@@ -1,0 +1,208 @@
+package jobs
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/nats-io/nats.go"
+	"github.com/oklog/ulid/v2"
+)
+
+// StepCtx is the per-step context handed to a WorkflowStep's Do function.
+type StepCtx struct {
+	Ctx   context.Context
+	JobID string
+	Spec  json.RawMessage
+	NATS  *nats.Conn
+	// Log appends a log line both to the persistent job_events table and to
+	// the live NATS event stream so the UI sees it in real time.
+	Log func(level, message string)
+}
+
+// DoFn executes one step. It may return a JSON-encodable result that will be
+// recorded against the step. A non-nil error triggers the step's retry
+// policy and, on exhaustion, fails the job.
+type DoFn func(sc *StepCtx) (json.RawMessage, error)
+
+// WorkflowStep declares one step of a Workflow.
+type WorkflowStep struct {
+	Name    string
+	Do      DoFn
+	Timeout time.Duration
+	Retries int // additional attempts beyond the first
+}
+
+// Workflow is a registered, named sequence of WorkflowSteps. Workflows are
+// linear sagas: steps run in order; a step's failure terminates the job.
+type Workflow struct {
+	Kind  string
+	Steps []WorkflowStep
+}
+
+// Runner is the saga executor. One Runner per api process; workflows are
+// registered at startup and looked up at Submit time.
+type Runner struct {
+	store     *Store
+	nc        *nats.Conn
+	mu        sync.RWMutex
+	workflows map[string]Workflow
+	wg        sync.WaitGroup
+}
+
+// NewRunner constructs a Runner bound to a Store and NATS connection.
+func NewRunner(store *Store, nc *nats.Conn) *Runner {
+	return &Runner{
+		store:     store,
+		nc:        nc,
+		workflows: make(map[string]Workflow),
+	}
+}
+
+// Register adds a Workflow to the runner's registry. Calling Register after
+// the runner is in use is safe.
+func (r *Runner) Register(w Workflow) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.workflows[w.Kind] = w
+}
+
+// Submit creates a new Job and kicks it off in a background goroutine. The
+// returned Job is the initial persisted state; callers should not assume it
+// reflects later step progress (use GetJob for that).
+func (r *Runner) Submit(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
+	r.mu.RLock()
+	wf, ok := r.workflows[kind]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown job kind %q", kind)
+	}
+
+	j := &Job{
+		ID:        ulid.Make().String(),
+		Kind:      kind,
+		Spec:      spec,
+		Status:    StatusQueued,
+		CreatedBy: createdBy,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := r.store.CreateJob(ctx, j); err != nil {
+		return nil, fmt.Errorf("create job: %w", err)
+	}
+	r.emit(ctx, j.ID, proto.JobCreated, j)
+
+	r.wg.Add(1)
+	go r.run(j, wf)
+	return j, nil
+}
+
+// Wait blocks until all running jobs finish. Used by main during shutdown.
+func (r *Runner) Wait() { r.wg.Wait() }
+
+func (r *Runner) run(j *Job, wf Workflow) {
+	defer r.wg.Done()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := r.store.MarkJobStarted(ctx, j.ID, now); err != nil {
+		log.Printf("jobs: mark started %s: %v", j.ID, err)
+	}
+	r.emit(ctx, j.ID, proto.JobStarted, nil)
+
+	for seq, step := range wf.Steps {
+		if err := r.runStep(ctx, j, seq, step); err != nil {
+			now := time.Now().UTC()
+			_ = r.store.MarkJobFailed(ctx, j.ID, err.Error(), now)
+			r.emit(ctx, j.ID, proto.JobFailed, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	now = time.Now().UTC()
+	_ = r.store.MarkJobSucceeded(ctx, j.ID, now)
+	r.emit(ctx, j.ID, proto.JobSucceeded, nil)
+}
+
+func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep) error {
+	startedAt := time.Now().UTC()
+	stepRow := &JobStep{
+		JobID:     j.ID,
+		Seq:       seq,
+		Name:      step.Name,
+		Status:    StepRunning,
+		StartedAt: &startedAt,
+	}
+	if err := r.store.CreateStep(ctx, stepRow); err != nil {
+		log.Printf("jobs: create step %s/%d: %v", j.ID, seq, err)
+	}
+	r.emit(ctx, j.ID, proto.JobStepStarted, proto.StepEventData{Seq: seq, Name: step.Name})
+
+	var lastErr error
+	maxAttempts := step.Retries + 1
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			r.emit(ctx, j.ID, proto.JobStepRetrying, proto.StepEventData{
+				Seq: seq, Name: step.Name, Attempt: attempt, Error: lastErr.Error(),
+			})
+			backoff := time.Duration(attempt) * time.Second
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		stepCtx, cancel := context.WithTimeout(ctx, step.Timeout)
+		sc := &StepCtx{
+			Ctx:   stepCtx,
+			JobID: j.ID,
+			Spec:  j.Spec,
+			NATS:  r.nc,
+			Log: func(level, message string) {
+				r.emit(ctx, j.ID, proto.JobLog, proto.LogEventData{
+					Level: level, Message: message,
+				})
+			},
+		}
+		result, err := step.Do(sc)
+		cancel()
+		if err == nil {
+			_ = r.store.MarkStepSucceeded(ctx, j.ID, seq, attempt, result, time.Now().UTC())
+			r.emit(ctx, j.ID, proto.JobStepSucceeded, proto.StepEventData{
+				Seq: seq, Name: step.Name, Attempt: attempt, Result: result,
+			})
+			return nil
+		}
+		lastErr = err
+	}
+	_ = r.store.MarkStepFailed(ctx, j.ID, seq, lastErr.Error(), time.Now().UTC())
+	r.emit(ctx, j.ID, proto.JobStepFailed, proto.StepEventData{
+		Seq: seq, Name: step.Name, Error: lastErr.Error(),
+	})
+	return lastErr
+}
+
+// emit persists a job event and publishes it on the live NATS subject.
+// Best-effort: failures are logged but do not fail the saga.
+func (r *Runner) emit(ctx context.Context, jobID string, t proto.JobEventType, data any) {
+	var raw json.RawMessage
+	if data != nil {
+		b, err := json.Marshal(data)
+		if err == nil {
+			raw = b
+		}
+	}
+	now := time.Now().UTC()
+	if err := r.store.AppendEvent(ctx, jobID, string(t), raw, now); err != nil {
+		log.Printf("jobs: append event %s/%s: %v", jobID, t, err)
+	}
+	ev := proto.JobEvent{Type: t, JobID: jobID, Ts: now, Data: raw}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	if err := r.nc.Publish(proto.JobEventsSubject(jobID), payload); err != nil {
+		log.Printf("jobs: publish event %s/%s: %v", jobID, t, err)
+	}
+}
