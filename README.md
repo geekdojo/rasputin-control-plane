@@ -14,8 +14,10 @@ Monorepo for the Rasputin control plane: API, web UI, and node agent.
 ## Build
 
 ```sh
-# Go side (api + agent share go.work)
-go build ./...
+# Go side (api + agent share go.work).
+# Name the modules explicitly — `./...` from the workspace root doesn't
+# expand into workspace submodules when the root itself isn't a module.
+go build ./api/... ./agent/...
 
 # UI
 cd ui && npm install && npm run dev
