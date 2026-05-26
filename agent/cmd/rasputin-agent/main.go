@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
@@ -66,6 +68,44 @@ func main() {
 	}
 	defer func() { _ = rebootSub.Unsubscribe() }()
 	log.Printf("rasputin-agent: subscribed to %s", proto.NodeCmdSubject(nodeID, "system.reboot"))
+
+	// Docker handlers — on compute and controlplane agents (the latter hosts
+	// the api's own sidecars in Tier 2). Picks `docker` if the CLI is on
+	// PATH, otherwise mocks. Force via RASPUTIN_DOCKER_BACKEND=mock|docker.
+	if role == proto.RoleCompute || role == proto.RoleControlPlane {
+		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
+			filepath.Join("./agent-state", nodeID))
+		appsDir := filepath.Join(stateDir, "apps")
+		backendChoice := envOr("RASPUTIN_DOCKER_BACKEND", autodetectDockerBackend())
+
+		var dockerBackend docker.Backend
+		switch backendChoice {
+		case "docker":
+			cb, err := docker.NewComposeBackend(appsDir)
+			if err != nil {
+				log.Fatalf("rasputin-agent: docker compose backend: %v", err)
+			}
+			dockerBackend = cb
+		case "mock":
+			mb, err := docker.NewMockBackend(appsDir)
+			if err != nil {
+				log.Fatalf("rasputin-agent: docker mock backend: %v", err)
+			}
+			dockerBackend = mb
+		default:
+			log.Fatalf("rasputin-agent: unknown RASPUTIN_DOCKER_BACKEND %q (expected docker|mock)", backendChoice)
+		}
+
+		dockerSubs, err := docker.RegisterHandlers(nc, nodeID, dockerBackend)
+		if err != nil {
+			log.Fatalf("rasputin-agent: register docker handlers: %v", err)
+		}
+		defer func() {
+			for _, sub := range dockerSubs {
+				_ = sub.Unsubscribe()
+			}
+		}()
+	}
 
 	// Firewall handlers — only on firewall-role agents. The dev/mock backend
 	// stores state under $RASPUTIN_AGENT_STATE_DIR/openwrt/; a real OpenWrt
@@ -177,4 +217,14 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// autodetectDockerBackend returns "docker" if the docker CLI is on PATH,
+// "mock" otherwise. Lets the agent come up cleanly on machines without
+// Docker Desktop installed.
+func autodetectDockerBackend() string {
+	if _, err := exec.LookPath("docker"); err == nil {
+		return "docker"
+	}
+	return "mock"
 }

@@ -123,3 +123,35 @@ export interface MetricSeries {
   to: string;
   series: Record<string, MetricPoint[]>;
 }
+
+export type AppStatus =
+  | 'stopped'
+  | 'deploying'
+  | 'running'
+  | 'stopping'
+  | 'failed'
+  | 'unknown';
+
+export type AppChange = 'deployed' | 'stopped' | 'failed' | 'deleted';
+
+export interface App {
+  id: string;
+  name: string;
+  composeYaml: string;
+  targetNode: string;
+  lastStatus: AppStatus;
+  lastDetail?: string;
+  lastDeployed?: string;
+  lastStopped?: string;
+  lastStatusAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AppChangeEvent {
+  appId: string;
+  change: AppChange;
+  status: AppStatus;
+  detail?: string;
+  ts: string;
+}

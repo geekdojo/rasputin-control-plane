@@ -536,6 +536,42 @@ header.with-user {
   white-space: pre-wrap;
 }
 
+.apps-section { margin-bottom: 1rem; }
+.apps-section h2 { margin-top: 2rem; }
+.apps-section > pre.err {
+  background: rgba(248, 113, 113, 0.07);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  color: var(--err);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  margin: 0 0 0.75rem;
+}
+
+.add-app textarea {
+  width: 100%;
+  margin-top: 0.6rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  resize: vertical;
+  min-height: 8rem;
+}
+.add-app textarea:focus { outline: 1px solid var(--accent); }
+.add-app .form-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+.add-app .form-actions pre.err { margin: 0; flex: 1; }
+
 .firewall-section > pre.err {
   background: rgba(248, 113, 113, 0.07);
   border: 1px solid rgba(248, 113, 113, 0.3);

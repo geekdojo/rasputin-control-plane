@@ -1,4 +1,6 @@
 import type {
+  App,
+  AppChangeEvent,
   FirewallChangeEvent,
   FirewallIntent,
   FirewallNodeState,
@@ -139,6 +141,48 @@ export function openFirewallWS(
   onEvent: (ev: FirewallChangeEvent) => void,
 ): () => void {
   return openWS<FirewallChangeEvent>('/ws/firewall', onEvent);
+}
+
+// ----- Apps ---------------------------------------------------------------
+
+export async function listApps(): Promise<App[]> {
+  return (await jsonFetch<App[] | null>('/api/apps')) ?? [];
+}
+
+export function createApp(input: {
+  name: string;
+  composeYaml: string;
+  targetNode: string;
+}): Promise<App> {
+  return jsonFetch<App>('/api/apps', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteApp(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/apps/${id}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`deleteApp: ${res.status}`);
+  }
+}
+
+export function deployApp(id: string): Promise<Job> {
+  return jsonFetch<Job>(`/api/apps/${id}/deploy`, { method: 'POST' });
+}
+
+export function stopApp(id: string): Promise<Job> {
+  return jsonFetch<Job>(`/api/apps/${id}/stop`, { method: 'POST' });
+}
+
+export function openAppsWS(
+  onEvent: (ev: AppChangeEvent) => void,
+): () => void {
+  return openWS<AppChangeEvent>('/ws/apps', onEvent);
 }
 
 // ----- WebSocket plumbing -------------------------------------------------
