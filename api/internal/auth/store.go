@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -27,7 +29,25 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("auth: apply schema: %w", err)
 	}
+	applyMigrations(ctx, db)
 	return &Store{db: db}, nil
+}
+
+// applyMigrations runs forward-only DDL that may not be expressible as
+// CREATE TABLE IF NOT EXISTS (e.g. adding a column to a pre-existing table).
+// Failures matching "duplicate column" / "already exists" are expected for
+// fresh installs where the CREATE TABLE already covered the change.
+func applyMigrations(ctx context.Context, db *sql.DB) {
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			msg := err.Error()
+			if strings.Contains(msg, "duplicate column name") ||
+				strings.Contains(msg, "already exists") {
+				continue
+			}
+			log.Printf("auth: migration %q: %v", stmt, err)
+		}
+	}
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -126,30 +146,37 @@ func (s *Store) scanUser(ctx context.Context, scan func(...any) error) (*User, e
 func (s *Store) CreateCredential(ctx context.Context, c *Credential) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO credentials (id, user_id, public_key, attestation, transports,
-                                 aaguid, sign_count, clone_warning, nickname,
+                                 aaguid, sign_count, clone_warning,
+                                 backup_eligible, backup_state, nickname,
                                  created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.UserID, c.PublicKey, c.AttestationType,
 		encodeTransports(c.Transports), c.AAGUID,
-		c.SignCount, boolToInt(c.CloneWarning), c.Nickname,
-		ms(c.CreatedAt))
+		c.SignCount, boolToInt(c.CloneWarning),
+		boolToInt(c.BackupEligible), boolToInt(c.BackupState),
+		c.Nickname, ms(c.CreatedAt))
 	return err
 }
 
+// UpdateCredentialAfterLogin refreshes sign_count, clone_warning, and
+// backup_state (BS can legitimately change). BackupEligible (BE) is set at
+// registration and must NEVER change — the WebAuthn library aborts login if
+// it does, so we deliberately don't update it here.
 func (s *Store) UpdateCredentialAfterLogin(ctx context.Context, c *webauthn.Credential, lastUsed time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
         UPDATE credentials
-        SET sign_count = ?, clone_warning = ?, last_used_at = ?
+        SET sign_count = ?, clone_warning = ?, backup_state = ?, last_used_at = ?
         WHERE id = ?`,
 		c.Authenticator.SignCount, boolToInt(c.Authenticator.CloneWarning),
-		ms(lastUsed), c.ID)
+		boolToInt(c.Flags.BackupState), ms(lastUsed), c.ID)
 	return err
 }
 
 func (s *Store) listCredentialsForUser(ctx context.Context, userID []byte) ([]*Credential, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT id, user_id, public_key, attestation, transports, aaguid,
-               sign_count, clone_warning, nickname, created_at, last_used_at
+               sign_count, clone_warning, backup_eligible, backup_state,
+               nickname, created_at, last_used_at
         FROM credentials WHERE user_id = ?`, userID)
 	if err != nil {
 		return nil, err
@@ -158,16 +185,19 @@ func (s *Store) listCredentialsForUser(ctx context.Context, userID []byte) ([]*C
 	var out []*Credential
 	for rows.Next() {
 		var (
-			c            Credential
-			transports   string
-			cloneWarning int
-			createdAt    int64
-			lastUsedAt   sql.NullInt64
-			aaguid       sql.RawBytes
+			c              Credential
+			transports     string
+			cloneWarning   int
+			backupEligible int
+			backupState    int
+			createdAt      int64
+			lastUsedAt     sql.NullInt64
+			aaguid         sql.RawBytes
 		)
 		if err := rows.Scan(&c.ID, &c.UserID, &c.PublicKey, &c.AttestationType,
-			&transports, &aaguid, &c.SignCount, &cloneWarning, &c.Nickname,
-			&createdAt, &lastUsedAt); err != nil {
+			&transports, &aaguid, &c.SignCount, &cloneWarning,
+			&backupEligible, &backupState,
+			&c.Nickname, &createdAt, &lastUsedAt); err != nil {
 			return nil, err
 		}
 		c.Transports = decodeTransports(transports)
@@ -175,6 +205,8 @@ func (s *Store) listCredentialsForUser(ctx context.Context, userID []byte) ([]*C
 			c.AAGUID = append([]byte(nil), aaguid...)
 		}
 		c.CloneWarning = cloneWarning != 0
+		c.BackupEligible = backupEligible != 0
+		c.BackupState = backupState != 0
 		c.CreatedAt = fromMs(createdAt)
 		if lastUsedAt.Valid {
 			t := fromMs(lastUsedAt.Int64)

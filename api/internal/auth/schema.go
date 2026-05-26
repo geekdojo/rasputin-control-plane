@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS credentials (
     aaguid          BLOB,
     sign_count      INTEGER NOT NULL DEFAULT 0,
     clone_warning   INTEGER NOT NULL DEFAULT 0,
+    backup_eligible INTEGER NOT NULL DEFAULT 0,
+    backup_state    INTEGER NOT NULL DEFAULT 0,
     nickname        TEXT NOT NULL DEFAULT '',
     created_at      INTEGER NOT NULL,
     last_used_at    INTEGER,
@@ -36,3 +38,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id    ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 `
+
+// migrations applied after schema. Each statement must be idempotent on its
+// own — failures due to "duplicate column name" / "duplicate index" /
+// "already exists" are silently swallowed by applyMigrations.
+var migrations = []string{
+	`ALTER TABLE credentials ADD COLUMN backup_eligible INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE credentials ADD COLUMN backup_state    INTEGER NOT NULL DEFAULT 0`,
+}

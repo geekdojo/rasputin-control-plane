@@ -39,17 +39,24 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential { return u.credential
 // Credential is the persisted form of a WebAuthn credential. Stored in the
 // credentials table; mapped to/from webauthn.Credential at the boundary.
 type Credential struct {
-	ID              []byte                              `json:"id"`
-	UserID          []byte                              `json:"userId"`
-	PublicKey       []byte                              `json:"-"`
-	AttestationType string                              `json:"attestationType"`
-	Transports      []protocol.AuthenticatorTransport   `json:"transports"`
-	AAGUID          []byte                              `json:"aaguid"`
-	SignCount       uint32                              `json:"signCount"`
-	CloneWarning    bool                                `json:"cloneWarning"`
-	Nickname        string                              `json:"nickname"`
-	CreatedAt       time.Time                           `json:"createdAt"`
-	LastUsedAt      *time.Time                          `json:"lastUsedAt,omitempty"`
+	ID              []byte                            `json:"id"`
+	UserID          []byte                            `json:"userId"`
+	PublicKey       []byte                            `json:"-"`
+	AttestationType string                            `json:"attestationType"`
+	Transports      []protocol.AuthenticatorTransport `json:"transports"`
+	AAGUID          []byte                            `json:"aaguid"`
+	SignCount       uint32                            `json:"signCount"`
+	CloneWarning    bool                              `json:"cloneWarning"`
+	// BackupEligible (BE) is set at registration and must NOT change across
+	// authentications — the library aborts login if it does.
+	BackupEligible bool `json:"backupEligible"`
+	// BackupState (BS) reflects whether the credential is currently backed
+	// up. It may legitimately flip true/false over time; we refresh it on
+	// every login.
+	BackupState bool       `json:"backupState"`
+	Nickname    string     `json:"nickname"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	LastUsedAt  *time.Time `json:"lastUsedAt,omitempty"`
 }
 
 func (c *Credential) toWebAuthn() webauthn.Credential {
@@ -58,6 +65,10 @@ func (c *Credential) toWebAuthn() webauthn.Credential {
 		PublicKey:       c.PublicKey,
 		AttestationType: c.AttestationType,
 		Transport:       c.Transports,
+		Flags: webauthn.CredentialFlags{
+			BackupEligible: c.BackupEligible,
+			BackupState:    c.BackupState,
+		},
 		Authenticator: webauthn.Authenticator{
 			AAGUID:       c.AAGUID,
 			SignCount:    c.SignCount,
@@ -76,6 +87,8 @@ func fromWebAuthn(cred *webauthn.Credential, userID []byte) *Credential {
 		AAGUID:          cred.Authenticator.AAGUID,
 		SignCount:       cred.Authenticator.SignCount,
 		CloneWarning:    cred.Authenticator.CloneWarning,
+		BackupEligible:  cred.Flags.BackupEligible,
+		BackupState:     cred.Flags.BackupState,
 	}
 }
 
