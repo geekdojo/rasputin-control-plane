@@ -9,20 +9,24 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
 // Server bundles the HTTP handlers for the api.
 type Server struct {
-	store   *jobs.Store
-	runner  *jobs.Runner
-	inv     *inventory.Store
-	fw      *firewall.Store
-	apps    *apps.Store
-	metrics *metrics.Store
-	auth    *auth.Service
-	nc      *nats.Conn
+	store           *jobs.Store
+	runner          *jobs.Runner
+	inv             *inventory.Store
+	fw              *firewall.Store
+	apps            *apps.Store
+	metrics         *metrics.Store
+	updater         *updater.Store
+	updaterVerifier *updater.Verifier
+	bundleDir       string
+	auth            *auth.Service
+	nc              *nats.Conn
 }
 
 // NewServer constructs an api Server. The auth service is mandatory; if you
@@ -36,12 +40,16 @@ func NewServer(
 	fw *firewall.Store,
 	appsStore *apps.Store,
 	mtr *metrics.Store,
+	updaterStore *updater.Store,
+	updaterVerifier *updater.Verifier,
+	bundleDir string,
 	authSvc *auth.Service,
 	nc *nats.Conn,
 ) *Server {
 	return &Server{
 		store: store, runner: runner, inv: inv, fw: fw, apps: appsStore,
-		metrics: mtr, auth: authSvc, nc: nc,
+		metrics: mtr, updater: updaterStore, updaterVerifier: updaterVerifier,
+		bundleDir: bundleDir, auth: authSvc, nc: nc,
 	}
 }
 
@@ -88,10 +96,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/apps/{id}/deploy", reqd(s.handleDeployApp))
 	mux.HandleFunc("POST /api/apps/{id}/stop", reqd(s.handleStopApp))
 
+	// Bundle bytes are content-addressed: the SHA-256 in the path is the
+	// capability. Agents have no session cookie in v0; the tailnet is
+	// the network boundary. List / upload / delete still require auth
+	// because they read or mutate the bundle catalog. (v1 adds per-node
+	// mTLS so the agent can authenticate; see updates.md.)
+	mux.HandleFunc("GET /api/bundles", reqd(s.handleListBundles))
+	mux.HandleFunc("POST /api/bundles", reqd(s.handleUploadBundle))
+	mux.HandleFunc("GET /api/bundles/{sha}", s.handleGetBundle) // unauthenticated
+	mux.HandleFunc("DELETE /api/bundles/{sha}", reqd(s.handleDeleteBundle))
+	mux.HandleFunc("POST /api/updates", reqd(s.handleCreateUpdate))
+	mux.HandleFunc("GET /api/updates", reqd(s.handleListUpdates))
+
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
 	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
 	mux.HandleFunc("GET /ws/firewall", reqd(s.bridgeSubject(proto.AllFirewallChangesFilter)))
 	mux.HandleFunc("GET /ws/apps", reqd(s.bridgeSubject(proto.AllAppsFilter)))
+	mux.HandleFunc("GET /ws/updates", reqd(s.bridgeSubject(proto.AllUpdatesFilter)))
 
 	return withCORS(mux)
 }

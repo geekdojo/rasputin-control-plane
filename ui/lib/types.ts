@@ -155,3 +155,65 @@ export interface AppChangeEvent {
   detail?: string;
   ts: string;
 }
+
+// ----- Updates ------------------------------------------------------------
+
+export type UpdateSlot = 'a' | 'b' | 'unknown';
+
+export type UpdateChange =
+  | 'started'
+  | 'downloaded'
+  | 'installed'
+  | 'committed'
+  | 'rolled_back'
+  | 'failed';
+
+export interface Bundle {
+  sha256: string;
+  version: string;
+  compatible: string;
+  architecture: string;
+  description: string;
+  buildDate: string;
+  sizeBytes: number;
+  signedBy: string;
+  uploadedAt: string;
+  uploadedBy: string;
+}
+
+export interface BundleList {
+  trustConfigured: boolean;
+  bundles: Bundle[];
+}
+
+export type NodeUpdateStatus =
+  | 'in_progress'
+  | 'committed'
+  | 'rolled_back'
+  | 'failed';
+
+export interface NodeUpdate {
+  jobId: string;
+  nodeId: string;
+  bundleSha256: string;
+  fromSlot: UpdateSlot;
+  toSlot: UpdateSlot;
+  fromVersion: string;
+  toVersion: string;
+  status: NodeUpdateStatus;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+}
+
+export interface UpdateChangeEvent {
+  nodeId: string;
+  jobId: string;
+  bundleId?: string;
+  change: UpdateChange;
+  fromSlot?: UpdateSlot;
+  toSlot?: UpdateSlot;
+  version?: string;
+  reason?: string;
+  ts: string;
+}

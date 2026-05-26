@@ -621,3 +621,50 @@ nav.tabs a.active {
   white-space: pre-wrap;
   margin: 0;
 }
+
+/* ----- Updates ------------------------------------------------------ */
+
+.updates-section h3 {
+  margin: 1.5rem 0 0.6rem;
+}
+
+.hint.warn {
+  color: var(--warn);
+}
+
+.update-status-in_progress { color: var(--accent); }
+.update-status-committed   { color: var(--ok); }
+.update-status-rolled_back { color: var(--warn); }
+.update-status-failed      { color: var(--err); }
+.update-status-started     { color: var(--accent); }
+.update-status-downloaded  { color: var(--accent); }
+.update-status-installed   { color: var(--accent); }
+
+.update-row.update-rolled_back td {
+  background: rgba(251, 191, 36, 0.05);
+}
+.update-row.update-failed td {
+  background: rgba(248, 113, 113, 0.05);
+}
+
+.inline-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.inline-form select {
+  font-size: 0.85rem;
+  padding: 0.2rem 0.4rem;
+}
+
+.event-feed {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+.event-feed li {
+  padding: 0.2rem 0;
+  border-bottom: 1px dotted var(--border);
+}

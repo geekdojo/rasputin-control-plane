@@ -17,6 +17,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -132,6 +133,50 @@ func main() {
 		}()
 	}
 
+	// OS update handlers — every node gets them. Picks `rauc` if the CLI
+	// is on PATH, otherwise falls back to mock. Force via
+	// RASPUTIN_UPDATE_BACKEND=rauc|mock.
+	{
+		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
+			filepath.Join("./agent-state", nodeID))
+		updaterDir := filepath.Join(stateDir, "updater")
+		backendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend())
+
+		var upBackend updater.Backend
+		switch backendChoice {
+		case "rauc":
+			rb, err := updater.NewRAUCBackend(updaterDir)
+			if err != nil {
+				log.Fatalf("rasputin-agent: rauc backend: %v", err)
+			}
+			rb.SetMuteHook(system.MutedAtomic())
+			upBackend = rb
+		case "mock":
+			mb, err := updater.NewMockBackend(updaterDir)
+			if err != nil {
+				log.Fatalf("rasputin-agent: updater mock: %v", err)
+			}
+			mb.SetMuteHook(system.MutedAtomic())
+			// Reregister after a simulated reboot so the api's saga step 6
+			// unblocks. Real rauc reboots the whole agent process, so the
+			// fresh process publishes its own registration on connect.
+			mb.SetReregisterHook(func() { reregister(nc) })
+			upBackend = mb
+		default:
+			log.Fatalf("rasputin-agent: unknown RASPUTIN_UPDATE_BACKEND %q (expected rauc|mock)", backendChoice)
+		}
+		upSubs, err := updater.RegisterHandlers(nc, nodeID, upBackend)
+		if err != nil {
+			log.Fatalf("rasputin-agent: register update handlers: %v", err)
+		}
+		defer func() {
+			for _, sub := range upSubs {
+				_ = sub.Unsubscribe()
+			}
+		}()
+		log.Printf("rasputin-agent: update backend=%s", upBackend.Name())
+	}
+
 	go runHeartbeats(ctx, nc, nodeID)
 	go metrics.Run(ctx, nc, nodeID, host.Uptime)
 
@@ -225,6 +270,16 @@ func envOr(key, def string) string {
 func autodetectDockerBackend() string {
 	if _, err := exec.LookPath("docker"); err == nil {
 		return "docker"
+	}
+	return "mock"
+}
+
+// autodetectUpdaterBackend returns "rauc" if the rauc CLI is on PATH,
+// "mock" otherwise. Mirrors autodetectDockerBackend; the same env-var
+// override lets the user force one or the other for testing.
+func autodetectUpdaterBackend() string {
+	if _, err := exec.LookPath("rauc"); err == nil {
+		return "rauc"
 	}
 	return "mock"
 }

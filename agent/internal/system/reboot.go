@@ -28,6 +28,12 @@ var muted atomic.Bool
 // Read by the heartbeat loop.
 func IsMuted() bool { return muted.Load() }
 
+// MutedAtomic returns the package-level mute flag so other subsystems
+// (e.g. updater) can mute heartbeats during their own simulated reboots.
+// Don't call Store(false) unless you also called Store(true) — share via
+// "set, defer reset" only.
+func MutedAtomic() *atomic.Bool { return &muted }
+
 // RegisterRebootHandler subscribes to rasputin.node.<nodeID>.cmd.system.reboot.
 // On a reboot command it:
 //  1. Replies synchronously so the saga can advance.

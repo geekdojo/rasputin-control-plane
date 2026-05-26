@@ -1,6 +1,8 @@
 import type {
   App,
   AppChangeEvent,
+  Bundle,
+  BundleList,
   FirewallChangeEvent,
   FirewallIntent,
   FirewallNodeState,
@@ -10,7 +12,9 @@ import type {
   JobStep,
   MetricSeries,
   Node,
+  NodeUpdate,
   PortForwardSpec,
+  UpdateChangeEvent,
 } from './types';
 
 // In dev, next.config.mjs sets NEXT_PUBLIC_API_BASE to http://localhost:8080
@@ -183,6 +187,72 @@ export function openAppsWS(
   onEvent: (ev: AppChangeEvent) => void,
 ): () => void {
   return openWS<AppChangeEvent>('/ws/apps', onEvent);
+}
+
+// ----- Updates ------------------------------------------------------------
+
+export async function listBundles(): Promise<BundleList> {
+  const r = await jsonFetch<BundleList | null>('/api/bundles');
+  return r ?? { trustConfigured: false, bundles: [] };
+}
+
+export async function uploadBundle(file: File): Promise<Bundle> {
+  const res = await fetch(`${BASE}/api/bundles`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = await res.json();
+      detail = body?.error ? `: ${body.error}` : '';
+    } catch {
+      // ignore
+    }
+    throw new Error(`uploadBundle → ${res.status}${detail}`);
+  }
+  return (await res.json()) as Bundle;
+}
+
+export async function deleteBundle(sha256: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/bundles/${sha256}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`deleteBundle → ${res.status}`);
+  }
+}
+
+export function createUpdate(input: {
+  nodeId: string;
+  bundleSha256: string;
+}): Promise<Job> {
+  return jsonFetch<Job>('/api/updates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listUpdates(
+  nodeId?: string,
+  limit = 50,
+): Promise<NodeUpdate[]> {
+  const params = new URLSearchParams();
+  if (nodeId) params.set('nodeId', nodeId);
+  params.set('limit', String(limit));
+  return (
+    (await jsonFetch<NodeUpdate[] | null>(`/api/updates?${params}`)) ?? []
+  );
+}
+
+export function openUpdatesWS(
+  onEvent: (ev: UpdateChangeEvent) => void,
+): () => void {
+  return openWS<UpdateChangeEvent>('/ws/updates', onEvent);
 }
 
 // ----- WebSocket plumbing -------------------------------------------------

@@ -11,6 +11,7 @@ const TABS: Array<{ href: string; label: string }> = [
   { href: '/', label: 'Nodes' },
   { href: '/apps', label: 'Apps' },
   { href: '/firewall', label: 'Firewall' },
+  { href: '/updates', label: 'Updates' },
   { href: '/tasks', label: 'Tasks' },
 ];
 

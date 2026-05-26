@@ -20,6 +20,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 )
 
 // rasputin-api: the Rasputin control-plane backend.
@@ -87,6 +88,33 @@ func main() {
 	}
 	defer appsStore.Close()
 
+	updaterStore, err := updater.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: updater store: %v", err)
+	}
+	defer updaterStore.Close()
+
+	// Bundles live on disk; the api streams them to agents. PKI trust
+	// material lives next door — root-ca.pem expected at <trustDir>/root-ca.pem.
+	bundleDir := envOr("RASPUTIN_BUNDLE_DIR", filepath.Join(dataDir, "bundles"))
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		log.Fatalf("rasputin-api: bundle dir: %v", err)
+	}
+	trustDir := envOr("RASPUTIN_TRUST_DIR", filepath.Join(dataDir, "trust"))
+	if err := os.MkdirAll(trustDir, 0o755); err != nil {
+		log.Fatalf("rasputin-api: trust dir: %v", err)
+	}
+	verifier, err := updater.NewVerifier(trustDir)
+	if err != nil {
+		log.Fatalf("rasputin-api: updater verifier: %v", err)
+	}
+	if !verifier.TrustConfigured() {
+		log.Printf("rasputin-api: WARNING — no root CA at %s/root-ca.pem; bundle signatures will not be verified. Run scripts/pki-init.sh.", trustDir)
+	}
+	// Public URL the agent uses to fetch bundles. In dev the api is at
+	// :8080; in production this is the api's tailnet hostname.
+	publicBaseURL := envOr("RASPUTIN_PUBLIC_BASE_URL", "http://localhost:8080")
+
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
 		RPID:          envOr("RASPUTIN_RP_ID", "localhost"),
@@ -107,6 +135,9 @@ func main() {
 	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn()))
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
+	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
+		PublicBaseURL: publicBaseURL,
+	}))
 
 	// Abort any jobs left in-flight from a previous run before we expose
 	// HTTP. v0 policy is honest-failure, not resume — see saga.go.
@@ -126,7 +157,7 @@ func main() {
 	}
 	defer metricsSvc.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, authSvc, busSrv.Conn())
+	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, authSvc, busSrv.Conn())
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),
