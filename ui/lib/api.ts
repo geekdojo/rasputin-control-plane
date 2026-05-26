@@ -1,9 +1,13 @@
 import type {
+  FirewallChangeEvent,
+  FirewallIntent,
+  FirewallNodeState,
   InventoryChangeEvent,
   Job,
   JobEvent,
   JobStep,
   Node,
+  PortForwardSpec,
 } from './types';
 
 // Empty string = use the Next.js dev rewrite (next.config.mjs) which proxies
@@ -60,6 +64,63 @@ export function openInventoryWS(
   onEvent: (ev: InventoryChangeEvent) => void,
 ): () => void {
   return openWS<InventoryChangeEvent>('/ws/inventory', onEvent);
+}
+
+// ----- Firewall -----------------------------------------------------------
+
+export async function listIntents(): Promise<FirewallIntent[]> {
+  return (await jsonFetch<FirewallIntent[] | null>('/api/firewall/intents')) ?? [];
+}
+
+export function createIntent(input: {
+  kind: 'port_forward';
+  name: string;
+  enabled?: boolean;
+  spec: PortForwardSpec;
+}): Promise<FirewallIntent> {
+  return jsonFetch<FirewallIntent>('/api/firewall/intents', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateIntent(
+  id: string,
+  patch: { name?: string; enabled?: boolean; spec?: PortForwardSpec },
+): Promise<FirewallIntent> {
+  return jsonFetch<FirewallIntent>(`/api/firewall/intents/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteIntent(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/firewall/intents/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`deleteIntent: ${res.status}`);
+  }
+}
+
+export async function listFirewallState(): Promise<FirewallNodeState[]> {
+  return (await jsonFetch<FirewallNodeState[] | null>('/api/firewall/state')) ?? [];
+}
+
+export function applyFirewall(): Promise<Job> {
+  return jsonFetch<Job>('/api/firewall/apply', { method: 'POST' });
+}
+
+export function reconcileFirewall(): Promise<Job> {
+  return jsonFetch<Job>('/api/firewall/reconcile', { method: 'POST' });
+}
+
+export function openFirewallWS(
+  onEvent: (ev: FirewallChangeEvent) => void,
+): () => void {
+  return openWS<FirewallChangeEvent>('/ws/firewall', onEvent);
 }
 
 function openWS<T>(path: string, onEvent: (ev: T) => void): () => void {

@@ -15,6 +15,7 @@ import (
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 )
@@ -66,6 +67,12 @@ func main() {
 	}
 	defer authStore.Close()
 
+	fwStore, err := firewall.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: firewall store: %v", err)
+	}
+	defer fwStore.Close()
+
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
 		RPID:          envOr("RASPUTIN_RP_ID", "localhost"),
@@ -82,6 +89,8 @@ func main() {
 	runner := jobs.NewRunner(jobStore, busSrv.Conn())
 	runner.Register(jobs.PingWorkflow())
 	runner.Register(jobs.RebootWorkflow())
+	runner.Register(firewall.ApplyWorkflow(fwStore, invStore, busSrv.Conn()))
+	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn()))
 
 	// Abort any jobs left in-flight from a previous run before we expose
 	// HTTP. v0 policy is honest-failure, not resume — see saga.go.
@@ -95,7 +104,7 @@ func main() {
 	}
 	defer invSvc.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, authSvc, busSrv.Conn())
+	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, authSvc, busSrv.Conn())
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),

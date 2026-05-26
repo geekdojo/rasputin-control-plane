@@ -71,3 +71,43 @@ export interface InventoryChangeEvent {
   node: Node;
   ts: string;
 }
+
+export type FirewallIntentKind = 'port_forward';
+export type PortForwardProto = 'tcp' | 'udp' | 'tcpudp';
+
+export interface PortForwardSpec {
+  wanPort: number;
+  lanHost: string;
+  lanPort: number;
+  protocol: PortForwardProto;
+  comment?: string;
+}
+
+export interface FirewallIntent {
+  id: string;
+  kind: FirewallIntentKind;
+  name: string;
+  enabled: boolean;
+  spec: PortForwardSpec; // future: union with other spec types
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FirewallNodeState {
+  nodeId: string;
+  intentHash: string;
+  observedHash: string;
+  lastApplied?: string;
+  lastReconciled?: string;
+  drift: boolean;
+}
+
+export type FirewallChange = 'applied' | 'drift' | 'in_sync' | 'reconciled';
+
+export interface FirewallChangeEvent {
+  nodeId: string;
+  change: FirewallChange;
+  intentHash?: string;
+  observedHash?: string;
+  ts: string;
+}

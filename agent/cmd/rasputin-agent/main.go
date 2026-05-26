@@ -6,11 +6,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -63,6 +65,31 @@ func main() {
 	}
 	defer func() { _ = rebootSub.Unsubscribe() }()
 	log.Printf("rasputin-agent: subscribed to %s", proto.NodeCmdSubject(nodeID, "system.reboot"))
+
+	// Firewall handlers — only on firewall-role agents. The dev/mock backend
+	// stores state under $RASPUTIN_AGENT_STATE_DIR/openwrt/; a real OpenWrt
+	// agent will swap NewMockClient for an ubus-backed implementation.
+	if role == proto.RoleFirewall {
+		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
+			filepath.Join("./agent-state", nodeID))
+		backend := envOr("RASPUTIN_OPENWRT_BACKEND", "mock")
+		if backend != "mock" {
+			log.Fatalf("rasputin-agent: only RASPUTIN_OPENWRT_BACKEND=mock is supported on this platform; got %q", backend)
+		}
+		mock, err := openwrt.NewMockClient(filepath.Join(stateDir, "openwrt"))
+		if err != nil {
+			log.Fatalf("rasputin-agent: openwrt mock: %v", err)
+		}
+		fwSubs, err := openwrt.RegisterHandlers(nc, nodeID, mock)
+		if err != nil {
+			log.Fatalf("rasputin-agent: register firewall handlers: %v", err)
+		}
+		defer func() {
+			for _, sub := range fwSubs {
+				_ = sub.Unsubscribe()
+			}
+		}()
+	}
 
 	go runHeartbeats(ctx, nc, nodeID)
 

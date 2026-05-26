@@ -371,6 +371,163 @@ header.with-user {
   opacity: 0.5;
   cursor: not-allowed;
 }
+.firewall-section { margin-bottom: 1rem; }
+
+.firewall-state-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+.firewall-state-bar .spacer { flex: 1; }
+.firewall-state-bar button {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.firewall-state-bar button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.firewall-state-bar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fw-state {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+.fw-state-label {
+  font-family: var(--mono);
+  color: var(--fg-dim);
+}
+.fw-state-pill {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+.fw-in-sync .fw-state-pill  { color: var(--ok); }
+.fw-drift   .fw-state-pill  { color: var(--err); }
+.fw-unknown .fw-state-pill  { color: var(--fg-dim); }
+.fw-state-meta {
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+  font-family: var(--mono);
+}
+
+.firewall-section h3 {
+  margin: 1.1rem 0 0.5rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+.firewall-section td.arrow,
+.add-intent .arrow {
+  color: var(--fg-dim);
+  font-family: var(--mono);
+}
+.firewall-section td.row-actions {
+  text-align: right;
+}
+.firewall-section td.row-actions button {
+  background: transparent;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.firewall-section td.row-actions button:hover {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.add-intent {
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.add-intent h4 {
+  margin: 0 0 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+.add-intent .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.add-intent input,
+.add-intent select {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+.add-intent input:focus,
+.add-intent select:focus { outline: 1px solid var(--accent); }
+.add-intent button {
+  background: var(--accent);
+  color: #1a0900;
+  border: none;
+  border-radius: 4px;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.add-intent button:disabled { opacity: 0.4; cursor: not-allowed; }
+.add-intent pre.err {
+  margin-top: 0.5rem;
+  background: rgba(248, 113, 113, 0.07);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  color: var(--err);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+}
+
+.firewall-section > pre.err {
+  background: rgba(248, 113, 113, 0.07);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  color: var(--err);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  margin: 0 0 0.75rem;
+}
+
 .auth-form pre.err {
   background: rgba(248, 113, 113, 0.07);
   color: var(--err);

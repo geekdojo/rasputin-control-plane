@@ -1,0 +1,214 @@
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
+	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/oklog/ulid/v2"
+)
+
+// GET /api/firewall/intents
+func (s *Server) handleListIntents(w http.ResponseWriter, r *http.Request) {
+	intents, err := s.fw.ListIntents(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if intents == nil {
+		intents = []*firewall.Intent{}
+	}
+	writeJSON(w, http.StatusOK, intents)
+}
+
+// POST /api/firewall/intents
+// Body: { "kind": "port_forward", "name": "minecraft", "enabled": true, "spec": {...} }
+func (s *Server) handleCreateIntent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Kind    string          `json:"kind"`
+		Name    string          `json:"name"`
+		Enabled *bool           `json:"enabled"`
+		Spec    json.RawMessage `json:"spec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if !proto.ValidFirewallIntentKind(proto.FirewallIntentKind(req.Kind)) {
+		writeError(w, http.StatusBadRequest, "unsupported intent kind")
+		return
+	}
+	if err := validateIntentSpec(req.Kind, req.Spec); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	now := time.Now().UTC()
+	intent := &firewall.Intent{
+		ID:        ulid.Make().String(),
+		Kind:      req.Kind,
+		Name:      req.Name,
+		Enabled:   enabled,
+		Spec:      req.Spec,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.fw.CreateIntent(r.Context(), intent); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, intent)
+}
+
+// PATCH /api/firewall/intents/{id}
+// Body: optional fields { "name", "enabled", "spec" }.
+func (s *Server) handleUpdateIntent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	existing, err := s.fw.GetIntent(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, "intent not found")
+		return
+	}
+	var req struct {
+		Name    *string          `json:"name"`
+		Enabled *bool            `json:"enabled"`
+		Spec    *json.RawMessage `json:"spec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Name != nil {
+		existing.Name = *req.Name
+	}
+	if req.Enabled != nil {
+		existing.Enabled = *req.Enabled
+	}
+	if req.Spec != nil {
+		if err := validateIntentSpec(existing.Kind, *req.Spec); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		existing.Spec = *req.Spec
+	}
+	existing.UpdatedAt = time.Now().UTC()
+	if err := s.fw.UpdateIntent(r.Context(), existing); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, existing)
+}
+
+// DELETE /api/firewall/intents/{id}
+func (s *Server) handleDeleteIntent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.fw.DeleteIntent(r.Context(), id); err != nil {
+		if errors.Is(err, errNoRowsSentinel) || err.Error() == "sql: no rows in result set" {
+			writeError(w, http.StatusNotFound, "intent not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/firewall/state — returns the per-node state for every firewall
+// node currently known to inventory (typically zero or one in v0).
+func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) {
+	fws, err := s.inv.ListByRole(r.Context(), proto.RoleFirewall)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]*firewall.NodeState, 0, len(fws))
+	for _, n := range fws {
+		st, err := s.fw.GetNodeState(r.Context(), n.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if st == nil {
+			st = &firewall.NodeState{NodeID: n.ID}
+		}
+		out = append(out, st)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// POST /api/firewall/apply — kicks off a firewall.apply job and returns it.
+func (s *Server) handleApplyFirewall(w http.ResponseWriter, r *http.Request) {
+	j, err := s.runner.Submit(r.Context(), "firewall.apply", json.RawMessage("{}"), creator(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, j)
+}
+
+// POST /api/firewall/reconcile — kicks off a firewall.reconcile job.
+func (s *Server) handleReconcileFirewall(w http.ResponseWriter, r *http.Request) {
+	j, err := s.runner.Submit(r.Context(), "firewall.reconcile", json.RawMessage("{}"), creator(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, j)
+}
+
+// validateIntentSpec checks a spec parses + is well-formed for the kind.
+// Returns nil on success.
+func validateIntentSpec(kind string, raw json.RawMessage) error {
+	switch proto.FirewallIntentKind(kind) {
+	case proto.IntentPortForward:
+		var spec proto.PortForwardSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			return errors.New("invalid port_forward spec: " + err.Error())
+		}
+		if spec.WanPort < 1 || spec.WanPort > 65535 {
+			return errors.New("wanPort must be 1-65535")
+		}
+		if spec.LanPort < 1 || spec.LanPort > 65535 {
+			return errors.New("lanPort must be 1-65535")
+		}
+		if spec.LanHost == "" {
+			return errors.New("lanHost is required")
+		}
+		if spec.Protocol == "" {
+			spec.Protocol = proto.ProtoTCP
+		}
+		switch spec.Protocol {
+		case proto.ProtoTCP, proto.ProtoUDP, proto.ProtoTCPUDP:
+		default:
+			return errors.New("protocol must be tcp, udp, or tcpudp")
+		}
+		return nil
+	}
+	return errors.New("unsupported intent kind")
+}
+
+// errNoRowsSentinel keeps the api package free of a direct database/sql
+// dependency in the handler layer; we compare error strings as fallback.
+var errNoRowsSentinel = errors.New("sql: no rows in result set")
+
+// creator returns a stable string identifier for who created a job. Uses
+// the authenticated user's name if available, falls back to "system".
+func creator(r *http.Request) string {
+	// Without importing auth here we'd need a re-exported helper; for v0
+	// fall back to "user" — same default the older job handler uses.
+	return "user"
+}

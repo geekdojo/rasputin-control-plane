@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -15,6 +16,7 @@ type Server struct {
 	store  *jobs.Store
 	runner *jobs.Runner
 	inv    *inventory.Store
+	fw     *firewall.Store
 	auth   *auth.Service
 	nc     *nats.Conn
 }
@@ -27,10 +29,11 @@ func NewServer(
 	store *jobs.Store,
 	runner *jobs.Runner,
 	inv *inventory.Store,
+	fw *firewall.Store,
 	authSvc *auth.Service,
 	nc *nats.Conn,
 ) *Server {
-	return &Server{store: store, runner: runner, inv: inv, auth: authSvc, nc: nc}
+	return &Server{store: store, runner: runner, inv: inv, fw: fw, auth: authSvc, nc: nc}
 }
 
 // Handler returns the root http.Handler with all routes wired.
@@ -59,8 +62,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/nodes", reqd(s.handleListNodes))
 	mux.HandleFunc("GET /api/nodes/{id}", reqd(s.handleGetNode))
 
+	mux.HandleFunc("GET /api/firewall/intents", reqd(s.handleListIntents))
+	mux.HandleFunc("POST /api/firewall/intents", reqd(s.handleCreateIntent))
+	mux.HandleFunc("PATCH /api/firewall/intents/{id}", reqd(s.handleUpdateIntent))
+	mux.HandleFunc("DELETE /api/firewall/intents/{id}", reqd(s.handleDeleteIntent))
+	mux.HandleFunc("GET /api/firewall/state", reqd(s.handleGetFirewallState))
+	mux.HandleFunc("POST /api/firewall/apply", reqd(s.handleApplyFirewall))
+	mux.HandleFunc("POST /api/firewall/reconcile", reqd(s.handleReconcileFirewall))
+
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
 	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
+	mux.HandleFunc("GET /ws/firewall", reqd(s.bridgeSubject(proto.AllFirewallChangesFilter)))
 
 	return withCORS(mux)
 }

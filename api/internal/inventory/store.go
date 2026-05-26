@@ -93,6 +93,28 @@ func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
 }
 
 // List returns every known node.
+// ListByRole returns every known node with the given role, ordered by
+// first_seen. Used by subsystems that target a particular role
+// (e.g. firewall workflows need the firewall node).
+func (s *Store) ListByRole(ctx context.Context, role proto.NodeRole) ([]*proto.Node, error) {
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen
+        FROM nodes WHERE role = ? ORDER BY first_seen ASC`, string(role))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*proto.Node
+	for rows.Next() {
+		n, err := scanNode(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) List(ctx context.Context) ([]*proto.Node, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen
