@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -14,39 +15,66 @@ type Server struct {
 	store  *jobs.Store
 	runner *jobs.Runner
 	inv    *inventory.Store
+	auth   *auth.Service
 	nc     *nats.Conn
 }
 
-// NewServer constructs an api Server.
-func NewServer(store *jobs.Store, runner *jobs.Runner, inv *inventory.Store, nc *nats.Conn) *Server {
-	return &Server{store: store, runner: runner, inv: inv, nc: nc}
+// NewServer constructs an api Server. The auth service is mandatory; if you
+// want the api to run without auth (e.g. for early dev), pass a Service
+// configured with an "allow-all" middleware in a future refactor — for v0
+// auth is always on.
+func NewServer(
+	store *jobs.Store,
+	runner *jobs.Runner,
+	inv *inventory.Store,
+	authSvc *auth.Service,
+	nc *nats.Conn,
+) *Server {
+	return &Server{store: store, runner: runner, inv: inv, auth: authSvc, nc: nc}
 }
 
 // Handler returns the root http.Handler with all routes wired.
+//
+// Route protection:
+//   - /healthz and /api/auth/* are open.
+//   - everything else requires a valid session cookie.
+//   - WebSocket endpoints (/ws/*) receive the cookie on upgrade and are
+//     gated by the same middleware.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// Open
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.auth.RegisterRoutes(mux)
 
-	mux.HandleFunc("POST /api/jobs", s.handleCreateJob)
-	mux.HandleFunc("GET /api/jobs", s.handleListJobs)
-	mux.HandleFunc("GET /api/jobs/{id}", s.handleGetJob)
-	mux.HandleFunc("GET /api/jobs/{id}/steps", s.handleListSteps)
-	mux.HandleFunc("GET /api/jobs/{id}/events", s.handleListEvents)
+	// Authenticated
+	reqd := s.auth.RequireSessionFunc
 
-	mux.HandleFunc("GET /api/nodes", s.handleListNodes)
-	mux.HandleFunc("GET /api/nodes/{id}", s.handleGetNode)
+	mux.HandleFunc("POST /api/jobs", reqd(s.handleCreateJob))
+	mux.HandleFunc("GET /api/jobs", reqd(s.handleListJobs))
+	mux.HandleFunc("GET /api/jobs/{id}", reqd(s.handleGetJob))
+	mux.HandleFunc("GET /api/jobs/{id}/steps", reqd(s.handleListSteps))
+	mux.HandleFunc("GET /api/jobs/{id}/events", reqd(s.handleListEvents))
 
-	mux.HandleFunc("GET /ws/jobs", s.bridgeSubject(proto.AllJobsFilter))
-	mux.HandleFunc("GET /ws/inventory", s.bridgeSubject(proto.AllInventoryFilter))
+	mux.HandleFunc("GET /api/nodes", reqd(s.handleListNodes))
+	mux.HandleFunc("GET /api/nodes/{id}", reqd(s.handleGetNode))
+
+	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
+	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
 
 	return withCORS(mux)
 }
 
 // withCORS is dev-only: allows the Next.js dev server on :3000 to talk to
-// the api on :8080. Production reverse-proxies both behind one origin.
+// the api on :8080. With cookies in play we must echo the request Origin
+// explicitly (the wildcard "*" is incompatible with credentials).
 func withCORS(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {

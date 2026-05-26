@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   createJob,
   listEvents,
@@ -10,6 +11,7 @@ import {
   openInventoryWS,
   openJobsWS,
 } from '../lib/api';
+import { getMe, logout, type CurrentUser } from '../lib/auth';
 import type {
   InventoryChangeEvent,
   Job,
@@ -19,11 +21,49 @@ import type {
 } from '../lib/types';
 
 export default function HomePage() {
+  const router = useRouter();
+  const [user, setUser] = useState<CurrentUser | null | undefined>(undefined);
+
+  useEffect(() => {
+    getMe()
+      .then((u) => {
+        if (u === null) {
+          router.replace('/login');
+        } else {
+          setUser(u);
+        }
+      })
+      .catch(() => router.replace('/login'));
+  }, [router]);
+
+  async function handleLogout() {
+    await logout();
+    router.replace('/login');
+  }
+
+  if (user === undefined || user === null) {
+    return (
+      <main>
+        <p className="hint">Loading…</p>
+      </main>
+    );
+  }
+
   return (
     <main>
-      <header>
-        <h1>Rasputin</h1>
-        <p className="sub">Control plane · local dev</p>
+      <header className="with-user">
+        <div>
+          <h1>Rasputin</h1>
+          <p className="sub">Control plane · local dev</p>
+        </div>
+        <div className="user-pill">
+          <span>
+            signed in as <strong>{user.displayName}</strong>
+          </span>
+          <button type="button" onClick={handleLogout}>
+            sign out
+          </button>
+        </div>
       </header>
       <NodesSection />
       <TasksSection />
