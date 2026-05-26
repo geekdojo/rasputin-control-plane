@@ -8,9 +8,10 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// Connect dials the api's NATS broker with infinite reconnect. The connection
-// name shows the node id in `nats` CLI output.
-func Connect(url, nodeID string) (*nats.Conn, error) {
+// Connect dials the api's NATS broker with infinite reconnect. onConnected,
+// if non-nil, fires once for the initial connection AND on every successful
+// reconnect — used by the agent to (re-)publish its registration event.
+func Connect(url, nodeID string, onConnected func(*nats.Conn)) (*nats.Conn, error) {
 	if url == "" {
 		url = nats.DefaultURL
 	}
@@ -27,6 +28,9 @@ func Connect(url, nodeID string) (*nats.Conn, error) {
 		}),
 		nats.ReconnectHandler(func(c *nats.Conn) {
 			log.Printf("agent/bus: reconnected to %s", c.ConnectedUrl())
+			if onConnected != nil {
+				onConnected(c)
+			}
 		}),
 		nats.ClosedHandler(func(_ *nats.Conn) {
 			log.Printf("agent/bus: connection closed")
@@ -36,5 +40,8 @@ func Connect(url, nodeID string) (*nats.Conn, error) {
 		return nil, fmt.Errorf("agent/bus: connect %s: %w", url, err)
 	}
 	log.Printf("agent/bus: connected to %s as %s", nc.ConnectedUrl(), nodeID)
+	if onConnected != nil {
+		onConnected(nc)
+	}
 	return nc, nil
 }

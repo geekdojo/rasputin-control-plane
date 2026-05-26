@@ -3,6 +3,9 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +81,49 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, events)
+}
+
+// GET /api/nodes
+func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	nodes, err := s.inv.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, n := range nodes {
+		n.Status = computeStatus(n.LastSeen)
+	}
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+// GET /api/nodes/{id}
+func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	n, err := s.inv.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n == nil {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+	n.Status = computeStatus(n.LastSeen)
+	writeJSON(w, http.StatusOK, n)
+}
+
+// computeStatus mirrors inventory.computeStatus. Duplicated here to avoid a
+// cycle with the inventory package, which already imports proto.
+func computeStatus(lastSeen time.Time) proto.NodeStatus {
+	gap := time.Since(lastSeen)
+	switch {
+	case gap < 30*time.Second:
+		return proto.StatusOnline
+	case gap < 2*time.Minute:
+		return proto.StatusStale
+	default:
+		return proto.StatusOffline
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

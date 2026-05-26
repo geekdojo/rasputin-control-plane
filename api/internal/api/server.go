@@ -3,7 +3,9 @@ package api
 import (
 	"net/http"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
@@ -11,24 +13,32 @@ import (
 type Server struct {
 	store  *jobs.Store
 	runner *jobs.Runner
+	inv    *inventory.Store
 	nc     *nats.Conn
 }
 
 // NewServer constructs an api Server.
-func NewServer(store *jobs.Store, runner *jobs.Runner, nc *nats.Conn) *Server {
-	return &Server{store: store, runner: runner, nc: nc}
+func NewServer(store *jobs.Store, runner *jobs.Runner, inv *inventory.Store, nc *nats.Conn) *Server {
+	return &Server{store: store, runner: runner, inv: inv, nc: nc}
 }
 
 // Handler returns the root http.Handler with all routes wired.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+
 	mux.HandleFunc("POST /api/jobs", s.handleCreateJob)
 	mux.HandleFunc("GET /api/jobs", s.handleListJobs)
 	mux.HandleFunc("GET /api/jobs/{id}", s.handleGetJob)
 	mux.HandleFunc("GET /api/jobs/{id}/steps", s.handleListSteps)
 	mux.HandleFunc("GET /api/jobs/{id}/events", s.handleListEvents)
-	mux.HandleFunc("GET /ws/jobs", s.handleJobsWS)
+
+	mux.HandleFunc("GET /api/nodes", s.handleListNodes)
+	mux.HandleFunc("GET /api/nodes/{id}", s.handleGetNode)
+
+	mux.HandleFunc("GET /ws/jobs", s.bridgeSubject(proto.AllJobsFilter))
+	mux.HandleFunc("GET /ws/inventory", s.bridgeSubject(proto.AllInventoryFilter))
+
 	return withCORS(mux)
 }
 

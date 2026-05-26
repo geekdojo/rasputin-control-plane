@@ -13,6 +13,7 @@ import (
 
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 )
 
@@ -44,16 +45,29 @@ func main() {
 	defer busSrv.Stop()
 	log.Printf("rasputin-api: nats listening on %s", busSrv.ClientURL())
 
-	store, err := jobs.OpenStore(ctx, filepath.Join(dataDir, "rasputin.db"))
+	dbPath := filepath.Join(dataDir, "rasputin.db")
+	jobStore, err := jobs.OpenStore(ctx, dbPath)
 	if err != nil {
 		log.Fatalf("rasputin-api: jobs store: %v", err)
 	}
-	defer store.Close()
+	defer jobStore.Close()
 
-	runner := jobs.NewRunner(store, busSrv.Conn())
+	invStore, err := inventory.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: inventory store: %v", err)
+	}
+	defer invStore.Close()
+
+	runner := jobs.NewRunner(jobStore, busSrv.Conn())
 	runner.Register(jobs.PingWorkflow())
 
-	srv := apipkg.NewServer(store, runner, busSrv.Conn())
+	invSvc := inventory.NewService(invStore, busSrv.Conn())
+	if err := invSvc.Start(ctx); err != nil {
+		log.Fatalf("rasputin-api: inventory service: %v", err)
+	}
+	defer invSvc.Stop()
+
+	srv := apipkg.NewServer(jobStore, runner, invStore, busSrv.Conn())
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),

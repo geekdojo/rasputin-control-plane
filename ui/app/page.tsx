@@ -5,12 +5,111 @@ import {
   createJob,
   listEvents,
   listJobs,
+  listNodes,
   listSteps,
+  openInventoryWS,
   openJobsWS,
 } from '../lib/api';
-import type { Job, JobEvent, JobStep } from '../lib/types';
+import type {
+  InventoryChangeEvent,
+  Job,
+  JobEvent,
+  JobStep,
+  Node,
+} from '../lib/types';
 
-export default function TasksPage() {
+export default function HomePage() {
+  return (
+    <main>
+      <header>
+        <h1>Rasputin</h1>
+        <p className="sub">Control plane · local dev</p>
+      </header>
+      <NodesSection />
+      <TasksSection />
+    </main>
+  );
+}
+
+// ----- Nodes ---------------------------------------------------------------
+
+function NodesSection() {
+  const [nodes, setNodes] = useState<Node[]>([]);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    listNodes().then(setNodes).catch(console.error);
+    const close = openInventoryWS((ev) => {
+      setNodes((prev) => applyInventoryEvent(prev, ev));
+    });
+    return close;
+  }, []);
+
+  // Tick the "last seen" relative timestamps every second.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <section className="nodes-section">
+      <h2>Nodes</h2>
+      {nodes.length === 0 ? (
+        <p className="hint">
+          no nodes registered yet — start <code>rasputin-agent</code> and one
+          should appear here within a second
+        </p>
+      ) : (
+        <div className="nodes-grid">
+          {nodes.map((n) => (
+            <NodeCard key={n.id} node={n} now={now} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NodeCard({ node, now }: { node: Node; now: number }) {
+  const lastSeenMs = now - new Date(node.lastSeen).getTime();
+  return (
+    <article className={`node-card status-${node.status}`}>
+      <header>
+        <span className={`status status-${node.status}`}>{node.status}</span>
+        <span className="role">{node.role}</span>
+      </header>
+      <h3>{node.id}</h3>
+      <dl>
+        <dt>host</dt>
+        <dd>{node.hostname || <em>unknown</em>}</dd>
+        <dt>last seen</dt>
+        <dd>{relativeTime(lastSeenMs)}</dd>
+        <dt>agent</dt>
+        <dd>
+          <code>{node.agentVersion}</code>
+        </dd>
+      </dl>
+    </article>
+  );
+}
+
+function applyInventoryEvent(prev: Node[], ev: InventoryChangeEvent): Node[] {
+  const exists = prev.find((n) => n.id === ev.node.id);
+  if (!exists) return [...prev, ev.node];
+  return prev.map((n) => (n.id === ev.node.id ? ev.node : n));
+}
+
+function relativeTime(ms: number): string {
+  if (ms < 0) return 'just now';
+  if (ms < 1000) return 'just now';
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s ago`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
+  return `${Math.floor(ms / 3_600_000)}h ago`;
+}
+
+// ----- Tasks ---------------------------------------------------------------
+
+function TasksSection() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [steps, setSteps] = useState<JobStep[]>([]);
@@ -19,7 +118,6 @@ export default function TasksPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Initial list + live updates
   useEffect(() => {
     let active = true;
     listJobs()
@@ -27,7 +125,7 @@ export default function TasksPage() {
       .catch((e) => active && setErr(String(e)));
 
     const close = openJobsWS((ev) => {
-      setJobs((prev) => applyEvent(prev, ev));
+      setJobs((prev) => applyJobEvent(prev, ev));
       if (ev.jobId === expanded) {
         refreshDetail(ev.jobId);
       }
@@ -39,7 +137,6 @@ export default function TasksPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Fetch detail when expanded changes
   useEffect(() => {
     if (!expanded) {
       setSteps([]);
@@ -60,7 +157,6 @@ export default function TasksPage() {
     setErr(null);
     try {
       await createJob('diag.ping', { nodeId });
-      // WebSocket 'created' event will append it to the list.
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -69,15 +165,13 @@ export default function TasksPage() {
   }
 
   return (
-    <main>
-      <header>
-        <h1>Rasputin · Tasks</h1>
-        <p className="sub">
-          Every state-changing operation is a Job. Click a row for steps and events.
-        </p>
-      </header>
+    <section className="tasks-section">
+      <h2>Tasks</h2>
+      <p className="hint">
+        Every state-changing operation is a Job. Click a row for steps and events.
+      </p>
 
-      <section className="actions">
+      <div className="actions">
         <label>
           Node id&nbsp;
           <input
@@ -90,7 +184,7 @@ export default function TasksPage() {
           {busy ? 'sending…' : 'Ping node'}
         </button>
         {err && <span className="err">{err}</span>}
-      </section>
+      </div>
 
       <table>
         <thead>
@@ -135,7 +229,7 @@ export default function TasksPage() {
           ))}
         </tbody>
       </table>
-    </main>
+    </section>
   );
 }
 
@@ -189,7 +283,7 @@ function Detail({
   );
 }
 
-function applyEvent(prev: Job[], ev: JobEvent): Job[] {
+function applyJobEvent(prev: Job[], ev: JobEvent): Job[] {
   if (ev.type === 'created') {
     const j = ev.data as Job | undefined;
     if (!j) return prev;

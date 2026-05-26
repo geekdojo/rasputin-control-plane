@@ -48,3 +48,23 @@ func JobLogSubject(jobID string) string {
 
 // AllJobsFilter is the wildcard the UI uses to receive every job event.
 const AllJobsFilter = "rasputin.job.>"
+
+// NodeRegisteredSubject is the canonical subject for an agent's registration
+// event, published on connect and reconnect.
+func NodeRegisteredSubject(nodeID string) string {
+	return NodeEvtSubject(nodeID, "registered")
+}
+
+// InventoryChangedSubject is the subject the api publishes to when a node's
+// status, role, or membership changes. Change is the event name
+// (e.g. "added", "online", "stale", "offline", "updated").
+func InventoryChangedSubject(nodeID, change string) string {
+	return fmt.Sprintf("rasputin.inventory.%s.%s", nodeID, change)
+}
+
+// AllInventoryFilter is the wildcard the UI uses to receive every inventory
+// change event.
+const AllInventoryFilter = "rasputin.inventory.>"
+
+// AllHeartbeatsFilter matches every node's heartbeat.
+const AllHeartbeatsFilter = "rasputin.node.*.heartbeat"

@@ -1,0 +1,135 @@
+package inventory
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
+	_ "modernc.org/sqlite"
+)
+
+// Store is the SQLite-backed ledger of known nodes.
+type Store struct {
+	db *sql.DB
+}
+
+// OpenStore opens (and migrates) the SQLite database at path. Safe to point
+// at the same file the jobs store uses; tables don't overlap.
+func OpenStore(ctx context.Context, path string) (*Store, error) {
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("inventory: open sqlite: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("inventory: apply schema: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func tsMillis(t time.Time) int64    { return t.UnixMilli() }
+func fromMillis(ms int64) time.Time { return time.UnixMilli(ms).UTC() }
+
+// Insert persists a brand-new node. Returns an error if a row with the same
+// id already exists.
+func (s *Store) Insert(ctx context.Context, n *proto.Node) error {
+	caps, _ := json.Marshal(n.Capabilities)
+	meta, _ := json.Marshal(n.Metadata)
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO nodes (id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		n.ID, string(n.Role), n.Hostname, n.AgentVersion,
+		string(caps), string(meta),
+		tsMillis(n.FirstSeen), tsMillis(n.LastSeen))
+	return err
+}
+
+// Update overwrites the mutable fields of an existing node. first_seen is
+// preserved.
+func (s *Store) Update(ctx context.Context, n *proto.Node) error {
+	caps, _ := json.Marshal(n.Capabilities)
+	meta, _ := json.Marshal(n.Metadata)
+	_, err := s.db.ExecContext(ctx, `
+        UPDATE nodes
+        SET role=?, hostname=?, agent_version=?, capabilities=?, metadata=?, last_seen=?
+        WHERE id=?`,
+		string(n.Role), n.Hostname, n.AgentVersion,
+		string(caps), string(meta),
+		tsMillis(n.LastSeen), n.ID)
+	return err
+}
+
+// TouchLastSeen updates only the last_seen column. Cheap, used on every
+// heartbeat.
+func (s *Store) TouchLastSeen(ctx context.Context, id string, ts time.Time) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE nodes SET last_seen=? WHERE id=?`, tsMillis(ts), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// Get returns the node with the given id, or (nil, nil) if not found.
+func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
+	row := s.db.QueryRowContext(ctx, `
+        SELECT id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen
+        FROM nodes WHERE id=?`, id)
+	return scanNode(row.Scan)
+}
+
+// List returns every known node.
+func (s *Store) List(ctx context.Context) ([]*proto.Node, error) {
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen
+        FROM nodes ORDER BY first_seen ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*proto.Node
+	for rows.Next() {
+		n, err := scanNode(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func scanNode(scan func(...any) error) (*proto.Node, error) {
+	var (
+		n               proto.Node
+		role, caps, met string
+		firstSeen       int64
+		lastSeen        int64
+	)
+	if err := scan(&n.ID, &role, &n.Hostname, &n.AgentVersion,
+		&caps, &met, &firstSeen, &lastSeen); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	n.Role = proto.NodeRole(role)
+	_ = json.Unmarshal([]byte(caps), &n.Capabilities)
+	_ = json.Unmarshal([]byte(met), &n.Metadata)
+	n.FirstSeen = fromMillis(firstSeen)
+	n.LastSeen = fromMillis(lastSeen)
+	return &n, nil
+}

@@ -1,4 +1,10 @@
-import type { Job, JobStep, JobEvent } from './types';
+import type {
+  InventoryChangeEvent,
+  Job,
+  JobEvent,
+  JobStep,
+  Node,
+} from './types';
 
 // Empty string = use the Next.js dev rewrite (next.config.mjs) which proxies
 // /api/* and /ws/* to rasputin-api on :8080. Override with NEXT_PUBLIC_API_BASE
@@ -42,16 +48,31 @@ export async function listEvents(jobId: string): Promise<JobEvent[]> {
 
 // openJobsWS subscribes to rasputin.job.> live events. Returns a close fn.
 export function openJobsWS(onEvent: (ev: JobEvent) => void): () => void {
-  const url = wsURL('/ws/jobs');
+  return openWS<JobEvent>('/ws/jobs', onEvent);
+}
+
+export async function listNodes(): Promise<Node[]> {
+  return (await jsonFetch<Node[] | null>('/api/nodes')) ?? [];
+}
+
+// openInventoryWS subscribes to rasputin.inventory.> change events.
+export function openInventoryWS(
+  onEvent: (ev: InventoryChangeEvent) => void,
+): () => void {
+  return openWS<InventoryChangeEvent>('/ws/inventory', onEvent);
+}
+
+function openWS<T>(path: string, onEvent: (ev: T) => void): () => void {
+  const url = wsURL(path);
   const ws = new WebSocket(url);
   ws.onmessage = (m) => {
     try {
-      onEvent(JSON.parse(m.data) as JobEvent);
+      onEvent(JSON.parse(m.data) as T);
     } catch (err) {
-      console.error('ws parse', err);
+      console.error(`ws parse ${path}`, err);
     }
   };
-  ws.onerror = (e) => console.warn('ws error', e);
+  ws.onerror = (e) => console.warn(`ws error ${path}`, e);
   return () => ws.close();
 }
 

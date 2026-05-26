@@ -44,3 +44,30 @@ export interface JobEvent {
   ts: string;
   data?: unknown;
 }
+
+export type NodeRole = 'controlplane' | 'firewall' | 'compute' | 'storage';
+export type NodeStatus = 'online' | 'stale' | 'offline';
+export type InventoryChange =
+  | 'added'
+  | 'online'
+  | 'stale'
+  | 'offline'
+  | 'updated';
+
+export interface Node {
+  id: string;
+  role: NodeRole;
+  hostname: string;
+  agentVersion: string;
+  capabilities?: string[];
+  metadata?: Record<string, unknown>;
+  firstSeen: string;
+  lastSeen: string;
+  status: NodeStatus;
+}
+
+export interface InventoryChangeEvent {
+  change: InventoryChange;
+  node: Node;
+  ts: string;
+}

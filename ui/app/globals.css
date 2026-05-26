@@ -200,3 +200,66 @@ ol.events li {
 ol.events time { color: var(--fg-dim); }
 ol.events .ev-type { color: var(--accent); }
 ol.events code { color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+h2 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-dim);
+  margin: 2rem 0 0.75rem;
+  font-weight: 600;
+}
+.nodes-section, .tasks-section { margin-bottom: 1rem; }
+
+.nodes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.75rem;
+}
+
+.node-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+}
+.node-card.status-online  { border-left-color: var(--ok); }
+.node-card.status-stale   { border-left-color: var(--warn); }
+.node-card.status-offline { border-left-color: var(--err); }
+
+.node-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+.node-card .role {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+}
+.node-card h3 {
+  margin: 0 0 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  color: var(--fg);
+}
+.node-card dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  gap: 0.15rem 0.5rem;
+  font-size: 0.8rem;
+}
+.node-card dt { color: var(--fg-dim); }
+.node-card dd { margin: 0; color: var(--fg); font-family: var(--mono); }
+.node-card dd em { color: var(--fg-dim); font-style: italic; }
+
+p.hint {
+  color: var(--fg-dim);
+  margin: 0.25rem 0 0.75rem;
+  font-size: 0.85rem;
+}
