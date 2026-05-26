@@ -320,6 +320,32 @@ header.with-user {
   gap: 1rem;
 }
 
+nav.tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin: 1.25rem 0 1.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+nav.tabs a {
+  color: var(--fg-dim);
+  text-decoration: none;
+  padding: 0.45rem 0.9rem;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px; /* overlap the nav's bottom border */
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition: color 0.1s, border-color 0.1s;
+}
+nav.tabs a:hover {
+  color: var(--fg);
+}
+nav.tabs a.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
 .user-pill {
   display: flex;
   align-items: center;

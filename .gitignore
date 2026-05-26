@@ -46,6 +46,7 @@ ui/next-env.d.ts
 # Local dev scratch
 /data/
 /tmp/
+/agent-state/
 
 # Vercel (legacy from Next.js scaffold)
 .vercel
