@@ -72,6 +72,21 @@ function NodesSection() {
 
 function NodeCard({ node, now }: { node: Node; now: number }) {
   const lastSeenMs = now - new Date(node.lastSeen).getTime();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function handleReboot() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await createJob('node.reboot', { nodeId: node.id });
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <article className={`node-card status-${node.status}`}>
       <header>
@@ -89,6 +104,16 @@ function NodeCard({ node, now }: { node: Node; now: number }) {
           <code>{node.agentVersion}</code>
         </dd>
       </dl>
+      <div className="card-actions">
+        <button
+          onClick={handleReboot}
+          disabled={busy || node.status !== 'online'}
+          title={node.status !== 'online' ? 'Node is not online' : 'Reboot this node'}
+        >
+          {busy ? 'sending…' : 'Reboot'}
+        </button>
+        {err && <span className="err">{err}</span>}
+      </div>
     </article>
   );
 }

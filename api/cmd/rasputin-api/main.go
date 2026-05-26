@@ -60,6 +60,13 @@ func main() {
 
 	runner := jobs.NewRunner(jobStore, busSrv.Conn())
 	runner.Register(jobs.PingWorkflow())
+	runner.Register(jobs.RebootWorkflow())
+
+	// Abort any jobs left in-flight from a previous run before we expose
+	// HTTP. v0 policy is honest-failure, not resume — see saga.go.
+	if err := runner.Recover(ctx); err != nil {
+		log.Fatalf("rasputin-api: recover in-flight jobs: %v", err)
+	}
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn())
 	if err := invSvc.Start(ctx); err != nil {

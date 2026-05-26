@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -82,6 +83,36 @@ func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
         SELECT id, kind, spec, status, created_by, created_at, started_at, finished_at, parent_id, error
         FROM jobs WHERE id = ?`, id)
 	return scanJob(row.Scan)
+}
+
+// ListJobsByStatus returns every job whose status is in `statuses`. Used by
+// Runner.Recover to find jobs that were in-flight when the api last died.
+func (s *Store) ListJobsByStatus(ctx context.Context, statuses []Status) ([]*Job, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+	args := make([]any, len(statuses))
+	for i, st := range statuses {
+		args[i] = string(st)
+	}
+	q := fmt.Sprintf(`
+        SELECT id, kind, spec, status, created_by, created_at, started_at, finished_at, parent_id, error
+        FROM jobs WHERE status IN (%s) ORDER BY created_at ASC`, placeholders)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Job
+	for rows.Next() {
+		j, err := scanJob(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListJobs(ctx context.Context, limit int) ([]*Job, error) {

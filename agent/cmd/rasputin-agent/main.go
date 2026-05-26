@@ -11,6 +11,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -39,23 +40,29 @@ func main() {
 			roleStr, proto.AllRoles)
 	}
 
-	nc, err := bus.Connect(natsURL, nodeID, func(c *nats.Conn) {
-		publishRegistered(c, nodeID, role)
-	})
+	reregister := func(c *nats.Conn) { publishRegistered(c, nodeID, role) }
+	nc, err := bus.Connect(natsURL, nodeID, reregister)
 	if err != nil {
 		log.Fatalf("rasputin-agent: %v", err)
 	}
 	defer func() { _ = nc.Drain() }()
 
 	pingSubj := proto.NodeCmdSubject(nodeID, "diag.ping")
-	sub, err := nc.Subscribe(pingSubj, func(m *nats.Msg) {
+	pingSub, err := nc.Subscribe(pingSubj, func(m *nats.Msg) {
 		handlePing(nodeID, m)
 	})
 	if err != nil {
 		log.Fatalf("rasputin-agent: subscribe %s: %v", pingSubj, err)
 	}
-	defer func() { _ = sub.Unsubscribe() }()
+	defer func() { _ = pingSub.Unsubscribe() }()
 	log.Printf("rasputin-agent: subscribed to %s", pingSubj)
+
+	rebootSub, err := system.RegisterRebootHandler(nc, nodeID, reregister)
+	if err != nil {
+		log.Fatalf("rasputin-agent: register reboot handler: %v", err)
+	}
+	defer func() { _ = rebootSub.Unsubscribe() }()
+	log.Printf("rasputin-agent: subscribed to %s", proto.NodeCmdSubject(nodeID, "system.reboot"))
 
 	go runHeartbeats(ctx, nc, nodeID)
 
@@ -92,6 +99,9 @@ func runHeartbeats(ctx context.Context, nc *nats.Conn, nodeID string) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if system.IsMuted() {
+				continue
+			}
 			hb := proto.HeartbeatEvt{
 				NodeID:       nodeID,
 				Uptime:       host.Uptime().String(),

@@ -103,6 +103,38 @@ func (r *Runner) Submit(ctx context.Context, kind string, spec json.RawMessage, 
 // Wait blocks until all running jobs finish. Used by main during shutdown.
 func (r *Runner) Wait() { r.wg.Wait() }
 
+// Recover marks any in-flight (queued or running) jobs as failed. Called at
+// api startup to keep the ledger honest after a crash or restart. v0 policy
+// is conservative: we abort, we don't resume. Resume would require knowing
+// whether each step's side effects had been applied, which we don't track
+// yet (it's a v1 problem; see architecture doc §6.4).
+func (r *Runner) Recover(ctx context.Context) error {
+	inFlight, err := r.store.ListJobsByStatus(ctx, []Status{StatusQueued, StatusRunning})
+	if err != nil {
+		return err
+	}
+	const msg = "control plane restarted mid-job"
+	for _, j := range inFlight {
+		now := time.Now().UTC()
+		if err := r.store.MarkJobFailed(ctx, j.ID, msg, now); err != nil {
+			log.Printf("jobs: recover %s: %v", j.ID, err)
+			continue
+		}
+		steps, _ := r.store.ListSteps(ctx, j.ID)
+		for _, st := range steps {
+			if st.Status == StepRunning {
+				_ = r.store.MarkStepFailed(ctx, j.ID, st.Seq, msg, now)
+			}
+		}
+		r.emit(ctx, j.ID, proto.JobFailed, map[string]any{
+			"error":     msg,
+			"recovered": true,
+		})
+		log.Printf("jobs: recovered (failed) %s [%s]", j.ID, j.Kind)
+	}
+	return nil
+}
+
 func (r *Runner) run(j *Job, wf Workflow) {
 	defer r.wg.Done()
 	ctx := context.Background()
