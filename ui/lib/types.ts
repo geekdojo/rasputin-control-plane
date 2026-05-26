@@ -111,3 +111,15 @@ export interface FirewallChangeEvent {
   observedHash?: string;
   ts: string;
 }
+
+export interface MetricPoint {
+  ts: string;
+  value: number;
+}
+
+export interface MetricSeries {
+  nodeId: string;
+  from: string;
+  to: string;
+  series: Record<string, MetricPoint[]>;
+}

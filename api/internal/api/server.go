@@ -7,18 +7,20 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
 // Server bundles the HTTP handlers for the api.
 type Server struct {
-	store  *jobs.Store
-	runner *jobs.Runner
-	inv    *inventory.Store
-	fw     *firewall.Store
-	auth   *auth.Service
-	nc     *nats.Conn
+	store   *jobs.Store
+	runner  *jobs.Runner
+	inv     *inventory.Store
+	fw      *firewall.Store
+	metrics *metrics.Store
+	auth    *auth.Service
+	nc      *nats.Conn
 }
 
 // NewServer constructs an api Server. The auth service is mandatory; if you
@@ -30,10 +32,11 @@ func NewServer(
 	runner *jobs.Runner,
 	inv *inventory.Store,
 	fw *firewall.Store,
+	mtr *metrics.Store,
 	authSvc *auth.Service,
 	nc *nats.Conn,
 ) *Server {
-	return &Server{store: store, runner: runner, inv: inv, fw: fw, auth: authSvc, nc: nc}
+	return &Server{store: store, runner: runner, inv: inv, fw: fw, metrics: mtr, auth: authSvc, nc: nc}
 }
 
 // Handler returns the root http.Handler with all routes wired.
@@ -61,6 +64,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/nodes", reqd(s.handleListNodes))
 	mux.HandleFunc("GET /api/nodes/{id}", reqd(s.handleGetNode))
+
+	mux.HandleFunc("GET /api/metrics/{id}", reqd(s.handleGetMetrics))
 
 	mux.HandleFunc("GET /api/firewall/intents", reqd(s.handleListIntents))
 	mux.HandleFunc("POST /api/firewall/intents", reqd(s.handleCreateIntent))

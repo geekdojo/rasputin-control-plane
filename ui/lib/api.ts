@@ -6,9 +6,22 @@ import type {
   Job,
   JobEvent,
   JobStep,
+  MetricSeries,
   Node,
   PortForwardSpec,
 } from './types';
+
+export type MetricsRange = '5m' | '15m' | '1h' | '6h' | '24h';
+
+export function getMetrics(
+  nodeId: string,
+  range: MetricsRange = '15m',
+  names?: string[],
+): Promise<MetricSeries> {
+  const params = new URLSearchParams({ range });
+  if (names && names.length > 0) params.set('metric', names.join(','));
+  return jsonFetch<MetricSeries>(`/api/metrics/${nodeId}?${params}`);
+}
 
 // Empty string = use the Next.js dev rewrite (next.config.mjs) which proxies
 // /api/* and /ws/* to rasputin-api on :8080. Override with NEXT_PUBLIC_API_BASE

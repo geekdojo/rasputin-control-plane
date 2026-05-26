@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 )
 
 // rasputin-api: the Rasputin control-plane backend.
@@ -73,6 +74,12 @@ func main() {
 	}
 	defer fwStore.Close()
 
+	metricsStore, err := metrics.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: metrics store: %v", err)
+	}
+	defer metricsStore.Close()
+
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
 		RPID:          envOr("RASPUTIN_RP_ID", "localhost"),
@@ -104,7 +111,13 @@ func main() {
 	}
 	defer invSvc.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, authSvc, busSrv.Conn())
+	metricsSvc := metrics.NewService(metricsStore, busSrv.Conn())
+	if err := metricsSvc.Start(ctx); err != nil {
+		log.Fatalf("rasputin-api: metrics service: %v", err)
+	}
+	defer metricsSvc.Stop()
+
+	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, metricsStore, authSvc, busSrv.Conn())
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),

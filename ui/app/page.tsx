@@ -7,6 +7,7 @@ import {
   createIntent,
   createJob,
   deleteIntent,
+  getMetrics,
   listEvents,
   listFirewallState,
   listIntents,
@@ -26,6 +27,7 @@ import type {
   Job,
   JobEvent,
   JobStep,
+  MetricSeries,
   Node,
   PortForwardProto,
 } from '../lib/types';
@@ -125,6 +127,32 @@ function NodeCard({ node, now }: { node: Node; now: number }) {
   const lastSeenMs = now - new Date(node.lastSeen).getTime();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [metrics, setMetrics] = useState<MetricSeries | null>(null);
+
+  // Poll the api every 30s for this node's metrics. Light pressure since
+  // each sample is just a few hundred bytes and the api reads are indexed.
+  useEffect(() => {
+    let active = true;
+    const fetch = () => {
+      getMetrics(node.id, '15m', [
+        'cpu_percent',
+        'mem_used_bytes',
+        'mem_total_bytes',
+      ])
+        .then((m) => {
+          if (active) setMetrics(m);
+        })
+        .catch(() => {
+          /* swallow — sparkline just stays empty */
+        });
+    };
+    fetch();
+    const t = setInterval(fetch, 30_000);
+    return () => {
+      active = false;
+      clearInterval(t);
+    };
+  }, [node.id]);
 
   async function handleReboot() {
     setBusy(true);
@@ -137,6 +165,17 @@ function NodeCard({ node, now }: { node: Node; now: number }) {
       setBusy(false);
     }
   }
+
+  const cpuPoints = metrics?.series?.cpu_percent ?? [];
+  const memUsedPoints = metrics?.series?.mem_used_bytes ?? [];
+  const memTotalPoints = metrics?.series?.mem_total_bytes ?? [];
+  const memPctValues = memUsedPoints.map((p, i) => {
+    const total = memTotalPoints[i]?.value ?? 0;
+    return total > 0 ? (p.value / total) * 100 : 0;
+  });
+  const cpuValues = cpuPoints.map((p) => p.value);
+  const latestCpu = cpuValues.length ? cpuValues[cpuValues.length - 1] : null;
+  const latestMem = memPctValues.length ? memPctValues[memPctValues.length - 1] : null;
 
   return (
     <article className={`node-card status-${node.status}`}>
@@ -155,6 +194,10 @@ function NodeCard({ node, now }: { node: Node; now: number }) {
           <code>{node.agentVersion}</code>
         </dd>
       </dl>
+      <div className="card-metrics">
+        <MetricRow label="cpu" data={cpuValues} latest={latestCpu} color="var(--warn)" />
+        <MetricRow label="mem" data={memPctValues} latest={latestMem} color="var(--accent)" />
+      </div>
       <div className="card-actions">
         <button
           onClick={handleReboot}
@@ -166,6 +209,58 @@ function NodeCard({ node, now }: { node: Node; now: number }) {
         {err && <span className="err">{err}</span>}
       </div>
     </article>
+  );
+}
+
+function MetricRow({
+  label,
+  data,
+  latest,
+  color,
+}: {
+  label: string;
+  data: number[];
+  latest: number | null;
+  color: string;
+}) {
+  return (
+    <div className="metric-row">
+      <span className="metric-label">{label}</span>
+      <Sparkline data={data} max={100} color={color} />
+      <span className="metric-value">
+        {latest != null ? `${latest.toFixed(0)}%` : '—'}
+      </span>
+    </div>
+  );
+}
+
+function Sparkline({
+  data,
+  max,
+  color,
+}: {
+  data: number[];
+  max: number;
+  color: string;
+}) {
+  const w = 80;
+  const h = 18;
+  if (data.length < 2) {
+    return <svg width={w} height={h} className="sparkline" aria-hidden />;
+  }
+  const safeMax = max > 0 ? max : 1;
+  const xStep = w / (data.length - 1);
+  const points = data
+    .map((v, i) => {
+      const x = (i * xStep).toFixed(1);
+      const y = (h - (Math.min(Math.max(v, 0), safeMax) / safeMax) * h).toFixed(1);
+      return `${x},${y}`;
+    })
+    .join(' ');
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="sparkline" aria-hidden>
+      <polyline fill="none" stroke={color} strokeWidth={1.5} points={points} />
+    </svg>
   );
 }
 

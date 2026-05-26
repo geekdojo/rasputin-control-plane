@@ -12,6 +12,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -92,6 +93,7 @@ func main() {
 	}
 
 	go runHeartbeats(ctx, nc, nodeID)
+	go metrics.Run(ctx, nc, nodeID, host.Uptime)
 
 	<-ctx.Done()
 	log.Println("rasputin-agent: shutting down")

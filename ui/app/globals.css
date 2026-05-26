@@ -258,6 +258,26 @@ h2 {
 .node-card dd { margin: 0; color: var(--fg); font-family: var(--mono); }
 .node-card dd em { color: var(--fg-dim); font-style: italic; }
 
+.card-metrics {
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.metric-row {
+  display: grid;
+  grid-template-columns: 32px 1fr 36px;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  font-family: var(--mono);
+}
+.metric-label { color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.metric-value { color: var(--fg); text-align: right; }
+.sparkline { display: block; }
+
 p.hint {
   color: var(--fg-dim);
   margin: 0.25rem 0 0.75rem;
