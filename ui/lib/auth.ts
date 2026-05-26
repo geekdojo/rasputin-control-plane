@@ -21,7 +21,7 @@ export interface AuthStatus {
 
 async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${input}`, {
-    credentials: 'same-origin',
+    credentials: 'include',
     ...init,
   });
   if (!res.ok) {
@@ -60,7 +60,7 @@ export async function getMe(): Promise<CurrentUser | null> {
 export async function logout(): Promise<void> {
   await fetch(`${BASE}/api/auth/logout`, {
     method: 'POST',
-    credentials: 'same-origin',
+    credentials: 'include',
   });
 }
 

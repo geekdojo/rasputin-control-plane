@@ -11,25 +11,17 @@ import type {
   PortForwardSpec,
 } from './types';
 
-export type MetricsRange = '5m' | '15m' | '1h' | '6h' | '24h';
-
-export function getMetrics(
-  nodeId: string,
-  range: MetricsRange = '15m',
-  names?: string[],
-): Promise<MetricSeries> {
-  const params = new URLSearchParams({ range });
-  if (names && names.length > 0) params.set('metric', names.join(','));
-  return jsonFetch<MetricSeries>(`/api/metrics/${nodeId}?${params}`);
-}
-
-// Empty string = use the Next.js dev rewrite (next.config.mjs) which proxies
-// /api/* and /ws/* to rasputin-api on :8080. Override with NEXT_PUBLIC_API_BASE
-// (e.g. "http://localhost:8080") to hit the api directly.
+// In dev, next.config.mjs sets NEXT_PUBLIC_API_BASE to http://localhost:8080
+// so the browser hits the api directly (cross-origin same-site, cookies sent
+// because SameSite=Lax + CORS Allow-Credentials).
+// In production, BASE is empty and the UI uses same-origin relative paths.
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
 async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${input}`, init);
+  const res = await fetch(`${BASE}${input}`, {
+    credentials: 'include',
+    ...init,
+  });
   if (!res.ok) {
     let detail = '';
     try {
@@ -41,6 +33,18 @@ async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
     throw new Error(`${input} → ${res.status}${detail}`);
   }
   return (await res.json()) as T;
+}
+
+export type MetricsRange = '5m' | '15m' | '1h' | '6h' | '24h';
+
+export function getMetrics(
+  nodeId: string,
+  range: MetricsRange = '15m',
+  names?: string[],
+): Promise<MetricSeries> {
+  const params = new URLSearchParams({ range });
+  if (names && names.length > 0) params.set('metric', names.join(','));
+  return jsonFetch<MetricSeries>(`/api/metrics/${nodeId}?${params}`);
 }
 
 export function createJob(kind: string, spec: unknown): Promise<Job> {
@@ -112,6 +116,7 @@ export function updateIntent(
 export async function deleteIntent(id: string): Promise<void> {
   const res = await fetch(`${BASE}/api/firewall/intents/${id}`, {
     method: 'DELETE',
+    credentials: 'include',
   });
   if (!res.ok && res.status !== 204) {
     throw new Error(`deleteIntent: ${res.status}`);
@@ -136,18 +141,47 @@ export function openFirewallWS(
   return openWS<FirewallChangeEvent>('/ws/firewall', onEvent);
 }
 
+// ----- WebSocket plumbing -------------------------------------------------
+
+// openWS opens a resilient WebSocket: logs lifecycle events, parses each
+// frame as T, calls onEvent. On unexpected close it reconnects with
+// exponential backoff (capped at 30s). Returns a close function that stops
+// reconnects.
 function openWS<T>(path: string, onEvent: (ev: T) => void): () => void {
+  let ws: WebSocket | null = null;
+  let closed = false;
+  let backoff = 1000;
   const url = wsURL(path);
-  const ws = new WebSocket(url);
-  ws.onmessage = (m) => {
-    try {
-      onEvent(JSON.parse(m.data) as T);
-    } catch (err) {
-      console.error(`ws parse ${path}`, err);
-    }
+
+  const connect = () => {
+    if (closed) return;
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      console.info(`ws open ${path}`);
+      backoff = 1000; // reset
+    };
+    ws.onmessage = (m) => {
+      try {
+        onEvent(JSON.parse(m.data) as T);
+      } catch (err) {
+        console.error(`ws parse ${path}`, err);
+      }
+    };
+    ws.onerror = (e) => console.warn(`ws error ${path}`, e);
+    ws.onclose = (e) => {
+      if (closed) return;
+      console.warn(`ws closed ${path} (code=${e.code} reason=${e.reason}); reconnecting in ${backoff}ms`);
+      setTimeout(connect, backoff);
+      backoff = Math.min(backoff * 2, 30_000);
+    };
   };
-  ws.onerror = (e) => console.warn(`ws error ${path}`, e);
-  return () => ws.close();
+
+  connect();
+
+  return () => {
+    closed = true;
+    if (ws) ws.close();
+  };
 }
 
 function wsURL(path: string): string {
