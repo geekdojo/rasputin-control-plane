@@ -22,7 +22,17 @@ export default function NodesPage() {
     const close = openInventoryWS((ev) => {
       setNodes((prev) => applyInventoryEvent(prev, ev));
     });
-    return close;
+    // The inventory WS only fires on status transitions (online↔stale↔offline),
+    // not on every heartbeat. Without a backstop, a steadily-online node never
+    // sees its lastSeen update and the relative time grows forever. Poll the
+    // list every 15s — cheap for 1–8 nodes — and the WS keeps transitions instant.
+    const refresh = setInterval(() => {
+      listNodes().then(setNodes).catch(() => {});
+    }, 15_000);
+    return () => {
+      close();
+      clearInterval(refresh);
+    };
   }, []);
 
   // Tick the "last seen" relative timestamps every second.
