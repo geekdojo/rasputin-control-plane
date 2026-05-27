@@ -1,6 +1,7 @@
 package apps
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,130 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 		},
 	}
 }
+
+// ReconcileWorkflow sweeps every app's actual status from its target node
+// and reconciles the api's stored lastStatus. Fired by the scheduler on a
+// 5-minute (default) interval; also manually invokable.
+//
+// Two steps:
+//
+//  1. list  — pull every app from the store; the result is just metadata
+//             for the next step (kept for observability + step result).
+//  2. sweep — for each app, if its target node is online, NATS-RPC
+//             docker.status; if the derived status differs from the
+//             stored lastStatus, update + emit a change event. Apps on
+//             offline nodes are recorded but not failed.
+//
+// The saga never fails as a whole — individual app failures are logged
+// and counted but don't abort the sweep. This is "honest drift
+// reporting", not "apply intent".
+func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
+	return jobs.Workflow{
+		Kind: "apps.reconcile",
+		Steps: []jobs.WorkflowStep{
+			{Name: "list", Timeout: 2 * time.Second, Do: reconcileList(store)},
+			{Name: "sweep", Timeout: 90 * time.Second, Do: reconcileSweep(store, inv, nc)},
+		},
+	}
+}
+
+func reconcileList(store *Store) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		all, err := store.List(sc.Ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list apps: %w", err)
+		}
+		sc.Log("info", fmt.Sprintf("reconciling %d app(s)", len(all)))
+		return json.Marshal(map[string]int{"count": len(all)})
+	}
+}
+
+func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		all, err := store.List(sc.Ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list apps: %w", err)
+		}
+
+		var (
+			checked  int
+			drifted  int
+			skipped  int
+			failed   int
+		)
+
+		for _, app := range all {
+			node, err := inv.Get(sc.Ctx, app.TargetNode)
+			if err != nil || node == nil {
+				skipped++
+				continue
+			}
+			// Skip if not online — the agent won't answer. We don't change
+			// lastStatus to "unknown" here because the heartbeat-driven
+			// status tracking already conveys that the node is offline.
+			if computeNodeStatus(node.LastSeen) != proto.StatusOnline {
+				skipped++
+				continue
+			}
+
+			cmd, _ := json.Marshal(proto.AppStatusCmd{AppID: app.ID})
+			// Short timeout per app — the sweep step's own deadline is the
+			// hard ceiling; a single hung agent shouldn't block the rest.
+			ctx, cancel := context.WithTimeout(sc.Ctx, 5*time.Second)
+			msg, err := nc.RequestWithContext(ctx, proto.AppStatusSubject(app.TargetNode), cmd)
+			cancel()
+			if err != nil {
+				failed++
+				sc.Log("warn", fmt.Sprintf("%s: status rpc on %s: %v", app.Name, app.TargetNode, err))
+				continue
+			}
+			var ack proto.AppStatusAck
+			if err := json.Unmarshal(msg.Data, &ack); err != nil {
+				failed++
+				continue
+			}
+			checked++
+			if ack.Status == app.LastStatus {
+				continue
+			}
+			// Drift detected — update store + publish.
+			now := time.Now().UTC()
+			detail := fmt.Sprintf("reconcile: was %s, observed %s", app.LastStatus, ack.Status)
+			_ = store.RecordStatus(sc.Ctx, app.ID, ack.Status, detail, now)
+			change := proto.AppDeployed
+			if ack.Status == proto.AppStatusStopped {
+				change = proto.AppStopped
+			} else if ack.Status == proto.AppStatusFailed {
+				change = proto.AppFailed
+			}
+			emitChange(nc, app.ID, change, ack.Status, detail, now)
+			drifted++
+			sc.Log("warn", fmt.Sprintf("%s drifted: %s → %s", app.Name, app.LastStatus, ack.Status))
+		}
+
+		sc.Log("info", fmt.Sprintf("checked=%d drifted=%d skipped=%d failed=%d",
+			checked, drifted, skipped, failed))
+		return json.Marshal(map[string]int{
+			"checked": checked, "drifted": drifted,
+			"skipped": skipped, "failed": failed,
+		})
+	}
+}
+
+// computeNodeStatus mirrors the api package's helper — duplicated here to
+// avoid an import cycle. 30s/2m thresholds match.
+func computeNodeStatus(lastSeen time.Time) proto.NodeStatus {
+	gap := time.Since(lastSeen)
+	switch {
+	case gap < 30*time.Second:
+		return proto.StatusOnline
+	case gap < 2*time.Minute:
+		return proto.StatusStale
+	default:
+		return proto.StatusOffline
+	}
+}
+
 
 func parseSpec(raw json.RawMessage) (*DeploySpec, error) {
 	var spec DeploySpec

@@ -21,6 +21,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 )
 
@@ -165,6 +166,7 @@ func main() {
 	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn()))
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
+	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
 		PublicBaseURL: publicBaseURL,
 	}))
@@ -192,6 +194,21 @@ func main() {
 		log.Fatalf("rasputin-api: metrics service: %v", err)
 	}
 	defer metricsSvc.Stop()
+
+	// Reconciliation tickers. One scheduler entry per drift-prone
+	// subsystem; staggered so the bus doesn't stampede at startup. All
+	// intervals are env-overridable (parsed by parseDurationOr below).
+	// Defaults match the firewall + mesh §6 docs (5 min).
+	fwReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_FW_RECONCILE_INTERVAL"), 5*time.Minute)
+	appsReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_RECONCILE_INTERVAL"), 5*time.Minute)
+	meshReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_MESH_RECONCILE_INTERVAL"), 5*time.Minute)
+	sched := scheduler.New(runner, []scheduler.Entry{
+		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
+		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
+		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
+	})
+	sched.Start(ctx)
+	defer sched.Stop()
 
 	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, meshSvc, authSvc, busSrv.Conn())
 	httpSrv := &http.Server{
@@ -233,4 +250,17 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// parseDurationOr parses s as a duration; on parse error or zero/negative,
+// returns def. Lets env-var overrides degrade safely.
+func parseDurationOr(s string, def time.Duration) time.Duration {
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
 }
