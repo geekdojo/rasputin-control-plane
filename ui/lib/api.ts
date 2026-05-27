@@ -10,6 +10,10 @@ import type {
   Job,
   JobEvent,
   JobStep,
+  MeshChangeEvent,
+  MeshDevice,
+  MeshIntent,
+  MeshStateEnvelope,
   MetricSeries,
   Node,
   NodeUpdate,
@@ -285,6 +289,106 @@ export function openSystemUpdatesWS(
   onEvent: (ev: SystemUpdateChangeEvent) => void,
 ): () => void {
   return openWS<SystemUpdateChangeEvent>('/ws/updates/system', onEvent);
+}
+
+// ----- Mesh ---------------------------------------------------------------
+
+export async function getMeshState(): Promise<MeshStateEnvelope> {
+  return jsonFetch<MeshStateEnvelope>('/api/mesh/state');
+}
+
+export async function listMeshDevices(): Promise<MeshDevice[]> {
+  return (await jsonFetch<MeshDevice[] | null>('/api/mesh/devices')) ?? [];
+}
+
+export async function deleteMeshDevice(hsId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/mesh/devices/${encodeURIComponent(hsId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`deleteMeshDevice → ${res.status}`);
+  }
+}
+
+export async function listMeshKeys(): Promise<MeshIntent[]> {
+  return (await jsonFetch<MeshIntent[] | null>('/api/mesh/keys')) ?? [];
+}
+
+export function createMeshKey(input: {
+  name: string;
+  deviceHint?: string;
+  reusable?: boolean;
+  ephemeral?: boolean;
+  expiresIn?: string;
+  tags?: string[];
+}): Promise<MeshIntent> {
+  return jsonFetch<MeshIntent>('/api/mesh/keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteMeshKey(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/mesh/keys/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`deleteMeshKey → ${res.status}`);
+  }
+}
+
+export async function listMeshRoutes(): Promise<MeshIntent[]> {
+  return (await jsonFetch<MeshIntent[] | null>('/api/mesh/routes')) ?? [];
+}
+
+export function createMeshRoute(input: {
+  name: string;
+  nodeId: string;
+  cidr: string;
+}): Promise<MeshIntent> {
+  return jsonFetch<MeshIntent>('/api/mesh/routes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteMeshRoute(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/mesh/routes/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`deleteMeshRoute → ${res.status}`);
+  }
+}
+
+export function applyMesh(): Promise<Job> {
+  return jsonFetch<Job>('/api/mesh/apply', { method: 'POST' });
+}
+
+export function reconcileMesh(): Promise<Job> {
+  return jsonFetch<Job>('/api/mesh/reconcile', { method: 'POST' });
+}
+
+export function enrollMeshNode(
+  nodeId: string,
+  advertiseRoutes?: string[],
+): Promise<Job> {
+  return jsonFetch<Job>(`/api/mesh/enroll/${encodeURIComponent(nodeId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ advertiseRoutes: advertiseRoutes ?? [] }),
+  });
+}
+
+export function openMeshWS(
+  onEvent: (ev: MeshChangeEvent) => void,
+): () => void {
+  return openWS<MeshChangeEvent>('/ws/mesh', onEvent);
 }
 
 // ----- WebSocket plumbing -------------------------------------------------

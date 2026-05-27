@@ -19,6 +19,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 )
@@ -94,6 +95,32 @@ func main() {
 	}
 	defer updaterStore.Close()
 
+	meshStore, err := mesh.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: mesh store: %v", err)
+	}
+	defer meshStore.Close()
+
+	// Mesh subsystem: v0 ships a file-backed mock Headscale client. Real
+	// Docker container supervision lands when we have a controlplane node
+	// with Docker installed (Phase 2). See wiki design/control-plane/mesh.md.
+	meshStateDir := envOr("RASPUTIN_MESH_STATE_DIR", filepath.Join(dataDir, "mesh"))
+	if err := os.MkdirAll(meshStateDir, 0o755); err != nil {
+		log.Fatalf("rasputin-api: mesh state dir: %v", err)
+	}
+	meshClient, err := mesh.NewMockClient(meshStateDir)
+	if err != nil {
+		log.Fatalf("rasputin-api: mesh mock client: %v", err)
+	}
+	meshSvc := mesh.NewService(mesh.Config{
+		LoginServer: envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local"),
+		DefaultUser: envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
+	}, meshStore, meshClient, mesh.NewNoopSupervisor())
+	if err := meshSvc.Start(ctx); err != nil {
+		log.Fatalf("rasputin-api: mesh service: %v", err)
+	}
+	defer meshSvc.Stop()
+
 	// Bundles live on disk; the api streams them to agents. PKI trust
 	// material lives next door — root-ca.pem expected at <trustDir>/root-ca.pem.
 	bundleDir := envOr("RASPUTIN_BUNDLE_DIR", filepath.Join(dataDir, "bundles"))
@@ -144,6 +171,9 @@ func main() {
 	runner.Register(updater.SystemUpdateWorkflow(updaterStore, invStore, jobStore, runner, busSrv.Conn(), updater.SystemUpdateConfig{
 		SelfNodeID: selfNodeID,
 	}))
+	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
+	runner.Register(mesh.ReconcileWorkflow(meshSvc, busSrv.Conn()))
+	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
 
 	// Abort any jobs left in-flight from a previous run before we expose
 	// HTTP. v0 policy is honest-failure, not resume — see saga.go.
@@ -163,7 +193,7 @@ func main() {
 	}
 	defer metricsSvc.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, authSvc, busSrv.Conn())
+	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, meshSvc, authSvc, busSrv.Conn())
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),

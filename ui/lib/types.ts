@@ -245,3 +245,83 @@ export interface SystemUpdateChangeEvent {
   counts?: SystemUpdateCounts;
   ts: string;
 }
+
+// ----- Mesh ---------------------------------------------------------------
+
+export type MeshIntentKind = 'preauth_key' | 'subnet_route';
+
+export interface PreAuthKeySpec {
+  user: string;
+  reusable: boolean;
+  ephemeral: boolean;
+  expiresIn: string;
+  tags?: string[];
+  deviceHint?: string;
+}
+
+export interface SubnetRouteSpec {
+  nodeId: string;
+  cidr: string;
+}
+
+export interface MeshIntent {
+  id: string;
+  kind: MeshIntentKind;
+  name: string;
+  enabled: boolean;
+  spec: PreAuthKeySpec | SubnetRouteSpec;
+  hsId?: string;
+  hsValue?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MeshDevice {
+  hsId: string;
+  user: string;
+  hostname: string;
+  tailnetIp: string;
+  tags: string[];
+  advertisedRoutes: string[];
+  rasputinNodeId?: string;
+  kind: 'rasputin' | 'user';
+  firstSeen: string;
+  lastSeen: string;
+}
+
+export interface MeshState {
+  intentHash: string;
+  observedHash: string;
+  lastApplied?: string;
+  lastReconciled?: string;
+  drift: boolean;
+}
+
+export interface MeshStateEnvelope {
+  backend: string;
+  loginServer: string;
+  defaultUser: string;
+  state: MeshState;
+}
+
+export type MeshChange =
+  | 'applied'
+  | 'in_sync'
+  | 'drift'
+  | 'reconciled'
+  | 'node_enrolled'
+  | 'node_left'
+  | 'key_created'
+  | 'key_expired'
+  | 'user_device_seen';
+
+export interface MeshChangeEvent {
+  scope: string;
+  change: MeshChange;
+  intentHash?: string;
+  observedHash?: string;
+  detail?: string;
+  nodeId?: string;
+  tailnetId?: string;
+  ts: string;
+}

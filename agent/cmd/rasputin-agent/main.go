@@ -17,6 +17,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/tailscale"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -177,6 +178,43 @@ func main() {
 		log.Printf("rasputin-agent: update backend=%s", upBackend.Name())
 	}
 
+	// Tailscale handlers — every node joins the tailnet (per
+	// design/control-plane/mesh.md §5). Picks the real backend if the
+	// tailscale binary is on PATH, otherwise mocks. Force via
+	// RASPUTIN_TAILSCALE_BACKEND=mock|tailscale.
+	{
+		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
+			filepath.Join("./agent-state", nodeID))
+		backendChoice := envOr("RASPUTIN_TAILSCALE_BACKEND", autodetectTailscaleBackend())
+		var tsBackend tailscale.Backend
+		switch backendChoice {
+		case "tailscale":
+			rb, err := tailscale.NewRealBackend()
+			if err != nil {
+				log.Fatalf("rasputin-agent: tailscale real backend: %v", err)
+			}
+			tsBackend = rb
+		case "mock":
+			mb, err := tailscale.NewMockBackend(filepath.Join(stateDir, "tailscale"))
+			if err != nil {
+				log.Fatalf("rasputin-agent: tailscale mock backend: %v", err)
+			}
+			tsBackend = mb
+		default:
+			log.Fatalf("rasputin-agent: unknown RASPUTIN_TAILSCALE_BACKEND %q (expected tailscale|mock)", backendChoice)
+		}
+		tsSubs, err := tailscale.RegisterHandlers(nc, nodeID, tsBackend)
+		if err != nil {
+			log.Fatalf("rasputin-agent: register tailscale handlers: %v", err)
+		}
+		defer func() {
+			for _, sub := range tsSubs {
+				_ = sub.Unsubscribe()
+			}
+		}()
+		log.Printf("rasputin-agent: tailscale backend=%s", tsBackend.Name())
+	}
+
 	go runHeartbeats(ctx, nc, nodeID)
 	go metrics.Run(ctx, nc, nodeID, host.Uptime)
 
@@ -280,6 +318,18 @@ func autodetectDockerBackend() string {
 func autodetectUpdaterBackend() string {
 	if _, err := exec.LookPath("rauc"); err == nil {
 		return "rauc"
+	}
+	return "mock"
+}
+
+// autodetectTailscaleBackend returns "tailscale" if the tailscale CLI is
+// on PATH and a working tailscaled is reachable, "mock" otherwise. v0
+// only checks for the binary — `tailscale status` would prove tailscaled
+// is alive but adds 1-2s to startup; we let the first enroll fail loudly
+// if the daemon isn't running.
+func autodetectTailscaleBackend() string {
+	if _, err := exec.LookPath("tailscale"); err == nil {
+		return "tailscale"
 	}
 	return "mock"
 }

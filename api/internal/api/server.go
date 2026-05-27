@@ -8,6 +8,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -25,6 +26,7 @@ type Server struct {
 	updater         *updater.Store
 	updaterVerifier *updater.Verifier
 	bundleDir       string
+	mesh            *mesh.Service
 	auth            *auth.Service
 	nc              *nats.Conn
 }
@@ -43,13 +45,14 @@ func NewServer(
 	updaterStore *updater.Store,
 	updaterVerifier *updater.Verifier,
 	bundleDir string,
+	meshSvc *mesh.Service,
 	authSvc *auth.Service,
 	nc *nats.Conn,
 ) *Server {
 	return &Server{
 		store: store, runner: runner, inv: inv, fw: fw, apps: appsStore,
 		metrics: mtr, updater: updaterStore, updaterVerifier: updaterVerifier,
-		bundleDir: bundleDir, auth: authSvc, nc: nc,
+		bundleDir: bundleDir, mesh: meshSvc, auth: authSvc, nc: nc,
 	}
 }
 
@@ -109,12 +112,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/updates/system", reqd(s.handleCreateSystemUpdate))
 	mux.HandleFunc("GET /api/updates", reqd(s.handleListUpdates))
 
+	mux.HandleFunc("GET /api/mesh/state", reqd(s.handleMeshState))
+	mux.HandleFunc("GET /api/mesh/devices", reqd(s.handleListMeshDevices))
+	mux.HandleFunc("DELETE /api/mesh/devices/{hsId}", reqd(s.handleDeleteMeshDevice))
+	mux.HandleFunc("GET /api/mesh/keys", reqd(s.handleListMeshKeys))
+	mux.HandleFunc("POST /api/mesh/keys", reqd(s.handleCreateMeshKey))
+	mux.HandleFunc("DELETE /api/mesh/keys/{id}", reqd(s.handleDeleteMeshKey))
+	mux.HandleFunc("GET /api/mesh/routes", reqd(s.handleListMeshRoutes))
+	mux.HandleFunc("POST /api/mesh/routes", reqd(s.handleCreateMeshRoute))
+	mux.HandleFunc("DELETE /api/mesh/routes/{id}", reqd(s.handleDeleteMeshRoute))
+	mux.HandleFunc("POST /api/mesh/apply", reqd(s.handleMeshApply))
+	mux.HandleFunc("POST /api/mesh/reconcile", reqd(s.handleMeshReconcile))
+	mux.HandleFunc("POST /api/mesh/enroll/{nodeId}", reqd(s.handleMeshEnrollNode))
+
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
 	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
 	mux.HandleFunc("GET /ws/firewall", reqd(s.bridgeSubject(proto.AllFirewallChangesFilter)))
 	mux.HandleFunc("GET /ws/apps", reqd(s.bridgeSubject(proto.AllAppsFilter)))
 	mux.HandleFunc("GET /ws/updates", reqd(s.bridgeSubject(proto.AllUpdatesFilter)))
 	mux.HandleFunc("GET /ws/updates/system", reqd(s.bridgeSubject(proto.AllSystemUpdatesFilter)))
+	mux.HandleFunc("GET /ws/mesh", reqd(s.bridgeSubject(proto.AllMeshChangesFilter)))
 
 	return withCORS(mux)
 }
