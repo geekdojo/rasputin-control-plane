@@ -11,6 +11,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -30,6 +31,7 @@ type Server struct {
 	mesh            *mesh.Service
 	bmc             *bmc.Service
 	bmcSessions     *bmc.SessionManager
+	setup           *setup.Service
 	auth            *auth.Service
 	nc              *nats.Conn
 }
@@ -50,6 +52,7 @@ func NewServer(
 	bundleDir string,
 	meshSvc *mesh.Service,
 	bmcSvc *bmc.Service,
+	setupSvc *setup.Service,
 	authSvc *auth.Service,
 	nc *nats.Conn,
 ) *Server {
@@ -58,7 +61,8 @@ func NewServer(
 		metrics: mtr, updater: updaterStore, updaterVerifier: updaterVerifier,
 		bundleDir: bundleDir, mesh: meshSvc,
 		bmc: bmcSvc, bmcSessions: bmc.NewSessionManager(bmcSvc),
-		auth: authSvc, nc: nc,
+		setup: setupSvc,
+		auth:  authSvc, nc: nc,
 	}
 }
 
@@ -75,6 +79,10 @@ func (s *Server) Handler() http.Handler {
 	// Open
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.auth.RegisterRoutes(mux)
+	// GET /api/setup/state is intentionally unauthenticated — the wizard
+	// runs before any passkey exists and needs to read step state to know
+	// which form to show first. The response carries no secrets.
+	mux.HandleFunc("GET /api/setup/state", s.handleSetupState)
 
 	// Authenticated
 	reqd := s.auth.RequireSessionFunc
@@ -130,6 +138,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/mesh/apply", reqd(s.handleMeshApply))
 	mux.HandleFunc("POST /api/mesh/reconcile", reqd(s.handleMeshReconcile))
 	mux.HandleFunc("POST /api/mesh/enroll/{nodeId}", reqd(s.handleMeshEnrollNode))
+
+	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))
+	mux.HandleFunc("POST /api/setup/mesh", reqd(s.handleSetupMesh))
+	mux.HandleFunc("POST /api/setup/complete", reqd(s.handleSetupComplete))
 
 	mux.HandleFunc("GET /api/bmc", reqd(s.handleListBMCStates))
 	mux.HandleFunc("GET /api/bmc/{nodeId}/status", reqd(s.handleBMCStatus))

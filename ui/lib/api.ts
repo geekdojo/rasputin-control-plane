@@ -21,6 +21,7 @@ import type {
   Node,
   NodeUpdate,
   PortForwardSpec,
+  SetupState,
   SystemUpdateChangeEvent,
   UpdateChangeEvent,
 } from './types';
@@ -425,6 +426,30 @@ export function openBMCWS(
 // Used by the console page to construct a WebSocket directly.
 export function bmcSOLURL(nodeId: string): string {
   return wsURL(`/ws/bmc/${encodeURIComponent(nodeId)}/sol`);
+}
+
+// ----- Setup wizard -------------------------------------------------------
+
+// GET /api/setup/state is intentionally unauthenticated — the wizard runs
+// before the first passkey exists. Returns no secrets.
+export async function getSetupState(): Promise<SetupState> {
+  return jsonFetch<SetupState>('/api/setup/state');
+}
+
+export function setInstallName(name: string): Promise<SetupState> {
+  return jsonFetch<SetupState>('/api/setup/install-name', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function setupEnrollSelf(): Promise<Job> {
+  return jsonFetch<Job>('/api/setup/mesh', { method: 'POST' });
+}
+
+export function completeSetup(): Promise<SetupState> {
+  return jsonFetch<SetupState>('/api/setup/complete', { method: 'POST' });
 }
 
 // ----- WebSocket plumbing -------------------------------------------------

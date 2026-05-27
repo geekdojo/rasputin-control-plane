@@ -3,7 +3,9 @@
 import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { getSetupState } from '../../lib/api';
 import { getMe, logout, type CurrentUser } from '../../lib/auth';
+import type { SetupState } from '../../lib/types';
 
 // Tabs in display order. Adding a new section: drop a new route under
 // app/(authed)/<name>/page.tsx and add an entry here.
@@ -24,6 +26,7 @@ export default function AuthedLayout({
   const router = useRouter();
   const pathname = usePathname();
   const [user, setUser] = useState<CurrentUser | null | undefined>(undefined);
+  const [setup, setSetup] = useState<SetupState | null>(null);
 
   useEffect(() => {
     getMe()
@@ -33,6 +36,12 @@ export default function AuthedLayout({
       })
       .catch(() => router.replace('/login'));
   }, [router]);
+
+  // Setup state drives the banner. Fetched alongside auth; refetched only
+  // on full page loads (the wizard's own page does its own refreshes).
+  useEffect(() => {
+    getSetupState().then(setSetup).catch(() => {});
+  }, []);
 
   if (user === undefined || user === null) {
     return (
@@ -75,6 +84,13 @@ export default function AuthedLayout({
           </Link>
         ))}
       </nav>
+
+      {setup && !setup.completed && pathname !== '/setup' && (
+        <div className="setup-banner">
+          <span>First-run setup isn&apos;t complete.</span>
+          <Link href="/setup">Finish setup →</Link>
+        </div>
+      )}
 
       {children}
     </main>

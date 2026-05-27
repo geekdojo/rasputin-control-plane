@@ -2,12 +2,25 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { getSetupState } from '../../lib/api';
 import {
   getStatus,
   loginWithPasskey,
   registerPasskey,
   type AuthStatus,
 } from '../../lib/auth';
+
+// postAuthDestination returns "/setup" if the wizard isn't complete,
+// otherwise "/". Used after both registration and sign-in. Failures fall
+// through to "/" — the auth layout's setup banner will still nudge them.
+async function postAuthDestination(): Promise<string> {
+  try {
+    const s = await getSetupState();
+    return s.completed ? '/' : '/setup';
+  } catch {
+    return '/';
+  }
+}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -19,9 +32,9 @@ export default function LoginPage() {
 
   useEffect(() => {
     getStatus()
-      .then((s) => {
+      .then(async (s) => {
         setStatus(s);
-        if (s.user) router.replace('/');
+        if (s.user) router.replace(await postAuthDestination());
       })
       .catch((e) => setErr(String(e)));
   }, [router]);
@@ -31,7 +44,7 @@ export default function LoginPage() {
     setErr(null);
     try {
       await loginWithPasskey();
-      router.replace('/');
+      router.replace(await postAuthDestination());
     } catch (e) {
       setErr(humanError(e));
     } finally {
@@ -44,7 +57,9 @@ export default function LoginPage() {
     setErr(null);
     try {
       await registerPasskey(name, displayName || name);
-      router.replace('/');
+      // First registration always lands on /setup so the operator
+      // doesn't miss the rest of the wizard.
+      router.replace('/setup');
     } catch (e) {
       setErr(humanError(e));
     } finally {

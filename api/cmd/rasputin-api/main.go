@@ -23,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 )
 
@@ -109,6 +110,12 @@ func main() {
 	}
 	defer bmcStore.Close()
 
+	setupStore, err := setup.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: setup store: %v", err)
+	}
+	defer setupStore.Close()
+
 	// Mesh subsystem: v0 ships a file-backed mock Headscale client. Real
 	// Docker container supervision lands when we have a controlplane node
 	// with Docker installed (Phase 2). See wiki design/control-plane/mesh.md.
@@ -157,6 +164,29 @@ func main() {
 	// MVS); override via RASPUTIN_BMC_HOST_NODE_ID for split-brain layouts.
 	bmcHostNodeID := envOr("RASPUTIN_BMC_HOST_NODE_ID", selfNodeID)
 	bmcSvc := bmc.NewService(bmc.Config{HostNodeID: bmcHostNodeID}, bmcStore, busSrv.Conn())
+
+	// Setup wizard service. Probes are functions over the other
+	// subsystems' stores; defined here so the setup package stays narrow
+	// and import-cycle-free.
+	setupSvc := setup.NewService(setupStore, setup.Probes{
+		HasUsers: func(ctx context.Context) (bool, error) {
+			n, err := authStore.CountUsers(ctx)
+			return n > 0, err
+		},
+		TrustConfigured: func() bool { return verifier.TrustConfigured() },
+		MeshEnrolled: func(ctx context.Context, selfNodeID string) (bool, error) {
+			devices, err := meshStore.ListDevices(ctx)
+			if err != nil {
+				return false, err
+			}
+			for _, d := range devices {
+				if d.RasputinNodeID == selfNodeID && d.Kind == "rasputin" {
+					return true, nil
+				}
+			}
+			return false, nil
+		},
+	}, selfNodeID)
 
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
@@ -223,7 +253,7 @@ func main() {
 	sched.Start(ctx)
 	defer sched.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, meshSvc, bmcSvc, authSvc, busSrv.Conn())
+	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, meshSvc, bmcSvc, setupSvc, authSvc, busSrv.Conn())
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),

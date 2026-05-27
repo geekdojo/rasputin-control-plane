@@ -356,3 +356,24 @@ export interface BMCChangeEvent {
   detail?: string;
   ts: string;
 }
+
+// ----- Setup wizard -------------------------------------------------------
+
+export interface SetupStep {
+  id: string;
+  title: string;
+  done: boolean;
+  required: boolean;
+  detail?: string;
+}
+
+export interface SetupState {
+  steps: SetupStep[];
+  completed: boolean;
+  completedAt?: string;
+  installName: string;
+  hasUsers: boolean;
+  trustConfigured: boolean;
+  meshEnrolled: boolean;
+  selfNodeId: string;
+}
