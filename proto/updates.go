@@ -244,3 +244,62 @@ const AllUpdatesFilter = "rasputin.updates.>"
 // AllUpdateProgressFilter matches both download and install progress for
 // every node. Used by the UI to render per-node progress bars.
 const AllUpdateProgressFilter = "rasputin.node.*.evt.update.>"
+
+// ----- System-wide updates ------------------------------------------------
+
+// SystemUpdateSpec is the spec body the api accepts for a system.update
+// job. The saga plans an ordered list of per-node updates, spawns each as
+// a child node.update job, and rolls up the outcome.
+type SystemUpdateSpec struct {
+	BundleSHA256 string `json:"bundleSha256"`
+	// ExcludeNodes optionally skips specific node ids. Always implicitly
+	// includes the api's own self node id (RASPUTIN_SELF_NODE_ID) — the
+	// operator updates that one manually after the cascade.
+	ExcludeNodes []string `json:"excludeNodes,omitempty"`
+}
+
+// SystemUpdateChangeType enumerates lifecycle events the api publishes on
+// rasputin.updates.system.<parentJobId>.<change>.
+type SystemUpdateChangeType string
+
+const (
+	SystemUpdatePlanned       SystemUpdateChangeType = "planned"
+	SystemUpdateNodeStarted   SystemUpdateChangeType = "node_started"
+	SystemUpdateNodeSucceeded SystemUpdateChangeType = "node_succeeded"
+	SystemUpdateNodeFailed    SystemUpdateChangeType = "node_failed"
+	SystemUpdateCompleted     SystemUpdateChangeType = "completed"
+	SystemUpdateAborted       SystemUpdateChangeType = "aborted"
+)
+
+// SystemUpdateChangeEvt is the payload published on each lifecycle
+// transition. NodeID is empty on planned/completed/aborted; populated on
+// node_*.
+type SystemUpdateChangeEvt struct {
+	ParentJobID string                 `json:"parentJobId"`
+	Change      SystemUpdateChangeType `json:"change"`
+	NodeID      string                 `json:"nodeId,omitempty"`
+	ChildJobID  string                 `json:"childJobId,omitempty"`
+	BundleID    string                 `json:"bundleId,omitempty"`
+	Detail      string                 `json:"detail,omitempty"`
+	// Counts is filled on planned/completed/aborted: total, succeeded, failed.
+	Counts *SystemUpdateCounts `json:"counts,omitempty"`
+	Ts     time.Time           `json:"ts"`
+}
+
+// SystemUpdateCounts is the per-cascade rollup carried on the planned and
+// terminal change events.
+type SystemUpdateCounts struct {
+	Total     int `json:"total"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+	Skipped   int `json:"skipped"`
+}
+
+// SystemUpdateChangeSubject returns the publish subject for a system-update
+// lifecycle change. parentJobID is the system.update job id.
+func SystemUpdateChangeSubject(parentJobID string, change SystemUpdateChangeType) string {
+	return fmt.Sprintf("rasputin.updates.system.%s.%s", parentJobID, string(change))
+}
+
+// AllSystemUpdatesFilter matches every system-update change event.
+const AllSystemUpdatesFilter = "rasputin.updates.system.>"

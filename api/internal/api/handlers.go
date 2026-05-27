@@ -35,8 +35,20 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, j)
 }
 
-// GET /api/jobs?limit=50
+// GET /api/jobs?limit=50&parentId=<id>
+// parentId, if set, returns only the children of that job (ordered by
+// created_at ascending). Without it, returns the most-recent N jobs of
+// any kind.
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	if parentID := r.URL.Query().Get("parentId"); parentID != "" {
+		children, err := s.store.ListChildJobs(r.Context(), parentID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, children)
+		return
+	}
 	limit := atoiOr(r.URL.Query().Get("limit"), 50)
 	jobs, err := s.store.ListJobs(r.Context(), limit)
 	if err != nil {

@@ -184,6 +184,33 @@ func (s *Server) handleDeleteBundle(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// POST /api/updates/system
+// Body: { "bundleSha256": "...", "excludeNodes": ["..."] }
+// Kicks off a system.update saga that cascades node.update children in a
+// safe role-ordered sequence (firewall last). The api's own self-node id
+// (RASPUTIN_SELF_NODE_ID) is always excluded.
+func (s *Server) handleCreateSystemUpdate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BundleSHA256 string   `json:"bundleSha256"`
+		ExcludeNodes []string `json:"excludeNodes,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.BundleSHA256 == "" {
+		writeError(w, http.StatusBadRequest, "bundleSha256 is required")
+		return
+	}
+	spec, _ := json.Marshal(req)
+	j, err := s.runner.Submit(r.Context(), "system.update", spec, creator(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, j)
+}
+
 // POST /api/updates
 // Body: { "nodeId": "...", "bundleSha256": "..." }
 func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {

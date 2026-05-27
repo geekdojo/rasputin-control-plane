@@ -14,6 +14,7 @@ import type {
   Node,
   NodeUpdate,
   PortForwardSpec,
+  SystemUpdateChangeEvent,
   UpdateChangeEvent,
 } from './types';
 
@@ -253,6 +254,37 @@ export function openUpdatesWS(
   onEvent: (ev: UpdateChangeEvent) => void,
 ): () => void {
   return openWS<UpdateChangeEvent>('/ws/updates', onEvent);
+}
+
+// createSystemUpdate kicks off a system.update saga. Returns the parent
+// job; per-node child jobs are spawned by the saga and visible at
+// /api/jobs?parentId=<parent.id>.
+export function createSystemUpdate(input: {
+  bundleSha256: string;
+  excludeNodes?: string[];
+}): Promise<Job> {
+  return jsonFetch<Job>('/api/updates/system', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+// listChildJobs returns the children of a given parent job (used for the
+// system update per-node rollup).
+export async function listChildJobs(parentId: string): Promise<Job[]> {
+  return (
+    (await jsonFetch<Job[] | null>(
+      `/api/jobs?parentId=${encodeURIComponent(parentId)}`,
+    )) ?? []
+  );
+}
+
+// openSystemUpdatesWS subscribes to system-wide update lifecycle events.
+export function openSystemUpdatesWS(
+  onEvent: (ev: SystemUpdateChangeEvent) => void,
+): () => void {
+  return openWS<SystemUpdateChangeEvent>('/ws/updates/system', onEvent);
 }
 
 // ----- WebSocket plumbing -------------------------------------------------

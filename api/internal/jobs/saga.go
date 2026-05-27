@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -75,6 +76,21 @@ func (r *Runner) Register(w Workflow) {
 // returned Job is the initial persisted state; callers should not assume it
 // reflects later step progress (use GetJob for that).
 func (r *Runner) Submit(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
+	return r.submit(ctx, kind, spec, createdBy, "")
+}
+
+// SubmitChild creates a new Job whose parent_id is set to parentID. The
+// child runs in its own goroutine independently of the parent; the parent
+// saga is expected to await terminal status via NATS or by polling the
+// store. Used by orchestrating sagas like system.update.
+func (r *Runner) SubmitChild(ctx context.Context, kind string, spec json.RawMessage, createdBy, parentID string) (*Job, error) {
+	if parentID == "" {
+		return nil, errors.New("SubmitChild requires a parentID; call Submit for a root job")
+	}
+	return r.submit(ctx, kind, spec, createdBy, parentID)
+}
+
+func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, createdBy, parentID string) (*Job, error) {
 	r.mu.RLock()
 	wf, ok := r.workflows[kind]
 	r.mu.RUnlock()
@@ -89,6 +105,9 @@ func (r *Runner) Submit(ctx context.Context, kind string, spec json.RawMessage, 
 		Status:    StatusQueued,
 		CreatedBy: createdBy,
 		CreatedAt: time.Now().UTC(),
+	}
+	if parentID != "" {
+		j.ParentID = &parentID
 	}
 	if err := r.store.CreateJob(ctx, j); err != nil {
 		return nil, fmt.Errorf("create job: %w", err)

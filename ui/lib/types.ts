@@ -217,3 +217,31 @@ export interface UpdateChangeEvent {
   reason?: string;
   ts: string;
 }
+
+// ----- System update -----------------------------------------------------
+
+export type SystemUpdateChange =
+  | 'planned'
+  | 'node_started'
+  | 'node_succeeded'
+  | 'node_failed'
+  | 'completed'
+  | 'aborted';
+
+export interface SystemUpdateCounts {
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface SystemUpdateChangeEvent {
+  parentJobId: string;
+  change: SystemUpdateChange;
+  nodeId?: string;
+  childJobId?: string;
+  bundleId?: string;
+  detail?: string;
+  counts?: SystemUpdateCounts;
+  ts: string;
+}

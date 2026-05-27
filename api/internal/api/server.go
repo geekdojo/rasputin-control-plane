@@ -106,6 +106,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bundles/{sha}", s.handleGetBundle) // unauthenticated
 	mux.HandleFunc("DELETE /api/bundles/{sha}", reqd(s.handleDeleteBundle))
 	mux.HandleFunc("POST /api/updates", reqd(s.handleCreateUpdate))
+	mux.HandleFunc("POST /api/updates/system", reqd(s.handleCreateSystemUpdate))
 	mux.HandleFunc("GET /api/updates", reqd(s.handleListUpdates))
 
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
@@ -113,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ws/firewall", reqd(s.bridgeSubject(proto.AllFirewallChangesFilter)))
 	mux.HandleFunc("GET /ws/apps", reqd(s.bridgeSubject(proto.AllAppsFilter)))
 	mux.HandleFunc("GET /ws/updates", reqd(s.bridgeSubject(proto.AllUpdatesFilter)))
+	mux.HandleFunc("GET /ws/updates/system", reqd(s.bridgeSubject(proto.AllSystemUpdatesFilter)))
 
 	return withCORS(mux)
 }

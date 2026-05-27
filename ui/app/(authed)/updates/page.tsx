@@ -2,16 +2,21 @@
 
 import { useEffect, useState } from 'react';
 import {
+  createSystemUpdate,
   createUpdate,
   deleteBundle,
   listBundles,
+  listChildJobs,
+  listJobs,
   listNodes,
   listUpdates,
+  openSystemUpdatesWS,
   openUpdatesWS,
   uploadBundle,
 } from '../../../lib/api';
 import type {
   Bundle,
+  Job,
   Node,
   NodeUpdate,
   UpdateChangeEvent,
@@ -22,17 +27,26 @@ export default function UpdatesPage() {
   const [trustConfigured, setTrustConfigured] = useState(true);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [history, setHistory] = useState<NodeUpdate[]>([]);
+  const [systemJobs, setSystemJobs] = useState<Job[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [recent, setRecent] = useState<UpdateChangeEvent[]>([]);
 
   useEffect(() => {
     refresh();
-    const close = openUpdatesWS((ev) => {
+    const closePerNode = openUpdatesWS((ev) => {
       setRecent((prev) => [ev, ...prev].slice(0, 20));
       // Any lifecycle event might change history — refetch.
       listUpdates().then(setHistory).catch(() => {});
     });
-    return close;
+    const closeSystem = openSystemUpdatesWS(() => {
+      // Refetch parent-job list on each system-update lifecycle event so
+      // the rollup view stays current.
+      refreshSystemJobs();
+    });
+    return () => {
+      closePerNode();
+      closeSystem();
+    };
   }, []);
 
   function refresh() {
@@ -44,6 +58,15 @@ export default function UpdatesPage() {
       .catch((e) => setErr(String(e)));
     listNodes().then(setNodes).catch(() => {});
     listUpdates().then(setHistory).catch(() => {});
+    refreshSystemJobs();
+  }
+
+  function refreshSystemJobs() {
+    // List the most-recent jobs and filter for system.update kind. v0 has
+    // no kind filter on the api yet; the slice is small.
+    listJobs(50)
+      .then((all) => setSystemJobs(all.filter((j) => j.kind === 'system.update')))
+      .catch(() => {});
   }
 
   async function handleDeleteBundle(sha: string) {
@@ -118,6 +141,7 @@ export default function UpdatesPage() {
                 </td>
                 <td className="row-actions">
                   <DeployBundleButton bundle={b} nodes={nodes} />
+                  <SystemUpdateButton bundle={b} />
                   <button onClick={() => handleDeleteBundle(b.sha256)}>
                     delete
                   </button>
@@ -131,6 +155,15 @@ export default function UpdatesPage() {
       <UploadBundleForm
         onUploaded={(b) => setBundles((prev) => [b, ...prev])}
       />
+
+      {systemJobs.length > 0 && (
+        <>
+          <h3>System updates</h3>
+          {systemJobs.map((j) => (
+            <SystemUpdateRow key={j.id} job={j} />
+          ))}
+        </>
+      )}
 
       <h3>History</h3>
       {history.length === 0 ? (
@@ -325,6 +358,142 @@ function UploadBundleForm({
       {err && <pre className="err">{err}</pre>}
     </div>
   );
+}
+
+// SystemUpdateButton kicks off a system.update saga that cascades across
+// every online node in role-safe order (firewall last). The api's own
+// self-node is implicitly excluded server-side.
+function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function go() {
+    if (
+      !confirm(
+        `Update every online node to ${bundle.version}? Nodes are updated one at a time in role-safe order (compute → storage → controlplane → firewall). The cascade halts on the first failure.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await createSystemUpdate({ bundleSha256: bundle.sha256 });
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button onClick={go} disabled={busy} title="Cascade this bundle across every online node">
+        {busy ? 'starting…' : 'update all'}
+      </button>
+      {err && <span className="err">{err}</span>}
+    </>
+  );
+}
+
+// SystemUpdateRow renders one parent system.update job with its per-node
+// child jobs expanded inline. Refetches children whenever the parent's
+// status changes (driven by the openSystemUpdatesWS refresh on the page).
+function SystemUpdateRow({ job }: { job: Job }) {
+  const [children, setChildren] = useState<Job[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    const fetch = () => {
+      listChildJobs(job.id)
+        .then((kids) => {
+          if (active) setChildren(kids);
+        })
+        .catch(() => {});
+    };
+    fetch();
+    // While the parent is still running, poll every 3s so the rollup
+    // reflects child progress without relying solely on WS refreshes.
+    const t =
+      job.status === 'running' || job.status === 'queued'
+        ? setInterval(fetch, 3000)
+        : null;
+    return () => {
+      active = false;
+      if (t) clearInterval(t);
+    };
+  }, [job.id, job.status]);
+
+  const succeeded = children.filter((c) => c.status === 'succeeded').length;
+  const failed = children.filter(
+    (c) => c.status === 'failed' || c.status === 'cancelled',
+  ).length;
+
+  return (
+    <article className={`system-update system-update-${job.status}`}>
+      <header>
+        <span className={`status status-${job.status}`}>{job.status}</span>
+        <span className="hint">
+          <code>{job.id.slice(0, 12)}</code> ·{' '}
+          {new Date(job.createdAt).toLocaleString()}
+        </span>
+        <span className="hint">
+          {succeeded} succeeded · {failed} failed · {children.length} total
+        </span>
+      </header>
+      {job.error && <pre className="err">{job.error}</pre>}
+      {children.length > 0 && (
+        <table>
+          <thead>
+            <tr>
+              <th>Node</th>
+              <th>Status</th>
+              <th>Started</th>
+              <th>Finished</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {children.map((c) => (
+              <tr key={c.id}>
+                <td>
+                  <code>{extractNodeId(c.spec)}</code>
+                </td>
+                <td>
+                  <span className={`status status-${c.status}`}>{c.status}</span>
+                </td>
+                <td>
+                  {c.startedAt
+                    ? new Date(c.startedAt).toLocaleTimeString()
+                    : '—'}
+                </td>
+                <td>
+                  {c.finishedAt
+                    ? new Date(c.finishedAt).toLocaleTimeString()
+                    : '—'}
+                </td>
+                <td className="hint">{c.error || ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </article>
+  );
+}
+
+// extractNodeId pulls nodeId off a job's spec when present (node.update
+// children have it). Returns empty string for jobs without a nodeId.
+function extractNodeId(spec: unknown): string {
+  if (
+    spec &&
+    typeof spec === 'object' &&
+    'nodeId' in (spec as Record<string, unknown>) &&
+    typeof (spec as Record<string, unknown>).nodeId === 'string'
+  ) {
+    return (spec as Record<string, string>).nodeId;
+  }
+  return '';
 }
 
 function prettyStatus(s: NodeUpdate['status']): string {

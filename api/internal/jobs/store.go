@@ -50,11 +50,37 @@ func fromNullMillis(n sql.NullInt64) *time.Time {
 // ----- Jobs ---------------------------------------------------------------
 
 func (s *Store) CreateJob(ctx context.Context, j *Job) error {
+	var parent any
+	if j.ParentID != nil && *j.ParentID != "" {
+		parent = *j.ParentID
+	}
 	_, err := s.db.ExecContext(ctx, `
-        INSERT INTO jobs (id, kind, spec, status, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)`,
-		j.ID, j.Kind, string(j.Spec), string(j.Status), j.CreatedBy, tsMillis(j.CreatedAt))
+        INSERT INTO jobs (id, kind, spec, status, created_by, created_at, parent_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		j.ID, j.Kind, string(j.Spec), string(j.Status), j.CreatedBy, tsMillis(j.CreatedAt), parent)
 	return err
+}
+
+// ListChildJobs returns every job whose parent_id matches parentID, ordered
+// by creation time ascending. Used by the api's GET /api/jobs?parentId
+// filter and by the system update UI for the per-node rollup view.
+func (s *Store) ListChildJobs(ctx context.Context, parentID string) ([]*Job, error) {
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, kind, spec, status, created_by, created_at, started_at, finished_at, parent_id, error
+        FROM jobs WHERE parent_id = ? ORDER BY created_at ASC`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Job
+	for rows.Next() {
+		j, err := scanJob(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) MarkJobStarted(ctx context.Context, id string, ts time.Time) error {

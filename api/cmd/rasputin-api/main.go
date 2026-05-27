@@ -114,6 +114,9 @@ func main() {
 	// Public URL the agent uses to fetch bundles. In dev the api is at
 	// :8080; in production this is the api's tailnet hostname.
 	publicBaseURL := envOr("RASPUTIN_PUBLIC_BASE_URL", "http://localhost:8080")
+	// The api's own node id — the system.update saga skips this one (the
+	// operator updates the controlplane node manually after the cascade).
+	selfNodeID := os.Getenv("RASPUTIN_SELF_NODE_ID")
 
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
@@ -137,6 +140,9 @@ func main() {
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
 		PublicBaseURL: publicBaseURL,
+	}))
+	runner.Register(updater.SystemUpdateWorkflow(updaterStore, invStore, jobStore, runner, busSrv.Conn(), updater.SystemUpdateConfig{
+		SelfNodeID: selfNodeID,
 	}))
 
 	// Abort any jobs left in-flight from a previous run before we expose
