@@ -1,13 +1,19 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import {
+  bmcPower,
   createJob,
+  getBMCStatus,
   getMetrics,
   listNodes,
+  openBMCWS,
   openInventoryWS,
 } from '../../lib/api';
 import type {
+  BMCPowerState,
+  BMCPowerVerb,
   InventoryChangeEvent,
   MetricSeries,
   Node,
@@ -146,7 +152,81 @@ function NodeCard({ node, now }: { node: Node; now: number }) {
         </button>
         {err && <span className="err">{err}</span>}
       </div>
+      <BMCControls nodeId={node.id} />
     </article>
+  );
+}
+
+// BMCControls renders the power controls and console link. Lives below the
+// OS-level Reboot button on each node card. Power verbs go through the
+// bmc.power saga; the console opens a new page.
+//
+// Distinction from the OS-level Reboot button: that button asks the agent
+// (the live OS) to reboot itself politely. BMC operations work even when
+// the OS is unresponsive — they're the recovery surface, not the everyday
+// one.
+function BMCControls({ nodeId }: { nodeId: string }) {
+  const [state, setState] = useState<BMCPowerState>('unknown');
+  const [busy, setBusy] = useState<BMCPowerVerb | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getBMCStatus(nodeId)
+      .then((s) => {
+        if (active) setState(s.powerState);
+      })
+      .catch(() => {});
+    const close = openBMCWS((ev) => {
+      if (ev.targetNodeId !== nodeId) return;
+      if (ev.state) setState(ev.state);
+    });
+    return () => {
+      active = false;
+      close();
+    };
+  }, [nodeId]);
+
+  async function go(verb: BMCPowerVerb) {
+    if (verb === 'off' || verb === 'cycle' || verb === 'reset') {
+      if (!confirm(`BMC ${verb} on ${nodeId}? This is a hardware-level operation.`)) return;
+    }
+    setBusy(verb);
+    setErr(null);
+    try {
+      await bmcPower(nodeId, verb);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="card-bmc">
+      <div className="bmc-power-pill">
+        <span className="hint">BMC:</span>
+        <span className={`status bmc-state-${state}`}>{state}</span>
+      </div>
+      <div className="card-actions card-actions-bmc">
+        <button onClick={() => go('on')} disabled={busy !== null} title="BMC power on">
+          {busy === 'on' ? '…' : 'On'}
+        </button>
+        <button onClick={() => go('off')} disabled={busy !== null} title="BMC power off (hard)">
+          {busy === 'off' ? '…' : 'Off'}
+        </button>
+        <button onClick={() => go('cycle')} disabled={busy !== null} title="BMC power cycle">
+          {busy === 'cycle' ? '…' : 'Cycle'}
+        </button>
+        <button onClick={() => go('reset')} disabled={busy !== null} title="BMC hard reset">
+          {busy === 'reset' ? '…' : 'Reset'}
+        </button>
+        <Link className="bmc-console-link" href={`/console/${encodeURIComponent(nodeId)}`}>
+          Console
+        </Link>
+      </div>
+      {err && <span className="err">{err}</span>}
+    </div>
   );
 }
 

@@ -5,6 +5,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -27,6 +28,8 @@ type Server struct {
 	updaterVerifier *updater.Verifier
 	bundleDir       string
 	mesh            *mesh.Service
+	bmc             *bmc.Service
+	bmcSessions     *bmc.SessionManager
 	auth            *auth.Service
 	nc              *nats.Conn
 }
@@ -46,13 +49,16 @@ func NewServer(
 	updaterVerifier *updater.Verifier,
 	bundleDir string,
 	meshSvc *mesh.Service,
+	bmcSvc *bmc.Service,
 	authSvc *auth.Service,
 	nc *nats.Conn,
 ) *Server {
 	return &Server{
 		store: store, runner: runner, inv: inv, fw: fw, apps: appsStore,
 		metrics: mtr, updater: updaterStore, updaterVerifier: updaterVerifier,
-		bundleDir: bundleDir, mesh: meshSvc, auth: authSvc, nc: nc,
+		bundleDir: bundleDir, mesh: meshSvc,
+		bmc: bmcSvc, bmcSessions: bmc.NewSessionManager(bmcSvc),
+		auth: authSvc, nc: nc,
 	}
 }
 
@@ -125,6 +131,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/mesh/reconcile", reqd(s.handleMeshReconcile))
 	mux.HandleFunc("POST /api/mesh/enroll/{nodeId}", reqd(s.handleMeshEnrollNode))
 
+	mux.HandleFunc("GET /api/bmc", reqd(s.handleListBMCStates))
+	mux.HandleFunc("GET /api/bmc/{nodeId}/status", reqd(s.handleBMCStatus))
+	mux.HandleFunc("POST /api/bmc/{nodeId}/power/{verb}", reqd(s.handleBMCPower))
+	mux.HandleFunc("GET /ws/bmc/{nodeId}/sol", reqd(s.handleBMCSOL))
+
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
 	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
 	mux.HandleFunc("GET /ws/firewall", reqd(s.bridgeSubject(proto.AllFirewallChangesFilter)))
@@ -132,6 +143,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ws/updates", reqd(s.bridgeSubject(proto.AllUpdatesFilter)))
 	mux.HandleFunc("GET /ws/updates/system", reqd(s.bridgeSubject(proto.AllSystemUpdatesFilter)))
 	mux.HandleFunc("GET /ws/mesh", reqd(s.bridgeSubject(proto.AllMeshChangesFilter)))
+	mux.HandleFunc("GET /ws/bmc", reqd(s.bridgeSubject(proto.AllBMCChangesFilter)))
 
 	return withCORS(mux)
 }

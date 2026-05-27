@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
@@ -213,6 +214,30 @@ func main() {
 			}
 		}()
 		log.Printf("rasputin-agent: tailscale backend=%s", tsBackend.Name())
+	}
+
+	// BMC handlers — registered on the BMC host. In MVS that's the
+	// controlplane node; override with RASPUTIN_BMC_HOST=1 to host BMC on
+	// any agent (useful for testing on dev compute agents). v0 only ships
+	// a mock backend; the real I²C/IPMI/Redfish wiring lands with chassis
+	// hardware.
+	if role == proto.RoleControlPlane || os.Getenv("RASPUTIN_BMC_HOST") == "1" {
+		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
+			filepath.Join("./agent-state", nodeID))
+		backend, err := bmc.NewMockBackend(filepath.Join(stateDir, "bmc"))
+		if err != nil {
+			log.Fatalf("rasputin-agent: bmc mock backend: %v", err)
+		}
+		bmcSubs, err := bmc.RegisterHandlers(nc, nodeID, backend)
+		if err != nil {
+			log.Fatalf("rasputin-agent: register bmc handlers: %v", err)
+		}
+		defer func() {
+			for _, sub := range bmcSubs {
+				_ = sub.Unsubscribe()
+			}
+		}()
+		log.Printf("rasputin-agent: bmc backend=%s (host)", backend.Name())
 	}
 
 	go runHeartbeats(ctx, nc, nodeID)

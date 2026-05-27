@@ -325,3 +325,34 @@ export interface MeshChangeEvent {
   tailnetId?: string;
   ts: string;
 }
+
+// ----- BMC ----------------------------------------------------------------
+
+export type BMCPowerVerb = 'on' | 'off' | 'cycle' | 'reset' | 'status';
+export type BMCPowerState = 'on' | 'off' | 'unknown';
+
+export interface BMCState {
+  targetNodeId: string;
+  powerState: BMCPowerState;
+  lastCmd?: string;
+  lastCmdAt?: string;
+  lastCmdResult?: string;
+  updatedAt: string;
+}
+
+export type BMCChange =
+  | 'powered_on'
+  | 'powered_off'
+  | 'cycled'
+  | 'reset_sent'
+  | 'sol_opened'
+  | 'sol_closed';
+
+export interface BMCChangeEvent {
+  targetNodeId: string;
+  change: BMCChange;
+  state?: BMCPowerState;
+  sessionId?: string;
+  detail?: string;
+  ts: string;
+}

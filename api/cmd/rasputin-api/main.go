@@ -15,6 +15,7 @@ import (
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -102,6 +103,12 @@ func main() {
 	}
 	defer meshStore.Close()
 
+	bmcStore, err := bmc.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: bmc store: %v", err)
+	}
+	defer bmcStore.Close()
+
 	// Mesh subsystem: v0 ships a file-backed mock Headscale client. Real
 	// Docker container supervision lands when we have a controlplane node
 	// with Docker installed (Phase 2). See wiki design/control-plane/mesh.md.
@@ -145,6 +152,11 @@ func main() {
 	// The api's own node id — the system.update saga skips this one (the
 	// operator updates the controlplane node manually after the cascade).
 	selfNodeID := os.Getenv("RASPUTIN_SELF_NODE_ID")
+	// The BMC host's node id — the node whose agent owns the BMC bus and
+	// receives bmc.* commands. Defaults to selfNodeID (the controlplane in
+	// MVS); override via RASPUTIN_BMC_HOST_NODE_ID for split-brain layouts.
+	bmcHostNodeID := envOr("RASPUTIN_BMC_HOST_NODE_ID", selfNodeID)
+	bmcSvc := bmc.NewService(bmc.Config{HostNodeID: bmcHostNodeID}, bmcStore, busSrv.Conn())
 
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
@@ -176,6 +188,7 @@ func main() {
 	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
+	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
 
 	// Abort any jobs left in-flight from a previous run before we expose
 	// HTTP. v0 policy is honest-failure, not resume — see saga.go.
@@ -210,7 +223,7 @@ func main() {
 	sched.Start(ctx)
 	defer sched.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, meshSvc, authSvc, busSrv.Conn())
+	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, meshSvc, bmcSvc, authSvc, busSrv.Conn())
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),

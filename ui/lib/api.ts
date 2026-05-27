@@ -1,6 +1,9 @@
 import type {
   App,
   AppChangeEvent,
+  BMCChangeEvent,
+  BMCPowerVerb,
+  BMCState,
   Bundle,
   BundleList,
   FirewallChangeEvent,
@@ -389,6 +392,39 @@ export function openMeshWS(
   onEvent: (ev: MeshChangeEvent) => void,
 ): () => void {
   return openWS<MeshChangeEvent>('/ws/mesh', onEvent);
+}
+
+// ----- BMC ----------------------------------------------------------------
+
+export async function listBMCStates(): Promise<BMCState[]> {
+  return (await jsonFetch<BMCState[] | null>('/api/bmc')) ?? [];
+}
+
+export async function getBMCStatus(nodeId: string): Promise<BMCState> {
+  return jsonFetch<BMCState>(
+    `/api/bmc/${encodeURIComponent(nodeId)}/status`,
+  );
+}
+
+// bmcPower kicks off a bmc.power job for the given target + verb.
+// Verb 'status' is a read-only refresh that updates the persisted state.
+export function bmcPower(nodeId: string, verb: BMCPowerVerb): Promise<Job> {
+  return jsonFetch<Job>(
+    `/api/bmc/${encodeURIComponent(nodeId)}/power/${verb}`,
+    { method: 'POST' },
+  );
+}
+
+export function openBMCWS(
+  onEvent: (ev: BMCChangeEvent) => void,
+): () => void {
+  return openWS<BMCChangeEvent>('/ws/bmc', onEvent);
+}
+
+// bmcSOLURL returns the absolute ws:// or wss:// URL for the SOL endpoint.
+// Used by the console page to construct a WebSocket directly.
+export function bmcSOLURL(nodeId: string): string {
+  return wsURL(`/ws/bmc/${encodeURIComponent(nodeId)}/sol`);
 }
 
 // ----- WebSocket plumbing -------------------------------------------------
