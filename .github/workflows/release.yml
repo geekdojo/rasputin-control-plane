@@ -1,0 +1,74 @@
+name: release
+
+# Publishes the statically-linked control-plane binaries that the OS-image
+# pipeline (rasputin-os) vendors. See os-images/buildroot-os.md §5.
+#
+# Binaries are pure-Go (CGO_ENABLED=0), so one build per GOARCH yields a
+# libc-independent static ELF that runs on the Buildroot OS *and* OpenWrt.
+#
+# Triggers:
+#   - push of a v* tag (e.g. v0.1.0)  → publish a Release with that version
+#   - manual dispatch with a version  → dry-run / ad-hoc build
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without leading v (e.g. 0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write   # create the release + upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          # cache keyed on the workspace go.sum files
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="${{ inputs.version }}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building version $V"
+
+      - name: Build release artifacts
+        run: ./scripts/build-release.sh "${{ steps.ver.outputs.version }}"
+
+      # Tag push → publish a GitHub Release with the tarballs + checksums.
+      # rasputin-os fetches these from
+      #   .../releases/download/v<version>/rasputin-<comp>-<version>-linux-<arch>.tar.gz
+      - name: Publish release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Rasputin control plane ${GITHUB_REF_NAME}" \
+            --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
+            dist/*.tar.gz dist/*.sha256 dist/*.hash
+
+      # Manual dispatch → just keep the artifacts for inspection.
+      - name: Upload artifacts (dispatch dry-run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.ver.outputs.version }}
+          path: dist/

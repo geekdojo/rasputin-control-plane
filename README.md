@@ -23,7 +23,34 @@ go build ./api/... ./agent/...
 cd ui && npm install && npm run dev
 ```
 
+## Releases
+
+The OS-image pipeline ([`rasputin-os`](https://github.com/geekdojo/rasputin-os))
+vendors pre-built `rasputin-agent` and `rasputin-api` binaries from this
+repo's GitHub Releases. They're pure-Go (`modernc.org/sqlite`, embedded
+NATS — no cgo), so `CGO_ENABLED=0` yields **fully static, libc-independent**
+ELF binaries: the same `linux-amd64` agent runs on the Buildroot OS *and*
+on the OpenWrt firewall (no separate musl build needed).
+
+```sh
+# build locally (dist/ is gitignored)
+scripts/build-release.sh 0.1.0
+# → dist/rasputin-{agent,api}-0.1.0-linux-{amd64,arm64}.tar.gz (+ .sha256, + .hash)
+
+# cut a real release: push a v-tag, CI builds + publishes the assets
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` runs the same script on a `v*` tag and
+attaches the tarballs + checksums to a GitHub Release. rasputin-os fetches
+them by the `.hash` (Buildroot download verification).
+
+> **Not yet bundled:** the web UI. The api binary ships without the built
+> Next.js assets — production UI serving from the api is the next gap to
+> close before an image is genuinely usable on a node.
+
 ## See also
 
 - Architecture: `projects/rasputin/design/control-plane/architecture.md` in the geekdojo-wiki.
+- OS images / release pipeline: `projects/rasputin/design/os-images/` in the geekdojo-wiki.
 - Project-level context: `Claude.md` in the parent `rasputin/` folder.
