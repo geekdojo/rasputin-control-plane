@@ -70,7 +70,20 @@ export default function LoginPage() {
   if (!status) {
     return (
       <main>
-        <p className="hint">Loading…</p>
+        <header>
+          <h1>Rasputin</h1>
+        </header>
+        {err ? (
+          <>
+            <p className="hint warn">
+              Couldn&apos;t reach the api. Is <code>rasputin-api</code>{' '}
+              running on <code>localhost:8080</code>?
+            </p>
+            <pre className="err">{err}</pre>
+          </>
+        ) : (
+          <p className="hint">Loading…</p>
+        )}
       </main>
     );
   }
