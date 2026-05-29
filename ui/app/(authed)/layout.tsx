@@ -6,6 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { getSetupState, listJobs, listNodes } from '../../lib/api';
 import { getMe, logout, type CurrentUser } from '../../lib/auth';
 import type { Node, SetupState } from '../../lib/types';
+import { HudBackground } from '../../components/HudBackground';
 import { SideNav } from '../../components/SideNav';
 import { TopBar } from '../../components/TopBar';
 import { ACCENT, accentA, MONO } from '../../components/ui-theme';
@@ -86,19 +87,25 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
         overflow: 'hidden',
       }}
     >
-      <TopBar
-        clusterName={setup?.installName ?? ''}
-        nodesOnline={online}
-        nodesTotal={nodes.length}
-        alerts={alerts}
-        tasksRunning={tasksRunning}
-        user={user.displayName}
-        onLogout={handleLogout}
-      />
+      <HudBackground />
+
+      <div style={{ position: 'relative', zIndex: 1, flexShrink: 0 }}>
+        <TopBar
+          clusterName={setup?.installName ?? ''}
+          nodesOnline={online}
+          nodesTotal={nodes.length}
+          alerts={alerts}
+          tasksRunning={tasksRunning}
+          user={user.displayName}
+          onLogout={handleLogout}
+        />
+      </div>
 
       {setup && !setup.completed && pathname !== '/setup' && (
         <div
           style={{
+            position: 'relative',
+            zIndex: 1,
             display: 'flex',
             alignItems: 'center',
             gap: 12,
@@ -117,7 +124,7 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
         </div>
       )}
 
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <div style={{ position: 'relative', zIndex: 1, flex: 1, display: 'flex', overflow: 'hidden' }}>
         <SideNav />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           {children}
