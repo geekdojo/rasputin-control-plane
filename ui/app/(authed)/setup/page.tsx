@@ -1,19 +1,13 @@
 'use client';
 
+import { Check, Circle, Rocket } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  completeSetup,
-  getSetupState,
-  setInstallName,
-  setupEnrollSelf,
-} from '../../../lib/api';
+import { completeSetup, getSetupState, setInstallName, setupEnrollSelf } from '../../../lib/api';
 import type { SetupState, SetupStep } from '../../../lib/types';
+import { Badge, Btn, DIM, FG, HAIR, Input, PageBody, PageHeader, PageShell, PANEL } from '../../../components/kit';
+import { ACCENT, MONO } from '../../../components/ui-theme';
 
-// First-run wizard. Step state is derived live from the api — see
-// /api/setup/state. The wizard is idempotent and re-runnable; revisiting
-// /setup any time after completion shows the same state with all steps
-// already ticked.
 export default function SetupPage() {
   const router = useRouter();
   const [state, setState] = useState<SetupState | null>(null);
@@ -49,9 +43,6 @@ export default function SetupPage() {
     setErr(null);
     try {
       await setupEnrollSelf();
-      // Poll once for state to update — the job is async; in mock mode
-      // it completes in <1s. A real Headscale enroll can take longer; the
-      // operator can just refresh the page.
       setTimeout(refresh, 1500);
     } catch (e) {
       setErr(String(e));
@@ -74,73 +65,52 @@ export default function SetupPage() {
     }
   }
 
-  if (!state) {
-    return (
-      <section className="setup-section">
-        <h2>Setup</h2>
-        <p className="hint">Loading…</p>
-        {err && <pre className="err">{err}</pre>}
-      </section>
-    );
-  }
-
-  const requiredDone = state.steps.every((s) => !s.required || s.done);
+  const requiredDone = state ? state.steps.every((s) => !s.required || s.done) : false;
 
   return (
-    <section className="setup-section">
-      <h2>First-run setup</h2>
-      <p className="hint">
-        Walks through the steps needed to make your Rasputin useful. Each
-        step is derived from the live system — re-visit any time to make
-        changes.
-      </p>
+    <PageShell>
+      <PageHeader icon={Rocket} title="FIRST-RUN SETUP" />
+      <PageBody>
+        <p style={{ color: DIM, fontSize: 11, fontFamily: MONO, lineHeight: 1.6, marginTop: 0, marginBottom: 18, maxWidth: 640 }}>
+          Steps to make your Rasputin useful. Each is derived live from the system — revisit any time to make changes.
+        </p>
 
-      {err && <pre className="err">{err}</pre>}
+        {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 14 }}>{err}</div>}
 
-      <ol className="setup-steps">
-        {state.steps.map((step) => (
-          <StepCard
-            key={step.id}
-            step={step}
-            state={state}
-            busy={busy}
-            onSaveName={handleSaveName}
-            onEnroll={handleEnroll}
-          />
-        ))}
-      </ol>
-
-      <div className="setup-finish">
-        {state.completed ? (
-          <p className="hint">
-            ✓ Setup completed{' '}
-            {state.completedAt
-              ? new Date(state.completedAt).toLocaleString()
-              : ''}
-            .
-          </p>
+        {!state ? (
+          <p style={{ color: DIM, fontSize: 11, fontFamily: MONO }}>LOADING…</p>
         ) : (
-          <button
-            className="primary"
-            disabled={!requiredDone || busy !== null}
-            onClick={handleComplete}
-            title={
-              !requiredDone
-                ? 'Finish the required steps first'
-                : 'Mark setup complete and continue'
-            }
-          >
-            {busy === 'complete' ? 'finishing…' : 'Finish setup & continue'}
-          </button>
+          <>
+            <ol style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 640 }}>
+              {state.steps.map((step) => (
+                <StepCard key={step.id} step={step} state={state} busy={busy} onSaveName={handleSaveName} onEnroll={handleEnroll} />
+              ))}
+            </ol>
+
+            <div style={{ marginTop: 20, maxWidth: 640 }}>
+              {state.completed ? (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: '#4ade80', fontSize: 11, fontFamily: MONO }}>
+                  <Check size={13} color="#4ade80" /> SETUP COMPLETE
+                  {state.completedAt ? ` · ${new Date(state.completedAt).toLocaleString()}` : ''}
+                </span>
+              ) : (
+                <Btn
+                  variant="primary"
+                  disabled={!requiredDone || busy !== null}
+                  onClick={handleComplete}
+                  title={!requiredDone ? 'Finish the required steps first' : 'Mark setup complete and continue'}
+                >
+                  {busy === 'complete' ? 'FINISHING…' : 'FINISH SETUP & CONTINUE'}
+                </Btn>
+              )}
+            </div>
+          </>
         )}
-      </div>
-    </section>
+      </PageBody>
+    </PageShell>
   );
 }
 
-// StepCard renders one step. The body varies by step.id — most are
-// informational ("here's the state of this thing"); two have inline
-// actions (install_name has a form, remote_access has a button).
 function StepCard({
   step,
   state,
@@ -155,24 +125,39 @@ function StepCard({
   onEnroll: () => void;
 }) {
   return (
-    <li className={`setup-step ${step.done ? 'done' : 'pending'}`}>
-      <div className="setup-step-head">
-        <span className="setup-step-mark">{step.done ? '✓' : '○'}</span>
-        <h3>{step.title}</h3>
+    <li
+      style={{
+        background: PANEL,
+        border: `1px solid ${step.done ? 'rgba(74,222,128,0.25)' : HAIR}`,
+        padding: '14px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {step.done ? <Check size={14} color="#4ade80" /> : <Circle size={14} color={ACCENT} />}
+        <span style={{ color: FG, fontSize: 12, fontFamily: MONO, letterSpacing: '0.04em' }}>{step.title}</span>
         {step.required && !step.done && (
-          <span className="setup-required">required</span>
+          <span style={{ marginLeft: 'auto' }}>
+            <Badge color="#facc15">REQUIRED</Badge>
+          </span>
         )}
       </div>
-      {step.detail && <p className="hint">{step.detail}</p>}
-      <StepBody
-        step={step}
-        state={state}
-        busy={busy}
-        onSaveName={onSaveName}
-        onEnroll={onEnroll}
-      />
+      {step.detail && <p style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{step.detail}</p>}
+      <StepBody step={step} state={state} busy={busy} onSaveName={onSaveName} onEnroll={onEnroll} />
     </li>
   );
+}
+
+function Hint({ children, warn = false }: { children: React.ReactNode; warn?: boolean }) {
+  return (
+    <p style={{ color: warn ? '#facc15' : DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{children}</p>
+  );
+}
+
+function Mono({ children }: { children: React.ReactNode }) {
+  return <span style={{ color: FG }}>{children}</span>;
 }
 
 function StepBody({
@@ -191,46 +176,37 @@ function StepBody({
   switch (step.id) {
     case 'passkey':
       return step.done ? (
-        <p className="hint">An operator passkey is registered.</p>
+        <Hint>An operator passkey is registered.</Hint>
       ) : (
-        <p className="hint">
-          Visit <a href="/login">/login</a> to register the first passkey,
-          then come back here.
-        </p>
+        <Hint>
+          Visit <Mono>/login</Mono> to register the first passkey, then come back here.
+        </Hint>
       );
     case 'install_name':
       return <InstallNameForm state={state} busy={busy} onSave={onSaveName} />;
     case 'remote_access':
       return state.selfNodeId === '' ? (
-        <p className="hint warn">
-          <code>RASPUTIN_SELF_NODE_ID</code> is not set on the api process.
-          Set it in your environment (the node id this api represents in
-          inventory) and restart — then this step can run.
-        </p>
+        <Hint warn>
+          <Mono>RASPUTIN_SELF_NODE_ID</Mono> is not set on the api process. Set it (the node id this api represents in inventory) and restart — then this step can run.
+        </Hint>
       ) : step.done ? (
-        <p className="hint">
-          This node is enrolled in the mesh as{' '}
-          <code>{state.selfNodeId}</code>.
-        </p>
+        <Hint>
+          This node is enrolled in the mesh as <Mono>{state.selfNodeId}</Mono>.
+        </Hint>
       ) : (
-        <button onClick={onEnroll} disabled={busy === 'remote_access'}>
-          {busy === 'remote_access'
-            ? 'enrolling…'
-            : `Enroll ${state.selfNodeId} in mesh`}
-        </button>
+        <div>
+          <Btn disabled={busy === 'remote_access'} onClick={onEnroll}>
+            {busy === 'remote_access' ? 'ENROLLING…' : `ENROLL ${state.selfNodeId.toUpperCase()} IN MESH`}
+          </Btn>
+        </div>
       );
     case 'trust':
       return step.done ? (
-        <p className="hint">
-          Root CA is loaded; bundle signatures will be verified.
-        </p>
+        <Hint>Root CA is loaded; bundle signatures will be verified.</Hint>
       ) : (
-        <p className="hint warn">
-          No <code>data/trust/root-ca.pem</code>. Run{' '}
-          <code>./scripts/pki-init.sh</code> in the repo, then copy the
-          generated <code>root-ca.pem</code> into <code>data/trust/</code>{' '}
-          on the api host and restart.
-        </p>
+        <Hint warn>
+          No <Mono>data/trust/root-ca.pem</Mono>. Run <Mono>./scripts/pki-init.sh</Mono>, copy the generated <Mono>root-ca.pem</Mono> into <Mono>data/trust/</Mono> on the api host, and restart.
+        </Hint>
       );
     default:
       return null;
@@ -247,8 +223,6 @@ function InstallNameForm({
   onSave: (name: string) => void;
 }) {
   const [name, setName] = useState(state.installName);
-  // Keep local state in sync if the api state changes underneath us
-  // (e.g. another tab edited it).
   useEffect(() => setName(state.installName), [state.installName]);
 
   function submit(e: React.FormEvent) {
@@ -257,16 +231,17 @@ function InstallNameForm({
   }
 
   return (
-    <form className="setup-name-form" onSubmit={submit}>
-      <input
+    <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
+      <Input
         placeholder="rasputin-bryce"
         value={name}
         onChange={(e) => setName(e.target.value)}
         disabled={busy === 'install_name'}
+        style={{ flex: 1, maxWidth: 280 }}
       />
-      <button type="submit" disabled={busy === 'install_name' || !name.trim()}>
-        {busy === 'install_name' ? 'saving…' : 'save'}
-      </button>
+      <Btn type="submit" variant="primary" disabled={busy === 'install_name' || !name.trim()}>
+        {busy === 'install_name' ? 'SAVING…' : 'SAVE'}
+      </Btn>
     </form>
   );
 }

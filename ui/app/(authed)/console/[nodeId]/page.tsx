@@ -1,39 +1,41 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { ArrowLeft, Terminal } from 'lucide-react';
 import Link from 'next/link';
+import { useParams } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
 import { bmcSOLURL } from '../../../../lib/api';
+import { Badge, Btn, DIM, HAIR, Input, PageHeader, PageShell } from '../../../../components/kit';
+import { MONO } from '../../../../components/ui-theme';
 
-// SOL console page. v0 uses a simple `<pre>` with autoscroll — no xterm.js.
-// Sufficient for mock-mode dev where output is line-oriented; we'll swap
-// in xterm.js when we wire to a real serial port and need ANSI handling.
-//
-// Input mode: the page captures a small text-input field below the output
-// pane. Each line submitted is sent over the WS as the bytes typed. Most
-// SOL sessions on Linux nodes are character-oriented; line-oriented input
-// is good enough for the operator to issue commands. xterm.js + raw-mode
-// keypress capture is the v1 upgrade.
+type ConnState = 'connecting' | 'open' | 'closed' | 'error';
+
+const CONN_COLOR: Record<ConnState, string> = {
+  connecting: '#facc15',
+  open: '#4ade80',
+  closed: 'rgba(148,163,184,0.6)',
+  error: '#f87171',
+};
+
+// SOL console (v0): a simple autoscrolling <pre>, line-oriented input. xterm.js
+// + raw keypress capture is the v1 upgrade when wired to a real serial port.
 export default function ConsolePage() {
   const params = useParams<{ nodeId: string }>();
   const nodeId = decodeURIComponent(params.nodeId);
   const [lines, setLines] = useState<string[]>([]);
-  const [connected, setConnected] = useState<'connecting' | 'open' | 'closed' | 'error'>('connecting');
+  const [connected, setConnected] = useState<ConnState>('connecting');
   const [input, setInput] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
   const paneRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
-    const url = bmcSOLURL(nodeId);
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(bmcSOLURL(nodeId));
     wsRef.current = ws;
     ws.onopen = () => setConnected('open');
     ws.onmessage = (ev) => {
       setLines((prev) => {
         const next = [...prev, typeof ev.data === 'string' ? ev.data : ''];
-        // Cap retained scrollback so the DOM doesn't grow unbounded.
-        if (next.length > 2000) return next.slice(next.length - 2000);
-        return next;
+        return next.length > 2000 ? next.slice(next.length - 2000) : next;
       });
     };
     ws.onerror = () => setConnected('error');
@@ -47,7 +49,6 @@ export default function ConsolePage() {
     };
   }, [nodeId]);
 
-  // Autoscroll on new output. Skipped if the user has scrolled up to read.
   useEffect(() => {
     const el = paneRef.current;
     if (!el) return;
@@ -64,39 +65,61 @@ export default function ConsolePage() {
   }
 
   return (
-    <section className="console-section">
-      <header className="console-header">
-        <h2>
-          Serial console · <code>{nodeId}</code>
-        </h2>
-        <span className={`status sol-${connected}`}>{connected}</span>
-        <Link href="/" className="console-back">
-          ← Nodes
-        </Link>
-      </header>
-      <pre ref={paneRef} className="console-pane">
-        {lines.join('')}
-      </pre>
-      <form className="console-input" onSubmit={sendLine}>
-        <input
-          autoFocus
-          placeholder={
-            connected === 'open'
-              ? 'type a line and press Enter'
-              : 'waiting for connection…'
-          }
-          value={input}
-          disabled={connected !== 'open'}
-          onChange={(e) => setInput(e.target.value)}
-        />
-        <button type="submit" disabled={connected !== 'open'}>
-          send
-        </button>
-      </form>
-      <p className="hint">
-        v0 mock backend emits a banner + uptime line every 2 s and echoes
-        typed input. Real BMC wiring lands with chassis hardware.
-      </p>
-    </section>
+    <PageShell>
+      <PageHeader
+        icon={Terminal}
+        title={`SERIAL CONSOLE · ${nodeId.toUpperCase()}`}
+        right={
+          <>
+            <Badge color={CONN_COLOR[connected]}>{connected.toUpperCase()}</Badge>
+            <Link href="/" style={{ textDecoration: 'none' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: DIM, fontSize: 10, letterSpacing: '0.08em' }}>
+                <ArrowLeft size={12} color={DIM} /> NODES
+              </span>
+            </Link>
+          </>
+        }
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: '14px 20px', gap: 10 }}>
+        <pre
+          ref={paneRef}
+          style={{
+            flex: 1,
+            margin: 0,
+            overflowY: 'auto',
+            background: '#060c16',
+            border: `1px solid ${HAIR}`,
+            color: '#cdd6e4',
+            fontSize: 11,
+            fontFamily: MONO,
+            lineHeight: 1.55,
+            padding: '12px 14px',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {lines.join('')}
+        </pre>
+
+        <form onSubmit={sendLine} style={{ display: 'flex', gap: 8 }}>
+          <Input
+            autoFocus
+            value={input}
+            disabled={connected !== 'open'}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={connected === 'open' ? 'type a line and press Enter' : 'waiting for connection…'}
+            style={{ flex: 1 }}
+          />
+          <Btn type="submit" variant="primary" disabled={connected !== 'open'}>
+            SEND
+          </Btn>
+        </form>
+
+        <p style={{ color: DIM, fontSize: 10, fontFamily: MONO, margin: 0, opacity: 0.7 }}>
+          v0 mock backend emits a banner + uptime line every 2s and echoes typed input. Real BMC wiring lands with chassis hardware.
+        </p>
+      </div>
+    </PageShell>
   );
 }

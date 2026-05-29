@@ -3,16 +3,10 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSetupState } from '../../lib/api';
-import {
-  getStatus,
-  loginWithPasskey,
-  registerPasskey,
-  type AuthStatus,
-} from '../../lib/auth';
+import { getStatus, loginWithPasskey, registerPasskey, type AuthStatus } from '../../lib/auth';
+import { Btn, DIM, FG, HAIR, Input, PANEL } from '../../components/kit';
+import { MONO } from '../../components/ui-theme';
 
-// postAuthDestination returns "/setup" if the wizard isn't complete,
-// otherwise "/". Used after both registration and sign-in. Failures fall
-// through to "/" — the auth layout's setup banner will still nudge them.
 async function postAuthDestination(): Promise<string> {
   try {
     const s = await getSetupState();
@@ -57,8 +51,6 @@ export default function LoginPage() {
     setErr(null);
     try {
       await registerPasskey(name, displayName || name);
-      // First registration always lands on /setup so the operator
-      // doesn't miss the rest of the wizard.
       router.replace('/setup');
     } catch (e) {
       setErr(humanError(e));
@@ -67,89 +59,98 @@ export default function LoginPage() {
     }
   }
 
-  if (!status) {
-    return (
-      <main>
-        <header>
-          <h1>Rasputin</h1>
-        </header>
-        {err ? (
-          <>
-            <p className="hint warn">
-              Couldn&apos;t reach the api. Is <code>rasputin-api</code>{' '}
-              running on <code>localhost:8080</code>?
-            </p>
-            <pre className="err">{err}</pre>
-          </>
-        ) : (
-          <p className="hint">Loading…</p>
-        )}
-      </main>
-    );
-  }
-
   return (
-    <main>
-      <header>
-        <h1>Rasputin</h1>
-        <p className="sub">
-          {status.hasUsers
-            ? 'Sign in with your passkey'
-            : 'Welcome — set up the first user'}
-        </p>
-      </header>
+    <div
+      style={{
+        minHeight: '100vh',
+        background: '#07101f',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: MONO,
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          width: 360,
+          maxWidth: '100%',
+          background: PANEL,
+          border: `1px solid ${HAIR}`,
+          padding: '28px 26px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 18,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#4ade80', boxShadow: '0 0 6px #4ade80' }} />
+          <span style={{ color: FG, fontSize: 13, letterSpacing: '0.18em' }}>RASPUTIN</span>
+        </div>
 
-      <section className="auth-form">
-        {!status.hasUsers ? (
-          <>
-            <label>
-              <span>
-                User name <small>letters · digits · - _ .</small>
-              </span>
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="bryce"
-                autoFocus
-                disabled={busy}
-              />
-            </label>
-            <label>
-              <span>
-                Display name <small>optional</small>
-              </span>
-              <input
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="Bryce"
-                disabled={busy}
-              />
-            </label>
-            <button
-              className="primary"
-              onClick={handleRegister}
-              disabled={busy || !name}
-            >
-              {busy ? 'Registering…' : 'Register passkey'}
-            </button>
-          </>
+        {!status ? (
+          err ? (
+            <>
+              <p style={{ color: '#facc15', fontSize: 11, lineHeight: 1.6, margin: 0 }}>
+                Couldn&apos;t reach the api. Is rasputin-api running on localhost:8080?
+              </p>
+              <ErrLine>{err}</ErrLine>
+            </>
+          ) : (
+            <p style={{ color: DIM, fontSize: 11, letterSpacing: '0.08em', margin: 0 }}>CONNECTING…</p>
+          )
         ) : (
           <>
-            <p>Use your passkey to continue.</p>
-            <button className="primary" onClick={handleLogin} disabled={busy}>
-              {busy ? 'Authenticating…' : 'Sign in with passkey'}
-            </button>
+            <p style={{ color: DIM, fontSize: 11, lineHeight: 1.6, margin: 0 }}>
+              {status.hasUsers ? 'Sign in with your passkey.' : 'Welcome — set up the first operator.'}
+            </p>
+
+            {!status.hasUsers ? (
+              <>
+                <Field label="USER NAME" hint="letters · digits · - _ .">
+                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="bryce" autoFocus disabled={busy} />
+                </Field>
+                <Field label="DISPLAY NAME" hint="optional">
+                  <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Bryce" disabled={busy} />
+                </Field>
+                <Btn variant="primary" disabled={busy || !name} onClick={handleRegister}>
+                  {busy ? 'REGISTERING…' : 'REGISTER PASSKEY'}
+                </Btn>
+              </>
+            ) : (
+              <Btn variant="primary" disabled={busy} onClick={handleLogin}>
+                {busy ? 'AUTHENTICATING…' : 'SIGN IN WITH PASSKEY'}
+              </Btn>
+            )}
+
+            {err && <ErrLine>{err}</ErrLine>}
           </>
         )}
-        {err && <pre className="err">{err}</pre>}
-      </section>
-    </main>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      <span style={{ color: DIM, fontSize: 9, letterSpacing: '0.1em' }}>
+        {label}
+        {hint && <span style={{ color: 'rgba(138,155,181,0.5)', marginLeft: 8 }}>{hint}</span>}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+function ErrLine({ children }: { children: React.ReactNode }) {
+  return (
+    <pre style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{children}</pre>
   );
 }
 
 function humanError(e: unknown): string {
   const s = String(e);
-  // WebAuthn API errors are noisy; strip the wrapper and report the cause.
   if (s.includes('NotAllowedError')) return 'Cancelled or denied by the authenticator.';
   if (s.includes('InvalidStateError')) return 'A credential already exists on this device for this account.';
   return s;

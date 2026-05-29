@@ -83,6 +83,23 @@
   }
 }
 
+/* Shared bits for the ported design (inline-styled screens reference these). */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.rasp-field:focus {
+  border-color: var(--primary);
+  outline: none;
+}
+.rasp-field::placeholder {
+  color: rgba(138, 155, 181, 0.5);
+}
+
 /* ===========================================================================
  * LEGACY (pre-redesign) styles — removed route-by-route during migration.
  * ======================================================================== */
