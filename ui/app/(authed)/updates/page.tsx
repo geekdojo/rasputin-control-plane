@@ -1,5 +1,6 @@
 'use client';
 
+import { Trash2, UploadCloud, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   createSystemUpdate,
@@ -14,13 +15,60 @@ import {
   openUpdatesWS,
   uploadBundle,
 } from '../../../lib/api';
-import type {
-  Bundle,
-  Job,
-  Node,
-  NodeUpdate,
-  UpdateChangeEvent,
-} from '../../../lib/types';
+import type { Bundle, Job, JobStatus, Node, NodeUpdate, NodeUpdateStatus, UpdateChangeEvent } from '../../../lib/types';
+import {
+  Badge,
+  Btn,
+  DIM,
+  FG,
+  HAIR,
+  Hint,
+  PageBody,
+  PageHeader,
+  PageShell,
+  PANEL,
+  Select,
+  SectionLabel,
+  Tok,
+  fieldStyle,
+  tdStyle,
+  thStyle,
+} from '../../../components/kit';
+import { ACCENT, accentA, MONO } from '../../../components/ui-theme';
+
+function nodeUpdateColor(s: NodeUpdateStatus): string {
+  switch (s) {
+    case 'committed':
+      return '#4ade80';
+    case 'rolled_back':
+      return '#facc15';
+    case 'failed':
+      return '#f87171';
+    default:
+      return ACCENT; // in_progress
+  }
+}
+
+function jobColor(s: JobStatus): string {
+  switch (s) {
+    case 'succeeded':
+      return '#4ade80';
+    case 'failed':
+      return '#f87171';
+    case 'running':
+      return ACCENT;
+    default:
+      return DIM;
+  }
+}
+
+function changeColor(change: string): string {
+  if (change === 'committed') return '#4ade80';
+  if (change === 'rolled_back') return '#facc15';
+  if (change === 'failed') return '#f87171';
+  if (change === 'started') return ACCENT;
+  return DIM;
+}
 
 export default function UpdatesPage() {
   const [bundles, setBundles] = useState<Bundle[]>([]);
@@ -35,18 +83,14 @@ export default function UpdatesPage() {
     refresh();
     const closePerNode = openUpdatesWS((ev) => {
       setRecent((prev) => [ev, ...prev].slice(0, 20));
-      // Any lifecycle event might change history — refetch.
       listUpdates().then(setHistory).catch(() => {});
     });
-    const closeSystem = openSystemUpdatesWS(() => {
-      // Refetch parent-job list on each system-update lifecycle event so
-      // the rollup view stays current.
-      refreshSystemJobs();
-    });
+    const closeSystem = openSystemUpdatesWS(() => refreshSystemJobs());
     return () => {
       closePerNode();
       closeSystem();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function refresh() {
@@ -62,8 +106,6 @@ export default function UpdatesPage() {
   }
 
   function refreshSystemJobs() {
-    // List the most-recent jobs and filter for system.update kind. v0 has
-    // no kind filter on the api yet; the slice is small.
     listJobs(50)
       .then((all) => setSystemJobs(all.filter((j) => j.kind === 'system.update')))
       .catch(() => {});
@@ -80,192 +122,143 @@ export default function UpdatesPage() {
   }
 
   return (
-    <section className="updates-section">
-      <h2>Updates</h2>
+    <PageShell>
+      <PageHeader icon={Zap} title="UPDATES" />
+      <PageBody>
+        {!trustConfigured && (
+          <Hint warn style={{ marginBottom: 14 }}>
+            ⚠ No root CA configured at <Tok>data/trust/root-ca.pem</Tok>. Bundle signatures will not be verified — run{' '}
+            <Tok>./scripts/pki-init.sh</Tok> and copy <Tok>root-ca.pem</Tok> into the trust dir.
+          </Hint>
+        )}
+        {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
 
-      {!trustConfigured && (
-        <p className="hint warn">
-          ⚠ No root CA is configured at <code>data/trust/root-ca.pem</code>.
-          Bundle signatures will not be verified. Run{' '}
-          <code>./scripts/pki-init.sh</code> and copy <code>root-ca.pem</code>{' '}
-          into the trust dir.
-        </p>
-      )}
-
-      {err && <pre className="err">{err}</pre>}
-
-      <h3>Bundles</h3>
-      {bundles.length === 0 ? (
-        <p className="hint">
-          no bundles uploaded yet — build one with{' '}
-          <code>scripts/build-bundle.sh</code> and upload below
-        </p>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Version</th>
-              <th>Arch</th>
-              <th>Compat</th>
-              <th>Size</th>
-              <th>Signed by</th>
-              <th>Uploaded</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {bundles.map((b) => (
-              <tr key={b.sha256}>
-                <td>
-                  <strong>{b.version}</strong>
-                  {b.description && (
-                    <span className="hint"> · {b.description}</span>
-                  )}
-                </td>
-                <td>
-                  <code>{b.architecture}</code>
-                </td>
-                <td>
-                  <code>{b.compatible}</code>
-                </td>
-                <td>{formatBytes(b.sizeBytes)}</td>
-                <td>
-                  {b.signedBy === '<unverified>' ? (
-                    <span className="hint warn">unverified</span>
-                  ) : (
-                    <code>{b.signedBy || '—'}</code>
-                  )}
-                </td>
-                <td title={b.sha256}>
-                  {new Date(b.uploadedAt).toLocaleString()}
-                </td>
-                <td className="row-actions">
-                  <DeployBundleButton bundle={b} nodes={nodes} />
-                  <SystemUpdateButton bundle={b} />
-                  <button onClick={() => handleDeleteBundle(b.sha256)}>
-                    delete
-                  </button>
-                </td>
+        <SectionLabel>BUNDLES</SectionLabel>
+        {bundles.length === 0 ? (
+          <Hint style={{ marginBottom: 18 }}>
+            no bundles uploaded yet — build one with <Tok>scripts/build-bundle.sh</Tok> and upload below
+          </Hint>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 18 }}>
+            <thead>
+              <tr>
+                {['VERSION', 'ARCH', 'COMPAT', 'SIZE', 'SIGNED BY', 'UPLOADED', ''].map((c, i) => (
+                  <th key={c || i} style={thStyle}>
+                    {c}
+                  </th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+            </thead>
+            <tbody>
+              {bundles.map((b) => (
+                <tr key={b.sha256}>
+                  <td style={{ ...tdStyle, color: FG }}>
+                    {b.version}
+                    {b.description && <span style={{ color: DIM, fontSize: 9, marginLeft: 8 }}>· {b.description}</span>}
+                  </td>
+                  <td style={{ ...tdStyle, color: DIM }}>{b.architecture}</td>
+                  <td style={{ ...tdStyle, color: DIM }}>{b.compatible}</td>
+                  <td style={{ ...tdStyle, color: DIM }}>{formatBytes(b.sizeBytes)}</td>
+                  <td style={tdStyle}>
+                    {b.signedBy === '<unverified>' ? (
+                      <Badge color="#facc15">UNVERIFIED</Badge>
+                    ) : (
+                      <span style={{ color: DIM }}>{b.signedBy || '—'}</span>
+                    )}
+                  </td>
+                  <td style={{ ...tdStyle, color: DIM }} title={b.sha256}>
+                    {new Date(b.uploadedAt).toLocaleString()}
+                  </td>
+                  <td style={{ ...tdStyle, paddingRight: 0 }}>
+                    <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                      <DeployBundleButton bundle={b} nodes={nodes} />
+                      <SystemUpdateButton bundle={b} />
+                      <Btn variant="danger" small onClick={() => handleDeleteBundle(b.sha256)}>
+                        <Trash2 size={10} /> DELETE
+                      </Btn>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
 
-      <UploadBundleForm
-        onUploaded={(b) => setBundles((prev) => [b, ...prev])}
-      />
+        <UploadBundleForm onUploaded={(b) => setBundles((prev) => [b, ...prev])} />
 
-      {systemJobs.length > 0 && (
-        <>
-          <h3>System updates</h3>
-          {systemJobs.map((j) => (
-            <SystemUpdateRow key={j.id} job={j} />
-          ))}
-        </>
-      )}
+        {systemJobs.length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <SectionLabel>SYSTEM UPDATES</SectionLabel>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {systemJobs.map((j) => (
+                <SystemUpdateRow key={j.id} job={j} />
+              ))}
+            </div>
+          </div>
+        )}
 
-      <h3>History</h3>
-      {history.length === 0 ? (
-        <p className="hint">no update history yet</p>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Node</th>
-              <th>Version</th>
-              <th>Slot</th>
-              <th>Status</th>
-              <th>Started</th>
-              <th>Finished</th>
-              <th>Notes</th>
-            </tr>
-          </thead>
-          <tbody>
-            {history.map((h) => (
-              <tr key={h.jobId} className={`update-row update-${h.status}`}>
-                <td>
-                  <code>{h.nodeId}</code>
-                </td>
-                <td>
-                  {h.fromVersion ? (
-                    <>
-                      <code>{h.fromVersion}</code> →{' '}
-                      <code>{h.toVersion}</code>
-                    </>
-                  ) : (
-                    <code>{h.toVersion}</code>
-                  )}
-                </td>
-                <td>
-                  {h.fromSlot !== 'unknown' && (
-                    <>
-                      <code>{h.fromSlot}</code> → <code>{h.toSlot}</code>
-                    </>
-                  )}
-                </td>
-                <td>
-                  <span className={`status update-status-${h.status}`}>
-                    {prettyStatus(h.status)}
-                  </span>
-                </td>
-                <td>{new Date(h.startedAt).toLocaleTimeString()}</td>
-                <td>
-                  {h.finishedAt
-                    ? new Date(h.finishedAt).toLocaleTimeString()
-                    : '—'}
-                </td>
-                <td className="hint">{h.error || ''}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+        <div style={{ marginTop: 24 }}>
+          <SectionLabel>HISTORY</SectionLabel>
+          {history.length === 0 ? (
+            <Hint>no update history yet</Hint>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  {['NODE', 'VERSION', 'SLOT', 'STATUS', 'STARTED', 'FINISHED', 'NOTES'].map((c) => (
+                    <th key={c} style={thStyle}>
+                      {c}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((h) => (
+                  <tr key={h.jobId}>
+                    <td style={{ ...tdStyle, color: FG }}>{h.nodeId}</td>
+                    <td style={{ ...tdStyle, color: DIM }}>
+                      {h.fromVersion ? `${h.fromVersion} → ${h.toVersion}` : h.toVersion}
+                    </td>
+                    <td style={{ ...tdStyle, color: DIM }}>{h.fromSlot !== 'unknown' ? `${h.fromSlot} → ${h.toSlot}` : '—'}</td>
+                    <td style={tdStyle}>
+                      <Badge color={nodeUpdateColor(h.status)}>{prettyStatus(h.status)}</Badge>
+                    </td>
+                    <td style={{ ...tdStyle, color: DIM }}>{new Date(h.startedAt).toLocaleTimeString()}</td>
+                    <td style={{ ...tdStyle, color: DIM }}>{h.finishedAt ? new Date(h.finishedAt).toLocaleTimeString() : '—'}</td>
+                    <td style={{ ...tdStyle, color: DIM, paddingRight: 0 }}>{h.error || ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
 
-      {recent.length > 0 && (
-        <>
-          <h3>Live events</h3>
-          <ul className="event-feed">
-            {recent.map((ev, i) => (
-              <li key={i}>
-                <code>{ev.nodeId}</code>{' '}
-                <span className={`status update-status-${ev.change}`}>
-                  {ev.change}
-                </span>
-                {ev.version && (
-                  <>
-                    {' '}· <code>{ev.version}</code>
-                  </>
-                )}
-                {ev.reason && <span className="hint"> — {ev.reason}</span>}
-                <span className="hint">
-                  {' '}
-                  · {new Date(ev.ts).toLocaleTimeString()}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-    </section>
+        {recent.length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <SectionLabel>LIVE EVENTS</SectionLabel>
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {recent.map((ev, i) => (
+                <li key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 10, fontFamily: MONO }}>
+                  <span style={{ color: FG }}>{ev.nodeId}</span>
+                  <Badge color={changeColor(ev.change)}>{ev.change}</Badge>
+                  {ev.version && <span style={{ color: DIM }}>{ev.version}</span>}
+                  {ev.reason && <span style={{ color: DIM }}>— {ev.reason}</span>}
+                  <span style={{ color: DIM, marginLeft: 'auto' }}>{new Date(ev.ts).toLocaleTimeString()}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </PageBody>
+    </PageShell>
   );
 }
 
-function DeployBundleButton({
-  bundle,
-  nodes,
-}: {
-  bundle: Bundle;
-  nodes: Node[];
-}) {
+function DeployBundleButton({ bundle, nodes }: { bundle: Bundle; nodes: Node[] }) {
   const [open, setOpen] = useState(false);
   const [nodeId, setNodeId] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-
-  // Targets: anything online matching the bundle's arch. v0 doesn't
-  // record per-node arch yet, so we show all online nodes and let the
-  // operator pick.
   const targets = nodes.filter((n) => n.status === 'online');
 
   async function start() {
@@ -287,46 +280,34 @@ function DeployBundleButton({
 
   if (!open) {
     return (
-      <button
-        onClick={() => setOpen(true)}
-        disabled={targets.length === 0}
-        title={
-          targets.length === 0 ? 'no online nodes' : 'apply bundle to node'
-        }
-      >
-        deploy
-      </button>
+      <Btn variant="primary" small disabled={targets.length === 0} title={targets.length === 0 ? 'no online nodes' : 'apply bundle to node'} onClick={() => setOpen(true)}>
+        <UploadCloud size={10} /> DEPLOY
+      </Btn>
     );
   }
 
   return (
-    <span className="inline-form">
-      <select
-        value={nodeId}
-        onChange={(e) => setNodeId(e.target.value)}
-        autoFocus
-      >
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <Select value={nodeId} onChange={(e) => setNodeId(e.target.value)} autoFocus style={{ fontSize: 10, padding: '4px 6px' }}>
         <option value="">— pick node —</option>
         {targets.map((n) => (
           <option key={n.id} value={n.id}>
             {n.id} ({n.role})
           </option>
         ))}
-      </select>
-      <button onClick={start} disabled={busy || !nodeId}>
-        {busy ? 'starting…' : 'go'}
-      </button>
-      <button onClick={() => setOpen(false)}>cancel</button>
-      {err && <span className="err">{err}</span>}
+      </Select>
+      <Btn variant="primary" small disabled={busy || !nodeId} onClick={start}>
+        {busy ? '…' : 'GO'}
+      </Btn>
+      <Btn small onClick={() => setOpen(false)}>
+        CANCEL
+      </Btn>
+      {err && <span style={{ color: '#f87171', fontSize: 9 }}>{err}</span>}
     </span>
   );
 }
 
-function UploadBundleForm({
-  onUploaded,
-}: {
-  onUploaded: (b: Bundle) => void;
-}) {
+function UploadBundleForm({ onUploaded }: { onUploaded: (b: Bundle) => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -336,8 +317,7 @@ function UploadBundleForm({
     setBusy(true);
     setErr(null);
     try {
-      const b = await uploadBundle(file);
-      onUploaded(b);
+      onUploaded(await uploadBundle(file));
     } catch (e2) {
       setErr(String(e2));
     } finally {
@@ -347,22 +327,35 @@ function UploadBundleForm({
   }
 
   return (
-    <div className="add-intent">
-      <h4>Upload bundle</h4>
-      <p className="hint">
-        produce a <code>.raspbundle</code> with{' '}
-        <code>scripts/build-bundle.sh</code>, then upload it here
-      </p>
-      <input type="file" onChange={handle} disabled={busy} />
-      {busy && <span className="hint"> uploading…</span>}
-      {err && <pre className="err">{err}</pre>}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <Hint>
+        produce a <Tok>.raspbundle</Tok> with <Tok>scripts/build-bundle.sh</Tok>, then upload it
+      </Hint>
+      <label
+        style={{
+          ...fieldStyle,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          width: 'fit-content',
+          color: ACCENT,
+          border: `1px solid ${accentA(0.35)}`,
+          background: accentA(0.08),
+          fontSize: 10,
+          letterSpacing: '0.08em',
+          cursor: busy ? 'not-allowed' : 'pointer',
+          opacity: busy ? 0.5 : 1,
+        }}
+      >
+        <UploadCloud size={11} />
+        {busy ? 'UPLOADING…' : 'UPLOAD BUNDLE'}
+        <input type="file" onChange={handle} disabled={busy} style={{ display: 'none' }} />
+      </label>
+      {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
     </div>
   );
 }
 
-// SystemUpdateButton kicks off a system.update saga that cascades across
-// every online node in role-safe order (firewall last). The api's own
-// self-node is implicitly excluded server-side.
 function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -370,11 +363,10 @@ function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
   async function go() {
     if (
       !confirm(
-        `Update every online node to ${bundle.version}? Nodes are updated one at a time in role-safe order (compute → storage → controlplane → firewall). The cascade halts on the first failure.`,
+        `Update every online node to ${bundle.version}? Nodes update one at a time in role-safe order (compute → storage → controlplane → firewall). The cascade halts on the first failure.`,
       )
-    ) {
+    )
       return;
-    }
     setBusy(true);
     setErr(null);
     try {
@@ -388,36 +380,22 @@ function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
 
   return (
     <>
-      <button onClick={go} disabled={busy} title="Cascade this bundle across every online node">
-        {busy ? 'starting…' : 'update all'}
-      </button>
-      {err && <span className="err">{err}</span>}
+      <Btn small disabled={busy} title="Cascade this bundle across every online node" onClick={go}>
+        {busy ? '…' : 'UPDATE ALL'}
+      </Btn>
+      {err && <span style={{ color: '#f87171', fontSize: 9 }}>{err}</span>}
     </>
   );
 }
 
-// SystemUpdateRow renders one parent system.update job with its per-node
-// child jobs expanded inline. Refetches children whenever the parent's
-// status changes (driven by the openSystemUpdatesWS refresh on the page).
 function SystemUpdateRow({ job }: { job: Job }) {
   const [children, setChildren] = useState<Job[]>([]);
 
   useEffect(() => {
     let active = true;
-    const fetch = () => {
-      listChildJobs(job.id)
-        .then((kids) => {
-          if (active) setChildren(kids);
-        })
-        .catch(() => {});
-    };
+    const fetch = () => listChildJobs(job.id).then((kids) => active && setChildren(kids)).catch(() => {});
     fetch();
-    // While the parent is still running, poll every 3s so the rollup
-    // reflects child progress without relying solely on WS refreshes.
-    const t =
-      job.status === 'running' || job.status === 'queued'
-        ? setInterval(fetch, 3000)
-        : null;
+    const t = job.status === 'running' || job.status === 'queued' ? setInterval(fetch, 3000) : null;
     return () => {
       active = false;
       if (t) clearInterval(t);
@@ -425,86 +403,61 @@ function SystemUpdateRow({ job }: { job: Job }) {
   }, [job.id, job.status]);
 
   const succeeded = children.filter((c) => c.status === 'succeeded').length;
-  const failed = children.filter(
-    (c) => c.status === 'failed' || c.status === 'cancelled',
-  ).length;
+  const failed = children.filter((c) => c.status === 'failed' || c.status === 'cancelled').length;
 
   return (
-    <article className={`system-update system-update-${job.status}`}>
-      <header>
-        <span className={`status status-${job.status}`}>{job.status}</span>
-        <span className="hint">
-          <code>{job.id.slice(0, 12)}</code> ·{' '}
-          {new Date(job.createdAt).toLocaleString()}
+    <div style={{ background: PANEL, border: `1px solid ${HAIR}`, padding: '12px 14px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: children.length > 0 ? 10 : 0, flexWrap: 'wrap' }}>
+        <Badge color={jobColor(job.status)}>{job.status.toUpperCase()}</Badge>
+        <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
+          {job.id.slice(0, 12)} · {new Date(job.createdAt).toLocaleString()}
         </span>
-        <span className="hint">
+        <span style={{ color: DIM, fontSize: 9, fontFamily: MONO, marginLeft: 'auto' }}>
           {succeeded} succeeded · {failed} failed · {children.length} total
         </span>
-      </header>
-      {job.error && <pre className="err">{job.error}</pre>}
+      </div>
+      {job.error && <pre style={{ color: '#f87171', fontSize: 9, fontFamily: MONO, margin: '0 0 8px', whiteSpace: 'pre-wrap' }}>{job.error}</pre>}
       {children.length > 0 && (
-        <table>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              <th>Node</th>
-              <th>Status</th>
-              <th>Started</th>
-              <th>Finished</th>
-              <th>Notes</th>
+              {['NODE', 'STATUS', 'STARTED', 'FINISHED', 'NOTES'].map((c) => (
+                <th key={c} style={thStyle}>
+                  {c}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {children.map((c) => (
               <tr key={c.id}>
-                <td>
-                  <code>{extractNodeId(c.spec)}</code>
+                <td style={{ ...tdStyle, color: FG }}>{extractNodeId(c.spec)}</td>
+                <td style={tdStyle}>
+                  <Badge color={jobColor(c.status)}>{c.status.toUpperCase()}</Badge>
                 </td>
-                <td>
-                  <span className={`status status-${c.status}`}>{c.status}</span>
-                </td>
-                <td>
-                  {c.startedAt
-                    ? new Date(c.startedAt).toLocaleTimeString()
-                    : '—'}
-                </td>
-                <td>
-                  {c.finishedAt
-                    ? new Date(c.finishedAt).toLocaleTimeString()
-                    : '—'}
-                </td>
-                <td className="hint">{c.error || ''}</td>
+                <td style={{ ...tdStyle, color: DIM }}>{c.startedAt ? new Date(c.startedAt).toLocaleTimeString() : '—'}</td>
+                <td style={{ ...tdStyle, color: DIM }}>{c.finishedAt ? new Date(c.finishedAt).toLocaleTimeString() : '—'}</td>
+                <td style={{ ...tdStyle, color: DIM, paddingRight: 0 }}>{c.error || ''}</td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
-    </article>
+    </div>
   );
 }
 
-// extractNodeId pulls nodeId off a job's spec when present (node.update
-// children have it). Returns empty string for jobs without a nodeId.
 function extractNodeId(spec: unknown): string {
-  if (
-    spec &&
-    typeof spec === 'object' &&
-    'nodeId' in (spec as Record<string, unknown>) &&
-    typeof (spec as Record<string, unknown>).nodeId === 'string'
-  ) {
+  if (spec && typeof spec === 'object' && 'nodeId' in (spec as Record<string, unknown>) && typeof (spec as Record<string, unknown>).nodeId === 'string') {
     return (spec as Record<string, string>).nodeId;
   }
   return '';
 }
 
-function prettyStatus(s: NodeUpdate['status']): string {
-  switch (s) {
-    case 'in_progress':
-      return 'in progress';
-    case 'rolled_back':
-      return 'rolled back';
-    default:
-      return s;
-  }
+function prettyStatus(s: NodeUpdateStatus): string {
+  if (s === 'in_progress') return 'IN PROGRESS';
+  if (s === 'rolled_back') return 'ROLLED BACK';
+  return s.toUpperCase();
 }
 
 function formatBytes(n: number): string {

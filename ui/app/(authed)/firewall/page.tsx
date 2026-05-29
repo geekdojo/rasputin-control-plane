@@ -1,6 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { ShieldAlert, Trash2 } from 'lucide-react';
+import { useState } from 'react';
+import { useEffect } from 'react';
 import {
   applyFirewall,
   createIntent,
@@ -10,11 +12,26 @@ import {
   openFirewallWS,
   reconcileFirewall,
 } from '../../../lib/api';
-import type {
-  FirewallIntent,
-  FirewallNodeState,
-  PortForwardProto,
-} from '../../../lib/types';
+import type { FirewallIntent, FirewallNodeState, PortForwardProto } from '../../../lib/types';
+import {
+  Badge,
+  Btn,
+  DIM,
+  FG,
+  HAIR,
+  Hint,
+  Input,
+  PageBody,
+  PageHeader,
+  PageShell,
+  PANEL,
+  Select,
+  SectionLabel,
+  Tok,
+  tdStyle,
+  thStyle,
+} from '../../../components/kit';
+import { MONO } from '../../../components/ui-theme';
 
 export default function FirewallPage() {
   const [intents, setIntents] = useState<FirewallIntent[]>([]);
@@ -24,34 +41,20 @@ export default function FirewallPage() {
 
   useEffect(() => {
     refresh();
-    const close = openFirewallWS(() => {
-      listFirewallState().then(setStates).catch(console.error);
-    });
+    const close = openFirewallWS(() => listFirewallState().then(setStates).catch(() => {}));
     return close;
   }, []);
 
   function refresh() {
     listIntents().then(setIntents).catch((e) => setErr(String(e)));
-    listFirewallState().then(setStates).catch(console.error);
+    listFirewallState().then(setStates).catch(() => {});
   }
 
-  async function handleApply() {
-    setBusy('apply');
+  async function act(which: 'apply' | 'reconcile') {
+    setBusy(which);
     setErr(null);
     try {
-      await applyFirewall();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function handleReconcile() {
-    setBusy('reconcile');
-    setErr(null);
-    try {
-      await reconcileFirewall();
+      await (which === 'apply' ? applyFirewall() : reconcileFirewall());
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -70,97 +73,99 @@ export default function FirewallPage() {
   }
 
   return (
-    <section className="firewall-section">
-      <h2>Firewall</h2>
-
-      {states.length === 0 ? (
-        <p className="hint">
-          No firewall-role agent is registered. Start one with{' '}
-          <code>RASPUTIN_NODE_ROLE=firewall</code>.
-        </p>
-      ) : (
-        <div className="firewall-state-bar">
-          {states.map((s) => (
-            <FirewallStateBadge key={s.nodeId} state={s} />
-          ))}
-          <div className="spacer" />
-          <button onClick={handleApply} disabled={busy !== null}>
-            {busy === 'apply' ? 'applying…' : 'Apply'}
-          </button>
-          <button onClick={handleReconcile} disabled={busy !== null}>
-            {busy === 'reconcile' ? 'reconciling…' : 'Reconcile'}
-          </button>
-        </div>
-      )}
-
-      {err && <pre className="err">{err}</pre>}
-
-      <h3>Port forwards</h3>
-      {intents.length === 0 ? (
-        <p className="hint">no intents yet</p>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>WAN port</th>
-              <th>→</th>
-              <th>LAN target</th>
-              <th>Proto</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {intents.map((i) => (
-              <tr key={i.id}>
-                <td>
-                  <strong>{i.name}</strong>
-                  {!i.enabled && <span className="hint"> (disabled)</span>}
-                </td>
-                <td><code>{i.spec.wanPort}</code></td>
-                <td className="arrow">→</td>
-                <td><code>{i.spec.lanHost}:{i.spec.lanPort}</code></td>
-                <td><code>{i.spec.protocol}</code></td>
-                <td className="row-actions">
-                  <button onClick={() => handleDelete(i.id)} title="Delete">
-                    delete
-                  </button>
-                </td>
-              </tr>
+    <PageShell>
+      <PageHeader
+        icon={ShieldAlert}
+        title="FIREWALL"
+        right={
+          states.length > 0 ? (
+            <>
+              <Btn variant="primary" small disabled={busy !== null} onClick={() => act('apply')}>
+                {busy === 'apply' ? 'APPLYING…' : 'APPLY'}
+              </Btn>
+              <Btn small disabled={busy !== null} onClick={() => act('reconcile')}>
+                {busy === 'reconcile' ? 'RECONCILING…' : 'RECONCILE'}
+              </Btn>
+            </>
+          ) : undefined
+        }
+      />
+      <PageBody>
+        {states.length === 0 ? (
+          <Hint style={{ marginBottom: 16 }}>
+            No firewall-role agent is registered. Start one with <Tok>RASPUTIN_NODE_ROLE=firewall</Tok>.
+          </Hint>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 20 }}>
+            {states.map((s) => (
+              <FirewallStateChip key={s.nodeId} state={s} />
             ))}
-          </tbody>
-        </table>
-      )}
+          </div>
+        )}
 
-      <AddPortForwardForm onCreated={(i) => setIntents((p) => [...p, i])} />
-    </section>
+        {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
+
+        <SectionLabel>PORT FORWARDS</SectionLabel>
+        {intents.length === 0 ? (
+          <Hint style={{ marginBottom: 24 }}>no intents yet</Hint>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 24 }}>
+            <thead>
+              <tr>
+                {['NAME', 'WAN PORT', 'LAN TARGET', 'PROTO', ''].map((c, i) => (
+                  <th key={c || i} style={thStyle}>
+                    {c}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {intents.map((i) => (
+                <tr key={i.id}>
+                  <td style={{ ...tdStyle, color: FG }}>
+                    {i.name}
+                    {!i.enabled && <span style={{ color: DIM, marginLeft: 8, fontSize: 9 }}>(disabled)</span>}
+                  </td>
+                  <td style={{ ...tdStyle, color: DIM }}>{i.spec.wanPort}</td>
+                  <td style={{ ...tdStyle, color: DIM }}>
+                    {i.spec.lanHost}:{i.spec.lanPort}
+                  </td>
+                  <td style={{ ...tdStyle, color: DIM }}>{i.spec.protocol}</td>
+                  <td style={{ ...tdStyle, paddingRight: 0 }}>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <Btn variant="danger" small onClick={() => handleDelete(i.id)}>
+                        <Trash2 size={10} /> DELETE
+                      </Btn>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <SectionLabel>ADD PORT FORWARD</SectionLabel>
+        <AddPortForwardForm onCreated={(i) => setIntents((p) => [...p, i])} />
+      </PageBody>
+    </PageShell>
   );
 }
 
-function FirewallStateBadge({ state }: { state: FirewallNodeState }) {
-  const status: 'in-sync' | 'drift' | 'unknown' = state.drift
-    ? 'drift'
-    : state.lastApplied
-    ? 'in-sync'
-    : 'unknown';
+function FirewallStateChip({ state }: { state: FirewallNodeState }) {
+  const status: 'in-sync' | 'drift' | 'unknown' = state.drift ? 'drift' : state.lastApplied ? 'in-sync' : 'unknown';
+  const color = status === 'in-sync' ? '#4ade80' : status === 'drift' ? '#facc15' : DIM;
   return (
-    <div className={`fw-state fw-${status}`}>
-      <span className="fw-state-label">{state.nodeId}</span>
-      <span className="fw-state-pill">{status === 'in-sync' ? 'in sync' : status}</span>
-      <span className="fw-state-meta">
-        {state.lastApplied
-          ? `applied ${new Date(state.lastApplied).toLocaleTimeString()}`
-          : 'never applied'}
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: PANEL, border: `1px solid ${HAIR}` }}>
+      <span style={{ color: FG, fontSize: 10, fontFamily: MONO }}>{state.nodeId}</span>
+      <Badge color={color}>{status === 'in-sync' ? 'IN SYNC' : status.toUpperCase()}</Badge>
+      <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
+        {state.lastApplied ? `applied ${new Date(state.lastApplied).toLocaleTimeString()}` : 'never applied'}
       </span>
     </div>
   );
 }
 
-function AddPortForwardForm({
-  onCreated,
-}: {
-  onCreated: (i: FirewallIntent) => void;
-}) {
+function AddPortForwardForm({ onCreated }: { onCreated: (i: FirewallIntent) => void }) {
   const [name, setName] = useState('');
   const [wanPort, setWanPort] = useState('');
   const [lanHost, setLanHost] = useState('');
@@ -178,12 +183,7 @@ function AddPortForwardForm({
         kind: 'port_forward',
         name,
         enabled: true,
-        spec: {
-          wanPort: Number(wanPort),
-          lanHost,
-          lanPort: Number(lanPort),
-          protocol,
-        },
+        spec: { wanPort: Number(wanPort), lanHost, lanPort: Number(lanPort), protocol },
       });
       onCreated(created);
       setName('');
@@ -199,49 +199,25 @@ function AddPortForwardForm({
   }
 
   return (
-    <form className="add-intent" onSubmit={submit}>
-      <h4>Add port forward</h4>
-      <div className="row">
-        <input
-          placeholder="name (e.g. minecraft)"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          required
-        />
-        <input
-          placeholder="WAN port"
-          value={wanPort}
-          onChange={(e) => setWanPort(e.target.value)}
-          inputMode="numeric"
-          required
-        />
-        <span className="arrow">→</span>
-        <input
-          placeholder="LAN host (10.0.0.50)"
-          value={lanHost}
-          onChange={(e) => setLanHost(e.target.value)}
-          required
-        />
-        <input
-          placeholder="LAN port"
-          value={lanPort}
-          onChange={(e) => setLanPort(e.target.value)}
-          inputMode="numeric"
-          required
-        />
-        <select
-          value={protocol}
-          onChange={(e) => setProtocol(e.target.value as PortForwardProto)}
-        >
+    <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 720 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <Input placeholder="name (e.g. minecraft)" value={name} onChange={(e) => setName(e.target.value)} required style={{ flex: '1 1 160px' }} />
+        <Input placeholder="WAN port" value={wanPort} onChange={(e) => setWanPort(e.target.value)} inputMode="numeric" required style={{ width: 100 }} />
+        <span style={{ color: DIM }}>→</span>
+        <Input placeholder="LAN host (10.0.0.50)" value={lanHost} onChange={(e) => setLanHost(e.target.value)} required style={{ flex: '1 1 160px' }} />
+        <Input placeholder="LAN port" value={lanPort} onChange={(e) => setLanPort(e.target.value)} inputMode="numeric" required style={{ width: 100 }} />
+        <Select value={protocol} onChange={(e) => setProtocol(e.target.value as PortForwardProto)}>
           <option value="tcp">tcp</option>
           <option value="udp">udp</option>
           <option value="tcpudp">tcp+udp</option>
-        </select>
-        <button type="submit" disabled={busy || !name || !wanPort || !lanHost || !lanPort}>
-          {busy ? 'adding…' : 'add'}
-        </button>
+        </Select>
       </div>
-      {err && <pre className="err">{err}</pre>}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <Btn type="submit" variant="primary" disabled={busy || !name || !wanPort || !lanHost || !lanPort}>
+          {busy ? 'ADDING…' : 'ADD FORWARD'}
+        </Btn>
+        {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
+      </div>
     </form>
   );
 }

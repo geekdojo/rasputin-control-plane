@@ -73,6 +73,19 @@ export function SectionLabel({ children, style }: { children: ReactNode; style?:
   );
 }
 
+export function Hint({ children, warn = false, style }: { children: ReactNode; warn?: boolean; style?: CSSProperties }) {
+  return (
+    <p style={{ color: warn ? '#facc15' : DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0, ...style }}>
+      {children}
+    </p>
+  );
+}
+
+// Inline code-ish token for embedding identifiers/paths in hint text.
+export function Tok({ children }: { children: ReactNode }) {
+  return <span style={{ color: FG }}>{children}</span>;
+}
+
 type BtnVariant = 'primary' | 'default' | 'danger' | 'ghost';
 
 const BTN_COLORS: Record<BtnVariant, { border: string; bg: string; hover: string; text: string }> = {
