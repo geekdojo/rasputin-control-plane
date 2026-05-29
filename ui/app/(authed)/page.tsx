@@ -1,296 +1,131 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
-import {
-  bmcPower,
-  createJob,
-  getBMCStatus,
-  getMetrics,
-  listNodes,
-  openBMCWS,
-  openInventoryWS,
-} from '../../lib/api';
-import type {
-  BMCPowerState,
-  BMCPowerVerb,
-  InventoryChangeEvent,
-  MetricSeries,
-  Node,
-} from '../../lib/types';
+import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { listApps, listNodes, getMetrics, openInventoryWS } from '../../lib/api';
+import type { App, InventoryChangeEvent, Node, NodeRole, NodeStatus } from '../../lib/types';
+import { NodeGrid, type NodeView } from '../../components/NodeGrid';
+import { NodeControls } from '../../components/NodeControls';
+import type { NodeViewStatus } from '../../components/ui-theme';
 
-export default function NodesPage() {
-  const [nodes, setNodes] = useState<Node[]>([]);
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    listNodes().then(setNodes).catch(console.error);
-    const close = openInventoryWS((ev) => {
-      setNodes((prev) => applyInventoryEvent(prev, ev));
-    });
-    // The inventory WS only fires on status transitions (online↔stale↔offline),
-    // not on every heartbeat. Without a backstop, a steadily-online node never
-    // sees its lastSeen update and the relative time grows forever. Poll the
-    // list every 15s — cheap for 1–8 nodes — and the WS keeps transitions instant.
-    const refresh = setInterval(() => {
-      listNodes().then(setNodes).catch(() => {});
-    }, 15_000);
-    return () => {
-      close();
-      clearInterval(refresh);
-    };
-  }, []);
-
-  // Tick the "last seen" relative timestamps every second.
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  return (
-    <section className="nodes-section">
-      <h2>Nodes</h2>
-      {nodes.length === 0 ? (
-        <p className="hint">
-          no nodes registered yet — start <code>rasputin-agent</code> and one
-          should appear here within a second
-        </p>
-      ) : (
-        <div className="nodes-grid">
-          {nodes.map((n) => (
-            <NodeCard key={n.id} node={n} now={now} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
+interface Util {
+  cpu: number | null;
+  mem: number | null;
 }
 
-function NodeCard({ node, now }: { node: Node; now: number }) {
-  const lastSeenMs = now - new Date(node.lastSeen).getTime();
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [metrics, setMetrics] = useState<MetricSeries | null>(null);
+const ROLE_SHORT: Record<NodeRole, string> = {
+  controlplane: 'ctrl',
+  firewall: 'fw',
+  compute: 'work',
+  storage: 'stor',
+};
 
-  // Poll metrics every 30s. The current api forwards live metric events on
-  // the bus but no /ws/metrics endpoint exists yet, so polling drives the
-  // sparkline window for now.
+function viewStatus(s: NodeStatus): NodeViewStatus {
+  if (s === 'online') return 'online';
+  if (s === 'offline') return 'offline';
+  return 'warning'; // stale → warning
+}
+
+function shortId(n: Node): string {
+  const raw = n.id;
+  return raw.length > 10 ? raw.slice(0, 9) + '…' : raw;
+}
+
+export default function NodesPage() {
+  const router = useRouter();
+  const [nodes, setNodes] = useState<Node[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [util, setUtil] = useState<Record<string, Util>>({});
+  const [apps, setApps] = useState<App[]>([]);
+
+  // Live node inventory + 15s backstop poll (transitions arrive via WS, but a
+  // steadily-online node needs the poll to refresh lastSeen-derived state).
   useEffect(() => {
-    let active = true;
-    const fetch = () => {
-      getMetrics(node.id, '15m', [
-        'cpu_percent',
-        'mem_used_bytes',
-        'mem_total_bytes',
-      ])
-        .then((m) => {
-          if (active) setMetrics(m);
-        })
-        .catch(() => {
-          /* sparkline stays empty on failure */
-        });
+    listNodes().then(setNodes).catch(() => {});
+    const close = openInventoryWS((ev: InventoryChangeEvent) => {
+      setNodes((prev) => {
+        const exists = prev.find((n) => n.id === ev.node.id);
+        return exists ? prev.map((n) => (n.id === ev.node.id ? ev.node : n)) : [...prev, ev.node];
+      });
+    });
+    const t = setInterval(() => listNodes().then(setNodes).catch(() => {}), 15_000);
+    return () => {
+      close();
+      clearInterval(t);
     };
-    fetch();
-    const t = setInterval(fetch, 30_000);
+  }, []);
+
+  // Per-node CPU/MEM snapshot for the hex labels + controls panel.
+  useEffect(() => {
+    if (nodes.length === 0) return;
+    let active = true;
+    const fetchAll = async () => {
+      const entries = await Promise.all(
+        nodes.map(async (n): Promise<[string, Util]> => {
+          try {
+            const m = await getMetrics(n.id, '15m', ['cpu_percent', 'mem_used_bytes', 'mem_total_bytes']);
+            const cpuArr = m.series?.cpu_percent ?? [];
+            const usedArr = m.series?.mem_used_bytes ?? [];
+            const totalArr = m.series?.mem_total_bytes ?? [];
+            const cpu = cpuArr.length ? cpuArr[cpuArr.length - 1].value : null;
+            const used = usedArr.length ? usedArr[usedArr.length - 1].value : null;
+            const total = totalArr.length ? totalArr[totalArr.length - 1].value : null;
+            const mem = used != null && total && total > 0 ? (used / total) * 100 : null;
+            return [n.id, { cpu, mem }];
+          } catch {
+            return [n.id, { cpu: null, mem: null }];
+          }
+        }),
+      );
+      if (active) setUtil(Object.fromEntries(entries));
+    };
+    fetchAll();
+    const t = setInterval(fetchAll, 30_000);
     return () => {
       active = false;
       clearInterval(t);
     };
-  }, [node.id]);
+  }, [nodes]);
 
-  async function handleReboot() {
-    setBusy(true);
-    setErr(null);
-    try {
-      await createJob('node.reboot', { nodeId: node.id });
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const cpuPoints = metrics?.series?.cpu_percent ?? [];
-  const memUsedPoints = metrics?.series?.mem_used_bytes ?? [];
-  const memTotalPoints = metrics?.series?.mem_total_bytes ?? [];
-  const memPctValues = memUsedPoints.map((p, i) => {
-    const total = memTotalPoints[i]?.value ?? 0;
-    return total > 0 ? (p.value / total) * 100 : 0;
-  });
-  const cpuValues = cpuPoints.map((p) => p.value);
-  const latestCpu = cpuValues.length ? cpuValues[cpuValues.length - 1] : null;
-  const latestMem = memPctValues.length ? memPctValues[memPctValues.length - 1] : null;
-
-  return (
-    <article className={`node-card status-${node.status}`}>
-      <header>
-        <span className={`status status-${node.status}`}>{node.status}</span>
-        <span className="role">{node.role}</span>
-      </header>
-      <h3>{node.id}</h3>
-      <dl>
-        <dt>host</dt>
-        <dd>{node.hostname || <em>unknown</em>}</dd>
-        <dt>last seen</dt>
-        <dd>{relativeTime(lastSeenMs)}</dd>
-        <dt>agent</dt>
-        <dd>
-          <code>{node.agentVersion}</code>
-        </dd>
-      </dl>
-      <div className="card-metrics">
-        <MetricRow label="cpu" data={cpuValues} latest={latestCpu} color="var(--warn)" />
-        <MetricRow label="mem" data={memPctValues} latest={latestMem} color="var(--accent)" />
-      </div>
-      <div className="card-actions">
-        <button
-          onClick={handleReboot}
-          disabled={busy || node.status !== 'online'}
-          title={node.status !== 'online' ? 'Node is not online' : 'Reboot this node'}
-        >
-          {busy ? 'sending…' : 'Reboot'}
-        </button>
-        {err && <span className="err">{err}</span>}
-      </div>
-      <BMCControls nodeId={node.id} />
-    </article>
-  );
-}
-
-// BMCControls renders the power controls and console link. Lives below the
-// OS-level Reboot button on each node card. Power verbs go through the
-// bmc.power saga; the console opens a new page.
-//
-// Distinction from the OS-level Reboot button: that button asks the agent
-// (the live OS) to reboot itself politely. BMC operations work even when
-// the OS is unresponsive — they're the recovery surface, not the everyday
-// one.
-function BMCControls({ nodeId }: { nodeId: string }) {
-  const [state, setState] = useState<BMCPowerState>('unknown');
-  const [busy, setBusy] = useState<BMCPowerVerb | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
+  // Apps (for the selected node's "deployed apps" list).
   useEffect(() => {
-    let active = true;
-    getBMCStatus(nodeId)
-      .then((s) => {
-        if (active) setState(s.powerState);
-      })
-      .catch(() => {});
-    const close = openBMCWS((ev) => {
-      if (ev.targetNodeId !== nodeId) return;
-      if (ev.state) setState(ev.state);
-    });
-    return () => {
-      active = false;
-      close();
-    };
-  }, [nodeId]);
+    listApps().then(setApps).catch(() => {});
+    const t = setInterval(() => listApps().then(setApps).catch(() => {}), 30_000);
+    return () => clearInterval(t);
+  }, []);
 
-  async function go(verb: BMCPowerVerb) {
-    if (verb === 'off' || verb === 'cycle' || verb === 'reset') {
-      if (!confirm(`BMC ${verb} on ${nodeId}? This is a hardware-level operation.`)) return;
-    }
-    setBusy(verb);
-    setErr(null);
-    try {
-      await bmcPower(nodeId, verb);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
+  const views: NodeView[] = useMemo(
+    () =>
+      nodes.map((n) => ({
+        id: n.id,
+        name: shortId(n),
+        status: viewStatus(n.status),
+        role: ROLE_SHORT[n.role] ?? n.role,
+        cpu: util[n.id]?.cpu ?? null,
+      })),
+    [nodes, util],
+  );
+
+  const selectedNode = nodes.find((n) => n.id === selectedId) ?? null;
+  const selectedUtil = selectedId ? util[selectedId] : undefined;
+  const selectedApps = selectedId ? apps.filter((a) => a.targetNode === selectedId) : [];
 
   return (
-    <div className="card-bmc">
-      <div className="bmc-power-pill">
-        <span className="hint">BMC:</span>
-        <span className={`status bmc-state-${state}`}>{state}</span>
+    <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <NodeGrid
+        nodes={views}
+        selectedId={selectedId}
+        onSelect={(id) => setSelectedId((prev) => (prev === id ? null : id))}
+      />
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+        <NodeControls
+          node={selectedNode}
+          cpu={selectedUtil?.cpu ?? null}
+          mem={selectedUtil?.mem ?? null}
+          apps={selectedApps}
+          onNavigate={(path) => router.push(path)}
+        />
       </div>
-      <div className="card-actions card-actions-bmc">
-        <button onClick={() => go('on')} disabled={busy !== null} title="BMC power on">
-          {busy === 'on' ? '…' : 'On'}
-        </button>
-        <button onClick={() => go('off')} disabled={busy !== null} title="BMC power off (hard)">
-          {busy === 'off' ? '…' : 'Off'}
-        </button>
-        <button onClick={() => go('cycle')} disabled={busy !== null} title="BMC power cycle">
-          {busy === 'cycle' ? '…' : 'Cycle'}
-        </button>
-        <button onClick={() => go('reset')} disabled={busy !== null} title="BMC hard reset">
-          {busy === 'reset' ? '…' : 'Reset'}
-        </button>
-        <Link className="bmc-console-link" href={`/console/${encodeURIComponent(nodeId)}`}>
-          Console
-        </Link>
-      </div>
-      {err && <span className="err">{err}</span>}
     </div>
   );
-}
-
-function MetricRow({
-  label,
-  data,
-  latest,
-  color,
-}: {
-  label: string;
-  data: number[];
-  latest: number | null;
-  color: string;
-}) {
-  return (
-    <div className="metric-row">
-      <span className="metric-label">{label}</span>
-      <Sparkline data={data} max={100} color={color} />
-      <span className="metric-value">
-        {latest != null ? `${latest.toFixed(0)}%` : '—'}
-      </span>
-    </div>
-  );
-}
-
-function Sparkline({
-  data,
-  max,
-  color,
-}: {
-  data: number[];
-  max: number;
-  color: string;
-}) {
-  const w = 80;
-  const h = 18;
-  if (data.length < 2) {
-    return <svg width={w} height={h} className="sparkline" aria-hidden />;
-  }
-  const safeMax = max > 0 ? max : 1;
-  const xStep = w / (data.length - 1);
-  const points = data
-    .map((v, i) => {
-      const x = (i * xStep).toFixed(1);
-      const y = (h - (Math.min(Math.max(v, 0), safeMax) / safeMax) * h).toFixed(1);
-      return `${x},${y}`;
-    })
-    .join(' ');
-  return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="sparkline" aria-hidden>
-      <polyline fill="none" stroke={color} strokeWidth={1.5} points={points} />
-    </svg>
-  );
-}
-
-function applyInventoryEvent(prev: Node[], ev: InventoryChangeEvent): Node[] {
-  const exists = prev.find((n) => n.id === ev.node.id);
-  if (!exists) return [...prev, ev.node];
-  return prev.map((n) => (n.id === ev.node.id ? ev.node : n));
-}
-
-function relativeTime(ms: number): string {
-  if (ms < 1000) return 'just now';
-  if (ms < 60_000) return `${Math.floor(ms / 1000)}s ago`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
-  return `${Math.floor(ms / 3_600_000)}h ago`;
 }

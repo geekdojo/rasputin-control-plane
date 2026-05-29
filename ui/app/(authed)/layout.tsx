@@ -1,32 +1,22 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { getSetupState } from '../../lib/api';
+import { usePathname, useRouter } from 'next/navigation';
+import { getSetupState, listJobs, listNodes } from '../../lib/api';
 import { getMe, logout, type CurrentUser } from '../../lib/auth';
-import type { SetupState } from '../../lib/types';
+import type { Node, SetupState } from '../../lib/types';
+import { SideNav } from '../../components/SideNav';
+import { TopBar } from '../../components/TopBar';
+import { MONO } from '../../components/ui-theme';
 
-// Tabs in display order. Adding a new section: drop a new route under
-// app/(authed)/<name>/page.tsx and add an entry here.
-const TABS: Array<{ href: string; label: string }> = [
-  { href: '/', label: 'Nodes' },
-  { href: '/apps', label: 'Apps' },
-  { href: '/firewall', label: 'Firewall' },
-  { href: '/mesh', label: 'Mesh' },
-  { href: '/updates', label: 'Updates' },
-  { href: '/tasks', label: 'Tasks' },
-];
-
-export default function AuthedLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function AuthedLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const pathname = usePathname();
+  const pathname = usePathname() ?? '/';
   const [user, setUser] = useState<CurrentUser | null | undefined>(undefined);
   const [setup, setSetup] = useState<SetupState | null>(null);
+  const [nodes, setNodes] = useState<Node[]>([]);
+  const [tasksRunning, setTasksRunning] = useState(0);
 
   useEffect(() => {
     getMe()
@@ -37,17 +27,42 @@ export default function AuthedLayout({
       .catch(() => router.replace('/login'));
   }, [router]);
 
-  // Setup state drives the banner. Fetched alongside auth; refetched only
-  // on full page loads (the wizard's own page does its own refreshes).
   useEffect(() => {
     getSetupState().then(setSetup).catch(() => {});
   }, []);
 
+  // Lightweight poll powering the TopBar cluster summary. The Nodes page keeps
+  // its own live (WS) view; 15s is plenty for the header rollup.
+  useEffect(() => {
+    if (!user) return;
+    const refresh = () => {
+      listNodes().then(setNodes).catch(() => {});
+      listJobs(100)
+        .then((jobs) => setTasksRunning(jobs.filter((j) => j.status === 'running').length))
+        .catch(() => {});
+    };
+    refresh();
+    const t = setInterval(refresh, 15_000);
+    return () => clearInterval(t);
+  }, [user]);
+
   if (user === undefined || user === null) {
     return (
-      <main>
-        <p className="hint">Loading…</p>
-      </main>
+      <div
+        style={{
+          height: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: '#07101f',
+          color: '#8a9bb5',
+          fontFamily: MONO,
+          fontSize: 12,
+          letterSpacing: '0.08em',
+        }}
+      >
+        LOADING…
+      </div>
     );
   }
 
@@ -56,43 +71,58 @@ export default function AuthedLayout({
     router.replace('/login');
   }
 
-  return (
-    <main>
-      <header className="with-user">
-        <div>
-          <h1>Rasputin</h1>
-          <p className="sub">Control plane · local dev</p>
-        </div>
-        <div className="user-pill">
-          <span>
-            signed in as <strong>{user.displayName}</strong>
-          </span>
-          <button type="button" onClick={handleLogout}>
-            sign out
-          </button>
-        </div>
-      </header>
+  const online = nodes.filter((n) => n.status === 'online').length;
+  const alerts = nodes.filter((n) => n.status === 'stale' || n.status === 'offline').length;
 
-      <nav className="tabs" aria-label="Sections">
-        {TABS.map((t) => (
-          <Link
-            key={t.href}
-            href={t.href}
-            className={pathname === t.href ? 'active' : ''}
-          >
-            {t.label}
-          </Link>
-        ))}
-      </nav>
+  return (
+    <div
+      style={{
+        height: '100vh',
+        width: '100%',
+        background: '#07101f',
+        display: 'flex',
+        flexDirection: 'column',
+        fontFamily: MONO,
+        overflow: 'hidden',
+      }}
+    >
+      <TopBar
+        clusterName={setup?.installName ?? ''}
+        nodesOnline={online}
+        nodesTotal={nodes.length}
+        alerts={alerts}
+        tasksRunning={tasksRunning}
+        user={user.displayName}
+        onLogout={handleLogout}
+      />
 
       {setup && !setup.completed && pathname !== '/setup' && (
-        <div className="setup-banner">
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            padding: '6px 16px',
+            background: 'rgba(250,70,22,0.08)',
+            borderBottom: '1px solid rgba(250,70,22,0.3)',
+            fontSize: 11,
+            color: '#e4e6ea',
+            flexShrink: 0,
+          }}
+        >
           <span>First-run setup isn&apos;t complete.</span>
-          <Link href="/setup">Finish setup →</Link>
+          <Link href="/setup" style={{ color: '#fa4616', textDecoration: 'none', letterSpacing: '0.06em' }}>
+            FINISH SETUP →
+          </Link>
         </div>
       )}
 
-      {children}
-    </main>
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        <SideNav />
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {children}
+        </div>
+      </div>
+    </div>
   );
 }

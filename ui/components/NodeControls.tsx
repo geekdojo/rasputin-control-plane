@@ -1,0 +1,384 @@
+'use client';
+
+import {
+  Activity,
+  AlertTriangle,
+  ChevronRight,
+  Layers,
+  Package,
+  Power,
+  RefreshCw,
+  RotateCcw,
+  Terminal,
+  Upload,
+} from 'lucide-react';
+import { useEffect, useState } from 'react';
+import type { ElementType } from 'react';
+import { bmcPower, createJob, getBMCStatus, openBMCWS } from '../lib/api';
+import type { App, BMCPowerState, Node } from '../lib/types';
+import { ConfirmModal } from './ConfirmModal';
+import { ACCENT, accentA, MONO } from './ui-theme';
+
+interface NodeControlsProps {
+  node: Node | null;
+  cpu: number | null;
+  mem: number | null;
+  apps: App[];
+  onNavigate: (path: string) => void;
+}
+
+function CtrlButton({
+  icon: Icon,
+  label,
+  variant = 'default',
+  disabled = false,
+  onClick,
+}: {
+  icon: ElementType;
+  label: string;
+  variant?: 'default' | 'danger' | 'accent';
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const colors = {
+    default: { border: 'rgba(228,230,234,0.22)', bg: 'rgba(228,230,234,0.04)', hover: 'rgba(228,230,234,0.1)', text: '#e4e6ea' },
+    danger: { border: 'rgba(192,57,43,0.5)', bg: 'rgba(192,57,43,0.07)', hover: 'rgba(192,57,43,0.15)', text: '#f87171' },
+    accent: { border: accentA(0.4), bg: accentA(0.07), hover: accentA(0.15), text: ACCENT },
+  }[variant];
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 12px',
+        border: `1px solid ${colors.border}`,
+        background: hovered && !disabled ? colors.hover : colors.bg,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.4 : 1,
+        transition: 'background 0.15s',
+        width: '100%',
+      }}
+    >
+      <Icon size={13} color={colors.text} />
+      <span style={{ color: colors.text, fontSize: 11, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
+      <ChevronRight size={11} color={colors.text} style={{ marginLeft: 'auto', opacity: 0.5 }} />
+    </button>
+  );
+}
+
+function StatBar({ label, value, color = '#e4e6ea' }: { label: string; value: number | null; color?: string }) {
+  const pct = value == null ? 0 : Math.min(Math.max(value, 0), 100);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <span style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
+        <span style={{ color: '#e4e6ea', fontSize: 10, fontFamily: MONO }}>{value == null ? '—' : `${Math.round(value)}%`}</span>
+      </div>
+      <div style={{ height: 3, background: 'rgba(228,230,234,0.1)', width: '100%' }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: color, transition: 'width 0.3s' }} />
+      </div>
+    </div>
+  );
+}
+
+function PowerButton({ state, disabled, onClick }: { state: BMCPowerState; disabled: boolean; onClick: () => void }) {
+  const [hovered, setHovered] = useState(false);
+  const on = { border: 'rgba(74,222,128,0.4)', bg: 'rgba(74,222,128,0.07)', hover: 'rgba(74,222,128,0.14)', text: '#4ade80' };
+  const off = { border: 'rgba(148,163,184,0.3)', bg: 'rgba(148,163,184,0.04)', hover: 'rgba(148,163,184,0.09)', text: '#94a3b8' };
+  const colors = state === 'on' ? on : off;
+  const label = state === 'unknown' ? '— —' : state.toUpperCase();
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 12px',
+        border: `1px solid ${colors.border}`,
+        background: hovered && !disabled ? colors.hover : colors.bg,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.4 : 1,
+        transition: 'background 0.15s',
+        width: '100%',
+      }}
+    >
+      <Power size={13} color={colors.text} />
+      <span style={{ color: colors.text, fontSize: 11, fontFamily: MONO, letterSpacing: '0.06em' }}>BMC {label}</span>
+      <ChevronRight size={11} color={colors.text} style={{ marginLeft: 'auto', opacity: 0.5 }} />
+    </button>
+  );
+}
+
+const sectionLabel = (text: string) => (
+  <div
+    style={{
+      color: '#8a9bb5',
+      fontSize: 9,
+      fontFamily: MONO,
+      letterSpacing: '0.12em',
+      marginBottom: 8,
+      marginTop: 4,
+      paddingBottom: 4,
+      borderBottom: '1px solid rgba(228,230,234,0.1)',
+    }}
+  >
+    {text}
+  </div>
+);
+
+function appStatusColor(status: App['lastStatus']): string {
+  if (status === 'running') return '#4ade80';
+  if (status === 'failed') return '#f87171';
+  if (status === 'deploying' || status === 'stopping') return '#facc15';
+  return 'rgba(148,163,184,0.5)';
+}
+
+export function NodeControls({ node, cpu, mem, apps, onNavigate }: NodeControlsProps) {
+  const [modal, setModal] = useState<'reboot' | 'power-off' | 'reset' | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [bmcState, setBmcState] = useState<BMCPowerState>('unknown');
+
+  const nodeId = node?.id ?? null;
+
+  // BMC power state for the selected node: seed via REST, then track live.
+  useEffect(() => {
+    if (!nodeId) {
+      setBmcState('unknown');
+      return;
+    }
+    let active = true;
+    setBmcState('unknown');
+    getBMCStatus(nodeId)
+      .then((s) => {
+        if (active) setBmcState(s.powerState);
+      })
+      .catch(() => {});
+    const close = openBMCWS((ev) => {
+      if (ev.targetNodeId !== nodeId) return;
+      if (ev.state) setBmcState(ev.state);
+    });
+    return () => {
+      active = false;
+      close();
+    };
+  }, [nodeId]);
+
+  // Clear transient action error when selection changes.
+  useEffect(() => {
+    setErr(null);
+    setBusy(null);
+  }, [nodeId]);
+
+  const isOnline = node?.status === 'online';
+
+  async function run(action: string, fn: () => Promise<unknown>) {
+    setBusy(action);
+    setErr(null);
+    try {
+      await fn();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '16px 14px', overflowY: 'auto' }}>
+        {/* Header */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <Layers size={13} color={ACCENT} />
+            <span style={{ color: '#e4e6ea', fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>NODE CONTROLS</span>
+            <button
+              onClick={() => onNavigate('/apps')}
+              disabled={!node}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                marginLeft: 'auto',
+                padding: '3px 8px',
+                background: accentA(0.08),
+                border: `1px solid ${accentA(0.3)}`,
+                color: ACCENT,
+                fontSize: 9,
+                fontFamily: MONO,
+                letterSpacing: '0.08em',
+                cursor: node ? 'pointer' : 'not-allowed',
+                opacity: node ? 1 : 0.4,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <Package size={10} color={ACCENT} />
+              DEPLOY APP
+            </button>
+          </div>
+          {node ? (
+            <div style={{ color: ACCENT, fontSize: 13, fontFamily: MONO, letterSpacing: '0.06em' }}>
+              {node.id.toUpperCase()}
+            </div>
+          ) : (
+            <div style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO }}>— select a node —</div>
+          )}
+        </div>
+
+        {node && (
+          <>
+            {sectionLabel('STATUS')}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+              {[
+                { label: 'HOSTNAME', value: node.hostname || '—' },
+                { label: 'ROLE', value: node.role.toUpperCase() },
+                { label: 'STATUS', value: node.status.toUpperCase() },
+                { label: 'AGENT', value: node.agentVersion || '—' },
+              ].map(({ label, value }) => (
+                <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                  <span style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
+                  <span
+                    style={{
+                      color: '#e4e6ea',
+                      fontSize: 10,
+                      fontFamily: MONO,
+                      textAlign: 'right',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {value}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {sectionLabel('UTILIZATION')}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+              <StatBar label="CPU" value={cpu} />
+              <StatBar label="MEMORY" value={mem} />
+            </div>
+          </>
+        )}
+
+        {sectionLabel('ACTIONS')}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+          <PowerButton
+            state={bmcState}
+            disabled={!node || busy !== null}
+            onClick={() => {
+              if (!node) return;
+              if (bmcState === 'on') setModal('power-off');
+              else void run('bmc-on', () => bmcPower(node.id, 'on'));
+            }}
+          />
+          <CtrlButton
+            icon={RotateCcw}
+            label={busy === 'reboot' ? 'REBOOTING…' : 'REBOOT (OS)'}
+            variant="danger"
+            disabled={!node || busy !== null || !isOnline}
+            onClick={() => setModal('reboot')}
+          />
+          <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console/${encodeURIComponent(node.id)}`)} />
+          <CtrlButton icon={Upload} label="UPDATE" disabled={!node} onClick={() => onNavigate('/updates')} />
+          <CtrlButton
+            icon={RefreshCw}
+            label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}
+            disabled={!node || busy !== null}
+            onClick={() => setModal('reset')}
+          />
+        </div>
+
+        {sectionLabel('DIAGNOSTICS')}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+          <CtrlButton
+            icon={Activity}
+            label={busy === 'ping' ? 'PINGING…' : 'PING'}
+            disabled={!node || busy !== null}
+            onClick={() => node && void run('ping', () => createJob('diag.ping', { nodeId: node.id }))}
+          />
+          <CtrlButton icon={AlertTriangle} label="VIEW LOGS" disabled />
+        </div>
+
+        {err && (
+          <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12, wordBreak: 'break-word' }}>{err}</div>
+        )}
+
+        {node && (
+          <>
+            {sectionLabel('DEPLOYED APPS')}
+            {apps.length === 0 ? (
+              <span style={{ color: 'rgba(228,230,234,0.2)', fontSize: 10, fontFamily: MONO }}>— none —</span>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {apps.map((app) => (
+                  <div
+                    key={app.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '5px 10px',
+                      background: 'rgba(228,230,234,0.03)',
+                      border: '1px solid rgba(228,230,234,0.1)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                      <div style={{ width: 4, height: 4, borderRadius: '50%', background: appStatusColor(app.lastStatus), flexShrink: 0 }} />
+                      <span style={{ color: '#e4e6ea', fontSize: 10, fontFamily: MONO }}>{app.name}</span>
+                    </div>
+                    <span style={{ color: '#8a9bb5', fontSize: 9, fontFamily: MONO }}>{app.lastStatus}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {modal === 'reboot' && node && (
+        <ConfirmModal
+          title="CONFIRM REBOOT"
+          message={`Reboot ${node.id.toUpperCase()}? This asks the running OS to restart gracefully; the node will be briefly unavailable.`}
+          confirmLabel="REBOOT"
+          danger
+          onConfirm={() => void run('reboot', () => createJob('node.reboot', { nodeId: node.id }))}
+          onCancel={() => setModal(null)}
+        />
+      )}
+      {modal === 'power-off' && node && (
+        <ConfirmModal
+          title="CONFIRM POWER OFF"
+          message={`Power off ${node.id.toUpperCase()} via BMC? This is a hardware-level power-off — running workloads are terminated.`}
+          confirmLabel="POWER OFF"
+          danger
+          onConfirm={() => void run('bmc-off', () => bmcPower(node.id, 'off'))}
+          onCancel={() => setModal(null)}
+        />
+      )}
+      {modal === 'reset' && node && (
+        <ConfirmModal
+          title="CONFIRM BMC RESET"
+          message={`Issue a hardware reset to ${node.id.toUpperCase()} via BMC? This is an abrupt reset (not a graceful reboot, and not a factory wipe).`}
+          confirmLabel="RESET"
+          danger
+          onConfirm={() => void run('reset', () => bmcPower(node.id, 'reset'))}
+          onCancel={() => setModal(null)}
+        />
+      )}
+    </>
+  );
+}
