@@ -8,7 +8,7 @@ import { getMe, logout, type CurrentUser } from '../../lib/auth';
 import type { Node, SetupState } from '../../lib/types';
 import { SideNav } from '../../components/SideNav';
 import { TopBar } from '../../components/TopBar';
-import { MONO } from '../../components/ui-theme';
+import { ACCENT, accentA, MONO } from '../../components/ui-theme';
 
 export default function AuthedLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -103,15 +103,15 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
             alignItems: 'center',
             gap: 12,
             padding: '6px 16px',
-            background: 'rgba(250,70,22,0.08)',
-            borderBottom: '1px solid rgba(250,70,22,0.3)',
+            background: accentA(0.08),
+            borderBottom: `1px solid ${accentA(0.3)}`,
             fontSize: 11,
             color: '#e4e6ea',
             flexShrink: 0,
           }}
         >
           <span>First-run setup isn&apos;t complete.</span>
-          <Link href="/setup" style={{ color: '#fa4616', textDecoration: 'none', letterSpacing: '0.06em' }}>
+          <Link href="/setup" style={{ color: ACCENT, textDecoration: 'none', letterSpacing: '0.06em' }}>
             FINISH SETUP →
           </Link>
         </div>

@@ -1,7 +1,7 @@
 /* ===========================================================================
  * Rasputin design system — ported from the Figma "Cluster Node Management
  * Interface" (Figma Make). Tailwind v4 + design tokens. The source design's
- * blue accent is remapped to Pantone 172 C (#fa4616) per the locked brand
+ * blue accent is remapped to Pantone 172 C (#fa3c04) per the locked brand
  * aesthetic. Screens are inline-styled to match the design 1:1; these tokens
  * back the shadcn/ui primitives we drop in over time.
  * ======================================================================== */
@@ -19,7 +19,7 @@
   --card-foreground: #e4e6ea;
   --popover: #0d1829;
   --popover-foreground: #e4e6ea;
-  --primary: #fa4616; /* Pantone 172 C — remapped from the design's #4a9eff */
+  --primary: #fa3c04; /* Pantone 172 C primary signal orange — remapped from the design's #4a9eff */
   --primary-foreground: #07101f;
   --secondary: #111d30;
   --secondary-foreground: #e4e6ea;
@@ -35,7 +35,7 @@
   --switch-background: #1e2f47;
   --font-weight-medium: 500;
   --font-weight-normal: 400;
-  --ring: rgba(250, 70, 22, 0.4); /* Pantone 172 C @ 40% — remapped from blue */
+  --ring: rgba(250, 60, 4, 0.4); /* Pantone 172 C @ 40% — remapped from blue */
   --radius: 0.625rem;
 }
 
