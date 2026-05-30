@@ -1,6 +1,6 @@
 module github.com/geekdojo/rasputin-control-plane/agent
 
-go 1.25.0
+go 1.23
 
 require (
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000

@@ -1,7 +1,7 @@
 go 1.23
 
 use (
-	./api
 	./agent
+	./api
 	./proto
 )
