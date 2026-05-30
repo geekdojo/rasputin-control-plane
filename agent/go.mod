@@ -1,11 +1,11 @@
 module github.com/geekdojo/rasputin-control-plane/agent
 
-go 1.23
+go 1.25.0
 
 require (
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats-server/v2 v2.10.20
-	github.com/nats-io/nats.go v1.51.0
+	github.com/nats-io/nats.go v1.37.0
 	github.com/shirou/gopsutil/v4 v4.24.8
 )
 
