@@ -24,6 +24,12 @@ on:
 permissions:
   contents: read
 
+# Opt into the Node.js 24 runner for JavaScript-based actions now, ahead of
+# the GitHub-forced migration on 2026-06-16. Removes the deprecation
+# annotation that the first run flagged.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   backend:
     name: backend (vet + test + build)
@@ -99,7 +105,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Project Node: current LTS (Node 22, LTS through April 2027).
+          # Next.js 15 documented support: 18.18+, 20, 22. Not bumping to
+          # 24 until it goes LTS in October 2026.
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
 
