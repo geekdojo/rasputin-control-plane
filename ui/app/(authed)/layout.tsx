@@ -3,9 +3,16 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { getSetupState, listJobs, listNodes, openJobsWS } from '../../lib/api';
+import {
+  getSetupState,
+  listAlerts,
+  listJobs,
+  listNodes,
+  openInventoryWS,
+  openJobsWS,
+} from '../../lib/api';
 import { getMe, logout, type CurrentUser } from '../../lib/auth';
-import type { Node, SetupState } from '../../lib/types';
+import type { Alert, Node, SetupState } from '../../lib/types';
 import { HudBackground } from '../../components/HudBackground';
 import { SideNav } from '../../components/SideNav';
 import { TopBar } from '../../components/TopBar';
@@ -18,6 +25,7 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
   const [setup, setSetup] = useState<SetupState | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [tasksRunning, setTasksRunning] = useState(0);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
 
   useEffect(() => {
     getMe()
@@ -32,16 +40,18 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
     getSetupState().then(setSetup).catch(() => {});
   }, []);
 
-  // TopBar cluster summary — NODES ONLINE polls every 15s, TASKS RUNNING is
-  // event-driven off /ws/jobs.
-  //
-  // We were polling tasksRunning at 15s too, but most jobs (BMC ack, ping,
-  // reboot dispatch) complete in under a second on the mock backend; the
-  // badge sat at 0 forever because every job was already gone by the next
-  // tick. Now we seed from a single listJobs call, then incrementally adjust
-  // on lifecycle events (step_* and log events are ignored to keep this
-  // O(jobs) not O(events)). The 15s poll stays as a drift-correction backstop
-  // so a missed event during a WS reconnect doesn't leave a stale count.
+  // TopBar cluster summary:
+  //   NODES ONLINE  — 15s poll; node status transitions are slow (heartbeat
+  //                   threshold is 30s) so a faster poll wouldn't add signal.
+  //   TASKS RUNNING — event-driven off /ws/jobs (most jobs finish sub-second
+  //                   on the mock backend so polling alone made the badge
+  //                   look dead). Incremental: +1 on 'started', -1 on
+  //                   'succeeded' | 'failed'. step_* and log events ignored
+  //                   to keep this O(jobs) not O(events).
+  //   ALERTS        — sourced from /api/alerts so the count matches the
+  //                   /alerts page exactly. Re-fetched on inventory + job
+  //                   WS events (the upstream sources today). 15s backstop
+  //                   poll absorbs missed events during WS reconnects.
   useEffect(() => {
     if (!user) return;
 
@@ -53,24 +63,43 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
         .then((jobs) => setTasksRunning(jobs.filter((j) => j.status === 'running').length))
         .catch(() => {});
     };
+    const refreshAlerts = () => {
+      listAlerts().then(setAlerts).catch(() => {});
+    };
 
     refreshNodes();
     refreshJobs();
+    refreshAlerts();
 
-    const closeWS = openJobsWS((ev) => {
+    const closeJobsWS = openJobsWS((ev) => {
       // 'created' is queued, not running — the matching 'started' bumps it.
       if (ev.type === 'started') setTasksRunning((n) => n + 1);
       else if (ev.type === 'succeeded' || ev.type === 'failed')
         setTasksRunning((n) => Math.max(0, n - 1));
+      // Any job lifecycle event might add/clear an alert (e.g. a job-failed
+      // alert appears on 'failed', not on 'started'). Re-fetch — alerts is
+      // a small JSON response.
+      if (ev.type === 'failed' || ev.type === 'succeeded' || ev.type === 'started') {
+        refreshAlerts();
+      }
+    });
+
+    const closeInvWS = openInventoryWS(() => {
+      // Status transitions (online ↔ stale ↔ offline) flip node-source
+      // alerts. Re-fetch both the local nodes view and the alerts count.
+      refreshNodes();
+      refreshAlerts();
     });
 
     const t = setInterval(() => {
       refreshNodes();
       refreshJobs();
+      refreshAlerts();
     }, 15_000);
 
     return () => {
-      closeWS();
+      closeJobsWS();
+      closeInvWS();
       clearInterval(t);
     };
   }, [user]);
@@ -101,7 +130,8 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
   }
 
   const online = nodes.filter((n) => n.status === 'online').length;
-  const alerts = nodes.filter((n) => n.status === 'stale' || n.status === 'offline').length;
+  const alertsCrit = alerts.filter((a) => a.severity === 'crit').length;
+  const alertsWarn = alerts.filter((a) => a.severity === 'warn').length;
 
   return (
     <div
@@ -122,7 +152,8 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
           clusterName={setup?.installName ?? ''}
           nodesOnline={online}
           nodesTotal={nodes.length}
-          alerts={alerts}
+          alertsCrit={alertsCrit}
+          alertsWarn={alertsWarn}
           tasksRunning={tasksRunning}
           user={user.displayName}
           onLogout={handleLogout}

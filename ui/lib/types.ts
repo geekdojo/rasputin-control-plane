@@ -377,3 +377,22 @@ export interface SetupState {
   meshEnrolled: boolean;
   selfNodeId: string;
 }
+
+// Alerts — surfaced by the v0 server-side aggregator at GET /api/alerts.
+// Mirror of proto/alerts.go. v0 is binary severity (no INFO tier); INFO-
+// level signals live in their own affordances. Drill-through uses
+// (relatedKind, relatedId).
+export type AlertSeverity = 'warn' | 'crit';
+export type AlertSource = 'node' | 'job' | 'app' | 'setup';
+export type AlertRelatedKind = 'node' | 'job' | 'app';
+
+export interface Alert {
+  id: string;
+  severity: AlertSeverity;
+  source: AlertSource;
+  title: string;
+  detail?: string;
+  since: string;
+  relatedKind?: AlertRelatedKind;
+  relatedId?: string;
+}

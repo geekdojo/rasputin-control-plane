@@ -1,18 +1,29 @@
 'use client';
 
 import { AlertTriangle, CheckCircle, Clock, LogOut, Server } from 'lucide-react';
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { ElementType } from 'react';
-import { MONO } from './ui-theme';
+import { accentA, MONO } from './ui-theme';
 
 interface TopBarProps {
   clusterName: string;
   nodesOnline: number;
   nodesTotal: number;
-  alerts: number;
+  alertsCrit: number;
+  alertsWarn: number;
   tasksRunning: number;
   user?: string;
   onLogout?: () => void;
+}
+
+// Severity-aware label for the ALERTS stat. Honest: never says "WARN" when
+// the underlying alert is critical.
+function formatAlertsLabel(crit: number, warn: number): { value: string; color?: string } {
+  if (crit === 0 && warn === 0) return { value: 'NONE' };
+  if (crit > 0 && warn === 0) return { value: `${crit} CRIT`, color: '#f87171' };
+  if (crit === 0 && warn > 0) return { value: `${warn} WARN`, color: '#facc15' };
+  return { value: `${crit} CRIT · ${warn} WARN`, color: '#f87171' };
 }
 
 interface Stat {
@@ -20,13 +31,15 @@ interface Stat {
   value: string;
   icon: ElementType;
   valueColor?: string;
+  href?: string; // when set, the stat renders as a Link that routes there
 }
 
 export function TopBar({
   clusterName,
   nodesOnline,
   nodesTotal,
-  alerts,
+  alertsCrit,
+  alertsWarn,
   tasksRunning,
   user,
   onLogout,
@@ -49,13 +62,20 @@ export function TopBar({
       icon: CheckCircle,
       valueColor: allOnline ? undefined : '#facc15',
     },
-    {
-      label: 'ALERTS',
-      value: alerts > 0 ? `${alerts} WARN` : 'NONE',
-      icon: AlertTriangle,
-      valueColor: alerts > 0 ? '#facc15' : undefined,
-    },
-    { label: 'TASKS RUNNING', value: String(tasksRunning), icon: Clock },
+    (() => {
+      const a = formatAlertsLabel(alertsCrit, alertsWarn);
+      return {
+        label: 'ALERTS',
+        value: a.value,
+        icon: AlertTriangle,
+        valueColor: a.color,
+        // ALERTS routes to /alerts so the badge is no longer a dead end —
+        // operators see what the count actually represents. TASKS RUNNING
+        // links to /tasks for the same reason.
+        href: '/alerts',
+      };
+    })(),
+    { label: 'TASKS RUNNING', value: String(tasksRunning), icon: Clock, href: '/tasks' },
   ];
 
   return (
@@ -110,20 +130,8 @@ export function TopBar({
       <div style={{ display: 'flex', alignItems: 'center', flex: 1, overflow: 'hidden' }}>
         {stats.map((s, i) => {
           const Icon = s.icon;
-          return (
-            <div
-              key={s.label}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                paddingLeft: 16,
-                paddingRight: 16,
-                borderRight:
-                  i < stats.length - 1 ? '1px solid rgba(228,230,234,0.12)' : 'none',
-                flexShrink: 0,
-              }}
-            >
+          const inner = (
+            <>
               <Icon size={12} color="#8a9bb5" />
               <span style={{ color: '#8a9bb5', fontSize: 10, letterSpacing: '0.08em' }}>
                 {s.label}
@@ -133,6 +141,41 @@ export function TopBar({
               >
                 {s.value}
               </span>
+            </>
+          );
+          const baseStyle = {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            paddingLeft: 16,
+            paddingRight: 16,
+            borderRight:
+              i < stats.length - 1 ? '1px solid rgba(228,230,234,0.12)' : 'none',
+            flexShrink: 0,
+            height: '100%',
+            textDecoration: 'none',
+          } as const;
+          if (s.href) {
+            // Subtle accent-tint hover so the affordance reads as live.
+            return (
+              <Link
+                key={s.label}
+                href={s.href}
+                style={{ ...baseStyle, cursor: 'pointer', transition: 'background 0.15s' }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = accentA(0.06);
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                {inner}
+              </Link>
+            );
+          }
+          return (
+            <div key={s.label} style={baseStyle}>
+              {inner}
             </div>
           );
         })}

@@ -39,7 +39,7 @@ const NAV: NavItem[] = [
 ];
 
 const BOTTOM: NavItem[] = [
-  { icon: Bell, label: 'Alerts' },
+  { icon: Bell, label: 'Alerts', href: '/alerts' },
   { icon: Settings, label: 'Settings' },
 ];
 

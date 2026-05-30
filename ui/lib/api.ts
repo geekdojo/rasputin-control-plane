@@ -1,4 +1,5 @@
 import type {
+  Alert,
   App,
   AppChangeEvent,
   BMCChangeEvent,
@@ -96,6 +97,17 @@ export function openInventoryWS(
   onEvent: (ev: InventoryChangeEvent) => void,
 ): () => void {
   return openWS<InventoryChangeEvent>('/ws/inventory', onEvent);
+}
+
+// ----- Alerts -------------------------------------------------------------
+
+// listAlerts returns the current snapshot of active alerts. v0 has no
+// live-push WS — callers poll on a backstop interval and re-fetch on
+// inventory / job WS events (those are the upstream sources today). When
+// the future rules-engine + /ws/alerts lands the wire shape stays the
+// same; only the live-update path changes.
+export async function listAlerts(): Promise<Alert[]> {
+  return (await jsonFetch<Alert[] | null>('/api/alerts')) ?? [];
 }
 
 // ----- Firewall -----------------------------------------------------------

@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
@@ -32,6 +33,7 @@ type Server struct {
 	bmc             *bmc.Service
 	bmcSessions     *bmc.SessionManager
 	setup           *setup.Service
+	alerts          *alerts.Service
 	auth            *auth.Service
 	nc              *nats.Conn
 }
@@ -62,7 +64,11 @@ func NewServer(
 		bundleDir: bundleDir, mesh: meshSvc,
 		bmc: bmcSvc, bmcSessions: bmc.NewSessionManager(bmcSvc),
 		setup: setupSvc,
-		auth:  authSvc, nc: nc,
+		// alerts is a pure read aggregator over the stores we already
+		// hold; it has no lifecycle of its own, so it doesn't need to be
+		// constructed by main.
+		alerts: alerts.New(inv, store, appsStore, setupSvc),
+		auth:   authSvc, nc: nc,
 	}
 }
 
@@ -147,6 +153,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bmc/{nodeId}/status", reqd(s.handleBMCStatus))
 	mux.HandleFunc("POST /api/bmc/{nodeId}/power/{verb}", reqd(s.handleBMCPower))
 	mux.HandleFunc("GET /ws/bmc/{nodeId}/sol", reqd(s.handleBMCSOL))
+
+	mux.HandleFunc("GET /api/alerts", reqd(s.handleListAlerts))
 
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
 	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
