@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { getSetupState, listJobs, listNodes } from '../../lib/api';
+import { getSetupState, listJobs, listNodes, openJobsWS } from '../../lib/api';
 import { getMe, logout, type CurrentUser } from '../../lib/auth';
 import type { Node, SetupState } from '../../lib/types';
 import { HudBackground } from '../../components/HudBackground';
@@ -32,19 +32,47 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
     getSetupState().then(setSetup).catch(() => {});
   }, []);
 
-  // Lightweight poll powering the TopBar cluster summary. The Nodes page keeps
-  // its own live (WS) view; 15s is plenty for the header rollup.
+  // TopBar cluster summary — NODES ONLINE polls every 15s, TASKS RUNNING is
+  // event-driven off /ws/jobs.
+  //
+  // We were polling tasksRunning at 15s too, but most jobs (BMC ack, ping,
+  // reboot dispatch) complete in under a second on the mock backend; the
+  // badge sat at 0 forever because every job was already gone by the next
+  // tick. Now we seed from a single listJobs call, then incrementally adjust
+  // on lifecycle events (step_* and log events are ignored to keep this
+  // O(jobs) not O(events)). The 15s poll stays as a drift-correction backstop
+  // so a missed event during a WS reconnect doesn't leave a stale count.
   useEffect(() => {
     if (!user) return;
-    const refresh = () => {
+
+    const refreshNodes = () => {
       listNodes().then(setNodes).catch(() => {});
+    };
+    const refreshJobs = () => {
       listJobs(100)
         .then((jobs) => setTasksRunning(jobs.filter((j) => j.status === 'running').length))
         .catch(() => {});
     };
-    refresh();
-    const t = setInterval(refresh, 15_000);
-    return () => clearInterval(t);
+
+    refreshNodes();
+    refreshJobs();
+
+    const closeWS = openJobsWS((ev) => {
+      // 'created' is queued, not running — the matching 'started' bumps it.
+      if (ev.type === 'started') setTasksRunning((n) => n + 1);
+      else if (ev.type === 'succeeded' || ev.type === 'failed')
+        setTasksRunning((n) => Math.max(0, n - 1));
+    });
+
+    const t = setInterval(() => {
+      refreshNodes();
+      refreshJobs();
+    }, 15_000);
+
+    return () => {
+      closeWS();
+      clearInterval(t);
+    };
   }, [user]);
 
   if (user === undefined || user === null) {
