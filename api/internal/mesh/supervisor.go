@@ -46,7 +46,7 @@ func (s *NoopSupervisor) Start(_ context.Context) error {
 	return nil
 }
 
-func (s *NoopSupervisor) Stop(_ context.Context) error  { return nil }
+func (s *NoopSupervisor) Stop(_ context.Context) error { return nil }
 func (s *NoopSupervisor) Healthy(_ context.Context) (bool, error) {
 	return true, nil
 }

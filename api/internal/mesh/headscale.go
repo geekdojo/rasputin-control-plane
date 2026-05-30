@@ -75,17 +75,17 @@ type HSPreAuthKey struct {
 
 // HSNode is the Headscale-side view of a registered device.
 type HSNode struct {
-	ID                string    `json:"id"`
-	User              string    `json:"user"`
-	Hostname          string    `json:"hostname"`
-	GivenName         string    `json:"givenName"`
-	IPv4              string    `json:"ipv4"`
-	IPv6              string    `json:"ipv6"`
-	Tags              []string  `json:"tags"`
-	AdvertisedRoutes  []string  `json:"advertisedRoutes"`
-	ApprovedRoutes    []string  `json:"approvedRoutes"`
-	RegisteredAt      time.Time `json:"registeredAt"`
-	LastSeen          time.Time `json:"lastSeen"`
+	ID               string    `json:"id"`
+	User             string    `json:"user"`
+	Hostname         string    `json:"hostname"`
+	GivenName        string    `json:"givenName"`
+	IPv4             string    `json:"ipv4"`
+	IPv6             string    `json:"ipv6"`
+	Tags             []string  `json:"tags"`
+	AdvertisedRoutes []string  `json:"advertisedRoutes"`
+	ApprovedRoutes   []string  `json:"approvedRoutes"`
+	RegisteredAt     time.Time `json:"registeredAt"`
+	LastSeen         time.Time `json:"lastSeen"`
 }
 
 // ----- MockClient ---------------------------------------------------------
@@ -105,15 +105,15 @@ type HSNode struct {
 // In production the real Headscale client supersedes this; the interface
 // shape is identical so callers don't change.
 type MockClient struct {
-	mu       sync.Mutex
+	mu        sync.Mutex
 	statePath string
-	state    mockState
+	state     mockState
 }
 
 type mockState struct {
-	Users        map[string]bool         `json:"users"`
-	PreAuthKeys  map[string]HSPreAuthKey `json:"preauth_keys"`
-	Nodes        map[string]HSNode       `json:"nodes"`
+	Users       map[string]bool         `json:"users"`
+	PreAuthKeys map[string]HSPreAuthKey `json:"preauth_keys"`
+	Nodes       map[string]HSNode       `json:"nodes"`
 }
 
 func NewMockClient(stateDir string) (*MockClient, error) {

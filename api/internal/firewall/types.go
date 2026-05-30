@@ -20,8 +20,8 @@ type Intent struct {
 // NodeState is the api's view of a firewall node's apply/reconcile status.
 type NodeState struct {
 	NodeID         string     `json:"nodeId"`
-	IntentHash     string     `json:"intentHash"`     // what we last pushed
-	ObservedHash   string     `json:"observedHash"`   // what agent reported on last reconcile
+	IntentHash     string     `json:"intentHash"`   // what we last pushed
+	ObservedHash   string     `json:"observedHash"` // what agent reported on last reconcile
 	LastApplied    *time.Time `json:"lastApplied,omitempty"`
 	LastReconciled *time.Time `json:"lastReconciled,omitempty"`
 	// Drift is true when ObservedHash is set and differs from IntentHash.

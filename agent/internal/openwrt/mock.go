@@ -27,8 +27,8 @@ import (
 // flow depends on observing user-introduced drift, and the easiest way to
 // reproduce that in dev is to open the JSON in a text editor.
 type MockClient struct {
-	mu      sync.Mutex
-	dir     string
+	mu        sync.Mutex
+	dir       string
 	statePath string
 }
 

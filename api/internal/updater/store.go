@@ -195,10 +195,10 @@ func (s *Store) LatestNodeUpdate(ctx context.Context, nodeID string) (*NodeUpdat
 
 func scanNodeUpdate(scan func(...any) error) (*NodeUpdate, error) {
 	var (
-		u                              NodeUpdate
-		fromSlot, toSlot, statusRaw    string
-		startedAt                      int64
-		finishedAt                     sql.NullInt64
+		u                           NodeUpdate
+		fromSlot, toSlot, statusRaw string
+		startedAt                   int64
+		finishedAt                  sql.NullInt64
 	)
 	if err := scan(&u.JobID, &u.NodeID, &u.BundleSHA256, &fromSlot, &toSlot,
 		&u.FromVersion, &u.ToVersion, &statusRaw, &startedAt, &finishedAt, &u.Error); err != nil {

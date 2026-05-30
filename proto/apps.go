@@ -51,15 +51,15 @@ type AppStatusCmd struct {
 }
 
 type AppStatusAck struct {
-	AppID    string    `json:"appId"`
-	Status   AppStatus `json:"status"`
+	AppID    string             `json:"appId"`
+	Status   AppStatus          `json:"status"`
 	Services []AppServiceStatus `json:"services,omitempty"`
 }
 
 // AppServiceStatus is one container/service from a compose stack.
 type AppServiceStatus struct {
 	Name   string `json:"name"`
-	State  string `json:"state"`  // "running", "exited", etc — agent backend specific
+	State  string `json:"state"` // "running", "exited", etc — agent backend specific
 	Health string `json:"health,omitempty"`
 }
 

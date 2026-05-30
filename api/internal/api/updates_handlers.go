@@ -31,8 +31,8 @@ func (s *Server) handleListBundles(w http.ResponseWriter, r *http.Request) {
 		bs = []*updater.Bundle{}
 	}
 	resp := struct {
-		TrustConfigured bool               `json:"trustConfigured"`
-		Bundles         []*updater.Bundle  `json:"bundles"`
+		TrustConfigured bool              `json:"trustConfigured"`
+		Bundles         []*updater.Bundle `json:"bundles"`
 	}{
 		TrustConfigured: s.updaterVerifier.TrustConfigured(),
 		Bundles:         bs,

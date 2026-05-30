@@ -85,10 +85,10 @@ func (s *Store) List(ctx context.Context) ([]*NodeState, error) {
 
 func scanState(scan func(...any) error) (*NodeState, error) {
 	var (
-		ns         NodeState
-		state      string
-		lastCmdAt  sql.NullInt64
-		updatedAt  int64
+		ns        NodeState
+		state     string
+		lastCmdAt sql.NullInt64
+		updatedAt int64
 	)
 	if err := scan(&ns.TargetNodeID, &state, &ns.LastCmd, &lastCmdAt, &ns.LastCmdResult, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

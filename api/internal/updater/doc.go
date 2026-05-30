@@ -15,5 +15,6 @@
 // through NATS — bundles are large.
 //
 // See projects/rasputin/design/control-plane/updates.md
-//   in the geekdojo-wiki.
+//
+//	in the geekdojo-wiki.
 package updater

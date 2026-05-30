@@ -90,8 +90,8 @@ type BMCSOLCloseAck struct {
 // subjects (.in for api→agent, .out for agent→api). Data is base64-safe
 // when it transits JSON; agents and the api should treat it as opaque.
 type BMCSOLDataEvt struct {
-	SessionID string `json:"sessionId"`
-	Data      string `json:"data"` // raw bytes, JSON-encoded as a string
+	SessionID string    `json:"sessionId"`
+	Data      string    `json:"data"` // raw bytes, JSON-encoded as a string
 	Ts        time.Time `json:"ts"`
 }
 

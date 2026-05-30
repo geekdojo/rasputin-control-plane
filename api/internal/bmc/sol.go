@@ -19,12 +19,12 @@ import (
 //
 // Each session:
 //
-//   1. Open():   generates a session id, RPCs the BMC host's agent on
-//                bmc.sol.open, subscribes to the .out subject on success.
-//                Returns a *Session the caller (WS handler) reads from.
-//   2. Write(s, data): publishes to the .in subject. Agent forwards to
-//                the target's serial port.
-//   3. Close(s): unsubscribes, RPCs bmc.sol.close, removes from registry.
+//  1. Open():   generates a session id, RPCs the BMC host's agent on
+//     bmc.sol.open, subscribes to the .out subject on success.
+//     Returns a *Session the caller (WS handler) reads from.
+//  2. Write(s, data): publishes to the .in subject. Agent forwards to
+//     the target's serial port.
+//  3. Close(s): unsubscribes, RPCs bmc.sol.close, removes from registry.
 //
 // Backpressure: the .out subscription writes into a buffered channel
 // (1024 messages). If the WS consumer can't drain fast enough, new bytes

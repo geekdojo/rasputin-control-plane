@@ -20,10 +20,10 @@ import (
 //
 //  1. compile     — turn intents into canonical state + hash
 //  2. push_keys   — create any pre-auth keys that don't exist on the
-//                   Headscale side yet; write the resulting hs_id +
-//                   plaintext back onto the intent row
+//     Headscale side yet; write the resulting hs_id +
+//     plaintext back onto the intent row
 //  3. push_routes — for each subnet_route intent, look up the node's
-//                   Headscale id (via mesh_devices) and call SetNodeRoutes
+//     Headscale id (via mesh_devices) and call SetNodeRoutes
 //  4. record      — persist intent_hash + last_applied
 func ApplyWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
 	return jobs.Workflow{
@@ -335,7 +335,7 @@ type EnrollSpec struct {
 // the resulting Headscale node id back into mesh_devices.
 //
 //  1. mint_key — CreatePreAuthKey for the rasputin-operator user
-//                with the Rasputin tag.
+//     with the Rasputin tag.
 //  2. dispatch — RPC the agent's mesh.enroll handler with the key + URL.
 //  3. record   — persist the device, publish node_enrolled.
 func EnrollNodeWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
@@ -428,13 +428,13 @@ func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
 		// mode (when ack.TailnetID is already populated by Headscale).
 		if mock, ok := svc.client.(*MockClient); ok && s.HSID == "" {
 			node := HSNode{
-				User:              svc.cfg.DefaultUser,
-				Hostname:          s.NodeID,
-				GivenName:         s.NodeID,
-				IPv4:              "100.64.0." + fmt.Sprintf("%d", 1+(simpleHash(s.NodeID)%240)),
-				Tags:              []string{"tag:rasputin-node"},
-				AdvertisedRoutes:  s.AdvertiseRoutes,
-				ApprovedRoutes:    s.AdvertiseRoutes,
+				User:             svc.cfg.DefaultUser,
+				Hostname:         s.NodeID,
+				GivenName:        s.NodeID,
+				IPv4:             "100.64.0." + fmt.Sprintf("%d", 1+(simpleHash(s.NodeID)%240)),
+				Tags:             []string{"tag:rasputin-node"},
+				AdvertisedRoutes: s.AdvertiseRoutes,
+				ApprovedRoutes:   s.AdvertiseRoutes,
 			}
 			if err := mock.UpsertMockNode(node); err != nil {
 				return nil, fmt.Errorf("mock register: %w", err)

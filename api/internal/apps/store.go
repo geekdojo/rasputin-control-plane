@@ -32,7 +32,7 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func ms(t time.Time) int64    { return t.UnixMilli() }
+func ms(t time.Time) int64     { return t.UnixMilli() }
 func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 func (s *Store) Create(ctx context.Context, a *App) error {

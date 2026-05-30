@@ -26,13 +26,13 @@ type SystemUpdateConfig struct {
 // SystemUpdateWorkflow returns the three-step system.update saga.
 //
 //  1. plan      — list nodes, filter online, sort by role (compute → storage
-//                 → controlplane → firewall), drop self + excluded. Emits
-//                 a `planned` change event with the ordered target list.
+//     → controlplane → firewall), drop self + excluded. Emits
+//     a `planned` change event with the ordered target list.
 //  2. cascade   — for each target in order, submit a child node.update job
-//                 and wait for its terminal status. On a child failure the
-//                 cascade halts; remaining nodes are reported skipped.
+//     and wait for its terminal status. On a child failure the
+//     cascade halts; remaining nodes are reported skipped.
 //  3. summarize — emit the final `completed` (or `aborted`) change event
-//                 with the per-node outcome counts.
+//     with the per-node outcome counts.
 //
 // Cascade ordering rationale: the firewall update is the riskiest from a
 // "did I lose connectivity to my fleet?" perspective. By updating it last

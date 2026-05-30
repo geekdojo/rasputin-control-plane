@@ -159,15 +159,15 @@ const (
 // UpdateChangeEvt is the payload published when a node transitions through
 // an update lifecycle state. Subscribed by the UI for live progress.
 type UpdateChangeEvt struct {
-	NodeID     string           `json:"nodeId"`
-	JobID      string           `json:"jobId"`
-	BundleID   string           `json:"bundleId,omitempty"`
-	Change     UpdateChangeType `json:"change"`
-	FromSlot   UpdateSlot       `json:"fromSlot,omitempty"`
-	ToSlot     UpdateSlot       `json:"toSlot,omitempty"`
-	Version    string           `json:"version,omitempty"`
-	Reason     string           `json:"reason,omitempty"`
-	Ts         time.Time        `json:"ts"`
+	NodeID   string           `json:"nodeId"`
+	JobID    string           `json:"jobId"`
+	BundleID string           `json:"bundleId,omitempty"`
+	Change   UpdateChangeType `json:"change"`
+	FromSlot UpdateSlot       `json:"fromSlot,omitempty"`
+	ToSlot   UpdateSlot       `json:"toSlot,omitempty"`
+	Version  string           `json:"version,omitempty"`
+	Reason   string           `json:"reason,omitempty"`
+	Ts       time.Time        `json:"ts"`
 }
 
 // ----- Bundle metadata ----------------------------------------------------

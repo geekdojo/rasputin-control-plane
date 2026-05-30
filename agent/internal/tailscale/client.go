@@ -16,20 +16,20 @@ type Backend interface {
 
 // EnrollInput captures the parameters for a fresh `tailscale up`.
 type EnrollInput struct {
-	LoginServer      string
-	AuthKey          string
-	Hostname         string
-	AdvertiseRoutes  []string
-	AcceptDNS        bool
-	AcceptRoutes     bool
+	LoginServer     string
+	AuthKey         string
+	Hostname        string
+	AdvertiseRoutes []string
+	AcceptDNS       bool
+	AcceptRoutes    bool
 }
 
 // Status is the small projection of `tailscale status --json` we care about.
 type Status struct {
-	Enrolled   bool     `json:"enrolled"`
-	TailnetID  string   `json:"tailnetId,omitempty"`
-	TailnetIP  string   `json:"tailnetIp,omitempty"`
-	Hostname   string   `json:"hostname,omitempty"`
-	Routes     []string `json:"routes,omitempty"`
-	PeerCount  int      `json:"peerCount,omitempty"`
+	Enrolled  bool     `json:"enrolled"`
+	TailnetID string   `json:"tailnetId,omitempty"`
+	TailnetIP string   `json:"tailnetIp,omitempty"`
+	Hostname  string   `json:"hostname,omitempty"`
+	Routes    []string `json:"routes,omitempty"`
+	PeerCount int      `json:"peerCount,omitempty"`
 }

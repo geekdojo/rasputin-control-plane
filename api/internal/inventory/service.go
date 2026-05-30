@@ -279,4 +279,3 @@ func nodeIDFromSubject(subject string) (string, bool) {
 	}
 	return parts[2], true
 }
-

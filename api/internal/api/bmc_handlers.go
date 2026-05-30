@@ -72,8 +72,8 @@ func (s *Server) handleListBMCStates(w http.ResponseWriter, r *http.Request) {
 //     and subscribes to the .out subject (where the agent publishes serial
 //     bytes from the device).
 //  3. Two goroutines run concurrently:
-//       - readLoop: WS → session.Write() → NATS .in subject
-//       - writeLoop: session.Out → WS frames
+//     - readLoop: WS → session.Write() → NATS .in subject
+//     - writeLoop: session.Out → WS frames
 //  4. When either side closes, the other goroutine sees ctx.Done() and we
 //     SessionManager.Close() which RPCs bmc.sol.close.
 func (s *Server) handleBMCSOL(w http.ResponseWriter, r *http.Request) {

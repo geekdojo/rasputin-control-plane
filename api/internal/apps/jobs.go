@@ -21,9 +21,9 @@ type DeploySpec struct {
 
 // DeployWorkflow drives the deploy saga:
 //
-//   1. load     — look up the app, validate target node is online
-//   2. push     — RPC the target agent's docker.deploy handler
-//   3. confirm  — agent's ack persists; emit a change event
+//  1. load     — look up the app, validate target node is online
+//  2. push     — RPC the target agent's docker.deploy handler
+//  3. confirm  — agent's ack persists; emit a change event
 //
 // The agent owns whether the deploy actually succeeded (container running,
 // healthchecks passing). The api just records what the agent reported.
@@ -55,11 +55,11 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 // Two steps:
 //
 //  1. list  — pull every app from the store; the result is just metadata
-//             for the next step (kept for observability + step result).
+//     for the next step (kept for observability + step result).
 //  2. sweep — for each app, if its target node is online, NATS-RPC
-//             docker.status; if the derived status differs from the
-//             stored lastStatus, update + emit a change event. Apps on
-//             offline nodes are recorded but not failed.
+//     docker.status; if the derived status differs from the
+//     stored lastStatus, update + emit a change event. Apps on
+//     offline nodes are recorded but not failed.
 //
 // The saga never fails as a whole — individual app failures are logged
 // and counted but don't abort the sweep. This is "honest drift
@@ -93,10 +93,10 @@ func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn
 		}
 
 		var (
-			checked  int
-			drifted  int
-			skipped  int
-			failed   int
+			checked int
+			drifted int
+			skipped int
+			failed  int
 		)
 
 		for _, app := range all {
@@ -170,7 +170,6 @@ func computeNodeStatus(lastSeen time.Time) proto.NodeStatus {
 		return proto.StatusOffline
 	}
 }
-
 
 func parseSpec(raw json.RawMessage) (*DeploySpec, error) {
 	var spec DeploySpec

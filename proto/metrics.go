@@ -9,13 +9,13 @@ import "time"
 // percents are 0–100, counts are integers cast to float, durations are
 // seconds.
 const (
-	MetricCPUPercent    = "cpu_percent"
-	MetricMemUsedBytes  = "mem_used_bytes"
-	MetricMemTotalBytes = "mem_total_bytes"
-	MetricDiskUsedBytes = "disk_used_bytes"
-	MetricDiskTotalBytes = "disk_total_bytes"
+	MetricCPUPercent         = "cpu_percent"
+	MetricMemUsedBytes       = "mem_used_bytes"
+	MetricMemTotalBytes      = "mem_total_bytes"
+	MetricDiskUsedBytes      = "disk_used_bytes"
+	MetricDiskTotalBytes     = "disk_total_bytes"
 	MetricAgentUptimeSeconds = "agent_uptime_seconds"
-	MetricGoroutines = "goroutines"
+	MetricGoroutines         = "goroutines"
 )
 
 // MetricsEvt is the payload published every collection tick on

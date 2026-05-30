@@ -25,11 +25,11 @@ type Spec struct {
 // Three steps:
 //
 //  1. validate — spec sanity; target node must exist in inventory (so we
-//                refuse typos that would silently no-op).
+//     refuse typos that would silently no-op).
 //  2. dispatch — RPC the BMC host's agent on the per-verb cmd subject.
-//                The agent's BMC backend translates verb → hardware op.
+//     The agent's BMC backend translates verb → hardware op.
 //  3. record   — persist the reported state + audit row; publish a
-//                BMCChangeEvt the UI's WS subscriber picks up.
+//     BMCChangeEvt the UI's WS subscriber picks up.
 func PowerWorkflow(svc *Service, inv *inventory.Store) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "bmc.power",

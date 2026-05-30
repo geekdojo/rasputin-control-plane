@@ -33,11 +33,11 @@ func ValidMeshIntentKind(k MeshIntentKind) bool {
 // resolved key string is persisted on the intent row (hs_value) after
 // apply — Headscale will not return the plaintext on subsequent reads.
 type PreAuthKeySpec struct {
-	User       string   `json:"user"`            // Headscale user; defaults to "rasputin-operator" in v0
-	Reusable   bool     `json:"reusable"`        // default false; single-use is safer
-	Ephemeral  bool     `json:"ephemeral"`       // ephemeral nodes auto-expire on disconnect; useful for user devices on transient networks
-	ExpiresIn  string   `json:"expiresIn"`       // duration string like "24h"; default 24h
-	Tags       []string `json:"tags,omitempty"`  // ACL tags assigned at registration; defaults ["tag:user-device"]
+	User       string   `json:"user"`                 // Headscale user; defaults to "rasputin-operator" in v0
+	Reusable   bool     `json:"reusable"`             // default false; single-use is safer
+	Ephemeral  bool     `json:"ephemeral"`            // ephemeral nodes auto-expire on disconnect; useful for user devices on transient networks
+	ExpiresIn  string   `json:"expiresIn"`            // duration string like "24h"; default 24h
+	Tags       []string `json:"tags,omitempty"`       // ACL tags assigned at registration; defaults ["tag:user-device"]
 	DeviceHint string   `json:"deviceHint,omitempty"` // human label shown to the user ("Bryce's MacBook")
 }
 
@@ -53,23 +53,23 @@ type SubnetRouteSpec struct {
 // runs `tailscale up --login-server=<loginServer> --auth-key=<authKey>`,
 // optionally advertising routes.
 type MeshEnrollCmd struct {
-	LoginServer      string   `json:"loginServer"`
-	AuthKey          string   `json:"authKey"`
-	Hostname         string   `json:"hostname,omitempty"`
-	AdvertiseRoutes  []string `json:"advertiseRoutes,omitempty"`
-	AcceptDNS        bool     `json:"acceptDns"`
-	AcceptRoutes     bool     `json:"acceptRoutes"`
+	LoginServer     string   `json:"loginServer"`
+	AuthKey         string   `json:"authKey"`
+	Hostname        string   `json:"hostname,omitempty"`
+	AdvertiseRoutes []string `json:"advertiseRoutes,omitempty"`
+	AcceptDNS       bool     `json:"acceptDns"`
+	AcceptRoutes    bool     `json:"acceptRoutes"`
 }
 
 // MeshEnrollAck reports the post-enrollment tailscale state.
 type MeshEnrollAck struct {
-	OK         bool     `json:"ok"`
-	TailnetID  string   `json:"tailnetId,omitempty"` // Headscale node id, if the agent could resolve it
-	TailnetIP  string   `json:"tailnetIp,omitempty"`
-	Hostname   string   `json:"hostname,omitempty"`
-	Routes     []string `json:"routes,omitempty"`
-	Backend    string   `json:"backend"` // "tailscale" or "mock"
-	Detail     string   `json:"detail,omitempty"`
+	OK        bool     `json:"ok"`
+	TailnetID string   `json:"tailnetId,omitempty"` // Headscale node id, if the agent could resolve it
+	TailnetIP string   `json:"tailnetIp,omitempty"`
+	Hostname  string   `json:"hostname,omitempty"`
+	Routes    []string `json:"routes,omitempty"`
+	Backend   string   `json:"backend"` // "tailscale" or "mock"
+	Detail    string   `json:"detail,omitempty"`
 }
 
 // MeshLeaveCmd asks the agent to leave the tailnet (tailscale logout +
@@ -86,15 +86,15 @@ type MeshLeaveAck struct {
 type MeshStatusCmd struct{}
 
 type MeshStatusAck struct {
-	OK           bool     `json:"ok"`
-	Enrolled     bool     `json:"enrolled"`
-	TailnetID    string   `json:"tailnetId,omitempty"`
-	TailnetIP    string   `json:"tailnetIp,omitempty"`
-	Hostname     string   `json:"hostname,omitempty"`
-	Routes       []string `json:"routes,omitempty"`
-	PeerCount    int      `json:"peerCount,omitempty"`
-	Backend      string   `json:"backend"`
-	Detail       string   `json:"detail,omitempty"`
+	OK        bool     `json:"ok"`
+	Enrolled  bool     `json:"enrolled"`
+	TailnetID string   `json:"tailnetId,omitempty"`
+	TailnetIP string   `json:"tailnetIp,omitempty"`
+	Hostname  string   `json:"hostname,omitempty"`
+	Routes    []string `json:"routes,omitempty"`
+	PeerCount int      `json:"peerCount,omitempty"`
+	Backend   string   `json:"backend"`
+	Detail    string   `json:"detail,omitempty"`
 }
 
 // MeshChangeType enumerates the change events the api publishes on
@@ -103,15 +103,15 @@ type MeshStatusAck struct {
 type MeshChangeType string
 
 const (
-	MeshApplied         MeshChangeType = "applied"
-	MeshInSync          MeshChangeType = "in_sync"
-	MeshDrift           MeshChangeType = "drift"
-	MeshReconciled      MeshChangeType = "reconciled"
-	MeshNodeEnrolled    MeshChangeType = "node_enrolled"
-	MeshNodeLeft        MeshChangeType = "node_left"
-	MeshKeyCreated      MeshChangeType = "key_created"
-	MeshKeyExpired      MeshChangeType = "key_expired"
-	MeshUserDeviceSeen  MeshChangeType = "user_device_seen"
+	MeshApplied        MeshChangeType = "applied"
+	MeshInSync         MeshChangeType = "in_sync"
+	MeshDrift          MeshChangeType = "drift"
+	MeshReconciled     MeshChangeType = "reconciled"
+	MeshNodeEnrolled   MeshChangeType = "node_enrolled"
+	MeshNodeLeft       MeshChangeType = "node_left"
+	MeshKeyCreated     MeshChangeType = "key_created"
+	MeshKeyExpired     MeshChangeType = "key_expired"
+	MeshUserDeviceSeen MeshChangeType = "user_device_seen"
 )
 
 // MeshChangeEvt is the payload published on each lifecycle transition.

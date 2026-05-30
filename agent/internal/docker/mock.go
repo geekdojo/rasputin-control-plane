@@ -31,9 +31,9 @@ func NewMockBackend(dir string) (*MockBackend, error) {
 func (m *MockBackend) Name() string { return "mock" }
 
 type mockState struct {
-	AppID     string    `json:"appId"`
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
+	AppID      string    `json:"appId"`
+	Name       string    `json:"name"`
+	Status     string    `json:"status"`
 	DeployedAt time.Time `json:"deployedAt,omitempty"`
 	StoppedAt  time.Time `json:"stoppedAt,omitempty"`
 }

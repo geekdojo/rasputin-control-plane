@@ -20,10 +20,10 @@ type MockBackend struct {
 }
 
 type mockTSState struct {
-	Enrolled  bool      `json:"enrolled"`
-	Hostname  string    `json:"hostname"`
-	TailnetIP string    `json:"tailnetIp"`
-	Routes    []string  `json:"routes"`
+	Enrolled   bool      `json:"enrolled"`
+	Hostname   string    `json:"hostname"`
+	TailnetIP  string    `json:"tailnetIp"`
+	Routes     []string  `json:"routes"`
 	EnrolledAt time.Time `json:"enrolledAt"`
 }
 

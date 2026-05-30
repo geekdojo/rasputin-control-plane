@@ -255,7 +255,7 @@ func (s *Service) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 // ----- helpers ------------------------------------------------------------
 
 type publicUserView struct {
-	ID          string     `json:"id"`           // hex of user handle
+	ID          string     `json:"id"` // hex of user handle
 	Name        string     `json:"name"`
 	DisplayName string     `json:"displayName"`
 	CreatedAt   time.Time  `json:"createdAt"`

@@ -81,9 +81,9 @@ type FirewallGetAck struct {
 type FirewallChangeType string
 
 const (
-	FirewallApplied  FirewallChangeType = "applied"
-	FirewallDrift    FirewallChangeType = "drift"
-	FirewallInSync   FirewallChangeType = "in_sync"
+	FirewallApplied    FirewallChangeType = "applied"
+	FirewallDrift      FirewallChangeType = "drift"
+	FirewallInSync     FirewallChangeType = "in_sync"
 	FirewallReconciled FirewallChangeType = "reconciled"
 )
 

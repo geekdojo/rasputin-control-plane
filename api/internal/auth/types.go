@@ -10,10 +10,10 @@ import (
 
 // User is the api's view of a Rasputin user. Implements webauthn.User.
 type User struct {
-	ID          []byte    `json:"id"`
-	Name        string    `json:"name"`
-	DisplayName string    `json:"displayName"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID          []byte     `json:"id"`
+	Name        string     `json:"name"`
+	DisplayName string     `json:"displayName"`
+	CreatedAt   time.Time  `json:"createdAt"`
 	LastLoginAt *time.Time `json:"lastLoginAt,omitempty"`
 	// credentials is loaded eagerly by the store for WebAuthn flows.
 	credentials []webauthn.Credential

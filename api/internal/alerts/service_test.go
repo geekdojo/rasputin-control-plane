@@ -22,13 +22,13 @@ import (
 // reports the passkey step undone, and the setup-incomplete alert fires
 // in every test no matter what.
 type fixture struct {
-	inv        *inventory.Store
-	jobs       *jobs.Store
-	apps       *apps.Store
-	setup      *setup.Service
-	svc        *Service
-	ctx        context.Context
-	hasUsers   bool
+	inv      *inventory.Store
+	jobs     *jobs.Store
+	apps     *apps.Store
+	setup    *setup.Service
+	svc      *Service
+	ctx      context.Context
+	hasUsers bool
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -61,10 +61,10 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(func() { _ = setupStore.Close() })
 
 	f := &fixture{
-		inv:   invStore,
-		jobs:  jobStore,
-		apps:  appStore,
-		ctx:   ctx,
+		inv:  invStore,
+		jobs: jobStore,
+		apps: appStore,
+		ctx:  ctx,
 	}
 	// HasUsers closes over the fixture's mutable hasUsers field so tests
 	// can opt in (markSetupComplete) without rebuilding the Service.
@@ -389,9 +389,9 @@ func TestList_SortedByCritFirstThenOldestSince(t *testing.T) {
 	f := newFixture(t)
 	f.markSetupComplete(t)
 	// A WARN (stale node) and two CRITs (offline nodes) with different Since.
-	f.insertNode(t, "warn-node", 45*time.Second)        // stale → warn
-	f.insertNode(t, "crit-recent", 5*time.Minute)       // offline → crit, since ≈ 5min ago
-	f.insertNode(t, "crit-very-old", 48*time.Hour)      // offline → crit, since ≈ 48h ago
+	f.insertNode(t, "warn-node", 45*time.Second)   // stale → warn
+	f.insertNode(t, "crit-recent", 5*time.Minute)  // offline → crit, since ≈ 5min ago
+	f.insertNode(t, "crit-very-old", 48*time.Hour) // offline → crit, since ≈ 48h ago
 
 	alerts, err := f.svc.List(f.ctx)
 	if err != nil {
@@ -480,4 +480,3 @@ func TestHumanizeDuration(t *testing.T) {
 		})
 	}
 }
-

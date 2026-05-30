@@ -52,8 +52,8 @@ func applyMigrations(ctx context.Context, db *sql.DB) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func ms(t time.Time) int64 { return t.UnixMilli() }
-func msPtr(t time.Time) any { return t.UnixMilli() }
+func ms(t time.Time) int64     { return t.UnixMilli() }
+func msPtr(t time.Time) any    { return t.UnixMilli() }
 func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 // ----- Users --------------------------------------------------------------

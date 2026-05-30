@@ -163,8 +163,8 @@ func (s *mockSOL) run(ctx context.Context) {
 	}
 }
 
-func (s *mockSOL) SessionID() string    { return s.id }
-func (s *mockSOL) Out() <-chan []byte   { return s.out }
+func (s *mockSOL) SessionID() string  { return s.id }
+func (s *mockSOL) Out() <-chan []byte { return s.out }
 func (s *mockSOL) Write(p []byte) error {
 	// Echo back so the operator sees what they typed.
 	select {

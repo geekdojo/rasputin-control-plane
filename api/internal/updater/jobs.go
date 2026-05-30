@@ -443,4 +443,3 @@ func publishChange(nc *nats.Conn, ev proto.UpdateChangeEvt) {
 		log.Printf("updater: publish change: %v", err)
 	}
 }
-
