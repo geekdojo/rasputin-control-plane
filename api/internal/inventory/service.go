@@ -92,7 +92,7 @@ func (s *Service) seed(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, n := range nodes {
-		s.statusByNode[n.ID] = computeStatus(n.LastSeen)
+		s.statusByNode[n.ID] = ComputeStatus(n.LastSeen)
 	}
 	return nil
 }
@@ -217,7 +217,7 @@ func (s *Service) scanForTransitions() {
 		return
 	}
 	for _, n := range nodes {
-		cur := computeStatus(n.LastSeen)
+		cur := ComputeStatus(n.LastSeen)
 		s.mu.Lock()
 		prev := s.statusByNode[n.ID]
 		if cur != prev {
@@ -255,7 +255,11 @@ func (s *Service) emit(n *proto.Node, change proto.InventoryChangeType) {
 	}
 }
 
-func computeStatus(lastSeen time.Time) proto.NodeStatus {
+// ComputeStatus derives a node's status from its last heartbeat timestamp
+// against staleAfter (30s) / offlineAfter (2m) thresholds. Exported so the
+// HTTP handlers and the alerts aggregator can share the same logic — the
+// nodes table doesn't persist status, every consumer has to compute it.
+func ComputeStatus(lastSeen time.Time) proto.NodeStatus {
 	gap := time.Since(lastSeen)
 	switch {
 	case gap < staleAfter:

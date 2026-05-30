@@ -32,6 +32,8 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
+// Status derivation lives in inventory.ComputeStatus — see nodeAlerts.
+
 // failedJobLookback bounds how far back we surface failed jobs. Past this
 // window the failure is "history" — the operator should look at /tasks if
 // they care, not be nagged by a banner.
@@ -96,9 +98,9 @@ func (s *Service) nodeAlerts(ctx context.Context, _ time.Time) ([]proto.Alert, e
 	out := make([]proto.Alert, 0, len(nodes))
 	for _, n := range nodes {
 		// inventory.Store.List doesn't populate Status — the column doesn't
-		// exist, status is derived from last_seen. Compute it the same way
-		// /api/nodes does. (Third copy of this logic; see TODO at bottom.)
-		switch computeNodeStatus(n.LastSeen) {
+		// exist, status is derived from last_seen. Use the same helper the
+		// /api/nodes handler uses so all three readers agree.
+		switch inventory.ComputeStatus(n.LastSeen) {
 		case proto.StatusOffline:
 			out = append(out, proto.Alert{
 				ID:          "node-offline:" + n.ID,
@@ -223,30 +225,6 @@ func severityRank(s proto.AlertSeverity) int {
 		return 1
 	default:
 		return 0
-	}
-}
-
-// computeNodeStatus mirrors inventory.computeStatus (unexported) and the
-// same helper in api/handlers.go. Thresholds:
-//
-//	gap < 30s  → online
-//	gap < 2m   → stale
-//	gap >= 2m  → offline
-//
-// TODO(consolidate): this is now duplicated in three places (here,
-// inventory/service.go, api/handlers.go). The cleanest fix is to export
-// it from inventory. Keeping the duplication today because the cycle-risk
-// note in api/handlers.go suggests the author already considered it; a
-// dedicated refactor PR can lift this into one place.
-func computeNodeStatus(lastSeen time.Time) proto.NodeStatus {
-	gap := time.Since(lastSeen)
-	switch {
-	case gap < 30*time.Second:
-		return proto.StatusOnline
-	case gap < 2*time.Minute:
-		return proto.StatusStale
-	default:
-		return proto.StatusOffline
 	}
 }
 
