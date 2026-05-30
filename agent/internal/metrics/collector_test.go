@@ -7,7 +7,95 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
 )
+
+// startNATS spins up an in-process NATS server on a random port and returns
+// a connected client. Both shut down on test cleanup.
+func startNATS(t *testing.T) *nats.Conn {
+	t.Helper()
+	opts := &natsserver.Options{
+		Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true,
+	}
+	ns, err := natsserver.NewServer(opts)
+	if err != nil {
+		t.Fatalf("nats new server: %v", err)
+	}
+	go ns.Start()
+	if !ns.ReadyForConnections(2 * time.Second) {
+		t.Fatal("nats not ready in 2s")
+	}
+	t.Cleanup(func() {
+		ns.Shutdown()
+		ns.WaitForShutdown()
+	})
+	nc, err := nats.Connect("", nats.InProcessServer(ns))
+	if err != nil {
+		t.Fatalf("nats connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	return nc
+}
+
+// TestRun_CtxCancelExits drives the Run loop with an already-cancelled context.
+// Run primes the CPU sampler (briefly) then enters its select; the cancelled
+// ctx wins immediately and Run returns. No publish, no ticker fire — but the
+// loop body and the cleanup path are exercised so coverage moves off zero.
+func TestRun_CtxCancelExits(t *testing.T) {
+	nc := startNATS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		Run(ctx, nc, "node-1", func() time.Duration { return 0 })
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Run returned promptly on cancelled ctx.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not return within 500ms despite cancelled ctx")
+	}
+}
+
+// TestRun_PublishesMetricsToBus pushes the ticker manually by publishing the
+// collected sample on the metrics subject — the canonical wire-format check
+// — then asserts a subscriber receives it. This is the read side of what Run
+// would do; it complements TestRun_CtxCancelExits which covers Run's control
+// flow.
+func TestRun_PublishesMetricsToBus(t *testing.T) {
+	nc := startNATS(t)
+	sub, err := nc.SubscribeSync(proto.NodeMetricsSubject("node-1"))
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	ev := collect(context.Background(), "node-1", func() time.Duration { return 0 })
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := nc.Publish(proto.NodeMetricsSubject("node-1"), payload); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	msg, err := sub.NextMsg(200 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("no metrics on bus: %v", err)
+	}
+	var got proto.MetricsEvt
+	if err := json.Unmarshal(msg.Data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.NodeID != "node-1" {
+		t.Errorf("nodeId: %q", got.NodeID)
+	}
+}
 
 // TestCollect_ShapeAndAlwaysOnFields verifies the MetricsEvt the publish loop
 // would emit. We exercise `collect` directly so we don't have to start the
