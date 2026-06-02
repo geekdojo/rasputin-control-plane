@@ -23,8 +23,10 @@ import (
 )
 
 // Interval is the gap between samples. 10s matches the heartbeat cadence so
-// metrics and presence track together.
-const Interval = 10 * time.Second
+// metrics and presence track together. Exposed as a var (not a const) so
+// tests that exercise the Run loop can shrink it to milliseconds without
+// burning 10s of real time per case.
+var Interval = 10 * time.Second
 
 // Run is the collector loop. Blocks until ctx is cancelled. Errors during
 // individual probes (e.g. disk usage on a path we can't reach) are logged

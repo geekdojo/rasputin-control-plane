@@ -168,14 +168,58 @@ func TestCollect_RoundTripsAsMetricsEvt(t *testing.T) {
 	}
 }
 
-func TestInterval_IsTenSeconds(t *testing.T) {
+func TestInterval_DefaultIsTenSeconds(t *testing.T) {
 	// The collector cadence is part of the contract with the heartbeat
 	// loop (10s matches). If someone retunes this, they should at least
 	// have to update this test, which jogs them into checking heartbeat
-	// alignment too.
+	// alignment too. Interval is a var (not a const) so tests can drive
+	// Run() at sub-second cadence — see TestRun_PublishesOnInterval.
 	if Interval != 10*time.Second {
 		t.Errorf("Interval = %v, want 10s", Interval)
 	}
+}
+
+// TestRun_PublishesOnInterval drives the Run loop end-to-end with a
+// millisecond Interval so we don't have to wait 10s real-time. Asserts
+// that at least one MetricsEvt lands on the bus within a tight budget,
+// proving (a) the ticker fires, (b) collect+publish wire correctly, and
+// (c) Interval is genuinely injectable now that it's a var.
+func TestRun_PublishesOnInterval(t *testing.T) {
+	prev := Interval
+	Interval = 50 * time.Millisecond
+	t.Cleanup(func() { Interval = prev })
+
+	nc := startNATS(t)
+	recv := make(chan proto.MetricsEvt, 8)
+	sub, err := nc.Subscribe(proto.NodeMetricsSubject("node-fast"), func(m *nats.Msg) {
+		var ev proto.MetricsEvt
+		if err := json.Unmarshal(m.Data, &ev); err == nil {
+			select {
+			case recv <- ev:
+			default:
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { Run(ctx, nc, "node-fast", func() time.Duration { return time.Minute }); close(done) }()
+
+	select {
+	case ev := <-recv:
+		if ev.NodeID != "node-fast" {
+			t.Errorf("first event nodeId: %q", ev.NodeID)
+		}
+	case <-time.After(900 * time.Millisecond):
+		t.Fatal("no metrics event in 900ms — Run is not honoring Interval override")
+	}
+	cancel()
+	<-done
 }
 
 // TestCollect_ProbesThatFailAreOmittedNotZeroed checks the "missing key on
