@@ -26,19 +26,35 @@ import (
 // when we have a Pi 5 + Buildroot image to test against.
 type RAUCBackend struct {
 	stateDir string
-	muted    *atomic.Bool
+	// binary is the resolved path to the rauc CLI. Held as a field rather
+	// than re-resolved via PATH on every exec — matches the tailscale
+	// backend's pattern and lets tests point at a shim without touching
+	// the process-wide PATH.
+	binary string
+	muted  *atomic.Bool
 }
 
 // NewRAUCBackend constructs a RAUCBackend. Returns an error if the rauc
 // CLI is not on PATH — callers should fall through to MockBackend then.
 func NewRAUCBackend(stateDir string) (*RAUCBackend, error) {
-	if _, err := exec.LookPath("rauc"); err != nil {
+	bin, err := exec.LookPath("rauc")
+	if err != nil {
 		return nil, fmt.Errorf("rauc not on PATH: %w", err)
+	}
+	return newRAUCBackend(stateDir, bin)
+}
+
+// newRAUCBackend is the lower-level constructor that takes an explicit
+// rauc binary path. Used by NewRAUCBackend (after PATH lookup) and by
+// tests that want to point at a shim without mutating the process env.
+func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
+	if binary == "" {
+		return nil, errors.New("rauc backend: binary path required")
 	}
 	if err := os.MkdirAll(filepath.Join(stateDir, "bundles"), 0o755); err != nil {
 		return nil, err
 	}
-	return &RAUCBackend{stateDir: stateDir}, nil
+	return &RAUCBackend{stateDir: stateDir, binary: binary}, nil
 }
 
 func (r *RAUCBackend) SetMuteHook(b *atomic.Bool) { r.muted = b }
@@ -46,7 +62,7 @@ func (r *RAUCBackend) SetMuteHook(b *atomic.Bool) { r.muted = b }
 func (r *RAUCBackend) Name() string { return "rauc" }
 
 func (r *RAUCBackend) Precheck(ctx context.Context) (*proto.UpdatePrecheckAck, error) {
-	out, err := exec.CommandContext(ctx, "rauc", "status", "--output-format=shell").Output()
+	out, err := exec.CommandContext(ctx, r.binary, "status", "--output-format=shell").Output()
 	if err != nil {
 		return &proto.UpdatePrecheckAck{OK: false, Detail: err.Error()}, nil
 	}
@@ -175,7 +191,7 @@ func (r *RAUCBackend) Install(ctx context.Context, bundleID, localPath string, t
 	if progressFn != nil {
 		progressFn("verify", 5)
 	}
-	cmd := exec.CommandContext(ctx, "rauc", "install", localPath)
+	cmd := exec.CommandContext(ctx, r.binary, "install", localPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("rauc install: %w: %s", err, out)
@@ -184,7 +200,7 @@ func (r *RAUCBackend) Install(ctx context.Context, bundleID, localPath string, t
 		progressFn("post-install", 100)
 	}
 	// `rauc info <bundle>` reports the version; parse it.
-	infoOut, err := exec.CommandContext(ctx, "rauc", "info", "--output-format=shell", localPath).Output()
+	infoOut, err := exec.CommandContext(ctx, r.binary, "info", "--output-format=shell", localPath).Output()
 	if err != nil {
 		return "", fmt.Errorf("rauc info: %w", err)
 	}
@@ -218,7 +234,7 @@ func (r *RAUCBackend) Reboot(ctx context.Context, bundleID string, delaySeconds 
 }
 
 func (r *RAUCBackend) MarkGood(ctx context.Context, bundleID string) error {
-	out, err := exec.CommandContext(ctx, "rauc", "status", "mark-good").CombinedOutput()
+	out, err := exec.CommandContext(ctx, r.binary, "status", "mark-good").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("rauc mark-good: %w: %s", err, out)
 	}
@@ -226,7 +242,7 @@ func (r *RAUCBackend) MarkGood(ctx context.Context, bundleID string) error {
 }
 
 func (r *RAUCBackend) MarkBad(ctx context.Context, bundleID, reason string) error {
-	out, err := exec.CommandContext(ctx, "rauc", "status", "mark-bad").CombinedOutput()
+	out, err := exec.CommandContext(ctx, r.binary, "status", "mark-bad").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("rauc mark-bad: %w: %s", err, out)
 	}

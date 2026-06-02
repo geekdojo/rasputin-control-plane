@@ -607,3 +607,54 @@ func TestRAUCBackend_InstallNoVersion(t *testing.T) {
 		t.Error("expected error when RAUC_MF_VERSION missing")
 	}
 }
+
+// TestRAUCBackend_ExplicitBinaryPath exercises the lower-level
+// newRAUCBackend constructor that takes an explicit binary path. This is
+// the test pattern adopted from tailscale/real.go — point at a shim
+// directly instead of mutating PATH. Faster (no PATH lookup), cleaner
+// (no env-var leak across parallel tests), and more honest (the field
+// being exercised is the one production code uses).
+func TestRAUCBackend_ExplicitBinaryPath(t *testing.T) {
+	if runtimeIsWindows() {
+		t.Skip("shim is /bin/sh")
+	}
+	shimDir := t.TempDir()
+	shimPath := shimDir + "/rauc-shim"
+	body := `#!/bin/sh
+case "$1" in
+  status)
+    cat <<EOF
+RAUC_BOOT_SLOT='rootfs.1'
+RAUC_SLOT_STATUS_1_BUNDLE_VERSION='9.9.9'
+EOF
+    ;;
+  *) exit 0 ;;
+esac
+`
+	if err := writeFile755(shimPath, body); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+	b, err := newRAUCBackend(t.TempDir(), shimPath)
+	if err != nil {
+		t.Fatalf("newRAUCBackend: %v", err)
+	}
+	ack, err := b.Precheck(context.Background())
+	if err != nil {
+		t.Fatalf("Precheck: %v", err)
+	}
+	if !ack.OK {
+		t.Errorf("ack: %+v", ack)
+	}
+	if ack.ActiveSlot != proto.SlotB {
+		t.Errorf("ActiveSlot: got %q want %q", ack.ActiveSlot, proto.SlotB)
+	}
+	if ack.CurrentVersion != "9.9.9" {
+		t.Errorf("CurrentVersion: got %q want 9.9.9", ack.CurrentVersion)
+	}
+}
+
+func TestRAUCBackend_NewRAUCBackend_RejectsEmptyBinary(t *testing.T) {
+	if _, err := newRAUCBackend(t.TempDir(), ""); err == nil {
+		t.Error("empty binary path should fail")
+	}
+}
