@@ -20,6 +20,13 @@ type StepCtx struct {
 	JobID string
 	Spec  json.RawMessage
 	NATS  *nats.Conn
+	// PriorResults holds the json.RawMessage each previously-completed
+	// step in this workflow returned, keyed by step name. Steps that
+	// returned nil are absent. Lets a later step reuse an earlier
+	// step's output (e.g. install reading precheck's ack) without
+	// re-issuing the RPC. nil-safe — a freshly-constructed StepCtx may
+	// have a nil map.
+	PriorResults map[string]json.RawMessage
 	// Log appends a log line both to the persistent job_events table and to
 	// the live NATS event stream so the UI sees it in real time.
 	Log func(level, message string)
@@ -185,8 +192,9 @@ func (r *Runner) run(j *Job, wf Workflow) {
 	}
 	r.emit(ctx, j.ID, proto.JobStarted, nil)
 
+	prior := make(map[string]json.RawMessage, len(wf.Steps))
 	for seq, step := range wf.Steps {
-		if err := r.runStep(ctx, j, seq, step); err != nil {
+		if err := r.runStep(ctx, j, seq, step, prior); err != nil {
 			now := time.Now().UTC()
 			_ = r.store.MarkJobFailed(ctx, j.ID, err.Error(), now)
 			r.emit(ctx, j.ID, proto.JobFailed, map[string]string{"error": err.Error()})
@@ -198,7 +206,7 @@ func (r *Runner) run(j *Job, wf Workflow) {
 	r.emit(ctx, j.ID, proto.JobSucceeded, nil)
 }
 
-func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep) error {
+func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep, prior map[string]json.RawMessage) error {
 	startedAt := time.Now().UTC()
 	stepRow := &JobStep{
 		JobID:     j.ID,
@@ -230,10 +238,11 @@ func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep
 		}
 		stepCtx, cancel := context.WithTimeout(ctx, step.Timeout)
 		sc := &StepCtx{
-			Ctx:   stepCtx,
-			JobID: j.ID,
-			Spec:  j.Spec,
-			NATS:  r.nc,
+			Ctx:          stepCtx,
+			JobID:        j.ID,
+			Spec:         j.Spec,
+			NATS:         r.nc,
+			PriorResults: prior,
 			Log: func(level, message string) {
 				r.emit(ctx, j.ID, proto.JobLog, proto.LogEventData{
 					Level: level, Message: message,
@@ -247,6 +256,9 @@ func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep
 			r.emit(ctx, j.ID, proto.JobStepSucceeded, proto.StepEventData{
 				Seq: seq, Name: step.Name, Attempt: attempt, Result: result,
 			})
+			if prior != nil && result != nil {
+				prior[step.Name] = result
+			}
 			return nil
 		}
 		lastErr = err

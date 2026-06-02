@@ -199,13 +199,27 @@ func updateInstall(store *Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		// Re-fetch the precheck result by requesting it again — cheap.
-		preMsg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.UpdatePrecheckSubject(spec.NodeID), mustJSON(proto.UpdatePrecheckCmd{}))
-		if err != nil {
-			return nil, fmt.Errorf("re-precheck: %w", err)
-		}
+		// Reuse the precheck step's already-published ack instead of
+		// re-issuing the RPC. The saga records each step's result in
+		// sc.PriorResults; here we want the "precheck" entry (the step
+		// name in jobs.go above). Fall through to a fresh RPC if the
+		// prior result is missing (e.g. step renamed or the install
+		// runs out-of-band).
 		var pre proto.UpdatePrecheckAck
-		_ = json.Unmarshal(preMsg.Data, &pre)
+		if raw, ok := sc.PriorResults["precheck"]; ok && len(raw) > 0 {
+			if err := json.Unmarshal(raw, &pre); err != nil {
+				return nil, fmt.Errorf("decode cached precheck ack: %w", err)
+			}
+		} else {
+			sc.Log("warn", "precheck result not cached; re-issuing RPC")
+			preMsg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.UpdatePrecheckSubject(spec.NodeID), mustJSON(proto.UpdatePrecheckCmd{}))
+			if err != nil {
+				return nil, fmt.Errorf("re-precheck: %w", err)
+			}
+			if err := json.Unmarshal(preMsg.Data, &pre); err != nil {
+				return nil, fmt.Errorf("decode re-precheck ack: %w", err)
+			}
+		}
 		if pre.InactiveSlot == "" || pre.InactiveSlot == proto.SlotUnknown {
 			return nil, errors.New("agent reported no inactive slot")
 		}

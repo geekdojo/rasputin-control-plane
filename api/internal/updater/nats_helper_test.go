@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,6 +345,56 @@ func TestUpdateInstall_HappyPath(t *testing.T) {
 	sc := newUpdaterCtx("j", specJSON("n", "sha-1"), nc)
 	if _, err := updateInstall(store)(sc); err != nil {
 		t.Fatalf("updateInstall: %v", err)
+	}
+}
+
+// When the saga seeds PriorResults with the precheck step's ack,
+// updateInstall must NOT re-issue the precheck RPC. Counting requests
+// on the precheck subject is the strict proof — zero requests means
+// the cache path won.
+func TestUpdateInstall_ReusesPriorPrecheckAck(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	seedNodeAndBundle(t, store, inv, "n", "sha-1", "v1")
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: "n", BundleSHA256: "sha-1",
+		FromSlot: proto.SlotUnknown, ToSlot: proto.SlotUnknown,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+
+	var precheckCalls int32
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject("n"), func(m *nats.Msg) {
+		atomic.AddInt32(&precheckCalls, 1)
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+			CurrentVersion: "v0", Backend: "mock",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+	inSub, _ := nc.Subscribe(proto.UpdateInstallSubject("n"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdateInstallAck{
+			OK: true, TargetSlot: proto.SlotB, NewVersion: "v1",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = inSub.Unsubscribe() }()
+
+	// Seed PriorResults exactly as the saga would after the precheck step.
+	priorAck, _ := json.Marshal(proto.UpdatePrecheckAck{
+		OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+		CurrentVersion: "v0", Backend: "mock",
+	})
+	sc := newUpdaterCtx("j", specJSON("n", "sha-1"), nc)
+	sc.PriorResults = map[string]json.RawMessage{"precheck": priorAck}
+
+	if _, err := updateInstall(store)(sc); err != nil {
+		t.Fatalf("updateInstall: %v", err)
+	}
+	if got := atomic.LoadInt32(&precheckCalls); got != 0 {
+		t.Errorf("expected 0 precheck RPCs (cached ack reused), got %d", got)
 	}
 }
 
