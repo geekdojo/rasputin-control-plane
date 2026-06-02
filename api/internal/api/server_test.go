@@ -2,9 +2,17 @@ package api
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -232,8 +240,9 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	}
 	runner := jobs.NewRunner(jobStore, nc)
 
+	trustDir := dir
 	srv := NewServer(jobStore, runner, invStore, fwStore, appStore,
-		mtrStore, updStore, verifier, bundleDir,
+		mtrStore, updStore, verifier, bundleDir, trustDir,
 		meshSvc, bmcSvc, setupSvc, authSvc, nc)
 
 	f.srv = srv
@@ -977,6 +986,66 @@ func TestHandleDeleteMeshDevice_NotFound(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Errorf("want 404, got %d", w.Code)
 	}
+}
+
+// --- /api/mesh/ios-profile -------------------------------------------------
+
+func TestHandleMeshIOSProfile_Missing404(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodGet, "/api/mesh/ios-profile", "", c)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("want 404 when root-ca.pem absent, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleMeshIOSProfile_ServesAppleAspenConfig(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	// Drop a fresh self-signed cert at <trustDir>/root-ca.pem (trustDir is
+	// the fixture's dir).
+	certPEM := freshSelfSignedCertForAPI(t)
+	rootPath := filepath.Join(f.srv.trustDir, "root-ca.pem")
+	if err := os.WriteFile(rootPath, certPEM, 0o644); err != nil {
+		t.Fatalf("write root-ca.pem: %v", err)
+	}
+	w := f.do(t, http.MethodGet, "/api/mesh/ios-profile", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/x-apple-aspen-config" {
+		t.Errorf("content-type: %q", got)
+	}
+	if got := w.Header().Get("Content-Disposition"); got == "" {
+		t.Error("content-disposition missing — iOS Safari won't trigger install prompt")
+	}
+	if !strings.Contains(w.Body.String(), "com.apple.security.root") {
+		t.Errorf("body missing root payload type:\n%s", w.Body.String())
+	}
+}
+
+// freshSelfSignedCertForAPI mirrors the mesh-package test helper but
+// duplicated here to avoid an internal export just for the test.
+func freshSelfSignedCertForAPI(t *testing.T) []byte {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Rasputin API Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour).UTC(),
+		NotAfter:              time.Now().Add(24 * time.Hour).UTC(),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 // Verify the handler removes the node from Headscale before dropping the

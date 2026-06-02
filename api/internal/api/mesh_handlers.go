@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
@@ -66,6 +68,42 @@ func (s *Server) handleDeleteMeshDevice(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/mesh/ios-profile — returns an Apple .mobileconfig that installs
+// the Rasputin internal root CA. iOS Safari recognises the content-type
+// and disposition and offers to install the profile in Settings →
+// General → VPN & Device Management. Required so the iOS Tailscale client
+// can trust Headscale's TLS endpoint (signed by our internal CA).
+//
+// 404 with a clear message if the trust root isn't yet provisioned —
+// the wizard's TLS step is the natural place to surface that.
+func (s *Server) handleMeshIOSProfile(w http.ResponseWriter, r *http.Request) {
+	if s.trustDir == "" {
+		writeError(w, http.StatusNotFound, "trust dir not configured")
+		return
+	}
+	rootPath := filepath.Join(s.trustDir, "root-ca.pem")
+	pem, err := os.ReadFile(rootPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "internal root CA not provisioned — run scripts/pki-init.sh")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	profile, err := mesh.BuildIOSMobileConfig(pem, "Rasputin Trust Root", "Rasputin")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "build mobileconfig: "+err.Error())
+		return
+	}
+	// content-type that iOS Safari recognises; disposition triggers the
+	// install prompt instead of rendering inline.
+	w.Header().Set("Content-Type", "application/x-apple-aspen-config")
+	w.Header().Set("Content-Disposition", `attachment; filename="rasputin-trust.mobileconfig"`)
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(profile)
 }
 
 // GET /api/mesh/keys — list preauth_key intents. Returns the plaintext

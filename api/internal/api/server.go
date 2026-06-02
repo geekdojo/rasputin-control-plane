@@ -29,6 +29,7 @@ type Server struct {
 	updater         *updater.Store
 	updaterVerifier *updater.Verifier
 	bundleDir       string
+	trustDir        string
 	mesh            *mesh.Service
 	bmc             *bmc.Service
 	bmcSessions     *bmc.SessionManager
@@ -52,6 +53,7 @@ func NewServer(
 	updaterStore *updater.Store,
 	updaterVerifier *updater.Verifier,
 	bundleDir string,
+	trustDir string,
 	meshSvc *mesh.Service,
 	bmcSvc *bmc.Service,
 	setupSvc *setup.Service,
@@ -61,7 +63,7 @@ func NewServer(
 	return &Server{
 		store: store, runner: runner, inv: inv, fw: fw, apps: appsStore,
 		metrics: mtr, updater: updaterStore, updaterVerifier: updaterVerifier,
-		bundleDir: bundleDir, mesh: meshSvc,
+		bundleDir: bundleDir, trustDir: trustDir, mesh: meshSvc,
 		bmc: bmcSvc, bmcSessions: bmc.NewSessionManager(bmcSvc),
 		setup: setupSvc,
 		// alerts is a pure read aggregator over the stores we already
@@ -144,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/mesh/apply", reqd(s.handleMeshApply))
 	mux.HandleFunc("POST /api/mesh/reconcile", reqd(s.handleMeshReconcile))
 	mux.HandleFunc("POST /api/mesh/enroll/{nodeId}", reqd(s.handleMeshEnrollNode))
+	mux.HandleFunc("GET /api/mesh/ios-profile", reqd(s.handleMeshIOSProfile))
 
 	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))
 	mux.HandleFunc("POST /api/setup/mesh", reqd(s.handleSetupMesh))
