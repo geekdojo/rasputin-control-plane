@@ -380,8 +380,19 @@ func toHSPreAuthKey(k hsPreAuthKey) HSPreAuthKey {
 		Expiration: k.Expiration.UTC(),
 		CreatedAt:  k.CreatedAt.UTC(),
 		Tags:       append([]string(nil), k.ACLTags...),
-		Plaintext:  k.Key, // empty on List per Headscale; only Create returns it
+		Plaintext:  usablePlaintext(k.Key),
 	}
+}
+
+// usablePlaintext strips Headscale's v0.28+ "prefix + ***" redaction marker
+// that List endpoints emit instead of empty. The saga relies on Plaintext
+// being non-empty ONLY when it's actually usable (i.e. the Create-time
+// response), so the redacted form gets normalized back to empty here.
+func usablePlaintext(s string) string {
+	if s == "" || strings.HasSuffix(s, "***") {
+		return ""
+	}
+	return s
 }
 
 func toHSNode(n hsNode) HSNode {
