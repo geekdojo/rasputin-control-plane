@@ -24,12 +24,12 @@ func freshSelfSignedCertPEM(t *testing.T, commonName string) []byte {
 		t.Fatalf("ecdsa generate: %v", err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: commonName, Organization: []string{"Rasputin"}},
-		NotBefore:    time.Now().Add(-time.Hour).UTC(),
-		NotAfter:     time.Now().Add(24 * time.Hour).UTC(),
-		IsCA:         true,
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: commonName, Organization: []string{"Rasputin"}},
+		NotBefore:             time.Now().Add(-time.Hour).UTC(),
+		NotAfter:              time.Now().Add(24 * time.Hour).UTC(),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)

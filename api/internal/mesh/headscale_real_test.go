@@ -28,13 +28,13 @@ type fakeHeadscale struct {
 	requests atomic.Int64
 
 	mu          sync.Mutex
-	users       map[string]string                // name -> id
+	users       map[string]string // name -> id
 	nextUserID  int
-	keys        map[string]fakeKey               // id -> key
+	keys        map[string]fakeKey // id -> key
 	nextKeyID   int
-	nodes       map[string]fakeNode              // id -> node
-	failRoute   map[string]int                   // "METHOD PATH" -> status
-	missingAuth bool                             // record whether any unauthed call slipped in
+	nodes       map[string]fakeNode // id -> node
+	failRoute   map[string]int      // "METHOD PATH" -> status
+	missingAuth bool                // record whether any unauthed call slipped in
 
 	// hooks captures every request method+path in arrival order — tests
 	// use this to assert call sequencing (e.g. ListUsers happens BEFORE
