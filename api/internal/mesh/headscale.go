@@ -44,6 +44,11 @@ type Client interface {
 	// --advertise-routes`; this is the approval step.
 	SetNodeRoutes(ctx context.Context, nodeID string, cidrs []string) error
 
+	// DeleteNode removes a node from Headscale. Idempotent: if the node
+	// is already gone, returning nil lets callers safely clean up a
+	// stale local cache row.
+	DeleteNode(ctx context.Context, nodeID string) error
+
 	// EnsureUser creates the user if it doesn't exist; idempotent.
 	EnsureUser(ctx context.Context, name string) error
 }
@@ -243,6 +248,16 @@ func (m *MockClient) SetNodeRoutes(_ context.Context, nodeID string, cidrs []str
 	sort.Strings(cp)
 	n.ApprovedRoutes = cp
 	m.state.Nodes[nodeID] = n
+	return m.persistLocked()
+}
+
+func (m *MockClient) DeleteNode(_ context.Context, nodeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.state.Nodes[nodeID]; !ok {
+		return nil // idempotent
+	}
+	delete(m.state.Nodes, nodeID)
 	return m.persistLocked()
 }
 

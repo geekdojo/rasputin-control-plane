@@ -117,6 +117,10 @@ func (f *fakeMeshClient) ListNodes(_ context.Context) ([]mesh.HSNode, error) {
 	return out, nil
 }
 func (f *fakeMeshClient) SetNodeRoutes(_ context.Context, _ string, _ []string) error { return nil }
+func (f *fakeMeshClient) DeleteNode(_ context.Context, nodeID string) error {
+	delete(f.nodes, nodeID)
+	return nil
+}
 func (f *fakeMeshClient) CreatePreAuthKey(_ context.Context, in mesh.CreatePreAuthKeyInput) (string, string, error) {
 	f.createCalls++
 	if f.createErr != nil {
@@ -972,6 +976,41 @@ func TestHandleDeleteMeshDevice_NotFound(t *testing.T) {
 	w := f.do(t, http.MethodDelete, "/api/mesh/devices/ghost", "", c)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("want 404, got %d", w.Code)
+	}
+}
+
+// Verify the handler removes the node from Headscale before dropping the
+// local cache row. Without this, a "deleted" device would re-appear on
+// the next reconcile.
+func TestHandleDeleteMeshDevice_RemovesFromHeadscale(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	ctx := context.Background()
+
+	// Seed both the local cache and the fake Headscale.
+	f.meshFake.nodes["hs-77"] = mesh.HSNode{ID: "hs-77", User: "alice", Hostname: "alice-laptop"}
+	if err := f.mesh.Store().UpsertDevice(ctx, &mesh.Device{
+		HSID: "hs-77", User: "alice", Hostname: "alice-laptop", Kind: "user",
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+
+	w := f.do(t, http.MethodDelete, "/api/mesh/devices/hs-77", "", c)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d body=%s", w.Code, w.Body.String())
+	}
+	if _, ok := f.meshFake.nodes["hs-77"]; ok {
+		t.Error("Headscale-side node was NOT removed")
+	}
+	rows, err := f.mesh.Store().ListDevices(ctx)
+	if err != nil {
+		t.Fatalf("ListDevices: %v", err)
+	}
+	for _, d := range rows {
+		if d.HSID == "hs-77" {
+			t.Error("local cache row was NOT removed")
+		}
 	}
 }
 

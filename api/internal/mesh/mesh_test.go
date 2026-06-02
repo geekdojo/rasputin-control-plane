@@ -30,12 +30,14 @@ type fakeClient struct {
 	expireCalls     int
 	setRoutesCalls  int
 	ensureUserCalls int
+	deleteNodeCalls int
 
 	createKeyErr  error
 	listNodesErr  error
 	listKeysErr   error
 	setRoutesErr  error
 	ensureUserErr error
+	deleteNodeErr error
 }
 
 func newFakeClient() *fakeClient {
@@ -132,6 +134,17 @@ func (f *fakeClient) SetNodeRoutes(_ context.Context, nodeID string, cidrs []str
 	}
 	n.ApprovedRoutes = append([]string{}, cidrs...)
 	f.nodes[nodeID] = n
+	return nil
+}
+
+func (f *fakeClient) DeleteNode(_ context.Context, nodeID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleteNodeCalls++
+	if f.deleteNodeErr != nil {
+		return f.deleteNodeErr
+	}
+	delete(f.nodes, nodeID)
 	return nil
 }
 

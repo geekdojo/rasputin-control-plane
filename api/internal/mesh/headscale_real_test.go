@@ -154,9 +154,29 @@ func (f *fakeHeadscale) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleListNodes(w)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/node/") && strings.HasSuffix(r.URL.Path, "/approve_routes"):
 		f.handleApproveRoutes(w, r)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/node/"):
+		f.handleDeleteNode(w, r)
 	default:
 		http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
 	}
+}
+
+func (f *fakeHeadscale) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	// Path: /api/v1/node/{id}
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 5 {
+		http.Error(w, `{"message":"bad path"}`, http.StatusBadRequest)
+		return
+	}
+	nodeID := parts[4]
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.nodes[nodeID]; !ok {
+		http.Error(w, `{"message":"node not found"}`, http.StatusNotFound)
+		return
+	}
+	delete(f.nodes, nodeID)
+	writeJSON(w, map[string]any{})
 }
 
 func (f *fakeHeadscale) handleListUsers(w http.ResponseWriter) {
@@ -669,6 +689,69 @@ func TestRealClient_SetNodeRoutes_NotFound(t *testing.T) {
 	var he *HTTPError
 	if !errors.As(err, &he) || he.Status != http.StatusNotFound {
 		t.Errorf("want 404 HTTPError, got %v", err)
+	}
+}
+
+func TestRealClient_DeleteNode_Success(t *testing.T) {
+	fh := newFakeHeadscale(t)
+	fh.seedUser("alice")
+	fh.seedNode(fakeNode{ID: "7", Name: "alice-laptop", User: "alice"})
+	c := newRealClientForFake(t, fh)
+
+	if err := c.DeleteNode(context.Background(), "7"); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	fh.mu.Lock()
+	_, present := fh.nodes["7"]
+	fh.mu.Unlock()
+	if present {
+		t.Error("node still present after delete")
+	}
+}
+
+// "Already gone" must resolve to nil so callers can clean up a stale
+// local cache row whose Headscale counterpart was already removed.
+func TestRealClient_DeleteNode_IdempotentOn404(t *testing.T) {
+	fh := newFakeHeadscale(t)
+	c := newRealClientForFake(t, fh)
+	if err := c.DeleteNode(context.Background(), "ghost"); err != nil {
+		t.Errorf("expected nil for missing node (idempotent), got %v", err)
+	}
+}
+
+// And for the v0.28 quirk: Headscale uses HTTP 400 + gRPC NotFound for
+// "no longer exists" in some paths. DeleteNode normalizes that too.
+func TestRealClient_DeleteNode_IdempotentOn400NotExist(t *testing.T) {
+	fh := newFakeHeadscale(t)
+	// Pre-program the route so the DELETE returns 400 with a body that
+	// looks like Headscale's "node no longer exists" message.
+	fh.failNext(http.MethodDelete, "/api/v1/node/99", http.StatusBadRequest)
+	c := newRealClientForFake(t, fh)
+	// Without the body-content match the test fake's failNext returns the
+	// generic injected payload, so we override the response to mimic
+	// Headscale's actual 400 shape.
+	prev := fh.srv.Config.Handler
+	fh.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/node/99" {
+			if got := r.Header.Get("Authorization"); got != "Bearer "+fh.apiKey {
+				http.Error(w, `unauth`, http.StatusUnauthorized)
+				return
+			}
+			http.Error(w, `{"code":5,"message":"node no longer exists in NodeStore: 99","details":[]}`, http.StatusBadRequest)
+			return
+		}
+		prev.ServeHTTP(w, r)
+	})
+	if err := c.DeleteNode(context.Background(), "99"); err != nil {
+		t.Errorf("expected nil for HTTP 400 not-exist (idempotent), got %v", err)
+	}
+}
+
+func TestRealClient_DeleteNode_RejectsEmptyID(t *testing.T) {
+	fh := newFakeHeadscale(t)
+	c := newRealClientForFake(t, fh)
+	if err := c.DeleteNode(context.Background(), ""); err == nil {
+		t.Error("expected error for empty nodeID")
 	}
 }
 

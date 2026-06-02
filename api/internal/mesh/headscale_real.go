@@ -368,6 +368,43 @@ func (c *RealClient) SetNodeRoutes(ctx context.Context, nodeID string, cidrs []s
 	return nil
 }
 
+// DeleteNode is idempotent: HTTP 404 / "not found" / gRPC NotFound from
+// Headscale resolves to a nil return so callers can use this to clean up
+// a stale local-cache row whose Headscale counterpart was already removed.
+func (c *RealClient) DeleteNode(ctx context.Context, nodeID string) error {
+	if nodeID == "" {
+		return errors.New("mesh: DeleteNode: empty nodeID")
+	}
+	path := "/api/v1/node/" + nodeID
+	if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("delete node %s: %w", nodeID, err)
+	}
+	return nil
+}
+
+// isNotFound returns true for the responses Headscale uses to signal a
+// missing entity. The REST surface emits HTTP 404 in some versions and
+// HTTP 400 with gRPC code 5 (NotFound) or a "not exist" message in others
+// (the live smoke against v0.28 surfaced this for SetNodeRoutes-missing).
+// DeleteNode normalizes both into "already gone, treat as success".
+func isNotFound(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	if he.Status == http.StatusNotFound {
+		return true
+	}
+	low := strings.ToLower(he.Body)
+	return strings.Contains(low, "not found") ||
+		strings.Contains(low, "no longer exists") ||
+		strings.Contains(low, "does not exist") ||
+		strings.Contains(low, `"code":5`)
+}
+
 // ----- Conversions --------------------------------------------------------
 
 func toHSPreAuthKey(k hsPreAuthKey) HSPreAuthKey {

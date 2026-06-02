@@ -44,11 +44,19 @@ func (s *Server) handleListMeshDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// DELETE /api/mesh/devices/{hsId} — drops the device record; the real
-// Headscale delete is a v1 concern (we'd need to call DeleteNode on the
-// client).
+// DELETE /api/mesh/devices/{hsId} — removes the device from Headscale and
+// drops the local cache row. Headscale.DeleteNode is idempotent (a missing
+// Headscale node resolves to nil), so a stale local row whose Headscale
+// counterpart was already removed still gets cleaned up. Order matters:
+// Headscale first, local row second, so a Headscale failure leaves the
+// row visible in the UI (matching reality) instead of silently dropping
+// it from the operator's view.
 func (s *Server) handleDeleteMeshDevice(w http.ResponseWriter, r *http.Request) {
 	hsID := r.PathValue("hsId")
+	if err := s.mesh.Client().DeleteNode(r.Context(), hsID); err != nil {
+		writeError(w, http.StatusBadGateway, "headscale delete: "+err.Error())
+		return
+	}
 	if err := s.mesh.Store().DeleteDevice(r.Context(), hsID); err != nil {
 		if errors.Is(err, errNoRowsSentinel) || err.Error() == "sql: no rows in result set" {
 			writeError(w, http.StatusNotFound, "device not found")
