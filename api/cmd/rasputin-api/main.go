@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"log"
 	"net/http"
@@ -116,16 +118,18 @@ func main() {
 	}
 	defer setupStore.Close()
 
-	// Mesh subsystem: v0 ships a file-backed mock Headscale client. Real
-	// Docker container supervision lands when we have a controlplane node
-	// with Docker installed (Phase 2). See wiki design/control-plane/mesh.md.
+	// Mesh subsystem: backend defaults to the file-backed mock client.
+	// Set RASPUTIN_MESH_BACKEND=headscale (plus RASPUTIN_HEADSCALE_URL and
+	// RASPUTIN_HEADSCALE_API_KEY) to talk to a real Headscale instance.
+	// Real Docker container supervision lands separately. See wiki
+	// design/control-plane/mesh.md.
 	meshStateDir := envOr("RASPUTIN_MESH_STATE_DIR", filepath.Join(dataDir, "mesh"))
 	if err := os.MkdirAll(meshStateDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: mesh state dir: %v", err)
 	}
-	meshClient, err := mesh.NewMockClient(meshStateDir)
+	meshClient, err := newMeshClient(meshStateDir)
 	if err != nil {
-		log.Fatalf("rasputin-api: mesh mock client: %v", err)
+		log.Fatalf("rasputin-api: mesh client: %v", err)
 	}
 	meshSvc := mesh.NewService(mesh.Config{
 		LoginServer: envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local"),
@@ -281,6 +285,52 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// newMeshClient builds the mesh.Client implementation chosen by env. The
+// default is the file-backed mock, suitable for dev and CI. Set
+// RASPUTIN_MESH_BACKEND=headscale to talk to a real Headscale instance —
+// then RASPUTIN_HEADSCALE_URL and RASPUTIN_HEADSCALE_API_KEY are required.
+// RASPUTIN_HEADSCALE_CA_FILE optionally points at a PEM CA bundle (the
+// Rasputin internal CA root) to trust when Headscale's leaf cert is signed
+// by something the system pool doesn't know about.
+func newMeshClient(stateDir string) (mesh.Client, error) {
+	backend := strings.ToLower(envOr("RASPUTIN_MESH_BACKEND", "mock"))
+	switch backend {
+	case "", "mock":
+		log.Printf("rasputin-api: mesh backend = mock (file-backed at %s)", stateDir)
+		return mesh.NewMockClient(stateDir)
+	case "headscale":
+		url := os.Getenv("RASPUTIN_HEADSCALE_URL")
+		key := os.Getenv("RASPUTIN_HEADSCALE_API_KEY")
+		if url == "" || key == "" {
+			return nil, errors.New("RASPUTIN_MESH_BACKEND=headscale requires RASPUTIN_HEADSCALE_URL and RASPUTIN_HEADSCALE_API_KEY")
+		}
+		cfg := mesh.RealClientConfig{BaseURL: url, APIKey: key}
+		if caFile := os.Getenv("RASPUTIN_HEADSCALE_CA_FILE"); caFile != "" {
+			tlsCfg, err := loadCATLSConfig(caFile)
+			if err != nil {
+				return nil, err
+			}
+			cfg.TLSConfig = tlsCfg
+		}
+		log.Printf("rasputin-api: mesh backend = headscale (url=%s)", url)
+		return mesh.NewRealClient(cfg)
+	default:
+		return nil, errors.New("unknown RASPUTIN_MESH_BACKEND: " + backend)
+	}
+}
+
+func loadCATLSConfig(caFile string) (*tls.Config, error) {
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, errors.New("read RASPUTIN_HEADSCALE_CA_FILE: " + err.Error())
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, errors.New("RASPUTIN_HEADSCALE_CA_FILE: no certs parsed from " + caFile)
+	}
+	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
 }
 
 func splitCSV(s string) []string {
