@@ -12,6 +12,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -36,6 +37,7 @@ type Server struct {
 	setup           *setup.Service
 	alerts          *alerts.Service
 	auth            *auth.Service
+	obs             *obs.Status
 	nc              *nats.Conn
 }
 
@@ -58,8 +60,15 @@ func NewServer(
 	bmcSvc *bmc.Service,
 	setupSvc *setup.Service,
 	authSvc *auth.Service,
+	obsStatus *obs.Status,
 	nc *nats.Conn,
 ) *Server {
+	if obsStatus == nil {
+		// Always-non-nil so handler can call Snapshot without guarding.
+		// A nil-input Status returns Enabled=false snapshots — exactly
+		// the right "obs is off" semantics.
+		obsStatus = obs.NewStatus(nil, nil)
+	}
 	return &Server{
 		store: store, runner: runner, inv: inv, fw: fw, apps: appsStore,
 		metrics: mtr, updater: updaterStore, updaterVerifier: updaterVerifier,
@@ -70,7 +79,7 @@ func NewServer(
 		// hold; it has no lifecycle of its own, so it doesn't need to be
 		// constructed by main.
 		alerts: alerts.New(inv, store, appsStore, setupSvc),
-		auth:   authSvc, nc: nc,
+		auth:   authSvc, obs: obsStatus, nc: nc,
 	}
 }
 
@@ -159,6 +168,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ws/bmc/{nodeId}/sol", reqd(s.handleBMCSOL))
 
 	mux.HandleFunc("GET /api/alerts", reqd(s.handleListAlerts))
+
+	mux.HandleFunc("GET /api/obs/status", reqd(s.handleObsStatus))
 
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
 	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))

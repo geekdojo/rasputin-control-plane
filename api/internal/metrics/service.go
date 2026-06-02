@@ -19,11 +19,25 @@ const Retention = 24 * time.Hour
 // GCInterval is how often the retention sweeper runs.
 const GCInterval = 5 * time.Minute
 
+// Sink is the optional second destination for every received event. The
+// SQLite ring buffer is the primary store; a Sink (typically obs.VMSink
+// for Tier 2's remote-write to VictoriaMetrics) gets a fan-out copy.
+// Defined as an interface here, not imported from obs, so the metrics
+// package stays free of the obs dependency.
+type Sink interface {
+	Write(ctx context.Context, evt *proto.MetricsEvt) error
+}
+
 // Service subscribes to agent metric publishes and persists them into Store.
-// A background GC loop deletes rows older than Retention.
+// A background GC loop deletes rows older than Retention. When an optional
+// Sink is set via SetSink, every event also fans out to it after the SQLite
+// insert.
 type Service struct {
 	store *Store
 	nc    *nats.Conn
+
+	mu   sync.RWMutex
+	sink Sink
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -33,6 +47,16 @@ type Service struct {
 
 func NewService(store *Store, nc *nats.Conn) *Service {
 	return &Service{store: store, nc: nc}
+}
+
+// SetSink installs (or removes, by passing nil) the fan-out Sink. Safe to
+// call before or after Start; the next received event will see the new
+// sink. Synchronous on purpose — the obs package's lifecycle (build the
+// supervisor, build the sink, hand it in) is naturally sequential.
+func (s *Service) SetSink(sink Sink) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sink = sink
 }
 
 func (s *Service) Start(ctx context.Context) error {
@@ -70,6 +94,18 @@ func (s *Service) handle(m *nats.Msg) {
 	}
 	if err := s.store.Insert(s.ctx, &ev); err != nil {
 		log.Printf("metrics: insert %s: %v", ev.NodeID, err)
+	}
+	// Fan out to the optional Tier 2 sink. Sink failures are logged but
+	// never block the SQLite path — the sparkline UI must keep working
+	// when VM is down. Read the sink under the RLock so SetSink can
+	// swap it concurrently.
+	s.mu.RLock()
+	sink := s.sink
+	s.mu.RUnlock()
+	if sink != nil {
+		if err := sink.Write(s.ctx, &ev); err != nil {
+			log.Printf("metrics: sink %s: %v", ev.NodeID, err)
+		}
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
@@ -273,6 +274,22 @@ func main() {
 	}
 	defer metricsSvc.Stop()
 
+	// Tier 2 observability — VictoriaMetrics sidecar + metrics fan-out.
+	// Off by default so dev runs don't require Docker; set
+	// RASPUTIN_OBS_ENABLED=1 to bring up VM and start remote-writing every
+	// agent sample. See wiki design/control-plane/observability-stack.md.
+	obsSup, obsSink, obsStatus := mustWireObs(ctx, dataDir, metricsSvc)
+	if obsSup != nil {
+		defer func() {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer stopCancel()
+			if err := obsSup.Stop(stopCtx); err != nil {
+				log.Printf("rasputin-api: obs supervisor stop: %v", err)
+			}
+		}()
+	}
+	_ = obsSink // referenced via the metricsSvc sink + obsStatus; kept named for clarity.
+
 	// Reconciliation tickers. One scheduler entry per drift-prone
 	// subsystem; staggered so the bus doesn't stampede at startup. All
 	// intervals are env-overridable (parsed by parseDurationOr below).
@@ -288,7 +305,7 @@ func main() {
 	sched.Start(ctx)
 	defer sched.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, busSrv.Conn())
+	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busSrv.Conn())
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),
@@ -403,6 +420,72 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// mustWireObs constructs the Tier 2 observability stack — supervisor +
+// VictoriaMetrics fan-out sink + read-only status surface — when
+// RASPUTIN_OBS_ENABLED is set. When obs is off (the default), returns a
+// nil supervisor + nil sink and a non-nil obs.Status whose snapshots
+// report Enabled=false; the api stays fully functional on the Tier 1
+// SQLite path.
+//
+// Why "must" — the failure modes here (mkdir, supervisor construction,
+// initial container start) are configuration / system issues that the
+// operator needs to fix before the api can usefully run with obs on. We
+// don't paper over them by silently disabling obs; that would mask the
+// real problem.
+//
+// Env vars:
+//
+//	RASPUTIN_OBS_ENABLED       — "1" to turn on. Anything else → off.
+//	RASPUTIN_OBS_STATE_DIR     — host dir for compose + VM data.
+//	                              Defaults to <dataDir>/obs.
+//	RASPUTIN_OBS_VM_IMAGE      — VictoriaMetrics image override.
+//	RASPUTIN_OBS_VM_LISTEN     — host bind for VM's HTTP listener.
+//	                              Defaults to 127.0.0.1:8428.
+//	RASPUTIN_OBS_VM_RETENTION  — VM -retentionPeriod flag. Default "1y".
+//
+// Side effect: when obs is enabled, this also calls metricsSvc.SetSink
+// so every received MetricsEvt fans out to VM after the SQLite insert.
+func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Service) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
+	if os.Getenv("RASPUTIN_OBS_ENABLED") != "1" {
+		log.Printf("rasputin-api: obs disabled (set RASPUTIN_OBS_ENABLED=1 to enable)")
+		return nil, nil, obs.NewStatus(nil, nil)
+	}
+	stateDir := envOr("RASPUTIN_OBS_STATE_DIR", filepath.Join(dataDir, "obs"))
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		log.Fatalf("rasputin-api: obs state dir: %v", err)
+	}
+	sup, err := obs.NewDockerComposeSupervisor(obs.DockerComposeSupervisorConfig{
+		StateDir:     stateDir,
+		VMImage:      os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
+		VMListenAddr: os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
+		VMRetention:  os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
+	})
+	if err != nil {
+		log.Fatalf("rasputin-api: obs supervisor: %v", err)
+	}
+	log.Printf("rasputin-api: obs supervisor = docker (state=%s, vm=%s)",
+		stateDir, sup.VMBaseURL())
+	// Start asynchronously so first-boot doesn't block the api's HTTP
+	// listener behind a slow `docker pull`. The supervisor's health
+	// probe drives the sink's "is it worth trying to write?" check; if
+	// VM never comes up, writes simply fail-fast.
+	go func() {
+		startCtx, startCancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer startCancel()
+		if err := sup.Start(startCtx); err != nil {
+			log.Printf("rasputin-api: obs supervisor start: %v", err)
+		} else {
+			log.Printf("rasputin-api: obs supervisor up; VM at %s", sup.VMBaseURL())
+		}
+	}()
+	sink, err := obs.NewVMSink(obs.VMSinkConfig{Supervisor: sup})
+	if err != nil {
+		log.Fatalf("rasputin-api: obs sink: %v", err)
+	}
+	metricsSvc.SetSink(sink)
+	return sup, sink, obs.NewStatus(sup, sink)
 }
 
 // parseDurationOr parses s as a duration; on parse error or zero/negative,

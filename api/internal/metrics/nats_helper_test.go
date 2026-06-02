@@ -3,7 +3,9 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,3 +119,111 @@ func TestService_Stop_BeforeStart_IsSafe(t *testing.T) {
 	// Should not panic.
 	svc.Stop()
 }
+
+// recordingSink captures every event it receives. Used to verify the
+// Service.SetSink fan-out lands on the optional second destination.
+type recordingSink struct {
+	mu   sync.Mutex
+	got  []*proto.MetricsEvt
+	fail error
+}
+
+func (r *recordingSink) Write(_ context.Context, evt *proto.MetricsEvt) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, evt)
+	return r.fail
+}
+
+func (r *recordingSink) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.got)
+}
+
+// TestService_SetSink_FanOut covers the obs.Sink path: every received event
+// hits SQLite AND the optional sink. We assert both: the row lands in the
+// store (proven elsewhere) and the sink saw the event.
+func TestService_SetSink_FanOut(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreAt(t, "m.db")
+	svc := NewService(store, nc)
+	sink := &recordingSink{}
+	svc.SetSink(sink)
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(svc.Stop)
+
+	ev := proto.MetricsEvt{
+		NodeID:  "n-fanout",
+		Ts:      time.UnixMilli(1717000000000).UTC(),
+		Metrics: map[string]float64{proto.MetricCPUPercent: 42},
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := nc.Publish(proto.NodeMetricsSubject("n-fanout"), data); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sink.count() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sink.count() != 1 {
+		t.Fatalf("sink call count = %d, want 1", sink.count())
+	}
+}
+
+// TestService_SinkErrorIsLoggedNotFatal pins the fan-out's "best-effort"
+// semantics — a sink that returns an error must not crash the subscriber
+// or block subsequent events. We confirm by publishing twice with a
+// failing sink and checking both events were attempted.
+func TestService_SinkErrorIsLoggedNotFatal(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreAt(t, "m.db")
+	svc := NewService(store, nc)
+	sink := &recordingSink{fail: errSentinel}
+	svc.SetSink(sink)
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(svc.Stop)
+
+	for i := 0; i < 2; i++ {
+		ev := proto.MetricsEvt{
+			NodeID:  "n-err",
+			Ts:      time.UnixMilli(int64(1717000000000 + i)).UTC(),
+			Metrics: map[string]float64{proto.MetricCPUPercent: float64(i)},
+		}
+		data, _ := json.Marshal(ev)
+		if err := nc.Publish(proto.NodeMetricsSubject("n-err"), data); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+	_ = nc.Flush()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sink.count() >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sink.count() != 2 {
+		t.Fatalf("sink saw %d events despite errors; want 2", sink.count())
+	}
+}
+
+var errSentinel = errors.New("recordingSink: simulated failure")

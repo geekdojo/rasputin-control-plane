@@ -243,7 +243,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	trustDir := dir
 	srv := NewServer(jobStore, runner, invStore, fwStore, appStore,
 		mtrStore, updStore, verifier, bundleDir, trustDir,
-		meshSvc, bmcSvc, setupSvc, authSvc, nc)
+		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, nc)
 
 	f.srv = srv
 	f.handler = srv.Handler()
@@ -1001,7 +1001,7 @@ func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
 	}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
 	srv := NewServer(f.jobsStore, f.runner, f.inv, f.fw, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
-		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, f.nc)
+		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.nc)
 	handler := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/mesh/state", nil)
@@ -1369,6 +1369,25 @@ func TestHandleListAlerts_Default(t *testing.T) {
 	w := f.do(t, http.MethodGet, "/api/alerts", "", c)
 	if w.Code != http.StatusOK {
 		t.Errorf("want 200, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// Obs status
+// ============================================================================
+
+// /api/obs/status defaults to Enabled=false when the fixture wires no
+// obs subsystem in (the production path is gated on RASPUTIN_OBS_ENABLED;
+// tests never bring up a real VM).
+func TestHandleObsStatus_Default(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodGet, "/api/obs/status", "", c)
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200, got %d", w.Code)
+	}
+	if got := w.Body.String(); !strings.Contains(got, `"enabled":false`) {
+		t.Errorf("expected enabled:false, got: %s", got)
 	}
 }
 
