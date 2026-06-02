@@ -40,7 +40,7 @@ type noopSink struct{}
 
 // NewNoopSink returns a Sink that does nothing. Useful for tests and for
 // the default dev-time wiring when RASPUTIN_OBS_ENABLED is unset.
-func NewNoopSink() Sink                                       { return noopSink{} }
+func NewNoopSink() Sink                                         { return noopSink{} }
 func (noopSink) Write(context.Context, *proto.MetricsEvt) error { return nil }
 
 // VMSink remote-writes every event into VictoriaMetrics via VM's

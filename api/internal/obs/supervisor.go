@@ -63,11 +63,11 @@ type NoopSupervisor struct{}
 // RASPUTIN_OBS_ENABLED is unset — the rest of the api keeps working
 // (Tier 1 SQLite metrics, alerts aggregator, etc.) and the fan-out sink
 // stays inert.
-func NewNoopSupervisor() Supervisor                              { return NoopSupervisor{} }
-func (NoopSupervisor) Start(context.Context) error               { return nil }
-func (NoopSupervisor) Stop(context.Context) error                { return nil }
-func (NoopSupervisor) Healthy(context.Context) (bool, error)     { return false, nil }
-func (NoopSupervisor) VMBaseURL() string                         { return "" }
+func NewNoopSupervisor() Supervisor                          { return NoopSupervisor{} }
+func (NoopSupervisor) Start(context.Context) error           { return nil }
+func (NoopSupervisor) Stop(context.Context) error            { return nil }
+func (NoopSupervisor) Healthy(context.Context) (bool, error) { return false, nil }
+func (NoopSupervisor) VMBaseURL() string                     { return "" }
 
 // CmdRunner runs a binary and returns its combined output. Injected so
 // tests can drive lifecycle decisions without a real Docker daemon.
