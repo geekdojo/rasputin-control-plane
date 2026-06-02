@@ -162,6 +162,7 @@ func TestStart_HappyPath(t *testing.T) {
 		HealthTimeout: 2 * time.Second,
 		PullTimeout:   time.Second,
 		EnableLoki:    &f, // unit tests don't stub Loki; gated off
+		EnableGrafana: &f, // same — no Grafana stub here
 	})
 	if err != nil {
 		t.Fatalf("constructor: %v", err)
@@ -206,6 +207,7 @@ func TestStart_PullFailureIsRecoverable(t *testing.T) {
 		HealthTimeout: 2 * time.Second,
 		PullTimeout:   time.Second,
 		EnableLoki:    &f,
+		EnableGrafana: &f,
 	})
 	if err != nil {
 		t.Fatalf("constructor: %v", err)
@@ -406,6 +408,7 @@ func TestStart_WritesAlloyConfig(t *testing.T) {
 		HTTPClient:    srv.Client(),
 		HealthTimeout: 2 * time.Second,
 		EnableLoki:    &f, // disable so test doesn't have to stub Loki too
+		EnableGrafana: &f,
 	})
 	if err := sup.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -431,9 +434,10 @@ func TestVMBaseURL(t *testing.T) {
 
 // fakeSupervisor is a Supervisor stub for VMSink tests.
 type fakeSupervisor struct {
-	healthy bool
-	baseURL string
-	lokiURL string
+	healthy    bool
+	baseURL    string
+	lokiURL    string
+	grafanaURL string
 }
 
 func (f *fakeSupervisor) Start(context.Context) error           { return nil }
@@ -441,6 +445,7 @@ func (f *fakeSupervisor) Stop(context.Context) error            { return nil }
 func (f *fakeSupervisor) Healthy(context.Context) (bool, error) { return f.healthy, nil }
 func (f *fakeSupervisor) VMBaseURL() string                     { return f.baseURL }
 func (f *fakeSupervisor) LokiBaseURL() string                   { return f.lokiURL }
+func (f *fakeSupervisor) GrafanaBaseURL() string                { return f.grafanaURL }
 
 func TestVMSink_RequiresSupervisor(t *testing.T) {
 	if _, err := NewVMSink(VMSinkConfig{}); err == nil {

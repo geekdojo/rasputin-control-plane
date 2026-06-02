@@ -265,6 +265,14 @@ func UserFromContext(ctx context.Context) (*User, bool) {
 	return u, ok
 }
 
+// WithUser returns a derived context carrying user as if RequireSession
+// had been called. Intended for tests that need to drive a handler
+// directly without going through the cookie middleware — production
+// code MUST go through RequireSession instead.
+func WithUser(ctx context.Context, user *User) context.Context {
+	return context.WithValue(ctx, ctxUser, user)
+}
+
 func (s *Service) resolveSession(r *http.Request) (*Session, *User, error) {
 	cookie, err := r.Cookie(sessionCookie)
 	if err != nil {

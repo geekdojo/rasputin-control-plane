@@ -55,6 +55,10 @@ type Supervisor interface {
 	// Empty when Loki is disabled OR Start hasn't succeeded yet.
 	// Used by the api's /api/obs/logs handler to proxy LogQL queries.
 	LokiBaseURL() string
+	// GrafanaBaseURL is the host-side base URL for Grafana. Empty
+	// when Grafana is disabled. The api's /observability/* reverse
+	// proxy uses it.
+	GrafanaBaseURL() string
 }
 
 // NoopSupervisor is the default when obs is disabled. Healthy always
@@ -73,6 +77,7 @@ func (NoopSupervisor) Stop(context.Context) error            { return nil }
 func (NoopSupervisor) Healthy(context.Context) (bool, error) { return false, nil }
 func (NoopSupervisor) VMBaseURL() string                     { return "" }
 func (NoopSupervisor) LokiBaseURL() string                   { return "" }
+func (NoopSupervisor) GrafanaBaseURL() string                { return "" }
 
 // CmdRunner runs a binary and returns its combined output. Injected so
 // tests can drive lifecycle decisions without a real Docker daemon.
@@ -145,6 +150,22 @@ type DockerComposeSupervisorConfig struct {
 	// in play.
 	EnableLoki *bool
 
+	// GrafanaImage overrides the Grafana image reference. Defaults to
+	// the pinned upstream tag. Grafana joins the stack at Slice 1.4
+	// and is reached via the api's auth-proxy at /observability/*.
+	GrafanaImage string
+
+	// GrafanaListenAddr is the host bind for Grafana's HTTP listener.
+	// Defaults to "127.0.0.1:3000"; container listens on 3000. Loopback
+	// only because the auth-proxy is what makes Grafana safe to expose
+	// — direct access bypasses Rasputin's session auth.
+	GrafanaListenAddr string
+
+	// EnableGrafana toggles the Grafana service. Default true. Off
+	// gives a metrics + logs stack without the dashboard UI — useful
+	// for operators using an existing Grafana elsewhere.
+	EnableGrafana *bool
+
 	// DockerBin overrides the docker binary path; useful when the runtime's
 	// CLI lives somewhere unexpected. Defaults to "docker".
 	DockerBin string
@@ -166,15 +187,17 @@ type DockerComposeSupervisorConfig struct {
 }
 
 const (
-	defaultProjectName     = "rasputin-obs"
-	defaultVMImage         = "victoriametrics/victoria-metrics:v1.103.0"
-	defaultVMListenAddr    = "127.0.0.1:8428"
-	defaultVMRetention     = "1y"
-	defaultAlloyImage      = "grafana/alloy:v1.4.2"
-	defaultAlloyListenAddr = "127.0.0.1:12345"
-	defaultLokiImage       = "grafana/loki:3.4.1"
-	defaultLokiListenAddr  = "127.0.0.1:3100"
-	defaultDockerBin       = "docker"
+	defaultProjectName       = "rasputin-obs"
+	defaultVMImage           = "victoriametrics/victoria-metrics:v1.103.0"
+	defaultVMListenAddr      = "127.0.0.1:8428"
+	defaultVMRetention       = "1y"
+	defaultAlloyImage        = "grafana/alloy:v1.4.2"
+	defaultAlloyListenAddr   = "127.0.0.1:12345"
+	defaultLokiImage         = "grafana/loki:3.4.1"
+	defaultLokiListenAddr    = "127.0.0.1:3100"
+	defaultGrafanaImage      = "grafana/grafana:11.5.1"
+	defaultGrafanaListenAddr = "127.0.0.1:3000"
+	defaultDockerBin         = "docker"
 
 	// 90s covers Loki's cold-start window. VM alone is up in <5s;
 	// Loki's TSDB schema bootstrap on a fresh data dir can take 30-60s.
@@ -191,6 +214,10 @@ const (
 	lokiConfigSubdir  = "loki-config"
 	lokiConfigFile    = "loki-config.yaml"
 	lokiDataDir       = "loki-data"
+
+	grafanaConfigSubdir = "grafana-config"
+	grafanaIniFile      = "grafana.ini"
+	grafanaDataDir      = "grafana-data"
 )
 
 // DockerComposeSupervisor manages the obs stack via `docker compose`.
@@ -237,6 +264,16 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	if cfg.EnableLoki == nil {
 		t := true
 		cfg.EnableLoki = &t
+	}
+	if cfg.GrafanaImage == "" {
+		cfg.GrafanaImage = defaultGrafanaImage
+	}
+	if cfg.GrafanaListenAddr == "" {
+		cfg.GrafanaListenAddr = defaultGrafanaListenAddr
+	}
+	if cfg.EnableGrafana == nil {
+		t := true
+		cfg.EnableGrafana = &t
 	}
 	if cfg.DockerBin == "" {
 		cfg.DockerBin = defaultDockerBin
@@ -287,6 +324,11 @@ func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 	}
 	if s.lokiEnabled() {
 		if err := s.writeLokiConfig(); err != nil {
+			return err
+		}
+	}
+	if s.grafanaEnabled() {
+		if err := s.writeGrafanaConfig(); err != nil {
 			return err
 		}
 	}
@@ -345,6 +387,16 @@ func (s *DockerComposeSupervisor) LokiBaseURL() string {
 	return "http://" + s.cfg.LokiListenAddr
 }
 
+// GrafanaBaseURL returns the host-side base URL Grafana is reachable
+// at, or "" when Grafana is disabled. Used by the api's
+// /observability/* reverse proxy.
+func (s *DockerComposeSupervisor) GrafanaBaseURL() string {
+	if !s.grafanaEnabled() {
+		return ""
+	}
+	return "http://" + s.cfg.GrafanaListenAddr
+}
+
 // ----- Compose invocations ------------------------------------------------
 
 // compose invokes `docker compose -p <project> -f <file> <args...>`.
@@ -362,11 +414,27 @@ func (s *DockerComposeSupervisor) prepareHostDirs() error {
 	if s.lokiEnabled() {
 		subs = append(subs, lokiConfigSubdir, lokiDataDir)
 	}
+	if s.grafanaEnabled() {
+		subs = append(subs,
+			grafanaConfigSubdir,
+			filepath.Join(grafanaConfigSubdir, "provisioning", "datasources"),
+			filepath.Join(grafanaConfigSubdir, "provisioning", "dashboards"),
+			filepath.Join(grafanaConfigSubdir, "dashboards"),
+			grafanaDataDir,
+		)
+	}
 	for _, sub := range subs {
 		p := filepath.Join(s.cfg.StateDir, sub)
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			return fmt.Errorf("obs supervisor: mkdir %s: %w", p, err)
 		}
+	}
+	// Grafana wants the data dir owned by uid 472 (grafana user). Trying
+	// to chown to a specific uid would break tests + cross-platform; we
+	// chmod 0o777 instead, which is fine for a homelab-scope dir that's
+	// never on a shared filesystem.
+	if s.grafanaEnabled() {
+		_ = os.Chmod(filepath.Join(s.cfg.StateDir, grafanaDataDir), 0o777)
 	}
 	return nil
 }
@@ -381,6 +449,11 @@ func (s *DockerComposeSupervisor) lokiEnabled() bool {
 // "is this optional component on" question.
 func (s *DockerComposeSupervisor) cadvisorEnabled() bool {
 	return s.cfg.EnableCadvisor != nil && *s.cfg.EnableCadvisor
+}
+
+// grafanaEnabled — single-source-of-truth for the dashboard service.
+func (s *DockerComposeSupervisor) grafanaEnabled() bool {
+	return s.cfg.EnableGrafana != nil && *s.cfg.EnableGrafana
 }
 
 // writeLokiConfig renders Loki's YAML config into <StateDir>/loki-config/.
@@ -406,6 +479,159 @@ func (s *DockerComposeSupervisor) writeLokiConfig() error {
 // here is fixed — paths inside the container, schema version, listen
 // port. No per-installation knobs to interpolate. If that changes
 // (custom retention, S3 backend, etc.) it'll become a template.
+// writeGrafanaConfig lays down grafana.ini, datasource provisioning,
+// dashboard provisioning, and the starter dashboard JSON.
+//
+// Grafana's "provisioning" feature reads YAML/JSON at startup; the api
+// owning the lifecycle of these files (regenerating on Start) keeps
+// Grafana stateless from the operator's perspective — no point-and-click
+// setup the first time obs is enabled.
+func (s *DockerComposeSupervisor) writeGrafanaConfig() error {
+	pairs := []struct {
+		path string
+		body string
+	}{
+		{filepath.Join(grafanaConfigSubdir, grafanaIniFile), grafanaIni},
+		{filepath.Join(grafanaConfigSubdir, "provisioning", "datasources", "all.yaml"), grafanaDatasourcesYAML},
+		{filepath.Join(grafanaConfigSubdir, "provisioning", "dashboards", "all.yaml"), grafanaDashboardsYAML},
+		{filepath.Join(grafanaConfigSubdir, "dashboards", "cluster-overview.json"), starterDashboardJSON},
+	}
+	for _, p := range pairs {
+		full := filepath.Join(s.cfg.StateDir, p.path)
+		tmp := full + ".tmp"
+		if err := os.WriteFile(tmp, []byte(p.body), 0o644); err != nil {
+			return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
+		}
+		if err := os.Rename(tmp, full); err != nil {
+			return fmt.Errorf("obs supervisor: rename %s: %w", tmp, err)
+		}
+	}
+	return nil
+}
+
+// grafanaIni — Slice 1.4 main Grafana config. Two non-default knobs:
+//
+//   - [server] serve_from_sub_path = true + root_url path so the
+//     api's /observability/* reverse proxy mounts cleanly.
+//   - [auth.proxy] enabled = true + header_name = X-Webauth-User.
+//     The api validates the operator's session cookie, then forwards
+//     the request to Grafana with the user's name in this header.
+//     auto_sign_up creates the Grafana user on first sight.
+//
+// allow_sign_up = false everywhere else — we don't want a sneak path
+// past the api's auth via Grafana's own login form.
+const grafanaIni = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
+# Edits get clobbered on the next supervisor Start.
+
+[server]
+http_port = 3000
+domain = localhost
+root_url = %(protocol)s://%(domain)s/observability/
+serve_from_sub_path = true
+
+[security]
+admin_user = admin
+admin_password = rasputin-admin
+
+[users]
+allow_sign_up = false
+auto_assign_org = true
+auto_assign_org_role = Viewer
+
+[auth]
+disable_login_form = true
+disable_signout_menu = true
+
+[auth.anonymous]
+enabled = false
+
+[auth.basic]
+enabled = false
+
+[auth.proxy]
+enabled = true
+header_name = X-Webauth-User
+header_property = username
+auto_sign_up = true
+sync_ttl = 60
+whitelist =
+headers =
+enable_login_token = false
+
+[log]
+mode = console
+level = warn
+`
+
+const grafanaDatasourcesYAML = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
+apiVersion: 1
+datasources:
+  - name: VictoriaMetrics
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    isDefault: true
+    editable: false
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+`
+
+const grafanaDashboardsYAML = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
+apiVersion: 1
+providers:
+  - name: rasputin
+    orgId: 1
+    folder: Rasputin
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+`
+
+// starterDashboardJSON is the "Cluster Overview" dashboard — three
+// stat panels backed by the rasputin_* metrics that VMSink writes.
+// Intentionally minimal: the goal is "operator sees something useful
+// the first time they open /observability", not "comprehensive
+// dashboard suite". The folder-provisioning hook (allowUiUpdates =
+// true) lets them edit and save without our overwriting their changes.
+const starterDashboardJSON = `{
+  "title": "Cluster Overview",
+  "uid": "rasputin-cluster-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "tags": ["rasputin"],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "CPU % per node",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "rasputin_cpu_percent", "legendFormat": "{{nodeId}}"}],
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory used (bytes) per node",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "rasputin_mem_used_bytes", "legendFormat": "{{nodeId}}"}],
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}
+    },
+    {
+      "type": "stat",
+      "title": "Nodes reporting",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "count(rasputin_cpu_percent)"}],
+      "gridPos": {"x": 0, "y": 8, "w": 6, "h": 4}
+    }
+  ]
+}
+`
+
 const lokiConfigYAML = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
 # Edits get clobbered on the next supervisor Start.
 
@@ -607,25 +833,38 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 	if lokiPort == "" {
 		return nil, fmt.Errorf("invalid LokiListenAddr %q: port required", s.cfg.LokiListenAddr)
 	}
+	grafanaHost, grafanaPort, err := net.SplitHostPort(s.cfg.GrafanaListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid GrafanaListenAddr %q: %w", s.cfg.GrafanaListenAddr, err)
+	}
+	if grafanaPort == "" {
+		return nil, fmt.Errorf("invalid GrafanaListenAddr %q: port required", s.cfg.GrafanaListenAddr)
+	}
 	data := composeData{
-		VMImage:         s.cfg.VMImage,
-		VMHost:          vmHost,
-		VMPort:          vmPort,
-		VMRetention:     s.cfg.VMRetention,
-		VMDataDir:       "./" + vmDataDir,
-		AlloyImage:      s.cfg.AlloyImage,
-		AlloyHost:       alloyHost,
-		AlloyPort:       alloyPort,
-		AlloyConfigDir:  "./" + alloyConfigSubdir,
-		AlloyConfigFile: alloyConfigFile,
-		EnableCadvisor:  s.cadvisorEnabled(),
-		EnableLoki:      s.lokiEnabled(),
-		LokiImage:       s.cfg.LokiImage,
-		LokiHost:        lokiHost,
-		LokiPort:        lokiPort,
-		LokiConfigDir:   "./" + lokiConfigSubdir,
-		LokiConfigFile:  lokiConfigFile,
-		LokiDataDir:     "./" + lokiDataDir,
+		VMImage:          s.cfg.VMImage,
+		VMHost:           vmHost,
+		VMPort:           vmPort,
+		VMRetention:      s.cfg.VMRetention,
+		VMDataDir:        "./" + vmDataDir,
+		AlloyImage:       s.cfg.AlloyImage,
+		AlloyHost:        alloyHost,
+		AlloyPort:        alloyPort,
+		AlloyConfigDir:   "./" + alloyConfigSubdir,
+		AlloyConfigFile:  alloyConfigFile,
+		EnableCadvisor:   s.cadvisorEnabled(),
+		EnableLoki:       s.lokiEnabled(),
+		LokiImage:        s.cfg.LokiImage,
+		LokiHost:         lokiHost,
+		LokiPort:         lokiPort,
+		LokiConfigDir:    "./" + lokiConfigSubdir,
+		LokiConfigFile:   lokiConfigFile,
+		LokiDataDir:      "./" + lokiDataDir,
+		EnableGrafana:    s.grafanaEnabled(),
+		GrafanaImage:     s.cfg.GrafanaImage,
+		GrafanaHost:      grafanaHost,
+		GrafanaPort:      grafanaPort,
+		GrafanaConfigDir: "./" + grafanaConfigSubdir,
+		GrafanaDataDir:   "./" + grafanaDataDir,
 	}
 	var buf bytes.Buffer
 	if err := composeTmpl.Execute(&buf, data); err != nil {
@@ -635,24 +874,30 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 }
 
 type composeData struct {
-	VMImage         string
-	VMHost          string
-	VMPort          string
-	VMRetention     string
-	VMDataDir       string
-	AlloyImage      string
-	AlloyHost       string
-	AlloyPort       string
-	AlloyConfigDir  string
-	AlloyConfigFile string
-	EnableCadvisor  bool
-	EnableLoki      bool
-	LokiImage       string
-	LokiHost        string
-	LokiPort        string
-	LokiConfigDir   string
-	LokiConfigFile  string
-	LokiDataDir     string
+	VMImage          string
+	VMHost           string
+	VMPort           string
+	VMRetention      string
+	VMDataDir        string
+	AlloyImage       string
+	AlloyHost        string
+	AlloyPort        string
+	AlloyConfigDir   string
+	AlloyConfigFile  string
+	EnableCadvisor   bool
+	EnableLoki       bool
+	LokiImage        string
+	LokiHost         string
+	LokiPort         string
+	LokiConfigDir    string
+	LokiConfigFile   string
+	LokiDataDir      string
+	EnableGrafana    bool
+	GrafanaImage     string
+	GrafanaHost      string
+	GrafanaPort      string
+	GrafanaConfigDir string
+	GrafanaDataDir   string
 }
 
 // composeTmpl is the Slice 1.1 compose YAML — VictoriaMetrics only.
@@ -738,6 +983,25 @@ services:
       - {{.LokiConfigDir}}:/etc/loki:ro
       - {{.LokiDataDir}}:/loki
 {{- end }}
+{{- if .EnableGrafana }}
+
+  grafana:
+    image: {{.GrafanaImage}}
+    container_name: rasputin-grafana
+    restart: unless-stopped
+    ports:
+      - "{{.GrafanaHost}}:{{.GrafanaPort}}:3000"
+    volumes:
+      - {{.GrafanaConfigDir}}/grafana.ini:/etc/grafana/grafana.ini:ro
+      - {{.GrafanaConfigDir}}/provisioning:/etc/grafana/provisioning:ro
+      - {{.GrafanaConfigDir}}/dashboards:/var/lib/grafana/dashboards:ro
+      - {{.GrafanaDataDir}}:/var/lib/grafana
+    depends_on:
+      - victoriametrics
+{{- if .EnableLoki }}
+      - loki
+{{- end }}
+{{- end }}
 `))
 
 // ----- Health -------------------------------------------------------------
@@ -757,7 +1021,12 @@ func (s *DockerComposeSupervisor) waitHealthy(ctx context.Context) error {
 		if s.lokiEnabled() {
 			lokiOK, lokiErr = s.lokiReady(ctx)
 		}
-		if vmOK && lokiOK {
+		grafanaOK := true
+		var grafanaErr error
+		if s.grafanaEnabled() {
+			grafanaOK, grafanaErr = s.grafanaReady(ctx)
+		}
+		if vmOK && lokiOK && grafanaOK {
 			return nil
 		}
 		switch {
@@ -769,6 +1038,10 @@ func (s *DockerComposeSupervisor) waitHealthy(ctx context.Context) error {
 			lastErr = fmt.Errorf("loki: %w", lokiErr)
 		case !lokiOK:
 			lastErr = errors.New("loki /ready returned non-2xx")
+		case !grafanaOK && grafanaErr != nil:
+			lastErr = fmt.Errorf("grafana: %w", grafanaErr)
+		case !grafanaOK:
+			lastErr = errors.New("grafana /api/health returned non-2xx")
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("obs supervisor: stack not healthy after %s (last error: %w)",
@@ -795,6 +1068,12 @@ func (s *DockerComposeSupervisor) vmHealth(ctx context.Context) (bool, error) {
 // yet (so it's a worse choice).
 func (s *DockerComposeSupervisor) lokiReady(ctx context.Context) (bool, error) {
 	return httpGet2xx(ctx, s.httpc, s.LokiBaseURL()+"/ready")
+}
+
+// grafanaReady polls Grafana's /api/health. Returns 200 + JSON body
+// {"database":"ok","version":"..."} once it's accepting requests.
+func (s *DockerComposeSupervisor) grafanaReady(ctx context.Context) (bool, error) {
+	return httpGet2xx(ctx, s.httpc, s.GrafanaBaseURL()+"/api/health")
 }
 
 func httpGet2xx(ctx context.Context, client *http.Client, url string) (bool, error) {

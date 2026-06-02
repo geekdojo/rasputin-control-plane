@@ -37,6 +37,28 @@ func (s *Status) Logs() *LogsClient {
 	return s.logs
 }
 
+// GrafanaEnabled reports whether the proxy at /observability/* has a
+// live Grafana to forward to. False when obs is off OR the supervisor
+// is the Noop one OR EnableGrafana was disabled.
+func (s *Status) GrafanaEnabled() bool {
+	if s == nil || s.sup == nil {
+		return false
+	}
+	if _, ok := s.sup.(NoopSupervisor); ok {
+		return false
+	}
+	return s.sup.GrafanaBaseURL() != ""
+}
+
+// GrafanaBaseURL is the host-side URL the api's reverse proxy forwards
+// to. Empty when GrafanaEnabled returns false.
+func (s *Status) GrafanaBaseURL() string {
+	if !s.GrafanaEnabled() {
+		return ""
+	}
+	return s.sup.GrafanaBaseURL()
+}
+
 // Snapshot is the JSON shape returned by /api/obs/status.
 type Snapshot struct {
 	// Enabled is true when both a non-noop Supervisor and a non-nil
@@ -67,6 +89,12 @@ type Snapshot struct {
 	// log shipping is enabled. Empty when Loki is disabled OR the obs
 	// stack hasn't started yet.
 	LokiBaseURL string `json:"lokiBaseUrl,omitempty"`
+
+	// GrafanaURL is the operator-facing path (relative to the api
+	// host) to the embedded Grafana. Always "/observability/" when
+	// Grafana is enabled — surfaced as a field so the UI's "Open
+	// Dashboards" link doesn't have to hard-code the path.
+	GrafanaURL string `json:"grafanaUrl,omitempty"`
 }
 
 // Snapshot returns the current obs state. Cheap — no I/O beyond the
@@ -87,6 +115,9 @@ func (s *Status) Snapshot(ctx context.Context) Snapshot {
 		Healthy:     healthy,
 		VMBaseURL:   s.sup.VMBaseURL(),
 		LokiBaseURL: s.sup.LokiBaseURL(),
+	}
+	if s.sup.GrafanaBaseURL() != "" {
+		out.GrafanaURL = "/observability/"
 	}
 	lastOK, lastErr := s.sink.LastWrite()
 	out.LastWriteOK = lastOK

@@ -206,6 +206,51 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("Grafana_ReachableAndProvisioned", func(t *testing.T) {
+		// Grafana's /api/health is unauthenticated. The presence of the
+		// VictoriaMetrics datasource (auto-provisioned at startup)
+		// requires admin auth, which we don't want to bake into the
+		// smoke test — instead just confirm Grafana is up and that
+		// the provisioned dashboard JSON is served (Grafana exposes
+		// it at /api/search?folderIds=…&type=dash-db which also
+		// requires auth, so we use the basic-auth admin credentials
+		// from the rendered grafana.ini).
+		base := sup.GrafanaBaseURL()
+		if base == "" {
+			t.Fatal("GrafanaBaseURL empty")
+		}
+		// /api/health is open.
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/health", nil)
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatalf("/api/health: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("/api/health = %d, want 200", resp.StatusCode)
+		}
+		// /api/search to confirm provisioning landed. Auth comes via
+		// the X-Webauth-User header (auth.proxy mode) — basic-auth
+		// + the cookie form are both disabled in the rendered
+		// grafana.ini. auto_sign_up creates the user on first sight.
+		req, _ = http.NewRequestWithContext(ctx, http.MethodGet,
+			base+"/api/search?type=dash-db", nil)
+		req.Header.Set("X-Webauth-User", "smoke-operator")
+		resp, err = (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatalf("/api/search: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("/api/search = %d", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "Cluster Overview") {
+			t.Fatalf("starter dashboard missing from search response: %s",
+				string(body))
+		}
+	})
+
 	t.Run("Stop_GracefullyStops", func(t *testing.T) {
 		if err := sup.Stop(ctx); err != nil {
 			t.Fatalf("Stop: %v", err)
