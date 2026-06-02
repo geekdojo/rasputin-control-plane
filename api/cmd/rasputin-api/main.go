@@ -121,7 +121,8 @@ func main() {
 	// Mesh subsystem: backend defaults to the file-backed mock client.
 	// Set RASPUTIN_MESH_BACKEND=headscale (plus RASPUTIN_HEADSCALE_URL and
 	// RASPUTIN_HEADSCALE_API_KEY) to talk to a real Headscale instance.
-	// Real Docker container supervision lands separately. See wiki
+	// Supervisor defaults to noop; set RASPUTIN_HEADSCALE_SUPERVISOR=docker
+	// to have the api manage the Headscale container itself. See wiki
 	// design/control-plane/mesh.md.
 	meshStateDir := envOr("RASPUTIN_MESH_STATE_DIR", filepath.Join(dataDir, "mesh"))
 	if err := os.MkdirAll(meshStateDir, 0o755); err != nil {
@@ -131,10 +132,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: mesh client: %v", err)
 	}
+	meshSup, err := newMeshSupervisor(meshStateDir)
+	if err != nil {
+		log.Fatalf("rasputin-api: mesh supervisor: %v", err)
+	}
 	meshSvc := mesh.NewService(mesh.Config{
 		LoginServer: envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local"),
 		DefaultUser: envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
-	}, meshStore, meshClient, mesh.NewNoopSupervisor())
+	}, meshStore, meshClient, meshSup)
 	if err := meshSvc.Start(ctx); err != nil {
 		log.Fatalf("rasputin-api: mesh service: %v", err)
 	}
@@ -318,6 +323,33 @@ func newMeshClient(stateDir string) (mesh.Client, error) {
 		return mesh.NewRealClient(cfg)
 	default:
 		return nil, errors.New("unknown RASPUTIN_MESH_BACKEND: " + backend)
+	}
+}
+
+// newMeshSupervisor builds the mesh.Supervisor chosen by env. Default is
+// the noop supervisor — appropriate when running against the mock client,
+// or when an operator manages Headscale themselves (e.g. via host-level
+// systemd or compose). Set RASPUTIN_HEADSCALE_SUPERVISOR=docker to have
+// the api drive the Headscale container's lifecycle via the local docker
+// CLI. RASPUTIN_HEADSCALE_IMAGE and RASPUTIN_HEADSCALE_LISTEN_ADDR
+// override the pinned defaults.
+func newMeshSupervisor(stateDir string) (mesh.Supervisor, error) {
+	choice := strings.ToLower(envOr("RASPUTIN_HEADSCALE_SUPERVISOR", "noop"))
+	switch choice {
+	case "", "noop":
+		return mesh.NewNoopSupervisor(), nil
+	case "docker":
+		cfg := mesh.DockerSupervisorConfig{
+			StateDir:      filepath.Join(stateDir, "headscale"),
+			Image:         os.Getenv("RASPUTIN_HEADSCALE_IMAGE"),
+			ListenAddr:    os.Getenv("RASPUTIN_HEADSCALE_LISTEN_ADDR"),
+			ServerURL:     os.Getenv("RASPUTIN_HEADSCALE_URL"),
+			ContainerName: os.Getenv("RASPUTIN_HEADSCALE_CONTAINER"),
+		}
+		log.Printf("rasputin-api: mesh supervisor = docker (state=%s)", cfg.StateDir)
+		return mesh.NewDockerSupervisor(cfg)
+	default:
+		return nil, errors.New("unknown RASPUTIN_HEADSCALE_SUPERVISOR: " + choice)
 	}
 }
 
