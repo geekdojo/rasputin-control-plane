@@ -51,6 +51,10 @@ type Supervisor interface {
 	// (POST /api/v1/import/prometheus) and queries (GET /api/v1/query).
 	// Empty until Start has succeeded at least once.
 	VMBaseURL() string
+	// LokiBaseURL is the host-side base URL for Loki's HTTP API.
+	// Empty when Loki is disabled OR Start hasn't succeeded yet.
+	// Used by the api's /api/obs/logs handler to proxy LogQL queries.
+	LokiBaseURL() string
 }
 
 // NoopSupervisor is the default when obs is disabled. Healthy always
@@ -68,6 +72,7 @@ func (NoopSupervisor) Start(context.Context) error           { return nil }
 func (NoopSupervisor) Stop(context.Context) error            { return nil }
 func (NoopSupervisor) Healthy(context.Context) (bool, error) { return false, nil }
 func (NoopSupervisor) VMBaseURL() string                     { return "" }
+func (NoopSupervisor) LokiBaseURL() string                   { return "" }
 
 // CmdRunner runs a binary and returns its combined output. Injected so
 // tests can drive lifecycle decisions without a real Docker daemon.
@@ -123,6 +128,23 @@ type DockerComposeSupervisorConfig struct {
 	// off if those mounts aren't permitted in your environment.
 	EnableCadvisor *bool
 
+	// LokiImage overrides the Loki image reference. Defaults to the
+	// pinned upstream tag. Loki joins the compose stack at Slice 1.3
+	// and receives container-log pushes from Alloy's loki.source.docker
+	// component.
+	LokiImage string
+
+	// LokiListenAddr is the host bind for Loki's HTTP listener
+	// (push + query). Defaults to "127.0.0.1:3100"; container listens
+	// on 3100 internally.
+	LokiListenAddr string
+
+	// EnableLoki toggles the Loki service + Alloy's log-shipping
+	// components. Default true. Off lets operators run a metrics-only
+	// obs stack — useful when an external log aggregator is already
+	// in play.
+	EnableLoki *bool
+
 	// DockerBin overrides the docker binary path; useful when the runtime's
 	// CLI lives somewhere unexpected. Defaults to "docker".
 	DockerBin string
@@ -150,15 +172,25 @@ const (
 	defaultVMRetention     = "1y"
 	defaultAlloyImage      = "grafana/alloy:v1.4.2"
 	defaultAlloyListenAddr = "127.0.0.1:12345"
+	defaultLokiImage       = "grafana/loki:3.4.1"
+	defaultLokiListenAddr  = "127.0.0.1:3100"
 	defaultDockerBin       = "docker"
 
-	defaultHealthTimeout = 30 * time.Second
+	// 90s covers Loki's cold-start window. VM alone is up in <5s;
+	// Loki's TSDB schema bootstrap on a fresh data dir can take 30-60s.
+	// Operators who run VM-only (EnableLoki=false) won't notice the
+	// difference because waitHealthy short-circuits the moment VM is
+	// ready in that mode.
+	defaultHealthTimeout = 90 * time.Second
 	defaultPullTimeout   = 5 * time.Minute
 
 	composeFileName   = "docker-compose.yaml"
 	vmDataDir         = "vm-data"
 	alloyConfigSubdir = "alloy-config"
 	alloyConfigFile   = "config.alloy"
+	lokiConfigSubdir  = "loki-config"
+	lokiConfigFile    = "loki-config.yaml"
+	lokiDataDir       = "loki-data"
 )
 
 // DockerComposeSupervisor manages the obs stack via `docker compose`.
@@ -195,6 +227,16 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	if cfg.EnableCadvisor == nil {
 		t := true
 		cfg.EnableCadvisor = &t
+	}
+	if cfg.LokiImage == "" {
+		cfg.LokiImage = defaultLokiImage
+	}
+	if cfg.LokiListenAddr == "" {
+		cfg.LokiListenAddr = defaultLokiListenAddr
+	}
+	if cfg.EnableLoki == nil {
+		t := true
+		cfg.EnableLoki = &t
 	}
 	if cfg.DockerBin == "" {
 		cfg.DockerBin = defaultDockerBin
@@ -243,6 +285,11 @@ func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 	if err := s.writeAlloyConfig(); err != nil {
 		return err
 	}
+	if s.lokiEnabled() {
+		if err := s.writeLokiConfig(); err != nil {
+			return err
+		}
+	}
 	if err := s.writeCompose(); err != nil {
 		return err
 	}
@@ -289,6 +336,15 @@ func (s *DockerComposeSupervisor) VMBaseURL() string {
 	return "http://" + s.cfg.VMListenAddr
 }
 
+// LokiBaseURL returns the host-side base URL Loki is reachable at, or
+// "" when Loki is disabled. Used by /api/obs/logs to proxy LogQL.
+func (s *DockerComposeSupervisor) LokiBaseURL() string {
+	if !s.lokiEnabled() {
+		return ""
+	}
+	return "http://" + s.cfg.LokiListenAddr
+}
+
 // ----- Compose invocations ------------------------------------------------
 
 // compose invokes `docker compose -p <project> -f <file> <args...>`.
@@ -302,7 +358,11 @@ func (s *DockerComposeSupervisor) compose(ctx context.Context, args ...string) (
 // ----- Host state + config ------------------------------------------------
 
 func (s *DockerComposeSupervisor) prepareHostDirs() error {
-	for _, sub := range []string{vmDataDir, alloyConfigSubdir} {
+	subs := []string{vmDataDir, alloyConfigSubdir}
+	if s.lokiEnabled() {
+		subs = append(subs, lokiConfigSubdir, lokiDataDir)
+	}
+	for _, sub := range subs {
 		p := filepath.Join(s.cfg.StateDir, sub)
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			return fmt.Errorf("obs supervisor: mkdir %s: %w", p, err)
@@ -310,6 +370,78 @@ func (s *DockerComposeSupervisor) prepareHostDirs() error {
 	}
 	return nil
 }
+
+// lokiEnabled is a small accessor so the rest of the package doesn't
+// have to chase the (nil-vs-pointer)? shape of EnableLoki everywhere.
+func (s *DockerComposeSupervisor) lokiEnabled() bool {
+	return s.cfg.EnableLoki != nil && *s.cfg.EnableLoki
+}
+
+// cadvisorEnabled mirrors lokiEnabled — single-source-of-truth for the
+// "is this optional component on" question.
+func (s *DockerComposeSupervisor) cadvisorEnabled() bool {
+	return s.cfg.EnableCadvisor != nil && *s.cfg.EnableCadvisor
+}
+
+// writeLokiConfig renders Loki's YAML config into <StateDir>/loki-config/.
+// Loki picks up config-file changes on reload (SIGHUP) only; the simpler
+// path is to let `docker compose up -d` recreate the container when the
+// file content changes, which the next Start does for free.
+func (s *DockerComposeSupervisor) writeLokiConfig() error {
+	out := filepath.Join(s.cfg.StateDir, lokiConfigSubdir, lokiConfigFile)
+	tmp := out + ".tmp"
+	if err := os.WriteFile(tmp, []byte(lokiConfigYAML), 0o644); err != nil {
+		return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
+	}
+	return os.Rename(tmp, out)
+}
+
+// lokiConfigYAML is a minimal single-instance Loki config — filesystem
+// storage, no replication, no auth, TSDB index. Fine for homelab scale
+// (think MB/day, not TB/day); when a real Loki cluster is needed, the
+// shape switches to k3s + the Loki distributed chart and this file
+// goes away.
+//
+// Why ship it as a static string instead of a template: every field
+// here is fixed — paths inside the container, schema version, listen
+// port. No per-installation knobs to interpolate. If that changes
+// (custom retention, S3 backend, etc.) it'll become a template.
+const lokiConfigYAML = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
+# Edits get clobbered on the next supervisor Start.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  log_level: warn
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  allow_structured_metadata: true
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+`
 
 // writeAlloyConfig renders config.alloy into <StateDir>/alloy-config/.
 // Alloy auto-reloads on file change (no SIGHUP needed) so subsequent
@@ -329,7 +461,8 @@ func (s *DockerComposeSupervisor) writeAlloyConfig() error {
 
 func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
 	data := alloyConfigData{
-		EnableCadvisor: s.cfg.EnableCadvisor != nil && *s.cfg.EnableCadvisor,
+		EnableCadvisor: s.cadvisorEnabled(),
+		EnableLoki:     s.lokiEnabled(),
 	}
 	var buf bytes.Buffer
 	if err := alloyConfigTmpl.Execute(&buf, data); err != nil {
@@ -340,6 +473,7 @@ func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
 
 type alloyConfigData struct {
 	EnableCadvisor bool
+	EnableLoki     bool
 }
 
 // alloyConfigTmpl is the Slice 1.2 Alloy config in River syntax. It does
@@ -386,6 +520,54 @@ prometheus.scrape "cadvisor" {
   scrape_interval = "15s"
 }
 {{- end }}
+{{- if .EnableLoki }}
+
+// ----- Loki log shipping (Slice 1.3) -----
+// loki.write hands every entry to Loki over the compose network. URL
+// is the in-network DNS name so the operator's host-port mapping
+// stays invisible to Alloy.
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+// Discover every running Docker container on the host. The result is a
+// dynamic target list — new containers get tailed automatically, gone
+// ones drop out. refresh_interval controls how often the discovery
+// re-scans; 30s matches the agent's own poll cadence.
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "30s"
+}
+
+// Relabel the discovery targets so each log stream carries useful
+// labels in Loki: container name, image, and the project's compose
+// service name. Keeps log search ergonomic ("{container=...}" instead
+// of looking up container IDs).
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.write.local.receiver]
+}
+{{- end }}
 `))
 
 // writeCompose renders the compose YAML and writes it atomically. Re-runs
@@ -418,6 +600,13 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 	if alloyPort == "" {
 		return nil, fmt.Errorf("invalid AlloyListenAddr %q: port required", s.cfg.AlloyListenAddr)
 	}
+	lokiHost, lokiPort, err := net.SplitHostPort(s.cfg.LokiListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid LokiListenAddr %q: %w", s.cfg.LokiListenAddr, err)
+	}
+	if lokiPort == "" {
+		return nil, fmt.Errorf("invalid LokiListenAddr %q: port required", s.cfg.LokiListenAddr)
+	}
 	data := composeData{
 		VMImage:         s.cfg.VMImage,
 		VMHost:          vmHost,
@@ -429,7 +618,14 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 		AlloyPort:       alloyPort,
 		AlloyConfigDir:  "./" + alloyConfigSubdir,
 		AlloyConfigFile: alloyConfigFile,
-		EnableCadvisor:  s.cfg.EnableCadvisor != nil && *s.cfg.EnableCadvisor,
+		EnableCadvisor:  s.cadvisorEnabled(),
+		EnableLoki:      s.lokiEnabled(),
+		LokiImage:       s.cfg.LokiImage,
+		LokiHost:        lokiHost,
+		LokiPort:        lokiPort,
+		LokiConfigDir:   "./" + lokiConfigSubdir,
+		LokiConfigFile:  lokiConfigFile,
+		LokiDataDir:     "./" + lokiDataDir,
 	}
 	var buf bytes.Buffer
 	if err := composeTmpl.Execute(&buf, data); err != nil {
@@ -450,6 +646,13 @@ type composeData struct {
 	AlloyConfigDir  string
 	AlloyConfigFile string
 	EnableCadvisor  bool
+	EnableLoki      bool
+	LokiImage       string
+	LokiHost        string
+	LokiPort        string
+	LokiConfigDir   string
+	LokiConfigFile  string
+	LokiDataDir     string
 }
 
 // composeTmpl is the Slice 1.1 compose YAML — VictoriaMetrics only.
@@ -520,26 +723,55 @@ services:
 {{- end }}
     depends_on:
       - victoriametrics
+{{- if .EnableLoki }}
+      - loki
+
+  loki:
+    image: {{.LokiImage}}
+    container_name: rasputin-loki
+    restart: unless-stopped
+    command:
+      - "-config.file=/etc/loki/{{.LokiConfigFile}}"
+    ports:
+      - "{{.LokiHost}}:{{.LokiPort}}:3100"
+    volumes:
+      - {{.LokiConfigDir}}:/etc/loki:ro
+      - {{.LokiDataDir}}:/loki
+{{- end }}
 `))
 
 // ----- Health -------------------------------------------------------------
 
-// waitHealthy polls vmHealth every 500 ms until success or HealthTimeout.
+// waitHealthy polls VM's /health (and Loki's /ready when enabled) every
+// 500 ms until both are healthy or HealthTimeout fires. Loki added
+// here so the supervisor doesn't claim "ready" while Loki is still
+// booting — log-side consumers (Alloy's loki.write, /api/obs/logs)
+// would otherwise see connection refused.
 func (s *DockerComposeSupervisor) waitHealthy(ctx context.Context) error {
 	deadline := time.Now().Add(s.cfg.HealthTimeout)
 	var lastErr error
 	for {
-		ok, err := s.vmHealth(ctx)
-		if err == nil && ok {
+		vmOK, vmErr := s.vmHealth(ctx)
+		lokiOK := true
+		var lokiErr error
+		if s.lokiEnabled() {
+			lokiOK, lokiErr = s.lokiReady(ctx)
+		}
+		if vmOK && lokiOK {
 			return nil
 		}
-		if err != nil {
-			lastErr = err
-		} else {
+		switch {
+		case !vmOK && vmErr != nil:
+			lastErr = vmErr
+		case !vmOK:
 			lastErr = errors.New("vm /health returned non-2xx")
+		case !lokiOK && lokiErr != nil:
+			lastErr = fmt.Errorf("loki: %w", lokiErr)
+		case !lokiOK:
+			lastErr = errors.New("loki /ready returned non-2xx")
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("obs supervisor: victoriametrics not healthy after %s (last error: %w)",
+			return fmt.Errorf("obs supervisor: stack not healthy after %s (last error: %w)",
 				s.cfg.HealthTimeout, lastErr)
 		}
 		select {
@@ -554,12 +786,23 @@ func (s *DockerComposeSupervisor) waitHealthy(ctx context.Context) error {
 // "OK" once it's ready to accept queries / writes. A non-2xx is a "not
 // ready yet" signal, not an error.
 func (s *DockerComposeSupervisor) vmHealth(ctx context.Context) (bool, error) {
-	url := s.VMBaseURL() + "/health"
+	return httpGet2xx(ctx, s.httpc, s.VMBaseURL()+"/health")
+}
+
+// lokiReady polls Loki's /ready endpoint, which returns 200 when the
+// ingester is ready to accept writes. /ready is the canonical Loki
+// readiness gate; /metrics responds even when the ingester isn't ready
+// yet (so it's a worse choice).
+func (s *DockerComposeSupervisor) lokiReady(ctx context.Context) (bool, error) {
+	return httpGet2xx(ctx, s.httpc, s.LokiBaseURL()+"/ready")
+}
+
+func httpGet2xx(ctx context.Context, client *http.Client, url string) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false, err
 	}
-	resp, err := s.httpc.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}

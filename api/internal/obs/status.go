@@ -6,9 +6,10 @@ import (
 )
 
 // Status is the read-only view the api's HTTP layer renders at
-// /api/obs/status. Bundling Supervisor + VMSink together (instead of
-// passing both into NewServer) keeps the api package's import list
-// narrow and gives the handler one thing to ask for a snapshot.
+// /api/obs/status. Bundling Supervisor + VMSink + (optional) LogsClient
+// together (instead of passing all three into NewServer) keeps the api
+// package's import list narrow and gives the handler one thing to ask
+// for a snapshot.
 //
 // Nil-safe: a zero-value *Status (obs disabled) returns a Snapshot whose
 // Enabled flag is false and all other fields are their zero values. The
@@ -17,12 +18,23 @@ import (
 type Status struct {
 	sup  Supervisor
 	sink *VMSink
+	logs *LogsClient
 }
 
-// NewStatus bundles a Supervisor + VMSink for the handler. Both are
-// optional; passing nil for either yields an Enabled=false snapshot.
-func NewStatus(sup Supervisor, sink *VMSink) *Status {
-	return &Status{sup: sup, sink: sink}
+// NewStatus bundles a Supervisor + VMSink + (optional) LogsClient for
+// the handler. Supervisor + VMSink are required for Enabled=true;
+// LogsClient is optional (Loki may be disabled — Snapshot reports it).
+func NewStatus(sup Supervisor, sink *VMSink, logs *LogsClient) *Status {
+	return &Status{sup: sup, sink: sink, logs: logs}
+}
+
+// Logs returns the obs LogsClient, or nil when obs is off OR Loki is
+// disabled. Callers (the /api/obs/logs handler) must guard for nil.
+func (s *Status) Logs() *LogsClient {
+	if s == nil {
+		return nil
+	}
+	return s.logs
 }
 
 // Snapshot is the JSON shape returned by /api/obs/status.
@@ -50,6 +62,11 @@ type Snapshot struct {
 	// attempted yet. Surfaced in the UI so operators can spot
 	// configuration / health issues without tailing logs.
 	LastError string `json:"lastError,omitempty"`
+
+	// LokiBaseURL is the host-side base URL Loki is reachable at when
+	// log shipping is enabled. Empty when Loki is disabled OR the obs
+	// stack hasn't started yet.
+	LokiBaseURL string `json:"lokiBaseUrl,omitempty"`
 }
 
 // Snapshot returns the current obs state. Cheap — no I/O beyond the
@@ -66,9 +83,10 @@ func (s *Status) Snapshot(ctx context.Context) Snapshot {
 	}
 	healthy, _ := s.sup.Healthy(ctx)
 	out := Snapshot{
-		Enabled:   true,
-		Healthy:   healthy,
-		VMBaseURL: s.sup.VMBaseURL(),
+		Enabled:     true,
+		Healthy:     healthy,
+		VMBaseURL:   s.sup.VMBaseURL(),
+		LokiBaseURL: s.sup.LokiBaseURL(),
 	}
 	lastOK, lastErr := s.sink.LastWrite()
 	out.LastWriteOK = lastOK

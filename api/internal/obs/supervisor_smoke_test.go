@@ -78,7 +78,7 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 		StateDir:      stateDir,
 		ProjectName:   obsSmokeProject,
 		VMListenAddr:  listenAddr,
-		HealthTimeout: 60 * time.Second, // first-run pull can be slow
+		HealthTimeout: 3 * time.Minute, // first-run pull + Loki TSDB bootstrap can be slow
 		PullTimeout:   3 * time.Minute,
 	})
 	if err != nil {
@@ -166,6 +166,43 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 					body, selfBody)
 			}
 			time.Sleep(2 * time.Second)
+		}
+	})
+
+	t.Run("Loki_AcceptsShippedDockerLogs", func(t *testing.T) {
+		// Build a LogsClient against the live supervisor and query
+		// {compose_service="victoriametrics"} — VM writes startup +
+		// query logs continuously, so something should be present within
+		// the discovery/ingest window. Loki's first scrape can take
+		// ~15-20s after Alloy starts.
+		client, err := NewLogsClient(LogsClientConfig{Supervisor: sup})
+		if err != nil {
+			t.Fatalf("NewLogsClient: %v", err)
+		}
+		deadline := time.Now().Add(90 * time.Second)
+		for {
+			body, err := client.QueryRange(ctx, LogsQuery{
+				Query: `{compose_service="victoriametrics"}`,
+				Start: time.Now().Add(-10 * time.Minute),
+				End:   time.Now(),
+				Limit: 5,
+			})
+			if err == nil && strings.Contains(string(body), `"streams"`) &&
+				strings.Contains(string(body), `"values"`) &&
+				!strings.Contains(string(body), `"result":[]`) {
+				return
+			}
+			if time.Now().After(deadline) {
+				snippet := ""
+				if body != nil {
+					snippet = string(body)
+					if len(snippet) > 256 {
+						snippet = snippet[:256]
+					}
+				}
+				t.Fatalf("no Loki logs after 90s; last err=%v body=%s", err, snippet)
+			}
+			time.Sleep(3 * time.Second)
 		}
 	})
 

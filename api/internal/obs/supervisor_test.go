@@ -153,6 +153,7 @@ func TestStart_HappyPath(t *testing.T) {
 	dir := t.TempDir()
 	fake := newFakeCompose()
 	host, port := splitHostPort(t, srv.URL)
+	f := false
 	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
 		StateDir:      dir,
 		VMListenAddr:  host + ":" + port,
@@ -160,6 +161,7 @@ func TestStart_HappyPath(t *testing.T) {
 		HTTPClient:    srv.Client(),
 		HealthTimeout: 2 * time.Second,
 		PullTimeout:   time.Second,
+		EnableLoki:    &f, // unit tests don't stub Loki; gated off
 	})
 	if err != nil {
 		t.Fatalf("constructor: %v", err)
@@ -195,6 +197,7 @@ func TestStart_PullFailureIsRecoverable(t *testing.T) {
 	fake.errOnSub["pull"] = errors.New("registry unreachable")
 
 	host, port := splitHostPort(t, srv.URL)
+	f := false
 	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
 		StateDir:      dir,
 		VMListenAddr:  host + ":" + port,
@@ -202,6 +205,7 @@ func TestStart_PullFailureIsRecoverable(t *testing.T) {
 		HTTPClient:    srv.Client(),
 		HealthTimeout: 2 * time.Second,
 		PullTimeout:   time.Second,
+		EnableLoki:    &f,
 	})
 	if err != nil {
 		t.Fatalf("constructor: %v", err)
@@ -394,12 +398,14 @@ func TestStart_WritesAlloyConfig(t *testing.T) {
 	defer srv.Close()
 	dir := t.TempDir()
 	host, port := splitHostPort(t, srv.URL)
+	f := false
 	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
 		StateDir:      dir,
 		VMListenAddr:  host + ":" + port,
 		Runner:        newFakeCompose().run,
 		HTTPClient:    srv.Client(),
 		HealthTimeout: 2 * time.Second,
+		EnableLoki:    &f, // disable so test doesn't have to stub Loki too
 	})
 	if err := sup.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -427,12 +433,14 @@ func TestVMBaseURL(t *testing.T) {
 type fakeSupervisor struct {
 	healthy bool
 	baseURL string
+	lokiURL string
 }
 
 func (f *fakeSupervisor) Start(context.Context) error           { return nil }
 func (f *fakeSupervisor) Stop(context.Context) error            { return nil }
 func (f *fakeSupervisor) Healthy(context.Context) (bool, error) { return f.healthy, nil }
 func (f *fakeSupervisor) VMBaseURL() string                     { return f.baseURL }
+func (f *fakeSupervisor) LokiBaseURL() string                   { return f.lokiURL }
 
 func TestVMSink_RequiresSupervisor(t *testing.T) {
 	if _, err := NewVMSink(VMSinkConfig{}); err == nil {
@@ -569,7 +577,7 @@ func TestStatus_NilReturnsDisabled(t *testing.T) {
 
 func TestStatus_NoopSupervisorIsDisabled(t *testing.T) {
 	sink, _ := NewVMSink(VMSinkConfig{Supervisor: &fakeSupervisor{}})
-	s := NewStatus(NoopSupervisor{}, sink)
+	s := NewStatus(NoopSupervisor{}, sink, nil)
 	if snap := s.Snapshot(context.Background()); snap.Enabled {
 		t.Error("noop supervisor should be Enabled=false")
 	}
@@ -586,7 +594,7 @@ func TestStatus_HealthyReportsTrue(t *testing.T) {
 		NodeID: "n", Ts: time.Now(), Metrics: map[string]float64{"x": 1},
 	})
 
-	s := NewStatus(fakeSup, sink)
+	s := NewStatus(fakeSup, sink, nil)
 	snap := s.Snapshot(context.Background())
 	if !snap.Enabled {
 		t.Fatal("Enabled should be true")

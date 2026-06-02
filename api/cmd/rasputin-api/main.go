@@ -469,7 +469,7 @@ func splitCSV(s string) []string {
 func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Service) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
 	if os.Getenv("RASPUTIN_OBS_ENABLED") != "1" {
 		log.Printf("rasputin-api: obs disabled (set RASPUTIN_OBS_ENABLED=1 to enable)")
-		return nil, nil, obs.NewStatus(nil, nil)
+		return nil, nil, obs.NewStatus(nil, nil, nil)
 	}
 	stateDir := envOr("RASPUTIN_OBS_STATE_DIR", filepath.Join(dataDir, "obs"))
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -507,7 +507,14 @@ func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Servic
 		log.Fatalf("rasputin-api: obs sink: %v", err)
 	}
 	metricsSvc.SetSink(sink)
-	return sup, sink, obs.NewStatus(sup, sink)
+	// LogsClient wraps the same supervisor — when Loki is on, LokiBaseURL()
+	// is non-empty and queries proxy through; when off, the client returns
+	// a clean "Loki not configured" error.
+	logs, err := obs.NewLogsClient(obs.LogsClientConfig{Supervisor: sup})
+	if err != nil {
+		log.Fatalf("rasputin-api: obs logs client: %v", err)
+	}
+	return sup, sink, obs.NewStatus(sup, sink, logs)
 }
 
 // parseDurationOr parses s as a duration; on parse error or zero/negative,

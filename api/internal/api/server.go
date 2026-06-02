@@ -67,7 +67,7 @@ func NewServer(
 		// Always-non-nil so handler can call Snapshot without guarding.
 		// A nil-input Status returns Enabled=false snapshots — exactly
 		// the right "obs is off" semantics.
-		obsStatus = obs.NewStatus(nil, nil)
+		obsStatus = obs.NewStatus(nil, nil, nil)
 	}
 	return &Server{
 		store: store, runner: runner, inv: inv, fw: fw, apps: appsStore,
@@ -170,6 +170,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/alerts", reqd(s.handleListAlerts))
 
 	mux.HandleFunc("GET /api/obs/status", reqd(s.handleObsStatus))
+	mux.HandleFunc("GET /api/obs/logs", reqd(s.handleObsLogs))
 
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
 	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
