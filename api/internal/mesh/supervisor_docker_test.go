@@ -202,14 +202,56 @@ func TestDockerSupervisor_Constructor_AppliesDefaults(t *testing.T) {
 	if s.cfg.ListenAddr != defaultListenAddr {
 		t.Errorf("ListenAddr: %q", s.cfg.ListenAddr)
 	}
-	if s.cfg.ServerURL != "http://"+defaultListenAddr {
-		t.Errorf("ServerURL: %q", s.cfg.ServerURL)
+	// ServerURL is derived from the resolved server host, not a literal
+	// "http://0.0.0.0:18080" — the wildcard wouldn't be navigable. Just
+	// assert it's non-empty + parses; the exact value depends on the
+	// host's network (and may differ in CI vs dev).
+	if s.cfg.ServerURL == "" {
+		t.Error("ServerURL: empty")
+	}
+	if !strings.HasPrefix(s.cfg.ServerURL, "http://") {
+		t.Errorf("ServerURL: want http:// prefix, got %q", s.cfg.ServerURL)
+	}
+	if strings.Contains(s.cfg.ServerURL, "0.0.0.0") {
+		t.Errorf("ServerURL: 0.0.0.0 leaked into URL: %q", s.cfg.ServerURL)
 	}
 	if s.cfg.DockerBin != "docker" {
 		t.Errorf("DockerBin: %q", s.cfg.DockerBin)
 	}
 	if s.cfg.HealthTimeout != defaultHealthTimeout || s.cfg.PullTimeout != defaultPullTimeout {
 		t.Errorf("timeouts: health=%v pull=%v", s.cfg.HealthTimeout, s.cfg.PullTimeout)
+	}
+}
+
+func TestResolveServerHost(t *testing.T) {
+	// Explicit IP passes through unchanged — operator's choice wins.
+	if got := resolveServerHost("127.0.0.1:18080"); got != "127.0.0.1" {
+		t.Errorf("loopback should pass through; got %q", got)
+	}
+	if got := resolveServerHost("192.168.1.10:18080"); got != "192.168.1.10" {
+		t.Errorf("specific IP should pass through; got %q", got)
+	}
+	// Wildcards resolve to something else — exact value depends on host
+	// network state, but it must NOT be "0.0.0.0" / "::" / "" (any of
+	// those would produce an unnavigable URL).
+	for _, listen := range []string{"0.0.0.0:18080", "[::]:18080"} {
+		got := resolveServerHost(listen)
+		if got == "" || got == "0.0.0.0" || got == "::" {
+			t.Errorf("resolveServerHost(%q) must not return wildcard / empty; got %q", listen, got)
+		}
+	}
+}
+
+func TestPortOf(t *testing.T) {
+	if got := portOf("127.0.0.1:18080"); got != "18080" {
+		t.Errorf("got %q", got)
+	}
+	if got := portOf("0.0.0.0:9999"); got != "9999" {
+		t.Errorf("got %q", got)
+	}
+	// Malformed → safe default; never blank, never panic.
+	if got := portOf("garbage"); got != "18080" {
+		t.Errorf("malformed addr should fall back to 18080; got %q", got)
 	}
 }
 

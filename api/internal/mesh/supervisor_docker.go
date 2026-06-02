@@ -60,9 +60,12 @@ type DockerSupervisorConfig struct {
 	// Image is the headscale image reference. Defaults to "headscale/headscale:0.28.0".
 	Image string
 
-	// ListenAddr is the host bind for Headscale's HTTP listener, e.g.
-	// "127.0.0.1:18080". The container listens on 8080 internally; we
-	// publish that to ListenAddr on the host.
+	// ListenAddr is the host bind for Headscale's HTTP listener. Defaults
+	// to "0.0.0.0:18080" — all LAN interfaces on the controlplane node,
+	// which is the right default since the controlplane is behind Node N
+	// on a real chassis and never has a WAN interface. Override to
+	// "127.0.0.1:18080" for single-host dev. The container listens on
+	// 8080 internally; we publish that to ListenAddr on the host.
 	ListenAddr string
 
 	// ServerURL is what gets written into Headscale's `server_url` field —
@@ -89,7 +92,14 @@ type DockerSupervisorConfig struct {
 const (
 	defaultContainerName = "rasputin-headscale"
 	defaultImage         = "headscale/headscale:0.28.0"
-	defaultListenAddr    = "127.0.0.1:18080"
+	// Bind to all interfaces by default. On a real Rasputin chassis the
+	// controlplane sits behind Node N (the firewall) on a LAN-only
+	// interface — there is no WAN-facing NIC to accidentally expose, so
+	// "all interfaces" means "all LAN interfaces". Loopback would prevent
+	// any LAN client (laptop, phone) from reaching Headscale, which is
+	// the whole point. Dev setups on multi-homed hosts can pin this to
+	// 127.0.0.1 via RASPUTIN_HEADSCALE_LISTEN_ADDR.
+	defaultListenAddr    = "0.0.0.0:18080"
 	defaultHealthTimeout = 30 * time.Second
 	defaultPullTimeout   = 5 * time.Minute
 )
@@ -110,7 +120,7 @@ func NewDockerSupervisor(cfg DockerSupervisorConfig) (*DockerSupervisor, error) 
 		cfg.ListenAddr = defaultListenAddr
 	}
 	if cfg.ServerURL == "" {
-		cfg.ServerURL = "http://" + cfg.ListenAddr
+		cfg.ServerURL = "http://" + resolveServerHost(cfg.ListenAddr) + ":" + portOf(cfg.ListenAddr)
 	}
 	if cfg.DockerBin == "" {
 		cfg.DockerBin = "docker"
@@ -130,6 +140,41 @@ func NewDockerSupervisor(cfg DockerSupervisorConfig) (*DockerSupervisor, error) 
 		runner: runner,
 		dialer: net.DialTimeout,
 	}, nil
+}
+
+// resolveServerHost picks the hostname that goes into Headscale's
+// server_url when the operator hasn't set RASPUTIN_HEADSCALE_URL. If
+// ListenAddr is a wildcard ("0.0.0.0" or "::") we can't use it as a URL
+// hostname — Tailscale clients would try to literally navigate there —
+// so we detect the controlplane's primary LAN IP via the dial-trick.
+// Loopback / specific binds are passed through verbatim; the operator
+// chose them deliberately.
+//
+// Fallback chain (in order of preference): host part of ListenAddr if
+// it's a real IP → primary LAN IP via dial-trick → "localhost". The
+// final fallback is only useful for same-host dev; production setups
+// hit the dial-trick branch.
+func resolveServerHost(listenAddr string) string {
+	host, _, err := net.SplitHostPort(listenAddr)
+	if err == nil && host != "" && host != "0.0.0.0" && host != "::" {
+		return host
+	}
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err == nil {
+		defer conn.Close()
+		if local, ok := conn.LocalAddr().(*net.UDPAddr); ok && local.IP != nil {
+			return local.IP.String()
+		}
+	}
+	return "localhost"
+}
+
+func portOf(listenAddr string) string {
+	_, port, err := net.SplitHostPort(listenAddr)
+	if err != nil || port == "" {
+		return "18080"
+	}
+	return port
 }
 
 // execRunner is the default CmdRunner — runs the binary and returns its
