@@ -21,7 +21,9 @@ package alerts
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/nats-io/nats.go"
 )
 
 // Status derivation lives in inventory.ComputeStatus — see nodeAlerts.
@@ -39,19 +42,26 @@ import (
 // they care, not be nagged by a banner.
 const failedJobLookback = 24 * time.Hour
 
-// Service aggregates alerts from the subsystem stores.
+// Service aggregates alerts from the subsystem stores AND merges in
+// rule-engine alerts persisted via the webhook (Slice 1.5). The
+// aggregator's view stays computed-on-read; persisted alerts come from
+// the Store and round out the picture with vmalert-driven entries the
+// aggregator can't compute (e.g. "CPU > 90% for 5m").
 type Service struct {
 	inv   *inventory.Store
 	jobs  *jobs.Store
 	apps  *apps.Store
 	setup *setup.Service
+	store *Store     // optional — nil means "no persistence; aggregator only"
+	nc    *nats.Conn // optional — nil disables NATS push of alert changes
 }
 
-// New constructs an alerts Service. All sources are required; if a future
-// version wants to gate one, expose it as an option here rather than
-// passing nil.
-func New(inv *inventory.Store, j *jobs.Store, a *apps.Store, s *setup.Service) *Service {
-	return &Service{inv: inv, jobs: j, apps: a, setup: s}
+// New constructs an alerts Service. The store + nats.Conn are optional;
+// dev-time wiring may pass nil for both (the aggregator still works).
+// Production wiring passes both so the webhook receiver can persist and
+// the UI's /ws/alerts gets push updates.
+func New(inv *inventory.Store, j *jobs.Store, a *apps.Store, s *setup.Service, store *Store, nc *nats.Conn) *Service {
+	return &Service{inv: inv, jobs: j, apps: a, setup: s, store: store, nc: nc}
 }
 
 // List returns the current alert snapshot, sorted by severity descending
@@ -77,6 +87,11 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	}
 	if alerts, err := s.setupAlerts(ctx, now); err != nil {
 		return nil, fmt.Errorf("alerts: setup: %w", err)
+	} else {
+		out = append(out, alerts...)
+	}
+	if alerts, err := s.ruleAlerts(ctx); err != nil {
+		return nil, fmt.Errorf("alerts: rules: %w", err)
 	} else {
 		out = append(out, alerts...)
 	}
@@ -215,6 +230,222 @@ func (s *Service) setupAlerts(ctx context.Context, now time.Time) ([]proto.Alert
 		Detail:   "Finish the wizard to enable cluster name, identity, and OS update flow.",
 		Since:    now,
 	}}, nil
+}
+
+// ruleAlerts pulls every non-dismissed persisted (rule-engine) alert.
+// Returns empty when no store is wired — dev mode keeps working.
+func (s *Service) ruleAlerts(ctx context.Context) ([]proto.Alert, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	rows, err := s.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]proto.Alert, 0, len(rows))
+	for _, p := range rows {
+		// Only include alerts that are currently firing OR have been
+		// acked but not dismissed (so the operator can see "yes I know,
+		// still ongoing"). A resolved + non-acked alert is treated as
+		// "self-healed" and dropped from the live view — operators
+		// who want history hit a future /api/alerts/history.
+		if p.Status != "firing" && p.AckedAt == nil {
+			continue
+		}
+		out = append(out, toAlert(p))
+	}
+	return out, nil
+}
+
+// IngestWebhook handles an Alertmanager-v2-format webhook POST. vmalert
+// (configured with -notifier.url=http://api:8080/api/alerts/webhook) is
+// the production caller; tests can drive it directly.
+//
+// Each alert in the payload is upsert-ed by fingerprint. A NEW row
+// triggers AlertFired on the NATS push topic; status transition to
+// "resolved" triggers AlertResolved. Both are best-effort — webhook
+// success is gated on the database write, not the push.
+func (s *Service) IngestWebhook(ctx context.Context, body []byte) (ingested int, err error) {
+	if s.store == nil {
+		return 0, fmt.Errorf("alerts: webhook: no store wired")
+	}
+	var wh AlertmanagerWebhook
+	if err := json.Unmarshal(body, &wh); err != nil {
+		return 0, fmt.Errorf("alerts: webhook: decode: %w", err)
+	}
+	for _, a := range wh.Alerts {
+		fp := a.Fingerprint
+		if fp == "" {
+			fp = fingerprintFromLabels(a.Labels)
+		}
+		title := a.Labels["alertname"]
+		if title == "" {
+			title = "alert"
+		}
+		sev := proto.AlertWarn
+		if a.Labels["severity"] == "critical" || a.Labels["severity"] == "crit" {
+			sev = proto.AlertCrit
+		}
+		detail := a.Annotations["summary"]
+		if detail == "" {
+			detail = a.Annotations["description"]
+		}
+		row := &PersistedAlert{
+			Fingerprint: fp,
+			Status:      a.Status,
+			Severity:    sev,
+			Title:       title,
+			Detail:      detail,
+			Labels:      a.Labels,
+			Annotations: a.Annotations,
+			StartsAt:    a.StartsAt,
+		}
+		if !a.EndsAt.IsZero() {
+			t := a.EndsAt
+			row.EndsAt = &t
+		}
+		saved, isNew, err := s.store.Upsert(ctx, row)
+		if err != nil {
+			return ingested, err
+		}
+		ingested++
+		change := proto.AlertResolved
+		switch {
+		case isNew:
+			change = proto.AlertFired
+		case saved.Status == "firing":
+			change = proto.AlertFired
+		case saved.Status == "resolved":
+			change = proto.AlertResolved
+		}
+		s.publishChange(change, saved)
+	}
+	return ingested, nil
+}
+
+// Ack persists the operator's acknowledgement of an alert and publishes
+// an AlertAcked event. Returns the updated alert.
+func (s *Service) Ack(ctx context.Context, id string) (*proto.Alert, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("alerts: ack: no store wired")
+	}
+	saved, err := s.store.Ack(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	a := toAlert(saved)
+	s.publishChange(proto.AlertAcked, saved)
+	return &a, nil
+}
+
+// Dismiss marks the alert hidden from the live list. Same flow as Ack.
+func (s *Service) Dismiss(ctx context.Context, id string) (*proto.Alert, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("alerts: dismiss: no store wired")
+	}
+	saved, err := s.store.Dismiss(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	a := toAlert(saved)
+	s.publishChange(proto.AlertDismissed, saved)
+	return &a, nil
+}
+
+// publishChange best-effort sends an AlertChangeEvt on the NATS push
+// subject. Failures are logged but never block the caller — push is a
+// nice-to-have, not the source of truth.
+func (s *Service) publishChange(change proto.AlertChangeType, p *PersistedAlert) {
+	if s.nc == nil || p == nil {
+		return
+	}
+	ev := proto.AlertChangeEvt{
+		Change: change,
+		Alert:  toAlert(p),
+		Ts:     time.Now().UTC(),
+	}
+	body, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	if err := s.nc.Publish(proto.AlertsChangesSubject, body); err != nil {
+		log.Printf("alerts: publish %s: %v", change, err)
+	}
+}
+
+// toAlert flattens a PersistedAlert into the proto.Alert wire shape.
+func toAlert(p *PersistedAlert) proto.Alert {
+	a := proto.Alert{
+		ID:       p.ID,
+		Severity: p.Severity,
+		Source:   proto.AlertSourceRule,
+		Title:    p.Title,
+		Detail:   p.Detail,
+		Since:    p.StartsAt,
+	}
+	if p.AckedAt != nil {
+		a.Acked = true
+		a.AckedAt = *p.AckedAt
+	}
+	// Surface related node/job/app if the labels point at one — the
+	// UI's drill-through becomes useful for vmalert rules whose
+	// expressions group by nodeId.
+	if n := p.Labels["nodeId"]; n != "" {
+		a.RelatedKind = "node"
+		a.RelatedID = n
+	}
+	return a
+}
+
+// AlertmanagerWebhook is the v2 webhook payload Alertmanager / vmalert
+// POST. Only the fields we actually use are decoded.
+type AlertmanagerWebhook struct {
+	Version  string              `json:"version"`
+	GroupKey string              `json:"groupKey"`
+	Status   string              `json:"status"`
+	Alerts   []AlertmanagerAlert `json:"alerts"`
+}
+
+// AlertmanagerAlert is a single entry inside the webhook payload.
+type AlertmanagerAlert struct {
+	Status       string            `json:"status"`
+	Labels       map[string]string `json:"labels"`
+	Annotations  map[string]string `json:"annotations"`
+	StartsAt     time.Time         `json:"startsAt"`
+	EndsAt       time.Time         `json:"endsAt"`
+	GeneratorURL string            `json:"generatorURL"`
+	Fingerprint  string            `json:"fingerprint"`
+}
+
+// fingerprintFromLabels derives a stable hash from the labels for
+// Alertmanager payloads that don't include a fingerprint field
+// (vmalert older versions). Sorted label k=v pairs joined by | hashed
+// to a hex string is enough — collision-resistant for the homelab
+// alert volume we care about.
+func fingerprintFromLabels(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var buf []byte
+	for _, k := range keys {
+		buf = append(buf, k...)
+		buf = append(buf, '=')
+		buf = append(buf, labels[k]...)
+		buf = append(buf, '|')
+	}
+	return fmt.Sprintf("%x", fnv64(buf))
+}
+
+// fnv64 is a tiny FNV-1a — avoids pulling crypto/sha256 for a non-security hash.
+func fnv64(b []byte) uint64 {
+	var h uint64 = 14695981039346656037
+	for _, c := range b {
+		h ^= uint64(c)
+		h *= 1099511628211
+	}
+	return h
 }
 
 func severityRank(s proto.AlertSeverity) int {

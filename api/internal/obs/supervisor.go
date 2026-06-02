@@ -166,6 +166,28 @@ type DockerComposeSupervisorConfig struct {
 	// for operators using an existing Grafana elsewhere.
 	EnableGrafana *bool
 
+	// VMAlertImage overrides the vmalert image reference. Defaults to
+	// the pinned upstream tag. vmalert evaluates the Slice 1.5
+	// starter-rules YAML against VM and POSTs Alertmanager-format
+	// notifications to AlertsWebhookURL.
+	VMAlertImage string
+
+	// AlertsWebhookURL is where vmalert POSTs alerts. Defaults to
+	// http://host.docker.internal:8080/api/alerts/webhook — the api
+	// running on the controlplane host. Operators on Linux without
+	// host.docker.internal can set this to the controlplane's LAN IP.
+	AlertsWebhookURL string
+
+	// AlertsWebhookSecret is sent in the X-Webhook-Secret header on
+	// every vmalert POST. Empty (default) disables the header. Must
+	// match RASPUTIN_ALERTS_WEBHOOK_SECRET on the api side.
+	AlertsWebhookSecret string
+
+	// EnableVMAlert toggles the vmalert service. Default true. Off
+	// gives a metrics + logs + dashboards stack without alerting —
+	// useful while operators are tuning rules.
+	EnableVMAlert *bool
+
 	// DockerBin overrides the docker binary path; useful when the runtime's
 	// CLI lives somewhere unexpected. Defaults to "docker".
 	DockerBin string
@@ -197,6 +219,8 @@ const (
 	defaultLokiListenAddr    = "127.0.0.1:3100"
 	defaultGrafanaImage      = "grafana/grafana:11.5.1"
 	defaultGrafanaListenAddr = "127.0.0.1:3000"
+	defaultVMAlertImage      = "victoriametrics/vmalert:v1.103.0"
+	defaultAlertsWebhookURL  = "http://host.docker.internal:8080/api/alerts/webhook"
 	defaultDockerBin         = "docker"
 
 	// 90s covers Loki's cold-start window. VM alone is up in <5s;
@@ -218,6 +242,9 @@ const (
 	grafanaConfigSubdir = "grafana-config"
 	grafanaIniFile      = "grafana.ini"
 	grafanaDataDir      = "grafana-data"
+
+	vmalertConfigSubdir = "vmalert-config"
+	vmalertRulesFile    = "rules.yml"
 )
 
 // DockerComposeSupervisor manages the obs stack via `docker compose`.
@@ -275,6 +302,16 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 		t := true
 		cfg.EnableGrafana = &t
 	}
+	if cfg.VMAlertImage == "" {
+		cfg.VMAlertImage = defaultVMAlertImage
+	}
+	if cfg.AlertsWebhookURL == "" {
+		cfg.AlertsWebhookURL = defaultAlertsWebhookURL
+	}
+	if cfg.EnableVMAlert == nil {
+		t := true
+		cfg.EnableVMAlert = &t
+	}
 	if cfg.DockerBin == "" {
 		cfg.DockerBin = defaultDockerBin
 	}
@@ -329,6 +366,11 @@ func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 	}
 	if s.grafanaEnabled() {
 		if err := s.writeGrafanaConfig(); err != nil {
+			return err
+		}
+	}
+	if s.vmalertEnabled() {
+		if err := s.writeVMAlertConfig(); err != nil {
 			return err
 		}
 	}
@@ -423,6 +465,9 @@ func (s *DockerComposeSupervisor) prepareHostDirs() error {
 			grafanaDataDir,
 		)
 	}
+	if s.vmalertEnabled() {
+		subs = append(subs, vmalertConfigSubdir)
+	}
 	for _, sub := range subs {
 		p := filepath.Join(s.cfg.StateDir, sub)
 		if err := os.MkdirAll(p, 0o755); err != nil {
@@ -454,6 +499,11 @@ func (s *DockerComposeSupervisor) cadvisorEnabled() bool {
 // grafanaEnabled — single-source-of-truth for the dashboard service.
 func (s *DockerComposeSupervisor) grafanaEnabled() bool {
 	return s.cfg.EnableGrafana != nil && *s.cfg.EnableGrafana
+}
+
+// vmalertEnabled — single-source-of-truth for the alerting service.
+func (s *DockerComposeSupervisor) vmalertEnabled() bool {
+	return s.cfg.EnableVMAlert != nil && *s.cfg.EnableVMAlert
 }
 
 // writeLokiConfig renders Loki's YAML config into <StateDir>/loki-config/.
@@ -630,6 +680,73 @@ const starterDashboardJSON = `{
     }
   ]
 }
+`
+
+// writeVMAlertConfig lays down the rules YAML into
+// <StateDir>/vmalert-config/. vmalert reloads on SIGHUP; the simpler
+// path (matching every other config we manage) is to re-deploy on
+// supervisor Start.
+func (s *DockerComposeSupervisor) writeVMAlertConfig() error {
+	out := filepath.Join(s.cfg.StateDir, vmalertConfigSubdir, vmalertRulesFile)
+	tmp := out + ".tmp"
+	if err := os.WriteFile(tmp, []byte(vmalertRulesYAML), 0o644); err != nil {
+		return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
+	}
+	return os.Rename(tmp, out)
+}
+
+// vmalertRulesYAML is the Slice 1.5 starter rule set. Three rules,
+// each scoped to homelab thresholds:
+//
+//   - NodeDown — node hasn't reported metrics in 5m. absent_over_time
+//     fires when the series goes silent, which matches the agent's
+//     "stale > 2m, offline > 30s" heartbeat semantics.
+//   - HighCPU  — sustained CPU > 90% for 5m. Tuned for a homelab
+//     where short spikes (apt-get update, docker pull) are normal
+//     but a sustained burn means something's wrong.
+//   - DiskAlmostFull — root disk > 85%. Below the 90% mark Linux
+//     starts losing performance on ext4, gives the operator time to
+//     clean up.
+//
+// All three carry severity: warning except NodeDown which is
+// critical. The aggregator-derived "node-offline" alert and the
+// rule's NodeDown will both fire for the same condition — Slice 1.5
+// ships dedup as a future item; the wire shape carries enough labels
+// for the UI to dedup client-side if needed.
+const vmalertRulesYAML = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
+groups:
+  - name: rasputin-default
+    interval: 30s
+    rules:
+      - alert: NodeDown
+        expr: absent_over_time(rasputin_cpu_percent[5m])
+        for: 5m
+        labels:
+          severity: critical
+          source: vmalert
+        annotations:
+          summary: "Node has not reported metrics in 5 minutes"
+          description: "rasputin_cpu_percent absent for >5m — check the agent on the affected node."
+
+      - alert: HighCPU
+        expr: rasputin_cpu_percent > 90
+        for: 5m
+        labels:
+          severity: warning
+          source: vmalert
+        annotations:
+          summary: "Sustained CPU > 90% on {{$labels.nodeId}}"
+          description: "rasputin_cpu_percent has been above 90% for 5+ minutes (current value: {{$value}})."
+
+      - alert: DiskAlmostFull
+        expr: (rasputin_disk_used_bytes / rasputin_disk_total_bytes) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          source: vmalert
+        annotations:
+          summary: "Root disk above 85% on {{$labels.nodeId}}"
+          description: "rasputin_disk_used_bytes / rasputin_disk_total_bytes > 0.85 for 5+ minutes."
 `
 
 const lokiConfigYAML = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
@@ -841,30 +958,36 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 		return nil, fmt.Errorf("invalid GrafanaListenAddr %q: port required", s.cfg.GrafanaListenAddr)
 	}
 	data := composeData{
-		VMImage:          s.cfg.VMImage,
-		VMHost:           vmHost,
-		VMPort:           vmPort,
-		VMRetention:      s.cfg.VMRetention,
-		VMDataDir:        "./" + vmDataDir,
-		AlloyImage:       s.cfg.AlloyImage,
-		AlloyHost:        alloyHost,
-		AlloyPort:        alloyPort,
-		AlloyConfigDir:   "./" + alloyConfigSubdir,
-		AlloyConfigFile:  alloyConfigFile,
-		EnableCadvisor:   s.cadvisorEnabled(),
-		EnableLoki:       s.lokiEnabled(),
-		LokiImage:        s.cfg.LokiImage,
-		LokiHost:         lokiHost,
-		LokiPort:         lokiPort,
-		LokiConfigDir:    "./" + lokiConfigSubdir,
-		LokiConfigFile:   lokiConfigFile,
-		LokiDataDir:      "./" + lokiDataDir,
-		EnableGrafana:    s.grafanaEnabled(),
-		GrafanaImage:     s.cfg.GrafanaImage,
-		GrafanaHost:      grafanaHost,
-		GrafanaPort:      grafanaPort,
-		GrafanaConfigDir: "./" + grafanaConfigSubdir,
-		GrafanaDataDir:   "./" + grafanaDataDir,
+		VMImage:             s.cfg.VMImage,
+		VMHost:              vmHost,
+		VMPort:              vmPort,
+		VMRetention:         s.cfg.VMRetention,
+		VMDataDir:           "./" + vmDataDir,
+		AlloyImage:          s.cfg.AlloyImage,
+		AlloyHost:           alloyHost,
+		AlloyPort:           alloyPort,
+		AlloyConfigDir:      "./" + alloyConfigSubdir,
+		AlloyConfigFile:     alloyConfigFile,
+		EnableCadvisor:      s.cadvisorEnabled(),
+		EnableLoki:          s.lokiEnabled(),
+		LokiImage:           s.cfg.LokiImage,
+		LokiHost:            lokiHost,
+		LokiPort:            lokiPort,
+		LokiConfigDir:       "./" + lokiConfigSubdir,
+		LokiConfigFile:      lokiConfigFile,
+		LokiDataDir:         "./" + lokiDataDir,
+		EnableGrafana:       s.grafanaEnabled(),
+		GrafanaImage:        s.cfg.GrafanaImage,
+		GrafanaHost:         grafanaHost,
+		GrafanaPort:         grafanaPort,
+		GrafanaConfigDir:    "./" + grafanaConfigSubdir,
+		GrafanaDataDir:      "./" + grafanaDataDir,
+		EnableVMAlert:       s.vmalertEnabled(),
+		VMAlertImage:        s.cfg.VMAlertImage,
+		VMAlertConfigDir:    "./" + vmalertConfigSubdir,
+		VMAlertRulesFile:    vmalertRulesFile,
+		AlertsWebhookURL:    s.cfg.AlertsWebhookURL,
+		AlertsWebhookSecret: s.cfg.AlertsWebhookSecret,
 	}
 	var buf bytes.Buffer
 	if err := composeTmpl.Execute(&buf, data); err != nil {
@@ -874,30 +997,36 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 }
 
 type composeData struct {
-	VMImage          string
-	VMHost           string
-	VMPort           string
-	VMRetention      string
-	VMDataDir        string
-	AlloyImage       string
-	AlloyHost        string
-	AlloyPort        string
-	AlloyConfigDir   string
-	AlloyConfigFile  string
-	EnableCadvisor   bool
-	EnableLoki       bool
-	LokiImage        string
-	LokiHost         string
-	LokiPort         string
-	LokiConfigDir    string
-	LokiConfigFile   string
-	LokiDataDir      string
-	EnableGrafana    bool
-	GrafanaImage     string
-	GrafanaHost      string
-	GrafanaPort      string
-	GrafanaConfigDir string
-	GrafanaDataDir   string
+	VMImage             string
+	VMHost              string
+	VMPort              string
+	VMRetention         string
+	VMDataDir           string
+	AlloyImage          string
+	AlloyHost           string
+	AlloyPort           string
+	AlloyConfigDir      string
+	AlloyConfigFile     string
+	EnableCadvisor      bool
+	EnableLoki          bool
+	LokiImage           string
+	LokiHost            string
+	LokiPort            string
+	LokiConfigDir       string
+	LokiConfigFile      string
+	LokiDataDir         string
+	EnableGrafana       bool
+	GrafanaImage        string
+	GrafanaHost         string
+	GrafanaPort         string
+	GrafanaConfigDir    string
+	GrafanaDataDir      string
+	EnableVMAlert       bool
+	VMAlertImage        string
+	VMAlertConfigDir    string
+	VMAlertRulesFile    string
+	AlertsWebhookURL    string
+	AlertsWebhookSecret string
 }
 
 // composeTmpl is the Slice 1.1 compose YAML — VictoriaMetrics only.
@@ -1001,6 +1130,30 @@ services:
 {{- if .EnableLoki }}
       - loki
 {{- end }}
+{{- end }}
+{{- if .EnableVMAlert }}
+
+  vmalert:
+    image: {{.VMAlertImage}}
+    container_name: rasputin-vmalert
+    restart: unless-stopped
+    command:
+      - "-rule=/etc/vmalert/{{.VMAlertRulesFile}}"
+      - "-datasource.url=http://victoriametrics:8428"
+      - "-remoteWrite.url=http://victoriametrics:8428"
+      - "-remoteRead.url=http://victoriametrics:8428"
+      - "-notifier.url={{.AlertsWebhookURL}}"
+      - "-evaluationInterval=30s"
+{{- if .AlertsWebhookSecret }}
+      - "-notifier.basicAuth.password=" # placeholder; secret goes via header below
+      - '-notifier.headers=X-Webhook-Secret:{{.AlertsWebhookSecret}}'
+{{- end }}
+    volumes:
+      - {{.VMAlertConfigDir}}:/etc/vmalert:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - victoriametrics
 {{- end }}
 `))
 

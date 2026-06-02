@@ -1376,6 +1376,43 @@ func TestHandleListAlerts_Default(t *testing.T) {
 // Obs status
 // ============================================================================
 
+// ============================================================================
+// Alert webhook + ack/dismiss
+// ============================================================================
+
+// TestAlertWebhook_NoStoreWiredErrors confirms the webhook handler
+// surfaces the "no persistence wired" error politely when the fixture
+// hasn't called SetAlertsService. Production wiring (main.go) always
+// passes a real store, so this only catches misconfiguration.
+func TestAlertWebhook_NoStoreWiredErrors(t *testing.T) {
+	f := newAPIFixture(t)
+	// No cookie — webhook is unauthenticated by design.
+	body := strings.NewReader(`{"alerts":[{"status":"firing","labels":{"alertname":"x"},"startsAt":"2026-06-02T12:00:00Z","fingerprint":"fp"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/alerts/webhook", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("want 400, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAlertWebhook_Secret_Rejects confirms the X-Webhook-Secret gate
+// rejects requests that don't carry the right secret. Production
+// vmalert is configured to send it via -notifier.headers.
+func TestAlertWebhook_Secret_Rejects(t *testing.T) {
+	f := newAPIFixture(t)
+	f.srv.SetAlertsWebhookSecret("topsecret")
+	req := httptest.NewRequest(http.MethodPost, "/api/alerts/webhook",
+		strings.NewReader(`{}`))
+	req.Header.Set("X-Webhook-Secret", "wrong")
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("want 401, got %d", w.Code)
+	}
+}
+
 // /api/obs/status defaults to Enabled=false when the fixture wires no
 // obs subsystem in (the production path is gated on RASPUTIN_OBS_ENABLED;
 // tests never bring up a real VM).

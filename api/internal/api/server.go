@@ -21,25 +21,36 @@ import (
 
 // Server bundles the HTTP handlers for the api.
 type Server struct {
-	store           *jobs.Store
-	runner          *jobs.Runner
-	inv             *inventory.Store
-	fw              *firewall.Store
-	apps            *apps.Store
-	metrics         *metrics.Store
-	updater         *updater.Store
-	updaterVerifier *updater.Verifier
-	bundleDir       string
-	trustDir        string
-	mesh            *mesh.Service
-	bmc             *bmc.Service
-	bmcSessions     *bmc.SessionManager
-	setup           *setup.Service
-	alerts          *alerts.Service
-	auth            *auth.Service
-	obs             *obs.Status
-	nc              *nats.Conn
+	store               *jobs.Store
+	runner              *jobs.Runner
+	inv                 *inventory.Store
+	fw                  *firewall.Store
+	apps                *apps.Store
+	metrics             *metrics.Store
+	updater             *updater.Store
+	updaterVerifier     *updater.Verifier
+	bundleDir           string
+	trustDir            string
+	mesh                *mesh.Service
+	bmc                 *bmc.Service
+	bmcSessions         *bmc.SessionManager
+	setup               *setup.Service
+	alerts              *alerts.Service
+	alertsWebhookSecret string
+	auth                *auth.Service
+	obs                 *obs.Status
+	nc                  *nats.Conn
 }
+
+// SetAlertsService overrides the default aggregator-only alerts service
+// with one that has a persistence store + nats conn wired. main.go
+// calls this when RASPUTIN_OBS_ENABLED=1 and the persisted store opens
+// successfully.
+func (s *Server) SetAlertsService(svc *alerts.Service) { s.alerts = svc }
+
+// SetAlertsWebhookSecret turns on shared-secret auth for
+// POST /api/alerts/webhook. Empty disables the check (dev mode).
+func (s *Server) SetAlertsWebhookSecret(secret string) { s.alertsWebhookSecret = secret }
 
 // NewServer constructs an api Server. The auth service is mandatory; if you
 // want the api to run without auth (e.g. for early dev), pass a Service
@@ -75,10 +86,11 @@ func NewServer(
 		bundleDir: bundleDir, trustDir: trustDir, mesh: meshSvc,
 		bmc: bmcSvc, bmcSessions: bmc.NewSessionManager(bmcSvc),
 		setup: setupSvc,
-		// alerts is a pure read aggregator over the stores we already
-		// hold; it has no lifecycle of its own, so it doesn't need to be
-		// constructed by main.
-		alerts: alerts.New(inv, store, appsStore, setupSvc),
+		// alerts aggregates the subsystem stores AND, when an alerts
+		// store + nats.Conn are wired, merges in vmalert-driven
+		// persisted alerts via the webhook receiver. Dev wiring passes
+		// nil for both; production passes them through main.go.
+		alerts: alerts.New(inv, store, appsStore, setupSvc, nil, nc),
 		auth:   authSvc, obs: obsStatus, nc: nc,
 	}
 }
@@ -168,6 +180,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ws/bmc/{nodeId}/sol", reqd(s.handleBMCSOL))
 
 	mux.HandleFunc("GET /api/alerts", reqd(s.handleListAlerts))
+	mux.HandleFunc("POST /api/alerts/{id}/ack", reqd(s.handleAlertAck))
+	mux.HandleFunc("POST /api/alerts/{id}/dismiss", reqd(s.handleAlertDismiss))
+	// Webhook is intentionally NOT behind reqd — vmalert can't carry a
+	// session cookie. Auth is the optional shared secret in
+	// X-Webhook-Secret (RASPUTIN_ALERTS_WEBHOOK_SECRET).
+	mux.HandleFunc("POST /api/alerts/webhook", s.handleAlertWebhook)
 
 	mux.HandleFunc("GET /api/obs/status", reqd(s.handleObsStatus))
 	mux.HandleFunc("GET /api/obs/logs", reqd(s.handleObsLogs))
@@ -186,6 +204,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ws/updates/system", reqd(s.bridgeSubject(proto.AllSystemUpdatesFilter)))
 	mux.HandleFunc("GET /ws/mesh", reqd(s.bridgeSubject(proto.AllMeshChangesFilter)))
 	mux.HandleFunc("GET /ws/bmc", reqd(s.bridgeSubject(proto.AllBMCChangesFilter)))
+	mux.HandleFunc("GET /ws/alerts", reqd(s.bridgeSubject(proto.AlertsChangesSubject)))
 
 	return withCORS(mux)
 }

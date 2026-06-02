@@ -22,6 +22,12 @@ const (
 	AlertSourceJob   AlertSource = "job"
 	AlertSourceApp   AlertSource = "app"
 	AlertSourceSetup AlertSource = "setup"
+	// AlertSourceRule is used by alerts that arrive from vmalert (or any
+	// future Alertmanager-compatible rules engine) via the webhook
+	// receiver at /api/alerts/webhook. The aggregator's source-specific
+	// alerts (node/job/app/setup) are computed on every read; rule
+	// alerts are persisted.
+	AlertSourceRule AlertSource = "rule"
 )
 
 // Alert is a single "the operator should look at this" line item. v0 is
@@ -42,4 +48,34 @@ type Alert struct {
 	Since       time.Time     `json:"since"`
 	RelatedKind string        `json:"relatedKind,omitempty"` // "node" | "job" | "app"
 	RelatedID   string        `json:"relatedId,omitempty"`
+	// Acked is true when the operator has acknowledged the alert via
+	// POST /api/alerts/{id}/ack. Only meaningful for Source=rule; the
+	// aggregator-derived alerts always report false since their
+	// lifecycle is computed-on-read.
+	Acked bool `json:"acked,omitempty"`
+	// AckedAt is when the alert was acknowledged. Zero when !Acked.
+	AckedAt time.Time `json:"ackedAt,omitempty"`
 }
+
+// AlertChangeType identifies what happened to a persisted alert. Used
+// by the NATS push topic the UI subscribes to so live updates land
+// without poll.
+type AlertChangeType string
+
+const (
+	AlertFired     AlertChangeType = "fired"     // first time we've seen this fingerprint OR a new firing after resolved
+	AlertResolved  AlertChangeType = "resolved"  // vmalert says it's no longer firing
+	AlertAcked     AlertChangeType = "acked"     // operator ack'd
+	AlertDismissed AlertChangeType = "dismissed" // operator dismissed (hidden from list)
+)
+
+// AlertChangeEvt is the payload published on AlertsChangesSubject.
+type AlertChangeEvt struct {
+	Change AlertChangeType `json:"change"`
+	Alert  Alert           `json:"alert"`
+	Ts     time.Time       `json:"ts"`
+}
+
+// AlertsChangesSubject is the NATS subject for live alert updates.
+// /ws/alerts bridges this to the UI.
+const AlertsChangesSubject = "rasputin.alerts.changes"

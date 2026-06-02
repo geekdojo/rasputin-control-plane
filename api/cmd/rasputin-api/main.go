@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
@@ -306,6 +307,26 @@ func main() {
 	defer sched.Stop()
 
 	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busSrv.Conn())
+
+	// Real alerting (Slice 1.5): open the persisted alerts store and
+	// wire a Service that merges aggregator + persisted views. Always
+	// on — the store is shared with the rest of the api's SQLite and
+	// is cheap when no rules are firing. The webhook receiver and
+	// /ws/alerts push are no-ops until vmalert (in the obs compose
+	// stack) starts POSTing.
+	alertsStore, err := alerts.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: alerts store: %v", err)
+	}
+	defer alertsStore.Close()
+	srv.SetAlertsService(alerts.New(invStore, jobStore, appsStore, setupSvc, alertsStore, busSrv.Conn()))
+	if secret := os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"); secret != "" {
+		srv.SetAlertsWebhookSecret(secret)
+		log.Printf("rasputin-api: alerts webhook protected by shared secret")
+	} else {
+		log.Printf("rasputin-api: WARNING — alerts webhook is unauthenticated " +
+			"(set RASPUTIN_ALERTS_WEBHOOK_SECRET to enable header auth)")
+	}
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           srv.Handler(),
@@ -476,13 +497,23 @@ func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Servic
 		log.Fatalf("rasputin-api: obs state dir: %v", err)
 	}
 	sup, err := obs.NewDockerComposeSupervisor(obs.DockerComposeSupervisorConfig{
-		StateDir:        stateDir,
-		VMImage:         os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
-		VMListenAddr:    os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
-		VMRetention:     os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
-		AlloyImage:      os.Getenv("RASPUTIN_OBS_ALLOY_IMAGE"),
-		AlloyListenAddr: os.Getenv("RASPUTIN_OBS_ALLOY_LISTEN"),
-		EnableCadvisor:  envBoolPtr("RASPUTIN_OBS_ALLOY_CADVISOR"),
+		StateDir:            stateDir,
+		VMImage:             os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
+		VMListenAddr:        os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
+		VMRetention:         os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
+		AlloyImage:          os.Getenv("RASPUTIN_OBS_ALLOY_IMAGE"),
+		AlloyListenAddr:     os.Getenv("RASPUTIN_OBS_ALLOY_LISTEN"),
+		EnableCadvisor:      envBoolPtr("RASPUTIN_OBS_ALLOY_CADVISOR"),
+		LokiImage:           os.Getenv("RASPUTIN_OBS_LOKI_IMAGE"),
+		LokiListenAddr:      os.Getenv("RASPUTIN_OBS_LOKI_LISTEN"),
+		EnableLoki:          envBoolPtr("RASPUTIN_OBS_LOKI"),
+		GrafanaImage:        os.Getenv("RASPUTIN_OBS_GRAFANA_IMAGE"),
+		GrafanaListenAddr:   os.Getenv("RASPUTIN_OBS_GRAFANA_LISTEN"),
+		EnableGrafana:       envBoolPtr("RASPUTIN_OBS_GRAFANA"),
+		VMAlertImage:        os.Getenv("RASPUTIN_OBS_VMALERT_IMAGE"),
+		AlertsWebhookURL:    os.Getenv("RASPUTIN_OBS_ALERTS_WEBHOOK_URL"),
+		AlertsWebhookSecret: os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"),
+		EnableVMAlert:       envBoolPtr("RASPUTIN_OBS_VMALERT"),
 	})
 	if err != nil {
 		log.Fatalf("rasputin-api: obs supervisor: %v", err)
