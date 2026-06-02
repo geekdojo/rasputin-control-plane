@@ -970,6 +970,53 @@ func TestHandleMeshState(t *testing.T) {
 	}
 }
 
+// When HeadplaneURL isn't configured the field is omitted entirely so
+// the UI can hide the sibling-tab link with a simple presence check.
+func TestHandleMeshState_OmitsHeadplaneURLWhenUnset(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodGet, "/api/mesh/state", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "headplaneUrl") {
+		t.Errorf("headplaneUrl should be omitted when not set; body=%s", w.Body.String())
+	}
+}
+
+// When configured, the URL is round-tripped verbatim so the UI can
+// build a sibling-tab link without any normalization on the backend.
+func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	// Mutate the service config in place — the fixture builds the
+	// service with zero values, and the config is held by pointer-free
+	// value, but the Service exposes Config() (by-value) which we can't
+	// mutate. So we build a parallel server with the URL set.
+	hpURL := "http://headplane.lan:3000"
+	meshSvc := mesh.NewService(mesh.Config{
+		LoginServer:  "http://mesh.local",
+		DefaultUser:  "rasputin-operator",
+		HeadplaneURL: hpURL,
+	}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
+	srv := NewServer(f.jobsStore, f.runner, f.inv, f.fw, f.appsStore,
+		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
+		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, f.nc)
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/mesh/state", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"headplaneUrl":"`+hpURL+`"`) {
+		t.Errorf("body missing headplane URL: %s", rec.Body.String())
+	}
+}
+
 func TestHandleListMeshDevices_Empty(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)

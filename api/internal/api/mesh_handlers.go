@@ -14,6 +14,9 @@ import (
 )
 
 // GET /api/mesh/state — singleton row (intent_hash, observed_hash, last_*).
+// HeadplaneURL is omitempty: when an operator hasn't deployed Headplane
+// (the common Phase 2 case), the field is absent from the response so
+// the UI can hide the sibling-tab link with a simple `if (state.headplaneUrl)`.
 func (s *Server) handleMeshState(w http.ResponseWriter, r *http.Request) {
 	state, err := s.mesh.Store().GetState(r.Context())
 	if err != nil {
@@ -21,15 +24,17 @@ func (s *Server) handleMeshState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Backend     string          `json:"backend"`
-		LoginServer string          `json:"loginServer"`
-		DefaultUser string          `json:"defaultUser"`
-		State       *mesh.MeshState `json:"state"`
+		Backend      string          `json:"backend"`
+		LoginServer  string          `json:"loginServer"`
+		DefaultUser  string          `json:"defaultUser"`
+		HeadplaneURL string          `json:"headplaneUrl,omitempty"`
+		State        *mesh.MeshState `json:"state"`
 	}{
-		Backend:     s.mesh.Client().Backend(),
-		LoginServer: s.mesh.Config().LoginServer,
-		DefaultUser: s.mesh.Config().DefaultUser,
-		State:       state,
+		Backend:      s.mesh.Client().Backend(),
+		LoginServer:  s.mesh.Config().LoginServer,
+		DefaultUser:  s.mesh.Config().DefaultUser,
+		HeadplaneURL: s.mesh.Config().HeadplaneURL,
+		State:        state,
 	})
 }
 

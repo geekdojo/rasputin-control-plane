@@ -137,8 +137,9 @@ func main() {
 		log.Fatalf("rasputin-api: mesh supervisor: %v", err)
 	}
 	meshSvc := mesh.NewService(mesh.Config{
-		LoginServer: envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local"),
-		DefaultUser: envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
+		LoginServer:  envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local"),
+		DefaultUser:  envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
+		HeadplaneURL: os.Getenv("RASPUTIN_HEADPLANE_URL"),
 	}, meshStore, meshClient, meshSup)
 	if err := meshSvc.Start(ctx); err != nil {
 		log.Fatalf("rasputin-api: mesh service: %v", err)
