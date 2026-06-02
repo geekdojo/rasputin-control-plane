@@ -163,10 +163,72 @@ func TestStore_GetUserByID_LoadsCredentials(t *testing.T) {
 	}
 }
 
-// NOTE: Store.ListUsers is not covered here. It calls listCredentialsForUser
-// while iterating rows, which deadlocks under db.SetMaxOpenConns(1). That's
-// a production bug (separate from this test suite), reported as a testability
-// gap rather than worked around in tests.
+func TestStore_ListUsers_EmptyAndOrdered(t *testing.T) {
+	f := newAuthFixture(t)
+	got, err := f.store.ListUsers(f.ctx)
+	if err != nil {
+		t.Fatalf("ListUsers empty: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want 0 users, got %d", len(got))
+	}
+
+	// CreateUser writes time.Now()-derived created_at via makeUser; sleep a
+	// millisecond between mints so the ORDER BY created_at has distinct keys.
+	alice := f.mintUser(t, "alice")
+	time.Sleep(2 * time.Millisecond)
+	bob := f.mintUser(t, "bob")
+
+	got, err = f.store.ListUsers(f.ctx)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 users, got %d", len(got))
+	}
+	if string(got[0].ID) != string(alice.ID) || string(got[1].ID) != string(bob.ID) {
+		t.Errorf("order: want [alice, bob], got [%s, %s]", got[0].Name, got[1].Name)
+	}
+}
+
+// TestStore_ListUsers_LoadsCredentials_NoDeadlock covers the regression
+// where ListUsers held the sole sql connection across rows.Next() while
+// scanUser issued a per-row credentials query — a guaranteed hang under
+// db.SetMaxOpenConns(1). The context cap turns a regression from "hangs CI"
+// into "fails fast".
+func TestStore_ListUsers_LoadsCredentials_NoDeadlock(t *testing.T) {
+	f := newAuthFixture(t)
+	alice := f.mintUser(t, "alice")
+	f.mintCredential(t, alice, "a1")
+	f.mintCredential(t, alice, "a2")
+	bob := f.mintUser(t, "bob")
+	f.mintCredential(t, bob, "b1")
+	f.mintUser(t, "carol") // user with no credentials
+
+	ctx, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+	defer cancel()
+
+	got, err := f.store.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 users, got %d", len(got))
+	}
+	credCount := map[string]int{}
+	for _, u := range got {
+		credCount[u.Name] = len(u.WebAuthnCredentials())
+	}
+	if credCount["alice"] != 2 {
+		t.Errorf("alice creds: want 2, got %d", credCount["alice"])
+	}
+	if credCount["bob"] != 1 {
+		t.Errorf("bob creds: want 1, got %d", credCount["bob"])
+	}
+	if credCount["carol"] != 0 {
+		t.Errorf("carol creds: want 0, got %d", credCount["carol"])
+	}
+}
 
 func TestStore_UpdateLastLogin(t *testing.T) {
 	f := newAuthFixture(t)

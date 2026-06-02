@@ -78,16 +78,34 @@ func (s *Store) GetUserByID(ctx context.Context, id []byte) (*User, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, name, display_name, created_at, last_login_at
         FROM users WHERE id = ?`, id)
-	return s.scanUser(ctx, row.Scan)
+	u, err := scanUserRow(row.Scan)
+	if err != nil || u == nil {
+		return u, err
+	}
+	if err := s.loadCredentials(ctx, u); err != nil {
+		return nil, err
+	}
+	return u, nil
 }
 
 func (s *Store) GetUserByName(ctx context.Context, name string) (*User, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, name, display_name, created_at, last_login_at
         FROM users WHERE name = ?`, name)
-	return s.scanUser(ctx, row.Scan)
+	u, err := scanUserRow(row.Scan)
+	if err != nil || u == nil {
+		return u, err
+	}
+	if err := s.loadCredentials(ctx, u); err != nil {
+		return nil, err
+	}
+	return u, nil
 }
 
+// ListUsers returns all users with their credentials. The user rows are read
+// into memory and the rows iterator is closed BEFORE credentials are fetched,
+// because db.SetMaxOpenConns(1) makes a per-row credential query while the
+// outer rows still hold the connection a hard deadlock.
 func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT id, name, display_name, created_at, last_login_at
@@ -95,16 +113,26 @@ func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []*User
 	for rows.Next() {
-		u, err := s.scanUser(ctx, rows.Scan)
+		u, err := scanUserRow(rows.Scan)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, u)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for _, u := range out {
+		if err := s.loadCredentials(ctx, u); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) UpdateLastLogin(ctx context.Context, id []byte, ts time.Time) error {
@@ -113,7 +141,10 @@ func (s *Store) UpdateLastLogin(ctx context.Context, id []byte, ts time.Time) er
 	return err
 }
 
-func (s *Store) scanUser(ctx context.Context, scan func(...any) error) (*User, error) {
+// scanUserRow decodes a single users-row into a User WITHOUT touching the
+// credentials table. Callers must invoke loadCredentials separately once the
+// originating rows iterator (if any) has been closed.
+func scanUserRow(scan func(...any) error) (*User, error) {
 	var (
 		u           User
 		createdAt   int64
@@ -130,15 +161,19 @@ func (s *Store) scanUser(ctx context.Context, scan func(...any) error) (*User, e
 		t := fromMs(lastLoginAt.Int64)
 		u.LastLoginAt = &t
 	}
+	return &u, nil
+}
+
+func (s *Store) loadCredentials(ctx context.Context, u *User) error {
 	creds, err := s.listCredentialsForUser(ctx, u.ID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	u.credentials = make([]webauthn.Credential, 0, len(creds))
 	for _, c := range creds {
 		u.credentials = append(u.credentials, c.toWebAuthn())
 	}
-	return &u, nil
+	return nil
 }
 
 // ----- Credentials --------------------------------------------------------
