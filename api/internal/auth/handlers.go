@@ -167,6 +167,7 @@ func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.UpdateLastLogin(r.Context(), p.user.ID, sess.CreatedAt)
+	s.runLoginHook(r.Context(), p.user)
 	s.setSessionCookie(w, sess.Token, sess.ExpiresAt)
 	writeJSON(w, http.StatusOK, publicUser(p.user))
 }
@@ -248,6 +249,7 @@ func (s *Service) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.UpdateLastLogin(ctx, user.ID, sess.CreatedAt)
+	s.runLoginHook(ctx, user)
 	s.setSessionCookie(w, sess.Token, sess.ExpiresAt)
 	writeJSON(w, http.StatusOK, publicUser(user))
 }

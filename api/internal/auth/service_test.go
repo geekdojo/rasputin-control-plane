@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -756,5 +757,110 @@ func TestStart_Stop_NoPanic(t *testing.T) {
 func TestHTTPError_ErrorString(t *testing.T) {
 	if got := httpError("boom").Error(); got != "boom" {
 		t.Errorf("want %q, got %q", "boom", got)
+	}
+}
+
+// ============================================================================
+// LoginHook
+// ============================================================================
+
+func TestSetLoginHook_NoHookIsNoop(t *testing.T) {
+	f := newAuthFixture(t)
+	u := f.mintUser(t, "alice")
+	// Should not panic, should not block; with no hook installed there's
+	// no observable effect, so the test asserts the negative (returns).
+	f.svc.runLoginHook(context.Background(), u)
+}
+
+func TestSetLoginHook_FiresWithUserAndContext(t *testing.T) {
+	f := newAuthFixture(t)
+	u := f.mintUser(t, "alice")
+
+	type call struct {
+		user *User
+		ctx  context.Context
+	}
+	got := make(chan call, 1)
+	f.svc.SetLoginHook(func(ctx context.Context, u *User) error {
+		got <- call{user: u, ctx: ctx}
+		return nil
+	})
+
+	// Use a distinctive ctx key so we can confirm the hook receives the
+	// caller's context (not a fresh background one).
+	type k int
+	ctx := context.WithValue(context.Background(), k(0), "marker")
+	f.svc.runLoginHook(ctx, u)
+
+	select {
+	case c := <-got:
+		if c.user != u {
+			t.Errorf("hook user: got %p want %p", c.user, u)
+		}
+		if c.ctx.Value(k(0)) != "marker" {
+			t.Errorf("hook did not receive caller context value")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hook never fired")
+	}
+}
+
+func TestSetLoginHook_ErrorDoesNotPropagate(t *testing.T) {
+	f := newAuthFixture(t)
+	u := f.mintUser(t, "alice")
+	f.svc.SetLoginHook(func(ctx context.Context, u *User) error {
+		return httpError("downstream-down")
+	})
+	// runLoginHook returns nothing; the panic that this guards against is
+	// the most important assertion. We also rely on it logging — covered
+	// by manual inspection rather than capturing stderr (brittle).
+	f.svc.runLoginHook(context.Background(), u)
+}
+
+func TestSetLoginHook_Replaceable(t *testing.T) {
+	f := newAuthFixture(t)
+	u := f.mintUser(t, "alice")
+
+	var aCount, bCount int
+	f.svc.SetLoginHook(func(ctx context.Context, u *User) error { aCount++; return nil })
+	f.svc.SetLoginHook(func(ctx context.Context, u *User) error { bCount++; return nil })
+	f.svc.runLoginHook(context.Background(), u)
+	if aCount != 0 {
+		t.Errorf("replaced hook should not fire; aCount=%d", aCount)
+	}
+	if bCount != 1 {
+		t.Errorf("replacement hook should fire exactly once; bCount=%d", bCount)
+	}
+}
+
+func TestSetLoginHook_NilUninstalls(t *testing.T) {
+	f := newAuthFixture(t)
+	u := f.mintUser(t, "alice")
+	var fired bool
+	f.svc.SetLoginHook(func(ctx context.Context, u *User) error { fired = true; return nil })
+	f.svc.SetLoginHook(nil)
+	f.svc.runLoginHook(context.Background(), u)
+	if fired {
+		t.Error("nil SetLoginHook did not uninstall")
+	}
+}
+
+// Login + register handlers must call runLoginHook so a downstream
+// EnsureUser side-effect is observable when the response returns. We
+// can't exercise the full WebAuthn flow in a unit test (real attestation
+// data), but we CAN assert the source contains both call sites — a
+// regression where someone deletes one of those calls would silently
+// break per-IAM-user Headscale provisioning. This catches that.
+func TestLoginHook_HandlerCallSitesIntact(t *testing.T) {
+	src, err := os.ReadFile("handlers.go")
+	if err != nil {
+		t.Fatalf("read handlers.go: %v", err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "s.runLoginHook(r.Context(), p.user)") {
+		t.Error("handleRegisterFinish missing runLoginHook call")
+	}
+	if !strings.Contains(body, "s.runLoginHook(ctx, user)") {
+		t.Error("handleLoginFinish missing runLoginHook call")
 	}
 }

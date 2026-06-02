@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -32,10 +33,25 @@ type Service struct {
 	mu      sync.Mutex
 	pending map[string]*pendingAuth // keyed by random pending-token
 
+	hookMu    sync.RWMutex
+	loginHook LoginHook
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
+
+// LoginHook runs after a successful login or first-credential registration,
+// before the session cookie is written. The hook receives the authenticated
+// User and a request-scoped context. It is invoked synchronously so callers
+// that depend on side-effects (e.g. mesh.EnsureUser provisioning a Headscale
+// user) can rely on the side-effect having occurred when /api/auth/me
+// returns. Errors are logged but never block the login response — auth
+// remains usable when downstream subsystems are unhealthy.
+//
+// auth does not import mesh; the wiring lives in cmd/main, which is where
+// both subsystems already meet.
+type LoginHook func(ctx context.Context, user *User) error
 
 type pendingAuth struct {
 	kind    string // "register" or "login"
@@ -77,6 +93,30 @@ func NewService(store *Store, cfg Config) (*Service, error) {
 		cfg:     cfg,
 		pending: make(map[string]*pendingAuth),
 	}, nil
+}
+
+// SetLoginHook installs (or replaces) the post-login hook. Safe to call
+// before or after Start; concurrent with Service operation. Pass nil to
+// uninstall.
+func (s *Service) SetLoginHook(h LoginHook) {
+	s.hookMu.Lock()
+	s.loginHook = h
+	s.hookMu.Unlock()
+}
+
+// runLoginHook invokes the installed hook with a request-scoped context.
+// Errors are logged at the auth boundary so handlers don't have to think
+// about it. No-op when no hook is installed.
+func (s *Service) runLoginHook(ctx context.Context, u *User) {
+	s.hookMu.RLock()
+	hook := s.loginHook
+	s.hookMu.RUnlock()
+	if hook == nil {
+		return
+	}
+	if err := hook(ctx, u); err != nil {
+		log.Printf("auth: login hook for %q: %v (login proceeds)", u.Name, err)
+	}
 }
 
 // Start launches the janitor that prunes expired pending-auth entries and

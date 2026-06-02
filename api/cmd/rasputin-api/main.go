@@ -207,6 +207,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: auth service: %v", err)
 	}
+	// On every successful login (and first-credential registration), ensure
+	// a matching Headscale user exists. EnsureUser is idempotent + cached,
+	// so this costs at most one HTTP round-trip on cold start per user;
+	// the mock backend turns it into a single map write. Errors are logged
+	// inside runLoginHook and never block the login response — auth stays
+	// usable when mesh/Headscale are unhealthy.
+	authSvc.SetLoginHook(func(ctx context.Context, u *auth.User) error {
+		return meshClient.EnsureUser(ctx, u.Name)
+	})
 	authSvc.Start(ctx)
 	defer authSvc.Stop()
 
