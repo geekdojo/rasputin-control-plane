@@ -319,6 +319,16 @@ func (s *DockerSupervisor) writeConfig() error {
 // (paths, listen, server_url). Operators who need to tune anything else
 // can edit the rendered file; subsequent writes will overwrite, so the
 // proper escape hatch (post-MVS) is a per-field config override map.
+//
+// Notable choice: the unix socket lives at /tmp/headscale.sock inside the
+// container, NOT under /var/lib/headscale. Headscale chmods the socket
+// on create; chmod on a socket inside a macOS-bind-mounted directory
+// fails with "invalid argument" under Rancher Desktop / OrbStack / Docker
+// Desktop, which crashes the process ~2s after Start. Production Linux
+// nodes don't see this — bind mounts there behave normally — but using
+// the ephemeral /tmp inside the container costs nothing and keeps the
+// macOS dev story working out of the box. The CLI (`headscale users ...`)
+// resolves its socket from the same config file, so it finds it there.
 func (s *DockerSupervisor) renderConfig() ([]byte, error) {
 	data := configData{
 		ServerURL:  s.cfg.ServerURL,
@@ -396,7 +406,7 @@ dns:
   search_domains: []
   extra_records: []
 
-unix_socket: /var/lib/headscale/headscale.sock
+unix_socket: /tmp/headscale.sock
 unix_socket_permission: "0770"
 `))
 
