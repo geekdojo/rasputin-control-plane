@@ -831,7 +831,7 @@ func TestWaitForChild_TerminalSucceeded(t *testing.T) {
 	// next tick (1s).
 	_ = jobStore.MarkJobSucceeded(ctx, "child", time.Now().UTC())
 
-	status, err := waitForChild(context.Background(), jobStore, "child", 5*time.Second)
+	status, err := waitForChild(context.Background(), jobStore, nil, "child", 5*time.Second)
 	if err != nil {
 		t.Fatalf("waitForChild: %v", err)
 	}
@@ -840,9 +840,68 @@ func TestWaitForChild_TerminalSucceeded(t *testing.T) {
 	}
 }
 
+// TestWaitForChild_WakesOnTerminalEvent proves the subscribe-not-poll
+// implementation: a JobSucceeded event published AFTER waitForChild
+// starts (so it can't be caught by the initial store read) wakes the
+// caller within ~50ms instead of paying the 1s fallback tick.
+func TestWaitForChild_WakesOnTerminalEvent(t *testing.T) {
+	ctx := context.Background()
+	jobStore := newJobsStore(t)
+	nc := startNATS(t)
+	parent := "p"
+	if err := jobStore.CreateJob(ctx, &jobs.Job{
+		ID: "child", Kind: "node.update", Status: jobs.StatusRunning,
+		CreatedAt: time.Now().UTC(), ParentID: &parent,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	type result struct {
+		status jobs.Status
+		err    error
+		dur    time.Duration
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		st, err := waitForChild(ctx, jobStore, nc, "child", 5*time.Second)
+		done <- result{status: st, err: err, dur: time.Since(start)}
+	}()
+
+	// Give the goroutine time to subscribe + initial store read.
+	time.Sleep(50 * time.Millisecond)
+
+	// Mark + publish — the order matters; the store write must be
+	// visible before the event so the wake-and-re-read picks it up.
+	if err := jobStore.MarkJobSucceeded(ctx, "child", time.Now().UTC()); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	payload, _ := json.Marshal(proto.JobEvent{Type: proto.JobSucceeded, JobID: "child"})
+	if err := nc.Publish(proto.JobEventsSubject("child"), payload); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("waitForChild: %v", r.err)
+		}
+		if r.status != jobs.StatusSucceeded {
+			t.Errorf("status: %q", r.status)
+		}
+		// Should be well under the 1s fallback tick — gives margin for
+		// scheduler jitter while still proving the bus path fired.
+		if r.dur > 500*time.Millisecond {
+			t.Errorf("waitForChild took %v — bus wake didn't fire", r.dur)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waitForChild never returned")
+	}
+}
+
 func TestWaitForChild_NotFound(t *testing.T) {
 	jobStore := newJobsStore(t)
-	_, err := waitForChild(context.Background(), jobStore, "no-such", 3*time.Second)
+	_, err := waitForChild(context.Background(), jobStore, nil, "no-such", 3*time.Second)
 	if err == nil {
 		t.Error("missing child: want error")
 	}
@@ -852,7 +911,7 @@ func TestWaitForChild_CtxCancel(t *testing.T) {
 	jobStore := newJobsStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := waitForChild(ctx, jobStore, "x", 5*time.Second)
+	_, err := waitForChild(ctx, jobStore, nil, "x", 5*time.Second)
 	if err == nil {
 		t.Error("cancelled ctx: want error")
 	}

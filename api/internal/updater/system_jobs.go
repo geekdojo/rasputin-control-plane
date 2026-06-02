@@ -234,7 +234,7 @@ func systemCascade(
 				Ts:          time.Now().UTC(),
 			})
 
-			outcome, derr := waitForChild(sc.Ctx, jobStore, child.ID, 30*time.Minute)
+			outcome, derr := waitForChild(sc.Ctx, jobStore, nc, child.ID, 30*time.Minute)
 			if derr != nil {
 				failed = append(failed, node.ID)
 				sc.Log("error", fmt.Sprintf("%s: %v", node.ID, derr))
@@ -288,24 +288,59 @@ func systemCascade(
 	}
 }
 
-// waitForChild polls the jobs table for a terminal status on the child.
-// Returns the final status. Polls every 1s. A NATS-subscribe approach
-// would be tighter, but polling has fewer moving parts and the saga step
-// timeout is the real ceiling.
-func waitForChild(ctx context.Context, jobStore *jobs.Store, childID string, timeout time.Duration) (jobs.Status, error) {
+// waitForChild blocks until the child job reaches a terminal status,
+// then returns it. Subscribes to rasputin.job.<id>.events and treats
+// JobSucceeded / JobFailed events as the wake signal — the store is then
+// re-read for the authoritative final Status (handles e.g. Cancelled,
+// which has no dedicated event today but might one day).
+//
+// Two safeguards against subscribe-vs-publish races:
+//
+//  1. We Subscribe BEFORE the initial store read, so an event that fires
+//     between our two operations queues on the subscription and isn't
+//     lost.
+//  2. We Flush after subscribing so the server has acked the SUB before
+//     we proceed — without this, a child that completes "instantly" can
+//     publish its terminal event before our SUB is processed, and the
+//     initial store read would be our only catch.
+//
+// nc may be nil in tests that don't supply a NATS connection; the loop
+// then falls back to a 100ms tick on the store (still faster than the
+// old 1s ticker, while keeping the test path simple).
+func waitForChild(ctx context.Context, jobStore *jobs.Store, nc *nats.Conn, childID string, timeout time.Duration) (jobs.Status, error) {
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	deadlineCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	// Set up the wake signal: a buffered chan that receives whenever a
+	// terminal-shaped event arrives. Buffer of 1 prevents the subscriber
+	// callback from blocking if the consumer is already winding down.
+	wake := make(chan struct{}, 1)
+	if nc != nil {
+		sub, err := nc.Subscribe(proto.JobEventsSubject(childID), func(m *nats.Msg) {
+			var ev proto.JobEvent
+			if json.Unmarshal(m.Data, &ev) != nil {
+				return
+			}
+			if ev.Type != proto.JobSucceeded && ev.Type != proto.JobFailed {
+				return
+			}
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		})
+		if err != nil {
+			return "", fmt.Errorf("subscribe child events: %w", err)
+		}
+		defer sub.Unsubscribe()
+		// Flush so the SUB is observed by the server before we poll the
+		// store — closes the "child completed instantly" race.
+		_ = nc.Flush()
+	}
+
 	for {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-ticker.C:
-		}
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("child %s did not terminate within %s", childID, timeout)
-		}
-		j, err := jobStore.GetJob(ctx, childID)
+		j, err := jobStore.GetJob(deadlineCtx, childID)
 		if err != nil {
 			return "", fmt.Errorf("get child: %w", err)
 		}
@@ -315,6 +350,26 @@ func waitForChild(ctx context.Context, jobStore *jobs.Store, childID string, tim
 		switch j.Status {
 		case jobs.StatusSucceeded, jobs.StatusFailed, jobs.StatusCancelled:
 			return j.Status, nil
+		}
+		// Block until either: a terminal event wakes us, the deadline
+		// fires, or the parent ctx is cancelled. Fall-back tick fires
+		// every 100ms when nc is nil (in-test) OR every 1s as a belt
+		// against an event we missed (e.g. status set via direct DB
+		// write that didn't emit).
+		fallback := 1 * time.Second
+		if nc == nil {
+			fallback = 100 * time.Millisecond
+		}
+		select {
+		case <-deadlineCtx.Done():
+			if deadlineCtx.Err() == context.DeadlineExceeded {
+				return "", fmt.Errorf("child %s did not terminate within %s", childID, timeout)
+			}
+			return "", deadlineCtx.Err()
+		case <-wake:
+			// loop and re-read the store
+		case <-time.After(fallback):
+			// belt-and-suspenders re-read
 		}
 	}
 }
