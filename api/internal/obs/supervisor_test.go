@@ -327,10 +327,85 @@ func TestRenderCompose_ContainsExpectedServices(t *testing.T) {
 		"-search.latencyOffset=0s",
 		"127.0.0.1:8428:8428",
 		"./vm-data:/storage",
+		"alloy:",
+		defaultAlloyImage,
+		"127.0.0.1:12345:12345",
+		"./alloy-config:/etc/alloy:ro",
+		"/var/run/docker.sock:/var/run/docker.sock:ro",
+		"depends_on:",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("compose missing %q\n--- compose ---\n%s", want, s)
 		}
+	}
+}
+
+func TestRenderCompose_CadvisorDisabledOmitsMounts(t *testing.T) {
+	f := false
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:       t.TempDir(),
+		EnableCadvisor: &f,
+	})
+	body, _ := sup.renderCompose()
+	s := string(body)
+	if strings.Contains(s, "/var/run/docker.sock") {
+		t.Error("docker socket mount should be absent when cadvisor disabled")
+	}
+	if strings.Contains(s, "/sys:/sys") {
+		t.Error("/sys mount should be absent when cadvisor disabled")
+	}
+}
+
+func TestRenderAlloyConfig_DefaultIncludesCadvisor(t *testing.T) {
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: t.TempDir()})
+	body, err := sup.renderAlloyConfig()
+	if err != nil {
+		t.Fatalf("render alloy: %v", err)
+	}
+	s := string(body)
+	for _, want := range []string{
+		`prometheus.remote_write "vm"`,
+		`url = "http://victoriametrics:8428/api/v1/write"`,
+		`prometheus.exporter.self "alloy"`,
+		`prometheus.exporter.cadvisor "containers"`,
+		`docker_only = true`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("alloy config missing %q\n--- alloy ---\n%s", want, s)
+		}
+	}
+}
+
+func TestRenderAlloyConfig_CadvisorDisabled(t *testing.T) {
+	f := false
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:       t.TempDir(),
+		EnableCadvisor: &f,
+	})
+	body, _ := sup.renderAlloyConfig()
+	if strings.Contains(string(body), "cadvisor") {
+		t.Errorf("cadvisor component should be absent\n%s", body)
+	}
+}
+
+func TestStart_WritesAlloyConfig(t *testing.T) {
+	vm := newStubVM()
+	srv := httptest.NewServer(vm.handler())
+	defer srv.Close()
+	dir := t.TempDir()
+	host, port := splitHostPort(t, srv.URL)
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:      dir,
+		VMListenAddr:  host + ":" + port,
+		Runner:        newFakeCompose().run,
+		HTTPClient:    srv.Client(),
+		HealthTimeout: 2 * time.Second,
+	})
+	if err := sup.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, alloyConfigSubdir, alloyConfigFile)); err != nil {
+		t.Fatalf("alloy config not written: %v", err)
 	}
 }
 

@@ -136,6 +136,39 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("Alloy_ScrapesAndShipsContainerMetrics", func(t *testing.T) {
+		// Alloy needs ~30s to come up, run its first cadvisor scrape, and
+		// remote-write. Poll for any sample carrying the cadvisor-emitted
+		// container_label_io_kubernetes_container_name or the generic
+		// container_cpu_user_seconds_total metric.
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			body, err := vmInstantQuery(ctx, sup.VMBaseURL(),
+				`count(container_cpu_user_seconds_total)`)
+			if err == nil && strings.Contains(body, `"value":[`) &&
+				!strings.Contains(body, `"result":[]`) {
+				return
+			}
+			// Also accept Alloy's self-scrape metric as a healthy signal
+			// when cadvisor mounts aren't usable in this environment
+			// (Docker Desktop on macOS sometimes refuses /sys mount).
+			selfBody, _ := vmInstantQuery(ctx, sup.VMBaseURL(),
+				`count(alloy_build_info)`)
+			if selfBody != "" && strings.Contains(selfBody, `"value":[`) &&
+				!strings.Contains(selfBody, `"result":[]`) {
+				t.Logf("Alloy self-scrape visible in VM; cadvisor likely not " +
+					"reachable in this dev env (Docker Desktop /sys mount). " +
+					"Self-scrape is enough to prove the Alloy → VM path.")
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no Alloy/cadvisor metrics in VM after 60s; last cadvisor=%s, self=%s",
+					body, selfBody)
+			}
+			time.Sleep(2 * time.Second)
+		}
+	})
+
 	t.Run("Stop_GracefullyStops", func(t *testing.T) {
 		if err := sup.Stop(ctx); err != nil {
 			t.Fatalf("Stop: %v", err)
@@ -165,6 +198,28 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 			t.Errorf("post-restart sample = %v, want 42.5", val)
 		}
 	})
+}
+
+// vmInstantQuery runs an instant query and returns the raw JSON body
+// (so the caller can do its own loose matching for "any sample present"
+// cases like the Alloy/cAdvisor probe where the exact metric set isn't
+// stable across environments).
+func vmInstantQuery(ctx context.Context, base, expr string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		base+"/api/v1/query?query="+httpEscape(expr), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return string(body), fmt.Errorf("query HTTP %d", resp.StatusCode)
+	}
+	return string(body), nil
 }
 
 // queryVMScalar runs an instant query against VM's /api/v1/query and

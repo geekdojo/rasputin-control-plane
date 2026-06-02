@@ -104,6 +104,25 @@ type DockerComposeSupervisorConfig struct {
 	// year of 10s samples is still small.
 	VMRetention string
 
+	// AlloyImage overrides the Grafana Alloy image reference. Defaults
+	// to the pinned upstream tag. Alloy lives in the same compose stack
+	// as VM (Slice 1.2 onward) and remote-writes container + self
+	// metrics to victoriametrics over the project network.
+	AlloyImage string
+
+	// AlloyListenAddr is the host bind for Alloy's UI / debug listener.
+	// Defaults to "127.0.0.1:12345"; the container listens on 12345
+	// internally. Loopback-only on purpose — Alloy's debug UI exposes
+	// component state and shouldn't be LAN-reachable.
+	AlloyListenAddr string
+
+	// EnableCadvisor toggles the prometheus.exporter.cadvisor component
+	// inside Alloy. Default true. cAdvisor scrapes per-container CPU /
+	// mem / network / disk. Off lets dev / CI runs skip the privileged
+	// mounts cAdvisor needs (Docker socket, host /sys, host /); turn
+	// off if those mounts aren't permitted in your environment.
+	EnableCadvisor *bool
+
 	// DockerBin overrides the docker binary path; useful when the runtime's
 	// CLI lives somewhere unexpected. Defaults to "docker".
 	DockerBin string
@@ -125,17 +144,21 @@ type DockerComposeSupervisorConfig struct {
 }
 
 const (
-	defaultProjectName  = "rasputin-obs"
-	defaultVMImage      = "victoriametrics/victoria-metrics:v1.103.0"
-	defaultVMListenAddr = "127.0.0.1:8428"
-	defaultVMRetention  = "1y"
-	defaultDockerBin    = "docker"
+	defaultProjectName     = "rasputin-obs"
+	defaultVMImage         = "victoriametrics/victoria-metrics:v1.103.0"
+	defaultVMListenAddr    = "127.0.0.1:8428"
+	defaultVMRetention     = "1y"
+	defaultAlloyImage      = "grafana/alloy:v1.4.2"
+	defaultAlloyListenAddr = "127.0.0.1:12345"
+	defaultDockerBin       = "docker"
 
 	defaultHealthTimeout = 30 * time.Second
 	defaultPullTimeout   = 5 * time.Minute
 
-	composeFileName = "docker-compose.yaml"
-	vmDataDir       = "vm-data"
+	composeFileName   = "docker-compose.yaml"
+	vmDataDir         = "vm-data"
+	alloyConfigSubdir = "alloy-config"
+	alloyConfigFile   = "config.alloy"
 )
 
 // DockerComposeSupervisor manages the obs stack via `docker compose`.
@@ -162,6 +185,16 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	}
 	if cfg.VMRetention == "" {
 		cfg.VMRetention = defaultVMRetention
+	}
+	if cfg.AlloyImage == "" {
+		cfg.AlloyImage = defaultAlloyImage
+	}
+	if cfg.AlloyListenAddr == "" {
+		cfg.AlloyListenAddr = defaultAlloyListenAddr
+	}
+	if cfg.EnableCadvisor == nil {
+		t := true
+		cfg.EnableCadvisor = &t
 	}
 	if cfg.DockerBin == "" {
 		cfg.DockerBin = defaultDockerBin
@@ -205,6 +238,9 @@ func execRunner(ctx context.Context, name string, args ...string) ([]byte, error
 //  4. Poll VM's /health until 2xx or HealthTimeout.
 func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 	if err := s.prepareHostDirs(); err != nil {
+		return err
+	}
+	if err := s.writeAlloyConfig(); err != nil {
 		return err
 	}
 	if err := s.writeCompose(); err != nil {
@@ -266,7 +302,7 @@ func (s *DockerComposeSupervisor) compose(ctx context.Context, args ...string) (
 // ----- Host state + config ------------------------------------------------
 
 func (s *DockerComposeSupervisor) prepareHostDirs() error {
-	for _, sub := range []string{vmDataDir} {
+	for _, sub := range []string{vmDataDir, alloyConfigSubdir} {
 		p := filepath.Join(s.cfg.StateDir, sub)
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			return fmt.Errorf("obs supervisor: mkdir %s: %w", p, err)
@@ -274,6 +310,83 @@ func (s *DockerComposeSupervisor) prepareHostDirs() error {
 	}
 	return nil
 }
+
+// writeAlloyConfig renders config.alloy into <StateDir>/alloy-config/.
+// Alloy auto-reloads on file change (no SIGHUP needed) so subsequent
+// supervisor Starts pick up template changes without container restarts.
+func (s *DockerComposeSupervisor) writeAlloyConfig() error {
+	rendered, err := s.renderAlloyConfig()
+	if err != nil {
+		return err
+	}
+	out := filepath.Join(s.cfg.StateDir, alloyConfigSubdir, alloyConfigFile)
+	tmp := out + ".tmp"
+	if err := os.WriteFile(tmp, rendered, 0o644); err != nil {
+		return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
+	}
+	return os.Rename(tmp, out)
+}
+
+func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
+	data := alloyConfigData{
+		EnableCadvisor: s.cfg.EnableCadvisor != nil && *s.cfg.EnableCadvisor,
+	}
+	var buf bytes.Buffer
+	if err := alloyConfigTmpl.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("render alloy config: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+type alloyConfigData struct {
+	EnableCadvisor bool
+}
+
+// alloyConfigTmpl is the Slice 1.2 Alloy config in River syntax. It does
+// two things in production:
+//
+//  1. Scrapes its own /metrics so Alloy's health (memory, components in
+//     error state, samples in/out) lives in VM next to everything else.
+//  2. Runs the prometheus.exporter.cadvisor component (embedded inside
+//     Alloy — no extra container) and scrapes its targets. cAdvisor's
+//     output is the per-container CPU / mem / network / disk that Slice
+//     1.2 promises. Off when EnableCadvisor=false (env: RASPUTIN_OBS_ALLOY_CADVISOR=0).
+//
+// Slice 1.3 adds Loki components (loki.source.docker, loki.write); the
+// template will grow in place rather than fork into a second file.
+//
+// Remote-write target is the in-network DNS name `victoriametrics` from
+// the compose project network — works across runtimes without resolving
+// the host's IP from inside the container.
+var alloyConfigTmpl = template.Must(template.New("alloy-config").Parse(`// Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
+// Edits get clobbered on the next supervisor Start.
+
+prometheus.remote_write "vm" {
+  endpoint {
+    url = "http://victoriametrics:8428/api/v1/write"
+  }
+}
+
+prometheus.exporter.self "alloy" {}
+
+prometheus.scrape "alloy_self" {
+  targets    = prometheus.exporter.self.alloy.targets
+  forward_to = [prometheus.remote_write.vm.receiver]
+  scrape_interval = "15s"
+}
+{{- if .EnableCadvisor }}
+
+prometheus.exporter.cadvisor "containers" {
+  docker_only = true
+}
+
+prometheus.scrape "cadvisor" {
+  targets    = prometheus.exporter.cadvisor.containers.targets
+  forward_to = [prometheus.remote_write.vm.receiver]
+  scrape_interval = "15s"
+}
+{{- end }}
+`))
 
 // writeCompose renders the compose YAML and writes it atomically. Re-runs
 // overwrite — VM picks up flag changes on the next `compose up`.
@@ -291,19 +404,32 @@ func (s *DockerComposeSupervisor) writeCompose() error {
 }
 
 func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
-	host, port, err := net.SplitHostPort(s.cfg.VMListenAddr)
+	vmHost, vmPort, err := net.SplitHostPort(s.cfg.VMListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid VMListenAddr %q: %w", s.cfg.VMListenAddr, err)
 	}
-	if port == "" {
+	if vmPort == "" {
 		return nil, fmt.Errorf("invalid VMListenAddr %q: port required", s.cfg.VMListenAddr)
 	}
+	alloyHost, alloyPort, err := net.SplitHostPort(s.cfg.AlloyListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid AlloyListenAddr %q: %w", s.cfg.AlloyListenAddr, err)
+	}
+	if alloyPort == "" {
+		return nil, fmt.Errorf("invalid AlloyListenAddr %q: port required", s.cfg.AlloyListenAddr)
+	}
 	data := composeData{
-		VMImage:     s.cfg.VMImage,
-		VMHost:      host,
-		VMPort:      port,
-		VMRetention: s.cfg.VMRetention,
-		VMDataDir:   "./" + vmDataDir,
+		VMImage:         s.cfg.VMImage,
+		VMHost:          vmHost,
+		VMPort:          vmPort,
+		VMRetention:     s.cfg.VMRetention,
+		VMDataDir:       "./" + vmDataDir,
+		AlloyImage:      s.cfg.AlloyImage,
+		AlloyHost:       alloyHost,
+		AlloyPort:       alloyPort,
+		AlloyConfigDir:  "./" + alloyConfigSubdir,
+		AlloyConfigFile: alloyConfigFile,
+		EnableCadvisor:  s.cfg.EnableCadvisor != nil && *s.cfg.EnableCadvisor,
 	}
 	var buf bytes.Buffer
 	if err := composeTmpl.Execute(&buf, data); err != nil {
@@ -313,11 +439,17 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 }
 
 type composeData struct {
-	VMImage     string
-	VMHost      string
-	VMPort      string
-	VMRetention string
-	VMDataDir   string
+	VMImage         string
+	VMHost          string
+	VMPort          string
+	VMRetention     string
+	VMDataDir       string
+	AlloyImage      string
+	AlloyHost       string
+	AlloyPort       string
+	AlloyConfigDir  string
+	AlloyConfigFile string
+	EnableCadvisor  bool
 }
 
 // composeTmpl is the Slice 1.1 compose YAML — VictoriaMetrics only.
@@ -341,6 +473,13 @@ type composeData struct {
 //
 // `restart: unless-stopped` lets the Docker daemon (not us) handle crash
 // recovery — simpler than reinventing it.
+// VM listens on a FIXED internal port (8428) and Alloy listens on a
+// FIXED internal port (12345). Only the host-side bind (VMListenAddr /
+// AlloyListenAddr) varies per install — so peers inside the compose
+// network can hard-code `victoriametrics:8428` and `alloy:12345` in
+// their config without seeing the operator's host-port choice. Mirrors
+// Headscale's "container always listens on 8080 internally" pattern in
+// mesh/supervisor_docker.go.
 var composeTmpl = template.Must(template.New("obs-compose").Parse(`# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
 # Edits get clobbered on the next supervisor Start.
 services:
@@ -351,12 +490,36 @@ services:
     command:
       - "-storageDataPath=/storage"
       - "-retentionPeriod={{.VMRetention}}"
-      - "-httpListenAddr=0.0.0.0:{{.VMPort}}"
+      - "-httpListenAddr=0.0.0.0:8428"
       - "-search.latencyOffset=0s"
     ports:
-      - "{{.VMHost}}:{{.VMPort}}:{{.VMPort}}"
+      - "{{.VMHost}}:{{.VMPort}}:8428"
     volumes:
       - {{.VMDataDir}}:/storage
+
+  alloy:
+    image: {{.AlloyImage}}
+    container_name: rasputin-alloy
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - /etc/alloy/{{.AlloyConfigFile}}
+    ports:
+      - "{{.AlloyHost}}:{{.AlloyPort}}:12345"
+    volumes:
+      - {{.AlloyConfigDir}}:/etc/alloy:ro
+{{- if .EnableCadvisor }}
+      # cAdvisor needs read access to the host's cgroup tree and the
+      # Docker socket to enumerate containers. These are Linux paths;
+      # Docker Desktop / OrbStack / Rancher Desktop expose the VM's
+      # equivalents transparently on macOS / Windows.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+{{- end }}
+    depends_on:
+      - victoriametrics
 `))
 
 // ----- Health -------------------------------------------------------------

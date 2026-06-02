@@ -335,6 +335,25 @@ func envOr(key, def string) string {
 	return def
 }
 
+// envBoolPtr returns nil when the env var is unset (so the config's own
+// default applies) and a non-nil bool when explicitly set. "1"/"true"/"yes"
+// → true; anything else → false. The pointer return shape is what the obs
+// config uses for tri-state ("not set" vs "explicitly false" vs "true").
+func envBoolPtr(key string) *bool {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		t := true
+		return &t
+	default:
+		f := false
+		return &f
+	}
+}
+
 // newMeshClient builds the mesh.Client implementation chosen by env. The
 // default is the file-backed mock, suitable for dev and CI. Set
 // RASPUTIN_MESH_BACKEND=headscale to talk to a real Headscale instance —
@@ -457,10 +476,13 @@ func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Servic
 		log.Fatalf("rasputin-api: obs state dir: %v", err)
 	}
 	sup, err := obs.NewDockerComposeSupervisor(obs.DockerComposeSupervisorConfig{
-		StateDir:     stateDir,
-		VMImage:      os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
-		VMListenAddr: os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
-		VMRetention:  os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
+		StateDir:        stateDir,
+		VMImage:         os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
+		VMListenAddr:    os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
+		VMRetention:     os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
+		AlloyImage:      os.Getenv("RASPUTIN_OBS_ALLOY_IMAGE"),
+		AlloyListenAddr: os.Getenv("RASPUTIN_OBS_ALLOY_LISTEN"),
+		EnableCadvisor:  envBoolPtr("RASPUTIN_OBS_ALLOY_CADVISOR"),
 	})
 	if err != nil {
 		log.Fatalf("rasputin-api: obs supervisor: %v", err)
