@@ -53,7 +53,16 @@ type Runner struct {
 	mu        sync.RWMutex
 	workflows map[string]Workflow
 	wg        sync.WaitGroup
+	// backoff returns the delay to wait before retry N (1-indexed).
+	// Defaults to N seconds — preserves the previous hard-coded behavior
+	// in production while letting tests inject a near-zero delay so
+	// "step succeeds on retry" cases don't pay a real second per attempt.
+	backoff func(attempt int) time.Duration
 }
+
+// DefaultBackoff is the production retry-delay schedule: N seconds before
+// retry N. Exported so callers / tests can wrap it.
+func DefaultBackoff(attempt int) time.Duration { return time.Duration(attempt) * time.Second }
 
 // NewRunner constructs a Runner bound to a Store and NATS connection.
 func NewRunner(store *Store, nc *nats.Conn) *Runner {
@@ -61,7 +70,20 @@ func NewRunner(store *Store, nc *nats.Conn) *Runner {
 		store:     store,
 		nc:        nc,
 		workflows: make(map[string]Workflow),
+		backoff:   DefaultBackoff,
 	}
+}
+
+// SetBackoff overrides the retry-delay function. Intended for tests that
+// want runStep to retry without waiting; production callers should leave
+// the default in place. Safe to call before or after Start; a nil hook
+// resets to DefaultBackoff so the runner never ends up with a nil
+// callback at the time-sensitive moment.
+func (r *Runner) SetBackoff(fn func(attempt int) time.Duration) {
+	if fn == nil {
+		fn = DefaultBackoff
+	}
+	r.backoff = fn
 }
 
 // Register adds a Workflow to the runner's registry. Calling Register after
@@ -197,11 +219,13 @@ func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep
 			r.emit(ctx, j.ID, proto.JobStepRetrying, proto.StepEventData{
 				Seq: seq, Name: step.Name, Attempt: attempt, Error: lastErr.Error(),
 			})
-			backoff := time.Duration(attempt) * time.Second
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return ctx.Err()
+			delay := r.backoff(attempt)
+			if delay > 0 {
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 		}
 		stepCtx, cancel := context.WithTimeout(ctx, step.Timeout)

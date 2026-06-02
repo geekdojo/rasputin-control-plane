@@ -146,11 +146,14 @@ func TestRunner_Submit_StepFailureMarksJobFailed(t *testing.T) {
 }
 
 // TestRunner_Submit_StepSucceedsOnRetry covers runStep's retry-then-succeed
-// branch — the JobStepRetrying emit path.
+// branch — the JobStepRetrying emit path. Uses SetBackoff(zero) so the
+// test doesn't burn a real second per retry; production callers still get
+// the DefaultBackoff (N seconds before retry N).
 func TestRunner_Submit_StepSucceedsOnRetry(t *testing.T) {
 	nc := startNATS(t)
 	store := newStore(t)
 	r := NewRunner(store, nc)
+	r.SetBackoff(func(int) time.Duration { return 0 })
 
 	var attempts int32
 	r.Register(Workflow{
@@ -171,12 +174,15 @@ func TestRunner_Submit_StepSucceedsOnRetry(t *testing.T) {
 		},
 	})
 
-	// retries inject a (attempt * 1s) backoff — for attempt 1 that's 1 second.
+	start := time.Now()
 	j, err := r.Submit(context.Background(), "test.flaky", json.RawMessage(`{}`), "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	waitForStatus(t, store, j.ID, StatusSucceeded, 5*time.Second)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("test took %v — backoff override not applied", elapsed)
+	}
 	if atomic.LoadInt32(&attempts) != 2 {
 		t.Errorf("attempts: want 2, got %d", atomic.LoadInt32(&attempts))
 	}
@@ -468,6 +474,28 @@ func TestRebootHealthCheck_BadSpec(t *testing.T) {
 	}
 	if _, err := rebootHealthCheck(sc); err == nil {
 		t.Error("missing nodeId: want error")
+	}
+}
+
+func TestDefaultBackoff(t *testing.T) {
+	if got := DefaultBackoff(0); got != 0 {
+		t.Errorf("DefaultBackoff(0) = %v, want 0", got)
+	}
+	if got := DefaultBackoff(1); got != time.Second {
+		t.Errorf("DefaultBackoff(1) = %v, want 1s", got)
+	}
+	if got := DefaultBackoff(3); got != 3*time.Second {
+		t.Errorf("DefaultBackoff(3) = %v, want 3s", got)
+	}
+}
+
+func TestRunner_SetBackoff_NilResets(t *testing.T) {
+	r := NewRunner(nil, nil)
+	r.SetBackoff(func(int) time.Duration { return time.Hour })
+	r.SetBackoff(nil)
+	// After reset to nil, the runner falls back to DefaultBackoff.
+	if got := r.backoff(2); got != 2*time.Second {
+		t.Errorf("after SetBackoff(nil): got %v, want %v (DefaultBackoff(2))", got, 2*time.Second)
 	}
 }
 
