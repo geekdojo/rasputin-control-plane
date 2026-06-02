@@ -70,6 +70,54 @@ func (s *Server) handleDeleteMeshDevice(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// GET /api/mesh/enroll-defaults/{nodeId} — suggested form values for the
+// mesh-enroll dialog. Currently returns the primary LAN CIDR the agent
+// detected at registration time, so the UI can pre-fill the
+// "advertise routes" field. Empty arrays are returned (not null) so the
+// UI can iterate without nil-checks.
+//
+// Returns 404 if the node isn't in inventory. A node that exists but
+// hasn't reported a CIDR (air-gapped, very old agent) gets an empty
+// advertiseRoutes — the form stays editable.
+func (s *Server) handleMeshEnrollDefaults(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("nodeId")
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "missing nodeId")
+		return
+	}
+	node, err := s.inv.Get(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if node == nil {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+	advertise := []string{}
+	if v, ok := node.Metadata["primaryLanCidr"]; ok {
+		if cidr, ok := v.(string); ok && cidr != "" {
+			advertise = []string{cidr}
+		}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		NodeID          string   `json:"nodeId"`
+		AdvertiseRoutes []string `json:"advertiseRoutes"`
+		PrimaryLanCidr  string   `json:"primaryLanCidr,omitempty"`
+	}{
+		NodeID:          nodeID,
+		AdvertiseRoutes: advertise,
+		PrimaryLanCidr:  firstOrEmpty(advertise),
+	})
+}
+
+func firstOrEmpty(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
+}
+
 // GET /api/mesh/ios-profile — returns an Apple .mobileconfig that installs
 // the Rasputin internal root CA. iOS Safari recognises the content-type
 // and disposition and offers to install the profile in Settings →

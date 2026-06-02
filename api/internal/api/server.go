@@ -146,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/mesh/apply", reqd(s.handleMeshApply))
 	mux.HandleFunc("POST /api/mesh/reconcile", reqd(s.handleMeshReconcile))
 	mux.HandleFunc("POST /api/mesh/enroll/{nodeId}", reqd(s.handleMeshEnrollNode))
+	mux.HandleFunc("GET /api/mesh/enroll-defaults/{nodeId}", reqd(s.handleMeshEnrollDefaults))
 	mux.HandleFunc("GET /api/mesh/ios-profile", reqd(s.handleMeshIOSProfile))
 
 	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))

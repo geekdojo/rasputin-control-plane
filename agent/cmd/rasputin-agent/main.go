@@ -248,11 +248,20 @@ func main() {
 }
 
 func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole) {
+	meta := map[string]any{}
+	if cidr := host.PrimaryLanCIDR(); cidr != "" {
+		// Carried in Metadata rather than as a top-level field so the
+		// shared proto.NodeRegisteredEvt stays small / additive: anything
+		// that needs the value reads metadata["primaryLanCidr"]. The api's
+		// mesh enroll-defaults endpoint surfaces it to the UI.
+		meta["primaryLanCidr"] = cidr
+	}
 	ev := proto.NodeRegisteredEvt{
 		NodeID:       nodeID,
 		Role:         role,
 		Hostname:     host.Hostname(),
 		AgentVersion: AgentVersion,
+		Metadata:     meta,
 		Ts:           time.Now().UTC(),
 	}
 	payload, err := json.Marshal(ev)

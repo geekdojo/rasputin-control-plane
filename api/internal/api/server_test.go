@@ -988,6 +988,69 @@ func TestHandleDeleteMeshDevice_NotFound(t *testing.T) {
 	}
 }
 
+// --- /api/mesh/enroll-defaults/{nodeId} -----------------------------------
+
+func TestHandleMeshEnrollDefaults_PrefillsFromAgentMetadata(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	if err := f.inv.Insert(f.ctx, &proto.Node{
+		ID: "node-5", Role: proto.RoleCompute, Hostname: "node-5",
+		Metadata:  map[string]any{"primaryLanCidr": "192.168.50.0/24"},
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("inv.Insert: %v", err)
+	}
+	w := f.do(t, http.MethodGet, "/api/mesh/enroll-defaults/node-5", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		NodeID          string   `json:"nodeId"`
+		AdvertiseRoutes []string `json:"advertiseRoutes"`
+		PrimaryLanCidr  string   `json:"primaryLanCidr"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.NodeID != "node-5" {
+		t.Errorf("nodeId: %q", resp.NodeID)
+	}
+	if resp.PrimaryLanCidr != "192.168.50.0/24" {
+		t.Errorf("primaryLanCidr: %q", resp.PrimaryLanCidr)
+	}
+	if len(resp.AdvertiseRoutes) != 1 || resp.AdvertiseRoutes[0] != "192.168.50.0/24" {
+		t.Errorf("advertiseRoutes: %v", resp.AdvertiseRoutes)
+	}
+}
+
+func TestHandleMeshEnrollDefaults_NoCIDRReturnsEmptyArray(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	if err := f.inv.Insert(f.ctx, &proto.Node{
+		ID: "node-6", Role: proto.RoleCompute, Hostname: "node-6",
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("inv.Insert: %v", err)
+	}
+	w := f.do(t, http.MethodGet, "/api/mesh/enroll-defaults/node-6", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	// JSON should have advertiseRoutes:[] (not null) so the UI can iterate.
+	if !strings.Contains(w.Body.String(), `"advertiseRoutes":[]`) {
+		t.Errorf("want empty array, got body=%s", w.Body.String())
+	}
+}
+
+func TestHandleMeshEnrollDefaults_NotFound(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodGet, "/api/mesh/enroll-defaults/missing", "", c)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("want 404, got %d", w.Code)
+	}
+}
+
 // --- /api/mesh/ios-profile -------------------------------------------------
 
 func TestHandleMeshIOSProfile_Missing404(t *testing.T) {
