@@ -1112,12 +1112,13 @@ func TestHandleMeshIOSProfile_Missing404(t *testing.T) {
 func TestHandleMeshIOSProfile_ServesAppleAspenConfig(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
-	// Drop a fresh self-signed cert at <trustDir>/root-ca.pem (trustDir is
-	// the fixture's dir).
+	// Drop a fresh self-signed cert at <trustDir>/mesh-ca.pem (the Mesh
+	// TLS CA — NOT root-ca.pem; that's the bundle-signing root which is
+	// the wrong CA for the trust-Headscale use case).
 	certPEM := freshSelfSignedCertForAPI(t)
-	rootPath := filepath.Join(f.srv.trustDir, "root-ca.pem")
-	if err := os.WriteFile(rootPath, certPEM, 0o644); err != nil {
-		t.Fatalf("write root-ca.pem: %v", err)
+	caPath := filepath.Join(f.srv.trustDir, mesh.MeshCAFileName)
+	if err := os.WriteFile(caPath, certPEM, 0o644); err != nil {
+		t.Fatalf("write mesh-ca.pem: %v", err)
 	}
 	w := f.do(t, http.MethodGet, "/api/mesh/ios-profile", "", c)
 	if w.Code != http.StatusOK {

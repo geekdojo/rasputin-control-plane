@@ -87,6 +87,20 @@ type DockerSupervisorConfig struct {
 	// Defaults to 5 minutes (the image is ~30 MB but first-pull bandwidth
 	// is highly variable).
 	PullTimeout time.Duration
+
+	// MeshCA, when non-nil, switches the supervisor into HTTPS mode:
+	// Start mints a server-auth leaf signed by this CA, mounts it into
+	// the container, and renders a Headscale config that points at it
+	// via tls_cert_path / tls_key_path. ServerURL is also forced to
+	// https:// in that mode. Leave nil for HTTP-only (useful for tests
+	// and bring-up before the wizard's PKI step runs).
+	MeshCA *MeshCA
+
+	// ExtraLeafDNSNames are appended to the leaf's SAN list — useful if
+	// the operator wants the cert to also validate for a custom hostname
+	// they advertise via mDNS or local DNS. The resolved listen host is
+	// included automatically.
+	ExtraLeafDNSNames []string
 }
 
 const (
@@ -120,7 +134,14 @@ func NewDockerSupervisor(cfg DockerSupervisorConfig) (*DockerSupervisor, error) 
 		cfg.ListenAddr = defaultListenAddr
 	}
 	if cfg.ServerURL == "" {
-		cfg.ServerURL = "http://" + resolveServerHost(cfg.ListenAddr) + ":" + portOf(cfg.ListenAddr)
+		scheme := "http"
+		if cfg.MeshCA != nil {
+			// HTTPS-mode default — the Tailscale client refuses plaintext
+			// HTTP, so a configured MeshCA implies the operator wants a
+			// real TLS endpoint.
+			scheme = "https"
+		}
+		cfg.ServerURL = scheme + "://" + resolveServerHost(cfg.ListenAddr) + ":" + portOf(cfg.ListenAddr)
 	}
 	if cfg.DockerBin == "" {
 		cfg.DockerBin = "docker"
@@ -193,9 +214,21 @@ func execRunner(ctx context.Context, name string, args ...string) ([]byte, error
 // Start brings the container up. Idempotent: a running container is a no-op
 // (still re-checks health), a stopped container is started, a missing
 // container is pulled + created + started.
+//
+// When MeshCA is set, Start also ensures a Headscale TLS leaf exists at
+// <state>/certs/{leaf.pem,leaf.key} and the config points at it. The
+// leaf is re-minted silently on SAN drift (e.g. controlplane moved
+// subnets) or near expiry — operators never see a "wrong cert" error
+// as long as they're trusting the CA the wizard installed on their
+// devices.
 func (s *DockerSupervisor) Start(ctx context.Context) error {
 	if err := s.prepareHostDirs(); err != nil {
 		return err
+	}
+	if s.cfg.MeshCA != nil {
+		if err := s.ensureLeaf(); err != nil {
+			return err
+		}
 	}
 	if err := s.writeConfig(); err != nil {
 		return err
@@ -321,11 +354,15 @@ func (s *DockerSupervisor) createAndStart(ctx context.Context) error {
 		"-p", s.cfg.ListenAddr + ":8080",
 		"-v", confDir + ":/etc/headscale:ro",
 		"-v", dataDir + ":/var/lib/headscale",
-		s.cfg.Image,
-		"serve",
 	}
-	log.Printf("mesh supervisor: creating container %q (image=%s listen=%s)",
-		s.cfg.ContainerName, s.cfg.Image, s.cfg.ListenAddr)
+	if s.cfg.MeshCA != nil {
+		certsDir := filepath.Join(s.cfg.StateDir, "certs")
+		args = append(args, "-v", certsDir+":/etc/headscale-certs:ro")
+	}
+	args = append(args, s.cfg.Image, "serve")
+
+	log.Printf("mesh supervisor: creating container %q (image=%s listen=%s tls=%v)",
+		s.cfg.ContainerName, s.cfg.Image, s.cfg.ListenAddr, s.cfg.MeshCA != nil)
 	if _, err := s.runner(ctx, s.cfg.DockerBin, args...); err != nil {
 		return fmt.Errorf("docker run %s: %w", s.cfg.ContainerName, err)
 	}
@@ -335,11 +372,39 @@ func (s *DockerSupervisor) createAndStart(ctx context.Context) error {
 // ----- Host state + config ------------------------------------------------
 
 func (s *DockerSupervisor) prepareHostDirs() error {
-	for _, sub := range []string{"config", "data"} {
+	subs := []string{"config", "data"}
+	if s.cfg.MeshCA != nil {
+		subs = append(subs, "certs")
+	}
+	for _, sub := range subs {
 		p := filepath.Join(s.cfg.StateDir, sub)
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			return fmt.Errorf("mesh supervisor: mkdir %s: %w", p, err)
 		}
+	}
+	return nil
+}
+
+// ensureLeaf mints (or reuses) the TLS leaf cert the container will
+// serve from. SANs include the resolved server host, 127.0.0.1 (for
+// same-host probes), localhost (same-host dev), and any ExtraLeafDNSNames
+// the caller wanted to advertise.
+func (s *DockerSupervisor) ensureLeaf() error {
+	host := resolveServerHost(s.cfg.ListenAddr)
+	spec := LeafSpec{
+		CommonName:  host,
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		spec.IPAddresses = append(spec.IPAddresses, ip)
+	} else {
+		spec.DNSNames = []string{host}
+	}
+	spec.DNSNames = append(spec.DNSNames, "localhost")
+	spec.DNSNames = append(spec.DNSNames, s.cfg.ExtraLeafDNSNames...)
+	certsDir := filepath.Join(s.cfg.StateDir, "certs")
+	if _, err := MintLeafToDisk(s.cfg.MeshCA, certsDir, spec); err != nil {
+		return fmt.Errorf("mesh supervisor: mint leaf: %w", err)
 	}
 	return nil
 }
@@ -361,9 +426,10 @@ func (s *DockerSupervisor) writeConfig() error {
 
 // renderConfig builds the YAML body. The template is deliberately compact —
 // only the fields Headscale actually requires plus the ones we override
-// (paths, listen, server_url). Operators who need to tune anything else
-// can edit the rendered file; subsequent writes will overwrite, so the
-// proper escape hatch (post-MVS) is a per-field config override map.
+// (paths, listen, server_url, optional TLS). Operators who need to tune
+// anything else can edit the rendered file; subsequent writes will
+// overwrite, so the proper escape hatch (post-MVS) is a per-field
+// config override map.
 //
 // Notable choice: the unix socket lives at /tmp/headscale.sock inside the
 // container, NOT under /var/lib/headscale. Headscale chmods the socket
@@ -379,6 +445,12 @@ func (s *DockerSupervisor) renderConfig() ([]byte, error) {
 		ServerURL:  s.cfg.ServerURL,
 		ListenAddr: "0.0.0.0:8080", // inside the container
 	}
+	if s.cfg.MeshCA != nil {
+		// Paths inside the container — the host's <state>/certs is
+		// bind-mounted at /etc/headscale-certs by createAndStart.
+		data.TLSCertPath = "/etc/headscale-certs/leaf.pem"
+		data.TLSKeyPath = "/etc/headscale-certs/leaf.key"
+	}
 	var buf bytes.Buffer
 	if err := configTmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("render headscale config: %w", err)
@@ -387,8 +459,10 @@ func (s *DockerSupervisor) renderConfig() ([]byte, error) {
 }
 
 type configData struct {
-	ServerURL  string
-	ListenAddr string
+	ServerURL   string
+	ListenAddr  string
+	TLSCertPath string // empty in HTTP mode
+	TLSKeyPath  string // empty in HTTP mode
 }
 
 var configTmpl = template.Must(template.New("headscale-config").Parse(`server_url: {{.ServerURL}}
@@ -430,8 +504,8 @@ tls_letsencrypt_hostname: ""
 tls_letsencrypt_cache_dir: /var/lib/headscale/cache
 tls_letsencrypt_challenge_type: HTTP-01
 tls_letsencrypt_listen: ":http"
-tls_cert_path: ""
-tls_key_path: ""
+tls_cert_path: "{{.TLSCertPath}}"
+tls_key_path: "{{.TLSKeyPath}}"
 
 log:
   level: info

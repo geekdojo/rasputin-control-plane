@@ -124,29 +124,37 @@ func firstOrEmpty(s []string) string {
 }
 
 // GET /api/mesh/ios-profile — returns an Apple .mobileconfig that installs
-// the Rasputin internal root CA. iOS Safari recognises the content-type
-// and disposition and offers to install the profile in Settings →
-// General → VPN & Device Management. Required so the iOS Tailscale client
-// can trust Headscale's TLS endpoint (signed by our internal CA).
+// the per-installation Mesh TLS CA on the operator's device. iOS Safari
+// recognises the content-type and disposition and offers to install the
+// profile in Settings → General → VPN & Device Management. Required so
+// the iOS Tailscale client trusts Headscale's TLS endpoint (signed by
+// the Mesh CA — see design/control-plane/certificates.md).
 //
-// 404 with a clear message if the trust root isn't yet provisioned —
-// the wizard's TLS step is the natural place to surface that.
+// NOTE: this serves <trustDir>/mesh-ca.pem (the Mesh TLS CA), NOT
+// root-ca.pem (the bundle-signing root). The two CAs are deliberately
+// separate; an earlier revision of this handler delivered root-ca.pem
+// by mistake, which would have made operator devices trust the wrong
+// CA for the wrong purpose.
+//
+// 404 with a clear message if the Mesh CA isn't yet provisioned —
+// EnsureMeshCA runs at api startup so this should only happen if the
+// trust dir got wiped between startup and the request.
 func (s *Server) handleMeshIOSProfile(w http.ResponseWriter, r *http.Request) {
 	if s.trustDir == "" {
 		writeError(w, http.StatusNotFound, "trust dir not configured")
 		return
 	}
-	rootPath := filepath.Join(s.trustDir, "root-ca.pem")
-	pem, err := os.ReadFile(rootPath)
+	caPath := filepath.Join(s.trustDir, mesh.MeshCAFileName)
+	pem, err := os.ReadFile(caPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "internal root CA not provisioned — run scripts/pki-init.sh")
+			writeError(w, http.StatusNotFound, "Mesh TLS CA not yet provisioned — restart the api to regenerate")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	profile, err := mesh.BuildIOSMobileConfig(pem, "Rasputin Trust Root", "Rasputin")
+	profile, err := mesh.BuildIOSMobileConfig(pem, "Rasputin Mesh TLS CA", "Rasputin")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "build mobileconfig: "+err.Error())
 		return

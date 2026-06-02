@@ -41,8 +41,11 @@ package mesh
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -73,13 +76,27 @@ func TestSupervisor_LiveDockerLifecycle(t *testing.T) {
 		_ = os.RemoveAll(stateDir)
 	})
 
+	// Mint a Mesh TLS CA in the same state tree so the supervisor renders
+	// an HTTPS-enabled Headscale config end-to-end. The CA lives outside
+	// the per-container state dir so re-runs (which wipe stateDir) don't
+	// invalidate it; in real deployment it'd be at <trustDir>/mesh-ca.*.
+	caDir := filepath.Join(stateDir, "trust")
+	if err := os.MkdirAll(caDir, 0o755); err != nil {
+		t.Fatalf("mkdir trust: %v", err)
+	}
+	ca, err := EnsureMeshCA(caDir, "supervisor-smoke")
+	if err != nil {
+		t.Fatalf("EnsureMeshCA: %v", err)
+	}
+
 	sup, err := NewDockerSupervisor(DockerSupervisorConfig{
 		StateDir:      stateDir,
 		ContainerName: supervisorTestContainer,
 		ListenAddr:    listenAddr,
-		ServerURL:     "http://" + listenAddr,
+		ServerURL:     "https://" + listenAddr,
 		HealthTimeout: 60 * time.Second, // first-run image pull can be slow
 		PullTimeout:   3 * time.Minute,
+		MeshCA:        ca,
 	})
 	if err != nil {
 		t.Fatalf("NewDockerSupervisor: %v", err)
@@ -144,10 +161,18 @@ func TestSupervisor_LiveDockerLifecycle(t *testing.T) {
 			t.Fatalf("could not parse API key from CLI output:\n%s", raw)
 		}
 
+		// Trust pool that ONLY contains our Mesh CA — proves the chain
+		// works without falling back to system roots (which wouldn't
+		// trust a per-installation CA anyway).
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(ca.CertPEM) {
+			t.Fatal("failed to add mesh CA to trust pool")
+		}
 		c, err := NewRealClient(RealClientConfig{
-			BaseURL:        "http://" + listenAddr,
+			BaseURL:        "https://" + listenAddr,
 			APIKey:         apiKey,
 			RequestTimeout: 10 * time.Second,
+			TLSConfig:      &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
 		})
 		if err != nil {
 			t.Fatalf("NewRealClient: %v", err)

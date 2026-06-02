@@ -118,6 +118,17 @@ func main() {
 	}
 	defer setupStore.Close()
 
+	// Trust material lives at <trustDir>/. Used by:
+	//   - updater.Verifier (root-ca.pem; bundle signatures)
+	//   - mesh.EnsureMeshCA (mesh-ca.{key,pem}; per-installation TLS CA)
+	//   - the .mobileconfig endpoint (serves mesh-ca.pem to operator devices)
+	// Set up ahead of mesh because the docker supervisor needs the Mesh CA
+	// at construction time. See wiki design/control-plane/certificates.md.
+	trustDir := envOr("RASPUTIN_TRUST_DIR", filepath.Join(dataDir, "trust"))
+	if err := os.MkdirAll(trustDir, 0o755); err != nil {
+		log.Fatalf("rasputin-api: trust dir: %v", err)
+	}
+
 	// Mesh subsystem: backend defaults to the file-backed mock client.
 	// Set RASPUTIN_MESH_BACKEND=headscale (plus RASPUTIN_HEADSCALE_URL and
 	// RASPUTIN_HEADSCALE_API_KEY) to talk to a real Headscale instance.
@@ -132,7 +143,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: mesh client: %v", err)
 	}
-	meshSup, err := newMeshSupervisor(meshStateDir)
+	installName := envOr("RASPUTIN_INSTALL_NAME", "rasputin")
+	meshCA, err := mesh.EnsureMeshCA(trustDir, installName)
+	if err != nil {
+		log.Fatalf("rasputin-api: mesh CA: %v", err)
+	}
+	log.Printf("rasputin-api: mesh CA loaded (CN=%s, expires=%s)",
+		meshCA.Cert.Subject.CommonName, meshCA.Cert.NotAfter.Format("2006-01-02"))
+	meshSup, err := newMeshSupervisor(meshStateDir, meshCA)
 	if err != nil {
 		log.Fatalf("rasputin-api: mesh supervisor: %v", err)
 	}
@@ -146,15 +164,13 @@ func main() {
 	}
 	defer meshSvc.Stop()
 
-	// Bundles live on disk; the api streams them to agents. PKI trust
-	// material lives next door — root-ca.pem expected at <trustDir>/root-ca.pem.
+	// Bundles live on disk; the api streams them to agents. The
+	// bundle-signing root-ca.pem lives at <trustDir>/root-ca.pem and is
+	// owned by Rasputin Inc. (separate CA from the Mesh TLS CA above —
+	// see certificates.md for why).
 	bundleDir := envOr("RASPUTIN_BUNDLE_DIR", filepath.Join(dataDir, "bundles"))
 	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: bundle dir: %v", err)
-	}
-	trustDir := envOr("RASPUTIN_TRUST_DIR", filepath.Join(dataDir, "trust"))
-	if err := os.MkdirAll(trustDir, 0o755); err != nil {
-		log.Fatalf("rasputin-api: trust dir: %v", err)
 	}
 	verifier, err := updater.NewVerifier(trustDir)
 	if err != nil {
@@ -343,7 +359,7 @@ func newMeshClient(stateDir string) (mesh.Client, error) {
 // the api drive the Headscale container's lifecycle via the local docker
 // CLI. RASPUTIN_HEADSCALE_IMAGE and RASPUTIN_HEADSCALE_LISTEN_ADDR
 // override the pinned defaults.
-func newMeshSupervisor(stateDir string) (mesh.Supervisor, error) {
+func newMeshSupervisor(stateDir string, meshCA *mesh.MeshCA) (mesh.Supervisor, error) {
 	choice := strings.ToLower(envOr("RASPUTIN_HEADSCALE_SUPERVISOR", "noop"))
 	switch choice {
 	case "", "noop":
@@ -355,8 +371,10 @@ func newMeshSupervisor(stateDir string) (mesh.Supervisor, error) {
 			ListenAddr:    os.Getenv("RASPUTIN_HEADSCALE_LISTEN_ADDR"),
 			ServerURL:     os.Getenv("RASPUTIN_HEADSCALE_URL"),
 			ContainerName: os.Getenv("RASPUTIN_HEADSCALE_CONTAINER"),
+			MeshCA:        meshCA, // enables HTTPS mode with a per-installation leaf
 		}
-		log.Printf("rasputin-api: mesh supervisor = docker (state=%s)", cfg.StateDir)
+		log.Printf("rasputin-api: mesh supervisor = docker (state=%s, tls=%v)",
+			cfg.StateDir, cfg.MeshCA != nil)
 		return mesh.NewDockerSupervisor(cfg)
 	default:
 		return nil, errors.New("unknown RASPUTIN_HEADSCALE_SUPERVISOR: " + choice)

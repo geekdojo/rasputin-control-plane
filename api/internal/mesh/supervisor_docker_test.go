@@ -482,6 +482,117 @@ func TestDockerSupervisor_Healthy_MissingContainer(t *testing.T) {
 // Config rendering
 // ============================================================================
 
+// ============================================================================
+// TLS / HTTPS mode
+// ============================================================================
+
+func TestDockerSupervisor_TLSMode_DefaultsServerURLToHTTPS(t *testing.T) {
+	ca, err := EnsureMeshCA(t.TempDir(), "x")
+	if err != nil {
+		t.Fatalf("EnsureMeshCA: %v", err)
+	}
+	s, err := NewDockerSupervisor(DockerSupervisorConfig{
+		StateDir: t.TempDir(),
+		MeshCA:   ca,
+	})
+	if err != nil {
+		t.Fatalf("NewDockerSupervisor: %v", err)
+	}
+	if !strings.HasPrefix(s.cfg.ServerURL, "https://") {
+		t.Errorf("ServerURL should be https:// in TLS mode; got %q", s.cfg.ServerURL)
+	}
+}
+
+func TestDockerSupervisor_TLSMode_RenderedConfigPointsAtLeaf(t *testing.T) {
+	ca, err := EnsureMeshCA(t.TempDir(), "x")
+	if err != nil {
+		t.Fatalf("EnsureMeshCA: %v", err)
+	}
+	fd := newFakeDocker()
+	s := newTestSupervisor(t, fd, func(c *DockerSupervisorConfig) {
+		c.MeshCA = ca
+		c.ListenAddr = "127.0.0.1:18080" // pinned so leaf SAN check is deterministic
+	})
+	body, err := s.renderConfig()
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	rendered := string(body)
+	if !strings.Contains(rendered, `tls_cert_path: "/etc/headscale-certs/leaf.pem"`) {
+		t.Errorf("config missing tls_cert_path; got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `tls_key_path: "/etc/headscale-certs/leaf.key"`) {
+		t.Errorf("config missing tls_key_path; got:\n%s", rendered)
+	}
+}
+
+func TestDockerSupervisor_TLSMode_StartMintsLeafAndMountsIt(t *testing.T) {
+	ca, err := EnsureMeshCA(t.TempDir(), "x")
+	if err != nil {
+		t.Fatalf("EnsureMeshCA: %v", err)
+	}
+	fd := newFakeDocker()
+	s := newTestSupervisor(t, fd, func(c *DockerSupervisorConfig) {
+		c.MeshCA = ca
+		c.ListenAddr = "127.0.0.1:18080"
+	})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Leaf files written under <state>/certs.
+	certPath := filepath.Join(s.cfg.StateDir, "certs", "leaf.pem")
+	keyPath := filepath.Join(s.cfg.StateDir, "certs", "leaf.key")
+	if _, err := os.Stat(certPath); err != nil {
+		t.Errorf("leaf cert not minted: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Errorf("leaf key not minted: %v", err)
+	}
+	// docker run args include the certs bind mount.
+	var runCall *dockerCall
+	for _, c := range fd.snapshot() {
+		if len(c.Args) > 0 && c.Args[0] == "run" {
+			rc := c
+			runCall = &rc
+			break
+		}
+	}
+	if runCall == nil {
+		t.Fatal("no docker run call")
+	}
+	if !strings.Contains(strings.Join(runCall.Args, " "), "/etc/headscale-certs:ro") {
+		t.Errorf("run args missing certs mount: %v", runCall.Args)
+	}
+}
+
+// HTTP mode (no MeshCA) must NOT touch the certs dir or render TLS
+// paths — keeps the bring-up / test path lightweight.
+func TestDockerSupervisor_HTTPMode_NoLeafNoMount(t *testing.T) {
+	fd := newFakeDocker()
+	s := newTestSupervisor(t, fd) // MeshCA nil by default
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "certs")); err == nil {
+		t.Error("certs dir was created in HTTP mode (should be skipped)")
+	}
+	for _, c := range fd.snapshot() {
+		if len(c.Args) > 0 && c.Args[0] == "run" {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "headscale-certs") {
+				t.Errorf("HTTP-mode run args leaked TLS mount: %v", c.Args)
+			}
+		}
+	}
+	body, err := s.renderConfig()
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	if !strings.Contains(string(body), `tls_cert_path: ""`) {
+		t.Errorf("HTTP-mode config should have empty tls_cert_path; got:\n%s", body)
+	}
+}
+
 func TestDockerSupervisor_RenderConfig_IncludesKeyFields(t *testing.T) {
 	fd := newFakeDocker()
 	s := newTestSupervisor(t, fd, func(c *DockerSupervisorConfig) {
