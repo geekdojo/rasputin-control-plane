@@ -194,6 +194,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/obs/status", reqd(s.handleObsStatus))
 	mux.HandleFunc("GET /api/obs/logs", reqd(s.handleObsLogs))
 	mux.HandleFunc("GET /api/obs/series", reqd(s.handleObsSeries))
+	mux.HandleFunc("GET /api/obs/containers", reqd(s.handleObsContainers))
 
 	// /observability/* is the auth-proxy in front of Grafana. The
 	// trailing slash matters — Go's ServeMux uses it as the prefix

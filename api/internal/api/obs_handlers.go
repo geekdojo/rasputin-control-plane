@@ -30,10 +30,17 @@ func (s *Server) handleObsStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleObsLogs proxies a LogQL range query to Loki. Query params:
 //
-//	query     — LogQL expression. Required.
+//	query     — Raw LogQL expression. Optional if node/container/grep set.
+//	node      — node_id label filter (composed-form shortcut).
+//	container — container label filter.
+//	grep      — case-insensitive regex line filter; wrapped in `(?i)`.
 //	start     — RFC3339 timestamp (or omit for "1h ago")
 //	end       — RFC3339 timestamp (or omit for "now")
 //	limit     — max entries (default 100, max 5000)
+//
+// The drawer's Logs tab uses the composed shortcut so the UI never
+// has to spell a LogQL selector. Power users can hit /api/obs/logs
+// with ?query= directly. Composed wins over raw query when both set.
 //
 // Response is the raw Loki JSON body, passed through. Errors from Loki
 // (syntax errors, missing label, etc.) propagate as 502 with the
@@ -45,13 +52,19 @@ func (s *Server) handleObsLogs(w http.ResponseWriter, r *http.Request) {
 			"obs.logs: Loki not configured (RASPUTIN_OBS_ENABLED=1 + Loki not disabled)")
 		return
 	}
-	q := r.URL.Query().Get("query")
-	if q == "" {
-		writeError(w, http.StatusBadRequest, "query parameter required")
+	qv := r.URL.Query()
+	lq := obs.LogsQuery{
+		Query:     qv.Get("query"),
+		NodeID:    qv.Get("node"),
+		Container: qv.Get("container"),
+		Grep:      qv.Get("grep"),
+	}
+	if lq.Query == "" && lq.NodeID == "" && lq.Container == "" {
+		writeError(w, http.StatusBadRequest,
+			"query parameter required (or set node= / container=)")
 		return
 	}
-	lq := obs.LogsQuery{Query: q}
-	if v := r.URL.Query().Get("start"); v != "" {
+	if v := qv.Get("start"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "start must be RFC3339: "+err.Error())
@@ -59,7 +72,7 @@ func (s *Server) handleObsLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		lq.Start = t
 	}
-	if v := r.URL.Query().Get("end"); v != "" {
+	if v := qv.Get("end"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "end must be RFC3339: "+err.Error())
@@ -67,7 +80,7 @@ func (s *Server) handleObsLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		lq.End = t
 	}
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := qv.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "limit must be integer: "+err.Error())
@@ -140,4 +153,35 @@ func (s *Server) handleObsSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// handleObsContainers returns the cAdvisor-derived container table for
+// the NodeDetailDrawer's Containers tab.
+//
+//	node — node id (required; advisory until Slice 1.2b ships per-node Alloy)
+//
+// 503 when obs is off, 502 if VM errors. Returns [] (not 404) when no
+// containers match — the UI renders that as "no containers visible from
+// this node" rather than a hard error.
+func (s *Server) handleObsContainers(w http.ResponseWriter, r *http.Request) {
+	cc := s.obs.Containers()
+	if cc == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"obs.containers: VictoriaMetrics not configured (RASPUTIN_OBS_ENABLED=1)")
+		return
+	}
+	node := r.URL.Query().Get("node")
+	if node == "" {
+		writeError(w, http.StatusBadRequest, "node parameter required")
+		return
+	}
+	rows, err := cc.List(r.Context(), node)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if rows == nil {
+		rows = []obs.Container{} // non-null for the UI
+	}
+	writeJSON(w, http.StatusOK, rows)
 }

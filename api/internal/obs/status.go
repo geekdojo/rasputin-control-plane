@@ -16,22 +16,27 @@ import (
 // handler renders that as "obs is off — set RASPUTIN_OBS_ENABLED=1 to
 // turn it on."
 type Status struct {
-	sup    Supervisor
-	sink   *VMSink
-	logs   *LogsClient
-	series *SeriesClient
+	sup        Supervisor
+	sink       *VMSink
+	logs       *LogsClient
+	series     *SeriesClient
+	containers *ContainersClient
 }
 
 // NewStatus bundles a Supervisor + VMSink + (optional) LogsClient for
 // the handler. Supervisor + VMSink are required for Enabled=true;
 // LogsClient is optional (Loki may be disabled — Snapshot reports it).
-// SeriesClient is built lazily off the same Supervisor when sup+sink
-// are present — handlers ask for it via Series().
+// SeriesClient + ContainersClient are built lazily off the same
+// Supervisor when sup+sink are present — handlers ask via Series() /
+// Containers().
 func NewStatus(sup Supervisor, sink *VMSink, logs *LogsClient) *Status {
 	st := &Status{sup: sup, sink: sink, logs: logs}
 	if sup != nil && sink != nil {
 		if c, err := NewSeriesClient(SeriesClientConfig{Supervisor: sup}); err == nil {
 			st.series = c
+		}
+		if c, err := NewContainersClient(ContainersClientConfig{Supervisor: sup}); err == nil {
+			st.containers = c
 		}
 	}
 	return st
@@ -53,6 +58,16 @@ func (s *Status) Series() *SeriesClient {
 		return nil
 	}
 	return s.series
+}
+
+// Containers returns the ContainersClient for cAdvisor-derived
+// container summaries, or nil when obs is off. Callers must guard
+// for nil — the handler renders 503 when it's nil.
+func (s *Status) Containers() *ContainersClient {
+	if s == nil {
+		return nil
+	}
+	return s.containers
 }
 
 // GrafanaEnabled reports whether the proxy at /observability/* has a

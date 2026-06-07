@@ -140,6 +140,63 @@ func TestLogsClient_DefaultsApplied(t *testing.T) {
 	}
 }
 
+// TestComposedExpr covers the LogQL-construction helper directly so
+// the test stays independent of the HTTP roundtrip.
+func TestComposedExpr(t *testing.T) {
+	cases := []struct {
+		name string
+		in   LogsQuery
+		want string
+	}{
+		{"empty", LogsQuery{}, ``},
+		{"node only", LogsQuery{NodeID: "cp-1"}, `{node_id="cp-1"}`},
+		{"container only", LogsQuery{Container: "rasputin-vm"}, `{container="rasputin-vm"}`},
+		{
+			"both labels",
+			LogsQuery{NodeID: "cp-1", Container: "rasputin-vm"},
+			`{node_id="cp-1",container="rasputin-vm"}`,
+		},
+		{
+			"node + grep",
+			LogsQuery{NodeID: "cp-1", Grep: "error"},
+			"{node_id=\"cp-1\"} |~ `(?i)error`",
+		},
+		{
+			"grep with backticks stripped",
+			LogsQuery{NodeID: "cp-1", Grep: "a`b"},
+			"{node_id=\"cp-1\"} |~ `(?i)ab`",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := composedExpr(tc.in); got != tc.want {
+				t.Errorf("composedExpr =\n  %q\nwant\n  %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLogsClient_ComposedFormWinsOverRawQuery confirms the composed
+// fields take precedence — partial-migration safety so a UI sending
+// both doesn't silently bypass the per-node filter.
+func TestLogsClient_ComposedFormWinsOverRawQuery(t *testing.T) {
+	loki := &stubLoki{}
+	srv := httptest.NewServer(loki.handler())
+	defer srv.Close()
+	c, _ := NewLogsClient(LogsClientConfig{
+		Supervisor: &fakeSupervisor{lokiURL: srv.URL},
+		HTTPClient: srv.Client(),
+	})
+	_, _ = c.QueryRange(context.Background(), LogsQuery{
+		Query:  `{container="raw"}`,
+		NodeID: "cp-1",
+	})
+	got, _ := loki.lastQuery.Load().(string)
+	if got != `{node_id="cp-1"}` {
+		t.Fatalf("forwarded query = %q, want composed selector", got)
+	}
+}
+
 func TestLogsClient_PropagatesHTTPError(t *testing.T) {
 	loki := &stubLoki{}
 	loki.status.Store(http.StatusBadRequest)

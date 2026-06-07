@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -47,18 +48,56 @@ func NewLogsClient(cfg LogsClientConfig) (*LogsClient, error) {
 
 // LogsQuery is the input to a LogQL range query.
 //
-// LogQL is well-documented at https://grafana.com/docs/loki/latest/logql/.
-// Common shapes:
+// Two shapes are supported:
 //
-//	{container="rasputin-headscale"}                  — every line from that container
-//	{compose_service="alloy"} |= "error"              — string match
-//	{container=~"rasputin-.*"} |~ "(?i)warn"          — regex match
-//	count_over_time({container="rasputin-vm"}[5m])    — metric extraction
+//  1. Raw LogQL — set Query directly. Power-user escape hatch; the
+//     handler exposes this when the UI passes ?query=.
+//  2. Composed — set NodeID and/or Container and/or Grep. The shim
+//     builds a LogQL selector from them so the UI never has to think
+//     about LogQL. This is the path the Drawer's Logs tab uses.
+//
+// Composed wins over Query when both are set, mainly so a partially-
+// migrated UI call doesn't silently bypass the per-node filter.
+//
+// LogQL reference: https://grafana.com/docs/loki/latest/logql/.
+// Common shapes the composed form produces:
+//
+//	{node_id="cp-1"}                                  — every line for that node
+//	{node_id="cp-1", container="rasputin-headscale"}  — narrowed to one container
+//	{node_id="cp-1"} |~ "(?i)warn"                    — case-insensitive grep
 type LogsQuery struct {
-	Query string    // LogQL expression. Required.
-	Start time.Time // Range start. Defaults to "1h ago" if zero.
-	End   time.Time // Range end. Defaults to "now" if zero.
-	Limit int       // Max entries. Defaults to 100; capped at 5000.
+	Query     string    // Raw LogQL expression. Optional.
+	NodeID    string    // node_id label filter (composed form).
+	Container string    // container label filter (composed form).
+	Grep      string    // case-insensitive regex line filter (composed form).
+	Start     time.Time // Range start. Defaults to "1h ago" if zero.
+	End       time.Time // Range end. Defaults to "now" if zero.
+	Limit     int       // Max entries. Defaults to 100; capped at 5000.
+}
+
+// composedExpr builds a LogQL expression from the per-label filter
+// fields. Returns "" when no filters are set (caller falls back to
+// raw Query). Exposed (lower-cased) so the test layer can assert the
+// exact selectors without invoking the HTTP path.
+func composedExpr(q LogsQuery) string {
+	var sels []string
+	if q.NodeID != "" {
+		sels = append(sels, fmt.Sprintf(`node_id=%q`, q.NodeID))
+	}
+	if q.Container != "" {
+		sels = append(sels, fmt.Sprintf(`container=%q`, q.Container))
+	}
+	if len(sels) == 0 {
+		return ""
+	}
+	expr := "{" + strings.Join(sels, ",") + "}"
+	if q.Grep != "" {
+		// Wrap in case-insensitive flag + escape backticks (LogQL uses
+		// backticks for raw regex literals). The shim leans on LogQL's
+		// `|~` so the operator can paste a regex straight from grep.
+		expr += " |~ `(?i)" + strings.ReplaceAll(q.Grep, "`", "") + "`"
+	}
+	return expr
 }
 
 // QueryRange proxies a LogQL range query to Loki and returns the raw
@@ -70,8 +109,12 @@ type LogsQuery struct {
 // includes a body snippet so the operator can spot LogQL syntax
 // errors without tailing Loki's logs.
 func (c *LogsClient) QueryRange(ctx context.Context, q LogsQuery) ([]byte, error) {
+	// Composed form wins over raw — see LogsQuery comment for why.
+	if expr := composedExpr(q); expr != "" {
+		q.Query = expr
+	}
 	if q.Query == "" {
-		return nil, errors.New("obs: logs query is required")
+		return nil, errors.New("obs: logs query is required (set Query, or NodeID/Container/Grep)")
 	}
 	base := c.sup.LokiBaseURL()
 	if base == "" {

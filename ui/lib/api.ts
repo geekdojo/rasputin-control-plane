@@ -181,6 +181,125 @@ export function getObsSeries(
   return jsonFetch<ObsSeries>(`/api/obs/series?${params}`);
 }
 
+// LogEntry is the flattened, UI-facing shape of one Loki log line.
+// Loki returns streams + values; we decode both into this shape so the
+// drawer's Logs tab can render a single sorted list without thinking
+// about LogQL response shapes.
+export interface LogEntry {
+  ts: string; // ISO8601 (RFC3339); derived from Loki's ns timestamp
+  container: string; // empty if absent on the stream
+  composeService?: string;
+  stream?: string; // "stdout" | "stderr"
+  line: string;
+  // raw labels for debugging — kept off the hot render path
+  labels: Record<string, string>;
+}
+
+interface LogsParams {
+  // node label filter — accepted by the api but Loki today only
+  // ships logs from the controlplane host. Forward-compat; safe to
+  // always pass.
+  node?: string;
+  container?: string;
+  grep?: string;
+  // Pre-built LogQL — bypass the composed form. Power-user only.
+  query?: string;
+  // Go duration, defaults to "1h" server-side. We pin to the
+  // drawer's range selector.
+  range?: string;
+  limit?: number;
+}
+
+// getObsLogs queries Loki via the api shim and decodes the streams
+// response into a flat, ts-desc-sorted list. Returns [] when no entries
+// matched the filter — caller renders that as "no logs in range" rather
+// than treating it as an error.
+export async function getObsLogs(p: LogsParams): Promise<LogEntry[]> {
+  const params = new URLSearchParams();
+  if (p.query) params.set('query', p.query);
+  if (p.node) params.set('node', p.node);
+  if (p.container) params.set('container', p.container);
+  if (p.grep) params.set('grep', p.grep);
+  if (p.limit) params.set('limit', String(p.limit));
+  if (p.range) {
+    // Loki wants RFC3339 start/end. Range is operator-shorthand —
+    // do the math here so the api shim stays Loki-agnostic.
+    const end = new Date();
+    const ms = parseRangeMs(p.range);
+    const start = new Date(end.getTime() - ms);
+    params.set('start', start.toISOString());
+    params.set('end', end.toISOString());
+  }
+  type LokiResp = {
+    status: string;
+    data: {
+      resultType: string;
+      result: Array<{
+        stream: Record<string, string>;
+        values: Array<[string, string]>;
+      }>;
+    };
+  };
+  const resp = await jsonFetch<LokiResp>(`/api/obs/logs?${params}`);
+  const entries: LogEntry[] = [];
+  for (const stream of resp.data.result ?? []) {
+    const labels = stream.stream ?? {};
+    for (const [nsStr, line] of stream.values ?? []) {
+      const ns = Number(nsStr);
+      const ms = Number.isFinite(ns) ? Math.floor(ns / 1_000_000) : Date.now();
+      entries.push({
+        ts: new Date(ms).toISOString(),
+        container: labels.container ?? '',
+        composeService: labels.compose_service,
+        stream: labels.stream,
+        line,
+        labels,
+      });
+    }
+  }
+  entries.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+  return entries;
+}
+
+// ObsContainer mirrors api/internal/obs/containers.go's Container.
+// CPU is fractional cores; mem is bytes; restarts is the cAdvisor
+// start-time proxy (see backend doc).
+export interface ObsContainer {
+  name: string;
+  image: string;
+  cpuCores: number;
+  memBytes: number;
+  restarts: number;
+}
+
+// getObsContainers returns the cAdvisor-derived container table for
+// the given node. Today the result is always the controlplane's set
+// regardless of node (Alloy only ships from there); Slice 1.2b changes
+// that without a UI shape change.
+export async function getObsContainers(nodeId: string): Promise<ObsContainer[]> {
+  const params = new URLSearchParams({ node: nodeId });
+  return (await jsonFetch<ObsContainer[] | null>(`/api/obs/containers?${params}`)) ?? [];
+}
+
+function parseRangeMs(r: string): number {
+  // Tiny Go-duration parser. Handles s|m|h|d suffixes — enough for the
+  // RANGES the drawer exposes. Falls back to 1h on parse failure.
+  const m = /^(\d+)(s|m|h|d)$/.exec(r.trim());
+  if (!m) return 60 * 60 * 1000;
+  const n = Number(m[1]);
+  switch (m[2]) {
+    case 's':
+      return n * 1000;
+    case 'm':
+      return n * 60 * 1000;
+    case 'h':
+      return n * 60 * 60 * 1000;
+    case 'd':
+      return n * 24 * 60 * 60 * 1000;
+  }
+  return 60 * 60 * 1000;
+}
+
 // ----- Firewall -----------------------------------------------------------
 
 export async function listIntents(): Promise<FirewallIntent[]> {

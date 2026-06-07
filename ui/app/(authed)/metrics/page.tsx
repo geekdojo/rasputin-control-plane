@@ -35,6 +35,7 @@ import {
 } from '../../../components/kit';
 import { MONO } from '../../../components/ui-theme';
 import { NodeCard } from '../../../components/obs/NodeCard';
+import { NodeDetailDrawer } from '../../../components/obs/NodeDetailDrawer';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
@@ -60,6 +61,7 @@ export default function MetricsPage() {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [range, setRange] = useState<RangeKey>('30m');
   const [seriesByNode, setSeriesByNode] = useState<Record<string, NodeSeries>>({});
+  const [drawerNodeId, setDrawerNodeId] = useState<string | null>(null);
 
   // --- bootstrap: nodes + obs status -----------------------------------
   useEffect(() => {
@@ -231,15 +233,25 @@ export default function MetricsPage() {
                   cpuSeries={s?.cpu ?? null}
                   memSeries={s?.mem ?? null}
                   obsEnabled={Boolean(status?.enabled && status?.healthy)}
-                  // Drawer wires up in Slice 3 — click is intentionally
-                  // a no-op for this commit so the grid lands first.
-                  onClick={() => {}}
+                  onClick={() => setDrawerNodeId(n.id)}
                 />
               );
             })}
           </div>
         )}
       </PageBody>
+      <NodeDetailDrawer
+        node={nodes.find((n) => n.id === drawerNodeId) ?? null}
+        open={drawerNodeId !== null}
+        onClose={() => setDrawerNodeId(null)}
+        range={range}
+        obsEnabled={Boolean(status?.enabled && status?.healthy)}
+        grafanaHref={
+          status?.enabled && status?.grafanaUrl && drawerNodeId
+            ? `${API_BASE}/observability/d/rasputin-cluster-overview?orgId=1&var-nodeId=${encodeURIComponent(drawerNodeId)}`
+            : undefined
+        }
+      />
     </PageShell>
   );
 }
