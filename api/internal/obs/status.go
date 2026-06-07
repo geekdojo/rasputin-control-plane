@@ -16,16 +16,25 @@ import (
 // handler renders that as "obs is off — set RASPUTIN_OBS_ENABLED=1 to
 // turn it on."
 type Status struct {
-	sup  Supervisor
-	sink *VMSink
-	logs *LogsClient
+	sup    Supervisor
+	sink   *VMSink
+	logs   *LogsClient
+	series *SeriesClient
 }
 
 // NewStatus bundles a Supervisor + VMSink + (optional) LogsClient for
 // the handler. Supervisor + VMSink are required for Enabled=true;
 // LogsClient is optional (Loki may be disabled — Snapshot reports it).
+// SeriesClient is built lazily off the same Supervisor when sup+sink
+// are present — handlers ask for it via Series().
 func NewStatus(sup Supervisor, sink *VMSink, logs *LogsClient) *Status {
-	return &Status{sup: sup, sink: sink, logs: logs}
+	st := &Status{sup: sup, sink: sink, logs: logs}
+	if sup != nil && sink != nil {
+		if c, err := NewSeriesClient(SeriesClientConfig{Supervisor: sup}); err == nil {
+			st.series = c
+		}
+	}
+	return st
 }
 
 // Logs returns the obs LogsClient, or nil when obs is off OR Loki is
@@ -35,6 +44,15 @@ func (s *Status) Logs() *LogsClient {
 		return nil
 	}
 	return s.logs
+}
+
+// Series returns the SeriesClient for chart-shaped PromQL queries, or
+// nil when obs is off. Callers must guard for nil.
+func (s *Status) Series() *SeriesClient {
+	if s == nil {
+		return nil
+	}
+	return s.series
 }
 
 // GrafanaEnabled reports whether the proxy at /observability/* has a

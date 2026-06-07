@@ -420,3 +420,26 @@ export interface ObsStatus {
   // the iframe src; the api's reverse proxy handles auth.
   grafanaUrl?: string;
 }
+
+// ObsSeriesMetric — keys accepted by GET /api/obs/series ?metric=. The
+// server maps each to a PromQL expression; the UI never has to think
+// about the underlying metric names. Keep in sync with the SeriesKey
+// constants in api/internal/obs/series.go.
+export type ObsSeriesMetric = 'cpu' | 'mem' | 'mem_bytes' | 'disk' | 'load1';
+
+export interface ObsSeriesPoint {
+  ts: string; // RFC3339; Date.parse() friendly
+  value: number;
+}
+
+// ObsSeries is what GET /api/obs/series returns — a single chart-shaped
+// {nodeId, metric, points[]} bundle. The shim sizes step automatically
+// for the requested range so points.length is ~120 regardless of window.
+export interface ObsSeries {
+  nodeId: string;
+  metric: ObsSeriesMetric;
+  unit: 'percent' | 'bytes' | 'load';
+  range: string; // Go duration, echoed back
+  step: string;
+  points: ObsSeriesPoint[];
+}

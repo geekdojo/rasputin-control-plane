@@ -21,6 +21,8 @@ import type {
   MetricSeries,
   Node,
   NodeUpdate,
+  ObsSeries,
+  ObsSeriesMetric,
   ObsStatus,
   PortForwardSpec,
   SetupState,
@@ -159,6 +161,24 @@ export function openAlertsWS(onChange: (raw: unknown) => void): () => void {
 // "enable observability" CTA on /metrics rather than 404-style errors.
 export async function getObsStatus(): Promise<ObsStatus> {
   return jsonFetch<ObsStatus>('/api/obs/status');
+}
+
+// getObsSeries fetches a chart-shaped {ts, value}[] for one node + one
+// metric over a Go-duration range. The api caps range at 24h and sizes
+// step automatically so a "30m" and a "24h" call both return ~120
+// points — the UI doesn't have to think about resolution. Returns an
+// empty points array when no samples landed yet (cold start).
+export function getObsSeries(
+  nodeId: string,
+  metric: ObsSeriesMetric,
+  range: string = '30m',
+): Promise<ObsSeries> {
+  const params = new URLSearchParams({
+    node: nodeId,
+    metric,
+    range,
+  });
+  return jsonFetch<ObsSeries>(`/api/obs/series?${params}`);
 }
 
 // ----- Firewall -----------------------------------------------------------
