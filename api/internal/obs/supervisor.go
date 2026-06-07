@@ -582,6 +582,11 @@ serve_from_sub_path = true
 [security]
 admin_user = admin
 admin_password = rasputin-admin
+# allow_embedding lets the UI's <iframe src="/observability/..."> render
+# the dashboards. Default is X-Frame-Options=DENY which kills the embed.
+# The auth-proxy is what makes this safe — only session-authenticated
+# requests ever reach Grafana, regardless of which origin's frame.
+allow_embedding = true
 
 [users]
 allow_sign_up = false

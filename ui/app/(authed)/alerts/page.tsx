@@ -34,6 +34,9 @@ const SOURCE_ICON: Record<AlertSource, ElementType> = {
   job: Layers,
   app: Box,
   setup: Wrench,
+  // 'rule' = vmalert-fired (Slice 1.5). Bell distinguishes it from
+  // aggregator-derived sources.
+  rule: Bell,
 };
 
 function timeAgo(iso: string): string {

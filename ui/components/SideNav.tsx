@@ -29,7 +29,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { icon: LayoutGrid, label: 'Nodes', href: '/' },
   { icon: LayoutDashboard, label: 'Apps', href: '/apps' },
-  { icon: BarChart2, label: 'Metrics' },
+  { icon: BarChart2, label: 'Metrics', href: '/metrics' },
   { icon: Database, label: 'Storage' },
   { icon: ShieldAlert, label: 'Firewall', href: '/firewall' },
   { icon: GitBranch, label: 'Mesh', href: '/mesh' },

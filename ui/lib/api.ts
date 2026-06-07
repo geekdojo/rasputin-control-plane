@@ -21,6 +21,7 @@ import type {
   MetricSeries,
   Node,
   NodeUpdate,
+  ObsStatus,
   PortForwardSpec,
   SetupState,
   SystemUpdateChangeEvent,
@@ -101,13 +102,39 @@ export function openInventoryWS(
 
 // ----- Alerts -------------------------------------------------------------
 
-// listAlerts returns the current snapshot of active alerts. v0 has no
-// live-push WS — callers poll on a backstop interval and re-fetch on
-// inventory / job WS events (those are the upstream sources today). When
-// the future rules-engine + /ws/alerts lands the wire shape stays the
-// same; only the live-update path changes.
+// listAlerts returns the current snapshot of active alerts. The Slice
+// 1.5 work added a live /ws/alerts push topic that lands AlertChangeEvt
+// records; the alerts page can subscribe via openAlertsWS when it wants
+// faster-than-poll updates. Aggregator-derived alerts (node/job/app/
+// setup) still piggyback on inventory + job WS like before.
 export async function listAlerts(): Promise<Alert[]> {
   return (await jsonFetch<Alert[] | null>('/api/alerts')) ?? [];
+}
+
+// ackAlert / dismissAlert are valid only for source=rule entries
+// (Slice 1.5 persisted alerts). Aggregator-derived entries don't carry
+// ack state — their lifecycle is computed-on-read.
+export function ackAlert(id: string): Promise<Alert> {
+  return jsonFetch<Alert>(`/api/alerts/${encodeURIComponent(id)}/ack`, { method: 'POST' });
+}
+export function dismissAlert(id: string): Promise<Alert> {
+  return jsonFetch<Alert>(`/api/alerts/${encodeURIComponent(id)}/dismiss`, { method: 'POST' });
+}
+
+// openAlertsWS subscribes to AlertChangeEvt push notifications.
+// Returns a close fn (matches openJobsWS / openInventoryWS shape).
+export function openAlertsWS(onChange: (raw: unknown) => void): () => void {
+  return openWS<unknown>('/ws/alerts', onChange);
+}
+
+// ----- Observability ------------------------------------------------------
+
+// getObsStatus returns the current obs-stack snapshot. The handler
+// always 200s — `enabled: false` means RASPUTIN_OBS_ENABLED wasn't set
+// at startup, NOT that the call failed. The UI uses this to render an
+// "enable observability" CTA on /metrics rather than 404-style errors.
+export async function getObsStatus(): Promise<ObsStatus> {
+  return jsonFetch<ObsStatus>('/api/obs/status');
 }
 
 // ----- Firewall -----------------------------------------------------------

@@ -383,7 +383,10 @@ export interface SetupState {
 // level signals live in their own affordances. Drill-through uses
 // (relatedKind, relatedId).
 export type AlertSeverity = 'warn' | 'crit';
-export type AlertSource = 'node' | 'job' | 'app' | 'setup';
+// 'rule' is the source for Slice 1.5 persisted alerts that arrive from
+// vmalert. The aggregator-derived sources (node/job/app/setup) carry
+// their lifecycle in code; rule alerts can be acked/dismissed.
+export type AlertSource = 'node' | 'job' | 'app' | 'setup' | 'rule';
 export type AlertRelatedKind = 'node' | 'job' | 'app';
 
 export interface Alert {
@@ -395,4 +398,24 @@ export interface Alert {
   since: string;
   relatedKind?: AlertRelatedKind;
   relatedId?: string;
+  // Slice 1.5 — only meaningful for source=rule.
+  acked?: boolean;
+  ackedAt?: string;
+}
+
+// ObsStatus mirrors api/internal/obs/status.go's Snapshot. Returned by
+// GET /api/obs/status. enabled=false means the obs stack is off
+// (RASPUTIN_OBS_ENABLED not set) and the UI should render an "enable
+// observability" CTA instead of dashboards.
+export interface ObsStatus {
+  enabled: boolean;
+  healthy: boolean;
+  vmBaseUrl?: string;
+  lastWriteOk?: string;
+  lastError?: string;
+  lokiBaseUrl?: string;
+  // grafanaUrl is the api-relative path to the embedded Grafana — set
+  // to "/observability/" when the proxy is active. The UI uses this as
+  // the iframe src; the api's reverse proxy handles auth.
+  grafanaUrl?: string;
 }
