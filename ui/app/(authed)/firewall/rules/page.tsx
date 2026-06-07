@@ -1,7 +1,7 @@
 'use client';
 
 import { Trash2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createIntent, deleteIntent, listIntents } from '../../../../lib/api';
 import type {
   FirewallIntent,
@@ -106,10 +106,17 @@ export default function RulesPage() {
   const [preset, setPreset] = useState<{ value: RulePreset; needs?: RuleTemplate['needs'] } | null>(
     null,
   );
+  const formRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     refresh();
   }, []);
+
+  // When a template is picked, jump the form back into view — templates sit
+  // below the form so the eye doesn't have to track back manually.
+  useEffect(() => {
+    if (preset) formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [preset]);
 
   function refresh() {
     listIntents().then(setIntents).catch((e) => setErr(String(e)));
@@ -189,25 +196,33 @@ export default function RulesPage() {
         </table>
       )}
 
-      <SectionLabel>TEMPLATES</SectionLabel>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 20 }}>
-        {TEMPLATES.map((t) => (
-          <TemplateCard
-            key={t.id}
-            template={t}
-            onPick={() => setPreset({ value: { ...t.preset }, needs: t.needs })}
-          />
-        ))}
+      <div ref={formRef} style={{ scrollMarginTop: 16 }}>
+        <SectionLabel>ADD RULE</SectionLabel>
+        <AddRuleForm
+          preset={preset}
+          onCreated={(i) => {
+            setIntents((p) => [...p, i]);
+            setPreset(null);
+          }}
+        />
       </div>
 
-      <SectionLabel>ADD RULE</SectionLabel>
-      <AddRuleForm
-        preset={preset}
-        onCreated={(i) => {
-          setIntents((p) => [...p, i]);
-          setPreset(null);
-        }}
-      />
+      <div style={{ marginTop: 28 }}>
+        <SectionLabel>TEMPLATES</SectionLabel>
+        <Hint style={{ marginBottom: 12 }}>
+          Quick-fill the form above. Pick one, the form scrolls back into view; type any extra
+          fields (highlighted in orange when a template needs them), then click ADD.
+        </Hint>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+          {TEMPLATES.map((t) => (
+            <TemplateCard
+              key={t.id}
+              template={t}
+              onPick={() => setPreset({ value: { ...t.preset }, needs: t.needs })}
+            />
+          ))}
+        </div>
+      </div>
     </>
   );
 }
@@ -311,6 +326,12 @@ function AddRuleForm({
     setTarget(p.target);
     setLog(p.log ?? false);
     setErr(null);
+    // Focus the field the template wants the user to fill. Wait a frame so
+    // the scroll-into-view in RulesPage gets to start first.
+    if (preset.needs) {
+      const fieldId = 'rule-' + preset.needs;
+      requestAnimationFrame(() => document.getElementById(fieldId)?.focus());
+    }
   }, [preset]);
 
   async function submit(e: React.FormEvent) {
@@ -374,12 +395,14 @@ function AddRuleForm({
           style={{ width: 140 }}
         />
         <Input
+          id="rule-srcIp"
           placeholder="src IP/CIDR (optional)"
           value={srcIp}
           onChange={(e) => setSrcIp(e.target.value)}
           style={highlightStyle('srcIp', preset?.needs, srcIp, { flex: '1 1 180px' })}
         />
         <Input
+          id="rule-srcPort"
           placeholder="src port (optional)"
           value={srcPort}
           onChange={(e) => setSrcPort(e.target.value)}
@@ -396,12 +419,14 @@ function AddRuleForm({
           style={{ width: 220 }}
         />
         <Input
+          id="rule-destIp"
           placeholder="dest IP/CIDR (optional)"
           value={destIp}
           onChange={(e) => setDestIp(e.target.value)}
           style={highlightStyle('destIp', preset?.needs, destIp, { flex: '1 1 180px' })}
         />
         <Input
+          id="rule-destPort"
           placeholder="dest port (optional)"
           value={destPort}
           onChange={(e) => setDestPort(e.target.value)}
