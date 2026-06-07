@@ -302,6 +302,9 @@ export interface MeshStateEnvelope {
   backend: string;
   loginServer: string;
   defaultUser: string;
+  // Backend omits the field when RASPUTIN_HEADPLANE_URL is unset; we treat
+  // its presence as the signal to show the Advanced → Headplane tab content.
+  headplaneUrl?: string;
   state: MeshState;
 }
 

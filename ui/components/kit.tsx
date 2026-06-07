@@ -5,6 +5,9 @@
 // labels, hairline borders, Pantone 172 C accent. Screens stay inline-styled;
 // these keep the common pieces consistent across pages.
 
+import { ExternalLink } from 'lucide-react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import type { CSSProperties, ElementType, ReactNode } from 'react';
 import { useState } from 'react';
 import { ACCENT, accentA, MONO } from './ui-theme';
@@ -52,6 +55,92 @@ export function PageHeader({
 
 export function PageBody({ children, style }: { children: ReactNode; style?: CSSProperties }) {
   return <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', ...style }}>{children}</div>;
+}
+
+// Horizontal tab strip for sub-routed domain navigation (firewall, mesh, etc.).
+// Renders below PageHeader; each tab is a real Next.js route so the URL stays
+// the source of truth (bookmarkable, browser-back works, deep-linkable).
+//
+// Active-state detection picks the LONGEST href that matches the current
+// pathname — so when the overview is at `/firewall` and a sibling at
+// `/firewall/port-forwards`, only the more-specific one lights up.
+export type PageTab = { label: string; href: string; external?: boolean };
+
+export function PageTabs({ tabs }: { tabs: PageTab[] }) {
+  const pathname = usePathname() ?? '';
+  const activeHref = longestMatch(pathname, tabs);
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 0,
+        padding: '0 20px',
+        borderBottom: `1px solid ${HAIR}`,
+        flexShrink: 0,
+      }}
+    >
+      {tabs.map((t) => (
+        <Tab key={t.href} tab={t} active={t.href === activeHref} />
+      ))}
+    </div>
+  );
+}
+
+function Tab({ tab, active }: { tab: PageTab; active: boolean }) {
+  const [hover, setHover] = useState(false);
+  const color = active ? ACCENT : tab.external ? DIM : '#a4b3cc';
+  const base: CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '10px 14px',
+    color,
+    fontSize: 10,
+    fontFamily: MONO,
+    letterSpacing: '0.1em',
+    background: hover && !active ? 'rgba(228,230,234,0.06)' : active ? accentA(0.06) : 'transparent',
+    borderBottom: active ? `2px solid ${ACCENT}` : '2px solid transparent',
+    textDecoration: 'none',
+    cursor: 'pointer',
+    transition: 'background 0.15s, color 0.15s',
+  };
+  if (tab.external) {
+    return (
+      <a
+        href={tab.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={base}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+      >
+        {tab.label}
+        <ExternalLink size={10} />
+      </a>
+    );
+  }
+  return (
+    <Link
+      href={tab.href}
+      style={base}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      {tab.label}
+    </Link>
+  );
+}
+
+function longestMatch(pathname: string, tabs: PageTab[]): string | null {
+  let best: { href: string; len: number } | null = null;
+  for (const t of tabs) {
+    if (t.external) continue;
+    const matches = pathname === t.href || pathname.startsWith(t.href + '/');
+    if (matches && (!best || t.href.length > best.len)) {
+      best = { href: t.href, len: t.href.length };
+    }
+  }
+  return best?.href ?? null;
 }
 
 export function SectionLabel({ children, style }: { children: ReactNode; style?: CSSProperties }) {
