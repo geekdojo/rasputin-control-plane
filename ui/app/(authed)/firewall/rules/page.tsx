@@ -13,19 +13,99 @@ import {
   Btn,
   DIM,
   FG,
+  HAIR,
   Hint,
   Input,
+  PANEL,
   Select,
   SectionLabel,
   Tok,
   tdStyle,
   thStyle,
 } from '../../../../components/kit';
-import { ACCENT, MONO } from '../../../../components/ui-theme';
+import { ACCENT, accentA, MONO } from '../../../../components/ui-theme';
+
+// Templates pre-fill the add-rule form for the most-common patterns r/homelab
+// asks about. Picking a template snapshots the entire form; the user then
+// fills in the field listed in `needs` (when relevant), tweaks anything, and
+// clicks ADD. Each template is intentionally self-contained — no hidden
+// assumption that a complementary rule already exists.
+type RulePreset = Partial<Omit<FirewallRuleSpec, 'target' | 'src'>> & {
+  src: string;
+  target: FirewallRuleTarget;
+  name: string;
+  log?: boolean;
+};
+
+type RuleTemplate = {
+  id: string;
+  title: string;
+  description: string;
+  preset: RulePreset;
+  needs?: 'srcIp' | 'destIp' | 'destPort' | 'srcPort';
+};
+
+const TEMPLATES: RuleTemplate[] = [
+  {
+    id: 'block-internet',
+    title: 'Block device from internet',
+    description: 'Stop a specific LAN host (Roku, IoT cam, ad-supported smart TV) from reaching the WAN.',
+    preset: {
+      name: 'block-internet',
+      src: 'lan',
+      dest: 'wan',
+      target: 'reject',
+      proto: 'any',
+    },
+    needs: 'srcIp',
+  },
+  {
+    id: 'tailnet-only',
+    title: 'Open port from tailnet only',
+    description: 'A service reachable over the tailnet but invisible from the LAN.',
+    preset: {
+      name: 'tailnet-only',
+      src: 'ts',
+      dest: '',
+      target: 'accept',
+      proto: 'tcp',
+    },
+    needs: 'destPort',
+  },
+  {
+    id: 'isolate-iot',
+    title: 'Isolate IoT from LAN',
+    description: "IoT zone can't reach LAN. Internet still works (separate default rule).",
+    preset: {
+      name: 'isolate-iot',
+      src: 'iot',
+      dest: 'lan',
+      target: 'reject',
+      proto: 'any',
+    },
+  },
+  {
+    id: 'allow-ping',
+    title: 'Allow ping to firewall',
+    description: 'ICMP echo to the firewall itself — handy for connectivity checks.',
+    preset: {
+      name: 'allow-ping',
+      src: 'lan',
+      dest: '',
+      target: 'accept',
+      proto: 'icmp',
+    },
+  },
+];
 
 export default function RulesPage() {
   const [intents, setIntents] = useState<FirewallIntent[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  // Each template-click constructs a NEW preset object; AddRuleForm watches
+  // by reference so re-picking the same template still resets fields.
+  const [preset, setPreset] = useState<{ value: RulePreset; needs?: RuleTemplate['needs'] } | null>(
+    null,
+  );
 
   useEffect(() => {
     refresh();
@@ -109,9 +189,69 @@ export default function RulesPage() {
         </table>
       )}
 
+      <SectionLabel>TEMPLATES</SectionLabel>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 20 }}>
+        {TEMPLATES.map((t) => (
+          <TemplateCard
+            key={t.id}
+            template={t}
+            onPick={() => setPreset({ value: { ...t.preset }, needs: t.needs })}
+          />
+        ))}
+      </div>
+
       <SectionLabel>ADD RULE</SectionLabel>
-      <AddRuleForm onCreated={(i) => setIntents((p) => [...p, i])} />
+      <AddRuleForm
+        preset={preset}
+        onCreated={(i) => {
+          setIntents((p) => [...p, i]);
+          setPreset(null);
+        }}
+      />
     </>
+  );
+}
+
+function TemplateCard({ template, onPick }: { template: RuleTemplate; onPick: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'flex-start',
+        gap: 6,
+        padding: '10px 12px',
+        width: 220,
+        textAlign: 'left',
+        background: hover ? accentA(0.08) : PANEL,
+        border: `1px solid ${hover ? accentA(0.45) : HAIR}`,
+        cursor: 'pointer',
+        transition: 'background 0.15s, border-color 0.15s',
+        fontFamily: MONO,
+      }}
+    >
+      <span style={{ color: hover ? ACCENT : FG, fontSize: 11, letterSpacing: '0.04em' }}>
+        {template.title}
+      </span>
+      <span style={{ color: DIM, fontSize: 9, lineHeight: 1.5 }}>{template.description}</span>
+      {template.needs && (
+        <span
+          style={{
+            color: ACCENT,
+            fontSize: 8,
+            letterSpacing: '0.12em',
+            marginTop: 2,
+          }}
+        >
+          NEEDS: {template.needs.toUpperCase()}
+        </span>
+      )}
+    </button>
   );
 }
 
@@ -135,7 +275,13 @@ function targetColor(t: FirewallRuleTarget): string {
   }
 }
 
-function AddRuleForm({ onCreated }: { onCreated: (i: FirewallIntent) => void }) {
+function AddRuleForm({
+  preset,
+  onCreated,
+}: {
+  preset: { value: RulePreset; needs?: RuleTemplate['needs'] } | null;
+  onCreated: (i: FirewallIntent) => void;
+}) {
   const [name, setName] = useState('');
   const [src, setSrc] = useState('lan');
   const [dest, setDest] = useState('');
@@ -148,6 +294,24 @@ function AddRuleForm({ onCreated }: { onCreated: (i: FirewallIntent) => void }) 
   const [log, setLog] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Watch by reference — RulesPage builds a fresh object on each pick, so the
+  // same template clicked twice still resets the form.
+  useEffect(() => {
+    if (!preset) return;
+    const p = preset.value;
+    setName(p.name ?? '');
+    setSrc(p.src);
+    setDest(p.dest ?? '');
+    setSrcIp(p.srcIp ?? '');
+    setSrcPort(p.srcPort ?? '');
+    setDestIp(p.destIp ?? '');
+    setDestPort(p.destPort ?? '');
+    setProtocol((p.proto ?? 'any') as FirewallRuleProto);
+    setTarget(p.target);
+    setLog(p.log ?? false);
+    setErr(null);
+  }, [preset]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -213,13 +377,13 @@ function AddRuleForm({ onCreated }: { onCreated: (i: FirewallIntent) => void }) 
           placeholder="src IP/CIDR (optional)"
           value={srcIp}
           onChange={(e) => setSrcIp(e.target.value)}
-          style={{ flex: '1 1 180px' }}
+          style={highlightStyle('srcIp', preset?.needs, srcIp, { flex: '1 1 180px' })}
         />
         <Input
           placeholder="src port (optional)"
           value={srcPort}
           onChange={(e) => setSrcPort(e.target.value)}
-          style={{ width: 140 }}
+          style={highlightStyle('srcPort', preset?.needs, srcPort, { width: 140 })}
         />
       </div>
 
@@ -235,13 +399,13 @@ function AddRuleForm({ onCreated }: { onCreated: (i: FirewallIntent) => void }) 
           placeholder="dest IP/CIDR (optional)"
           value={destIp}
           onChange={(e) => setDestIp(e.target.value)}
-          style={{ flex: '1 1 180px' }}
+          style={highlightStyle('destIp', preset?.needs, destIp, { flex: '1 1 180px' })}
         />
         <Input
           placeholder="dest port (optional)"
           value={destPort}
           onChange={(e) => setDestPort(e.target.value)}
-          style={{ width: 140 }}
+          style={highlightStyle('destPort', preset?.needs, destPort, { width: 140 })}
         />
       </div>
 
@@ -297,4 +461,19 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
       {children}
     </span>
   );
+}
+
+// highlightStyle accents a field's border while it's the one a freshly-picked
+// template still needs the user to fill in. Once they type anything, the
+// highlight drops — the template's job is done.
+function highlightStyle(
+  field: RuleTemplate['needs'],
+  needs: RuleTemplate['needs'] | undefined,
+  value: string,
+  base: React.CSSProperties,
+): React.CSSProperties {
+  if (needs && needs === field && value === '') {
+    return { ...base, border: `1px solid ${accentA(0.7)}`, boxShadow: `0 0 0 1px ${accentA(0.2)}` };
+  }
+  return base;
 }
