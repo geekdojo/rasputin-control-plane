@@ -39,14 +39,14 @@ export default function FirewallOverview() {
       <SectionLabel>WHAT&apos;S MANAGED</SectionLabel>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 24 }}>
         <CountTile label="PORT FORWARDS" count={counts.port_forward} href="/firewall/port-forwards" />
-        <CountTile label="RULES" count={0} href="/firewall/rules" comingSoon />
+        <CountTile label="RULES" count={counts.firewall_rule} href="/firewall/rules" />
         <CountTile label="WIREGUARD PEERS" count={0} href="/firewall/wireguard" comingSoon />
       </div>
 
       <SectionLabel>NEXT</SectionLabel>
       <Hint>
-        Port forwards are live. Generic firewall rules (zone-based accept/drop) land next, then WireGuard
-        peers once the Headscale mesh has settled. The OpenWrt escape hatch lives in{' '}
+        Port forwards and zone-based rules are live. WireGuard peers land once the Headscale mesh has
+        settled (see F-5). The OpenWrt escape hatch lives in{' '}
         <Link href="/firewall/advanced" style={{ color: ACCENT, textDecoration: 'none' }}>
           ADVANCED
         </Link>
@@ -61,7 +61,7 @@ function countByKind(intents: FirewallIntent[]): Record<string, number> {
   for (const i of intents) {
     out[i.kind] = (out[i.kind] ?? 0) + 1;
   }
-  return { port_forward: 0, ...out };
+  return { port_forward: 0, firewall_rule: 0, ...out };
 }
 
 function CountTile({

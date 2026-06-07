@@ -73,8 +73,24 @@ export interface InventoryChangeEvent {
   ts: string;
 }
 
-export type FirewallIntentKind = 'port_forward';
+export type FirewallIntentKind = 'port_forward' | 'firewall_rule';
 export type PortForwardProto = 'tcp' | 'udp' | 'tcpudp';
+
+export type FirewallRuleProto = 'tcp' | 'udp' | 'tcpudp' | 'icmp' | 'any';
+export type FirewallRuleTarget = 'accept' | 'reject' | 'drop';
+
+export interface FirewallRuleSpec {
+  src: string; // zone, required
+  dest?: string; // zone, "" = INPUT chain (to firewall itself)
+  srcIp?: string;
+  srcPort?: string;
+  destIp?: string;
+  destPort?: string;
+  proto?: FirewallRuleProto;
+  target: FirewallRuleTarget;
+  log?: boolean;
+  comment?: string;
+}
 
 export interface PortForwardSpec {
   wanPort: number;
@@ -89,7 +105,9 @@ export interface FirewallIntent {
   kind: FirewallIntentKind;
   name: string;
   enabled: boolean;
-  spec: PortForwardSpec; // future: union with other spec types
+  // Narrow by `kind` at the use site (see PreAuthKeySpec / SubnetRouteSpec
+  // pattern on MeshIntent).
+  spec: PortForwardSpec | FirewallRuleSpec;
   createdAt: string;
   updatedAt: string;
 }

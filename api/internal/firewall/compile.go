@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -15,9 +16,13 @@ import (
 //
 //	{
 //	  "firewall": {
-//	    "redirect": [ { "name": "...", "src": "wan", ... }, ... ]
+//	    "redirect": [ { "name": "...", "src": "wan", ... }, ... ],
+//	    "rule":     [ { "name": "...", "src": "iot", ... }, ... ]
 //	  }
 //	}
+//
+// Both slices are always present (possibly empty) so the canonical-empty hash
+// is stable regardless of which kinds the user has on file.
 //
 // The returned hash is SHA-256 over json.Marshal(state). Map encoding in Go's
 // encoding/json sorts keys alphabetically, so the hash is deterministic for
@@ -25,6 +30,7 @@ import (
 // deterministic, which is why ListIntents enforces a stable ORDER BY.
 func Compile(intents []*Intent) (map[string]any, string, error) {
 	redirects := make([]map[string]any, 0, len(intents))
+	rules := make([]map[string]any, 0, len(intents))
 
 	for _, in := range intents {
 		if !in.Enabled {
@@ -38,6 +44,12 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 				return nil, "", fmt.Errorf("intent %s (%s): %w", in.ID, in.Name, err)
 			}
 			redirects = append(redirects, r)
+		case proto.IntentFirewallRule:
+			r, err := compileFirewallRule(in)
+			if err != nil {
+				return nil, "", fmt.Errorf("intent %s (%s): %w", in.ID, in.Name, err)
+			}
+			rules = append(rules, r)
 		default:
 			return nil, "", fmt.Errorf("intent %s: unsupported kind %q", in.ID, in.Kind)
 		}
@@ -46,6 +58,7 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 	state := map[string]any{
 		"firewall": map[string]any{
 			"redirect": redirects,
+			"rule":     rules,
 		},
 	}
 	h, err := Hash(state)
@@ -98,6 +111,65 @@ func compilePortForward(in *Intent) (map[string]any, error) {
 func ucProto(p proto.PortForwardProto) string {
 	switch p {
 	case proto.ProtoTCPUDP:
+		return "tcp udp"
+	default:
+		return string(p)
+	}
+}
+
+func compileFirewallRule(in *Intent) (map[string]any, error) {
+	var spec proto.FirewallRuleSpec
+	if err := json.Unmarshal(in.Spec, &spec); err != nil {
+		return nil, fmt.Errorf("invalid firewall_rule spec: %w", err)
+	}
+	if spec.Src == "" {
+		return nil, fmt.Errorf("src zone is required")
+	}
+	switch spec.Target {
+	case proto.RuleTargetAccept, proto.RuleTargetReject, proto.RuleTargetDrop:
+	case "":
+		return nil, fmt.Errorf("target is required")
+	default:
+		return nil, fmt.Errorf("unsupported target %q", spec.Target)
+	}
+
+	r := map[string]any{
+		"name":   in.Name,
+		"src":    spec.Src,
+		"target": strings.ToUpper(string(spec.Target)),
+	}
+	if spec.Dest != "" {
+		r["dest"] = spec.Dest
+	}
+	if spec.SrcIP != "" {
+		r["src_ip"] = spec.SrcIP
+	}
+	if spec.SrcPort != "" {
+		r["src_port"] = spec.SrcPort
+	}
+	if spec.DestIP != "" {
+		r["dest_ip"] = spec.DestIP
+	}
+	if spec.DestPort != "" {
+		r["dest_port"] = spec.DestPort
+	}
+	r["proto"] = ucRuleProto(spec.Proto)
+	if spec.Log {
+		r["log"] = "1"
+	}
+	if spec.Comment != "" {
+		r["_comment"] = spec.Comment
+	}
+	return r, nil
+}
+
+// ucRuleProto picks the UCI proto value. "any" / unset → "all" (UCI's
+// wildcard); "tcpudp" → "tcp udp" (UCI's space-separated form).
+func ucRuleProto(p proto.FirewallRuleProto) string {
+	switch p {
+	case "", proto.RuleProtoAny:
+		return "all"
+	case proto.RuleProtoTCPUDP:
 		return "tcp udp"
 	default:
 		return string(p)

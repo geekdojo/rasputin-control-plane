@@ -89,11 +89,13 @@ func (c *MockClient) Get(ctx context.Context) (map[string]any, string, error) {
 
 // emptyState matches what firewall.Compile produces with no enabled intents,
 // so a fresh agent's hash matches the api's expectation when both have zero
-// intents on file.
+// intents on file. Both kind slices are always present (possibly empty) so
+// adding a new intent kind doesn't churn the empty-state hash.
 func emptyState() map[string]any {
 	return map[string]any{
 		"firewall": map[string]any{
 			"redirect": []map[string]any{},
+			"rule":     []map[string]any{},
 		},
 	}
 }

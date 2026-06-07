@@ -7,7 +7,7 @@ import {
   deleteIntent,
   listIntents,
 } from '../../../../lib/api';
-import type { FirewallIntent, PortForwardProto } from '../../../../lib/types';
+import type { FirewallIntent, PortForwardProto, PortForwardSpec } from '../../../../lib/types';
 import {
   Btn,
   DIM,
@@ -69,26 +69,29 @@ export default function PortForwardsPage() {
             </tr>
           </thead>
           <tbody>
-            {portForwards.map((i) => (
-              <tr key={i.id}>
-                <td style={{ ...tdStyle, color: FG }}>
-                  {i.name}
-                  {!i.enabled && <span style={{ color: DIM, marginLeft: 8, fontSize: 9 }}>(disabled)</span>}
-                </td>
-                <td style={{ ...tdStyle, color: DIM }}>{i.spec.wanPort}</td>
-                <td style={{ ...tdStyle, color: DIM }}>
-                  {i.spec.lanHost}:{i.spec.lanPort}
-                </td>
-                <td style={{ ...tdStyle, color: DIM }}>{i.spec.protocol}</td>
-                <td style={{ ...tdStyle, paddingRight: 0 }}>
-                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                    <Btn variant="danger" small onClick={() => handleDelete(i.id)}>
-                      <Trash2 size={10} /> DELETE
-                    </Btn>
-                  </div>
-                </td>
-              </tr>
-            ))}
+            {portForwards.map((i) => {
+              const spec = i.spec as PortForwardSpec;
+              return (
+                <tr key={i.id}>
+                  <td style={{ ...tdStyle, color: FG }}>
+                    {i.name}
+                    {!i.enabled && <span style={{ color: DIM, marginLeft: 8, fontSize: 9 }}>(disabled)</span>}
+                  </td>
+                  <td style={{ ...tdStyle, color: DIM }}>{spec.wanPort}</td>
+                  <td style={{ ...tdStyle, color: DIM }}>
+                    {spec.lanHost}:{spec.lanPort}
+                  </td>
+                  <td style={{ ...tdStyle, color: DIM }}>{spec.protocol}</td>
+                  <td style={{ ...tdStyle, paddingRight: 0 }}>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <Btn variant="danger" small onClick={() => handleDelete(i.id)}>
+                        <Trash2 size={10} /> DELETE
+                      </Btn>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

@@ -24,6 +24,7 @@ import type {
   ObsSeries,
   ObsSeriesMetric,
   ObsStatus,
+  FirewallRuleSpec,
   PortForwardSpec,
   SetupState,
   SystemUpdateChangeEvent,
@@ -306,12 +307,13 @@ export async function listIntents(): Promise<FirewallIntent[]> {
   return (await jsonFetch<FirewallIntent[] | null>('/api/firewall/intents')) ?? [];
 }
 
-export function createIntent(input: {
-  kind: 'port_forward';
-  name: string;
-  enabled?: boolean;
-  spec: PortForwardSpec;
-}): Promise<FirewallIntent> {
+// Discriminated union so the spec type is checked against `kind` at the call
+// site (TS narrows correctly).
+export type CreateIntentInput =
+  | { kind: 'port_forward'; name: string; enabled?: boolean; spec: PortForwardSpec }
+  | { kind: 'firewall_rule'; name: string; enabled?: boolean; spec: FirewallRuleSpec };
+
+export function createIntent(input: CreateIntentInput): Promise<FirewallIntent> {
   return jsonFetch<FirewallIntent>('/api/firewall/intents', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -321,7 +323,7 @@ export function createIntent(input: {
 
 export function updateIntent(
   id: string,
-  patch: { name?: string; enabled?: boolean; spec?: PortForwardSpec },
+  patch: { name?: string; enabled?: boolean; spec?: PortForwardSpec | FirewallRuleSpec },
 ): Promise<FirewallIntent> {
   return jsonFetch<FirewallIntent>(`/api/firewall/intents/${id}`, {
     method: 'PATCH',

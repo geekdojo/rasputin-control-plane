@@ -420,6 +420,145 @@ func TestCompile_RejectsUnknownKind(t *testing.T) {
 	}
 }
 
+func makeRuleIntent(t *testing.T, id, name string, spec proto.FirewallRuleSpec) *Intent {
+	t.Helper()
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	now := time.Now().UTC()
+	return &Intent{
+		ID: id, Kind: string(proto.IntentFirewallRule), Name: name,
+		Enabled: true, Spec: b, CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+func TestCompile_EmptyStateIncludesBothSlices(t *testing.T) {
+	// Both kind slices appear even when nothing is on file, so the canonical
+	// empty-state shape is stable as new kinds land.
+	state, _, err := Compile(nil)
+	if err != nil {
+		t.Fatalf("Compile(nil): %v", err)
+	}
+	fw, ok := state["firewall"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing firewall key: %v", state)
+	}
+	if _, ok := fw["redirect"]; !ok {
+		t.Error("missing redirect key in empty state")
+	}
+	if _, ok := fw["rule"]; !ok {
+		t.Error("missing rule key in empty state")
+	}
+}
+
+func TestCompile_FirewallRuleShape(t *testing.T) {
+	in := makeRuleIntent(t, "i", "block-iot-out", proto.FirewallRuleSpec{
+		Src: "iot", Dest: "wan",
+		SrcIP: "10.0.7.0/24", DestPort: "443",
+		Proto: proto.RuleProtoTCP, Target: proto.RuleTargetReject,
+		Log: true, Comment: "block IoT",
+	})
+	state, _, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	rules, ok := state["firewall"].(map[string]any)["rule"].([]map[string]any)
+	if !ok || len(rules) != 1 {
+		t.Fatalf("rule slice: %v", state["firewall"].(map[string]any)["rule"])
+	}
+	r := rules[0]
+	// Targets are upper-cased to match UCI's expected form.
+	if r["target"] != "REJECT" {
+		t.Errorf("target should be UPPERCASE REJECT, got %v", r["target"])
+	}
+	if r["src"] != "iot" || r["dest"] != "wan" {
+		t.Errorf("zones: %v %v", r["src"], r["dest"])
+	}
+	if r["src_ip"] != "10.0.7.0/24" || r["dest_port"] != "443" {
+		t.Errorf("ip/port: %v %v", r["src_ip"], r["dest_port"])
+	}
+	if r["proto"] != "tcp" {
+		t.Errorf("proto: %v", r["proto"])
+	}
+	if r["log"] != "1" {
+		t.Errorf("log: %v", r["log"])
+	}
+	if r["_comment"] != "block IoT" {
+		t.Errorf("comment: %v", r["_comment"])
+	}
+	// Unset optionals must not appear — keeps the canonical map small + the
+	// hash invariant against api changes that introduce new optional fields.
+	for _, k := range []string{"src_port", "dest_ip"} {
+		if _, ok := r[k]; ok {
+			t.Errorf("unset field %q should be omitted, got %v", k, r[k])
+		}
+	}
+}
+
+func TestCompile_FirewallRuleProtoDefaultIsAll(t *testing.T) {
+	in := makeRuleIntent(t, "i", "n", proto.FirewallRuleSpec{
+		Src: "lan", Target: proto.RuleTargetAccept,
+		// Proto left empty
+	})
+	state, _, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	r := state["firewall"].(map[string]any)["rule"].([]map[string]any)[0]
+	if r["proto"] != "all" {
+		t.Errorf("default proto should be 'all' (UCI wildcard), got %v", r["proto"])
+	}
+}
+
+func TestCompile_FirewallRuleProtoTCPUDPExpands(t *testing.T) {
+	in := makeRuleIntent(t, "i", "n", proto.FirewallRuleSpec{
+		Src: "lan", Target: proto.RuleTargetAccept, Proto: proto.RuleProtoTCPUDP,
+	})
+	state, _, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	r := state["firewall"].(map[string]any)["rule"].([]map[string]any)[0]
+	if r["proto"] != "tcp udp" {
+		t.Errorf("tcpudp should expand to 'tcp udp', got %v", r["proto"])
+	}
+}
+
+func TestCompile_FirewallRuleEmptyDestIsInputChain(t *testing.T) {
+	// An empty Dest is OpenWrt's idiom for "traffic terminating at the
+	// firewall itself" (the INPUT chain). Stays out of the map so UCI's
+	// default behavior takes over.
+	in := makeRuleIntent(t, "i", "ssh-to-router", proto.FirewallRuleSpec{
+		Src: "lan", Target: proto.RuleTargetAccept,
+		DestPort: "22", Proto: proto.RuleProtoTCP,
+	})
+	state, _, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	r := state["firewall"].(map[string]any)["rule"].([]map[string]any)[0]
+	if _, ok := r["dest"]; ok {
+		t.Errorf("empty Dest should be omitted, got %v", r["dest"])
+	}
+}
+
+func TestCompile_FirewallRuleRejectsBadSpec(t *testing.T) {
+	cases := map[string]proto.FirewallRuleSpec{
+		"missing-src":    {Target: proto.RuleTargetAccept},
+		"missing-target": {Src: "lan"},
+		"bad-target":     {Src: "lan", Target: "yeet"},
+	}
+	for name, spec := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := makeRuleIntent(t, "i", "n", spec)
+			if _, _, err := Compile([]*Intent{in}); err == nil {
+				t.Errorf("want error for %s", name)
+			}
+		})
+	}
+}
+
 // ============================================================================
 // Hash determinism — sanity that equivalent maps hash identically.
 // ============================================================================

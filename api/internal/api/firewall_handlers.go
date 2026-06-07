@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
@@ -197,8 +200,87 @@ func validateIntentSpec(kind string, raw json.RawMessage) error {
 			return errors.New("protocol must be tcp, udp, or tcpudp")
 		}
 		return nil
+	case proto.IntentFirewallRule:
+		var spec proto.FirewallRuleSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			return errors.New("invalid firewall_rule spec: " + err.Error())
+		}
+		if spec.Src == "" {
+			return errors.New("src zone is required")
+		}
+		switch spec.Target {
+		case proto.RuleTargetAccept, proto.RuleTargetReject, proto.RuleTargetDrop:
+		case "":
+			return errors.New("target is required")
+		default:
+			return errors.New("target must be accept, reject, or drop")
+		}
+		switch spec.Proto {
+		case "", proto.RuleProtoAny, proto.RuleProtoTCP, proto.RuleProtoUDP, proto.RuleProtoTCPUDP, proto.RuleProtoICMP:
+		default:
+			return errors.New("proto must be any, tcp, udp, tcpudp, or icmp")
+		}
+		if err := validateIPOrCIDR("srcIp", spec.SrcIP); err != nil {
+			return err
+		}
+		if err := validateIPOrCIDR("destIp", spec.DestIP); err != nil {
+			return err
+		}
+		if err := validatePortOrRange("srcPort", spec.SrcPort); err != nil {
+			return err
+		}
+		if err := validatePortOrRange("destPort", spec.DestPort); err != nil {
+			return err
+		}
+		return nil
 	}
 	return errors.New("unsupported intent kind")
+}
+
+// validateIPOrCIDR accepts either a bare address ("10.0.0.5") or a prefix
+// ("10.0.0.0/24"). Empty input is a no-op (the field is optional).
+func validateIPOrCIDR(field, v string) error {
+	if v == "" {
+		return nil
+	}
+	if _, err := netip.ParsePrefix(v); err == nil {
+		return nil
+	}
+	if _, err := netip.ParseAddr(v); err == nil {
+		return nil
+	}
+	return errors.New(field + " must be a valid IP or CIDR")
+}
+
+// validatePortOrRange accepts either a single port ("443") or an inclusive
+// range ("8000-8100"). Empty input is a no-op.
+func validatePortOrRange(field, v string) error {
+	if v == "" {
+		return nil
+	}
+	parse := func(s string) (int, error) {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > 65535 {
+			return 0, errors.New(field + " must be 1-65535")
+		}
+		return n, nil
+	}
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		lo, err := parse(v[:i])
+		if err != nil {
+			return err
+		}
+		hi, err := parse(v[i+1:])
+		if err != nil {
+			return err
+		}
+		if hi < lo {
+			return errors.New(field + " range must have low ≤ high")
+		}
+		return nil
+	}
+	_, err := parse(v)
+	return err
 }
 
 // errNoRowsSentinel keeps the api package free of a direct database/sql

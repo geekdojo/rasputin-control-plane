@@ -776,6 +776,47 @@ func TestValidateIntentSpec(t *testing.T) {
 	}
 }
 
+func TestValidateIntentSpec_FirewallRule(t *testing.T) {
+	// Minimum valid: just src + target.
+	if err := validateIntentSpec("firewall_rule", []byte(`{"src":"lan","target":"accept"}`)); err != nil {
+		t.Errorf("minimal valid rule: %v", err)
+	}
+	// Full valid: every optional field exercised.
+	full := []byte(`{
+		"src":"iot","dest":"wan","srcIp":"10.0.7.0/24","destPort":"443",
+		"proto":"tcp","target":"reject","log":true,"comment":"block IoT egress"
+	}`)
+	if err := validateIntentSpec("firewall_rule", full); err != nil {
+		t.Errorf("full valid rule: %v", err)
+	}
+	// Range port and ICMP.
+	if err := validateIntentSpec("firewall_rule", []byte(`{"src":"wan","target":"drop","destPort":"8000-8100"}`)); err != nil {
+		t.Errorf("port-range rule: %v", err)
+	}
+	if err := validateIntentSpec("firewall_rule", []byte(`{"src":"lan","target":"accept","proto":"icmp"}`)); err != nil {
+		t.Errorf("icmp rule: %v", err)
+	}
+
+	bad := map[string][]byte{
+		"not-json":      []byte(`{not json`),
+		"missing-src":   []byte(`{"target":"accept"}`),
+		"missing-tgt":   []byte(`{"src":"lan"}`),
+		"bad-target":    []byte(`{"src":"lan","target":"yeet"}`),
+		"bad-proto":     []byte(`{"src":"lan","target":"accept","proto":"sctp"}`),
+		"bad-srcip":     []byte(`{"src":"lan","target":"accept","srcIp":"not-an-ip"}`),
+		"bad-destip":    []byte(`{"src":"lan","target":"accept","destIp":"10.0.0.0/99"}`),
+		"port-zero":     []byte(`{"src":"lan","target":"accept","destPort":"0"}`),
+		"port-overflow": []byte(`{"src":"lan","target":"accept","destPort":"99999"}`),
+		"range-inverted": []byte(`{"src":"lan","target":"accept","destPort":"9000-8000"}`),
+		"range-bad-hi":  []byte(`{"src":"lan","target":"accept","destPort":"100-abc"}`),
+	}
+	for name, raw := range bad {
+		if err := validateIntentSpec("firewall_rule", raw); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
 // ============================================================================
 // Metrics handler
 // ============================================================================

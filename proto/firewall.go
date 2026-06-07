@@ -6,19 +6,18 @@ import (
 )
 
 // FirewallIntentKind enumerates the supported firewall intent types.
-// Only port_forward is implemented in v0; the others are reserved.
 type FirewallIntentKind string
 
 const (
-	IntentPortForward FirewallIntentKind = "port_forward"
+	IntentPortForward  FirewallIntentKind = "port_forward"
+	IntentFirewallRule FirewallIntentKind = "firewall_rule"
 	// Reserved for future:
-	// IntentWGPeer        FirewallIntentKind = "wg_peer"
-	// IntentVLAN          FirewallIntentKind = "vlan"
-	// IntentFirewallRule  FirewallIntentKind = "firewall_rule"
+	// IntentWGPeer FirewallIntentKind = "wg_peer"
+	// IntentVLAN   FirewallIntentKind = "vlan"
 )
 
 // AllFirewallIntentKinds lists supported intent kinds for validation.
-var AllFirewallIntentKinds = []FirewallIntentKind{IntentPortForward}
+var AllFirewallIntentKinds = []FirewallIntentKind{IntentPortForward, IntentFirewallRule}
 
 // ValidFirewallIntentKind reports whether k is one of the supported kinds.
 func ValidFirewallIntentKind(k FirewallIntentKind) bool {
@@ -46,6 +45,50 @@ type PortForwardSpec struct {
 	LanPort  int              `json:"lanPort"`
 	Protocol PortForwardProto `json:"protocol"`
 	Comment  string           `json:"comment,omitempty"`
+}
+
+// FirewallRuleProto enumerates supported protocols for a firewall rule. "any"
+// matches everything (compiled to UCI "all"); "tcpudp" is expanded into the
+// UCI form "tcp udp" at compile time.
+type FirewallRuleProto string
+
+const (
+	RuleProtoTCP    FirewallRuleProto = "tcp"
+	RuleProtoUDP    FirewallRuleProto = "udp"
+	RuleProtoTCPUDP FirewallRuleProto = "tcpudp"
+	RuleProtoICMP   FirewallRuleProto = "icmp"
+	RuleProtoAny    FirewallRuleProto = "any"
+)
+
+// FirewallRuleTarget enumerates supported actions for a firewall rule.
+type FirewallRuleTarget string
+
+const (
+	RuleTargetAccept FirewallRuleTarget = "accept"
+	RuleTargetReject FirewallRuleTarget = "reject"
+	RuleTargetDrop   FirewallRuleTarget = "drop"
+)
+
+// FirewallRuleSpec describes a generic zone-based accept/drop rule.
+//
+// Src is a zone name (e.g. "wan", "lan", "iot") and is required. Dest names
+// the destination zone; an empty Dest compiles to OpenWrt's INPUT chain
+// (traffic terminating at the firewall itself).
+//
+// SrcIP / DestIP accept either a single IP ("10.0.0.5") or a CIDR
+// ("10.0.0.0/24"). SrcPort / DestPort accept a single port ("443") or a
+// range ("8000-8100"). All four are optional; an unset field is "any".
+type FirewallRuleSpec struct {
+	Src      string             `json:"src"`
+	Dest     string             `json:"dest,omitempty"`
+	SrcIP    string             `json:"srcIp,omitempty"`
+	SrcPort  string             `json:"srcPort,omitempty"`
+	DestIP   string             `json:"destIp,omitempty"`
+	DestPort string             `json:"destPort,omitempty"`
+	Proto    FirewallRuleProto  `json:"proto,omitempty"`
+	Target   FirewallRuleTarget `json:"target"`
+	Log      bool               `json:"log,omitempty"`
+	Comment  string             `json:"comment,omitempty"`
 }
 
 // FirewallApplyCmd is the request body the api sends on
