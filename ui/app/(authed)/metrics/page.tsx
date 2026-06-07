@@ -55,6 +55,19 @@ type RangeKey = (typeof RANGES)[number]['value'];
 // from inventory WS events don't blow away the sparklines.
 type NodeSeries = { cpu: ObsSeries | null; mem: ObsSeries | null };
 
+// Role display priority for the cards grid. Firewall first because
+// it's the network ingress/egress — operators glance there first when
+// something feels off. Controlplane next (the brain). Compute and
+// storage are interchangeable from the operator's perspective and
+// fall through to alphabetic. `default` covers future roles cleanly.
+const ROLE_PRIORITY: Record<string, number> = {
+  firewall: 0,
+  controlplane: 1,
+  compute: 2,
+  storage: 3,
+  default: 99,
+};
+
 export default function MetricsPage() {
   const [status, setStatus] = useState<ObsStatus | null>(null);
   const [statusErr, setStatusErr] = useState<string | null>(null);
@@ -118,6 +131,21 @@ export default function MetricsPage() {
     }, 30_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // --- card ordering: deterministic, role-prioritized so the grid
+  // doesn't shuffle as the inventory WS fires. Firewall first (it's
+  // the network entry/exit — operators look there first when
+  // something goes wrong); then controlplane; then compute / storage
+  // / anything else alphabetically by id. Same id used in the card's
+  // primary label, so the visual order matches the sort key. -----------
+  const sortedNodes = useMemo(() => {
+    return [...nodes].sort((a, b) => {
+      const pa = ROLE_PRIORITY[a.role] ?? ROLE_PRIORITY.default;
+      const pb = ROLE_PRIORITY[b.role] ?? ROLE_PRIORITY.default;
+      if (pa !== pb) return pa - pb;
+      return a.id.localeCompare(b.id);
+    });
+  }, [nodes]);
 
   // --- series fetching: refetch on (range change | node set change |
   // obs enabled). We don't poll on a timer — VM samples at 10s and the
@@ -215,7 +243,7 @@ export default function MetricsPage() {
           </div>
         )}
 
-        {nodes.length > 0 && (
+        {sortedNodes.length > 0 && (
           <div
             style={{
               marginTop: 20,
@@ -224,7 +252,7 @@ export default function MetricsPage() {
               gap: 12,
             }}
           >
-            {nodes.map((n) => {
+            {sortedNodes.map((n) => {
               const s = seriesByNode[n.id];
               return (
                 <NodeCard
