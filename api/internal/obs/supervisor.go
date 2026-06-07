@@ -156,9 +156,12 @@ type DockerComposeSupervisorConfig struct {
 	GrafanaImage string
 
 	// GrafanaListenAddr is the host bind for Grafana's HTTP listener.
-	// Defaults to "127.0.0.1:3000"; container listens on 3000. Loopback
-	// only because the auth-proxy is what makes Grafana safe to expose
-	// — direct access bypasses Rasputin's session auth.
+	// Defaults to "127.0.0.1:13000"; container listens on 3000
+	// internally regardless of the host bind (see renderCompose's
+	// fixed in-container ports). Loopback only because the auth-proxy
+	// is what makes Grafana safe to expose — direct access bypasses
+	// Rasputin's session auth. The host port avoids 3000 deliberately
+	// because every JS dev server defaults to it.
 	GrafanaListenAddr string
 
 	// EnableGrafana toggles the Grafana service. Default true. Off
@@ -209,16 +212,22 @@ type DockerComposeSupervisorConfig struct {
 }
 
 const (
-	defaultProjectName       = "rasputin-obs"
-	defaultVMImage           = "victoriametrics/victoria-metrics:v1.103.0"
-	defaultVMListenAddr      = "127.0.0.1:8428"
-	defaultVMRetention       = "1y"
-	defaultAlloyImage        = "grafana/alloy:v1.4.2"
-	defaultAlloyListenAddr   = "127.0.0.1:12345"
-	defaultLokiImage         = "grafana/loki:3.4.1"
-	defaultLokiListenAddr    = "127.0.0.1:3100"
-	defaultGrafanaImage      = "grafana/grafana:11.5.1"
-	defaultGrafanaListenAddr = "127.0.0.1:3000"
+	defaultProjectName     = "rasputin-obs"
+	defaultVMImage         = "victoriametrics/victoria-metrics:v1.103.0"
+	defaultVMListenAddr    = "127.0.0.1:8428"
+	defaultVMRetention     = "1y"
+	defaultAlloyImage      = "grafana/alloy:v1.4.2"
+	defaultAlloyListenAddr = "127.0.0.1:12345"
+	defaultLokiImage       = "grafana/loki:3.4.1"
+	defaultLokiListenAddr  = "127.0.0.1:3100"
+	defaultGrafanaImage    = "grafana/grafana:11.5.1"
+	// 3000 is the most contended port on a dev box — Next.js, CRA,
+	// Vite, every common JS framework defaults to it. Grafana's
+	// own internal port stays 3000 (handled in renderCompose's
+	// fixed container-port map); only the HOST bind moves. 13000 is
+	// outside the registered-port range and well clear of the
+	// stack's other ports (VM 8428, Loki 3100, Alloy 12345).
+	defaultGrafanaListenAddr = "127.0.0.1:13000"
 	defaultVMAlertImage      = "victoriametrics/vmalert:v1.103.0"
 	defaultAlertsWebhookURL  = "http://host.docker.internal:8080/api/alerts/webhook"
 	defaultDockerBin         = "docker"
