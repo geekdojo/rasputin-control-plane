@@ -18,7 +18,13 @@
 
 import type { ObsSeriesPoint } from '../../lib/types';
 import { DIM } from '../kit';
-import { accentA, MONO } from '../ui-theme';
+import { MONO } from '../ui-theme';
+
+// Series color is FG-white (not the accent orange — too close to red
+// for a healthy chart). Accent stays reserved for hover/select/CTA
+// affordances. Mirrors the Sparkline default.
+const SERIES_LINE = 'rgba(228,230,234,0.95)';
+const SERIES_FILL = 'rgba(228,230,234,0.1)';
 
 interface ChartProps {
   title: string;
@@ -102,8 +108,8 @@ export function Chart({ title, unit, points, height = 200, domainMax }: ChartPro
       ))}
 
       {/* Area + line */}
-      <path d={areaPath} fill={accentA(0.13)} stroke="none" />
-      <path d={linePath} fill="none" stroke={accentA(0.95)} strokeWidth={1.4} />
+      <path d={areaPath} fill={SERIES_FILL} stroke="none" />
+      <path d={linePath} fill="none" stroke={SERIES_LINE} strokeWidth={1.4} />
 
       {/* Y tick labels */}
       {yTicks.map((tv, i) => (

@@ -9,8 +9,10 @@
 // `values` is a plain number[]. If empty (cold start, no samples yet)
 // renders a flat baseline so the card layout doesn't jump when data
 // arrives.
-
-import { accentA } from '../ui-theme';
+//
+// Series color is FG-white, NOT the accent orange — close to red, it
+// read as "warning" on a healthy chart. The accent stays reserved for
+// hover/select/CTA affordances (the rest of the design language).
 
 interface SparklineProps {
   values: number[];
@@ -32,8 +34,10 @@ export function Sparkline({
   fill,
   domainMax,
 }: SparklineProps) {
-  const stroke = color ?? accentA(0.9);
-  const fillC = fill ?? accentA(0.18);
+  // FG (#e4e6ea) with alpha — matches kit.tsx's FG token without
+  // re-importing it just to call rgba().
+  const stroke = color ?? 'rgba(228,230,234,0.9)';
+  const fillC = fill ?? 'rgba(228,230,234,0.13)';
 
   if (values.length === 0) {
     return (
