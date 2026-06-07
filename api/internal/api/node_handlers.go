@@ -16,10 +16,10 @@ import (
 // confirmation dialog listing the cascade so the operator knows what
 // they're about to delete.
 type nodeRemovalImpact struct {
-	NodeID            string   `json:"nodeId"`
-	AppIDs            []string `json:"appIds"`
-	MeshDeviceHSID    string   `json:"meshDeviceHsId,omitempty"`
-	HasFirewallState  bool     `json:"hasFirewallState"`
+	NodeID           string   `json:"nodeId"`
+	AppIDs           []string `json:"appIds"`
+	MeshDeviceHSID   string   `json:"meshDeviceHsId,omitempty"`
+	HasFirewallState bool     `json:"hasFirewallState"`
 }
 
 // GET /api/nodes/{id}/removal-impact — preview the cascade for the UI's
