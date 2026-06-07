@@ -57,3 +57,6 @@ ui/next-env.d.ts
 
 # Vercel (legacy from Next.js scaffold)
 .vercel
+
+# Claude Code session worktrees
+.claude/
