@@ -285,7 +285,7 @@ function KeyForm({
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <Input
           id="key-name"
-          placeholder="name (e.g. Bryce's MacBook)"
+          placeholder="name (e.g. Rasputin Terminal)"
           value={name}
           onChange={(e) => setName(e.target.value)}
           required

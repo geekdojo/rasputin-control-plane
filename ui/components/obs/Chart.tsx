@@ -4,7 +4,7 @@
 // tab. Same dep-free approach as Sparkline so the project doesn't pick
 // up a 400 KB charting library for the drawer's four charts. Recharts
 // would be appropriate if we needed tooltips with crosshairs and
-// brushing — those can land in a v2 if Bryce asks.
+// brushing — those can land in a v2 if a user asks.
 //
 // Provides:
 //   - 4-tick Y axis with formatted labels (percent / bytes / load)

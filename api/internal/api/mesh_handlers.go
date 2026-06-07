@@ -210,7 +210,7 @@ func (s *Server) handleListMeshKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/mesh/keys
-// Body: { "name": "Bryce's MacBook", "deviceHint": "MacBook Pro", ... }
+// Body: { "name": "Rasputin Terminal", "deviceHint": "MacBook Pro", ... }
 // Creates a preauth_key intent AND immediately runs mesh.apply so the key
 // is minted on Headscale. Returns the intent with the plaintext key value
 // — this is the only time the value is visible.

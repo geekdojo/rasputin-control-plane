@@ -108,10 +108,10 @@ export default function LoginPage() {
             {!status.hasUsers ? (
               <>
                 <Field label="USER NAME" hint="letters · digits · - _ .">
-                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="bryce" autoFocus disabled={busy} />
+                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="operator" autoFocus disabled={busy} />
                 </Field>
                 <Field label="DISPLAY NAME" hint="optional">
-                  <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Bryce" disabled={busy} />
+                  <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Operator" disabled={busy} />
                 </Field>
                 <Btn variant="primary" disabled={busy || !name} onClick={handleRegister}>
                   {busy ? 'REGISTERING…' : 'REGISTER PASSKEY'}

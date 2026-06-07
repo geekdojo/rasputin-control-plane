@@ -23,7 +23,7 @@ func (s *Server) handleSetupState(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/setup/install-name
-// Body: { "name": "rasputin-bryce" }
+// Body: { "name": "rasputin-home" }
 // Authenticated. Idempotent — operators can rename later from the wizard.
 func (s *Server) handleSetupInstallName(w http.ResponseWriter, r *http.Request) {
 	var req struct {

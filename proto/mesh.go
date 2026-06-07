@@ -38,7 +38,7 @@ type PreAuthKeySpec struct {
 	Ephemeral  bool     `json:"ephemeral"`            // ephemeral nodes auto-expire on disconnect; useful for user devices on transient networks
 	ExpiresIn  string   `json:"expiresIn"`            // duration string like "24h"; default 24h
 	Tags       []string `json:"tags,omitempty"`       // ACL tags assigned at registration; defaults ["tag:user-device"]
-	DeviceHint string   `json:"deviceHint,omitempty"` // human label shown to the user ("Bryce's MacBook")
+	DeviceHint string   `json:"deviceHint,omitempty"` // human label shown to the user ("Rasputin Terminal")
 }
 
 // SubnetRouteSpec describes one route advertisement. NodeID is a Rasputin

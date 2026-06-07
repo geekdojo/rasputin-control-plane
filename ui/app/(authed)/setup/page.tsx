@@ -233,7 +233,7 @@ function InstallNameForm({
   return (
     <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
       <Input
-        placeholder="rasputin-bryce"
+        placeholder="rasputin-home"
         value={name}
         onChange={(e) => setName(e.target.value)}
         disabled={busy === 'install_name'}
