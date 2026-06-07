@@ -1,8 +1,8 @@
 'use client';
 
-import { Trash2 } from 'lucide-react';
+import { Pencil, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { createIntent, deleteIntent, listIntents } from '../../../../lib/api';
+import { createIntent, deleteIntent, listIntents, updateIntent } from '../../../../lib/api';
 import type {
   FirewallIntent,
   FirewallRuleProto,
@@ -12,6 +12,7 @@ import type {
 import {
   Btn,
   DIM,
+  EnabledToggle,
   FG,
   HAIR,
   Hint,
@@ -106,17 +107,20 @@ export default function RulesPage() {
   const [preset, setPreset] = useState<{ value: RulePreset; needs?: RuleTemplate['needs'] } | null>(
     null,
   );
+  // `editing` is mutually exclusive with `preset` — picking a template clears
+  // any in-progress edit, and clicking Edit clears any pending template.
+  const [editing, setEditing] = useState<FirewallIntent | null>(null);
   const formRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     refresh();
   }, []);
 
-  // When a template is picked, jump the form back into view — templates sit
-  // below the form so the eye doesn't have to track back manually.
+  // Both template-pick and edit-start should bring the form back into view —
+  // templates and the rules table both sit far from the form.
   useEffect(() => {
-    if (preset) formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [preset]);
+    if (preset || editing) formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [preset, editing]);
 
   function refresh() {
     listIntents().then(setIntents).catch((e) => setErr(String(e)));
@@ -127,9 +131,25 @@ export default function RulesPage() {
     try {
       await deleteIntent(id);
       setIntents((prev) => prev.filter((p) => p.id !== id));
+      // Cancel any in-progress edit pointing at the now-gone row.
+      if (editing?.id === id) setEditing(null);
     } catch (e) {
       setErr(String(e));
     }
+  }
+
+  async function handleToggle(intent: FirewallIntent) {
+    try {
+      const updated = await updateIntent(intent.id, { enabled: !intent.enabled });
+      setIntents((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  function startEdit(intent: FirewallIntent) {
+    setPreset(null);
+    setEditing(intent);
   }
 
   const rules = intents.filter((i) => i.kind === 'firewall_rule');
@@ -163,27 +183,38 @@ export default function RulesPage() {
           <tbody>
             {rules.map((i) => {
               const spec = i.spec as FirewallRuleSpec;
+              const nameColor = i.enabled ? FG : DIM;
+              const cellColor = i.enabled ? DIM : 'rgba(138, 155, 181, 0.55)';
+              const isEditing = editing?.id === i.id;
               return (
-                <tr key={i.id}>
-                  <td style={{ ...tdStyle, color: FG }}>
-                    {i.name}
-                    {!i.enabled && <span style={{ color: DIM, marginLeft: 8, fontSize: 9 }}>(disabled)</span>}
-                  </td>
-                  <td style={{ ...tdStyle, color: DIM }}>{spec.src}</td>
-                  <td style={{ ...tdStyle, color: DIM }}>{spec.dest || '(input)'}</td>
-                  <td style={{ ...tdStyle, color: DIM }}>{spec.srcIp || '—'}</td>
-                  <td style={{ ...tdStyle, color: DIM }}>{spec.destIp || '—'}</td>
-                  <td style={{ ...tdStyle, color: DIM }}>
-                    {fmtPorts(spec.srcPort, spec.destPort)}
-                  </td>
-                  <td style={{ ...tdStyle, color: DIM }}>{spec.proto || 'any'}</td>
+                <tr
+                  key={i.id}
+                  style={isEditing ? { background: 'rgba(228,230,234,0.04)' } : undefined}
+                >
+                  <td style={{ ...tdStyle, color: nameColor }}>{i.name}</td>
+                  <td style={{ ...tdStyle, color: cellColor }}>{spec.src}</td>
+                  <td style={{ ...tdStyle, color: cellColor }}>{spec.dest || '(input)'}</td>
+                  <td style={{ ...tdStyle, color: cellColor }}>{spec.srcIp || '—'}</td>
+                  <td style={{ ...tdStyle, color: cellColor }}>{spec.destIp || '—'}</td>
+                  <td style={{ ...tdStyle, color: cellColor }}>{fmtPorts(spec.srcPort, spec.destPort)}</td>
+                  <td style={{ ...tdStyle, color: cellColor }}>{spec.proto || 'any'}</td>
                   <td style={tdStyle}>
-                    <span style={{ color: targetColor(spec.target), fontSize: 10, fontFamily: MONO }}>
+                    <span
+                      style={{
+                        color: i.enabled ? targetColor(spec.target) : DIM,
+                        fontSize: 10,
+                        fontFamily: MONO,
+                      }}
+                    >
                       {spec.target.toUpperCase()}
                     </span>
                   </td>
                   <td style={{ ...tdStyle, paddingRight: 0 }}>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                      <EnabledToggle enabled={i.enabled} onToggle={() => handleToggle(i)} />
+                      <Btn small onClick={() => startEdit(i)} title="Edit this rule">
+                        <Pencil size={10} /> EDIT
+                      </Btn>
                       <Btn variant="danger" small onClick={() => handleDelete(i.id)}>
                         <Trash2 size={10} /> DELETE
                       </Btn>
@@ -197,32 +228,42 @@ export default function RulesPage() {
       )}
 
       <div ref={formRef} style={{ scrollMarginTop: 16 }}>
-        <SectionLabel>ADD RULE</SectionLabel>
+        <SectionLabel>
+          {editing ? `EDIT RULE — ${editing.name}` : 'ADD RULE'}
+        </SectionLabel>
         <AddRuleForm
           preset={preset}
+          editing={editing}
           onCreated={(i) => {
             setIntents((p) => [...p, i]);
             setPreset(null);
           }}
+          onUpdated={(i) => {
+            setIntents((prev) => prev.map((p) => (p.id === i.id ? i : p)));
+            setEditing(null);
+          }}
+          onCancelEdit={() => setEditing(null)}
         />
       </div>
 
-      <div style={{ marginTop: 28 }}>
-        <SectionLabel>TEMPLATES</SectionLabel>
-        <Hint style={{ marginBottom: 12 }}>
-          Quick-fill the form above. Pick one, the form scrolls back into view; type any extra
-          fields (highlighted in orange when a template needs them), then click ADD.
-        </Hint>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-          {TEMPLATES.map((t) => (
-            <TemplateCard
-              key={t.id}
-              template={t}
-              onPick={() => setPreset({ value: { ...t.preset }, needs: t.needs })}
-            />
-          ))}
+      {!editing && (
+        <div style={{ marginTop: 28 }}>
+          <SectionLabel>TEMPLATES</SectionLabel>
+          <Hint style={{ marginBottom: 12 }}>
+            Quick-fill the form above. Pick one, the form scrolls back into view; type any extra
+            fields (highlighted in orange when a template needs them), then click ADD.
+          </Hint>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+            {TEMPLATES.map((t) => (
+              <TemplateCard
+                key={t.id}
+                template={t}
+                onPick={() => setPreset({ value: { ...t.preset }, needs: t.needs })}
+              />
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </>
   );
 }
@@ -292,10 +333,16 @@ function targetColor(t: FirewallRuleTarget): string {
 
 function AddRuleForm({
   preset,
+  editing,
   onCreated,
+  onUpdated,
+  onCancelEdit,
 }: {
   preset: { value: RulePreset; needs?: RuleTemplate['needs'] } | null;
+  editing: FirewallIntent | null;
   onCreated: (i: FirewallIntent) => void;
+  onUpdated: (i: FirewallIntent) => void;
+  onCancelEdit: () => void;
 }) {
   const [name, setName] = useState('');
   const [src, setSrc] = useState('lan');
@@ -310,10 +357,45 @@ function AddRuleForm({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Watch by reference — RulesPage builds a fresh object on each pick, so the
-  // same template clicked twice still resets the form.
+  function resetFields() {
+    setName('');
+    setSrc('lan');
+    setDest('');
+    setSrcIp('');
+    setSrcPort('');
+    setDestIp('');
+    setDestPort('');
+    setProtocol('any');
+    setTarget('accept');
+    setLog(false);
+    setErr(null);
+  }
+
+  // Apply an editing rule when one is set. Takes precedence over preset since
+  // edit mode is the explicit, in-progress action.
   useEffect(() => {
-    if (!preset) return;
+    if (!editing) return;
+    const s = editing.spec as FirewallRuleSpec;
+    setName(editing.name);
+    setSrc(s.src);
+    setDest(s.dest ?? '');
+    setSrcIp(s.srcIp ?? '');
+    setSrcPort(s.srcPort ?? '');
+    setDestIp(s.destIp ?? '');
+    setDestPort(s.destPort ?? '');
+    setProtocol((s.proto ?? 'any') as FirewallRuleProto);
+    setTarget(s.target);
+    setLog(s.log ?? false);
+    setErr(null);
+    requestAnimationFrame(() => document.getElementById('rule-name')?.focus());
+  }, [editing]);
+
+  // Watch by reference — RulesPage builds a fresh object on each pick, so the
+  // same template clicked twice still resets the form. Skip when editing —
+  // RulesPage clears `preset` when entering edit mode, but a stale ref could
+  // still fire on a render race.
+  useEffect(() => {
+    if (!preset || editing) return;
     const p = preset.value;
     setName(p.name ?? '');
     setSrc(p.src);
@@ -326,13 +408,11 @@ function AddRuleForm({
     setTarget(p.target);
     setLog(p.log ?? false);
     setErr(null);
-    // Focus the field the template wants the user to fill. Wait a frame so
-    // the scroll-into-view in RulesPage gets to start first.
     if (preset.needs) {
       const fieldId = 'rule-' + preset.needs;
       requestAnimationFrame(() => document.getElementById(fieldId)?.focus());
     }
-  }, [preset]);
+  }, [preset, editing]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -350,22 +430,20 @@ function AddRuleForm({
         ...(protocol !== 'any' && { proto: protocol }),
         ...(log && { log: true }),
       };
-      const created = await createIntent({
-        kind: 'firewall_rule',
-        name,
-        enabled: true,
-        spec,
-      });
-      onCreated(created);
-      setName('');
-      setDest('');
-      setSrcIp('');
-      setSrcPort('');
-      setDestIp('');
-      setDestPort('');
-      setProtocol('any');
-      setTarget('accept');
-      setLog(false);
+      if (editing) {
+        const updated = await updateIntent(editing.id, { name, spec });
+        onUpdated(updated);
+        resetFields();
+      } else {
+        const created = await createIntent({
+          kind: 'firewall_rule',
+          name,
+          enabled: true,
+          spec,
+        });
+        onCreated(created);
+        resetFields();
+      }
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -373,10 +451,16 @@ function AddRuleForm({
     }
   }
 
+  function cancel() {
+    resetFields();
+    onCancelEdit();
+  }
+
   return (
     <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 780 }}>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <Input
+          id="rule-name"
           placeholder="name (e.g. block-iot-egress)"
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -472,8 +556,19 @@ function AddRuleForm({
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <Btn type="submit" variant="primary" disabled={busy || !name || !src}>
-          {busy ? 'ADDING…' : 'ADD RULE'}
+          {busy
+            ? editing
+              ? 'UPDATING…'
+              : 'ADDING…'
+            : editing
+            ? 'UPDATE RULE'
+            : 'ADD RULE'}
         </Btn>
+        {editing && (
+          <Btn onClick={cancel} disabled={busy}>
+            CANCEL
+          </Btn>
+        )}
         {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
       </div>
     </form>

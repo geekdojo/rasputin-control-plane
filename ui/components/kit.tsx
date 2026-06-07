@@ -233,6 +233,56 @@ export function Btn({
   );
 }
 
+// Click-to-flip ON/OFF pill — used for the per-row enable/disable toggle on
+// intent tables (firewall rules, port forwards, mesh keys, etc.). Renders as
+// a button so it announces as actionable to AT.
+export function EnabledToggle({
+  enabled,
+  onToggle,
+  title,
+}: {
+  enabled: boolean;
+  onToggle: () => void;
+  title?: string;
+}) {
+  const [hover, setHover] = useState(false);
+  const color = enabled ? '#4ade80' : DIM;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={title ?? (enabled ? 'Click to disable' : 'Click to enable')}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        padding: '3px 7px',
+        border: `1px solid ${color}`,
+        background: hover ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)',
+        color,
+        fontSize: 9,
+        fontFamily: MONO,
+        letterSpacing: '0.08em',
+        cursor: 'pointer',
+        transition: 'background 0.15s',
+      }}
+    >
+      <span
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: '50%',
+          background: color,
+          display: 'inline-block',
+        }}
+      />
+      {enabled ? 'ON' : 'OFF'}
+    </button>
+  );
+}
+
 // Status pill — colored text + border, neutral translucent fill (works for any color).
 export function Badge({ color = DIM, children }: { color?: string; children: ReactNode }) {
   return (
