@@ -68,8 +68,16 @@ export function NodeDetailDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      title={node ? node.hostname || node.id : 'NODE'}
-      subtitle={node ? `${node.role.toUpperCase()} · ${node.id}` : undefined}
+      // Node id is the primary identifier (matches the Nodes-page
+      // hex label convention); hostname drops to the subtitle next
+      // to the role. Drawer header has room for the full id — no
+      // truncation needed here.
+      title={node ? node.id : 'NODE'}
+      subtitle={
+        node
+          ? `${node.role.toUpperCase()}${node.hostname ? ` · ${node.hostname}` : ''}`
+          : undefined
+      }
       headerExtras={
         grafanaHref ? (
           <a href={grafanaHref} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}>

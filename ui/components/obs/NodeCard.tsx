@@ -77,20 +77,21 @@ export function NodeCard({ node, cpuSeries, memSeries, obsEnabled, onClick }: No
         gap: 12,
       }}
     >
-      {/* Header — name + status pill */}
+      {/* Header — node id (primary identifier, like the Nodes page hex
+          label) + status pill. Hostname drops below as secondary. */}
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-        <span style={{ fontSize: 12, letterSpacing: '0.04em', color: FG }}>
-          {node.hostname || node.id}
-        </span>
         <span
+          title={node.id}
           style={{
-            fontSize: 8.5,
-            letterSpacing: '0.12em',
-            color: DIM,
-            textTransform: 'uppercase',
+            fontSize: 12,
+            letterSpacing: '0.04em',
+            color: FG,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           }}
         >
-          {node.role}
+          {shortId(node.id)}
         </span>
         <span
           style={{
@@ -116,6 +117,35 @@ export function NodeCard({ node, cpuSeries, memSeries, obsEnabled, onClick }: No
         </span>
       </div>
 
+      {/* Secondary row — role + hostname. Pushed under the id so the
+          card hierarchy matches the Nodes-page convention. */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 8,
+          fontSize: 8.5,
+          letterSpacing: '0.1em',
+          color: DIM,
+          marginTop: -6, // tuck under the header without re-introducing the row's 12px gap
+        }}
+      >
+        <span style={{ textTransform: 'uppercase' }}>{node.role}</span>
+        {node.hostname && (
+          <span
+            title={node.hostname}
+            style={{
+              letterSpacing: '0.04em',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            · {node.hostname}
+          </span>
+        )}
+      </div>
+
       {/* Sparkline rows */}
       <SparkRow
         label="CPU"
@@ -132,8 +162,8 @@ export function NodeCard({ node, cpuSeries, memSeries, obsEnabled, onClick }: No
         unavailable={!obsEnabled}
       />
 
-      {/* Footer — node id (short) + agent version. Keeps the card
-          information-dense without crowding the top half. */}
+      {/* Footer — agent version + last-seen marker. The id moved
+          to the header so the footer doesn't need to repeat it. */}
       <div
         style={{
           display: 'flex',
@@ -145,8 +175,8 @@ export function NodeCard({ node, cpuSeries, memSeries, obsEnabled, onClick }: No
           borderTop: `1px solid rgba(228,230,234,0.08)`,
         }}
       >
-        <span title={node.id}>{node.id.slice(0, 12)}</span>
-        <span>v{node.agentVersion}</span>
+        <span>AGENT v{node.agentVersion}</span>
+        <span title={node.lastSeen}>{lastSeenAgo(node.lastSeen)}</span>
       </div>
     </button>
   );
@@ -184,4 +214,25 @@ function SparkRow({
       </div>
     </div>
   );
+}
+
+// shortId truncates with an ellipsis past 10 chars. Matches the
+// /<Nodes> page's hex label so the card and the hex agree at a glance.
+function shortId(id: string): string {
+  return id.length > 14 ? id.slice(0, 13) + '…' : id;
+}
+
+// lastSeenAgo — coarse "Ns ago" for the card footer. Doesn't pretend
+// to be real-time (the card is re-rendered when inventory WS fires or
+// when series re-fetch); the operator gets a fresh value on each tick.
+function lastSeenAgo(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '—';
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
