@@ -3,6 +3,7 @@
 import { Pencil, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { createIntent, deleteIntent, listIntents, updateIntent } from '../../../../lib/api';
+import { useFirewallStateRefresh } from '../../../../lib/firewall-state-context';
 import type {
   FirewallIntent,
   FirewallRuleProto,
@@ -111,6 +112,7 @@ export default function RulesPage() {
   // any in-progress edit, and clicking Edit clears any pending template.
   const [editing, setEditing] = useState<FirewallIntent | null>(null);
   const formRef = useRef<HTMLDivElement>(null);
+  const refreshFirewallState = useFirewallStateRefresh();
 
   useEffect(() => {
     refresh();
@@ -133,6 +135,7 @@ export default function RulesPage() {
       setIntents((prev) => prev.filter((p) => p.id !== id));
       // Cancel any in-progress edit pointing at the now-gone row.
       if (editing?.id === id) setEditing(null);
+      refreshFirewallState();
     } catch (e) {
       setErr(String(e));
     }
@@ -142,6 +145,7 @@ export default function RulesPage() {
     try {
       const updated = await updateIntent(intent.id, { enabled: !intent.enabled });
       setIntents((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      refreshFirewallState();
     } catch (e) {
       setErr(String(e));
     }
@@ -237,10 +241,12 @@ export default function RulesPage() {
           onCreated={(i) => {
             setIntents((p) => [...p, i]);
             setPreset(null);
+            refreshFirewallState();
           }}
           onUpdated={(i) => {
             setIntents((prev) => prev.map((p) => (p.id === i.id ? i : p)));
             setEditing(null);
+            refreshFirewallState();
           }}
           onCancelEdit={() => setEditing(null)}
         />

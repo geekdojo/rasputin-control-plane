@@ -8,6 +8,7 @@ import {
   listIntents,
   updateIntent,
 } from '../../../../lib/api';
+import { useFirewallStateRefresh } from '../../../../lib/firewall-state-context';
 import type { FirewallIntent, PortForwardProto, PortForwardSpec } from '../../../../lib/types';
 import {
   Btn,
@@ -28,6 +29,7 @@ export default function PortForwardsPage() {
   const [editing, setEditing] = useState<FirewallIntent | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const formRef = useRef<HTMLDivElement>(null);
+  const refreshFirewallState = useFirewallStateRefresh();
 
   useEffect(() => {
     refresh();
@@ -47,6 +49,7 @@ export default function PortForwardsPage() {
       await deleteIntent(id);
       setIntents((prev) => prev.filter((p) => p.id !== id));
       if (editing?.id === id) setEditing(null);
+      refreshFirewallState();
     } catch (e) {
       setErr(String(e));
     }
@@ -56,6 +59,7 @@ export default function PortForwardsPage() {
     try {
       const updated = await updateIntent(intent.id, { enabled: !intent.enabled });
       setIntents((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      refreshFirewallState();
     } catch (e) {
       setErr(String(e));
     }
@@ -126,10 +130,14 @@ export default function PortForwardsPage() {
         </SectionLabel>
         <PortForwardForm
           editing={editing}
-          onCreated={(i) => setIntents((p) => [...p, i])}
+          onCreated={(i) => {
+            setIntents((p) => [...p, i]);
+            refreshFirewallState();
+          }}
           onUpdated={(i) => {
             setIntents((prev) => prev.map((p) => (p.id === i.id ? i : p)));
             setEditing(null);
+            refreshFirewallState();
           }}
           onCancelEdit={() => setEditing(null)}
         />

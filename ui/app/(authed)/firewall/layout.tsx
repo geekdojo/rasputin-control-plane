@@ -1,13 +1,14 @@
 'use client';
 
 import { ShieldAlert } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   applyFirewall,
   listFirewallState,
   openFirewallWS,
   reconcileFirewall,
 } from '../../../lib/api';
+import { FirewallStateContext } from '../../../lib/firewall-state-context';
 import type { FirewallNodeState } from '../../../lib/types';
 import {
   Badge,
@@ -19,7 +20,7 @@ import {
   PageTabs,
   type PageTab,
 } from '../../../components/kit';
-import { MONO } from '../../../components/ui-theme';
+import { ACCENT, MONO } from '../../../components/ui-theme';
 
 const TABS: PageTab[] = [
   { label: 'OVERVIEW', href: '/firewall' },
@@ -35,15 +36,18 @@ export default function FirewallLayout({ children }: { children: React.ReactNode
   const [busy, setBusy] = useState<'apply' | 'reconcile' | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const refresh = useCallback(() => {
+    listFirewallState().then(setStates).catch(() => {});
+  }, []);
+
   useEffect(() => {
     refresh();
     const close = openFirewallWS(refresh);
     return close;
-  }, []);
+  }, [refresh]);
 
-  function refresh() {
-    listFirewallState().then(setStates).catch(() => {});
-  }
+  // Stable identity so consumers' useEffect deps don't churn on every render.
+  const ctxValue = useMemo(() => ({ refresh }), [refresh]);
 
   async function act(which: 'apply' | 'reconcile') {
     setBusy(which);
@@ -96,21 +100,26 @@ export default function FirewallLayout({ children }: { children: React.ReactNode
         </div>
       )}
       <PageTabs tabs={TABS} />
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>{children}</div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+        <FirewallStateContext.Provider value={ctxValue}>{children}</FirewallStateContext.Provider>
+      </div>
     </PageShell>
   );
 }
 
 function FirewallStateChip({ state }: { state: FirewallNodeState }) {
-  const status: 'in-sync' | 'drift' | 'unknown' = state.drift
+  // Three-state precedence: drift > pending > in-sync. Drift wins because
+  // it's the more surprising state — someone hand-edited the firewall.
+  const status: 'drift' | 'pending' | 'in-sync' = state.drift
     ? 'drift'
-    : state.lastApplied
-    ? 'in-sync'
-    : 'unknown';
-  const color = status === 'in-sync' ? '#4ade80' : status === 'drift' ? '#facc15' : DIM;
+    : state.pending
+    ? 'pending'
+    : 'in-sync';
+  const color = status === 'drift' ? '#facc15' : status === 'pending' ? ACCENT : '#4ade80';
+  const label = status === 'in-sync' ? 'IN SYNC' : status.toUpperCase();
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <Badge color={color}>{status === 'in-sync' ? 'IN SYNC' : status.toUpperCase()}</Badge>
+      <Badge color={color}>{label}</Badge>
       <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
         {state.lastApplied
           ? `applied ${new Date(state.lastApplied).toLocaleTimeString()}`

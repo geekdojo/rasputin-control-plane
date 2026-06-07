@@ -22,12 +22,18 @@ type Intent struct {
 // MeshState is the singleton row recording last-applied / last-reconciled
 // hashes. Mirrors firewall.NodeState in spirit; the tailnet is the unit
 // rather than per-node.
+//
+// Three-valued status: in sync, pending (user has unapplied changes),
+// drift (Headscale was edited outside Rasputin). See firewall.NodeState for
+// the full vocabulary — same semantics here. Pending is computed at read
+// time, not persisted.
 type MeshState struct {
 	IntentHash     string     `json:"intentHash"`
 	ObservedHash   string     `json:"observedHash"`
 	LastApplied    *time.Time `json:"lastApplied,omitempty"`
 	LastReconciled *time.Time `json:"lastReconciled,omitempty"`
 	Drift          bool       `json:"drift"`
+	Pending        bool       `json:"pending"`
 }
 
 // Device is one row of the mesh_devices table.

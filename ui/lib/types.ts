@@ -118,7 +118,13 @@ export interface FirewallNodeState {
   observedHash: string;
   lastApplied?: string;
   lastReconciled?: string;
+  // True when the firewall agent's observed state diverges from what we last
+  // pushed (hand-edit on the box). Surfaced as the DRIFT chip state.
   drift: boolean;
+  // True when the user has intents that haven't been Applied yet — the
+  // compiled hash of current intents differs from what was last pushed.
+  // Surfaced as the PENDING chip state. Drift dominates pending when both.
+  pending: boolean;
 }
 
 export type FirewallChange = 'applied' | 'drift' | 'in_sync' | 'reconciled';
@@ -314,6 +320,7 @@ export interface MeshState {
   lastApplied?: string;
   lastReconciled?: string;
   drift: boolean;
+  pending: boolean;
 }
 
 export interface MeshStateEnvelope {

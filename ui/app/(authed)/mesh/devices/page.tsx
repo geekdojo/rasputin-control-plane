@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { enrollMeshNode, listMeshDevices, listNodes } from '../../../../lib/api';
+import { useMeshStateRefresh } from '../../../../lib/mesh-state-context';
 import type { MeshDevice, Node } from '../../../../lib/types';
 import {
   Badge,
@@ -21,6 +22,7 @@ export default function DevicesPage() {
   const [devices, setDevices] = useState<MeshDevice[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const refreshMeshState = useMeshStateRefresh();
 
   useEffect(() => {
     refresh();
@@ -71,7 +73,14 @@ export default function DevicesPage() {
       )}
 
       <SectionLabel>ENROLL RASPUTIN NODE</SectionLabel>
-      <EnrollNodeForm nodes={nodes} devices={devices} onEnrolled={refresh} />
+      <EnrollNodeForm
+        nodes={nodes}
+        devices={devices}
+        onEnrolled={() => {
+          refresh();
+          refreshMeshState();
+        }}
+      />
     </>
   );
 }

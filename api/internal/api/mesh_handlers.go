@@ -23,6 +23,27 @@ func (s *Server) handleMeshState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Mirror firewall: compute pending = (compile-of-current-intents) !=
+	// last-pushed intent hash. Runs every request; cheap (sub-ms). See
+	// firewall_handlers.go for the empty-state-fallback rationale.
+	intents, err := s.mesh.Store().ListIntents(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, pendingHash, err := mesh.Compile(intents)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "compile: "+err.Error())
+		return
+	}
+	_, emptyHash, _ := mesh.Compile(nil)
+	if state != nil {
+		effectivePushed := state.IntentHash
+		if effectivePushed == "" {
+			effectivePushed = emptyHash
+		}
+		state.Pending = effectivePushed != pendingHash
+	}
 	writeJSON(w, http.StatusOK, struct {
 		Backend      string          `json:"backend"`
 		LoginServer  string          `json:"loginServer"`

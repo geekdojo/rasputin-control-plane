@@ -730,6 +730,48 @@ func TestHandleGetFirewallState_Empty(t *testing.T) {
 	}
 }
 
+// Fresh node + zero intents must NOT report pending. IntentHash is empty
+// in the DB; Compile(nil) gives a non-empty canonical empty-state hash; the
+// handler treats "" as canonically equal to that, so the chip stays IN SYNC.
+func TestHandleGetFirewallState_PendingFalseWhenFreshAndEmpty(t *testing.T) {
+	f := newAPIFixture(t)
+	_ = f.inv.Insert(f.ctx, &proto.Node{
+		ID: "node-fw", Role: proto.RoleFirewall, Hostname: "fw",
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	})
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodGet, "/api/firewall/state", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"pending":true`) {
+		t.Errorf("fresh empty firewall should not be pending; body=%s", w.Body.String())
+	}
+}
+
+// Adding an intent without applying must flip pending to true — that's the
+// gap that motivated the field in the first place (user adds a rule, expects
+// the chip to flag changes-to-push).
+func TestHandleGetFirewallState_PendingTrueAfterCreate(t *testing.T) {
+	f := newAPIFixture(t)
+	_ = f.inv.Insert(f.ctx, &proto.Node{
+		ID: "node-fw", Role: proto.RoleFirewall, Hostname: "fw",
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	})
+	c := f.authenticate(t)
+	body := `{"kind":"port_forward","name":"pf","enabled":true,"spec":{"wanPort":25565,"lanPort":25565,"lanHost":"10.0.0.5","protocol":"tcp"}}`
+	if w := f.do(t, http.MethodPost, "/api/firewall/intents", body, c); w.Code != http.StatusCreated {
+		t.Fatalf("create intent: %d %s", w.Code, w.Body.String())
+	}
+	w := f.do(t, http.MethodGet, "/api/firewall/state", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get state: %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"pending":true`) {
+		t.Errorf("after unapplied create, pending should be true; body=%s", w.Body.String())
+	}
+}
+
 func TestHandleApplyFirewall_UnknownKind(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
@@ -1013,6 +1055,44 @@ func TestHandleMeshState(t *testing.T) {
 	w := f.do(t, http.MethodGet, "/api/mesh/state", "", c)
 	if w.Code != http.StatusOK {
 		t.Errorf("want 200, got %d", w.Code)
+	}
+}
+
+// Fresh install — no intents, no apply ever — should NOT report pending.
+// Mirrors TestHandleGetFirewallState_PendingFalseWhenFreshAndEmpty.
+func TestHandleMeshState_PendingFalseWhenFreshAndEmpty(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodGet, "/api/mesh/state", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"pending":true`) {
+		t.Errorf("fresh empty mesh should not be pending; body=%s", w.Body.String())
+	}
+}
+
+// Creating an intent without applying flips pending=true. POST /api/mesh/keys
+// inline-mints the Headscale key (mesh.md §6) so it lands in lastApplied state
+// straight away — to test the unapplied path we poke the store directly with
+// a route intent, which is a pure intent (no inline apply).
+func TestHandleMeshState_PendingTrueAfterCreate(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	spec, _ := json.Marshal(map[string]any{"name": "lan", "nodeId": "node-1", "cidr": "10.0.0.0/24"})
+	now := time.Now().UTC()
+	if err := f.mesh.Store().CreateIntent(f.ctx, &mesh.Intent{
+		ID: "i-1", Kind: "subnet_route", Name: "lan",
+		Enabled: true, Spec: spec, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create route intent: %v", err)
+	}
+	w := f.do(t, http.MethodGet, "/api/mesh/state", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get state: %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"pending":true`) {
+		t.Errorf("after unapplied create, pending should be true; body=%s", w.Body.String())
 	}
 }
 

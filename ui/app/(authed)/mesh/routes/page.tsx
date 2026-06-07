@@ -3,6 +3,7 @@
 import { Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { createMeshRoute, deleteMeshRoute, listMeshRoutes, listNodes } from '../../../../lib/api';
+import { useMeshStateRefresh } from '../../../../lib/mesh-state-context';
 import type { MeshIntent, Node, SubnetRouteSpec } from '../../../../lib/types';
 import {
   Btn,
@@ -21,6 +22,7 @@ export default function RoutesPage() {
   const [routes, setRoutes] = useState<MeshIntent[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const refreshMeshState = useMeshStateRefresh();
 
   useEffect(() => {
     refresh();
@@ -35,6 +37,7 @@ export default function RoutesPage() {
     try {
       await deleteMeshRoute(id);
       setRoutes((prev) => prev.filter((r) => r.id !== id));
+      refreshMeshState();
     } catch (e) {
       setErr(String(e));
     }
@@ -83,7 +86,13 @@ export default function RoutesPage() {
       )}
 
       <SectionLabel>ADD ROUTE</SectionLabel>
-      <AddRouteForm nodes={nodes} onCreated={refresh} />
+      <AddRouteForm
+        nodes={nodes}
+        onCreated={() => {
+          refresh();
+          refreshMeshState();
+        }}
+      />
     </>
   );
 }

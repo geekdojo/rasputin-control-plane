@@ -3,6 +3,7 @@
 import { Trash2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { createMeshKey, deleteMeshKey, listMeshKeys } from '../../../../lib/api';
+import { useMeshStateRefresh } from '../../../../lib/mesh-state-context';
 import type { MeshIntent, PreAuthKeySpec } from '../../../../lib/types';
 import {
   Btn,
@@ -22,6 +23,7 @@ export default function KeysPage() {
   const [keys, setKeys] = useState<MeshIntent[]>([]);
   const [freshKey, setFreshKey] = useState<MeshIntent | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const refreshMeshState = useMeshStateRefresh();
 
   useEffect(() => {
     refresh();
@@ -36,6 +38,7 @@ export default function KeysPage() {
     try {
       await deleteMeshKey(id);
       setKeys((prev) => prev.filter((k) => k.id !== id));
+      refreshMeshState();
     } catch (e) {
       setErr(String(e));
     }
@@ -100,6 +103,7 @@ export default function KeysPage() {
         onCreated={(intent) => {
           setFreshKey(intent);
           refresh();
+          refreshMeshState();
         }}
       />
     </>

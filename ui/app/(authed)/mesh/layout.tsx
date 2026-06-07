@@ -1,8 +1,9 @@
 'use client';
 
 import { GitBranch } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { applyMesh, getMeshState, openMeshWS, reconcileMesh } from '../../../lib/api';
+import { MeshStateContext } from '../../../lib/mesh-state-context';
 import type { MeshStateEnvelope } from '../../../lib/types';
 import {
   Badge,
@@ -16,7 +17,7 @@ import {
   Tok,
   type PageTab,
 } from '../../../components/kit';
-import { MONO } from '../../../components/ui-theme';
+import { ACCENT, MONO } from '../../../components/ui-theme';
 
 const TABS: PageTab[] = [
   { label: 'OVERVIEW', href: '/mesh' },
@@ -31,15 +32,17 @@ export default function MeshLayout({ children }: { children: React.ReactNode }) 
   const [busy, setBusy] = useState<'apply' | 'reconcile' | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const refresh = useCallback(() => {
+    getMeshState().then(setEnv).catch((e) => setErr(String(e)));
+  }, []);
+
   useEffect(() => {
     refresh();
     const close = openMeshWS(refresh);
     return close;
-  }, []);
+  }, [refresh]);
 
-  function refresh() {
-    getMeshState().then(setEnv).catch((e) => setErr(String(e)));
-  }
+  const ctxValue = useMemo(() => ({ refresh }), [refresh]);
 
   async function act(which: 'apply' | 'reconcile') {
     setBusy(which);
@@ -53,9 +56,14 @@ export default function MeshLayout({ children }: { children: React.ReactNode }) 
     }
   }
 
+  // Three-state precedence matches the firewall layout: drift > pending >
+  // in-sync. See firewall/layout.tsx FirewallStateChip for the vocabulary.
   const drift = env?.state.drift ?? false;
-  const syncColor = drift ? '#facc15' : env?.state.lastApplied ? '#4ade80' : DIM;
-  const syncLabel = drift ? 'DRIFT' : env?.state.lastApplied ? 'IN SYNC' : 'UNSTARTED';
+  const pending = env?.state.pending ?? false;
+  const status: 'drift' | 'pending' | 'in-sync' = drift ? 'drift' : pending ? 'pending' : 'in-sync';
+  const syncColor =
+    status === 'drift' ? '#facc15' : status === 'pending' ? ACCENT : '#4ade80';
+  const syncLabel = status === 'in-sync' ? 'IN SYNC' : status.toUpperCase();
 
   return (
     <PageShell>
@@ -120,7 +128,9 @@ export default function MeshLayout({ children }: { children: React.ReactNode }) 
         </div>
       )}
       <PageTabs tabs={TABS} />
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>{children}</div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+        <MeshStateContext.Provider value={ctxValue}>{children}</MeshStateContext.Provider>
+      </div>
     </PageShell>
   );
 }
