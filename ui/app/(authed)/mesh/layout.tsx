@@ -8,13 +8,11 @@ import {
   Badge,
   Btn,
   DIM,
-  FG,
   HAIR,
   Hint,
   PageHeader,
   PageShell,
   PageTabs,
-  PANEL,
   Tok,
   type PageTab,
 } from '../../../components/kit';
@@ -67,6 +65,14 @@ export default function MeshLayout({ children }: { children: React.ReactNode }) 
         right={
           env ? (
             <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Badge color={syncColor}>{syncLabel}</Badge>
+                <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
+                  {env.state.lastApplied
+                    ? `applied ${new Date(env.state.lastApplied).toLocaleTimeString()}`
+                    : 'never applied'}
+                </span>
+              </div>
               <Btn variant="primary" small disabled={busy !== null} onClick={() => act('apply')}>
                 {busy === 'apply' ? 'APPLYING…' : 'APPLY'}
               </Btn>
@@ -84,34 +90,19 @@ export default function MeshLayout({ children }: { children: React.ReactNode }) 
             alignItems: 'center',
             gap: 14,
             flexWrap: 'wrap',
-            padding: '10px 20px',
+            padding: '8px 20px',
             borderBottom: `1px solid ${HAIR}`,
             flexShrink: 0,
+            color: DIM,
+            fontSize: 9,
+            fontFamily: MONO,
           }}
         >
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '6px 10px',
-              background: PANEL,
-              border: `1px solid ${HAIR}`,
-            }}
-          >
-            <span style={{ color: FG, fontSize: 10, fontFamily: MONO }}>tailnet</span>
-            <Badge color={syncColor}>{syncLabel}</Badge>
-            <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
-              {env.state.lastApplied
-                ? `applied ${new Date(env.state.lastApplied).toLocaleTimeString()}`
-                : 'never applied'}
-            </span>
-          </div>
-          <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
+          <span>
             login server: <Tok>{env.loginServer}</Tok> · user: <Tok>{env.defaultUser}</Tok> · backend:{' '}
             <Tok>{env.backend}</Tok>
           </span>
-          {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
+          {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
         </div>
       )}
       {env?.backend === 'mock' && (

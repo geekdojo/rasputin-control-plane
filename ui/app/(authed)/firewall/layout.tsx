@@ -13,12 +13,10 @@ import {
   Badge,
   Btn,
   DIM,
-  FG,
   HAIR,
   PageHeader,
   PageShell,
   PageTabs,
-  PANEL,
   type PageTab,
 } from '../../../components/kit';
 import { MONO } from '../../../components/ui-theme';
@@ -59,7 +57,10 @@ export default function FirewallLayout({ children }: { children: React.ReactNode
     }
   }
 
-  const hasNode = states.length > 0;
+  // v0 explicitly supports exactly one firewall node (firewall-integration.md
+  // §9). Picking states[0] for the header chip; if a future v2 HA pair lands,
+  // we'll switch to a multi-chip treatment.
+  const primary = states[0];
 
   return (
     <PageShell>
@@ -67,8 +68,9 @@ export default function FirewallLayout({ children }: { children: React.ReactNode
         icon={ShieldAlert}
         title="FIREWALL"
         right={
-          hasNode ? (
+          primary ? (
             <>
+              <FirewallStateChip state={primary} />
               <Btn variant="primary" small disabled={busy !== null} onClick={() => act('apply')}>
                 {busy === 'apply' ? 'APPLYING…' : 'APPLY'}
               </Btn>
@@ -79,25 +81,18 @@ export default function FirewallLayout({ children }: { children: React.ReactNode
           ) : undefined
         }
       />
-      {hasNode && (
+      {err && (
         <div
           style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 10,
-            padding: '10px 20px',
+            padding: '8px 20px',
             borderBottom: `1px solid ${HAIR}`,
+            color: '#f87171',
+            fontSize: 10,
+            fontFamily: MONO,
             flexShrink: 0,
           }}
         >
-          {states.map((s) => (
-            <FirewallStateChip key={s.nodeId} state={s} />
-          ))}
-          {err && (
-            <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, alignSelf: 'center' }}>
-              {err}
-            </span>
-          )}
+          {err}
         </div>
       )}
       <PageTabs tabs={TABS} />
@@ -114,17 +109,7 @@ function FirewallStateChip({ state }: { state: FirewallNodeState }) {
     : 'unknown';
   const color = status === 'in-sync' ? '#4ade80' : status === 'drift' ? '#facc15' : DIM;
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: '6px 10px',
-        background: PANEL,
-        border: `1px solid ${HAIR}`,
-      }}
-    >
-      <span style={{ color: FG, fontSize: 10, fontFamily: MONO }}>{state.nodeId}</span>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
       <Badge color={color}>{status === 'in-sync' ? 'IN SYNC' : status.toUpperCase()}</Badge>
       <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
         {state.lastApplied
