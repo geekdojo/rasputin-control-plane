@@ -110,6 +110,46 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// DeleteByTargetNode removes every apps row whose target_node matches the
+// given id, returning the ids of the deleted rows so the caller can emit
+// per-app change events.
+//
+// Contract: this removes *deployments* targeting the node — never a shared
+// catalog entry. In today's schema each apps row IS both the catalog
+// definition and the deployment (target_node is on the same row, name is
+// UNIQUE), so deleting by target_node and "removing the deployment" are
+// the same operation. When the catalog/deployments split lands, this
+// method should be ported to operate on the deployments table; the
+// contract (one node's deployments, never shared catalog rows) is
+// unchanged.
+func (s *Store) DeleteByTargetNode(ctx context.Context, nodeID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM apps WHERE target_node = ?`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM apps WHERE target_node = ?`, nodeID); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, name, compose_yaml, target_node, last_status, last_detail,

@@ -24,6 +24,7 @@ type Server struct {
 	store               *jobs.Store
 	runner              *jobs.Runner
 	inv                 *inventory.Store
+	invSvc              *inventory.Service
 	fw                  *firewall.Store
 	apps                *apps.Store
 	metrics             *metrics.Store
@@ -60,6 +61,7 @@ func NewServer(
 	store *jobs.Store,
 	runner *jobs.Runner,
 	inv *inventory.Store,
+	invSvc *inventory.Service,
 	fw *firewall.Store,
 	appsStore *apps.Store,
 	mtr *metrics.Store,
@@ -81,7 +83,7 @@ func NewServer(
 		obsStatus = obs.NewStatus(nil, nil, nil)
 	}
 	return &Server{
-		store: store, runner: runner, inv: inv, fw: fw, apps: appsStore,
+		store: store, runner: runner, inv: inv, invSvc: invSvc, fw: fw, apps: appsStore,
 		metrics: mtr, updater: updaterStore, updaterVerifier: updaterVerifier,
 		bundleDir: bundleDir, trustDir: trustDir, mesh: meshSvc,
 		bmc: bmcSvc, bmcSessions: bmc.NewSessionManager(bmcSvc),
@@ -124,6 +126,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/nodes", reqd(s.handleListNodes))
 	mux.HandleFunc("GET /api/nodes/{id}", reqd(s.handleGetNode))
+	mux.HandleFunc("GET /api/nodes/{id}/removal-impact", reqd(s.handleGetNodeRemovalImpact))
+	mux.HandleFunc("DELETE /api/nodes/{id}", reqd(s.handleDeleteNode))
 
 	mux.HandleFunc("GET /api/metrics/{id}", reqd(s.handleGetMetrics))
 

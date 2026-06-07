@@ -10,11 +10,21 @@ import {
   RefreshCw,
   RotateCcw,
   Terminal,
+  Trash2,
   Upload,
+  X,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { ElementType } from 'react';
-import { bmcPower, createJob, getBMCStatus, openBMCWS } from '../lib/api';
+import {
+  bmcPower,
+  createJob,
+  deleteNode,
+  getBMCStatus,
+  getNodeRemovalImpact,
+  openBMCWS,
+  type NodeRemovalImpact,
+} from '../lib/api';
 import type { App, BMCPowerState, Node } from '../lib/types';
 import { ConfirmModal } from './ConfirmModal';
 import { ACCENT, accentA, MONO } from './ui-theme';
@@ -25,6 +35,7 @@ interface NodeControlsProps {
   mem: number | null;
   apps: App[];
   onNavigate: (path: string) => void;
+  onRemoved?: (id: string) => void;
 }
 
 function CtrlButton({
@@ -145,11 +156,13 @@ function appStatusColor(status: App['lastStatus']): string {
   return 'rgba(148,163,184,0.5)';
 }
 
-export function NodeControls({ node, cpu, mem, apps, onNavigate }: NodeControlsProps) {
-  const [modal, setModal] = useState<'reboot' | 'power-off' | 'reset' | null>(null);
+export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: NodeControlsProps) {
+  const [modal, setModal] = useState<'reboot' | 'power-off' | 'reset' | 'remove' | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [bmcState, setBmcState] = useState<BMCPowerState>('unknown');
+  const [removeImpact, setRemoveImpact] = useState<NodeRemovalImpact | null>(null);
+  const [impactErr, setImpactErr] = useState<string | null>(null);
 
   const nodeId = node?.id ?? null;
 
@@ -300,6 +313,21 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate }: NodeControlsP
             disabled={!node || busy !== null}
             onClick={() => setModal('reset')}
           />
+          <CtrlButton
+            icon={Trash2}
+            label={busy === 'remove' ? 'REMOVING…' : 'REMOVE NODE'}
+            variant="danger"
+            disabled={!node || busy !== null}
+            onClick={() => {
+              if (!node) return;
+              setImpactErr(null);
+              setRemoveImpact(null);
+              setModal('remove');
+              void getNodeRemovalImpact(node.id)
+                .then(setRemoveImpact)
+                .catch((e) => setImpactErr(String(e)));
+            }}
+          />
         </div>
 
         {sectionLabel('DIAGNOSTICS')}
@@ -379,6 +407,173 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate }: NodeControlsP
           onCancel={() => setModal(null)}
         />
       )}
+      {modal === 'remove' && node && (
+        <RemoveNodeModal
+          node={node}
+          impact={removeImpact}
+          impactErr={impactErr}
+          onCancel={() => setModal(null)}
+          onConfirm={() => {
+            const id = node.id;
+            setModal(null);
+            void run('remove', async () => {
+              await deleteNode(id);
+              onRemoved?.(id);
+            });
+          }}
+        />
+      )}
     </>
+  );
+}
+
+function RemoveNodeModal({
+  node,
+  impact,
+  impactErr,
+  onConfirm,
+  onCancel,
+}: {
+  node: Node;
+  impact: NodeRemovalImpact | null;
+  impactErr: string | null;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  // Loading: impact === null && !impactErr → show a placeholder. Failure: show
+  // the error and let the user retry by reopening. Loaded: show the cascade
+  // counts. The remove button is enabled as soon as the preview returns; a
+  // failed preview blocks the action because we don't actually know the
+  // cascade scope.
+  const ready = impact !== null;
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.6)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: '#0d1829',
+          border: '1px solid rgba(228,230,234,0.18)',
+          padding: 24,
+          width: 380,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 16,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertTriangle size={14} color="#f87171" />
+            <span style={{ color: '#e4e6ea', fontSize: 11, fontFamily: MONO, letterSpacing: '0.1em' }}>
+              REMOVE NODE
+            </span>
+          </div>
+          <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+            <X size={14} color="#8a9bb5" />
+          </button>
+        </div>
+
+        <div style={{ height: 1, background: 'rgba(228,230,234,0.1)' }} />
+
+        <p style={{ color: '#8a9bb5', fontSize: 11, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>
+          Permanently remove <span style={{ color: '#e4e6ea' }}>{node.id.toUpperCase()}</span> from inventory. Use this
+          when the hardware is gone or being repurposed — a re-registering agent will appear as a fresh node.
+        </p>
+
+        <div
+          style={{
+            border: '1px solid rgba(228,230,234,0.1)',
+            padding: '10px 12px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+          }}
+        >
+          <span
+            style={{
+              color: '#8a9bb5',
+              fontSize: 9,
+              fontFamily: MONO,
+              letterSpacing: '0.12em',
+              paddingBottom: 4,
+              borderBottom: '1px solid rgba(228,230,234,0.08)',
+            }}
+          >
+            CASCADE
+          </span>
+          {!ready && !impactErr && (
+            <span style={{ color: 'rgba(228,230,234,0.4)', fontSize: 10, fontFamily: MONO }}>computing…</span>
+          )}
+          {impactErr && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{impactErr}</span>}
+          {ready && (
+            <>
+              <ImpactRow label="APP DEPLOYMENTS" value={`${impact!.appIds.length} removed`} />
+              <ImpactRow
+                label="MESH ENROLLMENT"
+                value={impact!.meshDeviceHsId ? 'removed from Headscale' : 'not enrolled'}
+              />
+              <ImpactRow
+                label="FIREWALL STATE"
+                value={impact!.hasFirewallState ? 'reconciliation row removed' : 'none'}
+              />
+            </>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button
+            onClick={onCancel}
+            style={{
+              padding: '7px 16px',
+              background: 'transparent',
+              border: '1px solid rgba(228,230,234,0.18)',
+              color: '#8a9bb5',
+              fontSize: 10,
+              fontFamily: MONO,
+              letterSpacing: '0.08em',
+              cursor: 'pointer',
+            }}
+          >
+            CANCEL
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!ready}
+            style={{
+              padding: '7px 16px',
+              background: 'rgba(248,113,113,0.12)',
+              border: '1px solid rgba(248,113,113,0.5)',
+              color: '#f87171',
+              fontSize: 10,
+              fontFamily: MONO,
+              letterSpacing: '0.08em',
+              cursor: ready ? 'pointer' : 'not-allowed',
+              opacity: ready ? 1 : 0.4,
+            }}
+          >
+            REMOVE
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImpactRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+      <span style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
+      <span style={{ color: '#e4e6ea', fontSize: 10, fontFamily: MONO, textAlign: 'right' }}>{value}</span>
+    </div>
   );
 }

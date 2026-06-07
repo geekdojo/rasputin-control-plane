@@ -306,7 +306,7 @@ func main() {
 	sched.Start(ctx)
 	defer sched.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busSrv.Conn())
+	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busSrv.Conn())
 
 	// Real alerting (Slice 1.5): open the persisted alerts store and
 	// wire a Service that merges aggregator + persisted views. Always

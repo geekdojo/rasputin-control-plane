@@ -84,6 +84,24 @@ func (s *Store) TouchLastSeen(ctx context.Context, id string, ts time.Time) erro
 	return nil
 }
 
+// Delete removes the node row. Returns sql.ErrNoRows if no row matched.
+// Callers that need to also clear in-memory status and emit events should
+// use Service.Remove instead of calling this directly.
+func (s *Store) Delete(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // Get returns the node with the given id, or (nil, nil) if not found.
 func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
 	row := s.db.QueryRowContext(ctx, `

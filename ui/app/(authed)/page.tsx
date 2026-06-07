@@ -43,6 +43,11 @@ export default function NodesPage() {
   useEffect(() => {
     listNodes().then(setNodes).catch(() => {});
     const close = openInventoryWS((ev: InventoryChangeEvent) => {
+      if (ev.change === 'removed') {
+        setNodes((prev) => prev.filter((n) => n.id !== ev.node.id));
+        setSelectedId((prev) => (prev === ev.node.id ? null : prev));
+        return;
+      }
       setNodes((prev) => {
         const exists = prev.find((n) => n.id === ev.node.id);
         return exists ? prev.map((n) => (n.id === ev.node.id ? ev.node : n)) : [...prev, ev.node];
@@ -124,6 +129,10 @@ export default function NodesPage() {
           mem={selectedUtil?.mem ?? null}
           apps={selectedApps}
           onNavigate={(path) => router.push(path)}
+          onRemoved={(id) => {
+            setNodes((prev) => prev.filter((n) => n.id !== id));
+            setSelectedId((prev) => (prev === id ? null : prev));
+          }}
         />
       </div>
     </div>

@@ -69,6 +69,7 @@ const (
 	InventoryStale   InventoryChangeType = "stale"
 	InventoryOffline InventoryChangeType = "offline"
 	InventoryUpdated InventoryChangeType = "updated"
+	InventoryRemoved InventoryChangeType = "removed"
 )
 
 // InventoryChangeEvt is the payload published by the api on the inventory

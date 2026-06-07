@@ -84,6 +84,32 @@ func (s *Service) Stop() {
 // Store exposes the underlying store for read-only HTTP handlers.
 func (s *Service) Store() *Store { return s.store }
 
+// Remove deletes a node from inventory, clears its in-memory status entry,
+// and emits an InventoryRemoved change event carrying the last known Node
+// payload. Returns sql.ErrNoRows if the id is unknown.
+//
+// No blocklist: if the agent later re-registers under the same id,
+// handleRegistered will recreate the row. That's intentional for v1 —
+// removal is for nodes that are permanently gone (dead hardware), not for
+// preventing a return.
+func (s *Service) Remove(ctx context.Context, id string) error {
+	n, err := s.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if n == nil {
+		return sql.ErrNoRows
+	}
+	if err := s.store.Delete(ctx, id); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.statusByNode, id)
+	s.mu.Unlock()
+	s.emit(n, proto.InventoryRemoved)
+	return nil
+}
+
 func (s *Service) seed(ctx context.Context) error {
 	nodes, err := s.store.List(ctx)
 	if err != nil {

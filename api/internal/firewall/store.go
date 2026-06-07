@@ -168,6 +168,23 @@ func (s *Store) UpdateAfterApply(ctx context.Context, nodeID, intentHash string,
 	return err
 }
 
+// DeleteNodeState removes the per-node reconciliation row for nodeID. Used
+// when a node is removed from inventory — the firewall state is keyed by
+// node id and becomes meaningless once the node is gone. Returns
+// (false, nil) if no row existed (node never had firewall state, common
+// for non-firewall nodes), (true, nil) on a successful delete.
+func (s *Store) DeleteNodeState(ctx context.Context, nodeID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM firewall_state WHERE target_node_id = ?`, nodeID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // UpdateAfterReconcile records the observed hash from the agent at ts.
 func (s *Store) UpdateAfterReconcile(ctx context.Context, nodeID, observedHash string, ts time.Time) error {
 	_, err := s.db.ExecContext(ctx, `

@@ -52,7 +52,8 @@ export type InventoryChange =
   | 'online'
   | 'stale'
   | 'offline'
-  | 'updated';
+  | 'updated'
+  | 'removed';
 
 export interface Node {
   id: string;

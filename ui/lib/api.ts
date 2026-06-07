@@ -93,6 +93,30 @@ export async function listNodes(): Promise<Node[]> {
   return (await jsonFetch<Node[] | null>('/api/nodes')) ?? [];
 }
 
+export interface NodeRemovalImpact {
+  nodeId: string;
+  appIds: string[];
+  meshDeviceHsId?: string;
+  hasFirewallState: boolean;
+}
+
+// getNodeRemovalImpact previews what a DELETE /api/nodes/{id} would
+// cascade to. Read-only; safe to call from the confirm dialog while the
+// user is still deciding.
+export async function getNodeRemovalImpact(id: string): Promise<NodeRemovalImpact> {
+  return jsonFetch<NodeRemovalImpact>(`/api/nodes/${encodeURIComponent(id)}/removal-impact`);
+}
+
+// deleteNode removes a node from inventory and cascades app deployments,
+// mesh enrollment, and firewall state. Returns the impact summary so the
+// caller can show "removed N apps" feedback. There is no v1 blocklist —
+// a re-registering agent will re-appear in inventory.
+export async function deleteNode(id: string): Promise<NodeRemovalImpact> {
+  return jsonFetch<NodeRemovalImpact>(`/api/nodes/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
 // openInventoryWS subscribes to rasputin.inventory.> change events.
 export function openInventoryWS(
   onEvent: (ev: InventoryChangeEvent) => void,

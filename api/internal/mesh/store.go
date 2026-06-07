@@ -260,6 +260,35 @@ func (s *Store) ListDevices(ctx context.Context) ([]*Device, error) {
 	return out, rows.Err()
 }
 
+// GetDeviceByRasputinNodeID returns the cached mesh device whose
+// rasputin_node_id matches nodeID, or (nil, nil) if the node is not
+// enrolled. Used by the node-removal cascade to find the hs_id to pass
+// to Headscale.DeleteNode without making the caller list all devices.
+func (s *Store) GetDeviceByRasputinNodeID(ctx context.Context, nodeID string) (*Device, error) {
+	row := s.db.QueryRowContext(ctx, `
+        SELECT hs_id, user, hostname, tailnet_ip, tags, advertised_routes,
+               rasputin_node_id, kind, first_seen, last_seen
+        FROM mesh_devices WHERE rasputin_node_id = ? LIMIT 1`, nodeID)
+	var (
+		d            Device
+		tags, routes string
+		firstSeen    int64
+		lastSeen     int64
+	)
+	if err := row.Scan(&d.HSID, &d.User, &d.Hostname, &d.TailnetIP, &tags, &routes,
+		&d.RasputinNodeID, &d.Kind, &firstSeen, &lastSeen); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(tags), &d.Tags)
+	_ = json.Unmarshal([]byte(routes), &d.AdvertisedRoutes)
+	d.FirstSeen = fromMs(firstSeen)
+	d.LastSeen = fromMs(lastSeen)
+	return &d, nil
+}
+
 func (s *Store) DeleteDevice(ctx context.Context, hsID string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM mesh_devices WHERE hs_id = ?`, hsID)
 	if err != nil {

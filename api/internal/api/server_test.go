@@ -99,6 +99,7 @@ type fakeMeshClient struct {
 	nodes       map[string]mesh.HSNode
 	createCalls int
 	createErr   error
+	deleteErr   error
 }
 
 func newFakeMeshClient() *fakeMeshClient {
@@ -126,6 +127,9 @@ func (f *fakeMeshClient) ListNodes(_ context.Context) ([]mesh.HSNode, error) {
 }
 func (f *fakeMeshClient) SetNodeRoutes(_ context.Context, _ string, _ []string) error { return nil }
 func (f *fakeMeshClient) DeleteNode(_ context.Context, nodeID string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.nodes, nodeID)
 	return nil
 }
@@ -241,7 +245,8 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	runner := jobs.NewRunner(jobStore, nc)
 
 	trustDir := dir
-	srv := NewServer(jobStore, runner, invStore, fwStore, appStore,
+	invSvc := inventory.NewService(invStore, nc)
+	srv := NewServer(jobStore, runner, invStore, invSvc, fwStore, appStore,
 		mtrStore, updStore, verifier, bundleDir, trustDir,
 		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, nc)
 
@@ -999,7 +1004,8 @@ func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
 		DefaultUser:  "rasputin-operator",
 		HeadplaneURL: hpURL,
 	}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
-	srv := NewServer(f.jobsStore, f.runner, f.inv, f.fw, f.appsStore,
+	srv := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
+		f.fw, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.nc)
 	handler := srv.Handler()
