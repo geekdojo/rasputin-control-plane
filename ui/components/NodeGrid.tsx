@@ -208,12 +208,36 @@ function HexCell({
   );
 }
 
+// Role priority for the hex layout. Slots are sorted center-out in
+// buildSilhouette, so ordered[0] gets the very center hex, ordered[1]
+// the next ring, and so on. Firewall claims the center because it's
+// the network ingress/egress — operators glance there first when
+// something feels off. Controlplane takes the next inner slot.
+// Compute / storage / anything else fall through to alphabetic by id.
+//
+// Keys match the SHORT role strings minted by page.tsx's ROLE_SHORT
+// (controlplane→"ctrl", firewall→"fw", compute→"work", storage→"stor")
+// because that's what NodeView carries on the wire.
+const ROLE_PRIORITY: Record<string, number> = {
+  fw: 0,
+  ctrl: 1,
+  work: 2,
+  stor: 3,
+};
+const DEFAULT_ROLE_PRIORITY = 99;
+
 export function NodeGrid({ nodes, selectedId, onSelect }: NodeGridProps) {
   const { slots, width, height } = buildSilhouette(nodes.length);
 
-  // Control-plane nodes claim the center slots (the cluster's "core"); the rest
-  // keep list order. Slots beyond the node count render as open bays.
-  const ordered = [...nodes].sort((a, b) => (a.role === 'ctrl' ? 0 : 1) - (b.role === 'ctrl' ? 0 : 1));
+  // Stable role-prioritized order so inventory WS churn doesn't shuffle
+  // the hex layout. Same priority scheme as the /metrics cards grid so
+  // operators see a consistent "where is X" across views.
+  const ordered = [...nodes].sort((a, b) => {
+    const pa = ROLE_PRIORITY[a.role] ?? DEFAULT_ROLE_PRIORITY;
+    const pb = ROLE_PRIORITY[b.role] ?? DEFAULT_ROLE_PRIORITY;
+    if (pa !== pb) return pa - pb;
+    return a.id.localeCompare(b.id);
+  });
 
   return (
     <div
