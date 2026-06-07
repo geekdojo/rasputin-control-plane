@@ -7,6 +7,7 @@ import { useMeshStateRefresh } from '../../../../lib/mesh-state-context';
 import type { MeshIntent, PreAuthKeySpec } from '../../../../lib/types';
 import {
   Btn,
+  CopyButton,
   DIM,
   FG,
   HAIR,
@@ -143,6 +144,7 @@ export default function KeysPage() {
 function FreshKeyBanner({ intent, onClose }: { intent: MeshIntent; onClose: () => void }) {
   const value = intent.hsValue || '';
   const spec = intent.spec as PreAuthKeySpec;
+  const command = `tailscale up --login-server=<your-rasputin-mesh-url> --auth-key=${value}`;
   return (
     <div
       style={{
@@ -171,13 +173,26 @@ function FreshKeyBanner({ intent, onClose }: { intent: MeshIntent; onClose: () =
         {intent.name}
         {spec.deviceHint && ` · ${spec.deviceHint}`}
       </span>
-      <pre style={keyBox}>{value}</pre>
+      <CopyBlock value={value} />
       <Hint>On the device, install Tailscale, then run:</Hint>
-      <pre style={keyBox}>tailscale up --login-server=&lt;your-rasputin-mesh-url&gt; --auth-key={value}</pre>
+      <CopyBlock value={command} />
       <div>
         <Btn variant="primary" small onClick={onClose}>
-          I&apos;VE COPIED IT — CLOSE
+          DONE — CLOSE
         </Btn>
+      </div>
+    </div>
+  );
+}
+
+// Pre + COPY button overlay. The CopyButton floats in the top-right corner
+// so the value stays readable underneath.
+function CopyBlock({ value }: { value: string }) {
+  return (
+    <div style={{ position: 'relative' }}>
+      <pre style={keyBox}>{value}</pre>
+      <div style={{ position: 'absolute', top: 4, right: 4 }}>
+        <CopyButton value={value} />
       </div>
     </div>
   );

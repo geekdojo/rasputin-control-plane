@@ -5,7 +5,7 @@
 // labels, hairline borders, Pantone 172 C accent. Screens stay inline-styled;
 // these keep the common pieces consistent across pages.
 
-import { ExternalLink } from 'lucide-react';
+import { Check, Copy, ExternalLink } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { CSSProperties, ElementType, ReactNode } from 'react';
@@ -230,6 +230,46 @@ export function Btn({
     >
       {children}
     </button>
+  );
+}
+
+// Copy-to-clipboard button. Drop this next to ANY value the user is meant
+// to copy (auth keys, install commands, sample JSON, IDs). Shows a transient
+// "COPIED" state with a check icon; surfaces "FAILED" visibly if the
+// browser rejects clipboard access (typically: non-HTTPS context, no user
+// gesture in flight, or background-tab focus issues) so the user knows
+// they need to manually select.
+export function CopyButton({
+  value,
+  label = 'COPY',
+  title,
+  small = true,
+}: {
+  value: string;
+  label?: string;
+  title?: string;
+  small?: boolean;
+}) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+
+  async function handle() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setState('copied');
+      setTimeout(() => setState('idle'), 1500);
+    } catch {
+      setState('failed');
+      setTimeout(() => setState('idle'), 2500);
+    }
+  }
+
+  const Icon = state === 'copied' ? Check : Copy;
+  const text = state === 'copied' ? 'COPIED' : state === 'failed' ? 'FAILED' : label;
+  const variant: BtnVariant = state === 'failed' ? 'danger' : state === 'copied' ? 'primary' : 'default';
+  return (
+    <Btn variant={variant} small={small} onClick={handle} title={title ?? 'Copy to clipboard'}>
+      <Icon size={small ? 10 : 12} /> {text}
+    </Btn>
   );
 }
 
