@@ -840,17 +840,17 @@ func TestValidateIntentSpec_FirewallRule(t *testing.T) {
 	}
 
 	bad := map[string][]byte{
-		"not-json":      []byte(`{not json`),
-		"missing-src":   []byte(`{"target":"accept"}`),
-		"missing-tgt":   []byte(`{"src":"lan"}`),
-		"bad-target":    []byte(`{"src":"lan","target":"yeet"}`),
-		"bad-proto":     []byte(`{"src":"lan","target":"accept","proto":"sctp"}`),
-		"bad-srcip":     []byte(`{"src":"lan","target":"accept","srcIp":"not-an-ip"}`),
-		"bad-destip":    []byte(`{"src":"lan","target":"accept","destIp":"10.0.0.0/99"}`),
-		"port-zero":     []byte(`{"src":"lan","target":"accept","destPort":"0"}`),
-		"port-overflow": []byte(`{"src":"lan","target":"accept","destPort":"99999"}`),
+		"not-json":       []byte(`{not json`),
+		"missing-src":    []byte(`{"target":"accept"}`),
+		"missing-tgt":    []byte(`{"src":"lan"}`),
+		"bad-target":     []byte(`{"src":"lan","target":"yeet"}`),
+		"bad-proto":      []byte(`{"src":"lan","target":"accept","proto":"sctp"}`),
+		"bad-srcip":      []byte(`{"src":"lan","target":"accept","srcIp":"not-an-ip"}`),
+		"bad-destip":     []byte(`{"src":"lan","target":"accept","destIp":"10.0.0.0/99"}`),
+		"port-zero":      []byte(`{"src":"lan","target":"accept","destPort":"0"}`),
+		"port-overflow":  []byte(`{"src":"lan","target":"accept","destPort":"99999"}`),
 		"range-inverted": []byte(`{"src":"lan","target":"accept","destPort":"9000-8000"}`),
-		"range-bad-hi":  []byte(`{"src":"lan","target":"accept","destPort":"100-abc"}`),
+		"range-bad-hi":   []byte(`{"src":"lan","target":"accept","destPort":"100-abc"}`),
 	}
 	for name, raw := range bad {
 		if err := validateIntentSpec("firewall_rule", raw); err == nil {
