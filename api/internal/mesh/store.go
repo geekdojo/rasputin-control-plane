@@ -75,6 +75,27 @@ func (s *Store) DeleteIntent(ctx context.Context, id string) error {
 	return nil
 }
 
+// UpdateIntent rewrites the mutable columns (name, enabled, spec, updated_at)
+// for an existing intent. Hs_id / hs_value are NOT touched here — Headscale's
+// view of a key is bound at mint and stays put even when the user renames the
+// intent or toggles its enabled flag locally. Returns sql.ErrNoRows if the id
+// doesn't exist.
+func (s *Store) UpdateIntent(ctx context.Context, i *Intent) error {
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE mesh_intents
+        SET name = ?, enabled = ?, spec = ?, updated_at = ?
+        WHERE id = ?`,
+		i.Name, boolToInt(i.Enabled), string(i.Spec), ms(i.UpdatedAt), i.ID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) GetIntent(ctx context.Context, id string) (*Intent, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, kind, name, enabled, spec, hs_id, hs_value, created_at, updated_at

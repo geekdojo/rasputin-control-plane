@@ -548,6 +548,19 @@ export async function deleteMeshKey(id: string): Promise<void> {
   }
 }
 
+// PATCH /api/mesh/keys/{id} — only name + deviceHint are editable. user /
+// reusable / tags / expiresIn are bound at mint and rejected with 400 if sent.
+export function updateMeshKey(
+  id: string,
+  patch: { name?: string; deviceHint?: string },
+): Promise<MeshIntent> {
+  return jsonFetch<MeshIntent>(`/api/mesh/keys/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
 export async function listMeshRoutes(): Promise<MeshIntent[]> {
   return (await jsonFetch<MeshIntent[] | null>('/api/mesh/routes')) ?? [];
 }
@@ -561,6 +574,17 @@ export function createMeshRoute(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
+  });
+}
+
+export function updateMeshRoute(
+  id: string,
+  patch: { name?: string; enabled?: boolean; nodeId?: string; cidr?: string },
+): Promise<MeshIntent> {
+  return jsonFetch<MeshIntent>(`/api/mesh/routes/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
   });
 }
 

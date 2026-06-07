@@ -1,8 +1,8 @@
 'use client';
 
-import { Trash2, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { createMeshKey, deleteMeshKey, listMeshKeys } from '../../../../lib/api';
+import { Pencil, Trash2, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { createMeshKey, deleteMeshKey, listMeshKeys, updateMeshKey } from '../../../../lib/api';
 import { useMeshStateRefresh } from '../../../../lib/mesh-state-context';
 import type { MeshIntent, PreAuthKeySpec } from '../../../../lib/types';
 import {
@@ -14,6 +14,7 @@ import {
   Input,
   SectionLabel,
   Select,
+  Tok,
   tdStyle,
   thStyle,
 } from '../../../../components/kit';
@@ -22,12 +23,18 @@ import { ACCENT, accentA, MONO } from '../../../../components/ui-theme';
 export default function KeysPage() {
   const [keys, setKeys] = useState<MeshIntent[]>([]);
   const [freshKey, setFreshKey] = useState<MeshIntent | null>(null);
+  const [editing, setEditing] = useState<MeshIntent | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const formRef = useRef<HTMLDivElement>(null);
   const refreshMeshState = useMeshStateRefresh();
 
   useEffect(() => {
     refresh();
   }, []);
+
+  useEffect(() => {
+    if (editing) formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [editing]);
 
   function refresh() {
     listMeshKeys().then(setKeys).catch((e) => setErr(String(e)));
@@ -38,6 +45,7 @@ export default function KeysPage() {
     try {
       await deleteMeshKey(id);
       setKeys((prev) => prev.filter((k) => k.id !== id));
+      if (editing?.id === id) setEditing(null);
       refreshMeshState();
     } catch (e) {
       setErr(String(e));
@@ -72,8 +80,12 @@ export default function KeysPage() {
           <tbody>
             {keys.map((k) => {
               const spec = k.spec as PreAuthKeySpec;
+              const isEditing = editing?.id === k.id;
               return (
-                <tr key={k.id}>
+                <tr
+                  key={k.id}
+                  style={isEditing ? { background: 'rgba(228,230,234,0.04)' } : undefined}
+                >
                   <td style={{ ...tdStyle, color: FG }}>
                     {k.name}
                     {spec.deviceHint && (
@@ -85,7 +97,10 @@ export default function KeysPage() {
                   <td style={{ ...tdStyle, color: DIM }}>{(spec.tags || []).join(', ') || '—'}</td>
                   <td style={{ ...tdStyle, color: DIM }}>{spec.expiresIn || '—'}</td>
                   <td style={{ ...tdStyle, paddingRight: 0 }}>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                      <Btn small onClick={() => setEditing(k)} title="Rename or edit device hint">
+                        <Pencil size={10} /> EDIT
+                      </Btn>
                       <Btn variant="danger" small onClick={() => handleDeleteKey(k.id)}>
                         <Trash2 size={10} /> DELETE
                       </Btn>
@@ -98,14 +113,29 @@ export default function KeysPage() {
         </table>
       )}
 
-      <SectionLabel>ADD DEVICE</SectionLabel>
-      <AddDeviceForm
-        onCreated={(intent) => {
-          setFreshKey(intent);
-          refresh();
-          refreshMeshState();
-        }}
-      />
+      <div ref={formRef} style={{ scrollMarginTop: 16 }}>
+        <SectionLabel>
+          {editing ? `EDIT KEY — ${editing.name}` : 'ADD DEVICE'}
+        </SectionLabel>
+        <KeyForm
+          editing={editing}
+          onCreated={(intent) => {
+            setFreshKey(intent);
+            refresh();
+            refreshMeshState();
+          }}
+          onUpdated={(intent) => {
+            setKeys((prev) => prev.map((p) => (p.id === intent.id ? intent : p)));
+            setEditing(null);
+            // No mesh state refresh needed: rename/hint don't change the
+            // compile hash (intents are compiled by their Headscale-side
+            // attributes — user/tags/expiry/reusable — none of which we let
+            // you edit). Skipping the round trip keeps the chip stable
+            // through a pure display-field edit.
+          }}
+          onCancelEdit={() => setEditing(null)}
+        />
+      </div>
     </>
   );
 }
@@ -165,7 +195,17 @@ const keyBox: React.CSSProperties = {
   wordBreak: 'break-all',
 };
 
-function AddDeviceForm({ onCreated }: { onCreated: (i: MeshIntent) => void }) {
+function KeyForm({
+  editing,
+  onCreated,
+  onUpdated,
+  onCancelEdit,
+}: {
+  editing: MeshIntent | null;
+  onCreated: (i: MeshIntent) => void;
+  onUpdated: (i: MeshIntent) => void;
+  onCancelEdit: () => void;
+}) {
   const [name, setName] = useState('');
   const [hint, setHint] = useState('');
   const [reusable, setReusable] = useState(false);
@@ -173,17 +213,39 @@ function AddDeviceForm({ onCreated }: { onCreated: (i: MeshIntent) => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  function resetFields() {
+    setName('');
+    setHint('');
+    setReusable(false);
+    setExpiresIn('24h');
+    setErr(null);
+  }
+
+  useEffect(() => {
+    if (!editing) return;
+    const s = editing.spec as PreAuthKeySpec;
+    setName(editing.name);
+    setHint(s.deviceHint ?? '');
+    setReusable(s.reusable);
+    setExpiresIn(s.expiresIn ?? '24h');
+    setErr(null);
+    requestAnimationFrame(() => document.getElementById('key-name')?.focus());
+  }, [editing]);
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setErr(null);
     try {
-      const created = await createMeshKey({ name, deviceHint: hint, reusable, expiresIn });
-      onCreated(created);
-      setName('');
-      setHint('');
-      setReusable(false);
-      setExpiresIn('24h');
+      if (editing) {
+        const updated = await updateMeshKey(editing.id, { name, deviceHint: hint });
+        onUpdated(updated);
+        resetFields();
+      } else {
+        const created = await createMeshKey({ name, deviceHint: hint, reusable, expiresIn });
+        onCreated(created);
+        resetFields();
+      }
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -191,49 +253,80 @@ function AddDeviceForm({ onCreated }: { onCreated: (i: MeshIntent) => void }) {
     }
   }
 
+  function cancel() {
+    resetFields();
+    onCancelEdit();
+  }
+
   return (
-    <form onSubmit={submit} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-      <Input
-        placeholder="name (e.g. Bryce's MacBook)"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        required
-        style={{ flex: '1 1 200px' }}
-      />
-      <Input
-        placeholder="device hint (optional)"
-        value={hint}
-        onChange={(e) => setHint(e.target.value)}
-        style={{ flex: '1 1 180px' }}
-      />
-      <Select value={expiresIn} onChange={(e) => setExpiresIn(e.target.value)}>
-        <option value="1h">1h</option>
-        <option value="24h">24h (recommended)</option>
-        <option value="168h">7d</option>
-      </Select>
-      <label
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          color: DIM,
-          fontSize: 10,
-          fontFamily: MONO,
-          cursor: 'pointer',
-        }}
-      >
-        <input
-          type="checkbox"
-          checked={reusable}
-          onChange={(e) => setReusable(e.target.checked)}
-          style={{ accentColor: ACCENT }}
+    <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {editing && (
+        <Hint>
+          Only name and device hint are editable. <Tok>Reusable</Tok>, <Tok>expiry</Tok>, and{' '}
+          <Tok>tags</Tok> are bound at mint and can&apos;t change without re-creating the key (the
+          plaintext would be different).
+        </Hint>
+      )}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <Input
+          id="key-name"
+          placeholder="name (e.g. Bryce's MacBook)"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          required
+          style={{ flex: '1 1 200px' }}
         />
-        reusable
-      </label>
-      <Btn type="submit" variant="primary" disabled={busy || !name}>
-        {busy ? 'MINTING…' : 'GENERATE KEY'}
-      </Btn>
-      {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
+        <Input
+          placeholder="device hint (optional)"
+          value={hint}
+          onChange={(e) => setHint(e.target.value)}
+          style={{ flex: '1 1 180px' }}
+        />
+        {!editing && (
+          <>
+            <Select value={expiresIn} onChange={(e) => setExpiresIn(e.target.value)}>
+              <option value="1h">1h</option>
+              <option value="24h">24h (recommended)</option>
+              <option value="168h">7d</option>
+            </Select>
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                color: DIM,
+                fontSize: 10,
+                fontFamily: MONO,
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={reusable}
+                onChange={(e) => setReusable(e.target.checked)}
+                style={{ accentColor: ACCENT }}
+              />
+              reusable
+            </label>
+          </>
+        )}
+        {editing && (
+          <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
+            expires <Tok>{expiresIn}</Tok> · reusable <Tok>{reusable ? 'yes' : 'no'}</Tok>
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <Btn type="submit" variant="primary" disabled={busy || !name}>
+          {busy ? (editing ? 'UPDATING…' : 'MINTING…') : editing ? 'UPDATE KEY' : 'GENERATE KEY'}
+        </Btn>
+        {editing && (
+          <Btn onClick={cancel} disabled={busy}>
+            CANCEL
+          </Btn>
+        )}
+        {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
+      </div>
     </form>
   );
 }

@@ -1072,6 +1072,100 @@ func TestHandleMeshState_PendingFalseWhenFreshAndEmpty(t *testing.T) {
 	}
 }
 
+// PATCH /api/mesh/keys/{id} — name + deviceHint editable, immutable fields
+// rejected. enabled toggle explicitly rejected (semantically destructive for
+// already-minted keys; the user is supposed to DELETE + recreate).
+func TestHandleUpdateMeshKey(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	if w := f.do(t, http.MethodPost, "/api/mesh/keys",
+		`{"name":"laptop","deviceHint":"old hint","reusable":false,"expiresIn":"24h"}`, c); w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	// Find the created intent's id.
+	w := f.do(t, http.MethodGet, "/api/mesh/keys", "", c)
+	var keys []map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &keys)
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	id, _ := keys[0]["id"].(string)
+	if id == "" {
+		t.Fatal("intent missing id")
+	}
+	t.Run("rename + hint succeeds", func(t *testing.T) {
+		w := f.do(t, http.MethodPatch, "/api/mesh/keys/"+id, `{"name":"renamed","deviceHint":"new hint"}`, c)
+		if w.Code != http.StatusOK {
+			t.Errorf("want 200, got %d body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"name":"renamed"`) {
+			t.Errorf("rename didn't take: %s", w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"deviceHint":"new hint"`) {
+			t.Errorf("hint didn't take: %s", w.Body.String())
+		}
+	})
+	t.Run("enabled toggle rejected", func(t *testing.T) {
+		w := f.do(t, http.MethodPatch, "/api/mesh/keys/"+id, `{"enabled":false}`, c)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("want 400 on enabled toggle, got %d", w.Code)
+		}
+	})
+	t.Run("immutable fields rejected", func(t *testing.T) {
+		cases := []string{
+			`{"reusable":true}`,
+			`{"user":"someone-else"}`,
+			`{"expiresIn":"7d"}`,
+			`{"tags":["tag:other"]}`,
+		}
+		for _, body := range cases {
+			w := f.do(t, http.MethodPatch, "/api/mesh/keys/"+id, body, c)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("want 400 on %s, got %d", body, w.Code)
+			}
+		}
+	})
+	t.Run("404 for unknown id", func(t *testing.T) {
+		w := f.do(t, http.MethodPatch, "/api/mesh/keys/ghost", `{"name":"x"}`, c)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("want 404, got %d", w.Code)
+		}
+	})
+}
+
+// PATCH /api/mesh/routes/{id} — full edit: name, enabled, nodeId, cidr.
+func TestHandleUpdateMeshRoute(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	spec, _ := json.Marshal(map[string]any{"name": "lan", "nodeId": "node-1", "cidr": "10.0.0.0/24"})
+	now := time.Now().UTC()
+	if err := f.mesh.Store().CreateIntent(f.ctx, &mesh.Intent{
+		ID: "r-1", Kind: "subnet_route", Name: "lan",
+		Enabled: true, Spec: spec, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Run("rename + spec + toggle disable succeeds", func(t *testing.T) {
+		w := f.do(t, http.MethodPatch, "/api/mesh/routes/r-1",
+			`{"name":"lan-renamed","enabled":false,"cidr":"10.0.1.0/24"}`, c)
+		if w.Code != http.StatusOK {
+			t.Errorf("want 200, got %d body=%s", w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, `"name":"lan-renamed"`) ||
+			!strings.Contains(body, `"enabled":false`) ||
+			!strings.Contains(body, `"cidr":"10.0.1.0/24"`) {
+			t.Errorf("update didn't take: %s", body)
+		}
+	})
+	t.Run("404 for unknown id", func(t *testing.T) {
+		w := f.do(t, http.MethodPatch, "/api/mesh/routes/ghost", `{"name":"x"}`, c)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("want 404, got %d", w.Code)
+		}
+	})
+}
+
 // Creating an intent without applying flips pending=true. POST /api/mesh/keys
 // inline-mints the Headscale key (mesh.md §6) so it lands in lastApplied state
 // straight away — to test the unapplied path we poke the store directly with

@@ -296,6 +296,82 @@ func (s *Server) handleCreateMeshKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, intent)
 }
 
+// PATCH /api/mesh/keys/{id}
+// Body: { "name"?: string, "deviceHint"?: string }
+//
+// Only the display fields are editable — name and spec.deviceHint. The
+// underlying Headscale key is bound to user / reusable / tags / expiry at
+// mint and can't be re-bound without re-minting (v0.28 stores keys as a
+// prefix + bcrypt hash). Attempting to change any immutable field is a 400.
+//
+// `enabled` is intentionally NOT editable here: a "disabled" key on the
+// firewall side has clear semantics (skip on compile), but on the Headscale
+// side disable→enable can't round-trip the same plaintext, so a toggle
+// would be a destructive operation in disguise. The user is meant to
+// DELETE keys they want to invalidate; the path stays explicit.
+func (s *Server) handleUpdateMeshKey(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	existing, err := s.mesh.Store().GetIntent(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing == nil || existing.Kind != string(proto.IntentPreAuthKey) {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	var req struct {
+		Name       *string `json:"name"`
+		DeviceHint *string `json:"deviceHint"`
+		// Probe-fields — if the client sends them, we tell them why we
+		// reject. Easier to debug than a silently-ignored field.
+		Enabled   *bool     `json:"enabled"`
+		User      *string   `json:"user"`
+		Reusable  *bool     `json:"reusable"`
+		ExpiresIn *string   `json:"expiresIn"`
+		Tags      *[]string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Enabled != nil {
+		writeError(w, http.StatusBadRequest, "enabled toggle is not supported for keys — DELETE invalidates the key on Headscale; minting a new one creates a new plaintext")
+		return
+	}
+	if req.User != nil || req.Reusable != nil || req.ExpiresIn != nil || req.Tags != nil {
+		writeError(w, http.StatusBadRequest, "user / reusable / expiresIn / tags are bound at mint and cannot change — DELETE and create a new key instead")
+		return
+	}
+	var spec proto.PreAuthKeySpec
+	if err := json.Unmarshal(existing.Spec, &spec); err != nil {
+		writeError(w, http.StatusInternalServerError, "stored spec malformed: "+err.Error())
+		return
+	}
+	if req.Name != nil {
+		if *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "name cannot be empty")
+			return
+		}
+		existing.Name = *req.Name
+	}
+	if req.DeviceHint != nil {
+		spec.DeviceHint = *req.DeviceHint
+	}
+	newSpec, err := json.Marshal(spec)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	existing.Spec = newSpec
+	existing.UpdatedAt = time.Now().UTC()
+	if err := s.mesh.Store().UpdateIntent(r.Context(), existing); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, existing)
+}
+
 // DELETE /api/mesh/keys/{id}
 func (s *Server) handleDeleteMeshKey(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -363,6 +439,76 @@ func (s *Server) handleCreateMeshRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, intent)
+}
+
+// PATCH /api/mesh/routes/{id}
+// Body: { "name"?, "enabled"?, "nodeId"?, "cidr"? }
+//
+// Full edit surface — subnet routes aren't mint-bound the way pre-auth
+// keys are. Changes don't touch Headscale until the user clicks APPLY;
+// pending flips true on save.
+func (s *Server) handleUpdateMeshRoute(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	existing, err := s.mesh.Store().GetIntent(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing == nil || existing.Kind != string(proto.IntentSubnetRoute) {
+		writeError(w, http.StatusNotFound, "route not found")
+		return
+	}
+	var req struct {
+		Name    *string `json:"name"`
+		Enabled *bool   `json:"enabled"`
+		NodeID  *string `json:"nodeId"`
+		CIDR    *string `json:"cidr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	var spec proto.SubnetRouteSpec
+	if err := json.Unmarshal(existing.Spec, &spec); err != nil {
+		writeError(w, http.StatusInternalServerError, "stored spec malformed: "+err.Error())
+		return
+	}
+	if req.Name != nil {
+		if *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "name cannot be empty")
+			return
+		}
+		existing.Name = *req.Name
+	}
+	if req.Enabled != nil {
+		existing.Enabled = *req.Enabled
+	}
+	if req.NodeID != nil {
+		if *req.NodeID == "" {
+			writeError(w, http.StatusBadRequest, "nodeId cannot be empty")
+			return
+		}
+		spec.NodeID = *req.NodeID
+	}
+	if req.CIDR != nil {
+		if *req.CIDR == "" {
+			writeError(w, http.StatusBadRequest, "cidr cannot be empty")
+			return
+		}
+		spec.CIDR = *req.CIDR
+	}
+	newSpec, err := json.Marshal(spec)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	existing.Spec = newSpec
+	existing.UpdatedAt = time.Now().UTC()
+	if err := s.mesh.Store().UpdateIntent(r.Context(), existing); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, existing)
 }
 
 // DELETE /api/mesh/routes/{id}
