@@ -25,9 +25,10 @@ import { AlertsTab } from './AlertsTab';
 import { Chart } from './Chart';
 import { ContainersTab } from './ContainersTab';
 import { Drawer } from './Drawer';
+import { IDSAlertsTab } from './IDSAlertsTab';
 import { LogsTab } from './LogsTab';
 
-export type TabKey = 'metrics' | 'containers' | 'logs' | 'alerts';
+export type TabKey = 'metrics' | 'containers' | 'logs' | 'alerts' | 'ids';
 
 interface NodeDetailDrawerProps {
   node: Node | null;
@@ -40,12 +41,23 @@ interface NodeDetailDrawerProps {
   grafanaHref?: string;
 }
 
-const TABS: { key: TabKey; label: string }[] = [
+// All tabs in fixed order. The IDS tab only makes sense for firewall
+// nodes (snort doesn't run elsewhere), so the rendered list is filtered
+// per-node — see tabsForNode below.
+const ALL_TABS: { key: TabKey; label: string }[] = [
   { key: 'metrics', label: 'METRICS' },
   { key: 'containers', label: 'CONTAINERS' },
   { key: 'logs', label: 'LOGS' },
+  { key: 'ids', label: 'IDS' },
   { key: 'alerts', label: 'ALERTS' },
 ];
+
+function tabsForNode(node: Node | null): { key: TabKey; label: string }[] {
+  if (!node || node.role !== 'firewall') {
+    return ALL_TABS.filter((t) => t.key !== 'ids');
+  }
+  return ALL_TABS;
+}
 
 const METRICS_TO_CHART: { key: ObsSeriesMetric; title: string; unit: 'percent' | 'bytes' | 'load'; domainMax?: number }[] = [
   { key: 'cpu', title: 'CPU %', unit: 'percent', domainMax: 100 },
@@ -89,7 +101,7 @@ export function NodeDetailDrawer({
         ) : undefined
       }
     >
-      <Tabs current={tab} onChange={setTab} />
+      <Tabs current={tab} onChange={setTab} tabs={tabsForNode(node)} />
       <div style={{ flex: 1, padding: '16px 18px', display: 'flex', flexDirection: 'column' }}>
         {tab === 'metrics' && node && (
           <MetricsTab node={node} range={range} obsEnabled={obsEnabled} />
@@ -98,13 +110,24 @@ export function NodeDetailDrawer({
         {tab === 'logs' && node && (
           <LogsTab node={node} range={range} obsEnabled={obsEnabled} grafanaHref={grafanaHref} />
         )}
+        {tab === 'ids' && node && node.role === 'firewall' && (
+          <IDSAlertsTab node={node} range={range} obsEnabled={obsEnabled} />
+        )}
         {tab === 'alerts' && node && <AlertsTab node={node} />}
       </div>
     </Drawer>
   );
 }
 
-function Tabs({ current, onChange }: { current: TabKey; onChange: (k: TabKey) => void }) {
+function Tabs({
+  current,
+  onChange,
+  tabs,
+}: {
+  current: TabKey;
+  onChange: (k: TabKey) => void;
+  tabs: { key: TabKey; label: string }[];
+}) {
   return (
     <nav
       role="tablist"
@@ -115,7 +138,7 @@ function Tabs({ current, onChange }: { current: TabKey; onChange: (k: TabKey) =>
         borderBottom: `1px solid ${HAIR}`,
       }}
     >
-      {TABS.map((t) => {
+      {tabs.map((t) => {
         const active = t.key === current;
         return (
           <button
