@@ -25,8 +25,8 @@ import (
 // path. Tuned for "you can scroll a few days of alerts before Loki
 // stops returning rows."
 const (
-	DefaultMaxBytes    int64 = 100 << 20 // 100 MB
-	DefaultMaxBackups        = 5
+	DefaultMaxBytes   int64 = 100 << 20 // 100 MB
+	DefaultMaxBackups       = 5
 )
 
 // Writer appends one JSON line per IDS alert. The output line shape:

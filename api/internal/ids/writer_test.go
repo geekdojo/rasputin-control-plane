@@ -14,16 +14,16 @@ import (
 
 func sampleEvt() *proto.IDSAlertEvt {
 	return &proto.IDSAlertEvt{
-		NodeID:         "fw-1",
-		Ts:             time.Date(2026, 6, 8, 14, 23, 45, 0, time.UTC),
-		GID:            1, SID: 2009582, Rev: 5,
+		NodeID: "fw-1",
+		Ts:     time.Date(2026, 6, 8, 14, 23, 45, 0, time.UTC),
+		GID:    1, SID: 2009582, Rev: 5,
 		Message:        "ET POLICY HTTP traffic on port 443 (POST)",
 		Classification: "Potentially Bad Traffic",
 		Priority:       2,
 		Protocol:       "TCP",
 		SrcAddr:        "192.168.1.50", SrcPort: 54321,
-		DstAddr:        "8.8.8.8", DstPort: 443,
-		Raw:            "06/08-14:23:45.123456 [**] [1:2009582:5] ET POLICY HTTP traffic on port 443 (POST) [**] ...",
+		DstAddr: "8.8.8.8", DstPort: 443,
+		Raw: "06/08-14:23:45.123456 [**] [1:2009582:5] ET POLICY HTTP traffic on port 443 (POST) [**] ...",
 	}
 }
 
