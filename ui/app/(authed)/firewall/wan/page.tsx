@@ -72,15 +72,16 @@ export default function WANPage() {
       <Hint style={{ marginBottom: 14 }}>
         WAN configs for the firewall&apos;s upstream interface. Keep multiple profiles around
         (<Tok>isp-primary</Tok>, <Tok>isp-backup</Tok>); turning one ON automatically turns the
-        others OFF. With <strong>zero</strong> rows, OpenWrt&apos;s stock WAN (DHCP) is in effect —
-        Rasputin doesn&apos;t manage it. Once you add a row, Rasputin owns the section.
+        others OFF. With <strong>zero</strong> rows, Rasputin doesn&apos;t manage WAN — whatever
+        the firewall&apos;s stock config does is in effect. Once you add a row, Rasputin owns the
+        section.
       </Hint>
 
       {noneEnabled && (
         <Hint warn style={{ marginBottom: 14 }}>
           ⚠ No WAN config is enabled. On the next APPLY the firewall&apos;s WAN interface will be
-          set to <Tok>proto=none</Tok> (outbound traffic blocked at the WAN side). Enable a row to
-          restore connectivity.
+          administratively brought down — outbound traffic blocked. Enable a row to restore
+          connectivity.
         </Hint>
       )}
 
@@ -91,7 +92,8 @@ export default function WANPage() {
       <SectionLabel>WAN CONFIGS</SectionLabel>
       {wanConfigs.length === 0 ? (
         <Hint style={{ marginBottom: 24 }}>
-          no WAN configs — OpenWrt&apos;s stock DHCP on wan is in effect. Add one below to take over.
+          no WAN configs — the firewall&apos;s stock config is in effect. Add one below for
+          Rasputin to take over.
         </Hint>
       ) : (
         <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 24 }}>

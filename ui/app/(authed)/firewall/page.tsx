@@ -47,7 +47,8 @@ export default function FirewallOverview() {
       <SectionLabel>NEXT</SectionLabel>
       <Hint>
         Port forwards, zone-based rules, and WAN configs are live. WireGuard peers land once the
-        Headscale mesh has settled (see F-5). The OpenWrt escape hatch lives in{' '}
+        Headscale mesh has settled (see F-5). The firewall&apos;s native admin UI is the escape
+        hatch for anything Rasputin doesn&apos;t expose — see{' '}
         <Link href="/firewall/advanced" style={{ color: ACCENT, textDecoration: 'none' }}>
           ADVANCED
         </Link>
