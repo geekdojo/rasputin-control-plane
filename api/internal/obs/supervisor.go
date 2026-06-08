@@ -150,6 +150,24 @@ type DockerComposeSupervisorConfig struct {
 	// in play.
 	EnableLoki *bool
 
+	// IDSLogDir is the host directory containing the api's IDS-alert
+	// JSONL (api/internal/ids.Writer's parent dir). The Alloy container
+	// mounts it read-only at /var/log/rasputin/ so loki.source.file can
+	// tail the alert stream and ship to Loki with labels {job=rasputin-ids,
+	// node_id=...}. Empty (default) disables the IDS pipe.
+	//
+	// Convention: <dataDir>/obs/ids-alerts. The api wires it; the
+	// supervisor just mounts it.
+	IDSLogDir string
+
+	// EnableIDSPipe toggles Alloy's loki.source.file → loki.process →
+	// loki.write chain for the IDS-alert JSONL. Implicitly requires
+	// EnableLoki. Default true when both EnableLoki=true AND IDSLogDir
+	// is non-empty — operators get the IDS pipe automatically as soon
+	// as they wire the api side. Forced off by setting *EnableIDSPipe=false
+	// or leaving IDSLogDir empty.
+	EnableIDSPipe *bool
+
 	// GrafanaImage overrides the Grafana image reference. Defaults to
 	// the pinned upstream tag. Grafana joins the stack at Slice 1.4
 	// and is reached via the api's auth-proxy at /observability/*.
@@ -300,6 +318,12 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	if cfg.EnableLoki == nil {
 		t := true
 		cfg.EnableLoki = &t
+	}
+	if cfg.EnableIDSPipe == nil {
+		// Implicit-on when both Loki and an IDS log dir are configured.
+		// Off otherwise — there's nothing to ship.
+		on := *cfg.EnableLoki && cfg.IDSLogDir != ""
+		cfg.EnableIDSPipe = &on
 	}
 	if cfg.GrafanaImage == "" {
 		cfg.GrafanaImage = defaultGrafanaImage
@@ -497,6 +521,16 @@ func (s *DockerComposeSupervisor) prepareHostDirs() error {
 // have to chase the (nil-vs-pointer)? shape of EnableLoki everywhere.
 func (s *DockerComposeSupervisor) lokiEnabled() bool {
 	return s.cfg.EnableLoki != nil && *s.cfg.EnableLoki
+}
+
+// idsPipeEnabled reports whether Alloy should tail+ship the IDS-alert
+// JSONL. Requires Loki on AND a non-empty IDSLogDir — the dir is what
+// gets mounted into Alloy at /var/log/rasputin.
+func (s *DockerComposeSupervisor) idsPipeEnabled() bool {
+	if s.cfg.EnableIDSPipe == nil || !*s.cfg.EnableIDSPipe {
+		return false
+	}
+	return s.lokiEnabled() && s.cfg.IDSLogDir != ""
 }
 
 // cadvisorEnabled mirrors lokiEnabled — single-source-of-truth for the
@@ -820,6 +854,7 @@ func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
 	data := alloyConfigData{
 		EnableCadvisor: s.cadvisorEnabled(),
 		EnableLoki:     s.lokiEnabled(),
+		EnableIDSPipe:  s.idsPipeEnabled(),
 	}
 	var buf bytes.Buffer
 	if err := alloyConfigTmpl.Execute(&buf, data); err != nil {
@@ -831,6 +866,7 @@ func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
 type alloyConfigData struct {
 	EnableCadvisor bool
 	EnableLoki     bool
+	EnableIDSPipe  bool
 }
 
 // alloyConfigTmpl is the Slice 1.2 Alloy config in River syntax. It does
@@ -924,6 +960,33 @@ loki.source.docker "containers" {
   targets    = discovery.relabel.containers.output
   forward_to = [loki.write.local.receiver]
 }
+{{- if .EnableIDSPipe }}
+
+// ----- IDS alert pipe (snort3 → bus → api JSONL → here → Loki) -----
+// The api's ids.Writer appends one JSON line per snort alert to
+// /var/log/rasputin/alerts.jsonl (the supervisor mounts the host dir
+// read-only). loki.process pulls nodeId out of the JSON so the UI
+// can query {job="rasputin-ids", node_id="fw-1"} without scanning
+// every node's alerts.
+loki.source.file "ids_alerts" {
+  targets = [
+    {"__path__" = "/var/log/rasputin/alerts.jsonl", "job" = "rasputin-ids"},
+  ]
+  forward_to = [loki.process.ids_alerts.receiver]
+}
+
+loki.process "ids_alerts" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.json {
+    expressions = {nodeId = "nodeId", sid = "sid", priority = "priority"}
+  }
+
+  stage.labels {
+    values = {node_id = "nodeId"}
+  }
+}
+{{- end }}
 {{- end }}
 `))
 
@@ -984,6 +1047,8 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 		AlloyConfigFile:     alloyConfigFile,
 		EnableCadvisor:      s.cadvisorEnabled(),
 		EnableLoki:          s.lokiEnabled(),
+		EnableIDSPipe:       s.idsPipeEnabled(),
+		IDSLogHostDir:       s.cfg.IDSLogDir,
 		LokiImage:           s.cfg.LokiImage,
 		LokiHost:            lokiHost,
 		LokiPort:            lokiPort,
@@ -1023,6 +1088,8 @@ type composeData struct {
 	AlloyConfigFile     string
 	EnableCadvisor      bool
 	EnableLoki          bool
+	EnableIDSPipe       bool
+	IDSLogHostDir       string // absolute host path, mounted into Alloy at /var/log/rasputin
 	LokiImage           string
 	LokiHost            string
 	LokiPort            string
@@ -1108,6 +1175,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /sys:/sys:ro
       - /var/lib/docker:/var/lib/docker:ro
+{{- end }}
+{{- if .EnableIDSPipe }}
+      # IDS alert JSONL the api writes — Alloy tails it via
+      # loki.source.file (see alloyConfigTmpl). Read-only because the
+      # api owns the file lifecycle (open/rotate/close); Alloy just
+      # follows it.
+      - {{.IDSLogHostDir}}:/var/log/rasputin:ro
 {{- end }}
     depends_on:
       - victoriametrics

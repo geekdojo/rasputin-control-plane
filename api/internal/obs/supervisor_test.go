@@ -394,6 +394,75 @@ func TestRenderAlloyConfig_CadvisorDisabled(t *testing.T) {
 	}
 }
 
+func TestRenderCompose_IDSMountPresentWhenEnabled(t *testing.T) {
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:  t.TempDir(),
+		IDSLogDir: "/var/lib/rasputin/obs/ids-alerts",
+	})
+	body, err := sup.renderCompose()
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	s := string(body)
+	if !strings.Contains(s, "/var/lib/rasputin/obs/ids-alerts:/var/log/rasputin:ro") {
+		t.Errorf("compose missing IDS log mount\n--- compose ---\n%s", s)
+	}
+}
+
+func TestRenderCompose_IDSMountAbsentWithoutLogDir(t *testing.T) {
+	// IDSLogDir empty (the default) → no mount, even if EnableIDSPipe is
+	// explicitly true. The pipe is meaningless without a source path.
+	tr := true
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:      t.TempDir(),
+		EnableIDSPipe: &tr,
+	})
+	body, _ := sup.renderCompose()
+	if strings.Contains(string(body), "/var/log/rasputin:ro") {
+		t.Errorf("compose should NOT have IDS mount when IDSLogDir empty\n%s", body)
+	}
+}
+
+func TestRenderAlloyConfig_IDSPipePresentWhenEnabled(t *testing.T) {
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:  t.TempDir(),
+		IDSLogDir: "/var/lib/rasputin/obs/ids-alerts",
+	})
+	body, err := sup.renderAlloyConfig()
+	if err != nil {
+		t.Fatalf("render alloy: %v", err)
+	}
+	s := string(body)
+	for _, want := range []string{
+		`loki.source.file "ids_alerts"`,
+		`"__path__" = "/var/log/rasputin/alerts.jsonl"`,
+		`"job" = "rasputin-ids"`,
+		`loki.process "ids_alerts"`,
+		`nodeId = "nodeId"`,
+		`node_id = "nodeId"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("alloy config missing IDS-pipe fragment %q\n--- alloy ---\n%s", want, s)
+		}
+	}
+}
+
+func TestRenderAlloyConfig_IDSPipeAbsentWhenLokiOff(t *testing.T) {
+	// EnableIDSPipe defaults on when Loki is on AND IDSLogDir is set.
+	// Forcing Loki off must also turn the IDS pipe off — Alloy can't
+	// write to a non-running Loki.
+	f := false
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:   t.TempDir(),
+		EnableLoki: &f,
+		IDSLogDir:  "/var/lib/rasputin/obs/ids-alerts",
+	})
+	body, _ := sup.renderAlloyConfig()
+	if strings.Contains(string(body), "ids_alerts") {
+		t.Errorf("IDS pipe should be off when Loki is off\n%s", body)
+	}
+}
+
 func TestStart_WritesAlloyConfig(t *testing.T) {
 	vm := newStubVM()
 	srv := httptest.NewServer(vm.handler())

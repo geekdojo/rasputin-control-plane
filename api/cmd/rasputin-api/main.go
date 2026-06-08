@@ -281,7 +281,12 @@ func main() {
 	// Even with obs off, the file is still written so operators can
 	// `tail -f` / `jq` it from disk. Path is under dataDir so it survives
 	// the same way every other persistent state does.
-	idsLogPath := filepath.Join(dataDir, "obs", "ids-alerts", "alerts.jsonl")
+	//
+	// idsLogDir is passed to mustWireObs so the supervisor knows where to
+	// mount the host dir into the Alloy container; same constant both
+	// sides → no path-mismatch class of bug.
+	idsLogDir := filepath.Join(dataDir, "obs", "ids-alerts")
+	idsLogPath := filepath.Join(idsLogDir, "alerts.jsonl")
 	idsWriter, err := ids.NewWriter(idsLogPath)
 	if err != nil {
 		log.Fatalf("rasputin-api: ids writer: %v", err)
@@ -297,7 +302,7 @@ func main() {
 	// Off by default so dev runs don't require Docker; set
 	// RASPUTIN_OBS_ENABLED=1 to bring up VM and start remote-writing every
 	// agent sample. See wiki design/control-plane/observability-stack.md.
-	obsSup, obsSink, obsStatus := mustWireObs(ctx, dataDir, metricsSvc)
+	obsSup, obsSink, obsStatus := mustWireObs(ctx, dataDir, metricsSvc, idsLogDir)
 	if obsSup != nil {
 		defer func() {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -505,7 +510,7 @@ func splitCSV(s string) []string {
 //
 // Side effect: when obs is enabled, this also calls metricsSvc.SetSink
 // so every received MetricsEvt fans out to VM after the SQLite insert.
-func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Service) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
+func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Service, idsLogDir string) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
 	if os.Getenv("RASPUTIN_OBS_ENABLED") != "1" {
 		log.Printf("rasputin-api: obs disabled (set RASPUTIN_OBS_ENABLED=1 to enable)")
 		return nil, nil, obs.NewStatus(nil, nil, nil)
@@ -532,6 +537,13 @@ func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Servic
 		AlertsWebhookURL:    os.Getenv("RASPUTIN_OBS_ALERTS_WEBHOOK_URL"),
 		AlertsWebhookSecret: os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"),
 		EnableVMAlert:       envBoolPtr("RASPUTIN_OBS_VMALERT"),
+		// IDS log dir mounted into Alloy at /var/log/rasputin so
+		// loki.source.file can ship the api's alerts.jsonl to Loki.
+		// Same path the api's ids.Writer just opened a few lines above
+		// — passed through as a string both ends use literally so a
+		// rename in one place trips a build error not a runtime miss.
+		IDSLogDir:     idsLogDir,
+		EnableIDSPipe: envBoolPtr("RASPUTIN_OBS_IDS_PIPE"),
 	})
 	if err != nil {
 		log.Fatalf("rasputin-api: obs supervisor: %v", err)
