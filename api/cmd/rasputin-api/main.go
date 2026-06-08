@@ -21,6 +21,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
@@ -274,6 +275,23 @@ func main() {
 		log.Fatalf("rasputin-api: metrics service: %v", err)
 	}
 	defer metricsSvc.Stop()
+
+	// IDS alert subscriber — appends each firewall snort alert to a JSONL
+	// file the obs Alloy tails (when EnableLoki + EnableIDSPipe are on).
+	// Even with obs off, the file is still written so operators can
+	// `tail -f` / `jq` it from disk. Path is under dataDir so it survives
+	// the same way every other persistent state does.
+	idsLogPath := filepath.Join(dataDir, "obs", "ids-alerts", "alerts.jsonl")
+	idsWriter, err := ids.NewWriter(idsLogPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: ids writer: %v", err)
+	}
+	defer func() { _ = idsWriter.Close() }()
+	idsSvc := ids.NewService(idsWriter, busSrv.Conn())
+	if err := idsSvc.Start(ctx); err != nil {
+		log.Fatalf("rasputin-api: ids service: %v", err)
+	}
+	defer idsSvc.Stop()
 
 	// Tier 2 observability — VictoriaMetrics sidecar + metrics fan-out.
 	// Off by default so dev runs don't require Docker; set
