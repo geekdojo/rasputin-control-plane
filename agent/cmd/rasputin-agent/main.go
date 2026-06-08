@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
@@ -133,6 +134,16 @@ func main() {
 				_ = sub.Unsubscribe()
 			}
 		}()
+
+		// IDS alert tailer — tails snort3's alert_fast log (path comes
+		// from the firewall image's /etc/config/snort log_dir UCI option;
+		// 99-rasputin seeds it to /var/log/snort) and publishes one event
+		// per parsed alert on rasputin.node.<id>.evt.ids.alert. Only
+		// firewall-role agents start this loop (compute/controlplane
+		// agents don't run snort and have no log to tail). The path
+		// override is honored via RASPUTIN_IDS_ALERT_LOG for dev/test;
+		// blank means use the default in the ids package.
+		go ids.Run(ctx, nc, nodeID, os.Getenv("RASPUTIN_IDS_ALERT_LOG"))
 	}
 
 	// OS update handlers — every node gets them. Picks `rauc` if the CLI
