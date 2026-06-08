@@ -11,13 +11,14 @@ type FirewallIntentKind string
 const (
 	IntentPortForward  FirewallIntentKind = "port_forward"
 	IntentFirewallRule FirewallIntentKind = "firewall_rule"
+	IntentWANConfig    FirewallIntentKind = "wan_config"
 	// Reserved for future:
 	// IntentWGPeer FirewallIntentKind = "wg_peer"
 	// IntentVLAN   FirewallIntentKind = "vlan"
 )
 
 // AllFirewallIntentKinds lists supported intent kinds for validation.
-var AllFirewallIntentKinds = []FirewallIntentKind{IntentPortForward, IntentFirewallRule}
+var AllFirewallIntentKinds = []FirewallIntentKind{IntentPortForward, IntentFirewallRule, IntentWANConfig}
 
 // ValidFirewallIntentKind reports whether k is one of the supported kinds.
 func ValidFirewallIntentKind(k FirewallIntentKind) bool {
@@ -68,6 +69,46 @@ const (
 	RuleTargetReject FirewallRuleTarget = "reject"
 	RuleTargetDrop   FirewallRuleTarget = "drop"
 )
+
+// WANProto enumerates supported WAN-interface protocols.
+type WANProto string
+
+const (
+	WANProtoDHCP   WANProto = "dhcp"
+	WANProtoStatic WANProto = "static"
+	WANProtoPppoe  WANProto = "pppoe"
+)
+
+// WANConfigSpec describes a single WAN-interface configuration. Multiple
+// configs can coexist in the table — the operator might keep an "ISP A" and
+// "ISP B" profile around — but **at most one** is ever Enabled at a time
+// (enforced by the api at create / update / toggle time). 0 enabled is the
+// explicit "kill outbound" path: Compile emits `network.wan.proto = "none"`.
+//
+// The physical interface (`ifname`) is intentionally NOT part of the spec.
+// It's hardware-role-specific (eth0 on the Phase 2 RPi 5 firewall, eth1 on
+// the Phase 3 N100 + i226-V firewall) and lives in the agent's preconfigured
+// UCI `wan` interface section. The compiler only overrides the proto-specific
+// option keys, leaving ifname untouched.
+//
+// Field presence is gated by Proto — see validateIntentSpec for the contract.
+type WANConfigSpec struct {
+	Proto WANProto `json:"proto"`
+	// DHCP — Hostname is optional client-id hint passed to the upstream
+	// DHCP server.
+	Hostname string `json:"hostname,omitempty"`
+	// Static — IP is in CIDR form (e.g. "203.0.113.5/24"); Gateway is a
+	// bare address; DNS is 0+ resolver addresses.
+	IP      string   `json:"ip,omitempty"`
+	Gateway string   `json:"gateway,omitempty"`
+	DNS     []string `json:"dns,omitempty"`
+	// PPPoE — Username + Secret required; Service optional (some ISPs
+	// require a specific service-name tag).
+	Username string `json:"username,omitempty"`
+	Secret   string `json:"secret,omitempty"`
+	Service  string `json:"service,omitempty"`
+	Comment  string `json:"comment,omitempty"`
+}
 
 // FirewallRuleSpec describes a generic zone-based accept/drop rule.
 //

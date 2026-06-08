@@ -12,17 +12,26 @@ import (
 )
 
 // Compile turns a list of intents into the canonical UCI representation the
-// agent's UCIClient applies. Disabled intents are skipped. Output shape:
+// agent's UCIClient applies. Disabled firewall intents are skipped (their
+// presence is preserved in storage so users can re-enable later). Output
+// shape:
 //
 //	{
 //	  "firewall": {
 //	    "redirect": [ { "name": "...", "src": "wan", ... }, ... ],
 //	    "rule":     [ { "name": "...", "src": "iot", ... }, ... ]
+//	  },
+//	  "network": {            // present only when ≥1 wan_config row exists
+//	    "wan": { "proto": ..., ... }
 //	  }
 //	}
 //
-// Both slices are always present (possibly empty) so the canonical-empty hash
-// is stable regardless of which kinds the user has on file.
+// The "firewall" key is always present (even with empty slices) so the
+// canonical-empty hash is stable across the rule/port-forward intent kinds.
+// The "network" key is present **only when the user has at least one
+// wan_config row** — its absence is the signal "Rasputin doesn't manage WAN
+// here, leave OpenWrt's stock config alone." See firewall-integration.md
+// §13 for the full state model.
 //
 // The returned hash is SHA-256 over json.Marshal(state). Map encoding in Go's
 // encoding/json sorts keys alphabetically, so the hash is deterministic for
@@ -32,24 +41,42 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 	redirects := make([]map[string]any, 0, len(intents))
 	rules := make([]map[string]any, 0, len(intents))
 
+	var wanConfigSeen int
+	var enabledWAN *Intent
+
 	for _, in := range intents {
-		if !in.Enabled {
-			continue
-		}
 		kind := proto.FirewallIntentKind(in.Kind)
 		switch kind {
 		case proto.IntentPortForward:
+			if !in.Enabled {
+				continue
+			}
 			r, err := compilePortForward(in)
 			if err != nil {
 				return nil, "", fmt.Errorf("intent %s (%s): %w", in.ID, in.Name, err)
 			}
 			redirects = append(redirects, r)
 		case proto.IntentFirewallRule:
+			if !in.Enabled {
+				continue
+			}
 			r, err := compileFirewallRule(in)
 			if err != nil {
 				return nil, "", fmt.Errorf("intent %s (%s): %w", in.ID, in.Name, err)
 			}
 			rules = append(rules, r)
+		case proto.IntentWANConfig:
+			// Count every wan_config row (enabled or not) — the existence of
+			// ≥1 row is what signals "Rasputin manages WAN here." The api
+			// validation layer enforces ≤1 enabled, but compile defends
+			// against an inconsistent store anyway.
+			wanConfigSeen++
+			if in.Enabled {
+				if enabledWAN != nil {
+					return nil, "", fmt.Errorf("more than one wan_config is enabled (%s and %s) — at most one allowed", enabledWAN.ID, in.ID)
+				}
+				enabledWAN = in
+			}
 		default:
 			return nil, "", fmt.Errorf("intent %s: unsupported kind %q", in.ID, in.Kind)
 		}
@@ -61,11 +88,82 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 			"rule":     rules,
 		},
 	}
+
+	if wanConfigSeen > 0 {
+		wan, err := compileWANConfig(enabledWAN)
+		if err != nil {
+			return nil, "", err
+		}
+		state["network"] = map[string]any{"wan": wan}
+	}
+
 	h, err := Hash(state)
 	if err != nil {
 		return nil, "", err
 	}
 	return state, h, nil
+}
+
+// compileWANConfig produces the OpenWrt `network.wan` UCI section. A nil
+// intent means "the user has wan_config rows but none enabled" — that's the
+// explicit kill-outbound case, rendered as `proto = "none"` (OpenWrt's idiom
+// for an administratively-down interface).
+//
+// ifname is intentionally NOT emitted — it lives in the agent's preconfigured
+// `wan` section and is hardware-role-specific. We only override the proto
+// and proto-specific option keys. (For a real ubus backend this implies a
+// merge into /etc/config/network, not a full replace — see §6 of the doc.)
+func compileWANConfig(in *Intent) (map[string]any, error) {
+	if in == nil {
+		return map[string]any{"proto": "none"}, nil
+	}
+	var spec proto.WANConfigSpec
+	if err := json.Unmarshal(in.Spec, &spec); err != nil {
+		return nil, fmt.Errorf("invalid wan_config spec: %w", err)
+	}
+	r := map[string]any{}
+	switch spec.Proto {
+	case proto.WANProtoDHCP:
+		r["proto"] = "dhcp"
+		if spec.Hostname != "" {
+			r["hostname"] = spec.Hostname
+		}
+	case proto.WANProtoStatic:
+		if spec.IP == "" {
+			return nil, fmt.Errorf("static wan_config %s: ip is required", in.ID)
+		}
+		if spec.Gateway == "" {
+			return nil, fmt.Errorf("static wan_config %s: gateway is required", in.ID)
+		}
+		r["proto"] = "static"
+		r["ipaddr"] = spec.IP
+		r["gateway"] = spec.Gateway
+		if len(spec.DNS) > 0 {
+			// UCI dns is a space-separated list in option form.
+			r["dns"] = strings.Join(spec.DNS, " ")
+		}
+	case proto.WANProtoPppoe:
+		if spec.Username == "" {
+			return nil, fmt.Errorf("pppoe wan_config %s: username is required", in.ID)
+		}
+		if spec.Secret == "" {
+			return nil, fmt.Errorf("pppoe wan_config %s: secret is required", in.ID)
+		}
+		r["proto"] = "pppoe"
+		r["username"] = spec.Username
+		r["password"] = spec.Secret
+		if spec.Service != "" {
+			r["service"] = spec.Service
+		}
+	case "":
+		return nil, fmt.Errorf("wan_config %s: proto is required", in.ID)
+	default:
+		return nil, fmt.Errorf("wan_config %s: unsupported proto %q", in.ID, spec.Proto)
+	}
+	if spec.Comment != "" {
+		r["_comment"] = spec.Comment
+	}
+	return r, nil
 }
 
 func compilePortForward(in *Intent) (map[string]any, error) {

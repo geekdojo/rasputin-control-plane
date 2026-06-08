@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -70,7 +71,36 @@ func (s *Server) handleCreateIntent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := enforceWANConfigInvariant(r.Context(), s.fw, intent); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, intent)
+}
+
+// enforceWANConfigInvariant disables any sibling wan_config rows when the
+// just-written intent is an enabled wan_config. No-op for other kinds, for
+// disabled wan_configs, and for the always-OK case where this is the only
+// enabled wan_config in the table.
+//
+// Per firewall-integration.md §13, at most one wan_config can be enabled.
+// Toggling ON one config implicitly toggles OFF the others — the "switch
+// between ISP profiles" gesture. The api enforces this rather than asking
+// users to manually disable the previous active config first.
+func enforceWANConfigInvariant(ctx context.Context, fw wanInvariantStore, intent *firewall.Intent) error {
+	if intent.Kind != string(proto.IntentWANConfig) || !intent.Enabled {
+		return nil
+	}
+	if _, err := fw.DisableOtherWANConfigs(ctx, intent.ID); err != nil {
+		return errors.New("disable other wan_configs: " + err.Error())
+	}
+	return nil
+}
+
+// wanInvariantStore is the slice of *firewall.Store the helper needs — kept
+// narrow so tests can substitute a fake without depending on the full store.
+type wanInvariantStore interface {
+	DisableOtherWANConfigs(ctx context.Context, keepID string) (int64, error)
 }
 
 // PATCH /api/firewall/intents/{id}
@@ -110,6 +140,10 @@ func (s *Server) handleUpdateIntent(w http.ResponseWriter, r *http.Request) {
 	}
 	existing.UpdatedAt = time.Now().UTC()
 	if err := s.fw.UpdateIntent(r.Context(), existing); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := enforceWANConfigInvariant(r.Context(), s.fw, existing); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -224,6 +258,12 @@ func validateIntentSpec(kind string, raw json.RawMessage) error {
 			return errors.New("protocol must be tcp, udp, or tcpudp")
 		}
 		return nil
+	case proto.IntentWANConfig:
+		var spec proto.WANConfigSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			return errors.New("invalid wan_config spec: " + err.Error())
+		}
+		return validateWANConfigSpec(spec)
 	case proto.IntentFirewallRule:
 		var spec proto.FirewallRuleSpec
 		if err := json.Unmarshal(raw, &spec); err != nil {
@@ -259,6 +299,48 @@ func validateIntentSpec(kind string, raw json.RawMessage) error {
 		return nil
 	}
 	return errors.New("unsupported intent kind")
+}
+
+// validateWANConfigSpec enforces the protocol-specific required-fields
+// contract documented on proto.WANConfigSpec. Fields outside the active
+// protocol are silently accepted (they're saved as-is) — the compiler only
+// emits the ones it cares about for the chosen Proto, so leaving extras
+// lets users keep dormant ISP-A settings around while ISP-B is active.
+func validateWANConfigSpec(spec proto.WANConfigSpec) error {
+	switch spec.Proto {
+	case proto.WANProtoDHCP:
+		// Hostname is optional; no validation required beyond that.
+	case proto.WANProtoStatic:
+		if spec.IP == "" {
+			return errors.New("static proto: ip is required (CIDR form, e.g. 203.0.113.5/24)")
+		}
+		if err := validateIPOrCIDR("ip", spec.IP); err != nil {
+			return err
+		}
+		if spec.Gateway == "" {
+			return errors.New("static proto: gateway is required")
+		}
+		if err := validateIPOrCIDR("gateway", spec.Gateway); err != nil {
+			return err
+		}
+		for i, d := range spec.DNS {
+			if err := validateIPOrCIDR("dns["+strconv.Itoa(i)+"]", d); err != nil {
+				return err
+			}
+		}
+	case proto.WANProtoPppoe:
+		if spec.Username == "" {
+			return errors.New("pppoe proto: username is required")
+		}
+		if spec.Secret == "" {
+			return errors.New("pppoe proto: secret is required")
+		}
+	case "":
+		return errors.New("proto is required (dhcp, static, or pppoe)")
+	default:
+		return errors.New("proto must be dhcp, static, or pppoe")
+	}
+	return nil
 }
 
 // validateIPOrCIDR accepts either a bare address ("10.0.0.5") or a prefix

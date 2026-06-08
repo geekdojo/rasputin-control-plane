@@ -73,11 +73,28 @@ export interface InventoryChangeEvent {
   ts: string;
 }
 
-export type FirewallIntentKind = 'port_forward' | 'firewall_rule';
+export type FirewallIntentKind = 'port_forward' | 'firewall_rule' | 'wan_config';
 export type PortForwardProto = 'tcp' | 'udp' | 'tcpudp';
 
 export type FirewallRuleProto = 'tcp' | 'udp' | 'tcpudp' | 'icmp' | 'any';
 export type FirewallRuleTarget = 'accept' | 'reject' | 'drop';
+
+export type WANProto = 'dhcp' | 'static' | 'pppoe';
+
+export interface WANConfigSpec {
+  proto: WANProto;
+  // dhcp
+  hostname?: string;
+  // static
+  ip?: string;
+  gateway?: string;
+  dns?: string[];
+  // pppoe
+  username?: string;
+  secret?: string;
+  service?: string;
+  comment?: string;
+}
 
 export interface FirewallRuleSpec {
   src: string; // zone, required
@@ -107,7 +124,7 @@ export interface FirewallIntent {
   enabled: boolean;
   // Narrow by `kind` at the use site (see PreAuthKeySpec / SubnetRouteSpec
   // pattern on MeshIntent).
-  spec: PortForwardSpec | FirewallRuleSpec;
+  spec: PortForwardSpec | FirewallRuleSpec | WANConfigSpec;
   createdAt: string;
   updatedAt: string;
 }

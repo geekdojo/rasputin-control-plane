@@ -818,6 +818,112 @@ func TestValidateIntentSpec(t *testing.T) {
 	}
 }
 
+func TestValidateIntentSpec_WANConfig(t *testing.T) {
+	good := [][]byte{
+		[]byte(`{"proto":"dhcp"}`),
+		[]byte(`{"proto":"dhcp","hostname":"router"}`),
+		[]byte(`{"proto":"static","ip":"203.0.113.5/24","gateway":"203.0.113.1"}`),
+		[]byte(`{"proto":"static","ip":"203.0.113.5/24","gateway":"203.0.113.1","dns":["1.1.1.1"]}`),
+		[]byte(`{"proto":"pppoe","username":"u","secret":"s"}`),
+		[]byte(`{"proto":"pppoe","username":"u","secret":"s","service":"internet"}`),
+	}
+	for i, raw := range good {
+		if err := validateIntentSpec("wan_config", raw); err != nil {
+			t.Errorf("good %d: %v", i, err)
+		}
+	}
+	bad := map[string][]byte{
+		"not-json":           []byte(`{not json`),
+		"missing-proto":      []byte(`{}`),
+		"unknown-proto":      []byte(`{"proto":"wifi"}`),
+		"static-no-ip":       []byte(`{"proto":"static","gateway":"10.0.0.1"}`),
+		"static-no-gateway":  []byte(`{"proto":"static","ip":"10.0.0.5/24"}`),
+		"static-bad-ip":      []byte(`{"proto":"static","ip":"not-an-ip","gateway":"10.0.0.1"}`),
+		"static-bad-gateway": []byte(`{"proto":"static","ip":"10.0.0.5/24","gateway":"nope"}`),
+		"static-bad-dns":     []byte(`{"proto":"static","ip":"10.0.0.5/24","gateway":"10.0.0.1","dns":["broken"]}`),
+		"pppoe-no-username":  []byte(`{"proto":"pppoe","secret":"s"}`),
+		"pppoe-no-secret":    []byte(`{"proto":"pppoe","username":"u"}`),
+	}
+	for name, raw := range bad {
+		if err := validateIntentSpec("wan_config", raw); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
+// Creating a second enabled wan_config implicitly disables the first — the
+// "switch ISP profile" UX gesture, enforced server-side so the invariant
+// holds even if the UI omits to send a separate PATCH.
+func TestHandleCreateIntent_WANConfigDisablesSiblings(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+
+	first := `{"kind":"wan_config","name":"isp-a","enabled":true,"spec":{"proto":"dhcp"}}`
+	if w := f.do(t, http.MethodPost, "/api/firewall/intents", first, c); w.Code != http.StatusCreated {
+		t.Fatalf("create first: %d %s", w.Code, w.Body.String())
+	}
+	second := `{"kind":"wan_config","name":"isp-b","enabled":true,"spec":{"proto":"static","ip":"203.0.113.5/24","gateway":"203.0.113.1"}}`
+	if w := f.do(t, http.MethodPost, "/api/firewall/intents", second, c); w.Code != http.StatusCreated {
+		t.Fatalf("create second: %d %s", w.Code, w.Body.String())
+	}
+
+	w := f.do(t, http.MethodGet, "/api/firewall/intents", "", c)
+	var rows []struct {
+		Kind    string `json:"kind"`
+		Enabled bool   `json:"enabled"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &rows)
+	enabled := 0
+	for _, r := range rows {
+		if r.Kind == "wan_config" && r.Enabled {
+			enabled++
+		}
+	}
+	if enabled != 1 {
+		t.Errorf("expected exactly 1 enabled wan_config, got %d", enabled)
+	}
+}
+
+// PATCHing a wan_config to enabled=true also disables previously-enabled
+// siblings — same invariant, different entry path.
+func TestHandleUpdateIntent_WANConfigDisablesSiblings(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+
+	w := f.do(t, http.MethodPost, "/api/firewall/intents",
+		`{"kind":"wan_config","name":"isp-a","enabled":true,"spec":{"proto":"dhcp"}}`, c)
+	var first struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &first)
+
+	w = f.do(t, http.MethodPost, "/api/firewall/intents",
+		`{"kind":"wan_config","name":"isp-b","enabled":false,"spec":{"proto":"pppoe","username":"u","secret":"s"}}`, c)
+	var second struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &second)
+
+	if w := f.do(t, http.MethodPatch, "/api/firewall/intents/"+second.ID, `{"enabled":true}`, c); w.Code != http.StatusOK {
+		t.Fatalf("patch enable: %d %s", w.Code, w.Body.String())
+	}
+
+	w = f.do(t, http.MethodGet, "/api/firewall/intents", "", c)
+	type row struct {
+		ID      string `json:"id"`
+		Enabled bool   `json:"enabled"`
+	}
+	var rows []row
+	_ = json.Unmarshal(w.Body.Bytes(), &rows)
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.ID] = r.Enabled
+	}
+	if got[first.ID] || !got[second.ID] {
+		t.Errorf("after enabling second: first.enabled=%v second.enabled=%v want false/true", got[first.ID], got[second.ID])
+	}
+}
+
 func TestValidateIntentSpec_FirewallRule(t *testing.T) {
 	// Minimum valid: just src + target.
 	if err := validateIntentSpec("firewall_rule", []byte(`{"src":"lan","target":"accept"}`)); err != nil {

@@ -543,6 +543,190 @@ func TestCompile_FirewallRuleEmptyDestIsInputChain(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// WAN config compile + invariant.
+// ============================================================================
+
+func makeWANIntent(t *testing.T, id, name string, enabled bool, spec proto.WANConfigSpec) *Intent {
+	t.Helper()
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	now := time.Now().UTC()
+	return &Intent{
+		ID: id, Kind: string(proto.IntentWANConfig), Name: name,
+		Enabled: enabled, Spec: b, CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+func TestCompile_WANConfigAbsentWhenNoRows(t *testing.T) {
+	// Zero wan_configs → no "network" key. This is the "Rasputin doesn't
+	// manage WAN here" state — leaves whatever OpenWrt's stock config does
+	// in place.
+	state, _, err := Compile(nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if _, ok := state["network"]; ok {
+		t.Errorf("network key should be absent when no wan_configs exist: %v", state)
+	}
+}
+
+func TestCompile_WANConfigAllDisabledIsKillSwitch(t *testing.T) {
+	// ≥1 row but 0 enabled is the explicit "kill outbound" path —
+	// compile emits proto=none.
+	in := makeWANIntent(t, "w1", "isp-a", false, proto.WANConfigSpec{
+		Proto: proto.WANProtoDHCP,
+	})
+	state, _, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	wan, ok := state["network"].(map[string]any)["wan"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected network.wan, got %v", state["network"])
+	}
+	if wan["proto"] != "none" {
+		t.Errorf("all-disabled should compile to proto=none, got %v", wan["proto"])
+	}
+}
+
+func TestCompile_WANConfigDHCP(t *testing.T) {
+	in := makeWANIntent(t, "w1", "isp-a", true, proto.WANConfigSpec{
+		Proto: proto.WANProtoDHCP, Hostname: "router",
+	})
+	state, _, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	wan := state["network"].(map[string]any)["wan"].(map[string]any)
+	if wan["proto"] != "dhcp" || wan["hostname"] != "router" {
+		t.Errorf("dhcp shape: %v", wan)
+	}
+}
+
+func TestCompile_WANConfigStatic(t *testing.T) {
+	in := makeWANIntent(t, "w1", "leased-line", true, proto.WANConfigSpec{
+		Proto:   proto.WANProtoStatic,
+		IP:      "203.0.113.5/24",
+		Gateway: "203.0.113.1",
+		DNS:     []string{"1.1.1.1", "9.9.9.9"},
+	})
+	state, _, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	wan := state["network"].(map[string]any)["wan"].(map[string]any)
+	if wan["proto"] != "static" ||
+		wan["ipaddr"] != "203.0.113.5/24" ||
+		wan["gateway"] != "203.0.113.1" {
+		t.Errorf("static shape: %v", wan)
+	}
+	// UCI's option dns is space-separated.
+	if wan["dns"] != "1.1.1.1 9.9.9.9" {
+		t.Errorf("dns should be space-separated, got %v", wan["dns"])
+	}
+}
+
+func TestCompile_WANConfigPPPoE(t *testing.T) {
+	in := makeWANIntent(t, "w1", "isp-de", true, proto.WANConfigSpec{
+		Proto:    proto.WANProtoPppoe,
+		Username: "user@isp.de",
+		Secret:   "shh",
+		Service:  "internet",
+	})
+	state, _, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	wan := state["network"].(map[string]any)["wan"].(map[string]any)
+	if wan["proto"] != "pppoe" ||
+		wan["username"] != "user@isp.de" ||
+		wan["password"] != "shh" ||
+		wan["service"] != "internet" {
+		t.Errorf("pppoe shape: %v", wan)
+	}
+}
+
+func TestCompile_WANConfigRejectsMultipleEnabled(t *testing.T) {
+	// Compile defends against a desynced store. The api validation layer is
+	// the primary enforcer; this is the backstop.
+	a := makeWANIntent(t, "w1", "a", true, proto.WANConfigSpec{Proto: proto.WANProtoDHCP})
+	b := makeWANIntent(t, "w2", "b", true, proto.WANConfigSpec{Proto: proto.WANProtoDHCP})
+	if _, _, err := Compile([]*Intent{a, b}); err == nil {
+		t.Error("expected error when two wan_configs are enabled")
+	}
+}
+
+func TestCompile_WANConfigRejectsBadSpec(t *testing.T) {
+	cases := []proto.WANConfigSpec{
+		{Proto: proto.WANProtoStatic, Gateway: "10.0.0.1"}, // missing IP
+		{Proto: proto.WANProtoStatic, IP: "10.0.0.5/24"},   // missing gateway
+		{Proto: proto.WANProtoPppoe, Secret: "shh"},        // missing username
+		{Proto: proto.WANProtoPppoe, Username: "u"},        // missing secret
+		{Proto: "wifi", Username: "u", Secret: "s"},        // unsupported proto
+	}
+	for i, spec := range cases {
+		in := makeWANIntent(t, "w", "n", true, spec)
+		if _, _, err := Compile([]*Intent{in}); err == nil {
+			t.Errorf("case %d: want error for spec %+v", i, spec)
+		}
+	}
+}
+
+// ============================================================================
+// DisableOtherWANConfigs — store-level helper used by the api invariant.
+// ============================================================================
+
+func TestStore_DisableOtherWANConfigs(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	// Three wan_configs, all initially enabled.
+	for _, id := range []string{"w1", "w2", "w3"} {
+		in := makeWANIntent(t, id, id, true, proto.WANConfigSpec{Proto: proto.WANProtoDHCP})
+		if err := s.CreateIntent(ctx, in); err != nil {
+			t.Fatalf("Create %s: %v", id, err)
+		}
+	}
+
+	// Disabling siblings of w2 should flip w1 + w3, leave w2 alone.
+	n, err := s.DisableOtherWANConfigs(ctx, "w2")
+	if err != nil {
+		t.Fatalf("DisableOtherWANConfigs: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 rows updated, got %d", n)
+	}
+	for _, id := range []string{"w1", "w2", "w3"} {
+		got, _ := s.GetIntent(ctx, id)
+		wantEnabled := id == "w2"
+		if got.Enabled != wantEnabled {
+			t.Errorf("%s: enabled=%v want %v", id, got.Enabled, wantEnabled)
+		}
+	}
+
+	// Second call is a no-op (no siblings enabled to flip).
+	n, _ = s.DisableOtherWANConfigs(ctx, "w2")
+	if n != 0 {
+		t.Errorf("idempotent second call should affect 0 rows, got %d", n)
+	}
+
+	// Non-wan_config rows are untouched. Create a port_forward and confirm.
+	pf := makePortForwardIntent(t, "pf-1", "minecraft", true, 25565, 25565)
+	if err := s.CreateIntent(ctx, pf); err != nil {
+		t.Fatalf("Create pf: %v", err)
+	}
+	if _, err := s.DisableOtherWANConfigs(ctx, "w2"); err != nil {
+		t.Fatalf("DisableOtherWANConfigs: %v", err)
+	}
+	got, _ := s.GetIntent(ctx, "pf-1")
+	if !got.Enabled {
+		t.Errorf("port_forward should be untouched by wan_config disable, got enabled=%v", got.Enabled)
+	}
+}
+
 func TestCompile_FirewallRuleRejectsBadSpec(t *testing.T) {
 	cases := map[string]proto.FirewallRuleSpec{
 		"missing-src":    {Target: proto.RuleTargetAccept},

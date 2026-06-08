@@ -26,6 +26,7 @@ import type {
   ObsStatus,
   FirewallRuleSpec,
   PortForwardSpec,
+  WANConfigSpec,
   SetupState,
   SystemUpdateChangeEvent,
   UpdateChangeEvent,
@@ -311,7 +312,8 @@ export async function listIntents(): Promise<FirewallIntent[]> {
 // site (TS narrows correctly).
 export type CreateIntentInput =
   | { kind: 'port_forward'; name: string; enabled?: boolean; spec: PortForwardSpec }
-  | { kind: 'firewall_rule'; name: string; enabled?: boolean; spec: FirewallRuleSpec };
+  | { kind: 'firewall_rule'; name: string; enabled?: boolean; spec: FirewallRuleSpec }
+  | { kind: 'wan_config'; name: string; enabled?: boolean; spec: WANConfigSpec };
 
 export function createIntent(input: CreateIntentInput): Promise<FirewallIntent> {
   return jsonFetch<FirewallIntent>('/api/firewall/intents', {
@@ -323,7 +325,7 @@ export function createIntent(input: CreateIntentInput): Promise<FirewallIntent> 
 
 export function updateIntent(
   id: string,
-  patch: { name?: string; enabled?: boolean; spec?: PortForwardSpec | FirewallRuleSpec },
+  patch: { name?: string; enabled?: boolean; spec?: PortForwardSpec | FirewallRuleSpec | WANConfigSpec },
 ): Promise<FirewallIntent> {
   return jsonFetch<FirewallIntent>(`/api/firewall/intents/${id}`, {
     method: 'PATCH',

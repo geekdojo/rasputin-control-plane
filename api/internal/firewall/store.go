@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	_ "modernc.org/sqlite"
 )
 
@@ -100,6 +101,27 @@ func (s *Store) ListIntents(ctx context.Context) ([]*Intent, error) {
 		out = append(out, i)
 	}
 	return out, rows.Err()
+}
+
+// DisableOtherWANConfigs flips enabled=0 on every wan_config row whose id
+// isn't `keepID`. The api handlers call this in the same transaction as
+// the create/update that enabled a new wan_config, so the "at most one
+// enabled" invariant holds even if two requests race — the second one's
+// post-write listing will reflect whichever wrote last. (For v0 single-user
+// races aren't a concern; this is purely defensive.)
+//
+// Returns the count of rows updated so callers can detect a no-op.
+func (s *Store) DisableOtherWANConfigs(ctx context.Context, keepID string) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE firewall_intents
+        SET enabled = 0, updated_at = ?
+        WHERE kind = ? AND id != ? AND enabled = 1`,
+		ms(time.Now().UTC()), string(proto.IntentWANConfig), keepID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func scanIntent(scan func(...any) error) (*Intent, error) {
