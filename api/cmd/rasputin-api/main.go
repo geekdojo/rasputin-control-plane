@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -49,9 +50,18 @@ func main() {
 		log.Fatalf("rasputin-api: data dir: %v", err)
 	}
 
+	// NATS bind defaults to 127.0.0.1:4222 (api-local agents only). Operators
+	// federating agents from other nodes set RASPUTIN_NATS_HOST=0.0.0.0
+	// (or a specific LAN IP) so the embedded server is reachable. Port
+	// override is rarely useful but kept symmetric.
+	natsHost := envOr("RASPUTIN_NATS_HOST", "127.0.0.1")
+	natsPort := 4222
+	if p, err := strconv.Atoi(envOr("RASPUTIN_NATS_PORT", "4222")); err == nil && p > 0 {
+		natsPort = p
+	}
 	busSrv, err := bus.Start(ctx, bus.Config{
-		Host:     "127.0.0.1",
-		Port:     4222,
+		Host:     natsHost,
+		Port:     natsPort,
 		StoreDir: filepath.Join(dataDir, "nats"),
 	})
 	if err != nil {
