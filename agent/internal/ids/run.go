@@ -36,6 +36,15 @@ func Run(ctx context.Context, nc *nats.Conn, nodeID, path string) {
 	}
 	subj := proto.IDSAlertSubject(nodeID)
 
+	// Log a startup line so operators bisecting "is the IDS subsystem
+	// even running?" can grep for it. The silent-start was a real DX
+	// cost during the CWWK 2026-06-08 IDS bring-up — without a log
+	// line we had to bisect with manual `echo >> alert_fast.txt` to
+	// distinguish "tailer dead" from "agent v0.1.0 has no IDS at all"
+	// from "snort not writing alert_fast.txt". This one line makes the
+	// difference.
+	log.Printf("ids: tailer started, path=%s, subject=%s", path, subj)
+
 	tail := NewTailer(path)
 	go tail.Run(ctx)
 
