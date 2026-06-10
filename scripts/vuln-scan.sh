@@ -10,30 +10,29 @@
 # listed in .github/vuln-baseline.txt — i.e. it catches NEW advisories.
 #
 # Why a baseline instead of plain pass/fail:
-#   - CI pins Go 1.23 (see CLAUDE.md "Go gotcha"), which is past EOL.
-#     ~20 reachable stdlib advisories are unfixable on this toolchain;
-#     their fixes only ship in Go 1.24/1.25.
-#   - nats-server fixes for the 2026 advisories live on 2.11.x, which
-#     requires Go >= 1.24 — also blocked by the pin.
-#   The baseline records that debt explicitly. Remove entries as they get
+#   An advisory can be published before a fix is shippable here (toolchain
+#   pin, dependency not yet released, upgrade needs validation). The
+#   baseline records that debt explicitly instead of letting the gate rot
+#   red — the Go 1.23 era carried 37 entries until the 2026-06 bump to
+#   Go 1.25 + nats-server 2.11 cleared them. Remove entries as they get
 #   fixed; the script prints stale entries so the file shrinks over time.
 #
-# GOTOOLCHAIN is forced to go1.23.12 (the final 1.23 release, matching the
-# CI toolchain) so local runs on newer dev toolchains produce the same
-# stdlib findings as CI. Override with GOTOOLCHAIN env if needed.
+# GOTOOLCHAIN is forced to go1.25.11 (matching the CI toolchain) so local
+# runs on newer dev toolchains produce the same stdlib findings as CI.
+# Override with GOTOOLCHAIN env if needed.
 #
 # Usage:
 #   scripts/vuln-scan.sh            # gate against the baseline
 #   scripts/vuln-scan.sh --print    # just print current reachable IDs
 #                                   # (to regenerate the baseline)
 #
-# Requires: govulncheck (pinned in CI to v1.1.4 — v1.2.0+ needs Go >= 1.25),
+# Requires: govulncheck (pinned in CI to v1.3.0 — pin exact, never @latest),
 #           jq.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.23.12}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.11}"
 
 MODULES=(api agent proto)
 BASELINE=.github/vuln-baseline.txt
@@ -62,7 +61,8 @@ if [ "${1:-}" = "--print" ]; then
 fi
 
 baseline_ids="$(mktemp)"
-grep -vE '^[[:space:]]*(#|$)' "$BASELINE" | sort -u >"$baseline_ids"
+# `|| true`: grep exits 1 when the baseline is all comments (fully clean)
+{ grep -vE '^[[:space:]]*(#|$)' "$BASELINE" || true; } | sort -u >"$baseline_ids"
 
 stale="$(comm -13 "$found" "$baseline_ids")"
 new="$(comm -23 "$found" "$baseline_ids")"
@@ -78,8 +78,8 @@ if [ -n "$new" ]; then
   echo "::error::New reachable vulnerabilities, not in $BASELINE:"
   echo "$new" | sed 's|^|  https://pkg.go.dev/vuln/|'
   echo "Fix the dependency (pin an exact version — see CLAUDE.md before" \
-       "running go get) or, if unfixable under the Go 1.23 pin, add the" \
-       "ID to $BASELINE with a comment."
+       "running go get) or, if no fix is shippable yet, add the ID to" \
+       "$BASELINE with a comment."
   exit 1
 fi
 
