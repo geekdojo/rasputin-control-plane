@@ -6,7 +6,7 @@
 # Regenerate the raw list with: scripts/vuln-scan.sh --print
 # Remove entries as they're fixed (the script flags stale ones).
 #
-# Currently EMPTY: the 2026-06-09 bump to Go 1.25 + nats-server v2.11.17
+# Currently EMPTY: the 2026-06-09 bump to Go 1.26 + nats-server v2.11.17
 # cleared all 37 entries the Go 1.23 era carried (24 stdlib advisories
 # whose fixes only shipped in Go 1.24/1.25, plus 13 in the embedded
 # nats-server, fixed on the 2.11.x line which requires Go >= 1.24).

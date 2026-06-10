@@ -13,7 +13,7 @@ name: vuln-scan
 # The weekly schedule catches advisories published while the code sits
 # still — vuln coverage decays without pushes, so don't remove it.
 #
-# Conventions match ci.yml: Go 1.25, actions/setup-go@v5 cached on the
+# Conventions match ci.yml: Go 1.26, actions/setup-go@v5 cached on the
 # workspace's go.sum files.
 
 on:
@@ -40,7 +40,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache-dependency-path: |
             api/go.sum
             agent/go.sum

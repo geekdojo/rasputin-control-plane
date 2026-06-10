@@ -13,11 +13,11 @@
 #   An advisory can be published before a fix is shippable here (toolchain
 #   pin, dependency not yet released, upgrade needs validation). The
 #   baseline records that debt explicitly instead of letting the gate rot
-#   red — the Go 1.23 era carried 37 entries until the 2026-06 bump to
-#   Go 1.25 + nats-server 2.11 cleared them. Remove entries as they get
+#   red — the Go 1.23 era carried 37 entries until the 2026-06 toolchain
+#   + nats-server 2.11 bump cleared them. Remove entries as they get
 #   fixed; the script prints stale entries so the file shrinks over time.
 #
-# GOTOOLCHAIN is forced to go1.25.11 (matching the CI toolchain) so local
+# GOTOOLCHAIN is forced to go1.26.4 (matching the CI toolchain) so local
 # runs on newer dev toolchains produce the same stdlib findings as CI.
 # Override with GOTOOLCHAIN env if needed.
 #
@@ -32,7 +32,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.11}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.4}"
 
 MODULES=(api agent proto)
 BASELINE=.github/vuln-baseline.txt

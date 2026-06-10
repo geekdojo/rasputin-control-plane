@@ -1,3 +1,3 @@
 module github.com/geekdojo/rasputin-control-plane/proto
 
-go 1.25
+go 1.26
