@@ -1,0 +1,53 @@
+name: vuln-scan
+
+# govulncheck over the Go workspace modules (api / agent / proto), gated
+# against the checked-in baseline of known reachable vulnerabilities in
+# .github/vuln-baseline.txt. Fails only when a NEW reachable advisory
+# appears. Policy, rationale, and the Go-1.23-EOL situation are documented
+# in scripts/vuln-scan.sh.
+#
+# govulncheck is pinned to v1.1.4: it's the last release whose go.mod
+# allows Go 1.23 (v1.2.0+ requires >= 1.25 and `@latest` would silently
+# drag a newer toolchain into the build — the exact trap described in
+# CLAUDE.md's "Go gotcha" section).
+#
+# The weekly schedule catches advisories published while the code sits
+# still — vuln coverage decays without pushes, so don't remove it.
+#
+# Conventions match ci.yml: Go 1.23, actions/setup-go@v5 cached on the
+# workspace's go.sum files.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "30 6 * * 1" # Mondays 06:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  govulncheck:
+    name: govulncheck (baseline-gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+
+      - name: install govulncheck (pinned)
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: scan
+        run: ./scripts/vuln-scan.sh

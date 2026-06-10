@@ -1,0 +1,57 @@
+# Known reachable vulnerabilities, accepted until the Go 1.23 pin moves.
+# Consumed by scripts/vuln-scan.sh — the vuln-scan workflow fails only on
+# reachable advisories NOT listed here. One GO-* ID per line; comments and
+# blank lines ignored. Details: https://pkg.go.dev/vuln/<ID>
+#
+# Regenerate the raw list with: scripts/vuln-scan.sh --print
+# Remove entries as they're fixed (the script flags stale ones).
+
+# --- Go standard library (24) -----------------------------------------
+# Found in go1.23.12, the FINAL Go 1.23 release (EOL since Feb 2026).
+# Fixes ship only in Go 1.24/1.25 patch releases, so none of these are
+# fixable while CI pins Go 1.23. Clearing them requires bumping the
+# toolchain + go directives to a supported Go (>= 1.24), which also
+# unblocks the nats-server fixes below. Tracked in the wiki backlog.
+GO-2025-4007
+GO-2025-4008
+GO-2025-4009
+GO-2025-4010
+GO-2025-4011
+GO-2025-4012
+GO-2025-4013
+GO-2025-4014
+GO-2025-4155
+GO-2025-4175
+GO-2026-4337
+GO-2026-4340
+GO-2026-4341
+GO-2026-4601
+GO-2026-4602
+GO-2026-4869
+GO-2026-4870
+GO-2026-4918
+GO-2026-4946
+GO-2026-4947
+GO-2026-4971
+GO-2026-4976
+GO-2026-5037
+GO-2026-5039
+
+# --- github.com/nats-io/nats-server/v2 (13) ---------------------------
+# api embeds NATS server v2.10.29 — the last release on the 2.10 line,
+# and the last whose go directive allows Go 1.23. All remaining fixes
+# land in 2.11.12+ (go directive 1.24/1.25), so these are blocked on the
+# same toolchain bump as the stdlib entries above.
+GO-2026-4533
+GO-2026-4827
+GO-2026-4828
+GO-2026-4829
+GO-2026-4830
+GO-2026-4831
+GO-2026-4832
+GO-2026-4833
+GO-2026-4834
+GO-2026-4835
+GO-2026-4836
+GO-2026-4837
+GO-2026-4841
