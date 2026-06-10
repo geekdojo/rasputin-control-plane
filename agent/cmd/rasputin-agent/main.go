@@ -49,6 +49,17 @@ func main() {
 			roleStr, proto.AllRoles)
 	}
 
+	// All backend subsystems (apps, openwrt, updater, tailscale, bmc) keep
+	// state in subdirs of one state dir. Resolve and create it up front so
+	// a bad location fails loudly here — on a read-only rootfs with cwd=/
+	// the relative dev default fails with EROFS, which used to surface as
+	// a confusing mkdir error from whichever backend touched it first.
+	stateDir := agentStateDir(nodeID)
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		log.Fatalf("rasputin-agent: create state dir %s: %v (set RASPUTIN_AGENT_STATE_DIR to a writable absolute path)", stateDir, err)
+	}
+	log.Printf("rasputin-agent: state dir %s", stateDir)
+
 	reregister := func(c *nats.Conn) { publishRegistered(c, nodeID, role) }
 	nc, err := bus.Connect(natsURL, nodeID, reregister)
 	if err != nil {
@@ -77,8 +88,6 @@ func main() {
 	// the api's own sidecars in Tier 2). Picks `docker` if the CLI is on
 	// PATH, otherwise mocks. Force via RASPUTIN_DOCKER_BACKEND=mock|docker.
 	if role == proto.RoleCompute || role == proto.RoleControlPlane {
-		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
-			filepath.Join("./agent-state", nodeID))
 		appsDir := filepath.Join(stateDir, "apps")
 		backendChoice := envOr("RASPUTIN_DOCKER_BACKEND", autodetectDockerBackend())
 
@@ -115,8 +124,6 @@ func main() {
 	// stores state under $RASPUTIN_AGENT_STATE_DIR/openwrt/; a real OpenWrt
 	// agent will swap NewMockClient for an ubus-backed implementation.
 	if role == proto.RoleFirewall {
-		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
-			filepath.Join("./agent-state", nodeID))
 		backend := envOr("RASPUTIN_OPENWRT_BACKEND", "mock")
 		if backend != "mock" {
 			log.Fatalf("rasputin-agent: only RASPUTIN_OPENWRT_BACKEND=mock is supported on this platform; got %q", backend)
@@ -150,8 +157,6 @@ func main() {
 	// is on PATH, otherwise falls back to mock. Force via
 	// RASPUTIN_UPDATE_BACKEND=rauc|mock.
 	{
-		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
-			filepath.Join("./agent-state", nodeID))
 		updaterDir := filepath.Join(stateDir, "updater")
 		backendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend())
 
@@ -195,8 +200,6 @@ func main() {
 	// tailscale binary is on PATH, otherwise mocks. Force via
 	// RASPUTIN_TAILSCALE_BACKEND=mock|tailscale.
 	{
-		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
-			filepath.Join("./agent-state", nodeID))
 		backendChoice := envOr("RASPUTIN_TAILSCALE_BACKEND", autodetectTailscaleBackend())
 		var tsBackend tailscale.Backend
 		switch backendChoice {
@@ -233,8 +236,6 @@ func main() {
 	// a mock backend; the real I²C/IPMI/Redfish wiring lands with chassis
 	// hardware.
 	if role == proto.RoleControlPlane || os.Getenv("RASPUTIN_BMC_HOST") == "1" {
-		stateDir := envOr("RASPUTIN_AGENT_STATE_DIR",
-			filepath.Join("./agent-state", nodeID))
 		backend, err := bmc.NewMockBackend(filepath.Join(stateDir, "bmc"))
 		if err != nil {
 			log.Fatalf("rasputin-agent: bmc mock backend: %v", err)
@@ -345,6 +346,19 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// agentStateDir resolves the agent's state directory.
+// $RASPUTIN_AGENT_STATE_DIR is used verbatim when set — deployed images
+// set it to an absolute path on persistent storage (one agent per host,
+// so no per-node suffix). The dev default is ./agent-state/<nodeID>
+// relative to cwd; the nodeID suffix keeps multiple dev agents started
+// from the same repo checkout apart.
+func agentStateDir(nodeID string) string {
+	if v := os.Getenv("RASPUTIN_AGENT_STATE_DIR"); v != "" {
+		return v
+	}
+	return filepath.Join("agent-state", nodeID)
 }
 
 // autodetectDockerBackend returns "docker" if the docker CLI is on PATH,
