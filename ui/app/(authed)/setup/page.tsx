@@ -214,10 +214,14 @@ function StepBody({
       );
     case 'trust':
       return step.done ? (
-        <Hint>Root CA is loaded; bundle signatures will be verified.</Hint>
+        <Hint>Update signing is verified — OS updates are checked for authenticity before they install.</Hint>
       ) : (
         <Hint warn>
-          No <Mono>data/trust/root-ca.pem</Mono>. Run <Mono>./scripts/pki-init.sh</Mono>, copy the generated <Mono>root-ca.pem</Mono> into <Mono>data/trust/</Mono> on the api host, and restart.
+          The update trust root is missing, so OS updates can&apos;t be verified. On Rasputin hardware
+          this is preinstalled — if you&apos;re seeing this on a real system, re-flash the OS image
+          (images from 2026.06.0-dev.12 onward wire it up automatically). Developing locally? Run{' '}
+          <Mono>./scripts/pki-init.sh</Mono> and copy <Mono>root-ca.pem</Mono> into <Mono>data/trust/</Mono>,
+          then restart the api.
         </Hint>
       );
     default:

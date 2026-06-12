@@ -105,7 +105,7 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 			Title:    "Verify PKI trust",
 			Done:     trustConfigured,
 			Required: false,
-			Detail:   "Confirms the OS-update root CA is installed at data/trust/root-ca.pem. Bundle signatures aren't verified without it.",
+			Detail:   "Confirms this system can verify that OS updates are authentic before installing them.",
 		},
 	}
 
