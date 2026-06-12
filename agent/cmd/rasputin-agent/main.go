@@ -121,19 +121,32 @@ func main() {
 		}()
 	}
 
-	// Firewall handlers — only on firewall-role agents. The dev/mock backend
-	// stores state under $RASPUTIN_AGENT_STATE_DIR/openwrt/; a real OpenWrt
-	// agent will swap NewMockClient for an ubus-backed implementation.
+	// Firewall handlers — only on firewall-role agents. Picks the real uci
+	// backend when the agent is actually on OpenWrt (uci on PATH AND
+	// /etc/config/firewall present), the file-backed mock otherwise (state
+	// under $RASPUTIN_AGENT_STATE_DIR/openwrt/). Force via
+	// RASPUTIN_UCI_BACKEND=uci|mock.
 	if role == proto.RoleFirewall {
-		backend := envOr("RASPUTIN_OPENWRT_BACKEND", "mock")
-		if backend != "mock" {
-			log.Fatalf("rasputin-agent: only RASPUTIN_OPENWRT_BACKEND=mock is supported on this platform; got %q", backend)
+		backendChoice := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend())
+		var uciClient openwrt.UCIClient
+		switch backendChoice {
+		case "uci":
+			real, err := openwrt.NewRealClient(filepath.Join(stateDir, "openwrt"))
+			if err != nil {
+				log.Fatalf("rasputin-agent: openwrt uci backend: %v", err)
+			}
+			uciClient = real
+		case "mock":
+			mock, err := openwrt.NewMockClient(filepath.Join(stateDir, "openwrt"))
+			if err != nil {
+				log.Fatalf("rasputin-agent: openwrt mock: %v", err)
+			}
+			uciClient = mock
+		default:
+			log.Fatalf("rasputin-agent: unknown RASPUTIN_UCI_BACKEND %q (expected uci|mock)", backendChoice)
 		}
-		mock, err := openwrt.NewMockClient(filepath.Join(stateDir, "openwrt"))
-		if err != nil {
-			log.Fatalf("rasputin-agent: openwrt mock: %v", err)
-		}
-		fwSubs, err := openwrt.RegisterHandlers(nc, nodeID, mock)
+		log.Printf("rasputin-agent: uci backend=%s", backendChoice)
+		fwSubs, err := openwrt.RegisterHandlers(nc, nodeID, uciClient)
 		if err != nil {
 			log.Fatalf("rasputin-agent: register firewall handlers: %v", err)
 		}
@@ -388,6 +401,28 @@ func autodetectUpdaterBackend() string {
 		return "rauc"
 	}
 	return "mock"
+}
+
+// autodetectUCIBackend returns "uci" when the agent is running on a real
+// OpenWrt system — the uci CLI on PATH AND /etc/config/firewall present —
+// "mock" otherwise. Mirrors autodetectTailscaleBackend; the env-var
+// override (RASPUTIN_UCI_BACKEND) lets the user force one or the other.
+// The config-file check matters: a dev box could have a stray `uci`
+// binary installed, but only a real OpenWrt root has /etc/config/firewall.
+func autodetectUCIBackend() string {
+	return autodetectUCIBackendAt("/etc/config/firewall")
+}
+
+// autodetectUCIBackendAt is the testable core — the firewall config path
+// is a parameter so tests don't need a real /etc/config/firewall.
+func autodetectUCIBackendAt(firewallConfig string) string {
+	if _, err := exec.LookPath("uci"); err != nil {
+		return "mock"
+	}
+	if _, err := os.Stat(firewallConfig); err != nil {
+		return "mock"
+	}
+	return "uci"
 }
 
 // autodetectTailscaleBackend returns "tailscale" if the tailscale CLI is

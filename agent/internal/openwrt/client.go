@@ -6,12 +6,12 @@ import (
 
 // UCIClient is the contract the firewall agent uses to talk to OpenWrt.
 //
-// Two implementations are planned:
+// Two implementations:
 //
 //   - mock.go: file-backed, used everywhere except real OpenWrt hardware. The
 //     "state" is just a JSON document on disk; the hash is its SHA-256.
-//   - ubus.go (forthcoming, OpenWrt only): real ubus / UCI calls, applied via
-//     uci set + /etc/init.d/firewall reload.
+//   - uci.go (OpenWrt only): real uci / ubus calls — uci set + commit +
+//     /etc/init.d/firewall reload on apply, `ubus call uci get` read-back.
 //
 // Both must return identical hashes for identical state so the api's drift
 // detection is comparable across them.
