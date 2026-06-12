@@ -192,7 +192,16 @@ func (s *Store) GetState(ctx context.Context) (*MeshState, error) {
 		t := fromMs(lastReconciled.Int64)
 		ms_.LastReconciled = &t
 	}
-	ms_.Drift = ms_.ObservedHash != "" && ms_.ObservedHash != ms_.IntentHash
+	// Canonicalize a never-applied intent_hash ("") to the empty-compile
+	// hash before comparing — same fresh-install fix as the firewall
+	// store (see firewall/store.go GetNodeState, found 2026-06-12).
+	effectiveIntent := ms_.IntentHash
+	if effectiveIntent == "" {
+		if _, h, err := Compile(nil); err == nil {
+			effectiveIntent = h
+		}
+	}
+	ms_.Drift = ms_.ObservedHash != "" && ms_.ObservedHash != effectiveIntent
 	return &ms_, nil
 }
 

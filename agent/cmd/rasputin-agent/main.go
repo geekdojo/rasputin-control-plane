@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/tailscale"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/updater"
@@ -254,6 +255,14 @@ func main() {
 
 	go runHeartbeats(ctx, nc, nodeID)
 	go metrics.Run(ctx, nc, nodeID, host.Uptime)
+
+	// systemd integration (Buildroot nodes; procd on OpenWrt has no
+	// NOTIFY_SOCKET so both calls no-op there). The liveness probe is
+	// deliberately scheduling-only: a down NATS connection means the api
+	// is restarting and the agent's reconnect loop IS healthy behavior —
+	// it must not stop the watchdog pets. See internal/sdnotify.
+	sdnotify.Ready()
+	sdnotify.StartWatchdog(ctx, func(context.Context) error { return nil })
 
 	<-ctx.Done()
 	log.Println("rasputin-agent: shutting down")

@@ -30,6 +30,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 )
@@ -428,6 +429,15 @@ func main() {
 			log.Fatalf("rasputin-api: http: %v", err)
 		}
 	}()
+
+	// systemd integration: declare startup complete, then keep the
+	// watchdog fed for as long as the liveness probe (a trivial SQLite
+	// query) keeps passing. See internal/sdnotify for the war story.
+	sdnotify.Ready()
+	sdnotify.StartWatchdog(ctx, func(pctx context.Context) error {
+		_, err := authStore.CountUsers(pctx)
+		return err
+	})
 
 	<-ctx.Done()
 	log.Println("rasputin-api: shutting down")

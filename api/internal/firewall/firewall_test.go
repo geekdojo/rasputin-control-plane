@@ -814,3 +814,42 @@ func TestHash_Determinism(t *testing.T) {
 		t.Errorf("hash should be invariant to map key order: %q vs %q", h1, h2)
 	}
 }
+
+// Regression for the fresh-install drift bug (first Mu + CWWK bench,
+// 2026-06-12): a node whose agent reported clean empty state BEFORE any
+// apply has intent_hash="" in firewall_state, and the raw comparison
+// flagged DRIFT on an untouched firewall. GetNodeState must canonicalize
+// "" to the empty-compile hash, exactly as the pending computation does.
+func TestStore_GetNodeState_FreshInstallNoDrift(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	_, emptyHash, err := Compile(nil)
+	if err != nil {
+		t.Fatalf("Compile(nil): %v", err)
+	}
+
+	// Reconcile-before-any-apply: agent reports canonical empty state.
+	if err := s.UpdateAfterReconcile(ctx, "n", emptyHash, time.Now().UTC()); err != nil {
+		t.Fatalf("UpdateAfterReconcile: %v", err)
+	}
+	ns, err := s.GetNodeState(ctx, "n")
+	if err != nil {
+		t.Fatalf("GetNodeState: %v", err)
+	}
+	if ns.Drift {
+		t.Error("fresh install (never applied, agent reports empty) must NOT read as drift")
+	}
+
+	// But a never-applied node whose agent reports NON-empty state is
+	// genuine drift (someone configured the firewall out-of-band).
+	if err := s.UpdateAfterReconcile(ctx, "n", "some-other-hash", time.Now().UTC()); err != nil {
+		t.Fatalf("UpdateAfterReconcile: %v", err)
+	}
+	ns, err = s.GetNodeState(ctx, "n")
+	if err != nil {
+		t.Fatalf("GetNodeState: %v", err)
+	}
+	if !ns.Drift {
+		t.Error("never-applied node with non-empty observed state must read as drift")
+	}
+}

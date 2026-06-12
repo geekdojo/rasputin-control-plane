@@ -170,7 +170,19 @@ func (s *Store) GetNodeState(ctx context.Context, nodeID string) (*NodeState, er
 		t := fromMs(lastReconciled.Int64)
 		ns.LastReconciled = &t
 	}
-	ns.Drift = ns.ObservedHash != "" && ns.ObservedHash != ns.IntentHash
+	// A never-applied node has intent_hash="" — canonicalize it to the
+	// empty-compile hash before comparing, exactly as the pending
+	// computation does, so a factory-fresh node whose agent reports clean
+	// empty state doesn't read as DRIFT. Found on the first Mu + CWWK
+	// bench (2026-06-12): reconcile ran before any apply and the UI showed
+	// a drift banner on an untouched firewall.
+	effectiveIntent := ns.IntentHash
+	if effectiveIntent == "" {
+		if _, h, err := Compile(nil); err == nil {
+			effectiveIntent = h
+		}
+	}
+	ns.Drift = ns.ObservedHash != "" && ns.ObservedHash != effectiveIntent
 	return &ns, nil
 }
 
