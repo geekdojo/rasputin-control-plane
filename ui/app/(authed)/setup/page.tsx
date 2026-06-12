@@ -3,7 +3,7 @@
 import { Check, Circle, Rocket } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { completeSetup, getSetupState, setInstallName, setupEnrollSelf } from '../../../lib/api';
+import { completeSetup, getJob, getSetupState, setInstallName, setupEnrollSelf } from '../../../lib/api';
 import type { SetupState, SetupStep } from '../../../lib/types';
 import { Badge, Btn, DIM, FG, HAIR, Input, PageBody, PageHeader, PageShell, PANEL } from '../../../components/kit';
 import { ACCENT, MONO } from '../../../components/ui-theme';
@@ -42,8 +42,20 @@ export default function SetupPage() {
     setBusy('remote_access');
     setErr(null);
     try {
-      await setupEnrollSelf();
-      setTimeout(refresh, 1500);
+      const job = await setupEnrollSelf();
+      // Poll the enroll job to a terminal state so a failed enrollment
+      // surfaces here instead of silently leaving the step un-done (the
+      // first Mu wizard run failed agent-side and showed nothing).
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 700));
+        const j = await getJob(job.id);
+        if (j.status === 'failed' || j.status === 'cancelled') {
+          setErr(`Enrollment failed${j.error ? `: ${j.error}` : ' — see the Tasks panel for details.'}`);
+          break;
+        }
+        if (j.status === 'succeeded') break;
+      }
+      await refresh();
     } catch (e) {
       setErr(String(e));
     } finally {

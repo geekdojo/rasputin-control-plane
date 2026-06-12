@@ -349,8 +349,14 @@ func EnrollNodeWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.
 	}
 }
 
-// enrollSession is the state carried across steps via the spec — we
-// re-marshal the spec at each step to pass forward.
+// enrollSession is the state carried across steps: each step returns the
+// re-marshaled session as its step result, and the next step reads it back
+// via StepCtx.PriorResults (falling back to the job spec for the first
+// step). It is NOT carried via the spec — the runner hands every step the
+// original job spec unchanged, which is exactly the bug that shipped in v0:
+// dispatch re-parsed the spec, never saw mint_key's KeyValue, and the agent
+// rejected the enroll with "empty auth key" (caught on the first Mu wizard
+// run, 2026-06-12).
 type enrollSession struct {
 	EnrollSpec
 	KeyID    string `json:"keyId"`
@@ -368,6 +374,17 @@ func parseEnrollSession(raw json.RawMessage) (*enrollSession, error) {
 		return nil, errors.New("nodeId is required")
 	}
 	return &s, nil
+}
+
+// enrollSessionFrom resumes the session from priorStep's result when
+// present, else from the job spec (first step, or a step re-run after an
+// api restart where prior results were lost — the latter fails later with
+// a clear error rather than silently proceeding with empty fields).
+func enrollSessionFrom(sc *jobs.StepCtx, priorStep string) (*enrollSession, error) {
+	if raw, ok := sc.PriorResults[priorStep]; ok && len(raw) > 0 {
+		return parseEnrollSession(raw)
+	}
+	return parseEnrollSession(sc.Spec)
 }
 
 func enrollMintKey(svc *Service) jobs.DoFn {
@@ -395,9 +412,12 @@ func enrollMintKey(svc *Service) jobs.DoFn {
 
 func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		s, err := parseEnrollSession(sc.Spec)
+		s, err := enrollSessionFrom(sc, "mint_key")
 		if err != nil {
 			return nil, err
+		}
+		if s.KeyValue == "" {
+			return nil, errors.New("no auth key from mint_key step (saga state lost?)")
 		}
 		cmd, _ := json.Marshal(proto.MeshEnrollCmd{
 			LoginServer:     svc.cfg.LoginServer,
@@ -455,7 +475,7 @@ func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
 
 func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		s, err := parseEnrollSession(sc.Spec)
+		s, err := enrollSessionFrom(sc, "dispatch")
 		if err != nil {
 			return nil, err
 		}

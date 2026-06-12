@@ -80,6 +80,10 @@ export async function listJobs(limit = 50): Promise<Job[]> {
   return (await jsonFetch<Job[] | null>(`/api/jobs?limit=${limit}`)) ?? [];
 }
 
+export function getJob(jobId: string): Promise<Job> {
+  return jsonFetch<Job>(`/api/jobs/${jobId}`);
+}
+
 export async function listSteps(jobId: string): Promise<JobStep[]> {
   return (await jsonFetch<JobStep[] | null>(`/api/jobs/${jobId}/steps`)) ?? [];
 }

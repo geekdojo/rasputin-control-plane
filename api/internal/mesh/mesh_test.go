@@ -1010,3 +1010,68 @@ func TestMockClient_PersistsAcrossInstances(t *testing.T) {
 		t.Errorf("persistence: want 1 key, got %d", len(keys))
 	}
 }
+
+// TestEnrollWorkflow_KeyChainsAcrossSteps drives all three enroll steps the
+// way the saga runner does — every step gets the ORIGINAL job spec, and
+// prior step results accumulate in PriorResults keyed by step name. The
+// regression this guards: dispatch used to re-parse the spec instead of
+// mint_key's result, so the agent received an empty auth key ("agent
+// rejected enroll: tailscale mock: empty auth key" — first Mu wizard run,
+// 2026-06-12).
+func TestEnrollWorkflow_KeyChainsAcrossSteps(t *testing.T) {
+	f := newMeshFixture(t)
+
+	// Fake agent on the embedded bus: capture the dispatched cmd, ack OK.
+	gotKey := make(chan string, 1)
+	sub, err := f.nc.Subscribe(proto.MeshEnrollSubject("node-1"), func(m *nats.Msg) {
+		var cmd proto.MeshEnrollCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		gotKey <- cmd.AuthKey
+		ack, _ := json.Marshal(proto.MeshEnrollAck{
+			OK: true, TailnetID: "hs-42", TailnetIP: "100.64.0.9", Backend: "test",
+		})
+		_ = m.Respond(ack)
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	wf := EnrollNodeWorkflow(f.svc, nil, f.nc)
+	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
+	prior := map[string]json.RawMessage{}
+	for _, st := range wf.Steps {
+		sc := &jobs.StepCtx{
+			Ctx:          f.ctx,
+			JobID:        "test-job",
+			Spec:         spec, // original spec every step — runner semantics
+			NATS:         f.nc,
+			PriorResults: prior,
+			Log:          func(string, string) {},
+		}
+		res, err := st.Do(sc)
+		if err != nil {
+			t.Fatalf("step %s: %v", st.Name, err)
+		}
+		if res != nil {
+			prior[st.Name] = res
+		}
+	}
+
+	select {
+	case k := <-gotKey:
+		if k == "" {
+			t.Fatal("dispatch sent an empty auth key — mint_key's result was not chained forward")
+		}
+	default:
+		t.Fatal("agent never received the enroll cmd")
+	}
+
+	devices, err := f.store.ListDevices(f.ctx)
+	if err != nil {
+		t.Fatalf("ListDevices: %v", err)
+	}
+	if len(devices) != 1 || devices[0].HSID != "hs-42" || devices[0].RasputinNodeID != "node-1" {
+		t.Fatalf("record step: want one device hs-42/node-1, got %+v", devices)
+	}
+}
