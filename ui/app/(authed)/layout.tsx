@@ -36,9 +36,14 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
       .catch(() => router.replace('/login'));
   }, [router]);
 
+  // Re-fetched on every route change, not just layout mount: the App
+  // Router keeps this layout alive across client-side navigations, so a
+  // mount-only fetch left the "Finish setup" banner up after the operator
+  // clicked Finish and was redirected to / (first Mu bench runs,
+  // 2026-06-12). The state read is a tiny unauthenticated GET.
   useEffect(() => {
     getSetupState().then(setSetup).catch(() => {});
-  }, []);
+  }, [pathname]);
 
   // TopBar cluster summary:
   //   NODES ONLINE  — 15s poll; node status transitions are slow (heartbeat
