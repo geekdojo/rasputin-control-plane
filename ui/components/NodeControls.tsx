@@ -305,7 +305,7 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
             disabled={!node || busy !== null || !isOnline}
             onClick={() => setModal('reboot')}
           />
-          <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console/${encodeURIComponent(node.id)}`)} />
+          <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console?node=${encodeURIComponent(node.id)}`)} />
           <CtrlButton icon={Upload} label="UPDATE" disabled={!node} onClick={() => onNavigate('/updates')} />
           <CtrlButton
             icon={RefreshCw}

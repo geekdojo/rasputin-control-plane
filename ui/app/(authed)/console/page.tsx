@@ -2,11 +2,11 @@
 
 import { ArrowLeft, Terminal } from 'lucide-react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
-import { bmcSOLURL } from '../../../../lib/api';
-import { Badge, Btn, DIM, HAIR, Input, PageHeader, PageShell } from '../../../../components/kit';
-import { MONO } from '../../../../components/ui-theme';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useRef, useState } from 'react';
+import { bmcSOLURL } from '../../../lib/api';
+import { Badge, Btn, DIM, HAIR, Input, PageHeader, PageShell } from '../../../components/kit';
+import { MONO } from '../../../components/ui-theme';
 
 type ConnState = 'connecting' | 'open' | 'closed' | 'error';
 
@@ -19,9 +19,13 @@ const CONN_COLOR: Record<ConnState, string> = {
 
 // SOL console (v0): a simple autoscrolling <pre>, line-oriented input. xterm.js
 // + raw keypress capture is the v1 upgrade when wired to a real serial port.
-export default function ConsolePage() {
-  const params = useParams<{ nodeId: string }>();
-  const nodeId = decodeURIComponent(params.nodeId);
+//
+// The node id rides in ?node= rather than a path segment: the UI ships as a
+// Next static export (one .html per route baked at build time), and node ids
+// only exist at runtime.
+function ConsoleInner() {
+  const search = useSearchParams();
+  const nodeId = search.get('node') ?? '';
   const [lines, setLines] = useState<string[]>([]);
   const [connected, setConnected] = useState<ConnState>('connecting');
   const [input, setInput] = useState('');
@@ -29,6 +33,7 @@ export default function ConsolePage() {
   const paneRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
+    if (!nodeId) return;
     const ws = new WebSocket(bmcSOLURL(nodeId));
     wsRef.current = ws;
     ws.onopen = () => setConnected('open');
@@ -62,6 +67,22 @@ export default function ConsolePage() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(input + '\n');
     setInput('');
+  }
+
+  if (!nodeId) {
+    return (
+      <PageShell>
+        <PageHeader icon={Terminal} title="SERIAL CONSOLE" />
+        <div style={{ padding: '14px 20px' }}>
+          <p style={{ color: DIM, fontSize: 11, fontFamily: MONO }}>
+            No node selected. Open a console from a node&apos;s controls.{' '}
+            <Link href="/" style={{ color: DIM }}>
+              Back to nodes
+            </Link>
+          </p>
+        </div>
+      </PageShell>
+    );
   }
 
   return (
@@ -121,5 +142,15 @@ export default function ConsolePage() {
         </p>
       </div>
     </PageShell>
+  );
+}
+
+// useSearchParams must sit under a Suspense boundary for the static export
+// to prerender this route.
+export default function ConsolePage() {
+  return (
+    <Suspense fallback={null}>
+      <ConsoleInner />
+    </Suspense>
   );
 }

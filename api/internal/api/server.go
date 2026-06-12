@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"os"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
@@ -41,6 +42,7 @@ type Server struct {
 	auth                *auth.Service
 	obs                 *obs.Status
 	nc                  *nats.Conn
+	uiDir               string
 }
 
 // SetAlertsService overrides the default aggregator-only alerts service
@@ -213,6 +215,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ws/mesh", reqd(s.bridgeSubject(proto.AllMeshChangesFilter)))
 	mux.HandleFunc("GET /ws/bmc", reqd(s.bridgeSubject(proto.AllBMCChangesFilter)))
 	mux.HandleFunc("GET /ws/alerts", reqd(s.bridgeSubject(proto.AlertsChangesSubject)))
+
+	// Web UI: the mux fallback. "/" is the least-specific pattern, so every
+	// /api, /ws, /healthz and /observability route above wins; only paths
+	// nothing else claims reach the static export. Method-less on purpose:
+	// "GET /" would *conflict* with the method-less "/observability/"
+	// prefix route (Go 1.22 ServeMux rules) — the handler enforces
+	// GET/HEAD itself. See SetUIDir.
+	if s.uiDir != "" {
+		mux.Handle("/", uiHandler{fsys: os.DirFS(s.uiDir)})
+	}
 
 	return withCORS(mux)
 }

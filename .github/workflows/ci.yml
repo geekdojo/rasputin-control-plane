@@ -120,12 +120,12 @@ jobs:
 
       # Next build catches a class of errors tsc doesn't: missing 'use
       # client' directives, server/client component boundary violations,
-      # bad dynamic imports.
+      # bad dynamic imports. It also produces the static export (out/)
+      # that release tarballs ship — so assert it actually materialized.
+      # (NEXT_PUBLIC_API_BASE is computed inside next.config.mjs from
+      # NODE_ENV; production builds bake in same-origin paths.)
       - name: build
-        env:
-          # The build doesn't need a real api at compile time, but
-          # next.config.mjs reads NEXT_PUBLIC_API_BASE. Setting it to a
-          # well-formed dev value avoids any "API URL undefined" warnings
-          # baked into the bundle.
-          NEXT_PUBLIC_API_BASE: "http://localhost:8080"
         run: npm run build
+
+      - name: assert static export
+        run: test -f out/index.html && test -f out/login.html

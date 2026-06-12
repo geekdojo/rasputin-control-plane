@@ -227,10 +227,15 @@ func main() {
 		},
 	}, selfNodeID)
 
+	// Default origins cover both ways the UI reaches the api on localhost:
+	// the Next dev server (:3000, cross-origin) and the api-served static
+	// export (:8080, same-origin — including `ssh -L 8080:localhost:8080`
+	// tunnels to an appliance, which is the supported way to get a
+	// WebAuthn-grade secure context before the api grows TLS).
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
 		RPID:          envOr("RASPUTIN_RP_ID", "localhost"),
-		RPOrigins:     splitCSV(envOr("RASPUTIN_RP_ORIGINS", "http://localhost:3000")),
+		RPOrigins:     splitCSV(envOr("RASPUTIN_RP_ORIGINS", "http://localhost:3000,http://localhost:8080")),
 		SecureCookies: os.Getenv("RASPUTIN_SECURE_COOKIES") == "1",
 	}
 	authSvc, err := auth.NewService(authStore, authCfg)
@@ -340,6 +345,18 @@ func main() {
 	defer sched.Stop()
 
 	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busSrv.Conn())
+
+	// Web UI (Next.js static export). The OS image installs it at the
+	// default path (see rasputin-os package/rasputin-api); dev boxes
+	// usually don't have it, so the api quietly stays headless there and
+	// `next dev` serves the UI on :3000 instead.
+	uiDir := envOr("RASPUTIN_UI_DIR", "/usr/share/rasputin/ui")
+	if _, err := os.Stat(filepath.Join(uiDir, "index.html")); err == nil {
+		srv.SetUIDir(uiDir)
+		log.Printf("rasputin-api: serving web UI from %s", uiDir)
+	} else {
+		log.Printf("rasputin-api: no web UI at %s (%v); serving API only", uiDir, err)
+	}
 
 	// Real alerting (Slice 1.5): open the persisted alerts store and
 	// wire a Service that merges aggregator + persisted views. Always

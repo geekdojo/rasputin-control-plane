@@ -38,6 +38,15 @@ jobs:
             api/go.sum
             agent/go.sum
 
+      # Node for the web UI build (build-release.sh runs npm ci + next
+      # build and packs ui/out into the api tarballs). Version pin
+      # rationale lives in ci.yml's frontend job.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+
       - name: Resolve version
         id: ver
         run: |
@@ -62,7 +71,7 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --title "Rasputin control plane ${GITHUB_REF_NAME}" \
-            --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
+            --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64; the api tarball bundles the web UI). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
             dist/*.tar.gz dist/*.sha256 dist/*.hash
 
       # Manual dispatch → just keep the artifacts for inspection.
