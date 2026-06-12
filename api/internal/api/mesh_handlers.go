@@ -151,6 +151,11 @@ func firstOrEmpty(s []string) string {
 // the iOS Tailscale client trusts Headscale's TLS endpoint (signed by
 // the Mesh CA — see design/control-plane/certificates.md).
 //
+// Unauthenticated BY DESIGN (see Handler): the CA public cert is not a
+// secret, and the first-run flow needs it before any passkey exists —
+// the operator installs the CA over plain HTTP, then registers their
+// first credential over HTTPS on a now-trusted connection.
+//
 // NOTE: this serves <trustDir>/mesh-ca.pem (the Mesh TLS CA), NOT
 // root-ca.pem (the bundle-signing root). The two CAs are deliberately
 // separate; an earlier revision of this handler delivered root-ca.pem
@@ -186,6 +191,32 @@ func (s *Server) handleMeshIOSProfile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="rasputin-trust.mobileconfig"`)
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(profile)
+}
+
+// GET /mesh-ca.pem — the Mesh TLS CA public cert as raw PEM. The non-Apple
+// counterpart to /api/mesh/ios-profile above: laptops curl this straight
+// into their OS trust store (the /trust page shows the per-OS one-liners),
+// Windows downloads and double-clicks it. Same auth posture and 404
+// semantics as the ios-profile handler — unauthenticated by design, 404
+// when the CA hasn't been provisioned.
+func (s *Server) handleMeshCAPEM(w http.ResponseWriter, r *http.Request) {
+	if s.trustDir == "" {
+		writeError(w, http.StatusNotFound, "trust dir not configured")
+		return
+	}
+	caPEM, err := os.ReadFile(filepath.Join(s.trustDir, mesh.MeshCAFileName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "Mesh TLS CA not yet provisioned — restart the api to regenerate")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", `attachment; filename="rasputin-mesh-ca.pem"`)
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(caPEM)
 }
 
 // GET /api/mesh/keys — list preauth_key intents. Returns the plaintext

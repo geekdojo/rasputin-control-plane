@@ -102,7 +102,8 @@ func NewServer(
 // Handler returns the root http.Handler with all routes wired.
 //
 // Route protection:
-//   - /healthz and /api/auth/* are open.
+//   - /healthz, /api/auth/*, GET /api/setup/state and the CA-download
+//     endpoints (GET /mesh-ca.pem, GET /api/mesh/ios-profile) are open.
 //   - everything else requires a valid session cookie.
 //   - WebSocket endpoints (/ws/*) receive the cookie on upgrade and are
 //     gated by the same middleware.
@@ -116,6 +117,12 @@ func (s *Server) Handler() http.Handler {
 	// runs before any passkey exists and needs to read step state to know
 	// which form to show first. The response carries no secrets.
 	mux.HandleFunc("GET /api/setup/state", s.handleSetupState)
+	// CA-download endpoints are intentionally unauthenticated: the Mesh CA
+	// public cert is not a secret, and first-run has no users yet — the
+	// operator must be able to install the CA before the first passkey
+	// ceremony can happen over HTTPS. See the handlers' comments.
+	mux.HandleFunc("GET /api/mesh/ios-profile", s.handleMeshIOSProfile)
+	mux.HandleFunc("GET /mesh-ca.pem", s.handleMeshCAPEM)
 
 	// Authenticated
 	reqd := s.auth.RequireSessionFunc
@@ -176,7 +183,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/mesh/reconcile", reqd(s.handleMeshReconcile))
 	mux.HandleFunc("POST /api/mesh/enroll/{nodeId}", reqd(s.handleMeshEnrollNode))
 	mux.HandleFunc("GET /api/mesh/enroll-defaults/{nodeId}", reqd(s.handleMeshEnrollDefaults))
-	mux.HandleFunc("GET /api/mesh/ios-profile", reqd(s.handleMeshIOSProfile))
 
 	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))
 	mux.HandleFunc("POST /api/setup/mesh", reqd(s.handleSetupMesh))

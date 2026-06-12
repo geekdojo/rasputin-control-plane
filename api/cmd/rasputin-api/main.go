@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -45,6 +46,14 @@ func main() {
 
 	dataDir := envOr("RASPUTIN_DATA_DIR", "./data")
 	httpAddr := envOr("RASPUTIN_HTTP_ADDR", ":8080")
+	// Native HTTPS for first-run WebAuthn bootstrap: browsers only run the
+	// passkey ceremony in a secure context with a domain-name RP ID, so an
+	// appliance reached as https://rasputin.local must terminate TLS itself.
+	// Empty (the default) keeps dev behavior exactly as before — plain HTTP
+	// only. The OS image's systemd unit sets :443 (plus RASPUTIN_HTTP_ADDR=:80,
+	// RASPUTIN_RP_ID=rasputin.local, RASPUTIN_RP_ORIGINS=https://rasputin.local,
+	// RASPUTIN_PUBLIC_BASE_URL=https://rasputin.local).
+	httpsAddr := os.Getenv("RASPUTIN_HTTPS_ADDR")
 
 	if err := os.MkdirAll(filepath.Join(dataDir, "nats"), 0o755); err != nil {
 		log.Fatalf("rasputin-api: data dir: %v", err)
@@ -230,8 +239,10 @@ func main() {
 	// Default origins cover both ways the UI reaches the api on localhost:
 	// the Next dev server (:3000, cross-origin) and the api-served static
 	// export (:8080, same-origin — including `ssh -L 8080:localhost:8080`
-	// tunnels to an appliance, which is the supported way to get a
-	// WebAuthn-grade secure context before the api grows TLS).
+	// tunnels, still a valid escape hatch). On a real appliance the OS
+	// image overrides these to rasputin.local + https origins and enables
+	// the native HTTPS listener (RASPUTIN_HTTPS_ADDR above) so the passkey
+	// ceremony gets its secure context without any tunnel.
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
 		RPID:          envOr("RASPUTIN_RP_ID", "localhost"),
@@ -377,9 +388,37 @@ func main() {
 		log.Printf("rasputin-api: WARNING — alerts webhook is unauthenticated " +
 			"(set RASPUTIN_ALERTS_WEBHOOK_SECRET to enable header auth)")
 	}
+	handler := srv.Handler()
+
+	// With HTTPS on, the plain-HTTP listener demotes to the bootstrap
+	// surface (trust page + CA download + healthz; everything else 302s to
+	// https). With HTTPS off — every dev run — it serves the full handler
+	// exactly as before.
+	httpHandler := handler
+	var httpsSrv *http.Server
+	if httpsAddr != "" {
+		leafPaths, err := ensureAPILeaf(meshCA, dataDir)
+		if err != nil {
+			log.Fatalf("rasputin-api: https leaf: %v", err)
+		}
+		httpsSrv = &http.Server{
+			Addr:              httpsAddr,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+		}
+		go func() {
+			log.Printf("rasputin-api: https listening on %s (leaf %s)", httpsAddr, leafPaths.CertPath)
+			if err := httpsSrv.ListenAndServeTLS(leafPaths.CertPath, leafPaths.KeyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("rasputin-api: https: %v", err)
+			}
+		}()
+		httpHandler = srv.BootstrapHandler()
+	}
+
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
-		Handler:           srv.Handler(),
+		Handler:           httpHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -396,7 +435,76 @@ func main() {
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	_ = httpSrv.Shutdown(shutCtx)
+	if httpsSrv != nil {
+		_ = httpsSrv.Shutdown(shutCtx)
+	}
 	runner.Wait()
+}
+
+// ensureAPILeaf mints (or reuses — MintLeafToDisk is idempotent with
+// SAN-drift and <60d re-mint logic) the api's own HTTPS server leaf under
+// the Mesh CA. Lives at <dataDir>/tls/api/leaf.{pem,key}, parallel to the
+// Headscale leaf at <dataDir>/mesh/headscale/certs/.
+func ensureAPILeaf(meshCA *mesh.MeshCA, dataDir string) (mesh.LeafPaths, error) {
+	hostname, _ := os.Hostname()
+	spec := apiLeafSpec(hostname, primaryLanIP())
+	return mesh.MintLeafToDisk(meshCA, filepath.Join(dataDir, "tls", "api"), spec)
+}
+
+// apiLeafSpec builds the SAN set for the api's HTTPS leaf:
+//
+//	DNS: rasputin.local (the mDNS name the OS image advertises via
+//	     systemd-resolved), localhost (same-host curl/debug, and
+//	     symmetric with the Headscale leaf), the machine hostname, and
+//	     <hostname>.local when the hostname is a bare label.
+//	IP:  127.0.0.1 plus the discovered primary LAN IP, so operators who
+//	     browse by address before mDNS resolves still get a clean lock.
+//
+// MintLeafToDisk's SAN-drift check re-mints automatically when any of
+// these change (new hostname, node moved subnets).
+func apiLeafSpec(hostname string, lanIP net.IP) mesh.LeafSpec {
+	dns := []string{"rasputin.local", "localhost"}
+	seen := map[string]bool{"rasputin.local": true, "localhost": true}
+	add := func(name string) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" && !seen[name] {
+			seen[name] = true
+			dns = append(dns, name)
+		}
+	}
+	host := strings.ToLower(strings.TrimSpace(hostname))
+	add(host)
+	if host != "" && !strings.Contains(host, ".") {
+		add(host + ".local")
+	}
+	ips := []net.IP{net.IPv4(127, 0, 0, 1)}
+	if lanIP != nil {
+		ips = append(ips, lanIP)
+	}
+	return mesh.LeafSpec{
+		CommonName:  "rasputin.local",
+		DNSNames:    dns,
+		IPAddresses: ips,
+	}
+}
+
+// primaryLanIP returns the IP of the interface holding the default route,
+// or nil when there is none (air-gapped box). Mirrors the "dial 8.8.8.8
+// and inspect LocalAddr" trick in agent/internal/host.PrimaryLanCIDR —
+// mirrored rather than imported because that package is internal to the
+// agent module and the api can't reach across the module boundary. No
+// packet leaves the host: net.Dial("udp", ...) only does a route lookup.
+func primaryLanIP() net.IP {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	local, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	return local.IP
 }
 
 func envOr(key, def string) string {
