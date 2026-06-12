@@ -109,6 +109,13 @@ export default function TrustPage() {
         </section>
 
         <div style={{ borderTop: `1px solid ${HAIR}`, paddingTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {/* Firefox (and some other browsers) only read newly installed
+              certificates from the system store at launch — found on the
+              first Mu hardware bench, 2026-06-12. */}
+          <Hint>
+            Still seeing a warning after installing? Quit and reopen your browser — some browsers
+            (Firefox in particular) only pick up new certificates when they start.
+          </Hint>
           <LinkBtn href={secureHome} primary>
             CONTINUE SECURELY <ArrowRight size={12} />
           </LinkBtn>
