@@ -280,9 +280,9 @@ func validateIntentSpec(kind string, raw json.RawMessage) error {
 			return errors.New("target must be accept, reject, or drop")
 		}
 		switch spec.Proto {
-		case "", proto.RuleProtoAny, proto.RuleProtoTCP, proto.RuleProtoUDP, proto.RuleProtoTCPUDP, proto.RuleProtoICMP:
+		case "", proto.RuleProtoAny, proto.RuleProtoTCP, proto.RuleProtoUDP, proto.RuleProtoTCPUDP, proto.RuleProtoICMP, proto.RuleProtoIGMP:
 		default:
-			return errors.New("proto must be any, tcp, udp, tcpudp, or icmp")
+			return errors.New("proto must be any, tcp, udp, tcpudp, icmp, or igmp")
 		}
 		if err := validateIPOrCIDR("srcIp", spec.SrcIP); err != nil {
 			return err

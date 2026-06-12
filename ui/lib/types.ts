@@ -76,7 +76,7 @@ export interface InventoryChangeEvent {
 export type FirewallIntentKind = 'port_forward' | 'firewall_rule' | 'wan_config';
 export type PortForwardProto = 'tcp' | 'udp' | 'tcpudp';
 
-export type FirewallRuleProto = 'tcp' | 'udp' | 'tcpudp' | 'icmp' | 'any';
+export type FirewallRuleProto = 'tcp' | 'udp' | 'tcpudp' | 'icmp' | 'igmp' | 'any';
 export type FirewallRuleTarget = 'accept' | 'reject' | 'drop';
 
 export type WANProto = 'dhcp' | 'static' | 'pppoe';

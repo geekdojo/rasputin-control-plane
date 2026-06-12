@@ -231,6 +231,36 @@ func (s *Store) UpdateAfterReconcile(ctx context.Context, nodeID, observedHash s
 	return err
 }
 
+// ----- Baseline-seeded marker ---------------------------------------------
+
+// MarkBaselineSeeded atomically records that node nodeID has had its baseline
+// rules seeded, returning true only on the FIRST call for that node and false
+// on every subsequent call. The check-and-set is a single INSERT ... ON
+// CONFLICT DO NOTHING — the unique node_id PRIMARY KEY makes it race-safe:
+// concurrent callers serialize on the row, and exactly one sees RowsAffected==1.
+//
+// The marker is write-once and never deleted (no method removes it). That is
+// the load-bearing "deleted baseline rules don't resurrect" guarantee: once a
+// node is marked, SeedBaselineRules is a permanent no-op for it, so an operator
+// who deletes Allow-Ping (or any baseline rule) won't see it reappear when the
+// firewall agent reconnects (which re-runs the first-registration path only if
+// the inventory row was wiped — but this marker outlives that).
+func (s *Store) MarkBaselineSeeded(ctx context.Context, nodeID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+        INSERT INTO firewall_baseline_seeded (node_id, seeded_at)
+        VALUES (?, ?)
+        ON CONFLICT(node_id) DO NOTHING`,
+		nodeID, ms(time.Now().UTC()))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

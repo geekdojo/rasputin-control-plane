@@ -19,4 +19,14 @@ CREATE TABLE IF NOT EXISTS firewall_state (
     last_applied    INTEGER,
     last_reconciled INTEGER
 );
+
+-- firewall_baseline_seeded records that the stock-equivalent baseline rules
+-- have been seeded for a given firewall node at least once. The row's mere
+-- existence is the marker; we never delete it. This is what guarantees a
+-- baseline rule the operator later DELETES does not silently resurrect on the
+-- next agent reconnect / DB-reattach — see MarkBaselineSeeded.
+CREATE TABLE IF NOT EXISTS firewall_baseline_seeded (
+    node_id   TEXT PRIMARY KEY,
+    seeded_at INTEGER NOT NULL
+);
 `

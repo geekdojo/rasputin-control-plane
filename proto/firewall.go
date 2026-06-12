@@ -58,7 +58,11 @@ const (
 	RuleProtoUDP    FirewallRuleProto = "udp"
 	RuleProtoTCPUDP FirewallRuleProto = "tcpudp"
 	RuleProtoICMP   FirewallRuleProto = "icmp"
-	RuleProtoAny    FirewallRuleProto = "any"
+	// RuleProtoIGMP matches IGMP (multicast group management / IPTV). Added
+	// for the seeded Allow-IGMP baseline rule; maps straight to UCI proto
+	// "igmp" with no expansion (see ucRuleProto).
+	RuleProtoIGMP FirewallRuleProto = "igmp"
+	RuleProtoAny  FirewallRuleProto = "any"
 )
 
 // FirewallRuleTarget enumerates supported actions for a firewall rule.

@@ -33,6 +33,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // rasputin-api: the Rasputin control-plane backend.
@@ -292,6 +293,22 @@ func main() {
 	}
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn())
+	// On a firewall-role node's FIRST registration, seed the stock-equivalent
+	// baseline firewall rules (Allow-DHCP-Renew / Allow-Ping / Allow-IGMP) as
+	// real, visible, deletable intents. SeedBaselineRules is idempotent via a
+	// persistent marker and never reseeds, so a baseline rule the operator
+	// later deletes does not resurrect. Errors are logged and swallowed — a
+	// seeding failure must never break node registration. Wired here (not in
+	// the inventory package) to avoid an inventory→firewall import cycle,
+	// mirroring auth.SetLoginHook → mesh.EnsureUser above.
+	invSvc.SetOnNodeAdded(func(hookCtx context.Context, n *proto.Node) {
+		if n.Role != proto.RoleFirewall {
+			return
+		}
+		if _, err := firewall.SeedBaselineRules(hookCtx, fwStore, n.ID); err != nil {
+			log.Printf("rasputin-api: seed baseline firewall rules for %s: %v", n.ID, err)
+		}
+	})
 	if err := invSvc.Start(ctx); err != nil {
 		log.Fatalf("rasputin-api: inventory service: %v", err)
 	}

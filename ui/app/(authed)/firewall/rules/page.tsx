@@ -532,6 +532,7 @@ function AddRuleForm({
           <option value="udp">udp</option>
           <option value="tcpudp">tcp+udp</option>
           <option value="icmp">icmp</option>
+          <option value="igmp">igmp</option>
         </Select>
         <FieldLabel>THEN</FieldLabel>
         <Select value={target} onChange={(e) => setTarget(e.target.value as FirewallRuleTarget)}>

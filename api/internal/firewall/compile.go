@@ -262,13 +262,16 @@ func compileFirewallRule(in *Intent) (map[string]any, error) {
 }
 
 // ucRuleProto picks the UCI proto value. "any" / unset → "all" (UCI's
-// wildcard); "tcpudp" → "tcp udp" (UCI's space-separated form).
+// wildcard); "tcpudp" → "tcp udp" (UCI's space-separated form); "icmp" and
+// "igmp" pass straight through as the matching UCI proto name.
 func ucRuleProto(p proto.FirewallRuleProto) string {
 	switch p {
 	case "", proto.RuleProtoAny:
 		return "all"
 	case proto.RuleProtoTCPUDP:
 		return "tcp udp"
+	case proto.RuleProtoIGMP:
+		return "igmp"
 	default:
 		return string(p)
 	}

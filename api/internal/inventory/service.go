@@ -30,6 +30,13 @@ type Service struct {
 	mu           sync.Mutex
 	statusByNode map[string]proto.NodeStatus // last published status per node
 
+	// onNodeAdded, if set, is invoked AFTER a brand-new node row is inserted
+	// (the existing==nil first-registration path only). It must not block
+	// registration: handleRegistered logs-and-swallows any error. Wired in
+	// main.go to avoid an inventory→firewall import cycle — mirrors the
+	// auth.Service.SetLoginHook → mesh.EnsureUser pattern.
+	onNodeAdded func(ctx context.Context, n *proto.Node)
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	subs   []*nats.Subscription
@@ -83,6 +90,15 @@ func (s *Service) Stop() {
 
 // Store exposes the underlying store for read-only HTTP handlers.
 func (s *Service) Store() *Store { return s.store }
+
+// SetOnNodeAdded registers a callback fired exactly on a node's FIRST
+// registration (the insert path), after the InventoryAdded event is emitted.
+// Reconnects re-run handleRegistered but hit the update path, so they do not
+// fire this. The hook must be safe to fail: handleRegistered logs-and-swallows
+// errors and never lets a hook block registration. Set before Start.
+func (s *Service) SetOnNodeAdded(fn func(ctx context.Context, n *proto.Node)) {
+	s.onNodeAdded = fn
+}
 
 // Remove deletes a node from inventory, clears its in-memory status entry,
 // and emits an InventoryRemoved change event carrying the last known Node
@@ -196,6 +212,12 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 		s.statusByNode[ev.NodeID] = proto.StatusOnline
 		s.mu.Unlock()
 		s.emit(n, proto.InventoryAdded)
+		if s.onNodeAdded != nil {
+			// First-registration hook (e.g. firewall baseline seeding). Run
+			// synchronously but never let it break registration — the hook is
+			// responsible for its own error handling; we just guard the call.
+			s.onNodeAdded(s.ctx, n)
+		}
 		return
 	}
 
