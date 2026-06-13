@@ -24,6 +24,10 @@ func TestResponder_Authorize(t *testing.T) {
 	if err := store.Revoke(ctx, revID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
+	bound, _, err := store.MintBound(ctx, "bound", "fw-1")
+	if err != nil {
+		t.Fatalf("MintBound: %v", err)
+	}
 
 	r := &Responder{tokens: store}
 
@@ -41,6 +45,8 @@ func TestResponder_Authorize(t *testing.T) {
 		{"remote bad token denied", "fw-1", "garbage", "192.168.1.50", false},
 		{"remote revoked token denied", "fw-1", revoked, "192.168.1.50", false},
 		{"empty node id even on loopback denied", "", "", "127.0.0.1", false},
+		{"bound token as its node", "fw-1", bound, "192.168.1.50", true},
+		{"bound token as a different node denied", "fw-2", bound, "192.168.1.50", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

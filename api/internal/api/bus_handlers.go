@@ -28,12 +28,21 @@ func (s *Server) handleListBusTokens(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Label string `json:"label"`
+		Label  string `json:"label"`
+		NodeID string `json:"nodeId"` // optional: bind the token to this node id
 	}
 	// Body is optional; ignore decode errors on an empty body.
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	plaintext, id, err := s.busTokens.Mint(r.Context(), body.Label)
+	var (
+		plaintext, id string
+		err           error
+	)
+	if body.NodeID != "" {
+		plaintext, id, err = s.busTokens.MintBound(r.Context(), body.Label, body.NodeID)
+	} else {
+		plaintext, id, err = s.busTokens.Mint(r.Context(), body.Label)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -41,9 +50,10 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	// token is returned ONCE — the operator seeds it into the node and it's
 	// unrecoverable afterward.
 	writeJSON(w, http.StatusCreated, map[string]string{
-		"id":    id,
-		"label": body.Label,
-		"token": plaintext,
+		"id":     id,
+		"label":  body.Label,
+		"nodeId": body.NodeID,
+		"token":  plaintext,
 	})
 }
 

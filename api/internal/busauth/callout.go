@@ -33,7 +33,7 @@ const (
 
 // Validator is the subset of *Store the responder needs (eases testing).
 type Validator interface {
-	Validate(ctx context.Context, plaintext string) (bool, error)
+	Validate(ctx context.Context, plaintext, presentedNodeID string) (bool, error)
 }
 
 // Responder handles NATS auth-callout requests on the in-process connection:
@@ -112,12 +112,14 @@ func (r *Responder) authorize(nodeID, token, host string) (bool, string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), validateTimeout)
 	defer cancel()
-	valid, err := r.tokens.Validate(ctx, token)
+	// Pass the presented node id: a token bound to a different node is rejected
+	// here, so a leaked token can't be replayed as another node.
+	valid, err := r.tokens.Validate(ctx, token, nodeID)
 	if err != nil {
 		return false, "token validation error"
 	}
 	if !valid {
-		return false, "invalid or revoked join token"
+		return false, "invalid, revoked, or wrong-node join token"
 	}
 	return true, ""
 }
