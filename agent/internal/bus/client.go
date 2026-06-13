@@ -3,10 +3,35 @@ package bus
 import (
 	"fmt"
 	"log"
+	"net"
+	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/mdns"
 	"github.com/nats-io/nats.go"
 )
+
+// mdnsDialer resolves *.local hostnames via multicast DNS before dialing, so a
+// node can reach the control plane at rasputin.local on a LAN whose OS has no
+// .local resolver (notably the OpenWrt firewall image). nats calls Dial on every
+// (re)connect, so address churn is handled transparently — each reconnect
+// re-resolves. Non-.local hosts and bare IPs dial normally.
+type mdnsDialer struct {
+	resolveTimeout time.Duration
+	dialTimeout    time.Duration
+}
+
+func (d *mdnsDialer) Dial(network, address string) (net.Conn, error) {
+	if host, port, err := net.SplitHostPort(address); err == nil &&
+		strings.HasSuffix(strings.ToLower(host), ".local") {
+		if ip, rerr := mdns.Resolve(host, d.resolveTimeout); rerr == nil && ip != "" {
+			address = net.JoinHostPort(ip, port)
+		} else if rerr != nil {
+			log.Printf("agent/bus: mDNS resolve %s failed (%v); falling back to OS resolver", host, rerr)
+		}
+	}
+	return net.DialTimeout(network, address, d.dialTimeout)
+}
 
 // Connect dials the api's NATS broker with infinite reconnect. onConnected,
 // if non-nil, fires once for the initial connection AND on every successful
@@ -25,6 +50,8 @@ func Connect(url, nodeID, token string, onConnected func(*nats.Conn)) (*nats.Con
 	}
 	connOpts := []nats.Option{
 		nats.Name(fmt.Sprintf("rasputin-agent/%s", nodeID)),
+		// Resolve rasputin.local via mDNS on every (re)connect (see mdnsDialer).
+		nats.SetCustomDialer(&mdnsDialer{resolveTimeout: 2 * time.Second, dialTimeout: 5 * time.Second}),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),
 		nats.PingInterval(20 * time.Second),
