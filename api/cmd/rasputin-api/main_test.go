@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 )
 
@@ -91,5 +95,46 @@ func TestEnsureAPILeaf_CertCarriesSANs(t *testing.T) {
 	// And the browser-facing check that actually matters:
 	if err := cert.VerifyHostname("rasputin.local"); err != nil {
 		t.Errorf("VerifyHostname(rasputin.local): %v", err)
+	}
+}
+
+func TestLoadBusPreseed(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := busauth.OpenStore(ctx, filepath.Join(dir, "bus.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Missing file is normal — (0, nil), no error.
+	if n, err := loadBusPreseed(ctx, store, filepath.Join(dir, "nope.json")); err != nil || n != 0 {
+		t.Fatalf("missing preseed = (%d,%v); want (0,nil)", n, err)
+	}
+
+	// A valid preseed loads and the bound hashes validate.
+	pt, h, _ := busauth.GenerateToken()
+	path := filepath.Join(dir, "preseed.json")
+	body := `[{"hash":"` + h + `","nodeId":"node-a","label":"compute"}]`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write preseed: %v", err)
+	}
+	if n, err := loadBusPreseed(ctx, store, path); err != nil || n != 1 {
+		t.Fatalf("loadBusPreseed = (%d,%v); want (1,nil)", n, err)
+	}
+	if ok, _ := store.Validate(ctx, pt, "node-a"); !ok {
+		t.Error("preloaded token must validate for its bound node")
+	}
+	if ok, _ := store.Validate(ctx, pt, "node-b"); ok {
+		t.Error("preloaded token must not validate for another node")
+	}
+
+	// Malformed JSON surfaces an error (caller logs and continues).
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write bad: %v", err)
+	}
+	if _, err := loadBusPreseed(ctx, store, bad); err == nil {
+		t.Error("malformed preseed should error")
 	}
 }

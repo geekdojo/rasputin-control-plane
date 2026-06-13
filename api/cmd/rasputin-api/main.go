@@ -6,7 +6,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -120,6 +122,19 @@ func main() {
 		log.Fatalf("rasputin-api: bus token store: %v", err)
 	}
 	defer busTokenStore.Close()
+
+	// Preload any provisioning matched-set tokens (hashes + node bindings) the
+	// controlplane shipped with — firstboot drops the file on the persistent
+	// partition (token-provisioning-pipeline.md §4c). Idempotent, so it's safe on
+	// every boot; done regardless of enforcement so the tokens are known before a
+	// later flip to enforce. A bad/missing file never blocks boot — a node that
+	// can't join is a better failure than a controlplane that won't start.
+	if n, err := loadBusPreseed(ctx, busTokenStore, busPreseedPath(dataDir)); err != nil {
+		log.Printf("rasputin-api: bus token preseed: %v (continuing)", err)
+	} else if n > 0 {
+		log.Printf("rasputin-api: preloaded %d bus token(s) from provisioning seed", n)
+	}
+
 	if busAuthEnforce {
 		responder := busauth.NewResponder(busSrv.Conn(), busIssuer, busTokenStore)
 		if err := responder.Start(); err != nil {
@@ -585,6 +600,31 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// busPreseedPath is where the controlplane reads its provisioning matched-set
+// token preseed (hashes + node bindings). firstboot copies it here from the
+// seed FAT. Overridable for tests / non-default layouts.
+func busPreseedPath(dataDir string) string {
+	return envOr("RASPUTIN_BUS_PRESEED", filepath.Join(dataDir, "bus", "preseed.json"))
+}
+
+// loadBusPreseed reads a JSON array of {hash,nodeId,label} and preloads it into
+// the token store. A missing file is normal (not every install is a pre-paired
+// matched set) and returns (0, nil). Idempotent via Store.PreloadHashes.
+func loadBusPreseed(ctx context.Context, store *busauth.Store, path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var toks []busauth.PreseedToken
+	if err := json.Unmarshal(data, &toks); err != nil {
+		return 0, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return store.PreloadHashes(ctx, toks)
 }
 
 // randomSecret returns a 32-byte hex secret for the bus AuthUser. Generated
