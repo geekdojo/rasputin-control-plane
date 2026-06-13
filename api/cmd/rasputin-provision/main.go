@@ -76,6 +76,7 @@ type manifest struct {
 	ClusterID   string         `json:"clusterId"`
 	GeneratedAt string         `json:"generatedAt"`
 	NATSURL     string         `json:"natsUrl"`
+	Enforce     bool           `json:"enforce"`
 	Nodes       []manifestNode `json:"nodes"`
 	PreseedFile string         `json:"preseedFile"`
 }
@@ -92,6 +93,7 @@ func run() error {
 		clusterID = flag.String("cluster-id", "", "cluster id (required)")
 		natsURL   = flag.String("nats-url", defaultNATSURL, "control-plane NATS URL baked into non-controlplane seeds")
 		outDir    = flag.String("out", "", "output directory (default ./out/<cluster-id>)")
+		enforce   = flag.Bool("enforce", true, "bake RASPUTIN_BUS_AUTH=enforce into the controlplane seed (a matched set ships enforced)")
 		nodes     nodeList
 	)
 	flag.Var(&nodes, "node", "node as role[:node-id] (repeatable)")
@@ -101,7 +103,7 @@ func run() error {
 	if dir == "" {
 		dir = filepath.Join("out", *clusterID)
 	}
-	man, err := generate(*clusterID, *natsURL, dir, nodes)
+	man, err := generate(*clusterID, *natsURL, dir, nodes, *enforce)
 	if err != nil {
 		return err
 	}
@@ -115,7 +117,7 @@ func run() error {
 
 // generate assigns ids, validates the set, and writes all artifacts into dir.
 // Returns the manifest. Pure enough to unit-test end-to-end.
-func generate(clusterID, natsURL, dir string, nodes nodeList) (manifest, error) {
+func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool) (manifest, error) {
 	if clusterID == "" {
 		return manifest{}, fmt.Errorf("cluster id is required")
 	}
@@ -155,6 +157,7 @@ func generate(clusterID, natsURL, dir string, nodes nodeList) (manifest, error) 
 			ClusterID:   clusterID,
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 			NATSURL:     natsURL,
+			Enforce:     enforce,
 			PreseedFile: "controlplane-bus-tokens.json",
 		}
 	)
@@ -163,9 +166,14 @@ func generate(clusterID, natsURL, dir string, nodes nodeList) (manifest, error) 
 		mn := manifestNode{ID: n.ID, Role: n.Role}
 		if n.Role == "controlplane" {
 			// The controlplane self-inits: no token, dials its own loopback NATS,
-			// and is the recipient of the preseed (everyone else's hashes).
+			// and is the recipient of the preseed (everyone else's hashes). A
+			// matched set ships enforced — carried in the controlplane seed.
 			mn.SeedFile = seedFileName(n)
-			if err := writeFile(filepath.Join(dir, mn.SeedFile), buildrootSeed(n.Role, n.ID, loopbackNATSURL, ""), 0o600); err != nil {
+			seed := buildrootSeed(n.Role, n.ID, loopbackNATSURL, "")
+			if enforce {
+				seed += "RASPUTIN_BUS_AUTH=enforce\n"
+			}
+			if err := writeFile(filepath.Join(dir, mn.SeedFile), seed, 0o600); err != nil {
 				return manifest{}, err
 			}
 			man.Nodes = append(man.Nodes, mn)

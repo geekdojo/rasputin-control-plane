@@ -23,9 +23,12 @@ func TestGenerate_MatchedSetRoundTrips(t *testing.T) {
 		{Role: "compute", ID: "home1-n1"},
 		{Role: "compute"}, // id auto-assigned
 	}
-	man, err := generate("home1", defaultNATSURL, dir, nodes)
+	man, err := generate("home1", defaultNATSURL, dir, nodes, true)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
+	}
+	if !man.Enforce {
+		t.Error("manifest should record enforce=true")
 	}
 	if len(man.Nodes) != 4 {
 		t.Fatalf("manifest has %d nodes, want 4", len(man.Nodes))
@@ -64,6 +67,9 @@ func TestGenerate_MatchedSetRoundTrips(t *testing.T) {
 			if !strings.Contains(seed, "RASPUTIN_NATS_URL="+loopbackNATSURL) {
 				t.Errorf("controlplane should dial loopback NATS:\n%s", seed)
 			}
+			if !strings.Contains(seed, "RASPUTIN_BUS_AUTH=enforce") {
+				t.Errorf("controlplane seed should ship enforce on:\n%s", seed)
+			}
 			continue
 		}
 		seed := readSeed(t, dir, mn.SeedFile)
@@ -101,12 +107,12 @@ func TestGenerate_MatchedSetRoundTrips(t *testing.T) {
 
 func TestGenerate_RequiresExactlyOneControlplane(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := generate("c", defaultNATSURL, dir, nodeList{{Role: "compute", ID: "n1"}}); err == nil {
+	if _, err := generate("c", defaultNATSURL, dir, nodeList{{Role: "compute", ID: "n1"}}, true); err == nil {
 		t.Error("zero controlplanes should error")
 	}
 	if _, err := generate("c", defaultNATSURL, dir, nodeList{
 		{Role: "controlplane", ID: "cp1"}, {Role: "controlplane", ID: "cp2"},
-	}); err == nil {
+	}, true); err == nil {
 		t.Error("two controlplanes should error")
 	}
 }
@@ -115,7 +121,7 @@ func TestGenerate_RejectsDuplicateIDs(t *testing.T) {
 	dir := t.TempDir()
 	_, err := generate("c", defaultNATSURL, dir, nodeList{
 		{Role: "controlplane", ID: "x"}, {Role: "compute", ID: "x"},
-	})
+	}, true)
 	if err == nil {
 		t.Error("duplicate node ids should error")
 	}
