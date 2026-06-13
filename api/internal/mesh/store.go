@@ -201,7 +201,10 @@ func (s *Store) GetState(ctx context.Context) (*MeshState, error) {
 			effectiveIntent = h
 		}
 	}
-	ms_.Drift = ms_.ObservedHash != "" && ms_.ObservedHash != effectiveIntent
+	// Drift requires a prior apply by definition (same refinement as the
+	// firewall store, 2026-06-12): a never-applied tailnet shows PENDING,
+	// not drift. Reserve drift for post-apply divergence.
+	ms_.Drift = ms_.LastApplied != nil && ms_.ObservedHash != "" && ms_.ObservedHash != effectiveIntent
 	return &ms_, nil
 }
 

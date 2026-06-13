@@ -273,10 +273,12 @@ func TestStore_UpdateAfterReconcile_FreshNodeNoApply(t *testing.T) {
 	if got.IntentHash != "" {
 		t.Errorf("IntentHash should be empty on first reconcile, got %q", got.IntentHash)
 	}
-	if !got.Drift {
-		// With observed != intent ("" != "observed-only"), the current
-		// Drift rule treats this as drift. This pins that behavior.
-		t.Errorf("Drift behavior: observed-only after no-apply should still report drift per current rule")
+	if got.Drift {
+		// Drift requires a prior apply (LastApplied != nil). A reconcile
+		// before any apply — even with non-empty observed — is unmanaged,
+		// not drift. (Corrected 2026-06-12; the old assertion pinned the
+		// buggy behavior that contradicted this test's own comment.)
+		t.Errorf("observed-only before any apply must NOT report drift; got Drift=true")
 	}
 }
 
@@ -840,9 +842,30 @@ func TestStore_GetNodeState_FreshInstallNoDrift(t *testing.T) {
 		t.Error("fresh install (never applied, agent reports empty) must NOT read as drift")
 	}
 
-	// But a never-applied node whose agent reports NON-empty state is
-	// genuine drift (someone configured the firewall out-of-band).
-	if err := s.UpdateAfterReconcile(ctx, "n", "some-other-hash", time.Now().UTC()); err != nil {
+	// A never-applied node whose agent reports NON-empty state (its factory
+	// stock OpenWrt config) is NOT drift — it's unmanaged / not-yet-adopted,
+	// surfaced as pending. Drift requires a prior apply by definition.
+	// (Inverted from the original assertion after the Mu+CWWK bench,
+	// 2026-06-12: a freshly-attached firewall was alarmingly showing DRIFT
+	// before the operator had applied anything.)
+	if err := s.UpdateAfterReconcile(ctx, "n", "stock-config-hash", time.Now().UTC()); err != nil {
+		t.Fatalf("UpdateAfterReconcile: %v", err)
+	}
+	ns, err = s.GetNodeState(ctx, "n")
+	if err != nil {
+		t.Fatalf("GetNodeState: %v", err)
+	}
+	if ns.Drift {
+		t.Error("never-applied node with non-empty (stock) observed must NOT read as drift — it's unmanaged/pending")
+	}
+
+	// After an apply, drift detection turns on: a later reconcile observing
+	// a hash different from what we pushed IS genuine drift (LuCI hand-edit,
+	// or a factory-reset back to stock).
+	if err := s.UpdateAfterApply(ctx, "n", "applied-hash", time.Now().UTC()); err != nil {
+		t.Fatalf("UpdateAfterApply: %v", err)
+	}
+	if err := s.UpdateAfterReconcile(ctx, "n", "diverged-hash", time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAfterReconcile: %v", err)
 	}
 	ns, err = s.GetNodeState(ctx, "n")
@@ -850,6 +873,6 @@ func TestStore_GetNodeState_FreshInstallNoDrift(t *testing.T) {
 		t.Fatalf("GetNodeState: %v", err)
 	}
 	if !ns.Drift {
-		t.Error("never-applied node with non-empty observed state must read as drift")
+		t.Error("post-apply observed != intent must read as drift")
 	}
 }

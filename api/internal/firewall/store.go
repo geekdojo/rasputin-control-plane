@@ -182,7 +182,17 @@ func (s *Store) GetNodeState(ctx context.Context, nodeID string) (*NodeState, er
 			effectiveIntent = h
 		}
 	}
-	ns.Drift = ns.ObservedHash != "" && ns.ObservedHash != effectiveIntent
+	// Drift requires a PRIOR APPLY by definition — it means "the firewall
+	// diverged from what we pushed," which presupposes we pushed something.
+	// A never-applied node (LastApplied==nil) arrives with its factory/stock
+	// OpenWrt config on disk (the ~9 default rules), which is non-empty and
+	// won't match our intent — but that's not drift, it's "unmanaged / not
+	// yet adopted." Reporting it as drift on a freshly-attached firewall is
+	// alarming and wrong (Mu+CWWK bench, 2026-06-12): the node reads as
+	// PENDING instead (operator has the seeded baseline rules to APPLY), and
+	// genuine drift detection turns on only after the first apply — which
+	// still correctly catches a later factory-reset-back-to-stock.
+	ns.Drift = ns.LastApplied != nil && ns.ObservedHash != "" && ns.ObservedHash != effectiveIntent
 	return &ns, nil
 }
 
