@@ -23,6 +23,16 @@ type Config struct {
 	Host     string // default 127.0.0.1
 	Port     int    // default 4222
 	StoreDir string // JetStream storage root; must exist and be writable
+
+	// AuthEnforce turns on NATS auth callout. When false (default) the bus is
+	// open exactly as before — zero change to existing behavior. When true,
+	// IssuerPublicKey + APIUser + APIPass must be set: external connections are
+	// delegated to the in-process busauth responder, while the api's own
+	// connection authenticates as the AuthUser and bypasses the callout.
+	AuthEnforce     bool
+	IssuerPublicKey string // account public key the callout responder signs with
+	APIUser         string // AuthUser name for the api's in-process connection
+	APIPass         string // AuthUser secret (per-boot random is fine)
 }
 
 // Start brings up the embedded NATS server, opens an in-process client,
@@ -46,6 +56,19 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		StoreDir:   cfg.StoreDir,
 		NoSigs:     true,
 	}
+	if cfg.AuthEnforce {
+		if cfg.IssuerPublicKey == "" || cfg.APIUser == "" || cfg.APIPass == "" {
+			return nil, fmt.Errorf("bus: AuthEnforce requires IssuerPublicKey, APIUser, APIPass")
+		}
+		// The api's own connection authenticates as this AuthUser and bypasses
+		// the callout (full perms on $G); every other connection is delegated
+		// to the busauth responder. See busauth/callout.go.
+		opts.Users = []*server.User{{Username: cfg.APIUser, Password: cfg.APIPass}}
+		opts.AuthCallout = &server.AuthCallout{
+			Issuer:    cfg.IssuerPublicKey,
+			AuthUsers: []string{cfg.APIUser},
+		}
+	}
 	ns, err := server.NewServer(opts)
 	if err != nil {
 		return nil, fmt.Errorf("bus: new server: %w", err)
@@ -55,7 +78,11 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("bus: nats server not ready in 10s")
 	}
 
-	nc, err := nats.Connect("", nats.InProcessServer(ns))
+	inProcOpts := []nats.Option{nats.InProcessServer(ns)}
+	if cfg.AuthEnforce {
+		inProcOpts = append(inProcOpts, nats.UserInfo(cfg.APIUser, cfg.APIPass))
+	}
+	nc, err := nats.Connect("", inProcOpts...)
 	if err != nil {
 		ns.Shutdown()
 		return nil, fmt.Errorf("bus: in-process connect: %w", err)

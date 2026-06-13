@@ -8,6 +8,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -41,6 +42,7 @@ type Server struct {
 	alertsWebhookSecret string
 	auth                *auth.Service
 	obs                 *obs.Status
+	busTokens           *busauth.Store
 	nc                  *nats.Conn
 	uiDir               string
 }
@@ -76,6 +78,7 @@ func NewServer(
 	setupSvc *setup.Service,
 	authSvc *auth.Service,
 	obsStatus *obs.Status,
+	busTokens *busauth.Store,
 	nc *nats.Conn,
 ) *Server {
 	if obsStatus == nil {
@@ -95,7 +98,7 @@ func NewServer(
 		// persisted alerts via the webhook receiver. Dev wiring passes
 		// nil for both; production passes them through main.go.
 		alerts: alerts.New(inv, store, appsStore, setupSvc, nil, nc),
-		auth:   authSvc, obs: obsStatus, nc: nc,
+		auth:   authSvc, obs: obsStatus, busTokens: busTokens, nc: nc,
 	}
 }
 
@@ -183,6 +186,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/mesh/reconcile", reqd(s.handleMeshReconcile))
 	mux.HandleFunc("POST /api/mesh/enroll/{nodeId}", reqd(s.handleMeshEnrollNode))
 	mux.HandleFunc("GET /api/mesh/enroll-defaults/{nodeId}", reqd(s.handleMeshEnrollDefaults))
+
+	// Bus join tokens — the per-node credential agents present to the
+	// auth-callout. Authed (an operator mints/revokes them).
+	mux.HandleFunc("GET /api/bus/tokens", reqd(s.handleListBusTokens))
+	mux.HandleFunc("POST /api/bus/tokens", reqd(s.handleMintBusToken))
+	mux.HandleFunc("DELETE /api/bus/tokens/{id}", reqd(s.handleRevokeBusToken))
 
 	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))
 	mux.HandleFunc("POST /api/setup/mesh", reqd(s.handleSetupMesh))

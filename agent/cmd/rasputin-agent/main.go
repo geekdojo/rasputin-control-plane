@@ -61,8 +61,13 @@ func main() {
 	}
 	log.Printf("rasputin-agent: state dir %s", stateDir)
 
+	// Bus join token (RASPUTIN_CP_JOIN_TOKEN): presented to the api's
+	// auth-callout so it can mint a per-node scoped credential. Empty on a
+	// controlplane (trusted via loopback) and harmless when the server has no
+	// auth enabled. See agent/internal/bus.Connect.
+	joinToken := os.Getenv("RASPUTIN_CP_JOIN_TOKEN")
 	reregister := func(c *nats.Conn) { publishRegistered(c, nodeID, role) }
-	nc, err := bus.Connect(natsURL, nodeID, reregister)
+	nc, err := bus.Connect(natsURL, nodeID, joinToken, reregister)
 	if err != nil {
 		log.Fatalf("rasputin-agent: %v", err)
 	}

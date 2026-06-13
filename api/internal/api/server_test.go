@@ -21,6 +21,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -246,9 +247,13 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 	trustDir := dir
 	invSvc := inventory.NewService(invStore, nc)
+	busTokenStore, err := busauth.OpenStore(ctx, open("bus.db"))
+	if err != nil {
+		t.Fatalf("busauth OpenStore: %v", err)
+	}
 	srv := NewServer(jobStore, runner, invStore, invSvc, fwStore, appStore,
 		mtrStore, updStore, verifier, bundleDir, trustDir,
-		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, nc)
+		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, busTokenStore, nc)
 
 	f.srv = srv
 	f.handler = srv.Handler()
@@ -1328,7 +1333,7 @@ func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
 	srv := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
 		f.fw, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
-		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.nc)
+		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc)
 	handler := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/mesh/state", nil)

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"log"
 	"net"
@@ -22,6 +24,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -60,6 +63,7 @@ func main() {
 	if err := os.MkdirAll(filepath.Join(dataDir, "nats"), 0o755); err != nil {
 		log.Fatalf("rasputin-api: data dir: %v", err)
 	}
+	dbPath := filepath.Join(dataDir, "rasputin.db")
 
 	// NATS bind defaults to 127.0.0.1:4222 (api-local agents only). Operators
 	// federating agents from other nodes set RASPUTIN_NATS_HOST=0.0.0.0
@@ -70,18 +74,60 @@ func main() {
 	if p, err := strconv.Atoi(envOr("RASPUTIN_NATS_PORT", "4222")); err == nil && p > 0 {
 		natsPort = p
 	}
-	busSrv, err := bus.Start(ctx, bus.Config{
-		Host:     natsHost,
-		Port:     natsPort,
-		StoreDir: filepath.Join(dataDir, "nats"),
-	})
+
+	// Bus auth (RASPUTIN_BUS_AUTH=off|enforce, default off). Under enforcement,
+	// external agents must present a per-node join token that the in-process
+	// busauth responder validates → mints a subject-scoped JWT; the api's own
+	// connection authenticates as an AuthUser and bypasses the callout. Default
+	// off keeps the bus byte-identical to today until the bench validates the
+	// cutover. See design plan / architecture §5.4.
+	busAuthEnforce := envOr("RASPUTIN_BUS_AUTH", "off") == "enforce"
+	busCfg := bus.Config{Host: natsHost, Port: natsPort, StoreDir: filepath.Join(dataDir, "nats")}
+	var (
+		busIssuer *busauth.Issuer
+		err       error
+	)
+	if busAuthEnforce {
+		busIssuer, err = busauth.EnsureIssuer(filepath.Join(dataDir, "bus"))
+		if err != nil {
+			log.Fatalf("rasputin-api: bus auth issuer: %v", err)
+		}
+		apiPass, err := randomSecret()
+		if err != nil {
+			log.Fatalf("rasputin-api: bus auth secret: %v", err)
+		}
+		busCfg.AuthEnforce = true
+		busCfg.IssuerPublicKey = busIssuer.PublicKey()
+		busCfg.APIUser = "rasputin-api"
+		busCfg.APIPass = apiPass
+		log.Printf("rasputin-api: bus auth ENFORCED (issuer=%s)", busIssuer.PublicKey())
+	} else {
+		log.Printf("rasputin-api: bus auth OFF (set RASPUTIN_BUS_AUTH=enforce to require node join tokens)")
+	}
+
+	busSrv, err := bus.Start(ctx, busCfg)
 	if err != nil {
 		log.Fatalf("rasputin-api: bus: %v", err)
 	}
 	defer busSrv.Stop()
 	log.Printf("rasputin-api: nats listening on %s", busSrv.ClientURL())
 
-	dbPath := filepath.Join(dataDir, "rasputin.db")
+	// Token store backs both the auth-callout responder and the token-mgmt
+	// endpoints. Opened regardless of enforcement so an operator can mint
+	// tokens BEFORE flipping enforce on.
+	busTokenStore, err := busauth.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: bus token store: %v", err)
+	}
+	defer busTokenStore.Close()
+	if busAuthEnforce {
+		responder := busauth.NewResponder(busSrv.Conn(), busIssuer, busTokenStore)
+		if err := responder.Start(); err != nil {
+			log.Fatalf("rasputin-api: bus auth responder: %v", err)
+		}
+		defer responder.Stop()
+	}
+
 	jobStore, err := jobs.OpenStore(ctx, dbPath)
 	if err != nil {
 		log.Fatalf("rasputin-api: jobs store: %v", err)
@@ -373,7 +419,7 @@ func main() {
 	sched.Start(ctx)
 	defer sched.Stop()
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busSrv.Conn())
+	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn())
 
 	// Web UI (Next.js static export). The OS image installs it at the
 	// default path (see rasputin-os package/rasputin-api); dev boxes
@@ -539,6 +585,17 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// randomSecret returns a 32-byte hex secret for the bus AuthUser. Generated
+// per boot; only ever used by the api's own in-process connection, so it never
+// needs to persist.
+func randomSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := cryptorand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // envBoolPtr returns nil when the env var is unset (so the config's own

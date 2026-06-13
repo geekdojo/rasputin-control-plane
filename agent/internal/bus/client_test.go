@@ -17,7 +17,7 @@ func TestConnect_ReturnsErrorOnUnreachableURL(t *testing.T) {
 	go func() {
 		// Discard arg "onConnected" — if Connect erroneously succeeded the
 		// callback would never run because no broker is on this port.
-		_, err := Connect("nats://127.0.0.1:1", "node-x", nil)
+		_, err := Connect("nats://127.0.0.1:1", "node-x", "", nil)
 		done <- err
 	}()
 	select {
@@ -43,7 +43,7 @@ func TestConnect_EmptyURLAttemptsDefault(t *testing.T) {
 		ok  bool
 	}, 1)
 	go func() {
-		nc, err := Connect("", "node-x", nil)
+		nc, err := Connect("", "node-x", "", nil)
 		ok := nc != nil
 		if nc != nil {
 			nc.Close()
