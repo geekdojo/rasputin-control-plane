@@ -45,6 +45,7 @@ type NodeRegisteredEvt struct {
 	Role         NodeRole       `json:"role"`
 	Hostname     string         `json:"hostname"`
 	AgentVersion string         `json:"agentVersion"`
+	ImageVersion string         `json:"imageVersion"`
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	Ts           time.Time      `json:"ts"`
@@ -88,6 +89,7 @@ type Node struct {
 	Role         NodeRole       `json:"role"`
 	Hostname     string         `json:"hostname"`
 	AgentVersion string         `json:"agentVersion"`
+	ImageVersion string         `json:"imageVersion"`
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	FirstSeen    time.Time      `json:"firstSeen"`

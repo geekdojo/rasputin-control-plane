@@ -60,6 +60,7 @@ export interface Node {
   role: NodeRole;
   hostname: string;
   agentVersion: string;
+  imageVersion?: string;
   capabilities?: string[];
   metadata?: Record<string, unknown>;
   firstSeen: string;

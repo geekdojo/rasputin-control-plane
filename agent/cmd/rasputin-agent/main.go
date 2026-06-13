@@ -295,6 +295,7 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole) {
 		Role:         role,
 		Hostname:     host.Hostname(),
 		AgentVersion: AgentVersion,
+		ImageVersion: host.ImageVersion(),
 		Metadata:     meta,
 		Ts:           time.Now().UTC(),
 	}

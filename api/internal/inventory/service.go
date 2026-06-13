@@ -198,6 +198,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 			Role:         ev.Role,
 			Hostname:     ev.Hostname,
 			AgentVersion: ev.AgentVersion,
+			ImageVersion: ev.ImageVersion,
 			Capabilities: ev.Capabilities,
 			Metadata:     ev.Metadata,
 			FirstSeen:    now,
@@ -224,6 +225,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	existing.Role = ev.Role
 	existing.Hostname = ev.Hostname
 	existing.AgentVersion = ev.AgentVersion
+	existing.ImageVersion = ev.ImageVersion
 	existing.Capabilities = ev.Capabilities
 	existing.Metadata = ev.Metadata
 	existing.LastSeen = now

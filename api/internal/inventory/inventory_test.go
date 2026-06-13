@@ -37,6 +37,7 @@ func makeNode(id string, role proto.NodeRole, lastSeenAgo time.Duration) *proto.
 		Role:         role,
 		Hostname:     id + ".test",
 		AgentVersion: "v0.1.0",
+		ImageVersion: "2026.06.0-dev.13",
 		Capabilities: []string{"docker", "x86_64"},
 		Metadata:     map[string]any{"arch": "amd64", "cores": float64(4)},
 		FirstSeen:    now.Add(-1 * time.Hour),
@@ -64,7 +65,7 @@ func TestStore_InsertAndGet(t *testing.T) {
 	if got == nil {
 		t.Fatalf("Get returned nil for known id")
 	}
-	if got.ID != want.ID || got.Role != want.Role || got.Hostname != want.Hostname || got.AgentVersion != want.AgentVersion {
+	if got.ID != want.ID || got.Role != want.Role || got.Hostname != want.Hostname || got.AgentVersion != want.AgentVersion || got.ImageVersion != want.ImageVersion {
 		t.Errorf("scalar mismatch: got=%+v want=%+v", got, want)
 	}
 	if len(got.Capabilities) != 2 || got.Capabilities[0] != "docker" {
@@ -112,6 +113,7 @@ func TestStore_Update(t *testing.T) {
 
 	n.Hostname = "renamed.test"
 	n.AgentVersion = "v0.2.0"
+	n.ImageVersion = "2026.07.1-dev.8"
 	n.Role = proto.RoleStorage
 	n.Capabilities = []string{"zfs"}
 	n.Metadata = map[string]any{"pool": "tank"}
@@ -126,7 +128,7 @@ func TestStore_Update(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Hostname != "renamed.test" || got.AgentVersion != "v0.2.0" || got.Role != proto.RoleStorage {
+	if got.Hostname != "renamed.test" || got.AgentVersion != "v0.2.0" || got.ImageVersion != "2026.07.1-dev.8" || got.Role != proto.RoleStorage {
 		t.Errorf("update fields not persisted: %+v", got)
 	}
 	if len(got.Capabilities) != 1 || got.Capabilities[0] != "zfs" {

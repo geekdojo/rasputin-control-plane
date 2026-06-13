@@ -175,7 +175,10 @@ export function NodeCard({ node, cpuSeries, memSeries, obsEnabled, onClick }: No
           borderTop: `1px solid rgba(228,230,234,0.08)`,
         }}
       >
-        <span>AGENT v{node.agentVersion}</span>
+        <span>
+          AGENT v{node.agentVersion}
+          {node.imageVersion ? ` · IMAGE ${node.imageVersion}` : ''}
+        </span>
         <span title={node.lastSeen}>{lastSeenAgo(node.lastSeen)}</span>
       </div>
     </button>

@@ -259,6 +259,7 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
                 { label: 'ROLE', value: node.role.toUpperCase() },
                 { label: 'STATUS', value: node.status.toUpperCase() },
                 { label: 'AGENT', value: node.agentVersion || '—' },
+                { label: 'OS IMAGE', value: node.imageVersion || '—' },
               ].map(({ label, value }) => (
                 <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
                   <span style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>

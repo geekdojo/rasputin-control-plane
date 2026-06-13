@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -30,7 +32,25 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("inventory: apply schema: %w", err)
 	}
+	applyMigrations(ctx, db)
 	return &Store{db: db}, nil
+}
+
+// applyMigrations runs forward-only DDL that may not be expressible as
+// CREATE TABLE IF NOT EXISTS (e.g. adding a column to a pre-existing table).
+// Failures matching "duplicate column" / "already exists" are expected for
+// fresh installs where the CREATE TABLE already covered the change.
+func applyMigrations(ctx context.Context, db *sql.DB) {
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			msg := err.Error()
+			if strings.Contains(msg, "duplicate column name") ||
+				strings.Contains(msg, "already exists") {
+				continue
+			}
+			log.Printf("inventory: migration %q: %v", stmt, err)
+		}
+	}
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -44,9 +64,9 @@ func (s *Store) Insert(ctx context.Context, n *proto.Node) error {
 	caps, _ := json.Marshal(n.Capabilities)
 	meta, _ := json.Marshal(n.Metadata)
 	_, err := s.db.ExecContext(ctx, `
-        INSERT INTO nodes (id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		n.ID, string(n.Role), n.Hostname, n.AgentVersion,
+        INSERT INTO nodes (id, role, hostname, agent_version, image_version, capabilities, metadata, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		n.ID, string(n.Role), n.Hostname, n.AgentVersion, n.ImageVersion,
 		string(caps), string(meta),
 		tsMillis(n.FirstSeen), tsMillis(n.LastSeen))
 	return err
@@ -59,9 +79,9 @@ func (s *Store) Update(ctx context.Context, n *proto.Node) error {
 	meta, _ := json.Marshal(n.Metadata)
 	_, err := s.db.ExecContext(ctx, `
         UPDATE nodes
-        SET role=?, hostname=?, agent_version=?, capabilities=?, metadata=?, last_seen=?
+        SET role=?, hostname=?, agent_version=?, image_version=?, capabilities=?, metadata=?, last_seen=?
         WHERE id=?`,
-		string(n.Role), n.Hostname, n.AgentVersion,
+		string(n.Role), n.Hostname, n.AgentVersion, n.ImageVersion,
 		string(caps), string(meta),
 		tsMillis(n.LastSeen), n.ID)
 	return err
@@ -105,7 +125,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // Get returns the node with the given id, or (nil, nil) if not found.
 func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen
+        SELECT id, role, hostname, agent_version, image_version, capabilities, metadata, first_seen, last_seen
         FROM nodes WHERE id=?`, id)
 	return scanNode(row.Scan)
 }
@@ -116,7 +136,7 @@ func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
 // (e.g. firewall workflows need the firewall node).
 func (s *Store) ListByRole(ctx context.Context, role proto.NodeRole) ([]*proto.Node, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen
+        SELECT id, role, hostname, agent_version, image_version, capabilities, metadata, first_seen, last_seen
         FROM nodes WHERE role = ? ORDER BY first_seen ASC`, string(role))
 	if err != nil {
 		return nil, err
@@ -135,7 +155,7 @@ func (s *Store) ListByRole(ctx context.Context, role proto.NodeRole) ([]*proto.N
 
 func (s *Store) List(ctx context.Context) ([]*proto.Node, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, role, hostname, agent_version, capabilities, metadata, first_seen, last_seen
+        SELECT id, role, hostname, agent_version, image_version, capabilities, metadata, first_seen, last_seen
         FROM nodes ORDER BY first_seen ASC`)
 	if err != nil {
 		return nil, err
@@ -159,7 +179,7 @@ func scanNode(scan func(...any) error) (*proto.Node, error) {
 		firstSeen       int64
 		lastSeen        int64
 	)
-	if err := scan(&n.ID, &role, &n.Hostname, &n.AgentVersion,
+	if err := scan(&n.ID, &role, &n.Hostname, &n.AgentVersion, &n.ImageVersion,
 		&caps, &met, &firstSeen, &lastSeen); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
