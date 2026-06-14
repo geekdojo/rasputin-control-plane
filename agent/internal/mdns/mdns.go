@@ -27,46 +27,122 @@ const (
 
 // Resolve performs a one-shot mDNS A lookup for name (e.g. "rasputin.local")
 // and returns the first IPv4 address found, or an error on timeout / no answer.
+//
+// It queries on EVERY up/multicast/non-loopback IPv4 interface concurrently,
+// because on a multi-homed host the kernel's default multicast route can pick
+// the wrong interface — e.g. the firewall routes 224.0.0.251 out its WAN, but
+// the control plane lives on the LAN. Binding each query socket to an
+// interface's own source IP forces the query out that interface; the first
+// interface to get an answer wins.
 func Resolve(name string, timeout time.Duration) (string, error) {
 	name = strings.TrimSuffix(name, ".")
 	if name == "" {
 		return "", errors.New("mdns: empty name")
 	}
-
 	query, err := buildQuery(name)
 	if err != nil {
 		return "", err
 	}
-
 	dst, err := net.ResolveUDPAddr("udp4", mdnsAddr4)
 	if err != nil {
 		return "", err
 	}
-	// Ephemeral local socket; responders unicast back to it (QU bit).
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+
+	srcs := multicastSourceIPs()
+	if len(srcs) == 0 {
+		srcs = []net.IP{net.IPv4zero} // fall back to the default route
+	}
+
+	type result struct {
+		ip  string
+		err error
+	}
+	ch := make(chan result, len(srcs))
+	for _, src := range srcs {
+		go func(src net.IP) {
+			ip, err := queryOn(src, dst, query, name, timeout)
+			ch <- result{ip, err}
+		}(src)
+	}
+
+	deadline := time.After(timeout + 500*time.Millisecond)
+	var lastErr error
+	for range srcs {
+		select {
+		case r := <-ch:
+			if r.ip != "" {
+				return r.ip, nil
+			}
+			if r.err != nil {
+				lastErr = r.err
+			}
+		case <-deadline:
+			return "", fmt.Errorf("mdns: no A answer for %q (timeout)", name)
+		}
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("mdns: no A answer for %q: %w", name, lastErr)
+	}
+	return "", fmt.Errorf("mdns: no A answer for %q", name)
+}
+
+// multicastSourceIPs returns one IPv4 per up, multicast-capable, non-loopback
+// interface — the source addresses we bind to so each query egresses its own
+// interface.
+func multicastSourceIPs() []net.IP {
+	ifaces, err := net.Interfaces()
 	if err != nil {
-		return "", fmt.Errorf("mdns: listen: %w", err)
+		return nil
+	}
+	var ips []net.IP
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || ifc.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip4 := ip.To4(); ip4 != nil && !ip4.IsLoopback() {
+				ips = append(ips, ip4)
+			}
+		}
+	}
+	return ips
+}
+
+// queryOn sends the query from a socket bound to src (forcing egress on src's
+// interface) and returns the first matching A record, or an error on timeout.
+func queryOn(src net.IP, dst *net.UDPAddr, query []byte, want string, timeout time.Duration) (string, error) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: src, Port: 0})
+	if err != nil {
+		return "", err
 	}
 	defer conn.Close()
-
 	if _, err := conn.WriteToUDP(query, dst); err != nil {
-		return "", fmt.Errorf("mdns: send: %w", err)
+		return "", err
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return "", err
 	}
-
 	buf := make([]byte, 1500)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			return "", fmt.Errorf("mdns: no A answer for %q: %w", name, err)
+			return "", err
 		}
-		if ip := parseAnswer(buf[:n], name); ip != "" {
+		if ip := parseAnswer(buf[:n], want); ip != "" {
 			return ip, nil
 		}
-		// Not our answer (another responder / record type) — keep reading until
-		// the deadline.
+		// Not our answer (another responder / record type) — keep reading.
 	}
 }
 
