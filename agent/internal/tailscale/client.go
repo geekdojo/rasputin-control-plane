@@ -22,6 +22,12 @@ type EnrollInput struct {
 	AdvertiseRoutes []string
 	AcceptDNS       bool
 	AcceptRoutes    bool
+	// MeshCAPEM, when non-empty, is the per-installation Mesh CA root the
+	// node must trust before tailscaled dials the self-hosted Headscale's
+	// HTTPS leaf. The real backend installs it into tailscaled's trust
+	// bundle (and restarts the daemon if the bundle changed) before
+	// `tailscale up`. Empty for plain-HTTP dev or a publicly trusted cert.
+	MeshCAPEM []byte
 }
 
 // Status is the small projection of `tailscale status --json` we care about.

@@ -27,6 +27,12 @@ type Config struct {
 	// ReconcileInterval — how often to drift-check against Headscale.
 	// Default 5 min if zero.
 	ReconcileInterval time.Duration
+	// MeshCAPEM is the per-installation Mesh CA root (PEM). Shipped to nodes
+	// in the enroll command so they can trust the self-hosted Headscale's
+	// HTTPS leaf before `tailscale up`. Empty when Headscale is plain HTTP
+	// or externally managed with a publicly trusted cert (no extra trust
+	// needed node-side). See proto.MeshEnrollCmd.MeshCAPEM.
+	MeshCAPEM []byte
 }
 
 // Service ties together the store + the Headscale client + the supervisor.

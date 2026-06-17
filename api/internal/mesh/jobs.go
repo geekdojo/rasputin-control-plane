@@ -426,6 +426,10 @@ func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
 			AdvertiseRoutes: s.AdvertiseRoutes,
 			AcceptDNS:       true,
 			AcceptRoutes:    true,
+			// Ship the Mesh CA so the node trusts the self-hosted Headscale's
+			// HTTPS leaf before tailscaled dials it. Nil/empty in mock + HTTP
+			// dev and when Headscale is externally managed with a public cert.
+			MeshCAPEM: svc.cfg.MeshCAPEM,
 		})
 		sc.Log("info", fmt.Sprintf("dispatching mesh.enroll to %s", s.NodeID))
 		msg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.MeshEnrollSubject(s.NodeID), cmd)

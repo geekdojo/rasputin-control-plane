@@ -59,6 +59,14 @@ type MeshEnrollCmd struct {
 	AdvertiseRoutes []string `json:"advertiseRoutes,omitempty"`
 	AcceptDNS       bool     `json:"acceptDns"`
 	AcceptRoutes    bool     `json:"acceptRoutes"`
+	// MeshCAPEM is the per-installation Mesh CA root (PEM). When the
+	// controlplane self-hosts Headscale over HTTPS, the leaf is signed by
+	// this CA — which no public trust store knows about — so the node must
+	// trust it before `tailscale up`, or tailscaled's TLS dial to Headscale
+	// fails. The agent installs it into tailscaled's trust bundle. Empty
+	// when Headscale is plain HTTP (dev) or externally managed with a
+	// publicly trusted cert.
+	MeshCAPEM []byte `json:"meshCaPem,omitempty"`
 }
 
 // MeshEnrollAck reports the post-enrollment tailscale state.

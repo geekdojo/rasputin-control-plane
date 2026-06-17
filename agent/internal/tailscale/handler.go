@@ -61,6 +61,7 @@ func handleEnroll(backend Backend, m *nats.Msg) {
 		AdvertiseRoutes: cmd.AdvertiseRoutes,
 		AcceptDNS:       cmd.AcceptDNS,
 		AcceptRoutes:    cmd.AcceptRoutes,
+		MeshCAPEM:       cmd.MeshCAPEM,
 	})
 	if err != nil {
 		respond(m, proto.MeshEnrollAck{OK: false, Backend: backend.Name(), Detail: err.Error()})
