@@ -81,7 +81,7 @@ func applyPushKeys(svc *Service) jobs.DoFn {
 				user = svc.cfg.DefaultUser
 			}
 			expiry := time.Now().Add(parseExpiry(spec.ExpiresIn))
-			id, value, err := svc.client.CreatePreAuthKey(sc.Ctx, CreatePreAuthKeyInput{
+			id, value, err := svc.Client().CreatePreAuthKey(sc.Ctx, CreatePreAuthKeyInput{
 				User:      user,
 				Reusable:  spec.Reusable,
 				Ephemeral: spec.Ephemeral,
@@ -147,7 +147,7 @@ func applyPushRoutes(svc *Service, inv *inventory.Store) jobs.DoFn {
 				continue
 			}
 			sort.Strings(cidrs)
-			if err := svc.client.SetNodeRoutes(sc.Ctx, hsID, cidrs); err != nil {
+			if err := svc.Client().SetNodeRoutes(sc.Ctx, hsID, cidrs); err != nil {
 				return nil, fmt.Errorf("set routes on %s: %w", nodeID, err)
 			}
 			sc.Log("info", fmt.Sprintf("approved routes on %s: %v", nodeID, cidrs))
@@ -198,11 +198,11 @@ func ReconcileWorkflow(svc *Service, nc *nats.Conn) jobs.Workflow {
 
 func reconcileFetch(svc *Service, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		keys, err := svc.client.ListPreAuthKeys(sc.Ctx, "")
+		keys, err := svc.Client().ListPreAuthKeys(sc.Ctx, "")
 		if err != nil {
 			return nil, fmt.Errorf("list keys: %w", err)
 		}
-		nodes, err := svc.client.ListNodes(sc.Ctx)
+		nodes, err := svc.Client().ListNodes(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("list nodes: %w", err)
 		}
@@ -393,7 +393,7 @@ func enrollMintKey(svc *Service) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		id, value, err := svc.client.CreatePreAuthKey(sc.Ctx, CreatePreAuthKeyInput{
+		id, value, err := svc.Client().CreatePreAuthKey(sc.Ctx, CreatePreAuthKeyInput{
 			User:      svc.cfg.DefaultUser,
 			Reusable:  false,
 			Ephemeral: false,
@@ -450,7 +450,7 @@ func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
 		// api gets to do it on the agent's behalf: tell the mock client
 		// that this node is now in the tailnet. Skipped silently in real
 		// mode (when ack.TailnetID is already populated by Headscale).
-		if mock, ok := svc.client.(*MockClient); ok && s.HSID == "" {
+		if mock, ok := svc.Client().(*MockClient); ok && s.HSID == "" {
 			node := HSNode{
 				User:             svc.cfg.DefaultUser,
 				Hostname:         s.NodeID,

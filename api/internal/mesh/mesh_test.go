@@ -50,6 +50,15 @@ func newFakeClient() *fakeClient {
 
 func (f *fakeClient) Backend() string { return "fake" }
 
+// ensureCallCount reads the EnsureUser counter under the lock — Service.Start
+// now calls EnsureUser from a background goroutine, so tests must read it
+// race-safely.
+func (f *fakeClient) ensureCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ensureUserCalls
+}
+
 func (f *fakeClient) EnsureUser(_ context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -521,22 +530,27 @@ func TestService_DefaultsApplied(t *testing.T) {
 	}
 }
 
-func TestService_StartCallsEnsureUser(t *testing.T) {
+func TestService_StartEnsuresUserInBackground(t *testing.T) {
 	f := newMeshFixture(t)
-	if err := f.svc.Start(f.ctx); err != nil {
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	if err := f.svc.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if f.client.ensureUserCalls != 1 {
-		t.Errorf("EnsureUser calls: want 1, got %d", f.client.ensureUserCalls)
-	}
+	// EnsureUser now runs in the background bring-up, not synchronously.
+	waitFor(t, func() bool { return f.client.ensureCallCount() == 1 }, "EnsureUser called once")
 	f.svc.Stop()
 }
 
-func TestService_Start_SupervisorErrPropagates(t *testing.T) {
+func TestService_StartIsNonFatalOnSupervisorErr(t *testing.T) {
 	f := newMeshFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stops the background retry loop
 	svc := NewService(Config{}, f.store, f.client, &failingSupervisor{err: errFake})
-	if err := svc.Start(f.ctx); err == nil {
-		t.Error("want error from supervisor")
+	// New contract: a failing supervisor is retried in the background, never
+	// propagated from Start — a degraded mesh must not take the api down.
+	if err := svc.Start(ctx); err != nil {
+		t.Errorf("Start must be non-fatal, got %v", err)
 	}
 }
 
