@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -214,19 +215,18 @@ func main() {
 		log.Fatalf("rasputin-api: trust dir: %v", err)
 	}
 
-	// Mesh subsystem: backend defaults to the file-backed mock client.
-	// Set RASPUTIN_MESH_BACKEND=headscale (plus RASPUTIN_HEADSCALE_URL and
-	// RASPUTIN_HEADSCALE_API_KEY) to talk to a real Headscale instance.
-	// Supervisor defaults to noop; set RASPUTIN_HEADSCALE_SUPERVISOR=docker
-	// to have the api manage the Headscale container itself. See wiki
-	// design/control-plane/mesh.md.
+	// Mesh subsystem. The controlplane self-hosts Headscale: when Docker is
+	// present (production and most dev), the api brings up the Headscale
+	// container, mints its own admin API key against it, and talks to it for
+	// real — no operator input, no provision-time secret. Only when there's
+	// no Docker daemon AND no external Headscale configured does it fall back
+	// to the file-backed mock (CI, bare dev). Override the autodetect with
+	// RASPUTIN_MESH_BACKEND=mock|headscale|auto (default auto); point at an
+	// externally-managed Headscale with RASPUTIN_HEADSCALE_URL +
+	// RASPUTIN_HEADSCALE_API_KEY. See wiki design/control-plane/mesh.md §2.
 	meshStateDir := envOr("RASPUTIN_MESH_STATE_DIR", filepath.Join(dataDir, "mesh"))
 	if err := os.MkdirAll(meshStateDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: mesh state dir: %v", err)
-	}
-	meshClient, err := newMeshClient(meshStateDir)
-	if err != nil {
-		log.Fatalf("rasputin-api: mesh client: %v", err)
 	}
 	installName := envOr("RASPUTIN_INSTALL_NAME", "rasputin")
 	meshCA, err := mesh.EnsureMeshCA(trustDir, installName)
@@ -235,12 +235,13 @@ func main() {
 	}
 	log.Printf("rasputin-api: mesh CA loaded (CN=%s, expires=%s)",
 		meshCA.Cert.Subject.CommonName, meshCA.Cert.NotAfter.Format("2006-01-02"))
-	meshSup, err := newMeshSupervisor(meshStateDir, meshCA)
+	defaultLogin := envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local")
+	meshClient, meshSup, meshLogin, err := wireMesh(ctx, meshStateDir, meshCA, defaultLogin)
 	if err != nil {
-		log.Fatalf("rasputin-api: mesh supervisor: %v", err)
+		log.Fatalf("rasputin-api: mesh: %v", err)
 	}
 	meshSvc := mesh.NewService(mesh.Config{
-		LoginServer:  envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local"),
+		LoginServer:  meshLogin,
 		DefaultUser:  envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
 		HeadplaneURL: os.Getenv("RASPUTIN_HEADPLANE_URL"),
 	}, meshStore, meshClient, meshSup)
@@ -657,67 +658,151 @@ func envBoolPtr(key string) *bool {
 	}
 }
 
-// newMeshClient builds the mesh.Client implementation chosen by env. The
-// default is the file-backed mock, suitable for dev and CI. Set
-// RASPUTIN_MESH_BACKEND=headscale to talk to a real Headscale instance —
-// then RASPUTIN_HEADSCALE_URL and RASPUTIN_HEADSCALE_API_KEY are required.
-// RASPUTIN_HEADSCALE_CA_FILE optionally points at a PEM CA bundle (the
-// Rasputin internal CA root) to trust when Headscale's leaf cert is signed
-// by something the system pool doesn't know about.
-func newMeshClient(stateDir string) (mesh.Client, error) {
-	backend := strings.ToLower(envOr("RASPUTIN_MESH_BACKEND", "mock"))
+// wireMesh selects, builds, and bootstraps the mesh backend, returning the
+// client, the supervisor, and the effective login-server URL agents should
+// dial. The choice (RASPUTIN_MESH_BACKEND, default "auto"):
+//
+//	auto      — external Headscale creds set → real client against them
+//	            (noop supervisor); else Docker present → self-hosted (the
+//	            supervisor brings up Headscale and mints its own admin key,
+//	            real client against it); else → file-backed mock (CI/dev).
+//	mock      — force the file-backed mock + noop supervisor.
+//	headscale — force real; requires external creds OR Docker (errors if
+//	            neither is available, rather than silently mocking).
+//
+// "Self-hosted" is the production path and needs no operator input: the
+// supervisor owns the container so it can mint the very API key the client
+// needs (see DockerSupervisor.EnsureAPIKey). This is why mesh can't be
+// provisioned via a seed env var — the Headscale instance doesn't exist
+// until first boot — and why autodetect-on-Docker is the right default.
+func wireMesh(ctx context.Context, stateDir string, meshCA *mesh.MeshCA, defaultLogin string) (mesh.Client, mesh.Supervisor, string, error) {
+	backend := strings.ToLower(envOr("RASPUTIN_MESH_BACKEND", "auto"))
+	extURL := os.Getenv("RASPUTIN_HEADSCALE_URL")
+	extKey := os.Getenv("RASPUTIN_HEADSCALE_API_KEY")
+	hasExternal := extURL != "" && extKey != ""
+	dockerWanted := dockerAvailable() ||
+		strings.ToLower(envOr("RASPUTIN_HEADSCALE_SUPERVISOR", "")) == "docker"
+
 	switch backend {
-	case "", "mock":
-		log.Printf("rasputin-api: mesh backend = mock (file-backed at %s)", stateDir)
-		return mesh.NewMockClient(stateDir)
+	case "mock":
+		return wireMockMesh(stateDir, defaultLogin)
+	case "auto", "":
+		if hasExternal {
+			return wireExternalMesh(stateDir, meshCA, defaultLogin, extURL, extKey)
+		}
+		if dockerWanted {
+			return wireSelfHostedMesh(ctx, stateDir, meshCA, defaultLogin)
+		}
+		log.Printf("rasputin-api: mesh backend = mock (auto: no Docker and no external Headscale configured)")
+		return wireMockMesh(stateDir, defaultLogin)
 	case "headscale":
-		url := os.Getenv("RASPUTIN_HEADSCALE_URL")
-		key := os.Getenv("RASPUTIN_HEADSCALE_API_KEY")
-		if url == "" || key == "" {
-			return nil, errors.New("RASPUTIN_MESH_BACKEND=headscale requires RASPUTIN_HEADSCALE_URL and RASPUTIN_HEADSCALE_API_KEY")
+		if hasExternal {
+			return wireExternalMesh(stateDir, meshCA, defaultLogin, extURL, extKey)
 		}
-		cfg := mesh.RealClientConfig{BaseURL: url, APIKey: key}
-		if caFile := os.Getenv("RASPUTIN_HEADSCALE_CA_FILE"); caFile != "" {
-			tlsCfg, err := loadCATLSConfig(caFile)
-			if err != nil {
-				return nil, err
-			}
-			cfg.TLSConfig = tlsCfg
+		if dockerWanted {
+			return wireSelfHostedMesh(ctx, stateDir, meshCA, defaultLogin)
 		}
-		log.Printf("rasputin-api: mesh backend = headscale (url=%s)", url)
-		return mesh.NewRealClient(cfg)
+		return nil, nil, "", errors.New("RASPUTIN_MESH_BACKEND=headscale requires either RASPUTIN_HEADSCALE_URL+RASPUTIN_HEADSCALE_API_KEY (external) or the docker CLI on PATH (self-hosted)")
 	default:
-		return nil, errors.New("unknown RASPUTIN_MESH_BACKEND: " + backend)
+		return nil, nil, "", errors.New("unknown RASPUTIN_MESH_BACKEND: " + backend)
 	}
 }
 
-// newMeshSupervisor builds the mesh.Supervisor chosen by env. Default is
-// the noop supervisor — appropriate when running against the mock client,
-// or when an operator manages Headscale themselves (e.g. via host-level
-// systemd or compose). Set RASPUTIN_HEADSCALE_SUPERVISOR=docker to have
-// the api drive the Headscale container's lifecycle via the local docker
-// CLI. RASPUTIN_HEADSCALE_IMAGE and RASPUTIN_HEADSCALE_LISTEN_ADDR
-// override the pinned defaults.
-func newMeshSupervisor(stateDir string, meshCA *mesh.MeshCA) (mesh.Supervisor, error) {
-	choice := strings.ToLower(envOr("RASPUTIN_HEADSCALE_SUPERVISOR", "noop"))
-	switch choice {
-	case "", "noop":
-		return mesh.NewNoopSupervisor(), nil
-	case "docker":
-		cfg := mesh.DockerSupervisorConfig{
-			StateDir:      filepath.Join(stateDir, "headscale"),
-			Image:         os.Getenv("RASPUTIN_HEADSCALE_IMAGE"),
-			ListenAddr:    os.Getenv("RASPUTIN_HEADSCALE_LISTEN_ADDR"),
-			ServerURL:     os.Getenv("RASPUTIN_HEADSCALE_URL"),
-			ContainerName: os.Getenv("RASPUTIN_HEADSCALE_CONTAINER"),
-			MeshCA:        meshCA, // enables HTTPS mode with a per-installation leaf
-		}
-		log.Printf("rasputin-api: mesh supervisor = docker (state=%s, tls=%v)",
-			cfg.StateDir, cfg.MeshCA != nil)
-		return mesh.NewDockerSupervisor(cfg)
-	default:
-		return nil, errors.New("unknown RASPUTIN_HEADSCALE_SUPERVISOR: " + choice)
+// wireMockMesh is the dev/CI fallback: file-backed client, no supervisor.
+func wireMockMesh(stateDir, defaultLogin string) (mesh.Client, mesh.Supervisor, string, error) {
+	log.Printf("rasputin-api: mesh backend = mock (file-backed at %s)", stateDir)
+	c, err := mesh.NewMockClient(stateDir)
+	if err != nil {
+		return nil, nil, "", err
 	}
+	return c, mesh.NewNoopSupervisor(), defaultLogin, nil
+}
+
+// wireExternalMesh talks to a Headscale the operator runs themselves. We
+// trust the system pool unless RASPUTIN_HEADSCALE_CA_FILE points at a PEM
+// bundle (e.g. their internal CA). The container lifecycle is theirs (noop
+// supervisor) unless they explicitly asked us to drive it.
+func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, key string) (mesh.Client, mesh.Supervisor, string, error) {
+	cfg := mesh.RealClientConfig{BaseURL: url, APIKey: key}
+	if caFile := os.Getenv("RASPUTIN_HEADSCALE_CA_FILE"); caFile != "" {
+		tlsCfg, err := loadCATLSConfig(caFile)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		cfg.TLSConfig = tlsCfg
+	}
+	c, err := mesh.NewRealClient(cfg)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	var sup mesh.Supervisor = mesh.NewNoopSupervisor()
+	if strings.ToLower(envOr("RASPUTIN_HEADSCALE_SUPERVISOR", "noop")) == "docker" {
+		ds, derr := newDockerSupervisor(stateDir, meshCA)
+		if derr != nil {
+			return nil, nil, "", derr
+		}
+		sup = ds
+	}
+	log.Printf("rasputin-api: mesh backend = headscale (external, url=%s)", url)
+	return c, sup, url, nil
+}
+
+// wireSelfHostedMesh is the production path: bring up the Headscale container,
+// mint+persist an admin API key against it, and point a real client at the
+// local endpoint trusting the per-installation Mesh CA. Zero operator input.
+func wireSelfHostedMesh(ctx context.Context, stateDir string, meshCA *mesh.MeshCA, defaultLogin string) (mesh.Client, mesh.Supervisor, string, error) {
+	sup, err := newDockerSupervisor(stateDir, meshCA)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	// Start now so the container is up to mint a key against; mesh.Service.Start
+	// calls Start again later, which is idempotent.
+	if err := sup.Start(ctx); err != nil {
+		return nil, nil, "", fmt.Errorf("start headscale container: %w", err)
+	}
+	key, err := sup.EnsureAPIKey(ctx)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("bootstrap headscale api key: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(meshCA.CertPEM) {
+		return nil, nil, "", errors.New("mesh: failed to build trust pool from mesh CA")
+	}
+	url := sup.ServerURL()
+	c, err := mesh.NewRealClient(mesh.RealClientConfig{
+		BaseURL:   url,
+		APIKey:    key,
+		TLSConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	})
+	if err != nil {
+		return nil, nil, "", err
+	}
+	log.Printf("rasputin-api: mesh backend = headscale (self-hosted, url=%s, tls=mesh-ca)", url)
+	return c, sup, url, nil
+}
+
+// newDockerSupervisor builds a DockerSupervisor from env overrides + the Mesh
+// CA (which switches it into HTTPS mode with a per-installation leaf).
+func newDockerSupervisor(stateDir string, meshCA *mesh.MeshCA) (*mesh.DockerSupervisor, error) {
+	cfg := mesh.DockerSupervisorConfig{
+		StateDir:      filepath.Join(stateDir, "headscale"),
+		Image:         os.Getenv("RASPUTIN_HEADSCALE_IMAGE"),
+		ListenAddr:    os.Getenv("RASPUTIN_HEADSCALE_LISTEN_ADDR"),
+		ServerURL:     os.Getenv("RASPUTIN_HEADSCALE_URL"),
+		ContainerName: os.Getenv("RASPUTIN_HEADSCALE_CONTAINER"),
+		MeshCA:        meshCA,
+	}
+	log.Printf("rasputin-api: mesh supervisor = docker (state=%s, tls=%v)",
+		cfg.StateDir, cfg.MeshCA != nil)
+	return mesh.NewDockerSupervisor(cfg)
+}
+
+// dockerAvailable reports whether a docker CLI is on PATH — mirrors the
+// agent's autodetect for its docker/rauc/uci/tailscale backends.
+func dockerAvailable() bool {
+	bin := envOr("RASPUTIN_HEADSCALE_DOCKER_BIN", "docker")
+	_, err := exec.LookPath(bin)
+	return err == nil
 }
 
 func loadCATLSConfig(caFile string) (*tls.Config, error) {

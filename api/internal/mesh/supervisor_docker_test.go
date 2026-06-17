@@ -35,6 +35,7 @@ type fakeDocker struct {
 	containerState  string // "running" | "exited" | "created"
 	calls           []dockerCall
 	errOnCmd        map[string]error // keyed by first arg (e.g. "pull")
+	mintCount       int              // # of `docker exec ... apikeys create`
 }
 
 type dockerCall struct {
@@ -128,6 +129,15 @@ func (f *fakeDocker) run(ctx context.Context, name string, args ...string) ([]by
 		}
 		f.containerState = "exited"
 		return []byte("rasputin-headscale\n"), nil
+	case "exec":
+		// args: exec <container> headscale apikeys create --expiration <dur>
+		if !f.containerExists || f.containerState != "running" {
+			return nil, errors.New("container not running")
+		}
+		f.mintCount++
+		// Mimic the CLI: a human-readable line, then the key on its own line.
+		key := fmt.Sprintf("hskey-fake-%032d", f.mintCount)
+		return []byte("An API key was created:\n" + key + "\n"), nil
 	}
 	return nil, fmt.Errorf("fakeDocker: unhandled command: %v", args)
 }

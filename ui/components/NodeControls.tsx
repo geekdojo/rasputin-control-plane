@@ -26,6 +26,7 @@ import {
   type NodeRemovalImpact,
 } from '../lib/api';
 import type { App, BMCPowerState, Node } from '../lib/types';
+import { BMC_ENABLED } from '../lib/features';
 import { ConfirmModal } from './ConfirmModal';
 import { ACCENT, accentA, MONO } from './ui-theme';
 
@@ -167,8 +168,10 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
   const nodeId = node?.id ?? null;
 
   // BMC power state for the selected node: seed via REST, then track live.
+  // Gated on BMC_ENABLED — no real BMC backend exists yet (Phase 3 hardware),
+  // so we don't poll a mock or render power controls. See lib/features.ts.
   useEffect(() => {
-    if (!nodeId) {
+    if (!nodeId || !BMC_ENABLED) {
       setBmcState('unknown');
       return;
     }
@@ -290,15 +293,20 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
 
         {sectionLabel('ACTIONS')}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-          <PowerButton
-            state={bmcState}
-            disabled={!node || busy !== null}
-            onClick={() => {
-              if (!node) return;
-              if (bmcState === 'on') setModal('power-off');
-              else void run('bmc-on', () => bmcPower(node.id, 'on'));
-            }}
-          />
+          {/* BMC power controls (power on/off, hardware reset) and the
+              serial-over-LAN console are hidden until the real BMC backend
+              ships with Phase 3 chassis hardware. See lib/features.ts. */}
+          {BMC_ENABLED && (
+            <PowerButton
+              state={bmcState}
+              disabled={!node || busy !== null}
+              onClick={() => {
+                if (!node) return;
+                if (bmcState === 'on') setModal('power-off');
+                else void run('bmc-on', () => bmcPower(node.id, 'on'));
+              }}
+            />
+          )}
           <CtrlButton
             icon={RotateCcw}
             label={busy === 'reboot' ? 'REBOOTING…' : 'REBOOT (OS)'}
@@ -306,14 +314,18 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
             disabled={!node || busy !== null || !isOnline}
             onClick={() => setModal('reboot')}
           />
-          <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console?node=${encodeURIComponent(node.id)}`)} />
+          {BMC_ENABLED && (
+            <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console?node=${encodeURIComponent(node.id)}`)} />
+          )}
           <CtrlButton icon={Upload} label="UPDATE" disabled={!node} onClick={() => onNavigate('/updates')} />
-          <CtrlButton
-            icon={RefreshCw}
-            label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}
-            disabled={!node || busy !== null}
-            onClick={() => setModal('reset')}
-          />
+          {BMC_ENABLED && (
+            <CtrlButton
+              icon={RefreshCw}
+              label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}
+              disabled={!node || busy !== null}
+              onClick={() => setModal('reset')}
+            />
+          )}
           <CtrlButton
             icon={Trash2}
             label={busy === 'remove' ? 'REMOVING…' : 'REMOVE NODE'}

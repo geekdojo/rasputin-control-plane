@@ -289,6 +289,89 @@ func (s *DockerSupervisor) Healthy(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// ----- API key bootstrap --------------------------------------------------
+
+// apiKeyExpiration is the lifetime of the admin API key the supervisor mints
+// for the api to talk to its own Headscale. This is an appliance-internal
+// credential on a single-owner box, so it's set effectively permanent
+// (~10 years) — re-minting is a recovery action (delete the file + restart),
+// not a routine rotation. Headscale parses this as a Go duration.
+const apiKeyExpiration = "87600h"
+
+// ServerURL returns the resolved Headscale URL that clients should dial. This
+// is what the RealClient uses as its BaseURL and what agents pass to
+// `tailscale up --login-server`. Set explicitly via RASPUTIN_HEADSCALE_URL or
+// derived from the listen address (dial-trick for the primary LAN IP).
+func (s *DockerSupervisor) ServerURL() string { return s.cfg.ServerURL }
+
+// apiKeyPath is where the bootstrapped admin API key is persisted so it
+// survives api restarts without minting (and accumulating) a new key each
+// boot.
+func (s *DockerSupervisor) apiKeyPath() string {
+	return filepath.Join(s.cfg.StateDir, "apikey")
+}
+
+// EnsureAPIKey returns a Headscale admin API key for the supervised
+// container, minting one via `headscale apikeys create` on first call and
+// persisting it to <StateDir>/apikey (0600) for reuse across restarts. The
+// container must be running — call Start first.
+//
+// This is the step that closes the self-bootstrap loop. Because the
+// supervisor owns the container, it can mint the very credential the
+// RealClient needs — so a controlplane with Docker comes up on real mesh
+// with zero operator input and zero provision-time secret injection. (The
+// chicken-and-egg the env-var-only path couldn't solve: there's no Headscale
+// to mint a key from until first boot, so the key can't be baked into a
+// seed.)
+func (s *DockerSupervisor) EnsureAPIKey(ctx context.Context) (string, error) {
+	if b, err := os.ReadFile(s.apiKeyPath()); err == nil {
+		if key := strings.TrimSpace(string(b)); key != "" {
+			return key, nil
+		}
+	}
+	key, err := s.mintAPIKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(s.apiKeyPath(), []byte(key+"\n"), 0o600); err != nil {
+		return "", fmt.Errorf("mesh supervisor: persist api key: %w", err)
+	}
+	log.Printf("mesh supervisor: minted Headscale admin API key (persisted at %s)", s.apiKeyPath())
+	return key, nil
+}
+
+// mintAPIKey runs `headscale apikeys create` inside the container and returns
+// the resulting token.
+func (s *DockerSupervisor) mintAPIKey(ctx context.Context) (string, error) {
+	out, err := s.runner(ctx, s.cfg.DockerBin, "exec", s.cfg.ContainerName,
+		"headscale", "apikeys", "create", "--expiration", apiKeyExpiration)
+	if err != nil {
+		return "", fmt.Errorf("mesh supervisor: create api key: %w", err)
+	}
+	key := parseAPIKey(out)
+	if key == "" {
+		return "", fmt.Errorf("mesh supervisor: could not parse api key from headscale output: %q",
+			strings.TrimSpace(string(out)))
+	}
+	return key, nil
+}
+
+// parseAPIKey extracts the key token from `headscale apikeys create` output.
+// The CLI prints human-readable lines plus the key itself on its own line;
+// the key is the trailing whitespace-free token. Prefix-agnostic so it
+// survives Headscale formatting changes across the 0.2x line.
+func parseAPIKey(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.ContainsAny(line, " \t") || len(line) < 16 {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
 // ----- Container introspection -------------------------------------------
 
 type containerState int

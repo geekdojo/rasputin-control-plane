@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { bmcSOLURL } from '../../../lib/api';
+import { BMC_ENABLED } from '../../../lib/features';
 import { Badge, Btn, DIM, HAIR, Input, PageHeader, PageShell } from '../../../components/kit';
 import { MONO } from '../../../components/ui-theme';
 
@@ -33,7 +34,7 @@ function ConsoleInner() {
   const paneRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
-    if (!nodeId) return;
+    if (!nodeId || !BMC_ENABLED) return;
     const ws = new WebSocket(bmcSOLURL(nodeId));
     wsRef.current = ws;
     ws.onopen = () => setConnected('open');
@@ -67,6 +68,26 @@ function ConsoleInner() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(input + '\n');
     setInput('');
+  }
+
+  // The serial console rides on BMC serial-over-LAN, which has no real
+  // backend yet (Phase 3 hardware). The control that links here is hidden,
+  // but the route is still reachable by direct URL — guard it. See
+  // lib/features.ts.
+  if (!BMC_ENABLED) {
+    return (
+      <PageShell>
+        <PageHeader icon={Terminal} title="SERIAL CONSOLE" />
+        <div style={{ padding: '14px 20px' }}>
+          <p style={{ color: DIM, fontSize: 11, fontFamily: MONO }}>
+            The serial console isn&apos;t available in this release.{' '}
+            <Link href="/" style={{ color: DIM }}>
+              Back to nodes
+            </Link>
+          </p>
+        </div>
+      </PageShell>
+    );
   }
 
   if (!nodeId) {
