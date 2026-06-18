@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -854,22 +855,24 @@ func TestShort_Mesh(t *testing.T) {
 	}
 }
 
-func TestMatchesRasputinHostname(t *testing.T) {
+// Reconcile classifies a device as a Rasputin node by the control-plane-set
+// meshNodeTag, never by guessing from the hostname — a real node id like
+// "bench-controlplane1" matches no prefix, so the old hostname heuristic
+// downgraded enrolled nodes to "user" on every reconcile (bench 2026-06-18).
+func TestMeshNodeTagClassification(t *testing.T) {
 	cases := []struct {
-		in   string
-		want bool
+		tags []string
+		want bool // classified as a Rasputin node?
 	}{
-		{"node-1", true},
-		{"rasp-1", true},
-		{"fw-edge", true},
-		{"cp-main", true},
-		{"foo", false},
-		{"", false},
-		{"node", false}, // exactly len(prefix), no body
+		{[]string{meshNodeTag}, true},
+		{[]string{"tag:other", meshNodeTag}, true},
+		{[]string{"tag:other"}, false},
+		{[]string{"bench-controlplane1"}, false}, // hostname-shaped tag must NOT match
+		{nil, false},
 	}
 	for _, tc := range cases {
-		if got := matchesRasputinHostname(tc.in); got != tc.want {
-			t.Errorf("matchesRasputinHostname(%q) = %v, want %v", tc.in, got, tc.want)
+		if got := slices.Contains(tc.tags, meshNodeTag); got != tc.want {
+			t.Errorf("classify(%v) = %v, want %v", tc.tags, got, tc.want)
 		}
 	}
 }

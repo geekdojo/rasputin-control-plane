@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"time"
 
@@ -13,6 +14,14 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
+
+// meshNodeTag is the Tailscale/Headscale ACL tag the control plane stamps on
+// every node it enrolls (the enroll saga mints the preauth key with it). It is
+// the authoritative, control-plane-set marker of "this machine is a Rasputin
+// node" — distinct from RASPUTIN_NODE_ID/ROLE, which live in the control-plane
+// DB and never reach Headscale. Reconcile classifies devices by this tag, not
+// by guessing from the hostname.
+const meshNodeTag = "tag:rasputin-node"
 
 // ----- mesh.apply --------------------------------------------------------
 
@@ -208,12 +217,20 @@ func reconcileFetch(svc *Service, nc *nats.Conn) jobs.DoFn {
 		}
 
 		// Sync the mesh_devices table with Headscale's view of reality.
-		// Rasputin nodes are correlated by Hostname == NodeID (the agent
-		// publishes its node id as the tailscale hostname during enroll).
+		// Classify by the meshNodeTag the control plane stamps on every node it
+		// enrolls — a DIRECT match on a marker we set, not a guess from the
+		// hostname. (A Rasputin node id like "bench-controlplane1" matches no
+		// hostname prefix, and re-deriving from the hostname would clobber the
+		// authoritative kind/RasputinNodeID the enroll saga recorded — it did,
+		// downgrading enrolled nodes to "user" every reconcile, bench
+		// 2026-06-18.) A tagged node's hostname is its RASPUTIN_NODE_ID by
+		// construction (the agent sets the tailscale hostname to the node id on
+		// enroll). Anything untagged is a user device (e.g. a laptop added on
+		// the Keys tab).
 		for _, n := range nodes {
 			kind := "user"
 			rasp := ""
-			if matchesRasputinHostname(n.Hostname) {
+			if slices.Contains(n.Tags, meshNodeTag) {
 				kind = "rasputin"
 				rasp = n.Hostname
 			}
@@ -398,7 +415,7 @@ func enrollMintKey(svc *Service) jobs.DoFn {
 			Reusable:  false,
 			Ephemeral: false,
 			Expiry:    time.Now().Add(10 * time.Minute),
-			Tags:      []string{"tag:rasputin-node"},
+			Tags:      []string{meshNodeTag},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("mint key: %w", err)
@@ -456,7 +473,7 @@ func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
 				Hostname:         s.NodeID,
 				GivenName:        s.NodeID,
 				IPv4:             "100.64.0." + fmt.Sprintf("%d", 1+(simpleHash(s.NodeID)%240)),
-				Tags:             []string{"tag:rasputin-node"},
+				Tags:             []string{meshNodeTag},
 				AdvertisedRoutes: s.AdvertiseRoutes,
 				ApprovedRoutes:   s.AdvertiseRoutes,
 			}
@@ -492,7 +509,7 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 			User:             svc.cfg.DefaultUser,
 			Hostname:         s.NodeID,
 			TailnetIP:        s.HSIP,
-			Tags:             []string{"tag:rasputin-node"},
+			Tags:             []string{meshNodeTag},
 			AdvertisedRoutes: s.AdvertiseRoutes,
 			RasputinNodeID:   s.NodeID,
 			Kind:             "rasputin",
@@ -514,23 +531,6 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 }
 
 // ----- helpers ------------------------------------------------------------
-
-// matchesRasputinHostname returns true if the hostname matches a Rasputin
-// inventory node id format. v0 heuristic: starts with "node-" or any
-// Rasputin role prefix. Real correlation happens via the explicit
-// EnrollNodeWorkflow's record step; this is for reconcile cases where we
-// see a node we didn't enroll ourselves (post-reset, manual re-enroll).
-func matchesRasputinHostname(hostname string) bool {
-	if hostname == "" {
-		return false
-	}
-	for _, p := range []string{"node-", "rasp-", "fw-", "cp-"} {
-		if len(hostname) > len(p) && hostname[:len(p)] == p {
-			return true
-		}
-	}
-	return false
-}
 
 func mockNodesByHostname(mc *MockClient, hostname string) []HSNode {
 	nodes, _ := mc.ListNodes(nil)
