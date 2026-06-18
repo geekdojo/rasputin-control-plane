@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -473,23 +474,56 @@ func (s *DockerSupervisor) prepareHostDirs() error {
 // same-host probes), localhost (same-host dev), and any ExtraLeafDNSNames
 // the caller wanted to advertise.
 func (s *DockerSupervisor) ensureLeaf() error {
-	host := resolveServerHost(s.cfg.ListenAddr)
 	spec := LeafSpec{
-		CommonName:  host,
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		DNSNames:    []string{"localhost"},
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		spec.IPAddresses = append(spec.IPAddresses, ip)
-	} else {
-		spec.DNSNames = []string{host}
+	// The leaf MUST be valid for the host clients actually dial — the
+	// ServerURL host (e.g. rasputin.local) — not just a re-resolved
+	// ListenAddr. ensureLeaf used to derive the SAN solely from
+	// resolveServerHost(ListenAddr), so pinning ServerURL to a name left the
+	// leaf valid only for the LAN IP/localhost and the api's own client
+	// rejected it ("x509: certificate is valid for localhost, not
+	// rasputin.local" — bench 2026-06-18). Cover the ServerURL host AND the
+	// resolved LAN IP (so same-LAN IP access still validates); fall back to
+	// the resolved host when ServerURL is unset.
+	var hosts []string
+	if h := serverURLHost(s.cfg.ServerURL); h != "" {
+		hosts = append(hosts, h)
 	}
-	spec.DNSNames = append(spec.DNSNames, "localhost")
+	if lan := resolveServerHost(s.cfg.ListenAddr); lan != "" {
+		hosts = append(hosts, lan)
+	}
+	if len(hosts) == 0 {
+		hosts = []string{"localhost"}
+	}
+	spec.CommonName = hosts[0]
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			spec.IPAddresses = append(spec.IPAddresses, ip)
+		} else {
+			spec.DNSNames = append(spec.DNSNames, h)
+		}
+	}
 	spec.DNSNames = append(spec.DNSNames, s.cfg.ExtraLeafDNSNames...)
 	certsDir := filepath.Join(s.cfg.StateDir, "certs")
 	if _, err := MintLeafToDisk(s.cfg.MeshCA, certsDir, spec); err != nil {
 		return fmt.Errorf("mesh supervisor: mint leaf: %w", err)
 	}
 	return nil
+}
+
+// serverURLHost returns the hostname from a server URL like
+// "https://rasputin.local:18080" (no scheme, no port). "" if unset/unparseable.
+func serverURLHost(serverURL string) string {
+	if serverURL == "" {
+		return ""
+	}
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // writeConfig renders and writes config.yaml. Idempotent — overwrite is

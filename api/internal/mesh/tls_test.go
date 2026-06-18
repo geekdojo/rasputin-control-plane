@@ -284,6 +284,39 @@ func TestMintLeafToDisk_ReMintsOnIssuerChange(t *testing.T) {
 // helpers
 // ============================================================================
 
+// ensureLeaf must mint a cert valid for the ServerURL host (the name clients
+// actually dial), not just the resolved ListenAddr. Pinning server_url to
+// rasputin.local previously left the leaf valid only for localhost/IP, and the
+// api's own client rejected it: "x509: certificate is valid for localhost, not
+// rasputin.local" (bench 2026-06-18).
+func TestEnsureLeaf_CoversServerURLHost(t *testing.T) {
+	ca := newCAForTest(t)
+	stateDir := t.TempDir()
+	sup, err := NewDockerSupervisor(DockerSupervisorConfig{
+		StateDir:   stateDir,
+		ListenAddr: "127.0.0.1:18080", // deterministic — avoids the dial-trick
+		ServerURL:  "https://rasputin.local:18080",
+		MeshCA:     ca,
+	})
+	if err != nil {
+		t.Fatalf("NewDockerSupervisor: %v", err)
+	}
+	if err := sup.ensureLeaf(); err != nil {
+		t.Fatalf("ensureLeaf: %v", err)
+	}
+	certPEM, err := os.ReadFile(filepath.Join(stateDir, "certs", "leaf.pem"))
+	if err != nil {
+		t.Fatalf("read leaf: %v", err)
+	}
+	cert := mustParseCert(t, certPEM)
+	if err := cert.VerifyHostname("rasputin.local"); err != nil {
+		t.Errorf("leaf not valid for rasputin.local: %v (DNS=%v IP=%v)", err, cert.DNSNames, cert.IPAddresses)
+	}
+	if err := cert.VerifyHostname("127.0.0.1"); err != nil {
+		t.Errorf("leaf not valid for loopback: %v", err)
+	}
+}
+
 func newCAForTest(t *testing.T) *MeshCA {
 	t.Helper()
 	ca, err := EnsureMeshCA(t.TempDir(), "test-install")
