@@ -68,9 +68,26 @@ func main() {
 	// auth enabled. See agent/internal/bus.Connect.
 	joinToken := os.Getenv("RASPUTIN_CP_JOIN_TOKEN")
 	reregister := func(c *nats.Conn) { publishRegistered(c, nodeID, role) }
-	nc, err := bus.Connect(natsURL, nodeID, joinToken, reregister)
-	if err != nil {
-		log.Fatalf("rasputin-agent: %v", err)
+	// Retry the initial NATS connect instead of exiting on failure. On real
+	// hardware the firewall can boot before the control plane (it IS the
+	// network), so rasputin.local may not resolve yet at startup. Exiting let
+	// procd exhaust its respawn budget and the agent never recovered (bench
+	// 2026-06-18). Loop here with capped backoff until the control plane
+	// appears; only a shutdown signal aborts.
+	var nc *nats.Conn
+	for attempt := 1; ; attempt++ {
+		var cerr error
+		nc, cerr = bus.Connect(natsURL, nodeID, joinToken, reregister)
+		if cerr == nil {
+			break
+		}
+		wait := min(time.Duration(attempt)*2*time.Second, 30*time.Second)
+		log.Printf("rasputin-agent: NATS connect to %s failed (%v); retry %d in %s (control plane may still be coming up)", natsURL, cerr, attempt, wait)
+		select {
+		case <-ctx.Done():
+			log.Fatalf("rasputin-agent: aborted waiting for NATS: %v", ctx.Err())
+		case <-time.After(wait):
+		}
 	}
 	defer func() { _ = nc.Drain() }()
 
