@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/hostsync"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
@@ -170,6 +171,18 @@ func main() {
 		// override is honored via RASPUTIN_IDS_ALERT_LOG for dev/test;
 		// blank means use the default in the ids package.
 		go ids.Run(ctx, nc, nodeID, os.Getenv("RASPUTIN_IDS_ALERT_LOG"))
+	}
+
+	// Publish rasputin.local into a local resolver dir (a dnsmasq hostsdir) so
+	// clients on this box that can't do mDNS themselves can still resolve the
+	// control plane. The firewall sets RASPUTIN_CP_HOSTS_DIR for exactly this:
+	// musl has no nss-mdns, so tailscaled couldn't otherwise reach the mesh
+	// login server at https://rasputin.local. Env-gated — unset on rasputin-os
+	// (systemd-resolved does mDNS natively) → no-op. The agent already resolves
+	// the name over mDNS for NATS; this surfaces it to the whole box and
+	// self-heals when the control plane's address changes.
+	if hostsDir := os.Getenv("RASPUTIN_CP_HOSTS_DIR"); hostsDir != "" {
+		go hostsync.Run(ctx, "rasputin.local", hostsDir, 30*time.Second, nil)
 	}
 
 	// OS update handlers — every node gets them. Picks `rauc` if the CLI
