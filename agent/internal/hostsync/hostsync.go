@@ -20,7 +20,9 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/mdns"
@@ -34,7 +36,14 @@ type Resolver func(name string, timeout time.Duration) (string, error)
 // (atomic rename) whenever the resolved address changes. A dnsmasq configured
 // with `hostsdir=<dir>` picks up the change automatically. Blocks until ctx is
 // cancelled. dir is created if missing.
-func Run(ctx context.Context, name, dir string, interval time.Duration, resolve Resolver) {
+//
+// reloadCmd, if non-empty, is run via "sh -c" after each change to the hosts
+// file. dnsmasq does NOT auto-watch addn-hosts files (only --hostsdir, which
+// OpenWrt's uci doesn't expose), so the resolver must be told to re-read — on
+// the firewall this is "/etc/init.d/dnsmasq reload". It runs only on an actual
+// address change, so the reload is rare (first resolve + CP-IP changes), which
+// is also what makes this self-heal when the control plane's address moves.
+func Run(ctx context.Context, name, dir string, interval time.Duration, reloadCmd string, resolve Resolver) {
 	if resolve == nil {
 		resolve = mdns.Resolve
 	}
@@ -58,8 +67,13 @@ func Run(ctx context.Context, name, dir string, interval time.Duration, resolve 
 				if werr := writeHost(file, ip, name); werr != nil {
 					log.Printf("hostsync: write %s: %v", file, werr)
 				} else {
-					log.Printf("hostsync: %s -> %s (published to dnsmasq hostsdir %s)", name, ip, dir)
+					log.Printf("hostsync: %s -> %s (published to %s)", name, ip, dir)
 					last = ip
+					if reloadCmd != "" {
+						if out, rerr := exec.CommandContext(ctx, "sh", "-c", reloadCmd).CombinedOutput(); rerr != nil {
+							log.Printf("hostsync: reload %q failed: %v (%s)", reloadCmd, rerr, strings.TrimSpace(string(out)))
+						}
+					}
 				}
 			}
 			timer.Reset(interval)

@@ -182,7 +182,10 @@ func main() {
 	// the name over mDNS for NATS; this surfaces it to the whole box and
 	// self-heals when the control plane's address changes.
 	if hostsDir := os.Getenv("RASPUTIN_CP_HOSTS_DIR"); hostsDir != "" {
-		go hostsync.Run(ctx, "rasputin.local", hostsDir, 30*time.Second, nil)
+		// RASPUTIN_CP_HOSTS_RELOAD_CMD re-reads the resolver after a change —
+		// dnsmasq doesn't auto-watch addn-hosts files. The firewall sets it to
+		// "/etc/init.d/dnsmasq reload".
+		go hostsync.Run(ctx, "rasputin.local", hostsDir, 30*time.Second, os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"), nil)
 	}
 
 	// OS update handlers — every node gets them. Picks `rauc` if the CLI
