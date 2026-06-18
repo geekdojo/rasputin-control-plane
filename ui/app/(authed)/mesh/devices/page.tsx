@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { enrollMeshNode, listMeshDevices, listNodes } from '../../../../lib/api';
+import { enrollMeshNode, getJob, listMeshDevices, listNodes } from '../../../../lib/api';
 import { useMeshStateRefresh } from '../../../../lib/mesh-state-context';
 import type { MeshDevice, Node } from '../../../../lib/types';
 import {
@@ -114,8 +114,31 @@ function EnrollNodeForm({
     setErr(null);
     try {
       const cidrs = routes.split(',').map((s) => s.trim()).filter(Boolean);
-      await enrollMeshNode(nodeId, cidrs);
+      const job = await enrollMeshNode(nodeId, cidrs);
       setRoutes('');
+      // Poll the enroll job to a terminal state before refreshing. The saga
+      // runs async (the agent restarts tailscaled, runs `tailscale up`, then
+      // the record step writes the device) — ~10-30s on hardware. Refreshing
+      // immediately shows the node still absent, so it looks like the click
+      // did nothing until a manual page refresh (bench 2026-06-18). Poll up to
+      // ~60s, surface a failure, then refresh either way.
+      let terminal = false;
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const j = await getJob(job.id);
+        if (j.status === 'failed' || j.status === 'cancelled') {
+          setErr(`Enrollment failed${j.error ? `: ${j.error}` : ' — see the Tasks panel for details.'}`);
+          terminal = true;
+          break;
+        }
+        if (j.status === 'succeeded') {
+          terminal = true;
+          break;
+        }
+      }
+      if (!terminal) {
+        setErr('Enrollment is still running — it may finish shortly. Check the Tasks panel, then refresh.');
+      }
       onEnrolled();
     } catch (e) {
       setErr(String(e));

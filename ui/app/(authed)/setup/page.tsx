@@ -46,14 +46,29 @@ export default function SetupPage() {
       // Poll the enroll job to a terminal state so a failed enrollment
       // surfaces here instead of silently leaving the step un-done (the
       // first Mu wizard run failed agent-side and showed nothing).
-      for (let i = 0; i < 10; i++) {
-        await new Promise((r) => setTimeout(r, 700));
+      // Budget must cover a REAL enrollment, not just the mock: on hardware
+      // the agent restarts tailscaled, waits for the daemon, runs `tailscale
+      // up`, and only then returns the tailnet id the record step needs —
+      // ~10-30s on an N100 (bench 2026-06-18: a 7s budget expired first, so
+      // the step showed un-done even though the job later succeeded). Poll up
+      // to ~60s; if it's still running after that, say so rather than leave a
+      // silently-stale circle.
+      let terminal = false;
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
         const j = await getJob(job.id);
         if (j.status === 'failed' || j.status === 'cancelled') {
           setErr(`Enrollment failed${j.error ? `: ${j.error}` : ' — see the Tasks panel for details.'}`);
+          terminal = true;
           break;
         }
-        if (j.status === 'succeeded') break;
+        if (j.status === 'succeeded') {
+          terminal = true;
+          break;
+        }
+      }
+      if (!terminal) {
+        setErr('Enrollment is still running — it may finish shortly. Check the Tasks panel, then refresh this page.');
       }
       await refresh();
     } catch (e) {
