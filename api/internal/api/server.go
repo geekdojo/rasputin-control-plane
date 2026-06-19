@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -45,6 +46,21 @@ type Server struct {
 	busTokens           *busauth.Store
 	nc                  *nats.Conn
 	uiDir               string
+	// releaseSource discovers the latest releases from the public channel
+	// (Check for Updates). nil when not configured — the endpoints then
+	// return 503. releaseChannel is the default channel ("stable" | "dev").
+	releaseSource  releases.Source
+	releaseChannel string
+}
+
+// SetReleaseSource wires the update-channel source used by
+// POST /api/updates/check and /api/updates/pull. channel is the default
+// release channel. main.go calls this at startup.
+func (s *Server) SetReleaseSource(src releases.Source, channel string) {
+	s.releaseSource = src
+	if channel != "" {
+		s.releaseChannel = channel
+	}
 }
 
 // SetAlertsService overrides the default aggregator-only alerts service
@@ -170,6 +186,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/updates", reqd(s.handleCreateUpdate))
 	mux.HandleFunc("POST /api/updates/system", reqd(s.handleCreateSystemUpdate))
 	mux.HandleFunc("GET /api/updates", reqd(s.handleListUpdates))
+	mux.HandleFunc("POST /api/updates/check", reqd(s.handleCheckUpdates))
+	mux.HandleFunc("POST /api/updates/pull", reqd(s.handlePullUpdate))
 
 	mux.HandleFunc("GET /api/mesh/state", reqd(s.handleMeshState))
 	mux.HandleFunc("GET /api/mesh/devices", reqd(s.handleListMeshDevices))

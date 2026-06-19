@@ -229,6 +229,38 @@ export interface BundleList {
   bundles: Bundle[];
 }
 
+// "Check for Updates" — per-component report from POST /api/updates/check.
+export type UpdateStatus =
+  | 'up_to_date'
+  | 'update_available'
+  | 'no_release'
+  | 'unknown';
+
+export interface ComponentUpdate {
+  component: string; // "os" | "fw" | "cp"
+  label: string;
+  channel: string;
+  installed: string;
+  latest: string;
+  status: UpdateStatus;
+  kind: string; // "raucb" | "sysupgrade" | "info"
+  deployable: boolean;
+  bundleSha256?: string;
+  assetName?: string;
+  sizeBytes?: number;
+  signedBy?: string;
+  staged?: boolean;
+  manualInstructions?: string;
+  note?: string;
+  error?: string;
+}
+
+export interface UpdateCheckResult {
+  channel: string;
+  checkedAt: string;
+  components: ComponentUpdate[];
+}
+
 export type NodeUpdateStatus =
   | 'in_progress'
   | 'committed'

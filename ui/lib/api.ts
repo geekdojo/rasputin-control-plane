@@ -30,6 +30,7 @@ import type {
   SetupState,
   SystemUpdateChangeEvent,
   UpdateChangeEvent,
+  UpdateCheckResult,
 } from './types';
 
 // In dev, next.config.mjs sets NEXT_PUBLIC_API_BASE to http://localhost:8080
@@ -472,6 +473,28 @@ export function openUpdatesWS(
   onEvent: (ev: UpdateChangeEvent) => void,
 ): () => void {
   return openWS<UpdateChangeEvent>('/ws/updates', onEvent);
+}
+
+// checkForUpdates asks the control plane to compare installed component
+// versions against the latest releases on the configured channel. No bytes
+// are downloaded — only the small release manifests are fetched.
+export function checkForUpdates(channel?: string): Promise<UpdateCheckResult> {
+  return jsonFetch<UpdateCheckResult>('/api/updates/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(channel ? { channel } : {}),
+  });
+}
+
+// pullUpdate downloads the latest deployable bundle for a component into the
+// local bundle store so the existing Deploy / Update-all flow can distribute
+// it. Returns the staged Bundle.
+export function pullUpdate(component: string, channel?: string): Promise<Bundle> {
+  return jsonFetch<Bundle>('/api/updates/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ component, ...(channel ? { channel } : {}) }),
+  });
 }
 
 // createSystemUpdate kicks off a system.update saga. Returns the parent

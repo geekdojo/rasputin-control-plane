@@ -37,6 +37,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -475,6 +476,16 @@ func main() {
 		log.Printf("rasputin-api: WARNING — alerts webhook is unauthenticated " +
 			"(set RASPUTIN_ALERTS_WEBHOOK_SECRET to enable header auth)")
 	}
+	// Update discovery: the control plane pulls signed bundles from a PUBLIC
+	// release channel repo (source repos stay private; only signed artifacts
+	// are mirrored there) over anonymous HTTPS — no token on the appliance.
+	// RASPUTIN_RELEASE_API_BASE is overridable for a mirror/CDN or tests.
+	releaseRepo := envOr("RASPUTIN_RELEASE_REPO", "geekdojo/rasputin-releases")
+	releaseChannel := envOr("RASPUTIN_RELEASE_CHANNEL", "stable")
+	releaseAPIBase := envOr("RASPUTIN_RELEASE_API_BASE", "https://api.github.com")
+	srv.SetReleaseSource(releases.NewGithubPublicSource(releaseAPIBase, releaseRepo), releaseChannel)
+	log.Printf("rasputin-api: update channel = %s (repo %s)", releaseChannel, releaseRepo)
+
 	handler := srv.Handler()
 
 	// With HTTPS on, the plain-HTTP listener demotes to the bootstrap

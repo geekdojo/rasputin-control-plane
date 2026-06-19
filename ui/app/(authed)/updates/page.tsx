@@ -1,8 +1,9 @@
 'use client';
 
-import { Trash2, UploadCloud, Zap } from 'lucide-react';
+import { DownloadCloud, RefreshCw, Trash2, UploadCloud, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
+  checkForUpdates,
   createSystemUpdate,
   createUpdate,
   deleteBundle,
@@ -13,12 +14,24 @@ import {
   listUpdates,
   openSystemUpdatesWS,
   openUpdatesWS,
+  pullUpdate,
   uploadBundle,
 } from '../../../lib/api';
-import type { Bundle, Job, JobStatus, Node, NodeUpdate, NodeUpdateStatus, UpdateChangeEvent } from '../../../lib/types';
+import type {
+  Bundle,
+  ComponentUpdate,
+  Job,
+  JobStatus,
+  Node,
+  NodeUpdate,
+  NodeUpdateStatus,
+  UpdateChangeEvent,
+  UpdateCheckResult,
+} from '../../../lib/types';
 import {
   Badge,
   Btn,
+  CopyButton,
   DIM,
   FG,
   HAIR,
@@ -78,6 +91,21 @@ export default function UpdatesPage() {
   const [systemJobs, setSystemJobs] = useState<Job[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [recent, setRecent] = useState<UpdateChangeEvent[]>([]);
+  const [check, setCheck] = useState<UpdateCheckResult | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkErr, setCheckErr] = useState<string | null>(null);
+
+  async function runCheck() {
+    setChecking(true);
+    setCheckErr(null);
+    try {
+      setCheck(await checkForUpdates());
+    } catch (e) {
+      setCheckErr(String(e));
+    } finally {
+      setChecking(false);
+    }
+  }
 
   useEffect(() => {
     refresh();
@@ -132,6 +160,39 @@ export default function UpdatesPage() {
           </Hint>
         )}
         {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+          <SectionLabel style={{ marginBottom: 0, borderBottom: 'none', flex: 1 }}>
+            AVAILABLE UPDATES{check ? ` · ${check.channel.toUpperCase()} CHANNEL` : ''}
+          </SectionLabel>
+          <Btn variant="primary" small disabled={checking} onClick={runCheck}>
+            <RefreshCw size={10} /> {checking ? 'CHECKING…' : 'CHECK FOR UPDATES'}
+          </Btn>
+        </div>
+        {checkErr && (
+          <Hint warn style={{ marginBottom: 14 }}>
+            Couldn&apos;t reach the release server: {checkErr}
+          </Hint>
+        )}
+        {!check && !checkErr && (
+          <Hint style={{ marginBottom: 18 }}>
+            check the release channel for newer OS and firewall versions — nothing is downloaded until you stage it
+          </Hint>
+        )}
+        {check && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 22 }}>
+            {check.components.map((c) => (
+              <ComponentUpdateRow
+                key={c.component}
+                cu={c}
+                onStaged={() => {
+                  refresh();
+                  runCheck();
+                }}
+              />
+            ))}
+          </div>
+        )}
 
         <SectionLabel>BUNDLES</SectionLabel>
         {bundles.length === 0 ? (
@@ -443,6 +504,93 @@ function SystemUpdateRow({ job }: { job: Job }) {
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+function updateStatusColor(s: ComponentUpdate['status']): string {
+  switch (s) {
+    case 'update_available':
+      return ACCENT;
+    case 'up_to_date':
+      return '#4ade80';
+    case 'unknown':
+      return '#facc15';
+    default:
+      return DIM; // no_release
+  }
+}
+
+function updateStatusLabel(s: ComponentUpdate['status']): string {
+  switch (s) {
+    case 'update_available':
+      return 'UPDATE AVAILABLE';
+    case 'up_to_date':
+      return 'UP TO DATE';
+    case 'no_release':
+      return 'NO RELEASE';
+    default:
+      return 'UNKNOWN';
+  }
+}
+
+function ComponentUpdateRow({ cu, onStaged }: { cu: ComponentUpdate; onStaged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function stage() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await pullUpdate(cu.component, cu.channel);
+      onStaged();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const canStage = cu.status === 'update_available' && cu.deployable && !cu.staged;
+  const showManual = cu.status === 'update_available' && !cu.deployable && Boolean(cu.manualInstructions);
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${HAIR}`, padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ color: FG, fontSize: 11, fontFamily: MONO, letterSpacing: '0.06em', minWidth: 160 }}>
+          {cu.label.toUpperCase()}
+        </span>
+        <Badge color={updateStatusColor(cu.status)}>{updateStatusLabel(cu.status)}</Badge>
+        <span style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
+          {cu.installed || '—'}
+          {cu.latest ? ` → ${cu.latest}` : ''}
+        </span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {cu.staged && <Badge color="#4ade80">STAGED</Badge>}
+          {canStage && (
+            <Btn variant="primary" small disabled={busy} onClick={stage} title="download into the bundle catalog">
+              <DownloadCloud size={10} /> {busy ? 'STAGING…' : 'DOWNLOAD & STAGE'}
+            </Btn>
+          )}
+        </div>
+      </div>
+      {cu.staged && cu.deployable && (
+        <Hint>staged in the bundle catalog below — use DEPLOY or UPDATE ALL to roll it out</Hint>
+      )}
+      {showManual && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Hint warn>{cu.manualInstructions}</Hint>
+          {cu.assetName && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>{cu.assetName}</span>
+              <CopyButton value={cu.assetName} label="COPY IMAGE NAME" />
+            </div>
+          )}
+        </div>
+      )}
+      {cu.note && <Hint>{cu.note}</Hint>}
+      {cu.error && <Hint warn>{cu.error}</Hint>}
+      {err && <span style={{ color: '#f87171', fontSize: 9, fontFamily: MONO }}>{err}</span>}
     </div>
   );
 }
