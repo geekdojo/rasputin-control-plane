@@ -56,8 +56,8 @@ func TestCheck(t *testing.T) {
 		{ID: "n", Role: proto.RoleFirewall, ImageVersion: "2026.07.0"},
 	}
 	src := &fakeSource{rel: map[string]*ReleaseInfo{
-		"os": osRelease("2026.06.0-dev.24"),       // newer than installed dev.20
-		"fw": fwRelease("2026.07.1-dev.15"),       // newer than installed 2026.07.0
+		"os": osRelease("2026.06.0-dev.24"), // newer than installed dev.20
+		"fw": fwRelease("2026.07.1-dev.15"), // newer than installed 2026.07.0
 		"cp": {Component: "cp", Version: "v0.8.5", Manifest: Manifest{Version: "v0.8.5"}},
 	}}
 

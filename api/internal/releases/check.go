@@ -17,14 +17,14 @@ const (
 
 // ComponentStatus is the per-component result of a check.
 type ComponentStatus struct {
-	Component string `json:"component"`
-	Label     string `json:"label"`
-	Channel   string `json:"channel"`
-	Installed string `json:"installed"`
-	Latest    string `json:"latest"`
-	Status    string `json:"status"`
-	Kind      string `json:"kind"`
-	Deployable bool  `json:"deployable"`
+	Component  string `json:"component"`
+	Label      string `json:"label"`
+	Channel    string `json:"channel"`
+	Installed  string `json:"installed"`
+	Latest     string `json:"latest"`
+	Status     string `json:"status"`
+	Kind       string `json:"kind"`
+	Deployable bool   `json:"deployable"`
 
 	// Populated for deployable (OS) updates so the UI can offer a one-click
 	// "Download & stage" → POST /api/updates/pull.
