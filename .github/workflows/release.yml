@@ -74,6 +74,27 @@ jobs:
             --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64; the api tarball bundles the web UI). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
             dist/*.tar.gz dist/*.sha256 dist/*.hash
 
+      # Mirror an informational version manifest to the PUBLIC release channel
+      # (geekdojo/rasputin-releases), tag "cp-<version>". Check for Updates shows
+      # the control-plane software version, but it isn't deployed via the channel
+      # (it ships inside the OS image), so we mirror only a tiny manifest.json —
+      # not the binaries. RASPUTIN_RELEASES is an org secret (Contents:write on
+      # rasputin-releases). Idempotent (create-or-clobber).
+      - name: Mirror version to public release channel
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.RASPUTIN_RELEASES }}
+        run: |
+          set -eu
+          mkdir -p relmirror
+          printf '{"version":"%s","channel":"stable","artifacts":[]}\n' "${GITHUB_REF_NAME}" > relmirror/manifest.json
+          tag="cp-${GITHUB_REF_NAME}"
+          gh release create "$tag" --repo geekdojo/rasputin-releases \
+            --title "Rasputin control plane ${GITHUB_REF_NAME}" \
+            --notes "Informational version manifest. Control-plane software ships inside the OS image; update the OS to update it." \
+            relmirror/manifest.json \
+          || gh release upload "$tag" --repo geekdojo/rasputin-releases --clobber relmirror/manifest.json
+
       # Manual dispatch → just keep the artifacts for inspection.
       - name: Upload artifacts (dispatch dry-run)
         if: github.event_name == 'workflow_dispatch'

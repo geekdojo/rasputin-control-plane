@@ -98,6 +98,11 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 		cs.Status = StatusUpToDate
 	}
 
+	// Informational components (cp) carry their note regardless of whether the
+	// release ships a hardware artifact (it ships only a version manifest).
+	if comp.Kind == KindInfo {
+		cs.Note = cpShipsInOSNote
+	}
 	// Attach deploy/display metadata from the matching artifact.
 	if art, ok := info.Artifact(comp.Compatible); ok {
 		cs.SignedBy = art.SignedBy
@@ -111,8 +116,6 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 			if cs.Status == StatusUpdateAvailable {
 				cs.ManualInstructions = firewallManualNote
 			}
-		case KindInfo:
-			cs.Note = cpShipsInOSNote
 		}
 	}
 	return cs
