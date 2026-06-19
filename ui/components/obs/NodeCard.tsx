@@ -64,7 +64,7 @@ export function NodeCard({ node, cpuSeries, memSeries, obsEnabled, onClick }: No
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
-        background: hover ? '#111d30' : PANEL,
+        background: hover ? 'var(--rasp-field-bg)' : PANEL,
         border: `1px solid ${hover ? accentA(0.45) : HAIR}`,
         padding: '14px 16px',
         textAlign: 'left',
@@ -172,7 +172,7 @@ export function NodeCard({ node, cpuSeries, memSeries, obsEnabled, onClick }: No
           letterSpacing: '0.08em',
           color: DIM,
           paddingTop: 8,
-          borderTop: `1px solid rgba(228,230,234,0.08)`,
+          borderTop: `1px solid rgba(var(--rasp-fg-rgb),0.08)`,
         }}
       >
         <span>

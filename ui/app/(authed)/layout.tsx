@@ -117,8 +117,8 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: '#07101f',
-          color: '#8a9bb5',
+          background: 'var(--rasp-bg)',
+          color: 'var(--rasp-dim)',
           fontFamily: MONO,
           fontSize: 12,
           letterSpacing: '0.08em',
@@ -143,7 +143,7 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
       style={{
         height: '100vh',
         width: '100%',
-        background: '#07101f',
+        background: 'var(--rasp-bg)',
         display: 'flex',
         flexDirection: 'column',
         fontFamily: MONO,
@@ -177,7 +177,7 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
             background: accentA(0.08),
             borderBottom: `1px solid ${accentA(0.3)}`,
             fontSize: 11,
-            color: '#e4e6ea',
+            color: 'var(--rasp-fg)',
             flexShrink: 0,
           }}
         >

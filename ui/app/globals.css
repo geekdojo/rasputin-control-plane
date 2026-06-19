@@ -11,32 +11,72 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ---------------------------------------------------------------------------
+ * Theme tokens (--rasp-*). The inline-styled screens read these via the
+ * constants in components/ui-theme.ts + components/kit.tsx and via direct
+ * var() references, so a theme is just a different set of these values.
+ *
+ *   :root                     → "default" theme — the locked Pantone 172 C
+ *                               mission-control look. Unchanged from before.
+ *   [data-theme='cyberdeck']  → opt-in amber retro-terminal look (Settings).
+ *
+ * The theme is selected at runtime (ThemeProvider in lib/theme.tsx sets
+ * data-theme on <html>); default applies when the attribute is absent.
+ * ------------------------------------------------------------------------- */
 :root {
   --font-size: 14px;
-  --background: #07101f;
-  --foreground: #e4e6ea;
-  --card: #0d1829;
-  --card-foreground: #e4e6ea;
-  --popover: #0d1829;
-  --popover-foreground: #e4e6ea;
-  --primary: #fa3c04; /* Pantone 172 C primary signal orange — remapped from the design's #4a9eff */
-  --primary-foreground: #07101f;
-  --secondary: #111d30;
-  --secondary-foreground: #e4e6ea;
-  --muted: #0f1a2c;
-  --muted-foreground: #8a9bb5;
-  --accent: #1e2f47;
-  --accent-foreground: #e4e6ea;
+
+  /* Rasputin theme tokens — default (mission-control navy + Pantone 172 C). */
+  --rasp-bg: #07101f;
+  --rasp-panel: #0d1829;
+  --rasp-field-bg: #111d30;
+  --rasp-fg: #e4e6ea;
+  --rasp-fg-rgb: 228, 230, 234; /* foreground base, used at many alphas for hairlines/fills */
+  --rasp-dim: #8a9bb5;
+  --rasp-accent: #fa3c04; /* Pantone 172 C primary signal orange — remapped from the design's #4a9eff */
+  --rasp-accent-rgb: 250, 60, 4;
+  --rasp-radius: 0.625rem;
+
+  /* shadcn/ui token layer — derived from the --rasp-* tokens above so a
+     theme only has to override the --rasp-* set. */
+  --background: var(--rasp-bg);
+  --foreground: var(--rasp-fg);
+  --card: var(--rasp-panel);
+  --card-foreground: var(--rasp-fg);
+  --popover: var(--rasp-panel);
+  --popover-foreground: var(--rasp-fg);
+  --primary: var(--rasp-accent);
+  --primary-foreground: var(--rasp-bg);
+  --secondary: var(--rasp-field-bg);
+  --secondary-foreground: var(--rasp-fg);
+  --muted: var(--rasp-panel);
+  --muted-foreground: var(--rasp-dim);
+  --accent: var(--rasp-field-bg);
+  --accent-foreground: var(--rasp-fg);
   --destructive: #c0392b;
-  --destructive-foreground: #e4e6ea;
-  --border: rgba(228, 230, 234, 0.18);
-  --input: #111d30;
-  --input-background: #111d30;
-  --switch-background: #1e2f47;
+  --destructive-foreground: var(--rasp-fg);
+  --border: rgba(var(--rasp-fg-rgb), 0.18);
+  --input: var(--rasp-field-bg);
+  --input-background: var(--rasp-field-bg);
+  --switch-background: var(--rasp-field-bg);
   --font-weight-medium: 500;
   --font-weight-normal: 400;
-  --ring: rgba(250, 60, 4, 0.4); /* Pantone 172 C @ 40% — remapped from blue */
-  --radius: 0.625rem;
+  --ring: rgba(var(--rasp-accent-rgb), 0.4);
+  --radius: var(--rasp-radius);
+}
+
+/* Cyberdeck — opt-in amber CRT terminal theme (pure black + warm amber).
+ * Clean recolor of the default layout: only the --rasp-* tokens change. */
+[data-theme='cyberdeck'] {
+  --rasp-bg: #060606;
+  --rasp-panel: #0e0d0b;
+  --rasp-field-bg: #161410;
+  --rasp-fg: #ece3d0;
+  --rasp-fg-rgb: 236, 227, 208;
+  --rasp-dim: #9a8455;
+  --rasp-accent: #ffa000;
+  --rasp-accent-rgb: 255, 160, 0;
+  --rasp-radius: 0; /* square corners — the screenshot is all sharp rectangles */
 }
 
 @theme inline {

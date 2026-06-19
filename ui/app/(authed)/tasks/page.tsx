@@ -265,7 +265,7 @@ function preStyle(color: string) {
     fontFamily: MONO,
     margin: '2px 0 0',
     padding: '6px 8px',
-    background: 'rgba(228,230,234,0.03)',
+    background: 'rgba(var(--rasp-fg-rgb),0.03)',
     border: `1px solid ${HAIR_SOFT}`,
     whiteSpace: 'pre-wrap' as const,
     wordBreak: 'break-word' as const,

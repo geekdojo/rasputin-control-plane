@@ -369,7 +369,7 @@ function DisabledPanel() {
       <pre
         style={{
           background: '#0a1322',
-          border: `1px solid rgba(228,230,234,0.18)`,
+          border: `1px solid rgba(var(--rasp-fg-rgb),0.18)`,
           padding: 10,
           margin: 0,
           color: FG,

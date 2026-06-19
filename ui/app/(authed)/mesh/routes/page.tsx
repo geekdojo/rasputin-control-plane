@@ -96,7 +96,7 @@ export default function RoutesPage() {
               return (
                 <tr
                   key={r.id}
-                  style={isEditing ? { background: 'rgba(228,230,234,0.04)' } : undefined}
+                  style={isEditing ? { background: 'rgba(var(--rasp-fg-rgb),0.04)' } : undefined}
                 >
                   <td style={{ ...tdStyle, color: nameColor }}>{r.name}</td>
                   <td style={{ ...tdStyle, color: cellColor }}>{spec.nodeId}</td>

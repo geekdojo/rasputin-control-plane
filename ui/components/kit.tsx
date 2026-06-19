@@ -12,11 +12,11 @@ import type { CSSProperties, ElementType, ReactNode } from 'react';
 import { useState } from 'react';
 import { ACCENT, accentA, MONO } from './ui-theme';
 
-export const PANEL = '#0d1829';
-export const HAIR = 'rgba(228,230,234,0.18)';
-export const HAIR_SOFT = 'rgba(228,230,234,0.1)';
-export const FG = '#e4e6ea';
-export const DIM = '#8a9bb5';
+export const PANEL = 'var(--rasp-panel)';
+export const HAIR = 'rgba(var(--rasp-fg-rgb),0.18)';
+export const HAIR_SOFT = 'rgba(var(--rasp-fg-rgb),0.1)';
+export const FG = 'var(--rasp-fg)';
+export const DIM = 'var(--rasp-dim)';
 
 export function PageShell({ children }: { children: ReactNode }) {
   return (
@@ -98,7 +98,7 @@ function Tab({ tab, active }: { tab: PageTab; active: boolean }) {
     fontSize: 10,
     fontFamily: MONO,
     letterSpacing: '0.1em',
-    background: hover && !active ? 'rgba(228,230,234,0.06)' : active ? accentA(0.06) : 'transparent',
+    background: hover && !active ? 'rgba(var(--rasp-fg-rgb),0.06)' : active ? accentA(0.06) : 'transparent',
     borderBottom: active ? `2px solid ${ACCENT}` : '2px solid transparent',
     textDecoration: 'none',
     cursor: 'pointer',
@@ -179,9 +179,9 @@ type BtnVariant = 'primary' | 'default' | 'danger' | 'ghost';
 
 const BTN_COLORS: Record<BtnVariant, { border: string; bg: string; hover: string; text: string }> = {
   primary: { border: accentA(0.35), bg: accentA(0.08), hover: accentA(0.16), text: ACCENT },
-  default: { border: 'rgba(228,230,234,0.22)', bg: 'rgba(228,230,234,0.04)', hover: 'rgba(228,230,234,0.1)', text: FG },
+  default: { border: 'rgba(var(--rasp-fg-rgb),0.22)', bg: 'rgba(var(--rasp-fg-rgb),0.04)', hover: 'rgba(var(--rasp-fg-rgb),0.1)', text: FG },
   danger: { border: 'rgba(248,113,113,0.45)', bg: 'rgba(248,113,113,0.07)', hover: 'rgba(248,113,113,0.15)', text: '#f87171' },
-  ghost: { border: 'transparent', bg: 'transparent', hover: 'rgba(228,230,234,0.06)', text: DIM },
+  ghost: { border: 'transparent', bg: 'transparent', hover: 'rgba(var(--rasp-fg-rgb),0.06)', text: DIM },
 };
 
 export function Btn({
@@ -345,7 +345,7 @@ export function Badge({ color = DIM, children }: { color?: string; children: Rea
 }
 
 export const fieldStyle: CSSProperties = {
-  background: '#111d30',
+  background: 'var(--rasp-field-bg)',
   border: `1px solid ${HAIR}`,
   color: FG,
   fontFamily: MONO,

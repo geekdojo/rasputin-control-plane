@@ -18,15 +18,20 @@
 // authed layout and wrap real chrome in zIndex:1 containers so it stays behind.
 
 import { useEffect, useRef } from 'react';
-
-const HUD_CYAN_PRIMARY = '0, 200, 255';
-const HUD_CYAN_MID = '0, 180, 255';
-const HUD_CYAN_PARTICLE = '0, 210, 255';
+import { useTheme } from '../lib/theme';
+import { THEME_HUD } from './ui-theme';
 
 export function HudBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const { theme } = useTheme();
 
   useEffect(() => {
+    // Canvas can't read --rasp-* CSS vars, so the HUD palette is keyed by
+    // theme name in JS. Default keeps the source cyans; cyberdeck swaps to
+    // amber so the grid/particles read as warm CRT phosphor.
+    const { primary: HUD_CYAN_PRIMARY, mid: HUD_CYAN_MID, particle: HUD_CYAN_PARTICLE } =
+      THEME_HUD[theme];
+
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -182,7 +187,7 @@ export function HudBackground() {
       cancelAnimationFrame(animFrame);
       window.removeEventListener('resize', resize);
     };
-  }, []);
+  }, [theme]); // restart the animation with the new palette when the theme changes
 
   return (
     <canvas

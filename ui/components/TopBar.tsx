@@ -81,8 +81,8 @@ export function TopBar({
   return (
     <header
       style={{
-        background: '#07101f',
-        borderBottom: '1px solid rgba(228,230,234,0.18)',
+        background: 'var(--rasp-bg)',
+        borderBottom: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
         display: 'flex',
         alignItems: 'center',
         height: 48,
@@ -100,7 +100,7 @@ export function TopBar({
           gap: 8,
           paddingRight: 20,
           marginRight: 8,
-          borderRight: '1px solid rgba(228,230,234,0.18)',
+          borderRight: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
           height: '100%',
         }}
       >
@@ -116,7 +116,7 @@ export function TopBar({
         />
         <span
           style={{
-            color: '#e4e6ea',
+            color: 'var(--rasp-fg)',
             letterSpacing: '0.1em',
             fontSize: 11,
             whiteSpace: 'nowrap',
@@ -132,12 +132,12 @@ export function TopBar({
           const Icon = s.icon;
           const inner = (
             <>
-              <Icon size={12} color="#8a9bb5" />
-              <span style={{ color: '#8a9bb5', fontSize: 10, letterSpacing: '0.08em' }}>
+              <Icon size={12} color="var(--rasp-dim)" />
+              <span style={{ color: 'var(--rasp-dim)', fontSize: 10, letterSpacing: '0.08em' }}>
                 {s.label}
               </span>
               <span
-                style={{ color: s.valueColor ?? '#e4e6ea', fontSize: 11, letterSpacing: '0.04em' }}
+                style={{ color: s.valueColor ?? 'var(--rasp-fg)', fontSize: 11, letterSpacing: '0.04em' }}
               >
                 {s.value}
               </span>
@@ -150,7 +150,7 @@ export function TopBar({
             paddingLeft: 16,
             paddingRight: 16,
             borderRight:
-              i < stats.length - 1 ? '1px solid rgba(228,230,234,0.12)' : 'none',
+              i < stats.length - 1 ? '1px solid rgba(var(--rasp-fg-rgb),0.12)' : 'none',
             flexShrink: 0,
             height: '100%',
             textDecoration: 'none',
@@ -184,7 +184,7 @@ export function TopBar({
       {/* Timestamp */}
       <span
         style={{
-          color: '#8a9bb5',
+          color: 'var(--rasp-dim)',
           fontSize: 10,
           letterSpacing: '0.06em',
           whiteSpace: 'nowrap',
@@ -203,13 +203,13 @@ export function TopBar({
             gap: 10,
             marginLeft: 16,
             paddingLeft: 16,
-            borderLeft: '1px solid rgba(228,230,234,0.18)',
+            borderLeft: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
             height: '100%',
           }}
         >
           <span
             style={{
-              color: '#8a9bb5',
+              color: 'var(--rasp-dim)',
               fontSize: 10,
               letterSpacing: '0.04em',
               whiteSpace: 'nowrap',
@@ -226,15 +226,15 @@ export function TopBar({
               gap: 5,
               padding: '4px 8px',
               background: 'transparent',
-              border: '1px solid rgba(228,230,234,0.18)',
-              color: '#8a9bb5',
+              border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
+              color: 'var(--rasp-dim)',
               fontSize: 9,
               fontFamily: MONO,
               letterSpacing: '0.08em',
               cursor: 'pointer',
             }}
           >
-            <LogOut size={11} color="#8a9bb5" />
+            <LogOut size={11} color="var(--rasp-dim)" />
             SIGN OUT
           </button>
         </div>

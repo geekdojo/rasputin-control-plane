@@ -40,7 +40,7 @@ const NAV: NavItem[] = [
 
 const BOTTOM: NavItem[] = [
   { icon: Bell, label: 'Alerts', href: '/alerts' },
-  { icon: Settings, label: 'Settings' },
+  { icon: Settings, label: 'Settings', href: '/settings' },
 ];
 
 function isActive(pathname: string, href?: string): boolean {
@@ -69,10 +69,10 @@ function NavButton({ item, active }: { item: NavItem; active: boolean }) {
     transition: 'background 0.15s, border-color 0.15s',
   } as const;
 
-  const color = active ? ACCENT : '#8a9bb5';
+  const color = active ? ACCENT : 'var(--rasp-dim)';
 
   const hoverOn = (el: HTMLElement) => {
-    if (!active) el.style.background = 'rgba(228,230,234,0.06)';
+    if (!active) el.style.background = 'rgba(var(--rasp-fg-rgb),0.06)';
   };
   const hoverOff = (el: HTMLElement) => {
     if (!active) el.style.background = 'transparent';
@@ -106,8 +106,8 @@ export function SideNav() {
     <nav
       style={{
         width: 48,
-        background: '#07101f',
-        borderRight: '1px solid rgba(228,230,234,0.18)',
+        background: 'var(--rasp-bg)',
+        borderRight: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',

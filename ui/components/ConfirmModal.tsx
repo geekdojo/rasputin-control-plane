@@ -34,8 +34,8 @@ export function ConfirmModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: '#0d1829',
-          border: '1px solid rgba(228,230,234,0.18)',
+          background: 'var(--rasp-panel)',
+          border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
           padding: '24px',
           width: 340,
           display: 'flex',
@@ -48,7 +48,7 @@ export function ConfirmModal({
             <AlertTriangle size={14} color={danger ? '#f87171' : '#facc15'} />
             <span
               style={{
-                color: '#e4e6ea',
+                color: 'var(--rasp-fg)',
                 fontSize: 11,
                 fontFamily: MONO,
                 letterSpacing: '0.1em',
@@ -61,15 +61,15 @@ export function ConfirmModal({
             onClick={onCancel}
             style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
           >
-            <X size={14} color="#8a9bb5" />
+            <X size={14} color="var(--rasp-dim)" />
           </button>
         </div>
 
-        <div style={{ height: 1, background: 'rgba(228,230,234,0.1)' }} />
+        <div style={{ height: 1, background: 'rgba(var(--rasp-fg-rgb),0.1)' }} />
 
         <p
           style={{
-            color: '#8a9bb5',
+            color: 'var(--rasp-dim)',
             fontSize: 11,
             fontFamily: MONO,
             lineHeight: 1.6,
@@ -85,8 +85,8 @@ export function ConfirmModal({
             style={{
               padding: '7px 16px',
               background: 'transparent',
-              border: '1px solid rgba(228,230,234,0.18)',
-              color: '#8a9bb5',
+              border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
+              color: 'var(--rasp-dim)',
               fontSize: 10,
               fontFamily: MONO,
               letterSpacing: '0.08em',

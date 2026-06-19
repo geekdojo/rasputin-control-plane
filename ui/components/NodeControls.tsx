@@ -54,7 +54,7 @@ function CtrlButton({
 }) {
   const [hovered, setHovered] = useState(false);
   const colors = {
-    default: { border: 'rgba(228,230,234,0.22)', bg: 'rgba(228,230,234,0.04)', hover: 'rgba(228,230,234,0.1)', text: '#e4e6ea' },
+    default: { border: 'rgba(var(--rasp-fg-rgb),0.22)', bg: 'rgba(var(--rasp-fg-rgb),0.04)', hover: 'rgba(var(--rasp-fg-rgb),0.1)', text: 'var(--rasp-fg)' },
     danger: { border: 'rgba(192,57,43,0.5)', bg: 'rgba(192,57,43,0.07)', hover: 'rgba(192,57,43,0.15)', text: '#f87171' },
     accent: { border: accentA(0.4), bg: accentA(0.07), hover: accentA(0.15), text: ACCENT },
   }[variant];
@@ -85,15 +85,15 @@ function CtrlButton({
   );
 }
 
-function StatBar({ label, value, color = '#e4e6ea' }: { label: string; value: number | null; color?: string }) {
+function StatBar({ label, value, color = 'var(--rasp-fg)' }: { label: string; value: number | null; color?: string }) {
   const pct = value == null ? 0 : Math.min(Math.max(value, 0), 100);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <span style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
-        <span style={{ color: '#e4e6ea', fontSize: 10, fontFamily: MONO }}>{value == null ? '—' : `${Math.round(value)}%`}</span>
+        <span style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
+        <span style={{ color: 'var(--rasp-fg)', fontSize: 10, fontFamily: MONO }}>{value == null ? '—' : `${Math.round(value)}%`}</span>
       </div>
-      <div style={{ height: 3, background: 'rgba(228,230,234,0.1)', width: '100%' }}>
+      <div style={{ height: 3, background: 'rgba(var(--rasp-fg-rgb),0.1)', width: '100%' }}>
         <div style={{ height: '100%', width: `${pct}%`, background: color, transition: 'width 0.3s' }} />
       </div>
     </div>
@@ -136,14 +136,14 @@ function PowerButton({ state, disabled, onClick }: { state: BMCPowerState; disab
 const sectionLabel = (text: string) => (
   <div
     style={{
-      color: '#8a9bb5',
+      color: 'var(--rasp-dim)',
       fontSize: 9,
       fontFamily: MONO,
       letterSpacing: '0.12em',
       marginBottom: 8,
       marginTop: 4,
       paddingBottom: 4,
-      borderBottom: '1px solid rgba(228,230,234,0.1)',
+      borderBottom: '1px solid rgba(var(--rasp-fg-rgb),0.1)',
     }}
   >
     {text}
@@ -219,7 +219,7 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
         <div style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <Layers size={13} color={ACCENT} />
-            <span style={{ color: '#e4e6ea', fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>NODE CONTROLS</span>
+            <span style={{ color: 'var(--rasp-fg)', fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>NODE CONTROLS</span>
             <button
               onClick={() => onNavigate('/apps')}
               disabled={!node}
@@ -249,7 +249,7 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
               {node.id.toUpperCase()}
             </div>
           ) : (
-            <div style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO }}>— select a node —</div>
+            <div style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO }}>— select a node —</div>
           )}
         </div>
 
@@ -265,10 +265,10 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
                 { label: 'OS IMAGE', value: node.imageVersion || '—' },
               ].map(({ label, value }) => (
                 <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                  <span style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
+                  <span style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
                   <span
                     style={{
-                      color: '#e4e6ea',
+                      color: 'var(--rasp-fg)',
                       fontSize: 10,
                       fontFamily: MONO,
                       textAlign: 'right',
@@ -362,7 +362,7 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
           <>
             {sectionLabel('DEPLOYED APPS')}
             {apps.length === 0 ? (
-              <span style={{ color: 'rgba(228,230,234,0.2)', fontSize: 10, fontFamily: MONO }}>— none —</span>
+              <span style={{ color: 'rgba(var(--rasp-fg-rgb),0.2)', fontSize: 10, fontFamily: MONO }}>— none —</span>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {apps.map((app) => (
@@ -373,15 +373,15 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
                       alignItems: 'center',
                       justifyContent: 'space-between',
                       padding: '5px 10px',
-                      background: 'rgba(228,230,234,0.03)',
-                      border: '1px solid rgba(228,230,234,0.1)',
+                      background: 'rgba(var(--rasp-fg-rgb),0.03)',
+                      border: '1px solid rgba(var(--rasp-fg-rgb),0.1)',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                       <div style={{ width: 4, height: 4, borderRadius: '50%', background: appStatusColor(app.lastStatus), flexShrink: 0 }} />
-                      <span style={{ color: '#e4e6ea', fontSize: 10, fontFamily: MONO }}>{app.name}</span>
+                      <span style={{ color: 'var(--rasp-fg)', fontSize: 10, fontFamily: MONO }}>{app.name}</span>
                     </div>
-                    <span style={{ color: '#8a9bb5', fontSize: 9, fontFamily: MONO }}>{app.lastStatus}</span>
+                    <span style={{ color: 'var(--rasp-dim)', fontSize: 9, fontFamily: MONO }}>{app.lastStatus}</span>
                   </div>
                 ))}
               </div>
@@ -475,8 +475,8 @@ function RemoveNodeModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: '#0d1829',
-          border: '1px solid rgba(228,230,234,0.18)',
+          background: 'var(--rasp-panel)',
+          border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
           padding: 24,
           width: 380,
           display: 'flex',
@@ -487,25 +487,25 @@ function RemoveNodeModal({
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <AlertTriangle size={14} color="#f87171" />
-            <span style={{ color: '#e4e6ea', fontSize: 11, fontFamily: MONO, letterSpacing: '0.1em' }}>
+            <span style={{ color: 'var(--rasp-fg)', fontSize: 11, fontFamily: MONO, letterSpacing: '0.1em' }}>
               REMOVE NODE
             </span>
           </div>
           <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-            <X size={14} color="#8a9bb5" />
+            <X size={14} color="var(--rasp-dim)" />
           </button>
         </div>
 
-        <div style={{ height: 1, background: 'rgba(228,230,234,0.1)' }} />
+        <div style={{ height: 1, background: 'rgba(var(--rasp-fg-rgb),0.1)' }} />
 
-        <p style={{ color: '#8a9bb5', fontSize: 11, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>
-          Permanently remove <span style={{ color: '#e4e6ea' }}>{node.id.toUpperCase()}</span> from inventory. Use this
+        <p style={{ color: 'var(--rasp-dim)', fontSize: 11, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>
+          Permanently remove <span style={{ color: 'var(--rasp-fg)' }}>{node.id.toUpperCase()}</span> from inventory. Use this
           when the hardware is gone or being repurposed — a re-registering agent will appear as a fresh node.
         </p>
 
         <div
           style={{
-            border: '1px solid rgba(228,230,234,0.1)',
+            border: '1px solid rgba(var(--rasp-fg-rgb),0.1)',
             padding: '10px 12px',
             display: 'flex',
             flexDirection: 'column',
@@ -514,18 +514,18 @@ function RemoveNodeModal({
         >
           <span
             style={{
-              color: '#8a9bb5',
+              color: 'var(--rasp-dim)',
               fontSize: 9,
               fontFamily: MONO,
               letterSpacing: '0.12em',
               paddingBottom: 4,
-              borderBottom: '1px solid rgba(228,230,234,0.08)',
+              borderBottom: '1px solid rgba(var(--rasp-fg-rgb),0.08)',
             }}
           >
             CASCADE
           </span>
           {!ready && !impactErr && (
-            <span style={{ color: 'rgba(228,230,234,0.4)', fontSize: 10, fontFamily: MONO }}>computing…</span>
+            <span style={{ color: 'rgba(var(--rasp-fg-rgb),0.4)', fontSize: 10, fontFamily: MONO }}>computing…</span>
           )}
           {impactErr && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{impactErr}</span>}
           {ready && (
@@ -549,8 +549,8 @@ function RemoveNodeModal({
             style={{
               padding: '7px 16px',
               background: 'transparent',
-              border: '1px solid rgba(228,230,234,0.18)',
-              color: '#8a9bb5',
+              border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
+              color: 'var(--rasp-dim)',
               fontSize: 10,
               fontFamily: MONO,
               letterSpacing: '0.08em',
@@ -585,8 +585,8 @@ function RemoveNodeModal({
 function ImpactRow({ label, value }: { label: string; value: string }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-      <span style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
-      <span style={{ color: '#e4e6ea', fontSize: 10, fontFamily: MONO, textAlign: 'right' }}>{value}</span>
+      <span style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
+      <span style={{ color: 'var(--rasp-fg)', fontSize: 10, fontFamily: MONO, textAlign: 'right' }}>{value}</span>
     </div>
   );
 }

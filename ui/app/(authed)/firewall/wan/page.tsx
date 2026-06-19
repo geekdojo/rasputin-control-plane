@@ -18,7 +18,7 @@ import {
   tdStyle,
   thStyle,
 } from '../../../../components/kit';
-import { MONO } from '../../../../components/ui-theme';
+import { ACCENT, MONO } from '../../../../components/ui-theme';
 
 export default function WANPage() {
   const [intents, setIntents] = useState<FirewallIntent[]>([]);
@@ -115,7 +115,7 @@ export default function WANPage() {
               return (
                 <tr
                   key={i.id}
-                  style={isEditing ? { background: 'rgba(228,230,234,0.04)' } : undefined}
+                  style={isEditing ? { background: 'rgba(var(--rasp-fg-rgb),0.04)' } : undefined}
                 >
                   <td style={{ ...tdStyle, color: nameColor }}>{i.name}</td>
                   <td style={{ ...tdStyle, color: cellColor }}>{spec.proto}</td>
@@ -296,7 +296,7 @@ function WANForm({
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            style={{ accentColor: '#fa3c04' }}
+            style={{ accentColor: ACCENT }}
           />
           active
         </label>

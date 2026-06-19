@@ -224,7 +224,7 @@ function LogRow({ entry }: { entry: LogEntry }) {
         gridTemplateColumns: '64px 140px 1fr',
         gap: 10,
         padding: '4px 10px',
-        borderBottom: '1px solid rgba(228,230,234,0.04)',
+        borderBottom: '1px solid rgba(var(--rasp-fg-rgb),0.04)',
         color: isErr ? '#f87171' : FG,
       }}
     >

@@ -34,10 +34,10 @@ export function Sparkline({
   fill,
   domainMax,
 }: SparklineProps) {
-  // FG (#e4e6ea) with alpha — matches kit.tsx's FG token without
+  // FG (var(--rasp-fg)) with alpha — matches kit.tsx's FG token without
   // re-importing it just to call rgba().
-  const stroke = color ?? 'rgba(228,230,234,0.9)';
-  const fillC = fill ?? 'rgba(228,230,234,0.13)';
+  const stroke = color ?? 'rgba(var(--rasp-fg-rgb),0.9)';
+  const fillC = fill ?? 'rgba(var(--rasp-fg-rgb),0.13)';
 
   if (values.length === 0) {
     return (
@@ -47,7 +47,7 @@ export function Sparkline({
           y1={height - 1}
           x2={width}
           y2={height - 1}
-          stroke="rgba(228,230,234,0.18)"
+          stroke="rgba(var(--rasp-fg-rgb),0.18)"
           strokeWidth={1}
           strokeDasharray="2 3"
         />

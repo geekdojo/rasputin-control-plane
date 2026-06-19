@@ -63,7 +63,7 @@ export default function LoginPage() {
     <div
       style={{
         minHeight: '100vh',
-        background: '#07101f',
+        background: 'var(--rasp-bg)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

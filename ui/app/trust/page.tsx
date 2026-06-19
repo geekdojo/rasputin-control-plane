@@ -35,7 +35,7 @@ export default function TrustPage() {
     <div
       style={{
         minHeight: '100vh',
-        background: '#07101f',
+        background: 'var(--rasp-bg)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -149,14 +149,14 @@ function LinkBtn({
     alignItems: 'center',
     gap: 6,
     padding: primary ? '8px 14px' : '6px 12px',
-    border: `1px solid ${primary ? accentA(0.35) : 'rgba(228,230,234,0.22)'}`,
+    border: `1px solid ${primary ? accentA(0.35) : 'rgba(var(--rasp-fg-rgb),0.22)'}`,
     background: hover
       ? primary
         ? accentA(0.16)
-        : 'rgba(228,230,234,0.1)'
+        : 'rgba(var(--rasp-fg-rgb),0.1)'
       : primary
         ? accentA(0.08)
-        : 'rgba(228,230,234,0.04)',
+        : 'rgba(var(--rasp-fg-rgb),0.04)',
     color: primary ? ACCENT : FG,
     fontSize: 10,
     fontFamily: MONO,

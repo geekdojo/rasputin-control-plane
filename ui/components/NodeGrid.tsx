@@ -89,11 +89,11 @@ function BayCell({ cx, cy }: Slot) {
       <polygon
         points={hexPoints(cx, cy, R)}
         fill="rgba(14,26,44,0.35)"
-        stroke="rgba(228,230,234,0.1)"
+        stroke="rgba(var(--rasp-fg-rgb),0.1)"
         strokeWidth={0.75}
         strokeDasharray="3 4"
       />
-      <circle cx={cx} cy={cy} r={2} fill="rgba(228,230,234,0.1)" />
+      <circle cx={cx} cy={cy} r={2} fill="rgba(var(--rasp-fg-rgb),0.1)" />
     </g>
   );
 }
@@ -118,9 +118,9 @@ function HexCell({
   const fillColor = selected
     ? accentA(0.13)
     : hovered
-      ? 'rgba(228,230,234,0.05)'
+      ? 'rgba(var(--rasp-fg-rgb),0.05)'
       : 'rgba(14,26,44,0.6)';
-  const strokeColor = selected ? ACCENT : 'rgba(228,230,234,0.18)';
+  const strokeColor = selected ? ACCENT : 'rgba(var(--rasp-fg-rgb),0.18)';
   const strokeW = selected ? 1.5 : 0.75;
 
   const cpuLabel =
@@ -160,7 +160,7 @@ function HexCell({
         cx={cx}
         cy={cy - 22}
         r={4}
-        fill={selected ? statusColor : 'rgba(228,230,234,0.18)'}
+        fill={selected ? statusColor : 'rgba(var(--rasp-fg-rgb),0.18)'}
         style={{ transition: 'fill 0.15s' }}
       />
       {selected && node.status !== 'offline' && (
@@ -171,7 +171,7 @@ function HexCell({
         x={cx}
         y={cy - 6}
         textAnchor="middle"
-        fill={selected ? '#e4e6ea' : 'rgba(228,230,234,0.4)'}
+        fill={selected ? 'var(--rasp-fg)' : 'rgba(var(--rasp-fg-rgb),0.4)'}
         fontSize={12}
         fontFamily={MONO}
         letterSpacing="0.06em"
@@ -184,7 +184,7 @@ function HexCell({
         x={cx}
         y={cy + 9}
         textAnchor="middle"
-        fill={selected ? '#8a9bb5' : 'rgba(138,155,181,0.3)'}
+        fill={selected ? 'var(--rasp-dim)' : 'rgba(138,155,181,0.3)'}
         fontSize={10}
         fontFamily={MONO}
         letterSpacing="0.04em"
@@ -197,7 +197,7 @@ function HexCell({
         x={cx}
         y={cy + 25}
         textAnchor="middle"
-        fill={selected ? statusColor : 'rgba(228,230,234,0.18)'}
+        fill={selected ? statusColor : 'rgba(var(--rasp-fg-rgb),0.18)'}
         fontSize={10}
         fontFamily={MONO}
         style={{ transition: 'fill 0.15s', userSelect: 'none' }}
@@ -243,7 +243,7 @@ export function NodeGrid({ nodes, selectedId, onSelect }: NodeGridProps) {
     <div
       style={{
         flex: '0 0 65%',
-        borderRight: '1px solid rgba(228,230,234,0.18)',
+        borderRight: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
@@ -253,8 +253,8 @@ export function NodeGrid({ nodes, selectedId, onSelect }: NodeGridProps) {
       }}
     >
       {nodes.length === 0 ? (
-        <p style={{ color: '#8a9bb5', fontSize: 12, fontFamily: MONO, textAlign: 'center', maxWidth: 420 }}>
-          no nodes registered yet — start <span style={{ color: '#e4e6ea' }}>rasputin-agent</span> and one
+        <p style={{ color: 'var(--rasp-dim)', fontSize: 12, fontFamily: MONO, textAlign: 'center', maxWidth: 420 }}>
+          no nodes registered yet — start <span style={{ color: 'var(--rasp-fg)' }}>rasputin-agent</span> and one
           should appear here within a second
         </p>
       ) : (
@@ -294,7 +294,7 @@ export function NodeGrid({ nodes, selectedId, onSelect }: NodeGridProps) {
               display: 'flex',
               gap: 18,
               marginTop: 20,
-              borderTop: '1px solid rgba(228,230,234,0.1)',
+              borderTop: '1px solid rgba(var(--rasp-fg-rgb),0.1)',
               paddingTop: 12,
               width: '100%',
               justifyContent: 'center',
@@ -306,7 +306,7 @@ export function NodeGrid({ nodes, selectedId, onSelect }: NodeGridProps) {
               { label: 'WARNING', color: STATUS_COLOR.warning, dashed: false },
               { label: 'UPDATING', color: STATUS_COLOR.updating, dashed: false },
               { label: 'OFFLINE', color: 'rgba(148,163,184,0.5)', dashed: false },
-              { label: 'OPEN BAY', color: 'rgba(228,230,234,0.25)', dashed: true },
+              { label: 'OPEN BAY', color: 'rgba(var(--rasp-fg-rgb),0.25)', dashed: true },
             ].map(({ label, color, dashed }) => (
               <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <div
@@ -318,7 +318,7 @@ export function NodeGrid({ nodes, selectedId, onSelect }: NodeGridProps) {
                     border: dashed ? `1px dashed ${color}` : 'none',
                   }}
                 />
-                <span style={{ color: '#8a9bb5', fontSize: 10, fontFamily: MONO, letterSpacing: '0.08em' }}>
+                <span style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, letterSpacing: '0.08em' }}>
                   {label}
                 </span>
               </div>

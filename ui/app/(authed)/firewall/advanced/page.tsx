@@ -50,9 +50,9 @@ export default function AdvancedPage() {
           onChange={(e) => setFirewallHost(e.target.value)}
           placeholder={nodeId ? `${nodeId}.lan` : 'firewall LAN IP or hostname'}
           style={{
-            background: '#111d30',
-            border: '1px solid rgba(228,230,234,0.18)',
-            color: '#e4e6ea',
+            background: 'var(--rasp-field-bg)',
+            border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
+            color: 'var(--rasp-fg)',
             fontFamily: MONO,
             fontSize: 11,
             padding: '7px 9px',

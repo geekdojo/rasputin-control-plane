@@ -23,8 +23,8 @@ import { MONO } from '../ui-theme';
 // Series color is FG-white (not the accent orange — too close to red
 // for a healthy chart). Accent stays reserved for hover/select/CTA
 // affordances. Mirrors the Sparkline default.
-const SERIES_LINE = 'rgba(228,230,234,0.95)';
-const SERIES_FILL = 'rgba(228,230,234,0.1)';
+const SERIES_LINE = 'rgba(var(--rasp-fg-rgb),0.95)';
+const SERIES_FILL = 'rgba(var(--rasp-fg-rgb),0.1)';
 
 interface ChartProps {
   title: string;
@@ -102,7 +102,7 @@ export function Chart({ title, unit, points, height = 200, domainMax }: ChartPro
           y1={yFor(tv)}
           x2={PAD_L + innerW}
           y2={yFor(tv)}
-          stroke="rgba(228,230,234,0.06)"
+          stroke="rgba(var(--rasp-fg-rgb),0.06)"
           strokeWidth={1}
         />
       ))}
