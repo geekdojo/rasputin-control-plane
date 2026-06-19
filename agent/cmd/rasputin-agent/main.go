@@ -33,7 +33,12 @@ import (
 // Architecture: projects/rasputin/design/control-plane/architecture.md
 //   in the geekdojo-wiki.
 
-const AgentVersion = "0.0.1-dev"
+// AgentVersion is the version the agent reports on registration/heartbeat
+// (surfaced as the node's control-plane software version). A var, not a const,
+// so the release build can stamp the real version via
+// `-ldflags -X main.AgentVersion=<version>` (build-release.sh). Unstamped
+// local/dev builds report this default.
+var AgentVersion = "0.0.1-dev"
 
 const heartbeatInterval = 10 * time.Second
 

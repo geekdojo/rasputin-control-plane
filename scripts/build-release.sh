@@ -56,8 +56,11 @@ echo ">> building web UI (next static export)"
 cp -R "$ROOT/ui/out" "$DIST/ui"
 
 # -trimpath for reproducibility; -s -w to strip debug info (smaller image).
-# -X stamps the version into the binary (the agent/api expose it as AgentVersion).
-LDFLAGS="-s -w"
+# -X stamps the version into the agent binary (reported as the node's
+# control-plane software version). main.AgentVersion must be a var, not a const,
+# for this to take — the api has no such symbol, so the flag is a harmless no-op
+# there.
+LDFLAGS="-s -w -X main.AgentVersion=$VERSION"
 
 sha256_of() {
 	if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';

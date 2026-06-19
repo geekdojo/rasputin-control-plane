@@ -56,6 +56,12 @@ jobs:
             V="${{ inputs.version }}"
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
+          # A semver pre-release (anything with a hyphen, e.g. 0.8.7-dev.1) maps
+          # to the dev channel + GitHub prerelease; a clean x.y.z is stable.
+          case "$V" in
+            *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT"; echo "channel=dev"    >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT"; echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
+          esac
           echo "Building version $V"
 
       - name: Build release artifacts
@@ -69,9 +75,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          PRERELEASE_FLAG=""
+          [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
           gh release create "${GITHUB_REF_NAME}" \
             --title "Rasputin control plane ${GITHUB_REF_NAME}" \
             --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64; the api tarball bundles the web UI). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
+            $PRERELEASE_FLAG \
             dist/*.tar.gz dist/*.sha256 dist/*.hash
 
       # Mirror an informational version manifest to the PUBLIC release channel
@@ -86,12 +95,16 @@ jobs:
           GH_TOKEN: ${{ secrets.RASPUTIN_RELEASES }}
         run: |
           set -eu
+          CHANNEL="${{ steps.ver.outputs.channel }}"
+          PRERELEASE_FLAG=""
+          [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
           mkdir -p relmirror
-          printf '{"version":"%s","channel":"stable","artifacts":[]}\n' "${GITHUB_REF_NAME}" > relmirror/manifest.json
+          printf '{"version":"%s","channel":"%s","artifacts":[]}\n' "${GITHUB_REF_NAME}" "$CHANNEL" > relmirror/manifest.json
           tag="cp-${GITHUB_REF_NAME}"
           gh release create "$tag" --repo geekdojo/rasputin-releases \
             --title "Rasputin control plane ${GITHUB_REF_NAME}" \
-            --notes "Informational version manifest. Control-plane software ships inside the OS image; update the OS to update it." \
+            --notes "Informational version manifest ($CHANNEL channel). Control-plane software ships inside the OS image; update the OS to update it." \
+            $PRERELEASE_FLAG \
             relmirror/manifest.json \
           || gh release upload "$tag" --repo geekdojo/rasputin-releases --clobber relmirror/manifest.json
 
