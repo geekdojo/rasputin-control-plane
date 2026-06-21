@@ -3,6 +3,8 @@ package updater
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -32,6 +34,13 @@ type RAUCBackend struct {
 	// the process-wide PATH.
 	binary string
 	muted  *atomic.Bool
+	// caBundlePath, when set, is a PEM file (the per-installation Mesh CA)
+	// added to the bundle-download client's trust pool on top of the system
+	// roots. The api serves /api/bundles/{sha} over its mesh-CA HTTPS leaf,
+	// and the agent process has no SSL_CERT_FILE, so without this the default
+	// client rejects that cert ("bad certificate") and the saga stalls before
+	// install. Wired from main.go via SetCABundle(tailscale.CABundlePath()).
+	caBundlePath string
 }
 
 // NewRAUCBackend constructs a RAUCBackend. Returns an error if the rauc
@@ -58,6 +67,31 @@ func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
 }
 
 func (r *RAUCBackend) SetMuteHook(b *atomic.Bool) { r.muted = b }
+
+// SetCABundle points the bundle-download HTTPS client at a CA bundle to trust
+// in addition to the system roots — the per-installation Mesh CA that signs
+// the api's leaf. Mirrors SetMuteHook (post-construction wiring).
+func (r *RAUCBackend) SetCABundle(path string) { r.caBundlePath = path }
+
+// httpClient returns the client used to pull bundles. Its root pool is the
+// system roots plus the Mesh CA at caBundlePath (when set + readable). Built
+// per call so a re-enrolled CA is picked up without restarting the agent; an
+// unreadable/empty path degrades to system roots only.
+func (r *RAUCBackend) httpClient() *http.Client {
+	if r.caBundlePath == "" {
+		return http.DefaultClient
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if pem, err := os.ReadFile(r.caBundlePath); err == nil {
+		pool.AppendCertsFromPEM(pem)
+	}
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}}
+}
 
 func (r *RAUCBackend) Name() string { return "rauc" }
 
@@ -129,7 +163,7 @@ func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, expectedSHA s
 	if err != nil {
 		return "", "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.httpClient().Do(req)
 	if err != nil {
 		return "", "", err
 	}

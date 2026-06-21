@@ -225,6 +225,9 @@ func main() {
 				log.Fatalf("rasputin-agent: rauc backend: %v", err)
 			}
 			rb.SetMuteHook(system.MutedAtomic())
+			// Trust the Mesh CA when pulling bundles — the api serves them
+			// over its mesh-CA HTTPS leaf, which the system roots don't cover.
+			rb.SetCABundle(tailscale.CABundlePath())
 			upBackend = rb
 		case "mock":
 			mb, err := updater.NewMockBackend(updaterDir)

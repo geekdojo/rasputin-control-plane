@@ -28,6 +28,14 @@ func caBundlePath() string {
 	return defaultCABundlePath
 }
 
+// CABundlePath is the exported accessor for the resolved Mesh CA bundle path
+// (env override RASPUTIN_MESH_CA_BUNDLE, else the per-image default). The
+// updater's bundle-download HTTPS client uses it to trust the api's mesh-CA
+// leaf — the api serves /api/bundles/{sha} over the mesh-CA HTTPS listener,
+// and the agent's process (unlike tailscaled's) has no SSL_CERT_FILE, so its
+// default client would otherwise reject that cert.
+func CABundlePath() string { return caBundlePath() }
+
 // installMeshCA writes the Mesh CA PEM to path, atomically, and reports
 // whether the on-disk content actually changed. Idempotent: a re-enroll with
 // the same CA is a no-op (changed=false), so the caller skips the tailscaled
