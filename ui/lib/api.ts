@@ -1,6 +1,8 @@
 import type {
   Alert,
   App,
+  BusTokenInfo,
+  MintedBusToken,
   AppChangeEvent,
   BMCChangeEvent,
   BMCPowerVerb,
@@ -131,6 +133,39 @@ export function openInventoryWS(
   onEvent: (ev: InventoryChangeEvent) => void,
 ): () => void {
   return openWS<InventoryChangeEvent>('/ws/inventory', onEvent);
+}
+
+// ----- Bus join tokens (node enrollment) ---------------------------------
+
+// listBusTokens returns the secret-free token ledger. The node screen uses it
+// to surface pending enrollments — bound, unrevoked tokens whose node hasn't
+// come online yet.
+export async function listBusTokens(): Promise<BusTokenInfo[]> {
+  return (await jsonFetch<BusTokenInfo[] | null>('/api/bus/tokens')) ?? [];
+}
+
+// mintBusToken mints a join token bound to nodeId and returns the plaintext
+// ONCE. The operator seeds it into the new node's enrollment file; it's
+// unrecoverable afterward. Registers the binding in the live controlplane
+// immediately — the node is accepted the moment it boots, no restart.
+export function mintBusToken(label: string, nodeId: string): Promise<MintedBusToken> {
+  return jsonFetch<MintedBusToken>('/api/bus/tokens', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label, nodeId }),
+  });
+}
+
+// revokeBusToken cancels a token by id — used to cancel a pending enrollment
+// that was never finished. DELETE returns 204 with no body.
+export async function revokeBusToken(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/bus/tokens/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`revokeBusToken → ${res.status}`);
+  }
 }
 
 // ----- Alerts -------------------------------------------------------------

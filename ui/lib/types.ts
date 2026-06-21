@@ -74,6 +74,32 @@ export interface InventoryChangeEvent {
   ts: string;
 }
 
+// ----- Bus join tokens (node enrollment) ---------------------------------
+
+// BusTokenInfo is the secret-free view of a bus join token (GET /api/bus/tokens
+// — no plaintext, ever). A token bound to a node id (nodeId set) that is not
+// revoked and whose node hasn't registered in inventory yet is a *pending
+// enrollment* — the new node has been issued a credential but hasn't booted and
+// joined. id is the token_hash, the stable handle for revoke.
+export interface BusTokenInfo {
+  id: string;
+  label: string;
+  nodeId?: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+}
+
+// MintedBusToken is the one-shot reply from POST /api/bus/tokens. token is the
+// plaintext join credential — shown once and unrecoverable afterward (same
+// model as mesh pre-auth keys). It goes into the new node's enrollment seed.
+export interface MintedBusToken {
+  id: string;
+  label: string;
+  nodeId: string;
+  token: string;
+}
+
 export type FirewallIntentKind = 'port_forward' | 'firewall_rule' | 'wan_config';
 export type PortForwardProto = 'tcp' | 'udp' | 'tcpudp';
 

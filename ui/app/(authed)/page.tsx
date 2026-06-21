@@ -2,10 +2,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { listApps, listNodes, getMetrics, openInventoryWS } from '../../lib/api';
-import type { App, InventoryChangeEvent, Node, NodeRole, NodeStatus } from '../../lib/types';
-import { NodeGrid, type NodeView } from '../../components/NodeGrid';
+import { listApps, listBusTokens, listNodes, getMetrics, openInventoryWS, revokeBusToken } from '../../lib/api';
+import type { App, BusTokenInfo, InventoryChangeEvent, Node, NodeRole, NodeStatus } from '../../lib/types';
+import { NodeGrid, type NodeView, type PendingView } from '../../components/NodeGrid';
 import { NodeControls } from '../../components/NodeControls';
+import { AddNodeWizard } from '../../components/AddNodeWizard';
+import { ConfirmModal } from '../../components/ConfirmModal';
+import { clusterPrefixOf } from '../../lib/enroll';
 import type { NodeViewStatus } from '../../components/ui-theme';
 
 interface Util {
@@ -37,6 +40,10 @@ export default function NodesPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [util, setUtil] = useState<Record<string, Util>>({});
   const [apps, setApps] = useState<App[]>([]);
+  const [busTokens, setBusTokens] = useState<BusTokenInfo[]>([]);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [cancelTarget, setCancelTarget] = useState<PendingView | null>(null);
+  const [cancelErr, setCancelErr] = useState<string | null>(null);
 
   // Live node inventory + 15s backstop poll (transitions arrive via WS, but a
   // steadily-online node needs the poll to refresh lastSeen-derived state).
@@ -99,6 +106,14 @@ export default function NodesPage() {
     return () => clearInterval(t);
   }, []);
 
+  // Bus join tokens — drives the pending-enrollment bays. A bound, unrevoked
+  // token whose node hasn't registered yet is a node mid-enrollment.
+  useEffect(() => {
+    listBusTokens().then(setBusTokens).catch(() => {});
+    const t = setInterval(() => listBusTokens().then(setBusTokens).catch(() => {}), 15_000);
+    return () => clearInterval(t);
+  }, []);
+
   const views: NodeView[] = useMemo(
     () =>
       nodes.map((n) => ({
@@ -111,6 +126,28 @@ export default function NodesPage() {
     [nodes, util],
   );
 
+  // Pending enrollments: bound, unrevoked tokens whose node isn't in inventory
+  // yet. Once the node registers it drops out of this list and becomes a live
+  // hex — the come-online confirmation happens in the grid itself.
+  const nodeIds = useMemo(() => new Set(nodes.map((n) => n.id)), [nodes]);
+  const pending: PendingView[] = useMemo(
+    () =>
+      busTokens
+        .filter((t) => t.nodeId && !t.revokedAt && !nodeIds.has(t.nodeId))
+        .map((t) => ({
+          id: t.nodeId as string,
+          tokenId: t.id,
+          role: ROLE_SHORT[t.label as NodeRole] ?? t.label,
+        })),
+    [busTokens, nodeIds],
+  );
+
+  const clusterPrefix = useMemo(() => clusterPrefixOf(nodes.map((n) => n.id)), [nodes]);
+  const takenIds = useMemo(
+    () => new Set<string>([...nodes.map((n) => n.id), ...pending.map((p) => p.id)]),
+    [nodes, pending],
+  );
+
   const selectedNode = nodes.find((n) => n.id === selectedId) ?? null;
   const selectedUtil = selectedId ? util[selectedId] : undefined;
   const selectedApps = selectedId ? apps.filter((a) => a.targetNode === selectedId) : [];
@@ -119,8 +156,14 @@ export default function NodesPage() {
     <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
       <NodeGrid
         nodes={views}
+        pending={pending}
         selectedId={selectedId}
         onSelect={(id) => setSelectedId((prev) => (prev === id ? null : id))}
+        onAddNode={() => setWizardOpen(true)}
+        onCancelPending={(p) => {
+          setCancelErr(null);
+          setCancelTarget(p);
+        }}
       />
       <div style={{ flex: 1, overflowY: 'auto' }}>
         <NodeControls
@@ -135,6 +178,45 @@ export default function NodesPage() {
           }}
         />
       </div>
+
+      {wizardOpen && (
+        <AddNodeWizard
+          clusterPrefix={clusterPrefix}
+          taken={takenIds}
+          onClose={() => setWizardOpen(false)}
+          onMinted={({ id, tokenId, role }) => {
+            // Optimistically show the pending bay; the 15s poll reconciles.
+            setBusTokens((prev) => [
+              ...prev,
+              { id: tokenId, label: role, nodeId: id, createdAt: new Date().toISOString() },
+            ]);
+          }}
+        />
+      )}
+
+      {cancelTarget && (
+        <ConfirmModal
+          title="CANCEL ENROLLMENT"
+          message={
+            cancelErr
+              ? `Couldn't cancel: ${cancelErr}`
+              : `Cancel the pending enrollment for ${cancelTarget.id.toUpperCase()}? Its enrollment file stops working — if you've already flashed the node, it won't be able to join.`
+          }
+          confirmLabel="CANCEL ENROLLMENT"
+          danger
+          onCancel={() => setCancelTarget(null)}
+          onConfirm={() => {
+            const { tokenId, id } = cancelTarget;
+            revokeBusToken(tokenId)
+              .then(() => {
+                setBusTokens((prev) => prev.filter((t) => t.id !== tokenId));
+                setCancelTarget(null);
+              })
+              .catch((e) => setCancelErr(String(e)));
+            void id;
+          }}
+        />
+      )}
     </div>
   );
 }
