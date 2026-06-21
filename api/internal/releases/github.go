@@ -39,6 +39,21 @@ func NewGithubPublicSource(apiBase, repo string) Source {
 	}
 }
 
+// httpError is returned when the release API or an asset host answers with a
+// non-200 status. It carries the status code so callers (friendlyFetchError)
+// can classify rate-limiting vs. server errors without string-matching. Its
+// Error() string is unchanged from the previous inline fmt.Errorf, so logs and
+// other callers see the same text.
+type httpError struct {
+	status int
+	url    string
+	body   string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("GET %s: status %d: %s", e.url, e.status, e.body)
+}
+
 // ghRelease is the subset of the GitHub Releases API we read.
 type ghRelease struct {
 	TagName    string `json:"tag_name"`
@@ -144,7 +159,7 @@ func (g *githubPublicSource) getJSON(ctx context.Context, url string, out any) e
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("GET %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
+		return &httpError{status: resp.StatusCode, url: url, body: strings.TrimSpace(string(body))}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

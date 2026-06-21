@@ -2,6 +2,7 @@ package releases
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -77,7 +78,11 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 
 	info, err := src.LatestFor(ctx, comp, channel)
 	if err != nil {
-		cs.Status, cs.Error = StatusUnknown, err.Error()
+		// The raw error can name internal hosts, the upstream resolver IP, and
+		// Go net internals — log it for operators, but show the UI a short,
+		// vendor-neutral, actionable message instead.
+		log.Printf("releases: check %s on channel %q: %v", comp.ID, channel, err)
+		cs.Status, cs.Error = StatusUnknown, friendlyFetchError(err)
 		return cs
 	}
 	if info == nil {
