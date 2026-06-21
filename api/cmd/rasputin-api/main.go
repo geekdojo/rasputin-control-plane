@@ -357,10 +357,17 @@ func main() {
 	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
 
 	// Abort any jobs left in-flight from a previous run before we expose
-	// HTTP. v0 policy is honest-failure, not resume — see saga.go.
+	// HTTP. v0 policy is honest-failure, not resume — see saga.go — EXCEPT a
+	// control-plane self-update, which intentionally reboots the api mid-saga:
+	// the decider defers it so ResumeSelfUpdates can finish it on the new slot.
+	runner.SetRecoverDecider(updater.SelfUpdateRecoverDecider(selfNodeID))
 	if err := runner.Recover(ctx); err != nil {
 		log.Fatalf("rasputin-api: recover in-flight jobs: %v", err)
 	}
+	// Finish any self-update that rebooted us onto the new slot (no-op when
+	// there isn't one). Non-blocking — reconciles in the background once the
+	// co-located agent reconnects.
+	updater.ResumeSelfUpdates(ctx, updaterStore, jobStore, runner, busSrv.Conn(), selfNodeID)
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn())
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent

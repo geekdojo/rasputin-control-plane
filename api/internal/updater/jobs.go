@@ -328,42 +328,12 @@ func updateWaitOnlineAndVerifySlot(store *Store) jobs.DoFn {
 			return nil, fmt.Errorf("waiting for re-register: %w", sc.Ctx.Err())
 		}
 
-		// Read the active slot the agent now reports. We could parse the
-		// metadata from the registration event, but the source of truth is
-		// the precheck — re-issue it.
-		preMsg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.UpdatePrecheckSubject(spec.NodeID), mustJSON(proto.UpdatePrecheckCmd{}))
-		if err != nil {
-			return nil, fmt.Errorf("post-reboot precheck: %w", err)
+		// Precheck the booted slot vs the target (shared with the self-update
+		// reconciler — see selfupdate.go). Records + publishes a rollback on a
+		// slot mismatch.
+		if _, err := verifyBootedSlot(sc.Ctx, sc.NATS, store, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log); err != nil {
+			return nil, err
 		}
-		var pre proto.UpdatePrecheckAck
-		_ = json.Unmarshal(preMsg.Data, &pre)
-
-		// Compare with what we expected.
-		expected, err := store.GetNodeUpdate(sc.Ctx, sc.JobID)
-		if err != nil || expected == nil {
-			return nil, errors.New("update row missing at verify time")
-		}
-
-		if pre.ActiveSlot != expected.ToSlot {
-			// The bootloader rolled us back. Record + publish.
-			now := time.Now().UTC()
-			_ = store.UpdateNodeUpdate(sc.Ctx, sc.JobID, NodeUpdateRolledBack,
-				pre.ActiveSlot, pre.CurrentVersion, "bootloader rolled back to previous slot", now)
-			publishChange(sc.NATS, proto.UpdateChangeEvt{
-				NodeID:   spec.NodeID,
-				JobID:    sc.JobID,
-				BundleID: spec.BundleSHA256,
-				Change:   proto.UpdateRolledBack,
-				FromSlot: expected.ToSlot,
-				ToSlot:   pre.ActiveSlot,
-				Version:  pre.CurrentVersion,
-				Reason:   "bootloader watchdog or post-install init failure",
-				Ts:       now,
-			})
-			return nil, fmt.Errorf("bootloader_rolled_back: came up on slot %s, expected %s",
-				pre.ActiveSlot, expected.ToSlot)
-		}
-		sc.Log("info", fmt.Sprintf("node up on slot %s (version %s)", pre.ActiveSlot, pre.CurrentVersion))
 		return regBytes, nil
 	}
 }
@@ -376,60 +346,9 @@ func updateHealthCheckAndCommit(store *Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		// Health check via diag.ping.
-		pingCmd, _ := json.Marshal(proto.DiagPingCmd{JobID: sc.JobID})
-		if _, err := sc.NATS.RequestWithContext(sc.Ctx, proto.NodeCmdSubject(spec.NodeID, "diag.ping"), pingCmd); err != nil {
-			// Mark bad → agent reboots to old slot.
-			sc.Log("warn", "health check failed; sending mark-bad")
-			bad, _ := json.Marshal(proto.UpdateMarkBadCmd{BundleID: spec.BundleSHA256, Reason: err.Error()})
-			_, _ = sc.NATS.RequestWithContext(sc.Ctx, proto.UpdateMarkBadSubject(spec.NodeID), bad)
-
-			now := time.Now().UTC()
-			_ = store.UpdateNodeUpdate(sc.Ctx, sc.JobID, NodeUpdateRolledBack,
-				proto.SlotUnknown, "", "health check failed: "+err.Error(), now)
-			publishChange(sc.NATS, proto.UpdateChangeEvt{
-				NodeID:   spec.NodeID,
-				JobID:    sc.JobID,
-				BundleID: spec.BundleSHA256,
-				Change:   proto.UpdateRolledBack,
-				Reason:   "post-reboot health check failed",
-				Ts:       now,
-			})
-			return nil, fmt.Errorf("health check failed, mark-bad sent: %w", err)
-		}
-		// Mark good → bootloader committed.
-		good, _ := json.Marshal(proto.UpdateMarkGoodCmd{BundleID: spec.BundleSHA256})
-		gm, err := sc.NATS.RequestWithContext(sc.Ctx, proto.UpdateMarkGoodSubject(spec.NodeID), good)
-		if err != nil {
-			return nil, fmt.Errorf("mark-good rpc: %w", err)
-		}
-		var ack proto.UpdateMarkGoodAck
-		_ = json.Unmarshal(gm.Data, &ack)
-		if !ack.OK {
-			return nil, fmt.Errorf("mark-good rejected: %s", ack.Detail)
-		}
-
-		// Record commit.
-		row, _ := store.GetNodeUpdate(sc.Ctx, sc.JobID)
-		now := time.Now().UTC()
-		toSlot := proto.SlotUnknown
-		toVersion := ""
-		if row != nil {
-			toSlot = row.ToSlot
-			toVersion = row.ToVersion
-		}
-		_ = store.UpdateNodeUpdate(sc.Ctx, sc.JobID, NodeUpdateCommitted, toSlot, toVersion, "", now)
-		publishChange(sc.NATS, proto.UpdateChangeEvt{
-			NodeID:   spec.NodeID,
-			JobID:    sc.JobID,
-			BundleID: spec.BundleSHA256,
-			Change:   proto.UpdateCommitted,
-			ToSlot:   toSlot,
-			Version:  toVersion,
-			Ts:       now,
-		})
-		sc.Log("info", "update committed")
-		return json.Marshal(ack)
+		// diag.ping → mark-good (commit) or mark-bad (rollback). Shared with
+		// the self-update reconciler (selfupdate.go).
+		return healthCheckAndCommit(sc.Ctx, sc.NATS, store, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
 	}
 }
 

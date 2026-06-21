@@ -65,7 +65,26 @@ type Runner struct {
 	// in production while letting tests inject a near-zero delay so
 	// "step succeeds on retry" cases don't pay a real second per attempt.
 	backoff func(attempt int) time.Duration
+	// recoverDecider, when set, is consulted per in-flight job during Recover.
+	// Returning RecoverDefer leaves the job *running* instead of failing it —
+	// for workflows whose completion intentionally spans the api's own restart
+	// (the control-plane self-update reboots the api mid-saga; a separate
+	// resume handler finishes the job). Default (nil) = fail everything, the
+	// v0 "abort, not resume" policy. See architecture O-8.
+	recoverDecider func(j *Job, steps []*JobStep) RecoverDecision
 }
+
+// RecoverDecision is what to do with an in-flight job found at startup.
+type RecoverDecision int
+
+const (
+	// RecoverFail marks the job failed ("control plane restarted mid-job") —
+	// the default, v0 abort-not-resume behavior.
+	RecoverFail RecoverDecision = iota
+	// RecoverDefer leaves the job running for a separate resume handler that
+	// owns its completion (e.g. the self-update reconciler).
+	RecoverDefer
+)
 
 // DefaultBackoff is the production retry-delay schedule: N seconds before
 // retry N. Exported so callers / tests can wrap it.
@@ -91,6 +110,13 @@ func (r *Runner) SetBackoff(fn func(attempt int) time.Duration) {
 		fn = DefaultBackoff
 	}
 	r.backoff = fn
+}
+
+// SetRecoverDecider installs a policy consulted for each in-flight job during
+// Recover (see RecoverDecision). nil restores the default fail-everything
+// behavior. Set before Recover runs.
+func (r *Runner) SetRecoverDecider(fn func(j *Job, steps []*JobStep) RecoverDecision) {
+	r.recoverDecider = fn
 }
 
 // Register adds a Workflow to the runner's registry. Calling Register after
@@ -163,6 +189,13 @@ func (r *Runner) Recover(ctx context.Context) error {
 	}
 	const msg = "control plane restarted mid-job"
 	for _, j := range inFlight {
+		if r.recoverDecider != nil {
+			steps, _ := r.store.ListSteps(ctx, j.ID)
+			if r.recoverDecider(j, steps) == RecoverDefer {
+				log.Printf("jobs: recover %s [%s]: deferred to a resume handler (left running)", j.ID, j.Kind)
+				continue
+			}
+		}
 		now := time.Now().UTC()
 		if err := r.store.MarkJobFailed(ctx, j.ID, msg, now); err != nil {
 			log.Printf("jobs: recover %s: %v", j.ID, err)
@@ -181,6 +214,21 @@ func (r *Runner) Recover(ctx context.Context) error {
 		log.Printf("jobs: recovered (failed) %s [%s]", j.ID, j.Kind)
 	}
 	return nil
+}
+
+// FinishDeferred terminally completes a job that Recover left running
+// (RecoverDefer) once a resume handler has driven it to an outcome. Marks the
+// job succeeded/failed and emits the matching job event so the UI updates live,
+// exactly as a normally-run job would. errMsg is ignored on success.
+func (r *Runner) FinishDeferred(ctx context.Context, jobID string, success bool, errMsg string) {
+	now := time.Now().UTC()
+	if success {
+		_ = r.store.MarkJobSucceeded(ctx, jobID, now)
+		r.emit(ctx, jobID, proto.JobSucceeded, nil)
+		return
+	}
+	_ = r.store.MarkJobFailed(ctx, jobID, errMsg, now)
+	r.emit(ctx, jobID, proto.JobFailed, map[string]string{"error": errMsg})
 }
 
 func (r *Runner) run(j *Job, wf Workflow) {
