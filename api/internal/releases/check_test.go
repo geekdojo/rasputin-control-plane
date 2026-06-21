@@ -58,7 +58,6 @@ func TestCheck(t *testing.T) {
 	src := &fakeSource{rel: map[string]*ReleaseInfo{
 		"os": osRelease("2026.06.0-dev.24"), // newer than installed dev.20
 		"fw": fwRelease("2026.07.1-dev.15"), // newer than installed 2026.07.0
-		"cp": {Component: "cp", Version: "v0.8.5", Manifest: Manifest{Version: "v0.8.5"}},
 	}}
 
 	got := byComponent(Check(context.Background(), src, "dev", nodes))
@@ -85,33 +84,33 @@ func TestCheck(t *testing.T) {
 		t.Errorf("fw should not expose a bundle sha")
 	}
 
-	cp := got["cp"]
-	if cp.Status != StatusUpdateAvailable || cp.Deployable {
-		t.Errorf("cp = %+v, want informational update_available, not deployable", cp)
+	// The control-plane software is not a standalone row — it's folded into the
+	// OS row as a display-only bundled detail (it ships inside the OS image).
+	if _, ok := got["cp"]; ok {
+		t.Errorf("cp should not be a standalone update row")
+	}
+	if len(os.Bundled) != 1 || os.Bundled[0].Version != "v0.8.4" || os.Bundled[0].Label != "Control-plane software" {
+		t.Errorf("os.Bundled = %+v, want control-plane v0.8.4 (the controlplane node's agent version)", os.Bundled)
 	}
 }
 
-// Regression: the cp line ships -dev.N pre-releases, and the installed agent
-// version has no "v" prefix while the release tag does. The semver scheme must
-// compare the -dev.N suffix (not collapse dev.1 and dev.2 to the same 0.8.7 and
-// report "up to date").
-func TestCheckControlPlaneDevPrerelease(t *testing.T) {
+// The control-plane version is folded into the OS row from the controlplane
+// node's reported agent version, regardless of its format (a -dev.N pre-release
+// here) — it's display-only, never compared or shown as its own status.
+func TestCheckFoldsControlPlaneVersion(t *testing.T) {
 	nodes := []*proto.Node{
-		{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.28", AgentVersion: "0.8.7-dev.1"},
+		{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.28", AgentVersion: "0.8.7-dev.3"},
 	}
 	src := &fakeSource{rel: map[string]*ReleaseInfo{
-		"cp": {Component: "cp", Version: "v0.8.7-dev.2", Manifest: Manifest{Version: "v0.8.7-dev.2"}},
+		"os": osRelease("2026.06.0-dev.28"), // OS up to date
 	}}
-	cp := byComponent(Check(context.Background(), src, "dev", nodes))["cp"]
-	if cp.Status != StatusUpdateAvailable {
-		t.Errorf("cp status = %q, want update_available (dev.1 installed, dev.2 available)", cp.Status)
+	got := byComponent(Check(context.Background(), src, "dev", nodes))
+	if _, ok := got["cp"]; ok {
+		t.Fatalf("cp should not be a standalone row")
 	}
-
-	// Same dev build → up to date.
-	src.rel["cp"] = &ReleaseInfo{Component: "cp", Version: "v0.8.7-dev.1", Manifest: Manifest{Version: "v0.8.7-dev.1"}}
-	cp = byComponent(Check(context.Background(), src, "dev", nodes))["cp"]
-	if cp.Status != StatusUpToDate {
-		t.Errorf("cp status = %q, want up_to_date (dev.1 == dev.1)", cp.Status)
+	os := got["os"]
+	if len(os.Bundled) != 1 || os.Bundled[0].Version != "0.8.7-dev.3" {
+		t.Errorf("os.Bundled = %+v, want control-plane 0.8.7-dev.3 folded in", os.Bundled)
 	}
 }
 
@@ -123,7 +122,6 @@ func TestCheckUpToDateAndNoFirewall(t *testing.T) {
 	src := &fakeSource{rel: map[string]*ReleaseInfo{
 		"os": osRelease("2026.06.0-dev.24"), // same as installed
 		"fw": fwRelease("2026.07.1-dev.15"),
-		"cp": {Component: "cp", Version: "v0.8.5", Manifest: Manifest{Version: "v0.8.5"}},
 	}}
 
 	got := byComponent(Check(context.Background(), src, "dev", nodes))

@@ -38,12 +38,26 @@ type ComponentStatus struct {
 	Staged bool `json:"staged,omitempty"`
 
 	// Display-only components (firewall) carry a neutral instruction + the
-	// image asset name to copy; informational components (cp) carry a note.
+	// image asset name to copy.
 	ManualInstructions string `json:"manualInstructions,omitempty"`
 	Note               string `json:"note,omitempty"`
 
+	// Bundled lists software that ships *inside* this component's image rather
+	// than as its own updatable component — e.g. the control-plane binary
+	// inside the OS. Display-only: a detail line on the row, never its own
+	// update status. Populated by Check for the OS row.
+	Bundled []BundledComponent `json:"bundled,omitempty"`
+
 	// Diagnostic detail when Status == unknown.
 	Error string `json:"error,omitempty"`
+}
+
+// BundledComponent is a piece of software carried inside another component's
+// image, surfaced for visibility (support/debugging) without implying it can
+// be updated on its own.
+type BundledComponent struct {
+	Label   string `json:"label"`
+	Version string `json:"version"`
 }
 
 // CheckResult is the full report returned to the UI.
@@ -54,7 +68,10 @@ type CheckResult struct {
 }
 
 const firewallManualNote = "Automated firewall updates aren't available yet. Download the firewall image below and apply it from the firewall's recovery console, then re-run setup."
-const cpShipsInOSNote = "Control-plane software ships inside the OS image — update the OS to update it."
+
+// controlPlaneLabel names the control-plane software where it's folded into the
+// OS row's bundled detail.
+const controlPlaneLabel = "Control-plane software"
 
 // Check fetches the latest release for every registered component on the
 // given channel and compares it against the installed version reported by the
@@ -66,7 +83,31 @@ func Check(ctx context.Context, src Source, channel string, nodes []*proto.Node)
 	for _, comp := range Components {
 		res.Components = append(res.Components, checkOne(ctx, src, channel, comp, nodes))
 	}
+	// Fold the running control-plane version into the OS row as a display-only
+	// detail — the cp software ships inside the OS image, so it has no update
+	// path of its own. Shown for support visibility, never as a status row.
+	if cp := controlPlaneVersion(nodes); cp != "" {
+		for i := range res.Components {
+			if res.Components[i].Component == "os" {
+				res.Components[i].Bundled = append(res.Components[i].Bundled,
+					BundledComponent{Label: controlPlaneLabel, Version: cp})
+				break
+			}
+		}
+	}
 	return res
+}
+
+// controlPlaneVersion returns the control-plane software version reported by
+// the controlplane node (its agent version), or "" if no controlplane node has
+// reported yet.
+func controlPlaneVersion(nodes []*proto.Node) string {
+	for _, n := range nodes {
+		if n.Role == proto.RoleControlPlane {
+			return n.AgentVersion
+		}
+	}
+	return ""
 }
 
 func checkOne(ctx context.Context, src Source, channel string, comp Component, nodes []*proto.Node) ComponentStatus {
@@ -103,11 +144,6 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 		cs.Status = StatusUpToDate
 	}
 
-	// Informational components (cp) carry their note regardless of whether the
-	// release ships a hardware artifact (it ships only a version manifest).
-	if comp.Kind == KindInfo {
-		cs.Note = cpShipsInOSNote
-	}
 	// Attach deploy/display metadata from the matching artifact.
 	if art, ok := info.Artifact(comp.Compatible); ok {
 		cs.SignedBy = art.SignedBy

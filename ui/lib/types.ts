@@ -278,6 +278,10 @@ export interface ComponentUpdate {
   staged?: boolean;
   manualInstructions?: string;
   note?: string;
+  // Software that ships inside this component's image (e.g. the control-plane
+  // binary inside the OS) — shown as a display-only detail line, never with its
+  // own update status.
+  bundled?: { label: string; version: string }[];
   error?: string;
 }
 

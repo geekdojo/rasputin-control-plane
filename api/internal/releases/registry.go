@@ -14,9 +14,6 @@ const (
 	// "automated firewall push" item), so we surface the available version
 	// and manual instructions instead of a deploy button.
 	KindSysupgrade Kind = "sysupgrade"
-	// KindInfo is informational only: a version we display but never deploy
-	// directly (it ships inside another component's image).
-	KindInfo Kind = "info"
 )
 
 // Component describes one updatable/observable part of a Rasputin system and
@@ -45,9 +42,17 @@ type Component struct {
 	CompareField string
 }
 
-// Components is the v1 registry. OS is the one fully-deployable component;
-// the firewall is display-only; the control-plane software is informational
-// (it ships inside the OS image, so updating the OS updates it).
+// Components is the v1 registry of independently-checkable update targets. OS
+// is the one fully-deployable component; the firewall is display-only (it's a
+// separate node with its own sysupgrade path).
+//
+// The control-plane software is deliberately NOT a component here: it ships
+// *inside* the OS image (pinned in rasputin-os' package .mk files), so it can
+// never be updated on its own — updating the OS updates it. Presenting it as a
+// peer row with its own status badge implied an action that doesn't exist (and
+// would read "update available" the moment a cp release is mirrored ahead of an
+// OS image vendoring it). Instead Check folds the running control-plane version
+// into the OS row as a display-only detail. See ControlPlaneVersion.
 var Components = []Component{
 	{
 		ID: "os", Label: "Rasputin OS",
@@ -60,12 +65,6 @@ var Components = []Component{
 		TagPrefix: "fw-", Compatible: "rasputin-fw-n100",
 		Scheme: SchemeCalVer, Kind: KindSysupgrade, Deployable: false,
 		CompareRole: proto.RoleFirewall, CompareField: "image",
-	},
-	{
-		ID: "cp", Label: "Control-plane software",
-		TagPrefix: "cp-", Compatible: "",
-		Scheme: SchemeSemver, Kind: KindInfo, Deployable: false,
-		CompareRole: proto.RoleControlPlane, CompareField: "agent",
 	},
 }
 

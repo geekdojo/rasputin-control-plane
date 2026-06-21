@@ -1,6 +1,6 @@
 'use client';
 
-import { DownloadCloud, RefreshCw, Trash2, UploadCloud, Zap } from 'lucide-react';
+import { ChevronDown, ChevronRight, DownloadCloud, RefreshCw, Trash2, UploadCloud, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   checkForUpdates,
@@ -197,7 +197,7 @@ export default function UpdatesPage() {
         <SectionLabel>BUNDLES</SectionLabel>
         {bundles.length === 0 ? (
           <Hint style={{ marginBottom: 18 }}>
-            no bundles uploaded yet — build one with <Tok>scripts/build-bundle.sh</Tok> and upload below
+            nothing staged — updates you stage from the channel above land here, ready to deploy
           </Hint>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 18 }}>
@@ -245,7 +245,7 @@ export default function UpdatesPage() {
           </table>
         )}
 
-        <UploadBundleForm onUploaded={(b) => setBundles((prev) => [b, ...prev])} />
+        <AdvancedUpload onUploaded={(b) => setBundles((prev) => [b, ...prev])} />
 
         {systemJobs.length > 0 && (
           <div style={{ marginTop: 24 }}>
@@ -368,6 +368,42 @@ function DeployBundleButton({ bundle, nodes }: { bundle: Bundle; nodes: Node[] }
   );
 }
 
+// AdvancedUpload tucks the manual bundle upload behind a collapsed disclosure.
+// The normal path is staging from the channel (the control plane fetches the
+// bundle itself); manual upload is only for air-gapped installs or a locally
+// built bundle, so it shouldn't read as the primary action.
+function AdvancedUpload({ onUploaded }: { onUploaded: (b: Bundle) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginTop: 6 }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          cursor: 'pointer',
+          color: DIM,
+          fontSize: 10,
+          fontFamily: MONO,
+          letterSpacing: '0.06em',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+        }}
+      >
+        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        ADVANCED — MANUAL / AIR-GAPPED UPLOAD
+      </button>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          <UploadBundleForm onUploaded={onUploaded} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UploadBundleForm({ onUploaded }: { onUploaded: (b: Bundle) => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -390,7 +426,8 @@ function UploadBundleForm({ onUploaded }: { onUploaded: (b: Bundle) => void }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <Hint>
-        produce a <Tok>.raspbundle</Tok> with <Tok>scripts/build-bundle.sh</Tok>, then upload it
+        only needed for air-gapped installs or a locally built bundle — produce a <Tok>.raspbundle</Tok> with{' '}
+        <Tok>scripts/build-bundle.sh</Tok>, then upload it
       </Hint>
       <label
         style={{
@@ -574,6 +611,11 @@ function ComponentUpdateRow({ cu, onStaged }: { cu: ComponentUpdate; onStaged: (
           )}
         </div>
       </div>
+      {cu.bundled?.map((b) => (
+        <span key={b.label} style={{ color: DIM, fontSize: 9, fontFamily: MONO, letterSpacing: '0.04em' }}>
+          {b.label.toLowerCase()} {b.version} · ships in this image
+        </span>
+      ))}
       {cu.staged && cu.deployable && (
         <Hint>staged in the bundle catalog below — use DEPLOY or UPDATE ALL to roll it out</Hint>
       )}
