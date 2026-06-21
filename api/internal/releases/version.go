@@ -17,14 +17,17 @@ const (
 	// release outranks any -dev of the same base; among -dev builds the
 	// higher N is newer.
 	SchemeCalVer Scheme = iota
-	// SchemeSemver parses (v)MAJOR.MINOR.PATCH, e.g. "v0.8.5". Pre-release
-	// suffixes are ignored — the control-plane line doesn't ship them.
+	// SchemeSemver parses (v)MAJOR.MINOR.PATCH with an optional -dev.N
+	// suffix, e.g. "v0.8.5" (stable) or "v0.8.7-dev.2" (pre-release). The
+	// dev channel ships -dev.N pre-releases, so the suffix is significant:
+	// a stable release outranks any -dev of the same base, and among -dev
+	// builds the higher N is newer — same ordering as SchemeCalVer.
 	SchemeSemver
 )
 
 var (
 	calverRe = regexp.MustCompile(`^(\d{4})\.(\d{1,2})\.(\d+)(?:-dev\.(\d+))?$`)
-	semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)`)
+	semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$`)
 )
 
 // parsed is a comparable representation of a version under some scheme.
@@ -54,9 +57,12 @@ func parse(scheme Scheme, v string) (parsed, error) {
 		if m == nil {
 			return parsed{}, fmt.Errorf("not a semver version: %q", v)
 		}
-		p := parsed{stable: true}
+		p := parsed{stable: m[4] == ""}
 		for i := 0; i < 3; i++ {
 			p.parts[i], _ = strconv.Atoi(m[i+1])
+		}
+		if !p.stable {
+			p.dev, _ = strconv.Atoi(m[4])
 		}
 		return p, nil
 	default:

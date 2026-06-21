@@ -91,6 +91,30 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// Regression: the cp line ships -dev.N pre-releases, and the installed agent
+// version has no "v" prefix while the release tag does. The semver scheme must
+// compare the -dev.N suffix (not collapse dev.1 and dev.2 to the same 0.8.7 and
+// report "up to date").
+func TestCheckControlPlaneDevPrerelease(t *testing.T) {
+	nodes := []*proto.Node{
+		{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.28", AgentVersion: "0.8.7-dev.1"},
+	}
+	src := &fakeSource{rel: map[string]*ReleaseInfo{
+		"cp": {Component: "cp", Version: "v0.8.7-dev.2", Manifest: Manifest{Version: "v0.8.7-dev.2"}},
+	}}
+	cp := byComponent(Check(context.Background(), src, "dev", nodes))["cp"]
+	if cp.Status != StatusUpdateAvailable {
+		t.Errorf("cp status = %q, want update_available (dev.1 installed, dev.2 available)", cp.Status)
+	}
+
+	// Same dev build → up to date.
+	src.rel["cp"] = &ReleaseInfo{Component: "cp", Version: "v0.8.7-dev.1", Manifest: Manifest{Version: "v0.8.7-dev.1"}}
+	cp = byComponent(Check(context.Background(), src, "dev", nodes))["cp"]
+	if cp.Status != StatusUpToDate {
+		t.Errorf("cp status = %q, want up_to_date (dev.1 == dev.1)", cp.Status)
+	}
+}
+
 func TestCheckUpToDateAndNoFirewall(t *testing.T) {
 	nodes := []*proto.Node{
 		{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.24", AgentVersion: "v0.8.5"},

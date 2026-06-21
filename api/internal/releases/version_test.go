@@ -37,7 +37,13 @@ func TestCompareSemver(t *testing.T) {
 		{"v0.8.5", "v0.8.5", 0},
 		{"v0.9.0", "v0.8.5", 1},
 		{"v1.0.0", "v0.99.99", 1},
-		{"0.8.5", "v0.8.5", 0}, // leading v optional
+		{"0.8.5", "v0.8.5", 0},               // leading v optional
+		{"0.8.7-dev.1", "v0.8.7-dev.2", -1},  // dev channel: higher dev.N is newer (mixed v-prefix)
+		{"v0.8.7-dev.2", "0.8.7-dev.1", 1},   // and vice-versa
+		{"0.8.7-dev.2", "0.8.7-dev.2", 0},    // same dev build
+		{"v0.8.7", "v0.8.7-dev.2", 1},        // stable outranks dev of same base
+		{"v0.8.7-dev.2", "v0.8.7", -1},       // and vice-versa
+		{"v0.8.7-dev.9", "v0.8.8-dev.1", -1}, // newer base beats higher dev of older base
 	}
 	for _, c := range cases {
 		got, err := Compare(SchemeSemver, c.a, c.b)
