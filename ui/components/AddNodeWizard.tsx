@@ -7,6 +7,7 @@ import type { MintedBusToken } from '../lib/types';
 import {
   type AddableRole,
   downloadSeed,
+  nodeImageFor,
   renderNodeSeed,
   suggestNodeId,
 } from '../lib/enroll';
@@ -20,11 +21,16 @@ const ROLES: { value: AddableRole; label: string; icon: typeof Cpu; blurb: strin
 
 export function AddNodeWizard({
   clusterPrefix,
+  clusterOsVersion,
   taken,
   onClose,
   onMinted,
 }: {
   clusterPrefix: string;
+  // The cluster's OS version (the controlplane's), so the wizard can tell the
+  // operator which image to flash + link the matching download. Undefined when
+  // unknown → generic guidance.
+  clusterOsVersion?: string;
   taken: Set<string>;
   // Reports the freshly-minted pending enrollment so the grid can show it and
   // start watching for the node to come online.
@@ -77,7 +83,13 @@ export function AddNodeWizard({
       <div style={{ height: 1, background: HAIR, marginBottom: 16 }} />
 
       {minted ? (
-        <SuccessView role={role} nodeId={minted.nodeId} token={minted.token} onClose={onClose} />
+        <SuccessView
+          role={role}
+          nodeId={minted.nodeId}
+          token={minted.token}
+          clusterOsVersion={clusterOsVersion}
+          onClose={onClose}
+        />
       ) : (
         <>
           <SectionLabel>ROLE</SectionLabel>
@@ -150,14 +162,17 @@ function SuccessView({
   role,
   nodeId,
   token,
+  clusterOsVersion,
   onClose,
 }: {
   role: AddableRole;
   nodeId: string;
   token: string;
+  clusterOsVersion?: string;
   onClose: () => void;
 }) {
   const seed = renderNodeSeed(role, nodeId, token);
+  const image = nodeImageFor(clusterOsVersion);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div
@@ -192,7 +207,21 @@ function SuccessView({
       <SectionLabel>NEXT STEPS</SectionLabel>
       <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
         {[
-          <>Flash a Rasputin OS node image (the same build your cluster runs) to the new node&apos;s storage.</>,
+          image ? (
+            <>
+              Flash <Tok>Rasputin OS {image.version}</Tok> (your cluster&apos;s version) to the node&apos;s storage —{' '}
+              <a href={image.downloadUrl} target="_blank" rel="noreferrer" style={linkStyle}>
+                download the image
+              </a>{' '}
+              (
+              <a href={image.releaseUrl} target="_blank" rel="noreferrer" style={linkStyle}>
+                verify against the checksum in the release&apos;s manifest
+              </a>
+              ).
+            </>
+          ) : (
+            <>Flash a Rasputin OS node image — the same build your cluster runs — to the new node&apos;s storage.</>
+          ),
           <>Copy this <Tok>rasputin-seed.env</Tok> to the root of the disk&apos;s boot partition (labeled <Tok>RASPUTIN-FW</Tok>).</>,
           <>Seat the node in the backplane and power it on.</>,
         ].map((step, i) => (
@@ -244,6 +273,8 @@ function Overlay({ children, onClose }: { children: React.ReactNode; onClose: ()
     </div>
   );
 }
+
+const linkStyle: React.CSSProperties = { color: ACCENT, textDecoration: 'underline' };
 
 const seedBox: React.CSSProperties = {
   margin: 0,

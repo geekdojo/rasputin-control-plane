@@ -28,6 +28,38 @@ export function renderNodeSeed(
   );
 }
 
+// RELEASES_CHANNEL_URL is the public release channel the node OS images are
+// published to. The add-node wizard links here so a new node is flashed with
+// the *same* build the cluster runs. (Interim: a direct release link. The
+// per-cluster image/storefront delivery is a deferred Phase-2 item —
+// token-provisioning-pipeline §6 — and would replace this URL.)
+const RELEASES_CHANNEL_URL = 'https://github.com/geekdojo/rasputin-releases';
+
+export interface NodeImage {
+  version: string;
+  asset: string;
+  downloadUrl: string;
+  releaseUrl: string;
+}
+
+// nodeImageFor builds the public download for the n100 node OS image at a given
+// version — pass the cluster's OS version so a new node matches it. SKU is n100
+// (the only v1 SKU). Returns null when the version is unknown (the wizard then
+// falls back to generic guidance). The image is verifiable against the
+// `imageSha256` in the release's manifest.json.
+export function nodeImageFor(osVersion: string | undefined | null): NodeImage | null {
+  const v = (osVersion ?? '').trim();
+  if (!v) return null;
+  const tag = `os-${v}`;
+  const asset = `rasputin-os-n100-${v}.img.xz`;
+  return {
+    version: v,
+    asset,
+    downloadUrl: `${RELEASES_CHANNEL_URL}/releases/download/${tag}/${asset}`,
+    releaseUrl: `${RELEASES_CHANNEL_URL}/releases/tag/${tag}`,
+  };
+}
+
 // clusterPrefixOf derives the "<cluster>-" id prefix every node shares, from the
 // existing inventory: the longest common prefix, trimmed back to the last '-'.
 // Returns '' when there's no shared dash-delimited prefix (then suggestions are

@@ -143,6 +143,12 @@ export default function NodesPage() {
   );
 
   const clusterPrefix = useMemo(() => clusterPrefixOf(nodes.map((n) => n.id)), [nodes]);
+  // The OS version a new node should match — the controlplane's. Feeds the
+  // wizard's "flash this image" guidance + download link.
+  const clusterOsVersion = useMemo(
+    () => nodes.find((n) => n.role === 'controlplane')?.imageVersion,
+    [nodes],
+  );
   const takenIds = useMemo(
     () => new Set<string>([...nodes.map((n) => n.id), ...pending.map((p) => p.id)]),
     [nodes, pending],
@@ -182,6 +188,7 @@ export default function NodesPage() {
       {wizardOpen && (
         <AddNodeWizard
           clusterPrefix={clusterPrefix}
+          clusterOsVersion={clusterOsVersion}
           taken={takenIds}
           onClose={() => setWizardOpen(false)}
           onMinted={({ id, tokenId, role }) => {
