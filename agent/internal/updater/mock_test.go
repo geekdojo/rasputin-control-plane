@@ -336,10 +336,46 @@ RAUC_SLOT_STATUS_1_BUNDLE_VERSION='1.2.3'
 }
 
 func TestParseRAUCStatus_UnknownSlot(t *testing.T) {
-	// Missing RAUC_BOOT_SLOT → both unknown.
+	// No boot key and no slot states → both unknown.
 	got := parseRAUCStatus("RAUC_SYSTEM_COMPATIBLE='rasputin-pi5-cm5'\n")
 	if got.activeSlot != proto.SlotUnknown || got.inactiveSlot != proto.SlotUnknown {
 		t.Errorf("expected unknown/unknown: %+v", got)
+	}
+}
+
+func TestParseRAUCStatus_RealShellFormat(t *testing.T) {
+	// Captured verbatim from `rauc status --output-format=shell` on the N100
+	// controlplane. Real RAUC emits RAUC_BOOT_PRIMARY + per-index STATE/DEVICE,
+	// NOT RAUC_BOOT_SLOT — the schema the old parser wrongly assumed, which made
+	// OS self-update fail with "no inactive slot" (2026-06-22).
+	in := `RAUC_SYSTEM_COMPATIBLE='rasputin-n100'
+RAUC_SYSTEM_BOOTED_BOOTNAME='A'
+RAUC_BOOT_PRIMARY='rootfs.0'
+RAUC_SYSTEM_SLOTS='rootfs.1 rootfs.0'
+RAUC_SLOTS='1 2'
+RAUC_SLOT_STATE_1='inactive'
+RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'
+RAUC_SLOT_STATE_2='booted'
+RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
+`
+	got := parseRAUCStatus(in)
+	if got.activeSlot != proto.SlotA || got.inactiveSlot != proto.SlotB {
+		t.Fatalf("real format: active/inactive = %+v, want A/B", got)
+	}
+}
+
+func TestParseRAUCStatus_StateFallbackBootedB(t *testing.T) {
+	// No boot key present → fall back to the slot whose STATE is booted,
+	// resolved via its device partlabel (rootfs-1 → SlotB).
+	in := `RAUC_SLOTS='1 2'
+RAUC_SLOT_STATE_1='booted'
+RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'
+RAUC_SLOT_STATE_2='inactive'
+RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
+`
+	got := parseRAUCStatus(in)
+	if got.activeSlot != proto.SlotB || got.inactiveSlot != proto.SlotA {
+		t.Fatalf("state fallback: active/inactive = %+v, want B/A", got)
 	}
 }
 

@@ -118,38 +118,80 @@ type raucStatus struct {
 	activeVersion string
 }
 
-// parseRAUCStatus extracts the bare minimum from `rauc status --output-format=shell`:
+// slotNameFromDevice maps a RAUC slot device path to our rootfs.N name via the
+// partlabel the images use (rootfs-0 / rootfs-1).
+func slotNameFromDevice(dev string) string {
+	switch {
+	case strings.Contains(dev, "rootfs-0"):
+		return "rootfs.0"
+	case strings.Contains(dev, "rootfs-1"):
+		return "rootfs.1"
+	}
+	return ""
+}
+
+// parseRAUCStatus extracts the active/inactive slot from
+// `rauc status --output-format=shell`. Real RAUC (the version on our image)
+// names the booted slot in RAUC_BOOT_PRIMARY and describes each slot with
+// per-index RAUC_SLOT_STATE_N / RAUC_SLOT_DEVICE_N fields:
 //
-//	RAUC_SYSTEM_COMPATIBLE='rasputin-pi5-cm5'
-//	RAUC_SYSTEM_VARIANT=''
-//	RAUC_BOOT_SLOT='rootfs.0'
-//	RAUC_SLOT_STATUS_0='rootfs.0:active'
-//	RAUC_SLOT_STATUS_0_BUNDLE_VERSION='1.2.3'
-//	RAUC_SLOT_STATUS_1='rootfs.1:inactive'
+//	RAUC_SYSTEM_COMPATIBLE='rasputin-n100'
+//	RAUC_BOOT_PRIMARY='rootfs.0'
+//	RAUC_SLOTS='1 2'
+//	RAUC_SLOT_STATE_1='inactive'   RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'
+//	RAUC_SLOT_STATE_2='booted'     RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
 //
-// We map rootfs.0/.1 to our a/b model. The v0 mapping is fixed — a future
-// iteration could read RAUC's `system.compatible` to drive layout.
+// We also still accept the older schema (RAUC_BOOT_SLOT +
+// RAUC_SLOT_STATUS_N_BUNDLE_VERSION). The booted rootfs (rootfs.0 / rootfs.1)
+// maps to our a/b model (.0→A, .1→B); the other slot is the install target.
+//
+// NOTE (2026-06-22): this parser previously recognized ONLY RAUC_BOOT_SLOT —
+// which real RAUC never emits — so it always returned SlotUnknown and OS
+// self-update failed at the install step ("agent reported no inactive slot").
+// It had only been exercised against the mock + a fictional shell mock, never
+// real `rauc status` output. Caught on the Mu bench deploying 2026.06.0-dev.31.
 func parseRAUCStatus(s string) raucStatus {
 	out := raucStatus{
 		activeSlot:   proto.SlotUnknown,
 		inactiveSlot: proto.SlotUnknown,
 	}
+	kv := map[string]string{}
 	for _, line := range strings.Split(s, "\n") {
-		switch {
-		case strings.HasPrefix(line, "RAUC_BOOT_SLOT="):
-			v := strings.Trim(strings.TrimPrefix(line, "RAUC_BOOT_SLOT="), "'")
-			if strings.HasSuffix(v, ".0") {
-				out.activeSlot = proto.SlotA
-				out.inactiveSlot = proto.SlotB
-			} else if strings.HasSuffix(v, ".1") {
-				out.activeSlot = proto.SlotB
-				out.inactiveSlot = proto.SlotA
-			}
-		case strings.HasPrefix(line, "RAUC_SLOT_STATUS_0_BUNDLE_VERSION=") && out.activeSlot == proto.SlotA:
-			out.activeVersion = strings.Trim(strings.TrimPrefix(line, "RAUC_SLOT_STATUS_0_BUNDLE_VERSION="), "'")
-		case strings.HasPrefix(line, "RAUC_SLOT_STATUS_1_BUNDLE_VERSION=") && out.activeSlot == proto.SlotB:
-			out.activeVersion = strings.Trim(strings.TrimPrefix(line, "RAUC_SLOT_STATUS_1_BUNDLE_VERSION="), "'")
+		if i := strings.IndexByte(line, '='); i > 0 {
+			kv[line[:i]] = strings.Trim(line[i+1:], "'")
 		}
+	}
+
+	// Which rootfs slot are we booted from? Prefer the explicit boot key (real
+	// RAUC_BOOT_PRIMARY, or legacy RAUC_BOOT_SLOT); else fall back to the slot
+	// whose STATE is booted, resolved to a name via its device partlabel.
+	boot := kv["RAUC_BOOT_PRIMARY"]
+	if boot == "" {
+		boot = kv["RAUC_BOOT_SLOT"]
+	}
+	if boot == "" {
+		for _, idx := range strings.Fields(kv["RAUC_SLOTS"]) {
+			if st := kv["RAUC_SLOT_STATE_"+idx]; st == "booted" || st == "active" {
+				boot = slotNameFromDevice(kv["RAUC_SLOT_DEVICE_"+idx])
+				break
+			}
+		}
+	}
+
+	switch {
+	case strings.HasSuffix(boot, ".0") || strings.Contains(boot, "rootfs-0"):
+		out.activeSlot, out.inactiveSlot = proto.SlotA, proto.SlotB
+	case strings.HasSuffix(boot, ".1") || strings.Contains(boot, "rootfs-1"):
+		out.activeSlot, out.inactiveSlot = proto.SlotB, proto.SlotA
+	}
+
+	// Active slot's installed version, when RAUC records it (absent on a
+	// freshly-flashed slot — fine, the install step only needs the slot).
+	switch out.activeSlot {
+	case proto.SlotA:
+		out.activeVersion = kv["RAUC_SLOT_STATUS_0_BUNDLE_VERSION"]
+	case proto.SlotB:
+		out.activeVersion = kv["RAUC_SLOT_STATUS_1_BUNDLE_VERSION"]
 	}
 	return out
 }

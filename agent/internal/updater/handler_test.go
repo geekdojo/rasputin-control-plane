@@ -384,7 +384,13 @@ case "$1" in
       exit 0
     fi
     cat <<EOF
-RAUC_BOOT_SLOT='rootfs.0'
+RAUC_SYSTEM_COMPATIBLE='rasputin-n100'
+RAUC_BOOT_PRIMARY='rootfs.0'
+RAUC_SLOTS='1 2'
+RAUC_SLOT_STATE_1='inactive'
+RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'
+RAUC_SLOT_STATE_2='booted'
+RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
 RAUC_SLOT_STATUS_0_BUNDLE_VERSION='1.2.3'
 RAUC_SLOT_STATUS_1_BUNDLE_VERSION='1.0.0'
 EOF
