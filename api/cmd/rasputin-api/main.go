@@ -379,11 +379,27 @@ func main() {
 	// the inventory package) to avoid an inventory→firewall import cycle,
 	// mirroring auth.SetLoginHook → mesh.EnsureUser above.
 	invSvc.SetOnNodeAdded(func(hookCtx context.Context, n *proto.Node) {
-		if n.Role != proto.RoleFirewall {
-			return
-		}
-		if _, err := firewall.SeedBaselineRules(hookCtx, fwStore, n.ID); err != nil {
-			log.Printf("rasputin-api: seed baseline firewall rules for %s: %v", n.ID, err)
+		switch n.Role {
+		case proto.RoleFirewall:
+			if _, err := firewall.SeedBaselineRules(hookCtx, fwStore, n.ID); err != nil {
+				log.Printf("rasputin-api: seed baseline firewall rules for %s: %v", n.ID, err)
+			}
+		case proto.RoleCompute, proto.RoleStorage:
+			// Auto-enroll a newly-registered compute/storage node into the mesh so
+			// it receives the mesh CA (which it needs to verify the control plane's
+			// TLS when downloading update bundles) and a tailnet identity. The
+			// controlplane self-enrolls during setup; the firewall enrolls via its
+			// own path. Without this, a day-2 node added through the wizard joins the
+			// bus but never the mesh — and its first OS update fails on the bundle
+			// download with "certificate signed by unknown authority" (found
+			// deploying to bench-compute1, 2026-06-22). The DELETE /api/nodes cascade
+			// removes the headscale node + device on node removal.
+			spec, _ := json.Marshal(mesh.EnrollSpec{NodeID: n.ID})
+			if _, err := runner.Submit(hookCtx, "mesh.enroll_node", spec, "auto-enroll"); err != nil {
+				log.Printf("rasputin-api: auto mesh-enroll %s: %v", n.ID, err)
+			} else {
+				log.Printf("rasputin-api: auto-enrolling %s (%s) into the mesh", n.ID, n.Role)
+			}
 		}
 	})
 	if err := invSvc.Start(ctx); err != nil {

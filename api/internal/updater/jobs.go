@@ -328,6 +328,14 @@ func updateWaitOnlineAndVerifySlot(store *Store) jobs.DoFn {
 			return nil, fmt.Errorf("waiting for re-register: %w", sc.Ctx.Err())
 		}
 
+		// The node re-registered, but its precheck subscription can lag the
+		// registration event by a beat — poll until the agent actually answers
+		// before verifying, so we don't fail with "no responders available"
+		// (mirrors the self-update reconciler's waitForAgent → verifyBootedSlot).
+		if err := waitForAgent(sc.Ctx, sc.NATS, spec.NodeID); err != nil {
+			return nil, fmt.Errorf("waiting for agent after reboot: %w", err)
+		}
+
 		// Precheck the booted slot vs the target (shared with the self-update
 		// reconciler — see selfupdate.go). Records + publishes a rollback on a
 		// slot mismatch.
