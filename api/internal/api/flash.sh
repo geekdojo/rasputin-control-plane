@@ -190,8 +190,8 @@ have xz || die "xz is required to decompress the image (macOS: 'brew install xz'
 info "Flashing ${DISK} (this takes a few minutes; do not unplug)…"
 if [ "$OS" = "Darwin" ]; then
 	diskutil unmountDisk "$DISK" >/dev/null 2>&1 || true
-	RDISK="${DISK/\/dev\//\/dev\/r}"   # raw device is much faster on macOS
-	xz -dc "$IMG" | dd of="$RDISK" bs=4m 2>/dev/null || die "dd failed (need sudo? disk busy?)."
+	RDISK="/dev/r${DISK#/dev/}"   # raw device (e.g. /dev/disk4 -> /dev/rdisk4) is much faster on macOS
+	xz -dc "$IMG" | dd of="$RDISK" bs=4m || die "write to $RDISK failed (see the error above — is the disk in use?)."
 else
 	for p in $(lsblk -lnpo NAME "$DISK" 2>/dev/null | tail -n +2); do umount "$p" 2>/dev/null || true; done
 	if xz -dc "$IMG" | dd of="$DISK" bs=4M oflag=sync status=progress 2>/dev/null; then :; else
