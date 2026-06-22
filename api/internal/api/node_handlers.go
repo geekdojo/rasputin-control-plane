@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -104,6 +105,16 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.fw.DeleteNodeState(ctx, id); err != nil {
 		writeError(w, http.StatusInternalServerError, "delete firewall state: "+err.Error())
 		return
+	}
+
+	// Revoke the node's enrollment token(s) so a removed node leaves no dangling
+	// bound token — which would otherwise resurface as a ghost "pending" bay and
+	// let the node silently rejoin. Best-effort: a leftover token is less harmful
+	// than blocking the removal.
+	if n, err := s.busTokens.RevokeByNodeID(ctx, id); err != nil {
+		log.Printf("rasputin-api: revoke bus tokens for removed node %s: %v", id, err)
+	} else if n > 0 {
+		log.Printf("rasputin-api: revoked %d enrollment token(s) for removed node %s", n, id)
 	}
 
 	if err := s.invSvc.Remove(ctx, id); err != nil {

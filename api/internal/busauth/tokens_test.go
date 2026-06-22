@@ -167,3 +167,39 @@ func TestGenerateToken_HashMatches(t *testing.T) {
 		t.Fatal("HashToken(plaintext) must equal the returned hash")
 	}
 }
+
+func TestStore_RevokeByNodeID(t *testing.T) {
+	s := newTokenStore(t)
+	ctx := context.Background()
+	if _, _, err := s.MintBound(ctx, "compute", "bench-compute1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.MintBound(ctx, "compute", "bench-compute1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.MintBound(ctx, "compute", "bench-compute2"); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.RevokeByNodeID(ctx, "bench-compute1")
+	if err != nil {
+		t.Fatalf("RevokeByNodeID: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("revoked %d tokens, want 2", n)
+	}
+	// Idempotent: a second pass revokes nothing.
+	if n2, _ := s.RevokeByNodeID(ctx, "bench-compute1"); n2 != 0 {
+		t.Errorf("second call revoked %d, want 0", n2)
+	}
+	// bench-compute2's token is untouched.
+	list, _ := s.List(ctx)
+	for _, ti := range list {
+		if ti.NodeID != nil && *ti.NodeID == "bench-compute2" && ti.RevokedAt != nil {
+			t.Errorf("bench-compute2 token wrongly revoked")
+		}
+		if ti.NodeID != nil && *ti.NodeID == "bench-compute1" && ti.RevokedAt == nil {
+			t.Errorf("bench-compute1 token %s not revoked", ti.ID)
+		}
+	}
+}

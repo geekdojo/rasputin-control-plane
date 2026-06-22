@@ -212,6 +212,22 @@ func (s *Store) Revoke(ctx context.Context, id string) error {
 	return nil
 }
 
+// RevokeByNodeID revokes every still-active token bound to nodeID and returns
+// how many it revoked. The node-removal cascade calls it so a removed node
+// leaves no dangling enrollment token — which would otherwise resurface as a
+// ghost "pending" bay on the node grid. Idempotent: revoking zero tokens is not
+// an error.
+func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL`,
+		ms(time.Now().UTC()), nodeID)
+	if err != nil {
+		return 0, fmt.Errorf("busauth: revoke by node: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // List returns all tokens (secret-free), newest first.
 func (s *Store) List(ctx context.Context) ([]TokenInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
