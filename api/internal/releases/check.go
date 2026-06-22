@@ -2,7 +2,9 @@ package releases
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -140,6 +142,11 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 		cs.Status, cs.Error = StatusUnknown, err.Error()
 	} else if newer {
 		cs.Status = StatusUpdateAvailable
+		// Name the node(s) that lag latest so the operator knows where to deploy
+		// — the controlplane may already be current while a compute node trails.
+		if lag := laggingNodes(nodes, comp, cs.Latest); len(lag) > 0 {
+			cs.Note = "Behind latest: " + strings.Join(lag, ", ")
+		}
 	} else {
 		cs.Status = StatusUpToDate
 	}
@@ -162,15 +169,64 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 	return cs
 }
 
+// runsComponent reports whether a node runs comp's image (by role).
+func runsComponent(n *proto.Node, comp Component) bool {
+	for _, r := range comp.CompareRoles {
+		if n.Role == r {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeVersion is the installed version a node reports for comp's field.
+func nodeVersion(n *proto.Node, comp Component) string {
+	if comp.CompareField == "agent" {
+		return n.AgentVersion
+	}
+	return n.ImageVersion
+}
+
+// installedVersion returns the OLDEST version reported across all nodes that run
+// comp's image, so the component reads "update available" if ANY node lags
+// latest — not only the controlplane. "" when no such node has reported one.
 func installedVersion(nodes []*proto.Node, comp Component) string {
+	oldest := ""
 	for _, n := range nodes {
-		if n.Role != comp.CompareRole {
+		if !runsComponent(n, comp) {
 			continue
 		}
-		if comp.CompareField == "agent" {
-			return n.AgentVersion
+		v := nodeVersion(n, comp)
+		if v == "" {
+			continue
 		}
-		return n.ImageVersion
+		if oldest == "" {
+			oldest = v
+			continue
+		}
+		// IsNewer(scheme, v, oldest) == "oldest is newer than v" → v is older.
+		if older, err := IsNewer(comp.Scheme, v, oldest); err == nil && older {
+			oldest = v
+		}
 	}
-	return ""
+	return oldest
+}
+
+// laggingNodes lists "id (version)" for every node running comp whose version is
+// older than latest — the nodes the operator needs to deploy the update to.
+func laggingNodes(nodes []*proto.Node, comp Component, latest string) []string {
+	var out []string
+	for _, n := range nodes {
+		if !runsComponent(n, comp) {
+			continue
+		}
+		v := nodeVersion(n, comp)
+		if v == "" {
+			continue
+		}
+		if behind, err := IsNewer(comp.Scheme, v, latest); err == nil && behind {
+			out = append(out, fmt.Sprintf("%s (%s)", n.ID, v))
+		}
+	}
+	return out
 }

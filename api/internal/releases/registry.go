@@ -33,9 +33,12 @@ type Component struct {
 	Kind       Kind
 	Deployable bool // true → has a Download & stage button
 
-	// CompareRole is the node role whose reported version represents the
-	// "installed" version of this component.
-	CompareRole proto.NodeRole
+	// CompareRoles are the node roles that run this component's image. The
+	// component reads "update available" if ANY node in these roles reports a
+	// version older than latest — so an OS update surfaces while a single
+	// compute node lags, even when the controlplane is already current. (The OS
+	// image runs on every node but the firewall; the firewall runs its own.)
+	CompareRoles []proto.NodeRole
 	// CompareField selects which reported field holds the installed version:
 	// "image" → Node.ImageVersion (CalVer OS), "agent" → Node.AgentVersion
 	// (semver control-plane software).
@@ -58,13 +61,15 @@ var Components = []Component{
 		ID: "os", Label: "Rasputin OS",
 		TagPrefix: "os-", Compatible: "rasputin-n100",
 		Scheme: SchemeCalVer, Kind: KindRAUC, Deployable: true,
-		CompareRole: proto.RoleControlPlane, CompareField: "image",
+		CompareRoles: []proto.NodeRole{proto.RoleControlPlane, proto.RoleCompute, proto.RoleStorage},
+		CompareField: "image",
 	},
 	{
 		ID: "fw", Label: "Firewall",
 		TagPrefix: "fw-", Compatible: "rasputin-fw-n100",
 		Scheme: SchemeCalVer, Kind: KindSysupgrade, Deployable: false,
-		CompareRole: proto.RoleFirewall, CompareField: "image",
+		CompareRoles: []proto.NodeRole{proto.RoleFirewall},
+		CompareField: "image",
 	},
 }
 

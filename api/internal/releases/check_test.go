@@ -3,6 +3,7 @@ package releases
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -111,6 +112,42 @@ func TestCheckFoldsControlPlaneVersion(t *testing.T) {
 	os := got["os"]
 	if len(os.Bundled) != 1 || os.Bundled[0].Version != "0.8.7-dev.3" {
 		t.Errorf("os.Bundled = %+v, want control-plane 0.8.7-dev.3 folded in", os.Bundled)
+	}
+}
+
+// The OS row must read "update available" when ANY node running the OS image
+// lags latest — even if the controlplane itself is current — so the operator
+// can stage + deploy to the trailing node. Regression for a compute node stuck
+// a version behind a freshly-updated controlplane.
+func TestCheckOSBehindWhenComputeNodeLags(t *testing.T) {
+	nodes := []*proto.Node{
+		{ID: "bench-cp", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.33", AgentVersion: "0.8.7-dev.7"},
+		{ID: "bench-compute1", Role: proto.RoleCompute, ImageVersion: "2026.06.0-dev.32"},
+		{ID: "bench-fw", Role: proto.RoleFirewall, ImageVersion: "2026.07.1-dev.15"},
+	}
+	src := &fakeSource{rel: map[string]*ReleaseInfo{
+		"os": osRelease("2026.06.0-dev.33"), // controlplane already matches latest…
+		"fw": fwRelease("2026.07.1-dev.15"),
+	}}
+
+	got := byComponent(Check(context.Background(), src, "dev", nodes))
+
+	os := got["os"]
+	if os.Status != StatusUpdateAvailable {
+		t.Fatalf("os status = %q, want update_available (compute node behind)", os.Status)
+	}
+	if os.Installed != "2026.06.0-dev.32" {
+		t.Errorf("os.Installed = %q, want the oldest node version 2026.06.0-dev.32", os.Installed)
+	}
+	if !strings.Contains(os.Note, "bench-compute1") {
+		t.Errorf("os.Note = %q, want it to name the lagging compute node", os.Note)
+	}
+	if strings.Contains(os.Note, "dev.33") {
+		t.Errorf("os.Note = %q, should not list the current controlplane", os.Note)
+	}
+	// The firewall is on latest → unaffected.
+	if got["fw"].Status != StatusUpToDate {
+		t.Errorf("fw status = %q, want up_to_date", got["fw"].Status)
 	}
 }
 
