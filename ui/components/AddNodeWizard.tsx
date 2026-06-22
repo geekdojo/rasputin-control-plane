@@ -198,11 +198,9 @@ function SuccessView({
           image, verifies it, flashes the drive, writes <Tok>{nodeId}</Tok>&apos;s enrollment (and
           checks it landed), then ejects.
         </span>
-        <div style={{ position: 'relative' }}>
-          <pre style={seedBox}>{command}</pre>
-          <div style={{ position: 'absolute', top: 4, right: 4 }}>
-            <CopyButton value={command} />
-          </div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+          <pre style={{ ...seedBox, flex: 1, minWidth: 0 }}>{command}</pre>
+          <CopyButton value={command} />
         </div>
         <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
           macOS &amp; Linux. Only offers external/removable drives, and asks you to confirm before it writes anything.
