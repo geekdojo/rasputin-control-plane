@@ -69,12 +69,19 @@ export function nodeImageFor(osVersion: string | undefined | null): NodeImage | 
 // the control-plane host to its stable mDNS name so the command is identical
 // regardless of how the operator reached this UI (IP vs name).
 export function flashCommand(seed: string, cpBase = 'http://rasputin.local'): string {
-  const b64 =
-    typeof btoa === 'function'
-      ? btoa(seed)
-      : // SSR/test fallback; the browser path uses btoa.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (globalThis as any).Buffer.from(seed).toString('base64');
+  // Base64 the seed UTF-8-safely. btoa() throws on any char outside Latin1, and
+  // the seed's comment line carries an em dash (and a node name could hold other
+  // non-ASCII) — so encode to UTF-8 bytes first, then base64 those. flash.sh's
+  // `base64 -d` reproduces the exact bytes.
+  if (typeof btoa === 'function') {
+    const bytes = new TextEncoder().encode(seed);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return `curl -fsSL ${cpBase}/flash.sh | sudo RASPUTIN_SEED_B64='${btoa(bin)}' bash`;
+  }
+  // SSR/test fallback; the browser path uses btoa.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const b64 = (globalThis as any).Buffer.from(seed, 'utf8').toString('base64');
   return `curl -fsSL ${cpBase}/flash.sh | sudo RASPUTIN_SEED_B64='${b64}' bash`;
 }
 
