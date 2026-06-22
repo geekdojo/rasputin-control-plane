@@ -1090,6 +1090,18 @@ func TestHandleCreateUpdate_MissingFields(t *testing.T) {
 	}
 }
 
+func TestHandleCreateUpdate_RejectsFirewall(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "fw-1", Role: proto.RoleFirewall, Hostname: "fw"}); err != nil {
+		t.Fatalf("seed firewall node: %v", err)
+	}
+	w := f.do(t, http.MethodPost, "/api/updates", `{"nodeId":"fw-1","bundleSha256":"abc123"}`, c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for firewall target, got %d (body %s)", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleCreateSystemUpdate_MissingSha(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)

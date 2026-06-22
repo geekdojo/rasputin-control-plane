@@ -320,7 +320,10 @@ function DeployBundleButton({ bundle, nodes }: { bundle: Bundle; nodes: Node[] }
   const [nodeId, setNodeId] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const targets = nodes.filter((n) => n.status === 'online');
+  // An OS bundle (RAUC) deploys only to nodes running the Buildroot image —
+  // every role except the firewall, which runs a different image and updates
+  // through its own path, not RAUC bundles. Keep it out of the deploy picker.
+  const targets = nodes.filter((n) => n.status === 'online' && n.role !== 'firewall');
 
   async function start() {
     if (!nodeId) {

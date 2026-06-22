@@ -16,6 +16,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // maxBundleSize is the upper bound the api accepts for a single bundle
@@ -268,6 +269,14 @@ func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.NodeID == "" || req.BundleSHA256 == "" {
 		writeError(w, http.StatusBadRequest, "nodeId and bundleSha256 are required")
+		return
+	}
+	// The firewall runs a different image and updates through its own path, not
+	// OS bundles — reject it as a target so we never start a saga that can't
+	// apply the bundle (it has no agent to drive it). The UI already hides it
+	// from the deploy picker; this keeps the API honest for direct callers.
+	if n, err := s.inv.Get(r.Context(), req.NodeID); err == nil && n != nil && n.Role == proto.RoleFirewall {
+		writeError(w, http.StatusBadRequest, "the firewall node can't be updated with an OS bundle — it uses a separate update path")
 		return
 	}
 	spec, _ := json.Marshal(req)
