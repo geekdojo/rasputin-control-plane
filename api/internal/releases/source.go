@@ -24,10 +24,14 @@ type ManifestArtifact struct {
 	Raucb        string `json:"raucb,omitempty"`
 	Image        string `json:"image,omitempty"`
 	SHA256       string `json:"sha256"`
-	SizeBytes    int64  `json:"sizeBytes"`
-	Sig          string `json:"sig,omitempty"`
-	SignedBy     string `json:"signedBy,omitempty"`
-	BuildDate    string `json:"buildDate,omitempty"`
+	// ImageSha256 checksums the flashable `image` (the .img.xz), distinct from
+	// SHA256 which checksums the OTA `raucb`. Used by the node flasher to verify
+	// the downloaded image (GET /api/cluster/node-image).
+	ImageSha256 string `json:"imageSha256,omitempty"`
+	SizeBytes   int64  `json:"sizeBytes"`
+	Sig         string `json:"sig,omitempty"`
+	SignedBy    string `json:"signedBy,omitempty"`
+	BuildDate   string `json:"buildDate,omitempty"`
 }
 
 // ReleaseInfo is the resolved latest release for a component on a channel,

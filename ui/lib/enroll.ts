@@ -60,6 +60,24 @@ export function nodeImageFor(osVersion: string | undefined | null): NodeImage | 
   };
 }
 
+// flashCommand builds the single line the operator pastes on their laptop to
+// flash + enroll a new node ("plug in the drive, run this"). The control plane
+// serves the secret-free flasher at /flash.sh; the node's seed — the only
+// secret — rides along as a base64 env var (never in a URL). The script
+// downloads the cluster's image, verifies its checksum, flashes the drive,
+// writes the seed AND reads it back to confirm it landed, then ejects. We pin
+// the control-plane host to its stable mDNS name so the command is identical
+// regardless of how the operator reached this UI (IP vs name).
+export function flashCommand(seed: string, cpBase = 'http://rasputin.local'): string {
+  const b64 =
+    typeof btoa === 'function'
+      ? btoa(seed)
+      : // SSR/test fallback; the browser path uses btoa.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).Buffer.from(seed).toString('base64');
+  return `curl -fsSL ${cpBase}/flash.sh | sudo RASPUTIN_SEED_B64='${b64}' bash`;
+}
+
 // clusterPrefixOf derives the "<cluster>-" id prefix every node shares, from the
 // existing inventory: the longest common prefix, trimmed back to the last '-'.
 // Returns '' when there's no shared dash-delimited prefix (then suggestions are

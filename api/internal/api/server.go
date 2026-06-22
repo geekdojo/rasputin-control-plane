@@ -51,6 +51,12 @@ type Server struct {
 	// return 503. releaseChannel is the default channel ("stable" | "dev").
 	releaseSource  releases.Source
 	releaseChannel string
+	// releaseRepo / releaseDownloadBase resolve the public flashable node image
+	// for GET /api/cluster/node-image (the one-command flasher). Repo is
+	// "owner/name"; downloadBase is the asset host (https://github.com),
+	// overridable for tests/mirrors.
+	releaseRepo         string
+	releaseDownloadBase string
 }
 
 // SetReleaseSource wires the update-channel source used by
@@ -61,6 +67,14 @@ func (s *Server) SetReleaseSource(src releases.Source, channel string) {
 	if channel != "" {
 		s.releaseChannel = channel
 	}
+}
+
+// SetReleaseRepo wires the public release repo + asset host used to resolve a
+// new node's flashable image (GET /api/cluster/node-image). main.go calls this
+// at startup; tests point downloadBase at a fake asset server.
+func (s *Server) SetReleaseRepo(repo, downloadBase string) {
+	s.releaseRepo = repo
+	s.releaseDownloadBase = downloadBase
 }
 
 // SetAlertsService overrides the default aggregator-only alerts service
@@ -142,6 +156,11 @@ func (s *Server) Handler() http.Handler {
 	// ceremony can happen over HTTPS. See the handlers' comments.
 	mux.HandleFunc("GET /api/mesh/ios-profile", s.handleMeshIOSProfile)
 	mux.HandleFunc("GET /mesh-ca.pem", s.handleMeshCAPEM)
+	// The one-command node flasher runs on a laptop (no session) and is
+	// secret-free; both endpoints are intentionally open. flash.sh is a static
+	// script; node-image returns only the public image URL + checksum.
+	mux.HandleFunc("GET /flash.sh", s.handleGetFlashScript)
+	mux.HandleFunc("GET /api/cluster/node-image", s.handleClusterNodeImage)
 
 	// Authenticated
 	reqd := s.auth.RequireSessionFunc

@@ -1,12 +1,13 @@
 'use client';
 
-import { Cpu, Database, Download, Plus, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Cpu, Database, Download, Plus, X } from 'lucide-react';
 import { useState } from 'react';
 import { mintBusToken } from '../lib/api';
 import type { MintedBusToken } from '../lib/types';
 import {
   type AddableRole,
   downloadSeed,
+  flashCommand,
   nodeImageFor,
   renderNodeSeed,
   suggestNodeId,
@@ -173,8 +174,12 @@ function SuccessView({
 }) {
   const seed = renderNodeSeed(role, nodeId, token);
   const image = nodeImageFor(clusterOsVersion);
+  const command = flashCommand(seed);
+  const [showManual, setShowManual] = useState(false);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Primary path: one command flashes + enrolls the node end to end. */}
       <div
         style={{
           background: accentA(0.06),
@@ -186,50 +191,103 @@ function SuccessView({
         }}
       >
         <span style={{ color: ACCENT, fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>
-          ENROLLMENT FILE READY — SAVE IT NOW, NOT SHOWN AGAIN
+          FLASH THIS NODE IN ONE COMMAND
         </span>
-        <span style={{ color: FG, fontSize: 10, fontFamily: MONO }}>
-          for <Tok>{nodeId}</Tok>
+        <span style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
+          Plug the new node&apos;s drive into your computer, then run this. It downloads the matching
+          image, verifies it, flashes the drive, writes <Tok>{nodeId}</Tok>&apos;s enrollment (and
+          checks it landed), then ejects.
         </span>
         <div style={{ position: 'relative' }}>
-          <pre style={seedBox}>{seed}</pre>
+          <pre style={seedBox}>{command}</pre>
           <div style={{ position: 'absolute', top: 4, right: 4 }}>
-            <CopyButton value={seed} />
+            <CopyButton value={command} />
           </div>
         </div>
-        <div>
-          <Btn variant="primary" small onClick={() => downloadSeed(seed)}>
-            <Download size={11} /> DOWNLOAD rasputin-seed.env
-          </Btn>
-        </div>
+        <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
+          macOS &amp; Linux. Only offers external/removable drives, and asks you to confirm before it writes anything.
+        </span>
       </div>
 
-      <SectionLabel>NEXT STEPS</SectionLabel>
-      <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {[
-          image ? (
-            <>
-              Flash <Tok>Rasputin OS {image.version}</Tok> (your cluster&apos;s version) to the node&apos;s storage —{' '}
-              <a href={image.downloadUrl} target="_blank" rel="noreferrer" style={linkStyle}>
-                download the image
-              </a>{' '}
-              (
-              <a href={image.releaseUrl} target="_blank" rel="noreferrer" style={linkStyle}>
-                verify against the checksum in the release&apos;s manifest
-              </a>
-              ).
-            </>
-          ) : (
-            <>Flash a Rasputin OS node image — the same build your cluster runs — to the new node&apos;s storage.</>
-          ),
-          <>Copy this <Tok>rasputin-seed.env</Tok> to the root of the disk&apos;s boot partition (labeled <Tok>RASPUTIN-FW</Tok>).</>,
-          <>Seat the node in the backplane and power it on.</>,
-        ].map((step, i) => (
-          <li key={i} style={{ color: DIM, fontSize: 11, fontFamily: MONO, lineHeight: 1.5 }}>
-            {step}
-          </li>
-        ))}
-      </ol>
+      {/* Fallback: hand-flash with the seed file. */}
+      <button
+        onClick={() => setShowManual((v) => !v)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          padding: 0,
+          color: DIM,
+          fontSize: 10,
+          fontFamily: MONO,
+        }}
+      >
+        {showManual ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        Prefer to flash manually?
+      </button>
+
+      {showManual && (
+        <>
+          <div
+            style={{
+              background: accentA(0.06),
+              border: `1px solid ${accentA(0.4)}`,
+              padding: '12px 14px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+            }}
+          >
+            <span style={{ color: ACCENT, fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>
+              ENROLLMENT FILE — SAVE IT NOW, NOT SHOWN AGAIN
+            </span>
+            <span style={{ color: FG, fontSize: 10, fontFamily: MONO }}>
+              for <Tok>{nodeId}</Tok>
+            </span>
+            <div style={{ position: 'relative' }}>
+              <pre style={seedBox}>{seed}</pre>
+              <div style={{ position: 'absolute', top: 4, right: 4 }}>
+                <CopyButton value={seed} />
+              </div>
+            </div>
+            <div>
+              <Btn variant="primary" small onClick={() => downloadSeed(seed)}>
+                <Download size={11} /> DOWNLOAD rasputin-seed.env
+              </Btn>
+            </div>
+          </div>
+
+          <SectionLabel>MANUAL STEPS</SectionLabel>
+          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {[
+              image ? (
+                <>
+                  Flash <Tok>Rasputin OS {image.version}</Tok> (your cluster&apos;s version) to the node&apos;s storage —{' '}
+                  <a href={image.downloadUrl} target="_blank" rel="noreferrer" style={linkStyle}>
+                    download the image
+                  </a>{' '}
+                  (
+                  <a href={image.releaseUrl} target="_blank" rel="noreferrer" style={linkStyle}>
+                    verify against the checksum in the release&apos;s manifest
+                  </a>
+                  ).
+                </>
+              ) : (
+                <>Flash a Rasputin OS node image — the same build your cluster runs — to the new node&apos;s storage.</>
+              ),
+              <>Copy this <Tok>rasputin-seed.env</Tok> to the root of the disk&apos;s boot partition (labeled <Tok>RASPUTIN-FW</Tok>).</>,
+              <>Seat the node in the backplane and power it on.</>,
+            ].map((step, i) => (
+              <li key={i} style={{ color: DIM, fontSize: 11, fontFamily: MONO, lineHeight: 1.5 }}>
+                {step}
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
 
       <Hint>
         It&apos;ll appear below as <Tok>PENDING</Tok> until it powers on and joins — usually under a minute — then

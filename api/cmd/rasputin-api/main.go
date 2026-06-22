@@ -491,6 +491,7 @@ func main() {
 	releaseChannel := envOr("RASPUTIN_RELEASE_CHANNEL", "stable")
 	releaseAPIBase := envOr("RASPUTIN_RELEASE_API_BASE", "https://api.github.com")
 	srv.SetReleaseSource(releases.NewGithubPublicSource(releaseAPIBase, releaseRepo), releaseChannel)
+	srv.SetReleaseRepo(releaseRepo, envOr("RASPUTIN_RELEASE_DOWNLOAD_BASE", "https://github.com"))
 	log.Printf("rasputin-api: update channel = %s (repo %s)", releaseChannel, releaseRepo)
 
 	handler := srv.Handler()
