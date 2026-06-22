@@ -5,7 +5,7 @@
 # Served by the control plane at GET /flash.sh. The Add-node wizard hands the
 # operator a single line to paste on their laptop:
 #
-#   curl -fsSL http://rasputin.local/flash.sh | sudo RASPUTIN_SEED_B64='…' bash
+#   curl -fsSL https://rasputin.local/flash.sh | sudo RASPUTIN_SEED_B64='…' bash
 #
 # It downloads the OS image that matches the cluster, verifies its checksum,
 # flashes a plugged-in SSD/USB, writes the node's enrollment seed onto the boot
@@ -70,12 +70,17 @@ NODE_ROLE="$(seed_val RASPUTIN_NODE_ROLE)"
 NATS_URL="$(seed_val RASPUTIN_NATS_URL)"
 
 # Control-plane base URL: explicit override, else derive from the seed's NATS
-# host (nats://rasputin.local:4222 -> http://rasputin.local), else default.
+# host (nats://rasputin.local:4222 -> https://rasputin.local), else default.
+# HTTPS: the operator installed the mesh CA at first-run setup (it's what makes
+# the web UI + passkeys work), so curl validates the control plane's cert — and
+# fetching a script we pipe to `bash` over a verified channel keeps a LAN MITM
+# from swapping it. A cert error here means the CA isn't trusted on this machine
+# yet (install it from the control plane's trust page) — not something to -k past.
 CP_URL="${RASPUTIN_CP_URL:-}"
 if [ -z "$CP_URL" ]; then
 	host="$(printf '%s' "$NATS_URL" | sed -e 's#^[a-z]*://##' -e 's#:.*$##')"
 	[ -n "$host" ] || host="rasputin.local"
-	CP_URL="http://$host"
+	CP_URL="https://$host"
 fi
 CP_URL="${CP_URL%/}"
 

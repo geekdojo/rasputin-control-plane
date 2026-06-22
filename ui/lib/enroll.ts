@@ -68,7 +68,7 @@ export function nodeImageFor(osVersion: string | undefined | null): NodeImage | 
 // writes the seed AND reads it back to confirm it landed, then ejects. We pin
 // the control-plane host to its stable mDNS name so the command is identical
 // regardless of how the operator reached this UI (IP vs name).
-export function flashCommand(seed: string, cpBase = 'http://rasputin.local'): string {
+export function flashCommand(seed: string, cpBase = 'https://rasputin.local'): string {
   // Base64 the seed UTF-8-safely. btoa() throws on any char outside Latin1, and
   // the seed's comment line carries an em dash (and a node name could hold other
   // non-ASCII) — so encode to UTF-8 bytes first, then base64 those. flash.sh's
