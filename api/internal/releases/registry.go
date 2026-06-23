@@ -73,6 +73,23 @@ var Components = []Component{
 	},
 }
 
+// ArchCompatible maps a node CPU architecture to the OS release manifest's
+// `compatible` SKU string. The node OS ships one image per arch (role selected
+// at runtime), so this is all the flasher needs to pick the right artifact:
+// amd64 → the N100 (Intel) board, arm64 → the CM5 (Raspberry Pi) board. An
+// empty arch defaults to amd64. The firewall is a separate, x86-only image and
+// is not selectable here. Returns false for an unrecognized arch.
+func ArchCompatible(arch string) (string, bool) {
+	switch arch {
+	case "", "amd64":
+		return "rasputin-n100", true
+	case "arm64":
+		return "rasputin-pi5-cm5", true
+	default:
+		return "", false
+	}
+}
+
 // ComponentByID returns the registry entry for id.
 func ComponentByID(id string) (Component, bool) {
 	for _, c := range Components {

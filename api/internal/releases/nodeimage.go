@@ -12,10 +12,11 @@ import (
 // the anonymous download URL plus the checksum to verify it against. It backs
 // the one-command node flasher (GET /api/cluster/node-image → flash.sh).
 type NodeImageDescriptor struct {
-	Version string `json:"version"`
-	URL     string `json:"url"`
-	SHA256  string `json:"sha256"`
-	Image   string `json:"image"`
+	Version      string `json:"version"`
+	Architecture string `json:"architecture"`
+	URL          string `json:"url"`
+	SHA256       string `json:"sha256"`
+	Image        string `json:"image"`
 }
 
 // PublicNodeImage resolves the flashable node image for an EXACT OS version
@@ -59,10 +60,11 @@ func PublicNodeImage(ctx context.Context, hc *http.Client, downloadBase, repo, v
 			continue
 		}
 		return &NodeImageDescriptor{
-			Version: version,
-			URL:     tagBase + "/" + a.Image,
-			SHA256:  a.ImageSha256,
-			Image:   a.Image,
+			Version:      version,
+			Architecture: a.Architecture,
+			URL:          tagBase + "/" + a.Image,
+			SHA256:       a.ImageSha256,
+			Image:        a.Image,
 		}, nil
 	}
 	return nil, fmt.Errorf("no flashable %q image in manifest for os-%s", compatible, version)

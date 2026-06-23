@@ -32,15 +32,18 @@ func TestClusterNodeImage(t *testing.T) {
 	const version = "2026.06.0-dev.31"
 	const img = "rasputin-os-n100-2026.06.0-dev.31.img.xz"
 	const sha = "6b88e011deadbeef"
+	const armImg = "rasputin-os-cm5-2026.06.0-dev.31.img.xz"
+	const armSha = "abcdef0123456789"
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/geekdojo/rasputin-releases/releases/download/os-"+version+"/manifest.json",
 		func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(releases.Manifest{
 				Version: version,
-				Artifacts: []releases.ManifestArtifact{{
-					Compatible: "rasputin-n100", Image: img, ImageSha256: sha,
-				}},
+				Artifacts: []releases.ManifestArtifact{
+					{Compatible: "rasputin-n100", Architecture: "amd64", Image: img, ImageSha256: sha},
+					{Compatible: "rasputin-pi5-cm5", Architecture: "arm64", Image: armImg, ImageSha256: armSha},
+				},
 			})
 		})
 	rel := httptest.NewServer(mux)
@@ -58,6 +61,7 @@ func TestClusterNodeImage(t *testing.T) {
 		t.Fatalf("seed cp node: %v", err)
 	}
 
+	// Default (no arch) resolves the amd64/n100 image.
 	rec := f.do(t, http.MethodGet, "/api/cluster/node-image", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
@@ -66,10 +70,28 @@ func TestClusterNodeImage(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &desc); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if desc.Version != version || desc.SHA256 != sha {
+	if desc.Version != version || desc.SHA256 != sha || desc.Architecture != "amd64" {
 		t.Fatalf("descriptor = %+v", desc)
 	}
 	if !strings.HasSuffix(desc.URL, "/os-"+version+"/"+img) {
 		t.Fatalf("url = %q", desc.URL)
+	}
+
+	// ?arch=arm64 resolves the cm5 image.
+	rec = f.do(t, http.MethodGet, "/api/cluster/node-image?arch=arm64", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("arm64 status %d, body %s", rec.Code, rec.Body.String())
+	}
+	var armDesc releases.NodeImageDescriptor
+	if err := json.Unmarshal(rec.Body.Bytes(), &armDesc); err != nil {
+		t.Fatalf("decode arm64: %v", err)
+	}
+	if armDesc.SHA256 != armSha || armDesc.Architecture != "arm64" || !strings.HasSuffix(armDesc.URL, "/os-"+version+"/"+armImg) {
+		t.Fatalf("arm64 descriptor = %+v", armDesc)
+	}
+
+	// An unrecognized arch is a 400, not a silent fallback.
+	if rec := f.do(t, http.MethodGet, "/api/cluster/node-image?arch=mips", "", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad arch, got %d", rec.Code)
 	}
 }

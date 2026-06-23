@@ -6,8 +6,10 @@ import { mintBusToken } from '../lib/api';
 import type { MintedBusToken } from '../lib/types';
 import {
   type AddableRole,
+  type NodeArch,
   downloadSeed,
   flashCommand,
+  NODE_ARCHES,
   nodeImageFor,
   renderNodeSeed,
   suggestNodeId,
@@ -39,6 +41,7 @@ export function AddNodeWizard({
   onClose: () => void;
 }) {
   const [role, setRole] = useState<AddableRole>('compute');
+  const [arch, setArch] = useState<NodeArch>('amd64');
   const [nodeId, setNodeId] = useState(() => suggestNodeId(clusterPrefix, 'compute', taken));
   const [edited, setEdited] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -86,6 +89,7 @@ export function AddNodeWizard({
       {minted ? (
         <SuccessView
           role={role}
+          arch={arch}
           nodeId={minted.nodeId}
           token={minted.token}
           clusterOsVersion={clusterOsVersion}
@@ -125,6 +129,37 @@ export function AddNodeWizard({
             })}
           </div>
 
+          <SectionLabel>ARCHITECTURE</SectionLabel>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            {NODE_ARCHES.map((a) => {
+              const sel = arch === a.value;
+              return (
+                <button
+                  key={a.value}
+                  onClick={() => setArch(a.value)}
+                  style={{
+                    flex: 1,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-start',
+                    gap: 4,
+                    padding: '10px 12px',
+                    background: sel ? accentA(0.08) : 'rgba(var(--rasp-fg-rgb),0.03)',
+                    border: `1px solid ${sel ? accentA(0.5) : HAIR}`,
+                    cursor: 'pointer',
+                    transition: 'background 0.15s, border-color 0.15s',
+                  }}
+                >
+                  <span style={{ color: sel ? ACCENT : FG, fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>{a.label}</span>
+                  <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>{a.blurb}</span>
+                </button>
+              );
+            })}
+          </div>
+          <Hint style={{ marginBottom: 16 }}>
+            The CPU of the board you&apos;re flashing. Pick <Tok>ARM64</Tok> for a Raspberry Pi, <Tok>AMD64</Tok> for an Intel/AMD board.
+          </Hint>
+
           <SectionLabel>NODE NAME</SectionLabel>
           <Input
             value={nodeId}
@@ -161,20 +196,23 @@ export function AddNodeWizard({
 
 function SuccessView({
   role,
+  arch,
   nodeId,
   token,
   clusterOsVersion,
   onClose,
 }: {
   role: AddableRole;
+  arch: NodeArch;
   nodeId: string;
   token: string;
   clusterOsVersion?: string;
   onClose: () => void;
 }) {
   const seed = renderNodeSeed(role, nodeId, token);
-  const image = nodeImageFor(clusterOsVersion);
-  const command = flashCommand(seed);
+  const image = nodeImageFor(clusterOsVersion, arch);
+  const command = flashCommand(seed, arch);
+  const archLabel = NODE_ARCHES.find((a) => a.value === arch)?.label ?? arch.toUpperCase();
   const [showManual, setShowManual] = useState(false);
 
   return (
@@ -195,8 +233,8 @@ function SuccessView({
         </span>
         <span style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
           Plug the new node&apos;s drive into your computer, then run this. It downloads the matching
-          image, verifies it, flashes the drive, writes <Tok>{nodeId}</Tok>&apos;s enrollment (and
-          checks it landed), then ejects.
+          <Tok>{archLabel}</Tok> image, verifies it, flashes the drive, writes <Tok>{nodeId}</Tok>&apos;s
+          enrollment (and checks it landed), then ejects.
         </span>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
           <pre style={{ ...seedBox, flex: 1, minWidth: 0 }}>{command}</pre>
@@ -263,7 +301,7 @@ function SuccessView({
             {[
               image ? (
                 <>
-                  Flash <Tok>Rasputin OS {image.version}</Tok> (your cluster&apos;s version) to the node&apos;s storage —{' '}
+                  Flash <Tok>Rasputin OS {image.version}</Tok> <Tok>{archLabel}</Tok> (your cluster&apos;s version) to the node&apos;s storage —{' '}
                   <a href={image.downloadUrl} target="_blank" rel="noreferrer" style={linkStyle}>
                     download the image
                   </a>{' '}

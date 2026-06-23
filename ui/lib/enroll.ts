@@ -11,6 +11,27 @@ export const DEFAULT_NATS_URL = 'nats://rasputin.local:4222';
 // firewall is provisioned with the cluster, so neither is an "add a node" path.
 export type AddableRole = 'compute' | 'storage';
 
+// Target CPU architecture for a new node's OS image. The node OS is one image
+// per arch with the role selected at runtime (via the seed), so arch is
+// independent of role — a single arm64 image serves a compute, storage, or
+// controlplane node alike. The firewall is a separate, x86-only image and is
+// not added through this flow.
+export type NodeArch = 'amd64' | 'arm64';
+
+// Per-arch board SKU + display copy. amd64 → the N100 (Intel) board image;
+// arm64 → the CM5 (Raspberry Pi) board image. The public image asset names and
+// the release manifest's `compatible` string both key off the SKU.
+export const NODE_ARCHES: { value: NodeArch; sku: string; label: string; blurb: string }[] = [
+  { value: 'amd64', sku: 'n100', label: 'AMD64', blurb: 'Intel / AMD x86-64' },
+  { value: 'arm64', sku: 'cm5', label: 'ARM64', blurb: 'Raspberry Pi / ARM64' },
+];
+
+// skuForArch maps an arch to the board SKU used in image asset names
+// (rasputin-os-<sku>-<version>.img.xz). Defaults to the amd64/n100 SKU.
+export function skuForArch(arch: NodeArch): string {
+  return arch === 'arm64' ? 'cm5' : 'n100';
+}
+
 // renderNodeSeed builds the rasputin-seed.env the new node's firstboot reads.
 // Mirrors buildrootSeed (role / node-id / NATS url / join token).
 export function renderNodeSeed(
@@ -42,16 +63,19 @@ export interface NodeImage {
   releaseUrl: string;
 }
 
-// nodeImageFor builds the public download for the n100 node OS image at a given
-// version — pass the cluster's OS version so a new node matches it. SKU is n100
-// (the only v1 SKU). Returns null when the version is unknown (the wizard then
-// falls back to generic guidance). The image is verifiable against the
-// `imageSha256` in the release's manifest.json.
-export function nodeImageFor(osVersion: string | undefined | null): NodeImage | null {
+// nodeImageFor builds the public download for the node OS image at a given
+// version + architecture — pass the cluster's OS version so a new node matches
+// it, and the arch the operator is flashing for. Returns null when the version
+// is unknown (the wizard then falls back to generic guidance). The image is
+// verifiable against the `imageSha256` in the release's manifest.json.
+export function nodeImageFor(
+  osVersion: string | undefined | null,
+  arch: NodeArch = 'amd64',
+): NodeImage | null {
   const v = (osVersion ?? '').trim();
   if (!v) return null;
   const tag = `os-${v}`;
-  const asset = `rasputin-os-n100-${v}.img.xz`;
+  const asset = `rasputin-os-${skuForArch(arch)}-${v}.img.xz`;
   return {
     version: v,
     asset,
@@ -67,8 +91,12 @@ export function nodeImageFor(osVersion: string | undefined | null): NodeImage | 
 // downloads the cluster's image, verifies its checksum, flashes the drive,
 // writes the seed AND reads it back to confirm it landed, then ejects. We pin
 // the control-plane host to its stable mDNS name so the command is identical
-// regardless of how the operator reached this UI (IP vs name).
-export function flashCommand(seed: string, cpBase = 'https://rasputin.local'): string {
+// regardless of how the operator reached this UI (IP vs name). The arch selects
+// which image the flasher pulls (RASPUTIN_ARCH → /api/cluster/node-image?arch=);
+// it's only added to the line for non-default (arm64) so amd64 commands are
+// unchanged.
+export function flashCommand(seed: string, arch: NodeArch = 'amd64', cpBase = 'https://rasputin.local'): string {
+  const archEnv = arch !== 'amd64' ? `RASPUTIN_ARCH=${arch} ` : '';
   // Base64 the seed UTF-8-safely. btoa() throws on any char outside Latin1, and
   // the seed's comment line carries an em dash (and a node name could hold other
   // non-ASCII) — so encode to UTF-8 bytes first, then base64 those. flash.sh's
@@ -77,12 +105,12 @@ export function flashCommand(seed: string, cpBase = 'https://rasputin.local'): s
     const bytes = new TextEncoder().encode(seed);
     let bin = '';
     for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return `curl -fsSL ${cpBase}/flash.sh | sudo RASPUTIN_SEED_B64='${btoa(bin)}' bash`;
+    return `curl -fsSL ${cpBase}/flash.sh | sudo ${archEnv}RASPUTIN_SEED_B64='${btoa(bin)}' bash`;
   }
   // SSR/test fallback; the browser path uses btoa.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const b64 = (globalThis as any).Buffer.from(seed, 'utf8').toString('base64');
-  return `curl -fsSL ${cpBase}/flash.sh | sudo RASPUTIN_SEED_B64='${b64}' bash`;
+  return `curl -fsSL ${cpBase}/flash.sh | sudo ${archEnv}RASPUTIN_SEED_B64='${b64}' bash`;
 }
 
 // clusterPrefixOf derives the "<cluster>-" id prefix every node shares, from the

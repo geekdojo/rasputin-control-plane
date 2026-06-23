@@ -26,10 +26,17 @@ func (s *Server) handleGetFlashScript(w http.ResponseWriter, r *http.Request) {
 
 // handleClusterNodeImage returns the flashable OS image a NEW node should use
 // to match this cluster: the control plane's own OS version resolved to a
-// public download URL + checksum. Unauthenticated and secret-free — the flasher
-// script (run from a laptop, no session) fetches it, and it carries only the
-// version, the public image URL, and its sha256.
+// public download URL + checksum, for the requested CPU architecture
+// (?arch=amd64|arm64, default amd64). Unauthenticated and secret-free — the
+// flasher script (run from a laptop, no session) fetches it, and it carries
+// only the version, the public image URL, its sha256, and the arch.
 func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) {
+	arch := r.URL.Query().Get("arch")
+	compatible, ok := releases.ArchCompatible(arch)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unsupported arch (expected amd64 or arm64)")
+		return
+	}
 	cps, err := s.inv.ListByRole(r.Context(), proto.RoleControlPlane)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -50,10 +57,10 @@ func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) 
 	if base == "" {
 		base = "https://github.com"
 	}
-	desc, err := releases.PublicNodeImage(r.Context(), http.DefaultClient, base, s.releaseRepo, version, "rasputin-n100")
+	desc, err := releases.PublicNodeImage(r.Context(), http.DefaultClient, base, s.releaseRepo, version, compatible)
 	if err != nil {
-		log.Printf("cluster node-image (os-%s): %v", version, err)
-		writeError(w, http.StatusBadGateway, "couldn't resolve the node image for this cluster's version")
+		log.Printf("cluster node-image (os-%s, %s): %v", version, compatible, err)
+		writeError(w, http.StatusBadGateway, "couldn't resolve the node image for this cluster's version + architecture")
 		return
 	}
 	writeJSON(w, http.StatusOK, desc)

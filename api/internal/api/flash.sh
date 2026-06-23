@@ -27,6 +27,10 @@
 #
 # Env knobs:
 #   RASPUTIN_SEED_B64    (required) base64 of the rasputin-seed.env contents
+#   RASPUTIN_ARCH        target CPU arch: amd64 (default) or arm64. Selects which
+#                        per-arch OS image the control plane hands back (amd64 =
+#                        N100/Intel, arm64 = CM5/Raspberry Pi). The Add-node
+#                        wizard sets this from the architecture you pick.
 #   RASPUTIN_CP_URL      override control-plane base URL (default: derived from
 #                        the seed's NATS host, else http://rasputin.local)
 #   RASPUTIN_DISK        target device (e.g. /dev/disk4 or /dev/sdb); skips the
@@ -85,17 +89,21 @@ fi
 CP_URL="${CP_URL%/}"
 
 # --- fetch the image descriptor the cluster expects --------------------------
+# Target arch (amd64 default). The control plane resolves it to the matching
+# per-arch image (amd64 = N100/Intel, arm64 = CM5/Raspberry Pi).
+ARCH="${RASPUTIN_ARCH:-amd64}"
+case "$ARCH" in amd64|arm64) ;; *) die "RASPUTIN_ARCH must be amd64 or arm64 (got '$ARCH')." ;; esac
 have curl || die "curl is required."
-info "Asking ${CP_URL} which image this cluster runs…"
-DESC="$(curl -fsSL --max-time 20 "$CP_URL/api/cluster/node-image" 2>/dev/null || true)"
-[ -n "$DESC" ] || die "couldn't reach the control plane at $CP_URL — is this laptop on the same network as the cluster? (override with RASPUTIN_CP_URL=…)"
+info "Asking ${CP_URL} which ${ARCH} image this cluster runs…"
+DESC="$(curl -fsSL --max-time 20 "$CP_URL/api/cluster/node-image?arch=$ARCH" 2>/dev/null || true)"
+[ -n "$DESC" ] || die "couldn't get the $ARCH image from the control plane at $CP_URL — either this laptop isn't on the cluster's network (override with RASPUTIN_CP_URL=…), or this cluster's release has no $ARCH image yet."
 json_val() { printf '%s' "$DESC" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -1; }
 IMG_VERSION="$(json_val version)"
 IMG_URL="$(json_val url)"
 IMG_SHA="$(json_val sha256)"
 [ -n "$IMG_URL" ] && [ -n "$IMG_SHA" ] || die "the control plane didn't return a usable image descriptor (got: $DESC)"
 
-info "Node ${BLD}${NODE_ID}${RST} (${NODE_ROLE}) → Rasputin OS ${BLD}${IMG_VERSION}${RST}"
+info "Node ${BLD}${NODE_ID}${RST} (${NODE_ROLE}) → Rasputin OS ${BLD}${IMG_VERSION}${RST} (${ARCH})"
 
 # --- pick the target disk -----------------------------------------------------
 # list_disks prints one "<device>\t<size>\t<model>" line per candidate.

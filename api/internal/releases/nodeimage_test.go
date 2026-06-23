@@ -68,3 +68,23 @@ func TestPublicNodeImage_NoMatchingArtifact(t *testing.T) {
 		t.Fatal("expected error when no rasputin-n100 image is present")
 	}
 }
+
+func TestArchCompatible(t *testing.T) {
+	cases := []struct {
+		arch string
+		want string
+		ok   bool
+	}{
+		{"", "rasputin-n100", true},         // default → amd64
+		{"amd64", "rasputin-n100", true},    // N100 / Intel
+		{"arm64", "rasputin-pi5-cm5", true}, // CM5 / Raspberry Pi
+		{"mips", "", false},                 // unsupported
+		{"x86_64", "", false},               // not the canonical name
+	}
+	for _, c := range cases {
+		got, ok := ArchCompatible(c.arch)
+		if got != c.want || ok != c.ok {
+			t.Errorf("ArchCompatible(%q) = (%q, %v), want (%q, %v)", c.arch, got, ok, c.want, c.ok)
+		}
+	}
+}
