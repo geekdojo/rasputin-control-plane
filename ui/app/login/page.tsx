@@ -106,21 +106,34 @@ export default function LoginPage() {
             </p>
 
             {!status.hasUsers ? (
-              <>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleRegister();
+                }}
+                style={{ display: 'flex', flexDirection: 'column', gap: 18 }}
+              >
                 <Field label="USER NAME" hint="letters · digits · - _ .">
                   <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="operator" autoFocus disabled={busy} />
                 </Field>
                 <Field label="DISPLAY NAME" hint="optional">
                   <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Operator" disabled={busy} />
                 </Field>
-                <Btn variant="primary" disabled={busy || !name} onClick={handleRegister}>
+                <Btn variant="primary" type="submit" disabled={busy || !name}>
                   {busy ? 'REGISTERING…' : 'REGISTER PASSKEY'}
                 </Btn>
-              </>
+              </form>
             ) : (
-              <Btn variant="primary" disabled={busy} onClick={handleLogin}>
-                {busy ? 'AUTHENTICATING…' : 'SIGN IN WITH PASSKEY'}
-              </Btn>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleLogin();
+                }}
+              >
+                <Btn variant="primary" type="submit" disabled={busy}>
+                  {busy ? 'AUTHENTICATING…' : 'SIGN IN WITH PASSKEY'}
+                </Btn>
+              </form>
             )}
 
             {err && <ErrLine>{err}</ErrLine>}
