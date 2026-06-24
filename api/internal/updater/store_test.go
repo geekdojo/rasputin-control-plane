@@ -32,7 +32,7 @@ func sampleBundle(sha string) *Bundle {
 	return &Bundle{
 		SHA256:       sha,
 		Version:      "2026.05.30",
-		Compatible:   "rasputin-pi5-cm5",
+		Compatible:   "rasputin-rpi-arm64",
 		Architecture: "arm64",
 		Description:  "test bundle",
 		BuildDate:    "2026-05-30",

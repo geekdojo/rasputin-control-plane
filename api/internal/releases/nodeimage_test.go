@@ -75,11 +75,11 @@ func TestArchCompatible(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"", "rasputin-n100", true},         // default → amd64
-		{"amd64", "rasputin-n100", true},    // N100 / Intel
-		{"arm64", "rasputin-pi5-cm5", true}, // CM5 / Raspberry Pi
-		{"mips", "", false},                 // unsupported
-		{"x86_64", "", false},               // not the canonical name
+		{"", "rasputin-n100", true},           // default → amd64
+		{"amd64", "rasputin-n100", true},      // N100 / Intel
+		{"arm64", "rasputin-rpi-arm64", true}, // rpi: Pi 4 / Pi 5 / CM5
+		{"mips", "", false},                   // unsupported
+		{"x86_64", "", false},                 // not the canonical name
 	}
 	for _, c := range cases {
 		got, ok := ArchCompatible(c.arch)

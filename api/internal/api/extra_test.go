@@ -75,7 +75,7 @@ func buildBundleFixture(t *testing.T, f *apiFixture) ([]byte, string) {
 	f.srv.updaterVerifier = v
 
 	manifest := proto.BundleManifest{
-		Version: "test-1.0", Compatible: "rasputin-pi5-cm5", Architecture: "arm64",
+		Version: "test-1.0", Compatible: "rasputin-rpi-arm64", Architecture: "arm64",
 	}
 	payload := []byte("hello payload")
 	hashed := sha256.Sum256(payload)

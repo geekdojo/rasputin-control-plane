@@ -19,17 +19,18 @@ export type AddableRole = 'compute' | 'storage';
 export type NodeArch = 'amd64' | 'arm64';
 
 // Per-arch board SKU + display copy. amd64 → the N100 (Intel) board image;
-// arm64 → the CM5 (Raspberry Pi) board image. The public image asset names and
-// the release manifest's `compatible` string both key off the SKU.
+// arm64 → the `rpi` SKU (one unified image for Raspberry Pi 4 / Pi 5 / CM5).
+// The public image asset names and the release manifest's `compatible` string
+// both key off the SKU.
 export const NODE_ARCHES: { value: NodeArch; sku: string; label: string; blurb: string }[] = [
   { value: 'amd64', sku: 'n100', label: 'AMD64', blurb: 'Intel / AMD x86-64' },
-  { value: 'arm64', sku: 'cm5', label: 'ARM64', blurb: 'Raspberry Pi / ARM64' },
+  { value: 'arm64', sku: 'rpi', label: 'ARM64', blurb: 'Raspberry Pi / ARM64' },
 ];
 
 // skuForArch maps an arch to the board SKU used in image asset names
 // (rasputin-os-<sku>-<version>.img.xz). Defaults to the amd64/n100 SKU.
 export function skuForArch(arch: NodeArch): string {
-  return arch === 'arm64' ? 'cm5' : 'n100';
+  return arch === 'arm64' ? 'rpi' : 'n100';
 }
 
 // renderNodeSeed builds the rasputin-seed.env the new node's firstboot reads.

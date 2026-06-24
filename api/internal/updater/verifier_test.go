@@ -158,7 +158,7 @@ func TestVerify_MockBundle_Valid(t *testing.T) {
 	}
 	manifest := proto.BundleManifest{
 		Version:      "2026.05.30",
-		Compatible:   "rasputin-pi5-cm5",
+		Compatible:   "rasputin-rpi-arm64",
 		Architecture: "arm64",
 	}
 	payload := []byte("hello world bundle")
@@ -187,7 +187,7 @@ func TestVerify_MockBundle_Valid(t *testing.T) {
 func TestVerify_MockBundle_TamperedPayload(t *testing.T) {
 	pki := newPKI(t)
 	v, _ := NewVerifier(pki.trustDir)
-	manifest := proto.BundleManifest{Version: "1", Compatible: "rasputin-pi5-cm5", Architecture: "arm64"}
+	manifest := proto.BundleManifest{Version: "1", Compatible: "rasputin-rpi-arm64", Architecture: "arm64"}
 	buf := pki.buildMockBundle(t, manifest, []byte("original"))
 
 	// Decode → flip payload → re-encode, leaving signature intact.

@@ -32,7 +32,7 @@ func TestClusterNodeImage(t *testing.T) {
 	const version = "2026.06.0-dev.31"
 	const img = "rasputin-os-n100-2026.06.0-dev.31.img.xz"
 	const sha = "6b88e011deadbeef"
-	const armImg = "rasputin-os-cm5-2026.06.0-dev.31.img.xz"
+	const armImg = "rasputin-os-rpi-2026.06.0-dev.31.img.xz"
 	const armSha = "abcdef0123456789"
 
 	mux := http.NewServeMux()
@@ -42,7 +42,7 @@ func TestClusterNodeImage(t *testing.T) {
 				Version: version,
 				Artifacts: []releases.ManifestArtifact{
 					{Compatible: "rasputin-n100", Architecture: "amd64", Image: img, ImageSha256: sha},
-					{Compatible: "rasputin-pi5-cm5", Architecture: "arm64", Image: armImg, ImageSha256: armSha},
+					{Compatible: "rasputin-rpi-arm64", Architecture: "arm64", Image: armImg, ImageSha256: armSha},
 				},
 			})
 		})
@@ -77,7 +77,7 @@ func TestClusterNodeImage(t *testing.T) {
 		t.Fatalf("url = %q", desc.URL)
 	}
 
-	// ?arch=arm64 resolves the cm5 image.
+	// ?arch=arm64 resolves the rpi (Raspberry Pi) image.
 	rec = f.do(t, http.MethodGet, "/api/cluster/node-image?arch=arm64", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("arm64 status %d, body %s", rec.Code, rec.Body.String())
