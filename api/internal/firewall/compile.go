@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -180,6 +181,9 @@ func compilePortForward(in *Intent) (map[string]any, error) {
 	if spec.LanHost == "" {
 		return nil, fmt.Errorf("lanHost is required")
 	}
+	if err := rejectIPv6("lanHost", spec.LanHost); err != nil {
+		return nil, err
+	}
 	if spec.Protocol == "" {
 		spec.Protocol = proto.ProtoTCP
 	}
@@ -202,6 +206,27 @@ func compilePortForward(in *Intent) (map[string]any, error) {
 		r["_comment"] = spec.Comment
 	}
 	return r, nil
+}
+
+// rejectIPv6 enforces LOCKED decision #9 (Rasputin is IPv4-only): an explicit
+// IPv6 literal or IPv6 CIDR in a firewall intent's address field is rejected at
+// compile time so it can never reach the firewall. IPv4 values and non-IP
+// strings (a LAN hostname the firewall resolves itself) pass through — this
+// guard only catches an address the user pinned to IPv6.
+func rejectIPv6(field, val string) error {
+	if val == "" {
+		return nil
+	}
+	ip := net.ParseIP(val)
+	if ip == nil {
+		if _, ipnet, err := net.ParseCIDR(val); err == nil {
+			ip = ipnet.IP
+		}
+	}
+	if ip != nil && ip.To4() == nil {
+		return fmt.Errorf("%s %q is IPv6; Rasputin is IPv4-only (decision #9)", field, val)
+	}
+	return nil
 }
 
 // ucProto translates the api's protocol enum into the value OpenWrt's UCI
@@ -240,12 +265,18 @@ func compileFirewallRule(in *Intent) (map[string]any, error) {
 		r["dest"] = spec.Dest
 	}
 	if spec.SrcIP != "" {
+		if err := rejectIPv6("srcIp", spec.SrcIP); err != nil {
+			return nil, err
+		}
 		r["src_ip"] = spec.SrcIP
 	}
 	if spec.SrcPort != "" {
 		r["src_port"] = spec.SrcPort
 	}
 	if spec.DestIP != "" {
+		if err := rejectIPv6("destIp", spec.DestIP); err != nil {
+			return nil, err
+		}
 		r["dest_ip"] = spec.DestIP
 	}
 	if spec.DestPort != "" {

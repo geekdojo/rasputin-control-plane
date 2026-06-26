@@ -356,6 +356,26 @@ func TestCompile_ProtocolDefaultsToTCP(t *testing.T) {
 	}
 }
 
+func TestCompile_RejectsIPv6(t *testing.T) {
+	// port_forward lanHost pinned to an IPv6 literal is rejected (decision #9).
+	pf, _ := json.Marshal(proto.PortForwardSpec{WanPort: 80, LanHost: "fd7a:115c:a1e0::5", LanPort: 80})
+	if _, _, err := Compile([]*Intent{{ID: "i", Kind: string(proto.IntentPortForward), Name: "n", Enabled: true, Spec: pf}}); err == nil {
+		t.Error("expected IPv6 lanHost to be rejected")
+	}
+	// firewall_rule destIp as an IPv6 CIDR is rejected.
+	fr, _ := json.Marshal(proto.FirewallRuleSpec{Src: "wan", Target: proto.RuleTargetAccept, DestIP: "2001:db8::/32"})
+	if _, _, err := Compile([]*Intent{{ID: "j", Kind: string(proto.IntentFirewallRule), Name: "n", Enabled: true, Spec: fr}}); err == nil {
+		t.Error("expected IPv6 destIp CIDR to be rejected")
+	}
+	// IPv4 literal and a bare hostname both pass (the firewall resolves the name).
+	for _, host := range []string{"10.0.0.5", "nas.lan"} {
+		ok, _ := json.Marshal(proto.PortForwardSpec{WanPort: 80, LanHost: host, LanPort: 80})
+		if _, _, err := Compile([]*Intent{{ID: "k", Kind: string(proto.IntentPortForward), Name: "n", Enabled: true, Spec: ok}}); err != nil {
+			t.Errorf("lanHost %q should be accepted: %v", host, err)
+		}
+	}
+}
+
 func TestCompile_ProtocolTCPUDPExpands(t *testing.T) {
 	spec, _ := json.Marshal(proto.PortForwardSpec{
 		WanPort: 53, LanHost: "h", LanPort: 53, Protocol: proto.ProtoTCPUDP,
