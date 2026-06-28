@@ -288,10 +288,33 @@ func (r *RAUCBackend) Install(ctx context.Context, bundleID, localPath string, t
 	return "", errors.New("could not parse RAUC_MF_VERSION from `rauc info`")
 }
 
+// trybootMarker is the OS-image file whose presence means this node boots via
+// the Raspberry Pi firmware tryboot A/B mechanism (the selector partition's
+// autoboot.txt; the n100/GRUB image has no such file). Package var so tests can
+// point it elsewhere. Mirrors the OS-side gates
+// (rasputin-rauc-reconcile.service / rasputin-mark-good.service).
+var trybootMarker = "/run/rasputin-seed/autoboot.txt"
+
+// rebootArgs returns the `systemctl` arguments for the post-install trial
+// reboot. On a Pi (tryboot backend) the install armed [tryboot] boot_partition
+// but NOT the firmware one-shot (no vcmailbox in-tree), so a PLAIN reboot would
+// boot the still-committed slot and never trial the new one. `reboot "0 tryboot"`
+// arms the firmware one-shot so the next boot loads the candidate boot
+// partition; on a healthy boot the saga's health-gated mark-good commits, and a
+// failed trial reverts to the committed slot on the next (normal) boot. On the
+// n100 (GRUB) a plain reboot is correct — `rauc install` already set grubenv.
+func rebootArgs() []string {
+	if _, err := os.Stat(trybootMarker); err == nil {
+		return []string{"reboot", "0 tryboot"}
+	}
+	return []string{"reboot"}
+}
+
 func (r *RAUCBackend) Reboot(ctx context.Context, bundleID string, delaySeconds int) (int, error) {
 	if delaySeconds <= 0 || delaySeconds > 30 {
 		delaySeconds = 3
 	}
+	args := rebootArgs()
 	// Schedule the reboot in the background so we can ack synchronously.
 	// `shutdown -r +0` would be immediate; we use systemctl reboot after
 	// the configured delay so the agent has time to publish the rebooting
@@ -301,10 +324,10 @@ func (r *RAUCBackend) Reboot(ctx context.Context, bundleID string, delaySeconds 
 			r.muted.Store(true)
 		}
 		// time.Sleep blocks; we keep the goroutine alive until reboot.
-		// We use a syscall-level reboot via `systemctl reboot` to ensure
-		// the bootloader handoff is clean.
+		// We reboot via `systemctl` to ensure a clean bootloader handoff —
+		// with the tryboot one-shot argument on the Pi (see rebootArgs).
 		_ = exec.Command("sleep", fmt.Sprintf("%d", delaySeconds)).Run()
-		_ = exec.Command("systemctl", "reboot").Run()
+		_ = exec.Command("systemctl", args...).Run()
 	}()
 	return delaySeconds, nil
 }
