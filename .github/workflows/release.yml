@@ -7,8 +7,14 @@ name: release
 # libc-independent static ELF that runs on the Buildroot OS *and* OpenWrt.
 #
 # Triggers:
-#   - push of a v* tag (e.g. v0.1.0)  → publish a Release with that version
-#   - manual dispatch with a version  → dry-run / ad-hoc build
+#   - push of a v* tag (e.g. v2026.07.1 or v2026.07.1-dev.1) → publish a Release
+#   - manual dispatch (publish=false) → bench dry-run, artifacts only
+#   - manual dispatch (publish=true)  → publish a dev release versioned
+#       ${vars.RASPUTIN_VERSION}-dev.<run> (dev.N = run number). The release base
+#       (YYYY.MM.MICRO CalVer) comes from the org var RASPUTIN_VERSION, shared
+#       with rasputin-os / -openwrt-firewall for lockstep. Versions are CalVer
+#       now (was semver) — CalVer's year >> the old 0.x major, so an OS still
+#       reporting an old semver agent sees CalVer as a clean upgrade.
 
 on:
   push:
@@ -16,10 +22,10 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+*"
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version without leading v (e.g. 0.1.0)"
-        required: true
-        type: string
+      publish:
+        description: "Publish a dev release (versioned from org var RASPUTIN_VERSION). Off = bench dry-run, artifacts only."
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # create the release + upload assets
@@ -49,15 +55,27 @@ jobs:
 
       - name: Resolve version
         id: ver
+        # TARGET_VERSION = org var RASPUTIN_VERSION (current dev target, CalVer
+        # YYYY.MM.MICRO), shared across the three Rasputin repos for lockstep.
+        env:
+          TARGET_VERSION: ${{ vars.RASPUTIN_VERSION }}
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             V="${GITHUB_REF_NAME#v}"
           else
-            V="${{ inputs.version }}"
+            if [ -z "${TARGET_VERSION}" ]; then
+              echo "::error::org var RASPUTIN_VERSION is unset — set it to the current dev target (e.g. 2026.07.1): gh variable set RASPUTIN_VERSION --org geekdojo --body 2026.07.1 --visibility all"
+              exit 1
+            fi
+            V="${TARGET_VERSION}-dev.${GITHUB_RUN_NUMBER}"
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          # A semver pre-release (anything with a hyphen, e.g. 0.8.7-dev.1) maps
-          # to the dev channel + GitHub prerelease; a clean x.y.z is stable.
+          # Release tag is always v<version> (the OS .mk downloads from
+          # .../releases/download/v<version>/...). On a tag push this equals the
+          # pushed ref; on a dispatch-publish it tags the dispatched commit.
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+          # A pre-release (anything with a hyphen, e.g. 2026.07.1-dev.73) maps to
+          # the dev channel + GitHub prerelease; a clean CalVer is stable.
           case "$V" in
             *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT"; echo "channel=dev"    >> "$GITHUB_OUTPUT" ;;
             *)   echo "prerelease=false" >> "$GITHUB_OUTPUT"; echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
@@ -71,14 +89,15 @@ jobs:
       # rasputin-os fetches these from
       #   .../releases/download/v<version>/rasputin-<comp>-<version>-linux-<arch>.tar.gz
       - name: Publish release
-        if: github.event_name == 'push'
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true')) }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           PRERELEASE_FLAG=""
           [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "Rasputin control plane ${GITHUB_REF_NAME}" \
+          gh release create "$TAG" \
+            --title "Rasputin control plane $TAG" \
             --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64; the api tarball bundles the web UI). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
             $PRERELEASE_FLAG \
             dist/*.tar.gz dist/*.sha256 dist/*.hash
@@ -90,27 +109,28 @@ jobs:
       # not the binaries. RASPUTIN_RELEASES is an org secret (Contents:write on
       # rasputin-releases). Idempotent (create-or-clobber).
       - name: Mirror version to public release channel
-        if: github.event_name == 'push'
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true')) }}
         env:
           GH_TOKEN: ${{ secrets.RASPUTIN_RELEASES }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -eu
           CHANNEL="${{ steps.ver.outputs.channel }}"
           PRERELEASE_FLAG=""
           [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
           mkdir -p relmirror
-          printf '{"version":"%s","channel":"%s","artifacts":[]}\n' "${GITHUB_REF_NAME}" "$CHANNEL" > relmirror/manifest.json
-          tag="cp-${GITHUB_REF_NAME}"
+          printf '{"version":"%s","channel":"%s","artifacts":[]}\n' "$TAG" "$CHANNEL" > relmirror/manifest.json
+          tag="cp-${TAG}"
           gh release create "$tag" --repo geekdojo/rasputin-releases \
-            --title "Rasputin control plane ${GITHUB_REF_NAME}" \
+            --title "Rasputin control plane ${TAG}" \
             --notes "Informational version manifest ($CHANNEL channel). Control-plane software ships inside the OS image; update the OS to update it." \
             $PRERELEASE_FLAG \
             relmirror/manifest.json \
           || gh release upload "$tag" --repo geekdojo/rasputin-releases --clobber relmirror/manifest.json
 
-      # Manual dispatch → just keep the artifacts for inspection.
+      # Bench dispatch (publish=false) → just keep the artifacts for inspection.
       - name: Upload artifacts (dispatch dry-run)
-        if: github.event_name == 'workflow_dispatch'
+        if: ${{ github.event_name == 'workflow_dispatch' && !(inputs.publish == true || inputs.publish == 'true') }}
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ steps.ver.outputs.version }}
