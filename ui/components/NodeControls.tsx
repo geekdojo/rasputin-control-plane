@@ -260,8 +260,8 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
               {[
                 { label: 'HOSTNAME', value: node.hostname || '—' },
                 { label: 'ROLE', value: node.role.toUpperCase() },
+                { label: 'TYPE', value: node.architecture || '—' },
                 { label: 'STATUS', value: node.status.toUpperCase() },
-                { label: 'AGENT', value: node.agentVersion || '—' },
                 { label: 'OS IMAGE', value: node.imageVersion || '—' },
               ].map(({ label, value }) => (
                 <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>

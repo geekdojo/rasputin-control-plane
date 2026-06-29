@@ -22,4 +22,5 @@ CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen);
 // where the CREATE TABLE above already covered the change).
 var migrations = []string{
 	`ALTER TABLE nodes ADD COLUMN image_version TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE nodes ADD COLUMN architecture TEXT NOT NULL DEFAULT ''`,
 }

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -342,6 +343,9 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole) {
 		Hostname:     host.Hostname(),
 		AgentVersion: AgentVersion,
 		ImageVersion: host.ImageVersion(),
+		// The agent ships per-arch (one binary per OS image arch), so the
+		// compile-time GOARCH is the node's CPU arch.
+		Architecture: runtime.GOARCH,
 		Metadata:     meta,
 		Ts:           time.Now().UTC(),
 	}

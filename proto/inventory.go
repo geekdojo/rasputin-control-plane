@@ -41,11 +41,16 @@ const (
 // NodeRegisteredEvt is published by an agent on every NATS connect and
 // reconnect. The api treats it as an idempotent upsert of the node row.
 type NodeRegisteredEvt struct {
-	NodeID       string         `json:"nodeId"`
-	Role         NodeRole       `json:"role"`
-	Hostname     string         `json:"hostname"`
-	AgentVersion string         `json:"agentVersion"`
-	ImageVersion string         `json:"imageVersion"`
+	NodeID       string   `json:"nodeId"`
+	Role         NodeRole `json:"role"`
+	Hostname     string   `json:"hostname"`
+	AgentVersion string   `json:"agentVersion"`
+	ImageVersion string   `json:"imageVersion"`
+	// Architecture is the node's CPU arch ("amd64" | "arm64"), reported as the
+	// agent binary's runtime.GOARCH (the agent ships per-arch, so this is the
+	// node's arch). Drives arch-aware update deploys + the UI "Type" field.
+	// Empty from pre-arch agents; consumers treat "" as unknown.
+	Architecture string         `json:"architecture,omitempty"`
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	Ts           time.Time      `json:"ts"`
@@ -85,11 +90,15 @@ type InventoryChangeEvt struct {
 // Node is the api's view of an agent — the projection that gets returned
 // from /api/nodes and embedded in InventoryChangeEvt.
 type Node struct {
-	ID           string         `json:"id"`
-	Role         NodeRole       `json:"role"`
-	Hostname     string         `json:"hostname"`
-	AgentVersion string         `json:"agentVersion"`
-	ImageVersion string         `json:"imageVersion"`
+	ID           string   `json:"id"`
+	Role         NodeRole `json:"role"`
+	Hostname     string   `json:"hostname"`
+	AgentVersion string   `json:"agentVersion"`
+	ImageVersion string   `json:"imageVersion"`
+	// Architecture is the node's CPU arch ("amd64" | "arm64"); "" if a pre-arch
+	// agent never reported it. Surfaced in the UI and used to match the right
+	// OS bundle on deploy.
+	Architecture string         `json:"architecture,omitempty"`
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	FirstSeen    time.Time      `json:"firstSeen"`

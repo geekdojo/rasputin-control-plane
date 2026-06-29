@@ -199,6 +199,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 			Hostname:     ev.Hostname,
 			AgentVersion: ev.AgentVersion,
 			ImageVersion: ev.ImageVersion,
+			Architecture: ev.Architecture,
 			Capabilities: ev.Capabilities,
 			Metadata:     ev.Metadata,
 			FirstSeen:    now,
@@ -226,6 +227,11 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	existing.Hostname = ev.Hostname
 	existing.AgentVersion = ev.AgentVersion
 	existing.ImageVersion = ev.ImageVersion
+	// Only overwrite arch when reported — a pre-arch agent reconnecting (arch="")
+	// must not wipe an arch we already learned.
+	if ev.Architecture != "" {
+		existing.Architecture = ev.Architecture
+	}
 	existing.Capabilities = ev.Capabilities
 	existing.Metadata = ev.Metadata
 	existing.LastSeen = now

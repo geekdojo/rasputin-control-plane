@@ -271,13 +271,28 @@ func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "nodeId and bundleSha256 are required")
 		return
 	}
-	// The firewall runs a different image and updates through its own path, not
-	// OS bundles — reject it as a target so we never start a saga that can't
-	// apply the bundle (it has no agent to drive it). The UI already hides it
-	// from the deploy picker; this keeps the API honest for direct callers.
-	if n, err := s.inv.Get(r.Context(), req.NodeID); err == nil && n != nil && n.Role == proto.RoleFirewall {
-		writeError(w, http.StatusBadRequest, "the firewall node can't be updated with an OS bundle — it uses a separate update path")
-		return
+	// Validate the target node before starting a saga. Two guards:
+	//   1. The firewall runs a different image and updates through its own path,
+	//      not OS bundles — never start a saga it can't drive (no agent).
+	//   2. Arch match — an arm64 node can't install an amd64 bundle (RAUC would
+	//      reject it at install). Reject up front with an actionable message.
+	//      Only enforced when the node has reported its arch (pre-arch agents
+	//      report ""); the on-node RAUC compatible check is the backstop.
+	if n, err := s.inv.Get(r.Context(), req.NodeID); err == nil && n != nil {
+		if n.Role == proto.RoleFirewall {
+			writeError(w, http.StatusBadRequest, "the firewall node can't be updated with an OS bundle — it uses a separate update path")
+			return
+		}
+		if n.Architecture != "" {
+			if b, err := s.updater.GetBundle(r.Context(), req.BundleSHA256); err == nil && b != nil {
+				if want, ok := releases.ArchCompatible(n.Architecture); ok && b.Compatible != want {
+					writeError(w, http.StatusBadRequest, fmt.Sprintf(
+						"bundle is %s (%s) but node %s is %s — pick the %s bundle",
+						b.Compatible, b.Architecture, req.NodeID, n.Architecture, want))
+					return
+				}
+			}
+		}
 	}
 	spec, _ := json.Marshal(req)
 	j, err := s.runner.Submit(r.Context(), "node.update", spec, creator(r))
@@ -390,60 +405,81 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no release for "+comp.ID+" on channel "+channel)
 		return
 	}
-	art, ok := info.Artifact(comp.Compatible)
-	if !ok || art.Raucb == "" || art.SHA256 == "" {
-		writeError(w, http.StatusBadGateway, "release "+info.Version+" has no deployable artifact for "+comp.Compatible)
-		return
+	// Stage EVERY deployable artifact in the manifest — one per arch — so a
+	// mixed-arch cluster (N100 amd64 + Raspberry Pi arm64) has a bundle for
+	// every node. This previously pulled only comp.Compatible (the amd64 SKU),
+	// which left arm64 nodes with nothing to deploy and the OTA silently stuck.
+	var arts []*releases.ManifestArtifact
+	for i := range info.Manifest.Artifacts {
+		a := &info.Manifest.Artifacts[i]
+		if a.Raucb != "" && a.SHA256 != "" {
+			arts = append(arts, a)
+		}
 	}
-	url, ok := info.AssetURL(art.Raucb)
-	if !ok {
-		writeError(w, http.StatusBadGateway, "release "+info.Version+" has no asset "+art.Raucb)
+	if len(arts) == 0 {
+		writeError(w, http.StatusBadGateway, "release "+info.Version+" has no deployable artifact")
 		return
 	}
 
-	rc, err := s.releaseSource.Open(r.Context(), url)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "download bundle: "+err.Error())
-		return
-	}
-	defer rc.Close()
-
-	wantSHA := strings.ToLower(art.SHA256)
-	verify := func(tmpPath, sha string) (bundleMeta, error) {
-		if sha != wantSHA {
-			return bundleMeta{}, fmt.Errorf("sha256 mismatch: downloaded %s, manifest says %s", sha, wantSHA)
+	var primary *updater.Bundle
+	anyCreated := false
+	for _, art := range arts {
+		url, ok := info.AssetURL(art.Raucb)
+		if !ok {
+			writeError(w, http.StatusBadGateway, "release "+info.Version+" has no asset "+art.Raucb)
+			return
 		}
-		meta := bundleMeta{
-			Version: info.Version, Compatible: art.Compatible, Architecture: art.Architecture,
-			BuildDate: art.BuildDate, SignedBy: art.SignedBy,
-			Description: "pulled from " + channel + " channel",
+		rc, err := s.releaseSource.Open(r.Context(), url)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "download bundle: "+err.Error())
+			return
 		}
-		// Mock bundles (dev/CI) get the full host-side signature gate. Real
-		// .raucb bundles are sha-pinned by the signed manifest here and the
-		// signature is re-verified by RAUC at install time on the target node
-		// (the authoritative gate) — host-side .raucb verify needs the rauc
-		// CLI and lands with the real-RAUC-backend work (see updates.md).
-		if strings.HasSuffix(art.Raucb, ".raspbundle") {
-			man, _, err := s.updaterVerifier.VerifyFile(tmpPath)
-			if err != nil {
-				return bundleMeta{}, err
+		wantSHA := strings.ToLower(art.SHA256)
+		verify := func(tmpPath, sha string) (bundleMeta, error) {
+			if sha != wantSHA {
+				return bundleMeta{}, fmt.Errorf("sha256 mismatch: downloaded %s, manifest says %s", sha, wantSHA)
 			}
-			meta.Version, meta.Compatible, meta.Architecture = man.Version, man.Compatible, man.Architecture
-			meta.SignedBy, meta.BuildDate = man.SignedBy, man.BuildDate
+			meta := bundleMeta{
+				Version: info.Version, Compatible: art.Compatible, Architecture: art.Architecture,
+				BuildDate: art.BuildDate, SignedBy: art.SignedBy,
+				Description: "pulled from " + channel + " channel",
+			}
+			// Mock bundles (dev/CI) get the full host-side signature gate. Real
+			// .raucb bundles are sha-pinned by the signed manifest here and the
+			// signature is re-verified by RAUC at install time on the target node
+			// (the authoritative gate) — host-side .raucb verify needs the rauc
+			// CLI and lands with the real-RAUC-backend work (see updates.md).
+			if strings.HasSuffix(art.Raucb, ".raspbundle") {
+				man, _, err := s.updaterVerifier.VerifyFile(tmpPath)
+				if err != nil {
+					return bundleMeta{}, err
+				}
+				meta.Version, meta.Compatible, meta.Architecture = man.Version, man.Compatible, man.Architecture
+				meta.SignedBy, meta.BuildDate = man.SignedBy, man.BuildDate
+			}
+			return meta, nil
 		}
-		return meta, nil
-	}
-
-	bundle, created, err := s.ingestBundle(r.Context(), rc, "update-check", verify)
-	if err != nil {
-		writeError(w, ingestStatus(err), err.Error())
-		return
+		bundle, created, err := s.ingestBundle(r.Context(), rc, "update-check", verify)
+		rc.Close()
+		if err != nil {
+			writeError(w, ingestStatus(err), err.Error())
+			return
+		}
+		if created {
+			anyCreated = true
+		}
+		// Response body is the artifact matching the component's nominal compat
+		// (back-compat: the UI's pull returns a single Bundle); the rest land in
+		// the catalog the UI re-lists. Fall back to the first staged bundle.
+		if primary == nil || art.Compatible == comp.Compatible {
+			primary = bundle
+		}
 	}
 	status := http.StatusCreated
-	if !created {
+	if !anyCreated {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, bundle)
+	writeJSON(w, status, primary)
 }
 
 // looksLikeSHA256 reports whether s is exactly 64 lowercase hex chars.

@@ -323,7 +323,15 @@ function DeployBundleButton({ bundle, nodes }: { bundle: Bundle; nodes: Node[] }
   // An OS bundle (RAUC) deploys only to nodes running the Buildroot image —
   // every role except the firewall, which runs a different image and updates
   // through its own path, not RAUC bundles. Keep it out of the deploy picker.
-  const targets = nodes.filter((n) => n.status === 'online' && n.role !== 'firewall');
+  // Also match architecture: an amd64 bundle can't install on an arm64 node and
+  // vice-versa. Nodes that haven't reported an arch (pre-arch agents) stay
+  // eligible — the api re-checks arch and RAUC is the final backstop.
+  const targets = nodes.filter(
+    (n) =>
+      n.status === 'online' &&
+      n.role !== 'firewall' &&
+      (!n.architecture || n.architecture === bundle.architecture),
+  );
 
   async function start() {
     if (!nodeId) {

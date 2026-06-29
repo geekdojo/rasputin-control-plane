@@ -1102,6 +1102,27 @@ func TestHandleCreateUpdate_RejectsFirewall(t *testing.T) {
 	}
 }
 
+func TestHandleCreateUpdate_RejectsArchMismatch(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	// An arm64 node + an amd64 (rasputin-n100) bundle must be rejected before a
+	// saga starts — RAUC would refuse the cross-arch bundle on the node anyway.
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "pi-1", Role: proto.RoleCompute, Hostname: "pi", Architecture: "arm64"}); err != nil {
+		t.Fatalf("seed arm64 node: %v", err)
+	}
+	sha := strings.Repeat("a", 64)
+	if err := f.updStore.CreateBundle(f.ctx, &updater.Bundle{
+		SHA256: sha, Version: "2026.07.1-dev.74", Compatible: "rasputin-n100",
+		Architecture: "amd64", StoragePath: "/dev/null", UploadedAt: time.Now(), UploadedBy: "test",
+	}); err != nil {
+		t.Fatalf("seed amd64 bundle: %v", err)
+	}
+	w := f.do(t, http.MethodPost, "/api/updates", `{"nodeId":"pi-1","bundleSha256":"`+sha+`"}`, c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for arch mismatch, got %d (body %s)", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleCreateSystemUpdate_MissingSha(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)

@@ -61,6 +61,8 @@ export interface Node {
   hostname: string;
   agentVersion: string;
   imageVersion?: string;
+  /** CPU architecture: "amd64" | "arm64". Empty/undefined if a pre-arch agent never reported it. */
+  architecture?: string;
   capabilities?: string[];
   metadata?: Record<string, unknown>;
   firstSeen: string;
