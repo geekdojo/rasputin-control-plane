@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -316,18 +317,21 @@ func (r *RAUCBackend) Reboot(ctx context.Context, bundleID string, delaySeconds 
 	}
 	args := rebootArgs()
 	// Schedule the reboot in the background so we can ack synchronously.
-	// `shutdown -r +0` would be immediate; we use systemctl reboot after
-	// the configured delay so the agent has time to publish the rebooting
-	// event.
 	go func() {
 		if r.muted != nil {
 			r.muted.Store(true)
 		}
-		// time.Sleep blocks; we keep the goroutine alive until reboot.
-		// We reboot via `systemctl` to ensure a clean bootloader handoff —
-		// with the tryboot one-shot argument on the Pi (see rebootArgs).
 		_ = exec.Command("sleep", fmt.Sprintf("%d", delaySeconds)).Run()
-		_ = exec.Command("systemctl", args...).Run()
+		// Exec the `reboot` command directly — NOT `systemctl reboot`. The Pi
+		// firmware tryboot one-shot needs "0 tryboot" passed to reboot(2), which
+		// the `reboot` compat command does but the `systemctl reboot` VERB does
+		// not (systemd 256: `systemctl reboot "0 tryboot"` fails to arg-parse and
+		// never reboots). args[0] is "reboot" (+ "0 tryboot" on the Pi, nothing on
+		// n100). Log the error — a swallowed failure here silently stalled the
+		// first Pi OTA at wait_online_and_verify_slot (the box never rebooted).
+		if err := exec.Command(args[0], args[1:]...).Run(); err != nil {
+			log.Printf("rasputin-agent: reboot %v failed: %v", args, err)
+		}
 	}()
 	return delaySeconds, nil
 }
