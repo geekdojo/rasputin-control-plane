@@ -197,11 +197,41 @@ func parseRAUCStatus(s string) raucStatus {
 	return out
 }
 
+// pruneBundles removes every staged bundle + stale partial download from the
+// bundle store except keepID's .raucb. A bundle is only needed transiently
+// (download → rauc install); the installed OS then lives on the A/B slot, not
+// here, so old bundles are pure cache. Without pruning they accumulate (one
+// ~137 MB .raucb per OTA) and fill a small data partition — which failed an OTA
+// on the bench (the un-grown rpi persistent at 487 MB held 3 bundles → ENOSPC).
+// Best-effort: failures are logged, never fatal to the update.
+func (r *RAUCBackend) pruneBundles(keepID string) {
+	dir := filepath.Join(r.stateDir, "bundles")
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	keep := keepID + ".raucb"
+	for _, e := range ents {
+		name := e.Name()
+		if name == keep {
+			continue
+		}
+		if strings.HasSuffix(name, ".raucb") || strings.HasPrefix(name, "download-") {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil {
+				log.Printf("rasputin-agent: prune bundle %s: %v", name, err)
+			}
+		}
+	}
+}
+
 func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, expectedSHA string, sizeBytes int64,
 	progressFn func(int64, int64)) (string, string, error) {
 	// Same HTTP fetch as the mock; rauc doesn't have a native HTTP
 	// fetcher in our setup.
 	dest := filepath.Join(r.stateDir, "bundles", bundleID+".raucb")
+	// Free the store before pulling: drop any prior bundles/partials so they
+	// don't accumulate and fill a small data partition (see pruneBundles).
+	r.pruneBundles(bundleID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", "", err
