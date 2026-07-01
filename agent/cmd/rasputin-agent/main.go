@@ -211,12 +211,13 @@ func main() {
 		go hostsync.Run(ctx, "rasputin.local", hostsDir, 30*time.Second, os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"), nil)
 	}
 
-	// OS update handlers — every node gets them. Picks `rauc` if the CLI
-	// is on PATH, otherwise falls back to mock. Force via
-	// RASPUTIN_UPDATE_BACKEND=rauc|mock.
+	// OS update handlers — every node gets them. The firewall (OpenWrt, no
+	// RAUC) uses the custom A/B backend; compute/controlplane use `rauc` when
+	// the CLI is on PATH; everything else falls back to mock. Force via
+	// RASPUTIN_UPDATE_BACKEND=rauc|openwrt-ab|mock.
 	{
 		updaterDir := filepath.Join(stateDir, "updater")
-		backendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend())
+		backendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(role))
 
 		var upBackend updater.Backend
 		switch backendChoice {
@@ -230,6 +231,14 @@ func main() {
 			// over its mesh-CA HTTPS leaf, which the system roots don't cover.
 			rb.SetCABundle(tailscale.CABundlePath())
 			upBackend = rb
+		case "openwrt-ab":
+			ab, err := updater.NewOpenWrtABBackend(updaterDir)
+			if err != nil {
+				log.Fatalf("rasputin-agent: openwrt-ab backend: %v", err)
+			}
+			ab.SetMuteHook(system.MutedAtomic())
+			ab.SetCABundle(tailscale.CABundlePath())
+			upBackend = ab
 		case "mock":
 			mb, err := updater.NewMockBackend(updaterDir)
 			if err != nil {
@@ -242,7 +251,7 @@ func main() {
 			mb.SetReregisterHook(func() { reregister(nc) })
 			upBackend = mb
 		default:
-			log.Fatalf("rasputin-agent: unknown RASPUTIN_UPDATE_BACKEND %q (expected rauc|mock)", backendChoice)
+			log.Fatalf("rasputin-agent: unknown RASPUTIN_UPDATE_BACKEND %q (expected rauc|openwrt-ab|mock)", backendChoice)
 		}
 		upSubs, err := updater.RegisterHandlers(nc, nodeID, upBackend)
 		if err != nil {
@@ -444,10 +453,19 @@ func autodetectDockerBackend() string {
 	return "mock"
 }
 
-// autodetectUpdaterBackend returns "rauc" if the rauc CLI is on PATH,
-// "mock" otherwise. Mirrors autodetectDockerBackend; the same env-var
-// override lets the user force one or the other for testing.
-func autodetectUpdaterBackend() string {
+// autodetectUpdaterBackend picks the OS-update backend. The firewall runs
+// OpenWrt (no RAUC package exists for it) and updates via the custom A/B
+// backend — selected when the node is firewall-role AND actually on OpenWrt
+// (/etc/config/firewall present, same signal autodetectUCIBackend uses). Every
+// other node uses `rauc` when the CLI is on PATH, else mock. The env override
+// (RASPUTIN_UPDATE_BACKEND) forces any of rauc|openwrt-ab|mock.
+func autodetectUpdaterBackend(role proto.NodeRole) string {
+	if role == proto.RoleFirewall {
+		if _, err := os.Stat("/etc/config/firewall"); err == nil {
+			return "openwrt-ab"
+		}
+		return "mock"
+	}
 	if _, err := exec.LookPath("rauc"); err == nil {
 		return "rauc"
 	}
