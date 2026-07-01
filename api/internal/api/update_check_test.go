@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,12 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
+
+// The firewall's deployable OTA artifact is a bare rootfs squashfs. This fixture
+// stands in for it; its sha is what the fw manifest pins + the pull verifies.
+var fwRootfsFixture = []byte("FW-ROOTFS-SQUASHFS-FIXTURE")
+
+func fwRootfsSHA() string { s := sha256.Sum256(fwRootfsFixture); return hex.EncodeToString(s[:]) }
 
 // fakeReleaseServer serves a GitHub-Releases-shaped API plus the manifest and
 // bundle assets, so the github public source can be exercised end-to-end with
@@ -32,6 +40,7 @@ func fakeReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *httptest.
 				"tag_name": "fw-2026.07.1-dev.20", "prerelease": true,
 				"assets": []map[string]any{
 					{"name": "manifest.json", "browser_download_url": base + "/fw-manifest"},
+					{"name": "rasputin-fw-n100-2026.07.1-dev.20.rootfs", "browser_download_url": base + "/fw-asset"},
 				},
 			},
 		}
@@ -51,13 +60,18 @@ func fakeReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *httptest.
 		_ = json.NewEncoder(w).Encode(releases.Manifest{
 			Version: "2026.07.1-dev.20", Channel: "dev",
 			Artifacts: []releases.ManifestArtifact{{
-				SKU: "fw-n100", Architecture: "amd64", Compatible: "rasputin-fw-n100", Kind: "combined-efi",
-				Image: "rasputin-fw-n100-2026.07.1-dev.20-combined-efi.img.gz", SHA256: "deadbeef",
+				SKU: "fw-n100", Architecture: "amd64", Compatible: "rasputin-fw-n100", Kind: "ab",
+				Image:  "rasputin-fw-n100-2026.07.1-dev.20-ab.img.gz",
+				Rootfs: "rasputin-fw-n100-2026.07.1-dev.20.rootfs", RootfsSha256: fwRootfsSHA(),
+				RootfsSizeBytes: int64(len(fwRootfsFixture)),
 			}},
 		})
 	})
 	mux.HandleFunc("/os-asset", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(bundle)
+	})
+	mux.HandleFunc("/fw-asset", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(fwRootfsFixture)
 	})
 
 	srv := httptest.NewServer(mux)
@@ -94,7 +108,7 @@ func TestCheckAndPullUpdate(t *testing.T) {
 	if os := byID["os"]; os.Status != releases.StatusUpdateAvailable || os.BundleSHA256 != sha || os.Staged {
 		t.Fatalf("os check unexpected: %+v", os)
 	}
-	if fw := byID["fw"]; fw.Status != releases.StatusUpdateAvailable || fw.Deployable || fw.ManualInstructions == "" {
+	if fw := byID["fw"]; fw.Status != releases.StatusUpdateAvailable || !fw.Deployable || fw.BundleSHA256 != fwRootfsSHA() || fw.ManualInstructions != "" {
 		t.Fatalf("fw check unexpected: %+v", fw)
 	}
 
@@ -136,7 +150,9 @@ func TestCheckUpdatesNotConfigured(t *testing.T) {
 	}
 }
 
-func TestPullRejectsFirewall(t *testing.T) {
+// The firewall is now deployable (custom A/B via openwrt-ab) — pulling it stages
+// the rootfs OTA artifact into the bundle store, same as an OS bundle.
+func TestPullFirewall(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
 	bundle, sha := buildBundleFixture(t, f)
@@ -144,7 +160,10 @@ func TestPullRejectsFirewall(t *testing.T) {
 	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, "geekdojo/rasputin-releases"), "dev")
 
 	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("firewall pull should be 400, got %d (%s)", rec.Code, strings.TrimSpace(rec.Body.String()))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("firewall pull should be 201, got %d (%s)", rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+	if got, _ := f.srv.updater.GetBundle(f.ctx, fwRootfsSHA()); got == nil {
+		t.Fatalf("pulled firewall rootfs %s not in store", fwRootfsSHA())
 	}
 }

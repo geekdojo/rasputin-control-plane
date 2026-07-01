@@ -271,26 +271,31 @@ func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "nodeId and bundleSha256 are required")
 		return
 	}
-	// Validate the target node before starting a saga. Two guards:
-	//   1. The firewall runs a different image and updates through its own path,
-	//      not OS bundles — never start a saga it can't drive (no agent).
-	//   2. Arch match — an arm64 node can't install an amd64 bundle (RAUC would
-	//      reject it at install). Reject up front with an actionable message.
-	//      Only enforced when the node has reported its arch (pre-arch agents
-	//      report ""); the on-node RAUC compatible check is the backstop.
+	// Validate the target node before starting a saga: the bundle's `compatible`
+	// SKU must match what this node expects, or it'll be rejected at install
+	// (RAUC's compatible check on the OS; the firewall accepts only its own
+	// image). The firewall now updates through the SAME node.update saga as the
+	// OS nodes — only the on-agent backend differs (openwrt-ab vs rauc) — so the
+	// old "firewall can't be updated here" guard is gone; it just needs the
+	// firewall bundle, never an OS bundle (and vice-versa).
+	//   - Firewall node  → wants rasputin-fw-n100.
+	//   - OS node        → wants ArchCompatible(arch) (amd64/arm64 SKU).
+	// Only enforced when we can resolve the expectation (pre-arch agents report
+	// ""); the on-node compatible check is the backstop.
 	if n, err := s.inv.Get(r.Context(), req.NodeID); err == nil && n != nil {
+		var want string
+		var known bool
 		if n.Role == proto.RoleFirewall {
-			writeError(w, http.StatusBadRequest, "the firewall node can't be updated with an OS bundle — it uses a separate update path")
-			return
+			want, known = releases.FirewallCompatible, true
+		} else if n.Architecture != "" {
+			want, known = releases.ArchCompatible(n.Architecture)
 		}
-		if n.Architecture != "" {
-			if b, err := s.updater.GetBundle(r.Context(), req.BundleSHA256); err == nil && b != nil {
-				if want, ok := releases.ArchCompatible(n.Architecture); ok && b.Compatible != want {
-					writeError(w, http.StatusBadRequest, fmt.Sprintf(
-						"bundle is %s (%s) but node %s is %s — pick the %s bundle",
-						b.Compatible, b.Architecture, req.NodeID, n.Architecture, want))
-					return
-				}
+		if known {
+			if b, err := s.updater.GetBundle(r.Context(), req.BundleSHA256); err == nil && b != nil && b.Compatible != want {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf(
+					"bundle is %s but node %s (%s) needs %s — pick the %s image",
+					b.Compatible, req.NodeID, n.Role, want, want))
+				return
 			}
 		}
 	}
@@ -387,7 +392,7 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unknown component: "+req.Component)
 		return
 	}
-	if !comp.Deployable || comp.Kind != releases.KindRAUC {
+	if !comp.Deployable {
 		writeError(w, http.StatusBadRequest, comp.Label+" cannot be pulled (no automated update path)")
 		return
 	}
@@ -409,10 +414,12 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 	// mixed-arch cluster (N100 amd64 + Raspberry Pi arm64) has a bundle for
 	// every node. This previously pulled only comp.Compatible (the amd64 SKU),
 	// which left arm64 nodes with nothing to deploy and the OTA silently stuck.
+	// The deployable asset per artifact is kind-specific (RAUC .raucb vs the
+	// firewall's rootfs squashfs) — OTAAsset resolves it.
 	var arts []*releases.ManifestArtifact
 	for i := range info.Manifest.Artifacts {
 		a := &info.Manifest.Artifacts[i]
-		if a.Raucb != "" && a.SHA256 != "" {
+		if _, _, _, ok := a.OTAAsset(comp.Kind); ok {
 			arts = append(arts, a)
 		}
 	}
@@ -424,9 +431,10 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 	var primary *updater.Bundle
 	anyCreated := false
 	for _, art := range arts {
-		url, ok := info.AssetURL(art.Raucb)
+		assetName, assetSHA, _, _ := art.OTAAsset(comp.Kind)
+		url, ok := info.AssetURL(assetName)
 		if !ok {
-			writeError(w, http.StatusBadGateway, "release "+info.Version+" has no asset "+art.Raucb)
+			writeError(w, http.StatusBadGateway, "release "+info.Version+" has no asset "+assetName)
 			return
 		}
 		rc, err := s.releaseSource.Open(r.Context(), url)
@@ -434,7 +442,7 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "download bundle: "+err.Error())
 			return
 		}
-		wantSHA := strings.ToLower(art.SHA256)
+		wantSHA := strings.ToLower(assetSHA)
 		verify := func(tmpPath, sha string) (bundleMeta, error) {
 			if sha != wantSHA {
 				return bundleMeta{}, fmt.Errorf("sha256 mismatch: downloaded %s, manifest says %s", sha, wantSHA)
@@ -445,11 +453,11 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 				Description: "pulled from " + channel + " channel",
 			}
 			// Mock bundles (dev/CI) get the full host-side signature gate. Real
-			// .raucb bundles are sha-pinned by the signed manifest here and the
-			// signature is re-verified by RAUC at install time on the target node
-			// (the authoritative gate) — host-side .raucb verify needs the rauc
-			// CLI and lands with the real-RAUC-backend work (see updates.md).
-			if strings.HasSuffix(art.Raucb, ".raspbundle") {
+			// .raucb / .rootfs artifacts are sha-pinned by the signed manifest
+			// here and re-verified on the target node at install (RAUC for the OS;
+			// the firewall's detached-CMS verify hook is a follow-up) — host-side
+			// bundle verify needs the rauc CLI and lands with that work.
+			if strings.HasSuffix(assetName, ".raspbundle") {
 				man, _, err := s.updaterVerifier.VerifyFile(tmpPath)
 				if err != nil {
 					return bundleMeta{}, err

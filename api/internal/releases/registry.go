@@ -9,12 +9,20 @@ const (
 	// KindRAUC is an atomic A/B RAUC bundle (.raucb). Pullable into the
 	// bundle store and deployable through the existing node.update saga.
 	KindRAUC Kind = "raucb"
-	// KindSysupgrade is an OpenWrt sysupgrade image. Display-only in v1 —
-	// there is no automated push path for the firewall yet (see the backlog
-	// "automated firewall push" item), so we surface the available version
-	// and manual instructions instead of a deploy button.
+	// KindSysupgrade is an OpenWrt sysupgrade image. Legacy — the firewall used
+	// this while it was display-only; it now ships KindRootfsAB. Kept so an old
+	// manifest still parses.
 	KindSysupgrade Kind = "sysupgrade"
+	// KindRootfsAB is the firewall's custom A/B OTA artifact: a bare rootfs
+	// squashfs (the manifest's `rootfs`/`rootfsSha256`) the agent's
+	// OpenWrtABBackend dd's into the inactive slot. Deployable through the same
+	// node.update saga as KindRAUC — only the on-agent backend differs.
+	KindRootfsAB Kind = "rootfs-ab"
 )
+
+// FirewallCompatible is the SKU string a firewall (Node N) OTA artifact must
+// carry — the firewall accepts only its own image, never an OS bundle.
+const FirewallCompatible = "rasputin-fw-n100"
 
 // Component describes one updatable/observable part of a Rasputin system and
 // how to find its latest release + which node's installed version to compare
@@ -45,9 +53,10 @@ type Component struct {
 	CompareField string
 }
 
-// Components is the v1 registry of independently-checkable update targets. OS
-// is the one fully-deployable component; the firewall is display-only (it's a
-// separate node with its own sysupgrade path).
+// Components is the v1 registry of independently-checkable update targets. Both
+// OS (KindRAUC) and the firewall (KindRootfsAB) are deployable through the
+// node.update saga; they differ only in the on-agent backend (rauc vs
+// openwrt-ab) and the OTA artifact (.raucb vs the rootfs squashfs).
 //
 // The control-plane software is deliberately NOT a component here: it ships
 // *inside* the OS image (pinned in rasputin-os' package .mk files), so it can
@@ -66,8 +75,8 @@ var Components = []Component{
 	},
 	{
 		ID: "fw", Label: "Firewall",
-		TagPrefix: "fw-", Compatible: "rasputin-fw-n100",
-		Scheme: SchemeCalVer, Kind: KindSysupgrade, Deployable: false,
+		TagPrefix: "fw-", Compatible: FirewallCompatible,
+		Scheme: SchemeCalVer, Kind: KindRootfsAB, Deployable: true,
 		CompareRoles: []proto.NodeRole{proto.RoleFirewall},
 		CompareField: "image",
 	},

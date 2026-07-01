@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,7 +293,7 @@ func TestPlanTargets_OrderingByRole(t *testing.T) {
 		node("cmp-1", proto.RoleCompute, time.Second),
 		node("st-1", proto.RoleStorage, time.Second),
 	}
-	got, _ := planTargets(nodes, nil)
+	got, _ := planTargets(nodes, nil, "")
 	wantOrder := []string{"cmp-1", "st-1", "cp-1", "fw-1"}
 	if len(got) != len(wantOrder) {
 		t.Fatalf("want %d targets, got %d", len(wantOrder), len(got))
@@ -310,7 +311,7 @@ func TestPlanTargets_SkipsExcluded(t *testing.T) {
 		node("b", proto.RoleCompute, time.Second),
 	}
 	excl := map[string]struct{}{"a": {}}
-	got, skipped := planTargets(nodes, excl)
+	got, skipped := planTargets(nodes, excl, "")
 	if len(got) != 1 || got[0].ID != "b" {
 		t.Errorf("targets: %+v", got)
 	}
@@ -324,12 +325,45 @@ func TestPlanTargets_SkipsOfflineNodes(t *testing.T) {
 		node("on", proto.RoleCompute, time.Second),
 		node("off", proto.RoleCompute, 10*time.Minute),
 	}
-	got, skipped := planTargets(nodes, nil)
+	got, skipped := planTargets(nodes, nil, "")
 	if len(got) != 1 || got[0].ID != "on" {
 		t.Errorf("targets: %+v", got)
 	}
 	if len(skipped) != 1 {
 		t.Errorf("skipped: %+v", skipped)
+	}
+}
+
+// A system.update carries ONE bundle, so planTargets must skip nodes whose SKU
+// doesn't match it — the safety valve that stops an OS bundle from ever reaching
+// the firewall's real openwrt-ab backend (and vice-versa).
+func TestPlanTargets_SkipsSKUMismatch(t *testing.T) {
+	amd64Node := func(id string, role proto.NodeRole) *proto.Node {
+		n := node(id, role, time.Second)
+		n.Architecture = "amd64"
+		return n
+	}
+	nodes := []*proto.Node{
+		amd64Node("cmp-1", proto.RoleCompute),
+		node("fw-1", proto.RoleFirewall, time.Second),
+	}
+
+	// OS bundle → updates the compute node, skips the firewall.
+	got, skipped := planTargets(nodes, nil, "rasputin-n100")
+	if len(got) != 1 || got[0].ID != "cmp-1" {
+		t.Errorf("OS bundle targets = %+v, want [cmp-1]", got)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "fw-1") {
+		t.Errorf("OS bundle should skip fw-1, skipped = %+v", skipped)
+	}
+
+	// Firewall bundle → updates the firewall, skips the compute node.
+	got, skipped = planTargets(nodes, nil, "rasputin-fw-n100")
+	if len(got) != 1 || got[0].ID != "fw-1" {
+		t.Errorf("fw bundle targets = %+v, want [fw-1]", got)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "cmp-1") {
+		t.Errorf("fw bundle should skip cmp-1, skipped = %+v", skipped)
 	}
 }
 

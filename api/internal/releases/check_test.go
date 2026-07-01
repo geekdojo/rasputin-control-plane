@@ -37,8 +37,11 @@ func fwRelease(version string) *ReleaseInfo {
 	return &ReleaseInfo{
 		Component: "fw", Version: version, Channel: "dev",
 		Manifest: Manifest{Version: version, Channel: "dev", Artifacts: []ManifestArtifact{{
-			SKU: "fw-n100", Architecture: "amd64", Compatible: "rasputin-fw-n100", Kind: "combined-efi",
-			Image: "rasputin-fw-n100-" + version + "-combined-efi.img.gz", SHA256: "def456",
+			SKU: "fw-n100", Architecture: "amd64", Compatible: "rasputin-fw-n100", Kind: "ab",
+			// Full-disk image for humans; the rootfs squashfs is the deployable OTA artifact.
+			Image:  "rasputin-fw-n100-" + version + "-ab.img.gz",
+			Rootfs: "rasputin-fw-n100-" + version + ".rootfs", RootfsSha256: "def456", RootfsSizeBytes: 200,
+			SignedBy: "Rasputin Release " + version,
 		}}},
 	}
 }
@@ -75,14 +78,16 @@ func TestCheck(t *testing.T) {
 	if fw.Status != StatusUpdateAvailable {
 		t.Errorf("fw status = %q, want update_available", fw.Status)
 	}
-	if fw.Deployable {
-		t.Errorf("fw should not be deployable")
+	// Firewall is now deployable via the node.update saga (KindRootfsAB): it
+	// exposes the rootfs OTA artifact + its sha, and carries no manual note.
+	if !fw.Deployable {
+		t.Errorf("fw should be deployable")
 	}
-	if fw.ManualInstructions == "" || fw.AssetName == "" {
-		t.Errorf("fw should carry manual instructions + image asset name: %+v", fw)
+	if fw.BundleSHA256 != "def456" || fw.AssetName == "" {
+		t.Errorf("fw should expose the rootfs OTA asset + sha: %+v", fw)
 	}
-	if fw.BundleSHA256 != "" {
-		t.Errorf("fw should not expose a bundle sha")
+	if fw.ManualInstructions != "" {
+		t.Errorf("fw should no longer carry manual instructions: %q", fw.ManualInstructions)
 	}
 
 	// The control-plane software is not a standalone row — it's folded into the

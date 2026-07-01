@@ -11,6 +11,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -100,7 +101,7 @@ func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs
 			exclude[cfg.SelfNodeID] = struct{}{}
 		}
 
-		targets, skipped := planTargets(all, exclude)
+		targets, skipped := planTargets(all, exclude, bundle.Compatible)
 		ids := make([]string, len(targets))
 		for i, n := range targets {
 			ids[i] = n.ID
@@ -127,11 +128,28 @@ func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs
 	}
 }
 
+// expectedCompatible is the release SKU string a node's OTA artifact must
+// carry: the firewall accepts only its own image; every other node takes the
+// OS image for its arch. Second return is false when it can't be determined
+// (a pre-arch agent that hasn't reported its arch).
+func expectedCompatible(n *proto.Node) (string, bool) {
+	if n.Role == proto.RoleFirewall {
+		return releases.FirewallCompatible, true
+	}
+	return releases.ArchCompatible(n.Architecture)
+}
+
 // planTargets returns the ordered list of nodes to update and the ids of
 // nodes that were filtered out. Order: compute → storage → controlplane →
-// firewall, within each bucket alphabetic by id. Excluded ids and any node
-// not currently online are dropped from targets and listed in skipped.
-func planTargets(nodes []*proto.Node, exclude map[string]struct{}) (targets []*proto.Node, skipped []string) {
+// firewall, within each bucket alphabetic by id. Dropped (and listed in
+// skipped): excluded ids, offline nodes, and — the load-bearing one now that
+// the firewall is a real update target — nodes whose expected SKU doesn't match
+// bundleCompat. A system.update carries ONE bundle, so a run with an OS bundle
+// updates the OS nodes and skips the firewall (and vice-versa); this is what
+// keeps the firewall's real openwrt-ab backend from ever being handed an OS
+// image (it would dd the wrong squashfs into a slot). bundleCompat "" disables
+// the SKU filter (unknown bundle — fall back to the on-node compatible check).
+func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat string) (targets []*proto.Node, skipped []string) {
 	roleRank := map[proto.NodeRole]int{
 		proto.RoleCompute:      0,
 		proto.RoleStorage:      1,
@@ -147,6 +165,10 @@ func planTargets(nodes []*proto.Node, exclude map[string]struct{}) (targets []*p
 		// this on the API side but ListByRole returns it stale.
 		if computeStatus(n.LastSeen) != proto.StatusOnline {
 			skipped = append(skipped, n.ID+" (not online)")
+			continue
+		}
+		if want, known := expectedCompatible(n); bundleCompat != "" && known && want != bundleCompat {
+			skipped = append(skipped, fmt.Sprintf("%s (needs %s, bundle is %s)", n.ID, want, bundleCompat))
 			continue
 		}
 		targets = append(targets, n)
@@ -188,7 +210,14 @@ func systemCascade(
 		if cfg.SelfNodeID != "" {
 			exclude[cfg.SelfNodeID] = struct{}{}
 		}
-		targets, _ := planTargets(all, exclude)
+		// Re-derive the same SKU filter the plan step used, so the cascade never
+		// hands an incompatible bundle to a node (esp. an OS bundle to the
+		// firewall's openwrt-ab backend).
+		bundleCompat := ""
+		if b, _ := store.GetBundle(sc.Ctx, spec.BundleSHA256); b != nil {
+			bundleCompat = b.Compatible
+		}
+		targets, _ := planTargets(all, exclude, bundleCompat)
 
 		var (
 			succeeded []string

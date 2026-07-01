@@ -159,6 +159,11 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 			cs.BundleSHA256 = art.SHA256
 			cs.AssetName = art.Raucb
 			cs.SizeBytes = art.SizeBytes
+		case KindRootfsAB:
+			// Firewall A/B: the deployable OTA artifact is the rootfs squashfs.
+			cs.BundleSHA256 = art.RootfsSha256
+			cs.AssetName = art.Rootfs
+			cs.SizeBytes = art.RootfsSizeBytes
 		case KindSysupgrade:
 			cs.AssetName = art.Image
 			if cs.Status == StatusUpdateAvailable {

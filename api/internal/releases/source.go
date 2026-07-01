@@ -32,6 +32,34 @@ type ManifestArtifact struct {
 	Sig         string `json:"sig,omitempty"`
 	SignedBy    string `json:"signedBy,omitempty"`
 	BuildDate   string `json:"buildDate,omitempty"`
+
+	// Firewall A/B (KindRootfsAB): the deployable OTA artifact is the bare
+	// rootfs squashfs, distinct from `image` (which carries the full-disk
+	// initial-flash .img.gz for humans). The agent's OpenWrtABBackend dd's this
+	// into the inactive slot. Emitted by the firewall release pipeline.
+	Rootfs          string `json:"rootfs,omitempty"`
+	RootfsSha256    string `json:"rootfsSha256,omitempty"`
+	RootfsSizeBytes int64  `json:"rootfsSizeBytes,omitempty"`
+	RootfsSig       string `json:"rootfsSig,omitempty"`
+}
+
+// OTAAsset returns the deployable OTA artifact (asset filename, sha256,
+// sizeBytes) for the given component kind — the RAUC bundle for KindRAUC, the
+// rootfs squashfs for KindRootfsAB. ok=false when the artifact lacks that
+// kind's fields (so the caller can skip a non-matching arch/artifact). This is
+// the single place the kind→asset mapping lives.
+func (a *ManifestArtifact) OTAAsset(kind Kind) (name, sha256 string, size int64, ok bool) {
+	switch kind {
+	case KindRAUC:
+		if a.Raucb != "" && a.SHA256 != "" {
+			return a.Raucb, a.SHA256, a.SizeBytes, true
+		}
+	case KindRootfsAB:
+		if a.Rootfs != "" && a.RootfsSha256 != "" {
+			return a.Rootfs, a.RootfsSha256, a.RootfsSizeBytes, true
+		}
+	}
+	return "", "", 0, false
 }
 
 // ReleaseInfo is the resolved latest release for a component on a channel,
