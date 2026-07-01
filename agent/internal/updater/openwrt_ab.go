@@ -365,6 +365,22 @@ func (o *OpenWrtABBackend) MarkGood(ctx context.Context, bundleID string) error 
 	return o.markRunning(true)
 }
 
+// MarkGoodOnBoot resets the running slot's boot-counter (OK=1, TRY=0) once the
+// agent has reached its own userspace — the firewall's equivalent of compute's
+// rasputin-mark-good.service (defense-in-depth layer 1: "OS + agent booted").
+//
+// This is REQUIRED for correct steady-state behavior, not just belt-and-braces:
+// GRUB's grub.cfg consumes one TRY per boot (sets <slot>_TRY=1 + save_env), so
+// without resetting it here a second ordinary reboot would see the running slot
+// as already-tried, skip it, and fall through to the STALE other slot. Called
+// once at agent startup (see main.go). Idempotent, so a crash-restart within the
+// same boot re-runs it harmlessly. During an update trial boot it runs before
+// the saga's health check — that's fine and mirrors compute: the saga can still
+// MarkBad afterward (OK=0), which GRUB re-evaluates every boot.
+func (o *OpenWrtABBackend) MarkGoodOnBoot(ctx context.Context) error {
+	return o.markRunning(true)
+}
+
 // MarkBad marks the running slot bad (OK=0) so GRUB re-evaluates and boots the
 // other (good) slot, then reboots. Best-effort on the reboot — a mark-bad that
 // couldn't reboot is caught by the boot-counter on the next power cycle.

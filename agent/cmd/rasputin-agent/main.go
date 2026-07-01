@@ -263,6 +263,20 @@ func main() {
 			}
 		}()
 		log.Printf("rasputin-agent: update backend=%s", upBackend.Name())
+
+		// On the firewall (openwrt-ab), reset the running slot's GRUB boot-counter
+		// now that the agent is up — the firewall's equivalent of compute's
+		// rasputin-mark-good.service. REQUIRED: grub.cfg consumes one TRY per boot,
+		// so without this a second ordinary reboot would skip the (already-tried)
+		// running slot and fall through to the stale other slot. Backgrounded +
+		// best-effort; an error (e.g. ESP not mounted) is logged, never fatal.
+		if ab, ok := upBackend.(*updater.OpenWrtABBackend); ok {
+			go func() {
+				if err := ab.MarkGoodOnBoot(ctx); err != nil {
+					log.Printf("rasputin-agent: openwrt-ab boot mark-good: %v", err)
+				}
+			}()
+		}
 	}
 
 	// Tailscale handlers — every node joins the tailnet (per

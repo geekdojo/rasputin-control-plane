@@ -225,6 +225,27 @@ func TestMarkGoodResetsRunningSlotCounter(t *testing.T) {
 	}
 }
 
+func TestMarkGoodOnBootResetsConsumedTry(t *testing.T) {
+	b, read, reboots := newTestBackend(t)
+	// grub.cfg consumed a try on the running slot (A) this boot.
+	kv := mustRead(t, b.grubenvPath)
+	st := decodeAB(kv)
+	st.try["A"] = true
+	if err := writeGrubenv(b.grubenvPath, encodeAB(kv, st)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.MarkGoodOnBoot(context.Background()); err != nil {
+		t.Fatalf("boot mark-good: %v", err)
+	}
+	got := read()
+	if !got.ok["A"] || got.try["A"] {
+		t.Errorf("after boot mark-good running slot A should be OK+untried, got ok=%v try=%v", got.ok["A"], got.try["A"])
+	}
+	if len(*reboots) != 0 {
+		t.Errorf("boot mark-good must not reboot, got %d", len(*reboots))
+	}
+}
+
 func TestMarkBadClearsRunningSlotAndReboots(t *testing.T) {
 	b, read, reboots := newTestBackend(t)
 	if err := b.MarkBad(context.Background(), "x", "health failed"); err != nil {
