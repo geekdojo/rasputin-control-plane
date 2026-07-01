@@ -1,16 +1,19 @@
 'use client';
 
-import { ChevronDown, ChevronRight, Cpu, Database, Download, Plus, X } from 'lucide-react';
-import { useState } from 'react';
-import { mintBusToken } from '../lib/api';
-import type { MintedBusToken } from '../lib/types';
+import { ChevronDown, ChevronRight, Cpu, Database, Download, Plus, Shield, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { getFirewallImage, mintBusToken } from '../lib/api';
+import type { FlashableImage, MintedBusToken } from '../lib/types';
 import {
   type AddableRole,
   type NodeArch,
   downloadSeed,
+  FIREWALL_HOST_PLACEHOLDER,
+  firewallApplyCommand,
   flashCommand,
   NODE_ARCHES,
   nodeImageFor,
+  renderFirewallSeed,
   renderNodeSeed,
   suggestNodeId,
 } from '../lib/enroll';
@@ -20,7 +23,12 @@ import { ACCENT, accentA, MONO } from './ui-theme';
 const ROLES: { value: AddableRole; label: string; icon: typeof Cpu; blurb: string }[] = [
   { value: 'compute', label: 'COMPUTE', icon: Cpu, blurb: 'runs apps & workloads' },
   { value: 'storage', label: 'STORAGE', icon: Database, blurb: 'storage-focused node' },
+  { value: 'firewall', label: 'FIREWALL', icon: Shield, blurb: 'network edge & security' },
 ];
+
+// The firewall is x86-only (a single PCIe lane + 5 W ceiling rule out ARM
+// boards), so its enrollment always targets the amd64 image.
+const FIREWALL_ARCH: NodeArch = 'amd64';
 
 export function AddNodeWizard({
   clusterPrefix,
@@ -48,9 +56,14 @@ export function AddNodeWizard({
   const [err, setErr] = useState<string | null>(null);
   const [minted, setMinted] = useState<MintedBusToken | null>(null);
 
+  const isFirewall = role === 'firewall';
+
   // Re-suggest the id when the role changes, unless the user has hand-edited it.
+  // The firewall is x86-only, so selecting it pins the arch to amd64 (the arch
+  // picker is hidden for that role).
   function pickRole(r: AddableRole) {
     setRole(r);
+    if (r === 'firewall') setArch(FIREWALL_ARCH);
     if (!edited) setNodeId(suggestNodeId(clusterPrefix, r, taken));
   }
 
@@ -87,14 +100,18 @@ export function AddNodeWizard({
       <div style={{ height: 1, background: HAIR, marginBottom: 16 }} />
 
       {minted ? (
-        <SuccessView
-          role={role}
-          arch={arch}
-          nodeId={minted.nodeId}
-          token={minted.token}
-          clusterOsVersion={clusterOsVersion}
-          onClose={onClose}
-        />
+        isFirewall ? (
+          <FirewallSuccessView nodeId={minted.nodeId} token={minted.token} onClose={onClose} />
+        ) : (
+          <SuccessView
+            role={role}
+            arch={arch}
+            nodeId={minted.nodeId}
+            token={minted.token}
+            clusterOsVersion={clusterOsVersion}
+            onClose={onClose}
+          />
+        )
       ) : (
         <>
           <SectionLabel>ROLE</SectionLabel>
@@ -129,6 +146,13 @@ export function AddNodeWizard({
             })}
           </div>
 
+          {isFirewall ? (
+            <Hint style={{ marginBottom: 16 }}>
+              The firewall runs on an Intel/AMD (<Tok>x86-64</Tok>) board — a Raspberry Pi can&apos;t drive
+              dual high-speed network ports, so this role is x86-only.
+            </Hint>
+          ) : (
+            <>
           <SectionLabel>ARCHITECTURE</SectionLabel>
           <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
             {NODE_ARCHES.map((a) => {
@@ -159,6 +183,8 @@ export function AddNodeWizard({
           <Hint style={{ marginBottom: 16 }}>
             The CPU of the board you&apos;re flashing. Pick <Tok>ARM64</Tok> for a Raspberry Pi, <Tok>AMD64</Tok> for an Intel/AMD board.
           </Hint>
+            </>
+          )}
 
           <SectionLabel>NODE NAME</SectionLabel>
           <Input
@@ -337,6 +363,153 @@ function SuccessView({
   );
 }
 
+// The firewall is a different beast from an OS node: it ships its own x86-only
+// image and is typically ALREADY running it (bundled units arrive pre-imaged),
+// so enrollment is an over-the-network push of the seed — not a blank-drive
+// flash. No flash.sh one-liner here; instead the operator saves the seed and
+// delivers it over SSH. A collapsible covers imaging a brand-new board.
+function FirewallSuccessView({
+  nodeId,
+  token,
+  onClose,
+}: {
+  nodeId: string;
+  token: string;
+  onClose: () => void;
+}) {
+  const seed = renderFirewallSeed(nodeId, token);
+  const command = firewallApplyCommand();
+  const [showImage, setShowImage] = useState(false);
+  const [image, setImage] = useState<FlashableImage | null>(null);
+  const [imageResolved, setImageResolved] = useState(false);
+
+  // Resolve the latest firewall image so we can offer a verified download for a
+  // fresh board. Best-effort: on failure we fall back to the release channel.
+  useEffect(() => {
+    let live = true;
+    getFirewallImage()
+      .then((img) => live && setImage(img))
+      .finally(() => live && setImageResolved(true));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* The seed — the only secret. Save it now; it's unrecoverable. */}
+      <div
+        style={{
+          background: accentA(0.06),
+          border: `1px solid ${accentA(0.4)}`,
+          padding: '12px 14px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        <span style={{ color: ACCENT, fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>
+          ENROLLMENT FILE — SAVE IT NOW, NOT SHOWN AGAIN
+        </span>
+        <span style={{ color: FG, fontSize: 10, fontFamily: MONO }}>
+          for <Tok>{nodeId}</Tok>
+        </span>
+        <div style={{ position: 'relative' }}>
+          <pre style={seedBox}>{seed}</pre>
+          <div style={{ position: 'absolute', top: 4, right: 4 }}>
+            <CopyButton value={seed} />
+          </div>
+        </div>
+        <div>
+          <Btn variant="primary" small onClick={() => downloadSeed(seed, 'seed.env')}>
+            <Download size={11} /> DOWNLOAD seed.env
+          </Btn>
+        </div>
+      </div>
+
+      {/* Delivery: push the seed to the already-running firewall over SSH. */}
+      <SectionLabel>DELIVER IT TO THE FIREWALL</SectionLabel>
+      <span style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
+        Your firewall is already running its own image. From the folder where you saved{' '}
+        <Tok>seed.env</Tok>, run this — swap <Tok>{FIREWALL_HOST_PLACEHOLDER}</Tok> for the firewall&apos;s
+        address on your network:
+      </span>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+        <pre style={{ ...seedBox, flex: 1, minWidth: 0 }}>{command}</pre>
+        <CopyButton value={command} />
+      </div>
+      <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
+        It copies the file into place and applies it — the firewall joins immediately, no reboot.
+      </span>
+
+      {/* Fallback: image a brand-new board first. */}
+      <button
+        onClick={() => setShowImage((v) => !v)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          padding: 0,
+          color: DIM,
+          fontSize: 10,
+          fontFamily: MONO,
+        }}
+      >
+        {showImage ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        Setting up a brand-new firewall board?
+      </button>
+
+      {showImage && (
+        <>
+          <SectionLabel>IMAGE THE BOARD FIRST</SectionLabel>
+          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {[
+              image ? (
+                <>
+                  Write the <Tok>firewall image {image.version}</Tok> (<Tok>x86-64</Tok>) to the whole disk of
+                  the firewall board —{' '}
+                  <a href={image.url} target="_blank" rel="noreferrer" style={linkStyle}>
+                    download the image
+                  </a>{' '}
+                  (verify its sha256 <Tok>{image.sha256.slice(0, 12)}…</Tok> against the release&apos;s{' '}
+                  <Tok>manifest.json</Tok>).
+                </>
+              ) : imageResolved ? (
+                <>
+                  Write the latest <Tok>x86-64</Tok> firewall image to the whole disk of the board —{' '}
+                  <a href={FIREWALL_RELEASES_URL} target="_blank" rel="noreferrer" style={linkStyle}>
+                    grab the newest <Tok>fw-</Tok> release&apos;s <Tok>-ab.img.gz</Tok>
+                  </a>
+                  .
+                </>
+              ) : (
+                <>Resolving the latest firewall image…</>
+              ),
+              <>Boot the board and connect it to your network, then run the delivery command above.</>,
+            ].map((step, i) => (
+              <li key={i} style={{ color: DIM, fontSize: 11, fontFamily: MONO, lineHeight: 1.5 }}>
+                {step}
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+
+      <Hint>
+        It&apos;ll appear below as <Tok>PENDING</Tok> until it applies the file and joins — usually seconds —
+        then flip to a live node automatically.
+      </Hint>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <Btn variant="primary" onClick={onClose}>DONE</Btn>
+      </div>
+    </div>
+  );
+}
+
 function Overlay({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
   return (
     <div
@@ -367,6 +540,11 @@ function Overlay({ children, onClose }: { children: React.ReactNode; onClose: ()
     </div>
   );
 }
+
+// Fallback link when the control plane can't resolve a specific firewall image
+// (no release on the channel yet, or the update channel isn't configured): the
+// public release channel, where the operator can grab the newest firewall build.
+const FIREWALL_RELEASES_URL = 'https://github.com/geekdojo/rasputin-releases/releases';
 
 const linkStyle: React.CSSProperties = { color: ACCENT, textDecoration: 'underline' };
 

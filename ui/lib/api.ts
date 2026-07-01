@@ -2,6 +2,7 @@ import type {
   Alert,
   App,
   BusTokenInfo,
+  FlashableImage,
   MintedBusToken,
   AppChangeEvent,
   BMCChangeEvent,
@@ -154,6 +155,20 @@ export function mintBusToken(label: string, nodeId: string): Promise<MintedBusTo
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ label, nodeId }),
   });
+}
+
+// getFirewallImage resolves the latest firewall image (public download URL +
+// checksum) for the Add-firewall flow. Unlike the OS node image, the firewall
+// is a separate x86-only image on its own release cadence, so this returns the
+// newest published build rather than one tied to the cluster's OS version.
+// Returns null when the control plane can't resolve one (no release yet / no
+// update channel configured) so the wizard can fall back to generic guidance.
+export async function getFirewallImage(): Promise<FlashableImage | null> {
+  try {
+    return await jsonFetch<FlashableImage>('/api/cluster/firewall-image');
+  } catch {
+    return null;
+  }
 }
 
 // revokeBusToken cancels a token by id — used to cancel a pending enrollment

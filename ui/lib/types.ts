@@ -102,6 +102,19 @@ export interface MintedBusToken {
   token: string;
 }
 
+// FlashableImage is the public, verifiable image descriptor returned by the
+// cluster image endpoints (GET /api/cluster/node-image and
+// /api/cluster/firewall-image): an anonymous download URL plus the sha256 to
+// check it against. The Add-node / Add-firewall wizard links the exact image
+// to flash from it.
+export interface FlashableImage {
+  version: string;
+  architecture: string;
+  url: string;
+  sha256: string;
+  image: string;
+}
+
 export type FirewallIntentKind = 'port_forward' | 'firewall_rule' | 'wan_config';
 export type PortForwardProto = 'tcp' | 'udp' | 'tcpudp';
 

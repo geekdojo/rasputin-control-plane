@@ -65,3 +65,58 @@ func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, http.StatusOK, desc)
 }
+
+// handleClusterFirewallImage returns the flashable firewall image a new
+// firewall node should be imaged with — the LATEST firewall release on the
+// cluster's update channel resolved to a public download URL + checksum. Unlike
+// the OS node image (handleClusterNodeImage), the firewall is a separate,
+// x86-only image on its own release cadence, so it isn't tied to the cluster's
+// OS version; we take the newest published build. Unauthenticated and
+// secret-free — it carries only the version, the public image URL, its sha256,
+// and the arch (always amd64). The enrollment seed is delivered separately,
+// out of band, over SSH; this endpoint never sees it.
+func (s *Server) handleClusterFirewallImage(w http.ResponseWriter, r *http.Request) {
+	if s.releaseSource == nil {
+		writeError(w, http.StatusServiceUnavailable, "update channel not configured on this control plane")
+		return
+	}
+	comp, ok := releases.ComponentByID("fw")
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "firewall component not registered")
+		return
+	}
+	channel := r.URL.Query().Get("channel")
+	if channel == "" {
+		channel = s.releaseChannel
+	}
+	info, err := s.releaseSource.LatestFor(r.Context(), comp, channel)
+	if err != nil {
+		log.Printf("cluster firewall-image (%s): %v", channel, err)
+		writeError(w, http.StatusBadGateway, "couldn't resolve the latest firewall image")
+		return
+	}
+	if info == nil {
+		writeError(w, http.StatusNotFound, "no firewall release on channel "+channel)
+		return
+	}
+	// The firewall's full-disk initial-flash artifact is the `image`
+	// (*-ab.img.gz); its checksum lives in `sha256` (distinct from the OS, whose
+	// `sha256` covers the RAUC bundle and whose image sha is `imageSha256`).
+	art, ok := info.Artifact(comp.Compatible)
+	if !ok || art.Image == "" || art.SHA256 == "" {
+		writeError(w, http.StatusBadGateway, "firewall release "+info.Version+" has no flashable image")
+		return
+	}
+	url, ok := info.AssetURL(art.Image)
+	if !ok {
+		writeError(w, http.StatusBadGateway, "firewall release "+info.Version+" missing asset "+art.Image)
+		return
+	}
+	writeJSON(w, http.StatusOK, releases.NodeImageDescriptor{
+		Version:      info.Version,
+		Architecture: art.Architecture,
+		URL:          url,
+		SHA256:       art.SHA256,
+		Image:        art.Image,
+	})
+}

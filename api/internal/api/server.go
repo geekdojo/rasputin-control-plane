@@ -157,10 +157,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/mesh/ios-profile", s.handleMeshIOSProfile)
 	mux.HandleFunc("GET /mesh-ca.pem", s.handleMeshCAPEM)
 	// The one-command node flasher runs on a laptop (no session) and is
-	// secret-free; both endpoints are intentionally open. flash.sh is a static
-	// script; node-image returns only the public image URL + checksum.
+	// secret-free; these endpoints are intentionally open. flash.sh is a static
+	// script; the *-image endpoints return only the public image URL + checksum
+	// (node-image = the cluster's OS image; firewall-image = the latest firewall
+	// image, which enrolls over SSH rather than via flash.sh).
 	mux.HandleFunc("GET /flash.sh", s.handleGetFlashScript)
 	mux.HandleFunc("GET /api/cluster/node-image", s.handleClusterNodeImage)
+	mux.HandleFunc("GET /api/cluster/firewall-image", s.handleClusterFirewallImage)
 
 	// Authenticated
 	reqd := s.auth.RequireSessionFunc

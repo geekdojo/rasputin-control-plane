@@ -95,3 +95,59 @@ func TestClusterNodeImage(t *testing.T) {
 		t.Fatalf("expected 400 for bad arch, got %d", rec.Code)
 	}
 }
+
+func TestClusterFirewallImage(t *testing.T) {
+	const version = "2026.07.1-dev.20"
+	const img = "rasputin-fw-n100-2026.07.1-dev.20-ab.img.gz"
+	const sha = "0badf00ddeadbeef"
+
+	mux := http.NewServeMux()
+	// GithubPublicSource lists releases, then fetches the picked release's
+	// manifest.json from its asset URL.
+	mux.HandleFunc("/repos/geekdojo/rasputin-releases/releases", func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"tag_name":   "fw-" + version,
+			"prerelease": true,
+			"assets": []map[string]any{
+				{"name": "manifest.json", "browser_download_url": base + "/fw-manifest"},
+				{"name": img, "browser_download_url": base + "/dl/fw-" + version + "/" + img},
+			},
+		}})
+	})
+	mux.HandleFunc("/fw-manifest", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(releases.Manifest{
+			Version: version, Channel: "dev",
+			Artifacts: []releases.ManifestArtifact{{
+				SKU: "fw-n100", Architecture: "amd64", Compatible: releases.FirewallCompatible, Kind: "ab",
+				Image: img, SHA256: sha,
+			}},
+		})
+	})
+	rel := httptest.NewServer(mux)
+	defer rel.Close()
+
+	f := newAPIFixture(t)
+
+	// 503 until an update source is configured.
+	if rec := f.do(t, http.MethodGet, "/api/cluster/firewall-image", "", nil); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 before release source configured, got %d", rec.Code)
+	}
+
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, "geekdojo/rasputin-releases"), "dev")
+
+	rec := f.do(t, http.MethodGet, "/api/cluster/firewall-image", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+	}
+	var desc releases.NodeImageDescriptor
+	if err := json.Unmarshal(rec.Body.Bytes(), &desc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if desc.Version != version || desc.SHA256 != sha || desc.Architecture != "amd64" || desc.Image != img {
+		t.Fatalf("descriptor = %+v", desc)
+	}
+	if !strings.HasSuffix(desc.URL, "/"+img) {
+		t.Fatalf("url = %q", desc.URL)
+	}
+}
