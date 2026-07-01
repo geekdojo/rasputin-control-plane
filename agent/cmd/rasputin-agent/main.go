@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/health"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/hostsync"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/ids"
@@ -106,6 +107,18 @@ func main() {
 	}
 	defer func() { _ = pingSub.Unsubscribe() }()
 	log.Printf("rasputin-agent: subscribed to %s", pingSubj)
+
+	// diag.health — role-aware health probe the node.update saga uses as its
+	// post-reboot commit/rollback gate (richer than diag.ping's liveness).
+	healthSubj := proto.NodeCmdSubject(nodeID, "diag.health")
+	healthSub, err := nc.Subscribe(healthSubj, func(m *nats.Msg) {
+		handleHealth(ctx, nodeID, role, m)
+	})
+	if err != nil {
+		log.Fatalf("rasputin-agent: subscribe %s: %v", healthSubj, err)
+	}
+	defer func() { _ = healthSub.Unsubscribe() }()
+	log.Printf("rasputin-agent: subscribed to %s", healthSubj)
 
 	rebootSub, err := system.RegisterRebootHandler(nc, nodeID, reregister)
 	if err != nil {
@@ -434,6 +447,26 @@ func handlePing(nodeID string, m *nats.Msg) {
 	}
 	if err := m.Respond(payload); err != nil {
 		log.Printf("rasputin-agent: ping: respond: %v", err)
+	}
+}
+
+func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *nats.Msg) {
+	var cmd proto.DiagHealthCmd
+	_ = json.Unmarshal(m.Data, &cmd) // JobID is optional; ignore decode errors
+	// Bound the checks so a hung command can't hold the reply past the saga's
+	// health-check timeout.
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	ack := health.Check(cctx, role)
+	ack.JobID = cmd.JobID
+	ack.NodeID = nodeID
+	payload, err := json.Marshal(ack)
+	if err != nil {
+		log.Printf("rasputin-agent: health: marshal ack: %v", err)
+		return
+	}
+	if err := m.Respond(payload); err != nil {
+		log.Printf("rasputin-agent: health: respond: %v", err)
 	}
 }
 

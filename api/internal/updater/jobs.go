@@ -35,7 +35,7 @@ type Config struct {
 //  4. install                     — RPC agent: rauc install → inactive slot
 //  5. reboot                      — sub-before-RPC for the reboot event
 //  6. wait_online_and_verify_slot — wait for re-registration, compare slot
-//  7. health_check_and_commit     — diag.ping, then mark-good (or mark-bad)
+//  7. health_check_and_commit     — diag.health, then mark-good (or mark-bad)
 //
 // The store is updated in steps 1, 5, 6, 7 so the UI's Updates view can
 // follow progress without subscribing to NATS.
@@ -354,7 +354,7 @@ func updateHealthCheckAndCommit(store *Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		// diag.ping → mark-good (commit) or mark-bad (rollback). Shared with
+		// diag.health (role-aware) → mark-good (commit) or mark-bad (rollback). Shared with
 		// the self-update reconciler (selfupdate.go).
 		return healthCheckAndCommit(sc.Ctx, sc.NATS, store, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
 	}

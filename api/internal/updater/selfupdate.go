@@ -77,28 +77,58 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, nodeID, 
 	return pre, nil
 }
 
-// healthCheckAndCommit runs the post-reboot health check (diag.ping) and either
-// mark-good + records committed, or mark-bad + records rolled_back. Returns the
-// mark-good ack on success. Shared by saga step 7 and the self-update reconciler.
+// probeHealth runs the post-reboot health gate: diag.health (role-aware — the
+// firewall verifies its data plane, not just liveness) with a diag.ping fallback
+// for agents too old to answer diag.health. Returns (healthy, human detail).
+func probeHealth(ctx context.Context, nc *nats.Conn, nodeID, jobID string) (bool, string) {
+	hcmd, _ := json.Marshal(proto.DiagHealthCmd{JobID: jobID})
+	resp, err := nc.RequestWithContext(ctx, proto.NodeCmdSubject(nodeID, "diag.health"), hcmd)
+	if errors.Is(err, nats.ErrNoResponders) {
+		// Agent predates diag.health — fall back to diag.ping liveness.
+		pcmd, _ := json.Marshal(proto.DiagPingCmd{JobID: jobID})
+		if _, perr := nc.RequestWithContext(ctx, proto.NodeCmdSubject(nodeID, "diag.ping"), pcmd); perr != nil {
+			return false, "diag.ping (fallback) failed: " + perr.Error()
+		}
+		return true, "liveness ok (agent has no diag.health)"
+	}
+	if err != nil {
+		return false, "diag.health request failed: " + err.Error()
+	}
+	var ack proto.DiagHealthAck
+	if uerr := json.Unmarshal(resp.Data, &ack); uerr != nil {
+		return false, "diag.health decode failed: " + uerr.Error()
+	}
+	if !ack.OK {
+		if ack.Detail != "" {
+			return false, ack.Detail
+		}
+		return false, "unhealthy"
+	}
+	return true, "healthy"
+}
+
+// healthCheckAndCommit runs the post-reboot health check (diag.health, role-aware)
+// and either mark-good + records committed, or mark-bad + records rolled_back.
+// Returns the mark-good ack on success. Shared by saga step 7 and the self-update
+// reconciler.
 func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, nodeID, bundleSHA, jobID string, lg logFn) (json.RawMessage, error) {
-	pingCmd, _ := json.Marshal(proto.DiagPingCmd{JobID: jobID})
-	if _, err := nc.RequestWithContext(ctx, proto.NodeCmdSubject(nodeID, "diag.ping"), pingCmd); err != nil {
-		lg.log("warn", "health check failed; sending mark-bad")
-		bad, _ := json.Marshal(proto.UpdateMarkBadCmd{BundleID: bundleSHA, Reason: err.Error()})
+	if healthy, detail := probeHealth(ctx, nc, nodeID, jobID); !healthy {
+		lg.log("warn", "health check failed ("+detail+"); sending mark-bad")
+		bad, _ := json.Marshal(proto.UpdateMarkBadCmd{BundleID: bundleSHA, Reason: detail})
 		_, _ = nc.RequestWithContext(ctx, proto.UpdateMarkBadSubject(nodeID), bad)
 
 		now := time.Now().UTC()
 		_ = store.UpdateNodeUpdate(ctx, jobID, NodeUpdateRolledBack,
-			proto.SlotUnknown, "", "health check failed: "+err.Error(), now)
+			proto.SlotUnknown, "", "health check failed: "+detail, now)
 		publishChange(nc, proto.UpdateChangeEvt{
 			NodeID:   nodeID,
 			JobID:    jobID,
 			BundleID: bundleSHA,
 			Change:   proto.UpdateRolledBack,
-			Reason:   "post-reboot health check failed",
+			Reason:   "post-reboot health check failed: " + detail,
 			Ts:       now,
 		})
-		return nil, fmt.Errorf("health check failed, mark-bad sent: %w", err)
+		return nil, fmt.Errorf("health check failed (%s), mark-bad sent", detail)
 	}
 
 	good, _ := json.Marshal(proto.UpdateMarkGoodCmd{BundleID: bundleSHA})
