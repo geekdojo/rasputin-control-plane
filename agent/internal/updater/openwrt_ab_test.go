@@ -104,6 +104,33 @@ func mustRead(t *testing.T, path string) map[string]string {
 
 // ---- slot math --------------------------------------------------------------
 
+// Real `block info` output from the CWWK firewall (dev.49): p1 ESP (RASPUTIN-FW
+// vfat), p2 active squashfs (/rom), p3 inactive squashfs, p4 rootfs_data ext4.
+const benchBlockInfo = `/dev/nvme0n1p1: UUID="FE83-1305" LABEL="RASPUTIN-FW" VERSION="FAT16" TYPE="vfat"
+/dev/nvme0n1p2: UUID="51056db3-397a8a76-74c1d738-d627d629" VERSION="4.0" MOUNT="/rom" TYPE="squashfs"
+/dev/nvme0n1p3: UUID="51056db3-397a8a76-74c1d738-d627d629" VERSION="4.0" TYPE="squashfs"
+/dev/nvme0n1p4: UUID="df1368c8-442e-4c78-a8e6-88ee060259e3" LABEL="rootfs_data" VERSION="1.0" MOUNT="/overlay" TYPE="ext4"`
+
+func TestParseSquashfsSlots(t *testing.T) {
+	active, inactive := parseSquashfsSlots(benchBlockInfo)
+	if active != "/dev/nvme0n1p2" {
+		t.Errorf("active = %q, want /dev/nvme0n1p2 (the /rom mount)", active)
+	}
+	if inactive != "/dev/nvme0n1p3" {
+		t.Errorf("inactive = %q, want /dev/nvme0n1p3 (the other squashfs)", inactive)
+	}
+}
+
+func TestParseESPDevice(t *testing.T) {
+	if dev := parseESPDevice(benchBlockInfo); dev != "/dev/nvme0n1p1" {
+		t.Errorf("ESP = %q, want /dev/nvme0n1p1 (vfat RASPUTIN-FW)", dev)
+	}
+	// No ESP line → empty (caller errors).
+	if dev := parseESPDevice(`/dev/sda2: TYPE="ext4"`); dev != "" {
+		t.Errorf("expected no ESP, got %q", dev)
+	}
+}
+
 func TestBootedSlotFromCmdline(t *testing.T) {
 	cases := map[string]proto.UpdateSlot{
 		"root=PARTLABEL=rootfs-0 rootfstype=squashfs ro": proto.SlotA,

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -47,9 +48,10 @@ import (
 type OpenWrtABBackend struct {
 	stateDir string
 
-	// grubenvPath is the GRUB environment block on the mounted ESP. The
-	// firewall image mounts the ESP so grub.cfg's $prefix/grubenv is
-	// writable from userspace; default matches that mount.
+	// grubenvPath, when set, is a direct path to the GRUB env block — used by
+	// tests and by an image that pre-mounts the ESP. When EMPTY (the production
+	// default), the backend mounts the ESP on demand for each grubenv op: on
+	// OpenWrt the ESP isn't mounted at runtime, so there's no persistent path.
 	grubenvPath string
 	// procCmdline is read to determine the booted slot (root=PARTLABEL=…).
 	procCmdline string
@@ -80,8 +82,10 @@ func NewOpenWrtABBackend(stateDir string) (*OpenWrtABBackend, error) {
 		return nil, err
 	}
 	b := &OpenWrtABBackend{
-		stateDir:    stateDir,
-		grubenvPath: "/boot/grub/grubenv",
+		stateDir: stateDir,
+		// grubenvPath empty → mount the ESP on demand (see withGrubenv). The
+		// firewall doesn't mount the ESP at runtime, so there's no fixed path.
+		grubenvPath: "",
 		procCmdline: "/proc/cmdline",
 		versionFile: "/etc/rasputin/image-version",
 	}
@@ -333,19 +337,21 @@ func (o *OpenWrtABBackend) installedVersion(localPath, bundleID string) string {
 
 // activateSlot sets ORDER=[target, other] with target OK+untried, in place.
 func (o *OpenWrtABBackend) activateSlot(letter string) error {
-	kv, err := readGrubenv(o.grubenvPath)
-	if err != nil {
-		return err
-	}
-	st := decodeAB(kv)
-	other := "A"
-	if letter == "A" {
-		other = "B"
-	}
-	st.order = []string{letter, other}
-	st.ok[letter] = true
-	st.try[letter] = false
-	return writeGrubenv(o.grubenvPath, encodeAB(kv, st))
+	return o.withGrubenv(func(path string) error {
+		kv, err := readGrubenv(path)
+		if err != nil {
+			return err
+		}
+		st := decodeAB(kv)
+		other := "A"
+		if letter == "A" {
+			other = "B"
+		}
+		st.order = []string{letter, other}
+		st.ok[letter] = true
+		st.try[letter] = false
+		return writeGrubenv(path, encodeAB(kv, st))
+	})
 }
 
 func (o *OpenWrtABBackend) Reboot(ctx context.Context, bundleID string, delaySeconds int) (int, error) {
@@ -403,37 +409,140 @@ func (o *OpenWrtABBackend) markRunning(good bool) error {
 	if running == "" {
 		return fmt.Errorf("openwrt-ab: cannot determine running slot from cmdline")
 	}
-	kv, err := readGrubenv(o.grubenvPath)
+	return o.withGrubenv(func(path string) error {
+		kv, err := readGrubenv(path)
+		if err != nil {
+			return err
+		}
+		st := decodeAB(kv)
+		st.ok[running] = good
+		st.try[running] = false
+		return writeGrubenv(path, encodeAB(kv, st))
+	})
+}
+
+// withGrubenv runs fn with a readable+writable path to the GRUB env block. When
+// grubenvPath is set (tests, or an image that pre-mounts the ESP) it's used
+// directly. Otherwise — the production firewall — the ESP isn't mounted at
+// runtime, so we resolve it (`block info`, LABEL=RASPUTIN-FW), mount it rw on a
+// temp dir, run fn against <mnt>/boot/grub/grubenv, then sync + unmount promptly
+// to keep the FAT-dirty window small. writeGrubenv still overwrites in place, so
+// GRUB's save_env block-list stays valid across the remount.
+func (o *OpenWrtABBackend) withGrubenv(fn func(path string) error) error {
+	if o.grubenvPath != "" {
+		return fn(o.grubenvPath)
+	}
+	dev, err := espDevice()
+	if err != nil {
+		return fmt.Errorf("resolve ESP: %w", err)
+	}
+	mnt, err := os.MkdirTemp("", "rasputin-esp-")
 	if err != nil {
 		return err
 	}
-	st := decodeAB(kv)
-	st.ok[running] = good
-	st.try[running] = false
-	return writeGrubenv(o.grubenvPath, encodeAB(kv, st))
+	defer os.RemoveAll(mnt)
+	if out, err := exec.Command("mount", "-t", "vfat", "-o", "rw,noatime", dev, mnt).CombinedOutput(); err != nil {
+		return fmt.Errorf("mount ESP %s: %w: %s", dev, err, out)
+	}
+	defer func() {
+		_ = exec.Command("sync").Run()
+		if out, err := exec.Command("umount", mnt).CombinedOutput(); err != nil {
+			log.Printf("rasputin-agent: openwrt-ab: umount ESP %s: %v: %s", mnt, err, out)
+		}
+	}()
+	return fn(filepath.Join(mnt, "boot", "grub", "grubenv"))
 }
 
 // ---- default OS-coupled implementations -------------------------------------
 
-// defaultResolveDevice maps a slot letter to its rootfs block device. Prefers
-// the by-partlabel symlink (present when the image populates /dev/disk/by-*);
-// falls back to `findfs PARTLABEL=…` (util-linux / busybox) for OpenWrt roots
-// that don't run udev.
+// defaultResolveDevice maps a slot letter to its rootfs block device on OpenWrt.
+// OpenWrt has no udev by-partlabel symlinks and no findfs/blkid/lsblk, so we use
+// `block info` (from block-mount): the ACTIVE rootfs squashfs is mounted at /rom
+// and the INACTIVE one is the other squashfs (the A/B sibling). The booted slot
+// comes from the kernel cmdline; the requested letter is either it (→ active) or
+// the other (→ inactive). Install only ever asks for the inactive slot.
 func defaultResolveDevice(slot string) (string, error) {
-	label := "rootfs-0"
-	if slot == "B" {
-		label = "rootfs-1"
+	cmdline, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return "", err
 	}
-	byPartlabel := "/dev/disk/by-partlabel/" + label
-	if _, err := os.Stat(byPartlabel); err == nil {
-		return byPartlabel, nil
+	booted := slotLetter(bootedSlotFromCmdline(string(cmdline)))
+	if booted == "" {
+		return "", errors.New("cannot determine booted slot from /proc/cmdline")
 	}
-	if out, err := exec.Command("findfs", "PARTLABEL="+label).Output(); err == nil {
-		if dev := strings.TrimSpace(string(out)); dev != "" {
-			return dev, nil
+	info, err := blockInfo()
+	if err != nil {
+		return "", err
+	}
+	active, inactive := parseSquashfsSlots(info)
+	if active == "" || inactive == "" {
+		return "", fmt.Errorf("block info: expected two squashfs slots (active=%q inactive=%q)", active, inactive)
+	}
+	if slot == booted {
+		return active, nil
+	}
+	return inactive, nil
+}
+
+// espDevice resolves the ESP block device via `block info` — the FAT partition
+// labelled RASPUTIN-FW. No udev / by-label symlinks needed.
+func espDevice() (string, error) {
+	info, err := blockInfo()
+	if err != nil {
+		return "", err
+	}
+	if dev := parseESPDevice(info); dev != "" {
+		return dev, nil
+	}
+	return "", errors.New("ESP (vfat LABEL=RASPUTIN-FW) not found in `block info`")
+}
+
+// blockInfo runs OpenWrt's `block info` and returns its raw output.
+func blockInfo() (string, error) {
+	out, err := exec.Command("block", "info").Output()
+	if err != nil {
+		return "", fmt.Errorf("block info: %w", err)
+	}
+	return string(out), nil
+}
+
+// blockInfoDev extracts the device from a `block info` line
+// ("/dev/nvme0n1p2: UUID=…" → "/dev/nvme0n1p2").
+func blockInfoDev(line string) string {
+	f := strings.Fields(line)
+	if len(f) == 0 {
+		return ""
+	}
+	return strings.TrimSuffix(f[0], ":")
+}
+
+// parseSquashfsSlots picks the (active, inactive) rootfs squashfs devices out of
+// `block info` output: active = mounted at /rom, inactive = the other squashfs.
+// Pure (no I/O) so it's unit-tested against real `block info` fixtures.
+func parseSquashfsSlots(blockInfoOut string) (active, inactive string) {
+	for _, l := range strings.Split(blockInfoOut, "\n") {
+		if !strings.Contains(l, `TYPE="squashfs"`) {
+			continue
+		}
+		dev := blockInfoDev(l)
+		if strings.Contains(l, `MOUNT="/rom"`) {
+			active = dev
+		} else {
+			inactive = dev
 		}
 	}
-	return "", fmt.Errorf("cannot resolve device for slot %s (PARTLABEL=%s): no by-partlabel symlink and findfs failed", slot, label)
+	return active, inactive
+}
+
+// parseESPDevice picks the ESP (vfat LABEL=RASPUTIN-FW) device out of
+// `block info` output. Pure, for unit testing.
+func parseESPDevice(blockInfoOut string) string {
+	for _, l := range strings.Split(blockInfoOut, "\n") {
+		if strings.Contains(l, `LABEL="RASPUTIN-FW"`) && strings.Contains(l, `TYPE="vfat"`) {
+			return blockInfoDev(l)
+		}
+	}
+	return ""
 }
 
 // defaultWriteSlot streams the squashfs at src into the raw block device dev.
