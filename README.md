@@ -87,6 +87,12 @@ and hash.
 Issues and discussion are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
 for the PR flow and the CLA (signing is automatic on your first PR).
 
+## AI-assisted development
+
+This project is developed by a human maintainer working with AI coding assistants;
+AI-assisted commits carry `Co-Authored-By` trailers naming the model. Approach,
+accountability, and provenance: [AI_DISCLOSURE.md](AI_DISCLOSURE.md).
+
 ## License
 
 [AGPL-3.0](LICENSE).

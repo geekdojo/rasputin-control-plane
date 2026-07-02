@@ -33,3 +33,9 @@ already).
 
 This repository is licensed under [AGPL-3.0](LICENSE). By contributing, you
 agree your contribution is provided under the terms of the CLA above.
+
+## AI-assisted contributions
+
+Welcome, with disclosure: note the assistance in your PR and mark AI-assisted commits with a
+`Co-Authored-By` trailer naming the model. You remain accountable for the correctness and
+licensing of what you submit. Details: [AI_DISCLOSURE.md](AI_DISCLOSURE.md).
