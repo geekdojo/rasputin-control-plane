@@ -84,9 +84,8 @@ and hash.
 
 ## Contributing
 
-Issues and discussion are welcome. The project is early and moving fast, so
-expect churn; if you're planning a non-trivial PR, open an issue first so we
-don't collide.
+Issues and discussion are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
+for the PR flow and the CLA (signing is automatic on your first PR).
 
 ## License
 
