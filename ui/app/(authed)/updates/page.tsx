@@ -320,18 +320,25 @@ function DeployBundleButton({ bundle, nodes }: { bundle: Bundle; nodes: Node[] }
   const [nodeId, setNodeId] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  // An OS bundle (RAUC) deploys only to nodes running the Buildroot image —
-  // every role except the firewall, which runs a different image and updates
-  // through its own path, not RAUC bundles. Keep it out of the deploy picker.
-  // Also match architecture: an amd64 bundle can't install on an arm64 node and
-  // vice-versa. Nodes that haven't reported an arch (pre-arch agents) stay
-  // eligible — the api re-checks arch and RAUC is the final backstop.
-  const targets = nodes.filter(
-    (n) =>
-      n.status === 'online' &&
-      n.role !== 'firewall' &&
-      (!n.architecture || n.architecture === bundle.architecture),
-  );
+  // Eligibility = the bundle's SKU must match what the node runs (mirrors the
+  // api's compatible-match guard). The firewall runs its OWN image
+  // (rasputin-fw-n100) and now updates through the SAME node.update saga as the
+  // OS nodes (openwrt-ab backend), so it IS deployable — to the firewall bundle,
+  // and only that. OS nodes take OS bundles matching their arch; an amd64 bundle
+  // can't install on an arm64 node. Nodes with no reported arch (pre-arch agents)
+  // stay eligible for OS bundles — the api re-checks and the on-node compatible
+  // check is the backstop.
+  const FIREWALL_COMPATIBLE = 'rasputin-fw-n100';
+  const targets = nodes.filter((n) => {
+    if (n.status !== 'online') return false;
+    if (n.role === 'firewall') {
+      // Firewall accepts only its own image.
+      return bundle.compatible === FIREWALL_COMPATIBLE;
+    }
+    // OS node: never the firewall image; arch must match.
+    if (bundle.compatible === FIREWALL_COMPATIBLE) return false;
+    return !n.architecture || n.architecture === bundle.architecture;
+  });
 
   async function start() {
     if (!nodeId) {
