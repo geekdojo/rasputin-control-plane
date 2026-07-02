@@ -271,6 +271,21 @@ func (s *Store) MarkBaselineSeeded(ctx context.Context, nodeID string) (bool, er
 	return n == 1, nil
 }
 
+// HasLegacyBaselineMarkers reports whether any baseline-seeded marker exists
+// under a node-id OTHER than excludeKey — i.e. the cluster was seeded under the
+// pre-2026-07 per-node scheme. SeedBaselineRules uses this to ADOPT such a
+// cluster (set the global marker, skip seeding) so an upgrade never re-seeds and
+// duplicates the baseline.
+func (s *Store) HasLegacyBaselineMarkers(ctx context.Context, excludeKey string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM firewall_baseline_seeded WHERE node_id != ?)`, excludeKey).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

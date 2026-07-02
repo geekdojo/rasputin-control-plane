@@ -133,20 +133,50 @@ func TestSeedBaselineRules_DeletedRuleStaysDeleted(t *testing.T) {
 	}
 }
 
-func TestSeedBaselineRules_PerNodeMarker(t *testing.T) {
+// The baseline is CLUSTER-GLOBAL, not per-node: firewall intents have no
+// target_node_id (one firewall per cluster), so re-enrolling the firewall under
+// a DIFFERENT node-id (rename / re-provision / a fresh firewall after removal)
+// must NOT re-seed and duplicate the baseline. Regression test for the
+// 2026-07-02 duplicate-rules bug (per-node guard + global intents = duplicates).
+func TestSeedBaselineRules_ClusterGlobalNoDuplicateOnNodeIDChange(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
 	if n, err := SeedBaselineRules(ctx, s, "node-a"); err != nil || n != 3 {
 		t.Fatalf("seed node-a: n=%d err=%v", n, err)
 	}
-	// A different firewall node id gets its own seed (marker is per-node).
-	if n, err := SeedBaselineRules(ctx, s, "node-b"); err != nil || n != 3 {
-		t.Fatalf("seed node-b: n=%d err=%v", n, err)
+	// Firewall re-enrolls under a NEW node-id — must be a no-op, not a re-seed.
+	if n, err := SeedBaselineRules(ctx, s, "node-b"); err != nil || n != 0 {
+		t.Fatalf("re-enroll under node-b should not reseed: n=%d err=%v", n, err)
 	}
 	intents, _ := s.ListIntents(ctx)
-	if len(intents) != 6 {
-		t.Fatalf("len(intents) = %d, want 6 (3 per node)", len(intents))
+	if len(intents) != 3 {
+		t.Fatalf("len(intents) = %d, want 3 (no duplication across node-ids)", len(intents))
+	}
+}
+
+// Migration: a cluster seeded under the OLD per-node scheme (a per-node marker
+// exists, no global marker) is ADOPTED on the next seed call — the global marker
+// is set and nothing is re-seeded, so upgrading never duplicates (and never
+// resurrects rules the operator may have deleted).
+func TestSeedBaselineRules_AdoptsLegacyPerNodeMarker(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	// Simulate a pre-fix cluster: a per-node marker exists, no global marker.
+	if _, err := s.MarkBaselineSeeded(ctx, "legacy-fw"); err != nil {
+		t.Fatalf("seed legacy marker: %v", err)
+	}
+	// Next firewall registration must adopt (no re-seed), not duplicate.
+	if n, err := SeedBaselineRules(ctx, s, "new-fw"); err != nil || n != 0 {
+		t.Fatalf("adopt legacy: n=%d err=%v", n, err)
+	}
+	if intents, _ := s.ListIntents(ctx); len(intents) != 0 {
+		t.Fatalf("adoption must not seed: len(intents)=%d", len(intents))
+	}
+	// Sticky: subsequent calls stay no-ops.
+	if n, _ := SeedBaselineRules(ctx, s, "another"); n != 0 {
+		t.Fatal("should remain a no-op after adoption")
 	}
 }
 
