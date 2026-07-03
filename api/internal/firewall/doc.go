@@ -3,5 +3,5 @@
 // reconciles observed state against intent on a periodic timer.
 //
 // See projects/rasputin/design/control-plane/architecture.md §8
-// in the geekdojo-wiki.
+// in the geekdojo-brain.
 package firewall

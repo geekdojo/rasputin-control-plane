@@ -4,5 +4,5 @@
 // Only compiled in on firewall nodes (build tag: firewall).
 //
 // See projects/rasputin/design/control-plane/architecture.md §8
-// in the geekdojo-wiki.
+// in the geekdojo-brain.
 package openwrt

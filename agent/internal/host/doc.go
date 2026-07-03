@@ -2,5 +2,5 @@
 // reboot/shutdown control, and the local RAUC client wrapper.
 //
 // See projects/rasputin/design/control-plane/architecture.md §11
-// in the geekdojo-wiki.
+// in the geekdojo-brain.
 package host

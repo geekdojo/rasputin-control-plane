@@ -2,5 +2,5 @@
 // and the subject-name registry shared with the agent.
 //
 // See projects/rasputin/design/control-plane/architecture.md §5
-// in the geekdojo-wiki.
+// in the geekdojo-brain.
 package bus

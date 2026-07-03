@@ -46,7 +46,7 @@ import (
 // rasputin-api: the Rasputin control-plane backend.
 //
 // Architecture: projects/rasputin/design/control-plane/architecture.md
-//   in the geekdojo-wiki.
+//   in the geekdojo-brain.
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(),

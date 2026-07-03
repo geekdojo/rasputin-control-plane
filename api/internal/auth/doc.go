@@ -2,5 +2,5 @@
 // the local user store. OIDC is post-MVS.
 //
 // See projects/rasputin/design/control-plane/architecture.md §7.7
-// in the geekdojo-wiki.
+// in the geekdojo-brain.
 package auth

@@ -3,5 +3,5 @@
 // the backplane.
 //
 // See projects/rasputin/design/control-plane/architecture.md §7.2
-// in the geekdojo-wiki.
+// in the geekdojo-brain.
 package ipmi

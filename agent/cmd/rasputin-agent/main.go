@@ -33,7 +33,7 @@ import (
 // Dials the control-plane NATS broker outbound; never listens.
 //
 // Architecture: projects/rasputin/design/control-plane/architecture.md
-//   in the geekdojo-wiki.
+//   in the geekdojo-brain.
 
 // AgentVersion is the version the agent reports on registration/heartbeat
 // (surfaced as the node's control-plane software version). A var, not a const,

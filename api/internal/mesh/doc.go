@@ -17,5 +17,5 @@
 // TODO(v1): real Docker container supervision. The supervisor interface is
 // here so the wiring can swap to a real backend without restructuring.
 //
-// See projects/rasputin/design/control-plane/mesh.md in the geekdojo-wiki.
+// See projects/rasputin/design/control-plane/mesh.md in the geekdojo-brain.
 package mesh

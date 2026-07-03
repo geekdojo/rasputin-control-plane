@@ -15,5 +15,5 @@
 //     for each open session, wires bytes between the api's WebSocket and
 //     the agent's serial port.
 //
-// See projects/rasputin/design/control-plane/bmc.md in the geekdojo-wiki.
+// See projects/rasputin/design/control-plane/bmc.md in the geekdojo-brain.
 package bmc

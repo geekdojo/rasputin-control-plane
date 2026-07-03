@@ -16,5 +16,5 @@
 //
 // See projects/rasputin/design/control-plane/updates.md
 //
-//	in the geekdojo-wiki.
+//	in the geekdojo-brain.
 package updater

@@ -3,5 +3,5 @@
 // write paths create Jobs.
 //
 // See projects/rasputin/design/control-plane/architecture.md §2
-// in the geekdojo-wiki.
+// in the geekdojo-brain.
 package api
