@@ -608,10 +608,12 @@ func (o *OpenWrtABBackend) defaultReboot(delaySeconds int) {
 	}()
 }
 
-// defaultVerifySig is a placeholder until detached-CMS artifact signing is wired
-// end-to-end (the rootfs artifact isn't signed yet; the SHA-over-mesh-TLS gate
-// in Download is the current integrity guarantee). It logs once and passes.
-// Tracked as a hardening item in the firewall-image design doc.
+// defaultVerifySig is a placeholder: the release pipeline now signs the rootfs
+// artifact (detached CMS ${rootfs}.sig, published alongside it), but on-device
+// verification against the baked /etc/rasputin/trust/root-ca.pem is not yet
+// wired — the SHA-over-mesh-TLS gate in Download is the current integrity
+// guarantee. It logs once and passes. Tracked as an open item in the
+// firewall backlog.
 func defaultVerifySig(ctx context.Context, rootfsPath string) error {
 	log.Printf("rasputin-agent: openwrt-ab: artifact signature verification not yet wired — relying on SHA gate (see firewall-image.md)")
 	return nil
