@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,19 +14,53 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// Managed reports whether the api should manage the firewall node under the
+// current deployment mode. It returns false in LAN-peer mode — the existing
+// router firewalls and our box is idle, so apply/reconcile no-op rather than
+// pushing config or reporting perpetual drift against a stock box. A nil
+// Managed (tests, back-compat) is treated as "manage".
+type Managed func(ctx context.Context) (bool, error)
+
+// modeGate is the first step of both firewall workflows. In an unmanaged mode
+// it stops the saga early (successfully) so no config is pushed and no drift
+// is reported.
+func modeGate(managed Managed) jobs.WorkflowStep {
+	return jobs.WorkflowStep{
+		Name:    "mode_gate",
+		Timeout: 2 * time.Second,
+		Do: func(sc *jobs.StepCtx) (json.RawMessage, error) {
+			if managed == nil {
+				return nil, nil
+			}
+			ok, err := managed(sc.Ctx)
+			if err != nil {
+				return nil, fmt.Errorf("mode gate: %w", err)
+			}
+			if !ok {
+				sc.Log("info", "firewall management is disabled for this deployment mode (LAN peer) — skipping")
+				return nil, jobs.ErrStopWorkflow
+			}
+			return nil, nil
+		},
+	}
+}
+
 // ----- ApplyWorkflow ------------------------------------------------------
 
 // ApplyWorkflow pushes the api's intent set to the firewall agent.
 //
-//  1. find_target  — resolve the firewall node id (validates exactly one).
-//  2. compile      — load + compile intents to canonical UCI state.
-//  3. push         — RPC the agent, persist resulting hash.
+//  1. mode_gate    — stop early (no-op) if this deployment mode doesn't
+//     manage the firewall (LAN peer).
+//  2. find_target  — resolve the firewall node id (validates exactly one).
+//  3. compile      — load + compile intents to canonical UCI state.
+//  4. push         — RPC the agent, persist resulting hash.
 //
 // Steps don't share data via the runner; each re-reads what it needs.
-func ApplyWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
+func ApplyWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, managed Managed) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "firewall.apply",
 		Steps: []jobs.WorkflowStep{
+			modeGate(managed),
 			{Name: "find_target", Timeout: 2 * time.Second, Do: applyFindTarget(inv)},
 			{Name: "compile", Timeout: 2 * time.Second, Do: applyCompile(store)},
 			{Name: "push", Timeout: 5 * time.Second, Do: applyPush(store, inv, nc)},
@@ -132,10 +167,11 @@ func applyPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 // ReconcileWorkflow fetches the firewall agent's observed state, compares it
 // against the intent hash the api thinks should be live, and emits a drift
 // or in_sync change event accordingly.
-func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
+func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, managed Managed) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "firewall.reconcile",
 		Steps: []jobs.WorkflowStep{
+			modeGate(managed),
 			{Name: "find_target", Timeout: 2 * time.Second, Do: applyFindTarget(inv)},
 			{Name: "fetch_observed", Timeout: 5 * time.Second, Do: reconcileFetch(store, inv, nc)},
 			{Name: "compare", Timeout: 2 * time.Second, Do: reconcileCompare(store, inv, nc)},

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/oklog/ulid/v2"
 )
@@ -120,7 +121,20 @@ func (s *Server) handleMeshEnrollDefaults(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "node not found")
 		return
 	}
+	// In LAN-peer mode we advertise nothing by default: the Rasputin nodes sit
+	// on the operator's existing LAN, which their other tailnet routers may
+	// already advertise — auto-advertising it would create a route conflict.
+	// Router/sub-segment advertise the node's detected CIDR (whole LAN vs the
+	// segment behind Node N). The field stays editable regardless.
 	advertise := []string{}
+	if st, err := s.setup.GetState(r.Context()); err == nil && st.Mode == setup.ModeLANPeer {
+		writeJSON(w, http.StatusOK, struct {
+			NodeID          string   `json:"nodeId"`
+			AdvertiseRoutes []string `json:"advertiseRoutes"`
+			PrimaryLanCidr  string   `json:"primaryLanCidr,omitempty"`
+		}{NodeID: nodeID, AdvertiseRoutes: advertise})
+		return
+	}
 	if v, ok := node.Metadata["primaryLanCidr"]; ok {
 		if cidr, ok := v.(string); ok && cidr != "" {
 			advertise = []string{cidr}

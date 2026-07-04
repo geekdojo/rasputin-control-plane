@@ -1437,6 +1437,30 @@ func TestHandleMeshEnrollDefaults_PrefillsFromAgentMetadata(t *testing.T) {
 	}
 }
 
+func TestHandleMeshEnrollDefaults_LANPeerAdvertisesNothing(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	// LAN-peer: even a node that reported a CIDR must not auto-advertise it —
+	// the nodes sit on the operator's existing LAN.
+	if err := f.setupSvc.SetMode(f.ctx, "lan_peer"); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+	if err := f.inv.Insert(f.ctx, &proto.Node{
+		ID: "node-lp", Role: proto.RoleCompute, Hostname: "node-lp",
+		Metadata:  map[string]any{"primaryLanCidr": "192.168.50.0/24"},
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("inv.Insert: %v", err)
+	}
+	w := f.do(t, http.MethodGet, "/api/mesh/enroll-defaults/node-lp", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"advertiseRoutes":[]`) {
+		t.Errorf("LAN-peer should advertise nothing, got body=%s", w.Body.String())
+	}
+}
+
 func TestHandleMeshEnrollDefaults_NoCIDRReturnsEmptyArray(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)

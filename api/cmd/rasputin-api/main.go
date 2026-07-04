@@ -347,8 +347,18 @@ func main() {
 	runner := jobs.NewRunner(jobStore, busSrv.Conn())
 	runner.Register(jobs.PingWorkflow())
 	runner.Register(jobs.RebootWorkflow())
-	runner.Register(firewall.ApplyWorkflow(fwStore, invStore, busSrv.Conn()))
-	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn()))
+	// Firewall is managed in every mode except LAN-peer, where the existing
+	// router firewalls and our box (if any) is idle. Unset mode (pre-wizard)
+	// defaults to managed so a mid-setup box still reconciles.
+	fwManaged := func(ctx context.Context) (bool, error) {
+		m, err := setupStore.Get(ctx, setup.KeyMode)
+		if err != nil {
+			return false, err
+		}
+		return setup.Mode(m) != setup.ModeLANPeer, nil
+	}
+	runner.Register(firewall.ApplyWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
+	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn()))

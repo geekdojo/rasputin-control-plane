@@ -52,6 +52,13 @@ type Workflow struct {
 	Steps []WorkflowStep
 }
 
+// ErrStopWorkflow, returned by a step's Do, ends the saga *successfully*
+// without running the remaining steps. Use it for guard steps that decide the
+// rest of the workflow is a no-op (e.g. firewall apply/reconcile in LAN-peer
+// mode, where the box is idle). Distinct from any other error, which fails the
+// job. Not retried — the step is marked succeeded and the job completes.
+var ErrStopWorkflow = errors.New("jobs: stop workflow early")
+
 // Runner is the saga executor. One Runner per api process; workflows are
 // registered at startup and looked up at Submit time.
 type Runner struct {
@@ -243,6 +250,10 @@ func (r *Runner) run(j *Job, wf Workflow) {
 	prior := make(map[string]json.RawMessage, len(wf.Steps))
 	for seq, step := range wf.Steps {
 		if err := r.runStep(ctx, j, seq, step, prior); err != nil {
+			if errors.Is(err, ErrStopWorkflow) {
+				// Guard step decided the rest is a no-op — succeed early.
+				break
+			}
 			now := time.Now().UTC()
 			_ = r.store.MarkJobFailed(ctx, j.ID, err.Error(), now)
 			r.emit(ctx, j.ID, proto.JobFailed, map[string]string{"error": err.Error()})
@@ -308,6 +319,15 @@ func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep
 				prior[step.Name] = result
 			}
 			return nil
+		}
+		// A stop-early signal marks the step succeeded (not failed) and
+		// propagates up so run() can end the saga successfully. Never retried.
+		if errors.Is(err, ErrStopWorkflow) {
+			_ = r.store.MarkStepSucceeded(ctx, j.ID, seq, attempt, result, time.Now().UTC())
+			r.emit(ctx, j.ID, proto.JobStepSucceeded, proto.StepEventData{
+				Seq: seq, Name: step.Name, Attempt: attempt, Result: result,
+			})
+			return ErrStopWorkflow
 		}
 		lastErr = err
 	}

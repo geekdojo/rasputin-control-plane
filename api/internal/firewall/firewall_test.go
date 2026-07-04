@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -774,11 +775,11 @@ func TestCompile_FirewallRuleRejectsBadSpec(t *testing.T) {
 // ============================================================================
 
 func TestApplyWorkflowShape(t *testing.T) {
-	w := ApplyWorkflow(nil, nil, nil)
+	w := ApplyWorkflow(nil, nil, nil, nil)
 	if w.Kind != "firewall.apply" {
 		t.Errorf("Kind: %q", w.Kind)
 	}
-	wantSteps := []string{"find_target", "compile", "push"}
+	wantSteps := []string{"mode_gate", "find_target", "compile", "push"}
 	if len(w.Steps) != len(wantSteps) {
 		t.Fatalf("step count: got %d want %d", len(w.Steps), len(wantSteps))
 	}
@@ -790,12 +791,40 @@ func TestApplyWorkflowShape(t *testing.T) {
 }
 
 func TestReconcileWorkflowShape(t *testing.T) {
-	w := ReconcileWorkflow(nil, nil, nil)
+	w := ReconcileWorkflow(nil, nil, nil, nil)
 	if w.Kind != "firewall.reconcile" {
 		t.Errorf("Kind: %q", w.Kind)
 	}
+	if w.Steps[0].Name != "mode_gate" {
+		t.Errorf("first step should be mode_gate, got %q", w.Steps[0].Name)
+	}
 	if len(w.Steps) < 2 {
 		t.Errorf("expected at least 2 steps, got %d", len(w.Steps))
+	}
+}
+
+func TestModeGate(t *testing.T) {
+	run := func(managed Managed) error {
+		step := modeGate(managed)
+		_, err := step.Do(&jobs.StepCtx{Ctx: context.Background(), Log: func(string, string) {}})
+		return err
+	}
+	// Managed → proceed (nil error, no stop).
+	if err := run(func(context.Context) (bool, error) { return true, nil }); err != nil {
+		t.Errorf("managed=true should proceed, got %v", err)
+	}
+	// Unmanaged (LAN peer) → stop the saga early (success).
+	if err := run(func(context.Context) (bool, error) { return false, nil }); !errors.Is(err, jobs.ErrStopWorkflow) {
+		t.Errorf("managed=false should stop early, got %v", err)
+	}
+	// nil Managed (tests/back-compat) → proceed.
+	if err := run(nil); err != nil {
+		t.Errorf("nil Managed should proceed, got %v", err)
+	}
+	// Probe error → surfaced as a step error (not a stop).
+	probeErr := errors.New("boom")
+	if err := run(func(context.Context) (bool, error) { return false, probeErr }); !errors.Is(err, probeErr) {
+		t.Errorf("probe error should surface, got %v", err)
 	}
 }
 

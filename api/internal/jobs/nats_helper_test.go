@@ -105,6 +105,43 @@ func TestRunner_Submit_RunsWorkflowToSuccess(t *testing.T) {
 	r.Wait()
 }
 
+// TestRunner_Submit_StopWorkflowEndsEarlySuccess covers the ErrStopWorkflow
+// guard: a step returns it, the saga stops without running later steps, and
+// the job is marked succeeded (not failed).
+func TestRunner_Submit_StopWorkflowEndsEarlySuccess(t *testing.T) {
+	nc := startNATS(t)
+	store := newStore(t)
+	r := NewRunner(store, nc)
+
+	var laterRan int32
+	r.Register(Workflow{
+		Kind: "test.stop.early",
+		Steps: []WorkflowStep{
+			{Name: "gate", Timeout: time.Second, Do: func(sc *StepCtx) (json.RawMessage, error) {
+				sc.Log("info", "gate says stop")
+				return nil, ErrStopWorkflow
+			}},
+			{Name: "later", Timeout: time.Second, Do: func(sc *StepCtx) (json.RawMessage, error) {
+				atomic.AddInt32(&laterRan, 1)
+				return nil, nil
+			}},
+		},
+	})
+
+	j, err := r.Submit(context.Background(), "test.stop.early", json.RawMessage(`{}`), "test")
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	done := waitForStatus(t, store, j.ID, StatusSucceeded, 2*time.Second)
+	if done.FinishedAt == nil {
+		t.Errorf("FinishedAt should be set")
+	}
+	if atomic.LoadInt32(&laterRan) != 0 {
+		t.Errorf("steps after the stop must not run, got %d", atomic.LoadInt32(&laterRan))
+	}
+	r.Wait()
+}
+
 // TestRunner_Submit_StepFailureMarksJobFailed exercises runStep's retry +
 // failure path. Step returns an error on every attempt; with retries=1 we get
 // two attempts, then the step is failed, then the job is failed.
