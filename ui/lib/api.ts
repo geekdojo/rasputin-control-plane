@@ -30,6 +30,7 @@ import type {
   FirewallRuleSpec,
   PortForwardSpec,
   WANConfigSpec,
+  DeploymentMode,
   SetupState,
   SystemUpdateChangeEvent,
   UpdateChangeEvent,
@@ -748,6 +749,17 @@ export function setInstallName(name: string): Promise<SetupState> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
+  });
+}
+
+// Persist the deployment-mode choice. Throws on 400 (invalid) or 412 (a
+// firewall-running mode was picked with no firewall node registered) —
+// callers surface the message.
+export function setDeploymentMode(mode: DeploymentMode): Promise<SetupState> {
+  return jsonFetch<SetupState>('/api/setup/mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
   });
 }
 

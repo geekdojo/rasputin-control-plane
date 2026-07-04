@@ -66,29 +66,30 @@ func embeddedNATS(t *testing.T) *nats.Conn {
 // ============================================================================
 
 type apiFixture struct {
-	ctx          context.Context
-	dir          string
-	srv          *Server
-	handler      http.Handler
-	authSvc      *auth.Service
-	authStore    *auth.Store
-	authSession  *auth.Session
-	authUser     *auth.User
-	jobsStore    *jobs.Store
-	runner       *jobs.Runner
-	inv          *inventory.Store
-	fw           *firewall.Store
-	appsStore    *apps.Store
-	metricsStore *metrics.Store
-	updStore     *updater.Store
-	verifier     *updater.Verifier
-	bundleDir    string
-	mesh         *mesh.Service
-	meshFake     *fakeMeshClient
-	bmcSvc       *bmc.Service
-	setupSvc     *setup.Service
-	nc           *nats.Conn
-	hasUsers     bool
+	ctx             context.Context
+	dir             string
+	srv             *Server
+	handler         http.Handler
+	authSvc         *auth.Service
+	authStore       *auth.Store
+	authSession     *auth.Session
+	authUser        *auth.User
+	jobsStore       *jobs.Store
+	runner          *jobs.Runner
+	inv             *inventory.Store
+	fw              *firewall.Store
+	appsStore       *apps.Store
+	metricsStore    *metrics.Store
+	updStore        *updater.Store
+	verifier        *updater.Verifier
+	bundleDir       string
+	mesh            *mesh.Service
+	meshFake        *fakeMeshClient
+	bmcSvc          *bmc.Service
+	setupSvc        *setup.Service
+	nc              *nats.Conn
+	hasUsers        bool
+	hasFirewallNode bool
 }
 
 // fakeMeshClient is a minimal in-memory mesh Client implementation just
@@ -223,7 +224,8 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		updStore:     updStore,
 	}
 	probes := setup.Probes{
-		HasUsers: func(_ context.Context) (bool, error) { return f.hasUsers, nil },
+		HasUsers:        func(_ context.Context) (bool, error) { return f.hasUsers, nil },
+		HasFirewallNode: func(_ context.Context) (bool, error) { return f.hasFirewallNode, nil },
 	}
 	setupSvc := setup.NewService(setupStore, probes, "self-node")
 
@@ -1718,9 +1720,47 @@ func TestHandleSetupComplete_RequiredStepIncomplete(t *testing.T) {
 	c := f.authenticate(t)
 	w := f.do(t, http.MethodPost, "/api/setup/complete", "", c)
 	// The first-passkey step is unsatisfied until we mark hasUsers=true,
-	// AND install name must be set.
+	// AND install name + deployment mode must be set.
 	if w.Code != http.StatusPreconditionFailed {
 		t.Errorf("want 412, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleSetupMode_InvalidValue(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodPost, "/api/setup/mode", `{"mode":"nope"}`, c)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("want 400 (invalid mode), got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleSetupMode_LANPeerSucceeds(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	// No firewall node registered — lan_peer must still be accepted.
+	w := f.do(t, http.MethodPost, "/api/setup/mode", `{"mode":"lan_peer"}`, c)
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleSetupMode_FirewallModeGatedWithoutFirewallNode(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodPost, "/api/setup/mode", `{"mode":"router"}`, c)
+	if w.Code != http.StatusPreconditionFailed {
+		t.Errorf("want 412 (no firewall node), got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleSetupMode_FirewallModeAllowedWithFirewallNode(t *testing.T) {
+	f := newAPIFixture(t)
+	f.hasFirewallNode = true
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodPost, "/api/setup/mode", `{"mode":"sub_segment"}`, c)
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 

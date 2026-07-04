@@ -14,4 +14,10 @@ CREATE TABLE IF NOT EXISTS settings (
 const (
 	KeyInstallName       = "setup.install_name"
 	KeyWizardCompletedAt = "setup.wizard_completed_at"
+	// KeyMode holds the operator-chosen deployment topology (see mode.go).
+	// Unlike every other wizard fact, this is a stored *intent* that can't
+	// be derived from a subsystem probe — it's the single source of truth
+	// every mode-gated subsystem (firewall apply, IDS, DHCP, mesh advertise,
+	// UI SideNav) reads.
+	KeyMode = "setup.mode"
 )

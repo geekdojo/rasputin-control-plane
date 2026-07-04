@@ -303,6 +303,13 @@ func main() {
 			}
 			return false, nil
 		},
+		HasFirewallNode: func(ctx context.Context) (bool, error) {
+			nodes, err := invStore.ListByRole(ctx, proto.RoleFirewall)
+			if err != nil {
+				return false, err
+			}
+			return len(nodes) > 0, nil
+		},
 	}, selfNodeID)
 
 	// Default origins cover both ways the UI reaches the api on localhost:

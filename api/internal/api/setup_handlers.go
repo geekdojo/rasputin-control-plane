@@ -45,6 +45,33 @@ func (s *Server) handleSetupInstallName(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, state)
 }
 
+// POST /api/setup/mode
+// Body: { "mode": "router" | "lan_peer" | "sub_segment" }
+// Authenticated. Persists the deployment topology. 400 on an unknown value;
+// 412 when a firewall-running mode is picked but no firewall node exists yet.
+func (s *Server) handleSetupMode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if err := s.setup.SetMode(r.Context(), req.Mode); err != nil {
+		switch {
+		case errors.Is(err, setup.ErrInvalidMode):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, setup.ErrModeNeedsFirewallNode):
+			writeError(w, http.StatusPreconditionFailed, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	state, _ := s.setup.GetState(r.Context())
+	writeJSON(w, http.StatusOK, state)
+}
+
 // POST /api/setup/mesh
 // Body: none. Kicks off mesh.enroll_node for this api's self node.
 // Authenticated. Refuses if RASPUTIN_SELF_NODE_ID isn't configured —

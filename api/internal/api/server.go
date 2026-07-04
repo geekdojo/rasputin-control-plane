@@ -234,6 +234,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/bus/tokens/{id}", reqd(s.handleRevokeBusToken))
 
 	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))
+	mux.HandleFunc("POST /api/setup/mode", reqd(s.handleSetupMode))
 	mux.HandleFunc("POST /api/setup/mesh", reqd(s.handleSetupMesh))
 	mux.HandleFunc("POST /api/setup/complete", reqd(s.handleSetupComplete))
 

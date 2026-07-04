@@ -99,8 +99,13 @@ function NavButton({ item, active }: { item: NavItem; active: boolean }) {
   );
 }
 
-export function SideNav() {
+// hideFirewall drops the Firewall section entirely — set in "LAN peer" mode
+// (setup.mode === 'lan_peer'), where the existing router firewalls and
+// Rasputin has no firewall job, so WAN/rule/port-forward tabs would only
+// invite configuration for a device that can't act on it.
+export function SideNav({ hideFirewall = false }: { hideFirewall?: boolean }) {
   const pathname = usePathname() ?? '/';
+  const nav = hideFirewall ? NAV.filter((item) => item.label !== 'Firewall') : NAV;
 
   return (
     <nav
@@ -118,7 +123,7 @@ export function SideNav() {
       }}
     >
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, width: '100%' }}>
-        {NAV.map((item) => (
+        {nav.map((item) => (
           <NavButton key={item.label} item={item} active={isActive(pathname, item.href)} />
         ))}
       </div>

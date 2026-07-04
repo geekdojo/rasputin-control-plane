@@ -491,6 +491,10 @@ export interface SetupStep {
   detail?: string;
 }
 
+// Deployment topology chosen in the wizard. '' = not yet picked. The values
+// are a backend contract (setup.mode) — see the api setup package.
+export type DeploymentMode = '' | 'router' | 'lan_peer' | 'sub_segment';
+
 export interface SetupState {
   steps: SetupStep[];
   completed: boolean;
@@ -500,6 +504,11 @@ export interface SetupState {
   trustConfigured: boolean;
   meshEnrolled: boolean;
   selfNodeId: string;
+  // Chosen deployment mode ('' until picked).
+  mode: DeploymentMode;
+  // Whether a firewall-capable node is registered — i.e. whether the router
+  // and sub-segment modes are offerable.
+  firewallCapable: boolean;
 }
 
 // Alerts — surfaced by the v0 server-side aggregator at GET /api/alerts.

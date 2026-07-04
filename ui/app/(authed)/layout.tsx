@@ -189,7 +189,7 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
       )}
 
       <div style={{ position: 'relative', zIndex: 1, flex: 1, display: 'flex', overflow: 'hidden' }}>
-        <SideNav />
+        <SideNav hideFirewall={setup?.mode === 'lan_peer'} />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           {children}
         </div>

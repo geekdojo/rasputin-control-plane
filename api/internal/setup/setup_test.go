@@ -119,6 +119,7 @@ type probesState struct {
 	hasUsers        bool
 	trustConfigured bool
 	meshEnrolled    bool
+	hasFirewallNode bool
 	hasUsersErr     error
 	meshErr         error
 }
@@ -133,6 +134,9 @@ func buildService(t *testing.T, ps *probesState, selfNodeID string) *Service {
 		TrustConfigured: func() bool { return ps.trustConfigured },
 		MeshEnrolled: func(ctx context.Context, nodeID string) (bool, error) {
 			return ps.meshEnrolled, ps.meshErr
+		},
+		HasFirewallNode: func(ctx context.Context) (bool, error) {
+			return ps.hasFirewallNode, nil
 		},
 	}
 	return NewService(store, probes, selfNodeID)
@@ -207,7 +211,10 @@ func TestService_GetState_CompletedOnlyAfterMarkCompleted(t *testing.T) {
 	if err := svc.SetInstallName(ctx, "X"); err != nil {
 		t.Fatalf("SetInstallName: %v", err)
 	}
-	// At this point both required steps are done but MarkCompleted is not yet
+	if err := svc.SetMode(ctx, string(ModeLANPeer)); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+	// At this point all required steps are done but MarkCompleted is not yet
 	// recorded — Completed must stay false to give the operator the chance
 	// to click Finish.
 	pre, _ := svc.GetState(ctx)
@@ -296,5 +303,95 @@ func TestService_SelfNodeIDAccessor(t *testing.T) {
 	svc := NewService(store, Probes{}, "self-x")
 	if svc.SelfNodeID() != "self-x" {
 		t.Errorf("SelfNodeID: %q", svc.SelfNodeID())
+	}
+}
+
+// ============================================================================
+// Deployment mode (setup.mode) — the one stored-intent step. See mode.go and
+// the wiki backlog (setup-wizard SW-1).
+// ============================================================================
+
+func TestService_SetMode_RejectsUnknownValue(t *testing.T) {
+	svc := buildService(t, &probesState{}, "self")
+	if err := svc.SetMode(context.Background(), "bananas"); !errors.Is(err, ErrInvalidMode) {
+		t.Errorf("want ErrInvalidMode, got %v", err)
+	}
+}
+
+func TestService_SetMode_LANPeerAlwaysAllowed(t *testing.T) {
+	ctx := context.Background()
+	// No firewall node — LAN-peer must still work (it needs no firewall).
+	svc := buildService(t, &probesState{hasFirewallNode: false}, "self")
+	if err := svc.SetMode(ctx, string(ModeLANPeer)); err != nil {
+		t.Fatalf("SetMode(lan_peer): %v", err)
+	}
+	st, _ := svc.GetState(ctx)
+	if st.Mode != ModeLANPeer {
+		t.Errorf("Mode: want lan_peer, got %q", st.Mode)
+	}
+	step, _ := findStep(st.Steps, "deployment_mode")
+	if !step.Done {
+		t.Error("deployment_mode step should be done once a mode is set")
+	}
+}
+
+func TestService_SetMode_FirewallModesGatedWithoutFirewallNode(t *testing.T) {
+	ctx := context.Background()
+	svc := buildService(t, &probesState{hasFirewallNode: false}, "self")
+	for _, m := range []Mode{ModeRouter, ModeSubSegment} {
+		if err := svc.SetMode(ctx, string(m)); !errors.Is(err, ErrModeNeedsFirewallNode) {
+			t.Errorf("SetMode(%s) without firewall node: want ErrModeNeedsFirewallNode, got %v", m, err)
+		}
+	}
+	// Nothing should have been persisted.
+	st, _ := svc.GetState(ctx)
+	if st.Mode != ModeUnset {
+		t.Errorf("Mode should remain unset after gated failures, got %q", st.Mode)
+	}
+}
+
+func TestService_SetMode_FirewallModesAllowedWithFirewallNode(t *testing.T) {
+	ctx := context.Background()
+	svc := buildService(t, &probesState{hasFirewallNode: true}, "self")
+	if err := svc.SetMode(ctx, string(ModeRouter)); err != nil {
+		t.Fatalf("SetMode(router) with firewall node: %v", err)
+	}
+	st, _ := svc.GetState(ctx)
+	if st.Mode != ModeRouter {
+		t.Errorf("Mode: want router, got %q", st.Mode)
+	}
+}
+
+func TestService_GetState_FirewallCapableTracksProbe(t *testing.T) {
+	for _, capable := range []bool{true, false} {
+		svc := buildService(t, &probesState{hasFirewallNode: capable}, "self")
+		st, _ := svc.GetState(context.Background())
+		if st.FirewallCapable != capable {
+			t.Errorf("FirewallCapable: want %v, got %v", capable, st.FirewallCapable)
+		}
+	}
+}
+
+func TestService_GetState_ModeStepRequiredAndBlocksCompletion(t *testing.T) {
+	ctx := context.Background()
+	// All other required steps satisfied, mode left unset.
+	ps := &probesState{hasUsers: true}
+	svc := buildService(t, ps, "self")
+	if err := svc.SetInstallName(ctx, "X"); err != nil {
+		t.Fatalf("SetInstallName: %v", err)
+	}
+	if err := svc.MarkCompleted(ctx); err != nil {
+		t.Fatalf("MarkCompleted: %v", err)
+	}
+	st, _ := svc.GetState(ctx)
+	step, ok := findStep(st.Steps, "deployment_mode")
+	if !ok {
+		t.Fatal("deployment_mode step missing")
+	}
+	if !step.Required {
+		t.Error("deployment_mode step should be required")
+	}
+	if st.Completed {
+		t.Error("Completed must stay false while the mode is unset")
 	}
 }

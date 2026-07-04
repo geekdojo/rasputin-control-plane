@@ -138,11 +138,15 @@ func (f *fixture) insertApp(t *testing.T, id, name string, status proto.AppStatu
 func (f *fixture) markSetupComplete(t *testing.T) {
 	t.Helper()
 	// Satisfy all the required gates the wizard checks (see setup.GetState):
-	// (1) HasUsers probe true, (2) install name set, (3) operator explicitly
+	// (1) HasUsers probe true, (2) install name set, (3) a deployment mode
+	// chosen (LAN-peer needs no firewall node), (4) operator explicitly
 	// clicked Finish (recorded via MarkCompleted).
 	f.hasUsers = true
 	if err := f.setup.SetInstallName(f.ctx, "Test Cluster"); err != nil {
 		t.Fatalf("set install name: %v", err)
+	}
+	if err := f.setup.SetMode(f.ctx, string(setup.ModeLANPeer)); err != nil {
+		t.Fatalf("set mode: %v", err)
 	}
 	if err := f.setup.MarkCompleted(f.ctx); err != nil {
 		t.Fatalf("mark completed: %v", err)
