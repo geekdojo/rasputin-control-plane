@@ -4,6 +4,7 @@ import {
   Activity,
   AlertTriangle,
   ChevronRight,
+  Info,
   Layers,
   Package,
   Power,
@@ -25,7 +26,7 @@ import {
   openBMCWS,
   type NodeRemovalImpact,
 } from '../lib/api';
-import type { App, BMCPowerState, Node } from '../lib/types';
+import type { App, BMCPowerState, DeploymentMode, Node } from '../lib/types';
 import { BMC_ENABLED } from '../lib/features';
 import { ConfirmModal } from './ConfirmModal';
 import { ACCENT, accentA, MONO } from './ui-theme';
@@ -35,6 +36,7 @@ interface NodeControlsProps {
   cpu: number | null;
   mem: number | null;
   apps: App[];
+  deploymentMode?: DeploymentMode;
   onNavigate: (path: string) => void;
   onRemoved?: (id: string) => void;
 }
@@ -157,7 +159,7 @@ function appStatusColor(status: App['lastStatus']): string {
   return 'rgba(148,163,184,0.5)';
 }
 
-export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: NodeControlsProps) {
+export function NodeControls({ node, cpu, mem, apps, deploymentMode, onNavigate, onRemoved }: NodeControlsProps) {
   const [modal, setModal] = useState<'reboot' | 'power-off' | 'reset' | 'remove' | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -252,6 +254,27 @@ export function NodeControls({ node, cpu, mem, apps, onNavigate, onRemoved }: No
             <div style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO }}>— select a node —</div>
           )}
         </div>
+
+        {node?.role === 'firewall' && deploymentMode === 'lan_peer' && (
+          <div
+            style={{
+              border: `1px solid ${accentA(0.4)}`,
+              background: accentA(0.06),
+              padding: '10px 12px',
+              marginBottom: 16,
+              display: 'flex',
+              gap: 8,
+            }}
+          >
+            <Info size={13} color={ACCENT} style={{ flexShrink: 0, marginTop: 1 }} />
+            <p style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>
+              This is a firewall-capable node, but you chose to join your existing network — so it has no
+              firewall job here. Its built-in address (DHCP) server is turned off so it can&apos;t clash with
+              your router. It stays powered and keeps getting updates. To put it to work, re-run setup and pick
+              a firewall mode, or remove it.
+            </p>
+          </div>
+        )}
 
         {node && (
           <>

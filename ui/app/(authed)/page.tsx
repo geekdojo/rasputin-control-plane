@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { listApps, listBusTokens, listNodes, getMetrics, openInventoryWS, revokeBusToken } from '../../lib/api';
-import type { App, BusTokenInfo, InventoryChangeEvent, Node, NodeRole, NodeStatus } from '../../lib/types';
+import { getSetupState, listApps, listBusTokens, listNodes, getMetrics, openInventoryWS, revokeBusToken } from '../../lib/api';
+import type { App, BusTokenInfo, DeploymentMode, InventoryChangeEvent, Node, NodeRole, NodeStatus } from '../../lib/types';
 import { NodeGrid, type NodeView, type PendingView } from '../../components/NodeGrid';
 import { NodeControls } from '../../components/NodeControls';
 import { AddNodeWizard } from '../../components/AddNodeWizard';
@@ -44,6 +44,12 @@ export default function NodesPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [cancelTarget, setCancelTarget] = useState<PendingView | null>(null);
   const [cancelErr, setCancelErr] = useState<string | null>(null);
+  const [deploymentMode, setDeploymentMode] = useState<DeploymentMode>('');
+
+  // Deployment mode drives the idle-firewall note in the controls panel.
+  useEffect(() => {
+    getSetupState().then((s) => setDeploymentMode(s.mode)).catch(() => {});
+  }, []);
 
   // Live node inventory + 15s backstop poll (transitions arrive via WS, but a
   // steadily-online node needs the poll to refresh lastSeen-derived state).
@@ -177,6 +183,7 @@ export default function NodesPage() {
           cpu={selectedUtil?.cpu ?? null}
           mem={selectedUtil?.mem ?? null}
           apps={selectedApps}
+          deploymentMode={deploymentMode}
           onNavigate={(path) => router.push(path)}
           onRemoved={(id) => {
             setNodes((prev) => prev.filter((n) => n.id !== id));
