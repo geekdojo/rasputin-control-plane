@@ -795,8 +795,8 @@ func TestReconcileWorkflowShape(t *testing.T) {
 	if w.Kind != "firewall.reconcile" {
 		t.Errorf("Kind: %q", w.Kind)
 	}
-	if w.Steps[0].Name != "mode_gate" {
-		t.Errorf("first step should be mode_gate, got %q", w.Steps[0].Name)
+	if w.Steps[0].Name != "mode_enforce" {
+		t.Errorf("first step should be mode_enforce, got %q", w.Steps[0].Name)
 	}
 	if len(w.Steps) < 2 {
 		t.Errorf("expected at least 2 steps, got %d", len(w.Steps))

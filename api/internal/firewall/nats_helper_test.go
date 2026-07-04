@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -99,6 +100,69 @@ func TestApplyFindTarget_MultipleFirewallNodes(t *testing.T) {
 	sc := newStepCtxNATS(`{}`, nil)
 	if _, err := applyFindTarget(inv)(sc); err == nil {
 		t.Error("multiple firewall: want error")
+	}
+}
+
+// ============================================================================
+// modeEnforce — the reconcile loop's LAN-peer enforcement step.
+// ============================================================================
+
+func TestModeEnforce_LANPeerIdlesTheBox(t *testing.T) {
+	nc := startNATS(t)
+	inv := newInventory(t)
+	seedFirewallNode(t, inv, "fw-1")
+
+	gotCalled, gotActive := false, true
+	sub, err := nc.Subscribe(proto.FirewallSetActiveSubject("fw-1"), func(m *nats.Msg) {
+		var cmd proto.FirewallSetActiveCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		gotCalled, gotActive = true, cmd.Active
+		reply, _ := json.Marshal(proto.FirewallSetActiveAck{OK: true, Applied: cmd.Active})
+		_ = m.Respond(reply)
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	step := modeEnforce(func(context.Context) (bool, error) { return false, nil }, inv, nc)
+	_, err = step.Do(newStepCtxNATS(`{}`, nc))
+	if !errors.Is(err, jobs.ErrStopWorkflow) {
+		t.Fatalf("LAN-peer enforce should stop early, got %v", err)
+	}
+	if !gotCalled || gotActive {
+		t.Errorf("expected set_active(false) sent to box; called=%v active=%v", gotCalled, gotActive)
+	}
+}
+
+func TestModeEnforce_ManagedAndNilProceed(t *testing.T) {
+	inv := newInventory(t)
+	// Managed → proceed (nil error, no stop) so the normal reconcile runs.
+	step := modeEnforce(func(context.Context) (bool, error) { return true, nil }, inv, nil)
+	if _, err := step.Do(newStepCtxNATS(`{}`, nil)); err != nil {
+		t.Errorf("managed should proceed, got %v", err)
+	}
+	// nil Managed → proceed (back-compat / tests).
+	step = modeEnforce(nil, inv, nil)
+	if _, err := step.Do(newStepCtxNATS(`{}`, nil)); err != nil {
+		t.Errorf("nil managed should proceed, got %v", err)
+	}
+}
+
+func TestModeEnforce_LANPeerUnreachableBoxStillStops(t *testing.T) {
+	// No responder on the set_active subject → the RPC times out; enforce must
+	// still stop-early (best-effort), not fail the reconcile job.
+	nc := startNATS(t)
+	inv := newInventory(t)
+	seedFirewallNode(t, inv, "fw-1")
+
+	step := modeEnforce(func(context.Context) (bool, error) { return false, nil }, inv, nc)
+	sc := newStepCtxNATS(`{}`, nc)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	sc.Ctx = ctx
+	if _, err := step.Do(sc); !errors.Is(err, jobs.ErrStopWorkflow) {
+		t.Errorf("unreachable box should still stop-early, got %v", err)
 	}
 }
 

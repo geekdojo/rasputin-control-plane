@@ -192,26 +192,40 @@ func setActivePush(inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 				return nil, fmt.Errorf("bad spec: %w", err)
 			}
 		}
-		fws, err := inv.ListByRole(sc.Ctx, proto.RoleFirewall)
-		if err != nil || len(fws) != 1 {
-			return nil, fmt.Errorf("firewall node lookup: %w", err)
-		}
-		nodeID := fws[0].ID
-		cmd, _ := json.Marshal(proto.FirewallSetActiveCmd{Active: spec.Active})
-		msg, err := nc.RequestWithContext(sc.Ctx, proto.FirewallSetActiveSubject(nodeID), cmd)
+		nodeID, err := sendSetActive(sc.Ctx, inv, nc, spec.Active)
 		if err != nil {
-			return nil, fmt.Errorf("set_active rpc: %w", err)
-		}
-		var ack proto.FirewallSetActiveAck
-		if err := json.Unmarshal(msg.Data, &ack); err != nil {
-			return nil, fmt.Errorf("decode ack: %w", err)
-		}
-		if !ack.OK {
-			return nil, errors.New("agent reported set_active failed")
+			return nil, err
 		}
 		sc.Log("info", fmt.Sprintf("firewall active=%v applied on %s", spec.Active, nodeID))
 		return json.Marshal(map[string]any{"nodeId": nodeID, "active": spec.Active})
 	}
+}
+
+// sendSetActive resolves the single firewall node and RPCs it a set_active
+// command, returning the target node id. Shared by the SetActive workflow and
+// the reconcile loop's LAN-peer enforcement path.
+func sendSetActive(ctx context.Context, inv *inventory.Store, nc *nats.Conn, active bool) (string, error) {
+	fws, err := inv.ListByRole(ctx, proto.RoleFirewall)
+	if err != nil {
+		return "", fmt.Errorf("firewall node lookup: %w", err)
+	}
+	if len(fws) != 1 {
+		return "", fmt.Errorf("expected exactly one firewall node, found %d", len(fws))
+	}
+	nodeID := fws[0].ID
+	cmd, _ := json.Marshal(proto.FirewallSetActiveCmd{Active: active})
+	msg, err := nc.RequestWithContext(ctx, proto.FirewallSetActiveSubject(nodeID), cmd)
+	if err != nil {
+		return nodeID, fmt.Errorf("set_active rpc: %w", err)
+	}
+	var ack proto.FirewallSetActiveAck
+	if err := json.Unmarshal(msg.Data, &ack); err != nil {
+		return nodeID, fmt.Errorf("decode ack: %w", err)
+	}
+	if !ack.OK {
+		return nodeID, errors.New("agent reported set_active failed")
+	}
+	return nodeID, nil
 }
 
 // ----- ReconcileWorkflow --------------------------------------------------
@@ -223,10 +237,43 @@ func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, manage
 	return jobs.Workflow{
 		Kind: "firewall.reconcile",
 		Steps: []jobs.WorkflowStep{
-			modeGate(managed),
+			modeEnforce(managed, inv, nc),
 			{Name: "find_target", Timeout: 2 * time.Second, Do: applyFindTarget(inv)},
 			{Name: "fetch_observed", Timeout: 5 * time.Second, Do: reconcileFetch(store, inv, nc)},
 			{Name: "compare", Timeout: 2 * time.Second, Do: reconcileCompare(store, inv, nc)},
+		},
+	}
+}
+
+// modeEnforce is the reconcile loop's leading step. In a managed mode it
+// proceeds to the normal drift check. In an unmanaged mode (LAN-peer) it turns
+// the reconcile ticker into a self-healing enforcement loop: it re-idles the
+// firewall box (DHCP + snort off) and stops early — catching a box that
+// registered *after* LAN-peer was chosen, or one whose DHCP was hand-re-
+// enabled, without the SetMode click. Best-effort: if the box is unreachable
+// it logs a warning and still completes (a failing job every 5 min would be
+// noise); the box staying un-idle is itself the visible symptom.
+func modeEnforce(managed Managed, inv *inventory.Store, nc *nats.Conn) jobs.WorkflowStep {
+	return jobs.WorkflowStep{
+		Name:    "mode_enforce",
+		Timeout: 12 * time.Second,
+		Do: func(sc *jobs.StepCtx) (json.RawMessage, error) {
+			if managed == nil {
+				return nil, nil
+			}
+			ok, err := managed(sc.Ctx)
+			if err != nil {
+				return nil, fmt.Errorf("mode gate: %w", err)
+			}
+			if ok {
+				return nil, nil // managed → run the normal reconcile
+			}
+			if _, err := sendSetActive(sc.Ctx, inv, nc, false); err != nil {
+				sc.Log("warn", fmt.Sprintf("LAN-peer: could not idle firewall node: %v", err))
+			} else {
+				sc.Log("info", "LAN-peer: firewall node ensured idle (DHCP + snort off)")
+			}
+			return nil, jobs.ErrStopWorkflow
 		},
 	}
 }
