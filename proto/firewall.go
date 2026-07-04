@@ -164,6 +164,24 @@ type FirewallGetAck struct {
 	Hash  string         `json:"hash"`
 }
 
+// FirewallSetActiveCmd is sent on rasputin.node.<id>.cmd.firewall.set_active.
+// It toggles the firewall node's base services for the deployment mode:
+// Active=true (router / sub-segment) keeps DHCP + snort running; Active=false
+// (LAN-peer, box idle) turns the LAN DHCP server off — so it can't clash with
+// the operator's existing router — and stops snort. Distinct from an intent
+// apply: this governs whether the box has a firewall job at all, not which
+// port-forwards/rules are live.
+type FirewallSetActiveCmd struct {
+	Active bool `json:"active"`
+}
+
+// FirewallSetActiveAck is the synchronous reply from the agent's set_active
+// handler. Applied echoes the state the agent converged to.
+type FirewallSetActiveAck struct {
+	OK      bool `json:"ok"`
+	Applied bool `json:"applied"`
+}
+
 // FirewallChangeType enumerates the change events the api publishes on
 // rasputin.firewall.<nodeId>.<change>.
 type FirewallChangeType string
@@ -193,6 +211,11 @@ func FirewallApplySubject(nodeID string) string {
 // FirewallGetSubject returns the cmd subject for a state-get on nodeID.
 func FirewallGetSubject(nodeID string) string {
 	return NodeCmdSubject(nodeID, "firewall.get")
+}
+
+// FirewallSetActiveSubject returns the cmd subject for a set_active on nodeID.
+func FirewallSetActiveSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "firewall.set_active")
 }
 
 // FirewallChangeSubject returns the publish subject for a firewall change.

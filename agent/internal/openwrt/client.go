@@ -23,4 +23,12 @@ type UCIClient interface {
 	// Get returns the currently-observed state and its hash. Used by the
 	// reconcile workflow.
 	Get(ctx context.Context) (state map[string]any, hash string, err error)
+
+	// SetActive toggles the firewall node's base services for the deployment
+	// mode. active=false (LAN-peer — the box is idle) turns the LAN DHCP
+	// server off so it can't clash with the operator's existing router, and
+	// stops snort; active=true restores both. Idempotent. Independent of the
+	// intent Apply path (which governs port-forwards/rules, not whether the
+	// box has a firewall job at all).
+	SetActive(ctx context.Context, active bool) error
 }

@@ -359,6 +359,7 @@ func main() {
 	}
 	runner.Register(firewall.ApplyWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
 	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
+	runner.Register(firewall.SetActiveWorkflow(invStore, busSrv.Conn()))
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn()))

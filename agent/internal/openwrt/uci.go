@@ -228,6 +228,49 @@ func (c *UCIRealClient) Apply(ctx context.Context, state map[string]any) (string
 	return hashState(state)
 }
 
+// SetActive toggles the firewall node's base services for the deployment mode.
+// See the UCIClient interface. In the idle (LAN-peer) case, dhcp.lan.ignore=1
+// is the load-bearing change — it stops dnsmasq handing out DHCP leases on the
+// LAN, which is what a firewall-flashed box would otherwise do on the
+// operator's network (the DHCP war). snort is toggled alongside.
+func (c *UCIRealClient) SetActive(ctx context.Context, active bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	ignore, snortEnabled := "1", "0"
+	if active {
+		ignore, snortEnabled = "0", "1"
+	}
+
+	// LAN DHCP server (dnsmasq). dhcp.lan.ignore is the OpenWrt-canonical
+	// per-interface DHCP disable; a reload applies it without dropping DNS.
+	if _, err := c.runner.Run(ctx, "uci", "set", "dhcp.lan.ignore="+ignore); err != nil {
+		return fmt.Errorf("openwrt-uci: set dhcp.lan.ignore: %w", err)
+	}
+	if _, err := c.runner.Run(ctx, "uci", "commit", "dhcp"); err != nil {
+		return fmt.Errorf("openwrt-uci: commit dhcp: %w", err)
+	}
+	if _, err := c.runner.Run(ctx, "/etc/init.d/dnsmasq", "reload"); err != nil {
+		return fmt.Errorf("openwrt-uci: dnsmasq reload: %w", err)
+	}
+
+	// snort3 IDS. The UCI enabled flag governs boot; the init action governs
+	// the running process. The flag is the source of truth, so a benign
+	// start/stop failure (already in that state) is non-fatal.
+	if _, err := c.runner.Run(ctx, "uci", "set", "snort.snort.enabled="+snortEnabled); err != nil {
+		return fmt.Errorf("openwrt-uci: set snort.enabled: %w", err)
+	}
+	if _, err := c.runner.Run(ctx, "uci", "commit", "snort"); err != nil {
+		return fmt.Errorf("openwrt-uci: commit snort: %w", err)
+	}
+	action := "stop"
+	if active {
+		action = "start"
+	}
+	_, _ = c.runner.Run(ctx, "/etc/init.d/snort", action)
+	return nil
+}
+
 // Get reads observed reality back via ubus and canonicalizes it into the
 // exact map shape Compile produces, so an in-sync system hashes
 // identically to the api's compiled intent state.

@@ -66,6 +66,23 @@ func (c *MockClient) Apply(ctx context.Context, state map[string]any) (string, e
 	return hashState(state)
 }
 
+// SetActive records the requested active state to <dir>/active so a test (or
+// an operator inspecting a dev box) can observe it. The mock has no real
+// dnsmasq/snort to toggle; persisting the flag keeps the file-backed contract
+// honest and idempotent.
+func (c *MockClient) SetActive(ctx context.Context, active bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v := []byte("0")
+	if active {
+		v = []byte("1")
+	}
+	if err := os.WriteFile(filepath.Join(c.dir, "active"), v, 0o644); err != nil {
+		return fmt.Errorf("openwrt-mock: write active: %w", err)
+	}
+	return nil
+}
+
 // Get reads the on-disk state and returns it with its hash.
 func (c *MockClient) Get(ctx context.Context) (map[string]any, string, error) {
 	c.mu.Lock()

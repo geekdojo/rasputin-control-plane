@@ -3,8 +3,10 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 )
@@ -69,6 +71,18 @@ func (s *Server) handleSetupMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state, _ := s.setup.GetState(r.Context())
+	// Push the box's active/idle state to match the mode: LAN-peer idles the
+	// firewall box (DHCP off so it can't clash with the operator's router);
+	// router/sub-segment activate it. Best-effort — a mode write must not fail
+	// because the firewall node is momentarily unreachable; the job surfaces
+	// its own errors in the Tasks panel. Only submitted when a firewall node
+	// exists (the SetActive workflow needs exactly one).
+	if state != nil && state.FirewallCapable {
+		spec, _ := json.Marshal(firewall.SetActiveSpec{Active: state.Mode != setup.ModeLANPeer})
+		if _, err := s.runner.Submit(r.Context(), "firewall.set_active", spec, creator(r)); err != nil {
+			log.Printf("setup: submit firewall.set_active after mode change: %v", err)
+		}
+	}
 	writeJSON(w, http.StatusOK, state)
 }
 

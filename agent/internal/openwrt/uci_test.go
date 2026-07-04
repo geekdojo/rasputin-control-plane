@@ -803,3 +803,56 @@ func containsCall(calls [][]string, want []string) bool {
 	}
 	return false
 }
+
+// recRunner is a trivial recording CmdRunner: it logs every call and returns
+// success. Used for SetActive, which touches dhcp/snort/dnsmasq/snort init
+// scripts the elaborate simUCI doesn't model.
+type recRunner struct{ calls [][]string }
+
+func (r *recRunner) Run(_ context.Context, name string, args ...string) (string, error) {
+	r.calls = append(r.calls, append([]string{name}, args...))
+	return "", nil
+}
+
+func TestUCIRealClient_SetActiveIdleTurnsOffDHCPAndSnort(t *testing.T) {
+	rr := &recRunner{}
+	c, err := newRealClient(t.TempDir(), rr)
+	if err != nil {
+		t.Fatalf("newRealClient: %v", err)
+	}
+	if err := c.SetActive(context.Background(), false); err != nil {
+		t.Fatalf("SetActive(false): %v", err)
+	}
+	for _, want := range [][]string{
+		{"uci", "set", "dhcp.lan.ignore=1"},
+		{"uci", "commit", "dhcp"},
+		{"/etc/init.d/dnsmasq", "reload"},
+		{"uci", "set", "snort.snort.enabled=0"},
+		{"uci", "commit", "snort"},
+		{"/etc/init.d/snort", "stop"},
+	} {
+		if !containsCall(rr.calls, want) {
+			t.Errorf("missing call %v; got %s", want, fmtCalls(rr.calls))
+		}
+	}
+}
+
+func TestUCIRealClient_SetActiveActivateTurnsOnDHCPAndSnort(t *testing.T) {
+	rr := &recRunner{}
+	c, err := newRealClient(t.TempDir(), rr)
+	if err != nil {
+		t.Fatalf("newRealClient: %v", err)
+	}
+	if err := c.SetActive(context.Background(), true); err != nil {
+		t.Fatalf("SetActive(true): %v", err)
+	}
+	for _, want := range [][]string{
+		{"uci", "set", "dhcp.lan.ignore=0"},
+		{"uci", "set", "snort.snort.enabled=1"},
+		{"/etc/init.d/snort", "start"},
+	} {
+		if !containsCall(rr.calls, want) {
+			t.Errorf("missing call %v; got %s", want, fmtCalls(rr.calls))
+		}
+	}
+}

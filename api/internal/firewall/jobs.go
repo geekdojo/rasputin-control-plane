@@ -162,6 +162,58 @@ func applyPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 	}
 }
 
+// ----- SetActiveWorkflow --------------------------------------------------
+
+// SetActiveSpec is the spec body for a firewall.set_active job.
+type SetActiveSpec struct {
+	Active bool `json:"active"`
+}
+
+// SetActiveWorkflow tells the firewall agent to activate or idle its base
+// services (LAN DHCP + snort) for the deployment mode. Submitted when the mode
+// is chosen/changed: active=false idles the box in LAN-peer (DHCP off so it
+// can't clash with the operator's router); active=true restores it. Not
+// mode-gated — this *is* the mechanism that enforces the mode.
+func SetActiveWorkflow(inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
+	return jobs.Workflow{
+		Kind: "firewall.set_active",
+		Steps: []jobs.WorkflowStep{
+			{Name: "find_target", Timeout: 2 * time.Second, Do: applyFindTarget(inv)},
+			{Name: "set_active", Timeout: 12 * time.Second, Do: setActivePush(inv, nc)},
+		},
+	}
+}
+
+func setActivePush(inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		var spec SetActiveSpec
+		if len(sc.Spec) > 0 {
+			if err := json.Unmarshal(sc.Spec, &spec); err != nil {
+				return nil, fmt.Errorf("bad spec: %w", err)
+			}
+		}
+		fws, err := inv.ListByRole(sc.Ctx, proto.RoleFirewall)
+		if err != nil || len(fws) != 1 {
+			return nil, fmt.Errorf("firewall node lookup: %w", err)
+		}
+		nodeID := fws[0].ID
+		cmd, _ := json.Marshal(proto.FirewallSetActiveCmd{Active: spec.Active})
+		msg, err := nc.RequestWithContext(sc.Ctx, proto.FirewallSetActiveSubject(nodeID), cmd)
+		if err != nil {
+			return nil, fmt.Errorf("set_active rpc: %w", err)
+		}
+		var ack proto.FirewallSetActiveAck
+		if err := json.Unmarshal(msg.Data, &ack); err != nil {
+			return nil, fmt.Errorf("decode ack: %w", err)
+		}
+		if !ack.OK {
+			return nil, errors.New("agent reported set_active failed")
+		}
+		sc.Log("info", fmt.Sprintf("firewall active=%v applied on %s", spec.Active, nodeID))
+		return json.Marshal(map[string]any{"nodeId": nodeID, "active": spec.Active})
+	}
+}
+
 // ----- ReconcileWorkflow --------------------------------------------------
 
 // ReconcileWorkflow fetches the firewall agent's observed state, compares it

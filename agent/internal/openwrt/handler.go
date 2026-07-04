@@ -39,6 +39,16 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, client UCIClient) ([]*nats.S
 	subs = append(subs, sub)
 	log.Printf("rasputin-agent: subscribed to %s", getSubj)
 
+	setActiveSubj := proto.FirewallSetActiveSubject(nodeID)
+	sub, err = nc.Subscribe(setActiveSubj, func(m *nats.Msg) {
+		handleSetActive(client, m)
+	})
+	if err != nil {
+		return subs, err
+	}
+	subs = append(subs, sub)
+	log.Printf("rasputin-agent: subscribed to %s", setActiveSubj)
+
 	return subs, nil
 }
 
@@ -70,6 +80,24 @@ func handleGet(_ *nats.Conn, client UCIClient, m *nats.Msg) {
 		return
 	}
 	respond(m, proto.FirewallGetAck{State: state, Hash: hash})
+}
+
+func handleSetActive(client UCIClient, m *nats.Msg) {
+	var cmd proto.FirewallSetActiveCmd
+	if err := json.Unmarshal(m.Data, &cmd); err != nil {
+		respond(m, proto.FirewallSetActiveAck{OK: false})
+		log.Printf("rasputin-agent: firewall.set_active: bad cmd: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.SetActive(ctx, cmd.Active); err != nil {
+		respond(m, proto.FirewallSetActiveAck{OK: false, Applied: cmd.Active})
+		log.Printf("rasputin-agent: firewall.set_active(active=%v): %v", cmd.Active, err)
+		return
+	}
+	log.Printf("rasputin-agent: firewall.set_active(active=%v) ok", cmd.Active)
+	respond(m, proto.FirewallSetActiveAck{OK: true, Applied: cmd.Active})
 }
 
 func respond(m *nats.Msg, body any) {

@@ -803,6 +803,22 @@ func TestReconcileWorkflowShape(t *testing.T) {
 	}
 }
 
+func TestSetActiveWorkflowShape(t *testing.T) {
+	w := SetActiveWorkflow(nil, nil)
+	if w.Kind != "firewall.set_active" {
+		t.Errorf("Kind: %q", w.Kind)
+	}
+	wantSteps := []string{"find_target", "set_active"}
+	if len(w.Steps) != len(wantSteps) {
+		t.Fatalf("step count: got %d want %d", len(w.Steps), len(wantSteps))
+	}
+	for i, name := range wantSteps {
+		if w.Steps[i].Name != name {
+			t.Errorf("step %d: got %q want %q", i, w.Steps[i].Name, name)
+		}
+	}
+}
+
 func TestModeGate(t *testing.T) {
 	run := func(managed Managed) error {
 		step := modeGate(managed)

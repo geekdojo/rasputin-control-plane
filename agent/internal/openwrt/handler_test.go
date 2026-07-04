@@ -3,6 +3,8 @@ package openwrt
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -156,6 +158,61 @@ func TestRegisterHandlers_GetReturnsEmptyOnFreshAgent(t *testing.T) {
 	}
 }
 
+func TestRegisterHandlers_SetActiveHappyPath(t *testing.T) {
+	nc := startNATS(t)
+	dir := t.TempDir()
+	mc, err := NewMockClient(dir)
+	if err != nil {
+		t.Fatalf("NewMockClient: %v", err)
+	}
+	subs, err := RegisterHandlers(nc, "node-1", mc)
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+
+	// Idle the box (LAN-peer).
+	var ack proto.FirewallSetActiveAck
+	request(t, nc, proto.FirewallSetActiveSubject("node-1"), proto.FirewallSetActiveCmd{Active: false}, &ack)
+	if !ack.OK || ack.Applied {
+		t.Errorf("idle ack: %+v", ack)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "active")); string(b) != "0" {
+		t.Errorf("active file after idle = %q, want 0", string(b))
+	}
+
+	// Re-activate.
+	request(t, nc, proto.FirewallSetActiveSubject("node-1"), proto.FirewallSetActiveCmd{Active: true}, &ack)
+	if !ack.OK || !ack.Applied {
+		t.Errorf("active ack: %+v", ack)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "active")); string(b) != "1" {
+		t.Errorf("active file after activate = %q, want 1", string(b))
+	}
+}
+
+func TestRegisterHandlers_SetActiveErrorReportsNotOK(t *testing.T) {
+	nc := startNATS(t)
+	subs, err := RegisterHandlers(nc, "node-1", errClient{})
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+	var ack proto.FirewallSetActiveAck
+	request(t, nc, proto.FirewallSetActiveSubject("node-1"), proto.FirewallSetActiveCmd{Active: false}, &ack)
+	if ack.OK {
+		t.Error("expected OK=false when SetActive errors")
+	}
+}
+
 // errClient errors from both methods to drive the handlers' failure branches.
 type errClient struct{}
 
@@ -164,6 +221,9 @@ func (errClient) Apply(_ context.Context, _ map[string]any) (string, error) {
 }
 func (errClient) Get(_ context.Context) (map[string]any, string, error) {
 	return nil, "", errStr("boom")
+}
+func (errClient) SetActive(_ context.Context, _ bool) error {
+	return errStr("boom")
 }
 
 type errStr string
