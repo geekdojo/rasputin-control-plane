@@ -1,14 +1,22 @@
 'use client';
 
-// /settings — operator preferences for this control plane. First section is
-// Appearance (theme picker); more settings land here as they ship. The Settings
-// icon in the sidebar routes here.
+// /settings — operator preferences for this control plane. Sections:
+//   • Appearance (theme picker)
+//   • Deployment mode (post-setup change of setup.mode — the only surface for
+//     this once the first-run wizard has completed; the wizard redirects away
+//     when setup is done, so without this an operator who picked the wrong mode
+//     was stuck. Backend: POST /api/setup/mode, same endpoint the wizard uses.)
+// The Settings icon in the sidebar routes here.
 
 import { Check, Settings as SettingsIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { PageShell, PageHeader, PageBody, SectionLabel, Hint, DIM, FG, HAIR } from '../../../components/kit';
 import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
 import { THEMES, useTheme, type ThemeMeta } from '../../../lib/theme';
+import { DeploymentModePicker, MODES } from '../../../components/DeploymentModePicker';
+import { ConfirmModal } from '../../../components/ConfirmModal';
+import { getSetupState, setDeploymentMode } from '../../../lib/api';
+import type { DeploymentMode, SetupState } from '../../../lib/types';
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
@@ -34,8 +42,118 @@ export default function SettingsPage() {
             <ThemeCard key={t.id} meta={t} selected={theme === t.id} onSelect={() => setTheme(t.id)} />
           ))}
         </div>
+
+        <div style={{ height: 32 }} />
+        <DeploymentModeSection />
       </PageBody>
     </PageShell>
+  );
+}
+
+// --- Deployment mode ------------------------------------------------------
+
+// consequenceOf returns the confirm-dialog copy for switching TO `target`.
+// The sharp edge is LAN-peer: it idles a live firewall (DHCP + threat detection
+// off), which can drop devices offline if Rasputin is the one running the
+// network. Copy stays plain-language / vendor-neutral (no "DHCP"/OpenWrt).
+function consequenceOf(target: Exclude<DeploymentMode, ''>, firewallCapable: boolean): {
+  message: string;
+  danger: boolean;
+} {
+  if (target === 'lan_peer') {
+    if (firewallCapable) {
+      return {
+        danger: true,
+        message:
+          'Switching to “Join my existing network” turns your firewall node off — it stops handing out addresses and stops watching for threats. If Rasputin is currently running your network, connected devices — including the one you’re using right now — may drop offline when their address lease renews. Only switch if another router on the network hands out addresses.',
+      };
+    }
+    return {
+      danger: false,
+      message:
+        'Rasputin will run as a device on your existing network. Your current router keeps doing the firewalling — nothing else changes.',
+    };
+  }
+  if (target === 'router') {
+    return {
+      danger: false,
+      message:
+        'Rasputin becomes your router — it starts handing out addresses, running the firewall, and watching for threats on its network port.',
+    };
+  }
+  return {
+    danger: false,
+    message:
+      'Rasputin runs its own protected network — it starts handing out addresses, running the firewall, and watching for threats on that network.',
+  };
+}
+
+function DeploymentModeSection() {
+  const [state, setState] = useState<SetupState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [pending, setPending] = useState<Exclude<DeploymentMode, ''> | null>(null);
+
+  useEffect(() => {
+    getSetupState()
+      .then(setState)
+      .catch((e) => setErr(String(e)));
+  }, []);
+
+  async function apply(mode: Exclude<DeploymentMode, ''>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      setState(await setDeploymentMode(mode));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+      setPending(null);
+    }
+  }
+
+  const currentLabel = state ? MODES.find((m) => m.id === state.mode)?.label : null;
+  const consequence = pending ? consequenceOf(pending, state?.firewallCapable ?? false) : null;
+
+  return (
+    <>
+      <SectionLabel>DEPLOYMENT MODE</SectionLabel>
+      <Hint style={{ marginBottom: 16 }}>
+        How Rasputin sits on your network. Changing this reconfigures the firewall node — it takes
+        effect within a minute or two.{' '}
+        {currentLabel && (
+          <>
+            Currently: <span style={{ color: FG }}>{currentLabel}</span>.
+          </>
+        )}
+      </Hint>
+
+      {state === null && !err && <Hint>Loading…</Hint>}
+      {err && <Hint warn>{err}</Hint>}
+
+      {state && (
+        <div style={{ maxWidth: 560 }}>
+          <DeploymentModePicker
+            mode={state.mode}
+            firewallCapable={state.firewallCapable}
+            busy={busy}
+            onSelect={(m) => setPending(m)}
+          />
+        </div>
+      )}
+
+      {pending && consequence && (
+        <ConfirmModal
+          title="Change deployment mode?"
+          message={consequence.message}
+          confirmLabel={busy ? 'SWITCHING…' : 'SWITCH MODE'}
+          danger={consequence.danger}
+          onConfirm={() => apply(pending)}
+          onCancel={() => setPending(null)}
+        />
+      )}
+    </>
   );
 }
 
