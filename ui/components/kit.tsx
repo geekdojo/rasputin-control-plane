@@ -233,12 +233,35 @@ export function Btn({
   );
 }
 
+// Legacy clipboard fallback for NON-secure contexts. navigator.clipboard is
+// only exposed over HTTPS or localhost, so on the pre-CA-install /trust page
+// (served over plain http://rasputin.local) it's undefined and the async API
+// throws. The hidden-textarea + execCommand('copy') path still works over
+// plain HTTP — deprecated but universally supported, and this is exactly the
+// one surface we're guaranteed to be non-secure on.
+function legacyCopy(text: string): boolean {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 // Copy-to-clipboard button. Drop this next to ANY value the user is meant
 // to copy (auth keys, install commands, sample JSON, IDs). Shows a transient
-// "COPIED" state with a check icon; surfaces "FAILED" visibly if the
-// browser rejects clipboard access (typically: non-HTTPS context, no user
-// gesture in flight, or background-tab focus issues) so the user knows
-// they need to manually select.
+// "COPIED" state with a check icon. Uses the modern Clipboard API when it's
+// available and falls back to execCommand when it isn't (non-secure context —
+// the /trust page) or when it rejects; only surfaces "FAILED" if BOTH fail.
 export function CopyButton({
   value,
   label = 'COPY',
@@ -253,11 +276,20 @@ export function CopyButton({
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   async function handle() {
+    let ok = false;
     try {
-      await navigator.clipboard.writeText(value);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        ok = true;
+      }
+    } catch {
+      ok = false; // secure API present but rejected — try the legacy path
+    }
+    if (!ok) ok = legacyCopy(value);
+    if (ok) {
       setState('copied');
       setTimeout(() => setState('idle'), 1500);
-    } catch {
+    } else {
       setState('failed');
       setTimeout(() => setState('idle'), 2500);
     }
