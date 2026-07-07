@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -27,7 +29,21 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apps: apply schema: %w", err)
 	}
+	applyMigrations(ctx, db)
 	return &Store{db: db}, nil
+}
+
+func applyMigrations(ctx context.Context, db *sql.DB) {
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			msg := err.Error()
+			if strings.Contains(msg, "duplicate column name") ||
+				strings.Contains(msg, "already exists") {
+				continue // expected: column already present
+			}
+			log.Printf("apps: migration %q: %v", stmt, err)
+		}
+	}
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -37,11 +53,11 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 func (s *Store) Create(ctx context.Context, a *App) error {
 	_, err := s.db.ExecContext(ctx, `
-        INSERT INTO apps (id, name, compose_yaml, target_node, last_status,
-                          created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		a.ID, a.Name, a.ComposeYAML, a.TargetNode, string(a.LastStatus),
-		ms(a.CreatedAt), ms(a.UpdatedAt))
+        INSERT INTO apps (id, name, compose_yaml, target_node, published_port,
+                          last_status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.Name, a.ComposeYAML, a.TargetNode, a.PublishedPort,
+		string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt))
 	return err
 }
 
@@ -152,7 +168,7 @@ func (s *Store) DeleteByTargetNode(ctx context.Context, nodeID string) ([]string
 
 func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps WHERE id = ?`, id)
 	return scanApp(row.Scan)
@@ -160,7 +176,7 @@ func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 
 func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps WHERE name = ?`, name)
 	return scanApp(row.Scan)
@@ -168,7 +184,7 @@ func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 
 func (s *Store) List(ctx context.Context) ([]*App, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps ORDER BY created_at ASC`)
 	if err != nil {
@@ -196,8 +212,8 @@ func scanApp(scan func(...any) error) (*App, error) {
 		createdAt    int64
 		updatedAt    int64
 	)
-	if err := scan(&a.ID, &a.Name, &a.ComposeYAML, &a.TargetNode, &status,
-		&a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
+	if err := scan(&a.ID, &a.Name, &a.ComposeYAML, &a.TargetNode, &a.PublishedPort,
+		&status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
 		&createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

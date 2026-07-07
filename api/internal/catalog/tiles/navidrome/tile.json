@@ -1,0 +1,16 @@
+{
+  "id": "navidrome",
+  "name": "Navidrome",
+  "tagline": "Your own Spotify for the music you own.",
+  "description": "A fast, lightweight music streaming server that works with a big ecosystem of Subsonic-compatible apps. Featherweight — a perfect always-on tenant for a Pi node.",
+  "collection": "everyday",
+  "arch": "both",
+  "placementHint": "any",
+  "ramFloorMB": 256,
+  "exposureDefault": "lan-only",
+  "ports": [
+    { "name": "web", "container": 4533, "published": 4533, "protocol": "tcp", "primary": true }
+  ],
+  "website": "https://github.com/navidrome/navidrome",
+  "icon": "🎵"
+}

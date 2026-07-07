@@ -1,0 +1,18 @@
+# Pin is provisional — the ACC-1 bench gate re-pins before ship.
+# Set a real admin password before exposing this beyond the LAN.
+services:
+  pihole:
+    image: pihole/pihole:2024.07.0
+    restart: unless-stopped
+    environment:
+      TZ: "Etc/UTC"
+      FTLCONF_webserver_api_password: "changeme"
+    volumes:
+      - pihole-config:/etc/pihole
+    ports:
+      - "8081:80/tcp"
+      - "53:53/tcp"
+      - "53:53/udp"
+
+volumes:
+  pihole-config:

@@ -1,0 +1,16 @@
+# Pin is provisional — the ACC-1 bench gate re-pins before ship.
+services:
+  navidrome:
+    image: deluan/navidrome:0.53.3
+    restart: unless-stopped
+    environment:
+      ND_LOGLEVEL: info
+    volumes:
+      - navidrome-data:/data
+      - navidrome-music:/music:ro
+    ports:
+      - "4533:4533"
+
+volumes:
+  navidrome-data:
+  navidrome-music:

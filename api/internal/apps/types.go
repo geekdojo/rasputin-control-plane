@@ -10,15 +10,18 @@ import (
 // declared spec (name, compose YAML, target node) plus the last status the
 // agent reported.
 type App struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	ComposeYAML  string          `json:"composeYaml"`
-	TargetNode   string          `json:"targetNode"`
-	LastStatus   proto.AppStatus `json:"lastStatus"`
-	LastDetail   string          `json:"lastDetail,omitempty"`
-	LastDeployed *time.Time      `json:"lastDeployed,omitempty"`
-	LastStopped  *time.Time      `json:"lastStopped,omitempty"`
-	LastStatusAt *time.Time      `json:"lastStatusAt,omitempty"`
-	CreatedAt    time.Time       `json:"createdAt"`
-	UpdatedAt    time.Time       `json:"updatedAt"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ComposeYAML string `json:"composeYaml"`
+	TargetNode  string `json:"targetNode"`
+	// PublishedPort is the primary host port the reverse proxy fronts for this
+	// app (0 = none). Seeded from the catalog tile at install. See app-access.md.
+	PublishedPort int             `json:"publishedPort,omitempty"`
+	LastStatus    proto.AppStatus `json:"lastStatus"`
+	LastDetail    string          `json:"lastDetail,omitempty"`
+	LastDeployed  *time.Time      `json:"lastDeployed,omitempty"`
+	LastStopped   *time.Time      `json:"lastStopped,omitempty"`
+	LastStatusAt  *time.Time      `json:"lastStatusAt,omitempty"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	UpdatedAt     time.Time       `json:"updatedAt"`
 }

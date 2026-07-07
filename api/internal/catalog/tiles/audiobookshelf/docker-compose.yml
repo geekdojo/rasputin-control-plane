@@ -1,0 +1,18 @@
+# Pin is provisional — the ACC-1 bench gate re-pins before ship.
+services:
+  audiobookshelf:
+    image: ghcr.io/advplyr/audiobookshelf:2.17.0
+    restart: unless-stopped
+    volumes:
+      - abs-config:/config
+      - abs-metadata:/metadata
+      - abs-audiobooks:/audiobooks
+      - abs-podcasts:/podcasts
+    ports:
+      - "13378:80"
+
+volumes:
+  abs-config:
+  abs-metadata:
+  abs-audiobooks:
+  abs-podcasts:

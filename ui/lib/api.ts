@@ -10,6 +10,7 @@ import type {
   BMCState,
   Bundle,
   BundleList,
+  CatalogTile,
   FirewallChangeEvent,
   FirewallIntent,
   FirewallNodeState,
@@ -448,6 +449,29 @@ export async function deleteApp(id: string): Promise<void> {
 
 export function deployApp(id: string): Promise<Job> {
   return jsonFetch<Job>(`/api/apps/${id}/deploy`, { method: 'POST' });
+}
+
+// ---- App catalog (curated first-party tiles) ----
+
+export async function listCatalog(): Promise<CatalogTile[]> {
+  return (await jsonFetch<CatalogTile[] | null>('/api/catalog')) ?? [];
+}
+
+export function getCatalogTile(id: string): Promise<CatalogTile> {
+  return jsonFetch<CatalogTile>(`/api/catalog/${id}`);
+}
+
+// installCatalogApp declares an app from a tile (compose + primary port seeded
+// from the tile); it does not deploy — call deployApp with the returned app id.
+export function installCatalogApp(
+  id: string,
+  input: { targetNode: string; name?: string }
+): Promise<App> {
+  return jsonFetch<App>(`/api/catalog/${id}/install`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
 }
 
 export function stopApp(id: string): Promise<Job> {

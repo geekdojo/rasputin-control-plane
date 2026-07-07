@@ -1,0 +1,16 @@
+# Pin is provisional — the ACC-1 bench gate re-pins before ship.
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10.9.11
+    restart: unless-stopped
+    volumes:
+      - jellyfin-config:/config
+      - jellyfin-cache:/cache
+      - jellyfin-media:/media
+    ports:
+      - "8096:8096"
+
+volumes:
+  jellyfin-config:
+  jellyfin-cache:
+  jellyfin-media:

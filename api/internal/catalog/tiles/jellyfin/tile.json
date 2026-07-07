@@ -1,0 +1,16 @@
+{
+  "id": "jellyfin",
+  "name": "Jellyfin",
+  "tagline": "Your own Netflix — no accounts, no paywall.",
+  "description": "Stream your movies, shows, and music from your own hardware. Hardware transcoding runs best on the x86 node's Quick Sync; keep transcoding off the Pi.",
+  "collection": "essentials",
+  "arch": "both",
+  "placementHint": "prefer-x86",
+  "ramFloorMB": 2048,
+  "exposureDefault": "lan-only",
+  "ports": [
+    { "name": "web", "container": 8096, "published": 8096, "protocol": "tcp", "primary": true }
+  ],
+  "website": "https://github.com/jellyfin/jellyfin",
+  "icon": "🎬"
+}

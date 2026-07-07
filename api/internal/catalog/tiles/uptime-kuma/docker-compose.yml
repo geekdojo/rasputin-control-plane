@@ -1,0 +1,12 @@
+# Pin is provisional — the ACC-1 bench gate re-pins before ship.
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1.23.16
+    restart: unless-stopped
+    volumes:
+      - uptime-kuma-data:/app/data
+    ports:
+      - "3001:3001"
+
+volumes:
+  uptime-kuma-data:

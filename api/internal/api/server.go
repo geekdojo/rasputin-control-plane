@@ -9,6 +9,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -30,6 +31,7 @@ type Server struct {
 	invSvc              *inventory.Service
 	fw                  *firewall.Store
 	apps                *apps.Store
+	catalog             *catalog.Catalog
 	metrics             *metrics.Store
 	updater             *updater.Store
 	updaterVerifier     *updater.Verifier
@@ -119,6 +121,10 @@ func NewServer(
 	}
 	return &Server{
 		store: store, runner: runner, inv: inv, invSvc: invSvc, fw: fw, apps: appsStore,
+		// The catalog is embedded, read-only content — MustLoad panics on an
+		// invalid tile (a build defect in our own content), the same contract
+		// as template.Must. catalog_test.go gates this in CI.
+		catalog: catalog.MustLoad(),
 		metrics: mtr, updater: updaterStore, updaterVerifier: updaterVerifier,
 		bundleDir: bundleDir, trustDir: trustDir, mesh: meshSvc,
 		bmc: bmcSvc, bmcSessions: bmc.NewSessionManager(bmcSvc),
@@ -195,6 +201,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/apps/{id}", reqd(s.handleDeleteApp))
 	mux.HandleFunc("POST /api/apps/{id}/deploy", reqd(s.handleDeployApp))
 	mux.HandleFunc("POST /api/apps/{id}/stop", reqd(s.handleStopApp))
+	mux.HandleFunc("GET /api/catalog", reqd(s.handleListCatalog))
+	mux.HandleFunc("GET /api/catalog/{id}", reqd(s.handleGetCatalogTile))
+	mux.HandleFunc("POST /api/catalog/{id}/install", reqd(s.handleInstallCatalogTile))
 
 	// Bundle bytes are content-addressed: the SHA-256 in the path is the
 	// capability. Agents have no session cookie in v0; the tailnet is

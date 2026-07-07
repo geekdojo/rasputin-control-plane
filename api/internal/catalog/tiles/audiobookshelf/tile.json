@@ -1,0 +1,16 @@
+{
+  "id": "audiobookshelf",
+  "name": "Audiobookshelf",
+  "tagline": "Your audiobooks and podcasts, with great phone apps.",
+  "description": "A self-hosted server for your audiobook and podcast library, with progress sync across excellent iOS and Android apps. Point it at a folder and go.",
+  "collection": "everyday",
+  "arch": "both",
+  "placementHint": "any",
+  "ramFloorMB": 1024,
+  "exposureDefault": "lan-only",
+  "ports": [
+    { "name": "web", "container": 80, "published": 13378, "protocol": "tcp", "primary": true }
+  ],
+  "website": "https://github.com/advplyr/audiobookshelf",
+  "icon": "🎧"
+}

@@ -223,6 +223,9 @@ export interface App {
   name: string;
   composeYaml: string;
   targetNode: string;
+  // Primary host port the reverse proxy fronts (0/absent = none). Seeded from
+  // the catalog tile at install. See app-access.md.
+  publishedPort?: number;
   lastStatus: AppStatus;
   lastDetail?: string;
   lastDeployed?: string;
@@ -238,6 +241,37 @@ export interface AppChangeEvent {
   status: AppStatus;
   detail?: string;
   ts: string;
+}
+
+// ----- App catalog (curated first-party tiles) ----------------------------
+
+export type CatalogCollection = 'essentials' | 'show-off' | 'everyday' | 'dongle';
+
+export interface CatalogPort {
+  name: string;
+  container: number;
+  published: number;
+  protocol?: 'tcp' | 'udp';
+  primary?: boolean;
+}
+
+export interface CatalogTile {
+  id: string;
+  name: string;
+  tagline: string;
+  description?: string;
+  collection: CatalogCollection;
+  arch: 'both' | 'arm64' | 'amd64';
+  placementHint?: '' | 'any' | 'prefer-x86' | 'prefer-arm64';
+  ramFloorMB: number;
+  needsHardware?: string;
+  needsFeedKey?: string[];
+  exposureDefault: 'lan-only' | 'tailnet' | 'public';
+  ports: CatalogPort[];
+  website?: string;
+  icon?: string;
+  // Present only on the single-tile detail response, not the list.
+  composeYaml?: string;
 }
 
 // ----- Updates ------------------------------------------------------------
