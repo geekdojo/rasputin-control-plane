@@ -10,6 +10,7 @@ import {
   LayoutGrid,
   Settings,
   ShieldAlert,
+  Store,
   UserCog,
   Zap,
 } from 'lucide-react';
@@ -29,6 +30,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { icon: LayoutGrid, label: 'Nodes', href: '/' },
   { icon: LayoutDashboard, label: 'Apps', href: '/apps' },
+  { icon: Store, label: 'App Catalog', href: '/app-catalog' },
   { icon: BarChart2, label: 'Metrics', href: '/metrics' },
   { icon: Database, label: 'Storage' },
   { icon: ShieldAlert, label: 'Firewall', href: '/firewall' },
