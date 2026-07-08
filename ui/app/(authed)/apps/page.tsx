@@ -1,6 +1,6 @@
 'use client';
 
-import { ExternalLink, Package, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
+import { ExternalLink, Package, Play, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
@@ -158,6 +158,10 @@ function AppRow({
   const [hover, setHover] = useState(false);
   const canStop = app.lastStatus === 'running' || app.lastStatus === 'deploying' || app.lastStatus === 'failed';
   const canOpen = app.lastStatus === 'running' && !!url;
+  // The action that runs `docker compose up` reads DEPLOY the first time and
+  // START once the app has run before (stop does `compose down`, so bringing it
+  // back up is a start, not a fresh deploy). Same underlying action either way.
+  const started = !!app.lastDeployed;
 
   return (
     <tr
@@ -195,7 +199,15 @@ function AppRow({
           )}
           {app.lastStatus !== 'running' && (
             <Btn variant="primary" small disabled={busy} onClick={() => onAction('deploy', app)}>
-              <UploadCloud size={10} /> DEPLOY
+              {started ? (
+                <>
+                  <Play size={10} /> START
+                </>
+              ) : (
+                <>
+                  <UploadCloud size={10} /> DEPLOY
+                </>
+              )}
             </Btn>
           )}
           {canStop && (
