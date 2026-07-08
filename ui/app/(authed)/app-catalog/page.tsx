@@ -1,6 +1,6 @@
 'use client';
 
-import { FilePlus2, Store, UploadCloud, X } from 'lucide-react';
+import { ExternalLink, FilePlus2, Store, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
@@ -13,11 +13,13 @@ import {
   openInventoryWS,
 } from '../../../lib/api';
 import type { App, CatalogCollection, CatalogTile, Node } from '../../../lib/types';
+import { accessUrl } from '../../../lib/appurl';
 import {
   Badge,
   Btn,
   CopyButton,
   DIM,
+  Drawer,
   FG,
   HAIR,
   Hint,
@@ -220,56 +222,21 @@ function CustomCard({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-// Shared drawer chrome so the tile-install and custom-compose flows look
-// identical.
-function Drawer({ title, icon, onClose, children }: { title: string; icon?: string; onClose: () => void; children: React.ReactNode }) {
-  return (
-    <div
-      onClick={onClose}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'flex-end', zIndex: 50 }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 'min(560px, 92vw)',
-          height: '100%',
-          background: 'var(--rasp-bg)',
-          borderLeft: `1px solid ${HAIR}`,
-          display: 'flex',
-          flexDirection: 'column',
-          fontFamily: MONO,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', borderBottom: `1px solid ${HAIR}` }}>
-          {icon && <span style={{ fontSize: 18 }}>{icon}</span>}
-          <span style={{ color: FG, fontSize: 12, letterSpacing: '0.06em' }}>{title}</span>
-          <button
-            onClick={onClose}
-            title="Close"
-            style={{ marginLeft: 'auto', background: 'transparent', border: 'none', cursor: 'pointer', color: DIM, display: 'flex' }}
-          >
-            <X size={16} />
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-// Footer shown after an app is declared (install or custom) — offers deploy or
-// a jump to the Apps page.
-function InstalledFooter({ app }: { app: App }) {
+// Footer shown after an app is declared (install or custom) — offers deploy,
+// then the "what next": where to open it + the tile's first-run note.
+function InstalledFooter({ app, node, postInstall }: { app: App; node?: Node; postInstall?: string }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [deployMsg, setDeployMsg] = useState<string | null>(null);
+  const [deployed, setDeployed] = useState(false);
+
+  const url = accessUrl(node, app.targetNode, app.publishedPort);
 
   async function deployNow() {
     setBusy(true);
     setErr(null);
     try {
       await deployApp(app.id);
-      setDeployMsg('Deploy started — track it on the Apps page.');
+      setDeployed(true);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -280,12 +247,22 @@ function InstalledFooter({ app }: { app: App }) {
   return (
     <>
       <Hint>
-        Installed as <span style={{ color: FG }}>{app.name}</span> on <span style={{ color: FG }}>{app.targetNode}</span>. It
-        isn&apos;t running yet.
+        Installed as <span style={{ color: FG }}>{app.name}</span> on <span style={{ color: FG }}>{app.targetNode}</span>.
+        {deployed ? ' Deploying now…' : " It isn't running yet."}
       </Hint>
-      {deployMsg ? (
+      {deployed ? (
         <>
-          <Hint>{deployMsg}</Hint>
+          {url && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ color: DIM, fontSize: 10 }}>Open it at</span>
+              <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontSize: 10, textDecoration: 'none' }}>
+                {url} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
+              </a>
+              <CopyButton value={url} label="COPY" />
+            </div>
+          )}
+          {postInstall && <Hint>{postInstall}</Hint>}
+          <Hint style={{ color: DIM }}>It may take a moment to come up — watch its status on the Apps page.</Hint>
           <Link href="/apps" style={{ textDecoration: 'none' }}>
             <Btn variant="primary">GO TO APPS</Btn>
           </Link>
@@ -398,7 +375,11 @@ function InstallDrawer({
 
       <div style={{ borderTop: `1px solid ${HAIR}`, padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 10 }}>
         {installed ? (
-          <InstalledFooter app={installed} />
+          <InstalledFooter
+            app={installed}
+            node={deployTargets.find((n) => n.id === installed.targetNode)}
+            postInstall={tile.postInstall}
+          />
         ) : noTargets ? (
           <Hint warn>
             No online {tile.arch === 'both' ? 'compute or controlplane' : tile.arch} node is available. Bring a matching node
@@ -460,7 +441,7 @@ function CustomDrawer({ deployTargets, onClose }: { deployTargets: Node[]; onClo
     <Drawer title="CUSTOM APP" onClose={onClose}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         {installed ? (
-          <InstalledFooter app={installed} />
+          <InstalledFooter app={installed} node={deployTargets.find((n) => n.id === installed.targetNode)} />
         ) : noTargets ? (
           <Hint warn>No online compute or controlplane node is available. Bring one online first.</Hint>
         ) : (

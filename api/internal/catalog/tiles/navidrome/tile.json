@@ -2,15 +2,22 @@
   "id": "navidrome",
   "name": "Navidrome",
   "tagline": "Your own Spotify for the music you own.",
-  "description": "A fast, lightweight music streaming server that works with a big ecosystem of Subsonic-compatible apps. Featherweight — a perfect always-on tenant for a Pi node.",
+  "description": "A fast, lightweight music streaming server that works with a big ecosystem of Subsonic-compatible apps. Featherweight \u2014 a perfect always-on tenant for a Pi node.",
   "collection": "everyday",
   "arch": "both",
   "placementHint": "any",
   "ramFloorMB": 256,
   "exposureDefault": "lan-only",
   "ports": [
-    { "name": "web", "container": 4533, "published": 4533, "protocol": "tcp", "primary": true }
+    {
+      "name": "web",
+      "container": 4533,
+      "published": 4533,
+      "protocol": "tcp",
+      "primary": true
+    }
   ],
   "website": "https://github.com/navidrome/navidrome",
-  "icon": "🎵"
+  "icon": "\ud83c\udfb5",
+  "postInstall": "Open it and create your admin account, then point it at your music folder."
 }

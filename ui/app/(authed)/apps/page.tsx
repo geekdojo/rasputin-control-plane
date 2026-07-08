@@ -1,23 +1,37 @@
 'use client';
 
-import { Package, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
+import { ExternalLink, Package, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { deleteApp, deployApp, listApps, openAppsWS, stopApp } from '../../../lib/api';
-import type { App } from '../../../lib/types';
+import {
+  deleteApp,
+  deployApp,
+  getCatalogTile,
+  listApps,
+  listNodes,
+  openAppsWS,
+  openInventoryWS,
+  stopApp,
+} from '../../../lib/api';
+import type { App, CatalogTile, Node } from '../../../lib/types';
+import { accessUrl } from '../../../lib/appurl';
 import {
   Badge,
   Btn,
+  CopyButton,
   DIM,
+  Drawer,
   FG,
+  HAIR,
   Hint,
   PageBody,
   PageHeader,
   PageShell,
+  SectionLabel,
   tdStyle,
   thStyle,
 } from '../../../components/kit';
-import { accentA, MONO } from '../../../components/ui-theme';
+import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
 
 const COLS = ['NAME', 'TARGET', 'STATUS', 'LAST DEPLOYED', ''];
 
@@ -37,14 +51,23 @@ function statusColor(s: App['lastStatus']): string {
 
 export default function AppsPage() {
   const [apps, setApps] = useState<App[]>([]);
+  const [nodes, setNodes] = useState<Node[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [detail, setDetail] = useState<App | null>(null);
 
   useEffect(() => {
     listApps().then(setApps).catch((e) => setErr(String(e)));
+    listNodes().then(setNodes).catch(() => {});
     const closeApps = openAppsWS(() => listApps().then(setApps).catch(() => {}));
-    return () => closeApps();
+    const closeInv = openInventoryWS(() => listNodes().then(setNodes).catch(() => {}));
+    return () => {
+      closeApps();
+      closeInv();
+    };
   }, []);
+
+  const nodesById = new Map(nodes.map((n) => [n.id, n]));
 
   async function handle(action: 'deploy' | 'stop' | 'delete', app: App) {
     setBusy(app.id);
@@ -99,27 +122,41 @@ export default function AppsPage() {
             </thead>
             <tbody>
               {apps.map((a) => (
-                <AppRow key={a.id} app={a} busy={busy === a.id} onAction={handle} />
+                <AppRow
+                  key={a.id}
+                  app={a}
+                  url={accessUrl(nodesById.get(a.targetNode), a.targetNode, a.publishedPort)}
+                  busy={busy === a.id}
+                  onAction={handle}
+                  onOpenDetail={() => setDetail(a)}
+                />
               ))}
             </tbody>
           </table>
         )}
       </PageBody>
+
+      {detail && <AppDetail app={detail} node={nodesById.get(detail.targetNode)} onClose={() => setDetail(null)} />}
     </PageShell>
   );
 }
 
 function AppRow({
   app,
+  url,
   busy,
   onAction,
+  onOpenDetail,
 }: {
   app: App;
+  url: string | null;
   busy: boolean;
   onAction: (action: 'deploy' | 'stop' | 'delete', app: App) => void;
+  onOpenDetail: () => void;
 }) {
   const [hover, setHover] = useState(false);
   const canStop = app.lastStatus === 'running' || app.lastStatus === 'deploying' || app.lastStatus === 'failed';
+  const canOpen = app.lastStatus === 'running' && !!url;
 
   return (
     <tr
@@ -127,7 +164,15 @@ function AppRow({
       onMouseLeave={() => setHover(false)}
       style={{ background: hover ? accentA(0.05) : 'transparent', transition: 'background 0.1s' }}
     >
-      <td style={{ ...tdStyle, color: FG }}>{app.name}</td>
+      <td style={tdStyle}>
+        <button
+          onClick={onOpenDetail}
+          title="App details"
+          style={{ background: 'transparent', border: 'none', padding: 0, color: FG, fontFamily: MONO, fontSize: 10, cursor: 'pointer', textDecoration: hover ? 'underline' : 'none' }}
+        >
+          {app.name}
+        </button>
+      </td>
       <td style={{ ...tdStyle, color: DIM }}>{app.targetNode}</td>
       <td style={tdStyle}>
         <Badge color={statusColor(app.lastStatus)}>{app.lastStatus.toUpperCase()}</Badge>
@@ -140,6 +185,13 @@ function AppRow({
       <td style={{ ...tdStyle, color: DIM }}>{app.lastDeployed ? new Date(app.lastDeployed).toLocaleTimeString() : '—'}</td>
       <td style={{ ...tdStyle, paddingRight: 0 }}>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+          {canOpen && (
+            <a href={url!} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+              <Btn variant="primary" small title={url!}>
+                <ExternalLink size={10} /> OPEN
+              </Btn>
+            </a>
+          )}
           {app.lastStatus !== 'running' && (
             <Btn variant="primary" small disabled={busy} onClick={() => onAction('deploy', app)}>
               <UploadCloud size={10} /> DEPLOY
@@ -156,5 +208,81 @@ function AppRow({
         </div>
       </td>
     </tr>
+  );
+}
+
+// AppDetail — the "what next" for a running app: where to open it, what it is,
+// and the first-run step. Tile info (docs + first-run note) is fetched lazily
+// for apps installed from the catalog; custom-compose apps show just access.
+function AppDetail({ app, node, onClose }: { app: App; node?: Node; onClose: () => void }) {
+  const [tile, setTile] = useState<CatalogTile | null>(null);
+
+  useEffect(() => {
+    if (app.sourceTile) getCatalogTile(app.sourceTile).then(setTile).catch(() => {});
+  }, [app.sourceTile]);
+
+  const url = accessUrl(node, app.targetNode, app.publishedPort);
+  const running = app.lastStatus === 'running';
+
+  return (
+    <Drawer title={app.name.toUpperCase()} icon={tile?.icon} onClose={onClose}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Badge color={statusColor(app.lastStatus)}>{app.lastStatus.toUpperCase()}</Badge>
+          <span style={{ color: DIM, fontSize: 10 }}>on {app.targetNode}</span>
+        </div>
+
+        <div>
+          <SectionLabel>ACCESS</SectionLabel>
+          {url ? (
+            <>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: running ? ACCENT : DIM, fontSize: 10, textDecoration: 'none' }}
+                >
+                  {url} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
+                </a>
+                <CopyButton value={url} label="COPY" />
+              </div>
+              {!running && <Hint style={{ marginTop: 6 }}>Deploy it first — the link works once it&apos;s running.</Hint>}
+            </>
+          ) : (
+            <Hint>This app doesn&apos;t expose a web port.</Hint>
+          )}
+        </div>
+
+        {tile?.postInstall && (
+          <div>
+            <SectionLabel>FIRST RUN</SectionLabel>
+            <Hint>{tile.postInstall}</Hint>
+          </div>
+        )}
+
+        {tile && (tile.description || tile.website) && (
+          <div>
+            <SectionLabel>ABOUT</SectionLabel>
+            {tile.description && <p style={{ color: DIM, fontSize: 10, lineHeight: 1.6, margin: '0 0 8px' }}>{tile.description}</p>}
+            {tile.website && (
+              <a href={tile.website} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontSize: 10, textDecoration: 'none' }}>
+                Learn more &amp; customize <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
+              </a>
+            )}
+          </div>
+        )}
+
+        {!app.sourceTile && (
+          <Hint style={{ color: DIM }}>Custom app — no catalog guide. Manage it from the table.</Hint>
+        )}
+      </div>
+
+      <div style={{ borderTop: `1px solid ${HAIR}`, padding: '14px 20px' }}>
+        <Link href="/app-catalog" style={{ textDecoration: 'none' }}>
+          <Btn>BACK TO CATALOG</Btn>
+        </Link>
+      </div>
+    </Drawer>
   );
 }

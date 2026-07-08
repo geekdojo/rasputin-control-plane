@@ -76,7 +76,8 @@ type Tile struct {
 	ExposureDefault string   `json:"exposureDefault"`         // lan-only | tailnet | public
 	Ports           []Port   `json:"ports"`
 	Website         string   `json:"website,omitempty"`
-	Icon            string   `json:"icon,omitempty"` // emoji or asset ref
+	Icon            string   `json:"icon,omitempty"`        // emoji or asset ref
+	PostInstall     string   `json:"postInstall,omitempty"` // one-line first-run guidance shown after deploy
 
 	// ComposeYAML is loaded from the sibling docker-compose.yml, not tile.json.
 	ComposeYAML string `json:"-"`

@@ -16,12 +16,15 @@ type App struct {
 	TargetNode  string `json:"targetNode"`
 	// PublishedPort is the primary host port the reverse proxy fronts for this
 	// app (0 = none). Seeded from the catalog tile at install. See app-access.md.
-	PublishedPort int             `json:"publishedPort,omitempty"`
-	LastStatus    proto.AppStatus `json:"lastStatus"`
-	LastDetail    string          `json:"lastDetail,omitempty"`
-	LastDeployed  *time.Time      `json:"lastDeployed,omitempty"`
-	LastStopped   *time.Time      `json:"lastStopped,omitempty"`
-	LastStatusAt  *time.Time      `json:"lastStatusAt,omitempty"`
-	CreatedAt     time.Time       `json:"createdAt"`
-	UpdatedAt     time.Time       `json:"updatedAt"`
+	PublishedPort int `json:"publishedPort,omitempty"`
+	// SourceTile is the catalog tile id this app was installed from ("" for a
+	// custom-compose app). Lets the UI show the tile's docs + first-run note (AP-9).
+	SourceTile   string          `json:"sourceTile,omitempty"`
+	LastStatus   proto.AppStatus `json:"lastStatus"`
+	LastDetail   string          `json:"lastDetail,omitempty"`
+	LastDeployed *time.Time      `json:"lastDeployed,omitempty"`
+	LastStopped  *time.Time      `json:"lastStopped,omitempty"`
+	LastStatusAt *time.Time      `json:"lastStatusAt,omitempty"`
+	CreatedAt    time.Time       `json:"createdAt"`
+	UpdatedAt    time.Time       `json:"updatedAt"`
 }

@@ -1,7 +1,7 @@
 {
   "id": "pi-hole",
   "name": "Pi-hole",
-  "tagline": "Network-wide ad blocking — watch the counter climb.",
+  "tagline": "Network-wide ad blocking \u2014 watch the counter climb.",
   "description": "Point your network's DNS at Pi-hole and every device gets ad and tracker blocking, with a live dashboard of what it caught. The classic first self-hosted app. Change the admin password before exposing it.",
   "collection": "essentials",
   "arch": "both",
@@ -9,10 +9,27 @@
   "ramFloorMB": 512,
   "exposureDefault": "lan-only",
   "ports": [
-    { "name": "web", "container": 80, "published": 8081, "protocol": "tcp", "primary": true },
-    { "name": "dns-tcp", "container": 53, "published": 53, "protocol": "tcp" },
-    { "name": "dns-udp", "container": 53, "published": 53, "protocol": "udp" }
+    {
+      "name": "web",
+      "container": 80,
+      "published": 8081,
+      "protocol": "tcp",
+      "primary": true
+    },
+    {
+      "name": "dns-tcp",
+      "container": 53,
+      "published": 53,
+      "protocol": "tcp"
+    },
+    {
+      "name": "dns-udp",
+      "container": 53,
+      "published": 53,
+      "protocol": "udp"
+    }
   ],
   "website": "https://github.com/pi-hole/pi-hole",
-  "icon": "🛡️"
+  "icon": "\ud83d\udee1\ufe0f",
+  "postInstall": "The admin password is a placeholder ('changeme') \u2014 log in and change it in Settings, then point your devices' DNS at this node."
 }

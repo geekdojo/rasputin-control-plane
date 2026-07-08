@@ -55,6 +55,9 @@ func TestCatalog_InstallPersistsPort(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"publishedPort":8096`) {
 		t.Errorf("install response should carry publishedPort 8096, got %s", w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), `"sourceTile":"jellyfin"`) {
+		t.Errorf("install should record the source tile, got %s", w.Body.String())
+	}
 	if !strings.Contains(w.Body.String(), `"name":"jellyfin"`) {
 		t.Errorf("install should default the name to the tile id, got %s", w.Body.String())
 	}

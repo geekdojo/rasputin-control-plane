@@ -9,8 +9,15 @@
   "ramFloorMB": 256,
   "exposureDefault": "lan-only",
   "ports": [
-    { "name": "web", "container": 3001, "published": 3001, "protocol": "tcp", "primary": true }
+    {
+      "name": "web",
+      "container": 3001,
+      "published": 3001,
+      "protocol": "tcp",
+      "primary": true
+    }
   ],
   "website": "https://github.com/louislam/uptime-kuma",
-  "icon": "🟢"
+  "icon": "\ud83d\udfe2",
+  "postInstall": "Open it and create your admin account on the first screen, then add your first monitor."
 }

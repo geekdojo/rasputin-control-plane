@@ -226,6 +226,8 @@ export interface App {
   // Primary host port the reverse proxy fronts (0/absent = none). Seeded from
   // the catalog tile at install. See app-access.md.
   publishedPort?: number;
+  // Catalog tile id this app was installed from ('' / absent = custom compose).
+  sourceTile?: string;
   lastStatus: AppStatus;
   lastDetail?: string;
   lastDeployed?: string;
@@ -270,6 +272,8 @@ export interface CatalogTile {
   ports: CatalogPort[];
   website?: string;
   icon?: string;
+  // One-line first-run guidance shown after deploy.
+  postInstall?: string;
   // Present only on the single-tile detail response, not the list.
   composeYaml?: string;
 }

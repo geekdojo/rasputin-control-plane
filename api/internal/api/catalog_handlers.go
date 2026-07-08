@@ -105,6 +105,7 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		ComposeYAML:   tile.ComposeYAML,
 		TargetNode:    req.TargetNode,
 		PublishedPort: tile.PrimaryPort(),
+		SourceTile:    tile.ID,
 		LastStatus:    proto.AppStatusStopped,
 		CreatedAt:     now,
 		UpdatedAt:     now,

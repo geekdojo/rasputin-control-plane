@@ -54,10 +54,10 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 func (s *Store) Create(ctx context.Context, a *App) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO apps (id, name, compose_yaml, target_node, published_port,
-                          last_status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                          source_tile, last_status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.Name, a.ComposeYAML, a.TargetNode, a.PublishedPort,
-		string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt))
+		a.SourceTile, string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt))
 	return err
 }
 
@@ -168,7 +168,7 @@ func (s *Store) DeleteByTargetNode(ctx context.Context, nodeID string) ([]string
 
 func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, published_port, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, source_tile, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps WHERE id = ?`, id)
 	return scanApp(row.Scan)
@@ -176,7 +176,7 @@ func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 
 func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, published_port, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, source_tile, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps WHERE name = ?`, name)
 	return scanApp(row.Scan)
@@ -184,7 +184,7 @@ func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 
 func (s *Store) List(ctx context.Context) ([]*App, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, published_port, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, source_tile, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps ORDER BY created_at ASC`)
 	if err != nil {
@@ -213,7 +213,7 @@ func scanApp(scan func(...any) error) (*App, error) {
 		updatedAt    int64
 	)
 	if err := scan(&a.ID, &a.Name, &a.ComposeYAML, &a.TargetNode, &a.PublishedPort,
-		&status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
+		&a.SourceTile, &status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
 		&createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

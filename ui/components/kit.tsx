@@ -5,7 +5,7 @@
 // labels, hairline borders, Pantone 172 C accent. Screens stay inline-styled;
 // these keep the common pieces consistent across pages.
 
-import { Check, Copy, ExternalLink } from 'lucide-react';
+import { Check, Copy, ExternalLink, X } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { CSSProperties, ElementType, ReactNode } from 'react';
@@ -407,6 +407,54 @@ export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
     <select className={`rasp-field ${className ?? ''}`} style={{ ...fieldStyle, ...style }} {...rest}>
       {children}
     </select>
+  );
+}
+
+// Drawer — a right-side slide-over panel with a header (icon + title + close)
+// and a scrollable body. Used for catalog install and app detail. The caller
+// supplies the body (usually a scroll region + a pinned footer).
+export function Drawer({
+  title,
+  icon,
+  onClose,
+  children,
+}: {
+  title: string;
+  icon?: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'flex-end', zIndex: 50 }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(560px, 92vw)',
+          height: '100%',
+          background: 'var(--rasp-bg)',
+          borderLeft: `1px solid ${HAIR}`,
+          display: 'flex',
+          flexDirection: 'column',
+          fontFamily: MONO,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', borderBottom: `1px solid ${HAIR}` }}>
+          {icon && <span style={{ fontSize: 18 }}>{icon}</span>}
+          <span style={{ color: FG, fontSize: 12, letterSpacing: '0.06em' }}>{title}</span>
+          <button
+            onClick={onClose}
+            title="Close"
+            style={{ marginLeft: 'auto', background: 'transparent', border: 'none', cursor: 'pointer', color: DIM, display: 'flex' }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
   );
 }
 
