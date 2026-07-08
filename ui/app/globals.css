@@ -132,3 +132,12 @@
 .rasp-field::placeholder {
   color: rgba(138, 155, 181, 0.5);
 }
+/* The closed <select> control is custom-drawn in kit.tsx Select, but the open
+   popup list is still native — color-scheme + option colors keep it dark. */
+select.rasp-field {
+  color-scheme: dark;
+}
+select.rasp-field option {
+  background: var(--rasp-panel);
+  color: var(--rasp-fg);
+}

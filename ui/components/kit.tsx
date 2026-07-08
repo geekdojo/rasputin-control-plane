@@ -5,7 +5,7 @@
 // labels, hairline borders, Pantone 172 C accent. Screens stay inline-styled;
 // these keep the common pieces consistent across pages.
 
-import { Check, Copy, ExternalLink, X } from 'lucide-react';
+import { Check, ChevronDown, Copy, ExternalLink, X } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { CSSProperties, ElementType, ReactNode } from 'react';
@@ -401,12 +401,34 @@ export function Textarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement
   );
 }
 
+// appearance:none suppresses the OS-native select chrome (which ignores the
+// theme); the chevron is drawn by us so it follows --rasp-dim. paddingRight
+// stays after the caller's style spread so custom padding can't crowd it.
 export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   const { style, className, children, ...rest } = props;
   return (
-    <select className={`rasp-field ${className ?? ''}`} style={{ ...fieldStyle, ...style }} {...rest}>
-      {children}
-    </select>
+    <span style={{ position: 'relative', display: 'inline-flex' }}>
+      <select
+        className={`rasp-field ${className ?? ''}`}
+        style={{
+          ...fieldStyle,
+          appearance: 'none',
+          WebkitAppearance: 'none',
+          MozAppearance: 'none',
+          cursor: 'pointer',
+          width: '100%',
+          ...style,
+          paddingRight: 24,
+        }}
+        {...rest}
+      >
+        {children}
+      </select>
+      <ChevronDown
+        size={11}
+        style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: DIM }}
+      />
+    </span>
   );
 }
 
