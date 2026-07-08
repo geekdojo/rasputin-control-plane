@@ -17,7 +17,7 @@
 #   + nats-server 2.11 bump cleared them. Remove entries as they get
 #   fixed; the script prints stale entries so the file shrinks over time.
 #
-# GOTOOLCHAIN is forced to go1.26.4 (matching the CI toolchain) so local
+# GOTOOLCHAIN is forced to go1.26.5 (matching the CI toolchain) so local
 # runs on newer dev toolchains produce the same stdlib findings as CI.
 # Override with GOTOOLCHAIN env if needed.
 #
@@ -32,7 +32,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.4}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.5}"
 
 MODULES=(api agent proto)
 BASELINE=.github/vuln-baseline.txt
