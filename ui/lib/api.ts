@@ -437,14 +437,11 @@ export function createApp(input: {
   });
 }
 
-export async function deleteApp(id: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/apps/${id}`, {
-    method: 'DELETE',
-    credentials: 'include',
-  });
-  if (!res.ok && res.status !== 204) {
-    throw new Error(`deleteApp: ${res.status}`);
-  }
+// deleteApp runs the app.delete saga (stop the deployment, then remove the
+// record) and returns the job. Removal is async — the row disappears on the
+// `deleted` change event once the stop completes.
+export function deleteApp(id: string): Promise<Job> {
+  return jsonFetch<Job>(`/api/apps/${id}`, { method: 'DELETE' });
 }
 
 export function deployApp(id: string): Promise<Job> {

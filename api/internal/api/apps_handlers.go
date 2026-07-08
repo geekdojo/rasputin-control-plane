@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -109,20 +108,26 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /api/apps/{id}
-// Note: this only removes the api's record. It does NOT stop a running
-// deployment on the agent — the caller should POST /api/apps/{id}/stop first
-// if they want a clean teardown. We could chain them here later.
+// Runs the app.delete saga: stop the running deployment on the target node
+// (docker compose down) THEN remove the api's record — so delete actually tears
+// the containers down instead of orphaning them. Async, like deploy/stop:
+// returns the job; the row disappears on the `deleted` change event once the
+// stop completes. On a reachable node the stop must succeed or the delete fails
+// (the record stays); on an unreachable node it removes the record with a
+// logged warning.
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.apps.Delete(r.Context(), id); err != nil {
-		if errors.Is(err, errNoRowsSentinel) || err.Error() == "sql: no rows in result set" {
-			writeError(w, http.StatusNotFound, "app not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if existing, _ := s.apps.Get(r.Context(), id); existing == nil {
+		writeError(w, http.StatusNotFound, "app not found")
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	spec, _ := json.Marshal(apps.DeleteSpec{AppID: id})
+	j, err := s.runner.Submit(r.Context(), "app.delete", spec, creator(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, j)
 }
 
 // POST /api/apps/{id}/deploy

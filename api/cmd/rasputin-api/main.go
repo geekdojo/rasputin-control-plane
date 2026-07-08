@@ -362,6 +362,7 @@ func main() {
 	runner.Register(firewall.SetActiveWorkflow(invStore, busSrv.Conn()))
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
+	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
 		PublicBaseURL: publicBaseURL,

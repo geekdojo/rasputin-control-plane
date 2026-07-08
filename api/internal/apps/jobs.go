@@ -2,6 +2,7 @@ package apps
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,10 +15,14 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// DeploySpec is the spec body of an app.deploy job.
+// DeploySpec is the spec body of an app.deploy job (and, by alias, app.stop /
+// app.delete — all three are keyed only by appId).
 type DeploySpec struct {
 	AppID string `json:"appId"`
 }
+
+// DeleteSpec is the spec body of an app.delete job. Same shape as DeploySpec.
+type DeleteSpec = DeploySpec
 
 // DeployWorkflow drives the deploy saga:
 //
@@ -44,6 +49,27 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: stopLoad(store, inv)},
 			{Name: "push", Timeout: 30 * time.Second, Do: stopPush(store, inv, nc)},
+		},
+	}
+}
+
+// DeleteWorkflow drives the delete saga: stop the running deployment on the
+// target node (docker compose down), THEN remove the api's ledger row. This is
+// what makes "delete" actually tear down containers instead of orphaning them.
+//
+//  1. stop   — if the node is online, RPC docker.stop (compose down); this must
+//     succeed, else the saga fails and the row stays (no silent orphan
+//     on a reachable node — the user can retry). If the node is offline
+//     or de-registered, we can't reach it: log a warning and proceed to
+//     remove the record (delete should still work on a dead node), with
+//     the caveat that a container may reappear if that node returns.
+//  2. remove — delete the ledger row + emit the `deleted` change event.
+func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
+	return jobs.Workflow{
+		Kind: "app.delete",
+		Steps: []jobs.WorkflowStep{
+			{Name: "stop", Timeout: 40 * time.Second, Do: deleteStop(store, inv, nc)},
+			{Name: "remove", Timeout: 2 * time.Second, Do: deleteRemove(store, nc)},
 		},
 	}
 }
@@ -317,6 +343,83 @@ func stopPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 
 		sc.Log("info", fmt.Sprintf("status=%s", ack.Status))
 		return json.Marshal(ack)
+	}
+}
+
+// deleteStop stops the deployment before its record is removed. It reuses the
+// same docker.stop RPC as app.stop. On a reachable node the stop must succeed;
+// on an unreachable one it warns and lets the delete proceed (best-effort).
+func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		spec, err := parseSpec(sc.Spec)
+		if err != nil {
+			return nil, err
+		}
+		app, err := store.Get(sc.Ctx, spec.AppID)
+		if err != nil {
+			return nil, fmt.Errorf("get app: %w", err)
+		}
+		if app == nil {
+			// Already gone — idempotent success (the saga may have retried
+			// after remove already ran).
+			sc.Log("info", "app already removed")
+			return json.Marshal(map[string]string{"appId": spec.AppID, "stop": "already-gone"})
+		}
+
+		node, _ := inv.Get(sc.Ctx, app.TargetNode)
+		online := node != nil && computeNodeStatus(node.LastSeen) == proto.StatusOnline
+		if !online {
+			// Can't reach the node to stop it. Delete should still work (a user
+			// expects "delete" to remove the record), but warn loudly: if that
+			// node returns, its container may reappear until reconciled.
+			sc.Log("warn", fmt.Sprintf("node %q is unreachable — removing the record WITHOUT stopping; its container may reappear if the node returns", app.TargetNode))
+			return json.Marshal(map[string]string{"appId": app.ID, "stop": "skipped-unreachable"})
+		}
+
+		sc.Log("info", fmt.Sprintf("stopping %q on %s before delete", app.Name, app.TargetNode))
+		now := time.Now().UTC()
+		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusStopping, "", now)
+
+		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID})
+		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)
+		if err != nil {
+			now := time.Now().UTC()
+			_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusFailed, "stop rpc: "+err.Error(), now)
+			emitChange(nc, app.ID, proto.AppFailed, proto.AppStatusFailed, "stop rpc failed", now)
+			return nil, fmt.Errorf("stop rpc: %w", err)
+		}
+		var ack proto.AppStopAck
+		if err := json.Unmarshal(msg.Data, &ack); err != nil {
+			return nil, fmt.Errorf("decode stop ack: %w", err)
+		}
+		if !ack.OK {
+			detail := ack.Detail
+			if detail == "" {
+				detail = "agent reported stop failed"
+			}
+			now := time.Now().UTC()
+			_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusFailed, detail, now)
+			return nil, errors.New(detail)
+		}
+		sc.Log("info", "stopped")
+		return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok"})
+	}
+}
+
+// deleteRemove drops the ledger row and emits the deleted event. Idempotent:
+// a missing row is treated as already-removed.
+func deleteRemove(store *Store, nc *nats.Conn) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		spec, err := parseSpec(sc.Spec)
+		if err != nil {
+			return nil, err
+		}
+		if err := store.Delete(sc.Ctx, spec.AppID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("delete app: %w", err)
+		}
+		emitChange(nc, spec.AppID, proto.AppDeleted, proto.AppStatusStopped, "deleted", time.Now().UTC())
+		sc.Log("info", "removed from the app list")
+		return json.Marshal(map[string]string{"appId": spec.AppID, "deleted": "true"})
 	}
 }
 

@@ -76,9 +76,10 @@ export default function AppsPage() {
       if (action === 'deploy') await deployApp(app.id);
       else if (action === 'stop') await stopApp(app.id);
       else {
-        if (!confirm(`Delete app "${app.name}"? This removes the record; stop it first if it's running.`)) return;
+        if (!confirm(`Stop and remove "${app.name}" and its containers?`)) return;
+        // Async: the stop → remove saga emits a `deleted` event; the WS refresh
+        // drops the row once the container is actually torn down.
         await deleteApp(app.id);
-        setApps((prev) => prev.filter((a) => a.id !== app.id));
       }
     } catch (e) {
       setErr(String(e));
