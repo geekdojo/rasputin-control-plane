@@ -1,0 +1,16 @@
+{
+  "id": "ais-catcher",
+  "name": "AIS-catcher",
+  "tagline": "Track ships in real time on a live map.",
+  "description": "Decode marine AIS with an SDR and see cargo ships and ferries on a built-in map. Best near navigable water.",
+  "collection": "dongle",
+  "category": "radio",
+  "arch": "both",
+  "ramFloorMB": 256,
+  "needsHardware": "rtl-sdr",
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/jvde-github/AIS-catcher",
+  "icon": "\ud83d\udea2",
+  "postInstall": "Plug in your RTL-SDR + VHF antenna near the coast, then open the map."
+}

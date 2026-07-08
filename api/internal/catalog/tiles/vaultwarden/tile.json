@@ -1,0 +1,15 @@
+{
+  "id": "vaultwarden",
+  "name": "Vaultwarden",
+  "tagline": "Your passwords, on your own metal.",
+  "description": "A lightweight, self-hosted password manager compatible with the Bitwarden apps and browser extensions.",
+  "collection": "essentials",
+  "category": "security",
+  "arch": "both",
+  "ramFloorMB": 256,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/dani-garcia/vaultwarden",
+  "icon": "\ud83d\udd12",
+  "postInstall": "Open it, create your admin account, then install the Bitwarden browser extension and point it here."
+}

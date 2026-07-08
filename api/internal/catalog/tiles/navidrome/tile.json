@@ -19,5 +19,6 @@
   ],
   "website": "https://github.com/navidrome/navidrome",
   "icon": "\ud83c\udfb5",
-  "postInstall": "Open it and create your admin account, then point it at your music folder."
+  "postInstall": "Open it and create your admin account, then point it at your music folder.",
+  "category": "media"
 }

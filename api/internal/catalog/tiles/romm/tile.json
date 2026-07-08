@@ -1,0 +1,15 @@
+{
+  "id": "romm",
+  "name": "RomM",
+  "tagline": "Your retro game library, playable in the browser.",
+  "description": "A self-hosted ROM library with box art, metadata, and play-in-browser. Bring your own ROMs.",
+  "collection": "everyday",
+  "category": "games",
+  "arch": "both",
+  "ramFloorMB": 1024,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/rommapp/romm",
+  "icon": "\ud83d\udd79\ufe0f",
+  "postInstall": "Open it, create your account, and point it at your ROMs folder."
+}

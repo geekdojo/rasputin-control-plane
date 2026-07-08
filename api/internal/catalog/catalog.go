@@ -48,6 +48,24 @@ var validArch = map[string]bool{"both": true, "arm64": true, "amd64": true}
 
 var validPlacement = map[string]bool{"": true, "any": true, "prefer-x86": true, "prefer-arm64": true}
 
+// Functional categories power the catalog's filter chips (distinct from the
+// curated Collection, which is the browse grouping). A tile has at most one.
+var validCategory = map[string]bool{
+	"": true, "media": true, "photos": true, "network": true, "monitoring": true,
+	"automation": true, "productivity": true, "ai": true, "games": true,
+	"data": true, "radio": true, "security": true, "tools": true,
+}
+
+// Status gates installability. "preview" tiles are shown in the catalog (so the
+// grid reflects the full roadmap) but can't be installed until they clear the
+// bench (ACC-1) and flip to available.
+const (
+	StatusAvailable = "available"
+	StatusPreview   = "preview"
+)
+
+var validStatus = map[string]bool{"": true, StatusAvailable: true, StatusPreview: true}
+
 // Port is a structured published port. Guard #1 from the app-access design:
 // the proxy must be able to route <app>.<zone> to a concrete host port without
 // parsing the compose YAML, so every web-facing tile declares its ports here
@@ -75,13 +93,19 @@ type Tile struct {
 	NeedsFeedKey    []string `json:"needsFeedKey,omitempty"`  // external API keys prompted at install
 	ExposureDefault string   `json:"exposureDefault"`         // lan-only | tailnet | public
 	Ports           []Port   `json:"ports"`
+	Category        string   `json:"category,omitempty"` // functional filter chip (media, network, …)
+	Status          string   `json:"status,omitempty"`   // "" / available | preview (coming soon)
 	Website         string   `json:"website,omitempty"`
 	Icon            string   `json:"icon,omitempty"`        // emoji or asset ref
 	PostInstall     string   `json:"postInstall,omitempty"` // one-line first-run guidance shown after deploy
 
 	// ComposeYAML is loaded from the sibling docker-compose.yml, not tile.json.
+	// A preview tile may omit it (it can't be installed).
 	ComposeYAML string `json:"-"`
 }
+
+// Available reports whether the tile can be installed now (vs a preview/coming-soon).
+func (t Tile) Available() bool { return t.Status != StatusPreview }
 
 // PrimaryPort returns the published host port the reverse proxy should front,
 // or 0 if the tile declares none (a headless/no-UI tile).
@@ -138,9 +162,14 @@ func loadFromFS(fsys fs.FS) (*Catalog, error) {
 		}
 		compose, err := fs.ReadFile(fsys, "tiles/"+dir+"/docker-compose.yml")
 		if err != nil {
-			return nil, fmt.Errorf("tile %q: %w", dir, err)
+			// A preview tile may ship without a compose file — it can't be
+			// installed, so the stack is optional until it clears the bench.
+			if t.Status != StatusPreview {
+				return nil, fmt.Errorf("tile %q: %w", dir, err)
+			}
+		} else {
+			t.ComposeYAML = string(compose)
 		}
-		t.ComposeYAML = string(compose)
 
 		if t.ID != dir {
 			return nil, fmt.Errorf("tile %q: id %q must equal its directory name", dir, t.ID)
@@ -191,11 +220,14 @@ func validateTile(t Tile) error {
 	if !validExposure[t.ExposureDefault] {
 		return fmt.Errorf("exposureDefault %q is not one of lan-only|tailnet|public", t.ExposureDefault)
 	}
+	if !validCategory[t.Category] {
+		return fmt.Errorf("category %q is not a known functional category", t.Category)
+	}
+	if !validStatus[t.Status] {
+		return fmt.Errorf("status %q is not one of available|preview", t.Status)
+	}
 	if t.RAMFloorMB <= 0 {
 		return fmt.Errorf("ramFloorMB must be > 0")
-	}
-	if strings.TrimSpace(t.ComposeYAML) == "" {
-		return fmt.Errorf("docker-compose.yml is empty")
 	}
 	primaries := 0
 	for i, p := range t.Ports {
@@ -212,10 +244,16 @@ func validateTile(t Tile) error {
 			primaries++
 		}
 	}
-	// A web-facing tile (any ports) must mark exactly one primary so the proxy
-	// knows which host:port to front. A headless tile declares no ports.
-	if len(t.Ports) > 0 && primaries != 1 {
-		return fmt.Errorf("exactly one port must be primary (found %d)", primaries)
+	// Installable tiles must ship a compose stack and, if web-facing, mark
+	// exactly one primary port so the proxy knows which host:port to front.
+	// Preview tiles are exempt — they carry metadata only until they bench.
+	if t.Available() {
+		if strings.TrimSpace(t.ComposeYAML) == "" {
+			return fmt.Errorf("docker-compose.yml is empty")
+		}
+		if len(t.Ports) > 0 && primaries != 1 {
+			return fmt.Errorf("exactly one port must be primary (found %d)", primaries)
+		}
 	}
 	return nil
 }

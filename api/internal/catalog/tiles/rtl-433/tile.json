@@ -1,0 +1,16 @@
+{
+  "id": "rtl-433",
+  "name": "rtl_433",
+  "tagline": "Decode your neighborhood's wireless sensors.",
+  "description": "Sniff 433MHz sensors \u2014 weather stations, tire-pressure, thermometers \u2014 with a cheap SDR and pipe them to MQTT.",
+  "collection": "dongle",
+  "category": "radio",
+  "arch": "both",
+  "ramFloorMB": 256,
+  "needsHardware": "rtl-sdr",
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/merbanan/rtl_433",
+  "icon": "\ud83d\udce1",
+  "postInstall": "Plug in your RTL-SDR; decoded sensor data flows to MQTT and into your dashboards."
+}

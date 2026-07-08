@@ -19,5 +19,6 @@
   ],
   "website": "https://github.com/louislam/uptime-kuma",
   "icon": "\ud83d\udfe2",
-  "postInstall": "Open it and create your admin account on the first screen, then add your first monitor."
+  "postInstall": "Open it and create your admin account on the first screen, then add your first monitor.",
+  "category": "monitoring"
 }

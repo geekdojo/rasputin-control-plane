@@ -1,0 +1,15 @@
+{
+  "id": "minecraft",
+  "name": "Minecraft Server",
+  "tagline": "Your own Minecraft world, always on.",
+  "description": "The canonical homelab game server. Native arm64; instantly understood by non-techies.",
+  "collection": "show-off",
+  "category": "games",
+  "arch": "both",
+  "ramFloorMB": 2048,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/itzg/docker-minecraft-server",
+  "icon": "\u26cf\ufe0f",
+  "postInstall": "Point your Minecraft client at <node>.local:25565 to join."
+}

@@ -1,0 +1,19 @@
+{
+  "id": "shadowbroker",
+  "name": "Shadowbroker",
+  "tagline": "A global intelligence console on your own metal.",
+  "description": "An OSINT situational-awareness globe: flights, ships, satellites, quakes, wildfires and more on one MapLibre map. The most on-brand app for Rasputin.",
+  "collection": "show-off",
+  "category": "data",
+  "arch": "both",
+  "ramFloorMB": 4096,
+  "needsFeedKey": [
+    "OpenSky",
+    "AISStream"
+  ],
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/bigbodycobain/shadowbroker",
+  "icon": "\ud83d\udef0\ufe0f",
+  "postInstall": "Open it and add your OpenSky / AISStream keys in settings for full flight + ship coverage."
+}

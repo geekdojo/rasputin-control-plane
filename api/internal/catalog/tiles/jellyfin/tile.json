@@ -19,5 +19,6 @@
   ],
   "website": "https://github.com/jellyfin/jellyfin",
   "icon": "\ud83c\udfac",
-  "postInstall": "Open it to run the setup wizard: create your admin user and add a media library folder."
+  "postInstall": "Open it to run the setup wizard: create your admin user and add a media library folder.",
+  "category": "media"
 }

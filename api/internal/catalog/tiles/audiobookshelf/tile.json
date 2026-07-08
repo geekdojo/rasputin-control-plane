@@ -19,5 +19,6 @@
   ],
   "website": "https://github.com/advplyr/audiobookshelf",
   "icon": "\ud83c\udfa7",
-  "postInstall": "Open it, create your admin account, then add an audiobook or podcast library folder."
+  "postInstall": "Open it, create your admin account, then add an audiobook or podcast library folder.",
+  "category": "media"
 }

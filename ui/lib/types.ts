@@ -263,6 +263,10 @@ export interface CatalogTile {
   tagline: string;
   description?: string;
   collection: CatalogCollection;
+  // Functional category powering the filter chips (media, network, ai, …).
+  category?: string;
+  // '' / 'available' = installable; 'preview' = shown but coming soon.
+  status?: 'available' | 'preview';
   arch: 'both' | 'arm64' | 'amd64';
   placementHint?: '' | 'any' | 'prefer-x86' | 'prefer-arm64';
   ramFloorMB: number;

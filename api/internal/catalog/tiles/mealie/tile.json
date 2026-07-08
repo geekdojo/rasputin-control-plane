@@ -1,0 +1,15 @@
+{
+  "id": "mealie",
+  "name": "Mealie",
+  "tagline": "Your recipe box \u2014 import from any URL.",
+  "description": "A self-hosted recipe manager and meal planner. Paste a recipe URL and it imports clean.",
+  "collection": "everyday",
+  "category": "productivity",
+  "arch": "both",
+  "ramFloorMB": 512,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/mealie-recipes/mealie",
+  "icon": "\ud83c\udf72",
+  "postInstall": "Open it, create your account, and paste a recipe URL to import your first recipe."
+}

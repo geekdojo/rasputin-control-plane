@@ -1,6 +1,6 @@
 'use client';
 
-import { ExternalLink, FilePlus2, Store, UploadCloud } from 'lucide-react';
+import { ExternalLink, FilePlus2, Search, Store, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
@@ -64,12 +64,28 @@ function nodeOptionLabel(n: Node): string {
   return `${n.id} (${n.role}${n.architecture ? `, ${n.architecture}` : ''}, ${n.status})`;
 }
 
+function isPreview(t: CatalogTile): boolean {
+  return t.status === 'preview';
+}
+
+// Client-side substring search over the already-loaded manifest — no backend.
+function matchesQuery(t: CatalogTile, q: string): boolean {
+  return (
+    t.name.toLowerCase().includes(q) ||
+    t.tagline.toLowerCase().includes(q) ||
+    (t.description ?? '').toLowerCase().includes(q) ||
+    (t.category ?? '').toLowerCase().includes(q)
+  );
+}
+
 export default function AppCatalogPage() {
   const [tiles, setTiles] = useState<CatalogTile[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<CatalogTile | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [activeCat, setActiveCat] = useState('all');
 
   useEffect(() => {
     listCatalog().then(setTiles).catch((e) => setErr(String(e)));
@@ -79,6 +95,18 @@ export default function AppCatalogPage() {
   }, []);
 
   const deployTargets = nodes.filter(targetable);
+  const canInstall = (t: CatalogTile) => !isPreview(t) && deployTargets.some((n) => archOK(t, n));
+
+  const categories = Array.from(new Set(tiles.map((t) => t.category).filter(Boolean))).sort() as string[];
+  const q = query.trim().toLowerCase();
+  const filtering = activeCat !== 'all' || q !== '';
+  const filtered = tiles.filter(
+    (t) => (activeCat === 'all' || t.category === activeCat) && (q === '' || matchesQuery(t, q))
+  );
+
+  const card = (t: CatalogTile) => (
+    <CatalogCard key={t.id} tile={t} installable={canInstall(t)} preview={isPreview(t)} onOpen={() => setSelected(t)} />
+  );
 
   return (
     <PageShell>
@@ -90,36 +118,64 @@ export default function AppCatalogPage() {
           <p style={{ color: DIM, fontSize: 11, fontFamily: MONO }}>loading catalog…</p>
         )}
 
-        {COLLECTIONS.map(({ key, label, blurb }) => {
-          const group = tiles.filter((t) => t.collection === key);
-          if (group.length === 0) return null;
-          return (
-            <div key={key} style={{ marginBottom: 28 }}>
-              <SectionLabel>{label}</SectionLabel>
-              <Hint style={{ marginTop: -4, marginBottom: 12 }}>{blurb}</Hint>
+        {/* Search + category filter chips — all client-side over the manifest. */}
+        {tiles.length > 0 && (
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, ...fieldStyle, padding: '0 9px' }}>
+              <Search size={12} color={DIM} />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search apps…"
+                style={{ background: 'transparent', border: 'none', outline: 'none', color: FG, fontFamily: MONO, fontSize: 11, padding: '7px 0', width: 180 }}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {['all', ...categories].map((cat) => (
+                <Btn key={cat} small variant={activeCat === cat ? 'primary' : 'default'} onClick={() => setActiveCat(cat)}>
+                  {cat === 'all' ? 'ALL' : cat.toUpperCase()}
+                </Btn>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {filtering ? (
+          <div style={{ marginBottom: 28 }}>
+            <SectionLabel>
+              {filtered.length} {filtered.length === 1 ? 'RESULT' : 'RESULTS'}
+            </SectionLabel>
+            {filtered.length === 0 ? (
+              <Hint>No apps match — try a different search or category.</Hint>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>{filtered.map(card)}</div>
+            )}
+          </div>
+        ) : (
+          <>
+            {COLLECTIONS.map(({ key, label, blurb }) => {
+              const group = tiles.filter((t) => t.collection === key);
+              if (group.length === 0) return null;
+              return (
+                <div key={key} style={{ marginBottom: 28 }}>
+                  <SectionLabel>{label}</SectionLabel>
+                  <Hint style={{ marginTop: -4, marginBottom: 12 }}>{blurb}</Hint>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>{group.map(card)}</div>
+                </div>
+              );
+            })}
+
+            {/* Custom — bring-your-own-compose. Consolidates the old Apps-page
+                "Add App" form so all app-adding lives in one place. */}
+            <div style={{ marginBottom: 28 }}>
+              <SectionLabel>CUSTOM</SectionLabel>
+              <Hint style={{ marginTop: -4, marginBottom: 12 }}>Bring your own Docker Compose stack.</Hint>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-                {group.map((t) => (
-                  <CatalogCard
-                    key={t.id}
-                    tile={t}
-                    installable={deployTargets.some((n) => archOK(t, n))}
-                    onOpen={() => setSelected(t)}
-                  />
-                ))}
+                <CustomCard onOpen={() => setCustomOpen(true)} />
               </div>
             </div>
-          );
-        })}
-
-        {/* Custom — bring-your-own-compose. Consolidates the old Apps-page
-            "Add App" form so all app-adding lives in one place. */}
-        <div style={{ marginBottom: 28 }}>
-          <SectionLabel>CUSTOM</SectionLabel>
-          <Hint style={{ marginTop: -4, marginBottom: 12 }}>Bring your own Docker Compose stack.</Hint>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-            <CustomCard onOpen={() => setCustomOpen(true)} />
-          </div>
-        </div>
+          </>
+        )}
       </PageBody>
 
       {selected && (
@@ -137,10 +193,12 @@ export default function AppCatalogPage() {
 function CatalogCard({
   tile,
   installable,
+  preview,
   onOpen,
 }: {
   tile: CatalogTile;
   installable: boolean;
+  preview: boolean;
   onOpen: () => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -155,14 +213,20 @@ function CatalogCard({
         flexDirection: 'column',
         gap: 8,
         padding: 14,
+        opacity: preview ? 0.72 : 1,
         background: hover ? accentA(0.04) : PANEL,
-        border: `1px solid ${hover ? accentA(0.35) : HAIR}`,
+        border: `1px ${preview ? 'dashed' : 'solid'} ${hover ? accentA(0.35) : HAIR}`,
         transition: 'background 0.15s, border-color 0.15s',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         {tile.icon && <span style={{ fontSize: 18, lineHeight: 1 }}>{tile.icon}</span>}
         <span style={{ color: FG, fontSize: 12, fontFamily: MONO, letterSpacing: '0.04em' }}>{tile.name}</span>
+        {preview && (
+          <span style={{ marginLeft: 'auto' }}>
+            <Badge color="#facc15">SOON</Badge>
+          </span>
+        )}
       </div>
       <p style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5, margin: 0, minHeight: 30 }}>
         {tile.tagline}
@@ -176,7 +240,7 @@ function CatalogCard({
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
         <Btn variant="primary" small onClick={onOpen}>
-          <UploadCloud size={10} /> {installable ? 'INSTALL' : 'DETAILS'}
+          <UploadCloud size={10} /> {preview ? 'DETAILS' : installable ? 'INSTALL' : 'DETAILS'}
         </Btn>
         {tile.website && (
           <Btn variant="ghost" small onClick={() => window.open(tile.website, '_blank', 'noopener')}>
@@ -297,9 +361,10 @@ function InstallDrawer({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
+  const preview = tile.status === 'preview';
 
   useEffect(() => {
-    if (compose === null) {
+    if (!preview && compose === null) {
       getCatalogTile(tile.id)
         .then((full) => setCompose(full.composeYaml ?? ''))
         .catch(() => setCompose(''));
@@ -356,25 +421,35 @@ function InstallDrawer({
           </div>
         )}
 
-        <div>
-          <SectionLabel>STACK</SectionLabel>
-          {compose === null ? (
-            <p style={{ color: DIM, fontSize: 10 }}>loading…</p>
-          ) : (
-            <>
-              <pre style={{ ...fieldStyle, fontSize: 10, lineHeight: 1.5, maxHeight: 200, overflow: 'auto', margin: 0, whiteSpace: 'pre' }}>
-                {compose}
-              </pre>
-              <div style={{ marginTop: 6 }}>
-                <CopyButton value={compose} label="COPY COMPOSE" />
-              </div>
-            </>
-          )}
-        </div>
+        {!preview && (
+          <div>
+            <SectionLabel>STACK</SectionLabel>
+            {compose === null ? (
+              <p style={{ color: DIM, fontSize: 10 }}>loading…</p>
+            ) : (
+              <>
+                <pre style={{ ...fieldStyle, fontSize: 10, lineHeight: 1.5, maxHeight: 200, overflow: 'auto', margin: 0, whiteSpace: 'pre' }}>
+                  {compose}
+                </pre>
+                <div style={{ marginTop: 6 }}>
+                  <CopyButton value={compose} label="COPY COMPOSE" />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {tile.website && (
+          <a href={tile.website} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontSize: 10, textDecoration: 'none' }}>
+            Learn more &amp; customize <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
+          </a>
+        )}
       </div>
 
       <div style={{ borderTop: `1px solid ${HAIR}`, padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {installed ? (
+        {preview ? (
+          <Hint warn>Coming soon — this app is on the roadmap but isn&apos;t available to install yet.</Hint>
+        ) : installed ? (
           <InstalledFooter
             app={installed}
             node={deployTargets.find((n) => n.id === installed.targetNode)}

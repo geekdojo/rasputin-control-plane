@@ -1,0 +1,15 @@
+{
+  "id": "actual-budget",
+  "name": "Actual Budget",
+  "tagline": "Private, zero-based budgeting.",
+  "description": "A snappy, local-first budgeting app. Your finances never leave your cluster.",
+  "collection": "everyday",
+  "category": "productivity",
+  "arch": "both",
+  "ramFloorMB": 256,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://actualbudget.org",
+  "icon": "\ud83d\udcb0",
+  "postInstall": "Open it and create your budget file \u2014 everything stays local."
+}

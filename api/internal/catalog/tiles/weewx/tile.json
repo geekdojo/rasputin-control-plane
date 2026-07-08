@@ -1,0 +1,16 @@
+{
+  "id": "weewx",
+  "name": "WeeWX",
+  "tagline": "Your own weather station dashboard.",
+  "description": "Publish and archive readings from a real personal weather station. Pairs with an Ecowitt gateway (local LAN) or WeatherFlow Tempest.",
+  "collection": "dongle",
+  "category": "radio",
+  "arch": "both",
+  "ramFloorMB": 256,
+  "needsHardware": "weather-station",
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://weewx.com",
+  "icon": "\ud83c\udf26\ufe0f",
+  "postInstall": "Point it at your Ecowitt gateway (local LAN) or WeatherFlow Tempest."
+}

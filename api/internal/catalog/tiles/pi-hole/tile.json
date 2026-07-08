@@ -31,5 +31,6 @@
   ],
   "website": "https://github.com/pi-hole/pi-hole",
   "icon": "\ud83d\udee1\ufe0f",
-  "postInstall": "The admin password is a placeholder ('changeme') \u2014 log in and change it in Settings, then point your devices' DNS at this node."
+  "postInstall": "The admin password is a placeholder ('changeme') \u2014 log in and change it in Settings, then point your devices' DNS at this node.",
+  "category": "network"
 }

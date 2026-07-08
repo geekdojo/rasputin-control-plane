@@ -1,0 +1,15 @@
+{
+  "id": "home-assistant",
+  "name": "Home Assistant",
+  "tagline": "Automate your home \u2014 the #1 self-hosted app.",
+  "description": "The open-source home automation hub. Beloved, powerful, and a genuine weekend project rather than a five-minute setup.",
+  "collection": "essentials",
+  "category": "automation",
+  "arch": "both",
+  "ramFloorMB": 1024,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://www.home-assistant.io",
+  "icon": "\ud83c\udfe0",
+  "postInstall": "Open it and follow the onboarding wizard to create your account and add your first devices."
+}

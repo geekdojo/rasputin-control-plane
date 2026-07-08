@@ -1,0 +1,15 @@
+{
+  "id": "paperless-ngx",
+  "name": "Paperless-ngx",
+  "tagline": "Scan, OCR, and search every document.",
+  "description": "Turn your paper into a searchable archive. Drop a PDF and get full-text OCR search \u2014 'it found my tax form' is a real minor wow.",
+  "collection": "everyday",
+  "category": "productivity",
+  "arch": "both",
+  "ramFloorMB": 1024,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/paperless-ngx/paperless-ngx",
+  "icon": "\ud83d\udcc4",
+  "postInstall": "Open it, create your admin account, then drop PDFs into the consume folder or upload from the web."
+}

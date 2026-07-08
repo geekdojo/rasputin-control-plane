@@ -1,0 +1,16 @@
+{
+  "id": "immich",
+  "name": "Immich",
+  "tagline": "Google Photos at home \u2014 searchable and private.",
+  "description": "A self-hosted photo and video library with face recognition, semantic search, and phone auto-backup. The consensus #1 show-your-friends app.",
+  "collection": "show-off",
+  "category": "photos",
+  "arch": "both",
+  "placementHint": "prefer-x86",
+  "ramFloorMB": 8192,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/immich-app/immich",
+  "icon": "\ud83d\udcf8",
+  "postInstall": "Open it, create your admin account, install the mobile app, and turn on auto-backup. Runs its ML best on the x86 node."
+}

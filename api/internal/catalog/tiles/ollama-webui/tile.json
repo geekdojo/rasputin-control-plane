@@ -1,0 +1,16 @@
+{
+  "id": "ollama-webui",
+  "name": "Ollama + Open WebUI",
+  "tagline": "Chat with a local LLM your router can't see.",
+  "description": "Run small language models entirely on your own hardware with a friendly chat UI. A real wow at 1\u20133B; a disappointment above that on CPU.",
+  "collection": "show-off",
+  "category": "ai",
+  "arch": "both",
+  "placementHint": "prefer-x86",
+  "ramFloorMB": 4096,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/open-webui/open-webui",
+  "icon": "\ud83e\udd16",
+  "postInstall": "Open it, create your account, then pull a small model (llama3.2:3b) \u2014 bigger models crawl on CPU."
+}

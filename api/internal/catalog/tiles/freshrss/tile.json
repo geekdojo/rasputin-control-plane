@@ -1,0 +1,15 @@
+{
+  "id": "freshrss",
+  "name": "FreshRSS",
+  "tagline": "A fast, self-hosted RSS reader.",
+  "description": "Follow the web on your terms. Lightweight, quick, and great with mobile clients.",
+  "collection": "everyday",
+  "category": "productivity",
+  "arch": "both",
+  "ramFloorMB": 256,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://freshrss.org",
+  "icon": "\ud83d\udcf0",
+  "postInstall": "Open it, create your account, and add a few feeds to get started."
+}

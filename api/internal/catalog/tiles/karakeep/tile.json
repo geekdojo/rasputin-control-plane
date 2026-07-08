@@ -1,0 +1,15 @@
+{
+  "id": "karakeep",
+  "name": "Karakeep",
+  "tagline": "Bookmark everything, with AI tagging.",
+  "description": "A self-hosted 'bookmark everything' app with optional AI tagging. Pairs with the Ollama tile or an API key.",
+  "collection": "everyday",
+  "category": "productivity",
+  "arch": "both",
+  "ramFloorMB": 1024,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/karakeep-app/karakeep",
+  "icon": "\ud83d\udd16",
+  "postInstall": "Open it, create your account; AI tagging needs the Ollama tile or an API key."
+}

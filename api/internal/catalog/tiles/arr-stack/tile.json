@@ -1,0 +1,15 @@
+{
+  "id": "arr-stack",
+  "name": "Media Automation (*arr)",
+  "tagline": "Sonarr + Radarr + Prowlarr + qBittorrent.",
+  "description": "The classic 'media appears by magic' bundle that feeds Jellyfin. Ships with an indexer-config and VPN story.",
+  "collection": "everyday",
+  "category": "media",
+  "arch": "both",
+  "ramFloorMB": 2048,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://wiki.servarr.com",
+  "icon": "\ud83c\udf9e\ufe0f",
+  "postInstall": "Configure your indexers in Prowlarr and connect qBittorrent \u2014 set up a VPN before you do."
+}

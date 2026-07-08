@@ -18,20 +18,31 @@ func TestShippedCatalogLoads(t *testing.T) {
 	if len(all) == 0 {
 		t.Fatal("catalog is empty")
 	}
+	var available, preview int
 	for _, tile := range all {
 		if !ValidDNSLabel(tile.ID) {
 			t.Errorf("tile %q: id is not a DNS label", tile.ID)
 		}
-		if tile.ComposeYAML == "" {
-			t.Errorf("tile %q: empty compose", tile.ID)
-		}
-		if len(tile.Ports) > 0 && tile.PrimaryPort() == 0 {
-			t.Errorf("tile %q: has ports but no primary", tile.ID)
+		if tile.Available() {
+			available++
+			// Installable tiles must ship a runnable stack with a routable port.
+			if tile.ComposeYAML == "" {
+				t.Errorf("tile %q: available but empty compose", tile.ID)
+			}
+			if len(tile.Ports) > 0 && tile.PrimaryPort() == 0 {
+				t.Errorf("tile %q: has ports but no primary", tile.ID)
+			}
+		} else {
+			preview++
 		}
 		if got, ok := c.Get(tile.ID); !ok || got.ID != tile.ID {
 			t.Errorf("tile %q: not retrievable by id", tile.ID)
 		}
 	}
+	if available == 0 {
+		t.Error("catalog has no installable tiles")
+	}
+	t.Logf("catalog: %d available, %d preview", available, preview)
 }
 
 func TestShippedCatalogDisplayOrder(t *testing.T) {
@@ -144,6 +155,20 @@ func TestValidateTile_Guards(t *testing.T) {
 			mutate:  func(f map[string]string) { f["docker-compose.yml"] = "" },
 		},
 		{
+			name:    "bad category",
+			tileErr: "category",
+			mutate: func(f map[string]string) {
+				f["tile.json"] = replaceField(f["tile.json"], `"lan-only"`, `"lan-only", "category": "nonsense"`)
+			},
+		},
+		{
+			name:    "bad status",
+			tileErr: "status",
+			mutate: func(f map[string]string) {
+				f["tile.json"] = replaceField(f["tile.json"], `"lan-only"`, `"lan-only", "status": "live"`)
+			},
+		},
+		{
 			name:    "unknown field rejected",
 			tileErr: "parse",
 			mutate: func(f map[string]string) {
@@ -171,6 +196,32 @@ func TestValidateTile_Guards(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.tileErr)
 			}
 		})
+	}
+}
+
+// A preview tile may omit its compose file entirely and still load (it can't
+// be installed, so the stack + primary-port requirements are waived).
+func TestPreviewTile_LoadsWithoutCompose(t *testing.T) {
+	m := fstest.MapFS{
+		"tiles/soon/tile.json": &fstest.MapFile{Data: []byte(`{
+			"id": "soon", "name": "Soon", "tagline": "Coming soon.",
+			"collection": "everyday", "category": "productivity", "arch": "both",
+			"ramFloorMB": 256, "exposureDefault": "lan-only", "status": "preview"
+		}`)},
+	}
+	c, err := loadFromFS(m)
+	if err != nil {
+		t.Fatalf("preview tile should load without a compose: %v", err)
+	}
+	got, ok := c.Get("soon")
+	if !ok {
+		t.Fatal("preview tile not retrievable")
+	}
+	if got.Available() {
+		t.Error("preview tile should report Available()==false")
+	}
+	if got.ComposeYAML != "" {
+		t.Error("preview tile should have empty compose")
 	}
 }
 

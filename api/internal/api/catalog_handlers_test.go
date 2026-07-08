@@ -89,3 +89,19 @@ func TestCatalog_InstallRejectsBadTarget(t *testing.T) {
 		t.Errorf("unknown tile install: want 404, got %d", w.Code)
 	}
 }
+
+// A preview / coming-soon tile can be viewed but not installed.
+func TestCatalog_InstallRefusesPreviewTile(t *testing.T) {
+	f := newAPIFixture(t)
+	cookie := f.authenticate(t)
+	if err := f.inv.Insert(f.ctx, &proto.Node{
+		ID: "pi-1", Role: proto.RoleCompute, Hostname: "pi", Architecture: "arm64",
+	}); err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+	// immich ships as a preview tile.
+	w := f.do(t, http.MethodPost, "/api/catalog/immich/install", `{"targetNode":"pi-1"}`, cookie)
+	if w.Code != http.StatusConflict {
+		t.Errorf("preview install: want 409, got %d (%s)", w.Code, w.Body.String())
+	}
+}

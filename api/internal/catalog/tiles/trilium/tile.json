@@ -1,0 +1,15 @@
+{
+  "id": "trilium",
+  "name": "Trilium Notes",
+  "tagline": "A personal knowledge base and wiki.",
+  "description": "A hierarchical note-taking app \u2014 great for documenting your homelab. Single container, embedded database.",
+  "collection": "everyday",
+  "category": "productivity",
+  "arch": "both",
+  "ramFloorMB": 256,
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/TriliumNext/Trilium",
+  "icon": "\ud83d\udcd3",
+  "postInstall": "Open it, set your password, and start a note tree."
+}

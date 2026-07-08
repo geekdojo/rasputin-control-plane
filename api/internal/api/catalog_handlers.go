@@ -45,6 +45,10 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "catalog tile not found")
 		return
 	}
+	if !tile.Available() {
+		writeError(w, http.StatusConflict, "this app is a preview and isn't available to install yet")
+		return
+	}
 
 	var req struct {
 		TargetNode string `json:"targetNode"`

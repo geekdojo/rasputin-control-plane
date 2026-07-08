@@ -1,0 +1,16 @@
+{
+  "id": "adsb-ultrafeeder",
+  "name": "ADS-B Feeder",
+  "tagline": "See the planes flying over your house.",
+  "description": "Decode ADS-B with a cheap SDR and watch a live map + 24h heatmap. Feeds the community aggregators and FlightAware.",
+  "collection": "dongle",
+  "category": "radio",
+  "arch": "both",
+  "ramFloorMB": 512,
+  "needsHardware": "rtl-sdr",
+  "exposureDefault": "lan-only",
+  "status": "preview",
+  "website": "https://github.com/sdr-enthusiasts/docker-adsb-ultrafeeder",
+  "icon": "\u2708\ufe0f",
+  "postInstall": "Plug in your RTL-SDR + 1090MHz antenna, then open the map. Antenna placement drives your range."
+}
