@@ -1,9 +1,10 @@
 'use client';
 
-import { Store, UploadCloud, X } from 'lucide-react';
+import { FilePlus2, Store, UploadCloud, X } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
+  createApp,
   deployApp,
   getCatalogTile,
   installCatalogApp,
@@ -27,6 +28,7 @@ import {
   PANEL,
   SectionLabel,
   Select,
+  Textarea,
   fieldStyle,
 } from '../../../components/kit';
 import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
@@ -42,6 +44,12 @@ function ramLabel(mb: number): string {
   return mb >= 1024 ? `${mb % 1024 === 0 ? mb / 1024 : (mb / 1024).toFixed(1)}G RAM` : `${mb}M RAM`;
 }
 
+// A node can host an app only if it has an app-running role AND is reachable.
+// Offline nodes are excluded — deploying to one just times out and fails.
+function targetable(n: Node): boolean {
+  return (n.role === 'compute' || n.role === 'controlplane') && n.status !== 'offline';
+}
+
 // archOK mirrors the api's install gate: a non-"both" tile needs a matching
 // node arch, but an unreported arch ("") is allowed through.
 function archOK(tile: CatalogTile, node: Node): boolean {
@@ -50,11 +58,16 @@ function archOK(tile: CatalogTile, node: Node): boolean {
   return node.architecture === tile.arch;
 }
 
+function nodeOptionLabel(n: Node): string {
+  return `${n.id} (${n.role}${n.architecture ? `, ${n.architecture}` : ''}, ${n.status})`;
+}
+
 export default function AppCatalogPage() {
   const [tiles, setTiles] = useState<CatalogTile[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<CatalogTile | null>(null);
+  const [customOpen, setCustomOpen] = useState(false);
 
   useEffect(() => {
     listCatalog().then(setTiles).catch((e) => setErr(String(e)));
@@ -63,7 +76,7 @@ export default function AppCatalogPage() {
     return () => closeInv();
   }, []);
 
-  const deployTargets = nodes.filter((n) => n.role === 'compute' || n.role === 'controlplane');
+  const deployTargets = nodes.filter(targetable);
 
   return (
     <PageShell>
@@ -95,6 +108,16 @@ export default function AppCatalogPage() {
             </div>
           );
         })}
+
+        {/* Custom — bring-your-own-compose. Consolidates the old Apps-page
+            "Add App" form so all app-adding lives in one place. */}
+        <div style={{ marginBottom: 28 }}>
+          <SectionLabel>CUSTOM</SectionLabel>
+          <Hint style={{ marginTop: -4, marginBottom: 12 }}>Bring your own Docker Compose stack.</Hint>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            <CustomCard onOpen={() => setCustomOpen(true)} />
+          </div>
+        </div>
       </PageBody>
 
       {selected && (
@@ -104,6 +127,7 @@ export default function AppCatalogPage() {
           onClose={() => setSelected(null)}
         />
       )}
+      {customOpen && <CustomDrawer deployTargets={deployTargets} onClose={() => setCustomOpen(false)} />}
     </PageShell>
   );
 }
@@ -162,6 +186,125 @@ function CatalogCard({
   );
 }
 
+function CustomCard({ onOpen }: { onOpen: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        flex: '1 1 280px',
+        maxWidth: 340,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        padding: 14,
+        background: hover ? accentA(0.04) : PANEL,
+        border: `1px dashed ${hover ? accentA(0.35) : HAIR}`,
+        transition: 'background 0.15s, border-color 0.15s',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <FilePlus2 size={16} color={ACCENT} />
+        <span style={{ color: FG, fontSize: 12, fontFamily: MONO, letterSpacing: '0.04em' }}>Custom app</span>
+      </div>
+      <p style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5, margin: 0, minHeight: 30 }}>
+        Paste any Docker Compose stack and deploy it to a node.
+      </p>
+      <div style={{ marginTop: 2 }}>
+        <Btn variant="primary" small onClick={onOpen}>
+          <FilePlus2 size={10} /> NEW CUSTOM APP
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+// Shared drawer chrome so the tile-install and custom-compose flows look
+// identical.
+function Drawer({ title, icon, onClose, children }: { title: string; icon?: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'flex-end', zIndex: 50 }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(560px, 92vw)',
+          height: '100%',
+          background: 'var(--rasp-bg)',
+          borderLeft: `1px solid ${HAIR}`,
+          display: 'flex',
+          flexDirection: 'column',
+          fontFamily: MONO,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', borderBottom: `1px solid ${HAIR}` }}>
+          {icon && <span style={{ fontSize: 18 }}>{icon}</span>}
+          <span style={{ color: FG, fontSize: 12, letterSpacing: '0.06em' }}>{title}</span>
+          <button
+            onClick={onClose}
+            title="Close"
+            style={{ marginLeft: 'auto', background: 'transparent', border: 'none', cursor: 'pointer', color: DIM, display: 'flex' }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Footer shown after an app is declared (install or custom) — offers deploy or
+// a jump to the Apps page.
+function InstalledFooter({ app }: { app: App }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [deployMsg, setDeployMsg] = useState<string | null>(null);
+
+  async function deployNow() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await deployApp(app.id);
+      setDeployMsg('Deploy started — track it on the Apps page.');
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <Hint>
+        Installed as <span style={{ color: FG }}>{app.name}</span> on <span style={{ color: FG }}>{app.targetNode}</span>. It
+        isn&apos;t running yet.
+      </Hint>
+      {deployMsg ? (
+        <>
+          <Hint>{deployMsg}</Hint>
+          <Link href="/apps" style={{ textDecoration: 'none' }}>
+            <Btn variant="primary">GO TO APPS</Btn>
+          </Link>
+        </>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Btn variant="primary" disabled={busy} onClick={deployNow}>
+            <UploadCloud size={11} /> {busy ? 'DEPLOYING…' : 'DEPLOY NOW'}
+          </Btn>
+          <Link href="/apps" style={{ textDecoration: 'none' }}>
+            <Btn>VIEW IN APPS</Btn>
+          </Link>
+        </div>
+      )}
+      {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
+    </>
+  );
+}
+
 function InstallDrawer({
   tile,
   deployTargets,
@@ -177,7 +320,6 @@ function InstallDrawer({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
-  const [deployMsg, setDeployMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (compose === null) {
@@ -193,22 +335,7 @@ function InstallDrawer({
     setBusy(true);
     setErr(null);
     try {
-      const app = await installCatalogApp(tile.id, { targetNode, name });
-      setInstalled(app);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deployNow() {
-    if (!installed) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await deployApp(installed.id);
-      setDeployMsg('Deploy started — track it on the Apps page.');
+      setInstalled(await installCatalogApp(tile.id, { targetNode, name }));
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -219,172 +346,158 @@ function InstallDrawer({
   const noTargets = deployTargets.length === 0;
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.5)',
-        display: 'flex',
-        justifyContent: 'flex-end',
-        zIndex: 50,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 'min(560px, 92vw)',
-          height: '100%',
-          background: 'var(--rasp-bg)',
-          borderLeft: `1px solid ${HAIR}`,
-          display: 'flex',
-          flexDirection: 'column',
-          fontFamily: MONO,
-        }}
-      >
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: '14px 20px',
-            borderBottom: `1px solid ${HAIR}`,
-          }}
-        >
-          {tile.icon && <span style={{ fontSize: 18 }}>{tile.icon}</span>}
-          <span style={{ color: FG, fontSize: 12, letterSpacing: '0.06em' }}>{tile.name.toUpperCase()}</span>
-          <button
-            onClick={onClose}
-            title="Close"
-            style={{ marginLeft: 'auto', background: 'transparent', border: 'none', cursor: 'pointer', color: DIM, display: 'flex' }}
-          >
-            <X size={16} />
-          </button>
+    <Drawer title={tile.name.toUpperCase()} icon={tile.icon} onClose={onClose}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <p style={{ color: FG, fontSize: 11, lineHeight: 1.6, margin: 0 }}>{tile.tagline}</p>
+        {tile.description && <p style={{ color: DIM, fontSize: 10, lineHeight: 1.6, margin: 0 }}>{tile.description}</p>}
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+          <Badge>{ramLabel(tile.ramFloorMB)}</Badge>
+          <Badge>{tile.arch === 'both' ? 'ARM64 + X86' : `${tile.arch.toUpperCase()} ONLY`}</Badge>
+          {tile.placementHint === 'prefer-x86' && <Badge color="#facc15">PREFERS X86</Badge>}
+          <Badge>{tile.exposureDefault.toUpperCase()}</Badge>
+          {tile.needsHardware && <Badge color="#facc15">NEEDS {tile.needsHardware.toUpperCase()}</Badge>}
         </div>
 
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <p style={{ color: FG, fontSize: 11, lineHeight: 1.6, margin: 0 }}>{tile.tagline}</p>
-          {tile.description && (
-            <p style={{ color: DIM, fontSize: 10, lineHeight: 1.6, margin: 0 }}>{tile.description}</p>
-          )}
+        {tile.needsFeedKey && tile.needsFeedKey.length > 0 && (
+          <Hint warn>Needs external API key(s): {tile.needsFeedKey.join(', ')}. Add them after install.</Hint>
+        )}
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-            <Badge>{ramLabel(tile.ramFloorMB)}</Badge>
-            <Badge>{tile.arch === 'both' ? 'ARM64 + X86' : `${tile.arch.toUpperCase()} ONLY`}</Badge>
-            {tile.placementHint === 'prefer-x86' && <Badge color="#facc15">PREFERS X86</Badge>}
-            <Badge>{tile.exposureDefault.toUpperCase()}</Badge>
-            {tile.needsHardware && <Badge color="#facc15">NEEDS {tile.needsHardware.toUpperCase()}</Badge>}
-          </div>
-
-          {tile.needsFeedKey && tile.needsFeedKey.length > 0 && (
-            <Hint warn>Needs external API key(s): {tile.needsFeedKey.join(', ')}. Add them after install.</Hint>
-          )}
-
-          {tile.ports.length > 0 && (
-            <div>
-              <SectionLabel>PORTS</SectionLabel>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {tile.ports.map((p) => (
-                  <Badge key={`${p.name}-${p.published}`} color={p.primary ? ACCENT : DIM}>
-                    {p.name} {p.published}
-                    {p.protocol && p.protocol !== 'tcp' ? `/${p.protocol}` : ''}
-                    {p.primary ? ' ★' : ''}
-                  </Badge>
-                ))}
-              </div>
-              <Hint style={{ marginTop: 6 }}>★ = the port the built-in reverse proxy will front.</Hint>
-            </div>
-          )}
-
+        {tile.ports.length > 0 && (
           <div>
-            <SectionLabel>STACK</SectionLabel>
-            {compose === null ? (
-              <p style={{ color: DIM, fontSize: 10 }}>loading…</p>
-            ) : (
-              <>
-                <pre
-                  style={{
-                    ...fieldStyle,
-                    fontSize: 10,
-                    lineHeight: 1.5,
-                    maxHeight: 200,
-                    overflow: 'auto',
-                    margin: 0,
-                    whiteSpace: 'pre',
-                  }}
-                >
-                  {compose}
-                </pre>
-                <div style={{ marginTop: 6 }}>
-                  <CopyButton value={compose} label="COPY COMPOSE" />
-                </div>
-              </>
-            )}
+            <SectionLabel>PORTS</SectionLabel>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {tile.ports.map((p) => (
+                <Badge key={`${p.name}-${p.published}`} color={p.primary ? ACCENT : DIM}>
+                  {p.name} {p.published}
+                  {p.protocol && p.protocol !== 'tcp' ? `/${p.protocol}` : ''}
+                  {p.primary ? ' ★' : ''}
+                </Badge>
+              ))}
+            </div>
+            <Hint style={{ marginTop: 6 }}>★ = the port the built-in reverse proxy will front.</Hint>
           </div>
-        </div>
+        )}
 
-        {/* Install footer */}
-        <div style={{ borderTop: `1px solid ${HAIR}`, padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {installed ? (
-            <>
-              <Hint>
-                Installed as <span style={{ color: FG }}>{installed.name}</span> on{' '}
-                <span style={{ color: FG }}>{installed.targetNode}</span>. It isn&apos;t running yet.
-              </Hint>
-              {deployMsg ? (
-                <Hint>{deployMsg}</Hint>
-              ) : (
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <Btn variant="primary" disabled={busy} onClick={deployNow}>
-                    <UploadCloud size={11} /> {busy ? 'DEPLOYING…' : 'DEPLOY NOW'}
-                  </Btn>
-                  <Link href="/apps" style={{ textDecoration: 'none' }}>
-                    <Btn>VIEW IN APPS</Btn>
-                  </Link>
-                </div>
-              )}
-              {deployMsg && (
-                <Link href="/apps" style={{ textDecoration: 'none' }}>
-                  <Btn variant="primary">GO TO APPS</Btn>
-                </Link>
-              )}
-              {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
-            </>
-          ) : noTargets ? (
-            <Hint warn>
-              No {tile.arch === 'both' ? 'compute or controlplane' : `${tile.arch}`} node is available to install onto.
-              Register a matching node first.
-            </Hint>
+        <div>
+          <SectionLabel>STACK</SectionLabel>
+          {compose === null ? (
+            <p style={{ color: DIM, fontSize: 10 }}>loading…</p>
           ) : (
             <>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <Input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="app name"
-                  style={{ flex: 1 }}
-                  title="Instance name — must be unique"
-                />
-                <Select value={targetNode} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 180 }}>
-                  {deployTargets.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {n.id} ({n.role}
-                      {n.architecture ? `, ${n.architecture}` : ''})
-                    </option>
-                  ))}
-                </Select>
+              <pre style={{ ...fieldStyle, fontSize: 10, lineHeight: 1.5, maxHeight: 200, overflow: 'auto', margin: 0, whiteSpace: 'pre' }}>
+                {compose}
+              </pre>
+              <div style={{ marginTop: 6 }}>
+                <CopyButton value={compose} label="COPY COMPOSE" />
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <Btn variant="primary" disabled={busy || !name || !targetNode} onClick={install}>
-                  <UploadCloud size={11} /> {busy ? 'INSTALLING…' : 'INSTALL'}
-                </Btn>
-                {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
-              </div>
-              <Hint>Install declares the app; deploy is a separate step so you can review it first.</Hint>
             </>
           )}
         </div>
       </div>
-    </div>
+
+      <div style={{ borderTop: `1px solid ${HAIR}`, padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {installed ? (
+          <InstalledFooter app={installed} />
+        ) : noTargets ? (
+          <Hint warn>
+            No online {tile.arch === 'both' ? 'compute or controlplane' : tile.arch} node is available. Bring a matching node
+            online first.
+          </Hint>
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="app name" style={{ flex: 1 }} title="Instance name — must be unique" />
+              <Select value={targetNode} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 200 }}>
+                {deployTargets.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {nodeOptionLabel(n)}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <Btn variant="primary" disabled={busy || !name || !targetNode} onClick={install}>
+                <UploadCloud size={11} /> {busy ? 'INSTALLING…' : 'INSTALL'}
+              </Btn>
+              {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
+            </div>
+            <Hint>Install declares the app; deploy is a separate step so you can review it first.</Hint>
+          </>
+        )}
+      </div>
+    </Drawer>
+  );
+}
+
+function CustomDrawer({ deployTargets, onClose }: { deployTargets: Node[]; onClose: () => void }) {
+  const [name, setName] = useState('');
+  const [targetNode, setTargetNode] = useState('');
+  const [composeYaml, setComposeYaml] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [installed, setInstalled] = useState<App | null>(null);
+
+  useEffect(() => {
+    if (!targetNode && deployTargets.length > 0) setTargetNode(deployTargets[0].id);
+  }, [deployTargets, targetNode]);
+
+  async function create() {
+    setBusy(true);
+    setErr(null);
+    try {
+      setInstalled(await createApp({ name, targetNode, composeYaml }));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const noTargets = deployTargets.length === 0;
+
+  return (
+    <Drawer title="CUSTOM APP" onClose={onClose}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {installed ? (
+          <InstalledFooter app={installed} />
+        ) : noTargets ? (
+          <Hint warn>No online compute or controlplane node is available. Bring one online first.</Hint>
+        ) : (
+          <>
+            <div>
+              <SectionLabel>NAME + TARGET</SectionLabel>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. nextcloud)" style={{ flex: 1 }} />
+                <Select value={targetNode} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 200 }}>
+                  {deployTargets.map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {nodeOptionLabel(n)}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </div>
+            <div>
+              <SectionLabel>COMPOSE</SectionLabel>
+              <Textarea
+                placeholder={'services:\n  web:\n    image: nginx:alpine\n    ports:\n      - "8080:80"'}
+                value={composeYaml}
+                onChange={(e) => setComposeYaml(e.target.value)}
+                rows={12}
+                style={{ width: '100%' }}
+              />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <Btn variant="primary" disabled={busy || !name || !targetNode || !composeYaml} onClick={create}>
+                <UploadCloud size={11} /> {busy ? 'ADDING…' : 'ADD APP'}
+              </Btn>
+              {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
+            </div>
+            <Hint>Adds the app; deploy is a separate step so you can review it first.</Hint>
+          </>
+        )}
+      </div>
+    </Drawer>
   );
 }
