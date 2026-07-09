@@ -14,5 +14,9 @@ import type { Node } from './types';
 export function accessUrl(node: Node | undefined, targetNodeId: string, port?: number): string | null {
   if (!port) return null;
   const host = node?.hostname || targetNodeId;
-  return `http://${host}.local:${port}`;
+  // Real nodes report a bare node id (no dot) → append .local for mDNS. If the
+  // reported hostname is already qualified (contains a dot, e.g. an FQDN or an
+  // already-.local name), use it as-is rather than producing `host.local.local`.
+  const fqdn = host.includes('.') ? host : `${host}.local`;
+  return `http://${fqdn}:${port}`;
 }

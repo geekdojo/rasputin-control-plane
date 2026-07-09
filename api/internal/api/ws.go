@@ -29,6 +29,16 @@ func (s *Server) bridgeSubject(subjectFilter string) http.HandlerFunc {
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
+		// These endpoints are write-only (server → client), but coder/websocket
+		// only processes incoming control frames — pongs and client close —
+		// while something is reading. CloseRead runs that reader (discarding any
+		// data frames) and cancels ctx when the client goes away. Without it the
+		// keepalive Ping below never receives its pong and times out after 5s,
+		// so every connection dropped ~35s in (30s ping + 5s timeout) with a
+		// 1006 close — the "had to refresh to see the change" bug (bench
+		// 2026-07-09).
+		ctx = c.CloseRead(ctx)
+
 		msgs := make(chan []byte, 128)
 		sub, err := s.nc.Subscribe(subjectFilter, func(m *nats.Msg) {
 			select {
