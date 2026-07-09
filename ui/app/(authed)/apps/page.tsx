@@ -156,6 +156,7 @@ function AppRow({
   onOpenDetail: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const transient = app.lastStatus === 'deploying' || app.lastStatus === 'stopping';
   const canStop = app.lastStatus === 'running' || app.lastStatus === 'deploying' || app.lastStatus === 'failed';
   const canOpen = app.lastStatus === 'running' && !!url;
   // The action that runs `docker compose up` reads DEPLOY the first time and
@@ -197,7 +198,7 @@ function AppRow({
               </Btn>
             </a>
           )}
-          {app.lastStatus !== 'running' && (
+          {!transient && app.lastStatus !== 'running' && (
             <Btn variant="primary" small disabled={busy} onClick={() => onAction('deploy', app)}>
               {started ? (
                 <>

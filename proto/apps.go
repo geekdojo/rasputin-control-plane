@@ -68,6 +68,12 @@ type AppServiceStatus struct {
 type AppChangeType string
 
 const (
+	// Transitional — published the moment a saga starts working, so the UI
+	// reflects the in-progress state immediately instead of looking unresponsive
+	// while the (possibly slow) docker command runs.
+	AppDeploying AppChangeType = "deploying"
+	AppStopping  AppChangeType = "stopping"
+	// Terminal.
 	AppDeployed AppChangeType = "deployed"
 	AppStopped  AppChangeType = "stopped"
 	AppFailed   AppChangeType = "failed"

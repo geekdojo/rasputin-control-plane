@@ -253,9 +253,11 @@ func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		}
 
 		// Mark deploying before we send the rpc so the UI shows the
-		// transition immediately.
+		// transition immediately (event → WS refresh → yellow DEPLOYING badge),
+		// rather than looking unresponsive while the image pull / up runs.
 		now := time.Now().UTC()
 		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusDeploying, "", now)
+		emitChange(nc, app.ID, proto.AppDeploying, proto.AppStatusDeploying, "", now)
 
 		cmd, _ := json.Marshal(proto.AppDeployCmd{
 			AppID:       app.ID,
@@ -313,8 +315,11 @@ func stopPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 			return nil, err
 		}
 
+		// Show STOPPING immediately — docker compose down can take a few
+		// seconds and the button otherwise looks like it did nothing.
 		now := time.Now().UTC()
 		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusStopping, "", now)
+		emitChange(nc, app.ID, proto.AppStopping, proto.AppStatusStopping, "", now)
 
 		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID})
 		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)
@@ -379,6 +384,7 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		sc.Log("info", fmt.Sprintf("stopping %q on %s before delete", app.Name, app.TargetNode))
 		now := time.Now().UTC()
 		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusStopping, "", now)
+		emitChange(nc, app.ID, proto.AppStopping, proto.AppStatusStopping, "", now)
 
 		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID})
 		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)

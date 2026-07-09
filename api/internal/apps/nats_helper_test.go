@@ -200,9 +200,20 @@ func TestStopPush_HappyPath(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
+	// A transitional `stopping` event must fire immediately so the UI reflects
+	// the in-progress state instead of looking unresponsive.
+	stoppingSub, err := nc.SubscribeSync(proto.AppChangeSubject("a", proto.AppStopping))
+	if err != nil {
+		t.Fatalf("stopping sub: %v", err)
+	}
+	defer func() { _ = stoppingSub.Unsubscribe() }()
+
 	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
 	if _, err := stopPush(store, inv, nc)(sc); err != nil {
 		t.Fatalf("stopPush: %v", err)
+	}
+	if _, err := stoppingSub.NextMsg(time.Second); err != nil {
+		t.Errorf("expected a transitional AppStopping event: %v", err)
 	}
 	got, _ := store.Get(ctx, "a")
 	if got.LastStatus != proto.AppStatusStopped {

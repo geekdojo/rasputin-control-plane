@@ -216,7 +216,7 @@ export type AppStatus =
   | 'failed'
   | 'unknown';
 
-export type AppChange = 'deployed' | 'stopped' | 'failed' | 'deleted';
+export type AppChange = 'deploying' | 'stopping' | 'deployed' | 'stopped' | 'failed' | 'deleted';
 
 export interface App {
   id: string;
