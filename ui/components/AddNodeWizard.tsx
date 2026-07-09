@@ -455,12 +455,16 @@ function FirewallSuccessView({
         </div>
       </div>
 
-      {/* Delivery: push the seed to the already-running firewall over SSH. */}
+      {/* Delivery: push the seed to the already-running firewall over SSH.
+          This path needs SSH access — i.e. a firewall that was previously
+          seeded with your key. A brand-new board has no credentials at all
+          (images ship key-less, password auth off) and takes the seed via
+          its FAT partition instead — see the collapsible below. */}
       <SectionLabel>DELIVER IT TO THE FIREWALL</SectionLabel>
       <span style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
-        Your firewall is already running its own image. From the folder where you saved{' '}
-        <Tok>seed.env</Tok>, run this — swap <Tok>{FIREWALL_HOST_PLACEHOLDER}</Tok> for the firewall&apos;s
-        address on your network:
+        Your firewall is already running and enrolled with your SSH key. From the folder where you
+        saved <Tok>seed.env</Tok>, run this — swap <Tok>{FIREWALL_HOST_PLACEHOLDER}</Tok> for the
+        firewall&apos;s address on your network:
       </span>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
         <pre style={{ ...seedBox, flex: 1, minWidth: 0 }}>{command}</pre>
@@ -468,6 +472,7 @@ function FirewallSuccessView({
       </div>
       <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
         It copies the file into place and applies it — the firewall joins immediately, no reboot.
+        No SSH access yet? Use the brand-new-board steps below instead.
       </span>
 
       {/* Fallback: image a brand-new board first. */}
@@ -516,7 +521,13 @@ function FirewallSuccessView({
               ) : (
                 <>Resolving the latest firewall image…</>
               ),
-              <>Boot the board and connect it to your network, then run the delivery command above.</>,
+              <>
+                Before booting, put the seed on the disk: the image&apos;s first partition is a small FAT
+                volume labeled <Tok>RASPUTIN-FW</Tok> — mount it on your computer and copy{' '}
+                <Tok>seed.env</Tok> to its root. (A fresh image has no SSH credentials at all, so this —
+                not the command above — is how the first seed gets on.)
+              </>,
+              <>Connect the board to your network and boot — it seeds itself and joins.</>,
             ].map((step, i) => (
               <li key={i} style={{ color: DIM, fontSize: 11, fontFamily: MONO, lineHeight: 1.5 }}>
                 {step}
