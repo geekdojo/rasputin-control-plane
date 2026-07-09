@@ -16,6 +16,7 @@ import {
   renderFirewallSeed,
   renderNodeSeed,
   suggestNodeId,
+  validateSSHKey,
 } from '../lib/enroll';
 import { Btn, CopyButton, DIM, FG, HAIR, Hint, Input, SectionLabel, Tok } from './kit';
 import { ACCENT, accentA, MONO } from './ui-theme';
@@ -52,11 +53,15 @@ export function AddNodeWizard({
   const [arch, setArch] = useState<NodeArch>('amd64');
   const [nodeId, setNodeId] = useState(() => suggestNodeId(clusterPrefix, 'compute', taken));
   const [edited, setEdited] = useState(false);
+  const [sshKeyInput, setSshKeyInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [minted, setMinted] = useState<MintedBusToken | null>(null);
 
   const isFirewall = role === 'firewall';
+  // Images bake no SSH key (pre-GA vendor-key removal) — the seed line minted
+  // here is the node's only network-SSH path. Optional: blank = console/UI-only.
+  const sshCheck = validateSSHKey(sshKeyInput);
 
   // Re-suggest the id when the role changes, unless the user has hand-edited it.
   // The firewall is x86-only, so selecting it pins the arch to amd64 (the arch
@@ -68,7 +73,7 @@ export function AddNodeWizard({
   }
 
   const collision = taken.has(nodeId.trim());
-  const valid = nodeId.trim().length > 0 && !collision;
+  const valid = nodeId.trim().length > 0 && !collision && !sshCheck.error;
 
   async function generate() {
     if (!valid) return;
@@ -101,13 +106,14 @@ export function AddNodeWizard({
 
       {minted ? (
         isFirewall ? (
-          <FirewallSuccessView nodeId={minted.nodeId} token={minted.token} onClose={onClose} />
+          <FirewallSuccessView nodeId={minted.nodeId} token={minted.token} sshKey={sshCheck.key} onClose={onClose} />
         ) : (
           <SuccessView
             role={role}
             arch={arch}
             nodeId={minted.nodeId}
             token={minted.token}
+            sshKey={sshCheck.key}
             clusterOsVersion={clusterOsVersion}
             onClose={onClose}
           />
@@ -206,6 +212,24 @@ export function AddNodeWizard({
             </Hint>
           )}
 
+          <SectionLabel>SSH KEY (OPTIONAL)</SectionLabel>
+          <Input
+            value={sshKeyInput}
+            onChange={(e) => setSshKeyInput(e.target.value)}
+            placeholder="ssh-ed25519 AAAA… you@laptop"
+            spellCheck={false}
+            style={{ width: '100%', marginBottom: 6 }}
+          />
+          {sshCheck.error ? (
+            <Hint warn style={{ marginBottom: 16 }}>{sshCheck.error}</Hint>
+          ) : (
+            <Hint style={{ marginBottom: 16 }}>
+              Paste your SSH <em>public</em> key (from e.g. <Tok>~/.ssh/id_ed25519.pub</Tok>) to enable
+              key-only SSH to this node. Images ship with no key at all — leave blank and the node is
+              reachable via this UI and its local console only.
+            </Hint>
+          )}
+
           {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -225,6 +249,7 @@ function SuccessView({
   arch,
   nodeId,
   token,
+  sshKey,
   clusterOsVersion,
   onClose,
 }: {
@@ -232,10 +257,11 @@ function SuccessView({
   arch: NodeArch;
   nodeId: string;
   token: string;
+  sshKey: string;
   clusterOsVersion?: string;
   onClose: () => void;
 }) {
-  const seed = renderNodeSeed(role, nodeId, token);
+  const seed = renderNodeSeed(role, nodeId, token, sshKey);
   const image = nodeImageFor(clusterOsVersion, arch);
   const command = flashCommand(seed, arch);
   const archLabel = NODE_ARCHES.find((a) => a.value === arch)?.label ?? arch.toUpperCase();
@@ -371,13 +397,15 @@ function SuccessView({
 function FirewallSuccessView({
   nodeId,
   token,
+  sshKey,
   onClose,
 }: {
   nodeId: string;
   token: string;
+  sshKey: string;
   onClose: () => void;
 }) {
-  const seed = renderFirewallSeed(nodeId, token);
+  const seed = renderFirewallSeed(nodeId, token, sshKey);
   const command = firewallApplyCommand();
   const [showImage, setShowImage] = useState(false);
   const [image, setImage] = useState<FlashableImage | null>(null);

@@ -37,12 +37,37 @@ export function skuForArch(arch: NodeArch): string {
   return arch === 'arm64' ? 'rpi' : 'n100';
 }
 
+// validateSSHKey normalizes + validates an operator-pasted OpenSSH public key
+// destined for the seed's RASPUTIN_SSH_AUTHORIZED_KEY line. Empty is valid —
+// images bake no SSH key at all, so "no key" simply means a console/UI-only
+// node. Mirrors resolveSSHKey in cmd/rasputin-provision, same rules for the
+// same reason: the line is rendered double-quoted and sourced by sh on the
+// node, so a quote/dollar/backslash/backtick would break every seed field.
+export function validateSSHKey(input: string): { key: string; error?: string } {
+  const key = input.trim();
+  if (key === '') return { key: '' };
+  if (/[\n\r]/.test(key)) return { key, error: 'paste a single key line (one key only)' };
+  if (/["$\\`]/.test(key)) return { key, error: 'the key must not contain ", $, \\ or ` characters' };
+  const fields = key.split(/\s+/);
+  if (fields.length < 2 || !/^(ssh-|ecdsa-|sk-)/.test(fields[0])) {
+    return { key, error: 'that doesn’t look like an SSH public key — expected something like "ssh-ed25519 AAAA… you@laptop"' };
+  }
+  return { key };
+}
+
+// sshKeyLine renders the optional seed line ('' when no key). Double-quoted:
+// the seed is sourced by sh and the key value contains spaces.
+function sshKeyLine(sshKey: string): string {
+  return sshKey ? `RASPUTIN_SSH_AUTHORIZED_KEY="${sshKey}"\n` : '';
+}
+
 // renderNodeSeed builds the rasputin-seed.env the new node's firstboot reads.
-// Mirrors buildrootSeed (role / node-id / NATS url / join token).
+// Mirrors buildrootSeed (role / node-id / NATS url / join token / ssh key).
 export function renderNodeSeed(
   role: AddableRole,
   nodeId: string,
   token: string,
+  sshKey: string = '',
   natsUrl: string = DEFAULT_NATS_URL,
 ): string {
   return (
@@ -50,7 +75,8 @@ export function renderNodeSeed(
     `RASPUTIN_NODE_ROLE=${role}\n` +
     `RASPUTIN_NODE_ID=${nodeId}\n` +
     `RASPUTIN_NATS_URL=${natsUrl}\n` +
-    `RASPUTIN_CP_JOIN_TOKEN=${token}\n`
+    `RASPUTIN_CP_JOIN_TOKEN=${token}\n` +
+    sshKeyLine(sshKey)
   );
 }
 
@@ -64,6 +90,7 @@ export function renderNodeSeed(
 export function renderFirewallSeed(
   nodeId: string,
   token: string,
+  sshKey: string = '',
   natsUrl: string = DEFAULT_NATS_URL,
 ): string {
   return (
@@ -71,7 +98,8 @@ export function renderFirewallSeed(
     `RASPUTIN_NODE_ROLE=firewall\n` +
     `RASPUTIN_NODE_ID=${nodeId}\n` +
     `RASPUTIN_NATS_URL=${natsUrl}\n` +
-    `RASPUTIN_CP_JOIN_TOKEN=${token}\n`
+    `RASPUTIN_CP_JOIN_TOKEN=${token}\n` +
+    sshKeyLine(sshKey)
   );
 }
 
