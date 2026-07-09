@@ -1,9 +1,22 @@
 # rasputin-control-plane
 
-Monorepo for the [Rasputin](ARCHITECTURE.md) control plane: API, web UI, and
-node agent. Rasputin is a modular, node-based homelab system — a small
-cluster of compute nodes plus a dedicated firewall node, managed from one web
-UI. This repo is the brain; the bootable images live in
+[![CI](https://github.com/geekdojo/rasputin-control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/geekdojo/rasputin-control-plane/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/geekdojo/rasputin-control-plane?include_prereleases&label=release)](https://github.com/geekdojo/rasputin-control-plane/releases)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-E8590C.svg)](LICENSE)
+
+The brain of **Rasputin** — an open-source homelab cluster system: a small
+fleet of nodes (Raspberry Pi or Intel N100) plus a dedicated firewall node,
+managed from one web UI. Atomic A/B OS updates with automatic rollback,
+passkey-only auth, Docker Compose apps behind a catalog — opinionated where
+you want guidance, open where you want control, and built to work in the
+first hour.
+
+> **Want to run Rasputin, not build it?** Flashable images and a four-step
+> quickstart live in
+> [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases).
+
+This monorepo holds the control plane: API, web UI, and node agent (system
+overview: [ARCHITECTURE.md](ARCHITECTURE.md)). The bootable images live in
 [`rasputin-os`](https://github.com/geekdojo/rasputin-os) (compute/controlplane
 nodes) and
 [`rasputin-openwrt-firewall`](https://github.com/geekdojo/rasputin-openwrt-firewall)
