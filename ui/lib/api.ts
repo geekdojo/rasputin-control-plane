@@ -134,8 +134,9 @@ export async function deleteNode(id: string): Promise<NodeRemovalImpact> {
 // openInventoryWS subscribes to rasputin.inventory.> change events.
 export function openInventoryWS(
   onEvent: (ev: InventoryChangeEvent) => void,
+  onOpen?: () => void,
 ): () => void {
-  return openWS<InventoryChangeEvent>('/ws/inventory', onEvent);
+  return openWS<InventoryChangeEvent>('/ws/inventory', onEvent, onOpen);
 }
 
 // ----- Bus join tokens (node enrollment) ---------------------------------
@@ -477,8 +478,9 @@ export function stopApp(id: string): Promise<Job> {
 
 export function openAppsWS(
   onEvent: (ev: AppChangeEvent) => void,
+  onOpen?: () => void,
 ): () => void {
-  return openWS<AppChangeEvent>('/ws/apps', onEvent);
+  return openWS<AppChangeEvent>('/ws/apps', onEvent, onOpen);
 }
 
 // ----- Updates ------------------------------------------------------------
@@ -798,7 +800,12 @@ export function completeSetup(): Promise<SetupState> {
 // frame as T, calls onEvent. On unexpected close it reconnects with
 // exponential backoff (capped at 30s). Returns a close function that stops
 // reconnects.
-function openWS<T>(path: string, onEvent: (ev: T) => void): () => void {
+//
+// onOpen fires on every (re)connect — callers use it to RE-FETCH the current
+// state, so any events missed while the socket was down (a reconnect gap, a
+// laptop sleep, a proxy idle-timeout) are caught up instead of leaving the UI
+// stale until the next event.
+function openWS<T>(path: string, onEvent: (ev: T) => void, onOpen?: () => void): () => void {
   let ws: WebSocket | null = null;
   let closed = false;
   let backoff = 1000;
@@ -810,6 +817,7 @@ function openWS<T>(path: string, onEvent: (ev: T) => void): () => void {
     ws.onopen = () => {
       console.info(`ws open ${path}`);
       backoff = 1000; // reset
+      onOpen?.();
     };
     ws.onmessage = (m) => {
       try {

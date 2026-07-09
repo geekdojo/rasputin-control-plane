@@ -33,7 +33,16 @@ import {
 } from '../../../components/kit';
 import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
 
-const COLS = ['NAME', 'TARGET', 'STATUS', 'LAST DEPLOYED', ''];
+// Fixed column widths so the table doesn't reflow as per-row action buttons
+// appear/disappear (the actions cell is right-aligned; buttons grow within its
+// fixed width instead of shoving the other columns around).
+const COLS: { label: string; width: string }[] = [
+  { label: 'NAME', width: '22%' },
+  { label: 'TARGET', width: '16%' },
+  { label: 'STATUS', width: '22%' },
+  { label: 'LAST DEPLOYED', width: '14%' },
+  { label: '', width: '26%' },
+];
 
 function statusColor(s: App['lastStatus']): string {
   switch (s) {
@@ -49,6 +58,14 @@ function statusColor(s: App['lastStatus']): string {
   }
 }
 
+// Display label for the status badge. A restart reuses the deploy saga, so the
+// raw status is 'deploying' — but if the app has run before we call it STARTING
+// to match the START button the user just clicked.
+function statusLabel(app: App): string {
+  if (app.lastStatus === 'deploying' && app.lastDeployed) return 'STARTING';
+  return app.lastStatus.toUpperCase();
+}
+
 export default function AppsPage() {
   const [apps, setApps] = useState<App[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
@@ -57,13 +74,30 @@ export default function AppsPage() {
   const [detail, setDetail] = useState<App | null>(null);
 
   useEffect(() => {
-    listApps().then(setApps).catch((e) => setErr(String(e)));
-    listNodes().then(setNodes).catch(() => {});
-    const closeApps = openAppsWS(() => listApps().then(setApps).catch(() => {}));
-    const closeInv = openInventoryWS(() => listNodes().then(setNodes).catch(() => {}));
+    const refreshApps = () => listApps().then(setApps).catch((e) => setErr(String(e)));
+    const refreshNodes = () => listNodes().then(setNodes).catch(() => {});
+    const refreshAll = () => {
+      refreshApps();
+      refreshNodes();
+    };
+    refreshAll();
+    // WS drives instant updates; the onOpen callbacks re-sync on every
+    // (re)connect so a dropped socket can't leave the list stale.
+    const closeApps = openAppsWS(refreshApps, refreshApps);
+    const closeInv = openInventoryWS(refreshNodes, refreshNodes);
+    // Catch a socket that died silently (laptop sleep, proxy idle-timeout —
+    // no close event fires, so onOpen never re-runs): refresh when the tab
+    // becomes visible again, plus a slow backstop poll.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshAll();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    const poll = setInterval(refreshApps, 20_000);
     return () => {
       closeApps();
       closeInv();
+      document.removeEventListener('visibilitychange', onVisible);
+      clearInterval(poll);
     };
   }, []);
 
@@ -111,12 +145,17 @@ export default function AppsPage() {
             .
           </Hint>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+            <colgroup>
+              {COLS.map((c, i) => (
+                <col key={i} style={{ width: c.width }} />
+              ))}
+            </colgroup>
             <thead>
               <tr>
                 {COLS.map((c, i) => (
-                  <th key={c || i} style={thStyle}>
-                    {c}
+                  <th key={c.label || i} style={thStyle}>
+                    {c.label}
                   </th>
                 ))}
               </tr>
@@ -180,8 +219,8 @@ function AppRow({
         </button>
       </td>
       <td style={{ ...tdStyle, color: DIM }}>{app.targetNode}</td>
-      <td style={tdStyle}>
-        <Badge color={statusColor(app.lastStatus)}>{app.lastStatus.toUpperCase()}</Badge>
+      <td style={{ ...tdStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <Badge color={statusColor(app.lastStatus)}>{statusLabel(app)}</Badge>
         {app.lastDetail && (
           <span style={{ color: DIM, fontSize: 9, marginLeft: 8 }} title={app.lastDetail}>
             {app.lastDetail.length > 36 ? app.lastDetail.slice(0, 33) + '…' : app.lastDetail}
@@ -242,7 +281,7 @@ function AppDetail({ app, node, onClose }: { app: App; node?: Node; onClose: () 
     <Drawer title={app.name.toUpperCase()} icon={tile?.icon} onClose={onClose}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <Badge color={statusColor(app.lastStatus)}>{app.lastStatus.toUpperCase()}</Badge>
+          <Badge color={statusColor(app.lastStatus)}>{statusLabel(app)}</Badge>
           <span style={{ color: DIM, fontSize: 10 }}>on {app.targetNode}</span>
         </div>
 
