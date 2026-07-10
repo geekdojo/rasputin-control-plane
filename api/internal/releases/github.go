@@ -10,27 +10,26 @@ import (
 	"time"
 )
 
-// githubPublicSource reads releases from a PUBLIC GitHub repo (the mirror
-// channel, e.g. geekdojo/rasputin-releases) over anonymous HTTPS. Source repos
-// stay private; only signed artifacts are mirrored to the public channel, so
-// no token ever lives on an appliance — bundle signatures (verified by RAUC at
-// install time) gate authenticity, not repo privacy.
+// githubPublicSource reads releases directly from each component's PUBLIC
+// GitHub source repo (e.g. geekdojo/rasputin-os) over anonymous HTTPS — the
+// repo comes from the Component (see ADR-0002; the old rasputin-releases mirror
+// is retired). No token ever lives on an appliance: bundle signatures (verified
+// by RAUC at install time) gate authenticity, not repo privacy.
 type githubPublicSource struct {
 	apiBase string // e.g. https://api.github.com
-	repo    string // e.g. geekdojo/rasputin-releases
 	meta    *http.Client
 	dl      *http.Client
 }
 
-// NewGithubPublicSource builds a Source against repo (owner/name) using the
-// given API base (override for tests/mirrors; default https://api.github.com).
-func NewGithubPublicSource(apiBase, repo string) Source {
+// NewGithubPublicSource builds a Source that reads each component's releases
+// from the component's own source repo, using the given API base (override for
+// a proxy/CDN or tests; default https://api.github.com).
+func NewGithubPublicSource(apiBase string) Source {
 	if apiBase == "" {
 		apiBase = "https://api.github.com"
 	}
 	return &githubPublicSource{
 		apiBase: strings.TrimRight(apiBase, "/"),
-		repo:    repo,
 		// Small JSON calls: bounded total timeout.
 		meta: &http.Client{Timeout: 30 * time.Second},
 		// Large asset downloads (100s of MB): no total timeout; cancellation
@@ -65,8 +64,11 @@ type ghRelease struct {
 }
 
 func (g *githubPublicSource) LatestFor(ctx context.Context, comp Component, channel string) (*ReleaseInfo, error) {
+	if comp.Repo == "" {
+		return nil, fmt.Errorf("component %q has no source repo configured", comp.ID)
+	}
 	var rels []ghRelease
-	if err := g.getJSON(ctx, fmt.Sprintf("%s/repos/%s/releases?per_page=100", g.apiBase, g.repo), &rels); err != nil {
+	if err := g.getJSON(ctx, fmt.Sprintf("%s/repos/%s/releases?per_page=100", g.apiBase, comp.Repo), &rels); err != nil {
 		return nil, err
 	}
 

@@ -14,14 +14,14 @@ func TestFriendlyFetchError(t *testing.T) {
 	// wrapped dial → url.Error, carrying the real host + resolver IP.
 	dnsTimeout := &url.Error{
 		Op:  "Get",
-		URL: "https://api.github.com/repos/geekdojo/rasputin-releases/releases?per_page=100",
+		URL: "https://api.github.com/repos/geekdojo/rasputin-os/releases?per_page=100",
 		Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
 			Err: "i/o timeout", Name: "api.github.com", Server: "127.0.0.53:53", IsTimeout: true,
 		}},
 	}
 	noRoute := &url.Error{
 		Op:  "Get",
-		URL: "https://api.github.com/repos/geekdojo/rasputin-releases/releases?per_page=100",
+		URL: "https://api.github.com/repos/geekdojo/rasputin-os/releases?per_page=100",
 		Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH},
 	}
 

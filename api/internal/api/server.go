@@ -53,11 +53,10 @@ type Server struct {
 	// return 503. releaseChannel is the default channel ("stable" | "dev").
 	releaseSource  releases.Source
 	releaseChannel string
-	// releaseRepo / releaseDownloadBase resolve the public flashable node image
-	// for GET /api/cluster/node-image (the one-command flasher). Repo is
-	// "owner/name"; downloadBase is the asset host (https://github.com),
-	// overridable for tests/mirrors.
-	releaseRepo         string
+	// releaseDownloadBase is the asset host (https://github.com) used to resolve
+	// the public flashable node image for GET /api/cluster/node-image (the
+	// one-command flasher); overridable for tests. The OS source repo itself
+	// comes from the releases registry (ADR-0002).
 	releaseDownloadBase string
 }
 
@@ -71,11 +70,11 @@ func (s *Server) SetReleaseSource(src releases.Source, channel string) {
 	}
 }
 
-// SetReleaseRepo wires the public release repo + asset host used to resolve a
-// new node's flashable image (GET /api/cluster/node-image). main.go calls this
-// at startup; tests point downloadBase at a fake asset server.
-func (s *Server) SetReleaseRepo(repo, downloadBase string) {
-	s.releaseRepo = repo
+// SetReleaseDownloadBase wires the asset host used to resolve a new node's
+// flashable image (GET /api/cluster/node-image); the OS source repo itself
+// comes from the releases registry. main.go calls this at startup; tests point
+// it at a fake asset server.
+func (s *Server) SetReleaseDownloadBase(downloadBase string) {
 	s.releaseDownloadBase = downloadBase
 }
 

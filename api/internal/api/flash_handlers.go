@@ -57,9 +57,10 @@ func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) 
 	if base == "" {
 		base = "https://github.com"
 	}
-	desc, err := releases.PublicNodeImage(r.Context(), http.DefaultClient, base, s.releaseRepo, version, compatible)
+	osComp, _ := releases.ComponentByID("os")
+	desc, err := releases.PublicNodeImage(r.Context(), http.DefaultClient, base, osComp.Repo, version, compatible)
 	if err != nil {
-		log.Printf("cluster node-image (os-%s, %s): %v", version, compatible, err)
+		log.Printf("cluster node-image (os %s, %s): %v", version, compatible, err)
 		writeError(w, http.StatusBadGateway, "couldn't resolve the node image for this cluster's version + architecture")
 		return
 	}
