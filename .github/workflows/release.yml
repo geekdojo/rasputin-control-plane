@@ -102,32 +102,6 @@ jobs:
             $PRERELEASE_FLAG \
             dist/*.tar.gz dist/*.sha256 dist/*.hash
 
-      # Mirror an informational version manifest to the PUBLIC release channel
-      # (geekdojo/rasputin-releases), tag "cp-<version>". Check for Updates shows
-      # the control-plane software version, but it isn't deployed via the channel
-      # (it ships inside the OS image), so we mirror only a tiny manifest.json —
-      # not the binaries. RASPUTIN_RELEASES is an org secret (Contents:write on
-      # rasputin-releases). Idempotent (create-or-clobber).
-      - name: Mirror version to public release channel
-        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.publish == 'true')) }}
-        env:
-          GH_TOKEN: ${{ secrets.RASPUTIN_RELEASES }}
-          TAG: ${{ steps.ver.outputs.tag }}
-        run: |
-          set -eu
-          CHANNEL="${{ steps.ver.outputs.channel }}"
-          PRERELEASE_FLAG=""
-          [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
-          mkdir -p relmirror
-          printf '{"version":"%s","channel":"%s","artifacts":[]}\n' "$TAG" "$CHANNEL" > relmirror/manifest.json
-          tag="cp-${TAG}"
-          gh release create "$tag" --repo geekdojo/rasputin-releases \
-            --title "Rasputin control plane ${TAG}" \
-            --notes "Informational version manifest ($CHANNEL channel). Control-plane software ships inside the OS image; update the OS to update it." \
-            $PRERELEASE_FLAG \
-            relmirror/manifest.json \
-          || gh release upload "$tag" --repo geekdojo/rasputin-releases --clobber relmirror/manifest.json
-
       # Bench dispatch (publish=false) → just keep the artifacts for inspection.
       - name: Upload artifacts (dispatch dry-run)
         if: ${{ github.event_name == 'workflow_dispatch' && !(inputs.publish == true || inputs.publish == 'true') }}
