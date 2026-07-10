@@ -31,8 +31,15 @@ type Component struct {
 	ID    string // stable id used in the API + UI ("os", "fw", "cp")
 	Label string // human label
 
-	// TagPrefix namespaces this component's releases in the public channel
-	// repo, e.g. "os-" for tag "os-2026.06.0-dev.24".
+	// Repo is the PUBLIC GitHub source repo (owner/name) whose Releases hold
+	// this component's builds, read directly over anonymous HTTPS since the
+	// repos went public (ADR-0002 — the rasputin-releases mirror is retired),
+	// e.g. "geekdojo/rasputin-os".
+	Repo string
+	// TagPrefix is the version prefix on this component's release tags within
+	// its own repo, stripped to recover the version. The OS and firewall repos
+	// tag bare CalVer ("2026.07.1"), so it is empty for them; kept for a
+	// component whose native tags carry a prefix.
 	TagPrefix string
 	// Compatible is the hardware-compat string the release manifest's
 	// artifact must match for this component (the n100 SKUs in v1).
@@ -62,20 +69,20 @@ type Component struct {
 // *inside* the OS image (pinned in rasputin-os' package .mk files), so it can
 // never be updated on its own — updating the OS updates it. Presenting it as a
 // peer row with its own status badge implied an action that doesn't exist (and
-// would read "update available" the moment a cp release is mirrored ahead of an
+// would read "update available" the moment a cp release is published ahead of an
 // OS image vendoring it). Instead Check folds the running control-plane version
 // into the OS row as a display-only detail. See ControlPlaneVersion.
 var Components = []Component{
 	{
 		ID: "os", Label: "Rasputin OS",
-		TagPrefix: "os-", Compatible: "rasputin-n100",
+		Repo: "geekdojo/rasputin-os", Compatible: "rasputin-n100",
 		Scheme: SchemeCalVer, Kind: KindRAUC, Deployable: true,
 		CompareRoles: []proto.NodeRole{proto.RoleControlPlane, proto.RoleCompute, proto.RoleStorage},
 		CompareField: "image",
 	},
 	{
 		ID: "fw", Label: "Firewall",
-		TagPrefix: "fw-", Compatible: FirewallCompatible,
+		Repo: "geekdojo/rasputin-openwrt-firewall", Compatible: FirewallCompatible,
 		Scheme: SchemeCalVer, Kind: KindRootfsAB, Deployable: true,
 		CompareRoles: []proto.NodeRole{proto.RoleFirewall},
 		CompareField: "image",

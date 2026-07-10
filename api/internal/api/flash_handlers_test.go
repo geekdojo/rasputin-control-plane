@@ -36,7 +36,7 @@ func TestClusterNodeImage(t *testing.T) {
 	const armSha = "abcdef0123456789"
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/geekdojo/rasputin-releases/releases/download/os-"+version+"/manifest.json",
+	mux.HandleFunc("/geekdojo/rasputin-os/releases/download/"+version+"/manifest.json",
 		func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(releases.Manifest{
 				Version: version,
@@ -50,7 +50,7 @@ func TestClusterNodeImage(t *testing.T) {
 	defer rel.Close()
 
 	f := newAPIFixture(t)
-	f.srv.SetReleaseRepo("geekdojo/rasputin-releases", rel.URL)
+	f.srv.SetReleaseDownloadBase(rel.URL)
 
 	// 503 until a controlplane node has reported its OS version.
 	if rec := f.do(t, http.MethodGet, "/api/cluster/node-image", "", nil); rec.Code != http.StatusServiceUnavailable {
@@ -73,7 +73,7 @@ func TestClusterNodeImage(t *testing.T) {
 	if desc.Version != version || desc.SHA256 != sha || desc.Architecture != "amd64" {
 		t.Fatalf("descriptor = %+v", desc)
 	}
-	if !strings.HasSuffix(desc.URL, "/os-"+version+"/"+img) {
+	if !strings.HasSuffix(desc.URL, "/"+version+"/"+img) {
 		t.Fatalf("url = %q", desc.URL)
 	}
 
@@ -86,7 +86,7 @@ func TestClusterNodeImage(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &armDesc); err != nil {
 		t.Fatalf("decode arm64: %v", err)
 	}
-	if armDesc.SHA256 != armSha || armDesc.Architecture != "arm64" || !strings.HasSuffix(armDesc.URL, "/os-"+version+"/"+armImg) {
+	if armDesc.SHA256 != armSha || armDesc.Architecture != "arm64" || !strings.HasSuffix(armDesc.URL, "/"+version+"/"+armImg) {
 		t.Fatalf("arm64 descriptor = %+v", armDesc)
 	}
 
@@ -102,16 +102,16 @@ func TestClusterFirewallImage(t *testing.T) {
 	const sha = "0badf00ddeadbeef"
 
 	mux := http.NewServeMux()
-	// GithubPublicSource lists releases, then fetches the picked release's
-	// manifest.json from its asset URL.
-	mux.HandleFunc("/repos/geekdojo/rasputin-releases/releases", func(w http.ResponseWriter, r *http.Request) {
+	// GithubPublicSource lists releases from the firewall source repo, then
+	// fetches the picked release's manifest.json from its asset URL.
+	mux.HandleFunc("/repos/geekdojo/rasputin-openwrt-firewall/releases", func(w http.ResponseWriter, r *http.Request) {
 		base := "http://" + r.Host
 		_ = json.NewEncoder(w).Encode([]map[string]any{{
-			"tag_name":   "fw-" + version,
+			"tag_name":   version,
 			"prerelease": true,
 			"assets": []map[string]any{
 				{"name": "manifest.json", "browser_download_url": base + "/fw-manifest"},
-				{"name": img, "browser_download_url": base + "/dl/fw-" + version + "/" + img},
+				{"name": img, "browser_download_url": base + "/dl/" + version + "/" + img},
 			},
 		}})
 	})
@@ -134,7 +134,7 @@ func TestClusterFirewallImage(t *testing.T) {
 		t.Fatalf("expected 503 before release source configured, got %d", rec.Code)
 	}
 
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, "geekdojo/rasputin-releases"), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
 
 	rec := f.do(t, http.MethodGet, "/api/cluster/firewall-image", "", nil)
 	if rec.Code != http.StatusOK {

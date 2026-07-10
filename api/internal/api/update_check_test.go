@@ -21,30 +21,31 @@ func fwRootfsSHA() string { s := sha256.Sum256(fwRootfsFixture); return hex.Enco
 
 // fakeReleaseServer serves a GitHub-Releases-shaped API plus the manifest and
 // bundle assets, so the github public source can be exercised end-to-end with
-// RASPUTIN_RELEASE_API_BASE pointed at it.
+// RASPUTIN_RELEASE_API_BASE pointed at it. Each component is read from its own
+// source repo (ADR-0002), tagged with the bare version — no os-/fw- mirror
+// prefix.
 func fakeReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	var base string // set after the server starts so asset URLs are absolute
 
-	mux.HandleFunc("/repos/geekdojo/rasputin-releases/releases", func(w http.ResponseWriter, r *http.Request) {
-		rels := []map[string]any{
-			{
-				"tag_name": "os-2026.06.0-dev.99", "prerelease": true,
-				"assets": []map[string]any{
-					{"name": "manifest.json", "browser_download_url": base + "/os-manifest"},
-					{"name": "bundle.raspbundle", "browser_download_url": base + "/os-asset"},
-				},
+	mux.HandleFunc("/repos/geekdojo/rasputin-os/releases", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"tag_name": "2026.06.0-dev.99", "prerelease": true,
+			"assets": []map[string]any{
+				{"name": "manifest.json", "browser_download_url": base + "/os-manifest"},
+				{"name": "bundle.raspbundle", "browser_download_url": base + "/os-asset"},
 			},
-			{
-				"tag_name": "fw-2026.07.1-dev.20", "prerelease": true,
-				"assets": []map[string]any{
-					{"name": "manifest.json", "browser_download_url": base + "/fw-manifest"},
-					{"name": "rasputin-fw-n100-2026.07.1-dev.20.rootfs", "browser_download_url": base + "/fw-asset"},
-				},
+		}})
+	})
+	mux.HandleFunc("/repos/geekdojo/rasputin-openwrt-firewall/releases", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"tag_name": "2026.07.1-dev.20", "prerelease": true,
+			"assets": []map[string]any{
+				{"name": "manifest.json", "browser_download_url": base + "/fw-manifest"},
+				{"name": "rasputin-fw-n100-2026.07.1-dev.20.rootfs", "browser_download_url": base + "/fw-asset"},
 			},
-		}
-		_ = json.NewEncoder(w).Encode(rels)
+		}})
 	})
 	mux.HandleFunc("/os-manifest", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(releases.Manifest{
@@ -86,7 +87,7 @@ func TestCheckAndPullUpdate(t *testing.T) {
 	bundle, sha := buildBundleFixture(t, f) // also installs a real root CA on f.srv
 
 	rel := fakeReleaseServer(t, bundle, sha)
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, "geekdojo/rasputin-releases"), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
 
 	// Seed inventory: a controlplane node on an older OS, a firewall node.
 	_ = f.inv.Insert(f.ctx, &proto.Node{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.20", AgentVersion: "v0.8.4"})
@@ -157,7 +158,7 @@ func TestPullFirewall(t *testing.T) {
 	c := f.authenticate(t)
 	bundle, sha := buildBundleFixture(t, f)
 	rel := fakeReleaseServer(t, bundle, sha)
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, "geekdojo/rasputin-releases"), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
 
 	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
 	if rec.Code != http.StatusCreated {

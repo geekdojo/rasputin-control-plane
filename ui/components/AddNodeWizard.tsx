@@ -514,7 +514,7 @@ function FirewallSuccessView({
                 <>
                   Write the latest <Tok>x86-64</Tok> firewall image to the whole disk of the board —{' '}
                   <a href={FIREWALL_RELEASES_URL} target="_blank" rel="noreferrer" style={linkStyle}>
-                    grab the newest <Tok>fw-</Tok> release&apos;s <Tok>-ab.img.gz</Tok>
+                    grab the newest release&apos;s <Tok>-ab.img.gz</Tok>
                   </a>
                   .
                 </>
@@ -583,7 +583,7 @@ function Overlay({ children, onClose }: { children: React.ReactNode; onClose: ()
 // Fallback link when the control plane can't resolve a specific firewall image
 // (no release on the channel yet, or the update channel isn't configured): the
 // public release channel, where the operator can grab the newest firewall build.
-const FIREWALL_RELEASES_URL = 'https://github.com/geekdojo/rasputin-releases/releases';
+const FIREWALL_RELEASES_URL = 'https://github.com/geekdojo/rasputin-openwrt-firewall/releases';
 
 const linkStyle: React.CSSProperties = { color: ACCENT, textDecoration: 'underline' };
 

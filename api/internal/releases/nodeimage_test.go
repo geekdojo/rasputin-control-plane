@@ -14,7 +14,7 @@ func TestPublicNodeImage(t *testing.T) {
 	const sha = "6b88e011e816ae354d62d03957aa55472ccdb2f70c1dd12f31d3ff09e3c2a8c6"
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/geekdojo/rasputin-releases/releases/download/os-"+version+"/manifest.json",
+	mux.HandleFunc("/geekdojo/rasputin-os/releases/download/"+version+"/manifest.json",
 		func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(Manifest{
 				Version: version, Channel: "dev",
@@ -27,7 +27,7 @@ func TestPublicNodeImage(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	desc, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "geekdojo/rasputin-releases", version, "rasputin-n100")
+	desc, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "geekdojo/rasputin-os", version, "rasputin-n100")
 	if err != nil {
 		t.Fatalf("PublicNodeImage: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestPublicNodeImage(t *testing.T) {
 	if desc.SHA256 != sha {
 		t.Errorf("sha256 = %q, want %q", desc.SHA256, sha)
 	}
-	wantURL := srv.URL + "/geekdojo/rasputin-releases/releases/download/os-" + version + "/" + img
+	wantURL := srv.URL + "/geekdojo/rasputin-os/releases/download/" + version + "/" + img
 	if desc.URL != wantURL {
 		t.Errorf("url = %q, want %q", desc.URL, wantURL)
 	}
@@ -46,7 +46,7 @@ func TestPublicNodeImage(t *testing.T) {
 func TestPublicNodeImage_ManifestMissing(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
-	if _, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "geekdojo/rasputin-releases", "2026.06.0-dev.31", "rasputin-n100"); err == nil {
+	if _, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "geekdojo/rasputin-os", "2026.06.0-dev.31", "rasputin-n100"); err == nil {
 		t.Fatal("expected error when the manifest 404s")
 	}
 }
@@ -54,7 +54,7 @@ func TestPublicNodeImage_ManifestMissing(t *testing.T) {
 func TestPublicNodeImage_NoMatchingArtifact(t *testing.T) {
 	const version = "2026.06.0-dev.31"
 	mux := http.NewServeMux()
-	mux.HandleFunc("/r/releases/download/os-"+version+"/manifest.json",
+	mux.HandleFunc("/r/releases/download/"+version+"/manifest.json",
 		func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(Manifest{
 				Version: version,

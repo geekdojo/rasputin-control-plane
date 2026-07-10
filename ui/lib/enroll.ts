@@ -123,12 +123,13 @@ export function firewallApplyCommand(host: string = FIREWALL_HOST_PLACEHOLDER): 
   );
 }
 
-// RELEASES_CHANNEL_URL is the public release channel the node OS images are
-// published to. The add-node wizard links here so a new node is flashed with
-// the *same* build the cluster runs. (Interim: a direct release link. The
-// per-cluster image/storefront delivery is a deferred Phase-2 item —
-// token-provisioning-pipeline §6 — and would replace this URL.)
-const RELEASES_CHANNEL_URL = 'https://github.com/geekdojo/rasputin-releases';
+// OS_RELEASES_URL is the OS source repo whose public Releases hold the node OS
+// images, read directly since the repos went public (ADR-0002). The add-node
+// wizard links here so a new node is flashed with the *same* build the cluster
+// runs. (Interim: a direct release link. The per-cluster image/storefront
+// delivery is a deferred Phase-2 item — token-provisioning-pipeline §6 — and
+// would replace this URL.)
+const OS_RELEASES_URL = 'https://github.com/geekdojo/rasputin-os';
 
 export interface NodeImage {
   version: string;
@@ -148,13 +149,14 @@ export function nodeImageFor(
 ): NodeImage | null {
   const v = (osVersion ?? '').trim();
   if (!v) return null;
-  const tag = `os-${v}`;
+  // The OS source repo tags bare CalVer (ADR-0002 — no os- mirror prefix).
+  const tag = v;
   const asset = `rasputin-os-${skuForArch(arch)}-${v}.img.xz`;
   return {
     version: v,
     asset,
-    downloadUrl: `${RELEASES_CHANNEL_URL}/releases/download/${tag}/${asset}`,
-    releaseUrl: `${RELEASES_CHANNEL_URL}/releases/tag/${tag}`,
+    downloadUrl: `${OS_RELEASES_URL}/releases/download/${tag}/${asset}`,
+    releaseUrl: `${OS_RELEASES_URL}/releases/tag/${tag}`,
   };
 }
 

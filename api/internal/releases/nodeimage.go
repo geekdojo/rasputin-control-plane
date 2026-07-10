@@ -20,11 +20,13 @@ type NodeImageDescriptor struct {
 }
 
 // PublicNodeImage resolves the flashable node image for an EXACT OS version
-// from the public release channel — not "latest": a new node must match the
-// version the cluster currently runs. downloadBase is the asset host
-// (https://github.com), repo is "owner/name", compatible is the artifact SKU
-// ("rasputin-n100"). It fetches the release's manifest.json over anonymous
-// HTTPS and returns the image asset URL + its imageSha256.
+// from the OS source repo's public releases — not "latest": a new node must
+// match the version the cluster currently runs. downloadBase is the asset host
+// (https://github.com), repo is the OS source repo "owner/name"
+// (geekdojo/rasputin-os), compatible is the artifact SKU ("rasputin-n100"). The
+// release is tagged with the bare version (ADR-0002 — no channel-mirror
+// prefix). It fetches the release's manifest.json over anonymous HTTPS and
+// returns the image asset URL + its imageSha256.
 func PublicNodeImage(ctx context.Context, hc *http.Client, downloadBase, repo, version, compatible string) (*NodeImageDescriptor, error) {
 	if version == "" {
 		return nil, fmt.Errorf("no version given")
@@ -32,7 +34,7 @@ func PublicNodeImage(ctx context.Context, hc *http.Client, downloadBase, repo, v
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	tagBase := fmt.Sprintf("%s/%s/releases/download/os-%s", strings.TrimRight(downloadBase, "/"), repo, version)
+	tagBase := fmt.Sprintf("%s/%s/releases/download/%s", strings.TrimRight(downloadBase, "/"), repo, version)
 	manifestURL := tagBase + "/manifest.json"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
@@ -67,5 +69,5 @@ func PublicNodeImage(ctx context.Context, hc *http.Client, downloadBase, repo, v
 			Image:        a.Image,
 		}, nil
 	}
-	return nil, fmt.Errorf("no flashable %q image in manifest for os-%s", compatible, version)
+	return nil, fmt.Errorf("no flashable %q image in manifest for %s", compatible, version)
 }
