@@ -12,8 +12,8 @@ you want guidance, open where you want control, and built to work in the
 first hour.
 
 > **Want to run Rasputin, not build it?** Flashable images and a four-step
-> quickstart live in
-> [`rasputin-releases`](https://github.com/geekdojo/rasputin-releases).
+> quickstart live at
+> [rasputin.geekdojo.com/download](https://rasputin.geekdojo.com/download/).
 
 This monorepo holds the control plane: API, web UI, and node agent (system
 overview: [ARCHITECTURE.md](ARCHITECTURE.md)). The bootable images live in
