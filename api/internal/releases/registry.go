@@ -81,7 +81,7 @@ var Components = []Component{
 		CompareField: "image",
 	},
 	{
-		ID: "fw", Label: "Firewall",
+		ID: "fw", Label: "Rasputin OpenWrt Firewall",
 		Repo: "geekdojo/rasputin-openwrt-firewall", Compatible: FirewallCompatible,
 		Scheme: SchemeCalVer, Kind: KindRootfsAB, Deployable: true,
 		CompareRoles: []proto.NodeRole{proto.RoleFirewall},
