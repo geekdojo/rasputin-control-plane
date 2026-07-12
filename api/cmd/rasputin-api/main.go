@@ -540,23 +540,45 @@ func main() {
 	httpHandler := handler
 	var httpsSrv *http.Server
 	if httpsAddr != "" {
-		leafPaths, err := ensureAPILeaf(meshCA, dataDir)
-		if err != nil {
-			log.Fatalf("rasputin-api: https leaf: %v", err)
-		}
 		httpsSrv = &http.Server{
 			Addr:              httpsAddr,
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 			TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 		}
+		// HTTP demotes to the bootstrap surface right away so the node is
+		// reachable immediately; HTTPS comes up asynchronously once the clock
+		// is trustworthy (below). Minting the leaf must NOT block main() —
+		// this unit is Type=notify with the default ~90s start timeout, and a
+		// no-RTC node may wait tens of seconds for NTP.
+		httpHandler = srv.BootstrapHandler()
 		go func() {
+			// Don't mint the API leaf against an untrusted clock. A no-RTC node
+			// (e.g. Pi 5) boots to a bogus pre-NTP time; minting then anchors
+			// the cert's validity window in the past, so the browser reports an
+			// "expired" (or "not yet valid") certificate even though the image
+			// is fine. Wait — bounded — for systemd-timesyncd to synchronize
+			// first. Bounded so a genuinely offline node (no reachable NTP at
+			// all) still eventually serves HTTPS, degraded and logged loudly.
+			// See provisioning.md "Time sync".
+			synced := waitForTrustworthyClock(ctx, clockGateTimeout)
+			if ctx.Err() != nil {
+				return // shutting down before the clock settled
+			}
+			if !synced {
+				log.Printf("rasputin-api: WARNING — system clock not NTP-synchronized after %s; "+
+					"minting the HTTPS leaf against the current clock. If the UI shows an expired or "+
+					"not-yet-valid certificate, fix time sync (NTP) and restart rasputin-api.", clockGateTimeout)
+			}
+			leafPaths, err := ensureAPILeaf(meshCA, dataDir)
+			if err != nil {
+				log.Fatalf("rasputin-api: https leaf: %v", err)
+			}
 			log.Printf("rasputin-api: https listening on %s (leaf %s)", httpsAddr, leafPaths.CertPath)
 			if err := httpsSrv.ListenAndServeTLS(leafPaths.CertPath, leafPaths.KeyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("rasputin-api: https: %v", err)
 			}
 		}()
-		httpHandler = srv.BootstrapHandler()
 	}
 
 	httpSrv := &http.Server{
@@ -608,6 +630,55 @@ func main() {
 	case <-runnerDone:
 	case <-time.After(5 * time.Second):
 		log.Println("rasputin-api: job runner did not drain in 5s; proceeding to exit")
+	}
+}
+
+// clockGateTimeout bounds how long ensureAPILeaf waits for the wall clock to
+// NTP-synchronize before minting the HTTPS leaf. Kept under the api unit's
+// ~90s Type=notify start timeout headroom — but it runs in the HTTPS
+// goroutine, off the readiness path, so it never trips that timeout anyway.
+const clockGateTimeout = 90 * time.Second
+
+// clockSyncDir / clockSyncMarker locate systemd-timesyncd's synchronization
+// signal. timesyncd touches the marker on its first successful sync; this is
+// the same file time-sync.target / systemd-time-wait-sync key on. Package vars
+// (not consts) so tests can point them at a temp dir.
+var (
+	clockSyncDir    = "/run/systemd/timesync"
+	clockSyncMarker = "/run/systemd/timesync/synchronized"
+)
+
+// waitForTrustworthyClock blocks until systemd-timesyncd reports the wall clock
+// has synchronized (via NTP), ctx is cancelled, or timeout elapses. It returns
+// true only when synchronization was observed. On a host without
+// systemd-timesyncd (every dev run / CI — no /run/systemd/timesync) it returns
+// true immediately: the gate exists solely to stop a no-RTC appliance from
+// minting its TLS leaf against a bogus pre-NTP clock (the "expired cert"
+// failure). The deadline uses the monotonic clock, so an NTP step mid-wait
+// does not distort it.
+func waitForTrustworthyClock(ctx context.Context, timeout time.Duration) bool {
+	if _, err := os.Stat(clockSyncDir); err != nil {
+		return true // not a systemd-timesyncd system; nothing to wait for
+	}
+	if _, err := os.Stat(clockSyncMarker); err == nil {
+		return true // already synchronized
+	}
+	log.Printf("rasputin-api: waiting up to %s for the system clock to NTP-synchronize before minting the HTTPS leaf…", timeout)
+	deadline := time.Now().Add(timeout)
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+			if _, err := os.Stat(clockSyncMarker); err == nil {
+				return true
+			}
+			if !time.Now().Before(deadline) {
+				return false
+			}
+		}
 	}
 }
 
