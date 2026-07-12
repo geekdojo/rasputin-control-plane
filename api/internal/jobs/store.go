@@ -141,6 +141,31 @@ func (s *Store) ListJobsByStatus(ctx context.Context, statuses []Status) ([]*Job
 	return out, rows.Err()
 }
 
+// ListJobsByKind returns the newest `limit` jobs of one kind, newest first.
+// Used by convergence loops that need per-target job history (e.g. mesh
+// enrollment dedup + failure cooldown) without scanning unrelated kinds.
+func (s *Store) ListJobsByKind(ctx context.Context, kind string, limit int) ([]*Job, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, kind, spec, status, created_by, created_at, started_at, finished_at, parent_id, error
+        FROM jobs WHERE kind = ? ORDER BY created_at DESC LIMIT ?`, kind, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Job
+	for rows.Next() {
+		j, err := scanJob(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListJobs(ctx context.Context, limit int) ([]*Job, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100

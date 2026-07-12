@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats-server/v2/server"
@@ -798,6 +799,147 @@ func TestReconcileCompare_DriftSurfaces(t *testing.T) {
 }
 
 // ============================================================================
+// Reconcile: converge_enrollment
+// ============================================================================
+
+// convergeFixture wires the extra stores the converge step needs on top of
+// the base mesh fixture: an inventory store, a jobs store, and a runner with
+// a no-op mesh.enroll_node workflow registered (so Submit succeeds without
+// actually enrolling anything).
+type convergeFixture struct {
+	*meshFixture
+	inv    *inventory.Store
+	jstore *jobs.Store
+	runner *jobs.Runner
+}
+
+func newConvergeFixture(t *testing.T) *convergeFixture {
+	t.Helper()
+	f := newMeshFixture(t)
+	dir := t.TempDir()
+	inv, err := inventory.OpenStore(f.ctx, filepath.Join(dir, "inv.db"))
+	if err != nil {
+		t.Fatalf("inventory.OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = inv.Close() })
+	jst, err := jobs.OpenStore(f.ctx, filepath.Join(dir, "jobs.db"))
+	if err != nil {
+		t.Fatalf("jobs.OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = jst.Close() })
+	runner := jobs.NewRunner(jst, f.nc)
+	runner.Register(jobs.Workflow{Kind: "mesh.enroll_node"})
+	return &convergeFixture{meshFixture: f, inv: inv, jstore: jst, runner: runner}
+}
+
+func (f *convergeFixture) addNode(t *testing.T, id string, role proto.NodeRole, lastSeen time.Time) {
+	t.Helper()
+	if err := f.inv.Insert(f.ctx, &proto.Node{
+		ID: id, Role: role, Hostname: id, FirstSeen: lastSeen, LastSeen: lastSeen,
+	}); err != nil {
+		t.Fatalf("inv.Insert(%s): %v", id, err)
+	}
+}
+
+func (f *convergeFixture) addEnrollJob(t *testing.T, id, nodeID string, status jobs.Status, createdAt time.Time) {
+	t.Helper()
+	spec, _ := json.Marshal(EnrollSpec{NodeID: nodeID})
+	j := &jobs.Job{
+		ID: id, Kind: "mesh.enroll_node", Spec: spec,
+		Status: jobs.StatusQueued, CreatedBy: "test", CreatedAt: createdAt,
+	}
+	if err := f.jstore.CreateJob(f.ctx, j); err != nil {
+		t.Fatalf("CreateJob(%s): %v", id, err)
+	}
+	if status == jobs.StatusFailed {
+		if err := f.jstore.MarkJobFailed(f.ctx, id, "boom", createdAt); err != nil {
+			t.Fatalf("MarkJobFailed(%s): %v", id, err)
+		}
+	}
+}
+
+// submittedEnrolls returns the node ids of auto-enroll jobs the converge
+// step created (excluding jobs the test seeded itself).
+func (f *convergeFixture) submittedEnrolls(t *testing.T) []string {
+	t.Helper()
+	f.runner.Wait()
+	recent, err := f.jstore.ListJobsByKind(f.ctx, "mesh.enroll_node", 100)
+	if err != nil {
+		t.Fatalf("ListJobsByKind: %v", err)
+	}
+	var out []string
+	for _, j := range recent {
+		if j.CreatedBy != "auto-enroll" {
+			continue
+		}
+		var spec EnrollSpec
+		_ = json.Unmarshal(j.Spec, &spec)
+		out = append(out, spec.NodeID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func TestReconcileConverge_EnrollsUnenrolledManagedNodes(t *testing.T) {
+	f := newConvergeFixture(t)
+	now := time.Now().UTC()
+	f.addNode(t, "c01", proto.RoleCompute, now)                 // unenrolled → enroll
+	f.addNode(t, "stor1", proto.RoleStorage, now)               // unenrolled → enroll
+	f.addNode(t, "fw", proto.RoleFirewall, now)                 // unenrolled → enroll
+	f.addNode(t, "cp", proto.RoleControlPlane, now)             // CP self-enrolls at setup → skip
+	f.addNode(t, "c02", proto.RoleCompute, now)                 // already enrolled → skip
+	f.addNode(t, "c03", proto.RoleCompute, now.Add(-time.Hour)) // offline → skip
+	if err := f.store.UpsertDevice(f.ctx, &Device{
+		HSID: "hs-c02", User: "u", Hostname: "c02", Kind: "rasputin",
+		RasputinNodeID: "c02", FirstSeen: now, LastSeen: now,
+	}); err != nil {
+		t.Fatalf("UpsertDevice: %v", err)
+	}
+
+	step := reconcileConvergeEnrollment(f.svc, f.inv, f.jstore, f.runner)
+	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
+		t.Fatalf("converge: %v", err)
+	}
+	got := f.submittedEnrolls(t)
+	want := []string{"c01", "fw", "stor1"}
+	if !slices.Equal(got, want) {
+		t.Errorf("submitted = %v, want %v", got, want)
+	}
+}
+
+func TestReconcileConverge_SkipsInflightAndRecentFailure(t *testing.T) {
+	f := newConvergeFixture(t)
+	now := time.Now().UTC()
+	f.addNode(t, "c10", proto.RoleCompute, now)
+	f.addNode(t, "c11", proto.RoleCompute, now)
+	f.addEnrollJob(t, "job-inflight", "c10", jobs.StatusQueued, now)
+	f.addEnrollJob(t, "job-failed", "c11", jobs.StatusFailed, now.Add(-5*time.Minute))
+
+	step := reconcileConvergeEnrollment(f.svc, f.inv, f.jstore, f.runner)
+	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
+		t.Fatalf("converge: %v", err)
+	}
+	if got := f.submittedEnrolls(t); len(got) != 0 {
+		t.Errorf("submitted = %v, want none (inflight + cooldown)", got)
+	}
+}
+
+func TestReconcileConverge_RetriesAfterCooldown(t *testing.T) {
+	f := newConvergeFixture(t)
+	now := time.Now().UTC()
+	f.addNode(t, "c12", proto.RoleCompute, now)
+	f.addEnrollJob(t, "job-old-fail", "c12", jobs.StatusFailed, now.Add(-enrollRetryCooldown-time.Minute))
+
+	step := reconcileConvergeEnrollment(f.svc, f.inv, f.jstore, f.runner)
+	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
+		t.Fatalf("converge: %v", err)
+	}
+	if got := f.submittedEnrolls(t); !slices.Equal(got, []string{"c12"}) {
+		t.Errorf("submitted = %v, want [c12]", got)
+	}
+}
+
+// ============================================================================
 // Workflows: constructor smoke
 // ============================================================================
 
@@ -806,7 +948,7 @@ func TestWorkflowConstructors_Kinds(t *testing.T) {
 	if wf := ApplyWorkflow(f.svc, nil, f.nc); wf.Kind != "mesh.apply" {
 		t.Errorf("ApplyWorkflow.Kind = %q", wf.Kind)
 	}
-	if wf := ReconcileWorkflow(f.svc, f.nc); wf.Kind != "mesh.reconcile" {
+	if wf := ReconcileWorkflow(f.svc, nil, nil, nil, f.nc); wf.Kind != "mesh.reconcile" {
 		t.Errorf("ReconcileWorkflow.Kind = %q", wf.Kind)
 	}
 	if wf := EnrollNodeWorkflow(f.svc, nil, f.nc); wf.Kind != "mesh.enroll_node" {

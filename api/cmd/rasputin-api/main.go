@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -371,7 +372,7 @@ func main() {
 		SelfNodeID: selfNodeID,
 	}))
 	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
-	runner.Register(mesh.ReconcileWorkflow(meshSvc, busSrv.Conn()))
+	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
 
@@ -413,8 +414,10 @@ func main() {
 		// bench-compute1 2026-06-22; and on the firewall 2026-07-02 once it became a
 		// deployable A/B OTA target — the firewall was previously excluded here).
 		// The DELETE /api/nodes cascade removes the headscale node + device.
-		switch n.Role {
-		case proto.RoleFirewall, proto.RoleCompute, proto.RoleStorage:
+		// This hook is best-effort fast-path only: the mesh.reconcile workflow's
+		// converge_enrollment step retries any node this misses (e.g. one that
+		// registered before Headscale finished bring-up), every reconcile tick.
+		if slices.Contains(mesh.AutoEnrollRoles, n.Role) {
 			spec, _ := json.Marshal(mesh.EnrollSpec{NodeID: n.ID})
 			if _, err := runner.Submit(hookCtx, "mesh.enroll_node", spec, "auto-enroll"); err != nil {
 				log.Printf("rasputin-api: auto mesh-enroll %s: %v", n.ID, err)

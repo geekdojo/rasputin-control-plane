@@ -7,6 +7,7 @@ import (
 	"log"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -193,14 +194,29 @@ func applyRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 
 // ----- mesh.reconcile -----------------------------------------------------
 
+// AutoEnrollRoles are the node roles the control plane enrolls into the mesh
+// automatically — once at first registration (the onNodeAdded hook in main)
+// and convergently on every reconcile tick (converge_enrollment below). The
+// controlplane self-enrolls during setup (POST /api/setup/mesh); user devices
+// are never auto-enrolled.
+var AutoEnrollRoles = []proto.NodeRole{proto.RoleFirewall, proto.RoleCompute, proto.RoleStorage}
+
+// enrollRetryCooldown is how long converge_enrollment waits after a FAILED
+// enroll attempt before retrying that node, so a persistently broken agent
+// produces a failed job every ~cooldown instead of every reconcile tick.
+const enrollRetryCooldown = 30 * time.Minute
+
 // ReconcileWorkflow pulls Headscale's live state, derives an observed
-// hash, compares to intent_hash, and emits drift / in_sync.
-func ReconcileWorkflow(svc *Service, nc *nats.Conn) jobs.Workflow {
+// hash, compares to intent_hash, and emits drift / in_sync. It then
+// converges mesh membership: any managed node in inventory that isn't
+// enrolled gets a mesh.enroll_node job submitted.
+func ReconcileWorkflow(svc *Service, inv *inventory.Store, jstore *jobs.Store, runner *jobs.Runner, nc *nats.Conn) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "mesh.reconcile",
 		Steps: []jobs.WorkflowStep{
 			{Name: "fetch_observed", Timeout: 30 * time.Second, Do: reconcileFetch(svc, nc)},
 			{Name: "compare", Timeout: 2 * time.Second, Do: reconcileCompare(svc, nc)},
+			{Name: "converge_enrollment", Timeout: 10 * time.Second, Do: reconcileConvergeEnrollment(svc, inv, jstore, runner)},
 		},
 	}
 }
@@ -336,6 +352,100 @@ func reconcileCompare(svc *Service, nc *nats.Conn) jobs.DoFn {
 			"intentHash":   state.IntentHash,
 			"observedHash": state.ObservedHash,
 		})
+	}
+}
+
+// reconcileConvergeEnrollment makes mesh membership a converged invariant
+// rather than a fire-once event. The onNodeAdded hook enrolls a node exactly
+// once, at its FIRST inventory registration — so a node that registered
+// before Headscale finished bring-up, or whose enroll job failed, stayed out
+// of the mesh forever with no retry (found on rasputin-local 2026-07-12:
+// 21 of 23 computes unenrolled because the fleet first-registered during
+// initial cluster bring-up). This step runs every reconcile tick and submits
+// mesh.enroll_node for any inventory node in AutoEnrollRoles that:
+//
+//   - has no rasputin device row in mesh_devices (fetch_observed just synced
+//     that table from Headscale, so it reflects live mesh membership),
+//   - is currently online (an enroll RPC to an offline agent just burns the
+//     dispatch timeout; the node converges when it comes back),
+//   - has no enroll job already queued or running, and
+//   - isn't inside enrollRetryCooldown of its last failed attempt.
+func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *jobs.Store, runner *jobs.Runner) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		nodes, err := inv.List(sc.Ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list inventory: %w", err)
+		}
+		devices, err := svc.store.ListDevices(sc.Ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list devices: %w", err)
+		}
+		enrolled := make(map[string]bool, len(devices))
+		for _, d := range devices {
+			if d.Kind == "rasputin" && d.RasputinNodeID != "" {
+				enrolled[d.RasputinNodeID] = true
+			}
+		}
+
+		// One pass over recent enroll jobs (newest first) gives both guards:
+		// nodes with an in-flight enroll and each node's newest terminal job.
+		recent, err := jstore.ListJobsByKind(sc.Ctx, "mesh.enroll_node", 200)
+		if err != nil {
+			return nil, fmt.Errorf("list enroll jobs: %w", err)
+		}
+		inflight := map[string]bool{}
+		lastTerminal := map[string]*jobs.Job{}
+		for _, j := range recent {
+			var spec EnrollSpec
+			if json.Unmarshal(j.Spec, &spec) != nil || spec.NodeID == "" {
+				continue
+			}
+			switch j.Status {
+			case jobs.StatusQueued, jobs.StatusRunning:
+				inflight[spec.NodeID] = true
+			default:
+				if _, seen := lastTerminal[spec.NodeID]; !seen {
+					lastTerminal[spec.NodeID] = j
+				}
+			}
+		}
+
+		var submitted []string
+		skipped := map[string]int{}
+		for _, n := range nodes {
+			if !slices.Contains(AutoEnrollRoles, n.Role) || enrolled[n.ID] {
+				continue
+			}
+			if inventory.ComputeStatus(n.LastSeen) != proto.StatusOnline {
+				skipped["offline"]++
+				continue
+			}
+			if inflight[n.ID] {
+				skipped["inflight"]++
+				continue
+			}
+			if last := lastTerminal[n.ID]; last != nil && last.Status == jobs.StatusFailed &&
+				time.Since(last.CreatedAt) < enrollRetryCooldown {
+				skipped["cooldown"]++
+				continue
+			}
+			spec, _ := json.Marshal(EnrollSpec{NodeID: n.ID})
+			if _, err := runner.Submit(sc.Ctx, "mesh.enroll_node", spec, "auto-enroll"); err != nil {
+				// A single bad submit shouldn't fail the whole reconcile.
+				sc.Log("warn", fmt.Sprintf("converge: submit enroll for %s: %v", n.ID, err))
+				skipped["submit_error"]++
+				continue
+			}
+			submitted = append(submitted, n.ID)
+		}
+
+		if len(submitted) > 0 {
+			sc.Log("info", fmt.Sprintf("converge: enrolling %d unenrolled node(s): %s",
+				len(submitted), strings.Join(submitted, ", ")))
+		} else if len(skipped) > 0 {
+			sc.Log("info", fmt.Sprintf("converge: no enrolls submitted (skipped: %v)", skipped))
+		}
+		return json.Marshal(map[string]any{"submitted": submitted, "skipped": skipped})
 	}
 }
 
