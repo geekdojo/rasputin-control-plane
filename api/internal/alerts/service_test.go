@@ -72,7 +72,7 @@ func newFixture(t *testing.T) *fixture {
 		HasUsers: func(ctx context.Context) (bool, error) { return f.hasUsers, nil },
 	}
 	f.setup = setup.NewService(setupStore, probes, "")
-	f.svc = New(invStore, jobStore, appStore, f.setup, nil, nil)
+	f.svc = New(invStore, jobStore, appStore, f.setup, nil, nil, true)
 	return f
 }
 
@@ -368,6 +368,44 @@ func TestSetupAlerts_CompletedSuppresses(t *testing.T) {
 	}
 	if _, ok := find(alerts, "setup-incomplete"); ok {
 		t.Errorf("setup-incomplete should not fire when setup is complete, got: %+v", alerts)
+	}
+}
+
+// ============================================================================
+// Security alerts
+// ============================================================================
+
+// The fixture constructs the Service with busAuthEnforced=true so the
+// standing bus-auth-off warn doesn't pollute every other test; this test
+// builds a second Service over the same stores with enforcement off and
+// asserts the alert fires there and only there.
+func TestList_BusAuthOffFiresStandingWarn(t *testing.T) {
+	f := newFixture(t)
+	f.markSetupComplete(t)
+
+	open := New(f.inv, f.jobs, f.apps, f.setup, nil, nil, false)
+	alerts, err := open.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got, ok := find(alerts, "bus-auth-off")
+	if !ok {
+		t.Fatalf("expected bus-auth-off alert with enforcement off, got: %+v", alerts)
+	}
+	if got.Severity != proto.AlertWarn {
+		t.Errorf("severity: want warn, got %q", got.Severity)
+	}
+	if got.Source != proto.AlertSourceSecurity {
+		t.Errorf("source: want security, got %q", got.Source)
+	}
+
+	// The enforced fixture Service over the same stores must NOT emit it.
+	enforced, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List (enforced): %v", err)
+	}
+	if _, ok := find(enforced, "bus-auth-off"); ok {
+		t.Errorf("bus-auth-off must not fire when enforcement is on: %+v", enforced)
 	}
 }
 

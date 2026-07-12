@@ -13,6 +13,7 @@
 //   - jobs       → job-failed (warn), one per failed job in the last 24h
 //   - apps       → app-failed (warn), one per app whose last status is failed
 //   - setup      → setup-incomplete (warn), at most one
+//   - security   → bus-auth-off (warn), at most one
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -54,14 +55,22 @@ type Service struct {
 	setup *setup.Service
 	store *Store     // optional — nil means "no persistence; aggregator only"
 	nc    *nats.Conn // optional — nil disables NATS push of alert changes
+
+	// busAuthEnforced mirrors the api's RASPUTIN_BUS_AUTH=enforce state.
+	// When false the aggregator emits a standing bus-auth-off warn — the
+	// default is the alerting state on purpose, so wiring that forgets to
+	// pass the real value produces a visible false warning, not a silently
+	// missing security alert.
+	busAuthEnforced bool
 }
 
 // New constructs an alerts Service. The store + nats.Conn are optional;
 // dev-time wiring may pass nil for both (the aggregator still works).
 // Production wiring passes both so the webhook receiver can persist and
-// the UI's /ws/alerts gets push updates.
-func New(inv *inventory.Store, j *jobs.Store, a *apps.Store, s *setup.Service, store *Store, nc *nats.Conn) *Service {
-	return &Service{inv: inv, jobs: j, apps: a, setup: s, store: store, nc: nc}
+// the UI's /ws/alerts gets push updates. busAuthEnforced is whether the
+// api runs with RASPUTIN_BUS_AUTH=enforce — see securityAlerts.
+func New(inv *inventory.Store, j *jobs.Store, a *apps.Store, s *setup.Service, store *Store, nc *nats.Conn, busAuthEnforced bool) *Service {
+	return &Service{inv: inv, jobs: j, apps: a, setup: s, store: store, nc: nc, busAuthEnforced: busAuthEnforced}
 }
 
 // List returns the current alert snapshot, sorted by severity descending
@@ -90,6 +99,7 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	} else {
 		out = append(out, alerts...)
 	}
+	out = append(out, s.securityAlerts(now)...)
 	if alerts, err := s.ruleAlerts(ctx); err != nil {
 		return nil, fmt.Errorf("alerts: rules: %w", err)
 	} else {
@@ -230,6 +240,30 @@ func (s *Service) setupAlerts(ctx context.Context, now time.Time) ([]proto.Alert
 		Detail:   "Finish the wizard to enable cluster name, identity, and OS update flow.",
 		Since:    now,
 	}}, nil
+}
+
+// securityAlerts surfaces standing security-posture concerns. v0: exactly
+// one — the api running with bus auth off. RASPUTIN_BUS_AUTH defaults to
+// "off" and the only other signal is a single boot-log line, so an open
+// cluster looks perfectly healthy in the UI indefinitely (rasputin-local
+// ran 24 nodes on an open bus unnoticed, found 2026-07-12). A standing
+// warn keeps the posture honest without blocking dev clusters that are
+// deliberately open.
+func (s *Service) securityAlerts(now time.Time) []proto.Alert {
+	if s.busAuthEnforced {
+		return nil
+	}
+	// Like setup-incomplete, Since is "now" — the condition holds since api
+	// start but we don't track that; the UI doesn't render duration for
+	// cluster-wide standing alerts.
+	return []proto.Alert{{
+		ID:       "bus-auth-off",
+		Severity: proto.AlertWarn,
+		Source:   proto.AlertSourceSecurity,
+		Title:    "Node bus authentication is off",
+		Detail:   "The NATS bus accepts any connection — any device on the LAN can join as any node. Provision node join tokens and set RASPUTIN_BUS_AUTH=enforce on the controlplane to close it.",
+		Since:    now,
+	}}
 }
 
 // ruleAlerts pulls every non-dismissed persisted (rule-engine) alert.

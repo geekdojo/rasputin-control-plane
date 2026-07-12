@@ -11,7 +11,7 @@
 // their lifecycle in code — there's no concept of "acking" a stale node.
 
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Bell, Box, CheckCircle2, Layers, Server, Wrench, X } from 'lucide-react';
+import { AlertTriangle, Bell, Box, CheckCircle2, Layers, Server, ShieldAlert, Wrench, X } from 'lucide-react';
 import type { ElementType } from 'react';
 import { ackAlert, dismissAlert, listAlerts, openAlertsWS } from '../../lib/api';
 import type { Alert, AlertSeverity, AlertSource, Node } from '../../lib/types';
@@ -30,6 +30,7 @@ const SOURCE_ICON: Record<AlertSource, ElementType> = {
   job: Layers,
   app: Box,
   setup: Wrench,
+  security: ShieldAlert,
   rule: Bell,
 };
 

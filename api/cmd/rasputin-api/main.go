@@ -515,7 +515,7 @@ func main() {
 		log.Fatalf("rasputin-api: alerts store: %v", err)
 	}
 	defer alertsStore.Close()
-	srv.SetAlertsService(alerts.New(invStore, jobStore, appsStore, setupSvc, alertsStore, busSrv.Conn()))
+	srv.SetAlertsService(alerts.New(invStore, jobStore, appsStore, setupSvc, alertsStore, busSrv.Conn(), busAuthEnforce))
 	if secret := os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"); secret != "" {
 		srv.SetAlertsWebhookSecret(secret)
 		log.Printf("rasputin-api: alerts webhook protected by shared secret")

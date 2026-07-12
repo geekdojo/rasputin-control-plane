@@ -559,9 +559,11 @@ export interface SetupState {
 // (relatedKind, relatedId).
 export type AlertSeverity = 'warn' | 'crit';
 // 'rule' is the source for Slice 1.5 persisted alerts that arrive from
-// vmalert. The aggregator-derived sources (node/job/app/setup) carry
-// their lifecycle in code; rule alerts can be acked/dismissed.
-export type AlertSource = 'node' | 'job' | 'app' | 'setup' | 'rule';
+// vmalert. The aggregator-derived sources (node/job/app/setup/security)
+// carry their lifecycle in code; rule alerts can be acked/dismissed.
+// 'security' is a standing posture concern (v0: bus auth off) — cluster-
+// wide, no drill-through target.
+export type AlertSource = 'node' | 'job' | 'app' | 'setup' | 'security' | 'rule';
 export type AlertRelatedKind = 'node' | 'job' | 'app';
 
 export interface Alert {

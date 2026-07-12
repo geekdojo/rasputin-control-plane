@@ -132,7 +132,7 @@ func NewServer(
 		// store + nats.Conn are wired, merges in vmalert-driven
 		// persisted alerts via the webhook receiver. Dev wiring passes
 		// nil for both; production passes them through main.go.
-		alerts: alerts.New(inv, store, appsStore, setupSvc, nil, nc),
+		alerts: alerts.New(inv, store, appsStore, setupSvc, nil, nc, false),
 		auth:   authSvc, obs: obsStatus, busTokens: busTokens, nc: nc,
 	}
 }

@@ -22,6 +22,11 @@ const (
 	AlertSourceJob   AlertSource = "job"
 	AlertSourceApp   AlertSource = "app"
 	AlertSourceSetup AlertSource = "setup"
+	// AlertSourceSecurity marks standing security-posture concerns the
+	// aggregator derives from the api's own configuration (v0: the bus
+	// running with auth off). Like setup, these describe the cluster as a
+	// whole, not one drill-through object.
+	AlertSourceSecurity AlertSource = "security"
 	// AlertSourceRule is used by alerts that arrive from vmalert (or any
 	// future Alertmanager-compatible rules engine) via the webhook
 	// receiver at /api/alerts/webhook. The aggregator's source-specific

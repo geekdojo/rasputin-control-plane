@@ -15,7 +15,7 @@ import (
 func TestIngestWebhook_PersistsAndExposesViaRuleAlerts(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	svc := New(nil, nil, nil, nil, store, nil)
+	svc := New(nil, nil, nil, nil, store, nil, false)
 
 	payload := AlertmanagerWebhook{
 		Version: "4", Status: "firing",
@@ -69,7 +69,7 @@ func TestIngestWebhook_PersistsAndExposesViaRuleAlerts(t *testing.T) {
 func TestIngestWebhook_CriticalSeverityMappedToCrit(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	svc := New(nil, nil, nil, nil, store, nil)
+	svc := New(nil, nil, nil, nil, store, nil, false)
 	body, _ := json.Marshal(AlertmanagerWebhook{
 		Alerts: []AlertmanagerAlert{{
 			Status:      "firing",
@@ -90,7 +90,7 @@ func TestIngestWebhook_CriticalSeverityMappedToCrit(t *testing.T) {
 // TestIngestWebhook_NoStoreErrors confirms the service errors politely
 // when no store is wired — keeps the failure surface explicit.
 func TestIngestWebhook_NoStoreErrors(t *testing.T) {
-	svc := New(nil, nil, nil, nil, nil, nil)
+	svc := New(nil, nil, nil, nil, nil, nil, false)
 	if _, err := svc.IngestWebhook(context.Background(), []byte(`{}`)); err == nil {
 		t.Fatal("expected error when no store wired")
 	}
@@ -102,7 +102,7 @@ func TestIngestWebhook_NoStoreErrors(t *testing.T) {
 func TestIngestWebhook_FingerprintFallback(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	svc := New(nil, nil, nil, nil, store, nil)
+	svc := New(nil, nil, nil, nil, store, nil, false)
 	body, _ := json.Marshal(AlertmanagerWebhook{
 		Alerts: []AlertmanagerAlert{{
 			Status:   "firing",
@@ -128,7 +128,7 @@ func TestIngestWebhook_FingerprintFallback(t *testing.T) {
 func TestIngestWebhook_Dedup(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	svc := New(nil, nil, nil, nil, store, nil)
+	svc := New(nil, nil, nil, nil, store, nil, false)
 	payload := AlertmanagerWebhook{
 		Alerts: []AlertmanagerAlert{{
 			Status:      "firing",

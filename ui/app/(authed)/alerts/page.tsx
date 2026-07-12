@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { AlertTriangle, Bell, Box, Layers, RefreshCw, Server, Wrench } from 'lucide-react';
+import { AlertTriangle, Bell, Box, Layers, RefreshCw, Server, ShieldAlert, Wrench } from 'lucide-react';
 import type { ElementType } from 'react';
 import { listAlerts, openInventoryWS, openJobsWS } from '../../../lib/api';
 import type { Alert, AlertSeverity, AlertSource } from '../../../lib/types';
@@ -34,6 +34,7 @@ const SOURCE_ICON: Record<AlertSource, ElementType> = {
   job: Layers,
   app: Box,
   setup: Wrench,
+  security: ShieldAlert,
   // 'rule' = vmalert-fired (Slice 1.5). Bell distinguishes it from
   // aggregator-derived sources.
   rule: Bell,
