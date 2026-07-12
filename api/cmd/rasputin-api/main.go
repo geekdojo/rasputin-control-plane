@@ -584,13 +584,31 @@ func main() {
 	<-ctx.Done()
 	log.Println("rasputin-api: shutting down")
 
+	// Hard cap: exit within 20s no matter which teardown step wedges, so we never
+	// sit at systemd's 90s SIGKILL default (the stop job seen on the n100 console).
+	// runner.Wait() below was UNBOUNDED and could block shutdown indefinitely; the
+	// deferred subsystem stops (obs/sched/ids/alerts/bus) are best-effort within
+	// this window. See #8.
+	go func() {
+		time.Sleep(20 * time.Second)
+		log.Println("rasputin-api: shutdown deadline (20s) exceeded; forcing exit")
+		os.Exit(0)
+	}()
+
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	_ = httpSrv.Shutdown(shutCtx)
 	if httpsSrv != nil {
 		_ = httpsSrv.Shutdown(shutCtx)
 	}
-	runner.Wait()
+	// Bound the job-runner drain — a stuck worker must not wedge shutdown (#8).
+	runnerDone := make(chan struct{})
+	go func() { runner.Wait(); close(runnerDone) }()
+	select {
+	case <-runnerDone:
+	case <-time.After(5 * time.Second):
+		log.Println("rasputin-api: job runner did not drain in 5s; proceeding to exit")
+	}
 }
 
 // ensureAPILeaf mints (or reuses — MintLeafToDisk is idempotent with
