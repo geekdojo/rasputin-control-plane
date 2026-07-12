@@ -30,6 +30,26 @@ nodes) and
 picture: node roles, the bus, the job model, updates, the firewall, mesh,
 and observability.
 
+## Screenshots
+
+A 24-node BitScope rack enrolling and coming online — 23 Pi 4 compute nodes
+plus an off-rack Pi 5 control plane, power-on to 24/24 in 121 seconds:
+
+![24 nodes enrolling and coming online](docs/images/rack-load.gif)
+
+The dashboard — the same cluster, all green:
+
+![Dashboard: hexagon node grid, 24/24 online](docs/images/dashboard.png)
+
+Apps are Docker Compose stacks deployed from the catalog to a node you pick:
+
+![Apps view: navidrome and uptime-kuma running](docs/images/apps.png)
+
+Every state-changing action is a Job — expand one and you get its steps and
+the full event stream, replayable after the fact:
+
+![Task view: an app.deploy job expanded to steps and events](docs/images/task-saga.png)
+
 ## What's in here
 
 - `api/` — `rasputin-api`, the Go backend. Embeds NATS + JetStream and
