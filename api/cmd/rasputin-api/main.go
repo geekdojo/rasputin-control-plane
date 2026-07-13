@@ -80,13 +80,24 @@ func main() {
 		natsPort = p
 	}
 
-	// Bus auth (RASPUTIN_BUS_AUTH=off|enforce, default off). Under enforcement,
-	// external agents must present a per-node join token that the in-process
-	// busauth responder validates → mints a subject-scoped JWT; the api's own
-	// connection authenticates as an AuthUser and bypasses the callout. Default
-	// off keeps the bus byte-identical to today until the bench validates the
-	// cutover. See design plan / architecture §5.4.
-	busAuthEnforce := envOr("RASPUTIN_BUS_AUTH", "off") == "enforce"
+	// Bus auth (RASPUTIN_BUS_AUTH=off|enforce). Under enforcement, external
+	// agents must present a per-node join token that the in-process busauth
+	// responder validates → mints a subject-scoped JWT; the api's own connection
+	// authenticates as an AuthUser and bypasses the callout. See architecture §5.4.
+	//
+	// FAIL-CLOSED DEFAULT: enforce unless explicitly disabled with `=off`. Every
+	// node is onboarded with a bound join token (firstboot fails loud without one)
+	// and the controlplane preloads the matching hashes, so enforcement is the
+	// safe default — a matched set has always shipped enforced (rasputin-provision
+	// bakes `=enforce`). The old `off` default was fail-OPEN: a hand-written or
+	// incomplete CP seed that omitted the setting silently degraded to an open bus
+	// with no signal (bit rasputin-local 2026-07-12 — an OTA-test hand-seed left 24
+	// nodes on an unauthenticated bus). Now the only way to an open bus is a
+	// deliberate, visible `=off` (surfaced by the bus-auth-off alert). DEPLOY NOTE:
+	// a cluster already running open should verify token-readiness (dry-run
+	// reconciliation: every live node's token hashes to an active bound record)
+	// before updating to a build carrying this default, or set `=off` explicitly.
+	busAuthEnforce := envOr("RASPUTIN_BUS_AUTH", "enforce") != "off"
 	busCfg := bus.Config{Host: natsHost, Port: natsPort, StoreDir: filepath.Join(dataDir, "nats")}
 	var (
 		busIssuer *busauth.Issuer
@@ -107,7 +118,7 @@ func main() {
 		busCfg.APIPass = apiPass
 		log.Printf("rasputin-api: bus auth ENFORCED (issuer=%s)", busIssuer.PublicKey())
 	} else {
-		log.Printf("rasputin-api: bus auth OFF (set RASPUTIN_BUS_AUTH=enforce to require node join tokens)")
+		log.Printf("rasputin-api: bus auth OFF (explicitly disabled via RASPUTIN_BUS_AUTH=off — the bus accepts any connection; unset it to fail closed)")
 	}
 
 	busSrv, err := bus.Start(ctx, busCfg)

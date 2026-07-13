@@ -243,9 +243,11 @@ func (s *Service) setupAlerts(ctx context.Context, now time.Time) ([]proto.Alert
 }
 
 // securityAlerts surfaces standing security-posture concerns. v0: exactly
-// one — the api running with bus auth off. RASPUTIN_BUS_AUTH defaults to
-// "off" and the only other signal is a single boot-log line, so an open
-// cluster looks perfectly healthy in the UI indefinitely (rasputin-local
+// one — the api running with bus auth off. Bus auth is now fail-closed by
+// default (enforce unless `RASPUTIN_BUS_AUTH=off`), so an open bus is a
+// deliberate opt-out; this alert makes that opt-out visible rather than a
+// single boot-log line, so an open cluster can't look healthy in the UI
+// indefinitely (rasputin-local
 // ran 24 nodes on an open bus unnoticed, found 2026-07-12). A standing
 // warn keeps the posture honest without blocking dev clusters that are
 // deliberately open.
