@@ -246,6 +246,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/setup/mesh", reqd(s.handleSetupMesh))
 	mux.HandleFunc("POST /api/setup/complete", reqd(s.handleSetupComplete))
 
+	// Operator SSH keys — cluster-remembered wizard prefill (public-key
+	// material; authed because it's operator configuration).
+	mux.HandleFunc("GET /api/enroll/operator-keys", reqd(s.handleGetOperatorKeys))
+	mux.HandleFunc("PUT /api/enroll/operator-keys", reqd(s.handlePutOperatorKeys))
+
 	mux.HandleFunc("GET /api/bmc", reqd(s.handleListBMCStates))
 	mux.HandleFunc("GET /api/bmc/{nodeId}/status", reqd(s.handleBMCStatus))
 	mux.HandleFunc("POST /api/bmc/{nodeId}/power/{verb}", reqd(s.handleBMCPower))

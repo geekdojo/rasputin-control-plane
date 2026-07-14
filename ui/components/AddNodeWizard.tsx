@@ -2,7 +2,7 @@
 
 import { ChevronDown, ChevronRight, Cpu, Database, Download, Plus, Shield, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { getFirewallImage, mintBusToken } from '../lib/api';
+import { getFirewallImage, getOperatorKeys, mintBusToken, setOperatorKeys } from '../lib/api';
 import type { FlashableImage, MintedBusToken } from '../lib/types';
 import {
   type AddableRole,
@@ -57,6 +57,35 @@ export function AddNodeWizard({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [minted, setMinted] = useState<MintedBusToken | null>(null);
+  // The cluster-remembered operator key(s): prefill source + the list we
+  // append to on mint. null until fetched (or if the fetch failed — then we
+  // skip the persist rather than risk clobbering the stored list).
+  const [rememberedKeys, setRememberedKeys] = useState<string[] | null>(null);
+  const [prefilled, setPrefilled] = useState(false);
+
+  // Prefill the SSH key from the cluster setting — the cluster has seen the
+  // operator's key on every seed it ever minted, so don't re-ask. Best-effort:
+  // a failed fetch just leaves the field manual, and an operator who already
+  // started typing wins over the prefill.
+  useEffect(() => {
+    let alive = true;
+    getOperatorKeys()
+      .then((ok) => {
+        if (!alive) return;
+        setRememberedKeys(ok.keys);
+        if (ok.captured && ok.keys.length > 0) {
+          setSshKeyInput((cur) => {
+            if (cur !== '') return cur; // operator got there first
+            setPrefilled(true);
+            return ok.keys[0];
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const isFirewall = role === 'firewall';
   // Images bake no SSH key (pre-GA vendor-key removal) — the seed line minted
@@ -84,6 +113,12 @@ export function AddNodeWizard({
       const m = await mintBusToken(role, id);
       setMinted(m);
       onMinted({ id: m.nodeId || id, tokenId: m.id, role });
+      // Remember a newly-seen key for the next enrollment (persist-on-mint).
+      // Best-effort and non-blocking — the mint already succeeded; skipped
+      // when the stored list never loaded (a blind PUT could clobber it).
+      if (sshCheck.key && rememberedKeys && !rememberedKeys.includes(sshCheck.key)) {
+        setOperatorKeys([...rememberedKeys, sshCheck.key]).catch(() => {});
+      }
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -222,6 +257,11 @@ export function AddNodeWizard({
           />
           {sshCheck.error ? (
             <Hint warn style={{ marginBottom: 16 }}>{sshCheck.error}</Hint>
+          ) : prefilled && rememberedKeys?.includes(sshCheck.key) ? (
+            <Hint style={{ marginBottom: 16 }}>
+              Remembered from your earlier enrollments — edit to use a different key for this node,
+              or manage the stored key under <Tok>Settings</Tok>.
+            </Hint>
           ) : (
             <Hint style={{ marginBottom: 16 }}>
               Paste your SSH <em>public</em> key (from e.g. <Tok>~/.ssh/id_ed25519.pub</Tok>) to enable
