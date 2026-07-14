@@ -6,16 +6,20 @@
 //     this once the first-run wizard has completed; the wizard redirects away
 //     when setup is done, so without this an operator who picked the wrong mode
 //     was stuck. Backend: POST /api/setup/mode, same endpoint the wizard uses.)
+//   • Operator SSH key(s) — the cluster-remembered key(s) the Add-node wizard
+//     prefills from. Rotation here is forward-only (future seeds only); it
+//     never re-keys already-enrolled nodes.
 // The Settings icon in the sidebar routes here.
 
-import { Check, Settings as SettingsIcon } from 'lucide-react';
+import { Check, Settings as SettingsIcon, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { PageShell, PageHeader, PageBody, SectionLabel, Hint, DIM, FG, HAIR } from '../../../components/kit';
+import { Btn, PageShell, PageHeader, PageBody, SectionLabel, Hint, Input, Tok, DIM, FG, HAIR } from '../../../components/kit';
 import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
 import { THEMES, useTheme, type ThemeMeta } from '../../../lib/theme';
 import { DeploymentModePicker, MODES } from '../../../components/DeploymentModePicker';
 import { ConfirmModal } from '../../../components/ConfirmModal';
-import { getSetupState, setDeploymentMode } from '../../../lib/api';
+import { getOperatorKeys, getSetupState, setDeploymentMode, setOperatorKeys } from '../../../lib/api';
+import { validateSSHKey } from '../../../lib/enroll';
 import type { DeploymentMode, SetupState } from '../../../lib/types';
 
 export default function SettingsPage() {
@@ -45,8 +49,130 @@ export default function SettingsPage() {
 
         <div style={{ height: 32 }} />
         <DeploymentModeSection />
+
+        <div style={{ height: 32 }} />
+        <OperatorSSHKeySection />
       </PageBody>
     </PageShell>
+  );
+}
+
+// --- Operator SSH key -------------------------------------------------------
+
+function OperatorSSHKeySection() {
+  const [keys, setKeys] = useState<string[] | null>(null);
+  const [captured, setCaptured] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    getOperatorKeys()
+      .then((ok) => {
+        setKeys(ok.keys);
+        setCaptured(ok.captured);
+      })
+      .catch((e) => setErr(String(e)));
+  }, []);
+
+  async function save(next: string[]) {
+    setBusy(true);
+    setErr(null);
+    try {
+      const ok = await setOperatorKeys(next);
+      setKeys(ok.keys);
+      setCaptured(ok.captured);
+      setDraft('');
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const draftCheck = validateSSHKey(draft);
+  const canAdd = draft.trim() !== '' && !draftCheck.error && !(keys ?? []).includes(draftCheck.key);
+
+  return (
+    <>
+      <SectionLabel>OPERATOR SSH KEY</SectionLabel>
+      <Hint style={{ marginBottom: 16 }}>
+        The SSH <em>public</em> key(s) this cluster remembers for you — the Add-node wizard prefills
+        from the first one so you aren&apos;t re-asked on every enrollment. Changes apply to{' '}
+        <em>future</em> enrollments only; nodes already running keep the key they were seeded with.
+      </Hint>
+
+      {keys === null && !err && <Hint>Loading…</Hint>}
+      {err && <Hint warn style={{ marginBottom: 12 }}>{err}</Hint>}
+
+      {keys !== null && (
+        <div style={{ maxWidth: 720 }}>
+          {keys.length === 0 && (
+            <Hint style={{ marginBottom: 12 }}>
+              {captured
+                ? 'No key stored. The wizard won’t prefill until one is added here or used in an enrollment.'
+                : 'No key captured yet — the first Add-node enrollment that uses a key stores it here automatically.'}
+            </Hint>
+          )}
+          {keys.map((k) => (
+            <div
+              key={k}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '8px 10px',
+                border: `1px solid ${HAIR}`,
+                marginBottom: 8,
+              }}
+            >
+              <span
+                style={{
+                  flex: 1,
+                  color: FG,
+                  fontSize: 10,
+                  fontFamily: MONO,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={k}
+              >
+                {k}
+              </span>
+              <button
+                onClick={() => save(keys.filter((x) => x !== k))}
+                disabled={busy}
+                title="Remove this key (future enrollments only)"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, flexShrink: 0 }}
+              >
+                <X size={12} color={DIM} />
+              </button>
+            </div>
+          ))}
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <Input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="ssh-ed25519 AAAA… you@laptop"
+              spellCheck={false}
+              style={{ flex: 1 }}
+            />
+            <Btn variant="primary" small onClick={() => save([...(keys ?? []), draftCheck.key])} disabled={busy || !canAdd}>
+              {busy ? 'SAVING…' : 'ADD KEY'}
+            </Btn>
+          </div>
+          {draft.trim() !== '' && draftCheck.error ? (
+            <Hint warn style={{ marginTop: 6 }}>{draftCheck.error}</Hint>
+          ) : (
+            <Hint style={{ marginTop: 6 }}>
+              Paste a public key line, e.g. from <Tok>~/.ssh/id_ed25519.pub</Tok>.
+            </Hint>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 

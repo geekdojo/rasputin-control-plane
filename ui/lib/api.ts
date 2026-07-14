@@ -790,6 +790,27 @@ export function setupEnrollSelf(): Promise<Job> {
   return jsonFetch<Job>('/api/setup/mesh', { method: 'POST' });
 }
 
+// ----- Operator SSH keys ----------------------------------------------------
+
+// The cluster-remembered operator SSH public key(s) the Add-node wizard
+// prefills from. `captured: false` means never set (nothing to prefill —
+// the wizard remembers whatever the operator enters on the next mint).
+export type OperatorKeys = { keys: string[]; captured: boolean };
+
+export function getOperatorKeys(): Promise<OperatorKeys> {
+  return jsonFetch<OperatorKeys>('/api/enroll/operator-keys');
+}
+
+// Replaces the stored list. An empty list is an explicit "don't prefill"
+// and sticks. Rotation is forward-only: it changes future seeds only.
+export function setOperatorKeys(keys: string[]): Promise<OperatorKeys> {
+  return jsonFetch<OperatorKeys>('/api/enroll/operator-keys', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keys }),
+  });
+}
+
 export function completeSetup(): Promise<SetupState> {
   return jsonFetch<SetupState>('/api/setup/complete', { method: 'POST' });
 }
