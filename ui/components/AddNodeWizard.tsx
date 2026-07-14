@@ -21,9 +21,15 @@ import {
 import { Btn, CopyButton, DIM, FG, HAIR, Hint, Input, SectionLabel, Tok } from './kit';
 import { ACCENT, accentA, MONO } from './ui-theme';
 
-const ROLES: { value: AddableRole; label: string; icon: typeof Cpu; blurb: string }[] = [
+const ROLES: { value: AddableRole; label: string; icon: typeof Cpu; blurb: string; disabled?: boolean }[] = [
   { value: 'compute', label: 'COMPUTE', icon: Cpu, blurb: 'runs apps & workloads' },
-  { value: 'storage', label: 'STORAGE', icon: Database, blurb: 'storage-focused node' },
+  // Storage is design-stage only (geekdojo-brain design/storage) — a
+  // storage-role node gets no storage-specific behavior yet, so the tile is
+  // visible but disabled: the roadmap stays advertised without letting anyone
+  // enroll into a dead end. Flip `disabled` when the storage subsystem lands.
+  // UI-only gate — proto/api/rasputin-provision still accept the role, so
+  // bench minting of storage nodes keeps working.
+  { value: 'storage', label: 'STORAGE', icon: Database, blurb: 'coming soon', disabled: true },
   { value: 'firewall', label: 'FIREWALL', icon: Shield, blurb: 'network edge & security' },
 ];
 
@@ -160,10 +166,13 @@ export function AddNodeWizard({
             {ROLES.map((r) => {
               const Icon = r.icon;
               const sel = role === r.value;
+              const off = !!r.disabled;
               return (
                 <button
                   key={r.value}
-                  onClick={() => pickRole(r.value)}
+                  onClick={() => !off && pickRole(r.value)}
+                  disabled={off}
+                  title={off ? `${r.label.toLowerCase()} nodes are coming soon` : undefined}
                   style={{
                     flex: 1,
                     display: 'flex',
@@ -173,7 +182,8 @@ export function AddNodeWizard({
                     padding: '10px 12px',
                     background: sel ? accentA(0.08) : 'rgba(var(--rasp-fg-rgb),0.03)',
                     border: `1px solid ${sel ? accentA(0.5) : HAIR}`,
-                    cursor: 'pointer',
+                    cursor: off ? 'not-allowed' : 'pointer',
+                    opacity: off ? 0.45 : 1,
                     transition: 'background 0.15s, border-color 0.15s',
                   }}
                 >
