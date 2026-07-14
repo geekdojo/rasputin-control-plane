@@ -163,19 +163,12 @@ if [ "$OS" = "Linux" ]; then
 	[ "/dev/${rootdisk}" = "$DISK" ] && die "refusing to flash $DISK — it backs this computer's root filesystem."
 fi
 
-part_for() { # first partition device of a whole disk
-	if [ "$OS" = "Darwin" ]; then printf '%ss1' "$1"; else
-		case "$1" in *[0-9]) printf '%sp1' "$1";; *) printf '%s1' "$1";; esac
-	fi
-}
-PART="$(part_for "$DISK")"
-
 # --- confirm ------------------------------------------------------------------
 DISK_DESC="$(list_disks | awk -F'\t' -v d="$DISK" '$1==d{print $2"  "$3}')"
 say ""
 warn "About to ${BLD}ERASE ALL DATA${RST}${YEL} on ${BLD}${DISK}${RST}${YEL}  ${DISK_DESC}${RST}"
 say   "        and flash Rasputin OS ${IMG_VERSION}, seeded as ${NODE_ID} (${NODE_ROLE})."
-if [ "${RASPUTIN_DRY_RUN:-}" = "1" ]; then info "DRY RUN — stopping before any write. Disk=$DISK Part=$PART Image=$IMG_URL"; exit 0; fi
+if [ "${RASPUTIN_DRY_RUN:-}" = "1" ]; then info "DRY RUN — stopping before any write. Disk=$DISK Image=$IMG_URL"; exit 0; fi
 if [ "${RASPUTIN_ASSUME_YES:-}" != "1" ]; then
 	short="$(basename "$DISK")"
 	ans="$(ask "Type ${BLD}${short}${RST} to confirm (anything else aborts): ")"
@@ -214,36 +207,72 @@ if [ "$OS" = "Darwin" ]; then diskutil unmountDisk "$DISK" >/dev/null 2>&1 || tr
 	sleep 2
 fi
 
-# --- write the seed onto the boot FAT, then READ IT BACK ----------------------
+# --- locate the seed FAT on the flashed disk — BY VOLUME LABEL, never by number
+# The seed volume is the FAT labeled RASPUTIN-OS. Its partition NUMBER differs
+# by board (rpi: p1 "selector"; n100: p2 — p1 is the hidden ESP), and the OS
+# mounts it by label, so number-guessing strands the node: a seed written to
+# the ESP verifies clean but firstboot only ever sees the real seed volume's
+# baked blank template (bit the bootstrap.sh bench runs, 2026-07-14).
+seed_part_for() { # <disk> -> partition device carrying the RASPUTIN-OS FAT
+	if [ "$OS" = "Darwin" ]; then
+		local id vn
+		for id in $(diskutil list "$1" 2>/dev/null | awk '{print $NF}' | grep "^${1#/dev/}s[0-9]*$"); do
+			vn="$(diskutil info "/dev/$id" 2>/dev/null | awk -F': *' '/Volume Name/{print $2; exit}')"
+			[ "$vn" = "RASPUTIN-OS" ] && { printf '/dev/%s\n' "$id"; return 0; }
+		done
+		return 1
+	else
+		lsblk -lnpo NAME,LABEL "$1" 2>/dev/null | awk '$2=="RASPUTIN-OS"{print $1; exit}' | grep . || return 1
+	fi
+}
+PART=""
+for attempt in 1 2 3 4 5; do
+	PART="$(seed_part_for "$DISK" || true)"
+	[ -n "$PART" ] && break
+	sleep 1   # partition scan can lag the flash by a moment
+done
+[ -n "$PART" ] || die "no RASPUTIN-OS volume found on $DISK after flashing — can't place the seed. (Unexpected image layout? Re-run, and if it persists check the control plane's release.)"
+info "Seed volume: ${PART} (RASPUTIN-OS)"
+
+# --- write the seed onto the seed FAT, then READ IT BACK ----------------------
 SEED_FILE="$TMP/rasputin-seed.env"; printf '%s' "$SEED" > "$SEED_FILE"
 READBACK="$TMP/readback.env"
 write_and_verify_seed() {
-	if have mcopy; then
-		# Block-level write (no FS cache between us and the medium — the safe path).
-		[ "$OS" = "Darwin" ] && diskutil unmount "$PART" >/dev/null 2>&1 || umount "$PART" 2>/dev/null || true
+	if [ "$OS" = "Darwin" ]; then
+		# macOS: ALWAYS write through the kernel FS (mount-dance), never mcopy
+		# against the raw device. macOS auto-mounts the freshly-flashed FAT
+		# asynchronously seconds after dd; a raw-device write that races that
+		# mount verifies clean on read-back and is then UN-WRITTEN at eject,
+		# when the kernel flushes its stale cached FAT metadata over it.
+		# Writing via diskutil mount keeps every byte cache-coherent; the
+		# UNMOUNT + FRESH-MOUNT read-back still defeats the write cache.
+		local mp="$TMP/mnt"; mkdir -p "$mp"
+		diskutil unmount "$PART" >/dev/null 2>&1 || true   # clear any automount first
+		diskutil mount -mountPoint "$mp" "$PART" >/dev/null 2>&1 || return 1
+		cp "$SEED_FILE" "$mp/rasputin-seed.env" || return 1; sync
+		diskutil unmount "$mp" >/dev/null 2>&1 || return 1
+		diskutil mount -mountPoint "$mp" "$PART" >/dev/null 2>&1 || return 1
+		cp "$mp/rasputin-seed.env" "$READBACK" 2>/dev/null || true
+		diskutil unmount "$mp" >/dev/null 2>&1 || true
+	elif have mcopy; then
+		# Linux + mtools: block-level write (no FS cache between us and the
+		# medium). Headless Linux doesn't automount, so the macOS race above
+		# doesn't apply; a desktop automounter would reintroduce it, so make
+		# sure nothing has grabbed the partition first.
+		umount "$PART" 2>/dev/null || true
 		mcopy -o -i "$PART" "$SEED_FILE" ::rasputin-seed.env || return 1
 		rm -f "$READBACK"
 		mcopy -n -i "$PART" ::rasputin-seed.env "$READBACK" || return 1
 	else
-		# Mount-dance fallback: write, sync, UNMOUNT, then MOUNT FRESH to read
-		# back — a fresh mount reads from the medium, defeating any write cache
-		# (the macOS FAT flush trap that motivated this whole script).
+		# Linux without mtools: same mount-dance — write, sync, UNMOUNT, then
+		# MOUNT FRESH to read back from the medium.
 		local mp="$TMP/mnt"; mkdir -p "$mp"
-		if [ "$OS" = "Darwin" ]; then
-			diskutil mount -mountPoint "$mp" "$PART" >/dev/null 2>&1 || return 1
-			cp "$SEED_FILE" "$mp/rasputin-seed.env" || return 1; sync
-			diskutil unmount "$mp" >/dev/null 2>&1 || return 1
-			diskutil mount -mountPoint "$mp" "$PART" >/dev/null 2>&1 || return 1
-			cp "$mp/rasputin-seed.env" "$READBACK" 2>/dev/null || true
-			diskutil unmount "$mp" >/dev/null 2>&1 || true
-		else
-			mount "$PART" "$mp" || return 1
-			cp "$SEED_FILE" "$mp/rasputin-seed.env" || return 1; sync
-			umount "$mp" || return 1
-			mount "$PART" "$mp" || return 1
-			cp "$mp/rasputin-seed.env" "$READBACK" 2>/dev/null || true
-			umount "$mp" || true
-		fi
+		mount "$PART" "$mp" || return 1
+		cp "$SEED_FILE" "$mp/rasputin-seed.env" || return 1; sync
+		umount "$mp" || return 1
+		mount "$PART" "$mp" || return 1
+		cp "$mp/rasputin-seed.env" "$READBACK" 2>/dev/null || true
+		umount "$mp" || true
 	fi
 	return 0
 }
