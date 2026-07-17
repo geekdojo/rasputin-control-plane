@@ -926,3 +926,53 @@ func TestConfigHash_StableForSameContent(t *testing.T) {
 		t.Error("configHash did not change when content changed")
 	}
 }
+
+// Loki runs as uid 10001 and must write its bind-mounted /loki dir. The api
+// creates that dir as root at 0755, so on a real appliance (native Docker,
+// real uid enforcement) Loki can't write it and dies before binding :3100 —
+// a bare "connection refused" on the health check. Docker/Rancher Desktop
+// mask this via VM uid remapping, so it only surfaced on the bench. Grafana
+// (uid 472) had the 0o777 workaround since Slice 1.4; Loki (Slice 1.3) was
+// missed. Assert BOTH non-root data dirs are world-writable.
+func TestPrepareHostDirs_NonRootDataDirsAreWritable(t *testing.T) {
+	dir := t.TempDir()
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: dir})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if err := sup.prepareHostDirs(); err != nil {
+		t.Fatalf("prepareHostDirs: %v", err)
+	}
+	for _, d := range []string{lokiDataDir, grafanaDataDir} {
+		info, err := os.Stat(filepath.Join(dir, d))
+		if err != nil {
+			t.Fatalf("stat %s: %v", d, err)
+		}
+		// Other-write is the bit that lets a non-root container uid write a
+		// root-owned host mount.
+		if info.Mode().Perm()&0o002 == 0 {
+			t.Errorf("%s mode = %o; want other-writable (0o002 set) so a non-root container user can write it", d, info.Mode().Perm())
+		}
+	}
+}
+
+// When Loki is disabled there's no loki-data dir to loosen — don't create or
+// chmod one (it would be dead state, and the chmod would fail on a missing
+// path now that the error is checked).
+func TestPrepareHostDirs_NoLokiDirWhenDisabled(t *testing.T) {
+	dir := t.TempDir()
+	f := false
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:   dir,
+		EnableLoki: &f,
+	})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if err := sup.prepareHostDirs(); err != nil {
+		t.Fatalf("prepareHostDirs: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, lokiDataDir)); !os.IsNotExist(err) {
+		t.Errorf("loki-data dir exists with Loki disabled (err=%v); want absent", err)
+	}
+}

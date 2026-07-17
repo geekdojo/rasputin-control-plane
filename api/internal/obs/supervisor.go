@@ -588,12 +588,37 @@ func (s *DockerComposeSupervisor) prepareHostDirs() error {
 			return fmt.Errorf("obs supervisor: mkdir %s: %w", p, err)
 		}
 	}
-	// Grafana wants the data dir owned by uid 472 (grafana user). Trying
-	// to chown to a specific uid would break tests + cross-platform; we
-	// chmod 0o777 instead, which is fine for a homelab-scope dir that's
-	// never on a shared filesystem.
+	// Data dirs a NON-ROOT container user must write to.
+	//
+	// Docker bind-mounts preserve host ownership. The api creates these dirs
+	// as its own user (root on the appliance) at 0755, but these images run
+	// as fixed non-root uids — grafana=472, loki=10001 — so a root-owned 0755
+	// dir denies them write and the container crashes at boot. Loki's failure
+	// mode is a bare "connection refused" on :3100 because it dies before
+	// binding.
+	//
+	// This only bites on a REAL appliance: Docker/Rancher Desktop mask it via
+	// the VM's uid remapping, so a dev box (and CI) never sees it. It cost a
+	// bench cycle 2026-07-17 — Loki was the one obs service that had never run
+	// on real hardware until the UI toggle made obs reachable, and it went
+	// straight into this. Grafana had the workaround since Slice 1.4; Loki
+	// (Slice 1.3) was missed because nothing exercised it on native Docker.
+	//
+	// chmod 0o777 rather than chown to a specific uid: chown would break tests
+	// and differ per platform, and this is a homelab-scope local dir that's
+	// never on a shared filesystem. Any future sidecar with a writable data
+	// dir and a non-root user belongs in this list.
+	nonRootDataDirs := []string{}
 	if s.grafanaEnabled() {
-		_ = os.Chmod(filepath.Join(s.cfg.StateDir, grafanaDataDir), 0o777)
+		nonRootDataDirs = append(nonRootDataDirs, grafanaDataDir)
+	}
+	if s.lokiEnabled() {
+		nonRootDataDirs = append(nonRootDataDirs, lokiDataDir)
+	}
+	for _, d := range nonRootDataDirs {
+		if err := os.Chmod(filepath.Join(s.cfg.StateDir, d), 0o777); err != nil {
+			return fmt.Errorf("obs supervisor: chmod %s writable for non-root container: %w", d, err)
+		}
 	}
 	return nil
 }
