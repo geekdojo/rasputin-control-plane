@@ -3,6 +3,8 @@ package obs
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -114,6 +116,25 @@ type DockerComposeSupervisorConfig struct {
 	// year of 10s samples is still small.
 	VMRetention string
 
+	// VMMinFreeDiskSpace is the `-storage.minFreeDiskSpaceBytes` flag.
+	// Once free space on the partition drops below it, VM stops accepting
+	// new samples rather than filling the disk. Defaults to "2GB"; accepts
+	// VM's size suffixes (KB/MB/GB/TB, KiB/MiB/GiB/TiB).
+	//
+	// This is *back-pressure, not eviction* — old samples are kept and new
+	// ones are refused. That's the deliberate trade: a blind metrics store
+	// is recoverable, a wedged SQLite DB is an outage.
+	//
+	// Note this is NOT the size-cap storage.md §5 originally specified. That
+	// policy called for `-retentionSize`, which does not exist in
+	// VictoriaMetrics OSS at any version (it's Prometheus's
+	// --storage.tsdb.retention.size). Free-space reservation turns out to be
+	// the better fit anyway: a per-directory cap would only bound VM's own
+	// footprint, whereas this watches the whole shared partition — so
+	// bundles, app volumes and Docker images all count toward the headroom
+	// it defends.
+	VMMinFreeDiskSpace string
+
 	// AlloyImage overrides the Grafana Alloy image reference. Defaults
 	// to the pinned upstream tag. Alloy lives in the same compose stack
 	// as VM (Slice 1.2 onward) and remote-writes container + self
@@ -143,6 +164,18 @@ type DockerComposeSupervisorConfig struct {
 	// (push + query). Defaults to "127.0.0.1:3100"; container listens
 	// on 3100 internally.
 	LokiListenAddr string
+
+	// LokiRetention is how long log lines are kept — rendered into
+	// limits_config.retention_period and enforced by the compactor.
+	// Defaults to "720h" (30d). Must be a Go duration in hours or larger;
+	// Loki rejects retention below 24h.
+	//
+	// Before this existed Loki ran with no retention at all and kept every
+	// line forever, which made it the largest unbounded tenant on the
+	// controlplane's shared partition. Loki has no free-space guard (no
+	// equivalent of VM's -storage.minFreeDiskSpaceBytes), so this plus the
+	// 85% DiskAlmostFull alert is the entire defense — see storage.md §5.
+	LokiRetention string
 
 	// EnableLoki toggles the Loki service + Alloy's log-shipping
 	// components. Default true. Off lets operators run a metrics-only
@@ -230,15 +263,38 @@ type DockerComposeSupervisorConfig struct {
 }
 
 const (
-	defaultProjectName     = "rasputin-obs"
-	defaultVMImage         = "victoriametrics/victoria-metrics:v1.103.0"
-	defaultVMListenAddr    = "127.0.0.1:8428"
-	defaultVMRetention     = "1y"
-	defaultAlloyImage      = "grafana/alloy:v1.4.2"
-	defaultAlloyListenAddr = "127.0.0.1:12345"
-	defaultLokiImage       = "grafana/loki:3.4.1"
-	defaultLokiListenAddr  = "127.0.0.1:3100"
-	defaultGrafanaImage    = "grafana/grafana:11.5.1"
+	defaultProjectName  = "rasputin-obs"
+	defaultVMImage      = "victoriametrics/victoria-metrics:v1.103.0"
+	defaultVMListenAddr = "127.0.0.1:8428"
+	defaultVMRetention  = "1y"
+	// defaultVMMinFreeDiskSpace reserves 2 GB of the controlplane's single
+	// writable partition. VM refuses new samples once free space drops below
+	// this, which is what keeps a growing metrics store from taking the
+	// SQLite DB down with it — see storage.md §5. VM's own default is 10 MB,
+	// i.e. effectively no protection at all on a shared partition.
+	//
+	// 2 GB against the documented 64 GB floor (~3%) is enough headroom for
+	// SQLite to keep committing, a job ledger to keep writing, and the
+	// operator to delete a staged bundle. It sits far below the 85%
+	// DiskAlmostFull alert, so the alert always fires first and this is a
+	// backstop, not the primary signal.
+	defaultVMMinFreeDiskSpace = "2GB"
+	defaultAlloyImage         = "grafana/alloy:v1.4.2"
+	defaultAlloyListenAddr    = "127.0.0.1:12345"
+	defaultLokiImage          = "grafana/loki:3.4.1"
+	defaultLokiListenAddr     = "127.0.0.1:3100"
+	// defaultLokiRetention bounds how far back logs are kept. Loki shipped
+	// with NO retention configured at all — no compactor, no
+	// retention_period — so it kept every log line forever. On the
+	// controlplane's shared partition that is the single largest unbounded
+	// tenant: log volume dwarfs metrics.
+	//
+	// 30d (720h) covers "what happened last month" without unbounded growth.
+	// Unlike VM there is no free-space guard available — Loki has no
+	// equivalent of -storage.minFreeDiskSpaceBytes — so time retention plus
+	// the 85% alert is the whole defense. See storage.md §5.
+	defaultLokiRetention = "720h"
+	defaultGrafanaImage  = "grafana/grafana:11.5.1"
 	// 3000 is the most contended port on a dev box — Next.js, CRA,
 	// Vite, every common JS framework defaults to it. Grafana's
 	// own internal port stays 3000 (handled in renderCompose's
@@ -299,6 +355,9 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	if cfg.VMRetention == "" {
 		cfg.VMRetention = defaultVMRetention
 	}
+	if cfg.VMMinFreeDiskSpace == "" {
+		cfg.VMMinFreeDiskSpace = defaultVMMinFreeDiskSpace
+	}
 	if cfg.AlloyImage == "" {
 		cfg.AlloyImage = defaultAlloyImage
 	}
@@ -315,9 +374,31 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	if cfg.LokiListenAddr == "" {
 		cfg.LokiListenAddr = defaultLokiListenAddr
 	}
+	if cfg.LokiRetention == "" {
+		cfg.LokiRetention = defaultLokiRetention
+	}
 	if cfg.EnableLoki == nil {
 		t := true
 		cfg.EnableLoki = &t
+	}
+	if cfg.IDSLogDir != "" {
+		// Compose only reads a volume source as a BIND MOUNT when it's an
+		// absolute path (or starts with ./ — which then resolves against the
+		// project dir, not our cwd, so it'd be wrong here anyway). A bare
+		// relative source like "data/obs/ids-alerts" is parsed as a *named
+		// volume* and the whole project is rejected:
+		//
+		//   service "alloy" refers to undefined volume data/obs/ids-alerts
+		//
+		// dataDir is relative in dev (./data) and absolute on an appliance
+		// (/var/lib/rasputin), so this only ever bit dev — and dev couldn't
+		// reach obs at all until it became UI-toggleable. Normalize here
+		// rather than trusting every caller to pass an absolute path.
+		abs, err := filepath.Abs(cfg.IDSLogDir)
+		if err != nil {
+			return nil, fmt.Errorf("obs supervisor: resolve IDSLogDir: %w", err)
+		}
+		cfg.IDSLogDir = abs
 	}
 	if cfg.EnableIDSPipe == nil {
 		// Implicit-on when both Loki and an IDS log dir are configured.
@@ -554,24 +635,29 @@ func (s *DockerComposeSupervisor) vmalertEnabled() bool {
 // path is to let `docker compose up -d` recreate the container when the
 // file content changes, which the next Start does for free.
 func (s *DockerComposeSupervisor) writeLokiConfig() error {
+	var buf bytes.Buffer
+	if err := lokiConfigTmpl.Execute(&buf, struct{ Retention string }{
+		Retention: s.cfg.LokiRetention,
+	}); err != nil {
+		return fmt.Errorf("obs supervisor: render loki config: %w", err)
+	}
 	out := filepath.Join(s.cfg.StateDir, lokiConfigSubdir, lokiConfigFile)
 	tmp := out + ".tmp"
-	if err := os.WriteFile(tmp, []byte(lokiConfigYAML), 0o644); err != nil {
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
 	}
 	return os.Rename(tmp, out)
 }
 
-// lokiConfigYAML is a minimal single-instance Loki config — filesystem
+// lokiConfigTmpl is a minimal single-instance Loki config — filesystem
 // storage, no replication, no auth, TSDB index. Fine for homelab scale
 // (think MB/day, not TB/day); when a real Loki cluster is needed, the
 // shape switches to k3s + the Loki distributed chart and this file
 // goes away.
 //
-// Why ship it as a static string instead of a template: every field
-// here is fixed — paths inside the container, schema version, listen
-// port. No per-installation knobs to interpolate. If that changes
-// (custom retention, S3 backend, etc.) it'll become a template.
+// This was a static string until retention landed — the old comment here
+// said it would "become a template" if custom retention ever arrived. It
+// did, so it is.
 // writeGrafanaConfig lays down grafana.ini, datasource provisioning,
 // dashboard provisioning, and the starter dashboard JSON.
 //
@@ -797,7 +883,7 @@ groups:
           description: "rasputin_disk_used_bytes / rasputin_disk_total_bytes > 0.85 for 5+ minutes."
 `
 
-const lokiConfigYAML = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
+var lokiConfigTmpl = template.Must(template.New("loki-config").Parse(`# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
 # Edits get clobbered on the next supervisor Start.
 
 auth_enabled: false
@@ -832,7 +918,25 @@ limits_config:
   allow_structured_metadata: true
   reject_old_samples: true
   reject_old_samples_max_age: 168h
-`
+  # How far back logs are kept. Enforced by the compactor below; without
+  # BOTH of these Loki keeps every line forever, which is how it shipped.
+  retention_period: {{.Retention}}
+
+compactor:
+  working_directory: /loki/compactor
+  # retention_enabled is the switch that makes retention_period real. It is
+  # off by default, and a retention_period set without it is silently
+  # ignored — the trap that let logs accumulate unbounded.
+  retention_enabled: true
+  # Required once retention is on: where deletion requests are journaled.
+  # Loki refuses to start with retention_enabled and no store configured.
+  delete_request_store: filesystem
+  compaction_interval: 10m
+  # Grace window between a chunk falling out of retention and its deletion,
+  # so an in-flight query doesn't lose its chunks mid-read.
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 50
+`))
 
 // writeAlloyConfig renders config.alloy into <StateDir>/alloy-config/.
 // Alloy auto-reloads on file change (no SIGHUP needed) so subsequent
@@ -1005,6 +1109,43 @@ func (s *DockerComposeSupervisor) writeCompose() error {
 	return os.Rename(tmp, out)
 }
 
+// configHash returns a short digest of the given rendered config files, or ""
+// if none are readable. It exists to force `docker compose up -d` to actually
+// recreate a container when its config changes.
+//
+// Compose decides whether to recreate a service by hashing its *definition*
+// (image, command, env, volume declarations) — NOT the contents of the files
+// those volumes bind-mount. So editing loki-config.yaml and re-running
+// `compose up -d` leaves the old container running with the old config, and
+// the change silently does nothing. Verified 2026-07-16 on Rancher Desktop:
+// same container id, uptime uninterrupted, live /config still serving the
+// previous retention while the file on disk said otherwise.
+//
+// The api normally papers over this because a graceful shutdown stops the
+// stack, so the next Start's `up` boots a fresh process that re-reads the
+// file. But that's luck, not mechanism: kill the api ungracefully (crash,
+// OOM, SIGKILL) and the containers keep running, so the next Start silently
+// keeps the stale config. Feeding this digest into each service's
+// environment makes the definition change with the file, which is what
+// Kubernetes does with checksum/config annotations for the same reason.
+func configHash(paths ...string) string {
+	h := sha256.New()
+	any := false
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue // not rendered (service disabled) — contributes nothing
+		}
+		any = true
+		_, _ = h.Write([]byte(p))
+		_, _ = h.Write(b)
+	}
+	if !any {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
 func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 	vmHost, vmPort, err := net.SplitHostPort(s.cfg.VMListenAddr)
 	if err != nil {
@@ -1035,11 +1176,25 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 		return nil, fmt.Errorf("invalid GrafanaListenAddr %q: port required", s.cfg.GrafanaListenAddr)
 	}
 	data := composeData{
-		VMImage:             s.cfg.VMImage,
-		VMHost:              vmHost,
-		VMPort:              vmPort,
-		VMRetention:         s.cfg.VMRetention,
-		VMDataDir:           "./" + vmDataDir,
+		VMImage:            s.cfg.VMImage,
+		VMHost:             vmHost,
+		VMPort:             vmPort,
+		VMRetention:        s.cfg.VMRetention,
+		VMMinFreeDiskSpace: s.cfg.VMMinFreeDiskSpace,
+		VMDataDir:          "./" + vmDataDir,
+		// Digests of the configs each service bind-mounts. Start renders every
+		// config file before calling renderCompose, so these read back what was
+		// just written. VictoriaMetrics needs none — all of its knobs are
+		// command-line flags, which compose already hashes as part of the
+		// service definition.
+		AlloyConfigHash: configHash(
+			filepath.Join(s.cfg.StateDir, alloyConfigSubdir, alloyConfigFile)),
+		LokiConfigHash: configHash(
+			filepath.Join(s.cfg.StateDir, lokiConfigSubdir, lokiConfigFile)),
+		GrafanaConfigHash: configHash(
+			filepath.Join(s.cfg.StateDir, grafanaConfigSubdir, grafanaIniFile)),
+		VMAlertConfigHash: configHash(
+			filepath.Join(s.cfg.StateDir, vmalertConfigSubdir, vmalertRulesFile)),
 		AlloyImage:          s.cfg.AlloyImage,
 		AlloyHost:           alloyHost,
 		AlloyPort:           alloyPort,
@@ -1080,6 +1235,11 @@ type composeData struct {
 	VMHost              string
 	VMPort              string
 	VMRetention         string
+	VMMinFreeDiskSpace  string
+	AlloyConfigHash     string
+	LokiConfigHash      string
+	GrafanaConfigHash   string
+	VMAlertConfigHash   string
 	VMDataDir           string
 	AlloyImage          string
 	AlloyHost           string
@@ -1148,6 +1308,11 @@ services:
     command:
       - "-storageDataPath=/storage"
       - "-retentionPeriod={{.VMRetention}}"
+      # Stop accepting samples once the partition has less than this free,
+      # rather than filling it and taking the SQLite DB down too. VM has no
+      # size-based retention (see DockerComposeSupervisorConfig), so this
+      # reservation is the actual guard. storage.md §5.
+      - "-storage.minFreeDiskSpaceBytes={{.VMMinFreeDiskSpace}}"
       - "-httpListenAddr=0.0.0.0:8428"
       - "-search.latencyOffset=0s"
     ports:
@@ -1159,6 +1324,11 @@ services:
     image: {{.AlloyImage}}
     container_name: rasputin-alloy
     restart: unless-stopped
+    # Digest of the rendered config. Compose only recreates a container when
+    # its *definition* changes, never when a bind-mounted file's contents do —
+    # so without this an edited config silently keeps the old one running.
+    environment:
+      RASPUTIN_OBS_CONFIG_DIGEST: "{{.AlloyConfigHash}}"
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
@@ -1192,6 +1362,10 @@ services:
     image: {{.LokiImage}}
     container_name: rasputin-loki
     restart: unless-stopped
+    # See the alloy service — compose ignores bind-mounted file contents, so
+    # the retention window would otherwise never take effect on a restart.
+    environment:
+      RASPUTIN_OBS_CONFIG_DIGEST: "{{.LokiConfigHash}}"
     command:
       - "-config.file=/etc/loki/{{.LokiConfigFile}}"
     ports:
@@ -1206,6 +1380,10 @@ services:
     image: {{.GrafanaImage}}
     container_name: rasputin-grafana
     restart: unless-stopped
+    # See the alloy service. Covers grafana.ini + the provisioned datasources
+    # and dashboards, so a re-provision actually reaches the container.
+    environment:
+      RASPUTIN_OBS_CONFIG_DIGEST: "{{.GrafanaConfigHash}}"
     ports:
       - "{{.GrafanaHost}}:{{.GrafanaPort}}:3000"
     volumes:
@@ -1225,6 +1403,11 @@ services:
     image: {{.VMAlertImage}}
     container_name: rasputin-vmalert
     restart: unless-stopped
+    # See the alloy service. This one covers the alerting RULES file — without
+    # it an edited rule set silently never loads, which would be a quiet way to
+    # stop alerting.
+    environment:
+      RASPUTIN_OBS_CONFIG_DIGEST: "{{.VMAlertConfigHash}}"
     command:
       - "-rule=/etc/vmalert/{{.VMAlertRulesFile}}"
       - "-datasource.url=http://victoriametrics:8428"

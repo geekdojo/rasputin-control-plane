@@ -630,3 +630,50 @@ func TestParseRebootSpec(t *testing.T) {
 		})
 	}
 }
+
+// A specless job must persist "{}" rather than "". spec is stored verbatim in
+// a TEXT column and scanned straight back into a json.RawMessage, so an empty
+// spec round-trips to RawMessage("") — which fails to marshal and blanks the
+// ENTIRE /api/jobs response, not just the bad row. One specless job (obs.enable
+// was the first) takes the whole Tasks page down with it.
+func TestRunner_Submit_NormalizesEmptySpec(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec json.RawMessage
+	}{
+		{"nil", nil},
+		{"empty", json.RawMessage("")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newStore(t)
+			r := NewRunner(store, nil)
+			r.Register(Workflow{Kind: "obs.enable"})
+
+			j, err := r.Submit(context.Background(), "obs.enable", tc.spec, "test")
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			r.Wait()
+
+			got, err := store.GetJob(context.Background(), j.ID)
+			if err != nil {
+				t.Fatalf("GetJob: %v", err)
+			}
+			if string(got.Spec) != "{}" {
+				t.Errorf("persisted spec = %q; want %q", got.Spec, "{}")
+			}
+			// The real symptom: marshaling the read-back job must not error.
+			if _, err := json.Marshal([]*Job{got}); err != nil {
+				t.Errorf("marshal round-tripped job: %v — this is what blanks /api/jobs", err)
+			}
+		})
+	}
+}
+
+// Guard the invariant the fix relies on: an empty RawMessage genuinely cannot
+// marshal, so "" in the spec column is never merely cosmetic.
+func TestEmptyRawMessage_FailsToMarshal(t *testing.T) {
+	if _, err := json.Marshal(json.RawMessage("")); err == nil {
+		t.Fatal("expected empty json.RawMessage to fail marshaling; if this ever passes, Submit's normalization can be revisited")
+	}
+}

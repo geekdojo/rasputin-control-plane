@@ -214,8 +214,8 @@ function MetricsTab({
   if (!obsEnabled) {
     return (
       <Hint>
-        Observability is off. Per-node charts populate once <code>RASPUTIN_OBS_ENABLED=1</code> is
-        set and VictoriaMetrics is running.
+        Metrics &amp; logs are off, so there&apos;s no recorded history to chart. Turn them on in
+        Settings to start recording this node.
       </Hint>
     );
   }

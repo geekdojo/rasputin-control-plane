@@ -13,11 +13,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BarChart2, ExternalLink, RefreshCw } from 'lucide-react';
 import {
+  enableObs,
   getObsSeries,
   getObsStatus,
   listNodes,
   openInventoryWS,
 } from '../../../lib/api';
+import { ConfirmModal } from '../../../components/ConfirmModal';
 import type { Node, ObsSeries, ObsStatus } from '../../../lib/types';
 import {
   Btn,
@@ -119,18 +121,20 @@ export default function MetricsPage() {
     return close;
   }, []);
 
-  // --- obs status backstop poll: catches RASPUTIN_OBS_ENABLED flips
-  // (operator restarts the api with obs on after seeing the disabled
-  // panel). 30s is fine — once enabled, this page's value comes from
-  // the per-node series polling, not status. -----------------------------
+  // --- obs status poll. Tightens to 3s while the stack is starting so the
+  // page flips to charts on its own the moment it's up; a cold enable takes
+  // minutes and 30s of staleness on top of that reads as "it didn't work".
+  // Back to 30s once settled — this page's value then comes from the
+  // per-node series polling, not status. ---------------------------------
+  const pollEvery = status?.state === 'starting' ? 3_000 : 30_000;
   useEffect(() => {
     const id = window.setInterval(() => {
       getObsStatus()
         .then((s) => setStatus(s))
         .catch(() => {});
-    }, 30_000);
+    }, pollEvery);
     return () => window.clearInterval(id);
-  }, []);
+  }, [pollEvery]);
 
   // --- card ordering: deterministic, role-prioritized so the grid
   // doesn't shuffle as the inventory WS fires. Firewall first (it's
@@ -155,7 +159,7 @@ export default function MetricsPage() {
   const nodeIds = useMemo(() => nodes.map((n) => n.id).sort().join(','), [nodes]);
 
   useEffect(() => {
-    if (!status?.enabled) return;
+    if (status?.state !== 'on') return;
     if (nodes.length === 0) return;
     let cancelled = false;
     const ids = nodes.map((n) => n.id);
@@ -176,13 +180,13 @@ export default function MetricsPage() {
     return () => {
       cancelled = true;
     };
-  }, [nodeIds, range, status?.enabled]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [nodeIds, range, status?.state]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refresh = () => {
     // Manual re-fetch for the impatient operator. The effect above
     // already runs on range / nodeIds change, so this is only useful
     // when nothing else has changed but VM has new samples (10s tick).
-    if (!status?.enabled || nodes.length === 0) return;
+    if (status?.state !== 'on' || nodes.length === 0) return;
     Promise.all(
       nodes.map(async (n) => {
         const [cpu, mem] = await Promise.all([
@@ -207,7 +211,7 @@ export default function MetricsPage() {
               <RefreshCw size={11} />
               REFRESH
             </Btn>
-            {status?.enabled && status.grafanaUrl && (
+            {status?.state === 'on' && status.grafanaUrl && (
               <a
                 href={`${API_BASE}/observability/d/rasputin-cluster-overview?orgId=1`}
                 target="_blank"
@@ -232,7 +236,8 @@ export default function MetricsPage() {
 
         <ClusterStrip nodes={nodes} status={status} />
 
-        {status && !status.enabled && <DisabledPanel />}
+        {status?.state === 'off' && <DisabledPanel onEnabled={setStatus} />}
+        {status?.state === 'starting' && <StartingPanel status={status} />}
 
         {nodes.length === 0 && (
           <div style={{ marginTop: 20 }}>
@@ -260,7 +265,7 @@ export default function MetricsPage() {
                   node={n}
                   cpuSeries={s?.cpu ?? null}
                   memSeries={s?.mem ?? null}
-                  obsEnabled={Boolean(status?.enabled && status?.healthy)}
+                  obsEnabled={status?.state === 'on'}
                   onClick={() => setDrawerNodeId(n.id)}
                 />
               );
@@ -273,9 +278,9 @@ export default function MetricsPage() {
         open={drawerNodeId !== null}
         onClose={() => setDrawerNodeId(null)}
         range={range}
-        obsEnabled={Boolean(status?.enabled && status?.healthy)}
+        obsEnabled={status?.state === 'on'}
         grafanaHref={
-          status?.enabled && status?.grafanaUrl && drawerNodeId
+          status?.state === 'on' && status?.grafanaUrl && drawerNodeId
             ? `${API_BASE}/observability/d/rasputin-cluster-overview?orgId=1&var-nodeId=${encodeURIComponent(drawerNodeId)}`
             : undefined
         }
@@ -317,13 +322,13 @@ function ClusterStrip({ nodes, status }: { nodes: Node[]; status: ObsStatus | nu
       {counts.stale > 0 && <Stat label="STALE" value={String(counts.stale)} color="#facc15" />}
       {counts.offline > 0 && <Stat label="OFFLINE" value={String(counts.offline)} color="#f87171" />}
       <div style={{ marginLeft: 'auto' }}>
-        {status?.enabled === false ? (
-          <span style={{ color: '#facc15' }}>OBS OFF — set RASPUTIN_OBS_ENABLED=1</span>
-        ) : status?.enabled && !status?.healthy ? (
-          <span style={{ color: '#facc15' }}>OBS STARTING — health probe pending</span>
+        {status?.state === 'off' ? (
+          <span style={{ color: '#facc15' }}>NOT RECORDING</span>
+        ) : status?.state === 'starting' ? (
+          <span style={{ color: '#facc15' }}>STARTING…</span>
         ) : lastWriteAgo != null ? (
           <span>LAST WRITE · {lastWriteAgo}s ago</span>
-        ) : status?.enabled ? (
+        ) : status?.state === 'on' ? (
           <span>WAITING FOR FIRST WRITE</span>
         ) : null}
       </div>
@@ -356,36 +361,88 @@ function RangeSelector({ value, onChange }: { value: RangeKey; onChange: (r: Ran
   );
 }
 
-function DisabledPanel() {
+// The off-state CTA. This used to be a read-only panel telling the operator
+// to run `RASPUTIN_OBS_ENABLED=1 ./rasputin-api` — a shell command on an
+// appliance with no shell, so the advice was unfollowable and the feature
+// unreachable. It's a button now (POST /api/obs/enable).
+//
+// Settings → Metrics & Logs remains the canonical home; this is the CTA at
+// the point of discovery, because /metrics is where an operator finds out
+// they don't have metrics.
+function DisabledPanel({ onEnabled }: { onEnabled: (s: ObsStatus) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  async function turnOn() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await enableObs();
+      onEnabled(await getObsStatus());
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  }
+
   return (
     <div style={{ marginTop: 20, padding: '16px 18px', border: `1px solid ${HAIR}`, background: PANEL }}>
-      <SectionLabel>OBSERVABILITY IS OFF</SectionLabel>
+      <SectionLabel>METRICS &amp; LOGS ARE OFF</SectionLabel>
+      <Hint style={{ marginBottom: 12 }}>
+        The cards below show live status only. Turn on metrics &amp; logs to record each node&apos;s CPU,
+        memory and disk over time, see container activity, search logs, and get threshold alerts.
+      </Hint>
+      <Hint style={{ marginBottom: 12 }}>
+        First start downloads roughly 500 MB and takes a few minutes. History then grows as it records,
+        so this is best on a control plane with an SSD or NVMe drive.
+      </Hint>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <Btn onClick={() => setConfirming(true)} disabled={busy}>
+          {busy ? 'TURNING ON…' : 'TURN ON'}
+        </Btn>
+        <a href="/settings" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+          MANAGE IN SETTINGS →
+        </a>
+      </div>
+      {err && (
+        <Hint warn style={{ marginTop: 10 }}>
+          {err}
+        </Hint>
+      )}
+      {confirming && (
+        <ConfirmModal
+          title="Turn on metrics & logs?"
+          message={
+            'Rasputin will download about 500 MB the first time, then start recording history to this control plane. Expect a few minutes before charts fill in.\n\n' +
+            'Recorded data keeps growing over time and is not size-capped yet, so this is best on a control plane with an SSD or NVMe drive rather than a memory card.'
+          }
+          confirmLabel={busy ? 'TURNING ON…' : 'TURN ON'}
+          onConfirm={turnOn}
+          onCancel={() => setConfirming(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// StartingPanel covers the cold-start window. Without it the page would show
+// the "off" CTA for the several minutes the stack spends pulling — inviting
+// the operator to turn on something that's already turning on.
+function StartingPanel({ status }: { status: ObsStatus }) {
+  return (
+    <div style={{ marginTop: 20, padding: '16px 18px', border: `1px solid ${HAIR}`, background: PANEL }}>
+      <SectionLabel>METRICS &amp; LOGS ARE STARTING</SectionLabel>
       <Hint style={{ marginBottom: 10 }}>
-        Tier 2 observability (VictoriaMetrics + Alloy + Loki + Grafana + vmalert) isn&apos;t enabled on
-        this control-plane. The cards above show inventory-derived status only — sparklines stay empty
-        until the obs stack is running.
+        Downloading and starting services. The first run fetches roughly 500 MB and can take several
+        minutes — charts fill in on their own once it&apos;s up. You can leave this page.{' '}
+        <a href="/tasks" style={{ color: DIM }}>
+          Follow progress in Tasks →
+        </a>
       </Hint>
-      <Hint style={{ marginBottom: 10 }}>To turn it on, set the env var and restart the api:</Hint>
-      <pre
-        style={{
-          background: '#0a1322',
-          border: `1px solid rgba(var(--rasp-fg-rgb),0.18)`,
-          padding: 10,
-          margin: 0,
-          color: FG,
-          fontFamily: MONO,
-          fontSize: 10,
-          lineHeight: 1.6,
-        }}
-      >
-{`RASPUTIN_OBS_ENABLED=1 \\
-  ./rasputin-api`}
-      </pre>
-      <Hint style={{ marginTop: 10 }}>
-        On first start the stack pulls ~500 MB of images (VM, Alloy, Loki, Grafana, vmalert). Subsequent
-        starts are fast. Optional toggles: <Tok>RASPUTIN_OBS_LOKI=0</Tok> /{' '}
-        <Tok>RASPUTIN_OBS_GRAFANA=0</Tok> / <Tok>RASPUTIN_OBS_VMALERT=0</Tok>.
-      </Hint>
+      {status.lastError && <Hint warn>{status.lastError}</Hint>}
     </div>
   );
 }

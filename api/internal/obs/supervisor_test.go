@@ -699,3 +699,230 @@ func splitHostPort(t *testing.T, urlStr string) (string, string) {
 	}
 	return hostport[:idx], hostport[idx+1:]
 }
+
+// A relative IDSLogDir must be normalized to an absolute path before it
+// reaches the compose template. Compose reads a bare relative volume source
+// as a *named volume* rather than a bind mount and rejects the project with
+// "refers to undefined volume data/obs/ids-alerts" — which is exactly what a
+// dev run (dataDir = ./data) produced the first time the UI toggle made obs
+// reachable. Appliances pass an absolute dataDir, so only dev ever hit it.
+func TestNewDockerComposeSupervisor_MakesIDSLogDirAbsolute(t *testing.T) {
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:  t.TempDir(),
+		IDSLogDir: "data/obs/ids-alerts",
+	})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if !filepath.IsAbs(sup.cfg.IDSLogDir) {
+		t.Errorf("IDSLogDir = %q; want an absolute path — compose reads a relative source as a named volume and rejects the project", sup.cfg.IDSLogDir)
+	}
+	if !strings.HasSuffix(sup.cfg.IDSLogDir, filepath.Join("data", "obs", "ids-alerts")) {
+		t.Errorf("IDSLogDir = %q; want it to still point at the configured dir", sup.cfg.IDSLogDir)
+	}
+}
+
+func TestNewDockerComposeSupervisor_EmptyIDSLogDirStaysEmpty(t *testing.T) {
+	// Empty means "no IDS pipe" — Abs("") would turn it into the cwd and
+	// silently mount the whole working directory into Alloy.
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if sup.cfg.IDSLogDir != "" {
+		t.Errorf("IDSLogDir = %q; want empty", sup.cfg.IDSLogDir)
+	}
+	if *sup.cfg.EnableIDSPipe {
+		t.Error("EnableIDSPipe = true with no IDS log dir; want false")
+	}
+}
+
+// ----- storage size-caps (storage.md §5) ----------------------------------
+
+// VM must reserve free space on the shared partition. Without it VM's default
+// is 10 MB — effectively nothing — and a growing metrics store can fill the
+// partition it shares with the SQLite DB, whose writes then fail. That's the
+// wedge class the 2026-06-21 growpart incident proved.
+func TestRenderCompose_VMReservesFreeDiskSpace(t *testing.T) {
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	raw, err := sup.renderCompose()
+	if err != nil {
+		t.Fatalf("renderCompose: %v", err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, "-storage.minFreeDiskSpaceBytes=2GB") {
+		t.Errorf("compose missing the default free-space reservation:\n%s", body)
+	}
+	// The time bound stays — the reservation is a backstop, not a replacement.
+	if !strings.Contains(body, "-retentionPeriod=1y") {
+		t.Errorf("compose lost -retentionPeriod:\n%s", body)
+	}
+}
+
+func TestRenderCompose_VMFreeDiskSpaceOverride(t *testing.T) {
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:           t.TempDir(),
+		VMMinFreeDiskSpace: "512MB",
+	})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	raw, _ := sup.renderCompose()
+	if !strings.Contains(string(raw), "-storage.minFreeDiskSpaceBytes=512MB") {
+		t.Errorf("override not honored:\n%s", raw)
+	}
+}
+
+// Loki shipped with no retention at all — no compactor, no retention_period —
+// so it kept every log line forever and was the largest unbounded tenant on
+// the controlplane's partition. retention_period alone is NOT enough:
+// compactor.retention_enabled is off by default and a period set without it
+// is silently ignored, which is exactly how this stays broken.
+func TestWriteLokiConfig_HasRetentionAndCompactor(t *testing.T) {
+	dir := t.TempDir()
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: dir})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if err := sup.prepareHostDirs(); err != nil {
+		t.Fatalf("prepareHostDirs: %v", err)
+	}
+	if err := sup.writeLokiConfig(); err != nil {
+		t.Fatalf("writeLokiConfig: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, lokiConfigSubdir, lokiConfigFile))
+	if err != nil {
+		t.Fatalf("read rendered config: %v", err)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"retention_period: 720h",
+		"retention_enabled: true",
+		"delete_request_store: filesystem",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered loki config missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestWriteLokiConfig_RetentionOverride(t *testing.T) {
+	dir := t.TempDir()
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:      dir,
+		LokiRetention: "168h",
+	})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if err := sup.prepareHostDirs(); err != nil {
+		t.Fatalf("prepareHostDirs: %v", err)
+	}
+	if err := sup.writeLokiConfig(); err != nil {
+		t.Fatalf("writeLokiConfig: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, lokiConfigSubdir, lokiConfigFile))
+	if !strings.Contains(string(raw), "retention_period: 168h") {
+		t.Errorf("override not honored:\n%s", raw)
+	}
+}
+
+func TestNewDockerComposeSupervisor_SizeCapDefaults(t *testing.T) {
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if sup.cfg.VMMinFreeDiskSpace != defaultVMMinFreeDiskSpace {
+		t.Errorf("VMMinFreeDiskSpace = %q; want %q", sup.cfg.VMMinFreeDiskSpace, defaultVMMinFreeDiskSpace)
+	}
+	if sup.cfg.LokiRetention != defaultLokiRetention {
+		t.Errorf("LokiRetention = %q; want %q", sup.cfg.LokiRetention, defaultLokiRetention)
+	}
+}
+
+// Compose recreates a container only when its service *definition* changes —
+// never when a bind-mounted file's contents change. Verified live 2026-07-16:
+// editing loki-config.yaml and re-running `compose up -d` left the same
+// container id running with the previous retention still live. So the rendered
+// config's digest has to ride in the definition, or a changed config silently
+// never applies (Loki retention, and more alarmingly the vmalert RULES file).
+func TestRenderCompose_ConfigDigestChangesWithConfig(t *testing.T) {
+	render := func(retention string) string {
+		dir := t.TempDir()
+		sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+			StateDir:      dir,
+			LokiRetention: retention,
+		})
+		if err != nil {
+			t.Fatalf("NewDockerComposeSupervisor: %v", err)
+		}
+		if err := sup.prepareHostDirs(); err != nil {
+			t.Fatalf("prepareHostDirs: %v", err)
+		}
+		// Start renders configs before compose; mirror that ordering.
+		if err := sup.writeLokiConfig(); err != nil {
+			t.Fatalf("writeLokiConfig: %v", err)
+		}
+		raw, err := sup.renderCompose()
+		if err != nil {
+			t.Fatalf("renderCompose: %v", err)
+		}
+		return string(raw)
+	}
+
+	a, b := render("720h"), render("168h")
+	// Scope to the loki service — every config-mounting service carries a
+	// digest, and grabbing the first one finds alloy's, which has no reason to
+	// change when only loki's retention does.
+	digestOf := func(body, service string) string {
+		lines := strings.Split(body, "\n")
+		for i, line := range lines {
+			if strings.TrimSpace(line) != service+":" {
+				continue
+			}
+			for _, l := range lines[i:min(i+12, len(lines))] {
+				if strings.Contains(l, "RASPUTIN_OBS_CONFIG_DIGEST") {
+					return strings.TrimSpace(l)
+				}
+			}
+		}
+		return ""
+	}
+	da, db := digestOf(a, "loki"), digestOf(b, "loki")
+	if da == "" || db == "" {
+		t.Fatalf("no config digest rendered into compose:\n%s", a)
+	}
+	if da == db {
+		t.Errorf("digest %q unchanged across differing loki retention — compose would not recreate the container, so the new retention would never apply", da)
+	}
+}
+
+func TestConfigHash_MissingFilesYieldEmpty(t *testing.T) {
+	// A disabled service renders no config; an empty digest keeps its service
+	// definition stable rather than churning the container every Start.
+	if got := configHash(filepath.Join(t.TempDir(), "nope.yaml")); got != "" {
+		t.Errorf("configHash(missing) = %q; want empty", got)
+	}
+}
+
+func TestConfigHash_StableForSameContent(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(f, []byte("retention: 720h"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first := configHash(f)
+	second := configHash(f)
+	if first == "" || first != second {
+		t.Errorf("configHash unstable: %q vs %q — an unstable digest would recreate every container on every Start", first, second)
+	}
+	if err := os.WriteFile(f, []byte("retention: 168h"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if changed := configHash(f); changed == first {
+		t.Error("configHash did not change when content changed")
+	}
+}

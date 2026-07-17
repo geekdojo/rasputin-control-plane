@@ -55,8 +55,8 @@ export function ContainersTab({ node, obsEnabled }: ContainersTabProps) {
   if (!obsEnabled) {
     return (
       <Hint>
-        Observability is off. Per-node container telemetry populates once obs is enabled and Alloy
-        starts scraping cAdvisor.
+        Metrics &amp; logs are off, so container activity isn&apos;t being collected. Turn them on in
+        Settings.
       </Hint>
     );
   }
@@ -64,8 +64,8 @@ export function ContainersTab({ node, obsEnabled }: ContainersTabProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, height: '100%' }}>
       <Hint>
-        cAdvisor currently runs on the controlplane host only. Until Slice 1.2b deploys per-node
-        Alloy, every node&apos;s drawer shows the same set.
+        Container activity is currently collected on the control plane only, so every node shows the
+        same set. Per-node collection is planned.
       </Hint>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -121,9 +121,8 @@ export function ContainersTab({ node, obsEnabled }: ContainersTabProps) {
         </table>
       </div>
       <Hint style={{ color: DIM }}>
-        CPU is a 1-minute rate of cAdvisor user+system seconds; 1.00 = one full core. STARTED is the
-        container&apos;s last start time (proxy for restart count). True restart counts land when
-        Docker events get wired in.
+        CPU is a 1-minute average; 1.00 = one full core. STARTED is the container&apos;s last start
+        time — a stand-in for a restart count, which isn&apos;t collected yet.
       </Hint>
     </div>
   );
