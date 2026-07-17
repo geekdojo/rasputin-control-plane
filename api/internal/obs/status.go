@@ -11,17 +11,52 @@ import (
 // package's import list narrow and gives the handler one thing to ask
 // for a snapshot.
 //
-// Nil-safe: a zero-value *Status (obs disabled) returns a Snapshot whose
-// Enabled flag is false and all other fields are their zero values. The
-// handler renders that as "obs is off — set RASPUTIN_OBS_ENABLED=1 to
-// turn it on."
+// Nil-safe: a zero-value *Status returns a Snapshot whose Enabled flag is
+// false and all other fields are their zero values.
+//
+// Enablement is the operator's *stored* choice, read through EnabledFn —
+// not a structural property of this struct. Before Slice 1.6 the supervisor
+// was only constructed when RASPUTIN_OBS_ENABLED=1, so "is a supervisor
+// wired?" doubled as "is obs on?". The supervisor is now always constructed
+// (that's what makes runtime enable possible), so that inference no longer
+// holds and the setting is the only honest source.
 type Status struct {
 	sup        Supervisor
 	sink       *VMSink
 	logs       *LogsClient
 	series     *SeriesClient
 	containers *ContainersClient
+	enabled    EnabledFn
 }
+
+// EnabledFn reports the operator's stored observability intent. Injected as
+// a closure so the obs package never imports the settings store. A nil
+// EnabledFn falls back to structural detection (a supervisor + sink are
+// wired ⇒ on), which is what the package's own tests rely on.
+type EnabledFn func(ctx context.Context) (bool, error)
+
+// SetEnabled installs the stored-intent reader. Called once from main after
+// the settings store is open. Follows the same post-construction-setter
+// pattern as Server.SetAlertsService — the alternative is threading the
+// store through NewStatus and every test that builds one.
+func (s *Status) SetEnabled(fn EnabledFn) {
+	if s == nil {
+		return
+	}
+	s.enabled = fn
+}
+
+// Observability lifecycle states, as reported by Snapshot.State.
+//
+// The three-state split is load-bearing, not cosmetic: enable takes minutes
+// on a cold pull (~500 MB), and collapsing "starting" into "off" makes the
+// UI say "observability is off" during the exact window the operator is
+// watching the thing they just turned on.
+const (
+	StateOff      = "off"      // operator hasn't opted in
+	StateStarting = "starting" // opted in; stack not answering /health yet
+	StateOn       = "on"       // opted in and healthy
+)
 
 // NewStatus bundles a Supervisor + VMSink + (optional) LogsClient for
 // the handler. Supervisor + VMSink are required for Enabled=true;
@@ -71,22 +106,32 @@ func (s *Status) Containers() *ContainersClient {
 }
 
 // GrafanaEnabled reports whether the proxy at /observability/* has a
-// live Grafana to forward to. False when obs is off OR the supervisor
-// is the Noop one OR EnableGrafana was disabled.
-func (s *Status) GrafanaEnabled() bool {
+// live Grafana to forward to. False when the operator hasn't opted in,
+// OR the supervisor is the Noop one, OR EnableGrafana was disabled.
+//
+// Takes a ctx because enablement is now a settings read, not a structural
+// fact. Without the opt-in check the proxy would forward to a container
+// the operator just stopped and surface a raw 502.
+func (s *Status) GrafanaEnabled(ctx context.Context) bool {
 	if s == nil || s.sup == nil {
 		return false
 	}
 	if _, ok := s.sup.(NoopSupervisor); ok {
 		return false
 	}
+	if s.enabled != nil {
+		on, err := s.enabled(ctx)
+		if err != nil || !on {
+			return false
+		}
+	}
 	return s.sup.GrafanaBaseURL() != ""
 }
 
 // GrafanaBaseURL is the host-side URL the api's reverse proxy forwards
 // to. Empty when GrafanaEnabled returns false.
-func (s *Status) GrafanaBaseURL() string {
-	if !s.GrafanaEnabled() {
+func (s *Status) GrafanaBaseURL(ctx context.Context) string {
+	if !s.GrafanaEnabled(ctx) {
 		return ""
 	}
 	return s.sup.GrafanaBaseURL()
@@ -94,11 +139,17 @@ func (s *Status) GrafanaBaseURL() string {
 
 // Snapshot is the JSON shape returned by /api/obs/status.
 type Snapshot struct {
-	// Enabled is true when both a non-noop Supervisor and a non-nil
-	// VMSink are wired. False means obs is off — the rest of the fields
-	// are zero values and the UI should render an "enable obs" CTA
-	// rather than charts.
+	// Enabled reflects the operator's stored opt-in. False means the
+	// stack is deliberately off and the rest of the fields are zero.
+	//
+	// Enabled is NOT "you can render charts" — during a cold enable it's
+	// true for minutes while the stack pulls. Read State for that.
 	Enabled bool `json:"enabled"`
+
+	// State is the lifecycle: off | starting | on. Prefer this over
+	// Enabled+Healthy — deriving it in each client is how "starting"
+	// ends up rendered as "off".
+	State string `json:"state"`
 
 	// Healthy is the supervisor's current health probe — true when the
 	// VictoriaMetrics container is running and its /health answers 2xx.
@@ -134,20 +185,40 @@ type Snapshot struct {
 // supervisor's Healthy probe, which itself does a 2s-timeout HTTP GET.
 func (s *Status) Snapshot(ctx context.Context) Snapshot {
 	if s == nil || s.sup == nil || s.sink == nil {
-		return Snapshot{Enabled: false}
+		return Snapshot{Enabled: false, State: StateOff}
 	}
 	if _, ok := s.sup.(NoopSupervisor); ok {
 		// Defensive: even if a sink is wired against the noop
 		// supervisor, treat obs as "off" — there's no real VM to talk
 		// to. Keeps the UI clear about why it's not seeing charts.
-		return Snapshot{Enabled: false}
+		return Snapshot{Enabled: false, State: StateOff}
+	}
+	if s.enabled != nil {
+		on, err := s.enabled(ctx)
+		if err != nil {
+			// Surface rather than swallow: reporting "off" for a failed
+			// settings read would look identical to a deliberate opt-out
+			// and send the operator hunting the wrong problem.
+			return Snapshot{
+				Enabled:   false,
+				State:     StateOff,
+				LastError: "read observability setting: " + err.Error(),
+			}
+		}
+		if !on {
+			return Snapshot{Enabled: false, State: StateOff}
+		}
 	}
 	healthy, _ := s.sup.Healthy(ctx)
 	out := Snapshot{
 		Enabled:     true,
+		State:       StateStarting,
 		Healthy:     healthy,
 		VMBaseURL:   s.sup.VMBaseURL(),
 		LokiBaseURL: s.sup.LokiBaseURL(),
+	}
+	if healthy {
+		out.State = StateOn
 	}
 	if s.sup.GrafanaBaseURL() != "" {
 		out.GrafanaURL = "/observability/"

@@ -35,13 +35,15 @@ import (
 // 502'ing on an unreachable upstream — keeps the operator-visible
 // error specific.
 func (s *Server) handleObservabilityProxy(w http.ResponseWriter, r *http.Request) {
-	base := s.obs.Snapshot(r.Context()).VMBaseURL
-	if base == "" || !s.obs.GrafanaEnabled() {
+	// Gate on the operator's stored opt-in, not on an empty VMBaseURL —
+	// that older check only worked because a disabled stack meant a nil
+	// supervisor. The supervisor is always constructed since Slice 1.6.
+	if !s.obs.GrafanaEnabled(r.Context()) {
 		writeError(w, http.StatusServiceUnavailable,
-			"observability proxy: Grafana is disabled (RASPUTIN_OBS_ENABLED=1 + Grafana not disabled)")
+			"observability proxy: dashboards unavailable — observability is turned off for this control plane")
 		return
 	}
-	target, err := url.Parse(s.obs.GrafanaBaseURL())
+	target, err := url.Parse(s.obs.GrafanaBaseURL(r.Context()))
 	if err != nil {
 		log.Printf("api/obs proxy: bad Grafana URL: %v", err)
 		writeError(w, http.StatusInternalServerError, "observability proxy: misconfigured")

@@ -484,20 +484,48 @@ func main() {
 	defer idsSvc.Stop()
 
 	// Tier 2 observability — VictoriaMetrics sidecar + metrics fan-out.
-	// Off by default so dev runs don't require Docker; set
-	// RASPUTIN_OBS_ENABLED=1 to bring up VM and start remote-writing every
-	// agent sample. See wiki design/control-plane/observability-stack.md.
-	obsSup, obsSink, obsStatus := mustWireObs(ctx, dataDir, metricsSvc, idsLogDir)
-	if obsSup != nil {
-		defer func() {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer stopCancel()
-			if err := obsSup.Stop(stopCtx); err != nil {
-				log.Printf("rasputin-api: obs supervisor stop: %v", err)
-			}
-		}()
+	// Off by default so dev runs don't require Docker. The supervisor is
+	// always constructed; the operator's stored obs.enabled setting decides
+	// whether the stack actually runs, and Settings toggles it at runtime
+	// through the obs.enable / obs.disable jobs below. RASPUTIN_OBS_ENABLED
+	// only seeds that setting on a first boot.
+	// See wiki design/control-plane/observability-stack.md §3.8.
+	seedObsEnabled(ctx, setupStore)
+	obsEnabled := func(ctx context.Context) (bool, error) {
+		return setupStore.GetBool(ctx, setup.KeyObsEnabled, false)
 	}
-	_ = obsSink // referenced via the metricsSvc sink + obsStatus; kept named for clarity.
+	obsSup, obsSink, obsStatus := mustWireObs(ctx, dataDir, metricsSvc, idsLogDir, obsEnabled)
+	defer func() {
+		// Only tear down what we brought up. Stop shells out to `docker
+		// compose stop`; on a never-started stack that's a pointless
+		// subprocess, and on a host with no runtime it's a noisy one.
+		if on, err := obsEnabled(context.Background()); err != nil || !on {
+			return
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stopCancel()
+		if err := obsSup.Stop(stopCtx); err != nil {
+			log.Printf("rasputin-api: obs supervisor stop: %v", err)
+		}
+	}()
+	// The operator-facing toggle. Registered here rather than with the other
+	// workflows above because these close over the supervisor + sink that
+	// mustWireObs just built. Runner.Register is mutex-guarded and workflows
+	// resolve at Submit time, so late registration is safe.
+	setObsEnabled := func(ctx context.Context, on bool) error {
+		return setupStore.SetBool(ctx, setup.KeyObsEnabled, on)
+	}
+	setObsSink := func(on bool) {
+		if on {
+			metricsSvc.SetSink(obsSink)
+			return
+		}
+		metricsSvc.SetSink(nil)
+	}
+	runner.Register(obs.EnableWorkflow(obsSup, setObsEnabled, setObsSink, func() bool {
+		return dockerBinAvailable(obsDockerBin())
+	}))
+	runner.Register(obs.DisableWorkflow(obsSup, setObsEnabled, setObsSink))
 
 	// Reconciliation tickers. One scheduler entry per drift-prone
 	// subsystem; staggered so the bus doesn't stampede at startup. All
@@ -1002,13 +1030,28 @@ func newDockerSupervisor(stateDir string, meshCA *mesh.MeshCA) (*mesh.DockerSupe
 	return mesh.NewDockerSupervisor(cfg)
 }
 
-// dockerAvailable reports whether a docker CLI is on PATH — mirrors the
-// agent's autodetect for its docker/rauc/uci/tailscale backends.
-func dockerAvailable() bool {
-	bin := envOr("RASPUTIN_HEADSCALE_DOCKER_BIN", "docker")
+// dockerBinAvailable reports whether the named docker CLI is on PATH.
+// Split out from dockerAvailable so obs can preflight against its OWN
+// configured binary: dockerAvailable keys off RASPUTIN_HEADSCALE_DOCKER_BIN,
+// and an obs preflight that consulted a mesh-namespaced variable would be
+// quietly wrong for anyone who set only one of them.
+func dockerBinAvailable(bin string) bool {
+	if bin == "" {
+		bin = "docker"
+	}
 	_, err := exec.LookPath(bin)
 	return err == nil
 }
+
+// dockerAvailable reports whether a docker CLI is on PATH — mirrors the
+// agent's autodetect for its docker/rauc/uci/tailscale backends.
+func dockerAvailable() bool {
+	return dockerBinAvailable(envOr("RASPUTIN_HEADSCALE_DOCKER_BIN", "docker"))
+}
+
+// obsDockerBin is the container runtime obs shells out to. Its own env var,
+// defaulted to "docker".
+func obsDockerBin() string { return envOr("RASPUTIN_OBS_DOCKER_BIN", "docker") }
 
 func loadCATLSConfig(caFile string) (*tls.Config, error) {
 	pem, err := os.ReadFile(caFile)
@@ -1035,21 +1078,33 @@ func splitCSV(s string) []string {
 }
 
 // mustWireObs constructs the Tier 2 observability stack — supervisor +
-// VictoriaMetrics fan-out sink + read-only status surface — when
-// RASPUTIN_OBS_ENABLED is set. When obs is off (the default), returns a
-// nil supervisor + nil sink and a non-nil obs.Status whose snapshots
-// report Enabled=false; the api stays fully functional on the Tier 1
-// SQLite path.
+// VictoriaMetrics fan-out sink + read-only status surface. The supervisor is
+// built UNCONDITIONALLY; whether the stack actually runs is the operator's
+// stored `obs.enabled` setting, read through the `enabled` closure.
 //
-// Why "must" — the failure modes here (mkdir, supervisor construction,
-// initial container start) are configuration / system issues that the
-// operator needs to fix before the api can usefully run with obs on. We
-// don't paper over them by silently disabling obs; that would mask the
-// real problem.
+// That unconditional construction is the whole point of Slice 1.6. Before
+// it, an unset RASPUTIN_OBS_ENABLED returned a nil supervisor — so there was
+// no object to Start() later and the only way to turn observability on was
+// to restart the process with a different environment. On an appliance
+// (read-only rootfs, no shell, no SSH server) that is not a thing an
+// operator can do, which meant a complete Tier 2 stack shipped unreachable.
+// Constructing always costs a struct; it buys a UI toggle.
 //
-// Env vars:
+// Building the supervisor does no I/O beyond an mkdir — no Docker contact,
+// no containers — so this is cheap even when the operator never opts in.
 //
-//	RASPUTIN_OBS_ENABLED       — "1" to turn on. Anything else → off.
+// Why "must" — the failure modes here (mkdir, supervisor construction) are
+// configuration / system issues the operator needs to fix before the api can
+// usefully run with obs on. We don't paper over them by silently disabling
+// obs; that would mask the real problem. Note the *start* failure path is
+// deliberately not fatal: a stack that won't come up must not take the api
+// down with it.
+//
+// Env vars (all now *defaults* — the operator's stored choice wins; see
+// seedObsEnabled):
+//
+//	RASPUTIN_OBS_ENABLED       — seeds obs.enabled on first boot only.
+//	RASPUTIN_OBS_DOCKER_BIN    — container runtime binary. Default "docker".
 //	RASPUTIN_OBS_STATE_DIR     — host dir for compose + VM data.
 //	                              Defaults to <dataDir>/obs.
 //	RASPUTIN_OBS_VM_IMAGE      — VictoriaMetrics image override.
@@ -1057,19 +1112,17 @@ func splitCSV(s string) []string {
 //	                              Defaults to 127.0.0.1:8428.
 //	RASPUTIN_OBS_VM_RETENTION  — VM -retentionPeriod flag. Default "1y".
 //
-// Side effect: when obs is enabled, this also calls metricsSvc.SetSink
-// so every received MetricsEvt fans out to VM after the SQLite insert.
-func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Service, idsLogDir string) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
-	if os.Getenv("RASPUTIN_OBS_ENABLED") != "1" {
-		log.Printf("rasputin-api: obs disabled (set RASPUTIN_OBS_ENABLED=1 to enable)")
-		return nil, nil, obs.NewStatus(nil, nil, nil)
-	}
+// Side effect: when the stored setting says on, this starts the stack in the
+// background and calls metricsSvc.SetSink so every received MetricsEvt fans
+// out to VM after the SQLite insert.
+func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Service, idsLogDir string, enabled obs.EnabledFn) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
 	stateDir := envOr("RASPUTIN_OBS_STATE_DIR", filepath.Join(dataDir, "obs"))
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: obs state dir: %v", err)
 	}
 	sup, err := obs.NewDockerComposeSupervisor(obs.DockerComposeSupervisorConfig{
 		StateDir:            stateDir,
+		DockerBin:           obsDockerBin(),
 		VMImage:             os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
 		VMListenAddr:        os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
 		VMRetention:         os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
@@ -1097,6 +1150,32 @@ func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Servic
 	if err != nil {
 		log.Fatalf("rasputin-api: obs supervisor: %v", err)
 	}
+	sink, err := obs.NewVMSink(obs.VMSinkConfig{Supervisor: sup})
+	if err != nil {
+		log.Fatalf("rasputin-api: obs sink: %v", err)
+	}
+	// LogsClient wraps the same supervisor — when Loki is on, LokiBaseURL()
+	// is non-empty and queries proxy through; when off, the client returns
+	// a clean "Loki not configured" error.
+	logs, err := obs.NewLogsClient(obs.LogsClientConfig{Supervisor: sup})
+	if err != nil {
+		log.Fatalf("rasputin-api: obs logs client: %v", err)
+	}
+	status := obs.NewStatus(sup, sink, logs)
+	status.SetEnabled(enabled)
+
+	on, err := enabled(ctx)
+	if err != nil {
+		log.Fatalf("rasputin-api: read obs setting: %v", err)
+	}
+	if !on {
+		// Constructed but idle. No sink is installed: VMSink.Write errors
+		// when the stack is down and metrics.Service logs every failure, so
+		// an always-installed sink would spam the log every 10s per node.
+		// obs.enable installs it as its last step.
+		log.Printf("rasputin-api: obs off (state=%s) — turn it on from Settings", stateDir)
+		return sup, sink, status
+	}
 	log.Printf("rasputin-api: obs supervisor = docker (state=%s, vm=%s)",
 		stateDir, sup.VMBaseURL())
 	// Start asynchronously so first-boot doesn't block the api's HTTP
@@ -1112,19 +1191,38 @@ func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Servic
 			log.Printf("rasputin-api: obs supervisor up; VM at %s", sup.VMBaseURL())
 		}
 	}()
-	sink, err := obs.NewVMSink(obs.VMSinkConfig{Supervisor: sup})
-	if err != nil {
-		log.Fatalf("rasputin-api: obs sink: %v", err)
-	}
 	metricsSvc.SetSink(sink)
-	// LogsClient wraps the same supervisor — when Loki is on, LokiBaseURL()
-	// is non-empty and queries proxy through; when off, the client returns
-	// a clean "Loki not configured" error.
-	logs, err := obs.NewLogsClient(obs.LogsClientConfig{Supervisor: sup})
+	return sup, sink, status
+}
+
+// seedObsEnabled captures RASPUTIN_OBS_ENABLED as the initial value of the
+// obs.enabled setting — but only when the setting has NEVER been set, so an
+// explicit operator choice sticks. Mirrors SeedOperatorSSHKeysFromFile.
+//
+// This is what keeps the env var from becoming a rival source of truth. A
+// dev box that exports RASPUTIN_OBS_ENABLED=1 still comes up with obs on;
+// but once anyone uses the UI toggle, the stored choice is authoritative and
+// the env var is never consulted again. Without the "only if unset" guard,
+// every restart would silently undo the operator's last click.
+func seedObsEnabled(ctx context.Context, store *setup.Store) {
+	set, err := store.IsSet(ctx, setup.KeyObsEnabled)
 	if err != nil {
-		log.Fatalf("rasputin-api: obs logs client: %v", err)
+		log.Printf("rasputin-api: read obs.enabled: %v", err)
+		return
 	}
-	return sup, sink, obs.NewStatus(sup, sink, logs)
+	if set {
+		return
+	}
+	raw, ok := os.LookupEnv("RASPUTIN_OBS_ENABLED")
+	if !ok {
+		return // stay unset; the default (off) applies and a later boot can seed
+	}
+	on := setup.ParseBool(raw)
+	if err := store.SetBool(ctx, setup.KeyObsEnabled, on); err != nil {
+		log.Printf("rasputin-api: seed obs.enabled: %v", err)
+		return
+	}
+	log.Printf("rasputin-api: seeded obs.enabled=%v from RASPUTIN_OBS_ENABLED (operator choice wins from here on)", on)
 }
 
 // parseDurationOr parses s as a duration; on parse error or zero/negative,

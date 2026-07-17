@@ -580,12 +580,21 @@ export interface Alert {
   ackedAt?: string;
 }
 
+// ObsState is the lifecycle reported by GET /api/obs/status.
+//
+// Prefer this over deriving from enabled+healthy. `enabled && healthy` looks
+// equivalent but silently folds "starting" into "off" — and a cold enable
+// spends minutes pulling ~500 MB, so that window is exactly when the
+// operator is staring at the thing they just switched on.
+export type ObsState = 'off' | 'starting' | 'on';
+
 // ObsStatus mirrors api/internal/obs/status.go's Snapshot. Returned by
-// GET /api/obs/status. enabled=false means the obs stack is off
-// (RASPUTIN_OBS_ENABLED not set) and the UI should render an "enable
-// observability" CTA instead of dashboards.
+// GET /api/obs/status.
 export interface ObsStatus {
+  // enabled is the operator's stored opt-in — NOT "charts will render".
+  // It stays true for the whole cold-start pull. Read `state` for that.
   enabled: boolean;
+  state: ObsState;
   healthy: boolean;
   vmBaseUrl?: string;
   lastWriteOk?: string;

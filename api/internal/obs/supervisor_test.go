@@ -699,3 +699,40 @@ func splitHostPort(t *testing.T, urlStr string) (string, string) {
 	}
 	return hostport[:idx], hostport[idx+1:]
 }
+
+// A relative IDSLogDir must be normalized to an absolute path before it
+// reaches the compose template. Compose reads a bare relative volume source
+// as a *named volume* rather than a bind mount and rejects the project with
+// "refers to undefined volume data/obs/ids-alerts" — which is exactly what a
+// dev run (dataDir = ./data) produced the first time the UI toggle made obs
+// reachable. Appliances pass an absolute dataDir, so only dev ever hit it.
+func TestNewDockerComposeSupervisor_MakesIDSLogDirAbsolute(t *testing.T) {
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:  t.TempDir(),
+		IDSLogDir: "data/obs/ids-alerts",
+	})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if !filepath.IsAbs(sup.cfg.IDSLogDir) {
+		t.Errorf("IDSLogDir = %q; want an absolute path — compose reads a relative source as a named volume and rejects the project", sup.cfg.IDSLogDir)
+	}
+	if !strings.HasSuffix(sup.cfg.IDSLogDir, filepath.Join("data", "obs", "ids-alerts")) {
+		t.Errorf("IDSLogDir = %q; want it to still point at the configured dir", sup.cfg.IDSLogDir)
+	}
+}
+
+func TestNewDockerComposeSupervisor_EmptyIDSLogDirStaysEmpty(t *testing.T) {
+	// Empty means "no IDS pipe" — Abs("") would turn it into the cwd and
+	// silently mount the whole working directory into Alloy.
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	if sup.cfg.IDSLogDir != "" {
+		t.Errorf("IDSLogDir = %q; want empty", sup.cfg.IDSLogDir)
+	}
+	if *sup.cfg.EnableIDSPipe {
+		t.Error("EnableIDSPipe = true with no IDS log dir; want false")
+	}
+}

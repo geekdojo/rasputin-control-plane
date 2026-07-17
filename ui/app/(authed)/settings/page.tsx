@@ -6,6 +6,10 @@
 //     this once the first-run wizard has completed; the wizard redirects away
 //     when setup is done, so without this an operator who picked the wrong mode
 //     was stuck. Backend: POST /api/setup/mode, same endpoint the wizard uses.)
+//   • Metrics & logs — the on/off switch for observability. Same species of gap
+//     as deployment mode: the stack shipped complete but could only be turned on
+//     by restarting the api with an env var, which an appliance operator cannot
+//     do. Backend: POST /api/obs/{enable,disable} (async — returns a job).
 //   • Operator SSH key(s) — the cluster-remembered key(s) the Add-node wizard
 //     prefills from. Rotation here is forward-only (future seeds only); it
 //     never re-keys already-enrolled nodes.
@@ -13,14 +17,22 @@
 
 import { Check, Settings as SettingsIcon, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { Btn, PageShell, PageHeader, PageBody, SectionLabel, Hint, Input, Tok, DIM, FG, HAIR } from '../../../components/kit';
+import { Btn, PageShell, PageHeader, PageBody, SectionLabel, Hint, Input, Tok, EnabledToggle, DIM, FG, HAIR } from '../../../components/kit';
 import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
 import { THEMES, useTheme, type ThemeMeta } from '../../../lib/theme';
 import { DeploymentModePicker, MODES } from '../../../components/DeploymentModePicker';
 import { ConfirmModal } from '../../../components/ConfirmModal';
-import { getOperatorKeys, getSetupState, setDeploymentMode, setOperatorKeys } from '../../../lib/api';
+import {
+  disableObs,
+  enableObs,
+  getObsStatus,
+  getOperatorKeys,
+  getSetupState,
+  setDeploymentMode,
+  setOperatorKeys,
+} from '../../../lib/api';
 import { validateSSHKey } from '../../../lib/enroll';
-import type { DeploymentMode, SetupState } from '../../../lib/types';
+import type { DeploymentMode, ObsStatus, SetupState } from '../../../lib/types';
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
@@ -51,9 +63,144 @@ export default function SettingsPage() {
         <DeploymentModeSection />
 
         <div style={{ height: 32 }} />
+        <ObservabilitySection />
+
+        <div style={{ height: 32 }} />
         <OperatorSSHKeySection />
       </PageBody>
     </PageShell>
+  );
+}
+
+// --- Metrics & logs ---------------------------------------------------------
+
+// The canonical on/off surface for observability. Before this existed the only
+// way to turn the stack on was to restart the api with RASPUTIN_OBS_ENABLED=1
+// — impossible on an appliance (read-only rootfs, no shell, no SSH server),
+// which meant a complete Tier 2 stack shipped unreachable. See wiki
+// design/control-plane/observability-stack.md §3.8.
+//
+// Copy here is deliberately vendor-neutral per architecture.md's UI-strings
+// rule: the operator turns on "metrics & logs", not VictoriaMetrics + Loki +
+// Grafana. It's also NOT an upsell — observability is OSS we ship and the
+// entitlements doc explicitly kills gating it, so the cost we state is disk
+// and time, not money.
+function ObservabilitySection() {
+  const [status, setStatus] = useState<ObsStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [pending, setPending] = useState<'on' | 'off' | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+
+  const state = status?.state ?? 'off';
+
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      getObsStatus()
+        .then((s) => alive && setStatus(s))
+        .catch((e) => alive && setErr(String(e)));
+    load();
+    // Poll while the stack is warming up so the section converges on its own
+    // — a cold enable can take minutes and there's no push channel for status.
+    // Idle at a slow tick otherwise; this page isn't a dashboard.
+    const every = state === 'starting' ? 3000 : 15000;
+    const t = setInterval(load, every);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [state]);
+
+  async function apply(next: 'on' | 'off') {
+    setBusy(true);
+    setErr(null);
+    try {
+      const job = next === 'on' ? await enableObs() : await disableObs();
+      setJobId(job.id);
+      setStatus(await getObsStatus());
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+      setPending(null);
+    }
+  }
+
+  return (
+    <>
+      <SectionLabel>METRICS &amp; LOGS</SectionLabel>
+      <Hint style={{ marginBottom: 16 }}>
+        Records each node&apos;s CPU, memory and disk over time, plus container activity, searchable
+        logs, and threshold alerts. Node status, tasks and basic alerts work without this — turning it
+        on adds the history and the charts.
+      </Hint>
+
+      {status === null && !err && <Hint>Loading…</Hint>}
+
+      {status && (
+        <div style={{ maxWidth: 560 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+            <EnabledToggle
+              enabled={state !== 'off'}
+              onToggle={() => !busy && state !== 'starting' && setPending(state === 'off' ? 'on' : 'off')}
+              title={state === 'starting' ? 'Starting — please wait' : undefined}
+            />
+            <span style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+              {state === 'on' && 'RECORDING'}
+              {state === 'starting' && 'STARTING…'}
+              {state === 'off' && 'NOT RECORDING'}
+            </span>
+          </div>
+
+          {state === 'starting' && (
+            <Hint style={{ marginBottom: 10 }}>
+              Downloading and starting. The first run fetches roughly 500 MB and can take several
+              minutes — you can leave this page.{' '}
+              {jobId && <a href="/tasks" style={{ color: ACCENT }}>Follow it in Tasks →</a>}
+            </Hint>
+          )}
+
+          {state === 'off' && (
+            <Hint style={{ marginBottom: 10 }}>
+              Uses roughly 500 MB of downloads on first start, then grows as it records. Best on a
+              control plane with an SSD or NVMe drive.
+            </Hint>
+          )}
+
+          {/* A stuck "starting" is almost always a pull or health failure —
+              surface it here rather than making the operator find Tasks. */}
+          {state === 'starting' && status.lastError && <Hint warn>{status.lastError}</Hint>}
+          {err && <Hint warn>{err}</Hint>}
+        </div>
+      )}
+
+      {pending === 'on' && (
+        <ConfirmModal
+          title="Turn on metrics & logs?"
+          message={
+            'Rasputin will download about 500 MB the first time, then start recording history to this control plane. Expect a few minutes before charts fill in.\n\n' +
+            'Recorded data keeps growing over time and is not size-capped yet, so this is best on a control plane with an SSD or NVMe drive rather than a memory card.'
+          }
+          confirmLabel={busy ? 'TURNING ON…' : 'TURN ON'}
+          onConfirm={() => apply('on')}
+          onCancel={() => setPending(null)}
+        />
+      )}
+
+      {pending === 'off' && (
+        <ConfirmModal
+          title="Turn off metrics & logs?"
+          message={
+            'Charts, container activity, log search and threshold alerts stop working, and node history stops being recorded.\n\n' +
+            'Everything already recorded is kept — turning this back on later picks up where it left off. Node status and basic alerts are unaffected.'
+          }
+          confirmLabel={busy ? 'TURNING OFF…' : 'TURN OFF'}
+          onConfirm={() => apply('off')}
+          onCancel={() => setPending(null)}
+        />
+      )}
+    </>
   );
 }
 

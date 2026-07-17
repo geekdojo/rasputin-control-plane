@@ -135,9 +135,8 @@ export function AlertsTab({ node }: AlertsTabProps) {
         <CheckCircle2 size={18} color={DIM} />
         <span style={{ color: DIM, fontSize: 11, letterSpacing: '0.1em' }}>NO ACTIVE ALERTS</span>
         <Hint style={{ maxWidth: 360, textAlign: 'center' }}>
-          Nothing in inventory, jobs, apps, or rules is currently flagging this node. Aggregator
-          entries appear here when this node goes stale/offline; rule entries appear when vmalert
-          fires a rule whose <code>nodeId</code> matches.
+          Nothing is currently flagging this node. Alerts appear here when it goes stale or offline,
+          when one of its tasks or apps fails, or when it crosses a threshold you&apos;ve set.
         </Hint>
       </div>
     );

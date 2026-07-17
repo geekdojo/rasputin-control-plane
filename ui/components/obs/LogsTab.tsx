@@ -90,8 +90,7 @@ export function LogsTab({ node, range, obsEnabled, grafanaHref }: LogsTabProps) 
   if (!obsEnabled) {
     return (
       <Hint>
-        Observability is off. Set <code>RASPUTIN_OBS_ENABLED=1</code> and restart the api to enable
-        log shipping (Loki + Alloy).
+        Metrics &amp; logs are off, so logs aren&apos;t being collected. Turn them on in Settings.
       </Hint>
     );
   }
@@ -101,9 +100,8 @@ export function LogsTab({ node, range, obsEnabled, grafanaHref }: LogsTabProps) 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, height: '100%' }}>
       <Hint>
-        Loki currently sources logs from the controlplane host only. Slice 1.2b adds per-node Alloy
-        deploy — the <code>node_id</code> filter is already wired and will start narrowing results
-        the moment that ships.
+        Logs are currently collected from the control plane only, so every node shows the same
+        set. Per-node collection is planned; this view will narrow automatically once it ships.
       </Hint>
 
       {/* Filter row */}

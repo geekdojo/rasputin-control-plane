@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,17 +16,51 @@ import (
 // belt-and-suspenders bound, not the primary UX limiter.
 const maxSeriesRange = 24 * time.Hour
 
-// handleObsStatus returns a snapshot of the obs stack — whether it's
-// enabled (RASPUTIN_OBS_ENABLED at startup), whether VictoriaMetrics
-// reports healthy, and when the metrics fan-out last succeeded / failed.
-// Always 200; "obs disabled" is conveyed via Snapshot.Enabled=false, not
-// an HTTP error, so the UI's polling loop stays simple.
+// handleObsStatus returns a snapshot of the obs stack — the operator's
+// stored opt-in, the lifecycle state (off/starting/on), whether
+// VictoriaMetrics reports healthy, and when the metrics fan-out last
+// succeeded / failed. Always 200; "obs is off" is conveyed via
+// Snapshot.State, not an HTTP error, so the UI's polling loop stays simple.
 //
 // The status struct itself is nil-safe — if obs wasn't wired into the
-// Server, this returns Enabled=false with zero values rather than 500.
+// Server, this returns state=off with zero values rather than 500.
 func (s *Server) handleObsStatus(w http.ResponseWriter, r *http.Request) {
 	snap := s.obs.Snapshot(r.Context())
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// POST /api/obs/enable
+// Body: none. Authenticated. Submits the obs.enable saga and returns the
+// job so the UI can follow it — this is async on purpose: a cold enable
+// pulls ~500 MB and outlives any reasonable request timeout.
+//
+// Session-gated like every other mutating endpoint. There is no admin role
+// in this system (the users table has no role column) — a passkey holder
+// is an operator, and the tailnet is the boundary.
+func (s *Server) handleObsEnable(w http.ResponseWriter, r *http.Request) {
+	s.submitObsJob(w, r, "obs.enable")
+}
+
+// POST /api/obs/disable
+// Body: none. Authenticated. Submits obs.disable — stops the stack but
+// keeps its volumes, so re-enabling later returns with history intact.
+func (s *Server) handleObsDisable(w http.ResponseWriter, r *http.Request) {
+	s.submitObsJob(w, r, "obs.disable")
+}
+
+// submitObsJob is the shared body of the two toggle handlers. Returns 503
+// when the obs workflows were never registered (the supervisor failed to
+// construct at boot) rather than the runner's generic unknown-kind error,
+// which reads like a bug rather than a configuration state.
+func (s *Server) submitObsJob(w http.ResponseWriter, r *http.Request, kind string) {
+	job, err := s.runner.Submit(r.Context(), kind, nil, creator(r))
+	if err != nil {
+		log.Printf("api/obs: submit %s: %v", kind, err)
+		writeError(w, http.StatusServiceUnavailable,
+			"observability cannot be changed on this control plane: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
 }
 
 // handleObsLogs proxies a LogQL range query to Loki. Query params:

@@ -20,4 +20,13 @@ const (
 	// every mode-gated subsystem (firewall apply, IDS, DHCP, mesh advertise,
 	// UI SideNav) reads.
 	KeyMode = "setup.mode"
+	// KeyObsEnabled holds the operator's observability opt-in. Same species
+	// as KeyMode: a stored *intent*, not a derived fact — a stopped stack
+	// is indistinguishable from one that was never meant to run, so no
+	// probe can answer it. Seeded once from RASPUTIN_OBS_ENABLED so
+	// existing dev runs keep working; after that an explicit operator
+	// choice wins and is never re-seeded over, because two sources of
+	// truth would disagree the moment someone used the UI toggle.
+	// See wiki design/control-plane/observability-stack.md §3.8.
+	KeyObsEnabled = "obs.enabled"
 )

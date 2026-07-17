@@ -153,6 +153,20 @@ func (r *Runner) SubmitChild(ctx context.Context, kind string, spec json.RawMess
 }
 
 func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, createdBy, parentID string) (*Job, error) {
+	// Normalize an absent spec to an empty object.
+	//
+	// spec is persisted verbatim into a TEXT column and scanned straight back
+	// into a json.RawMessage (store.go). A nil/empty spec therefore round-trips
+	// as RawMessage(""), which FAILS to marshal — "unexpected end of JSON
+	// input" — and takes the entire /api/jobs response down with it, not just
+	// the offending row. One specless job blanks the whole Tasks page.
+	//
+	// Every workflow that marshals a spec struct already yields "{}" at
+	// minimum, so this just makes the genuinely specless kinds (obs.enable /
+	// obs.disable) match rather than poison the list.
+	if len(spec) == 0 {
+		spec = json.RawMessage("{}")
+	}
 	r.mu.RLock()
 	wf, ok := r.workflows[kind]
 	r.mu.RUnlock()

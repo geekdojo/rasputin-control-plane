@@ -268,6 +268,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/obs/logs", reqd(s.handleObsLogs))
 	mux.HandleFunc("GET /api/obs/series", reqd(s.handleObsSeries))
 	mux.HandleFunc("GET /api/obs/containers", reqd(s.handleObsContainers))
+	// The write half of the obs surface. Both are async (they return a
+	// job) — a cold enable pulls ~500 MB. See obs/jobs.go.
+	mux.HandleFunc("POST /api/obs/enable", reqd(s.handleObsEnable))
+	mux.HandleFunc("POST /api/obs/disable", reqd(s.handleObsDisable))
 
 	// /observability/* is the auth-proxy in front of Grafana. The
 	// trailing slash matters — Go's ServeMux uses it as the prefix

@@ -215,12 +215,26 @@ export function openAlertsWS(onChange: (raw: unknown) => void): () => void {
 
 // ----- Observability ------------------------------------------------------
 
-// getObsStatus returns the current obs-stack snapshot. The handler
-// always 200s — `enabled: false` means RASPUTIN_OBS_ENABLED wasn't set
-// at startup, NOT that the call failed. The UI uses this to render an
-// "enable observability" CTA on /metrics rather than 404-style errors.
+// getObsStatus returns the current obs-stack snapshot. The handler always
+// 200s — `state: 'off'` means the operator hasn't turned observability on,
+// NOT that the call failed.
 export async function getObsStatus(): Promise<ObsStatus> {
   return jsonFetch<ObsStatus>('/api/obs/status');
+}
+
+// enableObs turns observability on. Async by necessity: a first enable pulls
+// ~500 MB, so the api returns a Job rather than blocking the request. Follow
+// it on /tasks, or poll getJob — see the obs.enable saga in
+// api/internal/obs/jobs.go.
+export function enableObs(): Promise<Job> {
+  return jsonFetch<Job>('/api/obs/enable', { method: 'POST' });
+}
+
+// disableObs turns observability off and stops the stack. Recorded history
+// survives — the containers stop but their volumes stay — so re-enabling
+// later comes back with the past still in it.
+export function disableObs(): Promise<Job> {
+  return jsonFetch<Job>('/api/obs/disable', { method: 'POST' });
 }
 
 // getObsSeries fetches a chart-shaped {ts, value}[] for one node + one

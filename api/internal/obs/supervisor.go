@@ -319,6 +319,25 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 		t := true
 		cfg.EnableLoki = &t
 	}
+	if cfg.IDSLogDir != "" {
+		// Compose only reads a volume source as a BIND MOUNT when it's an
+		// absolute path (or starts with ./ — which then resolves against the
+		// project dir, not our cwd, so it'd be wrong here anyway). A bare
+		// relative source like "data/obs/ids-alerts" is parsed as a *named
+		// volume* and the whole project is rejected:
+		//
+		//   service "alloy" refers to undefined volume data/obs/ids-alerts
+		//
+		// dataDir is relative in dev (./data) and absolute on an appliance
+		// (/var/lib/rasputin), so this only ever bit dev — and dev couldn't
+		// reach obs at all until it became UI-toggleable. Normalize here
+		// rather than trusting every caller to pass an absolute path.
+		abs, err := filepath.Abs(cfg.IDSLogDir)
+		if err != nil {
+			return nil, fmt.Errorf("obs supervisor: resolve IDSLogDir: %w", err)
+		}
+		cfg.IDSLogDir = abs
+	}
 	if cfg.EnableIDSPipe == nil {
 		// Implicit-on when both Loki and an IDS log dir are configured.
 		// Off otherwise — there's nothing to ship.

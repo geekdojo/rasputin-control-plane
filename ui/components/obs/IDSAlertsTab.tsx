@@ -118,9 +118,8 @@ export function IDSAlertsTab({ node, range, obsEnabled }: IDSAlertsTabProps) {
   if (!obsEnabled) {
     return (
       <Hint style={{ color: DIM }}>
-        Observability is off (RASPUTIN_OBS_ENABLED != 1). IDS alerts are written to the
-        controlplane disk regardless, but the UI panel needs Loki + the api log-shim to
-        surface them.
+        Metrics &amp; logs are off. Intrusion alerts are still recorded to the control plane&apos;s
+        disk, but showing them here needs log collection turned on — do that in Settings.
       </Hint>
     );
   }
@@ -142,8 +141,8 @@ export function IDSAlertsTab({ node, range, obsEnabled }: IDSAlertsTabProps) {
 
       {!loading && err && (
         <Hint style={{ color: '#f87171' }}>
-          /api/obs/logs failed: {err}. Likely Loki is not yet up (check /api/obs/status) or
-          the api / Alloy hasn't finished plumbing the IDS pipe.
+          Couldn&apos;t load intrusion alerts: {err}. If metrics &amp; logs were just turned on,
+          log collection may still be starting — this usually resolves within a few minutes.
         </Hint>
       )}
 
@@ -235,8 +234,8 @@ export function IDSAlertsTab({ node, range, obsEnabled }: IDSAlertsTabProps) {
           ))}
           {rows.length === PAGE_CAP && (
             <Hint style={{ marginTop: 4 }}>
-              Showing the most recent {PAGE_CAP} alerts. Adjust the range selector for
-              earlier windows, or query Loki directly via /api/obs/logs with a wider limit.
+              Showing the most recent {PAGE_CAP} alerts. Use the range selector to look at
+              earlier windows.
             </Hint>
           )}
         </div>
