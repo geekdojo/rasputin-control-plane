@@ -22,12 +22,13 @@ type fakeSupGrafana struct {
 	grafanaURL string
 }
 
-func (f *fakeSupGrafana) Start(context.Context) error           { return nil }
-func (f *fakeSupGrafana) Stop(context.Context) error            { return nil }
-func (f *fakeSupGrafana) Healthy(context.Context) (bool, error) { return f.healthy, nil }
-func (f *fakeSupGrafana) VMBaseURL() string                     { return f.vmURL }
-func (f *fakeSupGrafana) LokiBaseURL() string                   { return f.lokiURL }
-func (f *fakeSupGrafana) GrafanaBaseURL() string                { return f.grafanaURL }
+func (f *fakeSupGrafana) Start(context.Context) error              { return nil }
+func (f *fakeSupGrafana) Stop(context.Context) error               { return nil }
+func (f *fakeSupGrafana) Healthy(context.Context) (bool, error)    { return f.healthy, nil }
+func (f *fakeSupGrafana) StackReady(context.Context) (bool, error) { return f.healthy, nil }
+func (f *fakeSupGrafana) VMBaseURL() string                        { return f.vmURL }
+func (f *fakeSupGrafana) LokiBaseURL() string                      { return f.lokiURL }
+func (f *fakeSupGrafana) GrafanaBaseURL() string                   { return f.grafanaURL }
 
 // TestObsProxy_ForwardsUserHeader confirms the proxy strips any
 // client-supplied X-Webauth-* and replaces it with the authenticated

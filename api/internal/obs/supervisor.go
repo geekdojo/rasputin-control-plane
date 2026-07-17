@@ -46,9 +46,22 @@ type Supervisor interface {
 	// re-attaches.
 	Stop(ctx context.Context) error
 	// Healthy is true when the VM container is running AND /health
-	// answers 2xx. Used by /api/obs/status and the metrics fan-out's
-	// "is it worth trying to remote-write?" gate.
+	// answers 2xx. This is VICTORIAMETRICS-ONLY on purpose: it gates the
+	// metrics fan-out ("is it worth trying to remote-write?"), and metrics
+	// must keep flowing to VM even when Loki or Grafana are down — they're
+	// independent stores. Do NOT widen this to the whole stack; use
+	// StackReady for "is everything up?".
 	Healthy(ctx context.Context) (bool, error)
+
+	// StackReady is a one-shot check that EVERY enabled service is ready
+	// (VM /health + Loki /ready if enabled + Grafana /api/health if
+	// enabled). Unlike Healthy it reflects the whole stack, and unlike
+	// waitHealthy it doesn't poll — it answers "right now, is the operator's
+	// obs actually working end to end?" for /api/obs/status. A partial
+	// failure (VM up, Loki dead) returns false here while Healthy stays
+	// true, which is exactly the distinction that keeps the UI from showing
+	// a green "recording" while a sidecar is crash-looping.
+	StackReady(ctx context.Context) (bool, error)
 	// VMBaseURL is the host-side base URL the api uses for remote-write
 	// (POST /api/v1/import/prometheus) and queries (GET /api/v1/query).
 	// Empty until Start has succeeded at least once.
@@ -73,13 +86,14 @@ type NoopSupervisor struct{}
 // RASPUTIN_OBS_ENABLED is unset — the rest of the api keeps working
 // (Tier 1 SQLite metrics, alerts aggregator, etc.) and the fan-out sink
 // stays inert.
-func NewNoopSupervisor() Supervisor                          { return NoopSupervisor{} }
-func (NoopSupervisor) Start(context.Context) error           { return nil }
-func (NoopSupervisor) Stop(context.Context) error            { return nil }
-func (NoopSupervisor) Healthy(context.Context) (bool, error) { return false, nil }
-func (NoopSupervisor) VMBaseURL() string                     { return "" }
-func (NoopSupervisor) LokiBaseURL() string                   { return "" }
-func (NoopSupervisor) GrafanaBaseURL() string                { return "" }
+func NewNoopSupervisor() Supervisor                             { return NoopSupervisor{} }
+func (NoopSupervisor) Start(context.Context) error              { return nil }
+func (NoopSupervisor) Stop(context.Context) error               { return nil }
+func (NoopSupervisor) Healthy(context.Context) (bool, error)    { return false, nil }
+func (NoopSupervisor) StackReady(context.Context) (bool, error) { return false, nil }
+func (NoopSupervisor) VMBaseURL() string                        { return "" }
+func (NoopSupervisor) LokiBaseURL() string                      { return "" }
+func (NoopSupervisor) GrafanaBaseURL() string                   { return "" }
 
 // CmdRunner runs a binary and returns its combined output. Injected so
 // tests can drive lifecycle decisions without a real Docker daemon.
@@ -525,6 +539,29 @@ func (s *DockerComposeSupervisor) Healthy(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return ok, nil
+}
+
+// StackReady checks every enabled service once (no polling) and reports
+// whether all are ready. It's the one-shot sibling of waitHealthy — same
+// per-service probes (vmHealth / lokiReady / grafanaReady), gated on the same
+// enable flags — used by /api/obs/status to answer "is obs actually working
+// right now?". A probe error is treated as not-ready (false, nil), never a
+// hard error, so the status handler renders a data state rather than a 500.
+func (s *DockerComposeSupervisor) StackReady(ctx context.Context) (bool, error) {
+	if ok, err := s.vmHealth(ctx); err != nil || !ok {
+		return false, nil
+	}
+	if s.lokiEnabled() {
+		if ok, err := s.lokiReady(ctx); err != nil || !ok {
+			return false, nil
+		}
+	}
+	if s.grafanaEnabled() {
+		if ok, err := s.grafanaReady(ctx); err != nil || !ok {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // VMBaseURL returns the host-side base URL VM is reachable at — e.g.

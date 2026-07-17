@@ -181,8 +181,9 @@ type Snapshot struct {
 	GrafanaURL string `json:"grafanaUrl,omitempty"`
 }
 
-// Snapshot returns the current obs state. Cheap — no I/O beyond the
-// supervisor's Healthy probe, which itself does a 2s-timeout HTTP GET.
+// Snapshot returns the current obs state. Cheap — the only I/O is
+// StackReady's per-service health GETs (VM, plus Loki/Grafana when enabled),
+// each on a short timeout.
 func (s *Status) Snapshot(ctx context.Context) Snapshot {
 	if s == nil || s.sup == nil || s.sink == nil {
 		return Snapshot{Enabled: false, State: StateOff}
@@ -209,15 +210,21 @@ func (s *Status) Snapshot(ctx context.Context) Snapshot {
 			return Snapshot{Enabled: false, State: StateOff}
 		}
 	}
-	healthy, _ := s.sup.Healthy(ctx)
+	// State reflects the WHOLE enabled stack, not just VM. Using VM-only
+	// health here was a lie on partial failure: on the bench (2026-07-17) VM
+	// came up while Loki crash-looped, and the old logic reported
+	// state="on", healthy=true — a green "recording" over a dead sidecar,
+	// with nothing actually landing in Loki. StackReady is only true when
+	// every enabled service answers.
+	ready, _ := s.sup.StackReady(ctx)
 	out := Snapshot{
 		Enabled:     true,
 		State:       StateStarting,
-		Healthy:     healthy,
+		Healthy:     ready,
 		VMBaseURL:   s.sup.VMBaseURL(),
 		LokiBaseURL: s.sup.LokiBaseURL(),
 	}
-	if healthy {
+	if ready {
 		out.State = StateOn
 	}
 	if s.sup.GrafanaBaseURL() != "" {

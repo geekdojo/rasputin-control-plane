@@ -63,6 +63,32 @@ func TestSnapshot_StartingIsNotOff(t *testing.T) {
 	}
 }
 
+func TestSnapshot_PartialFailureIsNotOn(t *testing.T) {
+	// The bench lie, 2026-07-17: VM came up but Loki crash-looped on a perms
+	// bug. VM-only health reported state="on", healthy=true — a green
+	// "recording" over a dead sidecar. State must reflect the whole stack:
+	// VM healthy, StackReady false ⇒ not on.
+	notReady := false
+	sup := &fakeSupervisor{healthy: true, stackReady: &notReady, baseURL: "http://vm", lokiURL: "http://loki"}
+	st := newTestStatus(t, sup)
+	st.SetEnabled(enabledFn(true, nil))
+
+	got := st.Snapshot(context.Background())
+	if got.State == StateOn {
+		t.Error("State = on while a sidecar is down; want starting")
+	}
+	if got.State != StateStarting {
+		t.Errorf("State = %q; want %q", got.State, StateStarting)
+	}
+	if got.Healthy {
+		t.Error("Healthy = true on a partial-stack failure; want false")
+	}
+	// Enablement is unchanged — the operator DID opt in.
+	if !got.Enabled {
+		t.Error("Enabled = false; the operator's opt-in stands even when a sidecar is down")
+	}
+}
+
 func TestSnapshot_OnWhenHealthy(t *testing.T) {
 	st := newTestStatus(t, &fakeSupervisor{healthy: true, baseURL: "http://vm", lokiURL: "http://loki"})
 	st.SetEnabled(enabledFn(true, nil))

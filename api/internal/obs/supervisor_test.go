@@ -504,6 +504,7 @@ func TestVMBaseURL(t *testing.T) {
 // fakeSupervisor is a Supervisor stub for VMSink tests.
 type fakeSupervisor struct {
 	healthy    bool
+	stackReady *bool // nil → mirror `healthy` (most tests only care about VM)
 	baseURL    string
 	lokiURL    string
 	grafanaURL string
@@ -512,9 +513,15 @@ type fakeSupervisor struct {
 func (f *fakeSupervisor) Start(context.Context) error           { return nil }
 func (f *fakeSupervisor) Stop(context.Context) error            { return nil }
 func (f *fakeSupervisor) Healthy(context.Context) (bool, error) { return f.healthy, nil }
-func (f *fakeSupervisor) VMBaseURL() string                     { return f.baseURL }
-func (f *fakeSupervisor) LokiBaseURL() string                   { return f.lokiURL }
-func (f *fakeSupervisor) GrafanaBaseURL() string                { return f.grafanaURL }
+func (f *fakeSupervisor) StackReady(context.Context) (bool, error) {
+	if f.stackReady != nil {
+		return *f.stackReady, nil
+	}
+	return f.healthy, nil
+}
+func (f *fakeSupervisor) VMBaseURL() string      { return f.baseURL }
+func (f *fakeSupervisor) LokiBaseURL() string    { return f.lokiURL }
+func (f *fakeSupervisor) GrafanaBaseURL() string { return f.grafanaURL }
 
 func TestVMSink_RequiresSupervisor(t *testing.T) {
 	if _, err := NewVMSink(VMSinkConfig{}); err == nil {
