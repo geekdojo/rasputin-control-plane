@@ -1111,6 +1111,9 @@ func splitCSV(s string) []string {
 //	RASPUTIN_OBS_VM_LISTEN     — host bind for VM's HTTP listener.
 //	                              Defaults to 127.0.0.1:8428.
 //	RASPUTIN_OBS_VM_RETENTION  — VM -retentionPeriod flag. Default "1y".
+//	RASPUTIN_OBS_VM_MIN_FREE_DISK — free space VM reserves on the partition
+//	                              before refusing writes. Default "2GB".
+//	RASPUTIN_OBS_LOKI_RETENTION — how long logs are kept. Default "720h" (30d).
 //
 // Side effect: when the stored setting says on, this starts the stack in the
 // background and calls metricsSvc.SetSink so every received MetricsEvt fans
@@ -1126,11 +1129,13 @@ func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Servic
 		VMImage:             os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
 		VMListenAddr:        os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
 		VMRetention:         os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
+		VMMinFreeDiskSpace:  os.Getenv("RASPUTIN_OBS_VM_MIN_FREE_DISK"),
 		AlloyImage:          os.Getenv("RASPUTIN_OBS_ALLOY_IMAGE"),
 		AlloyListenAddr:     os.Getenv("RASPUTIN_OBS_ALLOY_LISTEN"),
 		EnableCadvisor:      envBoolPtr("RASPUTIN_OBS_ALLOY_CADVISOR"),
 		LokiImage:           os.Getenv("RASPUTIN_OBS_LOKI_IMAGE"),
 		LokiListenAddr:      os.Getenv("RASPUTIN_OBS_LOKI_LISTEN"),
+		LokiRetention:       os.Getenv("RASPUTIN_OBS_LOKI_RETENTION"),
 		EnableLoki:          envBoolPtr("RASPUTIN_OBS_LOKI"),
 		GrafanaImage:        os.Getenv("RASPUTIN_OBS_GRAFANA_IMAGE"),
 		GrafanaListenAddr:   os.Getenv("RASPUTIN_OBS_GRAFANA_LISTEN"),
