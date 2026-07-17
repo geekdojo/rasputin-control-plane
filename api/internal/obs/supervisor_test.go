@@ -983,3 +983,79 @@ func TestPrepareHostDirs_NoLokiDirWhenDisabled(t *testing.T) {
 		t.Errorf("loki-data dir exists with Loki disabled (err=%v); want absent", err)
 	}
 }
+
+// cAdvisor resolves each container's read-write layer from the daemon's
+// reported DockerRootDir. On a Rasputin appliance that's /var/lib/rasputin/
+// docker (state on the persistent partition), not the default — so the Alloy
+// sidecar must bind-mount THAT path 1:1 or cAdvisor sees only the root cgroup
+// and the Containers tab is empty. Bench-observed 2026-07-17. Masked on dev
+// because Docker/Rancher Desktop keep the default data-root.
+func TestRenderCompose_MountsDiscoveredDockerDataRoot(t *testing.T) {
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	// Simulate what Start's discovery would set on a real appliance.
+	sup.dockerDataRoot = "/var/lib/rasputin/docker"
+	body, err := sup.renderCompose()
+	if err != nil {
+		t.Fatalf("renderCompose: %v", err)
+	}
+	s := string(body)
+	if !strings.Contains(s, "/var/lib/rasputin/docker:/var/lib/rasputin/docker:ro") {
+		t.Errorf("compose does not mount the discovered data-root 1:1:\n%s", s)
+	}
+	// The stale hardcoded default must be gone once a real root is known.
+	if strings.Contains(s, "/var/lib/docker:/var/lib/docker:ro") {
+		t.Errorf("compose still mounts the default /var/lib/docker after discovery:\n%s", s)
+	}
+}
+
+func TestRenderCompose_DockerDataRootFallsBackToDefault(t *testing.T) {
+	// No Start / no discovery → the previous behavior (default path) so dev
+	// and CI are unchanged.
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: t.TempDir()})
+	body, _ := sup.renderCompose()
+	if !strings.Contains(string(body), "/var/lib/docker:/var/lib/docker:ro") {
+		t.Errorf("expected default data-root mount when undiscovered:\n%s", body)
+	}
+}
+
+func TestDiscoverDockerDataRoot(t *testing.T) {
+	cases := []struct {
+		name   string
+		out    string
+		err    error
+		expect string
+	}{
+		{"appliance", "/var/lib/rasputin/docker\n", nil, "/var/lib/rasputin/docker"},
+		{"default", "/var/lib/docker", nil, "/var/lib/docker"},
+		{"error falls back", "", errShim, "/var/lib/docker"},
+		{"empty falls back", "  \n", nil, "/var/lib/docker"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotArgs []string
+			sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+				StateDir: t.TempDir(),
+				Runner: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+					gotArgs = args
+					return []byte(tc.out), tc.err
+				},
+			})
+			got := sup.discoverDockerDataRoot(context.Background())
+			if got != tc.expect {
+				t.Errorf("data-root = %q; want %q", got, tc.expect)
+			}
+			if tc.err == nil && (len(gotArgs) < 2 || gotArgs[0] != "info") {
+				t.Errorf("expected a `docker info` call, got args %v", gotArgs)
+			}
+		})
+	}
+}
+
+var errShim = errShimT("docker daemon down")
+
+type errShimT string
+
+func (e errShimT) Error() string { return string(e) }

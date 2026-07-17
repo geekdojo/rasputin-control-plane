@@ -319,6 +319,11 @@ const (
 	defaultVMAlertImage      = "victoriametrics/vmalert:v1.103.0"
 	defaultAlertsWebhookURL  = "http://host.docker.internal:8080/api/alerts/webhook"
 	defaultDockerBin         = "docker"
+	// defaultDockerDataRoot is Docker's stock data-root. A Rasputin appliance
+	// moves it onto the persistent partition (/var/lib/rasputin/docker) — this
+	// is only the fallback when `docker info` can't be reached (tests, or a
+	// daemon that's momentarily down).
+	defaultDockerDataRoot = "/var/lib/docker"
 
 	// 90s covers Loki's cold-start window. VM alone is up in <5s;
 	// Loki's TSDB schema bootstrap on a fresh data dir can take 30-60s.
@@ -349,6 +354,11 @@ type DockerComposeSupervisor struct {
 	cfg    DockerComposeSupervisorConfig
 	runner CmdRunner
 	httpc  *http.Client
+
+	// dockerDataRoot is the daemon's real data-root, discovered at Start.
+	// Empty until then; renderCompose falls back to defaultDockerDataRoot so
+	// tests that render without a live daemon still produce valid compose.
+	dockerDataRoot string
 }
 
 // NewDockerComposeSupervisor constructs the supervisor. StateDir is
@@ -484,6 +494,13 @@ func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 	if err := s.prepareHostDirs(); err != nil {
 		return err
 	}
+	// Discover Docker's real data-root before rendering compose. cAdvisor
+	// builds its per-container layer-metadata lookups from the path the daemon
+	// reports (DockerRootDir), so the Alloy sidecar must bind-mount THAT path
+	// 1:1 — see discoverDockerDataRoot. Only matters when cAdvisor is on.
+	if s.cadvisorEnabled() {
+		s.dockerDataRoot = s.discoverDockerDataRoot(ctx)
+	}
 	if err := s.writeAlloyConfig(); err != nil {
 		return err
 	}
@@ -528,6 +545,44 @@ func (s *DockerComposeSupervisor) Stop(ctx context.Context) error {
 		return fmt.Errorf("docker compose stop: %w", err)
 	}
 	return nil
+}
+
+// discoverDockerDataRoot asks the daemon where it actually stores data.
+//
+// A Rasputin appliance roots Docker's state on the persistent partition
+// (`/var/lib/rasputin/docker`), not the default `/var/lib/docker`. cAdvisor
+// (embedded in Alloy) reads the daemon's reported DockerRootDir to resolve
+// each container's read-write layer — e.g.
+// `<root>/image/overlay2/layerdb/mounts/<id>/mount-id` — so if the Alloy
+// sidecar bind-mounts the wrong path, cAdvisor can't map cgroups to
+// containers, falls back to the root cgroup only, and the Containers tab is
+// empty for every node. Mounting the daemon-reported root 1:1 fixes it.
+//
+// This bit only on real hardware: Docker/Rancher Desktop keep the default
+// data-root, so dev/CI never saw it — the same appliance-only blind spot as
+// the Loki data-dir permission bug. On failure it falls back to the default
+// path, which is exactly the previous behavior.
+func (s *DockerComposeSupervisor) discoverDockerDataRoot(ctx context.Context) string {
+	out, err := s.runner(ctx, s.cfg.DockerBin, "info", "--format", "{{.DockerRootDir}}")
+	if err != nil {
+		log.Printf("obs supervisor: docker info data-root failed (%v); assuming %s", err, defaultDockerDataRoot)
+		return defaultDockerDataRoot
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		log.Printf("obs supervisor: docker reported empty data-root; assuming %s", defaultDockerDataRoot)
+		return defaultDockerDataRoot
+	}
+	return root
+}
+
+// dockerDataRootOrDefault returns the discovered data-root, or the default
+// when Start hasn't run (tests render compose without a live daemon).
+func (s *DockerComposeSupervisor) dockerDataRootOrDefault() string {
+	if s.dockerDataRoot != "" {
+		return s.dockerDataRoot
+	}
+	return defaultDockerDataRoot
 }
 
 // Healthy probes VM's /health. Returns (false, nil) — not an error — when
@@ -1263,6 +1318,7 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 		AlloyConfigDir:      "./" + alloyConfigSubdir,
 		AlloyConfigFile:     alloyConfigFile,
 		EnableCadvisor:      s.cadvisorEnabled(),
+		DockerDataRoot:      s.dockerDataRootOrDefault(),
 		EnableLoki:          s.lokiEnabled(),
 		EnableIDSPipe:       s.idsPipeEnabled(),
 		IDSLogHostDir:       s.cfg.IDSLogDir,
@@ -1309,6 +1365,7 @@ type composeData struct {
 	AlloyConfigDir      string
 	AlloyConfigFile     string
 	EnableCadvisor      bool
+	DockerDataRoot      string
 	EnableLoki          bool
 	EnableIDSPipe       bool
 	IDSLogHostDir       string // absolute host path, mounted into Alloy at /var/log/rasputin
@@ -1406,7 +1463,11 @@ services:
       # equivalents transparently on macOS / Windows.
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /sys:/sys:ro
-      - /var/lib/docker:/var/lib/docker:ro
+      # Docker's data-root, mounted at its own path so cAdvisor's
+      # layer-metadata lookups (built from the daemon-reported DockerRootDir)
+      # resolve. On the appliance this is /var/lib/rasputin/docker, NOT the
+      # default — see discoverDockerDataRoot.
+      - {{.DockerDataRoot}}:{{.DockerDataRoot}}:ro
 {{- end }}
 {{- if .EnableIDSPipe }}
       # IDS alert JSONL the api writes — Alloy tails it via
