@@ -28,6 +28,15 @@ func ValidRole(r NodeRole) bool {
 	return false
 }
 
+// MaxClusterNodes is the deliberate cluster-size cap, controlplane included
+// (product decision 2026-07-12). The UI's hex grid is designed around it —
+// ui/components/NodeGrid.tsx MAX_NODES must stay in sync. The api enforces it
+// in two places: bus-token minting (a mint that would commit a new node id
+// past the cap is refused) and node registration (a registration that would
+// insert a row past the cap is dropped — the backstop for preseeded matched
+// sets and direct bus connects, which never pass through mint).
+const MaxClusterNodes = 24
+
 // NodeStatus is computed by the api from a node's last heartbeat. It is
 // never sent by an agent.
 type NodeStatus string

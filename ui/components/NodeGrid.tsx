@@ -321,6 +321,8 @@ const DEFAULT_ROLE_PRIORITY = 99;
 
 // MAX_NODES is the design silhouette's capacity — the flattened 24-cell
 // hexagon. At capacity the grid is "full" and shows no add affordance.
+// Must stay in sync with proto.MaxClusterNodes (proto/inventory.go), which
+// the api enforces at token mint and node registration.
 const MAX_NODES = 24;
 
 export function NodeGrid({ nodes, pending = [], selectedId, onSelect, onAddNode, onCancelPending }: NodeGridProps) {

@@ -193,6 +193,21 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	}
 
 	if existing == nil {
+		// Cluster-size cap: never insert a row past proto.MaxClusterNodes.
+		// This is the backstop for enrollment paths that don't pass through
+		// token minting (preseeded matched sets, loopback-trusted connects).
+		// Re-registrations of known nodes take the update path below and are
+		// never affected. Bench-verified 2026-07-15 that without this, a 25th
+		// node enrolls straight into inventory.
+		count, err := s.store.Count(s.ctx)
+		if err != nil {
+			log.Printf("inventory: count nodes: %v", err)
+			return
+		}
+		if count >= proto.MaxClusterNodes {
+			log.Printf("inventory: reject %s: cluster is at the %d-node cap", ev.NodeID, proto.MaxClusterNodes)
+			return
+		}
 		n := &proto.Node{
 			ID:           ev.NodeID,
 			Role:         ev.Role,

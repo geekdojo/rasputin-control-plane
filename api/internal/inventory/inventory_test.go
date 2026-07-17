@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -458,6 +459,50 @@ func TestService_HandleRegistered_EarlyExits(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc.handleRegistered(&nats.Msg{Subject: "rasputin.node.n.evt.registered", Data: tc.data})
 		})
+	}
+}
+
+// ============================================================================
+// Cluster-size cap (proto.MaxClusterNodes): registration never inserts a row
+// past the cap; a known node re-registering at the cap still updates.
+// ============================================================================
+
+func TestService_HandleRegistered_RejectsAtNodeCap(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStore(t)
+	svc := NewService(store, nc)
+	svc.ctx = ctx
+
+	for i := 0; i < proto.MaxClusterNodes; i++ {
+		if err := store.Insert(ctx, makeNode(fmt.Sprintf("n-%02d", i), proto.RoleCompute, time.Second)); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+
+	// A new node id past the cap is dropped: no row, count unchanged.
+	svc.handleRegistered(&nats.Msg{
+		Subject: "rasputin.node.n-extra.evt.registered",
+		Data:    mustJSON(t, proto.NodeRegisteredEvt{NodeID: "n-extra", Role: proto.RoleCompute}),
+	})
+	if n, err := store.Get(ctx, "n-extra"); err != nil || n != nil {
+		t.Fatalf("over-cap registration inserted a row: node=%v err=%v", n, err)
+	}
+	if got, err := store.Count(ctx); err != nil || got != proto.MaxClusterNodes {
+		t.Fatalf("Count = %d (err=%v), want %d", got, err, proto.MaxClusterNodes)
+	}
+
+	// A known node re-registering at the cap takes the update path untouched.
+	svc.handleRegistered(&nats.Msg{
+		Subject: "rasputin.node.n-00.evt.registered",
+		Data:    mustJSON(t, proto.NodeRegisteredEvt{NodeID: "n-00", Role: proto.RoleCompute, Hostname: "renamed"}),
+	})
+	n, err := store.Get(ctx, "n-00")
+	if err != nil || n == nil {
+		t.Fatalf("Get n-00 after re-registration: node=%v err=%v", n, err)
+	}
+	if n.Hostname != "renamed" {
+		t.Errorf("re-registration at cap didn't update the row: hostname=%q", n.Hostname)
 	}
 }
 

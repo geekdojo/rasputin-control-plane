@@ -122,6 +122,14 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// Count returns the number of node rows. Used by the cluster-size-cap guards
+// (proto.MaxClusterNodes) so they don't have to hydrate the full node list.
+func (s *Store) Count(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes`).Scan(&n)
+	return n, err
+}
+
 // Get returns the node with the given id, or (nil, nil) if not found.
 func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
 	row := s.db.QueryRowContext(ctx, `
