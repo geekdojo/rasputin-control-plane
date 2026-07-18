@@ -410,6 +410,30 @@ func TestRenderAlloyConfig_NoNodeIDLabelWhenUnset(t *testing.T) {
 	}
 }
 
+func TestRenderAlloyConfig_LokiWriteCarriesNodeID(t *testing.T) {
+	// With Loki enabled, loki.write must also carry external_labels{node_id} —
+	// otherwise the Logs tab's {node_id="…"} filter matches nothing (Slice 1.2c;
+	// this was the "empty for every node" bug).
+	tr := true
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:           t.TempDir(),
+		ControlPlaneNodeID: "cp-1",
+		EnableLoki:         &tr,
+	})
+	body, err := sup.renderAlloyConfig()
+	if err != nil {
+		t.Fatalf("render alloy: %v", err)
+	}
+	s := string(body)
+	if !strings.Contains(s, `loki.write "local"`) {
+		t.Fatalf("expected loki.write block when Loki enabled\n%s", s)
+	}
+	// node_id must appear in BOTH remote_write (metrics) and loki.write (logs).
+	if n := strings.Count(s, `node_id = "cp-1"`); n < 2 {
+		t.Errorf("node_id label count = %d, want >= 2 (remote_write + loki.write)\n%s", n, s)
+	}
+}
+
 func TestRenderAlloyConfig_CadvisorDisabled(t *testing.T) {
 	f := false
 	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{

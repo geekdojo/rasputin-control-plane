@@ -547,7 +547,7 @@ func main() {
 	// on, tear them down when off.
 	var obsCollectorEntries []scheduler.Entry
 	if obsIngestAddr != "" {
-		ingressURL, ingressServerName, err := obs.DeriveIngressEndpoint(publicBaseURL, obsIngestAddr)
+		ingressBaseURL, ingressServerName, err := obs.DeriveIngressEndpoint(publicBaseURL, obsIngestAddr)
 		if err != nil {
 			log.Fatalf("rasputin-api: obs collector ingress endpoint: %v", err)
 		}
@@ -577,7 +577,7 @@ func main() {
 		}))
 		runner.Register(obs.CollectorDeployWorkflow(obs.CollectorDeployDeps{
 			Inv: invStore, Mint: mintCollectorLeaf,
-			IngressURL: ingressURL, ServerName: ingressServerName,
+			IngressBaseURL: ingressBaseURL, ServerName: ingressServerName,
 		}))
 		runner.Register(obs.CollectorTeardownWorkflow())
 		obsCollectorReconcileEvery := parseDurationOr(
@@ -586,7 +586,7 @@ func main() {
 			Kind: obs.CollectorReconcileKind, Interval: obsCollectorReconcileEvery,
 			InitialDelay: 2 * time.Minute,
 		})
-		log.Printf("rasputin-api: obs collectors enabled — ingress %s (server_name %s)", ingressURL, ingressServerName)
+		log.Printf("rasputin-api: obs collectors enabled — ingress %s (server_name %s)", ingressBaseURL, ingressServerName)
 	}
 
 	// Reconciliation tickers. One scheduler entry per drift-prone

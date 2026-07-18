@@ -257,11 +257,11 @@ func collectorConverge(d CollectorReconcileDeps) jobs.DoFn {
 
 // CollectorDeployDeps is what the per-node deploy workflow needs.
 type CollectorDeployDeps struct {
-	Inv        *inventory.Store
-	Mint       MintCollectorLeafFn
-	IngressURL string // from DeriveIngressEndpoint (canonical hostname, not hardcoded)
-	ServerName string
-	AlloyImage string // optional; defaults to the pinned collector image
+	Inv            *inventory.Store
+	Mint           MintCollectorLeafFn
+	IngressBaseURL string // from DeriveIngressEndpoint (canonical hostname, not hardcoded)
+	ServerName     string
+	AlloyImage     string // optional; defaults to the pinned collector image
 }
 
 // CollectorDeployWorkflow mints the node's client leaf, renders its collector
@@ -301,13 +301,13 @@ func collectorDeploy(d CollectorDeployDeps) jobs.DoFn {
 			return nil, fmt.Errorf("collector deploy: mint leaf for %s: %w", spec.NodeID, err)
 		}
 		compose, err := BuildCollectorCompose(CollectorSpec{
-			NodeID:      spec.NodeID,
-			IngressURL:  d.IngressURL,
-			ServerName:  d.ServerName,
-			LeafCertPEM: leafCert,
-			LeafKeyPEM:  leafKey,
-			MeshCAPEM:   caPEM,
-			AlloyImage:  d.AlloyImage,
+			NodeID:         spec.NodeID,
+			IngressBaseURL: d.IngressBaseURL,
+			ServerName:     d.ServerName,
+			LeafCertPEM:    leafCert,
+			LeafKeyPEM:     leafKey,
+			MeshCAPEM:      caPEM,
+			AlloyImage:     d.AlloyImage,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("collector deploy: build compose: %w", err)

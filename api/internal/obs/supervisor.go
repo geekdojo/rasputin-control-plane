@@ -1158,6 +1158,11 @@ prometheus.scrape "cadvisor" {
 // is the in-network DNS name so the operator's host-port mapping
 // stays invisible to Alloy.
 loki.write "local" {
+{{- if .NodeID }}
+  external_labels = {
+    node_id = "{{.NodeID}}",
+  }
+{{- end }}
   endpoint {
     url = "http://loki:3100/loki/api/v1/push"
   }

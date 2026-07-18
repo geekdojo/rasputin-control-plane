@@ -18,12 +18,12 @@ const (
 
 func validCollectorSpec() CollectorSpec {
 	return CollectorSpec{
-		NodeID:      "c02",
-		IngressURL:  "https://rasputin.local:8443/api/obs/ingest",
-		ServerName:  "rasputin.local",
-		LeafCertPEM: testLeafCert,
-		LeafKeyPEM:  testLeafKey,
-		MeshCAPEM:   testMeshCA,
+		NodeID:         "c02",
+		IngressBaseURL: "https://rasputin.local:8443",
+		ServerName:     "rasputin.local",
+		LeafCertPEM:    testLeafCert,
+		LeafKeyPEM:     testLeafKey,
+		MeshCAPEM:      testMeshCA,
 	}
 }
 
@@ -121,12 +121,19 @@ func TestBuildCollectorCompose_WellFormed(t *testing.T) {
 	alloy := cf.Configs["alloy_config"].Content
 	for _, want := range []string{
 		`node_id = "c02"`,
+		// metrics remote_write endpoint (base + metrics path)
 		`url = "https://rasputin.local:8443/api/obs/ingest"`,
+		// logs loki.write endpoint (base + logs path) — Slice 1.2c
+		`url = "https://rasputin.local:8443/api/obs/logs/ingest"`,
 		`server_name = "rasputin.local"`,
 		`cert_file   = "` + collectorLeafCertPath + `"`,
 		`key_file    = "` + collectorLeafKeyPath + `"`,
 		`ca_file     = "` + collectorMeshCAPath + `"`,
 		"docker_only = true",
+		// the log-shipping block
+		`loki.write "ingress"`,
+		`loki.source.docker "containers"`,
+		`forward_to = [loki.write.ingress.receiver]`,
 	} {
 		if !strings.Contains(alloy, want) {
 			t.Errorf("alloy config missing %q\n---\n%s", want, alloy)
@@ -140,7 +147,7 @@ func TestBuildCollectorCompose_Validation(t *testing.T) {
 		mutate func(*CollectorSpec)
 	}{
 		{"missing NodeID", func(s *CollectorSpec) { s.NodeID = "" }},
-		{"missing IngressURL", func(s *CollectorSpec) { s.IngressURL = "" }},
+		{"missing IngressBaseURL", func(s *CollectorSpec) { s.IngressBaseURL = "" }},
 		{"missing ServerName", func(s *CollectorSpec) { s.ServerName = "" }},
 		{"missing LeafCertPEM", func(s *CollectorSpec) { s.LeafCertPEM = "" }},
 		{"missing LeafKeyPEM", func(s *CollectorSpec) { s.LeafKeyPEM = "" }},
@@ -167,15 +174,15 @@ func TestDeriveIngressEndpoint(t *testing.T) {
 		wantErr     bool
 	}{
 		{"canonical https base", "https://rasputin.local", ":8443",
-			"https://rasputin.local:8443/api/obs/ingest", "rasputin.local", false},
+			"https://rasputin.local:8443", "rasputin.local", false},
 		{"base carries a port, ingress port wins", "https://rasputin.local:443", ":8443",
-			"https://rasputin.local:8443/api/obs/ingest", "rasputin.local", false},
+			"https://rasputin.local:8443", "rasputin.local", false},
 		{"dev http base is forced to https", "http://localhost:8080", ":8443",
-			"https://localhost:8443/api/obs/ingest", "localhost", false},
+			"https://localhost:8443", "localhost", false},
 		{"bare host, no scheme", "rasputin.local", ":8443",
-			"https://rasputin.local:8443/api/obs/ingest", "rasputin.local", false},
+			"https://rasputin.local:8443", "rasputin.local", false},
 		{"ingress addr with explicit interface", "https://rasputin.local", "0.0.0.0:8443",
-			"https://rasputin.local:8443/api/obs/ingest", "rasputin.local", false},
+			"https://rasputin.local:8443", "rasputin.local", false},
 		{"empty base url", "", ":8443", "", "", true},
 		{"ingress addr with no port", "https://rasputin.local", "", "", "", true},
 	}
