@@ -6,9 +6,12 @@ require (
 	github.com/coder/websocket v1.8.12
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/go-webauthn/webauthn v0.11.2
+	github.com/nats-io/jwt/v2 v2.8.1
 	github.com/nats-io/nats-server/v2 v2.11.17
 	github.com/nats-io/nats.go v1.51.0
+	github.com/nats-io/nkeys v0.4.15
 	github.com/oklog/ulid/v2 v2.1.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.33.1
 )
 
@@ -25,8 +28,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/minio/highwayhash v1.0.4 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
-	github.com/nats-io/jwt/v2 v2.8.1 // indirect
-	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
