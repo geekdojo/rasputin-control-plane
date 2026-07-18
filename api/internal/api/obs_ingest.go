@@ -10,89 +10,92 @@ import (
 	"strings"
 )
 
-// obsIngestPattern is the single route served on the api's dedicated mTLS
-// ingress listener. Per-node Alloy collectors remote-write here
-// (observability-stack.md §3.10, Slice 1.2b).
-const obsIngestPattern = "POST /api/obs/ingest"
+// Routes served on the api's dedicated mTLS ingress listener. Per-node Alloy
+// collectors push here — metrics (§3.10) and, since Slice 1.2c, logs (§3.11).
+const (
+	obsIngestPattern     = "POST /api/obs/ingest"      // metrics remote-write
+	obsLogsIngestPattern = "POST /api/obs/logs/ingest" // Loki log push
+)
 
-// vmRemoteWritePath is VictoriaMetrics' Prometheus remote-write endpoint
-// (snappy-compressed protobuf). Note this is NOT the path the api's own
-// host-metrics push sink uses — that's /api/v1/import/prometheus (text
-// exposition). Per-node Alloy speaks the remote-write protocol, so the ingress
-// forwards to /api/v1/write. Both endpoints honor the extra_label query arg.
-const vmRemoteWritePath = "/api/v1/write"
+// Loopback backend paths the ingress forwards to.
+const (
+	// vmRemoteWritePath is VictoriaMetrics' Prometheus remote-write endpoint
+	// (snappy protobuf). NOT the api's own host-metrics sink path
+	// (/api/v1/import/prometheus, text); per-node Alloy speaks remote-write.
+	vmRemoteWritePath = "/api/v1/write"
+	// lokiPushPath is Loki's push endpoint (snappy protobuf). Unlike VM's
+	// remote-write it has no extra_label query arg, so node_id is carried in the
+	// stream labels by the collector's controlplane-rendered config, not stamped
+	// here (§3.11 decision (a)).
+	lokiPushPath = "/loki/api/v1/push"
+)
 
 // ObsIngestHandler builds the http.Handler served on the api's dedicated mTLS
-// ingress listener (wired in main.go). It carries a SINGLE route — the
-// per-node metric ingress — and deliberately no session middleware: the TLS
-// handshake (RequireAndVerifyClientCert against the per-installation mesh CA)
-// IS the authentication, and the verified client cert's CommonName is the
-// authorization identity. Everything reachable on this listener must therefore
-// be safe to expose to any mesh-CA-signed node and nothing else.
+// ingress listener (wired in main.go). Every route here has NO session
+// middleware: the TLS handshake (RequireAndVerifyClientCert against the
+// per-installation mesh CA) IS the authentication, and the verified client
+// cert's CommonName is the authorization identity. Everything reachable on this
+// listener must be safe to expose to any mesh-CA-signed node and nothing else.
 //
-// Kept separate from Handler()/BootstrapHandler() because those serve the
-// browser-facing HTTPS/HTTP surfaces, which are server-auth only (browsers
-// don't present client certs). mTLS gets its own listener so requiring a
-// client cert can't break the UI. See observability-stack.md §3.10.
+// Kept separate from Handler()/BootstrapHandler() (the browser-facing surfaces,
+// server-auth only — browsers don't present client certs) so requiring a client
+// cert can't break the UI. See observability-stack.md §3.10–3.11.
 func (s *Server) ObsIngestHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(obsIngestPattern, s.handleObsIngest)
+	mux.HandleFunc(obsLogsIngestPattern, s.handleObsLogsIngest)
 	return mux
 }
 
-// handleObsIngest reverse-proxies a per-node collector's Prometheus
-// remote-write stream to the loopback VictoriaMetrics, stamping the caller's
-// verified node identity as an authoritative server-side label.
+// authenticateCollector runs the two authorization gates every mTLS ingress
+// route shares, beyond the listener's already-completed RequireAndVerifyClient
+// Cert handshake:
 //
-// It runs ONLY on the mTLS listener, so by the time a request arrives the
-// listener's RequireAndVerifyClientCert has already proven the client cert
-// chains to our mesh CA. Authorization then has two gates beyond that
-// handshake:
+//  1. Identity — node_id is the verified client leaf's CommonName (mesh.MintLeaf
+//     sets CN = node_id). Read from the cert, never from request data, so a node
+//     cannot claim another's identity.
+//  2. Membership / revocation — inv.Get returns (nil, nil) for an unknown id (a
+//     leaf whose node was removed, or that outlived its node); reject it. A real
+//     store error is a 503, not a 403 — we don't know membership, so we don't
+//     silently drop the push.
 //
-//  1. Identity — node_id is the client leaf's CommonName (mesh.MintLeaf sets
-//     CN = node_id for client leaves). It is read from the verified cert, never
-//     from request data, so a node cannot claim another's identity.
-//  2. Membership / revocation — the node_id must be a currently-registered
-//     cluster member. A node removed from inventory loses ingest immediately,
-//     even while its still-unexpired leaf remains cryptographically valid. This
-//     is the CRL-free revocation path from §3.10: node removal cuts access on
-//     the next request, no OCSP/CRL machinery.
-//
-// On success the raw request body is streamed verbatim to
-// VM/api/v1/write?extra_label=node_id=<cn>. VM's extra_label is applied
-// server-side and OVERRIDES any node_id the payload carried (verified
-// 2026-07-17: injected label wins), so the api never decodes the remote-write
-// protobuf and pulls in no protobuf dependency, yet node_id is strictly
-// server-authoritative.
-func (s *Server) handleObsIngest(w http.ResponseWriter, r *http.Request) {
+// On any failure it writes the response and returns ok=false. `label` prefixes
+// the log lines and error bodies so the two routes are distinguishable.
+func (s *Server) authenticateCollector(w http.ResponseWriter, r *http.Request, label string) (nodeID string, ok bool) {
 	nodeID, err := nodeIDFromClientCert(r.TLS)
 	if err != nil {
-		// Defense in depth: the listener's RequireAndVerifyClientCert should
-		// make this unreachable, but if a cert-less request ever gets here
-		// (misconfigured listener), fail closed rather than proxy anonymously.
-		log.Printf("api/obs/ingest: rejecting request without a usable client cert: %v", err)
-		writeError(w, http.StatusUnauthorized, "obs ingest: client certificate required")
-		return
+		// Defense in depth: RequireAndVerifyClientCert should make this
+		// unreachable, but fail closed rather than proxy anonymously.
+		log.Printf("%s: rejecting request without a usable client cert: %v", label, err)
+		writeError(w, http.StatusUnauthorized, label+": client certificate required")
+		return "", false
 	}
-
-	// Membership / revocation gate. inv.Get returns (nil, nil) for an unknown
-	// id — a valid leaf whose node was removed from the cluster (or a leaf that
-	// outlived its node). Cut it off. A real store error is a 503, not a 403:
-	// we don't know the node's membership, so we don't silently drop metrics.
 	node, err := s.inv.Get(r.Context(), nodeID)
 	if err != nil {
-		log.Printf("api/obs/ingest: inventory lookup for %q failed: %v", nodeID, err)
-		writeError(w, http.StatusServiceUnavailable, "obs ingest: inventory unavailable")
-		return
+		log.Printf("%s: inventory lookup for %q failed: %v", label, nodeID, err)
+		writeError(w, http.StatusServiceUnavailable, label+": inventory unavailable")
+		return "", false
 	}
 	if node == nil {
-		log.Printf("api/obs/ingest: rejecting %q — not a current cluster member (removed or stale leaf)", nodeID)
-		writeError(w, http.StatusForbidden, "obs ingest: node is not a current cluster member")
+		log.Printf("%s: rejecting %q — not a current cluster member (removed or stale leaf)", label, nodeID)
+		writeError(w, http.StatusForbidden, label+": node is not a current cluster member")
+		return "", false
+	}
+	return nodeID, true
+}
+
+// handleObsIngest reverse-proxies a per-node collector's Prometheus remote-write
+// stream to the loopback VictoriaMetrics, stamping the caller's verified node
+// identity as an authoritative server-side label (VM's extra_label OVERRIDES any
+// node_id the payload carried — verified 2026-07-17 — so the api never decodes
+// the protobuf yet node_id is server-authoritative). §3.10.
+func (s *Server) handleObsIngest(w http.ResponseWriter, r *http.Request) {
+	nodeID, ok := s.authenticateCollector(w, r, "obs ingest")
+	if !ok {
 		return
 	}
-
-	// Where to write. Empty when obs is off/starting or VM isn't up yet — the
-	// collector's remote-write WAL retries, so a 503 here is safe backpressure.
+	// Empty when obs is off/starting or VM isn't up yet — the collector's WAL
+	// retries, so a 503 here is safe backpressure.
 	base := s.obs.VMWriteBaseURL(r.Context())
 	if base == "" {
 		writeError(w, http.StatusServiceUnavailable,
@@ -102,49 +105,73 @@ func (s *Server) handleObsIngest(w http.ResponseWriter, r *http.Request) {
 	s.proxyRemoteWrite(w, r, base, nodeID)
 }
 
+// handleObsLogsIngest reverse-proxies a per-node collector's Loki push stream to
+// the loopback Loki. Same auth as the metrics route, but node_id is NOT stamped
+// server-side: Loki has no extra_label equivalent, so the collector carries it
+// in the stream labels via its controlplane-rendered config (§3.11 decision (a)).
+// The ingress still fails closed and revocation-checks; it just doesn't override
+// the label.
+func (s *Server) handleObsLogsIngest(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authenticateCollector(w, r, "obs logs ingest"); !ok {
+		return
+	}
+	base := s.obs.LokiWriteBaseURL(r.Context())
+	if base == "" {
+		writeError(w, http.StatusServiceUnavailable,
+			"obs logs ingest: log backend not ready (observability off, Loki disabled, or still starting)")
+		return
+	}
+	s.proxyLokiPush(w, r, base)
+}
+
 // proxyRemoteWrite streams r's body to VM's remote-write endpoint at base,
-// stamping extra_label=node_id=<nodeID> so VM applies the authoritative label
-// server-side. Split out from handleObsIngest so the proxy mechanics (path
-// rewrite + extra_label + body pass-through) are unit-testable against a stub
-// VM without a TLS handshake or a full obs stack.
+// stamping extra_label=node_id=<nodeID> as the authoritative label. Split out so
+// the proxy mechanics are unit-testable against a stub VM.
 func (s *Server) proxyRemoteWrite(w http.ResponseWriter, r *http.Request, base, nodeID string) {
+	// url.Values.Encode escapes the inner '=' to %3D; VM percent-decodes the
+	// query arg before splitting the label, so it reads node_id=<cn> correctly.
+	q := url.Values{}
+	q.Set("extra_label", "node_id="+nodeID)
+	s.reverseProxyIngest(w, r, base, vmRemoteWritePath, q.Encode(), "obs ingest")
+}
+
+// proxyLokiPush streams r's body to Loki's push endpoint at base, verbatim — no
+// query rewrite (Loki has no extra_label; node_id rides in the stream labels).
+func (s *Server) proxyLokiPush(w http.ResponseWriter, r *http.Request, base string) {
+	s.reverseProxyIngest(w, r, base, lokiPushPath, "", "obs logs ingest")
+}
+
+// reverseProxyIngest streams r's body verbatim to a loopback obs backend at
+// base, forcing the outbound path and query regardless of the inbound request.
+// Shared by both ingress routes.
+func (s *Server) reverseProxyIngest(w http.ResponseWriter, r *http.Request, base, path, rawQuery, label string) {
 	target, err := url.Parse(base)
 	if err != nil {
-		log.Printf("api/obs/ingest: bad VM base url %q: %v", base, err)
-		writeError(w, http.StatusInternalServerError, "obs ingest: metrics backend misconfigured")
+		log.Printf("%s: bad backend url %q: %v", label, base, err)
+		writeError(w, http.StatusInternalServerError, label+": backend misconfigured")
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req) // sets scheme + host from target
-		// Force the remote-write path regardless of the inbound path, and set
-		// the authoritative label. url.Values.Encode escapes the inner '=' to
-		// %3D; VM percent-decodes the query arg before splitting the label, so
-		// it reads node_id=<cn> correctly.
-		req.URL.Path = vmRemoteWritePath
-		q := url.Values{}
-		q.Set("extra_label", "node_id="+nodeID)
-		req.URL.RawQuery = q.Encode()
+		req.URL.Path = path
+		req.URL.RawQuery = rawQuery
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		log.Printf("api/obs/ingest: proxy to VM failed: %v", err)
-		writeError(w, http.StatusBadGateway, "obs ingest: metrics backend error")
+		log.Printf("%s: proxy to backend failed: %v", label, err)
+		writeError(w, http.StatusBadGateway, label+": backend error")
 	}
 	proxy.ServeHTTP(w, r)
 }
 
 // nodeIDFromClientCert extracts the calling node's id from a verified mTLS
-// connection. The id is the client leaf's Subject CommonName — the mesh CA
-// mints per-node client leaves with CN = node_id (mesh.LeafSpec, §3.10). We
-// read the CN (not a SAN) because that is exactly what the minter sets and it
-// is a single unambiguous value.
-//
-// Returns an error — all "reject the request" conditions — when there is no TLS
-// state, no peer certificate, or an empty CommonName. It does NOT re-verify the
-// chain: the listener's RequireAndVerifyClientCert already proved the leaf
-// chains to the mesh CA before any handler runs. This only reads identity off
-// the already-verified leaf (PeerCertificates[0], which Go orders leaf-first).
+// connection — the client leaf's Subject CommonName (mesh mints per-node client
+// leaves with CN = node_id). Returns an error (all "reject the request"
+// conditions) on no TLS state, no peer cert, or an empty CommonName. It does NOT
+// re-verify the chain: RequireAndVerifyClientCert already proved the leaf chains
+// to the mesh CA before any handler runs; this only reads identity off the
+// already-verified leaf (PeerCertificates[0], leaf-first).
 func nodeIDFromClientCert(cs *tls.ConnectionState) (string, error) {
 	if cs == nil {
 		return "", errors.New("no TLS connection state (non-TLS request)")

@@ -106,10 +106,12 @@ func TestProxyRemoteWrite(t *testing.T) {
 // URL flows through.
 type fakeVMSup struct {
 	obs.NoopSupervisor
-	vmBase string
+	vmBase   string
+	lokiBase string
 }
 
-func (f fakeVMSup) VMBaseURL() string { return f.vmBase }
+func (f fakeVMSup) VMBaseURL() string   { return f.vmBase }
+func (f fakeVMSup) LokiBaseURL() string { return f.lokiBase }
 
 // newIngestServer builds a minimal Server holding just the two fields the
 // ingress touches — a real (SQLite) inventory store seeded with seedNodes, and
@@ -136,6 +138,102 @@ func ingestReq(cn string) *http.Request {
 		req.TLS = certState(cn)
 	}
 	return req
+}
+
+// TestProxyLokiPush verifies the log-push proxy: the inbound path is rewritten
+// to Loki's push endpoint, no extra_label is added (Loki has none — node_id
+// rides in the stream labels), and method + body pass through verbatim.
+func TestProxyLokiPush(t *testing.T) {
+	var gotPath, gotQuery, gotMethod, gotBody string
+	stubLoki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer stubLoki.Close()
+
+	const body = "snappy-loki-push-bytes"
+	req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	(&Server{}).proxyLokiPush(rec, req, stubLoki.URL)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status: got %d, want 204; body=%q", rec.Code, rec.Body.String())
+	}
+	if gotPath != lokiPushPath {
+		t.Errorf("Loki path: got %q, want %q", gotPath, lokiPushPath)
+	}
+	if gotQuery != "" {
+		t.Errorf("Loki push must carry no query (no extra_label), got %q", gotQuery)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: got %q, want POST", gotMethod)
+	}
+	if gotBody != body {
+		t.Errorf("body: got %q, want %q", gotBody, body)
+	}
+}
+
+func TestHandleObsLogsIngest(t *testing.T) {
+	offStatus := func() *obs.Status { return obs.NewStatus(obs.NewNoopSupervisor(), nil, nil) }
+
+	t.Run("no client cert → 401", func(t *testing.T) {
+		s := newIngestServer(t, offStatus(), "c02")
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
+		s.handleObsLogsIngest(rec, req) // req.TLS nil
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401; body=%q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("verified cert but node not in inventory → 403", func(t *testing.T) {
+		s := newIngestServer(t, offStatus()) // no nodes
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
+		req.TLS = certState("ghost")
+		s.handleObsLogsIngest(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("got %d, want 403; body=%q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("member node but Loki off → 503", func(t *testing.T) {
+		s := newIngestServer(t, offStatus(), "c02")
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
+		req.TLS = certState("c02")
+		s.handleObsLogsIngest(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("got %d, want 503; body=%q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("member node + Loki up → proxied to Loki push", func(t *testing.T) {
+		var gotPath string
+		stubLoki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer stubLoki.Close()
+
+		s := newIngestServer(t, obs.NewStatus(fakeVMSup{lokiBase: stubLoki.URL}, nil, nil), "c02")
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("payload"))
+		req.TLS = certState("c02")
+		s.handleObsLogsIngest(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("got %d, want 204; body=%q", rec.Code, rec.Body.String())
+		}
+		if gotPath != lokiPushPath {
+			t.Errorf("Loki path: got %q, want %q", gotPath, lokiPushPath)
+		}
+	})
 }
 
 func TestHandleObsIngest(t *testing.T) {

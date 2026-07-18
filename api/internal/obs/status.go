@@ -164,6 +164,27 @@ func (s *Status) VMWriteBaseURL(ctx context.Context) string {
 	return s.sup.VMBaseURL()
 }
 
+// LokiWriteBaseURL is the loopback base URL the obs mTLS ingress reverse-proxies
+// per-node log pushes to (observability-stack.md §3.11). Same gating as
+// VMWriteBaseURL — empty (→ 503 at the ingress) when obs is off, the supervisor
+// is the Noop one, OR Loki is disabled (the supervisor reports an empty
+// LokiBaseURL in that case). Loki stays loopback-only; this URL is api-internal.
+func (s *Status) LokiWriteBaseURL(ctx context.Context) string {
+	if s == nil || s.sup == nil {
+		return ""
+	}
+	if _, ok := s.sup.(NoopSupervisor); ok {
+		return ""
+	}
+	if s.enabled != nil {
+		on, err := s.enabled(ctx)
+		if err != nil || !on {
+			return ""
+		}
+	}
+	return s.sup.LokiBaseURL()
+}
+
 // Snapshot is the JSON shape returned by /api/obs/status.
 type Snapshot struct {
 	// Enabled reflects the operator's stored opt-in. False means the
