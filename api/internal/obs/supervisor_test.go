@@ -382,6 +382,34 @@ func TestRenderAlloyConfig_DefaultIncludesCadvisor(t *testing.T) {
 	}
 }
 
+func TestRenderAlloyConfig_NodeIDLabel(t *testing.T) {
+	// With ControlPlaneNodeID set, the controlplane's own remote-write stamps
+	// external_labels{node_id} so its containers filter uniformly (§3.10 p5).
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:           t.TempDir(),
+		ControlPlaneNodeID: "cp-1",
+	})
+	body, err := sup.renderAlloyConfig()
+	if err != nil {
+		t.Fatalf("render alloy: %v", err)
+	}
+	for _, want := range []string{"external_labels = {", `node_id = "cp-1"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("alloy config missing %q\n--- alloy ---\n%s", want, body)
+		}
+	}
+}
+
+func TestRenderAlloyConfig_NoNodeIDLabelWhenUnset(t *testing.T) {
+	// Empty ControlPlaneNodeID (dev / no self-id) omits the block entirely,
+	// rather than tagging every sample with node_id="".
+	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{StateDir: t.TempDir()})
+	body, _ := sup.renderAlloyConfig()
+	if strings.Contains(string(body), "external_labels") {
+		t.Errorf("expected no external_labels when node id unset\n%s", body)
+	}
+}
+
 func TestRenderAlloyConfig_CadvisorDisabled(t *testing.T) {
 	f := false
 	sup, _ := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{

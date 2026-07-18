@@ -507,7 +507,7 @@ func main() {
 	obsEnabled := func(ctx context.Context) (bool, error) {
 		return setupStore.GetBool(ctx, setup.KeyObsEnabled, false)
 	}
-	obsSup, obsSink, obsStatus := mustWireObs(ctx, dataDir, metricsSvc, idsLogDir, obsEnabled)
+	obsSup, obsSink, obsStatus := mustWireObs(ctx, dataDir, selfNodeID, metricsSvc, idsLogDir, obsEnabled)
 	defer func() {
 		// Only tear down what we brought up. Stop shells out to `docker
 		// compose stop`; on a never-started stack that's a pointless
@@ -1216,13 +1216,14 @@ func splitCSV(s string) []string {
 // Side effect: when the stored setting says on, this starts the stack in the
 // background and calls metricsSvc.SetSink so every received MetricsEvt fans
 // out to VM after the SQLite insert.
-func mustWireObs(ctx context.Context, dataDir string, metricsSvc *metrics.Service, idsLogDir string, enabled obs.EnabledFn) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
+func mustWireObs(ctx context.Context, dataDir, selfNodeID string, metricsSvc *metrics.Service, idsLogDir string, enabled obs.EnabledFn) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
 	stateDir := envOr("RASPUTIN_OBS_STATE_DIR", filepath.Join(dataDir, "obs"))
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: obs state dir: %v", err)
 	}
 	sup, err := obs.NewDockerComposeSupervisor(obs.DockerComposeSupervisorConfig{
 		StateDir:            stateDir,
+		ControlPlaneNodeID:  selfNodeID,
 		DockerBin:           obsDockerBin(),
 		VMImage:             os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
 		VMListenAddr:        os.Getenv("RASPUTIN_OBS_VM_LISTEN"),

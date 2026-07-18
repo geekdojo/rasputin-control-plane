@@ -193,7 +193,8 @@ func (s *Server) handleObsSeries(w http.ResponseWriter, r *http.Request) {
 // handleObsContainers returns the cAdvisor-derived container table for
 // the NodeDetailDrawer's Containers tab.
 //
-//	node — node id (required; advisory until Slice 1.2b ships per-node Alloy)
+//	node — node id (required); filters on the node_id label so the drawer
+//	       shows that node's containers (Slice 1.2b per-node collectors).
 //
 // 503 when obs is off, 502 if VM errors. Returns [] (not 404) when no
 // containers match — the UI renders that as "no containers visible from

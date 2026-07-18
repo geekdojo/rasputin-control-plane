@@ -144,6 +144,44 @@ func TestContainersClient_EmptyResultNotError(t *testing.T) {
 	}
 }
 
+// TestContainersClient_NodeFilter asserts the node id becomes a node_id
+// PromQL label matcher (Slice 1.2b) — so each drawer shows only that node's
+// containers — and that an empty node id emits no such matcher.
+func TestContainersClient_NodeFilter(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query().Get("query"))
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	defer srv.Close()
+	c, _ := NewContainersClient(ContainersClientConfig{Supervisor: &fakeSupervisor{baseURL: srv.URL}})
+
+	// With a node id, every query carries node_id="c02".
+	queries = nil
+	if _, err := c.List(context.Background(), "c02"); err != nil {
+		t.Fatalf("List(c02): %v", err)
+	}
+	if len(queries) != 3 {
+		t.Fatalf("got %d queries, want 3", len(queries))
+	}
+	for _, q := range queries {
+		if !strings.Contains(q, `node_id="c02"`) {
+			t.Errorf("query missing node_id filter: %q", q)
+		}
+	}
+
+	// With no node id, no node_id matcher (pre-1.2b cluster-wide behavior).
+	queries = nil
+	if _, err := c.List(context.Background(), ""); err != nil {
+		t.Fatalf("List(\"\"): %v", err)
+	}
+	for _, q := range queries {
+		if strings.Contains(q, "node_id") {
+			t.Errorf("empty node id should not filter, but query has node_id: %q", q)
+		}
+	}
+}
+
 // TestContainersClient_VMError surfaces VM's error body so the
 // operator can diagnose without log-diving.
 func TestContainersClient_VMError(t *testing.T) {

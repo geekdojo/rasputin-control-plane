@@ -18,12 +18,11 @@ import (
 // Alloy publishes to VictoriaMetrics — CPU%, memory, restarts — into
 // the row shape the NodeDetailDrawer's Containers tab renders.
 //
-// Today cAdvisor only runs on the controlplane host (per the Slice 1.2
-// Alloy config), so List() returns the controlplane's container set
-// regardless of the requested node. When Slice 1.2b deploys Alloy on
-// every node and tags samples with `node_id`, the NodeID filter on
-// the underlying PromQL starts narrowing the result without an API
-// shape change.
+// Since Slice 1.2b, a collector runs on every Docker-capable node and the
+// controlplane's own Alloy is tagged too (§3.10 piece 5), all stamping
+// samples with `node_id`. List() filters on that label, so each node's drawer
+// shows that node's containers. An empty nodeID returns every container
+// (the pre-1.2b behavior).
 type ContainersClient struct {
 	sup    Supervisor
 	client *http.Client
@@ -62,10 +61,10 @@ type Container struct {
 	Restarts int64   `json:"restarts"`
 }
 
-// List returns one Container per running container cAdvisor sees. Sorted
-// by CPU descending so the busiest container lands at the top of the
-// table. nodeID is currently advisory — see ContainersClient doc — and
-// reserved for the Slice 1.2b multi-node deploy.
+// List returns one Container per running container cAdvisor sees on the
+// given node. Sorted by CPU descending so the busiest container lands at the
+// top of the table. A non-empty nodeID filters on the `node_id` label; an
+// empty one returns every container across the cluster.
 func (c *ContainersClient) List(ctx context.Context, nodeID string) ([]Container, error) {
 	base := c.sup.VMBaseURL()
 	if base == "" {
@@ -76,10 +75,19 @@ func (c *ContainersClient) List(ctx context.Context, nodeID string) ([]Container
 	// the image ref. We rate-over-1m for CPU so the value is intuitive
 	// ("0.5 cores"); 30s and 5m are alternatives if 1m turns out to be
 	// too jumpy on the actual cluster.
-	cpuQ := `sum by (name, image) (rate(container_cpu_usage_seconds_total{name!=""}[1m]))`
-	memQ := `sum by (name, image) (container_memory_working_set_bytes{name!=""})`
-	resQ := `sum by (name, image) (container_start_time_seconds{name!=""})` // proxy for restarts; see doc
-	_ = nodeID                                                              // forward-compat; see doc
+	//
+	// Since Slice 1.2b every node's collector (and the controlplane's own
+	// Alloy, §3.10 piece 5) tags samples with node_id, so a non-empty nodeID
+	// narrows each query to that node's containers. strconv.Quote escapes the
+	// operator-supplied value into a safe PromQL string literal. Empty nodeID
+	// (no filter) still returns everything — the pre-1.2b behavior.
+	sel := `name!=""`
+	if nodeID != "" {
+		sel += `,node_id=` + strconv.Quote(nodeID)
+	}
+	cpuQ := `sum by (name, image) (rate(container_cpu_usage_seconds_total{` + sel + `}[1m]))`
+	memQ := `sum by (name, image) (container_memory_working_set_bytes{` + sel + `})`
+	resQ := `sum by (name, image) (container_start_time_seconds{` + sel + `})` // proxy for restarts; see doc
 
 	type cell struct {
 		Container

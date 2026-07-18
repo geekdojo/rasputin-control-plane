@@ -168,6 +168,13 @@ type DockerComposeSupervisorConfig struct {
 	// off if those mounts aren't permitted in your environment.
 	EnableCadvisor *bool
 
+	// ControlPlaneNodeID stamps the controlplane's own Alloy remote-write
+	// with external_labels{node_id} so its container metrics carry the same
+	// node_id the per-node collectors emit (Slice 1.2b §3.10 piece 5) — that's
+	// what makes the Containers tab's node filter work uniformly across every
+	// node, controlplane included. Empty (dev / no self-id) omits the label.
+	ControlPlaneNodeID string
+
 	// LokiImage overrides the Loki image reference. Defaults to the
 	// pinned upstream tag. Loki joins the compose stack at Slice 1.3
 	// and receives container-log pushes from Alloy's loki.source.docker
@@ -1076,6 +1083,7 @@ func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
 		EnableCadvisor: s.cadvisorEnabled(),
 		EnableLoki:     s.lokiEnabled(),
 		EnableIDSPipe:  s.idsPipeEnabled(),
+		NodeID:         s.cfg.ControlPlaneNodeID,
 	}
 	var buf bytes.Buffer
 	if err := alloyConfigTmpl.Execute(&buf, data); err != nil {
@@ -1088,6 +1096,10 @@ type alloyConfigData struct {
 	EnableCadvisor bool
 	EnableLoki     bool
 	EnableIDSPipe  bool
+	// NodeID, when set, tags every sample this controlplane Alloy writes with
+	// external_labels{node_id} so its containers filter uniformly with the
+	// per-node collectors (§3.10 piece 5).
+	NodeID string
 }
 
 // alloyConfigTmpl is the Slice 1.2 Alloy config in River syntax. It does
@@ -1110,6 +1122,11 @@ var alloyConfigTmpl = template.Must(template.New("alloy-config").Parse(`// Gener
 // Edits get clobbered on the next supervisor Start.
 
 prometheus.remote_write "vm" {
+{{- if .NodeID }}
+  external_labels = {
+    node_id = "{{.NodeID}}",
+  }
+{{- end }}
   endpoint {
     url = "http://victoriametrics:8428/api/v1/write"
   }
