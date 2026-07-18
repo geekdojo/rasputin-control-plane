@@ -99,11 +99,6 @@ export function LogsTab({ node, range, obsEnabled, grafanaHref }: LogsTabProps) 
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, height: '100%' }}>
-      <Hint>
-        Logs are currently collected from the control plane only, so every node shows the same
-        set. Per-node collection is planned; this view will narrow automatically once it ships.
-      </Hint>
-
       {/* Filter row */}
       <div
         style={{
