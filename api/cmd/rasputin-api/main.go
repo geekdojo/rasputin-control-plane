@@ -540,6 +540,55 @@ func main() {
 	}))
 	runner.Register(obs.DisableWorkflow(obsSup, setObsEnabled, setObsSink))
 
+	// Per-node observability collectors (Slice 1.2b, §3.10). Only in appliance
+	// mode: the mTLS ingress the collectors write to is appliance-only
+	// (obsIngestAddr), and dev has no compute/storage nodes. The reconcile
+	// converges the fleet to the operator's obs opt-in — deploy collectors when
+	// on, tear them down when off.
+	var obsCollectorEntries []scheduler.Entry
+	if obsIngestAddr != "" {
+		ingressURL, ingressServerName, err := obs.DeriveIngressEndpoint(publicBaseURL, obsIngestAddr)
+		if err != nil {
+			log.Fatalf("rasputin-api: obs collector ingress endpoint: %v", err)
+		}
+		// Mint (idempotently, near-expiry renewal via MintLeafToDisk) each
+		// node's client-auth leaf under the mesh CA. CN = node_id is what the
+		// ingress reads back; the DNS SAN is cosmetic for a client leaf (Go
+		// verifies the chain + clientAuth EKU, not SANs, on the server side).
+		mintCollectorLeaf := func(nodeID string) (certPEM, keyPEM, caPEM string, err error) {
+			paths, err := mesh.MintLeafToDisk(meshCA,
+				filepath.Join(dataDir, "tls", "collectors", nodeID),
+				mesh.LeafSpec{CommonName: nodeID, DNSNames: []string{nodeID}, ClientAuth: true})
+			if err != nil {
+				return "", "", "", err
+			}
+			cert, err := os.ReadFile(paths.CertPath)
+			if err != nil {
+				return "", "", "", fmt.Errorf("read collector leaf cert: %w", err)
+			}
+			key, err := os.ReadFile(paths.KeyPath)
+			if err != nil {
+				return "", "", "", fmt.Errorf("read collector leaf key: %w", err)
+			}
+			return string(cert), string(key), string(meshCA.CertPEM), nil
+		}
+		runner.Register(obs.CollectorReconcileWorkflow(obs.CollectorReconcileDeps{
+			Inv: invStore, Jobs: jobStore, Runner: runner, Enabled: obsEnabled,
+		}))
+		runner.Register(obs.CollectorDeployWorkflow(obs.CollectorDeployDeps{
+			Inv: invStore, Mint: mintCollectorLeaf,
+			IngressURL: ingressURL, ServerName: ingressServerName,
+		}))
+		runner.Register(obs.CollectorTeardownWorkflow())
+		obsCollectorReconcileEvery := parseDurationOr(
+			os.Getenv("RASPUTIN_OBS_COLLECTOR_RECONCILE_INTERVAL"), 5*time.Minute)
+		obsCollectorEntries = append(obsCollectorEntries, scheduler.Entry{
+			Kind: obs.CollectorReconcileKind, Interval: obsCollectorReconcileEvery,
+			InitialDelay: 2 * time.Minute,
+		})
+		log.Printf("rasputin-api: obs collectors enabled — ingress %s (server_name %s)", ingressURL, ingressServerName)
+	}
+
 	// Reconciliation tickers. One scheduler entry per drift-prone
 	// subsystem; staggered so the bus doesn't stampede at startup. All
 	// intervals are env-overridable (parsed by parseDurationOr below).
@@ -547,11 +596,11 @@ func main() {
 	fwReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_FW_RECONCILE_INTERVAL"), 5*time.Minute)
 	appsReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_RECONCILE_INTERVAL"), 5*time.Minute)
 	meshReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_MESH_RECONCILE_INTERVAL"), 5*time.Minute)
-	sched := scheduler.New(runner, []scheduler.Entry{
+	sched := scheduler.New(runner, append([]scheduler.Entry{
 		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
 		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
 		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
-	})
+	}, obsCollectorEntries...))
 	sched.Start(ctx)
 	defer sched.Stop()
 
