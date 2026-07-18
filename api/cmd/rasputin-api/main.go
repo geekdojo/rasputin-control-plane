@@ -64,6 +64,19 @@ func main() {
 	// RASPUTIN_RP_ID=rasputin.local, RASPUTIN_RP_ORIGINS=https://rasputin.local,
 	// RASPUTIN_PUBLIC_BASE_URL=https://rasputin.local).
 	httpsAddr := os.Getenv("RASPUTIN_HTTPS_ADDR")
+	// obsIngestAddr is the dedicated mTLS remote-write ingress for per-node obs
+	// collectors (Slice 1.2b, observability-stack.md §3.10). It comes up only in
+	// appliance mode (HTTPS on) — dev has no mesh server leaf and no compute
+	// nodes — and defaults to :8443 on all interfaces so compute/storage nodes
+	// can reach it via rasputin.local, the same mDNS path they already use for
+	// NATS. mTLS-only (RequireAndVerifyClientCert against the mesh CA): a
+	// connection without a mesh-CA-signed client cert never completes the
+	// handshake, so an always-open :8443 is not an open door, and VM stays
+	// loopback-only behind it.
+	obsIngestAddr := ""
+	if httpsAddr != "" {
+		obsIngestAddr = envOr("RASPUTIN_OBS_INGEST_ADDR", ":8443")
+	}
 
 	if err := os.MkdirAll(filepath.Join(dataDir, "nats"), 0o755); err != nil {
 		log.Fatalf("rasputin-api: data dir: %v", err)
@@ -593,13 +606,34 @@ func main() {
 	// https). With HTTPS off — every dev run — it serves the full handler
 	// exactly as before.
 	httpHandler := handler
-	var httpsSrv *http.Server
+	var httpsSrv, obsIngestSrv *http.Server
 	if httpsAddr != "" {
 		httpsSrv = &http.Server{
 			Addr:              httpsAddr,
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 			TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+		}
+		// The obs mTLS ingress shares the api's own server leaf for its
+		// identity (started with the same cert/key below, once minted) but
+		// adds RequireAndVerifyClientCert against the mesh CA — a per-node
+		// collector authenticates purely by presenting a mesh-CA-signed client
+		// leaf, whose node_id is the cert CN (see obs_ingest.go). Constructed
+		// synchronously here (like httpsSrv) so shutdown can reach it; it only
+		// starts serving inside the clock-gated goroutine, after the leaf exists.
+		if obsIngestAddr != "" {
+			clientCAs := x509.NewCertPool()
+			clientCAs.AddCert(meshCA.Cert)
+			obsIngestSrv = &http.Server{
+				Addr:              obsIngestAddr,
+				Handler:           srv.ObsIngestHandler(),
+				ReadHeaderTimeout: 10 * time.Second,
+				TLSConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+					ClientAuth: tls.RequireAndVerifyClientCert,
+					ClientCAs:  clientCAs,
+				},
+			}
 		}
 		// HTTP demotes to the bootstrap surface right away so the node is
 		// reachable immediately; HTTPS comes up asynchronously once the clock
@@ -630,6 +664,18 @@ func main() {
 				log.Fatalf("rasputin-api: https leaf: %v", err)
 			}
 			log.Printf("rasputin-api: https listening on %s (leaf %s)", httpsAddr, leafPaths.CertPath)
+			// Bring up the obs mTLS ingress on the same leaf, in its own
+			// goroutine so it serves alongside (not after) HTTPS. Both listeners
+			// load the leaf files at serve time; the leaf's SAN-drift re-mint
+			// path (MintLeafToDisk) applies on the next restart, same as HTTPS.
+			if obsIngestSrv != nil {
+				go func() {
+					log.Printf("rasputin-api: obs mTLS ingress listening on %s", obsIngestAddr)
+					if err := obsIngestSrv.ListenAndServeTLS(leafPaths.CertPath, leafPaths.KeyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
+						log.Fatalf("rasputin-api: obs ingress: %v", err)
+					}
+				}()
+			}
 			if err := httpsSrv.ListenAndServeTLS(leafPaths.CertPath, leafPaths.KeyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("rasputin-api: https: %v", err)
 			}
@@ -677,6 +723,9 @@ func main() {
 	_ = httpSrv.Shutdown(shutCtx)
 	if httpsSrv != nil {
 		_ = httpsSrv.Shutdown(shutCtx)
+	}
+	if obsIngestSrv != nil {
+		_ = obsIngestSrv.Shutdown(shutCtx)
 	}
 	// Bound the job-runner drain — a stuck worker must not wedge shutdown (#8).
 	runnerDone := make(chan struct{})

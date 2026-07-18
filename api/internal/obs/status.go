@@ -137,6 +137,33 @@ func (s *Status) GrafanaBaseURL(ctx context.Context) string {
 	return s.sup.GrafanaBaseURL()
 }
 
+// VMWriteBaseURL is the loopback base URL the obs mTLS ingress
+// reverse-proxies per-node remote-write requests to (observability-stack.md
+// §3.10). Empty — which the ingress renders as 503 — when there's nowhere to
+// write: obs is off (operator hasn't opted in), the supervisor is the Noop
+// one, or VM hasn't reported a base URL yet (still starting).
+//
+// Gating on the stored opt-in (mirrors GrafanaBaseURL) is defense in depth:
+// the reconcile saga tears collectors down when obs is disabled, but a stale
+// collector that keeps pushing gets a clean 503 here rather than a proxy
+// attempt at a torn-down VM. VM itself stays loopback-only; this URL is never
+// LAN-facing — it's the api-internal target the ingress forwards to.
+func (s *Status) VMWriteBaseURL(ctx context.Context) string {
+	if s == nil || s.sup == nil {
+		return ""
+	}
+	if _, ok := s.sup.(NoopSupervisor); ok {
+		return ""
+	}
+	if s.enabled != nil {
+		on, err := s.enabled(ctx)
+		if err != nil || !on {
+			return ""
+		}
+	}
+	return s.sup.VMBaseURL()
+}
+
 // Snapshot is the JSON shape returned by /api/obs/status.
 type Snapshot struct {
 	// Enabled reflects the operator's stored opt-in. False means the
