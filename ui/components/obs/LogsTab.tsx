@@ -5,11 +5,11 @@
 // the latest 200 entries (cap surfaced in the footer; Loki cap is
 // 5000 if a power user hits the api directly).
 //
-// Source caveat: today Loki only receives logs from the controlplane
-// host's own containers (Slice 1.2b adds per-node Alloy). We always
-// pass the drawer node as ?node= so the filter starts working the
-// moment 1.2b lands; until then, all nodes see the same lines (a
-// Hint at the top makes that explicit).
+// Per-node logs (Slice 1.2c): every node's collector ships its container logs
+// through the mTLS ingress tagged node_id, so ?node= narrows to that node's
+// lines. The container dropdown lists the node's running containers (from
+// /api/obs/containers) unioned with whatever has logged in-range, so a
+// running-but-quiet container is still selectable (it just shows no entries).
 //
 // No tail/streaming yet — the operator clicks Refetch or changes a
 // filter to update. WebSocket tail can land in a future iteration.
@@ -17,8 +17,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ExternalLink, RefreshCw, Search } from 'lucide-react';
 import type { Node } from '../../lib/types';
-import type { LogEntry } from '../../lib/api';
-import { getObsLogs } from '../../lib/api';
+import type { LogEntry, ObsContainer } from '../../lib/api';
+import { getObsContainers, getObsLogs } from '../../lib/api';
 import { Btn, DIM, FG, HAIR, Hint, Input, Select } from '../kit';
 import { accentA, MONO } from '../ui-theme';
 
@@ -40,6 +40,10 @@ export function LogsTab({ node, range, obsEnabled, grafanaHref }: LogsTabProps) 
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // The node's running containers, so the dropdown can offer a container even
+  // when it hasn't logged in the current range. Best-effort: on failure we fall
+  // back to the log-derived options below.
+  const [running, setRunning] = useState<string[]>([]);
 
   // 350ms grep debounce
   useEffect(() => {
@@ -75,15 +79,33 @@ export function LogsTab({ node, range, obsEnabled, grafanaHref }: LogsTabProps) 
     };
   }, [node.id, range, container, debouncedGrep, obsEnabled]);
 
-  // Derive the container dropdown options from the latest response —
-  // an extra label query would be cleaner but we'd need a separate
-  // /api/obs/labels handler. Self-deriving keeps the dropdown current
-  // without a backend roundtrip.
+  // Fetch the node's running containers (cAdvisor-derived) so the dropdown
+  // lists them regardless of whether they've logged in-range. Independent of
+  // range/grep — the running set doesn't change with the log query.
+  useEffect(() => {
+    if (!obsEnabled) return;
+    let cancelled = false;
+    getObsContainers(node.id)
+      .then((cs: ObsContainer[]) => {
+        if (!cancelled) setRunning(cs.map((c) => c.name).filter(Boolean));
+      })
+      .catch(() => {
+        if (!cancelled) setRunning([]); // best-effort; log-derived options still apply
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [node.id, obsEnabled]);
+
+  // Dropdown options = the node's running containers UNION whatever has logged
+  // in the current range. The union keeps a running-but-quiet container
+  // selectable (it shows "no entries") and still surfaces a container that has
+  // logged but already exited.
   const containerOptions = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>(running);
     for (const e of entries) if (e.container) set.add(e.container);
     return Array.from(set).sort();
-  }, [entries]);
+  }, [entries, running]);
 
   const refetch = () => setDebouncedGrep((g) => g); // trigger effect
 
