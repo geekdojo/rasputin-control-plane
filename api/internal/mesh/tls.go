@@ -210,6 +210,23 @@ type LeafSpec struct {
 	// Lifetime — defaults to 365d if zero. The auto-rotation path only
 	// kicks in when an existing leaf has less than `renewWindow` left.
 	Lifetime time.Duration
+	// ClientAuth mints a leaf for the CLIENT side of mTLS (ExtKeyUsage
+	// clientAuth) instead of the default server leaf (serverAuth). Used by
+	// the obs per-node collectors, which present a client cert to the api's
+	// mTLS remote-write ingress; the api reads their node id from the
+	// verified cert (observability-stack.md §3.10). Least-privilege: a leaf
+	// is either a server leaf or a client leaf, never both.
+	ClientAuth bool
+}
+
+// ekuFor returns the single ExtKeyUsage a leaf carries for the given spec.
+// Kept as one helper so MintLeaf (which stamps it) and loadLeafIfUsable
+// (which must re-mint on a mismatch) can never disagree.
+func ekuFor(spec LeafSpec) x509.ExtKeyUsage {
+	if spec.ClientAuth {
+		return x509.ExtKeyUsageClientAuth
+	}
+	return x509.ExtKeyUsageServerAuth
 }
 
 // LeafPaths is a small bundle of where a leaf's PEM files live on disk.
@@ -291,7 +308,7 @@ func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM, keyPEM []byte, err error) {
 		NotBefore:   now.Add(-time.Hour),
 		NotAfter:    now.Add(lifetime),
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage: []x509.ExtKeyUsage{ekuFor(spec)},
 		DNSNames:    append([]string(nil), spec.DNSNames...),
 		IPAddresses: append([]net.IP(nil), spec.IPAddresses...),
 	}
@@ -335,6 +352,20 @@ func loadLeafIfUsable(paths LeafPaths, ca *MeshCA, spec LeafSpec) *x509.Certific
 	}
 	// Near-expiry → re-mint.
 	if time.Until(cert.NotAfter) < renewWindow {
+		return nil
+	}
+	// EKU drift — a leaf minted server-auth can't be reused for a client
+	// spec (or vice versa). Without this a collector could pick up a stale
+	// server leaf from an earlier mint and fail the mTLS handshake.
+	wantEKU := ekuFor(spec)
+	hasEKU := false
+	for _, eku := range cert.ExtKeyUsage {
+		if eku == wantEKU {
+			hasEKU = true
+			break
+		}
+	}
+	if !hasEKU {
 		return nil
 	}
 	// SAN drift — every requested name/IP must be present on the leaf,

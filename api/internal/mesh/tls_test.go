@@ -371,3 +371,70 @@ func mustMtime(t *testing.T, path string) time.Time {
 	}
 	return info.ModTime()
 }
+
+// A client-auth leaf carries ExtKeyUsageClientAuth (and NOT ServerAuth) —
+// least-privilege for the obs per-node collectors, which are TLS clients to
+// the api's mTLS ingress and never servers.
+func TestMintLeaf_ClientAuth(t *testing.T) {
+	ca := newCAForTest(t)
+	certPEM, _, err := MintLeaf(ca, LeafSpec{
+		CommonName:  "c02",
+		DNSNames:    []string{"c02"},
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		ClientAuth:  true,
+	})
+	if err != nil {
+		t.Fatalf("MintLeaf: %v", err)
+	}
+	cert := mustParseCert(t, certPEM)
+	var hasClient, hasServer bool
+	for _, eku := range cert.ExtKeyUsage {
+		switch eku {
+		case x509.ExtKeyUsageClientAuth:
+			hasClient = true
+		case x509.ExtKeyUsageServerAuth:
+			hasServer = true
+		}
+	}
+	if !hasClient {
+		t.Error("client leaf missing ExtKeyUsageClientAuth")
+	}
+	if hasServer {
+		t.Error("client leaf should NOT carry ServerAuth (least privilege)")
+	}
+}
+
+// A leaf on disk with the wrong EKU must be re-minted, not reused — otherwise
+// a collector could pick up a stale server leaf and fail the mTLS handshake.
+func TestMintLeafToDisk_ReMintsOnEKUDrift(t *testing.T) {
+	ca := newCAForTest(t)
+	dir := t.TempDir()
+	spec := LeafSpec{CommonName: "c02", DNSNames: []string{"c02"}}
+
+	// First mint a SERVER leaf.
+	if _, err := MintLeafToDisk(ca, dir, spec); err != nil {
+		t.Fatalf("mint server leaf: %v", err)
+	}
+	serverCert := mustParseCertFile(t, filepath.Join(dir, "leaf.pem"))
+
+	// Now ask for a CLIENT leaf at the same path — must re-mint, not reuse.
+	clientSpec := spec
+	clientSpec.ClientAuth = true
+	if _, err := MintLeafToDisk(ca, dir, clientSpec); err != nil {
+		t.Fatalf("mint client leaf: %v", err)
+	}
+	clientCert := mustParseCertFile(t, filepath.Join(dir, "leaf.pem"))
+
+	if clientCert.SerialNumber.Cmp(serverCert.SerialNumber) == 0 {
+		t.Fatal("EKU drift did not force a re-mint — the server leaf was reused for a client spec")
+	}
+	hasClient := false
+	for _, eku := range clientCert.ExtKeyUsage {
+		if eku == x509.ExtKeyUsageClientAuth {
+			hasClient = true
+		}
+	}
+	if !hasClient {
+		t.Error("re-minted leaf is not client-auth")
+	}
+}
