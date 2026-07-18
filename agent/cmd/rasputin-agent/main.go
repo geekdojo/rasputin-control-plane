@@ -350,7 +350,13 @@ func main() {
 	}
 
 	go runHeartbeats(ctx, nc, nodeID)
-	go metrics.Run(ctx, nc, nodeID, host.Uptime)
+	// Disk metric measures the persistent data partition, not "/" (the
+	// read-only squashfs rootfs, ~100% by design on the appliance). Default to
+	// the agent's own state dir — on the appliance that's
+	// /var/lib/rasputin/agent-state, the same partition as Docker + obs data —
+	// and statfs is filesystem-level. Overridable if a node's layout differs.
+	diskMetricPath := envOr("RASPUTIN_DISK_METRIC_PATH", stateDir)
+	go metrics.Run(ctx, nc, nodeID, diskMetricPath, host.Uptime)
 
 	// systemd integration (Buildroot nodes; procd on OpenWrt has no
 	// NOTIFY_SOCKET so both calls no-op there). The liveness probe is

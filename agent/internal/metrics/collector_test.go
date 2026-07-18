@@ -49,7 +49,7 @@ func TestRun_CtxCancelExits(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		Run(ctx, nc, "node-1", func() time.Duration { return 0 })
+		Run(ctx, nc, "node-1", "/", func() time.Duration { return 0 })
 		close(done)
 	}()
 	select {
@@ -73,7 +73,7 @@ func TestRun_PublishesMetricsToBus(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	ev := collect(context.Background(), "node-1", func() time.Duration { return 0 })
+	ev := collect(context.Background(), "node-1", "/", func() time.Duration { return 0 })
 	payload, err := json.Marshal(ev)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -105,7 +105,7 @@ func TestRun_PublishesMetricsToBus(t *testing.T) {
 // collect anyway.
 func TestCollect_ShapeAndAlwaysOnFields(t *testing.T) {
 	uptime := func() time.Duration { return 123 * time.Second }
-	ev := collect(context.Background(), "node-x", uptime)
+	ev := collect(context.Background(), "node-x", "/", uptime)
 
 	if ev.NodeID != "node-x" {
 		t.Errorf("NodeID: %q want node-x", ev.NodeID)
@@ -133,7 +133,7 @@ func TestCollect_ShapeAndAlwaysOnFields(t *testing.T) {
 // will fail to compile (the iteration would still typecheck, but the
 // map type is already pinned).
 func TestCollect_AllFieldsAreFloat64(t *testing.T) {
-	ev := collect(context.Background(), "n", func() time.Duration { return 0 })
+	ev := collect(context.Background(), "n", "/", func() time.Duration { return 0 })
 	for k, v := range ev.Metrics {
 		// Trivially: assigning v to a float64 must work — it already is one.
 		// This test pins the map type via the round-trip below.
@@ -147,7 +147,7 @@ func TestCollect_AllFieldsAreFloat64(t *testing.T) {
 // TestCollect_RoundTripsAsMetricsEvt — the collector's output must marshal
 // into the wire shape the api expects (proto.MetricsEvt).
 func TestCollect_RoundTripsAsMetricsEvt(t *testing.T) {
-	ev := collect(context.Background(), "node-1", func() time.Duration { return 0 })
+	ev := collect(context.Background(), "node-1", "/", func() time.Duration { return 0 })
 	b, err := json.Marshal(ev)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -165,6 +165,40 @@ func TestCollect_RoundTripsAsMetricsEvt(t *testing.T) {
 	}
 	if _, ok := out.Metrics[proto.MetricGoroutines]; !ok {
 		t.Error("goroutines missing after round trip")
+	}
+}
+
+// TestCollect_DiskMeasuresGivenPath proves collect statfs's the diskPath it's
+// given — not a hardcoded "/". A real path yields disk metrics; a path that
+// can't be statfs'd omits them (per the "failing probes are omitted" contract).
+// This is the regression guard for the appliance bug where disk read "/" (the
+// read-only squashfs, ~100% by design) instead of the persistent partition.
+func TestCollect_DiskMeasuresGivenPath(t *testing.T) {
+	// A valid, statfs-able path → disk metrics present with a non-zero total.
+	ev := collect(context.Background(), "n", t.TempDir(), func() time.Duration { return 0 })
+	total, ok := ev.Metrics[proto.MetricDiskTotalBytes]
+	if !ok {
+		t.Fatal("disk total missing for a valid path")
+	}
+	if total <= 0 {
+		t.Errorf("disk total = %v, want > 0", total)
+	}
+	if _, ok := ev.Metrics[proto.MetricDiskUsedBytes]; !ok {
+		t.Error("disk used missing for a valid path")
+	}
+
+	// A path that can't be statfs'd → disk metrics omitted (not zeroed), and
+	// the rest of the sample is unaffected. If collect ignored diskPath and hit
+	// "/" instead, these would be present.
+	bad := collect(context.Background(), "n", "/no/such/path/rasputin-xyz", func() time.Duration { return 0 })
+	if _, ok := bad.Metrics[proto.MetricDiskTotalBytes]; ok {
+		t.Error("disk total should be omitted for an unstatfs-able path (collect ignored diskPath?)")
+	}
+	if _, ok := bad.Metrics[proto.MetricDiskUsedBytes]; ok {
+		t.Error("disk used should be omitted for an unstatfs-able path")
+	}
+	if _, ok := bad.Metrics[proto.MetricAgentUptimeSeconds]; !ok {
+		t.Error("a bad disk path must not suppress the always-on metrics")
 	}
 }
 
@@ -208,7 +242,7 @@ func TestRun_PublishesOnInterval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan struct{})
-	go func() { Run(ctx, nc, "node-fast", func() time.Duration { return time.Minute }); close(done) }()
+	go func() { Run(ctx, nc, "node-fast", "/", func() time.Duration { return time.Minute }); close(done) }()
 
 	select {
 	case ev := <-recv:
@@ -238,7 +272,7 @@ func TestCollect_OnlyEmitsKnownMetricKeys(t *testing.T) {
 		proto.MetricAgentUptimeSeconds: true,
 		proto.MetricGoroutines:         true,
 	}
-	ev := collect(context.Background(), "n", func() time.Duration { return 0 })
+	ev := collect(context.Background(), "n", "/", func() time.Duration { return 0 })
 	for k := range ev.Metrics {
 		if !known[k] {
 			t.Errorf("unexpected metric key %q — add it to proto.Metric* or remove from collector", k)

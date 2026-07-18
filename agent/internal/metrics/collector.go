@@ -31,7 +31,14 @@ var Interval = 10 * time.Second
 // Run is the collector loop. Blocks until ctx is cancelled. Errors during
 // individual probes (e.g. disk usage on a path we can't reach) are logged
 // and skipped — a single bad probe shouldn't take down the loop.
-func Run(ctx context.Context, nc *nats.Conn, nodeID string, uptime func() time.Duration) {
+//
+// diskPath is the filesystem the disk metric measures. It must be a path on
+// the node's persistent DATA partition — NOT "/", which on the appliance is the
+// read-only squashfs rootfs (RAUC A/B) and reads ~100% full by design. statfs
+// reports filesystem-level totals, so any path on that partition works; the
+// caller passes the agent's own state dir (`/var/lib/rasputin/agent-state` on
+// the appliance), the same partition Docker data and the obs stack live on.
+func Run(ctx context.Context, nc *nats.Conn, nodeID, diskPath string, uptime func() time.Duration) {
 	// Prime the CPU sampler — the first non-blocking call returns 0 because
 	// it has no prior reading to delta against. This 100ms call gives us a
 	// baseline so the first published sample is real.
@@ -46,7 +53,7 @@ func Run(ctx context.Context, nc *nats.Conn, nodeID string, uptime func() time.D
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			ev := collect(ctx, nodeID, uptime)
+			ev := collect(ctx, nodeID, diskPath, uptime)
 			payload, err := json.Marshal(ev)
 			if err != nil {
 				log.Printf("metrics: marshal: %v", err)
@@ -62,7 +69,7 @@ func Run(ctx context.Context, nc *nats.Conn, nodeID string, uptime func() time.D
 // collect snapshots the current host state into a MetricsEvt. Probes that
 // fail are silently omitted from the output map; the api treats missing keys
 // as "no data at this tick" which surfaces as gaps in the UI sparkline.
-func collect(ctx context.Context, nodeID string, uptime func() time.Duration) proto.MetricsEvt {
+func collect(ctx context.Context, nodeID, diskPath string, uptime func() time.Duration) proto.MetricsEvt {
 	m := map[string]float64{
 		proto.MetricAgentUptimeSeconds: uptime().Seconds(),
 		proto.MetricGoroutines:         float64(runtime.NumGoroutine()),
@@ -74,7 +81,8 @@ func collect(ctx context.Context, nodeID string, uptime func() time.Duration) pr
 		m[proto.MetricMemUsedBytes] = float64(v.Used)
 		m[proto.MetricMemTotalBytes] = float64(v.Total)
 	}
-	if du, err := disk.UsageWithContext(ctx, "/"); err == nil {
+	// Measure the persistent data partition, not "/". See Run's doc.
+	if du, err := disk.UsageWithContext(ctx, diskPath); err == nil {
 		m[proto.MetricDiskUsedBytes] = float64(du.Used)
 		m[proto.MetricDiskTotalBytes] = float64(du.Total)
 	}

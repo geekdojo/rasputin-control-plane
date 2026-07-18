@@ -63,7 +63,10 @@ const (
 	// SeriesMemUsedBytes — raw bytes used; useful for "is it growing?"
 	// over a long window.
 	SeriesMemUsedBytes SeriesKey = "mem_bytes"
-	// SeriesDiskPercent — derived as 100 * used/total of the root fs.
+	// SeriesDiskPercent — derived as 100 * used/total of the node's persistent
+	// data partition (the agent measures that partition, not "/" — the
+	// read-only squashfs rootfs, which reads ~100% by design; see the agent's
+	// metrics collector).
 	SeriesDiskPercent SeriesKey = "disk"
 	// SeriesLoad1 — agent-emitted 1-minute load average. Not currently
 	// published by the v0 agent; included so the UI can ask for it once
