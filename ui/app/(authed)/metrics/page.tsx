@@ -10,7 +10,8 @@
 // at once. The "↗ OPEN IN GRAFANA" button in the header is the escape
 // hatch for power-user PromQL / dashboard editing.
 
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { BarChart2, ExternalLink, RefreshCw } from 'lucide-react';
 import {
   enableObs,
@@ -37,7 +38,7 @@ import {
 } from '../../../components/kit';
 import { MONO } from '../../../components/ui-theme';
 import { NodeCard } from '../../../components/obs/NodeCard';
-import { NodeDetailDrawer } from '../../../components/obs/NodeDetailDrawer';
+import { NodeDetailDrawer, type TabKey } from '../../../components/obs/NodeDetailDrawer';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
@@ -70,13 +71,30 @@ const ROLE_PRIORITY: Record<string, number> = {
   default: 99,
 };
 
-export default function MetricsPage() {
+function MetricsPageInner() {
   const [status, setStatus] = useState<ObsStatus | null>(null);
   const [statusErr, setStatusErr] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [range, setRange] = useState<RangeKey>('30m');
   const [seriesByNode, setSeriesByNode] = useState<Record<string, NodeSeries>>({});
   const [drawerNodeId, setDrawerNodeId] = useState<string | null>(null);
+
+  // --- deep link -------------------------------------------------------
+  // /metrics?node=<id>&tab=<tab> opens that node's drawer on the requested tab.
+  // The dashboard "VIEW LOGS" action lands here (?tab=logs). Fires once when the
+  // params first appear; deepLinkTab is cleared on drawer close so a later
+  // manual open keeps its own tab.
+  const search = useSearchParams();
+  const [deepLinkTab, setDeepLinkTab] = useState<TabKey | undefined>(undefined);
+  const nodeParam = search.get('node');
+  const tabParam = search.get('tab');
+  useEffect(() => {
+    if (!nodeParam) return;
+    setDrawerNodeId(nodeParam);
+    if (tabParam && (['metrics', 'containers', 'logs', 'alerts', 'ids'] as string[]).includes(tabParam)) {
+      setDeepLinkTab(tabParam as TabKey);
+    }
+  }, [nodeParam, tabParam]);
 
   // --- bootstrap: nodes + obs status -----------------------------------
   useEffect(() => {
@@ -276,9 +294,13 @@ export default function MetricsPage() {
       <NodeDetailDrawer
         node={nodes.find((n) => n.id === drawerNodeId) ?? null}
         open={drawerNodeId !== null}
-        onClose={() => setDrawerNodeId(null)}
+        onClose={() => {
+          setDrawerNodeId(null);
+          setDeepLinkTab(undefined);
+        }}
         range={range}
         obsEnabled={status?.state === 'on'}
+        initialTab={deepLinkTab}
         grafanaHref={
           status?.state === 'on' && status?.grafanaUrl && drawerNodeId
             ? `${API_BASE}/observability/d/rasputin-cluster-overview?orgId=1&var-nodeId=${encodeURIComponent(drawerNodeId)}`
@@ -286,6 +308,17 @@ export default function MetricsPage() {
         }
       />
     </PageShell>
+  );
+}
+
+export default function MetricsPage() {
+  // The inner component reads useSearchParams (deep-link node/tab), which must
+  // sit under a Suspense boundary for the Next static export — same pattern as
+  // /console.
+  return (
+    <Suspense fallback={null}>
+      <MetricsPageInner />
+    </Suspense>
   );
 }
 

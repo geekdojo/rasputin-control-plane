@@ -4,6 +4,7 @@ import {
   Activity,
   AlertTriangle,
   ChevronRight,
+  FileText,
   Info,
   Layers,
   Package,
@@ -374,7 +375,12 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, onNavigate,
             disabled={!node || busy !== null}
             onClick={() => node && void run('ping', () => createJob('diag.ping', { nodeId: node.id }))}
           />
-          <CtrlButton icon={AlertTriangle} label="VIEW LOGS" disabled />
+          <CtrlButton
+            icon={FileText}
+            label="VIEW LOGS"
+            disabled={!node}
+            onClick={() => node && onNavigate(`/metrics?node=${encodeURIComponent(node.id)}&tab=logs`)}
+          />
         </div>
 
         {err && (

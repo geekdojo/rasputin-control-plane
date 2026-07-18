@@ -39,6 +39,10 @@ interface NodeDetailDrawerProps {
   // grafanaHref — when present, the "↗ open in Grafana" header link
   // jumps to the cluster dashboard. Omitted when obs is off.
   grafanaHref?: string;
+  // initialTab — when set, the drawer opens on this tab instead of Metrics.
+  // Used for deep links (the dashboard "VIEW LOGS" action opens straight to
+  // Logs). The page clears it on close so a later manual open keeps the tab.
+  initialTab?: TabKey;
 }
 
 // All tabs in fixed order. The IDS tab only makes sense for firewall
@@ -73,8 +77,15 @@ export function NodeDetailDrawer({
   range,
   obsEnabled,
   grafanaHref,
+  initialTab,
 }: NodeDetailDrawerProps) {
   const [tab, setTab] = useState<TabKey>('metrics');
+
+  // Apply a deep-linked tab when the drawer opens. Guarded on `initialTab` so a
+  // normal open (no deep link) leaves the operator's current tab untouched.
+  useEffect(() => {
+    if (open && initialTab) setTab(initialTab);
+  }, [open, initialTab]);
 
   return (
     <Drawer
