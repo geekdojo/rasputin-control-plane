@@ -63,11 +63,6 @@ export function ContainersTab({ node, obsEnabled }: ContainersTabProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, height: '100%' }}>
-      <Hint>
-        Container activity is currently collected on the control plane only, so every node shows the
-        same set. Per-node collection is planned.
-      </Hint>
-
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ color: DIM, fontFamily: MONO, fontSize: 9, letterSpacing: '0.08em' }}>
           {loading ? 'LOADING…' : `${rows.length} CONTAINER${rows.length === 1 ? '' : 'S'}`}
