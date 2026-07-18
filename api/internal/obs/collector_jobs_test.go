@@ -64,6 +64,11 @@ func TestDecideCollectorActions(t *testing.T) {
 		{"on: fresh compute, no history -> deploy", proto.RoleCompute, online, true, nil, nil, true, false, ""},
 		{"on: storage, no history -> deploy", proto.RoleStorage, online, true, nil, nil, true, false, ""},
 		{"on: recent success -> fresh skip", proto.RoleCompute, online, true, successAgo(time.Minute), nil, false, false, "fresh"},
+		// disable->re-enable: deploy was recent, but a teardown ran AFTER it, so
+		// the collector is down. Must redeploy (with the current config), NOT skip
+		// as "fresh". Regression guard for the off->on stuck-collector bug.
+		{"on: recent deploy but torn down since -> redeploy", proto.RoleCompute, online, true,
+			successAgo(2 * time.Minute), successAgo(30 * time.Second), true, false, ""},
 		{"on: stale success -> redeploy", proto.RoleCompute, online, true, successAgo(7 * time.Hour), nil, true, false, ""},
 		{"on: inflight -> skip", proto.RoleCompute, online, true, inflight(), nil, false, false, "inflight"},
 		{"on: recent failure -> cooldown", proto.RoleCompute, online, true, failedAgo(5 * time.Minute), nil, false, false, "cooldown"},

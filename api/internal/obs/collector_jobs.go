@@ -167,7 +167,14 @@ func decideCollectorActions(nodes []*proto.Node, deployState, teardownState map[
 				act.skipped["offline"]++
 			case dep != nil && dep.inflight:
 				act.skipped["inflight"]++
-			case dep != nil && !dep.lastSuccess.IsZero() && now.Sub(dep.lastSuccess) < collectorRedeployInterval:
+			case hasCollector && now.Sub(dep.lastSuccess) < collectorRedeployInterval:
+				// "fresh" only counts if the node STILL has a running collector.
+				// A node whose collector was torn down since its last deploy
+				// (obs disabled → re-enabled) has hasCollector=false, so it falls
+				// through to redeploy instead of being wrongly skipped for up to
+				// collectorRedeployInterval — the disable→re-enable bug. This also
+				// makes an off→on toggle the reliable way to push a new collector
+				// config to the fleet.
 				act.skipped["fresh"]++
 			case dep != nil && !dep.lastFailedAt.IsZero() && now.Sub(dep.lastFailedAt) < collectorRetryCooldown:
 				act.skipped["cooldown"]++
