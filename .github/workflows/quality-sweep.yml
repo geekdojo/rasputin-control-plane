@@ -1,0 +1,109 @@
+name: quality-sweep
+
+# Weekly unattended code-quality sweep (duplicative + dead code), the first of
+# the scheduled quality agents from the July 2026 "AI Agents for Continuous
+# Quality" research note (geekdojo-brain projects/rasputin/research/).
+#
+# Shape: claude-code-action v1 in automation mode — a cron-triggered prompt,
+# no @claude mention. The agent finds candidates, adversarially verifies each
+# one before touching code (the verify-before-posting pattern), fixes only
+# what survives, re-runs the same checks ci.yml runs, and opens a PR for
+# human review. It cannot approve or merge — the autonomy line stays at the
+# merge step, on purpose.
+#
+# Cost control: weekly cadence, --max-turns cap, job timeout. If a run finds
+# nothing that survives verification it opens nothing (no noise PRs).
+#
+# Requires (repo settings, not in this file):
+#   - ANTHROPIC_API_KEY in Actions secrets
+#   - the Claude GitHub App (github.com/apps/claude) installed on this repo,
+#     so pushes/PRs attribute to the app and its PRs still trigger ci.yml
+#     (PRs created with the default GITHUB_TOKEN would not).
+
+on:
+  schedule:
+    - cron: "0 10 * * 1" # Mondays 10:00 UTC, before the workday
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+  id-token: write
+  actions: read
+
+concurrency:
+  group: quality-sweep
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchains cached the same way ci.yml does, so the agent's gate
+      # checks (go test, npm run build) don't burn turns on cold installs.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --model claude-opus-4-8
+            --max-turns 50
+            --allowedTools "Edit,MultiEdit,Write,Bash(go:*),Bash(gofmt:*),Bash(git:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(npm:*)"
+          prompt: |
+            Weekly code-quality sweep: duplicative and dead code.
+
+            Read AGENTS.md, ARCHITECTURE.md, and CLAUDE.md before changing
+            anything. Scope: the three Go modules (api/, agent/, proto/) and
+            the Next.js ui/.
+
+            1. FIND candidates: logic duplicated across files/modules that
+               should share a helper; dead code (unexported symbols never
+               referenced, unused files, stale flags, commented-out blocks);
+               near-identical test scaffolding worth a shared helper.
+            2. VERIFY adversarially before touching anything. For each
+               candidate, try to refute it: is the "duplicate" divergent on
+               purpose? is the "dead" symbol reached via reflection, build
+               tags, generated code, cgo, or the UI? Drop anything you cannot
+               confirm. Few high-confidence fixes beat many speculative ones.
+            3. FIX only confirmed, low-risk items. Refactors must be
+               semantics-preserving — no behavior changes. Keep the total
+               diff under ~400 changed lines; if more survives verification,
+               fix the best subset and list the remainder in the PR body.
+            4. GATE with the same checks ci.yml runs, and do not push if any
+               fail:
+                 gofmt -l api/ agent/ proto/        (output must be empty)
+                 go vet ./api/... ./agent/... ./proto/...
+                 go test -race ./api/... ./agent/... ./proto/...
+                 go build ./api/... ./agent/... ./proto/...
+                 cd ui && npm ci && npm run type-check && npm run build
+            5. SHIP: commit to branch quality-sweep/run-${{ github.run_id }},
+               push it, and open a PR to main titled
+               "quality-sweep: <short summary>". The PR body must list each
+               change with the verification evidence from step 2, anything
+               found but not fixed, and a note that the PR is agent-authored
+               (see AI_DISCLOSURE.md). If nothing survives verification,
+               push nothing and open nothing — end with a summary of what
+               was considered and why it was dropped.
+
+            Hard limits: never modify .github/workflows/**, go.mod, go.sum,
+            ui/package.json, ui/package-lock.json, or the GET /healthz
+            contract; no dependency changes; never force-push.
