@@ -319,6 +319,17 @@ const ROLE_PRIORITY: Record<string, number> = {
 };
 const DEFAULT_ROLE_PRIORITY = 99;
 
+// sortNodeViews is the layout order: sorted[0] occupies the center hex.
+// Exported so the Nodes page can auto-select the same node the grid centers.
+export function sortNodeViews(nodes: NodeView[]): NodeView[] {
+  return [...nodes].sort((a, b) => {
+    const pa = ROLE_PRIORITY[a.role] ?? DEFAULT_ROLE_PRIORITY;
+    const pb = ROLE_PRIORITY[b.role] ?? DEFAULT_ROLE_PRIORITY;
+    if (pa !== pb) return pa - pb;
+    return a.id.localeCompare(b.id);
+  });
+}
+
 // MAX_NODES is the design silhouette's capacity — the flattened 24-cell
 // hexagon. At capacity the grid is "full" and shows no add affordance.
 // Must stay in sync with proto.MaxClusterNodes (proto/inventory.go), which
@@ -329,12 +340,7 @@ export function NodeGrid({ nodes, pending = [], selectedId, onSelect, onAddNode,
   // Stable role-prioritized order so inventory WS churn doesn't shuffle
   // the hex layout. Same priority scheme as the /metrics cards grid so
   // operators see a consistent "where is X" across views.
-  const ordered = [...nodes].sort((a, b) => {
-    const pa = ROLE_PRIORITY[a.role] ?? DEFAULT_ROLE_PRIORITY;
-    const pb = ROLE_PRIORITY[b.role] ?? DEFAULT_ROLE_PRIORITY;
-    if (pa !== pb) return pa - pb;
-    return a.id.localeCompare(b.id);
-  });
+  const ordered = sortNodeViews(nodes);
   const pend = [...pending].sort((a, b) => a.id.localeCompare(b.id));
   const occupied = ordered.length + pend.length;
 
