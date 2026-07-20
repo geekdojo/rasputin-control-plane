@@ -89,9 +89,6 @@ func (c *ContainersClient) List(ctx context.Context, nodeID string) ([]Container
 	memQ := `sum by (name, image) (container_memory_working_set_bytes{` + sel + `})`
 	resQ := `sum by (name, image) (container_start_time_seconds{` + sel + `})` // proxy for restarts; see doc
 
-	type cell struct {
-		Container
-	}
 	rows := make(map[string]*Container) // keyed by "name"
 	add := func(key string, mut func(*Container)) {
 		k := key

@@ -5,11 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/proto"
-	_ "modernc.org/sqlite"
 )
 
 // Store is the SQLite-backed ledger for firewall intents and per-node state.
@@ -18,15 +17,9 @@ type Store struct {
 }
 
 func OpenStore(ctx context.Context, path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := dbutil.Open(ctx, path, schema, "firewall")
 	if err != nil {
-		return nil, fmt.Errorf("firewall: open sqlite: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("firewall: apply schema: %w", err)
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }

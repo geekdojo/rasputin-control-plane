@@ -4,13 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/go-webauthn/webauthn/webauthn"
-	_ "modernc.org/sqlite"
 )
 
 // Store is the SQLite-backed user/credential/session ledger.
@@ -19,15 +18,9 @@ type Store struct {
 }
 
 func OpenStore(ctx context.Context, path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := dbutil.Open(ctx, path, schema, "auth")
 	if err != nil {
-		return nil, fmt.Errorf("auth: open sqlite: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("auth: apply schema: %w", err)
+		return nil, err
 	}
 	applyMigrations(ctx, db)
 	return &Store{db: db}, nil
@@ -53,7 +46,6 @@ func applyMigrations(ctx context.Context, db *sql.DB) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func ms(t time.Time) int64     { return t.UnixMilli() }
-func msPtr(t time.Time) any    { return t.UnixMilli() }
 func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 // ----- Users --------------------------------------------------------------

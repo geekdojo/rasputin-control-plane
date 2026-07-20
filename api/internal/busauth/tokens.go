@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 )
 
 // Tokens are high-entropy random strings; only their sha256 is stored, so a
@@ -60,15 +60,9 @@ type PreseedToken struct {
 }
 
 func OpenStore(ctx context.Context, path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := dbutil.Open(ctx, path, schema, "busauth")
 	if err != nil {
-		return nil, fmt.Errorf("busauth: open sqlite: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("busauth: apply schema: %w", err)
+		return nil, err
 	}
 	// Additive migration for DBs created before node binding. SQLite has no
 	// "ADD COLUMN IF NOT EXISTS"; on a fresh DB the column already exists (the

@@ -2,7 +2,6 @@ package updater
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -142,8 +141,6 @@ type abState struct {
 	ok    map[string]bool // "A"/"B" → bootable
 	try   map[string]bool // "A"/"B" → a boot attempt has been consumed
 }
-
-var errNoGrubenvState = errors.New("grubenv: no A/B state present")
 
 // decodeAB extracts the A/B counter from a parsed grubenv map. Absent keys
 // default to the same safe values grub.cfg hard-codes (ORDER "A B", A good, B

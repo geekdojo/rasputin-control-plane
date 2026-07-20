@@ -5,13 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/proto"
-	_ "modernc.org/sqlite"
 )
 
 // Store is the SQLite-backed ledger of known nodes.
@@ -22,15 +21,9 @@ type Store struct {
 // OpenStore opens (and migrates) the SQLite database at path. Safe to point
 // at the same file the jobs store uses; tables don't overlap.
 func OpenStore(ctx context.Context, path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := dbutil.Open(ctx, path, schema, "inventory")
 	if err != nil {
-		return nil, fmt.Errorf("inventory: open sqlite: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("inventory: apply schema: %w", err)
+		return nil, err
 	}
 	applyMigrations(ctx, db)
 	return &Store{db: db}, nil
