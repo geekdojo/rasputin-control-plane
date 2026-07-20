@@ -1,0 +1,157 @@
+name: mutation-survivors
+
+# Weekly survivor-killing agent loop — step 3b of the "AI Agents for
+# Continuous Quality" rollout (geekdojo-brain projects/rasputin/research/),
+# the ACH pattern (Meta, FSE 2025): find surviving mutants, then write tests
+# that KILL them. This is the "continuously improve" half; the per-PR
+# mutation-gate.yml is the "reliably release" half.
+#
+# Shape: claude-code-action v1 in automation mode (cron, no @claude). The
+# agent runs full mutation testing on the agent/ module with gremlins,
+# collects survivors (LIVED = covered but the tests never assert the mutated
+# behavior; NOT COVERED = no test runs the line), writes fault-detecting
+# tests for a capped, prioritized subset, and — crucially — PROVES each new
+# test kills its target mutant (write → pass on real code → hand-apply the
+# mutation → the test now fails → revert). It opens a PR for human review and
+# cannot merge.
+#
+# Why the verification step matters (the whole point): a test that merely
+# executes a line adds coverage without catching faults — the exact
+# anti-pattern the research warned against. A test only ships if it
+# demonstrably fails against the mutant it targets.
+#
+# SCOPE (v1): the agent/ module only. That's where the coverage gaps are
+# (~30 LIVED / ~194 NOT COVERED at rollout), its full mutation scan is fast
+# (~66s), and it keeps each run bounded and reviewable. Expanding to api/ is
+# a scope change for later, once agent/ is in good shape.
+#
+# Requires (repo settings, not in this file):
+#   - CLAUDE_CODE_OAUTH_TOKEN in Actions secrets (shared with quality-sweep).
+#   - the Claude GitHub App installed, so the agent's PR triggers ci.yml.
+
+on:
+  schedule:
+    - cron: "0 10 * * 3" # Wednesdays 10:00 UTC (offset from Mon quality-sweep)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+  id-token: write
+  actions: read
+
+concurrency:
+  group: mutation-survivors
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  kill-survivors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+
+      # Preinstall gremlins on PATH so the agent doesn't burn turns fighting
+      # the Bash allowlist to install it (the quality-sweep starvation lesson).
+      # Note: the CLI main is under cmd/gremlins, not the module root.
+      - name: preinstall gremlins
+        run: |
+          go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          show_full_output: "true"
+          display_report: "true"
+          claude_args: |
+            --model claude-opus-4-8
+            --max-turns 250
+            --allowedTools "Edit,MultiEdit,Write,Bash(go:*),Bash(gofmt:*),Bash(gremlins:*),Bash(git:*),Bash(gh pr create:*),Bash(gh pr list:*)"
+          prompt: |
+            Weekly mutation-survivor sweep: write tests that KILL surviving
+            mutants in the agent/ module. Read AGENTS.md, ARCHITECTURE.md, and
+            CLAUDE.md before writing anything.
+
+            Tooling preinstalled on PATH: the Go toolchain, gremlins, git, gh.
+            Do not install or work around other tools; if something is
+            unavailable, proceed without it and note it in your summary.
+
+            SCOPE: the agent/ module ONLY. Go tests only. Do not touch api/,
+            proto/, or ui/.
+
+            1. FIND survivors. From agent/, run `gremlins unleash` (a full
+               module scan, ~1 min) and collect the survivors it reports:
+               LIVED (a code line the tests execute but never assert the
+               mutated behavior of) and NOT COVERED (no test runs the line).
+               Each survivor is "STATUS MUTANT_TYPE at file:line:col".
+            2. PRIORITIZE, then CAP. Fix at most ~12 survivors (or ~400 lines
+               of new test code) this run — a small, reviewable PR beats a
+               huge one. Order of value:
+                 a. LIVED mutants first — the highest-value case: a test
+                    already runs the line, it just never checks the result.
+                    Adding the missing assertion is cheap and catches real
+                    faults line-coverage misses.
+                 b. NOT COVERED mutants in behavior-bearing logic
+                    (parsers, state machines, the A/B update logic, mdns,
+                    tailscale, hostsync — real decisions worth a test).
+               SKIP: main()/wiring glue, mock/fake/generated files
+               (*_mock.go, mock.go, generated code), and trivial pass-through
+               code where a test would assert nothing meaningful.
+            3. For EACH target, write a fault-detecting test and PROVE it
+               kills the mutant — this verification is mandatory, a test that
+               isn't proven to kill is discarded:
+                 i.   Write a test that exercises the code and ASSERTS the
+                      correct behavior. Prefer adding a case to the existing
+                      *_test.go; match the package's existing test style and
+                      helpers.
+                 ii.  Run `go test` for that package — it must PASS on the
+                      real code.
+                 iii. Hand-apply the exact mutation at file:line:col (e.g.
+                      CONDITIONALS_NEGATION flips `==`↔`!=` / `<`↔`>=`;
+                      ARITHMETIC_BASE swaps `+`↔`-`, `*`↔`/`; CONDITIONALS_
+                      BOUNDARY `<`↔`<=`; INCREMENT_DECREMENT `++`↔`--`), then
+                      run the test again — it MUST now FAIL. Then revert the
+                      mutation exactly.
+                 iv.  Keep the test only if step ii passed and step iii
+                      failed. If the mutation produces no observable behavior
+                      change (an equivalent mutant), you cannot kill it —
+                      skip it and list it under "equivalent/skipped" in the
+                      PR body.
+            4. If a survivor exposes a genuine BUG in production code, DO NOT
+               change the production code — this is a test-writing loop.
+               Describe the suspected bug in the PR body for human /
+               quality-sweep follow-up, and skip writing a test that would
+               encode the wrong behavior.
+            5. GATE with the checks ci.yml runs, scoped to agent/, and do not
+               push if any fail:
+                 gofmt -l agent/                    (output must be empty)
+                 go vet ./agent/...
+                 go test -race ./agent/...
+                 go build ./agent/...
+            6. SHIP: commit to branch mutation-survivors/run-${{ github.run_id }},
+               push it, and open a PR to main titled
+               "test: kill N mutation survivors in agent/". The PR body must,
+               for each new test, name the mutant it kills (file:line, type)
+               and confirm the write→pass→mutate→fail→revert verification;
+               list anything skipped (equivalent mutants, suspected bugs);
+               and note the PR is agent-authored (see AI_DISCLOSURE.md). If
+               nothing survives verification, push nothing and open nothing —
+               end with a summary of what was considered and why.
+
+            Hard limits: only ADD or extend test files (*_test.go) and, if
+            genuinely needed, test-only helpers — NEVER modify production
+            (non-test) .go files, .github/workflows/**, go.mod, go.sum. Never
+            weaken, delete, or loosen existing tests. Never add a test that
+            does not assert (no coverage-theater). Never force-push.
