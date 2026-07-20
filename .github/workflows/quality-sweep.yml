@@ -15,7 +15,8 @@ name: quality-sweep
 # nothing that survives verification it opens nothing (no noise PRs).
 #
 # Requires (repo settings, not in this file):
-#   - ANTHROPIC_API_KEY in Actions secrets
+#   - CLAUDE_CODE_OAUTH_TOKEN in Actions secrets (from `claude setup-token`;
+#     bills to the Claude subscription rather than API credits)
 #   - the Claude GitHub App (github.com/apps/claude) installed on this repo,
 #     so pushes/PRs attribute to the app and its PRs still trigger ci.yml
 #     (PRs created with the default GITHUB_TOKEN would not).
@@ -63,7 +64,7 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
             --model claude-opus-4-8
             --max-turns 50
