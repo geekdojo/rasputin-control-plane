@@ -74,6 +74,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          # MONOREPO PATH FIX (load-bearing): gremlins computes its diff with
+          # `git diff --merge-base <ref>` and matches the result against
+          # module-relative mutant paths (internal/...). But git, run from a
+          # module subdir, prints REPO-relative paths (api/internal/...) by
+          # default, so nothing matches and every mutant is silently SKIPPED —
+          # the gate would report "no Go changes" on every PR. Setting
+          # diff.relative makes git emit paths relative to the CWD (the module
+          # dir), which is exactly what gremlins expects. Verified: without
+          # this, a known-covered change reports 0 mutants run; with it, the
+          # mutant is found and KILLED.
+          git config diff.relative true
+
           # gremlins runs per Go module. api/ and agent/ are the two modules
           # with tests; proto/ is generated. A module with no in-diff Go
           # changes short-circuits ~instantly.
