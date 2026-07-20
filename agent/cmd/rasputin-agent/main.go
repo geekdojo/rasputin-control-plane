@@ -74,7 +74,15 @@ func main() {
 	// controlplane (trusted via loopback) and harmless when the server has no
 	// auth enabled. See agent/internal/bus.Connect.
 	joinToken := os.Getenv("RASPUTIN_CP_JOIN_TOKEN")
-	reregister := func(c *nats.Conn) { publishRegistered(c, nodeID, role) }
+	// Storage snapshot paths for the register event: statfs the same
+	// filesystem the disk metric measures (the persistent partition — never
+	// "/", the read-only squashfs), and read the growpart breadcrumb from the
+	// persistent root (stateDir's parent on the appliance layout).
+	storageDataPath := envOr("RASPUTIN_DISK_METRIC_PATH", stateDir)
+	growpartLogPath := envOr("RASPUTIN_GROWPART_LOG", filepath.Join(filepath.Dir(stateDir), "growpart.log"))
+	reregister := func(c *nats.Conn) {
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath))
+	}
 	// Retry the initial NATS connect instead of exiting on failure. On real
 	// hardware the firewall can boot before the control plane (it IS the
 	// network), so rasputin.local may not resolve yet at startup. Exiting let
@@ -355,8 +363,7 @@ func main() {
 	// the agent's own state dir — on the appliance that's
 	// /var/lib/rasputin/agent-state, the same partition as Docker + obs data —
 	// and statfs is filesystem-level. Overridable if a node's layout differs.
-	diskMetricPath := envOr("RASPUTIN_DISK_METRIC_PATH", stateDir)
-	go metrics.Run(ctx, nc, nodeID, diskMetricPath, host.Uptime)
+	go metrics.Run(ctx, nc, nodeID, storageDataPath, host.Uptime)
 
 	// systemd integration (Buildroot nodes; procd on OpenWrt has no
 	// NOTIFY_SOCKET so both calls no-op there). The liveness probe is
@@ -370,7 +377,7 @@ func main() {
 	log.Println("rasputin-agent: shutting down")
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole) {
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo) {
 	meta := map[string]any{}
 	if cidr := host.PrimaryLanCIDR(); cidr != "" {
 		// Carried in Metadata rather than as a top-level field so the
@@ -389,6 +396,7 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole) {
 		// compile-time GOARCH is the node's CPU arch.
 		Architecture: runtime.GOARCH,
 		Metadata:     meta,
+		Storage:      storage,
 		Ts:           time.Now().UTC(),
 	}
 	payload, err := json.Marshal(ev)

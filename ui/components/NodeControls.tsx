@@ -30,7 +30,21 @@ import {
 import type { App, BMCPowerState, DeploymentMode, Node } from '../lib/types';
 import { BMC_ENABLED } from '../lib/features';
 import { ConfirmModal } from './ConfirmModal';
-import { ACCENT, accentA, MONO } from './ui-theme';
+import { ACCENT, accentA, MONO, STATUS_COLOR } from './ui-theme';
+
+// Compact IEC size for the STORAGE row, e.g. 110.3G / 512M. One decimal at
+// G and up, whole numbers below — matches how df renders on the appliance.
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '—';
+  const units = ['B', 'K', 'M', 'G', 'T'];
+  let v = n;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u++;
+  }
+  return `${u >= 3 ? v.toFixed(1) : Math.round(v)}${units[u]}`;
+}
 
 interface NodeControlsProps {
   node: Node | null;
@@ -287,12 +301,28 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, onNavigate,
                 { label: 'TYPE', value: node.architecture || '—' },
                 { label: 'STATUS', value: node.status.toUpperCase() },
                 { label: 'OS IMAGE', value: node.imageVersion || '—' },
-              ].map(({ label, value }) => (
+                {
+                  label: 'STORAGE',
+                  value: node.storage?.persistentTotalBytes
+                    ? `${fmtBytes(node.storage.persistentFreeBytes)} free / ${fmtBytes(node.storage.persistentTotalBytes)}`
+                    : '—',
+                },
+                {
+                  label: 'GROWPART',
+                  value: node.storage?.growpart?.toUpperCase() || '—',
+                  // failed/skipped = the historically silent stuck-partition
+                  // states this field exists to surface — render as warning.
+                  color:
+                    node.storage?.growpart === 'failed' || node.storage?.growpart === 'skipped'
+                      ? STATUS_COLOR.warning
+                      : undefined,
+                },
+              ].map(({ label, value, color }: { label: string; value: string; color?: string }) => (
                 <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
                   <span style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
                   <span
                     style={{
-                      color: 'var(--rasp-fg)',
+                      color: color ?? 'var(--rasp-fg)',
                       fontSize: 10,
                       fontFamily: MONO,
                       textAlign: 'right',
