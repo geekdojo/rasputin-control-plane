@@ -59,6 +59,14 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Allow OUR app's PRs to be reviewed. By default the action refuses
+          # bot-initiated runs, so PRs opened by the quality agents
+          # (quality-sweep, mutation-survivors — authored by claude[bot])
+          # would escape security review entirely and show a red X. Those are
+          # exactly the PRs worth reviewing. Named specifically, NOT "*": this
+          # is a PUBLIC repo, and "*" would let any external App invoke the
+          # action (see the action's security docs).
+          allowed_bots: "claude[bot]"
           # Full transcript in the run log — a clean review and a silent
           # failure must not look identical (quality-sweep run-1 lesson).
           show_full_output: "true"
