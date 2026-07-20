@@ -96,6 +96,19 @@ jobs:
           total=0         # total mutants actually run (killed+lived+notcov)
 
           for m in $modules; do
+            # EMPTY-DIFF GUARD (load-bearing): gremlins treats an empty diff as
+            # "everything changed" and mutates the WHOLE module — so a PR that
+            # touches only one module would trigger a full (minutes-long,
+            # hundreds-of-mutants) scan of every other module and flood the
+            # comment. Only invoke gremlins when THIS module actually has
+            # changed .go files vs the base. (--relative scopes the path list
+            # to the module dir, matching gremlins' own path handling.)
+            changed=$(cd "$m" && git diff --name-only --relative "origin/$BASE" -- '*.go')
+            if [ -z "$changed" ]; then
+              summary="${summary}- **${m}** — no changed Go code"$'\n'
+              continue
+            fi
+
             echo "::group::gremlins $m"
             # -S lc  -> stdout shows only LIVED and NOT COVERED mutants
             # || true -> ADVISORY: a below-threshold/any exit never fails CI
