@@ -55,6 +55,18 @@ export type InventoryChange =
   | 'updated'
   | 'removed';
 
+/**
+ * Agent boot-time snapshot of the persistent data partition (/var/lib/rasputin).
+ * growpart is the outcome keyword from the rasputin-os breadcrumb log:
+ * grown | already-full | deferred-trial | skipped | failed. Absent from
+ * pre-storage agents.
+ */
+export interface NodeStorage {
+  persistentTotalBytes: number;
+  persistentFreeBytes: number;
+  growpart?: string;
+}
+
 export interface Node {
   id: string;
   role: NodeRole;
@@ -65,6 +77,7 @@ export interface Node {
   architecture?: string;
   capabilities?: string[];
   metadata?: Record<string, unknown>;
+  storage?: NodeStorage;
   firstSeen: string;
   lastSeen: string;
   status: NodeStatus;

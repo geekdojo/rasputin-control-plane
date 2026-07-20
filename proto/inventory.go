@@ -62,7 +62,30 @@ type NodeRegisteredEvt struct {
 	Architecture string         `json:"architecture,omitempty"`
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
-	Ts           time.Time      `json:"ts"`
+	// Storage is the agent's boot-time snapshot of the persistent data
+	// partition. Nil from pre-storage agents; consumers treat nil as unknown
+	// (and, like Architecture, never let a nil report wipe a learned value).
+	Storage *StorageInfo `json:"storage,omitempty"`
+	Ts      time.Time    `json:"ts"`
+}
+
+// StorageInfo describes the node's persistent data partition
+// (/var/lib/rasputin — the only writable storage on an appliance, where "/"
+// is read-only squashfs). Snapshotted by the agent at startup: the values
+// change materially only across a boot (the one-time growpart), so register
+// cadence is the right freshness; live fill level is in the disk_* metrics.
+type StorageInfo struct {
+	// PersistentTotalBytes / PersistentFreeBytes are a statfs of the
+	// persistent filesystem. A ~512 MiB total on a large disk is the
+	// signature of a failed/skipped growpart (the historically silent
+	// failure this field exists to surface).
+	PersistentTotalBytes uint64 `json:"persistentTotalBytes"`
+	PersistentFreeBytes  uint64 `json:"persistentFreeBytes"`
+	// Growpart is the outcome keyword from the newest line of the
+	// rasputin-os breadcrumb log (/var/lib/rasputin/growpart.log):
+	// grown | already-full | deferred-trial | skipped | failed.
+	// "" when the log is absent (pre-breadcrumb image, or dev).
+	Growpart string `json:"growpart,omitempty"`
 }
 
 // HeartbeatEvt is published on rasputin.node.<id>.heartbeat every ~10s. Kept
@@ -110,7 +133,10 @@ type Node struct {
 	Architecture string         `json:"architecture,omitempty"`
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
-	FirstSeen    time.Time      `json:"firstSeen"`
-	LastSeen     time.Time      `json:"lastSeen"`
-	Status       NodeStatus     `json:"status"`
+	// Storage is the latest agent-reported persistent-partition snapshot;
+	// nil until a storage-reporting agent registers.
+	Storage   *StorageInfo `json:"storage,omitempty"`
+	FirstSeen time.Time    `json:"firstSeen"`
+	LastSeen  time.Time    `json:"lastSeen"`
+	Status    NodeStatus   `json:"status"`
 }

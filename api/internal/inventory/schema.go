@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     image_version TEXT NOT NULL DEFAULT '',
     capabilities  TEXT NOT NULL DEFAULT '[]',
     metadata      TEXT NOT NULL DEFAULT '{}',
+    storage       TEXT NOT NULL DEFAULT '',
     first_seen    INTEGER NOT NULL,
     last_seen     INTEGER NOT NULL
 );
@@ -23,4 +24,5 @@ CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen);
 var migrations = []string{
 	`ALTER TABLE nodes ADD COLUMN image_version TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE nodes ADD COLUMN architecture TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE nodes ADD COLUMN storage TEXT NOT NULL DEFAULT ''`,
 }

@@ -217,6 +217,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 			Architecture: ev.Architecture,
 			Capabilities: ev.Capabilities,
 			Metadata:     ev.Metadata,
+			Storage:      ev.Storage,
 			FirstSeen:    now,
 			LastSeen:     now,
 			Status:       proto.StatusOnline,
@@ -246,6 +247,10 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	// must not wipe an arch we already learned.
 	if ev.Architecture != "" {
 		existing.Architecture = ev.Architecture
+	}
+	// Same guard for storage: a pre-storage agent reports nil.
+	if ev.Storage != nil {
+		existing.Storage = ev.Storage
 	}
 	existing.Capabilities = ev.Capabilities
 	existing.Metadata = ev.Metadata
