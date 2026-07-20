@@ -37,6 +37,7 @@ type Server struct {
 	updaterVerifier     *updater.Verifier
 	bundleDir           string
 	trustDir            string
+	logDir              string // CANARY (do not merge) — diag log tail dir
 	mesh                *mesh.Service
 	bmc                 *bmc.Service
 	bmcSessions         *bmc.SessionManager
@@ -185,6 +186,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/nodes/{id}", reqd(s.handleDeleteNode))
 
 	mux.HandleFunc("GET /api/metrics/{id}", reqd(s.handleGetMetrics))
+
+	// CANARY (do not merge) — operator diagnostics log tail.
+	mux.HandleFunc("GET /api/diag/logs", reqd(s.handleDiagLogTail))
 
 	mux.HandleFunc("GET /api/firewall/intents", reqd(s.handleListIntents))
 	mux.HandleFunc("POST /api/firewall/intents", reqd(s.handleCreateIntent))
