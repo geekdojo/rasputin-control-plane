@@ -1,0 +1,151 @@
+name: mutation-gate
+
+# Diff-scoped mutation testing on every PR — step 3 of the scheduled
+# quality agents from the July 2026 "AI Agents for Continuous Quality"
+# research note (geekdojo-brain projects/rasputin/research/). Mutation
+# testing measures whether the tests CATCH FAULTS, not merely whether they
+# execute lines — the "no line-coverage ratchet" finding from the note.
+#
+# Tool: gremlins v0.6.0 (go-gremlins/gremlins). Its --diff mode mutates
+# ONLY the code a PR changes vs the base branch, so a run is tens of
+# mutants (a few minutes) instead of the ~2600 repo-wide mutants that make
+# full-module mutation infeasible per-PR. A PR that changes no Go code
+# short-circuits in under a second.
+#
+# PHASE: ADVISORY (calibration). This job posts the mutation result as a PR
+# comment and ALWAYS succeeds — it does not block merges yet. Once we've
+# seen what real PRs score, flip it to blocking (see "TO MAKE BLOCKING"
+# below) and add it to branch-protection required checks.
+#
+#   TO MAKE BLOCKING (later):
+#     1. Set thresholds so gremlins exits non-zero below them, e.g. add to
+#        each module run:  --threshold-efficacy <N> --threshold-mcover <M>
+#     2. Remove the "|| true" advisory guard on the gremlins invocation and
+#        drop MUTATION_ADVISORY handling so a below-threshold run fails.
+#     3. Add "mutation-gate" to the repo's required status checks.
+#
+# No secrets: gremlins needs none. Same-repo PRs only, because the advisory
+# comment needs pull-requests: write (fork PRs get a read-only token).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: mutation-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  GREMLINS_VERSION: v0.6.0
+
+jobs:
+  mutation:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # fetch-depth: 0 so gremlins can diff the PR head against the base
+      # branch (origin/<base>). Required by gremlins --diff.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+
+      - name: install gremlins
+        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@${{ env.GREMLINS_VERSION }}
+
+      - name: mutation test (diff-scoped, advisory)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # gremlins runs per Go module. api/ and agent/ are the two modules
+          # with tests; proto/ is generated. A module with no in-diff Go
+          # changes short-circuits ~instantly.
+          modules="api agent"
+
+          summary=""      # per-module one-liners for the comment/summary
+          survivors=""    # LIVED / NOT COVERED lines across modules
+          total=0         # total mutants actually run (killed+lived+notcov)
+
+          for m in $modules; do
+            echo "::group::gremlins $m"
+            # -S lc  -> stdout shows only LIVED and NOT COVERED mutants
+            # || true -> ADVISORY: a below-threshold/any exit never fails CI
+            out=$(cd "$m" && gremlins unleash --diff "origin/$BASE" -S lc \
+                    -E '\.pb\.go$' -E '_gen\.go$' 2>&1 || true)
+            echo "$out"
+            echo "::endgroup::"
+
+            killed=$(echo "$out"   | sed -n 's/^Killed: \([0-9]*\).*/\1/p'      | tail -1)
+            lived=$(echo "$out"    | sed -n 's/.*Lived: \([0-9]*\).*/\1/p'      | tail -1)
+            notcov=$(echo "$out"   | sed -n 's/.*Not covered: \([0-9]*\).*/\1/p' | tail -1)
+            eff=$(echo "$out"      | sed -n 's/^Test efficacy: \(.*\)$/\1/p'    | tail -1)
+            mcov=$(echo "$out"     | sed -n 's/^Mutator coverage: \(.*\)$/\1/p' | tail -1)
+            : "${killed:=0}"; : "${lived:=0}"; : "${notcov:=0}"
+
+            run=$((killed + lived + notcov))
+            total=$((total + run))
+            if [ "$run" -eq 0 ]; then
+              summary="${summary}- **${m}** — no changed Go code"$'\n'
+            else
+              summary="${summary}- **${m}** — efficacy ${eff:-n/a} · coverage ${mcov:-n/a} · killed ${killed} / lived ${lived} / not-covered ${notcov}"$'\n'
+              mod_surv=$(echo "$out" | grep -E '^\s*(LIVED|NOT COVERED)' | sed "s#at #at ${m}/#" || true)
+              if [ -n "$mod_surv" ]; then
+                survivors="${survivors}${mod_surv}"$'\n'
+              fi
+            fi
+          done
+
+          # Build the report body.
+          {
+            echo "## Mutation gate (advisory)"
+            echo "<!-- mutation-gate-marker -->"
+            echo
+            echo "Diff-scoped mutation testing on this PR's changed Go code — gremlins \`${GREMLINS_VERSION}\`, \`--diff origin/${BASE}\`. **Advisory during calibration: this does not block merge.**"
+            echo
+            echo "$summary"
+            if [ -n "$survivors" ]; then
+              echo "Surviving mutants — a fault the tests did **not** catch. Consider adding a case that fails when this line is mutated:"
+              echo
+              echo '```'
+              echo "$survivors"
+              echo '```'
+            elif [ "$total" -gt 0 ]; then
+              echo "✅ Every mutant in the changed code was killed by the tests."
+            fi
+            echo
+            echo "<sub>Mutation testing checks whether tests *catch* faults, not just *execute* lines. LIVED = a code change the tests still passed on. Once calibrated, this becomes a required check.</sub>"
+          } > /tmp/mutation-report.md
+
+          cat /tmp/mutation-report.md >> "$GITHUB_STEP_SUMMARY"
+
+          # Only comment when there was Go code to mutate — no noise on
+          # docs/ui-only PRs. Update our previous comment in place if present.
+          if [ "$total" -gt 0 ]; then
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+                        --jq '[.[] | select(.body | contains("mutation-gate-marker"))][0].id' 2>/dev/null || true)
+            if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+              gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" \
+                -f body="$(cat /tmp/mutation-report.md)" >/dev/null
+            else
+              gh pr comment "$PR" --body-file /tmp/mutation-report.md
+            fi
+          else
+            echo "No changed Go code to mutate; skipping PR comment."
+          fi
