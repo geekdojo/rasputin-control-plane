@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSetupState, listApps, listBusTokens, listNodes, getMetrics, openInventoryWS, revokeBusToken } from '../../lib/api';
 import type { App, BusTokenInfo, DeploymentMode, InventoryChangeEvent, Node, NodeRole, NodeStatus } from '../../lib/types';
-import { NodeGrid, type NodeView, type PendingView } from '../../components/NodeGrid';
+import { NodeGrid, sortNodeViews, type NodeView, type PendingView } from '../../components/NodeGrid';
 import { NodeControls } from '../../components/NodeControls';
 import { AddNodeWizard } from '../../components/AddNodeWizard';
 import { ConfirmModal } from '../../components/ConfirmModal';
@@ -120,6 +120,12 @@ export default function NodesPage() {
     return () => clearInterval(t);
   }, []);
 
+  // Auto-select the center hex once nodes first arrive so the detail panel is
+  // populated on load instead of showing the placeholder (#7). One-shot: after
+  // that, an explicit deselect (click-toggle) or a node removal leaves the
+  // panel empty rather than snapping selection back.
+  const didAutoSelect = useRef(false);
+
   const views: NodeView[] = useMemo(
     () =>
       nodes.map((n) => ({
@@ -131,6 +137,12 @@ export default function NodesPage() {
       })),
     [nodes, util],
   );
+
+  useEffect(() => {
+    if (didAutoSelect.current || views.length === 0) return;
+    didAutoSelect.current = true;
+    setSelectedId((prev) => prev ?? sortNodeViews(views)[0].id);
+  }, [views]);
 
   // Pending enrollments: bound, unrevoked tokens whose node isn't in inventory
   // yet. Once the node registers it drops out of this list and becomes a live
