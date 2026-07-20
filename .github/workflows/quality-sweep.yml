@@ -62,6 +62,15 @@ jobs:
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
 
+      # Preinstall the analysis tool the agent reaches for. Run 29750112045
+      # burned ~15 of its turns trying to install and execute staticcheck
+      # around the allowlist; installing it here and allowing it below turns
+      # that into a single call.
+      - name: preinstall staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -70,16 +79,25 @@ jobs:
           # identical from outside).
           show_full_output: "true"
           display_report: "true"
+          # --max-turns sizing: a real sweep spends ~40 turns on discovery +
+          # verification + edits and ~15 on gates + shipping (measured on run
+          # 29750112045, which starved at 50). The 60-min job timeout remains
+          # the hard stop.
           claude_args: |
             --model claude-opus-4-8
-            --max-turns 50
-            --allowedTools "Edit,MultiEdit,Write,Bash(go:*),Bash(gofmt:*),Bash(git:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(npm:*)"
+            --max-turns 150
+            --allowedTools "Edit,MultiEdit,Write,Bash(go:*),Bash(gofmt:*),Bash(staticcheck:*),Bash(git:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(npm:*)"
           prompt: |
             Weekly code-quality sweep: duplicative and dead code.
 
             Read AGENTS.md, ARCHITECTURE.md, and CLAUDE.md before changing
             anything. Scope: the three Go modules (api/, agent/, proto/) and
             the Next.js ui/.
+
+            Tooling: the Go toolchain, staticcheck, node/npm, git, and gh are
+            preinstalled and on PATH. Do not install or work around other
+            tools — if something you want is unavailable, proceed without it
+            and note it in your summary.
 
             1. FIND candidates: logic duplicated across files/modules that
                should share a helper; dead code (unexported symbols never
