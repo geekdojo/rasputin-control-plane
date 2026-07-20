@@ -65,6 +65,11 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Surface the full agent transcript in the run log — without these the
+          # run is a black box (a no-findings sweep and a silent failure look
+          # identical from outside).
+          show_full_output: "true"
+          display_report: "true"
           claude_args: |
             --model claude-opus-4-8
             --max-turns 50
