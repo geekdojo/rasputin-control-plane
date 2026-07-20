@@ -4,13 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/proto"
-	_ "modernc.org/sqlite"
 )
 
 // Store is the SQLite-backed ledger of declared apps.
@@ -19,15 +18,9 @@ type Store struct {
 }
 
 func OpenStore(ctx context.Context, path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := dbutil.Open(ctx, path, schema, "apps")
 	if err != nil {
-		return nil, fmt.Errorf("apps: open sqlite: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("apps: apply schema: %w", err)
+		return nil, err
 	}
 	applyMigrations(ctx, db)
 	return &Store{db: db}, nil

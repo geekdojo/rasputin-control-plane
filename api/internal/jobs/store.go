@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 )
 
 // Store is the SQLite-backed durable ledger for jobs, steps, and events.
@@ -19,16 +19,9 @@ type Store struct {
 
 // OpenStore opens (and migrates) the SQLite database at path.
 func OpenStore(ctx context.Context, path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := dbutil.Open(ctx, path, schema, "jobs")
 	if err != nil {
-		return nil, fmt.Errorf("jobs: open sqlite: %w", err)
-	}
-	// SQLite is single-writer; cap connections so we serialize writes.
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("jobs: apply schema: %w", err)
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }

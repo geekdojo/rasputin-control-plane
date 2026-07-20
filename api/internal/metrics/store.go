@@ -3,11 +3,10 @@ package metrics
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/proto"
-	_ "modernc.org/sqlite"
 )
 
 // Store persists per-node metric samples to SQLite. The table is treated as
@@ -17,15 +16,9 @@ type Store struct {
 }
 
 func OpenStore(ctx context.Context, path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := dbutil.Open(ctx, path, schema, "metrics")
 	if err != nil {
-		return nil, fmt.Errorf("metrics: open sqlite: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("metrics: apply schema: %w", err)
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }
