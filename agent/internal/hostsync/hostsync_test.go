@@ -51,6 +51,27 @@ func TestRunNoopOnResolveError(t *testing.T) {
 	}
 }
 
+// Run must call the resolver with a 3s per-attempt timeout. Guards the
+// `3*time.Second` argument against arithmetic mutation (e.g. to `3/time.Second`,
+// which is 0).
+func TestRunPassesResolveTimeout(t *testing.T) {
+	dir := t.TempDir()
+	var gotTimeout atomic.Int64
+	resolve := func(name string, timeout time.Duration) (string, error) {
+		gotTimeout.Store(int64(timeout))
+		return "192.168.1.50", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "", resolve)
+
+	file := filepath.Join(dir, "rasputin.local")
+	waitFor(t, func() bool { return readHost(file) != "" }) // resolver has run
+	if got := time.Duration(gotTimeout.Load()); got != 3*time.Second {
+		t.Fatalf("resolve timeout = %v, want 3s", got)
+	}
+}
+
 func readHost(file string) string {
 	b, err := os.ReadFile(file)
 	if err != nil {
