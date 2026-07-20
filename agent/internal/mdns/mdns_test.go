@@ -93,3 +93,110 @@ func TestReadName_RejectsPointerCycle(t *testing.T) {
 		t.Error("pointer cycle should fail, not loop forever")
 	}
 }
+
+// A label of exactly 63 bytes is the longest a DNS label may be (RFC 1035
+// §2.3.4); buildQuery must accept it and reject 64. Guards the `> 63` bound
+// against being loosened to `>= 63`.
+func TestBuildQuery_LabelLengthBoundary(t *testing.T) {
+	if _, err := buildQuery(strings.Repeat("a", 63) + ".local"); err != nil {
+		t.Errorf("63-byte label is valid, got error: %v", err)
+	}
+	if _, err := buildQuery(strings.Repeat("a", 64) + ".local"); err == nil {
+		t.Error("64-byte label exceeds the DNS limit, want error")
+	}
+}
+
+// A name whose labels consume the entire buffer with no terminating zero must
+// fail rather than read past the end. Guards the `cur >= len(msg)` bound.
+func TestReadName_UnterminatedRunsToEnd(t *testing.T) {
+	msg := []byte{3, 'a', 'b', 'c'} // label "abc" ends exactly at len, no root 0
+	if _, _, ok := readName(msg, 0); ok {
+		t.Error("name with no terminating zero should fail")
+	}
+}
+
+// A compression pointer is two bytes; a lone 0xC0 at the buffer's end must fail
+// rather than read its missing second byte. Guards the `cur+1 >= len(msg)` bound.
+func TestReadName_TruncatedPointer(t *testing.T) {
+	msg := []byte{0xC0} // pointer high byte with no low byte following
+	if _, _, ok := readName(msg, 0); ok {
+		t.Error("truncated compression pointer should fail")
+	}
+}
+
+// A label byte claiming more bytes than remain must fail rather than slice past
+// the end. Guards the `cur+1+l > len(msg)` bound.
+func TestReadName_TruncatedLabel(t *testing.T) {
+	msg := []byte{3, 'a', 'b'} // length byte says 3, only 2 chars follow
+	if _, _, ok := readName(msg, 0); ok {
+		t.Error("label overrunning the buffer should fail")
+	}
+}
+
+// answerPacket builds header + question + the given answer-record tail, so tests
+// can craft truncated/multi-answer responses. anCount is written into the
+// header; the answer owner is a compression pointer back to the question (0xC00C).
+func answerPacket(name string, anCount byte, answerTail []byte) []byte {
+	var b []byte
+	b = append(b, 0, 0, 0x84, 0, 0, 1, 0, anCount, 0, 0, 0, 0) // response/AA, qd=1
+	for _, l := range strings.Split(name, ".") {
+		b = append(b, byte(len(l)))
+		b = append(b, l...)
+	}
+	b = append(b, 0)
+	b = append(b, 0, typeA, 0, classIN) // question qtype/qclass
+	return append(b, answerTail...)
+}
+
+// A response whose answer owner name is present but which then ends before the
+// 10-byte fixed answer fields (type/class/ttl/rdlength) must yield "" rather
+// than read out of bounds. Guards the `o+10 > len(msg)` check.
+func TestParseAnswer_TruncatedAnswerHeader(t *testing.T) {
+	// Answer tail: just the owner pointer, nothing after it.
+	msg := answerPacket("rasputin.local", 1, []byte{0xC0, 0x0C})
+	if got := parseAnswer(msg, "rasputin.local"); got != "" {
+		t.Errorf("truncated answer header should yield empty, got %q", got)
+	}
+}
+
+// A matching A record that declares rdlength=4 but is truncated before its 4
+// address bytes must yield "" rather than read out of bounds. Guards the
+// `rdStart+rdlen > len(msg)` check.
+func TestParseAnswer_TruncatedRData(t *testing.T) {
+	tail := []byte{
+		0xC0, 0x0C, // owner = pointer to question
+		0, typeA, 0, classIN, // type A, class IN
+		0, 0, 0, 120, // ttl
+		0, 4, // rdlength = 4
+		192, 168, // only 2 of the 4 promised address bytes
+	}
+	msg := answerPacket("rasputin.local", 1, tail)
+	if got := parseAnswer(msg, "rasputin.local"); got != "" {
+		t.Errorf("truncated rdata should yield empty, got %q", got)
+	}
+}
+
+// With two answers where the first is a non-A record, parseAnswer must advance
+// past the first (off = rdStart + rdlen) to find the matching A answer.
+// Guards the record-advance arithmetic against being flipped to subtraction.
+func TestParseAnswer_SkipsFirstAnswerToMatch(t *testing.T) {
+	const typeTXT = 16
+	tail := []byte{
+		// answer 1: TXT (non-A) for the same owner — must be skipped.
+		0xC0, 0x0C,
+		0, typeTXT, 0, classIN,
+		0, 0, 0, 120,
+		0, 1, // rdlength = 1
+		'x', // rdata
+		// answer 2: the A record we want.
+		0xC0, 0x0C,
+		0, typeA, 0, classIN,
+		0, 0, 0, 120,
+		0, 4,
+		192, 168, 1, 50,
+	}
+	msg := answerPacket("rasputin.local", 2, tail)
+	if got := parseAnswer(msg, "rasputin.local"); got != "192.168.1.50" {
+		t.Errorf("parseAnswer = %q, want 192.168.1.50 (must skip first answer)", got)
+	}
+}
