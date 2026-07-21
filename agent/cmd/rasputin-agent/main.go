@@ -344,7 +344,10 @@ func main() {
 	// design/control-plane/bmc-bitscope.md §2a.
 	if role == proto.RoleControlPlane || os.Getenv("RASPUTIN_BMC_HOST") == "1" {
 		backend, err := bmc.New(envOr("RASPUTIN_BMC_BACKEND", bmc.DefaultBackend), bmc.Config{
-			StateDir: filepath.Join(stateDir, "bmc"),
+			StateDir:       filepath.Join(stateDir, "bmc"),
+			BitScopeDev:    os.Getenv("RASPUTIN_BMC_BITSCOPE_DEV"),
+			BitScopeUnlock: os.Getenv("RASPUTIN_BMC_BITSCOPE_UNLOCK"),
+			BitScopeMap:    os.Getenv("RASPUTIN_BMC_BITSCOPE_MAP"),
 		})
 		if err != nil {
 			log.Fatalf("rasputin-agent: bmc backend: %v", err)
