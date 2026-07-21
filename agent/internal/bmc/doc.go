@@ -3,13 +3,18 @@
 // translates them into hardware operations against each target node's BMC
 // chip.
 //
-// Two backends:
-//   - RealBackend (TODO v1) — talks to the I²C / Redfish / IPMI surface
-//     exposed by the chassis backplane. Deferred until hardware lands.
-//   - MockBackend — file-backed per-target power state; SOL emits a
-//     canned banner + a periodic uptime line. Lets the api saga + UI be
-//     exercised end-to-end on dev machines without a real BMC.
+// Backends are pluggable through the registry in registry.go, selected
+// by RASPUTIN_BMC_BACKEND (see design/control-plane/bmc-bitscope.md §2a):
+//   - MockBackend ("mock", the default) — file-backed per-target power
+//     state; SOL emits a canned banner + a periodic uptime line. Lets the
+//     api saga + UI be exercised end-to-end without a real BMC.
+//   - "bitscope" (planned, Phase 2) — the BitScope CB04B blade BMC over
+//     the rack's RS-485 bus via the manager Pi's /dev/serial0.
+//   - "turingpi" (contemplated) — the Turing Pi BMC over its REST API.
+//   - the Phase 3 chassis driver — I²C / IPMI / Redfish against the
+//     Rasputin backplane.
 //
 // Only registered on agents whose role is controlplane (or when the env
-// override RASPUTIN_BMC_HOST=1 forces it on any agent for testing).
+// override RASPUTIN_BMC_HOST=1 forces it on any agent — the BitScope
+// bench rack's manager node is a compute agent).
 package bmc
