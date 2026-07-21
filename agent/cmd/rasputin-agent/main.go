@@ -81,16 +81,18 @@ func main() {
 	// persistent root (stateDir's parent on the appliance layout).
 	storageDataPath := envOr("RASPUTIN_DISK_METRIC_PATH", stateDir)
 	growpartLogPath := envOr("RASPUTIN_GROWPART_LOG", filepath.Join(filepath.Dir(stateDir), "growpart.log"))
-	// BMC backend — constructed on the BMC host before the bus connects,
-	// because registration advertises the backend's reachable targets
-	// (bmc-targets, design/control-plane/bmc.md §2a). In MVS the host is
-	// the controlplane node; RASPUTIN_BMC_HOST=1 hosts BMC on any agent
-	// (the BitScope bench rack's manager is a compute node). Backend
-	// selected by RASPUTIN_BMC_BACKEND via the bmc registry; mock stays
-	// the default. Handlers register after the bus is up, below.
+	// BMC backend — HARD on/off (bmc.md §2a, decided 2026-07-21): off by
+	// default; no backend is constructed, nothing registers, nothing is
+	// advertised. On only when RASPUTIN_BMC_BACKEND explicitly selects a
+	// backend — the mock included; it is an ordinary explicit selection
+	// that plays by the same strict rules, never a fallback. Selecting a
+	// backend IS the host opt-in (any agent may host BMC — the BitScope
+	// bench manager is a compute node), so there is no separate host
+	// flag. Constructed before the bus connects so registration can
+	// advertise bmc-targets; handlers register after the bus is up.
 	var bmcBackend bmc.Backend
-	if role == proto.RoleControlPlane || os.Getenv("RASPUTIN_BMC_HOST") == "1" {
-		b, err := bmc.New(envOr("RASPUTIN_BMC_BACKEND", bmc.DefaultBackend), bmc.Config{
+	if kind := os.Getenv("RASPUTIN_BMC_BACKEND"); kind != "" && kind != bmc.BackendNone {
+		b, err := bmc.New(kind, bmc.Config{
 			StateDir:       filepath.Join(stateDir, "bmc"),
 			BitScopeDev:    os.Getenv("RASPUTIN_BMC_BITSCOPE_DEV"),
 			BitScopeUnlock: os.Getenv("RASPUTIN_BMC_BITSCOPE_UNLOCK"),

@@ -40,20 +40,22 @@ func (s *Service) HostNodeID() string { return s.cfg.HostNodeID }
 func (s *Service) Store() *Store      { return s.store }
 
 // TargetReachable enforces per-node BMC gating (design/control-plane/
-// bmc.md §2a): when the configured BMC-host node advertises the
-// bmc-targets capability, target must appear in its advertised list —
-// power verbs and SoL against anything else are refused, so the UI can
-// never drive a console that has no serial path. Hosts that don't
-// advertise — older agents, or a mock backend with no configured
-// targets — keep the interim presence-only behavior, so mixed-version
-// clusters and dev setups don't regress.
+// bmc.md §2a) — HARD on/off, decided 2026-07-21: the configured BMC-host
+// node must be registered, must advertise the bmc-targets capability,
+// and target must appear in its advertised list. There is no permissive
+// fallback — a cluster whose host advertises nothing has BMC off, and
+// every verb and SoL open is refused, so nothing can ever "succeed"
+// against hardware that isn't there.
 func (s *Service) TargetReachable(ctx context.Context, inv *inventory.Store, target string) error {
 	host, err := inv.Get(ctx, s.cfg.HostNodeID)
 	if err != nil {
 		return fmt.Errorf("bmc host lookup: %w", err)
 	}
-	if host == nil || !slices.Contains(host.Capabilities, proto.CapabilityBMCTargets) {
-		return nil
+	if host == nil {
+		return fmt.Errorf("BMC host %q is not registered", s.cfg.HostNodeID)
+	}
+	if !slices.Contains(host.Capabilities, proto.CapabilityBMCTargets) {
+		return fmt.Errorf("no BMC configured: host %q advertises no bmc-targets", s.cfg.HostNodeID)
 	}
 	if !slices.Contains(proto.NodeBMCTargets(host), target) {
 		return fmt.Errorf("target %q is not reachable by BMC host %q (not in its advertised bmc-targets)",

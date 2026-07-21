@@ -6,9 +6,12 @@ import (
 	"strings"
 )
 
-// DefaultBackend is the selector fallback when RASPUTIN_BMC_BACKEND is
-// unset: mock everywhere until a real driver is configured.
-const DefaultBackend = "mock"
+// BackendNone is the hard-off state (decided 2026-07-21): no backend is
+// constructed, no handlers register, nothing is advertised, and the api
+// refuses every BMC verb. This is the default — BMC is on only when
+// RASPUTIN_BMC_BACKEND explicitly selects a backend, and the mock is an
+// ordinary explicit selection, never a fallback.
+const BackendNone = "none"
 
 // Config carries the inputs a backend constructor may need. Each driver
 // picks the fields it uses and ignores the rest.
@@ -48,15 +51,17 @@ var factories = map[string]factory{
 	"bitscope": func(cfg Config) (Backend, error) { return NewBitScopeBackend(cfg) },
 }
 
-// New constructs the backend named kind. An empty kind selects
-// DefaultBackend; an unregistered kind is an error naming the valid ones.
+// New constructs the backend named kind. "" and BackendNone are not
+// constructible — hard-off is the caller's branch (it must skip
+// construction and registration entirely), so asking for a backend
+// while off is a wiring bug worth a loud error.
 func New(kind string, cfg Config) (Backend, error) {
-	if kind == "" {
-		kind = DefaultBackend
+	if kind == "" || kind == BackendNone {
+		return nil, fmt.Errorf("no BMC backend selected (RASPUTIN_BMC_BACKEND=%s|%s)", BackendNone, strings.Join(Names(), "|"))
 	}
 	f, ok := factories[kind]
 	if !ok {
-		return nil, fmt.Errorf("unknown BMC backend %q (expected %s)", kind, strings.Join(Names(), "|"))
+		return nil, fmt.Errorf("unknown BMC backend %q (expected %s|%s)", kind, BackendNone, strings.Join(Names(), "|"))
 	}
 	return f(cfg)
 }

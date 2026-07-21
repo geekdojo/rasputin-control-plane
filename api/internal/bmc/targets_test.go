@@ -27,23 +27,26 @@ func registerHost(t *testing.T, f *fixture, inv *inventory.Store, targets []stri
 }
 
 func TestTargetReachable_HostNotRegistered(t *testing.T) {
-	// Interim behavior: an unregistered host doesn't gate (presence-only
-	// checks elsewhere still apply).
+	// Hard off: an unregistered host means BMC is not on — refuse.
 	f := newFixture(t)
 	inv := newInvStore(t)
-	if err := f.svc.TargetReachable(f.ctx, inv, "node-1"); err != nil {
-		t.Errorf("unregistered host should not gate: %v", err)
+	if err := f.svc.TargetReachable(f.ctx, inv, "node-1"); err == nil {
+		t.Error("unregistered host must refuse")
 	}
 }
 
 func TestTargetReachable_HostWithoutCapability(t *testing.T) {
-	// Older agents / mock hosts advertise nothing — presence-only
-	// behavior is preserved for them.
+	// Hard off: a registered host that advertises nothing has no BMC
+	// configured — refuse, never fall back to presence-only.
 	f := newFixture(t)
 	inv := newInvStore(t)
 	registerHost(t, f, inv, nil)
-	if err := f.svc.TargetReachable(f.ctx, inv, "node-1"); err != nil {
-		t.Errorf("non-advertising host should not gate: %v", err)
+	err := f.svc.TargetReachable(f.ctx, inv, "node-1")
+	if err == nil {
+		t.Fatal("non-advertising host must refuse")
+	}
+	if !strings.Contains(err.Error(), "no BMC configured") {
+		t.Errorf("refusal should say BMC is not configured: %v", err)
 	}
 }
 

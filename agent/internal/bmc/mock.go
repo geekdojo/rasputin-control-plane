@@ -50,11 +50,11 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 
 func (m *MockBackend) Name() string { return "mock" }
 
-// SetTargets configures the advertised bmc-targets list (dev-only, from
-// RASPUTIN_BMC_MOCK_TARGETS via the registry). The mock deliberately
-// advertises nothing by default: an advertised list makes the api's
-// per-node gate strict, and a dev cluster with no configured targets
-// should keep the permissive presence-only behavior.
+// SetTargets configures the advertised bmc-targets list (from
+// RASPUTIN_BMC_MOCK_TARGETS via the registry) — the mock's equivalent
+// of a real backend's address map. BMC gating is hard: with no list
+// configured the mock advertises nothing and every verb against the
+// cluster is refused, same as any misconfigured real backend.
 func (m *MockBackend) SetTargets(ids []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
