@@ -1,8 +1,13 @@
 package bmc
 
 import (
+	"context"
+	"fmt"
 	"log"
+	"slices"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
@@ -33,4 +38,27 @@ func NewService(cfg Config, store *Store, nc *nats.Conn) *Service {
 
 func (s *Service) HostNodeID() string { return s.cfg.HostNodeID }
 func (s *Service) Store() *Store      { return s.store }
-func (s *Service) NATS() *nats.Conn   { return s.nc }
+
+// TargetReachable enforces per-node BMC gating (design/control-plane/
+// bmc.md §2a): when the configured BMC-host node advertises the
+// bmc-targets capability, target must appear in its advertised list —
+// power verbs and SoL against anything else are refused, so the UI can
+// never drive a console that has no serial path. Hosts that don't
+// advertise — older agents, or a mock backend with no configured
+// targets — keep the interim presence-only behavior, so mixed-version
+// clusters and dev setups don't regress.
+func (s *Service) TargetReachable(ctx context.Context, inv *inventory.Store, target string) error {
+	host, err := inv.Get(ctx, s.cfg.HostNodeID)
+	if err != nil {
+		return fmt.Errorf("bmc host lookup: %w", err)
+	}
+	if host == nil || !slices.Contains(host.Capabilities, proto.CapabilityBMCTargets) {
+		return nil
+	}
+	if !slices.Contains(proto.NodeBMCTargets(host), target) {
+		return fmt.Errorf("target %q is not reachable by BMC host %q (not in its advertised bmc-targets)",
+			target, s.cfg.HostNodeID)
+	}
+	return nil
+}
+func (s *Service) NATS() *nats.Conn { return s.nc }

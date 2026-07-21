@@ -21,6 +21,12 @@ type Config struct {
 	BitScopeDev    string // serial device (default /dev/serial0)
 	BitScopeUnlock string // bus unlock sequence (default per D-4)
 	BitScopeMap    string // address map path (default <StateDir>/bitscope-map.json)
+
+	// MockTargets is the mock backend's advertised bmc-targets list
+	// (RASPUTIN_BMC_MOCK_TARGETS, comma-separated) — dev-only, for
+	// exercising per-node gating without hardware. Empty = advertise
+	// nothing, keeping dev clusters on permissive presence-only gating.
+	MockTargets []string
 }
 
 // factory constructs one named backend from Config.
@@ -31,7 +37,14 @@ type factory func(Config) (Backend, error)
 // RASPUTIN_BMC_BACKEND and only ever talks Backend. See
 // design/control-plane/bmc-bitscope.md §2a.
 var factories = map[string]factory{
-	"mock":     func(cfg Config) (Backend, error) { return NewMockBackend(cfg.StateDir) },
+	"mock": func(cfg Config) (Backend, error) {
+		mb, err := NewMockBackend(cfg.StateDir)
+		if err != nil {
+			return nil, err
+		}
+		mb.SetTargets(cfg.MockTargets)
+		return mb, nil
+	},
 	"bitscope": func(cfg Config) (Backend, error) { return NewBitScopeBackend(cfg) },
 }
 

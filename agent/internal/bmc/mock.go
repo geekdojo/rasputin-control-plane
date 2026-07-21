@@ -26,6 +26,7 @@ type MockBackend struct {
 	mu        sync.Mutex
 	statePath string
 	state     mockState
+	targets   []string
 }
 
 type mockState struct {
@@ -48,6 +49,23 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 }
 
 func (m *MockBackend) Name() string { return "mock" }
+
+// SetTargets configures the advertised bmc-targets list (dev-only, from
+// RASPUTIN_BMC_MOCK_TARGETS via the registry). The mock deliberately
+// advertises nothing by default: an advertised list makes the api's
+// per-node gate strict, and a dev cluster with no configured targets
+// should keep the permissive presence-only behavior.
+func (m *MockBackend) SetTargets(ids []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.targets = append([]string(nil), ids...)
+}
+
+func (m *MockBackend) Targets() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.targets...)
+}
 
 func (m *MockBackend) load() error {
 	buf, err := os.ReadFile(m.statePath)

@@ -4,8 +4,8 @@ import { ArrowLeft, Terminal } from 'lucide-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
-import { bmcSOLURL } from '../../../lib/api';
-import { BMC_ENABLED } from '../../../lib/features';
+import { bmcSOLURL, listNodes } from '../../../lib/api';
+import { bmcReachableNodes } from '../../../lib/bmc';
 import { Badge, Btn, DIM, HAIR, Input, PageHeader, PageShell } from '../../../components/kit';
 import { MONO } from '../../../components/ui-theme';
 
@@ -30,11 +30,32 @@ function ConsoleInner() {
   const [lines, setLines] = useState<string[]>([]);
   const [connected, setConnected] = useState<ConnState>('connecting');
   const [input, setInput] = useState('');
+  // Per-node gate (lib/bmc.ts): null = still checking, then whether some
+  // BMC host advertises this node. The control that links here is already
+  // gated, but the route is reachable by direct URL — check again. The
+  // api enforces the same gate server-side (403 on the WS).
+  const [reachable, setReachable] = useState<boolean | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const paneRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
-    if (!nodeId || !BMC_ENABLED) return;
+    if (!nodeId) return;
+    let active = true;
+    setReachable(null);
+    listNodes()
+      .then((ns) => {
+        if (active) setReachable(bmcReachableNodes(ns).has(nodeId));
+      })
+      .catch(() => {
+        if (active) setReachable(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [nodeId]);
+
+  useEffect(() => {
+    if (!nodeId || reachable !== true) return;
     const ws = new WebSocket(bmcSOLURL(nodeId));
     wsRef.current = ws;
     ws.onopen = () => setConnected('open');
@@ -53,7 +74,7 @@ function ConsoleInner() {
         /* ignore */
       }
     };
-  }, [nodeId]);
+  }, [nodeId, reachable]);
 
   useEffect(() => {
     const el = paneRef.current;
@@ -70,17 +91,13 @@ function ConsoleInner() {
     setInput('');
   }
 
-  // The serial console rides on BMC serial-over-LAN, which has no real
-  // backend yet (Phase 3 hardware). The control that links here is hidden,
-  // but the route is still reachable by direct URL — guard it. See
-  // lib/features.ts.
-  if (!BMC_ENABLED) {
+  if (nodeId && reachable === false) {
     return (
       <PageShell>
         <PageHeader icon={Terminal} title="SERIAL CONSOLE" />
         <div style={{ padding: '14px 20px' }}>
           <p style={{ color: DIM, fontSize: 11, fontFamily: MONO }}>
-            The serial console isn&apos;t available in this release.{' '}
+            No BMC host reaches this node&apos;s serial line — the console isn&apos;t available for it.{' '}
             <Link href="/" style={{ color: DIM }}>
               Back to nodes
             </Link>
@@ -159,7 +176,7 @@ function ConsoleInner() {
         </form>
 
         <p style={{ color: DIM, fontSize: 10, fontFamily: MONO, margin: 0, opacity: 0.7 }}>
-          v0 mock backend emits a banner + uptime line every 2s and echoes typed input. Real BMC wiring lands with chassis hardware.
+          Line-mode v0 console (Enter sends the line). xterm.js character-mode is the planned upgrade.
         </p>
       </div>
     </PageShell>

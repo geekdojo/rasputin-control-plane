@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -80,8 +81,33 @@ func main() {
 	// persistent root (stateDir's parent on the appliance layout).
 	storageDataPath := envOr("RASPUTIN_DISK_METRIC_PATH", stateDir)
 	growpartLogPath := envOr("RASPUTIN_GROWPART_LOG", filepath.Join(filepath.Dir(stateDir), "growpart.log"))
+	// BMC backend — constructed on the BMC host before the bus connects,
+	// because registration advertises the backend's reachable targets
+	// (bmc-targets, design/control-plane/bmc.md §2a). In MVS the host is
+	// the controlplane node; RASPUTIN_BMC_HOST=1 hosts BMC on any agent
+	// (the BitScope bench rack's manager is a compute node). Backend
+	// selected by RASPUTIN_BMC_BACKEND via the bmc registry; mock stays
+	// the default. Handlers register after the bus is up, below.
+	var bmcBackend bmc.Backend
+	if role == proto.RoleControlPlane || os.Getenv("RASPUTIN_BMC_HOST") == "1" {
+		b, err := bmc.New(envOr("RASPUTIN_BMC_BACKEND", bmc.DefaultBackend), bmc.Config{
+			StateDir:       filepath.Join(stateDir, "bmc"),
+			BitScopeDev:    os.Getenv("RASPUTIN_BMC_BITSCOPE_DEV"),
+			BitScopeUnlock: os.Getenv("RASPUTIN_BMC_BITSCOPE_UNLOCK"),
+			BitScopeMap:    os.Getenv("RASPUTIN_BMC_BITSCOPE_MAP"),
+			MockTargets:    splitCSV(os.Getenv("RASPUTIN_BMC_MOCK_TARGETS")),
+		})
+		if err != nil {
+			log.Fatalf("rasputin-agent: bmc backend: %v", err)
+		}
+		bmcBackend = b
+	}
 	reregister := func(c *nats.Conn) {
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath))
+		var bmcTargets []string
+		if bmcBackend != nil {
+			bmcTargets = bmcBackend.Targets()
+		}
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcTargets)
 	}
 	// Retry the initial NATS connect instead of exiting on failure. On real
 	// hardware the firewall can boot before the control plane (it IS the
@@ -335,24 +361,10 @@ func main() {
 		log.Printf("rasputin-agent: tailscale backend=%s", tsBackend.Name())
 	}
 
-	// BMC handlers — registered on the BMC host. In MVS that's the
-	// controlplane node; override with RASPUTIN_BMC_HOST=1 to host BMC on
-	// any agent (the BitScope bench rack's manager is a compute node).
-	// The backend comes from the bmc package's registry, selected by
-	// RASPUTIN_BMC_BACKEND; mock stays the default until a real driver
-	// (bitscope, turingpi, chassis) is configured. See
-	// design/control-plane/bmc-bitscope.md §2a.
-	if role == proto.RoleControlPlane || os.Getenv("RASPUTIN_BMC_HOST") == "1" {
-		backend, err := bmc.New(envOr("RASPUTIN_BMC_BACKEND", bmc.DefaultBackend), bmc.Config{
-			StateDir:       filepath.Join(stateDir, "bmc"),
-			BitScopeDev:    os.Getenv("RASPUTIN_BMC_BITSCOPE_DEV"),
-			BitScopeUnlock: os.Getenv("RASPUTIN_BMC_BITSCOPE_UNLOCK"),
-			BitScopeMap:    os.Getenv("RASPUTIN_BMC_BITSCOPE_MAP"),
-		})
-		if err != nil {
-			log.Fatalf("rasputin-agent: bmc backend: %v", err)
-		}
-		bmcSubs, err := bmc.RegisterHandlers(nc, nodeID, backend)
+	// BMC handlers — the backend itself was constructed before the bus
+	// connect (see above) so registration could advertise bmc-targets.
+	if bmcBackend != nil {
+		bmcSubs, err := bmc.RegisterHandlers(nc, nodeID, bmcBackend)
 		if err != nil {
 			log.Fatalf("rasputin-agent: register bmc handlers: %v", err)
 		}
@@ -361,7 +373,7 @@ func main() {
 				_ = sub.Unsubscribe()
 			}
 		}()
-		log.Printf("rasputin-agent: bmc backend=%s (host)", backend.Name())
+		log.Printf("rasputin-agent: bmc backend=%s (host, targets=%d)", bmcBackend.Name(), len(bmcBackend.Targets()))
 	}
 
 	go runHeartbeats(ctx, nc, nodeID)
@@ -384,7 +396,7 @@ func main() {
 	log.Println("rasputin-agent: shutting down")
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo) {
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcTargets []string) {
 	meta := map[string]any{}
 	if cidr := host.PrimaryLanCIDR(); cidr != "" {
 		// Carried in Metadata rather than as a top-level field so the
@@ -392,6 +404,15 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		// that needs the value reads metadata["primaryLanCidr"]. The api's
 		// mesh enroll-defaults endpoint surfaces it to the UI.
 		meta["primaryLanCidr"] = cidr
+	}
+	var caps []string
+	if len(bmcTargets) > 0 {
+		// This node hosts a BMC backend with an authoritative reachable-
+		// target list: advertise it so the api/UI gate power + console
+		// per-node (bmc.md §2a). Hosts without a list advertise nothing
+		// and the api keeps its interim presence-only gating.
+		caps = append(caps, proto.CapabilityBMCTargets)
+		meta[proto.MetadataBMCTargets] = bmcTargets
 	}
 	ev := proto.NodeRegisteredEvt{
 		NodeID:       nodeID,
@@ -402,6 +423,7 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		// The agent ships per-arch (one binary per OS image arch), so the
 		// compile-time GOARCH is the node's CPU arch.
 		Architecture: runtime.GOARCH,
+		Capabilities: caps,
 		Metadata:     meta,
 		Storage:      storage,
 		Ts:           time.Now().UTC(),
@@ -496,6 +518,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// splitCSV splits a comma-separated env value, trimming whitespace and
+// dropping empty entries; "" yields nil.
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // agentStateDir resolves the agent's state directory.
