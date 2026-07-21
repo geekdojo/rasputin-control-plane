@@ -67,6 +67,10 @@ func NewService(store *Store, probes Probes, selfNodeID string) *Service {
 	return &Service{store: store, probes: probes, selfNodeID: selfNodeID}
 }
 
+// Store exposes the settings store for subsystems that keep their own
+// keys in the shared table (e.g. the BMC selection handlers).
+func (s *Service) Store() *Store { return s.store }
+
 // GetState computes the live wizard state. Cheap — one settings lookup
 // plus three probe calls.
 func (s *Service) GetState(ctx context.Context) (*State, error) {

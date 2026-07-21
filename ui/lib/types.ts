@@ -510,6 +510,22 @@ export interface MeshChangeEvent {
 export type BMCPowerVerb = 'on' | 'off' | 'cycle' | 'reset' | 'status';
 export type BMCPowerState = 'on' | 'off' | 'unknown';
 
+// One entry of the served supported-backends list (Settings picker).
+export interface BMCBackendInfo {
+  kind: string;
+  label: string;
+  status: 'available' | 'planned';
+}
+
+// The cluster's current BMC selection, sanitized (write-only fields
+// like the bitscope unlock never round-trip; unlockSet marks presence).
+export interface BMCConfigView {
+  backend: string; // '' = off
+  hostNodeId?: string;
+  config?: Record<string, unknown>;
+  pinnedNode?: string;
+}
+
 export interface BMCState {
   targetNodeId: string;
   powerState: BMCPowerState;

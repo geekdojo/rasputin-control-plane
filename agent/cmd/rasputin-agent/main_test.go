@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -113,14 +114,14 @@ func testBus(t *testing.T) *nats.Conn {
 	return nc
 }
 
-func registeredEvt(t *testing.T, nc *nats.Conn, nodeID string, bmcTargets []string) proto.NodeRegisteredEvt {
+func registeredEvt(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement) proto.NodeRegisteredEvt {
 	t.Helper()
 	sub, err := nc.SubscribeSync(proto.NodeRegisteredSubject(nodeID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
-	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, bmcTargets)
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv)
 	msg, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
 		t.Fatalf("no registered event: %v", err)
@@ -134,9 +135,12 @@ func registeredEvt(t *testing.T, nc *nats.Conn, nodeID string, bmcTargets []stri
 
 func TestPublishRegistered_AdvertisesBMCTargets(t *testing.T) {
 	// Pins the wire format the api's inventory store and the UI decode:
-	// capability tag in capabilities[], list under metadata.bmcTargets.
+	// capability tag in capabilities[], list + config hash + pin marker
+	// under the proto.MetadataBMC* keys.
 	nc := testBus(t)
-	ev := registeredEvt(t, nc, "cp-test", []string{"n-a", "n-b"})
+	ev := registeredEvt(t, nc, "cp-test", &bmc.Advertisement{
+		Targets: []string{"n-a", "n-b"}, ConfigHash: "h1", Pinned: true,
+	})
 	if !reflect.DeepEqual(ev.Capabilities, []string{proto.CapabilityBMCTargets}) {
 		t.Errorf("capabilities: %v, want [%s]", ev.Capabilities, proto.CapabilityBMCTargets)
 	}
@@ -144,17 +148,25 @@ func TestPublishRegistered_AdvertisesBMCTargets(t *testing.T) {
 	if !ok || len(got) != 2 || got[0] != "n-a" || got[1] != "n-b" {
 		t.Errorf("metadata %s: %v", proto.MetadataBMCTargets, ev.Metadata[proto.MetadataBMCTargets])
 	}
+	if ev.Metadata[proto.MetadataBMCConfigHash] != "h1" {
+		t.Errorf("metadata %s: %v", proto.MetadataBMCConfigHash, ev.Metadata[proto.MetadataBMCConfigHash])
+	}
+	if ev.Metadata[proto.MetadataBMCConfigPinned] != true {
+		t.Errorf("metadata %s: %v", proto.MetadataBMCConfigPinned, ev.Metadata[proto.MetadataBMCConfigPinned])
+	}
 }
 
-func TestPublishRegistered_NoTargetsNoAdvertisement(t *testing.T) {
+func TestPublishRegistered_OffAdvertisesNothing(t *testing.T) {
 	nc := testBus(t)
 	ev := registeredEvt(t, nc, "cp-test", nil)
 	for _, c := range ev.Capabilities {
 		if c == proto.CapabilityBMCTargets {
-			t.Errorf("capability advertised with no targets: %v", ev.Capabilities)
+			t.Errorf("capability advertised while off: %v", ev.Capabilities)
 		}
 	}
-	if _, present := ev.Metadata[proto.MetadataBMCTargets]; present {
-		t.Errorf("metadata key present with no targets: %v", ev.Metadata)
+	for _, key := range []string{proto.MetadataBMCTargets, proto.MetadataBMCConfigHash, proto.MetadataBMCConfigPinned} {
+		if _, present := ev.Metadata[key]; present {
+			t.Errorf("metadata %s present while off: %v", key, ev.Metadata)
+		}
 	}
 }

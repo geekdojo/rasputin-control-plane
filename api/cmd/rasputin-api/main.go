@@ -301,11 +301,19 @@ func main() {
 	// The api's own node id — the system.update saga skips this one (the
 	// operator updates the controlplane node manually after the cascade).
 	selfNodeID := os.Getenv("RASPUTIN_SELF_NODE_ID")
-	// The BMC host's node id — the node whose agent owns the BMC bus and
-	// receives bmc.* commands. Defaults to selfNodeID (the controlplane in
-	// MVS); override via RASPUTIN_BMC_HOST_NODE_ID for split-brain layouts.
-	bmcHostNodeID := envOr("RASPUTIN_BMC_HOST_NODE_ID", selfNodeID)
-	bmcSvc := bmc.NewService(bmc.Config{HostNodeID: bmcHostNodeID}, bmcStore, busSrv.Conn())
+	// The BMC host's node id lives in settings (bmc.host_node_id,
+	// bmc-settings.md S-5) and is read live so a Settings change
+	// redirects routing without a restart. The env var seeds first boot
+	// only (seedObsEnabled recipe); the operator's choice wins after.
+	seedBMCHostNode(ctx, setupStore, envOr("RASPUTIN_BMC_HOST_NODE_ID", selfNodeID))
+	bmcSvc := bmc.NewService(bmc.Config{HostFn: func(ctx context.Context) string {
+		v, err := setupStore.Get(ctx, setup.KeyBMCHostNode)
+		if err != nil {
+			log.Printf("bmc: read %s: %v", setup.KeyBMCHostNode, err)
+			return ""
+		}
+		return v
+	}}, bmcStore, busSrv.Conn())
 
 	// Setup wizard service. Probes are functions over the other
 	// subsystems' stores; defined here so the setup package stays narrow
@@ -412,6 +420,8 @@ func main() {
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
+	// bmc.configure is registered after NewServer below — it needs the
+	// server's SoL SessionManager to refuse swaps under a live console.
 
 	// Abort any jobs left in-flight from a previous run before we expose
 	// HTTP. v0 policy is honest-failure, not resume — see saga.go — EXCEPT a
@@ -605,6 +615,47 @@ func main() {
 	defer sched.Stop()
 
 	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn())
+
+	// bmc.configure: delivers the operator's Settings selection to the
+	// host agent (bmc-settings.md §4); refuses while a console is open or
+	// a bmc.power job is running. Registered here because it shares the
+	// server's SoL SessionManager.
+	runner.Register(bmc.ConfigureWorkflow(bmcSvc, invStore, setupStore, srv.BMCSessions(), func(ctx context.Context) (bool, error) {
+		running, err := jobStore.ListJobsByStatus(ctx, []jobs.Status{jobs.StatusRunning})
+		if err != nil {
+			return false, err
+		}
+		for _, j := range running {
+			if j.Kind == "bmc.power" {
+				return true, nil
+			}
+		}
+		return false, nil
+	}))
+	// Event-driven reconcile: re-push the selection when the host
+	// re-registers stale (reflash / missed push). No ticker
+	// (bmc-settings.md §4).
+	stopBMCReconcile, err := bmc.StartReconcile(busSrv.Conn(), setupStore, func(ctx context.Context) (bool, error) {
+		// Stand down while any bmc.configure job is queued or running —
+		// mid-job the advertised and desired states legitimately differ.
+		inflight, ferr := jobStore.ListJobsByStatus(ctx, []jobs.Status{jobs.StatusQueued, jobs.StatusRunning})
+		if ferr != nil {
+			return false, ferr
+		}
+		for _, j := range inflight {
+			if j.Kind == "bmc.configure" {
+				return true, nil
+			}
+		}
+		return false, nil
+	}, func(ctx context.Context, kind string, spec json.RawMessage, createdBy string) error {
+		_, serr := runner.Submit(ctx, kind, spec, createdBy)
+		return serr
+	})
+	if err != nil {
+		log.Fatalf("rasputin-api: bmc reconcile: %v", err)
+	}
+	defer stopBMCReconcile()
 
 	// Web UI (Next.js static export). The OS image installs it at the
 	// default path (see rasputin-os package/rasputin-api); dev boxes
@@ -1308,6 +1359,29 @@ func mustWireObs(ctx context.Context, dataDir, selfNodeID string, metricsSvc *me
 // but once anyone uses the UI toggle, the stored choice is authoritative and
 // the env var is never consulted again. Without the "only if unset" guard,
 // every restart would silently undo the operator's last click.
+// seedBMCHostNode writes the env-derived BMC host into settings once —
+// only if the operator has never chosen (IsSet). Same recipe as
+// seedObsEnabled: env seeds first boot, the Settings choice wins
+// permanently (bmc-settings.md S-5).
+func seedBMCHostNode(ctx context.Context, store *setup.Store, hostNodeID string) {
+	if hostNodeID == "" {
+		return
+	}
+	set, err := store.IsSet(ctx, setup.KeyBMCHostNode)
+	if err != nil {
+		log.Printf("rasputin-api: read %s: %v", setup.KeyBMCHostNode, err)
+		return
+	}
+	if set {
+		return
+	}
+	if err := store.Set(ctx, setup.KeyBMCHostNode, hostNodeID); err != nil {
+		log.Printf("rasputin-api: seed %s: %v", setup.KeyBMCHostNode, err)
+		return
+	}
+	log.Printf("rasputin-api: seeded %s=%s from env (operator choice wins from here on)", setup.KeyBMCHostNode, hostNodeID)
+}
+
 func seedObsEnabled(ctx context.Context, store *setup.Store) {
 	set, err := store.IsSet(ctx, setup.KeyObsEnabled)
 	if err != nil {

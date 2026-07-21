@@ -90,6 +90,13 @@ func NewBitScopeBackend(cfg Config) (*BitScopeBackend, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newBitScopeOnDevice(dev, unlock, targets)
+}
+
+// newBitScopeOnDevice opens and unlocks the bus for an already-resolved
+// target map — shared by the env path (file map) and the settings path
+// (inline map, selection.go).
+func newBitScopeOnDevice(dev, unlock string, targets map[string]bitscopeTarget) (*BitScopeBackend, error) {
 	port, err := openBitScopePort(dev)
 	if err != nil {
 		return nil, fmt.Errorf("bitscope: open %s: %w", dev, err)
@@ -294,15 +301,19 @@ func decodeBitScopeState(reply string) (proto.BMCPowerState, string, error) {
 	return proto.BMCStateUnknown, "", fmt.Errorf("bitscope: unparseable status reply %q", strings.TrimSpace(reply))
 }
 
-// bitscopeMapFile is the on-disk address map (design doc §2d): pos is
-// authoritative, the bus address is derived so it can't drift from the
-// rack's geographic reality.
+// bitscopeMapEntry is one address-map row: pos is authoritative, the
+// bus address is derived so it can't drift from the rack's geographic
+// reality. The same shape serves the on-disk map file (env path) and
+// the inline settings selection (bmc-settings.md §3).
+type bitscopeMapEntry struct {
+	Pos    string `json:"pos"`
+	NodeID string `json:"node_id"`
+	Serial string `json:"serial,omitempty"`
+}
+
+// bitscopeMapFile is the on-disk address map (design doc §2d).
 type bitscopeMapFile struct {
-	Targets []struct {
-		Pos    string `json:"pos"`
-		NodeID string `json:"node_id"`
-		Serial string `json:"serial,omitempty"`
-	} `json:"targets"`
+	Targets []bitscopeMapEntry `json:"targets"`
 }
 
 func loadBitScopeMap(path string) (map[string]bitscopeTarget, error) {
@@ -314,25 +325,31 @@ func loadBitScopeMap(path string) (map[string]bitscopeTarget, error) {
 	if err := json.Unmarshal(buf, &mf); err != nil {
 		return nil, fmt.Errorf("bitscope: address map %s: %w", path, err)
 	}
-	if len(mf.Targets) == 0 {
-		return nil, fmt.Errorf("bitscope: address map %s: no targets", path)
+	return buildBitScopeTargets(path, mf.Targets)
+}
+
+// buildBitScopeTargets validates and resolves address-map entries;
+// source labels errors (a file path or "settings").
+func buildBitScopeTargets(source string, entries []bitscopeMapEntry) (map[string]bitscopeTarget, error) {
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("bitscope: address map %s: no targets", source)
 	}
-	targets := make(map[string]bitscopeTarget, len(mf.Targets))
-	seenPos := make(map[byte]string, len(mf.Targets))
-	for _, t := range mf.Targets {
+	targets := make(map[string]bitscopeTarget, len(entries))
+	seenPos := make(map[byte]string, len(entries))
+	for _, t := range entries {
 		if t.NodeID == "" {
-			return nil, fmt.Errorf("bitscope: address map %s: entry %q missing node_id", path, t.Pos)
+			return nil, fmt.Errorf("bitscope: address map %s: entry %q missing node_id", source, t.Pos)
 		}
 		addr, err := parseBitScopePos(t.Pos)
 		if err != nil {
-			return nil, fmt.Errorf("bitscope: address map %s: %w", path, err)
+			return nil, fmt.Errorf("bitscope: address map %s: %w", source, err)
 		}
 		if other, dup := seenPos[addr]; dup {
-			return nil, fmt.Errorf("bitscope: address map %s: pos %s duplicates %s", path, t.Pos, other)
+			return nil, fmt.Errorf("bitscope: address map %s: pos %s duplicates %s", source, t.Pos, other)
 		}
 		seenPos[addr] = t.Pos
 		if _, dup := targets[t.NodeID]; dup {
-			return nil, fmt.Errorf("bitscope: address map %s: duplicate node_id %q", path, t.NodeID)
+			return nil, fmt.Errorf("bitscope: address map %s: duplicate node_id %q", source, t.NodeID)
 		}
 		targets[t.NodeID] = bitscopeTarget{pos: t.Pos, addr: addr, serial: t.Serial}
 	}

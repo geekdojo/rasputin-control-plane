@@ -29,4 +29,15 @@ const (
 	// truth would disagree the moment someone used the UI toggle.
 	// See wiki design/control-plane/observability-stack.md §3.8.
 	KeyObsEnabled = "obs.enabled"
+	// The cluster's BMC selection (wiki design/control-plane/
+	// bmc-settings.md §3) — stored intents like KeyMode, written by the
+	// bmc.configure saga's record step so config state and audit trail
+	// can't diverge. KeyBMCBackend unset/empty = hard off. KeyBMCConfig
+	// holds the per-kind JSON blob (bitscope: inline address map +
+	// write-only unlock; mock: target list). KeyBMCHostNode is seeded
+	// once from RASPUTIN_BMC_HOST_NODE_ID/RASPUTIN_SELF_NODE_ID; after
+	// that the operator's Settings choice wins.
+	KeyBMCBackend  = "bmc.backend"
+	KeyBMCHostNode = "bmc.host_node_id"
+	KeyBMCConfig   = "bmc.config"
 )

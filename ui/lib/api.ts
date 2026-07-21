@@ -6,6 +6,8 @@ import type {
   MintedBusToken,
   AppChangeEvent,
   BMCChangeEvent,
+  BMCBackendInfo,
+  BMCConfigView,
   BMCPowerVerb,
   BMCState,
   Bundle,
@@ -759,6 +761,28 @@ export function bmcPower(nodeId: string, verb: BMCPowerVerb): Promise<Job> {
     `/api/bmc/${encodeURIComponent(nodeId)}/power/${verb}`,
     { method: 'POST' },
   );
+}
+
+// getBMCBackends returns the platform's supported-backends list — the
+// Settings picker renders this served data, never a hardcoded copy.
+export function getBMCBackends(): Promise<BMCBackendInfo[]> {
+  return jsonFetch<BMCBackendInfo[]>('/api/bmc/backends');
+}
+
+// getBMCConfig returns the current selection (sanitized: the bitscope
+// unlock is write-only and surfaced as unlockSet).
+export function getBMCConfig(): Promise<BMCConfigView> {
+  return jsonFetch<BMCConfigView>('/api/bmc/config');
+}
+
+// setBMCConfig submits a bmc.configure job; settings persist only after
+// the host agent acks the push. kind '' / 'none' turns BMC off.
+export function setBMCConfig(req: { kind: string; hostNodeId?: string; config?: unknown }): Promise<Job> {
+  return jsonFetch<Job>('/api/bmc/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
 }
 
 export function openBMCWS(

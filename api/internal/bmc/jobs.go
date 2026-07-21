@@ -61,7 +61,7 @@ func powerValidate(svc *Service, inv *inventory.Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		if svc.cfg.HostNodeID == "" {
+		if svc.Host(sc.Ctx) == "" {
 			return nil, errors.New("no BMC host node configured")
 		}
 		// The target must be a known inventory node — protects against
@@ -78,7 +78,7 @@ func powerValidate(svc *Service, inv *inventory.Store) jobs.DoFn {
 		if err := svc.TargetReachable(sc.Ctx, inv, spec.TargetNodeID); err != nil {
 			return nil, err
 		}
-		sc.Log("info", fmt.Sprintf("bmc.%s on %s (via %s)", spec.Verb, spec.TargetNodeID, svc.cfg.HostNodeID))
+		sc.Log("info", fmt.Sprintf("bmc.%s on %s (via %s)", spec.Verb, spec.TargetNodeID, svc.Host(sc.Ctx)))
 		return json.Marshal(spec)
 	}
 }
@@ -91,7 +91,7 @@ func powerDispatch(svc *Service) jobs.DoFn {
 		}
 		cmd, _ := json.Marshal(proto.BMCPowerCmd{TargetNodeID: spec.TargetNodeID})
 		msg, err := sc.NATS.RequestWithContext(sc.Ctx,
-			proto.BMCPowerSubject(svc.cfg.HostNodeID, spec.Verb), cmd)
+			proto.BMCPowerSubject(svc.Host(sc.Ctx), spec.Verb), cmd)
 		if err != nil {
 			return nil, fmt.Errorf("bmc rpc: %w", err)
 		}
@@ -119,7 +119,7 @@ func powerRecord(svc *Service) jobs.DoFn {
 		// `off`, `off`; for `on`, `on`. But the BMC is the truth source.
 		cmd, _ := json.Marshal(proto.BMCPowerCmd{TargetNodeID: spec.TargetNodeID})
 		msg, err := sc.NATS.RequestWithContext(sc.Ctx,
-			proto.BMCPowerSubject(svc.cfg.HostNodeID, proto.BMCPowerQuery), cmd)
+			proto.BMCPowerSubject(svc.Host(sc.Ctx), proto.BMCPowerQuery), cmd)
 		state := proto.BMCStateUnknown
 		detail := ""
 		if err == nil {
