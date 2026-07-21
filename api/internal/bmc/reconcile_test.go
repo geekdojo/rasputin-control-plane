@@ -23,7 +23,7 @@ func desiredMock(t *testing.T, st *setup.Store) string {
 	if err := st.Set(ctx, setup.KeyBMCConfig, cfg); err != nil {
 		t.Fatal(err)
 	}
-	return ConfigHash("mock", json.RawMessage(cfg))
+	return ConfigHash("mock", json.RawMessage(cfg), "")
 }
 
 func regEvt(t *testing.T, nodeID string, meta map[string]any) []byte {

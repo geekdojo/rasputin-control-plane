@@ -25,12 +25,19 @@ type ConfigureSpec struct {
 }
 
 // ConfigHash fingerprints a selection; the agent echoes and advertises
-// it opaquely, and the registration reconcile compares it.
-func ConfigHash(kind string, config json.RawMessage) string {
+// it opaquely, and the registration reconcile compares it. secret is
+// any write-only credential that rides outside the config blob (the
+// bitscope unlock) — folding it in means rotating the secret triggers a
+// re-push. The advertised value is a truncated one-way hash; a
+// high-entropy secret is not recoverable from it (the factory-default
+// unlock is public anyway).
+func ConfigHash(kind string, config json.RawMessage, secret string) string {
 	h := sha256.New()
 	h.Write([]byte(kind))
 	h.Write([]byte{'\n'})
 	h.Write(config)
+	h.Write([]byte{'\n'})
+	h.Write([]byte(secret))
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
@@ -48,7 +55,7 @@ func ConfigureWorkflow(svc *Service, inv *inventory.Store, st *setup.Store, sess
 		Kind: "bmc.configure",
 		Steps: []jobs.WorkflowStep{
 			{Name: "validate", Timeout: 3 * time.Second, Do: configureValidate(inv, sessions, powerRunning)},
-			{Name: "push", Timeout: 15 * time.Second, Do: configurePush()},
+			{Name: "push", Timeout: 15 * time.Second, Do: configurePush(st)},
 			{Name: "record", Timeout: 3 * time.Second, Do: configureRecord(st)},
 		},
 	}
@@ -105,6 +112,23 @@ func ValidateSelection(ctx context.Context, inv *inventory.Store, kind string, c
 		}
 	}
 	return nil
+}
+
+// injectJSONField returns raw with field set — used to attach the
+// unlock to the bus command without it ever touching the job spec.
+func injectJSONField(raw json.RawMessage, field, value string) (json.RawMessage, error) {
+	m := map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, fmt.Errorf("config decode: %w", err)
+		}
+	}
+	m[field] = value
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // selectionTargets extracts the referenced node-ids from a per-kind
@@ -177,15 +201,33 @@ func configureValidate(inv *inventory.Store, sessions *SessionManager, powerRunn
 	}
 }
 
-func configurePush() jobs.DoFn {
+// configurePush delivers the selection to the host agent. The job spec
+// deliberately carries NO secrets (job specs and step results are
+// served unredacted by the jobs API and persist in the audit trail) —
+// the bitscope unlock lives under its own settings key and is injected
+// into the bus command here, at dispatch time only.
+func configurePush(st *setup.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseConfigureSpec(sc.Spec)
 		if err != nil {
 			return nil, err
 		}
+		pushCfg := spec.Config
+		if spec.Kind == "bitscope" {
+			unlock, uerr := st.Get(sc.Ctx, setup.KeyBMCBitscopeUnlock)
+			if uerr != nil {
+				return nil, fmt.Errorf("read unlock: %w", uerr)
+			}
+			if unlock != "" {
+				pushCfg, err = injectJSONField(spec.Config, "unlock", unlock)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
 		cmd, _ := json.Marshal(proto.BMCConfigureCmd{
 			Kind:       spec.Kind,
-			Config:     spec.Config,
+			Config:     pushCfg,
 			ConfigHash: spec.ConfigHash,
 		})
 		msg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.BMCConfigureSubject(spec.HostNodeID), cmd)

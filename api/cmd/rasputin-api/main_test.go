@@ -12,6 +12,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 )
 
 func TestAPILeafSpec_SANs(t *testing.T) {
@@ -136,5 +137,35 @@ func TestLoadBusPreseed(t *testing.T) {
 	}
 	if _, err := loadBusPreseed(ctx, store, bad); err == nil {
 		t.Error("malformed preseed should error")
+	}
+}
+
+func TestSeedBMCHostNode(t *testing.T) {
+	ctx := context.Background()
+	st, err := setup.OpenStore(ctx, filepath.Join(t.TempDir(), "settings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	// Empty host id: nothing seeded (and IsSet stays false).
+	seedBMCHostNode(ctx, st, "")
+	if set, _ := st.IsSet(ctx, setup.KeyBMCHostNode); set {
+		t.Error("empty id must not seed")
+	}
+
+	// First boot: env value seeds.
+	seedBMCHostNode(ctx, st, "cp-env")
+	if v, _ := st.Get(ctx, setup.KeyBMCHostNode); v != "cp-env" {
+		t.Errorf("seeded: %q", v)
+	}
+
+	// Operator choice wins permanently: a later boot never re-seeds.
+	if err := st.Set(ctx, setup.KeyBMCHostNode, "cp-chosen"); err != nil {
+		t.Fatal(err)
+	}
+	seedBMCHostNode(ctx, st, "cp-env")
+	if v, _ := st.Get(ctx, setup.KeyBMCHostNode); v != "cp-chosen" {
+		t.Errorf("re-seeded over operator choice: %q", v)
 	}
 }

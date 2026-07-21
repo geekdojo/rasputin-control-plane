@@ -3,6 +3,7 @@ package bmc
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -371,4 +372,57 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestHandler_CloseAllSendsCourtesyFrameAndDrains(t *testing.T) {
+	nc := startNATS(t)
+	mb := newMock(t)
+	h, subs, err := registerHandlers(nc, "host-1", mb)
+	if err != nil {
+		t.Fatalf("registerHandlers: %v", err)
+	}
+	defer func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	}()
+
+	var ack proto.BMCSOLOpenAck
+	request(t, nc, proto.BMCSOLOpenSubject("host-1"),
+		proto.BMCSOLOpenCmd{TargetNodeID: "node-x", SessionID: "sess-close-all"}, &ack)
+	if !ack.OK {
+		t.Fatalf("sol open: %+v", ack)
+	}
+	out, err := nc.SubscribeSync(proto.BMCSOLOutSubject("sess-close-all"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = out.Unsubscribe() }()
+
+	h.closeAll("BMC reconfigured from Settings")
+
+	// The courtesy frame names the reason so the operator's console
+	// shows why it went quiet.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		msg, err := out.NextMsg(500 * time.Millisecond)
+		if err != nil {
+			break
+		}
+		var ev proto.BMCSOLDataEvt
+		if json.Unmarshal(msg.Data, &ev) == nil &&
+			ev.SessionID == "sess-close-all" &&
+			len(ev.Data) > 0 && ev.Ts.After(time.Time{}) &&
+			strings.Contains(ev.Data, "session closed: BMC reconfigured") {
+			// Sessions map must be drained too.
+			h.mu.Lock()
+			n := len(h.sessions)
+			h.mu.Unlock()
+			if n != 0 {
+				t.Errorf("sessions not drained: %d", n)
+			}
+			return
+		}
+	}
+	t.Fatal("no courtesy close frame observed on .out")
 }

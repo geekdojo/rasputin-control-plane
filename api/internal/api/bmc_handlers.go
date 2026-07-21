@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -51,6 +52,13 @@ func (s *Server) handleBMCGetConfig(w http.ResponseWriter, r *http.Request) {
 	if raw != "" {
 		view.Config = sanitizeBMCConfig(view.Backend, raw)
 	}
+	// The unlock lives under its own settings key (never in bmc.config);
+	// surface only its presence.
+	if view.Backend == "bitscope" {
+		if u, uerr := st.Get(r.Context(), setup.KeyBMCBitscopeUnlock); uerr == nil && u != "" {
+			view.Config = setUnlockSet(view.Config)
+		}
+	}
 	// A pinned host anywhere renders the whole section read-only.
 	if nodes, err := s.inv.List(r.Context()); err == nil {
 		for _, n := range nodes {
@@ -66,7 +74,9 @@ func (s *Server) handleBMCGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // sanitizeBMCConfig strips write-only fields before a config leaves the
-// api: bitscope's unlock is replaced by an unlockSet marker.
+// api. Stored configs no longer contain the unlock (it has its own
+// settings key), so this is defense-in-depth against any legacy or
+// hand-edited value.
 func sanitizeBMCConfig(kind, raw string) json.RawMessage {
 	if kind != "bitscope" {
 		return json.RawMessage(raw)
@@ -82,6 +92,22 @@ func sanitizeBMCConfig(kind, raw string) json.RawMessage {
 	out, err := json.Marshal(m)
 	if err != nil {
 		return nil
+	}
+	return out
+}
+
+// setUnlockSet annotates a config view with unlockSet: true.
+func setUnlockSet(raw json.RawMessage) json.RawMessage {
+	m := map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return raw
+		}
+	}
+	m["unlockSet"] = true
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
 	}
 	return out
 }
@@ -111,9 +137,20 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "hostNodeId is required")
 		return
 	}
-	// Write-only unlock: an empty incoming unlock keeps the stored one.
+	// Write-only unlock (security review, CP #34): a typed unlock goes
+	// straight to its own settings key and is STRIPPED from the config —
+	// job specs and step results are served unredacted by the jobs API,
+	// so no secret may enter them. An empty incoming unlock keeps the
+	// stored one; the push step injects it bus-side at dispatch time.
+	unlock := ""
 	if req.Kind == "bitscope" {
-		req.Config = mergeStoredUnlock(r.Context(), st, req.Config)
+		var uerr error
+		req.Config, uerr = storeAndStripUnlock(r.Context(), st, req.Config)
+		if uerr != nil {
+			writeError(w, http.StatusBadRequest, uerr.Error())
+			return
+		}
+		unlock, _ = st.Get(r.Context(), setup.KeyBMCBitscopeUnlock)
 	}
 	if err := bmc.ValidateSelection(r.Context(), s.inv, req.Kind, req.Config); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -123,7 +160,7 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 		Kind:       req.Kind,
 		HostNodeID: req.HostNodeID,
 		Config:     req.Config,
-		ConfigHash: bmc.ConfigHash(req.Kind, req.Config),
+		ConfigHash: bmc.ConfigHash(req.Kind, req.Config, unlock),
 	})
 	j, err := s.runner.Submit(r.Context(), "bmc.configure", spec, creator(r))
 	if err != nil {
@@ -133,35 +170,29 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, j)
 }
 
-// mergeStoredUnlock carries the previously-stored bitscope unlock into
-// an incoming config whose unlock field is empty/absent.
-func mergeStoredUnlock(ctx context.Context, st *setup.Store, incoming json.RawMessage) json.RawMessage {
-	var in map[string]any
-	if err := json.Unmarshal(incoming, &in); err != nil || in == nil {
-		return incoming
-	}
-	if v, ok := in["unlock"].(string); ok && v != "" {
-		return incoming // operator typed a new one
-	}
-	delete(in, "unlockSet")
-	prevKind, _ := st.Get(ctx, setup.KeyBMCBackend)
-	prevRaw, _ := st.Get(ctx, setup.KeyBMCConfig)
-	if prevKind == "bitscope" && prevRaw != "" {
-		var prev map[string]any
-		if err := json.Unmarshal([]byte(prevRaw), &prev); err == nil {
-			if u, ok := prev["unlock"].(string); ok && u != "" {
-				in["unlock"] = u
-			}
+// storeAndStripUnlock persists a newly-typed bitscope unlock under its
+// own settings key and returns the config with every unlock-related
+// field removed — the returned blob is safe for the job audit trail.
+// An absent/empty unlock keeps the stored secret unchanged.
+func storeAndStripUnlock(ctx context.Context, st *setup.Store, incoming json.RawMessage) (json.RawMessage, error) {
+	in := map[string]any{}
+	if len(incoming) > 0 {
+		if err := json.Unmarshal(incoming, &in); err != nil {
+			return nil, fmt.Errorf("bitscope config: %w", err)
 		}
 	}
-	if in["unlock"] == nil {
-		delete(in, "unlock")
+	if v, ok := in["unlock"].(string); ok && v != "" {
+		if err := st.Set(ctx, setup.KeyBMCBitscopeUnlock, v); err != nil {
+			return nil, fmt.Errorf("store unlock: %w", err)
+		}
 	}
+	delete(in, "unlock")
+	delete(in, "unlockSet")
 	out, err := json.Marshal(in)
 	if err != nil {
-		return incoming
+		return nil, err
 	}
-	return out
+	return out, nil
 }
 
 // POST /api/bmc/{nodeId}/power/{verb}

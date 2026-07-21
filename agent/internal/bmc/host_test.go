@@ -165,3 +165,17 @@ func TestHost_BadSelectionRollsBack(t *testing.T) {
 		t.Fatalf("rollback advertisement: %+v", adv)
 	}
 }
+
+func TestHost_CorruptPersistedSelectionComesUpOff(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, hostConfigFile), []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHost("n1", dir, "", Config{})
+	if err != nil {
+		t.Fatalf("corrupt selection must not fail NewHost: %v", err)
+	}
+	if h.Active() {
+		t.Error("corrupt selection must come up off")
+	}
+}

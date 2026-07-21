@@ -35,10 +35,10 @@ func insertNode(t *testing.T, f *fixture, inv *inventory.Store, id string) {
 }
 
 func TestConfigHash_Deterministic(t *testing.T) {
-	a := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`))
-	b := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`))
-	c := ConfigHash("mock", json.RawMessage(`{"targets":["b"]}`))
-	d := ConfigHash("bitscope", json.RawMessage(`{"targets":["a"]}`))
+	a := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`), "")
+	b := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`), "")
+	c := ConfigHash("mock", json.RawMessage(`{"targets":["b"]}`), "")
+	d := ConfigHash("bitscope", json.RawMessage(`{"targets":["a"]}`), "")
 	if a != b {
 		t.Error("same input must hash equal")
 	}
@@ -116,7 +116,7 @@ func TestConfigurePushAndRecord(t *testing.T) {
 	spec := ConfigureSpec{Kind: "mock", HostNodeID: "host-1",
 		Config: json.RawMessage(`{"targets":["node-1"]}`), ConfigHash: "h42"}
 
-	if _, err := configurePush()(stepCtx(f.ctx, f.nc, spec)); err != nil {
+	if _, err := configurePush(st)(stepCtx(f.ctx, f.nc, spec)); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	if got.Kind != "mock" || got.ConfigHash != "h42" {
@@ -158,8 +158,110 @@ func TestConfigurePush_HostRefusalIsTyped(t *testing.T) {
 	defer func() { _ = sub.Unsubscribe() }()
 
 	spec := ConfigureSpec{Kind: "mock", HostNodeID: "host-1", Config: json.RawMessage(`{}`), ConfigHash: "h"}
-	_, err = configurePush()(stepCtx(f.ctx, f.nc, spec))
+	_, err = configurePush(newSetupStore(t))(stepCtx(f.ctx, f.nc, spec))
 	if err == nil || !strings.Contains(err.Error(), "pinned") {
 		t.Errorf("pin nack must surface as a typed failure: %v", err)
+	}
+}
+
+func TestConfigureWorkflow_StepTimeouts(t *testing.T) {
+	// The push budget must absorb a real backend swap (serial open +
+	// unlock + re-register); validate/record are local. Pin the numbers.
+	f := newFixture(t)
+	wf := ConfigureWorkflow(f.svc, newInvStore(t), newSetupStore(t), NewSessionManager(f.svc), nil)
+	if wf.Kind != "bmc.configure" || len(wf.Steps) != 3 {
+		t.Fatalf("workflow shape: %s / %d steps", wf.Kind, len(wf.Steps))
+	}
+	want := []time.Duration{3 * time.Second, 15 * time.Second, 3 * time.Second}
+	for i, step := range wf.Steps {
+		if step.Timeout != want[i] {
+			t.Errorf("step %s timeout %v, want %v", step.Name, step.Timeout, want[i])
+		}
+	}
+}
+
+func TestConfigurePush_InjectsUnlockBusSideOnly(t *testing.T) {
+	// Security contract (review on CP #34): the job spec never carries
+	// the bitscope unlock; the push step injects the stored secret into
+	// the bus command at dispatch time only.
+	f := newFixture(t)
+	st := newSetupStore(t)
+	if err := st.Set(f.ctx, setup.KeyBMCBitscopeUnlock, "s3kr1t"); err != nil {
+		t.Fatal(err)
+	}
+
+	var got proto.BMCConfigureCmd
+	sub, err := f.nc.Subscribe(proto.BMCConfigureSubject("host-1"), func(m *nats.Msg) {
+		_ = json.Unmarshal(m.Data, &got)
+		ack, _ := json.Marshal(proto.BMCConfigureAck{OK: true, ConfigHash: got.ConfigHash})
+		_ = m.Respond(ack)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	spec := ConfigureSpec{Kind: "bitscope", HostNodeID: "host-1",
+		Config: json.RawMessage(`{"targets":[{"pos":"A-0","node_id":"n0"}]}`), ConfigHash: "h1"}
+	if strings.Contains(string(spec.Config), "s3kr1t") {
+		t.Fatal("test setup: spec must not contain the secret")
+	}
+	if _, err := configurePush(st)(stepCtx(f.ctx, f.nc, spec)); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	var pushed map[string]any
+	if err := json.Unmarshal(got.Config, &pushed); err != nil {
+		t.Fatal(err)
+	}
+	if pushed["unlock"] != "s3kr1t" {
+		t.Errorf("bus command must carry the unlock, got %v", pushed)
+	}
+}
+
+func TestInjectJSONField(t *testing.T) {
+	out, err := injectJSONField(json.RawMessage(`{"a":1}`), "unlock", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["unlock"] != "x" || m["a"] != float64(1) {
+		t.Errorf("inject: %v", m)
+	}
+	if _, err := injectJSONField(json.RawMessage(`not-json`), "unlock", "x"); err == nil {
+		t.Error("bad json must error")
+	}
+}
+
+func TestStartReconcile_SubscribesAndSubmits(t *testing.T) {
+	// End-to-end through the real subscription: a stale host
+	// registration event reaches the reconciler and submits a job.
+	f := newFixture(t)
+	st := newSetupStore(t)
+	desiredMock(t, st)
+	submitted := make(chan string, 1)
+	stop, err := StartReconcile(f.nc, st,
+		func(context.Context) (bool, error) { return false, nil },
+		func(_ context.Context, kind string, _ json.RawMessage, _ string) error {
+			submitted <- kind
+			return nil
+		})
+	if err != nil || stop == nil {
+		t.Fatalf("StartReconcile: stop-nil=%t err=%v", stop == nil, err)
+	}
+	defer stop()
+
+	if err := f.nc.Publish(proto.NodeRegisteredSubject("host-1"), regEvt(t, "host-1", nil)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case kind := <-submitted:
+		if kind != "bmc.configure" {
+			t.Errorf("submitted %q", kind)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no reconcile submit after stale registration")
 	}
 }

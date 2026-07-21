@@ -77,7 +77,11 @@ func (r *reconciler) onRegistered(data []byte) {
 	if err != nil {
 		return
 	}
-	desired := ConfigHash(kind, json.RawMessage(cfg))
+	unlock := ""
+	if kind == "bitscope" {
+		unlock, _ = r.st.Get(ctx, setup.KeyBMCBitscopeUnlock)
+	}
+	desired := ConfigHash(kind, json.RawMessage(cfg), unlock)
 	var advertised string
 	if ev.Metadata != nil {
 		advertised, _ = ev.Metadata[proto.MetadataBMCConfigHash].(string)

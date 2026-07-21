@@ -40,4 +40,10 @@ const (
 	KeyBMCBackend  = "bmc.backend"
 	KeyBMCHostNode = "bmc.host_node_id"
 	KeyBMCConfig   = "bmc.config"
+	// KeyBMCBitscopeUnlock holds the bitscope bus unlock sequence —
+	// a SECRET, stored under its own key precisely so it never rides in
+	// KeyBMCConfig, the bmc.configure job spec, or step results (the
+	// jobs API serves those unredacted; security review on CP #34). The
+	// push step injects it into the bus command at dispatch time only.
+	KeyBMCBitscopeUnlock = "bmc.bitscope_unlock"
 )
