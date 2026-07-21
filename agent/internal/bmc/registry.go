@@ -15,6 +15,12 @@ const DefaultBackend = "mock"
 type Config struct {
 	// StateDir is the agent's BMC state directory (<agentStateDir>/bmc).
 	StateDir string
+
+	// BitScope driver settings (RASPUTIN_BMC_BITSCOPE_*, design doc
+	// §2a); zero values select the documented defaults.
+	BitScopeDev    string // serial device (default /dev/serial0)
+	BitScopeUnlock string // bus unlock sequence (default per D-4)
+	BitScopeMap    string // address map path (default <StateDir>/bitscope-map.json)
 }
 
 // factory constructs one named backend from Config.
@@ -25,7 +31,8 @@ type factory func(Config) (Backend, error)
 // RASPUTIN_BMC_BACKEND and only ever talks Backend. See
 // design/control-plane/bmc-bitscope.md §2a.
 var factories = map[string]factory{
-	"mock": func(cfg Config) (Backend, error) { return NewMockBackend(cfg.StateDir) },
+	"mock":     func(cfg Config) (Backend, error) { return NewMockBackend(cfg.StateDir) },
+	"bitscope": func(cfg Config) (Backend, error) { return NewBitScopeBackend(cfg) },
 }
 
 // New constructs the backend named kind. An empty kind selects
