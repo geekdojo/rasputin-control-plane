@@ -1,0 +1,181 @@
+name: fuzz
+
+# Weekly deep-fuzz of the agent's untrusted-input parsers — the continuous
+# layer of step 5 ("AI Agents for Continuous Quality", geekdojo-brain
+# research/). OSS-Fuzz-Gen targets C/C++ and Rasputin owns no first-party C,
+# so this is the research's fallback: Go-native `go test -fuzz` of the parsers
+# that ingest attacker-influenced bytes (mDNS packets off the LAN, IDS alert
+# lines, the grubenv A/B block). PR-time `go test` already runs each harness's
+# SEED corpus as a regression check; this job does the deep exploration a
+# 45-second local run can't.
+#
+# Corpus compounding: Go stores generated "interesting" inputs in $GOCACHE/fuzz.
+# We pin GOCACHE to a workspace path and cache that fuzz dir with a ROTATING
+# key (+ restore-keys prefix) so every run builds on the previous run's
+# coverage instead of starting cold — which is what lets fuzzing find deep bugs
+# over weeks rather than in one sitting.
+#
+# Detect-only: a crash makes `go test -fuzz` write the reproducing input to
+# testdata/fuzz/ and exit non-zero; this job collects those, opens a GitHub
+# issue with the repro command, and uploads the crashers as artifacts. It never
+# commits a crasher or edits code — fixing the parser (and committing the
+# crasher as a permanent regression seed) is a human step.
+
+on:
+  schedule:
+    - cron: "0 9 * * 4" # Thursdays 09:00 UTC (offset from the other agents)
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Fuzz budget per target (Go duration, e.g. 5m, 20m)"
+        type: string
+        default: "5m"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Pin GOCACHE so the fuzz corpus lives at a stable, cacheable path.
+  GOCACHE: ${{ github.workspace }}/.gocache
+  FUZZTIME: ${{ github.event.inputs.fuzztime || '5m' }}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          # We manage caching explicitly below — setup-go's cache uses an
+          # immutable go.sum-keyed key, which would freeze the corpus after the
+          # first run (no compounding).
+          cache: false
+
+      # Restore the compounding fuzz corpus. Rotating key + prefix restore-keys
+      # means each run picks up the latest saved corpus and then saves a new one.
+      - name: Restore fuzz corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.gocache/fuzz
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Deep-fuzz the parsers
+        id: fuzz
+        working-directory: agent
+        run: |
+          set -uo pipefail   # NOT -e: a crash must not abort the loop
+          # Fuzz targets: "<pkg-dir>:<FuzzFunc>". Add untrusted-input parsers
+          # here as harnesses land.
+          targets="
+            internal/mdns:FuzzParseAnswer
+            internal/mdns:FuzzReadName
+            internal/ids:FuzzParseAlertFast
+            internal/updater:FuzzParseGrubenv
+          "
+          for t in $targets; do
+            [ -n "$t" ] || continue
+            dir="${t%%:*}"; fn="${t##*:}"
+            echo "::group::fuzz $fn ($dir) for $FUZZTIME"
+            go test -run='^$' -fuzz="^${fn}$" -fuzztime="$FUZZTIME" "./$dir"
+            rc=$?
+            echo "::endgroup::"
+            [ "$rc" -ne 0 ] && echo "::warning::$fn crashed (exit $rc)"
+          done
+          # Crashers are written to <dir>/testdata/fuzz/<Fuzz>/<hash>. There are
+          # no committed seeds there, so any such file is a new crasher.
+          mkdir -p ../fuzz-out
+          find . -path '*/testdata/fuzz/*' -type f -exec cp --parents {} ../fuzz-out/ \; 2>/dev/null || true
+          n=$(find . -path '*/testdata/fuzz/*' -type f | wc -l | tr -d ' ')
+          echo "crashers=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Save fuzz corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.gocache/fuzz
+          key: fuzz-corpus-${{ github.run_id }}
+
+      - name: Upload crashers
+        if: steps.fuzz.outputs.crashers != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ github.run_id }}
+          path: fuzz-out/
+
+      - name: Build issue body
+        if: steps.fuzz.outputs.crashers != '0'
+        working-directory: agent
+        run: |
+          set -eu
+          today=$(date -u +%Y-%m-%d)
+          {
+            echo "## Fuzz crash — $today"
+            echo
+            echo "\`go test -fuzz\` found reproducing input(s) in the agent's untrusted-input parsers."
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "### Crashers"
+            echo
+            for f in $(find . -path '*/testdata/fuzz/*' -type f | sort); do
+              # f = ./internal/<pkg>/testdata/fuzz/<Fuzz>/<hash>
+              rel="${f#./}"
+              fuzzname=$(echo "$rel" | sed -E 's#.*/testdata/fuzz/([^/]+)/.*#\1#')
+              hash=$(basename "$f")
+              pkgdir=$(echo "$rel" | sed -E 's#(.*)/testdata/fuzz/.*#\1#')
+              echo "- **$fuzzname** — \`$rel\`"
+              echo "  Reproduce:"
+              echo '  ```sh'
+              echo "  cd agent && go test -run='${fuzzname}/${hash}' ./${pkgdir}"
+              echo '  ```'
+              echo "  Input:"
+              echo '  ```'
+              sed 's/^/  /' "$f"
+              echo '  ```'
+            done
+            echo
+            echo "### What to do"
+            echo
+            echo "A crash here is a real bug — a malformed input panics/OOBs a parser that"
+            echo "handles attacker-influenced bytes. Fix the parser to fail gracefully, then"
+            echo "commit the crasher file as a permanent regression seed (it lives under the"
+            echo "package's \`testdata/fuzz/\`). The crashers are also attached as artifacts."
+            echo
+            echo "---"
+            echo "*Opened by the fuzz workflow. Close once fixed/triaged.*"
+          } > ../fuzz-out/issue-body.md
+          cat ../fuzz-out/issue-body.md
+
+      - name: Ensure 'fuzz' label
+        if: steps.fuzz.outputs.crashers != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create fuzz --repo "$GITHUB_REPOSITORY" \
+            --color D93F0B --description "Opened by the fuzz workflow — a parser crashed" --force
+
+      - name: Open / update fuzz issue
+        if: steps.fuzz.outputs.crashers != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          today=$(date -u +%Y-%m-%d)
+          title="Fuzz crash $today — ${{ steps.fuzz.outputs.crashers }} reproducing input(s)"
+          gh issue list --repo "$GITHUB_REPOSITORY" --label fuzz --state open \
+            --json number,title --jq '.[] | "\(.number)\t\(.title)"' \
+            | while IFS=$'\t' read -r num oldtitle; do
+                [ "$oldtitle" = "$title" ] || { echo "closing stale #$num"; \
+                  gh issue close "$num" --repo "$GITHUB_REPOSITORY" --comment "Superseded by today's fuzz run."; }
+              done
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+            --label fuzz --body-file fuzz-out/issue-body.md
