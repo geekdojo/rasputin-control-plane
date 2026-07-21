@@ -37,8 +37,8 @@ func FuzzParseAnswer(f *testing.F) {
 
 func FuzzReadName(f *testing.F) {
 	f.Add([]byte{0x03, 'f', 'o', 'o', 0}, 0)
-	f.Add([]byte{0xc0, 0x00}, 0)             // pointer to self — cycle guard
-	f.Add([]byte{0x3f}, 0)                    // length byte with no label bytes
+	f.Add([]byte{0xc0, 0x00}, 0) // pointer to self — cycle guard
+	f.Add([]byte{0x3f}, 0)       // length byte with no label bytes
 	f.Fuzz(func(t *testing.T, msg []byte, off int) {
 		if len(msg) == 0 {
 			return
