@@ -337,13 +337,17 @@ func main() {
 
 	// BMC handlers — registered on the BMC host. In MVS that's the
 	// controlplane node; override with RASPUTIN_BMC_HOST=1 to host BMC on
-	// any agent (useful for testing on dev compute agents). v0 only ships
-	// a mock backend; the real I²C/IPMI/Redfish wiring lands with chassis
-	// hardware.
+	// any agent (the BitScope bench rack's manager is a compute node).
+	// The backend comes from the bmc package's registry, selected by
+	// RASPUTIN_BMC_BACKEND; mock stays the default until a real driver
+	// (bitscope, turingpi, chassis) is configured. See
+	// design/control-plane/bmc-bitscope.md §2a.
 	if role == proto.RoleControlPlane || os.Getenv("RASPUTIN_BMC_HOST") == "1" {
-		backend, err := bmc.NewMockBackend(filepath.Join(stateDir, "bmc"))
+		backend, err := bmc.New(envOr("RASPUTIN_BMC_BACKEND", bmc.DefaultBackend), bmc.Config{
+			StateDir: filepath.Join(stateDir, "bmc"),
+		})
 		if err != nil {
-			log.Fatalf("rasputin-agent: bmc mock backend: %v", err)
+			log.Fatalf("rasputin-agent: bmc backend: %v", err)
 		}
 		bmcSubs, err := bmc.RegisterHandlers(nc, nodeID, backend)
 		if err != nil {
