@@ -22,6 +22,13 @@ type Backend interface {
 	// a SOL handle whose Out channel emits bytes from the device; the
 	// caller pumps bytes from the bus into Write(). Close() tears it down.
 	OpenSOL(ctx context.Context, target, sessionID string) (SOL, error)
+
+	// Targets returns the node-ids whose BMCs this backend can reach —
+	// the bmc-targets list the host agent advertises on registration
+	// (design/control-plane/bmc.md §2a). Empty means the backend has no
+	// authoritative list; the host then advertises nothing and the api
+	// keeps its interim presence-only gating.
+	Targets() []string
 }
 
 // SOL is one in-flight serial-over-LAN session on the agent side. The

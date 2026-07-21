@@ -28,7 +28,6 @@ import {
   type NodeRemovalImpact,
 } from '../lib/api';
 import type { App, BMCPowerState, DeploymentMode, Node } from '../lib/types';
-import { BMC_ENABLED } from '../lib/features';
 import { ConfirmModal } from './ConfirmModal';
 import { ACCENT, accentA, MONO, STATUS_COLOR } from './ui-theme';
 
@@ -52,6 +51,9 @@ interface NodeControlsProps {
   mem: number | null;
   apps: App[];
   deploymentMode?: DeploymentMode;
+  // Per-node BMC gate (lib/bmc.ts): true iff some registered BMC host
+  // advertises this node in its bmc-targets list.
+  bmcReachable?: boolean;
   onNavigate: (path: string) => void;
   onRemoved?: (id: string) => void;
 }
@@ -174,7 +176,7 @@ function appStatusColor(status: App['lastStatus']): string {
   return 'rgba(148,163,184,0.5)';
 }
 
-export function NodeControls({ node, cpu, mem, apps, deploymentMode, onNavigate, onRemoved }: NodeControlsProps) {
+export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachable = false, onNavigate, onRemoved }: NodeControlsProps) {
   const [modal, setModal] = useState<'reboot' | 'power-off' | 'reset' | 'remove' | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -185,10 +187,10 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, onNavigate,
   const nodeId = node?.id ?? null;
 
   // BMC power state for the selected node: seed via REST, then track live.
-  // Gated on BMC_ENABLED — no real BMC backend exists yet (Phase 3 hardware),
-  // so we don't poll a mock or render power controls. See lib/features.ts.
+  // Gated per-node on bmcReachable — no advertised serial path means no
+  // power state to poll and no controls to render. See lib/bmc.ts.
   useEffect(() => {
-    if (!nodeId || !BMC_ENABLED) {
+    if (!nodeId || !bmcReachable) {
       setBmcState('unknown');
       return;
     }
@@ -207,7 +209,7 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, onNavigate,
       active = false;
       close();
     };
-  }, [nodeId]);
+  }, [nodeId, bmcReachable]);
 
   // Clear transient action error when selection changes.
   useEffect(() => {
@@ -348,9 +350,10 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, onNavigate,
         {sectionLabel('ACTIONS')}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
           {/* BMC power controls (power on/off, hardware reset) and the
-              serial-over-LAN console are hidden until the real BMC backend
-              ships with Phase 3 chassis hardware. See lib/features.ts. */}
-          {BMC_ENABLED && (
+              serial-over-LAN console render only for nodes some BMC host
+              advertises in its bmc-targets list — never a control that
+              would no-op against missing hardware. See lib/bmc.ts. */}
+          {bmcReachable && (
             <PowerButton
               state={bmcState}
               disabled={!node || busy !== null}
@@ -368,11 +371,11 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, onNavigate,
             disabled={!node || busy !== null || !isOnline}
             onClick={() => setModal('reboot')}
           />
-          {BMC_ENABLED && (
+          {bmcReachable && (
             <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console?node=${encodeURIComponent(node.id)}`)} />
           )}
           <CtrlButton icon={Upload} label="UPDATE" disabled={!node} onClick={() => onNavigate('/updates')} />
-          {BMC_ENABLED && (
+          {bmcReachable && (
             <CtrlButton
               icon={RefreshCw}
               label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}

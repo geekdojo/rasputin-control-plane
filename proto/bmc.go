@@ -5,6 +5,40 @@ import (
 	"time"
 )
 
+// The bmc-targets capability (design/control-plane/bmc.md §2a): a BMC-host
+// agent's registration advertises the node-ids whose BMC serial lines it
+// can physically reach. CapabilityBMCTargets tags the host in
+// capabilities[]; the list itself rides in metadata under
+// MetadataBMCTargets. proto owns both names so the agent that publishes
+// and the api/UI that gate on them can't drift.
+const (
+	CapabilityBMCTargets = "bmc-targets"
+	MetadataBMCTargets   = "bmcTargets"
+)
+
+// NodeBMCTargets returns the node's advertised BMC target list, nil if it
+// advertises none. Metadata values arrive as []string in-process but as
+// []any after a JSON decode round-trip (the api's store path) — both
+// shapes are handled; non-string entries are dropped.
+func NodeBMCTargets(n *Node) []string {
+	if n == nil || n.Metadata == nil {
+		return nil
+	}
+	switch v := n.Metadata[MetadataBMCTargets].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // BMCPowerVerb enumerates the power operations a BMC supports.
 //
 // Routing note: BMC commands target a specific node, but they're delivered

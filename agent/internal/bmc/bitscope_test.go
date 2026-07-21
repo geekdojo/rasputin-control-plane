@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -235,6 +236,64 @@ func TestLoadBitScopeMap_Rejects(t *testing.T) {
 		if _, err := loadBitScopeMap(writeMap(t, content)); err == nil {
 			t.Errorf("%s: expected error", name)
 		}
+	}
+}
+
+func TestBitscopeSettings_Defaults(t *testing.T) {
+	dev, unlock, mapPath := bitscopeSettings(Config{StateDir: "/sd"})
+	if dev != "/dev/serial0" {
+		t.Errorf("dev: %q, want /dev/serial0", dev)
+	}
+	if unlock != "UnLockMe" {
+		t.Errorf("unlock: %q, want the EEPROM default", unlock)
+	}
+	if mapPath != filepath.Join("/sd", "bitscope-map.json") {
+		t.Errorf("mapPath: %q", mapPath)
+	}
+}
+
+func TestBitscopeSettings_Overrides(t *testing.T) {
+	dev, unlock, mapPath := bitscopeSettings(Config{
+		StateDir:       "/sd",
+		BitScopeDev:    "/dev/ttyUSB7",
+		BitScopeUnlock: "sekrit",
+		BitScopeMap:    "/etc/map.json",
+	})
+	if dev != "/dev/ttyUSB7" || unlock != "sekrit" || mapPath != "/etc/map.json" {
+		t.Errorf("overrides not honored: %q %q %q", dev, unlock, mapPath)
+	}
+}
+
+func TestBitScope_TimingDefaults(t *testing.T) {
+	// The settle delay and read budget are contract-adjacent (the cycle
+	// off→on gap, the reply-collection cap) — pin their defaults.
+	b := newBitScope(&fakePort{}, nil, bitscopeDefaultUnlock)
+	if b.settle != 2*time.Second {
+		t.Errorf("settle: %v, want 2s", b.settle)
+	}
+	if b.readBudget != 2*time.Second {
+		t.Errorf("readBudget: %v, want 2s", b.readBudget)
+	}
+}
+
+func TestBitScope_TargetsSorted(t *testing.T) {
+	b, _ := newBitScopeForTest(t)
+	got := b.Targets()
+	if len(got) != 2 || got[0] != "node-a1" || got[1] != "node-f3" {
+		t.Errorf("Targets: %v, want [node-a1 node-f3]", got)
+	}
+}
+
+func TestNewBitScopeBackend_PortOpenFails(t *testing.T) {
+	// Valid map, hopeless device: the map must parse first, then the
+	// port open must fail loudly (stub error off-linux, ENOENT on it).
+	mapPath := writeMap(t, `{"targets": [{"pos": "A-0", "node_id": "n0"}]}`)
+	_, err := NewBitScopeBackend(Config{
+		BitScopeMap: mapPath,
+		BitScopeDev: filepath.Join(t.TempDir(), "no-such-tty"),
+	})
+	if err == nil {
+		t.Fatal("expected port-open error")
 	}
 }
 

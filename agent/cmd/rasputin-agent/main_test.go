@@ -1,9 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
 )
 
 func TestAgentStateDir(t *testing.T) {
@@ -66,5 +73,88 @@ func TestUCIBackendSelectionEnvOverride(t *testing.T) {
 	t.Setenv("RASPUTIN_UCI_BACKEND", "")
 	if got := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend()); got != "mock" {
 		t.Errorf("autodetect fallback: got %q, want mock", got)
+	}
+}
+
+func TestSplitCSV(t *testing.T) {
+	cases := map[string][]string{
+		"":            nil,
+		"a":           {"a"},
+		"a,b":         {"a", "b"},
+		" a , b ,":    {"a", "b"},
+		",,":          nil,
+		"node-1, ,x2": {"node-1", "x2"},
+	}
+	for in, want := range cases {
+		if got := splitCSV(in); !reflect.DeepEqual(got, want) {
+			t.Errorf("splitCSV(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// testBus starts an in-process NATS server so the real publish path can
+// be exercised.
+func testBus(t *testing.T) *nats.Conn {
+	t.Helper()
+	s, err := server.NewServer(&server.Options{Port: -1})
+	if err != nil {
+		t.Fatalf("nats server: %v", err)
+	}
+	go s.Start()
+	t.Cleanup(s.Shutdown)
+	if !s.ReadyForConnections(5 * time.Second) {
+		t.Fatal("nats server not ready")
+	}
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatalf("nats connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	return nc
+}
+
+func registeredEvt(t *testing.T, nc *nats.Conn, nodeID string, bmcTargets []string) proto.NodeRegisteredEvt {
+	t.Helper()
+	sub, err := nc.SubscribeSync(proto.NodeRegisteredSubject(nodeID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, bmcTargets)
+	msg, err := sub.NextMsg(2 * time.Second)
+	if err != nil {
+		t.Fatalf("no registered event: %v", err)
+	}
+	var ev proto.NodeRegisteredEvt
+	if err := json.Unmarshal(msg.Data, &ev); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return ev
+}
+
+func TestPublishRegistered_AdvertisesBMCTargets(t *testing.T) {
+	// Pins the wire format the api's inventory store and the UI decode:
+	// capability tag in capabilities[], list under metadata.bmcTargets.
+	nc := testBus(t)
+	ev := registeredEvt(t, nc, "cp-test", []string{"n-a", "n-b"})
+	if !reflect.DeepEqual(ev.Capabilities, []string{proto.CapabilityBMCTargets}) {
+		t.Errorf("capabilities: %v, want [%s]", ev.Capabilities, proto.CapabilityBMCTargets)
+	}
+	got, ok := ev.Metadata[proto.MetadataBMCTargets].([]any)
+	if !ok || len(got) != 2 || got[0] != "n-a" || got[1] != "n-b" {
+		t.Errorf("metadata %s: %v", proto.MetadataBMCTargets, ev.Metadata[proto.MetadataBMCTargets])
+	}
+}
+
+func TestPublishRegistered_NoTargetsNoAdvertisement(t *testing.T) {
+	nc := testBus(t)
+	ev := registeredEvt(t, nc, "cp-test", nil)
+	for _, c := range ev.Capabilities {
+		if c == proto.CapabilityBMCTargets {
+			t.Errorf("capability advertised with no targets: %v", ev.Capabilities)
+		}
+	}
+	if _, present := ev.Metadata[proto.MetadataBMCTargets]; present {
+		t.Errorf("metadata key present with no targets: %v", ev.Metadata)
 	}
 }

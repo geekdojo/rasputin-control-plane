@@ -75,6 +75,9 @@ func powerValidate(svc *Service, inv *inventory.Store) jobs.DoFn {
 		if node == nil {
 			return nil, fmt.Errorf("target node %q not registered", spec.TargetNodeID)
 		}
+		if err := svc.TargetReachable(sc.Ctx, inv, spec.TargetNodeID); err != nil {
+			return nil, err
+		}
 		sc.Log("info", fmt.Sprintf("bmc.%s on %s (via %s)", spec.Verb, spec.TargetNodeID, svc.cfg.HostNodeID))
 		return json.Marshal(spec)
 	}

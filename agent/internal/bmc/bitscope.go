@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -84,18 +85,7 @@ const (
 // (dev /dev/serial0, the EEPROM-default unlock sequence per D-4, map at
 // <StateDir>/bitscope-map.json).
 func NewBitScopeBackend(cfg Config) (*BitScopeBackend, error) {
-	dev := cfg.BitScopeDev
-	if dev == "" {
-		dev = bitscopeDefaultDev
-	}
-	unlock := cfg.BitScopeUnlock
-	if unlock == "" {
-		unlock = bitscopeDefaultUnlock
-	}
-	mapPath := cfg.BitScopeMap
-	if mapPath == "" {
-		mapPath = filepath.Join(cfg.StateDir, bitscopeDefaultMap)
-	}
+	dev, unlock, mapPath := bitscopeSettings(cfg)
 	targets, err := loadBitScopeMap(mapPath)
 	if err != nil {
 		return nil, err
@@ -112,6 +102,24 @@ func NewBitScopeBackend(cfg Config) (*BitScopeBackend, error) {
 	return b, nil
 }
 
+// bitscopeSettings resolves the driver's Config fields to their
+// documented defaults (design doc §2a).
+func bitscopeSettings(cfg Config) (dev, unlock, mapPath string) {
+	dev = cfg.BitScopeDev
+	if dev == "" {
+		dev = bitscopeDefaultDev
+	}
+	unlock = cfg.BitScopeUnlock
+	if unlock == "" {
+		unlock = bitscopeDefaultUnlock
+	}
+	mapPath = cfg.BitScopeMap
+	if mapPath == "" {
+		mapPath = filepath.Join(cfg.StateDir, bitscopeDefaultMap)
+	}
+	return dev, unlock, mapPath
+}
+
 // newBitScope wires a backend onto an already-open port without
 // touching the bus. Tests inject a fake port here.
 func newBitScope(port busPort, targets map[string]bitscopeTarget, unlock string) *BitScopeBackend {
@@ -125,6 +133,18 @@ func newBitScope(port busPort, targets map[string]bitscopeTarget, unlock string)
 }
 
 func (b *BitScopeBackend) Name() string { return "bitscope" }
+
+// Targets lists the address map's node-ids, sorted — the authoritative
+// bmc-targets advertisement (design doc §2d). The map is immutable after
+// construction, so no lock is needed.
+func (b *BitScopeBackend) Targets() []string {
+	out := make([]string, 0, len(b.targets))
+	for id := range b.targets {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // unlockBus sends the unlock sequence and drains whatever the bus says
 // back. The bus powers up locked; one unlock per open session.

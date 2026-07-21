@@ -74,6 +74,9 @@ func TestPowerValidate_UnknownTarget(t *testing.T) {
 func TestPowerValidate_Success(t *testing.T) {
 	f := newFixture(t)
 	inv := newInvStore(t)
+	// Hard gating: the host must advertise the target for any verb to
+	// validate (registerHost lives in targets_test.go).
+	registerHost(t, f, inv, []string{"node-1"})
 	_ = inv.Insert(f.ctx, &proto.Node{
 		ID: "node-1", Role: proto.RoleCompute, Hostname: "node-1.local",
 		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),

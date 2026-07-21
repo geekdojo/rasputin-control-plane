@@ -9,6 +9,7 @@ import { NodeControls } from '../../components/NodeControls';
 import { AddNodeWizard } from '../../components/AddNodeWizard';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { clusterPrefixOf } from '../../lib/enroll';
+import { bmcReachableNodes } from '../../lib/bmc';
 import type { NodeViewStatus } from '../../components/ui-theme';
 
 interface Util {
@@ -148,6 +149,9 @@ export default function NodesPage() {
   // yet. Once the node registers it drops out of this list and becomes a live
   // hex — the come-online confirmation happens in the grid itself.
   const nodeIds = useMemo(() => new Set(nodes.map((n) => n.id)), [nodes]);
+  // Per-node BMC gate: nodes some registered BMC host advertises in its
+  // bmc-targets list (lib/bmc.ts).
+  const bmcTargets = useMemo(() => bmcReachableNodes(nodes), [nodes]);
   const pending: PendingView[] = useMemo(
     () =>
       busTokens
@@ -196,6 +200,7 @@ export default function NodesPage() {
           mem={selectedUtil?.mem ?? null}
           apps={selectedApps}
           deploymentMode={deploymentMode}
+          bmcReachable={selectedNode ? bmcTargets.has(selectedNode.id) : false}
           onNavigate={(path) => router.push(path)}
           onRemoved={(id) => {
             setNodes((prev) => prev.filter((n) => n.id !== id));

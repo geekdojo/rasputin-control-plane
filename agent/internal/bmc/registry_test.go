@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-func TestNew_EmptyKindSelectsDefault(t *testing.T) {
-	b, err := New("", Config{StateDir: t.TempDir()})
-	if err != nil {
-		t.Fatalf("New(\"\"): %v", err)
-	}
-	if b.Name() != DefaultBackend {
-		t.Errorf("Name: %q, want %q", b.Name(), DefaultBackend)
+func TestNew_OffKindsAreNotConstructible(t *testing.T) {
+	// Hard off: "" and "none" mean no backend at all — the caller skips
+	// construction; asking the registry for one is a wiring bug.
+	for _, kind := range []string{"", BackendNone} {
+		if _, err := New(kind, Config{StateDir: t.TempDir()}); err == nil {
+			t.Errorf("New(%q): expected error", kind)
+		}
 	}
 }
 
@@ -35,12 +35,17 @@ func TestNew_UnknownKindErrors(t *testing.T) {
 	}
 }
 
-func TestNames_ContainsDefault(t *testing.T) {
+func TestNames_ContainsRegisteredKinds(t *testing.T) {
 	names := Names()
+	want := map[string]bool{"mock": false, "bitscope": false}
 	for _, n := range names {
-		if n == DefaultBackend {
-			return
+		if _, ok := want[n]; ok {
+			want[n] = true
 		}
 	}
-	t.Errorf("Names() = %v, missing %q", names, DefaultBackend)
+	for kind, seen := range want {
+		if !seen {
+			t.Errorf("Names() = %v, missing %q", names, kind)
+		}
+	}
 }

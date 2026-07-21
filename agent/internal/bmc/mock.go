@@ -26,6 +26,7 @@ type MockBackend struct {
 	mu        sync.Mutex
 	statePath string
 	state     mockState
+	targets   []string
 }
 
 type mockState struct {
@@ -48,6 +49,23 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 }
 
 func (m *MockBackend) Name() string { return "mock" }
+
+// SetTargets configures the advertised bmc-targets list (from
+// RASPUTIN_BMC_MOCK_TARGETS via the registry) — the mock's equivalent
+// of a real backend's address map. BMC gating is hard: with no list
+// configured the mock advertises nothing and every verb against the
+// cluster is refused, same as any misconfigured real backend.
+func (m *MockBackend) SetTargets(ids []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.targets = append([]string(nil), ids...)
+}
+
+func (m *MockBackend) Targets() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.targets...)
+}
 
 func (m *MockBackend) load() error {
 	buf, err := os.ReadFile(m.statePath)

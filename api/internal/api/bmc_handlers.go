@@ -78,6 +78,12 @@ func (s *Server) handleListBMCStates(w http.ResponseWriter, r *http.Request) {
 //     SessionManager.Close() which RPCs bmc.sol.close.
 func (s *Server) handleBMCSOL(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.PathValue("nodeId")
+	// Per-node gate (bmc.md §2a): refuse before accepting the WS when the
+	// BMC host has no serial path to this target.
+	if err := s.bmc.TargetReachable(r.Context(), s.inv, nodeID); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true, // dev cross-origin, same as bridgeSubject
 	})
