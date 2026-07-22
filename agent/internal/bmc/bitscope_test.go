@@ -170,10 +170,10 @@ func TestBitScope_UnlockWritesSequence(t *testing.T) {
 	}
 }
 
-func TestBitScope_OpenSOLNotImplemented(t *testing.T) {
+func TestBitScope_OpenSOLUnmappedTargetErrors(t *testing.T) {
 	b, _ := newBitScopeForTest(t)
-	if _, err := b.OpenSOL(context.Background(), "node-a1", "sess"); err == nil {
-		t.Fatal("OpenSOL: expected not-implemented error")
+	if _, err := b.OpenSOL(context.Background(), "node-nope", "sess"); err == nil {
+		t.Fatal("OpenSOL: expected address-map error")
 	}
 }
 

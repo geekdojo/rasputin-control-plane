@@ -12,8 +12,10 @@
 //     (advertises only its configured RASPUTIN_BMC_MOCK_TARGETS list).
 //     File-backed power state; SOL emits a canned banner + uptime line.
 //   - BitScopeBackend ("bitscope") — the CB04B blade BMC over the rack's
-//     RS-485 bus via the manager Pi's /dev/serial0 (power verbs + status;
-//     SoL pending). Framing is bench-validation pending — see bitscope.go.
+//     RS-485 bus via the manager Pi's /dev/serial0. Power verbs + status
+//   - SoL (bus-wide single session with cross-target take-over; verbs
+//     interrupt an open console — see bitscope_sol.go). Framing and the
+//     console-exit escape are bench-validation pending — see bitscope.go.
 //   - "turingpi" (contemplated) — the Turing Pi BMC over its REST API.
 //   - the Phase 3 chassis driver — I²C / IPMI / Redfish against the
 //     Rasputin backplane.
