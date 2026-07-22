@@ -48,6 +48,12 @@ type BitScopeBackend struct {
 	// readBudget caps one command's reply collection even if a noisy
 	// bus never goes quiet.
 	readBudget time.Duration
+
+	// sol is the one live console session on the bus (D-5: bus-wide
+	// single-session); reader pumps its bytes between commands. Both
+	// guarded by mu. See bitscope_sol.go.
+	sol    *bitscopeSOL
+	reader *solReader
 }
 
 // bitscopeTarget is one row of the address map, resolved.
@@ -180,6 +186,12 @@ func (b *BitScopeBackend) Power(ctx context.Context, target string, verb proto.B
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// An open console shares the one serial line: suspend the bridge
+	// for the verb, reopen it after — even when the verb targets the
+	// bridged node itself (power-cycling the node you're watching).
+	resumeConsole := b.suspendConsoleLocked()
+	defer resumeConsole()
+
 	var detail string
 	switch verb {
 	case proto.BMCPowerOn:
@@ -232,16 +244,13 @@ func (b *BitScopeBackend) Power(ctx context.Context, target string, verb proto.B
 	return state, detail, nil
 }
 
-// OpenSOL is the next backlog item (design doc §2c) — the console
-// bridge needs the §3 bus-owner goroutine first.
-func (b *BitScopeBackend) OpenSOL(_ context.Context, target, _ string) (SOL, error) {
-	return nil, fmt.Errorf("bitscope: SoL for %s not implemented yet (bmc-bitscope backlog)", target)
-}
-
-// Close releases the serial port.
+// Close tears down any live console session and releases the port.
 func (b *BitScopeBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.sol != nil {
+		b.teardownSOLLocked(b.sol, "console closed: BMC backend shutting down")
+	}
 	return b.port.Close()
 }
 
