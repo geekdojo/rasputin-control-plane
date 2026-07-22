@@ -84,6 +84,54 @@ func TestParseAnswer_NoAnswer(t *testing.T) {
 	}
 }
 
+// A response whose header declares an=1 but which carries a second, matching A
+// record in trailing bytes must NOT be resolved — parseAnswer must stop after
+// the declared answer count. Guards the `i < an` loop bound (and its counter
+// direction) against reading past the declared answers.
+func TestParseAnswer_HonorsAnswerCount(t *testing.T) {
+	const typeTXT = 16
+	tail := []byte{
+		// answer 0 (the only declared answer): a non-matching TXT record.
+		0xC0, 0x0C,
+		0, typeTXT, 0, classIN,
+		0, 0, 0, 120,
+		0, 1, // rdlength = 1
+		'x',
+		// trailing, UNDECLARED answer: a valid A record for the wanted name.
+		// Reachable only if the answer loop runs more than an==1 iterations.
+		0xC0, 0x0C,
+		0, typeA, 0, classIN,
+		0, 0, 0, 120,
+		0, 4,
+		192, 168, 1, 50,
+	}
+	msg := answerPacket("rasputin.local", 1, tail) // header says one answer
+	if got := parseAnswer(msg, "rasputin.local"); got != "" {
+		t.Errorf("parseAnswer read past the declared answer count: got %q, want \"\"", got)
+	}
+}
+
+// readName caps its decode loop at 128 steps to defeat pointer cycles; that cap
+// also bounds a pathological chain of uncompressed labels. A name of exactly 128
+// one-byte labels must be rejected (the 128th step exhausts the bound before the
+// terminator is read), while 127 labels resolves. Guards the `steps < 128` bound
+// against being loosened to `<= 128`.
+func TestReadName_LabelCountBound(t *testing.T) {
+	build := func(n int) []byte {
+		var b []byte
+		for i := 0; i < n; i++ {
+			b = append(b, 1, 'a')
+		}
+		return append(b, 0) // terminating root label
+	}
+	if _, _, ok := readName(build(127), 0); !ok {
+		t.Error("127 one-byte labels are within the 128-step bound, want ok")
+	}
+	if _, _, ok := readName(build(128), 0); ok {
+		t.Error("128 one-byte labels exhaust the 128-step bound, want failure")
+	}
+}
+
 func TestReadName_RejectsPointerCycle(t *testing.T) {
 	// A pointer at offset 12 pointing to itself must not hang.
 	msg := make([]byte, 14)

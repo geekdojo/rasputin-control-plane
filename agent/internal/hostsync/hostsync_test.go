@@ -1,9 +1,13 @@
 package hostsync
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -70,6 +74,73 @@ func TestRunPassesResolveTimeout(t *testing.T) {
 	if got := time.Duration(gotTimeout.Load()); got != 3*time.Second {
 		t.Fatalf("resolve timeout = %v, want 3s", got)
 	}
+}
+
+// A non-positive interval must be clamped to the 30s default, not used verbatim.
+// With interval == 0 the ticker would otherwise fire immediately every loop,
+// hammering the resolver in a hot spin. We prove the clamp by showing that after
+// the first (immediate) tick, no second resolve happens for a long stretch —
+// which only holds if interval was replaced with a large default. Guards the
+// `interval <= 0` clamp against being narrowed to `interval < 0`.
+func TestRunClampsNonPositiveInterval(t *testing.T) {
+	dir := t.TempDir()
+	calls := make(chan struct{}, 64)
+	resolve := func(string, time.Duration) (string, error) {
+		calls <- struct{}{}
+		return "192.168.1.50", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, "rasputin.local", dir, 0, "", resolve) // interval == 0
+
+	<-calls // the immediate first tick
+	select {
+	case <-calls:
+		t.Fatal("interval <= 0 must clamp to the 30s default; got an immediate second resolve (hot spin)")
+	case <-time.After(300 * time.Millisecond):
+		// No second resolve — the interval was clamped to a long default.
+	}
+}
+
+// When reloadCmd fails, Run must log the failure. Guards the `rerr != nil` check
+// against being flipped to `rerr == nil` (which would log only on success and
+// swallow real reload failures).
+func TestRunLogsReloadFailure(t *testing.T) {
+	dir := t.TempDir()
+	var buf safeBuffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	resolve := func(string, time.Duration) (string, error) { return "192.168.1.50", nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// "exit 3" makes CombinedOutput return a non-nil error, exercising the
+	// failure branch on the very first (immediate) tick.
+	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "exit 3", resolve)
+
+	waitFor(t, func() bool {
+		s := buf.String()
+		return strings.Contains(s, "reload") && strings.Contains(s, "failed")
+	})
+}
+
+// safeBuffer is a concurrency-safe io.Writer for capturing log output written by
+// the Run goroutine while the test reads it.
+type safeBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func readHost(file string) string {
