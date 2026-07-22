@@ -81,35 +81,26 @@ func main() {
 	// persistent root (stateDir's parent on the appliance layout).
 	storageDataPath := envOr("RASPUTIN_DISK_METRIC_PATH", stateDir)
 	growpartLogPath := envOr("RASPUTIN_GROWPART_LOG", filepath.Join(filepath.Dir(stateDir), "growpart.log"))
-	// BMC backend — HARD on/off (bmc.md §2a, decided 2026-07-21): off by
-	// default; no backend is constructed, nothing registers, nothing is
-	// advertised. On only when RASPUTIN_BMC_BACKEND explicitly selects a
-	// backend — the mock included; it is an ordinary explicit selection
-	// that plays by the same strict rules, never a fallback. Selecting a
-	// backend IS the host opt-in (any agent may host BMC — the BitScope
-	// bench manager is a compute node), so there is no separate host
-	// flag. Constructed before the bus connects so registration can
-	// advertise bmc-targets; handlers register after the bus is up.
-	var bmcBackend bmc.Backend
-	if kind := os.Getenv("RASPUTIN_BMC_BACKEND"); kind != "" && kind != bmc.BackendNone {
-		b, err := bmc.New(kind, bmc.Config{
+	// BMC host — every agent runs one (bmc-settings.md §4-5). HARD
+	// on/off (bmc.md §2a): boot resolves the env pin (RASPUTIN_BMC_BACKEND,
+	// the dev/bench path — selecting a backend IS the host opt-in), else
+	// the persisted settings-pushed selection, else off: nothing
+	// registers or advertises until Settings pushes a selection.
+	// Constructed before the bus connects so the first registration can
+	// advertise bmc-targets; the configure handler attaches after.
+	bmcHost, err := bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"),
+		os.Getenv("RASPUTIN_BMC_BACKEND"), bmc.Config{
 			StateDir:       filepath.Join(stateDir, "bmc"),
 			BitScopeDev:    os.Getenv("RASPUTIN_BMC_BITSCOPE_DEV"),
 			BitScopeUnlock: os.Getenv("RASPUTIN_BMC_BITSCOPE_UNLOCK"),
 			BitScopeMap:    os.Getenv("RASPUTIN_BMC_BITSCOPE_MAP"),
 			MockTargets:    splitCSV(os.Getenv("RASPUTIN_BMC_MOCK_TARGETS")),
 		})
-		if err != nil {
-			log.Fatalf("rasputin-agent: bmc backend: %v", err)
-		}
-		bmcBackend = b
+	if err != nil {
+		log.Fatalf("rasputin-agent: bmc host: %v", err)
 	}
 	reregister := func(c *nats.Conn) {
-		var bmcTargets []string
-		if bmcBackend != nil {
-			bmcTargets = bmcBackend.Targets()
-		}
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcTargets)
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement())
 	}
 	// Retry the initial NATS connect instead of exiting on failure. On real
 	// hardware the firewall can boot before the control plane (it IS the
@@ -365,17 +356,15 @@ func main() {
 
 	// BMC handlers — the backend itself was constructed before the bus
 	// connect (see above) so registration could advertise bmc-targets.
-	if bmcBackend != nil {
-		bmcSubs, err := bmc.RegisterHandlers(nc, nodeID, bmcBackend)
-		if err != nil {
-			log.Fatalf("rasputin-agent: register bmc handlers: %v", err)
-		}
-		defer func() {
-			for _, sub := range bmcSubs {
-				_ = sub.Unsubscribe()
-			}
-		}()
-		log.Printf("rasputin-agent: bmc backend=%s (host, targets=%d)", bmcBackend.Name(), len(bmcBackend.Targets()))
+	// Attach subscribes bmc.configure on every agent (a Settings push can
+	// turn BMC on) and the power/SoL handlers when a backend is active.
+	if err := bmcHost.Attach(nc, func() { reregister(nc) }); err != nil {
+		log.Fatalf("rasputin-agent: bmc host attach: %v", err)
+	}
+	defer bmcHost.Shutdown()
+	if bmcHost.Active() {
+		adv := bmcHost.Advertisement()
+		log.Printf("rasputin-agent: bmc backend=%s (host, targets=%d, pinned=%t)", bmcHost.Name(), len(adv.Targets), adv.Pinned)
 	}
 
 	go runHeartbeats(ctx, nc, nodeID)
@@ -398,7 +387,7 @@ func main() {
 	log.Println("rasputin-agent: shutting down")
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcTargets []string) {
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement) {
 	meta := map[string]any{}
 	if cidr := host.PrimaryLanCIDR(); cidr != "" {
 		// Carried in Metadata rather than as a top-level field so the
@@ -408,13 +397,21 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		meta["primaryLanCidr"] = cidr
 	}
 	var caps []string
-	if len(bmcTargets) > 0 {
-		// This node hosts a BMC backend with an authoritative reachable-
-		// target list: advertise it so the api/UI gate power + console
-		// per-node (bmc.md §2a). Hosts without a list advertise nothing
-		// and the api keeps its interim presence-only gating.
+	if bmcAdv != nil {
+		// This node hosts an active BMC backend: advertise the reachable
+		// targets so the api/UI gate power + console per-node (bmc.md
+		// §2a), the applied settings-config hash so the api can re-push
+		// after a miss or reflash, and the env-pin marker so Settings
+		// renders read-only (bmc-settings.md §4-5). BMC-off nodes
+		// advertise nothing — hard off.
 		caps = append(caps, proto.CapabilityBMCTargets)
-		meta[proto.MetadataBMCTargets] = bmcTargets
+		meta[proto.MetadataBMCTargets] = bmcAdv.Targets
+		if bmcAdv.ConfigHash != "" {
+			meta[proto.MetadataBMCConfigHash] = bmcAdv.ConfigHash
+		}
+		if bmcAdv.Pinned {
+			meta[proto.MetadataBMCConfigPinned] = true
+		}
 	}
 	ev := proto.NodeRegisteredEvt{
 		NodeID:       nodeID,

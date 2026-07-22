@@ -1,6 +1,7 @@
 package proto
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -9,12 +10,80 @@ import (
 // agent's registration advertises the node-ids whose BMC serial lines it
 // can physically reach. CapabilityBMCTargets tags the host in
 // capabilities[]; the list itself rides in metadata under
-// MetadataBMCTargets. proto owns both names so the agent that publishes
-// and the api/UI that gate on them can't drift.
+// MetadataBMCTargets. MetadataBMCConfigHash echoes the applied
+// settings-config hash so the api can re-push after a miss or reflash,
+// and MetadataBMCConfigPinned marks a host whose selection is pinned by
+// RASPUTIN_BMC_BACKEND env (bmc-settings.md §4–5). proto owns all the
+// names so the agent that publishes and the api/UI that gate can't drift.
 const (
-	CapabilityBMCTargets = "bmc-targets"
-	MetadataBMCTargets   = "bmcTargets"
+	CapabilityBMCTargets    = "bmc-targets"
+	MetadataBMCTargets      = "bmcTargets"
+	MetadataBMCConfigHash   = "bmcConfigHash"
+	MetadataBMCConfigPinned = "bmcConfigPinned"
 )
+
+// BMCBackendInfo describes one supported BMC backend for the Settings
+// picker (bmc-settings.md §2, S-1). The UI renders this served list —
+// never a hardcoded copy. "None" is not a backend; it is the absence of
+// a selection (hard off).
+type BMCBackendInfo struct {
+	Kind   string `json:"kind"`
+	Label  string `json:"label"`
+	Status string `json:"status"` // BMCBackendAvailable | BMCBackendPlanned
+}
+
+const (
+	BMCBackendAvailable = "available"
+	BMCBackendPlanned   = "planned"
+)
+
+// SupportedBMCBackends is the platform's backend registry. Every
+// "available" kind must have a factory in the agent's bmc registry —
+// asserted by a drift test on the agent side (proto cannot import the
+// agent without a cycle).
+var SupportedBMCBackends = []BMCBackendInfo{
+	{Kind: "bitscope", Label: "BitScope CB04B blade rack", Status: BMCBackendAvailable},
+	{Kind: "mock", Label: "Mock (development)", Status: BMCBackendAvailable},
+	{Kind: "turingpi", Label: "Turing Pi", Status: BMCBackendPlanned},
+	{Kind: "rasputin", Label: "Rasputin chassis", Status: BMCBackendPlanned},
+}
+
+// AvailableBMCBackend reports whether kind is a supported, available
+// backend selection.
+func AvailableBMCBackend(kind string) bool {
+	for _, b := range SupportedBMCBackends {
+		if b.Kind == kind && b.Status == BMCBackendAvailable {
+			return true
+		}
+	}
+	return false
+}
+
+// BMCConfigureCmd delivers the cluster's BMC selection to the host agent
+// (bmc-settings.md §4). Kind "none" clears the selection: the agent
+// deletes its persisted config, tears down handlers, and re-registers
+// with no advertisement. Config is the per-kind blob from settings,
+// carried verbatim; ConfigHash is computed api-side and echoed by the
+// agent (opaque to it).
+type BMCConfigureCmd struct {
+	Kind       string          `json:"kind"`
+	Config     json.RawMessage `json:"config,omitempty"`
+	ConfigHash string          `json:"configHash"`
+}
+
+// BMCConfigureAck is the typed reply. A pinned host answers
+// OK:false with a detail naming the pin — never a timeout.
+type BMCConfigureAck struct {
+	OK         bool   `json:"ok"`
+	ConfigHash string `json:"configHash,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+}
+
+// BMCConfigureSubject returns the cmd subject that delivers the BMC
+// selection to the host agent.
+func BMCConfigureSubject(bmcHostID string) string {
+	return NodeCmdSubject(bmcHostID, "bmc.configure")
+}
 
 // NodeBMCTargets returns the node's advertised BMC target list, nil if it
 // advertises none. Metadata values arrive as []string in-process but as

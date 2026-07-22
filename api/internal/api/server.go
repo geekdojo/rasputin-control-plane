@@ -84,6 +84,10 @@ func (s *Server) SetReleaseDownloadBase(downloadBase string) {
 // successfully.
 func (s *Server) SetAlertsService(svc *alerts.Service) { s.alerts = svc }
 
+// BMCSessions exposes the SoL session manager so main can wire the
+// bmc.configure workflow to the same instance the WS handler uses.
+func (s *Server) BMCSessions() *bmc.SessionManager { return s.bmcSessions }
+
 // SetAlertsWebhookSecret turns on shared-secret auth for
 // POST /api/alerts/webhook. Empty disables the check (dev mode).
 func (s *Server) SetAlertsWebhookSecret(secret string) { s.alertsWebhookSecret = secret }
@@ -252,6 +256,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/enroll/operator-keys", reqd(s.handlePutOperatorKeys))
 
 	mux.HandleFunc("GET /api/bmc", reqd(s.handleListBMCStates))
+	mux.HandleFunc("GET /api/bmc/backends", reqd(s.handleBMCBackends))
+	mux.HandleFunc("GET /api/bmc/config", reqd(s.handleBMCGetConfig))
+	mux.HandleFunc("POST /api/bmc/config", reqd(s.handleBMCSetConfig))
 	mux.HandleFunc("GET /api/bmc/{nodeId}/status", reqd(s.handleBMCStatus))
 	mux.HandleFunc("POST /api/bmc/{nodeId}/power/{verb}", reqd(s.handleBMCPower))
 	mux.HandleFunc("GET /ws/bmc/{nodeId}/sol", reqd(s.handleBMCSOL))

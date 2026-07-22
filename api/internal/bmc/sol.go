@@ -44,6 +44,14 @@ func NewSessionManager(svc *Service) *SessionManager {
 	}
 }
 
+// Active returns the number of open SoL sessions — the configure saga
+// refuses to swap backends under a live console (bmc-settings.md §8).
+func (m *SessionManager) Active() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.sessions)
+}
+
 // Session is one in-flight SOL stream. The WS handler reads from Out
 // and writes via Write.
 type Session struct {
@@ -62,7 +70,8 @@ type Session struct {
 // to the .out subject, and returns the live Session. The caller must
 // eventually call Close().
 func (m *SessionManager) Open(ctx context.Context, targetNodeID string) (*Session, error) {
-	if m.svc.cfg.HostNodeID == "" {
+	hostID := m.svc.Host(ctx)
+	if hostID == "" {
 		return nil, errors.New("no BMC host node configured")
 	}
 	sessionID := ulid.Make().String()
@@ -94,7 +103,7 @@ func (m *SessionManager) Open(ctx context.Context, targetNodeID string) (*Sessio
 	openCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	respMsg, err := m.svc.nc.RequestWithContext(openCtx,
-		proto.BMCSOLOpenSubject(m.svc.cfg.HostNodeID), cmd)
+		proto.BMCSOLOpenSubject(hostID), cmd)
 	if err != nil {
 		_ = sub.Unsubscribe()
 		return nil, fmt.Errorf("sol open rpc: %w", err)
@@ -158,7 +167,7 @@ func (s *Session) Close(ctx context.Context) {
 		defer cancel()
 		cmd, _ := json.Marshal(proto.BMCSOLCloseCmd{SessionID: s.ID})
 		_, _ = s.mgr.svc.nc.RequestWithContext(closeCtx,
-			proto.BMCSOLCloseSubject(s.mgr.svc.cfg.HostNodeID), cmd)
+			proto.BMCSOLCloseSubject(s.mgr.svc.Host(ctx)), cmd)
 		s.mgr.mu.Lock()
 		delete(s.mgr.sessions, s.ID)
 		s.mgr.mu.Unlock()

@@ -13,10 +13,15 @@ import (
 
 // Config carries the runtime knobs the bmc subsystem reads from main.
 type Config struct {
-	// HostNodeID is the id of the Rasputin node whose agent owns the BMC
-	// bus. Commands target other nodes but are *delivered* to this one.
-	// Defaults to RASPUTIN_SELF_NODE_ID; can be overridden via
-	// RASPUTIN_BMC_HOST_NODE_ID for split-brain layouts (none expected v0).
+	// HostFn resolves the id of the node whose agent owns the BMC bus —
+	// live from the settings store (bmc.host_node_id, bmc-settings.md
+	// S-5), so changing the host in Settings redirects routing without
+	// an api restart. Commands target other nodes but are *delivered*
+	// to this one. Empty result = no host configured.
+	HostFn func(ctx context.Context) string
+
+	// HostNodeID is a static fallback used when HostFn is nil — tests
+	// and single-purpose tools; production wires HostFn.
 	HostNodeID string
 }
 
@@ -30,14 +35,21 @@ type Service struct {
 }
 
 func NewService(cfg Config, store *Store, nc *nats.Conn) *Service {
-	if cfg.HostNodeID == "" {
-		log.Printf("bmc: WARNING — no host node id configured; bmc operations will fail until RASPUTIN_BMC_HOST_NODE_ID or RASPUTIN_SELF_NODE_ID is set")
+	if cfg.HostFn == nil && cfg.HostNodeID == "" {
+		log.Printf("bmc: WARNING — no host resolution configured; bmc operations will fail until the BMC host is set")
 	}
 	return &Service{cfg: cfg, store: store, nc: nc}
 }
 
-func (s *Service) HostNodeID() string { return s.cfg.HostNodeID }
-func (s *Service) Store() *Store      { return s.store }
+// Host resolves the current BMC-host node id ("" = none configured).
+func (s *Service) Host(ctx context.Context) string {
+	if s.cfg.HostFn != nil {
+		return s.cfg.HostFn(ctx)
+	}
+	return s.cfg.HostNodeID
+}
+
+func (s *Service) Store() *Store { return s.store }
 
 // TargetReachable enforces per-node BMC gating (design/control-plane/
 // bmc.md §2a) — HARD on/off, decided 2026-07-21: the configured BMC-host
@@ -47,19 +59,23 @@ func (s *Service) Store() *Store      { return s.store }
 // every verb and SoL open is refused, so nothing can ever "succeed"
 // against hardware that isn't there.
 func (s *Service) TargetReachable(ctx context.Context, inv *inventory.Store, target string) error {
-	host, err := inv.Get(ctx, s.cfg.HostNodeID)
+	hostID := s.Host(ctx)
+	if hostID == "" {
+		return fmt.Errorf("no BMC host configured")
+	}
+	host, err := inv.Get(ctx, hostID)
 	if err != nil {
 		return fmt.Errorf("bmc host lookup: %w", err)
 	}
 	if host == nil {
-		return fmt.Errorf("BMC host %q is not registered", s.cfg.HostNodeID)
+		return fmt.Errorf("BMC host %q is not registered", hostID)
 	}
 	if !slices.Contains(host.Capabilities, proto.CapabilityBMCTargets) {
-		return fmt.Errorf("no BMC configured: host %q advertises no bmc-targets", s.cfg.HostNodeID)
+		return fmt.Errorf("no BMC configured: host %q advertises no bmc-targets", hostID)
 	}
 	if !slices.Contains(proto.NodeBMCTargets(host), target) {
 		return fmt.Errorf("target %q is not reachable by BMC host %q (not in its advertised bmc-targets)",
-			target, s.cfg.HostNodeID)
+			target, hostID)
 	}
 	return nil
 }

@@ -198,8 +198,8 @@ func TestMsRoundTrip_BMC(t *testing.T) {
 
 func TestNewService_AccessorsAndMissingHost(t *testing.T) {
 	f := newFixture(t)
-	if f.svc.HostNodeID() != "host-1" {
-		t.Errorf("HostNodeID: got %q", f.svc.HostNodeID())
+	if f.svc.Host(f.ctx) != "host-1" {
+		t.Errorf("Host: got %q", f.svc.Host(f.ctx))
 	}
 	if f.svc.Store() != f.store {
 		t.Error("Store accessor mismatch")
@@ -207,10 +207,16 @@ func TestNewService_AccessorsAndMissingHost(t *testing.T) {
 	if f.svc.NATS() != f.nc {
 		t.Error("NATS accessor mismatch")
 	}
-	// Constructing with no host id logs a warning but still returns a service.
+	// Constructing with no host resolution logs a warning but still
+	// returns a service.
 	svc2 := NewService(Config{}, f.store, f.nc)
-	if svc2.HostNodeID() != "" {
-		t.Errorf("HostNodeID: want empty, got %q", svc2.HostNodeID())
+	if svc2.Host(f.ctx) != "" {
+		t.Errorf("Host: want empty, got %q", svc2.Host(f.ctx))
+	}
+	// HostFn wins over the static fallback and is read live.
+	svc3 := NewService(Config{HostNodeID: "static", HostFn: func(context.Context) string { return "live" }}, f.store, f.nc)
+	if svc3.Host(f.ctx) != "live" {
+		t.Errorf("HostFn: got %q, want live", svc3.Host(f.ctx))
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -302,5 +303,32 @@ func TestNew_BitscopeWithoutMapErrors(t *testing.T) {
 	// map must fail loudly before any hardware is touched.
 	if _, err := New("bitscope", Config{StateDir: t.TempDir()}); err == nil {
 		t.Fatal("New(bitscope) without a map: expected error")
+	}
+}
+
+func TestNewFromSelection_BitscopeHonorsCustomDev(t *testing.T) {
+	// The dev default branch: a custom device must be the one opened —
+	// the open error names it (the stub error off-linux doesn't, so
+	// assert only where the real port code runs).
+	_, err := NewFromSelection("bitscope",
+		[]byte(`{"dev":"/definitely/custom-tty","targets":[{"pos":"A-0","node_id":"n0"}]}`), t.TempDir())
+	if err == nil {
+		t.Fatal("expected open error")
+	}
+	if runtime.GOOS == "linux" && !strings.Contains(err.Error(), "/definitely/custom-tty") {
+		t.Errorf("error should name the custom device: %v", err)
+	}
+}
+
+func TestNewFromSelection_MockAndUnknown(t *testing.T) {
+	b, err := NewFromSelection("mock", []byte(`{"targets":["a","b"]}`), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Targets(); len(got) != 2 {
+		t.Errorf("mock targets: %v", got)
+	}
+	if _, err := NewFromSelection("bogus", []byte(`{}`), t.TempDir()); err == nil {
+		t.Error("unknown kind must error")
 	}
 }

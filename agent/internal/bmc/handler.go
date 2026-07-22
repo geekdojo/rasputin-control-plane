@@ -18,6 +18,13 @@ import (
 //
 // Returns the subscriptions so the caller can Unsubscribe on shutdown.
 func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Subscription, error) {
+	_, subs, err := registerHandlers(nc, nodeID, backend)
+	return subs, err
+}
+
+// registerHandlers is RegisterHandlers returning the handler too, so
+// the Host can drain sessions on a hot swap.
+func registerHandlers(nc *nats.Conn, nodeID string, backend Backend) (*handler, []*nats.Subscription, error) {
 	h := &handler{nc: nc, backend: backend, sessions: map[string]SOL{}}
 
 	subs := make([]*nats.Subscription, 0, 7)
@@ -27,7 +34,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		subj := proto.BMCPowerSubject(nodeID, v)
 		sub, err := nc.Subscribe(subj, func(m *nats.Msg) { h.power(v, m) })
 		if err != nil {
-			return subs, err
+			return h, subs, err
 		}
 		subs = append(subs, sub)
 		log.Printf("rasputin-agent: subscribed to %s", subj)
@@ -36,7 +43,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 	openSubj := proto.BMCSOLOpenSubject(nodeID)
 	openSub, err := nc.Subscribe(openSubj, func(m *nats.Msg) { h.solOpen(m) })
 	if err != nil {
-		return subs, err
+		return h, subs, err
 	}
 	subs = append(subs, openSub)
 	log.Printf("rasputin-agent: subscribed to %s", openSubj)
@@ -44,12 +51,12 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 	closeSubj := proto.BMCSOLCloseSubject(nodeID)
 	closeSub, err := nc.Subscribe(closeSubj, func(m *nats.Msg) { h.solClose(m) })
 	if err != nil {
-		return subs, err
+		return h, subs, err
 	}
 	subs = append(subs, closeSub)
 	log.Printf("rasputin-agent: subscribed to %s", closeSubj)
 
-	return subs, nil
+	return h, subs, nil
 }
 
 type handler struct {
@@ -184,6 +191,37 @@ func (h *handler) solClose(m *nats.Msg) {
 		_ = sol.Close()
 	}
 	respond(m, proto.BMCSOLCloseAck{OK: true})
+}
+
+// closeAll tears down every open SoL session — used by the Host on a
+// hot backend swap (bmc-settings.md §4). Each session gets a courtesy
+// final frame on its .out subject so the operator's console shows why
+// it went quiet, then the pumps stop and the backend session closes.
+func (h *handler) closeAll(reason string) {
+	h.mu.Lock()
+	sessions := h.sessions
+	pumps := h.pumps
+	h.sessions = map[string]SOL{}
+	h.pumps = map[string]sessionPump{}
+	h.mu.Unlock()
+
+	for id := range sessions {
+		payload, err := json.Marshal(proto.BMCSOLDataEvt{
+			SessionID: id,
+			Data:      "\r\n*** session closed: " + reason + "\r\n",
+			Ts:        time.Now().UTC(),
+		})
+		if err == nil {
+			_ = h.nc.Publish(proto.BMCSOLOutSubject(id), payload)
+		}
+	}
+	for _, pump := range pumps {
+		_ = pump.inSub.Unsubscribe()
+		pump.cancel()
+	}
+	for _, sol := range sessions {
+		_ = sol.Close()
+	}
 }
 
 func respond(m *nats.Msg, body any) {
