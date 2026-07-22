@@ -62,7 +62,7 @@ func TestBitScope_NameIsBitscope(t *testing.T) {
 
 func TestBitScope_PowerOn(t *testing.T) {
 	// Round 1: '/' verb ack. Round 2: '=' status reply.
-	b, port := newBitScopeForTest(t, "ok", "", "ENABLED", "")
+	b, port := newBitScopeForTest(t, "ok", "", "01|=\n01 ff 1 26 98", "")
 	state, detail, err := b.Power(context.Background(), "node-a1", proto.BMCPowerOn)
 	if err != nil {
 		t.Fatalf("Power(on): %v", err)
@@ -80,7 +80,7 @@ func TestBitScope_PowerOn(t *testing.T) {
 }
 
 func TestBitScope_PowerOffDecodesOff(t *testing.T) {
-	b, port := newBitScopeForTest(t, "ok", "", "OFF", "")
+	b, port := newBitScopeForTest(t, "ok", "", "17|=\n17 ff 0 00 00", "")
 	state, _, err := b.Power(context.Background(), "node-f3", proto.BMCPowerOff)
 	if err != nil {
 		t.Fatalf("Power(off): %v", err)
@@ -95,7 +95,7 @@ func TestBitScope_PowerOffDecodesOff(t *testing.T) {
 }
 
 func TestBitScope_CycleSendsOffThenOn(t *testing.T) {
-	b, port := newBitScopeForTest(t, "ok", "", "ok", "", "ENABLED", "")
+	b, port := newBitScopeForTest(t, "ok", "", "ok", "", "01|=\n01 ff 1 26 98", "")
 	state, _, err := b.Power(context.Background(), "node-a1", proto.BMCPowerCycle)
 	if err != nil {
 		t.Fatalf("Power(cycle): %v", err)
@@ -113,7 +113,7 @@ func TestBitScope_CycleSendsOffThenOn(t *testing.T) {
 
 func TestBitScope_ResetDisclosesHardCycle(t *testing.T) {
 	// D-1: reset is a hard power-cycle and the detail must say so.
-	b, _ := newBitScopeForTest(t, "ok", "", "ok", "", "ENABLED", "")
+	b, _ := newBitScopeForTest(t, "ok", "", "ok", "", "01|=\n01 ff 1 26 98", "")
 	_, detail, err := b.Power(context.Background(), "node-a1", proto.BMCPowerReset)
 	if err != nil {
 		t.Fatalf("Power(reset): %v", err)
@@ -125,7 +125,7 @@ func TestBitScope_ResetDisclosesHardCycle(t *testing.T) {
 
 func TestBitScope_StatusDisabledIsOffWithDetail(t *testing.T) {
 	// D-2: DISABLED decodes to off, disclosed in the detail.
-	b, _ := newBitScopeForTest(t, "DISABLED", "")
+	b, _ := newBitScopeForTest(t, "01|=\n01 ff 2 26 98", "")
 	state, detail, err := b.Power(context.Background(), "node-a1", proto.BMCPowerQuery)
 	if err != nil {
 		t.Fatalf("Power(status): %v", err)
@@ -330,5 +330,44 @@ func TestNewFromSelection_MockAndUnknown(t *testing.T) {
 	}
 	if _, err := NewFromSelection("bogus", []byte(`{}`), t.TempDir()); err == nil {
 		t.Error("unknown kind must error")
+	}
+}
+
+func TestDecodeBitScopeState_LiveCapture(t *testing.T) {
+	// The exact first reply the rack ever gave us (2026-07-22, c05/B-0):
+	// command echo, then ID MS XX YY ZZ.
+	state, detail, err := decodeBitScopeState(0x04, "04|=\n04 ff 1 26 98")
+	if err != nil {
+		t.Fatalf("live capture: %v", err)
+	}
+	if state != proto.BMCStateOn {
+		t.Errorf("state: %q, want on", state)
+	}
+	if !strings.Contains(detail, "current=0x26") || !strings.Contains(detail, "fan=0x98") {
+		t.Errorf("detail: %q, want telemetry fields", detail)
+	}
+}
+
+func TestDecodeBitScopeState_TokensAndGuards(t *testing.T) {
+	if st, d, err := decodeBitScopeState(0x04, "04 ff 0 00 00"); err != nil || st != proto.BMCStateOff || strings.Contains(d, "disabled") {
+		t.Errorf("token 0: %v %q %v", st, d, err)
+	}
+	if st, d, err := decodeBitScopeState(0x04, "04 ff 2 10 20"); err != nil || st != proto.BMCStateOff || !strings.Contains(d, "disabled") {
+		t.Errorf("token 2: %v %q %v", st, d, err)
+	}
+	// Mis-routed reply: another node's address must never be trusted.
+	if _, _, err := decodeBitScopeState(0x04, "05 ff 1 26 98"); err == nil {
+		t.Error("wrong-address reply must error")
+	}
+	// Unknown token, short reply, garbage.
+	if _, _, err := decodeBitScopeState(0x04, "04 ff 9 26 98"); err == nil {
+		t.Error("unknown token must error")
+	}
+	if _, _, err := decodeBitScopeState(0x04, "%$#!"); err == nil {
+		t.Error("garbage must error")
+	}
+	// Minimal three-field reply still decodes (older firmware safety).
+	if st, _, err := decodeBitScopeState(0x04, "04 ff 1"); err != nil || st != proto.BMCStateOn {
+		t.Errorf("three-field: %v %v", st, err)
 	}
 }
