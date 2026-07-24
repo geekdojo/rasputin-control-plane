@@ -177,7 +177,7 @@ function appStatusColor(status: App['lastStatus']): string {
 }
 
 export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachable = false, onNavigate, onRemoved }: NodeControlsProps) {
-  const [modal, setModal] = useState<'reboot' | 'power-off' | 'reset' | 'remove' | null>(null);
+  const [modal, setModal] = useState<'reboot' | 'power-off' | 'power-on' | 'reset' | 'remove' | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [bmcState, setBmcState] = useState<BMCPowerState>('unknown');
@@ -359,8 +359,11 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
               disabled={!node || busy !== null}
               onClick={() => {
                 if (!node) return;
-                if (bmcState === 'on') setModal('power-off');
-                else void run('bmc-on', () => bmcPower(node.id, 'on'));
+                // The label shows the CURRENT state; the click's action is
+                // the opposite verb — confirm both directions with copy
+                // that names the action (bench 2026-07-23: a stale 'on'
+                // once showed the power-OFF modal on a power-ON click).
+                setModal(bmcState === 'on' ? 'power-off' : 'power-on');
               }}
             />
           )}
@@ -469,6 +472,15 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
           confirmLabel="POWER OFF"
           danger
           onConfirm={() => void run('bmc-off', () => bmcPower(node.id, 'off'))}
+          onCancel={() => setModal(null)}
+        />
+      )}
+      {modal === 'power-on' && node && (
+        <ConfirmModal
+          title="CONFIRM POWER ON"
+          message={`Power on ${node.id.toUpperCase()} via BMC? The node boots and rejoins the cluster.`}
+          confirmLabel="POWER ON"
+          onConfirm={() => void run('bmc-on', () => bmcPower(node.id, 'on'))}
           onCancel={() => setModal(null)}
         />
       )}
