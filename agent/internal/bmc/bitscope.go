@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,16 +25,15 @@ import (
 // Protocol (BitScope "I/O System" BIOS — proprietary single-character
 // verbs at 115,200 8N1, no flow control): power on '/', power off '\'
 // (hard cut — there is no reset line, so cycle and reset are both
-// off→settle→on per decision D-1), status '=' (reports OFF / ENABLED /
-// DISABLED, decoded per D-2), addressing by geographic bus id
-// (busID = 4·row + slot, hex 00–17) via the "<addr>|" pipe, bus locked
-// until the unlock sequence is sent.
+// off→settle→on per decision D-1), status '=' (five-field reply, see
+// decodeBitScopeState; state tokens mapped per D-2), addressing by
+// geographic bus id (busID = 4·row + slot, hex 00–17) via the
+// "<addr>|" pipe, bus locked until the unlock sequence is sent.
 //
-// Byte-level framing (addressing pipe syntax, unlock handshake, status
-// reply strings, cycle settle time) is asserted from BitScope's docs and
-// NOT yet hardware-validated — the bench checklist is design doc §9.
-// The decode is deliberately substring-based so framing details can't
-// break the state mapping.
+// HARDWARE-VALIDATED 2026-07-22 (first live rack contact, c02→c05 on
+// the ER24A): unlock handshake, addressing-pipe syntax, command-echo
+// framing, and the `=` reply format all confirmed. Remaining §9 items:
+// cycle settle time, console-exit escape, mute-mode reopen.
 //
 // Concurrency: a mutex serializes every bus command (the bus is one
 // shared serial line). When SoL lands this grows into the design doc §3
@@ -234,7 +234,7 @@ func (b *BitScopeBackend) Power(ctx context.Context, target string, verb proto.B
 	if err != nil {
 		return proto.BMCStateUnknown, "", err
 	}
-	state, stateDetail, err := decodeBitScopeState(reply)
+	state, stateDetail, err := decodeBitScopeState(t.addr, reply)
 	if err != nil {
 		return proto.BMCStateUnknown, "", err
 	}
@@ -292,22 +292,55 @@ func (b *BitScopeBackend) readReply(ctx context.Context) (string, error) {
 	}
 }
 
-// decodeBitScopeState maps a status reply onto the proto power states.
-// Substring-based on purpose: exact reply framing is a bench-validation
-// item, the state words are not. Per D-2, DISABLED decodes to off with
-// the raw fact disclosed in the detail; unknown is reserved for a reply
-// that names no state at all.
-func decodeBitScopeState(reply string) (proto.BMCPowerState, string, error) {
-	up := strings.ToUpper(reply)
-	switch {
-	case strings.Contains(up, "DISABLED"):
-		return proto.BMCStateOff, "disabled", nil
-	case strings.Contains(up, "ENABLED"):
-		return proto.BMCStateOn, "", nil
-	case strings.Contains(up, "OFF"):
-		return proto.BMCStateOff, "", nil
+// decodeBitScopeState parses a `=` status reply. Wire format validated
+// on the rack 2026-07-22 (first live capture: `04|=\n04 ff 1 26 98`)
+// and matching the archived BitScope control-plane protocol doc: the
+// bus echoes the issued command, then replies one line of five fields
+//
+//	ID MS XX YY ZZ
+//
+// ID = node address (hex 00–7f) · MS = 00 master / ff slave · XX =
+// power-state token (0 OFF / 1 ENABLED / 2 DISABLED) · YY = current
+// draw (U8) · ZZ = fan speed (U8). Token mapping per D-1/D-2:
+// 1 → on; 0 → off; 2 → off with the "disabled" fact disclosed. The ID
+// field is cross-checked against the addressed target so a mis-routed
+// reply can never report another node's state as the target's.
+func decodeBitScopeState(addr byte, reply string) (proto.BMCPowerState, string, error) {
+	// The reply is the last non-empty, non-echo line (echoes carry the
+	// `|` pipe character; status lines never do).
+	var status string
+	for _, raw := range strings.FieldsFunc(reply, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		l := strings.TrimSpace(raw)
+		if l != "" && !strings.ContainsRune(l, '|') {
+			status = l
+		}
 	}
-	return proto.BMCStateUnknown, "", fmt.Errorf("bitscope: unparseable status reply %q", strings.TrimSpace(reply))
+	fields := strings.Fields(status)
+	if len(fields) < 3 {
+		return proto.BMCStateUnknown, "", fmt.Errorf("bitscope: unparseable status reply %q", strings.TrimSpace(reply))
+	}
+	id, err := strconv.ParseUint(fields[0], 16, 8)
+	if err != nil || byte(id) != addr {
+		return proto.BMCStateUnknown, "", fmt.Errorf("bitscope: status reply for node %q, expected %02x (reply %q)",
+			fields[0], addr, strings.TrimSpace(reply))
+	}
+	detail := ""
+	if len(fields) >= 5 {
+		detail = fmt.Sprintf("current=0x%s fan=0x%s", fields[3], fields[4])
+	}
+	switch fields[2] {
+	case "1":
+		return proto.BMCStateOn, detail, nil
+	case "0":
+		return proto.BMCStateOff, detail, nil
+	case "2":
+		if detail != "" {
+			return proto.BMCStateOff, "disabled; " + detail, nil
+		}
+		return proto.BMCStateOff, "disabled", nil
+	}
+	return proto.BMCStateUnknown, "", fmt.Errorf("bitscope: unknown power-state token %q in reply %q",
+		fields[2], strings.TrimSpace(reply))
 }
 
 // bitscopeMapEntry is one address-map row: pos is authoritative, the

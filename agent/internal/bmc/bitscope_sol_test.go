@@ -227,7 +227,7 @@ func TestBitScopeSOL_PowerVerbInterruptsAndResumes(t *testing.T) {
 	off = awaitWrite(t, port, off, `17|\`)
 	// Status re-read: feed the reply inside the quiet window.
 	off = awaitWrite(t, port, off, "17|=")
-	port.in <- []byte("OFF")
+	port.in <- []byte("17|=\n17 ff 0 00 00")
 
 	r := <-done
 	if r.err != nil {
