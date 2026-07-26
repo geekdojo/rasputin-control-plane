@@ -74,6 +74,15 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "node not found")
 		return
 	}
+	// The controlplane is the cluster: removing its inventory row would
+	// orphan every subsystem that routes through it while the api keeps
+	// running on the very node it just "removed". Server-side refusal —
+	// the UI hides the control too, but the api is the authority
+	// (backlog: nodes "hide REMOVE NODE for the controlplane").
+	if n.Role == proto.RoleControlPlane {
+		writeError(w, http.StatusConflict, "the controlplane node cannot be removed — it is the cluster itself")
+		return
+	}
 
 	impact, err := s.computeRemovalImpact(ctx, id)
 	if err != nil {

@@ -386,6 +386,9 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
               onClick={() => setModal('reset')}
             />
           )}
+          {/* The controlplane cannot be removed — it IS the cluster; the
+              api refuses server-side too. */}
+          {node?.role !== 'controlplane' && (
           <CtrlButton
             icon={Trash2}
             label={busy === 'remove' ? 'REMOVING…' : 'REMOVE NODE'}
@@ -401,6 +404,7 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
                 .catch((e) => setImpactErr(String(e)));
             }}
           />
+          )}
         </div>
 
         {sectionLabel('DIAGNOSTICS')}

@@ -25,8 +25,11 @@ func seedNodeWithCascade(t *testing.T, f *apiFixture, nodeID string) (appID, hsI
 	ctx := context.Background()
 
 	now := time.Now().UTC()
+	// Compute role: the controlplane refuses removal outright (see
+	// TestDeleteNode_ControlplaneRefused), and the cascade under test is
+	// role-agnostic.
 	if err := f.inv.Insert(ctx, &proto.Node{
-		ID: nodeID, Role: proto.RoleControlPlane,
+		ID: nodeID, Role: proto.RoleCompute,
 		Hostname: nodeID, AgentVersion: "test",
 		FirstSeen: now, LastSeen: now, Status: proto.StatusOnline,
 	}); err != nil {
@@ -265,5 +268,28 @@ func (s *subscription) wait(d time.Duration) bool {
 		return true
 	case <-time.After(d):
 		return false
+	}
+}
+
+func TestDeleteNode_ControlplaneRefused(t *testing.T) {
+	// The controlplane IS the cluster: DELETE must refuse server-side
+	// regardless of what any UI shows (nodes-backlog item).
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := f.inv.Insert(ctx, &proto.Node{
+		ID: "cp-1", Role: proto.RoleControlPlane,
+		Hostname: "cp-1", FirstSeen: now, LastSeen: now, Status: proto.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := f.authenticate(t)
+	rec := f.do(t, http.MethodDelete, "/api/nodes/cp-1", "", c)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status %d, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	n, err := f.inv.Get(ctx, "cp-1")
+	if err != nil || n == nil {
+		t.Fatalf("controlplane row must survive the refused delete: %v %v", n, err)
 	}
 }
