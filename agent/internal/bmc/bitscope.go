@@ -30,10 +30,21 @@ import (
 // geographic bus id (busID = 4·row + slot, hex 00–17) via the
 // "<addr>|" pipe, bus locked until the unlock sequence is sent.
 //
+// PIPE DISCIPLINE (control-plane manual "Command Pipe", learned the
+// hard way on the bench 2026-07-26): "<addr>|" ATTACHES the slave —
+// after that, every byte except ^G is forwarded to it, including the
+// next command's "<addr>|" prefix. A pipe left open therefore wedges
+// the whole bus: verbs stop being interpreted by the master and vanish
+// into the attached slave. Every command must end by closing its pipe
+// with ^G, and unlock defensively closes any pipe a previous holder
+// left behind.
+//
 // HARDWARE-VALIDATED 2026-07-22 (first live rack contact, c02→c05 on
 // the ER24A): unlock handshake, addressing-pipe syntax, command-echo
-// framing, and the `=` reply format all confirmed. Remaining §9 items:
-// cycle settle time, console-exit escape, mute-mode reopen.
+// framing, and the `=` reply format all confirmed. 2026-07-26: ^G
+// pipe-close/recovery confirmed live (wedged bus answered `=` again
+// right after ^G). Remaining §9 items: cycle settle time, mute-mode
+// reopen.
 //
 // Concurrency: a mutex serializes every bus command (the bus is one
 // shared serial line). When SoL lands this grows into the design doc §3
@@ -84,6 +95,11 @@ const (
 	bitscopeVerbOn     = '/'
 	bitscopeVerbOff    = '\\'
 	bitscopeVerbStatus = '='
+
+	// bitscopePipeClose (^G, BEL) closes an open command pipe: the
+	// attached slave detaches and — if its console is open — the console
+	// closes with it. The one byte the master always interprets itself.
+	bitscopePipeClose = '\a'
 )
 
 // NewBitScopeBackend loads the address map, opens the serial bus, and
@@ -159,22 +175,53 @@ func (b *BitScopeBackend) Targets() []string {
 	return out
 }
 
-// unlockBus sends the unlock sequence and drains whatever the bus says
-// back. The bus powers up locked; one unlock per open session.
+// unlockBus readies the bus for commands: close any pipe a previous
+// holder left open (a stale pipe forwards everything to its slave and
+// the bus looks dead — the 2026-07-26 bench wedge), send the unlock
+// sequence, then prove local command mode with a bare `=` — the master
+// must answer its own five-field status. Failing that check here turns
+// "backend came up but every verb returns nothing" into a construction
+// error the operator actually sees.
 func (b *BitScopeBackend) unlockBus() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, err := b.port.Write([]byte{bitscopePipeClose}); err != nil {
+		return fmt.Errorf("bitscope: pipe-close write: %w", err)
+	}
 	if err := b.port.DrainInput(); err != nil {
 		return fmt.Errorf("bitscope: unlock drain: %w", err)
 	}
 	if _, err := b.port.Write(b.unlock); err != nil {
 		return fmt.Errorf("bitscope: unlock write: %w", err)
 	}
-	_, err := b.readReply(context.Background())
-	if err != nil {
+	if _, err := b.readReply(context.Background()); err != nil {
 		return fmt.Errorf("bitscope: unlock reply: %w", err)
 	}
+	if _, err := b.port.Write([]byte{bitscopeVerbStatus}); err != nil {
+		return fmt.Errorf("bitscope: status probe write: %w", err)
+	}
+	reply, err := b.readReply(context.Background())
+	if err != nil {
+		return fmt.Errorf("bitscope: status probe reply: %w", err)
+	}
+	if !bitscopeMasterStatus(reply) {
+		return fmt.Errorf("bitscope: bus did not answer the local status probe (reply %q) — still locked, wedged, or not a BMC line", reply)
+	}
 	return nil
+}
+
+// bitscopeMasterStatus reports whether reply carries the master BMC's
+// own status line: five fields with the MS field 00 (master). Anything
+// else — silence, echo only, a slave's ff — means the bus is not in
+// local command mode.
+func bitscopeMasterStatus(reply string) bool {
+	for _, line := range strings.Split(reply, "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) == 5 && f[1] == "00" {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *BitScopeBackend) Power(ctx context.Context, target string, verb proto.BMCPowerVerb) (proto.BMCPowerState, string, error) {
@@ -255,17 +302,24 @@ func (b *BitScopeBackend) Close() error {
 }
 
 // command addresses one target and issues one BIOS verb: drain stale
-// bytes, write "<addr>|<verb>", collect the reply until the line goes
-// quiet. Caller holds b.mu.
+// bytes, write "[<addr>]|<verb>" (bracketed entry clears vmInput before
+// the digits load it — the manual's canonical form), collect the reply
+// until the line goes quiet, then CLOSE THE PIPE — "[<addr>]|" attached
+// the slave, and a pipe left open swallows every subsequent command
+// (pipe discipline, see the type comment). Caller holds b.mu.
 func (b *BitScopeBackend) command(ctx context.Context, addr byte, verb byte) (string, error) {
 	if err := b.port.DrainInput(); err != nil {
 		return "", fmt.Errorf("bitscope: drain: %w", err)
 	}
-	cmd := fmt.Sprintf("%02x|%c", addr, verb)
+	cmd := fmt.Sprintf("[%02x]|%c", addr, verb)
 	if _, err := b.port.Write([]byte(cmd)); err != nil {
 		return "", fmt.Errorf("bitscope: write %q: %w", cmd, err)
 	}
-	return b.readReply(ctx)
+	reply, err := b.readReply(ctx)
+	if _, cerr := b.port.Write([]byte{bitscopePipeClose}); cerr == nil {
+		_ = b.port.DrainInput() // eat the pipe-close echo
+	}
+	return reply, err
 }
 
 // readReply collects bytes until the port reports quiet (io.EOF from
