@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // Serial-over-LAN for the BitScope backend (design doc §2c/§3, D-5).
@@ -58,6 +59,16 @@ const bitscopeConsoleBaud115k = "00"
 // validated live 2026-07-26 (recovered a wedged bus).
 var bitscopeConsoleExit = []byte{bitscopePipeClose}
 
+// bitscopeConsolePace is the inter-byte gap for operator→target console
+// writes. The bridge has no flow control in either direction (manual:
+// "the console port ... is not subject to flow control") and the
+// master→slave leg demonstrably drops characters on back-to-back bytes
+// (first live login, 2026-07-26: "root" arrived as "oot", newlines
+// vanished). ~86µs/byte is the 115k2 wire rate; 2ms/byte gives the
+// BMC's store-and-forward across the RS-485 bus >20 byte-times of
+// slack while staying invisible at interactive typing speeds.
+const bitscopeConsolePace = 2 * time.Millisecond
+
 // bitscopeSOL is the one live console session on the bus.
 type bitscopeSOL struct {
 	b      *BitScopeBackend
@@ -75,15 +86,22 @@ func (s *bitscopeSOL) Out() <-chan []byte { return s.out }
 
 // Write sends operator bytes toward the bridged target. It serializes
 // against power verbs via the bus mutex, so keystrokes queue behind an
-// in-flight verb rather than interleaving into the BIOS.
+// in-flight verb rather than interleaving into the BIOS. Bytes go out
+// individually with bitscopeConsolePace between them — the un-flow-
+// controlled bridge drops characters on back-to-back bursts.
 func (s *bitscopeSOL) Write(p []byte) error {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 	if s.b.sol != s {
 		return fmt.Errorf("bitscope: console session closed")
 	}
-	if _, err := s.b.port.Write(p); err != nil {
-		return fmt.Errorf("bitscope: console write: %w", err)
+	for i, c := range p {
+		if _, err := s.b.port.Write([]byte{c}); err != nil {
+			return fmt.Errorf("bitscope: console write: %w", err)
+		}
+		if i < len(p)-1 {
+			time.Sleep(bitscopeConsolePace)
+		}
 	}
 	return nil
 }
