@@ -181,7 +181,7 @@ func TestRegisterHandlers_SOLOpenAndClose(t *testing.T) {
 	sessionID := "abcdef-0123-4567-89ab"
 
 	// Subscribe to the .out subject before opening so we don't miss the banner.
-	outSub, err := nc.SubscribeSync(proto.BMCSOLOutSubject(sessionID))
+	outSub, err := nc.SubscribeSync(proto.BMCSOLOutSubject("host-1", sessionID))
 	if err != nil {
 		t.Fatalf("subscribe out: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestRegisterHandlers_SOLOpenAndClose(t *testing.T) {
 		Data:      "hello",
 		Ts:        time.Now().UTC(),
 	})
-	if err := nc.Publish(proto.BMCSOLInSubject(sessionID), inPayload); err != nil {
+	if err := nc.Publish(proto.BMCSOLInSubject("host-1", sessionID), inPayload); err != nil {
 		t.Fatalf("publish in: %v", err)
 	}
 	if err := nc.Flush(); err != nil {
@@ -393,7 +393,7 @@ func TestHandler_CloseAllSendsCourtesyFrameAndDrains(t *testing.T) {
 	if !ack.OK {
 		t.Fatalf("sol open: %+v", ack)
 	}
-	out, err := nc.SubscribeSync(proto.BMCSOLOutSubject("sess-close-all"))
+	out, err := nc.SubscribeSync(proto.BMCSOLOutSubject("host-1", "sess-close-all"))
 	if err != nil {
 		t.Fatal(err)
 	}

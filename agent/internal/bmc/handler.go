@@ -25,7 +25,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 // registerHandlers is RegisterHandlers returning the handler too, so
 // the Host can drain sessions on a hot swap.
 func registerHandlers(nc *nats.Conn, nodeID string, backend Backend) (*handler, []*nats.Subscription, error) {
-	h := &handler{nc: nc, backend: backend, sessions: map[string]SOL{}}
+	h := &handler{nc: nc, nodeID: nodeID, backend: backend, sessions: map[string]SOL{}}
 
 	subs := make([]*nats.Subscription, 0, 7)
 
@@ -61,6 +61,7 @@ func registerHandlers(nc *nats.Conn, nodeID string, backend Backend) (*handler, 
 
 type handler struct {
 	nc      *nats.Conn
+	nodeID  string
 	backend Backend
 
 	mu       sync.Mutex
@@ -113,7 +114,7 @@ func (h *handler) solOpen(m *nats.Msg) {
 	// Subscribe to the .in subject (api → device bytes) and forward to
 	// the backend session's Write().
 	pumpCtx, pumpCancel := context.WithCancel(context.Background())
-	inSub, err := h.nc.Subscribe(proto.BMCSOLInSubject(cmd.SessionID), func(msg *nats.Msg) {
+	inSub, err := h.nc.Subscribe(proto.BMCSOLInSubject(h.nodeID, cmd.SessionID), func(msg *nats.Msg) {
 		var ev proto.BMCSOLDataEvt
 		if err := json.Unmarshal(msg.Data, &ev); err != nil {
 			return
@@ -148,7 +149,7 @@ func (h *handler) solOpen(m *nats.Msg) {
 				if err != nil {
 					continue
 				}
-				if err := h.nc.Publish(proto.BMCSOLOutSubject(cmd.SessionID), payload); err != nil {
+				if err := h.nc.Publish(proto.BMCSOLOutSubject(h.nodeID, cmd.SessionID), payload); err != nil {
 					log.Printf("rasputin-agent: sol out publish: %v", err)
 				}
 			}
@@ -212,7 +213,7 @@ func (h *handler) closeAll(reason string) {
 			Ts:        time.Now().UTC(),
 		})
 		if err == nil {
-			_ = h.nc.Publish(proto.BMCSOLOutSubject(id), payload)
+			_ = h.nc.Publish(proto.BMCSOLOutSubject(h.nodeID, id), payload)
 		}
 	}
 	for _, pump := range pumps {
