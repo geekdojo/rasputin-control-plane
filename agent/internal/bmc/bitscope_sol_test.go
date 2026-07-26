@@ -133,7 +133,7 @@ func TestBitScopeSOL_BridgesBothDirections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSOL: %v", err)
 	}
-	off := awaitWrite(t, port, 0, "01|~")
+	off := awaitWrite(t, port, 0, "01|00~")
 
 	// target → operator
 	port.in <- []byte("login: ")
@@ -167,13 +167,13 @@ func TestBitScopeSOL_BusWideTakeover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	off := awaitWrite(t, port, 0, "01|~")
+	off := awaitWrite(t, port, 0, "01|00~")
 
 	s2, err := b.OpenSOL(context.Background(), "node-f3", "sess-2")
 	if err != nil {
 		t.Fatalf("takeover open: %v", err)
 	}
-	awaitWrite(t, port, off, "17|~")
+	awaitWrite(t, port, off, "17|00~")
 
 	// s1 gets the notice, then closes.
 	awaitOut(t, s1, "taken over")
@@ -210,7 +210,7 @@ func TestBitScopeSOL_PowerVerbInterruptsAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	off := awaitWrite(t, port, 0, "01|~")
+	off := awaitWrite(t, port, 0, "01|00~")
 
 	type res struct {
 		state proto.BMCPowerState
@@ -238,7 +238,7 @@ func TestBitScopeSOL_PowerVerbInterruptsAndResumes(t *testing.T) {
 	}
 
 	// Resume: console reopened on its original target...
-	off = awaitWrite(t, port, off, "01|~")
+	off = awaitWrite(t, port, off, "01|00~")
 	// ...and still bridging.
 	port.in <- []byte("still here")
 	awaitOut(t, s, "still here")

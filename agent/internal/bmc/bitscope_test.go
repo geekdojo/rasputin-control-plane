@@ -161,12 +161,54 @@ func TestBitScope_UnmappedTargetErrors(t *testing.T) {
 }
 
 func TestBitScope_UnlockWritesSequence(t *testing.T) {
-	b, port := newBitScopeForTest(t, "ok", "")
+	// Round 1: unlock echo. Round 2: the local `=` probe — master's own
+	// five-field status (MS 00).
+	b, port := newBitScopeForTest(t, "ok", "", "=\n01 00 1 22 88", "")
 	if err := b.unlockBus(); err != nil {
 		t.Fatalf("unlockBus: %v", err)
 	}
-	if !strings.Contains(port.wrote.String(), bitscopeDefaultUnlock) {
-		t.Errorf("bus writes %q, want the unlock sequence", port.wrote.String())
+	got := port.wrote.String()
+	if !strings.HasPrefix(got, string(bitscopePipeClose)) {
+		t.Errorf("bus writes %q, want a defensive pipe-close first", got)
+	}
+	if !strings.Contains(got, bitscopeDefaultUnlock) {
+		t.Errorf("bus writes %q, want the unlock sequence", got)
+	}
+	if !strings.HasSuffix(got, "=") {
+		t.Errorf("bus writes %q, want the local status probe last", got)
+	}
+}
+
+func TestBitScope_UnlockFailsWithoutMasterStatus(t *testing.T) {
+	// A silent (or slave-mode) probe reply means the bus is locked or
+	// wedged — construction must fail loudly, not report a live backend.
+	cases := map[string][]string{
+		"silent":     {"ok", "", "", ""},
+		"echo only":  {"ok", "", "=", ""},
+		"slave line": {"ok", "", "=\n04 ff 1 26 98", ""},
+	}
+	for name, script := range cases {
+		b, _ := newBitScopeForTest(t, script...)
+		if err := b.unlockBus(); err == nil || !strings.Contains(err.Error(), "status probe") && !strings.Contains(err.Error(), "locked") {
+			t.Errorf("%s: want a status-probe failure, got %v", name, err)
+		}
+	}
+}
+
+func TestBitScope_CommandClosesPipe(t *testing.T) {
+	// Pipe discipline: "<addr>|" attaches the slave and everything after
+	// is forwarded to it — each command must end with ^G or the next one
+	// vanishes into the attached slave (the 2026-07-26 bench wedge).
+	b, port := newBitScopeForTest(t, "ok", "", "01|=\n01 ff 1 26 98", "")
+	if _, _, err := b.Power(context.Background(), "node-a1", proto.BMCPowerOn); err != nil {
+		t.Fatalf("Power(on): %v", err)
+	}
+	got := port.wrote.String()
+	if n := strings.Count(got, string(bitscopePipeClose)); n != 2 {
+		t.Errorf("bus writes %q: want a pipe-close after each of the 2 commands, got %d", got, n)
+	}
+	if !strings.HasSuffix(got, string(bitscopePipeClose)) {
+		t.Errorf("bus writes %q: want the pipe closed after the final status read", got)
 	}
 }
 

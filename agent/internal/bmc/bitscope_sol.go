@@ -27,18 +27,33 @@ import (
 // at any time (the reader between commands, the mutex holder during
 // them), which is the invariant the design names.
 //
-// §9 BENCH-VALIDATION PENDING: the console-exit escape below is the
-// working assumption (BitScope's docs describe the '~' bridge and a
-// mute-mode reopen, not the exit byte), and the mute-mode reopen for a
-// flooding target is not yet wired — both are first items on the rack
-// checklist. If exit/reopen proves disruptive, the recorded fallback is
-// queue-verbs-behind-console-close (design doc §3).
+// Console mechanics (control-plane manual "Console Port", corrected on
+// the bench 2026-07-26 — the original ESC-exit assumption was wrong and
+// wedged the bus):
+//
+//   - Open = pipe first, then '~' THROUGH the pipe with the baud code
+//     in vmInput: "<addr>|" attaches the slave, "00~" tells the slave's
+//     BIOS to open its console at 115,200 (00 115k · 01 9k6 · 02 19k2 ·
+//     03 56k7). The baud digits are mandatory — without them the slave
+//     opens at whatever its vmInput held, i.e. garbage.
+//   - Exit = ^G, the one byte the master interprets while a pipe is
+//     open: it closes the pipe, and "the console is closed when the
+//     pipe (on the master) is closed."
+//
+// §9 STILL PENDING: the mute-mode reopen for a flooding target is not
+// yet wired (open-mute = same open with a hold-off count specifier —
+// the manual's "gone rogue" recovery), and cycle settle is untuned.
 
 const bitscopeVerbConsole = '~'
 
-// bitscopeConsoleExit is assumed to exit the console bridge back to
-// BIOS command mode. §9 bench-validation pending — adjust on the rack.
-var bitscopeConsoleExit = []byte{0x1b}
+// bitscopeConsoleBaud115k is the vmInput baud code forwarded with '~':
+// 115,200, matching the target images' serial getty.
+const bitscopeConsoleBaud115k = "00"
+
+// bitscopeConsoleExit closes the command pipe (^G), which closes the
+// slave's console with it. Documented in the control-plane manual and
+// validated live 2026-07-26 (recovered a wedged bus).
+var bitscopeConsoleExit = []byte{bitscopePipeClose}
 
 // bitscopeSOL is the one live console session on the bus.
 type bitscopeSOL struct {
@@ -114,8 +129,7 @@ func (b *BitScopeBackend) OpenSOL(_ context.Context, target, sessionID string) (
 	if err := b.port.DrainInput(); err != nil {
 		return nil, fmt.Errorf("bitscope: console drain: %w", err)
 	}
-	cmd := fmt.Sprintf("%02x|%c", t.addr, bitscopeVerbConsole)
-	if _, err := b.port.Write([]byte(cmd)); err != nil {
+	if _, err := b.port.Write([]byte(bitscopeConsoleOpen(t.addr))); err != nil {
 		return nil, fmt.Errorf("bitscope: console open: %w", err)
 	}
 
@@ -160,10 +174,16 @@ func (b *BitScopeBackend) suspendConsoleLocked() func() {
 		if b.sol != sol {
 			return
 		}
-		cmd := fmt.Sprintf("%02x|%c", sol.addr, bitscopeVerbConsole)
-		_, _ = b.port.Write([]byte(cmd))
+		_, _ = b.port.Write([]byte(bitscopeConsoleOpen(sol.addr)))
 		b.reader.resume()
 	}
+}
+
+// bitscopeConsoleOpen is the full console-open write for one target:
+// attach the slave's pipe, then the baud code + '~' forwarded to its
+// BIOS ("02|00~" = console on node 02 at 115,200).
+func bitscopeConsoleOpen(addr byte) string {
+	return fmt.Sprintf("%02x|%s%c", addr, bitscopeConsoleBaud115k, bitscopeVerbConsole)
 }
 
 // solReader owns the serial line between commands, pumping console
