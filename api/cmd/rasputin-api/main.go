@@ -712,7 +712,16 @@ func main() {
 			Addr:              httpsAddr,
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
-			TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+			// http/1.1 only: with h2 offered, Chrome rides WebSockets on an
+			// RFC 8441 extended-CONNECT h2 stream (Go ≥1.25 advertises it),
+			// and the SoL console's browser→api leg silently stalled on the
+			// bench (2026-07-26) — frames sent, never delivered to the
+			// handler. Pin ALPN to the classic Upgrade path until WS-over-h2
+			// is deliberately validated; the dashboard loses nothing.
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				NextProtos: []string{"http/1.1"},
+			},
 		}
 		// The obs mTLS ingress shares the api's own server leaf for its
 		// identity (started with the same cert/key below, once minted) but
