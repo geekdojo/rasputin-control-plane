@@ -244,14 +244,21 @@ func BMCSOLCloseSubject(bmcHostID string) string {
 
 // BMCSOLInSubject is the api→agent byte stream for a session. The api
 // publishes; the agent subscribes.
-func BMCSOLInSubject(sessionID string) string {
-	return fmt.Sprintf("rasputin.bmc.sol.%s.in", sessionID)
+//
+// Session subjects live inside the BMC host's node scope, not a global
+// rasputin.bmc.sol.* namespace: the bus-auth minted permissions only let
+// an agent subscribe under its own cmd scope and publish under its own
+// node scope, so a global subject is a permissions violation on an
+// enforced bus (bench find, 2026-07-26). In-scope subjects also mean
+// only the host that owns the session can carry its byte stream.
+func BMCSOLInSubject(bmcHostID, sessionID string) string {
+	return NodeCmdSubject(bmcHostID, "bmc.sol."+sessionID+".in")
 }
 
 // BMCSOLOutSubject is the agent→api byte stream for a session. The agent
-// publishes; the api subscribes.
-func BMCSOLOutSubject(sessionID string) string {
-	return fmt.Sprintf("rasputin.bmc.sol.%s.out", sessionID)
+// publishes; the api subscribes. Host-scoped like BMCSOLInSubject.
+func BMCSOLOutSubject(bmcHostID, sessionID string) string {
+	return NodeEvtSubject(bmcHostID, "bmc.sol."+sessionID+".out")
 }
 
 // BMCChangeSubject returns the publish subject for a BMC change event.

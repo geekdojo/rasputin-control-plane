@@ -57,10 +57,14 @@ func (m *SessionManager) Active() int {
 type Session struct {
 	ID           string
 	TargetNodeID string
-	Backend      string
-	Out          chan []byte
-	closeOnce    sync.Once
-	closed       chan struct{}
+	// HostNodeID pins the BMC host the session was opened on — the relay
+	// subjects are scoped to it, and Close must address the same host
+	// even if the configured host changes mid-session.
+	HostNodeID string
+	Backend    string
+	Out        chan []byte
+	closeOnce  sync.Once
+	closed     chan struct{}
 
 	mgr *SessionManager
 	sub *nats.Subscription
@@ -79,7 +83,7 @@ func (m *SessionManager) Open(ctx context.Context, targetNodeID string) (*Sessio
 	// Subscribe BEFORE the open RPC so we can't miss the initial bytes.
 	out := make(chan []byte, 1024)
 	closed := make(chan struct{})
-	sub, err := m.svc.nc.Subscribe(proto.BMCSOLOutSubject(sessionID), func(msg *nats.Msg) {
+	sub, err := m.svc.nc.Subscribe(proto.BMCSOLOutSubject(hostID, sessionID), func(msg *nats.Msg) {
 		var ev proto.BMCSOLDataEvt
 		if err := json.Unmarshal(msg.Data, &ev); err != nil {
 			return
@@ -121,6 +125,7 @@ func (m *SessionManager) Open(ctx context.Context, targetNodeID string) (*Sessio
 	sess := &Session{
 		ID:           sessionID,
 		TargetNodeID: targetNodeID,
+		HostNodeID:   hostID,
 		Backend:      ack.Backend,
 		Out:          out,
 		closed:       closed,
@@ -152,7 +157,7 @@ func (s *Session) Write(data []byte) error {
 	if err != nil {
 		return err
 	}
-	return s.mgr.svc.nc.Publish(proto.BMCSOLInSubject(s.ID), payload)
+	return s.mgr.svc.nc.Publish(proto.BMCSOLInSubject(s.HostNodeID, s.ID), payload)
 }
 
 // Close tears down the session: unsubscribe, RPC close to the agent,
@@ -167,7 +172,7 @@ func (s *Session) Close(ctx context.Context) {
 		defer cancel()
 		cmd, _ := json.Marshal(proto.BMCSOLCloseCmd{SessionID: s.ID})
 		_, _ = s.mgr.svc.nc.RequestWithContext(closeCtx,
-			proto.BMCSOLCloseSubject(s.mgr.svc.Host(ctx)), cmd)
+			proto.BMCSOLCloseSubject(s.HostNodeID), cmd)
 		s.mgr.mu.Lock()
 		delete(s.mgr.sessions, s.ID)
 		s.mgr.mu.Unlock()

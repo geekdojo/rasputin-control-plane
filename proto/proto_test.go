@@ -96,10 +96,12 @@ func TestBMCSubjects(t *testing.T) {
 	if got := BMCSOLCloseSubject("h1"); got != "rasputin.node.h1.cmd.bmc.sol.close" {
 		t.Errorf("BMCSOLCloseSubject: %q", got)
 	}
-	if got := BMCSOLInSubject("s1"); got != "rasputin.bmc.sol.s1.in" {
+	// Host-scoped: .in under the host's cmd scope (the only subject space
+	// a minted agent may subscribe), .out under its evt scope (pub-allowed).
+	if got := BMCSOLInSubject("h1", "s1"); got != "rasputin.node.h1.cmd.bmc.sol.s1.in" {
 		t.Errorf("BMCSOLInSubject: %q", got)
 	}
-	if got := BMCSOLOutSubject("s1"); got != "rasputin.bmc.sol.s1.out" {
+	if got := BMCSOLOutSubject("h1", "s1"); got != "rasputin.node.h1.evt.bmc.sol.s1.out" {
 		t.Errorf("BMCSOLOutSubject: %q", got)
 	}
 	if got := BMCChangeSubject("t1", BMCPoweredOn); got != "rasputin.bmc.t1.powered_on" {

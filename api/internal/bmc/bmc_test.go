@@ -338,12 +338,13 @@ func TestSession_Write(t *testing.T) {
 	sess := &Session{
 		ID:           "sess-1",
 		TargetNodeID: "n",
+		HostNodeID:   "host-1",
 		Backend:      "test",
 		Out:          make(chan []byte, 1),
 		closed:       make(chan struct{}),
 		mgr:          NewSessionManager(f.svc),
 	}
-	sub, err := f.nc.SubscribeSync(proto.BMCSOLInSubject(sess.ID))
+	sub, err := f.nc.SubscribeSync(proto.BMCSOLInSubject("host-1", sess.ID))
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
@@ -455,7 +456,7 @@ func TestSessionManager_OpenFlow(t *testing.T) {
 
 	// Push an out-event from the agent → should land in Out channel.
 	ev, _ := json.Marshal(proto.BMCSOLDataEvt{SessionID: sess.ID, Data: "boot..."})
-	if err := f.nc.Publish(proto.BMCSOLOutSubject(sess.ID), ev); err != nil {
+	if err := f.nc.Publish(proto.BMCSOLOutSubject("host-1", sess.ID), ev); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	select {
