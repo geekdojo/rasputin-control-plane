@@ -302,15 +302,16 @@ func (b *BitScopeBackend) Close() error {
 }
 
 // command addresses one target and issues one BIOS verb: drain stale
-// bytes, write "<addr>|<verb>", collect the reply until the line goes
-// quiet, then CLOSE THE PIPE — "<addr>|" attached the slave, and a pipe
-// left open swallows every subsequent command (pipe discipline, see the
-// type comment). Caller holds b.mu.
+// bytes, write "[<addr>]|<verb>" (bracketed entry clears vmInput before
+// the digits load it — the manual's canonical form), collect the reply
+// until the line goes quiet, then CLOSE THE PIPE — "[<addr>]|" attached
+// the slave, and a pipe left open swallows every subsequent command
+// (pipe discipline, see the type comment). Caller holds b.mu.
 func (b *BitScopeBackend) command(ctx context.Context, addr byte, verb byte) (string, error) {
 	if err := b.port.DrainInput(); err != nil {
 		return "", fmt.Errorf("bitscope: drain: %w", err)
 	}
-	cmd := fmt.Sprintf("%02x|%c", addr, verb)
+	cmd := fmt.Sprintf("[%02x]|%c", addr, verb)
 	if _, err := b.port.Write([]byte(cmd)); err != nil {
 		return "", fmt.Errorf("bitscope: write %q: %w", cmd, err)
 	}

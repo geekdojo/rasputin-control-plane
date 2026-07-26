@@ -74,7 +74,7 @@ func TestBitScope_PowerOn(t *testing.T) {
 		t.Errorf("detail: %q, want powered on", detail)
 	}
 	got := port.wrote.String()
-	if !strings.Contains(got, "01|/") || !strings.Contains(got, "01|=") {
+	if !strings.Contains(got, "[01]|/") || !strings.Contains(got, "[01]|=") {
 		t.Errorf("bus writes %q, want 01|/ then 01|=", got)
 	}
 }
@@ -89,7 +89,7 @@ func TestBitScope_PowerOffDecodesOff(t *testing.T) {
 		t.Errorf("state: %q, want off", state)
 	}
 	got := port.wrote.String()
-	if !strings.Contains(got, `17|\`) || !strings.Contains(got, "17|=") {
+	if !strings.Contains(got, `[17]|\`) || !strings.Contains(got, "[17]|=") {
 		t.Errorf(`bus writes %q, want 17|\ then 17|=`, got)
 	}
 }
@@ -104,8 +104,8 @@ func TestBitScope_CycleSendsOffThenOn(t *testing.T) {
 		t.Errorf("state: %q, want on", state)
 	}
 	got := port.wrote.String()
-	off := strings.Index(got, `01|\`)
-	on := strings.Index(got, "01|/")
+	off := strings.Index(got, `[01]|\`)
+	on := strings.Index(got, "[01]|/")
 	if off < 0 || on < 0 || off > on {
 		t.Errorf("bus writes %q, want off before on", got)
 	}

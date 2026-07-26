@@ -32,10 +32,13 @@ import (
 // wedged the bus):
 //
 //   - Open = pipe first, then '~' THROUGH the pipe with the baud code
-//     in vmInput: "<addr>|" attaches the slave, "00~" tells the slave's
-//     BIOS to open its console at 115,200 (00 115k · 01 9k6 · 02 19k2 ·
-//     03 56k7). The baud digits are mandatory — without them the slave
-//     opens at whatever its vmInput held, i.e. garbage.
+//     in vmInput — the manual's exact form: "[7e]|[03]~". "[<addr>]|"
+//     attaches the slave, "[00]~" tells the slave's BIOS to open its
+//     console at 115,200 (00 115k · 01 9k6 · 02 19k2 · 03 56k7). The
+//     bracketed entry matters: '[' commences data entry and CLEARS
+//     vmInput — bare digits after the pipe demonstrably did not load
+//     the slave's baud register on the bench (silent console), while
+//     the bracketed open bridged bidirectionally at full fidelity.
 //   - Exit = ^G, the one byte the master interprets while a pipe is
 //     open: it closes the pipe, and "the console is closed when the
 //     pipe (on the master) is closed."
@@ -181,9 +184,10 @@ func (b *BitScopeBackend) suspendConsoleLocked() func() {
 
 // bitscopeConsoleOpen is the full console-open write for one target:
 // attach the slave's pipe, then the baud code + '~' forwarded to its
-// BIOS ("02|00~" = console on node 02 at 115,200).
+// BIOS ("[02]|[00]~" = console on node 02 at 115,200 — bench-validated
+// bidirectionally 2026-07-26).
 func bitscopeConsoleOpen(addr byte) string {
-	return fmt.Sprintf("%02x|%s%c", addr, bitscopeConsoleBaud115k, bitscopeVerbConsole)
+	return fmt.Sprintf("[%02x]|[%s]%c", addr, bitscopeConsoleBaud115k, bitscopeVerbConsole)
 }
 
 // solReader owns the serial line between commands, pumping console
