@@ -167,9 +167,8 @@ func verbToChange(v proto.BMCPowerVerb) proto.BMCChangeType {
 	case proto.BMCPowerReset:
 		return proto.BMCResetSent
 	default:
-		// Query is read-only and doesn't generate a change event in
-		// principle; emit cycled-as-default just so the UI gets a tick.
-		return proto.BMCCycled
+		// Query is a read-only observation, not a command.
+		return proto.BMCStatusChecked
 	}
 }
 

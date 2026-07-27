@@ -349,24 +349,6 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
 
         {sectionLabel('ACTIONS')}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-          {/* BMC power controls (power on/off, hardware reset) and the
-              serial-over-LAN console render only for nodes some BMC host
-              advertises in its bmc-targets list — never a control that
-              would no-op against missing hardware. See lib/bmc.ts. */}
-          {bmcReachable && (
-            <PowerButton
-              state={bmcState}
-              disabled={!node || busy !== null}
-              onClick={() => {
-                if (!node) return;
-                // The label shows the CURRENT state; the click's action is
-                // the opposite verb — confirm both directions with copy
-                // that names the action (bench 2026-07-23: a stale 'on'
-                // once showed the power-OFF modal on a power-ON click).
-                setModal(bmcState === 'on' ? 'power-off' : 'power-on');
-              }}
-            />
-          )}
           <CtrlButton
             icon={RotateCcw}
             label={busy === 'reboot' ? 'REBOOTING…' : 'REBOOT (OS)'}
@@ -374,18 +356,7 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
             disabled={!node || busy !== null || !isOnline}
             onClick={() => setModal('reboot')}
           />
-          {bmcReachable && (
-            <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console?node=${encodeURIComponent(node.id)}`)} />
-          )}
           <CtrlButton icon={Upload} label="UPDATE" disabled={!node} onClick={() => onNavigate('/updates')} />
-          {bmcReachable && (
-            <CtrlButton
-              icon={RefreshCw}
-              label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}
-              disabled={!node || busy !== null}
-              onClick={() => setModal('reset')}
-            />
-          )}
           {/* The controlplane cannot be removed — it IS the cluster; the
               api refuses server-side too. */}
           {node?.role !== 'controlplane' && (
@@ -406,6 +377,38 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
           />
           )}
         </div>
+
+        {/* Hardware-management controls get their own section: they act
+            through the BMC bus, not the node's OS, and render only for
+            nodes some BMC host advertises in its bmc-targets list —
+            never a control that would no-op against missing hardware.
+            See lib/bmc.ts. */}
+        {bmcReachable && (
+          <>
+            {sectionLabel('BMC')}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+              <PowerButton
+                state={bmcState}
+                disabled={!node || busy !== null}
+                onClick={() => {
+                  if (!node) return;
+                  // The label shows the CURRENT state; the click's action is
+                  // the opposite verb — confirm both directions with copy
+                  // that names the action (bench 2026-07-23: a stale 'on'
+                  // once showed the power-OFF modal on a power-ON click).
+                  setModal(bmcState === 'on' ? 'power-off' : 'power-on');
+                }}
+              />
+              <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console?node=${encodeURIComponent(node.id)}`)} />
+              <CtrlButton
+                icon={RefreshCw}
+                label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}
+                disabled={!node || busy !== null}
+                onClick={() => setModal('reset')}
+              />
+            </div>
+          </>
+        )}
 
         {sectionLabel('DIAGNOSTICS')}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>

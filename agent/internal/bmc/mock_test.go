@@ -81,16 +81,17 @@ func TestMockBackend_QueryDoesNotMutate(t *testing.T) {
 	}
 }
 
-func TestMockBackend_QueryUnknownTargetReturnsUnknown(t *testing.T) {
-	// Regression: blank string from a missing-key map lookup must be coerced
-	// to BMCStateUnknown — otherwise the api gets "" and renders nothing.
+func TestMockBackend_QueryFreshTargetReportsOn(t *testing.T) {
+	// A never-touched mock target reports ON (a live rack's nodes are
+	// booted, and real hardware always answers with a concrete state) —
+	// and never the raw "" of a missing map key.
 	mb := newMock(t)
 	state, _, err := mb.Power(context.Background(), "never-seen", proto.BMCPowerQuery)
 	if err != nil {
-		t.Fatalf("query unknown: %v", err)
+		t.Fatalf("query fresh: %v", err)
 	}
-	if state != proto.BMCStateUnknown {
-		t.Errorf("unknown target: got %q, want unknown", state)
+	if state != proto.BMCStateOn {
+		t.Errorf("fresh target: got %q, want on", state)
 	}
 }
 

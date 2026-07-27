@@ -657,6 +657,15 @@ func main() {
 	}
 	defer stopBMCReconcile()
 
+	// Event-driven status seed: when a host advertises bmc-targets,
+	// sweep a read-only status query across them so every reachable
+	// node has a power state before the first operator verb.
+	stopBMCSeed, err := bmc.StartStatusSeed(busSrv.Conn(), bmcSvc)
+	if err != nil {
+		log.Fatalf("rasputin-api: bmc status seed: %v", err)
+	}
+	defer stopBMCSeed()
+
 	// Web UI (Next.js static export). The OS image installs it at the
 	// default path (see rasputin-os package/rasputin-api); dev boxes
 	// usually don't have it, so the api quietly stays headless there and
