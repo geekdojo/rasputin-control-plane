@@ -262,7 +262,7 @@ func TestVerbToChange(t *testing.T) {
 		{proto.BMCPowerOff, proto.BMCPoweredOff},
 		{proto.BMCPowerCycle, proto.BMCCycled},
 		{proto.BMCPowerReset, proto.BMCResetSent},
-		{proto.BMCPowerQuery, proto.BMCCycled}, // default for the read-only case
+		{proto.BMCPowerQuery, proto.BMCStatusChecked}, // read-only observation
 	}
 	for _, tc := range cases {
 		if got := verbToChange(tc.verb); got != tc.want {

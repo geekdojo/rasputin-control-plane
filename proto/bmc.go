@@ -210,6 +210,10 @@ const (
 	BMCResetSent  BMCChangeType = "reset_sent"
 	BMCSOLOpened  BMCChangeType = "sol_opened"
 	BMCSOLClosed  BMCChangeType = "sol_closed"
+	// BMCStatusChecked is a read-only observation: a status query (an
+	// explicit one, or the seed sweep after a host advertises targets)
+	// recorded fresh state without commanding anything.
+	BMCStatusChecked BMCChangeType = "status_checked"
 )
 
 // BMCChangeEvt is the payload published on each lifecycle transition.

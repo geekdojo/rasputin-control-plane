@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -99,7 +100,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-agent: bmc host: %v", err)
 	}
+	// Registration is gated until every command handler is subscribed:
+	// the registration event advertises capabilities (bmc-targets among
+	// them) and the api acts on it immediately — the BMC status seed's
+	// first sweep raced the handler subscriptions and got "no
+	// responders" (dev bench 2026-07-26). handlersReady flips after the
+	// full handler setup below, which then registers explicitly;
+	// reconnects (handlers long since up) re-register as before.
+	var handlersReady atomic.Bool
 	reregister := func(c *nats.Conn) {
+		if !handlersReady.Load() {
+			return
+		}
 		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement())
 	}
 	// Retry the initial NATS connect instead of exiting on failure. On real
@@ -366,6 +378,11 @@ func main() {
 		adv := bmcHost.Advertisement()
 		log.Printf("rasputin-agent: bmc backend=%s (host, targets=%d, pinned=%t)", bmcHost.Name(), len(adv.Targets), adv.Pinned)
 	}
+
+	// Every command handler is subscribed — announce ourselves. (The
+	// connect-time registration above was suppressed by the gate.)
+	handlersReady.Store(true)
+	reregister(nc)
 
 	go runHeartbeats(ctx, nc, nodeID)
 	// Disk metric measures the persistent data partition, not "/" (the

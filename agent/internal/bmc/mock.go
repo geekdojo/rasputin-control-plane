@@ -101,7 +101,12 @@ func (m *MockBackend) Power(_ context.Context, target string, verb proto.BMCPowe
 	defer m.mu.Unlock()
 	cur := m.state.Power[target]
 	if cur == "" {
-		cur = proto.BMCStateUnknown
+		// A never-touched mock target reports ON, matching real hardware:
+		// a live rack's nodes are booted, and the BitScope status verb
+		// always answers with a concrete state — "unknown" here made the
+		// dev stack's seeded panel show "— —" forever, the exact gap the
+		// status seed exists to close.
+		cur = proto.BMCStateOn
 	}
 	var next proto.BMCPowerState
 	detail := ""
