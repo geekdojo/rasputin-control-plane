@@ -50,13 +50,15 @@ func TestNodeBMCTargets_DropsNonStrings(t *testing.T) {
 }
 
 func TestAvailableBMCBackend(t *testing.T) {
-	for _, kind := range []string{"bitscope", "mock"} {
+	// turingpi became selectable once per-target capabilities existed: it
+	// can advertise power+reset without claiming a console it cannot serve.
+	for _, kind := range []string{"bitscope", "mock", "turingpi"} {
 		if !AvailableBMCBackend(kind) {
 			t.Errorf("%q should be available", kind)
 		}
 	}
 	// planned, unknown, and the off states are not selectable
-	for _, kind := range []string{"turingpi", "rasputin", "none", "", "bogus"} {
+	for _, kind := range []string{"rasputin", "none", "", "bogus"} {
 		if AvailableBMCBackend(kind) {
 			t.Errorf("%q should not be available", kind)
 		}
