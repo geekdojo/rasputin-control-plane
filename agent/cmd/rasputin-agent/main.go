@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -90,13 +91,7 @@ func main() {
 	// Constructed before the bus connects so the first registration can
 	// advertise bmc-targets; the configure handler attaches after.
 	bmcHost, err := bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"),
-		os.Getenv("RASPUTIN_BMC_BACKEND"), bmc.Config{
-			StateDir:       filepath.Join(stateDir, "bmc"),
-			BitScopeDev:    os.Getenv("RASPUTIN_BMC_BITSCOPE_DEV"),
-			BitScopeUnlock: os.Getenv("RASPUTIN_BMC_BITSCOPE_UNLOCK"),
-			BitScopeMap:    os.Getenv("RASPUTIN_BMC_BITSCOPE_MAP"),
-			MockTargets:    splitCSV(os.Getenv("RASPUTIN_BMC_MOCK_TARGETS")),
-		})
+		os.Getenv("RASPUTIN_BMC_BACKEND"), bmcConfigFromEnv(filepath.Join(stateDir, "bmc")))
 	if err != nil {
 		log.Fatalf("rasputin-agent: bmc host: %v", err)
 	}
@@ -535,6 +530,39 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// bmcConfigFromEnv reads every RASPUTIN_BMC_* driver setting into the
+// registry's Config. It is a named function purely so a test can hold it
+// against bmc.Config's field set: the turingpi driver shipped with its
+// six env vars documented in registry.go and read by NOBODY (CP #46), so
+// RASPUTIN_BMC_BACKEND=turingpi died at construction and took the agent
+// down with it. Every backend unit test builds Config directly, so no
+// test could see the gap. TestBMCConfigFromEnvCoversEveryField closes it
+// for the next driver too.
+func bmcConfigFromEnv(bmcStateDir string) bmc.Config {
+	return bmc.Config{
+		StateDir:       bmcStateDir,
+		BitScopeDev:    os.Getenv("RASPUTIN_BMC_BITSCOPE_DEV"),
+		BitScopeUnlock: os.Getenv("RASPUTIN_BMC_BITSCOPE_UNLOCK"),
+		BitScopeMap:    os.Getenv("RASPUTIN_BMC_BITSCOPE_MAP"),
+		MockTargets:    splitCSV(os.Getenv("RASPUTIN_BMC_MOCK_TARGETS")),
+
+		TuringPiEndpoint:    os.Getenv("RASPUTIN_BMC_TURINGPI_ENDPOINT"),
+		TuringPiUser:        os.Getenv("RASPUTIN_BMC_TURINGPI_USER"),
+		TuringPiPass:        os.Getenv("RASPUTIN_BMC_TURINGPI_PASS"),
+		TuringPiMap:         os.Getenv("RASPUTIN_BMC_TURINGPI_MAP"),
+		TuringPiFingerprint: os.Getenv("RASPUTIN_BMC_TURINGPI_FINGERPRINT"),
+		TuringPiInsecure:    envBool("RASPUTIN_BMC_TURINGPI_INSECURE"),
+	}
+}
+
+// envBool reads a boolean env var. Anything strconv.ParseBool rejects —
+// including unset — is false: an env var that disables TLS verification
+// must never be turned on by a typo.
+func envBool(key string) bool {
+	v, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(key)))
+	return err == nil && v
 }
 
 // splitCSV splits a comma-separated env value, trimming whitespace and

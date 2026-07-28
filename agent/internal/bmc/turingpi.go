@@ -400,6 +400,12 @@ func (t *TuringPiBackend) get(ctx context.Context, q url.Values) ([]byte, error)
 	if err != nil {
 		// Keep credentials out of the error: url.Error embeds the URL,
 		// and the query string is where this API carries its arguments.
+		// Our own trust failure: the message is ours, names only
+		// fingerprints, and is the one an operator can actually act on.
+		var pe *pinError
+		if errors.As(err, &pe) {
+			return nil, fmt.Errorf("turingpi: %s %s: %w", q.Get("opt"), q.Get("type"), pe)
+		}
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
 			return nil, fmt.Errorf("turingpi: %s %s: timeout", q.Get("opt"), q.Get("type"))
@@ -467,17 +473,29 @@ func certFingerprint(der []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// pinError is a trust failure raised by our own verifier. It is a named
+// type so get() can tell it apart from every other transport error and
+// let its message through: get() otherwise collapses transport failures
+// to "request failed" to keep the URL out of the text, which would hide
+// the single most likely misconfiguration behind the single least
+// actionable message (bench 2026-07-28 — a deliberately wrong pin
+// reported only "get power: request failed"). This error is built here
+// from the fingerprints alone, so it carries no credentials.
+type pinError struct{ msg string }
+
+func (e *pinError) Error() string { return e.msg }
+
 // pinnedCertVerifier matches the presented leaf against a pinned digest.
 // Deliberately ignores chain and validity: this board's certificate is
 // permanently expired by construction, so those checks can only ever fail.
 func pinnedCertVerifier(want string) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
-			return fmt.Errorf("turingpi: BMC presented no certificate")
+			return &pinError{"BMC presented no certificate"}
 		}
 		got := certFingerprint(rawCerts[0])
 		if got != want {
-			return fmt.Errorf("turingpi: BMC certificate does not match the pinned fingerprint (got %s, pinned %s) — if the BMC firmware was updated its certificate was regenerated and needs re-pinning; otherwise treat this as a trust failure", got, want)
+			return &pinError{fmt.Sprintf("BMC certificate does not match the pinned fingerprint (got %s, pinned %s) — if the BMC firmware was updated its certificate was regenerated and needs re-pinning; otherwise treat this as a trust failure", got, want)}
 		}
 		return nil
 	}

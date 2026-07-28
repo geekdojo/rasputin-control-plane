@@ -170,3 +170,60 @@ func TestPublishRegistered_OffAdvertisesNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestBMCConfigFromEnvCoversEveryField is a drift guard, not a value
+// check: it sets every RASPUTIN_BMC_* driver var and then walks
+// bmc.Config by reflection asserting nothing is left at its zero value.
+//
+// The turingpi driver shipped with six env vars that registry.go
+// documented and main.go never read (CP #46). Construction failed with
+// "endpoint is required" and log.Fatalf took the agent down at boot —
+// found on the bench, not by the suite, because every backend test
+// builds Config directly and never exercises the env path.
+//
+// So this asserts the seam rather than the driver. Add a field to
+// bmc.Config without an env read here and this test names it.
+func TestBMCConfigFromEnvCoversEveryField(t *testing.T) {
+	for k, v := range map[string]string{
+		"RASPUTIN_BMC_BITSCOPE_DEV":         "/dev/serial0",
+		"RASPUTIN_BMC_BITSCOPE_UNLOCK":      "unlock",
+		"RASPUTIN_BMC_BITSCOPE_MAP":         "/tmp/bitscope-map.json",
+		"RASPUTIN_BMC_MOCK_TARGETS":         "mock-a,mock-b",
+		"RASPUTIN_BMC_TURINGPI_ENDPOINT":    "turingpi.local",
+		"RASPUTIN_BMC_TURINGPI_USER":        "root",
+		"RASPUTIN_BMC_TURINGPI_PASS":        "turing",
+		"RASPUTIN_BMC_TURINGPI_MAP":         "tp-cp1:1,tp-n1:2",
+		"RASPUTIN_BMC_TURINGPI_FINGERPRINT": "41:7C:1E:EA",
+		"RASPUTIN_BMC_TURINGPI_INSECURE":    "true",
+	} {
+		t.Setenv(k, v)
+	}
+
+	cfg := bmcConfigFromEnv("/var/lib/rasputin/agent/bmc")
+	rv := reflect.ValueOf(cfg)
+	for i := 0; i < rv.NumField(); i++ {
+		if rv.Field(i).IsZero() {
+			t.Errorf("bmc.Config.%s is zero after bmcConfigFromEnv — no env var feeds it, "+
+				"so the setting is unreachable in a deployed agent",
+				rv.Type().Field(i).Name)
+		}
+	}
+}
+
+// TestEnvBool pins the fail-closed reading: only an explicit true-ish
+// value enables the flag. TuringPiInsecure disables TLS verification, so
+// a typo'd value must read false rather than "not false".
+func TestEnvBool(t *testing.T) {
+	for _, v := range []string{"true", "1", "TRUE", "T"} {
+		t.Setenv("RASPUTIN_TEST_BOOL", v)
+		if !envBool("RASPUTIN_TEST_BOOL") {
+			t.Errorf("envBool(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "false", "0", "yes", "on", "maybe", "  "} {
+		t.Setenv("RASPUTIN_TEST_BOOL", v)
+		if envBool("RASPUTIN_TEST_BOOL") {
+			t.Errorf("envBool(%q) = true, want false", v)
+		}
+	}
+}

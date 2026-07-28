@@ -405,8 +405,22 @@ func TestTuringPiPinnedCertWorksAgainstExpiredSelfSignedBoard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construction with a wrong pin should still build: %v", err)
 	}
-	if _, _, err := bad.Power(context.Background(), "tp-cp1", proto.BMCPowerQuery); err == nil {
+	_, _, err = bad.Power(context.Background(), "tp-cp1", proto.BMCPowerQuery)
+	if err == nil {
 		t.Fatal("a mismatched pin must fail the connection")
+	}
+	// ...and must SAY it was the pin. This assertion used to stop at
+	// err != nil, so the driver shipped collapsing a pin mismatch into
+	// "request failed" — indistinguishable from an unplugged cable, for
+	// what is the most likely misconfiguration of the whole driver
+	// (caught on the bench 2026-07-28 with a deliberately wrong pin).
+	if !strings.Contains(err.Error(), "pinned fingerprint") {
+		t.Errorf("a pin mismatch must name itself; got %q", err)
+	}
+	// The pinned and presented digests both belong in the message: the
+	// operator needs the value to re-pin after a firmware update.
+	if !strings.Contains(err.Error(), certFingerprint(leaf.Raw)) {
+		t.Errorf("pin-mismatch error should report the presented fingerprint; got %q", err)
 	}
 }
 
