@@ -75,7 +75,13 @@ func powerValidate(svc *Service, inv *inventory.Store) jobs.DoFn {
 		if node == nil {
 			return nil, fmt.Errorf("target node %q not registered", spec.TargetNodeID)
 		}
-		if err := svc.TargetReachable(sc.Ctx, inv, spec.TargetNodeID); err != nil {
+		// Gate on the capability the verb actually needs: a backend may
+		// drive power without offering reset, or vice versa.
+		needed := proto.BMCCapPower
+		if spec.Verb == proto.BMCPowerReset {
+			needed = proto.BMCCapReset
+		}
+		if err := svc.TargetSupports(sc.Ctx, inv, spec.TargetNodeID, needed); err != nil {
 			return nil, err
 		}
 		sc.Log("info", fmt.Sprintf("bmc.%s on %s (via %s)", spec.Verb, spec.TargetNodeID, svc.Host(sc.Ctx)))

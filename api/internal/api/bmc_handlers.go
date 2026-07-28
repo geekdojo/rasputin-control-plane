@@ -261,9 +261,11 @@ func (s *Server) handleListBMCStates(w http.ResponseWriter, r *http.Request) {
 //     SessionManager.Close() which RPCs bmc.sol.close.
 func (s *Server) handleBMCSOL(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.PathValue("nodeId")
-	// Per-node gate (bmc.md §2a): refuse before accepting the WS when the
-	// BMC host has no serial path to this target.
-	if err := s.bmc.TargetReachable(r.Context(), s.inv, nodeID); err != nil {
+	// Per-node, per-capability gate (bmc.md §2a): refuse before accepting
+	// the WS when the BMC host has no serial path to this target — or has
+	// one it cannot offer as a console. A backend that drives power but
+	// not console (turingpi) must not get a session it can only fail.
+	if err := s.bmc.TargetSupports(r.Context(), s.inv, nodeID, proto.BMCCapConsole); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}

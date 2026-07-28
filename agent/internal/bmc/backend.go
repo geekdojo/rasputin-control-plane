@@ -23,12 +23,18 @@ type Backend interface {
 	// caller pumps bytes from the bus into Write(). Close() tears it down.
 	OpenSOL(ctx context.Context, target, sessionID string) (SOL, error)
 
-	// Targets returns the node-ids whose BMCs this backend can reach —
-	// the bmc-targets list the host agent advertises on registration
-	// (design/control-plane/bmc.md §2a). Empty means the backend has no
-	// authoritative list; the host then advertises nothing and the api
-	// keeps its interim presence-only gating.
-	Targets() []string
+	// Targets returns the nodes this backend can reach AND what it can do
+	// for each — the advertisement the host agent publishes on
+	// registration (design/control-plane/bmc.md §2a).
+	//
+	// Capabilities are per-target because backends genuinely differ: a
+	// driver may drive power and reset while being unable to offer a
+	// usable console. Advertising bare reachability would render controls
+	// that fail on click, which §2a forbids.
+	//
+	// Empty means the backend has no authoritative list; the host then
+	// advertises nothing and BMC stays off for every node.
+	Targets() []proto.BMCTarget
 }
 
 // SOL is one in-flight serial-over-LAN session on the agent side. The

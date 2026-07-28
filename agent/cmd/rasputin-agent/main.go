@@ -423,6 +423,7 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		// advertise nothing — hard off.
 		caps = append(caps, proto.CapabilityBMCTargets)
 		meta[proto.MetadataBMCTargets] = bmcAdv.Targets
+		meta[proto.MetadataBMCCapabilities] = bmcAdv.Capabilities
 		if bmcAdv.ConfigHash != "" {
 			meta[proto.MetadataBMCConfigHash] = bmcAdv.ConfigHash
 		}

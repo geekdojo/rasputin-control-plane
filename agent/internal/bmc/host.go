@@ -44,9 +44,15 @@ type Host struct {
 // the bmc-targets capability list plus the applied config hash / pin
 // marker (proto.MetadataBMC*). Nil means BMC is off — advertise nothing.
 type Advertisement struct {
-	Targets    []string
-	ConfigHash string
-	Pinned     bool
+	// Targets is the legacy node-id list, still published so an api
+	// older than per-target capabilities keeps gating correctly during a
+	// rolling update.
+	Targets []string
+	// Capabilities is the same set with what the backend can actually do
+	// for each node. Preferred by any api that understands it.
+	Capabilities []proto.BMCTarget
+	ConfigHash   string
+	Pinned       bool
 }
 
 // NewHost resolves the boot-time selection: the env pin wins; else the
@@ -114,10 +120,12 @@ func (h *Host) Advertisement() *Advertisement {
 	if h.backend == nil {
 		return nil
 	}
+	caps := h.backend.Targets()
 	return &Advertisement{
-		Targets:    h.backend.Targets(),
-		ConfigHash: h.hash,
-		Pinned:     h.pinned,
+		Targets:      proto.BMCTargetIDs(caps),
+		Capabilities: caps,
+		ConfigHash:   h.hash,
+		Pinned:       h.pinned,
 	}
 }
 

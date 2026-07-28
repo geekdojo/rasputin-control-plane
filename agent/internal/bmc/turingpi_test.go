@@ -276,8 +276,30 @@ func TestTuringPiTargetsSorted(t *testing.T) {
 	_, srv := newFakeBMC(t, nil)
 	b := testBackend(t, srv, map[string]int{"tp-n1": 2, "tp-cp1": 1})
 	got := b.Targets()
-	if len(got) != 2 || got[0] != "tp-cp1" || got[1] != "tp-n1" {
+	if len(got) != 2 || got[0].NodeID != "tp-cp1" || got[1].NodeID != "tp-n1" {
 		t.Errorf("Targets() = %v, want sorted [tp-cp1 tp-n1]", got)
+	}
+}
+
+// The whole point of per-target capabilities: this backend drives power
+// and reset but must NOT claim a console, because OpenSOL refuses and a
+// CONSOLE button would fail on click.
+func TestTuringPiAdvertisesNoConsoleCapability(t *testing.T) {
+	_, srv := newFakeBMC(t, nil)
+	b := testBackend(t, srv, map[string]int{"tp-cp1": 1})
+	tgts := b.Targets()
+	if len(tgts) != 1 {
+		t.Fatalf("Targets() = %v", tgts)
+	}
+	tgt := tgts[0]
+	if !tgt.HasCap(proto.BMCCapPower) || !tgt.HasCap(proto.BMCCapReset) {
+		t.Errorf("want power+reset, got caps=%v", tgt.Caps)
+	}
+	if tgt.HasCap(proto.BMCCapConsole) {
+		t.Error("must not advertise console: OpenSOL refuses, so the button would fail on click")
+	}
+	if tgt.Console != nil {
+		t.Errorf("console info should be nil without the capability, got %+v", tgt.Console)
 	}
 }
 

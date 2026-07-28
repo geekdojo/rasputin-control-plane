@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -76,6 +77,36 @@ func (s *Service) TargetReachable(ctx context.Context, inv *inventory.Store, tar
 	if !slices.Contains(proto.NodeBMCTargets(host), target) {
 		return fmt.Errorf("target %q is not reachable by BMC host %q (not in its advertised bmc-targets)",
 			target, hostID)
+	}
+	return nil
+}
+
+// TargetSupports is TargetReachable plus a per-capability check. Reaching
+// a node is no longer the same question as being able to do a given thing
+// to it: the turingpi backend drives power and reset but cannot offer a
+// console, so a reachability-only gate would accept a SoL open it can
+// never honour (design/control-plane/bmc.md §2a).
+//
+// A host advertising only the legacy target list is treated as fully
+// capable, which is what those backends were.
+func (s *Service) TargetSupports(ctx context.Context, inv *inventory.Store, target, capability string) error {
+	if err := s.TargetReachable(ctx, inv, target); err != nil {
+		return err
+	}
+	hostID := s.Host(ctx)
+	host, err := inv.Get(ctx, hostID)
+	if err != nil {
+		return fmt.Errorf("bmc host lookup: %w", err)
+	}
+	entry, ok := proto.NodeBMCTargetFor(host, target)
+	if !ok {
+		// Reachable but absent from the capability set — treat as
+		// legacy-full rather than inventing a refusal.
+		return nil
+	}
+	if !entry.HasCap(capability) {
+		return fmt.Errorf("BMC host %q does not support %s for target %q (backend advertises: %s)",
+			hostID, capability, target, strings.Join(entry.Caps, ", "))
 	}
 	return nil
 }
