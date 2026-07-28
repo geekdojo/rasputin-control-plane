@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,60 @@ func TestPowerValidate_Success(t *testing.T) {
 	}
 	if len(out) == 0 {
 		t.Error("expected step output")
+	}
+}
+
+// A controlplane target refuses power-OFF but still accepts the verbs
+// that recover on their own. The rule is about the operator losing the
+// only surface that can issue power-ON — not about capability, and not
+// about whether the controlplane happens to also be the BMC host (on a
+// Turing Pi it is; on the BitScope rack it is not).
+func TestPowerValidate_ControlPlaneRefusesPowerOff(t *testing.T) {
+	f := newFixture(t)
+	inv := newInvStore(t)
+	registerHost(t, f, inv, []string{"cp-1"})
+	_ = inv.Insert(f.ctx, &proto.Node{
+		ID: "cp-1", Role: proto.RoleControlPlane, Hostname: "cp-1.local",
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	})
+	step := powerValidate(f.svc, inv)
+
+	sc := stepCtx(f.ctx, f.nc, Spec{TargetNodeID: "cp-1", Verb: proto.BMCPowerOff})
+	_, err := step(sc)
+	if err == nil {
+		t.Fatal("power-off on the controlplane must be refused")
+	}
+	// The refusal has to explain itself — an operator who cannot see why
+	// the button vanished will reach for the chassis BMC instead.
+	if !strings.Contains(err.Error(), "controlplane") {
+		t.Errorf("refusal should name the reason; got %q", err)
+	}
+
+	// reset and cycle drop the UI and bring it back, so they stay allowed.
+	// Regressing these to a blanket controlplane ban would remove the only
+	// in-product way to recover a wedged controlplane.
+	for _, verb := range []proto.BMCPowerVerb{proto.BMCPowerReset, proto.BMCPowerCycle, proto.BMCPowerQuery, proto.BMCPowerOn} {
+		sc := stepCtx(f.ctx, f.nc, Spec{TargetNodeID: "cp-1", Verb: verb})
+		if _, err := step(sc); err != nil {
+			t.Errorf("verb %q on the controlplane should be allowed: %v", verb, err)
+		}
+	}
+}
+
+// The rule keys on ROLE, so the same verb against a compute node in the
+// same cluster is unaffected.
+func TestPowerValidate_ComputePowerOffStillAllowed(t *testing.T) {
+	f := newFixture(t)
+	inv := newInvStore(t)
+	registerHost(t, f, inv, []string{"node-1"})
+	_ = inv.Insert(f.ctx, &proto.Node{
+		ID: "node-1", Role: proto.RoleCompute, Hostname: "node-1.local",
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	})
+	step := powerValidate(f.svc, inv)
+	sc := stepCtx(f.ctx, f.nc, Spec{TargetNodeID: "node-1", Verb: proto.BMCPowerOff})
+	if _, err := step(sc); err != nil {
+		t.Fatalf("power-off on a compute node must still validate: %v", err)
 	}
 }
 
