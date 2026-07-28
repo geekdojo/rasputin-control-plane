@@ -305,6 +305,89 @@ func TestTuringPiRequiresExplicitTLSChoice(t *testing.T) {
 	}
 }
 
+// Operators paste fingerprints in whatever shape their tool emitted.
+func TestNormalizeFingerprint(t *testing.T) {
+	const want = "417c1eeab9427f1033634c7af2d2ddf1e8758a9226ce1f633fe1ffd5110fb9e1"
+	for _, in := range []string{
+		"41:7C:1E:EA:B9:42:7F:10:33:63:4C:7A:F2:D2:DD:F1:E8:75:8A:92:26:CE:1F:63:3F:E1:FF:D5:11:0F:B9:E1",
+		"417C1EEAB9427F1033634C7AF2D2DDF1E8758A9226CE1F633FE1FFD5110FB9E1",
+		"  417c1eeab9427f1033634c7af2d2ddf1e8758a9226ce1f633fe1ffd5110fb9e1  ",
+	} {
+		got, err := normalizeFingerprint(in)
+		if err != nil {
+			t.Errorf("normalizeFingerprint(%.20s…): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("normalizeFingerprint(%.20s…) = %q, want %q", in, got, want)
+		}
+	}
+	for _, bad := range []string{"", "abc", "zz7c1eeab9427f1033634c7af2d2ddf1e8758a9226ce1f633fe1ffd5110fb9e1"} {
+		if _, err := normalizeFingerprint(bad); err == nil {
+			t.Errorf("normalizeFingerprint(%q) should fail", bad)
+		}
+	}
+}
+
+// The pinned verifier must accept exactly one certificate and reject any
+// other — including a valid-but-different one.
+func TestPinnedCertVerifier(t *testing.T) {
+	der := []byte("pretend-DER-bytes")
+	pin := certFingerprint(der)
+
+	if err := pinnedCertVerifier(pin)([][]byte{der}, nil); err != nil {
+		t.Errorf("matching certificate should verify: %v", err)
+	}
+	err := pinnedCertVerifier(pin)([][]byte{[]byte("a-different-cert")}, nil)
+	if err == nil {
+		t.Fatal("a different certificate must be rejected")
+	}
+	// The message has to point at the likely cause, since a firmware
+	// update regenerating the cert is a normal-operation path here.
+	if !strings.Contains(err.Error(), "re-pin") {
+		t.Errorf("mismatch error should mention re-pinning, got: %v", err)
+	}
+	if err := pinnedCertVerifier(pin)(nil, nil); err == nil {
+		t.Error("an empty chain must be rejected")
+	}
+}
+
+// An expired self-signed cert is what this board actually presents, so
+// pinning has to work against one. A CA-trust approach cannot.
+func TestTuringPiPinnedCertWorksAgainstExpiredSelfSignedBoard(t *testing.T) {
+	_, srv := newFakeBMC(t, map[int]string{1: "1"})
+	leaf := srv.Certificate()
+
+	b, err := NewTuringPiBackend(TuringPiOptions{
+		Endpoint:    srv.URL,
+		User:        "root",
+		Pass:        "turing",
+		Targets:     map[string]int{"tp-cp1": 1},
+		Fingerprint: certFingerprint(leaf.Raw),
+	})
+	if err != nil {
+		t.Fatalf("NewTuringPiBackend with a pinned fingerprint: %v", err)
+	}
+	if _, _, err := b.Power(context.Background(), "tp-cp1", proto.BMCPowerQuery); err != nil {
+		t.Fatalf("pinned request should succeed: %v", err)
+	}
+
+	// A wrong pin must fail the handshake rather than fall through.
+	bad, err := NewTuringPiBackend(TuringPiOptions{
+		Endpoint:    srv.URL,
+		User:        "root",
+		Pass:        "turing",
+		Targets:     map[string]int{"tp-cp1": 1},
+		Fingerprint: certFingerprint([]byte("not-this-board")),
+	})
+	if err != nil {
+		t.Fatalf("construction with a wrong pin should still build: %v", err)
+	}
+	if _, _, err := bad.Power(context.Background(), "tp-cp1", proto.BMCPowerQuery); err == nil {
+		t.Fatal("a mismatched pin must fail the connection")
+	}
+}
+
 func TestTuringPiRejectsBadConfig(t *testing.T) {
 	base := func() TuringPiOptions {
 		return TuringPiOptions{

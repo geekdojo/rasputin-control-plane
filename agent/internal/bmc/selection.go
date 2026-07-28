@@ -49,12 +49,12 @@ func NewFromSelection(kind string, raw json.RawMessage, stateDir string) (Backen
 		return newBitScopeOnDevice(sel.Dev, sel.Unlock, targets)
 	case "turingpi":
 		var sel struct {
-			Endpoint string `json:"endpoint"`
-			User     string `json:"user"`
-			Pass     string `json:"pass,omitempty"`
-			CAPem    string `json:"ca_pem,omitempty"`
-			Insecure bool   `json:"insecure_skip_verify,omitempty"`
-			Targets  []struct {
+			Endpoint    string `json:"endpoint"`
+			User        string `json:"user"`
+			Pass        string `json:"pass,omitempty"`
+			Fingerprint string `json:"fingerprint,omitempty"`
+			Insecure    bool   `json:"insecure_skip_verify,omitempty"`
+			Targets     []struct {
 				NodeID string `json:"node_id"`
 				Slot   int    `json:"slot"`
 			} `json:"targets"`
@@ -77,7 +77,7 @@ func NewFromSelection(kind string, raw json.RawMessage, stateDir string) (Backen
 			User:               sel.User,
 			Pass:               sel.Pass,
 			Targets:            targets,
-			CAPem:              sel.CAPem,
+			Fingerprint:        sel.Fingerprint,
 			InsecureSkipVerify: sel.Insecure,
 		})
 	}

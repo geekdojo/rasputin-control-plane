@@ -2,8 +2,10 @@ package bmc
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,7 @@ type TuringPiBackend struct {
 }
 
 const (
+	sha256HexLen           = 64
 	turingpiDefaultSettle  = 3 * time.Second
 	turingpiDefaultTimeout = 20 * time.Second
 	turingpiMinSlot        = 1
@@ -79,17 +82,28 @@ type TuringPiOptions struct {
 	Targets  map[string]int // node-id -> slot
 	Settle   time.Duration  // off->on gap when synthesizing `cycle`
 
-	// TLS against the chassis BMC. Turing Pi ships a self-signed
-	// certificate that chains to nothing we trust, so one of these is
-	// required to talk to real hardware:
+	// TLS against the chassis BMC.
 	//
-	//   CAPem              — trust this PEM (preferred; pin the board's cert)
-	//   InsecureSkipVerify — accept any certificate (explicit opt-in only)
+	// The board presents a self-signed certificate that is ALREADY
+	// EXPIRED — it is minted at epoch because the BMC has no clock:
 	//
-	// Neither is defaulted on. A driver that silently disabled
+	//	subject=CN=Turing-Pi self signed  issuer=CN=Turing-Pi self signed
+	//	notBefore=Jan 1 1970  notAfter=Jan 31 1970  BasicConstraints: CA:TRUE
+	//
+	// So trusting it as a CA cannot work: Go checks validity independently
+	// of trust and the chain fails on expiry no matter what is in the pool.
+	// The mechanism that does work is pinning the exact certificate:
+	//
+	//	Fingerprint        — SHA-256 of the leaf, hex (colons optional)
+	//	InsecureSkipVerify — accept any certificate (explicit opt-in only)
+	//
+	// Fingerprint pinning reads alarming because it rides on
+	// InsecureSkipVerify, but it is STRICTER than CA trust here — it
+	// accepts exactly one certificate rather than anything chaining to an
+	// anchor. Neither is defaulted on: a driver that silently disabled
 	// verification would be out of step with the rest of the platform
 	// (mesh CA, bus-auth enforce), so the operator has to choose.
-	CAPem              string
+	Fingerprint        string
 	InsecureSkipVerify bool
 }
 
@@ -121,16 +135,20 @@ func NewTuringPiBackend(opts TuringPiOptions) (*TuringPiBackend, error) {
 
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	switch {
-	case opts.CAPem != "":
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM([]byte(opts.CAPem)) {
-			return nil, fmt.Errorf("turingpi: ca_pem contains no usable certificate")
+	case opts.Fingerprint != "":
+		want, err := normalizeFingerprint(opts.Fingerprint)
+		if err != nil {
+			return nil, err
 		}
-		tlsCfg.RootCAs = pool
+		// Go's own verification is disabled so the expired-at-epoch cert
+		// gets past it; VerifyPeerCertificate then applies the stricter
+		// exact-match check.
+		tlsCfg.InsecureSkipVerify = true
+		tlsCfg.VerifyPeerCertificate = pinnedCertVerifier(want)
 	case opts.InsecureSkipVerify:
 		tlsCfg.InsecureSkipVerify = true
 	default:
-		return nil, fmt.Errorf("turingpi: TLS not configured — set ca_pem to pin the board's certificate, or insecure_skip_verify to accept any (the BMC ships a self-signed cert)")
+		return nil, fmt.Errorf("turingpi: TLS not configured — pin the board's certificate with its SHA-256 fingerprint, or set insecure_skip_verify to accept any (the board's self-signed cert is minted at epoch and permanently expired, so CA trust cannot work)")
 	}
 
 	settle := opts.Settle
@@ -414,6 +432,42 @@ func turingpiResultFailure(body []byte) (string, bool) {
 		return s, true
 	}
 	return "", false
+}
+
+// normalizeFingerprint accepts the shapes an operator will actually
+// paste — "41:7C:1E:…" from openssl, or bare hex, in either case.
+func normalizeFingerprint(raw string) (string, error) {
+	clean := strings.ToLower(strings.NewReplacer(":", "", " ", "", "-", "").Replace(strings.TrimSpace(raw)))
+	clean = strings.TrimPrefix(clean, "sha256")
+	if len(clean) != sha256HexLen {
+		return "", fmt.Errorf("turingpi: fingerprint must be a SHA-256 hex digest (%d hex chars, colons optional), got %d chars", sha256HexLen, len(clean))
+	}
+	if _, err := hex.DecodeString(clean); err != nil {
+		return "", fmt.Errorf("turingpi: fingerprint is not valid hex: %w", err)
+	}
+	return clean, nil
+}
+
+// certFingerprint returns the lowercase hex SHA-256 of a certificate's DER.
+func certFingerprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
+}
+
+// pinnedCertVerifier matches the presented leaf against a pinned digest.
+// Deliberately ignores chain and validity: this board's certificate is
+// permanently expired by construction, so those checks can only ever fail.
+func pinnedCertVerifier(want string) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return fmt.Errorf("turingpi: BMC presented no certificate")
+		}
+		got := certFingerprint(rawCerts[0])
+		if got != want {
+			return fmt.Errorf("turingpi: BMC certificate does not match the pinned fingerprint (got %s, pinned %s) — if the BMC firmware was updated its certificate was regenerated and needs re-pinning; otherwise treat this as a trust failure", got, want)
+		}
+		return nil
+	}
 }
 
 func truncate(s string, n int) string {

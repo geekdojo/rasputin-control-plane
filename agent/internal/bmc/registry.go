@@ -29,12 +29,12 @@ type Config struct {
 	// map is "<node-id>:<slot>" pairs, comma-separated — e.g.
 	// "tp-cp1:1,tp-n1:2". TLS needs one of CA/Insecure explicitly (the
 	// board ships a self-signed cert); see TuringPiOptions.
-	TuringPiEndpoint string
-	TuringPiUser     string
-	TuringPiPass     string
-	TuringPiMap      string
-	TuringPiCAPem    string
-	TuringPiInsecure bool
+	TuringPiEndpoint    string
+	TuringPiUser        string
+	TuringPiPass        string
+	TuringPiMap         string
+	TuringPiFingerprint string
+	TuringPiInsecure    bool
 
 	// MockTargets is the mock backend's advertised bmc-targets list
 	// (RASPUTIN_BMC_MOCK_TARGETS, comma-separated) — dev-only, for
@@ -70,7 +70,7 @@ var factories = map[string]factory{
 			User:               cfg.TuringPiUser,
 			Pass:               cfg.TuringPiPass,
 			Targets:            targets,
-			CAPem:              cfg.TuringPiCAPem,
+			Fingerprint:        cfg.TuringPiFingerprint,
 			InsecureSkipVerify: cfg.TuringPiInsecure,
 		})
 	},
