@@ -228,6 +228,18 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcCaps, on
   }, [nodeId]);
 
   const isOnline = node?.status === 'online';
+  const isControlPlane = node?.role === 'controlplane';
+
+  // An offline node has no CURRENT utilization, only a last-known one.
+  // The metrics feed doesn't emit a zero when a node dies — it simply
+  // stops, leaving the final sample in `util` indefinitely, so a node
+  // with its power physically cut kept rendering a live-looking CPU 6% /
+  // MEM 3% (bench 2026-07-28, tp-n1 powered off via BMC). NodeGrid
+  // already guards this and shows OFFL; the detail panel did not.
+  // StatBar renders null as "—" with an empty bar.
+  const isOffline = node?.status === 'offline';
+  const liveCpu = isOffline ? null : cpu;
+  const liveMem = isOffline ? null : mem;
 
   async function run(action: string, fn: () => Promise<unknown>) {
     setBusy(action);
@@ -351,8 +363,8 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcCaps, on
 
             {sectionLabel('UTILIZATION')}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
-              <StatBar label="CPU" value={cpu} />
-              <StatBar label="MEMORY" value={mem} />
+              <StatBar label="CPU" value={liveCpu} />
+              <StatBar label="MEMORY" value={liveMem} />
             </div>
           </>
         )}
@@ -397,7 +409,13 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcCaps, on
           <>
             {sectionLabel('BMC')}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-              {canPower && (
+              {/* No power control for the controlplane. The backend can
+                  honour it and the hardware will do it, but the UI that
+                  issues power-off is served BY this node — once it is off
+                  nothing here can turn it back on. The api refuses this
+                  server-side too; this only keeps the button out of reach.
+                  FORCE RESTART stays: it recovers on its own. */}
+              {canPower && !isControlPlane && (
               <PowerButton
                 state={bmcState}
                 disabled={!node || busy !== null}
@@ -424,7 +442,13 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcCaps, on
               {canReset && (
                 <CtrlButton
                   icon={RefreshCw}
-                  label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}
+                  /* "RESET" read as factory-reset to a homelab audience,
+                     especially sitting next to REMOVE NODE — the old confirm
+                     copy had to disclaim BOTH a graceful reboot and a wipe.
+                     "FORCE RESTART" says forcible without implying either,
+                     and pairs against REBOOT (OS) as make-it vs ask-nicely.
+                     Display only: the wire verb stays proto.BMCPowerReset. */
+                  label={busy === 'reset' ? 'RESTARTING…' : 'FORCE RESTART'}
                   disabled={!node || busy !== null}
                   onClick={() => setModal('reset')}
                 />
@@ -516,9 +540,9 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcCaps, on
       )}
       {modal === 'reset' && node && (
         <ConfirmModal
-          title="CONFIRM BMC RESET"
-          message={`Issue a hardware reset to ${node.id.toUpperCase()} via BMC? This is an abrupt reset (not a graceful reboot, and not a factory wipe).`}
-          confirmLabel="RESET"
+          title="CONFIRM FORCE RESTART"
+          message={`Force ${node.id.toUpperCase()} to restart via BMC? The OS is not notified and gets no chance to shut down, so anything unwritten is lost. Use REBOOT (OS) instead while the node still responds.`}
+          confirmLabel="FORCE RESTART"
           danger
           onConfirm={() => void run('reset', () => bmcPower(node.id, 'reset'))}
           onCancel={() => setModal(null)}

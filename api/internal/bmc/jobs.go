@@ -75,6 +75,27 @@ func powerValidate(svc *Service, inv *inventory.Store) jobs.DoFn {
 		if node == nil {
 			return nil, fmt.Errorf("target node %q not registered", spec.TargetNodeID)
 		}
+		// A controlplane target refuses power-OFF whatever the backend
+		// can do. This is deliberately NOT a capability question: the
+		// hardware honours it perfectly well — on a Turing Pi the
+		// controlplane is slot 1 and the BMC cut its power on request
+		// (bench 2026-07-28) — it is that the operation is one-way from
+		// the operator's seat. The UI that issues power-off is served BY
+		// the controlplane, so once it is off nothing is left to issue
+		// power-on; recovery means the chassis BMC's own interface or a
+		// walk to the rack. A confirmation dialog is the right tool for
+		// something the operator can undo, and this they cannot.
+		//
+		// reset and cycle stay allowed on purpose: they drop the UI and
+		// bring it back on their own (~90s on this bench), which is an
+		// interruption rather than a one-way door — and recovering a
+		// wedged controlplane from the board is a real use for them.
+		//
+		// Keyed on ROLE, not on a node id or on "is this the BMC host",
+		// so it survives the controlplane moving to a different node.
+		if node.Role == proto.RoleControlPlane && spec.Verb == proto.BMCPowerOff {
+			return nil, fmt.Errorf("refusing bmc power-off on %q: it is the controlplane — powering it off removes the only surface that can power it back on; use reset or cycle, which recover on their own", spec.TargetNodeID)
+		}
 		// Gate on the capability the verb actually needs: a backend may
 		// drive power without offering reset, or vice versa.
 		needed := proto.BMCCapPower
