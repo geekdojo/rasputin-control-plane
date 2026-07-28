@@ -166,12 +166,23 @@ func (b *BitScopeBackend) Name() string { return "bitscope" }
 // Targets lists the address map's node-ids, sorted — the authoritative
 // bmc-targets advertisement (design doc §2d). The map is immutable after
 // construction, so no lock is needed.
-func (b *BitScopeBackend) Targets() []string {
-	out := make([]string, 0, len(b.targets))
+func (b *BitScopeBackend) Targets() []proto.BMCTarget {
+	ids := make([]string, 0, len(b.targets))
 	for id := range b.targets {
-		out = append(out, id)
+		ids = append(ids, id)
 	}
-	sort.Strings(out)
+	sort.Strings(ids)
+	out := make([]proto.BMCTarget, 0, len(ids))
+	for _, id := range ids {
+		// A real serial line: raw bytes both directions, and nothing
+		// discards output behind our back. Reset is a synthesized hard
+		// power-cycle (D-1) but it is honoured, so it is advertised.
+		out = append(out, proto.BMCTarget{
+			NodeID:  id,
+			Caps:    []string{proto.BMCCapPower, proto.BMCCapReset, proto.BMCCapConsole},
+			Console: &proto.BMCConsoleInfo{Mode: proto.BMCConsoleCharacter},
+		})
+	}
 	return out
 }
 

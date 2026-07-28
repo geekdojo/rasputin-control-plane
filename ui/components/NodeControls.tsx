@@ -28,6 +28,7 @@ import {
   type NodeRemovalImpact,
 } from '../lib/api';
 import type { App, BMCPowerState, DeploymentMode, Node } from '../lib/types';
+import { BMC_CAP_CONSOLE, BMC_CAP_POWER, BMC_CAP_RESET, type BmcCaps } from '../lib/bmc';
 import { ConfirmModal } from './ConfirmModal';
 import { ACCENT, accentA, MONO, STATUS_COLOR } from './ui-theme';
 
@@ -53,7 +54,7 @@ interface NodeControlsProps {
   deploymentMode?: DeploymentMode;
   // Per-node BMC gate (lib/bmc.ts): true iff some registered BMC host
   // advertises this node in its bmc-targets list.
-  bmcReachable?: boolean;
+  bmcCaps?: BmcCaps;
   onNavigate: (path: string) => void;
   onRemoved?: (id: string) => void;
 }
@@ -176,7 +177,16 @@ function appStatusColor(status: App['lastStatus']): string {
   return 'rgba(148,163,184,0.5)';
 }
 
-export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachable = false, onNavigate, onRemoved }: NodeControlsProps) {
+export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcCaps, onNavigate, onRemoved }: NodeControlsProps) {
+  // Each hardware control gates on the capability it needs, not on bare
+  // reachability: a backend may drive power while being unable to offer a
+  // console (turingpi), and rendering a button its backend can only fail
+  // is exactly what bmc.md §2a forbids. See lib/bmc.ts.
+  const canPower = bmcCaps?.caps.has(BMC_CAP_POWER) ?? false;
+  const canReset = bmcCaps?.caps.has(BMC_CAP_RESET) ?? false;
+  const canConsole = bmcCaps?.caps.has(BMC_CAP_CONSOLE) ?? false;
+  const consoleLossy = bmcCaps?.console?.lossy ?? false;
+  const showBmcSection = canPower || canReset || canConsole;
   const [modal, setModal] = useState<'reboot' | 'power-off' | 'power-on' | 'reset' | 'remove' | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -187,10 +197,10 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
   const nodeId = node?.id ?? null;
 
   // BMC power state for the selected node: seed via REST, then track live.
-  // Gated per-node on bmcReachable — no advertised serial path means no
+  // Gated per-node on the power capability — no advertised path means no
   // power state to poll and no controls to render. See lib/bmc.ts.
   useEffect(() => {
-    if (!nodeId || !bmcReachable) {
+    if (!nodeId || !canPower) {
       setBmcState('unknown');
       return;
     }
@@ -209,7 +219,7 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
       active = false;
       close();
     };
-  }, [nodeId, bmcReachable]);
+  }, [nodeId, canPower]);
 
   // Clear transient action error when selection changes.
   useEffect(() => {
@@ -383,10 +393,11 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
             nodes some BMC host advertises in its bmc-targets list —
             never a control that would no-op against missing hardware.
             See lib/bmc.ts. */}
-        {bmcReachable && (
+        {showBmcSection && (
           <>
             {sectionLabel('BMC')}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+              {canPower && (
               <PowerButton
                 state={bmcState}
                 disabled={!node || busy !== null}
@@ -399,13 +410,25 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcReachabl
                   setModal(bmcState === 'on' ? 'power-off' : 'power-on');
                 }}
               />
-              <CtrlButton icon={Terminal} label="CONSOLE" disabled={!node} onClick={() => node && onNavigate(`/console?node=${encodeURIComponent(node.id)}`)} />
-              <CtrlButton
-                icon={RefreshCw}
-                label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}
-                disabled={!node || busy !== null}
-                onClick={() => setModal('reset')}
-              />
+              )}
+              {canConsole && (
+                <CtrlButton
+                  icon={Terminal}
+                  /* A polled ring-buffer console drops output between reads,
+                     so say so rather than let scrollback gaps read as a bug. */
+                  label={consoleLossy ? 'CONSOLE (LOSSY)' : 'CONSOLE'}
+                  disabled={!node}
+                  onClick={() => node && onNavigate(`/console?node=${encodeURIComponent(node.id)}`)}
+                />
+              )}
+              {canReset && (
+                <CtrlButton
+                  icon={RefreshCw}
+                  label={busy === 'reset' ? 'RESETTING…' : 'BMC RESET'}
+                  disabled={!node || busy !== null}
+                  onClick={() => setModal('reset')}
+                />
+              )}
             </div>
           </>
         )}

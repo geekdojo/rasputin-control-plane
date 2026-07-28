@@ -18,9 +18,165 @@ import (
 const (
 	CapabilityBMCTargets    = "bmc-targets"
 	MetadataBMCTargets      = "bmcTargets"
+	MetadataBMCCapabilities = "bmcCapabilities"
 	MetadataBMCConfigHash   = "bmcConfigHash"
 	MetadataBMCConfigPinned = "bmcConfigPinned"
 )
+
+// ── Per-target capabilities ──────────────────────────────────────────────
+//
+// bmc-targets originally answered one question: which nodes can this host
+// reach. That was enough while every backend could do everything. It is
+// not enough now — the turingpi driver does power and reset but cannot
+// offer a usable console, and a single reachability flag would render a
+// CONSOLE button that fails on click (exactly what bmc.md §2a forbids).
+//
+// So reachability grows into a capability set per node. Different BMC
+// controllers have genuinely different abilities, and the model has to be
+// able to say so.
+//
+// ROLLOUT: MetadataBMCTargets keeps carrying the plain node-id list and
+// MetadataBMCCapabilities is added alongside it. An agent older than this
+// change advertises only the list, and NodeBMCCapabilities then treats it
+// as "legacy: everything", which is what those backends could in fact do.
+// The controlplane and its nodes update independently, so both directions
+// of a rolling update have to keep working.
+
+// BMC capability names. A backend advertises the subset it can honour for
+// a given node.
+const (
+	BMCCapPower   = "power"   // on/off/status
+	BMCCapReset   = "reset"   // hard reset
+	BMCCapConsole = "console" // serial-over-LAN
+)
+
+// LegacyBMCCaps is what a target advertised without an explicit
+// capability set is assumed to support — everything, matching the
+// behaviour of the backends that shipped before capabilities existed.
+var LegacyBMCCaps = []string{BMCCapPower, BMCCapReset, BMCCapConsole}
+
+// Console fidelity. A polled, command-granular console (turingpi) cannot
+// do character-mode input, and it drops output between polls; the UI
+// needs to be able to say so rather than silently disappoint.
+const (
+	BMCConsoleCharacter = "character" // raw keypresses, ANSI, password masking
+	BMCConsoleLine      = "line"      // one line per write, no raw mode
+)
+
+// BMCConsoleInfo describes the console a backend can actually provide.
+// Nil when the target has no BMCCapConsole.
+type BMCConsoleInfo struct {
+	Mode string `json:"mode"` // BMCConsoleCharacter | BMCConsoleLine
+	// Lossy marks a console whose output can be dropped — a polled ring
+	// buffer overwrites bytes the client has not read yet, so boot
+	// capture is best-effort rather than guaranteed.
+	Lossy bool `json:"lossy,omitempty"`
+}
+
+// BMCTarget is one node a BMC host can reach, and what it can do for it.
+type BMCTarget struct {
+	NodeID  string          `json:"nodeId"`
+	Caps    []string        `json:"caps"`
+	Console *BMCConsoleInfo `json:"console,omitempty"`
+}
+
+// HasCap reports whether the target advertises cap.
+func (t BMCTarget) HasCap(cap string) bool {
+	for _, c := range t.Caps {
+		if c == cap {
+			return true
+		}
+	}
+	return false
+}
+
+// BMCTargetIDs projects the node-ids, for the legacy MetadataBMCTargets
+// list that ships alongside the capability set.
+func BMCTargetIDs(targets []BMCTarget) []string {
+	out := make([]string, 0, len(targets))
+	for _, t := range targets {
+		out = append(out, t.NodeID)
+	}
+	return out
+}
+
+// NodeBMCCapabilities returns the node's advertised per-target
+// capabilities. When the host advertises only the legacy list (an agent
+// older than this change), each target is synthesised with
+// LegacyBMCCaps — those backends really could do all three.
+//
+// Metadata arrives as concrete types in-process and as []any/map[string]any
+// after a JSON round-trip (the api's store path); both are handled.
+func NodeBMCCapabilities(n *Node) []BMCTarget {
+	if n == nil || n.Metadata == nil {
+		return nil
+	}
+	if raw, ok := n.Metadata[MetadataBMCCapabilities]; ok {
+		if targets := decodeBMCTargets(raw); len(targets) > 0 {
+			return targets
+		}
+	}
+	// Legacy fallback.
+	ids := NodeBMCTargets(n)
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]BMCTarget, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, BMCTarget{
+			NodeID:  id,
+			Caps:    append([]string(nil), LegacyBMCCaps...),
+			Console: &BMCConsoleInfo{Mode: BMCConsoleCharacter},
+		})
+	}
+	return out
+}
+
+func decodeBMCTargets(raw any) []BMCTarget {
+	switch v := raw.(type) {
+	case []BMCTarget:
+		return v
+	case []any:
+		out := make([]BMCTarget, 0, len(v))
+		for _, e := range v {
+			m, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := m["nodeId"].(string)
+			if id == "" {
+				continue
+			}
+			t := BMCTarget{NodeID: id}
+			if caps, ok := m["caps"].([]any); ok {
+				for _, c := range caps {
+					if s, ok := c.(string); ok {
+						t.Caps = append(t.Caps, s)
+					}
+				}
+			}
+			if c, ok := m["console"].(map[string]any); ok {
+				mode, _ := c["mode"].(string)
+				lossy, _ := c["lossy"].(bool)
+				t.Console = &BMCConsoleInfo{Mode: mode, Lossy: lossy}
+			}
+			out = append(out, t)
+		}
+		return out
+	}
+	return nil
+}
+
+// NodeBMCTargetFor returns the capability entry a host advertises for
+// target, and whether it was found.
+func NodeBMCTargetFor(host *Node, target string) (BMCTarget, bool) {
+	for _, t := range NodeBMCCapabilities(host) {
+		if t.NodeID == target {
+			return t, true
+		}
+	}
+	return BMCTarget{}, false
+}
 
 // BMCBackendInfo describes one supported BMC backend for the Settings
 // picker (bmc-settings.md §2, S-1). The UI renders this served list —
@@ -44,7 +200,7 @@ const (
 var SupportedBMCBackends = []BMCBackendInfo{
 	{Kind: "bitscope", Label: "BitScope CB04B blade rack", Status: BMCBackendAvailable},
 	{Kind: "mock", Label: "Mock (development)", Status: BMCBackendAvailable},
-	{Kind: "turingpi", Label: "Turing Pi", Status: BMCBackendPlanned},
+	{Kind: "turingpi", Label: "Turing Pi 2 / 2.5 (network BMC)", Status: BMCBackendAvailable},
 	{Kind: "rasputin", Label: "Rasputin chassis", Status: BMCBackendPlanned},
 }
 

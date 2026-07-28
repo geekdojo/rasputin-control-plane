@@ -9,7 +9,7 @@ import { NodeControls } from '../../components/NodeControls';
 import { AddNodeWizard } from '../../components/AddNodeWizard';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { clusterPrefixOf } from '../../lib/enroll';
-import { bmcReachableNodes } from '../../lib/bmc';
+import { bmcNodeCaps } from '../../lib/bmc';
 import type { NodeViewStatus } from '../../components/ui-theme';
 
 interface Util {
@@ -151,7 +151,7 @@ export default function NodesPage() {
   const nodeIds = useMemo(() => new Set(nodes.map((n) => n.id)), [nodes]);
   // Per-node BMC gate: nodes some registered BMC host advertises in its
   // bmc-targets list (lib/bmc.ts).
-  const bmcTargets = useMemo(() => bmcReachableNodes(nodes), [nodes]);
+  const bmcCaps = useMemo(() => bmcNodeCaps(nodes, selectedId ?? undefined), [nodes, selectedId]);
   const pending: PendingView[] = useMemo(
     () =>
       busTokens
@@ -200,7 +200,7 @@ export default function NodesPage() {
           mem={selectedUtil?.mem ?? null}
           apps={selectedApps}
           deploymentMode={deploymentMode}
-          bmcReachable={selectedNode ? bmcTargets.has(selectedNode.id) : false}
+          bmcCaps={bmcCaps}
           onNavigate={(path) => router.push(path)}
           onRemoved={(id) => {
             setNodes((prev) => prev.filter((n) => n.id !== id));

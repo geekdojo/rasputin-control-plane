@@ -221,12 +221,25 @@ func (t *TuringPiBackend) Name() string { return "turingpi" }
 // Targets returns the configured node-ids. Unlike a bus scan this is
 // operator-declared: the BMC knows its slots but not what Rasputin calls
 // the module in each one.
-func (t *TuringPiBackend) Targets() []string {
-	out := make([]string, 0, len(t.targets))
+func (t *TuringPiBackend) Targets() []proto.BMCTarget {
+	ids := make([]string, 0, len(t.targets))
 	for id := range t.targets {
-		out = append(out, id)
+		ids = append(ids, id)
 	}
-	sort.Strings(out)
+	sort.Strings(ids)
+	out := make([]proto.BMCTarget, 0, len(ids))
+	for _, id := range ids {
+		// Power and reset only. The BMC's UART is a polled ~16 KB ring
+		// with a command-granular write side, so OpenSOL refuses — and
+		// advertising a console capability we cannot honour would put a
+		// CONSOLE button on screen that fails on click. When a polled
+		// SoL lands this becomes BMCCapConsole with
+		// {Mode: line, Lossy: true}, which the UI can label honestly.
+		out = append(out, proto.BMCTarget{
+			NodeID: id,
+			Caps:   []string{proto.BMCCapPower, proto.BMCCapReset},
+		})
+	}
 	return out
 }
 

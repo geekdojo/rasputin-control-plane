@@ -61,10 +61,20 @@ func (m *MockBackend) SetTargets(ids []string) {
 	m.targets = append([]string(nil), ids...)
 }
 
-func (m *MockBackend) Targets() []string {
+func (m *MockBackend) Targets() []proto.BMCTarget {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]string(nil), m.targets...)
+	out := make([]proto.BMCTarget, 0, len(m.targets))
+	for _, id := range m.targets {
+		// The mock fakes a full-fidelity BMC — it is a development
+		// stand-in for a complete backend, not a limited one.
+		out = append(out, proto.BMCTarget{
+			NodeID:  id,
+			Caps:    append([]string(nil), proto.LegacyBMCCaps...),
+			Console: &proto.BMCConsoleInfo{Mode: proto.BMCConsoleCharacter},
+		})
+	}
+	return out
 }
 
 func (m *MockBackend) load() error {

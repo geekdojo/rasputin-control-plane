@@ -322,8 +322,27 @@ func TestBitScope_TimingDefaults(t *testing.T) {
 func TestBitScope_TargetsSorted(t *testing.T) {
 	b, _ := newBitScopeForTest(t)
 	got := b.Targets()
-	if len(got) != 2 || got[0] != "node-a1" || got[1] != "node-f3" {
+	if len(got) != 2 || got[0].NodeID != "node-a1" || got[1].NodeID != "node-f3" {
 		t.Errorf("Targets: %v, want [node-a1 node-f3]", got)
+	}
+}
+
+// A real serial line: every capability, character-mode, lossless. This is
+// the reference the degraded backends are contrasted against.
+func TestBitScope_AdvertisesFullCapability(t *testing.T) {
+	b, _ := newBitScopeForTest(t)
+	for _, tgt := range b.Targets() {
+		for _, want := range []string{proto.BMCCapPower, proto.BMCCapReset, proto.BMCCapConsole} {
+			if !tgt.HasCap(want) {
+				t.Errorf("%s: missing capability %q (caps=%v)", tgt.NodeID, want, tgt.Caps)
+			}
+		}
+		if tgt.Console == nil || tgt.Console.Mode != proto.BMCConsoleCharacter {
+			t.Errorf("%s: want a character-mode console, got %+v", tgt.NodeID, tgt.Console)
+		}
+		if tgt.Console != nil && tgt.Console.Lossy {
+			t.Errorf("%s: a real serial line is not lossy", tgt.NodeID)
+		}
 	}
 }
 
