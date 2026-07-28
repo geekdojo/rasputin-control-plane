@@ -25,6 +25,17 @@ type Config struct {
 	BitScopeUnlock string // bus unlock sequence (default per D-4)
 	BitScopeMap    string // address map path (default <StateDir>/bitscope-map.json)
 
+	// Turing Pi driver settings (RASPUTIN_BMC_TURINGPI_*). The address
+	// map is "<node-id>:<slot>" pairs, comma-separated — e.g.
+	// "tp-cp1:1,tp-n1:2". TLS needs one of CA/Insecure explicitly (the
+	// board ships a self-signed cert); see TuringPiOptions.
+	TuringPiEndpoint    string
+	TuringPiUser        string
+	TuringPiPass        string
+	TuringPiMap         string
+	TuringPiFingerprint string
+	TuringPiInsecure    bool
+
 	// MockTargets is the mock backend's advertised bmc-targets list
 	// (RASPUTIN_BMC_MOCK_TARGETS, comma-separated) — dev-only, for
 	// exercising per-node gating without hardware. Empty = advertise
@@ -49,6 +60,20 @@ var factories = map[string]factory{
 		return mb, nil
 	},
 	"bitscope": func(cfg Config) (Backend, error) { return NewBitScopeBackend(cfg) },
+	"turingpi": func(cfg Config) (Backend, error) {
+		targets, err := parseTuringPiMap(cfg.TuringPiMap)
+		if err != nil {
+			return nil, err
+		}
+		return NewTuringPiBackend(TuringPiOptions{
+			Endpoint:           cfg.TuringPiEndpoint,
+			User:               cfg.TuringPiUser,
+			Pass:               cfg.TuringPiPass,
+			Targets:            targets,
+			Fingerprint:        cfg.TuringPiFingerprint,
+			InsecureSkipVerify: cfg.TuringPiInsecure,
+		})
+	},
 }
 
 // New constructs the backend named kind. "" and BackendNone are not
