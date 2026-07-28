@@ -47,6 +47,39 @@ func NewFromSelection(kind string, raw json.RawMessage, stateDir string) (Backen
 			sel.Unlock = bitscopeDefaultUnlock
 		}
 		return newBitScopeOnDevice(sel.Dev, sel.Unlock, targets)
+	case "turingpi":
+		var sel struct {
+			Endpoint string `json:"endpoint"`
+			User     string `json:"user"`
+			Pass     string `json:"pass,omitempty"`
+			CAPem    string `json:"ca_pem,omitempty"`
+			Insecure bool   `json:"insecure_skip_verify,omitempty"`
+			Targets  []struct {
+				NodeID string `json:"node_id"`
+				Slot   int    `json:"slot"`
+			} `json:"targets"`
+		}
+		if err := json.Unmarshal(raw, &sel); err != nil {
+			return nil, fmt.Errorf("bmc: turingpi selection: %w", err)
+		}
+		targets := make(map[string]int, len(sel.Targets))
+		for _, e := range sel.Targets {
+			if e.NodeID == "" {
+				return nil, fmt.Errorf("bmc: turingpi selection: target with empty node_id")
+			}
+			if _, dup := targets[e.NodeID]; dup {
+				return nil, fmt.Errorf("bmc: turingpi selection: node %q listed twice", e.NodeID)
+			}
+			targets[e.NodeID] = e.Slot
+		}
+		return NewTuringPiBackend(TuringPiOptions{
+			Endpoint:           sel.Endpoint,
+			User:               sel.User,
+			Pass:               sel.Pass,
+			Targets:            targets,
+			CAPem:              sel.CAPem,
+			InsecureSkipVerify: sel.Insecure,
+		})
 	}
 	return nil, fmt.Errorf("bmc: unknown backend %q in selection (expected %s)", kind, strings.Join(Names(), "|"))
 }
