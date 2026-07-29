@@ -265,3 +265,71 @@ func TestStartReconcile_SubscribesAndSubmits(t *testing.T) {
 		t.Fatal("no reconcile submit after stale registration")
 	}
 }
+
+// The Settings picker lists turingpi as an available backend, so
+// ValidateSelection has to accept a well-formed turingpi config. It did
+// not until 2026-07-28 — the picker offered a kind that selectionTargets
+// had no case for, so choosing it returned `no config schema for backend
+// "turingpi"` and the only way to enable this BMC was editing node.env
+// over SSH. The whole hardware bench ran on the env pin, which by S-4
+// freezes the selection and makes Settings decline to manage it, so the
+// gap could not surface there.
+func TestTuringPiSelectionAccepted(t *testing.T) {
+	good := `{"endpoint":"turingpi.local","user":"root","fingerprint":"41:7C:1E:EA","targets":[{"node_id":"cp-1","slot":1},{"node_id":"n-1","slot":2}]}`
+	ids, err := selectionTargets("turingpi", json.RawMessage(good))
+	if err != nil {
+		t.Fatalf("a well-formed turingpi config must validate: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "cp-1" || ids[1] != "n-1" {
+		t.Errorf("targets = %v, want [cp-1 n-1]", ids)
+	}
+}
+
+// Each rejection names the field an operator has to fix. The TLS one is
+// deliberate rather than defaulted: the board's certificate is minted at
+// the epoch and permanently expired, so CA trust can never pass and a
+// silent default would mean silently unverified.
+func TestTuringPiSelectionRejections(t *testing.T) {
+	for _, tc := range []struct{ name, cfg, want string }{
+		{"no endpoint", `{"user":"root","fingerprint":"x","targets":[{"node_id":"a","slot":1}]}`, "endpoint is required"},
+		{"no user", `{"endpoint":"e","fingerprint":"x","targets":[{"node_id":"a","slot":1}]}`, "username is required"},
+		{"no tls choice", `{"endpoint":"e","user":"root","targets":[{"node_id":"a","slot":1}]}`, "pin the BMC certificate"},
+		{"slot out of range", `{"endpoint":"e","user":"root","fingerprint":"x","targets":[{"node_id":"a","slot":9}]}`, "want 1..4"},
+		{"duplicate slot", `{"endpoint":"e","user":"root","fingerprint":"x","targets":[{"node_id":"a","slot":1},{"node_id":"b","slot":1}]}`, "both claim slot 1"},
+	} {
+		_, err := selectionTargets("turingpi", json.RawMessage(tc.cfg))
+		if err == nil {
+			t.Errorf("%s: should have been rejected", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %q should mention %q", tc.name, err, tc.want)
+		}
+	}
+	// insecure_skip_verify is an explicit alternative to pinning.
+	if _, err := selectionTargets("turingpi", json.RawMessage(
+		`{"endpoint":"e","user":"root","insecure_skip_verify":true,"targets":[{"node_id":"a","slot":1}]}`)); err != nil {
+		t.Errorf("explicit insecure opt-in should validate: %v", err)
+	}
+}
+
+// No backend's credential may sit in the config blob — job specs and step
+// results are served unredacted by the jobs API. The kind->credential
+// table replaced four hardcoded `kind == "bitscope"` checks; this pins
+// that bitscope kept its exact behaviour and that turingpi joined it.
+func TestBackendCredentialsTable(t *testing.T) {
+	bs, ok := CredentialFor("bitscope")
+	if !ok || bs.Field != "unlock" || bs.SettingsKey != setup.KeyBMCBitscopeUnlock {
+		t.Errorf("bitscope credential = %+v, ok=%v — must stay unlock/%s", bs, ok, setup.KeyBMCBitscopeUnlock)
+	}
+	tp, ok := CredentialFor("turingpi")
+	if !ok || tp.Field != "pass" || tp.SettingsKey != setup.KeyBMCTuringPiPass {
+		t.Errorf("turingpi credential = %+v, ok=%v", tp, ok)
+	}
+	if _, ok := CredentialFor("mock"); ok {
+		t.Error("mock has no credential and must not claim one")
+	}
+	if bs.SettingsKey == tp.SettingsKey {
+		t.Error("each backend's credential needs its own settings key")
+	}
+}

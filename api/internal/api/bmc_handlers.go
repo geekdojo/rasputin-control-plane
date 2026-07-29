@@ -52,11 +52,12 @@ func (s *Server) handleBMCGetConfig(w http.ResponseWriter, r *http.Request) {
 	if raw != "" {
 		view.Config = sanitizeBMCConfig(view.Backend, raw)
 	}
-	// The unlock lives under its own settings key (never in bmc.config);
-	// surface only its presence.
-	if view.Backend == "bitscope" {
-		if u, uerr := st.Get(r.Context(), setup.KeyBMCBitscopeUnlock); uerr == nil && u != "" {
-			view.Config = setUnlockSet(view.Config)
+	// A backend's credential lives under its own settings key (never in
+	// bmc.config); surface only whether one is stored, so the form can
+	// show "leave blank to keep" instead of a blank that means "unset".
+	if cred, ok := bmc.CredentialFor(view.Backend); ok {
+		if v, cerr := st.Get(r.Context(), cred.SettingsKey); cerr == nil && v != "" {
+			view.Config = setCredentialSet(view.Config, cred.Field)
 		}
 	}
 	// A pinned host anywhere renders the whole section read-only.
@@ -78,17 +79,18 @@ func (s *Server) handleBMCGetConfig(w http.ResponseWriter, r *http.Request) {
 // settings key), so this is defense-in-depth against any legacy or
 // hand-edited value.
 func sanitizeBMCConfig(kind, raw string) json.RawMessage {
-	if kind != "bitscope" {
+	cred, ok := bmc.CredentialFor(kind)
+	if !ok {
 		return json.RawMessage(raw)
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return nil
 	}
-	if v, ok := m["unlock"].(string); ok && v != "" {
-		m["unlockSet"] = true
+	if v, vok := m[cred.Field].(string); vok && v != "" {
+		m[cred.Field+"Set"] = true
 	}
-	delete(m, "unlock")
+	delete(m, cred.Field)
 	out, err := json.Marshal(m)
 	if err != nil {
 		return nil
@@ -97,14 +99,14 @@ func sanitizeBMCConfig(kind, raw string) json.RawMessage {
 }
 
 // setUnlockSet annotates a config view with unlockSet: true.
-func setUnlockSet(raw json.RawMessage) json.RawMessage {
+func setCredentialSet(raw json.RawMessage, field string) json.RawMessage {
 	m := map[string]any{}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return raw
 		}
 	}
-	m["unlockSet"] = true
+	m[field+"Set"] = true
 	out, err := json.Marshal(m)
 	if err != nil {
 		return raw
@@ -142,15 +144,15 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 	// job specs and step results are served unredacted by the jobs API,
 	// so no secret may enter them. An empty incoming unlock keeps the
 	// stored one; the push step injects it bus-side at dispatch time.
-	unlock := ""
-	if req.Kind == "bitscope" {
-		var uerr error
-		req.Config, uerr = storeAndStripUnlock(r.Context(), st, req.Config)
-		if uerr != nil {
-			writeError(w, http.StatusBadRequest, uerr.Error())
+	secret := ""
+	if cred, ok := bmc.CredentialFor(req.Kind); ok {
+		var serr error
+		req.Config, serr = storeAndStripCredential(r.Context(), st, cred, req.Config)
+		if serr != nil {
+			writeError(w, http.StatusBadRequest, serr.Error())
 			return
 		}
-		unlock, _ = st.Get(r.Context(), setup.KeyBMCBitscopeUnlock)
+		secret, _ = st.Get(r.Context(), cred.SettingsKey)
 	}
 	if err := bmc.ValidateSelection(r.Context(), s.inv, req.Kind, req.Config); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -160,7 +162,7 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 		Kind:       req.Kind,
 		HostNodeID: req.HostNodeID,
 		Config:     req.Config,
-		ConfigHash: bmc.ConfigHash(req.Kind, req.Config, unlock),
+		ConfigHash: bmc.ConfigHash(req.Kind, req.Config, secret),
 	})
 	j, err := s.runner.Submit(r.Context(), "bmc.configure", spec, creator(r))
 	if err != nil {
@@ -170,24 +172,63 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, j)
 }
 
-// storeAndStripUnlock persists a newly-typed bitscope unlock under its
-// own settings key and returns the config with every unlock-related
-// field removed — the returned blob is safe for the job audit trail.
-// An absent/empty unlock keeps the stored secret unchanged.
-func storeAndStripUnlock(ctx context.Context, st *setup.Store, incoming json.RawMessage) (json.RawMessage, error) {
+// POST /api/bmc/probe
+// Body: {"kind":"turingpi","endpoint":"optional"}
+//
+// Asks the BMC-host agent to look for a board and capture the
+// certificate it presents (bmc-settings §7a). Runs with no credentials
+// and before any backend is configured — that is the point: it is what
+// lets Settings offer discovery instead of a blank form asking for an IP
+// and a fingerprint the operator would have to go and read themselves.
+//
+// Routed through the host agent rather than dialled from here because
+// mDNS is link-local: the well-known name resolves from a node on the
+// chassis's segment, which the host agent is and the api may not be.
+func (s *Server) handleBMCProbe(w http.ResponseWriter, r *http.Request) {
+	st := s.setup.Store()
+	var req proto.BMCProbeCmd
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	host, err := st.Get(r.Context(), setup.KeyBMCHostNode)
+	if err != nil || host == "" {
+		writeError(w, http.StatusBadRequest, "no BMC host node configured — pick one before probing")
+		return
+	}
+	body, _ := json.Marshal(req)
+	msg, err := s.nc.Request(proto.BMCProbeSubject(host), body, 25*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("probe rpc to %s: %v", host, err))
+		return
+	}
+	var res proto.BMCProbeResult
+	if uerr := json.Unmarshal(msg.Data, &res); uerr != nil {
+		writeError(w, http.StatusBadGateway, "probe returned an unreadable reply")
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// storeAndStripCredential persists a newly-typed credential under its own
+// settings key and returns the config with every trace of it removed —
+// the returned blob is what lands in the job spec and audit trail, so it
+// must be safe to serve unredacted. An absent/empty value keeps the
+// stored secret unchanged, which is what lets the form show a blank
+// password field without wiping the saved one.
+func storeAndStripCredential(ctx context.Context, st *setup.Store, cred bmc.CredentialField, incoming json.RawMessage) (json.RawMessage, error) {
 	in := map[string]any{}
 	if len(incoming) > 0 {
 		if err := json.Unmarshal(incoming, &in); err != nil {
-			return nil, fmt.Errorf("bitscope config: %w", err)
+			return nil, fmt.Errorf("bmc config: %w", err)
 		}
 	}
-	if v, ok := in["unlock"].(string); ok && v != "" {
-		if err := st.Set(ctx, setup.KeyBMCBitscopeUnlock, v); err != nil {
-			return nil, fmt.Errorf("store unlock: %w", err)
+	if v, ok := in[cred.Field].(string); ok && v != "" {
+		if err := st.Set(ctx, cred.SettingsKey, v); err != nil {
+			return nil, fmt.Errorf("store credential: %w", err)
 		}
 	}
-	delete(in, "unlock")
-	delete(in, "unlockSet")
+	delete(in, cred.Field)
+	delete(in, cred.Field+"Set")
 	out, err := json.Marshal(in)
 	if err != nil {
 		return nil, err

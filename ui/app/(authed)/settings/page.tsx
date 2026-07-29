@@ -35,6 +35,8 @@ import {
   setBMCConfig,
   setDeploymentMode,
   setOperatorKeys,
+  probeBMC,
+  type BMCProbeResult,
 } from '../../../lib/api';
 import { validateSSHKey } from '../../../lib/enroll';
 import type { BMCBackendInfo, BMCConfigView, DeploymentMode, Node, ObsStatus, SetupState } from '../../../lib/types';
@@ -111,6 +113,15 @@ function BMCSection() {
   const [bsUnlock, setBsUnlock] = useState('');
   const [bsUnlockSet, setBsUnlockSet] = useState(false);
   const [bsMapJSON, setBsMapJSON] = useState('');
+  const [tpEndpoint, setTpEndpoint] = useState('');
+  const [tpUser, setTpUser] = useState('root');
+  const [tpPass, setTpPass] = useState('');
+  const [tpPassSet, setTpPassSet] = useState(false);
+  const [tpFingerprint, setTpFingerprint] = useState('');
+  const [tpInsecure, setTpInsecure] = useState(false);
+  const [tpMapJSON, setTpMapJSON] = useState('');
+  const [tpProbing, setTpProbing] = useState(false);
+  const [tpProbe, setTpProbe] = useState<BMCProbeResult | null>(null);
 
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -146,12 +157,55 @@ function BMCSection() {
       setBsMapJSON('');
     }
     setBsUnlock('');
+
+    if (c.backend === 'turingpi') {
+      setTpEndpoint(typeof cfg.endpoint === 'string' ? cfg.endpoint : '');
+      setTpUser(typeof cfg.user === 'string' ? cfg.user : 'root');
+      setTpPassSet(cfg.passSet === true);
+      setTpFingerprint(typeof cfg.fingerprint === 'string' ? cfg.fingerprint : '');
+      setTpInsecure(cfg.insecure_skip_verify === true);
+      setTpMapJSON(Array.isArray(cfg.targets) ? JSON.stringify(cfg.targets, null, 2) : '');
+    } else {
+      setTpEndpoint('');
+      setTpUser('root');
+      setTpPassSet(false);
+      setTpFingerprint('');
+      setTpInsecure(false);
+      setTpMapJSON('');
+    }
+    setTpPass('');
   }
 
   useEffect(() => {
     void reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Discovery, not a form field. The probe runs on the BMC-host agent
+  // with no credentials: mDNS is link-local so only that node can resolve
+  // the board's name, and an unauthenticated 401 identifies the board
+  // before a password exists. The operator confirms the certificate we
+  // captured rather than reading one out of openssl themselves.
+  async function detectBoard() {
+    setTpProbing(true);
+    setTpProbe(null);
+    setErr(null);
+    try {
+      const res = await probeBMC({ kind: 'turingpi', endpoint: tpEndpoint.trim() || undefined });
+      setTpProbe(res);
+      if (res.ok) {
+        if (res.endpoint) setTpEndpoint(res.endpoint);
+        if (res.fingerprint) {
+          setTpFingerprint(res.fingerprint);
+          setTpInsecure(false);
+        }
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTpProbing(false);
+    }
+  }
 
   function buildConfig(): unknown {
     if (kind === 'mock') return { targets: [...mockTargets] };
@@ -165,6 +219,23 @@ function BMCSection() {
       const cfg: Record<string, unknown> = { targets };
       if (bsDev.trim()) cfg.dev = bsDev.trim();
       if (bsUnlock) cfg.unlock = bsUnlock; // empty = keep stored (write-only)
+      return cfg;
+    }
+    if (kind === 'turingpi') {
+      let targets: unknown = [];
+      try {
+        targets = tpMapJSON.trim() ? JSON.parse(tpMapJSON) : [];
+      } catch {
+        throw new Error('slot map is not valid JSON');
+      }
+      const cfg: Record<string, unknown> = {
+        targets,
+        endpoint: tpEndpoint.trim(),
+        user: tpUser.trim(),
+      };
+      if (tpFingerprint.trim()) cfg.fingerprint = tpFingerprint.trim();
+      if (tpInsecure) cfg.insecure_skip_verify = true;
+      if (tpPass) cfg.pass = tpPass; // empty = keep stored (write-only)
       return cfg;
     }
     return undefined;
@@ -298,6 +369,90 @@ function BMCSection() {
                   }}
                 />
               </label>
+            </>
+          )}
+
+          {kind === 'turingpi' && (
+            <>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                <label style={{ flex: 1, color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                  BMC ADDRESS
+                  <Input value={tpEndpoint} onChange={(e) => setTpEndpoint(e.target.value)} placeholder="turingpi.local" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                </label>
+                <Btn disabled={tpProbing || !hostNode} onClick={() => void detectBoard()}>
+                  {tpProbing ? 'DETECTING…' : 'DETECT BOARD'}
+                </Btn>
+              </div>
+              <Hint>
+                Leave the address blank and press DETECT BOARD to find it automatically — the search runs from{' '}
+                {hostNode || 'the BMC host node'}, which is on the board&rsquo;s network. Detect also reads the
+                certificate below, so you do not have to.
+              </Hint>
+
+              {tpProbe && (
+                <div style={{ border: `1px solid ${HAIR}`, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ color: tpProbe.ok && tpProbe.identified ? FG : DIM, fontFamily: MONO, fontSize: 11 }}>
+                    {tpProbe.ok && tpProbe.identified ? 'FOUND A TURING PI' : tpProbe.ok ? 'SOMETHING ANSWERED' : 'NO BOARD FOUND'}
+                  </div>
+                  {tpProbe.detail && <Hint warn={!tpProbe.identified}>{tpProbe.detail}</Hint>}
+                  {tpProbe.certSubject && (
+                    <div style={{ color: DIM, fontFamily: MONO, fontSize: 10 }}>certificate: {tpProbe.certSubject}</div>
+                  )}
+                  {tpProbe.fingerprint && (
+                    <>
+                      <div style={{ color: FG, fontFamily: MONO, fontSize: 10, wordBreak: 'break-all' }}>{tpProbe.fingerprint}</div>
+                      <Hint>
+                        This certificate is now pinned below. It is self-signed and dated 1970 — that is normal for this
+                        board, which has no clock at boot, and is why it cannot be checked against a certificate authority.
+                        Pinning this exact certificate is the stricter option. If it ever changes, Rasputin refuses to
+                        connect rather than trusting the new one silently.
+                      </Hint>
+                    </>
+                  )}
+                </div>
+              )}
+
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC USERNAME
+                <Input value={tpUser} onChange={(e) => setTpUser(e.target.value)} placeholder="root" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC PASSWORD {tpPassSet ? '(set — leave blank to keep)' : ''}
+                <Input type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              {/* The board ships root/turing and its BMC also serves SSH, so
+                  factory credentials on a LAN-reachable board are real exposure
+                  — say so rather than let the default ride silently. */}
+              {tpPass === 'turing' && (
+                <Hint warn>That is the factory default password. The BMC is reachable on your LAN and its account also has SSH — change it on the board and use the new one here.</Hint>
+              )}
+
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                CERTIFICATE FINGERPRINT (SHA-256)
+                <Input value={tpFingerprint} onChange={(e) => setTpFingerprint(e.target.value)} placeholder="41:7C:1E:EA:…" disabled={tpInsecure} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              <Hint>DETECT BOARD fills this in. Only type it by hand if you already have the fingerprint from elsewhere.</Hint>
+              <label style={{ display: 'flex', gap: 8, alignItems: 'center', color: DIM, fontFamily: MONO, fontSize: 10 }}>
+                <input type="checkbox" checked={tpInsecure} onChange={(e) => setTpInsecure(e.target.checked)} />
+                ACCEPT ANY CERTIFICATE (no pinning)
+              </label>
+              {tpInsecure && <Hint warn>Any certificate will be accepted, so this connection can be intercepted on your network. Pin the fingerprint instead unless you are deliberately testing.</Hint>}
+
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                SLOT MAP (JSON rows: {'{"node_id":"…","slot":1}'})
+                <textarea
+                  value={tpMapJSON}
+                  onChange={(e) => setTpMapJSON(e.target.value)}
+                  rows={6}
+                  spellCheck={false}
+                  style={{
+                    display: 'block', marginTop: 4, width: '100%', background: 'transparent',
+                    border: `1px solid ${HAIR}`, color: FG, fontFamily: MONO, fontSize: 11, padding: 8,
+                  }}
+                />
+              </label>
+              <Hint>Slots are numbered 1&ndash;4 as printed on the board. List only the slots you have filled.</Hint>
+              <Hint>This board&rsquo;s BMC offers power and reset, but not a console Rasputin can use — no CONSOLE button appears for its nodes.</Hint>
             </>
           )}
 

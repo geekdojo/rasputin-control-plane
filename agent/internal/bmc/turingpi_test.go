@@ -531,3 +531,44 @@ func TestTuringPiRegisteredInBothPaths(t *testing.T) {
 		t.Errorf("settings path does not know turingpi: %v", err)
 	}
 }
+
+// A .local endpoint must not be handed straight to the OS resolver. The
+// BMC is addressed by name everywhere — the Settings placeholder, the
+// public guide, and the design doc all say to use `turingpi.local`,
+// because the board takes DHCP and a lease is not an identity. The
+// driver nonetheless used a plain transport until 2026-07-28, so the one
+// address form we recommend was the one that could not connect; it went
+// unnoticed because every bench run used a literal IP. This pins that
+// the driver dials through the mDNS-aware path.
+func TestTuringPiDialsLocalNamesViaMDNS(t *testing.T) {
+	b, err := NewTuringPiBackend(TuringPiOptions{
+		Endpoint:           "turingpi.local",
+		User:               "root",
+		Targets:            map[string]int{"cp-1": 1},
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	tr, ok := b.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected an *http.Transport")
+	}
+	if tr.DialContext == nil {
+		t.Fatal("no DialContext — .local endpoints would go to the OS resolver, which cannot resolve them on the appliance")
+	}
+}
+
+// The probe renders digests the way `openssl x509 -fingerprint` does, so
+// an operator comparing what the UI shows against what they ran by hand
+// sees the same string rather than having to squint at case and colons.
+func TestDisplayFingerprintMatchesOpensslForm(t *testing.T) {
+	got := displayFingerprint("417c1eeab9427f10")
+	want := "41:7C:1E:EA:B9:42:7F:10"
+	if got != want {
+		t.Errorf("displayFingerprint = %q, want %q", got, want)
+	}
+	if displayFingerprint("") != "" {
+		t.Error("empty digest should render empty, not a stray colon")
+	}
+}

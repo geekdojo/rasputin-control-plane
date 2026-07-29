@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -160,6 +161,49 @@ func selectionTargets(kind string, config json.RawMessage) ([]string, error) {
 			out = append(out, t.NodeID)
 		}
 		return out, nil
+	case "turingpi":
+		// Shape mirrors the agent's NewFromSelection case exactly — that
+		// is the contract, and a mismatch here would validate cleanly and
+		// then fail on the node.
+		var sel struct {
+			Endpoint    string `json:"endpoint"`
+			User        string `json:"user"`
+			Fingerprint string `json:"fingerprint,omitempty"`
+			Insecure    bool   `json:"insecure_skip_verify,omitempty"`
+			Targets     []struct {
+				NodeID string `json:"node_id"`
+				Slot   int    `json:"slot"`
+			} `json:"targets"`
+		}
+		if err := json.Unmarshal(config, &sel); err != nil {
+			return nil, fmt.Errorf("turingpi config: %w", err)
+		}
+		if strings.TrimSpace(sel.Endpoint) == "" {
+			return nil, errors.New("turingpi config: endpoint is required")
+		}
+		if strings.TrimSpace(sel.User) == "" {
+			return nil, errors.New("turingpi config: username is required (the BMC requires auth)")
+		}
+		// TLS has to be chosen explicitly, same rule the driver enforces:
+		// the board's certificate is minted at the epoch and permanently
+		// expired, so CA trust cannot work and a silent default would mean
+		// silently unverified.
+		if sel.Fingerprint == "" && !sel.Insecure {
+			return nil, errors.New("turingpi config: pin the BMC certificate fingerprint, or explicitly accept any certificate")
+		}
+		seenSlot := map[int]string{}
+		out := make([]string, 0, len(sel.Targets))
+		for _, t := range sel.Targets {
+			if t.Slot < 1 || t.Slot > 4 {
+				return nil, fmt.Errorf("turingpi config: node %q has slot %d, want 1..4", t.NodeID, t.Slot)
+			}
+			if prev, dup := seenSlot[t.Slot]; dup {
+				return nil, fmt.Errorf("turingpi config: nodes %q and %q both claim slot %d", prev, t.NodeID, t.Slot)
+			}
+			seenSlot[t.Slot] = t.NodeID
+			out = append(out, t.NodeID)
+		}
+		return out, nil
 	}
 	return nil, fmt.Errorf("no config schema for backend %q", kind)
 }
@@ -213,13 +257,13 @@ func configurePush(st *setup.Store) jobs.DoFn {
 			return nil, err
 		}
 		pushCfg := spec.Config
-		if spec.Kind == "bitscope" {
-			unlock, uerr := st.Get(sc.Ctx, setup.KeyBMCBitscopeUnlock)
-			if uerr != nil {
-				return nil, fmt.Errorf("read unlock: %w", uerr)
+		if cred, ok := CredentialFor(spec.Kind); ok {
+			secret, serr := st.Get(sc.Ctx, cred.SettingsKey)
+			if serr != nil {
+				return nil, fmt.Errorf("read %s credential: %w", spec.Kind, serr)
 			}
-			if unlock != "" {
-				pushCfg, err = injectJSONField(spec.Config, "unlock", unlock)
+			if secret != "" {
+				pushCfg, err = injectJSONField(spec.Config, cred.Field, secret)
 				if err != nil {
 					return nil, err
 				}
@@ -274,4 +318,49 @@ func configureRecord(st *setup.Store) jobs.DoFn {
 		sc.Log("info", "settings recorded")
 		return json.Marshal(spec)
 	}
+}
+
+// ── Per-kind credential handling ─────────────────────────────────────────
+//
+// Job specs and step results are served unredacted by the jobs API and
+// persist in the audit trail, so no backend's credential may ride inside
+// KeyBMCConfig or a job spec (security review, CP #34). Each kind that
+// has one declares it here instead: the handler strips it into its own
+// settings key on write, and the push step injects it into the bus
+// command at dispatch time only.
+//
+// This started as `if kind == "bitscope"` in four places. Turing Pi made
+// that a pattern rather than a special case, so it is a table now —
+// adding the chassis backend later is one line, not another four-site
+// edit that can be half-done.
+type CredentialField struct {
+	Field       string // JSON field in the config blob
+	SettingsKey string // settings key it is stored under instead
+}
+
+var backendCredentials = map[string]CredentialField{
+	"bitscope": {Field: "unlock", SettingsKey: setup.KeyBMCBitscopeUnlock},
+	"turingpi": {Field: "pass", SettingsKey: setup.KeyBMCTuringPiPass},
+}
+
+// CredentialFor reports the credential field for a backend kind, if it
+// has one. Kinds absent from the table (mock) carry no secret.
+func CredentialFor(kind string) (CredentialField, bool) {
+	c, ok := backendCredentials[kind]
+	return c, ok
+}
+
+// StoredCredential returns the persisted credential for a kind, or ""
+// when the kind has none. Used to fold the secret into ConfigHash so a
+// rotation still re-pushes.
+func StoredCredential(ctx context.Context, st *setup.Store, kind string) string {
+	c, ok := CredentialFor(kind)
+	if !ok {
+		return ""
+	}
+	v, err := st.Get(ctx, c.SettingsKey)
+	if err != nil {
+		return ""
+	}
+	return v
 }

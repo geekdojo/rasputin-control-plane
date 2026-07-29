@@ -235,6 +235,61 @@ type BMCConfigureAck struct {
 	Detail     string `json:"detail,omitempty"`
 }
 
+// ── Probe (bmc-settings §7a) ─────────────────────────────────────────────
+//
+// Selecting a networked backend triggers a probe rather than a form. The
+// operator should not have to know their board's IP, nor run
+// `openssl s_client` to read a fingerprint out of a certificate — both
+// are things the controlplane can find out for itself, and asking for
+// them was the difference between a setting and a chore.
+//
+// Two facts come back that no form can supply honestly:
+//
+//   - **Identity before credentials.** An unauthenticated request to a
+//     Turing Pi BMC returns 401 with `no authorization header provided`.
+//     That identifies the board before any password exists, so the UI can
+//     say "found a Turing Pi" rather than "something answered".
+//   - **The certificate itself.** The leaf is captured during the probe
+//     and shown for confirmation — trust-on-first-use, the known_hosts
+//     model. Chain validation can never work here: the board's cert is
+//     self-signed AND minted at the epoch, so it is permanently expired.
+type BMCProbeCmd struct {
+	// Kind is the backend being probed; only networked kinds are
+	// probeable. Empty defaults to turingpi, the only one today.
+	Kind string `json:"kind,omitempty"`
+	// Endpoint is optional. Empty means "discover" — the agent resolves
+	// the backend's well-known mDNS name from where it actually sits,
+	// which is the point of probing from the BMC host rather than from
+	// the operator's browser.
+	Endpoint string `json:"endpoint,omitempty"`
+}
+
+// BMCProbeResult is what the operator is asked to confirm.
+type BMCProbeResult struct {
+	OK bool `json:"ok"`
+	// Endpoint actually reached — echoed back because it may have been
+	// discovered rather than supplied.
+	Endpoint string `json:"endpoint,omitempty"`
+	// Fingerprint is the SHA-256 of the presented leaf certificate,
+	// colon-separated uppercase hex, ready to display and to pin.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// Identified is true when the response carried the signature of the
+	// expected board. False with OK true means something answered on that
+	// address but did not look like the backend selected — worth showing,
+	// never worth silently pinning.
+	Identified bool `json:"identified,omitempty"`
+	// CertSubject is shown alongside the fingerprint so the operator has
+	// something human to recognise ("CN=Turing-Pi self signed").
+	CertSubject string `json:"certSubject,omitempty"`
+	// Detail carries the reason on failure, or a caveat on success.
+	Detail string `json:"detail,omitempty"`
+}
+
+// BMCProbeSubject returns the cmd subject for a probe on the BMC host.
+func BMCProbeSubject(bmcHostID string) string {
+	return NodeCmdSubject(bmcHostID, "bmc.probe")
+}
+
 // BMCConfigureSubject returns the cmd subject that delivers the BMC
 // selection to the host agent.
 func BMCConfigureSubject(bmcHostID string) string {

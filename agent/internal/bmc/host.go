@@ -1,6 +1,7 @@
 package bmc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -140,6 +142,16 @@ func (h *Host) Attach(nc *nats.Conn, rereg func()) error {
 	h.nc = nc
 	h.rereg = rereg
 
+	// Probe is deliberately NOT gated on a configured backend — its whole
+	// purpose is to run before one exists, so an operator can discover the
+	// board and see its certificate while BMC is still hard-off.
+	probeSub, err := nc.Subscribe(proto.BMCProbeSubject(h.nodeID), h.handleProbe)
+	if err != nil {
+		return err
+	}
+	h.subs = append(h.subs, probeSub)
+	log.Printf("rasputin-agent: subscribed to %s", proto.BMCProbeSubject(h.nodeID))
+
 	cfgSub, err := nc.Subscribe(proto.BMCConfigureSubject(h.nodeID), h.handleConfigure)
 	if err != nil {
 		return fmt.Errorf("bmc host: subscribe configure: %w", err)
@@ -186,6 +198,22 @@ func (h *Host) teardownLocked(reason string) {
 	}
 	h.backend = nil
 	h.hash = ""
+}
+
+func (h *Host) handleProbe(m *nats.Msg) {
+	var cmd proto.BMCProbeCmd
+	if len(m.Data) > 0 {
+		if err := json.Unmarshal(m.Data, &cmd); err != nil {
+			respond(m, proto.BMCProbeResult{Detail: "bad cmd: " + err.Error()})
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res := Probe(ctx, cmd)
+	log.Printf("rasputin-agent: bmc: probe kind=%s endpoint=%q ok=%v identified=%v",
+		cmd.Kind, res.Endpoint, res.OK, res.Identified)
+	respond(m, res)
 }
 
 func (h *Host) handleConfigure(m *nats.Msg) {

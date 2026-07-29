@@ -46,4 +46,11 @@ const (
 	// jobs API serves those unredacted; security review on CP #34). The
 	// push step injects it into the bus command at dispatch time only.
 	KeyBMCBitscopeUnlock = "bmc.bitscope_unlock"
+	// KeyBMCTuringPiPass holds the Turing Pi BMC password — a SECRET,
+	// stored under its own key for exactly the same reason as the
+	// bitscope unlock above. This one is a real credential rather than a
+	// mostly-public factory sequence: the board's BMC is LAN-reachable
+	// and its account also has SSH, so leaking it into the audit trail
+	// would be worth more to an attacker than the unlock ever was.
+	KeyBMCTuringPiPass = "bmc.turingpi_pass"
 )
