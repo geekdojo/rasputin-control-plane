@@ -262,6 +262,27 @@ type BMCProbeCmd struct {
 	// which is the point of probing from the BMC host rather than from
 	// the operator's browser.
 	Endpoint string `json:"endpoint,omitempty"`
+	// User and Pass are optional and enable the SECOND half of the probe:
+	// reading each slot's console banner to work out which node is in
+	// which slot. Identification and certificate capture deliberately
+	// need no credentials, because they happen before any exist — but the
+	// UART endpoint is authenticated, so slot detection can only run once
+	// the operator has supplied a password. One probe call does whichever
+	// half it has the inputs for.
+	User string `json:"user,omitempty"`
+	Pass string `json:"pass,omitempty"`
+}
+
+// BMCProbeSlot is one physical slot as the board reports it. The agent
+// fills everything except NodeID; the api fills NodeID by matching
+// Hostname against inventory, because the agent has no inventory and the
+// api has no board.
+type BMCProbeSlot struct {
+	Slot     int    `json:"slot"`               // 1-based, as printed on the board
+	Powered  bool   `json:"powered"`            //
+	Hostname string `json:"hostname,omitempty"` // read from the login banner
+	NodeID   string `json:"nodeId,omitempty"`   // matched Rasputin node, if any
+	Detail   string `json:"detail,omitempty"`   // why nothing was learned
 }
 
 // BMCProbeResult is what the operator is asked to confirm.
@@ -281,6 +302,10 @@ type BMCProbeResult struct {
 	// CertSubject is shown alongside the fingerprint so the operator has
 	// something human to recognise ("CN=Turing-Pi self signed").
 	CertSubject string `json:"certSubject,omitempty"`
+	// Slots is the per-slot occupancy read, present only when the probe
+	// was given credentials. Empty is not "no slots" — it means slot
+	// detection did not run.
+	Slots []BMCProbeSlot `json:"slots,omitempty"`
 	// Detail carries the reason on failure, or a caveat on success.
 	Detail string `json:"detail,omitempty"`
 }

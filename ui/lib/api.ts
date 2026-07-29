@@ -785,8 +785,17 @@ export function setBMCConfig(req: { kind: string; hostNodeId?: string; config?: 
   });
 }
 
+export type BMCProbeSlot = {
+  slot: number;
+  powered: boolean;
+  hostname?: string;
+  nodeId?: string;
+  detail?: string;
+};
+
 export type BMCProbeResult = {
   ok: boolean;
+  slots?: BMCProbeSlot[];
   endpoint?: string;
   fingerprint?: string;
   identified?: boolean;
@@ -799,7 +808,7 @@ export type BMCProbeResult = {
 // needs no credentials — it exists so Settings can offer discovery
 // instead of asking for an IP and a fingerprint the operator would have
 // to go and read out of openssl themselves.
-export function probeBMC(req: { kind?: string; endpoint?: string }): Promise<BMCProbeResult> {
+export function probeBMC(req: { kind?: string; endpoint?: string; user?: string; pass?: string }): Promise<BMCProbeResult> {
   return jsonFetch<BMCProbeResult>('/api/bmc/probe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

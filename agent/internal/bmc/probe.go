@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -145,6 +148,26 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 	if res.Fingerprint == "" {
 		res.OK = false
 		res.Detail = "connected but no certificate was presented — nothing to pin"
+		return res
+	}
+
+	// Second half: which node is in which slot. Needs credentials, so it
+	// runs only once the operator has supplied them — and only against a
+	// board we just identified, so we are never reading consoles from
+	// something we could not name.
+	if res.Identified && strings.TrimSpace(cmd.User) != "" {
+		b, berr := NewTuringPiBackend(TuringPiOptions{
+			Endpoint:    endpoint,
+			User:        cmd.User,
+			Pass:        cmd.Pass,
+			Targets:     map[string]int{"probe-placeholder": 1},
+			Fingerprint: res.Fingerprint,
+		})
+		if berr != nil {
+			res.Detail += " Slot detection unavailable: " + berr.Error()
+		} else {
+			res.Slots = detectSlots(ctx, b)
+		}
 	}
 	return res
 }
@@ -175,4 +198,75 @@ func displayFingerprint(hexDigest string) string {
 		b.WriteString(up[i : i+2])
 	}
 	return b.String()
+}
+
+// loginBannerHost matches the hostname a getty prints before its login
+// prompt — `tp-n1 login:`. That string is the node's own idea of who it
+// is, which for an enrolled Rasputin node is its node-id, so it is the
+// cheapest possible way to learn which node sits in which slot.
+//
+// Deliberately anchored on ` login:` rather than parsing the whole
+// banner: the ring buffer may have wrapped mid-boot, so the only thing
+// that can be relied on is the repeating prompt at the tail.
+var loginBannerHost = regexp.MustCompile(`(?m)^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s+login:`)
+
+// detectSlots reads each slot's console and reports what it finds. It is
+// non-destructive — the UART endpoint returns the ring buffer's current
+// contents and consumes nothing — so this is safe to run against a
+// working cluster.
+//
+// Requires credentials: unlike identification and certificate capture,
+// the UART endpoint is authenticated. That is why it is a separate half
+// of the probe rather than part of the first pass.
+//
+// Slots that report nothing are reported AS nothing rather than skipped.
+// An unpowered slot, a slot whose buffer wrapped past its last prompt,
+// and a slot running something that is not Rasputin are all legitimate
+// states an operator needs to see, and all of them mean "you fill this
+// row in yourself".
+func detectSlots(ctx context.Context, t *TuringPiBackend) []proto.BMCProbeSlot {
+	out := make([]proto.BMCProbeSlot, 0, turingpiMaxSlot)
+	power, perr := t.readPower(ctx)
+	for slot := turingpiMinSlot; slot <= turingpiMaxSlot; slot++ {
+		s := proto.BMCProbeSlot{Slot: slot}
+		if perr == nil {
+			s.Powered = power[slot] == proto.BMCStateOn
+		}
+		if perr == nil && !s.Powered {
+			s.Detail = "slot is powered off — power it on to identify it, or choose the node yourself"
+			out = append(out, s)
+			continue
+		}
+		body, err := t.get(ctx, url.Values{
+			"opt": {"get"}, "type": {"uart"}, "node": {zeroBasedNode(slot)},
+		})
+		if err != nil {
+			s.Detail = "could not read this slot's console"
+			out = append(out, s)
+			continue
+		}
+		var env struct {
+			Response []struct {
+				UART string `json:"uart"`
+			} `json:"response"`
+		}
+		if json.Unmarshal(body, &env) != nil || len(env.Response) == 0 {
+			s.Detail = "console returned nothing readable"
+			out = append(out, s)
+			continue
+		}
+		text := env.Response[0].UART
+		if m := loginBannerHost.FindAllStringSubmatch(strings.ReplaceAll(text, "\r", "\n"), -1); len(m) > 0 {
+			// Last match wins — the most recent prompt is the most
+			// current identity, and a node that was renamed or re-seeded
+			// will have printed the old one earlier in the same buffer.
+			s.Hostname = m[len(m)-1][1]
+		} else if strings.TrimSpace(text) == "" {
+			s.Detail = "console buffer is empty — the node may still be booting"
+		} else {
+			s.Detail = "no login prompt in this slot's console — choose the node yourself"
+		}
+		out = append(out, s)
+	}
+	return out
 }

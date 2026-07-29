@@ -119,7 +119,7 @@ function BMCSection() {
   const [tpPassSet, setTpPassSet] = useState(false);
   const [tpFingerprint, setTpFingerprint] = useState('');
   const [tpInsecure, setTpInsecure] = useState(false);
-  const [tpMapJSON, setTpMapJSON] = useState('');
+  const [tpSlots, setTpSlots] = useState<Record<number, string>>({ 1: '', 2: '', 3: '', 4: '' });
   const [tpProbing, setTpProbing] = useState(false);
   const [tpProbe, setTpProbe] = useState<BMCProbeResult | null>(null);
 
@@ -164,14 +164,20 @@ function BMCSection() {
       setTpPassSet(cfg.passSet === true);
       setTpFingerprint(typeof cfg.fingerprint === 'string' ? cfg.fingerprint : '');
       setTpInsecure(cfg.insecure_skip_verify === true);
-      setTpMapJSON(Array.isArray(cfg.targets) ? JSON.stringify(cfg.targets, null, 2) : '');
+      const slots: Record<number, string> = { 1: '', 2: '', 3: '', 4: '' };
+      if (Array.isArray(cfg.targets)) {
+        for (const t of cfg.targets as Array<{ node_id?: string; slot?: number }>) {
+          if (t && typeof t.slot === 'number' && typeof t.node_id === 'string') slots[t.slot] = t.node_id;
+        }
+      }
+      setTpSlots(slots);
     } else {
       setTpEndpoint('');
       setTpUser('root');
       setTpPassSet(false);
       setTpFingerprint('');
       setTpInsecure(false);
-      setTpMapJSON('');
+      setTpSlots({ 1: '', 2: '', 3: '', 4: '' });
     }
     setTpPass('');
   }
@@ -191,13 +197,39 @@ function BMCSection() {
     setTpProbe(null);
     setErr(null);
     try {
-      const res = await probeBMC({ kind: 'turingpi', endpoint: tpEndpoint.trim() || undefined });
+      const res = await probeBMC({
+        kind: 'turingpi',
+        endpoint: tpEndpoint.trim() || undefined,
+        // Identification and the certificate need no credentials. Slot
+        // detection does — the console endpoint is authenticated — so it
+        // only runs once there is a password to use.
+        user: tpUser.trim() || undefined,
+        pass: tpPass || undefined,
+      });
       setTpProbe(res);
       if (res.ok) {
         if (res.endpoint) setTpEndpoint(res.endpoint);
         if (res.fingerprint) {
           setTpFingerprint(res.fingerprint);
           setTpInsecure(false);
+        }
+        if (res.slots?.length) {
+          // Detect means detect. An earlier version only filled rows that
+          // were still empty, on the theory that a choice already made
+          // outranks a console banner — which fails the obvious case:
+          // clearing the rows in order to test detection, then watching
+          // the button do nothing (Bryce, 2026-07-28). A button that
+          // declines to change anything is indistinguishable from a
+          // broken one. Pressing it again is the operator asking to look
+          // again, so the findings win; overriding a row afterwards is
+          // one click and it sticks until the next press.
+          setTpSlots((prev) => {
+            const next = { ...prev };
+            for (const sl of res.slots ?? []) {
+              if (sl.nodeId) next[sl.slot] = sl.nodeId;
+            }
+            return next;
+          });
         }
       }
     } catch (e) {
@@ -222,12 +254,9 @@ function BMCSection() {
       return cfg;
     }
     if (kind === 'turingpi') {
-      let targets: unknown = [];
-      try {
-        targets = tpMapJSON.trim() ? JSON.parse(tpMapJSON) : [];
-      } catch {
-        throw new Error('slot map is not valid JSON');
-      }
+      const targets = Object.entries(tpSlots)
+        .filter(([, id]) => id.trim() !== '')
+        .map(([slot, id]) => ({ node_id: id, slot: Number(slot) }));
       const cfg: Record<string, unknown> = {
         targets,
         endpoint: tpEndpoint.trim(),
@@ -374,6 +403,21 @@ function BMCSection() {
 
           {kind === 'turingpi' && (
             <>
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC USERNAME
+                <Input value={tpUser} onChange={(e) => setTpUser(e.target.value)} placeholder="root" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC PASSWORD {tpPassSet ? '(set — leave blank to keep)' : ''}
+                <Input type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              {/* The board ships root/turing and its BMC also serves SSH, so
+                  factory credentials on a LAN-reachable board are real exposure
+                  — say so rather than let the default ride silently. */}
+              {tpPass === 'turing' && (
+                <Hint warn>That is the factory default password. The BMC is reachable on your LAN and its account also has SSH — change it on the board and use the new one here.</Hint>
+              )}
+
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
                 <label style={{ flex: 1, color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                   BMC ADDRESS
@@ -388,6 +432,16 @@ function BMCSection() {
                 {hostNode || 'the BMC host node'}, which is on the board&rsquo;s network. Detect also reads the
                 certificate below, so you do not have to.
               </Hint>
+              {/* Finding the board needs no credentials; reading the slots
+                  does, because that endpoint is authenticated. Say which
+                  you will get BEFORE the click — otherwise pressing it
+                  early looks like the slot detection is broken. */}
+              {!tpPass && !tpPassSet && (
+                <Hint warn>
+                  Without a password above, DETECT BOARD will find the board and its certificate but cannot read the
+                  slots. Fill the password in first to have the slot list below filled in too.
+                </Hint>
+              )}
 
               {tpProbe && (
                 <div style={{ border: `1px solid ${HAIR}`, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -413,21 +467,6 @@ function BMCSection() {
               )}
 
               <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
-                BMC USERNAME
-                <Input value={tpUser} onChange={(e) => setTpUser(e.target.value)} placeholder="root" style={{ display: 'block', marginTop: 4, width: '100%' }} />
-              </label>
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
-                BMC PASSWORD {tpPassSet ? '(set — leave blank to keep)' : ''}
-                <Input type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
-              </label>
-              {/* The board ships root/turing and its BMC also serves SSH, so
-                  factory credentials on a LAN-reachable board are real exposure
-                  — say so rather than let the default ride silently. */}
-              {tpPass === 'turing' && (
-                <Hint warn>That is the factory default password. The BMC is reachable on your LAN and its account also has SSH — change it on the board and use the new one here.</Hint>
-              )}
-
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 CERTIFICATE FINGERPRINT (SHA-256)
                 <Input value={tpFingerprint} onChange={(e) => setTpFingerprint(e.target.value)} placeholder="41:7C:1E:EA:…" disabled={tpInsecure} style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
@@ -438,20 +477,46 @@ function BMCSection() {
               </label>
               {tpInsecure && <Hint warn>Any certificate will be accepted, so this connection can be intercepted on your network. Pin the fingerprint instead unless you are deliberately testing.</Hint>}
 
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
-                SLOT MAP (JSON rows: {'{"node_id":"…","slot":1}'})
-                <textarea
-                  value={tpMapJSON}
-                  onChange={(e) => setTpMapJSON(e.target.value)}
-                  rows={6}
-                  spellCheck={false}
-                  style={{
-                    display: 'block', marginTop: 4, width: '100%', background: 'transparent',
-                    border: `1px solid ${HAIR}`, color: FG, fontFamily: MONO, fontSize: 11, padding: 8,
-                  }}
-                />
-              </label>
-              <Hint>Slots are numbered 1&ndash;4 as printed on the board. List only the slots you have filled.</Hint>
+              <div style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>WHICH NODE IS IN WHICH SLOT</div>
+              <Hint>
+                Slots are numbered 1&ndash;4 as printed on the board. Pick the Rasputin node in each one, and leave empty
+                slots set to &ldquo;not installed&rdquo;. With a password set, DETECT BOARD reads each slot&rsquo;s console and
+                fills these in &mdash; replacing whatever is selected, so press it whenever you want the board re-read.
+              </Hint>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {[1, 2, 3, 4].map((slot) => {
+                  const found = tpProbe?.slots?.find((sl) => sl.slot === slot);
+                  return (
+                    <div key={slot} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <span style={{ color: DIM, fontFamily: MONO, fontSize: 11, width: 56 }}>SLOT {slot}</span>
+                      <select
+                        value={tpSlots[slot] ?? ''}
+                        onChange={(e) => setTpSlots((prev) => ({ ...prev, [slot]: e.target.value }))}
+                        style={{
+                          flex: 1, background: 'transparent', border: `1px solid ${HAIR}`,
+                          color: FG, fontFamily: MONO, fontSize: 11, padding: 6,
+                        }}
+                      >
+                        <option value="">— not installed —</option>
+                        {nodes.map((n) => (
+                          <option key={n.id} value={n.id}>{n.id}</option>
+                        ))}
+                      </select>
+                      {found && (
+                        <span style={{ color: DIM, fontFamily: MONO, fontSize: 10, flex: 1 }}>
+                          {found.nodeId
+                            ? `detected: ${found.nodeId}`
+                            : found.detail
+                              ? found.detail
+                              : found.powered
+                                ? 'powered, not identified'
+                                : 'powered off'}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
               <Hint>This board&rsquo;s BMC offers power and reset, but not a console Rasputin can use — no CONSOLE button appears for its nodes.</Hint>
             </>
           )}
