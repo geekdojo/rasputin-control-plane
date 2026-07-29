@@ -122,6 +122,7 @@ function BMCSection() {
   const [tpSlots, setTpSlots] = useState<Record<number, string>>({ 1: '', 2: '', 3: '', 4: '' });
   const [tpProbing, setTpProbing] = useState(false);
   const [tpProbe, setTpProbe] = useState<BMCProbeResult | null>(null);
+  const [tpAccepted, setTpAccepted] = useState(false);
 
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -192,56 +193,64 @@ function BMCSection() {
   // the board's name, and an unauthenticated 401 identifies the board
   // before a password exists. The operator confirms the certificate we
   // captured rather than reading one out of openssl themselves.
-  async function detectBoard() {
+  // Two-step by necessity, one press by design.
+  //
+  // Finding the board needs no credentials; reading its slots does. We
+  // must not send a password to a board whose certificate the operator
+  // has not accepted — pinning to a digest captured on the same
+  // unverified handshake would authorise whatever answered.
+  //
+  // The first build made that an implicit second press of the same
+  // button, which reads as the button not working (Bryce, bench
+  // 2026-07-29). So the certificate now gets an explicit accept, exactly
+  // like ssh asking about an unknown host key, and accepting runs the
+  // credentialed half straight away.
+  async function runProbe(acceptedFingerprint?: string) {
     setTpProbing(true);
-    setTpProbe(null);
     setErr(null);
     try {
       const res = await probeBMC({
         kind: 'turingpi',
         endpoint: tpEndpoint.trim() || undefined,
-        // Identification and the certificate need no credentials. Slot
-        // detection does — the console endpoint is authenticated — so it
-        // only runs once there is a password to use AND a certificate the
-        // operator has already accepted. Sending the fingerprint back is
-        // what makes the pin mean something: without it the agent would
-        // be trusting a digest it captured on the same unverified
-        // handshake, and credentials would go to whatever answered.
         user: tpUser.trim() || undefined,
         pass: tpPass || undefined,
-        fingerprint: tpFingerprint.trim() || undefined,
+        fingerprint: acceptedFingerprint,
       });
       setTpProbe(res);
-      if (res.ok) {
-        if (res.endpoint) setTpEndpoint(res.endpoint);
-        if (res.fingerprint) {
-          setTpFingerprint(res.fingerprint);
-          setTpInsecure(false);
-        }
-        if (res.slots?.length) {
-          // Detect means detect. An earlier version only filled rows that
-          // were still empty, on the theory that a choice already made
-          // outranks a console banner — which fails the obvious case:
-          // clearing the rows in order to test detection, then watching
-          // the button do nothing (Bryce, 2026-07-28). A button that
-          // declines to change anything is indistinguishable from a
-          // broken one. Pressing it again is the operator asking to look
-          // again, so the findings win; overriding a row afterwards is
-          // one click and it sticks until the next press.
-          setTpSlots((prev) => {
-            const next = { ...prev };
-            for (const sl of res.slots ?? []) {
-              if (sl.nodeId) next[sl.slot] = sl.nodeId;
-            }
-            return next;
-          });
-        }
+      if (!res.ok) return;
+      if (res.endpoint) setTpEndpoint(res.endpoint);
+      if (res.slots?.length) {
+        setTpSlots((prev) => {
+          const next = { ...prev };
+          for (const sl of res.slots ?? []) {
+            if (sl.nodeId) next[sl.slot] = sl.nodeId;
+          }
+          return next;
+        });
       }
+      return res;
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setTpProbing(false);
     }
+  }
+
+  async function detectBoard() {
+    setTpProbe(null);
+    setTpAccepted(false);
+    await runProbe(tpFingerprint.trim() || undefined);
+  }
+
+  // Accepting is the trust decision, so it is its own act — and it is
+  // the only thing that lets a credential leave this cluster.
+  async function acceptCertificate() {
+    const fp = tpProbe?.fingerprint;
+    if (!fp) return;
+    setTpFingerprint(fp);
+    setTpInsecure(false);
+    setTpAccepted(true);
+    await runProbe(fp);
   }
 
   function buildConfig(): unknown {
@@ -434,26 +443,9 @@ function BMCSection() {
               </div>
               <Hint>
                 Leave the address blank and press DETECT BOARD to find it automatically — the search runs from{' '}
-                {hostNode || 'the BMC host node'}, which is on the board&rsquo;s network. Detect also reads the
-                certificate below, so you do not have to.
+                {hostNode || 'the BMC host node'}, which is on the board&rsquo;s network. It reads the board&rsquo;s
+                certificate and shows it to you; accepting it pins it and fills in the slot list.
               </Hint>
-              {/* Finding the board needs no credentials; reading the slots
-                  does, because that endpoint is authenticated. Say which
-                  you will get BEFORE the click — otherwise pressing it
-                  early looks like the slot detection is broken. */}
-              {!tpFingerprint.trim() && (
-                <Hint>
-                  First press finds the board and reads its certificate. Once you have accepted that certificate,
-                  press DETECT BOARD again to fill in the slot list &mdash; your password is only ever sent to a board
-                  presenting the certificate you accepted.
-                </Hint>
-              )}
-              {tpFingerprint.trim() && !tpPass && !tpPassSet && (
-                <Hint warn>
-                  Add the password above, then press DETECT BOARD again to fill in the slot list.
-                </Hint>
-              )}
-
               {tpProbe && (
                 <div style={{ border: `1px solid ${HAIR}`, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <div style={{ color: tpProbe.ok && tpProbe.identified ? FG : DIM, fontFamily: MONO, fontSize: 11 }}>
@@ -467,11 +459,27 @@ function BMCSection() {
                     <>
                       <div style={{ color: FG, fontFamily: MONO, fontSize: 10, wordBreak: 'break-all' }}>{tpProbe.fingerprint}</div>
                       <Hint>
-                        This certificate is now pinned below. It is self-signed and dated 1970 — that is normal for this
-                        board, which has no clock at boot, and is why it cannot be checked against a certificate authority.
-                        Pinning this exact certificate is the stricter option. If it ever changes, Rasputin refuses to
-                        connect rather than trusting the new one silently.
+                        This certificate is self-signed and dated 1970 — normal for this board, which has no clock at
+                        boot, and why it cannot be checked against a certificate authority. Accepting pins this exact
+                        certificate; if it ever changes, Rasputin refuses to connect rather than trusting the new one
+                        silently.
                       </Hint>
+                      {/* The trust decision is its own act, like ssh asking
+                          about an unknown host key — and it is the only thing
+                          that lets the password leave this cluster. */}
+                      {!tpAccepted && (
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <Btn variant="primary" disabled={tpProbing} onClick={() => void acceptCertificate()}>
+                            {tpProbing ? 'READING SLOTS…' : 'ACCEPT CERTIFICATE'}
+                          </Btn>
+                          <span style={{ color: DIM, fontFamily: MONO, fontSize: 10 }}>
+                            {tpPass || tpPassSet ? 'then the slot list fills in' : 'add the password above first'}
+                          </span>
+                        </div>
+                      )}
+                      {tpAccepted && (
+                        <div style={{ color: DIM, fontFamily: MONO, fontSize: 10 }}>&#10003; accepted and pinned</div>
+                      )}
                     </>
                   )}
                 </div>
