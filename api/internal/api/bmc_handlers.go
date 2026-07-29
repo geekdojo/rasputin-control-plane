@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -206,7 +207,74 @@ func (s *Server) handleBMCProbe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "probe returned an unreadable reply")
 		return
 	}
+	// The agent reads what each slot calls itself; only the api can say
+	// which Rasputin node that is. Split that way because the agent has
+	// no inventory and the api has no board.
+	s.matchProbeSlots(r.Context(), &res)
 	writeJSON(w, http.StatusOK, res)
+}
+
+// matchProbeSlots turns each slot's self-reported hostname into a
+// Rasputin node id, so the operator confirms a filled-in map instead of
+// composing one.
+//
+// A hostname is only a hint, never an assertion — it is whatever the
+// node's getty happens to print. So this matches conservatively and
+// leaves NodeID empty rather than guessing:
+//
+//   - exact node-id match, or exact hostname match, wins
+//   - anything ambiguous or unrecognised is left blank with a reason
+//
+// The controlplane is the case that reliably does not match: it sets a
+// transient hostname of "rasputin" regardless of its node-id, so it will
+// always fall through to the dropdown. That is expected, and worth
+// saying in the row rather than looking like a failure.
+func (s *Server) matchProbeSlots(ctx context.Context, res *proto.BMCProbeResult) {
+	if len(res.Slots) == 0 {
+		return
+	}
+	nodes, err := s.inv.List(ctx)
+	if err != nil {
+		return
+	}
+	matchProbeSlotsAgainst(res.Slots, nodes)
+}
+
+// matchProbeSlotsAgainst is the pure half, so the matching rules can be
+// tested without a Server or a board.
+func matchProbeSlotsAgainst(slots []proto.BMCProbeSlot, nodes []*proto.Node) {
+	byID := make(map[string]string, len(nodes))
+	byHost := make(map[string]string, len(nodes))
+	hostDup := map[string]bool{}
+	for _, n := range nodes {
+		byID[strings.ToLower(n.ID)] = n.ID
+		if h := strings.ToLower(strings.TrimSpace(n.Hostname)); h != "" {
+			if _, seen := byHost[h]; seen {
+				hostDup[h] = true
+			}
+			byHost[h] = n.ID
+		}
+	}
+	for i := range slots {
+		sl := &slots[i]
+		h := strings.ToLower(strings.TrimSpace(sl.Hostname))
+		if h == "" {
+			continue
+		}
+		if id, ok := byID[h]; ok {
+			sl.NodeID = id
+			continue
+		}
+		if id, ok := byHost[h]; ok && !hostDup[h] {
+			sl.NodeID = id
+			continue
+		}
+		if hostDup[h] {
+			sl.Detail = fmt.Sprintf("more than one node answers to %q — choose which one this slot is", sl.Hostname)
+			continue
+		}
+		sl.Detail = fmt.Sprintf("this slot calls itself %q, which is not a node Rasputin knows — choose it yourself, or leave the slot unmapped", sl.Hostname)
+	}
 }
 
 // storeAndStripCredential persists a newly-typed credential under its own

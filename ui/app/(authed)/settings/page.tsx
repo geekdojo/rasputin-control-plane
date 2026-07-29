@@ -119,7 +119,7 @@ function BMCSection() {
   const [tpPassSet, setTpPassSet] = useState(false);
   const [tpFingerprint, setTpFingerprint] = useState('');
   const [tpInsecure, setTpInsecure] = useState(false);
-  const [tpMapJSON, setTpMapJSON] = useState('');
+  const [tpSlots, setTpSlots] = useState<Record<number, string>>({ 1: '', 2: '', 3: '', 4: '' });
   const [tpProbing, setTpProbing] = useState(false);
   const [tpProbe, setTpProbe] = useState<BMCProbeResult | null>(null);
 
@@ -164,14 +164,20 @@ function BMCSection() {
       setTpPassSet(cfg.passSet === true);
       setTpFingerprint(typeof cfg.fingerprint === 'string' ? cfg.fingerprint : '');
       setTpInsecure(cfg.insecure_skip_verify === true);
-      setTpMapJSON(Array.isArray(cfg.targets) ? JSON.stringify(cfg.targets, null, 2) : '');
+      const slots: Record<number, string> = { 1: '', 2: '', 3: '', 4: '' };
+      if (Array.isArray(cfg.targets)) {
+        for (const t of cfg.targets as Array<{ node_id?: string; slot?: number }>) {
+          if (t && typeof t.slot === 'number' && typeof t.node_id === 'string') slots[t.slot] = t.node_id;
+        }
+      }
+      setTpSlots(slots);
     } else {
       setTpEndpoint('');
       setTpUser('root');
       setTpPassSet(false);
       setTpFingerprint('');
       setTpInsecure(false);
-      setTpMapJSON('');
+      setTpSlots({ 1: '', 2: '', 3: '', 4: '' });
     }
     setTpPass('');
   }
@@ -191,13 +197,32 @@ function BMCSection() {
     setTpProbe(null);
     setErr(null);
     try {
-      const res = await probeBMC({ kind: 'turingpi', endpoint: tpEndpoint.trim() || undefined });
+      const res = await probeBMC({
+        kind: 'turingpi',
+        endpoint: tpEndpoint.trim() || undefined,
+        // Identification and the certificate need no credentials. Slot
+        // detection does — the console endpoint is authenticated — so it
+        // only runs once there is a password to use.
+        user: tpUser.trim() || undefined,
+        pass: tpPass || undefined,
+      });
       setTpProbe(res);
       if (res.ok) {
         if (res.endpoint) setTpEndpoint(res.endpoint);
         if (res.fingerprint) {
           setTpFingerprint(res.fingerprint);
           setTpInsecure(false);
+        }
+        if (res.slots?.length) {
+          // Pre-fill only empty rows: a choice the operator already made
+          // outranks anything a console banner suggests.
+          setTpSlots((prev) => {
+            const next = { ...prev };
+            for (const sl of res.slots ?? []) {
+              if (sl.nodeId && !next[sl.slot]) next[sl.slot] = sl.nodeId;
+            }
+            return next;
+          });
         }
       }
     } catch (e) {
@@ -222,12 +247,9 @@ function BMCSection() {
       return cfg;
     }
     if (kind === 'turingpi') {
-      let targets: unknown = [];
-      try {
-        targets = tpMapJSON.trim() ? JSON.parse(tpMapJSON) : [];
-      } catch {
-        throw new Error('slot map is not valid JSON');
-      }
+      const targets = Object.entries(tpSlots)
+        .filter(([, id]) => id.trim() !== '')
+        .map(([slot, id]) => ({ node_id: id, slot: Number(slot) }));
       const cfg: Record<string, unknown> = {
         targets,
         endpoint: tpEndpoint.trim(),
@@ -438,20 +460,45 @@ function BMCSection() {
               </label>
               {tpInsecure && <Hint warn>Any certificate will be accepted, so this connection can be intercepted on your network. Pin the fingerprint instead unless you are deliberately testing.</Hint>}
 
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
-                SLOT MAP (JSON rows: {'{"node_id":"…","slot":1}'})
-                <textarea
-                  value={tpMapJSON}
-                  onChange={(e) => setTpMapJSON(e.target.value)}
-                  rows={6}
-                  spellCheck={false}
-                  style={{
-                    display: 'block', marginTop: 4, width: '100%', background: 'transparent',
-                    border: `1px solid ${HAIR}`, color: FG, fontFamily: MONO, fontSize: 11, padding: 8,
-                  }}
-                />
-              </label>
-              <Hint>Slots are numbered 1&ndash;4 as printed on the board. List only the slots you have filled.</Hint>
+              <div style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>WHICH NODE IS IN WHICH SLOT</div>
+              <Hint>
+                Slots are numbered 1&ndash;4 as printed on the board. Pick the Rasputin node in each one, and leave empty
+                slots set to &ldquo;not installed&rdquo;. DETECT BOARD fills these in for you when a password is set.
+              </Hint>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {[1, 2, 3, 4].map((slot) => {
+                  const found = tpProbe?.slots?.find((sl) => sl.slot === slot);
+                  return (
+                    <div key={slot} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <span style={{ color: DIM, fontFamily: MONO, fontSize: 11, width: 56 }}>SLOT {slot}</span>
+                      <select
+                        value={tpSlots[slot] ?? ''}
+                        onChange={(e) => setTpSlots((prev) => ({ ...prev, [slot]: e.target.value }))}
+                        style={{
+                          flex: 1, background: 'transparent', border: `1px solid ${HAIR}`,
+                          color: FG, fontFamily: MONO, fontSize: 11, padding: 6,
+                        }}
+                      >
+                        <option value="">— not installed —</option>
+                        {nodes.map((n) => (
+                          <option key={n.id} value={n.id}>{n.id}</option>
+                        ))}
+                      </select>
+                      {found && (
+                        <span style={{ color: DIM, fontFamily: MONO, fontSize: 10, flex: 1 }}>
+                          {found.nodeId
+                            ? `detected: ${found.nodeId}`
+                            : found.detail
+                              ? found.detail
+                              : found.powered
+                                ? 'powered, not identified'
+                                : 'powered off'}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
               <Hint>This board&rsquo;s BMC offers power and reset, but not a console Rasputin can use — no CONSOLE button appears for its nodes.</Hint>
             </>
           )}

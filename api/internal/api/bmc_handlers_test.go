@@ -9,6 +9,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 func bmcTestSetupStore(t *testing.T) *setup.Store {
@@ -99,4 +100,75 @@ func bitscopeCred() bmc.CredentialField {
 		panic("bitscope must declare a credential field")
 	}
 	return c
+}
+
+// Slot detection reads what each slot's getty prints; only the api can
+// turn that into a Rasputin node id. The cases below are the real ones
+// off the Turing Pi bench, 2026-07-28.
+func TestMatchProbeSlotsAgainst(t *testing.T) {
+	nodes := []*proto.Node{
+		// The controlplane sets a transient hostname of "rasputin"
+		// regardless of its node-id — the design assumed this would never
+		// match and would fall through to the dropdown. It does match,
+		// because inventory records that hostname, so matching on
+		// hostname (not just id) auto-detects the controlplane too.
+		{ID: "tp-cp1", Hostname: "rasputin", Role: proto.RoleControlPlane},
+		{ID: "tp-n1", Hostname: "tp-n1", Role: proto.RoleCompute},
+	}
+	slots := []proto.BMCProbeSlot{
+		{Slot: 1, Powered: true, Hostname: "rasputin"},
+		{Slot: 2, Powered: true, Hostname: "tp-n1"},
+		{Slot: 3, Powered: false, Detail: "slot is powered off"},
+		{Slot: 4, Powered: true, Hostname: "somebody-elses-box"},
+	}
+	matchProbeSlotsAgainst(slots, nodes)
+
+	if slots[0].NodeID != "tp-cp1" {
+		t.Errorf("slot 1 (hostname rasputin) = %q, want tp-cp1 — the controlplane matches on hostname", slots[0].NodeID)
+	}
+	if slots[1].NodeID != "tp-n1" {
+		t.Errorf("slot 2 = %q, want tp-n1", slots[1].NodeID)
+	}
+	if slots[2].NodeID != "" {
+		t.Error("an unpowered slot has nothing to match and must stay unmapped")
+	}
+	// A hostname we do not recognise must NOT be guessed at — it may be a
+	// node running something that is not Rasputin at all.
+	if slots[3].NodeID != "" {
+		t.Errorf("slot 4 = %q, want empty for an unknown hostname", slots[3].NodeID)
+	}
+	if !strings.Contains(slots[3].Detail, "somebody-elses-box") {
+		t.Errorf("slot 4 detail should quote what the slot called itself; got %q", slots[3].Detail)
+	}
+}
+
+// Two nodes answering to one hostname is ambiguous, and guessing would
+// silently map a slot to the wrong machine — which then accepts power
+// commands aimed at the other one.
+func TestMatchProbeSlotsRefusesAmbiguousHostnames(t *testing.T) {
+	nodes := []*proto.Node{
+		{ID: "a-1", Hostname: "rasputin"},
+		{ID: "b-1", Hostname: "rasputin"},
+	}
+	slots := []proto.BMCProbeSlot{{Slot: 1, Powered: true, Hostname: "rasputin"}}
+	matchProbeSlotsAgainst(slots, nodes)
+	if slots[0].NodeID != "" {
+		t.Errorf("ambiguous hostname matched %q — it must refuse and ask", slots[0].NodeID)
+	}
+	if !strings.Contains(slots[0].Detail, "more than one") {
+		t.Errorf("detail should explain the ambiguity; got %q", slots[0].Detail)
+	}
+}
+
+// An exact node-id always wins over a hostname that happens to collide.
+func TestMatchProbeSlotsPrefersExactNodeID(t *testing.T) {
+	nodes := []*proto.Node{
+		{ID: "tp-n1", Hostname: "something-else"},
+		{ID: "other", Hostname: "tp-n1"},
+	}
+	slots := []proto.BMCProbeSlot{{Slot: 1, Powered: true, Hostname: "tp-n1"}}
+	matchProbeSlotsAgainst(slots, nodes)
+	if slots[0].NodeID != "tp-n1" {
+		t.Errorf("got %q, want tp-n1 — an exact node-id match outranks a hostname match", slots[0].NodeID)
+	}
 }
