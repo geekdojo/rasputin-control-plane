@@ -12,7 +12,7 @@
 //     (advertises only its configured RASPUTIN_BMC_MOCK_TARGETS list).
 //     File-backed power state; SOL emits a canned banner + uptime line.
 //   - BitScopeBackend ("bitscope") — the CB04B blade BMC over the rack's
-//     RS-485 bus via the manager Pi's /dev/serial0. Power verbs, status,
+//     RS-485 bus via the manager Pi's header UART. Power verbs, status,
 //     and SoL (bus-wide single session with cross-target take-over;
 //     verbs interrupt an open console — see bitscope_sol.go). Framing
 //     and the console-exit escape are bench-pending — see bitscope.go.

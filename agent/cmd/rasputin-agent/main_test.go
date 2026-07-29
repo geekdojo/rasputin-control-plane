@@ -185,7 +185,7 @@ func TestPublishRegistered_OffAdvertisesNothing(t *testing.T) {
 // bmc.Config without an env read here and this test names it.
 func TestBMCConfigFromEnvCoversEveryField(t *testing.T) {
 	for k, v := range map[string]string{
-		"RASPUTIN_BMC_BITSCOPE_DEV":         "/dev/serial0",
+		"RASPUTIN_BMC_BITSCOPE_DEV":         "/dev/ttyS0",
 		"RASPUTIN_BMC_BITSCOPE_UNLOCK":      "unlock",
 		"RASPUTIN_BMC_BITSCOPE_MAP":         "/tmp/bitscope-map.json",
 		"RASPUTIN_BMC_MOCK_TARGETS":         "mock-a,mock-b",

@@ -28,7 +28,7 @@ func TestSanitizeBMCConfig(t *testing.T) {
 		t.Errorf("mock passthrough: %s", got)
 	}
 	// Legacy bitscope config with an embedded unlock: stripped + marked.
-	got := sanitizeBMCConfig("bitscope", `{"dev":"/dev/serial0","unlock":"sekrit"}`)
+	got := sanitizeBMCConfig("bitscope", `{"dev":"/dev/ttyS0","unlock":"sekrit"}`)
 	if strings.Contains(string(got), "sekrit") {
 		t.Fatalf("unlock leaked: %s", got)
 	}
@@ -36,7 +36,7 @@ func TestSanitizeBMCConfig(t *testing.T) {
 	if err := json.Unmarshal(got, &m); err != nil {
 		t.Fatal(err)
 	}
-	if m["unlockSet"] != true || m["dev"] != "/dev/serial0" {
+	if m["unlockSet"] != true || m["dev"] != "/dev/ttyS0" {
 		t.Errorf("sanitized: %v", m)
 	}
 	// Garbage never leaks raw bytes back.
