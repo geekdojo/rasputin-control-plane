@@ -271,6 +271,23 @@ type BMCProbeCmd struct {
 	// half it has the inputs for.
 	User string `json:"user,omitempty"`
 	Pass string `json:"pass,omitempty"`
+	// Fingerprint is the certificate the operator has ALREADY seen and
+	// accepted, echoed back from the form. It is required before any
+	// credential is sent.
+	//
+	// Without it the trust-on-first-use pin defeats itself: pinning to a
+	// certificate captured moments earlier on the same unverified
+	// handshake validates whatever just answered, so an attacker able to
+	// answer for the board's mDNS name receives the operator's BMC
+	// credentials — an account that also serves SSH and controls power
+	// for the whole chassis. Found by the automated security review on
+	// CP #51 before any build shipped.
+	//
+	// So identification and certificate capture are the ONLY things a
+	// first, uncredentialed probe does. Sending a password requires a
+	// second call carrying the fingerprint the operator kept from the
+	// first, and the board must still present that exact certificate.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // BMCProbeSlot is one physical slot as the board reports it. The agent

@@ -151,24 +151,49 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 		return res
 	}
 
-	// Second half: which node is in which slot. Needs credentials, so it
-	// runs only once the operator has supplied them — and only against a
-	// board we just identified, so we are never reading consoles from
-	// something we could not name.
-	if res.Identified && strings.TrimSpace(cmd.User) != "" {
-		b, berr := NewTuringPiBackend(TuringPiOptions{
-			Endpoint:    endpoint,
-			User:        cmd.User,
-			Pass:        cmd.Pass,
-			Targets:     map[string]int{"probe-placeholder": 1},
-			Fingerprint: res.Fingerprint,
-		})
-		if berr != nil {
-			res.Detail += " Slot detection unavailable: " + berr.Error()
-		} else {
-			res.Slots = detectSlots(ctx, b)
-		}
+	// Second half: which node is in which slot. This sends the operator's
+	// BMC credentials, so it is gated on a certificate they have ALREADY
+	// accepted — never on the one just captured.
+	//
+	// Pinning to res.Fingerprint here would be circular: that digest came
+	// from this very handshake, made with verification disabled, so it
+	// would authorise whatever answered. Anyone able to answer for the
+	// board's mDNS name could then present any certificate, return the
+	// 401 marker to look identified, and collect an account that also
+	// serves SSH and controls power for the whole chassis.
+	//
+	// So credentials require cmd.Fingerprint — carried back from the
+	// operator's form after the first, uncredentialed probe showed it to
+	// them — AND the board must still be presenting exactly that
+	// certificate now. A mismatch is refused loudly rather than
+	// re-pinned, because at that point either the firmware was
+	// regenerated or someone is answering in the board's place, and only
+	// the operator can tell those apart.
+	if !res.Identified || strings.TrimSpace(cmd.User) == "" {
+		return res
 	}
+	if strings.TrimSpace(cmd.Fingerprint) == "" {
+		res.Detail += " Slot detection skipped: confirm the certificate above first — credentials are never sent to a board whose certificate has not been accepted."
+		return res
+	}
+	wantFP, ferr := normalizeFingerprint(cmd.Fingerprint)
+	gotFP, gerr := normalizeFingerprint(res.Fingerprint)
+	if ferr != nil || gerr != nil || wantFP != gotFP {
+		res.Detail += " Slot detection refused: this board is presenting a different certificate than the one you accepted. No credentials were sent. If the BMC firmware was reinstalled, clear the fingerprint and detect again; otherwise treat this as a trust failure."
+		return res
+	}
+	b, berr := NewTuringPiBackend(TuringPiOptions{
+		Endpoint:    endpoint,
+		User:        cmd.User,
+		Pass:        cmd.Pass,
+		Targets:     map[string]int{"probe-placeholder": 1},
+		Fingerprint: gotFP,
+	})
+	if berr != nil {
+		res.Detail += " Slot detection unavailable: " + berr.Error()
+		return res
+	}
+	res.Slots = detectSlots(ctx, b)
 	return res
 }
 
