@@ -202,9 +202,14 @@ function BMCSection() {
         endpoint: tpEndpoint.trim() || undefined,
         // Identification and the certificate need no credentials. Slot
         // detection does — the console endpoint is authenticated — so it
-        // only runs once there is a password to use.
+        // only runs once there is a password to use AND a certificate the
+        // operator has already accepted. Sending the fingerprint back is
+        // what makes the pin mean something: without it the agent would
+        // be trusting a digest it captured on the same unverified
+        // handshake, and credentials would go to whatever answered.
         user: tpUser.trim() || undefined,
         pass: tpPass || undefined,
+        fingerprint: tpFingerprint.trim() || undefined,
       });
       setTpProbe(res);
       if (res.ok) {
@@ -436,10 +441,16 @@ function BMCSection() {
                   does, because that endpoint is authenticated. Say which
                   you will get BEFORE the click — otherwise pressing it
                   early looks like the slot detection is broken. */}
-              {!tpPass && !tpPassSet && (
+              {!tpFingerprint.trim() && (
+                <Hint>
+                  First press finds the board and reads its certificate. Once you have accepted that certificate,
+                  press DETECT BOARD again to fill in the slot list &mdash; your password is only ever sent to a board
+                  presenting the certificate you accepted.
+                </Hint>
+              )}
+              {tpFingerprint.trim() && !tpPass && !tpPassSet && (
                 <Hint warn>
-                  Without a password above, DETECT BOARD will find the board and its certificate but cannot read the
-                  slots. Fill the password in first to have the slot list below filled in too.
+                  Add the password above, then press DETECT BOARD again to fill in the slot list.
                 </Hint>
               )}
 
