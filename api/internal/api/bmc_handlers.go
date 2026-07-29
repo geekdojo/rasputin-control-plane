@@ -196,6 +196,22 @@ func (s *Server) handleBMCProbe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no BMC host node configured — pick one before probing")
 		return
 	}
+	// A blank password means "use the one already stored", exactly as it
+	// does on the configure path — the field is write-only, so it comes
+	// up empty every time Settings is reopened. Without this, pressing
+	// DETECT BOARD on an already-configured cluster sends no credential,
+	// the slot reads get 401, and nothing populates; the operator presses
+	// again and again with no explanation. Reported from the bench,
+	// 2026-07-29: "still having to click DETECT BOARD twice, sometimes a
+	// few times."
+	//
+	// Safe because the credential gate still applies: the agent only
+	// sends it to a board presenting the fingerprint the operator
+	// accepted, so injecting a stored secret cannot widen who receives
+	// it.
+	if strings.TrimSpace(req.Pass) == "" {
+		req.Pass = bmc.StoredCredential(r.Context(), st, "turingpi")
+	}
 	body, _ := json.Marshal(req)
 	msg, err := s.nc.Request(proto.BMCProbeSubject(host), body, 25*time.Second)
 	if err != nil {
@@ -222,7 +238,7 @@ func (s *Server) handleBMCProbe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	log.Printf("bmc: probe via %s endpoint=%q ok=%v identified=%v creds=%v slots=%d matched=%d",
-		host, res.Endpoint, res.OK, res.Identified, req.User != "", len(res.Slots), matched)
+		host, res.Endpoint, res.OK, res.Identified, req.User != "" && req.Pass != "", len(res.Slots), matched)
 	writeJSON(w, http.StatusOK, res)
 }
 

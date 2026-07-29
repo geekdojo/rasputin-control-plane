@@ -172,3 +172,30 @@ func TestMatchProbeSlotsPrefersExactNodeID(t *testing.T) {
 		t.Errorf("got %q, want tp-n1 — an exact node-id match outranks a hostname match", slots[0].NodeID)
 	}
 }
+
+// The password field is write-only, so it is blank every time Settings
+// is reopened. A blank one must mean "use the stored password", the same
+// as it does on the configure path — otherwise pressing DETECT BOARD on
+// an already-configured cluster sends no credential, the slot reads get
+// 401, and nothing populates. Reported from the bench 2026-07-29 as
+// "still having to click DETECT BOARD twice, sometimes a few times".
+func TestStoredCredentialBacksABlankProbePassword(t *testing.T) {
+	ctx := context.Background()
+	st := bmcTestSetupStore(t)
+
+	// Nothing stored yet: a blank stays blank rather than inventing one.
+	if got := bmc.StoredCredential(ctx, st, "turingpi"); got != "" {
+		t.Errorf("with nothing stored, got %q, want empty", got)
+	}
+	// After a configure has saved one, the probe can fall back to it.
+	if err := st.Set(ctx, setup.KeyBMCTuringPiPass, "s3cret"); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if got := bmc.StoredCredential(ctx, st, "turingpi"); got != "s3cret" {
+		t.Errorf("got %q, want the stored password", got)
+	}
+	// Backends without a credential must not pick one up by accident.
+	if got := bmc.StoredCredential(ctx, st, "mock"); got != "" {
+		t.Errorf("mock has no credential; got %q", got)
+	}
+}
