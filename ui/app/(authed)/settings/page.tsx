@@ -403,6 +403,21 @@ function BMCSection() {
 
           {kind === 'turingpi' && (
             <>
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC USERNAME
+                <Input value={tpUser} onChange={(e) => setTpUser(e.target.value)} placeholder="root" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC PASSWORD {tpPassSet ? '(set — leave blank to keep)' : ''}
+                <Input type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              {/* The board ships root/turing and its BMC also serves SSH, so
+                  factory credentials on a LAN-reachable board are real exposure
+                  — say so rather than let the default ride silently. */}
+              {tpPass === 'turing' && (
+                <Hint warn>That is the factory default password. The BMC is reachable on your LAN and its account also has SSH — change it on the board and use the new one here.</Hint>
+              )}
+
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
                 <label style={{ flex: 1, color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                   BMC ADDRESS
@@ -417,6 +432,16 @@ function BMCSection() {
                 {hostNode || 'the BMC host node'}, which is on the board&rsquo;s network. Detect also reads the
                 certificate below, so you do not have to.
               </Hint>
+              {/* Finding the board needs no credentials; reading the slots
+                  does, because that endpoint is authenticated. Say which
+                  you will get BEFORE the click — otherwise pressing it
+                  early looks like the slot detection is broken. */}
+              {!tpPass && !tpPassSet && (
+                <Hint warn>
+                  Without a password above, DETECT BOARD will find the board and its certificate but cannot read the
+                  slots. Fill the password in first to have the slot list below filled in too.
+                </Hint>
+              )}
 
               {tpProbe && (
                 <div style={{ border: `1px solid ${HAIR}`, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -439,21 +464,6 @@ function BMCSection() {
                     </>
                   )}
                 </div>
-              )}
-
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
-                BMC USERNAME
-                <Input value={tpUser} onChange={(e) => setTpUser(e.target.value)} placeholder="root" style={{ display: 'block', marginTop: 4, width: '100%' }} />
-              </label>
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
-                BMC PASSWORD {tpPassSet ? '(set — leave blank to keep)' : ''}
-                <Input type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
-              </label>
-              {/* The board ships root/turing and its BMC also serves SSH, so
-                  factory credentials on a LAN-reachable board are real exposure
-                  — say so rather than let the default ride silently. */}
-              {tpPass === 'turing' && (
-                <Hint warn>That is the factory default password. The BMC is reachable on your LAN and its account also has SSH — change it on the board and use the new one here.</Hint>
               )}
 
               <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
