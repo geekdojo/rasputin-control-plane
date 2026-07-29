@@ -35,6 +35,8 @@ import {
   setBMCConfig,
   setDeploymentMode,
   setOperatorKeys,
+  probeBMC,
+  type BMCProbeResult,
 } from '../../../lib/api';
 import { validateSSHKey } from '../../../lib/enroll';
 import type { BMCBackendInfo, BMCConfigView, DeploymentMode, Node, ObsStatus, SetupState } from '../../../lib/types';
@@ -118,6 +120,8 @@ function BMCSection() {
   const [tpFingerprint, setTpFingerprint] = useState('');
   const [tpInsecure, setTpInsecure] = useState(false);
   const [tpMapJSON, setTpMapJSON] = useState('');
+  const [tpProbing, setTpProbing] = useState(false);
+  const [tpProbe, setTpProbe] = useState<BMCProbeResult | null>(null);
 
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -176,6 +180,32 @@ function BMCSection() {
     void reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Discovery, not a form field. The probe runs on the BMC-host agent
+  // with no credentials: mDNS is link-local so only that node can resolve
+  // the board's name, and an unauthenticated 401 identifies the board
+  // before a password exists. The operator confirms the certificate we
+  // captured rather than reading one out of openssl themselves.
+  async function detectBoard() {
+    setTpProbing(true);
+    setTpProbe(null);
+    setErr(null);
+    try {
+      const res = await probeBMC({ kind: 'turingpi', endpoint: tpEndpoint.trim() || undefined });
+      setTpProbe(res);
+      if (res.ok) {
+        if (res.endpoint) setTpEndpoint(res.endpoint);
+        if (res.fingerprint) {
+          setTpFingerprint(res.fingerprint);
+          setTpInsecure(false);
+        }
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTpProbing(false);
+    }
+  }
 
   function buildConfig(): unknown {
     if (kind === 'mock') return { targets: [...mockTargets] };
@@ -344,11 +374,43 @@ function BMCSection() {
 
           {kind === 'turingpi' && (
             <>
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
-                BMC ADDRESS
-                <Input value={tpEndpoint} onChange={(e) => setTpEndpoint(e.target.value)} placeholder="turingpi.local" style={{ display: 'block', marginTop: 4, width: '100%' }} />
-              </label>
-              <Hint>Hostname or IP of the board&rsquo;s BMC. Prefer the name — the BMC takes DHCP, and a lease is not an identity.</Hint>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                <label style={{ flex: 1, color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                  BMC ADDRESS
+                  <Input value={tpEndpoint} onChange={(e) => setTpEndpoint(e.target.value)} placeholder="turingpi.local" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                </label>
+                <Btn disabled={tpProbing || !hostNode} onClick={() => void detectBoard()}>
+                  {tpProbing ? 'DETECTING…' : 'DETECT BOARD'}
+                </Btn>
+              </div>
+              <Hint>
+                Leave the address blank and press DETECT BOARD to find it automatically — the search runs from{' '}
+                {hostNode || 'the BMC host node'}, which is on the board&rsquo;s network. Detect also reads the
+                certificate below, so you do not have to.
+              </Hint>
+
+              {tpProbe && (
+                <div style={{ border: `1px solid ${HAIR}`, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ color: tpProbe.ok && tpProbe.identified ? FG : DIM, fontFamily: MONO, fontSize: 11 }}>
+                    {tpProbe.ok && tpProbe.identified ? 'FOUND A TURING PI' : tpProbe.ok ? 'SOMETHING ANSWERED' : 'NO BOARD FOUND'}
+                  </div>
+                  {tpProbe.detail && <Hint warn={!tpProbe.identified}>{tpProbe.detail}</Hint>}
+                  {tpProbe.certSubject && (
+                    <div style={{ color: DIM, fontFamily: MONO, fontSize: 10 }}>certificate: {tpProbe.certSubject}</div>
+                  )}
+                  {tpProbe.fingerprint && (
+                    <>
+                      <div style={{ color: FG, fontFamily: MONO, fontSize: 10, wordBreak: 'break-all' }}>{tpProbe.fingerprint}</div>
+                      <Hint>
+                        This certificate is now pinned below. It is self-signed and dated 1970 — that is normal for this
+                        board, which has no clock at boot, and is why it cannot be checked against a certificate authority.
+                        Pinning this exact certificate is the stricter option. If it ever changes, Rasputin refuses to
+                        connect rather than trusting the new one silently.
+                      </Hint>
+                    </>
+                  )}
+                </div>
+              )}
 
               <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 BMC USERNAME
@@ -369,11 +431,7 @@ function BMCSection() {
                 CERTIFICATE FINGERPRINT (SHA-256)
                 <Input value={tpFingerprint} onChange={(e) => setTpFingerprint(e.target.value)} placeholder="41:7C:1E:EA:…" disabled={tpInsecure} style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
-              <Hint>
-                The board&rsquo;s certificate is self-signed and minted at the Unix epoch, so it always reads as expired and no
-                certificate-authority trust can accept it. Pinning this exact certificate is the stricter option and the one that works. Read it with{' '}
-                <code>{'echo | openssl s_client -connect <bmc>:443 2>/dev/null | openssl x509 -noout -fingerprint -sha256'}</code>.
-              </Hint>
+              <Hint>DETECT BOARD fills this in. Only type it by hand if you already have the fingerprint from elsewhere.</Hint>
               <label style={{ display: 'flex', gap: 8, alignItems: 'center', color: DIM, fontFamily: MONO, fontSize: 10 }}>
                 <input type="checkbox" checked={tpInsecure} onChange={(e) => setTpInsecure(e.target.checked)} />
                 ACCEPT ANY CERTIFICATE (no pinning)

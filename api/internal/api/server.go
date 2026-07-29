@@ -259,6 +259,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bmc/backends", reqd(s.handleBMCBackends))
 	mux.HandleFunc("GET /api/bmc/config", reqd(s.handleBMCGetConfig))
 	mux.HandleFunc("POST /api/bmc/config", reqd(s.handleBMCSetConfig))
+	mux.HandleFunc("POST /api/bmc/probe", reqd(s.handleBMCProbe))
 	mux.HandleFunc("GET /api/bmc/{nodeId}/status", reqd(s.handleBMCStatus))
 	mux.HandleFunc("POST /api/bmc/{nodeId}/power/{verb}", reqd(s.handleBMCPower))
 	mux.HandleFunc("GET /ws/bmc/{nodeId}/sol", reqd(s.handleBMCSOL))

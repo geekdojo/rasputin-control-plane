@@ -162,8 +162,13 @@ func NewTuringPiBackend(opts TuringPiOptions) (*TuringPiBackend, error) {
 
 	return &TuringPiBackend{
 		client: &http.Client{
-			Timeout:   turingpiDefaultTimeout,
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			Timeout: turingpiDefaultTimeout,
+			// .local endpoints resolve over mDNS — see dial.go. The
+			// operator is told everywhere to address the board by name.
+			Transport: &http.Transport{
+				TLSClientConfig: tlsCfg,
+				DialContext:     mdnsDialContext(3*time.Second, 5*time.Second),
+			},
 		},
 		base:    base,
 		user:    opts.User,

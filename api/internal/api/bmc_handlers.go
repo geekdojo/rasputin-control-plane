@@ -172,6 +172,43 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, j)
 }
 
+// POST /api/bmc/probe
+// Body: {"kind":"turingpi","endpoint":"optional"}
+//
+// Asks the BMC-host agent to look for a board and capture the
+// certificate it presents (bmc-settings §7a). Runs with no credentials
+// and before any backend is configured — that is the point: it is what
+// lets Settings offer discovery instead of a blank form asking for an IP
+// and a fingerprint the operator would have to go and read themselves.
+//
+// Routed through the host agent rather than dialled from here because
+// mDNS is link-local: the well-known name resolves from a node on the
+// chassis's segment, which the host agent is and the api may not be.
+func (s *Server) handleBMCProbe(w http.ResponseWriter, r *http.Request) {
+	st := s.setup.Store()
+	var req proto.BMCProbeCmd
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	host, err := st.Get(r.Context(), setup.KeyBMCHostNode)
+	if err != nil || host == "" {
+		writeError(w, http.StatusBadRequest, "no BMC host node configured — pick one before probing")
+		return
+	}
+	body, _ := json.Marshal(req)
+	msg, err := s.nc.Request(proto.BMCProbeSubject(host), body, 25*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("probe rpc to %s: %v", host, err))
+		return
+	}
+	var res proto.BMCProbeResult
+	if uerr := json.Unmarshal(msg.Data, &res); uerr != nil {
+		writeError(w, http.StatusBadGateway, "probe returned an unreadable reply")
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // storeAndStripCredential persists a newly-typed credential under its own
 // settings key and returns the config with every trace of it removed —
 // the returned blob is what lands in the job spec and audit trail, so it
