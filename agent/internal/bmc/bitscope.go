@@ -86,7 +86,20 @@ type busPort interface {
 }
 
 const (
-	bitscopeDefaultDev    = "/dev/serial0"
+	// bitscopeDefaultDev is the Pi's 40-pin-header UART AS RASPUTIN OS
+	// NAMES IT. It was /dev/serial0 until 2026-07-29 — the Raspberry Pi
+	// OS alias BitScope's own documentation uses, inherited from the
+	// vendor's docs before this driver had ever run on the appliance
+	// image. The appliance is Buildroot and ships no udev rules at all,
+	// so that alias does not exist on any node Rasputin builds: the
+	// default could never open a bus, on any cluster, ever. The bench
+	// hid it by typing the right value into the Settings form.
+	//
+	// If the header UART is later moved to the PL011 (the open
+	// disable-bt decision on the os side), this becomes ttyAMA0 and the
+	// same reasoning applies: the default names the device the shipped
+	// image actually has.
+	bitscopeDefaultDev    = "/dev/ttyS0"
 	bitscopeDefaultUnlock = "UnLockMe"
 	bitscopeDefaultMap    = "bitscope-map.json"
 	bitscopeSettle        = 2 * time.Second
@@ -104,7 +117,7 @@ const (
 
 // NewBitScopeBackend loads the address map, opens the serial bus, and
 // unlocks it. Zero-value Config fields select the documented defaults
-// (dev /dev/serial0, the EEPROM-default unlock sequence per D-4, map at
+// (dev /dev/ttyS0, the EEPROM-default unlock sequence per D-4, map at
 // <StateDir>/bitscope-map.json).
 func NewBitScopeBackend(cfg Config) (*BitScopeBackend, error) {
 	dev, unlock, mapPath := bitscopeSettings(cfg)

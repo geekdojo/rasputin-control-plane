@@ -284,8 +284,9 @@ func TestLoadBitScopeMap_Rejects(t *testing.T) {
 
 func TestBitscopeSettings_Defaults(t *testing.T) {
 	dev, unlock, mapPath := bitscopeSettings(Config{StateDir: "/sd"})
-	if dev != "/dev/serial0" {
-		t.Errorf("dev: %q, want /dev/serial0", dev)
+	if dev != "/dev/ttyS0" {
+		t.Errorf("dev: %q, want /dev/ttyS0 — the device the appliance image "+
+			"actually creates; /dev/serial0 is a Raspberry Pi OS alias no Rasputin node has", dev)
 	}
 	if unlock != "UnLockMe" {
 		t.Errorf("unlock: %q, want the EEPROM default", unlock)

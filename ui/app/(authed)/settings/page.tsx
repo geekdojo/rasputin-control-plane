@@ -393,7 +393,7 @@ function BMCSection() {
             <>
               <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 SERIAL DEVICE
-                <Input value={bsDev} onChange={(e) => setBsDev(e.target.value)} placeholder="/dev/serial0" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                <Input value={bsDev} onChange={(e) => setBsDev(e.target.value)} placeholder="/dev/ttyS0" style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
               <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 UNLOCK SEQUENCE {bsUnlockSet ? '(set — leave blank to keep)' : '(blank = factory default)'}
