@@ -214,12 +214,19 @@ function BMCSection() {
           setTpInsecure(false);
         }
         if (res.slots?.length) {
-          // Pre-fill only empty rows: a choice the operator already made
-          // outranks anything a console banner suggests.
+          // Detect means detect. An earlier version only filled rows that
+          // were still empty, on the theory that a choice already made
+          // outranks a console banner — which fails the obvious case:
+          // clearing the rows in order to test detection, then watching
+          // the button do nothing (Bryce, 2026-07-28). A button that
+          // declines to change anything is indistinguishable from a
+          // broken one. Pressing it again is the operator asking to look
+          // again, so the findings win; overriding a row afterwards is
+          // one click and it sticks until the next press.
           setTpSlots((prev) => {
             const next = { ...prev };
             for (const sl of res.slots ?? []) {
-              if (sl.nodeId && !next[sl.slot]) next[sl.slot] = sl.nodeId;
+              if (sl.nodeId) next[sl.slot] = sl.nodeId;
             }
             return next;
           });
@@ -463,7 +470,8 @@ function BMCSection() {
               <div style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>WHICH NODE IS IN WHICH SLOT</div>
               <Hint>
                 Slots are numbered 1&ndash;4 as printed on the board. Pick the Rasputin node in each one, and leave empty
-                slots set to &ldquo;not installed&rdquo;. DETECT BOARD fills these in for you when a password is set.
+                slots set to &ldquo;not installed&rdquo;. With a password set, DETECT BOARD reads each slot&rsquo;s console and
+                fills these in &mdash; replacing whatever is selected, so press it whenever you want the board re-read.
               </Hint>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {[1, 2, 3, 4].map((slot) => {

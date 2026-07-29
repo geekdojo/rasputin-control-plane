@@ -211,6 +211,18 @@ func (s *Server) handleBMCProbe(w http.ResponseWriter, r *http.Request) {
 	// which Rasputin node that is. Split that way because the agent has
 	// no inventory and the api has no board.
 	s.matchProbeSlots(r.Context(), &res)
+	// Operationally useful and diagnostically decisive: a probe that
+	// identifies the board but returns no slots means credentials never
+	// reached the agent; slots with no matches means inventory did not
+	// recognise what the consoles reported.
+	matched := 0
+	for _, sl := range res.Slots {
+		if sl.NodeID != "" {
+			matched++
+		}
+	}
+	log.Printf("bmc: probe via %s endpoint=%q ok=%v identified=%v creds=%v slots=%d matched=%d",
+		host, res.Endpoint, res.OK, res.Identified, req.User != "", len(res.Slots), matched)
 	writeJSON(w, http.StatusOK, res)
 }
 
