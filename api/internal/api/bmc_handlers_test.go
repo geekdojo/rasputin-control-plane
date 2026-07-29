@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 )
 
@@ -45,13 +46,13 @@ func TestSanitizeBMCConfig(t *testing.T) {
 
 func TestSetUnlockSet(t *testing.T) {
 	var m map[string]any
-	if err := json.Unmarshal(setUnlockSet(json.RawMessage(`{"dev":"x"}`)), &m); err != nil {
+	if err := json.Unmarshal(setCredentialSet(json.RawMessage(`{"dev":"x"}`), "unlock"), &m); err != nil {
 		t.Fatal(err)
 	}
 	if m["unlockSet"] != true || m["dev"] != "x" {
 		t.Errorf("annotate: %v", m)
 	}
-	if err := json.Unmarshal(setUnlockSet(nil), &m); err != nil {
+	if err := json.Unmarshal(setCredentialSet(nil, "unlock"), &m); err != nil {
 		t.Fatal(err)
 	}
 	if m["unlockSet"] != true {
@@ -64,7 +65,7 @@ func TestStoreAndStripUnlock(t *testing.T) {
 	st := bmcTestSetupStore(t)
 
 	// A typed unlock lands in its own key and never in the returned blob.
-	out, err := storeAndStripUnlock(ctx, st, json.RawMessage(`{"dev":"/d","unlock":"newsecret","targets":[]}`))
+	out, err := storeAndStripCredential(ctx, st, bitscopeCred(), json.RawMessage(`{"dev":"/d","unlock":"newsecret","targets":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestStoreAndStripUnlock(t *testing.T) {
 	}
 
 	// Empty unlock keeps the stored secret.
-	if _, err := storeAndStripUnlock(ctx, st, json.RawMessage(`{"dev":"/d","unlock":"","unlockSet":true}`)); err != nil {
+	if _, err := storeAndStripCredential(ctx, st, bitscopeCred(), json.RawMessage(`{"dev":"/d","unlock":"","unlockSet":true}`)); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := st.Get(ctx, setup.KeyBMCBitscopeUnlock); v != "newsecret" {
@@ -84,7 +85,18 @@ func TestStoreAndStripUnlock(t *testing.T) {
 	}
 
 	// Bad JSON errors rather than passing through.
-	if _, err := storeAndStripUnlock(ctx, st, json.RawMessage(`nope`)); err == nil {
+	if _, err := storeAndStripCredential(ctx, st, bitscopeCred(), json.RawMessage(`nope`)); err == nil {
 		t.Error("bad json must error")
 	}
+}
+
+// bitscopeCred is the bitscope credential descriptor, so the existing
+// unlock tests keep exercising the exact behaviour they always did now
+// that the strip/store path is table-driven rather than kind-hardcoded.
+func bitscopeCred() bmc.CredentialField {
+	c, ok := bmc.CredentialFor("bitscope")
+	if !ok {
+		panic("bitscope must declare a credential field")
+	}
+	return c
 }

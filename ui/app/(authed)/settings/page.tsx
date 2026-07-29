@@ -111,6 +111,13 @@ function BMCSection() {
   const [bsUnlock, setBsUnlock] = useState('');
   const [bsUnlockSet, setBsUnlockSet] = useState(false);
   const [bsMapJSON, setBsMapJSON] = useState('');
+  const [tpEndpoint, setTpEndpoint] = useState('');
+  const [tpUser, setTpUser] = useState('root');
+  const [tpPass, setTpPass] = useState('');
+  const [tpPassSet, setTpPassSet] = useState(false);
+  const [tpFingerprint, setTpFingerprint] = useState('');
+  const [tpInsecure, setTpInsecure] = useState(false);
+  const [tpMapJSON, setTpMapJSON] = useState('');
 
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -146,6 +153,23 @@ function BMCSection() {
       setBsMapJSON('');
     }
     setBsUnlock('');
+
+    if (c.backend === 'turingpi') {
+      setTpEndpoint(typeof cfg.endpoint === 'string' ? cfg.endpoint : '');
+      setTpUser(typeof cfg.user === 'string' ? cfg.user : 'root');
+      setTpPassSet(cfg.passSet === true);
+      setTpFingerprint(typeof cfg.fingerprint === 'string' ? cfg.fingerprint : '');
+      setTpInsecure(cfg.insecure_skip_verify === true);
+      setTpMapJSON(Array.isArray(cfg.targets) ? JSON.stringify(cfg.targets, null, 2) : '');
+    } else {
+      setTpEndpoint('');
+      setTpUser('root');
+      setTpPassSet(false);
+      setTpFingerprint('');
+      setTpInsecure(false);
+      setTpMapJSON('');
+    }
+    setTpPass('');
   }
 
   useEffect(() => {
@@ -165,6 +189,23 @@ function BMCSection() {
       const cfg: Record<string, unknown> = { targets };
       if (bsDev.trim()) cfg.dev = bsDev.trim();
       if (bsUnlock) cfg.unlock = bsUnlock; // empty = keep stored (write-only)
+      return cfg;
+    }
+    if (kind === 'turingpi') {
+      let targets: unknown = [];
+      try {
+        targets = tpMapJSON.trim() ? JSON.parse(tpMapJSON) : [];
+      } catch {
+        throw new Error('slot map is not valid JSON');
+      }
+      const cfg: Record<string, unknown> = {
+        targets,
+        endpoint: tpEndpoint.trim(),
+        user: tpUser.trim(),
+      };
+      if (tpFingerprint.trim()) cfg.fingerprint = tpFingerprint.trim();
+      if (tpInsecure) cfg.insecure_skip_verify = true;
+      if (tpPass) cfg.pass = tpPass; // empty = keep stored (write-only)
       return cfg;
     }
     return undefined;
@@ -298,6 +339,62 @@ function BMCSection() {
                   }}
                 />
               </label>
+            </>
+          )}
+
+          {kind === 'turingpi' && (
+            <>
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC ADDRESS
+                <Input value={tpEndpoint} onChange={(e) => setTpEndpoint(e.target.value)} placeholder="turingpi.local" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              <Hint>Hostname or IP of the board&rsquo;s BMC. Prefer the name — the BMC takes DHCP, and a lease is not an identity.</Hint>
+
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC USERNAME
+                <Input value={tpUser} onChange={(e) => setTpUser(e.target.value)} placeholder="root" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BMC PASSWORD {tpPassSet ? '(set — leave blank to keep)' : ''}
+                <Input type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              {/* The board ships root/turing and its BMC also serves SSH, so
+                  factory credentials on a LAN-reachable board are real exposure
+                  — say so rather than let the default ride silently. */}
+              {tpPass === 'turing' && (
+                <Hint warn>That is the factory default password. The BMC is reachable on your LAN and its account also has SSH — change it on the board and use the new one here.</Hint>
+              )}
+
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                CERTIFICATE FINGERPRINT (SHA-256)
+                <Input value={tpFingerprint} onChange={(e) => setTpFingerprint(e.target.value)} placeholder="41:7C:1E:EA:…" disabled={tpInsecure} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              </label>
+              <Hint>
+                The board&rsquo;s certificate is self-signed and minted at the Unix epoch, so it always reads as expired and no
+                certificate-authority trust can accept it. Pinning this exact certificate is the stricter option and the one that works. Read it with{' '}
+                <code>{'echo | openssl s_client -connect <bmc>:443 2>/dev/null | openssl x509 -noout -fingerprint -sha256'}</code>.
+              </Hint>
+              <label style={{ display: 'flex', gap: 8, alignItems: 'center', color: DIM, fontFamily: MONO, fontSize: 10 }}>
+                <input type="checkbox" checked={tpInsecure} onChange={(e) => setTpInsecure(e.target.checked)} />
+                ACCEPT ANY CERTIFICATE (no pinning)
+              </label>
+              {tpInsecure && <Hint warn>Any certificate will be accepted, so this connection can be intercepted on your network. Pin the fingerprint instead unless you are deliberately testing.</Hint>}
+
+              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                SLOT MAP (JSON rows: {'{"node_id":"…","slot":1}'})
+                <textarea
+                  value={tpMapJSON}
+                  onChange={(e) => setTpMapJSON(e.target.value)}
+                  rows={6}
+                  spellCheck={false}
+                  style={{
+                    display: 'block', marginTop: 4, width: '100%', background: 'transparent',
+                    border: `1px solid ${HAIR}`, color: FG, fontFamily: MONO, fontSize: 11, padding: 8,
+                  }}
+                />
+              </label>
+              <Hint>Slots are numbered 1&ndash;4 as printed on the board. List only the slots you have filled.</Hint>
+              <Hint>This board&rsquo;s BMC offers power and reset, but not a console Rasputin can use — no CONSOLE button appears for its nodes.</Hint>
             </>
           )}
 
