@@ -30,6 +30,11 @@ export default function TrustPage() {
   const macCmd = `curl -fsS ${caURL} -o rasputin-mesh-ca.pem && sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rasputin-mesh-ca.pem`;
   const debianCmd = `curl -fsS ${caURL} -o rasputin-mesh-ca.crt && sudo cp rasputin-mesh-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`;
   const fedoraCmd = `curl -fsS ${caURL} -o rasputin-mesh-ca.pem && sudo cp rasputin-mesh-ca.pem /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust`;
+  // Firefox on Linux keeps its own certificate store and never reads the
+  // system one, so the two commands above leave it warning. Self-contained on
+  // purpose (re-downloads the certificate to a distribution-neutral path) so
+  // it works on any distribution and doesn't depend on which command ran first.
+  const firefoxCmd = `curl -fsS ${caURL} -o rasputin-mesh-ca.pem && sudo install -Dm644 rasputin-mesh-ca.pem /usr/local/share/rasputin/mesh-ca.pem && sudo mkdir -p /etc/firefox/policies && printf '{"policies":{"Certificates":{"Install":["/usr/local/share/rasputin/mesh-ca.pem"]}}}\\n' | sudo tee /etc/firefox/policies/policies.json >/dev/null`;
 
   return (
     <div
@@ -95,6 +100,16 @@ export default function TrustPage() {
           <CmdBlock value={debianCmd} />
           <Hint style={{ margin: '10px 0 6px' }}>Fedora / RHEL:</Hint>
           <CmdBlock value={fedoraCmd} />
+          <Hint style={{ margin: '10px 0 6px' }}>
+            Then, if you use Firefox — on any distribution, in addition to the command above:
+          </Hint>
+          <CmdBlock value={firefoxCmd} />
+          <Hint style={{ marginTop: 6 }}>
+            Firefox keeps its own certificate store and never reads the system one, so it keeps
+            warning until you run this. Fully quit Firefox and reopen it afterwards. If your
+            machine already has an /etc/firefox/policies/policies.json, this replaces it — add the
+            Certificates section to your existing file instead.
+          </Hint>
         </section>
 
         <section>
@@ -109,12 +124,22 @@ export default function TrustPage() {
         </section>
 
         <div style={{ borderTop: `1px solid ${HAIR}`, paddingTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {/* Firefox (and some other browsers) only read newly installed
-              certificates from the system store at launch — found on the
-              first Mu hardware bench, 2026-06-12. */}
+          {/* Browsers that DO read the system store still only pick up new
+              certificates at launch — found on the first Mu hardware bench,
+              2026-06-12. Firefox on Linux is a different failure: it never
+              reads the system store at all, so restarting alone can never fix
+              it and the old copy of this hint sent operators in circles. The
+              usual Debian workaround (point Firefox's root module at the system
+              store by replacing libnssckbi.so with p11-kit-trust.so) is not
+              available either — distribution Firefox builds such as Raspberry
+              Pi OS 151.0.3-1+rpt1 ship no libnssckbi.so at all, the roots are
+              compiled into libxul.so. The enterprise policy above is the one
+              mechanism that works regardless of build layout, and it applies to
+              profiles created later. Found on the Pi desktop bench, 2026-07-30. */}
           <Hint>
-            Still seeing a warning after installing? Quit and reopen your browser — some browsers
-            (Firefox in particular) only pick up new certificates when they start.
+            Still seeing a warning after installing? Quit and reopen your browser — browsers only
+            pick up new certificates when they start. On Linux, Firefox also needs the extra
+            command above.
           </Hint>
           <LinkBtn href={secureHome} primary>
             CONTINUE SECURELY <ArrowRight size={12} />
