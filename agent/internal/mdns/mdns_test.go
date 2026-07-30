@@ -3,7 +3,27 @@ package mdns
 import (
 	"strings"
 	"testing"
+	"time"
 )
+
+// Resolve must reject an empty name up front with its own distinct error,
+// before it ever builds a query or touches the network. Guards the
+// `name == ""` check (mdns.go:39): the negated form (`name != ""`) would
+// fall through to buildQuery, which fails with a *different* ("bad label")
+// error — so asserting the exact "empty name" message kills the mutant.
+// A bare "." trims to empty and takes the same path.
+func TestResolve_RejectsEmptyName(t *testing.T) {
+	for _, name := range []string{"", "."} {
+		_, err := Resolve(name, time.Millisecond)
+		if err == nil {
+			t.Errorf("Resolve(%q): expected error, got nil", name)
+			continue
+		}
+		if err.Error() != "mdns: empty name" {
+			t.Errorf("Resolve(%q) error = %q, want %q", name, err.Error(), "mdns: empty name")
+		}
+	}
+}
 
 func TestBuildQuery(t *testing.T) {
 	q, err := buildQuery("rasputin.local")

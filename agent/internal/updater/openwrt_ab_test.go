@@ -306,3 +306,36 @@ func TestPrecheckReportsBootedSlotAndVersion(t *testing.T) {
 		t.Errorf("backend = %q, want openwrt-ab", ack.Backend)
 	}
 }
+
+// Reboot clamps delaySeconds to a 3s default outside the (0, 30] window and
+// passes the effective delay through to doReboot (both the return value and the
+// scheduled reboot). Guards both bounds of the
+// `delaySeconds <= 0 || delaySeconds > 30` clamp (openwrt_ab.go:358):
+//   - 358:18 boundary (`<= 0` → `< 0`) and negation (`<= 0` → `> 0`): the in=0
+//     case would slip through unclamped (returns 0) or wrongly clamp in=5.
+//   - 358:39 boundary (`> 30` → `>= 30`) and negation (`> 30` → `<= 30`): the
+//     in=30 case would be wrongly clamped to 3, and in=31 slip through as 31.
+func TestRebootClampsDelaySeconds(t *testing.T) {
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{in: 0, want: 3},   // non-positive → default
+		{in: 5, want: 5},   // inside the window → unchanged
+		{in: 30, want: 30}, // upper bound is inclusive
+		{in: 31, want: 3},  // above the window → default
+	}
+	for _, c := range cases {
+		b, _, reboots := newTestBackend(t)
+		got, err := b.Reboot(context.Background(), "bundle", c.in)
+		if err != nil {
+			t.Fatalf("Reboot(%d): %v", c.in, err)
+		}
+		if got != c.want {
+			t.Errorf("Reboot(%d) returned %d, want %d", c.in, got, c.want)
+		}
+		if len(*reboots) != 1 || (*reboots)[0] != c.want {
+			t.Errorf("Reboot(%d) scheduled reboots %v, want [%d]", c.in, *reboots, c.want)
+		}
+	}
+}
