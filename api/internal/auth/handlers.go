@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
@@ -107,7 +108,18 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	options, sessionData, err := s.web.BeginRegistration(user)
+	// Require a discoverable credential (resident key). Login is
+	// BeginDiscoverableLogin — it sends an empty allowCredentials list, so an
+	// authenticator that stored a non-discoverable credential can never be
+	// offered at sign-in. Without this the two halves disagree: registration
+	// succeeds and login is then impossible, with nothing in the UI to explain
+	// why. Platform authenticators (Touch ID, Windows Hello) create
+	// discoverable credentials whether or not they're asked, which is why this
+	// stayed hidden — a USB security key, the only authenticator a Linux
+	// desktop can use, is the case that exposes it. WithResidentKeyRequirement
+	// also sets the legacy requireResidentKey flag for older authenticators.
+	options, sessionData, err := s.web.BeginRegistration(user,
+		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

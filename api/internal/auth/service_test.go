@@ -658,6 +658,49 @@ func TestHandleRegisterBegin_FirstUserAllowed(t *testing.T) {
 	}
 }
 
+// Guards the registration/login contract at the wire, not at the config
+// struct: login is BeginDiscoverableLogin (empty allowCredentials), so
+// registration must ask for a discoverable credential or a security key
+// registers fine and can then never sign in. Asserting the emitted JSON is
+// deliberate — this is exactly the field the browser acts on, and a test that
+// only inspected our Config would still pass if the option stopped reaching
+// the response.
+func TestHandleRegisterBegin_RequiresDiscoverableCredential(t *testing.T) {
+	f := newAuthFixture(t)
+	mux := http.NewServeMux()
+	f.svc.RegisterRoutes(mux)
+	body := `{"name":"alice","displayName":"Alice"}`
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/register/begin", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var got struct {
+		PublicKey struct {
+			AuthenticatorSelection struct {
+				ResidentKey        string `json:"residentKey"`
+				RequireResidentKey *bool  `json:"requireResidentKey"`
+			} `json:"authenticatorSelection"`
+		} `json:"publicKey"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode options: %v body=%s", err, w.Body.String())
+	}
+
+	sel := got.PublicKey.AuthenticatorSelection
+	if sel.ResidentKey != "required" {
+		t.Errorf("residentKey = %q, want \"required\" — discoverable login cannot find a non-discoverable credential", sel.ResidentKey)
+	}
+	// Legacy flag older authenticators still read; must agree with residentKey.
+	if sel.RequireResidentKey == nil {
+		t.Error("requireResidentKey absent, want true")
+	} else if !*sel.RequireResidentKey {
+		t.Error("requireResidentKey = false, want true")
+	}
+}
+
 func TestHandleRegisterBegin_InvalidName(t *testing.T) {
 	f := newAuthFixture(t)
 	mux := http.NewServeMux()
