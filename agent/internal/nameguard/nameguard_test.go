@@ -136,6 +136,21 @@ func (h *harness) last() Status {
 	return h.statuses[len(h.statuses)-1]
 }
 
+// firstWithState returns the first recorded Status in state s. Tests that
+// compare two states must use this rather than last(): with a millisecond
+// interval the loop can move on between two reads, so last() can return the
+// same Status twice and quietly assert nothing.
+func (h *harness) firstWithState(s State) (Status, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, st := range h.statuses {
+		if st.State == s {
+			return st, true
+		}
+	}
+	return Status{}, false
+}
+
 func (h *harness) sawState(s State) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -470,5 +485,38 @@ func TestSinceTracksTransitionsNotProbes(t *testing.T) {
 	waitFor(t, func() bool { c, _ := h.counts(); return c >= 10 }, "several more probes in the same state")
 	if got := h.last().Since; !got.Equal(first) {
 		t.Errorf("Since moved from %s to %s without a state change", first, got)
+	}
+}
+
+// ...and the inverse: Since MUST advance when the state actually changes.
+//
+// Without this, negating the `state != prev` guard survives: prev stays pinned
+// at StateUnknown forever, so Since freezes at process start and logTransition
+// is never called even once. That silently removes every operator-facing log
+// line — the exact signal this package exists to provide, and the reason the
+// original bug cost a day to diagnose. Asserting only that Since holds steady
+// within a state cannot catch it, because "never moves at all" satisfies that.
+func TestSinceAdvancesOnStateChange(t *testing.T) {
+	h := &harness{answers: []answer{
+		{ip: "192.168.1.240"}, // ours
+		{ip: "192.168.1.245"}, // someone else takes it
+	}}
+	h.start(t, Config{Local: fixedLocal("192.168.1.240")})
+
+	waitFor(t, func() bool {
+		_, ok := h.firstWithState(StateConflict)
+		return ok
+	}, "the run to reach the conflict")
+
+	healthySt, ok := h.firstWithState(StateOK)
+	if !ok {
+		t.Fatal("never observed the healthy state before the conflict")
+	}
+	conflictSt, _ := h.firstWithState(StateConflict)
+	healthy, conflicted := healthySt.Since, conflictSt.Since
+
+	if !conflicted.After(healthy) {
+		t.Fatalf("Since did not advance across a state change (%s -> %s): transitions are not being observed",
+			healthy, conflicted)
 	}
 }
