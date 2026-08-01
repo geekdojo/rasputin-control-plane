@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/nameguard"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -47,6 +48,11 @@ func check(ctx context.Context, role proto.NodeRole, run cmdRunner, fwConfig str
 	} else {
 		// Baseline: reaching here means the agent process is up and answering.
 		checks = []proto.HealthCheck{{Name: "agent", OK: true, Critical: true, Detail: "agent responding"}}
+	}
+	if role == proto.RoleControlPlane {
+		if c, ok := mdnsNameCheck(nameStatus()); ok {
+			checks = append(checks, c)
+		}
 	}
 	ack := proto.DiagHealthAck{Role: string(role), OK: true, Checks: checks, Ts: time.Now().UTC()}
 	var failed []string
@@ -105,6 +111,44 @@ func wanRouteCheck(ctx context.Context, run cmdRunner) proto.HealthCheck {
 		detail = "no default route yet (WAN may still be acquiring a lease)"
 	}
 	return proto.HealthCheck{Name: "wan-route", OK: ok, Critical: false, Detail: detail}
+}
+
+// nameStatus reads the mDNS name guard's latest verdict. Package var, in the
+// same style as firewallConfigPath, so tests can point it at a fixed Status
+// without running a guard.
+var nameStatus = nameguard.Snapshot
+
+// mdnsNameCheck maps the name guard's state onto a health check, returning
+// ok=false when there is nothing to report (the guard isn't running, e.g. on a
+// dev box or before its first probe completes). An unknown state must never be
+// reported as a passing check — that would show green on a node that never
+// looked.
+//
+// It is deliberately NON-critical. This gates the node.update saga's
+// post-reboot commit, and a name conflict is a pre-existing network condition
+// that an OS update neither caused nor can fix — rolling the update back would
+// leave the operator on an older image with the same conflict, which is
+// strictly worse. It is reported so the cause is visible, not enforced.
+func mdnsNameCheck(s nameguard.Status) (proto.HealthCheck, bool) {
+	switch s.State {
+	case nameguard.StateOK:
+		return proto.HealthCheck{
+			Name: "mdns-name", OK: true, Critical: false,
+			Detail: s.Name + " resolves to this node",
+		}, true
+	case nameguard.StateConflict:
+		return proto.HealthCheck{
+			Name: "mdns-name", OK: false, Critical: false,
+			Detail: s.Name + " is answered by " + s.OwnerIP + ", not this node — another Rasputin cluster owns the name",
+		}, true
+	case nameguard.StateUnpublished:
+		return proto.HealthCheck{
+			Name: "mdns-name", OK: false, Critical: false,
+			Detail: s.Name + " is not published by anyone — the mDNS responder has backed off",
+		}, true
+	default:
+		return proto.HealthCheck{}, false
+	}
 }
 
 func fileExists(p string) bool {

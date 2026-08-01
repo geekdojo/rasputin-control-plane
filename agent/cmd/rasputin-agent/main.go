@@ -23,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/hostsync"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/nameguard"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
@@ -256,6 +257,24 @@ func main() {
 		// dnsmasq doesn't auto-watch addn-hosts files. The firewall sets it to
 		// "/etc/init.d/dnsmasq reload".
 		go hostsync.Run(ctx, "rasputin.local", hostsDir, 30*time.Second, os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"), nil)
+	}
+
+	// Keep our own mDNS name published, and say so loudly when another cluster
+	// has taken it. systemd-resolved backs off permanently if it loses the
+	// boot-time probe — it neither renames nor reports — so a control plane
+	// that came up beside another Rasputin is unreachable by name for its
+	// entire uptime, and the operator's only clue is a downstream certificate
+	// error. See internal/nameguard for the full failure signature.
+	//
+	// Controlplane-only: it is the role that publishes the shared name (every
+	// other role takes its node id as hostname). RASPUTIN_MDNS_RECOVER_CMD is
+	// unset anywhere without systemd — the OpenWrt firewall, dev, CI — which
+	// degrades the guard to detect-and-report, the correct behaviour there.
+	if role == proto.RoleControlPlane {
+		go nameguard.Run(ctx, nameguard.Config{
+			Name:       envOr("RASPUTIN_CP_MDNS_NAME", "rasputin.local"),
+			RecoverCmd: os.Getenv("RASPUTIN_MDNS_RECOVER_CMD"),
+		})
 	}
 
 	// OS update handlers — every node gets them. The firewall (OpenWrt, no

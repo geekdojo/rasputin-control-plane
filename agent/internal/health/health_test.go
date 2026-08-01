@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/nameguard"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -102,4 +104,88 @@ func writeFWConfig(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// --- mDNS name check (controlplane) ------------------------------------------
+
+func withNameStatus(t *testing.T, s nameguard.Status) {
+	t.Helper()
+	prev := nameStatus
+	nameStatus = func() nameguard.Status { return s }
+	t.Cleanup(func() { nameStatus = prev })
+}
+
+// A name conflict must be REPORTED but must not fail the ack. This check gates
+// the node.update saga's post-reboot commit, and a conflict is a pre-existing
+// network condition the update neither caused nor can fix — rolling back would
+// strand the operator on an older image with the same conflict.
+func TestControlPlaneNameConflictIsReportedNotCritical(t *testing.T) {
+	withNameStatus(t, nameguard.Status{
+		State:   nameguard.StateConflict,
+		Name:    "rasputin.local",
+		OwnerIP: "192.168.207.245",
+	})
+	ack := check(context.Background(), proto.RoleControlPlane, fakeRun(nil, nil), "")
+	if !ack.OK {
+		t.Fatalf("a name conflict must not fail the health ack (it would roll back an unrelated update): %+v", ack)
+	}
+	c, ok := byName(ack)["mdns-name"]
+	if !ok {
+		t.Fatal("expected an mdns-name check on the controlplane")
+	}
+	if c.OK || c.Critical {
+		t.Errorf("mdns-name should be failing + non-critical: %+v", c)
+	}
+	if !strings.Contains(c.Detail, "192.168.207.245") {
+		t.Errorf("detail should name the host that owns the name, got %q", c.Detail)
+	}
+}
+
+func TestControlPlaneNameUnpublishedIsReported(t *testing.T) {
+	withNameStatus(t, nameguard.Status{State: nameguard.StateUnpublished, Name: "rasputin.local"})
+	ack := check(context.Background(), proto.RoleControlPlane, fakeRun(nil, nil), "")
+	c, ok := byName(ack)["mdns-name"]
+	if !ok {
+		t.Fatal("expected an mdns-name check on the controlplane")
+	}
+	if c.OK {
+		t.Errorf("unpublished name should report not-OK: %+v", c)
+	}
+	if !ack.OK {
+		t.Errorf("unpublished name must stay non-critical: %+v", ack)
+	}
+}
+
+func TestControlPlaneNameHealthy(t *testing.T) {
+	withNameStatus(t, nameguard.Status{State: nameguard.StateOK, Name: "rasputin.local"})
+	ack := check(context.Background(), proto.RoleControlPlane, fakeRun(nil, nil), "")
+	if c := byName(ack)["mdns-name"]; !c.OK {
+		t.Errorf("expected a passing mdns-name check, got %+v", c)
+	}
+}
+
+// A guard that never ran (dev box, or before the first probe) must produce NO
+// check at all — reporting unknown as a pass would show green on a node that
+// never looked.
+func TestUnknownNameStateEmitsNoCheck(t *testing.T) {
+	withNameStatus(t, nameguard.Status{})
+	ack := check(context.Background(), proto.RoleControlPlane, fakeRun(nil, nil), "")
+	if _, ok := byName(ack)["mdns-name"]; ok {
+		t.Error("an unknown name state must not emit a check")
+	}
+	if !ack.OK {
+		t.Errorf("baseline ack should still be healthy: %+v", ack)
+	}
+}
+
+// Non-controlplane roles never publish the shared name, so they must not carry
+// the check.
+func TestNonControlPlaneHasNoNameCheck(t *testing.T) {
+	withNameStatus(t, nameguard.Status{State: nameguard.StateConflict, Name: "rasputin.local", OwnerIP: "1.2.3.4"})
+	for _, role := range []proto.NodeRole{proto.RoleCompute, proto.RoleStorage} {
+		ack := check(context.Background(), role, fakeRun(nil, nil), "")
+		if _, ok := byName(ack)["mdns-name"]; ok {
+			t.Errorf("role %s should not carry an mdns-name check", role)
+		}
+	}
 }
