@@ -354,3 +354,121 @@ func TestNoRecoveryWhenResolverConfirmsUs(t *testing.T) {
 		t.Errorf("state = %q, want StateOK", got)
 	}
 }
+
+// --- config defaults ----------------------------------------------------------
+
+// Every other test sets Interval and MissesBeforeRecover explicitly, so nothing
+// exercises the defaults — and a zeroed Interval would spin the loop hot on
+// every appliance. Pin them.
+func TestApplyDefaults(t *testing.T) {
+	var c Config
+	c.applyDefaults()
+
+	if c.Interval != 60*time.Second {
+		t.Errorf("Interval = %s, want 60s", c.Interval)
+	}
+	if c.ProbeTimeout != 3*time.Second {
+		t.Errorf("ProbeTimeout = %s, want 3s", c.ProbeTimeout)
+	}
+	if c.MissesBeforeRecover != 2 {
+		t.Errorf("MissesBeforeRecover = %d, want 2 (a single miss must not restart the resolver)", c.MissesBeforeRecover)
+	}
+	if c.MaxRecoveries != 3 {
+		t.Errorf("MaxRecoveries = %d, want 3", c.MaxRecoveries)
+	}
+	if c.Resolve == nil || c.Local == nil || c.runCmd == nil {
+		t.Error("Resolve, Local and runCmd must all get defaults")
+	}
+}
+
+// Explicitly-set values must survive applyDefaults untouched.
+func TestApplyDefaultsKeepsExplicitValues(t *testing.T) {
+	c := Config{
+		Interval:            5 * time.Second,
+		ProbeTimeout:        time.Second,
+		MissesBeforeRecover: 7,
+		MaxRecoveries:       9,
+	}
+	c.applyDefaults()
+
+	if c.Interval != 5*time.Second || c.ProbeTimeout != time.Second {
+		t.Errorf("durations overwritten: %+v", c)
+	}
+	if c.MissesBeforeRecover != 7 || c.MaxRecoveries != 9 {
+		t.Errorf("counts overwritten: misses=%d max=%d", c.MissesBeforeRecover, c.MaxRecoveries)
+	}
+}
+
+// --- behaviour after the cap --------------------------------------------------
+
+// Hitting the recovery cap must not stop the guard reporting. Giving up on
+// repair and giving up on observation are different things: the operator still
+// needs to see that the name is unpublished.
+func TestKeepsReportingAfterGivingUp(t *testing.T) {
+	h := &harness{answers: []answer{{err: errors.New("no answer")}}}
+	h.start(t, Config{
+		MissesBeforeRecover: 1,
+		MaxRecoveries:       2,
+		RecoverCmd:          "systemctl restart systemd-resolved",
+		Local:               fixedLocal("192.168.1.240"),
+	})
+
+	waitFor(t, func() bool { c, _ := h.counts(); return c >= 25 }, "well past the cap")
+	if _, rec := h.counts(); rec != 2 {
+		t.Fatalf("recovery ran %d times, want it capped at 2", rec)
+	}
+	if got := h.last().State; got != StateUnpublished {
+		t.Errorf("state = %q after giving up, want it still reporting StateUnpublished", got)
+	}
+}
+
+// A recovery command that fails must be survivable — the responder restart is
+// best-effort, and a broken command must not wedge or panic the guard.
+func TestRecoveryCommandFailureIsSurvivable(t *testing.T) {
+	h := &harness{answers: []answer{{err: errors.New("no answer")}}}
+	failing := func(context.Context, string) (string, error) {
+		h.mu.Lock()
+		h.recoveries++
+		h.mu.Unlock()
+		return "Failed to restart systemd-resolved: Unit not found.", errors.New("exit 5")
+	}
+	cfg := Config{
+		Name:                "rasputin.local",
+		Interval:            time.Millisecond,
+		MissesBeforeRecover: 1,
+		MaxRecoveries:       2,
+		RecoverCmd:          "systemctl restart systemd-resolved",
+		Resolve:             h.resolve,
+		Local:               fixedLocal("192.168.1.240"),
+		Lookup:              failLookup,
+		runCmd:              failing,
+		onStatus:            h.record,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go Run(ctx, cfg)
+
+	waitFor(t, func() bool { c, _ := h.counts(); return c >= 15 }, "probes to continue after a failed recovery")
+	if _, rec := h.counts(); rec != 2 {
+		t.Errorf("recovery attempted %d times, want 2 — a failing command must still count against the cap", rec)
+	}
+	if got := h.last().State; got != StateUnpublished {
+		t.Errorf("state = %q, want the guard still reporting", got)
+	}
+}
+
+// Since marks when the state last CHANGED, not when it was last probed —
+// otherwise "conflicting since" in an operator-facing surface would be a lie
+// that resets every probe.
+func TestSinceTracksTransitionsNotProbes(t *testing.T) {
+	h := &harness{answers: []answer{{ip: "192.168.1.240"}}}
+	h.start(t, Config{Local: fixedLocal("192.168.1.240")})
+
+	waitFor(t, func() bool { return h.last().State == StateOK }, "a healthy status")
+	first := h.last().Since
+
+	waitFor(t, func() bool { c, _ := h.counts(); return c >= 10 }, "several more probes in the same state")
+	if got := h.last().Since; !got.Equal(first) {
+		t.Errorf("Since moved from %s to %s without a state change", first, got)
+	}
+}
