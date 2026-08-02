@@ -24,58 +24,67 @@ func fixedLookup(addrs ...string) SystemLookup {
 
 func TestProbeClassifies(t *testing.T) {
 	tests := []struct {
-		name      string
-		resolveIP string
-		resolveEr error
-		local     []string
-		wantState State
-		wantOwner string
+		name       string
+		resolveIP  string
+		resolveEr  error
+		local      []string
+		wantState  State
+		wantOwner  string
+		wantSource Source
 	}{
 		{
-			name:      "answers with one of our own addresses",
-			resolveIP: "192.168.1.10",
-			local:     []string{"10.0.0.1", "192.168.1.10"},
-			wantState: StateOK,
-			wantOwner: "192.168.1.10",
+			name:       "answers with one of our own addresses",
+			resolveIP:  "192.168.1.10",
+			local:      []string{"10.0.0.1", "192.168.1.10"},
+			wantState:  StateOK,
+			wantOwner:  "192.168.1.10",
+			wantSource: SourceMDNS,
 		},
 		{
-			name:      "answers with someone else's address",
-			resolveIP: "192.168.1.245",
-			local:     []string{"192.168.1.240"},
-			wantState: StateConflict,
-			wantOwner: "192.168.1.245",
+			name:       "answers with someone else's address",
+			resolveIP:  "192.168.1.245",
+			local:      []string{"192.168.1.240"},
+			wantState:  StateConflict,
+			wantOwner:  "192.168.1.245",
+			wantSource: SourceMDNS,
 		},
 		{
-			name:      "nobody answers",
-			resolveEr: errors.New("mdns: no A answer (timeout)"),
-			local:     []string{"192.168.1.240"},
-			wantState: StateUnpublished,
+			name:       "nobody answers",
+			resolveEr:  errors.New("mdns: no A answer (timeout)"),
+			local:      []string{"192.168.1.240"},
+			wantState:  StateUnpublished,
+			wantSource: SourceNone,
 		},
 		{
-			name:      "empty answer without an error is still unpublished",
-			resolveIP: "",
-			local:     []string{"192.168.1.240"},
-			wantState: StateUnpublished,
+			name:       "empty answer without an error is still unpublished",
+			resolveIP:  "",
+			local:      []string{"192.168.1.240"},
+			wantState:  StateUnpublished,
+			wantSource: SourceNone,
 		},
 		{
 			// A control plane with no addresses yet (very early boot) must not
 			// read an answer as OK — it cannot be us.
-			name:      "no local addresses means any answer is a conflict",
-			resolveIP: "192.168.1.245",
-			local:     nil,
-			wantState: StateConflict,
-			wantOwner: "192.168.1.245",
+			name:       "no local addresses means any answer is a conflict",
+			resolveIP:  "192.168.1.245",
+			local:      nil,
+			wantState:  StateConflict,
+			wantOwner:  "192.168.1.245",
+			wantSource: SourceMDNS,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			resolve := func(string, time.Duration) (string, error) { return tc.resolveIP, tc.resolveEr }
-			got, owner := probe("rasputin.local", time.Second, resolve, fixedLocal(tc.local...), failLookup)
+			got, owner, source := probe("rasputin.local", time.Second, resolve, fixedLocal(tc.local...), failLookup)
 			if got != tc.wantState {
 				t.Errorf("state = %q, want %q", got, tc.wantState)
 			}
 			if owner != tc.wantOwner {
 				t.Errorf("owner = %q, want %q", owner, tc.wantOwner)
+			}
+			if source != tc.wantSource {
+				t.Errorf("source = %q, want %q", source, tc.wantSource)
 			}
 		})
 	}
@@ -316,7 +325,7 @@ func TestSilentMDNSButResolverSeesUsIsHealthy(t *testing.T) {
 	resolve := func(string, time.Duration) (string, error) {
 		return "", errors.New("mdns: no A answer (timeout)")
 	}
-	got, owner := probe("rasputin.local", time.Second,
+	got, owner, source := probe("rasputin.local", time.Second,
 		resolve, fixedLocal("192.168.1.240"), fixedLookup("192.168.1.240"))
 	if got != StateOK {
 		t.Fatalf("state = %q, want StateOK — the resolver can still map the name to us", got)
@@ -324,13 +333,22 @@ func TestSilentMDNSButResolverSeesUsIsHealthy(t *testing.T) {
 	if owner != "192.168.1.240" {
 		t.Errorf("owner = %q, want our own address", owner)
 	}
+	// The whole point of recording Source: this healthy verdict came from the
+	// FALLBACK, meaning our own responder's answer is not reaching our socket.
+	// Indistinguishable from a wire-answered OK without it.
+	if source != SourceResolver {
+		t.Errorf("source = %q, want SourceResolver — a healthy verdict from the fallback must be distinguishable from one off the wire", source)
+	}
 }
 
 // The cross-check must not launder someone else's answer into a pass.
 func TestSilentMDNSAndResolverSeesSomeoneElseIsUnpublished(t *testing.T) {
 	resolve := func(string, time.Duration) (string, error) { return "", errors.New("no answer") }
-	got, _ := probe("rasputin.local", time.Second,
+	got, _, source := probe("rasputin.local", time.Second,
 		resolve, fixedLocal("192.168.1.240"), fixedLookup("192.168.1.245"))
+	if source != SourceNone {
+		t.Errorf("source = %q, want SourceNone — nothing produced a usable answer", source)
+	}
 	if got != StateUnpublished {
 		t.Fatalf("state = %q, want StateUnpublished — the resolver answered with a host that isn't us", got)
 	}
@@ -340,8 +358,11 @@ func TestSilentMDNSAndResolverSeesSomeoneElseIsUnpublished(t *testing.T) {
 // stale resolver answer (an /etc/hosts pin, a cached record).
 func TestWireConflictBeatsResolver(t *testing.T) {
 	resolve := func(string, time.Duration) (string, error) { return "192.168.1.245", nil }
-	got, owner := probe("rasputin.local", time.Second,
+	got, owner, source := probe("rasputin.local", time.Second,
 		resolve, fixedLocal("192.168.1.240"), fixedLookup("192.168.1.240"))
+	if source != SourceMDNS {
+		t.Errorf("source = %q, want SourceMDNS — the wire is what saw the conflict", source)
+	}
 	if got != StateConflict {
 		t.Fatalf("state = %q, want StateConflict — the wire is authoritative on who owns the name", got)
 	}

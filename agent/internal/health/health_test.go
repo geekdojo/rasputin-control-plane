@@ -189,3 +189,27 @@ func TestNonControlPlaneHasNoNameCheck(t *testing.T) {
 		}
 	}
 }
+
+// The healthy detail must carry the address and the signal — this is the only
+// way to read current state WITHOUT waiting for a transition, since the guard
+// logs on change only. On the bench a long-healthy node printed nothing and
+// the live state had to be inferred from the absence of log lines.
+func TestControlPlaneNameHealthyDetailCarriesAddressAndSource(t *testing.T) {
+	withNameStatus(t, nameguard.Status{
+		State:   nameguard.StateOK,
+		Name:    "rasputin.local",
+		OwnerIP: "192.168.207.31",
+		Source:  nameguard.SourceResolver,
+	})
+	ack := check(context.Background(), proto.RoleControlPlane, fakeRun(nil, nil), "")
+	c := byName(ack)["mdns-name"]
+	if !c.OK {
+		t.Fatalf("expected a passing check, got %+v", c)
+	}
+	if !strings.Contains(c.Detail, "192.168.207.31") {
+		t.Errorf("detail should name the answering address, got %q", c.Detail)
+	}
+	if !strings.Contains(c.Detail, "resolver") {
+		t.Errorf("detail should name the signal, so a fallback-only OK is visible, got %q", c.Detail)
+	}
+}

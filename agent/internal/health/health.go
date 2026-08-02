@@ -132,10 +132,16 @@ var nameStatus = nameguard.Snapshot
 func mdnsNameCheck(s nameguard.Status) (proto.HealthCheck, bool) {
 	switch s.State {
 	case nameguard.StateOK:
-		return proto.HealthCheck{
-			Name: "mdns-name", OK: true, Critical: false,
-			Detail: s.Name + " resolves to this node",
-		}, true
+		// Carry the address and the signal, not just "it's fine". This is the
+		// only way to read current state WITHOUT waiting for a transition —
+		// the guard logs on change only, so a long-healthy node prints
+		// nothing, and on the bench that meant inferring the live state from
+		// the absence of log lines.
+		detail := s.Name + " resolves to this node"
+		if s.OwnerIP != "" {
+			detail += " (" + s.OwnerIP + " via " + string(s.Source) + ")"
+		}
+		return proto.HealthCheck{Name: "mdns-name", OK: true, Critical: false, Detail: detail}, true
 	case nameguard.StateConflict:
 		return proto.HealthCheck{
 			Name: "mdns-name", OK: false, Critical: false,
