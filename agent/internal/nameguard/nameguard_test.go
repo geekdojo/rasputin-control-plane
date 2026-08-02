@@ -541,3 +541,22 @@ func TestSinceAdvancesOnStateChange(t *testing.T) {
 			healthy, conflicted)
 	}
 }
+
+// describe exists for exactly one reason: the bench printed "(was )" when the
+// zero State reached a log line, which reads like a bug in the logging rather
+// than the honest "we had not probed yet". Pin that contract — a pure function
+// with a stated guarantee is worth a test, unlike the log-string branches
+// around it.
+func TestDescribeRendersUnknown(t *testing.T) {
+	if got := describe(StateUnknown); got != "unknown" {
+		t.Errorf("describe(StateUnknown) = %q, want %q — an empty rendering is what made the log look broken", got, "unknown")
+	}
+	for _, s := range []State{StateOK, StateConflict, StateUnpublished} {
+		if got := describe(s); got != string(s) {
+			t.Errorf("describe(%q) = %q, want the state verbatim", s, got)
+		}
+		if got := describe(s); got == "unknown" {
+			t.Errorf("describe(%q) must not collapse a real state into \"unknown\"", s)
+		}
+	}
+}
