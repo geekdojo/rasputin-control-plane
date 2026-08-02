@@ -72,7 +72,29 @@ type Status struct {
 	// Recoveries counts responder restarts attempted in the current episode;
 	// it resets once a probe comes back healthy.
 	Recoveries int
+	// Source records WHICH signal produced this verdict — the mDNS probe or
+	// the resolver cross-check. Without it a healthy verdict is ambiguous:
+	// StateOK reads identically whether our own responder answered on the
+	// wire or the probe heard nothing and the resolver quietly covered for
+	// it. That ambiguity cost a bench run on 2026-08-02 — the whole point of
+	// the exercise was to learn whether multicast loopback delivers to our
+	// own socket, and the logs could not say.
+	Source Source
 }
+
+// Source names the signal a verdict came from.
+type Source string
+
+const (
+	SourceNone = Source("")
+	// SourceMDNS — someone answered our multicast query on the wire. This is
+	// the primary signal and the only one that can identify a conflict.
+	SourceMDNS = Source("mdns")
+	// SourceResolver — the wire was silent and the ordinary resolver stack
+	// still mapped the name to us. Healthy, but it means our own responder's
+	// answer is not reaching our own socket, which is worth knowing.
+	SourceResolver = Source("resolver")
+)
 
 // Resolver resolves a .local name to an IP. mdns.Resolve fits; injectable so
 // the classification logic is unit-tested without a network.
@@ -178,7 +200,18 @@ func Run(ctx context.Context, cfg Config) {
 		log.Printf("nameguard: no name to guard; not starting")
 		return
 	}
-	log.Printf("nameguard: guarding %s every %s (recover=%t)", cfg.Name, cfg.Interval, cfg.RecoverCmd != "")
+	// Log the recovery command VERBATIM, not a boolean. `recover=true` was the
+	// old form, and it reported true on a value of bare "systemctl" — the
+	// truncated env var that meant recovery never once worked (rasputin-os
+	// #23). A boolean cannot distinguish a working command from a mangled one;
+	// the literal string can, and it gives the QEMU boot smoke something to
+	// assert against, since the console is the only channel that smoke has.
+	// Safe to print: this is an operator-set command, never a credential.
+	if cfg.RecoverCmd == "" {
+		log.Printf("nameguard: guarding %s every %s (report-only — no recovery command set)", cfg.Name, cfg.Interval)
+	} else {
+		log.Printf("nameguard: guarding %s every %s (recovery command: %q)", cfg.Name, cfg.Interval, cfg.RecoverCmd)
+	}
 
 	var (
 		misses     int
@@ -195,10 +228,10 @@ func Run(ctx context.Context, cfg Config) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			state, owner := probe(cfg.Name, cfg.ProbeTimeout, cfg.Resolve, cfg.Local, cfg.Lookup)
+			state, owner, source := probe(cfg.Name, cfg.ProbeTimeout, cfg.Resolve, cfg.Local, cfg.Lookup)
 			if state != prev {
 				since = time.Now().UTC()
-				logTransition(cfg.Name, prev, state, owner)
+				logTransition(cfg.Name, prev, state, owner, source)
 				prev = state
 			}
 
@@ -235,6 +268,7 @@ func Run(ctx context.Context, cfg Config) {
 				OwnerIP:    owner,
 				Since:      since,
 				Recoveries: recoveries,
+				Source:     source,
 			}
 			snapshot.Store(st)
 			if cfg.onStatus != nil {
@@ -259,10 +293,11 @@ func Run(ctx context.Context, cfg Config) {
 // addresses, the name IS published and the mDNS silence was our own loopback,
 // not a fault; restarting on that would be a self-inflicted outage.
 func Probe(name string, timeout time.Duration, resolve Resolver, local LocalIPs) (State, string) {
-	return probe(name, timeout, resolve, local, nil)
+	st, owner, _ := probe(name, timeout, resolve, local, nil)
+	return st, owner
 }
 
-func probe(name string, timeout time.Duration, resolve Resolver, local LocalIPs, lookup SystemLookup) (State, string) {
+func probe(name string, timeout time.Duration, resolve Resolver, local LocalIPs, lookup SystemLookup) (State, string, Source) {
 	if resolve == nil {
 		resolve = mdns.Resolve
 	}
@@ -276,19 +311,19 @@ func probe(name string, timeout time.Duration, resolve Resolver, local LocalIPs,
 	ip, err := resolve(name, timeout)
 	if err == nil && ip != "" {
 		if containsIP(mine, ip) {
-			return StateOK, ip
+			return StateOK, ip, SourceMDNS
 		}
-		return StateConflict, ip
+		return StateConflict, ip, SourceMDNS
 	}
 	// Silent on the wire — corroborate before calling it unpublished.
 	if addrs, lerr := lookup(name); lerr == nil {
 		for _, a := range addrs {
 			if containsIP(mine, a) {
-				return StateOK, a
+				return StateOK, a, SourceResolver
 			}
 		}
 	}
-	return StateUnpublished, ""
+	return StateUnpublished, "", SourceNone
 }
 
 func containsIP(list []string, ip string) bool {
@@ -313,13 +348,19 @@ func restartResponder(ctx context.Context, cfg Config, attempt int) {
 // explicit: the whole failure class exists because the system gave no signal,
 // and the symptom an operator actually sees (a certificate error) points
 // nowhere near the cause.
-func logTransition(name string, from, to State, owner string) {
+func logTransition(name string, from, to State, owner string, source Source) {
 	switch to {
 	case StateOK:
+		// Always name the address AND the signal. Without the address, a
+		// verdict of "ours" hides WHICH of our addresses answered — on a box
+		// with a docker bridge that is the difference between the LAN name
+		// working and only the bridge answering. Without the signal, OK is
+		// ambiguous between the wire and the resolver fallback.
 		if from == StateUnknown {
-			log.Printf("nameguard: %s resolves to us — OK", name)
+			log.Printf("nameguard: %s resolves to us — OK (answered by %s via %s)", name, owner, source)
 		} else {
-			log.Printf("nameguard: %s resolves to us again — recovered from %s", name, from)
+			log.Printf("nameguard: %s resolves to us again — recovered from %s (answered by %s via %s)",
+				name, describe(from), owner, source)
 		}
 	case StateConflict:
 		log.Printf("nameguard: NAME CONFLICT — %s is answered by %s, which is not us. "+
@@ -329,8 +370,18 @@ func logTransition(name string, from, to State, owner string) {
 			"cluster-id and re-provision it.", name, owner)
 	case StateUnpublished:
 		log.Printf("nameguard: %s is not published by anyone (was %s) — the responder has "+
-			"most likely backed off after losing a probe and will not retry on its own", name, from)
+			"most likely backed off after losing a probe and will not retry on its own", name, describe(from))
 	}
+}
+
+// describe renders a State for an operator. The zero value must not print as
+// an empty string: the bench produced the line "(was )", which reads like a
+// bug in the logging rather than the honest "we had not probed yet".
+func describe(s State) string {
+	if s == StateUnknown {
+		return "unknown"
+	}
+	return string(s)
 }
 
 // LocalIPv4s returns this host's non-loopback IPv4 addresses.
