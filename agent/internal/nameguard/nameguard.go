@@ -200,7 +200,18 @@ func Run(ctx context.Context, cfg Config) {
 		log.Printf("nameguard: no name to guard; not starting")
 		return
 	}
-	log.Printf("nameguard: guarding %s every %s (recover=%t)", cfg.Name, cfg.Interval, cfg.RecoverCmd != "")
+	// Log the recovery command VERBATIM, not a boolean. `recover=true` was the
+	// old form, and it reported true on a value of bare "systemctl" — the
+	// truncated env var that meant recovery never once worked (rasputin-os
+	// #23). A boolean cannot distinguish a working command from a mangled one;
+	// the literal string can, and it gives the QEMU boot smoke something to
+	// assert against, since the console is the only channel that smoke has.
+	// Safe to print: this is an operator-set command, never a credential.
+	if cfg.RecoverCmd == "" {
+		log.Printf("nameguard: guarding %s every %s (report-only — no recovery command set)", cfg.Name, cfg.Interval)
+	} else {
+		log.Printf("nameguard: guarding %s every %s (recovery command: %q)", cfg.Name, cfg.Interval, cfg.RecoverCmd)
+	}
 
 	var (
 		misses     int
