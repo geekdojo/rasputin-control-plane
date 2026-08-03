@@ -3,6 +3,7 @@ package mesh
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -913,14 +914,56 @@ func TestReconcileConverge_SkipsInflightAndRecentFailure(t *testing.T) {
 	f.addNode(t, "c10", proto.RoleCompute, now)
 	f.addNode(t, "c11", proto.RoleCompute, now)
 	f.addEnrollJob(t, "job-inflight", "c10", jobs.StatusQueued, now)
-	f.addEnrollJob(t, "job-failed", "c11", jobs.StatusFailed, now.Add(-5*time.Minute))
+	// A single failure five SECONDS ago is still inside the 30s first-retry
+	// backoff. (This used to be five MINUTES ago and still be skipped, under
+	// the flat 30m cooldown — that is exactly the behaviour being changed.)
+	f.addEnrollJob(t, "job-failed", "c11", jobs.StatusFailed, now.Add(-5*time.Second))
 
 	step := reconcileConvergeEnrollment(f.svc, f.inv, f.jstore, f.runner)
 	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
 		t.Fatalf("converge: %v", err)
 	}
 	if got := f.submittedEnrolls(t); len(got) != 0 {
-		t.Errorf("submitted = %v, want none (inflight + cooldown)", got)
+		t.Errorf("submitted = %v, want none (inflight + backoff)", got)
+	}
+}
+
+// The bench scenario, as a test: ONE failed enroll (the growpart-reboot race),
+// the node long since healthy. Under the old flat 30m cooldown this sat out
+// for 33.7 minutes; it must now be retried on the next tick.
+func TestReconcileConverge_RetriesASingleTransientFailureQuickly(t *testing.T) {
+	f := newConvergeFixture(t)
+	now := time.Now().UTC()
+	f.addNode(t, "c13", proto.RoleCompute, now)
+	f.addEnrollJob(t, "job-firstboot-race", "c13", jobs.StatusFailed, now.Add(-5*time.Minute))
+
+	step := reconcileConvergeEnrollment(f.svc, f.inv, f.jstore, f.runner)
+	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
+		t.Fatalf("converge: %v", err)
+	}
+	if got := f.submittedEnrolls(t); !slices.Equal(got, []string{"c13"}) {
+		t.Errorf("submitted = %v, want [c13] — one transient failure must not cost 30 minutes", got)
+	}
+}
+
+// A node that keeps failing must still be paced, or the queue fills with a
+// failed job every reconcile tick — the reason a cooldown existed at all.
+func TestReconcileConverge_BacksOffARepeatedlyFailingNode(t *testing.T) {
+	f := newConvergeFixture(t)
+	now := time.Now().UTC()
+	f.addNode(t, "c14", proto.RoleCompute, now)
+	// Six consecutive failures -> 16m backoff; the newest is 5m old.
+	for i := range 6 {
+		f.addEnrollJob(t, fmt.Sprintf("job-fail-%d", i), "c14", jobs.StatusFailed,
+			now.Add(-time.Duration(5+i*10)*time.Minute))
+	}
+
+	step := reconcileConvergeEnrollment(f.svc, f.inv, f.jstore, f.runner)
+	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
+		t.Fatalf("converge: %v", err)
+	}
+	if got := f.submittedEnrolls(t); len(got) != 0 {
+		t.Errorf("submitted = %v, want none — a repeatedly failing node must stay paced", got)
 	}
 }
 
@@ -928,7 +971,7 @@ func TestReconcileConverge_RetriesAfterCooldown(t *testing.T) {
 	f := newConvergeFixture(t)
 	now := time.Now().UTC()
 	f.addNode(t, "c12", proto.RoleCompute, now)
-	f.addEnrollJob(t, "job-old-fail", "c12", jobs.StatusFailed, now.Add(-enrollRetryCooldown-time.Minute))
+	f.addEnrollJob(t, "job-old-fail", "c12", jobs.StatusFailed, now.Add(-enrollRetryMax-time.Minute))
 
 	step := reconcileConvergeEnrollment(f.svc, f.inv, f.jstore, f.runner)
 	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {

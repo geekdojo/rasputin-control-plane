@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // defaultCABundlePath is where the agent writes the Mesh CA so tailscaled
@@ -117,21 +118,53 @@ func ensureCAInSystemBundle(caPEM []byte, candidates []string) (changed bool, er
 // drive restart logic without a real init system.
 type cmdRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
+// initSystemPresent reports whether an init system's entrypoint exists. A var
+// so tests can drive either platform without a real filesystem.
+var initSystemPresent = func(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // restartTailscaled bounces the daemon so it reloads the system cert pool
-// (Go caches it at process start). Tries systemd first (Buildroot OS), then
-// procd (OpenWrt firewall). Best-effort across the two init systems Rasputin
-// images actually ship.
+// (Go caches it at process start). Rasputin ships two init systems — systemd
+// on the Buildroot OS, procd on the OpenWrt firewall — and only ever ONE of
+// them exists on a given box.
+//
+// So probe before attempting, rather than trying both and joining the errors.
+// The old version always tried both, which meant every systemd-node failure
+// reported a guaranteed-useless second line:
+//
+//	restart tailscaled (tried systemctl + procd): exit status 1
+//	fork/exec /etc/init.d/tailscale: no such file or directory
+//
+// The procd line reads as the cause and isn't — it can never exist there. On
+// the 2026-08-03 bench that message produced a confident misdiagnosis
+// ("wrong-platform bug") when the real cause was the first line: the node was
+// mid-reboot, so systemctl exited 1. An error that names the wrong cause is
+// worse than a terse one.
 func restartTailscaled(ctx context.Context, run cmdRunner) error {
+	attempts := []struct {
+		probe string // init-system marker that must exist to bother trying
+		argv  []string
+	}{
+		{"/run/systemd/system", []string{"systemctl", "restart", "tailscaled"}},
+		{"/etc/init.d/tailscale", []string{"/etc/init.d/tailscale", "restart"}},
+	}
 	var errs []error
-	for _, attempt := range [][]string{
-		{"systemctl", "restart", "tailscaled"},
-		{"/etc/init.d/tailscale", "restart"},
-	} {
-		if _, err := run(ctx, attempt[0], attempt[1:]...); err == nil {
+	var tried []string
+	for _, a := range attempts {
+		if !initSystemPresent(a.probe) {
+			continue
+		}
+		tried = append(tried, a.argv[0])
+		if _, err := run(ctx, a.argv[0], a.argv[1:]...); err == nil {
 			return nil
 		} else {
 			errs = append(errs, err)
 		}
 	}
-	return fmt.Errorf("restart tailscaled (tried systemctl + procd): %w", errors.Join(errs...))
+	if len(tried) == 0 {
+		return errors.New("restart tailscaled: no supported init system found (looked for systemd at /run/systemd/system and procd at /etc/init.d/tailscale)")
+	}
+	return fmt.Errorf("restart tailscaled (tried %s): %w", strings.Join(tried, ", "), errors.Join(errs...))
 }

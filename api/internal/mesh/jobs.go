@@ -201,10 +201,50 @@ func applyRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 // are never auto-enrolled.
 var AutoEnrollRoles = []proto.NodeRole{proto.RoleFirewall, proto.RoleCompute, proto.RoleStorage}
 
-// enrollRetryCooldown is how long converge_enrollment waits after a FAILED
-// enroll attempt before retrying that node, so a persistently broken agent
-// produces a failed job every ~cooldown instead of every reconcile tick.
-const enrollRetryCooldown = 30 * time.Minute
+// Retry pacing for converge_enrollment after a FAILED enroll.
+//
+// A flat 30-minute cooldown used to live here. Its purpose was sound — stop a
+// persistently broken agent producing a failed job every reconcile tick — but
+// it was tuned entirely for permanent failure and charged the same penalty to
+// a TRANSIENT one. The transient case is not hypothetical: a freshly flashed
+// node reboots for `growpart` on first boot, and the control plane enrolls the
+// instant the node registers, so the FIRST attempt lands mid-reboot and
+// `systemctl restart tailscaled` fails. Measured on the bench 2026-08-03: the
+// node self-corrected in ~30 seconds and then sat outside the mesh for
+// 33.7 minutes, showing a red FAILED job and a missing mesh device the whole
+// time. An operator reasonably concludes the cluster is broken and starts
+// debugging something that was going to fix itself.
+//
+// Exponential backoff instead: quick early retries for the transient case,
+// converging on the old ceiling for the permanent one, so nothing regresses.
+// Retrying is cheap — enrollMintKey's preauth key expires in 10 minutes, so a
+// failed attempt leaves no state to clean up.
+//
+// NOTE the real floor is the reconcile interval, not enrollRetryBase:
+// converge_enrollment only runs on a mesh.reconcile tick (default 5m,
+// RASPUTIN_MESH_RECONCILE_INTERVAL). So sub-5m delays mean "eligible at the
+// next tick" — first retry lands within ~5 minutes rather than ~30.
+const (
+	enrollRetryBase = 30 * time.Second
+	enrollRetryMax  = 30 * time.Minute
+)
+
+// enrollRetryBackoff is how long to wait after the Nth consecutive failed
+// enroll before trying again: 30s, 1m, 2m, 4m … capped at 30m. A success
+// resets the count, so a node that recovers is not penalised for its history.
+func enrollRetryBackoff(consecutiveFailures int) time.Duration {
+	if consecutiveFailures < 1 {
+		return 0
+	}
+	d := enrollRetryBase
+	for i := 1; i < consecutiveFailures; i++ {
+		if d >= enrollRetryMax {
+			break
+		}
+		d *= 2
+	}
+	return min(d, enrollRetryMax)
+}
 
 // ReconcileWorkflow pulls Headscale's live state, derives an observed
 // hash, compares to intent_hash, and emits drift / in_sync. It then
@@ -369,7 +409,8 @@ func reconcileCompare(svc *Service, nc *nats.Conn) jobs.DoFn {
 //   - is currently online (an enroll RPC to an offline agent just burns the
 //     dispatch timeout; the node converges when it comes back),
 //   - has no enroll job already queued or running, and
-//   - isn't inside enrollRetryCooldown of its last failed attempt.
+//   - isn't inside enrollRetryBackoff of its last failed attempt (30s after
+//     the first failure, doubling to a 30m cap; a success resets the streak).
 func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *jobs.Store, runner *jobs.Runner) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		nodes, err := inv.List(sc.Ctx)
@@ -395,6 +436,12 @@ func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *job
 		}
 		inflight := map[string]bool{}
 		lastTerminal := map[string]*jobs.Job{}
+		// Consecutive failures per node, newest-first: count leading FAILED
+		// jobs and stop at the first terminal job that is not a failure, so a
+		// node that once succeeded starts its backoff over rather than
+		// inheriting an old streak.
+		consecutiveFailures := map[string]int{}
+		streakEnded := map[string]bool{}
 		for _, j := range recent {
 			var spec EnrollSpec
 			if json.Unmarshal(j.Spec, &spec) != nil || spec.NodeID == "" {
@@ -406,6 +453,13 @@ func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *job
 			default:
 				if _, seen := lastTerminal[spec.NodeID]; !seen {
 					lastTerminal[spec.NodeID] = j
+				}
+				if !streakEnded[spec.NodeID] {
+					if j.Status == jobs.StatusFailed {
+						consecutiveFailures[spec.NodeID]++
+					} else {
+						streakEnded[spec.NodeID] = true
+					}
 				}
 			}
 		}
@@ -425,8 +479,8 @@ func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *job
 				continue
 			}
 			if last := lastTerminal[n.ID]; last != nil && last.Status == jobs.StatusFailed &&
-				time.Since(last.CreatedAt) < enrollRetryCooldown {
-				skipped["cooldown"]++
+				time.Since(last.CreatedAt) < enrollRetryBackoff(consecutiveFailures[n.ID]) {
+				skipped["backoff"]++
 				continue
 			}
 			spec, _ := json.Marshal(EnrollSpec{NodeID: n.ID})
