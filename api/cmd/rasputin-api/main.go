@@ -374,6 +374,23 @@ func main() {
 			"http://localhost:3000,http://localhost:8080"))),
 		SecureCookies: os.Getenv("RASPUTIN_SECURE_COOKIES") == "1",
 	}
+	// Say what this node believes its identity IS, on startup, verbatim.
+	//
+	// These four values are DERIVED from RASPUTIN_CLUSTER_ID now (ADR-0003), and
+	// until this line they appeared in no log, no endpoint and no health check —
+	// so a wrong derivation surfaced only when an operator's passkey silently
+	// failed to work. WebAuthn binds credentials to the RP ID, which makes this
+	// the least forgiving value on the box to get wrong quietly.
+	//
+	// It is also the only channel CI can see: the QEMU boot smoke has no shell
+	// into the guest and asserts by grepping the serial console. A value that
+	// never reaches the console is a value no build can ever check — the exact
+	// gap that let a truncated RASPUTIN_MDNS_RECOVER_CMD ship for a whole
+	// release past green CI (rasputin-os #23).
+	log.Printf("rasputin-api: cluster identity: rp-id=%q origins=%q public-base-url=%q (cluster-id=%q)",
+		authCfg.RPID, strings.Join(authCfg.RPOrigins, ","), publicBaseURL,
+		envOr("RASPUTIN_CLUSTER_ID", "<unset — dev defaults>"))
+
 	authSvc, err := auth.NewService(authStore, authCfg)
 	if err != nil {
 		log.Fatalf("rasputin-api: auth service: %v", err)
