@@ -169,3 +169,68 @@ func TestSeedBMCHostNode(t *testing.T) {
 		t.Errorf("re-seeded over operator choice: %q", v)
 	}
 }
+
+// --- cluster-name derivation (ADR-0003) --------------------------------------
+
+// RASPUTIN_CLUSTER_ID is written by firstboot and by nothing else, so its
+// PRESENCE is what distinguishes a provisioned appliance from a dev box. Get
+// this wrong and every developer's origin silently renames, breaking the local
+// passkey flow.
+func TestClusterHostname(t *testing.T) {
+	t.Setenv("RASPUTIN_CLUSTER_ID", "")
+	if got := clusterHostname(); got != "" {
+		t.Errorf("unset cluster id should yield %q (dev box), got %q", "", got)
+	}
+	t.Setenv("RASPUTIN_CLUSTER_ID", "home1")
+	if got := clusterHostname(); got != "home1.local" {
+		t.Errorf("clusterHostname() = %q, want home1.local", got)
+	}
+	// Whitespace from a hand-edited node.env must not produce " home1 .local".
+	t.Setenv("RASPUTIN_CLUSTER_ID", "  home1  ")
+	if got := clusterHostname(); got != "home1.local" {
+		t.Errorf("clusterHostname() = %q, want the id trimmed", got)
+	}
+}
+
+// The whole no-migration promise of ADR-0003 rests on this: a node whose
+// cluster id is the default derives EXACTLY the values the OS image hardcodes
+// today. If this drifts, every existing installation renames on upgrade.
+func TestDefaultClusterIDDerivesTodaysApplianceValues(t *testing.T) {
+	t.Setenv("RASPUTIN_CLUSTER_ID", "rasputin")
+	host := func(h string) string { return h }
+	https := func(h string) string { return "https://" + h }
+	hs := func(h string) string { return "https://" + h + ":18080" }
+
+	for _, tc := range []struct{ name, got, want string }{
+		{"RP ID", applianceOr(host, "localhost"), "rasputin.local"},
+		{"RP origin", applianceOr(https, "dev"), "https://rasputin.local"},
+		{"public base URL", applianceOr(https, "dev"), "https://rasputin.local"},
+		{"headscale server_url", applianceOr(hs, ""), "https://rasputin.local:18080"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q — an existing installation would RENAME on upgrade", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// A dev box keeps its localhost defaults untouched.
+func TestNoClusterIDKeepsDevDefaults(t *testing.T) {
+	t.Setenv("RASPUTIN_CLUSTER_ID", "")
+	if got := applianceOr(func(h string) string { return h }, "localhost"); got != "localhost" {
+		t.Errorf("RP ID default = %q, want localhost on a dev box", got)
+	}
+	if got := applianceOr(func(h string) string { return "https://" + h }, ""); got != "" {
+		t.Errorf("headscale ServerURL default = %q, want empty so the supervisor falls back to resolveServerHost", got)
+	}
+}
+
+// A non-default cluster id derives its own name everywhere.
+func TestNonDefaultClusterIDDerivesItsOwnName(t *testing.T) {
+	t.Setenv("RASPUTIN_CLUSTER_ID", "home1")
+	if got := applianceOr(func(h string) string { return h }, "localhost"); got != "home1.local" {
+		t.Errorf("RP ID = %q, want home1.local", got)
+	}
+	if got := applianceOr(func(h string) string { return "https://" + h + ":18080" }, ""); got != "https://home1.local:18080" {
+		t.Errorf("headscale server_url = %q, want https://home1.local:18080", got)
+	}
+}

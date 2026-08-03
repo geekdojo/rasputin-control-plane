@@ -297,7 +297,8 @@ func main() {
 	}
 	// Public URL the agent uses to fetch bundles. In dev the api is at
 	// :8080; in production this is the api's tailnet hostname.
-	publicBaseURL := envOr("RASPUTIN_PUBLIC_BASE_URL", "http://localhost:8080")
+	publicBaseURL := envOr("RASPUTIN_PUBLIC_BASE_URL", applianceOr(
+		func(h string) string { return "https://" + h }, "http://localhost:8080"))
 	// The api's own node id — the system.update saga skips this one (the
 	// operator updates the controlplane node manually after the cascade).
 	selfNodeID := os.Getenv("RASPUTIN_SELF_NODE_ID")
@@ -367,8 +368,10 @@ func main() {
 	// ceremony gets its secure context without any tunnel.
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
-		RPID:          envOr("RASPUTIN_RP_ID", "localhost"),
-		RPOrigins:     splitCSV(envOr("RASPUTIN_RP_ORIGINS", "http://localhost:3000,http://localhost:8080")),
+		RPID:          envOr("RASPUTIN_RP_ID", applianceOr(func(h string) string { return h }, "localhost")),
+		RPOrigins: splitCSV(envOr("RASPUTIN_RP_ORIGINS", applianceOr(
+			func(h string) string { return "https://" + h },
+			"http://localhost:3000,http://localhost:8080"))),
 		SecureCookies: os.Getenv("RASPUTIN_SECURE_COOKIES") == "1",
 	}
 	authSvc, err := auth.NewService(authStore, authCfg)
@@ -977,6 +980,37 @@ func envOr(key, def string) string {
 	return def
 }
 
+// clusterHostname returns the cluster's mDNS name — "<cluster-id>.local" — or
+// "" when this process is not running on a provisioned node.
+//
+// RASPUTIN_CLUSTER_ID is written into node.env by firstboot and by nothing
+// else, so its PRESENCE is the signal "I am a provisioned appliance". That is
+// what lets the appliance defaults below derive a name while dev keeps its
+// localhost defaults untouched — the alternative, deriving unconditionally,
+// would rename every developer's origin and break the local passkey flow.
+//
+// Per ADR-0003 the id defaults to "rasputin", so a node that predates
+// per-cluster naming — or any node whose operator never chose a name —
+// derives exactly the values the OS image hardcodes today. That is the
+// mechanism by which per-cluster naming ships with no migration.
+func clusterHostname() string {
+	id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID"))
+	if id == "" {
+		return ""
+	}
+	return id + ".local"
+}
+
+// applianceOr returns the appliance value derived from the cluster name, or
+// devDefault when there is no cluster id (i.e. a dev box). Callers still let an
+// explicit env var win — this only supplies the default.
+func applianceOr(appliance func(host string) string, devDefault string) string {
+	if h := clusterHostname(); h != "" {
+		return appliance(h)
+	}
+	return devDefault
+}
+
 // busPreseedPath is where the controlplane reads its provisioning matched-set
 // token preseed (hashes + node bindings). firstboot copies it here from the
 // seed FAT. Overridable for tests / non-default layouts.
@@ -1185,10 +1219,19 @@ func wireSelfHostedMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin strin
 // CA (which switches it into HTTPS mode with a per-installation leaf).
 func newDockerSupervisor(stateDir string, meshCA *mesh.MeshCA) (*mesh.DockerSupervisor, error) {
 	cfg := mesh.DockerSupervisorConfig{
-		StateDir:      filepath.Join(stateDir, "headscale"),
-		Image:         os.Getenv("RASPUTIN_HEADSCALE_IMAGE"),
-		ListenAddr:    os.Getenv("RASPUTIN_HEADSCALE_LISTEN_ADDR"),
-		ServerURL:     os.Getenv("RASPUTIN_HEADSCALE_URL"),
+		StateDir:   filepath.Join(stateDir, "headscale"),
+		Image:      os.Getenv("RASPUTIN_HEADSCALE_IMAGE"),
+		ListenAddr: os.Getenv("RASPUTIN_HEADSCALE_LISTEN_ADDR"),
+		// The URL agents dial for `tailscale up --login-server`, and the host
+		// the Headscale leaf is minted for. Derived from the cluster name on a
+		// provisioned node; "" in dev, where the supervisor falls back to
+		// resolveServerHost(ListenAddr) exactly as before.
+		//
+		// NOTE this is the ONLY place RASPUTIN_HEADSCALE_URL gets a default.
+		// Its other read (wireMesh) uses the variable's presence to select an
+		// EXTERNAL Headscale, so defaulting it there would make every
+		// self-hosted appliance believe it had external creds.
+		ServerURL:     envOr("RASPUTIN_HEADSCALE_URL", applianceOr(func(h string) string { return "https://" + h + ":18080" }, "")),
 		ContainerName: os.Getenv("RASPUTIN_HEADSCALE_CONTAINER"),
 		MeshCA:        meshCA,
 	}
