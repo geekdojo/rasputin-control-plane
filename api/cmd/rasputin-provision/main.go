@@ -124,16 +124,27 @@ func run() error {
 		return err
 	}
 
-	dir := *outDir
-	if dir == "" {
-		dir = filepath.Join("out", *clusterID)
-	}
-	man, err := generate(*clusterID, *natsURL, dir, nodes, *enforce, key)
+	// Normalize BEFORE the output path is derived from it. generate() would
+	// normalize anyway, but by then `out/<cluster-id>` and the summary line
+	// have already been built from the raw flag — so `--cluster-id Home1` would
+	// write a directory named "Home1" holding a manifest that says "home1", and
+	// tell the operator they had provisioned "Home1". A mismatch like that is
+	// how someone later re-runs with the wrong name and gets a second cluster.
+	normalized, err := normalizeDNSLabel("cluster id", *clusterID)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("provisioned %d nodes for cluster %q → %s\n", len(man.Nodes), *clusterID, dir)
+	dir := *outDir
+	if dir == "" {
+		dir = filepath.Join("out", normalized)
+	}
+	man, err := generate(normalized, *natsURL, dir, nodes, *enforce, key)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("provisioned %d nodes for cluster %q → %s\n", len(man.Nodes), man.ClusterID, dir)
 	fmt.Printf("  • per-node seeds (the tokens live ONLY here — treat as secrets)\n")
 	fmt.Printf("  • %s → the controlplane's seed (preload via firstboot)\n", man.PreseedFile)
 	fmt.Printf("  • manifest.json → audit record (no plaintext)\n")
@@ -177,12 +188,56 @@ func resolveSSHKey(literal, file string) (string, error) {
 	return literal, nil
 }
 
+// normalizeDNSLabel lowercases and validates a value that becomes a DNS label.
+//
+// Both ids this tool assigns end up as a machine's mDNS hostname: the cluster
+// id becomes the controlplane's (ADR-0003), and a node id becomes every other
+// node's. From there the cluster id is also the CN/SAN of the api's TLS leaf,
+// the WebAuthn RP ID, and the host every seeded NATS URL dials.
+//
+// Validating HERE is the point: rasputin-hostname.sh also checks, but it runs
+// at boot on a headless box and can only fall back to "rasputin" and log. The
+// operator then sees a cluster that silently kept the wrong name, three layers
+// away from the typo. Rejecting at the keyboard costs one error message.
+//
+// Lowercased rather than rejected — DNS labels are case-insensitive, and
+// firstboot already lowercases the DMI serial when deriving a node id.
+// Normalizing here means the seed carries the canonical form, so every
+// downstream consumer agrees without re-deriving it.
+func normalizeDNSLabel(kind, v string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return "", fmt.Errorf("%s is required", kind)
+	}
+	if len(v) > 63 {
+		return "", fmt.Errorf("%s %q is %d characters; a DNS label allows at most 63", kind, v, len(v))
+	}
+	if strings.HasPrefix(v, "-") || strings.HasSuffix(v, "-") {
+		return "", fmt.Errorf("%s %q must not start or end with a hyphen", kind, v)
+	}
+	for _, r := range v {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			hint := ""
+			if r == '.' {
+				// Worth naming explicitly: a dotted value looks reasonable and
+				// is the one failure ADR-0003 calls out — systemd-resolved
+				// publishes only a single-label <hostname>.local, so
+				// "home.lab" would produce a name nothing can advertise.
+				hint = " (a dot would make it a multi-label name, which mDNS cannot publish)"
+			}
+			return "", fmt.Errorf("%s %q contains %q; only a-z, 0-9 and - are allowed%s", kind, v, string(r), hint)
+		}
+	}
+	return v, nil
+}
+
 // generate assigns ids, validates the set, and writes all artifacts into dir.
 // Returns the manifest. Pure enough to unit-test end-to-end. sshKey ("" = none)
 // is the operator's public key, already validated by resolveSSHKey.
 func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshKey string) (manifest, error) {
-	if clusterID == "" {
-		return manifest{}, fmt.Errorf("cluster id is required")
+	clusterID, err := normalizeDNSLabel("cluster id", clusterID)
+	if err != nil {
+		return manifest{}, err
 	}
 	if len(nodes) == 0 {
 		return manifest{}, fmt.Errorf("at least one node is required")
@@ -205,6 +260,13 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 		if nodes[i].ID == "" {
 			seq[nodes[i].Role]++
 			nodes[i].ID = fmt.Sprintf("%s-%s%d", clusterID, nodes[i].Role, seq[nodes[i].Role])
+		}
+		// A node id becomes that node's hostname, so it faces the same
+		// constraint as the cluster id. Auto-assigned ids are valid by
+		// construction; an operator-supplied one is not.
+		nodes[i].ID, err = normalizeDNSLabel("node id", nodes[i].ID)
+		if err != nil {
+			return manifest{}, err
 		}
 		if seen[nodes[i].ID] {
 			return manifest{}, fmt.Errorf("duplicate node id %q", nodes[i].ID)

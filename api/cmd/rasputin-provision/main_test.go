@@ -343,3 +343,104 @@ func TestExplicitNATSURLWins(t *testing.T) {
 		t.Errorf("explicit --nats-url should win, got %q", man.NATSURL)
 	}
 }
+
+// --- DNS-label validation (ADR-0003) -----------------------------------------
+
+// The cluster id becomes the controlplane's mDNS hostname, its TLS leaf
+// CN/SAN, its WebAuthn RP ID, and the host every node dials. Catch a bad one
+// at the operator's keyboard — rasputin-hostname.sh can only fall back to
+// "rasputin" and log, at boot, on a headless box, three layers from the typo.
+func TestNormalizeDNSLabel(t *testing.T) {
+	ok := []struct{ in, want string }{
+		{"home1", "home1"},
+		{"Home1", "home1"},     // case-insensitive, normalized not rejected
+		{"  home1  ", "home1"}, // stray whitespace from a shell paste
+		{"my-cluster", "my-cluster"},
+		{"r2", "r2"},
+		{strings.Repeat("x", 63), strings.Repeat("x", 63)}, // exactly at the limit
+	}
+	for _, tc := range ok {
+		got, err := normalizeDNSLabel("cluster id", tc.in)
+		if err != nil {
+			t.Errorf("normalizeDNSLabel(%q) errored: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("normalizeDNSLabel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	bad := []string{
+		"", "   ",
+		"-home1", "home1-",
+		"has_underscore",
+		"has space",
+		"UPPER_BAD",
+		strings.Repeat("x", 64), // one past the limit
+	}
+	for _, in := range bad {
+		if got, err := normalizeDNSLabel("cluster id", in); err == nil {
+			t.Errorf("normalizeDNSLabel(%q) = %q, want an error", in, got)
+		}
+	}
+}
+
+// A dotted id is the failure worth naming: it looks perfectly reasonable, and
+// it is the one form ADR-0003 rules out — systemd-resolved publishes only a
+// single-label <hostname>.local, so "home.lab" yields a name nothing can
+// advertise. The error must say so rather than just "invalid character".
+func TestDottedClusterIDExplainsWhy(t *testing.T) {
+	_, err := normalizeDNSLabel("cluster id", "home.lab")
+	if err == nil {
+		t.Fatal("a dotted cluster id must be rejected")
+	}
+	if !strings.Contains(err.Error(), "multi-label") {
+		t.Errorf("error should explain the mDNS consequence, got: %v", err)
+	}
+}
+
+func TestGenerate_RejectsInvalidClusterID(t *testing.T) {
+	_, err := generate("my_cluster", "", t.TempDir(), nodeList{{Role: "controlplane"}}, true, "")
+	if err == nil {
+		t.Fatal("generate should reject a cluster id that cannot be a hostname")
+	}
+}
+
+// An operator-supplied node id becomes THAT node's hostname, so it faces the
+// same constraint. Auto-assigned ids are valid by construction; these are not.
+func TestGenerate_RejectsInvalidNodeID(t *testing.T) {
+	_, err := generate("home1", "", t.TempDir(), nodeList{
+		{Role: "controlplane"}, {Role: "compute", ID: "bad_node"},
+	}, true, "")
+	if err == nil {
+		t.Fatal("generate should reject a node id that cannot be a hostname")
+	}
+}
+
+// Normalization must reach the artifacts, not just the validation gate: the
+// seed, the node ids derived from the cluster id, and the manifest.
+func TestGenerate_NormalizesIntoArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	man, err := generate("Home1", "", dir, nodeList{{Role: "controlplane"}, {Role: "compute"}}, true, "")
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if man.ClusterID != "home1" {
+		t.Errorf("manifest cluster id = %q, want the lowercased form", man.ClusterID)
+	}
+	if man.NATSURL != "nats://home1.local:4222" {
+		t.Errorf("natsUrl = %q, want the lowercased name", man.NATSURL)
+	}
+	for _, n := range man.Nodes {
+		if strings.ToLower(n.ID) != n.ID {
+			t.Errorf("node id %q should be lowercase", n.ID)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, n.SeedFile))
+		if err != nil {
+			t.Fatalf("read seed: %v", err)
+		}
+		if !strings.Contains(string(b), "RASPUTIN_CLUSTER_ID=home1\n") {
+			t.Errorf("%s seed should carry the normalized cluster id:\n%s", n.ID, b)
+		}
+	}
+}
