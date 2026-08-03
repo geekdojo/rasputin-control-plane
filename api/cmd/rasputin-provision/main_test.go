@@ -23,7 +23,7 @@ func TestGenerate_MatchedSetRoundTrips(t *testing.T) {
 		{Role: "compute", ID: "home1-n1"},
 		{Role: "compute"}, // id auto-assigned
 	}
-	man, err := generate("home1", defaultNATSURL, dir, nodes, true, "")
+	man, err := generate("home1", "", dir, nodes, true, "")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -107,10 +107,10 @@ func TestGenerate_MatchedSetRoundTrips(t *testing.T) {
 
 func TestGenerate_RequiresExactlyOneControlplane(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := generate("c", defaultNATSURL, dir, nodeList{{Role: "compute", ID: "n1"}}, true, ""); err == nil {
+	if _, err := generate("c", "", dir, nodeList{{Role: "compute", ID: "n1"}}, true, ""); err == nil {
 		t.Error("zero controlplanes should error")
 	}
-	if _, err := generate("c", defaultNATSURL, dir, nodeList{
+	if _, err := generate("c", "", dir, nodeList{
 		{Role: "controlplane", ID: "cp1"}, {Role: "controlplane", ID: "cp2"},
 	}, true, ""); err == nil {
 		t.Error("two controlplanes should error")
@@ -119,7 +119,7 @@ func TestGenerate_RequiresExactlyOneControlplane(t *testing.T) {
 
 func TestGenerate_RejectsDuplicateIDs(t *testing.T) {
 	dir := t.TempDir()
-	_, err := generate("c", defaultNATSURL, dir, nodeList{
+	_, err := generate("c", "", dir, nodeList{
 		{Role: "controlplane", ID: "x"}, {Role: "compute", ID: "x"},
 	}, true, "")
 	if err == nil {
@@ -140,7 +140,7 @@ func TestGenerate_SSHKeyInEverySeed(t *testing.T) {
 		{Role: "firewall", ID: "c-fw"},
 		{Role: "compute", ID: "c-n1"},
 	}
-	man, err := generate("c", defaultNATSURL, dir, nodes, true, key)
+	man, err := generate("c", "", dir, nodes, true, key)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestGenerate_SSHKeyInEverySeed(t *testing.T) {
 
 	// And with no key: no line, manifest records false.
 	dir2 := t.TempDir()
-	man2, err := generate("c", defaultNATSURL, dir2, nodeList{{Role: "controlplane", ID: "c-cp"}}, true, "")
+	man2, err := generate("c", "", dir2, nodeList{{Role: "controlplane", ID: "c-cp"}}, true, "")
 	if err != nil {
 		t.Fatalf("generate (no key): %v", err)
 	}
@@ -277,5 +277,69 @@ func TestBuildrootSeed_ClusterIDIsBareToken(t *testing.T) {
 	fw := openwrtSeed("fw1", "home1", "nats://rasputin.local:4222", "tok", "")
 	if !strings.Contains(fw, "\nRASPUTIN_CLUSTER_ID=home1\n") {
 		t.Errorf("firewall seed should carry the cluster id, got:\n%s", fw)
+	}
+}
+
+// The seeded bus address must follow the cluster's name, not a shared literal
+// — otherwise a cluster named home1 would seed its nodes to dial
+// rasputin.local, which is either nothing or, worse, SOMEONE ELSE'S control
+// plane on the same LAN.
+func TestGenerate_NATSURLDerivesFromClusterID(t *testing.T) {
+	dir := t.TempDir()
+	man, err := generate("home1", "", dir, nodeList{{Role: "controlplane"}, {Role: "compute"}}, true, "")
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if man.NATSURL != "nats://home1.local:4222" {
+		t.Fatalf("manifest natsUrl = %q, want nats://home1.local:4222", man.NATSURL)
+	}
+	var compute manifestNode
+	for _, n := range man.Nodes {
+		if n.Role == "compute" {
+			compute = n
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(dir, compute.SeedFile))
+	if err != nil {
+		t.Fatalf("read compute seed: %v", err)
+	}
+	if !strings.Contains(string(b), "RASPUTIN_NATS_URL=nats://home1.local:4222\n") {
+		t.Errorf("compute seed should dial the cluster's own name:\n%s", b)
+	}
+	// The controlplane always dials its own loopback so it is trusted without a
+	// token — that must NOT follow the cluster name.
+	var cp manifestNode
+	for _, n := range man.Nodes {
+		if n.Role == "controlplane" {
+			cp = n
+		}
+	}
+	cpSeed, err := os.ReadFile(filepath.Join(dir, cp.SeedFile))
+	if err != nil {
+		t.Fatalf("read controlplane seed: %v", err)
+	}
+	if !strings.Contains(string(cpSeed), "RASPUTIN_NATS_URL=nats://127.0.0.1:4222\n") {
+		t.Errorf("controlplane must still dial loopback, not the cluster name:\n%s", cpSeed)
+	}
+}
+
+// The no-migration promise again: the default cluster id must derive exactly
+// the constant this replaced.
+func TestDefaultClusterIDDerivesTodaysNATSURL(t *testing.T) {
+	if got := defaultNATSURLFor("rasputin"); got != "nats://rasputin.local:4222" {
+		t.Errorf("defaultNATSURLFor(rasputin) = %q, want the literal it replaced", got)
+	}
+}
+
+// An explicit --nats-url still wins — a cluster reached over a tailnet host
+// does not want a .local name.
+func TestExplicitNATSURLWins(t *testing.T) {
+	dir := t.TempDir()
+	man, err := generate("home1", "nats://cp.tail1234.ts.net:4222", dir, nodeList{{Role: "controlplane"}}, true, "")
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if man.NATSURL != "nats://cp.tail1234.ts.net:4222" {
+		t.Errorf("explicit --nats-url should win, got %q", man.NATSURL)
 	}
 }

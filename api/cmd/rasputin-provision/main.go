@@ -17,7 +17,7 @@
 //	  --node controlplane:home1-cp \
 //	  --node firewall:home1-fw \
 //	  --node compute:home1-n1 --node compute \
-//	  [--nats-url nats://rasputin.local:4222] [--out ./out/home1] \
+//	  [--nats-url nats://<cluster-id>.local:4222] [--out ./out/home1] \
 //	  [--ssh-authorized-key-file ~/.ssh/id_ed25519.pub]
 //
 // A --node value is "role[:node-id]". When the id is omitted it's auto-assigned
@@ -42,7 +42,17 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 )
 
-const defaultNATSURL = "nats://rasputin.local:4222"
+// defaultNATSURLFor is the bus address baked into every non-controlplane seed:
+// the cluster's own mDNS name (ADR-0003), not a shared literal. With the
+// default cluster id "rasputin" this yields nats://rasputin.local:4222 —
+// exactly the constant it replaces, which is why no existing matched set
+// changes shape.
+//
+// It cannot be a flag default: flag defaults are evaluated before parsing, so
+// --cluster-id is not known yet. generate() applies it after validating the id.
+func defaultNATSURLFor(clusterID string) string {
+	return "nats://" + clusterID + ".local:4222"
+}
 
 // loopbackNATSURL is what the controlplane's own co-located agent dials so it's
 // trusted via loopback (it carries no token). See token-provisioning-pipeline.md.
@@ -99,7 +109,7 @@ func main() {
 func run() error {
 	var (
 		clusterID  = flag.String("cluster-id", "", "cluster id (required)")
-		natsURL    = flag.String("nats-url", defaultNATSURL, "control-plane NATS URL baked into non-controlplane seeds")
+		natsURL    = flag.String("nats-url", "", "control-plane NATS URL baked into non-controlplane seeds (default: nats://<cluster-id>.local:4222)")
 		outDir     = flag.String("out", "", "output directory (default ./out/<cluster-id>)")
 		enforce    = flag.Bool("enforce", true, "bake RASPUTIN_BUS_AUTH=enforce into the controlplane seed (a matched set ships enforced)")
 		sshKey     = flag.String("ssh-authorized-key", "", "operator SSH public key baked into every seed (one key line, e.g. \"ssh-ed25519 AAAA... you@laptop\")")
@@ -176,6 +186,11 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 	}
 	if len(nodes) == 0 {
 		return manifest{}, fmt.Errorf("at least one node is required")
+	}
+	// Derived here, not at the flag, because the cluster id is only known after
+	// parsing — and only trustworthy after the check above.
+	if natsURL == "" {
+		natsURL = defaultNATSURLFor(clusterID)
 	}
 
 	// Assign ids for nodes given by role only, and check uniqueness + single
