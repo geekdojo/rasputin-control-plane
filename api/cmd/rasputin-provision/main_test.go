@@ -237,3 +237,45 @@ func seedValue(seed, key string) string {
 	}
 	return ""
 }
+
+// Every seed must carry the cluster id. It exists today only in the manifest —
+// an operator-facing audit record that no node ever reads — so the name a
+// cluster was provisioned under reaches nothing on the box. ADR-0003 makes the
+// cluster id the source of the node's identity (mDNS hostname, NATS URL,
+// Headscale server_url, leaf SANs, RP ID), and none of that is reachable until
+// the value is in the seed.
+func TestGenerate_ClusterIDInEverySeed(t *testing.T) {
+	dir := t.TempDir()
+	man, err := generate("home1", "nats://rasputin.local:4222", dir, nodeList{
+		{Role: "controlplane"}, {Role: "firewall"}, {Role: "compute"},
+	}, true, "")
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if man.ClusterID != "home1" {
+		t.Fatalf("manifest cluster id = %q, want home1", man.ClusterID)
+	}
+	for _, n := range man.Nodes {
+		b, err := os.ReadFile(filepath.Join(dir, n.SeedFile))
+		if err != nil {
+			t.Fatalf("read seed for %s: %v", n.ID, err)
+		}
+		if !strings.Contains(string(b), "RASPUTIN_CLUSTER_ID=home1\n") {
+			t.Errorf("%s seed (%s) is missing RASPUTIN_CLUSTER_ID=home1:\n%s", n.Role, n.ID, b)
+		}
+	}
+}
+
+// The seed is sourced by sh, so the cluster id must render as a bare, unquoted
+// token. A value needing quotes would break every field after it — the same
+// class of defect that shipped a truncated recovery command in the agent unit.
+func TestBuildrootSeed_ClusterIDIsBareToken(t *testing.T) {
+	seed := buildrootSeed("controlplane", "cp1", "home1", "nats://127.0.0.1:4222", "", "")
+	if !strings.Contains(seed, "\nRASPUTIN_CLUSTER_ID=home1\n") {
+		t.Errorf("cluster id should render bare and unquoted, got:\n%s", seed)
+	}
+	fw := openwrtSeed("fw1", "home1", "nats://rasputin.local:4222", "tok", "")
+	if !strings.Contains(fw, "\nRASPUTIN_CLUSTER_ID=home1\n") {
+		t.Errorf("firewall seed should carry the cluster id, got:\n%s", fw)
+	}
+}
