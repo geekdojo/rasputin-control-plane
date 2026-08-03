@@ -71,7 +71,7 @@ func newFixture(t *testing.T) *fixture {
 	probes := setup.Probes{
 		HasUsers: func(ctx context.Context) (bool, error) { return f.hasUsers, nil },
 	}
-	f.setup = setup.NewService(setupStore, probes, "", "")
+	f.setup = setup.NewService(setupStore, probes, "", "", "")
 	f.svc = New(invStore, jobStore, appStore, f.setup, nil, nil, true)
 	return f
 }

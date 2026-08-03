@@ -584,6 +584,8 @@ export interface SetupState {
   // dials and the base the flash one-liner curls. EMPTY on a dev box; the UI
   // falls back to its own defaults then (see enroll.ts natsURLFor/cpBaseFor).
   clusterHostname: string;
+  // The bare cluster id ("home1") — seeds carry it as RASPUTIN_CLUSTER_ID.
+  clusterId: string;
 }
 
 // Alerts — surfaced by the v0 server-side aggregator at GET /api/alerts.

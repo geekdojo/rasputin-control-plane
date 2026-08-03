@@ -139,7 +139,7 @@ func buildService(t *testing.T, ps *probesState, selfNodeID string) *Service {
 			return ps.hasFirewallNode, nil
 		},
 	}
-	return NewService(store, probes, selfNodeID, "test1.local")
+	return NewService(store, probes, selfNodeID, "test1.local", "test1")
 }
 
 func findStep(steps []Step, id string) (Step, bool) {
@@ -266,7 +266,7 @@ func TestService_GetState_NilProbesAreSafe(t *testing.T) {
 	// Probes that the wiring code doesn't populate must default to false,
 	// not panic. main wires them all in prod; tests shouldn't depend on it.
 	store := newStore(t)
-	svc := NewService(store, Probes{}, "self", "test1.local")
+	svc := NewService(store, Probes{}, "self", "test1.local", "test1")
 	st, err := svc.GetState(context.Background())
 	if err != nil {
 		t.Fatalf("GetState: %v", err)
@@ -284,7 +284,7 @@ func TestService_GetState_NilProbesAreSafe(t *testing.T) {
 // green CI, a clean review, and a full Mode A bench.
 func TestService_GetState_CarriesClusterHostname(t *testing.T) {
 	store := newStore(t)
-	svc := NewService(store, Probes{}, "self", "home1.local")
+	svc := NewService(store, Probes{}, "self", "home1.local", "home1")
 	st, err := svc.GetState(context.Background())
 	if err != nil {
 		t.Fatalf("GetState: %v", err)
@@ -298,7 +298,7 @@ func TestService_GetState_CarriesClusterHostname(t *testing.T) {
 // empty string (and keep its own dev defaults) rather than a fabricated name.
 func TestService_GetState_ClusterHostnameEmptyOnDev(t *testing.T) {
 	store := newStore(t)
-	svc := NewService(store, Probes{}, "self", "")
+	svc := NewService(store, Probes{}, "self", "", "")
 	st, err := svc.GetState(context.Background())
 	if err != nil {
 		t.Fatalf("GetState: %v", err)
@@ -332,7 +332,7 @@ func TestService_SetInstallName_TrimsWhitespace(t *testing.T) {
 
 func TestService_SelfNodeIDAccessor(t *testing.T) {
 	store := newStore(t)
-	svc := NewService(store, Probes{}, "self-x", "test1.local")
+	svc := NewService(store, Probes{}, "self-x", "test1.local", "test1")
 	if svc.SelfNodeID() != "self-x" {
 		t.Errorf("SelfNodeID: %q", svc.SelfNodeID())
 	}

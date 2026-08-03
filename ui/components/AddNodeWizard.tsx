@@ -43,6 +43,7 @@ export function AddNodeWizard({
   clusterPrefix,
   clusterOsVersion,
   clusterHostname,
+  clusterId,
   taken,
   onClose,
   onMinted,
@@ -53,6 +54,8 @@ export function AddNodeWizard({
   // prop rather than re-derived: this value was hardcoded to rasputin.local
   // once already, and a seed that names the wrong host fails silently.
   clusterHostname: string;
+  // Bare cluster id — seeds carry it as RASPUTIN_CLUSTER_ID.
+  clusterId: string;
   // The cluster's OS version (the controlplane's), so the wizard can tell the
   // operator which image to flash + link the matching download. Undefined when
   // unknown → generic guidance.
@@ -160,6 +163,7 @@ export function AddNodeWizard({
             token={minted.token}
             sshKey={sshCheck.key}
             clusterHostname={clusterHostname}
+            clusterId={clusterId}
             onClose={onClose}
           />
         ) : (
@@ -171,6 +175,7 @@ export function AddNodeWizard({
             sshKey={sshCheck.key}
             clusterOsVersion={clusterOsVersion}
             clusterHostname={clusterHostname}
+            clusterId={clusterId}
             onClose={onClose}
           />
         )
@@ -317,6 +322,7 @@ function SuccessView({
   sshKey,
   clusterOsVersion,
   clusterHostname,
+  clusterId,
   onClose,
 }: {
   role: AddableRole;
@@ -326,9 +332,11 @@ function SuccessView({
   sshKey: string;
   clusterOsVersion?: string;
   clusterHostname: string;
+  // Bare cluster id — seeds carry it as RASPUTIN_CLUSTER_ID.
+  clusterId: string;
   onClose: () => void;
 }) {
-  const seed = renderNodeSeed(role, nodeId, token, sshKey, natsURLFor(clusterHostname));
+  const seed = renderNodeSeed(role, nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId);
   const image = nodeImageFor(clusterOsVersion, arch);
   const command = flashCommand(seed, arch, cpBaseFor(clusterHostname));
   const archLabel = NODE_ARCHES.find((a) => a.value === arch)?.label ?? arch.toUpperCase();
@@ -466,15 +474,18 @@ function FirewallSuccessView({
   token,
   sshKey,
   clusterHostname,
+  clusterId,
   onClose,
 }: {
   nodeId: string;
   token: string;
   sshKey: string;
   clusterHostname: string;
+  // Bare cluster id — seeds carry it as RASPUTIN_CLUSTER_ID.
+  clusterId: string;
   onClose: () => void;
 }) {
-  const seed = renderFirewallSeed(nodeId, token, sshKey, natsURLFor(clusterHostname));
+  const seed = renderFirewallSeed(nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId);
   const command = firewallApplyCommand();
   const [showImage, setShowImage] = useState(false);
   const [image, setImage] = useState<FlashableImage | null>(null);

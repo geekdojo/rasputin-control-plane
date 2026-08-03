@@ -44,6 +44,12 @@ type State struct {
 	// host that does not exist, and the node simply never joined. The api
 	// always knew the right answer; it just had no way to say it.
 	ClusterHostname string `json:"clusterHostname"`
+	// ClusterID is the bare id ("home1"), the value seeds carry as
+	// RASPUTIN_CLUSTER_ID. Exposed separately from ClusterHostname rather
+	// than having the UI strip ".local": the two are wired from the same
+	// env var, and re-deriving one from the other is the kind of implicit
+	// coupling that produced the bug this field exists to fix.
+	ClusterID string `json:"clusterId"`
 }
 
 // Probes is the small set of cross-subsystem queries the service uses to
@@ -73,14 +79,16 @@ type Service struct {
 	probes          Probes
 	selfNodeID      string
 	clusterHostname string
+	clusterID       string
 }
 
-func NewService(store *Store, probes Probes, selfNodeID, clusterHostname string) *Service {
+func NewService(store *Store, probes Probes, selfNodeID, clusterHostname, clusterID string) *Service {
 	return &Service{
 		store:           store,
 		probes:          probes,
 		selfNodeID:      selfNodeID,
 		clusterHostname: clusterHostname,
+		clusterID:       clusterID,
 	}
 }
 
@@ -182,6 +190,7 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 		Mode:            Mode(mode),
 		FirewallCapable: firewallCapable,
 		ClusterHostname: s.clusterHostname,
+		ClusterID:       s.clusterID,
 	}, nil
 }
 
