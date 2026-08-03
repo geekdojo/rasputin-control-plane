@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -313,7 +312,3 @@ func bytesToHex(b []byte) string {
 	}
 	return string(out)
 }
-
-// ensureCtx is here so we can drop a SoftPing-style helper later without the
-// linter complaining about unused imports during the v0 build.
-var _ = context.Background

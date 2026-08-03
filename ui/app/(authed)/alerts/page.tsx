@@ -14,6 +14,7 @@ import Link from 'next/link';
 import { AlertTriangle, Bell, Box, Layers, RefreshCw, Server, ShieldAlert, Wrench } from 'lucide-react';
 import type { ElementType } from 'react';
 import { listAlerts, openInventoryWS, openJobsWS } from '../../../lib/api';
+import { timeAgo } from '../../../lib/time';
 import type { Alert, AlertSeverity, AlertSource } from '../../../lib/types';
 import { PageShell, PageHeader, PageBody, Hint, DIM, FG, HAIR, HAIR_SOFT, PANEL } from '../../../components/kit';
 import { accentA, MONO } from '../../../components/ui-theme';
@@ -39,20 +40,6 @@ const SOURCE_ICON: Record<AlertSource, ElementType> = {
   // aggregator-derived sources.
   rule: Bell,
 };
-
-function timeAgo(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return '';
-  const d = Math.max(0, Date.now() - t);
-  const s = Math.floor(d / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const dd = Math.floor(h / 24);
-  return `${dd}d ago`;
-}
 
 function drillthroughPath(a: Alert): string | null {
   if (!a.relatedKind || !a.relatedId) {

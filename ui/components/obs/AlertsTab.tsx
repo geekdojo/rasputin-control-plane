@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, Bell, Box, CheckCircle2, Layers, Server, ShieldAlert, Wrench, X } from 'lucide-react';
 import type { ElementType } from 'react';
 import { ackAlert, dismissAlert, listAlerts, openAlertsWS } from '../../lib/api';
+import { timeAgo } from '../../lib/time';
 import type { Alert, AlertSeverity, AlertSource, Node } from '../../lib/types';
 import { Btn, DIM, FG, HAIR_SOFT, Hint, PANEL } from '../kit';
 import { MONO } from '../ui-theme';
@@ -49,19 +50,6 @@ function isRelatedToNode(a: Alert, nodeId: string): boolean {
   // the id as a substring — bit fuzzy but covers the gap.
   if (a.source === 'node' && a.title.includes(nodeId)) return true;
   return false;
-}
-
-function timeAgo(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return '';
-  const d = Math.max(0, Date.now() - t);
-  const s = Math.floor(d / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
 }
 
 export function AlertsTab({ node }: AlertsTabProps) {

@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -49,7 +50,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 func handleEnroll(backend Backend, m *nats.Msg) {
 	var cmd proto.MeshEnrollCmd
 	if err := json.Unmarshal(m.Data, &cmd); err != nil {
-		respond(m, proto.MeshEnrollAck{OK: false, Detail: "bad cmd: " + err.Error()})
+		bus.Respond(m, proto.MeshEnrollAck{OK: false, Detail: "bad cmd: " + err.Error()})
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -64,11 +65,11 @@ func handleEnroll(backend Backend, m *nats.Msg) {
 		MeshCAPEM:       cmd.MeshCAPEM,
 	})
 	if err != nil {
-		respond(m, proto.MeshEnrollAck{OK: false, Backend: backend.Name(), Detail: err.Error()})
+		bus.Respond(m, proto.MeshEnrollAck{OK: false, Backend: backend.Name(), Detail: err.Error()})
 		log.Printf("rasputin-agent: mesh.enroll: %v", err)
 		return
 	}
-	respond(m, proto.MeshEnrollAck{
+	bus.Respond(m, proto.MeshEnrollAck{
 		OK:        true,
 		TailnetID: st.TailnetID,
 		TailnetIP: st.TailnetIP,
@@ -82,11 +83,11 @@ func handleLeave(backend Backend, m *nats.Msg) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := backend.Leave(ctx); err != nil {
-		respond(m, proto.MeshLeaveAck{OK: false, Detail: err.Error()})
+		bus.Respond(m, proto.MeshLeaveAck{OK: false, Detail: err.Error()})
 		log.Printf("rasputin-agent: mesh.leave: %v", err)
 		return
 	}
-	respond(m, proto.MeshLeaveAck{OK: true})
+	bus.Respond(m, proto.MeshLeaveAck{OK: true})
 }
 
 func handleStatus(backend Backend, m *nats.Msg) {
@@ -94,10 +95,10 @@ func handleStatus(backend Backend, m *nats.Msg) {
 	defer cancel()
 	st, err := backend.Status(ctx)
 	if err != nil {
-		respond(m, proto.MeshStatusAck{OK: false, Backend: backend.Name(), Detail: err.Error()})
+		bus.Respond(m, proto.MeshStatusAck{OK: false, Backend: backend.Name(), Detail: err.Error()})
 		return
 	}
-	respond(m, proto.MeshStatusAck{
+	bus.Respond(m, proto.MeshStatusAck{
 		OK:        true,
 		Enrolled:  st.Enrolled,
 		TailnetID: st.TailnetID,
@@ -107,15 +108,4 @@ func handleStatus(backend Backend, m *nats.Msg) {
 		PeerCount: st.PeerCount,
 		Backend:   backend.Name(),
 	})
-}
-
-func respond(m *nats.Msg, body any) {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		log.Printf("rasputin-agent: marshal response: %v", err)
-		return
-	}
-	if err := m.Respond(payload); err != nil {
-		log.Printf("rasputin-agent: respond: %v", err)
-	}
 }

@@ -10,7 +10,6 @@
 // styles and in SVG presentation attributes — NOT in <canvas> (see THEME_HUD).
 
 export const ACCENT = 'var(--rasp-accent)'; // resolves to the active theme's accent
-export const ACCENT_RGB = 'var(--rasp-accent-rgb)';
 
 /** Translucent accent, e.g. accentA(0.12) → 'rgba(var(--rasp-accent-rgb), 0.12)'. */
 export const accentA = (alpha: number) => `rgba(var(--rasp-accent-rgb), ${alpha})`;

@@ -131,8 +131,5 @@ func (s *Server) Stop() {
 // Conn is the in-process NATS client connection.
 func (s *Server) Conn() *nats.Conn { return s.nc }
 
-// JS is the JetStream context bound to Conn.
-func (s *Server) JS() jetstream.JetStream { return s.js }
-
 // ClientURL is the URL external clients (e.g. the agent during dev) can dial.
 func (s *Server) ClientURL() string { return s.ns.ClientURL() }
