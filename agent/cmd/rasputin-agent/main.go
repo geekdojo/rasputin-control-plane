@@ -256,7 +256,7 @@ func main() {
 		// RASPUTIN_CP_HOSTS_RELOAD_CMD re-reads the resolver after a change —
 		// dnsmasq doesn't auto-watch addn-hosts files. The firewall sets it to
 		// "/etc/init.d/dnsmasq reload".
-		go hostsync.Run(ctx, "rasputin.local", hostsDir, 30*time.Second, os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"), nil)
+		go hostsync.Run(ctx, clusterName(), hostsDir, 30*time.Second, os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"), nil)
 	}
 
 	// Keep our own mDNS name published, and say so loudly when another cluster
@@ -272,7 +272,7 @@ func main() {
 	// degrades the guard to detect-and-report, the correct behaviour there.
 	if role == proto.RoleControlPlane {
 		go nameguard.Run(ctx, nameguard.Config{
-			Name:       envOr("RASPUTIN_CP_MDNS_NAME", "rasputin.local"),
+			Name:       envOr("RASPUTIN_CP_MDNS_NAME", clusterName()),
 			RecoverCmd: os.Getenv("RASPUTIN_MDNS_RECOVER_CMD"),
 		})
 	}
@@ -542,6 +542,25 @@ func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *na
 	if err := m.Respond(payload); err != nil {
 		log.Printf("rasputin-agent: health: respond: %v", err)
 	}
+}
+
+// clusterName returns the cluster's mDNS name — "<cluster-id>.local".
+//
+// Both places the agent needs it mean the SAME name: on the controlplane the
+// name guard defends the node's own, and on the firewall hostsync republishes
+// the control plane's into dnsmasq. One cluster, one name.
+//
+// RASPUTIN_CLUSTER_ID reaches the agent from node.env on rasputin-os, and from
+// the seed via UCI + procd on the firewall. It defaults to "rasputin" per
+// ADR-0003, so a node that predates per-cluster naming — or one whose operator
+// never chose a name — derives exactly "rasputin.local", the literal both call
+// sites used to hardcode.
+func clusterName() string {
+	id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID"))
+	if id == "" {
+		id = "rasputin"
+	}
+	return id + ".local"
 }
 
 func envOr(key, def string) string {

@@ -227,3 +227,31 @@ func TestEnvBool(t *testing.T) {
 		}
 	}
 }
+
+// --- cluster name derivation (ADR-0003) --------------------------------------
+
+// Both agent call sites — the name guard on the controlplane, hostsync on the
+// firewall — mean the SAME name, and both used to hardcode "rasputin.local".
+func TestClusterName(t *testing.T) {
+	t.Setenv("RASPUTIN_CLUSTER_ID", "home1")
+	if got := clusterName(); got != "home1.local" {
+		t.Errorf("clusterName() = %q, want home1.local", got)
+	}
+	t.Setenv("RASPUTIN_CLUSTER_ID", "  home1  ")
+	if got := clusterName(); got != "home1.local" {
+		t.Errorf("clusterName() = %q, want the id trimmed (a hand-edited node.env can carry padding)", got)
+	}
+}
+
+// The no-migration promise: an unset or empty cluster id must derive exactly
+// the literal both call sites hardcoded before this change. If this drifts, a
+// firewall republishes the wrong name into dnsmasq and tailscaled loses the
+// mesh login server.
+func TestClusterNameDefaultsToTodaysLiteral(t *testing.T) {
+	for _, v := range []string{"", "   "} {
+		t.Setenv("RASPUTIN_CLUSTER_ID", v)
+		if got := clusterName(); got != "rasputin.local" {
+			t.Errorf("clusterName() with id %q = %q, want rasputin.local — existing nodes would rename", v, got)
+		}
+	}
+}
