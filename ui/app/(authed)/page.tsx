@@ -50,6 +50,7 @@ export default function NodesPage() {
   // against it. '' until the fetch lands, and '' on a dev box; enroll.ts
   // falls back to the dev name in both cases.
   const [clusterHostname, setClusterHostname] = useState('');
+  const [clusterId, setClusterId] = useState('');
 
   // Deployment mode drives the idle-firewall note in the controls panel.
   useEffect(() => {
@@ -57,6 +58,7 @@ export default function NodesPage() {
       .then((s) => {
         setDeploymentMode(s.mode);
         setClusterHostname(s.clusterHostname ?? '');
+        setClusterId(s.clusterId ?? '');
       })
       .catch(() => {});
   }, []);
@@ -223,6 +225,7 @@ export default function NodesPage() {
           clusterPrefix={clusterPrefix}
           clusterOsVersion={clusterOsVersion}
           clusterHostname={clusterHostname}
+          clusterId={clusterId}
           taken={takenIds}
           onClose={() => setWizardOpen(false)}
           onMinted={({ id, tokenId, role }) => {

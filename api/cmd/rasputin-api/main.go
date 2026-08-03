@@ -344,7 +344,7 @@ func main() {
 			}
 			return len(nodes) > 0, nil
 		},
-	}, selfNodeID, clusterHostname())
+	}, selfNodeID, clusterHostname(), strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")))
 
 	// Capture the operator's SSH key as a cluster setting on first sight:
 	// the control plane's own authorized_keys holds exactly the bootstrap
