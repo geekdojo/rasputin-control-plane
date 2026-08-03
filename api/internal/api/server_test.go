@@ -227,7 +227,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		HasUsers:        func(_ context.Context) (bool, error) { return f.hasUsers, nil },
 		HasFirewallNode: func(_ context.Context) (bool, error) { return f.hasFirewallNode, nil },
 	}
-	setupSvc := setup.NewService(setupStore, probes, "self-node")
+	setupSvc := setup.NewService(setupStore, probes, "self-node", "test1.local")
 
 	authSvc, err := auth.NewService(authStore, auth.Config{
 		RPDisplayName: "Test", RPID: "localhost",

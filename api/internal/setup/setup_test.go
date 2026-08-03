@@ -139,7 +139,7 @@ func buildService(t *testing.T, ps *probesState, selfNodeID string) *Service {
 			return ps.hasFirewallNode, nil
 		},
 	}
-	return NewService(store, probes, selfNodeID)
+	return NewService(store, probes, selfNodeID, "test1.local")
 }
 
 func findStep(steps []Step, id string) (Step, bool) {
@@ -266,13 +266,45 @@ func TestService_GetState_NilProbesAreSafe(t *testing.T) {
 	// Probes that the wiring code doesn't populate must default to false,
 	// not panic. main wires them all in prod; tests shouldn't depend on it.
 	store := newStore(t)
-	svc := NewService(store, Probes{}, "self")
+	svc := NewService(store, Probes{}, "self", "test1.local")
 	st, err := svc.GetState(context.Background())
 	if err != nil {
 		t.Fatalf("GetState: %v", err)
 	}
 	if st.HasUsers || st.TrustConfigured || st.MeshEnrolled {
 		t.Errorf("nil probes should produce false flags, got %+v", st)
+	}
+}
+
+// The UI mints every node seed from this value. It was hardcoded to
+// "rasputin.local" in ui/lib/enroll.ts long after ADR-0003 shipped, so on a
+// cluster named anything else the Add-node wizard produced seeds pointing at
+// a host that does not exist and the node silently never joined. Nothing on
+// either side of the wire asserted the plumbing, which is why it survived a
+// green CI, a clean review, and a full Mode A bench.
+func TestService_GetState_CarriesClusterHostname(t *testing.T) {
+	store := newStore(t)
+	svc := NewService(store, Probes{}, "self", "home1.local")
+	st, err := svc.GetState(context.Background())
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	if st.ClusterHostname != "home1.local" {
+		t.Errorf("ClusterHostname = %q, want %q — the UI derives every seed's NATS URL from this", st.ClusterHostname, "home1.local")
+	}
+}
+
+// A dev box has no RASPUTIN_CLUSTER_ID, so main passes "". The UI must see the
+// empty string (and keep its own dev defaults) rather than a fabricated name.
+func TestService_GetState_ClusterHostnameEmptyOnDev(t *testing.T) {
+	store := newStore(t)
+	svc := NewService(store, Probes{}, "self", "")
+	st, err := svc.GetState(context.Background())
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	if st.ClusterHostname != "" {
+		t.Errorf("ClusterHostname = %q, want empty on a dev box", st.ClusterHostname)
 	}
 }
 
@@ -300,7 +332,7 @@ func TestService_SetInstallName_TrimsWhitespace(t *testing.T) {
 
 func TestService_SelfNodeIDAccessor(t *testing.T) {
 	store := newStore(t)
-	svc := NewService(store, Probes{}, "self-x")
+	svc := NewService(store, Probes{}, "self-x", "test1.local")
 	if svc.SelfNodeID() != "self-x" {
 		t.Errorf("SelfNodeID: %q", svc.SelfNodeID())
 	}

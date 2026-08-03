@@ -580,6 +580,10 @@ export interface SetupState {
   // Whether a firewall-capable node is registered — i.e. whether the router
   // and sub-segment modes are offerable.
   firewallCapable: boolean;
+  // "<cluster-id>.local" per ADR-0003 — the host every minted seed's NATS URL
+  // dials and the base the flash one-liner curls. EMPTY on a dev box; the UI
+  // falls back to its own defaults then (see enroll.ts natsURLFor/cpBaseFor).
+  clusterHostname: string;
 }
 
 // Alerts — surfaced by the v0 server-side aggregator at GET /api/alerts.
