@@ -33,6 +33,17 @@ type State struct {
 	// pre-gate the choice (and show the "add a firewall node" upsell) instead
 	// of surfacing a mode that would 412 on submit.
 	FirewallCapable bool `json:"firewallCapable"`
+	// ClusterHostname is "<cluster-id>.local" per ADR-0003 — the name every
+	// node's seeded NATS URL dials and the host the flash one-liner curls.
+	// EMPTY on a dev box (no RASPUTIN_CLUSTER_ID), where the UI keeps its
+	// localhost/rasputin.local defaults.
+	//
+	// This exists because the UI was minting seeds against a hardcoded
+	// "rasputin.local" long after ADR-0003 shipped: on a cluster named
+	// anything else, every seed the Add-node wizard produced pointed at a
+	// host that does not exist, and the node simply never joined. The api
+	// always knew the right answer; it just had no way to say it.
+	ClusterHostname string `json:"clusterHostname"`
 }
 
 // Probes is the small set of cross-subsystem queries the service uses to
@@ -58,13 +69,19 @@ type Probes struct {
 // Service is the wizard coordinator. Constructed in main with the probes
 // wired against concrete subsystems.
 type Service struct {
-	store      *Store
-	probes     Probes
-	selfNodeID string
+	store           *Store
+	probes          Probes
+	selfNodeID      string
+	clusterHostname string
 }
 
-func NewService(store *Store, probes Probes, selfNodeID string) *Service {
-	return &Service{store: store, probes: probes, selfNodeID: selfNodeID}
+func NewService(store *Store, probes Probes, selfNodeID, clusterHostname string) *Service {
+	return &Service{
+		store:           store,
+		probes:          probes,
+		selfNodeID:      selfNodeID,
+		clusterHostname: clusterHostname,
+	}
 }
 
 // Store exposes the settings store for subsystems that keep their own
@@ -164,6 +181,7 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 		SelfNodeID:      s.selfNodeID,
 		Mode:            Mode(mode),
 		FirewallCapable: firewallCapable,
+		ClusterHostname: s.clusterHostname,
 	}, nil
 }
 

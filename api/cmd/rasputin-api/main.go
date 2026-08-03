@@ -344,7 +344,7 @@ func main() {
 			}
 			return len(nodes) > 0, nil
 		},
-	}, selfNodeID)
+	}, selfNodeID, clusterHostname())
 
 	// Capture the operator's SSH key as a cluster setting on first sight:
 	// the control plane's own authorized_keys holds exactly the bootstrap

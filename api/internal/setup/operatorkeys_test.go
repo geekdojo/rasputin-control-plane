@@ -14,7 +14,7 @@ const (
 
 func newKeysService(t *testing.T) *Service {
 	t.Helper()
-	return NewService(newStore(t), Probes{}, "cp-1")
+	return NewService(newStore(t), Probes{}, "cp-1", "test1.local")
 }
 
 func TestOperatorSSHKeys_UnsetReturnsNil(t *testing.T) {

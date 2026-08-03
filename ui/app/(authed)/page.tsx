@@ -46,10 +46,19 @@ export default function NodesPage() {
   const [cancelTarget, setCancelTarget] = useState<PendingView | null>(null);
   const [cancelErr, setCancelErr] = useState<string | null>(null);
   const [deploymentMode, setDeploymentMode] = useState<DeploymentMode>('');
+  // '<cluster-id>.local' (ADR-0003) — the Add-node wizard mints every seed
+  // against it. '' until the fetch lands, and '' on a dev box; enroll.ts
+  // falls back to the dev name in both cases.
+  const [clusterHostname, setClusterHostname] = useState('');
 
   // Deployment mode drives the idle-firewall note in the controls panel.
   useEffect(() => {
-    getSetupState().then((s) => setDeploymentMode(s.mode)).catch(() => {});
+    getSetupState()
+      .then((s) => {
+        setDeploymentMode(s.mode);
+        setClusterHostname(s.clusterHostname ?? '');
+      })
+      .catch(() => {});
   }, []);
 
   // Live node inventory + 15s backstop poll (transitions arrive via WS, but a
@@ -213,6 +222,7 @@ export default function NodesPage() {
         <AddNodeWizard
           clusterPrefix={clusterPrefix}
           clusterOsVersion={clusterOsVersion}
+          clusterHostname={clusterHostname}
           taken={takenIds}
           onClose={() => setWizardOpen(false)}
           onMinted={({ id, tokenId, role }) => {

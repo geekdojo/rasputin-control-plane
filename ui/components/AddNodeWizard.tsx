@@ -8,6 +8,8 @@ import {
   type AddableRole,
   type NodeArch,
   downloadSeed,
+  natsURLFor,
+  cpBaseFor,
   FIREWALL_HOST_PLACEHOLDER,
   firewallApplyCommand,
   flashCommand,
@@ -40,11 +42,17 @@ const FIREWALL_ARCH: NodeArch = 'amd64';
 export function AddNodeWizard({
   clusterPrefix,
   clusterOsVersion,
+  clusterHostname,
   taken,
   onClose,
   onMinted,
 }: {
   clusterPrefix: string;
+  // "<cluster-id>.local" from SetupState (ADR-0003), '' on a dev box. Every
+  // seed minted here dials it, and the flash one-liner curls it. Threaded as a
+  // prop rather than re-derived: this value was hardcoded to rasputin.local
+  // once already, and a seed that names the wrong host fails silently.
+  clusterHostname: string;
   // The cluster's OS version (the controlplane's), so the wizard can tell the
   // operator which image to flash + link the matching download. Undefined when
   // unknown → generic guidance.
@@ -147,7 +155,13 @@ export function AddNodeWizard({
 
       {minted ? (
         isFirewall ? (
-          <FirewallSuccessView nodeId={minted.nodeId} token={minted.token} sshKey={sshCheck.key} onClose={onClose} />
+          <FirewallSuccessView
+            nodeId={minted.nodeId}
+            token={minted.token}
+            sshKey={sshCheck.key}
+            clusterHostname={clusterHostname}
+            onClose={onClose}
+          />
         ) : (
           <SuccessView
             role={role}
@@ -156,6 +170,7 @@ export function AddNodeWizard({
             token={minted.token}
             sshKey={sshCheck.key}
             clusterOsVersion={clusterOsVersion}
+            clusterHostname={clusterHostname}
             onClose={onClose}
           />
         )
@@ -301,6 +316,7 @@ function SuccessView({
   token,
   sshKey,
   clusterOsVersion,
+  clusterHostname,
   onClose,
 }: {
   role: AddableRole;
@@ -309,11 +325,12 @@ function SuccessView({
   token: string;
   sshKey: string;
   clusterOsVersion?: string;
+  clusterHostname: string;
   onClose: () => void;
 }) {
-  const seed = renderNodeSeed(role, nodeId, token, sshKey);
+  const seed = renderNodeSeed(role, nodeId, token, sshKey, natsURLFor(clusterHostname));
   const image = nodeImageFor(clusterOsVersion, arch);
-  const command = flashCommand(seed, arch);
+  const command = flashCommand(seed, arch, cpBaseFor(clusterHostname));
   const archLabel = NODE_ARCHES.find((a) => a.value === arch)?.label ?? arch.toUpperCase();
   const [showManual, setShowManual] = useState(false);
 
@@ -448,14 +465,16 @@ function FirewallSuccessView({
   nodeId,
   token,
   sshKey,
+  clusterHostname,
   onClose,
 }: {
   nodeId: string;
   token: string;
   sshKey: string;
+  clusterHostname: string;
   onClose: () => void;
 }) {
-  const seed = renderFirewallSeed(nodeId, token, sshKey);
+  const seed = renderFirewallSeed(nodeId, token, sshKey, natsURLFor(clusterHostname));
   const command = firewallApplyCommand();
   const [showImage, setShowImage] = useState(false);
   const [image, setImage] = useState<FlashableImage | null>(null);
