@@ -166,6 +166,21 @@ func NewDockerSupervisor(cfg DockerSupervisorConfig) (*DockerSupervisor, error) 
 
 // resolveServerHost picks the hostname that goes into Headscale's
 // server_url when the operator hasn't set RASPUTIN_HEADSCALE_URL. If
+// stunPublish maps the HTTP listen address onto the STUN port, preserving the
+// host bind: "0.0.0.0:18080" -> "0.0.0.0:3478", "127.0.0.1:18080" ->
+// "127.0.0.1:3478". Keeping the bind identical means narrowing ListenAddr for
+// dev narrows STUN with it, instead of quietly opening a LAN listener.
+func stunPublish(listenAddr string) string {
+	host := listenAddr
+	if i := strings.LastIndex(listenAddr, ":"); i >= 0 {
+		host = listenAddr[:i]
+	}
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	return host + ":3478"
+}
+
 // ListenAddr is a wildcard ("0.0.0.0" or "::") we can't use it as a URL
 // hostname — Tailscale clients would try to literally navigate there —
 // so we detect the controlplane's primary LAN IP via the dial-trick.
@@ -436,6 +451,10 @@ func (s *DockerSupervisor) createAndStart(ctx context.Context) error {
 		"--name", s.cfg.ContainerName,
 		"--restart", "unless-stopped",
 		"-p", s.cfg.ListenAddr + ":8080",
+		// STUN for the embedded DERP relay. Same host bind as the HTTP
+		// listener, so an operator who narrowed ListenAddr to loopback for dev
+		// gets a loopback STUN too rather than an unexpected LAN listener.
+		"-p", stunPublish(s.cfg.ListenAddr) + ":3478/udp",
 		"-v", confDir + ":/etc/headscale:ro",
 		"-v", dataDir + ":/var/lib/headscale",
 	}
@@ -598,9 +617,14 @@ prefixes:
 
 derp:
   server:
-    enabled: false
-  urls:
-    - https://controlplane.tailscale.com/derpmap/default
+    enabled: true
+    region_id: 999
+    region_code: "rasputin"
+    region_name: "Rasputin Embedded DERP"
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+  urls: []
   paths: []
   auto_update_enabled: false
   update_frequency: 24h

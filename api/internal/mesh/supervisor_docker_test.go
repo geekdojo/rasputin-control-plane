@@ -766,3 +766,68 @@ func equalStringSlices(a, b []string) bool {
 	}
 	return true
 }
+
+// renderTestConfig renders the Headscale config the supervisor would write, so
+// the DERP assertions below read the real template rather than a copy of it.
+func renderTestConfig(t *testing.T) string {
+	t.Helper()
+	s := newTestSupervisor(t, newFakeDocker())
+	// Start() normally creates this; we call writeConfig directly.
+	if err := os.MkdirAll(filepath.Join(s.cfg.StateDir, "config"), 0o755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := s.writeConfig(); err != nil {
+		t.Fatalf("writeConfig: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(s.cfg.StateDir, "config", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read rendered config: %v", err)
+	}
+	return string(b)
+}
+
+// The startup DERP fetch is what makes a controlplane require internet: with a
+// url listed, Headscale GETs the map at boot and treats failure as FATAL. On
+// the 2026-08-03 bench that crash-looped the container forever on a standalone
+// segment (lookup controlplane.tailscale.com … server misbehaving), so the
+// mesh never formed — despite the OS baking the container image specifically
+// so first boot works offline.
+func TestConfig_NoStartupDERPFetch(t *testing.T) {
+	cfg := renderTestConfig(t)
+	if strings.Contains(cfg, "controlplane.tailscale.com") {
+		t.Error("config still lists a remote DERP url — Headscale will fetch it at startup and die without internet")
+	}
+	if !strings.Contains(cfg, "urls: []") {
+		t.Error("derp.urls must be empty so no fetch happens at startup")
+	}
+}
+
+// With no remote map, the cluster needs its own relay or clients have nothing
+// to bootstrap against.
+func TestConfig_EmbeddedDERPEnabled(t *testing.T) {
+	cfg := renderTestConfig(t)
+	for _, want := range []string{
+		"enabled: true",
+		"region_id: 999",
+		"stun_listen_addr",
+		"automatically_add_embedded_derp_region: true",
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("embedded DERP config missing %q", want)
+		}
+	}
+}
+
+// STUN must follow the HTTP bind. An operator who narrows ListenAddr to
+// loopback for dev must not silently get a LAN-facing STUN listener.
+func TestStunPublish(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"0.0.0.0:18080", "0.0.0.0:3478"},
+		{"127.0.0.1:18080", "127.0.0.1:3478"},
+		{"192.168.1.181:18080", "192.168.1.181:3478"},
+	} {
+		if got := stunPublish(tc.in); got != tc.want {
+			t.Errorf("stunPublish(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
