@@ -104,26 +104,48 @@ func mustRead(t *testing.T, path string) map[string]string {
 
 // ---- slot math --------------------------------------------------------------
 
-// Real `block info` output from the CWWK firewall (dev.49): p1 ESP (RASPUTIN-FW
-// vfat), p2 active squashfs (/rom), p3 inactive squashfs, p4 rootfs_data ext4.
-const benchBlockInfo = `/dev/nvme0n1p1: UUID="FE83-1305" LABEL="RASPUTIN-FW" VERSION="FAT16" TYPE="vfat"
+// Current-layout `block info`: p1 ESP (RASPUTINEFI vfat), p2 SEED (RASPUTIN-FW
+// vfat, its own basic-data partition), p3 active squashfs (/rom), p4 inactive
+// squashfs, p5 rootfs_data ext4. The seed's own partition shifts the rootfs
+// numbers down one vs the legacy layout — everything resolves by label/mount,
+// so that's fine (grub PARTLABEL, fstab label, block-info type/mount).
+const benchBlockInfo = `/dev/nvme0n1p1: UUID="FE83-1305" LABEL="RASPUTINEFI" VERSION="FAT16" TYPE="vfat"
+/dev/nvme0n1p2: UUID="AB12-CD34" LABEL="RASPUTIN-FW" VERSION="FAT16" TYPE="vfat"
+/dev/nvme0n1p3: UUID="51056db3-397a8a76-74c1d738-d627d629" VERSION="4.0" MOUNT="/rom" TYPE="squashfs"
+/dev/nvme0n1p4: UUID="51056db3-397a8a76-74c1d738-d627d629" VERSION="4.0" TYPE="squashfs"
+/dev/nvme0n1p5: UUID="df1368c8-442e-4c78-a8e6-88ee060259e3" LABEL="rootfs_data" VERSION="1.0" MOUNT="/overlay" TYPE="ext4"`
+
+// Legacy single-partition layout (pre-2026-08 firewalls): the ESP itself is
+// labelled RASPUTIN-FW and carries the seed; no separate RASPUTINEFI partition.
+const legacyBlockInfo = `/dev/nvme0n1p1: UUID="FE83-1305" LABEL="RASPUTIN-FW" VERSION="FAT16" TYPE="vfat"
 /dev/nvme0n1p2: UUID="51056db3-397a8a76-74c1d738-d627d629" VERSION="4.0" MOUNT="/rom" TYPE="squashfs"
 /dev/nvme0n1p3: UUID="51056db3-397a8a76-74c1d738-d627d629" VERSION="4.0" TYPE="squashfs"
 /dev/nvme0n1p4: UUID="df1368c8-442e-4c78-a8e6-88ee060259e3" LABEL="rootfs_data" VERSION="1.0" MOUNT="/overlay" TYPE="ext4"`
 
 func TestParseSquashfsSlots(t *testing.T) {
 	active, inactive := parseSquashfsSlots(benchBlockInfo)
-	if active != "/dev/nvme0n1p2" {
-		t.Errorf("active = %q, want /dev/nvme0n1p2 (the /rom mount)", active)
+	if active != "/dev/nvme0n1p3" {
+		t.Errorf("active = %q, want /dev/nvme0n1p3 (the /rom mount)", active)
 	}
-	if inactive != "/dev/nvme0n1p3" {
-		t.Errorf("inactive = %q, want /dev/nvme0n1p3 (the other squashfs)", inactive)
+	if inactive != "/dev/nvme0n1p4" {
+		t.Errorf("inactive = %q, want /dev/nvme0n1p4 (the other squashfs)", inactive)
 	}
 }
 
 func TestParseESPDevice(t *testing.T) {
+	// Current layout: the ESP is RASPUTINEFI, NOT the RASPUTIN-FW seed on p2.
 	if dev := parseESPDevice(benchBlockInfo); dev != "/dev/nvme0n1p1" {
-		t.Errorf("ESP = %q, want /dev/nvme0n1p1 (vfat RASPUTIN-FW)", dev)
+		t.Errorf("ESP = %q, want /dev/nvme0n1p1 (vfat RASPUTINEFI)", dev)
+	}
+	// The make-or-break: with both labels present, grubenv must land on the ESP
+	// (RASPUTINEFI), never the seed (RASPUTIN-FW). A regression here silently
+	// corrupts the seed and never activates a slot.
+	if dev := parseESPDevice(benchBlockInfo); dev == "/dev/nvme0n1p2" {
+		t.Fatal("parseESPDevice picked the RASPUTIN-FW SEED partition — grubenv would corrupt the seed and slot activation would fail")
+	}
+	// Legacy single-partition firewall: fall back to the RASPUTIN-FW ESP.
+	if dev := parseESPDevice(legacyBlockInfo); dev != "/dev/nvme0n1p1" {
+		t.Errorf("legacy ESP = %q, want /dev/nvme0n1p1 (vfat RASPUTIN-FW, no RASPUTINEFI present)", dev)
 	}
 	// No ESP line → empty (caller errors).
 	if dev := parseESPDevice(`/dev/sda2: TYPE="ext4"`); dev != "" {
