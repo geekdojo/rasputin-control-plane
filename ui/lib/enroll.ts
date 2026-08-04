@@ -43,11 +43,9 @@ export function cpBaseFor(clusterHostname: string): string {
 // Roles a user can add from the UI. The controlplane self-registers, so it's
 // never an "add a node" path. `firewall` IS addable, on its own branch: it's a
 // distinct, x86-only image. Since the firewall seed moved onto a basic-data FAT
-// (labeled RASPUTIN-FW, like the OS node's RASPUTIN-OS), a blank board can now
-// take the SAME flash.sh one-liner the compute/storage nodes use
-// (firewallFlashCommand); the scp + apply-seed push (firewallApplyCommand)
-// stays for a pre-imaged unit that's already running with your key. See
-// renderFirewallSeed.
+// (labeled RASPUTIN-FW, like the OS node's RASPUTIN-OS), a blank board takes the
+// SAME flash.sh one-liner the compute/storage nodes use (firewallFlashCommand).
+// See renderFirewallSeed.
 export type AddableRole = 'compute' | 'storage' | 'firewall';
 
 // Target CPU architecture for a new node's OS image. The node OS is one image
@@ -141,26 +139,6 @@ export function renderFirewallSeed(
     `RASPUTIN_NATS_URL=${natsUrl}\n` +
     `RASPUTIN_CP_JOIN_TOKEN=${token}\n` +
     sshKeyLine(sshKey)
-  );
-}
-
-// FIREWALL_HOST_PLACEHOLDER is the stand-in the operator replaces with their
-// firewall's LAN address in the delivery command. Kept as one constant so the
-// hint text and the command can't drift apart.
-export const FIREWALL_HOST_PLACEHOLDER = '<firewall-ip>';
-
-// firewallApplyCommand builds the one line the operator runs (from the folder
-// holding the downloaded seed.env) to enroll an ALREADY-IMAGED firewall: copy
-// the seed into place, then apply it. Unlike a fresh OS node — which is flashed
-// blank and self-seeds on first boot — the firewall is already running its own
-// image, so enrollment is an over-the-network push, not a re-flash. The `-O`
-// forces scp's legacy protocol (the firewall's SSH server doesn't speak the
-// newer SFTP-based transfer). apply-seed pushes the seed into config and the
-// agent auto-starts.
-export function firewallApplyCommand(host: string = FIREWALL_HOST_PLACEHOLDER): string {
-  return (
-    `scp -O seed.env root@${host}:/etc/rasputin/seed.env && ` +
-    `ssh root@${host} /usr/lib/rasputin/apply-seed`
   );
 }
 

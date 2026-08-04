@@ -10,8 +10,6 @@ import {
   downloadSeed,
   natsURLFor,
   cpBaseFor,
-  FIREWALL_HOST_PLACEHOLDER,
-  firewallApplyCommand,
   firewallFlashCommand,
   flashCommand,
   NODE_ARCHES,
@@ -466,11 +464,11 @@ function SuccessView({
 }
 
 // The firewall ships its own x86-only image, but since its seed moved onto a
-// basic-data FAT (RASPUTIN-FW) the enrollment story now matches a compute node:
-// a blank board takes the SAME flash.sh one-liner (the primary path here). A
-// pre-imaged bundled unit that's already running with your key skips the flash
-// and takes the seed over SSH (the scp/apply-seed alternative). A collapsible
-// keeps the by-hand flash for anyone who wants it.
+// basic-data FAT (RASPUTIN-FW) its enrollment now matches a compute node: a
+// blank board takes the SAME flash.sh one-liner. This view mirrors the compute
+// SuccessView — one primary command, with the seed file + by-hand steps behind
+// a "flash manually" disclosure. (The old scp + apply-seed push was removed
+// 2026-08-04 — the one-command flash supersedes it.)
 function FirewallSuccessView({
   nodeId,
   token,
@@ -488,17 +486,13 @@ function FirewallSuccessView({
   onClose: () => void;
 }) {
   const seed = renderFirewallSeed(nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId);
-  // Blank-board (DIY) path: one command flashes + seeds, exactly like a compute
-  // node. The scp/apply-seed push stays for a pre-imaged unit already running
-  // with your key.
   const flashCmd = firewallFlashCommand(seed, cpBaseFor(clusterHostname));
-  const applyCommand = firewallApplyCommand();
   const [showManual, setShowManual] = useState(false);
   const [image, setImage] = useState<FlashableImage | null>(null);
   const [imageResolved, setImageResolved] = useState(false);
 
-  // Resolve the latest firewall image so we can offer a verified download for a
-  // fresh board. Best-effort: on failure we fall back to the release channel.
+  // Resolve the latest firewall image so the manual fallback can offer a
+  // verified download. Best-effort: on failure we fall back to the release channel.
   useEffect(() => {
     let live = true;
     getFirewallImage()
@@ -511,7 +505,10 @@ function FirewallSuccessView({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* The seed — the only secret. Save it now; it's unrecoverable. */}
+      {/* Primary path: one command flashes + enrolls a blank board end to end,
+          exactly like a compute node. The flasher reads role=firewall from the
+          seed, so it pulls the firewall image and seeds the RASPUTIN-FW FAT —
+          no firewall-specific flag on the line. */}
       <div
         style={{
           background: accentA(0.06),
@@ -523,43 +520,10 @@ function FirewallSuccessView({
         }}
       >
         <span style={{ color: ACCENT, fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>
-          ENROLLMENT FILE — SAVE IT NOW, NOT SHOWN AGAIN
-        </span>
-        <span style={{ color: FG, fontSize: 10, fontFamily: MONO }}>
-          for <Tok>{nodeId}</Tok>
-        </span>
-        <div style={{ position: 'relative' }}>
-          <pre style={seedBox}>{seed}</pre>
-          <div style={{ position: 'absolute', top: 4, right: 4 }}>
-            <CopyButton value={seed} />
-          </div>
-        </div>
-        <div>
-          <Btn variant="primary" small onClick={() => downloadSeed(seed, 'seed.env')}>
-            <Download size={11} /> DOWNLOAD seed.env
-          </Btn>
-        </div>
-      </div>
-
-      {/* Primary path for a brand-new board: one command flashes + enrolls it
-          end to end, exactly like a compute node. The flasher reads role=firewall
-          from the seed above, so it pulls the firewall image and seeds the
-          RASPUTIN-FW FAT — no firewall-specific flag on the line. */}
-      <div
-        style={{
-          background: accentA(0.06),
-          border: `1px solid ${accentA(0.4)}`,
-          padding: '12px 14px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-        }}
-      >
-        <span style={{ color: ACCENT, fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>
-          FLASH A NEW BOARD IN ONE COMMAND
+          FLASH THIS FIREWALL IN ONE COMMAND
         </span>
         <span style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
-          Blank firewall board? Plug its drive into your computer, then run this. It downloads the
+          Plug the new firewall board&apos;s drive into your computer, then run this. It downloads the
           latest <Tok>x86-64</Tok> firewall image, verifies it, flashes the drive, writes{' '}
           <Tok>{nodeId}</Tok>&apos;s enrollment (and checks it landed), then ejects.
         </span>
@@ -572,25 +536,7 @@ function FirewallSuccessView({
         </span>
       </div>
 
-      {/* Alternative: the board is already imaged and enrolled with your key
-          (a pre-built bundled unit) — no drive to pull, so push the seed over
-          SSH instead. Not for a blank board: a fresh image ships key-less with
-          password auth off, so it has no credentials to SSH into. */}
-      <SectionLabel>ALREADY RUNNING WITH YOUR SSH KEY?</SectionLabel>
-      <span style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
-        If the firewall is already running its image and enrolled with your SSH key (a pre-built
-        unit), skip the flash. From the folder where you saved <Tok>seed.env</Tok>, run this — swap{' '}
-        <Tok>{FIREWALL_HOST_PLACEHOLDER}</Tok> for the firewall&apos;s address on your network:
-      </span>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-        <pre style={{ ...seedBox, flex: 1, minWidth: 0 }}>{applyCommand}</pre>
-        <CopyButton value={applyCommand} />
-      </div>
-      <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
-        It copies the file into place and applies it — the firewall joins immediately, no reboot.
-      </span>
-
-      {/* Deep fallback: flash a blank board by hand instead of the one-liner. */}
+      {/* Fallback: hand-flash with the seed file. */}
       <button
         onClick={() => setShowManual((v) => !v)}
         style={{
@@ -607,15 +553,41 @@ function FirewallSuccessView({
         }}
       >
         {showManual ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        Prefer to flash a blank board by hand?
+        Prefer to flash manually?
       </button>
 
       {showManual && (
         <>
-          <SectionLabel>FLASH THE BOARD MANUALLY</SectionLabel>
-          <span style={{ color: DIM, fontSize: 9, fontFamily: MONO, lineHeight: 1.5 }}>
-            The one-command flasher above does all of this for you. These are the same steps by hand:
-          </span>
+          <div
+            style={{
+              background: accentA(0.06),
+              border: `1px solid ${accentA(0.4)}`,
+              padding: '12px 14px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+            }}
+          >
+            <span style={{ color: ACCENT, fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>
+              ENROLLMENT FILE — SAVE IT NOW, NOT SHOWN AGAIN
+            </span>
+            <span style={{ color: FG, fontSize: 10, fontFamily: MONO }}>
+              for <Tok>{nodeId}</Tok>
+            </span>
+            <div style={{ position: 'relative' }}>
+              <pre style={seedBox}>{seed}</pre>
+              <div style={{ position: 'absolute', top: 4, right: 4 }}>
+                <CopyButton value={seed} />
+              </div>
+            </div>
+            <div>
+              <Btn variant="primary" small onClick={() => downloadSeed(seed, 'seed.env')}>
+                <Download size={11} /> DOWNLOAD seed.env
+              </Btn>
+            </div>
+          </div>
+
+          <SectionLabel>MANUAL STEPS</SectionLabel>
           <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
             {[
               image ? (
@@ -640,10 +612,9 @@ function FirewallSuccessView({
                 <>Resolving the latest firewall image…</>
               ),
               <>
-                Before booting, put the seed on the disk: the image carries a small FAT volume labeled{' '}
-                <Tok>RASPUTIN-FW</Tok> — mount it on your computer and copy <Tok>seed.env</Tok> to its
-                root. (A fresh image has no SSH credentials at all, so this — not the SSH push above —
-                is how the first seed gets on.)
+                Before booting, copy this <Tok>seed.env</Tok> to the root of the disk&apos;s small FAT volume
+                labeled <Tok>RASPUTIN-FW</Tok> — mount it on your computer and drop the file in. (A fresh
+                image has no SSH credentials at all, so this is how the first seed gets on.)
               </>,
               <>Connect the board to your network and boot — it seeds itself and joins.</>,
             ].map((step, i) => (
@@ -656,7 +627,7 @@ function FirewallSuccessView({
       )}
 
       <Hint>
-        It&apos;ll appear below as <Tok>PENDING</Tok> until it applies the file and joins — usually seconds —
+        It&apos;ll appear below as <Tok>PENDING</Tok> until it powers on and joins — usually under a minute —
         then flip to a live node automatically.
       </Hint>
 
