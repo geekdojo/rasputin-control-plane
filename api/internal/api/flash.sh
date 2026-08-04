@@ -1,24 +1,34 @@
 #!/usr/bin/env bash
 #
-# rasputin flash.sh — one-command node flasher.
+# rasputin flash.sh — one-command node flasher (OS nodes AND the firewall).
 #
 # Served by the control plane at GET /flash.sh. The Add-node wizard hands the
 # operator a single line to paste on their laptop:
 #
 #   curl -fsSL https://rasputin.local/flash.sh | sudo RASPUTIN_SEED_B64='…' bash
 #
-# It downloads the OS image that matches the cluster, verifies its checksum,
+# It downloads the image that matches the cluster, verifies its checksum,
 # flashes a plugged-in SSD/USB, writes the node's enrollment seed onto the boot
 # partition, and — critically — READS THE SEED BACK at the block level and fails
 # loudly if it didn't land. A silent seed write that never reached the medium is
 # exactly what stranded the first bench add-node (2026-06-22); the read-back is
 # the point of this script, not a nicety.
 #
+# One script, both images — the seed's RASPUTIN_NODE_ROLE decides which:
+#   role=firewall → the x86-only firewall image (/api/cluster/firewall-image, a
+#                   .img.gz) seeded onto the RASPUTIN-FW FAT;
+#   any other role → the per-arch OS image (/api/cluster/node-image, a .img.xz)
+#                   seeded onto the RASPUTIN-OS FAT.
+# There is deliberately no "if firewall" flag on the command line: the seed
+# already carries the difference, so the firewall one-liner is byte-identical to
+# the OS one-liner apart from its (opaque) base64 seed. The decompressor is
+# picked from the image's own filename below, not hard-coded per role.
+#
 # Secret handling: the only secret is the seed (it carries the one-time, node-
 # bound join token). It is passed in via RASPUTIN_SEED_B64 (base64) and never
 # placed in a URL or fetched from the server — this script itself contains no
 # secrets. Image version/URL/sha are non-secret and fetched from the control
-# plane's /api/cluster/node-image.
+# plane's image endpoint (node-image or firewall-image; see above).
 #
 # Cross-platform: macOS (diskutil + mtools/diskutil) and Linux (lsblk + mtools/
 # mount). Safe by construction: only external/removable disks are offered, the
@@ -30,7 +40,9 @@
 #   RASPUTIN_ARCH        target CPU arch: amd64 (default) or arm64. Selects which
 #                        per-arch OS image the control plane hands back (amd64 =
 #                        N100/Intel, arm64 = CM5/Raspberry Pi). The Add-node
-#                        wizard sets this from the architecture you pick.
+#                        wizard sets this from the architecture you pick. OS
+#                        nodes only — ignored for a firewall seed (x86-only, and
+#                        its image endpoint takes no arch).
 #   RASPUTIN_CP_URL      override control-plane base URL (default: derived from
 #                        the seed's NATS host, else http://rasputin.local)
 #   RASPUTIN_DISK        target device (e.g. /dev/disk4 or /dev/sdb); skips the
@@ -88,22 +100,46 @@ if [ -z "$CP_URL" ]; then
 fi
 CP_URL="${CP_URL%/}"
 
+# --- role-derived image + seed parameters ------------------------------------
+# The seed's RASPUTIN_NODE_ROLE is the single source of truth for what this
+# node becomes, so it also selects the two things that genuinely differ between
+# the OS-node image and the firewall image: which control-plane endpoint hands
+# back the image descriptor, and the volume LABEL of the seed FAT the image
+# exposes. Everything downstream is identical for both — that one-code-path is
+# the whole point (no "if firewall, do X differently"). The decompressor is
+# derived from the image's own filename at flash time, not from the role.
+case "$NODE_ROLE" in
+	firewall)
+		SEED_LABEL="RASPUTIN-FW"
+		IMG_DESC_URL="$CP_URL/api/cluster/firewall-image"
+		IMG_KIND="Rasputin Firewall"
+		IMG_ARCH_LABEL="x86-64"
+		;;
+	*)
+		# OS nodes (compute/storage/controlplane): a per-arch image, seed FAT
+		# labeled RASPUTIN-OS. Arch applies only on this path — the firewall is
+		# x86-only and its endpoint takes no arch.
+		ARCH="${RASPUTIN_ARCH:-amd64}"
+		case "$ARCH" in amd64|arm64) ;; *) die "RASPUTIN_ARCH must be amd64 or arm64 (got '$ARCH')." ;; esac
+		SEED_LABEL="RASPUTIN-OS"
+		IMG_DESC_URL="$CP_URL/api/cluster/node-image?arch=$ARCH"
+		IMG_KIND="Rasputin OS"
+		IMG_ARCH_LABEL="$ARCH"
+		;;
+esac
+
 # --- fetch the image descriptor the cluster expects --------------------------
-# Target arch (amd64 default). The control plane resolves it to the matching
-# per-arch image (amd64 = N100/Intel, arm64 = CM5/Raspberry Pi).
-ARCH="${RASPUTIN_ARCH:-amd64}"
-case "$ARCH" in amd64|arm64) ;; *) die "RASPUTIN_ARCH must be amd64 or arm64 (got '$ARCH')." ;; esac
 have curl || die "curl is required."
-info "Asking ${CP_URL} which ${ARCH} image this cluster runs…"
-DESC="$(curl -fsSL --max-time 20 "$CP_URL/api/cluster/node-image?arch=$ARCH" 2>/dev/null || true)"
-[ -n "$DESC" ] || die "couldn't get the $ARCH image from the control plane at $CP_URL — either this laptop isn't on the cluster's network (override with RASPUTIN_CP_URL=…), or this cluster's release has no $ARCH image yet."
+info "Asking ${CP_URL} which ${IMG_KIND} (${IMG_ARCH_LABEL}) image this cluster runs…"
+DESC="$(curl -fsSL --max-time 20 "$IMG_DESC_URL" 2>/dev/null || true)"
+[ -n "$DESC" ] || die "couldn't get the ${IMG_KIND} image from the control plane at $CP_URL — either this laptop isn't on the cluster's network (override with RASPUTIN_CP_URL=…), or this cluster's release has no matching image yet."
 json_val() { printf '%s' "$DESC" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -1; }
 IMG_VERSION="$(json_val version)"
 IMG_URL="$(json_val url)"
 IMG_SHA="$(json_val sha256)"
 [ -n "$IMG_URL" ] && [ -n "$IMG_SHA" ] || die "the control plane didn't return a usable image descriptor (got: $DESC)"
 
-info "Node ${BLD}${NODE_ID}${RST} (${NODE_ROLE}) → Rasputin OS ${BLD}${IMG_VERSION}${RST} (${ARCH})"
+info "Node ${BLD}${NODE_ID}${RST} (${NODE_ROLE}) → ${IMG_KIND} ${BLD}${IMG_VERSION}${RST} (${IMG_ARCH_LABEL})"
 
 # --- pick the target disk -----------------------------------------------------
 # list_disks prints one "<device>\t<size>\t<model>" line per candidate.
@@ -167,7 +203,7 @@ fi
 DISK_DESC="$(list_disks | awk -F'\t' -v d="$DISK" '$1==d{print $2"  "$3}')"
 say ""
 warn "About to ${BLD}ERASE ALL DATA${RST}${YEL} on ${BLD}${DISK}${RST}${YEL}  ${DISK_DESC}${RST}"
-say   "        and flash Rasputin OS ${IMG_VERSION}, seeded as ${NODE_ID} (${NODE_ROLE})."
+say   "        and flash ${IMG_KIND} ${IMG_VERSION}, seeded as ${NODE_ID} (${NODE_ROLE})."
 if [ "${RASPUTIN_DRY_RUN:-}" = "1" ]; then info "DRY RUN — stopping before any write. Disk=$DISK Image=$IMG_URL"; exit 0; fi
 if [ "${RASPUTIN_ASSUME_YES:-}" != "1" ]; then
 	short="$(basename "$DISK")"
@@ -178,7 +214,7 @@ fi
 # --- download + verify --------------------------------------------------------
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/rasputin-flash.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
-IMG="$TMP/node.img.xz"
+IMG="$TMP/rasputin-image.img"   # compression-agnostic name; decompressor picked below
 info "Downloading $IMG_URL"
 curl -fL --progress-bar -o "$IMG" "$IMG_URL" || die "image download failed."
 info "Verifying checksum…"
@@ -187,16 +223,24 @@ if have shasum; then got="$(shasum -a 256 "$IMG" | awk '{print $1}')"; else got=
 info "Checksum OK."
 
 # --- flash --------------------------------------------------------------------
-have xz || die "xz is required to decompress the image (macOS: 'brew install xz'; Linux: install xz-utils)."
+# Pick the decompressor from the image's own filename — the OS image ships
+# .img.xz, the firewall image ships .img.gz. Deriving it from the URL (rather
+# than the role) means a future compression change needs no edit here.
+case "$IMG_URL" in
+	*.xz) DECOMP="xz" ;;
+	*.gz) DECOMP="gzip" ;;
+	*)    die "don't know how to decompress $IMG_URL (expected an .img.xz or .img.gz image)." ;;
+esac
+have "$DECOMP" || die "$DECOMP is required to decompress the image (macOS: 'brew install $DECOMP'; Linux: install it via your package manager)."
 info "Flashing ${DISK} (this takes a few minutes; do not unplug)…"
 if [ "$OS" = "Darwin" ]; then
 	diskutil unmountDisk "$DISK" >/dev/null 2>&1 || true
 	RDISK="/dev/r${DISK#/dev/}"   # raw device (e.g. /dev/disk4 -> /dev/rdisk4) is much faster on macOS
-	xz -dc "$IMG" | dd of="$RDISK" bs=4m || die "write to $RDISK failed (see the error above — is the disk in use?)."
+	"$DECOMP" -dc "$IMG" | dd of="$RDISK" bs=4m || die "write to $RDISK failed (see the error above — is the disk in use?)."
 else
 	for p in $(lsblk -lnpo NAME "$DISK" 2>/dev/null | tail -n +2); do umount "$p" 2>/dev/null || true; done
-	if xz -dc "$IMG" | dd of="$DISK" bs=4M oflag=sync status=progress 2>/dev/null; then :; else
-		xz -dc "$IMG" | dd of="$DISK" bs=4M 2>/dev/null || die "dd failed."
+	if "$DECOMP" -dc "$IMG" | dd of="$DISK" bs=4M oflag=sync status=progress 2>/dev/null; then :; else
+		"$DECOMP" -dc "$IMG" | dd of="$DISK" bs=4M 2>/dev/null || die "dd failed."
 	fi
 fi
 sync
@@ -208,21 +252,23 @@ if [ "$OS" = "Darwin" ]; then diskutil unmountDisk "$DISK" >/dev/null 2>&1 || tr
 fi
 
 # --- locate the seed FAT on the flashed disk — BY VOLUME LABEL, never by number
-# The seed volume is the FAT labeled RASPUTIN-OS. Its partition NUMBER differs
-# by board (rpi: p1 "selector"; n100: p2 — p1 is the hidden ESP), and the OS
-# mounts it by label, so number-guessing strands the node: a seed written to
-# the ESP verifies clean but firstboot only ever sees the real seed volume's
-# baked blank template (bit the bootstrap.sh bench runs, 2026-07-14).
-seed_part_for() { # <disk> -> partition device carrying the RASPUTIN-OS FAT
+# The seed volume is the FAT labeled $SEED_LABEL (RASPUTIN-OS for an OS node,
+# RASPUTIN-FW for a firewall). Its partition NUMBER differs by image (rpi: p1
+# "selector"; n100: p2 — p1 is the hidden ESP; firewall: the basic-data FAT
+# after the RASPUTINEFI ESP), and every image mounts the seed by label, so
+# number-guessing strands the node: a seed written to the ESP verifies clean
+# but firstboot only ever sees the real seed volume's baked blank template
+# (bit the bootstrap.sh bench runs, 2026-07-14).
+seed_part_for() { # <disk> -> partition device carrying the $SEED_LABEL FAT
 	if [ "$OS" = "Darwin" ]; then
 		local id vn
 		for id in $(diskutil list "$1" 2>/dev/null | awk '{print $NF}' | grep "^${1#/dev/}s[0-9]*$"); do
 			vn="$(diskutil info "/dev/$id" 2>/dev/null | awk -F': *' '/Volume Name/{print $2; exit}')"
-			[ "$vn" = "RASPUTIN-OS" ] && { printf '/dev/%s\n' "$id"; return 0; }
+			[ "$vn" = "$SEED_LABEL" ] && { printf '/dev/%s\n' "$id"; return 0; }
 		done
 		return 1
 	else
-		lsblk -lnpo NAME,LABEL "$1" 2>/dev/null | awk '$2=="RASPUTIN-OS"{print $1; exit}' | grep . || return 1
+		lsblk -lnpo NAME,LABEL "$1" 2>/dev/null | awk -v lbl="$SEED_LABEL" '$2==lbl{print $1; exit}' | grep . || return 1
 	fi
 }
 PART=""
@@ -231,8 +277,8 @@ for attempt in 1 2 3 4 5; do
 	[ -n "$PART" ] && break
 	sleep 1   # partition scan can lag the flash by a moment
 done
-[ -n "$PART" ] || die "no RASPUTIN-OS volume found on $DISK after flashing — can't place the seed. (Unexpected image layout? Re-run, and if it persists check the control plane's release.)"
-info "Seed volume: ${PART} (RASPUTIN-OS)"
+[ -n "$PART" ] || die "no $SEED_LABEL volume found on $DISK after flashing — can't place the seed. (Unexpected image layout? Re-run, and if it persists check the control plane's release.)"
+info "Seed volume: ${PART} (${SEED_LABEL})"
 
 # --- write the seed onto the seed FAT, then READ IT BACK ----------------------
 SEED_FILE="$TMP/rasputin-seed.env"; printf '%s' "$SEED" > "$SEED_FILE"
@@ -287,5 +333,5 @@ if [ "$OS" = "Darwin" ]; then diskutil eject "$DISK" >/dev/null 2>&1 || true; el
 	sync; have udisksctl && udisksctl power-off -b "$DISK" >/dev/null 2>&1 || true
 fi
 say ""
-info "${GRN}${BLD}Done.${RST} Flashed Rasputin OS ${IMG_VERSION} and seeded ${NODE_ID} (${NODE_ROLE})."
-say   "      Seat the SSD in the node, power it on — it'll appear as ${BLD}${NODE_ID}${RST} in the control plane within a minute."
+info "${GRN}${BLD}Done.${RST} Flashed ${IMG_KIND} ${IMG_VERSION} and seeded ${NODE_ID} (${NODE_ROLE})."
+say   "      Seat the drive in the node, power it on — it'll appear as ${BLD}${NODE_ID}${RST} in the control plane within a minute."

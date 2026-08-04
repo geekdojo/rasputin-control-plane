@@ -41,10 +41,13 @@ export function cpBaseFor(clusterHostname: string): string {
 }
 
 // Roles a user can add from the UI. The controlplane self-registers, so it's
-// never an "add a node" path. `firewall` IS addable, but on a separate branch:
-// it's a distinct, x86-only image that enrolls over SSH (not the flash.sh /
-// ESP-seed path the compute/storage OS nodes use) — see renderFirewallSeed +
-// firewallApplyCommand.
+// never an "add a node" path. `firewall` IS addable, on its own branch: it's a
+// distinct, x86-only image. Since the firewall seed moved onto a basic-data FAT
+// (labeled RASPUTIN-FW, like the OS node's RASPUTIN-OS), a blank board can now
+// take the SAME flash.sh one-liner the compute/storage nodes use
+// (firewallFlashCommand); the scp + apply-seed push (firewallApplyCommand)
+// stays for a pre-imaged unit that's already running with your key. See
+// renderFirewallSeed.
 export type AddableRole = 'compute' | 'storage' | 'firewall';
 
 // Target CPU architecture for a new node's OS image. The node OS is one image
@@ -116,11 +119,12 @@ export function renderNodeSeed(
 }
 
 // renderFirewallSeed builds the firewall's seed.env — the SAME four keys as a
-// node seed (role / node-id / NATS url / join token, always with a token), but
-// the firewall consumes it differently: it lands at /etc/rasputin/seed.env over
-// SSH and is applied by apply-seed, rather than on a boot-partition FAT read by
-// firstboot. Mirrors openwrtSeed() in cmd/rasputin-provision so a UI-enrolled
-// firewall and a CLI-provisioned one are byte-compatible. See
+// node seed (role / node-id / NATS url / join token, always with a token). The
+// firewall can consume it two ways: dropped on the boot-partition FAT
+// (RASPUTIN-FW) of a blank board and read at first boot (the flash.sh path), or
+// pushed to /etc/rasputin/seed.env over SSH and applied by apply-seed on an
+// already-running unit. Mirrors openwrtSeed() in cmd/rasputin-provision so a
+// UI-enrolled firewall and a CLI-provisioned one are byte-compatible. See
 // firewall-image.md + token-provisioning-pipeline.md.
 export function renderFirewallSeed(
   nodeId: string,
@@ -197,6 +201,23 @@ export function nodeImageFor(
   };
 }
 
+// seedToB64 base64-encodes the seed for the flasher's RASPUTIN_SEED_B64 env var.
+// UTF-8-safe: btoa() throws on any char outside Latin1, and the seed's comment
+// line carries an em dash (and a node name could hold other non-ASCII) — so
+// encode to UTF-8 bytes first, then base64 those. flash.sh's `base64 -d`
+// reproduces the exact bytes. Falls back to Buffer under SSR/test where btoa is
+// absent; the browser path uses btoa.
+function seedToB64(seed: string): string {
+  if (typeof btoa === 'function') {
+    const bytes = new TextEncoder().encode(seed);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (globalThis as any).Buffer.from(seed, 'utf8').toString('base64');
+}
+
 // flashCommand builds the single line the operator pastes on their laptop to
 // flash + enroll a new node ("plug in the drive, run this"). The control plane
 // serves the secret-free flasher at /flash.sh; the node's seed — the only
@@ -210,20 +231,20 @@ export function nodeImageFor(
 // unchanged.
 export function flashCommand(seed: string, arch: NodeArch, cpBase: string): string {
   const archEnv = arch !== 'amd64' ? `RASPUTIN_ARCH=${arch} ` : '';
-  // Base64 the seed UTF-8-safely. btoa() throws on any char outside Latin1, and
-  // the seed's comment line carries an em dash (and a node name could hold other
-  // non-ASCII) — so encode to UTF-8 bytes first, then base64 those. flash.sh's
-  // `base64 -d` reproduces the exact bytes.
-  if (typeof btoa === 'function') {
-    const bytes = new TextEncoder().encode(seed);
-    let bin = '';
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return `curl -fsSL ${cpBase}/flash.sh | sudo ${archEnv}RASPUTIN_SEED_B64='${btoa(bin)}' bash`;
-  }
-  // SSR/test fallback; the browser path uses btoa.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const b64 = (globalThis as any).Buffer.from(seed, 'utf8').toString('base64');
-  return `curl -fsSL ${cpBase}/flash.sh | sudo ${archEnv}RASPUTIN_SEED_B64='${b64}' bash`;
+  return `curl -fsSL ${cpBase}/flash.sh | sudo ${archEnv}RASPUTIN_SEED_B64='${seedToB64(seed)}' bash`;
+}
+
+// firewallFlashCommand builds the one-liner that flashes + enrolls a BLANK
+// firewall board — the DIY / bare-drive case, the firewall counterpart of
+// flashCommand. It's the SAME secret-free flasher (/flash.sh) with the SAME
+// seed-rides-as-base64 contract; the flasher reads RASPUTIN_NODE_ROLE=firewall
+// from the seed and pulls the x86-only firewall image (so no arch env) and
+// seeds the RASPUTIN-FW FAT, all off that one role field — there is no
+// firewall-specific flag on the line. The scp + apply-seed path
+// (firewallApplyCommand) stays for a pre-imaged unit that's already running
+// with your key; this is for a board with a blank drive.
+export function firewallFlashCommand(seed: string, cpBase: string): string {
+  return `curl -fsSL ${cpBase}/flash.sh | sudo RASPUTIN_SEED_B64='${seedToB64(seed)}' bash`;
 }
 
 // clusterPrefixOf derives the "<cluster>-" id prefix every node shares, from the

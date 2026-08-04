@@ -12,6 +12,7 @@ import {
   cpBaseFor,
   FIREWALL_HOST_PLACEHOLDER,
   firewallApplyCommand,
+  firewallFlashCommand,
   flashCommand,
   NODE_ARCHES,
   nodeImageFor,
@@ -441,7 +442,7 @@ function SuccessView({
               ) : (
                 <>Flash a Rasputin OS node image — the same build your cluster runs — to the new node&apos;s storage.</>
               ),
-              <>Copy this <Tok>rasputin-seed.env</Tok> to the root of the disk&apos;s boot partition (labeled <Tok>RASPUTIN-FW</Tok>).</>,
+              <>Copy this <Tok>rasputin-seed.env</Tok> to the root of the disk&apos;s boot partition (labeled <Tok>RASPUTIN-OS</Tok>).</>,
               <>Seat the node in the backplane and power it on.</>,
             ].map((step, i) => (
               <li key={i} style={{ color: DIM, fontSize: 11, fontFamily: MONO, lineHeight: 1.5 }}>
@@ -464,11 +465,12 @@ function SuccessView({
   );
 }
 
-// The firewall is a different beast from an OS node: it ships its own x86-only
-// image and is typically ALREADY running it (bundled units arrive pre-imaged),
-// so enrollment is an over-the-network push of the seed — not a blank-drive
-// flash. No flash.sh one-liner here; instead the operator saves the seed and
-// delivers it over SSH. A collapsible covers imaging a brand-new board.
+// The firewall ships its own x86-only image, but since its seed moved onto a
+// basic-data FAT (RASPUTIN-FW) the enrollment story now matches a compute node:
+// a blank board takes the SAME flash.sh one-liner (the primary path here). A
+// pre-imaged bundled unit that's already running with your key skips the flash
+// and takes the seed over SSH (the scp/apply-seed alternative). A collapsible
+// keeps the by-hand flash for anyone who wants it.
 function FirewallSuccessView({
   nodeId,
   token,
@@ -486,8 +488,12 @@ function FirewallSuccessView({
   onClose: () => void;
 }) {
   const seed = renderFirewallSeed(nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId);
-  const command = firewallApplyCommand();
-  const [showImage, setShowImage] = useState(false);
+  // Blank-board (DIY) path: one command flashes + seeds, exactly like a compute
+  // node. The scp/apply-seed push stays for a pre-imaged unit already running
+  // with your key.
+  const flashCmd = firewallFlashCommand(seed, cpBaseFor(clusterHostname));
+  const applyCommand = firewallApplyCommand();
+  const [showManual, setShowManual] = useState(false);
   const [image, setImage] = useState<FlashableImage | null>(null);
   const [imageResolved, setImageResolved] = useState(false);
 
@@ -535,29 +541,58 @@ function FirewallSuccessView({
         </div>
       </div>
 
-      {/* Delivery: push the seed to the already-running firewall over SSH.
-          This path needs SSH access — i.e. a firewall that was previously
-          seeded with your key. A brand-new board has no credentials at all
-          (images ship key-less, password auth off) and takes the seed via
-          its FAT partition instead — see the collapsible below. */}
-      <SectionLabel>DELIVER IT TO THE FIREWALL</SectionLabel>
+      {/* Primary path for a brand-new board: one command flashes + enrolls it
+          end to end, exactly like a compute node. The flasher reads role=firewall
+          from the seed above, so it pulls the firewall image and seeds the
+          RASPUTIN-FW FAT — no firewall-specific flag on the line. */}
+      <div
+        style={{
+          background: accentA(0.06),
+          border: `1px solid ${accentA(0.4)}`,
+          padding: '12px 14px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        <span style={{ color: ACCENT, fontSize: 11, fontFamily: MONO, letterSpacing: '0.08em' }}>
+          FLASH A NEW BOARD IN ONE COMMAND
+        </span>
+        <span style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
+          Blank firewall board? Plug its drive into your computer, then run this. It downloads the
+          latest <Tok>x86-64</Tok> firewall image, verifies it, flashes the drive, writes{' '}
+          <Tok>{nodeId}</Tok>&apos;s enrollment (and checks it landed), then ejects.
+        </span>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+          <pre style={{ ...seedBox, flex: 1, minWidth: 0 }}>{flashCmd}</pre>
+          <CopyButton value={flashCmd} />
+        </div>
+        <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
+          macOS &amp; Linux. Only offers external/removable drives, and asks you to confirm before it writes anything.
+        </span>
+      </div>
+
+      {/* Alternative: the board is already imaged and enrolled with your key
+          (a pre-built bundled unit) — no drive to pull, so push the seed over
+          SSH instead. Not for a blank board: a fresh image ships key-less with
+          password auth off, so it has no credentials to SSH into. */}
+      <SectionLabel>ALREADY RUNNING WITH YOUR SSH KEY?</SectionLabel>
       <span style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
-        Your firewall is already running and enrolled with your SSH key. From the folder where you
-        saved <Tok>seed.env</Tok>, run this — swap <Tok>{FIREWALL_HOST_PLACEHOLDER}</Tok> for the
-        firewall&apos;s address on your network:
+        If the firewall is already running its image and enrolled with your SSH key (a pre-built
+        unit), skip the flash. From the folder where you saved <Tok>seed.env</Tok>, run this — swap{' '}
+        <Tok>{FIREWALL_HOST_PLACEHOLDER}</Tok> for the firewall&apos;s address on your network:
       </span>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-        <pre style={{ ...seedBox, flex: 1, minWidth: 0 }}>{command}</pre>
-        <CopyButton value={command} />
+        <pre style={{ ...seedBox, flex: 1, minWidth: 0 }}>{applyCommand}</pre>
+        <CopyButton value={applyCommand} />
       </div>
       <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
         It copies the file into place and applies it — the firewall joins immediately, no reboot.
-        No SSH access yet? Use the brand-new-board steps below instead.
       </span>
 
-      {/* Fallback: image a brand-new board first. */}
+      {/* Deep fallback: flash a blank board by hand instead of the one-liner. */}
       <button
-        onClick={() => setShowImage((v) => !v)}
+        onClick={() => setShowManual((v) => !v)}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -571,13 +606,16 @@ function FirewallSuccessView({
           fontFamily: MONO,
         }}
       >
-        {showImage ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        Setting up a brand-new firewall board?
+        {showManual ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        Prefer to flash a blank board by hand?
       </button>
 
-      {showImage && (
+      {showManual && (
         <>
-          <SectionLabel>IMAGE THE BOARD FIRST</SectionLabel>
+          <SectionLabel>FLASH THE BOARD MANUALLY</SectionLabel>
+          <span style={{ color: DIM, fontSize: 9, fontFamily: MONO, lineHeight: 1.5 }}>
+            The one-command flasher above does all of this for you. These are the same steps by hand:
+          </span>
           <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
             {[
               image ? (
@@ -602,10 +640,10 @@ function FirewallSuccessView({
                 <>Resolving the latest firewall image…</>
               ),
               <>
-                Before booting, put the seed on the disk: the image&apos;s first partition is a small FAT
-                volume labeled <Tok>RASPUTIN-FW</Tok> — mount it on your computer and copy{' '}
-                <Tok>seed.env</Tok> to its root. (A fresh image has no SSH credentials at all, so this —
-                not the command above — is how the first seed gets on.)
+                Before booting, put the seed on the disk: the image carries a small FAT volume labeled{' '}
+                <Tok>RASPUTIN-FW</Tok> — mount it on your computer and copy <Tok>seed.env</Tok> to its
+                root. (A fresh image has no SSH credentials at all, so this — not the SSH push above —
+                is how the first seed gets on.)
               </>,
               <>Connect the board to your network and boot — it seeds itself and joins.</>,
             ].map((step, i) => (
