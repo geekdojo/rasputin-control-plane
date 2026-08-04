@@ -424,7 +424,7 @@ func (o *OpenWrtABBackend) markRunning(good bool) error {
 // withGrubenv runs fn with a readable+writable path to the GRUB env block. When
 // grubenvPath is set (tests, or an image that pre-mounts the ESP) it's used
 // directly. Otherwise — the production firewall — the ESP isn't mounted at
-// runtime, so we resolve it (`block info`, LABEL=RASPUTIN-FW), mount it rw on a
+// runtime, so we resolve it (`block info`, see espDevice), mount it rw on a
 // temp dir, run fn against <mnt>/boot/grub/grubenv, then sync + unmount promptly
 // to keep the FAT-dirty window small. writeGrubenv still overwrites in place, so
 // GRUB's save_env block-list stays valid across the remount.
@@ -484,8 +484,9 @@ func defaultResolveDevice(slot string) (string, error) {
 	return inactive, nil
 }
 
-// espDevice resolves the ESP block device via `block info` — the FAT partition
-// labelled RASPUTIN-FW. No udev / by-label symlinks needed.
+// espDevice resolves the ESP block device via `block info`. No udev / by-label
+// symlinks needed. See parseESPDevice for the RASPUTINEFI / legacy RASPUTIN-FW
+// label handling.
 func espDevice() (string, error) {
 	info, err := blockInfo()
 	if err != nil {
@@ -494,7 +495,7 @@ func espDevice() (string, error) {
 	if dev := parseESPDevice(info); dev != "" {
 		return dev, nil
 	}
-	return "", errors.New("ESP (vfat LABEL=RASPUTIN-FW) not found in `block info`")
+	return "", errors.New("ESP (vfat LABEL=RASPUTINEFI, or legacy RASPUTIN-FW) not found in `block info`")
 }
 
 // blockInfo runs OpenWrt's `block info` and returns its raw output.
@@ -534,15 +535,36 @@ func parseSquashfsSlots(blockInfoOut string) (active, inactive string) {
 	return active, inactive
 }
 
-// parseESPDevice picks the ESP (vfat LABEL=RASPUTIN-FW) device out of
-// `block info` output. Pure, for unit testing.
+// parseESPDevice picks the ESP block device out of `block info` output. Pure,
+// for unit testing.
+//
+// The ESP's FAT label is RASPUTINEFI. The seed lives on its OWN basic-data FAT
+// labelled RASPUTIN-FW (so it auto-mounts on a laptop; an ESP does not) — this
+// mirrors the compute image, which split ESP (RASPUTINEFI) from seed
+// (RASPUTIN-OS) for the same reason. Older single-partition firewalls labelled
+// the ESP itself RASPUTIN-FW and carried the seed on it.
+//
+// So: prefer RASPUTINEFI, and fall back to RASPUTIN-FW ONLY when no RASPUTINEFI
+// is present (a legacy box). This ordering is load-bearing — on the current
+// layout RASPUTIN-FW is the SEED partition, and writing grubenv there would
+// corrupt the seed and silently never activate a slot. Because the fallback is
+// gated on RASPUTINEFI's absence, a new agent is safe on both layouts, so this
+// change needs no flag-day with the image; a new-layout image must simply pin
+// an agent new enough to have it (which its agent-version.txt does).
 func parseESPDevice(blockInfoOut string) string {
+	var legacy string
 	for _, l := range strings.Split(blockInfoOut, "\n") {
-		if strings.Contains(l, `LABEL="RASPUTIN-FW"`) && strings.Contains(l, `TYPE="vfat"`) {
-			return blockInfoDev(l)
+		if !strings.Contains(l, `TYPE="vfat"`) {
+			continue
+		}
+		if strings.Contains(l, `LABEL="RASPUTINEFI"`) {
+			return blockInfoDev(l) // current layout — definitive, wins immediately
+		}
+		if strings.Contains(l, `LABEL="RASPUTIN-FW"`) {
+			legacy = blockInfoDev(l) // remember; used only if no RASPUTINEFI appears
 		}
 	}
-	return ""
+	return legacy
 }
 
 // defaultWriteSlot streams the squashfs at src into the raw block device dev.
