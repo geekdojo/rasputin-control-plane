@@ -344,6 +344,12 @@ func main() {
 			}
 			return len(nodes) > 0, nil
 		},
+		ServerIP: func() string {
+			if ip := primaryLanIP(); ip != nil {
+				return ip.String()
+			}
+			return ""
+		},
 	}, selfNodeID, clusterHostname(), strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")))
 
 	// Capture the operator's SSH key as a cluster setting on first sight:

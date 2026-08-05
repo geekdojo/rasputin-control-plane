@@ -9,23 +9,43 @@
 // Copy rules: vendor-neutral — "certificate", "secure connection", "passkey";
 // no backend tech names in user-visible strings.
 
-import { ArrowRight, Download, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Download, QrCode, ShieldCheck } from 'lucide-react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import { CopyButton, DIM, FG, HAIR, Hint, PANEL, SectionLabel } from '../../components/kit';
 import { ACCENT, accentA, MONO } from '../../components/ui-theme';
+import { QrSvg } from '../../components/QrSvg';
 
 export default function TrustPage() {
   // Fallback for the static prerender; replaced with the real hostname
   // after hydration so commands and links work when the operator reaches
   // the box by IP or a custom hostname instead of rasputin.local.
   const [host, setHost] = useState('rasputin.local');
+  // The cluster's mDNS name + the CP's LAN IP, from the unauthenticated setup-
+  // state endpoint. Both feed the REACH THIS SYSTEM block; best-effort, so it
+  // degrades to just the reached host if the call fails.
+  const [clusterHostname, setClusterHostname] = useState('');
+  const [serverIP, setServerIP] = useState('');
   useEffect(() => {
     if (window.location.hostname) setHost(window.location.hostname);
+    fetch('/api/setup/state')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (!s) return;
+        if (typeof s.clusterHostname === 'string') setClusterHostname(s.clusterHostname);
+        if (typeof s.serverIP === 'string') setServerIP(s.serverIP);
+      })
+      .catch(() => {});
   }, []);
 
   const caURL = `http://${host}/mesh-ca.pem`;
   const secureHome = `https://${host}/login`;
+  // "Reach this system" addresses. The QR prefers the cluster's .local name — it's
+  // the identity that works end-to-end (CA install AND the later passkey, whose RP
+  // ID is <cluster>.local) and a same-segment phone resolves it over mDNS. The IP
+  // is shown as copyable text for a device on another VLAN that can't resolve the
+  // name. Falls back to the reached host on a dev box (no cluster name).
+  const qrURL = `http://${clusterHostname || host}/`;
 
   const macCmd = `curl -fsS ${caURL} -o rasputin-mesh-ca.pem && sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rasputin-mesh-ca.pem`;
   const debianCmd = `curl -fsS ${caURL} -o rasputin-mesh-ca.crt && sudo cp rasputin-mesh-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`;
@@ -76,6 +96,41 @@ export default function TrustPage() {
             secure connection, with no browser warnings.
           </p>
         </div>
+
+        {/* Reach-this-system: the addresses + a QR to open on another device.
+            Serves the cross-VLAN case (an operator who can't mDNS-resolve the
+            name still learns the IP) and easy phone hopping (scan to open). */}
+        <section
+          style={{
+            border: `1px solid ${HAIR}`,
+            background: '#0b1220',
+            padding: '14px 16px',
+            display: 'flex',
+            gap: 18,
+            alignItems: 'center',
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 210, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <QrCode size={12} color={ACCENT} />
+              <SectionLabel>REACH THIS SYSTEM</SectionLabel>
+            </div>
+            {clusterHostname && <AddrRow label="name" value={clusterHostname} />}
+            {serverIP && <AddrRow label="ip" value={serverIP} />}
+            {!clusterHostname && !serverIP && <AddrRow label="host" value={host} />}
+            <Hint>
+              Scan the code to open this system on your phone. From another network where the name
+              doesn&apos;t resolve, reach it by IP.
+            </Hint>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+            <div style={{ padding: 6, background: '#fff', borderRadius: 6 }}>
+              <QrSvg text={qrURL} size={128} />
+            </div>
+            <span style={{ color: DIM, fontSize: 9, letterSpacing: '0.1em' }}>SCAN TO OPEN</span>
+          </div>
+        </section>
 
         <section>
           <SectionLabel>IPHONE / IPAD</SectionLabel>
@@ -227,6 +282,32 @@ function CmdBlock({ value }: { value: string }) {
         {value}
       </pre>
       <div style={{ position: 'absolute', top: 4, right: 4 }}>
+        <CopyButton value={value} />
+      </div>
+    </div>
+  );
+}
+
+// AddrRow — a short labeled, copyable address line for the REACH THIS SYSTEM block.
+function AddrRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span
+        style={{
+          color: DIM,
+          fontSize: 9,
+          width: 28,
+          letterSpacing: '0.1em',
+          textTransform: 'uppercase',
+          flexShrink: 0,
+        }}
+      >
+        {label}
+      </span>
+      <code style={{ color: '#cdd6e4', fontSize: 12, fontFamily: MONO, wordBreak: 'break-all' }}>
+        {value}
+      </code>
+      <div style={{ marginLeft: 'auto', flexShrink: 0 }}>
         <CopyButton value={value} />
       </div>
     </div>
