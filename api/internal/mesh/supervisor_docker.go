@@ -73,6 +73,14 @@ type DockerSupervisorConfig struct {
 	// what Tailscale clients will connect to. Defaults to "http://" + ListenAddr.
 	ServerURL string
 
+	// ClusterID is the bare cluster identity (RASPUTIN_CLUSTER_ID, e.g. "home1"),
+	// used to derive the MagicDNS base domain "<cluster-id>.rasputin.internal".
+	// Empty on a dev box → the base domain falls back to "rasputin.rasputin.internal".
+	// Kept separate from ServerURL because an operator can override ServerURL
+	// (RASPUTIN_HEADSCALE_URL) to a non-.local host, so it isn't a reliable
+	// source for the cluster id. See renderConfig / baseDomainFor.
+	ClusterID string
+
 	// DockerBin overrides the docker binary path; useful when the runtime's
 	// CLI lives somewhere unexpected. Defaults to "docker".
 	DockerBin string
@@ -580,6 +588,7 @@ func (s *DockerSupervisor) renderConfig() ([]byte, error) {
 	data := configData{
 		ServerURL:  s.cfg.ServerURL,
 		ListenAddr: "0.0.0.0:8080", // inside the container
+		BaseDomain: baseDomainFor(s.cfg.ClusterID),
 	}
 	if s.cfg.MeshCA != nil {
 		// Paths inside the container — the host's <state>/certs is
@@ -597,8 +606,24 @@ func (s *DockerSupervisor) renderConfig() ([]byte, error) {
 type configData struct {
 	ServerURL   string
 	ListenAddr  string
+	BaseDomain  string // MagicDNS base domain, "<cluster-id>.rasputin.internal"
 	TLSCertPath string // empty in HTTP mode
 	TLSKeyPath  string // empty in HTTP mode
+}
+
+// baseDomainFor builds the MagicDNS base domain from the cluster id:
+// "<cluster-id>.rasputin.internal" — a private-use `.internal` namespace (the
+// ICANN-reserved TLD, so it can never collide with a public zone). The
+// installation-name prefix means two clusters in one household don't collide on
+// tailnet names (mesh.md §6). Empty/dev → "rasputin.rasputin.internal". The
+// cluster id is already a single DNS-safe label (ADR-0003), so no sanitisation
+// is needed here.
+func baseDomainFor(clusterID string) string {
+	id := strings.TrimSpace(clusterID)
+	if id == "" {
+		id = "rasputin"
+	}
+	return id + ".rasputin.internal"
 }
 
 var configTmpl = template.Must(template.New("headscale-config").Parse(`server_url: {{.ServerURL}}
@@ -657,8 +682,8 @@ policy:
   path: ""
 
 dns:
-  magic_dns: false
-  base_domain: rasputin.invalid
+  magic_dns: true
+  base_domain: {{.BaseDomain}}
   override_local_dns: false
   nameservers:
     global: []

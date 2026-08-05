@@ -233,6 +233,40 @@ func TestDockerSupervisor_Constructor_AppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestBaseDomainFor(t *testing.T) {
+	cases := map[string]string{
+		"home1":     "home1.rasputin.internal",
+		"":          "rasputin.rasputin.internal", // dev / unnamed cluster
+		"  home2  ": "home2.rasputin.internal",    // trimmed
+	}
+	for in, want := range cases {
+		if got := baseDomainFor(in); got != want {
+			t.Errorf("baseDomainFor(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRenderConfig_MagicDNSAndBaseDomain(t *testing.T) {
+	s, err := NewDockerSupervisor(DockerSupervisorConfig{StateDir: t.TempDir(), ClusterID: "home1"})
+	if err != nil {
+		t.Fatalf("NewDockerSupervisor: %v", err)
+	}
+	body, err := s.renderConfig()
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	got := string(body)
+	for _, want := range []string{"magic_dns: true", "base_domain: home1.rasputin.internal"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered config missing %q:\n%s", want, got)
+		}
+	}
+	// Must not regress to the old disabled defaults.
+	if strings.Contains(got, "magic_dns: false") || strings.Contains(got, "rasputin.invalid") {
+		t.Errorf("rendered config still carries disabled-MagicDNS defaults:\n%s", got)
+	}
+}
+
 func TestResolveServerHost(t *testing.T) {
 	// Explicit IP passes through unchanged — operator's choice wins.
 	if got := resolveServerHost("127.0.0.1:18080"); got != "127.0.0.1" {
@@ -619,7 +653,8 @@ func TestDockerSupervisor_RenderConfig_IncludesKeyFields(t *testing.T) {
 		"listen_addr: 0.0.0.0:8080", // bound inside the container
 		"/var/lib/headscale/noise_private.key",
 		"/var/lib/headscale/db.sqlite",
-		"magic_dns: false",
+		"magic_dns: true",
+		"base_domain: rasputin.rasputin.internal", // no ClusterID set → dev default
 		"disable_check_updates: true",
 	} {
 		if !strings.Contains(got, want) {
