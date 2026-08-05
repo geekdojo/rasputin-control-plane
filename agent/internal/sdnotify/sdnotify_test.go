@@ -1,10 +1,13 @@
 package sdnotify
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,5 +86,39 @@ func TestStartWatchdog_RejectsZeroUsec(t *testing.T) {
 
 	if StartWatchdog(ctx, func(context.Context) error { return nil }) {
 		t.Error("StartWatchdog should return false for WATCHDOG_USEC=0")
+	}
+}
+
+// The pet interval must be exactly half of WATCHDOG_USEC: systemd kills a
+// process that misses its deadline, so a too-long interval SIGABRTs a healthy
+// agent and a too-short one wastes wakeups on the firewall's modest N100. The
+// arm/reject tests above only assert the bool return, leaving the interval
+// arithmetic on sdnotify.go:69 (`time.Duration(usec) * time.Microsecond / 2`)
+// unchecked — two ARITHMETIC_BASE survivors LIVED there. StartWatchdog logs the
+// computed interval when it arms, so asserting that line pins the math:
+//   - 69:34 (`*` → `/`): WATCHDOG_USEC=10000000 would yield a 5µs interval.
+//   - 69:53 (`/ 2` → `* 2`): it would yield a 20s interval.
+//
+// Only the correct code prints "petting every 5s" (half of 10s).
+func TestStartWatchdog_PetIntervalIsHalfOfUsec(t *testing.T) {
+	var buf bytes.Buffer
+	oldOut, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldOut)
+		log.SetFlags(oldFlags)
+	}()
+
+	// 10s expressed in microseconds; the pet interval must be exactly 5s.
+	t.Setenv("WATCHDOG_USEC", "10000000")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so the pet goroutine exits before it can log anything
+
+	if !StartWatchdog(ctx, func(context.Context) error { return nil }) {
+		t.Fatal("StartWatchdog should arm for a valid positive WATCHDOG_USEC")
+	}
+	if got := buf.String(); !strings.Contains(got, "petting every 5s") {
+		t.Errorf("armed log = %q, want it to report a 5s pet interval (half of WATCHDOG_USEC=10s)", got)
 	}
 }
