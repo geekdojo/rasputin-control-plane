@@ -99,7 +99,12 @@ export default function TrustPage() {
 
         {/* Reach-this-system: the addresses + a QR to open on another device.
             Serves the cross-VLAN case (an operator who can't mDNS-resolve the
-            name still learns the IP) and easy phone hopping (scan to open). */}
+            name still learns the IP) and easy phone hopping (scan to open).
+            NOTE: this is a `.local`-era reach stopgap. When the control plane
+            serves DNS (app-access AA-8) and answers <cluster>.local by unicast,
+            the QR can encode the name unconditionally and the IP fallback goes
+            away — but the passkey RP ID stays <cluster>.local (ADR-0003 lock),
+            so DNS only makes .local resolve wider; it never moves passkey off it. */}
         <section
           style={{
             border: `1px solid ${HAIR}`,
