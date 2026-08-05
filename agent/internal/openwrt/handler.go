@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -55,7 +56,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, client UCIClient) ([]*nats.S
 func handleApply(_ *nats.Conn, client UCIClient, m *nats.Msg) {
 	var cmd proto.FirewallApplyCmd
 	if err := json.Unmarshal(m.Data, &cmd); err != nil {
-		respond(m, proto.FirewallApplyAck{OK: false})
+		bus.Respond(m, proto.FirewallApplyAck{OK: false})
 		log.Printf("rasputin-agent: firewall.apply: bad cmd: %v", err)
 		return
 	}
@@ -63,11 +64,11 @@ func handleApply(_ *nats.Conn, client UCIClient, m *nats.Msg) {
 	defer cancel()
 	hash, err := client.Apply(ctx, cmd.State)
 	if err != nil {
-		respond(m, proto.FirewallApplyAck{OK: false})
+		bus.Respond(m, proto.FirewallApplyAck{OK: false})
 		log.Printf("rasputin-agent: firewall.apply: %v", err)
 		return
 	}
-	respond(m, proto.FirewallApplyAck{OK: true, Hash: hash})
+	bus.Respond(m, proto.FirewallApplyAck{OK: true, Hash: hash})
 }
 
 func handleGet(_ *nats.Conn, client UCIClient, m *nats.Msg) {
@@ -75,38 +76,27 @@ func handleGet(_ *nats.Conn, client UCIClient, m *nats.Msg) {
 	defer cancel()
 	state, hash, err := client.Get(ctx)
 	if err != nil {
-		respond(m, proto.FirewallGetAck{State: map[string]any{}, Hash: ""})
+		bus.Respond(m, proto.FirewallGetAck{State: map[string]any{}, Hash: ""})
 		log.Printf("rasputin-agent: firewall.get: %v", err)
 		return
 	}
-	respond(m, proto.FirewallGetAck{State: state, Hash: hash})
+	bus.Respond(m, proto.FirewallGetAck{State: state, Hash: hash})
 }
 
 func handleSetActive(client UCIClient, m *nats.Msg) {
 	var cmd proto.FirewallSetActiveCmd
 	if err := json.Unmarshal(m.Data, &cmd); err != nil {
-		respond(m, proto.FirewallSetActiveAck{OK: false})
+		bus.Respond(m, proto.FirewallSetActiveAck{OK: false})
 		log.Printf("rasputin-agent: firewall.set_active: bad cmd: %v", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := client.SetActive(ctx, cmd.Active); err != nil {
-		respond(m, proto.FirewallSetActiveAck{OK: false, Applied: cmd.Active})
+		bus.Respond(m, proto.FirewallSetActiveAck{OK: false, Applied: cmd.Active})
 		log.Printf("rasputin-agent: firewall.set_active(active=%v): %v", cmd.Active, err)
 		return
 	}
 	log.Printf("rasputin-agent: firewall.set_active(active=%v) ok", cmd.Active)
-	respond(m, proto.FirewallSetActiveAck{OK: true, Applied: cmd.Active})
-}
-
-func respond(m *nats.Msg, body any) {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		log.Printf("rasputin-agent: marshal response: %v", err)
-		return
-	}
-	if err := m.Respond(payload); err != nil {
-		log.Printf("rasputin-agent: respond: %v", err)
-	}
+	bus.Respond(m, proto.FirewallSetActiveAck{OK: true, Applied: cmd.Active})
 }

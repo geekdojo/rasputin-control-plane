@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -34,10 +35,10 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		defer cancel()
 		ack, err := backend.Precheck(ctx)
 		if err != nil {
-			respond(m, proto.UpdatePrecheckAck{OK: false, Detail: err.Error()})
+			bus.Respond(m, proto.UpdatePrecheckAck{OK: false, Detail: err.Error()})
 			return
 		}
-		respond(m, ack)
+		bus.Respond(m, ack)
 	}); err != nil {
 		return subs, err
 	}
@@ -45,7 +46,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 	if err := bind(proto.UpdateDownloadSubject(nodeID), func(m *nats.Msg) {
 		var cmd proto.UpdateDownloadCmd
 		if err := json.Unmarshal(m.Data, &cmd); err != nil {
-			respond(m, proto.UpdateDownloadAck{OK: false, Detail: err.Error()})
+			bus.Respond(m, proto.UpdateDownloadAck{OK: false, Detail: err.Error()})
 			return
 		}
 		// Long-running: 15-minute upper bound. The api's step timeout is
@@ -65,10 +66,10 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		}
 		localPath, sha, err := backend.Download(ctx, cmd.BundleID, cmd.URL, cmd.ExpectedSHA256, cmd.SizeBytes, progress)
 		if err != nil {
-			respond(m, proto.UpdateDownloadAck{OK: false, SHA256: sha, Detail: err.Error()})
+			bus.Respond(m, proto.UpdateDownloadAck{OK: false, SHA256: sha, Detail: err.Error()})
 			return
 		}
-		respond(m, proto.UpdateDownloadAck{
+		bus.Respond(m, proto.UpdateDownloadAck{
 			OK: true, LocalPath: localPath, SHA256: sha,
 		})
 	}); err != nil {
@@ -78,7 +79,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 	if err := bind(proto.UpdateInstallSubject(nodeID), func(m *nats.Msg) {
 		var cmd proto.UpdateInstallCmd
 		if err := json.Unmarshal(m.Data, &cmd); err != nil {
-			respond(m, proto.UpdateInstallAck{OK: false, Detail: err.Error()})
+			bus.Respond(m, proto.UpdateInstallAck{OK: false, Detail: err.Error()})
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -96,10 +97,10 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		}
 		newVer, err := backend.Install(ctx, cmd.BundleID, cmd.LocalPath, cmd.TargetSlot, progress)
 		if err != nil {
-			respond(m, proto.UpdateInstallAck{OK: false, TargetSlot: cmd.TargetSlot, Detail: err.Error()})
+			bus.Respond(m, proto.UpdateInstallAck{OK: false, TargetSlot: cmd.TargetSlot, Detail: err.Error()})
 			return
 		}
-		respond(m, proto.UpdateInstallAck{
+		bus.Respond(m, proto.UpdateInstallAck{
 			OK: true, TargetSlot: cmd.TargetSlot, NewVersion: newVer,
 		})
 	}); err != nil {
@@ -113,10 +114,10 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		defer cancel()
 		delay, err := backend.Reboot(ctx, cmd.BundleID, cmd.DelaySeconds)
 		if err != nil {
-			respond(m, proto.UpdateRebootAck{OK: false})
+			bus.Respond(m, proto.UpdateRebootAck{OK: false})
 			return
 		}
-		respond(m, proto.UpdateRebootAck{OK: true, DelaySeconds: delay})
+		bus.Respond(m, proto.UpdateRebootAck{OK: true, DelaySeconds: delay})
 		// Publish the rebooting event so the saga's sub-before-RPC catches it.
 		ev, _ := json.Marshal(proto.SystemRebootingEvt{
 			NodeID:       nodeID,
@@ -134,10 +135,10 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := backend.MarkGood(ctx, cmd.BundleID); err != nil {
-			respond(m, proto.UpdateMarkGoodAck{OK: false, Detail: err.Error()})
+			bus.Respond(m, proto.UpdateMarkGoodAck{OK: false, Detail: err.Error()})
 			return
 		}
-		respond(m, proto.UpdateMarkGoodAck{OK: true})
+		bus.Respond(m, proto.UpdateMarkGoodAck{OK: true})
 	}); err != nil {
 		return subs, err
 	}
@@ -148,24 +149,13 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := backend.MarkBad(ctx, cmd.BundleID, cmd.Reason); err != nil {
-			respond(m, proto.UpdateMarkBadAck{OK: false, Detail: err.Error()})
+			bus.Respond(m, proto.UpdateMarkBadAck{OK: false, Detail: err.Error()})
 			return
 		}
-		respond(m, proto.UpdateMarkBadAck{OK: true})
+		bus.Respond(m, proto.UpdateMarkBadAck{OK: true})
 	}); err != nil {
 		return subs, err
 	}
 
 	return subs, nil
-}
-
-func respond(m *nats.Msg, body any) {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		log.Printf("rasputin-agent: marshal response: %v", err)
-		return
-	}
-	if err := m.Respond(payload); err != nil {
-		log.Printf("rasputin-agent: respond: %v", err)
-	}
 }
