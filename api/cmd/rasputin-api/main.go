@@ -1256,7 +1256,7 @@ func newDockerSupervisor(stateDir string, meshCA *mesh.MeshCA) (*mesh.DockerSupe
 		// self-hosted appliance believe it had external creds.
 		ServerURL:     envOr("RASPUTIN_HEADSCALE_URL", applianceOr(func(h string) string { return "https://" + h + ":18080" }, "")),
 		ContainerName: os.Getenv("RASPUTIN_HEADSCALE_CONTAINER"),
-		// Bare cluster id → the MagicDNS base domain "<cluster-id>.rasputin.internal".
+		// Bare cluster id → the MagicDNS base domain "<cluster-id>.internal".
 		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
 		MeshCA:    meshCA,
 	}

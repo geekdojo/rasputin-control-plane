@@ -74,8 +74,8 @@ type DockerSupervisorConfig struct {
 	ServerURL string
 
 	// ClusterID is the bare cluster identity (RASPUTIN_CLUSTER_ID, e.g. "home1"),
-	// used to derive the MagicDNS base domain "<cluster-id>.rasputin.internal".
-	// Empty on a dev box → the base domain falls back to "rasputin.rasputin.internal".
+	// used to derive the MagicDNS base domain "<cluster-id>.internal".
+	// Empty on a dev box → the base domain falls back to "rasputin.internal".
 	// Kept separate from ServerURL because an operator can override ServerURL
 	// (RASPUTIN_HEADSCALE_URL) to a non-.local host, so it isn't a reliable
 	// source for the cluster id. See renderConfig / baseDomainFor.
@@ -606,24 +606,24 @@ func (s *DockerSupervisor) renderConfig() ([]byte, error) {
 type configData struct {
 	ServerURL   string
 	ListenAddr  string
-	BaseDomain  string // MagicDNS base domain, "<cluster-id>.rasputin.internal"
+	BaseDomain  string // MagicDNS base domain, "<cluster-id>.internal"
 	TLSCertPath string // empty in HTTP mode
 	TLSKeyPath  string // empty in HTTP mode
 }
 
 // baseDomainFor builds the MagicDNS base domain from the cluster id:
-// "<cluster-id>.rasputin.internal" — a private-use `.internal` namespace (the
-// ICANN-reserved TLD, so it can never collide with a public zone). The
-// installation-name prefix means two clusters in one household don't collide on
-// tailnet names (mesh.md §6). Empty/dev → "rasputin.rasputin.internal". The
-// cluster id is already a single DNS-safe label (ADR-0003), so no sanitisation
-// is needed here.
+// "<cluster-id>.internal" — the ICANN-reserved private-use `.internal` TLD, so
+// it can never collide with a public zone. The cluster-id prefix means two
+// clusters in one household don't collide on tailnet names, and compute/app
+// names hang cleanly off it (`<node>.home1.internal`) — mesh.md §6. Empty/dev →
+// "rasputin.internal". The cluster id is already a single DNS-safe label
+// (ADR-0003), so no sanitisation is needed here.
 func baseDomainFor(clusterID string) string {
 	id := strings.TrimSpace(clusterID)
 	if id == "" {
 		id = "rasputin"
 	}
-	return id + ".rasputin.internal"
+	return id + ".internal"
 }
 
 var configTmpl = template.Must(template.New("headscale-config").Parse(`server_url: {{.ServerURL}}

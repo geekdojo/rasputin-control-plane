@@ -235,9 +235,9 @@ func TestDockerSupervisor_Constructor_AppliesDefaults(t *testing.T) {
 
 func TestBaseDomainFor(t *testing.T) {
 	cases := map[string]string{
-		"home1":     "home1.rasputin.internal",
-		"":          "rasputin.rasputin.internal", // dev / unnamed cluster
-		"  home2  ": "home2.rasputin.internal",    // trimmed
+		"home1":     "home1.internal",
+		"":          "rasputin.internal", // dev / unnamed cluster
+		"  home2  ": "home2.internal",    // trimmed
 	}
 	for in, want := range cases {
 		if got := baseDomainFor(in); got != want {
@@ -256,7 +256,7 @@ func TestRenderConfig_MagicDNSAndBaseDomain(t *testing.T) {
 		t.Fatalf("renderConfig: %v", err)
 	}
 	got := string(body)
-	for _, want := range []string{"magic_dns: true", "base_domain: home1.rasputin.internal"} {
+	for _, want := range []string{"magic_dns: true", "base_domain: home1.internal"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered config missing %q:\n%s", want, got)
 		}
@@ -654,7 +654,7 @@ func TestDockerSupervisor_RenderConfig_IncludesKeyFields(t *testing.T) {
 		"/var/lib/headscale/noise_private.key",
 		"/var/lib/headscale/db.sqlite",
 		"magic_dns: true",
-		"base_domain: rasputin.rasputin.internal", // no ClusterID set → dev default
+		"base_domain: rasputin.internal", // no ClusterID set → dev default
 		"disable_check_updates: true",
 	} {
 		if !strings.Contains(got, want) {
