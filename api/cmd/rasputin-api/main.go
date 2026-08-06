@@ -396,6 +396,16 @@ func main() {
 	log.Printf("rasputin-api: cluster identity: rp-id=%q origins=%q public-base-url=%q (cluster-id=%q)",
 		authCfg.RPID, strings.Join(authCfg.RPOrigins, ","), publicBaseURL,
 		envOr("RASPUTIN_CLUSTER_ID", "<unset — dev defaults>"))
+	// A provisioned appliance (self-node id set) that still derived a loopback
+	// public-base-url is misconfigured: nodes cannot fetch update bundles from
+	// here, and node.update will be refused (see updater.remoteLoopbackBundleURL).
+	// This is the RASPUTIN_CLUSTER_ID-unset trap on a cluster whose node.env
+	// predates per-cluster naming — the rasputin-os backfill migration fixes it
+	// going forward; warn loudly (and greppably, for CI) if we hit it. #75.
+	if selfNodeID != "" && updater.IsLoopbackURL(publicBaseURL) {
+		log.Printf("rasputin-api: WARNING — public-base-url is loopback (%q) on a provisioned appliance (self-node %s); nodes cannot fetch update bundles and node.update will be refused. Set RASPUTIN_CLUSTER_ID (default %q) in /var/lib/rasputin/node.env and restart. See control-plane #75.",
+			publicBaseURL, selfNodeID, "rasputin")
+	}
 
 	authSvc, err := auth.NewService(authStore, authCfg)
 	if err != nil {
@@ -438,6 +448,7 @@ func main() {
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
 		PublicBaseURL: publicBaseURL,
+		SelfNodeID:    selfNodeID,
 	}))
 	runner.Register(updater.SystemUpdateWorkflow(updaterStore, invStore, jobStore, runner, busSrv.Conn(), updater.SystemUpdateConfig{
 		SelfNodeID: selfNodeID,

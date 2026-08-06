@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -25,6 +27,14 @@ type Config struct {
 	// In dev: "http://localhost:8080". In production: the api's tailnet
 	// hostname. The saga appends "/api/bundles/{sha256}".
 	PublicBaseURL string
+	// SelfNodeID is the control plane's own node id (RASPUTIN_SELF_NODE_ID),
+	// or "" in dev. A non-empty value marks a provisioned appliance and lets
+	// the download step refuse to hand a REMOTE node a loopback bundle URL —
+	// the symptom of a misderived localhost public-base-url (e.g.
+	// RASPUTIN_CLUSTER_ID unset in node.env after an in-place update), which
+	// would otherwise fail opaquely on the agent as "connection refused".
+	// See control-plane #75.
+	SelfNodeID string
 }
 
 // UpdateWorkflow returns the seven-step node.update saga.
@@ -157,6 +167,16 @@ func updateDownload(store *Store, cfg Config) jobs.DoFn {
 			return nil, fmt.Errorf("bundle missing at download time")
 		}
 		bundleURL := cfg.PublicBaseURL + "/api/bundles/" + spec.BundleSHA256
+		// Guardrail: a loopback bundle URL only reaches the api from its OWN
+		// co-located node (dev single-box, or a self-update). Handing it to a
+		// REMOTE node strands that node dialing its own loopback — the api
+		// derived a localhost public-base-url (RASPUTIN_CLUSTER_ID unset in
+		// node.env). Fail here, loudly and with the fix, instead of letting the
+		// agent fail deep in the download with an opaque "connection refused".
+		// Disabled in dev (SelfNodeID == "") and for the api's own node. #75.
+		if remoteLoopbackBundleURL(bundleURL, cfg.SelfNodeID, spec.NodeID) {
+			return nil, fmt.Errorf("refusing to send loopback bundle URL %q to remote node %s: the control plane derived a localhost public-base-url — set RASPUTIN_CLUSTER_ID (or RASPUTIN_PUBLIC_BASE_URL) in /var/lib/rasputin/node.env and restart rasputin-api (control-plane #75)", bundleURL, spec.NodeID)
+		}
 		cmd, _ := json.Marshal(proto.UpdateDownloadCmd{
 			BundleID:       spec.BundleSHA256,
 			URL:            bundleURL,
@@ -189,6 +209,34 @@ func updateDownload(store *Store, cfg Config) jobs.DoFn {
 		// Stash the local path for the install step.
 		return json.Marshal(map[string]any{"spec": spec, "localPath": ack.LocalPath})
 	}
+}
+
+// remoteLoopbackBundleURL reports whether handing bundleURL to targetNodeID
+// would strand a REMOTE node with a loopback URL it cannot reach. selfNodeID
+// == "" (dev / not a provisioned appliance) disables the check; the api's own
+// co-located node is always fine. See control-plane #75.
+func remoteLoopbackBundleURL(bundleURL, selfNodeID, targetNodeID string) bool {
+	if selfNodeID == "" || targetNodeID == selfNodeID {
+		return false
+	}
+	return IsLoopbackURL(bundleURL)
+}
+
+// IsLoopbackURL reports whether raw's host is a loopback name or address —
+// "localhost", 127.0.0.0/8, or ::1. The api's dev-default public-base-url is
+// "http://localhost:8080", so the "localhost" name (which net.ParseIP rejects)
+// must count. Exported so the api's startup identity check can reuse it.
+func IsLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ----- Step 4: install ----------------------------------------------------
