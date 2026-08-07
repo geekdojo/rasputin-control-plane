@@ -17,12 +17,25 @@ name: mutation-gate
 # seen what real PRs score, flip it to blocking (see "TO MAKE BLOCKING"
 # below) and add it to branch-protection required checks.
 #
+#   WHAT IT WILL ASSERT (decided on #59): a NO-REGRESSION RATCHET — efficacy on
+#   the PR's changed code must not fall below main's. It catches test rot, needs
+#   no arbitrary magic threshold, and never blocks on a line nobody should test.
+#   NOT a fixed efficacy floor (the number would be arbitrary and need tuning).
+#   The per-survivor "review each one" judgement call is demoted to advisory
+#   context (the comment below), never a merge precondition. Stays advisory until
+#   the ratchet is proven on real PRs.
+#
 #   TO MAKE BLOCKING (later):
-#     1. Set thresholds so gremlins exits non-zero below them, e.g. add to
-#        each module run:  --threshold-efficacy <N> --threshold-mcover <M>
+#     1. Compute main's efficacy on the same changed files and fail when the
+#        PR's efficacy regresses below it (the ratchet above). A fixed
+#        --threshold-efficacy is the cruder fallback, not the plan.
 #     2. Remove the "|| true" advisory guard on the gremlins invocation and
-#        drop MUTATION_ADVISORY handling so a below-threshold run fails.
+#        drop MUTATION_ADVISORY handling so a regressing run fails.
 #     3. Add "mutation-gate" to the repo's required status checks.
+#
+#   PRECONDITION: the NOT COVERED cross-check below (scripts/
+#   mutation-notcovered-classify.sh) must stay in place — the ratchet is only
+#   trustworthy once the labels it reports are.
 #
 # No secrets: gremlins needs none. Same-repo PRs only, because the advisory
 # comment needs pull-requests: write (fork PRs get a read-only token).
@@ -92,7 +105,8 @@ jobs:
           modules="api agent"
 
           summary=""      # per-module one-liners for the comment/summary
-          survivors=""    # LIVED / NOT COVERED lines across modules
+          survivors=""    # real survivors: LIVED + genuinely-not-covered lines
+          artifacts=""    # NOT COVERED lines that are actually on covered code
           total=0         # total mutants actually run (killed+lived+notcov)
 
           for m in $modules; do
@@ -129,10 +143,40 @@ jobs:
             if [ "$run" -eq 0 ]; then
               summary="${summary}- **${m}** — no changed Go code"$'\n'
             else
-              summary="${summary}- **${m}** — efficacy ${eff:-n/a} · coverage ${mcov:-n/a} · killed ${killed} / lived ${lived} / not-covered ${notcov}"$'\n'
-              mod_surv=$(echo "$out" | grep -E '^\s*(LIVED|NOT COVERED)' | sed "s#at #at ${m}/#" || true)
-              if [ -n "$mod_surv" ]; then
-                survivors="${survivors}${mod_surv}"$'\n'
+              # Split gremlins' surviving-mutant lines by verdict.
+              lived_raw=$(echo "$out"  | grep -E '^\s*LIVED' || true)
+              notcov_raw=$(echo "$out" | grep -E '^\s*NOT COVERED' || true)
+
+              # NOT-COVERED CROSS-CHECK (#59): gremlins mislabels any mutant
+              # inside a `switch { case <expr>: }` as NOT COVERED, because Go
+              # opens the coverage block at the case *body* column, not the case
+              # *expression* column where the mutant sits — so it's published
+              # under "a fault the tests did not catch" when the line is in fact
+              # executed and the mutant killed. Re-check each NOT COVERED mutant
+              # against a real coverage profile: REAL = a genuine gap, ARTIFACT =
+              # a covered line that gremlins mislabeled.
+              real_notcov=""
+              art_notcov=""
+              nart=0
+              if [ -n "$notcov_raw" ]; then
+                classified=$(echo "$notcov_raw" | ./scripts/mutation-notcovered-classify.sh "$m")
+                real_notcov=$(echo "$classified" | sed -n 's/^REAL'$'\t''//p')
+                art_notcov=$(echo "$classified"  | sed -n 's/^ARTIFACT'$'\t''//p')
+                [ -n "$art_notcov" ] && nart=$(echo "$art_notcov" | grep -c . || true)
+              fi
+
+              # Per-module summary — flag mislabeled not-covered so the number
+              # can't be misread as "N faults your tests miss".
+              notcov_disp="$notcov"
+              [ "$nart" -gt 0 ] && notcov_disp="${notcov} (${nart} on covered lines — see note)"
+              summary="${summary}- **${m}** — efficacy ${eff:-n/a} · coverage ${mcov:-n/a} · killed ${killed} / lived ${lived} / not-covered ${notcov_disp}"$'\n'
+
+              # Real survivors (LIVED + genuinely-not-covered), module-qualified.
+              real_surv=$(printf '%s\n' "$lived_raw" "$real_notcov" | grep -E '^\s*(LIVED|NOT COVERED)' | sed "s#at #at ${m}/#" || true)
+              [ -n "$real_surv" ] && survivors="${survivors}${real_surv}"$'\n'
+              # Mislabeled not-covered, module-qualified, reported separately.
+              if [ -n "$art_notcov" ]; then
+                artifacts="${artifacts}$(echo "$art_notcov" | sed "s#at #at ${m}/#")"$'\n'
               fi
             fi
           done
@@ -146,13 +190,21 @@ jobs:
             echo
             echo "$summary"
             if [ -n "$survivors" ]; then
-              echo "Surviving mutants — a fault the tests did **not** catch. Consider adding a case that fails when this line is mutated:"
+              echo "Surviving mutants — either a change the tests still passed on (\`LIVED\`) or a line no test executes (\`NOT COVERED\`). Consider adding a case that fails when this line is mutated:"
               echo
               echo '```'
               echo "$survivors"
               echo '```'
             elif [ "$total" -gt 0 ]; then
-              echo "✅ Every mutant in the changed code was killed by the tests."
+              echo "✅ No surviving mutants the tests should catch in the changed code."
+            fi
+            if [ -n "$artifacts" ]; then
+              echo
+              echo "> **These \`NOT COVERED\` labels are false positives — the line *is* covered.** gremlins looks up coverage at the mutant's exact column, but Go opens the coverage block for a \`switch { case <expr>: }\` at the case *body* column, not the case *expression* column. No test is needed for these. ([#59](https://github.com/${GITHUB_REPOSITORY}/issues/59))"
+              echo
+              echo '```'
+              echo "$artifacts"
+              echo '```'
             fi
             echo
             echo "<sub>Mutation testing checks whether tests *catch* faults, not just *execute* lines. LIVED = a code change the tests still passed on. Once calibrated, this becomes a required check.</sub>"
