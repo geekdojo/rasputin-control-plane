@@ -479,7 +479,7 @@ function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
   async function go() {
     if (
       !confirm(
-        `Update every online node to ${bundle.version}? Nodes update one at a time in role-safe order (compute → storage → controlplane → firewall). The cascade halts on the first failure.`,
+        `Update every online node to ${bundle.version}? Nodes update one at a time in role-safe order (compute → storage → firewall). The controlplane is not included — update it separately from its node card afterward. The cascade halts on the first failure.`,
       )
     )
       return;
