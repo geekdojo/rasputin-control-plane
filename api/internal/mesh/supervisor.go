@@ -27,6 +27,10 @@ type Supervisor interface {
 	Stop(ctx context.Context) error
 	// Healthy reports the current container state.
 	Healthy(ctx context.Context) (bool, error)
+	// ReconcileAppRecords writes the tailnet app-name DNS projection
+	// (fqdn→tailnet IPv4) to Headscale's hot-reloaded extra_records file
+	// (ADR-0004 §9). A noop where Headscale isn't self-hosted by us.
+	ReconcileAppRecords(fqdnToIP map[string]string) error
 }
 
 // NoopSupervisor is the v0 default. Logs once at start and otherwise
@@ -50,3 +54,7 @@ func (s *NoopSupervisor) Stop(_ context.Context) error { return nil }
 func (s *NoopSupervisor) Healthy(_ context.Context) (bool, error) {
 	return true, nil
 }
+
+// ReconcileAppRecords is a noop: we don't own the Headscale config when the
+// supervisor is noop (external/mock), so we don't write extra_records.
+func (s *NoopSupervisor) ReconcileAppRecords(map[string]string) error { return nil }

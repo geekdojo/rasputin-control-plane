@@ -163,9 +163,10 @@ func (f *fakeClient) DeleteNode(_ context.Context, nodeID string) error {
 // failingSupervisor is used to test the Start error path.
 type failingSupervisor struct{ err error }
 
-func (s *failingSupervisor) Start(context.Context) error           { return s.err }
-func (s *failingSupervisor) Stop(context.Context) error            { return nil }
-func (s *failingSupervisor) Healthy(context.Context) (bool, error) { return true, nil }
+func (s *failingSupervisor) Start(context.Context) error                 { return s.err }
+func (s *failingSupervisor) Stop(context.Context) error                  { return nil }
+func (s *failingSupervisor) Healthy(context.Context) (bool, error)       { return true, nil }
+func (s *failingSupervisor) ReconcileAppRecords(map[string]string) error { return nil }
 
 // ============================================================================
 // embedded NATS (publish only — Service jobs use it for change events)

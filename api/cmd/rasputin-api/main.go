@@ -272,10 +272,26 @@ func main() {
 		DefaultUser:  envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
 		HeadplaneURL: os.Getenv("RASPUTIN_HEADPLANE_URL"),
 		MeshCAPEM:    mw.caPEM,
+		ClusterID:    strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
 	}, meshStore, mw.client, mw.sup)
 	if mw.bootstrap != nil {
 		meshSvc.SetBootstrap(mw.bootstrap)
 	}
+	// Feed the tailnet app-name DNS projection (ADR-0004 §9): each app resolves at
+	// <app>.<cluster-id>.internal → its target node's tailnet IP via Headscale
+	// extra_records. Read live per reconcile (store error → project nothing).
+	meshSvc.SetAppLister(func() []mesh.AppDNS {
+		list, err := appsStore.List(ctx)
+		if err != nil {
+			log.Printf("rasputin-api: mesh app-DNS projection: %v", err)
+			return nil
+		}
+		out := make([]mesh.AppDNS, 0, len(list))
+		for _, a := range list {
+			out = append(out, mesh.AppDNS{Name: a.Name, TargetNode: a.TargetNode})
+		}
+		return out
+	})
 	// Start is non-blocking: mesh bring-up runs in the background so a slow or
 	// failing Headscale never delays /healthz or kills the api.
 	_ = meshSvc.Start(ctx)
