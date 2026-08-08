@@ -65,12 +65,14 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// Default the instance name to the tile id (already a DNS-safe label).
-	name := req.Name
+	// Normalize operator input the same way handleCreateApp does — the name
+	// becomes a DNS label + TLS SAN (ADR-0004 §4/§5).
+	name := normalizeAppName(req.Name)
 	if name == "" {
 		name = tile.ID
 	}
 	if !validAppName(name) {
-		writeError(w, http.StatusBadRequest, "name must be 1-32 chars of [a-zA-Z0-9_-]")
+		writeError(w, http.StatusBadRequest, appNameRuleMsg)
 		return
 	}
 

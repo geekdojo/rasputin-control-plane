@@ -634,17 +634,47 @@ func TestHandleStopApp_UnknownKind(t *testing.T) {
 // ============================================================================
 
 func TestValidAppName(t *testing.T) {
+	// validAppName is a strict RFC 1123 DNS label (ADR-0004 §5): lowercase
+	// alnum + interior hyphens only. Callers normalizeAppName() first, so this
+	// predicate itself rejects uppercase rather than folding it.
 	cases := map[string]bool{
 		"a":                     true,
 		"minecraft":             true,
-		"my_app-1":              true,
+		"jellyfin":              true,
+		"my-app-1":              true,
+		"a-b":                   true,
+		"0abc":                  true,
+		"app--name":             true, // consecutive interior hyphens are a valid label
+		strings.Repeat("a", 32): true,
+
 		"":                      false,
 		"with space":            false,
-		strings.Repeat("a", 33): false,
+		"my_app":                false, // underscore is invalid in a hostname/SAN
+		"my_app-1":              false, // (was accepted by the old charset check)
+		"-app":                  false, // leading hyphen
+		"app-":                  false, // trailing hyphen
+		"Jellyfin":              false, // uppercase — normalizeAppName handles this upstream
+		"MINECRAFT":             false,
+		strings.Repeat("a", 33): false, // over the 32-char cap
 	}
 	for n, want := range cases {
 		if got := validAppName(n); got != want {
 			t.Errorf("validAppName(%q) = %v, want %v", n, got, want)
+		}
+	}
+}
+
+func TestNormalizeAppName(t *testing.T) {
+	cases := map[string]string{
+		"Jellyfin":    "jellyfin",
+		"  minecraft": "minecraft",
+		"MINECRAFT ":  "minecraft",
+		"my-app":      "my-app",
+		"":            "",
+	}
+	for in, want := range cases {
+		if got := normalizeAppName(in); got != want {
+			t.Errorf("normalizeAppName(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
