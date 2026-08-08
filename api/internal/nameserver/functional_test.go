@@ -108,6 +108,40 @@ func TestFunctional_ReflectsLiveChanges(t *testing.T) {
 	}
 }
 
+// TestFunctional_ClusterRecords wires a ClusterSource alongside SelfSource and
+// resolves a node name and an app name end to end over the wire — the Slice-2b
+// projection proven through real sockets.
+func TestFunctional_ClusterRecords(t *testing.T) {
+	loopback := net.IPv4(127, 0, 0, 1)
+	nodes := []NodeAddr{{ID: "cp", Hostname: "home1-cp", IP: net.ParseIP("192.168.1.2")}}
+	apps := []AppRec{{Name: "jellyfin", TargetNode: "cp"}}
+	resp := NewResponder(testZone,
+		NewSelfSource(testZone, testLocal, func() net.IP { return testIP }),
+		NewClusterSource(testZone, func() []NodeAddr { return nodes }, func() []AppRec { return apps }))
+	srv := NewServer(func() net.IP { return loopback }, 0, resp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Stop()
+
+	node := exchange(t, "udp", srv.Addr(), "home1-cp."+testZone, dns.TypeA)
+	if len(node.Answer) != 1 || !node.Answer[0].(*dns.A).A.Equal(net.ParseIP("192.168.1.2")) {
+		t.Errorf("node record = %v, want 192.168.1.2", node.Answer)
+	}
+	app := exchange(t, "udp", srv.Addr(), "jellyfin."+testZone, dns.TypeA)
+	if len(app.Answer) != 1 || !app.Answer[0].(*dns.A).A.Equal(net.ParseIP("192.168.1.2")) {
+		t.Errorf("app record = %v, want 192.168.1.2 (target node's IP)", app.Answer)
+	}
+	// The apex (SelfSource) still resolves alongside the cluster records.
+	apex := exchange(t, "udp", srv.Addr(), testZone, dns.TypeA)
+	if len(apex.Answer) != 1 || !apex.Answer[0].(*dns.A).A.Equal(testIP) {
+		t.Errorf("apex = %v, want %v", apex.Answer, testIP)
+	}
+}
+
 func exchange(t *testing.T, proto, addr, name string, qtype uint16) *dns.Msg {
 	t.Helper()
 	req := new(dns.Msg)
