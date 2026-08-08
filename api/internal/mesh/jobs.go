@@ -257,7 +257,20 @@ func ReconcileWorkflow(svc *Service, inv *inventory.Store, jstore *jobs.Store, r
 			{Name: "fetch_observed", Timeout: 30 * time.Second, Do: reconcileFetch(svc, nc)},
 			{Name: "compare", Timeout: 2 * time.Second, Do: reconcileCompare(svc, nc)},
 			{Name: "converge_enrollment", Timeout: 10 * time.Second, Do: reconcileConvergeEnrollment(svc, inv, jstore, runner)},
+			{Name: "reconcile_app_dns", Timeout: 10 * time.Second, Do: reconcileAppDNS(svc)},
 		},
+	}
+}
+
+// reconcileAppDNS re-renders the tailnet app-name projection into Headscale's
+// extra_records on every mesh.reconcile tick (ADR-0004 §9) — the topology-driven
+// backstop that catches app or enrollment changes.
+func reconcileAppDNS(svc *Service) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		if err := svc.ReconcileAppDNS(sc.Ctx); err != nil {
+			return nil, err
+		}
+		return nil, nil
 	}
 }
 
