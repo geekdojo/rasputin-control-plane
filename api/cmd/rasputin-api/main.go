@@ -535,11 +535,15 @@ func main() {
 		if id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")); id != "" {
 			zone = id + ".internal"
 		}
-		// Slice 2b: project node + app A records live from inventory + apps.
-		// Node record <hostname>.<zone> → node LAN IP; app record <app>.<zone> →
-		// its target node's LAN IP. Read on every query (store errors → serve
-		// nothing that round, never crash).
-		clusterSrc := nameserver.NewClusterSource(zone,
+		// Project node + app A records live from inventory + apps, under the
+		// **.lan subzone** (ADR-0004 §9): <hostname>.lan.<zone> → node LAN IP,
+		// <app>.lan.<zone> → its target node's LAN IP. The bare base domain is the
+		// tailnet name (MagicDNS / extra_records), so the CP nameserver serves LAN
+		// IPs only under .lan and NXDOMAINs bare node/app names — a LAN-only client
+		// can't route a tailnet IP anyway. Read on every query (store errors →
+		// serve nothing that round, never crash).
+		lanZone := "lan." + zone
+		clusterSrc := nameserver.NewClusterSource(lanZone,
 			func() []nameserver.NodeAddr {
 				nodes, err := invStore.List(ctx)
 				if err != nil {

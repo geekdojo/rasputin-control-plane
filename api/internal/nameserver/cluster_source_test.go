@@ -6,6 +6,10 @@ import (
 	"testing"
 )
 
+// testLANZone is the .lan subzone the cluster source is constructed with in
+// production (ADR-0004 §9). testZone is the base zone (from responder_test.go).
+const testLANZone = "lan." + testZone
+
 func ip(s string) net.IP { return net.ParseIP(s) }
 
 func TestClusterSource_Projection(t *testing.T) {
@@ -22,17 +26,17 @@ func TestClusterSource_Projection(t *testing.T) {
 		{Name: "sonarr", TargetNode: "ghost"}, // unknown target → skipped
 		{Name: "my_app", TargetNode: "cp"},    // grandfathered invalid label → skipped
 	}
-	src := NewClusterSource(testZone,
+	src := NewClusterSource(testLANZone,
 		func() []NodeAddr { return nodes },
 		func() []AppRec { return apps })
 
 	got := src.Records()
 
 	want := map[string]string{
-		"home1-cp.home1.internal.":       "192.168.1.2", // node record
-		"home1-compute1.home1.internal.": "192.168.1.3", // dotted hostname → first label
-		"jellyfin.home1.internal.":       "192.168.1.2", // app on cp
-		"plex.home1.internal.":           "192.168.1.5", // app joins by node id despite bad hostname
+		"home1-cp.lan.home1.internal.":       "192.168.1.2", // node record
+		"home1-compute1.lan.home1.internal.": "192.168.1.3", // dotted hostname → first label
+		"jellyfin.lan.home1.internal.":       "192.168.1.2", // app on cp
+		"plex.lan.home1.internal.":           "192.168.1.5", // app joins by node id despite bad hostname
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d records %v, want %d %v", len(got), keys(got), len(want), want)
@@ -50,11 +54,11 @@ func TestClusterSource_Projection(t *testing.T) {
 
 	// Explicit negatives — these must NOT be present.
 	for _, absent := range []string{
-		"pending.home1.internal.",  // node with no IP
-		"bad_host.home1.internal.", // invalid hostname label
-		"radarr.home1.internal.",   // app target has no IP
-		"sonarr.home1.internal.",   // app target unknown
-		"my_app.home1.internal.",   // grandfathered invalid app name
+		"pending.lan.home1.internal.",  // node with no IP
+		"bad_host.lan.home1.internal.", // invalid hostname label
+		"radarr.lan.home1.internal.",   // app target has no IP
+		"sonarr.lan.home1.internal.",   // app target unknown
+		"my_app.lan.home1.internal.",   // grandfathered invalid app name
 	} {
 		if _, ok := got[absent]; ok {
 			t.Errorf("record %s should be absent", absent)
@@ -63,7 +67,7 @@ func TestClusterSource_Projection(t *testing.T) {
 }
 
 func TestClusterSource_EmptyProviders(t *testing.T) {
-	src := NewClusterSource(testZone,
+	src := NewClusterSource(testLANZone,
 		func() []NodeAddr { return nil },
 		func() []AppRec { return nil })
 	if got := src.Records(); len(got) != 0 {

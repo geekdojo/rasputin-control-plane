@@ -19,12 +19,15 @@
 // coexistence — ahead of the node-IP plumbing. The <cluster>.local answer
 // retires the E2 .local reach stopgaps.
 //
-// # Slice 2 (later)
+// # Slice 2 (shipped)
 //
-// Node and app A records, projected from the inventory + apps tables. Node LAN
-// IP is agent-reported on NodeRegisteredEvt (no DHCP MAC reservations, so a
-// node's IP churns on reboot); agent reconnect fires a reconcile job that
-// resyncs the node's record and every app on it. Slice 2 supplies an additional
+// Node and app A records, projected from the inventory + apps tables under the
+// .lan subzone (<name>.lan.<cluster-id>.internal → LAN IP, ADR-0004 §9). Node
+// LAN IP is agent-reported on NodeRegisteredEvt (no DHCP MAC reservations, so a
+// node's IP churns on reboot); the live read reflects the reconnect refresh with
+// no reload. The bare base domain is the tailnet name (MagicDNS synthesis for
+// nodes, Headscale extra_records for apps) and is not served here — the CP
+// nameserver NXDOMAINs bare node/app names. Slice 2 supplies an additional
 // [Source]; the responder is unchanged.
 //
 // # Bind

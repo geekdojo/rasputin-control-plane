@@ -108,16 +108,17 @@ func TestFunctional_ReflectsLiveChanges(t *testing.T) {
 	}
 }
 
-// TestFunctional_ClusterRecords wires a ClusterSource alongside SelfSource and
-// resolves a node name and an app name end to end over the wire — the Slice-2b
-// projection proven through real sockets.
+// TestFunctional_ClusterRecords wires a ClusterSource (on the .lan subzone)
+// alongside SelfSource and resolves a node name and an app name end to end over
+// the wire — the projection proven through real sockets — and confirms the bare
+// (tailnet) names NXDOMAIN on the CP nameserver (ADR-0004 §9).
 func TestFunctional_ClusterRecords(t *testing.T) {
 	loopback := net.IPv4(127, 0, 0, 1)
 	nodes := []NodeAddr{{ID: "cp", Hostname: "home1-cp", IP: net.ParseIP("192.168.1.2")}}
 	apps := []AppRec{{Name: "jellyfin", TargetNode: "cp"}}
 	resp := NewResponder(testZone,
 		NewSelfSource(testZone, testLocal, func() net.IP { return testIP }),
-		NewClusterSource(testZone, func() []NodeAddr { return nodes }, func() []AppRec { return apps }))
+		NewClusterSource(testLANZone, func() []NodeAddr { return nodes }, func() []AppRec { return apps }))
 	srv := NewServer(func() net.IP { return loopback }, 0, resp)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -127,13 +128,23 @@ func TestFunctional_ClusterRecords(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	node := exchange(t, "udp", srv.Addr(), "home1-cp."+testZone, dns.TypeA)
+	// LAN names resolve under .lan.
+	node := exchange(t, "udp", srv.Addr(), "home1-cp."+testLANZone, dns.TypeA)
 	if len(node.Answer) != 1 || !node.Answer[0].(*dns.A).A.Equal(net.ParseIP("192.168.1.2")) {
-		t.Errorf("node record = %v, want 192.168.1.2", node.Answer)
+		t.Errorf("node .lan record = %v, want 192.168.1.2", node.Answer)
 	}
-	app := exchange(t, "udp", srv.Addr(), "jellyfin."+testZone, dns.TypeA)
+	app := exchange(t, "udp", srv.Addr(), "jellyfin."+testLANZone, dns.TypeA)
 	if len(app.Answer) != 1 || !app.Answer[0].(*dns.A).A.Equal(net.ParseIP("192.168.1.2")) {
-		t.Errorf("app record = %v, want 192.168.1.2 (target node's IP)", app.Answer)
+		t.Errorf("app .lan record = %v, want 192.168.1.2 (target node's IP)", app.Answer)
+	}
+
+	// Bare (tailnet) node/app names are NOT served by the CP nameserver — that's
+	// MagicDNS's job; the CP nameserver correctly NXDOMAINs them (Decision 9).
+	for _, bare := range []string{"home1-cp." + testZone, "jellyfin." + testZone} {
+		m := exchange(t, "udp", srv.Addr(), bare, dns.TypeA)
+		if m.Rcode != dns.RcodeNameError {
+			t.Errorf("bare name %s: rcode = %s, want NXDOMAIN", bare, dns.RcodeToString[m.Rcode])
+		}
 	}
 	// The apex (SelfSource) still resolves alongside the cluster records.
 	apex := exchange(t, "udp", srv.Addr(), testZone, dns.TypeA)

@@ -22,12 +22,17 @@ type AppRec struct {
 	TargetNode string
 }
 
-// ClusterSource projects the cluster's node and app A records for the zone,
-// read live on every query from the provided listers (main backs them with the
-// inventory + apps stores). This is the Slice-2b [Source]:
+// ClusterSource projects the cluster's node and app A records for the zone it is
+// given, read live on every query from the provided listers (main backs them
+// with the inventory + apps stores). main constructs it with the **.lan
+// subzone** (lan.<cluster-id>.internal, ADR-0004 §9), so in production it serves:
 //
-//   - node record: <hostname-label>.<zone>  -> the node's LAN IP
-//   - app record:  <app-name>.<zone>        -> its target node's LAN IP
+//   - node record: <hostname-label>.lan.<cluster-id>.internal  -> the node's LAN IP
+//   - app record:  <app-name>.lan.<cluster-id>.internal        -> its target node's LAN IP
+//
+// The bare base domain is the tailnet name (MagicDNS / extra_records), not this
+// source's concern. The type itself is zone-agnostic — it projects under
+// whatever zone it's constructed with — so the .lan choice lives in main.
 //
 // A record is omitted (→ the responder answers NXDOMAIN) rather than served
 // wrong whenever the data isn't resolvable yet: a node with no LAN IP, an app
