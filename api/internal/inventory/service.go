@@ -215,6 +215,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 			AgentVersion: ev.AgentVersion,
 			ImageVersion: ev.ImageVersion,
 			Architecture: ev.Architecture,
+			LANIP:        ev.LANIP,
 			Capabilities: ev.Capabilities,
 			Metadata:     ev.Metadata,
 			Storage:      ev.Storage,
@@ -251,6 +252,14 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	// Same guard for storage: a pre-storage agent reports nil.
 	if ev.Storage != nil {
 		existing.Storage = ev.Storage
+	}
+	// LANIP changes on most reboots (no DHCP MAC reservations), so a new value
+	// SHOULD overwrite — but a pre-LANIP agent reporting "" must not wipe a
+	// learned IP. A changed IP rides out on the InventoryUpdated/Online emit
+	// below (the full Node is included), which is the reconcile trigger the CP
+	// nameserver's live read and Slice 2c's reconnect job both hang off.
+	if ev.LANIP != "" {
+		existing.LANIP = ev.LANIP
 	}
 	existing.Capabilities = ev.Capabilities
 	existing.Metadata = ev.Metadata
