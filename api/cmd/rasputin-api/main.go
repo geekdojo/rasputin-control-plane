@@ -459,7 +459,33 @@ func main() {
 	runner.Register(firewall.ApplyWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
 	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
 	runner.Register(firewall.SetActiveWorkflow(invStore, busSrv.Conn()))
-	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn()))
+	// Per-app TLS-leaf minter for the deploy saga (ADR-0004 §6): mints a Mesh-CA
+	// leaf for the app's FQDN(s) and fills the delivery command. nil (no CA)
+	// disables leaf delivery; the app still deploys, just without the proxy.
+	var mintAppLeaf apps.LeafMinter
+	if meshCA != nil {
+		clusterID := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID"))
+		mintAppLeaf = func(app *apps.App) (proto.AppLeafCmd, error) {
+			certPEM, keyPEM, err := mesh.MintAppLeaf(meshCA, clusterID, app.Name, app.ExposeLAN)
+			if err != nil {
+				return proto.AppLeafCmd{}, err
+			}
+			names := mesh.AppLeafDNSNames(clusterID, app.Name, app.ExposeLAN)
+			cmd := proto.AppLeafCmd{
+				AppID:        app.ID,
+				Name:         app.Name,
+				CertPEM:      certPEM,
+				KeyPEM:       keyPEM,
+				TailnetFQDN:  names[0],
+				UpstreamPort: app.PublishedPort,
+			}
+			if len(names) > 1 {
+				cmd.LANFQDN = names[1]
+			}
+			return cmd, nil
+		}
+	}
+	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn()))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn()))
