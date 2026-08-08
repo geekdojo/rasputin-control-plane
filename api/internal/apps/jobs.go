@@ -32,13 +32,79 @@ type DeleteSpec = DeploySpec
 //
 // The agent owns whether the deploy actually succeeded (container running,
 // healthchecks passing). The api just records what the agent reported.
-func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
+// LeafMinter mints an app's per-app TLS leaf and returns the delivery command
+// (cert/key + proxy route info) the deploy saga ships to the target node
+// (ADR-0004 §6). main backs it with the Mesh CA + cluster id; nil disables leaf
+// delivery (e.g. dev without a CA).
+type LeafMinter func(app *App) (proto.AppLeafCmd, error)
+
+func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.deploy",
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: deployLoad(store, inv)},
 			{Name: "push", Timeout: 60 * time.Second, Do: deployPush(store, inv, nc)},
+			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, mint)},
 		},
+	}
+}
+
+// deployLeaf mints the app's TLS leaf and delivers it (+ proxy route info) to
+// the target node, where the node-local Caddy fronts the app at its real HTTPS
+// URL (ADR-0004 §6/§9). Best-effort: a successful container deploy is not undone
+// by a leaf hiccup — the failure is logged, and a redeploy (or the node's
+// startup reconcile) retries. Skipped for a headless app (no published port) or
+// when leaf delivery is disabled (nil minter).
+func deployLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		if mint == nil {
+			return nil, nil
+		}
+		app, err := loadApp(sc, store, inv)
+		if err != nil {
+			return nil, err
+		}
+		if app.PublishedPort == 0 {
+			sc.Log("info", "no published port — skipping proxy leaf")
+			return nil, nil
+		}
+		cmd, err := mint(app)
+		if err != nil {
+			sc.Log("warn", "mint leaf failed (app is deployed; proxy unavailable): "+err.Error())
+			return nil, nil
+		}
+		payload, _ := json.Marshal(cmd)
+		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppLeafSubject(app.TargetNode), payload)
+		if err != nil {
+			sc.Log("warn", "deliver leaf failed (app is deployed; proxy unavailable): "+err.Error())
+			return nil, nil
+		}
+		var ack proto.AppLeafAck
+		if json.Unmarshal(msg.Data, &ack); !ack.OK {
+			sc.Log("warn", "node rejected leaf: "+ack.Detail)
+			return nil, nil
+		}
+		sc.Log("info", "delivered TLS leaf + proxy route")
+		return nil, nil
+	}
+}
+
+// deleteLeaf tears down the app's leaf + proxy route on the target node before
+// the ledger row is removed (ADR-0004 §6). Best-effort — an offline node must
+// not block delete (its files go when it's reflashed / the app never returns).
+func deleteLeaf(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		app, err := loadApp(sc, store, inv)
+		if err != nil {
+			// Node gone/de-registered: nothing to tear down on it. Let delete proceed.
+			sc.Log("warn", "skip leaf teardown: "+err.Error())
+			return nil, nil
+		}
+		cmd, _ := json.Marshal(proto.AppLeafCmd{AppID: app.ID, Remove: true})
+		if _, err := nc.RequestWithContext(sc.Ctx, proto.AppLeafSubject(app.TargetNode), cmd); err != nil {
+			sc.Log("warn", "leaf teardown rpc failed: "+err.Error())
+		}
+		return nil, nil
 	}
 }
 
@@ -69,6 +135,7 @@ func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Work
 		Kind: "app.delete",
 		Steps: []jobs.WorkflowStep{
 			{Name: "stop", Timeout: 40 * time.Second, Do: deleteStop(store, inv, nc)},
+			{Name: "teardown_leaf", Timeout: 10 * time.Second, Do: deleteLeaf(store, inv, nc)},
 			{Name: "remove", Timeout: 2 * time.Second, Do: deleteRemove(store, nc)},
 		},
 	}
