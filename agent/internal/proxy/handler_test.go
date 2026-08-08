@@ -47,7 +47,7 @@ func requestLeaf(t *testing.T, nc *nats.Conn, nodeID string, cmd proto.AppLeafCm
 func TestHandler_DeliverThenRemove(t *testing.T) {
 	nc := startNATS(t)
 	store := NewLeafStore(t.TempDir())
-	sub, err := RegisterHandlers(nc, "node-1", store)
+	sub, err := RegisterHandlers(nc, "node-1", store, nil)
 	if err != nil {
 		t.Fatalf("RegisterHandlers: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestHandler_DeliverThenRemove(t *testing.T) {
 
 	// Deliver a leaf over the wire → files land, ack OK.
 	if ack := requestLeaf(t, nc, "node-1", proto.AppLeafCmd{
-		AppID: "app-1", Name: "jellyfin", CertPEM: []byte("CERT"), KeyPEM: []byte("KEY"),
+		AppID: "app-1", Name: "jellyfin", CertPEM: []byte("CERT"), KeyPEM: []byte("KEY"), TailnetFQDN: "jellyfin.home1.internal", UpstreamPort: 8096,
 	}); !ack.OK {
 		t.Fatalf("deliver ack not OK: %+v", ack)
 	}

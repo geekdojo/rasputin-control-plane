@@ -8,7 +8,7 @@ import (
 func TestLeafStore_WriteReadRemove(t *testing.T) {
 	s := NewLeafStore(t.TempDir())
 
-	if err := s.Write("app-1", []byte("CERT"), []byte("KEY")); err != nil {
+	if err := s.Write("app-1", []byte("CERT"), []byte("KEY"), RouteMeta{TailnetFQDN: "a.home1.internal", UpstreamPort: 80}); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if b, _ := os.ReadFile(s.CertPath("app-1")); string(b) != "CERT" {
@@ -25,7 +25,7 @@ func TestLeafStore_WriteReadRemove(t *testing.T) {
 	}
 
 	// Rotation: a second write overwrites in place.
-	if err := s.Write("app-1", []byte("CERT2"), []byte("KEY2")); err != nil {
+	if err := s.Write("app-1", []byte("CERT2"), []byte("KEY2"), RouteMeta{TailnetFQDN: "a.home1.internal", UpstreamPort: 80}); err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
 	if b, _ := os.ReadFile(s.CertPath("app-1")); string(b) != "CERT2" {
@@ -46,13 +46,13 @@ func TestLeafStore_WriteReadRemove(t *testing.T) {
 
 func TestLeafStore_Rejects(t *testing.T) {
 	s := NewLeafStore(t.TempDir())
-	if err := s.Write("", []byte("c"), []byte("k")); err == nil {
+	if err := s.Write("", []byte("c"), []byte("k"), RouteMeta{TailnetFQDN: "a", UpstreamPort: 80}); err == nil {
 		t.Error("empty appID should error")
 	}
-	if err := s.Write("a", nil, []byte("k")); err == nil {
+	if err := s.Write("a", nil, []byte("k"), RouteMeta{TailnetFQDN: "a", UpstreamPort: 80}); err == nil {
 		t.Error("empty cert should error")
 	}
-	if err := s.Write("a", []byte("c"), nil); err == nil {
+	if err := s.Write("a", []byte("c"), nil, RouteMeta{TailnetFQDN: "a", UpstreamPort: 80}); err == nil {
 		t.Error("empty key should error")
 	}
 }
