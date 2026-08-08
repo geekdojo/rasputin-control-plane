@@ -43,6 +43,30 @@ func makeApp(id, name string) *App {
 	}
 }
 
+func TestStore_ExposeLAN_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	// Default: tailnet-only (false) round-trips.
+	def := makeApp("a-def", "tailnetonly")
+	if err := s.Create(ctx, def); err != nil {
+		t.Fatalf("Create default: %v", err)
+	}
+	if got, _ := s.Get(ctx, "a-def"); got == nil || got.ExposeLAN {
+		t.Errorf("default ExposeLAN = %v, want false", got.ExposeLAN)
+	}
+
+	// Explicit opt-in (true) round-trips.
+	on := makeApp("a-on", "lanexposed")
+	on.ExposeLAN = true
+	if err := s.Create(ctx, on); err != nil {
+		t.Fatalf("Create opted-in: %v", err)
+	}
+	if got, _ := s.Get(ctx, "a-on"); got == nil || !got.ExposeLAN {
+		t.Errorf("opted-in ExposeLAN = %v, want true", got.ExposeLAN)
+	}
+}
+
 // ============================================================================
 // Store: Create / Get / GetByName
 // ============================================================================

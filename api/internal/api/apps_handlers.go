@@ -32,6 +32,9 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		ComposeYAML string `json:"composeYaml"`
 		TargetNode  string `json:"targetNode"`
+		// ExposeLAN opts the app into LAN reachability (ADR-0004 §9). Absent →
+		// false: tailnet-only by default; LAN is always an explicit opt-in.
+		ExposeLAN bool `json:"exposeLan"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -83,6 +86,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		ComposeYAML: req.ComposeYAML,
 		TargetNode:  req.TargetNode,
+		ExposeLAN:   req.ExposeLAN,
 		LastStatus:  proto.AppStatusStopped,
 		CreatedAt:   now,
 		UpdatedAt:   now,

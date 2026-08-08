@@ -19,7 +19,12 @@ type App struct {
 	PublishedPort int `json:"publishedPort,omitempty"`
 	// SourceTile is the catalog tile id this app was installed from ("" for a
 	// custom-compose app). Lets the UI show the tile's docs + first-run note (AP-9).
-	SourceTile   string          `json:"sourceTile,omitempty"`
+	SourceTile string `json:"sourceTile,omitempty"`
+	// ExposeLAN opts the app into LAN reachability (ADR-0004 §9). Default false:
+	// the app is tailnet-only — bare <app>.<cluster-id>.internal (tailnet) name,
+	// proxy bound to the tailnet interface only. When true it also gets the
+	// <app>.lan.<cluster-id>.internal name (LAN IP) and a LAN-interface bind.
+	ExposeLAN    bool            `json:"exposeLan"`
 	LastStatus   proto.AppStatus `json:"lastStatus"`
 	LastDetail   string          `json:"lastDetail,omitempty"`
 	LastDeployed *time.Time      `json:"lastDeployed,omitempty"`

@@ -20,11 +20,12 @@ func TestClusterSource_Projection(t *testing.T) {
 		{ID: "n4", Hostname: "BAD_HOST", IP: ip("192.168.1.5")},                   // invalid label, valid IP
 	}
 	apps := []AppRec{
-		{Name: "jellyfin", TargetNode: "cp"},  // → cp's IP
-		{Name: "plex", TargetNode: "n4"},      // node record skipped, but app joins on id → n4's IP
-		{Name: "radarr", TargetNode: "n3"},    // target has no IP → skipped
-		{Name: "sonarr", TargetNode: "ghost"}, // unknown target → skipped
-		{Name: "my_app", TargetNode: "cp"},    // grandfathered invalid label → skipped
+		{Name: "jellyfin", TargetNode: "cp", ExposeLAN: true},     // → cp's IP
+		{Name: "plex", TargetNode: "n4", ExposeLAN: true},         // node record skipped, but app joins on id → n4's IP
+		{Name: "radarr", TargetNode: "n3", ExposeLAN: true},       // target has no IP → skipped
+		{Name: "sonarr", TargetNode: "ghost", ExposeLAN: true},    // unknown target → skipped
+		{Name: "my_app", TargetNode: "cp", ExposeLAN: true},       // grandfathered invalid label → skipped
+		{Name: "vaultwarden", TargetNode: "cp", ExposeLAN: false}, // tailnet-only → no .lan record
 	}
 	src := NewClusterSource(testLANZone,
 		func() []NodeAddr { return nodes },
@@ -54,11 +55,12 @@ func TestClusterSource_Projection(t *testing.T) {
 
 	// Explicit negatives — these must NOT be present.
 	for _, absent := range []string{
-		"pending.lan.home1.internal.",  // node with no IP
-		"bad_host.lan.home1.internal.", // invalid hostname label
-		"radarr.lan.home1.internal.",   // app target has no IP
-		"sonarr.lan.home1.internal.",   // app target unknown
-		"my_app.lan.home1.internal.",   // grandfathered invalid app name
+		"pending.lan.home1.internal.",     // node with no IP
+		"bad_host.lan.home1.internal.",    // invalid hostname label
+		"radarr.lan.home1.internal.",      // app target has no IP
+		"sonarr.lan.home1.internal.",      // app target unknown
+		"my_app.lan.home1.internal.",      // grandfathered invalid app name
+		"vaultwarden.lan.home1.internal.", // tailnet-only app (ExposeLAN false)
 	} {
 		if _, ok := got[absent]; ok {
 			t.Errorf("record %s should be absent", absent)

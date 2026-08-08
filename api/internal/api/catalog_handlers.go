@@ -53,6 +53,11 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 	var req struct {
 		TargetNode string `json:"targetNode"`
 		Name       string `json:"name"`
+		// ExposeLAN opts the app into LAN reachability (ADR-0004 §9). Absent →
+		// false (tailnet-only). The tile's ExposureDefault is a UI hint for
+		// pre-filling this; the stored default stays tailnet-only unless the
+		// operator explicitly opts in.
+		ExposeLAN bool `json:"exposeLan"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -112,6 +117,7 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		TargetNode:    req.TargetNode,
 		PublishedPort: tile.PrimaryPort(),
 		SourceTile:    tile.ID,
+		ExposeLAN:     req.ExposeLAN,
 		LastStatus:    proto.AppStatusStopped,
 		CreatedAt:     now,
 		UpdatedAt:     now,

@@ -115,7 +115,7 @@ func TestFunctional_ReflectsLiveChanges(t *testing.T) {
 func TestFunctional_ClusterRecords(t *testing.T) {
 	loopback := net.IPv4(127, 0, 0, 1)
 	nodes := []NodeAddr{{ID: "cp", Hostname: "home1-cp", IP: net.ParseIP("192.168.1.2")}}
-	apps := []AppRec{{Name: "jellyfin", TargetNode: "cp"}}
+	apps := []AppRec{{Name: "jellyfin", TargetNode: "cp", ExposeLAN: true}}
 	resp := NewResponder(testZone,
 		NewSelfSource(testZone, testLocal, func() net.IP { return testIP }),
 		NewClusterSource(testLANZone, func() []NodeAddr { return nodes }, func() []AppRec { return apps }))
