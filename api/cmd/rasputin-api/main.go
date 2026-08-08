@@ -35,6 +35,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nameserver"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
@@ -520,6 +521,30 @@ func main() {
 		log.Fatalf("rasputin-api: metrics service: %v", err)
 	}
 	defer metricsSvc.Stop()
+
+	// Authoritative DNS for the internal zone <cluster-id>.internal, plus the
+	// <cluster>.local unicast name, both → the control plane's own LAN IP
+	// (ADR-0004 §3/§8). Slice 1 serves CP-self answers only; node + app records
+	// arrive with Slice 2. Binds the LAN IP:53 by value — never 0.0.0.0 — so
+	// systemd-resolved's 127.0.0.53 stub, which publishes the cluster's mDNS
+	// .local (ADR-0003), is left untouched. A bind failure (no LAN route, or no
+	// privilege on a dev box) is logged and skipped, never fatal: a control
+	// plane that won't start is worse than one without name resolution.
+	if envOr("RASPUTIN_DNS", "on") != "off" {
+		zone := "rasputin.internal"
+		if id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")); id != "" {
+			zone = id + ".internal"
+		}
+		nsResp := nameserver.NewResponder(zone,
+			nameserver.NewSelfSource(zone, clusterHostname(), primaryLanIP))
+		nsSrv := nameserver.NewServer(primaryLanIP, 53, nsResp)
+		if err := nsSrv.Start(ctx); err != nil {
+			log.Printf("rasputin-api: nameserver not started (%v) — %s won't resolve via the CP", err, zone)
+		} else {
+			log.Printf("rasputin-api: nameserver authoritative for %s on %s", zone, nsSrv.Addr())
+			defer nsSrv.Stop()
+		}
+	}
 
 	// IDS alert subscriber — appends each firewall snort alert to a JSONL
 	// file the obs Alloy tails (when EnableLoki + EnableIDSPipe are on).
