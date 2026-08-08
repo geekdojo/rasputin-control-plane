@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/oklog/ulid/v2"
 )
@@ -36,14 +37,14 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	req.Name = strings.TrimSpace(req.Name)
+	req.Name = normalizeAppName(req.Name)
 	req.TargetNode = strings.TrimSpace(req.TargetNode)
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
 	if !validAppName(req.Name) {
-		writeError(w, http.StatusBadRequest, "name must be 1-32 chars of [a-zA-Z0-9_-]")
+		writeError(w, http.StatusBadRequest, appNameRuleMsg)
 		return
 	}
 	if strings.TrimSpace(req.ComposeYAML) == "" {
@@ -154,19 +155,35 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, j)
 }
 
+// normalizeAppName lower-cases and trims an operator-supplied app name. The
+// name becomes a DNS label and a TLS SAN (ADR-0004 §4), and DNS labels are
+// case-insensitive — so we canonicalize to lowercase on input. Because every
+// new row is stored lowercase, the existing BINARY-collated `name UNIQUE`
+// constraint then enforces case-insensitive uniqueness on the write path
+// (`Jellyfin` and `jellyfin` both normalize to one key), which is the
+// "lowercase-normalize before store + compare" option ADR-0004 §5 sanctions in
+// lieu of rebuilding the table with COLLATE NOCASE. Pre-fix mixed-case rows are
+// grandfathered: they stay until renamed and, per ADR §5, get no DNS record /
+// cert until they pass validAppName (a Phase-B concern, once records exist).
+func normalizeAppName(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// appNameRuleMsg is the 400 body when a name fails validAppName. It describes
+// the post-normalization rule (input is already lower-cased), so it omits the
+// case requirement to avoid confusing an operator who typed mixed case.
+const appNameRuleMsg = "name must be a DNS-safe label: 1-32 chars of lowercase letters, digits, and hyphens, not starting or ending with a hyphen"
+
+// validAppName reports whether s is a strict RFC 1123 DNS label short enough to
+// be an app name, the constraint ADR-0004 §5 requires now that the name is
+// load-bearing for DNS and TLS. The old check accepted `[a-zA-Z0-9_-]`, which
+// allowed three things that break once the name is a hostname + dNSName SAN:
+// underscores, leading/trailing hyphens, and uppercase (which collided with the
+// case-sensitive UNIQUE). It reuses catalog.ValidDNSLabel — the same Guard #2
+// predicate that keeps every catalog id usable as `<app>.<cluster-domain>` — and
+// only tightens the length cap from the 63-char DNS-label max to 32 for app
+// names. It is deliberately strict on case: callers normalizeAppName first, so
+// uppercase input is folded to lowercase before it reaches here.
 func validAppName(s string) bool {
-	if len(s) < 1 || len(s) > 32 {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '_' || r == '-':
-		default:
-			return false
-		}
-	}
-	return true
+	return len(s) <= 32 && catalog.ValidDNSLabel(s)
 }
