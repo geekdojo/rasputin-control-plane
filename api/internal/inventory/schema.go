@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     capabilities  TEXT NOT NULL DEFAULT '[]',
     metadata      TEXT NOT NULL DEFAULT '{}',
     storage       TEXT NOT NULL DEFAULT '',
+    lan_ip        TEXT NOT NULL DEFAULT '',
     first_seen    INTEGER NOT NULL,
     last_seen     INTEGER NOT NULL
 );
@@ -25,4 +26,7 @@ var migrations = []string{
 	`ALTER TABLE nodes ADD COLUMN image_version TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE nodes ADD COLUMN architecture TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE nodes ADD COLUMN storage TEXT NOT NULL DEFAULT ''`,
+	// lan_ip: the node's agent-reported LAN IPv4 (ADR-0004 §8 / E3 AA-2), the
+	// address the CP nameserver answers the node's and its apps' names with.
+	`ALTER TABLE nodes ADD COLUMN lan_ip TEXT NOT NULL DEFAULT ''`,
 }

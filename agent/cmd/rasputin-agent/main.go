@@ -454,6 +454,10 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		// The agent ships per-arch (one binary per OS image arch), so the
 		// compile-time GOARCH is the node's CPU arch.
 		Architecture: runtime.GOARCH,
+		// The node's LAN IPv4, re-detected here so every (re)connect carries the
+		// current address — the reboot-time IP churn from making no DHCP
+		// reservations lands as a fresh registration (ADR-0004 §8).
+		LANIP:        host.PrimaryLANIP(),
 		Capabilities: caps,
 		Metadata:     meta,
 		Storage:      storage,

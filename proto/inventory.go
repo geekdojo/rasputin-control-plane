@@ -59,7 +59,15 @@ type NodeRegisteredEvt struct {
 	// agent binary's runtime.GOARCH (the agent ships per-arch, so this is the
 	// node's arch). Drives arch-aware update deploys + the UI "Type" field.
 	// Empty from pre-arch agents; consumers treat "" as unknown.
-	Architecture string         `json:"architecture,omitempty"`
+	Architecture string `json:"architecture,omitempty"`
+	// LANIP is the node's LAN IPv4 — its default-route source address, computed
+	// by the agent the same way the control plane computes its own. The CP
+	// nameserver answers <hostname>.<cluster-id>.internal (and apps homed on this
+	// node) with it (ADR-0004 §8). Because Rasputin makes no DHCP MAC
+	// reservations, it changes on most reboots, so it is re-reported on every
+	// reconnect (this event fires on every NATS connect). "" from a pre-LANIP
+	// agent; consumers treat "" as unknown and never let it wipe a learned value.
+	LANIP        string         `json:"lanIP,omitempty"`
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	// Storage is the agent's boot-time snapshot of the persistent data
@@ -130,7 +138,11 @@ type Node struct {
 	// Architecture is the node's CPU arch ("amd64" | "arm64"); "" if a pre-arch
 	// agent never reported it. Surfaced in the UI and used to match the right
 	// OS bundle on deploy.
-	Architecture string         `json:"architecture,omitempty"`
+	Architecture string `json:"architecture,omitempty"`
+	// LANIP is the node's LAN IPv4, agent-reported on NodeRegisteredEvt (ADR-0004
+	// §8). "" until a LANIP-reporting agent registers. What the CP nameserver
+	// resolves this node's name (and its apps' names) to.
+	LANIP        string         `json:"lanIP,omitempty"`
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	// Storage is the latest agent-reported persistent-partition snapshot;

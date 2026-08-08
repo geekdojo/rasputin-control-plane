@@ -57,9 +57,9 @@ func (s *Store) Insert(ctx context.Context, n *proto.Node) error {
 	caps, _ := json.Marshal(n.Capabilities)
 	meta, _ := json.Marshal(n.Metadata)
 	_, err := s.db.ExecContext(ctx, `
-        INSERT INTO nodes (id, role, hostname, agent_version, image_version, architecture, capabilities, metadata, storage, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		n.ID, string(n.Role), n.Hostname, n.AgentVersion, n.ImageVersion, n.Architecture,
+        INSERT INTO nodes (id, role, hostname, agent_version, image_version, architecture, lan_ip, capabilities, metadata, storage, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		n.ID, string(n.Role), n.Hostname, n.AgentVersion, n.ImageVersion, n.Architecture, n.LANIP,
 		string(caps), string(meta), marshalStorage(n.Storage),
 		tsMillis(n.FirstSeen), tsMillis(n.LastSeen))
 	return err
@@ -72,9 +72,9 @@ func (s *Store) Update(ctx context.Context, n *proto.Node) error {
 	meta, _ := json.Marshal(n.Metadata)
 	_, err := s.db.ExecContext(ctx, `
         UPDATE nodes
-        SET role=?, hostname=?, agent_version=?, image_version=?, architecture=?, capabilities=?, metadata=?, storage=?, last_seen=?
+        SET role=?, hostname=?, agent_version=?, image_version=?, architecture=?, lan_ip=?, capabilities=?, metadata=?, storage=?, last_seen=?
         WHERE id=?`,
-		string(n.Role), n.Hostname, n.AgentVersion, n.ImageVersion, n.Architecture,
+		string(n.Role), n.Hostname, n.AgentVersion, n.ImageVersion, n.Architecture, n.LANIP,
 		string(caps), string(meta), marshalStorage(n.Storage),
 		tsMillis(n.LastSeen), n.ID)
 	return err
@@ -136,7 +136,7 @@ func (s *Store) Count(ctx context.Context) (int, error) {
 // Get returns the node with the given id, or (nil, nil) if not found.
 func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, role, hostname, agent_version, image_version, architecture, capabilities, metadata, storage, first_seen, last_seen
+        SELECT id, role, hostname, agent_version, image_version, architecture, lan_ip, capabilities, metadata, storage, first_seen, last_seen
         FROM nodes WHERE id=?`, id)
 	return scanNode(row.Scan)
 }
@@ -147,7 +147,7 @@ func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
 // (e.g. firewall workflows need the firewall node).
 func (s *Store) ListByRole(ctx context.Context, role proto.NodeRole) ([]*proto.Node, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, role, hostname, agent_version, image_version, architecture, capabilities, metadata, storage, first_seen, last_seen
+        SELECT id, role, hostname, agent_version, image_version, architecture, lan_ip, capabilities, metadata, storage, first_seen, last_seen
         FROM nodes WHERE role = ? ORDER BY first_seen ASC`, string(role))
 	if err != nil {
 		return nil, err
@@ -166,7 +166,7 @@ func (s *Store) ListByRole(ctx context.Context, role proto.NodeRole) ([]*proto.N
 
 func (s *Store) List(ctx context.Context) ([]*proto.Node, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, role, hostname, agent_version, image_version, architecture, capabilities, metadata, storage, first_seen, last_seen
+        SELECT id, role, hostname, agent_version, image_version, architecture, lan_ip, capabilities, metadata, storage, first_seen, last_seen
         FROM nodes ORDER BY first_seen ASC`)
 	if err != nil {
 		return nil, err
@@ -190,7 +190,7 @@ func scanNode(scan func(...any) error) (*proto.Node, error) {
 		firstSeen            int64
 		lastSeen             int64
 	)
-	if err := scan(&n.ID, &role, &n.Hostname, &n.AgentVersion, &n.ImageVersion, &n.Architecture,
+	if err := scan(&n.ID, &role, &n.Hostname, &n.AgentVersion, &n.ImageVersion, &n.Architecture, &n.LANIP,
 		&caps, &met, &sto, &firstSeen, &lastSeen); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
