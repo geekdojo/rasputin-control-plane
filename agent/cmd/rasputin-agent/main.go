@@ -25,6 +25,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/nameguard"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/proxy"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/tailscale"
@@ -196,6 +197,15 @@ func main() {
 				_ = sub.Unsubscribe()
 			}
 		}()
+
+		// Node-local reverse-proxy leaf delivery (ADR-0004 §6): receive per-app
+		// TLS leaves and store them where the node-local Caddy reads them.
+		leafStore := proxy.NewLeafStore(filepath.Join(stateDir, "proxy"))
+		leafSub, err := proxy.RegisterHandlers(nc, nodeID, leafStore)
+		if err != nil {
+			log.Fatalf("rasputin-agent: register proxy handlers: %v", err)
+		}
+		defer func() { _ = leafSub.Unsubscribe() }()
 	}
 
 	// Firewall handlers — only on firewall-role agents. Picks the real uci

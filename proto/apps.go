@@ -63,6 +63,33 @@ type AppServiceStatus struct {
 	Health string `json:"health,omitempty"`
 }
 
+// AppLeafCmd delivers a per-app TLS leaf (ADR-0004 §6) to the node hosting the
+// app, on rasputin.node.<id>.cmd.app.leaf. The agent writes cert+key to the
+// app's proxy-cert directory, where the node-local Caddy terminates TLS with
+// them. Re-sent on rotation (no redeploy needed); a Remove tears the leaf down
+// (app delete / re-target). Keyed by the stable AppID so a rename can't orphan
+// or misdirect the files.
+type AppLeafCmd struct {
+	AppID   string `json:"appId"`
+	Name    string `json:"name,omitempty"` // instance name — logging only
+	CertPEM []byte `json:"certPem,omitempty"`
+	KeyPEM  []byte `json:"keyPem,omitempty"`
+	// Remove tears the leaf down (app delete / re-target). When true the PEMs
+	// are ignored and the app's cert directory is removed.
+	Remove bool `json:"remove,omitempty"`
+}
+
+// AppLeafAck is the synchronous reply to an AppLeafCmd.
+type AppLeafAck struct {
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// AppLeafSubject is the cmd subject for delivering a leaf to nodeID.
+func AppLeafSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "app.leaf")
+}
+
 // AppChangeType enumerates the change events the api publishes on
 // rasputin.apps.<appId>.<change>.
 type AppChangeType string
