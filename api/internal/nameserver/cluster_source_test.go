@@ -2,6 +2,7 @@ package nameserver
 
 import (
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -72,13 +73,18 @@ func TestClusterSource_EmptyProviders(t *testing.T) {
 
 func TestHostLabel(t *testing.T) {
 	cases := map[string]string{
-		"home1-cp":            "home1-cp",
-		"HOME1-CP":            "home1-cp", // lowercased
-		"host.home1.internal": "host",     // first label only
-		"  home1-cp  ":        "home1-cp", // trimmed
-		"bad_host":            "",         // underscore invalid
-		"-lead":               "",         // leading hyphen invalid
-		"":                    "",         // empty
+		"home1-cp":              "home1-cp",
+		"HOME1-CP":              "home1-cp",              // lowercased
+		"host.home1.internal":   "host",                  // first label only
+		"  home1-cp  ":          "home1-cp",              // trimmed
+		"a":                     "a",                     // single char is a valid label (len==1 boundary)
+		"bad_host":              "",                      // underscore invalid
+		"-lead":                 "",                      // leading hyphen invalid
+		"app-":                  "",                      // trailing hyphen invalid (len-1 boundary)
+		"a-":                    "",                      // trailing hyphen, minimal
+		"":                      "",                      // empty (len<1 boundary)
+		strings.Repeat("a", 63): strings.Repeat("a", 63), // 63 chars is the max valid label
+		strings.Repeat("a", 64): "",                      // 64 chars exceeds the label cap
 	}
 	for in, want := range cases {
 		if got := hostLabel(in); got != want {
