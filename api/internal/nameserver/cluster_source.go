@@ -16,10 +16,13 @@ type NodeAddr struct {
 }
 
 // AppRec is the minimal app projection: the instance name (already an RFC 1123
-// label, enforced at create — ADR-0004 §5) and the id of the node it targets.
+// label, enforced at create — ADR-0004 §5), the id of the node it targets, and
+// whether it's LAN-exposed. Only LAN-exposed apps get a .lan record; tailnet-
+// only apps are reachable solely by their bare tailnet name (ADR-0004 §9).
 type AppRec struct {
 	Name       string
 	TargetNode string
+	ExposeLAN  bool
 }
 
 // ClusterSource projects the cluster's node and app A records for the zone it is
@@ -71,6 +74,9 @@ func (c *ClusterSource) Records() map[string]net.IP {
 	}
 
 	for _, a := range c.listApps() {
+		if !a.ExposeLAN {
+			continue // tailnet-only app: no .lan record (ADR-0004 §9)
+		}
 		ip := ipByNode[a.TargetNode]
 		if ip == nil {
 			continue // target node unregistered or has no LAN IP

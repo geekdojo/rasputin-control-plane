@@ -580,7 +580,7 @@ func main() {
 				}
 				out := make([]nameserver.AppRec, 0, len(list))
 				for _, a := range list {
-					out = append(out, nameserver.AppRec{Name: a.Name, TargetNode: a.TargetNode})
+					out = append(out, nameserver.AppRec{Name: a.Name, TargetNode: a.TargetNode, ExposeLAN: a.ExposeLAN})
 				}
 				return out
 			})

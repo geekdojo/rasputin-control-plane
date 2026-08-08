@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS apps (
     target_node     TEXT NOT NULL,            -- node id; resolved against inventory
     published_port  INTEGER NOT NULL DEFAULT 0, -- primary host port for the reverse proxy (0 = none)
     source_tile     TEXT NOT NULL DEFAULT '',  -- catalog tile id this app was installed from ('' = custom compose)
+    expose_lan      INTEGER NOT NULL DEFAULT 0, -- LAN exposure opt-in (0 = tailnet-only default); ADR-0004 §9
     last_status     TEXT NOT NULL DEFAULT 'stopped',
     last_detail     TEXT NOT NULL DEFAULT '',
     last_deployed   INTEGER,
@@ -35,4 +36,9 @@ var migrations = []string{
 	// UI show the tile's docs / description / first-run note for a running app.
 	// '' for hand-authored (custom compose) apps.
 	`ALTER TABLE apps ADD COLUMN source_tile TEXT NOT NULL DEFAULT ''`,
+	// expose_lan: LAN exposure is an explicit per-app opt-in (ADR-0004 §9).
+	// Default 0 = tailnet-only: the app gets only the bare (tailnet) FQDN and
+	// its node-local proxy binds the tailnet interface only. 1 adds the .lan
+	// FQDN + the LAN-interface bind.
+	`ALTER TABLE apps ADD COLUMN expose_lan INTEGER NOT NULL DEFAULT 0`,
 }
