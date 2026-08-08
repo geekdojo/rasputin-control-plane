@@ -42,14 +42,15 @@ func (s *Service) ReconcileAppDNS(ctx context.Context) error {
 		}
 	}
 
-	base := baseDomainFor(s.cfg.ClusterID)
 	fqdnToIP := make(map[string]string)
 	for _, a := range s.appLister() {
 		ip := tailnetIPByNode[a.TargetNode]
 		if ip == "" || a.Name == "" {
 			continue // target node not enrolled yet, or no app name
 		}
-		fqdnToIP[a.Name+"."+base] = ip
+		// Shares appTailnetFQDN with the leaf SANs so the record and the cert
+		// are byte-identical (appleaf.go).
+		fqdnToIP[appTailnetFQDN(s.cfg.ClusterID, a.Name)] = ip
 	}
 	return s.sup.ReconcileAppRecords(fqdnToIP)
 }
