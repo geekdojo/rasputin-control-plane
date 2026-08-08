@@ -257,6 +257,9 @@ func (s *DockerSupervisor) Start(ctx context.Context) error {
 	if err := s.writeConfig(); err != nil {
 		return err
 	}
+	if err := s.ensureExtraRecordsFile(); err != nil {
+		return err
+	}
 	state, err := s.inspect(ctx)
 	if err != nil {
 		return err
@@ -568,6 +571,86 @@ func (s *DockerSupervisor) writeConfig() error {
 	return os.Rename(tmp, out)
 }
 
+// extraRecordsHostPath is where the api writes the Headscale `extra_records`
+// JSON on the host. It's inside the config dir, which createAndStart bind-mounts
+// read-only at /etc/headscale — so Headscale reads/watches it at the container
+// path the config template points to (extra_records_path). ADR-0004 §9: this is
+// the tailnet app-name projection (`<app>.<cluster-id>.internal → tailnet IP`);
+// node tailnet names are MagicDNS-synthesized and are not written here.
+func (s *DockerSupervisor) extraRecordsHostPath() string {
+	return filepath.Join(s.cfg.StateDir, "config", "extra_records.json")
+}
+
+// ensureExtraRecordsFile writes an empty `[]` records file if none exists yet,
+// so Headscale never starts against a missing extra_records_path (it reads the
+// path early — juanfont/headscale#2753). An existing file (a projection written
+// on a prior run) is left untouched; the next reconcile refreshes it.
+func (s *DockerSupervisor) ensureExtraRecordsFile() error {
+	path := s.extraRecordsHostPath()
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte("[]\n"), 0o644); err != nil {
+		return fmt.Errorf("mesh supervisor: seed extra_records: %w", err)
+	}
+	return nil
+}
+
+// extraRecord is one Headscale dns.extra_records entry. Only A records are used:
+// the Tailscale client processes A/AAAA, and Rasputin is IPv4-only (LOCKED
+// decision #9).
+type extraRecord struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+// renderExtraRecords marshals fqdn→IPv4 to the Headscale extra_records JSON,
+// **sorted by name** for stable output — Headscale checksums the file to detect
+// real changes, so a stable byte-for-byte rendering avoids spurious reloads
+// (headscale.net/ref/dns). Entries with an empty name or value are dropped.
+func renderExtraRecords(fqdnToIP map[string]string) ([]byte, error) {
+	names := make([]string, 0, len(fqdnToIP))
+	for name, ip := range fqdnToIP {
+		if name == "" || ip == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	recs := make([]extraRecord, 0, len(names))
+	for _, name := range names {
+		recs = append(recs, extraRecord{Name: name, Type: "A", Value: fqdnToIP[name]})
+	}
+	// A non-nil empty slice renders as `[]`, never `null` — Headscale wants a
+	// valid (possibly empty) array at all times.
+	return json.MarshalIndent(recs, "", "  ")
+}
+
+// ReconcileAppRecords writes the current tailnet app-name projection to the
+// Headscale extra_records file, which Headscale hot-reloads (no restart —
+// ADR-0004 §9). fqdnToIP maps each app's tailnet FQDN to its target node's
+// tailnet IPv4.
+//
+// The write is **in place** (truncate + write the same inode), deliberately
+// NOT the temp-file+rename writeConfig uses: Headscale's filewatcher watches the
+// path's inode, and a rename-over swaps the inode and drops the watch
+// (juanfont/headscale#2289), silently stranding every later change. In-place
+// keeps the watch; the cost is a sub-second window where a concurrent read could
+// see a partial/empty file, which self-heals on the next change event (the file
+// is tiny and written in one call). Runtime filewatcher behavior is validated on
+// a real bench cluster, not in unit tests.
+func (s *DockerSupervisor) ReconcileAppRecords(fqdnToIP map[string]string) error {
+	data, err := renderExtraRecords(fqdnToIP)
+	if err != nil {
+		return fmt.Errorf("mesh supervisor: render extra_records: %w", err)
+	}
+	if err := os.WriteFile(s.extraRecordsHostPath(), data, 0o644); err != nil {
+		return fmt.Errorf("mesh supervisor: write extra_records: %w", err)
+	}
+	return nil
+}
+
 // renderConfig builds the YAML body. The template is deliberately compact —
 // only the fields Headscale actually requires plus the ones we override
 // (paths, listen, server_url, optional TLS). Operators who need to tune
@@ -689,7 +772,7 @@ dns:
     global: []
     split: {}
   search_domains: []
-  extra_records: []
+  extra_records_path: /etc/headscale/extra_records.json
 
 unix_socket: /tmp/headscale.sock
 unix_socket_permission: "0770"
