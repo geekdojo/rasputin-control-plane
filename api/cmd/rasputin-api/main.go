@@ -535,8 +535,38 @@ func main() {
 		if id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")); id != "" {
 			zone = id + ".internal"
 		}
+		// Slice 2b: project node + app A records live from inventory + apps.
+		// Node record <hostname>.<zone> → node LAN IP; app record <app>.<zone> →
+		// its target node's LAN IP. Read on every query (store errors → serve
+		// nothing that round, never crash).
+		clusterSrc := nameserver.NewClusterSource(zone,
+			func() []nameserver.NodeAddr {
+				nodes, err := invStore.List(ctx)
+				if err != nil {
+					log.Printf("rasputin-api: nameserver node projection: %v", err)
+					return nil
+				}
+				out := make([]nameserver.NodeAddr, 0, len(nodes))
+				for _, n := range nodes {
+					out = append(out, nameserver.NodeAddr{ID: n.ID, Hostname: n.Hostname, IP: net.ParseIP(n.LANIP)})
+				}
+				return out
+			},
+			func() []nameserver.AppRec {
+				list, err := appsStore.List(ctx)
+				if err != nil {
+					log.Printf("rasputin-api: nameserver app projection: %v", err)
+					return nil
+				}
+				out := make([]nameserver.AppRec, 0, len(list))
+				for _, a := range list {
+					out = append(out, nameserver.AppRec{Name: a.Name, TargetNode: a.TargetNode})
+				}
+				return out
+			})
 		nsResp := nameserver.NewResponder(zone,
-			nameserver.NewSelfSource(zone, clusterHostname(), primaryLanIP))
+			nameserver.NewSelfSource(zone, clusterHostname(), primaryLanIP),
+			clusterSrc)
 		nsSrv := nameserver.NewServer(primaryLanIP, 53, nsResp)
 		if err := nsSrv.Start(ctx); err != nil {
 			log.Printf("rasputin-api: nameserver not started (%v) — %s won't resolve via the CP", err, zone)
