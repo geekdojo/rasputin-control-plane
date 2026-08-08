@@ -198,10 +198,21 @@ func main() {
 			}
 		}()
 
-		// Node-local reverse-proxy leaf delivery (ADR-0004 §6): receive per-app
-		// TLS leaves and store them where the node-local Caddy reads them.
+		// Node-local reverse proxy (ADR-0004 §1/§6/§9): the agent runs the stock
+		// caddy binary, receives per-app TLS leaves + route metadata, and pushes
+		// the Caddy config (Host-routes to loopback, TLS from the leaves) via the
+		// admin API. Listen addresses: the node's LAN IP (host) and tailnet IP
+		// (tailscale). Best-effort — a proxy failure never blocks the agent.
 		leafStore := proxy.NewLeafStore(filepath.Join(stateDir, "proxy"))
-		leafSub, err := proxy.RegisterHandlers(nc, nodeID, leafStore)
+		reconciler := proxy.NewReconciler(leafStore, proxy.CaddyAdminAddr,
+			func() string { return nodeTailnetIP() },
+			host.PrimaryLANIP)
+		if caddyBin := caddyBinary(); caddyBin != "" {
+			go reconciler.RunCaddy(ctx, caddyBin)
+		} else {
+			log.Printf("rasputin-agent: caddy binary not found on PATH — node-local proxy disabled (leaves still delivered)")
+		}
+		leafSub, err := proxy.RegisterHandlers(nc, nodeID, leafStore, reconciler.Reconcile)
 		if err != nil {
 			log.Fatalf("rasputin-agent: register proxy handlers: %v", err)
 		}
@@ -650,6 +661,30 @@ func autodetectDockerBackend() string {
 		return "docker"
 	}
 	return "mock"
+}
+
+// caddyBinary returns the caddy binary path (RASPUTIN_CADDY_BIN override, else
+// `caddy` on PATH), or "" when absent — the node-local proxy then stays off and
+// leaves are still delivered/stored for when it appears.
+func caddyBinary() string {
+	if p := strings.TrimSpace(os.Getenv("RASPUTIN_CADDY_BIN")); p != "" {
+		return p
+	}
+	if p, err := exec.LookPath("caddy"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// nodeTailnetIP returns the node's tailnet IPv4 (best-effort, `tailscale ip -4`),
+// or "" if the node isn't on the tailnet yet — resolved per reconcile so it
+// appears once enrollment completes.
+func nodeTailnetIP() string {
+	out, err := exec.Command("tailscale", "ip", "-4").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
 }
 
 // autodetectUpdaterBackend picks the OS-update backend. The firewall runs

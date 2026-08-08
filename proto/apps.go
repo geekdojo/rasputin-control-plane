@@ -74,8 +74,15 @@ type AppLeafCmd struct {
 	Name    string `json:"name,omitempty"` // instance name — logging only
 	CertPEM []byte `json:"certPem,omitempty"`
 	KeyPEM  []byte `json:"keyPem,omitempty"`
-	// Remove tears the leaf down (app delete / re-target). When true the PEMs
-	// are ignored and the app's cert directory is removed.
+	// TailnetFQDN / LANFQDN are the app's proxy Host names — the same names in
+	// the leaf's SANs (both from mesh.AppLeafDNSNames), so the Caddy route host
+	// matches the cert by construction. LANFQDN is "" for a tailnet-only app.
+	TailnetFQDN string `json:"tailnetFqdn,omitempty"`
+	LANFQDN     string `json:"lanFqdn,omitempty"`
+	// UpstreamPort is the app's loopback port the node-local Caddy proxies to.
+	UpstreamPort int `json:"upstreamPort,omitempty"`
+	// Remove tears the leaf down (app delete / re-target). When true the other
+	// fields are ignored and the app's proxy state is removed.
 	Remove bool `json:"remove,omitempty"`
 }
 
