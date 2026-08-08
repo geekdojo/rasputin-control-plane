@@ -33,6 +33,11 @@ type Config struct {
 	// or externally managed with a publicly trusted cert (no extra trust
 	// needed node-side). See proto.MeshEnrollCmd.MeshCAPEM.
 	MeshCAPEM []byte
+	// ClusterID is the bare cluster id (RASPUTIN_CLUSTER_ID, e.g. "home1"),
+	// used to derive the MagicDNS base domain for the tailnet app-name
+	// projection (<app>.<cluster-id>.internal). "" → the baseDomainFor dev
+	// fallback ("rasputin.internal"). Matches the supervisor's ClusterID.
+	ClusterID string
 }
 
 // Service ties together the store + the Headscale client + the supervisor.
@@ -50,6 +55,10 @@ type Service struct {
 	mu        sync.RWMutex
 	client    Client
 	bootstrap func(context.Context) (Client, error) // self-hosted: builds the real client; nil for eager modes
+
+	// appLister supplies the apps for the tailnet DNS projection (ADR-0004 §9).
+	// nil (default) means project nothing. main backs it with the apps store.
+	appLister func() []AppDNS
 }
 
 func NewService(cfg Config, store *Store, client Client, sup Supervisor) *Service {
@@ -118,6 +127,12 @@ func (s *Service) bringUp(ctx context.Context) {
 		return
 	}
 	log.Printf("mesh: ready (backend=%s, user=%s)", s.Client().Backend(), s.cfg.DefaultUser)
+	// Seed the tailnet app-name projection once Headscale is up; the
+	// mesh.reconcile tick keeps it fresh thereafter (ADR-0004 §9). Best-effort —
+	// a failure here must not fail bring-up.
+	if err := s.ReconcileAppDNS(ctx); err != nil {
+		log.Printf("mesh: initial app-DNS reconcile failed: %v (will retry on the reconcile tick)", err)
+	}
 }
 
 // retry runs fn until it succeeds (returns true) or ctx is cancelled (returns
