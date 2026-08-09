@@ -50,13 +50,6 @@ type State struct {
 	// env var, and re-deriving one from the other is the kind of implicit
 	// coupling that produced the bug this field exists to fix.
 	ClusterID string `json:"clusterId"`
-	// ServerIP is the control plane's primary LAN IPv4 (the default-route
-	// source address), or "" when there's no LAN route. Surfaced so the
-	// unauthenticated /trust page can show the operator a reachable address —
-	// notably the IP, for a device on another VLAN that can't mDNS-resolve
-	// <cluster>.local. Not sensitive: it's a LAN address anyone on the segment
-	// already sees via ARP/mDNS, and /trust is a LAN-only first-run surface.
-	ServerIP string `json:"serverIP,omitempty"`
 }
 
 // Probes is the small set of cross-subsystem queries the service uses to
@@ -77,10 +70,6 @@ type Probes struct {
 	// inventory. Drives the deployment-mode hardware gate — the router and
 	// sub-segment modes are only offerable when this is true.
 	HasFirewallNode func(ctx context.Context) (bool, error)
-	// ServerIP returns the control plane's primary LAN IPv4 ("" if none). Used
-	// to fill State.ServerIP for the /trust page. Recomputed per call so it
-	// tracks the box moving subnets (cheap: a route lookup, no packet sent).
-	ServerIP func() string
 }
 
 // Service is the wizard coordinator. Constructed in main with the probes
@@ -135,10 +124,6 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 	firewallCapable := false
 	if s.probes.HasFirewallNode != nil {
 		firewallCapable, _ = s.probes.HasFirewallNode(ctx)
-	}
-	serverIP := ""
-	if s.probes.ServerIP != nil {
-		serverIP = s.probes.ServerIP()
 	}
 
 	steps := []Step{
@@ -206,7 +191,6 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 		FirewallCapable: firewallCapable,
 		ClusterHostname: s.clusterHostname,
 		ClusterID:       s.clusterID,
-		ServerIP:        serverIP,
 	}, nil
 }
 
