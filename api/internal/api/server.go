@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"os"
 
@@ -58,6 +59,10 @@ type Server struct {
 	// one-command flasher); overridable for tests. The OS source repo itself
 	// comes from the releases registry (ADR-0002).
 	releaseDownloadBase string
+	// applyDNSForwarding reconciles the CP nameserver's AA-11 forwarding stub
+	// from the persisted setting and returns the effective upstream. nil when the
+	// nameserver isn't running (RASPUTIN_DNS=off). Wired by main after NewServer.
+	applyDNSForwarding func(context.Context) (effectiveUpstream string, fellBack bool, err error)
 }
 
 // SetReleaseSource wires the update-channel source used by
@@ -91,6 +96,12 @@ func (s *Server) BMCSessions() *bmc.SessionManager { return s.bmcSessions }
 // SetAlertsWebhookSecret turns on shared-secret auth for
 // POST /api/alerts/webhook. Empty disables the check (dev mode).
 func (s *Server) SetAlertsWebhookSecret(secret string) { s.alertsWebhookSecret = secret }
+
+// SetDNSForwardingApplier wires the AA-11 reconcile hook (main → nameserver),
+// kept plain-typed so this package doesn't import nameserver.
+func (s *Server) SetDNSForwardingApplier(fn func(context.Context) (string, bool, error)) {
+	s.applyDNSForwarding = fn
+}
 
 // NewServer constructs an api Server. The auth service is mandatory; if you
 // want the api to run without auth (e.g. for early dev), pass a Service
@@ -249,6 +260,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/setup/mode", reqd(s.handleSetupMode))
 	mux.HandleFunc("POST /api/setup/mesh", reqd(s.handleSetupMesh))
 	mux.HandleFunc("POST /api/setup/complete", reqd(s.handleSetupComplete))
+
+	mux.HandleFunc("GET /api/settings/dns-forwarding", reqd(s.handleGetDNSForwarding))
+	mux.HandleFunc("POST /api/settings/dns-forwarding", reqd(s.handleSetDNSForwarding))
 
 	// Operator SSH keys — cluster-remembered wizard prefill (public-key
 	// material; authed because it's operator configuration).

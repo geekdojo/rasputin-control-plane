@@ -2,6 +2,7 @@ package nameserver
 
 import (
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -34,9 +35,10 @@ type Responder struct {
 	rname   string // SOA RNAME (hostmaster.<zone>), '@' encoded as a label dot
 	sources []Source
 	// forwarder, when set, proxies off-zone queries to an upstream instead of
-	// REFUSEing them (AA-11 forwarding stub, ADR-0004 §10). nil keeps the pure
-	// authoritative posture. See WithForwarder.
-	forwarder *Forwarder
+	// REFUSEing them (AA-11 forwarding stub, ADR-0004 §10). Held atomically so the
+	// api can hot-swap it when the operator toggles forwarding — a nil (unset)
+	// value keeps the pure authoritative posture. See WithForwarder / SetForwarder.
+	forwarder atomic.Pointer[Forwarder]
 }
 
 // NewResponder builds a responder authoritative for zone (any case / trailing
@@ -56,8 +58,15 @@ func NewResponder(zone string, sources ...Source) *Responder {
 // returns the responder for chaining. Passing nil is a no-op that keeps the
 // pure authoritative (REFUSE off-zone) behavior.
 func (r *Responder) WithForwarder(f *Forwarder) *Responder {
-	r.forwarder = f
+	r.forwarder.Store(f)
 	return r
+}
+
+// SetForwarder atomically swaps the off-zone forwarder — the reconcile path when
+// the operator toggles DNS forwarding or changes the upstream (AA-11 slice 2). A
+// nil f disables forwarding (off-zone reverts to REFUSE) with no restart.
+func (r *Responder) SetForwarder(f *Forwarder) {
+	r.forwarder.Store(f)
 }
 
 // ServeDNS implements dns.Handler.
@@ -128,7 +137,7 @@ func (r *Responder) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		// authoritative for the name — REFUSE rather than assert a false NXDOMAIN
 		// (the correct answer for, e.g., an arbitrary *.local other than
 		// <cluster>.local).
-		if r.forwarder.tryForward(w, req) {
+		if r.forwarder.Load().tryForward(w, req) {
 			return
 		}
 		m.Authoritative = false
