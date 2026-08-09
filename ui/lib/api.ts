@@ -446,6 +446,8 @@ export function createApp(input: {
   name: string;
   composeYaml: string;
   targetNode: string;
+  // Opt the app into LAN reachability (ADR-0004 §9). Absent → tailnet-only.
+  exposeLan?: boolean;
 }): Promise<App> {
   return jsonFetch<App>('/api/apps', {
     method: 'POST',
@@ -479,7 +481,7 @@ export function getCatalogTile(id: string): Promise<CatalogTile> {
 // from the tile); it does not deploy — call deployApp with the returned app id.
 export function installCatalogApp(
   id: string,
-  input: { targetNode: string; name?: string }
+  input: { targetNode: string; name?: string; exposeLan?: boolean }
 ): Promise<App> {
   return jsonFetch<App>(`/api/catalog/${id}/install`, {
     method: 'POST',

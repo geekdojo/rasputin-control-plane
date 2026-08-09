@@ -7,14 +7,13 @@ import {
   deleteApp,
   deployApp,
   getCatalogTile,
+  getSetupState,
   listApps,
-  listNodes,
   openAppsWS,
-  openInventoryWS,
   stopApp,
 } from '../../../lib/api';
-import type { App, CatalogTile, Node } from '../../../lib/types';
-import { accessUrl } from '../../../lib/appurl';
+import type { App, CatalogTile } from '../../../lib/types';
+import { appAccess, type AppAccess } from '../../../lib/appurl';
 import {
   Badge,
   Btn,
@@ -68,40 +67,35 @@ function statusLabel(app: App): string {
 
 export default function AppsPage() {
   const [apps, setApps] = useState<App[]>([]);
-  const [nodes, setNodes] = useState<Node[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [detail, setDetail] = useState<App | null>(null);
+  // Cluster id seeds the app-access hostname (<app>.<cluster-id>.internal). ''
+  // until the fetch lands and '' on a dev box — appAccess falls back to
+  // "rasputin" then, matching the api's baseDomainFor.
+  const [clusterId, setClusterId] = useState('');
 
   useEffect(() => {
     const refreshApps = () => listApps().then(setApps).catch((e) => setErr(String(e)));
-    const refreshNodes = () => listNodes().then(setNodes).catch(() => {});
-    const refreshAll = () => {
-      refreshApps();
-      refreshNodes();
-    };
-    refreshAll();
-    // WS drives instant updates; the onOpen callbacks re-sync on every
+    refreshApps();
+    getSetupState().then((s) => setClusterId(s.clusterId ?? '')).catch(() => {});
+    // WS drives instant updates; the onOpen callback re-syncs on every
     // (re)connect so a dropped socket can't leave the list stale.
     const closeApps = openAppsWS(refreshApps, refreshApps);
-    const closeInv = openInventoryWS(refreshNodes, refreshNodes);
     // Catch a socket that died silently (laptop sleep, proxy idle-timeout —
     // no close event fires, so onOpen never re-runs): refresh when the tab
     // becomes visible again, plus a slow backstop poll.
     const onVisible = () => {
-      if (document.visibilityState === 'visible') refreshAll();
+      if (document.visibilityState === 'visible') refreshApps();
     };
     document.addEventListener('visibilitychange', onVisible);
     const poll = setInterval(refreshApps, 20_000);
     return () => {
       closeApps();
-      closeInv();
       document.removeEventListener('visibilitychange', onVisible);
       clearInterval(poll);
     };
   }, []);
-
-  const nodesById = new Map(nodes.map((n) => [n.id, n]));
 
   async function handle(action: 'deploy' | 'stop' | 'delete', app: App) {
     setBusy(app.id);
@@ -165,7 +159,7 @@ export default function AppsPage() {
                 <AppRow
                   key={a.id}
                   app={a}
-                  url={accessUrl(nodesById.get(a.targetNode), a.targetNode, a.publishedPort)}
+                  access={appAccess(a, clusterId)}
                   busy={busy === a.id}
                   onAction={handle}
                   onOpenDetail={() => setDetail(a)}
@@ -176,20 +170,20 @@ export default function AppsPage() {
         )}
       </PageBody>
 
-      {detail && <AppDetail app={detail} node={nodesById.get(detail.targetNode)} onClose={() => setDetail(null)} />}
+      {detail && <AppDetail app={detail} clusterId={clusterId} onClose={() => setDetail(null)} />}
     </PageShell>
   );
 }
 
 function AppRow({
   app,
-  url,
+  access,
   busy,
   onAction,
   onOpenDetail,
 }: {
   app: App;
-  url: string | null;
+  access: AppAccess | null;
   busy: boolean;
   onAction: (action: 'deploy' | 'stop' | 'delete', app: App) => void;
   onOpenDetail: () => void;
@@ -197,7 +191,10 @@ function AppRow({
   const [hover, setHover] = useState(false);
   const transient = app.lastStatus === 'deploying' || app.lastStatus === 'stopping';
   const canStop = app.lastStatus === 'running' || app.lastStatus === 'deploying' || app.lastStatus === 'failed';
-  const canOpen = app.lastStatus === 'running' && !!url;
+  // Hand off the tailnet name — reachable from anywhere on the tailnet, and the
+  // one name every app has (LAN is an opt-in extra, surfaced in the detail drawer).
+  const openUrl = access?.tailnet ?? null;
+  const canOpen = app.lastStatus === 'running' && !!openUrl;
   // The action that runs `docker compose up` reads DEPLOY the first time and
   // START once the app has run before (stop does `compose down`, so bringing it
   // back up is a start, not a fresh deploy). Same underlying action either way.
@@ -231,8 +228,8 @@ function AppRow({
       <td style={{ ...tdStyle, paddingRight: 0 }}>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
           {canOpen && (
-            <a href={url!} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
-              <Btn variant="primary" small title={url!}>
+            <a href={openUrl!} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+              <Btn variant="primary" small title={openUrl!}>
                 <ExternalLink size={10} /> OPEN
               </Btn>
             </a>
@@ -267,14 +264,14 @@ function AppRow({
 // AppDetail — the "what next" for a running app: where to open it, what it is,
 // and the first-run step. Tile info (docs + first-run note) is fetched lazily
 // for apps installed from the catalog; custom-compose apps show just access.
-function AppDetail({ app, node, onClose }: { app: App; node?: Node; onClose: () => void }) {
+function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; onClose: () => void }) {
   const [tile, setTile] = useState<CatalogTile | null>(null);
 
   useEffect(() => {
     if (app.sourceTile) getCatalogTile(app.sourceTile).then(setTile).catch(() => {});
   }, [app.sourceTile]);
 
-  const url = accessUrl(node, app.targetNode, app.publishedPort);
+  const access = appAccess(app, clusterId);
   const running = app.lastStatus === 'running';
 
   return (
@@ -287,19 +284,33 @@ function AppDetail({ app, node, onClose }: { app: App; node?: Node; onClose: () 
 
         <div>
           <SectionLabel>ACCESS</SectionLabel>
-          {url ? (
+          {access ? (
             <>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <a
-                  href={url}
+                  href={access.tailnet}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{ color: running ? ACCENT : DIM, fontSize: 10, textDecoration: 'none' }}
                 >
-                  {url} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
+                  {access.tailnet} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
                 </a>
-                <CopyButton value={url} label="COPY" />
+                <CopyButton value={access.tailnet} label="COPY" />
               </div>
+              {access.lan && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+                  <span style={{ color: DIM, fontSize: 9 }}>LAN</span>
+                  <a
+                    href={access.lan}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: running ? ACCENT : DIM, fontSize: 10, textDecoration: 'none' }}
+                  >
+                    {access.lan} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
+                  </a>
+                  <CopyButton value={access.lan} label="COPY" />
+                </div>
+              )}
               {!running && <Hint style={{ marginTop: 6 }}>Deploy it first — the link works once it&apos;s running.</Hint>}
             </>
           ) : (
