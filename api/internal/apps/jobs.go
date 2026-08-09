@@ -457,8 +457,10 @@ func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		})
 		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppDeploySubject(app.TargetNode), cmd)
 		if err != nil {
+			fctx, cancel := detachCtx(sc.Ctx)
 			now := time.Now().UTC()
-			_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusFailed, "deploy rpc: "+err.Error(), now)
+			_ = store.RecordStatus(fctx, app.ID, proto.AppStatusFailed, "deploy rpc: "+err.Error(), now)
+			cancel()
 			emitChange(nc, app.ID, proto.AppFailed, proto.AppStatusFailed, "deploy rpc failed", now)
 			return nil, fmt.Errorf("deploy rpc: %w", err)
 		}
@@ -515,8 +517,10 @@ func stopPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID})
 		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)
 		if err != nil {
+			fctx, cancel := detachCtx(sc.Ctx)
 			now := time.Now().UTC()
-			_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusFailed, "stop rpc: "+err.Error(), now)
+			_ = store.RecordStatus(fctx, app.ID, proto.AppStatusFailed, "stop rpc: "+err.Error(), now)
+			cancel()
 			emitChange(nc, app.ID, proto.AppFailed, proto.AppStatusFailed, "stop rpc failed", now)
 			return nil, fmt.Errorf("stop rpc: %w", err)
 		}
@@ -580,8 +584,10 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID})
 		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)
 		if err != nil {
+			fctx, cancel := detachCtx(sc.Ctx)
 			now := time.Now().UTC()
-			_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusFailed, "stop rpc: "+err.Error(), now)
+			_ = store.RecordStatus(fctx, app.ID, proto.AppStatusFailed, "stop rpc: "+err.Error(), now)
+			cancel()
 			emitChange(nc, app.ID, proto.AppFailed, proto.AppStatusFailed, "stop rpc failed", now)
 			return nil, fmt.Errorf("stop rpc: %w", err)
 		}
@@ -618,6 +624,17 @@ func deleteRemove(store *Store, nc *nats.Conn) jobs.DoFn {
 		sc.Log("info", "removed from the app list")
 		return json.Marshal(map[string]string{"appId": spec.AppID, "deleted": "true"})
 	}
+}
+
+// detachCtx returns a context that survives the cancellation/deadline of the
+// request context — which is often the very reason an RPC failed — so a
+// terminal-status write still lands. Without this, recording "failed" on an
+// already-expired sc.Ctx is a silent no-op (ExecContext returns
+// context.DeadlineExceeded and writes nothing), leaving the app stuck showing a
+// transitional state (deploying/stopping) forever. Values from sc.Ctx are
+// preserved; only the cancellation is dropped, then bounded by a fresh timeout.
+func detachCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
 
 func emitChange(nc *nats.Conn, appID string, change proto.AppChangeType, status proto.AppStatus, detail string, ts time.Time) {
