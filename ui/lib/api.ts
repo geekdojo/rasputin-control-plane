@@ -34,6 +34,7 @@ import type {
   PortForwardSpec,
   WANConfigSpec,
   DeploymentMode,
+  DNSForwarding,
   SetupState,
   SystemUpdateChangeEvent,
   UpdateChangeEvent,
@@ -836,6 +837,20 @@ export function bmcSOLURL(nodeId: string): string {
 // before the first passkey exists. Returns no secrets.
 export async function getSetupState(): Promise<SetupState> {
   return jsonFetch<SetupState>('/api/setup/state');
+}
+
+// DNS forwarding (AA-11) — whether the CP answers DNS for the whole LAN, and the
+// upstream it forwards non-internal lookups to.
+export function getDNSForwarding(): Promise<DNSForwarding> {
+  return jsonFetch<DNSForwarding>('/api/settings/dns-forwarding');
+}
+
+export function setDNSForwarding(input: { enabled: boolean; upstream: string }): Promise<DNSForwarding> {
+  return jsonFetch<DNSForwarding>('/api/settings/dns-forwarding', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
 }
 
 export function setInstallName(name: string): Promise<SetupState> {

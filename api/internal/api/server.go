@@ -63,6 +63,9 @@ type Server struct {
 	// from the persisted setting and returns the effective upstream. nil when the
 	// nameserver isn't running (RASPUTIN_DNS=off). Wired by main after NewServer.
 	applyDNSForwarding func(context.Context) (effectiveUpstream string, fellBack bool, err error)
+	// hostLANInfo returns the control plane's LAN IP + MAC for the DHCP-reservation
+	// guidance surfaced in the DNS-forwarding view (AA-11). nil until main wires it.
+	hostLANInfo func() (ip string, mac string)
 }
 
 // SetReleaseSource wires the update-channel source used by
@@ -101,6 +104,13 @@ func (s *Server) SetAlertsWebhookSecret(secret string) { s.alertsWebhookSecret =
 // kept plain-typed so this package doesn't import nameserver.
 func (s *Server) SetDNSForwardingApplier(fn func(context.Context) (string, bool, error)) {
 	s.applyDNSForwarding = fn
+}
+
+// SetHostLANInfo wires the control plane's LAN IP + MAC provider (main →
+// interface lookup), surfaced in the DNS-forwarding view for the reservation
+// recommendation.
+func (s *Server) SetHostLANInfo(fn func() (ip string, mac string)) {
+	s.hostLANInfo = fn
 }
 
 // NewServer constructs an api Server. The auth service is mandatory; if you

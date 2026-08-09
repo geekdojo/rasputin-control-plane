@@ -17,7 +17,7 @@
 
 import { Check, Settings as SettingsIcon, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { Btn, PageShell, PageHeader, PageBody, SectionLabel, Hint, Input, Select, Tok, EnabledToggle, DIM, FG, HAIR } from '../../../components/kit';
+import { Btn, PageShell, PageHeader, PageBody, SectionLabel, Hint, Input, Select, Tok, EnabledToggle, CopyButton, DIM, FG, HAIR } from '../../../components/kit';
 import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
 import { THEMES, useTheme, type ThemeMeta } from '../../../lib/theme';
 import { DeploymentModePicker, MODES } from '../../../components/DeploymentModePicker';
@@ -27,6 +27,7 @@ import {
   enableObs,
   getBMCBackends,
   getBMCConfig,
+  getDNSForwarding,
   getJob,
   getObsStatus,
   getOperatorKeys,
@@ -34,12 +35,13 @@ import {
   listNodes,
   setBMCConfig,
   setDeploymentMode,
+  setDNSForwarding,
   setOperatorKeys,
   probeBMC,
   type BMCProbeResult,
 } from '../../../lib/api';
 import { validateSSHKey } from '../../../lib/enroll';
-import type { BMCBackendInfo, BMCConfigView, DeploymentMode, Node, ObsStatus, SetupState } from '../../../lib/types';
+import type { BMCBackendInfo, BMCConfigView, DeploymentMode, DNSForwarding, Node, ObsStatus, SetupState } from '../../../lib/types';
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
@@ -68,6 +70,9 @@ export default function SettingsPage() {
 
         <div style={{ height: 32 }} />
         <DeploymentModeSection />
+
+        <div style={{ height: 32 }} />
+        <DNSForwardingSection />
 
         <div style={{ height: 32 }} />
         <BMCSection />
@@ -563,6 +568,124 @@ function BMCSection() {
           onConfirm={() => void apply()}
           onCancel={() => setConfirming(false)}
         />
+      )}
+    </>
+  );
+}
+
+// --- Network DNS (AA-11 forwarding stub) ------------------------------------
+
+// Lets the control plane serve DNS for the whole LAN (Mode B): internal names
+// answered authoritatively, everything else forwarded on. The reservation nudge
+// (CP IP + MAC) is the durable fix for DHCP moving the CP's address out from
+// under a "point your router at Rasputin" setup (ADR-0004 §10).
+function DNSForwardingSection() {
+  const [cfg, setCfg] = useState<DNSForwarding | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [upstream, setUpstream] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    getDNSForwarding()
+      .then((c) => {
+        if (!alive) return;
+        setCfg(c);
+        setUpstream(c.upstream);
+      })
+      .catch((e) => alive && setErr(String(e)));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function apply(next: { enabled: boolean; upstream: string }) {
+    setBusy(true);
+    setErr(null);
+    try {
+      const c = await setDNSForwarding(next);
+      setCfg(c);
+      setUpstream(c.upstream);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <SectionLabel>NETWORK DNS</SectionLabel>
+      <Hint style={{ marginBottom: 16 }}>
+        Let Rasputin answer DNS for your whole network, so app names like{' '}
+        <span style={{ color: DIM }}>jellyfin.&lt;your-cluster&gt;.internal</span> work on every device. Rasputin
+        resolves your cluster&apos;s internal names and forwards everything else on to the internet. Off by
+        default; most useful when Rasputin is a device on your existing network (Mode B).
+      </Hint>
+
+      {cfg === null && !err && <Hint>Loading…</Hint>}
+
+      {cfg && (
+        <div style={{ maxWidth: 640 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+            <EnabledToggle enabled={cfg.enabled} onToggle={() => !busy && apply({ enabled: !cfg.enabled, upstream })} />
+            <span style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+              {cfg.enabled ? 'ANSWERING DNS' : 'OFF'}
+            </span>
+          </div>
+
+          {!cfg.enabled && (
+            <Hint>
+              Turn on to make Rasputin your network&apos;s DNS resolver. You&apos;ll then point your router&apos;s DNS
+              at the control plane.
+            </Hint>
+          )}
+
+          {cfg.enabled && (
+            <>
+              {cfg.controlPlaneIp && (
+                <Hint style={{ marginBottom: 12 }}>
+                  Point your router&apos;s DNS server at <span style={{ color: FG }}>{cfg.controlPlaneIp}</span>.
+                  {cfg.controlPlaneMac && (
+                    <>
+                      {' '}To keep it working after a reboot, reserve this address in your router by MAC —{' '}
+                      <span style={{ color: FG }}>{cfg.controlPlaneMac}</span>{' '}
+                      <CopyButton value={cfg.controlPlaneMac} label="COPY" /> — so the control plane&apos;s address never
+                      changes.
+                    </>
+                  )}
+                </Hint>
+              )}
+
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+                <span style={{ color: DIM, fontSize: 10, minWidth: 150 }}>Forward other lookups to</span>
+                <Input value={upstream} onChange={(e) => setUpstream(e.target.value)} placeholder="auto" style={{ width: 180 }} />
+                <Btn small disabled={busy} onClick={() => apply({ enabled: true, upstream })}>
+                  SAVE
+                </Btn>
+              </div>
+
+              {cfg.effectiveUpstream && !cfg.fellBack && (
+                <Hint>
+                  Forwarding to <span style={{ color: FG }}>{cfg.effectiveUpstream}</span>
+                  {upstream.trim() === '' && ' (auto)'}.
+                </Hint>
+              )}
+              {cfg.fellBack && (
+                <Hint warn>
+                  Couldn&apos;t auto-detect a safe upstream on your network, so lookups go to {cfg.effectiveUpstream} for
+                  now. Enter your own resolver above if you&apos;d prefer.
+                </Hint>
+              )}
+            </>
+          )}
+
+          {err && (
+            <Hint warn style={{ marginTop: 8 }}>
+              {err}
+            </Hint>
+          )}
+        </div>
       )}
     </>
   );
