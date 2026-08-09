@@ -33,6 +33,10 @@ type Responder struct {
 	mname   string // primary nameserver / SOA MNAME — we are it
 	rname   string // SOA RNAME (hostmaster.<zone>), '@' encoded as a label dot
 	sources []Source
+	// forwarder, when set, proxies off-zone queries to an upstream instead of
+	// REFUSEing them (AA-11 forwarding stub, ADR-0004 §10). nil keeps the pure
+	// authoritative posture. See WithForwarder.
+	forwarder *Forwarder
 }
 
 // NewResponder builds a responder authoritative for zone (any case / trailing
@@ -46,6 +50,14 @@ func NewResponder(zone string, sources ...Source) *Responder {
 		rname:   "hostmaster." + z,
 		sources: sources,
 	}
+}
+
+// WithForwarder attaches an optional off-zone forwarding stub (AA-11) and
+// returns the responder for chaining. Passing nil is a no-op that keeps the
+// pure authoritative (REFUSE off-zone) behavior.
+func (r *Responder) WithForwarder(f *Forwarder) *Responder {
+	r.forwarder = f
+	return r
 }
 
 // ServeDNS implements dns.Handler.
@@ -108,9 +120,17 @@ func (r *Responder) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	switch {
 	case !inZone:
 		// Not in our zone, and not one of the extra unicast names we serve
-		// (those would have matched hasRec above). We are not authoritative for
-		// it — REFUSE rather than assert a false NXDOMAIN. This is the correct
-		// answer for, e.g., an arbitrary *.local other than <cluster>.local.
+		// (those would have matched hasRec above). With the optional AA-11
+		// forwarding stub attached, proxy the query to the upstream so the CP can
+		// serve as a client's whole-network resolver (ADR-0004 §10); the
+		// forwarder self-guards (source ACL, self-loop, rate limit) and returns
+		// false when it declines. Absent a forwarder, or on decline, we are not
+		// authoritative for the name — REFUSE rather than assert a false NXDOMAIN
+		// (the correct answer for, e.g., an arbitrary *.local other than
+		// <cluster>.local).
+		if r.forwarder.tryForward(w, req) {
+			return
+		}
 		m.Authoritative = false
 		m.Rcode = dns.RcodeRefused
 	case hasRec:
