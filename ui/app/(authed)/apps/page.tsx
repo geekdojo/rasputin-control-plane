@@ -13,7 +13,7 @@ import {
   stopApp,
 } from '../../../lib/api';
 import type { App, CatalogTile } from '../../../lib/types';
-import { appAccess, type AppAccess } from '../../../lib/appurl';
+import { appAccess, preferredAppUrl, type AppAccess } from '../../../lib/appurl';
 import {
   Badge,
   Btn,
@@ -191,9 +191,10 @@ function AppRow({
   const [hover, setHover] = useState(false);
   const transient = app.lastStatus === 'deploying' || app.lastStatus === 'stopping';
   const canStop = app.lastStatus === 'running' || app.lastStatus === 'deploying' || app.lastStatus === 'failed';
-  // Hand off the tailnet name — reachable from anywhere on the tailnet, and the
-  // one name every app has (LAN is an opt-in extra, surfaced in the detail drawer).
-  const openUrl = access?.tailnet ?? null;
+  // Hand off the URL matching the operator's current network: a LAN-exposed app
+  // opened from a LAN view uses its .lan name (the tailnet name NXDOMAINs on the
+  // LAN); otherwise the tailnet name. Both are always in the detail drawer.
+  const openUrl = preferredAppUrl(access);
   const canOpen = app.lastStatus === 'running' && !!openUrl;
   // The action that runs `docker compose up` reads DEPLOY the first time and
   // START once the app has run before (stop does `compose down`, so bringing it

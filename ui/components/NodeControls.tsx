@@ -29,7 +29,7 @@ import {
   type NodeRemovalImpact,
 } from '../lib/api';
 import type { App, BMCPowerState, DeploymentMode, Node } from '../lib/types';
-import { appAccess } from '../lib/appurl';
+import { appAccess, preferredAppUrl } from '../lib/appurl';
 import { BMC_CAP_CONSOLE, BMC_CAP_POWER, BMC_CAP_RESET, type BmcCaps } from '../lib/bmc';
 import { ConfirmModal } from './ConfirmModal';
 import { ACCENT, accentA, MONO, STATUS_COLOR } from './ui-theme';
@@ -183,12 +183,13 @@ function appStatusColor(status: App['lastStatus']): string {
 
 // DeployedAppRow — one app under a node's DEPLOYED APPS list. When the app is
 // running and exposes a web port, the whole row is a link that opens the app at
-// its app-access URL in a new tab (same tailnet name as the Apps-page OPEN
-// button); otherwise it's a plain, non-clickable status row.
+// its app-access URL in a new tab (network-matched, same as the Apps-page OPEN
+// button — .lan from a LAN view, tailnet otherwise); otherwise it's a plain,
+// non-clickable status row.
 function DeployedAppRow({ app, clusterId }: { app: App; clusterId: string }) {
   const [hover, setHover] = useState(false);
-  const access = appAccess(app, clusterId);
-  const canOpen = app.lastStatus === 'running' && !!access;
+  const openUrl = preferredAppUrl(appAccess(app, clusterId));
+  const canOpen = app.lastStatus === 'running' && !!openUrl;
 
   const rowStyle: CSSProperties = {
     display: 'flex',
@@ -219,10 +220,10 @@ function DeployedAppRow({ app, clusterId }: { app: App; clusterId: string }) {
   if (!canOpen) return <div style={rowStyle}>{content}</div>;
   return (
     <a
-      href={access!.tailnet}
+      href={openUrl!}
       target="_blank"
       rel="noopener noreferrer"
-      title={`Open ${app.name} — ${access!.tailnet}`}
+      title={`Open ${app.name} — ${openUrl}`}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{ ...rowStyle, cursor: 'pointer' }}
