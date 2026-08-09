@@ -593,6 +593,24 @@ export interface SetupState {
   clusterId: string;
 }
 
+// DNS forwarding (AA-11 / ADR-0004 §10) — the control plane can answer DNS for
+// the whole LAN: internal names authoritatively, everything else forwarded on.
+// GET/POST /api/settings/dns-forwarding.
+export interface DNSForwarding {
+  enabled: boolean;
+  // Operator-configured upstream ("" = auto: inherit the CP's DHCP resolver,
+  // else a public fallback).
+  upstream: string;
+  // What the running forwarder actually forwards to now.
+  effectiveUpstream: string;
+  // effectiveUpstream is the public default because no safe upstream was found.
+  fellBack: boolean;
+  // The control plane's LAN IP + MAC — where to point the router's DNS, and the
+  // MAC to reserve so that address survives reboots.
+  controlPlaneIp: string;
+  controlPlaneMac: string;
+}
+
 // Alerts — surfaced by the v0 server-side aggregator at GET /api/alerts.
 // Mirror of proto/alerts.go. v0 is binary severity (no INFO tier); INFO-
 // level signals live in their own affordances. Drill-through uses

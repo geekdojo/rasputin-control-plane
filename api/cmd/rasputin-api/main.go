@@ -786,6 +786,16 @@ func main() {
 		srv.SetDNSForwardingApplier(applyDNS)
 	}
 
+	// Host LAN IP + MAC for the DNS-forwarding reservation guidance (AA-11) —
+	// available whether or not the nameserver runs.
+	srv.SetHostLANInfo(func() (string, string) {
+		ip := primaryLanIP()
+		if ip == nil {
+			return "", ""
+		}
+		return ip.String(), hardwareAddrForIP(ip)
+	})
+
 	// bmc.configure: delivers the operator's Settings selection to the
 	// host agent (bmc-settings.md §4); refuses while a console is open or
 	// a bmc.power job is running. Registered here because it shares the
@@ -1145,6 +1155,35 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// hardwareAddrForIP returns the MAC of the interface holding ip, best-effort
+// ("" if not found). Used to recommend a DHCP reservation for the control plane
+// (AA-11) so its address survives reboots.
+func hardwareAddrForIP(ip net.IP) string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			var aip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				aip = v.IP
+			case *net.IPAddr:
+				aip = v.IP
+			}
+			if aip != nil && aip.Equal(ip) {
+				return iface.HardwareAddr.String()
+			}
+		}
+	}
+	return ""
 }
 
 // clusterHostname returns the cluster's mDNS name — "<cluster-id>.local" — or

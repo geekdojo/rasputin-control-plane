@@ -15,6 +15,21 @@ type dnsForwardingResponse struct {
 	Upstream          string `json:"upstream"`          // operator-configured ("" = auto)
 	EffectiveUpstream string `json:"effectiveUpstream"` // what the forwarder uses now
 	FellBack          bool   `json:"fellBack"`          // effective is the public default
+	// ControlPlaneIP/MAC let the UI tell the operator where to point their
+	// router's DNS and recommend a DHCP reservation (by MAC) so the CP's address
+	// survives reboots — the durable fix for the DHCP-churn that otherwise breaks
+	// a "point your router at Rasputin" setup. Empty when unavailable.
+	ControlPlaneIP  string `json:"controlPlaneIp"`
+	ControlPlaneMAC string `json:"controlPlaneMac"`
+}
+
+// fillHostLAN adds the control plane's LAN IP + MAC (best-effort) for the
+// reservation guidance. No-op when main didn't wire the host-info hook.
+func (s *Server) fillHostLAN(resp *dnsForwardingResponse) {
+	if s.hostLANInfo == nil {
+		return
+	}
+	resp.ControlPlaneIP, resp.ControlPlaneMAC = s.hostLANInfo()
 }
 
 // applyAndFill re-applies the persisted setting to the running nameserver (a
@@ -45,6 +60,7 @@ func (s *Server) handleGetDNSForwarding(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.fillHostLAN(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -72,5 +88,6 @@ func (s *Server) handleSetDNSForwarding(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.fillHostLAN(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }

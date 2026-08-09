@@ -47,13 +47,18 @@ func TestDNSForwardingHandlers(t *testing.T) {
 		t.Errorf("IPv6 upstream should 400, got %d %s", w.Code, w.Body.String())
 	}
 
-	// With the reconcile hook wired, the response surfaces the effective upstream
-	// + fellBack (what the running forwarder resolved to).
+	// With the reconcile + host-info hooks wired, the response surfaces the
+	// effective upstream + fellBack and the CP's IP/MAC (reservation guidance).
+	f.srv.SetHostLANInfo(func() (string, string) { return "192.168.207.56", "d8:3a:dd:12:34:56" })
 	f.srv.SetDNSForwardingApplier(func(context.Context) (string, bool, error) {
 		return "1.1.1.1:53", true, nil
 	})
 	w = f.do(t, http.MethodPost, "/api/settings/dns-forwarding", `{"enabled":true,"upstream":""}`, c)
-	if got := decode(w); got.EffectiveUpstream != "1.1.1.1:53" || !got.FellBack {
+	got := decode(w)
+	if got.EffectiveUpstream != "1.1.1.1:53" || !got.FellBack {
 		t.Errorf("applier should surface effective + fellBack, got %+v", got)
+	}
+	if got.ControlPlaneIP != "192.168.207.56" || got.ControlPlaneMAC != "d8:3a:dd:12:34:56" {
+		t.Errorf("host LAN info should surface, got ip=%q mac=%q", got.ControlPlaneIP, got.ControlPlaneMAC)
 	}
 }
