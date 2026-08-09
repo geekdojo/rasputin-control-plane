@@ -21,11 +21,10 @@ export default function TrustPage() {
   // after hydration so commands and links work when the operator reaches
   // the box by IP or a custom hostname instead of rasputin.local.
   const [host, setHost] = useState('rasputin.local');
-  // The cluster's mDNS name + the CP's LAN IP, from the unauthenticated setup-
-  // state endpoint. Both feed the REACH THIS SYSTEM block; best-effort, so it
-  // degrades to just the reached host if the call fails.
+  // The cluster's mDNS name, from the unauthenticated setup-state endpoint. It
+  // feeds the REACH THIS SYSTEM block; best-effort, so it degrades to just the
+  // reached host if the call fails.
   const [clusterHostname, setClusterHostname] = useState('');
-  const [serverIP, setServerIP] = useState('');
   useEffect(() => {
     if (window.location.hostname) setHost(window.location.hostname);
     fetch('/api/setup/state')
@@ -33,18 +32,18 @@ export default function TrustPage() {
       .then((s) => {
         if (!s) return;
         if (typeof s.clusterHostname === 'string') setClusterHostname(s.clusterHostname);
-        if (typeof s.serverIP === 'string') setServerIP(s.serverIP);
       })
       .catch(() => {});
   }, []);
 
   const caURL = `http://${host}/mesh-ca.pem`;
   const secureHome = `https://${host}/login`;
-  // "Reach this system" addresses. The QR prefers the cluster's .local name — it's
-  // the identity that works end-to-end (CA install AND the later passkey, whose RP
-  // ID is <cluster>.local) and a same-segment phone resolves it over mDNS. The IP
-  // is shown as copyable text for a device on another VLAN that can't resolve the
-  // name. Falls back to the reached host on a dev box (no cluster name).
+  // "Reach this system" address. The QR encodes the cluster's .local name — the
+  // identity that works end-to-end (CA install AND the later passkey, whose RP ID
+  // is <cluster>.local). A same-segment phone resolves it over mDNS, and off-
+  // segment it resolves by unicast once the control plane's nameserver answers
+  // <cluster>.local (E3) — so the old "reach it by IP" fallback is gone. Falls
+  // back to the reached host on a dev box with no cluster name.
   const qrURL = `http://${clusterHostname || host}/`;
 
   const macCmd = `curl -fsS ${caURL} -o rasputin-mesh-ca.pem && sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rasputin-mesh-ca.pem`;
@@ -97,14 +96,12 @@ export default function TrustPage() {
           </p>
         </div>
 
-        {/* Reach-this-system: the addresses + a QR to open on another device.
-            Serves the cross-VLAN case (an operator who can't mDNS-resolve the
-            name still learns the IP) and easy phone hopping (scan to open).
-            NOTE: this is a `.local`-era reach stopgap. When the control plane
-            serves DNS (app-access AA-8) and answers <cluster>.local by unicast,
-            the QR can encode the name unconditionally and the IP fallback goes
-            away — but the passkey RP ID stays <cluster>.local (ADR-0003 lock),
-            so DNS only makes .local resolve wider; it never moves passkey off it. */}
+        {/* Reach-this-system: the name + a QR to open on another device.
+            The control plane's nameserver now answers <cluster>.local by unicast
+            (E3), so the name resolves off-segment too and the old IP fallback is
+            retired — the QR carries the name unconditionally. The passkey RP ID
+            stays <cluster>.local (ADR-0003 lock); DNS only makes .local resolve
+            wider, it never moves passkey off the name. */}
         <section
           style={{
             border: `1px solid ${HAIR}`,
@@ -121,13 +118,12 @@ export default function TrustPage() {
               <QrCode size={12} color={ACCENT} />
               <SectionLabel>REACH THIS SYSTEM</SectionLabel>
             </div>
-            {clusterHostname && <AddrRow label="name" value={clusterHostname} />}
-            {serverIP && <AddrRow label="ip" value={serverIP} />}
-            {!clusterHostname && !serverIP && <AddrRow label="host" value={host} />}
-            <Hint>
-              Scan the code to open this system on your phone. From another network where the name
-              doesn&apos;t resolve, reach it by IP.
-            </Hint>
+            {clusterHostname ? (
+              <AddrRow label="name" value={clusterHostname} />
+            ) : (
+              <AddrRow label="host" value={host} />
+            )}
+            <Hint>Scan the code to open this system on your phone.</Hint>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
             <div style={{ padding: 6, background: '#fff', borderRadius: 6 }}>
