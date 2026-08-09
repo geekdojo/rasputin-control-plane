@@ -7,19 +7,21 @@ import {
   createApp,
   deployApp,
   getCatalogTile,
+  getSetupState,
   installCatalogApp,
   listCatalog,
   listNodes,
   openInventoryWS,
 } from '../../../lib/api';
 import type { App, CatalogCollection, CatalogTile, Node } from '../../../lib/types';
-import { accessUrl } from '../../../lib/appurl';
+import { appAccess } from '../../../lib/appurl';
 import {
   Badge,
   Btn,
   CopyButton,
   DIM,
   Drawer,
+  EnabledToggle,
   FG,
   HAIR,
   Hint,
@@ -86,10 +88,15 @@ export default function AppCatalogPage() {
   const [customOpen, setCustomOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeCat, setActiveCat] = useState('all');
+  // Cluster id seeds the app-access hostname (<app>.<cluster-id>.internal). ''
+  // until the fetch lands and '' on a dev box — appAccess falls back to
+  // "rasputin" then, matching the api's baseDomainFor.
+  const [clusterId, setClusterId] = useState('');
 
   useEffect(() => {
     listCatalog().then(setTiles).catch((e) => setErr(String(e)));
     listNodes().then(setNodes).catch(() => {});
+    getSetupState().then((s) => setClusterId(s.clusterId ?? '')).catch(() => {});
     const closeInv = openInventoryWS(() => listNodes().then(setNodes).catch(() => {}));
     return () => closeInv();
   }, []);
@@ -182,10 +189,13 @@ export default function AppCatalogPage() {
         <InstallDrawer
           tile={selected}
           deployTargets={deployTargets.filter((n) => archOK(selected, n))}
+          clusterId={clusterId}
           onClose={() => setSelected(null)}
         />
       )}
-      {customOpen && <CustomDrawer deployTargets={deployTargets} onClose={() => setCustomOpen(false)} />}
+      {customOpen && (
+        <CustomDrawer deployTargets={deployTargets} clusterId={clusterId} onClose={() => setCustomOpen(false)} />
+      )}
     </PageShell>
   );
 }
@@ -286,14 +296,39 @@ function CustomCard({ onOpen }: { onOpen: () => void }) {
   );
 }
 
+// ExposureField — the per-app LAN opt-in (ADR-0004 §9). Off (default) = the app
+// is tailnet-only; on adds the <app>.lan.<cluster-id>.internal name and a LAN
+// bind so other devices on the local network can reach it. It's a real bind, not
+// just a DNS record — tailnet-only apps aren't reachable from the LAN at all.
+function ExposureField({ exposeLan, onChange }: { exposeLan: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div>
+      <SectionLabel>LAN ACCESS</SectionLabel>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <EnabledToggle
+          enabled={exposeLan}
+          onToggle={() => onChange(!exposeLan)}
+          title={exposeLan ? 'LAN access on — click for tailnet-only' : 'Tailnet-only — click to allow LAN access'}
+        />
+        <span style={{ color: FG, fontSize: 10 }}>{exposeLan ? 'Reachable on your LAN' : 'Tailnet only'}</span>
+      </div>
+      <Hint style={{ marginTop: 6 }}>
+        {exposeLan
+          ? 'Devices on your local network can reach it at its .lan name. It stays reachable over your tailnet too.'
+          : 'Reachable only over your tailnet — the safe default. Turn on to also let devices on your LAN reach it.'}
+      </Hint>
+    </div>
+  );
+}
+
 // Footer shown after an app is declared (install or custom) — offers deploy,
 // then the "what next": where to open it + the tile's first-run note.
-function InstalledFooter({ app, node, postInstall }: { app: App; node?: Node; postInstall?: string }) {
+function InstalledFooter({ app, clusterId, postInstall }: { app: App; clusterId: string; postInstall?: string }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [deployed, setDeployed] = useState(false);
 
-  const url = accessUrl(node, app.targetNode, app.publishedPort);
+  const access = appAccess(app, clusterId);
 
   async function deployNow() {
     setBusy(true);
@@ -316,13 +351,24 @@ function InstalledFooter({ app, node, postInstall }: { app: App; node?: Node; po
       </Hint>
       {deployed ? (
         <>
-          {url && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ color: DIM, fontSize: 10 }}>Open it at</span>
-              <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontSize: 10, textDecoration: 'none' }}>
-                {url} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
-              </a>
-              <CopyButton value={url} label="COPY" />
+          {access && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ color: DIM, fontSize: 10 }}>Open it at</span>
+                <a href={access.tailnet} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontSize: 10, textDecoration: 'none' }}>
+                  {access.tailnet} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
+                </a>
+                <CopyButton value={access.tailnet} label="COPY" />
+              </div>
+              {access.lan && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ color: DIM, fontSize: 10 }}>On your LAN</span>
+                  <a href={access.lan} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontSize: 10, textDecoration: 'none' }}>
+                    {access.lan} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
+                  </a>
+                  <CopyButton value={access.lan} label="COPY" />
+                </div>
+              )}
             </div>
           )}
           {postInstall && <Hint>{postInstall}</Hint>}
@@ -349,19 +395,27 @@ function InstalledFooter({ app, node, postInstall }: { app: App; node?: Node; po
 function InstallDrawer({
   tile,
   deployTargets,
+  clusterId,
   onClose,
 }: {
   tile: CatalogTile;
   deployTargets: Node[];
+  clusterId: string;
   onClose: () => void;
 }) {
   const [name, setName] = useState(tile.id);
   const [targetNode, setTargetNode] = useState('');
   const [compose, setCompose] = useState<string | null>(tile.composeYaml ?? null);
+  // LAN exposure opt-in. Default off (tailnet-only) — the safe default per
+  // ADR-0004 §9; not pre-filled from tile.exposureDefault (see PR note).
+  const [exposeLan, setExposeLan] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
   const preview = tile.status === 'preview';
+  // Only a fronted (primary) port is reachable, so LAN access is meaningful only
+  // for apps that publish one — hide the toggle for port-less tiles.
+  const hasWebPort = tile.ports.some((p) => p.primary);
 
   useEffect(() => {
     if (!preview && compose === null) {
@@ -377,7 +431,7 @@ function InstallDrawer({
     setBusy(true);
     setErr(null);
     try {
-      setInstalled(await installCatalogApp(tile.id, { targetNode, name }));
+      setInstalled(await installCatalogApp(tile.id, { targetNode, name, exposeLan }));
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -450,11 +504,7 @@ function InstallDrawer({
         {preview ? (
           <Hint warn>Coming soon — this app is on the roadmap but isn&apos;t available to install yet.</Hint>
         ) : installed ? (
-          <InstalledFooter
-            app={installed}
-            node={deployTargets.find((n) => n.id === installed.targetNode)}
-            postInstall={tile.postInstall}
-          />
+          <InstalledFooter app={installed} clusterId={clusterId} postInstall={tile.postInstall} />
         ) : noTargets ? (
           <Hint warn>
             No online {tile.arch === 'both' ? 'compute or controlplane' : tile.arch} node is available. Bring a matching node
@@ -472,6 +522,7 @@ function InstallDrawer({
                 ))}
               </Select>
             </div>
+            {hasWebPort && <ExposureField exposeLan={exposeLan} onChange={setExposeLan} />}
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <Btn variant="primary" disabled={busy || !name || !targetNode} onClick={install}>
                 <UploadCloud size={11} /> {busy ? 'INSTALLING…' : 'INSTALL'}
@@ -486,7 +537,7 @@ function InstallDrawer({
   );
 }
 
-function CustomDrawer({ deployTargets, onClose }: { deployTargets: Node[]; onClose: () => void }) {
+function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: Node[]; clusterId: string; onClose: () => void }) {
   const [name, setName] = useState('');
   const [targetNode, setTargetNode] = useState('');
   const [composeYaml, setComposeYaml] = useState('');
@@ -516,7 +567,7 @@ function CustomDrawer({ deployTargets, onClose }: { deployTargets: Node[]; onClo
     <Drawer title="CUSTOM APP" onClose={onClose}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         {installed ? (
-          <InstalledFooter app={installed} node={deployTargets.find((n) => n.id === installed.targetNode)} />
+          <InstalledFooter app={installed} clusterId={clusterId} />
         ) : noTargets ? (
           <Hint warn>No online compute or controlplane node is available. Bring one online first.</Hint>
         ) : (

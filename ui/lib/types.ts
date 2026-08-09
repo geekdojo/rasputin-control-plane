@@ -241,6 +241,11 @@ export interface App {
   publishedPort?: number;
   // Catalog tile id this app was installed from ('' / absent = custom compose).
   sourceTile?: string;
+  // Whether the app is LAN-exposed (ADR-0004 §9). Default false: tailnet-only —
+  // reachable at the bare <app>.<cluster-id>.internal name. When true it also
+  // gets the <app>.lan.<cluster-id>.internal name. LAN is always an explicit
+  // opt-in (no install-form toggle yet — see app-access.md).
+  exposeLan?: boolean;
   lastStatus: AppStatus;
   lastDetail?: string;
   lastDeployed?: string;
