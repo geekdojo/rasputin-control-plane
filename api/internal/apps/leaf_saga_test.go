@@ -105,7 +105,9 @@ func TestDeleteLeaf_SendsRemove(t *testing.T) {
 	sub := fakeLeafAgent(t, nc, "n", got)
 	defer sub.Unsubscribe()
 
-	if _, err := deleteLeaf(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	removed := ""
+	rm := func(appID string) error { removed = appID; return nil }
+	if _, err := deleteLeaf(store, inv, nc, rm)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
 		t.Fatalf("deleteLeaf: %v", err)
 	}
 	select {
@@ -115,5 +117,8 @@ func TestDeleteLeaf_SendsRemove(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("agent never received the teardown")
+	}
+	if removed != "a" {
+		t.Errorf("removeLeaf called with %q, want \"a\" (CP-side leaf dir cleanup)", removed)
 	}
 }

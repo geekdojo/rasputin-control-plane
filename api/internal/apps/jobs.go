@@ -73,15 +73,13 @@ func deployLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMint
 			sc.Log("warn", "mint leaf failed (app is deployed; proxy unavailable): "+err.Error())
 			return nil, nil
 		}
-		payload, _ := json.Marshal(cmd)
-		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppLeafSubject(app.TargetNode), payload)
+		ok, detail, err := deliverLeaf(sc.Ctx, nc, app.TargetNode, cmd)
 		if err != nil {
 			sc.Log("warn", "deliver leaf failed (app is deployed; proxy unavailable): "+err.Error())
 			return nil, nil
 		}
-		var ack proto.AppLeafAck
-		if json.Unmarshal(msg.Data, &ack); !ack.OK {
-			sc.Log("warn", "node rejected leaf: "+ack.Detail)
+		if !ok {
+			sc.Log("warn", "node rejected leaf: "+detail)
 			return nil, nil
 		}
 		sc.Log("info", "delivered TLS leaf + proxy route")
@@ -89,20 +87,54 @@ func deployLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMint
 	}
 }
 
-// deleteLeaf tears down the app's leaf + proxy route on the target node before
-// the ledger row is removed (ADR-0004 §6). Best-effort — an offline node must
-// not block delete (its files go when it's reflashed / the app never returns).
-func deleteLeaf(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+// deliverLeaf ships an AppLeafCmd to nodeID over the bus and reports whether the
+// node accepted it (ack.OK) plus any rejection detail. Shared by the deploy saga
+// and the rotation sweep so mint-and-ship lives in one place.
+func deliverLeaf(ctx context.Context, nc *nats.Conn, nodeID string, cmd proto.AppLeafCmd) (ok bool, detail string, err error) {
+	payload, err := json.Marshal(cmd)
+	if err != nil {
+		return false, "", err
+	}
+	msg, err := nc.RequestWithContext(ctx, proto.AppLeafSubject(nodeID), payload)
+	if err != nil {
+		return false, "", err
+	}
+	var ack proto.AppLeafAck
+	if err := json.Unmarshal(msg.Data, &ack); err != nil {
+		return false, "", err
+	}
+	return ack.OK, ack.Detail, nil
+}
+
+// LeafRemover deletes an app's on-disk leaf material on the control plane
+// (keyed by AppID). main backs it with an os.RemoveAll of the app's leaf dir;
+// nil is a no-op (dev without a CA — no leaves were ever persisted).
+type LeafRemover func(appID string) error
+
+// deleteLeaf tears down the app's leaf + proxy route on the target node, and
+// removes the CP-side leaf material, before the ledger row is removed
+// (ADR-0004 §6). Best-effort — an offline node must not block delete (its files
+// go when it's reflashed / the app never returns).
+func deleteLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		app, err := loadApp(sc, store, inv)
 		if err != nil {
-			// Node gone/de-registered: nothing to tear down on it. Let delete proceed.
+			// Node gone/de-registered: nothing to tear down on it. Let delete
+			// proceed, but still clean the CP-side leaf dir if we can name the app.
 			sc.Log("warn", "skip leaf teardown: "+err.Error())
+			if spec, perr := parseSpec(sc.Spec); perr == nil && removeLeaf != nil {
+				_ = removeLeaf(spec.AppID)
+			}
 			return nil, nil
 		}
 		cmd, _ := json.Marshal(proto.AppLeafCmd{AppID: app.ID, Remove: true})
 		if _, err := nc.RequestWithContext(sc.Ctx, proto.AppLeafSubject(app.TargetNode), cmd); err != nil {
 			sc.Log("warn", "leaf teardown rpc failed: "+err.Error())
+		}
+		if removeLeaf != nil {
+			if err := removeLeaf(app.ID); err != nil {
+				sc.Log("warn", "remove CP leaf dir failed: "+err.Error())
+			}
 		}
 		return nil, nil
 	}
@@ -130,12 +162,12 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 //     remove the record (delete should still work on a dead node), with
 //     the caveat that a container may reappear if that node returns.
 //  2. remove — delete the ledger row + emit the `deleted` change event.
-func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
+func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.delete",
 		Steps: []jobs.WorkflowStep{
 			{Name: "stop", Timeout: 40 * time.Second, Do: deleteStop(store, inv, nc)},
-			{Name: "teardown_leaf", Timeout: 10 * time.Second, Do: deleteLeaf(store, inv, nc)},
+			{Name: "teardown_leaf", Timeout: 10 * time.Second, Do: deleteLeaf(store, inv, nc, removeLeaf)},
 			{Name: "remove", Timeout: 2 * time.Second, Do: deleteRemove(store, nc)},
 		},
 	}
@@ -164,6 +196,98 @@ func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.W
 			{Name: "list", Timeout: 2 * time.Second, Do: reconcileList(store)},
 			{Name: "sweep", Timeout: 90 * time.Second, Do: reconcileSweep(store, inv, nc)},
 		},
+	}
+}
+
+// LeafRotator re-mints an app's per-app TLS leaf against its on-disk copy. It
+// returns the delivery command, whether a fresh leaf was minted this sweep
+// (renewed==true → the leaf entered its renew window or its SANs drifted and
+// must be re-shipped), and a commit closure the caller invokes ONLY after the
+// node accepts the fresh leaf — so an offline node retries on the next sweep
+// instead of the on-disk leaf silently advancing past what the node holds. nil
+// disables rotation (no CA / dev).
+type LeafRotator func(app *App) (cmd proto.AppLeafCmd, renewed bool, commit func() error, err error)
+
+// RotateLeavesWorkflow is the timer half of the per-app leaf lifecycle
+// (ADR-0004 §6): it periodically re-mints per-app TLS leaves before they expire
+// and re-ships the fresh leaf to the app's node, which hot-reloads its proxy.
+// Mint-on-deploy and teardown-on-delete are the saga's job; this closes the
+// "leaves must not expire" gap. Like the reconcile sweep it never fails as a
+// whole — per-app errors are logged and counted, not fatal.
+func RotateLeavesWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.Workflow {
+	return jobs.Workflow{
+		Kind: "apps.leaf_rotate",
+		Steps: []jobs.WorkflowStep{
+			{Name: "rotate", Timeout: 90 * time.Second, Do: rotateLeavesSweep(store, inv, nc, rotate)},
+		},
+	}
+}
+
+func rotateLeavesSweep(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		if rotate == nil {
+			return nil, nil
+		}
+		all, err := store.List(sc.Ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list apps: %w", err)
+		}
+
+		var checked, rotated, shipped, skipped, failed int
+		for _, app := range all {
+			if app.PublishedPort == 0 {
+				continue // headless app: no proxy, no leaf
+			}
+			checked++
+			cmd, renewed, commit, err := rotate(app)
+			if err != nil {
+				failed++
+				sc.Log("warn", fmt.Sprintf("%s: re-mint leaf: %v", app.Name, err))
+				continue
+			}
+			if !renewed {
+				continue // leaf still has more than renewWindow of life; nothing to do
+			}
+			rotated++
+
+			// Ship only to an online node. If it's offline the fresh leaf is
+			// NOT committed, so the next sweep re-mints and retries — the app's
+			// leaf can't quietly expire on a node that was down during rotation.
+			node, err := inv.Get(sc.Ctx, app.TargetNode)
+			if err != nil || node == nil || computeNodeStatus(node.LastSeen) != proto.StatusOnline {
+				skipped++
+				sc.Log("info", fmt.Sprintf("%s: leaf due for rotation but node %s offline — retrying next sweep", app.Name, app.TargetNode))
+				continue
+			}
+
+			ctx, cancel := context.WithTimeout(sc.Ctx, 5*time.Second)
+			ok, detail, derr := deliverLeaf(ctx, nc, app.TargetNode, cmd)
+			cancel()
+			if derr != nil {
+				failed++
+				sc.Log("warn", fmt.Sprintf("%s: deliver rotated leaf: %v", app.Name, derr))
+				continue
+			}
+			if !ok {
+				failed++
+				sc.Log("warn", fmt.Sprintf("%s: node rejected rotated leaf: %s", app.Name, detail))
+				continue
+			}
+			if err := commit(); err != nil {
+				// Delivered but not persisted: harmless (next sweep re-mints and
+				// re-ships an equivalent leaf), but worth surfacing.
+				sc.Log("warn", fmt.Sprintf("%s: persist rotated leaf: %v", app.Name, err))
+			}
+			shipped++
+			sc.Log("info", fmt.Sprintf("%s: rotated + delivered fresh TLS leaf", app.Name))
+		}
+
+		sc.Log("info", fmt.Sprintf("checked=%d rotated=%d shipped=%d skipped=%d failed=%d",
+			checked, rotated, shipped, skipped, failed))
+		return json.Marshal(map[string]int{
+			"checked": checked, "rotated": rotated, "shipped": shipped,
+			"skipped": skipped, "failed": failed,
+		})
 	}
 }
 

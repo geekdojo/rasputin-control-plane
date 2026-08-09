@@ -462,14 +462,18 @@ func main() {
 	// Per-app TLS-leaf minter for the deploy saga (ADR-0004 §6): mints a Mesh-CA
 	// leaf for the app's FQDN(s) and fills the delivery command. nil (no CA)
 	// disables leaf delivery; the app still deploys, just without the proxy.
-	var mintAppLeaf apps.LeafMinter
+	var (
+		mintAppLeaf   apps.LeafMinter
+		rotateAppLeaf apps.LeafRotator
+		removeAppLeaf apps.LeafRemover
+	)
 	if meshCA != nil {
 		clusterID := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID"))
-		mintAppLeaf = func(app *apps.App) (proto.AppLeafCmd, error) {
-			certPEM, keyPEM, err := mesh.MintAppLeaf(meshCA, clusterID, app.Name, app.ExposeLAN)
-			if err != nil {
-				return proto.AppLeafCmd{}, err
-			}
+		appLeafDir := filepath.Join(dataDir, "tls", "apps")
+		// buildAppLeafCmd fills the delivery command from freshly-minted PEMs —
+		// shared by the deploy minter and the rotation path so the wire shape
+		// (FQDNs, upstream port) can't drift between them.
+		buildAppLeafCmd := func(app *apps.App, certPEM, keyPEM []byte) proto.AppLeafCmd {
 			names := mesh.AppLeafDNSNames(clusterID, app.Name, app.ExposeLAN)
 			cmd := proto.AppLeafCmd{
 				AppID:        app.ID,
@@ -482,13 +486,37 @@ func main() {
 			if len(names) > 1 {
 				cmd.LANFQDN = names[1]
 			}
-			return cmd, nil
+			return cmd
+		}
+		mintAppLeaf = func(app *apps.App) (proto.AppLeafCmd, error) {
+			certPEM, keyPEM, err := mesh.MintAppLeaf(meshCA, clusterID, app.Name, app.ExposeLAN)
+			if err != nil {
+				return proto.AppLeafCmd{}, err
+			}
+			return buildAppLeafCmd(app, certPEM, keyPEM), nil
+		}
+		// rotateAppLeaf is the disk-backed, renew-gated form used by the rotation
+		// sweep: it returns the current leaf (renewed=false) or a fresh in-memory
+		// one (renewed=true) plus a commit closure to persist it only after the
+		// node accepts delivery (apps.LeafRotator).
+		rotateAppLeaf = func(app *apps.App) (proto.AppLeafCmd, bool, func() error, error) {
+			dir := filepath.Join(appLeafDir, app.ID)
+			certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(meshCA, dir, clusterID, app.Name, app.ExposeLAN)
+			if err != nil {
+				return proto.AppLeafCmd{}, false, nil, err
+			}
+			commit := func() error { return mesh.CommitAppLeaf(dir, certPEM, keyPEM) }
+			return buildAppLeafCmd(app, certPEM, keyPEM), renewed, commit, nil
+		}
+		removeAppLeaf = func(appID string) error {
+			return os.RemoveAll(filepath.Join(appLeafDir, appID))
 		}
 	}
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
-	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn()))
+	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn()))
+	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
 		PublicBaseURL: publicBaseURL,
 		SelfNodeID:    selfNodeID,
@@ -747,10 +775,14 @@ func main() {
 	fwReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_FW_RECONCILE_INTERVAL"), 5*time.Minute)
 	appsReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_RECONCILE_INTERVAL"), 5*time.Minute)
 	meshReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_MESH_RECONCILE_INTERVAL"), 5*time.Minute)
+	// Per-app TLS leaves live a year and renew at <60d left (mesh.renewWindow);
+	// a daily sweep is ample and cheap (it no-ops until a leaf enters the window).
+	leafRotateEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_LEAF_ROTATE_INTERVAL"), 24*time.Hour)
 	sched := scheduler.New(runner, append([]scheduler.Entry{
 		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
 		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
 		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
+		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
 	}, obsCollectorEntries...))
 	sched.Start(ctx)
 	defer sched.Stop()
