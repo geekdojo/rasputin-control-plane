@@ -266,3 +266,33 @@ func TestNewForwarder_Defaults(t *testing.T) {
 		t.Errorf("explicit config not honored: timeout=%v rate=%v burst=%v", f2.client.Timeout, f2.limiter.rate, f2.limiter.max)
 	}
 }
+
+// TestResponder_SetForwarderSwapsLive proves the atomic hot-swap: off-zone flips
+// between REFUSE and forward as the forwarder is set and cleared, no restart.
+func TestResponder_SetForwarderSwapsLive(t *testing.T) {
+	up, stop := startUpstream(t, net.IPv4(1, 2, 3, 4))
+	defer stop()
+	self := net.IPv4(192, 168, 1, 1)
+	src := NewSelfSource("home1.internal.", "", func() net.IP { return self })
+	r := NewResponder("home1.internal.", src) // no forwarder yet
+
+	refused := func(tag string) {
+		w := &captureWriter{remote: udpFrom("192.168.1.50")}
+		r.ServeDNS(w, queryA("example.com.", true))
+		if w.msg.Rcode != dns.RcodeRefused {
+			t.Fatalf("%s: off-zone should REFUSE, got %s", tag, dns.RcodeToString[w.msg.Rcode])
+		}
+	}
+
+	refused("before")
+
+	r.SetForwarder(NewForwarder(ForwarderConfig{Upstream: up, SelfIP: func() net.IP { return self }}))
+	w := &captureWriter{remote: udpFrom("192.168.1.50")}
+	r.ServeDNS(w, queryA("example.com.", true))
+	if w.msg.Rcode != dns.RcodeSuccess || len(w.msg.Answer) != 1 {
+		t.Fatalf("after SetForwarder, off-zone should forward, got %+v", w.msg)
+	}
+
+	r.SetForwarder(nil)
+	refused("after clear")
+}

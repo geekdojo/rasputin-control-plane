@@ -572,6 +572,9 @@ func main() {
 	// .local (ADR-0003), is left untouched. A bind failure (no LAN route, or no
 	// privilege on a dev box) is logged and skipped, never fatal: a control
 	// plane that won't start is worse than one without name resolution.
+	// nsResp is hoisted so the api server can hot-swap its AA-11 forwarding stub
+	// after construction (below); nil when the nameserver is disabled/unstarted.
+	var nsResp *nameserver.Responder
 	if envOr("RASPUTIN_DNS", "on") != "off" {
 		zone := "rasputin.internal"
 		if id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")); id != "" {
@@ -610,7 +613,7 @@ func main() {
 				}
 				return out
 			})
-		nsResp := nameserver.NewResponder(zone,
+		nsResp = nameserver.NewResponder(zone,
 			nameserver.NewSelfSource(zone, clusterHostname(), primaryLanIP),
 			clusterSrc)
 		nsSrv := nameserver.NewServer(primaryLanIP, 53, nsResp)
@@ -753,6 +756,35 @@ func main() {
 	defer sched.Stop()
 
 	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn())
+
+	// AA-11 DNS forwarding (ADR-0004 §10): reconcile the nameserver's off-zone
+	// forwarding stub from the persisted setting, and hand the api the hook to
+	// re-apply it when the operator toggles it. Blank upstream → inherit the CP's
+	// DHCP resolver, falling back to a public resolver when that would loop
+	// (detect-and-fall-back). Kept plain-typed so api needn't import nameserver.
+	if nsResp != nil {
+		applyDNS := func(ctx context.Context) (string, bool, error) {
+			cfg, err := setupSvc.GetDNSForwarding(ctx)
+			if err != nil {
+				return "", false, err
+			}
+			if !cfg.Enabled {
+				nsResp.SetForwarder(nil)
+				return "", false, nil
+			}
+			up := nameserver.ResolveUpstream(cfg.Upstream, primaryLanIP(),
+				nameserver.SystemUpstreams("/etc/resolv.conf", "/run/systemd/netif/leases"))
+			nsResp.SetForwarder(nameserver.NewForwarder(nameserver.ForwarderConfig{
+				Upstream: up.Addr,
+				SelfIP:   primaryLanIP,
+			}))
+			return up.Addr, up.FellBack, nil
+		}
+		if _, _, err := applyDNS(ctx); err != nil {
+			log.Printf("rasputin-api: DNS forwarding initial apply: %v", err)
+		}
+		srv.SetDNSForwardingApplier(applyDNS)
+	}
 
 	// bmc.configure: delivers the operator's Settings selection to the
 	// host agent (bmc-settings.md §4); refuses while a console is open or
