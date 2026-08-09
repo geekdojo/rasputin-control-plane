@@ -63,8 +63,12 @@ func RenderCaddyConfig(routes []AppRoute, tailnetAddr, lanAddr string, certPort 
 		servers["lan"] = httpServer(fmt.Sprintf("%s:%d", lanAddr, certPort), lr)
 	}
 
-	// Load each app's delivered leaf once (shared by both servers).
-	var loadFiles []any
+	// Load each app's delivered leaf once (shared by both servers). MUST be a
+	// non-nil slice: a nil renders as JSON `null`, which Caddy's tls app rejects
+	// ("load_files: module value cannot be null") — so a node with zero apps
+	// would fail every config load until its first leaf arrived (caught on the
+	// bench, 2026-08-09). An empty `[]` is accepted.
+	loadFiles := []any{}
 	for _, r := range sorted {
 		if r.CertPath == "" || r.KeyPath == "" {
 			continue
