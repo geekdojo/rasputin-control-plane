@@ -108,3 +108,30 @@ func keysOf(m map[string]any) []string {
 	}
 	return out
 }
+
+// TestRenderCaddyConfig_EmptyLoadFilesIsArrayNotNull is the regression for the
+// bench-found bug (2026-08-09): a node with zero apps rendered
+// load_files: null, which Caddy rejects, breaking every config load until the
+// first leaf arrived.
+func TestRenderCaddyConfig_EmptyLoadFilesIsArrayNotNull(t *testing.T) {
+	// No routes at all — the zero-app case a fresh node starts in.
+	data, err := RenderCaddyConfig(nil, "100.64.0.2", "192.168.1.2", 443)
+	if err != nil {
+		t.Fatalf("RenderCaddyConfig: %v", err)
+	}
+	// The raw JSON must carry an empty array, never null.
+	if strings.Contains(string(data), `"load_files": null`) || strings.Contains(string(data), `"load_files":null`) {
+		t.Fatalf("load_files rendered as null (Caddy rejects it):\n%s", data)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("not valid JSON: %v", err)
+	}
+	lf := cfg["apps"].(map[string]any)["tls"].(map[string]any)["certificates"].(map[string]any)["load_files"]
+	if lf == nil {
+		t.Errorf("load_files is null, want []")
+	}
+	if arr, ok := lf.([]any); !ok || len(arr) != 0 {
+		t.Errorf("load_files = %v, want empty array", lf)
+	}
+}
