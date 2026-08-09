@@ -24,6 +24,9 @@ import (
 //	  },
 //	  "network": {            // present only when ≥1 wan_config row exists
 //	    "wan": { "proto": ..., ... }
+//	  },
+//	  "dhcp": {               // present only when a dns_forward is enabled
+//	    "server": "/<zone>/<cp-ip>"   // the one Rasputin-owned dnsmasq forward
 //	  }
 //	}
 //
@@ -44,6 +47,7 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 
 	var wanConfigSeen int
 	var enabledWAN *Intent
+	var enabledDNSForward *Intent
 
 	for _, in := range intents {
 		kind := proto.FirewallIntentKind(in.Kind)
@@ -66,6 +70,16 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 				return nil, "", fmt.Errorf("intent %s (%s): %w", in.ID, in.Name, err)
 			}
 			rules = append(rules, r)
+		case proto.IntentDNSForward:
+			// Only the enabled forward matters; a disabled one emits no `dhcp`
+			// key, which tells the agent to remove Rasputin's forward entirely.
+			if !in.Enabled {
+				continue
+			}
+			if enabledDNSForward != nil {
+				return nil, "", fmt.Errorf("more than one dns_forward is enabled (%s and %s) — at most one allowed", enabledDNSForward.ID, in.ID)
+			}
+			enabledDNSForward = in
 		case proto.IntentWANConfig:
 			// Count every wan_config row (enabled or not) — the existence of
 			// ≥1 row is what signals "Rasputin manages WAN here." The api
@@ -96,6 +110,18 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 			return nil, "", err
 		}
 		state["network"] = map[string]any{"wan": wan}
+	}
+
+	// The `dhcp` key is present ONLY when a dns_forward is enabled — its
+	// absence tells the agent to remove Rasputin's conditional-forward (mode
+	// changed away from a firewall mode, or the forward was disabled). This
+	// mirrors the network-key semantics but for a single owned dnsmasq entry.
+	if enabledDNSForward != nil {
+		server, err := compileDNSForward(enabledDNSForward)
+		if err != nil {
+			return nil, "", err
+		}
+		state["dhcp"] = map[string]any{"server": server}
 	}
 
 	h, err := Hash(state)
@@ -206,6 +232,32 @@ func compilePortForward(in *Intent) (map[string]any, error) {
 		r["_comment"] = spec.Comment
 	}
 	return r, nil
+}
+
+// compileDNSForward produces the single dnsmasq `server` list entry for the
+// cluster's conditional-forward, in dnsmasq's `/<domain>/<server>` form. Both
+// fields are CP-derived; Target must be a literal IPv4 address (decision #9,
+// and it's always primaryLanIP() on the api side). Zone must not contain '/'
+// (it becomes a path segment in the server-entry string).
+func compileDNSForward(in *Intent) (string, error) {
+	var spec proto.DNSForwardSpec
+	if err := json.Unmarshal(in.Spec, &spec); err != nil {
+		return "", fmt.Errorf("invalid dns_forward spec: %w", err)
+	}
+	if spec.Zone == "" {
+		return "", fmt.Errorf("dns_forward %s: zone is required", in.ID)
+	}
+	if strings.ContainsRune(spec.Zone, '/') {
+		return "", fmt.Errorf("dns_forward %s: zone %q must not contain '/'", in.ID, spec.Zone)
+	}
+	if spec.Target == "" {
+		return "", fmt.Errorf("dns_forward %s: target is required", in.ID)
+	}
+	ip := net.ParseIP(spec.Target)
+	if ip == nil || ip.To4() == nil {
+		return "", fmt.Errorf("dns_forward %s: target %q must be an IPv4 address (decision #9)", in.ID, spec.Target)
+	}
+	return "/" + spec.Zone + "/" + spec.Target, nil
 }
 
 // rejectIPv6 enforces LOCKED decision #9 (Rasputin is IPv4-only): an explicit

@@ -459,6 +459,25 @@ func main() {
 	runner.Register(firewall.ApplyWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
 	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
 	runner.Register(firewall.SetActiveWorkflow(invStore, busSrv.Conn()))
+	// AA-11 Mode-A/C zero-touch DNS (ADR-0004 §10): keep the firewall's dnsmasq
+	// conditional-forward for <cluster-id>.internal pointed at the control plane's
+	// current LAN IP, auto-applying when it moves. Gated to firewall-present modes
+	// by fwManaged; a dev box with no cluster id emits no forward.
+	runner.Register(firewall.DNSForwardWorkflow(fwStore, runner, firewall.DNSForwardConfig{
+		Zone: func() string {
+			if id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")); id != "" {
+				return id + ".internal"
+			}
+			return ""
+		},
+		Target: func() string {
+			if ip := primaryLanIP(); ip != nil {
+				return ip.String()
+			}
+			return ""
+		},
+		Managed: fwManaged,
+	}))
 	// Per-app TLS-leaf minter for the deploy saga (ADR-0004 §6): mints a Mesh-CA
 	// leaf for the app's FQDN(s) and fills the delivery command. nil (no CA)
 	// disables leaf delivery; the app still deploys, just without the proxy.
@@ -749,6 +768,7 @@ func main() {
 	meshReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_MESH_RECONCILE_INTERVAL"), 5*time.Minute)
 	sched := scheduler.New(runner, append([]scheduler.Entry{
 		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
+		{Kind: "firewall.dns_forward", Interval: fwReconcileEvery, InitialDelay: 100 * time.Second},
 		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
 		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
 	}, obsCollectorEntries...))

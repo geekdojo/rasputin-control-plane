@@ -13,6 +13,11 @@ type applyPlan struct {
 	redirects []map[string]string
 	rules     []map[string]string
 	wan       map[string]string
+	// dnsForward is the single Rasputin-owned dnsmasq `server` list entry in
+	// dnsmasq's "/<zone>/<ip>" form (the conditional-forward for the cluster
+	// zone), or "" when the state has no `dhcp` key — which means "remove
+	// Rasputin's forward" (mode changed away from a firewall mode, or disabled).
+	dnsForward string
 }
 
 // planFromState validates the compiled state map and normalizes it into an
@@ -29,7 +34,7 @@ type applyPlan struct {
 func planFromState(state map[string]any) (applyPlan, error) {
 	var plan applyPlan
 	for k := range state {
-		if k != "firewall" && k != "network" {
+		if k != "firewall" && k != "network" && k != "dhcp" {
 			return plan, fmt.Errorf("unexpected top-level key %q in compiled state", k)
 		}
 	}
@@ -75,6 +80,28 @@ func planFromState(state map[string]any) (applyPlan, error) {
 		}
 		if plan.wan, err = stringMap(wanMap); err != nil {
 			return plan, fmt.Errorf("network.wan: %w", err)
+		}
+	}
+
+	if dhcpRaw, ok := state["dhcp"]; ok {
+		dhcp, ok := dhcpRaw.(map[string]any)
+		if !ok {
+			return plan, fmt.Errorf("dhcp key is %T, want map", dhcpRaw)
+		}
+		for k := range dhcp {
+			if k != "server" {
+				return plan, fmt.Errorf("unexpected dhcp option %q in compiled state", k)
+			}
+		}
+		sm, err := stringMap(dhcp)
+		if err != nil {
+			return plan, fmt.Errorf("dhcp: %w", err)
+		}
+		plan.dnsForward = sm["server"]
+		if plan.dnsForward == "" {
+			// Compile emits `dhcp` only with a non-empty server; an empty one is
+			// a malformed state, not the "remove" signal (that's an absent key).
+			return plan, fmt.Errorf("dhcp key present but server is empty")
 		}
 	}
 	return plan, nil

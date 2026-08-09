@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,8 @@ type simUCI struct {
 	fw      []simSection
 	hasFW   bool
 	wan     map[string]any // nil = no network.wan section
+	hasDHCP bool           // whether a dnsmasq section exists
+	dnsmasq []string       // the dnsmasq section's `server` list (forwards + upstreams)
 	reloads []string
 }
 
@@ -47,7 +50,8 @@ func stockSim() *simUCI {
 			{typ: "zone", opts: map[string]any{"name": "wan", "input": "REJECT", "output": "ACCEPT", "forward": "REJECT", "masq": "1"}},
 			{typ: "forwarding", opts: map[string]any{"src": "lan", "dest": "wan"}},
 		},
-		wan: map[string]any{"device": "eth1", "proto": "dhcp"},
+		wan:     map[string]any{"device": "eth1", "proto": "dhcp"},
+		hasDHCP: true,
 	}
 }
 
@@ -63,6 +67,9 @@ func (s *simUCI) Run(_ context.Context, name string, args ...string) (string, er
 		return "", nil
 	case "/etc/init.d/network":
 		s.reloads = append(s.reloads, "network")
+		return "", nil
+	case "/etc/init.d/dnsmasq":
+		s.reloads = append(s.reloads, "dnsmasq")
 		return "", nil
 	}
 	return "", fmt.Errorf("sim: unknown binary %q", name)
@@ -89,6 +96,10 @@ func (s *simUCI) uci(args []string) (string, error) {
 		return "", s.uciDelete(args[1])
 	case "set":
 		return "", s.uciSet(args[1])
+	case "add_list":
+		return "", s.uciListOp(args[1], true)
+	case "del_list":
+		return "", s.uciListOp(args[1], false)
 	}
 	return "", fmt.Errorf("sim: unsupported uci verb %q", args[0])
 }
@@ -145,6 +156,31 @@ func (s *simUCI) uciSet(expr string) error {
 	return fmt.Errorf("sim: unsupported set path %q", path)
 }
 
+// uciListOp models `uci add_list`/`del_list` on dhcp.@dnsmasq[0].server —
+// the only list option Rasputin manages. add_list appends (preserving any
+// existing upstream entries); del_list removes the first exact match.
+func (s *simUCI) uciListOp(expr string, add bool) error {
+	path, value, ok := strings.Cut(expr, "=")
+	if !ok {
+		return fmt.Errorf("sim: malformed list op %q", expr)
+	}
+	if path != "dhcp.@dnsmasq[0].server" {
+		return fmt.Errorf("sim: unsupported list path %q", path)
+	}
+	if add {
+		s.dnsmasq = append(s.dnsmasq, value)
+		s.hasDHCP = true
+		return nil
+	}
+	for i, v := range s.dnsmasq {
+		if v == value {
+			s.dnsmasq = append(s.dnsmasq[:i], s.dnsmasq[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("uci: Entry not found")
+}
+
 func (s *simUCI) ubus(args []string) (string, error) {
 	if len(args) != 4 || args[0] != "call" || args[1] != "uci" || args[2] != "get" {
 		return "", fmt.Errorf("sim: unsupported ubus invocation %v", args)
@@ -190,6 +226,22 @@ func (s *simUCI) ubus(args []string) (string, error) {
 			entry[k] = v
 		}
 		b, err := json.Marshal(map[string]any{"values": entry})
+		return string(b), err
+	case req.Config == "dhcp" && req.Section == "":
+		if !s.hasDHCP {
+			return "", errors.New("Command failed: Not found")
+		}
+		entry := map[string]any{
+			".anonymous": true, ".type": "dnsmasq", ".name": "cfg01", ".index": 0,
+		}
+		if len(s.dnsmasq) > 0 {
+			arr := make([]any, len(s.dnsmasq)) // ubus returns list options as JSON arrays
+			for i, v := range s.dnsmasq {
+				arr[i] = v
+			}
+			entry["server"] = arr
+		}
+		b, err := json.Marshal(map[string]any{"values": map[string]any{"cfg01": entry}})
 		return string(b), err
 	}
 	return "", errors.New("Command failed: Not found")
@@ -854,5 +906,132 @@ func TestUCIRealClient_SetActiveActivateTurnsOnDHCPAndSnort(t *testing.T) {
 		if !containsCall(rr.calls, want) {
 			t.Errorf("missing call %v; got %s", want, fmtCalls(rr.calls))
 		}
+	}
+}
+
+// ----- dns_forward (dnsmasq conditional-forward) ------------------------------
+
+func stateWithForward(forward string) map[string]any {
+	s := stateWith(nil, nil, nil)
+	s["dhcp"] = map[string]any{"server": forward}
+	return s
+}
+
+func countStr(ss []string, want string) int {
+	n := 0
+	for _, s := range ss {
+		if s == want {
+			n++
+		}
+	}
+	return n
+}
+
+func TestApply_AddsDNSForwardAndRoundTrips(t *testing.T) {
+	sim := stockSim()
+	c, dir := newSimClient(t, sim)
+	fwd := "/home1.internal/192.168.1.5"
+
+	h, err := c.Apply(context.Background(), jsonRoundTrip(t, stateWithForward(fwd)))
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !slices.Contains(sim.dnsmasq, fwd) {
+		t.Errorf("dnsmasq server list %v missing %q", sim.dnsmasq, fwd)
+	}
+	if !slices.Contains(sim.reloads, "dnsmasq") {
+		t.Errorf("dnsmasq not reloaded: %v", sim.reloads)
+	}
+	if m := loadManifestFile(t, dir); m.DNSForward != fwd {
+		t.Errorf("manifest.DNSForward = %q, want %q", m.DNSForward, fwd)
+	}
+	// A clean box reads back to the same hash (in sync, not perpetual drift).
+	got, gh, err := c.Get(context.Background())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if gh != h {
+		t.Errorf("Get hash %s != Apply hash %s on a clean box", gh, h)
+	}
+	dhcp, ok := got["dhcp"].(map[string]any)
+	if !ok || dhcp["server"] != fwd {
+		t.Errorf("Get dhcp = %v, want server=%q", got["dhcp"], fwd)
+	}
+}
+
+func TestApply_DNSForwardPreservesUpstreams(t *testing.T) {
+	sim := stockSim()
+	sim.dnsmasq = []string{"1.1.1.1"} // a pre-existing upstream server
+	c, _ := newSimClient(t, sim)
+	fwd := "/home1.internal/192.168.1.5"
+
+	if _, err := c.Apply(context.Background(), jsonRoundTrip(t, stateWithForward(fwd))); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !slices.Contains(sim.dnsmasq, "1.1.1.1") {
+		t.Errorf("upstream 1.1.1.1 was clobbered: %v", sim.dnsmasq)
+	}
+	if !slices.Contains(sim.dnsmasq, fwd) {
+		t.Errorf("forward %q not added: %v", fwd, sim.dnsmasq)
+	}
+}
+
+func TestApply_RemovesDNSForwardOnAbsentKey(t *testing.T) {
+	sim := stockSim()
+	c, dir := newSimClient(t, sim)
+	fwd := "/home1.internal/192.168.1.5"
+
+	if _, err := c.Apply(context.Background(), jsonRoundTrip(t, stateWithForward(fwd))); err != nil {
+		t.Fatalf("apply add: %v", err)
+	}
+	// Apply a state with NO dhcp key → Rasputin's forward is removed.
+	if _, err := c.Apply(context.Background(), jsonRoundTrip(t, stateWith(nil, nil, nil))); err != nil {
+		t.Fatalf("apply remove: %v", err)
+	}
+	if slices.Contains(sim.dnsmasq, fwd) {
+		t.Errorf("forward not removed on absent dhcp key: %v", sim.dnsmasq)
+	}
+	if m := loadManifestFile(t, dir); m.DNSForward != "" {
+		t.Errorf("manifest.DNSForward = %q, want empty after removal", m.DNSForward)
+	}
+}
+
+func TestApply_DNSForwardIdempotentNoReload(t *testing.T) {
+	sim := stockSim()
+	c, _ := newSimClient(t, sim)
+	fwd := "/home1.internal/192.168.1.5"
+	st := jsonRoundTrip(t, stateWithForward(fwd))
+
+	if _, err := c.Apply(context.Background(), st); err != nil {
+		t.Fatalf("apply 1: %v", err)
+	}
+	sim.reloads = nil // reset, then apply the identical state again
+	if _, err := c.Apply(context.Background(), st); err != nil {
+		t.Fatalf("apply 2: %v", err)
+	}
+	if slices.Contains(sim.reloads, "dnsmasq") {
+		t.Errorf("dnsmasq reloaded on an unchanged apply: %v", sim.reloads)
+	}
+	if n := countStr(sim.dnsmasq, fwd); n != 1 {
+		t.Errorf("forward present %d times, want exactly 1: %v", n, sim.dnsmasq)
+	}
+}
+
+func TestGet_DNSForwardDriftWhenRemovedOutOfBand(t *testing.T) {
+	sim := stockSim()
+	c, _ := newSimClient(t, sim)
+	fwd := "/home1.internal/192.168.1.5"
+
+	applied, err := c.Apply(context.Background(), jsonRoundTrip(t, stateWithForward(fwd)))
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	sim.dnsmasq = nil // operator hand-removed our forward
+	_, gh, err := c.Get(context.Background())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if gh == applied {
+		t.Error("Get hash matches applied despite the forward being removed — drift not detected")
 	}
 }

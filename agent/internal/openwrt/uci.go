@@ -112,6 +112,13 @@ type managedManifest struct {
 	// "leave alone", not "clean up"), and the next network-managing apply
 	// must know to delete the ones it no longer sets.
 	WANKeys []string `json:"wanKeys,omitempty"`
+	// DNSForward is the dnsmasq `server` list entry Rasputin currently manages
+	// (the "/<zone>/<ip>" conditional-forward), or "" when none. Unlike WANKeys
+	// this IS cleaned up on an absent key — the forward is purely Rasputin's, so
+	// an absent `dhcp` key means "remove it". Kept so the next apply can
+	// del_list the exact prior entry (preserving any non-Rasputin `server`
+	// upstreams) and Get can tell whether our entry is still present.
+	DNSForward string `json:"dnsForward,omitempty"`
 }
 
 // wanProtoKeys maps an observed network.wan proto to the proto-specific
@@ -208,6 +215,33 @@ func (c *UCIRealClient) Apply(ctx context.Context, state map[string]any) (string
 		manifest.Network = false
 	}
 
+	// --- /etc/config/dhcp: Rasputin's one conditional-forward -------------
+	// dnsmasq `server=/<zone>/<cp-ip>`. add_list/del_list touch ONLY our entry,
+	// leaving any upstream `server` entries alone. Reconcile only when the
+	// desired forward differs from what we last managed, so an unrelated apply
+	// doesn't needlessly bounce dnsmasq. An absent dhcp key (plan.dnsForward
+	// "") removes our forward — it's purely Rasputin's, unlike network.wan.
+	dnsmasqTouched := false
+	if plan.dnsForward != manifest.DNSForward {
+		if _, err := c.runner.Run(ctx, "uci", "-q", "revert", "dhcp"); err != nil {
+			return "", fmt.Errorf("openwrt-uci: revert dhcp: %w", err)
+		}
+		if manifest.DNSForward != "" {
+			// Idempotent: the entry may already be gone (hand-edited / interrupted).
+			_, _ = c.runner.Run(ctx, "uci", "-q", "del_list", "dhcp.@dnsmasq[0].server="+manifest.DNSForward)
+		}
+		if plan.dnsForward != "" {
+			if _, err := c.runner.Run(ctx, "uci", "add_list", "dhcp.@dnsmasq[0].server="+plan.dnsForward); err != nil {
+				return "", fmt.Errorf("openwrt-uci: add dns forward: %w", err)
+			}
+		}
+		if _, err := c.runner.Run(ctx, "uci", "commit", "dhcp"); err != nil {
+			return "", fmt.Errorf("openwrt-uci: commit dhcp: %w", err)
+		}
+		manifest.DNSForward = plan.dnsForward
+		dnsmasqTouched = true
+	}
+
 	// Persist the manifest after the commits (it describes committed
 	// state) and before the reloads (a failed reload doesn't change what
 	// is on disk).
@@ -222,6 +256,12 @@ func (c *UCIRealClient) Apply(ctx context.Context, state map[string]any) (string
 	if networkTouched {
 		if _, err := c.runner.Run(ctx, "/etc/init.d/network", "reload"); err != nil {
 			return "", fmt.Errorf("openwrt-uci: network reload: %w", err)
+		}
+	}
+	if dnsmasqTouched {
+		// reload (not restart) applies the server change without dropping DNS.
+		if _, err := c.runner.Run(ctx, "/etc/init.d/dnsmasq", "reload"); err != nil {
+			return "", fmt.Errorf("openwrt-uci: dnsmasq reload: %w", err)
 		}
 	}
 
@@ -333,8 +373,46 @@ func (c *UCIRealClient) Get(ctx context.Context) (map[string]any, string, error)
 		state["network"] = map[string]any{"wan": wan}
 	}
 
+	// dhcp: emitted only when Rasputin manages a forward (manifest), mirroring
+	// Compile — so a box with no forward hashes to a Compile with no dns_forward.
+	// We report the OBSERVED presence of our exact entry: gone out-of-band →
+	// server "" → won't match the intent's "/<zone>/<ip>" → surfaces as drift.
+	if manifest.DNSForward != "" {
+		present, err := c.dnsForwardPresent(ctx, manifest.DNSForward)
+		if err != nil {
+			return nil, "", err
+		}
+		server := ""
+		if present {
+			server = manifest.DNSForward
+		}
+		state["dhcp"] = map[string]any{"server": server}
+	}
+
 	h, err := hashState(state)
 	return state, h, err
+}
+
+// dnsForwardPresent reports whether entry (a "/<zone>/<ip>" server value) is in
+// the dnsmasq section's `server` list. Server entries are whitespace-free, so a
+// field split of the read-back (readUbusConfig space-joins list options) is an
+// exact membership test that ignores any other upstream `server` entries.
+func (c *UCIRealClient) dnsForwardPresent(ctx context.Context, entry string) (bool, error) {
+	sections, err := c.readUbusConfig(ctx, "dhcp")
+	if err != nil {
+		return false, fmt.Errorf("openwrt-uci: read dhcp config: %w", err)
+	}
+	for _, s := range sections {
+		if s.typ != "dnsmasq" {
+			continue
+		}
+		for _, tok := range strings.Fields(s.opts["server"]) {
+			if tok == entry {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // ----- ubus read-back -------------------------------------------------------

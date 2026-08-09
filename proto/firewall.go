@@ -12,13 +12,20 @@ const (
 	IntentPortForward  FirewallIntentKind = "port_forward"
 	IntentFirewallRule FirewallIntentKind = "firewall_rule"
 	IntentWANConfig    FirewallIntentKind = "wan_config"
+	// IntentDNSForward is a dnsmasq conditional-forward: resolve the cluster's
+	// internal zone via the control plane, everything else via the firewall's
+	// normal upstream. CP-managed (never operator hand-authored) — the api
+	// seeds/refreshes it with the control plane's current LAN IP so app names
+	// resolve on the whole Rasputin segment with zero operator action
+	// (ADR-0004 §10, Mode A / Mode C).
+	IntentDNSForward FirewallIntentKind = "dns_forward"
 	// Reserved for future:
 	// IntentWGPeer FirewallIntentKind = "wg_peer"
 	// IntentVLAN   FirewallIntentKind = "vlan"
 )
 
 // AllFirewallIntentKinds lists supported intent kinds for validation.
-var AllFirewallIntentKinds = []FirewallIntentKind{IntentPortForward, IntentFirewallRule, IntentWANConfig}
+var AllFirewallIntentKinds = []FirewallIntentKind{IntentPortForward, IntentFirewallRule, IntentWANConfig, IntentDNSForward}
 
 // ValidFirewallIntentKind reports whether k is one of the supported kinds.
 func ValidFirewallIntentKind(k FirewallIntentKind) bool {
@@ -112,6 +119,21 @@ type WANConfigSpec struct {
 	Secret   string `json:"secret,omitempty"`
 	Service  string `json:"service,omitempty"`
 	Comment  string `json:"comment,omitempty"`
+}
+
+// DNSForwardSpec describes a dnsmasq conditional-forward: queries for names
+// under Zone are forwarded to Target; all other queries follow the firewall's
+// normal upstream. Rasputin owns exactly one such forward — its internal zone
+// (<cluster-id>.internal) → the control plane's LAN IP — so the firewall's
+// dnsmasq resolves app/node names on the whole segment while the control plane
+// stays authoritative for the zone (ADR-0004 §10).
+//
+// Both fields are CP-derived, never operator-entered: Zone from the cluster id,
+// Target from the control plane's current LAN IP (refreshed as DHCP moves it).
+// Target is IPv4-only (decision #9), rejected at compile time otherwise.
+type DNSForwardSpec struct {
+	Zone   string `json:"zone"`
+	Target string `json:"target"`
 }
 
 // FirewallRuleSpec describes a generic zone-based accept/drop rule.
