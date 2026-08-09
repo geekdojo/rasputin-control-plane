@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/pem"
 	"slices"
@@ -60,6 +61,69 @@ func TestMintAppLeaf_SANsMatchExposure(t *testing.T) {
 				t.Errorf("leaf does not verify against the Mesh CA: %v", err)
 			}
 		})
+	}
+}
+
+// TestPrepareAppLeaf_RenewsUntilCommitted proves the commit-on-delivery
+// contract: a freshly-prepared leaf is not persisted, so it keeps renewing
+// until CommitAppLeaf runs — after which it's returned unchanged (renewed=false).
+func TestPrepareAppLeaf_RenewsUntilCommitted(t *testing.T) {
+	ca := newCAForTest(t)
+	dir := t.TempDir()
+
+	certPEM, keyPEM, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false)
+	if err != nil {
+		t.Fatalf("PrepareAppLeaf: %v", err)
+	}
+	if !renewed {
+		t.Fatal("first prepare (no disk leaf) must mint fresh: renewed=true")
+	}
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		t.Fatal("empty PEM from fresh mint")
+	}
+
+	// Uncommitted → a second prepare must STILL renew (offline-retry safety).
+	if _, _, renewed2, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false); err != nil || !renewed2 {
+		t.Fatalf("uncommitted leaf must keep renewing: renewed=%v err=%v", renewed2, err)
+	}
+
+	// Commit, then the same still-valid leaf comes back with renewed=false.
+	if err := CommitAppLeaf(dir, certPEM, keyPEM); err != nil {
+		t.Fatalf("CommitAppLeaf: %v", err)
+	}
+	got, _, renewed3, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false)
+	if err != nil {
+		t.Fatalf("PrepareAppLeaf after commit: %v", err)
+	}
+	if renewed3 {
+		t.Error("committed, still-valid leaf must not renew")
+	}
+	if !bytes.Equal(got, certPEM) {
+		t.Error("prepare returned a different cert than was committed")
+	}
+}
+
+// TestPrepareAppLeaf_RenewsOnSANDrift: toggling exposeLAN changes the SANs, so
+// even a committed, far-from-expiry leaf must be re-minted.
+func TestPrepareAppLeaf_RenewsOnSANDrift(t *testing.T) {
+	ca := newCAForTest(t)
+	dir := t.TempDir()
+
+	certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := CommitAppLeaf(dir, certPEM, keyPEM); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, _, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", true); err != nil || !renewed {
+		t.Errorf("exposeLAN toggle (SAN drift) must renew: renewed=%v err=%v", renewed, err)
+	}
+}
+
+func TestPrepareAppLeaf_NilCA(t *testing.T) {
+	if _, _, _, err := PrepareAppLeaf(nil, t.TempDir(), "home1", "app", false); err == nil {
+		t.Error("nil CA must error")
 	}
 }
 
