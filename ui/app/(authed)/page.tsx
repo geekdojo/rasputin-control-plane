@@ -210,6 +210,7 @@ export default function NodesPage() {
           cpu={selectedUtil?.cpu ?? null}
           mem={selectedUtil?.mem ?? null}
           apps={selectedApps}
+          clusterId={clusterId}
           deploymentMode={deploymentMode}
           bmcCaps={bmcCaps}
           onNavigate={(path) => router.push(path)}

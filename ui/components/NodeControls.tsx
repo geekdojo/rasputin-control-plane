@@ -4,6 +4,7 @@ import {
   Activity,
   AlertTriangle,
   ChevronRight,
+  ExternalLink,
   FileText,
   Info,
   Layers,
@@ -17,7 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import type { ElementType } from 'react';
+import type { CSSProperties, ElementType } from 'react';
 import {
   bmcPower,
   createJob,
@@ -28,6 +29,7 @@ import {
   type NodeRemovalImpact,
 } from '../lib/api';
 import type { App, BMCPowerState, DeploymentMode, Node } from '../lib/types';
+import { appAccess } from '../lib/appurl';
 import { BMC_CAP_CONSOLE, BMC_CAP_POWER, BMC_CAP_RESET, type BmcCaps } from '../lib/bmc';
 import { ConfirmModal } from './ConfirmModal';
 import { ACCENT, accentA, MONO, STATUS_COLOR } from './ui-theme';
@@ -51,6 +53,8 @@ interface NodeControlsProps {
   cpu: number | null;
   mem: number | null;
   apps: App[];
+  // Cluster id → the app-access hostname each deployed-app row links to.
+  clusterId: string;
   deploymentMode?: DeploymentMode;
   // Per-node BMC gate (lib/bmc.ts): true iff some registered BMC host
   // advertises this node in its bmc-targets list.
@@ -177,7 +181,58 @@ function appStatusColor(status: App['lastStatus']): string {
   return 'rgba(148,163,184,0.5)';
 }
 
-export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcCaps, onNavigate, onRemoved }: NodeControlsProps) {
+// DeployedAppRow — one app under a node's DEPLOYED APPS list. When the app is
+// running and exposes a web port, the whole row is a link that opens the app at
+// its app-access URL in a new tab (same tailnet name as the Apps-page OPEN
+// button); otherwise it's a plain, non-clickable status row.
+function DeployedAppRow({ app, clusterId }: { app: App; clusterId: string }) {
+  const [hover, setHover] = useState(false);
+  const access = appAccess(app, clusterId);
+  const canOpen = app.lastStatus === 'running' && !!access;
+
+  const rowStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '5px 10px',
+    background: canOpen && hover ? accentA(0.08) : 'rgba(var(--rasp-fg-rgb),0.03)',
+    border: `1px solid ${canOpen && hover ? accentA(0.4) : 'rgba(var(--rasp-fg-rgb),0.1)'}`,
+    transition: 'background 0.12s, border-color 0.12s',
+    textDecoration: 'none',
+  };
+
+  const content = (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+        <div style={{ width: 4, height: 4, borderRadius: '50%', background: appStatusColor(app.lastStatus), flexShrink: 0 }} />
+        <span style={{ color: 'var(--rasp-fg)', fontSize: 10, fontFamily: MONO, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {app.name}
+        </span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <span style={{ color: 'var(--rasp-dim)', fontSize: 9, fontFamily: MONO }}>{app.lastStatus}</span>
+        {canOpen && <ExternalLink size={10} style={{ color: hover ? ACCENT : 'var(--rasp-dim)' }} />}
+      </div>
+    </>
+  );
+
+  if (!canOpen) return <div style={rowStyle}>{content}</div>;
+  return (
+    <a
+      href={access!.tailnet}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={`Open ${app.name} — ${access!.tailnet}`}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ ...rowStyle, cursor: 'pointer' }}
+    >
+      {content}
+    </a>
+  );
+}
+
+export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, bmcCaps, onNavigate, onRemoved }: NodeControlsProps) {
   // Each hardware control gates on the capability it needs, not on bare
   // reachability: a backend may drive power while being unable to offer a
   // console (turingpi), and rendering a button its backend can only fail
@@ -485,23 +540,7 @@ export function NodeControls({ node, cpu, mem, apps, deploymentMode, bmcCaps, on
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {apps.map((app) => (
-                  <div
-                    key={app.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '5px 10px',
-                      background: 'rgba(var(--rasp-fg-rgb),0.03)',
-                      border: '1px solid rgba(var(--rasp-fg-rgb),0.1)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                      <div style={{ width: 4, height: 4, borderRadius: '50%', background: appStatusColor(app.lastStatus), flexShrink: 0 }} />
-                      <span style={{ color: 'var(--rasp-fg)', fontSize: 10, fontFamily: MONO }}>{app.name}</span>
-                    </div>
-                    <span style={{ color: 'var(--rasp-dim)', fontSize: 9, fontFamily: MONO }}>{app.lastStatus}</span>
-                  </div>
+                  <DeployedAppRow key={app.id} app={app} clusterId={clusterId} />
                 ))}
               </div>
             )}
