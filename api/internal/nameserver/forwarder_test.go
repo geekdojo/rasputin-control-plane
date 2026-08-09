@@ -241,3 +241,28 @@ func TestResponder_OffZoneRefusedWithoutForwarder(t *testing.T) {
 		t.Fatalf("off-zone without a forwarder should REFUSE, got %s", dns.RcodeToString[w.msg.Rcode])
 	}
 }
+
+// TestNewForwarder_Defaults pins the construction defaults (a zero-config
+// forwarder must still be bounded) and that explicit config is honored.
+func TestNewForwarder_Defaults(t *testing.T) {
+	// Zero-value tuning → documented defaults; a bare upstream gets :53.
+	f := NewForwarder(ForwarderConfig{Upstream: "1.1.1.1"})
+	if f.upstream != "1.1.1.1:53" {
+		t.Errorf("bare upstream should get :53, got %q", f.upstream)
+	}
+	if f.client.Timeout != 3*time.Second {
+		t.Errorf("default timeout = %v, want 3s", f.client.Timeout)
+	}
+	if f.limiter.rate != 50 || f.limiter.max != 100 {
+		t.Errorf("default rate/burst = %v/%v, want 50/100", f.limiter.rate, f.limiter.max)
+	}
+
+	// Explicit values are honored; an upstream that already has a port is kept.
+	f2 := NewForwarder(ForwarderConfig{Upstream: "9.9.9.9:5353", Timeout: time.Second, QPS: 5, Burst: 7})
+	if f2.upstream != "9.9.9.9:5353" {
+		t.Errorf("upstream with a port should be preserved, got %q", f2.upstream)
+	}
+	if f2.client.Timeout != time.Second || f2.limiter.rate != 5 || f2.limiter.max != 7 {
+		t.Errorf("explicit config not honored: timeout=%v rate=%v burst=%v", f2.client.Timeout, f2.limiter.rate, f2.limiter.max)
+	}
+}
