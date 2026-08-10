@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -216,23 +217,36 @@ func (c *UCIRealClient) Apply(ctx context.Context, state map[string]any) (string
 	}
 
 	// --- /etc/config/dhcp: Rasputin's one conditional-forward -------------
-	// dnsmasq `server=/<zone>/<cp-ip>`. add_list/del_list touch ONLY our entry,
-	// leaving any upstream `server` entries alone. Reconcile only when the
-	// desired forward differs from what we last managed, so an unrelated apply
-	// doesn't needlessly bounce dnsmasq. An absent dhcp key (plan.dnsForward
-	// "") removes our forward — it's purely Rasputin's, unlike network.wan.
+	// dnsmasq `server=/<zone>/<cp-ip>` PLUS a `rebind_domain=<zone>` whitelist.
+	// The rebind_domain half is load-bearing: OpenWrt ships rebind protection on
+	// (rebind_protection='1'), which drops any upstream answer resolving to an
+	// RFC1918 address as a DNS-rebind attack — and every .internal record is
+	// private, so without the whitelist the forward silently returns nothing.
+	// Both are list options: add_list/del_list touch ONLY our entries, leaving
+	// operator upstreams / whitelists alone. Reconcile only when the desired
+	// forward differs from what we last managed, so an unrelated apply doesn't
+	// needlessly bounce dnsmasq. An absent dhcp key (plan.dnsForward "") removes
+	// our forward — it's purely Rasputin's, unlike network.wan.
 	dnsmasqTouched := false
 	if plan.dnsForward != manifest.DNSForward {
 		if _, err := c.runner.Run(ctx, "uci", "-q", "revert", "dhcp"); err != nil {
 			return "", fmt.Errorf("openwrt-uci: revert dhcp: %w", err)
 		}
 		if manifest.DNSForward != "" {
-			// Idempotent: the entry may already be gone (hand-edited / interrupted).
+			// Idempotent: the entries may already be gone (hand-edited / interrupted).
 			_, _ = c.runner.Run(ctx, "uci", "-q", "del_list", "dhcp.@dnsmasq[0].server="+manifest.DNSForward)
+			if z := dnsForwardZone(manifest.DNSForward); z != "" {
+				_, _ = c.runner.Run(ctx, "uci", "-q", "del_list", "dhcp.@dnsmasq[0].rebind_domain="+z)
+			}
 		}
 		if plan.dnsForward != "" {
 			if _, err := c.runner.Run(ctx, "uci", "add_list", "dhcp.@dnsmasq[0].server="+plan.dnsForward); err != nil {
 				return "", fmt.Errorf("openwrt-uci: add dns forward: %w", err)
+			}
+			if z := dnsForwardZone(plan.dnsForward); z != "" {
+				if _, err := c.runner.Run(ctx, "uci", "add_list", "dhcp.@dnsmasq[0].rebind_domain="+z); err != nil {
+					return "", fmt.Errorf("openwrt-uci: add dns rebind_domain: %w", err)
+				}
 			}
 		}
 		if _, err := c.runner.Run(ctx, "uci", "commit", "dhcp"); err != nil {
@@ -393,26 +407,44 @@ func (c *UCIRealClient) Get(ctx context.Context) (map[string]any, string, error)
 	return state, h, err
 }
 
-// dnsForwardPresent reports whether entry (a "/<zone>/<ip>" server value) is in
-// the dnsmasq section's `server` list. Server entries are whitespace-free, so a
-// field split of the read-back (readUbusConfig space-joins list options) is an
-// exact membership test that ignores any other upstream `server` entries.
+// dnsForwardPresent reports whether Rasputin's conditional-forward is FULLY in
+// place: both the dnsmasq `server=/<zone>/<ip>` entry AND its matching
+// `rebind_domain=<zone>` whitelist. Requiring both is deliberate — a stripped
+// rebind_domain leaves the server line intact but silently black-holes every
+// .internal answer (rebind protection), so it must read as "not present" and
+// surface as drift exactly like a missing server entry. List options come back
+// space-joined from readUbusConfig, and both values are whitespace-free, so a
+// field split is an exact membership test that ignores operator upstreams.
 func (c *UCIRealClient) dnsForwardPresent(ctx context.Context, entry string) (bool, error) {
 	sections, err := c.readUbusConfig(ctx, "dhcp")
 	if err != nil {
 		return false, fmt.Errorf("openwrt-uci: read dhcp config: %w", err)
 	}
+	zone := dnsForwardZone(entry)
 	for _, s := range sections {
 		if s.typ != "dnsmasq" {
 			continue
 		}
-		for _, tok := range strings.Fields(s.opts["server"]) {
-			if tok == entry {
-				return true, nil
-			}
+		serverOK := slices.Contains(strings.Fields(s.opts["server"]), entry)
+		// A malformed entry (zone "") can't require a whitelist it has no name for.
+		rebindOK := zone == "" || slices.Contains(strings.Fields(s.opts["rebind_domain"]), zone)
+		if serverOK && rebindOK {
+			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// dnsForwardZone extracts the zone label from a "/<zone>/<ip>" dnsmasq server
+// entry — the name that must be whitelisted via rebind_domain. Returns "" for
+// anything not in that canonical shape (defensive; Compile only ever emits it,
+// and the zone is validated slash-free upstream in compileDNSForward).
+func dnsForwardZone(entry string) string {
+	parts := strings.SplitN(entry, "/", 3)
+	if len(parts) < 3 || parts[0] != "" || parts[1] == "" {
+		return ""
+	}
+	return parts[1]
 }
 
 // ----- ubus read-back -------------------------------------------------------
