@@ -29,13 +29,14 @@ type simSection struct {
 // and its state can be hand-mutated between calls to simulate operator
 // drift (the real-hardware analog of editing the mock's firewall.json).
 type simUCI struct {
-	calls   [][]string
-	fw      []simSection
-	hasFW   bool
-	wan     map[string]any // nil = no network.wan section
-	hasDHCP bool           // whether a dnsmasq section exists
-	dnsmasq []string       // the dnsmasq section's `server` list (forwards + upstreams)
-	reloads []string
+	calls        [][]string
+	fw           []simSection
+	hasFW        bool
+	wan          map[string]any // nil = no network.wan section
+	hasDHCP      bool           // whether a dnsmasq section exists
+	dnsmasq      []string       // the dnsmasq section's `server` list (forwards + upstreams)
+	rebindDomain []string       // the dnsmasq section's `rebind_domain` whitelist
+	reloads      []string
 }
 
 // stockSim models a Node N fresh from the firewall image's uci-defaults:
@@ -156,25 +157,32 @@ func (s *simUCI) uciSet(expr string) error {
 	return fmt.Errorf("sim: unsupported set path %q", path)
 }
 
-// uciListOp models `uci add_list`/`del_list` on dhcp.@dnsmasq[0].server —
-// the only list option Rasputin manages. add_list appends (preserving any
-// existing upstream entries); del_list removes the first exact match.
+// uciListOp models `uci add_list`/`del_list` on the two dnsmasq list options
+// Rasputin manages — `server` (the conditional-forward) and `rebind_domain`
+// (its rebind-protection whitelist). add_list appends (preserving any existing
+// upstream entries); del_list removes the first exact match.
 func (s *simUCI) uciListOp(expr string, add bool) error {
 	path, value, ok := strings.Cut(expr, "=")
 	if !ok {
 		return fmt.Errorf("sim: malformed list op %q", expr)
 	}
-	if path != "dhcp.@dnsmasq[0].server" {
+	var list *[]string
+	switch path {
+	case "dhcp.@dnsmasq[0].server":
+		list = &s.dnsmasq
+	case "dhcp.@dnsmasq[0].rebind_domain":
+		list = &s.rebindDomain
+	default:
 		return fmt.Errorf("sim: unsupported list path %q", path)
 	}
 	if add {
-		s.dnsmasq = append(s.dnsmasq, value)
+		*list = append(*list, value)
 		s.hasDHCP = true
 		return nil
 	}
-	for i, v := range s.dnsmasq {
+	for i, v := range *list {
 		if v == value {
-			s.dnsmasq = append(s.dnsmasq[:i], s.dnsmasq[i+1:]...)
+			*list = append((*list)[:i], (*list)[i+1:]...)
 			return nil
 		}
 	}
@@ -234,12 +242,20 @@ func (s *simUCI) ubus(args []string) (string, error) {
 		entry := map[string]any{
 			".anonymous": true, ".type": "dnsmasq", ".name": "cfg01", ".index": 0,
 		}
+		// ubus returns list options as JSON arrays.
 		if len(s.dnsmasq) > 0 {
-			arr := make([]any, len(s.dnsmasq)) // ubus returns list options as JSON arrays
+			arr := make([]any, len(s.dnsmasq))
 			for i, v := range s.dnsmasq {
 				arr[i] = v
 			}
 			entry["server"] = arr
+		}
+		if len(s.rebindDomain) > 0 {
+			arr := make([]any, len(s.rebindDomain))
+			for i, v := range s.rebindDomain {
+				arr[i] = v
+			}
+			entry["rebind_domain"] = arr
 		}
 		b, err := json.Marshal(map[string]any{"values": map[string]any{"cfg01": entry}})
 		return string(b), err
@@ -939,6 +955,11 @@ func TestApply_AddsDNSForwardAndRoundTrips(t *testing.T) {
 	if !slices.Contains(sim.dnsmasq, fwd) {
 		t.Errorf("dnsmasq server list %v missing %q", sim.dnsmasq, fwd)
 	}
+	// The zone MUST also be whitelisted against rebind protection, or dnsmasq
+	// black-holes every (private-IP) .internal answer.
+	if !slices.Contains(sim.rebindDomain, "home1.internal") {
+		t.Errorf("rebind_domain %v missing zone %q", sim.rebindDomain, "home1.internal")
+	}
 	if !slices.Contains(sim.reloads, "dnsmasq") {
 		t.Errorf("dnsmasq not reloaded: %v", sim.reloads)
 	}
@@ -991,6 +1012,9 @@ func TestApply_RemovesDNSForwardOnAbsentKey(t *testing.T) {
 	if slices.Contains(sim.dnsmasq, fwd) {
 		t.Errorf("forward not removed on absent dhcp key: %v", sim.dnsmasq)
 	}
+	if slices.Contains(sim.rebindDomain, "home1.internal") {
+		t.Errorf("rebind_domain whitelist not removed on absent dhcp key: %v", sim.rebindDomain)
+	}
 	if m := loadManifestFile(t, dir); m.DNSForward != "" {
 		t.Errorf("manifest.DNSForward = %q, want empty after removal", m.DNSForward)
 	}
@@ -1015,6 +1039,9 @@ func TestApply_DNSForwardIdempotentNoReload(t *testing.T) {
 	if n := countStr(sim.dnsmasq, fwd); n != 1 {
 		t.Errorf("forward present %d times, want exactly 1: %v", n, sim.dnsmasq)
 	}
+	if n := countStr(sim.rebindDomain, "home1.internal"); n != 1 {
+		t.Errorf("rebind_domain present %d times, want exactly 1: %v", n, sim.rebindDomain)
+	}
 }
 
 func TestGet_DNSForwardDriftWhenRemovedOutOfBand(t *testing.T) {
@@ -1033,5 +1060,30 @@ func TestGet_DNSForwardDriftWhenRemovedOutOfBand(t *testing.T) {
 	}
 	if gh == applied {
 		t.Error("Get hash matches applied despite the forward being removed — drift not detected")
+	}
+}
+
+// A stripped rebind_domain leaves the server line intact but silently
+// black-holes .internal — so it MUST read as drift, not as in-sync.
+func TestGet_DNSForwardDriftWhenRebindDomainStripped(t *testing.T) {
+	sim := stockSim()
+	c, _ := newSimClient(t, sim)
+	fwd := "/home1.internal/192.168.1.5"
+
+	applied, err := c.Apply(context.Background(), jsonRoundTrip(t, stateWithForward(fwd)))
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// Server entry stays; only the rebind_domain whitelist is hand-removed.
+	sim.rebindDomain = nil
+	got, gh, err := c.Get(context.Background())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if gh == applied {
+		t.Error("Get hash matches applied despite rebind_domain being stripped — the black-hole isn't detected as drift")
+	}
+	if dhcp, ok := got["dhcp"].(map[string]any); !ok || dhcp["server"] != "" {
+		t.Errorf("Get dhcp = %v, want server=\"\" (forward reported absent)", got["dhcp"])
 	}
 }
