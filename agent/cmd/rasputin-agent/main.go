@@ -482,7 +482,13 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		Capabilities: caps,
 		Metadata:     meta,
 		Storage:      storage,
-		Ts:           time.Now().UTC(),
+		// The kernel's identity for this boot, so the update saga can tell a
+		// post-reboot registration from the pre-reboot agent still answering
+		// (ADR-0005 Decision 1). Read per publish rather than cached at
+		// startup: the file cannot change under a running process, and
+		// re-reading keeps this consistent with the precheck handler.
+		BootID: host.BootID(),
+		Ts:     time.Now().UTC(),
 	}
 	payload, err := json.Marshal(ev)
 	if err != nil {

@@ -57,6 +57,52 @@ func trimmedFileVersion(t *testing.T) string {
 	return strings.TrimSpace(string(b))
 }
 
+func TestBootID_EnvOverrideWins(t *testing.T) {
+	// The dev/testing lever: on a laptop a "reboot" is a process restart, so
+	// the env override is how a functional test drives a boot change.
+	t.Setenv("RASPUTIN_BOOT_ID", "  4f8c2b1e-0000-4a11-9c3d-000000000001\n")
+	if got := BootID(); got != "4f8c2b1e-0000-4a11-9c3d-000000000001" {
+		t.Errorf("BootID() = %q, want trimmed env value", got)
+	}
+}
+
+func TestBootID_MissingFileIsEmptyNotError(t *testing.T) {
+	// macOS dev boxes have no /proc at all. The helper must degrade to "" —
+	// which consumers read as UNKNOWN, never as a boot mismatch (ADR-0005
+	// Decision 3) — rather than error or panic.
+	t.Setenv("RASPUTIN_BOOT_ID", "")
+	got := BootID()
+	if got != "" && got != trimmedFileBootID(t) {
+		t.Errorf("BootID() = %q, want \"\" or the trimmed file contents", got)
+	}
+	// On a real Linux host the value must look like a boot_id: a non-empty
+	// single line with no surrounding whitespace.
+	if got != "" && (strings.TrimSpace(got) != got || strings.Contains(got, "\n")) {
+		t.Errorf("BootID() = %q, want a trimmed single line", got)
+	}
+}
+
+// TestBootID_StableWithinAProcess pins the property the whole comparison rests
+// on: within one boot the identity does not change, so two reads that differ
+// would mean "different boot" to the update saga when nothing rebooted.
+func TestBootID_StableWithinAProcess(t *testing.T) {
+	t.Setenv("RASPUTIN_BOOT_ID", "")
+	if a, b := BootID(), BootID(); a != b {
+		t.Errorf("BootID() not stable within a process: %q then %q", a, b)
+	}
+}
+
+// trimmedFileBootID returns the trimmed contents of the kernel boot_id file if
+// it exists (so the test also passes on a real Linux node), else "".
+func trimmedFileBootID(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(bootIDPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func TestUptime_IsMonotonicNonDecreasing(t *testing.T) {
 	// Two consecutive reads taken back-to-back should never go backwards.
 	// We intentionally don't sleep between them — that would push the test

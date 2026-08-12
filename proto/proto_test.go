@@ -368,6 +368,7 @@ func TestUpdatePrecheckAckRoundTrip(t *testing.T) {
 		CurrentVersion: "1.2.3",
 		AvailableBytes: 1 << 30,
 		Backend:        "mock",
+		BootID:         "7f3a9d20-5555-4666-8777-888899990000",
 	}
 	b, err := json.Marshal(in)
 	if err != nil {
@@ -379,6 +380,44 @@ func TestUpdatePrecheckAckRoundTrip(t *testing.T) {
 	}
 	if out != in {
 		t.Errorf("round-trip mismatch:\n got %+v\nwant %+v", out, in)
+	}
+}
+
+// The wire field is "bootId" and it is omitted when empty, so a pre-bootId
+// agent's ack is byte-identical to what it sent before this field existed —
+// the compatibility property ADR-0005 Decision 3 depends on.
+func TestUpdatePrecheckAckBootIDWireName(t *testing.T) {
+	b, err := json.Marshal(UpdatePrecheckAck{OK: true, BootID: "abc"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"bootId":"abc"`) {
+		t.Errorf("wire form missing bootId: %s", b)
+	}
+	empty, _ := json.Marshal(UpdatePrecheckAck{OK: true})
+	if strings.Contains(string(empty), "bootId") {
+		t.Errorf("empty bootId must be omitted, got %s", empty)
+	}
+}
+
+// Same two properties on the registration event, plus the one that matters
+// most for an in-place upgrade: an OLD agent's payload (no bootId key at all)
+// still decodes cleanly, leaving BootID == "" — unknown, not a mismatch.
+func TestNodeRegisteredEvtBootID(t *testing.T) {
+	b, err := json.Marshal(NodeRegisteredEvt{NodeID: "n-1", Role: RoleCompute, BootID: "abc"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"bootId":"abc"`) {
+		t.Errorf("wire form missing bootId: %s", b)
+	}
+
+	var old NodeRegisteredEvt
+	if err := json.Unmarshal([]byte(`{"nodeId":"n-1","role":"compute"}`), &old); err != nil {
+		t.Fatalf("pre-bootId agent payload must still decode: %v", err)
+	}
+	if old.BootID != "" {
+		t.Errorf("BootID = %q, want \"\" from a pre-bootId agent", old.BootID)
 	}
 }
 

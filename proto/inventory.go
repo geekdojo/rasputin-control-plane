@@ -74,7 +74,19 @@ type NodeRegisteredEvt struct {
 	// partition. Nil from pre-storage agents; consumers treat nil as unknown
 	// (and, like Architecture, never let a nil report wipe a learned value).
 	Storage *StorageInfo `json:"storage,omitempty"`
-	Ts      time.Time    `json:"ts"`
+	// BootID is the kernel's per-boot UUID (/proc/sys/kernel/random/boot_id)
+	// for the boot publishing this registration — the same identity carried on
+	// UpdatePrecheckAck, and documented there. Carried here so the update
+	// saga's wait step can compare boot identity straight off the registration
+	// event it is already subscribed to, without a second round trip.
+	//
+	// Note this event fires on every NATS *connect*, not every boot, so two
+	// registrations with the same BootID are the normal case (an agent
+	// reconnecting after an api restart). Equality means "same boot", nothing
+	// more. Empty from a pre-bootId agent; consumers treat "" as unknown, never
+	// as a mismatch (ADR-0005 Decision 3).
+	BootID string    `json:"bootId,omitempty"`
+	Ts     time.Time `json:"ts"`
 }
 
 // StorageInfo describes the node's persistent data partition

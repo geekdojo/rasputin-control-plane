@@ -148,8 +148,13 @@ func updatePrecheck() jobs.DoFn {
 		if !ack.OK {
 			return nil, fmt.Errorf("precheck failed: %s", ack.Detail)
 		}
-		sc.Log("info", fmt.Sprintf("active=%s inactive=%s current=%s backend=%s",
-			ack.ActiveSlot, ack.InactiveSlot, ack.CurrentVersion, ack.Backend))
+		// The whole ack is the step result, so the PRE-REBOOT boot identity is
+		// captured here and threaded to step 6 through sc.PriorResults without
+		// any extra plumbing — this step is the last point in the saga at which
+		// the old boot is guaranteed to still be the one answering. ADR-0005
+		// Decision 1 ("capture the pre-reboot bootId in step 2").
+		sc.Log("info", fmt.Sprintf("active=%s inactive=%s current=%s backend=%s bootId=%s",
+			ack.ActiveSlot, ack.InactiveSlot, ack.CurrentVersion, ack.Backend, bootIDForLog(ack.BootID)))
 		return json.Marshal(ack)
 	}
 }
@@ -367,6 +372,14 @@ func updateWaitOnlineAndVerifySlot(store *Store) jobs.DoFn {
 		}
 		defer func() { _ = sub.Unsubscribe() }()
 
+		// The boot identity captured before the reboot RPC (step 2's ack).
+		// Read from the cached step result ONLY — unlike step 4, there is no
+		// re-issue-the-RPC fallback here, because after the reboot an RPC
+		// answers with the CURRENT boot, which is the very thing this value
+		// exists to be compared against. A missing cache degrades to unknown,
+		// exactly like a pre-bootId agent.
+		priorBootID := priorPrecheckBootID(sc.PriorResults)
+
 		sc.Log("info", "waiting for node to re-register")
 		var regBytes []byte
 		select {
@@ -387,9 +400,19 @@ func updateWaitOnlineAndVerifySlot(store *Store) jobs.DoFn {
 		// Precheck the booted slot vs the target (shared with the self-update
 		// reconciler — see selfupdate.go). Records + publishes a rollback on a
 		// slot mismatch.
-		if _, err := verifyBootedSlot(sc.Ctx, sc.NATS, store, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log); err != nil {
+		post, err := verifyBootedSlot(sc.Ctx, sc.NATS, store, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
+		if err != nil {
 			return nil, err
 		}
+
+		// Boot identity is REPORTED here, not yet enforced. The gate — making a
+		// differing bootId conjunct (a) of the verify contract, so the answering
+		// agent must be a different boot than the one told to reboot — is #58's
+		// restructure of this step; #71 owns surfacing the degraded case. This
+		// story's job is to make the value exist and travel (ADR-0005 Decision
+		// 1), and the log line is what lets a bench run see it doing so before
+		// anything depends on it.
+		sc.Log("info", "boot identity: "+describeBootTransition(priorBootID, post.BootID))
 		return regBytes, nil
 	}
 }
@@ -413,6 +436,54 @@ func updateHealthCheckAndCommit(store *Store) jobs.DoFn {
 func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// priorPrecheckBootID digs the pre-reboot boot identity out of the precheck
+// step's cached result. Every failure mode — no cached result, unparseable
+// result, a pre-bootId agent that sent no field — collapses to "", which
+// consumers must read as UNKNOWN rather than as a mismatch (ADR-0005
+// Decision 3). Deliberately total: a boot identity that could not be captured
+// must never be the reason an otherwise-good update is failed.
+func priorPrecheckBootID(prior map[string]json.RawMessage) string {
+	raw, ok := prior["precheck"]
+	if !ok || len(raw) == 0 {
+		return ""
+	}
+	var pre proto.UpdatePrecheckAck
+	if err := json.Unmarshal(raw, &pre); err != nil {
+		return ""
+	}
+	return pre.BootID
+}
+
+// describeBootTransition renders the before/after boot identity for the step
+// log. The three outcomes are meaningfully different and must not be flattened
+// into one line: "different" is the post-reboot state the saga wants, "SAME"
+// means the pre-reboot agent is still answering (the #58 false-rollback class),
+// and "unknown" means one side reported nothing — a mixed-version fleet, which
+// ADR-0005 Decision 3 says is the normal case on a cluster's first rollout.
+func describeBootTransition(before, after string) string {
+	switch {
+	case before == "" && after == "":
+		return "unknown (neither boot reported a bootId — pre-bootId agent)"
+	case before == "":
+		return fmt.Sprintf("unknown (pre-reboot bootId not captured; now on %s)", short(after))
+	case after == "":
+		return fmt.Sprintf("unknown (was %s; this boot reported no bootId)", short(before))
+	case before == after:
+		return fmt.Sprintf("SAME boot %s — the pre-reboot agent is still answering", short(before))
+	default:
+		return fmt.Sprintf("different boot (%s → %s)", short(before), short(after))
+	}
+}
+
+// bootIDForLog renders a boot identity for a log line, naming the empty case
+// rather than leaving a blank field an operator has to interpret.
+func bootIDForLog(id string) string {
+	if id == "" {
+		return "(none)"
+	}
+	return short(id)
 }
 
 func short(h string) string {

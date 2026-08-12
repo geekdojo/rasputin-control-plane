@@ -1,6 +1,8 @@
 package updater
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,5 +104,83 @@ func TestSystemUpdateWorkflow_Kind(t *testing.T) {
 	}
 	if len(wf.Steps) != 3 {
 		t.Errorf("steps: want 3, got %d", len(wf.Steps))
+	}
+}
+
+// ============================================================================
+// Boot identity (ADR-0005 Decision 1)
+// ============================================================================
+
+// priorPrecheckBootID must be total: every way the capture can fail collapses
+// to "" (unknown), because a boot identity that could not be captured must
+// never become the reason an otherwise-good update is failed.
+func TestPriorPrecheckBootID(t *testing.T) {
+	cases := []struct {
+		name  string
+		prior map[string]json.RawMessage
+		want  string
+	}{
+		{"captured", map[string]json.RawMessage{
+			"precheck": json.RawMessage(`{"ok":true,"bootId":"boot-before"}`),
+		}, "boot-before"},
+		{"pre-bootId agent sent no field", map[string]json.RawMessage{
+			"precheck": json.RawMessage(`{"ok":true,"activeSlot":"a"}`),
+		}, ""},
+		{"no prior results at all", nil, ""},
+		{"precheck step absent", map[string]json.RawMessage{
+			"validate": json.RawMessage(`{"version":"v1"}`),
+		}, ""},
+		{"empty result", map[string]json.RawMessage{
+			"precheck": json.RawMessage(``),
+		}, ""},
+		{"unparseable result", map[string]json.RawMessage{
+			"precheck": json.RawMessage(`not json`),
+		}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := priorPrecheckBootID(c.prior); got != c.want {
+				t.Errorf("priorPrecheckBootID = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The three outcomes must stay distinguishable in the step log: the operator
+// reading a bench run has to be able to tell "rebooted" from "the old agent is
+// still answering" (the #58 false-rollback class) from "mixed-version fleet,
+// no identity available" (ADR-0005 Decision 3).
+func TestDescribeBootTransition(t *testing.T) {
+	cases := []struct {
+		name, before, after, wantSubstr string
+	}{
+		{"different boot", "boot-a", "boot-b", "different boot"},
+		{"same boot", "boot-a", "boot-a", "SAME boot"},
+		{"neither reported", "", "", "unknown"},
+		{"pre-reboot missing", "", "boot-b", "unknown"},
+		{"post-reboot missing", "boot-a", "", "unknown"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := describeBootTransition(c.before, c.after)
+			if !strings.Contains(got, c.wantSubstr) {
+				t.Errorf("describeBootTransition(%q, %q) = %q, want it to contain %q",
+					c.before, c.after, got, c.wantSubstr)
+			}
+		})
+	}
+	// A same-boot answer must never be described as a successful transition —
+	// that phrasing is what an operator would act on.
+	if s := describeBootTransition("x", "x"); strings.Contains(s, "different") {
+		t.Errorf("same-boot description must not read as different: %q", s)
+	}
+}
+
+func TestBootIDForLog_NamesTheEmptyCase(t *testing.T) {
+	if got := bootIDForLog(""); got != "(none)" {
+		t.Errorf("bootIDForLog(\"\") = %q, want %q", got, "(none)")
+	}
+	if got := bootIDForLog("0123456789abcdef"); got == "" || got == "(none)" {
+		t.Errorf("bootIDForLog of a real id = %q", got)
 	}
 }

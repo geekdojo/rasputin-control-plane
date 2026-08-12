@@ -43,7 +43,22 @@ type UpdatePrecheckAck struct {
 	CurrentVersion string     `json:"currentVersion"`
 	AvailableBytes int64      `json:"availableBytes"` // free space on inactive slot's partition
 	Backend        string     `json:"backend"`        // "rauc" or "mock"
-	Detail         string     `json:"detail,omitempty"`
+	// BootID is the kernel's per-boot UUID (/proc/sys/kernel/random/boot_id)
+	// for the boot that is answering. It is the update saga's boot IDENTITY:
+	// the pre-reboot value is captured at precheck and compared for EQUALITY
+	// after the reboot, which is the only question step 6 actually wants to ask
+	// — "is this a different boot than the one I told to reboot?" A boot
+	// *timestamp* would not do: the majority node is a Pi with no RTC whose
+	// clock is wrong until timesyncd runs. ADR-0005 Decision 1.
+	//
+	// Empty from a pre-bootId agent. Consumers treat "" as UNKNOWN and never as
+	// a mismatch (ADR-0005 Decision 3) — a fleet update is mixed-version by
+	// definition, so the first rollout onto any existing cluster gets no boot
+	// identity from any node, and hard-failing would mean no existing cluster
+	// could ever adopt the feature. Same tolerance as Architecture / LANIP /
+	// Storage on NodeRegisteredEvt.
+	BootID string `json:"bootId,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // UpdateDownloadCmd tells the agent where to fetch the bundle. URL is

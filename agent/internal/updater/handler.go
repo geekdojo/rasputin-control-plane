@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -35,9 +36,15 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		defer cancel()
 		ack, err := backend.Precheck(ctx)
 		if err != nil {
-			bus.Respond(m, proto.UpdatePrecheckAck{OK: false, Detail: err.Error()})
+			bus.Respond(m, proto.UpdatePrecheckAck{OK: false, BootID: host.BootID(), Detail: err.Error()})
 			return
 		}
+		// Boot identity is stamped here rather than inside each backend: a
+		// Backend describes SLOT reality (rauc / openwrt-ab / mock), and which
+		// boot is answering is a host fact that is identical for all three.
+		// One place to stamp means a new backend cannot silently omit it.
+		// ADR-0005 Decision 1.
+		ack.BootID = host.BootID()
 		bus.Respond(m, ack)
 	}); err != nil {
 		return subs, err

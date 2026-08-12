@@ -98,6 +98,34 @@ func TestRegisterHandlers_PrecheckHappyPath(t *testing.T) {
 	}
 }
 
+// The precheck ack carries the kernel boot identity, and it is stamped by the
+// HANDLER rather than by the backend — the mock backend never sets it, so a
+// value arriving here proves the handler is the one place a new backend cannot
+// forget. ADR-0005 Decision 1.
+func TestRegisterHandlers_PrecheckCarriesBootID(t *testing.T) {
+	const bootID = "9a1f0c44-1111-4222-8333-444455556666"
+	t.Setenv("RASPUTIN_BOOT_ID", bootID)
+	nc, _ := newRegistered(t)
+	var ack proto.UpdatePrecheckAck
+	request(t, nc, proto.UpdatePrecheckSubject("node-1"), proto.UpdatePrecheckCmd{}, &ack)
+	if ack.BootID != bootID {
+		t.Errorf("bootId = %q, want %q", ack.BootID, bootID)
+	}
+}
+
+// A node whose kernel exposes no boot_id (and no override) reports "" rather
+// than failing the precheck: per ADR-0005 Decision 3 an absent boot identity is
+// UNKNOWN, and a missing primitive must never be the reason an update stops.
+func TestRegisterHandlers_PrecheckWithoutBootIDStillSucceeds(t *testing.T) {
+	t.Setenv("RASPUTIN_BOOT_ID", "")
+	nc, _ := newRegistered(t)
+	var ack proto.UpdatePrecheckAck
+	request(t, nc, proto.UpdatePrecheckSubject("node-1"), proto.UpdatePrecheckCmd{}, &ack)
+	if !ack.OK {
+		t.Errorf("precheck must still succeed without a boot id: %+v", ack)
+	}
+}
+
 func TestRegisterHandlers_DownloadHappyPath(t *testing.T) {
 	body := []byte("mock bundle bytes for handler test")
 	sum := sha256.Sum256(body)
