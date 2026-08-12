@@ -16,6 +16,17 @@ const (
 	StatusUpdateAvailable = "update_available"
 	StatusNoRelease       = "no_release" // channel has no release for this component
 	StatusUnknown         = "unknown"    // can't compare (no node, unparseable version, fetch error)
+	// StatusNeedsAttention: the comparison says up to date, but at least one
+	// node running this component has an UNCONFIRMED version — inventory is
+	// holding a value an update outcome told us not to trust (ADR-0005
+	// Decision 4). Distinct from unknown, which means we could not compare at
+	// all; here we compared fine and the inputs are suspect.
+	//
+	// It exists because the alternative is worse in exactly the case that
+	// matters: a stranded node reporting the version it was MEANT to reach
+	// makes the whole component read green, which is how bench node c08
+	// disappeared from "what needs updating" while sitting on the old image.
+	StatusNeedsAttention = "needs_attention"
 )
 
 // ComponentStatus is the per-component result of a check.
@@ -151,6 +162,25 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 		cs.Status = StatusUpToDate
 	}
 
+	// An unconfirmed node poisons a green verdict, and only a green one. If the
+	// component already reads update_available the operator is being sent to the
+	// Updates page regardless, so the unconfirmed node is a note on top of an
+	// action they are already taking; if it reads up to date, that verdict is
+	// resting on a version we have been told not to trust, and it must not
+	// stand. ADR-0005 Decision 4.
+	//
+	// Note that excluding unconfirmed nodes from the comparison instead would
+	// NOT fix this: the c08 case is a single stranded node among a fleet that
+	// genuinely is current, so dropping it just leaves the remaining nodes
+	// agreeing on latest — green again, with the stranded node now invisible
+	// rather than merely miscounted.
+	if unconfirmed := unconfirmedNodes(nodes, comp); len(unconfirmed) > 0 {
+		if cs.Status == StatusUpToDate {
+			cs.Status = StatusNeedsAttention
+		}
+		cs.Note = appendNote(cs.Note, "Version unconfirmed (last update didn't verify): "+strings.Join(unconfirmed, ", "))
+	}
+
 	// Attach deploy/display metadata from the matching artifact.
 	if art, ok := info.Artifact(comp.Compatible); ok {
 		cs.SignedBy = art.SignedBy
@@ -215,6 +245,42 @@ func installedVersion(nodes []*proto.Node, comp Component) string {
 		}
 	}
 	return oldest
+}
+
+// unconfirmedNodes lists "id (version)" for every node running comp whose
+// image version carries no confirmation — inventory is holding the last thing
+// it was told by a node that an update outcome then failed to verify.
+//
+// Only meaningful for image versions. A component compared on the AGENT version
+// (CompareField == "agent") is unaffected: image_version_confirmed_at says
+// nothing about agent_version, and treating it as if it did would make an
+// unrelated component read yellow for a reason its operator cannot act on.
+func unconfirmedNodes(nodes []*proto.Node, comp Component) []string {
+	if comp.CompareField == "agent" {
+		return nil
+	}
+	var out []string
+	for _, n := range nodes {
+		if !runsComponent(n, comp) || n.ImageVersionConfirmedAt != nil {
+			continue
+		}
+		v := n.ImageVersion
+		if v == "" {
+			v = "no version reported"
+		}
+		out = append(out, fmt.Sprintf("%s (%s)", n.ID, v))
+	}
+	return out
+}
+
+// appendNote joins note fragments so a row can carry both "behind latest" and
+// "unconfirmed" without one silently replacing the other — they are different
+// problems on (possibly) different nodes.
+func appendNote(existing, add string) string {
+	if existing == "" {
+		return add
+	}
+	return existing + " · " + add
 }
 
 // laggingNodes lists "id (version)" for every node running comp whose version is

@@ -42,13 +42,7 @@ func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	version := ""
-	for _, n := range cps {
-		if n.ImageVersion != "" {
-			version = n.ImageVersion
-			break
-		}
-	}
+	version := clusterOSVersion(cps)
 	if version == "" {
 		writeError(w, http.StatusServiceUnavailable, "cluster OS version not known yet")
 		return
@@ -65,6 +59,37 @@ func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, desc)
+}
+
+// clusterOSVersion picks the OS version a NEW node should be flashed with, from
+// the controlplane node(s). A CONFIRMED version wins over an unconfirmed one
+// (ADR-0005 Decision 4): an unconfirmed value is one an update outcome told us
+// not to trust, and flashing a new node to it would seed the cluster's newest
+// member from its least reliable fact.
+//
+// An unconfirmed value is still used when it is all there is, deliberately.
+// Refusing would mean a cluster whose controlplane update failed to verify
+// cannot add nodes at all — turning a stale-version problem into an
+// onboarding outage, which is far worse for the operator than flashing a node
+// with a version that may be one release off and is fixed by an ordinary
+// update. Logged so the choice is visible in the journal rather than silent.
+func clusterOSVersion(cps []*proto.Node) string {
+	fallback := ""
+	for _, n := range cps {
+		if n.ImageVersion == "" {
+			continue
+		}
+		if n.ImageVersionConfirmedAt != nil {
+			return n.ImageVersion
+		}
+		if fallback == "" {
+			fallback = n.ImageVersion
+		}
+	}
+	if fallback != "" {
+		log.Printf("cluster node-image: no controlplane has a CONFIRMED image version; falling back to the unconfirmed %q", fallback)
+	}
+	return fallback
 }
 
 // handleClusterFirewallImage returns the flashable firewall image a new

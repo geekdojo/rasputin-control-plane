@@ -794,7 +794,7 @@ func TestUpdateHealthCheckAndCommit_HappyPath(t *testing.T) {
 	defer func() { _ = mgSub.Unsubscribe() }()
 
 	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
-	if _, err := updateHealthCheckAndCommit(store)(sc); err != nil {
+	if _, err := updateHealthCheckAndCommit(store, nil)(sc); err != nil {
 		t.Fatalf("updateHealthCheckAndCommit: %v", err)
 	}
 	row, _ := store.GetNodeUpdate(ctx, "j")
@@ -824,7 +824,7 @@ func TestUpdateHealthCheckAndCommit_HealthCheckFails(t *testing.T) {
 	defer cancel()
 	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
 	sc.Ctx = tctx
-	if _, err := updateHealthCheckAndCommit(store)(sc); err == nil {
+	if _, err := updateHealthCheckAndCommit(store, nil)(sc); err == nil {
 		t.Error("health failure: want error")
 	}
 	row, _ := store.GetNodeUpdate(ctx, "j")
@@ -837,7 +837,7 @@ func TestUpdateHealthCheckAndCommit_BadSpec(t *testing.T) {
 	nc := startNATS(t)
 	store := newStoreFixture(t).store
 	sc := newUpdaterCtx("j", `{}`, nc)
-	if _, err := updateHealthCheckAndCommit(store)(sc); err == nil {
+	if _, err := updateHealthCheckAndCommit(store, nil)(sc); err == nil {
 		t.Error("bad spec: want error")
 	}
 }
@@ -862,7 +862,7 @@ func TestUpdateHealthCheckAndCommit_MarkGoodRejected(t *testing.T) {
 	defer func() { _ = mgSub.Unsubscribe() }()
 
 	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
-	if _, err := updateHealthCheckAndCommit(store)(sc); err == nil {
+	if _, err := updateHealthCheckAndCommit(store, nil)(sc); err == nil {
 		t.Error("mark-good rejected: want error")
 	}
 }

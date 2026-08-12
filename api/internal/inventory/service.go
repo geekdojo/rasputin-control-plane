@@ -214,14 +214,18 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 			Hostname:     ev.Hostname,
 			AgentVersion: ev.AgentVersion,
 			ImageVersion: ev.ImageVersion,
-			Architecture: ev.Architecture,
-			LANIP:        ev.LANIP,
-			Capabilities: ev.Capabilities,
-			Metadata:     ev.Metadata,
-			Storage:      ev.Storage,
-			FirstSeen:    now,
-			LastSeen:     now,
-			Status:       proto.StatusOnline,
+			// A registration IS a confirmation: the agent read this value off
+			// the rootfs it is currently running, and it is alive enough to
+			// say so. ADR-0005 Decision 4.
+			ImageVersionConfirmedAt: &now,
+			Architecture:            ev.Architecture,
+			LANIP:                   ev.LANIP,
+			Capabilities:            ev.Capabilities,
+			Metadata:                ev.Metadata,
+			Storage:                 ev.Storage,
+			FirstSeen:               now,
+			LastSeen:                now,
+			Status:                  proto.StatusOnline,
 		}
 		if err := s.store.Insert(s.ctx, n); err != nil {
 			log.Printf("inventory: insert %s: %v", ev.NodeID, err)
@@ -244,6 +248,11 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	existing.Hostname = ev.Hostname
 	existing.AgentVersion = ev.AgentVersion
 	existing.ImageVersion = ev.ImageVersion
+	// Re-confirmed on every re-registration, which is what makes an
+	// unconfirmed row self-healing: any node that comes back clears its own
+	// doubt, and the ones that never do are exactly the ones whose version
+	// should stop reading as agreed (ADR-0005 Decision 4).
+	existing.ImageVersionConfirmedAt = &now
 	// Only overwrite arch when reported — a pre-arch agent reconnecting (arch="")
 	// must not wipe an arch we already learned.
 	if ev.Architecture != "" {
