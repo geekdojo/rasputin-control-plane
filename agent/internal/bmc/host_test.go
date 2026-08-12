@@ -179,3 +179,29 @@ func TestHost_CorruptPersistedSelectionComesUpOff(t *testing.T) {
 		t.Error("corrupt selection must come up off")
 	}
 }
+
+// handleProbe must honor the endpoint carried in the command's payload rather
+// than falling back to mDNS discovery. Guards host.go:205 `if len(m.Data) > 0`
+// CONDITIONALS_NEGATION (`>` → `<=`): under that mutation a non-empty payload
+// is dropped on the floor, the probe runs with a zero command (empty endpoint),
+// and it discovers over mDNS instead of hitting the endpoint we asked for —
+// so it never reaches, let alone identifies, the board we pointed it at.
+func TestHost_ProbeUsesEndpointFromCommand(t *testing.T) {
+	board := unauthedBoard(t) // a fake BMC: 401 + the vendor marker
+	h, err := NewHost("n1", t.TempDir(), "", Config{})
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	nc, _ := attachHost(t, h)
+
+	var res proto.BMCProbeResult
+	request(t, nc, proto.BMCProbeSubject("n1"),
+		proto.BMCProbeCmd{Kind: "turingpi", Endpoint: board.URL}, &res)
+
+	if !res.Identified {
+		t.Fatalf("probe did not identify the board at the endpoint we passed — the payload endpoint was ignored: %+v", res)
+	}
+	if res.Endpoint != board.URL {
+		t.Errorf("result endpoint = %q, want the one from the command (%q)", res.Endpoint, board.URL)
+	}
+}

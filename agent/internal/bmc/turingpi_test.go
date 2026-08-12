@@ -572,3 +572,30 @@ func TestDisplayFingerprintMatchesOpensslForm(t *testing.T) {
 		t.Error("empty digest should render empty, not a stray colon")
 	}
 }
+
+// truncate caps the BMC error bodies the driver echoes back (turingpi.go:430
+// wraps a 200-limited body). It must leave a string that fits untouched — the
+// `<=` guard is a length boundary and its off-by-one/negation both corrupt the
+// common, in-bounds case:
+//   - boundary `len(s) <= n` → `len(s) < n`: a string of exactly n runes would
+//     be truncated to n bytes plus an ellipsis, so "abc"/3 → "abc…".
+//   - negation `<=` → `>`: an in-bounds string takes the s[:n] slice and panics
+//     (n past the end), or at best appends a spurious ellipsis.
+func TestTruncate(t *testing.T) {
+	cases := []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"", 5, ""},           // empty is always under the cap
+		{"ab", 5, "ab"},       // well under — unchanged, and must not slice past the end
+		{"abc", 3, "abc"},     // exactly at the cap — the boundary: still unchanged, no ellipsis
+		{"abcd", 3, "abc…"},   // one over — truncated to n with an ellipsis
+		{"abcdef", 3, "abc…"}, // several over — same
+	}
+	for _, tc := range cases {
+		if got := truncate(tc.s, tc.n); got != tc.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
+		}
+	}
+}
