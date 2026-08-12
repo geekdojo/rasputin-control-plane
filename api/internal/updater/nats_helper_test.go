@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -598,6 +599,152 @@ func TestUpdateWaitOnlineAndVerifySlot_BootloaderRollback(t *testing.T) {
 	if row == nil || row.Status != NodeUpdateRolledBack {
 		t.Errorf("status after rollback: %+v", row)
 	}
+}
+
+// The pre-reboot boot identity has to survive from step 2 to step 6, and the
+// mechanism is that step 2 returns the WHOLE ack as its step result. This is
+// the capture half of ADR-0005 Decision 1; without it there is nothing for the
+// post-reboot value to be compared against.
+func TestUpdatePrecheck_CapturesBootIDInStepResult(t *testing.T) {
+	nc := startNATS(t)
+	const nodeID, bootID = "n", "boot-before-reboot"
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+			CurrentVersion: "v0", Backend: "mock", BootID: bootID,
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha-1"), nc)
+	out, err := updatePrecheck()(sc)
+	if err != nil {
+		t.Fatalf("updatePrecheck: %v", err)
+	}
+	if got := priorPrecheckBootID(map[string]json.RawMessage{"precheck": out}); got != bootID {
+		t.Errorf("bootId threaded through the step result = %q, want %q", got, bootID)
+	}
+}
+
+// Step 6 reads the pre-reboot identity out of PriorResults and reports the
+// transition — but does NOT gate on it. A node still answering on the SAME boot
+// is the #58 false-rollback class; this story deliberately only makes the value
+// visible, so the step must still pass on the slot check alone. When #58 makes
+// bootId conjunct (a) of the verify contract, this expectation flips, and that
+// is the point of pinning it now.
+func TestUpdateWaitOnlineAndVerifySlot_BootIDReportedNotEnforced(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID, bootID = "n", "same-boot"
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+
+	// Slot says "on the new slot", but the boot identity is unchanged — i.e.
+	// the pre-reboot agent answering.
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA,
+			CurrentVersion: "v1", BootID: bootID,
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = nc.Publish(proto.NodeRegisteredSubject(nodeID), []byte(`{"nodeId":"`+nodeID+`"}`))
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	var logged []string
+	tctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
+	sc.Ctx = tctx
+	sc.PriorResults = map[string]json.RawMessage{
+		"precheck": mustJSON(proto.UpdatePrecheckAck{OK: true, BootID: bootID}),
+	}
+	sc.Log = func(level, message string) { logged = append(logged, message) }
+
+	if _, err := updateWaitOnlineAndVerifySlot(store)(sc); err != nil {
+		t.Fatalf("bootId is reported, not enforced, in this story: %v", err)
+	}
+	if !containsSubstr(logged, "SAME boot") {
+		t.Errorf("expected the same-boot observation in the step log, got %q", logged)
+	}
+}
+
+// A pre-bootId agent (no identity on either side) must not change step 6's
+// behaviour at all — ADR-0005 Decision 3's degrade-loudly rule starts as
+// degrade-visibly here.
+func TestUpdateWaitOnlineAndVerifySlot_NoBootIDIsUnknownNotFailure(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID = "n"
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA, CurrentVersion: "v1",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = nc.Publish(proto.NodeRegisteredSubject(nodeID), []byte(`{"nodeId":"`+nodeID+`"}`))
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	var logged []string
+	tctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
+	sc.Ctx = tctx
+	// No PriorResults at all — the harshest version of "we captured nothing".
+	sc.Log = func(level, message string) { logged = append(logged, message) }
+
+	if _, err := updateWaitOnlineAndVerifySlot(store)(sc); err != nil {
+		t.Fatalf("absent bootId must be unknown, not a mismatch: %v", err)
+	}
+	if !containsSubstr(logged, "unknown") {
+		t.Errorf("expected the unknown-identity observation in the step log, got %q", logged)
+	}
+}
+
+func containsSubstr(lines []string, want string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestUpdateWaitOnlineAndVerifySlot_BadSpec(t *testing.T) {

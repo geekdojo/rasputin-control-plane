@@ -220,11 +220,31 @@ func ResumeSelfUpdates(ctx context.Context, store *Store, jobStore *jobs.Store, 
 		if !rebootDone(steps) {
 			continue
 		}
-		go reconcileSelfUpdate(ctx, store, runner, nc, spec, j.ID)
+		// The pre-reboot boot identity, recovered from the PERSISTED precheck
+		// step result. The in-memory sc.PriorResults that step 6 reads died
+		// with the old api — this path is the api finishing a job across its
+		// own reboot — but the step result itself is durable (JobStep.Result),
+		// so the value survives exactly the reboot it exists to span.
+		// ADR-0005 Decision 1.
+		priorBootID := priorPrecheckBootID(map[string]json.RawMessage{
+			"precheck": stepResult(steps, "precheck"),
+		})
+		go reconcileSelfUpdate(ctx, store, runner, nc, spec, j.ID, priorBootID)
 	}
 }
 
-func reconcileSelfUpdate(ctx context.Context, store *Store, runner *jobs.Runner, nc *nats.Conn, spec UpdateSpec, jobID string) {
+// stepResult returns the recorded result of the named step, or nil if the step
+// is absent or never recorded one.
+func stepResult(steps []*jobs.JobStep, name string) json.RawMessage {
+	for _, s := range steps {
+		if s.Name == name {
+			return s.Result
+		}
+	}
+	return nil
+}
+
+func reconcileSelfUpdate(ctx context.Context, store *Store, runner *jobs.Runner, nc *nats.Conn, spec UpdateSpec, jobID, priorBootID string) {
 	log.Printf("updater: resuming self-update %s after reboot", jobID)
 	wctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -233,11 +253,15 @@ func reconcileSelfUpdate(ctx context.Context, store *Store, runner *jobs.Runner,
 		runner.FinishDeferred(ctx, jobID, false, "agent did not reconnect after self-update reboot: "+err.Error())
 		return
 	}
-	if _, err := verifyBootedSlot(wctx, nc, store, spec.NodeID, spec.BundleSHA256, jobID, nil); err != nil {
+	post, err := verifyBootedSlot(wctx, nc, store, spec.NodeID, spec.BundleSHA256, jobID, nil)
+	if err != nil {
 		// verifyBootedSlot already recorded + published the rollback.
 		runner.FinishDeferred(ctx, jobID, false, err.Error())
 		return
 	}
+	// Reported, not yet enforced — the same stance as saga step 6. Making a
+	// differing bootId a conjunct of the verify contract is #58.
+	log.Printf("updater: self-update %s boot identity: %s", jobID, describeBootTransition(priorBootID, post.BootID))
 	if _, err := healthCheckAndCommit(wctx, nc, store, spec.NodeID, spec.BundleSHA256, jobID, nil); err != nil {
 		runner.FinishDeferred(ctx, jobID, false, err.Error())
 		return

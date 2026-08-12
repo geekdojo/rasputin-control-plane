@@ -150,7 +150,7 @@ func TestReconcileSelfUpdate_RollbackOnOldSlot(t *testing.T) {
 	seedSelfUpdateJob(t, jobStore, store, jid, self, sha)
 	fakeAgentForSelfUpdate(t, nc, self, proto.SlotA) // came up on the OLD slot
 
-	reconcileSelfUpdate(ctx, store, runner, nc, UpdateSpec{NodeID: self, BundleSHA256: sha}, jid)
+	reconcileSelfUpdate(ctx, store, runner, nc, UpdateSpec{NodeID: self, BundleSHA256: sha}, jid, "")
 
 	waitJobStatus(t, jobStore, jid, jobs.StatusFailed)
 	row, _ := store.GetNodeUpdate(ctx, jid)
