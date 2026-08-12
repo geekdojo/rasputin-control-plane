@@ -58,7 +58,7 @@ func UpdateWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, cfg Confi
 			{Name: "download", Timeout: 10 * time.Minute, Do: updateDownload(store, cfg)},
 			{Name: "install", Timeout: 10 * time.Minute, Do: updateInstall(store)},
 			{Name: "reboot", Timeout: 15 * time.Second, Do: updateReboot()},
-			{Name: "wait_online_and_verify_slot", Timeout: 5 * time.Minute, Do: updateWaitOnlineAndVerifySlot(store)},
+			{Name: "wait_online_and_verify_slot", Timeout: 5 * time.Minute, Do: updateWaitOnlineAndVerifySlot(store, inv)},
 			{Name: "health_check_and_commit", Timeout: 30 * time.Second, Retries: 1, Do: updateHealthCheckAndCommit(store)},
 		},
 	}
@@ -353,7 +353,7 @@ func updateReboot() jobs.DoFn {
 
 // ----- Step 6: wait_online_and_verify_slot --------------------------------
 
-func updateWaitOnlineAndVerifySlot(store *Store) jobs.DoFn {
+func updateWaitOnlineAndVerifySlot(store *Store, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseSpec(sc.Spec)
 		if err != nil {
@@ -400,7 +400,7 @@ func updateWaitOnlineAndVerifySlot(store *Store) jobs.DoFn {
 		// Precheck the booted slot vs the target (shared with the self-update
 		// reconciler — see selfupdate.go). Records + publishes a rollback on a
 		// slot mismatch.
-		post, err := verifyBootedSlot(sc.Ctx, sc.NATS, store, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
+		post, err := verifyBootedSlot(sc.Ctx, sc.NATS, store, inv, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
 		if err != nil {
 			return nil, err
 		}

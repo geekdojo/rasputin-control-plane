@@ -555,7 +555,7 @@ func main() {
 	// Finish any self-update that rebooted us onto the new slot (no-op when
 	// there isn't one). Non-blocking — reconciles in the background once the
 	// co-located agent reconnects.
-	updater.ResumeSelfUpdates(ctx, updaterStore, jobStore, runner, busSrv.Conn(), selfNodeID)
+	updater.ResumeSelfUpdates(ctx, updaterStore, invStore, jobStore, runner, busSrv.Conn(), selfNodeID)
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn())
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent

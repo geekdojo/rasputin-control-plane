@@ -547,7 +547,7 @@ func TestUpdateWaitOnlineAndVerifySlot_HappyPath(t *testing.T) {
 	defer cancel()
 	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
 	sc.Ctx = tctx
-	if _, err := updateWaitOnlineAndVerifySlot(store)(sc); err != nil {
+	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err != nil {
 		t.Fatalf("updateWaitOnlineAndVerifySlot: %v", err)
 	}
 }
@@ -591,7 +591,7 @@ func TestUpdateWaitOnlineAndVerifySlot_BootloaderRollback(t *testing.T) {
 	defer cancel()
 	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
 	sc.Ctx = tctx
-	if _, err := updateWaitOnlineAndVerifySlot(store)(sc); err == nil {
+	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err == nil {
 		t.Error("rollback: want error")
 	}
 	// Row should now be marked rolled_back.
@@ -679,7 +679,7 @@ func TestUpdateWaitOnlineAndVerifySlot_BootIDReportedNotEnforced(t *testing.T) {
 	}
 	sc.Log = func(level, message string) { logged = append(logged, message) }
 
-	if _, err := updateWaitOnlineAndVerifySlot(store)(sc); err != nil {
+	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err != nil {
 		t.Fatalf("bootId is reported, not enforced, in this story: %v", err)
 	}
 	if !containsSubstr(logged, "SAME boot") {
@@ -730,7 +730,7 @@ func TestUpdateWaitOnlineAndVerifySlot_NoBootIDIsUnknownNotFailure(t *testing.T)
 	// No PriorResults at all — the harshest version of "we captured nothing".
 	sc.Log = func(level, message string) { logged = append(logged, message) }
 
-	if _, err := updateWaitOnlineAndVerifySlot(store)(sc); err != nil {
+	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err != nil {
 		t.Fatalf("absent bootId must be unknown, not a mismatch: %v", err)
 	}
 	if !containsSubstr(logged, "unknown") {
@@ -751,7 +751,7 @@ func TestUpdateWaitOnlineAndVerifySlot_BadSpec(t *testing.T) {
 	nc := startNATS(t)
 	store := newStoreFixture(t).store
 	sc := newUpdaterCtx("j", `{}`, nc)
-	if _, err := updateWaitOnlineAndVerifySlot(store)(sc); err == nil {
+	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err == nil {
 		t.Error("bad spec: want error")
 	}
 }
@@ -763,7 +763,7 @@ func TestUpdateWaitOnlineAndVerifySlot_NoRegisterEvent_CtxCancel(t *testing.T) {
 	defer cancel()
 	sc := newUpdaterCtx("j", specJSON("n", "sha"), nc)
 	sc.Ctx = tctx
-	if _, err := updateWaitOnlineAndVerifySlot(store)(sc); err == nil {
+	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err == nil {
 		t.Error("ctx deadline: want error")
 	}
 }

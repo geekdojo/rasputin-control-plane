@@ -1,0 +1,197 @@
+package updater
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/nats-io/nats.go"
+)
+
+// Inventory version-integrity (ADR-0005 Decision 4, first half).
+//
+// Before this, nodes.image_version was a pure last-write-wins cache of the
+// agent's registration, and the updater only ever READ inventory. So a node
+// that registered on the new slot and was then rolled back kept reporting the
+// version it was MEANT to reach — forever, if it never re-registered. That is
+// bench node c08 on 2026-07-12, and releases/check.go reads that column, so the
+// stranded node rendered as up to date.
+
+// verifyStep drives step 6 against a fake agent whose post-reboot precheck
+// reports bootedSlot + runningVersion, with the node_update row targeting
+// toSlot. Returns the step's error (nil on a clean verify).
+func verifyStep(t *testing.T, inv *inventory.Store, nodeID string,
+	toSlot, bootedSlot proto.UpdateSlot, runningVersion string) error {
+
+	t.Helper()
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+
+	if err := store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: toSlot,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateNodeUpdate: %v", err)
+	}
+
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: bootedSlot, InactiveSlot: otherSlot(bootedSlot),
+			CurrentVersion: runningVersion,
+		})
+		_ = m.Respond(ack)
+	})
+	t.Cleanup(func() { _ = preSub.Unsubscribe() })
+
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = nc.Publish(proto.NodeRegisteredSubject(nodeID), []byte(`{"nodeId":"`+nodeID+`"}`))
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	tctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancel)
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
+	sc.Ctx = tctx
+	_, err := updateWaitOnlineAndVerifySlot(store, inv)(sc)
+	return err
+}
+
+func otherSlot(s proto.UpdateSlot) proto.UpdateSlot {
+	if s == proto.SlotA {
+		return proto.SlotB
+	}
+	return proto.SlotA
+}
+
+// seedInventoryAt puts a node in inventory already reporting version — i.e. the
+// optimistic value its registration on the new slot wrote.
+func seedInventoryAt(t *testing.T, nodeID, version string) *inventory.Store {
+	t.Helper()
+	inv := newInventory(t)
+	if err := inv.Insert(context.Background(), &proto.Node{
+		ID: nodeID, Role: proto.RoleCompute, Hostname: nodeID + ".test",
+		ImageVersion: version,
+		FirstSeen:    time.Now().UTC(), LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("inv insert: %v", err)
+	}
+	return inv
+}
+
+func invVersion(t *testing.T, inv *inventory.Store, nodeID string) string {
+	t.Helper()
+	n, err := inv.Get(context.Background(), nodeID)
+	if err != nil || n == nil {
+		t.Fatalf("inv.Get(%s): %v, %+v", nodeID, err, n)
+	}
+	return n.ImageVersion
+}
+
+// THE c08 REGRESSION. The node registered on the new slot (inventory says
+// dev.104), the bootloader then reverted it, and it is now running dev.101.
+// Inventory must follow the update outcome, not the stale self-report.
+func TestVerify_RollbackReconcilesInventoryToTheRunningVersion(t *testing.T) {
+	const nodeID = "c08"
+	inv := seedInventoryAt(t, nodeID, "2026.07.0-dev.104")
+
+	// Target was slot B; it came up on slot A running the OLD version.
+	if err := verifyStep(t, inv, nodeID, proto.SlotB, proto.SlotA, "2026.07.0-dev.101"); err == nil {
+		t.Fatal("a rollback must still fail the step")
+	}
+	if got := invVersion(t, inv, nodeID); got != "2026.07.0-dev.101" {
+		t.Errorf("inventory = %q, want the version the node is ACTUALLY running", got)
+	}
+}
+
+// The success branch reconciles too — one invariant ("the update outcome is
+// authoritative at the moment it is decided") rather than a rollback special
+// case. The precheck answer is also fresher evidence than the registration
+// event that preceded it.
+func TestVerify_SuccessReconcilesInventoryToTheVerifiedVersion(t *testing.T) {
+	const nodeID = "c09"
+	inv := seedInventoryAt(t, nodeID, "2026.07.0-dev.101")
+
+	if err := verifyStep(t, inv, nodeID, proto.SlotB, proto.SlotB, "2026.07.0-dev.104"); err != nil {
+		t.Fatalf("clean verify: %v", err)
+	}
+	if got := invVersion(t, inv, nodeID); got != "2026.07.0-dev.104" {
+		t.Errorf("inventory = %q, want the verified running version", got)
+	}
+}
+
+// An agent that reports no version at all must leave the column alone. Blanking
+// it would replace a wrong answer with a differently-wrong one; "we could not
+// confirm" is image_version_confirmed_at's job (#72), not this write's.
+func TestVerify_EmptyReportedVersionDoesNotBlankInventory(t *testing.T) {
+	const nodeID = "c10"
+	inv := seedInventoryAt(t, nodeID, "2026.07.0-dev.101")
+
+	if err := verifyStep(t, inv, nodeID, proto.SlotB, proto.SlotB, ""); err != nil {
+		t.Fatalf("clean verify: %v", err)
+	}
+	if got := invVersion(t, inv, nodeID); got != "2026.07.0-dev.101" {
+		t.Errorf("inventory = %q, want the previous value left intact", got)
+	}
+}
+
+// A node that vanished from inventory between the update starting and verify
+// finishing must not fail the saga — the write is best-effort by design.
+func TestVerify_MissingInventoryRowDoesNotFailTheStep(t *testing.T) {
+	inv := newInventory(t) // deliberately empty
+	if err := verifyStep(t, inv, "ghost", proto.SlotB, proto.SlotB, "2026.07.0-dev.104"); err != nil {
+		t.Errorf("a missing inventory row must not fail verify: %v", err)
+	}
+}
+
+// The mark-bad path deliberately does NOT reconcile: the node is still on the
+// new slot but about to revert, so every value available is about to be wrong.
+// The honest state is "unconfirmed", which the schema cannot express until #72.
+// Pinning it here so the omission reads as a decision, not an oversight.
+func TestHealthCheckFailure_LeavesInventoryUntouched(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID = "c11"
+	inv := seedInventoryAt(t, nodeID, "2026.07.0-dev.104")
+
+	if err := store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateNodeUpdate: %v", err)
+	}
+
+	hSub, _ := nc.Subscribe(proto.NodeCmdSubject(nodeID, "diag.health"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.DiagHealthAck{OK: false, Detail: "nats down"})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = hSub.Unsubscribe() }()
+	bSub, _ := nc.Subscribe(proto.UpdateMarkBadSubject(nodeID), func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"ok":true}`))
+	})
+	defer func() { _ = bSub.Unsubscribe() }()
+
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if _, err := healthCheckAndCommit(tctx, nc, store, nodeID, "sha", "j", nil); err == nil {
+		t.Fatal("failed health check must fail the step")
+	}
+	if got := invVersion(t, inv, nodeID); got != "2026.07.0-dev.104" {
+		t.Errorf("inventory = %q; the mark-bad path must not write a version it cannot confirm", got)
+	}
+}

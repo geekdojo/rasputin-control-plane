@@ -107,6 +107,34 @@ func (s *Store) TouchLastSeen(ctx context.Context, id string, ts time.Time) erro
 	return nil
 }
 
+// SetImageVersion writes only the image_version column, for the one writer
+// that is not the agent's self-report: the updater, reconciling inventory from
+// a terminal update outcome (ADR-0005 Decision 4).
+//
+// A targeted column write rather than a read-modify-Update, deliberately —
+// Update overwrites every mutable field, so hydrating a node, changing one
+// string, and writing it back would clobber anything a concurrent registration
+// learned in between (arch, LAN IP, storage, capabilities). The updater knows
+// exactly one fact about this node and should write exactly that.
+//
+// Returns sql.ErrNoRows if no row matched. Callers treat that as non-fatal: an
+// update outcome for a node that is no longer in inventory is a reason to log,
+// never a reason to fail the saga.
+func (s *Store) SetImageVersion(ctx context.Context, id, version string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE nodes SET image_version=? WHERE id=?`, version, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // Delete removes the node row. Returns sql.ErrNoRows if no row matched.
 // Callers that need to also clear in-memory status and emit events should
 // use Service.Remove instead of calling this directly.
