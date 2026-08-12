@@ -44,7 +44,7 @@ type Config struct {
 //  3. download                    — RPC agent: pull bundle from PublicBaseURL
 //  4. install                     — RPC agent: rauc install → inactive slot
 //  5. reboot                      — sub-before-RPC for the reboot event
-//  6. wait_online_and_verify_slot — wait for re-registration, compare slot
+//  6. wait_online_and_verify_slot — wait for a NEW boot, then verify (a)(b)(c)
 //  7. health_check_and_commit     — diag.health, then mark-good (or mark-bad)
 //
 // The store is updated in steps 1, 5, 6, 7 so the UI's Updates view can
@@ -359,6 +359,12 @@ func updateWaitOnlineAndVerifySlot(store *Store, inv *inventory.Store) jobs.DoFn
 		if err != nil {
 			return nil, err
 		}
+		// The node.registered subscription is now a LATENCY HINT, not the
+		// correctness mechanism (ADR-0005 Decision 2). It is still created
+		// before anything else so a fast reboot's registration is not missed —
+		// but a registration no longer proves the reboot happened, because the
+		// pre-reboot system can publish one just as easily. Boot identity does
+		// the proving; this only says "look now instead of at the next poll".
 		regSubj := proto.NodeRegisteredSubject(spec.NodeID)
 		ch := make(chan *nats.Msg, 1)
 		sub, err := sc.NATS.Subscribe(regSubj, func(m *nats.Msg) {
@@ -378,42 +384,29 @@ func updateWaitOnlineAndVerifySlot(store *Store, inv *inventory.Store) jobs.DoFn
 		// answers with the CURRENT boot, which is the very thing this value
 		// exists to be compared against. A missing cache degrades to unknown,
 		// exactly like a pre-bootId agent.
-		priorBootID := priorPrecheckBootID(sc.PriorResults)
-
-		sc.Log("info", "waiting for node to re-register")
-		var regBytes []byte
-		select {
-		case m := <-ch:
-			regBytes = m.Data
-		case <-sc.Ctx.Done():
-			return nil, fmt.Errorf("waiting for re-register: %w", sc.Ctx.Err())
+		req := verifyRequest{
+			NodeID:       spec.NodeID,
+			BundleSHA256: spec.BundleSHA256,
+			JobID:        sc.JobID,
+			PriorBootID:  priorPrecheckBootID(sc.PriorResults),
 		}
 
-		// The node re-registered, but its precheck subscription can lag the
-		// registration event by a beat — poll until the agent actually answers
-		// before verifying, so we don't fail with "no responders available"
-		// (mirrors the self-update reconciler's waitForAgent → verifyBootedSlot).
-		if err := waitForAgent(sc.Ctx, sc.NATS, spec.NodeID); err != nil {
-			return nil, fmt.Errorf("waiting for agent after reboot: %w", err)
-		}
-
-		// Precheck the booted slot vs the target (shared with the self-update
-		// reconciler — see selfupdate.go). Records + publishes a rollback on a
-		// slot mismatch.
-		post, err := verifyBootedSlot(sc.Ctx, sc.NATS, store, inv, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
-		if err != nil {
+		// Wait for a DIFFERENT boot to answer. This replaces "wait for a
+		// registration event, then trust whoever responds", which the old boot
+		// satisfied for the seconds systemd took to tear it down (c13) and
+		// which also missed nodes that re-registered before the subscription
+		// landed, burning the full timeout.
+		if _, err := waitForNewBoot(sc.Ctx, sc.NATS, req, ch, sc.Log); err != nil {
 			return nil, err
 		}
 
-		// Boot identity is REPORTED here, not yet enforced. The gate — making a
-		// differing bootId conjunct (a) of the verify contract, so the answering
-		// agent must be a different boot than the one told to reboot — is #58's
-		// restructure of this step; #71 owns surfacing the degraded case. This
-		// story's job is to make the value exist and travel (ADR-0005 Decision
-		// 1), and the log line is what lets a bench run see it doing so before
-		// anything depends on it.
-		sc.Log("info", "boot identity: "+describeBootTransition(priorBootID, post.BootID))
-		return regBytes, nil
+		// Evaluate the contract: (a) different boot, (b) slot, (c) version.
+		// Shared with the self-update reconciler — see selfupdate.go / verify.go.
+		res, err := verifyBootedSlot(sc.Ctx, sc.NATS, store, inv, req, sc.Log)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(res)
 	}
 }
 
@@ -454,27 +447,6 @@ func priorPrecheckBootID(prior map[string]json.RawMessage) string {
 		return ""
 	}
 	return pre.BootID
-}
-
-// describeBootTransition renders the before/after boot identity for the step
-// log. The three outcomes are meaningfully different and must not be flattened
-// into one line: "different" is the post-reboot state the saga wants, "SAME"
-// means the pre-reboot agent is still answering (the #58 false-rollback class),
-// and "unknown" means one side reported nothing — a mixed-version fleet, which
-// ADR-0005 Decision 3 says is the normal case on a cluster's first rollout.
-func describeBootTransition(before, after string) string {
-	switch {
-	case before == "" && after == "":
-		return "unknown (neither boot reported a bootId — pre-bootId agent)"
-	case before == "":
-		return fmt.Sprintf("unknown (pre-reboot bootId not captured; now on %s)", short(after))
-	case after == "":
-		return fmt.Sprintf("unknown (was %s; this boot reported no bootId)", short(before))
-	case before == after:
-		return fmt.Sprintf("SAME boot %s — the pre-reboot agent is still answering", short(before))
-	default:
-		return fmt.Sprintf("different boot (%s → %s)", short(before), short(after))
-	}
 }
 
 // bootIDForLog renders a boot identity for a log line, naming the empty case

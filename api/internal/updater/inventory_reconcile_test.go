@@ -270,7 +270,7 @@ func TestVerify_UnreachableNodeUnconfirmsWithoutBlankingTheVersion(t *testing.T)
 	// No precheck responder at all — the node is gone.
 	tctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	if _, err := verifyBootedSlot(tctx, nc, store, inv, nodeID, "sha", "j", nil); err == nil {
+	if _, err := verifyBootedSlot(tctx, nc, store, inv, verifyRequest{NodeID: nodeID, BundleSHA256: "sha", JobID: "j"}, nil); err == nil {
 		t.Fatal("an unreachable node must fail verify")
 	}
 	if confirmed(t, inv, nodeID) {
