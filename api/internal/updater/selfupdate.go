@@ -2,12 +2,14 @@ package updater
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -43,7 +45,12 @@ func (l logFn) log(level, msg string) {
 // back, or the new slot never booted) it records + publishes a rollback and
 // returns an error; on a match it returns the precheck ack. Shared by saga
 // step 6 and the self-update reconciler.
-func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, nodeID, bundleSHA, jobID string, lg logFn) (proto.UpdatePrecheckAck, error) {
+//
+// It is also the one place that reconciles INVENTORY from the update outcome
+// (ADR-0005 Decision 4) — see reconcileInventoryVersion. This is the right site
+// because it is where the post-reboot precheck answer is in hand: the version
+// the node is ACTUALLY running, read off the rootfs it actually booted.
+func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inventory.Store, nodeID, bundleSHA, jobID string, lg logFn) (proto.UpdatePrecheckAck, error) {
 	var pre proto.UpdatePrecheckAck
 	preMsg, err := nc.RequestWithContext(ctx, proto.UpdatePrecheckSubject(nodeID), mustJSON(proto.UpdatePrecheckCmd{}))
 	if err != nil {
@@ -59,6 +66,14 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, nodeID, 
 		now := time.Now().UTC()
 		_ = store.UpdateNodeUpdate(ctx, jobID, NodeUpdateRolledBack,
 			pre.ActiveSlot, pre.CurrentVersion, "bootloader rolled back to previous slot", now)
+		// THE c08 FIX. Before this, a rolled-back node kept reporting the
+		// version it was MEANT to reach: the agent registered on the new slot,
+		// inventory took that value last-write-wins, the bootloader then
+		// reverted, and nothing wrote inventory again unless the node
+		// re-registered — which c08, genuinely stuck, never did. The row stayed
+		// wrong indefinitely, and releases/check.go reads that column, so the
+		// node rendered as up-to-date. ADR-0005 Decision 4.
+		reconcileInventoryVersion(ctx, inv, nodeID, pre.CurrentVersion, lg)
 		publishChange(nc, proto.UpdateChangeEvt{
 			NodeID:   nodeID,
 			JobID:    jobID,
@@ -73,8 +88,43 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, nodeID, 
 		return pre, fmt.Errorf("bootloader_rolled_back: came up on slot %s, expected %s",
 			pre.ActiveSlot, expected.ToSlot)
 	}
+	// Same reconciliation on the success branch, for the same reason: the
+	// precheck answer is fresher evidence than the registration event that
+	// preceded it, and making the write unconditional keeps "the update outcome
+	// is authoritative at the moment it is decided" one invariant rather than a
+	// rollback special case.
+	reconcileInventoryVersion(ctx, inv, nodeID, pre.CurrentVersion, lg)
 	lg.log("info", fmt.Sprintf("node up on slot %s (version %s)", pre.ActiveSlot, pre.CurrentVersion))
 	return pre, nil
+}
+
+// reconcileInventoryVersion writes a verified running version back to
+// nodes.image_version, closing the gap that made inventory a pure last-write-
+// wins cache of an agent self-report (ADR-0005 Decision 4).
+//
+// The precedence it establishes: the update outcome is authoritative for the
+// node's version AT THE MOMENT IT IS DECIDED, and the agent's self-report is
+// authoritative afterwards. So a registration that lands after this write
+// legitimately wins — that is the design, not a race to guard against. What is
+// fixed is the case where no such registration ever comes.
+//
+// Never fatal. An empty version is skipped rather than written: a blank
+// image_version would replace a wrong answer with a differently-wrong one, and
+// "we could not confirm" is a state the schema cannot yet express — that is
+// image_version_confirmed_at, the other half of Decision 4 (#72).
+func reconcileInventoryVersion(ctx context.Context, inv *inventory.Store, nodeID, version string, lg logFn) {
+	if inv == nil || version == "" {
+		return
+	}
+	if err := inv.SetImageVersion(ctx, nodeID, version); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			lg.log("warn", fmt.Sprintf("inventory has no row for %s; version %s not reconciled", nodeID, version))
+			return
+		}
+		lg.log("warn", fmt.Sprintf("reconcile inventory version for %s: %v", nodeID, err))
+		return
+	}
+	lg.log("info", fmt.Sprintf("inventory reconciled: %s is running %s", nodeID, version))
 }
 
 // probeHealth runs the post-reboot health gate: diag.health (role-aware — the
@@ -118,6 +168,15 @@ func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, node
 		_, _ = nc.RequestWithContext(ctx, proto.UpdateMarkBadSubject(nodeID), bad)
 
 		now := time.Now().UTC()
+		// Inventory is deliberately NOT reconciled here. mark-bad means the
+		// node is still running the new slot but will revert on its next boot,
+		// so every value available right now is about to become wrong: writing
+		// the running version records a version the node is about to leave, and
+		// writing the old one asserts a revert that has not happened yet. The
+		// honest answer is "unconfirmed", which the schema cannot express until
+		// image_version_confirmed_at lands (ADR-0005 Decision 4, second half —
+		// #72). Until then the stale value stands, visibly, rather than being
+		// replaced by a confident guess.
 		_ = store.UpdateNodeUpdate(ctx, jobID, NodeUpdateRolledBack,
 			proto.SlotUnknown, "", "health check failed: "+detail, now)
 		publishChange(nc, proto.UpdateChangeEvt{
@@ -199,7 +258,7 @@ func rebootDone(steps []*jobs.JobStep) bool {
 // reconciled in its own goroutine, which waits (bounded) for the co-located
 // agent to reconnect, then verifies the booted slot + health and commits or
 // records the rollback — closing the user-initiated job with no human step.
-func ResumeSelfUpdates(ctx context.Context, store *Store, jobStore *jobs.Store, runner *jobs.Runner, nc *nats.Conn, selfNodeID string) {
+func ResumeSelfUpdates(ctx context.Context, store *Store, inv *inventory.Store, jobStore *jobs.Store, runner *jobs.Runner, nc *nats.Conn, selfNodeID string) {
 	if selfNodeID == "" {
 		return
 	}
@@ -229,7 +288,7 @@ func ResumeSelfUpdates(ctx context.Context, store *Store, jobStore *jobs.Store, 
 		priorBootID := priorPrecheckBootID(map[string]json.RawMessage{
 			"precheck": stepResult(steps, "precheck"),
 		})
-		go reconcileSelfUpdate(ctx, store, runner, nc, spec, j.ID, priorBootID)
+		go reconcileSelfUpdate(ctx, store, inv, runner, nc, spec, j.ID, priorBootID)
 	}
 }
 
@@ -244,7 +303,7 @@ func stepResult(steps []*jobs.JobStep, name string) json.RawMessage {
 	return nil
 }
 
-func reconcileSelfUpdate(ctx context.Context, store *Store, runner *jobs.Runner, nc *nats.Conn, spec UpdateSpec, jobID, priorBootID string) {
+func reconcileSelfUpdate(ctx context.Context, store *Store, inv *inventory.Store, runner *jobs.Runner, nc *nats.Conn, spec UpdateSpec, jobID, priorBootID string) {
 	log.Printf("updater: resuming self-update %s after reboot", jobID)
 	wctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -253,7 +312,7 @@ func reconcileSelfUpdate(ctx context.Context, store *Store, runner *jobs.Runner,
 		runner.FinishDeferred(ctx, jobID, false, "agent did not reconnect after self-update reboot: "+err.Error())
 		return
 	}
-	post, err := verifyBootedSlot(wctx, nc, store, spec.NodeID, spec.BundleSHA256, jobID, nil)
+	post, err := verifyBootedSlot(wctx, nc, store, inv, spec.NodeID, spec.BundleSHA256, jobID, nil)
 	if err != nil {
 		// verifyBootedSlot already recorded + published the rollback.
 		runner.FinishDeferred(ctx, jobID, false, err.Error())
