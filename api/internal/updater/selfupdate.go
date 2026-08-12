@@ -443,6 +443,16 @@ func reconcileSelfUpdate(ctx context.Context, store *Store, inv *inventory.Store
 
 // waitForAgent blocks until the node's agent answers a precheck (it reconnects
 // to the bus shortly after the api restarts), or ctx expires.
+//
+// ⚠️ "The agent answered" is NOT evidence that the node rebooted, and this must
+// never be used as if it were: the pre-reboot agent answers prechecks perfectly
+// well for as long as it is running, and on an update it is also already
+// reporting the TARGET slot (rauc activates at install time). Using this in
+// step 6's degraded branch is what made #83 record a node committed 46s before
+// it finished rebooting. It is sound in reconcileSelfUpdate and only there,
+// because that caller runs in an api process that came up on the new slot — the
+// reboot is proven by the fact that this code is executing at all. Everything
+// else wants waitForNewBoot.
 func waitForAgent(ctx context.Context, nc *nats.Conn, nodeID string) error {
 	for {
 		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)

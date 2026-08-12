@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,23 +142,119 @@ func TestWaitForNewBoot_PreBootIDAgentDegradesImmediately(t *testing.T) {
 	}
 }
 
-// With no prior identity there is nothing to compare, so this degrades to the
-// old behaviour: wait for the agent to answer at all. That path is every
-// existing cluster's first rollout after the feature ships.
-func TestWaitForNewBoot_NoPriorIDWaitsOnlyForTheAgent(t *testing.T) {
+// ----- the degraded branch: no prior identity ------------------------------
+//
+// This block replaces TestWaitForNewBoot_NoPriorIDWaitsOnlyForTheAgent, whose
+// premise the bench disproved (#83): "wait for the agent to answer at all" is
+// satisfied instantly by the agent that has not rebooted yet, because it is
+// still running and answering. On e3bench 2026-08-12 that recorded a compute
+// node `committed` 46s before it finished rebooting. The verdict is still
+// bootUnknown on this path — conjunct (a) genuinely cannot be evaluated — but
+// the WAIT must be real.
+
+// The regression itself. An agent that keeps answering, reports no identity,
+// and never goes quiet is the pre-reboot agent, and it must never satisfy the
+// wait however long it answers for.
+func TestWaitForNewBoot_NoPriorIDRejectsThePreRebootAgent(t *testing.T) {
 	nc := startNATS(t)
 	const nodeID = "n"
 	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
-		ack, _ := json.Marshal(proto.UpdatePrecheckAck{OK: true, BootID: "whatever"})
+		// Exactly what the bench saw: OK, on the TARGET slot (rauc activates it
+		// at install time), and silent about its boot identity.
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{OK: true, ActiveSlot: proto.SlotB})
 		_ = m.Respond(ack)
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	got, err := waitForNewBoot(ctx, nc, verifyRequest{NodeID: nodeID, PriorBootID: ""}, nil, nil)
+	if err == nil {
+		t.Fatal("an agent that never went quiet has not proven it rebooted — the wait must not be satisfied")
+	}
+	if !strings.Contains(err.Error(), "never rebooted") {
+		t.Errorf("error = %q, want it to say the node never rebooted rather than a generic timeout", err)
+	}
+	if got != bootUnknown {
+		t.Errorf("verdict = %q, want %q — there is no prior identity to call this the SAME boot", got, bootUnknown)
+	}
+}
+
+// First proof: the returning agent reports an identity. The pre-reboot agent
+// demonstrably could not (that is why PriorBootID is empty), so a non-empty one
+// can only have come from the image just installed. This is the normal shape of
+// every existing cluster's first rollout.
+func TestWaitForNewBoot_NoPriorIDAcceptsAnAgentThatReportsAnIdentity(t *testing.T) {
+	nc := startNATS(t)
+	const nodeID = "n"
+	var polls atomic.Int32
+	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		var ack []byte
+		if polls.Add(1) <= 2 {
+			ack, _ = json.Marshal(proto.UpdatePrecheckAck{OK: true}) // old agent, no identity
+		} else {
+			ack, _ = json.Marshal(proto.UpdatePrecheckAck{OK: true, BootID: "new-boot"})
+		}
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = sub.Unsubscribe() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	got, err := waitForNewBoot(ctx, nc, verifyRequest{NodeID: nodeID, PriorBootID: ""}, nil, nil)
 	if err != nil {
-		t.Fatalf("no prior id must still proceed: %v", err)
+		t.Fatalf("an agent reporting a fresh identity has proven the reboot: %v", err)
+	}
+	if got != bootUnknown {
+		t.Errorf("verdict = %q, want %q — proving the reboot is not the same as evaluating conjunct (a)", got, bootUnknown)
+	}
+	if polls.Load() < 3 {
+		t.Errorf("returned after %d polls — it must not have accepted the identity-less answers", polls.Load())
+	}
+}
+
+// Second proof, and the only one available when the TARGET image also predates
+// bootId (a downgrade, or an older bundle deployed deliberately): the agent
+// stopped answering and then answered again. Backend-agnostic, and not
+// producible by a node that never rebooted.
+func TestWaitForNewBoot_NoPriorIDAcceptsGoneThenBack(t *testing.T) {
+	nc := startNATS(t)
+	const nodeID = "n"
+	var polls atomic.Int32
+	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		// Answer, then go silent for a stretch (the reboot), then answer again —
+		// never reporting an identity, so "gone and back" is the only evidence.
+		if polls.Add(1) == 2 {
+			return
+		}
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{OK: true})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = sub.Unsubscribe() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	got, err := waitForNewBoot(ctx, nc, verifyRequest{NodeID: nodeID, PriorBootID: ""}, nil, nil)
+	if err != nil {
+		t.Fatalf("gone-then-back proves the reboot even with no identity anywhere: %v", err)
+	}
+	if got != bootUnknown {
+		t.Errorf("verdict = %q, want %q", got, bootUnknown)
+	}
+}
+
+// A node that goes quiet and never comes back must be a timeout, not a pass —
+// the "went away" half alone is not proof it came back.
+func TestWaitForNewBoot_NoPriorIDGoneAndStaysGoneFails(t *testing.T) {
+	nc := startNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	got, err := waitForNewBoot(ctx, nc, verifyRequest{NodeID: "gone", PriorBootID: ""}, nil, nil)
+	if err == nil {
+		t.Fatal("a node that never came back must time out")
+	}
+	if strings.Contains(err.Error(), "never rebooted") {
+		t.Errorf("error = %q — this node DID go quiet; that is a different diagnosis from one that never rebooted", err)
 	}
 	if got != bootUnknown {
 		t.Errorf("verdict = %q, want %q", got, bootUnknown)

@@ -139,54 +139,106 @@ func classifyVersion(expected, reported string) versionMatch {
 // "something changed, look now" and shortcuts the poll interval. It is never
 // evidence on its own, which is the whole point.
 //
-// With no prior boot id there is nothing to compare, so this degrades to the
-// old behaviour — wait for the agent to answer at all — and reports
-// bootUnknown. That path is every existing cluster's first rollout.
+// THE INVARIANT, and the reason the degraded branch below is not a shortcut:
+// verify must never be satisfiable by state that exists BEFORE the reboot. That
+// is easy to get wrong here because `rauc install` activates the target slot at
+// INSTALL time, so the still-running pre-reboot agent already answers with
+// ActiveSlot == the target. Conjunct (b) is therefore not merely uninformative
+// before the reboot — it is affirmatively true. Something else has to prove the
+// reboot happened, and this function is the only thing that does.
+//
+// With no prior boot id there is nothing to compare against, so the identity
+// test cannot run and the verdict is bootUnknown either way (Decision 3 — that
+// path is every existing cluster's first rollout). What it must NOT do is
+// return early: an earlier version of this waited only for the agent to answer,
+// which the pre-reboot agent does immediately, so a node was recorded committed
+// ~46s before it finished rebooting (bench e3bench 2026-08-12, #83). Two
+// independent post-reboot proofs replace that, either of which is sufficient:
+//
+//   - the answering agent reports a boot id at all. The pre-reboot agent
+//     demonstrably did not (that is WHY PriorBootID is empty), so a non-empty
+//     one can only come from the image we just installed;
+//   - the agent stopped answering and then answered again. Backend-agnostic,
+//     and the only evidence available when the target image also predates
+//     bootId — a downgrade, or an older bundle deployed deliberately.
+//
+// Neither can be produced by a node that has not rebooted, which is the whole
+// requirement. If neither ever appears the step times out saying so, instead of
+// passing on evidence it does not have.
 func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh <-chan *nats.Msg, lg logFn) (bootIdentity, error) {
 	const pollInterval = 2 * time.Second
 	const rpcTimeout = 5 * time.Second
 
-	if req.PriorBootID == "" {
-		lg.log("warn", "no pre-reboot boot id captured; waiting only for the agent to answer (verify will be degraded)")
-		if err := waitForAgent(ctx, nc, req.NodeID); err != nil {
-			return bootUnknown, err
-		}
-		return bootUnknown, nil
+	degraded := req.PriorBootID == ""
+	if degraded {
+		lg.log("warn", "no pre-reboot boot id captured; waiting for the node to go away and come back (verify will be degraded)")
+	} else {
+		lg.log("info", fmt.Sprintf("waiting for a boot other than %s", short(req.PriorBootID)))
 	}
 
-	lg.log("info", fmt.Sprintf("waiting for a boot other than %s", short(req.PriorBootID)))
 	sameBootSeen := false
+	// wentQuiet: the degraded path has observed the agent stop answering, which
+	// is the "it went away" half of its proof. Latched, never cleared — the
+	// point is that it happened, not that it is still happening.
+	wentQuiet := false
 	for {
 		rctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 		msg, err := nc.RequestWithContext(rctx, proto.UpdatePrecheckSubject(req.NodeID), mustJSON(proto.UpdatePrecheckCmd{}))
 		cancel()
-		if err == nil {
+		switch {
+		case err != nil:
+			if degraded && !wentQuiet {
+				wentQuiet = true
+				lg.log("info", "node stopped answering — the reboot is under way")
+			}
+		default:
 			var ack proto.UpdatePrecheckAck
 			if json.Unmarshal(msg.Data, &ack) == nil {
-				switch classifyBoot(req.PriorBootID, ack.BootID) {
-				case bootDiffers:
-					lg.log("info", fmt.Sprintf("node is up on a new boot (%s)", short(ack.BootID)))
-					return bootDiffers, nil
-				case bootUnknown:
-					// The node came back but its agent predates bootId. Nothing
-					// to wait for — waiting longer cannot produce an identity
-					// that will never be sent. Proceed degraded.
-					lg.log("warn", "node answered without a boot id (pre-bootId agent); verify will be degraded")
-					return bootUnknown, nil
-				case bootSame:
-					sameBootSeen = true
+				if degraded {
+					switch {
+					case ack.BootID != "":
+						lg.log("info", fmt.Sprintf("node is up on boot %s, which the pre-reboot agent could not report — rebooted", short(ack.BootID)))
+						return bootUnknown, nil
+					case wentQuiet:
+						lg.log("info", "node went away and came back; its agent still reports no boot id — verify will be degraded")
+						return bootUnknown, nil
+					}
+					// Still answering, still silent about its identity: this is
+					// the pre-reboot agent. Keep waiting — accepting it here is
+					// exactly the bug (#83).
+				} else {
+					switch classifyBoot(req.PriorBootID, ack.BootID) {
+					case bootDiffers:
+						lg.log("info", fmt.Sprintf("node is up on a new boot (%s)", short(ack.BootID)))
+						return bootDiffers, nil
+					case bootUnknown:
+						// Prior WAS reported and this answer is not, so the thing
+						// answering is not the process that answered precheck — a
+						// live process cannot forget its own boot id. The reboot is
+						// proven; the comparison just cannot be made.
+						lg.log("warn", "node answered without a boot id (pre-bootId agent); verify will be degraded")
+						return bootUnknown, nil
+					case bootSame:
+						sameBootSeen = true
+					}
 				}
 			}
 		}
 
 		select {
 		case <-ctx.Done():
-			if sameBootSeen {
+			switch {
+			case sameBootSeen:
 				// Meaningfully different from "we never heard from it": the node
 				// is alive and answering, it just never rebooted. Saying so
 				// beats the old behaviour, which called this a rollback.
 				return bootSame, fmt.Errorf("node never rebooted: still answering on boot %s after %w",
 					short(req.PriorBootID), ctx.Err())
+			case degraded && !wentQuiet:
+				// The degraded flavour of the same observation, and the case
+				// that used to pass in 2ms. No identity to name, so name the
+				// evidence instead.
+				return bootUnknown, fmt.Errorf("node never rebooted: it answered prechecks throughout and never went quiet: %w", ctx.Err())
 			}
 			return bootUnknown, fmt.Errorf("waiting for the node to come back: %w", ctx.Err())
 		case <-regCh:
