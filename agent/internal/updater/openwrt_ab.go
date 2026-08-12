@@ -326,13 +326,39 @@ func (o *OpenWrtABBackend) Install(ctx context.Context, bundleID, localPath stri
 // sidecar the release pipeline ships next to the rootfs; failing that we fall
 // back to the bundleID (the api already knows the version it pushed — this is
 // display-only).
+// installedVersion reports the version the bundle just written to the target
+// slot will run as, or "" when it cannot be determined.
+//
+// ⚠️ It used to fall back to bundleID — the bundle's sha256 — which is not a
+// version and can never equal one. That was inert until ADR-0005 Decision 2
+// added conjunct (c), and then it inverted: the node correctly reported
+// "2026.08.2-dev.83", the contract compared it against
+// "7dc0657846367cec…", and EVERY openwrt-ab update failed verify with
+// version_mismatch. Bench-caught on e3bench 2026-08-12, the first time the
+// verify contract had ever run against this backend.
+//
+// Empty is the honest answer and the contract already knows what to do with
+// it: conjunct (c) is three-valued, so an unknown version DEGRADES the verdict
+// (unverifiedVersion) instead of failing it — Decision 3. A sha256 here is
+// strictly worse than nothing, because it is a wrong answer wearing a right
+// answer's type. Nothing is lost from the record either: node_updates already
+// carries bundle_sha256 in its own column.
+//
+// The real fix upstream is for the firewall image to ship the `.version`
+// sidecar this reads, so (c) can actually be evaluated on this backend rather
+// than permanently degraded.
+//
+// This is the same trap as the RAUC CurrentVersion bug (#82) and the third
+// time on this path that a wrong-but-unused value became load-bearing the
+// moment verify started reading it. When a value feeds a comparison, "" and
+// "plausible garbage" are not equivalent defaults.
 func (o *OpenWrtABBackend) installedVersion(localPath, bundleID string) string {
 	if b, err := os.ReadFile(localPath + ".version"); err == nil {
 		if v := strings.TrimSpace(string(b)); v != "" {
 			return v
 		}
 	}
-	return bundleID
+	return ""
 }
 
 // activateSlot sets ORDER=[target, other] with target OK+untried, in place.

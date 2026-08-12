@@ -19,6 +19,13 @@ import (
 // install) stream progress on
 // rasputin.node.<nodeID>.evt.update.{download,install}.progress.
 func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Subscription, error) {
+	return RegisterHandlersWithFault(nc, nodeID, backend, FaultNone, "")
+}
+
+// RegisterHandlersWithFault is RegisterHandlers plus update-path fault
+// injection (see fault.go). fault is FaultNone in every non-bench build path;
+// stateDir is only read when a fault needs to leave a marker across the reboot.
+func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fault Fault, stateDir string) ([]*nats.Subscription, error) {
 	subs := make([]*nats.Subscription, 0, 6)
 
 	bind := func(subj string, fn nats.MsgHandler) error {
@@ -140,6 +147,36 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		_ = json.Unmarshal(m.Data, &cmd)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		// FaultNoReboot: ack and announce exactly as a healthy node does, then
+		// simply do not reboot. From the api's side this is indistinguishable
+		// from a node whose reboot silently failed — bench node c13 — and it is
+		// the only way to reach the terminal bootSame verdict.
+		if fault == FaultNoReboot {
+			log.Printf("rasputin-agent: ⚠️  FAULT %s: acking the reboot and NOT rebooting", FaultNoReboot)
+			bus.Respond(m, proto.UpdateRebootAck{OK: true, DelaySeconds: cmd.DelaySeconds})
+			ev, _ := json.Marshal(proto.SystemRebootingEvt{
+				NodeID:       nodeID,
+				DelaySeconds: cmd.DelaySeconds,
+				Ts:           time.Now().UTC(),
+			})
+			_ = nc.Publish(proto.NodeEvtSubject(nodeID, "rebooting"), ev)
+			return
+		}
+
+		// FaultDieAfterReboot: reboot for real, but arm the marker FIRST so the
+		// agent on the far side comes up mute. Arming before the reboot is the
+		// whole trick — after it, this process is gone. A marker we could not
+		// write is reported and the reboot proceeds normally, so the test fails
+		// loudly rather than quietly passing as a healthy update.
+		if fault == FaultDieAfterReboot {
+			if err := ArmMuteAfterReboot(stateDir); err != nil {
+				log.Printf("rasputin-agent: ⚠️  FAULT %s: could not arm marker: %v — rebooting NORMALLY, the fault will NOT fire", FaultDieAfterReboot, err)
+			} else {
+				log.Printf("rasputin-agent: ⚠️  FAULT %s: armed; this node will come back MUTE", FaultDieAfterReboot)
+			}
+		}
+
 		delay, err := backend.Reboot(ctx, cmd.BundleID, cmd.DelaySeconds)
 		if err != nil {
 			bus.Respond(m, proto.UpdateRebootAck{OK: false})

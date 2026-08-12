@@ -74,6 +74,29 @@ func main() {
 	}
 	log.Printf("rasputin-agent: state dir %s", stateDir)
 
+	// Update-path fault injection (updater/fault.go). Resolved once, here,
+	// because two of the three faults have to be known before we decide what
+	// to subscribe to at all. An unrecognised value is fatal on purpose: a
+	// mistyped fault that injects nothing would leave a test reporting success
+	// while proving nothing.
+	updateFault, err := updater.FaultFromEnv()
+	if err != nil {
+		log.Fatalf("rasputin-agent: %v", err)
+	}
+	updateFault.Announce()
+
+	// FaultDieAfterReboot, far side: the marker was armed by the reboot handler
+	// in the previous boot, so this process comes up MUTE — no registration, no
+	// update subscriptions. The node is running and healthy and the control
+	// plane simply never hears from it again, which is bench node c08 and the
+	// case #57 / #72 exist for. One-shot: the marker is consumed here so the
+	// next boot rejoins on its own.
+	muteAfterReboot := updater.TakeMuteAfterReboot(stateDir)
+	if muteAfterReboot {
+		log.Printf("rasputin-agent: ⚠️  FAULT %s FIRING: coming up MUTE — no registration, no update handlers. "+
+			"Restart the agent to rejoin.", updater.FaultDieAfterReboot)
+	}
+
 	// Bus join token (RASPUTIN_CP_JOIN_TOKEN): presented to the api's
 	// auth-callout so it can mint a per-node scoped credential. Empty on a
 	// controlplane (trusted via loopback) and harmless when the server has no
@@ -148,7 +171,7 @@ func main() {
 	// post-reboot commit/rollback gate (richer than diag.ping's liveness).
 	healthSubj := proto.NodeCmdSubject(nodeID, "diag.health")
 	healthSub, err := nc.Subscribe(healthSubj, func(m *nats.Msg) {
-		handleHealth(ctx, nodeID, role, m)
+		handleHealth(ctx, nodeID, role, m, updateFault == updater.FaultFailHealth)
 	})
 	if err != nil {
 		log.Fatalf("rasputin-agent: subscribe %s: %v", healthSubj, err)
@@ -340,7 +363,16 @@ func main() {
 		default:
 			log.Fatalf("rasputin-agent: unknown RASPUTIN_UPDATE_BACKEND %q (expected rauc|openwrt-ab|mock)", backendChoice)
 		}
-		upSubs, err := updater.RegisterHandlers(nc, nodeID, upBackend)
+		// Mute node: skip the update subscriptions entirely, so a precheck gets
+		// "no responders" rather than an answer. Verify must find nothing at
+		// all — a node that still answered prechecks would be a different
+		// (and much easier) failure than the one c08 posed.
+		if muteAfterReboot {
+			log.Printf("rasputin-agent: ⚠️  FAULT %s: not subscribing to update.* — prechecks will go unanswered",
+				updater.FaultDieAfterReboot)
+			return
+		}
+		upSubs, err := updater.RegisterHandlersWithFault(nc, nodeID, upBackend, updateFault, updaterDir)
 		if err != nil {
 			log.Fatalf("rasputin-agent: register update handlers: %v", err)
 		}
@@ -416,8 +448,20 @@ func main() {
 
 	// Every command handler is subscribed — announce ourselves. (The
 	// connect-time registration above was suppressed by the gate.)
-	handlersReady.Store(true)
-	reregister(nc)
+	//
+	// …unless FaultDieAfterReboot fired, in which case handlersReady stays
+	// false and no registration is ever published. Leaving the gate shut is
+	// what makes this faithful to c08 rather than a crash: the node stays up,
+	// keeps its lease, keeps answering ping — it simply never tells the control
+	// plane it came back, so verify times out with nothing to write and
+	// inventory has to represent "we don't know".
+	if muteAfterReboot {
+		log.Printf("rasputin-agent: ⚠️  FAULT %s: suppressing registration — the control plane will not hear from this node",
+			updater.FaultDieAfterReboot)
+	} else {
+		handlersReady.Store(true)
+		reregister(nc)
+	}
 
 	go runHeartbeats(ctx, nc, nodeID)
 	// Disk metric measures the persistent data partition, not "/" (the
@@ -555,7 +599,7 @@ func handlePing(nodeID string, m *nats.Msg) {
 	}
 }
 
-func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *nats.Msg) {
+func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *nats.Msg, injectFailure bool) {
 	var cmd proto.DiagHealthCmd
 	_ = json.Unmarshal(m.Data, &cmd) // JobID is optional; ignore decode errors
 	// Bound the checks so a hung command can't hold the reply past the saga's
@@ -563,6 +607,17 @@ func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *na
 	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	ack := health.Check(cctx, role)
+	// FaultFailHealth: answer unhealthy AFTER running the real battery, so the
+	// reply is shaped exactly like a genuine failure rather than a special case
+	// the api might treat differently. Drives the mark-bad branch — the one that
+	// unconfirms inventory instead of recording a version, because the node is
+	// on the new slot but about to revert away from it.
+	if injectFailure {
+		log.Printf("rasputin-agent: ⚠️  FAULT %s: reporting UNHEALTHY (real result was ok=%v)",
+			updater.FaultFailHealth, ack.OK)
+		ack.OK = false
+		ack.Detail = "fault injection: " + string(updater.FaultFailHealth)
+	}
 	ack.JobID = cmd.JobID
 	ack.NodeID = nodeID
 	payload, err := json.Marshal(ack)
