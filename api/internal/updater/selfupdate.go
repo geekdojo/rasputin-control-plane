@@ -40,18 +40,21 @@ func (l logFn) log(level, msg string) {
 	}
 }
 
-// verifyBootedSlot prechecks nodeID and compares the booted slot to the target
-// recorded in the node_update row for jobID. On a mismatch (bootloader rolled
-// back, or the new slot never booted) it records + publishes a rollback and
-// returns an error; on a match it returns the precheck ack. Shared by saga
-// step 6 and the self-update reconciler.
+// verifyBootedSlot evaluates conjuncts (a), (b) and (c) of the verify contract
+// against a fresh precheck. See verify.go for the contract itself; (d), the
+// health battery, is step 7 because it can mark the slot bad.
+//
+// Shared by saga step 6 and the self-update reconciler, so there is exactly one
+// implementation of what "verified" means — which is the point of naming it
+// (ADR-0005 Decision 2).
 //
 // It is also the one place that reconciles INVENTORY from the update outcome
 // (ADR-0005 Decision 4) — see reconcileInventoryVersion. This is the right site
 // because it is where the post-reboot precheck answer is in hand: the version
 // the node is ACTUALLY running, read off the rootfs it actually booted.
-func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inventory.Store, nodeID, bundleSHA, jobID string, lg logFn) (proto.UpdatePrecheckAck, error) {
-	var pre proto.UpdatePrecheckAck
+func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inventory.Store, req verifyRequest, lg logFn) (verifyResult, error) {
+	nodeID, bundleSHA, jobID := req.NodeID, req.BundleSHA256, req.JobID
+	var res verifyResult
 	preMsg, err := nc.RequestWithContext(ctx, proto.UpdatePrecheckSubject(nodeID), mustJSON(proto.UpdatePrecheckCmd{}))
 	if err != nil {
 		// THE c08 CASE, exactly. We told this node to reboot and it never came
@@ -60,14 +63,32 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 		// was an optimistic registration on a slot the node may have left. Drop
 		// the confirmation; keep the value as the only clue an operator has.
 		unconfirmInventoryVersion(ctx, inv, nodeID, "node did not answer after the reboot", lg)
-		return pre, fmt.Errorf("post-reboot precheck: %w", err)
+		return res, fmt.Errorf("post-reboot precheck: %w", err)
 	}
+	var pre proto.UpdatePrecheckAck
 	_ = json.Unmarshal(preMsg.Data, &pre)
+	res.Ack = pre
 
 	expected, err := store.GetNodeUpdate(ctx, jobID)
 	if err != nil || expected == nil {
-		return pre, errors.New("update row missing at verify time")
+		return res, errors.New("update row missing at verify time")
 	}
+
+	// ----- conjunct (a): a DIFFERENT boot than the one we told to reboot -----
+	//
+	// Checked first, and deliberately WITHOUT recording a rollback, because the
+	// two failures look identical from the slot alone and are opposites: a node
+	// that has not rebooted yet is still on the old slot, which the (b) check
+	// below would call a bootloader rollback. That misdiagnosis is c13 — a
+	// healthy node marked rolled_back and left uncommitted.
+	res.Boot = classifyBoot(req.PriorBootID, pre.BootID)
+	if res.Boot == bootSame {
+		unconfirmInventoryVersion(ctx, inv, nodeID,
+			"the pre-reboot agent is still answering; what it runs next is not yet decided", lg)
+		return res, fmt.Errorf("pre_reboot_agent_answered: still on boot %s — the node has not rebooted, this is NOT a rollback",
+			short(pre.BootID))
+	}
+
 	if pre.ActiveSlot != expected.ToSlot {
 		now := time.Now().UTC()
 		_ = store.UpdateNodeUpdate(ctx, jobID, NodeUpdateRolledBack,
@@ -91,8 +112,22 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 			Reason:   "bootloader watchdog or post-install init failure",
 			Ts:       now,
 		})
-		return pre, fmt.Errorf("bootloader_rolled_back: came up on slot %s, expected %s",
+		return res, fmt.Errorf("bootloader_rolled_back: came up on slot %s, expected %s",
 			pre.ActiveSlot, expected.ToSlot)
+	}
+
+	// ----- conjunct (c): the reported version is the one we installed --------
+	//
+	// Free: the value has always been in hand here and was simply discarded.
+	// A node on the right slot running the wrong version is not a rollback and
+	// not a success — most likely the slot was written by something other than
+	// this update. Inventory is CONFIRMED to what it actually reports, because
+	// that part we do know.
+	res.Version = classifyVersion(expected.ToVersion, pre.CurrentVersion)
+	if res.Version == versionMismatch {
+		reconcileInventoryVersion(ctx, inv, nodeID, pre.CurrentVersion, lg)
+		return res, fmt.Errorf("version_mismatch: booted slot %s reports %q, expected %q",
+			pre.ActiveSlot, pre.CurrentVersion, expected.ToVersion)
 	}
 	// Same reconciliation on the success branch, for the same reason: the
 	// precheck answer is fresher evidence than the registration event that
@@ -100,8 +135,16 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 	// is authoritative at the moment it is decided" one invariant rather than a
 	// rollback special case.
 	reconcileInventoryVersion(ctx, inv, nodeID, pre.CurrentVersion, lg)
-	lg.log("info", fmt.Sprintf("node up on slot %s (version %s)", pre.ActiveSlot, pre.CurrentVersion))
-	return pre, nil
+	lg.log("info", fmt.Sprintf("verified: slot %s, version %s, boot %s, version-check %s",
+		pre.ActiveSlot, pre.CurrentVersion, res.Boot, res.Version))
+	if res.Degraded() {
+		// Decision 3: a degraded verify still passes — refusing would mean no
+		// existing cluster could ever adopt the feature — but it is a weaker
+		// claim and never a silent one. #71 carries this onto the wire.
+		lg.log("warn", fmt.Sprintf("verify DEGRADED (boot=%s version=%s): passed on the conjuncts that could be evaluated",
+			res.Boot, res.Version))
+	}
+	return res, nil
 }
 
 // reconcileInventoryVersion writes a verified running version back to
@@ -348,15 +391,25 @@ func reconcileSelfUpdate(ctx context.Context, store *Store, inv *inventory.Store
 		runner.FinishDeferred(ctx, jobID, false, "agent did not reconnect after self-update reboot: "+err.Error())
 		return
 	}
-	post, err := verifyBootedSlot(wctx, nc, store, inv, spec.NodeID, spec.BundleSHA256, jobID, nil)
+	req := verifyRequest{
+		NodeID:       spec.NodeID,
+		BundleSHA256: spec.BundleSHA256,
+		JobID:        jobID,
+		PriorBootID:  priorBootID,
+	}
+	res, err := verifyBootedSlot(wctx, nc, store, inv, req, nil)
 	if err != nil {
 		// verifyBootedSlot already recorded + published the rollback.
 		runner.FinishDeferred(ctx, jobID, false, err.Error())
 		return
 	}
-	// Reported, not yet enforced — the same stance as saga step 6. Making a
-	// differing bootId a conjunct of the verify contract is #58.
-	log.Printf("updater: self-update %s boot identity: %s", jobID, describeBootTransition(priorBootID, post.BootID))
+	// No waitForNewBoot here, deliberately: this path runs in a NEW api process
+	// that came up on the new slot, so the box demonstrably rebooted — the race
+	// step 6 has to defend against cannot occur. The conjunct is still
+	// EVALUATED (verifyBootedSlot does it from the ack), so a self-update that
+	// somehow answered on the old boot is still caught.
+	log.Printf("updater: self-update %s verified (boot=%s version=%s degraded=%v)",
+		jobID, res.Boot, res.Version, res.Degraded())
 	if _, err := healthCheckAndCommit(wctx, nc, store, inv, spec.NodeID, spec.BundleSHA256, jobID, nil); err != nil {
 		runner.FinishDeferred(ctx, jobID, false, err.Error())
 		return

@@ -627,34 +627,40 @@ func TestUpdatePrecheck_CapturesBootIDInStepResult(t *testing.T) {
 	}
 }
 
-// Step 6 reads the pre-reboot identity out of PriorResults and reports the
-// transition — but does NOT gate on it. A node still answering on the SAME boot
-// is the #58 false-rollback class; this story deliberately only makes the value
-// visible, so the step must still pass on the slot check alone. When #58 makes
-// bootId conjunct (a) of the verify contract, this expectation flips, and that
-// is the point of pinning it now.
-func TestUpdateWaitOnlineAndVerifySlot_BootIDReportedNotEnforced(t *testing.T) {
+// THE c13 FIX, inverted from its #70 form. A node still answering on the SAME
+// boot is the pre-reboot agent — the reboot has not happened yet — and step 6
+// must NOT accept it. Until #58 this passed on the slot check alone; the test
+// that pinned the old behaviour (..._BootIDReportedNotEnforced) is this one,
+// flipped, which is why it was written that way.
+//
+// Critically it must also NOT be recorded as a bootloader rollback. Those two
+// failures look identical from the slot alone and are opposites: "has not
+// rebooted" versus "rebooted and fell back". Conflating them is what marked
+// healthy c13 rolled_back on the 24-node run.
+func TestUpdateWaitOnlineAndVerifySlot_SameBootIsRejectedAndIsNotARollback(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store := newStoreFixture(t).store
-	const nodeID, bootID = "n", "same-boot"
+	const nodeID, bootID = "c13", "same-boot"
 	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
 		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
 		FromSlot: proto.SlotA, ToSlot: proto.SlotB,
 		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
 	})
 
-	// Slot says "on the new slot", but the boot identity is unchanged — i.e.
-	// the pre-reboot agent answering.
+	// The old agent answers happily, and reports the OLD slot — exactly what
+	// the pre-reboot system looks like.
 	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
-			OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA,
-			CurrentVersion: "v1", BootID: bootID,
+			OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+			CurrentVersion: "v0", BootID: bootID,
 		})
 		_ = m.Respond(ack)
 	})
 	defer func() { _ = preSub.Unsubscribe() }()
 
+	// It also re-registers, which under the old design was accepted as proof
+	// the reboot happened.
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
@@ -669,21 +675,103 @@ func TestUpdateWaitOnlineAndVerifySlot_BootIDReportedNotEnforced(t *testing.T) {
 		}
 	}()
 
-	var logged []string
-	tctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	tctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
 	sc.Ctx = tctx
 	sc.PriorResults = map[string]json.RawMessage{
 		"precheck": mustJSON(proto.UpdatePrecheckAck{OK: true, BootID: bootID}),
 	}
-	sc.Log = func(level, message string) { logged = append(logged, message) }
+
+	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err == nil {
+		t.Fatal("the pre-reboot agent must not satisfy verify")
+	}
+	row, _ := store.GetNodeUpdate(ctx, "j")
+	if row != nil && row.Status == NodeUpdateRolledBack {
+		t.Error("a node that has not rebooted must NOT be recorded as a bootloader rollback — that is the c13 misdiagnosis")
+	}
+}
+
+// A node that comes back on a NEW boot verifies cleanly, even though it took a
+// moment: the first two prechecks are answered by the old boot.
+func TestUpdateWaitOnlineAndVerifySlot_WaitsThroughTheOldBoot(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID = "c13ok"
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB, ToVersion: "v1",
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+
+	var answers int32
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		var ack []byte
+		if atomic.AddInt32(&answers, 1) <= 2 {
+			// Still the old system: old slot, old boot.
+			ack, _ = json.Marshal(proto.UpdatePrecheckAck{
+				OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+				CurrentVersion: "v0", BootID: "old-boot",
+			})
+		} else {
+			ack, _ = json.Marshal(proto.UpdatePrecheckAck{
+				OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA,
+				CurrentVersion: "v1", BootID: "new-boot",
+			})
+		}
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+
+	tctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
+	sc.Ctx = tctx
+	sc.PriorResults = map[string]json.RawMessage{
+		"precheck": mustJSON(proto.UpdatePrecheckAck{OK: true, BootID: "old-boot"}),
+	}
 
 	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err != nil {
-		t.Fatalf("bootId is reported, not enforced, in this story: %v", err)
+		t.Fatalf("a node that does reboot must verify: %v", err)
 	}
-	if !containsSubstr(logged, "SAME boot") {
-		t.Errorf("expected the same-boot observation in the step log, got %q", logged)
+	if got := atomic.LoadInt32(&answers); got < 3 {
+		t.Errorf("expected to poll past the old boot, only %d answers", got)
+	}
+}
+
+// No registration event is ever published here. Under the old design step 6
+// blocked on the subscription and burned its whole timeout when a node
+// re-registered before the subscription landed; polling cannot miss it.
+func TestUpdateWaitOnlineAndVerifySlot_NeedsNoRegistrationEvent(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID = "fastboot"
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB, ToVersion: "v1",
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA,
+			CurrentVersion: "v1", BootID: "new-boot",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+
+	tctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
+	sc.Ctx = tctx
+	sc.PriorResults = map[string]json.RawMessage{
+		"precheck": mustJSON(proto.UpdatePrecheckAck{OK: true, BootID: "old-boot"}),
+	}
+
+	if _, err := updateWaitOnlineAndVerifySlot(store, nil)(sc); err != nil {
+		t.Fatalf("verify must not depend on a registration event: %v", err)
 	}
 }
 

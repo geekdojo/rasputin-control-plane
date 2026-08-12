@@ -2,7 +2,7 @@ package updater
 
 import (
 	"encoding/json"
-	"strings"
+
 	"testing"
 	"time"
 
@@ -143,36 +143,6 @@ func TestPriorPrecheckBootID(t *testing.T) {
 				t.Errorf("priorPrecheckBootID = %q, want %q", got, c.want)
 			}
 		})
-	}
-}
-
-// The three outcomes must stay distinguishable in the step log: the operator
-// reading a bench run has to be able to tell "rebooted" from "the old agent is
-// still answering" (the #58 false-rollback class) from "mixed-version fleet,
-// no identity available" (ADR-0005 Decision 3).
-func TestDescribeBootTransition(t *testing.T) {
-	cases := []struct {
-		name, before, after, wantSubstr string
-	}{
-		{"different boot", "boot-a", "boot-b", "different boot"},
-		{"same boot", "boot-a", "boot-a", "SAME boot"},
-		{"neither reported", "", "", "unknown"},
-		{"pre-reboot missing", "", "boot-b", "unknown"},
-		{"post-reboot missing", "boot-a", "", "unknown"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := describeBootTransition(c.before, c.after)
-			if !strings.Contains(got, c.wantSubstr) {
-				t.Errorf("describeBootTransition(%q, %q) = %q, want it to contain %q",
-					c.before, c.after, got, c.wantSubstr)
-			}
-		})
-	}
-	// A same-boot answer must never be described as a successful transition —
-	// that phrasing is what an operator would act on.
-	if s := describeBootTransition("x", "x"); strings.Contains(s, "different") {
-		t.Errorf("same-boot description must not read as different: %q", s)
 	}
 }
 
