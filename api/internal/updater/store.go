@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
@@ -20,7 +22,25 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyMigrations(ctx, db)
 	return &Store{db: db}, nil
+}
+
+// applyMigrations runs the forward-only DDL in schema.go. A "duplicate column"
+// / "already exists" failure is the expected result on a fresh install, where
+// CREATE TABLE already produced the final shape; anything else is logged and
+// skipped rather than fatal, because a store that will not open takes the whole
+// api down for what is usually one additive column.
+func applyMigrations(ctx context.Context, db *sql.DB) {
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			msg := err.Error()
+			if strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists") {
+				continue
+			}
+			log.Printf("updater: migration %q: %v", stmt, err)
+		}
+	}
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -121,6 +141,26 @@ func (s *Store) UpdateNodeUpdate(ctx context.Context, jobID string, status NodeU
 	return err
 }
 
+// SetNodeUpdateVerifyGaps records which conjuncts of the verify contract could
+// not be evaluated for this update (ADR-0005 Decision 3). Written once, when
+// verify completes, so the per-node report can say that a green row rests on
+// fewer than all four checks.
+//
+// A separate call rather than more arguments on UpdateNodeUpdate because the
+// two are written at different moments by different steps — verify knows the
+// gaps, the terminal status is decided later — and threading them through would
+// mean carrying the values across a step boundary just to write them together.
+func (s *Store) SetNodeUpdateVerifyGaps(ctx context.Context, jobID string, unverifiedBoot, unverifiedVersion bool) error {
+	_, err := s.db.ExecContext(ctx, `
+        UPDATE node_updates
+        SET unverified_boot = :unverified_boot, unverified_version = :unverified_version
+        WHERE job_id = :job_id`,
+		sql.Named("unverified_boot", unverifiedBoot),
+		sql.Named("unverified_version", unverifiedVersion),
+		sql.Named("job_id", jobID))
+	return err
+}
+
 // SetNodeUpdateSlots records the from/to slot and version once known
 // (after install). Called from the install step.
 func (s *Store) SetNodeUpdateSlots(ctx context.Context, jobID string, from, to proto.UpdateSlot, fromVersion, toVersion string) error {
@@ -135,6 +175,7 @@ func (s *Store) SetNodeUpdateSlots(ctx context.Context, jobID string, from, to p
 func (s *Store) GetNodeUpdate(ctx context.Context, jobID string) (*NodeUpdate, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT job_id, node_id, bundle_sha256, from_slot, to_slot, from_version, to_version,
+               unverified_boot, unverified_version,
                status, started_at, finished_at, error
         FROM node_updates WHERE job_id = ?`, jobID)
 	return scanNodeUpdate(row.Scan)
@@ -153,11 +194,13 @@ func (s *Store) ListNodeUpdates(ctx context.Context, nodeID string, limit int) (
 	if nodeID != "" {
 		rows, err = s.db.QueryContext(ctx, `
             SELECT job_id, node_id, bundle_sha256, from_slot, to_slot, from_version, to_version,
+               unverified_boot, unverified_version,
                    status, started_at, finished_at, error
             FROM node_updates WHERE node_id = ? ORDER BY started_at DESC LIMIT ?`, nodeID, limit)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
             SELECT job_id, node_id, bundle_sha256, from_slot, to_slot, from_version, to_version,
+               unverified_boot, unverified_version,
                    status, started_at, finished_at, error
             FROM node_updates ORDER BY started_at DESC LIMIT ?`, limit)
 	}
@@ -181,6 +224,7 @@ func (s *Store) ListNodeUpdates(ctx context.Context, nodeID string, limit int) (
 func (s *Store) LatestNodeUpdate(ctx context.Context, nodeID string) (*NodeUpdate, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT job_id, node_id, bundle_sha256, from_slot, to_slot, from_version, to_version,
+               unverified_boot, unverified_version,
                status, started_at, finished_at, error
         FROM node_updates WHERE node_id = ? ORDER BY started_at DESC LIMIT 1`, nodeID)
 	return scanNodeUpdate(row.Scan)
@@ -194,7 +238,8 @@ func scanNodeUpdate(scan func(...any) error) (*NodeUpdate, error) {
 		finishedAt                  sql.NullInt64
 	)
 	if err := scan(&u.JobID, &u.NodeID, &u.BundleSHA256, &fromSlot, &toSlot,
-		&u.FromVersion, &u.ToVersion, &statusRaw, &startedAt, &finishedAt, &u.Error); err != nil {
+		&u.FromVersion, &u.ToVersion, &u.UnverifiedBoot, &u.UnverifiedVersion,
+		&statusRaw, &startedAt, &finishedAt, &u.Error); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}

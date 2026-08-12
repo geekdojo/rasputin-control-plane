@@ -43,8 +43,18 @@ type NodeUpdate struct {
 	ToSlot       proto.UpdateSlot `json:"toSlot"`
 	FromVersion  string           `json:"fromVersion"`
 	ToVersion    string           `json:"toVersion"`
-	Status       NodeUpdateStatus `json:"status"`
-	StartedAt    time.Time        `json:"startedAt"`
-	FinishedAt   *time.Time       `json:"finishedAt,omitempty"`
-	Error        string           `json:"error,omitempty"`
+	// UnverifiedBoot / UnverifiedVersion: conjuncts of the verify contract that
+	// could not be EVALUATED for this update — an agent that reported no boot
+	// identity, or no image version (ADR-0005 Decision 3). They are not
+	// failures: verify passed on the conjuncts it could check, and fan-out
+	// proceeds, because a fleet update is mixed-version by definition and
+	// refusing would mean no existing cluster could adopt the feature. What
+	// they prevent is a green row that silently means less than another green
+	// row next to it.
+	UnverifiedBoot    bool             `json:"unverifiedBoot,omitempty"`
+	UnverifiedVersion bool             `json:"unverifiedVersion,omitempty"`
+	Status            NodeUpdateStatus `json:"status"`
+	StartedAt         time.Time        `json:"startedAt"`
+	FinishedAt        *time.Time       `json:"finishedAt,omitempty"`
+	Error             string           `json:"error,omitempty"`
 }

@@ -86,8 +86,17 @@ type verifyResult struct {
 // i.e. some conjunct could not be evaluated. A degraded pass is still a pass
 // (Decision 3: fan-out proceeds), but it is a weaker claim and must say so.
 func (r verifyResult) Degraded() bool {
-	return r.Boot == bootUnknown || r.Version == versionUnknown
+	return r.UnverifiedBoot() || r.UnverifiedVersion()
 }
+
+// UnverifiedBoot / UnverifiedVersion are Degraded() split into the two things
+// an operator can act on differently. An unverified BOOT usually means a
+// pre-bootId agent, which the next rollout fixes by itself; an unverified
+// VERSION means the node could not say what it is running, which does not
+// self-heal and is worth a look. Collapsing them into one flag would put those
+// two on the same line.
+func (r verifyResult) UnverifiedBoot() bool    { return r.Boot == bootUnknown }
+func (r verifyResult) UnverifiedVersion() bool { return r.Version == versionUnknown }
 
 // classifyBoot evaluates conjunct (a).
 func classifyBoot(prior, current string) bootIdentity {

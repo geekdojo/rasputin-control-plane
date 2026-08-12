@@ -182,7 +182,20 @@ type UpdateChangeEvt struct {
 	ToSlot   UpdateSlot       `json:"toSlot,omitempty"`
 	Version  string           `json:"version,omitempty"`
 	Reason   string           `json:"reason,omitempty"`
-	Ts       time.Time        `json:"ts"`
+	// UnverifiedBoot / UnverifiedVersion mark a verify that PASSED on fewer
+	// than all its conjuncts because some could not be evaluated — a node whose
+	// agent reported no boot identity, or no image version (ADR-0005
+	// Decision 3). Carried on terminal events so a live watcher, and later the
+	// canary gate, can tell a fully-verified outcome from a degraded one.
+	//
+	// A degraded result is still a pass and still fans out: a fleet update is
+	// mixed-version by definition, so every existing cluster's FIRST rollout
+	// after boot identity shipped is degraded on every node. Refusing would
+	// mean no existing cluster could ever adopt the feature. These fields exist
+	// so that is visible rather than silent.
+	UnverifiedBoot    bool      `json:"unverifiedBoot,omitempty"`
+	UnverifiedVersion bool      `json:"unverifiedVersion,omitempty"`
+	Ts                time.Time `json:"ts"`
 }
 
 // ----- Bundle metadata ----------------------------------------------------

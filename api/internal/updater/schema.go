@@ -28,8 +28,27 @@ CREATE TABLE IF NOT EXISTS node_updates (
     status          TEXT NOT NULL,  -- 'in_progress' | 'committed' | 'rolled_back' | 'failed'
     started_at      INTEGER NOT NULL,
     finished_at     INTEGER,
-    error           TEXT NOT NULL DEFAULT ''
+    error           TEXT NOT NULL DEFAULT '',
+    unverified_boot    INTEGER NOT NULL DEFAULT 0,
+    unverified_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_node_updates_node ON node_updates(node_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_node_updates_status ON node_updates(status);
 `
+
+// migrations are forward-only DDL that CREATE TABLE IF NOT EXISTS cannot
+// express — adding a column to a table that already exists on a live cluster.
+// Applied after schema; "duplicate column" is the expected outcome on a fresh
+// install where the CREATE above already covered it. Same shape as the
+// inventory store's, deliberately: two stores inventing two migration idioms is
+// how one of them ends up untested.
+var migrations = []string{
+	// unverified_boot / unverified_version: which conjuncts of the verify
+	// contract could NOT be evaluated for this update (ADR-0005 Decision 3).
+	// Default 0 for rows that predate the columns, which is correct in the only
+	// sense available — those updates were verified by whatever the contract
+	// was at the time, and claiming they were degraded would be inventing
+	// history.
+	`ALTER TABLE node_updates ADD COLUMN unverified_boot INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE node_updates ADD COLUMN unverified_version INTEGER NOT NULL DEFAULT 0`,
+}

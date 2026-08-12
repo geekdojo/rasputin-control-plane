@@ -282,7 +282,17 @@ export default function UpdatesPage() {
                     </td>
                     <td style={{ ...tdStyle, color: DIM }}>{h.fromSlot !== 'unknown' ? `${h.fromSlot} → ${h.toSlot}` : '—'}</td>
                     <td style={tdStyle}>
-                      <Badge color={nodeUpdateColor(h.status)}>{prettyStatus(h.status)}</Badge>
+                      <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <Badge color={nodeUpdateColor(h.status)}>{prettyStatus(h.status)}</Badge>
+                        {/* A committed row that could not evaluate every conjunct is
+                            still a success — it just rests on less evidence than the
+                            row above it, and saying so is the whole point. */}
+                        {(h.unverifiedBoot || h.unverifiedVersion) && (
+                          <Badge color="#facc15" title={unverifiedTitle(h)}>
+                            DEGRADED
+                          </Badge>
+                        )}
+                      </span>
                     </td>
                     <td style={{ ...tdStyle, color: DIM }}>{new Date(h.startedAt).toLocaleTimeString()}</td>
                     <td style={{ ...tdStyle, color: DIM }}>{h.finishedAt ? new Date(h.finishedAt).toLocaleTimeString() : '—'}</td>
@@ -561,6 +571,18 @@ function SystemUpdateRow({ job }: { job: Job }) {
       )}
     </div>
   );
+}
+
+// unverifiedTitle names which conjuncts were skipped. An unverified BOOT is
+// usually a pre-bootId agent and fixes itself on the next rollout; an
+// unverified VERSION means the node could not say what it is running, which
+// does not self-heal — so they are worth distinguishing rather than merging
+// into one "degraded" with no cause.
+function unverifiedTitle(h: NodeUpdate): string {
+  const gaps: string[] = [];
+  if (h.unverifiedBoot) gaps.push('boot identity not reported (agent predates it)');
+  if (h.unverifiedVersion) gaps.push('running version not reported');
+  return `Verified on fewer checks than usual: ${gaps.join('; ')}. The update succeeded on the checks that could run.`;
 }
 
 function updateStatusColor(s: ComponentUpdate['status']): string {

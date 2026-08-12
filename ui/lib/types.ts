@@ -385,6 +385,13 @@ export interface NodeUpdate {
   toSlot: UpdateSlot;
   fromVersion: string;
   toVersion: string;
+  // Conjuncts of the verify contract that could not be EVALUATED for this
+  // update — an agent that reported no boot identity, or no image version
+  // (ADR-0005 Decision 3). Not failures: the update passed on what could be
+  // checked. They exist so a green row that means less than the green row
+  // beside it says so.
+  unverifiedBoot?: boolean;
+  unverifiedVersion?: boolean;
   status: NodeUpdateStatus;
   startedAt: string;
   finishedAt?: string;
