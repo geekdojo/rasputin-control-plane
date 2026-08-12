@@ -522,6 +522,11 @@ func TestUpdateWaitOnlineAndVerifySlot_HappyPath(t *testing.T) {
 		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
 			OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA,
 			CurrentVersion: "v1",
+			// Post-reboot agents report a boot identity, and step 5 requires
+			// evidence of the reboot before it verifies (#83). Answering
+			// without one describes the pre-reboot agent — see
+			// TestUpdateWaitOnlineAndVerifySlot_NoBootIDIsUnknownNotFailure.
+			BootID: "boot-after-reboot",
 		})
 		_ = m.Respond(ack)
 	})
@@ -563,11 +568,15 @@ func TestUpdateWaitOnlineAndVerifySlot_BootloaderRollback(t *testing.T) {
 		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
 	})
 
-	// Precheck reports node came up on the *old* slot — rollback.
+	// Precheck reports node came up on the *old* slot — rollback. The boot id
+	// is what makes this a rollback rather than a node that has not rebooted
+	// yet: those two are indistinguishable from the slot alone, they are
+	// opposites, and telling them apart is the whole point of the contract
+	// (c13, and the #83 regression on its degraded branch).
 	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
 			OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
-			CurrentVersion: "v0",
+			CurrentVersion: "v0", BootID: "boot-after-reboot",
 		})
 		_ = m.Respond(ack)
 	})
@@ -775,9 +784,15 @@ func TestUpdateWaitOnlineAndVerifySlot_NeedsNoRegistrationEvent(t *testing.T) {
 	}
 }
 
-// A pre-bootId agent (no identity on either side) must not change step 6's
-// behaviour at all — ADR-0005 Decision 3's degrade-loudly rule starts as
-// degrade-visibly here.
+// A pre-bootId agent (no identity on either side) must still verify, degraded —
+// ADR-0005 Decision 3's degrade-loudly rule starts as degrade-visibly here.
+//
+// What it must NOT do is skip the wait. The node has to prove it rebooted some
+// other way, and with no identity anywhere the only proof left is that it went
+// quiet and came back. The fixture therefore models a real reboot: answer,
+// silence, answer. An earlier version of this test answered continuously and
+// passed in milliseconds, which is precisely the shape of #83 — on e3bench that
+// recorded a node committed 46s before it finished rebooting.
 func TestUpdateWaitOnlineAndVerifySlot_NoBootIDIsUnknownNotFailure(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
@@ -788,7 +803,11 @@ func TestUpdateWaitOnlineAndVerifySlot_NoBootIDIsUnknownNotFailure(t *testing.T)
 		FromSlot: proto.SlotA, ToSlot: proto.SlotB,
 		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
 	})
+	var polls atomic.Int32
 	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		if polls.Add(1) == 2 {
+			return // the reboot: nobody is listening on the node
+		}
 		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
 			OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA, CurrentVersion: "v1",
 		})
@@ -811,7 +830,7 @@ func TestUpdateWaitOnlineAndVerifySlot_NoBootIDIsUnknownNotFailure(t *testing.T)
 	}()
 
 	var logged []string
-	tctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	tctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
 	sc.Ctx = tctx
@@ -823,6 +842,11 @@ func TestUpdateWaitOnlineAndVerifySlot_NoBootIDIsUnknownNotFailure(t *testing.T)
 	}
 	if !containsSubstr(logged, "unknown") {
 		t.Errorf("expected the unknown-identity observation in the step log, got %q", logged)
+	}
+	// The registration event is firing continuously throughout — it must not be
+	// what satisfied the wait. Only the observed absence may.
+	if polls.Load() < 3 {
+		t.Errorf("verified after %d polls: the step accepted an answer without waiting out the reboot", polls.Load())
 	}
 }
 

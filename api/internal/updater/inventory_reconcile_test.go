@@ -43,6 +43,12 @@ func verifyStep(t *testing.T, inv *inventory.Store, nodeID string,
 		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
 			OK: true, ActiveSlot: bootedSlot, InactiveSlot: otherSlot(bootedSlot),
 			CurrentVersion: runningVersion,
+			// A post-reboot agent reports its boot identity, and step 5 now
+			// requires evidence of that kind before it will verify anything
+			// (#83). A fixture that answers without one is describing the agent
+			// that has NOT rebooted yet — which is a different scenario and has
+			// its own test. These cases are about the verdict, not the wait.
+			BootID: "boot-after-reboot",
 		})
 		_ = m.Respond(ack)
 	})
