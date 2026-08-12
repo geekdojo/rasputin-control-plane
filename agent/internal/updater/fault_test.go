@@ -1,10 +1,13 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,3 +222,54 @@ func (b *countingRebootBackend) Reboot(_ context.Context, _ string, delay int) (
 
 func (b *countingRebootBackend) MarkGood(context.Context, string) error        { return nil }
 func (b *countingRebootBackend) MarkBad(context.Context, string, string) error { return nil }
+
+// The error message IS the mitigation. A mistyped fault is fatal at startup,
+// so this string is the only thing standing between an operator and ten minutes
+// of wondering why their bench round came back healthy. It has to name what was
+// wrong AND what would have been right.
+func TestUnknownFaultError_NamesTheBadValueAndTheValidOnes(t *testing.T) {
+	t.Setenv(FaultEnv, "no-reboto")
+	_, err := FaultFromEnv()
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"no-reboto",                 // what they typed
+		FaultEnv,                    // which knob
+		string(FaultNoReboot),       // …and every valid option, so the
+		string(FaultDieAfterReboot), // typo is self-correcting without
+		string(FaultFailHealth),     // going to the source
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q", msg, want)
+		}
+	}
+}
+
+// Announce is a safety mechanism, not decoration: a node silently carrying a
+// fault injector is worse than no injector at all, and this line is what a
+// confused operator greps for. Silence on an armed fault is the bug.
+func TestAnnounce_ShoutsWhenArmedAndIsSilentWhenNot(t *testing.T) {
+	capture := func(f Fault) string {
+		var buf bytes.Buffer
+		orig := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(orig)
+		f.Announce()
+		return buf.String()
+	}
+
+	if got := capture(FaultNone); got != "" {
+		t.Errorf("unarmed announce logged %q — a clean node must say nothing", got)
+	}
+	for _, f := range []Fault{FaultNoReboot, FaultDieAfterReboot, FaultFailHealth} {
+		got := capture(f)
+		if !strings.Contains(got, string(f)) {
+			t.Errorf("announce for %q = %q, must name the armed fault", f, got)
+		}
+		if !strings.Contains(got, FaultEnv) {
+			t.Errorf("announce for %q = %q, must name the variable to unset", f, got)
+		}
+	}
+}

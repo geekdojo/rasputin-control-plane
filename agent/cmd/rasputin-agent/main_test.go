@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -253,5 +254,65 @@ func TestClusterNameDefaultsToTodaysLiteral(t *testing.T) {
 		if got := clusterName(); got != "rasputin.local" {
 			t.Errorf("clusterName() with id %q = %q, want rasputin.local — existing nodes would rename", v, got)
 		}
+	}
+}
+
+// FaultFailHealth drives the mark-bad branch of the update saga — the one that
+// unconfirms inventory instead of recording a version, because a node on the
+// new slot that is about to revert has no version worth writing. The reply has
+// to be shaped exactly like a genuine health failure, or the api takes a
+// different path than it would in the real thing and the round proves nothing.
+func TestHandleHealth_FaultReportsUnhealthyWithoutChangingTheReplyShape(t *testing.T) {
+	nc := testBus(t)
+	const nodeID = "n"
+
+	ask := func(t *testing.T, inject bool) proto.DiagHealthAck {
+		t.Helper()
+		subj := proto.NodeCmdSubject(nodeID, "diag.health."+map[bool]string{true: "fault", false: "clean"}[inject])
+		sub, err := nc.Subscribe(subj, func(m *nats.Msg) {
+			handleHealth(context.Background(), nodeID, proto.RoleCompute, m, inject)
+		})
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		defer func() { _ = sub.Unsubscribe() }()
+
+		cmd, _ := json.Marshal(proto.DiagHealthCmd{JobID: "job-1"})
+		msg, err := nc.Request(subj, cmd, 15*time.Second)
+		if err != nil {
+			t.Fatalf("health rpc: %v", err)
+		}
+		var ack proto.DiagHealthAck
+		if err := json.Unmarshal(msg.Data, &ack); err != nil {
+			t.Fatalf("ack: %v", err)
+		}
+		return ack
+	}
+
+	faulted := ask(t, true)
+	if faulted.OK {
+		t.Error("armed fault must report NOT ok")
+	}
+	if faulted.Detail == "" {
+		t.Error("a failure with no detail gives the operator nothing to go on")
+	}
+	// The identifying fields must survive the injection — the api correlates on
+	// them, and a fault that also broke correlation would fail for the wrong
+	// reason.
+	if faulted.JobID != "job-1" {
+		t.Errorf("JobID = %q, want it preserved through the injection", faulted.JobID)
+	}
+	if faulted.NodeID != nodeID {
+		t.Errorf("NodeID = %q, want %q", faulted.NodeID, nodeID)
+	}
+
+	// And unarmed, the same handler must report the real battery's verdict —
+	// otherwise the test above is measuring a broken handler, not a fault.
+	clean := ask(t, false)
+	if clean.JobID != "job-1" || clean.NodeID != nodeID {
+		t.Errorf("clean ack lost its identity fields: %+v", clean)
+	}
+	if clean.Detail == faulted.Detail && clean.Detail != "" {
+		t.Errorf("clean and faulted details are identical (%q) — the fault is not distinguishable", clean.Detail)
 	}
 }
