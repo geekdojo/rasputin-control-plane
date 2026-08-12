@@ -45,6 +45,27 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		// One place to stamp means a new backend cannot silently omit it.
 		// ADR-0005 Decision 1.
 		ack.BootID = host.BootID()
+		// Same argument for the running version, and here it is not a nicety.
+		//
+		// RAUCBackend sources CurrentVersion from RAUC_SLOT_STATUS_N_BUNDLE_VERSION,
+		// which the RAUC on our image NEVER emits: /etc/rauc/system.conf sets
+		// neither data-directory nor statusfile, so RAUC falls back to per-slot
+		// status and says "System status information not supported!". Bench-
+		// confirmed on e3bench 2026-08-12 — the real `rauc status
+		// --output-format=shell` output contains no version field at all. So
+		// every Buildroot OS node reported an EMPTY CurrentVersion, which made
+		// the verify path blind and inverted the inventory write-back: a
+		// successful update took the no-version-in-hand branch and left the node
+		// UNCONFIRMED, so the update check reported needs-attention forever.
+		//
+		// The running rootfs IS the booted slot, so /etc/rasputin/image-version
+		// is the authoritative answer and the agent already reads it for
+		// registration. Fall back to it whenever the backend has nothing —
+		// never override a backend that does know, since a slot-aware value is
+		// strictly better evidence than a file on the mounted rootfs.
+		if ack.CurrentVersion == "" {
+			ack.CurrentVersion = host.ImageVersion()
+		}
 		bus.Respond(m, ack)
 	}); err != nil {
 		return subs, err

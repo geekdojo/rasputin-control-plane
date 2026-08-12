@@ -419,8 +419,8 @@ RAUC_SLOT_STATE_1='inactive'
 RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'
 RAUC_SLOT_STATE_2='booted'
 RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
-RAUC_SLOT_STATUS_0_BUNDLE_VERSION='1.2.3'
-RAUC_SLOT_STATUS_1_BUNDLE_VERSION='1.0.0'
+RAUC_SLOT_BOOT_STATUS_1='good'
+RAUC_SLOT_BOOT_STATUS_2='good'
 EOF
     ;;
   install)
@@ -479,8 +479,13 @@ func TestRAUCBackend_PrecheckHappy(t *testing.T) {
 	if ack.ActiveSlot != proto.SlotA {
 		t.Errorf("active slot: %q", ack.ActiveSlot)
 	}
-	if ack.CurrentVersion != "1.2.3" {
-		t.Errorf("version: %q", ack.CurrentVersion)
+	// Real `rauc status` on our image reports NO version (see the fixture, and
+	// the note on parseRAUCStatus). The backend must say so honestly rather
+	// than inventing one — filling that gap is the precheck HANDLER's job, via
+	// host.ImageVersion(). Asserting "" here is what keeps the fixture from
+	// drifting back into fiction.
+	if ack.CurrentVersion != "" {
+		t.Errorf("version: got %q, want \"\" — our RAUC config emits no per-slot version", ack.CurrentVersion)
 	}
 }
 
@@ -691,4 +696,105 @@ func TestRAUCBackend_NewRAUCBackend_RejectsEmptyBinary(t *testing.T) {
 	if _, err := newRAUCBackend(t.TempDir(), ""); err == nil {
 		t.Error("empty binary path should fail")
 	}
+}
+
+// The precheck ack must carry the running image version even though our RAUC
+// reports none — the regression behind geekdojo-brain #82.
+//
+// RAUCBackend reads RAUC_SLOT_STATUS_N_BUNDLE_VERSION, which /etc/rauc/system.conf
+// on the Rasputin image never causes RAUC to emit, so CurrentVersion arrived
+// EMPTY from every Buildroot OS node. That was inert until the updater began
+// reconciling inventory from update outcomes: an empty version routes to the
+// "we could not establish what it is running" branch, so a SUCCESSFUL update
+// left the node unconfirmed and the update check reported needs-attention
+// forever. The suite could not see it because MockBackend fabricates a version.
+func TestRegisterHandlers_PrecheckFillsCurrentVersionWhenBackendHasNone(t *testing.T) {
+	const version = "2026.08.2-dev.154"
+	t.Setenv("RASPUTIN_IMAGE_VERSION", version)
+
+	nc := startNATS(t)
+	subs, err := RegisterHandlers(nc, "node-1", versionlessBackend{})
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+
+	var ack proto.UpdatePrecheckAck
+	request(t, nc, proto.UpdatePrecheckSubject("node-1"), proto.UpdatePrecheckCmd{}, &ack)
+	if ack.CurrentVersion != version {
+		t.Errorf("CurrentVersion = %q, want the running image version %q", ack.CurrentVersion, version)
+	}
+}
+
+// ...but a backend that DOES know its slot's version keeps it. A slot-aware
+// value is strictly better evidence than a file on the mounted rootfs, so the
+// fallback fills a gap and never overrides.
+func TestRegisterHandlers_PrecheckDoesNotOverrideABackendVersion(t *testing.T) {
+	t.Setenv("RASPUTIN_IMAGE_VERSION", "2026.08.2-dev.154")
+
+	nc := startNATS(t)
+	subs, err := RegisterHandlers(nc, "node-1", versionfulBackend{})
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+
+	var ack proto.UpdatePrecheckAck
+	request(t, nc, proto.UpdatePrecheckSubject("node-1"), proto.UpdatePrecheckCmd{}, &ack)
+	if ack.CurrentVersion != "slot-known-9.9.9" {
+		t.Errorf("CurrentVersion = %q, want the backend's own slot-aware value", ack.CurrentVersion)
+	}
+}
+
+// A node with neither a backend version nor an image-version file reports "",
+// and the precheck still succeeds — consumers treat "" as unknown, and a
+// missing fact must never be the reason an update stops.
+func TestRegisterHandlers_PrecheckWithNoVersionAnywhereStillSucceeds(t *testing.T) {
+	t.Setenv("RASPUTIN_IMAGE_VERSION", "")
+
+	nc := startNATS(t)
+	subs, err := RegisterHandlers(nc, "node-1", versionlessBackend{})
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+
+	var ack proto.UpdatePrecheckAck
+	request(t, nc, proto.UpdatePrecheckSubject("node-1"), proto.UpdatePrecheckCmd{}, &ack)
+	if !ack.OK {
+		t.Errorf("precheck must still succeed with no version anywhere: %+v", ack)
+	}
+}
+
+// versionlessBackend models the real RAUC backend on our image: it knows its
+// slots and reports no version at all.
+type versionlessBackend struct{ errBackend }
+
+func (versionlessBackend) Precheck(_ context.Context) (*proto.UpdatePrecheckAck, error) {
+	return &proto.UpdatePrecheckAck{
+		OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB, Backend: "rauc",
+	}, nil
+}
+
+// versionfulBackend models the OpenWrt A/B backend, which reads the version
+// itself.
+type versionfulBackend struct{ errBackend }
+
+func (versionfulBackend) Precheck(_ context.Context) (*proto.UpdatePrecheckAck, error) {
+	return &proto.UpdatePrecheckAck{
+		OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+		CurrentVersion: "slot-known-9.9.9", Backend: "openwrt-ab",
+	}, nil
 }
