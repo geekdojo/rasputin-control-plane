@@ -101,6 +101,16 @@ func invVersion(t *testing.T, inv *inventory.Store, nodeID string) string {
 	return n.ImageVersion
 }
 
+// confirmed reports whether inventory currently vouches for the node's version.
+func confirmed(t *testing.T, inv *inventory.Store, nodeID string) bool {
+	t.Helper()
+	n, err := inv.Get(context.Background(), nodeID)
+	if err != nil || n == nil {
+		t.Fatalf("inv.Get(%s): %v, %+v", nodeID, err, n)
+	}
+	return n.ImageVersionConfirmedAt != nil
+}
+
 // THE c08 REGRESSION. The node registered on the new slot (inventory says
 // dev.104), the bootloader then reverted it, and it is now running dev.101.
 // Inventory must follow the update outcome, not the stale self-report.
@@ -134,8 +144,9 @@ func TestVerify_SuccessReconcilesInventoryToTheVerifiedVersion(t *testing.T) {
 }
 
 // An agent that reports no version at all must leave the column alone. Blanking
-// it would replace a wrong answer with a differently-wrong one; "we could not
-// confirm" is image_version_confirmed_at's job (#72), not this write's.
+// it would replace a wrong answer with a differently-wrong one; the doubt is
+// expressed by dropping the confirmation instead — see
+// TestVerify_EmptyReportedVersionUnconfirms for that half.
 func TestVerify_EmptyReportedVersionDoesNotBlankInventory(t *testing.T) {
 	const nodeID = "c10"
 	inv := seedInventoryAt(t, nodeID, "2026.07.0-dev.101")
@@ -157,11 +168,12 @@ func TestVerify_MissingInventoryRowDoesNotFailTheStep(t *testing.T) {
 	}
 }
 
-// The mark-bad path deliberately does NOT reconcile: the node is still on the
-// new slot but about to revert, so every value available is about to be wrong.
-// The honest state is "unconfirmed", which the schema cannot express until #72.
-// Pinning it here so the omission reads as a decision, not an oversight.
-func TestHealthCheckFailure_LeavesInventoryUntouched(t *testing.T) {
+// The mark-bad path asserts no version — the node is still on the new slot but
+// about to revert, so every value available is about to be wrong. It drops the
+// CONFIRMATION instead, which is the state #72 added. (#57 left this path
+// untouched because the schema could not yet say "unconfirmed"; this test is
+// that one, flipped.)
+func TestHealthCheckFailure_UnconfirmsInventoryVersion(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store := newStoreFixture(t).store
@@ -188,10 +200,112 @@ func TestHealthCheckFailure_LeavesInventoryUntouched(t *testing.T) {
 
 	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if _, err := healthCheckAndCommit(tctx, nc, store, nodeID, "sha", "j", nil); err == nil {
+	if _, err := healthCheckAndCommit(tctx, nc, store, inv, nodeID, "sha", "j", nil); err == nil {
 		t.Fatal("failed health check must fail the step")
 	}
 	if got := invVersion(t, inv, nodeID); got != "2026.07.0-dev.104" {
 		t.Errorf("inventory = %q; the mark-bad path must not write a version it cannot confirm", got)
 	}
+	if confirmed(t, inv, nodeID) {
+		t.Error("mark-bad must leave the version UNCONFIRMED — the node is about to revert away from it")
+	}
+}
+
+// ============================================================================
+// image_version_confirmed_at (ADR-0005 Decision 4, second half)
+//
+// #57 made the updater WRITE inventory. This half makes "we don't know"
+// representable, so a terminal outcome that could not establish the running
+// version stops leaving a confident-looking lie behind.
+// ============================================================================
+
+// A verified outcome confirms. Reconciling and stamping are one write on
+// purpose — a version and the time it was confirmed must never be able to
+// describe different versions.
+func TestVerify_SuccessConfirmsTheVersion(t *testing.T) {
+	const nodeID = "c20"
+	inv := seedUnconfirmedAt(t, nodeID, "2026.07.0-dev.101")
+
+	if err := verifyStep(t, inv, nodeID, proto.SlotB, proto.SlotB, "2026.07.0-dev.104"); err != nil {
+		t.Fatalf("clean verify: %v", err)
+	}
+	if !confirmed(t, inv, nodeID) {
+		t.Error("a verified outcome must confirm the version")
+	}
+}
+
+// A rollback we could OBSERVE is still knowledge: the node answered, told us
+// which slot and version it is on, and that is confirmed — the rollback is the
+// bad news, not the uncertainty.
+func TestVerify_ObservedRollbackConfirmsTheOldVersion(t *testing.T) {
+	const nodeID = "c21"
+	inv := seedInventoryAt(t, nodeID, "2026.07.0-dev.104")
+
+	if err := verifyStep(t, inv, nodeID, proto.SlotB, proto.SlotA, "2026.07.0-dev.101"); err == nil {
+		t.Fatal("a rollback must still fail the step")
+	}
+	if !confirmed(t, inv, nodeID) {
+		t.Error("an OBSERVED rollback is knowledge; the version it reported is confirmed")
+	}
+}
+
+// THE c08 CASE. The node never came back to answer, so the version inventory
+// holds is from a boot that may no longer exist. Keep the value — it is the
+// only clue an operator has — and drop the confidence.
+func TestVerify_UnreachableNodeUnconfirmsWithoutBlankingTheVersion(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID = "c08"
+	inv := seedInventoryAt(t, nodeID, "2026.07.0-dev.104")
+
+	if err := store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateNodeUpdate: %v", err)
+	}
+
+	// No precheck responder at all — the node is gone.
+	tctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if _, err := verifyBootedSlot(tctx, nc, store, inv, nodeID, "sha", "j", nil); err == nil {
+		t.Fatal("an unreachable node must fail verify")
+	}
+	if confirmed(t, inv, nodeID) {
+		t.Error("a node that never answered must not leave a CONFIRMED version behind")
+	}
+	if got := invVersion(t, inv, nodeID); got != "2026.07.0-dev.104" {
+		t.Errorf("inventory = %q; the last-known value is the operator's only clue and must survive", got)
+	}
+}
+
+// An agent that answers but names no version is the same epistemic state as one
+// that did not answer: we know nothing new. It must not read as confirmed.
+func TestVerify_EmptyReportedVersionUnconfirms(t *testing.T) {
+	const nodeID = "c22"
+	inv := seedInventoryAt(t, nodeID, "2026.07.0-dev.101")
+
+	if err := verifyStep(t, inv, nodeID, proto.SlotB, proto.SlotB, ""); err != nil {
+		t.Fatalf("clean verify: %v", err)
+	}
+	if confirmed(t, inv, nodeID) {
+		t.Error("an agent that reported no version cannot have confirmed one")
+	}
+	if got := invVersion(t, inv, nodeID); got != "2026.07.0-dev.101" {
+		t.Errorf("inventory = %q, want the previous value left intact", got)
+	}
+}
+
+// seedUnconfirmedAt is seedInventoryAt with the confirmation explicitly
+// cleared — the state a row is in after a failed verify, and the state every
+// pre-migration row starts in.
+func seedUnconfirmedAt(t *testing.T, nodeID, version string) *inventory.Store {
+	t.Helper()
+	inv := seedInventoryAt(t, nodeID, version)
+	if err := inv.UnconfirmImageVersion(context.Background(), nodeID); err != nil {
+		t.Fatalf("UnconfirmImageVersion: %v", err)
+	}
+	return inv
 }

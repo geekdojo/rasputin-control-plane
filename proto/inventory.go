@@ -147,6 +147,19 @@ type Node struct {
 	Hostname     string   `json:"hostname"`
 	AgentVersion string   `json:"agentVersion"`
 	ImageVersion string   `json:"imageVersion"`
+	// ImageVersionConfirmedAt is when ImageVersion was last CONFIRMED — either
+	// by the agent registering (it read the value off the rootfs it is running)
+	// or by an update outcome verifying it. nil means the value is stale
+	// evidence we have been explicitly told not to trust: an update reached a
+	// terminal state without being able to establish what the node is running,
+	// which is the c08 case — registered on the new slot, bootloader reverted,
+	// never re-registered.
+	//
+	// Without this, "we don't know" was unrepresentable and the last optimistic
+	// self-report stood forever, so a stranded node rendered as up to date.
+	// Consumers must treat nil as needs-attention, never as agreement.
+	// ADR-0005 Decision 4.
+	ImageVersionConfirmedAt *time.Time `json:"imageVersionConfirmedAt,omitempty"`
 	// Architecture is the node's CPU arch ("amd64" | "arm64"); "" if a pre-arch
 	// agent never reported it. Surfaced in the UI and used to match the right
 	// OS bundle on deploy.

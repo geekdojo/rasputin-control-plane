@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -54,10 +55,21 @@ func byComponent(res CheckResult) map[string]ComponentStatus {
 	return m
 }
 
+// confirmedNode builds a node whose image version carries a CONFIRMATION —
+// the normal state of any row in inventory, since every registration stamps
+// one (ADR-0005 Decision 4). Tests that care about the UNCONFIRMED case build
+// their nodes by hand; everything else uses this, so the fixtures describe a
+// real fleet rather than one that has been globally doubted.
+func confirmedNode(n *proto.Node) *proto.Node {
+	at := time.Now().UTC()
+	n.ImageVersionConfirmedAt = &at
+	return n
+}
+
 func TestCheck(t *testing.T) {
 	nodes := []*proto.Node{
-		{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.20", AgentVersion: "v0.8.4"},
-		{ID: "n", Role: proto.RoleFirewall, ImageVersion: "2026.07.0"},
+		confirmedNode(&proto.Node{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.20", AgentVersion: "v0.8.4"}),
+		confirmedNode(&proto.Node{ID: "n", Role: proto.RoleFirewall, ImageVersion: "2026.07.0"}),
 	}
 	src := &fakeSource{rel: map[string]*ReleaseInfo{
 		"os": osRelease("2026.06.0-dev.24"), // newer than installed dev.20
@@ -105,7 +117,7 @@ func TestCheck(t *testing.T) {
 // here) — it's display-only, never compared or shown as its own status.
 func TestCheckFoldsControlPlaneVersion(t *testing.T) {
 	nodes := []*proto.Node{
-		{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.28", AgentVersion: "0.8.7-dev.3"},
+		confirmedNode(&proto.Node{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.28", AgentVersion: "0.8.7-dev.3"}),
 	}
 	src := &fakeSource{rel: map[string]*ReleaseInfo{
 		"os": osRelease("2026.06.0-dev.28"), // OS up to date
@@ -126,9 +138,9 @@ func TestCheckFoldsControlPlaneVersion(t *testing.T) {
 // a version behind a freshly-updated controlplane.
 func TestCheckOSBehindWhenComputeNodeLags(t *testing.T) {
 	nodes := []*proto.Node{
-		{ID: "bench-cp", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.33", AgentVersion: "0.8.7-dev.7"},
-		{ID: "bench-compute1", Role: proto.RoleCompute, ImageVersion: "2026.06.0-dev.32"},
-		{ID: "bench-fw", Role: proto.RoleFirewall, ImageVersion: "2026.07.1-dev.15"},
+		confirmedNode(&proto.Node{ID: "bench-cp", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.33", AgentVersion: "0.8.7-dev.7"}),
+		confirmedNode(&proto.Node{ID: "bench-compute1", Role: proto.RoleCompute, ImageVersion: "2026.06.0-dev.32"}),
+		confirmedNode(&proto.Node{ID: "bench-fw", Role: proto.RoleFirewall, ImageVersion: "2026.07.1-dev.15"}),
 	}
 	src := &fakeSource{rel: map[string]*ReleaseInfo{
 		"os": osRelease("2026.06.0-dev.33"), // controlplane already matches latest…
@@ -158,7 +170,7 @@ func TestCheckOSBehindWhenComputeNodeLags(t *testing.T) {
 
 func TestCheckUpToDateAndNoFirewall(t *testing.T) {
 	nodes := []*proto.Node{
-		{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.24", AgentVersion: "v0.8.5"},
+		confirmedNode(&proto.Node{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.24", AgentVersion: "v0.8.5"}),
 		// no firewall node registered
 	}
 	src := &fakeSource{rel: map[string]*ReleaseInfo{
@@ -183,9 +195,92 @@ func TestCheckUpToDateAndNoFirewall(t *testing.T) {
 func TestCheckNoRelease(t *testing.T) {
 	src := &fakeSource{rel: map[string]*ReleaseInfo{}} // LatestFor returns nil
 	got := byComponent(Check(context.Background(), src, "stable", []*proto.Node{
-		{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.24"},
+		confirmedNode(&proto.Node{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.24"}),
 	}))
 	if got["os"].Status != StatusNoRelease {
 		t.Errorf("os status = %q, want no_release", got["os"].Status)
+	}
+}
+
+// ============================================================================
+// Unconfirmed versions (ADR-0005 Decision 4)
+//
+// A node whose image version carries no confirmation is one an update outcome
+// told us not to trust. The whole point of the column is that such a node must
+// stop making its component read green.
+// ============================================================================
+
+// THE c08 SHAPE. Every node agrees it is on latest — but one of them is only
+// SAYING so on the strength of a registration that an update outcome later
+// failed to verify. Green would be a lie.
+func TestCheck_UnconfirmedNodeBlocksUpToDate(t *testing.T) {
+	nodes := []*proto.Node{
+		confirmedNode(&proto.Node{ID: "cp", Role: proto.RoleControlPlane, ImageVersion: "2026.07.0-dev.104"}),
+		// c08: reports latest, but nothing confirms it.
+		{ID: "c08", Role: proto.RoleCompute, ImageVersion: "2026.07.0-dev.104"},
+	}
+	src := &fakeSource{rel: map[string]*ReleaseInfo{"os": osRelease("2026.07.0-dev.104")}}
+
+	got := byComponent(Check(context.Background(), src, "dev", nodes))
+	if got["os"].Status != StatusNeedsAttention {
+		t.Errorf("os status = %q, want needs_attention", got["os"].Status)
+	}
+	if !strings.Contains(got["os"].Note, "c08") {
+		t.Errorf("os.Note = %q, want it to name the unconfirmed node", got["os"].Note)
+	}
+}
+
+// An update is already an action; an unconfirmed node is a different problem on
+// (possibly) a different node. The status stays update_available — the operator
+// is being sent to the Updates page either way — but both notes survive, since
+// one silently replacing the other would hide a node.
+func TestCheck_UnconfirmedNodeAnnotatesButDoesNotMaskUpdateAvailable(t *testing.T) {
+	nodes := []*proto.Node{
+		confirmedNode(&proto.Node{ID: "cp", Role: proto.RoleControlPlane, ImageVersion: "2026.07.0-dev.101"}),
+		{ID: "c08", Role: proto.RoleCompute, ImageVersion: "2026.07.0-dev.104"},
+	}
+	src := &fakeSource{rel: map[string]*ReleaseInfo{"os": osRelease("2026.07.0-dev.104")}}
+
+	got := byComponent(Check(context.Background(), src, "dev", nodes))
+	if got["os"].Status != StatusUpdateAvailable {
+		t.Errorf("os status = %q, want update_available to survive", got["os"].Status)
+	}
+	if !strings.Contains(got["os"].Note, "Behind latest") || !strings.Contains(got["os"].Note, "unconfirmed") {
+		t.Errorf("os.Note = %q, want BOTH the lagging and the unconfirmed node named", got["os"].Note)
+	}
+}
+
+// A fully confirmed fleet reads green, unchanged. The guard must cost nothing
+// when every node is trustworthy — otherwise it is just a permanent yellow
+// light and operators learn to ignore it.
+func TestCheck_AllConfirmedStaysUpToDate(t *testing.T) {
+	nodes := []*proto.Node{
+		confirmedNode(&proto.Node{ID: "cp", Role: proto.RoleControlPlane, ImageVersion: "2026.07.0-dev.104"}),
+		confirmedNode(&proto.Node{ID: "c01", Role: proto.RoleCompute, ImageVersion: "2026.07.0-dev.104"}),
+	}
+	src := &fakeSource{rel: map[string]*ReleaseInfo{"os": osRelease("2026.07.0-dev.104")}}
+
+	got := byComponent(Check(context.Background(), src, "dev", nodes))
+	if got["os"].Status != StatusUpToDate {
+		t.Errorf("os status = %q, want up_to_date", got["os"].Status)
+	}
+	if got["os"].Note != "" {
+		t.Errorf("os.Note = %q, want no note on a clean fleet", got["os"].Note)
+	}
+}
+
+// A node whose version was unconfirmed AND is blank still has to be nameable —
+// otherwise the note reads "Version unconfirmed: c08 ()" and an operator cannot
+// tell an empty version from a rendering bug.
+func TestCheck_UnconfirmedNodeWithNoVersionIsStillNamed(t *testing.T) {
+	nodes := []*proto.Node{
+		confirmedNode(&proto.Node{ID: "cp", Role: proto.RoleControlPlane, ImageVersion: "2026.07.0-dev.104"}),
+		{ID: "c08", Role: proto.RoleCompute}, // never reported a version at all
+	}
+	src := &fakeSource{rel: map[string]*ReleaseInfo{"os": osRelease("2026.07.0-dev.104")}}
+
+	got := byComponent(Check(context.Background(), src, "dev", nodes))
+	if !strings.Contains(got["os"].Note, "c08 (no version reported)") {
+		t.Errorf("os.Note = %q, want the empty version spelled out", got["os"].Note)
 	}
 }

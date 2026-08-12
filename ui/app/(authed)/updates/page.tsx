@@ -569,6 +569,9 @@ function updateStatusColor(s: ComponentUpdate['status']): string {
       return ACCENT;
     case 'up_to_date':
       return '#4ade80';
+    // Amber, not green: the comparison passed but its inputs are suspect.
+    case 'needs_attention':
+      return '#facc15';
     case 'unknown':
       return '#facc15';
     default:
@@ -582,6 +585,8 @@ function updateStatusLabel(s: ComponentUpdate['status']): string {
       return 'UPDATE AVAILABLE';
     case 'up_to_date':
       return 'UP TO DATE';
+    case 'needs_attention':
+      return 'NEEDS ATTENTION';
     case 'no_release':
       return 'NO RELEASE';
     default:

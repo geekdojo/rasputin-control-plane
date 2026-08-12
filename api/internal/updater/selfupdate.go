@@ -54,6 +54,12 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 	var pre proto.UpdatePrecheckAck
 	preMsg, err := nc.RequestWithContext(ctx, proto.UpdatePrecheckSubject(nodeID), mustJSON(proto.UpdatePrecheckCmd{}))
 	if err != nil {
+		// THE c08 CASE, exactly. We told this node to reboot and it never came
+		// back to answer — so whatever inventory currently holds is a version
+		// from a boot that may no longer exist, and the last thing that wrote it
+		// was an optimistic registration on a slot the node may have left. Drop
+		// the confirmation; keep the value as the only clue an operator has.
+		unconfirmInventoryVersion(ctx, inv, nodeID, "node did not answer after the reboot", lg)
 		return pre, fmt.Errorf("post-reboot precheck: %w", err)
 	}
 	_ = json.Unmarshal(preMsg.Data, &pre)
@@ -108,15 +114,20 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 // legitimately wins — that is the design, not a race to guard against. What is
 // fixed is the case where no such registration ever comes.
 //
-// Never fatal. An empty version is skipped rather than written: a blank
-// image_version would replace a wrong answer with a differently-wrong one, and
-// "we could not confirm" is a state the schema cannot yet express — that is
-// image_version_confirmed_at, the other half of Decision 4 (#72).
+// Never fatal. An agent that answers but names no version leaves the value in
+// place and loses its CONFIRMATION instead — blanking image_version would swap
+// a wrong answer for a differently-wrong one, while an unconfirmed row says the
+// true thing: this is the last thing we were told, and we now know not to trust
+// it.
 func reconcileInventoryVersion(ctx context.Context, inv *inventory.Store, nodeID, version string, lg logFn) {
-	if inv == nil || version == "" {
+	if inv == nil {
 		return
 	}
-	if err := inv.SetImageVersion(ctx, nodeID, version); err != nil {
+	if version == "" {
+		unconfirmInventoryVersion(ctx, inv, nodeID, "the node reported no image version", lg)
+		return
+	}
+	if err := inv.ConfirmImageVersion(ctx, nodeID, version, time.Now().UTC()); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			lg.log("warn", fmt.Sprintf("inventory has no row for %s; version %s not reconciled", nodeID, version))
 			return
@@ -124,7 +135,32 @@ func reconcileInventoryVersion(ctx context.Context, inv *inventory.Store, nodeID
 		lg.log("warn", fmt.Sprintf("reconcile inventory version for %s: %v", nodeID, err))
 		return
 	}
-	lg.log("info", fmt.Sprintf("inventory reconciled: %s is running %s", nodeID, version))
+	lg.log("info", fmt.Sprintf("inventory reconciled: %s is confirmed running %s", nodeID, version))
+}
+
+// unconfirmInventoryVersion records that we can no longer vouch for what a node
+// is running, without pretending to know what it is instead (ADR-0005
+// Decision 4). Called from every terminal path that ends without a verified
+// version in hand.
+//
+// The reason is logged rather than persisted: the durable record of WHY lives
+// in node_updates, which already carries the terminal status and its detail for
+// this job. Inventory only needs to stop asserting a version it cannot stand
+// behind — duplicating the narrative here would give two places to disagree.
+func unconfirmInventoryVersion(ctx context.Context, inv *inventory.Store, nodeID, reason string, lg logFn) {
+	if inv == nil {
+		return
+	}
+	if err := inv.UnconfirmImageVersion(ctx, nodeID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No row to doubt. Not worth a warning — a node that left inventory
+			// mid-update is already visible in the job's own failure.
+			return
+		}
+		lg.log("warn", fmt.Sprintf("unconfirm inventory version for %s: %v", nodeID, err))
+		return
+	}
+	lg.log("warn", fmt.Sprintf("inventory version for %s is no longer confirmed: %s", nodeID, reason))
 }
 
 // probeHealth runs the post-reboot health gate: diag.health (role-aware — the
@@ -161,22 +197,22 @@ func probeHealth(ctx context.Context, nc *nats.Conn, nodeID, jobID string) (bool
 // and either mark-good + records committed, or mark-bad + records rolled_back.
 // Returns the mark-good ack on success. Shared by saga step 7 and the self-update
 // reconciler.
-func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, nodeID, bundleSHA, jobID string, lg logFn) (json.RawMessage, error) {
+func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, inv *inventory.Store, nodeID, bundleSHA, jobID string, lg logFn) (json.RawMessage, error) {
 	if healthy, detail := probeHealth(ctx, nc, nodeID, jobID); !healthy {
 		lg.log("warn", "health check failed ("+detail+"); sending mark-bad")
 		bad, _ := json.Marshal(proto.UpdateMarkBadCmd{BundleID: bundleSHA, Reason: detail})
 		_, _ = nc.RequestWithContext(ctx, proto.UpdateMarkBadSubject(nodeID), bad)
 
 		now := time.Now().UTC()
-		// Inventory is deliberately NOT reconciled here. mark-bad means the
-		// node is still running the new slot but will revert on its next boot,
-		// so every value available right now is about to become wrong: writing
-		// the running version records a version the node is about to leave, and
-		// writing the old one asserts a revert that has not happened yet. The
-		// honest answer is "unconfirmed", which the schema cannot express until
-		// image_version_confirmed_at lands (ADR-0005 Decision 4, second half —
-		// #72). Until then the stale value stands, visibly, rather than being
-		// replaced by a confident guess.
+		// mark-bad means the node is still running the new slot but will revert
+		// on its next boot, so every version available right now is about to be
+		// wrong: the running one records a version the node is about to leave,
+		// and the old one asserts a revert that has not happened yet. So we
+		// assert neither and drop the confirmation instead — the state this
+		// column was added for. (#57 left this path untouched precisely because
+		// the schema could not yet say "unconfirmed".)
+		unconfirmInventoryVersion(ctx, inv, nodeID,
+			"health check failed; the node will revert on its next boot", lg)
 		_ = store.UpdateNodeUpdate(ctx, jobID, NodeUpdateRolledBack,
 			proto.SlotUnknown, "", "health check failed: "+detail, now)
 		publishChange(nc, proto.UpdateChangeEvt{
@@ -321,7 +357,7 @@ func reconcileSelfUpdate(ctx context.Context, store *Store, inv *inventory.Store
 	// Reported, not yet enforced — the same stance as saga step 6. Making a
 	// differing bootId a conjunct of the verify contract is #58.
 	log.Printf("updater: self-update %s boot identity: %s", jobID, describeBootTransition(priorBootID, post.BootID))
-	if _, err := healthCheckAndCommit(wctx, nc, store, spec.NodeID, spec.BundleSHA256, jobID, nil); err != nil {
+	if _, err := healthCheckAndCommit(wctx, nc, store, inv, spec.NodeID, spec.BundleSHA256, jobID, nil); err != nil {
 		runner.FinishDeferred(ctx, jobID, false, err.Error())
 		return
 	}

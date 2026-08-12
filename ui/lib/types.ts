@@ -335,6 +335,11 @@ export type UpdateStatus =
   | 'up_to_date'
   | 'update_available'
   | 'no_release'
+  // The comparison says up to date, but a node's version is UNCONFIRMED —
+  // inventory is holding a value an update outcome told us not to trust
+  // (ADR-0005 Decision 4). Distinct from 'unknown', which means we could not
+  // compare at all. The row's note names the node(s).
+  | 'needs_attention'
   | 'unknown';
 
 export interface ComponentUpdate {

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -149,5 +150,41 @@ func TestClusterFirewallImage(t *testing.T) {
 	}
 	if !strings.HasSuffix(desc.URL, "/"+img) {
 		t.Fatalf("url = %q", desc.URL)
+	}
+}
+
+// clusterOSVersion decides what OS version a NEW node gets flashed with, and
+// prefers a CONFIRMED controlplane version over an unconfirmed one (ADR-0005
+// Decision 4): an unconfirmed value is one an update outcome told us not to
+// trust, and seeding the cluster's newest member from its least reliable fact
+// is the wrong default.
+func TestClusterOSVersion_PrefersAConfirmedControlPlane(t *testing.T) {
+	at := time.Now().UTC()
+	nodes := []*proto.Node{
+		{ID: "cp-a", Role: proto.RoleControlPlane, ImageVersion: "2026.07.0-dev.104"}, // unconfirmed
+		{ID: "cp-b", Role: proto.RoleControlPlane, ImageVersion: "2026.07.0-dev.101", ImageVersionConfirmedAt: &at},
+	}
+	if got := clusterOSVersion(nodes); got != "2026.07.0-dev.101" {
+		t.Errorf("clusterOSVersion = %q, want the CONFIRMED controlplane's version", got)
+	}
+}
+
+// ...but an unconfirmed version is still used when it is all there is.
+// Refusing would mean a cluster whose controlplane update failed to verify
+// cannot add nodes at all — turning a stale-version problem into an onboarding
+// outage, which is strictly worse than flashing a node one release off and
+// fixing it with an ordinary update.
+func TestClusterOSVersion_FallsBackToUnconfirmedRatherThanRefusing(t *testing.T) {
+	nodes := []*proto.Node{
+		{ID: "cp", Role: proto.RoleControlPlane, ImageVersion: "2026.07.0-dev.104"},
+	}
+	if got := clusterOSVersion(nodes); got != "2026.07.0-dev.104" {
+		t.Errorf("clusterOSVersion = %q, want the unconfirmed fallback", got)
+	}
+}
+
+func TestClusterOSVersion_NoVersionAtAll(t *testing.T) {
+	if got := clusterOSVersion([]*proto.Node{{ID: "cp", Role: proto.RoleControlPlane}}); got != "" {
+		t.Errorf("clusterOSVersion = %q, want \"\"", got)
 	}
 }

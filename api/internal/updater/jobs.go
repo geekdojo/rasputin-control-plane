@@ -59,7 +59,7 @@ func UpdateWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, cfg Confi
 			{Name: "install", Timeout: 10 * time.Minute, Do: updateInstall(store)},
 			{Name: "reboot", Timeout: 15 * time.Second, Do: updateReboot()},
 			{Name: "wait_online_and_verify_slot", Timeout: 5 * time.Minute, Do: updateWaitOnlineAndVerifySlot(store, inv)},
-			{Name: "health_check_and_commit", Timeout: 30 * time.Second, Retries: 1, Do: updateHealthCheckAndCommit(store)},
+			{Name: "health_check_and_commit", Timeout: 30 * time.Second, Retries: 1, Do: updateHealthCheckAndCommit(store, inv)},
 		},
 	}
 }
@@ -419,7 +419,7 @@ func updateWaitOnlineAndVerifySlot(store *Store, inv *inventory.Store) jobs.DoFn
 
 // ----- Step 7: health_check_and_commit ------------------------------------
 
-func updateHealthCheckAndCommit(store *Store) jobs.DoFn {
+func updateHealthCheckAndCommit(store *Store, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseSpec(sc.Spec)
 		if err != nil {
@@ -427,7 +427,7 @@ func updateHealthCheckAndCommit(store *Store) jobs.DoFn {
 		}
 		// diag.health (role-aware) → mark-good (commit) or mark-bad (rollback). Shared with
 		// the self-update reconciler (selfupdate.go).
-		return healthCheckAndCommit(sc.Ctx, sc.NATS, store, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
+		return healthCheckAndCommit(sc.Ctx, sc.NATS, store, inv, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
 	}
 }
 
