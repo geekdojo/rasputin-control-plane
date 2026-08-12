@@ -421,6 +421,28 @@ func TestNodeRegisteredEvtBootID(t *testing.T) {
 	}
 }
 
+// The degraded flags are omitted when false, so a fully-verified event is
+// byte-identical to what shipped before they existed (ADR-0005 Decision 3).
+func TestUpdateChangeEvtUnverifiedFlags(t *testing.T) {
+	clean, err := json.Marshal(UpdateChangeEvt{NodeID: "n", Change: UpdateCommitted})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(clean), "unverified") {
+		t.Errorf("a fully-verified event must carry no degraded flags: %s", clean)
+	}
+
+	degraded, _ := json.Marshal(UpdateChangeEvt{
+		NodeID: "n", Change: UpdateCommitted, UnverifiedBoot: true,
+	})
+	if !strings.Contains(string(degraded), `"unverifiedBoot":true`) {
+		t.Errorf("wire form missing the flag: %s", degraded)
+	}
+	if strings.Contains(string(degraded), "unverifiedVersion") {
+		t.Errorf("only the gap that exists should be on the wire: %s", degraded)
+	}
+}
+
 func TestSystemUpdateChangeEvtRoundTrip(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	in := SystemUpdateChangeEvt{

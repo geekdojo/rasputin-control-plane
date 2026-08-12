@@ -89,6 +89,13 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 			short(pre.BootID))
 	}
 
+	// Recorded before the branch so BOTH outcomes carry it: a rolled-back node
+	// whose verify was degraded is exactly as interesting as a committed one.
+	res.Version = classifyVersion(expected.ToVersion, pre.CurrentVersion)
+	if err := store.SetNodeUpdateVerifyGaps(ctx, jobID, res.UnverifiedBoot(), res.UnverifiedVersion()); err != nil {
+		lg.log("warn", fmt.Sprintf("record verify gaps for %s: %v", nodeID, err))
+	}
+
 	if pre.ActiveSlot != expected.ToSlot {
 		now := time.Now().UTC()
 		_ = store.UpdateNodeUpdate(ctx, jobID, NodeUpdateRolledBack,
@@ -102,15 +109,17 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 		// node rendered as up-to-date. ADR-0005 Decision 4.
 		reconcileInventoryVersion(ctx, inv, nodeID, pre.CurrentVersion, lg)
 		publishChange(nc, proto.UpdateChangeEvt{
-			NodeID:   nodeID,
-			JobID:    jobID,
-			BundleID: bundleSHA,
-			Change:   proto.UpdateRolledBack,
-			FromSlot: expected.ToSlot,
-			ToSlot:   pre.ActiveSlot,
-			Version:  pre.CurrentVersion,
-			Reason:   "bootloader watchdog or post-install init failure",
-			Ts:       now,
+			NodeID:            nodeID,
+			JobID:             jobID,
+			BundleID:          bundleSHA,
+			Change:            proto.UpdateRolledBack,
+			FromSlot:          expected.ToSlot,
+			ToSlot:            pre.ActiveSlot,
+			Version:           pre.CurrentVersion,
+			Reason:            "bootloader watchdog or post-install init failure",
+			UnverifiedBoot:    res.UnverifiedBoot(),
+			UnverifiedVersion: res.UnverifiedVersion(),
+			Ts:                now,
 		})
 		return res, fmt.Errorf("bootloader_rolled_back: came up on slot %s, expected %s",
 			pre.ActiveSlot, expected.ToSlot)
@@ -123,7 +132,6 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 	// not a success — most likely the slot was written by something other than
 	// this update. Inventory is CONFIRMED to what it actually reports, because
 	// that part we do know.
-	res.Version = classifyVersion(expected.ToVersion, pre.CurrentVersion)
 	if res.Version == versionMismatch {
 		reconcileInventoryVersion(ctx, inv, nodeID, pre.CurrentVersion, lg)
 		return res, fmt.Errorf("version_mismatch: booted slot %s reports %q, expected %q",
@@ -284,21 +292,36 @@ func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, inv 
 	now := time.Now().UTC()
 	toSlot := proto.SlotUnknown
 	toVersion := ""
+	unverifiedBoot, unverifiedVersion := false, false
 	if row != nil {
 		toSlot = row.ToSlot
 		toVersion = row.ToVersion
+		// Read back what verify recorded on this row rather than re-deriving
+		// it: step 7 runs as its own step and does not carry the verifyResult,
+		// and the row is where the gaps were durably written.
+		unverifiedBoot, unverifiedVersion = row.UnverifiedBoot, row.UnverifiedVersion
 	}
 	_ = store.UpdateNodeUpdate(ctx, jobID, NodeUpdateCommitted, toSlot, toVersion, "", now)
 	publishChange(nc, proto.UpdateChangeEvt{
-		NodeID:   nodeID,
-		JobID:    jobID,
-		BundleID: bundleSHA,
-		Change:   proto.UpdateCommitted,
-		ToSlot:   toSlot,
-		Version:  toVersion,
-		Ts:       now,
+		NodeID:            nodeID,
+		JobID:             jobID,
+		BundleID:          bundleSHA,
+		Change:            proto.UpdateCommitted,
+		ToSlot:            toSlot,
+		Version:           toVersion,
+		UnverifiedBoot:    unverifiedBoot,
+		UnverifiedVersion: unverifiedVersion,
+		Ts:                now,
 	})
-	lg.log("info", "update committed")
+	if unverifiedBoot || unverifiedVersion {
+		// Once per node per run, on the terminal event — ADR-0005 Decision 3's
+		// "the api logs it once per node per run". The warn during verify says
+		// it is happening; this says it is what the operator ended up with.
+		lg.log("warn", fmt.Sprintf("update committed DEGRADED on %s (unverifiedBoot=%v unverifiedVersion=%v): green, but on fewer conjuncts than a fully-verified node",
+			nodeID, unverifiedBoot, unverifiedVersion))
+	} else {
+		lg.log("info", "update committed")
+	}
 	return json.Marshal(ack)
 }
 

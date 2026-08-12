@@ -356,9 +356,12 @@ export function EnabledToggle({
 }
 
 // Status pill — colored text + border, neutral translucent fill (works for any color).
-export function Badge({ color = DIM, children }: { color?: string; children: ReactNode }) {
+// `title` is optional and renders as the native tooltip — for a badge whose
+// label is necessarily terse (DEGRADED) but whose cause the operator needs.
+export function Badge({ color = DIM, children, title }: { color?: string; children: ReactNode; title?: string }) {
   return (
     <span
+      title={title}
       style={{
         display: 'inline-block',
         padding: '2px 7px',

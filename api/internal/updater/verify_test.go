@@ -245,3 +245,142 @@ func TestVerify_NoBootIDAndNoVersionPassesDegraded(t *testing.T) {
 		t.Errorf("verdict = %+v, want both conjuncts unknown", res)
 	}
 }
+
+// ----- surfacing the degradation (ADR-0005 Decision 3) --------------------
+//
+// A degraded verify still passes and still fans out. What it must never do is
+// look identical to a fully-verified one.
+
+func TestVerifyResult_UnverifiedSplitsDegraded(t *testing.T) {
+	cases := []struct {
+		name              string
+		res               verifyResult
+		wantBoot, wantVer bool
+	}{
+		{"fully verified", verifyResult{Boot: bootDiffers, Version: versionMatches}, false, false},
+		{"pre-bootId agent", verifyResult{Boot: bootUnknown, Version: versionMatches}, true, false},
+		{"node named no version", verifyResult{Boot: bootDiffers, Version: versionUnknown}, false, true},
+		{"neither knowable", verifyResult{Boot: bootUnknown, Version: versionUnknown}, true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.res.UnverifiedBoot(); got != c.wantBoot {
+				t.Errorf("UnverifiedBoot = %v, want %v", got, c.wantBoot)
+			}
+			if got := c.res.UnverifiedVersion(); got != c.wantVer {
+				t.Errorf("UnverifiedVersion = %v, want %v", got, c.wantVer)
+			}
+			if got := c.res.Degraded(); got != (c.wantBoot || c.wantVer) {
+				t.Errorf("Degraded = %v, want %v", got, c.wantBoot || c.wantVer)
+			}
+		})
+	}
+}
+
+// The mixed-version case that Decision 3 is about: the whole fleet's first
+// rollout after boot identity ships. Verify passes, and the per-node row says
+// which conjuncts it could not evaluate.
+func TestVerify_DegradedPassRecordsTheGapsOnTheRow(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID = "pre-bootid"
+	if err := store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB, ToVersion: "2026.08.2",
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateNodeUpdate: %v", err)
+	}
+	// An agent that predates both fields: no boot id, no version.
+	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA,
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = sub.Unsubscribe() }()
+
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	res, err := verifyBootedSlot(tctx, nc, store, nil, verifyRequest{
+		NodeID: nodeID, BundleSHA256: "sha", JobID: "j",
+	}, nil)
+	if err != nil {
+		t.Fatalf("a degraded verify must still PASS — refusing would strand every existing cluster: %v", err)
+	}
+	if !res.Degraded() {
+		t.Fatal("verify on an agent with neither field must report degraded")
+	}
+	row, _ := store.GetNodeUpdate(ctx, "j")
+	if row == nil || !row.UnverifiedBoot || !row.UnverifiedVersion {
+		t.Errorf("row = %+v, want both gaps recorded", row)
+	}
+}
+
+// A fully-verified update must leave the row clean, or the flag is noise.
+func TestVerify_FullPassRecordsNoGaps(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID = "modern"
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB, ToVersion: "2026.08.2",
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA,
+			CurrentVersion: "2026.08.2", BootID: "new",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = sub.Unsubscribe() }()
+
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if _, err := verifyBootedSlot(tctx, nc, store, nil, verifyRequest{
+		NodeID: nodeID, BundleSHA256: "sha", JobID: "j", PriorBootID: "old",
+	}, nil); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	row, _ := store.GetNodeUpdate(ctx, "j")
+	if row == nil || row.UnverifiedBoot || row.UnverifiedVersion {
+		t.Errorf("row = %+v, want no gaps on a fully-verified update", row)
+	}
+}
+
+// A ROLLED-BACK node's degradation matters too — it is how an operator tells
+// "rolled back, and we could see everything" from "rolled back, and we were
+// half blind". The gaps are recorded before the branch for exactly this.
+func TestVerify_RollbackAlsoRecordsTheGaps(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	const nodeID = "rolled"
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB, ToVersion: "2026.08.2",
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB, // rolled back
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = sub.Unsubscribe() }()
+
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if _, err := verifyBootedSlot(tctx, nc, store, nil, verifyRequest{
+		NodeID: nodeID, BundleSHA256: "sha", JobID: "j",
+	}, nil); err == nil {
+		t.Fatal("a rollback must fail verify")
+	}
+	row, _ := store.GetNodeUpdate(ctx, "j")
+	if row == nil || !row.UnverifiedBoot {
+		t.Errorf("row = %+v, want the boot gap recorded on a rollback too", row)
+	}
+}
