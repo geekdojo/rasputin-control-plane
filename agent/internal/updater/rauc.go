@@ -186,8 +186,22 @@ func parseRAUCStatus(s string) raucStatus {
 		out.activeSlot, out.inactiveSlot = proto.SlotB, proto.SlotA
 	}
 
-	// Active slot's installed version, when RAUC records it (absent on a
-	// freshly-flashed slot — fine, the install step only needs the slot).
+	// Active slot's installed version, when RAUC records it.
+	//
+	// ⚠️ On the Rasputin image it NEVER does. /etc/rauc/system.conf sets neither
+	// data-directory nor statusfile, so RAUC falls back to per-slot status and
+	// prints "System status information not supported!" — the real
+	// `rauc status --output-format=shell` output contains no version key at all
+	// (bench-confirmed on e3bench 2026-08-12). These lookups therefore always
+	// miss, and activeVersion is always "".
+	//
+	// That is left as-is rather than papered over here: the parser's job is to
+	// report what RAUC said, and inventing a version at this layer would be the
+	// same mistake as the fictional shell mock that hid the 2026-06-22
+	// RAUC_BOOT_SLOT bug. The precheck HANDLER supplies the real answer from
+	// /etc/rasputin/image-version, which is the booted rootfs and therefore the
+	// booted slot. Kept because a RAUC configured WITH a data directory does
+	// emit these, and then a slot-aware version is better evidence than a file.
 	switch out.activeSlot {
 	case proto.SlotA:
 		out.activeVersion = kv["RAUC_SLOT_STATUS_0_BUNDLE_VERSION"]

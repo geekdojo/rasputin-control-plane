@@ -307,6 +307,13 @@ func TestReboot_ClampsDelay(t *testing.T) {
 
 // ----- rauc.go pure parsers (no rauc CLI required) ---------------------------
 
+// NOTE on the version assertions below: these exercise the parser's ability to
+// read RAUC_SLOT_STATUS_N_BUNDLE_VERSION *when RAUC emits it*, which requires a
+// data-directory or statusfile in system.conf. The Rasputin image sets neither,
+// so on real hardware those keys are absent and activeVersion is always "" —
+// see TestParseRAUCStatus_RealImageOutputHasNoVersion, which is the shape that
+// actually ships. Keep both: the first guards the parser, the second guards
+// against mistaking the parser's capability for the image's behaviour.
 func TestParseRAUCStatus_SlotA(t *testing.T) {
 	in := `RAUC_BOOT_SLOT='rootfs.0'
 RAUC_SLOT_STATUS_0_BUNDLE_VERSION='1.2.3'
@@ -332,6 +339,41 @@ RAUC_SLOT_STATUS_1_BUNDLE_VERSION='1.2.3'
 	}
 	if got.activeVersion != "1.2.3" {
 		t.Errorf("active version: %q", got.activeVersion)
+	}
+}
+
+// Verbatim `rauc status --output-format=shell` from a real Buildroot node
+// (e3bench controlplane, image 2026.08.2-dev.154, captured 2026-08-12). Slots
+// parse; the version does NOT exist. This is the fixture that matters — the
+// hand-written ones above describe a RAUC configuration we do not ship, and
+// believing them is what let geekdojo-brain #82 through.
+func TestParseRAUCStatus_RealImageOutputHasNoVersion(t *testing.T) {
+	in := `RAUC_SYSTEM_COMPATIBLE='rasputin-n100'
+RAUC_SYSTEM_VARIANT='(null)'
+RAUC_SYSTEM_BOOTED_BOOTNAME='A'
+RAUC_BOOT_PRIMARY='rootfs.0'
+RAUC_SYSTEM_SLOTS='rootfs.1 rootfs.0'
+RAUC_SLOTS='1 2'
+RAUC_SLOT_STATE_1='inactive'
+RAUC_SLOT_CLASS_1='rootfs'
+RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'
+RAUC_SLOT_TYPE_1='raw'
+RAUC_SLOT_BOOTNAME_1='B'
+RAUC_SLOT_BOOT_STATUS_1='good'
+RAUC_SLOT_STATE_2='booted'
+RAUC_SLOT_CLASS_2='rootfs'
+RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
+RAUC_SLOT_TYPE_2='raw'
+RAUC_SLOT_BOOTNAME_2='A'
+RAUC_SLOT_BOOT_STATUS_2='good'
+RAUC_REPOS=''
+`
+	got := parseRAUCStatus(in)
+	if got.activeSlot != proto.SlotA || got.inactiveSlot != proto.SlotB {
+		t.Errorf("slots must still parse from real output: %+v", got)
+	}
+	if got.activeVersion != "" {
+		t.Errorf("activeVersion = %q; real output carries no version and the parser must not invent one", got.activeVersion)
 	}
 }
 
