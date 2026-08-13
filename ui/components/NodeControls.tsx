@@ -31,6 +31,7 @@ import {
 import type { App, BMCPowerState, DeploymentMode, Node } from '../lib/types';
 import { appAccess, preferredAppUrl } from '../lib/appurl';
 import { BMC_CAP_CONSOLE, BMC_CAP_POWER, BMC_CAP_RESET, type BmcCaps } from '../lib/bmc';
+import { configFaults } from '../lib/configFaults';
 import { ConfirmModal } from './ConfirmModal';
 import { ACCENT, accentA, MONO, STATUS_COLOR } from './ui-theme';
 
@@ -416,6 +417,62 @@ export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, 
                 </div>
               ))}
             </div>
+
+            {/* CONFIG FAULT — values this node's node.env asked for and the
+                agent REFUSED. It is running, reachable and reporting; the named
+                capability is simply off. Rendering it is what keeps "degrade
+                instead of exit" from being a quieter lie than the crash it
+                replaced (#89): before this, the fault reached nodes.metadata
+                and stopped there. Absent entirely on a healthy node. */}
+            {configFaults(node).length > 0 && (
+              <>
+                {sectionLabel('CONFIG FAULT')}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+                  {configFaults(node).map((f) => (
+                    <div
+                      key={f.variable}
+                      style={{
+                        border: `1px solid ${STATUS_COLOR.warning}`,
+                        padding: 8,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 4,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <AlertTriangle size={12} color={STATUS_COLOR.warning} />
+                        <span
+                          style={{
+                            color: STATUS_COLOR.warning,
+                            fontSize: 10,
+                            fontFamily: MONO,
+                            letterSpacing: '0.06em',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}
+                        >
+                          {f.variable}
+                        </span>
+                      </div>
+                      {/* The effect first: an operator acts on "updates are
+                          disabled", not on "unknown backend". */}
+                      {f.effect && (
+                        <span style={{ color: 'var(--rasp-fg)', fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
+                          {f.effect}
+                        </span>
+                      )}
+                      <span style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
+                        set to <span style={{ color: STATUS_COLOR.warning }}>{f.value || '(empty)'}</span>
+                        {f.expected.length > 0 && <> · expected {f.expected.join(' | ')}</>}
+                      </span>
+                      <span style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>
+                        Fix /var/lib/rasputin/node.env on this node and restart the agent.
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
 
             {sectionLabel('UTILIZATION')}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
