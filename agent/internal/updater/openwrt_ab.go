@@ -318,14 +318,9 @@ func (o *OpenWrtABBackend) Install(ctx context.Context, bundleID, localPath stri
 		progressFn("post-install", 100)
 	}
 
-	return o.installedVersion(localPath, bundleID), nil
+	return o.installedVersion(localPath), nil
 }
 
-// installedVersion reports the version to record for the just-installed slot.
-// The raw squashfs carries no manifest, so we read an optional `<artifact>.version`
-// sidecar the release pipeline ships next to the rootfs; failing that we fall
-// back to the bundleID (the api already knows the version it pushed — this is
-// display-only).
 // installedVersion reports the version the bundle just written to the target
 // slot will run as, or "" when it cannot be determined.
 //
@@ -344,15 +339,25 @@ func (o *OpenWrtABBackend) Install(ctx context.Context, bundleID, localPath stri
 // answer's type. Nothing is lost from the record either: node_updates already
 // carries bundle_sha256 in its own column.
 //
-// The real fix upstream is for the firewall image to ship the `.version`
-// sidecar this reads, so (c) can actually be evaluated on this backend rather
-// than permanently degraded.
+// ⚠️ AND DEGRADING IS NOT THE END STATE, though an earlier version of this
+// comment said it was. It claimed "the real fix upstream is for the firewall
+// image to ship the `.version` sidecar this reads" — that was a misdiagnosis.
+// No sidecar is needed. The api writes the authoritative `bundle.Version` from
+// the release manifest at step 1 and used to overwrite it with this echo at
+// step 4; it now keeps its own value when this returns "" (see
+// api/internal/updater.Store.SetNodeUpdateSlots). So conjunct (c) is fully
+// EVALUATED on this backend, not permanently degraded, and "" here is simply
+// "I have nothing to add" rather than "nobody knows".
+//
+// The sidecar would still be a genuine improvement — a slot-aware version read
+// from the artifact is stronger evidence than a manifest the api is holding —
+// but it buys corroboration, not correctness, and it is not blocking anything.
 //
 // This is the same trap as the RAUC CurrentVersion bug (#82) and the third
 // time on this path that a wrong-but-unused value became load-bearing the
 // moment verify started reading it. When a value feeds a comparison, "" and
 // "plausible garbage" are not equivalent defaults.
-func (o *OpenWrtABBackend) installedVersion(localPath, bundleID string) string {
+func (o *OpenWrtABBackend) installedVersion(localPath string) string {
 	if b, err := os.ReadFile(localPath + ".version"); err == nil {
 		if v := strings.TrimSpace(string(b)); v != "" {
 			return v

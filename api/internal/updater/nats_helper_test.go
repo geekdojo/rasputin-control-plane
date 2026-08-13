@@ -1277,3 +1277,59 @@ func TestSystemCascade_BadSpec(t *testing.T) {
 		t.Error("bad spec: want error")
 	}
 }
+
+// ⚠️ #86 END TO END, at the seam where it actually bit.
+//
+// The firewall is the whole reason this matters: openwrt-ab installs a raw
+// squashfs with no manifest in it, so its install ack carries NewVersion="".
+// This drives the real step-4 handler with that ack and asserts the row still
+// holds the version the api recorded from the release manifest at step 1 —
+// which is the value verify will later read as conjunct (c)'s EXPECTED side.
+//
+// Before the fix this test would find "", and every firewall update was
+// permanently unverifiedVersion as a result.
+func TestUpdateInstall_EmptyAckVersionKeepsTheManifestVersion(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	seedNodeAndBundle(t, store, inv, "firewall1", "sha-fw", "2026.08.2-dev.84")
+	// Step 1 already wrote what the release manifest says we are installing.
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: "firewall1", BundleSHA256: "sha-fw",
+		FromSlot: proto.SlotUnknown, ToSlot: proto.SlotUnknown,
+		ToVersion: "2026.08.2-dev.84",
+		Status:    NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject("firewall1"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+			CurrentVersion: "2026.08.2-dev.83", Backend: "openwrt-ab",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+	// The openwrt-ab ack: installed fine, nothing to say about the version.
+	inSub, _ := nc.Subscribe(proto.UpdateInstallSubject("firewall1"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdateInstallAck{
+			OK: true, TargetSlot: proto.SlotB, NewVersion: "",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = inSub.Unsubscribe() }()
+
+	sc := newUpdaterCtx("j", specJSON("firewall1", "sha-fw"), nc)
+	if _, err := updateInstall(store)(sc); err != nil {
+		t.Fatalf("updateInstall: %v", err)
+	}
+
+	got, _ := store.GetNodeUpdate(ctx, "j")
+	if got.ToVersion != "2026.08.2-dev.84" {
+		t.Errorf("to_version = %q, want %q — conjunct (c) reads this as the expected side, so an erased "+
+			"manifest version degrades every openwrt-ab update forever (#86)", got.ToVersion, "2026.08.2-dev.84")
+	}
+	if got.ToSlot != proto.SlotB {
+		t.Errorf("to_slot = %q, want b — the slots must still be recorded normally", got.ToSlot)
+	}
+}
