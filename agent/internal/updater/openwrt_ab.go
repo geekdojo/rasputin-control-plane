@@ -116,13 +116,36 @@ func slotLetter(s proto.UpdateSlot) string {
 }
 
 // bootedSlotFromCmdline parses the booted rootfs slot from a kernel cmdline.
-// Matches the firewall grub.cfg's `root=PARTLABEL=rootfs-0|rootfs-1`, and
-// accepts an explicit `rasputin.slot=A|B` marker as a fallback.
+//
+// Three markers, one per image family, because the cmdline is written by
+// whatever boots that image:
+//
+//   - `root=PARTLABEL=rootfs-0|rootfs-1` — the firewall's and the n100's
+//     grub.cfg, which roots each slot by partition label;
+//   - `rauc.slot=A|B` — the Pi's per-slot cmdline.txt. The Pi roots by
+//     PARTUUID, which carries no slot name, so the slot is stated explicitly;
+//   - `rasputin.slot=A|B` — accepted as a generic override.
+//
+// ⚠️ `rauc.slot` was MISSING here until 2026-08-13 and the omission was
+// invisible, because the only caller was the openwrt-ab backend and that
+// backend only ever runs on the x86 firewall — it never sees a Pi cmdline. The
+// gap surfaced the moment the RAUC backend started using this for #88: on the
+// Pi it returned SlotUnknown, which would have silently left arm64 — the one
+// architecture where the bug does durable harm — running on the old, wrong
+// answer. Caught by a unit test whose fixture is a real bench cmdline rather
+// than an invented one.
+//
+// Whatever it returns is a FACT about the running kernel, never an intent:
+// /proc/cmdline is not stored anywhere, it is what the kernel was handed.
 func bootedSlotFromCmdline(cmdline string) proto.UpdateSlot {
 	switch {
-	case strings.Contains(cmdline, "PARTLABEL=rootfs-0"), strings.Contains(cmdline, "rasputin.slot=A"):
+	case strings.Contains(cmdline, "PARTLABEL=rootfs-0"),
+		strings.Contains(cmdline, "rauc.slot=A"),
+		strings.Contains(cmdline, "rasputin.slot=A"):
 		return proto.SlotA
-	case strings.Contains(cmdline, "PARTLABEL=rootfs-1"), strings.Contains(cmdline, "rasputin.slot=B"):
+	case strings.Contains(cmdline, "PARTLABEL=rootfs-1"),
+		strings.Contains(cmdline, "rauc.slot=B"),
+		strings.Contains(cmdline, "rasputin.slot=B"):
 		return proto.SlotB
 	}
 	return proto.SlotUnknown
