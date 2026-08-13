@@ -62,21 +62,59 @@ func TestFaultFromEnv_UnknownValueIsAnError(t *testing.T) {
 // a node stuck mute forever would need a hand-fix to rejoin, which defeats the
 // point of reproducing c08 on a bench you want back.
 func TestMuteMarker_OneShot(t *testing.T) {
-	dir := t.TempDir()
-	if TakeMuteAfterReboot(dir) {
+	cfg := NewFaultConfig(FaultDieAfterReboot, t.TempDir())
+	if cfg.TakeMuteAfterReboot() {
 		t.Fatal("no marker armed, must not fire")
 	}
-	if err := ArmMuteAfterReboot(dir); err != nil {
+	if err := cfg.ArmMuteAfterReboot(); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, muteMarkerName)); err != nil {
-		t.Fatalf("marker not on disk: %v", err)
-	}
-	if !TakeMuteAfterReboot(dir) {
+	if !cfg.TakeMuteAfterReboot() {
 		t.Error("armed marker must fire on the next boot")
 	}
-	if TakeMuteAfterReboot(dir) {
+	if cfg.TakeMuteAfterReboot() {
 		t.Error("marker must be consumed — a node that stays mute forever needs a hand-fix to rejoin")
+	}
+}
+
+// The regression. The marker is armed by one process and consumed by ANOTHER,
+// on the far side of a reboot, so the two halves only meet through the path
+// they each compute. They computed different ones: armed into <stateDir>/updater,
+// looked for in <stateDir>. die-after-reboot silently never fired and the update
+// it was meant to break returned a clean `committed` in 63 seconds (bench
+// 2026-08-13) — a fault that proves nothing while reporting success.
+//
+// This test spans the restart the way the real thing does: arm through one
+// FaultConfig value, consume through a SEPARATE one built the same way, with
+// nothing shared but the directory the caller supplies.
+func TestMuteMarker_SurvivesAProcessRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	// process 1: the reboot handler arms, then the process goes away
+	if err := NewFaultConfig(FaultDieAfterReboot, dir).ArmMuteAfterReboot(); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+
+	// process 2: startup on the far side of the reboot
+	if !NewFaultConfig(FaultDieAfterReboot, dir).TakeMuteAfterReboot() {
+		t.Fatal("a marker armed before the reboot was not found after it — the fault would silently not fire and the round would report a clean update")
+	}
+}
+
+// A fault bound to one directory must not find a marker armed under another.
+// Stated explicitly because the bug was exactly this, and "obviously they use
+// the same dir" is what made it invisible for a whole bench round.
+func TestMuteMarker_DoesNotLeakAcrossDirectories(t *testing.T) {
+	armed := NewFaultConfig(FaultDieAfterReboot, t.TempDir())
+	other := NewFaultConfig(FaultDieAfterReboot, t.TempDir())
+	if err := armed.ArmMuteAfterReboot(); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	if other.TakeMuteAfterReboot() {
+		t.Error("a different directory must not see this marker")
+	}
+	if !armed.TakeMuteAfterReboot() {
+		t.Error("the arming config must still see its own marker")
 	}
 }
 
@@ -89,7 +127,7 @@ func TestFaultNoReboot_AcksAndAnnouncesButDoesNotReboot(t *testing.T) {
 	const nodeID = "n"
 	be := &countingRebootBackend{}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultNoReboot, t.TempDir())
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, NewFaultConfig(FaultNoReboot, t.TempDir()))
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -137,7 +175,7 @@ func TestNoFault_RebootsNormally(t *testing.T) {
 	const nodeID = "n"
 	be := &countingRebootBackend{}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultNone, t.TempDir())
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, NewFaultConfig(FaultNone, t.TempDir()))
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -169,7 +207,7 @@ func TestFaultDieAfterReboot_ArmsMarkerBeforeRebooting(t *testing.T) {
 		}
 	}}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultDieAfterReboot, dir)
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, NewFaultConfig(FaultDieAfterReboot, dir))
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -186,7 +224,7 @@ func TestFaultDieAfterReboot_ArmsMarkerBeforeRebooting(t *testing.T) {
 	if be.reboots != 1 {
 		t.Errorf("backend.Reboot called %d times, want 1 — this fault reboots for real", be.reboots)
 	}
-	if !TakeMuteAfterReboot(dir) {
+	if !NewFaultConfig(FaultDieAfterReboot, dir).TakeMuteAfterReboot() {
 		t.Error("marker must be armed for the next boot")
 	}
 }

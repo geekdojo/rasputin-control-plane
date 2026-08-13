@@ -114,19 +114,51 @@ func (f Fault) Announce() {
 		"misbehave during its next update. Unset it in node.env and restart to disarm.", FaultEnv, f)
 }
 
+// FaultConfig binds a fault to the ONE directory its marker lives in.
+//
+// ⚠️ This type exists because the two halves disagreed once. The reboot handler
+// armed the marker into <stateDir>/updater while startup looked for it in
+// <stateDir>, so die-after-reboot never fired — and the update it was supposed
+// to break came back a clean `committed` in 63 seconds. Bench 2026-08-13.
+//
+// That is exactly the failure this file's fatal unknown-value check was written
+// to prevent — "a mistyped fault that injects nothing would leave a test
+// reporting success having proven nothing" — arriving through a door that check
+// did not cover. Guarding the VALUE was not enough; the PATH could diverge too,
+// and a silent no-op fault is worse than no fault injector at all because it
+// manufactures false evidence.
+//
+// The fix is structural rather than a corrected argument: the directory is
+// captured once, by the caller that knows it, and both halves are methods on
+// the result. There is no longer a second place to pass a different one.
+type FaultConfig struct {
+	Fault Fault
+	dir   string
+}
+
+// NewFaultConfig binds fault to dir. dir must be the same directory for the
+// process's whole lifetime — it is where the one-shot marker is written before
+// a reboot and looked for after it.
+func NewFaultConfig(fault Fault, dir string) FaultConfig {
+	return FaultConfig{Fault: fault, dir: dir}
+}
+
+// Announce logs an armed fault. See Fault.Announce.
+func (c FaultConfig) Announce() { c.Fault.Announce() }
+
 // ArmMuteAfterReboot writes the one-shot marker consumed by TakeMuteAfterReboot.
-// Best-effort: a marker we could not write means the fault does not fire, which
-// is loud in the test rather than silently wrong.
-func ArmMuteAfterReboot(stateDir string) error {
-	return os.WriteFile(filepath.Join(stateDir, muteMarkerName), []byte("armed\n"), 0o644)
+// A marker we could not write means the fault does not fire, so the caller logs
+// it loudly rather than letting the round look like a clean update.
+func (c FaultConfig) ArmMuteAfterReboot() error {
+	return os.WriteFile(c.markerPath(), []byte("armed\n"), 0o644)
 }
 
 // TakeMuteAfterReboot reports whether the marker was present and removes it, so
 // the fault fires for exactly one boot. Consuming it here rather than leaving it
 // in place matters: a node that stayed mute forever would need a hand-fix to
 // rejoin, and the point is to reproduce c08, not to brick a bench node.
-func TakeMuteAfterReboot(stateDir string) bool {
-	path := filepath.Join(stateDir, muteMarkerName)
+func (c FaultConfig) TakeMuteAfterReboot() bool {
+	path := c.markerPath()
 	if _, err := os.Stat(path); err != nil {
 		return false
 	}
@@ -137,3 +169,5 @@ func TakeMuteAfterReboot(stateDir string) bool {
 	}
 	return true
 }
+
+func (c FaultConfig) markerPath() string { return filepath.Join(c.dir, muteMarkerName) }

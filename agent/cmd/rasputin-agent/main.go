@@ -83,7 +83,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-agent: %v", err)
 	}
-	updateFault.Announce()
+	// Bind the fault to its marker directory ONCE, here. Passing the directory
+	// separately to the arm site and the consume site is how die-after-reboot
+	// silently never fired on the bench 2026-08-13 — see updater.FaultConfig.
+	faultCfg := updater.NewFaultConfig(updateFault, updaterStateDir(stateDir))
+	faultCfg.Announce()
 
 	// FaultDieAfterReboot, far side: the marker was armed by the reboot handler
 	// in the previous boot, so this process comes up MUTE — no registration, no
@@ -91,7 +95,7 @@ func main() {
 	// plane simply never hears from it again, which is bench node c08 and the
 	// case #57 / #72 exist for. One-shot: the marker is consumed here so the
 	// next boot rejoins on its own.
-	muteAfterReboot := updater.TakeMuteAfterReboot(stateDir)
+	muteAfterReboot := faultCfg.TakeMuteAfterReboot()
 	if muteAfterReboot {
 		log.Printf("rasputin-agent: ⚠️  FAULT %s FIRING: coming up MUTE — no registration, no update handlers. "+
 			"Restart the agent to rejoin.", updater.FaultDieAfterReboot)
@@ -326,7 +330,7 @@ func main() {
 	// the CLI is on PATH; everything else falls back to mock. Force via
 	// RASPUTIN_UPDATE_BACKEND=rauc|openwrt-ab|mock.
 	{
-		updaterDir := filepath.Join(stateDir, "updater")
+		updaterDir := updaterStateDir(stateDir)
 		backendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(role))
 
 		var upBackend updater.Backend
@@ -372,7 +376,7 @@ func main() {
 				updater.FaultDieAfterReboot)
 			return
 		}
-		upSubs, err := updater.RegisterHandlersWithFault(nc, nodeID, upBackend, updateFault, updaterDir)
+		upSubs, err := updater.RegisterHandlersWithFault(nc, nodeID, upBackend, faultCfg)
 		if err != nil {
 			log.Fatalf("rasputin-agent: register update handlers: %v", err)
 		}
@@ -707,6 +711,11 @@ func splitCSV(s string) []string {
 // so no per-node suffix). The dev default is ./agent-state/<nodeID>
 // relative to cwd; the nodeID suffix keeps multiple dev agents started
 // from the same repo checkout apart.
+// updaterStateDir is the one place the updater's state directory is derived.
+// The fault marker lives here and must be looked for here — deriving it twice
+// is what let the arm and consume sites disagree (bench 2026-08-13).
+func updaterStateDir(stateDir string) string { return filepath.Join(stateDir, "updater") }
+
 func agentStateDir(nodeID string) string {
 	if v := os.Getenv("RASPUTIN_AGENT_STATE_DIR"); v != "" {
 		return v
