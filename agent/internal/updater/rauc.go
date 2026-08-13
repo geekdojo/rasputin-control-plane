@@ -42,6 +42,10 @@ type RAUCBackend struct {
 	// client rejects that cert ("bad certificate") and the saga stalls before
 	// install. Wired from main.go via SetCABundle(tailscale.CABundlePath()).
 	caBundlePath string
+	// procCmdline is read to determine the slot we are ACTUALLY running from.
+	// Mirrors OpenWrtABBackend's field of the same name; overridable in tests.
+	// See Precheck for why this outranks anything `rauc status` reports.
+	procCmdline string
 }
 
 // NewRAUCBackend constructs a RAUCBackend. Returns an error if the rauc
@@ -64,7 +68,7 @@ func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
 	if err := os.MkdirAll(filepath.Join(stateDir, "bundles"), 0o755); err != nil {
 		return nil, err
 	}
-	return &RAUCBackend{stateDir: stateDir, binary: binary}, nil
+	return &RAUCBackend{stateDir: stateDir, binary: binary, procCmdline: "/proc/cmdline"}, nil
 }
 
 func (r *RAUCBackend) SetMuteHook(b *atomic.Bool) { r.muted = b }
@@ -102,10 +106,50 @@ func (r *RAUCBackend) Precheck(ctx context.Context) (*proto.UpdatePrecheckAck, e
 		return &proto.UpdatePrecheckAck{OK: false, Detail: err.Error()}, nil
 	}
 	parsed := parseRAUCStatus(string(out))
+
+	// ⚠️ THE KERNEL OUTRANKS RAUC ON THIS ONE QUESTION. #88.
+	//
+	// Everywhere else this backend's job is to report what RAUC says, and a
+	// comment further down warns against inventing answers at this layer —
+	// that instinct is right and was earned. "Which slot am I on" is the single
+	// exception, because RAUC's answer is about the bootloader's INTENT
+	// (RAUC_BOOT_PRIMARY, read from grubenv on the n100 and autoboot.txt on the
+	// Pi — both files written by the UPDATE, not by the boot). Intent and fact
+	// agree except in one window: after an install and before its reboot, and
+	// then PERMANENTLY on a node whose reboot never happened. That window is
+	// exactly where verify operates.
+	//
+	// /proc/cmdline cannot go stale, because it is not stored anywhere: it is
+	// the command line the running kernel was actually handed. Each slot's
+	// cmdline statically roots that slot (grub.cfg's root=PARTLABEL on the
+	// n100, cmdline.txt's rauc.slot on the Pi), so it states the running slot
+	// by construction. bootedSlotFromCmdline already parses both forms and has
+	// been the openwrt-ab backend's source since it was written — this makes
+	// ActiveSlot mean the same thing on every backend, which is what every
+	// caller already assumed.
+	//
+	// Bench-measured 2026-08-13: a diverged node reported ActiveSlot=A from
+	// BOOT_PRIMARY while running B; its next update was recorded a false
+	// `rolled_back`, and on the Pi that false verdict CAUSED a real rollback
+	// (the trial was never committed, the next reboot reverted, and
+	// rauc-reconcile then marked the healthy slot bad).
+	active, inactive := parsed.activeSlot, parsed.inactiveSlot
+	if cmdline, err := os.ReadFile(r.procCmdline); err == nil {
+		if booted := bootedSlotFromCmdline(string(cmdline)); booted != proto.SlotUnknown {
+			active, inactive = booted, otherSlot(booted)
+		}
+	}
+	// If the cmdline carried no slot marker we keep RAUC's answer rather than
+	// degrading to SlotUnknown. Unknown is NOT the safe default here: verify's
+	// conjunct (b) compares ActiveSlot against the target, so an unknown slot
+	// reads as a mismatch and produces the very false rollback this fixes.
+	// Intent is wrong only inside the install→reboot window; unknown is wrong
+	// always.
+
 	ack := &proto.UpdatePrecheckAck{
 		OK:             true,
-		ActiveSlot:     parsed.activeSlot,
-		InactiveSlot:   parsed.inactiveSlot,
+		ActiveSlot:     active,
+		InactiveSlot:   inactive,
 		CurrentVersion: parsed.activeVersion,
 		AvailableBytes: 0, // TODO: statfs the inactive slot's partition
 		Backend:        "rauc",
