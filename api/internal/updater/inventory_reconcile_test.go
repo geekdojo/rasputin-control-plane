@@ -315,3 +315,113 @@ func seedUnconfirmedAt(t *testing.T, nodeID, version string) *inventory.Store {
 	}
 	return inv
 }
+
+// strandedStep drives step 6 against a node that is simply NOT THERE — no
+// precheck responder at all, which is what a node that rebooted and never came
+// back looks like from the api. Step 5 therefore times out and the step fails
+// before verifyBootedSlot is ever reached, which is the whole point.
+func strandedStep(t *testing.T, inv *inventory.Store, nodeID string) error {
+	t.Helper()
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+
+	if err := store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateNodeUpdate: %v", err)
+	}
+
+	tctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancel)
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
+	sc.Ctx = tctx
+	_, err := updateWaitOnlineAndVerifySlot(store, inv)(sc)
+	return err
+}
+
+// ⚠️ THE #90 REGRESSION, and the most consequential one found in this campaign.
+//
+// verifyBootedSlot opens with an unconfirmInventoryVersion call under a comment
+// reading "THE c08 CASE, exactly" — and it was UNREACHABLE in the actual c08
+// case, because step 5's timeout returns before verify ever runs. #58 added
+// that gate and #83 hardened it; each time it got better at refusing bad
+// evidence it moved the stranded-node case further from the handler written
+// for it. Both halves were bench-validated separately and neither run crossed
+// the boundary, because producing c08 was the scenario never run.
+//
+// Measured on e3bench 2026-08-13: the node was told to reboot, never came back,
+// the job FAILED — and image_version_confirmed_at was left standing from an
+// earlier round, so releases.Check counted it toward a green `up_to_date`.
+// That is verbatim the lie #72 exists to kill.
+func TestVerify_StrandedNodeUnconfirmsInventory(t *testing.T) {
+	const nodeID = "c08"
+	inv := seedInventoryAt(t, nodeID, "2026.08.3-dev.158")
+	if err := inv.ConfirmImageVersion(context.Background(), nodeID, "2026.08.3-dev.158", time.Now().UTC()); err != nil {
+		t.Fatalf("seed confirmation: %v", err)
+	}
+	if !confirmed(t, inv, nodeID) {
+		t.Fatal("fixture must START confirmed, or this test cannot observe the drop")
+	}
+
+	if err := strandedStep(t, inv, nodeID); err == nil {
+		t.Fatal("a node that never comes back must fail the step")
+	}
+
+	if confirmed(t, inv, nodeID) {
+		t.Error("inventory still VOUCHES for this node's version after it was told to reboot and never came back — " +
+			"releases.Check skips any node with a confirmation, so this node counts toward a green up_to_date (#90)")
+	}
+	// The value survives: it is the only clue an operator has about where the
+	// node might be. Only the confidence drops. ADR-0005 Decision 4.
+	if got := invVersion(t, inv, nodeID); got != "2026.08.3-dev.158" {
+		t.Errorf("image_version = %q, want it KEPT — unconfirming must not blank the only clue there is", got)
+	}
+}
+
+// The c13 shape reaches the same step-5 failure by a different road — the node
+// is alive and answering on the pre-reboot boot — and inventory must be doubted
+// there too: `rauc install` has already armed the bootloader for the other
+// slot, so what the node runs NEXT is undecided even though what it runs now is
+// known. verifyBootedSlot's own bootSame branch has always said exactly that;
+// this pins that the step-5 exit agrees with it.
+func TestVerify_NodeThatNeverRebootedAlsoUnconfirms(t *testing.T) {
+	const nodeID = "c13"
+	inv := seedInventoryAt(t, nodeID, "2026.08.3-dev.157")
+	if err := inv.ConfirmImageVersion(context.Background(), nodeID, "2026.08.3-dev.157", time.Now().UTC()); err != nil {
+		t.Fatalf("seed confirmation: %v", err)
+	}
+
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	if err := store.CreateNodeUpdate(context.Background(), &NodeUpdate{
+		JobID: "j", NodeID: nodeID, BundleSHA256: "sha",
+		FromSlot: proto.SlotA, ToSlot: proto.SlotB,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateNodeUpdate: %v", err)
+	}
+	// Answers forever on the boot we told to reboot: it never rebooted.
+	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{OK: true, BootID: "prior-boot"})
+		_ = m.Respond(ack)
+	})
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	tctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancel)
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
+	sc.Ctx = tctx
+	// Seed the precheck step result exactly as the saga would, so step 5 has a
+	// prior boot id to compare against and takes the non-degraded branch.
+	prior, _ := json.Marshal(proto.UpdatePrecheckAck{OK: true, BootID: "prior-boot"})
+	sc.PriorResults = map[string]json.RawMessage{"precheck": prior}
+	if _, err := updateWaitOnlineAndVerifySlot(store, inv)(sc); err == nil {
+		t.Fatal("a node that never rebooted must fail the step")
+	}
+	if confirmed(t, inv, nodeID) {
+		t.Error("the bootloader is armed for the other slot — what this node runs next is not decided, so inventory must not vouch for it")
+	}
+}
