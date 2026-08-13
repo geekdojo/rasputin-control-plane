@@ -552,6 +552,16 @@ func main() {
 	if err := runner.Recover(ctx); err != nil {
 		log.Fatalf("rasputin-api: recover in-flight jobs: %v", err)
 	}
+	// Clear per-node update rows stranded in_progress by a job that already
+	// reached a terminal state (#53). The OnTerminal hook closes this path
+	// going forward; this one-shot sweep is what reaches back to rows stranded
+	// before it existed, or by a process that died between failing the job and
+	// firing the hook. Runs AFTER Recover so orphans it just failed are swept
+	// in the same pass. Non-fatal: a stale history row is a display problem,
+	// not a reason to refuse to start.
+	if err := updater.ReconcileStrandedRows(ctx, updaterStore, jobStore); err != nil {
+		log.Printf("rasputin-api: reconcile stranded node_updates: %v", err)
+	}
 	// Finish any self-update that rebooted us onto the new slot (no-op when
 	// there isn't one). Non-blocking — reconciles in the background once the
 	// co-located agent reconnects.

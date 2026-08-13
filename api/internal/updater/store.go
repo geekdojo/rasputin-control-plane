@@ -181,6 +181,34 @@ func (s *Store) GetNodeUpdate(ctx context.Context, jobID string) (*NodeUpdate, e
 	return scanNodeUpdate(row.Scan)
 }
 
+// ListInProgressNodeUpdates returns every row still reading in_progress,
+// oldest first. Used by ReconcileStrandedRows at api start to clear rows whose
+// job has already reached a terminal state — see #53.
+//
+// Unbounded on purpose: this runs once per process against a table with one row
+// per node per update, and a LIMIT here would silently leave the oldest strays
+// behind, which is the exact failure being cleaned up.
+func (s *Store) ListInProgressNodeUpdates(ctx context.Context) ([]*NodeUpdate, error) {
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT job_id, node_id, bundle_sha256, from_slot, to_slot, from_version, to_version,
+               unverified_boot, unverified_version,
+               status, started_at, finished_at, error
+        FROM node_updates WHERE status = ? ORDER BY started_at ASC`, string(NodeUpdateInProgress))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*NodeUpdate
+	for rows.Next() {
+		nu, err := scanNodeUpdate(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, nu)
+	}
+	return out, rows.Err()
+}
+
 // ListNodeUpdates returns the most-recent update history for one node (or
 // all nodes if nodeID is empty). Limit is the number of rows returned.
 func (s *Store) ListNodeUpdates(ctx context.Context, nodeID string, limit int) ([]*NodeUpdate, error) {
