@@ -3,13 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/configfault"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -116,13 +121,19 @@ func testBus(t *testing.T) *nats.Conn {
 }
 
 func registeredEvt(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement) proto.NodeRegisteredEvt {
+	return registeredEvtWithFaults(t, nc, nodeID, adv, nil)
+}
+
+// registeredEvtWithFaults is registeredEvt plus the startup config-fault set,
+// so the reporting half of #89 can be exercised on the real publish path.
+func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set) proto.NodeRegisteredEvt {
 	t.Helper()
 	sub, err := nc.SubscribeSync(proto.NodeRegisteredSubject(nodeID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
-	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv)
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults)
 	msg, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
 		t.Fatalf("no registered event: %v", err)
@@ -314,5 +325,84 @@ func TestHandleHealth_FaultReportsUnhealthyWithoutChangingTheReplyShape(t *testi
 	}
 	if clean.Detail == faulted.Detail && clean.Detail != "" {
 		t.Errorf("clean and faulted details are identical (%q) — the fault is not distinguishable", clean.Detail)
+	}
+}
+
+// ⚠️ THE #89 REGRESSION GUARD, and it reads the source on purpose.
+//
+// Six environment-selected switches used to reject an unrecognised value with
+// log.Fatalf. On an appliance that is not a loud failure: rasputin-agent.service
+// pairs Restart=always with RestartSec=2, node.env is hand-edited on the
+// persistent partition, and / is read-only — so one typo permanently prevents
+// the agent from starting, on a box whose only remaining door is SSH. Confirmed
+// on hardware 2026-07-28 (tp-cp1, RASPUTIN_BMC_BACKEND), where the api kept
+// serving a UI for a controlplane that no longer had an agent.
+//
+// A behavioural test would have to start the process and prove a negative about
+// something that does not happen, which is slow and flaky. Scanning the source
+// is blunt but it pins the exact property that regressed, and it is the check
+// that would have caught the seventh instance this campaign added and removed.
+// If a genuinely fatal use of one of these variables is ever justified, this
+// test is the place to argue it — not a silent edit.
+func TestNoConfigVariableIsFatal(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	vars := []string{
+		"RASPUTIN_NODE_ROLE",
+		"RASPUTIN_BMC_BACKEND",
+		"RASPUTIN_DOCKER_BACKEND",
+		"RASPUTIN_UCI_BACKEND",
+		"RASPUTIN_UPDATE_BACKEND",
+		"RASPUTIN_TAILSCALE_BACKEND",
+	}
+	for _, line := range strings.Split(string(src), "\n") {
+		if !strings.Contains(line, "log.Fatalf") {
+			continue
+		}
+		for _, v := range vars {
+			if strings.Contains(line, v) {
+				t.Errorf("log.Fatalf mentions %s:\n\t%s\n"+
+					"An unrecognised value for this variable must be survived and reported "+
+					"(configfault.Set.Reject), never fatal — Restart=always turns it into a "+
+					"permanently unreachable node. See #89.", v, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+// The other half: surviving quietly would trade a dead node for a lying one, so
+// the faults have to leave the box. This pins that publishRegistered puts them
+// in the registration metadata under the agreed key — the api stores Metadata
+// wholesale, so this is the whole of the reporting path.
+func TestPublishRegistered_CarriesConfigFaults(t *testing.T) {
+	var faults configfault.Set
+	orig := log.Writer()
+	log.SetOutput(io.Discard)
+	faults.Reject("RASPUTIN_UPDATE_BACKEND", "racu", []string{"rauc", "mock"}, "OS updates are disabled")
+	log.SetOutput(orig)
+
+	ev := registeredEvtWithFaults(t, testBus(t), "n", nil, &faults)
+	raw, ok := ev.Metadata[proto.MetadataConfigFaults]
+	if !ok {
+		t.Fatalf("registration carries no %q — the node survived a bad node.env and told nobody",
+			proto.MetadataConfigFaults)
+	}
+	if !strings.Contains(fmt.Sprint(raw), "RASPUTIN_UPDATE_BACKEND") {
+		t.Errorf("config faults = %v, must name the variable", raw)
+	}
+	if !strings.Contains(fmt.Sprint(raw), "OS updates are disabled") {
+		t.Errorf("config faults = %v, must carry the EFFECT — that is what an operator acts on", raw)
+	}
+}
+
+// A healthy node must not carry the key at all — absence is the signal, and an
+// empty list would make every clean node look like it had something to say.
+func TestPublishRegistered_CleanNodeCarriesNoFaultKey(t *testing.T) {
+	var faults configfault.Set // nothing rejected
+	ev := registeredEvtWithFaults(t, testBus(t), "n", nil, &faults)
+	if _, ok := ev.Metadata[proto.MetadataConfigFaults]; ok {
+		t.Error("a clean node must not carry the config-faults key at all")
 	}
 }

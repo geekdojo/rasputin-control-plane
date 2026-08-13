@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/configfault"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/health"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
@@ -56,11 +59,34 @@ func main() {
 
 	nodeID := envOr("RASPUTIN_NODE_ID", "node-dev")
 	natsURL := envOr("RASPUTIN_NATS_URL", nats.DefaultURL)
+	// Operator-configuration mistakes are survived and REPORTED, never fatal.
+	// agent/internal/configfault carries the full reasoning; the short version
+	// is that Restart=always + a hand-edited node.env + a read-only rootfs turn
+	// any startup exit into a permanently unreachable node, and the agent is
+	// the only repair path we have. See #89.
+	var faults configfault.Set
+
 	roleStr := envOr("RASPUTIN_NODE_ROLE", string(proto.RoleCompute))
 	role := proto.NodeRole(roleStr)
 	if !proto.ValidRole(role) {
-		log.Fatalf("rasputin-agent: invalid RASPUTIN_NODE_ROLE %q; expected one of %v",
-			roleStr, proto.AllRoles)
+		// ⚠️ THE ONE FALLBACK THAT ASSERTS SOMETHING, and it is forced.
+		//
+		// Passing the bad value through would be more honest — we would claim
+		// no role at all — but the api REJECTS a registration whose role fails
+		// proto.ValidRole (inventory/service.go), so the node would never
+		// appear and we would be back to an invisible box by another route.
+		// Falling back to the default keeps it visible; the fault recorded
+		// alongside is what stops that from being a silent lie.
+		//
+		// Known cost, worth stating plainly: role selects the health battery
+		// and the updater backend autodetect, so a mis-roled controlplane is
+		// gated on the compute battery. That is a weaker gate than it should
+		// have — but it applies to a node whose node.env is already broken and
+		// which is now loudly saying so, and it is strictly better than a node
+		// nobody can reach at all.
+		faults.Reject("RASPUTIN_NODE_ROLE", roleStr, rolesAsStrings(),
+			fmt.Sprintf("this node is running as %q instead; its health checks and update backend are chosen for that role", proto.RoleCompute))
+		role = proto.RoleCompute
 	}
 
 	// All backend subsystems (apps, openwrt, updater, tailscale, bmc) keep
@@ -100,10 +126,29 @@ func main() {
 	// registers or advertises until Settings pushes a selection.
 	// Constructed before the bus connects so the first registration can
 	// advertise bmc-targets; the configure handler attaches after.
+	bmcKind := os.Getenv("RASPUTIN_BMC_BACKEND")
 	bmcHost, err := bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"),
-		os.Getenv("RASPUTIN_BMC_BACKEND"), bmcConfigFromEnv(filepath.Join(stateDir, "bmc")))
+		bmcKind, bmcConfigFromEnv(filepath.Join(stateDir, "bmc")))
 	if err != nil {
-		log.Fatalf("rasputin-agent: bmc host: %v", err)
+		// THE SITE THAT WAS PROVEN ON HARDWARE (tp-cp1, 2026-07-28): an env pin
+		// naming a backend this image doesn't carry used to be fatal, and took
+		// metrics, updates, mesh and docker down with it — on the controlplane,
+		// whose api kept serving a UI for a node that no longer had an agent.
+		//
+		// Only an unknown NAME degrades: hard-off is already the documented
+		// safe default state (bmc.md §2a) and the persisted-selection path next
+		// door has always come up off on a bad read. A backend that exists but
+		// fails to CONSTRUCT is a real environment problem and stays fatal —
+		// that is a different bug with a different fix.
+		if errors.Is(err, bmc.ErrUnknownBackend) {
+			faults.Reject("RASPUTIN_BMC_BACKEND", bmcKind, append([]string{bmc.BackendNone}, bmc.Names()...),
+				"BMC is OFF on this node — no power control, no serial console")
+			bmcHost, err = bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"), bmc.BackendNone,
+				bmcConfigFromEnv(filepath.Join(stateDir, "bmc")))
+		}
+		if err != nil {
+			log.Fatalf("rasputin-agent: bmc host: %v", err)
+		}
 	}
 	// Registration is gated until every command handler is subscribed:
 	// the registration event advertises capabilities (bmc-targets among
@@ -117,7 +162,7 @@ func main() {
 		if !handlersReady.Load() {
 			return
 		}
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement())
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults)
 	}
 	// Retry the initial NATS connect instead of exiting on failure. On real
 	// hardware the firewall can boot before the control plane (it IS the
@@ -193,18 +238,21 @@ func main() {
 			}
 			dockerBackend = mb
 		default:
-			log.Fatalf("rasputin-agent: unknown RASPUTIN_DOCKER_BACKEND %q (expected docker|mock)", backendChoice)
+			faults.Reject("RASPUTIN_DOCKER_BACKEND", backendChoice, []string{"docker", "mock"},
+				"app deploy/start/stop is disabled on this node")
 		}
 
-		dockerSubs, err := docker.RegisterHandlers(nc, nodeID, dockerBackend)
-		if err != nil {
-			log.Fatalf("rasputin-agent: register docker handlers: %v", err)
-		}
-		defer func() {
-			for _, sub := range dockerSubs {
-				_ = sub.Unsubscribe()
+		if dockerBackend != nil {
+			dockerSubs, err := docker.RegisterHandlers(nc, nodeID, dockerBackend)
+			if err != nil {
+				log.Fatalf("rasputin-agent: register docker handlers: %v", err)
 			}
-		}()
+			defer func() {
+				for _, sub := range dockerSubs {
+					_ = sub.Unsubscribe()
+				}
+			}()
+		}
 
 		// Node-local reverse proxy (ADR-0004 §1/§6/§9): the agent runs the stock
 		// caddy binary, receives per-app TLS leaves + route metadata, and pushes
@@ -249,18 +297,21 @@ func main() {
 			}
 			uciClient = mock
 		default:
-			log.Fatalf("rasputin-agent: unknown RASPUTIN_UCI_BACKEND %q (expected uci|mock)", backendChoice)
+			faults.Reject("RASPUTIN_UCI_BACKEND", backendChoice, []string{"uci", "mock"},
+				"firewall configuration is disabled on this node")
 		}
-		log.Printf("rasputin-agent: uci backend=%s", backendChoice)
-		fwSubs, err := openwrt.RegisterHandlers(nc, nodeID, uciClient)
-		if err != nil {
-			log.Fatalf("rasputin-agent: register firewall handlers: %v", err)
-		}
-		defer func() {
-			for _, sub := range fwSubs {
-				_ = sub.Unsubscribe()
+		if uciClient != nil {
+			log.Printf("rasputin-agent: uci backend=%s", backendChoice)
+			fwSubs, err := openwrt.RegisterHandlers(nc, nodeID, uciClient)
+			if err != nil {
+				log.Fatalf("rasputin-agent: register firewall handlers: %v", err)
 			}
-		}()
+			defer func() {
+				for _, sub := range fwSubs {
+					_ = sub.Unsubscribe()
+				}
+			}()
+		}
 
 		// IDS alert tailer — tails snort3's alert_fast log (path comes
 		// from the firewall image's /etc/config/snort log_dir UCI option;
@@ -346,18 +397,21 @@ func main() {
 			mb.SetReregisterHook(func() { reregister(nc) })
 			upBackend = mb
 		default:
-			log.Fatalf("rasputin-agent: unknown RASPUTIN_UPDATE_BACKEND %q (expected rauc|openwrt-ab|mock)", backendChoice)
+			faults.Reject("RASPUTIN_UPDATE_BACKEND", backendChoice, []string{"rauc", "openwrt-ab", "mock"},
+				"OS updates are disabled on this node — it will not accept a new image")
 		}
-		upSubs, err := updater.RegisterHandlersWithFault(nc, nodeID, upBackend, updateFault)
-		if err != nil {
-			log.Fatalf("rasputin-agent: register update handlers: %v", err)
-		}
-		defer func() {
-			for _, sub := range upSubs {
-				_ = sub.Unsubscribe()
+		if upBackend != nil {
+			upSubs, err := updater.RegisterHandlersWithFault(nc, nodeID, upBackend, updateFault)
+			if err != nil {
+				log.Fatalf("rasputin-agent: register update handlers: %v", err)
 			}
-		}()
-		log.Printf("rasputin-agent: update backend=%s", upBackend.Name())
+			defer func() {
+				for _, sub := range upSubs {
+					_ = sub.Unsubscribe()
+				}
+			}()
+			log.Printf("rasputin-agent: update backend=%s", upBackend.Name())
+		}
 
 		// On the firewall (openwrt-ab), reset the running slot's GRUB boot-counter
 		// now that the agent is up — the firewall's equivalent of compute's
@@ -365,7 +419,7 @@ func main() {
 		// so without this a second ordinary reboot would skip the (already-tried)
 		// running slot and fall through to the stale other slot. Backgrounded +
 		// best-effort; an error (e.g. ESP not mounted) is logged, never fatal.
-		if ab, ok := upBackend.(*updater.OpenWrtABBackend); ok {
+		if ab, ok := upBackend.(*updater.OpenWrtABBackend); ok && ab != nil {
 			go func() {
 				if err := ab.MarkGoodOnBoot(ctx); err != nil {
 					log.Printf("rasputin-agent: openwrt-ab boot mark-good: %v", err)
@@ -395,18 +449,21 @@ func main() {
 			}
 			tsBackend = mb
 		default:
-			log.Fatalf("rasputin-agent: unknown RASPUTIN_TAILSCALE_BACKEND %q (expected tailscale|mock)", backendChoice)
+			faults.Reject("RASPUTIN_TAILSCALE_BACKEND", backendChoice, []string{"tailscale", "mock"},
+				"mesh join/leave is disabled on this node")
 		}
-		tsSubs, err := tailscale.RegisterHandlers(nc, nodeID, tsBackend)
-		if err != nil {
-			log.Fatalf("rasputin-agent: register tailscale handlers: %v", err)
-		}
-		defer func() {
-			for _, sub := range tsSubs {
-				_ = sub.Unsubscribe()
+		if tsBackend != nil {
+			tsSubs, err := tailscale.RegisterHandlers(nc, nodeID, tsBackend)
+			if err != nil {
+				log.Fatalf("rasputin-agent: register tailscale handlers: %v", err)
 			}
-		}()
-		log.Printf("rasputin-agent: tailscale backend=%s", tsBackend.Name())
+			defer func() {
+				for _, sub := range tsSubs {
+					_ = sub.Unsubscribe()
+				}
+			}()
+			log.Printf("rasputin-agent: tailscale backend=%s", tsBackend.Name())
+		}
 	}
 
 	// BMC handlers — the backend itself was constructed before the bus
@@ -426,6 +483,10 @@ func main() {
 	// connect-time registration above was suppressed by the gate.)
 	handlersReady.Store(true)
 	reregister(nc)
+	if faults.Any() {
+		log.Printf("rasputin-agent: ⚠️  started WITH %s — this node is reachable but degraded; "+
+			"the control plane has been told, and the detail is above.", faults.Summary())
+	}
 
 	go runHeartbeats(ctx, nc, nodeID)
 	// Disk metric measures the persistent data partition, not "/" (the
@@ -447,7 +508,7 @@ func main() {
 	log.Println("rasputin-agent: shutting down")
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement) {
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set) {
 	meta := map[string]any{}
 	if cidr := host.PrimaryLanCIDR(); cidr != "" {
 		// Carried in Metadata rather than as a top-level field so the
@@ -455,6 +516,15 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		// that needs the value reads metadata["primaryLanCidr"]. The api's
 		// mesh enroll-defaults endpoint surfaces it to the UI.
 		meta["primaryLanCidr"] = cidr
+	}
+	// Configuration faults ride along on every registration, so a node that
+	// survived a bad node.env says so to the control plane rather than only to
+	// a journal nobody is tailing. Absent entirely on a healthy node. See
+	// agent/internal/configfault and proto.MetadataConfigFaults (#89).
+	if faults != nil {
+		if fs := faults.Metadata(); fs != nil {
+			meta[proto.MetadataConfigFaults] = fs
+		}
 	}
 	var caps []string
 	if bmcAdv != nil {
@@ -611,6 +681,17 @@ func clusterName() string {
 		id = "rasputin"
 	}
 	return id + ".local"
+}
+
+// rolesAsStrings renders proto.AllRoles for an operator-facing message. The
+// valid options belong in the error: a typo should be self-correcting without
+// anyone reading the source.
+func rolesAsStrings() []string {
+	out := make([]string, 0, len(proto.AllRoles))
+	for _, r := range proto.AllRoles {
+		out = append(out, string(r))
+	}
+	return out
 }
 
 func envOr(key, def string) string {

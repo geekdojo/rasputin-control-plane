@@ -1,6 +1,7 @@
 package bmc
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -76,6 +77,13 @@ var factories = map[string]factory{
 	},
 }
 
+// ErrUnknownBackend is returned when a caller names a backend this image does
+// not carry. Sentinel rather than a bare string so the agent's startup path can
+// tell "the operator typed a name we don't have" — which it survives, reports
+// and comes up BMC-off for — apart from a backend that exists but failed to
+// construct, which is a real environment problem. See agent/internal/configfault.
+var ErrUnknownBackend = errors.New("unknown BMC backend")
+
 // New constructs the backend named kind. "" and BackendNone are not
 // constructible — hard-off is the caller's branch (it must skip
 // construction and registration entirely), so asking for a backend
@@ -86,7 +94,7 @@ func New(kind string, cfg Config) (Backend, error) {
 	}
 	f, ok := factories[kind]
 	if !ok {
-		return nil, fmt.Errorf("unknown BMC backend %q (expected %s|%s)", kind, BackendNone, strings.Join(Names(), "|"))
+		return nil, fmt.Errorf("%w %q (expected %s|%s)", ErrUnknownBackend, kind, BackendNone, strings.Join(Names(), "|"))
 	}
 	return f(cfg)
 }

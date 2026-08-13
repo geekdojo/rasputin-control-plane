@@ -18,6 +18,20 @@ const (
 // rejected on registration.
 var AllRoles = []NodeRole{RoleControlPlane, RoleFirewall, RoleCompute, RoleStorage}
 
+// MetadataConfigFaults is the registration-metadata key under which an agent
+// reports operator-configuration values it REJECTED at startup — an
+// unrecognised RASPUTIN_*_BACKEND, an invalid role, and so on.
+//
+// The agent survives these rather than exiting (agent/internal/configfault
+// explains why at length: a node that will not start is unreachable, and the
+// agent is the only repair path we have). Surviving quietly would trade a dead
+// node for a lying one, so the rejection travels with the registration: the
+// value is a []map[string]any of {variable, value, expected, effect}.
+//
+// Absent on a healthy node. Consumers must treat absence as "no faults" and an
+// unknown shape as opaque — this is additive metadata, not a contract.
+const MetadataConfigFaults = "configFaults"
+
 // ValidRole reports whether r is one of AllRoles.
 func ValidRole(r NodeRole) bool {
 	for _, ok := range AllRoles {
