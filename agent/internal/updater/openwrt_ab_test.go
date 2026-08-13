@@ -373,13 +373,16 @@ func TestInstalledVersion_UnknownIsEmptyNotTheBundleHash(t *testing.T) {
 	b := &OpenWrtABBackend{}
 	localPath := filepath.Join(dir, "bundle.rootfs")
 
+	// The bundle sha is no longer even reachable from here — the parameter that
+	// carried it is gone, which is the strongest form the fix can take. Kept as
+	// a value to compare against so the test still says what went wrong.
 	const bundleID = "7dc0657846367cec8c9f328e513e4d3af297864119186651605632e4f72e16ea"
-	got := b.installedVersion(localPath, bundleID)
+	got := b.installedVersion(localPath)
 	if got == bundleID {
 		t.Fatal("returned the bundle sha as a version — a wrong answer wearing a right answer's type; conjunct (c) can only ever fail on it")
 	}
 	if got != "" {
-		t.Errorf("installedVersion = %q, want \"\" so the contract can degrade rather than mismatch", got)
+		t.Errorf("installedVersion = %q, want \"\" so the api keeps its own manifest version (#86)", got)
 	}
 
 	// And when the sidecar IS present it must be preferred — the fix must not
@@ -387,7 +390,7 @@ func TestInstalledVersion_UnknownIsEmptyNotTheBundleHash(t *testing.T) {
 	if err := os.WriteFile(localPath+".version", []byte(" 2026.08.2-dev.83 \n"), 0o644); err != nil {
 		t.Fatalf("write sidecar: %v", err)
 	}
-	if got := b.installedVersion(localPath, bundleID); got != "2026.08.2-dev.83" {
+	if got := b.installedVersion(localPath); got != "2026.08.2-dev.83" {
 		t.Errorf("installedVersion = %q, want the sidecar value trimmed", got)
 	}
 }

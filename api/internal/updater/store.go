@@ -163,12 +163,49 @@ func (s *Store) SetNodeUpdateVerifyGaps(ctx context.Context, jobID string, unver
 
 // SetNodeUpdateSlots records the from/to slot and version once known
 // (after install). Called from the install step.
+//
+// ⚠️ THE VERSIONS REFINE, THEY NEVER ERASE — that is what the COALESCE is for,
+// and it is the whole of #86's real fix.
+//
+// The api already knows the version it is installing: step 1 writes
+// `to_version = bundle.Version` straight from the release manifest, before the
+// node has been asked to do anything. This statement then ran with the AGENT's
+// echo and overwrote it unconditionally. On RAUC that was invisible, because
+// `rauc info` returns the same string. On openwrt-ab the raw squashfs carries
+// no manifest, so the echo is "" — and a good manifest version was replaced
+// with nothing on every single firewall update.
+//
+// The consequence was not cosmetic. verify's conjunct (c) reads this column as
+// the EXPECTED side (`classifyVersion(expected.ToVersion, …)`), so blanking it
+// made the check permanently unevaluable on that backend. #86 was originally
+// filed against the agent — it used to return the bundle's sha256 here, which
+// verify then compared against a real CalVer and failed every firewall update —
+// and #111 fixed that by returning "" so the three-valued conjunct would
+// degrade rather than fail. That was right as far as it went, and it went one
+// step short: degrading was never necessary, because the api held the answer
+// the whole time and was throwing it away here.
+//
+// So: an agent that knows better may refine the value (a slot-aware version is
+// stronger evidence than a manifest), and an agent that knows nothing leaves it
+// alone. No `.version` sidecar in the firewall image is required, which is what
+// the issue and the wiki both originally proposed.
+//
+// Done in SQL rather than read-modify-write so it stays a single atomic
+// statement; a concurrent writer cannot interleave between the read and the
+// decision.
 func (s *Store) SetNodeUpdateSlots(ctx context.Context, jobID string, from, to proto.UpdateSlot, fromVersion, toVersion string) error {
 	_, err := s.db.ExecContext(ctx, `
         UPDATE node_updates
-        SET from_slot = ?, to_slot = ?, from_version = ?, to_version = ?
-        WHERE job_id = ?`,
-		string(from), string(to), fromVersion, toVersion, jobID)
+        SET from_slot    = :from_slot,
+            to_slot      = :to_slot,
+            from_version = COALESCE(NULLIF(:from_version, ''), from_version),
+            to_version   = COALESCE(NULLIF(:to_version,   ''), to_version)
+        WHERE job_id = :job_id`,
+		sql.Named("from_slot", string(from)),
+		sql.Named("to_slot", string(to)),
+		sql.Named("from_version", fromVersion),
+		sql.Named("to_version", toVersion),
+		sql.Named("job_id", jobID))
 	return err
 }
 

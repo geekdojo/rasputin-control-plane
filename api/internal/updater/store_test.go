@@ -451,3 +451,85 @@ func TestMsRoundTrip_Updater(t *testing.T) {
 // but the pure helper takes a slice. Make sure the inventory package still
 // compiles in our import set.
 var _ = inventory.OpenStore
+
+// ⚠️ THE #86 REGRESSION. The api writes the authoritative to_version from the
+// release manifest at step 1, and this statement used to overwrite it with the
+// agent's echo unconditionally. On RAUC that is invisible — `rauc info` returns
+// the same string — but openwrt-ab's raw squashfs carries no manifest, so the
+// echo is "" and a good version was replaced with nothing on EVERY firewall
+// update. verify reads this exact column as conjunct (c)'s expected side, so
+// blanking it made the check permanently unevaluable on that backend.
+//
+// The issue and the wiki both originally proposed shipping a `.version` sidecar
+// in the firewall image. No sidecar is needed: the api held the answer the
+// whole time and was throwing it away here.
+func TestStore_SetNodeUpdateSlots_EmptyVersionDoesNotEraseTheManifestVersion(t *testing.T) {
+	f := newStoreFixture(t)
+	u := sampleNodeUpdate("job-1", "firewall1")
+	u.FromSlot = proto.SlotUnknown
+	u.ToSlot = proto.SlotUnknown
+	// Step 1: the api records what the RELEASE MANIFEST says it is installing,
+	// before the node has been asked to do anything.
+	u.ToVersion = "2026.08.2-dev.84"
+	_ = f.store.CreateNodeUpdate(f.ctx, u)
+
+	// Step 4: openwrt-ab installed it fine but has no manifest to read, so it
+	// echoes back "" — "I have nothing to add", not "nobody knows".
+	if err := f.store.SetNodeUpdateSlots(f.ctx, "job-1",
+		proto.SlotA, proto.SlotB, "2026.08.2-dev.83", ""); err != nil {
+		t.Fatalf("SetNodeUpdateSlots: %v", err)
+	}
+
+	got, _ := f.store.GetNodeUpdate(f.ctx, "job-1")
+	if got.ToVersion != "2026.08.2-dev.84" {
+		t.Errorf("to_version = %q, want the manifest version kept — verify reads this as conjunct (c)'s expected side, "+
+			"so erasing it degrades every openwrt-ab update forever (#86)", got.ToVersion)
+	}
+	// The slots and the version it DID know are still recorded normally.
+	if got.FromSlot != proto.SlotA || got.ToSlot != proto.SlotB {
+		t.Errorf("slots: %s → %s, want a → b", got.FromSlot, got.ToSlot)
+	}
+	if got.FromVersion != "2026.08.2-dev.83" {
+		t.Errorf("from_version = %q, want it written — a non-empty echo must still land", got.FromVersion)
+	}
+}
+
+// The other direction, so the fix cannot degenerate into "never write versions":
+// a backend that DOES know (RAUC reads RAUC_MF_VERSION from the bundle) must
+// still refine the value. A slot-aware version is stronger evidence than a
+// manifest the api is holding.
+func TestStore_SetNodeUpdateSlots_KnownVersionStillRefines(t *testing.T) {
+	f := newStoreFixture(t)
+	u := sampleNodeUpdate("job-1", "compute1")
+	u.ToVersion = "2026.08.3-dev.160"
+	_ = f.store.CreateNodeUpdate(f.ctx, u)
+
+	if err := f.store.SetNodeUpdateSlots(f.ctx, "job-1",
+		proto.SlotA, proto.SlotB, "2026.08.3-dev.158", "2026.08.3-dev.160-rauc"); err != nil {
+		t.Fatalf("SetNodeUpdateSlots: %v", err)
+	}
+	got, _ := f.store.GetNodeUpdate(f.ctx, "job-1")
+	if got.ToVersion != "2026.08.3-dev.160-rauc" {
+		t.Errorf("to_version = %q, want the agent's value — an agent that knows better must be allowed to say so", got.ToVersion)
+	}
+}
+
+// An empty from_version must not erase either. Nothing writes from_version
+// before the install step today, so this is a guard rather than a live bug —
+// stated because the two columns are set by the same statement and treating
+// them differently is exactly the kind of asymmetry that rots.
+func TestStore_SetNodeUpdateSlots_EmptyFromVersionDoesNotErase(t *testing.T) {
+	f := newStoreFixture(t)
+	u := sampleNodeUpdate("job-1", "node-1")
+	u.FromVersion = "2026.08.2-dev.83"
+	_ = f.store.CreateNodeUpdate(f.ctx, u)
+
+	if err := f.store.SetNodeUpdateSlots(f.ctx, "job-1",
+		proto.SlotA, proto.SlotB, "", "v2"); err != nil {
+		t.Fatalf("SetNodeUpdateSlots: %v", err)
+	}
+	got, _ := f.store.GetNodeUpdate(f.ctx, "job-1")
+	if got.FromVersion != "2026.08.2-dev.83" {
+		t.Errorf("from_version = %q, want it kept", got.FromVersion)
+	}
+}
