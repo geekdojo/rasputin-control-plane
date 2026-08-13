@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,106 +13,132 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+const devImage = "2026.08.3-dev.159"
+
+// captureLog runs f with the standard logger redirected and returns what it
+// wrote. Arm's only channel for "I refused to arm and here is why" is a log
+// line, so the log IS the interface under test.
+func captureLog(f func()) string {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+	f()
+	return buf.String()
+}
+
 // The shipping default has to be "no fault", and it has to be the default that
 // arrives when nobody has thought about it — i.e. an unset variable.
-func TestFaultFromEnv_UnsetIsNone(t *testing.T) {
+func TestArm_UnsetIsNoneAndSilent(t *testing.T) {
 	t.Setenv(FaultEnv, "")
-	got, err := FaultFromEnv()
-	if err != nil {
-		t.Fatalf("unset must not error: %v", err)
-	}
+	var got Fault
+	out := captureLog(func() { got = Arm(devImage) })
 	if got != FaultNone {
 		t.Errorf("fault = %q, want none", got)
 	}
+	if out != "" {
+		t.Errorf("an unarmed node logged %q — it must say nothing", out)
+	}
 }
 
-func TestFaultFromEnv_KnownValues(t *testing.T) {
-	for _, want := range []Fault{FaultNoReboot, FaultDieAfterReboot, FaultFailHealth} {
+func TestArm_KnownValuesOnADevImage(t *testing.T) {
+	for _, want := range []Fault{FaultNoReboot, FaultFailHealth} {
 		t.Run(string(want), func(t *testing.T) {
 			t.Setenv(FaultEnv, string(want))
-			got, err := FaultFromEnv()
-			if err != nil {
-				t.Fatalf("%s: %v", want, err)
-			}
-			if got != want {
+			if got := Arm(devImage); got != want {
 				t.Errorf("fault = %q, want %q", got, want)
 			}
 		})
 	}
 }
 
-// A typo must be LOUD. If an unrecognised value silently meant "no fault", a
-// mistyped fault would produce a clean, healthy update that reads exactly like
-// a passing test — the test would report success having proven nothing, which
-// is worse than the test failing.
-func TestFaultFromEnv_UnknownValueIsAnError(t *testing.T) {
-	t.Setenv(FaultEnv, "no-reboto")
-	got, err := FaultFromEnv()
-	if err == nil {
-		t.Fatal("an unrecognised fault must be an error, never a silent no-op")
-	}
-	if got != FaultNone {
-		t.Errorf("fault = %q, want none alongside the error", got)
-	}
-}
-
-// The marker has to survive the reboot it spans and then fire exactly once —
-// a node stuck mute forever would need a hand-fix to rejoin, which defeats the
-// point of reproducing c08 on a bench you want back.
-func TestMuteMarker_OneShot(t *testing.T) {
-	cfg := NewFaultConfig(FaultDieAfterReboot, t.TempDir())
-	if cfg.TakeMuteAfterReboot() {
-		t.Fatal("no marker armed, must not fire")
-	}
-	if err := cfg.ArmMuteAfterReboot(); err != nil {
-		t.Fatalf("arm: %v", err)
-	}
-	if !cfg.TakeMuteAfterReboot() {
-		t.Error("armed marker must fire on the next boot")
-	}
-	if cfg.TakeMuteAfterReboot() {
-		t.Error("marker must be consumed — a node that stays mute forever needs a hand-fix to rejoin")
-	}
-}
-
-// The regression. The marker is armed by one process and consumed by ANOTHER,
-// on the far side of a reboot, so the two halves only meet through the path
-// they each compute. They computed different ones: armed into <stateDir>/updater,
-// looked for in <stateDir>. die-after-reboot silently never fired and the update
-// it was meant to break returned a clean `committed` in 63 seconds (bench
-// 2026-08-13) — a fault that proves nothing while reporting success.
+// ⚠️ THE REGRESSION THIS FILE EXISTS FOR.
 //
-// This test spans the restart the way the real thing does: arm through one
-// FaultConfig value, consume through a SEPARATE one built the same way, with
-// nothing shared but the directory the caller supplies.
-func TestMuteMarker_SurvivesAProcessRestart(t *testing.T) {
-	dir := t.TempDir()
+// Arm must never be able to stop the agent. The previous version returned an
+// error on an unrecognised value and main called log.Fatalf on it; with
+// Restart=always / RestartSec=2 in rasputin-agent.service and node.env edited
+// by hand to flip channels, one typo permanently prevented the agent from
+// starting on a box reachable only by SSH.
+//
+// A signature with no error is the fix, so the strongest thing this test can
+// assert is that the signature has not grown one back — a compile-time fact
+// stated as a runtime test so it is visible when someone changes it. What is
+// checked at runtime is the behaviour that has to survive: a bad value yields
+// a working agent with nothing armed.
+func TestArm_UnknownValueArmsNothingAndCannotStopTheAgent(t *testing.T) {
+	// If Arm ever returns (Fault, error) again this line stops compiling —
+	// which is the point. There must be nothing for a caller to be fatal on.
+	var _ func(string) Fault = Arm
 
-	// process 1: the reboot handler arms, then the process goes away
-	if err := NewFaultConfig(FaultDieAfterReboot, dir).ArmMuteAfterReboot(); err != nil {
-		t.Fatalf("arm: %v", err)
+	t.Setenv(FaultEnv, "no-reboto")
+	var got Fault
+	out := captureLog(func() { got = Arm(devImage) })
+	if got != FaultNone {
+		t.Errorf("fault = %q, want none — a typo must not arm anything", got)
 	}
-
-	// process 2: startup on the far side of the reboot
-	if !NewFaultConfig(FaultDieAfterReboot, dir).TakeMuteAfterReboot() {
-		t.Fatal("a marker armed before the reboot was not found after it — the fault would silently not fire and the round would report a clean update")
+	if !strings.Contains(out, "no-reboto") {
+		t.Errorf("refusal %q must name the value that was rejected", out)
 	}
 }
 
-// A fault bound to one directory must not find a marker armed under another.
-// Stated explicitly because the bug was exactly this, and "obviously they use
-// the same dir" is what made it invisible for a whole bench round.
-func TestMuteMarker_DoesNotLeakAcrossDirectories(t *testing.T) {
-	armed := NewFaultConfig(FaultDieAfterReboot, t.TempDir())
-	other := NewFaultConfig(FaultDieAfterReboot, t.TempDir())
-	if err := armed.ArmMuteAfterReboot(); err != nil {
-		t.Fatalf("arm: %v", err)
+// The mitigation for no-longer-being-fatal is that the refusal is loud and
+// self-correcting: it names the knob, what was typed, and every valid option,
+// so nobody has to read this file to fix their typo.
+func TestArm_UnknownValueRefusalIsSelfCorrecting(t *testing.T) {
+	t.Setenv(FaultEnv, "fail-heath")
+	out := captureLog(func() { Arm(devImage) })
+	for _, want := range []string{
+		"fail-heath",            // what they typed
+		FaultEnv,                // which knob
+		string(FaultNoReboot),   // …and every valid option, so the typo is
+		string(FaultFailHealth), // fixable without going to the source
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal %q does not mention %q", out, want)
+		}
 	}
-	if other.TakeMuteAfterReboot() {
-		t.Error("a different directory must not see this marker")
+}
+
+// A released image must not be faultable however node.env got edited. This is
+// what keeps the seam's blast radius on the bench: the bench runs -dev. images
+// by definition, so the gate costs the seam nothing.
+func TestArm_RefusesToArmOnAReleasedImage(t *testing.T) {
+	t.Setenv(FaultEnv, string(FaultNoReboot))
+	var got Fault
+	out := captureLog(func() { got = Arm("2026.08.3") })
+	if got != FaultNone {
+		t.Errorf("fault = %q on a released image, want none", got)
 	}
-	if !armed.TakeMuteAfterReboot() {
-		t.Error("the arming config must still see its own marker")
+	if !strings.Contains(out, "2026.08.3") {
+		t.Errorf("refusal %q must name the image it refused on", out)
+	}
+}
+
+// An empty version is a dev checkout with no /etc/rasputin/image-version at
+// all — not an appliance, which always has one — so the seam still works when
+// running the agent straight out of the repo.
+func TestArm_EmptyVersionIsADevCheckoutNotAnAppliance(t *testing.T) {
+	t.Setenv(FaultEnv, string(FaultFailHealth))
+	if got := Arm(""); got != FaultFailHealth {
+		t.Errorf("fault = %q on an unversioned dev checkout, want %q", got, FaultFailHealth)
+	}
+}
+
+func TestIsDevImage(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		dev     bool
+	}{
+		{"2026.08.3-dev.159", true},
+		{"  2026.08.3-dev.1  ", true},
+		{"", true},  // dev checkout, no image-version file
+		{" ", true}, // …and whitespace is the same thing
+		{"2026.08.3", false},
+		{"2026.08.3-rc.1", false},
+	} {
+		if got := isDevImage(tc.version); got != tc.dev {
+			t.Errorf("isDevImage(%q) = %v, want %v", tc.version, got, tc.dev)
+		}
 	}
 }
 
@@ -127,7 +151,7 @@ func TestFaultNoReboot_AcksAndAnnouncesButDoesNotReboot(t *testing.T) {
 	const nodeID = "n"
 	be := &countingRebootBackend{}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, NewFaultConfig(FaultNoReboot, t.TempDir()))
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultNoReboot)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -175,7 +199,7 @@ func TestNoFault_RebootsNormally(t *testing.T) {
 	const nodeID = "n"
 	be := &countingRebootBackend{}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, NewFaultConfig(FaultNone, t.TempDir()))
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultNone)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -194,20 +218,15 @@ func TestNoFault_RebootsNormally(t *testing.T) {
 	}
 }
 
-// FaultDieAfterReboot must arm the marker BEFORE rebooting — after the reboot
-// this process no longer exists, so an arm-after-reboot would never happen.
-func TestFaultDieAfterReboot_ArmsMarkerBeforeRebooting(t *testing.T) {
+// fail-health is not a reboot fault: the node must reboot normally and fail
+// later, at conjunct (d). If it also suppressed the reboot the two faults would
+// be the same test.
+func TestFaultFailHealth_DoesNotTouchTheRebootPath(t *testing.T) {
 	nc := startNATS(t)
 	const nodeID = "n"
-	dir := t.TempDir()
-	be := &countingRebootBackend{onReboot: func() {
-		// Runs inside backend.Reboot: the marker must already be on disk.
-		if _, err := os.Stat(filepath.Join(dir, muteMarkerName)); err != nil {
-			t.Errorf("marker not armed before the reboot: %v", err)
-		}
-	}}
+	be := &countingRebootBackend{}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, NewFaultConfig(FaultDieAfterReboot, dir))
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultFailHealth)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -222,10 +241,7 @@ func TestFaultDieAfterReboot_ArmsMarkerBeforeRebooting(t *testing.T) {
 		t.Fatalf("reboot rpc: %v", err)
 	}
 	if be.reboots != 1 {
-		t.Errorf("backend.Reboot called %d times, want 1 — this fault reboots for real", be.reboots)
-	}
-	if !NewFaultConfig(FaultDieAfterReboot, dir).TakeMuteAfterReboot() {
-		t.Error("marker must be armed for the next boot")
+		t.Errorf("backend.Reboot called %d times, want 1 — fail-health reboots for real", be.reboots)
 	}
 }
 
@@ -261,48 +277,16 @@ func (b *countingRebootBackend) Reboot(_ context.Context, _ string, delay int) (
 func (b *countingRebootBackend) MarkGood(context.Context, string) error        { return nil }
 func (b *countingRebootBackend) MarkBad(context.Context, string, string) error { return nil }
 
-// The error message IS the mitigation. A mistyped fault is fatal at startup,
-// so this string is the only thing standing between an operator and ten minutes
-// of wondering why their bench round came back healthy. It has to name what was
-// wrong AND what would have been right.
-func TestUnknownFaultError_NamesTheBadValueAndTheValidOnes(t *testing.T) {
-	t.Setenv(FaultEnv, "no-reboto")
-	_, err := FaultFromEnv()
-	if err == nil {
-		t.Fatal("want an error")
-	}
-	msg := err.Error()
-	for _, want := range []string{
-		"no-reboto",                 // what they typed
-		FaultEnv,                    // which knob
-		string(FaultNoReboot),       // …and every valid option, so the
-		string(FaultDieAfterReboot), // typo is self-correcting without
-		string(FaultFailHealth),     // going to the source
-	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("error %q does not mention %q", msg, want)
-		}
-	}
-}
-
 // Announce is a safety mechanism, not decoration: a node silently carrying a
-// fault injector is worse than no injector at all, and this line is what a
-// confused operator greps for. Silence on an armed fault is the bug.
+// fault injector is worse than no injector at all, and this line is what the
+// bench procedure greps for before dispatching a round — the check that
+// replaced being fatal. Silence on an armed fault is the bug.
 func TestAnnounce_ShoutsWhenArmedAndIsSilentWhenNot(t *testing.T) {
-	capture := func(f Fault) string {
-		var buf bytes.Buffer
-		orig := log.Writer()
-		log.SetOutput(&buf)
-		defer log.SetOutput(orig)
-		f.Announce()
-		return buf.String()
-	}
-
-	if got := capture(FaultNone); got != "" {
+	if got := captureLog(func() { FaultNone.Announce() }); got != "" {
 		t.Errorf("unarmed announce logged %q — a clean node must say nothing", got)
 	}
-	for _, f := range []Fault{FaultNoReboot, FaultDieAfterReboot, FaultFailHealth} {
-		got := capture(f)
+	for _, f := range []Fault{FaultNoReboot, FaultFailHealth} {
+		got := captureLog(func() { f.Announce() })
 		if !strings.Contains(got, string(f)) {
 			t.Errorf("announce for %q = %q, must name the armed fault", f, got)
 		}

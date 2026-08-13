@@ -19,16 +19,13 @@ import (
 // install) stream progress on
 // rasputin.node.<nodeID>.evt.update.{download,install}.progress.
 func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Subscription, error) {
-	return RegisterHandlersWithFault(nc, nodeID, backend, FaultConfig{})
+	return RegisterHandlersWithFault(nc, nodeID, backend, FaultNone)
 }
 
 // RegisterHandlersWithFault is RegisterHandlers plus update-path fault
-// injection (see fault.go). cfg is the zero FaultConfig in every non-bench
-// path; it carries both the armed fault and the one directory its marker
-// lives in, so this site cannot disagree with the startup site about where
-// that is.
-func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, cfg FaultConfig) ([]*nats.Subscription, error) {
-	fault := cfg.Fault
+// injection (see fault.go). fault is FaultNone in every non-bench path, and
+// can only have come from updater.Arm.
+func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fault Fault) ([]*nats.Subscription, error) {
 	subs := make([]*nats.Subscription, 0, 6)
 
 	bind := func(subj string, fn nats.MsgHandler) error {
@@ -165,19 +162,6 @@ func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, cf
 			})
 			_ = nc.Publish(proto.NodeEvtSubject(nodeID, "rebooting"), ev)
 			return
-		}
-
-		// FaultDieAfterReboot: reboot for real, but arm the marker FIRST so the
-		// agent on the far side comes up mute. Arming before the reboot is the
-		// whole trick — after it, this process is gone. A marker we could not
-		// write is reported and the reboot proceeds normally, so the test fails
-		// loudly rather than quietly passing as a healthy update.
-		if fault == FaultDieAfterReboot {
-			if err := cfg.ArmMuteAfterReboot(); err != nil {
-				log.Printf("rasputin-agent: ⚠️  FAULT %s: could not arm marker: %v — rebooting NORMALLY, the fault will NOT fire", FaultDieAfterReboot, err)
-			} else {
-				log.Printf("rasputin-agent: ⚠️  FAULT %s: armed; this node will come back MUTE", FaultDieAfterReboot)
-			}
 		}
 
 		delay, err := backend.Reboot(ctx, cmd.BundleID, cmd.DelaySeconds)
