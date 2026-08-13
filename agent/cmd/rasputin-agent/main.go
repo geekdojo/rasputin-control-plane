@@ -74,32 +74,13 @@ func main() {
 	}
 	log.Printf("rasputin-agent: state dir %s", stateDir)
 
-	// Update-path fault injection (updater/fault.go). Resolved once, here,
-	// because two of the three faults have to be known before we decide what
-	// to subscribe to at all. An unrecognised value is fatal on purpose: a
-	// mistyped fault that injects nothing would leave a test reporting success
-	// while proving nothing.
-	updateFault, err := updater.FaultFromEnv()
-	if err != nil {
-		log.Fatalf("rasputin-agent: %v", err)
-	}
-	// Bind the fault to its marker directory ONCE, here. Passing the directory
-	// separately to the arm site and the consume site is how die-after-reboot
-	// silently never fired on the bench 2026-08-13 — see updater.FaultConfig.
-	faultCfg := updater.NewFaultConfig(updateFault, updaterStateDir(stateDir))
-	faultCfg.Announce()
-
-	// FaultDieAfterReboot, far side: the marker was armed by the reboot handler
-	// in the previous boot, so this process comes up MUTE — no registration, no
-	// update subscriptions. The node is running and healthy and the control
-	// plane simply never hears from it again, which is bench node c08 and the
-	// case #57 / #72 exist for. One-shot: the marker is consumed here so the
-	// next boot rejoins on its own.
-	muteAfterReboot := faultCfg.TakeMuteAfterReboot()
-	if muteAfterReboot {
-		log.Printf("rasputin-agent: ⚠️  FAULT %s FIRING: coming up MUTE — no registration, no update handlers. "+
-			"Restart the agent to rejoin.", updater.FaultDieAfterReboot)
-	}
+	// Update-path fault injection (updater/fault.go). Resolved once, here.
+	// updater.Arm cannot fail and cannot exit — an unrecognised value, or any
+	// value at all on a released image, logs loudly and arms nothing. It used
+	// to be fatal, which meant a typo in hand-edited node.env crash-looped the
+	// agent forever against Restart=always. See updater.Arm.
+	updateFault := updater.Arm(host.ImageVersion())
+	updateFault.Announce()
 
 	// Bus join token (RASPUTIN_CP_JOIN_TOKEN): presented to the api's
 	// auth-callout so it can mint a per-node scoped credential. Empty on a
@@ -367,16 +348,7 @@ func main() {
 		default:
 			log.Fatalf("rasputin-agent: unknown RASPUTIN_UPDATE_BACKEND %q (expected rauc|openwrt-ab|mock)", backendChoice)
 		}
-		// Mute node: skip the update subscriptions entirely, so a precheck gets
-		// "no responders" rather than an answer. Verify must find nothing at
-		// all — a node that still answered prechecks would be a different
-		// (and much easier) failure than the one c08 posed.
-		if muteAfterReboot {
-			log.Printf("rasputin-agent: ⚠️  FAULT %s: not subscribing to update.* — prechecks will go unanswered",
-				updater.FaultDieAfterReboot)
-			return
-		}
-		upSubs, err := updater.RegisterHandlersWithFault(nc, nodeID, upBackend, faultCfg)
+		upSubs, err := updater.RegisterHandlersWithFault(nc, nodeID, upBackend, updateFault)
 		if err != nil {
 			log.Fatalf("rasputin-agent: register update handlers: %v", err)
 		}
@@ -452,20 +424,8 @@ func main() {
 
 	// Every command handler is subscribed — announce ourselves. (The
 	// connect-time registration above was suppressed by the gate.)
-	//
-	// …unless FaultDieAfterReboot fired, in which case handlersReady stays
-	// false and no registration is ever published. Leaving the gate shut is
-	// what makes this faithful to c08 rather than a crash: the node stays up,
-	// keeps its lease, keeps answering ping — it simply never tells the control
-	// plane it came back, so verify times out with nothing to write and
-	// inventory has to represent "we don't know".
-	if muteAfterReboot {
-		log.Printf("rasputin-agent: ⚠️  FAULT %s: suppressing registration — the control plane will not hear from this node",
-			updater.FaultDieAfterReboot)
-	} else {
-		handlersReady.Store(true)
-		reregister(nc)
-	}
+	handlersReady.Store(true)
+	reregister(nc)
 
 	go runHeartbeats(ctx, nc, nodeID)
 	// Disk metric measures the persistent data partition, not "/" (the
