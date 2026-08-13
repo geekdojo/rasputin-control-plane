@@ -176,10 +176,22 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 		lg.log("info", fmt.Sprintf("waiting for a boot other than %s", short(req.PriorBootID)))
 	}
 
-	sameBootSeen := false
-	// wentQuiet: the degraded path has observed the agent stop answering, which
-	// is the "it went away" half of its proof. Latched, never cleared — the
-	// point is that it happened, not that it is still happening.
+	// Three facts, deliberately kept apart, because the deadline verdict below
+	// is a different answer for each combination of them.
+	//
+	// ⚠️ answeringPriorBoot is about the LAST answer, not about "ever". It used
+	// to be a latch called sameBootSeen that was set on the first prior-boot ack
+	// and never cleared — and the reboot RPC carries a delay, so the pre-reboot
+	// agent legitimately answers for the first seconds of EVERY update. Any node
+	// that then rebooted and vanished was therefore reported as "node never
+	// rebooted: still answering", which is the exact opposite of what happened.
+	// Bench e3bench 2026-08-13, the first time c08 was ever run: the node was up
+	// on the target slot with a new boot id while the control plane said it had
+	// never rebooted. See #90.
+	answeringPriorBoot := false
+	// everAnswered / wentQuiet are genuine latches — they record that something
+	// happened, and nothing later can unhappen it.
+	everAnswered := false
 	wentQuiet := false
 	for {
 		rctx, cancel := context.WithTimeout(ctx, rpcTimeout)
@@ -187,13 +199,17 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 		cancel()
 		switch {
 		case err != nil:
-			if degraded && !wentQuiet {
+			if !wentQuiet {
 				wentQuiet = true
 				lg.log("info", "node stopped answering — the reboot is under way")
 			}
+			// The node is not answering NOW, so whatever it last said about its
+			// boot is history. Clearing this is the #90 fix.
+			answeringPriorBoot = false
 		default:
 			var ack proto.UpdatePrecheckAck
 			if json.Unmarshal(msg.Data, &ack) == nil {
+				everAnswered = true
 				if degraded {
 					switch {
 					case ack.BootID != "":
@@ -219,7 +235,7 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 						lg.log("warn", "node answered without a boot id (pre-bootId agent); verify will be degraded")
 						return bootUnknown, nil
 					case bootSame:
-						sameBootSeen = true
+						answeringPriorBoot = true
 					}
 				}
 			}
@@ -227,11 +243,15 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 
 		select {
 		case <-ctx.Done():
+			// Four distinct failures, and telling them apart IS the deliverable
+			// — this message is the only thing an operator has to go on, and
+			// naming the wrong one sends them to the wrong machine. Ordered
+			// most-specific first.
 			switch {
-			case sameBootSeen:
-				// Meaningfully different from "we never heard from it": the node
-				// is alive and answering, it just never rebooted. Saying so
-				// beats the old behaviour, which called this a rollback.
+			case answeringPriorBoot:
+				// Answering RIGHT NOW on the boot we told to reboot: alive and
+				// well, it simply never rebooted. c13. This is the only shape
+				// that earns the bootSame verdict.
 				return bootSame, fmt.Errorf("node never rebooted: still answering on boot %s after %w",
 					short(req.PriorBootID), ctx.Err())
 			case degraded && !wentQuiet:
@@ -239,8 +259,19 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 				// that used to pass in 2ms. No identity to name, so name the
 				// evidence instead.
 				return bootUnknown, fmt.Errorf("node never rebooted: it answered prechecks throughout and never went quiet: %w", ctx.Err())
+			case everAnswered:
+				// It answered, then went silent and stayed silent. THE c08
+				// SHAPE: the reboot almost certainly happened — that is what
+				// stopped the answers — and the node never came back to say so.
+				// Emphatically NOT "still answering", and not a rollback either:
+				// nothing here says which slot it is on, only that we cannot ask.
+				return bootUnknown, fmt.Errorf(
+					"node stopped answering and never came back — it rebooted or died and did not return: %w", ctx.Err())
 			}
-			return bootUnknown, fmt.Errorf("waiting for the node to come back: %w", ctx.Err())
+			// Never heard from it at all in this step. Different from c08: the
+			// node was already unreachable when we started waiting, so the
+			// reboot RPC's ack may be the last true thing we know.
+			return bootUnknown, fmt.Errorf("node never answered after the reboot was issued: %w", ctx.Err())
 		case <-regCh:
 			// Registration is a hint that something changed — poll immediately
 			// rather than sitting out the interval.

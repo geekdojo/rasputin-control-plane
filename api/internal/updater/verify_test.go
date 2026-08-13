@@ -481,3 +481,105 @@ func TestVerify_RollbackAlsoRecordsTheGaps(t *testing.T) {
 		t.Errorf("row = %+v, want the boot gap recorded on a rollback too", row)
 	}
 }
+
+// ⚠️ THE #90 REGRESSION, and the reason this file exists in its current shape.
+//
+// The reboot RPC carries a delay, so the pre-reboot agent legitimately answers
+// prechecks on the OLD boot id for the first seconds of EVERY update. That used
+// to latch a `sameBootSeen` flag which was never cleared, so a node that then
+// rebooted and never came back was reported at the deadline as "node never
+// rebooted: still answering" — the exact opposite of what happened, pointing
+// the operator at a live node stuck on the old slot when the truth is the node
+// is gone.
+//
+// Bench e3bench 2026-08-13, the first time c08 was ever run: ground truth was a
+// new boot id on the TARGET slot, healthy, two minutes of uptime. The control
+// plane recorded "never rebooted, still answering".
+//
+// The fixture models the real thing exactly — answer on the prior boot, then
+// have the subscription vanish, which is what a rebooting process does to its
+// NATS subscriptions.
+func TestWaitForNewBoot_AnsweredThenVanishedIsNotStillAnswering(t *testing.T) {
+	nc := startNATS(t)
+	const nodeID = "c08"
+
+	var polls atomic.Int32
+	gone := make(chan struct{}, 1)
+	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{OK: true, BootID: "old"})
+		_ = m.Respond(ack)
+		if polls.Add(1) == 2 {
+			select {
+			case gone <- struct{}{}:
+			default:
+			}
+		}
+	})
+	// The reboot: the agent's subscriptions go away with its process, so every
+	// later poll gets "no responders" rather than a slow timeout.
+	go func() { <-gone; _ = sub.Unsubscribe() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+	got, err := waitForNewBoot(ctx, nc, verifyRequest{NodeID: nodeID, PriorBootID: "old"}, nil, nil)
+	if err == nil {
+		t.Fatal("a node that never came back must time out")
+	}
+	if polls.Load() < 2 {
+		t.Fatalf("fixture never answered on the prior boot (%d polls) — the test is not exercising the latch", polls.Load())
+	}
+	if got == bootSame {
+		t.Error("verdict = bootSame — this node DID reboot; bootSame is the diagnosis for one that did not")
+	}
+	if strings.Contains(err.Error(), "still answering") {
+		t.Errorf("error = %q — it stopped answering seconds ago; claiming otherwise sends the operator to the wrong machine", err)
+	}
+	if !strings.Contains(err.Error(), "never came back") {
+		t.Errorf("error = %q — must name the actual shape: it stopped answering and never came back", err)
+	}
+}
+
+// The other half of the same switch: a node that really IS still answering on
+// the old boot must keep reporting bootSame. Without this, the #90 fix could
+// have been "never say bootSame", which would give c13 back its false rollback.
+func TestWaitForNewBoot_StillAnsweringKeepsTheBootSameDiagnosis(t *testing.T) {
+	nc := startNATS(t)
+	const nodeID = "c13"
+	sub, _ := nc.Subscribe(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{OK: true, BootID: "old"})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = sub.Unsubscribe() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	got, err := waitForNewBoot(ctx, nc, verifyRequest{NodeID: nodeID, PriorBootID: "old"}, nil, nil)
+	if err == nil {
+		t.Fatal("the old boot must never satisfy the wait")
+	}
+	if got != bootSame {
+		t.Errorf("verdict = %q, want %q — a node answering right now on the prior boot is c13", got, bootSame)
+	}
+	if !strings.Contains(err.Error(), "still answering") {
+		t.Errorf("error = %q — must say it is still answering, which is what makes this not a rollback", err)
+	}
+}
+
+// A node that was unreachable the whole time is a third diagnosis: we never
+// heard from it at all, so the reboot ack may be the last true thing we know.
+// Distinct from c08, where the answers stopping IS the evidence it rebooted.
+func TestWaitForNewBoot_NeverAnsweredAtAllSaysSo(t *testing.T) {
+	nc := startNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	got, err := waitForNewBoot(ctx, nc, verifyRequest{NodeID: "absent", PriorBootID: "old"}, nil, nil)
+	if err == nil {
+		t.Fatal("an absent node must time out")
+	}
+	if got != bootUnknown {
+		t.Errorf("verdict = %q, want %q", got, bootUnknown)
+	}
+	if !strings.Contains(err.Error(), "never answered") {
+		t.Errorf("error = %q — must distinguish 'never heard from it' from 'it went quiet'", err)
+	}
+}

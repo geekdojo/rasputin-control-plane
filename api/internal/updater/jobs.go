@@ -478,6 +478,43 @@ func updateWaitOnlineAndVerifySlot(store *Store, inv *inventory.Store) jobs.DoFn
 		// which also missed nodes that re-registered before the subscription
 		// landed, burning the full timeout.
 		if _, err := waitForNewBoot(sc.Ctx, sc.NATS, req, ch, sc.Log); err != nil {
+			// ⚠️ INVENTORY MUST BE DOUBTED HERE, and for a while it was not.
+			//
+			// verifyBootedSlot below opens with an unconfirmInventoryVersion
+			// call under a comment reading "THE c08 CASE, exactly" — and it is
+			// unreachable in the actual c08 case, because this return fires
+			// first. #58 added this gate and #83 hardened it, and each time it
+			// got better at refusing bad evidence it moved the stranded-node
+			// case further from the handler written for it (#57 / #72). Both
+			// halves were bench-validated separately; neither run crossed the
+			// boundary, because producing c08 was the scenario never run.
+			//
+			// Measured cost on the bench 2026-08-13: the node was told to
+			// reboot, never came back, the job FAILED — and because
+			// image_version_confirmed_at was left standing from an earlier
+			// round, releases.Check still counted it toward a green up_to_date.
+			// That is verbatim the lie #72 exists to kill. See #90.
+			//
+			// Every shape waitForNewBoot fails with means the same thing for
+			// inventory: we told this node to reboot and never got a verifiable
+			// answer, so whatever the row holds is a version from a boot that
+			// may no longer be running. Even the c13 shape — still answering on
+			// the old boot — belongs here, because the bootloader is already
+			// armed for the other slot and what it runs NEXT is not yet decided;
+			// verifyBootedSlot's own bootSame branch has always said exactly
+			// that. The value stays as the operator's only clue; only the
+			// confidence drops.
+			// ⚠️ A DETACHED CONTEXT, and it is load-bearing. sc.Ctx is expired —
+			// its deadline firing is precisely why waitForNewBoot returned — so
+			// passing it here means the UPDATE never runs and unconfirming
+			// degrades to a log line nobody reads. The first version of this fix
+			// did exactly that and looked correct; the regression test below is
+			// what caught it, which is the second time on this path that a fix
+			// silently did not fire (see the die-after-reboot marker, #113).
+			// Cleanup after a cancellation must never inherit the cancellation.
+			uctx, ucancel := context.WithTimeout(context.WithoutCancel(sc.Ctx), 5*time.Second)
+			unconfirmInventoryVersion(uctx, inv, spec.NodeID, err.Error(), sc.Log)
+			ucancel()
 			return nil, err
 		}
 
