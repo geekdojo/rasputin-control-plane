@@ -19,13 +19,16 @@ import (
 // install) stream progress on
 // rasputin.node.<nodeID>.evt.update.{download,install}.progress.
 func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Subscription, error) {
-	return RegisterHandlersWithFault(nc, nodeID, backend, FaultNone, "")
+	return RegisterHandlersWithFault(nc, nodeID, backend, FaultConfig{})
 }
 
 // RegisterHandlersWithFault is RegisterHandlers plus update-path fault
-// injection (see fault.go). fault is FaultNone in every non-bench build path;
-// stateDir is only read when a fault needs to leave a marker across the reboot.
-func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fault Fault, stateDir string) ([]*nats.Subscription, error) {
+// injection (see fault.go). cfg is the zero FaultConfig in every non-bench
+// path; it carries both the armed fault and the one directory its marker
+// lives in, so this site cannot disagree with the startup site about where
+// that is.
+func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, cfg FaultConfig) ([]*nats.Subscription, error) {
+	fault := cfg.Fault
 	subs := make([]*nats.Subscription, 0, 6)
 
 	bind := func(subj string, fn nats.MsgHandler) error {
@@ -170,7 +173,7 @@ func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fa
 		// write is reported and the reboot proceeds normally, so the test fails
 		// loudly rather than quietly passing as a healthy update.
 		if fault == FaultDieAfterReboot {
-			if err := ArmMuteAfterReboot(stateDir); err != nil {
+			if err := cfg.ArmMuteAfterReboot(); err != nil {
 				log.Printf("rasputin-agent: ⚠️  FAULT %s: could not arm marker: %v — rebooting NORMALLY, the fault will NOT fire", FaultDieAfterReboot, err)
 			} else {
 				log.Printf("rasputin-agent: ⚠️  FAULT %s: armed; this node will come back MUTE", FaultDieAfterReboot)
