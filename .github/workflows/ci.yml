@@ -39,7 +39,14 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
+          # check-latest: fetch the newest 1.26.x rather than reusing whatever
+          # patch the runner image happens to have cached. On 2026-08-13 the
+          # runner served a cached go1.26.5 while go1.26.6 — which fixes five
+          # reachable net/http + encoding/asn1 advisories — was already
+          # published, so vuln-scan went red on a commit whose identical code
+          # had passed an hour earlier and no re-run could clear it.
           go-version: "1.26"
+          check-latest: true
           cache-dependency-path: |
             api/go.sum
             agent/go.sum
