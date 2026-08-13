@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,7 +62,87 @@ func UpdateWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, cfg Confi
 			{Name: "wait_online_and_verify_slot", Timeout: 5 * time.Minute, Do: updateWaitOnlineAndVerifySlot(store, inv)},
 			{Name: "health_check_and_commit", Timeout: 30 * time.Second, Retries: 1, Do: updateHealthCheckAndCommit(store, inv)},
 		},
+		OnTerminal: finalizeNodeUpdateRow(store),
 	}
+}
+
+// finalizeNodeUpdateRow gives the per-node row a terminal status on every path
+// (ADR-0005 Decision 5, #53).
+//
+// The row only ever reached a terminal status on the verify/commit path:
+// verifyBootedSlot writes rolled_back, healthCheckAndCommit writes committed.
+// A saga that failed at download, install, or verify propagated its error to
+// the runner, which failed the JOB and never touched the row — so the Updates
+// page rendered a failed run as one still in progress, indefinitely. Bench
+// 2026-08-12: a firewall update that failed conjunct (c) at step 5 left exactly
+// that, and the same shape was recorded in 2026-06-22 and 2026-06-28.
+//
+// Only ever writes to a row still in_progress. That single guard is what makes
+// the hook safe to fire on every terminal transition including success: a
+// committed or rolled_back row is a verdict this hook has no business
+// overwriting, and preserving it matters most in the case that motivated the
+// whole feature — a node marked rolled_back must not be relabelled `failed`
+// just because the job also ended in error.
+func finalizeNodeUpdateRow(store *Store) func(context.Context, string, bool, string) {
+	return func(ctx context.Context, jobID string, success bool, errMsg string) {
+		row, err := store.GetNodeUpdate(ctx, jobID)
+		if err != nil || row == nil {
+			return // not a per-node update, or the row was never created
+		}
+		if row.Status != NodeUpdateInProgress {
+			return // already has a verdict — committed, rolled_back, failed
+		}
+		if errMsg == "" {
+			// A job that succeeded while its row is still in_progress means a
+			// step stopped the workflow early without recording an outcome.
+			// Say so rather than inventing one.
+			errMsg = "job ended without recording a per-node outcome"
+		}
+		if err := store.UpdateNodeUpdate(ctx, jobID, NodeUpdateFailed,
+			row.ToSlot, row.ToVersion, errMsg, time.Now().UTC()); err != nil {
+			log.Printf("updater: finalize node_update %s: %v", jobID, err)
+			return
+		}
+		log.Printf("updater: node_update %s finalized as failed (%s)", jobID, errMsg)
+	}
+}
+
+// ReconcileStrandedRows finalizes in_progress rows whose job is already
+// terminal. Called at api start.
+//
+// The hook above closes the path going forward, but it cannot reach back: rows
+// stranded before it existed, or by a process that died between failing the job
+// and firing the hook, stay in_progress forever and there is no later event to
+// catch them. This is the one-shot sweep that clears them, and it is
+// deliberately NOT a timeout reaper — it decides nothing from a clock, only
+// from a job that has already reached a terminal state, so it cannot race a
+// legitimately slow install (ADR-0005 Decision 5: a reaper "must not be the
+// primary mechanism").
+func ReconcileStrandedRows(ctx context.Context, store *Store, jobStore *jobs.Store) error {
+	rows, err := store.ListInProgressNodeUpdates(ctx)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		j, err := jobStore.GetJob(ctx, row.JobID)
+		if err != nil || j == nil {
+			continue
+		}
+		if j.Status != jobs.StatusFailed && j.Status != jobs.StatusSucceeded {
+			continue // still genuinely running — leave it alone
+		}
+		msg := j.Error
+		if msg == "" {
+			msg = "job reached a terminal state without recording a per-node outcome"
+		}
+		if err := store.UpdateNodeUpdate(ctx, row.JobID, NodeUpdateFailed,
+			row.ToSlot, row.ToVersion, msg, time.Now().UTC()); err != nil {
+			log.Printf("updater: reconcile stranded %s: %v", row.JobID, err)
+			continue
+		}
+		log.Printf("updater: reconciled stranded node_update %s (job already %s)", row.JobID, j.Status)
+	}
+	return nil
 }
 
 func parseSpec(raw json.RawMessage) (*UpdateSpec, error) {

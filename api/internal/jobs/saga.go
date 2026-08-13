@@ -50,6 +50,32 @@ type WorkflowStep struct {
 type Workflow struct {
 	Kind  string
 	Steps []WorkflowStep
+
+	// OnTerminal, when set, fires exactly once when a job of this Kind reaches
+	// a terminal state — from run() on both success and failure, from Recover()
+	// for jobs orphaned by an api restart, and from FinishDeferred() for jobs a
+	// resume handler drove to an outcome. ADR-0005 Decision 5.
+	//
+	// It exists because a workflow can own state the runner knows nothing
+	// about. node.update writes a per-node row that only ever reached a
+	// terminal status on the verify/commit path, so a saga that failed at
+	// download, install, or verify left the row reading `in_progress` forever
+	// while the job itself was correctly `failed` — the Updates page then
+	// rendered a failed run as one still in progress (#53, and reproduced on
+	// e3bench 2026-08-12 by a firewall update that failed at step 5).
+	//
+	// A workflow hook rather than a JobFailed bus subscriber, deliberately: it
+	// keeps the runner generic — the runner still knows nothing about
+	// node_updates, the knowledge lives in the workflow that owns the table —
+	// while being in-process, synchronous, and unit-testable with no bus
+	// round-trip or delivery-ordering risk.
+	//
+	// The hook must be idempotent. It is called once per terminal transition,
+	// but a job that Recover() defers and a resume handler later finishes will
+	// see one call from the path that actually terminated it, and a workflow
+	// that also finalizes its own row on the happy path will see a call for a
+	// row already in a terminal state.
+	OnTerminal func(ctx context.Context, jobID string, success bool, errMsg string)
 }
 
 // ErrStopWorkflow, returned by a step's Do, ends the saga *successfully*
@@ -232,6 +258,12 @@ func (r *Runner) Recover(ctx context.Context) error {
 			"error":     msg,
 			"recovered": true,
 		})
+		// An orphan is exactly the case the hook exists for: nothing else will
+		// ever run for this job, so whatever state the workflow owns is stranded
+		// unless it is finalized here.
+		if wf, ok := r.workflowFor(j.Kind); ok {
+			r.fireTerminal(ctx, wf, j.ID, false, msg)
+		}
 		log.Printf("jobs: recovered (failed) %s [%s]", j.ID, j.Kind)
 	}
 	return nil
@@ -243,13 +275,28 @@ func (r *Runner) Recover(ctx context.Context) error {
 // exactly as a normally-run job would. errMsg is ignored on success.
 func (r *Runner) FinishDeferred(ctx context.Context, jobID string, success bool, errMsg string) {
 	now := time.Now().UTC()
+	// This is a terminal transition like any other, and the ADR's list of hook
+	// sites predates it. A deferred job that a resume handler fails — a
+	// self-update whose post-reboot verify did not pass — strands its workflow
+	// state exactly as a step failure would, so it fires the hook too.
+	var wf Workflow
+	haveWF := false
+	if j, err := r.store.GetJob(ctx, jobID); err == nil && j != nil {
+		wf, haveWF = r.workflowFor(j.Kind)
+	}
 	if success {
 		_ = r.store.MarkJobSucceeded(ctx, jobID, now)
 		r.emit(ctx, jobID, proto.JobSucceeded, nil)
+		if haveWF {
+			r.fireTerminal(ctx, wf, jobID, true, "")
+		}
 		return
 	}
 	_ = r.store.MarkJobFailed(ctx, jobID, errMsg, now)
 	r.emit(ctx, jobID, proto.JobFailed, map[string]string{"error": errMsg})
+	if haveWF {
+		r.fireTerminal(ctx, wf, jobID, false, errMsg)
+	}
 }
 
 func (r *Runner) run(j *Job, wf Workflow) {
@@ -271,12 +318,43 @@ func (r *Runner) run(j *Job, wf Workflow) {
 			now := time.Now().UTC()
 			_ = r.store.MarkJobFailed(ctx, j.ID, err.Error(), now)
 			r.emit(ctx, j.ID, proto.JobFailed, map[string]string{"error": err.Error()})
+			r.fireTerminal(ctx, wf, j.ID, false, err.Error())
 			return
 		}
 	}
 	now = time.Now().UTC()
 	_ = r.store.MarkJobSucceeded(ctx, j.ID, now)
 	r.emit(ctx, j.ID, proto.JobSucceeded, nil)
+	r.fireTerminal(ctx, wf, j.ID, true, "")
+}
+
+// fireTerminal invokes a workflow's OnTerminal hook, if it has one.
+//
+// The panic guard is load-bearing rather than defensive habit: the hook is
+// workflow-owned code touching a store the runner does not know about, and it
+// runs on the runner's goroutine AFTER the job ledger has already been made
+// consistent. A panic there must not unwind past this point and take the runner
+// down or, worse, make a correctly-recorded job look like a crash.
+func (r *Runner) fireTerminal(ctx context.Context, wf Workflow, jobID string, success bool, errMsg string) {
+	if wf.OnTerminal == nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("jobs: OnTerminal %s [%s] panicked: %v", jobID, wf.Kind, p)
+		}
+	}()
+	wf.OnTerminal(ctx, jobID, success, errMsg)
+}
+
+// workflowFor looks up a registered workflow by kind. Returns false for a kind
+// this process has no workflow for, which is normal after a downgrade: the
+// ledger can hold jobs whose workflow no longer exists.
+func (r *Runner) workflowFor(kind string) (Workflow, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	wf, ok := r.workflows[kind]
+	return wf, ok
 }
 
 func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep, prior map[string]json.RawMessage) error {
