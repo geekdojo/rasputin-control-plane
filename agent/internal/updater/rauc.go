@@ -163,9 +163,27 @@ func parseRAUCStatus(s string) raucStatus {
 		}
 	}
 
-	// Which rootfs slot are we booted from? Prefer the explicit boot key (real
-	// RAUC_BOOT_PRIMARY, or legacy RAUC_BOOT_SLOT); else fall back to the slot
-	// whose STATE is booted, resolved to a name via its device partlabel.
+	// Which rootfs slot does the BOOTLOADER consider primary? Prefer the
+	// explicit boot key (RAUC_BOOT_PRIMARY, or legacy RAUC_BOOT_SLOT); else
+	// fall back to the slot whose STATE is booted, resolved to a name via its
+	// device partlabel.
+	//
+	// ⚠️ This is the bootloader's primary slot, NOT necessarily the slot we are
+	// running from, and an earlier version of this comment claimed otherwise.
+	// `rauc install` ACTIVATES the target slot at install time, so between the
+	// install and the reboot RAUC_BOOT_PRIMARY already names the target while
+	// the kernel is still running the old one. Bench-confirmed on e3bench
+	// 2026-08-12: a precheck taken in that window reported ActiveSlot=b on a
+	// node booted from a.
+	//
+	// That window is exactly why verify cannot rest on the slot alone
+	// (ADR-0005 Decision 2 conjunct (b), and the #83 regression): the
+	// pre-reboot agent answers with the slot the update is TRYING to reach, so
+	// a slot check passes before the thing it is verifying has happened. Note
+	// the OpenWrt A/B backend differs — it reads /proc/cmdline, i.e. the truly
+	// booted slot — so the same bug surfaces there as a false ROLLBACK rather
+	// than a false commit. Do not "fix" one to match the other without
+	// revisiting both callers.
 	boot := kv["RAUC_BOOT_PRIMARY"]
 	if boot == "" {
 		boot = kv["RAUC_BOOT_SLOT"]

@@ -361,3 +361,33 @@ func TestRebootClampsDelaySeconds(t *testing.T) {
 		}
 	}
 }
+
+// installedVersion feeds ADR-0005 Decision 2's conjunct (c). Returning the
+// bundle's sha256 when no version is available made that comparison
+// permanently unsatisfiable: on e3bench 2026-08-12 the node correctly reported
+// "2026.08.2-dev.83" and verify compared it against "7dc0657846367cec…", so
+// EVERY openwrt-ab update failed with version_mismatch. Empty is the honest
+// answer — conjunct (c) is three-valued and degrades on unknown (Decision 3).
+func TestInstalledVersion_UnknownIsEmptyNotTheBundleHash(t *testing.T) {
+	dir := t.TempDir()
+	b := &OpenWrtABBackend{}
+	localPath := filepath.Join(dir, "bundle.rootfs")
+
+	const bundleID = "7dc0657846367cec8c9f328e513e4d3af297864119186651605632e4f72e16ea"
+	got := b.installedVersion(localPath, bundleID)
+	if got == bundleID {
+		t.Fatal("returned the bundle sha as a version — a wrong answer wearing a right answer's type; conjunct (c) can only ever fail on it")
+	}
+	if got != "" {
+		t.Errorf("installedVersion = %q, want \"\" so the contract can degrade rather than mismatch", got)
+	}
+
+	// And when the sidecar IS present it must be preferred — the fix must not
+	// make a knowable version unknowable.
+	if err := os.WriteFile(localPath+".version", []byte(" 2026.08.2-dev.83 \n"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+	if got := b.installedVersion(localPath, bundleID); got != "2026.08.2-dev.83" {
+		t.Errorf("installedVersion = %q, want the sidecar value trimmed", got)
+	}
+}
