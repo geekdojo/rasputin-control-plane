@@ -379,6 +379,41 @@ func updateInstall(store *Store) jobs.DoFn {
 		if !ack.OK {
 			return nil, fmt.Errorf("install failed: %s", ack.Detail)
 		}
+
+		// The ack's TargetSlot is a pure ECHO of the slot we just asked for, and
+		// it becomes conjunct (b)'s expected side. ADR-0005 Decision 2's third
+		// corollary — the node must not own both sides of its own check.
+		//
+		// This is NOT the #92 shape, and the difference decides the fix. There
+		// the api held an independent, signed answer (the release manifest), so
+		// it could simply refuse the echo. Here it holds nothing: `TargetSlot`
+		// was set from `pre.InactiveSlot`, which the AGENT reported at precheck.
+		// Both sides of the round trip originate on the node, so preferring one
+		// over the other only swaps an earlier claim for a later one.
+		//
+		// What IS worth having is noticing when the two disagree. A backend that
+		// resolves its own inactive slot (openwrt-ab does, via `block info`)
+		// could install somewhere other than where it was sent, and today that
+		// divergence is silently recorded as if it were the plan. So:
+		//
+		//   - silent agent  → keep what we asked for. Writing "" would blank
+		//     to_slot (the slots are not COALESCEd), and conjunct (b) reads a
+		//     blank expected slot as a MISMATCH — i.e. a healthy node recorded
+		//     as a bootloader rollback, which is precisely the c13 harm the
+		//     contract exists to prevent.
+		//   - disagreeing agent → fail here, loudly, before the reboot. The
+		//     install has already happened, so the honest report is "we do not
+		//     know which slot is about to boot", and a verify built on the wrong
+		//     expected slot would call the result a rollback either way.
+		switch {
+		case ack.TargetSlot == "" || ack.TargetSlot == proto.SlotUnknown:
+			ack.TargetSlot = pre.InactiveSlot
+		case ack.TargetSlot != pre.InactiveSlot:
+			return nil, fmt.Errorf(
+				"agent installed to slot %s but was told to use %s — refusing to record a target the api did not choose",
+				ack.TargetSlot, pre.InactiveSlot)
+		}
+
 		// Persist target slot + version.
 		_ = store.SetNodeUpdateSlots(sc.Ctx, sc.JobID, pre.ActiveSlot, ack.TargetSlot, pre.CurrentVersion, ack.NewVersion)
 		publishChange(sc.NATS, proto.UpdateChangeEvt{
