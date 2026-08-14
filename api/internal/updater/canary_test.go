@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,14 +64,37 @@ func eqIDs(a, b []string) bool {
 	return true
 }
 
-// stubDriver records the order children were submitted in and returns a
-// scripted outcome per node id. Anything not in `fail` succeeds.
+// stubDriver scripts each node's outcome and records what the scheduler did:
+// the order children were submitted in, and the PEAK number in flight at once.
+// Peak concurrency is the only direct evidence that a bound is a bound.
+//
+// Thread-safe because bounded fan-out calls it from several goroutines — the
+// first version of this stub was not, and `-race` said so immediately.
 type stubDriver struct {
-	started []string
-	fail    map[string]bool
+	mu       sync.Mutex
+	started  []string
+	inFlight int
+	peak     int
+
+	fail map[string]bool
 	// submitErr nodes fail at submission rather than at completion — a
 	// different code path, and one that used to be able to skip the gate.
 	submitErr map[string]bool
+	// hold is how long each child "runs". Non-zero makes overlap observable;
+	// with instant children a serial run and a parallel one look identical.
+	hold time.Duration
+}
+
+func (s *stubDriver) startOrder() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.started...)
+}
+
+func (s *stubDriver) peakInFlight() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peak
 }
 
 func (s *stubDriver) driver() childDriver {
@@ -79,17 +103,38 @@ func (s *stubDriver) driver() childDriver {
 			if s.submitErr[t.NodeID] {
 				return "", errors.New("no runner")
 			}
+			s.mu.Lock()
 			s.started = append(s.started, t.NodeID)
+			s.inFlight++
+			if s.inFlight > s.peak {
+				s.peak = s.inFlight
+			}
+			s.mu.Unlock()
 			return "child-" + t.NodeID, nil
 		},
 		wait: func(sc *jobs.StepCtx, childID string) (jobs.Status, error) {
+			if s.hold > 0 {
+				time.Sleep(s.hold)
+			}
 			id := strings.TrimPrefix(childID, "child-")
+			s.mu.Lock()
+			s.inFlight--
+			s.mu.Unlock()
 			if s.fail[id] {
 				return jobs.StatusFailed, nil
 			}
 			return jobs.StatusSucceeded, nil
 		},
 	}
+}
+
+// serial is the spec every test that asserts an exact start ORDER must use.
+// Above k=1 the fan-out finishes in whatever sequence the fleet reboots in,
+// which is the feature, so pinning order there would be testing the scheduler
+// for a property it deliberately does not have.
+func serial() proto.SystemUpdateSpec {
+	k := proto.Int(1)
+	return proto.SystemUpdateSpec{Version: "2026.08.0", MaxInFlight: &k}
 }
 
 // runCascade drives the cascade step over a fixed plan, bypassing step 1 by
@@ -275,7 +320,7 @@ func TestCascade_CanaryFailureAbortsBeforeFanOut(t *testing.T) {
 		t.Fatalf("assignCanaries: %v", err)
 	}
 	drv := &stubDriver{fail: map[string]bool{"c01": true}}
-	res := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, drv.driver())
+	res := runCascade(t, targets, serial(), drv.driver())
 
 	err := res.terminalError()
 	if err == nil {
@@ -315,7 +360,7 @@ func TestCascade_CanaryFailureAtSubmitAlsoAborts(t *testing.T) {
 		t.Fatalf("assignCanaries: %v", err)
 	}
 	drv := &stubDriver{submitErr: map[string]bool{"c01": true}}
-	res := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, drv.driver())
+	res := runCascade(t, targets, serial(), drv.driver())
 
 	if res.terminalError() == nil {
 		t.Fatal("want a terminal error when the canary cannot be submitted, got nil")
@@ -342,7 +387,7 @@ func TestCascade_CanaryRunsFirstThenTheRestOfItsTier(t *testing.T) {
 		t.Fatalf("assignCanaries: %v", err)
 	}
 	drv := &stubDriver{}
-	res := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, drv.driver())
+	res := runCascade(t, targets, serial(), drv.driver())
 	if err := res.terminalError(); err != nil {
 		t.Fatalf("terminal error on a clean run: %v", err)
 	}
@@ -377,7 +422,7 @@ func TestCascade_SecondArchCanaryFailureStopsTheFirstArchFanOut(t *testing.T) {
 		t.Fatalf("assignCanaries: %v", err)
 	}
 	drv := &stubDriver{fail: map[string]bool{"c03": true}}
-	res := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, drv.driver())
+	res := runCascade(t, targets, serial(), drv.driver())
 	if res.terminalError() == nil {
 		t.Fatal("want a terminal error, got nil")
 	}
@@ -400,7 +445,7 @@ func TestCascade_TierWithoutACanaryStillRuns(t *testing.T) {
 		t.Fatalf("assignCanaries: %v", err)
 	}
 	drv := &stubDriver{}
-	res := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, drv.driver())
+	res := runCascade(t, targets, serial(), drv.driver())
 	if err := res.terminalError(); err != nil {
 		t.Fatalf("terminal error: %v", err)
 	}
@@ -430,7 +475,7 @@ func TestCascade_FanOutFailureDoesNotStopTheRun(t *testing.T) {
 		t.Fatalf("assignCanaries: %v", err)
 	}
 	drv := &stubDriver{fail: map[string]bool{"c02": true}}
-	res := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, drv.driver())
+	res := runCascade(t, targets, serial(), drv.driver())
 
 	err := res.terminalError()
 	if err == nil {
@@ -466,7 +511,7 @@ func TestCascade_AFailedTierDoesNotStopTheNextOne(t *testing.T) {
 	}
 	// c01 is the compute canary, so failing c02 keeps the gate out of it.
 	drv := &stubDriver{fail: map[string]bool{"c02": true}}
-	res := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, drv.driver())
+	res := runCascade(t, targets, serial(), drv.driver())
 	if !eqIDs(drv.started, []string{"c01", "c02", "s01"}) {
 		t.Errorf("started %v, want storage reached despite the compute failure", drv.started)
 	}
@@ -485,7 +530,7 @@ func TestCascade_GridCarriesTierArchAndCanary(t *testing.T) {
 	if err := assignCanaries(targets, nil); err != nil {
 		t.Fatalf("assignCanaries: %v", err)
 	}
-	res := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, (&stubDriver{}).driver())
+	res := runCascade(t, targets, serial(), (&stubDriver{}).driver())
 	if len(res.Results) != 2 {
 		t.Fatalf("grid has %d rows, want 2", len(res.Results))
 	}
@@ -792,7 +837,7 @@ func TestCascade_SoakHoldsFanOutAndIsSkippedAtZero(t *testing.T) {
 	// Default (0) must not sleep. A wall-clock assertion is the only thing
 	// that can catch a soak that fires when it should not.
 	start := time.Now()
-	if err := runCascade(t, targets, proto.SystemUpdateSpec{Version: "2026.08.0"}, (&stubDriver{}).driver()).terminalError(); err != nil {
+	if err := runCascade(t, targets, serial(), (&stubDriver{}).driver()).terminalError(); err != nil {
 		t.Fatalf("cascade: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -810,5 +855,171 @@ func TestCascade_SoakHoldsFanOutAndIsSkippedAtZero(t *testing.T) {
 	}
 	if err := soak(&jobs.StepCtx{Ctx: context.Background()}, 0); err != nil {
 		t.Errorf("zero soak returned %v, want nil", err)
+	}
+}
+
+// ----- bounded fan-out (#74) -----------------------------------------------
+
+// tierOf builds a compute tier of n same-arch nodes, canaries assigned.
+func computeTier(t *testing.T, n int) []plannedTarget {
+	t.Helper()
+	targets := make([]plannedTarget, n)
+	for i := range targets {
+		targets[i] = tgt(fmt.Sprintf("c%02d", i+1), proto.RoleCompute, x86)
+	}
+	if err := assignCanaries(targets, nil); err != nil {
+		t.Fatalf("assignCanaries: %v", err)
+	}
+	return targets
+}
+
+func specK(k proto.IntOrString) proto.SystemUpdateSpec {
+	return proto.SystemUpdateSpec{Version: "2026.08.0", MaxInFlight: &k}
+}
+
+func TestCascade_KEqualsOneIsExactlyTheSerialCascade(t *testing.T) {
+	// The backwards-compatibility claim, asserted rather than assumed: at k=1
+	// nodes start in planned order and never overlap. If this ever stops
+	// holding, "bounded fan-out is expressible as a backwards-compatible
+	// change" stops being true.
+	targets := computeTier(t, 6)
+	drv := &stubDriver{hold: 5 * time.Millisecond}
+	runCascade(t, targets, specK(proto.Int(1)), drv.driver())
+
+	want := []string{"c01", "c02", "c03", "c04", "c05", "c06"}
+	if got := drv.startOrder(); !eqIDs(got, want) {
+		t.Errorf("start order = %v, want %v", got, want)
+	}
+	if peak := drv.peakInFlight(); peak != 1 {
+		t.Errorf("peak in flight = %d, want 1", peak)
+	}
+}
+
+func TestCascade_FanOutIsBoundedByK(t *testing.T) {
+	// 22 compute nodes, k=4: the canary goes alone, then the remaining 21 run
+	// four at a time and never five.
+	targets := computeTier(t, 22)
+	drv := &stubDriver{hold: 10 * time.Millisecond}
+	res := runCascade(t, targets, specK(proto.Int(4)), drv.driver())
+
+	if err := res.terminalError(); err != nil {
+		t.Fatalf("clean run reported %v", err)
+	}
+	if peak := drv.peakInFlight(); peak != 4 {
+		t.Errorf("peak in flight = %d, want exactly 4 — under is not bounded, over is not honoured", peak)
+	}
+	if n := len(drv.startOrder()); n != 22 {
+		t.Errorf("started %d nodes, want all 22", n)
+	}
+	// The canary is still alone: it must finish before anything else starts.
+	if first := drv.startOrder()[0]; first != "c01" {
+		t.Errorf("first node started = %s, want the canary c01", first)
+	}
+}
+
+func TestCascade_CanariesNeverRunInParallelWithFanOut(t *testing.T) {
+	// The gate is worthless if the nodes it gates are already in flight. With
+	// k=4 and a tier big enough to overlap, peak concurrency during the canary
+	// must still be 1 — which this catches by failing the canary and checking
+	// nothing else ever started.
+	targets := computeTier(t, 12)
+	drv := &stubDriver{hold: 5 * time.Millisecond, fail: map[string]bool{"c01": true}}
+	res := runCascade(t, targets, specK(proto.Int(4)), drv.driver())
+
+	if got := drv.startOrder(); !eqIDs(got, []string{"c01"}) {
+		t.Errorf("started %v, want only the canary", got)
+	}
+	if peak := drv.peakInFlight(); peak != 1 {
+		t.Errorf("peak in flight = %d, want 1 during the canary phase", peak)
+	}
+	if len(res.Remaining) != 11 {
+		t.Errorf("remaining = %d, want the 11 nodes the gate protected", len(res.Remaining))
+	}
+}
+
+func TestCascade_ClampForcesSerialOnATwoNodeTier(t *testing.T) {
+	// k=4 on a two-node tier is not a bounded fan-out, it is one unbounded
+	// batch wearing the word. The clamp holds a node back at every size.
+	targets := computeTier(t, 2)
+	drv := &stubDriver{hold: 5 * time.Millisecond}
+	runCascade(t, targets, specK(proto.Int(4)), drv.driver())
+	if peak := drv.peakInFlight(); peak != 1 {
+		t.Errorf("peak in flight = %d on a 2-node tier, want 1 — the clamp did not bite", peak)
+	}
+}
+
+func TestCascade_PercentIsResolvedAgainstTheTier(t *testing.T) {
+	// "20%" of a 20-node tier is 4, clamped against 19 → 4.
+	targets := computeTier(t, 20)
+	drv := &stubDriver{hold: 10 * time.Millisecond}
+	runCascade(t, targets, specK(proto.Percent(20)), drv.driver())
+	if peak := drv.peakInFlight(); peak != 4 {
+		t.Errorf("peak in flight = %d, want 4 (20%% of 20)", peak)
+	}
+}
+
+func TestCascade_KIsScopedPerTierNotPerRun(t *testing.T) {
+	// A big compute tier and a two-node storage tier in one run: the clamp is
+	// computed against each tier's own size, so storage runs serially even
+	// though compute did not. A run-scoped k would let a 4-wide setting take
+	// out both storage nodes at once.
+	targets := append(computeTier(t, 10),
+		tgt("s01", proto.RoleStorage, x86),
+		tgt("s02", proto.RoleStorage, x86),
+	)
+	if err := assignCanaries(targets, nil); err != nil {
+		t.Fatalf("assignCanaries: %v", err)
+	}
+	drv := &stubDriver{hold: 10 * time.Millisecond}
+	res := runCascade(t, targets, specK(proto.Int(4)), drv.driver())
+	if err := res.terminalError(); err != nil {
+		t.Fatalf("clean run reported %v", err)
+	}
+	// s01 is the storage canary and s02 the whole of its fan-out, so the
+	// storage tier can never exceed 1 in flight whatever compute did. The
+	// assertion that matters is that both ran and the run stayed clean.
+	order := drv.startOrder()
+	if len(order) != 12 {
+		t.Fatalf("started %d nodes, want 12", len(order))
+	}
+	if last := order[len(order)-1]; last != "s02" {
+		t.Errorf("last node started = %s, want s02 — tiers are sequential", last)
+	}
+}
+
+func TestCascade_GridStaysInPlannedOrderUnderParallelism(t *testing.T) {
+	// Nodes finish in whatever order the fleet reboots in; the report must
+	// not. A grid that reshuffles between two runs of the same update is one
+	// an operator cannot diff.
+	targets := computeTier(t, 8)
+	drv := &stubDriver{hold: 5 * time.Millisecond, fail: map[string]bool{"c03": true, "c06": true}}
+	res := runCascade(t, targets, specK(proto.Int(4)), drv.driver())
+
+	want := []string{
+		"c01=succeeded", "c02=succeeded", "c03=failed", "c04=succeeded",
+		"c05=succeeded", "c06=failed", "c07=succeeded", "c08=succeeded",
+	}
+	if got := outcomes(res.Results); !eqIDs(got, want) {
+		t.Errorf("grid = %v, want %v", got, want)
+	}
+	if !eqIDs(res.Failed, []string{"c03", "c06"}) {
+		t.Errorf("failed = %v, want [c03 c06] in planned order", res.Failed)
+	}
+}
+
+func TestClampMaxInFlight(t *testing.T) {
+	cases := []struct{ k, tierSize, want int }{
+		{4, 22, 4}, // inert on a big tier — the default is meant to be
+		{4, 5, 4},  // 4 < 5-1, still inert
+		{4, 4, 3},  // one held back
+		{4, 2, 1},  // forced serial
+		{4, 1, 1},  // a lone node: nothing to hold back, but never zero
+		{4, 0, 1},  // empty tier, defensive
+		{0, 22, 1}, // a nonsense k is clamped UP; zero in flight never runs
+	}
+	for _, c := range cases {
+		if got := proto.ClampMaxInFlight(c.k, c.tierSize); got != c.want {
+			t.Errorf("ClampMaxInFlight(%d, %d) = %d, want %d", c.k, c.tierSize, got, c.want)
+		}
 	}
 }

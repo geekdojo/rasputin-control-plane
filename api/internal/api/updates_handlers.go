@@ -259,6 +259,12 @@ func (s *Server) handleCreateSystemUpdate(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	if req.MaxInFlight != nil {
+		if err := req.MaxInFlight.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "maxInFlight "+err.Error())
+			return
+		}
+	}
 	if req.CanarySoakSeconds < 0 || req.CanarySoakSeconds > proto.MaxCanarySoakSeconds {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf(
 			"canarySoakSeconds must be between 0 and %d", proto.MaxCanarySoakSeconds))

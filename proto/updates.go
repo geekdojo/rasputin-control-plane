@@ -315,6 +315,19 @@ type SystemUpdateSpec struct {
 	// has a reason and getting a different one is worse than being told no.
 	// ADR-0005 Decision 6.
 	CanaryNodes []string `json:"canaryNodes,omitempty"`
+	// MaxInFlight bounds how many nodes of ONE TIER update at the same time.
+	// nil means DefaultMaxInFlight.
+	//
+	// `1` reproduces the serial cascade exactly, which is what makes bounded
+	// fan-out expressible as a backwards-compatible change. The governing
+	// constraint on the default is availability blast radius — 4 in flight on
+	// a 24-node compute tier is about a sixth of it rebooting at once — not
+	// control-plane I/O; whether concurrent bundle pulls off a Pi 5 become the
+	// binding constraint is an open measurement owed on the bench (#81), and
+	// the default is a starting point rather than a measured one.
+	//
+	// Always clamped per tier, see ClampMaxInFlight.
+	MaxInFlight *IntOrString `json:"maxInFlight,omitempty"`
 	// CanarySoakSeconds holds a tier's fan-out for this long after its
 	// canaries pass. Defaults to 0 and is expected to stay there: the health
 	// battery that gates mark-good is synchronous, so a soak adds latency
@@ -328,6 +341,39 @@ type SystemUpdateSpec struct {
 // timeout is two hours and a soak spends it doing nothing, so an unbounded
 // value turns a knob into a way to fail a fleet update by timeout.
 const MaxCanarySoakSeconds = 3600
+
+// DefaultMaxInFlight is the fan-out width when the caller does not say
+// (approved 2026-08-11). Unmeasured on purpose and recorded as such: it is
+// chosen for blast radius, and the bench that would turn it into a measured
+// number is its own Spike.
+var DefaultMaxInFlight = Int(4)
+
+// ClampMaxInFlight is the rule that makes a flat default safe to leave alone
+// at every cluster size: min(k, max(1, tierSize−1)).
+//
+// The subtraction is the whole point — it holds AT LEAST ONE NODE BACK in
+// every tier however small. At 22 compute nodes the clamp is inert (4 < 21);
+// at 2 nodes it forces 1, which is serial. Without it, `k=4` on a two-node
+// tier is not a bounded fan-out at all, it is one unbounded batch wearing the
+// word "bounded".
+//
+// It also partly rescues the failure budget. That breaker can only act while
+// nodes are still WAITING to start, so it is inert once tierSize ≤ k; the
+// clamp guarantees k < tierSize whenever tierSize ≥ 2, which keeps the final
+// node gated behind the failure count. One held-back node is a thin brake and
+// this does not make the breaker useful at three nodes — on small fleets the
+// canary is the real gate — but it stops it being structurally dead.
+//
+// ADR-0005 Decision 6.
+func ClampMaxInFlight(k, tierSize int) int {
+	if ceiling := tierSize - 1; k > ceiling {
+		k = ceiling
+	}
+	if k < 1 {
+		return 1
+	}
+	return k
+}
 
 // SystemUpdateChangeType enumerates lifecycle events the api publishes on
 // rasputin.updates.system.<parentJobId>.<change>.

@@ -610,6 +610,11 @@ export function createSystemUpdate(input: {
    *  be a planned target, and never the controlplane or the firewall — the
    *  plan rejects the run rather than quietly canarying somebody else. */
   canaryNodes?: string[];
+  /** How many nodes of one TIER update at once — `4` or `"20%"`, default 4.
+   *  Always clamped to `min(k, max(1, tierSize - 1))`, so at least one node is
+   *  held back in every tier at every cluster size. `1` is the old serial
+   *  cascade exactly. */
+  maxInFlight?: number | string;
   /** Hold each tier's fan-out this long after its canaries pass. Defaults to
    *  0 and is expected to stay there; the health battery that gates mark-good
    *  is already synchronous. Max 3600. */
