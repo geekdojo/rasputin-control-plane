@@ -1164,6 +1164,35 @@ func TestHandleCreateSystemUpdate_MissingSha(t *testing.T) {
 	}
 }
 
+// The soak knob is bounded here rather than left to the operator, because the
+// cascade step's own timeout is two hours and a soak spends it doing nothing:
+// an unbounded value is a way to fail a fleet update by timeout, which reads
+// to the operator as a broken update rather than a bad setting.
+func TestHandleCreateSystemUpdate_CanarySoakBounds(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	cases := []struct {
+		name, body   string
+		wantRejected bool
+	}{
+		{"negative", `{"version":"2026.08.4","canarySoakSeconds":-1}`, true},
+		{"over the cap", `{"version":"2026.08.4","canarySoakSeconds":3601}`, true},
+		{"at the cap", `{"version":"2026.08.4","canarySoakSeconds":3600}`, false},
+		{"the default", `{"version":"2026.08.4"}`, false},
+	}
+	for _, tc := range cases {
+		w := f.do(t, http.MethodPost, "/api/updates/system", tc.body, c)
+		body := strings.TrimSpace(w.Body.String())
+		// As above: the fixture registers no workflows, so an ACCEPTED spec
+		// still 400s from the runner. Which layer rejected is the assertion.
+		rejectedHere := strings.Contains(body, "canarySoakSeconds must be between")
+		if rejectedHere != tc.wantRejected {
+			t.Errorf("%s: handler-rejected=%v, want %v (status %d, body %s)",
+				tc.name, rejectedHere, tc.wantRejected, w.Code, body)
+		}
+	}
+}
+
 // Exactly one keying form. Accepting both would leave the plan silently
 // choosing between "the release" and "this artifact", which are different
 // runs on a mixed-arch cluster (ADR-0005 Decision 11).

@@ -306,7 +306,28 @@ type SystemUpdateSpec struct {
 	// includes the api's own self node id (RASPUTIN_SELF_NODE_ID) — the
 	// operator updates that one manually after the cascade.
 	ExcludeNodes []string `json:"excludeNodes,omitempty"`
+	// CanaryNodes optionally overrides which node is the canary. The plan
+	// otherwise picks the first target in planned order for each (tier, arch)
+	// pair; naming a node here makes it that pair's canary instead. At most
+	// one override per pair, each must be a target of this plan, and none may
+	// be the controlplane or the firewall — the plan fails loudly rather than
+	// silently ignoring an override, because an operator who names a canary
+	// has a reason and getting a different one is worse than being told no.
+	// ADR-0005 Decision 6.
+	CanaryNodes []string `json:"canaryNodes,omitempty"`
+	// CanarySoakSeconds holds a tier's fan-out for this long after its
+	// canaries pass. Defaults to 0 and is expected to stay there: the health
+	// battery that gates mark-good is synchronous, so a soak adds latency
+	// without adding a signal we do not already take. The knob exists so that
+	// late-manifesting field failures are a config change rather than a
+	// redesign (ADR-0005 Decision 6, recorded as a revisit criterion).
+	CanarySoakSeconds int `json:"canarySoakSeconds,omitempty"`
 }
+
+// MaxCanarySoakSeconds bounds CanarySoakSeconds. The cascade step's own
+// timeout is two hours and a soak spends it doing nothing, so an unbounded
+// value turns a knob into a way to fail a fleet update by timeout.
+const MaxCanarySoakSeconds = 3600
 
 // SystemUpdateChangeType enumerates lifecycle events the api publishes on
 // rasputin.updates.system.<parentJobId>.<change>.
@@ -319,6 +340,15 @@ const (
 	SystemUpdateNodeFailed    SystemUpdateChangeType = "node_failed"
 	SystemUpdateCompleted     SystemUpdateChangeType = "completed"
 	SystemUpdateAborted       SystemUpdateChangeType = "aborted"
+	// SystemUpdateCanaryPassed / SystemUpdateCanaryFailed are the GATE's
+	// verdict for one (tier, arch) pair, which is a different fact from the
+	// canary node's own outcome — that already arrives as node_succeeded /
+	// node_failed with Canary set. The gate event is the one that says whether
+	// the arch's fan-out is authorised, and it is what a results grid renders
+	// as the row separating "one node proved the image" from "and then twenty
+	// more got it". ADR-0005 Decisions 6 + 11.
+	SystemUpdateCanaryPassed SystemUpdateChangeType = "canary_passed"
+	SystemUpdateCanaryFailed SystemUpdateChangeType = "canary_failed"
 )
 
 // SystemUpdateChangeEvt is the payload published on each lifecycle
@@ -331,6 +361,17 @@ type SystemUpdateChangeEvt struct {
 	ChildJobID  string                 `json:"childJobId,omitempty"`
 	BundleID    string                 `json:"bundleId,omitempty"`
 	Detail      string                 `json:"detail,omitempty"`
+	// Tier is the node's role, which is also the unit the cascade advances in:
+	// compute → storage → controlplane → firewall, sequential between tiers.
+	// Populated on node_* and canary_*.
+	Tier NodeRole `json:"tier,omitempty"`
+	// Compatible is the release SKU of the artifact this node is receiving —
+	// the arch, in practice. Carried because the canary is scoped per arch, so
+	// "the canary passed" is only ever a claim about one of them.
+	Compatible string `json:"compatible,omitempty"`
+	// Canary marks a node_* event as belonging to a canary rather than to a
+	// fan-out target.
+	Canary bool `json:"canary,omitempty"`
 	// Counts is filled on planned/completed/aborted: total, succeeded, failed.
 	Counts *SystemUpdateCounts `json:"counts,omitempty"`
 	// Skipped is filled on planned/completed with the per-node reason each

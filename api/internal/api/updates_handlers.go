@@ -259,6 +259,15 @@ func (s *Server) handleCreateSystemUpdate(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	if req.CanarySoakSeconds < 0 || req.CanarySoakSeconds > proto.MaxCanarySoakSeconds {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"canarySoakSeconds must be between 0 and %d", proto.MaxCanarySoakSeconds))
+		return
+	}
+	// The rest of the canary rules — is it a target, is it the controlplane,
+	// two overrides for one tier — need the plan and are enforced there, where
+	// the failure is a job that never touches a node rather than a 400 that
+	// duplicates the planner's knowledge of the fleet.
 	spec, _ := json.Marshal(req)
 	j, err := s.runner.Submit(r.Context(), "system.update", spec, creator(r))
 	if err != nil {
