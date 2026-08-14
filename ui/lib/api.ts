@@ -596,8 +596,14 @@ export function pullUpdate(component: string, channel?: string): Promise<PullRes
 // createSystemUpdate kicks off a system.update saga. Returns the parent
 // job; per-node child jobs are spawned by the saga and visible at
 // /api/jobs?parentId=<parent.id>.
+// Pass `version` (+ optional `component`, default "os") for a FLEET update —
+// the plan then resolves the right per-arch bundle for each node, so a mixed
+// arm64/amd64 cluster updates completely. Pass `bundleSha256` for a targeted
+// run against one specific artifact. Exactly one of the two.
 export function createSystemUpdate(input: {
-  bundleSha256: string;
+  version?: string;
+  component?: string;
+  bundleSha256?: string;
   excludeNodes?: string[];
 }): Promise<Job> {
   return jsonFetch<Job>('/api/updates/system', {

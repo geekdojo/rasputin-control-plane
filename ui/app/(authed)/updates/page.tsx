@@ -194,6 +194,17 @@ export default function UpdatesPage() {
           </div>
         )}
 
+        {bundles.length > 0 && (
+          <>
+            <SectionLabel>STAGED RELEASES</SectionLabel>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
+              {groupBundlesByRelease(bundles).map((rel) => (
+                <ReleaseRow key={`${rel.component}:${rel.version}`} release={rel} nodes={nodes} />
+              ))}
+            </div>
+          </>
+        )}
+
         <SectionLabel>BUNDLES</SectionLabel>
         {bundles.length === 0 ? (
           <Hint style={{ marginBottom: 18 }}>
@@ -482,6 +493,126 @@ function UploadBundleForm({ onUploaded }: { onUploaded: (b: Bundle) => void }) {
   );
 }
 
+const FIREWALL_COMPATIBLE = 'rasputin-fw-n100';
+
+/** A release is one artifact per architecture, and UPDATE ALL acts on the
+ *  release — not on one of its artifacts. Grouping the staged bundles back into
+ *  releases is what lets the button mean "all nodes" instead of "all nodes of
+ *  whichever arch I happened to click". */
+interface StagedRelease {
+  version: string;
+  component: 'os' | 'fw';
+  bundles: Bundle[];
+}
+
+function groupBundlesByRelease(bundles: Bundle[]): StagedRelease[] {
+  const byKey = new Map<string, StagedRelease>();
+  for (const b of bundles) {
+    const component = b.compatible === FIREWALL_COMPATIBLE ? 'fw' : 'os';
+    const key = `${component}:${b.version}`;
+    const rel = byKey.get(key) ?? { version: b.version, component, bundles: [] };
+    rel.bundles.push(b);
+    byKey.set(key, rel);
+  }
+  return [...byKey.values()];
+}
+
+/** Which OS SKU a node needs. Mirrors releases.ArchCompatible — a node that
+ *  never reported its arch resolves to nothing, deliberately, rather than
+ *  being guessed into amd64. */
+function nodeCompatible(n: Node): string | null {
+  if (n.role === 'firewall') return FIREWALL_COMPATIBLE;
+  if (n.architecture === 'amd64') return 'rasputin-n100';
+  if (n.architecture === 'arm64') return 'rasputin-rpi-arm64';
+  return null;
+}
+
+function ReleaseRow({ release, nodes }: { release: StagedRelease; nodes: Node[] }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const staged = new Set(release.bundles.map((b) => b.compatible));
+  const inScope = nodes.filter((n) =>
+    release.component === 'fw' ? n.role === 'firewall' : n.role !== 'firewall',
+  );
+  // SKUs the fleet needs that this release has no staged artifact for. The
+  // plan step refuses to run in exactly this state, so say so before the click
+  // rather than after.
+  const missing = [
+    ...new Set(
+      inScope
+        .map(nodeCompatible)
+        .filter((c): c is string => c !== null)
+        .filter((c) => !staged.has(c)),
+    ),
+  ];
+  const covered = inScope.filter((n) => {
+    const c = nodeCompatible(n);
+    return c !== null && staged.has(c);
+  }).length;
+
+  async function go() {
+    if (
+      !confirm(
+        `Update every online ${release.component === 'fw' ? 'firewall' : 'node'} to ${release.version}? ` +
+          `Each node receives the artifact for its own architecture. Nodes update one at a time in role-safe order ` +
+          `(compute → storage → firewall). The controlplane is not included — update it separately from its node ` +
+          `card afterward. The cascade halts on the first failure.`,
+      )
+    )
+      return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await createSystemUpdate({ version: release.version, component: release.component });
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${HAIR}`, padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <span style={{ color: FG, fontSize: 11, fontFamily: MONO, letterSpacing: '0.06em' }}>
+        {release.component === 'fw' ? 'FIREWALL' : 'OS'} {release.version}
+      </span>
+      {[...staged].sort().map((c) => (
+        <Badge key={c} color="#4ade80">
+          {release.bundles.find((b) => b.compatible === c)?.architecture || c}
+        </Badge>
+      ))}
+      {missing.map((c) => (
+        <Badge key={c} color="#fbbf24">
+          {c} NOT STAGED
+        </Badge>
+      ))}
+      <span style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
+        {covered}/{inScope.length} node{inScope.length === 1 ? '' : 's'} covered
+      </span>
+      <div style={{ marginLeft: 'auto' }}>
+        <Btn
+          small
+          variant="primary"
+          disabled={busy || missing.length > 0 || covered === 0}
+          title={
+            missing.length > 0
+              ? `Stage ${missing.join(', ')} first — the plan refuses to run a fleet update that would leave nodes behind`
+              : 'Cascade this release across every online node, each on its own architecture'
+          }
+          onClick={go}
+        >
+          {busy ? '…' : 'UPDATE ALL'}
+        </Btn>
+      </div>
+      {err && <span style={{ color: '#f87171', fontSize: 9, width: '100%' }}>{err}</span>}
+    </div>
+  );
+}
+
+/** The targeted form: cascade ONE artifact to whatever matches it. Kept for
+ *  deploying a specific bundle, and named so it cannot be mistaken for the
+ *  fleet action — that one lives on the release row above. */
 function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -489,7 +620,9 @@ function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
   async function go() {
     if (
       !confirm(
-        `Update every online node to ${bundle.version}? Nodes update one at a time in role-safe order (compute → storage → firewall). The controlplane is not included — update it separately from its node card afterward. The cascade halts on the first failure.`,
+        `Cascade this ${bundle.compatible} bundle (${bundle.version}) to every online node that takes it? ` +
+          `Nodes on any OTHER architecture are NOT updated by this — use UPDATE ALL on the release above for that. ` +
+          `The controlplane is not included. The cascade halts on the first failure.`,
       )
     )
       return;
@@ -506,8 +639,8 @@ function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
 
   return (
     <>
-      <Btn small disabled={busy} title="Cascade this bundle across every online node" onClick={go}>
-        {busy ? '…' : 'UPDATE ALL'}
+      <Btn small disabled={busy} title={`Cascade only this ${bundle.compatible} artifact`} onClick={go}>
+        {busy ? '…' : 'UPDATE MATCHING'}
       </Btn>
       {err && <span style={{ color: '#f87171', fontSize: 9 }}>{err}</span>}
     </>

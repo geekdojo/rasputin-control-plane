@@ -1164,6 +1164,41 @@ func TestHandleCreateSystemUpdate_MissingSha(t *testing.T) {
 	}
 }
 
+// Exactly one keying form. Accepting both would leave the plan silently
+// choosing between "the release" and "this artifact", which are different
+// runs on a mixed-arch cluster (ADR-0005 Decision 11).
+func TestHandleCreateSystemUpdate_SpecForms(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	// The fixture registers no workflows, so an accepted spec still 400s —
+	// from the RUNNER ("unknown job kind"), not the handler. Asserting on which
+	// layer rejected is what actually distinguishes the cases here.
+	cases := []struct {
+		name, body   string
+		wantRejected bool
+	}{
+		{"neither form", `{}`, true},
+		{"both forms", `{"version":"2026.08.4","bundleSha256":"deadbeef"}`, true},
+		{"unknown component", `{"version":"2026.08.4","component":"nope"}`, true},
+		{"version form", `{"version":"2026.08.4"}`, false},
+		{"version + component", `{"version":"2026.08.4","component":"fw"}`, false},
+		{"bundle form", `{"bundleSha256":"deadbeef"}`, false},
+	}
+	for _, tc := range cases {
+		w := f.do(t, http.MethodPost, "/api/updates/system", tc.body, c)
+		body := strings.TrimSpace(w.Body.String())
+		rejectedHere := strings.Contains(body, "exactly one of version or bundleSha256") ||
+			strings.Contains(body, "unknown component")
+		if rejectedHere != tc.wantRejected {
+			t.Errorf("%s: handler-rejected=%v, want %v (status %d, body %s)",
+				tc.name, rejectedHere, tc.wantRejected, w.Code, body)
+		}
+		if tc.wantRejected && w.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d", tc.name, w.Code)
+		}
+	}
+}
+
 func TestHandleUploadBundle_TooLarge(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)

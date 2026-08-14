@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -58,15 +59,38 @@ func SystemUpdateWorkflow(
 	}
 }
 
-// systemPlanState is what step 1 stashes for step 2 to read. We don't have
-// shared step memory, so we re-derive it by re-running the same plan; the
-// stash is purely for observability (returned as step result for the UI).
+// plannedTarget is one node and the bundle IT will receive. The bundle is
+// per-target rather than per-run because a mixed arm64/amd64 tier takes two
+// different artifacts of the same release (ADR-0005 Decision 11).
+type plannedTarget struct {
+	NodeID       string `json:"nodeId"`
+	BundleSHA256 string `json:"bundleSha256"`
+	Compatible   string `json:"compatible"`
+	node         *proto.Node
+}
+
+// systemPlanState is what step 1 stashes for step 2 to read. Both steps build
+// it through the same buildPlan call, so the cascade cannot silently disagree
+// with the plan the operator was shown.
 type systemPlanState struct {
-	BundleSHA256 string              `json:"bundleSha256"`
+	// BundleSHA256 / BundleVer describe the run as a whole. On a
+	// Version-keyed run BundleSHA256 is empty — there is no single bundle,
+	// which is the point — and each target carries its own.
+	BundleSHA256 string              `json:"bundleSha256,omitempty"`
 	BundleVer    string              `json:"bundleVersion"`
-	Targets      []string            `json:"targets"`
+	Component    string              `json:"component,omitempty"`
+	Targets      []plannedTarget     `json:"targets"`
 	Skipped      []proto.SkippedNode `json:"skipped"`
 	SelfNodeID   string              `json:"selfNodeId,omitempty"`
+}
+
+// targetIDs is the ordered node-id list, for logs and the change event.
+func (s systemPlanState) targetIDs() []string {
+	ids := make([]string, len(s.Targets))
+	for i, t := range s.Targets {
+		ids[i] = t.NodeID
+	}
+	return ids
 }
 
 // stranded returns the skips nobody asked for — nodes with no artifact for
@@ -82,6 +106,179 @@ func (s systemPlanState) stranded() []proto.SkippedNode {
 	return out
 }
 
+// ----- The plan -----------------------------------------------------------
+
+// buildPlan resolves a spec into the ordered targets, each with the bundle it
+// will receive, plus the reasoned skips. Both the plan and cascade steps call
+// it, so the cascade cannot silently act on a different plan than the one the
+// operator was shown at `planned`.
+//
+// Two spec forms:
+//
+//   - Version (+ Component) — the fleet form. The correct per-arch bundle is
+//     resolved FOR EACH NODE. Every arch present in the plan must already be
+//     staged; if one is not, this fails LOUDLY here rather than surfacing 40
+//     minutes later as a mid-cascade download failure on node fourteen.
+//   - BundleSHA256 — the targeted form. One bundle, and nodes whose SKU does
+//     not match it are skipped (stranded if it is an arch mismatch).
+func buildPlan(
+	ctx context.Context,
+	store *Store,
+	inv *inventory.Store,
+	spec proto.SystemUpdateSpec,
+	cfg SystemUpdateConfig,
+) (systemPlanState, error) {
+	if (spec.Version == "") == (spec.BundleSHA256 == "") {
+		return systemPlanState{}, errors.New("exactly one of version or bundleSha256 is required")
+	}
+
+	all, err := inv.List(ctx)
+	if err != nil {
+		return systemPlanState{}, fmt.Errorf("inventory: %w", err)
+	}
+	exclude := map[string]struct{}{}
+	for _, id := range spec.ExcludeNodes {
+		exclude[id] = struct{}{}
+	}
+	if cfg.SelfNodeID != "" {
+		exclude[cfg.SelfNodeID] = struct{}{}
+	}
+
+	if spec.BundleSHA256 != "" {
+		bundle, err := store.GetBundle(ctx, spec.BundleSHA256)
+		if err != nil {
+			return systemPlanState{}, fmt.Errorf("bundle lookup: %w", err)
+		}
+		if bundle == nil {
+			return systemPlanState{}, fmt.Errorf("bundle %s not found", spec.BundleSHA256)
+		}
+		nodes, skipped := planTargets(all, exclude, bundle.Compatible)
+		targets := make([]plannedTarget, len(nodes))
+		for i, n := range nodes {
+			targets[i] = plannedTarget{
+				NodeID: n.ID, BundleSHA256: bundle.SHA256, Compatible: bundle.Compatible, node: n,
+			}
+		}
+		return systemPlanState{
+			BundleSHA256: bundle.SHA256, BundleVer: bundle.Version,
+			Targets: targets, Skipped: skipped, SelfNodeID: cfg.SelfNodeID,
+		}, nil
+	}
+
+	compID := spec.Component
+	if compID == "" {
+		compID = "os"
+	}
+	comp, ok := releases.ComponentByID(compID)
+	if !ok {
+		return systemPlanState{}, fmt.Errorf("unknown component %q", compID)
+	}
+
+	// Index what is staged for this version by SKU, so the resolution below is
+	// a map lookup rather than a query per node.
+	staged, err := stagedByCompatible(ctx, store, spec.Version)
+	if err != nil {
+		return systemPlanState{}, err
+	}
+
+	nodes, skipped := planTargets(all, exclude, "") // "" = no single-bundle filter
+	var (
+		targets []plannedTarget
+		// missing maps a SKU with no staged bundle to the nodes that need it.
+		// Collected across ALL nodes before failing, so the operator is told
+		// everything they have to stage rather than one arch at a time.
+		missing     = map[string][]string{}
+		missingSKUs []string
+	)
+	for _, n := range nodes {
+		want, known := expectedCompatible(n)
+		if !known {
+			// planTargets already rejects these when a bundle SKU is given;
+			// with no filter they reach here, and they are still stranded.
+			skipped = append(skipped, proto.SkippedNode{
+				NodeID: n.ID, Reason: proto.SkipNoArtifactForArch,
+				Detail: fmt.Sprintf("architecture %q has no known artifact", n.Architecture),
+			})
+			continue
+		}
+		if !componentCovers(comp, want) {
+			// An OS run reaching the firewall, or the reverse. The designed
+			// single-SKU filter (Decision 8) — never a stranding, and the
+			// reason it survives keying on a release at all.
+			skipped = append(skipped, proto.SkippedNode{
+				NodeID: n.ID, Reason: proto.SkipFirewallSKU,
+				Detail: fmt.Sprintf("needs %s, this run updates %s", want, comp.Label),
+			})
+			continue
+		}
+		b, ok := staged[want]
+		if !ok {
+			if _, seen := missing[want]; !seen {
+				missingSKUs = append(missingSKUs, want)
+			}
+			missing[want] = append(missing[want], n.ID)
+			continue
+		}
+		targets = append(targets, plannedTarget{
+			NodeID: n.ID, BundleSHA256: b.SHA256, Compatible: want, node: n,
+		})
+	}
+
+	// The staging precondition. Failing here is the whole point: a node that
+	// has no artifact staged is not a node to strand quietly, it is an
+	// operator error that is one click from being fixed, and finding out
+	// mid-cascade is strictly worse than finding out before anything reboots.
+	if len(missing) > 0 {
+		sort.Strings(missingSKUs)
+		parts := make([]string, 0, len(missingSKUs))
+		for _, sku := range missingSKUs {
+			ids := missing[sku]
+			sort.Strings(ids)
+			parts = append(parts, fmt.Sprintf("%s (%d node(s): %s)", sku, len(ids), strings.Join(ids, ", ")))
+		}
+		return systemPlanState{}, fmt.Errorf(
+			"%s %s is not staged for every architecture in this cluster — stage %s first",
+			comp.Label, spec.Version, strings.Join(parts, "; "))
+	}
+
+	return systemPlanState{
+		BundleVer: spec.Version, Component: comp.ID,
+		Targets: targets, Skipped: skipped, SelfNodeID: cfg.SelfNodeID,
+	}, nil
+}
+
+// stagedByCompatible indexes the locally-staged bundles of one version by SKU.
+// A version has at most one bundle per SKU; a duplicate would mean two
+// artifacts claiming the same version and arch, and the first wins
+// deterministically because ListBundles orders by upload time descending —
+// i.e. the most recently staged.
+func stagedByCompatible(ctx context.Context, store *Store, version string) (map[string]*Bundle, error) {
+	all, err := store.ListBundles(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list bundles: %w", err)
+	}
+	out := map[string]*Bundle{}
+	for _, b := range all {
+		if b.Version != version || b.Compatible == "" {
+			continue
+		}
+		if _, seen := out[b.Compatible]; !seen {
+			out[b.Compatible] = b
+		}
+	}
+	return out, nil
+}
+
+// componentCovers reports whether a SKU belongs to this component's product
+// line. The firewall has exactly one SKU; the OS has one per arch, which is
+// every SKU that is not the firewall's.
+func componentCovers(comp releases.Component, sku string) bool {
+	if comp.Kind == releases.KindRootfsAB || comp.Compatible == releases.FirewallCompatible {
+		return sku == releases.FirewallCompatible
+	}
+	return sku != releases.FirewallCompatible
+}
+
 // ----- Step 1: plan -------------------------------------------------------
 
 func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs.DoFn {
@@ -90,43 +287,12 @@ func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs
 		if err := json.Unmarshal(sc.Spec, &spec); err != nil {
 			return nil, fmt.Errorf("invalid spec: %w", err)
 		}
-		if spec.BundleSHA256 == "" {
-			return nil, errors.New("bundleSha256 is required")
-		}
-		bundle, err := store.GetBundle(sc.Ctx, spec.BundleSHA256)
+		state, err := buildPlan(sc.Ctx, store, inv, spec, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("bundle lookup: %w", err)
+			return nil, err
 		}
-		if bundle == nil {
-			return nil, fmt.Errorf("bundle %s not found", spec.BundleSHA256)
-		}
+		targets, skipped, ids := state.Targets, state.Skipped, state.targetIDs()
 
-		all, err := inv.List(sc.Ctx)
-		if err != nil {
-			return nil, fmt.Errorf("inventory: %w", err)
-		}
-
-		exclude := map[string]struct{}{}
-		for _, id := range spec.ExcludeNodes {
-			exclude[id] = struct{}{}
-		}
-		if cfg.SelfNodeID != "" {
-			exclude[cfg.SelfNodeID] = struct{}{}
-		}
-
-		targets, skipped := planTargets(all, exclude, bundle.Compatible)
-		ids := make([]string, len(targets))
-		for i, n := range targets {
-			ids[i] = n.ID
-		}
-
-		state := systemPlanState{
-			BundleSHA256: spec.BundleSHA256,
-			BundleVer:    bundle.Version,
-			Targets:      ids,
-			Skipped:      skipped,
-			SelfNodeID:   cfg.SelfNodeID,
-		}
 		sc.Log("info", fmt.Sprintf("plan: %d target(s), %d skipped — order: %v",
 			len(targets), len(skipped), ids))
 		// Say the stranded nodes out loud at plan time, not only in the
@@ -140,8 +306,8 @@ func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs
 		publishSystemChange(sc.NATS, proto.SystemUpdateChangeEvt{
 			ParentJobID: sc.JobID,
 			Change:      proto.SystemUpdatePlanned,
-			BundleID:    spec.BundleSHA256,
-			Detail:      bundle.Version,
+			BundleID:    state.BundleSHA256, // empty on a release-keyed run
+			Detail:      state.BundleVer,
 			Counts: &proto.SystemUpdateCounts{
 				Total: len(targets), Skipped: len(skipped), Stranded: len(state.stranded()),
 			},
@@ -254,26 +420,23 @@ func systemCascade(
 		if err := json.Unmarshal(sc.Spec, &spec); err != nil {
 			return nil, fmt.Errorf("invalid spec: %w", err)
 		}
-		// Re-derive the plan; can't share state across steps directly.
-		all, err := inv.List(sc.Ctx)
-		if err != nil {
-			return nil, fmt.Errorf("inventory: %w", err)
+		// Prefer the plan the operator was actually shown; re-derive only if the
+		// step result is missing (an older job resumed after a restart). The
+		// re-derivation used to be the ONLY path, which meant the cascade could
+		// act on a different plan than the `planned` event advertised if
+		// inventory moved between steps.
+		var state systemPlanState
+		if raw, ok := sc.PriorResults["plan"]; ok {
+			if err := json.Unmarshal(raw, &state); err != nil {
+				return nil, fmt.Errorf("read plan result: %w", err)
+			}
+		} else {
+			var err error
+			if state, err = buildPlan(sc.Ctx, store, inv, spec, cfg); err != nil {
+				return nil, err
+			}
 		}
-		exclude := map[string]struct{}{}
-		for _, id := range spec.ExcludeNodes {
-			exclude[id] = struct{}{}
-		}
-		if cfg.SelfNodeID != "" {
-			exclude[cfg.SelfNodeID] = struct{}{}
-		}
-		// Re-derive the same SKU filter the plan step used, so the cascade never
-		// hands an incompatible bundle to a node (esp. an OS bundle to the
-		// firewall's openwrt-ab backend).
-		bundleCompat := ""
-		if b, _ := store.GetBundle(sc.Ctx, spec.BundleSHA256); b != nil {
-			bundleCompat = b.Compatible
-		}
-		targets, _ := planTargets(all, exclude, bundleCompat)
+		targets := state.Targets
 
 		var (
 			succeeded []string
@@ -281,81 +444,85 @@ func systemCascade(
 			remaining []string
 		)
 
-		for i, node := range targets {
+		for i, target := range targets {
 			// If we already failed once, the remaining nodes are skipped.
 			if len(failed) > 0 {
-				remaining = append(remaining, node.ID)
-				for _, n := range targets[i+1:] {
-					remaining = append(remaining, n.ID)
+				remaining = append(remaining, target.NodeID)
+				for _, t := range targets[i+1:] {
+					remaining = append(remaining, t.NodeID)
 				}
 				break
 			}
 
+			// The bundle comes from the TARGET, not the spec — that is the
+			// whole of Decision 11 at the point it matters. On a mixed tier
+			// consecutive iterations hand out different artifacts of the same
+			// release.
 			childSpec, _ := json.Marshal(map[string]string{
-				"nodeId":       node.ID,
-				"bundleSha256": spec.BundleSHA256,
+				"nodeId":       target.NodeID,
+				"bundleSha256": target.BundleSHA256,
 			})
 			child, err := runner.SubmitChild(sc.Ctx, "node.update", childSpec, "system.update", sc.JobID)
 			if err != nil {
-				failed = append(failed, node.ID)
-				sc.Log("error", fmt.Sprintf("submit child for %s: %v", node.ID, err))
+				failed = append(failed, target.NodeID)
+				sc.Log("error", fmt.Sprintf("submit child for %s: %v", target.NodeID, err))
 				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
 					ParentJobID: sc.JobID,
 					Change:      proto.SystemUpdateNodeFailed,
-					NodeID:      node.ID,
-					BundleID:    spec.BundleSHA256,
+					NodeID:      target.NodeID,
+					BundleID:    target.BundleSHA256,
 					Detail:      err.Error(),
 					Ts:          time.Now().UTC(),
 				})
 				continue
 			}
-			sc.Log("info", fmt.Sprintf("started child %s for %s", child.ID, node.ID))
+			sc.Log("info", fmt.Sprintf("started child %s for %s (%s)", child.ID, target.NodeID, target.Compatible))
 			publishSystemChange(nc, proto.SystemUpdateChangeEvt{
 				ParentJobID: sc.JobID,
 				Change:      proto.SystemUpdateNodeStarted,
-				NodeID:      node.ID,
+				NodeID:      target.NodeID,
 				ChildJobID:  child.ID,
-				BundleID:    spec.BundleSHA256,
+				BundleID:    target.BundleSHA256,
 				Ts:          time.Now().UTC(),
 			})
 
 			outcome, derr := waitForChild(sc.Ctx, jobStore, nc, child.ID, 30*time.Minute)
 			if derr != nil {
-				failed = append(failed, node.ID)
-				sc.Log("error", fmt.Sprintf("%s: %v", node.ID, derr))
+				failed = append(failed, target.NodeID)
+				sc.Log("error", fmt.Sprintf("%s: %v", target.NodeID, derr))
 				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
 					ParentJobID: sc.JobID,
 					Change:      proto.SystemUpdateNodeFailed,
-					NodeID:      node.ID,
+					NodeID:      target.NodeID,
 					ChildJobID:  child.ID,
-					BundleID:    spec.BundleSHA256,
+					BundleID:    target.BundleSHA256,
 					Detail:      derr.Error(),
 					Ts:          time.Now().UTC(),
 				})
 				continue
 			}
 			if outcome != jobs.StatusSucceeded {
-				failed = append(failed, node.ID)
-				sc.Log("error", fmt.Sprintf("%s: child terminated %s", node.ID, outcome))
+				failed = append(failed, target.NodeID)
+				sc.Log("error", fmt.Sprintf("%s: child terminated %s", target.NodeID, outcome))
 				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
 					ParentJobID: sc.JobID,
 					Change:      proto.SystemUpdateNodeFailed,
-					NodeID:      node.ID,
+					NodeID:      target.NodeID,
 					ChildJobID:  child.ID,
-					BundleID:    spec.BundleSHA256,
+					BundleID:    target.BundleSHA256,
 					Detail:      fmt.Sprintf("child %s", outcome),
 					Ts:          time.Now().UTC(),
 				})
 				continue
 			}
-			succeeded = append(succeeded, node.ID)
-			sc.Log("info", fmt.Sprintf("%s: updated", node.ID))
+			succeeded = append(succeeded, target.NodeID)
+			sc.Log("info", fmt.Sprintf("%s: updated", target.NodeID))
 			publishSystemChange(nc, proto.SystemUpdateChangeEvt{
 				ParentJobID: sc.JobID,
 				Change:      proto.SystemUpdateNodeSucceeded,
-				NodeID:      node.ID,
+				NodeID:      target.NodeID,
 				ChildJobID:  child.ID,
-				BundleID:    spec.BundleSHA256,
+				BundleID:    target.BundleSHA256,
 				Ts:          time.Now().UTC(),
 			})
 		}
