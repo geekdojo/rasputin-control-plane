@@ -229,6 +229,67 @@ func TestPullUpdate_PartialStagingIsReportedNotSwallowed(t *testing.T) {
 	}
 }
 
+// When NOTHING lands the pull is an ordinary failure — but it still reports
+// per-artifact detail rather than only the first error hit, which is the whole
+// reason the loop stopped bailing out.
+func TestPullUpdate_NothingStagedIsStillAFailureWithDetail(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+
+	mux := http.NewServeMux()
+	var base string
+	mux.HandleFunc("/repos/geekdojo/rasputin-os/releases", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"tag_name": "2026.06.0-dev.99", "prerelease": true,
+			"assets": []map[string]any{
+				{"name": "manifest.json", "browser_download_url": base + "/os-manifest"},
+			},
+		}})
+	})
+	mux.HandleFunc("/os-manifest", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(releases.Manifest{
+			Version: "2026.06.0-dev.99", Channel: "dev",
+			Artifacts: []releases.ManifestArtifact{
+				{SKU: "n100", Architecture: "amd64", Compatible: "rasputin-n100",
+					Raucb: "gone-amd64.raspbundle", SHA256: strings.Repeat("a", 64)},
+				{SKU: "rpi", Architecture: "arm64", Compatible: "rasputin-rpi-arm64",
+					Raucb: "gone-arm64.raspbundle", SHA256: strings.Repeat("b", 64)},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	base = srv.URL
+	t.Cleanup(srv.Close)
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(srv.URL), "dev")
+
+	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"os","channel":"dev"}`, c)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("total failure: status %d, want 502; body %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Staged []struct{ Architecture string } `json:"staged"`
+		Failed []struct {
+			Architecture string `json:"architecture"`
+			Error        string `json:"error"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(res.Staged) != 0 {
+		t.Errorf("staged = %+v, want none", res.Staged)
+	}
+	// Both arches are named, not just whichever failed first.
+	if len(res.Failed) != 2 {
+		t.Fatalf("failed = %+v, want both arches reported", res.Failed)
+	}
+	for _, a := range res.Failed {
+		if a.Error == "" {
+			t.Errorf("%s failed with no reason", a.Architecture)
+		}
+	}
+}
+
 // The arch-set badge: a cluster with an arm64 node must not read STAGED when
 // only the amd64 bundle is present, and a cluster with no arm64 hardware must
 // not be nagged for a bundle it will never use.
