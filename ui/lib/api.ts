@@ -615,6 +615,12 @@ export function createSystemUpdate(input: {
    *  held back in every tier at every cluster size. `1` is the old serial
    *  cascade exactly. */
   maxInFlight?: number | string;
+  /** How many nodes of one TIER may fail before the cascade stops STARTING new
+   *  ones — `3` or `"15%"`, default `"15%"`. In-flight nodes finish. An
+   *  absolute `0` means unlimited; a percentage that rounds to zero floors to
+   *  1, because a percentage is a request for a proportionate brake and never
+   *  a request to remove it. */
+  maxFailures?: number | string;
   /** Hold each tier's fan-out this long after its canaries pass. Defaults to
    *  0 and is expected to stay there; the health battery that gates mark-good
    *  is already synchronous. Max 3600. */

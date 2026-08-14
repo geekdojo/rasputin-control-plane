@@ -328,6 +328,18 @@ type SystemUpdateSpec struct {
 	//
 	// Always clamped per tier, see ClampMaxInFlight.
 	MaxInFlight *IntOrString `json:"maxInFlight,omitempty"`
+	// MaxFailures is how many nodes of ONE TIER may fail before the cascade
+	// stops STARTING new ones. Nodes already in flight are allowed to finish.
+	// nil means DefaultMaxFailures; an absolute `0` means unlimited.
+	//
+	// The rationale is that the canary has already cleared the image, so
+	// several independent failures during fan-out indicate fleet
+	// heterogeneity rather than a bad bundle — a condition an operator should
+	// look at before it touches twenty more nodes.
+	//
+	// See ResolveMaxFailures for why it is tier-relative and what a percentage
+	// that rounds to zero means.
+	MaxFailures *IntOrString `json:"maxFailures,omitempty"`
 	// CanarySoakSeconds holds a tier's fan-out for this long after its
 	// canaries pass. Defaults to 0 and is expected to stay there: the health
 	// battery that gates mark-good is synchronous, so a soak adds latency
@@ -375,6 +387,47 @@ func ClampMaxInFlight(k, tierSize int) int {
 	return k
 }
 
+// DefaultMaxFailures is the failure budget when the caller does not say.
+//
+// 15% lands on the approved anchor — a 24-node cluster's ~22-node compute tier
+// gives floor(3.3) = 3 — and degrades sensibly on the way down: 8 nodes → 1,
+// 3 nodes → 1. An absolute 3 was rejected because it can never trip on a
+// 2-node compute tier (Bryce, 2026-08-11: "3 is fine for 24 nodes, useless on
+// a 3-node cluster"). ADR-0005 Decision 7.
+var DefaultMaxFailures = Percent(15)
+
+// UnlimitedFailures is the budget that never trips.
+const UnlimitedFailures = 0
+
+// ResolveMaxFailures turns the budget into a count of nodes for one tier.
+//
+// Two rules that are not symmetric, deliberately:
+//
+//   - an ABSOLUTE zero means UNLIMITED. It is the only way to say "attempt
+//     every node whatever happens", and best-effort fan-out (Decision 7) makes
+//     that a legitimate thing to want.
+//   - a PERCENTAGE that rounds down to zero floors to ONE. 15% of a 3-node
+//     tier is 0.45, and reading that as "unlimited" would turn the safest-
+//     sounding setting into the least safe one on the smallest cluster —
+//     exactly backwards. A percentage is a request for a proportionate brake,
+//     never a request to remove it.
+//
+// ⚠️ The breaker is weak on a small cluster whatever this returns, because it
+// can only act while nodes are still WAITING to start — it bites only when
+// tierSize > k. Decision 6's clamp stops that being structurally dead by
+// always holding one node back, but one node is a thin brake. On small fleets
+// safety comes from the canary and from per-node A/B rollback, and the ADR
+// states that rather than implying otherwise.
+func ResolveMaxFailures(v IntOrString, tierSize int) int {
+	if !v.Percent {
+		return v.Value
+	}
+	if n := v.Resolve(tierSize); n > 0 {
+		return n
+	}
+	return 1
+}
+
 // SystemUpdateChangeType enumerates lifecycle events the api publishes on
 // rasputin.updates.system.<parentJobId>.<change>.
 type SystemUpdateChangeType string
@@ -395,6 +448,12 @@ const (
 	// more got it". ADR-0005 Decisions 6 + 11.
 	SystemUpdateCanaryPassed SystemUpdateChangeType = "canary_passed"
 	SystemUpdateCanaryFailed SystemUpdateChangeType = "canary_failed"
+	// SystemUpdateBudgetSpent — a tier's failure budget was reached and the
+	// cascade stopped starting new nodes there. Its own event because the
+	// alternative is an operator inferring it from a run that simply stopped:
+	// "we stopped on purpose" and "it ran out of nodes" look identical in a
+	// grid full of not-attempted rows. ADR-0005 Decision 7.
+	SystemUpdateBudgetSpent SystemUpdateChangeType = "budget_spent"
 )
 
 // SystemUpdateChangeEvt is the payload published on each lifecycle

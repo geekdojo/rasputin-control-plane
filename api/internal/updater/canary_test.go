@@ -133,8 +133,8 @@ func (s *stubDriver) driver() childDriver {
 // which is the feature, so pinning order there would be testing the scheduler
 // for a property it deliberately does not have.
 func serial() proto.SystemUpdateSpec {
-	k := proto.Int(1)
-	return proto.SystemUpdateSpec{Version: "2026.08.0", MaxInFlight: &k}
+	k, unlimited := proto.Int(1), proto.Int(proto.UnlimitedFailures)
+	return proto.SystemUpdateSpec{Version: "2026.08.0", MaxInFlight: &k, MaxFailures: &unlimited}
 }
 
 // runCascade drives the cascade step over a fixed plan, bypassing step 1 by
@@ -873,8 +873,19 @@ func computeTier(t *testing.T, n int) []plannedTarget {
 	return targets
 }
 
+// specK sets the fan-out width and turns the failure budget OFF, so a test
+// about the SCHEDULER is not also a test of the breaker. The default budget is
+// tier-relative and lands on 1 for any tier under seven nodes, which is small
+// enough that it would otherwise stop half these fixtures mid-run — correctly,
+// but for reasons the test is not about.
 func specK(k proto.IntOrString) proto.SystemUpdateSpec {
-	return proto.SystemUpdateSpec{Version: "2026.08.0", MaxInFlight: &k}
+	unlimited := proto.Int(proto.UnlimitedFailures)
+	return proto.SystemUpdateSpec{Version: "2026.08.0", MaxInFlight: &k, MaxFailures: &unlimited}
+}
+
+// specBudget pins both knobs for the breaker's own tests.
+func specBudget(k, budget proto.IntOrString) proto.SystemUpdateSpec {
+	return proto.SystemUpdateSpec{Version: "2026.08.0", MaxInFlight: &k, MaxFailures: &budget}
 }
 
 func TestCascade_KEqualsOneIsExactlyTheSerialCascade(t *testing.T) {
@@ -1020,6 +1031,172 @@ func TestClampMaxInFlight(t *testing.T) {
 	for _, c := range cases {
 		if got := proto.ClampMaxInFlight(c.k, c.tierSize); got != c.want {
 			t.Errorf("ClampMaxInFlight(%d, %d) = %d, want %d", c.k, c.tierSize, got, c.want)
+		}
+	}
+}
+
+// ----- the failure budget (#75) --------------------------------------------
+
+func TestCascade_BudgetStopsNewStarts(t *testing.T) {
+	// 10 compute nodes, serial, budget 2. c02 and c03 fail; the budget is
+	// spent the moment the second failure lands, so c04 onward are never
+	// started and are reported untouched rather than failed.
+	targets := computeTier(t, 10)
+	drv := &stubDriver{fail: map[string]bool{"c02": true, "c03": true}}
+	res := runCascade(t, targets, specBudget(proto.Int(1), proto.Int(2)), drv.driver())
+
+	if got := drv.startOrder(); !eqIDs(got, []string{"c01", "c02", "c03"}) {
+		t.Errorf("started %v, want the run to stop after the second failure", got)
+	}
+	if !eqIDs(res.BudgetSpent, []string{"compute"}) {
+		t.Errorf("budgetSpent = %v, want [compute]", res.BudgetSpent)
+	}
+	if n := len(res.Remaining); n != 7 {
+		t.Errorf("remaining = %d, want 7", n)
+	}
+	err := res.terminalError()
+	if err == nil || !strings.Contains(err.Error(), "failure budget stopped the run") {
+		t.Errorf("error = %v, want it to name the budget", err)
+	}
+	// The untouched nodes must say WHY. "The run stopped" and "the budget
+	// stopped it" are the same grid otherwise, and only one of them tells the
+	// operator the fleet is waiting on their decision.
+	for _, r := range res.Results {
+		if r.Outcome != proto.NodeOutcomeNotAttempted {
+			continue
+		}
+		if !strings.Contains(r.Detail, "failure budget") {
+			t.Errorf("%s detail = %q, want it to name the budget", r.NodeID, r.Detail)
+		}
+	}
+}
+
+func TestCascade_BudgetLetsInFlightNodesFinish(t *testing.T) {
+	// The breaker stops STARTS, never cancels work already under way — an
+	// update mid-reboot is the worst possible moment to change your mind, and
+	// a node that has installed but not verified has to reach a slot the A/B
+	// logic can reason about. With k=4 and everything failing, the four in
+	// flight all complete even though the budget of 1 was spent by the first.
+	targets := computeTier(t, 12)
+	fail := map[string]bool{}
+	for i := 2; i <= 12; i++ {
+		fail[fmt.Sprintf("c%02d", i)] = true
+	}
+	drv := &stubDriver{hold: 10 * time.Millisecond, fail: fail}
+	res := runCascade(t, targets, specBudget(proto.Int(4), proto.Int(1)), drv.driver())
+
+	started := len(drv.startOrder())
+	// 1 canary + at most one full batch of 4 that was already in flight.
+	if started < 2 || started > 5 {
+		t.Errorf("started %d nodes (%v), want the canary plus at most one in-flight batch",
+			started, drv.startOrder())
+	}
+	// Everything started and failed is reported failed — never silently
+	// downgraded to not-attempted because the budget had already gone.
+	failedRows := 0
+	for _, r := range res.Results {
+		if r.Outcome == proto.NodeOutcomeFailed {
+			failedRows++
+		}
+	}
+	if failedRows != len(res.Failed) || failedRows < 1 {
+		t.Errorf("grid has %d failed rows, res.Failed has %d", failedRows, len(res.Failed))
+	}
+	if started != failedRows+countSucceeded(res.Results) {
+		t.Errorf("started %d but the grid accounts for %d — every started node needs a row",
+			started, failedRows+countSucceeded(res.Results))
+	}
+}
+
+func countSucceeded(rows []proto.NodeResult) int {
+	n := 0
+	for _, r := range rows {
+		if r.Outcome == proto.NodeOutcomeSucceeded {
+			n++
+		}
+	}
+	return n
+}
+
+func TestCascade_BudgetIsPerTier(t *testing.T) {
+	// A tier that spends its budget must not starve the next one. The budget
+	// is a statement about one tier's health, and compute being unhappy is not
+	// a reason to leave storage on an old image without trying.
+	targets := append(computeTier(t, 4),
+		tgt("s01", proto.RoleStorage, x86),
+		tgt("s02", proto.RoleStorage, x86),
+		tgt("s03", proto.RoleStorage, x86),
+	)
+	if err := assignCanaries(targets, nil); err != nil {
+		t.Fatalf("assignCanaries: %v", err)
+	}
+	drv := &stubDriver{fail: map[string]bool{"c02": true}}
+	res := runCascade(t, targets, specBudget(proto.Int(1), proto.Int(1)), drv.driver())
+
+	order := drv.startOrder()
+	if !eqIDs(order, []string{"c01", "c02", "s01", "s02", "s03"}) {
+		t.Errorf("started %v — compute should stop at c02 and storage should still run in full", order)
+	}
+	if !eqIDs(res.BudgetSpent, []string{"compute"}) {
+		t.Errorf("budgetSpent = %v, want only [compute]", res.BudgetSpent)
+	}
+}
+
+func TestCascade_UnlimitedBudgetNeverTrips(t *testing.T) {
+	// `0` is the only way to say "attempt every node whatever happens", and
+	// best-effort fan-out makes that a legitimate thing to want.
+	targets := computeTier(t, 6)
+	drv := &stubDriver{fail: map[string]bool{"c02": true, "c03": true, "c04": true, "c05": true}}
+	res := runCascade(t, targets, specBudget(proto.Int(1), proto.Int(proto.UnlimitedFailures)), drv.driver())
+
+	if n := len(drv.startOrder()); n != 6 {
+		t.Errorf("started %d, want all 6", n)
+	}
+	if len(res.BudgetSpent) != 0 {
+		t.Errorf("budgetSpent = %v, want none", res.BudgetSpent)
+	}
+	if len(res.Remaining) != 0 {
+		t.Errorf("remaining = %v, want none", res.Remaining)
+	}
+}
+
+func TestCascade_PercentBudgetFloorsToOneRatherThanUnlimited(t *testing.T) {
+	// 15% of a 3-node tier is 0.45. Reading that as "unlimited" would make the
+	// safest-sounding setting the least safe one on the smallest cluster —
+	// exactly backwards. A percentage is a request for a proportionate brake,
+	// never a request to remove it.
+	targets := computeTier(t, 3)
+	drv := &stubDriver{fail: map[string]bool{"c02": true}}
+	res := runCascade(t, targets, specBudget(proto.Int(1), proto.Percent(15)), drv.driver())
+
+	if got := drv.startOrder(); !eqIDs(got, []string{"c01", "c02"}) {
+		t.Errorf("started %v, want the budget of 1 to stop c03", got)
+	}
+	if !eqIDs(res.BudgetSpent, []string{"compute"}) {
+		t.Errorf("budgetSpent = %v, want [compute]", res.BudgetSpent)
+	}
+}
+
+func TestResolveMaxFailures(t *testing.T) {
+	cases := []struct {
+		v        proto.IntOrString
+		tierSize int
+		want     int
+	}{
+		// The approved anchor: a 24-node cluster's ~22-node compute tier.
+		{proto.DefaultMaxFailures, 22, 3},
+		{proto.DefaultMaxFailures, 8, 1}, // floor(1.2)
+		{proto.DefaultMaxFailures, 3, 1}, // floor(0.45) floored UP to 1
+		{proto.DefaultMaxFailures, 1, 1}, // never zero from a percentage
+		{proto.Int(3), 22, 3},            // absolute passes through
+		{proto.Int(3), 2, 3},             // ...even when it can never trip. THIS is
+		// why the default is relative: an absolute 3 on a 2-node tier is a
+		// breaker that is present and inert.
+		{proto.Int(proto.UnlimitedFailures), 22, 0}, // absolute zero survives as unlimited
+	}
+	for _, c := range cases {
+		if got := proto.ResolveMaxFailures(c.v, c.tierSize); got != c.want {
+			t.Errorf("ResolveMaxFailures(%s, %d) = %d, want %d", c.v, c.tierSize, got, c.want)
 		}
 	}
 }

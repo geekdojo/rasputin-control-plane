@@ -1228,6 +1228,34 @@ func TestHandleCreateSystemUpdate_MaxInFlightBounds(t *testing.T) {
 	}
 }
 
+// maxFailures takes the same shape and the same bounds. `0` is explicitly
+// VALID here and means unlimited — rejecting it would remove the only way to
+// say "attempt every node whatever happens".
+func TestHandleCreateSystemUpdate_MaxFailuresBounds(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	cases := []struct {
+		name, body   string
+		wantRejected bool
+	}{
+		{"negative", `{"version":"2026.08.4","maxFailures":-1}`, true},
+		{"over 100 percent", `{"version":"2026.08.4","maxFailures":"150%"}`, true},
+		{"unlimited", `{"version":"2026.08.4","maxFailures":0}`, false},
+		{"absolute", `{"version":"2026.08.4","maxFailures":3}`, false},
+		{"percent", `{"version":"2026.08.4","maxFailures":"15%"}`, false},
+		{"the default", `{"version":"2026.08.4"}`, false},
+	}
+	for _, tc := range cases {
+		w := f.do(t, http.MethodPost, "/api/updates/system", tc.body, c)
+		body := strings.TrimSpace(w.Body.String())
+		rejectedHere := strings.Contains(body, "maxFailures")
+		if rejectedHere != tc.wantRejected {
+			t.Errorf("%s: handler-rejected=%v, want %v (status %d, body %s)",
+				tc.name, rejectedHere, tc.wantRejected, w.Code, body)
+		}
+	}
+}
+
 // Exactly one keying form. Accepting both would leave the plan silently
 // choosing between "the release" and "this artifact", which are different
 // runs on a mixed-arch cluster (ADR-0005 Decision 11).
