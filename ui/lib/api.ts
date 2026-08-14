@@ -605,6 +605,15 @@ export function createSystemUpdate(input: {
   component?: string;
   bundleSha256?: string;
   excludeNodes?: string[];
+  /** Override the canary pick for a (tier, arch) pair. The plan otherwise
+   *  takes the first target in planned order. At most one per pair, each must
+   *  be a planned target, and never the controlplane or the firewall — the
+   *  plan rejects the run rather than quietly canarying somebody else. */
+  canaryNodes?: string[];
+  /** Hold each tier's fan-out this long after its canaries pass. Defaults to
+   *  0 and is expected to stay there; the health battery that gates mark-good
+   *  is already synchronous. Max 3600. */
+  canarySoakSeconds?: number;
 }): Promise<Job> {
   return jsonFetch<Job>('/api/updates/system', {
     method: 'POST',

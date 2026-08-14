@@ -461,6 +461,12 @@ export type SystemUpdateChange =
   | 'node_started'
   | 'node_succeeded'
   | 'node_failed'
+  /** The GATE's verdict for one (tier, arch) pair — whether that
+   *  architecture's fan-out is authorised. Distinct from the canary node's own
+   *  `node_succeeded` / `node_failed`, which says only what happened to that
+   *  one node. ADR-0005 Decisions 6 + 11. */
+  | 'canary_passed'
+  | 'canary_failed'
   | 'completed'
   | 'aborted';
 
@@ -499,6 +505,16 @@ export interface SystemUpdateChangeEvent {
   childJobId?: string;
   bundleId?: string;
   detail?: string;
+  /** The node's role, which is also the unit the cascade advances in:
+   *  compute → storage → controlplane → firewall. On `node_*` and `canary_*`. */
+  tier?: NodeRole;
+  /** Release SKU of the artifact this node is receiving — the arch, in
+   *  practice. The canary is scoped per arch, so a canary verdict is only ever
+   *  a claim about one of them. */
+  compatible?: string;
+  /** True when this `node_*` event belongs to a canary rather than a fan-out
+   *  target. */
+  canary?: boolean;
   counts?: SystemUpdateCounts;
   /** Per-node skip reasons, carried on `planned` and `completed`. */
   skipped?: SkippedNode[];

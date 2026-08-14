@@ -63,10 +63,16 @@ func SystemUpdateWorkflow(
 // per-target rather than per-run because a mixed arm64/amd64 tier takes two
 // different artifacts of the same release (ADR-0005 Decision 11).
 type plannedTarget struct {
-	NodeID       string `json:"nodeId"`
-	BundleSHA256 string `json:"bundleSha256"`
-	Compatible   string `json:"compatible"`
-	node         *proto.Node
+	NodeID       string         `json:"nodeId"`
+	BundleSHA256 string         `json:"bundleSha256"`
+	Compatible   string         `json:"compatible"`
+	Tier         proto.NodeRole `json:"tier"`
+	// Canary marks this target as the one node whose outcome gates fan-out for
+	// its (Tier, Compatible) pair. Decided at PLAN time, not in the cascade, so
+	// the `planned` event tells the operator which node is about to carry the
+	// risk while there is still time to override it.
+	Canary bool `json:"canary,omitempty"`
+	node   *proto.Node
 }
 
 // systemPlanState is what step 1 stashes for step 2 to read. Both steps build
@@ -89,6 +95,19 @@ func (s systemPlanState) targetIDs() []string {
 	ids := make([]string, len(s.Targets))
 	for i, t := range s.Targets {
 		ids[i] = t.NodeID
+	}
+	return ids
+}
+
+// canaryIDs is the ordered list of nodes gating a fan-out, one per (tier,
+// arch) pair. Named at plan time so the operator can see who is carrying the
+// risk before anything reboots.
+func (s systemPlanState) canaryIDs() []string {
+	var ids []string
+	for _, t := range s.Targets {
+		if t.Canary {
+			ids = append(ids, t.NodeID)
+		}
 	}
 	return ids
 }
@@ -156,8 +175,12 @@ func buildPlan(
 		targets := make([]plannedTarget, len(nodes))
 		for i, n := range nodes {
 			targets[i] = plannedTarget{
-				NodeID: n.ID, BundleSHA256: bundle.SHA256, Compatible: bundle.Compatible, node: n,
+				NodeID: n.ID, BundleSHA256: bundle.SHA256, Compatible: bundle.Compatible,
+				Tier: n.Role, node: n,
 			}
+		}
+		if err := assignCanaries(targets, spec.CanaryNodes); err != nil {
+			return systemPlanState{}, err
 		}
 		return systemPlanState{
 			BundleSHA256: bundle.SHA256, BundleVer: bundle.Version,
@@ -220,7 +243,7 @@ func buildPlan(
 			continue
 		}
 		targets = append(targets, plannedTarget{
-			NodeID: n.ID, BundleSHA256: b.SHA256, Compatible: want, node: n,
+			NodeID: n.ID, BundleSHA256: b.SHA256, Compatible: want, Tier: n.Role, node: n,
 		})
 	}
 
@@ -241,10 +264,127 @@ func buildPlan(
 			comp.Label, spec.Version, strings.Join(parts, "; "))
 	}
 
+	if err := assignCanaries(targets, spec.CanaryNodes); err != nil {
+		return systemPlanState{}, err
+	}
 	return systemPlanState{
 		BundleVer: spec.Version, Component: comp.ID,
 		Targets: targets, Skipped: skipped, SelfNodeID: cfg.SelfNodeID,
 	}, nil
+}
+
+// ----- The canary ---------------------------------------------------------
+
+// canaryEligible reports whether a tier nominates a canary at all.
+//
+// The controlplane and the firewall never do (ADR-0005 Decision 6). Not an
+// arbitrary carve-out: a canary is the cheap node you risk on behalf of the
+// expensive ones, and neither of these has anything behind it to protect. The
+// firewall cascades alone — the component filter means an OS run has no
+// firewall target and a firewall run has nothing else (Decision 8) — so a
+// "canary" there would be the entire tier gating itself. The controlplane is
+// ordered last among the OS tiers precisely because losing it costs the
+// operator their view of the fleet; making it the first node to take a new
+// image inverts the reason for that ordering.
+func canaryEligible(tier proto.NodeRole) bool {
+	return tier == proto.RoleCompute || tier == proto.RoleStorage
+}
+
+// canaryGroup identifies the unit a canary speaks for: one tier, one arch.
+//
+// Arch is half the key because "the image is good" is an arch-scoped claim —
+// an arm64 canary proves nothing about the amd64 artifact, which is a
+// different binary built by a different job (ADR-0005 Decision 11). Tier is
+// the other half because tiers advance sequentially and a canary only ever
+// authorises the fan-out immediately behind it.
+type canaryGroup struct {
+	Tier       proto.NodeRole
+	Compatible string
+}
+
+func (g canaryGroup) String() string { return string(g.Tier) + "/" + g.Compatible }
+
+// assignCanaries marks one canary per (tier, arch) group, in place.
+//
+// The default pick is the first target in planned order within the group,
+// which is deterministic and matches what the `planned` event already shows an
+// operator. An id in `overrides` replaces the default pick for its own group.
+//
+// Every override problem is an error rather than a silent fallback. An
+// operator who names a canary has a reason — a node they can afford to lose, a
+// node physically in front of them — and quietly canarying a different one is
+// worse than refusing the run.
+func assignCanaries(targets []plannedTarget, overrides []string) error {
+	chosen := map[canaryGroup]int{} // group → index into targets
+	byID := map[string]int{}
+	for i, t := range targets {
+		byID[t.NodeID] = i
+		if !canaryEligible(t.Tier) {
+			continue
+		}
+		g := canaryGroup{Tier: t.Tier, Compatible: t.Compatible}
+		if _, seen := chosen[g]; !seen {
+			chosen[g] = i
+		}
+	}
+
+	overriddenBy := map[canaryGroup]string{}
+	for _, id := range overrides {
+		i, ok := byID[id]
+		if !ok {
+			return fmt.Errorf("canary override %q is not a target of this plan", id)
+		}
+		t := targets[i]
+		if !canaryEligible(t.Tier) {
+			return fmt.Errorf("canary override %q is a %s node; the canary is never the controlplane or the firewall",
+				id, t.Tier)
+		}
+		g := canaryGroup{Tier: t.Tier, Compatible: t.Compatible}
+		if prev, dup := overriddenBy[g]; dup {
+			return fmt.Errorf("canary overrides %q and %q are both in %s; one canary per tier and architecture",
+				prev, id, g)
+		}
+		overriddenBy[g] = id
+		chosen[g] = i
+	}
+
+	for _, i := range chosen {
+		targets[i].Canary = true
+	}
+	return nil
+}
+
+// tierGroup is one tier's slice of the planned order, kept contiguous.
+// planTargets already sorts by role, so grouping is a scan rather than a sort
+// and the order within a tier is the planned order.
+type tierGroup struct {
+	Tier    proto.NodeRole
+	Targets []plannedTarget
+}
+
+func groupByTier(targets []plannedTarget) []tierGroup {
+	var out []tierGroup
+	for _, t := range targets {
+		if n := len(out); n > 0 && out[n-1].Tier == t.Tier {
+			out[n-1].Targets = append(out[n-1].Targets, t)
+			continue
+		}
+		out = append(out, tierGroup{Tier: t.Tier, Targets: []plannedTarget{t}})
+	}
+	return out
+}
+
+// split separates a tier into the canaries that gate it and the fan-out behind
+// them, preserving planned order in both.
+func (g tierGroup) split() (canaries, fanout []plannedTarget) {
+	for _, t := range g.Targets {
+		if t.Canary {
+			canaries = append(canaries, t)
+		} else {
+			fanout = append(fanout, t)
+		}
+	}
+	return canaries, fanout
 }
 
 // stagedByCompatible indexes the locally-staged bundles of one version by SKU.
@@ -295,6 +435,12 @@ func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs
 
 		sc.Log("info", fmt.Sprintf("plan: %d target(s), %d skipped — order: %v",
 			len(targets), len(skipped), ids))
+		// Name the canaries at plan time. They are the nodes that will take the
+		// image on behalf of the rest, and this is the last moment an operator
+		// can override the pick before one of them reboots.
+		if cans := state.canaryIDs(); len(cans) > 0 {
+			sc.Log("info", fmt.Sprintf("canaries (one per tier and architecture): %v — fan-out is gated on them", cans))
+		}
 		// Say the stranded nodes out loud at plan time, not only in the
 		// summary. They are the ones an operator would want to act on before
 		// the cascade runs for twenty minutes.
@@ -412,6 +558,40 @@ func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat 
 
 // ----- Step 2: cascade ----------------------------------------------------
 
+// childDriver is the cascade's one dependency on the live world: submitting a
+// node.update child and waiting for it to terminate. Split out behind function
+// values so the ORDERING logic above it — the canary gate now, bounded fan-out
+// and the failure budget next (#74, #75) — is exercisable without a runner, a
+// NATS server and a job store. That logic is the part with the interesting
+// failure modes and it was previously reachable only through a full saga.
+type childDriver struct {
+	submit func(sc *jobs.StepCtx, t plannedTarget) (childID string, err error)
+	wait   func(sc *jobs.StepCtx, childID string) (jobs.Status, error)
+}
+
+func liveChildDriver(jobStore *jobs.Store, runner *jobs.Runner, nc *nats.Conn) childDriver {
+	return childDriver{
+		submit: func(sc *jobs.StepCtx, t plannedTarget) (string, error) {
+			// The bundle comes from the TARGET, not the spec — that is the
+			// whole of Decision 11 at the point it matters. On a mixed tier
+			// consecutive children are handed different artifacts of the same
+			// release.
+			childSpec, _ := json.Marshal(map[string]string{
+				"nodeId":       t.NodeID,
+				"bundleSha256": t.BundleSHA256,
+			})
+			child, err := runner.SubmitChild(sc.Ctx, "node.update", childSpec, "system.update", sc.JobID)
+			if err != nil {
+				return "", err
+			}
+			return child.ID, nil
+		},
+		wait: func(sc *jobs.StepCtx, childID string) (jobs.Status, error) {
+			return waitForChild(sc.Ctx, jobStore, nc, childID, 30*time.Minute)
+		},
+	}
+}
+
 func systemCascade(
 	store *Store,
 	inv *inventory.Store,
@@ -419,6 +599,45 @@ func systemCascade(
 	runner *jobs.Runner,
 	nc *nats.Conn,
 	cfg SystemUpdateConfig,
+) jobs.DoFn {
+	return systemCascadeWith(store, inv, nc, cfg, liveChildDriver(jobStore, runner, nc))
+}
+
+// systemCascadeWith is systemCascade with the child driver injected.
+//
+// Shape, per ADR-0005 Decisions 6 and 11: tiers run in the planned order,
+// sequentially. Within a tier, the canary of each architecture present runs
+// FIRST and its outcome gates the fan-out behind it — an arm64 canary cannot
+// authorise amd64 nodes, so a mixed tier runs one canary per arch.
+//
+// ⚠️ ANY canary failure aborts the whole run, not just its own arch's fan-out.
+// Decision 11 makes the gate per-arch, and Decision 6 says a canary failure
+// means "abort before fan-out; nothing else in the fleet is touched — this is
+// the one place abort survives". The per-arch rule is about a canary being
+// INSUFFICIENT authority for another arch, not about the two arches failing
+// independently; a bad build is far likelier to be a bad release than a bad
+// single artifact, and the operator can re-run scoped to the good arch. So the
+// two decisions compose as: fan-out for an arch requires that arch's own
+// canary, and any canary failing stops everything.
+//
+// Fan-out itself is still serial and still halts on the first failure. That is
+// today's behaviour, deliberately left alone here: the bounded-parallel fan-out
+// is #74 and best-effort reporting is #76. This story adds the gate in FRONT of
+// fan-out, which makes every intermediate state at least as safe as the one
+// before it — the reverse order would land a fleet update that neither aborts
+// nor canaries.
+//
+// A plan stashed by an api that predates this code carries no Tier and no
+// Canary on its targets, so it degrades to one unnamed tier with no gate —
+// i.e. to exactly the serial halt-on-first cascade it was planned under. That
+// is the right answer for a job resumed across an upgrade: finish it the way
+// it started rather than invent a canary halfway through.
+func systemCascadeWith(
+	store *Store,
+	inv *inventory.Store,
+	nc *nats.Conn,
+	cfg SystemUpdateConfig,
+	drv childDriver,
 ) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		var spec proto.SystemUpdateSpec
@@ -446,102 +665,165 @@ func systemCascade(
 		var (
 			succeeded []string
 			failed    []string
-			remaining []string
+			canaries  []string
+			// canaryFailure names the gate that stopped the run, so the error
+			// can say "the canary caught this" rather than the generic
+			// "something failed" — the two ask an operator for different next
+			// moves.
+			canaryFailure string
 		)
+		done := map[string]bool{}
 
-		for i, target := range targets {
-			// If we already failed once, the remaining nodes are skipped.
-			if len(failed) > 0 {
-				remaining = append(remaining, target.NodeID)
-				for _, t := range targets[i+1:] {
-					remaining = append(remaining, t.NodeID)
-				}
-				break
+		// runOne submits a child, waits for it, and reports whether the node
+		// updated. Every exit path emits the matching node_* event, so the
+		// grid never has a target that started and then vanished.
+		runOne := func(t plannedTarget, isCanary bool) bool {
+			done[t.NodeID] = true
+			evt := func(change proto.SystemUpdateChangeType, childID, detail string) {
+				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
+					ParentJobID: sc.JobID,
+					Change:      change,
+					NodeID:      t.NodeID,
+					ChildJobID:  childID,
+					BundleID:    t.BundleSHA256,
+					Detail:      detail,
+					Tier:        t.Tier,
+					Compatible:  t.Compatible,
+					Canary:      isCanary,
+					Ts:          time.Now().UTC(),
+				})
+			}
+			role := "target"
+			if isCanary {
+				role = "canary"
 			}
 
-			// The bundle comes from the TARGET, not the spec — that is the
-			// whole of Decision 11 at the point it matters. On a mixed tier
-			// consecutive iterations hand out different artifacts of the same
-			// release.
-			childSpec, _ := json.Marshal(map[string]string{
-				"nodeId":       target.NodeID,
-				"bundleSha256": target.BundleSHA256,
-			})
-			child, err := runner.SubmitChild(sc.Ctx, "node.update", childSpec, "system.update", sc.JobID)
+			childID, err := drv.submit(sc, t)
 			if err != nil {
-				failed = append(failed, target.NodeID)
-				sc.Log("error", fmt.Sprintf("submit child for %s: %v", target.NodeID, err))
-				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
-					ParentJobID: sc.JobID,
-					Change:      proto.SystemUpdateNodeFailed,
-					NodeID:      target.NodeID,
-					BundleID:    target.BundleSHA256,
-					Detail:      err.Error(),
-					Ts:          time.Now().UTC(),
-				})
-				continue
+				failed = append(failed, t.NodeID)
+				sc.Log("error", fmt.Sprintf("submit child for %s: %v", t.NodeID, err))
+				evt(proto.SystemUpdateNodeFailed, "", err.Error())
+				return false
 			}
-			sc.Log("info", fmt.Sprintf("started child %s for %s (%s)", child.ID, target.NodeID, target.Compatible))
-			publishSystemChange(nc, proto.SystemUpdateChangeEvt{
-				ParentJobID: sc.JobID,
-				Change:      proto.SystemUpdateNodeStarted,
-				NodeID:      target.NodeID,
-				ChildJobID:  child.ID,
-				BundleID:    target.BundleSHA256,
-				Ts:          time.Now().UTC(),
-			})
+			sc.Log("info", fmt.Sprintf("started child %s for %s %s (%s)", childID, role, t.NodeID, t.Compatible))
+			evt(proto.SystemUpdateNodeStarted, childID, "")
 
-			outcome, derr := waitForChild(sc.Ctx, jobStore, nc, child.ID, 30*time.Minute)
-			if derr != nil {
-				failed = append(failed, target.NodeID)
-				sc.Log("error", fmt.Sprintf("%s: %v", target.NodeID, derr))
-				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
-					ParentJobID: sc.JobID,
-					Change:      proto.SystemUpdateNodeFailed,
-					NodeID:      target.NodeID,
-					ChildJobID:  child.ID,
-					BundleID:    target.BundleSHA256,
-					Detail:      derr.Error(),
-					Ts:          time.Now().UTC(),
-				})
-				continue
+			outcome, derr := drv.wait(sc, childID)
+			switch {
+			case derr != nil:
+				failed = append(failed, t.NodeID)
+				sc.Log("error", fmt.Sprintf("%s: %v", t.NodeID, derr))
+				evt(proto.SystemUpdateNodeFailed, childID, derr.Error())
+				return false
+			case outcome != jobs.StatusSucceeded:
+				failed = append(failed, t.NodeID)
+				sc.Log("error", fmt.Sprintf("%s: child terminated %s", t.NodeID, outcome))
+				evt(proto.SystemUpdateNodeFailed, childID, fmt.Sprintf("child %s", outcome))
+				return false
 			}
-			if outcome != jobs.StatusSucceeded {
-				failed = append(failed, target.NodeID)
-				sc.Log("error", fmt.Sprintf("%s: child terminated %s", target.NodeID, outcome))
-				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
-					ParentJobID: sc.JobID,
-					Change:      proto.SystemUpdateNodeFailed,
-					NodeID:      target.NodeID,
-					ChildJobID:  child.ID,
-					BundleID:    target.BundleSHA256,
-					Detail:      fmt.Sprintf("child %s", outcome),
-					Ts:          time.Now().UTC(),
-				})
-				continue
-			}
-			succeeded = append(succeeded, target.NodeID)
-			sc.Log("info", fmt.Sprintf("%s: updated", target.NodeID))
+			succeeded = append(succeeded, t.NodeID)
+			sc.Log("info", fmt.Sprintf("%s: updated", t.NodeID))
+			evt(proto.SystemUpdateNodeSucceeded, childID, "")
+			return true
+		}
+
+		// gateEvt publishes a canary_* verdict for one (tier, arch) pair. This
+		// is the fan-out authorisation, distinct from the canary node's own
+		// node_* outcome.
+		gateEvt := func(change proto.SystemUpdateChangeType, t plannedTarget, detail string) {
 			publishSystemChange(nc, proto.SystemUpdateChangeEvt{
 				ParentJobID: sc.JobID,
-				Change:      proto.SystemUpdateNodeSucceeded,
-				NodeID:      target.NodeID,
-				ChildJobID:  child.ID,
-				BundleID:    target.BundleSHA256,
+				Change:      change,
+				NodeID:      t.NodeID,
+				BundleID:    t.BundleSHA256,
+				Detail:      detail,
+				Tier:        t.Tier,
+				Compatible:  t.Compatible,
+				Canary:      true,
 				Ts:          time.Now().UTC(),
 			})
+		}
+
+	tiers:
+		for _, tier := range groupByTier(targets) {
+			tierCanaries, fanout := tier.split()
+
+			for _, c := range tierCanaries {
+				canaries = append(canaries, c.NodeID)
+				g := canaryGroup{Tier: c.Tier, Compatible: c.Compatible}
+				sc.Log("info", fmt.Sprintf("canary for %s: %s — fan-out for this architecture is gated on it", g, c.NodeID))
+				if !runOne(c, true) {
+					canaryFailure = fmt.Sprintf("%s (%s)", c.NodeID, g)
+					gateEvt(proto.SystemUpdateCanaryFailed, c, "fan-out aborted; nothing else was touched")
+					sc.Log("error", fmt.Sprintf(
+						"canary %s failed for %s — aborting before fan-out; no further node is touched", c.NodeID, g))
+					break tiers
+				}
+				gateEvt(proto.SystemUpdateCanaryPassed, c, "fan-out authorised for this architecture")
+			}
+
+			if len(tierCanaries) > 0 && len(fanout) > 0 {
+				if err := soak(sc, spec.CanarySoakSeconds); err != nil {
+					return nil, err
+				}
+			}
+
+			for _, t := range fanout {
+				// Fan-out still halts on the first failure — #76 replaces this
+				// with the per-node results grid. Until then the canary is the
+				// addition and nothing about the old policy is relaxed.
+				if len(failed) > 0 {
+					break tiers
+				}
+				runOne(t, false)
+			}
+			if len(failed) > 0 {
+				break tiers
+			}
+		}
+
+		// Whatever we never attempted, in planned order. Derived from the plan
+		// rather than accumulated at each break, so a new abort path cannot
+		// forget to fill it in.
+		var remaining []string
+		for _, t := range targets {
+			if !done[t.NodeID] {
+				remaining = append(remaining, t.NodeID)
+			}
 		}
 
 		result := map[string]any{
 			"succeeded": succeeded,
 			"failed":    failed,
 			"remaining": remaining,
+			"canaries":  canaries,
 		}
 		raw, _ := json.Marshal(result)
-		if len(failed) > 0 {
+		switch {
+		case canaryFailure != "":
+			return raw, fmt.Errorf(
+				"canary %s failed — aborted before fan-out, %d node(s) untouched", canaryFailure, len(remaining))
+		case len(failed) > 0:
 			return raw, fmt.Errorf("cascade aborted: %d node(s) failed (%v)", len(failed), failed)
 		}
 		return raw, nil
+	}
+}
+
+// soak holds a tier's fan-out after its canaries pass. Zero — the default and
+// the expected setting — returns immediately without logging, so the normal
+// path reads exactly as it did before the knob existed.
+func soak(sc *jobs.StepCtx, seconds int) error {
+	if seconds <= 0 {
+		return nil
+	}
+	d := time.Duration(seconds) * time.Second
+	sc.Log("info", fmt.Sprintf("canaries passed; soaking %s before fan-out", d))
+	select {
+	case <-time.After(d):
+		return nil
+	case <-sc.Ctx.Done():
+		return fmt.Errorf("cancelled during the %s canary soak: %w", d, sc.Ctx.Err())
 	}
 }
 
