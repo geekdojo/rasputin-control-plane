@@ -488,11 +488,35 @@ export interface SkippedNode {
   detail?: string;
 }
 
+/**
+ * What happened to ONE planned target. `not-attempted` is the third value that
+ * makes the report honest: under best-effort fan-out every target IS attempted,
+ * so a target that was not is a node the run deliberately stopped short of —
+ * the canary gate aborted before it — and rendering that as a failure sends an
+ * operator to look at a machine that is fine.
+ */
+export type NodeOutcome = 'succeeded' | 'failed' | 'not-attempted';
+
+/** One row of the per-node results grid. */
+export interface NodeResult {
+  nodeId: string;
+  outcome: NodeOutcome;
+  tier?: NodeRole;
+  /** Release SKU of the artifact this node took — the arch, in practice. */
+  compatible?: string;
+  canary?: boolean;
+  childJobId?: string;
+  detail?: string;
+}
+
 export interface SystemUpdateCounts {
   total: number;
   succeeded: number;
   failed: number;
   skipped: number;
+  /** Planned targets the run never started. Distinct from `failed` (something
+   *  happened to the node) and from `skipped` (decided at plan time). */
+  notAttempted?: number;
   /** Subset of `skipped` that nobody asked for. Non-zero means the run did not
    *  do what UPDATE ALL says on the button. */
   stranded?: number;
@@ -518,6 +542,11 @@ export interface SystemUpdateChangeEvent {
   counts?: SystemUpdateCounts;
   /** Per-node skip reasons, carried on `planned` and `completed`. */
   skipped?: SkippedNode[];
+  /** The per-node grid, on `completed`: one row per planned target, in planned
+   *  order. Skipped nodes are not in here — they are in `skipped`, with a
+   *  reason, because "never a target" and "a target that failed" are different
+   *  rows of the same report. */
+  results?: NodeResult[];
   ts: string;
 }
 

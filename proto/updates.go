@@ -379,7 +379,12 @@ type SystemUpdateChangeEvt struct {
 	// count cannot answer the only question that matters — whether a skip was
 	// designed or a node was left behind (see SkipReason).
 	Skipped []SkippedNode `json:"skipped,omitempty"`
-	Ts      time.Time     `json:"ts"`
+	// Results is the per-node grid, filled on `completed`: one row per planned
+	// target, in planned order. Skipped nodes are NOT in here — they are in
+	// Skipped, with a reason, because "never a target" and "a target that
+	// failed" are different rows of the same report.
+	Results []NodeResult `json:"results,omitempty"`
+	Ts      time.Time    `json:"ts"`
 }
 
 // SkipReason names why a node was left out of a system.update plan.
@@ -423,6 +428,46 @@ type SkippedNode struct {
 	Detail string     `json:"detail,omitempty"`
 }
 
+// NodeOutcome is what happened to ONE planned target of a fleet update.
+//
+// A third value beyond succeeded/failed is the whole point. Under best-effort
+// fan-out (ADR-0005 Decision 7) every planned target is attempted, so a target
+// that was NOT attempted is a specific and rarer event — the canary gate
+// aborted before it, or the failure budget stopped the tier — and it is not
+// the same as a failure. Collapsing the two would report a node the cascade
+// deliberately protected as a node that broke.
+type NodeOutcome string
+
+const (
+	NodeOutcomeSucceeded NodeOutcome = "succeeded"
+	NodeOutcomeFailed    NodeOutcome = "failed"
+	// NodeOutcomeNotAttempted — planned, never started. Nothing happened to
+	// this node; it is still on its old slot.
+	NodeOutcomeNotAttempted NodeOutcome = "not-attempted"
+)
+
+// NodeResult is one row of the per-node results grid.
+//
+// The grid is the primary artifact of a fleet update, not a detail view: once
+// the cascade stops halting on the first failure, partial success becomes the
+// COMMON outcome and "3 of 22 failed, here is which three" is the answer an
+// operator actually needs. A parent status and a set of counts cannot give it.
+//
+// Carried alongside the child jobs rather than derived from them because the
+// grid has to include rows that have no child — a target that was never
+// attempted — and dimensions a child job does not know: which tier it was in,
+// which architecture's artifact it took, and whether it was the canary.
+type NodeResult struct {
+	NodeID     string      `json:"nodeId"`
+	Outcome    NodeOutcome `json:"outcome"`
+	Tier       NodeRole    `json:"tier,omitempty"`
+	Compatible string      `json:"compatible,omitempty"`
+	Canary     bool        `json:"canary,omitempty"`
+	ChildJobID string      `json:"childJobId,omitempty"`
+	// Detail is the failure reason, or why the node was never attempted.
+	Detail string `json:"detail,omitempty"`
+}
+
 // SystemUpdateCounts is the per-cascade rollup carried on the planned and
 // terminal change events.
 type SystemUpdateCounts struct {
@@ -430,6 +475,13 @@ type SystemUpdateCounts struct {
 	Succeeded int `json:"succeeded"`
 	Failed    int `json:"failed"`
 	Skipped   int `json:"skipped"`
+	// NotAttempted is planned targets the cascade never started. Separate from
+	// Failed and from Skipped: a skip was decided at plan time and a failure
+	// happened to a node, but this is a node the run stopped short of. It is
+	// also what tells "every node was tried and every one failed" apart from
+	// "the canary caught it and we stopped" — two red screens that ask the
+	// operator for completely different next moves.
+	NotAttempted int `json:"notAttempted,omitempty"`
 	// Stranded is the subset of Skipped that nobody asked for — nodes with no
 	// artifact for their arch. Broken out rather than left inside Skipped
 	// because it is the number that decides whether the run was honest, and a
