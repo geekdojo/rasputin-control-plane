@@ -154,8 +154,13 @@ func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs
 
 // expectedCompatible is the release SKU string a node's OTA artifact must
 // carry: the firewall accepts only its own image; every other node takes the
-// OS image for its arch. Second return is false when it can't be determined
-// (a pre-arch agent that hasn't reported its arch).
+// OS image for its arch. Second return is false when it can't be determined —
+// an unrecognized arch, or an agent that never reported one.
+//
+// That sentence used to be false for the empty case: ArchCompatible grouped
+// "" with amd64 and returned true, so a node that never said which arch it
+// was got planned into an amd64 cascade with full confidence. The comment and
+// the code have been made to agree by fixing the code (#67).
 func expectedCompatible(n *proto.Node) (string, bool) {
 	if n.Role == proto.RoleFirewall {
 		return releases.FirewallCompatible, true

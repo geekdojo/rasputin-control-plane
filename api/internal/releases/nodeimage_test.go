@@ -75,7 +75,13 @@ func TestArchCompatible(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"", "rasputin-n100", true},           // default → amd64
+		// Empty is UNDETERMINABLE, not amd64. A node that never said which
+		// arch it is must not be planned into an amd64 cascade with full
+		// confidence — it fails at install and burns the maxFailures budget
+		// for a node that was never a valid target (#67). The flasher's
+		// amd64 default lives in handleClusterNodeImage, where a human chose
+		// it, not here where it becomes a guess about a fact.
+		{"", "", false},
 		{"amd64", "rasputin-n100", true},      // N100 / Intel
 		{"arm64", "rasputin-rpi-arm64", true}, // rpi: Pi 4 / Pi 5 / CM5
 		{"mips", "", false},                   // unsupported

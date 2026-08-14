@@ -31,7 +31,18 @@ func (s *Server) handleGetFlashScript(w http.ResponseWriter, r *http.Request) {
 // flasher script (run from a laptop, no session) fetches it, and it carries
 // only the version, the public image URL, its sha256, and the arch.
 func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) {
+	// The amd64 default lives HERE, not inside ArchCompatible, because the two
+	// callers ask different questions with the same function. The flasher asks
+	// "which image should I write to a blank disk", where a default is a
+	// legitimate convenience chosen by a human at a keyboard who can see the
+	// arch label the script prints back. The fleet plan asks "which image does
+	// THIS node take", where the same default is a guess about a fact — the
+	// #67 defect. Keeping it at this layer preserves the endpoint's documented
+	// behaviour and stops it leaking into the plan.
 	arch := r.URL.Query().Get("arch")
+	if arch == "" {
+		arch = "amd64"
+	}
 	compatible, ok := releases.ArchCompatible(arch)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "unsupported arch (expected amd64 or arm64)")

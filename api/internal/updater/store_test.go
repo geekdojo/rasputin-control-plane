@@ -409,6 +409,38 @@ func TestPlanTargets_OtherArchIsStrandedNotDesigned(t *testing.T) {
 	}
 }
 
+// #67: a node that never reported its architecture was classified amd64 with
+// full confidence. On a mixed cluster that plans an arch-unknown arm64 node
+// into an amd64 cascade, where it fails at install and eats maxFailures budget
+// for a node that was never a valid target. It is stranded, not planned.
+func TestPlanTargets_EmptyArchIsStrandedNotAssumedAmd64(t *testing.T) {
+	n := node("never-said", proto.RoleCompute, time.Second) // Architecture == ""
+	got, skipped := planTargets([]*proto.Node{n}, nil, "rasputin-n100")
+	if len(got) != 0 {
+		t.Errorf("targets = %+v, want none — an unreported arch is not amd64", got)
+	}
+	if len(skipped) != 1 || skipped[0].Reason != proto.SkipNoArtifactForArch {
+		t.Fatalf("skipped = %+v, want one no-artifact-for-arch skip", skipped)
+	}
+	if !skipped[0].Reason.Stranded() {
+		t.Error("an unreported arch is a stranding — nobody asked for this node to be left out")
+	}
+}
+
+// The firewall's artifact is selected by its own SKU, never by arch, so the
+// #67 change must not make a firewall node undeterminable. It has no
+// Architecture in most fixtures and still has exactly one valid image.
+func TestPlanTargets_FirewallIsUnaffectedByEmptyArch(t *testing.T) {
+	fw := node("fw-1", proto.RoleFirewall, time.Second) // Architecture == ""
+	got, skipped := planTargets([]*proto.Node{fw}, nil, "rasputin-fw-n100")
+	if len(got) != 1 || got[0].ID != "fw-1" {
+		t.Fatalf("targets = %+v, want [fw-1]; the firewall is selected by SKU, not arch", got)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %+v, want none", skipped)
+	}
+}
+
 // A node whose arch cannot be resolved to an artifact used to fall straight
 // through the SKU filter and be planned into whatever bundle the run carried —
 // the `known` return was computed and then only consulted in the mismatch
