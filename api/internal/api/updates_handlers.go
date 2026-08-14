@@ -230,22 +230,34 @@ func (s *Server) handleDeleteBundle(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/updates/system
-// Body: { "bundleSha256": "...", "excludeNodes": ["..."] }
-// Kicks off a system.update saga that cascades node.update children in a
-// safe role-ordered sequence (firewall last). The api's own self-node id
+// Body: { "version": "...", "component"?: "os"|"fw", "excludeNodes": ["..."] }
+//
+//	or: { "bundleSha256": "...", "excludeNodes": ["..."] }
+//
+// Kicks off a system.update saga that cascades node.update children in a safe
+// role-ordered sequence (firewall last). The api's own self-node id
 // (RASPUTIN_SELF_NODE_ID) is always excluded.
+//
+// The VERSION form is what "UPDATE ALL" means: the plan resolves the correct
+// per-arch bundle for each node, so a mixed arm64/amd64 cluster updates
+// completely rather than updating one arch and bucketing the other under
+// `skipped` (ADR-0005 Decision 11). The bundleSha256 form remains for a
+// targeted run against one specific artifact.
 func (s *Server) handleCreateSystemUpdate(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		BundleSHA256 string   `json:"bundleSha256"`
-		ExcludeNodes []string `json:"excludeNodes,omitempty"`
-	}
+	var req proto.SystemUpdateSpec
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	if req.BundleSHA256 == "" {
-		writeError(w, http.StatusBadRequest, "bundleSha256 is required")
+	if (req.Version == "") == (req.BundleSHA256 == "") {
+		writeError(w, http.StatusBadRequest, "exactly one of version or bundleSha256 is required")
 		return
+	}
+	if req.Component != "" {
+		if _, ok := releases.ComponentByID(req.Component); !ok {
+			writeError(w, http.StatusBadRequest, "unknown component: "+req.Component)
+			return
+		}
 	}
 	spec, _ := json.Marshal(req)
 	j, err := s.runner.Submit(r.Context(), "system.update", spec, creator(r))

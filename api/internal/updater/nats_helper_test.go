@@ -11,6 +11,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
@@ -1057,6 +1058,222 @@ func TestSystemPlan_MissingSHA(t *testing.T) {
 	}
 }
 
+// seedMixedFleet puts an amd64 node, an arm64 node and a firewall in the
+// inventory, and stages whichever of the three artifacts the caller names, all
+// at version v.
+func seedMixedFleet(t *testing.T, store *Store, inv *inventory.Store, v string, stage ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, n := range []struct {
+		id, arch string
+		role     proto.NodeRole
+	}{
+		{"n100-1", "amd64", proto.RoleCompute},
+		{"pi-1", "arm64", proto.RoleCompute},
+		{"fw-1", "", proto.RoleFirewall},
+	} {
+		if err := inv.Insert(ctx, &proto.Node{
+			ID: n.id, Role: n.role, Architecture: n.arch,
+			FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("inv %s: %v", n.id, err)
+		}
+	}
+	for _, compat := range stage {
+		if err := store.CreateBundle(ctx, &Bundle{
+			SHA256: "sha-" + compat, Version: v, Compatible: compat,
+			UploadedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("bundle %s: %v", compat, err)
+		}
+	}
+}
+
+// THE POINT OF #77. Keyed on a release rather than a bundle, UPDATE ALL plans
+// BOTH arches — each node resolved to its own artifact — instead of updating
+// one and bucketing the other under `skipped`.
+func TestSystemPlan_VersionKeyedResolvesPerNodeBundle(t *testing.T) {
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	seedMixedFleet(t, store, inv, "2026.08.4", "rasputin-n100", "rasputin-rpi-arm64")
+
+	sc := newUpdaterCtx("parent", `{"version":"2026.08.4"}`, nc)
+	out, err := systemPlan(store, inv, SystemUpdateConfig{})(sc)
+	if err != nil {
+		t.Fatalf("systemPlan: %v", err)
+	}
+	var state systemPlanState
+	if err := json.Unmarshal(out, &state); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, tg := range state.Targets {
+		got[tg.NodeID] = tg.BundleSHA256
+	}
+	if len(got) != 2 {
+		t.Fatalf("targets = %+v, want both compute nodes", state.Targets)
+	}
+	if got["n100-1"] != "sha-rasputin-n100" {
+		t.Errorf("n100-1 got bundle %q, want the amd64 artifact", got["n100-1"])
+	}
+	if got["pi-1"] != "sha-rasputin-rpi-arm64" {
+		t.Errorf("pi-1 got bundle %q, want the arm64 artifact", got["pi-1"])
+	}
+	if got["n100-1"] == got["pi-1"] {
+		t.Error("two arches must not receive the same artifact")
+	}
+	// Nothing is stranded — that is the difference this story makes.
+	if str := state.stranded(); len(str) != 0 {
+		t.Errorf("stranded = %+v, want none", str)
+	}
+	// The firewall is still skipped, and still as a DESIGNED skip. Keying on a
+	// release must not weaken the filter that keeps an OS squashfs away from
+	// the openwrt-ab backend.
+	var fw *proto.SkippedNode
+	for i := range state.Skipped {
+		if state.Skipped[i].NodeID == "fw-1" {
+			fw = &state.Skipped[i]
+		}
+	}
+	if fw == nil || fw.Reason != proto.SkipFirewallSKU {
+		t.Fatalf("fw-1 skip = %+v, want firewall-sku", fw)
+	}
+	// And no single run-wide bundle, because there isn't one.
+	if state.BundleSHA256 != "" {
+		t.Errorf("BundleSHA256 = %q, want empty on a release-keyed run", state.BundleSHA256)
+	}
+}
+
+// The staging precondition. An unstaged arch fails the PLAN — loudly, naming
+// the SKU and the nodes — rather than surfacing forty minutes later as a
+// mid-cascade download failure on node fourteen.
+func TestSystemPlan_UnstagedArchFailsThePlanLoudly(t *testing.T) {
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	seedMixedFleet(t, store, inv, "2026.08.4", "rasputin-n100") // no arm64
+
+	sc := newUpdaterCtx("parent", `{"version":"2026.08.4"}`, nc)
+	_, err := systemPlan(store, inv, SystemUpdateConfig{})(sc)
+	if err == nil {
+		t.Fatal("want the plan to fail when an arch in the fleet is not staged")
+	}
+	msg := err.Error()
+	for _, want := range []string{"rasputin-rpi-arm64", "pi-1", "2026.08.4"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q should name %q so the operator knows what to stage", msg, want)
+		}
+	}
+	// The amd64 node being fine is not a reason to proceed with half the fleet.
+	if strings.Contains(msg, "n100-1") {
+		t.Errorf("error names a node that IS staged: %q", msg)
+	}
+}
+
+// A firewall run is the mirror image: the firewall is the target and the OS
+// nodes are the designed skip. Neither direction may report a stranding, or
+// every ordinary single-component update goes red.
+func TestSystemPlan_FirewallComponentRunSkipsOSNodesAsDesigned(t *testing.T) {
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	seedMixedFleet(t, store, inv, "2026.08.4", releases.FirewallCompatible)
+
+	sc := newUpdaterCtx("parent", `{"version":"2026.08.4","component":"fw"}`, nc)
+	out, err := systemPlan(store, inv, SystemUpdateConfig{})(sc)
+	if err != nil {
+		t.Fatalf("systemPlan: %v", err)
+	}
+	var state systemPlanState
+	_ = json.Unmarshal(out, &state)
+
+	if ids := state.targetIDs(); len(ids) != 1 || ids[0] != "fw-1" {
+		t.Fatalf("targets = %v, want [fw-1]", ids)
+	}
+	if str := state.stranded(); len(str) != 0 {
+		t.Errorf("stranded = %+v — OS nodes skipped by a firewall run are designed, not stranded", str)
+	}
+	for _, sk := range state.Skipped {
+		if sk.Reason != proto.SkipFirewallSKU {
+			t.Errorf("%s skipped as %q, want firewall-sku", sk.NodeID, sk.Reason)
+		}
+	}
+}
+
+// Exactly one keying form. Both together is ambiguous (which wins?) and
+// neither is the old "bundleSha256 is required" error.
+func TestSystemPlan_RejectsAmbiguousSpec(t *testing.T) {
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	for _, spec := range []string{
+		`{}`,
+		`{"version":"2026.08.4","bundleSha256":"sha-x"}`,
+	} {
+		if _, err := systemPlan(store, inv, SystemUpdateConfig{})(newUpdaterCtx("p", spec, nc)); err == nil {
+			t.Errorf("spec %s: want an error", spec)
+		}
+	}
+}
+
+// The cascade must hand each node the bundle the PLAN chose, not one taken
+// from the spec — on a release-keyed run the spec has no bundle at all.
+func TestSystemCascade_HandsEachNodeItsOwnBundle(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	jobStore := newJobsStore(t)
+	runner := jobs.NewRunner(jobStore, nc)
+	runner.Register(jobs.Workflow{
+		Kind: "node.update",
+		Steps: []jobs.WorkflowStep{{
+			Name: "noop", Timeout: time.Second,
+			Do: func(sc *jobs.StepCtx) (json.RawMessage, error) { return nil, nil },
+		}},
+	})
+
+	planRaw, _ := json.Marshal(systemPlanState{
+		BundleVer: "2026.08.4", Component: "os",
+		Targets: []plannedTarget{
+			{NodeID: "n100-1", BundleSHA256: "sha-amd64", Compatible: "rasputin-n100"},
+			{NodeID: "pi-1", BundleSHA256: "sha-arm64", Compatible: "rasputin-rpi-arm64"},
+		},
+	})
+
+	parent := "parent"
+	if err := jobStore.CreateJob(ctx, &jobs.Job{
+		ID: parent, Kind: "system.update", Status: jobs.StatusRunning, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	sc := newUpdaterCtx(parent, `{"version":"2026.08.4"}`, nc)
+	sc.PriorResults = map[string]json.RawMessage{"plan": planRaw}
+	if _, err := systemCascade(store, inv, jobStore, runner, nc, SystemUpdateConfig{})(sc); err != nil {
+		t.Fatalf("systemCascade: %v", err)
+	}
+	runner.Wait()
+
+	children, err := jobStore.ListChildJobs(ctx, parent)
+	if err != nil {
+		t.Fatalf("list children: %v", err)
+	}
+	got := map[string]string{}
+	for _, c := range children {
+		var s struct{ NodeID, BundleSHA256 string }
+		if err := json.Unmarshal(c.Spec, &s); err != nil {
+			t.Fatalf("child spec: %v", err)
+		}
+		got[s.NodeID] = s.BundleSHA256
+	}
+	if got["n100-1"] != "sha-amd64" || got["pi-1"] != "sha-arm64" {
+		t.Errorf("child specs = %+v, want each node its own artifact", got)
+	}
+}
+
 // The Decision-11 headline case end-to-end through the plan step: an amd64
 // bundle on a mixed cluster plans the N100 and reports the Pi as stranded, on
 // the stashed state AND on the wire event.
@@ -1090,7 +1307,7 @@ func TestSystemPlan_MixedArchReportsStranded(t *testing.T) {
 	if err := json.Unmarshal(out, &state); err != nil {
 		t.Fatalf("unmarshal state: %v", err)
 	}
-	if len(state.Targets) != 1 || state.Targets[0] != "n100-1" {
+	if ids := state.targetIDs(); len(ids) != 1 || ids[0] != "n100-1" {
 		t.Errorf("targets = %v, want [n100-1]", state.Targets)
 	}
 	str := state.stranded()
@@ -1128,7 +1345,7 @@ func TestSystemSummarize_StrandedNodeFailsTheParent(t *testing.T) {
 	_ = jobStore.MarkJobSucceeded(ctx, "c-ok", time.Now().UTC())
 
 	planRaw, _ := json.Marshal(systemPlanState{
-		Targets: []string{"n100-1"},
+		Targets: []plannedTarget{{NodeID: "n100-1", BundleSHA256: "sha-amd64"}},
 		Skipped: []proto.SkippedNode{
 			{NodeID: "fw-1", Reason: proto.SkipFirewallSKU},
 			{NodeID: "pi-1", Reason: proto.SkipNoArtifactForArch},

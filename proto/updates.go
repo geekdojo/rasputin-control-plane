@@ -278,8 +278,30 @@ const AllUpdateProgressFilter = "rasputin.node.*.evt.update.>"
 // SystemUpdateSpec is the spec body the api accepts for a system.update
 // job. The saga plans an ordered list of per-node updates, spawns each as
 // a child node.update job, and rolls up the outcome.
+// Exactly one of Version or BundleSHA256 must be set.
 type SystemUpdateSpec struct {
-	BundleSHA256 string `json:"bundleSha256"`
+	// Version keys the cascade on a RELEASE. The plan then resolves the
+	// correct per-arch bundle FOR EACH NODE, so "UPDATE ALL" means all nodes
+	// on a mixed arm64/amd64 cluster. This is the form the UI uses.
+	//
+	// Keying on a single bundle made the SKU filter do target *rejection*:
+	// one bundle was chosen, every node wanting a different one was bucketed
+	// under `skipped`, and the parent succeeded. Resolving per node turns the
+	// same filter into bundle *selection* — which subsumes its original job
+	// while keeping the firewall's protection intact, since the firewall's
+	// artifact is still selected by its own SKU and it still cascades alone,
+	// never handed an OS image to dd. ADR-0005 Decision 11.
+	Version string `json:"version,omitempty"`
+	// Component scopes a Version-keyed run to one product line ("os" | "fw").
+	// Required because a version alone cannot say which: the OS and the
+	// firewall are separate images on separate release cadences, and nodes
+	// outside the chosen component are skipped as `firewall-sku` — the
+	// designed single-SKU filter, not a stranding. Defaults to "os".
+	Component string `json:"component,omitempty"`
+	// BundleSHA256 keys the cascade on ONE bundle. Retained for a targeted
+	// run — deploying a specific artifact to whatever matches it — and it is
+	// the only form that existed before Decision 11.
+	BundleSHA256 string `json:"bundleSha256,omitempty"`
 	// ExcludeNodes optionally skips specific node ids. Always implicitly
 	// includes the api's own self node id (RASPUTIN_SELF_NODE_ID) — the
 	// operator updates that one manually after the cascade.
