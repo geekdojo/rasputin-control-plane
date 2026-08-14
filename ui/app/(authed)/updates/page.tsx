@@ -624,7 +624,16 @@ function ComponentUpdateRow({ cu, onStaged }: { cu: ComponentUpdate; onStaged: (
     setBusy(true);
     setErr(null);
     try {
-      await pullUpdate(cu.component, cu.channel);
+      const res = await pullUpdate(cu.component, cu.channel);
+      // A partial pull resolves (HTTP 207) rather than throwing — some arches
+      // are in the store and some are not. Saying nothing here is what made a
+      // half-staged release invisible in the first place.
+      if (res.failed?.length) {
+        setErr(
+          `Staged ${res.staged.map((a) => a.architecture).join(', ') || 'nothing'}. ` +
+            res.failed.map((a) => `${a.architecture} failed: ${a.error}`).join('; '),
+        );
+      }
       onStaged();
     } catch (e) {
       setErr(String(e));
@@ -633,6 +642,10 @@ function ComponentUpdateRow({ cu, onStaged }: { cu: ComponentUpdate; onStaged: (
     }
   }
 
+  // Only the arches this cluster actually runs. An all-N100 fleet is not
+  // half-staged for lacking the Pi bundle it will never deploy.
+  const needed = (cu.artifacts ?? []).filter((a) => a.neededBy > 0);
+  const missing = needed.filter((a) => !a.staged);
   const canStage = cu.status === 'update_available' && cu.deployable && !cu.staged;
   const showManual = cu.status === 'update_available' && !cu.deployable && Boolean(cu.manualInstructions);
 
@@ -649,6 +662,11 @@ function ComponentUpdateRow({ cu, onStaged }: { cu: ComponentUpdate; onStaged: (
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
           {cu.staged && <Badge color="#4ade80">STAGED</Badge>}
+          {!cu.staged && needed.length > 1 && missing.length > 0 && missing.length < needed.length && (
+            <Badge color="#fbbf24">
+              PARTIAL — {missing.map((a) => a.architecture).join(', ')} MISSING
+            </Badge>
+          )}
           {canStage && (
             <Btn variant="primary" small disabled={busy} onClick={stage} title="download into the bundle catalog">
               <DownloadCloud size={10} /> {busy ? 'STAGING…' : 'DOWNLOAD & STAGE'}

@@ -342,6 +342,46 @@ export type UpdateStatus =
   | 'needs_attention'
   | 'unknown';
 
+/**
+ * One architecture's deployable artifact within a release, and whether this
+ * cluster has it staged. `neededBy` is how many nodes would take it — zero
+ * means the cluster has no hardware of that arch, so a missing artifact is
+ * not a problem worth flagging.
+ */
+export interface ArtifactStatus {
+  architecture: string;
+  compatible: string;
+  bundleSha256: string;
+  assetName?: string;
+  sizeBytes?: number;
+  staged: boolean;
+  neededBy: number;
+}
+
+/** One architecture's outcome from POST /api/updates/pull. */
+export interface PullArtifactResult {
+  architecture: string;
+  compatible: string;
+  assetName: string;
+  sha256?: string;
+  created?: boolean;
+  error?: string;
+}
+
+/**
+ * Reply from POST /api/updates/pull. `staged` and `failed` together always
+ * cover every deployable artifact in the release, so a partial pull (HTTP 207)
+ * is distinguishable from a complete one without re-checking.
+ */
+export interface PullResult {
+  component: string;
+  version: string;
+  channel: string;
+  staged: PullArtifactResult[];
+  failed?: PullArtifactResult[];
+  bundle?: Bundle;
+}
+
 export interface ComponentUpdate {
   component: string; // "os" | "fw" | "cp"
   label: string;
@@ -355,7 +395,11 @@ export interface ComponentUpdate {
   assetName?: string;
   sizeBytes?: number;
   signedBy?: string;
+  /** True only when every artifact the fleet NEEDS is staged — see `artifacts`. */
   staged?: boolean;
+  /** One entry per architecture in the release. A release is one artifact per
+   *  arch, so a single `staged` bool cannot describe a mixed-arch cluster. */
+  artifacts?: ArtifactStatus[];
   manualInstructions?: string;
   note?: string;
   // Software that ships inside this component's image (e.g. the control-plane

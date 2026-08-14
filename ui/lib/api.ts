@@ -32,6 +32,7 @@ import type {
   ObsStatus,
   FirewallRuleSpec,
   PortForwardSpec,
+  PullResult,
   WANConfigSpec,
   DeploymentMode,
   DNSForwarding,
@@ -579,11 +580,13 @@ export function checkForUpdates(channel?: string): Promise<UpdateCheckResult> {
   });
 }
 
-// pullUpdate downloads the latest deployable bundle for a component into the
-// local bundle store so the existing Deploy / Update-all flow can distribute
-// it. Returns the staged Bundle.
-export function pullUpdate(component: string, channel?: string): Promise<Bundle> {
-  return jsonFetch<Bundle>('/api/updates/pull', {
+// pullUpdate downloads EVERY deployable artifact for a component — one per
+// architecture — into the local bundle store so the Deploy / Update-all flow
+// can distribute it. Each arch is attempted independently: the reply lists
+// what staged and what didn't, and a partial pull answers HTTP 207 rather
+// than throwing, so callers must check `failed` and not just the promise.
+export function pullUpdate(component: string, channel?: string): Promise<PullResult> {
+  return jsonFetch<PullResult>('/api/updates/pull', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ component, ...(channel ? { channel } : {}) }),
