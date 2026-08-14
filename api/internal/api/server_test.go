@@ -1193,6 +1193,41 @@ func TestHandleCreateSystemUpdate_CanarySoakBounds(t *testing.T) {
 	}
 }
 
+// maxInFlight is rejected at the door for the values that cannot mean
+// anything. A negative width is nonsense in both forms, and a percentage over
+// 100 has lost track of what it is a percentage of — far likelier a typo than
+// an intent, and one that would otherwise reach the clamp and be silently
+// reinterpreted as "the whole tier bar one".
+func TestHandleCreateSystemUpdate_MaxInFlightBounds(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	cases := []struct {
+		name, body   string
+		wantRejected bool
+	}{
+		{"negative", `{"version":"2026.08.4","maxInFlight":-1}`, true},
+		{"negative percent", `{"version":"2026.08.4","maxInFlight":"-5%"}`, true},
+		{"over 100 percent", `{"version":"2026.08.4","maxInFlight":"101%"}`, true},
+		{"absolute", `{"version":"2026.08.4","maxInFlight":4}`, false},
+		{"serial", `{"version":"2026.08.4","maxInFlight":1}`, false},
+		{"percent", `{"version":"2026.08.4","maxInFlight":"20%"}`, false},
+		{"absolute over the tier size is fine — the clamp handles it",
+			`{"version":"2026.08.4","maxInFlight":9999}`, false},
+		{"the default", `{"version":"2026.08.4"}`, false},
+	}
+	for _, tc := range cases {
+		w := f.do(t, http.MethodPost, "/api/updates/system", tc.body, c)
+		body := strings.TrimSpace(w.Body.String())
+		// The fixture registers no workflows, so an accepted spec still 400s
+		// from the runner. Which layer rejected is the assertion.
+		rejectedHere := strings.Contains(body, "maxInFlight")
+		if rejectedHere != tc.wantRejected {
+			t.Errorf("%s: handler-rejected=%v, want %v (status %d, body %s)",
+				tc.name, rejectedHere, tc.wantRejected, w.Code, body)
+		}
+	}
+}
+
 // Exactly one keying form. Accepting both would leave the plan silently
 // choosing between "the release" and "this artifact", which are different
 // runs on a mixed-arch cluster (ADR-0005 Decision 11).
