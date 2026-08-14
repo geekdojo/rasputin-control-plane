@@ -352,18 +352,52 @@ func (s *Server) handleCheckUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 	result := releases.Check(r.Context(), s.releaseSource, channel, nodes)
 
-	// Annotate deployable components already staged in the local bundle store
-	// so the UI can show "staged" instead of a redundant download button.
+	// Annotate what the local bundle store already holds, PER ARTIFACT. A
+	// release is one artifact per arch, so asking only about the component's
+	// nominal SKU answered a different question than the one the UI was
+	// showing: "the amd64 bundle is here" rendered as "staged" on a cluster
+	// with three Pis that had nothing to deploy.
 	for i := range result.Components {
 		c := &result.Components[i]
-		if c.BundleSHA256 == "" {
-			continue
+		for j := range c.Artifacts {
+			a := &c.Artifacts[j]
+			if a.BundleSHA256 == "" {
+				continue
+			}
+			if existing, _ := s.updater.GetBundle(r.Context(), a.BundleSHA256); existing != nil {
+				a.Staged = true
+			}
 		}
-		if existing, _ := s.updater.GetBundle(r.Context(), c.BundleSHA256); existing != nil {
-			c.Staged = true
-		}
+		c.Staged = componentFullyStaged(c)
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// componentFullyStaged reports whether every artifact this cluster actually
+// needs is in the local bundle store. Artifacts no node needs are ignored —
+// an all-N100 cluster is fully staged without ever pulling the Pi bundle —
+// and a component with no needed artifacts at all falls back to the nominal
+// bundle so a fleet that has not reported arch yet still gets a badge.
+func componentFullyStaged(c *releases.ComponentStatus) bool {
+	needed, staged := 0, 0
+	for _, a := range c.Artifacts {
+		if a.NeededBy == 0 {
+			continue
+		}
+		needed++
+		if a.Staged {
+			staged++
+		}
+	}
+	if needed > 0 {
+		return staged == needed
+	}
+	for _, a := range c.Artifacts {
+		if a.BundleSHA256 == c.BundleSHA256 {
+			return a.Staged
+		}
+	}
+	return false
 }
 
 // POST /api/updates/pull
@@ -428,19 +462,39 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every artifact is attempted, and a failure on one does not abandon the
+	// others. Fail-fast here left the store holding whichever arches happened
+	// to download before the error, with a single error string as the only
+	// signal — so a half-staged release looked exactly like a failed one, and
+	// re-running the pull was the only way to find out which. The outcome per
+	// arch is reported instead, and a partial pull answers 207 so the UI can
+	// say WHICH arch is missing.
+	res := pullResult{Component: comp.ID, Version: info.Version, Channel: channel}
 	var primary *updater.Bundle
 	anyCreated := false
+	worstStatus := 0
 	for _, art := range arts {
 		assetName, assetSHA, _, _ := art.OTAAsset(comp.Kind)
+		outcome := pullArtifactResult{
+			Architecture: art.Architecture, Compatible: art.Compatible, AssetName: assetName,
+		}
+		fail := func(status int, msg string) {
+			outcome.Error = msg
+			res.Failed = append(res.Failed, outcome)
+			if status > worstStatus {
+				worstStatus = status
+			}
+		}
+
 		url, ok := info.AssetURL(assetName)
 		if !ok {
-			writeError(w, http.StatusBadGateway, "release "+info.Version+" has no asset "+assetName)
-			return
+			fail(http.StatusBadGateway, "release "+info.Version+" has no asset "+assetName)
+			continue
 		}
 		rc, err := s.releaseSource.Open(r.Context(), url)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, "download bundle: "+err.Error())
-			return
+			fail(http.StatusBadGateway, "download bundle: "+err.Error())
+			continue
 		}
 		wantSHA := strings.ToLower(assetSHA)
 		verify := func(tmpPath, sha string) (bundleMeta, error) {
@@ -470,24 +524,67 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 		bundle, created, err := s.ingestBundle(r.Context(), rc, "update-check", verify)
 		rc.Close()
 		if err != nil {
-			writeError(w, ingestStatus(err), err.Error())
-			return
+			fail(ingestStatus(err), err.Error())
+			continue
 		}
 		if created {
 			anyCreated = true
 		}
-		// Response body is the artifact matching the component's nominal compat
-		// (back-compat: the UI's pull returns a single Bundle); the rest land in
-		// the catalog the UI re-lists. Fall back to the first staged bundle.
+		outcome.SHA256, outcome.Created = bundle.SHA256, created
+		res.Staged = append(res.Staged, outcome)
+		// Bundle is the artifact matching the component's nominal compat; the
+		// rest land in the catalog the UI re-lists. Fall back to the first
+		// staged bundle.
 		if primary == nil || art.Compatible == comp.Compatible {
 			primary = bundle
 		}
 	}
-	status := http.StatusCreated
-	if !anyCreated {
-		status = http.StatusOK
+	res.Bundle = primary
+
+	switch {
+	case len(res.Staged) == 0:
+		// Nothing landed — an ordinary failure, reported with the per-artifact
+		// detail rather than only the first error encountered.
+		if worstStatus == 0 {
+			worstStatus = http.StatusBadGateway
+		}
+		writeJSON(w, worstStatus, res)
+	case len(res.Failed) > 0:
+		// THE CASE THIS EXISTS FOR: some arches staged, some did not. Neither
+		// a success nor a failure, and it must not be reported as either.
+		writeJSON(w, http.StatusMultiStatus, res)
+	case anyCreated:
+		writeJSON(w, http.StatusCreated, res)
+	default:
+		writeJSON(w, http.StatusOK, res)
 	}
-	writeJSON(w, status, primary)
+}
+
+// pullArtifactResult is one architecture's outcome from a pull. Named per
+// arch rather than per asset because arch is what an operator reasons about
+// ("the Pi bundle didn't come down"), and it is what the fleet plan keys on.
+type pullArtifactResult struct {
+	Architecture string `json:"architecture"`
+	Compatible   string `json:"compatible"`
+	AssetName    string `json:"assetName"`
+	SHA256       string `json:"sha256,omitempty"`
+	// Created distinguishes a fresh download from an idempotent re-pull.
+	Created bool   `json:"created,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// pullResult is the reply from POST /api/updates/pull. Staged and Failed
+// together always cover every deployable artifact in the release, so the
+// caller can tell a complete pull from a partial one without re-checking.
+type pullResult struct {
+	Component string               `json:"component"`
+	Version   string               `json:"version"`
+	Channel   string               `json:"channel"`
+	Staged    []pullArtifactResult `json:"staged"`
+	Failed    []pullArtifactResult `json:"failed,omitempty"`
+	// Bundle is the artifact matching the component's nominal SKU, for
+	// callers that want a single bundle to deploy from.
+	Bundle *updater.Bundle `json:"bundle,omitempty"`
 }
 
 // looksLikeSHA256 reports whether s is exactly 64 lowercase hex chars.

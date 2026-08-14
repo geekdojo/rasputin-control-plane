@@ -46,9 +46,19 @@ type ComponentStatus struct {
 	AssetName    string `json:"assetName,omitempty"`
 	SizeBytes    int64  `json:"sizeBytes,omitempty"`
 	SignedBy     string `json:"signedBy,omitempty"`
-	// Staged is set by the api handler (not Check) when the bundle for this
-	// update is already present in the local bundle store.
+	// Staged is set by the api handler (not Check). True only when every
+	// artifact the FLEET NEEDS is present in the local bundle store — see
+	// Artifacts. A component whose amd64 bundle is staged and whose arm64
+	// bundle is not is emphatically not "staged" on a cluster with Pis in it,
+	// and reading it as such is how a half-staged release stayed invisible.
 	Staged bool `json:"staged,omitempty"`
+
+	// Artifacts is every deployable artifact in the latest release — one per
+	// architecture — with whether it is staged and how many nodes need it.
+	// A release is one artifact per arch, so a single `staged` bool and a
+	// single bundleSha256 could never describe a mixed-arch cluster's real
+	// state. ADR-0005 Decision 11.
+	Artifacts []ArtifactStatus `json:"artifacts,omitempty"`
 
 	// Display-only components (firewall) carry a neutral instruction + the
 	// image asset name to copy.
@@ -63,6 +73,25 @@ type ComponentStatus struct {
 
 	// Diagnostic detail when Status == unknown.
 	Error string `json:"error,omitempty"`
+}
+
+// ArtifactStatus is one architecture's deployable artifact within a release,
+// and whether this cluster has it staged. The set of these is what makes a
+// half-staged release visible: three arm64 nodes and no arm64 bundle is a
+// fact the operator can act on, where a bare "staged" tick is not.
+type ArtifactStatus struct {
+	Architecture string `json:"architecture"`
+	Compatible   string `json:"compatible"`
+	BundleSHA256 string `json:"bundleSha256"`
+	AssetName    string `json:"assetName,omitempty"`
+	SizeBytes    int64  `json:"sizeBytes,omitempty"`
+	// Staged is filled by the api handler from the local bundle store.
+	Staged bool `json:"staged"`
+	// NeededBy is how many inventory nodes would take this artifact. Zero
+	// means the cluster has no hardware of that arch, which is why a missing
+	// artifact is not automatically a problem — an all-N100 cluster is fully
+	// staged without ever downloading the Pi bundle.
+	NeededBy int `json:"neededBy"`
 }
 
 // BundledComponent is a piece of software carried inside another component's
@@ -181,6 +210,8 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 		cs.Note = appendNote(cs.Note, "Version unconfirmed (last update didn't verify): "+strings.Join(unconfirmed, ", "))
 	}
 
+	cs.Artifacts = artifactStatuses(info, comp, nodes)
+
 	// Attach deploy/display metadata from the matching artifact.
 	if art, ok := info.Artifact(comp.Compatible); ok {
 		cs.SignedBy = art.SignedBy
@@ -202,6 +233,61 @@ func checkOne(ctx context.Context, src Source, channel string, comp Component, n
 		}
 	}
 	return cs
+}
+
+// artifactStatuses enumerates every deployable artifact in the release — one
+// per arch — and counts the nodes that would take each. Staged is left false;
+// only the api handler can see the local bundle store.
+//
+// A component with no deployable OTA artifact (KindSysupgrade, the display-only
+// firewall path) yields none, which is correct: there is nothing to stage.
+func artifactStatuses(info *ReleaseInfo, comp Component, nodes []*proto.Node) []ArtifactStatus {
+	if info == nil {
+		return nil
+	}
+	var out []ArtifactStatus
+	for i := range info.Manifest.Artifacts {
+		a := &info.Manifest.Artifacts[i]
+		name, sha, size, ok := a.OTAAsset(comp.Kind)
+		if !ok {
+			continue
+		}
+		out = append(out, ArtifactStatus{
+			Architecture: a.Architecture,
+			Compatible:   a.Compatible,
+			BundleSHA256: sha,
+			AssetName:    name,
+			SizeBytes:    size,
+			NeededBy:     nodesNeeding(nodes, comp, a.Compatible),
+		})
+	}
+	return out
+}
+
+// nodesNeeding counts the nodes that run comp's image AND whose architecture
+// resolves to this artifact's SKU. This is what makes "not staged" actionable
+// rather than alarming: an all-N100 cluster genuinely does not need the Pi
+// bundle, and must not be told it is half-staged for lacking it.
+//
+// A node whose arch does not resolve is counted against NO artifact. It is
+// not silently attributed to one either — that is exactly the guess #67 is
+// about, and inventing a number here would put it back in a second place.
+func nodesNeeding(nodes []*proto.Node, comp Component, compatible string) int {
+	n := 0
+	for _, node := range nodes {
+		if !runsComponent(node, comp) {
+			continue
+		}
+		want, known := ArchCompatible(node.Architecture)
+		if comp.Kind == KindRootfsAB {
+			// The firewall's artifact is selected by its own SKU, not by arch.
+			want, known = comp.Compatible, true
+		}
+		if known && want == compatible {
+			n++
+		}
+	}
+	return n
 }
 
 // runsComponent reports whether a node runs comp's image (by role).
