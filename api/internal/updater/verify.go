@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -111,9 +112,29 @@ func classifyBoot(prior, current string) bootIdentity {
 
 // classifyVersion evaluates conjunct (c). `expected` is the version the install
 // step recorded for the target slot; `reported` is what the booted node says it
-// is running.
-func classifyVersion(expected, reported string) versionMatch {
+// is running; `bundleSHA` is the content hash of the bundle being installed.
+//
+// The three-valued result is deliberately asymmetric — an ABSENT value degrades
+// (Decision 3), a DIFFERENT one fails — and that is only safe while `expected`
+// is trustworthy. #92 showed it is not: a pre-#111 agent echoes the bundle's
+// sha256 as its version, the install step recorded it, and conjunct (c) then
+// compared a real CalVer against a hash and failed every firewall update.
+//
+// So a value that IS the bundle's content hash is treated as UNKNOWN rather
+// than as a mismatch. It is not a version at all, and "we cannot tell" is the
+// honest reading of it — which lets a fleet carrying older agents degrade
+// instead of failing outright, exactly as Decision 3 intends for the
+// mixed-version case that is the norm here.
+//
+// This is belt and braces, not the fix: SetNodeUpdateSlots now refuses to
+// overwrite a manifest version with the echo at all, so new rows never hold a
+// hash. This clause covers the rows already written before that landed, and
+// any agent that finds a new way to report nonsense.
+func classifyVersion(expected, reported, bundleSHA string) versionMatch {
 	if expected == "" || reported == "" {
+		return versionUnknown
+	}
+	if bundleSHA != "" && strings.EqualFold(expected, bundleSHA) {
 		return versionUnknown
 	}
 	if expected == reported {

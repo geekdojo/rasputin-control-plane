@@ -91,7 +91,7 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 
 	// Recorded before the branch so BOTH outcomes carry it: a rolled-back node
 	// whose verify was degraded is exactly as interesting as a committed one.
-	res.Version = classifyVersion(expected.ToVersion, pre.CurrentVersion)
+	res.Version = classifyVersion(expected.ToVersion, pre.CurrentVersion, expected.BundleSHA256)
 	if err := store.SetNodeUpdateVerifyGaps(ctx, jobID, res.UnverifiedBoot(), res.UnverifiedVersion()); err != nil {
 		lg.log("warn", fmt.Sprintf("record verify gaps for %s: %v", nodeID, err))
 	}

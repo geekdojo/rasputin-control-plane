@@ -42,22 +42,112 @@ func TestClassifyBoot(t *testing.T) {
 }
 
 func TestClassifyVersion(t *testing.T) {
+	const sha = "77fbd31b35717d9034253df44cf74221e076dbf5cde81b0c8e7f79d04ece7c61"
 	cases := []struct {
-		name, expected, reported string
-		want                     versionMatch
+		name, expected, reported, bundleSHA string
+		want                                versionMatch
 	}{
-		{"agrees", "2026.08.2", "2026.08.2", versionMatches},
-		{"disagrees", "2026.08.2", "2026.08.1", versionMismatch},
-		{"node reported none", "2026.08.2", "", versionUnknown},
-		{"we expected none", "", "2026.08.2", versionUnknown},
-		{"neither", "", "", versionUnknown},
+		{"agrees", "2026.08.2", "2026.08.2", sha, versionMatches},
+		{"disagrees", "2026.08.2", "2026.08.1", sha, versionMismatch},
+		{"node reported none", "2026.08.2", "", sha, versionUnknown},
+		{"we expected none", "", "2026.08.2", sha, versionUnknown},
+		{"neither", "", "", sha, versionUnknown},
+		// #92: a pre-#111 agent echoed the bundle's content hash and the
+		// install step recorded it. That is not a version, so it cannot be a
+		// MISMATCH — comparing a CalVer against a hash failed every firewall
+		// update on e3bench. Unknown degrades; mismatch kills.
+		{"expected is the bundle hash", sha, "2026.08.2-dev.84", sha, versionUnknown},
+		{"expected is the bundle hash, uppercase", strings.ToUpper(sha), "2026.08.2-dev.84", sha, versionUnknown},
+		// The guard must not fire when there is no hash to compare against,
+		// nor swallow a genuine mismatch that merely looks hash-shaped.
+		{"no bundle sha known", sha, "2026.08.2-dev.84", "", versionMismatch},
+		{"different hash is still a mismatch", strings.Repeat("a", 64), "2026.08.2", sha, versionMismatch},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := classifyVersion(c.expected, c.reported); got != c.want {
-				t.Errorf("classifyVersion(%q,%q) = %q, want %q", c.expected, c.reported, got, c.want)
+			if got := classifyVersion(c.expected, c.reported, c.bundleSHA); got != c.want {
+				t.Errorf("classifyVersion(%q,%q,%q) = %q, want %q",
+					c.expected, c.reported, c.bundleSHA, got, c.want)
 			}
 		})
+	}
+}
+
+// THE INVARIANT, stated as an invariant rather than as a regression case for
+// one bug: the api must never let an agent's echo replace a value it already
+// holds from the signed manifest.
+//
+// The original #86 fix asserted only the EMPTY echo, which is why #92 survived
+// it — a pre-#111 agent returns the bundle's sha256, which is non-empty, and
+// a test that only ever passes "" cannot see that. Any future echo of any
+// wrong value is covered here.
+func TestSetNodeUpdateSlots_EchoNeverOverwritesAKnownVersion(t *testing.T) {
+	f := newStoreFixture(t)
+	const manifestVer = "2026.08.2-dev.84"
+	const bundleSHA = "77fbd31b35717d9034253df44cf74221e076dbf5cde81b0c8e7f79d04ece7c61"
+
+	// What step 1 does: record the version straight from the release manifest,
+	// before the node has been asked to do anything.
+	seed := func(t *testing.T, jobID string) {
+		t.Helper()
+		u := sampleNodeUpdate(jobID, "fw-1")
+		u.BundleSHA256, u.ToVersion, u.FromVersion = bundleSHA, manifestVer, ""
+		if err := f.store.CreateNodeUpdate(f.ctx, u); err != nil {
+			t.Fatalf("CreateNodeUpdate: %v", err)
+		}
+	}
+
+	for _, echo := range []struct{ name, value string }{
+		{"the bundle sha (a pre-#111 agent)", bundleSHA},
+		{"a different version entirely", "1.2.3"},
+		{"nothing (the #86 case)", ""},
+		{"whitespace nonsense", "   "},
+	} {
+		t.Run(echo.name, func(t *testing.T) {
+			jobID := "job-" + echo.name
+			seed(t, jobID)
+			if err := f.store.SetNodeUpdateSlots(f.ctx, jobID,
+				proto.SlotA, proto.SlotB, "2026.08.2-dev.83", echo.value); err != nil {
+				t.Fatalf("SetNodeUpdateSlots: %v", err)
+			}
+			got, _ := f.store.GetNodeUpdate(f.ctx, jobID)
+			if got.ToVersion != manifestVer {
+				t.Errorf("to_version = %q, want the manifest's %q — the agent's echo (%q) must not replace a version the api already holds",
+					got.ToVersion, manifestVer, echo.value)
+			}
+		})
+	}
+
+	// The other half of the asymmetry: from_version has NO manifest source —
+	// only the node can say what it was running — so there the echo IS
+	// authoritative and must be recorded.
+	seed(t, "job-from")
+	if err := f.store.SetNodeUpdateSlots(f.ctx, "job-from",
+		proto.SlotA, proto.SlotB, "2026.08.2-dev.83", ""); err != nil {
+		t.Fatalf("SetNodeUpdateSlots: %v", err)
+	}
+	got, _ := f.store.GetNodeUpdate(f.ctx, "job-from")
+	if got.FromVersion != "2026.08.2-dev.83" {
+		t.Errorf("from_version = %q, want the agent's report — the api holds no manifest value for it", got.FromVersion)
+	}
+}
+
+// A row whose to_version was never seeded still takes the agent's value: the
+// echo fills a GAP, which is the one thing it is still for.
+func TestSetNodeUpdateSlots_EchoFillsAnEmptyVersion(t *testing.T) {
+	f := newStoreFixture(t)
+	u := sampleNodeUpdate("job-gap", "n1")
+	u.ToVersion = ""
+	if err := f.store.CreateNodeUpdate(f.ctx, u); err != nil {
+		t.Fatalf("CreateNodeUpdate: %v", err)
+	}
+	if err := f.store.SetNodeUpdateSlots(f.ctx, "job-gap",
+		proto.SlotA, proto.SlotB, "", "2026.08.3-dev.162"); err != nil {
+		t.Fatalf("SetNodeUpdateSlots: %v", err)
+	}
+	got, _ := f.store.GetNodeUpdate(f.ctx, "job-gap")
+	if got.ToVersion != "2026.08.3-dev.162" {
+		t.Errorf("to_version = %q, want the echo to fill an empty column", got.ToVersion)
 	}
 }
 

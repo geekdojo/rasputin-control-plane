@@ -185,10 +185,30 @@ func (s *Store) SetNodeUpdateVerifyGaps(ctx context.Context, jobID string, unver
 // step short: degrading was never necessary, because the api held the answer
 // the whole time and was throwing it away here.
 //
-// So: an agent that knows better may refine the value (a slot-aware version is
-// stronger evidence than a manifest), and an agent that knows nothing leaves it
-// alone. No `.version` sidecar in the firewall image is required, which is what
-// the issue and the wiki both originally proposed.
+// ⚠️ AMENDED for #92 — THE ECHO FILLS A GAP, IT DOES NOT REFINE.
+//
+// The original fix guarded only the EMPTY echo (NULLIF on the bind param),
+// on the reasoning that an agent which knows better may refine the value. A
+// pre-#111 agent does not return nothing — it returns the bundle's SHA256,
+// which is non-empty, sails through that guard, and replaces a good manifest
+// version with a string that is not a version at all. The firewall's agent is
+// pinned separately (`rasputin-openwrt-firewall/agent-version.txt`) on its own
+// cadence, so it lagged into exactly that state and EVERY firewall update
+// failed `version_mismatch` on `e3bench` 2026-08-14.
+//
+// The asymmetry below is the point, and it follows from who holds the answer:
+//
+//   - to_version   — the api ALREADY KNOWS IT (step 1 wrote bundle.Version from
+//     the signed manifest before the node was asked anything). The
+//     existing value therefore WINS, and the agent's echo can only
+//     fill the column when it is still empty.
+//   - from_version — the api knows NOTHING (step 1 leaves it empty; only the
+//     node can say what it was running). The echo stays authoritative.
+//
+// "Refinement" bought nothing to weigh against that: on RAUC the two strings
+// are identical, and on openwrt-ab the agent has no better source than the
+// manifest the api is already holding. What it cost was letting a node
+// overwrite the EXPECTED side of the check that grades it.
 //
 // Done in SQL rather than read-modify-write so it stays a single atomic
 // statement; a concurrent writer cannot interleave between the read and the
@@ -199,7 +219,7 @@ func (s *Store) SetNodeUpdateSlots(ctx context.Context, jobID string, from, to p
         SET from_slot    = :from_slot,
             to_slot      = :to_slot,
             from_version = COALESCE(NULLIF(:from_version, ''), from_version),
-            to_version   = COALESCE(NULLIF(:to_version,   ''), to_version)
+            to_version   = COALESCE(NULLIF(to_version, ''), NULLIF(:to_version, ''))
         WHERE job_id = :job_id`,
 		sql.Named("from_slot", string(from)),
 		sql.Named("to_slot", string(to)),

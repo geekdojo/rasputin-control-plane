@@ -584,11 +584,25 @@ func TestStore_SetNodeUpdateSlots_EmptyVersionDoesNotEraseTheManifestVersion(t *
 	}
 }
 
-// The other direction, so the fix cannot degenerate into "never write versions":
-// a backend that DOES know (RAUC reads RAUC_MF_VERSION from the bundle) must
-// still refine the value. A slot-aware version is stronger evidence than a
-// manifest the api is holding.
-func TestStore_SetNodeUpdateSlots_KnownVersionStillRefines(t *testing.T) {
+// ⚠️ THIS TEST ASSERTED THE OPPOSITE UNTIL #92, DELIBERATELY — the inversion is
+// the change, not an accident, and the old expectation is kept here so nobody
+// "restores" it later.
+//
+// #86 reasoned that a backend which DOES know (RAUC reads RAUC_MF_VERSION from
+// the bundle) should be allowed to refine the value, on the grounds that a
+// slot-aware version is stronger evidence than a manifest the api is holding.
+// That argument does not survive contact with an agent that is simply WRONG: a
+// pre-#111 agent returns the bundle's sha256, which is non-empty, so "refine"
+// let it overwrite a good manifest version with a content hash — and conjunct
+// (c) then compared a real CalVer against that hash and failed EVERY firewall
+// update (bench-observed, e3bench 2026-08-14).
+//
+// Weighing the two: refinement bought nothing measurable — on RAUC the agent's
+// string and the manifest's are the same value, and on openwrt-ab the agent has
+// no better source than the manifest — while costing the api's ability to trust
+// the EXPECTED side of the check that grades the node. So the echo now fills a
+// GAP and never replaces a known value.
+func TestStore_SetNodeUpdateSlots_EchoDoesNotOverrideAKnownVersion(t *testing.T) {
 	f := newStoreFixture(t)
 	u := sampleNodeUpdate("job-1", "compute1")
 	u.ToVersion = "2026.08.3-dev.160"
@@ -599,8 +613,15 @@ func TestStore_SetNodeUpdateSlots_KnownVersionStillRefines(t *testing.T) {
 		t.Fatalf("SetNodeUpdateSlots: %v", err)
 	}
 	got, _ := f.store.GetNodeUpdate(f.ctx, "job-1")
-	if got.ToVersion != "2026.08.3-dev.160-rauc" {
-		t.Errorf("to_version = %q, want the agent's value — an agent that knows better must be allowed to say so", got.ToVersion)
+	if got.ToVersion != "2026.08.3-dev.160" {
+		t.Errorf("to_version = %q, want the manifest's %q kept — the api already knew it, and an echo it cannot validate must not replace it (#92)",
+			got.ToVersion, "2026.08.3-dev.160")
+	}
+	// from_version has no manifest source, so the echo there is still the only
+	// evidence and must still land. Losing this is how the fix would degenerate
+	// into "never write versions".
+	if got.FromVersion != "2026.08.3-dev.158" {
+		t.Errorf("from_version = %q, want the agent's report — the api holds nothing to compare it against", got.FromVersion)
 	}
 }
 
