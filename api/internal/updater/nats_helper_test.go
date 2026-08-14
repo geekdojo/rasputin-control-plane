@@ -1057,6 +1057,136 @@ func TestSystemPlan_MissingSHA(t *testing.T) {
 	}
 }
 
+// The Decision-11 headline case end-to-end through the plan step: an amd64
+// bundle on a mixed cluster plans the N100 and reports the Pi as stranded, on
+// the stashed state AND on the wire event.
+func TestSystemPlan_MixedArchReportsStranded(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+
+	for _, n := range []struct{ id, arch string }{{"n100-1", "amd64"}, {"pi-1", "arm64"}} {
+		if err := inv.Insert(ctx, &proto.Node{
+			ID: n.id, Role: proto.RoleCompute, Architecture: n.arch,
+			FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("inv %s: %v", n.id, err)
+		}
+	}
+	if err := store.CreateBundle(ctx, &Bundle{
+		SHA256: "sha-amd64", Version: "v9", Compatible: "rasputin-n100",
+		UploadedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("bundle: %v", err)
+	}
+
+	sc := newUpdaterCtx("parent", `{"bundleSha256":"sha-amd64"}`, nc)
+	out, err := systemPlan(store, inv, SystemUpdateConfig{})(sc)
+	if err != nil {
+		t.Fatalf("systemPlan: %v", err)
+	}
+	var state systemPlanState
+	if err := json.Unmarshal(out, &state); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if len(state.Targets) != 1 || state.Targets[0] != "n100-1" {
+		t.Errorf("targets = %v, want [n100-1]", state.Targets)
+	}
+	str := state.stranded()
+	if len(str) != 1 || str[0].NodeID != "pi-1" {
+		t.Fatalf("stranded = %+v, want [pi-1]", str)
+	}
+	if str[0].Reason != proto.SkipNoArtifactForArch {
+		t.Errorf("reason = %q, want %q", str[0].Reason, proto.SkipNoArtifactForArch)
+	}
+}
+
+// The stranded node must fail the parent even when every child committed. A
+// green run that left half the fleet behind is the exact honesty failure
+// ADR-0005 Decision 11 exists to close, so summarize returns an error — and it
+// must still publish the report first, because that report is what the
+// operator needs in order to act.
+func TestSystemSummarize_StrandedNodeFailsTheParent(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	jobStore := newJobsStore(t)
+
+	parent := "parent"
+	if err := jobStore.CreateJob(ctx, &jobs.Job{
+		ID: parent, Kind: "system.update", Status: jobs.StatusRunning, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	p := parent
+	if err := jobStore.CreateJob(ctx, &jobs.Job{
+		ID: "c-ok", Kind: "node.update", Status: jobs.StatusQueued,
+		ParentID: &p, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	_ = jobStore.MarkJobSucceeded(ctx, "c-ok", time.Now().UTC())
+
+	planRaw, _ := json.Marshal(systemPlanState{
+		Targets: []string{"n100-1"},
+		Skipped: []proto.SkippedNode{
+			{NodeID: "fw-1", Reason: proto.SkipFirewallSKU},
+			{NodeID: "pi-1", Reason: proto.SkipNoArtifactForArch},
+		},
+	})
+	sc := newUpdaterCtx(parent, `{}`, nc)
+	sc.PriorResults = map[string]json.RawMessage{"plan": planRaw}
+
+	out, err := systemSummarize(jobStore, nc)(sc)
+	if err == nil {
+		t.Fatal("want an error so the parent job is failed; every child succeeded but a node was stranded")
+	}
+	if out == nil {
+		t.Fatal("want the counts returned alongside the error — the report is the point")
+	}
+	var counts proto.SystemUpdateCounts
+	if err := json.Unmarshal(out, &counts); err != nil {
+		t.Fatalf("unmarshal counts: %v", err)
+	}
+	if counts.Succeeded != 1 || counts.Failed != 0 {
+		t.Errorf("child counts = %+v, want 1 succeeded / 0 failed", counts)
+	}
+	if counts.Skipped != 2 || counts.Stranded != 1 {
+		t.Errorf("counts = %+v, want 2 skipped of which 1 stranded", counts)
+	}
+}
+
+// A firewall skipped by an OS cascade is the SKU filter working as designed —
+// it must NOT fail the parent. This is the other half of the distinction; get
+// it wrong and every ordinary OS update goes red.
+func TestSystemSummarize_DesignedSkipKeepsTheParentGreen(t *testing.T) {
+	nc := startNATS(t)
+	jobStore := newJobsStore(t)
+
+	planRaw, _ := json.Marshal(systemPlanState{
+		Skipped: []proto.SkippedNode{
+			{NodeID: "fw-1", Reason: proto.SkipFirewallSKU},
+			{NodeID: "c-9", Reason: proto.SkipOffline},
+			{NodeID: "c-8", Reason: proto.SkipExcluded},
+		},
+	})
+	sc := newUpdaterCtx("parent", `{}`, nc)
+	sc.PriorResults = map[string]json.RawMessage{"plan": planRaw}
+
+	out, err := systemSummarize(jobStore, nc)(sc)
+	if err != nil {
+		t.Fatalf("designed skips must not fail the parent: %v", err)
+	}
+	var counts proto.SystemUpdateCounts
+	_ = json.Unmarshal(out, &counts)
+	if counts.Stranded != 0 {
+		t.Errorf("stranded = %d, want 0", counts.Stranded)
+	}
+	if counts.Skipped != 3 {
+		t.Errorf("skipped = %d, want 3 — designed skips are still reported", counts.Skipped)
+	}
+}
+
 func TestSystemSummarize_NoChildren(t *testing.T) {
 	nc := startNATS(t)
 	jobStore := newJobsStore(t)

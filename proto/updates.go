@@ -311,7 +311,53 @@ type SystemUpdateChangeEvt struct {
 	Detail      string                 `json:"detail,omitempty"`
 	// Counts is filled on planned/completed/aborted: total, succeeded, failed.
 	Counts *SystemUpdateCounts `json:"counts,omitempty"`
-	Ts     time.Time           `json:"ts"`
+	// Skipped is filled on planned/completed with the per-node reason each
+	// non-target was left out. Carried as well as Counts.Skipped because a
+	// count cannot answer the only question that matters — whether a skip was
+	// designed or a node was left behind (see SkipReason).
+	Skipped []SkippedNode `json:"skipped,omitempty"`
+	Ts      time.Time     `json:"ts"`
+}
+
+// SkipReason names why a node was left out of a system.update plan.
+//
+// The distinction is load-bearing, not cosmetic. Three of these are the plan
+// working exactly as designed; SkipNoArtifactForArch is a node left behind.
+// Until ADR-0005 Decision 11 they rendered identically — a bare id in a list
+// and a bare count on the wire — so "UPDATE ALL" on a mixed arm64/amd64
+// cluster could update eleven nodes, strand eleven more, and report green.
+type SkipReason string
+
+const (
+	// SkipExcluded — the operator (or the self-node rule) asked for it.
+	SkipExcluded SkipReason = "excluded"
+	// SkipOffline — the node was not reachable when the plan was made.
+	SkipOffline SkipReason = "offline"
+	// SkipFirewallSKU — the SKU filter working as designed: a system.update
+	// carries one bundle, so an OS cascade skips the firewall and a firewall
+	// cascade contains only it. This is what keeps an OS squashfs from ever
+	// reaching the firewall's openwrt-ab backend (ADR-0005 Decision 8).
+	SkipFirewallSKU SkipReason = "firewall-sku"
+	// SkipNoArtifactForArch — THE STRANDED ONE. The node runs an architecture
+	// this cascade has no artifact for, either because the run was keyed on a
+	// single bundle of another arch or because the node never reported an arch
+	// at all. Nobody asked for this node to be left out; it just was.
+	SkipNoArtifactForArch SkipReason = "no-artifact-for-arch"
+)
+
+// Stranded reports whether a skip means a node was left behind rather than
+// deliberately left out. A plan containing any stranded node must not leave
+// its parent job green (ADR-0005 Decision 11).
+func (r SkipReason) Stranded() bool { return r == SkipNoArtifactForArch }
+
+// SkippedNode is one non-target of a system.update plan, with the reason it
+// was not planned. Detail is human-readable colour for the UI (e.g. which SKU
+// the node wanted versus which the bundle carries); Reason is what code
+// branches on.
+type SkippedNode struct {
+	NodeID string     `json:"nodeId"`
+	Reason SkipReason `json:"reason"`
+	Detail string     `json:"detail,omitempty"`
 }
 
 // SystemUpdateCounts is the per-cascade rollup carried on the planned and
@@ -321,6 +367,12 @@ type SystemUpdateCounts struct {
 	Succeeded int `json:"succeeded"`
 	Failed    int `json:"failed"`
 	Skipped   int `json:"skipped"`
+	// Stranded is the subset of Skipped that nobody asked for — nodes with no
+	// artifact for their arch. Broken out rather than left inside Skipped
+	// because it is the number that decides whether the run was honest, and a
+	// UI that renders "3 skipped" next to a green tick is the bug this exists
+	// to close.
+	Stranded int `json:"stranded,omitempty"`
 }
 
 // SystemUpdateChangeSubject returns the publish subject for a system-update

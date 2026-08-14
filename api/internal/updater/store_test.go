@@ -3,7 +3,6 @@ package updater
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -315,7 +314,7 @@ func TestPlanTargets_SkipsExcluded(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "b" {
 		t.Errorf("targets: %+v", got)
 	}
-	if len(skipped) != 1 || skipped[0] != "a (excluded)" {
+	if len(skipped) != 1 || skipped[0].NodeID != "a" || skipped[0].Reason != proto.SkipExcluded {
 		t.Errorf("skipped: %+v", skipped)
 	}
 }
@@ -329,7 +328,7 @@ func TestPlanTargets_SkipsOfflineNodes(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "on" {
 		t.Errorf("targets: %+v", got)
 	}
-	if len(skipped) != 1 {
+	if len(skipped) != 1 || skipped[0].Reason != proto.SkipOffline {
 		t.Errorf("skipped: %+v", skipped)
 	}
 }
@@ -348,22 +347,81 @@ func TestPlanTargets_SkipsSKUMismatch(t *testing.T) {
 		node("fw-1", proto.RoleFirewall, time.Second),
 	}
 
-	// OS bundle → updates the compute node, skips the firewall.
+	// OS bundle → updates the compute node, skips the firewall. The firewall
+	// skip is DESIGNED, so it must not read as stranded.
 	got, skipped := planTargets(nodes, nil, "rasputin-n100")
 	if len(got) != 1 || got[0].ID != "cmp-1" {
 		t.Errorf("OS bundle targets = %+v, want [cmp-1]", got)
 	}
-	if len(skipped) != 1 || !strings.Contains(skipped[0], "fw-1") {
-		t.Errorf("OS bundle should skip fw-1, skipped = %+v", skipped)
+	if len(skipped) != 1 || skipped[0].NodeID != "fw-1" {
+		t.Fatalf("OS bundle should skip fw-1, skipped = %+v", skipped)
+	}
+	if skipped[0].Reason != proto.SkipFirewallSKU || skipped[0].Reason.Stranded() {
+		t.Errorf("fw-1 skip reason = %q (stranded=%v), want firewall-sku and NOT stranded",
+			skipped[0].Reason, skipped[0].Reason.Stranded())
 	}
 
-	// Firewall bundle → updates the firewall, skips the compute node.
+	// Firewall bundle → updates the firewall, skips the compute node. Same
+	// direction, same designed reason.
 	got, skipped = planTargets(nodes, nil, "rasputin-fw-n100")
 	if len(got) != 1 || got[0].ID != "fw-1" {
 		t.Errorf("fw bundle targets = %+v, want [fw-1]", got)
 	}
-	if len(skipped) != 1 || !strings.Contains(skipped[0], "cmp-1") {
-		t.Errorf("fw bundle should skip cmp-1, skipped = %+v", skipped)
+	if len(skipped) != 1 || skipped[0].NodeID != "cmp-1" {
+		t.Fatalf("fw bundle should skip cmp-1, skipped = %+v", skipped)
+	}
+	if skipped[0].Reason != proto.SkipFirewallSKU || skipped[0].Reason.Stranded() {
+		t.Errorf("cmp-1 skip reason = %q (stranded=%v), want firewall-sku and NOT stranded",
+			skipped[0].Reason, skipped[0].Reason.Stranded())
+	}
+}
+
+// The whole point of ADR-0005 Decision 11: on a mixed arm64/amd64 cluster a
+// single-bundle run leaves the other arch behind, and that skip is NOT the
+// same thing as the firewall being filtered out. Eleven updated, eleven
+// stranded, reported green is the failure this test exists to prevent.
+func TestPlanTargets_OtherArchIsStrandedNotDesigned(t *testing.T) {
+	withArch := func(id, arch string) *proto.Node {
+		n := node(id, proto.RoleCompute, time.Second)
+		n.Architecture = arch
+		return n
+	}
+	nodes := []*proto.Node{
+		withArch("n100-1", "amd64"),
+		withArch("pi-1", "arm64"),
+		node("fw-1", proto.RoleFirewall, time.Second),
+	}
+
+	got, skipped := planTargets(nodes, nil, "rasputin-n100")
+	if len(got) != 1 || got[0].ID != "n100-1" {
+		t.Fatalf("targets = %+v, want [n100-1]", got)
+	}
+
+	byID := map[string]proto.SkippedNode{}
+	for _, sk := range skipped {
+		byID[sk.NodeID] = sk
+	}
+	if r := byID["pi-1"].Reason; r != proto.SkipNoArtifactForArch || !r.Stranded() {
+		t.Errorf("pi-1 skip reason = %q (stranded=%v), want no-artifact-for-arch and stranded", r, r.Stranded())
+	}
+	if r := byID["fw-1"].Reason; r != proto.SkipFirewallSKU || r.Stranded() {
+		t.Errorf("fw-1 skip reason = %q (stranded=%v), want firewall-sku and NOT stranded", r, r.Stranded())
+	}
+}
+
+// A node whose arch cannot be resolved to an artifact used to fall straight
+// through the SKU filter and be planned into whatever bundle the run carried —
+// the `known` return was computed and then only consulted in the mismatch
+// branch. It must be skipped as stranded instead.
+func TestPlanTargets_UnknownArchIsStrandedNotPlanned(t *testing.T) {
+	n := node("weird-1", proto.RoleCompute, time.Second)
+	n.Architecture = "riscv64"
+	got, skipped := planTargets([]*proto.Node{n}, nil, "rasputin-n100")
+	if len(got) != 0 {
+		t.Errorf("targets = %+v, want none — an unresolvable arch is not a valid target", got)
+	}
+	if len(skipped) != 1 || !skipped[0].Reason.Stranded() {
+		t.Errorf("skipped = %+v, want one stranded skip", skipped)
 	}
 }
 
