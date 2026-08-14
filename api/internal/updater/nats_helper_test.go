@@ -350,6 +350,101 @@ func TestUpdateInstall_HappyPath(t *testing.T) {
 	}
 }
 
+// ADR-0005 Decision 2's third corollary, the to_slot half. The install ack's
+// TargetSlot is a pure echo of what the api asked for, and it becomes conjunct
+// (b)'s EXPECTED side — so an agent that installs somewhere else must not be
+// able to quietly redefine what "success" means for its own check.
+//
+// Unlike #92 the api has no independent answer here (`pre.InactiveSlot` is
+// itself agent-reported), so the fix is not "prefer our value" but "notice the
+// disagreement". Failing at install is the honest outcome: the install already
+// happened, so we genuinely do not know which slot is about to boot.
+func TestUpdateInstall_RejectsASlotTheAPIDidNotChoose(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	seedNodeAndBundle(t, store, inv, "n", "sha-1", "v1")
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: "n", BundleSHA256: "sha-1",
+		FromSlot: proto.SlotUnknown, ToSlot: proto.SlotUnknown,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject("n"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+			CurrentVersion: "v0", Backend: "mock",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+	// Told to use B; claims it used A — which happens to be the slot currently
+	// running, so recording it would make verify call a healthy boot a rollback.
+	inSub, _ := nc.Subscribe(proto.UpdateInstallSubject("n"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdateInstallAck{
+			OK: true, TargetSlot: proto.SlotA, NewVersion: "v1",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = inSub.Unsubscribe() }()
+
+	sc := newUpdaterCtx("j", specJSON("n", "sha-1"), nc)
+	_, err := updateInstall(store)(sc)
+	if err == nil {
+		t.Fatal("want an error when the agent reports a slot the api did not choose")
+	}
+	if !strings.Contains(err.Error(), "was told to use") {
+		t.Errorf("error %q should say which slot was requested", err)
+	}
+	// The row must not carry the slot the agent invented.
+	row, _ := store.GetNodeUpdate(ctx, "j")
+	if row.ToSlot == proto.SlotA {
+		t.Error("to_slot recorded the agent's slot despite the mismatch")
+	}
+}
+
+// A quiet agent is not a disagreeing one. Writing "" would BLANK to_slot — the
+// slot columns are not COALESCEd — and conjunct (b) reads a blank expected slot
+// as a mismatch, i.e. a healthy node recorded as a bootloader rollback. That is
+// the c13 harm the verify contract exists to prevent, so an unreported slot
+// falls back to the one the api asked for.
+func TestUpdateInstall_SilentSlotFallsBackToTheRequestedOne(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	seedNodeAndBundle(t, store, inv, "n", "sha-1", "v1")
+	_ = store.CreateNodeUpdate(ctx, &NodeUpdate{
+		JobID: "j", NodeID: "n", BundleSHA256: "sha-1",
+		FromSlot: proto.SlotUnknown, ToSlot: proto.SlotUnknown,
+		Status: NodeUpdateInProgress, StartedAt: time.Now().UTC(),
+	})
+
+	preSub, _ := nc.Subscribe(proto.UpdatePrecheckSubject("n"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdatePrecheckAck{
+			OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB,
+			CurrentVersion: "v0", Backend: "mock",
+		})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = preSub.Unsubscribe() }()
+	inSub, _ := nc.Subscribe(proto.UpdateInstallSubject("n"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.UpdateInstallAck{OK: true, NewVersion: "v1"}) // no TargetSlot
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = inSub.Unsubscribe() }()
+
+	sc := newUpdaterCtx("j", specJSON("n", "sha-1"), nc)
+	if _, err := updateInstall(store)(sc); err != nil {
+		t.Fatalf("a silent slot is not a disagreement: %v", err)
+	}
+	row, _ := store.GetNodeUpdate(ctx, "j")
+	if row.ToSlot != proto.SlotB {
+		t.Errorf("to_slot = %q, want the requested slot b — a blank expected slot reads as a rollback", row.ToSlot)
+	}
+}
+
 // When the saga seeds PriorResults with the precheck step's ack,
 // updateInstall must NOT re-issue the precheck RPC. Counting requests
 // on the precheck subject is the strict proof — zero requests means
