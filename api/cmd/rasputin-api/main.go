@@ -671,7 +671,7 @@ func main() {
 		if err := nsSrv.Start(ctx); err != nil {
 			log.Printf("rasputin-api: nameserver not started (%v) — %s won't resolve via the CP", err, zone)
 		} else {
-			log.Printf("rasputin-api: nameserver authoritative for %s on %s", zone, nsSrv.Addr())
+			log.Printf("rasputin-api: nameserver authoritative for %s on %s (udp+tcp)", zone, nsSrv.UDPAddr())
 			defer nsSrv.Stop()
 		}
 	}

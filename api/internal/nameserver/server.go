@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strconv"
 	"sync"
 
 	"github.com/miekg/dns"
@@ -27,10 +26,10 @@ type Server struct {
 	ipFn    func() net.IP // the CP's LAN IPv4, re-resolved at Start (it moves per lease)
 	port    int           // 53 in production; 0 asks the OS for an ephemeral port (tests)
 
-	mu       sync.Mutex
-	udp, tcp *dns.Server
-	addr     string // the actual bound host:port (meaningful after Start)
-	stopped  bool
+	mu               sync.Mutex
+	udp, tcp         *dns.Server
+	udpAddr, tcpAddr string // the actual bound host:port per transport (meaningful after Start)
+	stopped          bool
 }
 
 // NewServer builds a nameserver that binds ipFn()'s address on the given port
@@ -48,25 +47,28 @@ func (s *Server) Start(ctx context.Context) error {
 		return ErrNoLANRoute
 	}
 
-	// Bind UDP first; when port is 0 the OS assigns one, and we then bind TCP on
-	// that same port so a caller has a single address for both transports.
+	// Each transport binds the requested port itself; neither is ever handed a
+	// port number read back off the other. UDP and TCP have independent port
+	// spaces, so an ephemeral port the UDP bind lands on may already be held on
+	// TCP — deriving one from the other is a TOCTOU that shows up as an
+	// intermittent "bind: address already in use" (#125). In production both
+	// transports get 53, as DNS requires; at port 0 they may land on different
+	// ports, which is why the two addresses are reported separately.
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: s.port})
 	if err != nil {
 		return fmt.Errorf("nameserver: bind udp %s:%d: %w", ip, s.port, err)
 	}
-	port := pc.LocalAddr().(*net.UDPAddr).Port
-	addr := net.JoinHostPort(ip.String(), strconv.Itoa(port))
-
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: ip, Port: s.port})
 	if err != nil {
 		_ = pc.Close()
-		return fmt.Errorf("nameserver: bind tcp %s: %w", addr, err)
+		return fmt.Errorf("nameserver: bind tcp %s:%d: %w", ip, s.port, err)
 	}
 
 	s.mu.Lock()
 	s.udp = &dns.Server{PacketConn: pc, Handler: s.handler}
 	s.tcp = &dns.Server{Listener: ln, Handler: s.handler}
-	s.addr = addr
+	s.udpAddr = pc.LocalAddr().String()
+	s.tcpAddr = ln.Addr().String()
 	s.mu.Unlock()
 
 	go func() { _ = s.udp.ActivateAndServe() }()
@@ -104,10 +106,19 @@ func (s *Server) Stop() error {
 	return errors.Join(errs...)
 }
 
-// Addr returns the bound host:port (useful when port 0 was requested). Empty
-// until Start has bound successfully.
-func (s *Server) Addr() string {
+// UDPAddr returns the bound UDP host:port (useful when port 0 was requested).
+// Empty until Start has bound successfully.
+func (s *Server) UDPAddr() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.addr
+	return s.udpAddr
+}
+
+// TCPAddr returns the bound TCP host:port. It equals UDPAddr for any fixed port
+// (53 in production) but not necessarily at port 0, where each transport takes
+// whatever the OS assigns it — see Start.
+func (s *Server) TCPAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tcpAddr
 }

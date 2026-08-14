@@ -30,12 +30,21 @@ func TestFunctional_EndToEnd(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	addr := srv.Addr()
-	if addr == "" {
-		t.Fatal("Server.Addr() empty after Start")
+	// Each transport reports its own bound address: at port 0 the OS assigns
+	// them independently, so they need not share a port (Start never derives
+	// one bind's port from the other's).
+	transports := []struct{ proto, addr string }{
+		{"udp", srv.UDPAddr()},
+		{"tcp", srv.TCPAddr()},
+	}
+	for _, tr := range transports {
+		if tr.addr == "" {
+			t.Fatalf("Server %s address empty after Start", tr.proto)
+		}
 	}
 
-	for _, proto := range []string{"udp", "tcp"} {
+	for _, tr := range transports {
+		proto, addr := tr.proto, tr.addr
 		t.Run(proto, func(t *testing.T) {
 			// Positive: apex A resolves to the CP IP over the wire.
 			m := exchange(t, proto, addr, testZone, dns.TypeA)
@@ -93,7 +102,7 @@ func TestFunctional_ReflectsLiveChanges(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	first := exchange(t, "udp", srv.Addr(), testZone, dns.TypeA)
+	first := exchange(t, "udp", srv.UDPAddr(), testZone, dns.TypeA)
 	if len(first.Answer) != 1 || !first.Answer[0].(*dns.A).A.Equal(net.ParseIP("192.168.1.10")) {
 		t.Fatalf("first answer = %v, want 192.168.1.10", first.Answer)
 	}
@@ -102,7 +111,7 @@ func TestFunctional_ReflectsLiveChanges(t *testing.T) {
 	ip2 := net.ParseIP("10.0.0.5")
 	current.Store(&ip2)
 
-	second := exchange(t, "udp", srv.Addr(), testZone, dns.TypeA)
+	second := exchange(t, "udp", srv.UDPAddr(), testZone, dns.TypeA)
 	if len(second.Answer) != 1 || !second.Answer[0].(*dns.A).A.Equal(net.ParseIP("10.0.0.5")) {
 		t.Fatalf("second answer = %v, want 10.0.0.5 (change not reflected without reload)", second.Answer)
 	}
@@ -129,11 +138,11 @@ func TestFunctional_ClusterRecords(t *testing.T) {
 	defer srv.Stop()
 
 	// LAN names resolve under .lan.
-	node := exchange(t, "udp", srv.Addr(), "home1-cp."+testLANZone, dns.TypeA)
+	node := exchange(t, "udp", srv.UDPAddr(), "home1-cp."+testLANZone, dns.TypeA)
 	if len(node.Answer) != 1 || !node.Answer[0].(*dns.A).A.Equal(net.ParseIP("192.168.1.2")) {
 		t.Errorf("node .lan record = %v, want 192.168.1.2", node.Answer)
 	}
-	app := exchange(t, "udp", srv.Addr(), "jellyfin."+testLANZone, dns.TypeA)
+	app := exchange(t, "udp", srv.UDPAddr(), "jellyfin."+testLANZone, dns.TypeA)
 	if len(app.Answer) != 1 || !app.Answer[0].(*dns.A).A.Equal(net.ParseIP("192.168.1.2")) {
 		t.Errorf("app .lan record = %v, want 192.168.1.2 (target node's IP)", app.Answer)
 	}
@@ -141,13 +150,13 @@ func TestFunctional_ClusterRecords(t *testing.T) {
 	// Bare (tailnet) node/app names are NOT served by the CP nameserver — that's
 	// MagicDNS's job; the CP nameserver correctly NXDOMAINs them (Decision 9).
 	for _, bare := range []string{"home1-cp." + testZone, "jellyfin." + testZone} {
-		m := exchange(t, "udp", srv.Addr(), bare, dns.TypeA)
+		m := exchange(t, "udp", srv.UDPAddr(), bare, dns.TypeA)
 		if m.Rcode != dns.RcodeNameError {
 			t.Errorf("bare name %s: rcode = %s, want NXDOMAIN", bare, dns.RcodeToString[m.Rcode])
 		}
 	}
 	// The apex (SelfSource) still resolves alongside the cluster records.
-	apex := exchange(t, "udp", srv.Addr(), testZone, dns.TypeA)
+	apex := exchange(t, "udp", srv.UDPAddr(), testZone, dns.TypeA)
 	if len(apex.Answer) != 1 || !apex.Answer[0].(*dns.A).A.Equal(testIP) {
 		t.Errorf("apex = %v, want %v", apex.Answer, testIP)
 	}
