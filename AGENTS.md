@@ -18,7 +18,14 @@ Repo facts an agent should know:
   gate it casually.
 - The `rasputin-provision` matched-set CLI lives at `api/cmd/rasputin-provision`.
 - Go code: run `gofmt` before pushing; check CI after every push.
-- A commit or PR that fixes a tracked issue must use a **closing keyword** —
-  `Fixes #N` / `Closes #N` — not a bare `(#N)` reference. Bare references leave the
+- ⚠️ **Tracked work lives in ANOTHER repo — `geekdojo/geekdojo-brain` — so `Fixes #N` here
+  is wrong.** A bare `#N` resolves inside *this* repo, where that number is an unrelated
+  issue or (GitHub shares one number sequence) a long-merged PR. It fails silently: the PR
+  looks annotated and the tracked issue never closes. On 2026-08-14 eight PRs (#121–#128)
+  each carried `Fixes #N` and not one brain issue closed. Write the cross-repo form,
+  `Fixes geekdojo/geekdojo-brain#N`, and **close the issue explicitly** rather than trusting
+  auto-close across repos.
+- For an issue that genuinely lives in THIS repo, a commit or PR must still use a
+  **closing keyword** — `Fixes #N` / `Closes #N` — not a bare `(#N)` reference. Bare references leave the
   issue open after the fix ships (audited 2026-07-20: four of six stale-open issues
   across the rasputin repos were exactly this).
