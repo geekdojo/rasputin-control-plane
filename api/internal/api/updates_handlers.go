@@ -280,14 +280,18 @@ func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {
 	// firewall bundle, never an OS bundle (and vice-versa).
 	//   - Firewall node  → wants rasputin-fw-n100.
 	//   - OS node        → wants ArchCompatible(arch) (amd64/arm64 SKU).
-	// Only enforced when we can resolve the expectation (pre-arch agents report
-	// ""); the on-node compatible check is the backstop.
+	// Only enforced when we can resolve the expectation — ArchCompatible now
+	// answers false for an arch it cannot resolve, empty included, so the
+	// separate `!= ""` guard that used to be needed here is gone. This is a
+	// single-node deploy the operator asked for explicitly, so an unresolvable
+	// arch stays permissive and the on-node compatible check is the backstop;
+	// the fleet plan, which nobody aimed at a particular node, skips instead.
 	if n, err := s.inv.Get(r.Context(), req.NodeID); err == nil && n != nil {
 		var want string
 		var known bool
 		if n.Role == proto.RoleFirewall {
 			want, known = releases.FirewallCompatible, true
-		} else if n.Architecture != "" {
+		} else {
 			want, known = releases.ArchCompatible(n.Architecture)
 		}
 		if known {

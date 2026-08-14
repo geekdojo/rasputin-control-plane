@@ -93,12 +93,32 @@ var Components = []Component{
 // `compatible` SKU string. The node OS ships one image per arch (role selected
 // at runtime), so this is all the flasher needs to pick the right artifact:
 // amd64 → the N100 (Intel) board, arm64 → the `rpi` SKU (one unified image for
-// Raspberry Pi 4 / Pi 5 / CM5). An empty arch defaults to amd64. The firewall
-// is a separate, x86-only image and is not selectable here. Returns false for
-// an unrecognized arch.
+// Raspberry Pi 4 / Pi 5 / CM5). The firewall is a separate, x86-only image and
+// is not selectable here.
+//
+// The second return is false when no artifact can be chosen — an unrecognized
+// arch, OR an EMPTY one.
+//
+// Empty used to be grouped with amd64 and answered `("rasputin-n100", true)`:
+// amd64, with full confidence, for a node that never said. On a mixed cluster
+// that plans an arch-unknown arm64 node into an amd64 cascade, where it fails
+// at install with RAUC as the only backstop — a red cell, and one that eats
+// the maxFailures budget, for a node that was never a valid target.
+//
+// The convenience being traded away is smaller than it looks. Node rows are
+// only ever created by agent registration (inventory/service.go), the agent
+// has reported `runtime.GOARCH` unconditionally since 2026-06-28 (0bb5cad),
+// that value is compile-time so it cannot fail or be empty, registration
+// fires on every NATS connect AND reconnect, and a later empty report never
+// wipes a learned value. So a fresh node has its arch from its very first
+// registration, and "" now means exactly one thing: an agent older than
+// 2026-06-28 that has not reconnected once since. That node also predates
+// bootId and the whole verify contract, and a loud skip is the right answer
+// for it. Decided by Bryce 2026-08-13 on the ADR-0005 Decision 11 revisit
+// criterion, which the ADR deliberately left open.
 func ArchCompatible(arch string) (string, bool) {
 	switch arch {
-	case "", "amd64":
+	case "amd64":
 		return "rasputin-n100", true
 	case "arm64":
 		return "rasputin-rpi-arm64", true
