@@ -21,22 +21,6 @@ name: fuzz
 # commits a crasher or edits code — fixing the parser (and committing the
 # crasher as a permanent regression seed) is a human step.
 
-# GOTOOLCHAIN: the go command fetches this toolchain itself, from the module
-# proxy, instead of using whatever actions/setup-go could resolve. That matters
-# because setup-go resolves against GitHub's actions/go-versions manifest, which
-# LAGS go.dev — on 2026-08-13 go1.26.6 was published and fixed five reachable
-# net/http + encoding/asn1 advisories, but the manifest still topped out at
-# 1.26.5, so neither `go-version: "1.26"` nor check-latest could obtain the fix
-# and vuln-scan was red on code that had passed hours earlier.
-#
-# Bumping this one line is the whole remediation for a stdlib advisory, and it
-# WORKS the day the fix ships rather than whenever GitHub catches up. Kept as an
-# exact version deliberately: `latest` would also jump minor releases and break
-# the build on Go's schedule rather than ours. setup-go still installs a
-# baseline toolchain below; this only decides which one actually compiles.
-env:
-  GOTOOLCHAIN: go1.26.6
-
 on:
   schedule:
     - cron: "0 9 * * 4" # Thursdays 09:00 UTC (offset from the other agents)
@@ -56,6 +40,19 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # GOTOOLCHAIN: the go command fetches this toolchain itself, from the module
+  # proxy, instead of using whatever actions/setup-go could resolve. That matters
+  # because setup-go resolves against GitHub's actions/go-versions manifest, which
+  # LAGS go.dev — on 2026-08-13 go1.26.6 was published and fixed five reachable
+  # net/http + encoding/asn1 advisories, but the manifest still topped out at
+  # 1.26.5, so neither `go-version: "1.26"` nor check-latest could obtain the fix
+  # and vuln-scan was red on code that had passed hours earlier.
+  #
+  # Bumping this one line is the whole remediation for a stdlib advisory, and it
+  # WORKS the day the fix ships rather than whenever GitHub catches up. Kept as an
+  # exact version deliberately: `latest` would also jump minor releases and break
+  # the build on Go's schedule rather than ours.
+  GOTOOLCHAIN: go1.26.6
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   # Pin GOCACHE so the fuzz corpus lives at a stable, cacheable path.
   GOCACHE: ${{ github.workspace }}/.gocache
