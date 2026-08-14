@@ -183,6 +183,61 @@ func TestProbeRefusesCredentialsOnFingerprintMismatch(t *testing.T) {
 	}
 }
 
+// A 401 carrying the vendor marker must be reported as the recognised board
+// with the "as expected" wording — the strongest identification the probe can
+// make before credentials exist. Kills probe.go:132 CONDITIONALS_NEGATION
+// (`StatusCode == StatusUnauthorized` → `!=`): under the mutation a 401+marker
+// falls through to the plainer 401 case, so the detail changes from
+// "responded 401 as expected" to "requiring authentication".
+func TestProbeIdentifiesMarkedUnauthorizedAsExpected(t *testing.T) {
+	srv := unauthedBoard(t) // 401 + "no authorization header provided"
+
+	res := Probe(context.Background(), proto.BMCProbeCmd{
+		Kind:     "turingpi",
+		Endpoint: srv.URL,
+		// No User: the probe stops after identification, before any
+		// credentialed slot detection, so res.Detail is the switch verdict.
+	})
+	if !res.Identified {
+		t.Fatalf("a 401 with the vendor marker must be Identified; got %+v", res)
+	}
+	if !strings.Contains(res.Detail, "responded 401 as expected") {
+		t.Errorf("detail = %q, want the marked-401 wording (\"responded 401 as expected\")", res.Detail)
+	}
+}
+
+// unmarkedUnauthorizedBoard answers 401 but WITHOUT the vendor marker body —
+// some BMC / firmware simply demands auth with no recognisable phrase.
+func unmarkedUnauthorizedBoard(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A 401 WITHOUT the marker is still treated as the board (something answered
+// and demanded auth), but with the plainer wording. Kills probe.go:136
+// CONDITIONALS_NEGATION (`StatusCode == StatusUnauthorized` → `!=`): under the
+// mutation this 401 falls through to the default branch, so Identified flips to
+// false and the detail becomes the "not how a Turing Pi responds" message.
+func TestProbeIdentifiesUnmarkedUnauthorizedAsAuthRequired(t *testing.T) {
+	srv := unmarkedUnauthorizedBoard(t)
+
+	res := Probe(context.Background(), proto.BMCProbeCmd{
+		Kind:     "turingpi",
+		Endpoint: srv.URL,
+	})
+	if !res.Identified {
+		t.Fatalf("a 401 without the marker must still be Identified as a board; got %+v", res)
+	}
+	if !strings.Contains(res.Detail, "requiring authentication") {
+		t.Errorf("detail = %q, want the plain-401 wording (\"requiring authentication\")", res.Detail)
+	}
+}
+
 // Colon-separated display form is what the UI shows and hands back, so
 // the gate has to accept it rather than only raw hex.
 func TestProbeAcceptsTheDisplayFingerprintForm(t *testing.T) {

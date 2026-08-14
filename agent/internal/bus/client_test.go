@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,5 +68,32 @@ func TestConnect_EmptyURLAttemptsDefault(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Connect blocked for > 5s with empty URL")
+	}
+}
+
+// TestConnect_NonEmptyURLIsNotReplacedWithDefault pins that a caller-supplied,
+// non-empty URL is dialed as-is — the empty-URL default substitution
+// (client.go: `if url == ""`) must NOT fire for it. The error Connect wraps
+// names the URL it actually dialed, so a distinctive unreachable port that is
+// NOT the default (4222) proves which URL was used: if the `== ""` guard were
+// negated, the non-empty URL would be swapped for nats.DefaultURL and the
+// error would name :4222 instead of the port we passed.
+func TestConnect_NonEmptyURLIsNotReplacedWithDefault(t *testing.T) {
+	const url = "nats://127.0.0.1:1" // unreachable, and deliberately not :4222
+	done := make(chan error, 1)
+	go func() {
+		_, err := Connect(url, "node-x", "", nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a connect error against an unreachable port")
+		}
+		if !strings.Contains(err.Error(), "127.0.0.1:1") {
+			t.Errorf("error %q does not name the URL we passed (%s) — the non-empty URL must be dialed as-is, not swapped for the default", err.Error(), url)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect blocked for > 5s on unreachable URL")
 	}
 }
