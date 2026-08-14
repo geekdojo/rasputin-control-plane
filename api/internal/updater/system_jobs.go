@@ -62,11 +62,24 @@ func SystemUpdateWorkflow(
 // shared step memory, so we re-derive it by re-running the same plan; the
 // stash is purely for observability (returned as step result for the UI).
 type systemPlanState struct {
-	BundleSHA256 string   `json:"bundleSha256"`
-	BundleVer    string   `json:"bundleVersion"`
-	Targets      []string `json:"targets"`
-	Skipped      []string `json:"skipped"`
-	SelfNodeID   string   `json:"selfNodeId,omitempty"`
+	BundleSHA256 string              `json:"bundleSha256"`
+	BundleVer    string              `json:"bundleVersion"`
+	Targets      []string            `json:"targets"`
+	Skipped      []proto.SkippedNode `json:"skipped"`
+	SelfNodeID   string              `json:"selfNodeId,omitempty"`
+}
+
+// stranded returns the skips nobody asked for — nodes with no artifact for
+// their architecture. The summarize step reads this off the plan's stashed
+// result to decide whether the parent may go green (ADR-0005 Decision 11).
+func (s systemPlanState) stranded() []proto.SkippedNode {
+	var out []proto.SkippedNode
+	for _, sk := range s.Skipped {
+		if sk.Reason.Stranded() {
+			out = append(out, sk)
+		}
+	}
+	return out
 }
 
 // ----- Step 1: plan -------------------------------------------------------
@@ -116,13 +129,24 @@ func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs
 		}
 		sc.Log("info", fmt.Sprintf("plan: %d target(s), %d skipped — order: %v",
 			len(targets), len(skipped), ids))
+		// Say the stranded nodes out loud at plan time, not only in the
+		// summary. They are the ones an operator would want to act on before
+		// the cascade runs for twenty minutes.
+		if str := state.stranded(); len(str) > 0 {
+			for _, sk := range str {
+				sc.Log("warn", fmt.Sprintf("stranded: %s — %s", sk.NodeID, sk.Detail))
+			}
+		}
 		publishSystemChange(sc.NATS, proto.SystemUpdateChangeEvt{
 			ParentJobID: sc.JobID,
 			Change:      proto.SystemUpdatePlanned,
 			BundleID:    spec.BundleSHA256,
 			Detail:      bundle.Version,
-			Counts:      &proto.SystemUpdateCounts{Total: len(targets), Skipped: len(skipped)},
-			Ts:          time.Now().UTC(),
+			Counts: &proto.SystemUpdateCounts{
+				Total: len(targets), Skipped: len(skipped), Stranded: len(state.stranded()),
+			},
+			Skipped: skipped,
+			Ts:      time.Now().UTC(),
 		})
 		return json.Marshal(state)
 	}
@@ -139,37 +163,69 @@ func expectedCompatible(n *proto.Node) (string, bool) {
 	return releases.ArchCompatible(n.Architecture)
 }
 
-// planTargets returns the ordered list of nodes to update and the ids of
-// nodes that were filtered out. Order: compute → storage → controlplane →
-// firewall, within each bucket alphabetic by id. Dropped (and listed in
-// skipped): excluded ids, offline nodes, and — the load-bearing one now that
-// the firewall is a real update target — nodes whose expected SKU doesn't match
-// bundleCompat. A system.update carries ONE bundle, so a run with an OS bundle
-// updates the OS nodes and skips the firewall (and vice-versa); this is what
-// keeps the firewall's real openwrt-ab backend from ever being handed an OS
-// image (it would dd the wrong squashfs into a slot). bundleCompat "" disables
-// the SKU filter (unknown bundle — fall back to the on-node compatible check).
-func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat string) (targets []*proto.Node, skipped []string) {
+// skuMismatchReason classifies a node whose expected SKU differs from the
+// bundle's. The firewall's image and the OS image are different products, and
+// a cascade only ever carries one of them — so either side being the firewall
+// SKU makes this the designed single-SKU filter (Decision 8), not a stranding.
+// Anything else is two OS artifacts of different arches, which means the node
+// wanted an image this run simply does not have.
+func skuMismatchReason(want, bundleCompat string) proto.SkipReason {
+	if want == releases.FirewallCompatible || bundleCompat == releases.FirewallCompatible {
+		return proto.SkipFirewallSKU
+	}
+	return proto.SkipNoArtifactForArch
+}
+
+// planTargets returns the ordered list of nodes to update and the nodes that
+// were filtered out, each with the reason it was. Order: compute → storage →
+// controlplane → firewall, within each bucket alphabetic by id.
+//
+// Every skip carries a proto.SkipReason, and the one that matters is
+// SkipNoArtifactForArch: three of the four reasons are the plan working as
+// designed, and that one is a node left behind. A system.update carries ONE
+// bundle, so an OS run skips the firewall (SkipFirewallSKU — this is what
+// keeps the firewall's openwrt-ab backend from ever being handed an OS image
+// to dd into a slot) but an arm64 node skipped by an amd64 bundle is stranded,
+// not excluded. Before ADR-0005 Decision 11 both were a bare id in a list.
+//
+// bundleCompat "" disables the SKU filter (unknown bundle — fall back to the
+// on-node compatible check).
+func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat string) (targets []*proto.Node, skipped []proto.SkippedNode) {
 	roleRank := map[proto.NodeRole]int{
 		proto.RoleCompute:      0,
 		proto.RoleStorage:      1,
 		proto.RoleControlPlane: 2,
 		proto.RoleFirewall:     3,
 	}
+	skip := func(id string, r proto.SkipReason, detail string) {
+		skipped = append(skipped, proto.SkippedNode{NodeID: id, Reason: r, Detail: detail})
+	}
 	for _, n := range nodes {
 		if _, ex := exclude[n.ID]; ex {
-			skipped = append(skipped, n.ID+" (excluded)")
+			skip(n.ID, proto.SkipExcluded, "excluded from this run")
 			continue
 		}
 		// Compute status from last_seen — the inventory list endpoint does
 		// this on the API side but ListByRole returns it stale.
 		if computeStatus(n.LastSeen) != proto.StatusOnline {
-			skipped = append(skipped, n.ID+" (not online)")
+			skip(n.ID, proto.SkipOffline, "not online when the plan was made")
 			continue
 		}
-		if want, known := expectedCompatible(n); bundleCompat != "" && known && want != bundleCompat {
-			skipped = append(skipped, fmt.Sprintf("%s (needs %s, bundle is %s)", n.ID, want, bundleCompat))
-			continue
+		if bundleCompat != "" {
+			want, known := expectedCompatible(n)
+			switch {
+			case !known:
+				// No artifact can be chosen for this node at all. Previously
+				// this fell through and planned the node into whichever bundle
+				// the run happened to carry, which fails at install.
+				skip(n.ID, proto.SkipNoArtifactForArch,
+					fmt.Sprintf("architecture %q has no known artifact", n.Architecture))
+				continue
+			case want != bundleCompat:
+				skip(n.ID, skuMismatchReason(want, bundleCompat),
+					fmt.Sprintf("needs %s, bundle is %s", want, bundleCompat))
+				continue
+			}
 		}
 		targets = append(targets, n)
 	}
@@ -420,10 +476,24 @@ func systemSummarize(jobStore *jobs.Store, nc *nats.Conn) jobs.DoFn {
 				failed++
 			}
 		}
+		// Read the plan back off the step-result map so the summary can
+		// account for nodes that never became targets. Without this the
+		// rollup only ever sees children, and a node that was never planned
+		// is invisible to the very report that is supposed to notice it.
+		var plan systemPlanState
+		if raw, ok := sc.PriorResults["plan"]; ok {
+			if err := json.Unmarshal(raw, &plan); err != nil {
+				return nil, fmt.Errorf("read plan result: %w", err)
+			}
+		}
+		stranded := plan.stranded()
+
 		counts := &proto.SystemUpdateCounts{
 			Total:     len(children),
 			Succeeded: succeeded,
 			Failed:    failed,
+			Skipped:   len(plan.Skipped),
+			Stranded:  len(stranded),
 		}
 		// We always emit "completed" here even if some nodes failed —
 		// that's still cascade-complete from the saga's perspective. The
@@ -435,10 +505,34 @@ func systemSummarize(jobStore *jobs.Store, nc *nats.Conn) jobs.DoFn {
 			ParentJobID: sc.JobID,
 			Change:      proto.SystemUpdateCompleted,
 			Counts:      counts,
+			Skipped:     plan.Skipped,
 			Ts:          time.Now().UTC(),
 		})
 		sc.Log("info", fmt.Sprintf("cascade complete: %d succeeded, %d failed", succeeded, failed))
-		return json.Marshal(counts)
+		raw, err := json.Marshal(counts)
+		if err != nil {
+			return nil, err
+		}
+		// A stranded node fails the parent. Every child may have committed
+		// cleanly and the grid may be all green, and the run still did not do
+		// what "UPDATE ALL" says on the button — so the honest terminal state
+		// is failed, not succeeded. This is the one place where the parent's
+		// colour is decided by something other than its children.
+		//
+		// It runs AFTER the completed event is published, deliberately: the
+		// operator needs the report in order to act on the strandings, and a
+		// step that errors before publishing would take the report with it.
+		if len(stranded) > 0 {
+			ids := make([]string, len(stranded))
+			for i, sk := range stranded {
+				ids[i] = sk.NodeID
+			}
+			sc.Log("error", fmt.Sprintf("%d node(s) stranded — no artifact for their architecture: %v",
+				len(stranded), ids))
+			return raw, fmt.Errorf("%d node(s) had no artifact for their architecture and were never updated (%v)",
+				len(stranded), ids)
+		}
+		return raw, nil
 	}
 }
 

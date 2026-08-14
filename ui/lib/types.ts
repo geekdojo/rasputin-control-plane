@@ -420,11 +420,32 @@ export type SystemUpdateChange =
   | 'completed'
   | 'aborted';
 
+/**
+ * Why a node was left out of a system.update plan. Three of these are the plan
+ * working as designed; `no-artifact-for-arch` is a node left behind, and a run
+ * containing one fails its parent job however green the per-node grid looks
+ * (ADR-0005 Decision 11). Never render them as one undifferentiated "skipped".
+ */
+export type SkipReason =
+  | 'excluded'
+  | 'offline'
+  | 'firewall-sku'
+  | 'no-artifact-for-arch';
+
+export interface SkippedNode {
+  nodeId: string;
+  reason: SkipReason;
+  detail?: string;
+}
+
 export interface SystemUpdateCounts {
   total: number;
   succeeded: number;
   failed: number;
   skipped: number;
+  /** Subset of `skipped` that nobody asked for. Non-zero means the run did not
+   *  do what UPDATE ALL says on the button. */
+  stranded?: number;
 }
 
 export interface SystemUpdateChangeEvent {
@@ -435,6 +456,8 @@ export interface SystemUpdateChangeEvent {
   bundleId?: string;
   detail?: string;
   counts?: SystemUpdateCounts;
+  /** Per-node skip reasons, carried on `planned` and `completed`. */
+  skipped?: SkippedNode[];
   ts: string;
 }
 
