@@ -467,6 +467,10 @@ export type SystemUpdateChange =
    *  one node. ADR-0005 Decisions 6 + 11. */
   | 'canary_passed'
   | 'canary_failed'
+  /** A tier's failure budget was reached and the cascade stopped starting new
+   *  nodes there. Its own event because "we stopped on purpose" and "it ran
+   *  out of nodes" otherwise look identical in a grid of not-attempted rows. */
+  | 'budget_spent'
   | 'completed'
   | 'aborted';
 

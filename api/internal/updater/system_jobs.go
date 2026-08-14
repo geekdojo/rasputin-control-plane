@@ -670,6 +670,18 @@ func systemCascadeWith(
 		if err := maxInFlight.Validate(); err != nil {
 			return nil, fmt.Errorf("maxInFlight: %w", err)
 		}
+		maxFailures := proto.DefaultMaxFailures
+		if spec.MaxFailures != nil {
+			maxFailures = *spec.MaxFailures
+		}
+		if err := maxFailures.Validate(); err != nil {
+			return nil, fmt.Errorf("maxFailures: %w", err)
+		}
+		// budgetSpent records, per tier, why its remaining nodes were never
+		// started — so a not-attempted row can say "the budget stopped this"
+		// rather than the generic "the run stopped". Written only from the
+		// scheduler's launch loop, which is single-goroutine per tier.
+		budgetSpent := map[proto.NodeRole]string{}
 
 		var (
 			canaries []string
@@ -805,12 +817,55 @@ func systemCascadeWith(
 			//
 			// Bounded-parallel, k scoped to THIS tier and clamped against its
 			// size (Decision 6). k=1 is the serial cascade exactly.
-			k := proto.ClampMaxInFlight(maxInFlight.Resolve(len(tier.Targets)), len(tier.Targets))
+			tierSize := len(tier.Targets)
+			k := proto.ClampMaxInFlight(maxInFlight.Resolve(tierSize), tierSize)
+			budget := proto.ResolveMaxFailures(maxFailures, tierSize)
 			if len(fanout) > 0 {
-				sc.Log("info", fmt.Sprintf("%s fan-out: %d node(s), %d at a time (%s of a %d-node tier)",
-					tier.Tier, len(fanout), k, maxInFlight, len(tier.Targets)))
+				sc.Log("info", fmt.Sprintf("%s fan-out: %d node(s), %d at a time (%s of a %d-node tier), failure budget %s",
+					tier.Tier, len(fanout), k, maxInFlight, tierSize, budgetLabel(budget)))
 			}
-			runBounded(fanout, k, func(t plannedTarget) { runOne(t, false) })
+
+			// The breaker. Counts failures IN THIS TIER — the budget is
+			// tier-relative, so failures do not carry across from an earlier
+			// one — and stops new starts once they reach it. The canary has
+			// already cleared the image, so several independent failures here
+			// mean fleet heterogeneity rather than a bad bundle: a thing an
+			// operator should look at before it touches twenty more nodes.
+			thisTier := tier.Tier
+			mayStart := func() bool {
+				if budget == proto.UnlimitedFailures {
+					return true
+				}
+				gridMu.Lock()
+				n := 0
+				for _, r := range grid {
+					if r.Outcome == proto.NodeOutcomeFailed && r.Tier == thisTier {
+						n++
+					}
+				}
+				gridMu.Unlock()
+				if n < budget {
+					return true
+				}
+				if _, already := budgetSpent[thisTier]; !already {
+					budgetSpent[thisTier] = fmt.Sprintf(
+						"the %s tier's failure budget (%d) was spent before this node was started; it is untouched",
+						thisTier, budget)
+					sc.Log("error", fmt.Sprintf(
+						"%s: %d node(s) failed, budget is %d — no further node in this tier will be started (in-flight ones finish)",
+						thisTier, n, budget))
+					publishSystemChange(nc, proto.SystemUpdateChangeEvt{
+						ParentJobID: sc.JobID,
+						Change:      proto.SystemUpdateBudgetSpent,
+						Tier:        thisTier,
+						Detail: fmt.Sprintf("%d of a budget of %d failed; new starts stopped, in-flight nodes finish",
+							n, budget),
+						Ts: time.Now().UTC(),
+					})
+				}
+				return false
+			}
+			runBounded(fanout, k, mayStart, func(t plannedTarget) { runOne(t, false) })
 		}
 
 		// The whole report, in PLANNED order — not completion order. Under
@@ -823,14 +878,25 @@ func systemCascadeWith(
 		for _, t := range targets {
 			row, attempted := grid[t.NodeID]
 			if !attempted {
-				// Under best-effort this only happens when the canary gate
-				// aborted, which is exactly why it is worth its own outcome
-				// rather than being folded in with the failures.
+				// Under best-effort a target is only left unattempted when
+				// something stopped the run on purpose — the canary gate or a
+				// spent failure budget — which is exactly why this is its own
+				// outcome rather than being folded in with the failures. The
+				// row says WHICH, because "we stopped deliberately" and "it
+				// ran out of nodes" otherwise look identical in a grid full of
+				// not-attempted rows.
 				remaining = append(remaining, t.NodeID)
+				detail := "the run stopped before this node was started; it is untouched"
+				switch {
+				case canaryFailure != "":
+					detail = "the canary gate aborted the run before this node was started; it is untouched"
+				case budgetSpent[t.Tier] != "":
+					detail = budgetSpent[t.Tier]
+				}
 				row = proto.NodeResult{
 					NodeID: t.NodeID, Tier: t.Tier, Compatible: t.Compatible, Canary: t.Canary,
 					Outcome: proto.NodeOutcomeNotAttempted,
-					Detail:  "the run stopped before this node was started; it is untouched",
+					Detail:  detail,
 				}
 			}
 			switch row.Outcome {
@@ -859,12 +925,19 @@ func systemCascadeWith(
 		// error — the same pattern the stranded-node check already uses, for
 		// the same reason: the operator needs the report in order to act on
 		// it. The parent still ends `failed`; only which step said so moves.
+		var spentTiers []string
+		for _, tier := range groupByTier(targets) {
+			if budgetSpent[tier.Tier] != "" {
+				spentTiers = append(spentTiers, string(tier.Tier))
+			}
+		}
 		return json.Marshal(cascadeResult{
 			Succeeded:     succeeded,
 			Failed:        failed,
 			Remaining:     remaining,
 			Canaries:      canaries,
 			CanaryFailure: canaryFailure,
+			BudgetSpent:   spentTiers,
 			Results:       results,
 		})
 	}
@@ -884,6 +957,8 @@ type cascadeResult struct {
 	// terminal error reads differently for it: "the canary caught a bad image"
 	// and "three nodes in your fleet are unhappy" ask for different next moves.
 	CanaryFailure string `json:"canaryFailure,omitempty"`
+	// BudgetSpent lists the tiers whose failure budget stopped new starts.
+	BudgetSpent []string `json:"budgetSpent,omitempty"`
 }
 
 // terminalError is the run's verdict, or nil. Computed here rather than in the
@@ -898,10 +973,29 @@ func (r cascadeResult) terminalError() error {
 		// failed if any node failed. Deliberate — it preserves the existing
 		// green/red UI semantics, and "some of your fleet did not take the
 		// update" is not a success however many nodes did.
+		//
+		// A spent budget is named in the same sentence rather than replacing
+		// it: the failures are still the story, and the budget is why the
+		// remaining nodes are untouched instead of also red.
+		if len(r.BudgetSpent) > 0 {
+			return fmt.Errorf("%d of %d node(s) failed (%v) — the %s failure budget stopped the run, %d node(s) untouched",
+				len(r.Failed), len(r.Results), r.Failed,
+				strings.Join(r.BudgetSpent, "/"), len(r.Remaining))
+		}
 		return fmt.Errorf("%d of %d node(s) failed (%v)",
 			len(r.Failed), len(r.Results), r.Failed)
 	}
 	return nil
+}
+
+// budgetLabel renders a resolved failure budget for a log line, naming the
+// unlimited case rather than printing a bare 0 that reads like "no failures
+// tolerated" — the exact opposite of what it means.
+func budgetLabel(budget int) string {
+	if budget == proto.UnlimitedFailures {
+		return "unlimited"
+	}
+	return fmt.Sprintf("%d", budget)
 }
 
 // runBounded runs `run` over targets with at most k in flight, in planned
@@ -913,11 +1007,17 @@ func (r cascadeResult) terminalError() error {
 // cascade, which is what lets bounded fan-out be described as backwards
 // compatible rather than as a rewrite.
 //
-// No early exit: under best-effort every target is attempted (Decision 7).
-// Stopping the tier once failures pile up is the failure budget, #75, and it
-// belongs at the point a node is about to START — the semaphore acquire below
-// is where that check goes.
-func runBounded(targets []plannedTarget, k int, run func(plannedTarget)) {
+// mayStart is consulted immediately before each target is launched, and false
+// stops the loop for good. That placement is the whole semantics of the
+// failure budget (Decision 7): it stops nodes STARTING, it never cancels a
+// node already in flight — an update mid-reboot is the worst possible moment
+// to change your mind, and a node that has installed but not yet verified must
+// be allowed to reach a slot the A/B logic can reason about.
+//
+// It is also why the budget can overshoot: with k in flight when the budget is
+// spent, up to k−1 further failures can still land. Allowing that is the
+// design, not a rounding error.
+func runBounded(targets []plannedTarget, k int, mayStart func() bool, run func(plannedTarget)) {
 	if k < 1 {
 		k = 1
 	}
@@ -925,6 +1025,10 @@ func runBounded(targets []plannedTarget, k int, run func(plannedTarget)) {
 	var wg sync.WaitGroup
 	for _, t := range targets {
 		sem <- struct{}{}
+		if mayStart != nil && !mayStart() {
+			<-sem
+			break
+		}
 		wg.Add(1)
 		go func(t plannedTarget) {
 			defer wg.Done()
