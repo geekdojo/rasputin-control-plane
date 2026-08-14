@@ -8,6 +8,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -662,33 +663,48 @@ func systemCascadeWith(
 		}
 		targets := state.Targets
 
+		maxInFlight := proto.DefaultMaxInFlight
+		if spec.MaxInFlight != nil {
+			maxInFlight = *spec.MaxInFlight
+		}
+		if err := maxInFlight.Validate(); err != nil {
+			return nil, fmt.Errorf("maxInFlight: %w", err)
+		}
+
 		var (
-			succeeded []string
-			failed    []string
-			canaries  []string
+			canaries []string
 			// canaryFailure names the gate that stopped the run, so the error
 			// can say "the canary caught this" rather than the generic
 			// "something failed" — the two ask an operator for different next
 			// moves.
 			canaryFailure string
 		)
-		// grid is the per-node report, keyed for update and rendered in planned
-		// order at the end. Every planned target gets a row whether or not it
-		// was ever started, which is the difference between a report and a list
-		// of things that happened to work.
+		// grid is the per-node report. Every planned target gets a row whether
+		// or not it was ever started, which is the difference between a report
+		// and a list of things that happened to work.
+		//
+		// It is also the ONLY tally. The succeeded/failed lists are derived
+		// from it in planned order at the end rather than appended as nodes
+		// finish, so that a bounded-parallel run reports in a stable order
+		// instead of in whatever order the fleet happened to reboot. A grid
+		// that reshuffles itself between two runs of the same update is a
+		// report an operator cannot diff.
+		var gridMu sync.Mutex
 		grid := map[string]proto.NodeResult{}
 
 		// runOne submits a child, waits for it, and reports whether the node
 		// updated. Every exit path emits the matching node_* event AND writes
 		// the node's grid row, so a target can never start and then vanish
-		// from the report.
+		// from the report. Safe to call from several goroutines at once.
 		runOne := func(t plannedTarget, isCanary bool) bool {
 			row := proto.NodeResult{
 				NodeID: t.NodeID, Tier: t.Tier, Compatible: t.Compatible, Canary: isCanary,
 			}
 			record := func(outcome proto.NodeOutcome, childID, detail string) {
 				row.Outcome, row.ChildJobID, row.Detail = outcome, childID, detail
+				gridMu.Lock()
 				grid[t.NodeID] = row
+				gridMu.Unlock()
 			}
 			evt := func(change proto.SystemUpdateChangeType, childID, detail string) {
 				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
@@ -711,7 +727,6 @@ func systemCascadeWith(
 
 			childID, err := drv.submit(sc, t)
 			if err != nil {
-				failed = append(failed, t.NodeID)
 				sc.Log("error", fmt.Sprintf("submit child for %s: %v", t.NodeID, err))
 				record(proto.NodeOutcomeFailed, "", err.Error())
 				evt(proto.SystemUpdateNodeFailed, "", err.Error())
@@ -723,19 +738,16 @@ func systemCascadeWith(
 			outcome, derr := drv.wait(sc, childID)
 			switch {
 			case derr != nil:
-				failed = append(failed, t.NodeID)
 				sc.Log("error", fmt.Sprintf("%s: %v", t.NodeID, derr))
 				record(proto.NodeOutcomeFailed, childID, derr.Error())
 				evt(proto.SystemUpdateNodeFailed, childID, derr.Error())
 				return false
 			case outcome != jobs.StatusSucceeded:
-				failed = append(failed, t.NodeID)
 				sc.Log("error", fmt.Sprintf("%s: child terminated %s", t.NodeID, outcome))
 				record(proto.NodeOutcomeFailed, childID, fmt.Sprintf("child %s", outcome))
 				evt(proto.SystemUpdateNodeFailed, childID, fmt.Sprintf("child %s", outcome))
 				return false
 			}
-			succeeded = append(succeeded, t.NodeID)
 			sc.Log("info", fmt.Sprintf("%s: updated", t.NodeID))
 			record(proto.NodeOutcomeSucceeded, childID, "")
 			evt(proto.SystemUpdateNodeSucceeded, childID, "")
@@ -790,26 +802,42 @@ func systemCascadeWith(
 			// cleared the image, which is what makes carrying on reasonable
 			// rather than reckless. The thing that DOES stop a tier once
 			// failures pile up is the failure budget, #75.
-			for _, t := range fanout {
-				runOne(t, false)
+			//
+			// Bounded-parallel, k scoped to THIS tier and clamped against its
+			// size (Decision 6). k=1 is the serial cascade exactly.
+			k := proto.ClampMaxInFlight(maxInFlight.Resolve(len(tier.Targets)), len(tier.Targets))
+			if len(fanout) > 0 {
+				sc.Log("info", fmt.Sprintf("%s fan-out: %d node(s), %d at a time (%s of a %d-node tier)",
+					tier.Tier, len(fanout), k, maxInFlight, len(tier.Targets)))
 			}
+			runBounded(fanout, k, func(t plannedTarget) { runOne(t, false) })
 		}
 
-		// Every planned target the run never started, in planned order. Under
-		// best-effort this is empty unless the canary gate aborted, which is
-		// exactly why it is worth its own outcome rather than being folded in
-		// with the failures.
-		var remaining []string
+		// The whole report, in PLANNED order — not completion order. Under
+		// bounded parallelism nodes finish in whatever sequence the fleet
+		// reboots in, and a grid that reshuffles between two runs of the same
+		// update is one an operator cannot diff. Every tally below is derived
+		// from this loop for the same reason.
+		var succeeded, failed, remaining []string
 		results := make([]proto.NodeResult, 0, len(targets))
 		for _, t := range targets {
 			row, attempted := grid[t.NodeID]
 			if !attempted {
+				// Under best-effort this only happens when the canary gate
+				// aborted, which is exactly why it is worth its own outcome
+				// rather than being folded in with the failures.
 				remaining = append(remaining, t.NodeID)
 				row = proto.NodeResult{
 					NodeID: t.NodeID, Tier: t.Tier, Compatible: t.Compatible, Canary: t.Canary,
 					Outcome: proto.NodeOutcomeNotAttempted,
 					Detail:  "the run stopped before this node was started; it is untouched",
 				}
+			}
+			switch row.Outcome {
+			case proto.NodeOutcomeSucceeded:
+				succeeded = append(succeeded, t.NodeID)
+			case proto.NodeOutcomeFailed:
+				failed = append(failed, t.NodeID)
 			}
 			results = append(results, row)
 		}
@@ -874,6 +902,37 @@ func (r cascadeResult) terminalError() error {
 			len(r.Failed), len(r.Results), r.Failed)
 	}
 	return nil
+}
+
+// runBounded runs `run` over targets with at most k in flight, in planned
+// order of START. It returns when every target has finished.
+//
+// A plain worker pool rather than anything cleverer: the work items are known
+// up front, each takes tens of minutes, and there is nothing to steal or
+// rebalance. k=1 walks the list one at a time — byte-for-byte the old serial
+// cascade, which is what lets bounded fan-out be described as backwards
+// compatible rather than as a rewrite.
+//
+// No early exit: under best-effort every target is attempted (Decision 7).
+// Stopping the tier once failures pile up is the failure budget, #75, and it
+// belongs at the point a node is about to START — the semaphore acquire below
+// is where that check goes.
+func runBounded(targets []plannedTarget, k int, run func(plannedTarget)) {
+	if k < 1 {
+		k = 1
+	}
+	sem := make(chan struct{}, k)
+	var wg sync.WaitGroup
+	for _, t := range targets {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(t plannedTarget) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			run(t)
+		}(t)
+	}
+	wg.Wait()
 }
 
 // soak holds a tier's fan-out after its canaries pass. Zero — the default and
