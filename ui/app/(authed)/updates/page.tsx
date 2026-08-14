@@ -9,6 +9,7 @@ import {
   deleteBundle,
   listBundles,
   listChildJobs,
+  listSteps,
   listJobs,
   listNodes,
   listUpdates,
@@ -22,9 +23,14 @@ import type {
   ComponentUpdate,
   Job,
   JobStatus,
+  JobStep,
   Node,
+  NodeOutcome,
+  NodeResult,
   NodeUpdate,
   NodeUpdateStatus,
+  SkippedNode,
+  SkipReason,
   UpdateChangeEvent,
   UpdateCheckResult,
 } from '../../../lib/types';
@@ -647,12 +653,53 @@ function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
   );
 }
 
+// outcomeColor / outcomeLabel keep `not-attempted` visually distinct from
+// `failed`. They are the same shade of "did not update" and completely
+// different operator problems: a failure is a machine to go and look at, a
+// not-attempted node is one the canary gate protected and is still on its old
+// slot, untouched.
+function outcomeColor(o: NodeOutcome): string {
+  switch (o) {
+    case 'succeeded':
+      return '#4ade80';
+    case 'failed':
+      return '#f87171';
+    default:
+      return DIM; // not-attempted — nothing happened to this node
+  }
+}
+
+function outcomeLabel(o: NodeOutcome): string {
+  return o === 'not-attempted' ? 'NOT STARTED' : o.toUpperCase();
+}
+
+// skipColor separates the designed skips from the stranding. `firewall-sku`,
+// `excluded` and `offline` are the plan working; `no-artifact-for-arch` is a
+// node nobody asked to leave behind, and it must never render like the others
+// (ADR-0005 Decision 11).
+function skipColor(r: SkipReason): string {
+  return r === 'no-artifact-for-arch' ? '#f87171' : DIM;
+}
+
+// stepResult digs one step's stashed result out of the parent job's steps.
+// The grid lives there rather than being rebuilt from the live event stream so
+// that it survives a page reload — a fleet update runs for half an hour and
+// the report is the thing you come back to.
+function stepResult<T>(steps: JobStep[], name: string): T | undefined {
+  const s = steps.find((x) => x.name === name);
+  return s?.result as T | undefined;
+}
+
 function SystemUpdateRow({ job }: { job: Job }) {
   const [children, setChildren] = useState<Job[]>([]);
+  const [steps, setSteps] = useState<JobStep[]>([]);
 
   useEffect(() => {
     let active = true;
-    const fetch = () => listChildJobs(job.id).then((kids) => active && setChildren(kids)).catch(() => {});
+    const fetch = () => {
+      listChildJobs(job.id).then((kids) => active && setChildren(kids)).catch(() => {});
+      listSteps(job.id).then((s) => active && setSteps(s)).catch(() => {});
+    };
     fetch();
     const t = job.status === 'running' || job.status === 'queued' ? setInterval(fetch, 3000) : null;
     return () => {
@@ -661,26 +708,49 @@ function SystemUpdateRow({ job }: { job: Job }) {
     };
   }, [job.id, job.status]);
 
-  const succeeded = children.filter((c) => c.status === 'succeeded').length;
-  const failed = children.filter((c) => c.status === 'failed' || c.status === 'cancelled').length;
+  const cascade = stepResult<{ results?: NodeResult[] }>(steps, 'cascade');
+  const plan = stepResult<{ skipped?: SkippedNode[] }>(steps, 'plan');
+  const skipped = plan?.skipped ?? [];
+
+  // The grid is the cascade's when it has one. A run still in flight — or an
+  // older job from before the grid existed — falls back to the child jobs,
+  // which carry the node and the status but none of the dimensions.
+  const results: NodeResult[] =
+    cascade?.results ??
+    children.map((c) => ({
+      nodeId: extractNodeId(c.spec),
+      outcome: c.status === 'succeeded' ? 'succeeded' : c.status === 'running' || c.status === 'queued' ? 'not-attempted' : 'failed',
+      childJobId: c.id,
+      detail: c.error,
+    }));
+
+  const byChildId = new Map(children.map((c) => [c.id, c]));
+  const count = (o: NodeOutcome) => results.filter((r) => r.outcome === o).length;
+  const notAttempted = count('not-attempted');
+  const stranded = skipped.filter((s) => s.reason === 'no-artifact-for-arch').length;
+  const hasRows = results.length > 0 || skipped.length > 0;
 
   return (
     <div style={{ background: PANEL, border: `1px solid ${HAIR}`, padding: '12px 14px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: children.length > 0 ? 10 : 0, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: hasRows ? 10 : 0, flexWrap: 'wrap' }}>
         <Badge color={jobColor(job.status)}>{job.status.toUpperCase()}</Badge>
         <span style={{ color: DIM, fontSize: 9, fontFamily: MONO }}>
           {job.id.slice(0, 12)} · {new Date(job.createdAt).toLocaleString()}
         </span>
         <span style={{ color: DIM, fontSize: 9, fontFamily: MONO, marginLeft: 'auto' }}>
-          {succeeded} succeeded · {failed} failed · {children.length} total
+          {count('succeeded')} succeeded · {count('failed')} failed
+          {notAttempted > 0 && <span style={{ color: '#facc15' }}> · {notAttempted} never started</span>}
+          {stranded > 0 && <span style={{ color: '#f87171' }}> · {stranded} stranded</span>}
+          {' · '}
+          {results.length} planned
         </span>
       </div>
       {job.error && <pre style={{ color: '#f87171', fontSize: 9, fontFamily: MONO, margin: '0 0 8px', whiteSpace: 'pre-wrap' }}>{job.error}</pre>}
-      {children.length > 0 && (
+      {hasRows && (
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              {['NODE', 'STATUS', 'STARTED', 'FINISHED', 'NOTES'].map((c) => (
+              {['NODE', 'TIER', 'ARCH', 'OUTCOME', 'STARTED', 'FINISHED', 'NOTES'].map((c) => (
                 <th key={c} style={thStyle}>
                   {c}
                 </th>
@@ -688,15 +758,46 @@ function SystemUpdateRow({ job }: { job: Job }) {
             </tr>
           </thead>
           <tbody>
-            {children.map((c) => (
-              <tr key={c.id}>
-                <td style={{ ...tdStyle, color: FG }}>{extractNodeId(c.spec)}</td>
+            {results.map((r) => {
+              const child = r.childJobId ? byChildId.get(r.childJobId) : undefined;
+              return (
+                <tr key={r.nodeId}>
+                  <td style={{ ...tdStyle, color: FG }}>
+                    {r.nodeId}
+                    {r.canary && (
+                      <span
+                        title="Canary — this node's outcome gated fan-out for its tier and architecture."
+                        style={{ color: ACCENT, fontSize: 8, marginLeft: 6, letterSpacing: 0.5 }}
+                      >
+                        CANARY
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ ...tdStyle, color: DIM }}>{r.tier ?? '—'}</td>
+                  <td style={{ ...tdStyle, color: DIM }}>{r.compatible ?? '—'}</td>
+                  <td style={tdStyle}>
+                    <Badge color={outcomeColor(r.outcome)}>{outcomeLabel(r.outcome)}</Badge>
+                  </td>
+                  <td style={{ ...tdStyle, color: DIM }}>{child?.startedAt ? new Date(child.startedAt).toLocaleTimeString() : '—'}</td>
+                  <td style={{ ...tdStyle, color: DIM }}>{child?.finishedAt ? new Date(child.finishedAt).toLocaleTimeString() : '—'}</td>
+                  <td style={{ ...tdStyle, color: DIM, paddingRight: 0 }}>{r.detail || child?.error || ''}</td>
+                </tr>
+              );
+            })}
+            {/* Skipped nodes belong in the same report — a node left out is
+                part of what happened to the fleet — but they were never
+                targets, so they get no outcome and no timings. */}
+            {skipped.map((s) => (
+              <tr key={`skip-${s.nodeId}`}>
+                <td style={{ ...tdStyle, color: DIM }}>{s.nodeId}</td>
+                <td style={{ ...tdStyle, color: DIM }}>—</td>
+                <td style={{ ...tdStyle, color: DIM }}>—</td>
                 <td style={tdStyle}>
-                  <Badge color={jobColor(c.status)}>{c.status.toUpperCase()}</Badge>
+                  <Badge color={skipColor(s.reason)}>{s.reason === 'no-artifact-for-arch' ? 'STRANDED' : 'SKIPPED'}</Badge>
                 </td>
-                <td style={{ ...tdStyle, color: DIM }}>{c.startedAt ? new Date(c.startedAt).toLocaleTimeString() : '—'}</td>
-                <td style={{ ...tdStyle, color: DIM }}>{c.finishedAt ? new Date(c.finishedAt).toLocaleTimeString() : '—'}</td>
-                <td style={{ ...tdStyle, color: DIM, paddingRight: 0 }}>{c.error || ''}</td>
+                <td style={{ ...tdStyle, color: DIM }}>—</td>
+                <td style={{ ...tdStyle, color: DIM }}>—</td>
+                <td style={{ ...tdStyle, color: DIM, paddingRight: 0 }}>{s.detail || s.reason}</td>
               </tr>
             ))}
           </tbody>

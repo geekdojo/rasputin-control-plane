@@ -672,13 +672,24 @@ func systemCascadeWith(
 			// moves.
 			canaryFailure string
 		)
-		done := map[string]bool{}
+		// grid is the per-node report, keyed for update and rendered in planned
+		// order at the end. Every planned target gets a row whether or not it
+		// was ever started, which is the difference between a report and a list
+		// of things that happened to work.
+		grid := map[string]proto.NodeResult{}
 
 		// runOne submits a child, waits for it, and reports whether the node
-		// updated. Every exit path emits the matching node_* event, so the
-		// grid never has a target that started and then vanished.
+		// updated. Every exit path emits the matching node_* event AND writes
+		// the node's grid row, so a target can never start and then vanish
+		// from the report.
 		runOne := func(t plannedTarget, isCanary bool) bool {
-			done[t.NodeID] = true
+			row := proto.NodeResult{
+				NodeID: t.NodeID, Tier: t.Tier, Compatible: t.Compatible, Canary: isCanary,
+			}
+			record := func(outcome proto.NodeOutcome, childID, detail string) {
+				row.Outcome, row.ChildJobID, row.Detail = outcome, childID, detail
+				grid[t.NodeID] = row
+			}
 			evt := func(change proto.SystemUpdateChangeType, childID, detail string) {
 				publishSystemChange(nc, proto.SystemUpdateChangeEvt{
 					ParentJobID: sc.JobID,
@@ -702,6 +713,7 @@ func systemCascadeWith(
 			if err != nil {
 				failed = append(failed, t.NodeID)
 				sc.Log("error", fmt.Sprintf("submit child for %s: %v", t.NodeID, err))
+				record(proto.NodeOutcomeFailed, "", err.Error())
 				evt(proto.SystemUpdateNodeFailed, "", err.Error())
 				return false
 			}
@@ -713,16 +725,19 @@ func systemCascadeWith(
 			case derr != nil:
 				failed = append(failed, t.NodeID)
 				sc.Log("error", fmt.Sprintf("%s: %v", t.NodeID, derr))
+				record(proto.NodeOutcomeFailed, childID, derr.Error())
 				evt(proto.SystemUpdateNodeFailed, childID, derr.Error())
 				return false
 			case outcome != jobs.StatusSucceeded:
 				failed = append(failed, t.NodeID)
 				sc.Log("error", fmt.Sprintf("%s: child terminated %s", t.NodeID, outcome))
+				record(proto.NodeOutcomeFailed, childID, fmt.Sprintf("child %s", outcome))
 				evt(proto.SystemUpdateNodeFailed, childID, fmt.Sprintf("child %s", outcome))
 				return false
 			}
 			succeeded = append(succeeded, t.NodeID)
 			sc.Log("info", fmt.Sprintf("%s: updated", t.NodeID))
+			record(proto.NodeOutcomeSucceeded, childID, "")
 			evt(proto.SystemUpdateNodeSucceeded, childID, "")
 			return true
 		}
@@ -768,46 +783,97 @@ func systemCascadeWith(
 				}
 			}
 
+			// Best-effort fan-out (ADR-0005 Decision 7): every planned target
+			// is attempted and a failed node is a red cell, not a wall. A/B
+			// rollback is per-node and independent, so one node failing says
+			// nothing about the next — and the canary above has already
+			// cleared the image, which is what makes carrying on reasonable
+			// rather than reckless. The thing that DOES stop a tier once
+			// failures pile up is the failure budget, #75.
 			for _, t := range fanout {
-				// Fan-out still halts on the first failure — #76 replaces this
-				// with the per-node results grid. Until then the canary is the
-				// addition and nothing about the old policy is relaxed.
-				if len(failed) > 0 {
-					break tiers
-				}
 				runOne(t, false)
 			}
-			if len(failed) > 0 {
-				break tiers
-			}
 		}
 
-		// Whatever we never attempted, in planned order. Derived from the plan
-		// rather than accumulated at each break, so a new abort path cannot
-		// forget to fill it in.
+		// Every planned target the run never started, in planned order. Under
+		// best-effort this is empty unless the canary gate aborted, which is
+		// exactly why it is worth its own outcome rather than being folded in
+		// with the failures.
 		var remaining []string
+		results := make([]proto.NodeResult, 0, len(targets))
 		for _, t := range targets {
-			if !done[t.NodeID] {
+			row, attempted := grid[t.NodeID]
+			if !attempted {
 				remaining = append(remaining, t.NodeID)
+				row = proto.NodeResult{
+					NodeID: t.NodeID, Tier: t.Tier, Compatible: t.Compatible, Canary: t.Canary,
+					Outcome: proto.NodeOutcomeNotAttempted,
+					Detail:  "the run stopped before this node was started; it is untouched",
+				}
 			}
+			results = append(results, row)
 		}
 
-		result := map[string]any{
-			"succeeded": succeeded,
-			"failed":    failed,
-			"remaining": remaining,
-			"canaries":  canaries,
-		}
-		raw, _ := json.Marshal(result)
-		switch {
-		case canaryFailure != "":
-			return raw, fmt.Errorf(
-				"canary %s failed — aborted before fan-out, %d node(s) untouched", canaryFailure, len(remaining))
-		case len(failed) > 0:
-			return raw, fmt.Errorf("cascade aborted: %d node(s) failed (%v)", len(failed), failed)
-		}
-		return raw, nil
+		// ⚠️ A node failure does NOT fail this step, and that is a change.
+		//
+		// A saga stops at its first failed step (`Runner.run`), so a cascade
+		// that returned an error took `summarize` down with it — meaning the
+		// `completed` event and its counts were never published on precisely
+		// the runs that had something to report. updates.md §4 asserts the
+		// opposite ("the summarize step still fires"); the doc was describing
+		// an intent the code did not implement, and nobody noticed while
+		// halt-on-first made a failed run a two-line story.
+		//
+		// It stops being survivable here: once partial success is the common
+		// outcome, the results grid IS the report, and losing it on failure
+		// loses the whole feature. So the outcome travels on the step result
+		// and `summarize` publishes the report and THEN returns the terminal
+		// error — the same pattern the stranded-node check already uses, for
+		// the same reason: the operator needs the report in order to act on
+		// it. The parent still ends `failed`; only which step said so moves.
+		return json.Marshal(cascadeResult{
+			Succeeded:     succeeded,
+			Failed:        failed,
+			Remaining:     remaining,
+			Canaries:      canaries,
+			CanaryFailure: canaryFailure,
+			Results:       results,
+		})
 	}
+}
+
+// cascadeResult is the shape the cascade step returns, read back by summarize.
+// The three id lists are kept because they read well in a job-step dump;
+// Results is the one that carries tier, arch, canary and the not-attempted
+// rows, and is what the UI renders.
+type cascadeResult struct {
+	Succeeded []string           `json:"succeeded"`
+	Failed    []string           `json:"failed"`
+	Remaining []string           `json:"remaining"`
+	Canaries  []string           `json:"canaries"`
+	Results   []proto.NodeResult `json:"results"`
+	// CanaryFailure names the gate that stopped the run, empty otherwise. The
+	// terminal error reads differently for it: "the canary caught a bad image"
+	// and "three nodes in your fleet are unhappy" ask for different next moves.
+	CanaryFailure string `json:"canaryFailure,omitempty"`
+}
+
+// terminalError is the run's verdict, or nil. Computed here rather than in the
+// cascade so the report is published before the saga is failed.
+func (r cascadeResult) terminalError() error {
+	switch {
+	case r.CanaryFailure != "":
+		return fmt.Errorf("canary %s failed — aborted before fan-out, %d node(s) untouched",
+			r.CanaryFailure, len(r.Remaining))
+	case len(r.Failed) > 0:
+		// The parent's terminal state is unchanged by best-effort: still
+		// failed if any node failed. Deliberate — it preserves the existing
+		// green/red UI semantics, and "some of your fleet did not take the
+		// update" is not a success however many nodes did.
+		return fmt.Errorf("%d of %d node(s) failed (%v)",
+			len(r.Failed), len(r.Results), r.Failed)
+	}
+	return nil
 }
 
 // soak holds a tier's fan-out after its canaries pass. Zero — the default and
@@ -942,40 +1008,81 @@ func systemSummarize(jobStore *jobs.Store, nc *nats.Conn) jobs.DoFn {
 		}
 		stranded := plan.stranded()
 
-		counts := &proto.SystemUpdateCounts{
-			Total:     len(children),
-			Succeeded: succeeded,
-			Failed:    failed,
-			Skipped:   len(plan.Skipped),
-			Stranded:  len(stranded),
+		// And the cascade's grid, which is the report itself. Children give a
+		// tally; only the grid knows which tier and architecture each node was
+		// in, which one was the canary, and — the row a child job can never
+		// produce — which planned targets were never started at all.
+		var cascade cascadeResult
+		if raw, ok := sc.PriorResults["cascade"]; ok {
+			if err := json.Unmarshal(raw, &cascade); err != nil {
+				return nil, fmt.Errorf("read cascade result: %w", err)
+			}
 		}
-		// We always emit "completed" here even if some nodes failed —
-		// that's still cascade-complete from the saga's perspective. The
-		// cascade step already returned an error in that case, so the
-		// parent job will be marked failed and the UI can tell apart
-		// "completed with failures" via the counts. "aborted" is reserved
-		// for explicit user cancellation, a v1 feature.
+
+		// The grid is the better source when it exists. Counting children
+		// loses any target that has no child — a node whose submission itself
+		// failed produces no row to count, and a node the run never reached
+		// produces none either, so both vanish from a tally that is supposed
+		// to account for the whole plan. The child tally stays as the fallback
+		// for a job resumed from before the grid existed.
+		total := len(children)
+		if len(cascade.Results) > 0 {
+			total, succeeded, failed = len(cascade.Results), 0, 0
+			for _, r := range cascade.Results {
+				switch r.Outcome {
+				case proto.NodeOutcomeSucceeded:
+					succeeded++
+				case proto.NodeOutcomeFailed:
+					failed++
+				}
+			}
+		}
+		counts := &proto.SystemUpdateCounts{
+			Total:        total,
+			Succeeded:    succeeded,
+			Failed:       failed,
+			Skipped:      len(plan.Skipped),
+			Stranded:     len(stranded),
+			NotAttempted: len(cascade.Remaining),
+		}
+		// The `completed` event fires whatever the outcome — it is the report,
+		// and a report you only get when nothing went wrong is not a report.
+		// "aborted" stays reserved for explicit user cancellation (#61).
 		publishSystemChange(nc, proto.SystemUpdateChangeEvt{
 			ParentJobID: sc.JobID,
 			Change:      proto.SystemUpdateCompleted,
 			Counts:      counts,
 			Skipped:     plan.Skipped,
+			Results:     cascade.Results,
 			Ts:          time.Now().UTC(),
 		})
-		sc.Log("info", fmt.Sprintf("cascade complete: %d succeeded, %d failed", succeeded, failed))
+		if counts.NotAttempted > 0 {
+			sc.Log("info", fmt.Sprintf("cascade complete: %d succeeded, %d failed, %d never started",
+				succeeded, failed, counts.NotAttempted))
+		} else {
+			sc.Log("info", fmt.Sprintf("cascade complete: %d succeeded, %d failed", succeeded, failed))
+		}
 		raw, err := json.Marshal(counts)
 		if err != nil {
 			return nil, err
 		}
-		// A stranded node fails the parent. Every child may have committed
-		// cleanly and the grid may be all green, and the run still did not do
-		// what "UPDATE ALL" says on the button — so the honest terminal state
-		// is failed, not succeeded. This is the one place where the parent's
-		// colour is decided by something other than its children.
-		//
-		// It runs AFTER the completed event is published, deliberately: the
-		// operator needs the report in order to act on the strandings, and a
-		// step that errors before publishing would take the report with it.
+		// Everything below decides the PARENT'S colour, and all of it runs
+		// after the completed event is published — deliberately, because the
+		// operator needs the report in order to act on it and a step that
+		// errors before publishing takes the report with it.
+
+		// The cascade's own verdict: a canary abort, or nodes that failed.
+		// Raised here rather than in the cascade step so that publishing
+		// happens first; the parent ends `failed` either way.
+		if err := cascade.terminalError(); err != nil {
+			sc.Log("error", err.Error())
+			return raw, err
+		}
+
+		// A stranded node fails the parent even when every child committed
+		// cleanly and the grid is all green: the run still did not do what
+		// "UPDATE ALL" says on the button. This is the one place where the
+		// parent's colour is decided by something other than its targets.
 		if len(stranded) > 0 {
 			ids := make([]string, len(stranded))
 			for i, sk := range stranded {
