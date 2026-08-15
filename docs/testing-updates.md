@@ -1,5 +1,10 @@
 # Testing the OS update workflow
 
+> This page covers ONE node updating, against a real `rasputin-agent` process with the mock
+> backend. For a whole FLEET — the canary gate, bounded fan-out, the failure budget and the
+> results grid — see [`testing-fleet-updates.md`](testing-fleet-updates.md), which needs no
+> running processes at all.
+
 Three failure scenarios exercise the Phase 2 exit-gate criterion "atomic A/B OS update demonstrably rolls back on simulated failure." All three run against the **mock backend** on a dev laptop — no real hardware required.
 
 When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run against the real **RAUC backend** with no changes to the saga or test harness.

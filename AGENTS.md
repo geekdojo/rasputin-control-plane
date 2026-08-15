@@ -18,6 +18,12 @@ Repo facts an agent should know:
   gate it casually.
 - The `rasputin-provision` matched-set CLI lives at `api/cmd/rasputin-provision`.
 - Go code: run `gofmt` before pushing; check CI after every push.
+- Changing anything under `api/internal/updater`? The fan-out state machine has a
+  simulated-fleet **regression net** — a whole cluster's rollout, on the real sagas and the real
+  bus, in about eleven seconds. Run it and read
+  [`docs/testing-fleet-updates.md`](docs/testing-fleet-updates.md). ⚠️ It mocks at the bus
+  boundary, so it is blind to everything below it (RAUC, GRUB, `/proc/cmdline`); a green run is
+  not evidence a rollout works. Real fleet proof is the bench.
 - ⚠️ **Tracked work lives in ANOTHER repo — `geekdojo/geekdojo-brain` — so `Fixes #N` here
   is wrong.** A bare `#N` resolves inside *this* repo, where that number is an unrelated
   issue or (GitHub shares one number sequence) a long-merged PR. It fails silently: the PR
