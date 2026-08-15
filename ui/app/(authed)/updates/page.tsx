@@ -658,19 +658,37 @@ function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
 // different operator problems: a failure is a machine to go and look at, a
 // not-attempted node is one the canary gate protected and is still on its old
 // slot, untouched.
-function outcomeColor(o: NodeOutcome): string {
+// GridOutcome is a row's terminal NodeOutcome plus 'running', the one state the
+// final report never carries. It exists only for the live fallback below: while
+// a run is in flight there is no cascade grid yet, so rows come from the child
+// jobs, and an in-flight child MUST render distinctly from 'not-attempted'.
+// Conflating them (the bug this fixes, #96) makes a node that is actively
+// updating read as one the run never touched — the opposite fact — on the exact
+// screen an operator watches during a rollout.
+type GridOutcome = NodeOutcome | 'running';
+
+function outcomeColor(o: GridOutcome): string {
   switch (o) {
     case 'succeeded':
       return '#4ade80';
     case 'failed':
       return '#f87171';
+    case 'running':
+      return ACCENT; // in flight right now
     default:
       return DIM; // not-attempted — nothing happened to this node
   }
 }
 
-function outcomeLabel(o: NodeOutcome): string {
-  return o === 'not-attempted' ? 'NOT STARTED' : o.toUpperCase();
+function outcomeLabel(o: GridOutcome): string {
+  switch (o) {
+    case 'running':
+      return 'UPDATING';
+    case 'not-attempted':
+      return 'NOT STARTED';
+    default:
+      return o.toUpperCase();
+  }
 }
 
 // skipColor separates the designed skips from the stranding. `firewall-sku`,
@@ -715,17 +733,18 @@ function SystemUpdateRow({ job }: { job: Job }) {
   // The grid is the cascade's when it has one. A run still in flight — or an
   // older job from before the grid existed — falls back to the child jobs,
   // which carry the node and the status but none of the dimensions.
-  const results: NodeResult[] =
+  const results: Array<Omit<NodeResult, 'outcome'> & { outcome: GridOutcome }> =
     cascade?.results ??
     children.map((c) => ({
       nodeId: extractNodeId(c.spec),
-      outcome: c.status === 'succeeded' ? 'succeeded' : c.status === 'running' || c.status === 'queued' ? 'not-attempted' : 'failed',
+      outcome: c.status === 'succeeded' ? 'succeeded' : c.status === 'running' || c.status === 'queued' ? 'running' : 'failed',
       childJobId: c.id,
       detail: c.error,
     }));
 
   const byChildId = new Map(children.map((c) => [c.id, c]));
-  const count = (o: NodeOutcome) => results.filter((r) => r.outcome === o).length;
+  const count = (o: GridOutcome) => results.filter((r) => r.outcome === o).length;
+  const running = count('running');
   const notAttempted = count('not-attempted');
   const stranded = skipped.filter((s) => s.reason === 'no-artifact-for-arch').length;
   const hasRows = results.length > 0 || skipped.length > 0;
@@ -739,6 +758,7 @@ function SystemUpdateRow({ job }: { job: Job }) {
         </span>
         <span style={{ color: DIM, fontSize: 9, fontFamily: MONO, marginLeft: 'auto' }}>
           {count('succeeded')} succeeded · {count('failed')} failed
+          {running > 0 && <span style={{ color: ACCENT }}> · {running} updating</span>}
           {notAttempted > 0 && <span style={{ color: '#facc15' }}> · {notAttempted} never started</span>}
           {stranded > 0 && <span style={{ color: '#f87171' }}> · {stranded} stranded</span>}
           {' · '}
