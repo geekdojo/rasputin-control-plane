@@ -542,6 +542,9 @@ export interface SystemUpdatePlan {
   component?: string;
   targets: PlanTarget[];
   skipped: SkippedNode[];
+  /** The node hosting the api, when the plan updates it too (#56). Set only
+   *  when it is actually a target — absent means this run does not touch it. */
+  selfNodeId?: string;
 }
 
 export interface SystemUpdateChangeEvent {

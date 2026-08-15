@@ -439,6 +439,11 @@ type SystemUpdatePlan struct {
 	Component     string        `json:"component,omitempty"`
 	Targets       []PlanTarget  `json:"targets"`
 	Skipped       []SkippedNode `json:"skipped"`
+	// SelfNodeID is the node hosting the api, when it is one of the targets
+	// (#56). The pre-flight drawer needs it to name the one consequence an
+	// operator cannot see coming from a list of node ids: the last node in
+	// this plan is the one serving the page they are reading.
+	SelfNodeID string `json:"selfNodeId,omitempty"`
 }
 
 // PlanTarget is one node the plan would update, in planned order, flagged if it

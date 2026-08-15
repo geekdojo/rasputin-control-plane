@@ -325,21 +325,40 @@ func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, inv 
 	return json.Marshal(ack)
 }
 
-// SelfUpdateRecoverDecider returns the runner recover policy that DEFERS (rather
-// than fails) an in-flight node.update for selfNodeID that has already passed
-// its reboot step — i.e. the controlplane that rebooted to activate the new
-// slot. ResumeSelfUpdates owns finishing those. Everything else fails as usual.
-func SelfUpdateRecoverDecider(selfNodeID string) func(*jobs.Job, []*jobs.JobStep) jobs.RecoverDecision {
+// SelfUpdateRecoverDecider returns the runner recover policy for the two jobs
+// that can outlive the api process, both of them consequences of the
+// controlplane updating itself:
+//
+//   - the node.update for selfNodeID that has already passed its reboot step —
+//     the controlplane rebooting to activate the new slot. ResumeSelfUpdates
+//     finishes it.
+//   - the system.update that submitted that child, when self was the last
+//     target of a fleet run (#56). ResumeSystemUpdates finishes it.
+//
+// Everything else fails as usual — including a system.update that died for any
+// other reason, which is why the parent test is "the self child is past its
+// reboot" rather than "the plan contains self". See SystemUpdateDeferred.
+//
+// ctx bounds the store reads the parent test needs; Recover does not pass one
+// through to the decider, and this is called once at startup.
+func SelfUpdateRecoverDecider(ctx context.Context, jobStore *jobs.Store, selfNodeID string) func(*jobs.Job, []*jobs.JobStep) jobs.RecoverDecision {
 	return func(j *jobs.Job, steps []*jobs.JobStep) jobs.RecoverDecision {
-		if selfNodeID == "" || j.Kind != "node.update" {
+		if selfNodeID == "" {
 			return jobs.RecoverFail
 		}
-		var spec UpdateSpec
-		if err := json.Unmarshal(j.Spec, &spec); err != nil || spec.NodeID != selfNodeID {
-			return jobs.RecoverFail
-		}
-		if rebootDone(steps) {
-			return jobs.RecoverDefer
+		switch j.Kind {
+		case "node.update":
+			var spec UpdateSpec
+			if err := json.Unmarshal(j.Spec, &spec); err != nil || spec.NodeID != selfNodeID {
+				return jobs.RecoverFail
+			}
+			if rebootDone(steps) {
+				return jobs.RecoverDefer
+			}
+		case "system.update":
+			if jobStore != nil && SystemUpdateDeferred(ctx, jobStore, j, selfNodeID) {
+				return jobs.RecoverDefer
+			}
 		}
 		return jobs.RecoverFail
 	}

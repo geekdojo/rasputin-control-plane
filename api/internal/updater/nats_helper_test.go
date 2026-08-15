@@ -1118,8 +1118,19 @@ func TestSystemPlan_HappyPath(t *testing.T) {
 	}
 	var state systemPlanState
 	_ = json.Unmarshal(out, &state)
-	if len(state.Targets) != 2 {
-		t.Errorf("targets: want 2, got %v", state.Targets)
+	// All three, self included: since #56 "UPDATE ALL" plans the controlplane
+	// too. This assertion read `want 2` before, which was the bug the issue
+	// describes — the node hosting the button was the one node the button
+	// could not update.
+	if len(state.Targets) != 3 {
+		t.Errorf("targets: want 3, got %v", state.Targets)
+	}
+	// And self is LAST. The whole defer/resume design rests on nothing being
+	// planned behind the node that takes the api down, so this is a structural
+	// assertion, not a cosmetic one — "self" sorts first alphabetically, so a
+	// plain id sort would put it at the front.
+	if got := state.Targets[len(state.Targets)-1].NodeID; got != "self" {
+		t.Errorf("last target: want self, got %q (order %v)", got, state.targetIDs())
 	}
 }
 

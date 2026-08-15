@@ -19,29 +19,39 @@ import (
 )
 
 // SystemUpdateConfig is what the saga needs from main beyond what its
-// constructor args carry. SelfNodeID is the node hosting this api process;
-// if set, the cascade skips it (the operator drives that update manually,
-// once the rest of the fleet is verified).
+// constructor args carry. SelfNodeID is the node hosting this api process; if
+// set, it is ordered strictly LAST in the cascade rather than skipped (#56).
+// It used to be skipped, which made "UPDATE ALL" untrue for the one node the
+// operator was looking at.
 type SystemUpdateConfig struct {
 	SelfNodeID string
 }
 
 // SystemUpdateWorkflow returns the three-step system.update saga.
 //
-//  1. plan      — list nodes, filter online, sort by role (compute → storage
-//     → controlplane → firewall), drop self + excluded. Emits
-//     a `planned` change event with the ordered target list.
-//  2. cascade   — for each target in order, submit a child node.update job
-//     and wait for its terminal status. On a child failure the
-//     cascade halts; remaining nodes are reported skipped.
-//  3. summarize — emit the final `completed` (or `aborted`) change event
-//     with the per-node outcome counts.
+//  1. plan      — list nodes, filter online, drop excluded, sort by role
+//     (compute → storage → controlplane → firewall) with self last
+//     inside its tier. Emits a `planned` change event.
+//  2. cascade   — tier by tier, sequentially between tiers. Each (tier, arch)
+//     canary runs alone and gates the fan-out behind it; the rest
+//     run bounded-parallel, K at a time. A node failure does NOT
+//     halt anything — every planned target is attempted and a
+//     failure is a red cell (ADR-0005 Decision 7). Only a canary
+//     failure aborts, and a tier's failure budget stops new starts
+//     in that tier alone.
+//  3. summarize — emit the final `completed` change event with the per-node
+//     results grid and the outcome counts.
 //
 // Cascade ordering rationale: the firewall update is the riskiest from a
 // "did I lose connectivity to my fleet?" perspective. By updating it last
 // we ensure the rest of the system is verified-good before we touch the
 // firewall — if the firewall update bricks, at least the other nodes are
-// already on the new known-good slot. (See wiki updates.md §3.)
+// already on the new known-good slot. (See wiki updates.md §4.)
+//
+// The controlplane sits immediately before it for the same reason one level
+// in: losing it costs the operator their view of the fleet. Since #56 it is
+// a real target, and the api's own reboot is survived by deferring the parent
+// job and finishing it on the new slot — see ResumeSystemUpdates.
 func SystemUpdateWorkflow(
 	store *Store,
 	inv *inventory.Store,
@@ -160,9 +170,12 @@ func buildPlan(
 	for _, id := range spec.ExcludeNodes {
 		exclude[id] = struct{}{}
 	}
-	if cfg.SelfNodeID != "" {
-		exclude[cfg.SelfNodeID] = struct{}{}
-	}
+	// Self is NOT excluded (#56, ADR-0005 Decision 9). It used to be, which
+	// made "UPDATE ALL" a claim the run did not honour: the one node the
+	// operator could not update from the button was the one hosting the
+	// button. It is an ordinary target now, ordered strictly last by
+	// planTargets, and the parent job survives its own reboot via the
+	// defer/resume path in selfupdate.go.
 
 	if spec.BundleSHA256 != "" {
 		bundle, err := store.GetBundle(ctx, spec.BundleSHA256)
@@ -172,7 +185,7 @@ func buildPlan(
 		if bundle == nil {
 			return systemPlanState{}, fmt.Errorf("bundle %s not found", spec.BundleSHA256)
 		}
-		nodes, skipped := planTargets(all, exclude, bundle.Compatible)
+		nodes, skipped := planTargets(all, exclude, bundle.Compatible, cfg.SelfNodeID)
 		targets := make([]plannedTarget, len(nodes))
 		for i, n := range nodes {
 			targets[i] = plannedTarget{
@@ -205,7 +218,7 @@ func buildPlan(
 		return systemPlanState{}, err
 	}
 
-	nodes, skipped := planTargets(all, exclude, "") // "" = no single-bundle filter
+	nodes, skipped := planTargets(all, exclude, "", cfg.SelfNodeID) // "" = no single-bundle filter
 	var (
 		targets []plannedTarget
 		// missing maps a SKU with no staged bundle to the nodes that need it.
@@ -410,11 +423,22 @@ func PreviewPlan(
 			NodeID: t.NodeID, Tier: t.Tier, Compatible: t.Compatible, Canary: t.Canary,
 		}
 	}
+	// Only when self is actually a target — an operator whose controlplane is
+	// offline or filtered out by SKU should not be warned about a reboot that
+	// is not in this plan.
+	selfID := ""
+	for _, t := range state.Targets {
+		if t.NodeID == state.SelfNodeID {
+			selfID = state.SelfNodeID
+			break
+		}
+	}
 	return proto.SystemUpdatePlan{
 		BundleVersion: state.BundleVer,
 		Component:     state.Component,
 		Targets:       targets,
 		Skipped:       state.Skipped,
+		SelfNodeID:    selfID,
 	}, nil
 }
 
@@ -538,7 +562,17 @@ func skuMismatchReason(want, bundleCompat string) proto.SkipReason {
 //
 // bundleCompat "" disables the SKU filter (unknown bundle — fall back to the
 // on-node compatible check).
-func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat string) (targets []*proto.Node, skipped []proto.SkippedNode) {
+//
+// selfNodeID, when set, sorts the api's own node LAST within its tier. The
+// tier order already puts controlplane after compute and storage, and the
+// component filter means no firewall target ever shares a run with it — so
+// "last in its tier" is "last in the run" for every cascade that can contain
+// self. That is what makes #56's defer/resume tractable: when the api reboots
+// there is nothing left to orchestrate, so resuming degenerates into
+// finishing the parent rather than rebuilding a half-run cascade
+// (ADR-0005 Decision 9). A cluster with a second controlplane-role node would
+// otherwise sort self into the middle of its own tier on id alone.
+func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat, selfNodeID string) (targets []*proto.Node, skipped []proto.SkippedNode) {
 	roleRank := map[proto.NodeRole]int{
 		proto.RoleCompute:      0,
 		proto.RoleStorage:      1,
@@ -581,6 +615,14 @@ func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat 
 		ri, rj := roleRank[targets[i].Role], roleRank[targets[j].Role]
 		if ri != rj {
 			return ri < rj
+		}
+		// Self after every peer in the same tier, ahead of the id sort. See
+		// the doc comment: the whole resume design rests on nothing being
+		// planned behind the node that is about to take the api down.
+		si := selfNodeID != "" && targets[i].ID == selfNodeID
+		sj := selfNodeID != "" && targets[j].ID == selfNodeID
+		if si != sj {
+			return sj
 		}
 		return targets[i].ID < targets[j].ID
 	})
