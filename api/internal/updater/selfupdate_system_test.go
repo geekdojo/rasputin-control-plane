@@ -3,11 +3,13 @@ package updater
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/nats-io/nats.go"
 )
 
 // Tests for #56 — UPDATE ALL includes the controlplane.
@@ -249,6 +251,97 @@ func TestResumeSystemUpdates_ClosesTheParent(t *testing.T) {
 
 			waitJobStatus(t, js, p, c.want)
 		})
+	}
+}
+
+// The resumed run PUBLISHES the report, and the counts on it are the operator's
+// whole picture of a run whose orchestrator rebooted mid-way. Asserted against
+// the wire event rather than the internals, because that is what the UI reads.
+//
+// Also pins the two verdicts that are not "a node failed": a stranded node
+// fails the parent even when every child committed, and a planned target that
+// was never started is counted as not-attempted rather than as a failure.
+func TestResumeSystemUpdates_PublishesTheReport(t *testing.T) {
+	const self = "cp"
+	ctx := context.Background()
+	nc := startNATS(t)
+	js := newJobStore(t)
+	runner := jobs.NewRunner(js, nc)
+
+	p := seedParent(t, js, "parent")
+	seedPlanStep(t, js, p, systemPlanState{
+		BundleVer: "v9",
+		Targets: []plannedTarget{
+			{NodeID: "a", Tier: proto.RoleCompute, Compatible: "rasputin-n100"},
+			{NodeID: "never", Tier: proto.RoleCompute, Compatible: "rasputin-n100"},
+			{NodeID: self, Tier: proto.RoleControlPlane, Compatible: "rasputin-n100"},
+		},
+		Skipped: []proto.SkippedNode{
+			{NodeID: "arm1", Reason: proto.SkipNoArtifactForArch, Detail: "no artifact"},
+		},
+		SelfNodeID: self,
+	})
+	seedChild(t, js, "ca", p, "a", jobs.StatusSucceeded, true)
+	seedChild(t, js, "cs", p, self, jobs.StatusSucceeded, true)
+
+	evts := make(chan proto.SystemUpdateChangeEvt, 4)
+	sub, err := nc.Subscribe(proto.SystemUpdateChangeSubject(p, proto.SystemUpdateCompleted), func(m *nats.Msg) {
+		var ev proto.SystemUpdateChangeEvt
+		if json.Unmarshal(m.Data, &ev) == nil {
+			evts <- ev
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	ResumeSystemUpdates(ctx, js, runner, nc, self)
+
+	var ev proto.SystemUpdateChangeEvt
+	select {
+	case ev = <-evts:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no completed event published within 10s")
+	}
+	if ev.Counts == nil {
+		t.Fatal("completed event carried no counts")
+	}
+	got := *ev.Counts
+	want := proto.SystemUpdateCounts{
+		Total: 3, Succeeded: 2, Failed: 0, Skipped: 1, Stranded: 1, NotAttempted: 1,
+	}
+	if got != want {
+		t.Errorf("counts = %+v, want %+v", got, want)
+	}
+	if len(ev.Results) != 3 {
+		t.Errorf("grid rows on the event = %d, want 3", len(ev.Results))
+	}
+	// Every child committed, but a stranded node means the run did not do what
+	// UPDATE ALL says — the parent is red.
+	waitJobStatus(t, js, p, jobs.StatusFailed)
+}
+
+// A parent whose plan step recorded nothing cannot be reported against. It must
+// still reach a terminal state — a deferred job nothing finishes is the exact
+// failure the defer test guards the other side of.
+func TestResumeSystemUpdates_UnreportableParentStillCloses(t *testing.T) {
+	const self = "cp"
+	ctx := context.Background()
+	nc := startNATS(t)
+	js := newJobStore(t)
+	runner := jobs.NewRunner(js, nc)
+
+	p := seedParent(t, js, "parent")
+	// No plan step seeded, so the rebuild has no targets to report.
+	seedChild(t, js, "cs", p, self, jobs.StatusSucceeded, true)
+
+	ResumeSystemUpdates(ctx, js, runner, nc, self)
+
+	waitJobStatus(t, js, p, jobs.StatusFailed)
+	j, _ := js.GetJob(ctx, p)
+	if j == nil || !strings.Contains(j.Error, "could not rebuild") {
+		t.Errorf("job error = %q, want it to name the rebuild failure", j.Error)
 	}
 }
 
