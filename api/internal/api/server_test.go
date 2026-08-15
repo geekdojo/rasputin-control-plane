@@ -372,6 +372,39 @@ func TestHandleListJobs_Empty(t *testing.T) {
 	}
 }
 
+// `kind` used to be accepted and ignored, so a caller asking for one kind got
+// the newest job of any kind — a confident answer to a question nobody asked.
+// The regression that matters is not "the filter works" but "a non-matching
+// job is absent", which is the shape that misled a reader.
+func TestHandleListJobs_KindFilter(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	for _, j := range []*jobs.Job{
+		{ID: "sys-1", Kind: "system.update", Spec: json.RawMessage(`{}`), Status: jobs.StatusRunning, CreatedAt: time.Now().UTC().Add(-time.Minute)},
+		{ID: "other-1", Kind: "obs.collectors.reconcile", Spec: json.RawMessage(`{}`), Status: jobs.StatusSucceeded, CreatedAt: time.Now().UTC()},
+	} {
+		if err := f.jobsStore.CreateJob(f.ctx, j); err != nil {
+			t.Fatalf("CreateJob %s: %v", j.ID, err)
+		}
+	}
+
+	w := f.do(t, http.MethodGet, "/api/jobs?kind=system.update", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var got []*jobs.Job
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "sys-1" {
+		ids := make([]string, len(got))
+		for i, j := range got {
+			ids[i] = j.ID + "/" + j.Kind
+		}
+		t.Fatalf("kind filter returned %v, want just sys-1/system.update", ids)
+	}
+}
+
 func TestHandleListJobs_ParentFilter(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)

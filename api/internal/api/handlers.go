@@ -49,6 +49,19 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := atoiOr(r.URL.Query().Get("limit"), 50)
+	// `kind` was accepted-and-ignored until 2026-08-15: a caller filtering for
+	// system.update got the newest job of ANY kind and no indication it had been
+	// dropped, which reads as a confident answer to a question that was never
+	// asked. A silently-ignored filter is worse than an unsupported one.
+	if kind := r.URL.Query().Get("kind"); kind != "" {
+		jobs, err := s.store.ListJobsByKind(r.Context(), kind, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, jobs)
+		return
+	}
 	jobs, err := s.store.ListJobs(r.Context(), limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
