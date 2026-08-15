@@ -428,6 +428,28 @@ func ResolveMaxFailures(v IntOrString, tierSize int) int {
 	return 1
 }
 
+// SystemUpdatePlan is the read-only resolution of a system.update spec: what
+// the cascade WOULD do, without submitting anything. It powers the pre-flight
+// UI (#95) — the operator sees the ordered targets and the per-arch canary
+// picks, and can override the canary or the knobs, before committing to a
+// rollout. It is produced by the same buildPlan the saga runs, so the preview
+// cannot drift from what actually executes.
+type SystemUpdatePlan struct {
+	BundleVersion string        `json:"bundleVersion"`
+	Component     string        `json:"component,omitempty"`
+	Targets       []PlanTarget  `json:"targets"`
+	Skipped       []SkippedNode `json:"skipped"`
+}
+
+// PlanTarget is one node the plan would update, in planned order, flagged if it
+// is the canary for its (tier, arch) pair.
+type PlanTarget struct {
+	NodeID     string   `json:"nodeId"`
+	Tier       NodeRole `json:"tier"`
+	Compatible string   `json:"compatible"`
+	Canary     bool     `json:"canary"`
+}
+
 // SystemUpdateChangeType enumerates lifecycle events the api publishes on
 // rasputin.updates.system.<parentJobId>.<change>.
 type SystemUpdateChangeType string

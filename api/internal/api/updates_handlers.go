@@ -289,6 +289,32 @@ func (s *Server) handleCreateSystemUpdate(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusAccepted, j)
 }
 
+// POST /api/updates/system/plan
+// Same body as POST /api/updates/system, but read-only: it resolves and returns
+// the plan the cascade WOULD run (ordered targets, per-arch canary picks,
+// reasoned skips) without submitting a job. Powers the pre-flight UI (#95) so
+// the operator sees which node carries the canary risk — and can override it or
+// the knobs — before committing to the rollout.
+func (s *Server) handleSystemUpdatePlan(w http.ResponseWriter, r *http.Request) {
+	var req proto.SystemUpdateSpec
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if (req.Version == "") == (req.BundleSHA256 == "") {
+		writeError(w, http.StatusBadRequest, "exactly one of version or bundleSha256 is required")
+		return
+	}
+	plan, err := updater.PreviewPlan(r.Context(), s.updater, s.inv, req, updater.SystemUpdateConfig{SelfNodeID: s.selfNodeID})
+	if err != nil {
+		// A plan resolution error (e.g. an arch not staged) is the operator's
+		// to see and fix, not a server fault — 400, with the message.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
 // POST /api/updates
 // Body: { "nodeId": "...", "bundleSha256": "..." }
 func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {

@@ -1775,3 +1775,74 @@ func TestUpdateInstall_EmptyAckVersionKeepsTheManifestVersion(t *testing.T) {
 		t.Errorf("to_slot = %q, want b — the slots must still be recorded normally", got.ToSlot)
 	}
 }
+
+// PreviewPlan is the read-only resolution powering the pre-flight UI (#95). It
+// must return the SAME plan the saga runs — ordered targets with canary flags
+// and reasoned skips — so the operator never sees a preview that differs from
+// what executes. Mixed-arch tier: canary per arch, the amd64-only bundle
+// strands the arm64 node.
+func TestPreviewPlan_MixedArch(t *testing.T) {
+	ctx := context.Background()
+	store := newStoreFixture(t).store
+	inv := newInventory(t)
+	for _, n := range []struct{ id, arch string }{
+		{"n100-1", "amd64"}, {"n100-2", "amd64"}, {"pi-1", "arm64"}, {"pi-2", "arm64"},
+	} {
+		if err := inv.Insert(ctx, &proto.Node{
+			ID: n.id, Role: proto.RoleCompute, Architecture: n.arch,
+			FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("inv %s: %v", n.id, err)
+		}
+	}
+	for _, b := range []struct{ sha, compat string }{
+		{"sha-amd64", "rasputin-n100"}, {"sha-arm64", "rasputin-rpi-arm64"},
+	} {
+		if err := store.CreateBundle(ctx, &Bundle{
+			SHA256: b.sha, Version: "2026.08.3", Compatible: b.compat, UploadedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("bundle %s: %v", b.sha, err)
+		}
+	}
+
+	plan, err := PreviewPlan(ctx, store, inv, proto.SystemUpdateSpec{Version: "2026.08.3", Component: "os"}, SystemUpdateConfig{})
+	if err != nil {
+		t.Fatalf("PreviewPlan: %v", err)
+	}
+	if len(plan.Targets) != 4 {
+		t.Fatalf("targets = %d, want 4", len(plan.Targets))
+	}
+	// One canary per (tier, arch): the first amd64 and the first arm64 in
+	// planned (alphabetical-by-id) order.
+	canaries := map[string]bool{}
+	for _, t2 := range plan.Targets {
+		if t2.Canary {
+			canaries[t2.NodeID] = true
+		}
+		if t2.Tier != proto.RoleCompute {
+			t.Errorf("%s tier = %q, want compute", t2.NodeID, t2.Tier)
+		}
+		if t2.Compatible == "" {
+			t.Errorf("%s has no compatible", t2.NodeID)
+		}
+	}
+	if !canaries["n100-1"] || !canaries["pi-1"] || len(canaries) != 2 {
+		t.Errorf("canaries = %v, want exactly {n100-1, pi-1}", canaries)
+	}
+
+	// Strand check: an amd64-only bundle preview strands the arm64 nodes and
+	// carries the reason, no job submitted.
+	strand, err := PreviewPlan(ctx, store, inv, proto.SystemUpdateSpec{BundleSHA256: "sha-amd64"}, SystemUpdateConfig{})
+	if err != nil {
+		t.Fatalf("PreviewPlan(bundle): %v", err)
+	}
+	stranded := 0
+	for _, sk := range strand.Skipped {
+		if sk.Reason == proto.SkipNoArtifactForArch {
+			stranded++
+		}
+	}
+	if stranded != 2 {
+		t.Errorf("stranded = %d, want 2 (pi-1, pi-2)", stranded)
+	}
+}
