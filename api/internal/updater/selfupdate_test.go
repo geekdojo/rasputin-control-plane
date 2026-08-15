@@ -32,7 +32,10 @@ func TestSelfUpdateRecoverDecider(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			decide := SelfUpdateRecoverDecider(c.self)
+			// nil store: these cases are all node.update, which the decider
+			// answers without touching it. The system.update branch has its
+			// own test with a real store (selfupdate_system_test.go).
+			decide := SelfUpdateRecoverDecider(context.Background(), nil, c.self)
 			j := &jobs.Job{Kind: c.kind, Spec: json.RawMessage(specJSON(c.node, "sha"))}
 			if got := decide(j, c.steps); got != c.want {
 				t.Errorf("decide = %v, want %v", got, c.want)

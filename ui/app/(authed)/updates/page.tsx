@@ -677,6 +677,17 @@ function FleetUpdateDrawer({
               </tbody>
             </table>
           )}
+          {/* The one consequence a list of node ids cannot show: the last node
+              in the plan is the one serving this page (#56). Not a choice —
+              UPDATE ALL means all — but an operator should not have the UI go
+              dark on them unannounced. */}
+          {plan?.selfNodeId && (
+            <Hint style={{ marginTop: 8 }}>
+              this run updates <strong>{plan.selfNodeId}</strong>, the node running the control plane. It goes{' '}
+              <strong>last</strong>, after every other node has reported. This page will drop while it reboots and come
+              back on its own — the run finishes and reports itself either way.
+            </Hint>
+          )}
         </div>
 
         {/* Canary override — one select per (tier, arch) group */}

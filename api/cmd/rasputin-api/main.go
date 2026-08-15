@@ -548,7 +548,9 @@ func main() {
 	// HTTP. v0 policy is honest-failure, not resume — see saga.go — EXCEPT a
 	// control-plane self-update, which intentionally reboots the api mid-saga:
 	// the decider defers it so ResumeSelfUpdates can finish it on the new slot.
-	runner.SetRecoverDecider(updater.SelfUpdateRecoverDecider(selfNodeID))
+	// Since #56 that applies to the parent system.update too, when self was
+	// the last target of a fleet run — ResumeSystemUpdates finishes that one.
+	runner.SetRecoverDecider(updater.SelfUpdateRecoverDecider(ctx, jobStore, selfNodeID))
 	if err := runner.Recover(ctx); err != nil {
 		log.Fatalf("rasputin-api: recover in-flight jobs: %v", err)
 	}
@@ -566,6 +568,10 @@ func main() {
 	// there isn't one). Non-blocking — reconciles in the background once the
 	// co-located agent reconnects.
 	updater.ResumeSelfUpdates(ctx, updaterStore, invStore, jobStore, runner, busSrv.Conn(), selfNodeID)
+	// And the fleet run that self-update belonged to, if it was one (#56).
+	// Ordered after ResumeSelfUpdates because it waits on the child that call
+	// drives — starting it first would just poll for longer.
+	updater.ResumeSystemUpdates(ctx, jobStore, runner, busSrv.Conn(), selfNodeID)
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn())
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent

@@ -292,7 +292,7 @@ func TestPlanTargets_OrderingByRole(t *testing.T) {
 		node("cmp-1", proto.RoleCompute, time.Second),
 		node("st-1", proto.RoleStorage, time.Second),
 	}
-	got, _ := planTargets(nodes, nil, "")
+	got, _ := planTargets(nodes, nil, "", "")
 	wantOrder := []string{"cmp-1", "st-1", "cp-1", "fw-1"}
 	if len(got) != len(wantOrder) {
 		t.Fatalf("want %d targets, got %d", len(wantOrder), len(got))
@@ -310,7 +310,7 @@ func TestPlanTargets_SkipsExcluded(t *testing.T) {
 		node("b", proto.RoleCompute, time.Second),
 	}
 	excl := map[string]struct{}{"a": {}}
-	got, skipped := planTargets(nodes, excl, "")
+	got, skipped := planTargets(nodes, excl, "", "")
 	if len(got) != 1 || got[0].ID != "b" {
 		t.Errorf("targets: %+v", got)
 	}
@@ -324,7 +324,7 @@ func TestPlanTargets_SkipsOfflineNodes(t *testing.T) {
 		node("on", proto.RoleCompute, time.Second),
 		node("off", proto.RoleCompute, 10*time.Minute),
 	}
-	got, skipped := planTargets(nodes, nil, "")
+	got, skipped := planTargets(nodes, nil, "", "")
 	if len(got) != 1 || got[0].ID != "on" {
 		t.Errorf("targets: %+v", got)
 	}
@@ -349,7 +349,7 @@ func TestPlanTargets_SkipsSKUMismatch(t *testing.T) {
 
 	// OS bundle → updates the compute node, skips the firewall. The firewall
 	// skip is DESIGNED, so it must not read as stranded.
-	got, skipped := planTargets(nodes, nil, "rasputin-n100")
+	got, skipped := planTargets(nodes, nil, "rasputin-n100", "")
 	if len(got) != 1 || got[0].ID != "cmp-1" {
 		t.Errorf("OS bundle targets = %+v, want [cmp-1]", got)
 	}
@@ -363,7 +363,7 @@ func TestPlanTargets_SkipsSKUMismatch(t *testing.T) {
 
 	// Firewall bundle → updates the firewall, skips the compute node. Same
 	// direction, same designed reason.
-	got, skipped = planTargets(nodes, nil, "rasputin-fw-n100")
+	got, skipped = planTargets(nodes, nil, "rasputin-fw-n100", "")
 	if len(got) != 1 || got[0].ID != "fw-1" {
 		t.Errorf("fw bundle targets = %+v, want [fw-1]", got)
 	}
@@ -392,7 +392,7 @@ func TestPlanTargets_OtherArchIsStrandedNotDesigned(t *testing.T) {
 		node("fw-1", proto.RoleFirewall, time.Second),
 	}
 
-	got, skipped := planTargets(nodes, nil, "rasputin-n100")
+	got, skipped := planTargets(nodes, nil, "rasputin-n100", "")
 	if len(got) != 1 || got[0].ID != "n100-1" {
 		t.Fatalf("targets = %+v, want [n100-1]", got)
 	}
@@ -415,7 +415,7 @@ func TestPlanTargets_OtherArchIsStrandedNotDesigned(t *testing.T) {
 // for a node that was never a valid target. It is stranded, not planned.
 func TestPlanTargets_EmptyArchIsStrandedNotAssumedAmd64(t *testing.T) {
 	n := node("never-said", proto.RoleCompute, time.Second) // Architecture == ""
-	got, skipped := planTargets([]*proto.Node{n}, nil, "rasputin-n100")
+	got, skipped := planTargets([]*proto.Node{n}, nil, "rasputin-n100", "")
 	if len(got) != 0 {
 		t.Errorf("targets = %+v, want none — an unreported arch is not amd64", got)
 	}
@@ -432,7 +432,7 @@ func TestPlanTargets_EmptyArchIsStrandedNotAssumedAmd64(t *testing.T) {
 // Architecture in most fixtures and still has exactly one valid image.
 func TestPlanTargets_FirewallIsUnaffectedByEmptyArch(t *testing.T) {
 	fw := node("fw-1", proto.RoleFirewall, time.Second) // Architecture == ""
-	got, skipped := planTargets([]*proto.Node{fw}, nil, "rasputin-fw-n100")
+	got, skipped := planTargets([]*proto.Node{fw}, nil, "rasputin-fw-n100", "")
 	if len(got) != 1 || got[0].ID != "fw-1" {
 		t.Fatalf("targets = %+v, want [fw-1]; the firewall is selected by SKU, not arch", got)
 	}
@@ -448,7 +448,7 @@ func TestPlanTargets_FirewallIsUnaffectedByEmptyArch(t *testing.T) {
 func TestPlanTargets_UnknownArchIsStrandedNotPlanned(t *testing.T) {
 	n := node("weird-1", proto.RoleCompute, time.Second)
 	n.Architecture = "riscv64"
-	got, skipped := planTargets([]*proto.Node{n}, nil, "rasputin-n100")
+	got, skipped := planTargets([]*proto.Node{n}, nil, "rasputin-n100", "")
 	if len(got) != 0 {
 		t.Errorf("targets = %+v, want none — an unresolvable arch is not a valid target", got)
 	}
