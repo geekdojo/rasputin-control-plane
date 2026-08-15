@@ -38,6 +38,7 @@ import type {
   DNSForwarding,
   SetupState,
   SystemUpdateChangeEvent,
+  SystemUpdatePlan,
   UpdateChangeEvent,
   UpdateCheckResult,
 } from './types';
@@ -627,6 +628,23 @@ export function createSystemUpdate(input: {
   canarySoakSeconds?: number;
 }): Promise<Job> {
   return jsonFetch<Job>('/api/updates/system', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+// previewSystemUpdatePlan resolves what a system.update WOULD do — ordered
+// targets, per-arch canary picks, reasoned skips — without submitting a job.
+// Same body as createSystemUpdate; powers the pre-flight drawer (#95).
+export function previewSystemUpdatePlan(input: {
+  version?: string;
+  component?: string;
+  bundleSha256?: string;
+  excludeNodes?: string[];
+  canaryNodes?: string[];
+}): Promise<SystemUpdatePlan> {
+  return jsonFetch<SystemUpdatePlan>('/api/updates/system/plan', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),

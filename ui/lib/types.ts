@@ -526,6 +526,24 @@ export interface SystemUpdateCounts {
   stranded?: number;
 }
 
+/** One node the plan would update, in planned order, flagged if it is the
+ *  canary for its (tier, arch) pair. */
+export interface PlanTarget {
+  nodeId: string;
+  tier: NodeRole;
+  compatible: string;
+  canary: boolean;
+}
+
+/** Read-only resolution of a system.update spec — what the cascade WOULD run,
+ *  no job submitted. Powers the pre-flight drawer (#95). */
+export interface SystemUpdatePlan {
+  bundleVersion: string;
+  component?: string;
+  targets: PlanTarget[];
+  skipped: SkippedNode[];
+}
+
 export interface SystemUpdateChangeEvent {
   parentJobId: string;
   change: SystemUpdateChange;

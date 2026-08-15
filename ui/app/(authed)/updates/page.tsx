@@ -14,6 +14,7 @@ import {
   listNodes,
   listUpdates,
   openSystemUpdatesWS,
+  previewSystemUpdatePlan,
   openUpdatesWS,
   pullUpdate,
   uploadBundle,
@@ -26,11 +27,14 @@ import type {
   JobStep,
   Node,
   NodeOutcome,
+  NodeRole,
   NodeResult,
   NodeUpdate,
   NodeUpdateStatus,
+  PlanTarget,
   SkippedNode,
   SkipReason,
+  SystemUpdatePlan,
   UpdateChangeEvent,
   UpdateCheckResult,
 } from '../../../lib/types';
@@ -38,6 +42,8 @@ import {
   Badge,
   Btn,
   CopyButton,
+  Drawer,
+  Input,
   DIM,
   FG,
   HAIR,
@@ -533,9 +539,273 @@ function nodeCompatible(n: Node): string | null {
   return null;
 }
 
-function ReleaseRow({ release, nodes }: { release: StagedRelease; nodes: Node[] }) {
+// ----- Fleet-update pre-flight drawer (#95) --------------------------------
+
+// The rollout knobs are per-run, not persistent cluster config, so they live at
+// the UPDATE ALL action rather than in Settings. We remember the last-used
+// width/budget/soak client-side (localStorage) so the boxes come back
+// pre-filled, seeded from the ADR defaults on a fresh cluster. The canary
+// override is deliberately NOT remembered — it defaults to the plan's computed
+// pick each run, because a specific node id does not survive a changing fleet.
+const KNOBS_LS_KEY = 'rasputin.fleetUpdate.knobs';
+const DEFAULT_KNOBS = { maxInFlight: '4', maxFailures: '15%', canarySoakSeconds: 0 };
+type Knobs = typeof DEFAULT_KNOBS;
+
+function loadKnobs(): Knobs {
+  try {
+    const raw = localStorage.getItem(KNOBS_LS_KEY);
+    if (raw) return { ...DEFAULT_KNOBS, ...JSON.parse(raw) };
+  } catch {
+    /* ignore corrupt/absent localStorage — fall back to defaults */
+  }
+  return { ...DEFAULT_KNOBS };
+}
+
+// An IntOrString knob is valid as a bare count (`4`) or a percentage (`20%`).
+const KNOB_RE = /^\d+%?$/;
+const groupKey = (tier: string, arch: string) => `${tier}/${arch}`;
+
+function FleetUpdateDrawer({
+  release,
+  onClose,
+  onDeployed,
+}: {
+  release: StagedRelease;
+  onClose: () => void;
+  onDeployed: () => void;
+}) {
+  const [plan, setPlan] = useState<SystemUpdatePlan | null>(null);
+  const [planErr, setPlanErr] = useState<string | null>(null);
+  const [knobs, setKnobs] = useState<Knobs>(loadKnobs);
+  // groupKey -> chosen canary nodeId. Empty until the operator overrides one.
+  const [canaryOverride, setCanaryOverride] = useState<Record<string, string>>({});
+  const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // (Re)resolve the plan on open and whenever a canary override changes, so the
+  // preview always reflects the pick that will actually run.
+  useEffect(() => {
+    let active = true;
+    const canaryNodes = Object.values(canaryOverride).filter(Boolean);
+    previewSystemUpdatePlan({ version: release.version, component: release.component, canaryNodes })
+      .then((p) => active && (setPlan(p), setPlanErr(null)))
+      .catch((e) => active && setPlanErr(String(e)));
+    return () => {
+      active = false;
+    };
+  }, [release.version, release.component, canaryOverride]);
+
+  // Group targets by (tier, arch) so each canary-bearing group offers an
+  // override select. Order preserved from the plan (planned order).
+  const groups = new Map<string, { tier: NodeRole; arch: string; nodes: PlanTarget[]; canary?: string }>();
+  for (const t of plan?.targets ?? []) {
+    const k = groupKey(t.tier, t.compatible);
+    if (!groups.has(k)) groups.set(k, { tier: t.tier, arch: t.compatible, nodes: [] });
+    const g = groups.get(k)!;
+    g.nodes.push(t);
+    if (t.canary) g.canary = t.nodeId;
+  }
+  const canaryGroups = [...groups.values()].filter((g) => g.canary);
+
+  const knobsValid = KNOB_RE.test(knobs.maxInFlight.trim()) && KNOB_RE.test(knobs.maxFailures.trim());
+
+  async function deploy() {
+    if (!knobsValid) {
+      setErr('Max in flight and max failures must be a number (4) or a percentage (20%).');
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      const canaryNodes = Object.values(canaryOverride).filter(Boolean);
+      await createSystemUpdate({
+        version: release.version,
+        component: release.component,
+        maxInFlight: knobs.maxInFlight.trim(),
+        maxFailures: knobs.maxFailures.trim(),
+        canarySoakSeconds: knobs.canarySoakSeconds || undefined,
+        canaryNodes: canaryNodes.length ? canaryNodes : undefined,
+      });
+      try {
+        localStorage.setItem(KNOBS_LS_KEY, JSON.stringify(knobs));
+      } catch {
+        /* non-fatal: the update still dispatched */
+      }
+      onDeployed();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const skips = plan?.skipped ?? [];
+  const stranded = skips.filter((s) => s.reason === 'no-artifact-for-arch');
+
+  return (
+    <Drawer title={`REVIEW ROLLOUT · ${release.version}`} icon="🚀" onClose={onClose}>
+      <div style={{ padding: '16px 20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}>
+        {planErr && (
+          <Hint warn>
+            The plan can&apos;t run as staged: {planErr}
+          </Hint>
+        )}
+
+        {/* Plan — ordered targets, canaries flagged */}
+        <div>
+          <SectionLabel>PLAN{plan ? ` · ${plan.targets.length} NODE${plan.targets.length === 1 ? '' : 'S'}` : ''}</SectionLabel>
+          {!plan && !planErr && <span style={{ color: DIM, fontSize: 10 }}>resolving…</span>}
+          {plan && plan.targets.length === 0 && !planErr && (
+            <span style={{ color: DIM, fontSize: 10 }}>no online nodes match this release</span>
+          )}
+          {plan && plan.targets.length > 0 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <tbody>
+                {plan.targets.map((t) => (
+                  <tr key={t.nodeId}>
+                    <td style={{ ...tdStyle, color: FG }}>
+                      {t.nodeId}
+                      {t.canary && (
+                        <span style={{ color: ACCENT, fontSize: 8, marginLeft: 6, letterSpacing: 0.5 }}>CANARY</span>
+                      )}
+                    </td>
+                    <td style={{ ...tdStyle, color: DIM }}>{t.tier}</td>
+                    <td style={{ ...tdStyle, color: DIM, paddingRight: 0 }}>{t.compatible}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Canary override — one select per (tier, arch) group */}
+        {canaryGroups.length > 0 && (
+          <div>
+            <SectionLabel>CANARY</SectionLabel>
+            <Hint style={{ marginBottom: 8 }}>
+              one node per tier and architecture proves the image before fan-out. Override the pick if you have a node
+              you can afford to lose first.
+            </Hint>
+            {canaryGroups.map((g) => {
+              const k = groupKey(g.tier, g.arch);
+              return (
+                <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                  <span style={{ color: DIM, fontSize: 10, minWidth: 190 }}>
+                    {g.tier} / {g.arch}
+                  </span>
+                  <Select
+                    value={canaryOverride[k] ?? g.canary ?? ''}
+                    onChange={(e) => setCanaryOverride((prev) => ({ ...prev, [k]: e.target.value }))}
+                    style={{ flex: 1 }}
+                  >
+                    {g.nodes.map((n) => (
+                      <option key={n.nodeId} value={n.nodeId}>
+                        {n.nodeId}
+                        {n.nodeId === g.canary ? ' (plan default)' : ''}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Knobs */}
+        <div>
+          <SectionLabel>ROLLOUT</SectionLabel>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={{ color: DIM, fontSize: 10 }}>MAX IN FLIGHT</span>
+              <Input
+                value={knobs.maxInFlight}
+                onChange={(e) => setKnobs((k) => ({ ...k, maxInFlight: e.target.value }))}
+                style={{ width: 90 }}
+                placeholder="4 or 20%"
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={{ color: DIM, fontSize: 10 }}>MAX FAILURES</span>
+              <Input
+                value={knobs.maxFailures}
+                onChange={(e) => setKnobs((k) => ({ ...k, maxFailures: e.target.value }))}
+                style={{ width: 90 }}
+                placeholder="15% · 0=∞"
+              />
+            </label>
+          </div>
+          <button
+            onClick={() => setAdvanced((v) => !v)}
+            style={{ background: 'transparent', border: 'none', color: DIM, cursor: 'pointer', fontSize: 10, marginTop: 10, padding: 0, fontFamily: MONO }}
+          >
+            {advanced ? '▾' : '▸'} advanced
+          </button>
+          {advanced && (
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
+              <span style={{ color: DIM, fontSize: 10 }}>CANARY SOAK (SECONDS)</span>
+              <Input
+                type="number"
+                min={0}
+                max={3600}
+                value={knobs.canarySoakSeconds}
+                onChange={(e) => setKnobs((k) => ({ ...k, canarySoakSeconds: Math.max(0, Number(e.target.value) || 0) }))}
+                style={{ width: 120 }}
+              />
+              <span style={{ color: DIM, fontSize: 9 }}>hold fan-out this long after canaries pass. 0 = no soak (default).</span>
+            </label>
+          )}
+        </div>
+
+        {/* Skips */}
+        {skips.length > 0 && (
+          <div>
+            <SectionLabel>NOT TARGETED · {skips.length}</SectionLabel>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <tbody>
+                {skips.map((s) => (
+                  <tr key={s.nodeId}>
+                    <td style={{ ...tdStyle, color: DIM }}>{s.nodeId}</td>
+                    <td style={tdStyle}>
+                      <Badge color={skipColor(s.reason)}>{s.reason === 'no-artifact-for-arch' ? 'STRANDED' : 'SKIPPED'}</Badge>
+                    </td>
+                    <td style={{ ...tdStyle, color: DIM, paddingRight: 0 }}>{s.detail || s.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {stranded.length > 0 && (
+              <Hint warn style={{ marginTop: 8 }}>
+                {stranded.length} node{stranded.length === 1 ? '' : 's'} would be stranded — no artifact for their
+                architecture. The run will fail even if every other node succeeds. Stage the missing arch first.
+              </Hint>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div style={{ marginTop: 'auto', borderTop: `1px solid ${HAIR}`, padding: '14px 20px', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ color: '#f87171', fontSize: 9, flex: 1 }}>{err ?? ''}</span>
+        <Btn small onClick={onClose}>
+          CANCEL
+        </Btn>
+        <Btn
+          small
+          variant="primary"
+          disabled={busy || !!planErr || !plan || plan.targets.length === 0 || !knobsValid}
+          onClick={deploy}
+          title={planErr ? 'Fix the plan first' : 'Cascade this release with the settings above'}
+        >
+          {busy ? '…' : 'DEPLOY'}
+        </Btn>
+      </div>
+    </Drawer>
+  );
+}
+
+function ReleaseRow({ release, nodes }: { release: StagedRelease; nodes: Node[] }) {
+  const [drawer, setDrawer] = useState(false);
 
   const staged = new Set(release.bundles.map((b) => b.compatible));
   const inScope = nodes.filter((n) =>
@@ -556,27 +826,6 @@ function ReleaseRow({ release, nodes }: { release: StagedRelease; nodes: Node[] 
     const c = nodeCompatible(n);
     return c !== null && staged.has(c);
   }).length;
-
-  async function go() {
-    if (
-      !confirm(
-        `Update every online ${release.component === 'fw' ? 'firewall' : 'node'} to ${release.version}? ` +
-          `Each node receives the artifact for its own architecture. Nodes update one at a time in role-safe order ` +
-          `(compute → storage → firewall). The controlplane is not included — update it separately from its node ` +
-          `card afterward. The cascade halts on the first failure.`,
-      )
-    )
-      return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await createSystemUpdate({ version: release.version, component: release.component });
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <div style={{ background: PANEL, border: `1px solid ${HAIR}`, padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -600,18 +849,24 @@ function ReleaseRow({ release, nodes }: { release: StagedRelease; nodes: Node[] 
         <Btn
           small
           variant="primary"
-          disabled={busy || missing.length > 0 || covered === 0}
+          disabled={missing.length > 0 || covered === 0}
           title={
             missing.length > 0
               ? `Stage ${missing.join(', ')} first — the plan refuses to run a fleet update that would leave nodes behind`
-              : 'Cascade this release across every online node, each on its own architecture'
+              : 'Review the plan and roll this release out across every online node'
           }
-          onClick={go}
+          onClick={() => setDrawer(true)}
         >
-          {busy ? '…' : 'UPDATE ALL'}
+          UPDATE ALL
         </Btn>
       </div>
-      {err && <span style={{ color: '#f87171', fontSize: 9, width: '100%' }}>{err}</span>}
+      {drawer && (
+        <FleetUpdateDrawer
+          release={release}
+          onClose={() => setDrawer(false)}
+          onDeployed={() => setDrawer(false)}
+        />
+      )}
     </div>
   );
 }

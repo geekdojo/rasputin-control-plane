@@ -66,6 +66,10 @@ type Server struct {
 	// hostLANInfo returns the control plane's LAN IP + MAC for the DHCP-reservation
 	// guidance surfaced in the DNS-forwarding view (AA-11). nil until main wires it.
 	hostLANInfo func() (ip string, mac string)
+	// selfNodeID is the node hosting this api. Read from the same env the saga's
+	// SystemUpdateConfig is built from, so the plan preview excludes the
+	// controlplane exactly as the real cascade does. Empty off-appliance.
+	selfNodeID string
 }
 
 // SetReleaseSource wires the update-channel source used by
@@ -159,6 +163,11 @@ func NewServer(
 		// nil for both; production passes them through main.go.
 		alerts: alerts.New(inv, store, appsStore, setupSvc, nil, nc, false),
 		auth:   authSvc, obs: obsStatus, busTokens: busTokens, nc: nc,
+		// Mirrors the saga's SystemUpdateConfig.SelfNodeID (main.go reads the
+		// same env). Threading it as a 19th constructor arg would touch every
+		// caller for a process-wide constant; reading it here keeps the one
+		// source without disturbing the signature.
+		selfNodeID: os.Getenv("RASPUTIN_SELF_NODE_ID"),
 	}
 }
 
@@ -240,6 +249,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/bundles/{sha}", reqd(s.handleDeleteBundle))
 	mux.HandleFunc("POST /api/updates", reqd(s.handleCreateUpdate))
 	mux.HandleFunc("POST /api/updates/system", reqd(s.handleCreateSystemUpdate))
+	mux.HandleFunc("POST /api/updates/system/plan", reqd(s.handleSystemUpdatePlan))
 	mux.HandleFunc("GET /api/updates", reqd(s.handleListUpdates))
 	mux.HandleFunc("POST /api/updates/check", reqd(s.handleCheckUpdates))
 	mux.HandleFunc("POST /api/updates/pull", reqd(s.handlePullUpdate))

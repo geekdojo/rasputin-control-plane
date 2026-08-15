@@ -388,6 +388,36 @@ func (g tierGroup) split() (canaries, fanout []plannedTarget) {
 	return canaries, fanout
 }
 
+// PreviewPlan resolves a spec into the plan the cascade WOULD run, without
+// submitting anything. It is buildPlan + assignCanaries — the exact resolution
+// the saga's step 1 performs — mapped to the wire shape, so the pre-flight UI
+// (#95) shows the real ordered targets and canary picks rather than a
+// client-side guess that could drift from what executes.
+func PreviewPlan(
+	ctx context.Context,
+	store *Store,
+	inv *inventory.Store,
+	spec proto.SystemUpdateSpec,
+	cfg SystemUpdateConfig,
+) (proto.SystemUpdatePlan, error) {
+	state, err := buildPlan(ctx, store, inv, spec, cfg)
+	if err != nil {
+		return proto.SystemUpdatePlan{}, err
+	}
+	targets := make([]proto.PlanTarget, len(state.Targets))
+	for i, t := range state.Targets {
+		targets[i] = proto.PlanTarget{
+			NodeID: t.NodeID, Tier: t.Tier, Compatible: t.Compatible, Canary: t.Canary,
+		}
+	}
+	return proto.SystemUpdatePlan{
+		BundleVersion: state.BundleVer,
+		Component:     state.Component,
+		Targets:       targets,
+		Skipped:       state.Skipped,
+	}, nil
+}
+
 // stagedByCompatible indexes the locally-staged bundles of one version by SKU.
 // A version has at most one bundle per SKU; a duplicate would mean two
 // artifacts claiming the same version and arch, and the first wins
