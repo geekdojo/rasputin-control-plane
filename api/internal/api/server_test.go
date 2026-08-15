@@ -1228,6 +1228,34 @@ func TestHandleCreateSystemUpdate_MaxInFlightBounds(t *testing.T) {
 	}
 }
 
+// The plan-preview endpoint (#95) is read-only and shares the spec-form rule
+// with the dispatch endpoint. A resolution failure (e.g. an unknown bundle) is
+// the operator's to see — 400 with the message — not a 500.
+func TestHandleSystemUpdatePlan(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	cases := []struct {
+		name, body   string
+		wantStatus   int
+		wantContains string
+	}{
+		{"neither form", `{}`, http.StatusBadRequest, "exactly one of version or bundleSha256"},
+		{"both forms", `{"version":"2026.08.4","bundleSha256":"deadbeef"}`, http.StatusBadRequest, "exactly one of version or bundleSha256"},
+		{"unknown bundle resolves to 400, not 500", `{"bundleSha256":"deadbeef"}`, http.StatusBadRequest, "not found"},
+		// An empty fleet is a valid plan with no targets — 200, no job.
+		{"valid version, empty fleet", `{"version":"2026.08.4","component":"os"}`, http.StatusOK, ""},
+	}
+	for _, tc := range cases {
+		w := f.do(t, http.MethodPost, "/api/updates/system/plan", tc.body, c)
+		if w.Code != tc.wantStatus {
+			t.Errorf("%s: status = %d, want %d (body %s)", tc.name, w.Code, tc.wantStatus, w.Body.String())
+		}
+		if tc.wantContains != "" && !strings.Contains(w.Body.String(), tc.wantContains) {
+			t.Errorf("%s: body %q, want it to contain %q", tc.name, w.Body.String(), tc.wantContains)
+		}
+	}
+}
+
 // maxFailures takes the same shape and the same bounds. `0` is explicitly
 // VALID here and means unlimited — rejecting it would remove the only way to
 // say "attempt every node whatever happens".
