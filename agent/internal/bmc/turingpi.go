@@ -143,8 +143,13 @@ func NewTuringPiBackend(opts TuringPiOptions) (*TuringPiBackend, error) {
 		// Go's own verification is disabled so the expired-at-epoch cert
 		// gets past it; VerifyPeerCertificate then applies the stricter
 		// exact-match check.
-		tlsCfg.InsecureSkipVerify = true
-		tlsCfg.VerifyPeerCertificate = pinnedCertVerifier(want)
+		// ClientSessionCache is nil here and on the http.Client's transport,
+		// which per crypto/tls disables client-side resumption — so the pinned
+		// verifier below runs on every handshake and a resumed session cannot
+		// slip past it. (That is gosec's G123.)
+		tlsCfg.InsecureSkipVerify = true                        //#nosec G402 -- Go's chain verification must be off for the epoch-expired board cert; the pinned exact-match verifier below is stricter
+		tlsCfg.VerifyPeerCertificate = pinnedCertVerifier(want) //#nosec G123 -- resumption is disabled (nil ClientSessionCache), so the pinned verifier runs on every handshake
+
 	case opts.InsecureSkipVerify:
 		tlsCfg.InsecureSkipVerify = true
 	default:
