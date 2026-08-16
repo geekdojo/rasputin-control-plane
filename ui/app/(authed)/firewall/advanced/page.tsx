@@ -59,6 +59,27 @@ export default function AdvancedPage() {
             minWidth: 240,
           }}
         />
+        {/*
+          CodeQL flags the href below as js/xss-through-dom (HIGH): DOM text
+          reaching a URL. False positive — the scheme is not attacker-reachable.
+          The template literal hard-codes `http://` as a prefix, so the value
+          can never begin with `javascript:` or `data:`, which is the only way
+          a URL becomes script execution. Worst case is the operator navigating
+          to a host they themselves typed, in a new tab that gets no opener
+          reference (rel="noopener noreferrer").
+
+          firewallHost is also operator-typed and nothing else: useState(''),
+          set only by this input's onChange. No API value reaches it — nodeId
+          from listFirewallState is used for the PLACEHOLDER only, which is
+          inert text.
+
+          TRIP-WIRE: the file comment above says host derivation becomes
+          automatic when primaryLanIp lands on Node. On that day firewallHost
+          stops being operator-typed and starts carrying a NODE-SUPPLIED value,
+          and this verdict must be re-opened in .github/codeql-register.tsv —
+          a compromised node could then choose where this link points. The
+          hard-coded scheme still caps it at open-redirect rather than XSS.
+        */}
         <a
           href={firewallHost ? `http://${firewallHost}/` : '#'}
           target="_blank"

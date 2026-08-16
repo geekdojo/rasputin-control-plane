@@ -46,7 +46,25 @@ permissions:
   contents: write   # create the release + upload assets
 
 jobs:
+  # The shipping gate. No control-plane release carrying a real or unreviewed
+  # critical/high CodeQL finding is ever cut — and because rasputin-os and
+  # rasputin-openwrt-firewall build their images from a PUBLISHED release
+  # pinned by version and hash rather than from this source, blocking the
+  # release here is the single boundary that keeps such code out of every image
+  # built from this point on. There is deliberately no equivalent gate in those
+  # repos: they have no control-plane source to analyse.
+  #
+  # Called rather than copied so the release gate and the PR gate cannot drift.
+  # Runs on dry-run dispatches too — a dry run that skipped the gate would
+  # report a green build that a real release would then refuse to cut.
+  codeql:
+    uses: ./.github/workflows/codeql.yml
+    permissions:
+      contents: read
+      security-events: write
+
   release:
+    needs: codeql
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

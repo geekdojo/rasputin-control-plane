@@ -1,0 +1,154 @@
+name: codeql
+
+# CodeQL dataflow analysis of code WE wrote, gated against a reviewed register.
+#
+# The third leg of the static-analysis stool, and it is worth being precise
+# about which question each leg answers, because they are different:
+#
+#   vuln-scan.yml  govulncheck — are our DEPENDENCIES known-vulnerable?
+#   sast.yml       gosec + staticcheck — did we write an insecure PATTERN?
+#   codeql.yml     CodeQL — does a value FLOW somewhere it shouldn't?
+#
+# gosec matches patterns at a point. CodeQL tracks taint across function and
+# file boundaries, which is the class gosec structurally cannot see. It is also
+# the first static analysis that has ever looked at ui/ — gosec cannot read
+# TypeScript, and CP-7's npm audit reads dependency manifests, not our code.
+#
+# Policy lives in scripts/codeql-register.sh, exactly as sast.yml defers to
+# scripts/sast-register.sh. The short version, which differs from that gate:
+#
+#   NO high or critical finding that is real — or that nobody has reviewed —
+#   may exist on a release. Such code is never built into an image.
+#
+# That is stricter than the gosec gate, which tolerates known `real` findings,
+# and it is deliberate: the two sit at different boundaries. gosec's asks "is
+# anything new or unseen"; this one also asks "is this fit to ship". It is why
+# the same gate runs again in release.yml — see the enforcement note there.
+#
+# Medium and low findings still require a recorded verdict, but do not block.
+#
+# Scope: this repo only. rasputin-os and rasputin-openwrt-firewall do not
+# compile this source — they consume a PUBLISHED control-plane release pinned
+# by version and hash — so there is nothing here for CodeQL to analyse there,
+# and gating this repo's release is the single boundary that keeps critical or
+# high findings out of any image built from that point on.
+#
+# NO paths-ignore, deliberately. Nothing in the tree is excluded as "vendor":
+# code copied into this repo is our code regardless of who wrote it
+# (ui/lib/qrcodegen.ts being the live example), and because copied code has no
+# manifest entry, no dependency scanner and no Dependabot will ever look at it.
+# Exclude it here too and nothing looks at it at all, while it ships on every
+# appliance. Vendor PACKAGES resolved from a manifest or the module cache are a
+# different lane and are not analysed here — that is govulncheck's and
+# Dependabot's job, and CodeQL reporting on them would mean it is misconfigured.
+# The JS extractor confirms the split: it reported lines-of-user-code exactly
+# equal to lines-of-code, i.e. zero dependency code analysed.
+#
+# Conventions match ci.yml and sast.yml: Go 1.26, actions/setup-go@v5 cached on
+# the workspace go.sum files.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  # release.yml calls this rather than repeating the analysis, so the gate that
+  # blocks a release and the gate that runs on a PR are the SAME definition
+  # with the same query suite and the same build steps. Copy-pasting it into
+  # the release workflow would let the two drift, and the one that matters is
+  # the one nobody looks at until it blocks something.
+  workflow_call:
+
+permissions:
+  contents: read
+  # Needed to upload SARIF to code scanning. Unavailable on pull requests from
+  # forks, which is why the upload below is conditional — but note the GATE
+  # needs no token at all, so an external contributor's PR is still gated
+  # exactly as ours is. Only the Security-tab view is lost.
+  security-events: write
+
+env:
+  # See sast.yml for why this is pinned exactly rather than left to setup-go's
+  # manifest, which lags go.dev.
+  GOTOOLCHAIN: go1.26.6
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  analyze:
+    name: ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        if: matrix.language == 'go'
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+
+      # security-extended, not the default suite. Measured on 2026-08-16 before
+      # choosing: across both languages it produced exactly ONE finding more
+      # than the default suite (a medium log-injection), so the extra depth
+      # that is the entire reason to add CodeQL over gosec costs one finding.
+      #
+      # security-and-quality is deliberately NOT used: its additional rules are
+      # maintainability rather than security, and this gate blocks releases.
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      # build-mode: manual, not autobuild.
+      #
+      # autobuild runs `go build ./...` from the repo root, and this repo's root
+      # holds no Go packages — the code lives in the three go.work modules. The
+      # pattern would match nothing, the database would come back near-empty,
+      # and the gate would go green having analysed almost nothing. A gate that
+      # passes because it looked at no code is worse than no gate, so the build
+      # is explicit and the extractor's line count is the check on it.
+      #
+      # Note this excludes _test.go: `go build` does not compile test files, so
+      # ~47k lines of test code are not analysed. Deliberate — a finding in a
+      # test does not ship — but it means "clean" here means "clean in shipping
+      # code", which is the claim this gate is entitled to make and no more.
+      - name: build go modules
+        if: matrix.language == 'go'
+        run: |
+          for m in api agent proto; do
+            echo "::group::go build ./$m/..."
+            (cd "$m" && go build ./...)
+            echo "::endgroup::"
+          done
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+          # Write SARIF to disk for the gate, AND publish to code scanning so a
+          # taint path can actually be read — a register row cannot show a
+          # multi-hop flow. The Security tab is a VIEWER; the register is the
+          # record. Dismissing an alert there changes nothing about this gate,
+          # by design: that UI dismissal is invisible to git and to review,
+          # which is the whole reason the register exists.
+          output: sarif
+          upload: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'always' || 'never' }}
+
+      # The gate needs no token, so a fork PR — where the upload above is
+      # skipped entirely — is still gated exactly as ours is. If analyze itself
+      # failed there is no SARIF, and the script fails loudly saying so rather
+      # than reporting an empty scan as a clean one.
+      - name: gate against the reviewed register
+        run: ./scripts/codeql-register.sh --gate sarif
