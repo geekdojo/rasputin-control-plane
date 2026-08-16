@@ -1,0 +1,160 @@
+# gosec-baseline.txt — findings that existed when the SAST gate landed.
+#
+# Regenerate with:  scripts/sast-scan.sh --print > .github/gosec-baseline.txt
+# Policy, fingerprint scheme, and why this file exists: scripts/sast-scan.sh
+#
+# Columns: fingerprint  count  rule  severity  path  # detail
+#
+# NOTHING HIGH BELONGS HERE. A HIGH finding is fixed, or suppressed at the
+# source with `#nosec Gxxx -- reason`. Adding one to this file is how the
+# gate stops being worth having.
+#
+# Shrinking this file is the point. Delete a line once its finding is fixed;
+# the gate prints stale entries on every run to make that easy.
+fa63fae92361ff36  1  G301  MEDIUM  agent/cmd/rasputin-agent/main.go  # Expect directory permissions to be 0750 or less
+4e4d57adb73d8e00  1  G706  LOW  agent/cmd/rasputin-agent/main.go  # Log injection via taint analysis
+6aaf7c9c58b4d7c4  1  G304  MEDIUM  agent/internal/bmc/bitscope.go  # Potential file inclusion via variable
+ce0dfde92b274352  1  G301  MEDIUM  agent/internal/bmc/host.go  # Expect directory permissions to be 0750 or less
+ccfc7342d40005ee  1  G304  MEDIUM  agent/internal/bmc/host.go  # Potential file inclusion via variable
+dff6b81265d3865b  1  G301  MEDIUM  agent/internal/bmc/mock.go  # Expect directory permissions to be 0750 or less
+b0f81a7c5dd1ab74  1  G204  MEDIUM  agent/internal/docker/compose.go  # Subprocess launched with variable
+395a8af14fee8c4e  1  G301  MEDIUM  agent/internal/docker/compose.go  # Expect directory permissions to be 0750 or less
+e84c9b517fb4bc49  1  G301  MEDIUM  agent/internal/docker/compose.go  # Expect directory permissions to be 0750 or less
+68be609c62acb682  1  G306  MEDIUM  agent/internal/docker/compose.go  # Expect WriteFile permissions to be 0600 or less
+341b1bb290edcb93  1  G301  MEDIUM  agent/internal/docker/mock.go  # Expect directory permissions to be 0750 or less
+b3089760f4321757  1  G301  MEDIUM  agent/internal/docker/mock.go  # Expect directory permissions to be 0750 or less
+f0501fa483e7ea9a  1  G301  MEDIUM  agent/internal/docker/mock.go  # Expect directory permissions to be 0750 or less
+25e5d3e327ef27a9  1  G306  MEDIUM  agent/internal/docker/mock.go  # Expect WriteFile permissions to be 0600 or less
+db26eb978d969b19  1  G306  MEDIUM  agent/internal/docker/mock.go  # Expect WriteFile permissions to be 0600 or less
+f25d11decb7a6b75  1  G204  MEDIUM  agent/internal/health/health.go  # Subprocess launched with variable
+2c7f1b26080936bb  1  G304  MEDIUM  agent/internal/host/storage.go  # Potential file inclusion via variable
+028c504ae410ea34  1  G204  MEDIUM  agent/internal/hostsync/hostsync.go  # Subprocess launched with variable
+0de08025cefd4857  1  G301  MEDIUM  agent/internal/hostsync/hostsync.go  # Expect directory permissions to be 0750 or less
+5a4ed0c268e871dc  1  G306  MEDIUM  agent/internal/hostsync/hostsync.go  # Expect WriteFile permissions to be 0600 or less
+b2f573faf0c9ed78  1  G204  MEDIUM  agent/internal/nameguard/nameguard.go  # Subprocess launched with variable
+9b5e7f4cfbe8cb48  1  G301  MEDIUM  agent/internal/openwrt/mock.go  # Expect directory permissions to be 0750 or less
+83401c5e0c26bd79  1  G306  MEDIUM  agent/internal/openwrt/mock.go  # Expect WriteFile permissions to be 0600 or less
+e55d38a830c11e75  1  G306  MEDIUM  agent/internal/openwrt/mock.go  # Expect WriteFile permissions to be 0600 or less
+96d71c97bfae6259  1  G204  MEDIUM  agent/internal/openwrt/uci.go  # Subprocess launched with variable
+2256981f49a80946  1  G301  MEDIUM  agent/internal/openwrt/uci.go  # Expect directory permissions to be 0750 or less
+56a5af3d55643ae5  1  G306  MEDIUM  agent/internal/openwrt/uci.go  # Expect WriteFile permissions to be 0600 or less
+b5451d65c995a527  1  G301  MEDIUM  agent/internal/proxy/leaf.go  # Expect directory permissions to be 0750 or less
+a86d998436972bc6  1  G706  LOW  agent/internal/sdnotify/sdnotify.go  # Log injection via taint analysis
+79e0111e622d8313  1  G301  MEDIUM  agent/internal/tailscale/mock.go  # Expect directory permissions to be 0750 or less
+12ac31aec68d2d80  1  G204  MEDIUM  agent/internal/tailscale/real.go  # Subprocess launched with a potential tainted input or cmd arguments
+9ef90f77531f4e31  1  G204  MEDIUM  agent/internal/tailscale/real.go  # Subprocess launched with a potential tainted input or cmd arguments
+ad768cbadb41260b  1  G204  MEDIUM  agent/internal/tailscale/real.go  # Subprocess launched with a potential tainted input or cmd arguments
+c57b892ed730be00  1  G204  MEDIUM  agent/internal/tailscale/real.go  # Subprocess launched with a potential tainted input or cmd arguments
+da513a6ba5d32010  1  G204  MEDIUM  agent/internal/tailscale/real.go  # Subprocess launched with variable
+261c64f2ae27e4d2  1  G301  MEDIUM  agent/internal/tailscale/trust.go  # Expect directory permissions to be 0750 or less
+a82c6130967e6d18  1  G302  MEDIUM  agent/internal/tailscale/trust.go  # Expect file permissions to be 0600 or less
+0622fd53a0abed69  1  G304  MEDIUM  agent/internal/tailscale/trust.go  # Potential file inclusion via variable
+be7626af4531559e  1  G304  MEDIUM  agent/internal/tailscale/trust.go  # Potential file inclusion via variable
+e49097cb5e500952  1  G304  MEDIUM  agent/internal/tailscale/trust.go  # Potential file inclusion via variable
+93d3379b3c7ced90  1  G306  MEDIUM  agent/internal/tailscale/trust.go  # Expect WriteFile permissions to be 0600 or less
+d5c532b359735ec9  1  G706  LOW  agent/internal/updater/fault.go  # Log injection via taint analysis
+63a49807d36f09eb  1  G302  MEDIUM  agent/internal/updater/grubenv.go  # Expect file permissions to be 0600 or less
+3395a778a1fe295e  1  G304  MEDIUM  agent/internal/updater/grubenv.go  # Potential file inclusion via variable
+9b0b0c9fef223f2c  1  G304  MEDIUM  agent/internal/updater/grubenv.go  # Potential file inclusion via variable
+0beabcd55438c978  1  G104  LOW  agent/internal/updater/mock.go  # Errors unhandled
+61224381655024ca  1  G104  LOW  agent/internal/updater/mock.go  # Errors unhandled
+772ffc615e08d425  1  G301  MEDIUM  agent/internal/updater/mock.go  # Expect directory permissions to be 0750 or less
+b71c1a9ac79ef353  1  G304  MEDIUM  agent/internal/updater/mock.go  # Potential file inclusion via variable
+3a343c6ef1ce8f6d  1  G306  MEDIUM  agent/internal/updater/mock.go  # Expect WriteFile permissions to be 0600 or less
+f260c4d87a194d13  1  G104  LOW  agent/internal/updater/openwrt_ab.go  # Errors unhandled
+fe1674413849b0a0  1  G104  LOW  agent/internal/updater/openwrt_ab.go  # Errors unhandled
+5dc8d0fc6a20b262  1  G204  MEDIUM  agent/internal/updater/openwrt_ab.go  # Subprocess launched with variable
+dd3f2cfa837fd8f9  1  G204  MEDIUM  agent/internal/updater/openwrt_ab.go  # Subprocess launched with variable
+f4ee652a0727271a  1  G204  MEDIUM  agent/internal/updater/openwrt_ab.go  # Subprocess launched with a potential tainted input or cmd arguments
+ce4ebe0b53a7ddff  1  G301  MEDIUM  agent/internal/updater/openwrt_ab.go  # Expect directory permissions to be 0750 or less
+aa511a15e7da9571  1  G304  MEDIUM  agent/internal/updater/openwrt_ab.go  # Potential file inclusion via variable
+b1930c2d51cb5fd7  1  G304  MEDIUM  agent/internal/updater/openwrt_ab.go  # Potential file inclusion via variable
+e90430198c3ddaac  1  G304  MEDIUM  agent/internal/updater/openwrt_ab.go  # Potential file inclusion via variable
+90b289e399a2c275  1  G104  LOW  agent/internal/updater/rauc.go  # Errors unhandled
+d731ba4b303d4393  1  G104  LOW  agent/internal/updater/rauc.go  # Errors unhandled
+20ecf5d0f466900a  1  G204  MEDIUM  agent/internal/updater/rauc.go  # Subprocess launched with a potential tainted input or cmd arguments
+22bbf27397014500  1  G204  MEDIUM  agent/internal/updater/rauc.go  # Subprocess launched with a potential tainted input or cmd arguments
+375e1e6075eaa81a  1  G204  MEDIUM  agent/internal/updater/rauc.go  # Subprocess launched with a potential tainted input or cmd arguments
+4b5da83e2f55d649  1  G204  MEDIUM  agent/internal/updater/rauc.go  # Subprocess launched with a potential tainted input or cmd arguments
+503213cdaebafd13  1  G204  MEDIUM  agent/internal/updater/rauc.go  # Subprocess launched with a potential tainted input or cmd arguments
+7fbaa50fc07a0a11  1  G204  MEDIUM  agent/internal/updater/rauc.go  # Subprocess launched with a potential tainted input or cmd arguments
+d64fa0f1f93a0fb6  1  G204  MEDIUM  agent/internal/updater/rauc.go  # Subprocess launched with a potential tainted input or cmd arguments
+7addfbdb7239c00c  1  G301  MEDIUM  agent/internal/updater/rauc.go  # Expect directory permissions to be 0750 or less
+062649fe342fcd24  1  G301  MEDIUM  api/cmd/rasputin-api/main.go  # Expect directory permissions to be 0750 or less
+617b6ec921ad1222  1  G301  MEDIUM  api/cmd/rasputin-api/main.go  # Expect directory permissions to be 0750 or less
+64407ef9fa954fa6  1  G301  MEDIUM  api/cmd/rasputin-api/main.go  # Expect directory permissions to be 0750 or less
+9bd610cd9bcf030e  1  G301  MEDIUM  api/cmd/rasputin-api/main.go  # Expect directory permissions to be 0750 or less
+bce73c88649ae833  1  G301  MEDIUM  api/cmd/rasputin-api/main.go  # Expect directory permissions to be 0750 or less
+0295bcc30d3a1129  1  G304  MEDIUM  api/cmd/rasputin-api/main.go  # Potential file inclusion via variable
+67b2564f984c49fb  1  G304  MEDIUM  api/cmd/rasputin-api/main.go  # Potential file inclusion via variable
+79075ed2983abbbb  1  G304  MEDIUM  api/cmd/rasputin-api/main.go  # Potential file inclusion via variable
+1107efdc0ff5ed62  1  G706  LOW  api/cmd/rasputin-api/main.go  # Log injection via taint analysis
+5f176d21a61fbfb8  1  G706  LOW  api/cmd/rasputin-api/main.go  # Log injection via taint analysis
+74134005b314cb91  1  G706  LOW  api/cmd/rasputin-api/main.go  # Log injection via taint analysis
+8c5cd5a12e3a2fc1  1  G706  LOW  api/cmd/rasputin-api/main.go  # Log injection via taint analysis
+8d8b9f64b54ff2b7  1  G706  LOW  api/cmd/rasputin-api/main.go  # Log injection via taint analysis
+a4980c93dd326037  1  G706  LOW  api/cmd/rasputin-api/main.go  # Log injection via taint analysis
+fd1ac9d26dfa4205  1  G706  LOW  api/cmd/rasputin-api/main.go  # Log injection via taint analysis
+11e4d95d3efe0146  1  G301  MEDIUM  api/cmd/rasputin-provision/main.go  # Expect directory permissions to be 0750 or less
+883e418b9e1a1690  1  G304  MEDIUM  api/cmd/rasputin-provision/main.go  # Potential file inclusion via variable
+6dc740906b010a5f  1  G104  LOW  api/internal/api/bmc_handlers.go  # Errors unhandled
+a0b5da0918837cf1  1  G104  LOW  api/internal/api/bmc_handlers.go  # Errors unhandled
+a1c6c05d17f255cc  1  G104  LOW  api/internal/api/bmc_handlers.go  # Errors unhandled
+94f4b6c18e89c994  1  G117  MEDIUM  api/internal/api/bmc_handlers.go  # Marshaled struct field "Pass" (JSON key "pass") matches secret pattern
+4d4264bfa7ee1461  1  G706  LOW  api/internal/api/flash_handlers.go  # Log injection via taint analysis
+e9862262cbedbfc8  1  G706  LOW  api/internal/api/flash_handlers.go  # Log injection via taint analysis
+237046facffc54f5  1  G304  MEDIUM  api/internal/api/mesh_handlers.go  # Potential file inclusion via variable
+55cd015f6d6f99cb  1  G706  LOW  api/internal/api/node_handlers.go  # Log injection via taint analysis
+6a71892595398f90  1  G706  LOW  api/internal/api/node_handlers.go  # Log injection via taint analysis
+94da0d341c0533f6  1  G706  LOW  api/internal/api/obs_ingest.go  # Log injection via taint analysis
+f6c62c41f04d6b92  1  G706  LOW  api/internal/api/obs_ingest.go  # Log injection via taint analysis
+76100573b55fb51a  1  G104  LOW  api/internal/api/updates_handlers.go  # Errors unhandled
+fdb649123a921a94  1  G104  LOW  api/internal/api/updates_handlers.go  # Errors unhandled
+6b8d600e4640502c  1  G301  MEDIUM  api/internal/api/updates_handlers.go  # Expect directory permissions to be 0750 or less
+c2d0fc456b2146b5  1  G104  LOW  api/internal/api/ws.go  # Errors unhandled
+0b14fa8190f398fc  1  G104  LOW  api/internal/apps/store.go  # Errors unhandled
+11b8a492035549ec  1  G104  LOW  api/internal/apps/store.go  # Errors unhandled
+bcf26182e6727218  1  G104  LOW  api/internal/apps/store.go  # Errors unhandled
+ed670640c701d135  1  G202  MEDIUM  api/internal/apps/store.go  # SQL string concatenation
+1edf8a6ed2d3b6a4  1  G124  MEDIUM  api/internal/auth/service.go  # http.Cookie missing or has insecure Secure, HttpOnly, or SameSite attribute
+37ab0a08ab177253  1  G124  MEDIUM  api/internal/auth/service.go  # http.Cookie missing or has insecure Secure, HttpOnly, or SameSite attribute
+537891efe548ff68  1  G124  MEDIUM  api/internal/auth/service.go  # http.Cookie missing or has insecure Secure, HttpOnly, or SameSite attribute
+f3ddb452404095c4  1  G124  MEDIUM  api/internal/auth/service.go  # http.Cookie missing or has insecure Secure, HttpOnly, or SameSite attribute
+5aa4414f1c25bfc2  1  G104  LOW  api/internal/auth/store.go  # Errors unhandled
+7244cf3256b9e7cb  1  G104  LOW  api/internal/auth/store.go  # Errors unhandled
+a8e5c995e6df1a12  1  G104  LOW  api/internal/auth/store.go  # Errors unhandled
+100cd4affaeea756  1  G301  MEDIUM  api/internal/busauth/issuer.go  # Expect directory permissions to be 0750 or less
+ca60d149fb449f71  1  G304  MEDIUM  api/internal/busauth/issuer.go  # Potential file inclusion via variable
+0a9d8f39e496c5a0  1  G301  MEDIUM  api/internal/ids/writer.go  # Expect directory permissions to be 0750 or less
+c0f2ff953c67db77  1  G302  MEDIUM  api/internal/ids/writer.go  # Expect file permissions to be 0600 or less
+7aa9fc5095b90fad  1  G201  MEDIUM  api/internal/jobs/store.go  # SQL string formatting
+8467d4dc470ac0e9  1  G301  MEDIUM  api/internal/mesh/appleaf.go  # Expect directory permissions to be 0750 or less
+928468c52c41fb4d  1  G301  MEDIUM  api/internal/mesh/headscale.go  # Expect directory permissions to be 0750 or less
+5b8af4d3be076dc1  1  G401  MEDIUM  api/internal/mesh/ios_profile.go  # Use of weak cryptographic primitive
+b919a204b883101b  1  G505  MEDIUM  api/internal/mesh/ios_profile.go  # Blocklisted import crypto/sha1: weak cryptographic primitive
+47143aec039f8d47  1  G117  MEDIUM  api/internal/mesh/jobs.go  # Marshaled struct field "AuthKey" (JSON key "authKey") matches secret pattern
+56ddcc95348a8286  1  G204  MEDIUM  api/internal/mesh/supervisor_docker.go  # Subprocess launched with variable
+e3dbd778c6752867  1  G301  MEDIUM  api/internal/mesh/supervisor_docker.go  # Expect directory permissions to be 0750 or less
+044e5025bd4338f3  1  G306  MEDIUM  api/internal/mesh/supervisor_docker.go  # Expect WriteFile permissions to be 0600 or less
+1bbc1fd57f552f45  1  G306  MEDIUM  api/internal/mesh/supervisor_docker.go  # Expect WriteFile permissions to be 0600 or less
+d44cea368515e6d5  1  G306  MEDIUM  api/internal/mesh/supervisor_docker.go  # Expect WriteFile permissions to be 0600 or less
+590f498f470a40ff  1  G301  MEDIUM  api/internal/mesh/tls.go  # Expect directory permissions to be 0750 or less
+b1396207b9d5c235  1  G301  MEDIUM  api/internal/mesh/tls.go  # Expect directory permissions to be 0750 or less
+6f1f5e0aa9365b49  1  G304  MEDIUM  api/internal/mesh/tls.go  # Potential file inclusion via variable
+f656b76378b4a7a8  1  G304  MEDIUM  api/internal/mesh/tls.go  # Potential file inclusion via variable
+877f172a6b03dee3  1  G202  MEDIUM  api/internal/metrics/store.go  # SQL string concatenation
+486e3761e2ff9090  1  G304  MEDIUM  api/internal/nameserver/upstream.go  # Potential file inclusion via variable
+e5acec3f668e142f  1  G304  MEDIUM  api/internal/nameserver/upstream.go  # Potential file inclusion via variable
+49b5b7675ffb1f32  1  G204  MEDIUM  api/internal/obs/supervisor.go  # Subprocess launched with variable
+95194118f6e58da8  1  G301  MEDIUM  api/internal/obs/supervisor.go  # Expect directory permissions to be 0750 or less
+91ddab719b4f6168  1  G302  MEDIUM  api/internal/obs/supervisor.go  # Expect file permissions to be 0600 or less
+0d90883136798b91  1  G304  MEDIUM  api/internal/obs/supervisor.go  # Potential file inclusion via variable
+1346bbf257c6aa13  1  G306  MEDIUM  api/internal/obs/supervisor.go  # Expect WriteFile permissions to be 0600 or less
+55c392efa15bb058  2  G306  MEDIUM  api/internal/obs/supervisor.go  # Expect WriteFile permissions to be 0600 or less
+6e5ae42f170d7f0e  1  G306  MEDIUM  api/internal/obs/supervisor.go  # Expect WriteFile permissions to be 0600 or less
+abceb4699afb906a  1  G306  MEDIUM  api/internal/obs/supervisor.go  # Expect WriteFile permissions to be 0600 or less
+87524126f1450a7b  1  G104  LOW  api/internal/releases/github.go  # Errors unhandled
+35f541c302fa8524  1  G706  LOW  api/internal/sdnotify/sdnotify.go  # Log injection via taint analysis
+cbdf17570611c9f0  1  G304  MEDIUM  api/internal/setup/operatorkeys.go  # Potential file inclusion via variable
+705f6629895dbb8e  1  G304  MEDIUM  api/internal/updater/verifier.go  # Potential file inclusion via variable
+71466a48ebcd1a7b  1  G304  MEDIUM  api/internal/updater/verifier.go  # Potential file inclusion via variable

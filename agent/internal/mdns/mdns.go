@@ -157,14 +157,16 @@ func buildQuery(name string) ([]byte, error) {
 		if len(label) == 0 || len(label) > 63 {
 			return nil, fmt.Errorf("mdns: bad label in %q", name)
 		}
-		b = append(b, byte(len(label)))
+		b = append(b, byte(len(label))) //#nosec G115 -- the guard above rejects len 0 or >63, so this always fits a byte
+
 		b = append(b, label...)
 	}
 	b = append(b, 0) // root label
 	// QTYPE=A, QCLASS=IN|QU.
 	b = append(b, byte(typeA>>8), byte(typeA))
 	q := uint16(classIN | quBit)
-	b = append(b, byte(q>>8), byte(q))
+	b = append(b, byte(q>>8), byte(q)) //#nosec G115 -- deliberate big-endian split of a uint16 into two wire bytes; truncation is the intent
+
 	return b, nil
 }
 

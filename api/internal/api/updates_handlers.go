@@ -192,7 +192,11 @@ func (s *Server) handleGetBundle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "bundle not found")
 		return
 	}
-	f, err := os.Open(b.StoragePath)
+	// StoragePath is server-constructed at ingest as filepath.Join(bundleDir,
+	// hex(sha256(bytes))) — a 64-char hex string that cannot hold a separator
+	// or "..". The request's sha only selects the row; it never builds the path.
+	f, err := os.Open(b.StoragePath) //#nosec G703 -- path is filepath.Join(bundleDir, server-computed hex digest); see ingest above
+
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "open bundle: "+err.Error())
 		return
@@ -223,7 +227,8 @@ func (s *Server) handleDeleteBundle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := os.Remove(b.StoragePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(b.StoragePath); err != nil && !errors.Is(err, os.ErrNotExist) { //#nosec G703 -- same server-constructed digest path as the download handler above
+
 		// Bundle row already gone — log but don't fail.
 	}
 	w.WriteHeader(http.StatusNoContent)
