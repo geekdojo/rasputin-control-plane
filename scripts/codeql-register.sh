@@ -50,6 +50,37 @@
 #   unreviewed     nobody has looked yet. Never a resting state, and always
 #                  fails the gate regardless of severity.
 #
+# When suppression is legitimate
+# ------------------------------
+# testing-strategy.md §4 says suppression is anti-posture. That is not a blanket
+# ban and this gate does not overturn it — it is a statement about WHY something
+# is being silenced. Read it as the condition it is:
+#
+#   Suppressing a finding to CLEAR A GATE, or to defer the work until later, is
+#   anti-posture. The finding is still true; only the signal has been removed.
+#
+#   Suppressing a finding is legitimate once it has been reviewed, VALIDATED,
+#   and found to be both (1) mitigated by another control, and (2) undesirable
+#   to fix. Both halves are required. "Mitigated" without "undesirable to fix"
+#   is just an unfixed defect with an excuse; "undesirable to fix" without a
+#   mitigation is an accepted risk nobody has named.
+#
+# So a `deliberate` row must NAME the control that makes the pattern safe, and
+# its reasoning must say why fixing it is the wrong trade — not merely that
+# fixing it is inconvenient. bmc/probe.go is the worked example: verification
+# really is off, the mitigations are that the connection carries no credentials
+# and confers no trust, and fixing it is undesirable because a chain check
+# CANNOT pass against a cert minted at the epoch, so the "fix" would be to
+# delete the discovery step operators need.
+#
+# §4's two specific objections are ANSWERED here rather than waived:
+#
+#   * "silencing makes the most security-relevant code unqueryable" — every
+#     accepted finding stays in this register, greppable, with its reasoning;
+#   * "leaves nothing to re-validate the justification when the code beneath it
+#     changes" — that is exactly what the fingerprint below does. Edit the
+#     flagged line and the verdict resets to unreviewed.
+#
 # Accepted findings are also annotated AT THE SITE in the source, saying why the
 # code is secure (Bryce, 2026-08-16). The register is what the gate reads; the
 # comment is what the next person reading that function sees. Neither replaces
