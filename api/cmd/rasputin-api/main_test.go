@@ -15,6 +15,33 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 )
 
+// Secure is derived from whether this process terminates TLS, because that is
+// the condition under which the cookie can only travel over TLS. The bug this
+// replaces was an opt-in env var that defaulted OFF and was set nowhere, so
+// the appliance — which serves https on :443 — shipped session cookies without
+// Secure. The unset-override row is the one that regressed.
+func TestSecureCookies(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name      string
+		httpsAddr string
+		override  *bool
+		want      bool
+	}{
+		{"appliance: https listener, no override", ":443", nil, true},
+		{"dev: no https listener, no override", "", nil, false},
+		{"override forces on behind a TLS-terminating proxy", "", &yes, true},
+		{"override forces off despite an https listener", ":443", &no, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := secureCookies(tc.httpsAddr, tc.override); got != tc.want {
+				t.Errorf("secureCookies(%q, %v) = %v, want %v",
+					tc.httpsAddr, tc.override, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAPILeafSpec_SANs(t *testing.T) {
 	spec := apiLeafSpec("nodex", net.ParseIP("192.168.7.2"))
 

@@ -389,7 +389,7 @@ func main() {
 		RPOrigins: splitCSV(envOr("RASPUTIN_RP_ORIGINS", applianceOr(
 			func(h string) string { return "https://" + h },
 			"http://localhost:3000,http://localhost:8080"))),
-		SecureCookies: os.Getenv("RASPUTIN_SECURE_COOKIES") == "1",
+		SecureCookies: secureCookies(httpsAddr, envBoolPtr("RASPUTIN_SECURE_COOKIES")),
 	}
 	// Say what this node believes its identity IS, on startup, verbatim.
 	//
@@ -1313,6 +1313,38 @@ func randomSecret() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// secureCookies decides whether the session and pending-auth cookies carry
+// the Secure attribute.
+//
+// It is DERIVED from whether this process terminates TLS, rather than read
+// from a standalone env var, because `httpsAddr != ""` is the exact condition
+// under which the cookie actually travels over TLS: it is the same value that
+// starts the HTTPS listener AND demotes the plain-HTTP listener to the
+// bootstrap surface, where everything but the trust page and healthz 302s to
+// https. So whenever this returns true, an authenticated request cannot be
+// served over plaintext, and whenever it returns false there is no https
+// listener for a Secure cookie to be sent to.
+//
+// It previously read `os.Getenv("RASPUTIN_SECURE_COOKIES") == "1"` — opt-in,
+// defaulting to OFF. That variable was set nowhere in rasputin-control-plane,
+// rasputin-os or rasputin-openwrt-firewall, so the 7-day passkey session
+// cookie shipped without Secure on every appliance, even though the appliance
+// serves https (the OS image's unit sets RASPUTIN_HTTPS_ADDR=:443). The
+// default was the bench value and production had to remember to opt in; a
+// derived value cannot be forgotten the way an env var can.
+//
+// The override remains for deployments this process cannot observe — TLS
+// terminated by a reverse proxy in front of a plain-HTTP api (force true), or
+// an https listener reached over a path where Secure would strand the session
+// (force false). Unset means derived, which is what every current deployment
+// wants.
+func secureCookies(httpsAddr string, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	return httpsAddr != ""
 }
 
 // envBoolPtr returns nil when the env var is unset (so the config's own

@@ -234,6 +234,44 @@ func TestCreateSession_PersistsAndReturnsToken(t *testing.T) {
 // Cookie helpers
 // ============================================================================
 
+// Every cookie this service emits must honour SecureCookies — all four, not
+// just the session one. The pending cookie carries the in-flight WebAuthn
+// ceremony, so it leaking over plaintext is not meaningfully better.
+//
+// Guards the regression in geekdojo/geekdojo-brain#143: SecureCookies came
+// from an opt-in env var that defaulted off and was set in no deployment, so
+// appliances served the 7-day passkey session cookie without Secure.
+func TestCookiesHonourSecureFlag(t *testing.T) {
+	for _, secure := range []bool{true, false} {
+		t.Run(map[bool]string{true: "secure", false: "insecure"}[secure], func(t *testing.T) {
+			f := newAuthFixture(t)
+			f.svc.cfg.SecureCookies = secure
+
+			emit := map[string]func(w *httptest.ResponseRecorder){
+				"setSessionCookie":   func(w *httptest.ResponseRecorder) { f.svc.setSessionCookie(w, "tok", time.Now().Add(time.Hour)) },
+				"clearSessionCookie": func(w *httptest.ResponseRecorder) { f.svc.clearSessionCookie(w) },
+				"setPendingCookie":   func(w *httptest.ResponseRecorder) { f.svc.setPendingCookie(w, "tok") },
+				"clearPendingCookie": func(w *httptest.ResponseRecorder) { f.svc.clearPendingCookie(w) },
+			}
+			for name, fn := range emit {
+				w := httptest.NewRecorder()
+				fn(w)
+				got := w.Result().Cookies()
+				if len(got) != 1 {
+					t.Fatalf("%s: want 1 cookie, got %d", name, len(got))
+				}
+				if got[0].Secure != secure {
+					t.Errorf("%s: Secure = %v, want %v", name, got[0].Secure, secure)
+				}
+				// HttpOnly is unconditional and must not regress alongside.
+				if !got[0].HttpOnly {
+					t.Errorf("%s: cookie should always be HttpOnly", name)
+				}
+			}
+		})
+	}
+}
+
 func TestSetClearSessionCookie(t *testing.T) {
 	f := newAuthFixture(t)
 	w := httptest.NewRecorder()
