@@ -90,6 +90,25 @@ func Compile(intents []*Intent) (state map[string]any, hash string, err error) {
 
 // HashObserved produces a hash over a Headscale-derived state shaped the
 // same way Compile produces. Used by reconcile.
+//
+// CodeQL flags this as go/weak-sensitive-data-hashing (HIGH), having followed
+// the "preauth_keys" key into it. False positive on two independent grounds,
+// either of which is sufficient:
+//
+//  1. There is no secret here to hash. The preauth entries Compile builds carry
+//     metadata only — name, user, reusable, ephemeral, expiresIn, tags. The key
+//     material itself never enters this map. CodeQL tainted it on the
+//     identifier's NAME, not on a value.
+//  2. This is not password hashing. The hash is a change-detection fingerprint:
+//     reconcile compares desired against observed to decide whether anything
+//     drifted. Nothing is ever verified against it, so the property a slow KDF
+//     protects — resistance to offline guessing of a secret — is not a property
+//     this hash is asked to have.
+//
+// TRIP-WIRE: ground 1 holds only while the compiled state stays metadata-only.
+// If a secret is ever added to the map Compile builds — an actual pre-auth key,
+// a token, an API key — re-open .github/codeql-register.tsv, because the hash
+// would then cover material worth guessing at.
 func HashObserved(state map[string]any) (string, error) {
 	canon, err := json.Marshal(state)
 	if err != nil {

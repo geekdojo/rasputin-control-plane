@@ -143,6 +143,21 @@ func NewTuringPiBackend(opts TuringPiOptions) (*TuringPiBackend, error) {
 		// Go's own verification is disabled so the expired-at-epoch cert
 		// gets past it; VerifyPeerCertificate then applies the stricter
 		// exact-match check.
+		//
+		// CodeQL flags the next line as go/disabled-certificate-check (HIGH)
+		// and it is a false positive: certificate pinning is STRICTER than the
+		// CA trust being skipped. CA trust accepts any cert a trusted issuer
+		// signed; pinnedCertVerifier accepts exactly one SHA-256 fingerprint
+		// and nothing else. Skipping is not optional either — the board mints
+		// a self-signed cert at the epoch, so it is permanently expired and no
+		// chain check can ever pass.
+		//
+		// TRIP-WIRE: the safety of this line lives on the line AFTER it. If
+		// the VerifyPeerCertificate assignment is removed, moved behind a
+		// condition, or replaced with a verifier that does not compare the
+		// full fingerprint, this becomes "accept any certificate" and the
+		// verdict in .github/codeql-register.tsv is void. The register's
+		// fingerprint covers only the flagged line and will NOT catch that.
 		tlsCfg.InsecureSkipVerify = true
 		tlsCfg.VerifyPeerCertificate = pinnedCertVerifier(want)
 	case opts.InsecureSkipVerify:

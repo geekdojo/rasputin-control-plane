@@ -81,6 +81,28 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 	// disabled: the board's certificate is self-signed and minted at the
 	// epoch, so every check would fail and we would learn nothing. The
 	// operator does the trusting, once, on what we show them.
+	//
+	// CodeQL flags this as go/disabled-certificate-check (HIGH). Accepted as
+	// deliberate rather than a false positive — verification really is off and
+	// this really is trust-on-first-use, with TOFU's usual weakness that an
+	// attacker present at probe time gets their fingerprint pinned instead of
+	// the board's. What makes it safe to ship is what this connection does
+	// NOT do:
+	//
+	//   * it sends no credentials — the request is an unauthenticated
+	//     GET /api/bmc?opt=get&type=about, so a hostile endpoint learns
+	//     nothing and captures nothing;
+	//   * it grants no trust — VerifyPeerCertificate below only RECORDS the
+	//     fingerprint and subject and always returns nil. Nothing downstream
+	//     acts on this connection;
+	//   * the fingerprint it captures is shown to the operator, who confirms
+	//     it against the board before it ever becomes the pin that
+	//     NewTuringPiBackend enforces.
+	//
+	// TRIP-WIRE: this verdict rests on the connection carrying no secrets and
+	// conferring no trust. If this probe ever sends credentials, or its result
+	// is used to configure anything without the operator confirming the
+	// digest, re-open .github/codeql-register.tsv — it becomes a real finding.
 	var (
 		fingerprint string
 		subject     string
