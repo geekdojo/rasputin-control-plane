@@ -285,6 +285,26 @@ def open_issues(rows):
     return issues
 
 
+# Is this SARIF a whole-repo verdict, or only a verdict on what changed?
+#
+# github/codeql-action runs DIFF-INFORMED analysis on pull_request events — the
+# log says "Computing PR diff ranges" and it passes a pr-diff-range extension
+# pack to run-queries — so alerts are computed only for lines the PR touched.
+# Observed on rasputin-control-plane#144: the same tree that produces 5 Go and
+# 1 TS finding on a full scan produced 2 and 0 on the PR, because comments were
+# added ABOVE the flagged lines and the flagged lines themselves were unchanged.
+#
+# That is good behaviour for fast feedback and bad behaviour to be silent about,
+# because a green check on a partial scan reads exactly like a green check on a
+# clean repo. So it is stated on every run, and it disables the destructive half
+# of --refresh above.
+#
+# ALLOW_DROP=1 overrides the refresh guard for the case where a full scan
+# genuinely did resolve a lot of findings at once.
+diff_limited = os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+allow_drop = bool(os.environ.get("ALLOW_DROP"))
+
+
 def main():
     if MODE == "--report":
         rows = read_register()
@@ -297,6 +317,29 @@ def main():
     rows = read_register()
 
     if MODE == "--refresh":
+        # A pull_request SARIF is DIFF-LIMITED (see diff_limited below): it
+        # contains only findings on lines the PR touched. Refreshing from one
+        # would drop every row outside the diff and report them as "resolved",
+        # silently deleting the register. Refuse rather than warn — the whole
+        # value of this file is that it cannot quietly lose a verdict.
+        dropped_rows = set(rows) - set(found)
+        if dropped_rows and not allow_drop and \
+                (diff_limited or len(dropped_rows) > len(found)):
+            print(f"::error::refusing to refresh: this would remove "
+                  f"{len(dropped_rows)} row(s) that the scan did not report.")
+            if diff_limited:
+                print("::error::the SARIF is diff-limited (a pull_request "
+                      "analysis covers only changed lines), so absence from it "
+                      "does NOT mean a finding is resolved. Refresh from a "
+                      "full scan — a push/main or workflow_dispatch run.")
+            else:
+                print("::error::more rows would be removed than the scan "
+                      "reported findings, which usually means a partial or "
+                      "failed analysis rather than a genuine cleanup.")
+            print("::error::set ALLOW_DROP=1 to override once you have "
+                  "confirmed the scan really is complete.")
+            return 1
+
         merged = {}
         for fpr, finding in found.items():
             existing = rows.get(fpr)
@@ -382,6 +425,16 @@ def main():
     counts = collections.Counter(f["severity"] for f in found.values())
     print(f"this scan: {len(found)} findings · "
           + " · ".join(f"{k} {counts[k]}" for k in sorted(counts)))
+    if diff_limited:
+        print("scan COVERAGE: diff-limited — a pull_request analysis computes "
+              "alerts only for lines this PR changed.")
+        print("               Passing here means 'nothing new in what you "
+              "changed', NOT 'the repo is clean'.")
+        print("               The whole-repo verdict is the run on main and "
+              "the one release.yml gates on.")
+    else:
+        print("scan COVERAGE: full — every analysed line, not just changed "
+              "ones. This is the verdict a release is gated on.")
     blocking_real = [f"{f['rule']} at {f['path']}:{f['line']}"
                      for fpr, f in sorted(found.items())
                      if f["severity"] in BLOCKING

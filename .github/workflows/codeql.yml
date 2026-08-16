@@ -20,6 +20,15 @@ name: codeql
 #   NO high or critical finding that is real — or that nobody has reviewed —
 #   may exist on a release. Such code is never built into an image.
 #
+# ⚠ PR runs and release runs do not have the same COVERAGE, and the gate says
+# so on every run. github/codeql-action performs DIFF-INFORMED analysis on
+# pull_request events — it computes alerts only for lines the PR changed. So a
+# green check here means "nothing new in what you changed", not "the repo is
+# clean". The whole-repo verdict is the run on main and the one release.yml
+# gates on, where no diff range is applied. This is the right trade for PR
+# feedback and the wrong thing to be silent about, which is why the gate prints
+# its coverage rather than letting a partial pass read like a clean one.
+#
 # That is stricter than the gosec gate, which tolerates known `real` findings,
 # and it is deliberate: the two sit at different boundaries. gosec's asks "is
 # anything new or unseen"; this one also asks "is this fit to ship". It is why
