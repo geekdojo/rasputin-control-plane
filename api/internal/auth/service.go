@@ -317,11 +317,8 @@ func (s *Service) RequireSession(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxUser, user)
 		ctx = context.WithValue(ctx, ctxSession, sess)
 		next.ServeHTTP(w, r.WithContext(ctx))
-		// touch session async; best-effort. r.Context() is already canceled by
-		// the time this runs (ServeHTTP returned above), so the detached
-		// Background + explicit 2s timeout is the correct context here.
-		go func(token string) { //#nosec G118 -- runs after the handler returns; r.Context() would already be canceled
-
+		// touch session async; best-effort
+		go func(token string) {
 			bg, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			_ = s.store.TouchSession(bg, token, time.Now().UTC())

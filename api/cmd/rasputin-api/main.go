@@ -1423,8 +1423,7 @@ func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, k
 			return meshWiring{}, err
 		}
 		cfg.TLSConfig = tlsCfg
-		if pem, rerr := os.ReadFile(caFile); rerr == nil { //#nosec G703 -- RASPUTIN_HEADSCALE_CA_FILE is set by the operator on our own process; not request-derived
-
+		if pem, rerr := os.ReadFile(caFile); rerr == nil {
 			caToShip = pem // nodes trust the same custom CA before tailscale up
 		}
 	}
@@ -1535,7 +1534,7 @@ func dockerAvailable() bool {
 func obsDockerBin() string { return envOr("RASPUTIN_OBS_DOCKER_BIN", "docker") }
 
 func loadCATLSConfig(caFile string) (*tls.Config, error) {
-	pem, err := os.ReadFile(caFile) //#nosec G703 -- RASPUTIN_HEADSCALE_CA_FILE is set by the operator on our own process; not request-derived
+	pem, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, errors.New("read RASPUTIN_HEADSCALE_CA_FILE: " + err.Error())
 	}

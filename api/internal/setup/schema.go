@@ -52,6 +52,5 @@ const (
 	// mostly-public factory sequence: the board's BMC is LAN-reachable
 	// and its account also has SSH, so leaking it into the audit trail
 	// would be worth more to an attacker than the unlock ever was.
-	KeyBMCTuringPiPass = "bmc.turingpi_pass" //#nosec G101 -- settings-table key name, not the credential itself; the value lives in the DB
-
+	KeyBMCTuringPiPass = "bmc.turingpi_pass"
 )

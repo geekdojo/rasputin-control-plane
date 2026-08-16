@@ -1,7 +1,6 @@
 package mesh
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -711,7 +710,7 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 // ----- helpers ------------------------------------------------------------
 
 func mockNodesByHostname(mc *MockClient, hostname string) []HSNode {
-	nodes, _ := mc.ListNodes(context.TODO())
+	nodes, _ := mc.ListNodes(nil)
 	var out []HSNode
 	for _, n := range nodes {
 		if n.Hostname == hostname {

@@ -217,10 +217,7 @@ func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, 
 	r.emit(ctx, j.ID, proto.JobCreated, j)
 
 	r.wg.Add(1)
-	// A job deliberately outlives the request that created it — run() takes
-	// context.Background() and shutdown is sequenced through r.wg, not ctx.
-	go r.run(j, wf) //#nosec G118 -- jobs outlive the creating request by design; Wait() is the shutdown barrier
-
+	go r.run(j, wf)
 	return j, nil
 }
 
