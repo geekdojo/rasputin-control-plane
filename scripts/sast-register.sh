@@ -43,14 +43,41 @@
 # The `line` column is for human navigation only and is refreshed on every run;
 # it is not part of the identity.
 #
+# The gate
+# --------
+# --gate is what CI runs. It fails on:
+#
+#   * any staticcheck finding — that gate is CLEAN, with no register and no
+#     baseline. It measured 2 findings across ~90k lines, so clean is cheap
+#     to hold;
+#   * any gosec finding whose fingerprint is not in the register — something
+#     new arrived and nobody has looked at it;
+#   * any register row still marked `unreviewed` — the state exists to be
+#     reported, never to be rested in;
+#   * any `real` or `blocked` row with no issue cited — an untracked defect
+#     is one that will be forgotten, and a `blocked` row with no deciding
+#     issue can never be revisited when the fix becomes available.
+#
+# It does NOT fail merely because `real` findings exist. Blocking every merge
+# until the last defect is fixed is the same over-strictness that produced the
+# unread baseline; the contract is that nothing is NEW and nothing is UNSEEN,
+# not that the debt is zero.
+#
+# And it never prints a bare "OK". Every run ends with the posture line and
+# the issues tracking open real findings, so a green check reads as "nothing
+# new, and here is what we still owe" rather than "the code is clean". The
+# reverted attempt printed "OK: no gosec findings outside the baseline", which
+# is precisely the sentence that let 148 unread findings look settled.
+#
 # Usage:
+#   scripts/sast-register.sh --gate      # CI gate (staticcheck + gosec)
 #   scripts/sast-register.sh --refresh   # rescan, preserve verdicts, add new
 #                                        # rows as unreviewed, drop resolved
 #   scripts/sast-register.sh --report    # posture summary (counts by verdict)
-#   scripts/sast-register.sh --install   # install the pinned gosec
+#   scripts/sast-register.sh --install   # install the pinned tools
 #
-# Requires: go, python3, gosec. Run --install for the last; it lands in
-# "$(go env GOPATH)/bin", which must be on PATH.
+# Requires: go, python3, gosec, staticcheck. Run --install for the tools; they
+# land in "$(go env GOPATH)/bin", which must be on PATH.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -59,32 +86,57 @@ cd "$(dirname "$0")/.."
 # drag in a newer toolchain requirement, either of which moves the register
 # under us. Bumping this is a deliberate act with a register diff to review.
 GOSEC_VERSION=v2.28.0
+# Matches the version quality-sweep.yml preinstalls, so the advisory sweep and
+# this gate can never disagree about what staticcheck considers a finding.
+STATICCHECK_VERSION=2025.1.1
 
 MODULES=(api agent proto)
 REGISTER=.github/sast-register.tsv
 
 if [ "${1:-}" = "--install" ]; then
   go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+  go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
   exit 0
 fi
 
-for tool in gosec python3; do
+MODE="${1:---report}"
+
+need=(gosec python3)
+[ "$MODE" = "--gate" ] && need+=(staticcheck)
+for tool in "${need[@]}"; do
   command -v "$tool" >/dev/null 2>&1 || {
-    echo "::error::$tool not found on PATH. For gosec run 'scripts/sast-register.sh --install'" \
+    echo "::error::$tool not found on PATH. Run 'scripts/sast-register.sh --install'" \
          "and put \"\$(go env GOPATH)/bin\" on your PATH; python3 ships with macOS and ubuntu-latest."
     exit 1
   }
 done
 
+# staticcheck first: it is the cheap clean gate, and a failure here is always
+# unambiguous, so there is no reason to make someone read the gosec posture
+# before finding out about it.
+if [ "$MODE" = "--gate" ]; then
+  sc_out="$(mktemp)"
+  trap 'rm -f "$sc_out"' EXIT
+  for m in "${MODULES[@]}"; do
+    (cd "$m" && staticcheck ./...) >>"$sc_out" 2>&1 || true
+  done
+  if [ -s "$sc_out" ]; then
+    echo "::error::staticcheck findings — this gate is clean, there is no baseline:"
+    cat "$sc_out"
+    exit 1
+  fi
+  echo "staticcheck: clean across ${MODULES[*]}"
+fi
+
 scan="$(mktemp)"
-trap 'rm -f "$scan"' EXIT
+trap 'rm -f "${sc_out:-}" "$scan"' EXIT
 for m in "${MODULES[@]}"; do
   # -no-fail: a non-zero exit just means findings exist, which is the normal
   # case here. The register, not the exit code, is the signal.
   (cd "$m" && gosec -fmt=json -quiet -no-fail ./... 2>/dev/null) >>"$scan" || true
 done
 
-MODE="${1:---report}" REGISTER="$REGISTER" REPO_ROOT="$PWD" python3 - "$scan" <<'PY'
+MODE="$MODE" REGISTER="$REGISTER" REPO_ROOT="$PWD" python3 - "$scan" <<'PY'
 import hashlib, json, os, re, sys
 from collections import Counter
 
@@ -163,12 +215,62 @@ if mode == "--refresh":
           f"{f', {len(resolved)} resolved row(s) dropped' if resolved else ''}")
 
 counts = Counter(r["verdict"] for r in merged)
-unreviewed = counts["unreviewed"]
+unreviewed = [r for r in merged if r["verdict"] == "unreviewed"]
+
+# The posture line, always. Never a bare "OK" — a green check has to say what
+# is still owed, or it reads as "the code is clean".
 print(f"{len(merged)} findings · " + " · ".join(f"{v} {counts[v]}" for v in sorted(counts)))
+tracked = sorted({r["issue"] for r in merged
+                  if r["verdict"] in ("real", "blocked") and r["issue"]})
+if tracked:
+    print("open, tracked: " + ", ".join(tracked))
+if resolved and mode != "--refresh":
+    print(f"{len(resolved)} register row(s) no longer detected — "
+          f"prune with: scripts/sast-register.sh --refresh")
+
+if mode != "--gate":
+    for r in unreviewed:
+        print(f"  UNREVIEWED {r['fingerprint']}  {r['rule']}  {r['severity']:<6} "
+              f"{r['path']}:{r['line']}")
+    sys.exit(0)
+
+# ── gate ────────────────────────────────────────────────────────────────────
+# `new` is computed against the register on disk, so it means "arrived without
+# anyone recording a verdict" — which is the same failure as `unreviewed`, just
+# caught one step earlier.
+new = [r for r in merged if r["fingerprint"] not in existing]
+untracked = [r for r in merged
+             if r["verdict"] in ("real", "blocked") and not r["issue"]]
+
+fail = False
+if new:
+    fail = True
+    print(f"\n::error::{len(new)} gosec finding(s) not in {reg_path}:")
+    for r in new:
+        print(f"  {r['fingerprint']}  {r['rule']}  {r['severity']:<6} {r['path']}:{r['line']}")
+    print("Fix it, or record a verdict: run `scripts/sast-register.sh --refresh`,")
+    print("then set verdict + reasoning on the new row(s). A verdict of")
+    print("'real' or 'blocked' must cite an issue. Do NOT record a verdict you")
+    print("have not derived — that is exactly how the reverted baseline shipped")
+    print("148 findings nobody had read.")
+
+# Reachable when someone refreshes the register and commits it without filling
+# in the verdicts — the register's own failure mode, so the gate names it.
 if unreviewed:
-    print(f"\n{unreviewed} UNREVIEWED — posture unknown for these. "
-          f"Triage: geekdojo/geekdojo-brain#141")
-    for r in merged:
-        if r["verdict"] == "unreviewed":
-            print(f"  {r['fingerprint']}  {r['rule']}  {r['severity']:<6} {r['path']}:{r['line']}")
+    fail = True
+    print(f"\n::error::{len(unreviewed)} row(s) in {reg_path} are still 'unreviewed':")
+    for r in unreviewed:
+        print(f"  {r['fingerprint']}  {r['rule']}  {r['severity']:<6} {r['path']}:{r['line']}")
+    print("Every finding carries a recorded verdict and its reasoning. Triage")
+    print("these before merging; 'unreviewed' is a state to report, not to rest in.")
+
+if untracked:
+    fail = True
+    print(f"\n::error::{len(untracked)} row(s) are 'real' or 'blocked' with no issue cited:")
+    for r in untracked:
+        print(f"  {r['fingerprint']}  {r['rule']}  {r['verdict']:<8} {r['path']}:{r['line']}")
+    print("A real defect with no issue gets forgotten, and a blocked row with no")
+    print("deciding issue can never be revisited when the fix becomes available.")
+
+sys.exit(1 if fail else 0)
 PY
