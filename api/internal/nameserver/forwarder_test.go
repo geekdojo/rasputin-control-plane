@@ -182,10 +182,7 @@ func TestTokenBucket(t *testing.T) {
 	now := time.Unix(1000, 0)
 	b := &tokenBucket{tokens: 2, max: 2, rate: 1, last: now, now: func() time.Time { return now }}
 
-	// Both calls must actually run — `!b.allow() || !b.allow()` short-circuits
-	// past the second one, so it never proved the burst it claimed to.
-	first, second := b.allow(), b.allow()
-	if !first || !second {
+	if !b.allow() || !b.allow() {
 		t.Fatal("burst of 2 should both pass")
 	}
 	if b.allow() {

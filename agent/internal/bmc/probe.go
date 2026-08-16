@@ -85,14 +85,9 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 		fingerprint string
 		subject     string
 	)
-	// ClientSessionCache is left nil here and on the http.Transport below, which
-	// per crypto/tls disables client-side session resumption entirely — so this
-	// VerifyPeerCertificate hook runs on every handshake and cannot be skipped
-	// by a resumed one. (That is what gosec's G123 warns about.)
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true, //#nosec G402 -- TOFU capture; verification is deliberately off and the operator confirms the digest
+		InsecureSkipVerify: true, //nolint:gosec // TOFU capture; the operator confirms the digest
 		MinVersion:         tls.VersionTLS12,
-		//#nosec G123 -- resumption is disabled (nil ClientSessionCache), so this hook runs on every handshake
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) > 0 {
 				fingerprint = displayFingerprint(certFingerprint(rawCerts[0]))
