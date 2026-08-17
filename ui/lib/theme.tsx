@@ -8,11 +8,11 @@
 
 import {
   createContext,
+  type ReactNode,
   useCallback,
   useContext,
-  useEffect,
-  useState,
-  type ReactNode,
+  useMemo,
+  useSyncExternalStore,
 } from 'react';
 import type { ThemeName } from '../components/ui-theme';
 
@@ -66,28 +66,45 @@ const ThemeContext = createContext<ThemeContextValue>({
   setTheme: () => {},
 });
 
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  // Start from DEFAULT_THEME so server and first client render agree; the
-  // effect below re-syncs to whatever the bootstrap script applied. The
-  // visuals are already correct pre-hydration (the script set data-theme),
-  // so this only corrects React state used by the Settings picker + HUD.
-  const [theme, setThemeState] = useState<ThemeName>(DEFAULT_THEME);
+// The data-theme attribute on <html> is the real source of truth: THEME_BOOTSTRAP
+// below sets it in <head> before first paint, so the page is already correct
+// visually before React runs. Mirroring it into useState meant a second copy
+// that had to be re-synced from an effect — a synchronous setState on effect
+// entry (react-hooks/set-state-in-effect), and a duplicate that could disagree.
+//
+// useSyncExternalStore reads the attribute directly with an explicit server
+// snapshot, so there is one source of truth and no sync effect at all.
+const themeListeners = new Set<() => void>();
 
-  useEffect(() => {
-    setThemeState(currentTheme());
-  }, []);
+function subscribeTheme(onChange: () => void): () => void {
+  themeListeners.add(onChange);
+  return () => {
+    themeListeners.delete(onChange);
+  };
+}
+
+function getThemeServerSnapshot(): ThemeName {
+  return DEFAULT_THEME;
+}
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const theme = useSyncExternalStore(subscribeTheme, currentTheme, getThemeServerSnapshot);
 
   const setTheme = useCallback((t: ThemeName) => {
-    setThemeState(t);
     document.documentElement.setAttribute('data-theme', t);
     try {
       localStorage.setItem(STORAGE_KEY, t);
     } catch {
       // Private-mode / disabled storage — theme still applies for the session.
     }
+    // Tell every subscriber to re-read the attribute.
+    themeListeners.forEach((l) => l());
   }, []);
 
-  return <ThemeContext.Provider value={{ theme, setTheme }}>{children}</ThemeContext.Provider>;
+  // Memoised so consumers don't re-render on every provider render.
+  const value = useMemo(() => ({ theme, setTheme }), [theme, setTheme]);
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
 export function useTheme(): ThemeContextValue {

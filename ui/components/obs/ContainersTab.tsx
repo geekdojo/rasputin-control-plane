@@ -22,35 +22,42 @@ interface ContainersTabProps {
 }
 
 export function ContainersTab({ node, obsEnabled }: ContainersTabProps) {
-  const [rows, setRows] = useState<ObsContainer[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
   // refetchTick lets the manual REFETCH button retrigger the effect
   // without duplicating fetch logic into a second handler.
   const [refetchTick, setRefetchTick] = useState(0);
   const refetch = () => setRefetchTick((t) => t + 1);
 
+  // One result object keyed by the request it answers, rather than separate
+  // rows/loading/err. `loading` is then DERIVED — it is simply "the result we
+  // hold is not the one the current inputs ask for" — which removes the
+  // setLoading(true)/setErr(null) reset that used to run synchronously on
+  // effect entry (react-hooks/set-state-in-effect). State is now only ever
+  // written from a fetch continuation, which is what effects are for.
+  const requestKey = `${node.id}|${refetchTick}`;
+  const [result, setResult] = useState<{
+    key: string;
+    rows: ObsContainer[];
+    err: string | null;
+  }>({ key: '', rows: [], err: null });
+
+  const loading = obsEnabled && result.key !== requestKey;
+  const rows = result.key === requestKey ? result.rows : [];
+  const err = result.key === requestKey ? result.err : null;
+
   useEffect(() => {
-    let cancelled = false;
     if (!obsEnabled) return;
-    setLoading(true);
-    setErr(null);
+    let cancelled = false;
     getObsContainers(node.id)
       .then((rs) => {
-        if (cancelled) return;
-        setRows(rs);
-        setLoading(false);
+        if (!cancelled) setResult({ key: requestKey, rows: rs, err: null });
       })
       .catch((e: Error) => {
-        if (cancelled) return;
-        setErr(e.message);
-        setLoading(false);
+        if (!cancelled) setResult({ key: requestKey, rows: [], err: e.message });
       });
     return () => {
       cancelled = true;
     };
-  }, [node.id, obsEnabled, refetchTick]);
+  }, [node.id, obsEnabled, requestKey]);
 
   if (!obsEnabled) {
     return (

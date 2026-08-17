@@ -114,6 +114,12 @@ export default function RulesPage() {
   const formRef = useRef<HTMLDivElement>(null);
   const refreshFirewallState = useFirewallStateRefresh();
 
+  // Declared above the effect that calls it: a hoisted function declaration
+  // works at runtime but reads as use-before-declare to the React Compiler.
+  function refresh() {
+    listIntents().then(setIntents).catch((e) => setErr(String(e)));
+  }
+
   useEffect(() => {
     refresh();
   }, []);
@@ -124,9 +130,6 @@ export default function RulesPage() {
     if (preset || editing) formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [preset, editing]);
 
-  function refresh() {
-    listIntents().then(setIntents).catch((e) => setErr(String(e)));
-  }
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this rule? It will remain on the firewall until you Apply again.')) return;

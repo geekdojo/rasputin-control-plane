@@ -325,6 +325,27 @@ export default function MetricsPage() {
 // ClusterStrip — one-line cluster summary above the grid. Pulls counts
 // from inventory; uses obs.status for the "last write" timestamp.
 function ClusterStrip({ nodes, status }: { nodes: Node[]; status: ObsStatus | null }) {
+  // "Ns ago" needs the current time, but reading the clock during render is
+  // impure (react-hooks/purity) — the same inputs would produce a different
+  // output on every render. Holding it in state and ticking it from an effect
+  // makes the render a pure function of its props plus this state, and has the
+  // side benefit that the label now actually counts up: computed inline it was
+  // frozen until something else happened to re-render the strip.
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    // The first tick is scheduled rather than called inline: setting state
+    // synchronously on effect entry is itself set-state-in-effect. A 0ms
+    // timeout lands in the next task, so the label fills in immediately in
+    // practice while the effect body stays free of synchronous setState.
+    const first = window.setTimeout(tick, 0);
+    const id = window.setInterval(tick, 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(id);
+    };
+  }, []);
+
   const counts = nodes.reduce(
     (acc, n) => {
       acc[n.status] = (acc[n.status] ?? 0) + 1;
@@ -333,7 +354,7 @@ function ClusterStrip({ nodes, status }: { nodes: Node[]; status: ObsStatus | nu
     { online: 0, stale: 0, offline: 0 } as Record<Node['status'], number>,
   );
   const lastWrite = status?.lastWriteOk ? new Date(status.lastWriteOk) : null;
-  const lastWriteAgo = lastWrite ? Math.max(0, Math.floor((Date.now() - lastWrite.getTime()) / 1000)) : null;
+  const lastWriteAgo = lastWrite && now ? Math.max(0, Math.floor((now - lastWrite.getTime()) / 1000)) : null;
 
   return (
     <div

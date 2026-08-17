@@ -31,6 +31,12 @@ export default function PortForwardsPage() {
   const formRef = useRef<HTMLDivElement>(null);
   const refreshFirewallState = useFirewallStateRefresh();
 
+  // Declared above the effect that calls it: a hoisted function declaration
+  // works at runtime but reads as use-before-declare to the React Compiler.
+  function refresh() {
+    listIntents().then(setIntents).catch((e) => setErr(String(e)));
+  }
+
   useEffect(() => {
     refresh();
   }, []);
@@ -39,9 +45,6 @@ export default function PortForwardsPage() {
     if (editing) formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [editing]);
 
-  function refresh() {
-    listIntents().then(setIntents).catch((e) => setErr(String(e)));
-  }
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this intent? It will remain on the firewall until you Apply again.')) return;

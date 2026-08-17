@@ -70,6 +70,9 @@ function fmtTime(iso: string): string {
   return t.toLocaleTimeString(undefined, { hour12: false });
 }
 
+// Stable identity for the empty case so `rows` never churns downstream.
+const EMPTY_ROWS: IDSAlertRow[] = [];
+
 function parseRow(entry: LogEntry): IDSAlertRow | null {
   try {
     return JSON.parse(entry.line) as IDSAlertRow;
@@ -79,16 +82,24 @@ function parseRow(entry: LogEntry): IDSAlertRow | null {
 }
 
 export function IDSAlertsTab({ node, range, obsEnabled }: IDSAlertsTabProps) {
-  const [rows, setRows] = useState<IDSAlertRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+
+  // One result object keyed by the request it answers, so `loading` is DERIVED
+  // rather than set synchronously on effect entry (set-state-in-effect).
+  const requestKey = `${node.id}|${range}|${tick}`;
+  const [result, setResult] = useState<{
+    key: string;
+    rows: IDSAlertRow[];
+    err: string | null;
+  }>({ key: '', rows: [], err: null });
+
+  const loading = obsEnabled && result.key !== requestKey;
+  const rows = result.key === requestKey ? result.rows : EMPTY_ROWS;
+  const err = result.key === requestKey ? result.err : null;
 
   useEffect(() => {
     if (!obsEnabled) return;
     let cancelled = false;
-    setLoading(true);
-    setErr(null);
     // Raw LogQL — composed-form filters don't have a "job" param, so
     // we hand the api a literal selector. Backticks would be wrong
     // here: LogQL selectors are wrapped in double-quotes inside the
@@ -102,18 +113,16 @@ export function IDSAlertsTab({ node, range, obsEnabled }: IDSAlertsTabProps) {
           const row = parseRow(e);
           if (row) parsed.push(row);
         }
-        setRows(parsed.slice(0, PAGE_CAP));
-        setLoading(false);
+        setResult({ key: requestKey, rows: parsed.slice(0, PAGE_CAP), err: null });
       })
       .catch((e: Error) => {
         if (cancelled) return;
-        setErr(e.message);
-        setLoading(false);
+        setResult({ key: requestKey, rows: [], err: e.message });
       });
     return () => {
       cancelled = true;
     };
-  }, [node.id, range, obsEnabled, tick]);
+  }, [node.id, range, obsEnabled, requestKey]);
 
   if (!obsEnabled) {
     return (

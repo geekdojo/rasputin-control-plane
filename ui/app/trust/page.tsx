@@ -11,22 +11,32 @@
 
 import { ArrowRight, Download, QrCode, ShieldCheck } from 'lucide-react';
 import type { CSSProperties, ReactNode } from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { CopyButton, DIM, FG, HAIR, Hint, PANEL, SectionLabel } from '../../components/kit';
 import { ACCENT, accentA, MONO } from '../../components/ui-theme';
 import { QrSvg } from '../../components/QrSvg';
+
+// Module-scope so their identities are stable — useSyncExternalStore resubscribes
+// if the subscribe function changes.
+const subscribeNever = () => () => {};
+const getHostSnapshot = () => window.location.hostname || 'rasputin.local';
+const getHostServerSnapshot = () => 'rasputin.local';
 
 export default function TrustPage() {
   // Fallback for the static prerender; replaced with the real hostname
   // after hydration so commands and links work when the operator reaches
   // the box by IP or a custom hostname instead of rasputin.local.
-  const [host, setHost] = useState('rasputin.local');
+  // window.location.hostname is an external, non-React value that never changes
+  // for the life of the page. useSyncExternalStore reads it with an explicit
+  // server snapshot, which is exactly the SSR-safe shape this needs — the old
+  // version set it from an effect, which is a synchronous setState on effect
+  // entry (react-hooks/set-state-in-effect).
+  const host = useSyncExternalStore(subscribeNever, getHostSnapshot, getHostServerSnapshot);
   // The cluster's mDNS name, from the unauthenticated setup-state endpoint. It
   // feeds the REACH THIS SYSTEM block; best-effort, so it degrades to just the
   // reached host if the call fails.
   const [clusterHostname, setClusterHostname] = useState('');
   useEffect(() => {
-    if (window.location.hostname) setHost(window.location.hostname);
     fetch('/api/setup/state')
       .then((r) => (r.ok ? r.json() : null))
       .then((s) => {
