@@ -398,3 +398,186 @@ func seedPlanStep(t *testing.T, js *jobs.Store, parentID string, state systemPla
 		t.Fatalf("MarkStepSucceeded plan: %v", err)
 	}
 }
+
+// seedCascadeStepRunning reproduces the state the bench showed: a cascade step
+// left at `running` because the api rebooted inside it and it never returned.
+func seedCascadeStepRunning(t *testing.T, js *jobs.Store, parentID string) {
+	t.Helper()
+	if err := js.CreateStep(context.Background(), &jobs.JobStep{
+		JobID: parentID, Seq: 1, Name: "cascade", Status: jobs.StepRunning, Attempt: 1,
+	}); err != nil {
+		t.Fatalf("CreateStep cascade: %v", err)
+	}
+}
+
+func cascadeStep(t *testing.T, js *jobs.Store, parentID string) *jobs.JobStep {
+	t.Helper()
+	steps, err := js.ListSteps(context.Background(), parentID)
+	if err != nil {
+		t.Fatalf("ListSteps: %v", err)
+	}
+	for _, s := range steps {
+		if s.Name == "cascade" {
+			return s
+		}
+	}
+	t.Fatalf("no cascade step on %s", parentID)
+	return nil
+}
+
+// ----- 4. the report is WRITTEN DOWN, not just published (#152) -----------
+
+// The resumed run must leave the same durable record as one that never
+// rebooted. Publishing the grid is not keeping it: the `completed` event is
+// ephemeral and the UI reads job steps, so a run whose grid only ever existed
+// as an event has no report at all once the page reloads.
+//
+// Measured on e3bench 2026-08-17: a run that updated five compute nodes and the
+// controlplane finished `succeeded` with its cascade step still `running` and
+// its result null — the entire grid gone, on the highest-stakes run there is.
+func TestResumeSystemUpdates_RecordsTheGrid(t *testing.T) {
+	const self = "cp"
+	ctx := context.Background()
+	nc := startNATS(t)
+	js := newJobStore(t)
+	runner := jobs.NewRunner(js, nc)
+
+	p := seedParent(t, js, "parent")
+	seedPlanStep(t, js, p, systemPlanState{
+		BundleVer: "v9",
+		Targets: []plannedTarget{
+			{NodeID: "a", Tier: proto.RoleCompute, Compatible: "rasputin-n100", Canary: true},
+			{NodeID: "never", Tier: proto.RoleCompute, Compatible: "rasputin-rpi-arm64"},
+			{NodeID: self, Tier: proto.RoleControlPlane, Compatible: "rasputin-n100"},
+		},
+		SelfNodeID: self,
+	})
+	seedCascadeStepRunning(t, js, p)
+	seedChild(t, js, "ca", p, "a", jobs.StatusSucceeded, true)
+	seedChild(t, js, "cs", p, self, jobs.StatusSucceeded, true)
+
+	ResumeSystemUpdates(ctx, js, runner, nc, self)
+	waitJobStatus(t, js, p, jobs.StatusSucceeded)
+
+	step := cascadeStep(t, js, p)
+	if step.Status != jobs.StepSucceeded {
+		t.Fatalf("cascade step status = %q, want %q — a succeeded job on top of a running step is the inconsistency this fixes",
+			step.Status, jobs.StepSucceeded)
+	}
+	var got cascadeResult
+	if err := json.Unmarshal(step.Result, &got); err != nil {
+		t.Fatalf("cascade step result did not decode: %v (raw %q)", err, string(step.Result))
+	}
+	if len(got.Results) != 3 {
+		t.Fatalf("grid rows = %d, want 3", len(got.Results))
+	}
+	// Planned order, and every dimension the child jobs cannot supply.
+	for i, want := range []proto.NodeResult{
+		{NodeID: "a", Outcome: proto.NodeOutcomeSucceeded, Tier: proto.RoleCompute, Compatible: "rasputin-n100", Canary: true},
+		{NodeID: "never", Outcome: proto.NodeOutcomeNotAttempted, Tier: proto.RoleCompute, Compatible: "rasputin-rpi-arm64"},
+		{NodeID: self, Outcome: proto.NodeOutcomeSucceeded, Tier: proto.RoleControlPlane, Compatible: "rasputin-n100"},
+	} {
+		g := got.Results[i]
+		if g.NodeID != want.NodeID || g.Outcome != want.Outcome ||
+			g.Tier != want.Tier || g.Compatible != want.Compatible || g.Canary != want.Canary {
+			t.Errorf("row %d = %+v, want nodeId/outcome/tier/compatible/canary %+v", i, g, want)
+		}
+	}
+	if len(got.Canaries) != 1 || got.Canaries[0] != "a" {
+		t.Errorf("canaries = %v, want [a]", got.Canaries)
+	}
+	if len(got.Remaining) != 1 || got.Remaining[0] != "never" {
+		t.Errorf("remaining = %v, want [never]", got.Remaining)
+	}
+}
+
+// A cascade step that DID record its own result is authoritative — the resume
+// must not overwrite it with a rebuild. The rebuild is a reconstruction from
+// two sources; the real one saw the run happen.
+func TestResumeSystemUpdates_LeavesAClosedCascadeAlone(t *testing.T) {
+	const self = "cp"
+	ctx := context.Background()
+	nc := startNATS(t)
+	js := newJobStore(t)
+	runner := jobs.NewRunner(js, nc)
+
+	p := seedParent(t, js, "parent")
+	seedPlanStep(t, js, p, systemPlanState{
+		BundleVer:  "v9",
+		Targets:    []plannedTarget{{NodeID: self, Tier: proto.RoleControlPlane, Compatible: "rasputin-n100"}},
+		SelfNodeID: self,
+	})
+	seedCascadeStepRunning(t, js, p)
+	original := json.RawMessage(`{"succeeded":["kept"],"results":[{"nodeId":"kept","outcome":"succeeded"}]}`)
+	if err := js.MarkStepSucceeded(ctx, p, 1, 1, original, time.Now().UTC()); err != nil {
+		t.Fatalf("MarkStepSucceeded cascade: %v", err)
+	}
+	seedChild(t, js, "cs", p, self, jobs.StatusSucceeded, true)
+
+	ResumeSystemUpdates(ctx, js, runner, nc, self)
+	waitJobStatus(t, js, p, jobs.StatusSucceeded)
+
+	var got cascadeResult
+	if err := json.Unmarshal(cascadeStep(t, js, p).Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Results) != 1 || got.Results[0].NodeID != "kept" {
+		t.Errorf("cascade result = %+v, want the original grid untouched", got.Results)
+	}
+}
+
+// ----- 5. skipped nodes are rows of the same report (#152) ----------------
+
+// A skipped node carries its tier and the SKU it WOULD have taken. Both were
+// dropped, so a firewall run rendered one populated row above six blank ones
+// and read as broken data rather than as six deliberate omissions.
+//
+// The `no-artifact-for-arch` case is the one that matters: the arch a stranded
+// node needed is the entire content of that row (ADR-0005 Decision 11).
+func TestPlanTargets_SkippedNodesCarryTheirDimensions(t *testing.T) {
+	now := time.Now().UTC()
+	node := func(id string, role proto.NodeRole, arch string) *proto.Node {
+		return &proto.Node{ID: id, Role: role, Architecture: arch, FirstSeen: now, LastSeen: now}
+	}
+	nodes := []*proto.Node{
+		node("excluded1", proto.RoleCompute, "amd64"),
+		{ID: "offline1", Role: proto.RoleStorage, Architecture: "arm64", FirstSeen: now, LastSeen: now.Add(-24 * time.Hour)},
+		node("armbox", proto.RoleCompute, "arm64"),
+		node("fw1", proto.RoleFirewall, "amd64"),
+		node("mystery", proto.RoleCompute, "riscv64"),
+	}
+	exclude := map[string]struct{}{"excluded1": {}}
+
+	// An amd64 OS bundle: the arm64 node is stranded, the firewall is the
+	// designed SKU filter, and the unknown arch has no answer at all.
+	_, skipped := planTargets(nodes, exclude, "rasputin-n100", "")
+
+	got := map[string]proto.SkippedNode{}
+	for _, s := range skipped {
+		got[s.NodeID] = s
+	}
+	for _, c := range []struct {
+		id         string
+		reason     proto.SkipReason
+		tier       proto.NodeRole
+		compatible string
+	}{
+		{"excluded1", proto.SkipExcluded, proto.RoleCompute, "rasputin-n100"},
+		{"offline1", proto.SkipOffline, proto.RoleStorage, "rasputin-rpi-arm64"},
+		{"armbox", proto.SkipNoArtifactForArch, proto.RoleCompute, "rasputin-rpi-arm64"},
+		{"fw1", proto.SkipFirewallSKU, proto.RoleFirewall, "rasputin-fw-n100"},
+		// Compatible stays empty here on purpose: not knowing which SKU this
+		// node wanted IS the finding, and inventing one would hide it.
+		{"mystery", proto.SkipNoArtifactForArch, proto.RoleCompute, ""},
+	} {
+		s, ok := got[c.id]
+		if !ok {
+			t.Errorf("%s was not skipped at all", c.id)
+			continue
+		}
+		if s.Reason != c.reason || s.Tier != c.tier || s.Compatible != c.compatible {
+			t.Errorf("%s = {reason:%q tier:%q compatible:%q}, want {reason:%q tier:%q compatible:%q}",
+				c.id, s.Reason, s.Tier, s.Compatible, c.reason, c.tier, c.compatible)
+		}
+	}
+}

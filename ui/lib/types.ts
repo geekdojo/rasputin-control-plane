@@ -490,6 +490,13 @@ export interface SkippedNode {
   nodeId: string;
   reason: SkipReason;
   detail?: string;
+  /** The node's role and the SKU it WOULD have taken. A skipped node is still
+   *  a row of the same report as a target; leaving its dimensions blank makes
+   *  the grid read as broken rather than as a deliberate omission. Absent on
+   *  jobs recorded before these were carried, and `compatible` is absent when
+   *  the node's arch has no known artifact — not knowing IS the finding. */
+  tier?: NodeRole;
+  compatible?: string;
 }
 
 /**

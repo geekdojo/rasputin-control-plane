@@ -235,6 +235,9 @@ func buildPlan(
 			skipped = append(skipped, proto.SkippedNode{
 				NodeID: n.ID, Reason: proto.SkipNoArtifactForArch,
 				Detail: fmt.Sprintf("architecture %q has no known artifact", n.Architecture),
+				Tier:   n.Role,
+				// Compatible stays empty: not knowing which SKU this node
+				// wanted IS the finding.
 			})
 			continue
 		}
@@ -245,6 +248,7 @@ func buildPlan(
 			skipped = append(skipped, proto.SkippedNode{
 				NodeID: n.ID, Reason: proto.SkipFirewallSKU,
 				Detail: fmt.Sprintf("needs %s, this run updates %s", want, comp.Label),
+				Tier:   n.Role, Compatible: want,
 			})
 			continue
 		}
@@ -579,18 +583,26 @@ func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat,
 		proto.RoleControlPlane: 2,
 		proto.RoleFirewall:     3,
 	}
-	skip := func(id string, r proto.SkipReason, detail string) {
-		skipped = append(skipped, proto.SkippedNode{NodeID: id, Reason: r, Detail: detail})
+	// The node, not just its id: a skipped row carries the same dimensions a
+	// target row does, and both come straight off the inventory record we
+	// already hold here. Compatible is best-effort — a node whose arch has no
+	// known artifact leaves it empty, which is the honest answer.
+	skip := func(n *proto.Node, r proto.SkipReason, detail string) {
+		want, _ := expectedCompatible(n)
+		skipped = append(skipped, proto.SkippedNode{
+			NodeID: n.ID, Reason: r, Detail: detail,
+			Tier: n.Role, Compatible: want,
+		})
 	}
 	for _, n := range nodes {
 		if _, ex := exclude[n.ID]; ex {
-			skip(n.ID, proto.SkipExcluded, "excluded from this run")
+			skip(n, proto.SkipExcluded, "excluded from this run")
 			continue
 		}
 		// Compute status from last_seen — the inventory list endpoint does
 		// this on the API side but ListByRole returns it stale.
 		if computeStatus(n.LastSeen) != proto.StatusOnline {
-			skip(n.ID, proto.SkipOffline, "not online when the plan was made")
+			skip(n, proto.SkipOffline, "not online when the plan was made")
 			continue
 		}
 		if bundleCompat != "" {
@@ -600,11 +612,11 @@ func planTargets(nodes []*proto.Node, exclude map[string]struct{}, bundleCompat,
 				// No artifact can be chosen for this node at all. Previously
 				// this fell through and planned the node into whichever bundle
 				// the run happened to carry, which fails at install.
-				skip(n.ID, proto.SkipNoArtifactForArch,
+				skip(n, proto.SkipNoArtifactForArch,
 					fmt.Sprintf("architecture %q has no known artifact", n.Architecture))
 				continue
 			case want != bundleCompat:
-				skip(n.ID, skuMismatchReason(want, bundleCompat),
+				skip(n, skuMismatchReason(want, bundleCompat),
 					fmt.Sprintf("needs %s, bundle is %s", want, bundleCompat))
 				continue
 			}
