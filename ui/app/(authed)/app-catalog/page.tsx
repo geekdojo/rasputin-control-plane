@@ -405,6 +405,10 @@ function InstallDrawer({
 }) {
   const [name, setName] = useState(tile.id);
   const [targetNode, setTargetNode] = useState('');
+  // Default selection DERIVED rather than written from an effect — "nothing
+  // chosen yet" falls back to the first deploy target. Writing it was a
+  // synchronous setState on effect entry (set-state-in-effect).
+  const selectedTarget = targetNode || (deployTargets[0]?.id ?? '');
   const [compose, setCompose] = useState<string | null>(tile.composeYaml ?? null);
   // LAN exposure opt-in. Default off (tailnet-only) — the safe default per
   // ADR-0004 §9; not pre-filled from tile.exposureDefault (see PR note).
@@ -423,14 +427,13 @@ function InstallDrawer({
         .then((full) => setCompose(full.composeYaml ?? ''))
         .catch(() => setCompose(''));
     }
-    if (!targetNode && deployTargets.length > 0) setTargetNode(deployTargets[0].id);
   }, []);
 
   async function install() {
     setBusy(true);
     setErr(null);
     try {
-      setInstalled(await installCatalogApp(tile.id, { targetNode, name, exposeLan }));
+      setInstalled(await installCatalogApp(tile.id, { targetNode: selectedTarget, name, exposeLan }));
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -513,7 +516,7 @@ function InstallDrawer({
           <>
             <div style={{ display: 'flex', gap: 8 }}>
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="app name" style={{ flex: 1 }} title="Instance name — must be unique" />
-              <Select value={targetNode} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 200 }}>
+              <Select value={selectedTarget} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 200 }}>
                 {deployTargets.map((n) => (
                   <option key={n.id} value={n.id}>
                     {nodeOptionLabel(n)}
@@ -523,7 +526,7 @@ function InstallDrawer({
             </div>
             {hasWebPort && <ExposureField exposeLan={exposeLan} onChange={setExposeLan} />}
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Btn variant="primary" disabled={busy || !name || !targetNode} onClick={install}>
+              <Btn variant="primary" disabled={busy || !name || !selectedTarget} onClick={install}>
                 <UploadCloud size={11} /> {busy ? 'INSTALLING…' : 'INSTALL'}
               </Btn>
               {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
@@ -544,15 +547,16 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
 
-  useEffect(() => {
-    if (!targetNode && deployTargets.length > 0) setTargetNode(deployTargets[0].id);
-  }, [deployTargets, targetNode]);
+  // Default selection DERIVED rather than written from an effect — "nothing
+  // chosen yet" falls back to the first deploy target. Writing it was a
+  // synchronous setState on effect entry (set-state-in-effect).
+  const selectedTarget = targetNode || (deployTargets[0]?.id ?? '');
 
   async function create() {
     setBusy(true);
     setErr(null);
     try {
-      setInstalled(await createApp({ name, targetNode, composeYaml }));
+      setInstalled(await createApp({ name, targetNode: selectedTarget, composeYaml }));
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -575,7 +579,7 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
               <SectionLabel>NAME + TARGET</SectionLabel>
               <div style={{ display: 'flex', gap: 8 }}>
                 <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. nextcloud)" style={{ flex: 1 }} />
-                <Select value={targetNode} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 200 }}>
+                <Select value={selectedTarget} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 200 }}>
                   {deployTargets.map((n) => (
                     <option key={n.id} value={n.id}>
                       {nodeOptionLabel(n)}
@@ -595,7 +599,7 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
               />
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Btn variant="primary" disabled={busy || !name || !targetNode || !composeYaml} onClick={create}>
+              <Btn variant="primary" disabled={busy || !name || !selectedTarget || !composeYaml} onClick={create}>
                 <UploadCloud size={11} /> {busy ? 'ADDING…' : 'ADD APP'}
               </Btn>
               {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}

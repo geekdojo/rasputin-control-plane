@@ -31,15 +31,33 @@ interface LogsTabProps {
 
 const DISPLAY_CAP = 200;
 
+// Stable identity for the empty case, so `entries` below never churns.
+const EMPTY_ENTRIES: LogEntry[] = [];
+
 export function LogsTab({ node, range, obsEnabled, grafanaHref }: LogsTabProps) {
   const [container, setContainer] = useState<string>('');
   const [grep, setGrep] = useState<string>('');
   // debouncedGrep keeps us from firing a Loki query on every keystroke
   // while the operator types a regex.
   const [debouncedGrep, setDebouncedGrep] = useState<string>('');
-  const [entries, setEntries] = useState<LogEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  // One result object keyed by the request it answers, so `loading` is DERIVED
+  // ("what we hold isn't what the current inputs ask for") rather than set
+  // synchronously on effect entry — see react-hooks/set-state-in-effect.
+  const requestKey = `${node.id}|${range}|${container}|${debouncedGrep}`;
+  const [result, setResult] = useState<{
+    key: string;
+    entries: LogEntry[];
+    err: string | null;
+  }>({ key: '', entries: [], err: null });
+
+  const loading = obsEnabled && result.key !== requestKey;
+  // Memoised because a bare `: []` would be a fresh array on every render, and
+  // the useMemo below depends on it.
+  const entries = useMemo(
+    () => (result.key === requestKey ? result.entries : EMPTY_ENTRIES),
+    [result, requestKey],
+  );
+  const err = result.key === requestKey ? result.err : null;
   // The node's running containers, so the dropdown can offer a container even
   // when it hasn't logged in the current range. Best-effort: on failure we fall
   // back to the log-derived options below.
@@ -55,8 +73,6 @@ export function LogsTab({ node, range, obsEnabled, grafanaHref }: LogsTabProps) 
   useEffect(() => {
     if (!obsEnabled) return;
     let cancelled = false;
-    setLoading(true);
-    setErr(null);
     getObsLogs({
       node: node.id,
       container: container || undefined,
@@ -65,19 +81,15 @@ export function LogsTab({ node, range, obsEnabled, grafanaHref }: LogsTabProps) 
       limit: 500,
     })
       .then((es) => {
-        if (cancelled) return;
-        setEntries(es);
-        setLoading(false);
+        if (!cancelled) setResult({ key: requestKey, entries: es, err: null });
       })
       .catch((e: Error) => {
-        if (cancelled) return;
-        setErr(e.message);
-        setLoading(false);
+        if (!cancelled) setResult({ key: requestKey, entries: [], err: e.message });
       });
     return () => {
       cancelled = true;
     };
-  }, [node.id, range, container, debouncedGrep, obsEnabled]);
+  }, [node.id, range, container, debouncedGrep, obsEnabled, requestKey]);
 
   // Fetch the node's running containers (cAdvisor-derived) so the dropdown
   // lists them regardless of whether they've logged in-range. Independent of

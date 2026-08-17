@@ -236,14 +236,28 @@ function KeyForm({
     setErr(null);
   }
 
+  // Prefill is adjusted DURING RENDER, not from an effect: React documents this
+  // for "a prop changed and state must follow it", and it re-renders before
+  // paint so the previous selection's values never flash in the form. From an
+  // effect this was a synchronous setState on entry (set-state-in-effect).
+  // `appliedEditing` records what has already been applied so the operator can
+  // keep typing without being overwritten on every render.
+  const [appliedEditing, setAppliedEditing] = useState(editing);
+  if (appliedEditing !== editing) {
+    setAppliedEditing(editing);
+    if (editing) {
+      const s = editing.spec as PreAuthKeySpec;
+      setName(editing.name);
+      setHint(s.deviceHint ?? '');
+      setReusable(s.reusable);
+      setExpiresIn(s.expiresIn ?? '24h');
+      setErr(null);
+    }
+  }
+
+  // Focus stays in an effect — a real DOM side effect, not state.
   useEffect(() => {
     if (!editing) return;
-    const s = editing.spec as PreAuthKeySpec;
-    setName(editing.name);
-    setHint(s.deviceHint ?? '');
-    setReusable(s.reusable);
-    setExpiresIn(s.expiresIn ?? '24h');
-    setErr(null);
     requestAnimationFrame(() => document.getElementById('key-name')?.focus());
   }, [editing]);
 

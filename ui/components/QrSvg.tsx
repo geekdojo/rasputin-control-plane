@@ -1,10 +1,10 @@
 import { useMemo } from 'react';
-import { qrcodegen } from '../lib/qrcodegen';
+import { Ecc, QrCode } from '../lib/qrcodegen';
 
 // QrSvg renders `text` as a QR code (inline SVG). Dark modules sit on a white
 // tile with a quiet-zone border: QR scanners expect dark-on-light regardless of
 // the page's dark theme, so the tile is always light. Pure client-side — the
-// encoder is vendored (lib/vendor/qrcodegen.ts) and does no I/O. All dark
+// encoder is vendored (lib/qrcodegen.ts) and does no I/O. All dark
 // modules are emitted as one <path> (crisp and compact at any scale).
 export function QrSvg({
   text,
@@ -16,7 +16,7 @@ export function QrSvg({
   border?: number;
 }) {
   const { path, dim } = useMemo(() => {
-    const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.MEDIUM);
+    const qr = QrCode.encodeText(text, Ecc.MEDIUM);
     let d = '';
     for (let y = 0; y < qr.size; y++) {
       for (let x = 0; x < qr.size; x++) {

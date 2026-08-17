@@ -31,6 +31,12 @@ export default function PortForwardsPage() {
   const formRef = useRef<HTMLDivElement>(null);
   const refreshFirewallState = useFirewallStateRefresh();
 
+  // Declared above the effect that calls it: a hoisted function declaration
+  // works at runtime but reads as use-before-declare to the React Compiler.
+  function refresh() {
+    listIntents().then(setIntents).catch((e) => setErr(String(e)));
+  }
+
   useEffect(() => {
     refresh();
   }, []);
@@ -39,9 +45,6 @@ export default function PortForwardsPage() {
     if (editing) formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [editing]);
 
-  function refresh() {
-    listIntents().then(setIntents).catch((e) => setErr(String(e)));
-  }
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this intent? It will remain on the firewall until you Apply again.')) return;
@@ -174,15 +177,29 @@ function PortForwardForm({
     setErr(null);
   }
 
+  // Prefill is adjusted DURING RENDER, not from an effect: React documents this
+  // for "a prop changed and state must follow it", and it re-renders before
+  // paint so the previous selection's values never flash in the form. From an
+  // effect this was a synchronous setState on entry (set-state-in-effect).
+  // `appliedEditing` records what has already been applied so the operator can
+  // keep typing without being overwritten on every render.
+  const [appliedEditing, setAppliedEditing] = useState(editing);
+  if (appliedEditing !== editing) {
+    setAppliedEditing(editing);
+    if (editing) {
+      const s = editing.spec as PortForwardSpec;
+      setName(editing.name);
+      setWanPort(String(s.wanPort));
+      setLanHost(s.lanHost);
+      setLanPort(String(s.lanPort));
+      setProtocol(s.protocol);
+      setErr(null);
+    }
+  }
+
+  // Focus stays in an effect — a real DOM side effect, not state.
   useEffect(() => {
     if (!editing) return;
-    const s = editing.spec as PortForwardSpec;
-    setName(editing.name);
-    setWanPort(String(s.wanPort));
-    setLanHost(s.lanHost);
-    setLanPort(String(s.lanPort));
-    setProtocol(s.protocol);
-    setErr(null);
     requestAnimationFrame(() => document.getElementById('pf-name')?.focus());
   }, [editing]);
 

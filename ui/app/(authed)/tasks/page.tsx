@@ -58,6 +58,14 @@ export default function TasksPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Declared before the effects that call it. It was a hoisted function
+  // declaration below them, which works at runtime but reads as use-before-
+  // declare to the React Compiler.
+  function refreshDetail(id: string) {
+    listSteps(id).then(setSteps).catch(() => {});
+    listEvents(id).then(setEvents).catch(() => {});
+  }
+
   useEffect(() => {
     let active = true;
     listJobs()
@@ -73,19 +81,12 @@ export default function TasksPage() {
     };
   }, []);
 
+  // No clearing branch: the row already renders `expanded === j.id ? steps : []`,
+  // so wiping state here was redundant with the guard below AND was a
+  // synchronous setState inside an effect (react-hooks/set-state-in-effect).
   useEffect(() => {
-    if (!expanded) {
-      setSteps([]);
-      setEvents([]);
-      return;
-    }
-    refreshDetail(expanded);
+    if (expanded) refreshDetail(expanded);
   }, [expanded]);
-
-  function refreshDetail(id: string) {
-    listSteps(id).then(setSteps).catch(() => {});
-    listEvents(id).then(setEvents).catch(() => {});
-  }
 
   async function handlePing() {
     setBusy(true);

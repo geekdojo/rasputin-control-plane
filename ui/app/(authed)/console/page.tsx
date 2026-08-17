@@ -34,20 +34,23 @@ function ConsoleInner() {
   // BMC host advertises this node. The control that links here is already
   // gated, but the route is reachable by direct URL — check again. The
   // api enforces the same gate server-side (403 on the WS).
-  const [reachable, setReachable] = useState<boolean | null>(null);
+  const [probe, setProbe] = useState<{ node: string; ok: boolean } | null>(null);
+  const reachable = probe && probe.node === nodeId ? probe.ok : null;
   const wsRef = useRef<WebSocket | null>(null);
   const paneRef = useRef<HTMLPreElement | null>(null);
 
+  // Keyed by the node it answers, so "not yet known" is DERIVED (the probe we
+  // hold isn't for this node) rather than written with a synchronous
+  // setReachable(null) on effect entry — see set-state-in-effect.
   useEffect(() => {
     if (!nodeId) return;
     let active = true;
-    setReachable(null);
     listNodes()
       .then((ns) => {
-        if (active) setReachable(bmcReachableNodes(ns).has(nodeId));
+        if (active) setProbe({ node: nodeId, ok: bmcReachableNodes(ns).has(nodeId) });
       })
       .catch(() => {
-        if (active) setReachable(false);
+        if (active) setProbe({ node: nodeId, ok: false });
       });
     return () => {
       active = false;

@@ -83,9 +83,19 @@ export function NodeDetailDrawer({
 
   // Apply a deep-linked tab when the drawer opens. Guarded on `initialTab` so a
   // normal open (no deep link) leaves the operator's current tab untouched.
-  useEffect(() => {
+  //
+  // Adjusted DURING RENDER rather than from an effect. React documents this for
+  // "a prop changed and state must follow it": the component re-renders
+  // immediately, before children render or the browser paints, so there is no
+  // flash of the wrong tab — whereas an effect sets state after paint and is a
+  // synchronous setState on effect entry (react-hooks/set-state-in-effect).
+  // `honored` records which deep link has already been applied so the operator
+  // can still switch tabs afterwards without being yanked back.
+  const [honored, setHonored] = useState<{ open: boolean; tab?: TabKey }>({ open: false });
+  if (honored.open !== open || honored.tab !== initialTab) {
+    setHonored({ open, tab: initialTab });
     if (open && initialTab) setTab(initialTab);
-  }, [open, initialTab]);
+  }
 
   return (
     <Drawer
@@ -178,6 +188,14 @@ function Tabs({
   );
 }
 
+const EMPTY_SERIES: Record<ObsSeriesMetric, ObsSeries | null> = {
+  cpu: null,
+  mem: null,
+  mem_bytes: null,
+  disk: null,
+  load1: null,
+};
+
 function MetricsTab({
   node,
   range,
@@ -187,40 +205,47 @@ function MetricsTab({
   range: string;
   obsEnabled: boolean;
 }) {
-  const [series, setSeries] = useState<Record<ObsSeriesMetric, ObsSeries | null>>({
-    cpu: null,
-    mem: null,
-    mem_bytes: null,
-    disk: null,
-    load1: null,
-  });
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  // One result object keyed by the request it answers, so `loading` is DERIVED
+  // rather than set synchronously on effect entry (set-state-in-effect). The
+  // per-metric error is collected inside the Promise.all and written once with
+  // the series, instead of racing a separate setErr from each rejected chart.
+  const requestKey = `${node.id}|${range}`;
+  const [result, setResult] = useState<{
+    key: string;
+    series: Record<ObsSeriesMetric, ObsSeries | null>;
+    err: string | null;
+  }>({ key: '', series: EMPTY_SERIES, err: null });
+
+  const loading = obsEnabled && result.key !== requestKey;
+  const series = result.key === requestKey ? result.series : EMPTY_SERIES;
+  const err = result.key === requestKey ? result.err : null;
 
   useEffect(() => {
     if (!obsEnabled) return;
     let cancelled = false;
-    setLoading(true);
-    setErr(null);
+    let failure: string | null = null;
     Promise.all(
       METRICS_TO_CHART.map(async (m) => {
         try {
           const s = await getObsSeries(node.id, m.key, range);
           return [m.key, s] as const;
         } catch (e) {
-          if (!cancelled) setErr((e as Error).message);
+          failure = (e as Error).message;
           return [m.key, null] as const;
         }
       }),
     ).then((entries) => {
       if (cancelled) return;
-      setSeries((curr) => ({ ...curr, ...Object.fromEntries(entries) }));
-      setLoading(false);
+      setResult({
+        key: requestKey,
+        series: { ...EMPTY_SERIES, ...Object.fromEntries(entries) },
+        err: failure,
+      });
     });
     return () => {
       cancelled = true;
     };
-  }, [node.id, range, obsEnabled]);
+  }, [node.id, range, obsEnabled, requestKey]);
 
   if (!obsEnabled) {
     return (

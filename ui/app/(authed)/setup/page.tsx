@@ -280,8 +280,16 @@ function InstallNameForm({
   busy: string | null;
   onSave: (name: string) => void;
 }) {
+  // Follows state.installName when the server value changes, but keeps whatever
+  // the operator has typed in between. Adjusted during render rather than from
+  // an effect — see React's "a prop changed and state must follow it"; from an
+  // effect this was a synchronous setState on entry (set-state-in-effect).
   const [name, setName] = useState(state.installName);
-  useEffect(() => setName(state.installName), [state.installName]);
+  const [appliedName, setAppliedName] = useState(state.installName);
+  if (appliedName !== state.installName) {
+    setAppliedName(state.installName);
+    setName(state.installName);
+  }
 
   function submit(e: React.FormEvent) {
     e.preventDefault();

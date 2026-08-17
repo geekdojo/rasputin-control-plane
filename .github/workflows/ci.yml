@@ -126,8 +126,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           # Project Node: current LTS (Node 22, LTS through April 2027).
-          # Next.js 15 documented support: 18.18+, 20, 22. Not bumping to
-          # 24 until it goes LTS in October 2026.
+          # Next 16 requires >=20.9.0 (its own engines field), so 22 clears it
+          # comfortably — note 16 dropped Node 18, which the previous Next 15
+          # note here still listed as supported. Not bumping to 24 until it
+          # goes LTS in October 2026.
           node-version: "22"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
