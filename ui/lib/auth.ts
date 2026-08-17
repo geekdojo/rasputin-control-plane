@@ -64,9 +64,29 @@ export async function logout(): Promise<void> {
   });
 }
 
+// The option shapes SimpleWebAuthn accepts, derived from the functions
+// themselves rather than imported.
+//
+// PublicKeyCredentialCreationOptionsJSON lives in @simplewebauthn/types, which
+// @simplewebauthn/browser does NOT re-export — importing it would mean naming a
+// transitive dependency, and a version skew between the two would then be ours
+// to notice. Reading the types off the functions costs no dependency and tracks
+// the library automatically: if an upgrade reshapes the options, these reshape
+// with it and any mismatch below becomes a compile error rather than a failure
+// at the authenticator prompt.
+type RegistrationOptions = Parameters<typeof startRegistration>[0]['optionsJSON'];
+type AuthenticationOptions = Parameters<typeof startAuthentication>[0]['optionsJSON'];
+
 // go-webauthn returns { publicKey: { ... } }; SimpleWebAuthn wants the inner
 // publicKey object as optionsJSON.
-function unwrapPublicKey(opts: unknown): Record<string, unknown> {
+//
+// The cast at each call site is unavoidable — this data arrives off the network
+// as `unknown` and nothing here validates its shape. What the cast should NOT
+// be is `any`, which switches off checking for everything downstream of it.
+// Casting to the specific option type keeps the rest of the call checked.
+// Runtime validation of the server's response would be a genuine improvement
+// and is deliberately not attempted here.
+function unwrapPublicKey(opts: unknown): unknown {
   const o = opts as { publicKey?: Record<string, unknown> };
   return (o.publicKey ?? (opts as Record<string, unknown>));
 }
@@ -80,8 +100,7 @@ export async function registerPasskey(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, displayName: displayName ?? name }),
   });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const credential = await startRegistration({ optionsJSON: unwrapPublicKey(opts) as any });
+  const credential = await startRegistration({ optionsJSON: unwrapPublicKey(opts) as RegistrationOptions });
   return jsonFetch<CurrentUser>('/api/auth/register/finish', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -93,8 +112,7 @@ export async function loginWithPasskey(): Promise<CurrentUser> {
   const opts = await jsonFetch<unknown>('/api/auth/login/begin', {
     method: 'POST',
   });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const credential = await startAuthentication({ optionsJSON: unwrapPublicKey(opts) as any });
+  const credential = await startAuthentication({ optionsJSON: unwrapPublicKey(opts) as AuthenticationOptions });
   return jsonFetch<CurrentUser>('/api/auth/login/finish', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

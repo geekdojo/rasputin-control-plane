@@ -135,6 +135,22 @@ jobs:
       - name: install
         run: npm ci
 
+      # eslint runs first because it is the cheapest of the three and, until
+      # 2026-08-16, did not run at all: the repo carried nine eslint-disable
+      # comments waiving rules for a linter that was in neither dependencies nor
+      # devDependencies and that ci.yml never invoked. Those comments read as
+      # nine reviewed exceptions; no linter had ever evaluated the lines.
+      #
+      # Errors fail. Warnings print and do not fail — the react-hooks
+      # exhaustive-deps warnings are kept deliberately visible as pointers to
+      # investigate if the UI misbehaves, and making them blockers would only
+      # get them suppressed again.
+      #
+      # The release path is gated too, in scripts/build-release.sh, so a release
+      # cannot be cut from code that fails this.
+      - name: lint
+        run: npm run lint
+
       - name: typecheck
         run: npm run type-check
 
