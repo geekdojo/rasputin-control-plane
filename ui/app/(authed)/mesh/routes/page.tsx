@@ -161,9 +161,11 @@ function RouteForm({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!nodeId && nodes.length > 0 && !editing) setNodeId(nodes[0].id);
-  }, [nodes, nodeId, editing]);
+  // The default selection is DERIVED rather than written into state from an
+  // effect: "nothing chosen yet" simply falls back to the first node. Writing
+  // it was a synchronous setState on effect entry (set-state-in-effect), and it
+  // also meant the form briefly held '' before the effect ran.
+  const selectedNodeId = nodeId || (editing ? '' : (nodes[0]?.id ?? ''));
 
   function resetFields() {
     setName('');
@@ -172,13 +174,27 @@ function RouteForm({
     setErr(null);
   }
 
+  // Prefill is adjusted DURING RENDER, not from an effect: React documents this
+  // for "a prop changed and state must follow it", and it re-renders before
+  // paint so the previous selection's values never flash in the form. From an
+  // effect this was a synchronous setState on entry (set-state-in-effect).
+  // `appliedEditing` records what has already been applied so the operator can
+  // keep typing without being overwritten on every render.
+  const [appliedEditing, setAppliedEditing] = useState(editing);
+  if (appliedEditing !== editing) {
+    setAppliedEditing(editing);
+    if (editing) {
+      const s = editing.spec as SubnetRouteSpec;
+      setName(editing.name);
+      setNodeId(s.nodeId);
+      setCidr(s.cidr);
+      setErr(null);
+    }
+  }
+
+  // Focus stays in an effect — a real DOM side effect, not state.
   useEffect(() => {
     if (!editing) return;
-    const s = editing.spec as SubnetRouteSpec;
-    setName(editing.name);
-    setNodeId(s.nodeId);
-    setCidr(s.cidr);
-    setErr(null);
     requestAnimationFrame(() => document.getElementById('route-name')?.focus());
   }, [editing]);
 
@@ -188,11 +204,11 @@ function RouteForm({
     setErr(null);
     try {
       if (editing) {
-        const updated = await updateMeshRoute(editing.id, { name, nodeId, cidr });
+        const updated = await updateMeshRoute(editing.id, { name, nodeId: selectedNodeId, cidr });
         onUpdated(updated);
         resetFields();
       } else {
-        await createMeshRoute({ name, nodeId, cidr });
+        await createMeshRoute({ name, nodeId: selectedNodeId, cidr });
         onCreated();
         resetFields();
       }
@@ -222,7 +238,7 @@ function RouteForm({
         required
         style={{ flex: '1 1 180px' }}
       />
-      <Select value={nodeId} onChange={(e) => setNodeId(e.target.value)} style={{ minWidth: 180 }}>
+      <Select value={selectedNodeId} onChange={(e) => setNodeId(e.target.value)} style={{ minWidth: 180 }}>
         {nodes.map((n) => (
           <option key={n.id} value={n.id}>
             {n.id} ({n.role})

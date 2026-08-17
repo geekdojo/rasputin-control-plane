@@ -88,13 +88,24 @@ function MetricsPageInner() {
   const [deepLinkTab, setDeepLinkTab] = useState<TabKey | undefined>(undefined);
   const nodeParam = search.get('node');
   const tabParam = search.get('tab');
-  useEffect(() => {
-    if (!nodeParam) return;
+  // Applied DURING RENDER rather than from an effect: React documents this for
+  // "a prop changed and state must follow it", and it re-renders before paint
+  // so a deep link opens straight onto the right node and tab instead of
+  // flashing the closed drawer first. From an effect this was a synchronous
+  // setState on entry (react-hooks/set-state-in-effect).
+  //
+  // `appliedParams` records which querystring has already been honoured, so
+  // closing the drawer or switching tabs afterwards is not undone on the next
+  // render.
+  const [appliedParams, setAppliedParams] = useState<string | null>(null);
+  const paramsKey = `${nodeParam ?? ''}|${tabParam ?? ''}`;
+  if (nodeParam && appliedParams !== paramsKey) {
+    setAppliedParams(paramsKey);
     setDrawerNodeId(nodeParam);
     if (tabParam && (['metrics', 'containers', 'logs', 'alerts', 'ids'] as string[]).includes(tabParam)) {
       setDeepLinkTab(tabParam as TabKey);
     }
-  }, [nodeParam, tabParam]);
+  }
 
   // --- bootstrap: nodes + obs status -----------------------------------
   useEffect(() => {

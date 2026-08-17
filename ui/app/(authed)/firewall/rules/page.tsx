@@ -382,20 +382,37 @@ function AddRuleForm({
 
   // Apply an editing rule when one is set. Takes precedence over preset since
   // edit mode is the explicit, in-progress action.
+  // Prefill is adjusted DURING RENDER, not from an effect: React documents this
+  // for "a prop changed and state must follow it", and it re-renders before
+  // paint so the operator never sees the previous rule's values flash in the
+  // form. Setting this state from an effect was a synchronous setState on
+  // effect entry (react-hooks/set-state-in-effect).
+  //
+  // `appliedEditing`/`appliedPreset` record what has already been applied, so
+  // the operator can keep typing afterwards without being overwritten on every
+  // render.
+  const [appliedEditing, setAppliedEditing] = useState(editing);
+  if (appliedEditing !== editing) {
+    setAppliedEditing(editing);
+    if (editing) {
+      const s = editing.spec as FirewallRuleSpec;
+      setName(editing.name);
+      setSrc(s.src);
+      setDest(s.dest ?? '');
+      setSrcIp(s.srcIp ?? '');
+      setSrcPort(s.srcPort ?? '');
+      setDestIp(s.destIp ?? '');
+      setDestPort(s.destPort ?? '');
+      setProtocol((s.proto ?? 'any') as FirewallRuleProto);
+      setTarget(s.target);
+      setLog(s.log ?? false);
+      setErr(null);
+    }
+  }
+
+  // Focus stays in an effect — it is a real DOM side effect, not state.
   useEffect(() => {
     if (!editing) return;
-    const s = editing.spec as FirewallRuleSpec;
-    setName(editing.name);
-    setSrc(s.src);
-    setDest(s.dest ?? '');
-    setSrcIp(s.srcIp ?? '');
-    setSrcPort(s.srcPort ?? '');
-    setDestIp(s.destIp ?? '');
-    setDestPort(s.destPort ?? '');
-    setProtocol((s.proto ?? 'any') as FirewallRuleProto);
-    setTarget(s.target);
-    setLog(s.log ?? false);
-    setErr(null);
     requestAnimationFrame(() => document.getElementById('rule-name')?.focus());
   }, [editing]);
 
@@ -403,24 +420,29 @@ function AddRuleForm({
   // same template clicked twice still resets the form. Skip when editing —
   // RulesPage clears `preset` when entering edit mode, but a stale ref could
   // still fire on a render race.
-  useEffect(() => {
-    if (!preset || editing) return;
-    const p = preset.value;
-    setName(p.name ?? '');
-    setSrc(p.src);
-    setDest(p.dest ?? '');
-    setSrcIp(p.srcIp ?? '');
-    setSrcPort(p.srcPort ?? '');
-    setDestIp(p.destIp ?? '');
-    setDestPort(p.destPort ?? '');
-    setProtocol((p.proto ?? 'any') as FirewallRuleProto);
-    setTarget(p.target);
-    setLog(p.log ?? false);
-    setErr(null);
-    if (preset.needs) {
-      const fieldId = 'rule-' + preset.needs;
-      requestAnimationFrame(() => document.getElementById(fieldId)?.focus());
+  const [appliedPreset, setAppliedPreset] = useState(preset);
+  if (appliedPreset !== preset) {
+    setAppliedPreset(preset);
+    if (preset && !editing) {
+      const p = preset.value;
+      setName(p.name ?? '');
+      setSrc(p.src);
+      setDest(p.dest ?? '');
+      setSrcIp(p.srcIp ?? '');
+      setSrcPort(p.srcPort ?? '');
+      setDestIp(p.destIp ?? '');
+      setDestPort(p.destPort ?? '');
+      setProtocol((p.proto ?? 'any') as FirewallRuleProto);
+      setTarget(p.target);
+      setLog(p.log ?? false);
+      setErr(null);
     }
+  }
+
+  useEffect(() => {
+    if (!preset || editing || !preset.needs) return;
+    const fieldId = 'rule-' + preset.needs;
+    requestAnimationFrame(() => document.getElementById(fieldId)?.focus());
   }, [preset, editing]);
 
   async function submit(e: React.FormEvent) {

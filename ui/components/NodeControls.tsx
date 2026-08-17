@@ -17,7 +17,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { CSSProperties, ElementType } from 'react';
 import {
   bmcPower,
@@ -245,32 +245,47 @@ export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, 
   const consoleLossy = bmcCaps?.console?.lossy ?? false;
   const showBmcSection = canPower || canReset || canConsole;
   const [modal, setModal] = useState<'reboot' | 'power-off' | 'power-on' | 'reset' | 'remove' | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [bmcState, setBmcState] = useState<BMCPowerState>('unknown');
   const [removeImpact, setRemoveImpact] = useState<NodeRemovalImpact | null>(null);
   const [impactErr, setImpactErr] = useState<string | null>(null);
 
   const nodeId = node?.id ?? null;
 
+  // busy/err/bmcState are all keyed by the node they describe, so switching
+  // selection DERIVES a clean slate instead of writing one from an effect —
+  // both the "clear transient error" effect and the setBmcState('unknown')
+  // reset were synchronous setState on effect entry (set-state-in-effect).
+  const [transient, setTransient] = useState<{ node: string | null; busy: string | null; err: string | null }>(
+    { node: '', busy: null, err: null },
+  );
+  const [probe, setProbe] = useState<{ node: string | null; state: BMCPowerState } | null>(null);
+
+  const busy = transient.node === nodeId ? transient.busy : null;
+  const err = transient.node === nodeId ? transient.err : null;
+  const bmcState: BMCPowerState = probe && probe.node === nodeId ? probe.state : 'unknown';
+
+  const setBusy = useCallback(
+    (v: string | null) => setTransient((c) => ({ node: nodeId, busy: v, err: c.node === nodeId ? c.err : null })),
+    [nodeId],
+  );
+  const setErr = useCallback(
+    (v: string | null) => setTransient((c) => ({ node: nodeId, err: v, busy: c.node === nodeId ? c.busy : null })),
+    [nodeId],
+  );
+
   // BMC power state for the selected node: seed via REST, then track live.
   // Gated per-node on the power capability — no advertised path means no
   // power state to poll and no controls to render. See lib/bmc.ts.
   useEffect(() => {
-    if (!nodeId || !canPower) {
-      setBmcState('unknown');
-      return;
-    }
+    if (!nodeId || !canPower) return;
     let active = true;
-    setBmcState('unknown');
     getBMCStatus(nodeId)
       .then((s) => {
-        if (active) setBmcState(s.powerState);
+        if (active) setProbe({ node: nodeId, state: s.powerState });
       })
       .catch(() => {});
     const close = openBMCWS((ev) => {
       if (ev.targetNodeId !== nodeId) return;
-      if (ev.state) setBmcState(ev.state);
+      if (ev.state) setProbe({ node: nodeId, state: ev.state });
     });
     return () => {
       active = false;
@@ -278,11 +293,7 @@ export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, 
     };
   }, [nodeId, canPower]);
 
-  // Clear transient action error when selection changes.
-  useEffect(() => {
-    setErr(null);
-    setBusy(null);
-  }, [nodeId]);
+  // (transient busy/err clear themselves: they are keyed by node above.)
 
   const isOnline = node?.status === 'online';
   const isControlPlane = node?.role === 'controlplane';

@@ -103,18 +103,19 @@ function EnrollNodeForm({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!nodeId && candidates.length > 0) setNodeId(candidates[0].id);
-  }, [candidates, nodeId]);
+  // Default selection DERIVED rather than written from an effect — "nothing
+  // chosen yet" falls back to the first candidate. Writing it was a synchronous
+  // setState on effect entry (set-state-in-effect).
+  const selectedNodeId = nodeId || (candidates[0]?.id ?? '');
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!nodeId) return;
+    if (!selectedNodeId) return;
     setBusy(true);
     setErr(null);
     try {
       const cidrs = routes.split(',').map((s) => s.trim()).filter(Boolean);
-      const job = await enrollMeshNode(nodeId, cidrs);
+      const job = await enrollMeshNode(selectedNodeId, cidrs);
       setRoutes('');
       // Poll the enroll job to a terminal state before refreshing. The saga
       // runs async (the agent restarts tailscaled, runs `tailscale up`, then
@@ -153,7 +154,7 @@ function EnrollNodeForm({
 
   return (
     <form onSubmit={submit} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-      <Select value={nodeId} onChange={(e) => setNodeId(e.target.value)} style={{ minWidth: 180 }}>
+      <Select value={selectedNodeId} onChange={(e) => setNodeId(e.target.value)} style={{ minWidth: 180 }}>
         {candidates.map((n) => (
           <option key={n.id} value={n.id}>
             {n.id} ({n.role})
@@ -166,7 +167,7 @@ function EnrollNodeForm({
         onChange={(e) => setRoutes(e.target.value)}
         style={{ flex: '1 1 240px' }}
       />
-      <Btn type="submit" variant="primary" disabled={busy || !nodeId}>
+      <Btn type="submit" variant="primary" disabled={busy || !selectedNodeId}>
         {busy ? 'ENROLLING…' : 'ENROLL NODE'}
       </Btn>
       {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
