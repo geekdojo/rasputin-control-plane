@@ -130,7 +130,6 @@ export default function UpdatesPage() {
       closePerNode();
       closeSystem();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function refresh() {

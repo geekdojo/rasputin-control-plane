@@ -192,8 +192,14 @@ function seedToB64(seed: string): string {
     for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
     return btoa(bin);
   }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (globalThis as any).Buffer.from(seed, 'utf8').toString('base64');
+  // Node-only fallback (SSR / tests). Declared as the narrow shape actually
+  // used rather than `any`, so a typo in this branch — which no browser run
+  // ever exercises — is still a compile error.
+  const g = globalThis as unknown as {
+    Buffer?: { from(s: string, enc: string): { toString(enc: string): string } };
+  };
+  if (!g.Buffer) throw new Error('seedToB64: neither btoa nor Buffer is available');
+  return g.Buffer.from(seed, 'utf8').toString('base64');
 }
 
 // flashCommand builds the single line the operator pastes on their laptop to

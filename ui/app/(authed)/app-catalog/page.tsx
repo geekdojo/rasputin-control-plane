@@ -424,7 +424,6 @@ function InstallDrawer({
         .catch(() => setCompose(''));
     }
     if (!targetNode && deployTargets.length > 0) setTargetNode(deployTargets[0].id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function install() {

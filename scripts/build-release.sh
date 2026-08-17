@@ -50,8 +50,19 @@ ARCHES="amd64 arm64"
 # Web UI: one static export, shared by every api tarball (it's plain
 # HTML/JS — nothing arch-specific). `npm ci` keeps the build reproducible
 # from package-lock.json.
+#
+# eslint runs here rather than only in ci.yml so the RELEASE path is gated too,
+# and so a local release build is gated identically — the deps are already
+# installed at this point, so it costs one command and no second npm ci.
+#
+# Errors fail the build; warnings print and do not. That split is deliberate:
+# the react-hooks/exhaustive-deps warnings are kept deliberately visible as
+# pointers to investigate if the UI misbehaves (2026-08-16), and turning them
+# into blockers would only get them suppressed again — which is exactly the
+# state this replaced, nine eslint-disable comments waiving rules for a linter
+# that was never installed.
 echo ">> building web UI (next static export)"
-( cd "$ROOT/ui" && npm ci --no-audit --no-fund && npm run build )
+( cd "$ROOT/ui" && npm ci --no-audit --no-fund && npm run lint && npm run build )
 [ -f "$ROOT/ui/out/index.html" ] || { echo "ui build produced no out/index.html" >&2; exit 1; }
 cp -R "$ROOT/ui/out" "$DIST/ui"
 

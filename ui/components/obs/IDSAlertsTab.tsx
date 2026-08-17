@@ -14,7 +14,7 @@ import { RefreshCw, ShieldAlert } from 'lucide-react';
 import { getObsLogs } from '../../lib/api';
 import type { LogEntry } from '../../lib/api';
 import type { Node } from '../../lib/types';
-import { Btn, DIM, FG, HAIR, HAIR_SOFT, Hint, PANEL } from '../kit';
+import { Btn, DIM, FG, HAIR_SOFT, Hint, PANEL } from '../kit';
 import { accentA, MONO } from '../ui-theme';
 
 interface IDSAlertsTabProps {
@@ -162,7 +162,7 @@ export function IDSAlertsTab({ node, range, obsEnabled }: IDSAlertsTabProps) {
             NO ALERTS IN RANGE
           </span>
           <Hint style={{ maxWidth: 360, textAlign: 'center' }}>
-            snort3 hasn't matched any ET Open signature on this firewall in the selected
+            snort3 hasn&apos;t matched any ET Open signature on this firewall in the selected
             range. Generate a known-signature hit (e.g. <code>curl http://testmynids.org/uid/index.html</code>{' '}
             from a LAN client) to verify the pipeline end-to-end.
           </Hint>

@@ -190,7 +190,6 @@ function BMCSection() {
 
   useEffect(() => {
     void reload();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Discovery, not a form field. The probe runs on the BMC-host agent

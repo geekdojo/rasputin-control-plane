@@ -71,7 +71,6 @@ export default function TasksPage() {
       active = false;
       close();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -81,7 +80,6 @@ export default function TasksPage() {
       return;
     }
     refreshDetail(expanded);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded]);
 
   function refreshDetail(id: string) {

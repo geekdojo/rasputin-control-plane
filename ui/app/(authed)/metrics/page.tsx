@@ -198,7 +198,7 @@ function MetricsPageInner() {
     return () => {
       cancelled = true;
     };
-  }, [nodeIds, range, status?.state]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [nodeIds, range, status?.state]);
 
   const refresh = () => {
     // Manual re-fetch for the impatient operator. The effect above
