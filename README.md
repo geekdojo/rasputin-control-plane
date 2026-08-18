@@ -1,7 +1,7 @@
 # rasputin-control-plane
 
 [![CI](https://github.com/geekdojo/rasputin-control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/geekdojo/rasputin-control-plane/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/geekdojo/rasputin-control-plane?include_prereleases&label=release)](https://github.com/geekdojo/rasputin-control-plane/releases)
+[![Release](https://img.shields.io/github/v/release/geekdojo/rasputin-control-plane?label=release)](https://github.com/geekdojo/rasputin-control-plane/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-E8590C.svg)](LICENSE)
 
 The brain of **Rasputin** — an open-source homelab cluster system: a small
