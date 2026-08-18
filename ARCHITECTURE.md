@@ -105,6 +105,16 @@ and **commits on success or rolls back to the previous slot on failure**.
 Bundles are verified against a CA baked into every image; fleet updates roll
 node-by-node, never in parallel, with the firewall last.
 
+The **firewall** does not run RAUC (it isn't packaged for OpenWrt), so it
+installs a bare rootfs squashfs itself and verifies the publisher signature
+itself: the release pipeline publishes a detached CMS `.sig` beside the
+artifact, the control plane stages it with the bundle, and the node checks it
+against the same baked root before writing a byte to the inactive slot. It
+fails closed — a missing or unverifiable signature aborts the update rather
+than falling back to the checksum, which authenticates the transport and not
+the publisher. `rasputin-agent verify-artifact` runs the same check by hand for
+the manual `sysupgrade` path.
+
 Bootloader integration differs per arch, honestly:
 
 - **amd64:** GRUB with a real boot counter — bootloader-level rollback even
@@ -176,7 +186,6 @@ updates with health-check rollback (both bootloader backends,
 hardware-validated), firewall intent apply + drift detection, IDS alert
 pipeline, mesh bootstrap, Tier 1 observability, app deploys, and the web UI.
 
-Not there yet (non-exhaustive): dm-verity rootfs integrity, signature
-verification of the firewall OTA artifact (SHA-over-mesh-TLS is the current
-integrity gate), a general resumable-saga engine, k3s/Incus advanced modes,
-HA control plane. Expect sharp edges everywhere.
+Not there yet (non-exhaustive): dm-verity rootfs integrity, a general
+resumable-saga engine, k3s/Incus advanced modes, HA control plane. Expect sharp
+edges everywhere.

@@ -263,9 +263,18 @@ func updateDownload(store *Store, cfg Config) jobs.DoFn {
 		if remoteLoopbackBundleURL(bundleURL, cfg.SelfNodeID, spec.NodeID) {
 			return nil, fmt.Errorf("refusing to send loopback bundle URL %q to remote node %s: the control plane derived a localhost public-base-url — set RASPUTIN_CLUSTER_ID (or RASPUTIN_PUBLIC_BASE_URL) in /var/lib/rasputin/node.env and restart rasputin-api (control-plane #75)", bundleURL, spec.NodeID)
 		}
+		// The detached signature's URL goes to every node regardless of
+		// backend: the ones whose artifact carries its own signature ignore it,
+		// and the firewall — which installs a bare squashfs by hand — fetches
+		// it first and refuses to install without it. Sent unconditionally
+		// rather than gated on the node's role because the api would be
+		// deciding, from its own record, whether a node needs to check its
+		// signature; the node is the one that knows, and the node is the one
+		// being defended. geekdojo/geekdojo-brain#154.
 		cmd, _ := json.Marshal(proto.UpdateDownloadCmd{
 			BundleID:       spec.BundleSHA256,
 			URL:            bundleURL,
+			SigURL:         bundleURL + "/sig",
 			ExpectedSHA256: spec.BundleSHA256,
 			SizeBytes:      bundle.SizeBytes,
 		})

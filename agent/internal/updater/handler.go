@@ -99,7 +99,7 @@ func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fa
 			payload, _ := json.Marshal(ev)
 			_ = nc.Publish(proto.UpdateDownloadProgressSubject(nodeID), payload)
 		}
-		localPath, sha, err := backend.Download(ctx, cmd.BundleID, cmd.URL, cmd.ExpectedSHA256, cmd.SizeBytes, progress)
+		localPath, sha, err := backend.Download(ctx, cmd.BundleID, cmd.URL, cmd.SigURL, cmd.ExpectedSHA256, cmd.SizeBytes, progress)
 		if err != nil {
 			bus.Respond(m, proto.UpdateDownloadAck{OK: false, SHA256: sha, Detail: err.Error()})
 			return

@@ -8,8 +8,8 @@ import (
 )
 
 // TestOpenWrtPruneBundles verifies the OpenWrt A/B bundle store keeps only the
-// target's rootfs artifact AND its .version sidecar, drops other bundles plus
-// stale partial downloads, and leaves unrelated files alone — the same
+// target's rootfs artifact AND its .version and .sig sidecars, drops other
+// bundles plus stale partial downloads, and leaves unrelated files alone — the same
 // transient-cache contract RAUCBackend has (see TestPruneBundles), but for the
 // OpenWrt backend, whose pruneBundles shipped with every branch NOT COVERED.
 //
@@ -29,11 +29,16 @@ func TestOpenWrtPruneBundles(t *testing.T) {
 	for _, f := range []string{
 		"keepme.rootfs",         // the target — must survive
 		"keepme.rootfs.version", // its version sidecar — must survive
-		"old1.rootfs",           // prior bundle — prune
-		"old2.rootfs.version",   // prior sidecar — prune
-		"download-9999.tmp",     // stale partial download — prune
-		"state.json",            // unrelated — keep
-		"notes.txt",             // unrelated — keep
+		// Its detached signature — must survive. Install reads this back off
+		// disk, so pruning it would fail the update closed with "signature
+		// missing", which reads like tampering rather than like housekeeping.
+		"keepme.rootfs.sig",
+		"old1.rootfs",         // prior bundle — prune
+		"old1.rootfs.sig",     // prior signature — prune
+		"old2.rootfs.version", // prior sidecar — prune
+		"download-9999.tmp",   // stale partial download — prune
+		"state.json",          // unrelated — keep
+		"notes.txt",           // unrelated — keep
 	} {
 		if err := os.WriteFile(filepath.Join(bundles, f), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
@@ -52,7 +57,7 @@ func TestOpenWrtPruneBundles(t *testing.T) {
 		got = append(got, e.Name())
 	}
 	sort.Strings(got)
-	want := []string{"keepme.rootfs", "keepme.rootfs.version", "notes.txt", "state.json"}
+	want := []string{"keepme.rootfs", "keepme.rootfs.sig", "keepme.rootfs.version", "notes.txt", "state.json"}
 	if len(got) != len(want) {
 		t.Fatalf("after prune: got %v, want %v", got, want)
 	}

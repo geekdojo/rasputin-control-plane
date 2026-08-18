@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,15 +22,37 @@ var fwRootfsFixture = []byte("FW-ROOTFS-SQUASHFS-FIXTURE")
 
 func fwRootfsSHA() string { s := sha256.Sum256(fwRootfsFixture); return hex.EncodeToString(s[:]) }
 
+// The detached CMS signature published beside the rootfs. Opaque bytes here on
+// purpose: the api stages this blob and never opens it — verification happens
+// on the node, against the root baked into its own image, because in this
+// threat model the api is the component being defended against
+// (geekdojo/geekdojo-brain#154).
+var fwRootfsSigFixture = []byte("DETACHED-CMS-SIGNATURE-FIXTURE")
+
+// fakeReleaseOpts bends the fake release away from a well-formed one.
+type fakeReleaseOpts struct {
+	// omitFirewallSig publishes a firewall release with no .sig — the shape a
+	// release cut before the pipeline signed rootfs artifacts has.
+	omitFirewallSig bool
+}
+
 // fakeReleaseServer serves a GitHub-Releases-shaped API plus the manifest and
 // bundle assets, so the github public source can be exercised end-to-end with
 // RASPUTIN_RELEASE_API_BASE pointed at it. Each component is read from its own
 // source repo (ADR-0002), tagged with the bare version — no os-/fw- mirror
 // prefix.
 func fakeReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *httptest.Server {
+	return fakeReleaseServerOpts(t, bundle, bundleSHA, fakeReleaseOpts{})
+}
+
+func fakeReleaseServerOpts(t *testing.T, bundle []byte, bundleSHA string, opts fakeReleaseOpts) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	var base string // set after the server starts so asset URLs are absolute
+	fwSigAsset := "rasputin-fw-n100-2026.07.1-dev.20.rootfs.sig"
+	if opts.omitFirewallSig {
+		fwSigAsset = ""
+	}
 
 	mux.HandleFunc("/repos/geekdojo/rasputin-os/releases", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{{
@@ -44,6 +69,7 @@ func fakeReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *httptest.
 			"assets": []map[string]any{
 				{"name": "manifest.json", "browser_download_url": base + "/fw-manifest"},
 				{"name": "rasputin-fw-n100-2026.07.1-dev.20.rootfs", "browser_download_url": base + "/fw-asset"},
+				{"name": "rasputin-fw-n100-2026.07.1-dev.20.rootfs.sig", "browser_download_url": base + "/fw-sig"},
 			},
 		}})
 	})
@@ -65,6 +91,7 @@ func fakeReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *httptest.
 				Image:  "rasputin-fw-n100-2026.07.1-dev.20-ab.img.gz",
 				Rootfs: "rasputin-fw-n100-2026.07.1-dev.20.rootfs", RootfsSha256: fwRootfsSHA(),
 				RootfsSizeBytes: int64(len(fwRootfsFixture)),
+				RootfsSig:       fwSigAsset,
 			}},
 		})
 	})
@@ -73,6 +100,9 @@ func fakeReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *httptest.
 	})
 	mux.HandleFunc("/fw-asset", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(fwRootfsFixture)
+	})
+	mux.HandleFunc("/fw-sig", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(fwRootfsSigFixture)
 	})
 
 	srv := httptest.NewServer(mux)
@@ -387,5 +417,93 @@ func TestPullFirewall(t *testing.T) {
 	}
 	if got, _ := f.srv.updater.GetBundle(f.ctx, fwRootfsSHA()); got == nil {
 		t.Fatalf("pulled firewall rootfs %s not in store", fwRootfsSHA())
+	}
+}
+
+// --- publisher signature staging (geekdojo/geekdojo-brain#154) --------------
+
+// Pulling a firewall release must stage the detached signature beside the blob
+// and serve it, because the node fetches it BEFORE the artifact and refuses to
+// install without one.
+func TestPullFirewallStagesTheDetachedSignature(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	bundle, sha := buildBundleFixture(t, f)
+	rel := fakeReleaseServer(t, bundle, sha)
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+
+	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("pull: %d (%s)", rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+
+	onDisk, err := os.ReadFile(filepath.Join(f.bundleDir, fwRootfsSHA()+".sig"))
+	if err != nil {
+		t.Fatalf("signature not staged beside the blob: %v", err)
+	}
+	if !bytes.Equal(onDisk, fwRootfsSigFixture) {
+		t.Errorf("staged signature = %q", onDisk)
+	}
+
+	// Served, unauthenticated, exactly like the blob beside it — the agent
+	// fetches this before it has done anything else.
+	served := f.do(t, http.MethodGet, "/api/bundles/"+fwRootfsSHA()+"/sig", "", nil)
+	if served.Code != http.StatusOK {
+		t.Fatalf("GET sig: %d (%s)", served.Code, strings.TrimSpace(served.Body.String()))
+	}
+	if !bytes.Equal(served.Body.Bytes(), fwRootfsSigFixture) {
+		t.Errorf("served signature = %q", served.Body.String())
+	}
+
+	// Deleting the bundle takes its signature with it.
+	if del := f.do(t, http.MethodDelete, "/api/bundles/"+fwRootfsSHA(), "", c); del.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", del.Code)
+	}
+	if _, err := os.Stat(filepath.Join(f.bundleDir, fwRootfsSHA()+".sig")); !os.IsNotExist(err) {
+		t.Errorf("signature outlived its bundle: %v", err)
+	}
+}
+
+// A release cut before the pipeline signed rootfs artifacts. Staging it would
+// hand the operator a bundle that looks deployable and is refused by the node
+// at the last step, so the pull fails the artifact instead.
+func TestPullFirewallRefusesAnUnsignedRelease(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	bundle, sha := buildBundleFixture(t, f)
+	rel := fakeReleaseServerOpts(t, bundle, sha, fakeReleaseOpts{omitFirewallSig: true})
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+
+	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
+	if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {
+		t.Fatalf("pull reported success for an unsigned release: %d (%s)", rec.Code, rec.Body.String())
+	}
+	var res pullResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(res.Staged) != 0 {
+		t.Errorf("staged %d artifacts from an unsigned release", len(res.Staged))
+	}
+	if len(res.Failed) != 1 || !strings.Contains(res.Failed[0].Error, "no detached signature") {
+		t.Errorf("failure should name the missing signature, got %+v", res.Failed)
+	}
+}
+
+// The 404 is load-bearing: the agent turns exactly this into "re-pull the
+// release so the .sig is staged with it", which is a different instruction from
+// "this artifact has been tampered with".
+func TestGetBundleSigNotStaged(t *testing.T) {
+	f := newAPIFixture(t)
+	rec := f.do(t, http.MethodGet, "/api/bundles/"+strings.Repeat("a", 64)+"/sig", "", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "re-pull") {
+		t.Errorf("404 body should tell the operator what to do: %s", rec.Body.String())
+	}
+	// A path that is not a sha at all is a client error, not a missing file.
+	if bad := f.do(t, http.MethodGet, "/api/bundles/zzz/sig", "", nil); bad.Code != http.StatusBadRequest {
+		t.Errorf("non-sha path: want 400, got %d", bad.Code)
 	}
 }

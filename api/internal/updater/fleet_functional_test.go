@@ -693,3 +693,62 @@ func formatGates(run fleetRun) string {
 	}
 	return b.String()
 }
+
+// ----- the publisher-signature plumbing (geekdojo/geekdojo-brain#154) -------
+
+// TestFleetFunctional_EveryDownloadCarriesASignatureURL asserts that the
+// signature's location actually crosses the bus to every node in a full
+// rollout.
+//
+// This is here rather than in a unit test because the bug it guards against is
+// specifically a plumbing bug, and plumbing bugs are invisible from either end.
+// The manifest field the firewall pipeline publishes — RootfsSig — sat modelled
+// and unread in the api for its entire life, which is how the firewall came to
+// apply artifacts nobody had authenticated. A unit test on the api proves the
+// field is populated; a unit test on the agent proves the field is honoured;
+// only something that runs the real saga over a real bus proves the two are
+// connected.
+//
+// Every node gets one, not only the firewall: the api does not decide from its
+// own records whether a node needs to check its signature. The node knows, and
+// the node is the one being defended.
+func TestFleetFunctional_EveryDownloadCarriesASignatureURL(t *testing.T) {
+	f := newFleet(t, bitscopeShaped(), osBundles(fleetVersion))
+	run := f.run(releaseSpec(fleetVersion))
+
+	if run.Status != jobs.StatusSucceeded {
+		t.Fatalf("parent job = %s (%s)", run.Status, run.Error)
+	}
+
+	checked := 0
+	for _, id := range run.nodeIDs() {
+		n := f.node(t, id)
+		n.mu.Lock()
+		urls := append([]string(nil), n.sigURLs...)
+		n.mu.Unlock()
+
+		if len(urls) == 0 {
+			t.Errorf("%s: updated without ever receiving a download command", id)
+			continue
+		}
+		for _, u := range urls {
+			// Counted before it is judged: "we saw commands and they were all
+			// wrong" and "we saw no commands at all" are different failures and
+			// the second one must not be able to masquerade as the first.
+			checked++
+			if u == "" {
+				t.Errorf("%s: download command carried no signature URL", id)
+				continue
+			}
+			// It must address THIS bundle's signature. A URL that resolves to
+			// some other artifact's signature would fail verification on the
+			// node and read as tampering.
+			if !strings.HasSuffix(u, "/sig") || !strings.Contains(u, "/api/bundles/") {
+				t.Errorf("%s: signature URL %q does not address the bundle sig endpoint", id, u)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no download commands were observed; this test asserted nothing")
+	}
+}

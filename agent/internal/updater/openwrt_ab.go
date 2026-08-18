@@ -16,7 +16,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/artifactsig"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -68,9 +70,9 @@ type OpenWrtABBackend struct {
 	writeSlot func(ctx context.Context, src, dev string, progressFn func(phase string, percent int)) error
 	// doReboot performs the (backgrounded) reboot after delaySeconds.
 	doReboot func(delaySeconds int)
-	// verifySig verifies the artifact's signature before install. Default is
-	// a skip-with-warning until artifact signing is wired end-to-end (see the
-	// design doc's hardening note); overridden in tests.
+	// verifySig verifies the artifact's detached CMS signature against the
+	// baked publisher trust root before install, and fails the install if it
+	// cannot. Overridden in tests, which have no baked trust root.
 	verifySig func(ctx context.Context, rootfsPath string) error
 }
 
@@ -225,10 +227,15 @@ func (o *OpenWrtABBackend) pruneBundles(keepID string) {
 	keep := keepID + ".rootfs"
 	for _, e := range ents {
 		name := e.Name()
-		if name == keep || name == keep+".version" {
+		// The detached signature is kept with its artifact: Install reads it
+		// back from disk, and a pruned .sig would fail the update closed for a
+		// reason ("signature missing") that points at tampering rather than at
+		// housekeeping.
+		if name == keep || name == keep+".version" || name == keep+".sig" {
 			continue
 		}
-		if strings.HasSuffix(name, ".rootfs") || strings.HasSuffix(name, ".version") || strings.HasPrefix(name, "download-") {
+		if strings.HasSuffix(name, ".rootfs") || strings.HasSuffix(name, ".version") ||
+			strings.HasSuffix(name, ".sig") || strings.HasPrefix(name, "download-") {
 			if err := os.Remove(filepath.Join(dir, name)); err != nil {
 				log.Printf("rasputin-agent: prune bundle %s: %v", name, err)
 			}
@@ -236,10 +243,25 @@ func (o *OpenWrtABBackend) pruneBundles(keepID string) {
 	}
 }
 
-func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, expectedSHA string, sizeBytes int64,
+func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, expectedSHA string, sizeBytes int64,
 	progressFn func(int64, int64)) (string, string, error) {
 	dest := o.bundlePath(bundleID)
 	o.pruneBundles(bundleID)
+
+	// The signature comes FIRST, before half a gigabyte moves. Install will
+	// refuse without it either way (defaultVerifySig fails closed), so fetching
+	// the artifact first would only mean spending the whole transfer to arrive
+	// at the same refusal. An empty sigURL means the control plane is older
+	// than this check and has no signature to offer — that is a hard failure,
+	// not a reason to fall back to the sha gate. geekdojo/geekdojo-brain#154.
+	if sigURL == "" {
+		return "", "", fmt.Errorf("openwrt-ab download: the control plane sent no signature URL for bundle %s; "+
+			"this node will not install an unsigned artifact — update the control plane", bundleID)
+	}
+	if err := o.downloadSignature(ctx, sigURL, artifactsig.SigPathFor(dest)); err != nil {
+		return "", "", err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", "", err
@@ -297,6 +319,50 @@ func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, expected
 	}
 	return dest, observed, nil
 }
+
+// downloadSignature fetches the detached CMS signature to dest. It is a small
+// fixed-size fetch — a real one is ~1.6 KiB — so it is read whole and capped,
+// rather than streamed like the artifact.
+//
+// A 404 here has a specific and actionable meaning worth saying out loud: the
+// api staged this bundle before it knew to stage signatures alongside, so the
+// fix is to re-pull the release rather than to go looking for tampering.
+func (o *OpenWrtABBackend) downloadSignature(ctx context.Context, sigURL, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", sigURL, nil)
+	if err != nil {
+		return fmt.Errorf("openwrt-ab download: signature request: %w", err)
+	}
+	resp, err := o.httpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("openwrt-ab download: fetch signature %s: %w", sigURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("openwrt-ab download: the control plane has no signature staged for this artifact "+
+			"(%s returned 404); re-pull the release so the .sig is staged with it", sigURL)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("openwrt-ab download: fetch signature %s: http %d", sigURL, resp.StatusCode)
+	}
+	der, err := io.ReadAll(io.LimitReader(resp.Body, maxSignatureBytes+1))
+	if err != nil {
+		return fmt.Errorf("openwrt-ab download: read signature %s: %w", sigURL, err)
+	}
+	if len(der) == 0 {
+		return fmt.Errorf("openwrt-ab download: signature %s is empty", sigURL)
+	}
+	if len(der) > maxSignatureBytes {
+		return fmt.Errorf("openwrt-ab download: signature %s exceeds %d bytes", sigURL, maxSignatureBytes)
+	}
+	if err := os.WriteFile(dest, der, 0o644); err != nil {
+		return fmt.Errorf("openwrt-ab download: write signature %s: %w", dest, err)
+	}
+	return nil
+}
+
+// maxSignatureBytes bounds the detached-signature fetch. Mirrors the cap in
+// artifactsig, which is the code that will ultimately parse these bytes.
+const maxSignatureBytes = 1 << 20
 
 func (o *OpenWrtABBackend) Install(ctx context.Context, bundleID, localPath string, targetSlot proto.UpdateSlot,
 	progressFn func(string, int)) (string, error) {
@@ -684,13 +750,35 @@ func (o *OpenWrtABBackend) defaultReboot(delaySeconds int) {
 	}()
 }
 
-// defaultVerifySig is a placeholder: the release pipeline now signs the rootfs
-// artifact (detached CMS ${rootfs}.sig, published alongside it), but on-device
-// verification against the baked /etc/rasputin/trust/root-ca.pem is not yet
-// wired — the SHA-over-mesh-TLS gate in Download is the current integrity
-// guarantee. It logs once and passes. Tracked as an open item in the
-// firewall backlog.
+// defaultVerifySig verifies the detached CMS signature the release pipeline
+// publishes as ${rootfs}.sig against the publisher root CA baked into the image
+// — the check that stands between a hostile artifact and the partition that
+// terminates the WAN.
+//
+// ⚠️ This used to log one line and `return nil`. For as long as it did, the ONLY
+// integrity gate on a firewall update was the sha256 compare in Download, and
+// that compare authenticates the TRANSPORT, not the PUBLISHER: it proves the
+// bytes arrived from the api unaltered, and says nothing about whether the api
+// was serving a genuine Rasputin artifact. A compromised api, a poisoned
+// staging path or a malicious operator reached the slot unchallenged. The trust
+// root had been baked and plumbed (RASPUTIN_TRUST_ROOT) the whole time; nothing
+// read it. geekdojo/geekdojo-brain#154, Tier 0 rank 1 of the STRIDE model.
+//
+// It FAILS CLOSED, and that is the requirement rather than an implementation
+// detail: a missing .sig, an unreadable trust root or a chain that does not
+// build all abort the install. None of them degrade back to the sha gate — a
+// degradable gate is one an attacker chooses to degrade. The sha compare stays
+// where it is, as the cheap corruption check it always was.
 func defaultVerifySig(ctx context.Context, rootfsPath string) error {
-	log.Printf("rasputin-agent: openwrt-ab: artifact signature verification not yet wired — relying on SHA gate (see firewall-image.md)")
+	res, err := artifactsig.VerifyDefault(rootfsPath)
+	if err != nil {
+		return err
+	}
+	// Attribution, not just "ok": an unattributed pass on a security gate is
+	// only marginally more useful than no gate when reading a bench log. The
+	// leaf expiry is here because the failure it eventually causes reads like
+	// tampering unless the operator knows the signer simply aged out.
+	log.Printf("rasputin-agent: openwrt-ab: artifact signature OK — signer %q (issued by %q, expires %s), %s %s",
+		res.Signer, res.Issuer, res.NotAfter.UTC().Format(time.RFC3339), res.DigestAlg, res.DigestHex)
 	return nil
 }

@@ -139,7 +139,11 @@ func (m *MockBackend) Precheck(ctx context.Context) (*proto.UpdatePrecheckAck, e
 	}, nil
 }
 
-func (m *MockBackend) Download(ctx context.Context, bundleID, url, expectedSHA string, sizeBytes int64,
+// Download ignores sigURL: the mock backend exists for dev and CI, where the
+// artifact is a synthetic blob nobody signed. It is never selected on the
+// firewall — main.go picks it only by explicit RASPUTIN_UPDATE_BACKEND=mock —
+// so ignoring the signature here cannot weaken a shipping node.
+func (m *MockBackend) Download(ctx context.Context, bundleID, url, _, expectedSHA string, sizeBytes int64,
 	progressFn func(bytesCompleted, bytesTotal int64)) (string, string, error) {
 
 	if os.Getenv("RASPUTIN_UPDATE_FAIL_MODE") == "download" {
