@@ -930,7 +930,12 @@ function SystemUpdateButton({ bundle }: { bundle: Bundle }) {
 // Conflating them (the bug this fixes, #96) makes a node that is actively
 // updating read as one the run never touched — the opposite fact — on the exact
 // screen an operator watches during a rollout.
-type GridOutcome = NodeOutcome | 'running';
+// 'pending' is the second live-only state: a planned target the cascade has
+// not reached yet. It is NOT 'not-attempted', which is a verdict — the run
+// stopped short of this node and it is staying on its old slot. On a run still
+// in flight that verdict is not in yet, and rendering it would tell an operator
+// a rollout had given up on nodes it is about to reach.
+type GridOutcome = NodeOutcome | 'running' | 'pending';
 
 function outcomeColor(o: GridOutcome): string {
   switch (o) {
@@ -941,7 +946,7 @@ function outcomeColor(o: GridOutcome): string {
     case 'running':
       return ACCENT; // in flight right now
     default:
-      return DIM; // not-attempted — nothing happened to this node
+      return DIM; // not-attempted / pending — nothing has happened to this node
   }
 }
 
@@ -951,9 +956,60 @@ function outcomeLabel(o: GridOutcome): string {
       return 'UPDATING';
     case 'not-attempted':
       return 'NOT STARTED';
+    case 'pending':
+      return 'WAITING';
     default:
       return o.toUpperCase();
   }
+}
+
+type GridRow = Omit<NodeResult, 'outcome'> & { outcome: GridOutcome };
+
+// liveGrid is the report a run can show BEFORE the cascade step returns.
+//
+// The real grid is stashed in that step's result, so it does not exist until
+// the run is over — half an hour on a real fleet, which is exactly the window
+// an operator is watching. Falling back to the child jobs alone (what this
+// replaced) loses every dimension the report is for: child jobs carry a node
+// and a status and nothing else, so TIER and ARCH rendered blank for the whole
+// run, rows arrived in completion order, and a target with no child yet was
+// simply absent from a grid whose job is to account for the entire plan.
+//
+// The plan step's result is durable from the first second and carries all of
+// it. Joining the two gives the same shape the final grid has, which is also
+// what makes the transition to the real grid invisible when it lands.
+function liveGrid(targets: PlanTarget[], children: Job[], jobStatus: JobStatus): GridRow[] {
+  const rowFor = (c: Job): GridOutcome =>
+    c.status === 'succeeded' ? 'succeeded' : c.status === 'running' || c.status === 'queued' ? 'running' : 'failed';
+
+  // No plan targets: a job recorded before the plan step stashed them. Keep
+  // the old child-only shape rather than showing an empty report.
+  if (targets.length === 0) {
+    return children.map((c) => ({
+      nodeId: extractNodeId(c.spec),
+      outcome: rowFor(c),
+      childJobId: c.id,
+      detail: c.error,
+    }));
+  }
+
+  const byNode = new Map(children.map((c) => [extractNodeId(c.spec), c]));
+  const settled = jobStatus !== 'running' && jobStatus !== 'queued';
+  return targets.map((t) => {
+    const c = byNode.get(t.nodeId);
+    return {
+      nodeId: t.nodeId,
+      tier: t.tier,
+      compatible: t.compatible,
+      canary: t.canary,
+      // A target with no child on a run that has ENDED is a target the run
+      // never reached — the same verdict rebuildReport records. On a run still
+      // going it is simply next.
+      outcome: c ? rowFor(c) : settled ? 'not-attempted' : 'pending',
+      childJobId: c?.id,
+      detail: c?.error,
+    };
+  });
 }
 
 // skipColor separates the designed skips from the stranding. `firewall-sku`,
@@ -992,20 +1048,13 @@ function SystemUpdateRow({ job }: { job: Job }) {
   }, [job.id, job.status]);
 
   const cascade = stepResult<{ results?: NodeResult[] }>(steps, 'cascade');
-  const plan = stepResult<{ skipped?: SkippedNode[] }>(steps, 'plan');
+  const plan = stepResult<{ targets?: PlanTarget[]; skipped?: SkippedNode[] }>(steps, 'plan');
   const skipped = plan?.skipped ?? [];
 
-  // The grid is the cascade's when it has one. A run still in flight — or an
-  // older job from before the grid existed — falls back to the child jobs,
-  // which carry the node and the status but none of the dimensions.
-  const results: Array<Omit<NodeResult, 'outcome'> & { outcome: GridOutcome }> =
-    cascade?.results ??
-    children.map((c) => ({
-      nodeId: extractNodeId(c.spec),
-      outcome: c.status === 'succeeded' ? 'succeeded' : c.status === 'running' || c.status === 'queued' ? 'running' : 'failed',
-      childJobId: c.id,
-      detail: c.error,
-    }));
+  // The grid is the cascade's when it has one. Until then — the whole time a
+  // run is in flight — it is rebuilt from the plan and the child jobs, which
+  // is the same pair the api's own post-reboot resume rebuilds from.
+  const results: GridRow[] = cascade?.results ?? liveGrid(plan?.targets ?? [], children, job.status);
 
   const byChildId = new Map(children.map((c) => [c.id, c]));
   const count = (o: GridOutcome) => results.filter((r) => r.outcome === o).length;
@@ -1071,12 +1120,14 @@ function SystemUpdateRow({ job }: { job: Job }) {
             })}
             {/* Skipped nodes belong in the same report — a node left out is
                 part of what happened to the fleet — but they were never
-                targets, so they get no outcome and no timings. */}
+                targets, so they get no outcome and no timings. Their tier and
+                arch ARE known (the api carries them since #152); on a stranded
+                row the arch is the entire point of the row. */}
             {skipped.map((s) => (
               <tr key={`skip-${s.nodeId}`}>
                 <td style={{ ...tdStyle, color: DIM }}>{s.nodeId}</td>
-                <td style={{ ...tdStyle, color: DIM }}>—</td>
-                <td style={{ ...tdStyle, color: DIM }}>—</td>
+                <td style={{ ...tdStyle, color: DIM }}>{s.tier ?? '—'}</td>
+                <td style={{ ...tdStyle, color: DIM }}>{s.compatible ?? '—'}</td>
                 <td style={tdStyle}>
                   <Badge color={skipColor(s.reason)}>{s.reason === 'no-artifact-for-arch' ? 'STRANDED' : 'SKIPPED'}</Badge>
                 </td>

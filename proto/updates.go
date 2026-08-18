@@ -558,6 +558,19 @@ type SkippedNode struct {
 	NodeID string     `json:"nodeId"`
 	Reason SkipReason `json:"reason"`
 	Detail string     `json:"detail,omitempty"`
+	// Tier and Compatible are the node's role and the SKU it WOULD have taken.
+	// A skipped node is still a row of the same report as a target, and a
+	// report whose skipped half has no dimensions reads as broken data rather
+	// than as a deliberate omission — which is what a firewall run looked like
+	// on the bench, one populated row above six blank ones.
+	//
+	// Both are known at plan time and were simply dropped. Compatible carries
+	// most of the weight: on a SkipNoArtifactForArch row the arch the node
+	// needed is the whole content of the row, and Decision 11 exists to keep
+	// exactly that visible. Empty when the node reported an architecture with
+	// no known artifact — the honest answer there is that we do not know.
+	Tier       NodeRole `json:"tier,omitempty"`
+	Compatible string   `json:"compatible,omitempty"`
 }
 
 // NodeOutcome is what happened to ONE planned target of a fleet update.

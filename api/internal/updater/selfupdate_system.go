@@ -206,6 +206,15 @@ func finishResumed(
 		return
 	}
 
+	// Write the grid down before anything else touches the parent. Publishing
+	// it is not keeping it: the `completed` event below is ephemeral, and the
+	// UI reads job STEPS rather than the event stream, so a report that only
+	// ever exists as an event is a report nobody can come back to. Until this
+	// call the cascade step was left at `running` with a null result forever
+	// while its parent went `succeeded` — the grid lost for good, on precisely
+	// the runs that update the controlplane.
+	persistResumedCascade(ctx, jobStore, parentID, plan, grid)
+
 	var succeeded, failed, notAttempted int
 	for _, r := range grid {
 		switch r.Outcome {
@@ -254,6 +263,77 @@ func finishResumed(
 				len(stranded), ids))
 	default:
 		runner.FinishDeferred(ctx, parentID, true, "")
+	}
+}
+
+// persistResumedCascade closes the cascade step with the rebuilt grid, so a run
+// that survived the api's own reboot leaves the same durable record as one that
+// never rebooted.
+//
+// Best-effort by design: every failure here is logged and swallowed. The report
+// has already been rebuilt and is about to be published, and losing the parent's
+// terminal transition because a write failed would trade a degraded record for
+// a job stuck at `running` — strictly the worse of the two.
+//
+// CanaryFailure and BudgetSpent are deliberately left empty. Neither survives
+// the reboot, and neither can be inferred from the grid; a canary failure
+// aborts the run before self is ever reached, so it cannot reach this path at
+// all. A budget spent in an earlier tier CAN, and its `not-attempted` rows keep
+// the truthful-but-less-specific detail rebuildReport gives them rather than
+// the tier-budget wording the live cascade would have written.
+func persistResumedCascade(
+	ctx context.Context,
+	jobStore *jobs.Store,
+	parentID string,
+	plan systemPlanState,
+	grid []proto.NodeResult,
+) {
+	steps, err := jobStore.ListSteps(ctx, parentID)
+	if err != nil {
+		log.Printf("updater: fleet update %s: list steps to record the grid: %v", parentID, err)
+		return
+	}
+	var cascade *jobs.JobStep
+	for _, s := range steps {
+		if s.Name == "cascade" {
+			cascade = s
+			break
+		}
+	}
+	if cascade == nil {
+		log.Printf("updater: fleet update %s: no cascade step to record the grid on", parentID)
+		return
+	}
+	if cascade.Status != jobs.StepRunning {
+		// Already terminal — this resume is a re-run, or the cascade closed
+		// before the reboot landed. Its own result is the authoritative one.
+		return
+	}
+
+	var succeeded, failed, remaining []string
+	for _, r := range grid {
+		switch r.Outcome {
+		case proto.NodeOutcomeSucceeded:
+			succeeded = append(succeeded, r.NodeID)
+		case proto.NodeOutcomeFailed:
+			failed = append(failed, r.NodeID)
+		case proto.NodeOutcomeNotAttempted:
+			remaining = append(remaining, r.NodeID)
+		}
+	}
+	raw, err := json.Marshal(cascadeResult{
+		Succeeded: succeeded,
+		Failed:    failed,
+		Remaining: remaining,
+		Canaries:  plan.canaryIDs(),
+		Results:   grid,
+	})
+	if err != nil {
+		log.Printf("updater: fleet update %s: encode the rebuilt grid: %v", parentID, err)
+		return
+	}
+	if err := jobStore.MarkStepSucceeded(ctx, parentID, cascade.Seq, cascade.Attempt, raw, time.Now().UTC()); err != nil {
+		log.Printf("updater: fleet update %s: record the rebuilt grid: %v", parentID, err)
 	}
 }
 
