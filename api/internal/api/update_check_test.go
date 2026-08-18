@@ -34,6 +34,12 @@ type fakeReleaseOpts struct {
 	// omitFirewallSig publishes a firewall release with no .sig — the shape a
 	// release cut before the pipeline signed rootfs artifacts has.
 	omitFirewallSig bool
+	// sigAssetMissing has the manifest NAME a signature the release does not
+	// actually carry — a partially-uploaded release, where the manifest and the
+	// asset list disagree.
+	sigAssetMissing bool
+	// sigDownloadFails serves the signature asset as a 500.
+	sigDownloadFails bool
 }
 
 // fakeReleaseServer serves a GitHub-Releases-shaped API plus the manifest and
@@ -53,6 +59,13 @@ func fakeReleaseServerOpts(t *testing.T, bundle []byte, bundleSHA string, opts f
 	if opts.omitFirewallSig {
 		fwSigAsset = ""
 	}
+	// What the RELEASE carries, as opposed to what the manifest claims. They
+	// are the same name in every healthy release and deliberately different
+	// when sigAssetMissing is set.
+	fwSigAssetPublished := "rasputin-fw-n100-2026.07.1-dev.20.rootfs.sig"
+	if opts.sigAssetMissing {
+		fwSigAssetPublished = "some-other-file.txt"
+	}
 
 	mux.HandleFunc("/repos/geekdojo/rasputin-os/releases", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{{
@@ -69,7 +82,7 @@ func fakeReleaseServerOpts(t *testing.T, bundle []byte, bundleSHA string, opts f
 			"assets": []map[string]any{
 				{"name": "manifest.json", "browser_download_url": base + "/fw-manifest"},
 				{"name": "rasputin-fw-n100-2026.07.1-dev.20.rootfs", "browser_download_url": base + "/fw-asset"},
-				{"name": "rasputin-fw-n100-2026.07.1-dev.20.rootfs.sig", "browser_download_url": base + "/fw-sig"},
+				{"name": fwSigAssetPublished, "browser_download_url": base + "/fw-sig"},
 			},
 		}})
 	})
@@ -102,6 +115,10 @@ func fakeReleaseServerOpts(t *testing.T, bundle []byte, bundleSHA string, opts f
 		w.Write(fwRootfsFixture)
 	})
 	mux.HandleFunc("/fw-sig", func(w http.ResponseWriter, r *http.Request) {
+		if opts.sigDownloadFails {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.Write(fwRootfsSigFixture)
 	})
 
@@ -505,5 +522,56 @@ func TestGetBundleSigNotStaged(t *testing.T) {
 	// A path that is not a sha at all is a client error, not a missing file.
 	if bad := f.do(t, http.MethodGet, "/api/bundles/zzz/sig", "", nil); bad.Code != http.StatusBadRequest {
 		t.Errorf("non-sha path: want 400, got %d", bad.Code)
+	}
+}
+
+// The two ways a release can name a signature and still not deliver one. Both
+// have to fail the artifact rather than stage it: the node refuses to install
+// without a signature, so a bundle staged here is a bundle that fails at the
+// last step of a rollout instead of at the pull an operator is watching.
+func TestPullFirewallSignatureFetchFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		opts   fakeReleaseOpts
+		wantIn string
+	}{
+		{
+			name:   "manifest names a signature the release does not carry",
+			opts:   fakeReleaseOpts{sigAssetMissing: true},
+			wantIn: "has no asset",
+		},
+		{
+			name:   "the signature asset fails to download",
+			opts:   fakeReleaseOpts{sigDownloadFails: true},
+			wantIn: "stage signature",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAPIFixture(t)
+			c := f.authenticate(t)
+			bundle, sha := buildBundleFixture(t, f)
+			rel := fakeReleaseServerOpts(t, bundle, sha, tc.opts)
+			f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+
+			rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
+			if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {
+				t.Fatalf("pull reported success: %d (%s)", rec.Code, rec.Body.String())
+			}
+			var res pullResult
+			if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(res.Staged) != 0 {
+				t.Errorf("staged %d artifacts despite an unusable signature", len(res.Staged))
+			}
+			if len(res.Failed) != 1 || !strings.Contains(res.Failed[0].Error, tc.wantIn) {
+				t.Errorf("failure should mention %q, got %+v", tc.wantIn, res.Failed)
+			}
+			// Nothing half-staged: no orphan .sig left behind for a bundle the
+			// pull decided not to stage.
+			if _, err := os.Stat(filepath.Join(f.bundleDir, fwRootfsSHA()+".sig")); !os.IsNotExist(err) {
+				t.Errorf("a signature was left staged for a failed artifact: %v", err)
+			}
+		})
 	}
 }

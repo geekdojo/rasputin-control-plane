@@ -221,7 +221,7 @@ func (s *Server) stageBundleSignature(ctx context.Context, sigURL, sha string) e
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(der); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // the write already failed; the deferred Remove is the cleanup
 		return fmt.Errorf("write tmp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

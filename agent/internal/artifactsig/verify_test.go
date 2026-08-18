@@ -155,6 +155,37 @@ func TestVerify_SignatureProblems(t *testing.T) {
 	}
 }
 
+// The size cap is a boundary and boundaries are where caps fail. A signature of
+// exactly maxSigBytes is legal and must be rejected on its CONTENTS, not on its
+// length; one byte more must be rejected on length alone and never read. Both
+// halves matter: a cap that is off by one either truncates a legitimate object
+// (turning a valid signature into "tampered") or admits an unbounded read.
+func TestVerify_SignatureSizeCapBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		size       int
+		wantTooBig bool
+	}{
+		{name: "exactly at the cap", size: maxSigBytes, wantTooBig: false},
+		{name: "one byte over the cap", size: maxSigBytes + 1, wantTooBig: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sigPath := filepath.Join(t.TempDir(), "payload.bin.sig")
+			if err := os.WriteFile(sigPath, make([]byte, tc.size), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Verify(fixture(t, "payload.bin"), sigPath, fixture(t, "root-ca.pem"))
+			if err == nil {
+				t.Fatal("Verify accepted a signature of zero bytes padded to the cap")
+			}
+			tooBig := strings.Contains(err.Error(), "exceeds")
+			if tooBig != tc.wantTooBig {
+				t.Errorf("error = %v; rejected-for-size = %v, want %v", err, tooBig, tc.wantTooBig)
+			}
+		})
+	}
+}
+
 // A trust root that cannot be read is indistinguishable from one an attacker
 // removed, so it must fail rather than fall through to an empty pool (which
 // x509 treats as "use the system roots" on some platforms — a bypass).
