@@ -62,8 +62,15 @@ func StartWatchdog(ctx context.Context, ping func(context.Context) error) bool {
 		return false
 	}
 	usec, err := strconv.ParseInt(usecStr, 10, 64)
-	if err != nil || usec <= 0 {
+	if err != nil {
 		log.Printf("sdnotify: bad WATCHDOG_USEC %q: %v", usecStr, err)
+		return false
+	}
+	if usec <= 0 {
+		// Split from the parse failure above: a value that parses fine but is
+		// non-positive has no error to report, and the combined branch logged
+		// "bad WATCHDOG_USEC \"0\": <nil>" — naming a cause that did not exist.
+		log.Printf("sdnotify: WATCHDOG_USEC %q is not positive; watchdog disabled", usecStr)
 		return false
 	}
 	interval := time.Duration(usec) * time.Microsecond / 2

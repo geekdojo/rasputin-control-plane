@@ -17,11 +17,23 @@ import (
 // (`if sock == ""`): the negated form (`sock != ""`) would return a nil
 // no-op precisely when the socket IS configured, so nothing would arrive.
 func TestNotify_SendsWhenSocketSet(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "notify.sock")
-	ln, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: sockPath, Net: "unixgram"})
+	// NOT t.TempDir(): a unix socket path is capped by sun_path — 104 bytes on
+	// darwin, 108 on linux — and t.TempDir() bakes the test name into a path
+	// already ~50 chars deep under /var/folders on macOS, which overflows it and
+	// fails with a bare "bind: invalid argument". Keep the base short instead.
+	dir, err := os.MkdirTemp("/tmp", "sdn")
 	if err != nil {
-		t.Fatalf("listen unixgram: %v", err)
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	sockPath := filepath.Join(dir, "notify.sock")
+	if len(sockPath) > 100 {
+		t.Fatalf("socket path %q is %d bytes, too long for sun_path", sockPath, len(sockPath))
+	}
+	ln, err2 := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: sockPath, Net: "unixgram"})
+	if err2 != nil {
+		t.Fatalf("listen unixgram: %v", err2)
 	}
 	defer ln.Close()
 
