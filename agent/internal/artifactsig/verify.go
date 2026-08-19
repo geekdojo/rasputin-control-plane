@@ -47,6 +47,7 @@ package artifactsig
 import (
 	"crypto"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -126,9 +127,14 @@ func TrustRootPath() string {
 func SigPathFor(artifactPath string) string { return artifactPath + ".sig" }
 
 // VerifyDefault verifies artifactPath against its `.sig` companion and the
-// image's baked trust root. This is the form both OTA paths use.
+// image's baked trust root, requiring a leaf authorized to sign OS and firmware
+// releases. This is the form both OTA paths use.
+//
+// The purpose is not a parameter here on purpose: every caller of this function
+// is installing an image, and an OTA path that could be talked into accepting a
+// catalog-signing leaf is the bug geekdojo/geekdojo-brain#192 exists to close.
 func VerifyDefault(artifactPath string) (*Result, error) {
-	return Verify(artifactPath, SigPathFor(artifactPath), TrustRootPath())
+	return VerifyForPurpose(artifactPath, SigPathFor(artifactPath), TrustRootPath(), OIDCodeSigningRelease)
 }
 
 // Verify checks the detached CMS signature at sigPath over the artifact at
@@ -139,6 +145,18 @@ func VerifyDefault(artifactPath string) (*Result, error) {
 // cannot accidentally treat a missing signature as a soft warning, because
 // there is no value they could receive that says so.
 func Verify(artifactPath, sigPath, trustRootPath string) (*Result, error) {
+	return VerifyForPurpose(artifactPath, sigPath, trustRootPath, OIDCodeSigningRelease)
+}
+
+// VerifyForPurpose is Verify with the authorized signing purpose named
+// explicitly. A leaf that chains to the trust root but was not issued for
+// `purpose` is REJECTED.
+//
+// This is the check whose absence made ADR-0006 Decision 3 untrue: before it,
+// authorization was chain-to-root alone, so every leaf under the intermediate
+// could sign every artifact class and "a separate leaf for the catalog" bought
+// nothing at all.
+func VerifyForPurpose(artifactPath, sigPath, trustRootPath string, purpose asn1.ObjectIdentifier) (*Result, error) {
 	roots, err := loadTrustRoot(trustRootPath)
 	if err != nil {
 		return nil, err
@@ -187,6 +205,12 @@ func Verify(artifactPath, sigPath, trustRootPath string) (*Result, error) {
 		// a lie, and this is the one place that could tell it.
 		return nil, fmt.Errorf("%s: verified but no signer certificate to attribute it to", sigPath)
 	}
+	// Chain-of-trust is necessary and NOT sufficient: ask what this leaf was
+	// issued to do before accepting what it signed.
+	if err := authorizePurpose(leaf, purpose); err != nil {
+		return nil, err
+	}
+
 	return &Result{
 		Signer:    leaf.Subject.CommonName,
 		Issuer:    leaf.Issuer.CommonName,

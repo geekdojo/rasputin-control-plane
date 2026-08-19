@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# NOTE: leaves carry extendedKeyUsage=codeSigning because the real PKI issues
+# them that way (pki-init.sh, and the deployed leaf-001). They previously
+# carried no EKU at all, which is a shape Rasputin has never issued — harmless
+# until #192 made the verifier ask what a leaf is authorized to do, at which
+# point the only thing failing was the fixtures' unrealism.
 # Regenerate the checked-in CMS fixtures for the artifactsig tests.
 #
 # These are NOT hand-rolled: the signing command below is a copy of the one the
@@ -39,7 +44,7 @@ openssl req -newkey rsa:2048 -noenc -keyout leaf.key -out leaf.csr \
   -subj "/C=US/O=Geekdojo Test/CN=Rasputin Test Release Leaf"
 openssl x509 -req -in leaf.csr -CA intermediate.pem -CAkey intermediate.key \
   -CAcreateserial -out leaf.pem -days "$DAYS" -sha256 \
-  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n')
+  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n')
 
 # --- an equally well-formed chain under a DIFFERENT root --------------------
 # The "attacker signed it properly, just not with our key" case. Without this,
@@ -51,7 +56,7 @@ openssl req -newkey rsa:2048 -noenc -keyout other-leaf.key -out other-leaf.csr \
   -subj "/C=US/O=Someone Else/CN=Not Rasputin Leaf"
 openssl x509 -req -in other-leaf.csr -CA other-root-ca.pem -CAkey other-root-ca.key \
   -CAcreateserial -out other-leaf.pem -days "$DAYS" -sha256 \
-  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n')
+  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n')
 
 # --- the payload + its detached signatures ----------------------------------
 # Deliberately not a round number of blocks, so an off-by-one in streaming
