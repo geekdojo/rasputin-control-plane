@@ -5,7 +5,6 @@ go 1.26.0
 require (
 	github.com/coder/websocket v1.8.12
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
-	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
 	github.com/go-webauthn/webauthn v0.11.2
 	github.com/miekg/dns v1.1.72
 	github.com/nats-io/jwt/v2 v2.8.1
@@ -50,5 +49,3 @@ require (
 )
 
 replace github.com/geekdojo/rasputin-control-plane/proto => ../proto
-
-replace github.com/geekdojo/rasputin-control-plane/tileschema => ../tileschema
