@@ -16,7 +16,8 @@
 #   3. MOVE root-ca.key OFFLINE — a YubiKey, a 1Password vault entry, or
 #      an air-gapped encrypted USB. The api never needs the root key.
 #   4. The intermediate-ca.key can live on the release machine (or a
-#      sealed CI secret), used quarterly to issue new leaf certs.
+#      sealed CI secret), used to issue new leaf certs. Leaves are minted for
+#      LEAF_DAYS (2 years) — see that constant for why the number matters.
 #   5. leaf-001.key + leaf-001.pem are what build-bundle.sh consumes.
 #
 # Re-running this script with --rotate-leaf will issue a new leaf-NNN pair
@@ -40,6 +41,19 @@ EOF
 OUT_DIR="./pki-out"
 CN_PREFIX="Rasputin"
 ROTATE_LEAF=0
+
+# Leaf validity, in days. 730 = 2 years, matching the deployed leaf-001
+# (notAfter 2028-05-29). This was hardcoded 90 in both leaf paths while the
+# leaf actually in production was minted for two years, so the script did not
+# reproduce the PKI it claims to bootstrap and --rotate-leaf would have quietly
+# issued a 90-day cert.
+#
+# The number is load-bearing, not a preference: agent/internal/artifactsig
+# verifies the chain at time.Now() rather than at the signature's signingTime,
+# so when a leaf expires every artifact it ever signed stops being installable
+# OTA until re-signed. Shortening this shortens the shelf life of every release
+# it touches, retroactively. Expiry alarm + rotation runbook: geekdojo/geekdojo-brain#191.
+LEAF_DAYS=730
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -72,7 +86,7 @@ if [[ $ROTATE_LEAF -eq 1 ]]; then
         -subj "/CN=${CN_PREFIX} Bundle Signing leaf-${next}"
     openssl x509 -req -in "leaf-${next}.csr" \
         -CA intermediate-ca.pem -CAkey intermediate-ca.key -CAcreateserial \
-        -out "leaf-${next}.pem" -days 90 -sha256 \
+        -out "leaf-${next}.pem" -days "$LEAF_DAYS" -sha256 \
         -extfile <(printf "keyUsage=digitalSignature\nextendedKeyUsage=codeSigning")
     rm -f "leaf-${next}.csr"
     echo "done: leaf-${next}.{key,pem}"
@@ -120,7 +134,7 @@ openssl req -new -key leaf-001.key -out leaf-001.csr \
     -subj "/CN=${CN_PREFIX} Bundle Signing leaf-001"
 openssl x509 -req -in leaf-001.csr \
     -CA intermediate-ca.pem -CAkey intermediate-ca.key -CAcreateserial \
-    -out leaf-001.pem -days 90 -sha256 \
+    -out leaf-001.pem -days "$LEAF_DAYS" -sha256 \
     -extfile <(printf "keyUsage=digitalSignature\nextendedKeyUsage=codeSigning")
 rm -f leaf-001.csr
 
