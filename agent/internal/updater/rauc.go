@@ -300,7 +300,15 @@ func (r *RAUCBackend) pruneBundles(keepID string) {
 	}
 }
 
-func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, expectedSHA string, sizeBytes int64,
+// Download ignores sigURL, and that is not an oversight. A RAUC bundle carries
+// its PKCS#7 signature INSIDE the .raucb, and rauc verifies it against the same
+// baked root (board/rasputin/n100/rauc-system.conf pins [keyring] to
+// /etc/rasputin/trust/root-ca.pem) before it will install anything. There is no
+// detached .sig for a .raucb to fetch, so requiring one here would fail every
+// Rasputin OS update to satisfy a check rauc already performs. The publisher
+// gate exists on both surfaces; only the firewall had to grow its own, because
+// only the firewall installs a bare squashfs by hand.
+func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, _, expectedSHA string, sizeBytes int64,
 	progressFn func(int64, int64)) (string, string, error) {
 	// Same HTTP fetch as the mock; rauc doesn't have a native HTTP
 	// fetcher in our setup.

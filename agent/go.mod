@@ -7,6 +7,7 @@ require (
 	github.com/nats-io/nats-server/v2 v2.11.17
 	github.com/nats-io/nats.go v1.51.0
 	github.com/shirou/gopsutil/v4 v4.24.8
+	github.com/smallstep/pkcs7 v0.2.3
 	golang.org/x/sys v0.43.0
 )
 

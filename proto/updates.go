@@ -69,6 +69,23 @@ type UpdateDownloadCmd struct {
 	URL            string `json:"url"`
 	ExpectedSHA256 string `json:"expectedSha256"`
 	SizeBytes      int64  `json:"sizeBytes,omitempty"`
+	// SigURL is where the artifact's DETACHED CMS signature lives — the
+	// `${artifact}.sig` the release pipeline publishes, staged beside the
+	// bundle blob and served at /api/bundles/{sha}/sig.
+	//
+	// It is separate from ExpectedSHA256 because the two answer different
+	// questions and only one of them is a security control. The sha proves the
+	// bytes arrived from the api unaltered — TRANSPORT integrity. The signature
+	// proves the bytes were published by whoever holds the offline Rasputin
+	// root — PUBLISHER authenticity. The firewall shipped with only the former
+	// for its whole life, which meant anything that could reach the bundle
+	// store could reach the partition that terminates the WAN
+	// (geekdojo/geekdojo-brain#154).
+	//
+	// Empty means the api had no signature to offer. Backends that verify
+	// signatures MUST treat that as a hard failure rather than falling back to
+	// the sha gate — a gate with a fallback is a gate an attacker selects.
+	SigURL string `json:"sigUrl,omitempty"`
 }
 
 // UpdateDownloadAck reports the local filesystem path the agent placed the

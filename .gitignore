@@ -33,6 +33,13 @@ ui/next-env.d.ts
 
 # Secrets / certs / signing material — NEVER commit these
 *.pem
+# ...except the artifactsig test fixtures, which are PUBLIC ROOT CERTIFICATES
+# with no private-key half. The rule above exists to keep PKI material out of a
+# public repo; these carry none, and the CMS verification tests cannot run
+# without a trust root to verify against. Their generator
+# (agent/internal/artifactsig/testdata/gen-fixtures.sh) deletes every key it
+# creates before it finishes. *.key stays ignored unconditionally.
+!agent/internal/artifactsig/testdata/*.pem
 *.key
 *.srl
 *.csr

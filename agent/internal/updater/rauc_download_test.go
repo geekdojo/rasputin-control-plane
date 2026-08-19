@@ -48,14 +48,14 @@ func TestRAUCBackend_Download_TrustsMeshCA(t *testing.T) {
 	// Without the CA: system roots don't cover the server cert → TLS failure,
 	// not a silent success.
 	b := newBackend()
-	if _, _, err := b.Download(context.Background(), "b1", url, wantSHA, int64(len(body)), nil); err == nil {
+	if _, _, err := b.Download(context.Background(), "b1", url, "", wantSHA, int64(len(body)), nil); err == nil {
 		t.Fatal("expected a TLS failure without the mesh CA, got nil")
 	}
 
 	// With the CA trusted: download succeeds and the sha matches.
 	b = newBackend()
 	b.SetCABundle(caPath)
-	path, observed, err := b.Download(context.Background(), "b1", url, wantSHA, int64(len(body)), nil)
+	path, observed, err := b.Download(context.Background(), "b1", url, "", wantSHA, int64(len(body)), nil)
 	if err != nil {
 		t.Fatalf("Download with mesh CA trusted: %v", err)
 	}

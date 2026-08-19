@@ -178,7 +178,7 @@ func TestDownload_VerifiesSHA(t *testing.T) {
 	}
 
 	// Happy path: matching SHA.
-	localPath, observed, err := mb.Download(context.Background(), "b1", srv.URL, expectedSHA, int64(len(body)), progress)
+	localPath, observed, err := mb.Download(context.Background(), "b1", srv.URL, "", expectedSHA, int64(len(body)), progress)
 	if err != nil {
 		t.Fatalf("Download (happy): %v", err)
 	}
@@ -208,7 +208,7 @@ func TestDownload_FailsOnSHAMismatch(t *testing.T) {
 	}))
 	defer srv.Close()
 	mb := newUpdaterMock(t)
-	_, observed, err := mb.Download(context.Background(), "b2", srv.URL, "deadbeef", 0, nil)
+	_, observed, err := mb.Download(context.Background(), "b2", srv.URL, "", "deadbeef", 0, nil)
 	if err == nil {
 		t.Fatalf("expected SHA mismatch error")
 	}
@@ -223,7 +223,7 @@ func TestDownload_HTTPErrorBubbles(t *testing.T) {
 	}))
 	defer srv.Close()
 	mb := newUpdaterMock(t)
-	if _, _, err := mb.Download(context.Background(), "b3", srv.URL, "", 0, nil); err == nil {
+	if _, _, err := mb.Download(context.Background(), "b3", srv.URL, "", "", 0, nil); err == nil {
 		t.Errorf("expected error on HTTP 500")
 	}
 }
@@ -231,7 +231,7 @@ func TestDownload_HTTPErrorBubbles(t *testing.T) {
 func TestDownload_FailModeEnvErrors(t *testing.T) {
 	t.Setenv("RASPUTIN_UPDATE_FAIL_MODE", "download")
 	mb := newUpdaterMock(t)
-	if _, _, err := mb.Download(context.Background(), "b4", "http://unused", "", 0, nil); err == nil {
+	if _, _, err := mb.Download(context.Background(), "b4", "http://unused", "", "", 0, nil); err == nil {
 		t.Errorf("expected fail-mode error")
 	}
 }
@@ -239,7 +239,7 @@ func TestDownload_FailModeEnvErrors(t *testing.T) {
 func TestDownload_BadURLErrors(t *testing.T) {
 	mb := newUpdaterMock(t)
 	// Invalid URL — NewRequestWithContext should reject.
-	if _, _, err := mb.Download(context.Background(), "b5", "::not-a-url::", "", 0, nil); err == nil {
+	if _, _, err := mb.Download(context.Background(), "b5", "::not-a-url::", "", "", 0, nil); err == nil {
 		t.Errorf("expected URL parse error")
 	}
 }

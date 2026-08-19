@@ -53,6 +53,11 @@ var AgentVersion = "0.0.1-dev"
 const heartbeatInterval = 10 * time.Second
 
 func main() {
+	// One-shot commands (help, version, verify-artifact) run and exit before
+	// any daemon setup. Both shipping units start the agent with no arguments,
+	// so this is inert on the boot path. See cli.go.
+	exitCLI()
+
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)
 	defer cancel()

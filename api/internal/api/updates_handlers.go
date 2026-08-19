@@ -175,6 +175,91 @@ func (s *Server) ingestBundle(
 	return bundle, true, nil
 }
 
+// bundleSigPath is where a bundle's detached CMS signature lives: beside the
+// content-addressed blob, with `.sig` appended. Deliberately NOT a database
+// column — the signature is derived from the release and belongs to the blob,
+// so a sibling file means no schema migration and no way for the row and the
+// bytes to disagree.
+func (s *Server) bundleSigPath(sha string) string {
+	return filepath.Join(s.bundleDir, sha+".sig")
+}
+
+// maxSigBytes bounds a detached signature. A real one is ~1.6 KiB.
+const maxSigBytes = 1 << 20
+
+// stageBundleSignature downloads the detached CMS signature for an already
+// staged bundle and writes it beside the blob.
+//
+// ⚠️ The api does NOT verify the signature it stages, and that is the design
+// rather than a gap. In this threat model the control plane is not the trusted
+// party — the whole reason #154 exists is that a compromised api could serve
+// anything it liked to the node that terminates the WAN. A check performed here
+// would be a check performed by the very component the gate is defending
+// against. Verification belongs on the device, against the root baked read-only
+// into its own image, and that is where it now happens.
+func (s *Server) stageBundleSignature(ctx context.Context, sigURL, sha string) error {
+	rc, err := s.releaseSource.Open(ctx, sigURL)
+	if err != nil {
+		return fmt.Errorf("download: %w", err)
+	}
+	defer rc.Close()
+	der, err := io.ReadAll(io.LimitReader(rc, maxSigBytes+1))
+	if err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	if len(der) == 0 {
+		return errors.New("signature asset is empty")
+	}
+	if len(der) > maxSigBytes {
+		return fmt.Errorf("signature asset exceeds %d bytes", maxSigBytes)
+	}
+	// Write-then-rename: a half-written .sig beside a complete blob would fail
+	// verification on the node and read exactly like tampering.
+	tmp, err := os.CreateTemp(s.bundleDir, "sig-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(der); err != nil {
+		_ = tmp.Close() // the write already failed; the deferred Remove is the cleanup
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	return os.Rename(tmp.Name(), s.bundleSigPath(sha))
+}
+
+// GET /api/bundles/{sha}/sig — the detached CMS signature for a bundle. Agents
+// fetch this before the artifact itself, so a node pointed at a control plane
+// with nothing staged fails in a kilobyte rather than after half a gigabyte.
+//
+// Unauthenticated, like the blob endpoint beside it, and for a stronger reason:
+// these exact bytes are published on the public GitHub release. Withholding
+// them would protect nothing and would break the documented manual verification
+// path.
+func (s *Server) handleGetBundleSig(w http.ResponseWriter, r *http.Request) {
+	sha := r.PathValue("sha")
+	if !looksLikeSHA256(sha) {
+		writeError(w, http.StatusBadRequest, "invalid sha")
+		return
+	}
+	f, err := os.Open(s.bundleSigPath(sha))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// 404 is load-bearing: the agent turns exactly this into
+			// "re-pull the release so the .sig is staged with it".
+			writeError(w, http.StatusNotFound, "no signature staged for this bundle; re-pull the release")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "open signature: "+err.Error())
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/pkcs7-signature")
+	http.ServeContent(w, r, sha+".sig", time.Time{}, f)
+}
+
 // GET /api/bundles/{sha} — agents fetch the binary here. JSON listings are
 // at /api/bundles.
 func (s *Server) handleGetBundle(w http.ResponseWriter, r *http.Request) {
@@ -225,6 +310,12 @@ func (s *Server) handleDeleteBundle(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := os.Remove(b.StoragePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		// Bundle row already gone — log but don't fail.
+	}
+	// The detached signature goes with its blob; an orphan .sig would be
+	// re-served for a future bundle only if a sha collided, but it would also
+	// quietly grow the store forever.
+	if err := os.Remove(s.bundleSigPath(sha)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Same posture as the blob above: best-effort.
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -593,6 +684,33 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 		if created {
 			anyCreated = true
 		}
+		// Stage the detached signature beside the blob. This runs on EVERY
+		// pull, not only when the bundle was newly created, so that re-pulling
+		// a release backfills the signature for a bundle staged before the api
+		// knew to fetch one — which is the migration path for anything already
+		// sitting in the store.
+		//
+		// A firewall artifact without its signature is not deployable (the node
+		// fails the update closed), so failing to stage it fails the ARTIFACT.
+		// Reporting it as staged would hand the operator a bundle that looks
+		// ready and refuses at the last step.
+		if sigName, detached := art.OTASigAsset(comp.Kind); detached {
+			if sigName == "" {
+				fail(http.StatusBadGateway, "release "+info.Version+" publishes no detached signature for "+
+					assetName+"; refusing to stage an artifact that cannot be verified on the node")
+				continue
+			}
+			sigURL, ok := info.AssetURL(sigName)
+			if !ok {
+				fail(http.StatusBadGateway, "release "+info.Version+" has no asset "+sigName)
+				continue
+			}
+			if err := s.stageBundleSignature(r.Context(), sigURL, bundle.SHA256); err != nil {
+				fail(http.StatusBadGateway, "stage signature "+sigName+": "+err.Error())
+				continue
+			}
+			outcome.SigAssetName = sigName
+		}
 		outcome.SHA256, outcome.Created = bundle.SHA256, created
 		res.Staged = append(res.Staged, outcome)
 		// Bundle is the artifact matching the component's nominal compat; the
@@ -630,6 +748,9 @@ type pullArtifactResult struct {
 	Architecture string `json:"architecture"`
 	Compatible   string `json:"compatible"`
 	AssetName    string `json:"assetName"`
+	// SigAssetName names the detached signature staged with this artifact.
+	// Empty for kinds that carry their signature inside the bundle.
+	SigAssetName string `json:"sigAssetName,omitempty"`
 	SHA256       string `json:"sha256,omitempty"`
 	// Created distinguishes a fresh download from an idempotent re-pull.
 	Created bool   `json:"created,omitempty"`

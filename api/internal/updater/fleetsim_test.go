@@ -183,6 +183,12 @@ type simNode struct {
 	// installs is the same for installs, and is what the sim-side concurrency
 	// observation is built from.
 	installs int
+	// sigURLs records the SigURL on every download command this node received.
+	// The bug class it exists to catch is the one that produced #154 in the
+	// first place: a field that is modelled, populated somewhere, and never
+	// actually reaches the component whose safety depends on it. A unit test on
+	// either side of the bus cannot see that; this can.
+	sigURLs []string
 	// inFlight / peakInFlight track how many installs are running on THIS node
 	// at once (always ≤ 1) — the fleet aggregates them.
 	fleetEnter func()
@@ -273,6 +279,9 @@ func (n *simNode) onPrecheck(m *nats.Msg) {
 func (n *simNode) onDownload(m *nats.Msg) {
 	var cmd proto.UpdateDownloadCmd
 	_ = json.Unmarshal(m.Data, &cmd)
+	n.mu.Lock()
+	n.sigURLs = append(n.sigURLs, cmd.SigURL)
+	n.mu.Unlock()
 	if n.spec.Behaviour == simFailDownload {
 		n.respond(m, proto.UpdateDownloadAck{OK: false, Detail: "simulated download failure"})
 		return

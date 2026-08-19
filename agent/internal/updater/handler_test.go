@@ -305,7 +305,7 @@ func (errBackend) Name() string { return "errmock" }
 func (errBackend) Precheck(_ context.Context) (*proto.UpdatePrecheckAck, error) {
 	return nil, errStr("boom")
 }
-func (errBackend) Download(_ context.Context, _, _, _ string, _ int64, _ func(int64, int64)) (string, string, error) {
+func (errBackend) Download(_ context.Context, _, _, _, _ string, _ int64, _ func(int64, int64)) (string, string, error) {
 	return "", "", errStr("boom")
 }
 func (errBackend) Install(_ context.Context, _, _ string, _ proto.UpdateSlot, _ func(string, int)) (string, error) {
@@ -565,7 +565,7 @@ func TestRAUCBackend_DownloadHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
-	path, observed, err := b.Download(context.Background(), "b1", srv.URL, expectedSHA, int64(len(body)), nil)
+	path, observed, err := b.Download(context.Background(), "b1", srv.URL, "", expectedSHA, int64(len(body)), nil)
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -587,7 +587,7 @@ func TestRAUCBackend_DownloadHTTPError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
-	if _, _, err := b.Download(context.Background(), "b", srv.URL, "", 0, nil); err == nil {
+	if _, _, err := b.Download(context.Background(), "b", srv.URL, "", "", 0, nil); err == nil {
 		t.Error("expected HTTP error")
 	}
 }
@@ -598,7 +598,7 @@ func TestRAUCBackend_DownloadBadURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
-	if _, _, err := b.Download(context.Background(), "b", "::not-a-url::", "", 0, nil); err == nil {
+	if _, _, err := b.Download(context.Background(), "b", "::not-a-url::", "", "", 0, nil); err == nil {
 		t.Error("expected URL parse error")
 	}
 }

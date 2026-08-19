@@ -258,7 +258,7 @@ func (b *countingRebootBackend) Precheck(context.Context) (*proto.UpdatePrecheck
 	return &proto.UpdatePrecheckAck{OK: true, ActiveSlot: proto.SlotA, InactiveSlot: proto.SlotB}, nil
 }
 
-func (b *countingRebootBackend) Download(context.Context, string, string, string, int64, func(int64, int64)) (string, string, error) {
+func (b *countingRebootBackend) Download(context.Context, string, string, string, string, int64, func(int64, int64)) (string, string, error) {
 	return "", "", nil
 }
 

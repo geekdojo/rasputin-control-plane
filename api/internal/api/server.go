@@ -245,7 +245,8 @@ func (s *Server) Handler() http.Handler {
 	// mTLS so the agent can authenticate; see updates.md.)
 	mux.HandleFunc("GET /api/bundles", reqd(s.handleListBundles))
 	mux.HandleFunc("POST /api/bundles", reqd(s.handleUploadBundle))
-	mux.HandleFunc("GET /api/bundles/{sha}", s.handleGetBundle) // unauthenticated
+	mux.HandleFunc("GET /api/bundles/{sha}", s.handleGetBundle)        // unauthenticated
+	mux.HandleFunc("GET /api/bundles/{sha}/sig", s.handleGetBundleSig) // unauthenticated
 	mux.HandleFunc("DELETE /api/bundles/{sha}", reqd(s.handleDeleteBundle))
 	mux.HandleFunc("POST /api/updates", reqd(s.handleCreateUpdate))
 	mux.HandleFunc("POST /api/updates/system", reqd(s.handleCreateSystemUpdate))

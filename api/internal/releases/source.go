@@ -62,6 +62,27 @@ func (a *ManifestArtifact) OTAAsset(kind Kind) (name, sha256 string, size int64,
 	return "", "", 0, false
 }
 
+// OTASigAsset returns the DETACHED signature asset for this artifact's
+// deployable OTA payload, and whether this kind has one at all.
+//
+// Only KindRootfsAB does. A RAUC bundle carries its PKCS#7 signature inside the
+// .raucb and rauc verifies it against the same baked root before installing, so
+// there is nothing detached to stage — `Sig` on this struct signs the full-disk
+// `image` a human flashes, not the OTA payload. The firewall installs a bare
+// squashfs by hand and therefore needs the signature shipped alongside it.
+//
+// detached=false means "this kind does not have one", NOT "this one is
+// optional": when detached is true and name is empty, the release published no
+// signature and the artifact must not be staged for deployment
+// (geekdojo/geekdojo-brain#154).
+func (a *ManifestArtifact) OTASigAsset(kind Kind) (name string, detached bool) {
+	switch kind {
+	case KindRootfsAB:
+		return a.RootfsSig, true
+	}
+	return "", false
+}
+
 // ReleaseInfo is the resolved latest release for a component on a channel,
 // with the asset download URLs needed to pull the deployable bytes.
 type ReleaseInfo struct {

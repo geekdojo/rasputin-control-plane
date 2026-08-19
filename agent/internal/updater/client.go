@@ -20,7 +20,15 @@ type Backend interface {
 	// it against expectedSHA. On success returns the local path and the
 	// observed sha256. ProgressFn (if non-nil) is called with
 	// (bytesCompleted, bytesTotal) at the backend's discretion.
-	Download(ctx context.Context, bundleID, url, expectedSHA string, sizeBytes int64,
+	//
+	// sigURL points at the artifact's detached CMS signature (see
+	// proto.UpdateDownloadCmd.SigURL). Backends whose install path verifies a
+	// detached signature fetch it here and MUST refuse to proceed when it is
+	// empty or unfetchable; backends whose artifact format carries its own
+	// signature (RAUC) ignore it. It is a download-time argument rather than an
+	// install-time one so a firewall pointed at an api too old to send it fails
+	// before moving half a gigabyte, not after.
+	Download(ctx context.Context, bundleID, url, sigURL, expectedSHA string, sizeBytes int64,
 		progressFn func(bytesCompleted, bytesTotal int64)) (localPath string, observedSHA string, err error)
 
 	// Install writes the bundle to the inactive slot. Returns the version
