@@ -163,11 +163,18 @@ func main() {
 	// full handler setup below, which then registers explicitly;
 	// reconnects (handlers long since up) re-register as before.
 	var handlersReady atomic.Bool
+	// How this node answers "which address do others reach me on". The default
+	// is the default-route heuristic, which is right everywhere EXCEPT the
+	// router — see the openwrt override below and
+	// geekdojo/geekdojo-brain#193. Assigned before the first registration:
+	// registration is gated on handlersReady, which flips after the backend
+	// selection that may replace this.
+	lanAddr := func() (ip, cidr string) { return host.PrimaryLANIP(), host.PrimaryLanCIDR() }
 	reregister := func(c *nats.Conn) {
 		if !handlersReady.Load() {
 			return
 		}
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults)
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr)
 	}
 	// Retry the initial NATS connect instead of exiting on failure. On real
 	// hardware the firewall can boot before the control plane (it IS the
@@ -295,6 +302,7 @@ func main() {
 				log.Fatalf("rasputin-agent: openwrt uci backend: %v", err)
 			}
 			uciClient = real
+			lanAddr = uciLANAddr(real.LANAddress, lanAddr)
 		case "mock":
 			mock, err := openwrt.NewMockClient(filepath.Join(stateDir, "openwrt"))
 			if err != nil {
@@ -513,9 +521,38 @@ func main() {
 	log.Println("rasputin-agent: shutting down")
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set) {
+// uciLANAddr wraps a UCI-backed LAN lookup with the heuristic as a fallback.
+//
+// ⚠️ On the firewall the default route leaves via WAN, so the generic heuristic
+// reports the WAN address as this node's lanIP — which the control plane
+// publishes as the node's cluster-DNS answer and as the mesh advertise-routes
+// suggestion. Both then point at an interface whose own WAN input policy
+// rejects everything but DHCP-renew, ping and IGMP. The box knows the real
+// answer, so ask it rather than infer. geekdojo/geekdojo-brain#193.
+//
+// It NEVER returns empty when the fallback can answer: an absent lanIP wipes
+// the node out of cluster DNS entirely, which is worse than the
+// wrong-interface answer this exists to fix. Named rather than inlined so that
+// guarantee is testable — it is the kind of promise that silently stops being
+// true.
+func uciLANAddr(lookup func(context.Context) (string, string, error), fallback func() (ip, cidr string)) func() (string, string) {
+	return func() (string, string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ip, cidr, err := lookup(ctx)
+		if err != nil || ip == "" {
+			log.Printf("rasputin-agent: could not read the LAN address from uci (err=%v, ip=%q); "+
+				"falling back to the default-route heuristic, which on a router reports the WAN address", err, ip)
+			return fallback()
+		}
+		return ip, cidr
+	}
+}
+
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string)) {
 	meta := map[string]any{}
-	if cidr := host.PrimaryLanCIDR(); cidr != "" {
+	lanIP, lanCIDR := lanAddr()
+	if cidr := lanCIDR; cidr != "" {
 		// Carried in Metadata rather than as a top-level field so the
 		// shared proto.NodeRegisteredEvt stays small / additive: anything
 		// that needs the value reads metadata["primaryLanCidr"]. The api's
@@ -561,7 +598,7 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		// The node's LAN IPv4, re-detected here so every (re)connect carries the
 		// current address — the reboot-time IP churn from making no DHCP
 		// reservations lands as a fresh registration (ADR-0004 §8).
-		LANIP:        host.PrimaryLANIP(),
+		LANIP:        lanIP,
 		Capabilities: caps,
 		Metadata:     meta,
 		Storage:      storage,

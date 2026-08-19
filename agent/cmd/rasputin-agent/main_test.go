@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -133,7 +134,11 @@ func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bm
 		t.Fatal(err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
-	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults)
+	// A fixed resolver rather than the live host one: this helper asserts what
+	// the publish path CARRIES, and reading the test machine's own routing
+	// table would make that assertion depend on where the suite runs.
+	lanAddr := func() (string, string) { return "192.168.1.50", "192.168.1.50/24" }
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr)
 	msg, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
 		t.Fatalf("no registered event: %v", err)
@@ -404,5 +409,65 @@ func TestPublishRegistered_CleanNodeCarriesNoFaultKey(t *testing.T) {
 	ev := registeredEvtWithFaults(t, testBus(t), "n", nil, &faults)
 	if _, ok := ev.Metadata[proto.MetadataConfigFaults]; ok {
 		t.Error("a clean node must not carry the config-faults key at all")
+	}
+}
+
+// uciLANAddr's whole job is to prefer the box's own answer while GUARANTEEING
+// it never leaves the node without one. An empty lanIP drops the node out of
+// cluster DNS entirely — strictly worse than the wrong-interface value this
+// code exists to replace — so every failure shape must reach the fallback.
+func TestUCILANAddr(t *testing.T) {
+	fallback := func() (string, string) { return "10.9.9.9", "10.9.9.9/24" }
+
+	for _, tc := range []struct {
+		name             string
+		ip, cidr         string
+		err              error
+		wantIP, wantCIDR string
+	}{
+		{
+			name: "uci answers — the LAN wins over the default route",
+			ip:   "192.168.1.1", cidr: "192.168.1.1/24",
+			wantIP: "192.168.1.1", wantCIDR: "192.168.1.1/24",
+		},
+		{
+			name:   "uci errors — fall back rather than report nothing",
+			err:    errors.New("uci: command not found"),
+			wantIP: "10.9.9.9", wantCIDR: "10.9.9.9/24",
+		},
+		{
+			// The subtle one: no error, but nothing useful. Returning this
+			// through would publish an empty lanIP and look like a success.
+			name: "uci answers empty — still falls back",
+			ip:   "", cidr: "",
+			wantIP: "10.9.9.9", wantCIDR: "10.9.9.9/24",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolve := uciLANAddr(func(context.Context) (string, string, error) {
+				return tc.ip, tc.cidr, tc.err
+			}, fallback)
+			ip, cidr := resolve()
+			if ip != tc.wantIP || cidr != tc.wantCIDR {
+				t.Errorf("got %q / %q, want %q / %q", ip, cidr, tc.wantIP, tc.wantCIDR)
+			}
+			if ip == "" {
+				t.Error("returned an empty lanIP — the node would vanish from cluster DNS")
+			}
+		})
+	}
+}
+
+// The lookup must be given a deadline: it shells out to uci on a box that may
+// be mid-boot, and a hung call here stalls registration.
+func TestUCILANAddr_PassesADeadline(t *testing.T) {
+	var hadDeadline bool
+	resolve := uciLANAddr(func(ctx context.Context) (string, string, error) {
+		_, hadDeadline = ctx.Deadline()
+		return "192.168.1.1", "192.168.1.1/24", nil
+	}, func() (string, string) { return "", "" })
+	resolve()
+	if !hadDeadline {
+		t.Error("uciLANAddr called the lookup with no deadline")
 	}
 }
