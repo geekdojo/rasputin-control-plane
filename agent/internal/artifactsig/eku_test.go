@@ -95,3 +95,36 @@ func TestOIDArc_IsStillProvisional(t *testing.T) {
 	}
 	t.Log("arc is provisional (PEN 0, IANA-reserved); a real PEN is required before minting any leaf")
 }
+
+// A leaf carrying the bare Rasputin arc with no purpose suffix is malformed,
+// but it is unambiguously issued under our arc — so it must not get the legacy
+// allowance. This is the case the mutation gate found unguarded: with a `>`
+// length test instead of `>=`, such a leaf was treated as pre-#192 and accepted
+// for releases.
+func TestAuthorize_BareArcLeafDoesNotGetTheLegacyAllowance(t *testing.T) {
+	bareArc := leafWith([]x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+		[]asn1.ObjectIdentifier{OIDGeekdojo})
+	if err := authorizePurpose(bareArc, OIDCodeSigningRelease); err == nil {
+		t.Fatal("a leaf carrying the bare Rasputin arc must not fall back to the legacy allowance")
+	}
+}
+
+// extend must not alias its base. If it appended onto OIDGeekdojo's backing
+// array, deriving the second purpose could overwrite the first — turning the
+// release OID into the catalog OID at init time, which would invert every
+// check in this file.
+func TestExtend_DoesNotAliasTheBaseArc(t *testing.T) {
+	if OIDCodeSigningRelease.Equal(OIDCodeSigningCatalog) {
+		t.Fatal("the two purposes collapsed to the same OID — extend aliased its base")
+	}
+	last := OIDCodeSigningRelease[len(OIDCodeSigningRelease)-1]
+	if last != 1 {
+		t.Errorf("release purpose ends in %d, want 1 — base was mutated", last)
+	}
+	if got := OIDCodeSigningCatalog[len(OIDCodeSigningCatalog)-1]; got != 2 {
+		t.Errorf("catalog purpose ends in %d, want 2", got)
+	}
+	if len(OIDGeekdojo) != 7 {
+		t.Errorf("OIDGeekdojo grew to %d components — extend wrote into its base", len(OIDGeekdojo))
+	}
+}

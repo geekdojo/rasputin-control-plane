@@ -63,8 +63,11 @@ var (
 )
 
 func extend(base asn1.ObjectIdentifier, more ...int) asn1.ObjectIdentifier {
-	out := make(asn1.ObjectIdentifier, 0, len(base)+len(more))
-	out = append(out, base...)
+	// Copy base rather than appending onto it: append could otherwise write
+	// into a shared backing array and quietly rewrite one purpose OID into
+	// another. No capacity arithmetic here on purpose — the only mutation that
+	// survived the gate was on a capacity hint that cannot change behaviour.
+	out := append(asn1.ObjectIdentifier{}, base...)
 	return append(out, more...)
 }
 
@@ -128,7 +131,11 @@ func hasGenericCodeSigning(leaf *x509.Certificate) bool {
 // codeSigning would slip through the legacy allowance and defeat the split.
 func hasAnyRasputinPurpose(leaf *x509.Certificate) bool {
 	for _, oid := range leaf.UnknownExtKeyUsage {
-		if len(oid) > len(OIDGeekdojo) && oid[:len(OIDGeekdojo)].Equal(OIDGeekdojo) {
+		// >= not >: a leaf carrying the BARE arc with no purpose suffix is still
+		// a leaf someone deliberately issued under Rasputin's arc, so it must
+		// not fall back to the legacy allowance. Using > left that as a way to
+		// carry a Rasputin-arc EKU and still be treated as a pre-#192 leaf.
+		if len(oid) >= len(OIDGeekdojo) && oid[:len(OIDGeekdojo)].Equal(OIDGeekdojo) {
 			return true
 		}
 	}
