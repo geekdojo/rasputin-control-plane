@@ -1,7 +1,9 @@
 package updater
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -392,5 +394,94 @@ func TestInstalledVersion_UnknownIsEmptyNotTheBundleHash(t *testing.T) {
 	}
 	if got := b.installedVersion(localPath); got != "2026.08.2-dev.83" {
 		t.Errorf("installedVersion = %q, want the sidecar value trimmed", got)
+	}
+}
+
+// ---- defaultWriteSlot -------------------------------------------------------
+
+// defaultWriteSlot streams a squashfs into the raw inactive-slot device — the
+// byte-mover of an OpenWrt A/B install. Its copy must be exact and its 10→90
+// progress sweep must actually track the write. Nothing exercised it before
+// (production tests inject a mock writeSlot), so a wrong buffer copy or a broken
+// progress calc would ship silently.
+func TestDefaultWriteSlotCopiesExactlyAndReportsProgress(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "bundle.rootfs")
+	dst := filepath.Join(dir, "slot.img")
+
+	// Span more than one 1 MiB read buffer, with distinctive non-repeating
+	// content, so a truncated/offset copy OR an early loop break (mistaking a
+	// mid-stream nil error for EOF) leaves the destination the wrong size.
+	content := make([]byte, (1<<20)+4096)
+	for i := range content {
+		content[i] = byte(i*7 + 3)
+	}
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	// The device must already exist: defaultWriteSlot opens it O_WRONLY, no create.
+	if err := os.WriteFile(dst, nil, 0o644); err != nil {
+		t.Fatalf("create dst: %v", err)
+	}
+
+	type step struct {
+		phase string
+		pct   int
+	}
+	var steps []step
+	progress := func(phase string, pct int) { steps = append(steps, step{phase, pct}) }
+
+	if err := defaultWriteSlot(context.Background(), src, dst, progress); err != nil {
+		t.Fatalf("defaultWriteSlot: %v", err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("copied %d bytes, want an exact %d-byte copy of the source", len(got), len(content))
+	}
+	if len(steps) == 0 {
+		t.Fatal("no progress reported; the install UI would show a frozen bar")
+	}
+	for _, s := range steps {
+		if s.phase != "write" {
+			t.Errorf("progress phase = %q, want \"write\"", s.phase)
+		}
+	}
+	// After the last chunk written==total, so the sweep is pinned at its top end:
+	// 10 + 80*written/total = 90. This exact value is what kills the arithmetic
+	// mutations in 10+int(80*written/total) (e.g. + to -, * to /) and the
+	// "total > 0" guard being dropped.
+	if last := steps[len(steps)-1].pct; last != 90 {
+		t.Errorf("final progress = %d, want 90 (10 + 80*written/total at written==total)", last)
+	}
+}
+
+// A cancelled context must abort the write before it moves bytes — an install
+// that keeps streaming to the inactive slot after the saga gave up is exactly
+// the kind of half-written slot the A/B design exists to avoid.
+func TestDefaultWriteSlotHonorsContextCancellation(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "bundle.rootfs")
+	dst := filepath.Join(dir, "slot.img")
+	if err := os.WriteFile(src, make([]byte, 2048), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := os.WriteFile(dst, nil, 0o644); err != nil {
+		t.Fatalf("create dst: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the first loop turn
+
+	err := defaultWriteSlot(ctx, src, dst, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	// The per-iteration ctx.Err() gate must fire first: nothing should reach the slot.
+	if got, _ := os.ReadFile(dst); len(got) != 0 {
+		t.Errorf("wrote %d bytes to the slot after cancellation, want 0", len(got))
 	}
 }

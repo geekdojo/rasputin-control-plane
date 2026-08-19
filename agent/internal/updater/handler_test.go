@@ -798,3 +798,40 @@ func (versionfulBackend) Precheck(_ context.Context) (*proto.UpdatePrecheckAck, 
 		CurrentVersion: "slot-known-9.9.9", Backend: "openwrt-ab",
 	}, nil
 }
+
+// RegisterHandlers promises to wire ALL SIX update verbs, and each
+//
+//	if err := bind(...); err != nil { return subs, err }
+//
+// is a point where an early return would silently drop every verb after it —
+// leaving, for instance, mark-bad unroutable, so a failed A/B update could never
+// be marked bad and rolled back. Other tests each poke a single verb, so a
+// registration truncated partway through still passes them. Pin the full count,
+// and prove the LAST verb (mark-bad, the first thing a truncation drops) is
+// actually routable rather than trusting the number alone.
+func TestRegisterHandlers_WiresAllSixVerbs(t *testing.T) {
+	nc := startNATS(t)
+	mb, err := NewMockBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewMockBackend: %v", err)
+	}
+	subs, err := RegisterHandlers(nc, "node-1", mb)
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+	if len(subs) != 6 {
+		t.Fatalf("wired %d subscriptions, want all 6 update verbs", len(subs))
+	}
+	var ack proto.UpdateMarkBadAck
+	request(t, nc, proto.UpdateMarkBadSubject("node-1"), proto.UpdateMarkBadCmd{
+		BundleID: "b", Reason: "wiring check",
+	}, &ack)
+	if !ack.OK {
+		t.Errorf("mark-bad ack = %+v, want OK — the last-registered verb must still be routable", ack)
+	}
+}
