@@ -302,30 +302,7 @@ func main() {
 				log.Fatalf("rasputin-agent: openwrt uci backend: %v", err)
 			}
 			uciClient = real
-			// ⚠️ On the firewall the default route leaves via WAN, so the
-			// generic heuristic reports the WAN address as this node's lanIP —
-			// which the control plane then publishes as the node's cluster-DNS
-			// answer and as the mesh advertise-routes suggestion. Both then
-			// point at an interface whose own WAN input policy rejects
-			// everything but DHCP-renew, ping and IGMP.
-			//
-			// The box knows the real answer, so ask it rather than infer.
-			// geekdojo/geekdojo-brain#193.
-			lanAddr = func() (string, string) {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				ip, cidr, err := real.LANAddress(ctx)
-				if err != nil || ip == "" {
-					// Never regress to an EMPTY lanIP: an absent address wipes
-					// this node out of cluster DNS, which is worse than the
-					// wrong-interface answer this exists to fix. Fall back and
-					// say so once, loudly enough to be found.
-					log.Printf("rasputin-agent: could not read the LAN address from uci (%v); "+
-						"falling back to the default-route heuristic, which on a router reports the WAN address", err)
-					return host.PrimaryLANIP(), host.PrimaryLanCIDR()
-				}
-				return ip, cidr
-			}
+			lanAddr = uciLANAddr(real.LANAddress, lanAddr)
 		case "mock":
 			mock, err := openwrt.NewMockClient(filepath.Join(stateDir, "openwrt"))
 			if err != nil {
@@ -542,6 +519,34 @@ func main() {
 
 	<-ctx.Done()
 	log.Println("rasputin-agent: shutting down")
+}
+
+// uciLANAddr wraps a UCI-backed LAN lookup with the heuristic as a fallback.
+//
+// ⚠️ On the firewall the default route leaves via WAN, so the generic heuristic
+// reports the WAN address as this node's lanIP — which the control plane
+// publishes as the node's cluster-DNS answer and as the mesh advertise-routes
+// suggestion. Both then point at an interface whose own WAN input policy
+// rejects everything but DHCP-renew, ping and IGMP. The box knows the real
+// answer, so ask it rather than infer. geekdojo/geekdojo-brain#193.
+//
+// It NEVER returns empty when the fallback can answer: an absent lanIP wipes
+// the node out of cluster DNS entirely, which is worse than the
+// wrong-interface answer this exists to fix. Named rather than inlined so that
+// guarantee is testable — it is the kind of promise that silently stops being
+// true.
+func uciLANAddr(lookup func(context.Context) (string, string, error), fallback func() (ip, cidr string)) func() (string, string) {
+	return func() (string, string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ip, cidr, err := lookup(ctx)
+		if err != nil || ip == "" {
+			log.Printf("rasputin-agent: could not read the LAN address from uci (err=%v, ip=%q); "+
+				"falling back to the default-route heuristic, which on a router reports the WAN address", err, ip)
+			return fallback()
+		}
+		return ip, cidr
+	}
 }
 
 func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string)) {
