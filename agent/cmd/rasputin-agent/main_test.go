@@ -133,7 +133,11 @@ func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bm
 		t.Fatal(err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
-	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults)
+	// A fixed resolver rather than the live host one: this helper asserts what
+	// the publish path CARRIES, and reading the test machine's own routing
+	// table would make that assertion depend on where the suite runs.
+	lanAddr := func() (string, string) { return "192.168.1.50", "192.168.1.50/24" }
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr)
 	msg, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
 		t.Fatalf("no registered event: %v", err)
