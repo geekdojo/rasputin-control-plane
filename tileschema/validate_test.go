@@ -1,6 +1,10 @@
 package tileschema
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 const goodDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -164,5 +168,73 @@ func TestValidDNSLabel(t *testing.T) {
 		if ValidDNSLabel(s) {
 			t.Errorf("%q should be invalid", s)
 		}
+	}
+}
+
+// --- #195: the privilege facts the extractor was blind to. ---
+
+// The SafetyFacts JSON keys are a signed-bundle contract: a publisher writes
+// them and a control plane of a different vintage reads them. Renaming one
+// silently drops a privilege fact on the floor at the reader, which is the
+// exact failure #195 exists to end. Pin the wire names.
+func TestSafetyFacts_PrivilegeJSONKeysArePinned(t *testing.T) {
+	f := SafetyFacts{
+		Images:          []string{"img@" + goodDigest},
+		SecurityOpt:     []string{"seccomp=unconfined"},
+		UsernsMode:      []string{"host"},
+		GroupAdd:        []string{"docker"},
+		Sysctls:         []string{"net.ipv4.ip_forward=1"},
+		VolumesFrom:     []string{"other"},
+		ReservedDevices: []string{"nvidia:gpu"},
+		NamespaceJoins:  []string{"network:container:abc"},
+		CgroupParent:    []string{"/rasputin"},
+		Tmpfs:           []string{"/tmp/cache"},
+		Ulimits:         []string{"nofile=65535"},
+	}
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{
+		"securityOpt", "usernsMode", "groupAdd", "sysctls", "volumesFrom",
+		"reservedDevices", "namespaceJoins", "cgroupParent", "tmpfs", "ulimits",
+	} {
+		if !strings.Contains(string(b), `"`+key+`":`) {
+			t.Errorf("SafetyFacts JSON is missing key %q — a renamed key is a privilege fact the reader drops silently\ngot: %s", key, b)
+		}
+	}
+}
+
+// Every new field must be omitempty: an unprivileged tile's manifest should not
+// grow ten empty arrays, and a reader distinguishing "absent" from "empty" would
+// be reading noise.
+func TestSafetyFacts_PrivilegeFieldsOmitWhenEmpty(t *testing.T) {
+	b, err := json.Marshal(SafetyFacts{Images: []string{"img@" + goodDigest}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{
+		"securityOpt", "usernsMode", "groupAdd", "sysctls", "volumesFrom",
+		"reservedDevices", "namespaceJoins", "cgroupParent", "tmpfs", "ulimits",
+	} {
+		if strings.Contains(string(b), key) {
+			t.Errorf("empty SafetyFacts still emits %q; want omitempty\ngot: %s", key, b)
+		}
+	}
+}
+
+// DELIBERATELY PERMITTED, FOR NOW. #195 is capture, not policy: these facts are
+// now visible in the signed manifest and in tilelint's output, but the validator
+// does not yet rule on them. #196 decides what a tile may declare and what an
+// operator must consent to. This test exists so the gap is a recorded decision
+// rather than something a later reader assumes is covered — when #196 lands it
+// should FAIL and be rewritten, not deleted.
+func TestValidateTileSafety_PrivilegeFactsNotYetEnforced_See196(t *testing.T) {
+	f := okFacts()
+	f.SecurityOpt = []string{"seccomp=unconfined"}
+	f.UsernsMode = []string{"host"}
+	f.GroupAdd = []string{"docker"}
+	if err := ValidateTileSafety(okTile(), f); err != nil {
+		t.Fatalf("capture-only change must not alter the verdict; #196 owns the policy. got: %v", err)
 	}
 }

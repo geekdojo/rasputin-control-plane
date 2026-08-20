@@ -145,6 +145,61 @@ type SafetyFacts struct {
 	BindMounts []string `json:"bindMounts,omitempty"`
 	// Devices is every host device mapped into a container.
 	Devices []string `json:"devices,omitempty"`
+
+	// --- Added 2026-08-20 (#195). ---
+	//
+	// The fields above were the whole of the extractor's view, and a compose
+	// key it does not read is a privilege the validator cannot see. Proven,
+	// not theorised: buildah fails in a plain container with
+	// unshare(CLONE_NEWUSER) denied, and one `security_opt: seccomp=unconfined`
+	// line — no privileged, no cap_add, no mounts — makes it build images while
+	// passing every gate. Capture is deliberately separate from policy: what we
+	// permit is #196's call, but nothing can be enforced over facts nobody
+	// collects, and these are signature-covered, so a tile's privilege is
+	// visible to a reviewer and to the operator either way.
+
+	// SecurityOpt is every security_opt entry, normalised to "key=value".
+	// `seccomp=unconfined` removes the kernel syscall filter and
+	// `apparmor=unconfined` the MAC policy — the closest a stack gets to
+	// privileged without spelling it that way.
+	SecurityOpt []string `json:"securityOpt,omitempty"`
+
+	// UsernsMode is every user-namespace override. "host" disables the
+	// remapping that stops container root being host root.
+	UsernsMode []string `json:"usernsMode,omitempty"`
+
+	// GroupAdd is every supplementary group joined. Membership of a host group
+	// (docker, disk, video) is authority the image was not built with.
+	GroupAdd []string `json:"groupAdd,omitempty"`
+
+	// Sysctls is every kernel tunable a service sets, as "name=value".
+	Sysctls []string `json:"sysctls,omitempty"`
+
+	// VolumesFrom is every source a service inherits mounts from. It reaches
+	// around BindMounts entirely: the inheriting service receives paths this
+	// struct never recorded.
+	VolumesFrom []string `json:"volumesFrom,omitempty"`
+
+	// ReservedDevices is every deploy.resources.reservations.devices entry —
+	// how GPUs are actually requested. Without it a stack reaches hardware
+	// while declaring no `devices:`, and so no NeedsHardware.
+	ReservedDevices []string `json:"reservedDevices,omitempty"`
+
+	// NamespaceJoins is every namespace a service joins instead of creating,
+	// as "<kind>:<target>" (e.g. "network:service:vpn", "pid:container:abc").
+	// A `service:` target names a sibling inside the stack — the ordinary
+	// VPN-sidecar shape. A `container:` target names something outside it,
+	// which the signed bundle does not describe.
+	NamespaceJoins []string `json:"namespaceJoins,omitempty"`
+
+	// CgroupParent is every cgroup a service attaches to rather than its own.
+	CgroupParent []string `json:"cgroupParent,omitempty"`
+
+	// Tmpfs is every tmpfs mount path. Unbounded, it is host memory.
+	Tmpfs []string `json:"tmpfs,omitempty"`
+
+	// Ulimits is every resource limit a service overrides, as "name=value".
+	Ulimits []string `json:"ulimits,omitempty"`
 }
 
 // Available reports whether the tile can be installed now.
