@@ -59,6 +59,13 @@ CATALOG_LEAF=0
 # it touches, retroactively. Expiry alarm + rotation runbook: geekdojo/geekdojo-brain#191.
 LEAF_DAYS=730
 
+# The deployed PKI is EC P-384 with ecdsa-with-SHA384 throughout — root,
+# intermediate and leaf-001 all secp384r1. This script generated RSA-4096, so
+# a leaf it issued was RSA under an EC intermediate: valid, but not the PKI
+# this script claims to bootstrap. Same class of drift as the LEAF_DAYS note
+# below, found the same way — by reading the certs actually in use.
+EC_CURVE="secp384r1"
+
 # Purpose OIDs under Geekdojo's IANA Private Enterprise Number 66587, assigned
 # 2026-08-20. These MUST stay identical to agent/internal/artifactsig/eku.go —
 # a leaf minted under a different arc than the verifier expects is refused by
@@ -104,12 +111,12 @@ if [[ $CATALOG_LEAF -eq 1 ]]; then
     if [[ -z "$last" ]]; then next="001"; else next=$(printf "%03d" $((10#$last + 1))); fi
 
     echo "==> Issuing catalog-leaf-${next} under existing intermediate"
-    openssl genrsa -out "catalog-leaf-${next}.key" 4096
+    openssl ecparam -genkey -name "$EC_CURVE" -noout -out "catalog-leaf-${next}.key"
     openssl req -new -key "catalog-leaf-${next}.key" -out "catalog-leaf-${next}.csr" \
         -subj "/CN=${CN_PREFIX} App Catalog Signing catalog-leaf-${next}"
     openssl x509 -req -in "catalog-leaf-${next}.csr" \
         -CA intermediate-ca.pem -CAkey intermediate-ca.key -CAcreateserial \
-        -out "catalog-leaf-${next}.pem" -days "$LEAF_DAYS" -sha256 \
+        -out "catalog-leaf-${next}.pem" -days "$LEAF_DAYS" -sha384 \
         -extfile <(printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=critical,%s" "$EKU_CATALOG")
     rm -f "catalog-leaf-${next}.csr"
 
@@ -159,12 +166,12 @@ if [[ $ROTATE_LEAF -eq 1 ]]; then
         next=$(printf "%03d" $((10#$last + 1)))
     fi
     echo "==> Issuing leaf-${next} under existing intermediate"
-    openssl genrsa -out "leaf-${next}.key" 4096
+    openssl ecparam -genkey -name "$EC_CURVE" -noout -out "leaf-${next}.key"
     openssl req -new -key "leaf-${next}.key" -out "leaf-${next}.csr" \
         -subj "/CN=${CN_PREFIX} Bundle Signing leaf-${next}"
     openssl x509 -req -in "leaf-${next}.csr" \
         -CA intermediate-ca.pem -CAkey intermediate-ca.key -CAcreateserial \
-        -out "leaf-${next}.pem" -days "$LEAF_DAYS" -sha256 \
+        -out "leaf-${next}.pem" -days "$LEAF_DAYS" -sha384 \
         -extfile <(printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=critical,%s" "$EKU_RELEASE")
     rm -f "leaf-${next}.csr"
     echo "done: leaf-${next}.{key,pem}"
@@ -178,8 +185,8 @@ if [[ -f root-ca.key ]]; then
 fi
 
 echo "==> Generating Rasputin Root CA"
-openssl genrsa -out root-ca.key 4096
-openssl req -x509 -new -key root-ca.key -out root-ca.pem -days 7300 -sha256 \
+openssl ecparam -genkey -name "$EC_CURVE" -noout -out root-ca.key
+openssl req -x509 -new -key root-ca.key -out root-ca.pem -days 7300 -sha384 \
     -subj "/CN=${CN_PREFIX} Root CA" \
     -extensions v3_ca -config <(cat <<EOF
 [req]
@@ -193,12 +200,12 @@ EOF
 )
 
 echo "==> Generating Rasputin Update Signing CA (intermediate)"
-openssl genrsa -out intermediate-ca.key 4096
+openssl ecparam -genkey -name "$EC_CURVE" -noout -out intermediate-ca.key
 openssl req -new -key intermediate-ca.key -out intermediate-ca.csr \
     -subj "/CN=${CN_PREFIX} Update Signing CA"
 openssl x509 -req -in intermediate-ca.csr \
     -CA root-ca.pem -CAkey root-ca.key -CAcreateserial \
-    -out intermediate-ca.pem -days 3650 -sha256 \
+    -out intermediate-ca.pem -days 3650 -sha384 \
     -extfile <(cat <<EOF
 basicConstraints = critical, CA:TRUE, pathlen:0
 keyUsage = critical, keyCertSign, cRLSign
@@ -207,12 +214,12 @@ EOF
 rm -f intermediate-ca.csr
 
 echo "==> Generating first release leaf cert (leaf-001)"
-openssl genrsa -out leaf-001.key 4096
+openssl ecparam -genkey -name "$EC_CURVE" -noout -out leaf-001.key
 openssl req -new -key leaf-001.key -out leaf-001.csr \
     -subj "/CN=${CN_PREFIX} Bundle Signing leaf-001"
 openssl x509 -req -in leaf-001.csr \
     -CA intermediate-ca.pem -CAkey intermediate-ca.key -CAcreateserial \
-    -out leaf-001.pem -days "$LEAF_DAYS" -sha256 \
+    -out leaf-001.pem -days "$LEAF_DAYS" -sha384 \
     -extfile <(printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=critical,%s" "$EKU_RELEASE")
 rm -f leaf-001.csr
 
