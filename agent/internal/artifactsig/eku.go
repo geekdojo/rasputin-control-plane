@@ -22,35 +22,30 @@ import (
 // a naming convention: a holder of the catalog leaf's private key cannot grant
 // themselves the release purpose without the intermediate key, which is offline.
 //
-// THE ARC IS PROVISIONAL AND MUST BE REPLACED BEFORE ANY LEAF IS MINTED.
+// THE ARC: 1.3.6.1.4.1.66587, Geekdojo's IANA Private Enterprise Number.
+// Assigned 2026-08-20. https://www.iana.org/assignments/enterprise-numbers/
 //
-// The first attempt used 2.25, the ITU-T UUID arc — any UUID may be used as an
-// OID under it with no registration and no chance of collision. That is the
-// textbook answer and it is unusable here: Go models an OID as []int, and a
-// UUID rendered as a decimal arc is ~2.1e38, which does not fit. encoding/asn1
-// cannot represent it, so the idea fails at compile time rather than in review.
+// Two dead ends are recorded because both look correct until you try them.
 //
-// The correct arc is 1.3.6.1.4.1.<PEN> under a Geekdojo IANA Private Enterprise
-// Number. Registration is free but is a human action nobody has taken, so the
-// placeholder below sits under PEN 0, which IANA has RESERVED and will never
-// assign. That is deliberate: an unregistered placeholder that can never
-// collide with a real organisation, and that is obviously wrong to anyone who
-// looks it up. Inventing a plausible-looking PEN would be squatting and would
-// eventually collide with whoever holds it.
+// 2.25, the ITU-T UUID arc, is the textbook answer — any UUID may be used as an
+// OID beneath it with no registration and no chance of collision. It is
+// unusable here: Go models an OID as []int, and a UUID rendered as a decimal
+// arc is ~2.1e38. encoding/asn1 cannot represent it, so the idea fails at
+// compile time rather than in review.
 //
-// Nothing in the field carries these OIDs yet — the transitional rule below
-// accepts the legacy leaf on its generic codeSigning EKU — so changing the arc
-// today costs one line. Changing it after a leaf is minted costs a re-mint and
-// a re-sign of everything that leaf signed. Hence: before minting, not after.
-// Tracked on geekdojo/geekdojo-brain#192.
+// Inventing a plausible-looking PEN while waiting for the real one is squatting
+// on whoever holds it, and any leaf that escaped would assert another
+// organisation's identifier. The placeholder used until this assignment landed
+// was PEN 0, which IANA has reserved and will never assign — chosen precisely
+// because it cannot collide and is obviously wrong to anyone who looks it up.
+//
+// No leaf was ever minted under the placeholder. Confirmed before the swap:
+// pki-init.sh had no catalog-leaf mode, no catalog signing secret existed at
+// org or repository level, and nothing outside this file referenced the OID.
+// Closes geekdojo/geekdojo-brain#192.
 var (
 	// OIDGeekdojo is the root of everything Geekdojo issues.
-	// PROVISIONAL: PEN 0 is IANA-reserved. Replace with the real PEN — see above.
-	OIDGeekdojo = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 0}
-
-	// ArcIsProvisional reports that OIDGeekdojo is still the placeholder. Read
-	// by the test that refuses to let a provisional arc reach a minted leaf.
-	ArcIsProvisional = OIDGeekdojo.Equal(asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 0})
+	OIDGeekdojo = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66587}
 
 	// OIDCodeSigningRelease marks a leaf permitted to sign OS and firmware
 	// artifacts — the RAUC bundles and the firewall rootfs the agent flashes.

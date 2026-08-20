@@ -5,6 +5,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -84,18 +85,6 @@ func TestAuthorize_NoEKULeafIsRefused(t *testing.T) {
 	}
 }
 
-// Guards the swap that has to happen before any leaf is minted. It asserts the
-// arc is STILL provisional so the reminder is impossible to lose; when the real
-// PEN lands, this test is what tells you to delete it.
-func TestOIDArc_IsStillProvisional(t *testing.T) {
-	if !ArcIsProvisional {
-		t.Fatal("OIDGeekdojo is no longer the PEN-0 placeholder — good. " +
-			"Delete this test, and confirm no leaf was minted under the old arc " +
-			"(geekdojo/geekdojo-brain#192).")
-	}
-	t.Log("arc is provisional (PEN 0, IANA-reserved); a real PEN is required before minting any leaf")
-}
-
 // A leaf carrying the bare Rasputin arc with no purpose suffix is malformed,
 // but it is unambiguously issued under our arc — so it must not get the legacy
 // allowance. This is the case the mutation gate found unguarded: with a `>`
@@ -126,5 +115,44 @@ func TestExtend_DoesNotAliasTheBaseArc(t *testing.T) {
 	}
 	if len(OIDGeekdojo) != 7 {
 		t.Errorf("OIDGeekdojo grew to %d components — extend wrote into its base", len(OIDGeekdojo))
+	}
+}
+
+// The arc is a PERMANENT contract as of 2026-08-20: leaves are minted under it
+// and certificates outlive the code that made them. Changing any of these
+// values silently invalidates every leaf already issued, and the failure shows
+// up as a fleet that refuses its own updates rather than as a build error.
+// Pinned as literal dotted strings so a mistake is visible in the diff.
+func TestOIDArc_IsPinned(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		got  asn1.ObjectIdentifier
+		want string
+	}{
+		{"geekdojo root", OIDGeekdojo, "1.3.6.1.4.1.66587"},
+		{"code signing / release", OIDCodeSigningRelease, "1.3.6.1.4.1.66587.1.1.1"},
+		{"code signing / catalog", OIDCodeSigningCatalog, "1.3.6.1.4.1.66587.1.1.2"},
+	} {
+		if got := c.got.String(); got != c.want {
+			t.Errorf("%s = %s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+// Release and catalog must never be the same OID, and neither may be a prefix
+// of the other — the whole authorization model is that holding one does not
+// imply the other.
+func TestOIDArc_PurposesAreDistinct(t *testing.T) {
+	if OIDCodeSigningRelease.Equal(OIDCodeSigningCatalog) {
+		t.Fatal("release and catalog purposes must be distinct OIDs")
+	}
+	for _, pair := range [][2]asn1.ObjectIdentifier{
+		{OIDCodeSigningRelease, OIDCodeSigningCatalog},
+		{OIDCodeSigningCatalog, OIDCodeSigningRelease},
+	} {
+		a, b := pair[0].String(), pair[1].String()
+		if strings.HasPrefix(a+".", b+".") {
+			t.Errorf("%s is a prefix of %s — a prefix match would let one purpose satisfy the other", b, a)
+		}
 	}
 }
