@@ -433,6 +433,12 @@ func issued(t *testing.T, cn string, notBefore, notAfter time.Time,
 		tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
 	} else {
 		tmpl.KeyUsage = x509.KeyUsageDigitalSignature
+		// Match the deployed leaf-001, which carries generic codeSigning and no
+		// explicit Rasputin purpose. These fixtures previously set no EKU at
+		// all, which is not a shape the PKI has ever issued — and once #192
+		// started asking what a leaf was authorized to do, that unrealism was
+		// the only thing failing.
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
 	if err != nil {
