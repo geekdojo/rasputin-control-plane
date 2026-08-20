@@ -32,7 +32,10 @@ Usage: $0 [--out-dir DIR] [--cn-prefix STR] [--rotate-leaf]
 Options:
   --out-dir DIR      Output directory (default: ./pki-out)
   --cn-prefix STR    CN prefix for issued certs (default: "Rasputin")
-  --rotate-leaf      Issue a new leaf under the existing intermediate
+  --rotate-leaf      Issue a new RELEASE leaf under the existing intermediate
+  --catalog-leaf     Issue a new APP-CATALOG leaf under the existing intermediate.
+                     Carries the catalog purpose only, so it cannot sign an OS
+                     or firmware artifact even though it shares the trust root.
                      (requires intermediate-ca.{key,pem} already in --out-dir)
 EOF
     exit 1
@@ -41,6 +44,7 @@ EOF
 OUT_DIR="./pki-out"
 CN_PREFIX="Rasputin"
 ROTATE_LEAF=0
+CATALOG_LEAF=0
 
 # Leaf validity, in days. 730 = 2 years, matching the deployed leaf-001
 # (notAfter 2028-05-29). This was hardcoded 90 in both leaf paths while the
@@ -55,11 +59,34 @@ ROTATE_LEAF=0
 # it touches, retroactively. Expiry alarm + rotation runbook: geekdojo/geekdojo-brain#191.
 LEAF_DAYS=730
 
+# Purpose OIDs under Geekdojo's IANA Private Enterprise Number 66587, assigned
+# 2026-08-20. These MUST stay identical to agent/internal/artifactsig/eku.go —
+# a leaf minted under a different arc than the verifier expects is refused by
+# the whole fleet, and the symptom is "updates stopped working", not an error
+# anyone can read. eku.go pins the same strings in TestOIDArc_IsPinned.
+OID_RELEASE="1.3.6.1.4.1.66587.1.1.1"
+OID_CATALOG="1.3.6.1.4.1.66587.1.1.2"
+
+# A RELEASE leaf carries BOTH the release OID and generic codeSigning.
+# codeSigning is transitional: agents predating the EKU check authorize on
+# chain-to-root and a leaf without it may not satisfy their purpose check, so
+# dropping it now would strand any node that has not taken the update. Remove
+# it once no such node remains (ADR-0006 Decision 3's tracked trigger).
+EKU_RELEASE="codeSigning,${OID_RELEASE}"
+
+# A CATALOG leaf carries the catalog OID and NOTHING ELSE — deliberately not
+# codeSigning. That single omission is the whole blast-radius separation: a
+# holder of the catalog key cannot produce a signature the OTA path accepts,
+# and cannot grant themselves the release purpose without the intermediate key,
+# which is offline.
+EKU_CATALOG="${OID_CATALOG}"
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         --out-dir) OUT_DIR=$2; shift 2 ;;
         --cn-prefix) CN_PREFIX=$2; shift 2 ;;
         --rotate-leaf) ROTATE_LEAF=1; shift ;;
+        --catalog-leaf) CATALOG_LEAF=1; shift ;;
         -h|--help) usage ;;
         *) echo "unknown arg: $1" >&2; usage ;;
     esac
@@ -67,6 +94,57 @@ done
 
 mkdir -p "$OUT_DIR"
 cd "$OUT_DIR"
+
+if [[ $CATALOG_LEAF -eq 1 ]]; then
+    if [[ ! -f intermediate-ca.key || ! -f intermediate-ca.pem ]]; then
+        echo "error: intermediate-ca.{key,pem} not found in $OUT_DIR; cannot issue a catalog leaf" >&2
+        exit 2
+    fi
+    last=$(ls -1 catalog-leaf-*.pem 2>/dev/null | sed 's/catalog-leaf-\([0-9]*\)\.pem/\1/' | sort -n | tail -1 || true)
+    if [[ -z "$last" ]]; then next="001"; else next=$(printf "%03d" $((10#$last + 1))); fi
+
+    echo "==> Issuing catalog-leaf-${next} under existing intermediate"
+    openssl genrsa -out "catalog-leaf-${next}.key" 4096
+    openssl req -new -key "catalog-leaf-${next}.key" -out "catalog-leaf-${next}.csr" \
+        -subj "/CN=${CN_PREFIX} App Catalog Signing catalog-leaf-${next}"
+    openssl x509 -req -in "catalog-leaf-${next}.csr" \
+        -CA intermediate-ca.pem -CAkey intermediate-ca.key -CAcreateserial \
+        -out "catalog-leaf-${next}.pem" -days "$LEAF_DAYS" -sha256 \
+        -extfile <(printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=critical,%s" "$EKU_CATALOG")
+    rm -f "catalog-leaf-${next}.csr"
+
+    # Prove what was minted rather than trusting the flags. A leaf that
+    # silently acquired codeSigning would re-merge the blast radii this
+    # separation exists to keep apart, and nothing downstream would notice.
+    if openssl x509 -in "catalog-leaf-${next}.pem" -noout -text | grep -q "Code Signing"; then
+        echo "error: catalog leaf carries codeSigning — it must not" >&2
+        exit 1
+    fi
+    if ! openssl x509 -in "catalog-leaf-${next}.pem" -noout -text | grep -q "$OID_CATALOG"; then
+        echo "error: catalog leaf is missing the catalog purpose $OID_CATALOG" >&2
+        exit 1
+    fi
+    openssl verify -CAfile root-ca.pem -untrusted intermediate-ca.pem \
+        -purpose any "catalog-leaf-${next}.pem" >/dev/null \
+        || { echo "error: catalog leaf does not chain to the root" >&2; exit 1; }
+
+    chmod 600 "catalog-leaf-${next}.key"
+    cat <<EOF
+
+done: catalog-leaf-${next}.{key,pem}
+  purpose: ${OID_CATALOG} (app-catalog bundles only; NOT codeSigning)
+  expires: $(openssl x509 -in "catalog-leaf-${next}.pem" -noout -enddate | cut -d= -f2)
+
+Load into the catalog repo as repository secrets:
+  RASPUTIN_CATALOG_LEAF_CERT   cat catalog-leaf-${next}.pem intermediate-ca.pem
+  RASPUTIN_CATALOG_LEAF_KEY    catalog-leaf-${next}.key
+
+The CERT secret is the leaf AND the intermediate, in that order — the publish
+workflow splits them, and the signature must embed both so a node holding only
+the root can build the chain.
+EOF
+    exit 0
+fi
 
 if [[ $ROTATE_LEAF -eq 1 ]]; then
     if [[ ! -f intermediate-ca.key || ! -f intermediate-ca.pem ]]; then
@@ -87,7 +165,7 @@ if [[ $ROTATE_LEAF -eq 1 ]]; then
     openssl x509 -req -in "leaf-${next}.csr" \
         -CA intermediate-ca.pem -CAkey intermediate-ca.key -CAcreateserial \
         -out "leaf-${next}.pem" -days "$LEAF_DAYS" -sha256 \
-        -extfile <(printf "keyUsage=digitalSignature\nextendedKeyUsage=codeSigning")
+        -extfile <(printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=critical,%s" "$EKU_RELEASE")
     rm -f "leaf-${next}.csr"
     echo "done: leaf-${next}.{key,pem}"
     exit 0
@@ -135,7 +213,7 @@ openssl req -new -key leaf-001.key -out leaf-001.csr \
 openssl x509 -req -in leaf-001.csr \
     -CA intermediate-ca.pem -CAkey intermediate-ca.key -CAcreateserial \
     -out leaf-001.pem -days "$LEAF_DAYS" -sha256 \
-    -extfile <(printf "keyUsage=digitalSignature\nextendedKeyUsage=codeSigning")
+    -extfile <(printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=critical,%s" "$EKU_RELEASE")
 rm -f leaf-001.csr
 
 chmod 600 *.key
