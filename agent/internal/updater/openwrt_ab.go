@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/agent/internal/artifactsig"
+	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
