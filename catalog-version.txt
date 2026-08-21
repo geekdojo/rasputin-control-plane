@@ -1,0 +1,22 @@
+# Pinned app-catalog release embedded into this build as the OFFLINE FLOOR.
+#
+# WHAT THE FLOOR IS. Not "the catalog" — ADR-0006 Decision 6 demoted the baked
+# manifest to what a cluster has before it has ever completed a verified fetch:
+# first boot, an airgapped install, a WAN outage on day one. The effective
+# catalog is the most recent VERIFIED fetch, or this, and never a merge of the
+# two.
+#
+# WHY A PIN AND NOT "FETCH LATEST". A build that reaches for a moving target is
+# not reproducible, and a rebuild of an old tag would silently acquire a newer
+# catalog than it shipped with. A pin makes the floor a reviewable line in a
+# diff. Same shape as rasputin-openwrt-firewall/agent-version.txt.
+#
+# TO BUMP: run scripts/embed-catalog.sh, which fetches that release, verifies
+# its signature against the Rasputin root CA, and rewrites the embedded bundle
+# under api/internal/catalog/floor/. Do not hand-edit either the number or the
+# bundle — a test asserts they agree, precisely so a hand-edit fails CI rather
+# than shipping a floor whose contents disagree with its label.
+#
+# History:
+#   1  2026-08-21  first published catalog (23 tiles, 5 available)
+1

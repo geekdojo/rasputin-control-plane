@@ -12,9 +12,43 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
+// effectiveTiles is the catalog in effect: the most recent verified fetch, or
+// the embedded floor if no fetch has ever succeeded (ADR-0006 Decision 6).
+//
+// Never a union of the two. A merge would make "which tile is live" depend on
+// two sources with no obvious precedence, which is the two-sources-of-truth
+// failure this project has already been bitten by twice.
+func (s *Server) effectiveTiles() []catalog.Tile {
+	if s.catalogStore == nil {
+		return s.catalog.All()
+	}
+	b := s.catalogStore.Current()
+	out := make([]catalog.Tile, 0, len(b.Tiles))
+	for _, bt := range b.Tiles {
+		t := bt.Tile
+		t.ComposeYAML = bt.Compose
+		out = append(out, t)
+	}
+	return out
+}
+
+func (s *Server) effectiveTile(id string) (catalog.Tile, bool) {
+	if s.catalogStore == nil {
+		return s.catalog.Get(id)
+	}
+	for _, bt := range s.catalogStore.Current().Tiles {
+		if bt.Tile.ID == id {
+			t := bt.Tile
+			t.ComposeYAML = bt.Compose
+			return t, true
+		}
+	}
+	return catalog.Tile{}, false
+}
+
 // GET /api/catalog — list every curated tile in display order.
 func (s *Server) handleListCatalog(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.catalog.All())
+	writeJSON(w, http.StatusOK, s.effectiveTiles())
 }
 
 // GET /api/catalog/{id} — one tile, including its compose YAML so advanced
@@ -22,7 +56,7 @@ func (s *Server) handleListCatalog(w http.ResponseWriter, r *http.Request) {
 // compose (it's `json:"-"` on the Tile) to stay lean; the detail view adds it
 // back explicitly.
 func (s *Server) handleGetCatalogTile(w http.ResponseWriter, r *http.Request) {
-	t, ok := s.catalog.Get(r.PathValue("id"))
+	t, ok := s.effectiveTile(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "catalog tile not found")
 		return
@@ -40,7 +74,7 @@ func (s *Server) handleGetCatalogTile(w http.ResponseWriter, r *http.Request) {
 // tile); it does NOT deploy — the caller POSTs /api/apps/{id}/deploy after,
 // same as a hand-authored app. Keeps the create/deploy split consistent.
 func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request) {
-	tile, ok := s.catalog.Get(r.PathValue("id"))
+	tile, ok := s.effectiveTile(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "catalog tile not found")
 		return

@@ -44,6 +44,28 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  catalog-floor:
+    # The offline floor ships in every image, so a hand-edited or stale bundle
+    # would reach every cluster built from this commit. The Go test checks it
+    # parses and agrees with catalog-version.txt; this checks the bytes are
+    # still the ones the publisher SIGNED, which no amount of Go can tell.
+    name: catalog floor signature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: verify the embedded catalog floor
+        env:
+          RASPUTIN_ROOT_CA_PEM: ${{ vars.RASPUTIN_ROOT_CA_PEM }}
+        run: |
+          set -eu
+          if [ -z "${RASPUTIN_ROOT_CA_PEM:-}" ]; then
+            echo "::error::vars.RASPUTIN_ROOT_CA_PEM is unset; cannot verify the embedded catalog floor"
+            exit 1
+          fi
+          ./scripts/embed-catalog.sh --verify
+
   backend:
     name: backend (vet + test + build)
     runs-on: ubuntu-latest

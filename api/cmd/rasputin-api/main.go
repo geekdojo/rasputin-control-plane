@@ -29,6 +29,8 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog/floor"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -949,6 +951,42 @@ func main() {
 	srv.SetReleaseSource(releases.NewGithubPublicSource(releaseAPIBase), releaseChannel)
 	srv.SetReleaseDownloadBase(envOr("RASPUTIN_RELEASE_DOWNLOAD_BASE", "https://github.com"))
 	log.Printf("rasputin-api: update channel = %s (direct from source repos)", releaseChannel)
+
+	// App catalog (ADR-0006). The floor embedded in this build is what a
+	// cluster has before it has ever completed a verified fetch; the poller
+	// replaces it with the newest signed catalog it can verify. Resolution has
+	// no third case, so nothing here merges the two.
+	//
+	// A floor that does not parse is a BUILD defect — every cluster from this
+	// image would inherit it — so it is fatal rather than degraded.
+	catalogFloor, err := floor.Load()
+	if err != nil {
+		log.Fatalf("rasputin-api: %v", err)
+	}
+	catalogStore, err := catalogsync.New(dataDir, catalogsync.NewVerifier(filepath.Join(trustDir, "root-ca.pem")), catalogFloor)
+	if err != nil {
+		log.Fatalf("rasputin-api: catalog store: %v", err)
+	}
+	catalogPoller := catalogsync.NewPoller(
+		catalogsync.NewFetcher(
+			envOr("RASPUTIN_CATALOG_REPO", ""),
+			envOr("RASPUTIN_CATALOG_API_BASE", releaseAPIBase),
+			releaseChannel,
+		),
+		catalogStore,
+	)
+	srv.SetCatalogSync(catalogStore, catalogPoller)
+	go catalogPoller.Run(ctx)
+	{
+		v, fetched, note := catalogStore.State()
+		src := "embedded floor"
+		if fetched {
+			src = "verified fetch"
+		}
+		log.Printf("rasputin-api: app catalog v%d (%s), polling %s every %s%s",
+			v, src, releaseChannel, catalogsync.DefaultInterval,
+			map[bool]string{true: " — " + note, false: ""}[note != ""])
+	}
 
 	handler := srv.Handler()
 
