@@ -219,20 +219,42 @@ verify_release_leaf() {
         anchor=(-CAfile intermediate-ca.pem -partial_chain)
     fi
 
-    local failed=0 purpose
+    local failed=0
+
     # smimesign — OpenSSL CMS_verify's DEFAULT purpose, and therefore what
-    #   `rauc bundle` and every deployed board enforce today, because no
-    #   rasputin-os board sets [keyring] check-purpose. Needs emailProtection.
-    # codesign  — what RAUC enforces once check-purpose=codesign is configured,
-    #   and what the published `openssl cms -verify` guidance implies.
-    for purpose in smimesign codesign; do
-        if openssl verify "${anchor[@]}" -purpose "$purpose" "$leaf" >/dev/null 2>&1; then
-            echo "    purpose $purpose: OK"
-        else
-            echo "    purpose $purpose: FAILED — a consumer using this purpose will refuse every artifact this leaf signs" >&2
-            failed=1
-        fi
-    done
+    # `rauc bundle` and every deployed board enforce today, because no
+    # rasputin-os board sets [keyring] check-purpose. Needs emailProtection.
+    # This purpose has existed forever, so it is safe to ask for by name.
+    if openssl verify "${anchor[@]}" -purpose smimesign "$leaf" >/dev/null 2>&1; then
+        echo "    purpose smimesign: OK"
+    else
+        echo "    purpose smimesign: FAILED — the deployed fleet will refuse every artifact this leaf signs" >&2
+        failed=1
+    fi
+
+    # RAUC's codesign semantics, checked on the extensions rather than through
+    # OpenSSL's "codesign" purpose.
+    #
+    # Do NOT switch this to `-purpose codesign`. That purpose is absent from
+    # OpenSSL 3.0.13 (ubuntu-latest), where it yields "Invalid purpose
+    # codesign" — a failure about the tool, not the certificate. It cost a
+    # release build once already, on a leaf that was correct. Local openssl
+    # being newer is exactly what makes the trap hard to see from a Mac.
+    #
+    # It is also the more faithful test: RAUC does not use OpenSSL's purpose.
+    # It registers its own with X509_PURPOSE_add ("codesign-rauc",
+    # src/signature.c), and that callback asks a leaf for precisely these two.
+    local eku ku
+    eku=$(openssl x509 -in "$leaf" -noout -ext extendedKeyUsage 2>/dev/null || true)
+    ku=$(openssl x509 -in "$leaf" -noout -ext keyUsage 2>/dev/null || true)
+    if grep -q "Code Signing" <<<"$eku" && grep -q "Digital Signature" <<<"$ku"; then
+        echo "    RAUC codesign semantics (EKU codeSigning + KU digitalSignature): OK"
+    else
+        echo "    RAUC codesign semantics: FAILED — a board with check-purpose=codesign will refuse this leaf" >&2
+        echo "      extendedKeyUsage: ${eku:-<none>}" >&2
+        echo "      keyUsage:         ${ku:-<none>}" >&2
+        failed=1
+    fi
 
     if ! openssl x509 -in "$leaf" -noout -text | grep -q "$OID_RELEASE"; then
         echo "    release purpose $OID_RELEASE: MISSING — artifactsig will refuse it" >&2
