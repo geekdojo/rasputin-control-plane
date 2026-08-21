@@ -1,0 +1,671 @@
+{
+  "schemaVersion": 1,
+  "version": 1,
+  "publishedAt": "2026-08-21T02:05:22Z",
+  "source": "geekdojo/rasputin-app-catalog@f778a07f40eec7871af943f72b17e227d483277b",
+  "tiles": [
+    {
+      "tile": {
+        "id": "actual-budget",
+        "name": "Actual Budget",
+        "tagline": "Private, zero-based budgeting.",
+        "description": "A snappy, local-first budgeting app. Your finances never leave your cluster.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 256,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "productivity",
+        "status": "preview",
+        "website": "https://actualbudget.org",
+        "icon": "💰",
+        "postInstall": "Open it and create your budget file — everything stays local."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "adsb-ultrafeeder",
+        "name": "ADS-B Feeder",
+        "tagline": "See the planes flying over your house.",
+        "description": "Decode ADS-B with a cheap SDR and watch a live map + 24h heatmap. Feeds the community aggregators and FlightAware.",
+        "collection": "dongle",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 512,
+        "needsHardware": "rtl-sdr",
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "radio",
+        "status": "preview",
+        "website": "https://github.com/sdr-enthusiasts/docker-adsb-ultrafeeder",
+        "icon": "✈️",
+        "postInstall": "Plug in your RTL-SDR + 1090MHz antenna, then open the map. Antenna placement drives your range."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "ais-catcher",
+        "name": "AIS-catcher",
+        "tagline": "Track ships in real time on a live map.",
+        "description": "Decode marine AIS with an SDR and see cargo ships and ferries on a built-in map. Best near navigable water.",
+        "collection": "dongle",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 256,
+        "needsHardware": "rtl-sdr",
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "radio",
+        "status": "preview",
+        "website": "https://github.com/jvde-github/AIS-catcher",
+        "icon": "🚢",
+        "postInstall": "Plug in your RTL-SDR + VHF antenna near the coast, then open the map."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "arr-stack",
+        "name": "Media Automation (*arr)",
+        "tagline": "Sonarr + Radarr + Prowlarr + qBittorrent.",
+        "description": "The classic 'media appears by magic' bundle that feeds Jellyfin. Ships with an indexer-config and VPN story.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 2048,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "media",
+        "status": "preview",
+        "website": "https://wiki.servarr.com",
+        "icon": "🎞️",
+        "postInstall": "Configure your indexers in Prowlarr and connect qBittorrent — set up a VPN before you do."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "audiobookshelf",
+        "name": "Audiobookshelf",
+        "tagline": "Your audiobooks and podcasts, with great phone apps.",
+        "description": "A self-hosted server for your audiobook and podcast library, with progress sync across excellent iOS and Android apps. Point it at a folder and go.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "any",
+        "ramFloorMB": 1024,
+        "exposureDefault": "lan-only",
+        "ports": [
+          {
+            "name": "web",
+            "container": 80,
+            "published": 13378,
+            "protocol": "tcp",
+            "primary": true
+          }
+        ],
+        "category": "media",
+        "website": "https://github.com/advplyr/audiobookshelf",
+        "icon": "🎧",
+        "postInstall": "Open it, create your admin account, then add an audiobook or podcast library folder."
+      },
+      "compose": "# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  audiobookshelf:\n    image: ghcr.io/advplyr/audiobookshelf:2.36.0@sha256:180acad33d69c99ed208676465d8edcb268fa46967735579a7810859885b1a8e\n    restart: unless-stopped\n    volumes:\n      - abs-config:/config\n      - abs-metadata:/metadata\n      - abs-audiobooks:/audiobooks\n      - abs-podcasts:/podcasts\n    ports:\n      - \"13378:80\"\n\nvolumes:\n  abs-config:\n  abs-metadata:\n  abs-audiobooks:\n  abs-podcasts:\n",
+      "safety": {
+        "images": [
+          "ghcr.io/advplyr/audiobookshelf:2.36.0@sha256:180acad33d69c99ed208676465d8edcb268fa46967735579a7810859885b1a8e"
+        ],
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "freshrss",
+        "name": "FreshRSS",
+        "tagline": "A fast, self-hosted RSS reader.",
+        "description": "Follow the web on your terms. Lightweight, quick, and great with mobile clients.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 256,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "productivity",
+        "status": "preview",
+        "website": "https://freshrss.org",
+        "icon": "📰",
+        "postInstall": "Open it, create your account, and add a few feeds to get started."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "home-assistant",
+        "name": "Home Assistant",
+        "tagline": "Automate your home — the #1 self-hosted app.",
+        "description": "The open-source home automation hub. Beloved, powerful, and a genuine weekend project rather than a five-minute setup.",
+        "collection": "essentials",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 1024,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "automation",
+        "status": "preview",
+        "website": "https://www.home-assistant.io",
+        "icon": "🏠",
+        "postInstall": "Open it and follow the onboarding wizard to create your account and add your first devices."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "immich",
+        "name": "Immich",
+        "tagline": "Google Photos at home — searchable and private.",
+        "description": "A self-hosted photo and video library with face recognition, semantic search, and phone auto-backup. The consensus #1 show-your-friends app.",
+        "collection": "show-off",
+        "arch": "both",
+        "placementHint": "prefer-x86",
+        "ramFloorMB": 8192,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "photos",
+        "status": "preview",
+        "website": "https://github.com/immich-app/immich",
+        "icon": "📸",
+        "postInstall": "Open it, create your admin account, install the mobile app, and turn on auto-backup. Runs its ML best on the x86 node."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "jellyfin",
+        "name": "Jellyfin",
+        "tagline": "Your own Netflix — no accounts, no paywall.",
+        "description": "Stream your movies, shows, and music from your own hardware. Hardware transcoding runs best on the x86 node's Quick Sync; keep transcoding off the Pi.",
+        "collection": "essentials",
+        "arch": "both",
+        "placementHint": "prefer-x86",
+        "ramFloorMB": 2048,
+        "exposureDefault": "lan-only",
+        "ports": [
+          {
+            "name": "web",
+            "container": 8096,
+            "published": 8096,
+            "protocol": "tcp",
+            "primary": true
+          }
+        ],
+        "category": "media",
+        "website": "https://github.com/jellyfin/jellyfin",
+        "icon": "🎬",
+        "postInstall": "Open it to run the setup wizard: create your admin user and add a media library folder."
+      },
+      "compose": "# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  jellyfin:\n    image: jellyfin/jellyfin:10.11.11@sha256:aefb67e6a7ff1debdd154a78a7bbb780fd0c873d8639210a7f6a2016ad2b35db\n    restart: unless-stopped\n    volumes:\n      - jellyfin-config:/config\n      - jellyfin-cache:/cache\n      - jellyfin-media:/media\n    ports:\n      - \"8096:8096\"\n\nvolumes:\n  jellyfin-config:\n  jellyfin-cache:\n  jellyfin-media:\n",
+      "safety": {
+        "images": [
+          "jellyfin/jellyfin:10.11.11@sha256:aefb67e6a7ff1debdd154a78a7bbb780fd0c873d8639210a7f6a2016ad2b35db"
+        ],
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "karakeep",
+        "name": "Karakeep",
+        "tagline": "Bookmark everything, with AI tagging.",
+        "description": "A self-hosted 'bookmark everything' app with optional AI tagging. Pairs with the Ollama tile or an API key.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 1024,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "productivity",
+        "status": "preview",
+        "website": "https://github.com/karakeep-app/karakeep",
+        "icon": "🔖",
+        "postInstall": "Open it, create your account; AI tagging needs the Ollama tile or an API key."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "mealie",
+        "name": "Mealie",
+        "tagline": "Your recipe box — import from any URL.",
+        "description": "A self-hosted recipe manager and meal planner. Paste a recipe URL and it imports clean.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 512,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "productivity",
+        "status": "preview",
+        "website": "https://github.com/mealie-recipes/mealie",
+        "icon": "🍲",
+        "postInstall": "Open it, create your account, and paste a recipe URL to import your first recipe."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "minecraft",
+        "name": "Minecraft Server",
+        "tagline": "Your own Minecraft world, always on.",
+        "description": "The canonical homelab game server. Native arm64; instantly understood by non-techies.",
+        "collection": "show-off",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 2048,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "games",
+        "status": "preview",
+        "website": "https://github.com/itzg/docker-minecraft-server",
+        "icon": "⛏️",
+        "postInstall": "Point your Minecraft client at \u003cnode\u003e.local:25565 to join."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "navidrome",
+        "name": "Navidrome",
+        "tagline": "Your own Spotify for the music you own.",
+        "description": "A fast, lightweight music streaming server that works with a big ecosystem of Subsonic-compatible apps. Featherweight — a perfect always-on tenant for a Pi node.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "any",
+        "ramFloorMB": 256,
+        "exposureDefault": "lan-only",
+        "ports": [
+          {
+            "name": "web",
+            "container": 4533,
+            "published": 4533,
+            "protocol": "tcp",
+            "primary": true
+          }
+        ],
+        "category": "media",
+        "website": "https://github.com/navidrome/navidrome",
+        "icon": "🎵",
+        "postInstall": "Open it and create your admin account, then point it at your music folder."
+      },
+      "compose": "# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  navidrome:\n    image: deluan/navidrome:0.63.2@sha256:9012939114fbb1bb641b81cf96dec5ded15f0aafefe8d47a511d7cb919658e40\n    restart: unless-stopped\n    environment:\n      ND_LOGLEVEL: info\n    volumes:\n      - navidrome-data:/data\n      - navidrome-music:/music:ro\n    ports:\n      - \"4533:4533\"\n\nvolumes:\n  navidrome-data:\n  navidrome-music:\n",
+      "safety": {
+        "images": [
+          "deluan/navidrome:0.63.2@sha256:9012939114fbb1bb641b81cf96dec5ded15f0aafefe8d47a511d7cb919658e40"
+        ],
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "ollama-webui",
+        "name": "Ollama + Open WebUI",
+        "tagline": "Chat with a local LLM your router can't see.",
+        "description": "Run small language models entirely on your own hardware with a friendly chat UI. A real wow at 1–3B; a disappointment above that on CPU.",
+        "collection": "show-off",
+        "arch": "both",
+        "placementHint": "prefer-x86",
+        "ramFloorMB": 4096,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "ai",
+        "status": "preview",
+        "website": "https://github.com/open-webui/open-webui",
+        "icon": "🤖",
+        "postInstall": "Open it, create your account, then pull a small model (llama3.2:3b) — bigger models crawl on CPU."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "paperless-ngx",
+        "name": "Paperless-ngx",
+        "tagline": "Scan, OCR, and search every document.",
+        "description": "Turn your paper into a searchable archive. Drop a PDF and get full-text OCR search — 'it found my tax form' is a real minor wow.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 1024,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "productivity",
+        "status": "preview",
+        "website": "https://github.com/paperless-ngx/paperless-ngx",
+        "icon": "📄",
+        "postInstall": "Open it, create your admin account, then drop PDFs into the consume folder or upload from the web."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "pi-hole",
+        "name": "Pi-hole",
+        "tagline": "Network-wide ad blocking — watch the counter climb.",
+        "description": "Point your network's DNS at Pi-hole and every device gets ad and tracker blocking, with a live dashboard of what it caught. The classic first self-hosted app. Change the admin password before exposing it.",
+        "collection": "essentials",
+        "arch": "both",
+        "placementHint": "any",
+        "ramFloorMB": 512,
+        "exposureDefault": "lan-only",
+        "ports": [
+          {
+            "name": "web",
+            "container": 80,
+            "published": 8081,
+            "protocol": "tcp",
+            "primary": true
+          },
+          {
+            "name": "dns-tcp",
+            "container": 53,
+            "published": 53,
+            "protocol": "tcp"
+          },
+          {
+            "name": "dns-udp",
+            "container": 53,
+            "published": 53,
+            "protocol": "udp"
+          }
+        ],
+        "category": "network",
+        "website": "https://github.com/pi-hole/pi-hole",
+        "icon": "🛡️",
+        "postInstall": "The admin password is a placeholder ('changeme') — log in and change it in Settings, then point your devices' DNS at this node."
+      },
+      "compose": "# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\n# Set a real admin password before exposing this beyond the LAN.\nservices:\n  pihole:\n    image: pihole/pihole:2026.07.2@sha256:f7d1be836e3bc608b56d82fc9904f5a831cdfbc0dc9c6d58f94e4c985c70038b\n    restart: unless-stopped\n    environment:\n      TZ: \"Etc/UTC\"\n      FTLCONF_webserver_api_password: \"changeme\"\n    volumes:\n      - pihole-config:/etc/pihole\n    ports:\n      - \"8081:80/tcp\"\n      - \"53:53/tcp\"\n      - \"53:53/udp\"\n\nvolumes:\n  pihole-config:\n",
+      "safety": {
+        "images": [
+          "pihole/pihole:2026.07.2@sha256:f7d1be836e3bc608b56d82fc9904f5a831cdfbc0dc9c6d58f94e4c985c70038b"
+        ],
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "romm",
+        "name": "RomM",
+        "tagline": "Your retro game library, playable in the browser.",
+        "description": "A self-hosted ROM library with box art, metadata, and play-in-browser. Bring your own ROMs.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 1024,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "games",
+        "status": "preview",
+        "website": "https://github.com/rommapp/romm",
+        "icon": "🕹️",
+        "postInstall": "Open it, create your account, and point it at your ROMs folder."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "rtl-433",
+        "name": "rtl_433",
+        "tagline": "Decode your neighborhood's wireless sensors.",
+        "description": "Sniff 433MHz sensors — weather stations, tire-pressure, thermometers — with a cheap SDR and pipe them to MQTT.",
+        "collection": "dongle",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 256,
+        "needsHardware": "rtl-sdr",
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "radio",
+        "status": "preview",
+        "website": "https://github.com/merbanan/rtl_433",
+        "icon": "📡",
+        "postInstall": "Plug in your RTL-SDR; decoded sensor data flows to MQTT and into your dashboards."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "shadowbroker",
+        "name": "Shadowbroker",
+        "tagline": "A global intelligence console on your own metal.",
+        "description": "An OSINT situational-awareness globe: flights, ships, satellites, quakes, wildfires and more on one MapLibre map. The most on-brand app for Rasputin.",
+        "collection": "show-off",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 4096,
+        "needsFeedKey": [
+          "OpenSky",
+          "AISStream"
+        ],
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "data",
+        "status": "preview",
+        "website": "https://github.com/bigbodycobain/shadowbroker",
+        "icon": "🛰️",
+        "postInstall": "Open it and add your OpenSky / AISStream keys in settings for full flight + ship coverage."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "trilium",
+        "name": "Trilium Notes",
+        "tagline": "A personal knowledge base and wiki.",
+        "description": "A hierarchical note-taking app — great for documenting your homelab. Single container, embedded database.",
+        "collection": "everyday",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 256,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "productivity",
+        "status": "preview",
+        "website": "https://github.com/TriliumNext/Trilium",
+        "icon": "📓",
+        "postInstall": "Open it, set your password, and start a note tree."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "uptime-kuma",
+        "name": "Uptime Kuma",
+        "tagline": "A self-hosted status board for everything you run.",
+        "description": "Monitor your services, get an all-green dashboard, and publish a shareable status page. The most-loved monitoring app in the self-hosted community.",
+        "collection": "essentials",
+        "arch": "both",
+        "placementHint": "any",
+        "ramFloorMB": 256,
+        "exposureDefault": "lan-only",
+        "ports": [
+          {
+            "name": "web",
+            "container": 3001,
+            "published": 3001,
+            "protocol": "tcp",
+            "primary": true
+          }
+        ],
+        "category": "monitoring",
+        "website": "https://github.com/louislam/uptime-kuma",
+        "icon": "🟢",
+        "postInstall": "Open it and create your admin account on the first screen, then add your first monitor."
+      },
+      "compose": "# On 2.x. The raw CVE count is higher than 1.23.17 (1475 vs 176) and that number\n# is misleading: v2's OWN dependencies are better (92 fixable in node+go vs 174),\n# and the difference is 1383 fixable Debian CVEs from a stale base layer that\n# upstream fixes by rebuilding. Different owner, different remediation.\n#\n# Staying on 1.x was the wrong call for a second reason: 1.23.17 shipped\n# 2025-10-20 and is the only 1.x release in twenty months, while 2.x has had\n# eight. A branch that no longer gets fixes does not stay at 176.\n#\n# Still owed: an ACC-1 bench, since this is a major version.\n#\n# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  uptime-kuma:\n    image: louislam/uptime-kuma:2.5.0@sha256:a8610b3b4c38077922ba51b036691e06887d7cefd91fe620fd3d6d23d03dc240\n    restart: unless-stopped\n    volumes:\n      - uptime-kuma-data:/app/data\n    ports:\n      - \"3001:3001\"\n\nvolumes:\n  uptime-kuma-data:\n",
+      "safety": {
+        "images": [
+          "louislam/uptime-kuma:2.5.0@sha256:a8610b3b4c38077922ba51b036691e06887d7cefd91fe620fd3d6d23d03dc240"
+        ],
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "vaultwarden",
+        "name": "Vaultwarden",
+        "tagline": "Your passwords, on your own metal.",
+        "description": "A lightweight, self-hosted password manager compatible with the Bitwarden apps and browser extensions.",
+        "collection": "essentials",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 256,
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "security",
+        "status": "preview",
+        "website": "https://github.com/dani-garcia/vaultwarden",
+        "icon": "🔒",
+        "postInstall": "Open it, create your admin account, then install the Bitwarden browser extension and point it here."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    },
+    {
+      "tile": {
+        "id": "weewx",
+        "name": "WeeWX",
+        "tagline": "Your own weather station dashboard.",
+        "description": "Publish and archive readings from a real personal weather station. Pairs with an Ecowitt gateway (local LAN) or WeatherFlow Tempest.",
+        "collection": "dongle",
+        "arch": "both",
+        "placementHint": "",
+        "ramFloorMB": 256,
+        "needsHardware": "weather-station",
+        "exposureDefault": "lan-only",
+        "ports": null,
+        "category": "radio",
+        "status": "preview",
+        "website": "https://weewx.com",
+        "icon": "🌦️",
+        "postInstall": "Point it at your Ecowitt gateway (local LAN) or WeatherFlow Tempest."
+      },
+      "compose": "",
+      "safety": {
+        "images": null,
+        "privileged": false,
+        "hostNetwork": false,
+        "hostPidOrIpc": false
+      }
+    }
+  ]
+}
