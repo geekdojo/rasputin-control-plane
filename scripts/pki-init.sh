@@ -45,6 +45,7 @@ OUT_DIR="./pki-out"
 CN_PREFIX="Rasputin"
 ROTATE_LEAF=0
 CATALOG_LEAF=0
+LEAF_NUM=""
 
 # Leaf validity, in days. 730 = 2 years, matching the deployed leaf-001
 # (notAfter 2028-05-29). This was hardcoded 90 in both leaf paths while the
@@ -74,12 +75,47 @@ EC_CURVE="secp384r1"
 OID_RELEASE="1.3.6.1.4.1.66587.1.1.1"
 OID_CATALOG="1.3.6.1.4.1.66587.1.1.2"
 
-# A RELEASE leaf carries BOTH the release OID and generic codeSigning.
+# A RELEASE leaf carries the release OID, generic codeSigning, AND
+# emailProtection. All three are load-bearing; none is decoration.
+#
 # codeSigning is transitional: agents predating the EKU check authorize on
 # chain-to-root and a leaf without it may not satisfy their purpose check, so
 # dropping it now would strand any node that has not taken the update. Remove
 # it once no such node remains (ADR-0006 Decision 3's tracked trigger).
-EKU_RELEASE="codeSigning,${OID_RELEASE}"
+#
+# emailProtection is here for a reason that looks absurd and is not: OpenSSL's
+# CMS_verify() defaults to the S/MIME SIGNING purpose, and that purpose requires
+# emailProtection in the leaf's EKU. RAUC verifies bundles with CMS_verify and
+# only overrides the purpose when [keyring] check-purpose is set in system.conf
+# — which NO deployed Rasputin board sets. So the effective requirement on every
+# node already in the field is the S/MIME purpose, whatever we think we are
+# issuing.
+#
+# This is not theory. leaf-001 carried NO EKU at all, so every purpose was
+# satisfied vacuously and nobody noticed the rule existed. leaf-002 carried
+# codeSigning + the release OID and nothing else, and rasputin-os release run
+# #171 died in `rauc bundle` with:
+#
+#     Verify error: unsuitable certificate purpose
+#
+# which is X509_V_ERR_INVALID_PURPOSE (error 26). Reproduced directly against
+# the real leaf and the public root:
+#
+#     openssl verify -purpose smimesign leaf-002.pem  -> error 26
+#     openssl verify -purpose codesign  leaf-002.pem  -> OK
+#
+# Because `rauc bundle --signing-keyring` runs the SAME check a device runs at
+# install, that failure was not merely a build error: it was a demonstration
+# that the deployed fleet would refuse the bundle. Dropping emailProtection
+# again is safe only once every node runs an image whose rauc-system.conf sets
+# `[keyring] check-purpose=codesign`, at which point the S/MIME default no
+# longer applies to anyone.
+#
+# It does NOT weaken the purpose split. artifactsig authorizes on the Rasputin
+# arc under UnknownExtKeyUsage; emailProtection is a KNOWN usage in Go and lands
+# in ExtKeyUsage, so it is invisible to that check. A catalog leaf still cannot
+# sign a release, which is the property Decision 3 buys.
+EKU_RELEASE="codeSigning,emailProtection,${OID_RELEASE}"
 
 # A CATALOG leaf carries the catalog OID and NOTHING ELSE — deliberately not
 # codeSigning. That single omission is the whole blast-radius separation: a
@@ -93,6 +129,7 @@ while [[ $# -gt 0 ]]; do
         --out-dir) OUT_DIR=$2; shift 2 ;;
         --cn-prefix) CN_PREFIX=$2; shift 2 ;;
         --rotate-leaf) ROTATE_LEAF=1; shift ;;
+        --leaf-num) LEAF_NUM=$2; shift 2 ;;
         --catalog-leaf) CATALOG_LEAF=1; shift ;;
         -h|--help) usage ;;
         *) echo "unknown arg: $1" >&2; usage ;;
@@ -153,17 +190,102 @@ EOF
     exit 0
 fi
 
+# Prove a freshly minted RELEASE leaf satisfies every purpose its consumers
+# actually demand, before it can reach a CI secret.
+#
+# The check this replaces ran `openssl verify` with no -purpose, which checks
+# the chain and skips purpose ENTIRELY. That is precisely how leaf-002 shipped:
+# a perfectly valid chain that no CMS verifier would accept. The failure then
+# surfaced 50 minutes into a release build as RAUC's "unsuitable certificate
+# purpose", with nothing pointing at the certificate.
+#
+# Each purpose below has a named consumer, so a failure says who would refuse it.
+verify_release_leaf() {
+    local leaf=$1
+    local anchor=(-CAfile root-ca.pem -untrusted intermediate-ca.pem)
+    if [[ ! -f root-ca.pem ]]; then
+        # Rotating with only the intermediate to hand is normal — the root is
+        # offline, and only the intermediate key is needed to issue. Anchor on
+        # the intermediate instead.
+        #
+        # -partial_chain is REQUIRED here and is not optional politeness: the
+        # intermediate is not self-signed, so without it openssl refuses to
+        # treat it as a trust anchor and BOTH purposes fail identically. That
+        # false failure is indistinguishable from the real one this function
+        # exists to catch, which would send someone hunting a certificate bug
+        # that isn't there. The purposes being checked are properties of the
+        # leaf, so the shorter chain tests exactly the same thing.
+        echo "    (root-ca.pem absent; anchoring the purpose check on the intermediate)"
+        anchor=(-CAfile intermediate-ca.pem -partial_chain)
+    fi
+
+    local failed=0 purpose
+    # smimesign — OpenSSL CMS_verify's DEFAULT purpose, and therefore what
+    #   `rauc bundle` and every deployed board enforce today, because no
+    #   rasputin-os board sets [keyring] check-purpose. Needs emailProtection.
+    # codesign  — what RAUC enforces once check-purpose=codesign is configured,
+    #   and what the published `openssl cms -verify` guidance implies.
+    for purpose in smimesign codesign; do
+        if openssl verify "${anchor[@]}" -purpose "$purpose" "$leaf" >/dev/null 2>&1; then
+            echo "    purpose $purpose: OK"
+        else
+            echo "    purpose $purpose: FAILED — a consumer using this purpose will refuse every artifact this leaf signs" >&2
+            failed=1
+        fi
+    done
+
+    if ! openssl x509 -in "$leaf" -noout -text | grep -q "$OID_RELEASE"; then
+        echo "    release purpose $OID_RELEASE: MISSING — artifactsig will refuse it" >&2
+        failed=1
+    else
+        echo "    release purpose $OID_RELEASE: present"
+    fi
+
+    if [[ $failed -ne 0 ]]; then
+        echo "error: $leaf is not usable as a release signing leaf; refusing to hand it over." >&2
+        return 1
+    fi
+    echo "    $leaf is accepted by every consumer checked."
+}
+
 if [[ $ROTATE_LEAF -eq 1 ]]; then
     if [[ ! -f intermediate-ca.key || ! -f intermediate-ca.pem ]]; then
         echo "error: intermediate-ca.{key,pem} not found in $OUT_DIR; cannot rotate" >&2
         exit 2
     fi
-    # Find next leaf number.
-    last=$(ls -1 leaf-*.pem 2>/dev/null | sed 's/leaf-\([0-9]*\)\.pem/\1/' | sort -n | tail -1 || true)
-    if [[ -z "$last" ]]; then
-        next="001"
+    # Pick the leaf number.
+    #
+    # Auto-derivation reads leaf-*.pem in OUT_DIR, which is only correct when
+    # this directory still holds the previous leaves. It usually does not: the
+    # working copies are moved into 1Password and the directory is wiped, which
+    # is the RIGHT thing to do with private keys and makes the highest-numbered
+    # file on disk an unreliable record of what has been issued. An empty
+    # directory silently re-derives "001" and mints a SECOND leaf-001 — two
+    # different keys sharing a common name, which is unresolvable after the
+    # fact from a signature alone.
+    #
+    # So --leaf-num is explicit and always available, and auto-derivation is
+    # kept only for the case where the evidence is actually present.
+    if [[ -n "$LEAF_NUM" ]]; then
+        if [[ ! "$LEAF_NUM" =~ ^[0-9]{1,3}$ ]]; then
+            echo "error: --leaf-num must be 1-3 digits, got '$LEAF_NUM'" >&2
+            exit 2
+        fi
+        next=$(printf "%03d" $((10#$LEAF_NUM)))
     else
+        last=$(ls -1 leaf-*.pem 2>/dev/null | sed 's/leaf-\([0-9]*\)\.pem/\1/' | sort -n | tail -1 || true)
+        if [[ -z "$last" ]]; then
+            echo "error: no leaf-*.pem in $OUT_DIR to derive the next number from." >&2
+            echo "       This is expected when the directory was wiped after archiving to" >&2
+            echo "       1Password. Pass the number explicitly so a name is never reused:" >&2
+            echo "         $0 --rotate-leaf --leaf-num 003" >&2
+            exit 2
+        fi
         next=$(printf "%03d" $((10#$last + 1)))
+    fi
+    if [[ -e "leaf-${next}.pem" || -e "leaf-${next}.key" ]]; then
+        echo "error: leaf-${next}.{pem,key} already exists in $OUT_DIR — refusing to overwrite." >&2
+        exit 2
     fi
     echo "==> Issuing leaf-${next} under existing intermediate"
     openssl ecparam -genkey -name "$EC_CURVE" -noout -out "leaf-${next}.key"
@@ -174,6 +296,9 @@ if [[ $ROTATE_LEAF -eq 1 ]]; then
         -out "leaf-${next}.pem" -days "$LEAF_DAYS" -sha384 \
         -extfile <(printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=critical,%s" "$EKU_RELEASE")
     rm -f "leaf-${next}.csr"
+    echo "==> Verifying leaf-${next} against every consumer's purpose"
+    verify_release_leaf "leaf-${next}.pem" || exit 1
+    chmod 600 "leaf-${next}.key"
     echo "done: leaf-${next}.{key,pem}"
     exit 0
 fi
@@ -222,6 +347,9 @@ openssl x509 -req -in leaf-001.csr \
     -out leaf-001.pem -days "$LEAF_DAYS" -sha384 \
     -extfile <(printf "keyUsage=critical,digitalSignature\nextendedKeyUsage=critical,%s" "$EKU_RELEASE")
 rm -f leaf-001.csr
+
+echo "==> Verifying leaf-001 against every consumer's purpose"
+verify_release_leaf "leaf-001.pem" || exit 1
 
 chmod 600 *.key
 
