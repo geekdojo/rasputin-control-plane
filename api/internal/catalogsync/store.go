@@ -37,6 +37,12 @@ const (
 	sigSuffix   = ".sig"
 	pointerName = "current"
 	dirName     = "catalog"
+
+	// The catalog is not secret, but it is api-owned state and nothing else
+	// on the box reads it. 0700/0600 keeps the blast radius of a compromised
+	// unprivileged process to what it already had, and costs nothing.
+	dirPerm  = 0o700
+	filePerm = 0o600
 )
 
 // Store is the live catalog and the state directory behind it.
@@ -77,7 +83,7 @@ func New(stateDir string, v Verifier, floor tileschema.Bundle) (*Store, error) {
 		dir:     filepath.Join(stateDir, dirName),
 		verify:  v,
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if err := os.MkdirAll(s.dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("catalogsync: %w", err)
 	}
 
@@ -219,20 +225,29 @@ func (s *Store) loadPersisted() (tileschema.Bundle, error) {
 	return b, nil
 }
 
-func writeSync(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+// writeSync writes and fsyncs. The Sync matters: without it the rename below
+// can be durable while the bytes it points at are not, which on a power cut
+// leaves a pointer to a truncated bundle — the exact state the pointer scheme
+// exists to prevent.
+//
+// Close is checked on every path, including the error paths. On a filesystem
+// that reports write errors late, Close is where a failed write surfaces, and
+// discarding it turns a lost catalog into a silent success.
+func writeSync(path string, data []byte) (err error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, filePerm)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
+	defer func() {
+		cerr := f.Close()
+		if err == nil {
+			err = cerr
+		}
+	}()
+	if _, err = f.Write(data); err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return f.Sync()
 }
 
 // writeSyncRename writes to a sibling temp file and renames over the target,
@@ -243,7 +258,12 @@ func writeSyncRename(path string, data []byte) error {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		// Report the rename failure, but say so if the temp file also could
+		// not be cleaned up — a stray .tmp is harmless, silently swallowing
+		// the reason a directory is unwritable is not.
+		if rmErr := os.Remove(tmp); rmErr != nil {
+			return fmt.Errorf("rename %s: %w (and the temp file could not be removed: %v)", path, err, rmErr)
+		}
 		return err
 	}
 	return nil
