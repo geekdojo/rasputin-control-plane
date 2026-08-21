@@ -12,7 +12,7 @@ import (
 // to how the pipeline signs cannot leave one of them passing against a stale
 // copy.
 func fixture(name string) string {
-	return filepath.Join("..", "..", "internal", "artifactsig", "testdata", name)
+	return filepath.Join("..", "..", "..", "artifactsig", "testdata", name)
 }
 
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {

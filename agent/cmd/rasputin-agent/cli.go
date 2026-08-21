@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/geekdojo/rasputin-control-plane/agent/internal/artifactsig"
+	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 )
 
 // The agent is a daemon that both shipping units start with no arguments

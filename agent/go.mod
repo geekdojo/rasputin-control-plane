@@ -3,6 +3,7 @@ module github.com/geekdojo/rasputin-control-plane/agent
 go 1.26.0
 
 require (
+	github.com/geekdojo/rasputin-control-plane/artifactsig v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats-server/v2 v2.11.17
 	github.com/nats-io/nats.go v1.51.0
@@ -31,3 +32,5 @@ require (
 )
 
 replace github.com/geekdojo/rasputin-control-plane/proto => ../proto
+
+replace github.com/geekdojo/rasputin-control-plane/artifactsig => ../artifactsig
