@@ -1,0 +1,257 @@
+// Package catalogsync holds the effective app catalog and the rules for
+// replacing it.
+//
+// ADR-0006 Decision 6 states resolution once: the effective catalog is the
+// most recent VERIFIED fetch, or the embedded floor if no fetch has ever
+// succeeded. Not a union, not a merge — a union would make "which tile is
+// live" depend on two sources with no obvious precedence.
+//
+// Everything here is deliberately offline. Fetching is a separate concern; this
+// package decides whether a bundle that has already been obtained is allowed to
+// become the catalog, and makes the replacement survivable across a crash.
+package catalogsync
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
+)
+
+// Verifier checks a detached signature over a bundle file. It exists as an
+// interface so this package's rules can be tested without crypto, and so the
+// one production implementation can be the shared artifactsig — bound to the
+// CATALOG purpose, never a generic "is this signed" check.
+type Verifier interface {
+	VerifyForPurpose(artifactPath, sigPath string) error
+}
+
+const (
+	bundleName  = "catalog-%d.json"
+	sigSuffix   = ".sig"
+	pointerName = "current"
+	dirName     = "catalog"
+)
+
+// Store is the live catalog and the state directory behind it.
+type Store struct {
+	mu      sync.RWMutex
+	current tileschema.Bundle
+	// fetched is false while the floor is in effect. The UI needs to
+	// distinguish "no fetch has succeeded yet" from "fetched and it happens to
+	// match" — otherwise a cluster that has never reached the internet looks
+	// identical to one that is up to date (#163's failure mode).
+	fetched bool
+
+	floor    tileschema.Bundle
+	dir      string
+	verify   Verifier
+	lastErr  error
+	lastNote string
+}
+
+// New builds the store, adopting any previously verified bundle from disk.
+//
+// A persisted bundle is RE-VERIFIED on load rather than trusted because it is
+// on our disk. The signature travels with it precisely so that trust does not
+// have to be re-established by provenance, and re-checking costs milliseconds
+// once per boot. A persisted bundle that fails falls back to the floor loudly
+// rather than refusing to start — a cluster with a corrupt cache should still
+// serve apps.
+func New(stateDir string, v Verifier, floor tileschema.Bundle) (*Store, error) {
+	if v == nil {
+		return nil, errors.New("catalogsync: a verifier is required; there is no unverified mode")
+	}
+	if err := floor.Validate(); err != nil {
+		return nil, fmt.Errorf("catalogsync: the embedded floor is not a valid bundle: %w", err)
+	}
+	s := &Store{
+		current: floor,
+		floor:   floor,
+		dir:     filepath.Join(stateDir, dirName),
+		verify:  v,
+	}
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return nil, fmt.Errorf("catalogsync: %w", err)
+	}
+
+	b, err := s.loadPersisted()
+	switch {
+	case err != nil:
+		s.lastNote = "using the embedded floor: " + err.Error()
+	case b.Version > floor.Version:
+		s.current, s.fetched = b, true
+	default:
+		// A persisted bundle no newer than the floor means the image was
+		// updated past it. The floor wins; the stale file is left for the next
+		// successful fetch to supersede rather than deleted on a guess.
+		s.lastNote = fmt.Sprintf("embedded floor v%d supersedes the cached catalog v%d", floor.Version, b.Version)
+	}
+	return s, nil
+}
+
+// Current returns the effective catalog.
+func (s *Store) Current() tileschema.Bundle {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.current
+}
+
+// State reports what the operator needs to answer "which catalog am I on, and
+// is that because a fetch worked or because nothing ever has".
+func (s *Store) State() (version int, fromFetch bool, note string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := s.lastNote
+	if s.lastErr != nil {
+		n = s.lastErr.Error()
+	}
+	return s.current.Version, s.fetched, n
+}
+
+// Apply verifies a downloaded bundle and, if it supersedes the current one,
+// makes it the catalog and persists it.
+//
+// Every refusal leaves the current catalog untouched — that is the whole
+// contract. A cluster that rejects an update keeps serving the last good
+// catalog rather than falling to empty, because an empty catalog is
+// indistinguishable to a user from a broken product.
+func (s *Store) Apply(bundlePath, sigPath string) error {
+	// Verify BEFORE reading the content into anything that parses it
+	// (Decision 4). The signature is checked against the catalog purpose, so a
+	// release leaf — equally valid, equally chained to our root — is refused.
+	if err := s.verify.VerifyForPurpose(bundlePath, sigPath); err != nil {
+		return s.fail(fmt.Errorf("signature: %w", err))
+	}
+	raw, err := os.ReadFile(bundlePath)
+	if err != nil {
+		return s.fail(err)
+	}
+	b, err := tileschema.ParseBundle(raw)
+	if err != nil {
+		return s.fail(err)
+	}
+
+	s.mu.Lock()
+	have := s.current.Version
+	s.mu.Unlock()
+
+	// Decision 5. A validly-signed OLD bundle is a rollback to image digests
+	// with known CVEs, and a signature check cannot tell that from an update.
+	if !b.SupersedesVersion(have) {
+		return s.fail(fmt.Errorf("catalog v%d does not supersede the v%d already in effect", b.Version, have))
+	}
+
+	sig, err := os.ReadFile(sigPath)
+	if err != nil {
+		return s.fail(err)
+	}
+	if err := s.persist(b.Version, raw, sig); err != nil {
+		return s.fail(err)
+	}
+
+	s.mu.Lock()
+	s.current, s.fetched, s.lastErr = b, true, nil
+	s.lastNote = ""
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) fail(err error) error {
+	s.mu.Lock()
+	s.lastErr = err
+	s.mu.Unlock()
+	return err
+}
+
+// persist writes the pair, then flips a pointer file.
+//
+// Two renames are not atomic TOGETHER, so a crash between them could leave a
+// bundle paired with the previous signature — which would then fail
+// verification on the next boot and silently drop the cluster to the floor.
+// Writing version-suffixed files and renaming a single small pointer LAST
+// makes the switch one atomic operation: until the pointer moves, the old pair
+// is still what loads.
+func (s *Store) persist(version int, bundle, sig []byte) error {
+	base := fmt.Sprintf(bundleName, version)
+	if err := writeSync(filepath.Join(s.dir, base), bundle); err != nil {
+		return err
+	}
+	if err := writeSync(filepath.Join(s.dir, base+sigSuffix), sig); err != nil {
+		return err
+	}
+	return writeSyncRename(filepath.Join(s.dir, pointerName), []byte(strconv.Itoa(version)+"\n"))
+}
+
+func (s *Store) loadPersisted() (tileschema.Bundle, error) {
+	ptr, err := os.ReadFile(filepath.Join(s.dir, pointerName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return tileschema.Bundle{}, errors.New("no catalog has been fetched yet")
+		}
+		return tileschema.Bundle{}, err
+	}
+	version, err := strconv.Atoi(strings.TrimSpace(string(ptr)))
+	if err != nil {
+		return tileschema.Bundle{}, fmt.Errorf("unreadable catalog pointer: %w", err)
+	}
+	base := filepath.Join(s.dir, fmt.Sprintf(bundleName, version))
+	if err := s.verify.VerifyForPurpose(base, base+sigSuffix); err != nil {
+		return tileschema.Bundle{}, fmt.Errorf("cached catalog v%d failed verification: %w", version, err)
+	}
+	raw, err := os.ReadFile(base)
+	if err != nil {
+		return tileschema.Bundle{}, err
+	}
+	b, err := tileschema.ParseBundle(raw)
+	if err != nil {
+		return tileschema.Bundle{}, fmt.Errorf("cached catalog v%d: %w", version, err)
+	}
+	if b.Version != version {
+		return tileschema.Bundle{}, fmt.Errorf("cached catalog claims v%d but the pointer says v%d", b.Version, version)
+	}
+	return b, nil
+}
+
+func writeSync(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// writeSyncRename writes to a sibling temp file and renames over the target,
+// which is atomic within a directory on every filesystem we run on.
+func writeSyncRename(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := writeSync(tmp, data); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// marshal renders a bundle the way the publisher does. Used by tests and by
+// any caller that needs the canonical bytes.
+func marshal(b tileschema.Bundle) ([]byte, error) {
+	tileschema.SortTiles(b.Tiles)
+	return json.MarshalIndent(b, "", "  ")
+}

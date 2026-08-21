@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -476,5 +477,66 @@ func writePEM(t *testing.T, path string, der []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The 2x2 that makes the purpose check meaningful: ONE payload, two leaves
+// that differ only in what they were authorized to sign, checked against both
+// purposes. A verifier that skips authorization passes all four; a correct one
+// passes exactly the diagonal.
+//
+// Without a catalog-purpose fixture this property is untestable, and an
+// authorization bug looks identical to a working system — the signatures are
+// all cryptographically valid and all chain to the trusted root. The only
+// difference is what the certificate says the signer was allowed to do.
+func TestVerifyForPurpose_CrossPurposeMatrix(t *testing.T) {
+	payload := fixture(t, "payload.bin")
+	root := fixture(t, "root-ca.pem")
+
+	cases := []struct {
+		name    string
+		sig     string
+		purpose asn1.ObjectIdentifier
+		wantOK  bool
+		why     string
+	}{
+		{
+			name: "catalog leaf signs a catalog", sig: "payload.bin.catalog.sig",
+			purpose: OIDCodeSigningCatalog, wantOK: true,
+			why: "the leaf carries exactly this purpose",
+		},
+		{
+			name: "catalog leaf may NOT sign a release", sig: "payload.bin.catalog.sig",
+			purpose: OIDCodeSigningRelease, wantOK: false,
+			why: "this is the blast-radius separation: a compromised catalog key must not yield an OS artifact",
+		},
+		{
+			name: "release leaf may NOT sign a catalog", sig: "payload.bin.sig",
+			purpose: OIDCodeSigningCatalog, wantOK: false,
+			why: "the legacy codeSigning allowance is release-only and must not leak into the catalog path",
+		},
+		{
+			name: "release leaf signs a release", sig: "payload.bin.sig",
+			purpose: OIDCodeSigningRelease, wantOK: true,
+			why: "legacy codeSigning leaf, accepted for releases during the transition",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := VerifyForPurpose(payload, fixture(t, c.sig), root, c.purpose)
+			if c.wantOK && err != nil {
+				t.Fatalf("want accepted (%s), got %v", c.why, err)
+			}
+			if !c.wantOK {
+				if err == nil {
+					t.Fatalf("want REFUSED (%s), got accepted", c.why)
+				}
+				var wrong *ErrWrongPurpose
+				if !errors.As(err, &wrong) {
+					t.Errorf("want ErrWrongPurpose so a caller can tell authorization from a broken signature; got %T: %v", err, err)
+				}
+			}
+		})
 	}
 }

@@ -46,6 +46,18 @@ openssl x509 -req -in leaf.csr -CA intermediate.pem -CAkey intermediate.key \
   -CAcreateserial -out leaf.pem -days "$DAYS" -sha256 \
   -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n')
 
+# --- a CATALOG-purpose leaf under the SAME root -----------------------------
+# Carries the catalog OID and deliberately NOT codeSigning, exactly as
+# pki-init.sh --catalog-leaf mints it. This is what makes the cross-purpose
+# tests possible: without a leaf that is legitimate for one purpose and not
+# the other, "the release leaf cannot sign a catalog" is untestable, and an
+# authorization bug there looks identical to a working system.
+openssl req -newkey rsa:2048 -noenc -keyout catalog-leaf.key -out catalog-leaf.csr \
+  -subj "/C=US/O=Geekdojo Test/CN=Rasputin Test Catalog Leaf"
+openssl x509 -req -in catalog-leaf.csr -CA intermediate.pem -CAkey intermediate.key \
+  -CAcreateserial -out catalog-leaf.pem -days "$DAYS" -sha256 \
+  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=1.3.6.1.4.1.66587.1.1.2\n')
+
 # --- an equally well-formed chain under a DIFFERENT root --------------------
 # The "attacker signed it properly, just not with our key" case. Without this,
 # a verifier that parses the CMS and forgets to pin the root still passes every
@@ -78,6 +90,18 @@ openssl cms -sign -binary \
   -inkey  other-leaf.key \
   -outform DER \
   -out payload.bin.other.sig
+
+# The same payload signed by the CATALOG leaf. Pairing it with payload.bin.sig
+# (release leaf) over the SAME bytes is the point: the two differ only in what
+# the signer was authorized to do, so a purpose check that does nothing passes
+# both and a correct one passes exactly one each way.
+openssl cms -sign -binary \
+  -in payload.bin \
+  -signer   catalog-leaf.pem \
+  -certfile intermediate.pem \
+  -inkey    catalog-leaf.key \
+  -outform DER \
+  -out payload.bin.catalog.sig
 
 # Prove the fixtures are what we think they are before checking them in: if
 # openssl itself will not verify them, the Go tests are testing nothing.

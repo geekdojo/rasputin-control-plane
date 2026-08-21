@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/coder/websocket v1.8.12
+	github.com/geekdojo/rasputin-control-plane/artifactsig v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
 	github.com/go-webauthn/webauthn v0.11.2
@@ -33,6 +34,7 @@ require (
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/smallstep/pkcs7 v0.2.3 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/mod v0.33.0 // indirect
@@ -52,3 +54,5 @@ require (
 replace github.com/geekdojo/rasputin-control-plane/proto => ../proto
 
 replace github.com/geekdojo/rasputin-control-plane/tileschema => ../tileschema
+
+replace github.com/geekdojo/rasputin-control-plane/artifactsig => ../artifactsig
