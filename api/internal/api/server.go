@@ -11,6 +11,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -33,6 +34,8 @@ type Server struct {
 	fw                  *firewall.Store
 	apps                *apps.Store
 	catalog             *catalog.Catalog
+	catalogStore        *catalogsync.Store
+	catalogPoller       *catalogsync.Poller
 	metrics             *metrics.Store
 	updater             *updater.Store
 	updaterVerifier     *updater.Verifier
@@ -235,6 +238,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/apps/{id}/deploy", reqd(s.handleDeployApp))
 	mux.HandleFunc("POST /api/apps/{id}/stop", reqd(s.handleStopApp))
 	mux.HandleFunc("GET /api/catalog", reqd(s.handleListCatalog))
+	// Registered BEFORE the {id} route for readability; Go's mux prefers the
+	// more specific pattern regardless, and "_status" cannot be a tile id.
+	mux.HandleFunc("GET /api/catalog/_status", reqd(s.handleCatalogStatus))
+	mux.HandleFunc("POST /api/catalog/_refresh", reqd(s.handleCatalogRefresh))
 	mux.HandleFunc("GET /api/catalog/{id}", reqd(s.handleGetCatalogTile))
 	mux.HandleFunc("POST /api/catalog/{id}/install", reqd(s.handleInstallCatalogTile))
 
