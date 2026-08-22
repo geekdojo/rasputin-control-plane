@@ -23,6 +23,28 @@ var AllowedBindRoots = []string{
 // because the properties worth checking there cannot be seen without parsing
 // it; those live in ValidateTileSafety.
 func ValidateTile(t Tile) error {
+	// Must-understand check FIRST, and deliberately here rather than in
+	// ValidateTileSafety (moved 2026-08-22, #162).
+	//
+	// It lived in the safety validator, which reads as the natural home and is
+	// the wrong one: ValidateTileSafety only runs for tiles that are
+	// Available(), because a preview tile ships no compose and so has no stack
+	// to have facts about. That gate is right for safety facts and wrong for
+	// this. The result was that a PREVIEW tile naming a capability this build
+	// does not understand was never checked at all — the one class of tile
+	// where the reader is most likely to be older than the publisher, since
+	// preview is where new tiles land first.
+	//
+	// This is not a safety check. It is a comprehension check: the tile is
+	// telling the reader "I mean something you may not know", and Decision 7's
+	// answer is unconditional — refuse that tile, load the rest. Coupling it
+	// to installability made a must-understand rule quietly optional.
+	for _, capability := range t.Requires {
+		if !KnownCapabilities[capability] {
+			return fmt.Errorf("requires unknown capability %q (schema %d) — refusing rather than loading without it", capability, SchemaVersion)
+		}
+	}
+
 	if !ValidDNSLabel(t.ID) {
 		return fmt.Errorf("id must be a DNS-1123 label (1-63 chars, [a-z0-9-], no leading/trailing hyphen)")
 	}
@@ -102,15 +124,6 @@ func ValidateTile(t Tile) error {
 // disagree the cluster's answer wins, because it is the one with something to
 // lose.
 func ValidateTileSafety(t Tile, f SafetyFacts) error {
-	// Must-understand check first (Decision 7). A tile naming a capability
-	// this reader does not know is refused outright — ignoring it is exactly
-	// how a future safety constraint becomes a no-op on old clusters.
-	for _, cap := range t.Requires {
-		if !KnownCapabilities[cap] {
-			return fmt.Errorf("requires unknown capability %q (schema %d) — refusing rather than loading without it", cap, SchemaVersion)
-		}
-	}
-
 	if len(f.Images) == 0 {
 		return fmt.Errorf("no images declared — a stack that pulls nothing cannot be verified")
 	}

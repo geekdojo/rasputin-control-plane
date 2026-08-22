@@ -116,9 +116,6 @@ func TestValidateTileSafety_Rejects(t *testing.T) {
 		{"devices without needsHardware", func(_ *Tile, f *SafetyFacts) {
 			f.Devices = []string{"/dev/bus/usb/001/004"}
 		}},
-		{"unknown required capability", func(x *Tile, _ *SafetyFacts) {
-			x.Requires = []string{"gpu-passthrough-v2"}
-		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,5 +233,33 @@ func TestValidateTileSafety_PrivilegeFactsNotYetEnforced_See196(t *testing.T) {
 	f.GroupAdd = []string{"docker"}
 	if err := ValidateTileSafety(okTile(), f); err != nil {
 		t.Fatalf("capture-only change must not alter the verdict; #196 owns the policy. got: %v", err)
+	}
+}
+
+// The must-understand rule applies to EVERY tile, not just installable ones
+// (#162). It used to live in ValidateTileSafety, which is skipped for preview
+// tiles — so the class of tile most likely to be newer than the reader was the
+// one class never checked. Decision 7 is unconditional.
+func TestValidateTile_UnknownCapabilityIsRefusedWhateverTheStatus(t *testing.T) {
+	for _, status := range []string{StatusAvailable, StatusPreview, ""} {
+		name := status
+		if name == "" {
+			name = "(unset, means available)"
+		}
+		t.Run(name, func(t *testing.T) {
+			x := okTile()
+			x.Status = status
+			x.Requires = []string{"gpu-passthrough-v2"}
+			if err := ValidateTile(x); err == nil {
+				t.Fatal("a tile naming a capability this build does not understand must be refused")
+			}
+			// And a KNOWN capability must not be refused, or the gate is just
+			// "any requires entry is fatal".
+			KnownCapabilities["gpu-passthrough-v2"] = true
+			defer delete(KnownCapabilities, "gpu-passthrough-v2")
+			if err := ValidateTile(x); err != nil {
+				t.Fatalf("a known capability must be accepted: %v", err)
+			}
+		})
 	}
 }

@@ -1,7 +1,9 @@
 package catalogsync
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -239,5 +241,121 @@ func TestPersist_PointerIsTheAtomicSwitch(t *testing.T) {
 	}
 	if got := s2.Current().Version; got != 2 {
 		t.Fatalf("an interrupted write was adopted: v%d, want the last committed v2", got)
+	}
+}
+
+// --- Per-tile refusal at adopt (#162, ADR-0006 Decision 7) ------------------
+
+// withTiles returns a bundle carrying the given tiles verbatim, so a test can
+// mix acceptable and refusable ones.
+func withTiles(version int, tiles ...tileschema.BundleTile) tileschema.Bundle {
+	b := bundle(version, "unused")
+	b.Tiles = tiles
+	return b
+}
+
+func okTileNamed(id string) tileschema.BundleTile {
+	return bundle(1, id).Tiles[0]
+}
+
+// refusableTile names a capability no build knows. It is Decision 7's own
+// case, and the one a current publisher will really emit to an older cluster
+// once KnownCapabilities gains its first entry.
+func refusableTile(id string) tileschema.BundleTile {
+	bt := okTileNamed(id)
+	bt.Tile.Requires = []string{"tile.capability-from-the-future"}
+	bt.Tile.Status = tileschema.StatusAvailable
+	bt.Compose = "services:\n  x:\n    image: e/x:1@sha256:" + strings.Repeat("a", 64) + "\n"
+	bt.Safety = tileschema.SafetyFacts{Images: []string{"e/x:1@sha256:" + strings.Repeat("a", 64)}}
+	return bt
+}
+
+func TestApply_ABadTileCostsOneTileNotTheCatalog(t *testing.T) {
+	s, dir := newStore(t, &fakeVerifier{}, bundle(1, "floor"))
+	bp, sp := write(t, dir, withTiles(2,
+		okTileNamed("keeper-one"), refusableTile("from-the-future"), okTileNamed("keeper-two")))
+
+	if err := s.Apply(bp, sp); err != nil {
+		t.Fatalf("one bad tile must not cost the catalog: %v", err)
+	}
+	if got := s.Current().Version; got != 2 {
+		t.Fatalf("want the bundle adopted at v2, got v%d", got)
+	}
+	if got := len(s.Current().Tiles); got != 2 {
+		t.Fatalf("want the 2 good tiles served, got %d", got)
+	}
+	rej := s.Rejected()
+	if len(rej) != 1 || rej[0].ID != "from-the-future" {
+		t.Fatalf("the refusal must be reportable, got %+v", rej)
+	}
+}
+
+// The trap this guards: filtering happens in memory, but the SIGNATURE covers
+// the bytes as published. Persisting the survivors instead of the original
+// would produce a pair that fails its own re-verification on the next boot and
+// silently drop the cluster to the floor.
+func TestApply_PersistsThePublishedBytesNotTheFilteredCorpus(t *testing.T) {
+	s, dir := newStore(t, &fakeVerifier{}, bundle(1, "floor"))
+	in := withTiles(2, okTileNamed("keeper"), refusableTile("dropped"))
+	bp, sp := write(t, dir, in)
+	published, err := os.ReadFile(bp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Apply(bp, sp); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	stored, err := os.ReadFile(filepath.Join(dir, "catalog", fmt.Sprintf(bundleName, 2)))
+	if err != nil {
+		t.Fatalf("reading the persisted bundle: %v", err)
+	}
+	if !bytes.Equal(stored, published) {
+		t.Fatal("the persisted bundle differs from the published bytes — the detached signature covers the published bytes, so this pair would fail verification on the next boot")
+	}
+	// And the dropped tile is still IN those bytes: we keep the artifact whole
+	// and re-decide, rather than rewriting history.
+	if !bytes.Contains(stored, []byte("dropped")) {
+		t.Error("the refused tile should still be present in the stored artifact")
+	}
+}
+
+func TestNew_ReloadDropsTheSameTilesItDroppedBefore(t *testing.T) {
+	s, dir := newStore(t, &fakeVerifier{}, bundle(1, "floor"))
+	bp, sp := write(t, dir, withTiles(2, okTileNamed("keeper"), refusableTile("dropped")))
+	if err := s.Apply(bp, sp); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	before := len(s.Current().Tiles)
+
+	// Same directory, fresh store — this is what a reboot does.
+	reloaded, err := New(dir, &fakeVerifier{}, bundle(1, "floor"))
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := reloaded.Current().Version; got != 2 {
+		t.Fatalf("want the cached v2 adopted, got v%d", got)
+	}
+	if got := len(reloaded.Current().Tiles); got != before {
+		t.Fatalf("a reboot changed the catalog: %d tiles before, %d after", before, got)
+	}
+	if got := len(reloaded.Rejected()); got != 1 {
+		t.Errorf("the refusal must survive a restart too, got %d", got)
+	}
+}
+
+func TestApply_EveryTileRefusedIsNotAdopted(t *testing.T) {
+	floor := bundle(1, "floor")
+	s, dir := newStore(t, &fakeVerifier{}, floor)
+	bp, sp := write(t, dir, withTiles(2, refusableTile("a"), refusableTile("b")))
+
+	if err := s.Apply(bp, sp); err == nil {
+		t.Fatal("a bundle whose every tile is refused must not be adopted as an empty catalog")
+	}
+	if got := s.Current().Version; got != floor.Version {
+		t.Fatalf("the last good catalog must survive the refusal, got v%d", got)
+	}
+	if len(s.Current().Tiles) == 0 {
+		t.Fatal("the cluster was left with no catalog at all")
 	}
 }

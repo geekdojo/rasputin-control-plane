@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // SetCatalogSync wires the fetched-catalog machinery. Optional: an api built
@@ -29,6 +30,18 @@ type catalogStatus struct {
 	Checked *time.Time `json:"lastChecked"`
 	Error   string     `json:"lastError,omitempty"`
 	Note    string     `json:"note,omitempty"`
+
+	// Rejected is the tiles in the adopted bundle this build refused, with the
+	// reason for each (ADR-0006 Decision 7, #162). Present because a tile
+	// dropped silently is the harder failure to diagnose: the catalog looks
+	// fine, and the operator's only symptom is that an app they expected is
+	// absent — with no error, no count discrepancy, and nothing to search for.
+	//
+	// The expected steady state is empty. A non-empty list on a current build
+	// usually means this cluster is older than the catalog it is reading,
+	// which is the situation Decision 7 was written for and is worth saying
+	// out loud rather than absorbing.
+	Rejected []tileschema.TileRejection `json:"rejectedTiles,omitempty"`
 }
 
 // GET /api/catalog/_status — provenance of the catalog currently in effect.
@@ -52,10 +65,11 @@ func (s *Server) handleCatalogStatus(w http.ResponseWriter, r *http.Request) {
 
 	version, fromFetch, note := s.catalogStore.State()
 	out := catalogStatus{
-		Version: version,
-		Source:  "embedded",
-		Tiles:   len(s.catalogStore.Current().Tiles),
-		Note:    note,
+		Version:  version,
+		Source:   "embedded",
+		Tiles:    len(s.catalogStore.Current().Tiles),
+		Note:     note,
+		Rejected: s.catalogStore.Rejected(),
 	}
 	if fromFetch {
 		out.Source = "fetched"
