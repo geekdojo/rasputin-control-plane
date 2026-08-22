@@ -1,0 +1,119 @@
+name: leaf-expiry
+
+# The publisher signing leaves expire, and expiry is a cliff rather than a
+# warning: artifactsig verifies the chain at time.Now(), not at the signature's
+# signingTime, so when a leaf lapses EVERY artifact it ever signed stops being
+# installable at once. The app catalog fails quieter and worse — catalogsync
+# re-verifies its cached bundle on each boot, so every cluster reverts to the
+# floor baked into its image with nothing surfacing why.
+#
+# Rotating is a twenty-minute ceremony. Remembering to is the part that fails,
+# which is what this exists for. Runbook: geekdojo-brain
+# projects/rasputin/design/os-images/release-pipeline.md §9.
+on:
+  schedule:
+    # Weekly. The thing being watched moves one day per day, so anything more
+    # often is noise; anything less risks stepping over a threshold unseen.
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  expiry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: How long until a signing leaf takes the fleet down
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          # ONE invocation producing both forms. Running it twice would be two
+          # sets of downloads that can disagree if a release publishes between
+          # them, leaving the report and the numbers driving the alarm
+          # describing different states.
+          rc=0
+          JSON_OUT=report.json ./scripts/check-leaf-expiry.sh > report.txt || rc=$?
+          cat report.txt
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Signing leaf expiry"
+            echo
+            echo '```'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # rc=2 means it could not read a single leaf. That is NOT "all clear" and
+      # must not pass silently: a check that fails open is worse than no check,
+      # because it is trusted.
+      - name: A check that cannot read anything has failed, not passed
+        if: steps.check.outputs.rc == '2'
+        run: |
+          echo "::error::could not read a signing leaf from any published signature — the expiry alarm is blind, not clear"
+          exit 1
+
+      - name: Raise or update the alarm
+        if: steps.check.outputs.rc == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          soonest=$(python3 -c 'import json;print(json.load(open("report.json"))["soonestDays"])')
+          crit=$(python3 -c 'import json;print(json.load(open("report.json"))["critDays"])')
+
+          severity="rotate now"
+          if [ "$soonest" -le "$crit" ]; then
+            severity="OVERDUE — the rollback window is being consumed"
+          fi
+
+          # One heredoc, quoted, written to a file. Interpolating this into the
+          # gh command line would let a certificate subject — which is data, not
+          # ours to trust unconditionally — reach a shell.
+          cat > body.md <<'PREAMBLE'
+          A publisher signing leaf is approaching expiry.
+
+          **Why this is not a routine renewal.** Verification happens at `time.Now()`, not at the
+          signature's `signingTime`, so when a leaf lapses **every artifact it ever signed stops
+          being installable** — not just new ones. The app catalog fails more quietly still: each
+          cluster re-verifies its cached bundle on boot, so the whole fleet reverts to the floor
+          baked into its image with no error anyone sees.
+
+          Old releases are **not** re-signed (decision, 2026-08-22), so the new leaf must be
+          signing production releases at least 90 days before the old one expires — otherwise
+          there is no back catalogue left to install or roll back to.
+
+          PREAMBLE
+          {
+            echo "**Status: $severity** — soonest expiry in **$soonest days**."
+            echo
+            echo '```'
+            cat report.txt
+            echo '```'
+            echo
+            echo "Runbook: \`projects/rasputin/design/os-images/release-pipeline.md\` §9 in geekdojo-brain."
+            echo "Mint with \`scripts/pki-init.sh --rotate-leaf --leaf-num <NNN>\`; it verifies both"
+            echo "required X509 purposes before handing the leaf over. A leaf that is valid, in date"
+            echo "and correctly chained can still be uninstallable by the entire fleet — see §9.5."
+          } >> body.md
+
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label leaf-expiry --limit 1 --json number -q '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file body.md
+            echo "updated existing alarm #$existing"
+          else
+            gh label create leaf-expiry --repo "$GITHUB_REPOSITORY" \
+              --description "Publisher signing leaf approaching expiry" --color B60205 2>/dev/null || true
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Signing leaf expires in $soonest days — $severity" \
+              --label leaf-expiry --body-file body.md
+          fi
