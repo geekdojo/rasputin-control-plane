@@ -175,3 +175,63 @@ func oneTileBundle(version int, id string) tileschema.Bundle {
 		}},
 	}
 }
+
+// A refused tile must be visible to an operator, not merely absent. Without
+// this the catalog just quietly has fewer apps in it and there is nothing to
+// search for (#162, ADR-0006 Decision 7).
+func TestCatalogSync_StatusReportsRefusedTiles(t *testing.T) {
+	f := newAPIFixture(t)
+	cookie := f.authenticate(t)
+
+	store, err := catalogsync.New(t.TempDir(), stubVerifier{}, oneTileBundle(1, "floor-tile"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	f.srv.SetCatalogSync(store, nil)
+
+	// A v2 carrying one acceptable tile and one this build cannot understand.
+	b := oneTileBundle(2, "keeper")
+	future := b.Tiles[0]
+	future.Tile.ID = "from-the-future"
+	future.Tile.Requires = []string{"tile.capability-from-the-future"}
+	b.Tiles = append(b.Tiles, future)
+
+	dir := t.TempDir()
+	raw, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bp := filepath.Join(dir, "catalog.json")
+	if err := os.WriteFile(bp, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bp+".sig", []byte("sig"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Apply(bp, bp+".sig"); err != nil {
+		t.Fatalf("one unreadable tile must not cost the catalog: %v", err)
+	}
+
+	w := f.do(t, http.MethodGet, "/api/catalog", "", cookie)
+	if !strings.Contains(w.Body.String(), "keeper") {
+		t.Errorf("the acceptable tile should be served, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "from-the-future") {
+		t.Error("a refused tile was served anyway")
+	}
+
+	w = f.do(t, http.MethodGet, "/api/catalog/_status", "", cookie)
+	var st catalogStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if st.Version != 2 || st.Tiles != 1 {
+		t.Errorf("want v2 with 1 served tile, got v%d with %d", st.Version, st.Tiles)
+	}
+	if len(st.Rejected) != 1 || st.Rejected[0].ID != "from-the-future" {
+		t.Fatalf("the refusal must be reported, got %+v", st.Rejected)
+	}
+	if !strings.Contains(st.Rejected[0].Reason, "unknown capability") {
+		t.Errorf("the reason must say why, got %q", st.Rejected[0].Reason)
+	}
+}

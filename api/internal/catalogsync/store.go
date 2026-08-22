@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,6 +61,14 @@ type Store struct {
 	verify   Verifier
 	lastErr  error
 	lastNote string
+
+	// rejected is the per-tile refusals from the catalog CURRENTLY in effect
+	// (ADR-0006 Decision 7, #162). Held rather than only logged because a
+	// catalog that quietly loses tiles is a worse failure than one that fails
+	// loudly: the operator's symptom is an app that simply is not there, with
+	// nothing to search for. Empty whenever the floor is in effect — the floor
+	// is validated strictly, so it cannot have any.
+	rejected []tileschema.TileRejection
 }
 
 // New builds the store, adopting any previously verified bundle from disk.
@@ -87,12 +96,15 @@ func New(stateDir string, v Verifier, floor tileschema.Bundle) (*Store, error) {
 		return nil, fmt.Errorf("catalogsync: %w", err)
 	}
 
-	b, err := s.loadPersisted()
+	b, rejected, err := s.loadPersisted()
 	switch {
 	case err != nil:
 		s.lastNote = "using the embedded floor: " + err.Error()
 	case b.Version > floor.Version:
-		s.current, s.fetched = b, true
+		s.current, s.fetched, s.rejected = b, true, rejected
+		for _, r := range rejected {
+			log.Printf("catalog: cached v%d tile %q refused, serving the rest: %s", b.Version, r.ID, r.Reason)
+		}
 	default:
 		// A persisted bundle no newer than the floor means the image was
 		// updated past it. The floor wins; the stale file is left for the next
@@ -139,7 +151,11 @@ func (s *Store) Apply(bundlePath, sigPath string) error {
 	if err != nil {
 		return s.fail(err)
 	}
-	b, err := tileschema.ParseBundle(raw)
+	// Tolerant here, strict for the floor and the publisher: a tile this build
+	// cannot accept costs that tile, not the catalog (Decision 7, #162). The
+	// bundle still fails whole if its envelope is untrustworthy or if EVERY
+	// tile is refused.
+	b, rejected, err := tileschema.ParseFetchedBundle(raw)
 	if err != nil {
 		return s.fail(err)
 	}
@@ -158,15 +174,41 @@ func (s *Store) Apply(bundlePath, sigPath string) error {
 	if err != nil {
 		return s.fail(err)
 	}
+	// `raw`, deliberately — the bytes as published, NOT a re-marshalling of the
+	// filtered corpus. The detached signature covers exactly these bytes, so
+	// writing the survivors instead would produce a pair that fails its own
+	// re-verification on the next boot and drop the cluster to the floor. The
+	// filtering is a decision this reader makes about content it keeps intact.
 	if err := s.persist(b.Version, raw, sig); err != nil {
 		return s.fail(err)
 	}
 
+	if len(rejected) > 0 {
+		// Once per adopt, not once per poll: the poller re-reads the same
+		// bundle every 24h and a line per tile per day would bury it.
+		for _, r := range rejected {
+			log.Printf("catalog: v%d tile %q refused, serving the rest: %s", b.Version, r.ID, r.Reason)
+		}
+	}
+
 	s.mu.Lock()
 	s.current, s.fetched, s.lastErr = b, true, nil
+	s.rejected = rejected
 	s.lastNote = ""
 	s.mu.Unlock()
 	return nil
+}
+
+// Rejected returns the per-tile refusals behind the catalog in effect.
+func (s *Store) Rejected() []tileschema.TileRejection {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.rejected) == 0 {
+		return nil
+	}
+	out := make([]tileschema.TileRejection, len(s.rejected))
+	copy(out, s.rejected)
+	return out
 }
 
 func (s *Store) fail(err error) error {
@@ -195,34 +237,37 @@ func (s *Store) persist(version int, bundle, sig []byte) error {
 	return writeSyncRename(filepath.Join(s.dir, pointerName), []byte(strconv.Itoa(version)+"\n"))
 }
 
-func (s *Store) loadPersisted() (tileschema.Bundle, error) {
+func (s *Store) loadPersisted() (tileschema.Bundle, []tileschema.TileRejection, error) {
 	ptr, err := os.ReadFile(filepath.Join(s.dir, pointerName))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return tileschema.Bundle{}, errors.New("no catalog has been fetched yet")
+			return tileschema.Bundle{}, nil, errors.New("no catalog has been fetched yet")
 		}
-		return tileschema.Bundle{}, err
+		return tileschema.Bundle{}, nil, err
 	}
 	version, err := strconv.Atoi(strings.TrimSpace(string(ptr)))
 	if err != nil {
-		return tileschema.Bundle{}, fmt.Errorf("unreadable catalog pointer: %w", err)
+		return tileschema.Bundle{}, nil, fmt.Errorf("unreadable catalog pointer: %w", err)
 	}
 	base := filepath.Join(s.dir, fmt.Sprintf(bundleName, version))
 	if err := s.verify.VerifyForPurpose(base, base+sigSuffix); err != nil {
-		return tileschema.Bundle{}, fmt.Errorf("cached catalog v%d failed verification: %w", version, err)
+		return tileschema.Bundle{}, nil, fmt.Errorf("cached catalog v%d failed verification: %w", version, err)
 	}
 	raw, err := os.ReadFile(base)
 	if err != nil {
-		return tileschema.Bundle{}, err
+		return tileschema.Bundle{}, nil, err
 	}
-	b, err := tileschema.ParseBundle(raw)
+	// Same disposition as Apply, and it must be: this re-parses the very bytes
+	// Apply adopted, so a stricter reading here would make a cluster lose
+	// tiles across a reboot with nothing having been published.
+	b, rejected, err := tileschema.ParseFetchedBundle(raw)
 	if err != nil {
-		return tileschema.Bundle{}, fmt.Errorf("cached catalog v%d: %w", version, err)
+		return tileschema.Bundle{}, nil, fmt.Errorf("cached catalog v%d: %w", version, err)
 	}
 	if b.Version != version {
-		return tileschema.Bundle{}, fmt.Errorf("cached catalog claims v%d but the pointer says v%d", b.Version, version)
+		return tileschema.Bundle{}, nil, fmt.Errorf("cached catalog claims v%d but the pointer says v%d", b.Version, version)
 	}
-	return b, nil
+	return b, rejected, nil
 }
 
 // writeSync writes and fsyncs. The Sync matters: without it the rename below

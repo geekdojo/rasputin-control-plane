@@ -69,20 +69,34 @@ type BundleTile struct {
 	Safety  SafetyFacts `json:"safety"`
 }
 
-// ParseBundle decodes and fully validates a catalog bundle.
+// TileRejection is one tile a reader refused, and why.
 //
-// It is the ONLY supported way to turn bundle bytes into a Bundle: every
-// refusal in this file is a property the caller would otherwise have to
-// remember to check, and a reader that forgets one fails open. Callers verify
-// the signature over the bytes BEFORE calling this — parsing an unverified
-// bundle is exactly what Decision 4 forbids.
+// It exists so a refusal is REPORTABLE rather than merely silent. A catalog
+// that quietly loses tiles is a worse failure than one that fails loudly:
+// nobody goes looking for an app they were never shown, so the operator's
+// symptom is "the app I wanted isn't in the catalog" with no thread to pull.
+type TileRejection struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
+// ParseBundle decodes and STRICTLY validates a catalog bundle: one bad tile
+// fails the whole thing.
+//
+// For bundles WE produced — the publisher's own output, and the floor embedded
+// in this binary. Both are build artifacts, so a bad tile in either is a build
+// defect that should stop the build rather than be routed around. The floor in
+// particular is deliberately fatal at startup (see api/cmd/rasputin-api): an
+// image that silently boots with tiles missing is worse than one that refuses.
+//
+// For a bundle that ARRIVED from somewhere, use ParseFetchedBundle.
+//
+// Callers verify the signature over the bytes BEFORE calling either — parsing
+// an unverified bundle is exactly what Decision 4 forbids.
 func ParseBundle(raw []byte) (Bundle, error) {
-	var b Bundle
-	// An unknown field in a bundle is tolerated within a major (Decision 7's
-	// additive rule), so DisallowUnknownFields is deliberately NOT set. The
-	// must-understand escape hatch is Tile.Requires, not strict decoding.
-	if err := json.Unmarshal(raw, &b); err != nil {
-		return Bundle{}, fmt.Errorf("parse catalog bundle: %w", err)
+	b, err := decodeBundle(raw)
+	if err != nil {
+		return Bundle{}, err
 	}
 	if err := b.Validate(); err != nil {
 		return Bundle{}, err
@@ -90,8 +104,133 @@ func ParseBundle(raw []byte) (Bundle, error) {
 	return b, nil
 }
 
-// Validate enforces every rule that does not need a signature or a filesystem.
+// ParseFetchedBundle decodes a bundle that arrived from outside this build,
+// keeping every tile that validates and REPORTING the ones that do not.
+//
+// ADR-0006 Decision 7, stated exactly: a tile a reader cannot accept "is fatal
+// to their tile and only their tile", while "the rest of the catalog loads
+// normally". ParseBundle could not express that — it returns on the first bad
+// tile, so a single malformed entry costs a cluster its entire catalog and
+// pins it to whatever it held before.
+//
+// WHY THIS IS NOT PARANOIA ABOUT OUR OWN PUBLISHER. Today the publisher and
+// this reader compile the same validator, so the publisher refuses anything
+// this would. That equality is temporary and not a property to rely on: a
+// cluster runs the validator it shipped with, so the moment KnownCapabilities
+// gains an entry — Decision 11's `tile.secrets` is the first — a current
+// publisher legitimately emits tiles that older clusters must refuse. Decision
+// 7 exists precisely for that case, and without per-tile refusal its arrival
+// would take out the catalog on every cluster that had not updated.
+//
+// The envelope is still all-or-nothing. A reader that cannot trust the
+// schemaVersion, the monotonic version, or the JSON itself cannot be selective
+// about the contents, and a bundle whose tiles ALL fail is not a catalog.
+func ParseFetchedBundle(raw []byte) (Bundle, []TileRejection, error) {
+	b, err := decodeBundle(raw)
+	if err != nil {
+		return Bundle{}, nil, err
+	}
+	if err := b.validateEnvelope(); err != nil {
+		return Bundle{}, nil, err
+	}
+
+	kept, rejected := b.partitionTiles()
+	if len(kept) == 0 {
+		// Not "an empty catalog": every tile was individually refused, which
+		// says something is wrong with the bundle or with this reader's
+		// understanding of it. Adopting nothing would replace a working
+		// catalog with a blank one and record it as success.
+		return Bundle{}, rejected, fmt.Errorf(
+			"every one of the %d tiles in bundle v%d was refused — refusing the bundle rather than adopting an empty catalog",
+			len(b.Tiles), b.Version)
+	}
+	b.Tiles = kept
+	return b, rejected, nil
+}
+
+func decodeBundle(raw []byte) (Bundle, error) {
+	var b Bundle
+	// An unknown field in a bundle is tolerated within a major (Decision 7's
+	// additive rule), so DisallowUnknownFields is deliberately NOT set. The
+	// must-understand escape hatch is Tile.Requires, not strict decoding.
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return Bundle{}, fmt.Errorf("parse catalog bundle: %w", err)
+	}
+	return b, nil
+}
+
+// partitionTiles splits the corpus into the tiles this reader accepts and the
+// ones it refuses. Pure and order-preserving over b.Tiles, which matters more
+// than it looks: the store re-parses the SAME persisted bytes on every boot, so
+// a partition that depended on map order or wall-clock would silently change a
+// cluster's catalog across a restart.
+func (b Bundle) partitionTiles() (kept []BundleTile, rejected []TileRejection) {
+	seen := make(map[string]bool, len(b.Tiles))
+	for _, bt := range b.Tiles {
+		if err := checkTile(bt, seen); err != nil {
+			rejected = append(rejected, TileRejection{ID: bt.Tile.ID, Reason: err.Error()})
+			continue
+		}
+		seen[bt.Tile.ID] = true
+		kept = append(kept, bt)
+	}
+	return kept, rejected
+}
+
+// checkTile is the per-tile judgement, shared by the strict and tolerant paths
+// so the two can never disagree about what a valid tile is. Only the
+// DISPOSITION differs: strict returns the error, tolerant drops the tile.
+func checkTile(bt BundleTile, seen map[string]bool) error {
+	if seen[bt.Tile.ID] {
+		return fmt.Errorf("duplicate tile id %q", bt.Tile.ID)
+	}
+	// Reconstruct the tile as the validators expect it. ComposeYAML is
+	// carried beside the tile in the wire format, not inside it.
+	t := bt.Tile
+	t.ComposeYAML = bt.Compose
+
+	if err := ValidateTile(t); err != nil {
+		return err
+	}
+	// A preview tile may ship no compose at all, so it has no stack to have
+	// facts about. Anything installable does.
+	if t.Available() {
+		if err := ValidateTileSafety(t, bt.Safety); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Validate enforces every rule that does not need a signature or a filesystem,
+// STRICTLY: the first bad tile fails the bundle. ParseFetchedBundle applies the
+// same per-tile rules with a different disposition.
+//
+// Both paths route through checkTile, so "what makes a tile valid" has exactly
+// one definition. Only what happens next differs. Keeping that in one place is
+// the same reasoning as Decision 8's one-validator-two-callers, applied a level
+// down: a strict and a tolerant copy of these checks would drift, and the drift
+// would show up as a tile the publisher accepted and the cluster silently
+// dropped.
 func (b Bundle) Validate() error {
+	if err := b.validateEnvelope(); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(b.Tiles))
+	for i, bt := range b.Tiles {
+		if err := checkTile(bt, seen); err != nil {
+			return fmt.Errorf("tiles[%d] (%q): %w", i, bt.Tile.ID, err)
+		}
+		seen[bt.Tile.ID] = true
+	}
+	return nil
+}
+
+// validateEnvelope checks the properties that describe the bundle rather than
+// any tile in it. These are all-or-nothing by nature and stay that way in both
+// paths: a reader that cannot trust the schema version, the ordering guarantee,
+// or the JSON has no basis for being selective about the contents.
+func (b Bundle) validateEnvelope() error {
 	if b.SchemaVersion <= 0 {
 		return fmt.Errorf("bundle declares no schemaVersion")
 	}
@@ -105,30 +244,6 @@ func (b Bundle) Validate() error {
 	}
 	if len(b.Tiles) == 0 {
 		return fmt.Errorf("bundle declares no tiles — an empty catalog is a publish bug, not a valid state")
-	}
-
-	seen := make(map[string]bool, len(b.Tiles))
-	for i, bt := range b.Tiles {
-		if seen[bt.Tile.ID] {
-			return fmt.Errorf("tiles[%d]: duplicate tile id %q", i, bt.Tile.ID)
-		}
-		seen[bt.Tile.ID] = true
-
-		// Reconstruct the tile as the validators expect it. ComposeYAML is
-		// carried beside the tile in the wire format, not inside it.
-		t := bt.Tile
-		t.ComposeYAML = bt.Compose
-
-		if err := ValidateTile(t); err != nil {
-			return fmt.Errorf("tile %q: %w", bt.Tile.ID, err)
-		}
-		// A preview tile may ship no compose at all, so it has no stack to
-		// have facts about. Anything installable does.
-		if t.Available() {
-			if err := ValidateTileSafety(t, bt.Safety); err != nil {
-				return fmt.Errorf("tile %q: %w", bt.Tile.ID, err)
-			}
-		}
 	}
 	return nil
 }
