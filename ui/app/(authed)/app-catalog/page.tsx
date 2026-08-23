@@ -1,6 +1,6 @@
 'use client';
 
-import { ExternalLink, FilePlus2, Search, Store, UploadCloud } from 'lucide-react';
+import { ExternalLink, FilePlus2, Search, ShieldAlert, Store, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
@@ -14,6 +14,7 @@ import {
   openInventoryWS,
 } from '../../../lib/api';
 import type { App, CatalogCollection, CatalogTile, Node } from '../../../lib/types';
+import { grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
 import { appAccess } from '../../../lib/appurl';
 import {
   Badge,
@@ -247,6 +248,7 @@ function CatalogCard({
         {tile.placementHint === 'prefer-x86' && <Badge>PREFERS X86</Badge>}
         {tile.needsHardware && <Badge color="#facc15">NEEDS {tile.needsHardware.toUpperCase()}</Badge>}
         {tile.needsFeedKey && tile.needsFeedKey.length > 0 && <Badge color="#facc15">NEEDS KEYS</Badge>}
+        <PrivilegeBadges tile={tile} />
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
         <Btn variant="primary" small onClick={onOpen}>
@@ -292,6 +294,164 @@ function CustomCard({ onOpen }: { onOpen: () => void }) {
           <FilePlus2 size={10} /> NEW CUSTOM APP
         </Btn>
       </div>
+    </div>
+  );
+}
+
+// PrivilegeBadges — the tier, in the same yellow-badge idiom the catalog
+// already uses for NEEDS <hardware>. Routine tiles carry no badge at all:
+// almost every tile is routine, so badging them would make the badge mean
+// "this is an app" rather than "look at this".
+//
+// The container runtime socket gets its OWN badge rather than being folded
+// into the tier (ADR-0006 Decision 12b). It is not merely root-equivalent — it
+// is the ability to escape any constraint added later, and it is the specific
+// footgun of this hobby. A tier that hides it teaches the owner nothing.
+function PrivilegeBadges({ tile }: { tile: CatalogTile }) {
+  if (isRoutine(tile.privilege)) return null;
+  const copy = TIER_COPY[tierOf(tile.privilege)];
+  return (
+    <>
+      <Badge color={copy.color} title={copy.summary}>
+        {copy.label}
+      </Badge>
+      {tile.privilege?.dockerSocket && (
+        <Badge color={TIER_COPY['host-trusting'].color} title="Can control the container runtime">
+          RUNTIME SOCKET
+        </Badge>
+      )}
+    </>
+  );
+}
+
+// PrivilegePanel — what the app can do, why it says it needs to, and a "what
+// does this mean" that teaches rather than warns (ADR-0006 Decision 12c).
+//
+// The grant list is DERIVED from the app's own compose by the publisher and
+// covered by the catalog signature, so it is not a promise — it is the same
+// list the control plane checked before it would load the tile at all.
+function PrivilegePanel({ tile }: { tile: CatalogTile }) {
+  const [open, setOpen] = useState(false);
+  if (isRoutine(tile.privilege)) return null;
+  const tier = tierOf(tile.privilege);
+  const copy = TIER_COPY[tier];
+  const grants = tile.privilege?.grants ?? [];
+
+  return (
+    <div style={{ border: `1px solid ${copy.color}55`, background: `${copy.color}0d`, padding: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <ShieldAlert size={12} color={copy.color} />
+        <span style={{ color: copy.color, fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>
+          {copy.label}
+        </span>
+        <span style={{ color: DIM, fontSize: 10 }}>{copy.summary}</span>
+      </div>
+
+      {tile.privilege?.why && (
+        <p style={{ color: FG, fontSize: 10, lineHeight: 1.6, margin: '0 0 8px' }}>{tile.privilege.why}</p>
+      )}
+
+      {grants.length > 0 && (
+        <>
+          <SectionLabel>THIS APP CAN</SectionLabel>
+          <ul style={{ margin: '4px 0 0', paddingLeft: 16, color: FG, fontSize: 10, lineHeight: 1.7 }}>
+            {grants.map((g) => (
+              <li key={g} title={g}>
+                {grantLabel(g)}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          marginTop: 10,
+          padding: 0,
+          border: 'none',
+          background: 'none',
+          color: ACCENT,
+          fontSize: 10,
+          fontFamily: MONO,
+          cursor: 'pointer',
+        }}
+      >
+        {open ? '\u2212' : '+'} what does this mean?
+      </button>
+      {open && (
+        <p style={{ color: DIM, fontSize: 10, lineHeight: 1.7, margin: '8px 0 0' }}>
+          {copy.explainer}{' '}
+          {tier !== 'routine' && (
+            <>
+              Everything listed above was read out of the app&apos;s own compose file by the catalog publisher and
+              signed with it, and this cluster refused to load the tile until the two matched — so the list is what
+              the app takes, not what it claims.
+            </>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ConsentGate — consent PROPORTIONAL to the tier (ADR-0006 Decision 12c).
+// Routine asks nothing; elevated is an acknowledgement; host-trusting is a
+// deliberate act, so it asks for the app's name to be typed.
+//
+// This is a gate on the owner, not on an attacker: the install API is
+// authenticated to the same person, and Decision 12 is explicit that nothing
+// here is enforced beyond what Docker enforces from the compose. Its job is to
+// make sure nobody grants root by clicking the same button they click for a
+// note-taking app.
+function ConsentGate({
+  tile,
+  consented,
+  onConsent,
+  typed,
+  onType,
+}: {
+  tile: CatalogTile;
+  consented: boolean;
+  onConsent: (v: boolean) => void;
+  typed: string;
+  onType: (v: string) => void;
+}) {
+  const tier = tierOf(tile.privilege);
+  if (tier === 'routine') return null;
+  const copy = TIER_COPY[tier];
+
+  return (
+    <div>
+      <SectionLabel>CONSENT</SectionLabel>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <EnabledToggle
+          enabled={consented}
+          onToggle={() => onConsent(!consented)}
+          title={consented ? 'Consent given — click to withdraw' : 'Click to consent'}
+        />
+        <span style={{ color: FG, fontSize: 10 }}>
+          {tier === 'host-trusting'
+            ? `Give ${tile.name} root-equivalent access to this node`
+            : `Let ${tile.name} reach beyond its own container`}
+        </span>
+      </div>
+      {consented && tier === 'host-trusting' && (
+        <div style={{ marginTop: 8 }}>
+          <Input
+            value={typed}
+            onChange={(e) => onType(e.target.value)}
+            placeholder={tile.id}
+            title="Type the app id to confirm"
+            style={{ width: '100%' }}
+          />
+          <Hint warn style={{ marginTop: 6 }}>
+            Type <strong>{tile.id}</strong> to confirm. {copy.summary} You can change your mind later, but you cannot
+            un-run it.
+          </Hint>
+        </div>
+      )}
     </div>
   );
 }
@@ -413,6 +573,10 @@ function InstallDrawer({
   // LAN exposure opt-in. Default off (tailnet-only) — the safe default per
   // ADR-0004 §9; not pre-filled from tile.exposureDefault (see PR note).
   const [exposeLan, setExposeLan] = useState(false);
+  // Consent state (ADR-0006 Decision 12c). Both start false on every open, so
+  // reopening the drawer never carries a previous decision forward.
+  const [consented, setConsented] = useState(false);
+  const [typedConfirm, setTypedConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
@@ -420,6 +584,11 @@ function InstallDrawer({
   // Only a fronted (primary) port is reachable, so LAN access is meaningful only
   // for apps that publish one — hide the toggle for port-less tiles.
   const hasWebPort = tile.ports.some((p) => p.primary);
+  // A routine tile is asked nothing; elevated needs the acknowledgement;
+  // host-trusting needs the acknowledgement AND the app's id typed back.
+  const tier = tierOf(tile.privilege);
+  const consentSatisfied =
+    tier === 'routine' || (consented && (tier !== 'host-trusting' || typedConfirm.trim() === tile.id));
 
   useEffect(() => {
     if (!preview && compose === null) {
@@ -455,7 +624,10 @@ function InstallDrawer({
           {tile.placementHint === 'prefer-x86' && <Badge color="#facc15">PREFERS X86</Badge>}
           <Badge>{tile.exposureDefault.toUpperCase()}</Badge>
           {tile.needsHardware && <Badge color="#facc15">NEEDS {tile.needsHardware.toUpperCase()}</Badge>}
+          <PrivilegeBadges tile={tile} />
         </div>
+
+        <PrivilegePanel tile={tile} />
 
         {tile.needsFeedKey && tile.needsFeedKey.length > 0 && (
           <Hint warn>Needs external API key(s): {tile.needsFeedKey.join(', ')}. Add them after install.</Hint>
@@ -525,8 +697,20 @@ function InstallDrawer({
               </Select>
             </div>
             {hasWebPort && <ExposureField exposeLan={exposeLan} onChange={setExposeLan} />}
+            <ConsentGate
+              tile={tile}
+              consented={consented}
+              onConsent={setConsented}
+              typed={typedConfirm}
+              onType={setTypedConfirm}
+            />
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Btn variant="primary" disabled={busy || !name || !selectedTarget} onClick={install}>
+              <Btn
+                variant="primary"
+                disabled={busy || !name || !selectedTarget || !consentSatisfied}
+                title={consentSatisfied ? undefined : 'Consent to what this app can do before installing'}
+                onClick={install}
+              >
                 <UploadCloud size={11} /> {busy ? 'INSTALLING…' : 'INSTALL'}
               </Btn>
               {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}

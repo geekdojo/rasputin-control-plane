@@ -275,6 +275,9 @@ export interface CatalogPort {
   primary?: boolean;
 }
 
+export type { PrivilegeTier, TilePrivilege } from './privilege';
+import type { TilePrivilege } from './privilege';
+
 export interface CatalogTile {
   id: string;
   name: string;
@@ -296,6 +299,12 @@ export interface CatalogTile {
   icon?: string;
   // One-line first-run guidance shown after deploy.
   postInstall?: string;
+  // What the tile's compose stack takes, declared by the publisher and checked
+  // against the derived facts before the bundle is signed (ADR-0006 Decision
+  // 12). Absent means routine — every tile published before 2026-08-22.
+  privilege?: TilePrivilege;
+  // Capabilities a reader must understand to load this tile (Decision 7).
+  requires?: string[];
   // Present only on the single-tile detail response, not the list.
   composeYaml?: string;
 }
