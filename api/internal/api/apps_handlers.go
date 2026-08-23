@@ -112,6 +112,74 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
+// PATCH /api/apps/{id}
+// Body: { "exposeLan": false }
+//
+// The reverse edge LAN exposure never had (#197). ExposeLAN was set once from
+// the create payload and never updated, so withdrawing LAN reachability meant
+// DELETING the app — for any tile with volumes, choosing between leaving it on
+// the LAN and destroying its data. A security control must not force that.
+//
+// Only exposeLan is patchable, and deliberately so. The compose was signed and
+// installed; an exposure toggle has no business rewriting it, and a general
+// "update the app" route is how it would grow the ability to.
+//
+// The flip is not just a database write. The .lan name is a SAN in the app's
+// per-app TLS leaf and a route on the proxy's LAN listener, so revoking it
+// means re-minting the leaf without that name and re-shipping it. That already
+// works — PrepareAppLeaf treats a SAN drift as a reason to re-mint — so this
+// runs the app's rotation NOW rather than leaving the name resolving until the
+// next sweep. An offline node is not an error: the fresh leaf is not committed,
+// so the sweep retries and the change lands when the node returns.
+func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	app, err := s.apps.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if app == nil {
+		writeError(w, http.StatusNotFound, "app not found")
+		return
+	}
+
+	var body struct {
+		ExposeLAN *bool `json:"exposeLan"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.ExposeLAN == nil {
+		writeError(w, http.StatusBadRequest, "nothing to update: exposeLan is the only patchable field")
+		return
+	}
+	if *body.ExposeLAN == app.ExposeLAN {
+		writeJSON(w, http.StatusOK, app) // already there; re-minting would be churn
+		return
+	}
+
+	if err := s.apps.SetExposeLAN(r.Context(), id, *body.ExposeLAN, time.Now().UTC()); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	app.ExposeLAN = *body.ExposeLAN
+
+	// Re-mint and re-ship against the NEW exposure. Reported but not fatal: the
+	// record is already authoritative for DNS, and the rotation sweep is the
+	// backstop for the proxy half.
+	if s.rotateAppLeaf != nil {
+		if res := apps.RotateAppLeaf(r.Context(), s.inv, s.nc, s.rotateAppLeaf, app); res.Err != nil {
+			writeJSON(w, http.StatusOK, struct {
+				*apps.App
+				LeafWarning string `json:"leafWarning"`
+			}{app, res.Err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, app)
+}
+
 // DELETE /api/apps/{id}
 // Runs the app.delete saga: stop the running deployment on the target node
 // (docker compose down) THEN remove the api's record — so delete actually tears

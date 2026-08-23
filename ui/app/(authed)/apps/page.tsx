@@ -10,6 +10,7 @@ import {
   getSetupState,
   listApps,
   openAppsWS,
+  setAppExposure,
   stopApp,
 } from '../../../lib/api';
 import type { App, CatalogTile } from '../../../lib/types';
@@ -20,6 +21,7 @@ import {
   CopyButton,
   DIM,
   Drawer,
+  EnabledToggle,
   FG,
   HAIR,
   Hint,
@@ -267,6 +269,13 @@ function AppRow({
 // for apps installed from the catalog; custom-compose apps show just access.
 function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; onClose: () => void }) {
   const [tile, setTile] = useState<CatalogTile | null>(null);
+  // Exposure is edited HERE, on a live app, which is the whole of #197: it used
+  // to be settable only in the install drawer, so the only way back was delete.
+  // Held locally and seeded from the record so the toggle responds immediately
+  // and reverts visibly if the patch fails.
+  const [exposeLan, setExposeLan] = useState(app.exposeLan ?? false);
+  const [exposureBusy, setExposureBusy] = useState(false);
+  const [exposureNote, setExposureNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (app.sourceTile) getCatalogTile(app.sourceTile).then(setTile).catch(() => {});
@@ -274,6 +283,27 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
 
   const access = appAccess(app, clusterId);
   const running = app.lastStatus === 'running';
+
+  async function toggleExposure() {
+    const want = !exposeLan;
+    setExposureBusy(true);
+    setExposureNote(null);
+    setExposeLan(want);
+    try {
+      const updated = await setAppExposure(app.id, want);
+      setExposeLan(updated.exposeLan ?? want);
+      if (updated.leafWarning) {
+        setExposureNote(
+          `Saved, but the proxy certificate could not be re-issued yet (${updated.leafWarning}). The name stops resolving now; the proxy catches up on the next rotation.`
+        );
+      }
+    } catch (e) {
+      setExposeLan(!want); // revert — never leave the toggle claiming a change that failed
+      setExposureNote(String(e));
+    } finally {
+      setExposureBusy(false);
+    }
+  }
 
   return (
     <Drawer title={app.name.toUpperCase()} icon={tile?.icon} onClose={onClose}>
@@ -318,6 +348,30 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
             <Hint>This app doesn&apos;t expose a web port.</Hint>
           )}
         </div>
+
+        {access && (
+          <div>
+            <SectionLabel>LAN ACCESS</SectionLabel>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <EnabledToggle
+                enabled={exposeLan}
+                onToggle={() => {
+                  if (!exposureBusy) void toggleExposure();
+                }}
+                title={exposeLan ? 'Reachable on your LAN — click for tailnet-only' : 'Tailnet only — click to allow LAN access'}
+              />
+              <span style={{ color: FG, fontSize: 10 }}>
+                {exposureBusy ? 'saving…' : exposeLan ? 'Reachable on your LAN' : 'Tailnet only'}
+              </span>
+            </div>
+            <Hint warn={!!exposureNote} style={{ marginTop: 6 }}>
+              {exposureNote ??
+                (exposeLan
+                  ? 'Devices on your local network can reach it at its .lan name. Turn this off to withdraw it — the app and its data stay put.'
+                  : 'Reachable only over your tailnet. Turning this on adds the .lan name and a LAN bind.')}
+            </Hint>
+          </div>
+        )}
 
         {tile?.postInstall && (
           <div>

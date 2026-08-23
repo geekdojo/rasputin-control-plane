@@ -69,6 +69,30 @@ func (s *Store) Update(ctx context.Context, a *App) error {
 	return nil
 }
 
+// SetExposeLAN flips an app's LAN-exposure opt-in in place.
+//
+// It exists because the grant had no reverse edge (#197): ExposeLAN was set
+// once from the create payload and never updated, so withdrawing LAN
+// reachability meant DELETING the app — for any tile with volumes, a choice
+// between leaving it on the LAN and destroying its data. The default was right
+// and the grant path was well built; the asymmetry was the defect.
+//
+// Deliberately narrow rather than folded into Update: Update rewrites name,
+// compose and target node, and an exposure toggle should not be able to touch
+// the compose that was signed and installed.
+func (s *Store) SetExposeLAN(ctx context.Context, id string, expose bool, now time.Time) error {
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE apps SET expose_lan = ?, updated_at = ? WHERE id = ?`,
+		expose, ms(now), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // RecordStatus persists the agent-reported status for an app. status is the
 // new value; detail is an optional human-readable message; deployed/stopped
 // timestamps are updated when status transitions into/out of running.
