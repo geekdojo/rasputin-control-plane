@@ -276,6 +276,30 @@ export interface CatalogPort {
 }
 
 export type { PrivilegeTier, TilePrivilege } from './privilege';
+
+// One tile the control plane refused out of an otherwise-valid bundle
+// (ADR-0006 Decision 7, #162), and why.
+export interface TileRejection {
+  id: string;
+  reason: string;
+}
+
+// Provenance of the catalog currently in effect (GET /api/catalog/_status).
+export interface CatalogStatus {
+  version: number;
+  // "fetched" = adopted from a signed published bundle; "embedded" = the floor
+  // baked into this image, i.e. nothing has ever been adopted.
+  source: 'fetched' | 'embedded' | string;
+  tiles: number;
+  // NULL until a poll has COMPLETED, and null is NOT "checked, found nothing".
+  // A cluster that has never reached the internet must not look identical to
+  // one that is up to date — that was #149's failure mode in the updates panel
+  // and this field exists so the catalog cannot repeat it.
+  lastChecked: string | null;
+  lastError?: string;
+  note?: string;
+  rejectedTiles?: TileRejection[];
+}
 import type { TilePrivilege } from './privilege';
 
 export interface CatalogTile {
