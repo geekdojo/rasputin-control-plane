@@ -18,6 +18,30 @@ const (
 	AppStatusUnknown   AppStatus = "unknown"
 )
 
+// Deploy timing. These two live here, together, because they are ONE contract
+// split across two processes and they only work if they stay ordered.
+//
+// AppDeployWork is how long the agent may spend on `docker compose up` — the
+// real budget, and almost all of it is the image pull. AppDeployRPC is how long
+// the api waits for the agent's reply. The api's must be LONGER, so the agent
+// always loses the race and answers with what actually went wrong.
+//
+// Reversed, the api gives up while the agent is still working and the operator
+// gets "deploy rpc: context deadline exceeded" — true, useless, and identical
+// for a missing image, a bad compose and a slow network. That is exactly what
+// shipped: a 60s api deadline under a 120s agent window, so EVERY slow deploy
+// failed opaquely. Bench 2026-08-23 on e3bench: of 8 tiles deployed
+// concurrently, 5 failed and every single failed task lasted exactly 1m 0s
+// while the successes came in at 51s and 57s — a cliff at the deadline, not a
+// spread. Two of the five recovered only because a retry hit a warm cache.
+//
+// 300s is the work budget: a four-container tile cold-pulling to an arm64 node
+// over a home connection does not finish in one minute.
+const (
+	AppDeployWork = 300 * time.Second
+	AppDeployRPC  = AppDeployWork + 30*time.Second
+)
+
 // AppDeployCmd is the request body on rasputin.node.<id>.cmd.docker.deploy.
 // The agent writes the compose file to its app state directory and runs
 // `docker compose up -d` (or the mock-backend equivalent).
