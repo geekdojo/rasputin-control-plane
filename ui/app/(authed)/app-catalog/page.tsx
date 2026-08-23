@@ -1,19 +1,21 @@
 'use client';
 
-import { ExternalLink, FilePlus2, Search, ShieldAlert, Store, UploadCloud } from 'lucide-react';
+import { ExternalLink, FilePlus2, RefreshCw, Search, ShieldAlert, Store, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   createApp,
   deployApp,
+  getCatalogStatus,
   getCatalogTile,
   getSetupState,
   installCatalogApp,
   listCatalog,
   listNodes,
   openInventoryWS,
+  refreshCatalog,
 } from '../../../lib/api';
-import type { App, CatalogCollection, CatalogTile, Node } from '../../../lib/types';
+import type { App, CatalogCollection, CatalogStatus, CatalogTile, Node } from '../../../lib/types';
 import { grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
 import { appAccess } from '../../../lib/appurl';
 import {
@@ -121,6 +123,8 @@ export default function AppCatalogPage() {
       <PageHeader icon={Store} title={`APP CATALOG — ${tiles.length}`} />
       <PageBody>
         {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
+
+        <CatalogFreshness onAdopted={() => listCatalog().then(setTiles).catch(() => {})} />
 
         {tiles.length === 0 && !err && (
           <p style={{ color: DIM, fontSize: 11, fontFamily: MONO }}>loading catalog…</p>
@@ -294,6 +298,156 @@ function CustomCard({ onOpen }: { onOpen: () => void }) {
           <FilePlus2 size={10} /> NEW CUSTOM APP
         </Btn>
       </div>
+    </div>
+  );
+}
+
+// relativeTime renders an ISO timestamp as "4m ago". Deliberately coarse: the
+// question this panel answers is "has it looked recently", not "when exactly".
+function relativeTime(iso: string): string {
+  const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 90) return `${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  if (mins < 90) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 36) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+// How long to keep re-reading _status after a manual refresh. The refresh is
+// fire-and-forget (the api answers 202 and the poll runs in the background), so
+// the panel watches for lastChecked to advance. Bounded deliberately: an
+// unbounded poll would spin forever against a cluster whose fetch is wedged and
+// report nothing, which is the exact opposite of what this panel is for.
+const REFRESH_POLL_MS = 1500;
+const REFRESH_DEADLINE_MS = 30_000;
+
+// CatalogFreshness — where the catalog in effect came from, and a way to check
+// now (#163).
+//
+// Without this, "apps show up on their own" is indistinguishable from "the
+// catalog is broken". The distinction that matters most is NEVER CHECKED vs
+// CHECKED AND UP TO DATE: lastChecked is null until a poll completes, and a
+// cluster that has never reached the internet must not render the same as one
+// that is current. That was #149's failure mode in the updates panel — reading
+// "nothing available" when it had simply never looked — and the api carries the
+// null specifically so this cannot repeat it.
+function CatalogFreshness({ onAdopted }: { onAdopted: () => void }) {
+  const [status, setStatus] = useState<CatalogStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    getCatalogStatus().then(setStatus).catch(() => {});
+  }, []);
+
+  async function checkNow() {
+    if (!status) return;
+    const before = status.lastChecked;
+    const startedVersion = status.version;
+    setChecking(true);
+    setNote(null);
+    try {
+      await refreshCatalog();
+    } catch (e) {
+      setChecking(false);
+      setNote(String(e));
+      return;
+    }
+
+    const deadline = Date.now() + REFRESH_DEADLINE_MS;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, REFRESH_POLL_MS));
+      let next: CatalogStatus;
+      try {
+        next = await getCatalogStatus();
+      } catch {
+        continue; // transient; the deadline below still bounds this
+      }
+      if (next.lastChecked && next.lastChecked !== before) {
+        setStatus(next);
+        setChecking(false);
+        if (next.version !== startedVersion) onAdopted();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        setStatus(next);
+        setChecking(false);
+        // Said plainly rather than left spinning. "Still running" is a real
+        // answer; a spinner that never resolves is not.
+        setNote('Still checking after 30s — the fetch is taking longer than expected. Reload to see the result.');
+        return;
+      }
+    }
+  }
+
+  if (!status) return null;
+
+  const neverChecked = !status.lastChecked;
+  const embedded = status.source === 'embedded';
+  const warn = neverChecked || !!status.lastError || (status.rejectedTiles?.length ?? 0) > 0;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 12,
+        flexWrap: 'wrap',
+        padding: '10px 12px',
+        marginBottom: 16,
+        border: `1px ${warn ? 'solid' : 'dashed'} ${warn ? '#facc1555' : HAIR}`,
+        background: warn ? '#facc150d' : 'transparent',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', flex: 1, minWidth: 260 }}>
+        <Badge color={embedded ? '#facc15' : ACCENT}>CATALOG v{status.version}</Badge>
+        <Badge>{status.tiles} TILES</Badge>
+        {embedded && (
+          <Badge color="#facc15" title="Nothing has been adopted — these are the tiles baked into this image">
+            BUILT IN
+          </Badge>
+        )}
+        <span style={{ color: DIM, fontSize: 10 }}>
+          {checking
+            ? 'checking…'
+            : neverChecked
+              ? 'never checked for updates'
+              : `checked ${relativeTime(status.lastChecked as string)}`}
+        </span>
+      </div>
+      <Btn small disabled={checking} onClick={() => void checkNow()}>
+        <RefreshCw size={10} /> {checking ? 'CHECKING…' : 'CHECK NOW'}
+      </Btn>
+
+      {(note || status.lastError || status.note || neverChecked || (status.rejectedTiles?.length ?? 0) > 0) && (
+        <div style={{ flexBasis: '100%' }}>
+          {note && <Hint warn>{note}</Hint>}
+          {status.lastError && <Hint warn>Last check failed: {status.lastError}</Hint>}
+          {!status.lastError && neverChecked && (
+            <Hint warn>
+              This cluster has not checked for a published catalog yet, so these are the tiles baked into its image.
+              That is not the same as being up to date.
+            </Hint>
+          )}
+          {status.note && !status.lastError && <Hint>{status.note}</Hint>}
+          {(status.rejectedTiles?.length ?? 0) > 0 && (
+            <div style={{ marginTop: 6 }}>
+              <Hint warn>
+                {status.rejectedTiles!.length} tile(s) in the published catalog were refused by this build — usually
+                because this cluster is older than the catalog it is reading. Update it to see them.
+              </Hint>
+              <ul style={{ margin: '4px 0 0', paddingLeft: 16, color: DIM, fontSize: 10, lineHeight: 1.6 }}>
+                {status.rejectedTiles!.map((r) => (
+                  <li key={r.id}>
+                    <span style={{ color: FG }}>{r.id}</span> — {r.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

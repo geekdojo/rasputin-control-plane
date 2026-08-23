@@ -2,6 +2,7 @@ import type {
   Alert,
   App,
   BusTokenInfo,
+  CatalogStatus,
   FlashableImage,
   MintedBusToken,
   AppChangeEvent,
@@ -491,6 +492,20 @@ export function installCatalogApp(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
+}
+
+// getCatalogStatus reports where the catalog in effect came from: its version,
+// whether it was fetched or is still the embedded floor, when the last poll
+// COMPLETED (null = never), and any tiles this build refused.
+export function getCatalogStatus(): Promise<CatalogStatus> {
+  return jsonFetch<CatalogStatus>('/api/catalog/_status');
+}
+
+// refreshCatalog asks the poller to check now. Fire-and-forget: the api answers
+// 202 and the fetch runs in the background, so the caller re-reads _status to
+// learn what happened.
+export function refreshCatalog(): Promise<void> {
+  return jsonFetch<void>('/api/catalog/_refresh', { method: 'POST' });
 }
 
 export function stopApp(id: string): Promise<Job> {
