@@ -1,6 +1,7 @@
 package tileschema
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
 	"strings"
@@ -138,7 +139,7 @@ func TestValidateTileSafety_DockerSocketMustBeDeclaredByName(t *testing.T) {
 	f.BindMounts = []string{"/var/run/docker.sock"}
 
 	x := okTile()
-	x.Privilege = Privilege{Tier: TierHostTrusting, Grants: []string{GrantDockerSocket}}
+	x.Privilege = &Privilege{Tier: TierHostTrusting, Grants: []string{GrantDockerSocket}}
 	x.Requires = []string{CapabilityPrivilegeTiers}
 	err := ValidateTileSafety(x, f)
 	if err == nil || !strings.Contains(err.Error(), "dockerSocket") {
@@ -156,7 +157,7 @@ func TestValidateTileSafety_DockerSocketMustBeDeclaredByName(t *testing.T) {
 // forbidding it would mean a tile could not be conservative.
 func TestValidateTileSafety_OverDeclarationIsAllowed(t *testing.T) {
 	x, f := okTile(), okFacts()
-	x.Privilege = Privilege{
+	x.Privilege = &Privilege{
 		Tier:   TierHostTrusting,
 		Grants: []string{GrantPrivileged, GrantHostNetwork},
 		Why:    "we would rather over-warn",
@@ -174,7 +175,7 @@ func TestValidateTileSafety_NonRoutineMustNameTheCapability(t *testing.T) {
 	f := okFacts()
 	f.HostNetwork = true
 	x := okTile()
-	x.Privilege = Privilege{Tier: TierElevated, Grants: []string{GrantHostNetwork}}
+	x.Privilege = &Privilege{Tier: TierElevated, Grants: []string{GrantHostNetwork}}
 
 	err := ValidateTileSafety(x, f)
 	if err == nil || !strings.Contains(err.Error(), CapabilityPrivilegeTiers) {
@@ -282,7 +283,7 @@ func TestValidateTileSafety_CarriesHomeAssistant(t *testing.T) {
 	x.ID = "home-assistant"
 	x.NeedsHardware = "zigbee or z-wave radio (optional)"
 	x.Requires = []string{CapabilityPrivilegeTiers}
-	x.Privilege = Privilege{
+	x.Privilege = &Privilege{
 		Tier:   TierHostTrusting,
 		Grants: derived.Grants,
 		Why:    "discovers and controls devices on your network, and talks to USB radios",
@@ -314,6 +315,48 @@ func TestDerivePrivilege_IsDeterministic(t *testing.T) {
 	}
 }
 
+// The wire shape the UI reads. Two halves, and the second is why Privilege is
+// a pointer: `omitempty` does nothing for a struct, so as a value this emitted
+// `"privilege":{}` on all 23 routine tiles in every published bundle — the
+// same empty-field noise TestSafetyFacts_PrivilegeFieldsOmitWhenEmpty exists
+// to keep out of the manifest.
+func TestTile_PrivilegeJSONShape(t *testing.T) {
+	routine, err := json.Marshal(Tile{ID: "kuma"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(routine), "privilege") {
+		t.Errorf("a routine tile must not carry a privilege key at all\ngot: %s", routine)
+	}
+
+	declared, err := json.Marshal(Tile{
+		ID:       "home-assistant",
+		Requires: []string{CapabilityPrivilegeTiers},
+		Privilege: &Privilege{
+			Tier:         TierHostTrusting,
+			DockerSocket: true,
+			Grants:       []string{GrantPrivileged},
+			Why:          "controls devices on your network",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exact key names, because the UI reads them and a rename here is a
+	// silently unbadged tile there rather than a compile error anywhere.
+	for _, key := range []string{
+		`"requires":["privilege-tiers-v1"]`,
+		`"tier":"host-trusting"`,
+		`"dockerSocket":true`,
+		`"grants":["privileged"]`,
+		`"why":"controls devices on your network"`,
+	} {
+		if !strings.Contains(string(declared), key) {
+			t.Errorf("missing %s\ngot: %s", key, declared)
+		}
+	}
+}
+
 // A tier string outside the vocabulary is caught on the AUTHORED metadata, so
 // a typo in a preview tile — which never reaches the safety validator — still
 // fails at publish rather than on the day it flips to available.
@@ -325,7 +368,7 @@ func TestValidateTile_RejectsAnUnknownTier(t *testing.T) {
 			x.ComposeYAML = ""
 			x.Ports = nil
 		}
-		x.Privilege = Privilege{Tier: "root"}
+		x.Privilege = &Privilege{Tier: "root"}
 		if err := ValidateTile(x); err == nil {
 			t.Errorf("status %q: unknown tier must be refused", status)
 		}

@@ -133,7 +133,7 @@ func TestValidateTileSafety_Rejects(t *testing.T) {
 		// check and stop testing what it names.
 		{"devices without needsHardware", "declares no needsHardware", func(x *Tile, f *SafetyFacts) {
 			f.Devices = []string{"/dev/bus/usb/001/004"}
-			x.Privilege = Privilege{Tier: TierElevated, Grants: []string{"device:/dev/bus/usb/001/004"}}
+			x.Privilege = &Privilege{Tier: TierElevated, Grants: []string{"device:/dev/bus/usb/001/004"}}
 			x.Requires = []string{CapabilityPrivilegeTiers}
 		}},
 	}
@@ -160,7 +160,7 @@ func TestValidateTileSafety_AllowsDeclaredHardwareAndAllowedMounts(t *testing.T)
 	// The two routine bind roots contribute NO grant — that is the line
 	// between routine and elevated, and a tile keeping to it stays routine.
 	// The USB device does, so this tile is elevated and names the capability.
-	x.Privilege = Privilege{
+	x.Privilege = &Privilege{
 		Tier:   TierElevated,
 		Grants: []string{"device:/dev/bus/usb/001/004"},
 		Why:    "talks to an RTL-SDR dongle",
@@ -276,7 +276,7 @@ func TestValidateTileSafety_PrivilegeFactsAreTiered(t *testing.T) {
 	// And accepted once declared — the point of Decision 12 is that this is a
 	// consent prompt, not a wall.
 	x := okTile()
-	x.Privilege = Privilege{
+	x.Privilege = &Privilege{
 		Tier:   TierHostTrusting,
 		Grants: []string{GrantSeccompUnconfined, GrantUsernsHost, GrantPrefixGroup + "docker"},
 		Why:    "builds container images locally",

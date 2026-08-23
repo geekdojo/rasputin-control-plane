@@ -131,7 +131,11 @@ type Tile struct {
 	// ValidateTileSafety. That pairing is the whole mechanism: the declaration
 	// is what an owner reads and consents to, and the derivation is what keeps
 	// it honest. See privilege.go.
-	Privilege Privilege `json:"privilege,omitempty"`
+	//
+	// A POINTER, because `omitempty` does nothing for a struct: as a value
+	// this emitted `"privilege":{}` on all 23 routine tiles in every published
+	// bundle. Read it through DeclaredPrivilege rather than dereferencing.
+	Privilege *Privilege `json:"privilege,omitempty"`
 
 	// ComposeYAML is loaded from the sibling docker-compose.yml, not tile.json.
 	// A preview tile may omit it — it cannot be installed.
@@ -219,6 +223,16 @@ type SafetyFacts struct {
 
 	// Ulimits is every resource limit a service overrides, as "name=value".
 	Ulimits []string `json:"ulimits,omitempty"`
+}
+
+// DeclaredPrivilege is the tile's declaration, or the zero value — routine,
+// nothing declared — when it has none. Every caller should use this rather
+// than the field, so "absent" and "declared routine" cannot diverge.
+func (t Tile) DeclaredPrivilege() Privilege {
+	if t.Privilege == nil {
+		return Privilege{}
+	}
+	return *t.Privilege
 }
 
 // Available reports whether the tile can be installed now.

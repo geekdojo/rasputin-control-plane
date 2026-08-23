@@ -63,12 +63,13 @@ func ValidateTile(t Tile) error {
 	// than in ValidateTileSafety — a PREVIEW tile ships no compose and never
 	// reaches the safety validator, and a typo in its tier should surface at
 	// publish rather than at the moment it flips to available.
-	if t.Privilege.Tier != "" {
-		if _, ok := TierRank[t.Privilege.Tier]; !ok {
-			return fmt.Errorf("privilege.tier %q is not one of routine|elevated|host-trusting", t.Privilege.Tier)
+	declaredPriv := t.DeclaredPrivilege()
+	if declaredPriv.Tier != "" {
+		if _, ok := TierRank[declaredPriv.Tier]; !ok {
+			return fmt.Errorf("privilege.tier %q is not one of routine|elevated|host-trusting", declaredPriv.Tier)
 		}
 	}
-	for i, g := range t.Privilege.Grants {
+	for i, g := range declaredPriv.Grants {
 		if strings.TrimSpace(g) == "" {
 			return fmt.Errorf("privilege.grants[%d] is empty", i)
 		}
@@ -176,7 +177,7 @@ func ValidateTileSafety(t Tile, f SafetyFacts) error {
 	// badge scarier than the stack deserves is a publisher's problem and not a
 	// cluster's.
 	derived := DerivePrivilege(f)
-	declared := t.Privilege
+	declared := t.DeclaredPrivilege()
 
 	if TierRank[declared.EffectiveTier()] < TierRank[derived.Tier] {
 		return fmt.Errorf("declares privilege tier %q but its compose takes %q (%s)",
