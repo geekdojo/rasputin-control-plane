@@ -502,10 +502,24 @@ export function getCatalogStatus(): Promise<CatalogStatus> {
 }
 
 // refreshCatalog asks the poller to check now. Fire-and-forget: the api answers
-// 202 and the fetch runs in the background, so the caller re-reads _status to
-// learn what happened.
-export function refreshCatalog(): Promise<void> {
-  return jsonFetch<void>('/api/catalog/_refresh', { method: 'POST' });
+// 202 with NO BODY and the fetch runs in the background, so the caller re-reads
+// _status to learn what happened.
+//
+// Raw fetch rather than jsonFetch, which unconditionally parses the response
+// body. Against a bodyless 202 that throws "Unexpected end of JSON input" — so
+// the request succeeds, the poller runs, and the UI reports a failure for it
+// anyway. Found on e3bench 2026-08-23, the first time this ran against the real
+// api; tsc, eslint and next build all pass on the broken version, because none
+// of them execute a response. Same shape as revokeBusToken and the other
+// no-body callers.
+export async function refreshCatalog(): Promise<void> {
+  const res = await fetch(`${BASE}/api/catalog/_refresh`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    throw new Error(`refreshCatalog → ${res.status}`);
+  }
 }
 
 // setAppExposure flips an installed app's LAN reachability in place (#197).
