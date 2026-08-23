@@ -34,6 +34,10 @@ func TestDerivePrivilege_ScoresEveryDimension(t *testing.T) {
 		{"cgroup tree", func(f *SafetyFacts) { f.BindMounts = []string{"/sys/fs/cgroup"} }, TierHostTrusting, GrantPrefixBind + "/sys/fs/cgroup"},
 		{"host etc", func(f *SafetyFacts) { f.BindMounts = []string{"/etc/ssh"} }, TierHostTrusting, GrantPrefixBind + "/etc/ssh"},
 		{"docker data root", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/docker"} }, TierHostTrusting, GrantDockerDataRoot},
+		// Refused outright by TrustChainViolation, so no tier is ever consulted
+		// for it — scored here only so DerivePrivilege cannot be quoted saying
+		// that reaching the trust store is merely elevated.
+		{"trust store", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/trust"} }, TierHostTrusting, GrantPrefixBind + "/var/lib/rasputin/trust"},
 
 		// --- elevated: reaches past itself, not root-equivalent ---
 		{"host network", func(f *SafetyFacts) { f.HostNetwork = true }, TierElevated, GrantHostNetwork},

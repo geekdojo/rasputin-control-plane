@@ -174,10 +174,20 @@ var hostTrustingBindExact = []string{"/", "/dev"}
 // /etc is here even though /etc/localtime is routine: RoutineBindRoots is
 // consulted FIRST in classifyHostPath, so the timezone file stays free while
 // /etc/shadow, /etc/passwd, /etc/sudoers and /etc/ssh are what they are.
+//
+// The runtime data roots precede /var/lib/rasputin because the loop returns on
+// the first match and they have their own grant name.
+//
+// PlatformStateRoots appear at the end even though TrustChainViolation refuses
+// them outright and no tier is ever consulted for a refused tile. Coherence:
+// DerivePrivilege is a public function and a caller other than the validator
+// may render its answer, so "reaching the trust store is elevated" must not be
+// a sentence this package can produce.
 var hostTrustingBindPrefixes = []string{
 	"/boot", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root", "/proc", "/sys",
 	"/var/lib/docker", "/var/lib/containerd",
 	"/var/lib/rasputin/docker", "/var/lib/rasputin/containerd",
+	"/var/lib/rasputin", "/etc/rasputin",
 }
 
 // escapeCaps are the Linux capabilities that are container escape in practice
