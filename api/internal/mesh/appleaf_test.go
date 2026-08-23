@@ -105,19 +105,77 @@ func TestPrepareAppLeaf_RenewsUntilCommitted(t *testing.T) {
 
 // TestPrepareAppLeaf_RenewsOnSANDrift: toggling exposeLAN changes the SANs, so
 // even a committed, far-from-expiry leaf must be re-minted.
+//
+// BOTH DIRECTIONS, and the shrink is the one that matters. This test used to
+// assert only false→true, and the asymmetry was the bug: the generic SAN check
+// tolerates EXTRA names on the leaf, so true→false left the wanted set a subset
+// of what was on disk, the leaf read as usable, and nothing was re-minted or
+// shipped. The node kept a valid <app>.lan certificate and its Caddy LAN route
+// for the leaf's remaining life — 365d minus the 60d renew window, about ten
+// months after the operator was told the app had left the LAN. DNS was the only
+// half that actually revoked. Found by the automated review on #197.
 func TestPrepareAppLeaf_RenewsOnSANDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		from, want bool
+	}{
+		{"grant LAN exposure — the SAN set grows", false, true},
+		{"revoke LAN exposure — the SAN set SHRINKS", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ca := newCAForTest(t)
+			dir := t.TempDir()
+
+			certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", tc.from)
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if err := CommitAppLeaf(dir, certPEM, keyPEM); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+
+			fresh, _, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", tc.want)
+			if err != nil {
+				t.Fatalf("prepare after toggle: %v", err)
+			}
+			if !renewed {
+				t.Fatal("an exposeLAN toggle must re-mint: without a fresh leaf nothing is shipped, and the node keeps whatever it already had")
+			}
+			// And the fresh leaf must carry exactly the new name set — a
+			// re-mint that kept the .lan SAN would ship a certificate still
+			// valid for the name being withdrawn.
+			got := parseLeaf(t, fresh)
+			wantNames := AppLeafDNSNames("home1", "jellyfin", tc.want)
+			if len(got.DNSNames) != len(wantNames) {
+				t.Fatalf("SANs: got %v, want exactly %v", got.DNSNames, wantNames)
+			}
+			for _, n := range wantNames {
+				if !slices.Contains(got.DNSNames, n) {
+					t.Errorf("SANs %v missing %q", got.DNSNames, n)
+				}
+			}
+		})
+	}
+}
+
+// And the re-mint must SETTLE. Exact SAN matching would be a re-mint loop if
+// the committed leaf never satisfied its own spec — every sweep would ship a
+// new certificate to the node forever.
+func TestPrepareAppLeaf_ExactSANsStillSettle(t *testing.T) {
 	ca := newCAForTest(t)
 	dir := t.TempDir()
 
-	certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false)
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if err := CommitAppLeaf(dir, certPEM, keyPEM); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if _, _, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", true); err != nil || !renewed {
-		t.Errorf("exposeLAN toggle (SAN drift) must renew: renewed=%v err=%v", renewed, err)
+	for _, expose := range []bool{false, true, false} {
+		certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", expose)
+		if err != nil {
+			t.Fatalf("prepare(%v): %v", expose, err)
+		}
+		if err := CommitAppLeaf(dir, certPEM, keyPEM); err != nil {
+			t.Fatalf("commit(%v): %v", expose, err)
+		}
+		if _, _, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", expose); err != nil || renewed {
+			t.Fatalf("expose=%v: a committed leaf must be reused, got renewed=%v err=%v", expose, renewed, err)
+		}
 	}
 }
 

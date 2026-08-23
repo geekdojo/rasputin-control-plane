@@ -46,9 +46,15 @@ func MintAppLeaf(ca *MeshCA, clusterID, appName string, exposeLAN bool) (certPEM
 func appLeafSpec(clusterID, appName string, exposeLAN bool) LeafSpec {
 	names := AppLeafDNSNames(clusterID, appName, exposeLAN)
 	return LeafSpec{
-		CommonName:  names[0],
-		DNSNames:    names,
-		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		CommonName: names[0],
+		DNSNames:   names,
+		// An app's SAN set legitimately SHRINKS: revoking LAN exposure
+		// withdraws the .lan name, and a leaf still valid for it is a live
+		// route on the node's LAN listener, not merely a stale string. The
+		// default subset check tolerates extra names, which silently turned
+		// the revoke half of #197 into a no-op for ~10 months.
+		ExactDNSNames: true,
+		IPAddresses:   []net.IP{net.IPv4(127, 0, 0, 1)},
 	}
 }
 

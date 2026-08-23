@@ -210,6 +210,16 @@ type LeafSpec struct {
 	// Lifetime — defaults to 365d if zero. The auto-rotation path only
 	// kicks in when an existing leaf has less than `renewWindow` left.
 	Lifetime time.Duration
+	// ExactDNSNames requires the on-disk leaf's SAN set to EQUAL DNSNames
+	// rather than merely contain it, so a name being REMOVED forces a
+	// re-mint the same way adding one does.
+	//
+	// Off by default because the tolerant check below is right for a leaf
+	// whose names only ever grow. It is wrong wherever a name is withdrawn
+	// as a security control: see appLeafSpec, where revoking an app's LAN
+	// exposure shrinks the set and a leaf still valid for the .lan name is
+	// a live route on the node's LAN listener.
+	ExactDNSNames bool
 	// ClientAuth mints a leaf for the CLIENT side of mTLS (ExtKeyUsage
 	// clientAuth) instead of the default server leaf (serverAuth). Used by
 	// the obs per-node collectors, which present a client cert to the api's
@@ -369,9 +379,18 @@ func loadLeafIfUsable(paths LeafPaths, ca *MeshCA, spec LeafSpec) *x509.Certific
 		return nil
 	}
 	// SAN drift — every requested name/IP must be present on the leaf,
-	// otherwise mint a fresh one with the updated set. We DON'T require
-	// exact equality (older SAN entries are fine to keep) since the
+	// otherwise mint a fresh one with the updated set. By default we DON'T
+	// require exact equality (older SAN entries are fine to keep) since the
 	// operator may add a new hostname mid-lifetime.
+	//
+	// That tolerance is one-directional, and a spec that WITHDRAWS a name
+	// must say so with ExactDNSNames. Found on #197 by the automated review:
+	// revoking an app's LAN exposure shrinks the wanted set to a subset of
+	// what the leaf already carries, so the leaf read as still-usable,
+	// nothing was re-minted, nothing was shipped, and the node kept both a
+	// valid .lan certificate and its Caddy LAN route until the leaf's own
+	// renew window — 365d lifetime minus 60d window, so roughly ten months
+	// after the operator was told the app had left the LAN.
 	have := make(map[string]bool, len(cert.DNSNames))
 	for _, n := range cert.DNSNames {
 		have[n] = true
@@ -380,6 +399,9 @@ func loadLeafIfUsable(paths LeafPaths, ca *MeshCA, spec LeafSpec) *x509.Certific
 		if !have[want] {
 			return nil
 		}
+	}
+	if spec.ExactDNSNames && len(cert.DNSNames) != len(spec.DNSNames) {
+		return nil
 	}
 	haveIP := make(map[string]bool, len(cert.IPAddresses))
 	for _, ip := range cert.IPAddresses {
