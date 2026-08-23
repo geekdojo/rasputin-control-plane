@@ -70,11 +70,19 @@ var (
 // understands. ADR-0006 Decision 7's must-understand rule reads from it: a tile
 // naming a capability absent here is REFUSED rather than loaded without it.
 //
-// Empty today by design. The mechanism exists before its first user precisely
-// so that an older control plane already knows to refuse a future tile it
-// cannot reason about — adding the mechanism at the same time as the first
-// capability would leave every already-shipped cluster silently ignoring it.
-var KnownCapabilities = map[string]bool{}
+// It was empty until 2026-08-22 by design — the mechanism shipped before its
+// first user precisely so that an older control plane already knew to refuse a
+// future tile it could not reason about. That foresight is what makes the entry
+// below safe to add now.
+//
+// privilege-tiers-v1 is the first (Decision 12d, #198). A tile taking any
+// privilege above routine names it, so a control plane predating Decision 12
+// refuses that tile rather than installing it with no tier, no badge and no
+// consent. Bounded because #162 landed first: before per-tile refusal, one
+// unknown capability cost a cluster its entire catalog.
+var KnownCapabilities = map[string]bool{
+	CapabilityPrivilegeTiers: true,
+}
 
 // Port is a structured published port. The reverse proxy must route
 // <app>.<zone> to a concrete host port without parsing compose, so every
@@ -113,6 +121,17 @@ type Tile struct {
 	// safely (ADR-0006 Decision 7). Unknown OPTIONAL fields are ignored;
 	// unknown REQUIRED capabilities are fatal to this tile and only this tile.
 	Requires []string `json:"requires,omitempty"`
+
+	// Privilege is the tile's declaration of what its compose stack takes
+	// (ADR-0006 Decision 12a). Absent means routine, which is what every tile
+	// published before 2026-08-22 is by construction — they passed the five
+	// absolute refusals Decision 12 replaces.
+	//
+	// It is AUTHORED, and checked against the derived SafetyFacts by
+	// ValidateTileSafety. That pairing is the whole mechanism: the declaration
+	// is what an owner reads and consents to, and the derivation is what keeps
+	// it honest. See privilege.go.
+	Privilege Privilege `json:"privilege,omitempty"`
 
 	// ComposeYAML is loaded from the sibling docker-compose.yml, not tile.json.
 	// A preview tile may omit it — it cannot be installed.

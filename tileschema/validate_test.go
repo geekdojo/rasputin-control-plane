@@ -86,43 +86,67 @@ func TestValidateTileSafety_AcceptsACleanStack(t *testing.T) {
 	}
 }
 
+// want is a substring of the expected error. It exists because Decision 12
+// turned several of these from "not permitted" into "not declared" — the same
+// verdict for a different reason — and a table that only asserts "some error"
+// would have gone on passing while the rule underneath it changed meaning.
 func TestValidateTileSafety_Rejects(t *testing.T) {
 	cases := []struct {
 		name string
+		want string
 		mut  func(*Tile, *SafetyFacts)
 	}{
-		{"no images", func(_ *Tile, f *SafetyFacts) { f.Images = nil }},
-		{"tag not digest", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx:1.27"} }},
-		{"latest", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx:latest"} }},
-		{"bare name", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx"} }},
-		{"md5 digest", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx@md5:abc"} }},
-		{"short sha", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx@sha256:abc"} }},
-		{"non-hex sha", func(_ *Tile, f *SafetyFacts) {
+		{"no images", "", func(_ *Tile, f *SafetyFacts) { f.Images = nil }},
+		{"tag not digest", "", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx:1.27"} }},
+		{"latest", "", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx:latest"} }},
+		{"bare name", "", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx"} }},
+		{"md5 digest", "", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx@md5:abc"} }},
+		{"short sha", "", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"nginx@sha256:abc"} }},
+		{"non-hex sha", "", func(_ *Tile, f *SafetyFacts) {
 			f.Images = []string{"nginx@sha256:zzzz56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"}
 		}},
-		{"digest with no name", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"@" + goodDigest} }},
-		{"privileged", func(_ *Tile, f *SafetyFacts) { f.Privileged = true }},
-		{"host network", func(_ *Tile, f *SafetyFacts) { f.HostNetwork = true }},
-		{"host pid or ipc", func(_ *Tile, f *SafetyFacts) { f.HostPIDOrIPC = true }},
-		{"cap add", func(_ *Tile, f *SafetyFacts) { f.CapAdd = []string{"NET_ADMIN"} }},
-		{"bind outside roots", func(_ *Tile, f *SafetyFacts) { f.BindMounts = []string{"/etc/shadow"} }},
-		{"bind traversal", func(_ *Tile, f *SafetyFacts) {
+		{"digest with no name", "", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"@" + goodDigest} }},
+		{"undeclared privileged", `takes "host-trusting" (privileged)`, func(_ *Tile, f *SafetyFacts) { f.Privileged = true }},
+		{"undeclared host network", `takes "elevated" (host-network)`, func(_ *Tile, f *SafetyFacts) { f.HostNetwork = true }},
+		{"undeclared host pid or ipc", `takes "elevated" (host-pid-ipc)`, func(_ *Tile, f *SafetyFacts) { f.HostPIDOrIPC = true }},
+		{"undeclared cap add", `takes "elevated" (cap:NET_ADMIN)`, func(_ *Tile, f *SafetyFacts) { f.CapAdd = []string{"NET_ADMIN"} }},
+		{"undeclared bind outside roots", `takes "host-trusting" (bind:/etc/shadow)`, func(_ *Tile, f *SafetyFacts) { f.BindMounts = []string{"/etc/shadow"} }},
+		// Cleaned before classification, so the traversal is scored on where
+		// it LANDS. Three levels up from the app root is /var, not /, which is
+		// why the want here is /var/etc/shadow and not what the string reads
+		// like at a glance.
+		{"bind traversal out of the app root", "bind:/var/etc/shadow", func(_ *Tile, f *SafetyFacts) {
 			f.BindMounts = []string{"/var/lib/rasputin/apps/../../../etc/shadow"}
 		}},
-		{"bind relative", func(_ *Tile, f *SafetyFacts) { f.BindMounts = []string{"data"} }},
-		{"bind prefix lookalike", func(_ *Tile, f *SafetyFacts) {
+		// The traversal that matters: out of the app root and sideways into
+		// the trust store, which is Decision 12e's absolute refusal and not a
+		// tier at all.
+		{"bind traversal into the trust store", "trust chain", func(_ *Tile, f *SafetyFacts) {
+			f.BindMounts = []string{"/var/lib/rasputin/apps/../trust"}
+		}},
+		{"bind relative", "not an absolute path", func(_ *Tile, f *SafetyFacts) { f.BindMounts = []string{"data"} }},
+		{"bind prefix lookalike", "trust chain", func(_ *Tile, f *SafetyFacts) {
 			f.BindMounts = []string{"/var/lib/rasputin/appsEVIL/x"}
 		}},
-		{"devices without needsHardware", func(_ *Tile, f *SafetyFacts) {
+		// Declared as elevated, so the ONLY thing left to fail is the
+		// needsHardware pairing — otherwise this would pass on the privilege
+		// check and stop testing what it names.
+		{"devices without needsHardware", "declares no needsHardware", func(x *Tile, f *SafetyFacts) {
 			f.Devices = []string{"/dev/bus/usb/001/004"}
+			x.Privilege = Privilege{Tier: TierElevated, Grants: []string{"device:/dev/bus/usb/001/004"}}
+			x.Requires = []string{CapabilityPrivilegeTiers}
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			x, f := okTile(), okFacts()
 			tc.mut(&x, &f)
-			if err := ValidateTileSafety(x, f); err == nil {
+			err := ValidateTileSafety(x, f)
+			if err == nil {
 				t.Fatalf("expected rejection for %s", tc.name)
+			}
+			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s: rejected for the wrong reason\n got: %v\nwant substring: %q", tc.name, err, tc.want)
 			}
 		})
 	}
@@ -133,6 +157,15 @@ func TestValidateTileSafety_AllowsDeclaredHardwareAndAllowedMounts(t *testing.T)
 	x.NeedsHardware = "rtl-sdr"
 	f.Devices = []string{"/dev/bus/usb/001/004"}
 	f.BindMounts = []string{"/var/lib/rasputin/apps/uptime-kuma/data", "/etc/localtime"}
+	// The two routine bind roots contribute NO grant — that is the line
+	// between routine and elevated, and a tile keeping to it stays routine.
+	// The USB device does, so this tile is elevated and names the capability.
+	x.Privilege = Privilege{
+		Tier:   TierElevated,
+		Grants: []string{"device:/dev/bus/usb/001/004"},
+		Why:    "talks to an RTL-SDR dongle",
+	}
+	x.Requires = []string{CapabilityPrivilegeTiers}
 	if err := ValidateTileSafety(x, f); err != nil {
 		t.Fatalf("expected valid, got %v", err)
 	}
@@ -220,19 +253,37 @@ func TestSafetyFacts_PrivilegeFieldsOmitWhenEmpty(t *testing.T) {
 	}
 }
 
-// DELIBERATELY PERMITTED, FOR NOW. #195 is capture, not policy: these facts are
-// now visible in the signed manifest and in tilelint's output, but the validator
-// does not yet rule on them. #196 decides what a tile may declare and what an
-// operator must consent to. This test exists so the gap is a recorded decision
-// rather than something a later reader assumes is covered — when #196 lands it
-// should FAIL and be rewritten, not deleted.
-func TestValidateTileSafety_PrivilegeFactsNotYetEnforced_See196(t *testing.T) {
+// THE GAP #195 OPENED AND #196 CLOSED. This test used to assert the opposite:
+// #195 captured ten privilege dimensions that the validator read nowhere, so a
+// stack could take seccomp=unconfined, userns host and the docker group and be
+// waved through as routine while Home Assistant was refused outright. Its
+// comment said it should FAIL and be rewritten when #196 landed. It did, and
+// this is the rewrite.
+func TestValidateTileSafety_PrivilegeFactsAreTiered(t *testing.T) {
 	f := okFacts()
 	f.SecurityOpt = []string{"seccomp=unconfined"}
 	f.UsernsMode = []string{"host"}
 	f.GroupAdd = []string{"docker"}
-	if err := ValidateTileSafety(okTile(), f); err != nil {
-		t.Fatalf("capture-only change must not alter the verdict; #196 owns the policy. got: %v", err)
+
+	err := ValidateTileSafety(okTile(), f)
+	if err == nil {
+		t.Fatal("an undeclared host-trusting stack must be refused, not silently accepted as routine")
+	}
+	if !strings.Contains(err.Error(), TierHostTrusting) {
+		t.Fatalf("want the verdict to name the host-trusting tier, got: %v", err)
+	}
+
+	// And accepted once declared — the point of Decision 12 is that this is a
+	// consent prompt, not a wall.
+	x := okTile()
+	x.Privilege = Privilege{
+		Tier:   TierHostTrusting,
+		Grants: []string{GrantSeccompUnconfined, GrantUsernsHost, GrantPrefixGroup + "docker"},
+		Why:    "builds container images locally",
+	}
+	x.Requires = []string{CapabilityPrivilegeTiers}
+	if err := ValidateTileSafety(x, f); err != nil {
+		t.Fatalf("a fully declared host-trusting stack must be accepted, got %v", err)
 	}
 }
 
