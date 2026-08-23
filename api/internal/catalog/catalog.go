@@ -37,6 +37,7 @@ type (
 	Tile        = tileschema.Tile
 	Port        = tileschema.Port
 	SafetyFacts = tileschema.SafetyFacts
+	Privilege   = tileschema.Privilege
 )
 
 const (
@@ -47,6 +48,12 @@ const (
 
 	StatusAvailable = tileschema.StatusAvailable
 	StatusPreview   = tileschema.StatusPreview
+
+	// ADR-0006 Decision 12b. Aliased here so the consent surface (#200) reads
+	// the same vocabulary as the validator rather than a second copy of it.
+	TierRoutine      = tileschema.TierRoutine
+	TierElevated     = tileschema.TierElevated
+	TierHostTrusting = tileschema.TierHostTrusting
 )
 
 var collectionOrder = tileschema.CollectionOrder

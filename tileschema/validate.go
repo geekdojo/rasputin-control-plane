@@ -2,21 +2,8 @@ package tileschema
 
 import (
 	"fmt"
-	"path"
 	"strings"
 )
-
-// AllowedBindRoots are the host path prefixes a tile may bind-mount. Anything
-// else is refused: a catalog tile has no business reaching into the host
-// filesystem, and the two entries here are the ones a normal self-hosted stack
-// legitimately needs.
-//
-// /var/lib/rasputin/apps/ is per-app persistent data. /etc/localtime is the
-// near-universal read-only timezone mount.
-var AllowedBindRoots = []string{
-	"/var/lib/rasputin/apps/",
-	"/etc/localtime",
-}
 
 // ValidateTile checks the AUTHORED metadata of a tile — everything expressible
 // in tile.json. It does not look at the compose stack beyond "is it present",
@@ -72,6 +59,21 @@ func ValidateTile(t Tile) error {
 	if !ValidStatus[t.Status] {
 		return fmt.Errorf("status %q is not one of available|preview", t.Status)
 	}
+	// The declared tier is authored metadata, so it is checked here rather
+	// than in ValidateTileSafety — a PREVIEW tile ships no compose and never
+	// reaches the safety validator, and a typo in its tier should surface at
+	// publish rather than at the moment it flips to available.
+	declaredPriv := t.DeclaredPrivilege()
+	if declaredPriv.Tier != "" {
+		if _, ok := TierRank[declaredPriv.Tier]; !ok {
+			return fmt.Errorf("privilege.tier %q is not one of routine|elevated|host-trusting", declaredPriv.Tier)
+		}
+	}
+	for i, g := range declaredPriv.Grants {
+		if strings.TrimSpace(g) == "" {
+			return fmt.Errorf("privilege.grants[%d] is empty", i)
+		}
+	}
 	if t.RAMFloorMB <= 0 {
 		return fmt.Errorf("ramFloorMB must be > 0")
 	}
@@ -123,6 +125,19 @@ func ValidateTile(t Tile) error {
 // before signing; the control plane runs it before loading. If the two ever
 // disagree the cluster's answer wins, because it is the one with something to
 // lose.
+//
+// WHAT IT NO LONGER DOES, as of Decision 12 (#198). It used to refuse five
+// things outright — privileged, host networking, host PID/IPC, any cap_add,
+// and bind mounts outside two roots — while reading none of the ten privilege
+// dimensions #195 captured. So it blocked Home Assistant, which is must-carry,
+// and waved through seccomp=unconfined, which is the closest a stack gets to
+// privileged without spelling it that way. Neither half was defensible.
+//
+// The posture now is "no UNDECLARED privilege": a tile states what it takes,
+// this checks the statement against the derived facts, and the owner consents
+// to the difference. One absolute refusal survives — the platform's own trust
+// chain (12e) — because consent is only meaningful while the thing asking for
+// it is still trustworthy. See privilege.go.
 func ValidateTileSafety(t Tile, f SafetyFacts) error {
 	if len(f.Images) == 0 {
 		return fmt.Errorf("no images declared — a stack that pulls nothing cannot be verified")
@@ -133,23 +148,61 @@ func ValidateTileSafety(t Tile, f SafetyFacts) error {
 		}
 	}
 
-	if f.Privileged {
-		return fmt.Errorf("privileged containers are not permitted in the catalog")
+	// --- ADR-0006 Decision 12e: the only absolute refusals. ---
+	//
+	// Everything else below is declarable and consentable. These are not,
+	// because consent is only meaningful while the thing asking for it is
+	// still trustworthy: an app that can rewrite the trust store authorises
+	// every future update, so consenting to it destroys the basis of every
+	// later consent. See TrustChainViolation.
+	for _, m := range f.BindMounts {
+		if !strings.HasPrefix(strings.TrimSpace(m), "/") {
+			return fmt.Errorf("bind mount %q is not an absolute path — the daemon resolves it against its own working directory, which nothing here can see", m)
+		}
+		if hit := TrustChainViolation(m); hit != "" {
+			return fmt.Errorf("bind mount %q reaches the platform's own trust chain (%s) — the one privilege no consent can cover", m, hit)
+		}
 	}
-	if f.HostNetwork {
-		return fmt.Errorf("host networking is not permitted in the catalog")
-	}
-	if f.HostPIDOrIPC {
-		return fmt.Errorf("sharing the host PID or IPC namespace is not permitted in the catalog")
-	}
-	if len(f.CapAdd) > 0 {
-		return fmt.Errorf("added capabilities are not permitted in the catalog (found %s)", strings.Join(f.CapAdd, ", "))
+	for _, d := range f.Devices {
+		if hit := TrustChainViolation(d); hit != "" {
+			return fmt.Errorf("device %q reaches the platform's own trust chain (%s) — the one privilege no consent can cover", d, hit)
+		}
 	}
 
-	for _, m := range f.BindMounts {
-		if !allowedBindMount(m) {
-			return fmt.Errorf("bind mount %q is outside the allowed roots (%s)", m, strings.Join(AllowedBindRoots, ", "))
-		}
+	// --- ADR-0006 Decision 12a: the declaration must cover the facts. ---
+	//
+	// Exactly the shape of the needsHardware check below, which was the one
+	// dimension already working this way, generalised to all of them.
+	// UNDER-declaration is the error; over-declaration is allowed, because a
+	// badge scarier than the stack deserves is a publisher's problem and not a
+	// cluster's.
+	derived := DerivePrivilege(f)
+	declared := t.DeclaredPrivilege()
+
+	if TierRank[declared.EffectiveTier()] < TierRank[derived.Tier] {
+		return fmt.Errorf("declares privilege tier %q but its compose takes %q (%s)",
+			declared.EffectiveTier(), derived.Tier, strings.Join(derived.Grants, ", "))
+	}
+	if missing := undeclaredGrants(declared, derived); len(missing) > 0 {
+		return fmt.Errorf("compose takes privileges the tile does not declare: %s", strings.Join(missing, ", "))
+	}
+	if derived.DockerSocket && !declared.DockerSocket {
+		return fmt.Errorf("mounts the container runtime socket but does not declare privilege.dockerSocket — it is named separately from the tier because it is the ability to escape any constraint added later")
+	}
+
+	// --- ADR-0006 Decision 12d: an older reader must refuse this tile. ---
+	//
+	// A control plane predating Decision 12 has no privilege vocabulary, so it
+	// would install a host-trusting tile with no tier, no badge and no consent
+	// prompt. Naming the capability makes Decision 7's must-understand rule
+	// refuse it instead — that tile, and only that tile (#162).
+	//
+	// Routine tiles do NOT name it: requiring it everywhere would make every
+	// tile already in the field refused by every cluster already in the field,
+	// in order to communicate "this app is ordinary".
+	if TierRank[derived.Tier] > TierRank[TierRoutine] && !requires(t, CapabilityPrivilegeTiers) {
+		return fmt.Errorf("takes %q privilege but does not list %q in requires — an older control plane must refuse this tile rather than install it unbadged",
+			derived.Tier, CapabilityPrivilegeTiers)
 	}
 
 	// A stack mapping host devices must say so in its metadata, so the catalog
@@ -160,6 +213,29 @@ func ValidateTileSafety(t Tile, f SafetyFacts) error {
 	}
 
 	return nil
+}
+
+// undeclaredGrants returns the derived grants the tile did not declare, in
+// derivation order (already sorted).
+func undeclaredGrants(declared, derived Privilege) []string {
+	have := declared.grantSet()
+	var missing []string
+	for _, g := range derived.Grants {
+		if !have[g] {
+			missing = append(missing, g)
+		}
+	}
+	return missing
+}
+
+// requires reports whether a tile names a capability in its Requires array.
+func requires(t Tile, capability string) bool {
+	for _, c := range t.Requires {
+		if c == capability {
+			return true
+		}
+	}
+	return false
 }
 
 // validateImagePin requires a digest-pinned reference. A tag — including a
@@ -192,25 +268,6 @@ func validateImagePin(img string) error {
 		return fmt.Errorf("missing image name before the digest")
 	}
 	return nil
-}
-
-// allowedBindMount reports whether a host path sits under an allowed root.
-// Cleaned first so that /var/lib/rasputin/apps/../../../etc/shadow does not
-// pass a naive prefix test.
-func allowedBindMount(p string) bool {
-	if !strings.HasPrefix(p, "/") {
-		return false // relative paths are resolved by the daemon's cwd — refuse
-	}
-	clean := path.Clean(p)
-	for _, root := range AllowedBindRoots {
-		if clean == path.Clean(root) {
-			return true
-		}
-		if strings.HasSuffix(root, "/") && strings.HasPrefix(clean+"/", root) {
-			return true
-		}
-	}
-	return false
 }
 
 // ValidDNSLabel reports whether s is a valid RFC-1123 DNS label: 1-63 chars,
