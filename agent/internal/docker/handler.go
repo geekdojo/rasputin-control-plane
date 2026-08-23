@@ -60,8 +60,10 @@ func handleDeploy(b Backend, m *nats.Msg) {
 		log.Printf("rasputin-agent: docker.deploy: bad cmd: %v", err)
 		return
 	}
-	// Deploy can be slow (image pulls etc); give it a generous window.
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// Deploy is slow because of the image pull. The window is proto's, shared
+	// with the api's RPC deadline so the two cannot drift apart — see
+	// proto.AppDeployWork.
+	ctx, cancel := context.WithTimeout(context.Background(), proto.AppDeployWork)
 	defer cancel()
 	status, detail, err := b.Deploy(ctx, cmd.AppID, cmd.Name, cmd.ComposeYAML)
 	if err != nil {

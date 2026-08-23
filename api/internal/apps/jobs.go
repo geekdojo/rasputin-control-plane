@@ -43,7 +43,10 @@ func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 		Kind: "app.deploy",
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: deployLoad(store, inv)},
-			{Name: "push", Timeout: 60 * time.Second, Do: deployPush(store, inv, nc)},
+			// Longer than the agent's own work budget on purpose, so the agent
+			// answers with the real failure instead of this step timing out on
+			// top of it — see proto.AppDeployWork.
+			{Name: "push", Timeout: proto.AppDeployRPC, Do: deployPush(store, inv, nc)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, mint)},
 		},
 	}
