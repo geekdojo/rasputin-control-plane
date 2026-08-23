@@ -365,6 +365,47 @@ func reconcileList(store *Store) jobs.DoFn {
 	}
 }
 
+// isRealDrift decides whether an observed container state is news worth
+// overwriting the stored status with.
+//
+// The sweep exists for one symptom — "the api says running but it isn't" — and
+// it used to treat ANY difference as drift. That is wrong twice over, because
+// not every stored status is a belief about containers that an observation can
+// simply correct.
+//
+//	IN FLIGHT (deploying, stopping). An operation owns the record while it
+//	runs. Mid-deploy the containers legitimately do not exist yet, so the agent
+//	answers "stopped" and the old code helpfully reset the row — clobbering a
+//	deploy that was still pulling. This was survivable while a deploy was
+//	capped at 60s; with proto.AppDeployWork at 300s and this sweep on a 5-minute
+//	timer, a long first pull and a sweep now overlap by design.
+//
+//	A VERDICT (failed). "failed" records what an operation concluded, not what
+//	is running. A failed deploy leaves no containers, so the agent reports
+//	"stopped" — which CONFIRMS the failure rather than contradicting it. The old
+//	code overwrote the verdict and its error detail with a bare "stopped", so
+//	the row read as merely un-deployed and the reason was gone. Observed on
+//	e3bench 2026-08-23: rows flipped to "reconcile: was failed, observed
+//	stopped" about a minute after failing, and the operator was left with no
+//	trace of why. Only "running" is genuine news — the app recovered.
+//
+// Anything else is ordinary drift and is recorded as before.
+func isRealDrift(app *App, observed proto.AppStatus, now time.Time) bool {
+	if observed == app.LastStatus {
+		return false
+	}
+	switch app.LastStatus {
+	case proto.AppStatusDeploying, proto.AppStatusStopping:
+		// Leave it alone only while the operation could plausibly still be
+		// running. Past that the row is stale, not busy, and refusing to
+		// correct it would strand the app in a transitional state forever.
+		return now.Sub(app.UpdatedAt) > proto.AppDeployRPC
+	case proto.AppStatusFailed:
+		return observed == proto.AppStatusRunning
+	}
+	return true
+}
+
 func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		all, err := store.List(sc.Ctx)
@@ -410,7 +451,7 @@ func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn
 				continue
 			}
 			checked++
-			if ack.Status == app.LastStatus {
+			if !isRealDrift(app, ack.Status, time.Now().UTC()) {
 				continue
 			}
 			// Drift detected — update store + publish.
