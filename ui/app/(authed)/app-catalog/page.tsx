@@ -1,19 +1,22 @@
 'use client';
 
-import { ExternalLink, FilePlus2, Search, Store, UploadCloud } from 'lucide-react';
+import { ExternalLink, FilePlus2, RefreshCw, Search, ShieldAlert, Store, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   createApp,
   deployApp,
+  getCatalogStatus,
   getCatalogTile,
   getSetupState,
   installCatalogApp,
   listCatalog,
   listNodes,
   openInventoryWS,
+  refreshCatalog,
 } from '../../../lib/api';
-import type { App, CatalogCollection, CatalogTile, Node } from '../../../lib/types';
+import type { App, CatalogCollection, CatalogStatus, CatalogTile, Node } from '../../../lib/types';
+import { grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
 import { appAccess } from '../../../lib/appurl';
 import {
   Badge,
@@ -120,6 +123,8 @@ export default function AppCatalogPage() {
       <PageHeader icon={Store} title={`APP CATALOG — ${tiles.length}`} />
       <PageBody>
         {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
+
+        <CatalogFreshness onAdopted={() => listCatalog().then(setTiles).catch(() => {})} />
 
         {tiles.length === 0 && !err && (
           <p style={{ color: DIM, fontSize: 11, fontFamily: MONO }}>loading catalog…</p>
@@ -247,6 +252,7 @@ function CatalogCard({
         {tile.placementHint === 'prefer-x86' && <Badge>PREFERS X86</Badge>}
         {tile.needsHardware && <Badge color="#facc15">NEEDS {tile.needsHardware.toUpperCase()}</Badge>}
         {tile.needsFeedKey && tile.needsFeedKey.length > 0 && <Badge color="#facc15">NEEDS KEYS</Badge>}
+        <PrivilegeBadges tile={tile} />
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
         <Btn variant="primary" small onClick={onOpen}>
@@ -292,6 +298,314 @@ function CustomCard({ onOpen }: { onOpen: () => void }) {
           <FilePlus2 size={10} /> NEW CUSTOM APP
         </Btn>
       </div>
+    </div>
+  );
+}
+
+// relativeTime renders an ISO timestamp as "4m ago". Deliberately coarse: the
+// question this panel answers is "has it looked recently", not "when exactly".
+function relativeTime(iso: string): string {
+  const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 90) return `${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  if (mins < 90) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 36) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+// How long to keep re-reading _status after a manual refresh. The refresh is
+// fire-and-forget (the api answers 202 and the poll runs in the background), so
+// the panel watches for lastChecked to advance. Bounded deliberately: an
+// unbounded poll would spin forever against a cluster whose fetch is wedged and
+// report nothing, which is the exact opposite of what this panel is for.
+const REFRESH_POLL_MS = 1500;
+const REFRESH_DEADLINE_MS = 30_000;
+
+// CatalogFreshness — where the catalog in effect came from, and a way to check
+// now (#163).
+//
+// Without this, "apps show up on their own" is indistinguishable from "the
+// catalog is broken". The distinction that matters most is NEVER CHECKED vs
+// CHECKED AND UP TO DATE: lastChecked is null until a poll completes, and a
+// cluster that has never reached the internet must not render the same as one
+// that is current. That was #149's failure mode in the updates panel — reading
+// "nothing available" when it had simply never looked — and the api carries the
+// null specifically so this cannot repeat it.
+function CatalogFreshness({ onAdopted }: { onAdopted: () => void }) {
+  const [status, setStatus] = useState<CatalogStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    getCatalogStatus().then(setStatus).catch(() => {});
+  }, []);
+
+  async function checkNow() {
+    if (!status) return;
+    const before = status.lastChecked;
+    const startedVersion = status.version;
+    setChecking(true);
+    setNote(null);
+    try {
+      await refreshCatalog();
+    } catch (e) {
+      setChecking(false);
+      setNote(String(e));
+      return;
+    }
+
+    const deadline = Date.now() + REFRESH_DEADLINE_MS;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, REFRESH_POLL_MS));
+      let next: CatalogStatus;
+      try {
+        next = await getCatalogStatus();
+      } catch {
+        continue; // transient; the deadline below still bounds this
+      }
+      if (next.lastChecked && next.lastChecked !== before) {
+        setStatus(next);
+        setChecking(false);
+        if (next.version !== startedVersion) onAdopted();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        setStatus(next);
+        setChecking(false);
+        // Said plainly rather than left spinning. "Still running" is a real
+        // answer; a spinner that never resolves is not.
+        setNote('Still checking after 30s — the fetch is taking longer than expected. Reload to see the result.');
+        return;
+      }
+    }
+  }
+
+  if (!status) return null;
+
+  const neverChecked = !status.lastChecked;
+  const embedded = status.source === 'embedded';
+  const warn = neverChecked || !!status.lastError || (status.rejectedTiles?.length ?? 0) > 0;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 12,
+        flexWrap: 'wrap',
+        padding: '10px 12px',
+        marginBottom: 16,
+        border: `1px ${warn ? 'solid' : 'dashed'} ${warn ? '#facc1555' : HAIR}`,
+        background: warn ? '#facc150d' : 'transparent',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', flex: 1, minWidth: 260 }}>
+        <Badge color={embedded ? '#facc15' : ACCENT}>CATALOG v{status.version}</Badge>
+        <Badge>{status.tiles} TILES</Badge>
+        {embedded && (
+          <Badge color="#facc15" title="Nothing has been adopted — these are the tiles baked into this image">
+            BUILT IN
+          </Badge>
+        )}
+        <span style={{ color: DIM, fontSize: 10 }}>
+          {checking
+            ? 'checking…'
+            : neverChecked
+              ? 'never checked for updates'
+              : `checked ${relativeTime(status.lastChecked as string)}`}
+        </span>
+      </div>
+      <Btn small disabled={checking} onClick={() => void checkNow()}>
+        <RefreshCw size={10} /> {checking ? 'CHECKING…' : 'CHECK NOW'}
+      </Btn>
+
+      {(note || status.lastError || status.note || neverChecked || (status.rejectedTiles?.length ?? 0) > 0) && (
+        <div style={{ flexBasis: '100%' }}>
+          {note && <Hint warn>{note}</Hint>}
+          {status.lastError && <Hint warn>Last check failed: {status.lastError}</Hint>}
+          {!status.lastError && neverChecked && (
+            <Hint warn>
+              This cluster has not checked for a published catalog yet, so these are the tiles baked into its image.
+              That is not the same as being up to date.
+            </Hint>
+          )}
+          {status.note && !status.lastError && <Hint>{status.note}</Hint>}
+          {(status.rejectedTiles?.length ?? 0) > 0 && (
+            <div style={{ marginTop: 6 }}>
+              <Hint warn>
+                {status.rejectedTiles!.length} tile(s) in the published catalog were refused by this build — usually
+                because this cluster is older than the catalog it is reading. Update it to see them.
+              </Hint>
+              <ul style={{ margin: '4px 0 0', paddingLeft: 16, color: DIM, fontSize: 10, lineHeight: 1.6 }}>
+                {status.rejectedTiles!.map((r) => (
+                  <li key={r.id}>
+                    <span style={{ color: FG }}>{r.id}</span> — {r.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// PrivilegeBadges — the tier, in the same yellow-badge idiom the catalog
+// already uses for NEEDS <hardware>. Routine tiles carry no badge at all:
+// almost every tile is routine, so badging them would make the badge mean
+// "this is an app" rather than "look at this".
+//
+// The container runtime socket gets its OWN badge rather than being folded
+// into the tier (ADR-0006 Decision 12b). It is not merely root-equivalent — it
+// is the ability to escape any constraint added later, and it is the specific
+// footgun of this hobby. A tier that hides it teaches the owner nothing.
+function PrivilegeBadges({ tile }: { tile: CatalogTile }) {
+  if (isRoutine(tile.privilege)) return null;
+  const copy = TIER_COPY[tierOf(tile.privilege)];
+  return (
+    <>
+      <Badge color={copy.color} title={copy.summary}>
+        {copy.label}
+      </Badge>
+      {tile.privilege?.dockerSocket && (
+        <Badge color={TIER_COPY['host-trusting'].color} title="Can control the container runtime">
+          RUNTIME SOCKET
+        </Badge>
+      )}
+    </>
+  );
+}
+
+// PrivilegePanel — what the app can do, why it says it needs to, and a "what
+// does this mean" that teaches rather than warns (ADR-0006 Decision 12c).
+//
+// The grant list is DERIVED from the app's own compose by the publisher and
+// covered by the catalog signature, so it is not a promise — it is the same
+// list the control plane checked before it would load the tile at all.
+function PrivilegePanel({ tile }: { tile: CatalogTile }) {
+  const [open, setOpen] = useState(false);
+  if (isRoutine(tile.privilege)) return null;
+  const tier = tierOf(tile.privilege);
+  const copy = TIER_COPY[tier];
+  const grants = tile.privilege?.grants ?? [];
+
+  return (
+    <div style={{ border: `1px solid ${copy.color}55`, background: `${copy.color}0d`, padding: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <ShieldAlert size={12} color={copy.color} />
+        <span style={{ color: copy.color, fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>
+          {copy.label}
+        </span>
+        <span style={{ color: DIM, fontSize: 10 }}>{copy.summary}</span>
+      </div>
+
+      {tile.privilege?.why && (
+        <p style={{ color: FG, fontSize: 10, lineHeight: 1.6, margin: '0 0 8px' }}>{tile.privilege.why}</p>
+      )}
+
+      {grants.length > 0 && (
+        <>
+          <SectionLabel>THIS APP CAN</SectionLabel>
+          <ul style={{ margin: '4px 0 0', paddingLeft: 16, color: FG, fontSize: 10, lineHeight: 1.7 }}>
+            {grants.map((g) => (
+              <li key={g} title={g}>
+                {grantLabel(g)}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          marginTop: 10,
+          padding: 0,
+          border: 'none',
+          background: 'none',
+          color: ACCENT,
+          fontSize: 10,
+          fontFamily: MONO,
+          cursor: 'pointer',
+        }}
+      >
+        {open ? '\u2212' : '+'} what does this mean?
+      </button>
+      {open && (
+        <p style={{ color: DIM, fontSize: 10, lineHeight: 1.7, margin: '8px 0 0' }}>
+          {copy.explainer}{' '}
+          {tier !== 'routine' && (
+            <>
+              Everything listed above was read out of the app&apos;s own compose file by the catalog publisher and
+              signed with it, and this cluster refused to load the tile until the two matched — so the list is what
+              the app takes, not what it claims.
+            </>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ConsentGate — consent PROPORTIONAL to the tier (ADR-0006 Decision 12c).
+// Routine asks nothing; elevated is an acknowledgement; host-trusting is a
+// deliberate act, so it asks for the app's name to be typed.
+//
+// This is a gate on the owner, not on an attacker: the install API is
+// authenticated to the same person, and Decision 12 is explicit that nothing
+// here is enforced beyond what Docker enforces from the compose. Its job is to
+// make sure nobody grants root by clicking the same button they click for a
+// note-taking app.
+function ConsentGate({
+  tile,
+  consented,
+  onConsent,
+  typed,
+  onType,
+}: {
+  tile: CatalogTile;
+  consented: boolean;
+  onConsent: (v: boolean) => void;
+  typed: string;
+  onType: (v: string) => void;
+}) {
+  const tier = tierOf(tile.privilege);
+  if (tier === 'routine') return null;
+  const copy = TIER_COPY[tier];
+
+  return (
+    <div>
+      <SectionLabel>CONSENT</SectionLabel>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <EnabledToggle
+          enabled={consented}
+          onToggle={() => onConsent(!consented)}
+          title={consented ? 'Consent given — click to withdraw' : 'Click to consent'}
+        />
+        <span style={{ color: FG, fontSize: 10 }}>
+          {tier === 'host-trusting'
+            ? `Give ${tile.name} root-equivalent access to this node`
+            : `Let ${tile.name} reach beyond its own container`}
+        </span>
+      </div>
+      {consented && tier === 'host-trusting' && (
+        <div style={{ marginTop: 8 }}>
+          <Input
+            value={typed}
+            onChange={(e) => onType(e.target.value)}
+            placeholder={tile.id}
+            title="Type the app id to confirm"
+            style={{ width: '100%' }}
+          />
+          <Hint warn style={{ marginTop: 6 }}>
+            Type <strong>{tile.id}</strong> to confirm. {copy.summary} You can change your mind later, but you cannot
+            un-run it.
+          </Hint>
+        </div>
+      )}
     </div>
   );
 }
@@ -413,6 +727,10 @@ function InstallDrawer({
   // LAN exposure opt-in. Default off (tailnet-only) — the safe default per
   // ADR-0004 §9; not pre-filled from tile.exposureDefault (see PR note).
   const [exposeLan, setExposeLan] = useState(false);
+  // Consent state (ADR-0006 Decision 12c). Both start false on every open, so
+  // reopening the drawer never carries a previous decision forward.
+  const [consented, setConsented] = useState(false);
+  const [typedConfirm, setTypedConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
@@ -420,6 +738,11 @@ function InstallDrawer({
   // Only a fronted (primary) port is reachable, so LAN access is meaningful only
   // for apps that publish one — hide the toggle for port-less tiles.
   const hasWebPort = tile.ports.some((p) => p.primary);
+  // A routine tile is asked nothing; elevated needs the acknowledgement;
+  // host-trusting needs the acknowledgement AND the app's id typed back.
+  const tier = tierOf(tile.privilege);
+  const consentSatisfied =
+    tier === 'routine' || (consented && (tier !== 'host-trusting' || typedConfirm.trim() === tile.id));
 
   useEffect(() => {
     if (!preview && compose === null) {
@@ -455,7 +778,10 @@ function InstallDrawer({
           {tile.placementHint === 'prefer-x86' && <Badge color="#facc15">PREFERS X86</Badge>}
           <Badge>{tile.exposureDefault.toUpperCase()}</Badge>
           {tile.needsHardware && <Badge color="#facc15">NEEDS {tile.needsHardware.toUpperCase()}</Badge>}
+          <PrivilegeBadges tile={tile} />
         </div>
+
+        <PrivilegePanel tile={tile} />
 
         {tile.needsFeedKey && tile.needsFeedKey.length > 0 && (
           <Hint warn>Needs external API key(s): {tile.needsFeedKey.join(', ')}. Add them after install.</Hint>
@@ -525,8 +851,20 @@ function InstallDrawer({
               </Select>
             </div>
             {hasWebPort && <ExposureField exposeLan={exposeLan} onChange={setExposeLan} />}
+            <ConsentGate
+              tile={tile}
+              consented={consented}
+              onConsent={setConsented}
+              typed={typedConfirm}
+              onType={setTypedConfirm}
+            />
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Btn variant="primary" disabled={busy || !name || !selectedTarget} onClick={install}>
+              <Btn
+                variant="primary"
+                disabled={busy || !name || !selectedTarget || !consentSatisfied}
+                title={consentSatisfied ? undefined : 'Consent to what this app can do before installing'}
+                onClick={install}
+              >
                 <UploadCloud size={11} /> {busy ? 'INSTALLING…' : 'INSTALL'}
               </Btn>
               {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
