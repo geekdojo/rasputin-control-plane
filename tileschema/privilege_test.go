@@ -13,54 +13,69 @@ import (
 // from branches in DerivePrivilege.
 func TestDerivePrivilege_ScoresEveryDimension(t *testing.T) {
 	cases := []struct {
-		name  string
-		mut   func(*SafetyFacts)
-		tier  string
-		grant string // "" means: contributes no grant at all
+		name   string
+		mut    func(*SafetyFacts)
+		tier   string
+		grants []string // nil means: contributes no grant at all
 	}{
 		// --- host-trusting: effectively root on the node ---
-		{"privileged", func(f *SafetyFacts) { f.Privileged = true }, TierHostTrusting, GrantPrivileged},
-		{"seccomp unconfined", func(f *SafetyFacts) { f.SecurityOpt = []string{"seccomp=unconfined"} }, TierHostTrusting, GrantSeccompUnconfined},
-		{"apparmor unconfined", func(f *SafetyFacts) { f.SecurityOpt = []string{"apparmor=unconfined"} }, TierHostTrusting, GrantApparmorDisabled},
-		{"selinux disabled", func(f *SafetyFacts) { f.SecurityOpt = []string{"label=disable"} }, TierHostTrusting, GrantSELinuxDisabled},
-		{"userns host", func(f *SafetyFacts) { f.UsernsMode = []string{"host"} }, TierHostTrusting, GrantUsernsHost},
-		{"docker group", func(f *SafetyFacts) { f.GroupAdd = []string{"docker"} }, TierHostTrusting, GrantPrefixGroup + "docker"},
-		{"disk group", func(f *SafetyFacts) { f.GroupAdd = []string{"disk"} }, TierHostTrusting, GrantPrefixGroup + "disk"},
-		{"escape capability", func(f *SafetyFacts) { f.CapAdd = []string{"SYS_ADMIN"} }, TierHostTrusting, GrantPrefixCap + "SYS_ADMIN"},
-		{"escape capability with CAP_ prefix", func(f *SafetyFacts) { f.CapAdd = []string{"CAP_SYS_MODULE"} }, TierHostTrusting, GrantPrefixCap + "SYS_MODULE"},
-		{"root filesystem", func(f *SafetyFacts) { f.BindMounts = []string{"/"} }, TierHostTrusting, GrantPrefixBind + "/"},
-		{"whole dev tree", func(f *SafetyFacts) { f.BindMounts = []string{"/dev"} }, TierHostTrusting, GrantPrefixBind + "/dev"},
-		{"proc subpath", func(f *SafetyFacts) { f.BindMounts = []string{"/proc/1/root"} }, TierHostTrusting, GrantPrefixBind + "/proc/1/root"},
-		{"cgroup tree", func(f *SafetyFacts) { f.BindMounts = []string{"/sys/fs/cgroup"} }, TierHostTrusting, GrantPrefixBind + "/sys/fs/cgroup"},
-		{"host etc", func(f *SafetyFacts) { f.BindMounts = []string{"/etc/ssh"} }, TierHostTrusting, GrantPrefixBind + "/etc/ssh"},
-		{"docker data root", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/docker"} }, TierHostTrusting, GrantDockerDataRoot},
+		{"privileged", func(f *SafetyFacts) { f.Privileged = true }, TierHostTrusting, []string{GrantPrivileged}},
+		{"seccomp unconfined", func(f *SafetyFacts) { f.SecurityOpt = []string{"seccomp=unconfined"} }, TierHostTrusting, []string{GrantSeccompUnconfined}},
+		{"apparmor unconfined", func(f *SafetyFacts) { f.SecurityOpt = []string{"apparmor=unconfined"} }, TierHostTrusting, []string{GrantApparmorDisabled}},
+		{"selinux disabled", func(f *SafetyFacts) { f.SecurityOpt = []string{"label=disable"} }, TierHostTrusting, []string{GrantSELinuxDisabled}},
+		{"userns host", func(f *SafetyFacts) { f.UsernsMode = []string{"host"} }, TierHostTrusting, []string{GrantUsernsHost}},
+		{"docker group", func(f *SafetyFacts) { f.GroupAdd = []string{"docker"} }, TierHostTrusting, []string{GrantPrefixGroup + "docker"}},
+		{"disk group", func(f *SafetyFacts) { f.GroupAdd = []string{"disk"} }, TierHostTrusting, []string{GrantPrefixGroup + "disk"}},
+		{"escape capability", func(f *SafetyFacts) { f.CapAdd = []string{"SYS_ADMIN"} }, TierHostTrusting, []string{GrantPrefixCap + "SYS_ADMIN"}},
+		{"escape capability with CAP_ prefix", func(f *SafetyFacts) { f.CapAdd = []string{"CAP_SYS_MODULE"} }, TierHostTrusting, []string{GrantPrefixCap + "SYS_MODULE"}},
+		// Mounting / exposes the runtime socket too, so both grants appear.
+		// Academic — TrustChainViolation refuses it outright — but the
+		// derivation must not be quotable saying / is only a bind.
+		{"root filesystem", func(f *SafetyFacts) { f.BindMounts = []string{"/"} }, TierHostTrusting, []string{GrantPrefixBind + "/", GrantDockerSocket}},
+		{"whole dev tree", func(f *SafetyFacts) { f.BindMounts = []string{"/dev"} }, TierHostTrusting, []string{GrantPrefixBind + "/dev"}},
+		{"proc subpath", func(f *SafetyFacts) { f.BindMounts = []string{"/proc/1/root"} }, TierHostTrusting, []string{GrantPrefixBind + "/proc/1/root"}},
+		{"cgroup tree", func(f *SafetyFacts) { f.BindMounts = []string{"/sys/fs/cgroup"} }, TierHostTrusting, []string{GrantPrefixBind + "/sys/fs/cgroup"}},
+		{"host etc", func(f *SafetyFacts) { f.BindMounts = []string{"/etc/ssh"} }, TierHostTrusting, []string{GrantPrefixBind + "/etc/ssh"}},
+		{"docker data root", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/docker"} }, TierHostTrusting, []string{GrantDockerDataRoot}},
+		// The socket's PARENT DIRECTORY. Exposes the socket just as completely
+		// as naming it, and an exact-match test scored these `elevated` with
+		// the socket flag unset — the mechanism defeated at its most dangerous
+		// point. Both grants, because the directory and the socket inside it
+		// are separate facts an owner should see.
+		{"run directory", func(f *SafetyFacts) { f.BindMounts = []string{"/run"} }, TierHostTrusting, []string{GrantPrefixBind + "/run", GrantDockerSocket}},
+		{"var run directory", func(f *SafetyFacts) { f.BindMounts = []string{"/var/run"} }, TierHostTrusting, []string{GrantPrefixBind + "/var/run", GrantDockerSocket}},
+		{"containerd run directory", func(f *SafetyFacts) { f.BindMounts = []string{"/run/containerd"} }, TierHostTrusting, []string{GrantPrefixBind + "/run/containerd", GrantDockerSocket}},
+		// Inside /run but NOT an ancestor of any socket: host-trusting via the
+		// prefix (the system message bus is authority over most of what
+		// systemd manages) with the socket flag correctly left off.
+		{"system dbus", func(f *SafetyFacts) { f.BindMounts = []string{"/run/dbus"} }, TierHostTrusting, []string{GrantPrefixBind + "/run/dbus"}},
 		// Refused outright by TrustChainViolation, so no tier is ever consulted
 		// for it — scored here only so DerivePrivilege cannot be quoted saying
 		// that reaching the trust store is merely elevated.
-		{"trust store", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/trust"} }, TierHostTrusting, GrantPrefixBind + "/var/lib/rasputin/trust"},
+		{"trust store", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/trust"} }, TierHostTrusting, []string{GrantPrefixBind + "/var/lib/rasputin/trust"}},
 
 		// --- elevated: reaches past itself, not root-equivalent ---
-		{"host network", func(f *SafetyFacts) { f.HostNetwork = true }, TierElevated, GrantHostNetwork},
-		{"host pid or ipc", func(f *SafetyFacts) { f.HostPIDOrIPC = true }, TierElevated, GrantHostPIDOrIPC},
-		{"ordinary capability", func(f *SafetyFacts) { f.CapAdd = []string{"NET_ADMIN"} }, TierElevated, GrantPrefixCap + "NET_ADMIN"},
-		{"usb dongle", func(f *SafetyFacts) { f.Devices = []string{"/dev/bus/usb/001/004"} }, TierElevated, GrantPrefixDevice + "/dev/bus/usb/001/004"},
-		{"gpu reservation", func(f *SafetyFacts) { f.ReservedDevices = []string{"gpu x1"} }, TierElevated, GrantPrefixReservedDev + "gpu x1"},
-		{"ordinary group", func(f *SafetyFacts) { f.GroupAdd = []string{"video"} }, TierElevated, GrantPrefixGroup + "video"},
-		{"other security opt", func(f *SafetyFacts) { f.SecurityOpt = []string{"apparmor=custom"} }, TierElevated, GrantPrefixSecurityOpt + "apparmor=custom"},
-		{"other userns", func(f *SafetyFacts) { f.UsernsMode = []string{"keep-id"} }, TierElevated, GrantPrefixUserns + "keep-id"},
-		{"volumes from", func(f *SafetyFacts) { f.VolumesFrom = []string{"data"} }, TierElevated, GrantPrefixVolumesFrom + "data"},
-		{"cgroup parent", func(f *SafetyFacts) { f.CgroupParent = []string{"/rasputin.slice"} }, TierElevated, GrantPrefixCgroupParent + "/rasputin.slice"},
-		{"joins a container outside the stack", func(f *SafetyFacts) { f.NamespaceJoins = []string{"network:container:abc"} }, TierElevated, GrantPrefixNamespaceJoin + "network:container:abc"},
-		{"extra host path", func(f *SafetyFacts) { f.BindMounts = []string{"/srv/media"} }, TierElevated, GrantPrefixBind + "/srv/media"},
+		{"host network", func(f *SafetyFacts) { f.HostNetwork = true }, TierElevated, []string{GrantHostNetwork}},
+		{"host pid or ipc", func(f *SafetyFacts) { f.HostPIDOrIPC = true }, TierElevated, []string{GrantHostPIDOrIPC}},
+		{"ordinary capability", func(f *SafetyFacts) { f.CapAdd = []string{"NET_ADMIN"} }, TierElevated, []string{GrantPrefixCap + "NET_ADMIN"}},
+		{"usb dongle", func(f *SafetyFacts) { f.Devices = []string{"/dev/bus/usb/001/004"} }, TierElevated, []string{GrantPrefixDevice + "/dev/bus/usb/001/004"}},
+		{"gpu reservation", func(f *SafetyFacts) { f.ReservedDevices = []string{"gpu x1"} }, TierElevated, []string{GrantPrefixReservedDev + "gpu x1"}},
+		{"ordinary group", func(f *SafetyFacts) { f.GroupAdd = []string{"video"} }, TierElevated, []string{GrantPrefixGroup + "video"}},
+		{"other security opt", func(f *SafetyFacts) { f.SecurityOpt = []string{"apparmor=custom"} }, TierElevated, []string{GrantPrefixSecurityOpt + "apparmor=custom"}},
+		{"other userns", func(f *SafetyFacts) { f.UsernsMode = []string{"keep-id"} }, TierElevated, []string{GrantPrefixUserns + "keep-id"}},
+		{"volumes from", func(f *SafetyFacts) { f.VolumesFrom = []string{"data"} }, TierElevated, []string{GrantPrefixVolumesFrom + "data"}},
+		{"cgroup parent", func(f *SafetyFacts) { f.CgroupParent = []string{"/rasputin.slice"} }, TierElevated, []string{GrantPrefixCgroupParent + "/rasputin.slice"}},
+		{"joins a container outside the stack", func(f *SafetyFacts) { f.NamespaceJoins = []string{"network:container:abc"} }, TierElevated, []string{GrantPrefixNamespaceJoin + "network:container:abc"}},
+		{"extra host path", func(f *SafetyFacts) { f.BindMounts = []string{"/srv/media"} }, TierElevated, []string{GrantPrefixBind + "/srv/media"}},
 
 		// --- routine: recorded by #195, but not authority ---
-		{"app data", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/apps/kuma/data"} }, TierRoutine, ""},
-		{"localtime", func(f *SafetyFacts) { f.BindMounts = []string{"/etc/localtime"} }, TierRoutine, ""},
-		{"sysctls", func(f *SafetyFacts) { f.Sysctls = []string{"net.core.somaxconn=1024"} }, TierRoutine, ""},
-		{"tmpfs", func(f *SafetyFacts) { f.Tmpfs = []string{"/tmp"} }, TierRoutine, ""},
-		{"ulimits", func(f *SafetyFacts) { f.Ulimits = []string{"nofile=65535"} }, TierRoutine, ""},
-		{"no-new-privileges is a restriction", func(f *SafetyFacts) { f.SecurityOpt = []string{"no-new-privileges=true"} }, TierRoutine, ""},
-		{"vpn sidecar in the same stack", func(f *SafetyFacts) { f.NamespaceJoins = []string{"network:service:vpn"} }, TierRoutine, ""},
+		{"app data", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/apps/kuma/data"} }, TierRoutine, nil},
+		{"localtime", func(f *SafetyFacts) { f.BindMounts = []string{"/etc/localtime"} }, TierRoutine, nil},
+		{"sysctls", func(f *SafetyFacts) { f.Sysctls = []string{"net.core.somaxconn=1024"} }, TierRoutine, nil},
+		{"tmpfs", func(f *SafetyFacts) { f.Tmpfs = []string{"/tmp"} }, TierRoutine, nil},
+		{"ulimits", func(f *SafetyFacts) { f.Ulimits = []string{"nofile=65535"} }, TierRoutine, nil},
+		{"no-new-privileges is a restriction", func(f *SafetyFacts) { f.SecurityOpt = []string{"no-new-privileges=true"} }, TierRoutine, nil},
+		{"vpn sidecar in the same stack", func(f *SafetyFacts) { f.NamespaceJoins = []string{"network:service:vpn"} }, TierRoutine, nil},
 	}
 
 	for _, tc := range cases {
@@ -71,14 +86,8 @@ func TestDerivePrivilege_ScoresEveryDimension(t *testing.T) {
 			if got.Tier != tc.tier {
 				t.Fatalf("tier: got %q want %q (grants %v)", got.Tier, tc.tier, got.Grants)
 			}
-			if tc.grant == "" {
-				if len(got.Grants) != 0 {
-					t.Fatalf("expected no grant, got %v", got.Grants)
-				}
-				return
-			}
-			if !reflect.DeepEqual(got.Grants, []string{tc.grant}) {
-				t.Fatalf("grants: got %v want [%s]", got.Grants, tc.grant)
+			if !reflect.DeepEqual(got.Grants, tc.grants) {
+				t.Fatalf("grants: got %v want %v", got.Grants, tc.grants)
 			}
 		})
 	}
@@ -88,6 +97,22 @@ func TestDerivePrivilege_ScoresEveryDimension(t *testing.T) {
 // merely root-equivalent — it is the ability to escape any constraint added
 // later, and the specific footgun of this hobby.
 func TestDerivePrivilege_DockerSocketIsNamed(t *testing.T) {
+	// The socket flag must be set for the socket itself AND for any directory
+	// containing it — mounting /run hands over the same API.
+	for _, p := range []string{"/run", "/var/run", "/"} {
+		f := okFacts()
+		f.BindMounts = []string{p}
+		if got := DerivePrivilege(f); !got.DockerSocket || got.Tier != TierHostTrusting {
+			t.Errorf("%s: want host-trusting with the socket flag set, got %q %v (socket=%v)", p, got.Tier, got.Grants, got.DockerSocket)
+		}
+	}
+	// And must NOT be set for a sibling path inside the same directory.
+	f := okFacts()
+	f.BindMounts = []string{"/run/dbus"}
+	if got := DerivePrivilege(f); got.DockerSocket {
+		t.Errorf("/run/dbus is not the socket, but the flag was set: %v", got.Grants)
+	}
+
 	for _, sock := range DockerSocketPaths {
 		f := okFacts()
 		f.BindMounts = []string{sock}

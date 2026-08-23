@@ -185,6 +185,11 @@ var hostTrustingBindExact = []string{"/", "/dev"}
 // a sentence this package can produce.
 var hostTrustingBindPrefixes = []string{
 	"/boot", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root", "/proc", "/sys",
+	// /run and /var/run hold the runtime sockets and the system message bus.
+	// The socket loop above already catches an ancestor mount; these cover the
+	// rest of the tree — /run/dbus is the system D-Bus, which is authority
+	// over most of what systemd manages.
+	"/run", "/var/run",
 	"/var/lib/docker", "/var/lib/containerd",
 	"/var/lib/rasputin/docker", "/var/lib/rasputin/containerd",
 	"/var/lib/rasputin", "/etc/rasputin",
@@ -447,10 +452,29 @@ func classifyHostPath(b *privilegeBuilder, p, prefix string) {
 	}
 	clean := path.Clean(raw)
 
+	// Containment in BOTH directions, the same reasoning TrustChainViolation
+	// uses. An exact match is the socket; a mount of any DIRECTORY CONTAINING
+	// it — /run, /var/run, / — exposes the socket inside the container just as
+	// completely, and an exact-match test scored those `elevated` with the
+	// socket flag unset. That is the whole mechanism defeated at its most
+	// dangerous point: the owner is told "reaches past itself but is not
+	// root-equivalent", consents, and the container then drives the runtime
+	// and launches a sibling that mounts the trust store — walking straight
+	// through Decision 12e's absolute refusal. Found by the automated review
+	// on PR #172; the ancestor case had no test and no branch.
 	for _, sock := range DockerSocketPaths {
 		if clean == sock {
 			b.socket = true
 			b.add(TierHostTrusting, GrantDockerSocket)
+			return
+		}
+		if under(sock, clean) {
+			b.socket = true
+			b.add(TierHostTrusting, GrantDockerSocket)
+			// Keep the bind grant too: the directory is a separate fact from
+			// the socket it happens to contain, and the consent screen should
+			// say both.
+			b.add(TierHostTrusting, prefix+clean)
 			return
 		}
 	}
