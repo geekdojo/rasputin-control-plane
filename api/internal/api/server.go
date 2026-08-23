@@ -69,6 +69,12 @@ type Server struct {
 	// hostLANInfo returns the control plane's LAN IP + MAC for the DHCP-reservation
 	// guidance surfaced in the DNS-forwarding view (AA-11). nil until main wires it.
 	hostLANInfo func() (ip string, mac string)
+	// rotateAppLeaf re-mints an app's TLS leaf when its SANs drift, so a LAN
+	// exposure change (#197) takes effect immediately instead of waiting for
+	// the rotation sweep. nil when there is no Mesh CA (dev, or a cluster that
+	// never enrolled) — the exposure flip still persists and still changes DNS;
+	// only the proxy half waits.
+	rotateAppLeaf apps.LeafRotator
 	// selfNodeID is the node hosting this api. Read from the same env the saga's
 	// SystemUpdateConfig is built from, so the plan preview excludes the
 	// controlplane exactly as the real cascade does. Empty off-appliance.
@@ -92,6 +98,11 @@ func (s *Server) SetReleaseSource(src releases.Source, channel string) {
 func (s *Server) SetReleaseDownloadBase(downloadBase string) {
 	s.releaseDownloadBase = downloadBase
 }
+
+// SetAppLeafRotator wires the per-app TLS-leaf rotator so PATCH /api/apps/{id}
+// can apply a LAN-exposure change to the proxy immediately. main.go calls this
+// with the same closure the rotation workflow uses, so the two cannot drift.
+func (s *Server) SetAppLeafRotator(rotate apps.LeafRotator) { s.rotateAppLeaf = rotate }
 
 // SetAlertsService overrides the default aggregator-only alerts service
 // with one that has a persistence store + nats conn wired. main.go
@@ -234,6 +245,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/apps", reqd(s.handleListApps))
 	mux.HandleFunc("POST /api/apps", reqd(s.handleCreateApp))
 	mux.HandleFunc("GET /api/apps/{id}", reqd(s.handleGetApp))
+	mux.HandleFunc("PATCH /api/apps/{id}", reqd(s.handleUpdateApp))
 	mux.HandleFunc("DELETE /api/apps/{id}", reqd(s.handleDeleteApp))
 	mux.HandleFunc("POST /api/apps/{id}/deploy", reqd(s.handleDeployApp))
 	mux.HandleFunc("POST /api/apps/{id}/stop", reqd(s.handleStopApp))

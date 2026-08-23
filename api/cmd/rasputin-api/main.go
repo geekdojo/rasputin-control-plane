@@ -820,6 +820,12 @@ func main() {
 	defer sched.Stop()
 
 	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn())
+	// The SAME rotator closure the leaf-rotation workflow uses, so PATCH
+	// /api/apps/{id} applies a LAN-exposure change (#197) to the proxy
+	// immediately instead of leaving the .lan name resolving until the next
+	// sweep. One rotator, two callers — a second one would differ in exactly
+	// the case that matters, an offline node.
+	srv.SetAppLeafRotator(rotateAppLeaf)
 
 	// AA-11 DNS forwarding (ADR-0004 §10): reconcile the nameserver's off-zone
 	// forwarding stub from the persisted setting, and hand the api the hook to

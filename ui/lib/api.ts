@@ -508,6 +508,19 @@ export function refreshCatalog(): Promise<void> {
   return jsonFetch<void>('/api/catalog/_refresh', { method: 'POST' });
 }
 
+// setAppExposure flips an installed app's LAN reachability in place (#197).
+// Before this route, revoking LAN access meant DELETING the app — for a tile
+// with volumes, choosing between the LAN and its data. Returns the updated
+// record; `leafWarning` is present when the exposure change persisted but the
+// proxy's TLS leaf could not be re-shipped yet (the rotation sweep retries).
+export function setAppExposure(id: string, exposeLan: boolean): Promise<App & { leafWarning?: string }> {
+  return jsonFetch<App & { leafWarning?: string }>(`/api/apps/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ exposeLan }),
+  });
+}
+
 export function stopApp(id: string): Promise<Job> {
   return jsonFetch<Job>(`/api/apps/${id}/stop`, { method: 'POST' });
 }

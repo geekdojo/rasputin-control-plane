@@ -239,47 +239,24 @@ func rotateLeavesSweep(store *Store, inv *inventory.Store, nc *nats.Conn, rotate
 				continue // headless app: no proxy, no leaf
 			}
 			checked++
-			cmd, renewed, commit, err := rotate(app)
-			if err != nil {
-				failed++
-				sc.Log("warn", fmt.Sprintf("%s: re-mint leaf: %v", app.Name, err))
-				continue
+			out := RotateAppLeaf(sc.Ctx, inv, nc, rotate, app)
+			for _, m := range out.Log {
+				sc.Log(m.Level, m.Text)
 			}
-			if !renewed {
-				continue // leaf still has more than renewWindow of life; nothing to do
-			}
-			rotated++
-
-			// Ship only to an online node. If it's offline the fresh leaf is
-			// NOT committed, so the next sweep re-mints and retries — the app's
-			// leaf can't quietly expire on a node that was down during rotation.
-			node, err := inv.Get(sc.Ctx, app.TargetNode)
-			if err != nil || node == nil || computeNodeStatus(node.LastSeen) != proto.StatusOnline {
+			switch out.Outcome {
+			case LeafUnchanged:
+			case LeafShipped:
+				rotated++
+				shipped++
+			case LeafNodeOffline:
+				rotated++
 				skipped++
-				sc.Log("info", fmt.Sprintf("%s: leaf due for rotation but node %s offline — retrying next sweep", app.Name, app.TargetNode))
-				continue
-			}
-
-			ctx, cancel := context.WithTimeout(sc.Ctx, 5*time.Second)
-			ok, detail, derr := deliverLeaf(ctx, nc, app.TargetNode, cmd)
-			cancel()
-			if derr != nil {
+			case LeafFailed:
+				if out.Renewed {
+					rotated++
+				}
 				failed++
-				sc.Log("warn", fmt.Sprintf("%s: deliver rotated leaf: %v", app.Name, derr))
-				continue
 			}
-			if !ok {
-				failed++
-				sc.Log("warn", fmt.Sprintf("%s: node rejected rotated leaf: %s", app.Name, detail))
-				continue
-			}
-			if err := commit(); err != nil {
-				// Delivered but not persisted: harmless (next sweep re-mints and
-				// re-ships an equivalent leaf), but worth surfacing.
-				sc.Log("warn", fmt.Sprintf("%s: persist rotated leaf: %v", app.Name, err))
-			}
-			shipped++
-			sc.Log("info", fmt.Sprintf("%s: rotated + delivered fresh TLS leaf", app.Name))
 		}
 
 		sc.Log("info", fmt.Sprintf("checked=%d rotated=%d shipped=%d skipped=%d failed=%d",
@@ -289,6 +266,89 @@ func rotateLeavesSweep(store *Store, inv *inventory.Store, nc *nats.Conn, rotate
 			"skipped": skipped, "failed": failed,
 		})
 	}
+}
+
+// --- one app's leaf, shared by the sweep and the exposure toggle ------------
+
+// LeafOutcome is what happened to one app's leaf.
+type LeafOutcome string
+
+const (
+	LeafUnchanged   LeafOutcome = "unchanged"    // still has life and its SANs match
+	LeafShipped     LeafOutcome = "shipped"      // re-minted, delivered, persisted
+	LeafNodeOffline LeafOutcome = "node-offline" // re-minted but not delivered; retried next sweep
+	LeafFailed      LeafOutcome = "failed"
+)
+
+// LeafLog is one line the caller decides how to surface: the sweep writes it to
+// its job log, the PATCH handler discards all but the error.
+type LeafLog struct {
+	Level string
+	Text  string
+}
+
+// LeafResult is the outcome of RotateAppLeaf.
+type LeafResult struct {
+	Outcome LeafOutcome
+	Renewed bool
+	Err     error
+	Log     []LeafLog
+}
+
+// RotateAppLeaf re-mints ONE app's TLS leaf if it needs it and ships it to the
+// app's node.
+//
+// Extracted from the rotation sweep for #197. Changing an app's LAN exposure
+// changes its leaf's SAN set, and PrepareAppLeaf already treats a SAN drift as
+// a reason to re-mint — so the toggle needs no new machinery, only the ability
+// to run one app's rotation NOW rather than waiting up to a sweep interval for
+// the .lan name to start or stop resolving. Sharing the body rather than
+// copying it is the point: two rotation paths would differ in exactly the
+// place that matters, which is what happens when the node is offline.
+//
+// Never returns an error for an offline node. The fresh leaf is deliberately
+// NOT committed in that case, so the sweep re-mints and retries — an app's leaf
+// cannot quietly expire on a node that was down, and an exposure change made
+// while a node is offline lands when it comes back.
+func RotateAppLeaf(ctx context.Context, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, app *App) LeafResult {
+	if rotate == nil || app.PublishedPort == 0 {
+		return LeafResult{Outcome: LeafUnchanged}
+	}
+	cmd, renewed, commit, err := rotate(app)
+	if err != nil {
+		return LeafResult{Outcome: LeafFailed, Err: fmt.Errorf("re-mint leaf: %w", err),
+			Log: []LeafLog{{"warn", fmt.Sprintf("%s: re-mint leaf: %v", app.Name, err)}}}
+	}
+	if !renewed {
+		return LeafResult{Outcome: LeafUnchanged}
+	}
+
+	node, err := inv.Get(ctx, app.TargetNode)
+	if err != nil || node == nil || computeNodeStatus(node.LastSeen) != proto.StatusOnline {
+		return LeafResult{Outcome: LeafNodeOffline, Renewed: true,
+			Log: []LeafLog{{"info", fmt.Sprintf("%s: leaf due for rotation but node %s offline — retrying next sweep", app.Name, app.TargetNode)}}}
+	}
+
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ok, detail, derr := deliverLeaf(dctx, nc, app.TargetNode, cmd)
+	cancel()
+	if derr != nil {
+		return LeafResult{Outcome: LeafFailed, Renewed: true, Err: fmt.Errorf("deliver leaf: %w", derr),
+			Log: []LeafLog{{"warn", fmt.Sprintf("%s: deliver rotated leaf: %v", app.Name, derr)}}}
+	}
+	if !ok {
+		return LeafResult{Outcome: LeafFailed, Renewed: true, Err: fmt.Errorf("node rejected leaf: %s", detail),
+			Log: []LeafLog{{"warn", fmt.Sprintf("%s: node rejected rotated leaf: %s", app.Name, detail)}}}
+	}
+
+	res := LeafResult{Outcome: LeafShipped, Renewed: true,
+		Log: []LeafLog{{"info", fmt.Sprintf("%s: rotated + delivered fresh TLS leaf", app.Name)}}}
+	if err := commit(); err != nil {
+		// Delivered but not persisted: harmless (the next sweep re-mints and
+		// re-ships an equivalent leaf), but worth surfacing.
+		res.Log = append(res.Log, LeafLog{"warn", fmt.Sprintf("%s: persist rotated leaf: %v", app.Name, err)})
+	}
+	return res
 }
 
 func reconcileList(store *Store) jobs.DoFn {
