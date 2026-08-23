@@ -577,3 +577,45 @@ func TestWorkflowShapes(t *testing.T) {
 		t.Errorf("ReconcileWorkflow Kind: %q", r.Kind)
 	}
 }
+
+// SetExposeLAN's two failure paths (#197). Both are unreachable through the
+// PATCH handler, which checks Get first and holds an open store — which is
+// exactly why they need testing here: an unreachable error path is one nobody
+// notices has stopped working.
+func TestSetExposeLAN_Errors(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	app := makeApp("app-1", "kuma")
+	if err := s.Create(ctx, app); err != nil {
+		t.Fatal(err)
+	}
+
+	// The happy path first, so the not-found case below cannot pass simply
+	// because the statement never worked.
+	if err := s.SetExposeLAN(ctx, "app-1", true, time.Now().UTC()); err != nil {
+		t.Fatalf("set on an existing app: %v", err)
+	}
+	got, err := s.Get(ctx, "app-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ExposeLAN {
+		t.Fatal("exposeLan not persisted")
+	}
+
+	// An unknown id must be sql.ErrNoRows, not a silent success. A caller that
+	// reads "no error" for an app that does not exist reports a revocation it
+	// never made.
+	if err := s.SetExposeLAN(ctx, "does-not-exist", false, time.Now().UTC()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unknown id: want sql.ErrNoRows, got %v", err)
+	}
+
+	// And a dead database is an error rather than a lie.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetExposeLAN(ctx, "app-1", false, time.Now().UTC()); err == nil {
+		t.Fatal("a closed store must not report success")
+	}
+}
