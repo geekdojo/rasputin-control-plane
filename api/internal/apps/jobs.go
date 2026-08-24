@@ -71,23 +71,43 @@ func deployLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMint
 			sc.Log("info", "no published port — skipping proxy leaf")
 			return nil, nil
 		}
-		cmd, err := mint(app)
-		if err != nil {
-			sc.Log("warn", "mint leaf failed (app is deployed; proxy unavailable): "+err.Error())
-			return nil, nil
-		}
-		ok, detail, err := deliverLeaf(sc.Ctx, nc, app.TargetNode, cmd)
-		if err != nil {
-			sc.Log("warn", "deliver leaf failed (app is deployed; proxy unavailable): "+err.Error())
-			return nil, nil
-		}
+		ok, detail := provisionAppLeaf(sc.Ctx, nc, mint, app)
 		if !ok {
-			sc.Log("warn", "node rejected leaf: "+detail)
+			sc.Log("warn", detail+" (app is deployed; proxy unavailable)")
 			return nil, nil
 		}
-		sc.Log("info", "delivered TLS leaf + proxy route")
+		sc.Log("info", detail)
 		return nil, nil
 	}
+}
+
+// provisionAppLeaf mints an app's TLS leaf and ships it with its proxy route.
+//
+// One implementation, two callers — the deploy saga's leaf step and the
+// reconcile sweep's recovery path. A second copy would differ in exactly the
+// case that matters and nobody would notice until an app was unreachable.
+//
+// Returns whether the node is now serving the app, plus a line to log. Callers
+// treat failure as non-fatal: an app that is up but unrouted is worth another
+// attempt on the next sweep, not a rollback of a working container.
+func provisionAppLeaf(ctx context.Context, nc *nats.Conn, mint LeafMinter, app *App) (ok bool, detail string) {
+	if mint == nil || app.PublishedPort == 0 {
+		return false, "no published port or leaf delivery disabled — nothing to route"
+	}
+	cmd, err := mint(app)
+	if err != nil {
+		return false, "mint leaf failed: " + err.Error()
+	}
+	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	accepted, rejectDetail, err := deliverLeaf(dctx, nc, app.TargetNode, cmd)
+	if err != nil {
+		return false, "deliver leaf failed: " + err.Error()
+	}
+	if !accepted {
+		return false, "node rejected leaf: " + rejectDetail
+	}
+	return true, "delivered TLS leaf + proxy route"
 }
 
 // deliverLeaf ships an AppLeafCmd to nodeID over the bus and reports whether the
@@ -192,12 +212,12 @@ func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLea
 // The saga never fails as a whole — individual app failures are logged
 // and counted but don't abort the sweep. This is "honest drift
 // reporting", not "apply intent".
-func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
+func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "apps.reconcile",
 		Steps: []jobs.WorkflowStep{
 			{Name: "list", Timeout: 2 * time.Second, Do: reconcileList(store)},
-			{Name: "sweep", Timeout: 90 * time.Second, Do: reconcileSweep(store, inv, nc)},
+			{Name: "sweep", Timeout: 90 * time.Second, Do: reconcileSweep(store, inv, nc, mint)},
 		},
 	}
 }
@@ -406,7 +426,7 @@ func isRealDrift(app *App, observed proto.AppStatus, now time.Time) bool {
 	return true
 }
 
-func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		all, err := store.List(sc.Ctx)
 		if err != nil {
@@ -414,10 +434,11 @@ func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn
 		}
 
 		var (
-			checked int
-			drifted int
-			skipped int
-			failed  int
+			checked   int
+			drifted   int
+			skipped   int
+			failed    int
+			recovered int
 		)
 
 		for _, app := range all {
@@ -455,6 +476,7 @@ func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn
 				continue
 			}
 			// Drift detected — update store + publish.
+			wasFailed := app.LastStatus == proto.AppStatusFailed
 			now := time.Now().UTC()
 			detail := fmt.Sprintf("reconcile: was %s, observed %s", app.LastStatus, ack.Status)
 			_ = store.RecordStatus(sc.Ctx, app.ID, ack.Status, detail, now)
@@ -467,12 +489,35 @@ func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn
 			emitChange(nc, app.ID, change, ack.Status, detail, now)
 			drifted++
 			sc.Log("warn", fmt.Sprintf("%s drifted: %s → %s", app.Name, app.LastStatus, ack.Status))
+
+			// A failed→running app came up AFTER its deploy gave up, which means
+			// the saga aborted at "push" and its "leaf" step never ran: no TLS
+			// cert, no proxy route, no name. Nothing else ever provisions one,
+			// so the app sits there running and permanently unreachable — and
+			// now that this sweep reports it RUNNING, it looks healthy while
+			// being unusable, which is worse than the failure it replaced.
+			// Observed on e3bench 2026-08-23: uptime-kuma answered on its node
+			// port while its .lan name did not resolve at all.
+			//
+			// This is the moment we learn the app is up without a route, so it
+			// is the moment to mint one. Best-effort by design: a container that
+			// is running must not be rolled back over a proxy hiccup, and the
+			// next sweep tries again.
+			if wasFailed && ack.Status == proto.AppStatusRunning {
+				ok, leafDetail := provisionAppLeaf(sc.Ctx, nc, mint, app)
+				if ok {
+					recovered++
+					sc.Log("info", fmt.Sprintf("%s recovered after a timed-out deploy: %s", app.Name, leafDetail))
+				} else {
+					sc.Log("warn", fmt.Sprintf("%s is running but unrouted: %s — retrying next sweep", app.Name, leafDetail))
+				}
+			}
 		}
 
-		sc.Log("info", fmt.Sprintf("checked=%d drifted=%d skipped=%d failed=%d",
-			checked, drifted, skipped, failed))
+		sc.Log("info", fmt.Sprintf("checked=%d drifted=%d recovered=%d skipped=%d failed=%d",
+			checked, drifted, recovered, skipped, failed))
 		return json.Marshal(map[string]int{
-			"checked": checked, "drifted": drifted,
+			"checked": checked, "drifted": drifted, "recovered": recovered,
 			"skipped": skipped, "failed": failed,
 		})
 	}

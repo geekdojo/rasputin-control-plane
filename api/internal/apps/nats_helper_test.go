@@ -282,7 +282,7 @@ func TestReconcileSweep_DriftDetectedUpdatesStore(t *testing.T) {
 	defer func() { _ = sub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{}`, nc)
-	out, err := reconcileSweep(store, inv, nc)(sc)
+	out, err := reconcileSweep(store, inv, nc, nil)(sc)
 	if err != nil {
 		t.Fatalf("reconcileSweep: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestReconcileSweep_SkipsOfflineTarget(t *testing.T) {
 	}
 
 	sc := newStepCtxNATS(`{}`, nc)
-	out, err := reconcileSweep(store, inv, nc)(sc)
+	out, err := reconcileSweep(store, inv, nc, nil)(sc)
 	if err != nil {
 		t.Fatalf("reconcileSweep: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestReconcileSweep_RPCFailureCounted(t *testing.T) {
 
 	// No agent listens — the request will time out.
 	sc := newStepCtxNATS(`{}`, nc)
-	out, err := reconcileSweep(store, inv, nc)(sc)
+	out, err := reconcileSweep(store, inv, nc, nil)(sc)
 	if err != nil {
 		t.Fatalf("reconcileSweep: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestReconcileSweep_NoDrift(t *testing.T) {
 	defer func() { _ = sub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{}`, nc)
-	out, err := reconcileSweep(store, inv, nc)(sc)
+	out, err := reconcileSweep(store, inv, nc, nil)(sc)
 	if err != nil {
 		t.Fatalf("reconcileSweep: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestReconcileSweep_BadAckCountsAsFailure(t *testing.T) {
 	defer func() { _ = sub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{}`, nc)
-	out, err := reconcileSweep(store, inv, nc)(sc)
+	out, err := reconcileSweep(store, inv, nc, nil)(sc)
 	if err != nil {
 		t.Fatalf("reconcileSweep: %v", err)
 	}

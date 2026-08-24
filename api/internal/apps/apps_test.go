@@ -572,7 +572,7 @@ func TestWorkflowShapes(t *testing.T) {
 		t.Errorf("StopWorkflow Kind: %q", s.Kind)
 	}
 
-	r := ReconcileWorkflow(nil, nil, nil)
+	r := ReconcileWorkflow(nil, nil, nil, nil)
 	if r.Kind != "apps.reconcile" {
 		t.Errorf("ReconcileWorkflow Kind: %q", r.Kind)
 	}
