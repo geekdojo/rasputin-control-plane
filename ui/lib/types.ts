@@ -438,7 +438,9 @@ export interface ComponentUpdate {
   // Software that ships inside this component's image (e.g. the control-plane
   // binary inside the OS) — shown as a display-only detail line, never with its
   // own update status.
-  bundled?: { label: string; version: string }[];
+  // What is RUNNING inside this component's image, not what the offered
+  // release carries — see releases.ComponentStatus.Running.
+  running?: { label: string; version: string }[];
   error?: string;
 }
 

@@ -65,11 +65,25 @@ type ComponentStatus struct {
 	ManualInstructions string `json:"manualInstructions,omitempty"`
 	Note               string `json:"note,omitempty"`
 
-	// Bundled lists software that ships *inside* this component's image rather
-	// than as its own updatable component — e.g. the control-plane binary
-	// inside the OS. Display-only: a detail line on the row, never its own
-	// update status. Populated by Check for the OS row.
-	Bundled []BundledComponent `json:"bundled,omitempty"`
+	// Running lists software that has no update path of its own because it
+	// ships inside this component's image — the control-plane binary inside the
+	// OS — reported as the version RUNNING NOW on the cluster. Display-only: a
+	// detail line on the row, never its own update status.
+	//
+	// It was called Bundled and rendered as "ships in this image", which is a
+	// different fact and was wrong every time an update was pending. The row it
+	// sits on describes the release being OFFERED; the version here comes from
+	// the controlplane node's own agent, so during an upgrade the row read
+	// "OS 2026.07.1-dev.178 · control-plane dev.122 ships in this image" while
+	// dev.178 actually vendored dev.123. Confirmed only by reading the build
+	// log (bench, 2026-08-23).
+	//
+	// Reporting what the OFFERED image bundles would be the more useful fact,
+	// but an OS release does not publish its control-plane pin as structured
+	// metadata, so there is nothing here to read it from. Naming the fact we do
+	// have is the honest fix; the other one needs the publisher to emit the pin
+	// first.
+	Running []RunningComponent `json:"running,omitempty"`
 
 	// Diagnostic detail when Status == unknown.
 	Error string `json:"error,omitempty"`
@@ -94,10 +108,10 @@ type ArtifactStatus struct {
 	NeededBy int `json:"neededBy"`
 }
 
-// BundledComponent is a piece of software carried inside another component's
+// RunningComponent is a piece of software carried inside another component's
 // image, surfaced for visibility (support/debugging) without implying it can
-// be updated on its own.
-type BundledComponent struct {
+// be updated on its own. The version is what is running, not what is offered.
+type RunningComponent struct {
 	Label   string `json:"label"`
 	Version string `json:"version"`
 }
@@ -127,12 +141,14 @@ func Check(ctx context.Context, src Source, channel string, nodes []*proto.Node)
 	}
 	// Fold the running control-plane version into the OS row as a display-only
 	// detail — the cp software ships inside the OS image, so it has no update
-	// path of its own. Shown for support visibility, never as a status row.
+	// path of its own. Shown for support visibility, never as a status row, and
+	// labelled as RUNNING rather than as what the offered image carries; see
+	// ComponentStatus.Running for why those are not the same thing.
 	if cp := controlPlaneVersion(nodes); cp != "" {
 		for i := range res.Components {
 			if res.Components[i].Component == "os" {
-				res.Components[i].Bundled = append(res.Components[i].Bundled,
-					BundledComponent{Label: controlPlaneLabel, Version: cp})
+				res.Components[i].Running = append(res.Components[i].Running,
+					RunningComponent{Label: controlPlaneLabel, Version: cp})
 				break
 			}
 		}

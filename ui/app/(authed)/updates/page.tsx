@@ -1250,9 +1250,13 @@ function ComponentUpdateRow({ cu, onStaged }: { cu: ComponentUpdate; onStaged: (
           )}
         </div>
       </div>
-      {cu.bundled?.map((b) => (
+      {/* This row describes the release being OFFERED, but these versions are
+          what is RUNNING — they come from the controlplane node, not from the
+          release. Saying "ships in this image" here read as a promise about the
+          update and was wrong whenever one was pending. */}
+      {cu.running?.map((b) => (
         <span key={b.label} style={{ color: DIM, fontSize: 9, fontFamily: MONO, letterSpacing: '0.04em' }}>
-          {b.label.toLowerCase()} {b.version} · ships in this image
+          {b.label.toLowerCase()} {b.version} · running now
         </span>
       ))}
       {cu.staged && cu.deployable && (

@@ -4,7 +4,7 @@ import { Ban, CheckCircle, Circle, ClipboardList, Loader, XCircle } from 'lucide
 import { Fragment, Suspense, useEffect, useState } from 'react';
 import type { ElementType } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { createJob, listEvents, listJobs, listSteps, openJobsWS } from '../../../lib/api';
+import { createJob, listApps, listEvents, listJobs, listSteps, openJobsWS } from '../../../lib/api';
 import type { Job, JobEvent, JobStatus, JobStep, StepStatus } from '../../../lib/types';
 import { Badge, Btn, DIM, FG, HAIR_SOFT, Input, LinkBtn, PageBody, PageHeader, PageShell, SectionLabel, tdStyle, thStyle } from '../../../components/kit';
 import { ACCENT, accentA, MONO } from '../../../components/ui-theme';
@@ -34,10 +34,22 @@ const STEP_COLOR: Record<StepStatus, string> = {
   compensated: '#facc15',
 };
 
-function jobNode(j: Job): string {
+// Most sagas name their node in the spec. The app.* ones do not: they key on
+// appId and the target node lives on the app record, so every install, stop and
+// delete used to render NODE as an em dash — the operations most likely to be
+// read here after something went wrong, and the column was blank for all of
+// them. appNodes maps the gap.
+function jobNode(j: Job, appNodes: Map<string, string>): string {
   if (j.spec && typeof j.spec === 'object' && 'nodeId' in j.spec) {
     const v = (j.spec as { nodeId?: unknown }).nodeId;
     if (typeof v === 'string' && v) return v;
+  }
+  const appId = jobApp(j);
+  if (appId) {
+    // Empty when the app has since been deleted — its jobs outlive it, and a
+    // dash is honest there. Nothing else is recoverable.
+    const node = appNodes.get(appId);
+    if (node) return node;
   }
   return '—';
 }
@@ -64,6 +76,9 @@ function fmtDuration(j: Job): string {
 function TasksInner() {
   const appFilter = useSearchParams()?.get('app') ?? null;
   const [jobs, setJobs] = useState<Job[]>([]);
+  // appId -> target node, so app.* jobs can fill the NODE column they have no
+  // spec field for. See jobNode.
+  const [appNodes, setAppNodes] = useState<Map<string, string>>(new Map());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [steps, setSteps] = useState<JobStep[]>([]);
   const [events, setEvents] = useState<JobEvent[]>([]);
@@ -84,6 +99,11 @@ function TasksInner() {
     listJobs()
       .then((js) => active && setJobs(js))
       .catch((e) => active && setErr(String(e)));
+    // Best-effort: the NODE column degrades to a dash without this, so a
+    // failure here is not worth surfacing over the jobs themselves.
+    listApps()
+      .then((as) => active && setAppNodes(new Map(as.map((a) => [a.id, a.targetNode]))))
+      .catch(() => {});
     const close = openJobsWS((ev) => {
       setJobs((prev) => applyJobEvent(prev, ev));
       if (ev.jobId === expanded) refreshDetail(ev.jobId);
@@ -173,6 +193,7 @@ function TasksInner() {
               <JobRow
                 key={j.id}
                 job={j}
+                node={jobNode(j, appNodes)}
                 expanded={expanded === j.id}
                 steps={expanded === j.id ? steps : []}
                 events={expanded === j.id ? events : []}
@@ -198,12 +219,14 @@ export default function TasksPage() {
 
 function JobRow({
   job,
+  node,
   expanded,
   steps,
   events,
   onToggle,
 }: {
   job: Job;
+  node: string;
   expanded: boolean;
   steps: JobStep[];
   events: JobEvent[];
@@ -229,7 +252,7 @@ function JobRow({
             <span style={{ color: meta.color, letterSpacing: '0.06em' }}>{job.status.toUpperCase()}</span>
           </span>
         </td>
-        <td style={{ ...tdStyle, color: DIM }}>{jobNode(job)}</td>
+        <td style={{ ...tdStyle, color: DIM }}>{node}</td>
         <td style={{ ...tdStyle, color: DIM }}>{job.startedAt ? new Date(job.startedAt).toLocaleTimeString() : '—'}</td>
         <td style={{ ...tdStyle, color: DIM, paddingRight: 0 }}>{fmtDuration(job)}</td>
       </tr>
