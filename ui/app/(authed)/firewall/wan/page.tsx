@@ -310,6 +310,7 @@ function WANForm({
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
+            aria-label="Active"
             style={{ accentColor: ACCENT }}
           />
           active

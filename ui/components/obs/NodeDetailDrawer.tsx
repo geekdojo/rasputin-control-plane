@@ -149,9 +149,13 @@ function Tabs({
   onChange: (k: TabKey) => void;
   tabs: { key: TabKey; label: string }[];
 }) {
+  // <div>, not <nav>: role="tablist" on a landmark element is two conflicting
+  // semantics on one node, and this is a tab strip inside a dialog, not site
+  // navigation.
   return (
-    <nav
+    <div
       role="tablist"
+      aria-label="Node detail sections"
       style={{
         display: 'flex',
         gap: 4,
@@ -164,6 +168,7 @@ function Tabs({
         return (
           <button
             key={t.key}
+            type="button"
             role="tab"
             aria-selected={active}
             onClick={() => onChange(t.key)}
@@ -184,7 +189,7 @@ function Tabs({
           </button>
         );
       })}
-    </nav>
+    </div>
   );
 }
 

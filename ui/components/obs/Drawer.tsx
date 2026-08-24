@@ -6,15 +6,19 @@
 //   - ESC closes
 //   - click on the dimmed backdrop closes
 //   - body scroll-locks while open
+//   - background goes inert + out of the AX tree while open
 //   - 200ms slide-in via CSS transform
 //   - focus trap is best-effort (we focus the close button on open)
+//
+// The behaviour itself is shared with kit.tsx's Drawer and ConfirmModal via
+// useModalChrome — this file keeps only its own layout and the slide.
 //
 // Width adapts: 560px on desktop, full-width on narrow viewports. The
 // drawer page handles its own internal scroll.
 
-import { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { DIM, FG, HAIR, PANEL } from '../kit';
+import { ModalPortal, useModalChrome } from '../modal';
 import { MONO } from '../ui-theme';
 
 interface DrawerProps {
@@ -27,28 +31,10 @@ interface DrawerProps {
 }
 
 export function Drawer({ open, onClose, title, subtitle, headerExtras, children }: DrawerProps) {
-  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
-
-  // ESC + body scroll lock
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    // Focus close button so screen readers / keyboard land somewhere
-    // sensible. Operator can Tab into the body content from there.
-    closeBtnRef.current?.focus();
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      document.body.style.overflow = prev;
-    };
-  }, [open, onClose]);
+  const { initialFocusRef } = useModalChrome({ open, onClose });
 
   return (
-    <>
+    <ModalPortal active={open}>
       {/* Backdrop — separate from the panel so the slide animation
           doesn't drag the backdrop along. pointer-events toggle so the
           drawer's children don't intercept clicks when it's closed. */}
@@ -65,10 +51,15 @@ export function Drawer({ open, onClose, title, subtitle, headerExtras, children 
           zIndex: 50,
         }}
       />
+      {/* This panel stays mounted when closed (that is what the slide
+          animates from), so it also has to be taken out of the tree when
+          closed — otherwise its controls stay tabbable behind the page. */}
       <aside
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        aria-hidden={!open}
+        inert={!open}
         style={{
           position: 'fixed',
           top: 0,
@@ -106,7 +97,8 @@ export function Drawer({ open, onClose, title, subtitle, headerExtras, children 
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
             {headerExtras}
             <button
-              ref={closeBtnRef}
+              ref={initialFocusRef as React.RefObject<HTMLButtonElement | null>}
+              type="button"
               onClick={onClose}
               aria-label="Close drawer"
               style={{
@@ -126,6 +118,6 @@ export function Drawer({ open, onClose, title, subtitle, headerExtras, children 
           {children}
         </div>
       </aside>
-    </>
+    </ModalPortal>
   );
 }

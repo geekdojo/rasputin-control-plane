@@ -1,6 +1,6 @@
 'use client';
 
-import { ExternalLink, Package, Play, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
+import { ClipboardList, ExternalLink, Package, Play, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
@@ -24,25 +24,31 @@ import {
   EnabledToggle,
   FG,
   HAIR,
+  HAIR_SOFT,
   Hint,
+  LinkBtn,
   PageBody,
   PageHeader,
   PageShell,
   SectionLabel,
+  srOnly,
   tdStyle,
   thStyle,
 } from '../../../components/kit';
-import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
+import { ConfirmModal } from '../../../components/ConfirmModal';
+import { ACCENT, MONO } from '../../../components/ui-theme';
 
 // Fixed column widths so the table doesn't reflow as per-row action buttons
 // appear/disappear (the actions cell is right-aligned; buttons grow within its
 // fixed width instead of shoving the other columns around).
-const COLS: { label: string; width: string }[] = [
+const COLS: { label: string; width: string; hideLabel?: boolean }[] = [
   { label: 'NAME', width: '22%' },
   { label: 'TARGET', width: '16%' },
   { label: 'STATUS', width: '22%' },
   { label: 'LAST DEPLOYED', width: '14%' },
-  { label: '', width: '26%' },
+  // Obvious from the buttons underneath if you can see them, and to nobody
+  // else — so the header is hidden rather than empty.
+  { label: 'ACTIONS', width: '26%', hideLabel: true },
 ];
 
 function statusColor(s: App['lastStatus']): string {
@@ -72,6 +78,11 @@ export default function AppsPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [detail, setDetail] = useState<App | null>(null);
+  // Delete asks in-page rather than through window.confirm(). A native dialog
+  // is browser chrome: never in the a11y tree, so an agent driving by ref has
+  // nothing to click, and automation that auto-dismisses it aborts the delete
+  // without a trace.
+  const [pendingDelete, setPendingDelete] = useState<App | null>(null);
   // Cluster id seeds the app-access hostname (<app>.<cluster-id>.internal). ''
   // until the fetch lands and '' on a dev box — appAccess falls back to
   // "rasputin" then, matching the api's baseDomainFor.
@@ -100,17 +111,29 @@ export default function AppsPage() {
   }, []);
 
   async function handle(action: 'deploy' | 'stop' | 'delete', app: App) {
+    if (action === 'delete') {
+      setPendingDelete(app);
+      return;
+    }
     setBusy(app.id);
     setErr(null);
     try {
       if (action === 'deploy') await deployApp(app.id);
-      else if (action === 'stop') await stopApp(app.id);
-      else {
-        if (!confirm(`Stop and remove "${app.name}" and its containers?`)) return;
-        // Async: the stop → remove saga emits a `deleted` event; the WS refresh
-        // drops the row once the container is actually torn down.
-        await deleteApp(app.id);
-      }
+      else await stopApp(app.id);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmDelete(app: App) {
+    setBusy(app.id);
+    setErr(null);
+    try {
+      // Async: the stop → remove saga emits a `deleted` event; the WS refresh
+      // drops the row once the container is actually torn down.
+      await deleteApp(app.id);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -119,11 +142,9 @@ export default function AppsPage() {
   }
 
   const addButton = (
-    <Link href="/app-catalog" style={{ textDecoration: 'none' }}>
-      <Btn variant="primary" small>
-        <Plus size={10} /> ADD APP
-      </Btn>
-    </Link>
+    <LinkBtn href="/app-catalog" variant="primary" small>
+      <Plus size={10} /> ADD APP
+    </LinkBtn>
   );
 
   return (
@@ -141,7 +162,7 @@ export default function AppsPage() {
             .
           </Hint>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+          <table aria-label="Apps" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
             <colgroup>
               {COLS.map((c, i) => (
                 <col key={i} style={{ width: c.width }} />
@@ -149,9 +170,9 @@ export default function AppsPage() {
             </colgroup>
             <thead>
               <tr>
-                {COLS.map((c, i) => (
-                  <th key={c.label || i} style={thStyle}>
-                    {c.label}
+                {COLS.map((c) => (
+                  <th key={c.label} scope="col" style={thStyle}>
+                    {c.hideLabel ? <span style={srOnly}>{c.label}</span> : c.label}
                   </th>
                 ))}
               </tr>
@@ -173,6 +194,17 @@ export default function AppsPage() {
       </PageBody>
 
       {detail && <AppDetail app={detail} clusterId={clusterId} onClose={() => setDetail(null)} />}
+
+      {pendingDelete && (
+        <ConfirmModal
+          title="DELETE APP"
+          message={`Stop and remove "${pendingDelete.name}" and its containers?`}
+          confirmLabel="DELETE"
+          danger
+          onConfirm={() => void confirmDelete(pendingDelete)}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </PageShell>
   );
 }
@@ -190,7 +222,6 @@ function AppRow({
   onAction: (action: 'deploy' | 'stop' | 'delete', app: App) => void;
   onOpenDetail: () => void;
 }) {
-  const [hover, setHover] = useState(false);
   const transient = app.lastStatus === 'deploying' || app.lastStatus === 'stopping';
   const canStop = app.lastStatus === 'running' || app.lastStatus === 'deploying' || app.lastStatus === 'failed';
   // Hand off the URL matching the operator's current network: a LAN-exposed app
@@ -203,20 +234,14 @@ function AppRow({
   // back up is a start, not a fresh deploy). Same underlying action either way.
   const started = !!app.lastDeployed;
 
+  // No row-level hover affordance: the row has no onClick, and highlighting
+  // the whole row told the operator (and the bench agents) that the row was
+  // the target when only the controls inside it are. The name button carries
+  // its own hover instead.
   return (
-    <tr
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{ background: hover ? accentA(0.05) : 'transparent', transition: 'background 0.1s' }}
-    >
+    <tr>
       <td style={tdStyle}>
-        <button
-          onClick={onOpenDetail}
-          title="App details"
-          style={{ background: 'transparent', border: 'none', padding: 0, color: FG, fontFamily: MONO, fontSize: 10, cursor: 'pointer', textDecoration: hover ? 'underline' : 'none' }}
-        >
-          {app.name}
-        </button>
+        <NameButton name={app.name} onClick={onOpenDetail} />
       </td>
       <td style={{ ...tdStyle, color: DIM }}>{app.targetNode}</td>
       <td style={{ ...tdStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -230,15 +255,22 @@ function AppRow({
       <td style={{ ...tdStyle, color: DIM }}>{app.lastDeployed ? new Date(app.lastDeployed).toLocaleTimeString() : '—'}</td>
       <td style={{ ...tdStyle, paddingRight: 0 }}>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+          {/* Every action here repeats once per row, so each needs the app's
+              name in its accessible name — otherwise a table of five apps
+              offers five controls all called "DELETE". */}
           {canOpen && (
-            <a href={openUrl!} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
-              <Btn variant="primary" small title={openUrl!}>
-                <ExternalLink size={10} /> OPEN
-              </Btn>
-            </a>
+            <LinkBtn external href={openUrl!} variant="primary" small title={openUrl!} aria-label={`Open ${app.name}`}>
+              <ExternalLink size={10} /> OPEN
+            </LinkBtn>
           )}
           {!transient && app.lastStatus !== 'running' && (
-            <Btn variant="primary" small disabled={busy} onClick={() => onAction('deploy', app)}>
+            <Btn
+              variant="primary"
+              small
+              disabled={busy}
+              aria-label={`${started ? 'Start' : 'Deploy'} ${app.name}`}
+              onClick={() => onAction('deploy', app)}
+            >
               {started ? (
                 <>
                   <Play size={10} /> START
@@ -251,16 +283,43 @@ function AppRow({
             </Btn>
           )}
           {canStop && (
-            <Btn small disabled={busy} onClick={() => onAction('stop', app)}>
+            <Btn small disabled={busy} aria-label={`Stop ${app.name}`} onClick={() => onAction('stop', app)}>
               <Square size={10} /> STOP
             </Btn>
           )}
-          <Btn variant="danger" small disabled={busy} onClick={() => onAction('delete', app)}>
+          <Btn variant="danger" small disabled={busy} aria-label={`Delete ${app.name}`} onClick={() => onAction('delete', app)}>
             <Trash2 size={10} /> DELETE
           </Btn>
         </div>
       </td>
     </tr>
+  );
+}
+
+// The app name doubles as the detail trigger. Its own hover underline — the
+// row used to carry it, which made the whole row look clickable.
+function NameButton({ name, onClick }: { name: string; onClick: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      aria-label={`Details for ${name}`}
+      style={{
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        color: FG,
+        fontFamily: MONO,
+        fontSize: 10,
+        cursor: 'pointer',
+        textDecoration: hover ? 'underline' : 'none',
+      }}
+    >
+      {name}
+    </button>
   );
 }
 
@@ -313,6 +372,36 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
           <span style={{ color: DIM, fontSize: 10 }}>on {app.targetNode}</span>
         </div>
 
+        {/* The status cell clips this to ~36 characters, which is nowhere near
+            enough for a compose error — and until now the full text existed
+            only on /tasks with nothing pointing at it. Unabridged here, plus
+            the way through to the run that produced it. */}
+        {app.lastDetail && (
+          <div>
+            <SectionLabel>{app.lastStatus === 'failed' ? 'FAILURE' : 'LAST DETAIL'}</SectionLabel>
+            <pre
+              style={{
+                color: app.lastStatus === 'failed' ? '#f87171' : DIM,
+                fontSize: 9,
+                fontFamily: MONO,
+                margin: 0,
+                padding: '6px 8px',
+                background: 'rgba(var(--rasp-fg-rgb),0.03)',
+                border: `1px solid ${HAIR_SOFT}`,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}
+            >
+              {app.lastDetail}
+            </pre>
+            <div style={{ marginTop: 8 }}>
+              <LinkBtn href={`/tasks?app=${encodeURIComponent(app.id)}`} small aria-label={`Tasks for ${app.name}`}>
+                <ClipboardList size={10} /> VIEW TASKS
+              </LinkBtn>
+            </div>
+          </div>
+        )}
+
         <div>
           <SectionLabel>ACCESS</SectionLabel>
           {access ? (
@@ -326,7 +415,7 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
                 >
                   {access.tailnet} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
                 </a>
-                <CopyButton value={access.tailnet} label="COPY" />
+                <CopyButton value={access.tailnet} label="COPY" ariaLabel="Copy tailnet address" />
               </div>
               {access.lan && (
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
@@ -339,7 +428,7 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
                   >
                     {access.lan} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
                   </a>
-                  <CopyButton value={access.lan} label="COPY" />
+                  <CopyButton value={access.lan} label="COPY" ariaLabel="Copy LAN address" />
                 </div>
               )}
               {!running && <Hint style={{ marginTop: 6 }}>Deploy it first — the link works once it&apos;s running.</Hint>}
@@ -358,6 +447,7 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
                 onToggle={() => {
                   if (!exposureBusy) void toggleExposure();
                 }}
+                aria-label={`LAN access for ${app.name}`}
                 title={exposeLan ? 'Reachable on your LAN — click for tailnet-only' : 'Tailnet only — click to allow LAN access'}
               />
               <span style={{ color: FG, fontSize: 10 }}>
@@ -398,9 +488,7 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
       </div>
 
       <div style={{ borderTop: `1px solid ${HAIR}`, padding: '14px 20px' }}>
-        <Link href="/app-catalog" style={{ textDecoration: 'none' }}>
-          <Btn>BACK TO CATALOG</Btn>
-        </Link>
+        <LinkBtn href="/app-catalog">BACK TO CATALOG</LinkBtn>
       </div>
     </Drawer>
   );

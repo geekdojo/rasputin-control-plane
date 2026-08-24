@@ -113,11 +113,14 @@ export default function LoginPage() {
                 }}
                 style={{ display: 'flex', flexDirection: 'column', gap: 18 }}
               >
-                <Field label="USER NAME" hint="letters · digits · - _ .">
-                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="operator" autoFocus disabled={busy} />
+                <Field htmlFor="register-name" label="USER NAME" hint="letters · digits · - _ .">
+                  {/* eslint-disable-next-line jsx-a11y/no-autofocus -- first field
+                      of the only form on a dedicated single-purpose page; nothing
+                      above it to skip past, so the focus jump surprises nobody. */}
+                  <Input id="register-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="operator" autoFocus disabled={busy} />
                 </Field>
-                <Field label="DISPLAY NAME" hint="optional">
-                  <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Operator" disabled={busy} />
+                <Field htmlFor="register-display-name" label="DISPLAY NAME" hint="optional">
+                  <Input id="register-display-name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Operator" disabled={busy} />
                 </Field>
                 <Btn variant="primary" type="submit" disabled={busy || !name}>
                   {busy ? 'REGISTERING…' : 'REGISTER PASSKEY'}
@@ -144,9 +147,9 @@ export default function LoginPage() {
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Field({ htmlFor, label, hint, children }: { htmlFor: string; label: string; hint?: string; children: React.ReactNode }) {
   return (
-    <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+    <label htmlFor={htmlFor} style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
       <span style={{ color: DIM, fontSize: 9, letterSpacing: '0.1em' }}>
         {label}
         {hint && <span style={{ color: 'rgba(138,155,181,0.5)', marginLeft: 8 }}>{hint}</span>}

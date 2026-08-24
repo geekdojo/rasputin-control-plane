@@ -48,6 +48,7 @@ export default function AdvancedPage() {
         <input
           value={firewallHost}
           onChange={(e) => setFirewallHost(e.target.value)}
+          aria-label="Firewall host"
           placeholder={nodeId ? `${nodeId}.lan` : 'firewall LAN IP or hostname'}
           style={{
             background: 'var(--rasp-field-bg)',

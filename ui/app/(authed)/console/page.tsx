@@ -165,8 +165,10 @@ function ConsoleInner() {
         </pre>
 
         <form onSubmit={sendLine} style={{ display: 'flex', gap: 8 }}>
-          <Input
-            autoFocus
+          {/* eslint-disable-next-line jsx-a11y/no-autofocus -- this IS the page:
+              a serial console you have to click into before you can type is a
+              bug, not a courtesy. */}
+          <Input autoFocus
             value={input}
             disabled={connected !== 'open'}
             onChange={(e) => setInput(e.target.value)}

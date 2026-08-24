@@ -343,9 +343,9 @@ function BMCSection() {
 
       {!pinned && current !== null && (
         <div style={{ maxWidth: 560, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+          <label htmlFor="bmc-backend" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
             BACKEND
-            <Select value={kind} onChange={(e) => setKind(e.target.value)} style={{ display: 'block', marginTop: 4, width: '100%' }}>
+            <Select id="bmc-backend" value={kind} onChange={(e) => setKind(e.target.value)} style={{ display: 'block', marginTop: 4, width: '100%' }}>
               <option value="">None (BMC off)</option>
               {backends.map((b) => (
                 <option key={b.kind} value={b.kind} disabled={b.status !== 'available'}>
@@ -357,9 +357,9 @@ function BMCSection() {
           </label>
 
           {kind && (
-            <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+            <label htmlFor="bmc-host-node" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
               BMC HOST NODE (owns the bus)
-              <Select value={hostNode} onChange={(e) => setHostNode(e.target.value)} style={{ display: 'block', marginTop: 4, width: '100%' }}>
+              <Select id="bmc-host-node" value={hostNode} onChange={(e) => setHostNode(e.target.value)} style={{ display: 'block', marginTop: 4, width: '100%' }}>
                 <option value="">— select a node —</option>
                 {nodes.map((n) => (
                   <option key={n.id} value={n.id}>
@@ -379,6 +379,7 @@ function BMCSection() {
                 <label key={n.id} style={{ display: 'flex', alignItems: 'center', gap: 8, color: FG, fontFamily: MONO, fontSize: 11, padding: '2px 0' }}>
                   <input
                     type="checkbox"
+                    aria-label={n.id}
                     checked={mockTargets.has(n.id)}
                     onChange={(e) => {
                       const next = new Set(mockTargets);
@@ -395,19 +396,20 @@ function BMCSection() {
 
           {kind === 'bitscope' && (
             <>
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+              <label htmlFor="bmc-serial-device" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 SERIAL DEVICE
-                <Input value={bsDev} onChange={(e) => setBsDev(e.target.value)} placeholder="/dev/ttyS0" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                <Input id="bmc-serial-device" value={bsDev} onChange={(e) => setBsDev(e.target.value)} placeholder="/dev/ttyS0" style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+              <label htmlFor="bmc-unlock" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 UNLOCK SEQUENCE {bsUnlockSet ? '(set — leave blank to keep)' : '(blank = factory default)'}
-                <Input type="password" value={bsUnlock} onChange={(e) => setBsUnlock(e.target.value)} placeholder={bsUnlockSet ? '••••••••' : 'UnLockMe'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                <Input id="bmc-unlock" type="password" value={bsUnlock} onChange={(e) => setBsUnlock(e.target.value)} placeholder={bsUnlockSet ? '••••••••' : 'UnLockMe'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
               <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 ADDRESS MAP (JSON rows: {'{"pos":"A-0","node_id":"…"}'})
                 <textarea
                   value={bsMapJSON}
                   onChange={(e) => setBsMapJSON(e.target.value)}
+                  aria-label="Address map JSON"
                   rows={6}
                   spellCheck={false}
                   style={{
@@ -421,13 +423,13 @@ function BMCSection() {
 
           {kind === 'turingpi' && (
             <>
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+              <label htmlFor="bmc-username" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 BMC USERNAME
-                <Input value={tpUser} onChange={(e) => setTpUser(e.target.value)} placeholder="root" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                <Input id="bmc-username" value={tpUser} onChange={(e) => setTpUser(e.target.value)} placeholder="root" style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+              <label htmlFor="bmc-password" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 BMC PASSWORD {tpPassSet ? '(set — leave blank to keep)' : ''}
-                <Input type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                <Input id="bmc-password" type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
               {/* The board ships root/turing and its BMC also serves SSH, so
                   factory credentials on a LAN-reachable board are real exposure
@@ -437,9 +439,9 @@ function BMCSection() {
               )}
 
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-                <label style={{ flex: 1, color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                <label htmlFor="bmc-address" style={{ flex: 1, color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                   BMC ADDRESS
-                  <Input value={tpEndpoint} onChange={(e) => setTpEndpoint(e.target.value)} placeholder="turingpi.local" style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                  <Input id="bmc-address" value={tpEndpoint} onChange={(e) => setTpEndpoint(e.target.value)} placeholder="turingpi.local" style={{ display: 'block', marginTop: 4, width: '100%' }} />
                 </label>
                 <Btn disabled={tpProbing || !hostNode} onClick={() => void detectBoard()}>
                   {tpProbing ? 'DETECTING…' : 'DETECT BOARD'}
@@ -489,13 +491,18 @@ function BMCSection() {
                 </div>
               )}
 
-              <label style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+              <label htmlFor="bmc-fingerprint" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
                 CERTIFICATE FINGERPRINT (SHA-256)
-                <Input value={tpFingerprint} onChange={(e) => setTpFingerprint(e.target.value)} placeholder="41:7C:1E:EA:…" disabled={tpInsecure} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+                <Input id="bmc-fingerprint" value={tpFingerprint} onChange={(e) => setTpFingerprint(e.target.value)} placeholder="41:7C:1E:EA:…" disabled={tpInsecure} style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
               <Hint>DETECT BOARD fills this in. Only type it by hand if you already have the fingerprint from elsewhere.</Hint>
               <label style={{ display: 'flex', gap: 8, alignItems: 'center', color: DIM, fontFamily: MONO, fontSize: 10 }}>
-                <input type="checkbox" checked={tpInsecure} onChange={(e) => setTpInsecure(e.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={tpInsecure}
+                  onChange={(e) => setTpInsecure(e.target.checked)}
+                  aria-label="Accept any certificate (no pinning)"
+                />
                 ACCEPT ANY CERTIFICATE (no pinning)
               </label>
               {tpInsecure && <Hint warn>Any certificate will be accepted, so this connection can be intercepted on your network. Pin the fingerprint instead unless you are deliberately testing.</Hint>}

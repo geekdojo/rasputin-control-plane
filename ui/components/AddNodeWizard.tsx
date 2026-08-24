@@ -20,6 +20,7 @@ import {
   validateSSHKey,
 } from '../lib/enroll';
 import { Btn, CopyButton, DIM, FG, HAIR, Hint, Input, SectionLabel, Tok } from './kit';
+import { ModalPortal, useModalChrome } from './modal';
 import { ACCENT, accentA, MONO } from './ui-theme';
 
 const ROLES: { value: AddableRole; label: string; icon: typeof Cpu; blurb: string; disabled?: boolean }[] = [
@@ -65,6 +66,7 @@ export function AddNodeWizard({
   onMinted: (p: { id: string; tokenId: string; role: AddableRole }) => void;
   onClose: () => void;
 }) {
+  const { initialFocusRef } = useModalChrome({ open: true, onClose });
   const [role, setRole] = useState<AddableRole>('compute');
   const [arch, setArch] = useState<NodeArch>('amd64');
   const [nodeId, setNodeId] = useState(() => suggestNodeId(clusterPrefix, 'compute', taken));
@@ -143,13 +145,20 @@ export function AddNodeWizard({
   }
 
   return (
-    <Overlay onClose={onClose}>
+    <Overlay onClose={onClose} label="Add node">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Plus size={14} color={ACCENT} />
           <span style={{ color: FG, fontSize: 11, fontFamily: MONO, letterSpacing: '0.1em' }}>ADD NODE</span>
         </div>
-        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }} title="Close">
+        <button
+          ref={initialFocusRef as React.RefObject<HTMLButtonElement | null>}
+          type="button"
+          onClick={onClose}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+          title="Close"
+          aria-label="Close"
+        >
           <X size={14} color={DIM} />
         </button>
       </div>
@@ -638,23 +647,35 @@ function FirewallSuccessView({
   );
 }
 
-function Overlay({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+// Same modal contract as the drawers — see components/modal.tsx for why a
+// bare scrim leaves the page behind it clickable-looking but unreachable.
+function Overlay({
+  children,
+  onClose,
+  label,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  label: string;
+}) {
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-      }}
-    >
+    <ModalPortal>
+      {/* aria-hidden: the scrim is a click target, not content. */}
       <div
-        onClick={(e) => e.stopPropagation()}
+        onClick={onClose}
+        aria-hidden
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000 }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
         style={{
+          position: 'fixed',
+          inset: 0,
+          margin: 'auto',
+          height: 'fit-content',
+          zIndex: 1001,
           background: 'var(--rasp-panel)',
           border: `1px solid ${HAIR}`,
           padding: 24,
@@ -665,7 +686,7 @@ function Overlay({ children, onClose }: { children: React.ReactNode; onClose: ()
       >
         {children}
       </div>
-    </div>
+    </ModalPortal>
   );
 }
 

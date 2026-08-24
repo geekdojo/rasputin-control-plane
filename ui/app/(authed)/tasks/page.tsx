@@ -1,11 +1,12 @@
 'use client';
 
 import { Ban, CheckCircle, Circle, ClipboardList, Loader, XCircle } from 'lucide-react';
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, Suspense, useEffect, useState } from 'react';
 import type { ElementType } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { createJob, listEvents, listJobs, listSteps, openJobsWS } from '../../../lib/api';
 import type { Job, JobEvent, JobStatus, JobStep, StepStatus } from '../../../lib/types';
-import { Badge, Btn, DIM, FG, HAIR_SOFT, Input, PageBody, PageHeader, PageShell, SectionLabel, tdStyle, thStyle } from '../../../components/kit';
+import { Badge, Btn, DIM, FG, HAIR_SOFT, Input, LinkBtn, PageBody, PageHeader, PageShell, SectionLabel, tdStyle, thStyle } from '../../../components/kit';
 import { ACCENT, accentA, MONO } from '../../../components/ui-theme';
 
 const COLS = ['JOB', 'KIND', 'STATUS', 'NODE', 'STARTED', 'DURATION'];
@@ -41,6 +42,17 @@ function jobNode(j: Job): string {
   return '—';
 }
 
+// The app.* sagas key their spec on appId, which is what lets an app's detail
+// drawer link straight at the run that failed it (?app=<id>) instead of
+// dropping the operator into an unfiltered queue.
+function jobApp(j: Job): string | null {
+  if (j.spec && typeof j.spec === 'object' && 'appId' in j.spec) {
+    const v = (j.spec as { appId?: unknown }).appId;
+    if (typeof v === 'string' && v) return v;
+  }
+  return null;
+}
+
 function fmtDuration(j: Job): string {
   if (!j.startedAt) return '—';
   if (!j.finishedAt) return 'running';
@@ -49,7 +61,8 @@ function fmtDuration(j: Job): string {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-export default function TasksPage() {
+function TasksInner() {
+  const appFilter = useSearchParams()?.get('app') ?? null;
   const [jobs, setJobs] = useState<Job[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [steps, setSteps] = useState<JobStep[]>([]);
@@ -100,9 +113,10 @@ export default function TasksPage() {
     }
   }
 
-  const running = jobs.filter((j) => j.status === 'running').length;
-  const queued = jobs.filter((j) => j.status === 'queued').length;
-  const failed = jobs.filter((j) => j.status === 'failed').length;
+  const shown = appFilter ? jobs.filter((j) => jobApp(j) === appFilter) : jobs;
+  const running = shown.filter((j) => j.status === 'running').length;
+  const queued = shown.filter((j) => j.status === 'queued').length;
+  const failed = shown.filter((j) => j.status === 'failed').length;
 
   return (
     <PageShell>
@@ -126,25 +140,36 @@ export default function TasksPage() {
       <PageBody>
         {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
 
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        {appFilter && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <span style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>filtered to app {appFilter}</span>
+            <LinkBtn href="/tasks" small>
+              SHOW ALL
+            </LinkBtn>
+          </div>
+        )}
+
+        <table aria-label="Task queue" style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
               {COLS.map((c) => (
-                <th key={c} style={thStyle}>
+                <th key={c} scope="col" style={thStyle}>
                   {c}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {jobs.length === 0 && (
+            {shown.length === 0 && (
               <tr>
                 <td colSpan={COLS.length} style={{ ...tdStyle, color: DIM, padding: '16px 0' }}>
-                  no jobs yet — operations from other sections will show up here
+                  {appFilter
+                    ? 'no jobs recorded for this app yet'
+                    : 'no jobs yet — operations from other sections will show up here'}
                 </td>
               </tr>
             )}
-            {jobs.map((j) => (
+            {shown.map((j) => (
               <JobRow
                 key={j.id}
                 job={j}
@@ -158,6 +183,16 @@ export default function TasksPage() {
         </table>
       </PageBody>
     </PageShell>
+  );
+}
+
+// useSearchParams must sit under a Suspense boundary for the static export
+// to prerender this route.
+export default function TasksPage() {
+  return (
+    <Suspense fallback={null}>
+      <TasksInner />
+    </Suspense>
   );
 }
 

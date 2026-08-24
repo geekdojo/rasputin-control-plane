@@ -580,6 +580,7 @@ function AddRuleForm({
             type="checkbox"
             checked={log}
             onChange={(e) => setLog(e.target.checked)}
+            aria-label="Log matches"
             style={{ accentColor: ACCENT }}
           />
           log matches
