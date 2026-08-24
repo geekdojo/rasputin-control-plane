@@ -65,7 +65,7 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 		return proto.AppStatusFailed, "write compose: " + err.Error(), err
 	}
 
-	out, err := c.run(ctx, appID, "up", "-d", "--remove-orphans")
+	out, err := c.run(ctx, appID, composeUpArgs()...)
 	if err != nil {
 		return proto.AppStatusFailed, formatCmdErr("docker compose up", out, err), err
 	}
@@ -117,12 +117,7 @@ func (c *ComposeBackend) statusLocked(ctx context.Context, appID string) (proto.
 // combined stdout+stderr. ctx is honored — if it cancels, the command is
 // killed.
 func (c *ComposeBackend) run(ctx context.Context, appID string, args ...string) ([]byte, error) {
-	full := append([]string{
-		"compose",
-		"-f", c.composePath(appID),
-		"-p", projectName(appID),
-	}, args...)
-	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd := exec.CommandContext(ctx, "docker", composeArgs(c.composePath(appID), projectName(appID), args...)...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -130,15 +125,73 @@ func (c *ComposeBackend) run(ctx context.Context, appID string, args ...string) 
 	return buf.Bytes(), err
 }
 
+// composeArgs builds the docker CLI arg vector for one compose invocation.
+// It exists so the flags are assertable in a test — run() shells out through
+// exec.CommandContext, which nothing can inspect.
+func composeArgs(composePath, project string, args ...string) []string {
+	return append([]string{"compose", "-f", composePath, "-p", project}, args...)
+}
+
+// composeUpArgs is the `up` invocation Deploy uses.
+//
+// --quiet-pull is load-bearing, not cosmetic. Compose streams one progress line
+// per layer per state ("Pulling fs layer", "Downloading", "Extracting"), which
+// for a multi-container tile buries the daemon's actual verdict under dozens of
+// lines of noise. It is an `up` flag rather than the root `--progress quiet`
+// deliberately: the root flag also mutes error output, which is the one thing
+// we need to survive. Available since compose v2.0; the appliance already
+// requires >= v2.23.1 for inline `configs` content (see the obs collector
+// template), so there is no version floor to worry about here.
+func composeUpArgs() []string {
+	return []string{"up", "-d", "--remove-orphans", "--quiet-pull"}
+}
+
+// maxDetailBytes caps the compose output we attach to a failed task. Nothing
+// downstream actually constrains this: the bus sets no MaxPayload (nats-server
+// defaults to 1 MiB), apps.last_detail is a SQLite TEXT column, and the Tasks
+// page renders the string in a pre-wrap <pre>. The Apps drawer clips its
+// one-line summary to 36 chars client-side, which is where "keep it readable"
+// belongs — not here, where clipping destroys the evidence.
+const maxDetailBytes = 4096
+
 func formatCmdErr(label string, out []byte, err error) string {
 	trimmed := strings.TrimSpace(string(out))
 	if trimmed == "" {
 		return fmt.Sprintf("%s: %v", label, err)
 	}
-	if len(trimmed) > 500 {
-		trimmed = trimmed[:500] + "…"
+	return fmt.Sprintf("%s: %v — %s", label, err, truncateDetail(trimmed))
+}
+
+// truncateDetail keeps the TAIL of s, not the head.
+//
+// Compose writes progress first and the real failure last, so a head-keeping
+// cap kept exactly the wrong half. On the bench (2026-08-23, e3bench) a failed
+// pi-hole deploy surfaced as `docker compose up: exit status 1` followed by ~17
+// lines of per-layer pull progress and nothing else; the tile was pulled from
+// the catalog undiagnosed because the daemon's message had been cut off. The
+// last line is always the one worth reading.
+func truncateDetail(s string) string {
+	if len(s) <= maxDetailBytes {
+		return s
 	}
-	return fmt.Sprintf("%s: %v — %s", label, err, trimmed)
+	// "…\n" so the truncation marker is visible and sits on its own line.
+	const marker = "…\n"
+	start := len(s) - (maxDetailBytes - len(marker))
+	// Compose writes one status per line. Resuming mid-line reads like
+	// corruption, so land on a line boundary whenever one is in budget.
+	if s[start-1] == '\n' {
+		return marker + s[start:]
+	}
+	if i := strings.IndexByte(s[start:], '\n'); i >= 0 {
+		return marker + s[start+i+1:]
+	}
+	// One enormous line with no boundary to land on — back up to the next rune
+	// start so we never hand the UI half of a UTF-8 sequence.
+	cut := s[start:]
+	for len(cut) > 0 && cut[0]&0xC0 == 0x80 {
+		cut = cut[1:]
+	}
+	return "…" + cut
 }
 
 // composePsLine is the shape `docker compose ps --format json` emits, one
