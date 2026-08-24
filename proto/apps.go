@@ -144,6 +144,22 @@ type AppServiceStatus struct {
 	Name   string `json:"name"`
 	State  string `json:"state"` // "running", "exited", etc — agent backend specific
 	Health string `json:"health,omitempty"`
+
+	// ExitCode is the container's exit status, and it is ONLY meaningful when
+	// State says the container has exited. `docker compose ps --format json`
+	// emits ExitCode for every container including live ones, where it reads
+	// 0 — verified against compose v5.0.1: a healthy long-running busybox
+	// reports {"State":"running","ExitCode":0}. So exit code alone can never
+	// be read as "finished cleanly"; state and exit code are one fact and must
+	// be read together.
+	//
+	// It is a pointer because absent and zero have to stay distinguishable on
+	// the wire. An agent older than this field omits it, and an int would
+	// unmarshal that silence as 0 — turning "we have no idea why this
+	// container is gone" into "it completed successfully", which is precisely
+	// the misreading this field exists to prevent. nil means unknown, and an
+	// exited container with an unknown exit code is treated as a failure.
+	ExitCode *int `json:"exitCode,omitempty"`
 }
 
 // AppLeafCmd delivers a per-app TLS leaf (ADR-0004 §6) to the node hosting the
