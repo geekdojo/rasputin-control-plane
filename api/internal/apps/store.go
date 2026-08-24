@@ -47,27 +47,27 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 func (s *Store) Create(ctx context.Context, a *App) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO apps (id, name, compose_yaml, target_node, published_port,
-                          source_tile, expose_lan, last_status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          source_tile, deploy_budget_s, expose_lan, last_status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.Name, a.ComposeYAML, a.TargetNode, a.PublishedPort,
-		a.SourceTile, a.ExposeLAN, string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt))
+		a.SourceTile, a.DeployBudgetSeconds, a.ExposeLAN, string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt))
 	return err
 }
 
-func (s *Store) Update(ctx context.Context, a *App) error {
-	res, err := s.db.ExecContext(ctx, `
-        UPDATE apps
-        SET name = ?, compose_yaml = ?, target_node = ?, updated_at = ?
-        WHERE id = ?`,
-		a.Name, a.ComposeYAML, a.TargetNode, ms(a.UpdatedAt), a.ID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
+// There is deliberately no general Update.
+//
+// There was one, and nothing in the api ever called it — its only callers were
+// its own tests. It wrote name, compose_yaml and target_node and silently
+// dropped every other column, which is exactly the shape of trap that costs an
+// afternoon: a test seeded an app, called Update to set a published port, and
+// passed for the wrong reason because the port was never written and the
+// assertion happened to hold anyway.
+//
+// Mutations here are narrow and named for what they do — SetExposeLAN,
+// RecordStatus — so a caller cannot accidentally rewrite an installed app's
+// compose while flipping one flag, and so a column added later cannot be
+// silently forgotten by a method whose name promises to write everything. If an
+// edit-app feature lands it should add its own narrow method the same way.
 
 // SetExposeLAN flips an app's LAN-exposure opt-in in place.
 //
@@ -185,7 +185,7 @@ func (s *Store) DeleteByTargetNode(ctx context.Context, nodeID string) ([]string
 
 func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, published_port, source_tile, expose_lan, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps WHERE id = ?`, id)
 	return scanApp(row.Scan)
@@ -193,7 +193,7 @@ func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 
 func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, published_port, source_tile, expose_lan, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps WHERE name = ?`, name)
 	return scanApp(row.Scan)
@@ -201,7 +201,7 @@ func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 
 func (s *Store) List(ctx context.Context) ([]*App, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, name, compose_yaml, target_node, published_port, source_tile, expose_lan, last_status, last_detail,
+        SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at
         FROM apps ORDER BY created_at ASC`)
 	if err != nil {
@@ -230,7 +230,7 @@ func scanApp(scan func(...any) error) (*App, error) {
 		updatedAt    int64
 	)
 	if err := scan(&a.ID, &a.Name, &a.ComposeYAML, &a.TargetNode, &a.PublishedPort,
-		&a.SourceTile, &a.ExposeLAN, &status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
+		&a.SourceTile, &a.DeployBudgetSeconds, &a.ExposeLAN, &status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
 		&createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

@@ -20,6 +20,13 @@ type App struct {
 	// SourceTile is the catalog tile id this app was installed from ("" for a
 	// custom-compose app). Lets the UI show the tile's docs + first-run note (AP-9).
 	SourceTile string `json:"sourceTile,omitempty"`
+	// DeployBudgetSeconds is how long the agent may spend bringing this app up,
+	// copied from its catalog tile at install (0 = the tile declared nothing, so
+	// use the default). Stored on the app rather than read back from the tile
+	// because the tile can change under a running install, and the budget a
+	// deploy is judged against should be the one that was installed. Read it
+	// through proto.AppDeployWorkFor / proto.AppDeployRPCFor, never directly.
+	DeployBudgetSeconds int `json:"deployBudgetSeconds,omitempty"`
 	// ExposeLAN opts the app into LAN reachability (ADR-0004 §9). Default false:
 	// the app is tailnet-only — bare <app>.<cluster-id>.internal (tailnet) name,
 	// proxy bound to the tailnet interface only. When true it also gets the

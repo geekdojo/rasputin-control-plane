@@ -5,6 +5,19 @@ import (
 	"strings"
 )
 
+// The range a tile may declare for Tile.DeployBudgetSeconds. Absent (0) is
+// always valid and means the reader's default.
+//
+// These are the AUTHORING bounds, checked here so a bad value is a publish-time
+// failure rather than a runtime surprise. The reader clamps to the same range
+// again on the way to the agent — see proto.AppDeployWorkFor — because a value
+// that reaches the api from a row it did not write must not be able to hand the
+// agent an unbounded context.
+const (
+	DeployBudgetMinSeconds = 60
+	DeployBudgetMaxSeconds = 1800
+)
+
 // ValidateTile checks the AUTHORED metadata of a tile — everything expressible
 // in tile.json. It does not look at the compose stack beyond "is it present",
 // because the properties worth checking there cannot be seen without parsing
@@ -76,6 +89,11 @@ func ValidateTile(t Tile) error {
 	}
 	if t.RAMFloorMB <= 0 {
 		return fmt.Errorf("ramFloorMB must be > 0")
+	}
+	if t.DeployBudgetSeconds != 0 &&
+		(t.DeployBudgetSeconds < DeployBudgetMinSeconds || t.DeployBudgetSeconds > DeployBudgetMaxSeconds) {
+		return fmt.Errorf("deployBudgetSeconds %d is out of range: omit it to take the default, or choose %d-%d",
+			t.DeployBudgetSeconds, DeployBudgetMinSeconds, DeployBudgetMaxSeconds)
 	}
 
 	primaries := 0

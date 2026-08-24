@@ -314,3 +314,83 @@ func TestValidateTile_UnknownCapabilityIsRefusedWhateverTheStatus(t *testing.T) 
 		})
 	}
 }
+
+// A tile may say how long it needs to come up, within bounds. Absent is the
+// common case and must stay valid — every tile published before the field
+// existed omits it.
+func TestValidateTile_DeployBudgetBounds(t *testing.T) {
+	valid := []struct {
+		name    string
+		seconds int
+	}{
+		{"absent takes the default", 0},
+		{"at the floor", DeployBudgetMinSeconds},
+		{"at the ceiling", DeployBudgetMaxSeconds},
+		{"a heavy stack", 900},
+	}
+	for _, c := range valid {
+		t.Run(c.name, func(t *testing.T) {
+			x := okTile()
+			x.DeployBudgetSeconds = c.seconds
+			if err := ValidateTile(x); err != nil {
+				t.Fatalf("expected %d to be valid, got %v", c.seconds, err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name    string
+		seconds int
+	}{
+		{"negative", -1},
+		{"one under the floor", DeployBudgetMinSeconds - 1},
+		{"one over the ceiling", DeployBudgetMaxSeconds + 1},
+		{"a day", 86400},
+	}
+	for _, c := range invalid {
+		t.Run(c.name, func(t *testing.T) {
+			x := okTile()
+			x.DeployBudgetSeconds = c.seconds
+			err := ValidateTile(x)
+			if err == nil {
+				t.Fatalf("expected %d to be rejected", c.seconds)
+			}
+			// The message has to tell an author what to do instead, because
+			// the only person who ever reads it is mid-edit in a tile.json.
+			if !strings.Contains(err.Error(), "deployBudgetSeconds") {
+				t.Fatalf("error should name the field, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "omit it") {
+				t.Fatalf("error should offer the default as a way out, got %v", err)
+			}
+		})
+	}
+}
+
+// The field has to survive a round trip through a published bundle, and has to
+// stay absent from the JSON when it is not declared — a bundle is signed over
+// its bytes, so a field that materialises as `"deployBudgetSeconds":0` on every
+// tile changes every tile's bytes for nothing.
+func TestTile_DeployBudgetJSONRoundTrip(t *testing.T) {
+	raw, err := json.Marshal(okTile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "deployBudgetSeconds") {
+		t.Fatalf("undeclared budget must not appear in the JSON: %s", raw)
+	}
+
+	x := okTile()
+	x.DeployBudgetSeconds = 900
+	raw, err = json.Marshal(x)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Tile
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.DeployBudgetSeconds != 900 {
+		t.Fatalf("budget did not survive the round trip: got %d", back.DeployBudgetSeconds)
+	}
+}

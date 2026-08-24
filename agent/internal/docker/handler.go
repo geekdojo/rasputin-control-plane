@@ -62,8 +62,11 @@ func handleDeploy(b Backend, m *nats.Msg) {
 	}
 	// Deploy is slow because of the image pull. The window is proto's, shared
 	// with the api's RPC deadline so the two cannot drift apart — see
-	// proto.AppDeployWork.
-	ctx, cancel := context.WithTimeout(context.Background(), proto.AppDeployWork)
+	// proto.AppDeployWorkFor, which also clamps whatever the api sent. The api
+	// takes the budget from the app's catalog tile; an api older than the field
+	// sends nothing, which is zero, which is the default.
+	budget := proto.AppDeployWorkFor(cmd.WorkBudgetSeconds)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	status, detail, err := b.Deploy(ctx, cmd.AppID, cmd.Name, cmd.ComposeYAML)
 	if err != nil {
