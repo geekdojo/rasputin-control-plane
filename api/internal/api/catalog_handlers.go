@@ -125,9 +125,8 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "target node not registered")
 		return
 	}
-	if node.Role != proto.RoleCompute && node.Role != proto.RoleControlPlane {
-		writeError(w, http.StatusBadRequest,
-			"target node role must be compute or controlplane")
+	if node.Role != proto.RoleCompute {
+		writeError(w, http.StatusBadRequest, appTargetRoleMsg)
 		return
 	}
 	// Arch gate: block only on a clear mismatch. An unreported arch ("") is

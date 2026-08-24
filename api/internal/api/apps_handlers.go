@@ -69,9 +69,8 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "target node not registered")
 		return
 	}
-	if node.Role != proto.RoleCompute && node.Role != proto.RoleControlPlane {
-		writeError(w, http.StatusBadRequest,
-			"target node role must be compute or controlplane")
+	if node.Role != proto.RoleCompute {
+		writeError(w, http.StatusBadRequest, appTargetRoleMsg)
 		return
 	}
 
@@ -240,6 +239,25 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 func normalizeAppName(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
+
+// appTargetRoleMsg is the 400 body when someone aims an app at a node that
+// cannot host one. Apps run on COMPUTE nodes only.
+//
+// The controlplane node is excluded deliberately, and it is the reason this
+// message exists. rasputin-api owns :443 there — the OS image's unit sets
+// RASPUTIN_HTTPS_ADDR=:443, the wildcard — so the node-local Caddy that fronts
+// apps can never bind the port it needs. Nothing about that is visible from the
+// deploy: the leaf is delivered, the saga logs "delivered TLS leaf + proxy
+// route", the app reports RUNNING, and its name resolves to the control plane
+// and serves the control plane's own cert and 404. Measured on e3bench
+// 2026-08-23 with a 12s deploy that never went near a timeout.
+//
+// Refusing up front is not the end state — a one-node cluster is a topology we
+// want, and that needs the two to share the port properly. It is the honest
+// state until then: an install that cannot work should fail where the operator
+// is standing, not five minutes later as an app that looks healthy and answers
+// nothing.
+const appTargetRoleMsg = "apps run on compute nodes only — the controlplane node cannot host them yet, because the control plane itself owns the HTTPS port an app would need"
 
 // appNameRuleMsg is the 400 body when a name fails validAppName. It describes
 // the post-normalization rule (input is already lower-cased), so it omits the

@@ -567,8 +567,8 @@ func loadApp(sc *jobs.StepCtx, store *Store, inv *inventory.Store) (*App, error)
 	if node == nil {
 		return nil, fmt.Errorf("target node %q not registered", app.TargetNode)
 	}
-	if node.Role != proto.RoleCompute && node.Role != proto.RoleControlPlane {
-		return nil, fmt.Errorf("target node %q has role %q; expected compute or controlplane",
+	if node.Role != proto.RoleCompute {
+		return nil, fmt.Errorf("target node %q has role %q; apps run on compute nodes only",
 			app.TargetNode, node.Role)
 	}
 	return app, nil
