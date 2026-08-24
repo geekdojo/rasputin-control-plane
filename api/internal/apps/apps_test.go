@@ -479,7 +479,7 @@ func TestLoadApp_ErrorCases(t *testing.T) {
 		{"bad spec", `{}`, "appId"},
 		{"unknown app", `{"appId":"no-such"}`, "not found"},
 		{"target node not registered", `{"appId":"a-no-node"}`, "not registered"},
-		{"target node has wrong role", `{"appId":"a-wrong-role"}`, "expected compute or controlplane"},
+		{"target node has wrong role", `{"appId":"a-wrong-role"}`, "apps run on compute nodes only"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -499,8 +499,10 @@ func TestDeployLoad_And_StopLoad_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	inv := newInventory(t)
+	// Compute, not controlplane: apps are refused on the controlplane node, so
+	// a happy path targeting one would be asserting the bug.
 	if err := inv.Insert(ctx, &proto.Node{
-		ID: "n", Role: proto.RoleControlPlane, FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+		ID: "n", Role: proto.RoleCompute, FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("inv insert: %v", err)
 	}

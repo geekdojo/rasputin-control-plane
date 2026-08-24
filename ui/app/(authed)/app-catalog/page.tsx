@@ -53,8 +53,14 @@ function ramLabel(mb: number): string {
 
 // A node can host an app only if it has an app-running role AND is reachable.
 // Offline nodes are excluded — deploying to one just times out and fails.
+//
+// COMPUTE ONLY. The controlplane node is excluded to match the api's install
+// gate: rasputin-api owns :443 there, so the node-local Caddy that fronts apps
+// can never bind it and the app ends up running and unreachable behind the
+// control plane's own cert and 404. Offering it here would only produce a
+// choice that always 400s.
 function targetable(n: Node): boolean {
-  return (n.role === 'compute' || n.role === 'controlplane') && n.status !== 'offline';
+  return n.role === 'compute' && n.status !== 'offline';
 }
 
 // archOK mirrors the api's install gate: a non-"both" tile needs a matching
