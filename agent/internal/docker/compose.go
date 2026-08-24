@@ -69,9 +69,17 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 	if err != nil {
 		return proto.AppStatusFailed, formatCmdErr("docker compose up", out, err), err
 	}
-	status, _, err := c.statusLocked(ctx, appID)
+	status, services, err := c.statusLocked(ctx, appID)
 	if err != nil {
 		return status, err.Error(), err
+	}
+	if status != proto.AppStatusRunning {
+		// `up` returned 0 and we still aren't running, so compose has no
+		// complaint to quote and the per-service state is the only evidence
+		// there is. Returning "" here — which is what this did — is how a
+		// failed deploy reached the operator as a bare FAILED with no reason
+		// attached anywhere in the UI.
+		return status, deployDetail(status, services), nil
 	}
 	return status, "", nil
 }
@@ -201,6 +209,12 @@ type composePsLine struct {
 	Service string `json:"Service"`
 	State   string `json:"State"`
 	Health  string `json:"Health,omitempty"`
+	// ExitCode is a pointer so a payload that never carried the key stays
+	// distinguishable from one that carried a 0 — see proto.AppServiceStatus.
+	// Compose emits it unconditionally (v5.0.1 checked), but the parser also
+	// eats hand-rolled and older output, and guessing 0 there would invent a
+	// clean exit out of nothing.
+	ExitCode *int `json:"ExitCode,omitempty"`
 }
 
 func parsePsOutput(out []byte) ([]proto.AppServiceStatus, error) {
@@ -238,30 +252,154 @@ func parsePsOutput(out []byte) ([]proto.AppServiceStatus, error) {
 
 func toServiceStatus(p composePsLine) proto.AppServiceStatus {
 	return proto.AppServiceStatus{
-		Name:   p.Service,
-		State:  p.State,
-		Health: p.Health,
+		Name:     p.Service,
+		State:    p.State,
+		Health:   p.Health,
+		ExitCode: p.ExitCode,
 	}
 }
 
-// aggregateStatus rolls up service-level state into the app-level enum. We
-// report `running` only when every service is running; any failure flips us
-// to `failed`; everything else is `deploying` (transient states like
-// `created`, `restarting`).
+// serviceOutcome is what aggregateStatus makes of one container. It exists so
+// the "state and exit code are one fact" rule lives in exactly one place —
+// every caller that wants to know whether a container is a problem asks here
+// rather than re-deriving it from the two fields and getting it subtly wrong.
+type serviceOutcome int
+
+const (
+	outcomeRunning   serviceOutcome = iota // up right now
+	outcomeCompleted                       // exited, and exited 0 — a finished one-shot
+	outcomeBroken                          // exited non-zero, exit code unknown, dead, removing
+	outcomeTransient                       // created, restarting, paused — still settling
+)
+
+func classifyService(s proto.AppServiceStatus) serviceOutcome {
+	switch strings.ToLower(s.State) {
+	case "running":
+		return outcomeRunning
+	case "dead", "removing":
+		return outcomeBroken
+	case "exited":
+		// nil is "we were not told", not "zero". An agent that predates the
+		// field, or any producer that omits it, leaves us unable to prove the
+		// container finished cleanly — and an unprovable clean exit is treated
+		// as a failure, which is exactly the behaviour this code had before
+		// exit codes existed. Only an explicit 0 buys the benefit of the doubt.
+		if s.ExitCode != nil && *s.ExitCode == 0 {
+			return outcomeCompleted
+		}
+		return outcomeBroken
+	default:
+		return outcomeTransient
+	}
+}
+
+// aggregateStatus rolls up service-level state into the app-level enum.
+//
+// The rule, and why each arm is what it is:
+//
+//   - any broken service (exited non-zero, exited with an exit code we were
+//     never told, `dead`, `removing`) → failed. Failure wins over everything
+//     else: a stack with a crashed container is a broken app no matter how
+//     many of its siblings are happily up.
+//   - otherwise, any transient service (`created`, `restarting`, `paused`) →
+//     deploying. Unchanged: the stack is still settling and calling it either
+//     way would be premature.
+//   - otherwise, at least one service running → running. This is the arm that
+//     fixes the bug. A finished one-shot is not a fault, it is the entire
+//     point of a one-shot: compose ships
+//     `depends_on: {condition: service_completed_successfully}` precisely
+//     because a container that exits 0 is a normal, successful outcome.
+//     Before this, `case "exited": return failed` fired on sight of any exited
+//     container regardless of exit code, so every tile with an init container
+//     failed 100% of the time — reproduced twice on e3bench (2026-08-24, OS
+//     dev.179 / CP dev.124), where the v11 home-assistant tile's
+//     `home-assistant-config-seed` writes configuration.yaml, exits 0, and
+//     took the whole deploy down with it in 1 second flat against a 300s
+//     budget.
+//   - otherwise (every service completed cleanly, or there are none at all) →
+//     stopped. NOT running: nothing is serving, and claiming otherwise would
+//     put a green row on the Apps page for an app with no process behind it —
+//     which the reconcile sweep would then act on by minting a TLS leaf and a
+//     proxy route pointing at nothing. NOT failed either: exiting 0 is what
+//     these containers were asked to do. `stopped` is also what statusLocked
+//     already returns when compose reports no containers at all, and the two
+//     cases are the same fact to an operator — nothing is up. It matters
+//     beyond the degenerate all-one-shots stack: `docker compose stop` (as
+//     opposed to the `down` our Stop uses) leaves containers behind as
+//     exited-0, so an app stopped from the docker CLI must keep reading as
+//     stopped rather than flipping to running.
 func aggregateStatus(services []proto.AppServiceStatus) proto.AppStatus {
-	allRunning := true
+	var running, transient int
 	for _, s := range services {
-		switch strings.ToLower(s.State) {
-		case "exited", "dead", "removing":
+		switch classifyService(s) {
+		case outcomeBroken:
 			return proto.AppStatusFailed
-		case "running":
-			// continue
-		default:
-			allRunning = false
+		case outcomeRunning:
+			running++
+		case outcomeTransient:
+			transient++
+		case outcomeCompleted:
+			// A finished one-shot neither helps nor hurts the rollup; it only
+			// matters if it turns out to be the ONLY thing in the stack.
 		}
 	}
-	if allRunning {
+	if transient > 0 {
+		return proto.AppStatusDeploying
+	}
+	if running > 0 {
 		return proto.AppStatusRunning
 	}
-	return proto.AppStatusDeploying
+	return proto.AppStatusStopped
+}
+
+// deployDetail explains a deploy that did not come back `running`.
+//
+// It exists because Deploy used to return an empty string for every
+// non-running outcome, and empty detail is invisible: the api swaps it for the
+// generic "agent reported deploy failed", and the app drawer renders its
+// failure block only when lastDetail is non-empty, so a failed home-assistant
+// deploy showed the operator a bare FAILED chip and literally nothing else.
+//
+// The offending services come FIRST because the Apps table clips this to ~36
+// chars for its tooltip — the head is the only part most readers ever see, so
+// it has to carry the name and the verdict, not a preamble. The full string
+// stays useful in the drawer.
+func deployDetail(status proto.AppStatus, services []proto.AppServiceStatus) string {
+	if len(services) == 0 {
+		return fmt.Sprintf("app is %s: compose ps reported no containers", status)
+	}
+	var notable []string
+	running := 0
+	for _, s := range services {
+		name := s.Name
+		if name == "" {
+			name = "(unnamed service)"
+		}
+		switch classifyService(s) {
+		case outcomeRunning:
+			running++
+			continue
+		case outcomeCompleted:
+			notable = append(notable, name+" completed (exit 0)")
+		case outcomeBroken:
+			switch {
+			case !strings.EqualFold(s.State, "exited"):
+				notable = append(notable, fmt.Sprintf("%s %s", name, strings.ToLower(s.State)))
+			case s.ExitCode == nil:
+				// Worth spelling out: this is the agent saying it cannot tell
+				// a clean finish from a crash, not a container that reported
+				// no status.
+				notable = append(notable, name+" exited (exit code unknown)")
+			default:
+				notable = append(notable, fmt.Sprintf("%s exited (code %d)", name, *s.ExitCode))
+			}
+		default:
+			notable = append(notable, fmt.Sprintf("%s %s", name, strings.ToLower(s.State)))
+		}
+	}
+	summary := fmt.Sprintf("app is %s (%d/%d services running)", status, running, len(services))
+	if len(notable) == 0 {
+		return summary
+	}
+	return strings.Join(notable, ", ") + " — " + summary
 }

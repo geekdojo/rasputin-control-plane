@@ -1,6 +1,9 @@
 package docker
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -293,7 +296,11 @@ func TestAggregateStatus(t *testing.T) {
 			want: proto.AppStatusRunning,
 		},
 		{
-			name: "one exited",
+			// No exit code on the wire at all — an agent older than the field,
+			// or any producer that omits it. We cannot prove a clean finish,
+			// so it stays a failure exactly as it was before exit codes
+			// existed. This case is the whole reason ExitCode is a pointer.
+			name: "exited with an unknown exit code",
 			in:   []proto.AppServiceStatus{{State: "running"}, {State: "exited"}},
 			want: proto.AppStatusFailed,
 		},
@@ -317,6 +324,94 @@ func TestAggregateStatus(t *testing.T) {
 			in:   []proto.AppServiceStatus{{State: "RUNNING"}},
 			want: proto.AppStatusRunning,
 		},
+		{
+			// The bug, in the exact shape that took the v11 home-assistant
+			// tile down on e3bench: the app is up, its config-seed one-shot
+			// has written configuration.yaml and exited 0. Before the fix
+			// this returned "failed" on sight of the exited container.
+			name: "init container that completed — home-assistant shape",
+			in: []proto.AppServiceStatus{
+				{Name: "home-assistant", State: "running", ExitCode: intp(0)},
+				{Name: "home-assistant-config-seed", State: "exited", ExitCode: intp(0)},
+			},
+			want: proto.AppStatusRunning,
+		},
+		{
+			// A live container also reports ExitCode 0 — confirmed against
+			// compose v5.0.1. If anything ever reads the exit code without
+			// the state, this is the case that catches it.
+			name: "running services carry ExitCode 0 and are still running",
+			in: []proto.AppServiceStatus{
+				{Name: "web", State: "running", ExitCode: intp(0)},
+				{Name: "db", State: "running", ExitCode: intp(0)},
+			},
+			want: proto.AppStatusRunning,
+		},
+		{
+			name: "exited non-zero is failed",
+			in: []proto.AppServiceStatus{
+				{Name: "web", State: "running", ExitCode: intp(0)},
+				{Name: "seed", State: "exited", ExitCode: intp(3)},
+			},
+			want: proto.AppStatusFailed,
+		},
+		{
+			// Regression guard: an app that deployed and later crashed must
+			// keep reading as failed, not get excused as a finished one-shot.
+			name: "the only service crashed",
+			in:   []proto.AppServiceStatus{{Name: "web", State: "exited", ExitCode: intp(137)}},
+			want: proto.AppStatusFailed,
+		},
+		{
+			// Regression guard the other way: nothing is up, so nothing may
+			// claim to be running. `docker compose stop` leaves this shape
+			// behind, and a stopped app must stay stopped.
+			name: "every service completed cleanly",
+			in: []proto.AppServiceStatus{
+				{Name: "seed", State: "exited", ExitCode: intp(0)},
+				{Name: "migrate", State: "exited", ExitCode: intp(0)},
+			},
+			want: proto.AppStatusStopped,
+		},
+		{
+			name: "no services at all",
+			in:   []proto.AppServiceStatus{},
+			want: proto.AppStatusStopped,
+		},
+		{
+			name: "completed one-shot alongside a still-settling service",
+			in: []proto.AppServiceStatus{
+				{Name: "seed", State: "exited", ExitCode: intp(0)},
+				{Name: "web", State: "created"},
+			},
+			want: proto.AppStatusDeploying,
+		},
+		{
+			// Failure outranks transience: a crashed container is a broken
+			// app however busy its siblings look.
+			name: "a crash outranks a transient service",
+			in: []proto.AppServiceStatus{
+				{Name: "web", State: "restarting"},
+				{Name: "seed", State: "exited", ExitCode: intp(1)},
+			},
+			want: proto.AppStatusFailed,
+		},
+		{
+			name: "case-insensitive — EXITED with code 0 counts as complete",
+			in: []proto.AppServiceStatus{
+				{Name: "web", State: "Running"},
+				{Name: "seed", State: "EXITED", ExitCode: intp(0)},
+			},
+			want: proto.AppStatusRunning,
+		},
+		{
+			name: "dead outranks a completed one-shot",
+			in: []proto.AppServiceStatus{
+				{Name: "seed", State: "exited", ExitCode: intp(0)},
+				{Name: "web", State: "dead"},
+			},
+			want: proto.AppStatusFailed,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -332,5 +427,213 @@ func TestToServiceStatus(t *testing.T) {
 	got := toServiceStatus(in)
 	if got.Name != "web" || got.State != "running" || got.Health != "healthy" {
 		t.Errorf("toServiceStatus: %+v", got)
+	}
+}
+
+// intp is here because ExitCode is a *int — nil has to stay distinguishable
+// from an explicit 0, so the tests need addressable literals.
+func intp(i int) *int { return &i }
+
+func TestParsePsOutputCarriesExitCode(t *testing.T) {
+	// Verbatim field set from `docker compose ps --format json --all` under
+	// compose v5.0.1 (trimmed of the fields we don't read). Note `web`: a
+	// container that is UP still reports ExitCode 0, which is why nothing may
+	// read the exit code without the state.
+	ndjson := `{"Name":"a-web-1","Service":"web","State":"running","ExitCode":0,"Status":"Up Less than a second"}
+{"Name":"a-seed-1","Service":"seed","State":"exited","ExitCode":0,"Status":"Exited (0) Less than a second ago"}
+{"Name":"a-crasher-1","Service":"crasher","State":"exited","ExitCode":3,"Status":"Exited (3) Less than a second ago"}
+`
+	svcs, err := parsePsOutput([]byte(ndjson))
+	if err != nil {
+		t.Fatalf("parsePsOutput: %v", err)
+	}
+	if len(svcs) != 3 {
+		t.Fatalf("svcs: want 3, got %d", len(svcs))
+	}
+	for i, want := range []int{0, 0, 3} {
+		if svcs[i].ExitCode == nil {
+			t.Fatalf("svc[%d] (%s): ExitCode is nil, want %d", i, svcs[i].Name, want)
+		}
+		if *svcs[i].ExitCode != want {
+			t.Errorf("svc[%d] (%s): ExitCode = %d, want %d", i, svcs[i].Name, *svcs[i].ExitCode, want)
+		}
+	}
+	if aggregateStatus(svcs[:2]) != proto.AppStatusRunning {
+		t.Errorf("running + completed one-shot should aggregate to running")
+	}
+	if aggregateStatus(svcs) != proto.AppStatusFailed {
+		t.Errorf("a crasher in the stack should aggregate to failed")
+	}
+}
+
+func TestParsePsOutputLegacyArrayCarriesExitCode(t *testing.T) {
+	// The single-line JSON-array shape older CLIs emit has to preserve the
+	// exit code too — it goes through a different unmarshal branch.
+	arr := `[{"Name":"a","Service":"web","State":"running","ExitCode":0},{"Name":"b","Service":"seed","State":"exited","ExitCode":0},{"Name":"c","Service":"bad","State":"exited","ExitCode":7}]`
+	svcs, err := parsePsOutput([]byte(arr))
+	if err != nil {
+		t.Fatalf("parsePsOutput: %v", err)
+	}
+	if len(svcs) != 3 {
+		t.Fatalf("svcs: want 3, got %d", len(svcs))
+	}
+	for i, want := range []int{0, 0, 7} {
+		if svcs[i].ExitCode == nil || *svcs[i].ExitCode != want {
+			t.Errorf("svc[%d] (%s): ExitCode = %v, want %d", i, svcs[i].Name, svcs[i].ExitCode, want)
+		}
+	}
+}
+
+func TestParsePsOutputAbsentExitCodeStaysUnknown(t *testing.T) {
+	// The trap: output with no ExitCode key must NOT come back as a clean
+	// zero. nil means "we were not told", and an exited container we were not
+	// told about is a failure.
+	svcs, err := parsePsOutput([]byte(`{"Name":"a-seed-1","Service":"seed","State":"exited"}` + "\n"))
+	if err != nil {
+		t.Fatalf("parsePsOutput: %v", err)
+	}
+	if svcs[0].ExitCode != nil {
+		t.Fatalf("absent ExitCode came back as %d — absent must not read as 0", *svcs[0].ExitCode)
+	}
+	if got := aggregateStatus(svcs); got != proto.AppStatusFailed {
+		t.Errorf("exited with unknown exit code = %q, want %q", got, proto.AppStatusFailed)
+	}
+}
+
+func TestDeployDetail(t *testing.T) {
+	cases := []struct {
+		name   string
+		status proto.AppStatus
+		in     []proto.AppServiceStatus
+		// wantHas are substrings the message must carry; wantHead is what the
+		// first 36 chars (the Apps-table tooltip clip) must start with.
+		wantHas  []string
+		wantHead string
+	}{
+		{
+			name:   "crashed service is named with its exit code",
+			status: proto.AppStatusFailed,
+			in: []proto.AppServiceStatus{
+				{Name: "web", State: "running", ExitCode: intp(0)},
+				{Name: "seed", State: "exited", ExitCode: intp(3)},
+			},
+			wantHas:  []string{"seed", "code 3", "1/2 services running"},
+			wantHead: "seed exited (code 3)",
+		},
+		{
+			name:    "unknown exit code says so rather than inventing one",
+			status:  proto.AppStatusFailed,
+			in:      []proto.AppServiceStatus{{Name: "seed", State: "exited"}},
+			wantHas: []string{"seed", "exit code unknown"},
+		},
+		{
+			name:     "dead service is named",
+			status:   proto.AppStatusFailed,
+			in:       []proto.AppServiceStatus{{Name: "db", State: "dead"}},
+			wantHas:  []string{"db", "dead"},
+			wantHead: "db dead",
+		},
+		{
+			name:   "a stack of finished one-shots reads as completed, not failed",
+			status: proto.AppStatusStopped,
+			in: []proto.AppServiceStatus{
+				{Name: "seed", State: "exited", ExitCode: intp(0)},
+			},
+			wantHas: []string{"seed", "completed (exit 0)", "stopped"},
+		},
+		{
+			name:    "still settling names the transient service",
+			status:  proto.AppStatusDeploying,
+			in:      []proto.AppServiceStatus{{Name: "web", State: "created"}},
+			wantHas: []string{"web", "created", "deploying"},
+		},
+		{
+			name:    "no containers at all",
+			status:  proto.AppStatusStopped,
+			in:      nil,
+			wantHas: []string{"no containers"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deployDetail(tc.status, tc.in)
+			if got == "" {
+				t.Fatal("deployDetail returned an empty string — that is the bug")
+			}
+			for _, want := range tc.wantHas {
+				if !strings.Contains(got, want) {
+					t.Errorf("detail %q is missing %q", got, want)
+				}
+			}
+			if tc.wantHead != "" && !strings.HasPrefix(got, tc.wantHead) {
+				t.Errorf("detail %q must lead with %q — the table tooltip clips to ~36 chars", got, tc.wantHead)
+			}
+		})
+	}
+}
+
+// fakeDockerOnPath installs a stub `docker` executable that answers
+// `compose ... up` with success and `compose ... ps --format json --all` with
+// psJSON. It lets the Deploy wiring be tested end-to-end without a daemon;
+// the real-compose proof lives in the `docker`-tagged functional test.
+func fakeDockerOnPath(t *testing.T, psJSON string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = \"ps\" ]; then\n    cat <<'PSEOF'\n" +
+		psJSON + "PSEOF\n    exit 0\n  fi\ndone\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestDeployNonRunningReturnsDetailNamingTheService(t *testing.T) {
+	// This is the second bug: Deploy used to return "" for every non-running
+	// outcome, so the operator got a bare FAILED chip and the drawer — which
+	// only renders its failure block when lastDetail is non-empty — showed
+	// nothing at all.
+	fakeDockerOnPath(t, `{"Name":"x-web-1","Service":"web","State":"running","ExitCode":0}
+{"Name":"x-seed-1","Service":"seed","State":"exited","ExitCode":3}
+`)
+	c, err := NewComposeBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewComposeBackend: %v", err)
+	}
+	status, detail, err := c.Deploy(context.Background(), "01TESTAPP", "test", "services: {}\n")
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if status != proto.AppStatusFailed {
+		t.Fatalf("status = %q, want %q", status, proto.AppStatusFailed)
+	}
+	if detail == "" {
+		t.Fatal("Deploy returned an empty detail for a non-running status — the failure is invisible to the operator")
+	}
+	if !strings.Contains(detail, "seed") || !strings.Contains(detail, "3") {
+		t.Errorf("detail %q must name the offending service and its exit code", detail)
+	}
+	t.Logf("detail: %s", detail)
+}
+
+func TestDeployOneShotStackReportsRunningWithNoDetail(t *testing.T) {
+	// The home-assistant case, through the whole Deploy path: a running app
+	// plus a one-shot that finished is a successful deploy, and a successful
+	// deploy carries no failure detail.
+	fakeDockerOnPath(t, `{"Name":"x-ha-1","Service":"home-assistant","State":"running","ExitCode":0}
+{"Name":"x-seed-1","Service":"home-assistant-config-seed","State":"exited","ExitCode":0}
+`)
+	c, err := NewComposeBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewComposeBackend: %v", err)
+	}
+	status, detail, err := c.Deploy(context.Background(), "01TESTAPP", "home-assistant", "services: {}\n")
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if status != proto.AppStatusRunning {
+		t.Fatalf("status = %q, want %q (detail: %q)", status, proto.AppStatusRunning, detail)
+	}
+	if detail != "" {
+		t.Errorf("a successful deploy should carry no detail, got %q", detail)
 	}
 }
