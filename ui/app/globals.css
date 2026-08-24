@@ -125,9 +125,17 @@
     transform: rotate(360deg);
   }
 }
+/* Focus. The border tint alone is the mouse-user's cue; keyboard focus needs
+   a ring you cannot miss, so :focus-visible paints one on every interactive
+   element. This used to be `outline: none` on .rasp-field with nothing put
+   back, which left a keyboard operator with no way to tell where they were. */
 .rasp-field:focus {
   border-color: var(--primary);
-  outline: none;
+}
+:focus-visible,
+.rasp-field:focus-visible {
+  outline: 2px solid var(--rasp-accent);
+  outline-offset: 1px;
 }
 .rasp-field::placeholder {
   color: rgba(138, 155, 181, 0.5);

@@ -1,7 +1,6 @@
 'use client';
 
 import { ExternalLink, FilePlus2, RefreshCw, Search, ShieldAlert, Store, UploadCloud } from 'lucide-react';
-import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   createApp,
@@ -29,6 +28,7 @@ import {
   HAIR,
   Hint,
   Input,
+  LinkBtn,
   PageBody,
   PageHeader,
   PageShell,
@@ -38,7 +38,7 @@ import {
   Textarea,
   fieldStyle,
 } from '../../../components/kit';
-import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
+import { ACCENT, MONO } from '../../../components/ui-theme';
 
 const COLLECTIONS: { key: CatalogCollection; label: string; blurb: string }[] = [
   { key: 'essentials', label: 'ESSENTIALS', blurb: 'The credibility floor — every cluster should run these.' },
@@ -144,6 +144,7 @@ export default function AppCatalogPage() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
+                aria-label="Search apps"
                 placeholder="Search apps…"
                 style={{ background: 'transparent', border: 'none', outline: 'none', color: FG, fontFamily: MONO, fontSize: 11, padding: '7px 0', width: 180 }}
               />
@@ -222,11 +223,12 @@ function CatalogCard({
   preview: boolean;
   onOpen: () => void;
 }) {
-  const [hover, setHover] = useState(false);
+  // No hover affordance on the card itself: it has no onClick, no role and no
+  // tabIndex, so lighting up its background AND border on hover advertised a
+  // click it never handled. Only the buttons below are targets — and the card
+  // can't become one, because it contains the SOURCE link.
   return (
     <div
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
       style={{
         flex: '1 1 280px',
         maxWidth: 340,
@@ -235,9 +237,8 @@ function CatalogCard({
         gap: 8,
         padding: 14,
         opacity: preview ? 0.72 : 1,
-        background: hover ? accentA(0.04) : PANEL,
-        border: `1px ${preview ? 'dashed' : 'solid'} ${hover ? accentA(0.35) : HAIR}`,
-        transition: 'background 0.15s, border-color 0.15s',
+        background: PANEL,
+        border: `1px ${preview ? 'dashed' : 'solid'} ${HAIR}`,
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -261,13 +262,21 @@ function CatalogCard({
         <PrivilegeBadges tile={tile} />
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
-        <Btn variant="primary" small onClick={onOpen}>
+        <Btn
+          variant="primary"
+          small
+          aria-label={`${!preview && installable ? 'Install' : 'Details for'} ${tile.name}`}
+          onClick={onOpen}
+        >
           <UploadCloud size={10} /> {preview ? 'DETAILS' : installable ? 'INSTALL' : 'DETAILS'}
         </Btn>
+        {/* A real link, not window.open(): Chrome's popup blocker wants
+            transient user activation, which a synthetic click has none of, so
+            the old onClick was silently dropped for every browser agent. */}
         {tile.website && (
-          <Btn variant="ghost" small onClick={() => window.open(tile.website, '_blank', 'noopener')}>
+          <LinkBtn external href={tile.website} variant="ghost" small aria-label={`${tile.name} source website`}>
             SOURCE
-          </Btn>
+          </LinkBtn>
         )}
       </div>
     </div>
@@ -275,11 +284,9 @@ function CatalogCard({
 }
 
 function CustomCard({ onOpen }: { onOpen: () => void }) {
-  const [hover, setHover] = useState(false);
+  // Same as CatalogCard: no wrapper hover, the button is the target.
   return (
     <div
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
       style={{
         flex: '1 1 280px',
         maxWidth: 340,
@@ -287,9 +294,8 @@ function CustomCard({ onOpen }: { onOpen: () => void }) {
         flexDirection: 'column',
         gap: 8,
         padding: 14,
-        background: hover ? accentA(0.04) : PANEL,
-        border: `1px dashed ${hover ? accentA(0.35) : HAIR}`,
-        transition: 'background 0.15s, border-color 0.15s',
+        background: PANEL,
+        border: `1px dashed ${HAIR}`,
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -589,6 +595,7 @@ function ConsentGate({
         <EnabledToggle
           enabled={consented}
           onToggle={() => onConsent(!consented)}
+          aria-label={`Consent to what ${tile.name} can do`}
           title={consented ? 'Consent given — click to withdraw' : 'Click to consent'}
         />
         <span style={{ color: FG, fontSize: 10 }}>
@@ -603,6 +610,7 @@ function ConsentGate({
             value={typed}
             onChange={(e) => onType(e.target.value)}
             placeholder={tile.id}
+            aria-label={`Type ${tile.id} to confirm`}
             title="Type the app id to confirm"
             style={{ width: '100%' }}
           />
@@ -628,6 +636,7 @@ function ExposureField({ exposeLan, onChange }: { exposeLan: boolean; onChange: 
         <EnabledToggle
           enabled={exposeLan}
           onToggle={() => onChange(!exposeLan)}
+          aria-label="LAN access"
           title={exposeLan ? 'LAN access on — click for tailnet-only' : 'Tailnet-only — click to allow LAN access'}
         />
         <span style={{ color: FG, fontSize: 10 }}>{exposeLan ? 'Reachable on your LAN' : 'Tailnet only'}</span>
@@ -678,7 +687,7 @@ function InstalledFooter({ app, clusterId, postInstall }: { app: App; clusterId:
                 <a href={access.tailnet} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontSize: 10, textDecoration: 'none' }}>
                   {access.tailnet} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
                 </a>
-                <CopyButton value={access.tailnet} label="COPY" />
+                <CopyButton value={access.tailnet} label="COPY" ariaLabel="Copy tailnet address" />
               </div>
               {access.lan && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -686,25 +695,21 @@ function InstalledFooter({ app, clusterId, postInstall }: { app: App; clusterId:
                   <a href={access.lan} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontSize: 10, textDecoration: 'none' }}>
                     {access.lan} <ExternalLink size={9} style={{ verticalAlign: 'middle' }} />
                   </a>
-                  <CopyButton value={access.lan} label="COPY" />
+                  <CopyButton value={access.lan} label="COPY" ariaLabel="Copy LAN address" />
                 </div>
               )}
             </div>
           )}
           {postInstall && <Hint>{postInstall}</Hint>}
           <Hint style={{ color: DIM }}>It may take a moment to come up — watch its status on the Apps page.</Hint>
-          <Link href="/apps" style={{ textDecoration: 'none' }}>
-            <Btn variant="primary">GO TO APPS</Btn>
-          </Link>
+          <LinkBtn href="/apps" variant="primary">GO TO APPS</LinkBtn>
         </>
       ) : (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <Btn variant="primary" disabled={busy} onClick={deployNow}>
             <UploadCloud size={11} /> {busy ? 'DEPLOYING…' : 'DEPLOY NOW'}
           </Btn>
-          <Link href="/apps" style={{ textDecoration: 'none' }}>
-            <Btn>VIEW IN APPS</Btn>
-          </Link>
+          <LinkBtn href="/apps">VIEW IN APPS</LinkBtn>
         </div>
       )}
       {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
@@ -847,8 +852,20 @@ function InstallDrawer({
         ) : (
           <>
             <div style={{ display: 'flex', gap: 8 }}>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="app name" style={{ flex: 1 }} title="Instance name — must be unique" />
-              <Select value={selectedTarget} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 200 }}>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="app name"
+                aria-label="Instance name"
+                title="Instance name — must be unique"
+                style={{ flex: 1 }}
+              />
+              <Select
+                value={selectedTarget}
+                onChange={(e) => setTargetNode(e.target.value)}
+                aria-label="Target node"
+                style={{ minWidth: 200 }}
+              >
                 {deployTargets.map((n) => (
                   <option key={n.id} value={n.id}>
                     {nodeOptionLabel(n)}
@@ -868,6 +885,7 @@ function InstallDrawer({
               <Btn
                 variant="primary"
                 disabled={busy || !name || !selectedTarget || !consentSatisfied}
+                aria-label={`Install ${tile.name}`}
                 title={consentSatisfied ? undefined : 'Consent to what this app can do before installing'}
                 onClick={install}
               >
@@ -922,8 +940,19 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
             <div>
               <SectionLabel>NAME + TARGET</SectionLabel>
               <div style={{ display: 'flex', gap: 8 }}>
-                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="name (e.g. nextcloud)" style={{ flex: 1 }} />
-                <Select value={selectedTarget} onChange={(e) => setTargetNode(e.target.value)} style={{ minWidth: 200 }}>
+                <Input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="name (e.g. nextcloud)"
+                  aria-label="App name"
+                  style={{ flex: 1 }}
+                />
+                <Select
+                  value={selectedTarget}
+                  onChange={(e) => setTargetNode(e.target.value)}
+                  aria-label="Target node"
+                  style={{ minWidth: 200 }}
+                >
                   {deployTargets.map((n) => (
                     <option key={n.id} value={n.id}>
                       {nodeOptionLabel(n)}
@@ -938,6 +967,7 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
                 placeholder={'services:\n  web:\n    image: nginx:alpine\n    ports:\n      - "8080:80"'}
                 value={composeYaml}
                 onChange={(e) => setComposeYaml(e.target.value)}
+                aria-label="Docker Compose YAML"
                 rows={12}
                 style={{ width: '100%' }}
               />

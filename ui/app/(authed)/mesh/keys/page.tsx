@@ -333,6 +333,7 @@ function KeyForm({
                 type="checkbox"
                 checked={reusable}
                 onChange={(e) => setReusable(e.target.checked)}
+                aria-label="Reusable"
                 style={{ accentColor: ACCENT }}
               />
               reusable

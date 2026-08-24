@@ -33,6 +33,7 @@ import { appAccess, preferredAppUrl } from '../lib/appurl';
 import { BMC_CAP_CONSOLE, BMC_CAP_POWER, BMC_CAP_RESET, type BmcCaps } from '../lib/bmc';
 import { configFaults } from '../lib/configFaults';
 import { ConfirmModal } from './ConfirmModal';
+import { ModalPortal, useModalChrome } from './modal';
 import { ACCENT, accentA, MONO, STATUS_COLOR } from './ui-theme';
 
 // Compact IEC size for the STORAGE row, e.g. 110.3G / 512M. One decimal at
@@ -695,22 +696,26 @@ function RemoveNodeModal({
   // failed preview blocks the action because we don't actually know the
   // cascade scope.
   const ready = impact !== null;
+  // Modal contract shared with the drawers — see components/modal.tsx.
+  const { initialFocusRef } = useModalChrome({ open: true, onClose: onCancel });
   return (
-    <div
-      onClick={onCancel}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-      }}
-    >
+    <ModalPortal>
+      {/* aria-hidden: the scrim is a click target, not content. */}
       <div
-        onClick={(e) => e.stopPropagation()}
+        onClick={onCancel}
+        aria-hidden
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000 }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Remove node"
         style={{
+          position: 'fixed',
+          inset: 0,
+          margin: 'auto',
+          height: 'fit-content',
+          zIndex: 1001,
           background: 'var(--rasp-panel)',
           border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
           padding: 24,
@@ -727,7 +732,12 @@ function RemoveNodeModal({
               REMOVE NODE
             </span>
           </div>
-          <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            aria-label="Close"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+          >
             <X size={14} color="var(--rasp-dim)" />
           </button>
         </div>
@@ -781,6 +791,8 @@ function RemoveNodeModal({
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button
+            ref={initialFocusRef as React.RefObject<HTMLButtonElement | null>}
+            type="button"
             onClick={onCancel}
             style={{
               padding: '7px 16px',
@@ -796,6 +808,7 @@ function RemoveNodeModal({
             CANCEL
           </button>
           <button
+            type="button"
             onClick={onConfirm}
             disabled={!ready}
             style={{
@@ -814,7 +827,7 @@ function RemoveNodeModal({
           </button>
         </div>
       </div>
-    </div>
+    </ModalPortal>
   );
 }
 

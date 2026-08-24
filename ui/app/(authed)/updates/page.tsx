@@ -399,6 +399,9 @@ function DeployBundleButton({ bundle, nodes }: { bundle: Bundle; nodes: Node[] }
 
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      {/* eslint-disable-next-line jsx-a11y/no-autofocus -- this picker only
+          exists after the operator clicks DEPLOY; moving focus to the control
+          their click just produced is focus management, not a hijack. */}
       <Select value={nodeId} onChange={(e) => setNodeId(e.target.value)} autoFocus style={{ fontSize: 10, padding: '4px 6px' }}>
         <option value="">— pick node —</option>
         {targets.map((n) => (
@@ -497,7 +500,7 @@ function UploadBundleForm({ onUploaded }: { onUploaded: (b: Bundle) => void }) {
       >
         <UploadCloud size={11} />
         {busy ? 'UPLOADING…' : 'UPLOAD BUNDLE'}
-        <input type="file" onChange={handle} disabled={busy} style={{ display: 'none' }} />
+        <input type="file" onChange={handle} disabled={busy} aria-label="Upload bundle" style={{ display: 'none' }} />
       </label>
       {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
     </div>
@@ -726,18 +729,20 @@ function FleetUpdateDrawer({
         <div>
           <SectionLabel>ROLLOUT</SectionLabel>
           <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <label htmlFor="rollout-max-in-flight" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ color: DIM, fontSize: 10 }}>MAX IN FLIGHT</span>
               <Input
+                id="rollout-max-in-flight"
                 value={knobs.maxInFlight}
                 onChange={(e) => setKnobs((k) => ({ ...k, maxInFlight: e.target.value }))}
                 style={{ width: 90 }}
                 placeholder="4 or 20%"
               />
             </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <label htmlFor="rollout-max-failures" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ color: DIM, fontSize: 10 }}>MAX FAILURES</span>
               <Input
+                id="rollout-max-failures"
                 value={knobs.maxFailures}
                 onChange={(e) => setKnobs((k) => ({ ...k, maxFailures: e.target.value }))}
                 style={{ width: 90 }}
@@ -752,9 +757,10 @@ function FleetUpdateDrawer({
             {advanced ? '▾' : '▸'} advanced
           </button>
           {advanced && (
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
+            <label htmlFor="rollout-canary-soak" style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
               <span style={{ color: DIM, fontSize: 10 }}>CANARY SOAK (SECONDS)</span>
               <Input
+                id="rollout-canary-soak"
                 type="number"
                 min={0}
                 max={3600}
@@ -1244,9 +1250,13 @@ function ComponentUpdateRow({ cu, onStaged }: { cu: ComponentUpdate; onStaged: (
           )}
         </div>
       </div>
-      {cu.bundled?.map((b) => (
+      {/* This row describes the release being OFFERED, but these versions are
+          what is RUNNING — they come from the controlplane node, not from the
+          release. Saying "ships in this image" here read as a promise about the
+          update and was wrong whenever one was pending. */}
+      {cu.running?.map((b) => (
         <span key={b.label} style={{ color: DIM, fontSize: 9, fontFamily: MONO, letterSpacing: '0.04em' }}>
-          {b.label.toLowerCase()} {b.version} · ships in this image
+          {b.label.toLowerCase()} {b.version} · running now
         </span>
       ))}
       {cu.staged && cu.deployable && (

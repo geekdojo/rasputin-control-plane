@@ -9,7 +9,8 @@ import { Check, ChevronDown, Copy, ExternalLink, X } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { CSSProperties, ElementType, ReactNode } from 'react';
-import { useState } from 'react';
+import { forwardRef, useState } from 'react';
+import { ModalPortal, useModalChrome } from './modal';
 import { ACCENT, accentA, MONO } from './ui-theme';
 
 export const PANEL = 'var(--rasp-panel)';
@@ -184,52 +185,112 @@ const BTN_COLORS: Record<BtnVariant, { border: string; bg: string; hover: string
   ghost: { border: 'transparent', bg: 'transparent', hover: 'rgba(var(--rasp-fg-rgb),0.06)', text: DIM },
 };
 
-export function Btn({
-  variant = 'default',
-  small = false,
-  disabled = false,
-  type = 'button',
-  title,
-  onClick,
-  children,
-}: {
+function btnStyle(variant: BtnVariant, small: boolean, hover: boolean, disabled: boolean): CSSProperties {
+  const c = BTN_COLORS[variant];
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: small ? '4px 8px' : '6px 12px',
+    border: `1px solid ${c.border}`,
+    background: !disabled && hover ? c.hover : c.bg,
+    color: c.text,
+    fontSize: small ? 9 : 10,
+    fontFamily: MONO,
+    letterSpacing: '0.08em',
+    textDecoration: 'none',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.4 : 1,
+    transition: 'background 0.15s',
+    whiteSpace: 'nowrap',
+  };
+}
+
+// The prop list is the full button surface rather than a hand-picked seven.
+// It used to be closed, which meant there was no way to give the per-row and
+// per-card actions an accessible name: a table of five apps shipped five
+// buttons all named exactly "DELETE", so find-by-name is ambiguous and a
+// screen reader announces "delete, button" with no object. Callers pass
+// aria-label (and anything else a <button> takes) through `rest`.
+export type BtnProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: BtnVariant;
   small?: boolean;
-  disabled?: boolean;
-  type?: 'button' | 'submit';
-  title?: string;
-  onClick?: () => void;
-  children: ReactNode;
-}) {
+};
+
+export const Btn = forwardRef<HTMLButtonElement, BtnProps>(function Btn(
+  { variant = 'default', small = false, disabled = false, type = 'button', style, onMouseEnter, onMouseLeave, children, ...rest },
+  ref,
+) {
   const [hover, setHover] = useState(false);
-  const c = BTN_COLORS[variant];
   return (
     <button
+      ref={ref}
       type={type}
       disabled={disabled}
-      title={title}
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        padding: small ? '4px 8px' : '6px 12px',
-        border: `1px solid ${c.border}`,
-        background: !disabled && hover ? c.hover : c.bg,
-        color: c.text,
-        fontSize: small ? 9 : 10,
-        fontFamily: MONO,
-        letterSpacing: '0.08em',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.4 : 1,
-        transition: 'background 0.15s',
-        whiteSpace: 'nowrap',
+      onMouseEnter={(e) => {
+        setHover(true);
+        onMouseEnter?.(e);
       }}
+      onMouseLeave={(e) => {
+        setHover(false);
+        onMouseLeave?.(e);
+      }}
+      style={{ ...btnStyle(variant, small, hover, disabled), ...style }}
+      {...rest}
     >
       {children}
     </button>
+  );
+});
+
+// LinkBtn — a real link wearing the button styling. A <button> nested inside
+// an <a> is invalid HTML and produces two overlapping nodes in the a11y tree
+// (the agent gets a ref for the button, activating it navigates nowhere), and
+// window.open() from an onClick is worse: Chrome's popup blocker wants
+// transient user activation, which a synthetic click doesn't carry, so the
+// call is silently dropped. Both cases become this.
+export type LinkBtnProps = React.AnchorHTMLAttributes<HTMLAnchorElement> & {
+  href: string;
+  /** Opens in a new tab with rel="noopener noreferrer"; skips client routing. */
+  external?: boolean;
+  variant?: BtnVariant;
+  small?: boolean;
+};
+
+export function LinkBtn({
+  href,
+  external = false,
+  variant = 'default',
+  small = false,
+  style,
+  onMouseEnter,
+  onMouseLeave,
+  children,
+  ...rest
+}: LinkBtnProps) {
+  const [hover, setHover] = useState(false);
+  const handlers = {
+    onMouseEnter: (e: React.MouseEvent<HTMLAnchorElement>) => {
+      setHover(true);
+      onMouseEnter?.(e);
+    },
+    onMouseLeave: (e: React.MouseEvent<HTMLAnchorElement>) => {
+      setHover(false);
+      onMouseLeave?.(e);
+    },
+  };
+  const css = { ...btnStyle(variant, small, hover, false), ...style };
+  if (external) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" style={css} {...handlers} {...rest}>
+        {children}
+      </a>
+    );
+  }
+  return (
+    <Link href={href} style={css} {...handlers} {...rest}>
+      {children}
+    </Link>
   );
 }
 
@@ -267,11 +328,14 @@ export function CopyButton({
   label = 'COPY',
   title,
   small = true,
+  ariaLabel,
 }: {
   value: string;
   label?: string;
   title?: string;
   small?: boolean;
+  /** What is being copied — two COPY buttons in one drawer are otherwise indistinguishable by name. */
+  ariaLabel?: string;
 }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
@@ -299,7 +363,13 @@ export function CopyButton({
   const text = state === 'copied' ? 'COPIED' : state === 'failed' ? 'FAILED' : label;
   const variant: BtnVariant = state === 'failed' ? 'danger' : state === 'copied' ? 'primary' : 'default';
   return (
-    <Btn variant={variant} small={small} onClick={handle} title={title ?? 'Copy to clipboard'}>
+    <Btn
+      variant={variant}
+      small={small}
+      onClick={handle}
+      title={title ?? 'Copy to clipboard'}
+      aria-label={ariaLabel}
+    >
       <Icon size={small ? 10 : 12} /> {text}
     </Btn>
   );
@@ -308,24 +378,32 @@ export function CopyButton({
 // Click-to-flip ON/OFF pill — used for the per-row enable/disable toggle on
 // intent tables (firewall rules, port forwards, mesh keys, etc.). Renders as
 // a button so it announces as actionable to AT.
-export function EnabledToggle({
-  enabled,
-  onToggle,
-  title,
-}: {
+//
+// Same open prop list as Btn, and for the same reason: its whole label is
+// "ON"/"OFF", so the LAN-exposure and consent toggles announced identically
+// with nothing saying what they govern. Callers pass aria-label through.
+export type EnabledToggleProps = Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'onToggle'> & {
   enabled: boolean;
   onToggle: () => void;
-  title?: string;
-}) {
+};
+
+export function EnabledToggle({ enabled, onToggle, title, style, onMouseEnter, onMouseLeave, ...rest }: EnabledToggleProps) {
   const [hover, setHover] = useState(false);
   const color = enabled ? '#4ade80' : DIM;
   return (
     <button
       type="button"
       onClick={onToggle}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseEnter={(e) => {
+        setHover(true);
+        onMouseEnter?.(e);
+      }}
+      onMouseLeave={(e) => {
+        setHover(false);
+        onMouseLeave?.(e);
+      }}
       title={title ?? (enabled ? 'Click to disable' : 'Click to enable')}
+      {...rest}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -339,6 +417,7 @@ export function EnabledToggle({
         letterSpacing: '0.08em',
         cursor: 'pointer',
         transition: 'background 0.15s',
+        ...style,
       }}
     >
       <span
@@ -437,7 +516,12 @@ export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
 
 // Drawer — a right-side slide-over panel with a header (icon + title + close)
 // and a scrollable body. Used for catalog install and app detail. The caller
-// supplies the body (usually a scroll region + a pinned footer).
+// supplies the body (usually a scroll region + a pinned footer). Mounted only
+// while open, so `open` is constant true from useModalChrome's point of view.
+//
+// The modal semantics (Escape, inert background, scroll lock, focus move and
+// restore) live in useModalChrome — see components/modal.tsx for why a scrim
+// on its own was actively breaking the page behind it.
 export function Drawer({
   title,
   icon,
@@ -449,29 +533,44 @@ export function Drawer({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const { initialFocusRef } = useModalChrome({ open: true, onClose });
   return (
-    <div
-      onClick={onClose}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'flex-end', zIndex: 50 }}
-    >
+    <ModalPortal>
+      {/* aria-hidden on the scrim: it is a click target, not content, and it
+          would otherwise sit in the AX tree as an unnamed group wrapping the
+          dialog. */}
       <div
-        onClick={(e) => e.stopPropagation()}
+        onClick={onClose}
+        aria-hidden
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 50 }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
         style={{
+          position: 'fixed',
+          top: 0,
+          right: 0,
+          bottom: 0,
           width: 'min(560px, 92vw)',
-          height: '100%',
           background: 'var(--rasp-bg)',
           borderLeft: `1px solid ${HAIR}`,
           display: 'flex',
           flexDirection: 'column',
           fontFamily: MONO,
+          zIndex: 51,
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', borderBottom: `1px solid ${HAIR}` }}>
           {icon && <span style={{ fontSize: 18 }}>{icon}</span>}
           <span style={{ color: FG, fontSize: 12, letterSpacing: '0.06em' }}>{title}</span>
           <button
+            ref={initialFocusRef as React.RefObject<HTMLButtonElement | null>}
+            type="button"
             onClick={onClose}
             title="Close"
+            aria-label="Close"
             style={{ marginLeft: 'auto', background: 'transparent', border: 'none', cursor: 'pointer', color: DIM, display: 'flex' }}
           >
             <X size={16} />
@@ -479,7 +578,7 @@ export function Drawer({
         </div>
         {children}
       </div>
-    </div>
+    </ModalPortal>
   );
 }
 
@@ -493,6 +592,22 @@ export const thStyle: CSSProperties = {
   letterSpacing: '0.1em',
   fontWeight: 500,
   borderBottom: `1px solid ${HAIR_SOFT}`,
+};
+
+// Visually hidden but still announced — for a column header whose meaning is
+// obvious to a sighted reader from the buttons underneath it, and to nobody
+// else. The clip-rect idiom rather than display:none, which removes it from
+// the a11y tree too.
+export const srOnly: CSSProperties = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: 'hidden',
+  clipPath: 'inset(50%)',
+  whiteSpace: 'nowrap',
+  border: 0,
 };
 
 export const tdStyle: CSSProperties = {

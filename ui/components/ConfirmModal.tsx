@@ -1,4 +1,7 @@
+'use client';
+
 import { AlertTriangle, X } from 'lucide-react';
+import { ModalPortal, useModalChrome } from './modal';
 import { MONO } from './ui-theme';
 
 interface ConfirmModalProps {
@@ -18,22 +21,33 @@ export function ConfirmModal({
   onConfirm,
   onCancel,
 }: ConfirmModalProps) {
+  // Mounted only while asking, so `open` is constant true. Modal semantics
+  // (Escape, inert background, scroll lock, focus in and back) come from
+  // useModalChrome — see components/modal.tsx.
+  const { initialFocusRef } = useModalChrome({ open: true, onClose: onCancel });
   return (
-    <div
-      onClick={onCancel}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-      }}
-    >
+    <ModalPortal>
+      {/* aria-hidden: the scrim is a click target, not content. */}
       <div
-        onClick={(e) => e.stopPropagation()}
+        onClick={onCancel}
+        aria-hidden
         style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0,0,0,0.6)',
+          zIndex: 1000,
+        }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        style={{
+          position: 'fixed',
+          inset: 0,
+          margin: 'auto',
+          height: 'fit-content',
+          zIndex: 1001,
           background: 'var(--rasp-panel)',
           border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
           padding: '24px',
@@ -58,7 +72,9 @@ export function ConfirmModal({
             </span>
           </div>
           <button
+            type="button"
             onClick={onCancel}
+            aria-label="Close"
             style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
           >
             <X size={14} color="var(--rasp-dim)" />
@@ -81,6 +97,8 @@ export function ConfirmModal({
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button
+            ref={initialFocusRef as React.RefObject<HTMLButtonElement | null>}
+            type="button"
             onClick={onCancel}
             style={{
               padding: '7px 16px',
@@ -96,6 +114,7 @@ export function ConfirmModal({
             CANCEL
           </button>
           <button
+            type="button"
             onClick={() => {
               onConfirm();
               onCancel();
@@ -115,6 +134,6 @@ export function ConfirmModal({
           </button>
         </div>
       </div>
-    </div>
+    </ModalPortal>
   );
 }

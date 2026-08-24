@@ -103,12 +103,13 @@ func TestCheck(t *testing.T) {
 	}
 
 	// The control-plane software is not a standalone row — it's folded into the
-	// OS row as a display-only bundled detail (it ships inside the OS image).
+	// OS row as a display-only RUNNING detail (it ships inside the OS image, so
+	// it has no update path, and the version we can see is the one running).
 	if _, ok := got["cp"]; ok {
 		t.Errorf("cp should not be a standalone update row")
 	}
-	if len(os.Bundled) != 1 || os.Bundled[0].Version != "v0.8.4" || os.Bundled[0].Label != "Control-plane software" {
-		t.Errorf("os.Bundled = %+v, want control-plane v0.8.4 (the controlplane node's agent version)", os.Bundled)
+	if len(os.Running) != 1 || os.Running[0].Version != "v0.8.4" || os.Running[0].Label != "Control-plane software" {
+		t.Errorf("os.Running = %+v, want control-plane v0.8.4 (the controlplane node's agent version)", os.Running)
 	}
 }
 
@@ -127,8 +128,8 @@ func TestCheckFoldsControlPlaneVersion(t *testing.T) {
 		t.Fatalf("cp should not be a standalone row")
 	}
 	os := got["os"]
-	if len(os.Bundled) != 1 || os.Bundled[0].Version != "0.8.7-dev.3" {
-		t.Errorf("os.Bundled = %+v, want control-plane 0.8.7-dev.3 folded in", os.Bundled)
+	if len(os.Running) != 1 || os.Running[0].Version != "0.8.7-dev.3" {
+		t.Errorf("os.Running = %+v, want control-plane 0.8.7-dev.3 folded in", os.Running)
 	}
 }
 
@@ -282,5 +283,46 @@ func TestCheck_UnconfirmedNodeWithNoVersionIsStillNamed(t *testing.T) {
 	got := byComponent(Check(context.Background(), src, "dev", nodes))
 	if !strings.Contains(got["os"].Note, "c08 (no version reported)") {
 		t.Errorf("os.Note = %q, want the empty version spelled out", got["os"].Note)
+	}
+}
+
+// The version folded into the OS row is what is RUNNING, and the row it sits on
+// describes what is OFFERED. Those diverge exactly when an update is pending,
+// which is the only time anyone reads the row.
+//
+// It used to be labelled "ships in this image", so during the 2026-08-23 bench
+// the OS row offered 2026.07.1-dev.178 and reported a control-plane version of
+// dev.122 as if dev.178 carried it. dev.178 actually vendored dev.123; dev.122
+// was simply what the node was still running. The only way to establish that
+// was to read the OS build log.
+//
+// This test pins the semantics, not the wording: if someone ever tries to make
+// this field mean "what the offered image bundles", it has to come from the
+// release rather than from the node, and this fails first.
+func TestRunningVersionComesFromTheNodeNotTheOfferedRelease(t *testing.T) {
+	const running = "2026.07.1-dev.122"
+	nodes := []*proto.Node{
+		confirmedNode(&proto.Node{
+			ID: "cp1", Role: proto.RoleControlPlane,
+			ImageVersion: "2026.07.1-dev.170", AgentVersion: running,
+		}),
+	}
+	// An OS update IS pending — the offered release is newer than what runs.
+	src := &fakeSource{rel: map[string]*ReleaseInfo{
+		"os": osRelease("2026.07.1-dev.178"),
+	}}
+
+	os := byComponent(Check(context.Background(), src, "dev", nodes))["os"]
+	if len(os.Running) != 1 {
+		t.Fatalf("want exactly one running detail on the OS row, got %+v", os.Running)
+	}
+	if os.Running[0].Version != running {
+		t.Errorf("Running = %q, want the controlplane node's own version %q — this field "+
+			"reports what is running, never what the offered image carries",
+			os.Running[0].Version, running)
+	}
+	if os.Running[0].Version == os.Latest {
+		t.Errorf("Running tracked the offered release (%q) instead of the node — that is the "+
+			"exact confusion this field caused when it was called Bundled", os.Latest)
 	}
 }
