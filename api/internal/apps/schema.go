@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS apps (
     target_node     TEXT NOT NULL,            -- node id; resolved against inventory
     published_port  INTEGER NOT NULL DEFAULT 0, -- primary host port for the reverse proxy (0 = none)
     source_tile     TEXT NOT NULL DEFAULT '',  -- catalog tile id this app was installed from ('' = custom compose)
+    deploy_budget_s INTEGER NOT NULL DEFAULT 0, -- per-app deploy budget in seconds from the tile (0 = default)
     expose_lan      INTEGER NOT NULL DEFAULT 0, -- LAN exposure opt-in (0 = tailnet-only default); ADR-0004 §9
     last_status     TEXT NOT NULL DEFAULT 'stopped',
     last_detail     TEXT NOT NULL DEFAULT '',
@@ -41,4 +42,9 @@ var migrations = []string{
 	// its node-local proxy binds the tailnet interface only. 1 adds the .lan
 	// FQDN + the LAN-interface bind.
 	`ALTER TABLE apps ADD COLUMN expose_lan INTEGER NOT NULL DEFAULT 0`,
+	// deploy_budget_s: how long the agent may spend bringing THIS app up, from
+	// its catalog tile. 0 means the tile declared nothing, which is every app
+	// installed before this column existed — and 0 maps to the default, not to
+	// zero patience. See proto.AppDeployWorkFor.
+	`ALTER TABLE apps ADD COLUMN deploy_budget_s INTEGER NOT NULL DEFAULT 0`,
 }

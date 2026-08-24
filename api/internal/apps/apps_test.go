@@ -133,34 +133,68 @@ func TestStore_Create_DuplicateNameIsError(t *testing.T) {
 }
 
 // ============================================================================
-// Store: Update
+// Store: every install-time column survives the round trip
 // ============================================================================
 
-func TestStore_Update(t *testing.T) {
+// This replaces the old Store.Update tests, which were its only callers.
+// Update wrote three columns and silently dropped the rest, and that is how it
+// went unnoticed: a test set a published port through it, the port was never
+// written, and the assertion passed anyway. The property actually worth holding
+// is that nothing an install decides is lost between Create and Get — so assert
+// that directly, on every column, and let a field added later fail here rather
+// than on a bench.
+func TestStore_CreateKeepsEveryInstallTimeColumn(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
+
 	a := makeApp("a", "name1")
+	a.PublishedPort = 8096
+	a.SourceTile = "jellyfin"
+	a.DeployBudgetSeconds = 900
+	a.ExposeLAN = true
 	if err := s.Create(ctx, a); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	a.Name = "name2"
-	a.ComposeYAML = "services: web: { image: nginx }"
-	a.TargetNode = "node-y"
-	a.UpdatedAt = a.UpdatedAt.Add(1 * time.Second)
-	if err := s.Update(ctx, a); err != nil {
-		t.Fatalf("Update: %v", err)
+
+	got, err := s.Get(ctx, "a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
 	}
-	got, _ := s.Get(ctx, "a")
-	if got.Name != "name2" || got.TargetNode != "node-y" {
-		t.Errorf("Update lost fields: %+v", got)
+	if got == nil {
+		t.Fatal("Get returned nothing for an app that was just created")
+	}
+	if got.PublishedPort != 8096 {
+		t.Errorf("PublishedPort = %d, want 8096", got.PublishedPort)
+	}
+	if got.SourceTile != "jellyfin" {
+		t.Errorf("SourceTile = %q, want %q", got.SourceTile, "jellyfin")
+	}
+	if got.DeployBudgetSeconds != 900 {
+		t.Errorf("DeployBudgetSeconds = %d, want 900", got.DeployBudgetSeconds)
+	}
+	if !got.ExposeLAN {
+		t.Error("ExposeLAN = false, want true")
+	}
+	if got.Name != "name1" || got.TargetNode != "node-test" || got.ComposeYAML != "services: {}" {
+		t.Errorf("Create lost a basic field: %+v", got)
 	}
 }
 
-func TestStore_Update_UnknownIsErrNoRows(t *testing.T) {
+// An app installed before the budget column existed reads back as 0, which
+// proto.AppDeployWorkFor maps to the default. Zero must never mean zero
+// patience.
+func TestStore_UndeclaredBudgetReadsBackAsZero(t *testing.T) {
+	ctx := context.Background()
 	s := newStore(t)
-	err := s.Update(context.Background(), makeApp("ghost", "g"))
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("want sql.ErrNoRows, got %v", err)
+	if err := s.Create(ctx, makeApp("a", "name1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, _ := s.Get(ctx, "a")
+	if got.DeployBudgetSeconds != 0 {
+		t.Fatalf("DeployBudgetSeconds = %d, want 0", got.DeployBudgetSeconds)
+	}
+	if want := proto.AppDeployWork; proto.AppDeployWorkFor(got.DeployBudgetSeconds) != want {
+		t.Errorf("an undeclared budget must resolve to the default %s", want)
 	}
 }
 

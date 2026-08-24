@@ -35,12 +35,64 @@ const (
 // while the successes came in at 51s and 57s — a cliff at the deadline, not a
 // spread. Two of the five recovered only because a retry hit a warm cache.
 //
-// 300s is the work budget: a four-container tile cold-pulling to an arm64 node
-// over a home connection does not finish in one minute.
+// 300s is the DEFAULT work budget: a four-container tile cold-pulling to an
+// arm64 node over a home connection does not finish in one minute. A tile may
+// override it — see AppDeployWorkFor.
 const (
 	AppDeployWork = 300 * time.Second
-	AppDeployRPC  = AppDeployWork + 30*time.Second
+	AppDeployRPC  = AppDeployWork + AppDeployRPCSlack
+
+	// AppDeployRPCSlack is how much longer the api waits than the agent works.
+	// It covers the round trip and the agent's own teardown after its budget
+	// expires; it is the whole reason the agent loses the race.
+	AppDeployRPCSlack = 30 * time.Second
+
+	// The bounds any per-app budget is clamped into. A tile declares its budget
+	// in tile.json and tileschema rejects an out-of-range value at authoring
+	// time, so the clamp here is the second line: the api must never hand the
+	// agent a context derived from a row it did not write, whatever is in it.
+	//
+	// The floor is not zero on purpose. Below a minute nothing cold-pulls, and
+	// a budget that cannot succeed is not a fast failure, it is a broken tile
+	// that looks like a flaky network.
+	AppDeployWorkMin = 60 * time.Second
+	AppDeployWorkMax = 1800 * time.Second
 )
+
+// AppDeployWorkFor is how long the agent may spend bringing ONE app up: the
+// tile's declared budget when it has one, AppDeployWork otherwise, clamped into
+// [AppDeployWorkMin, AppDeployWorkMax].
+//
+// One budget for the whole catalog is a budget that fits none of it. It has to
+// clear the slowest stack on the slowest link — so it gets set by immich, and
+// then every fast tile inherits immich's patience. FreshRSS pulls one small
+// image; when it hangs, five minutes of DEPLOYING tells the operator nothing
+// that ninety seconds would not have told them sooner. Chasing the upper bound
+// with a single number gates the quick apps to pay for the slow ones.
+//
+// Zero means "not declared", which is the only value an older api or a tile
+// published before this field existed can send. It maps to the default rather
+// than to zero patience.
+func AppDeployWorkFor(seconds int) time.Duration {
+	if seconds <= 0 {
+		return AppDeployWork
+	}
+	d := time.Duration(seconds) * time.Second
+	if d < AppDeployWorkMin {
+		return AppDeployWorkMin
+	}
+	if d > AppDeployWorkMax {
+		return AppDeployWorkMax
+	}
+	return d
+}
+
+// AppDeployRPCFor is the api-side deadline matching AppDeployWorkFor's budget.
+// Always the longer of the pair, for the same reason AppDeployRPC is: the agent
+// must lose the race and answer with what actually went wrong.
+func AppDeployRPCFor(seconds int) time.Duration {
+	return AppDeployWorkFor(seconds) + AppDeployRPCSlack
+}
 
 // AppDeployCmd is the request body on rasputin.node.<id>.cmd.docker.deploy.
 // The agent writes the compose file to its app state directory and runs
@@ -49,6 +101,13 @@ type AppDeployCmd struct {
 	AppID       string `json:"appId"`
 	Name        string `json:"name"`
 	ComposeYAML string `json:"composeYaml"`
+
+	// WorkBudgetSeconds is this app's deploy budget, from its catalog tile.
+	// Zero means the agent picks the default — which is what an api that
+	// predates this field sends, so an old api against a new agent still gets
+	// the behaviour it expects rather than an instant timeout. Read it through
+	// AppDeployWorkFor, never directly.
+	WorkBudgetSeconds int `json:"workBudgetSeconds,omitempty"`
 }
 
 // AppDeployAck is the synchronous reply.

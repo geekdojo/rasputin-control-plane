@@ -43,10 +43,17 @@ func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 		Kind: "app.deploy",
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: deployLoad(store, inv)},
-			// Longer than the agent's own work budget on purpose, so the agent
-			// answers with the real failure instead of this step timing out on
-			// top of it — see proto.AppDeployWork.
-			{Name: "push", Timeout: proto.AppDeployRPC, Do: deployPush(store, inv, nc)},
+			// This is a BACKSTOP, not the deploy deadline. The real deadline is
+			// per-app and lives inside deployPush, because the budget comes from
+			// the app's catalog tile and a workflow's steps are declared once at
+			// registration, before any app is known. So this is set to the
+			// longest budget any tile could ever declare; if it ever fires,
+			// deployPush's own deadline failed to, which is a bug.
+			//
+			// Both are longer than the agent's work budget on purpose, so the
+			// agent answers with the real failure instead of a step timing out
+			// on top of it — see proto.AppDeployWorkFor.
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, mint)},
 		},
 	}
@@ -397,8 +404,11 @@ func reconcileList(store *Store) jobs.DoFn {
 //	runs. Mid-deploy the containers legitimately do not exist yet, so the agent
 //	answers "stopped" and the old code helpfully reset the row — clobbering a
 //	deploy that was still pulling. This was survivable while a deploy was
-//	capped at 60s; with proto.AppDeployWork at 300s and this sweep on a 5-minute
-//	timer, a long first pull and a sweep now overlap by design.
+//	capped at 60s; with the default budget at 300s (and a heavy tile allowed to
+//	declare more) and this sweep on a 5-minute timer, a long first pull and a
+//	sweep now overlap by design. The window below is the app's OWN budget, so a
+//	tile that asked for fifteen minutes gets fifteen minutes of grace and a tile
+//	that asked for ninety seconds is corrected in ninety.
 //
 //	A VERDICT (failed). "failed" records what an operation concluded, not what
 //	is running. A failed deploy leaves no containers, so the agent reports
@@ -419,7 +429,7 @@ func isRealDrift(app *App, observed proto.AppStatus, now time.Time) bool {
 		// Leave it alone only while the operation could plausibly still be
 		// running. Past that the row is stale, not busy, and refusing to
 		// correct it would strand the app in a transitional state forever.
-		return now.Sub(app.UpdatedAt) > proto.AppDeployRPC
+		return now.Sub(app.UpdatedAt) > proto.AppDeployRPCFor(app.DeployBudgetSeconds)
 	case proto.AppStatusFailed:
 		return observed == proto.AppStatusRunning
 	}
@@ -600,11 +610,21 @@ func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		emitChange(nc, app.ID, proto.AppDeploying, proto.AppStatusDeploying, "", now)
 
 		cmd, _ := json.Marshal(proto.AppDeployCmd{
-			AppID:       app.ID,
-			Name:        app.Name,
-			ComposeYAML: app.ComposeYAML,
+			AppID:             app.ID,
+			Name:              app.Name,
+			ComposeYAML:       app.ComposeYAML,
+			WorkBudgetSeconds: app.DeployBudgetSeconds,
 		})
-		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppDeploySubject(app.TargetNode), cmd)
+
+		// The deadline is this app's, not the catalog's. The agent gets the same
+		// budget in the command and answers first; we wait the slack longer so
+		// the reply we surface is the agent's real error and not our own
+		// "context deadline exceeded". The step's own timeout is a backstop far
+		// above this — see DeployWorkflow.
+		ctx, cancel := context.WithTimeout(sc.Ctx, proto.AppDeployRPCFor(app.DeployBudgetSeconds))
+		defer cancel()
+
+		msg, err := nc.RequestWithContext(ctx, proto.AppDeploySubject(app.TargetNode), cmd)
 		if err != nil {
 			fctx, cancel := detachCtx(sc.Ctx)
 			now := time.Now().UTC()

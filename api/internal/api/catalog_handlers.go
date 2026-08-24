@@ -150,10 +150,14 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		TargetNode:    req.TargetNode,
 		PublishedPort: tile.PrimaryPort(),
 		SourceTile:    tile.ID,
-		ExposeLAN:     req.ExposeLAN,
-		LastStatus:    proto.AppStatusStopped,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		// The tile's budget is COPIED, not looked up at deploy time: a catalog
+		// update can change the tile under a running install, and the budget a
+		// deploy is judged against should be the one the owner installed.
+		DeployBudgetSeconds: tile.DeployBudgetSeconds,
+		ExposeLAN:           req.ExposeLAN,
+		LastStatus:          proto.AppStatusStopped,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	if err := s.apps.Create(r.Context(), app); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

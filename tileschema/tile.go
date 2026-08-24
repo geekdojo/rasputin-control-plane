@@ -137,6 +137,26 @@ type Tile struct {
 	// bundle. Read it through DeclaredPrivilege rather than dereferencing.
 	Privilege *Privilege `json:"privilege,omitempty"`
 
+	// DeployBudgetSeconds is how long the agent may spend bringing THIS tile up
+	// before the install is called failed. Absent (0) means the control plane's
+	// default, which is what almost every tile should say.
+	//
+	// One budget for the whole catalog is a budget that fits none of it. A
+	// single number has to clear the slowest stack on the slowest link — so it
+	// gets set by immich, and then every fast tile inherits immich's patience.
+	// FreshRSS pulls one small image; when it hangs, five minutes of DEPLOYING
+	// tells the operator nothing that ninety seconds would not have told them
+	// sooner, and sooner is the whole value. Declare this when a tile is
+	// genuinely heavier or genuinely lighter than the default assumes, and say
+	// why in the PR.
+	//
+	// Bounded on both sides — DeployBudgetMinSeconds..DeployBudgetMaxSeconds.
+	// A tile cannot buy itself an unbounded deploy, and it cannot set a budget
+	// so short that nothing could ever cold-pull inside it: a budget that
+	// cannot succeed is not a fast failure, it is a broken tile wearing a
+	// flaky network's clothes.
+	DeployBudgetSeconds int `json:"deployBudgetSeconds,omitempty"`
+
 	// ComposeYAML is loaded from the sibling docker-compose.yml, not tile.json.
 	// A preview tile may omit it — it cannot be installed.
 	ComposeYAML string `json:"-"`
