@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -69,6 +70,29 @@ func Connect(url, nodeID, token string, onConnected func(*nats.Conn)) (*nats.Con
 		}),
 		nats.ClosedHandler(func(_ *nats.Conn) {
 			log.Printf("agent/bus: connection closed")
+		}),
+		// Without this, nats.go installs its own default handler and the only
+		// trace of an async failure is a bare, unprefixed line nobody greps for.
+		// That matters most for permissions violations: Msg.Respond is an
+		// ASYNCHRONOUS publish that returns nil, so an agent whose reply is
+		// denied by the bus sees no error at all on the calling goroutine — the
+		// denial arrives here, later, or nowhere. A dropped reply then surfaces
+		// only on the api as "rpc: context deadline exceeded", which names the
+		// wrong side of the connection. Say it loudly, with the fix.
+		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			subject := "(no subscription)"
+			if sub != nil {
+				subject = sub.Subject
+			}
+			if errors.Is(err, nats.ErrPermissionViolation) {
+				log.Printf("rasputin-agent: bus: PERMISSIONS VIOLATION on %s: %v — "+
+					"this node's minted credential does not allow that subject. If it "+
+					"names an _INBOX subject, a reply outlived its response grant "+
+					"(see proto.BusReplyGrantTTL); otherwise the publish is outside "+
+					"rasputin.node.%s.>", subject, err, nodeID)
+				return
+			}
+			log.Printf("rasputin-agent: bus: async error on %s: %v", subject, err)
 		}),
 	}
 	// Always present the node id as the NATS username (token as password, which

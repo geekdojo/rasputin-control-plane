@@ -73,6 +73,14 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bus: new server: %w", err)
 	}
+	// Without this the embedded server has NO logger and says nothing, ever —
+	// including about its own authorization decisions. A permissions violation
+	// is logged server-side with the user, the subject and the connection id,
+	// which is the only place both halves of a denied reply appear together;
+	// with logging off, a node silently losing the right to answer left no
+	// trace anywhere in the controlplane journal. Info level: no Debug, no
+	// Trace, so this is startup lines plus errors, not per-message noise.
+	ns.ConfigureLogger()
 	go ns.Start()
 	if !ns.ReadyForConnections(10 * time.Second) {
 		return nil, fmt.Errorf("bus: nats server not ready in 10s")
