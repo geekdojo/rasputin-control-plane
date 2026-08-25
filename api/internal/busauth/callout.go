@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 )
@@ -44,10 +45,16 @@ type Responder struct {
 	issuer *Issuer
 	tokens Validator
 	sub    *nats.Subscription
+
+	// replyTTL is the lifetime stamped into every minted credential's dynamic
+	// response permission. Production is always proto.BusReplyGrantTTL; the
+	// integration test shortens it so the expiry path runs in milliseconds
+	// instead of forty-five minutes.
+	replyTTL time.Duration
 }
 
 func NewResponder(nc *nats.Conn, issuer *Issuer, tokens Validator) *Responder {
-	return &Responder{nc: nc, issuer: issuer, tokens: tokens}
+	return &Responder{nc: nc, issuer: issuer, tokens: tokens, replyTTL: proto.BusReplyGrantTTL}
 }
 
 // Start subscribes to the auth-callout subject. The connection MUST be the
@@ -133,13 +140,39 @@ func (r *Responder) mintUserJWT(userNkey, nodeID string) (string, error) {
 	uc.Audience = globalAccount // placement (non-operator mode)
 	uc.Expires = time.Now().Add(mintedTTL).Unix()
 
+	// A Responder built as a zero value (tests, a future constructor that
+	// forgets the field) must not fall back to the server's two-minute default
+	// — that is the bug this constant exists to close.
+	replyTTL := r.replyTTL
+	if replyTTL <= 0 {
+		replyTTL = proto.BusReplyGrantTTL
+	}
+
 	scope := "rasputin.node." + nodeID
 	uc.Permissions.Pub.Allow.Add(scope + ".>") // events, heartbeat, logs
 	uc.Permissions.Sub.Allow.Add(scope + ".cmd.>")
 	uc.Permissions.Sub.Allow.Add("_INBOX.>") // replies to requests the agent makes
 	// Let the agent answer request-reply (api → agent commands) by publishing
-	// to the reply subject it received, without granting blanket pub.
-	uc.Permissions.Resp = &jwt.ResponsePermission{MaxMsgs: -1}
+	// to the reply subject it received, without granting blanket pub. Both
+	// bounds are set EXPLICITLY because nats-server fills a zero with its own
+	// default, and both of its defaults are wrong for us:
+	//
+	//   MaxMsgs -1 — unlimited. The default is 1.
+	//   Expires    — proto.BusReplyGrantTTL. The default is two minutes, which
+	//                is shorter than every agent work budget we hand out, so a
+	//                slow handler lost the right to answer mid-flight and the
+	//                operator saw only "context deadline exceeded".
+	//
+	// This bounds a LIFETIME, not a subject space: the grant still covers only
+	// the one literal reply subject the server just delivered to this
+	// connection, and only because the connection cannot already publish there.
+	// See proto/busreply.go for the full derivation. Do NOT "fix" this by
+	// adding _INBOX.> to Pub.Allow — that would let any compromised node forge
+	// acks for requests addressed to other nodes.
+	uc.Permissions.Resp = &jwt.ResponsePermission{
+		MaxMsgs: -1,
+		Expires: replyTTL,
+	}
 
 	return uc.Encode(r.issuer.KeyPair())
 }

@@ -30,6 +30,23 @@ const (
 	SlotStateInactive UpdateSlotState = "inactive"
 )
 
+// Updater work budgets: how long the AGENT may spend on one step before it
+// answers. They live here, next to the wire types, for the same reason the
+// deploy pair in apps.go does — they are half of a contract whose other half
+// lives in another process, and the bus reply grant in busreply.go is derived
+// from them, so they must be visible to something that can see all of them at
+// once.
+//
+// Note the api's matching saga step timeouts (api/internal/updater/jobs.go) are
+// SHORTER at 10m, unlike deploy where the api's deadline is deliberately the
+// longer of the pair. That inversion is documented in the agent handler as
+// intentional ("the api's step timeout is shorter (10m) so the saga will time
+// out first if needed"); it is recorded here, not changed here.
+const (
+	UpdateDownloadWork = 15 * time.Minute
+	UpdateInstallWork  = 15 * time.Minute
+)
+
 // UpdatePrecheckCmd is sent on rasputin.node.<id>.cmd.update.precheck. The
 // agent reports its current view of the slot layout without mutating
 // anything. The api uses it to validate the target before starting download.

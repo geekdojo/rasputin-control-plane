@@ -85,8 +85,11 @@ func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fa
 			return
 		}
 		// Long-running: 15-minute upper bound. The api's step timeout is
-		// shorter (10m) so the saga will time out first if needed.
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		// shorter (10m) so the saga will time out first if needed. The budget
+		// is a proto constant because the bus reply grant is derived from it —
+		// see proto.BusReplyGrantTTL; a budget the grant does not outlive is a
+		// reply the agent is not allowed to send.
+		ctx, cancel := context.WithTimeout(context.Background(), proto.UpdateDownloadWork)
 		defer cancel()
 		progress := func(done, total int64) {
 			ev := proto.UpdateDownloadProgressEvt{
@@ -117,7 +120,8 @@ func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fa
 			bus.Respond(m, proto.UpdateInstallAck{OK: false, Detail: err.Error()})
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		// Same shape as download above, and the same reason it is a constant.
+		ctx, cancel := context.WithTimeout(context.Background(), proto.UpdateInstallWork)
 		defer cancel()
 		progress := func(phase string, percent int) {
 			ev := proto.UpdateInstallProgressEvt{
