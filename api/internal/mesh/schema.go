@@ -40,3 +40,9 @@ CREATE TABLE IF NOT EXISTS mesh_devices (
 CREATE INDEX IF NOT EXISTS idx_mesh_devices_rasputin ON mesh_devices(rasputin_node_id);
 CREATE INDEX IF NOT EXISTS idx_mesh_devices_kind ON mesh_devices(kind);
 `
+
+// migrations run after schema on every open. Each must be idempotent on an
+// already-migrated database; "duplicate column name" is expected and swallowed.
+var migrations = []string{
+	`ALTER TABLE mesh_devices ADD COLUMN online INTEGER NOT NULL DEFAULT 0`,
+}

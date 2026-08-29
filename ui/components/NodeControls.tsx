@@ -28,7 +28,7 @@ import {
   openBMCWS,
   type NodeRemovalImpact,
 } from '../lib/api';
-import type { App, BMCPowerState, DeploymentMode, Node } from '../lib/types';
+import type { App, BMCPowerState, DeploymentMode, MeshMembership, Node } from '../lib/types';
 import { appAccess, preferredAppUrl } from '../lib/appurl';
 import { BMC_CAP_CONSOLE, BMC_CAP_POWER, BMC_CAP_RESET, type BmcCaps } from '../lib/bmc';
 import { configFaults } from '../lib/configFaults';
@@ -392,7 +392,16 @@ export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, 
                 { label: 'HOSTNAME', value: node.hostname || '—' },
                 { label: 'ROLE', value: node.role.toUpperCase() },
                 { label: 'TYPE', value: node.architecture || '—' },
-                { label: 'STATUS', value: node.status.toUpperCase() },
+                // LAN and MESH are two independent properties. They are shown
+                // as two rows, adjacent and separately labelled, because
+                // collapsing them into one indicator is what hid 16 nodes for
+                // five weeks (geekdojo/geekdojo-brain#202).
+                { label: 'LAN', value: node.status.toUpperCase() },
+                {
+                  label: 'MESH',
+                  value: meshLabel(node.mesh),
+                  color: meshColor(node.mesh),
+                },
                 { label: 'OS IMAGE', value: node.imageVersion || '—' },
                 {
                   label: 'STORAGE',
@@ -838,4 +847,37 @@ function ImpactRow({ label, value }: { label: string; value: string }) {
       <span style={{ color: 'var(--rasp-fg)', fontSize: 10, fontFamily: MONO, textAlign: 'right' }}>{value}</span>
     </div>
   );
+}
+
+// meshLabel renders tailnet membership, including how long an absent node has
+// been gone — the question the old single "online" count made unanswerable.
+// Undefined membership reads "UNKNOWN", never as healthy.
+function meshLabel(mesh?: MeshMembership): string {
+  if (!mesh || mesh.state === 'unknown') return 'UNKNOWN';
+  if (mesh.state === 'joined') return mesh.tailnetIP ? `JOINED ${mesh.tailnetIP}` : 'JOINED';
+  return mesh.lastSeen ? `ABSENT — last seen ${meshAgo(mesh.lastSeen)}` : 'ABSENT';
+}
+
+// meshColor: absent is a warning because a tailnet-only app cannot run there.
+// Unknown is dimmed rather than green — we did not check, so we do not claim.
+function meshColor(mesh?: MeshMembership): string | undefined {
+  if (!mesh || mesh.state === 'unknown') return 'var(--rasp-dim)';
+  return mesh.state === 'absent' ? STATUS_COLOR.warning : undefined;
+}
+
+// meshAgo — coarse elapsed time. Deliberately coarse at the top end: the
+// difference between "5 weeks" and "38 days" changes nothing, but the
+// difference between "2m" and "5 weeks" is the entire point.
+function meshAgo(iso: string): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return 'unknown';
+  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (secs < 90) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 90) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days}d ago`;
+  return `${Math.floor(days / 7)}w ago`;
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +118,7 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	for _, n := range nodes {
 		n.Status = inventory.ComputeStatus(n.LastSeen)
 	}
+	applyMeshMembership(nodes, s.meshMembership(r.Context()))
 	writeJSON(w, http.StatusOK, nodes)
 }
 
@@ -133,6 +135,7 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.Status = inventory.ComputeStatus(n.LastSeen)
+	applyMeshMembership([]*proto.Node{n}, s.meshMembership(r.Context()))
 	writeJSON(w, http.StatusOK, n)
 }
 

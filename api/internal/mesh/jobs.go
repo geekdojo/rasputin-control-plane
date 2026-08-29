@@ -315,6 +315,7 @@ func reconcileFetch(svc *Service, nc *nats.Conn) jobs.DoFn {
 				Kind:             kind,
 				FirstSeen:        n.RegisteredAt,
 				LastSeen:         n.LastSeen,
+				Online:           n.Online,
 			})
 		}
 

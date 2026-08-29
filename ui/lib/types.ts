@@ -80,7 +80,39 @@ export interface Node {
   storage?: NodeStorage;
   firstSeen: string;
   lastSeen: string;
+  /**
+   * LAN liveness ONLY — derived from the agent heartbeat, which travels over
+   * the LAN and never touches the tailnet. A node can be `online` here and not
+   * be on the mesh at all. Never label this simply "online"; say online how.
+   */
   status: NodeStatus;
+  /**
+   * Tailnet membership — independent of `status`, different failure mode.
+   * `undefined` means UNDETERMINED (no mesh service, or no reconcile yet), and
+   * must never be rendered as healthy. See geekdojo/geekdojo-brain#202.
+   */
+  mesh?: MeshMembership;
+}
+
+/**
+ * A node's tailnet membership, deliberately separate from NodeStatus.
+ * Named MeshMembershipState, not MeshState: `MeshState` is already the
+ * reconcile-state of the mesh service as a whole, and conflating "is this node
+ * on the tailnet" with "has the mesh config converged" is the exact kind of
+ * two-facts-one-name error that produced #202.
+ */
+export type MeshMembershipState = 'joined' | 'absent' | 'unknown';
+
+export interface MeshMembership {
+  state: MeshMembershipState;
+  /**
+   * Headscale's last-seen. Meaningful mainly when `state` is 'absent' — it
+   * answers "how long has this been broken?". Not refreshed while a node stays
+   * connected, so for a joined node it is the moment it connected.
+   */
+  lastSeen?: string;
+  /** The 100.64.0.x address; absent when not enrolled. */
+  tailnetIP?: string;
 }
 
 export interface InventoryChangeEvent {
