@@ -56,13 +56,30 @@ export type AddableRole = 'compute' | 'storage' | 'firewall';
 // OS-node path.
 export type NodeArch = 'amd64' | 'arm64';
 
-// Per-arch board SKU + display copy. amd64 → the N100 (Intel) board image;
-// arm64 → the `rpi` SKU (one unified image for Raspberry Pi 4 / Pi 5 / CM5).
-// The public image asset names and the release manifest's `compatible` string
-// both key off the SKU.
+// Per-arch board SKU + display copy. The public image asset names and the
+// release manifest's `compatible` string both key off the SKU, so the SKUs
+// ('n100', 'rpi') are frozen artifact identifiers — NOT descriptions of what
+// the image runs on. Do not read a support claim out of them.
+//
+// What each image actually supports, which is what the blurbs must say:
+//
+//   amd64 / `n100` — a generic upstream x86_64 kernel booted by GRUB over
+//     UEFI. Broad: any 64-bit UEFI machine with a wired Intel or Realtek NIC.
+//     The N100 is the tested example, not the boundary. UEFI is the one hard
+//     requirement, and a legacy-BIOS box fails by simply never booting, with
+//     nothing to tell the operator why — hence it is in the blurb.
+//
+//   arm64 / `rpi` — a Raspberry Pi image: the Pi's own bootloader and a
+//     Pi-fork kernel. It boots a Pi and nothing else. The blurb said
+//     'Raspberry Pi / ARM64' until 2026-08-29, which read as a general arm64
+//     claim we cannot honour — a Radxa or Orange Pi owner would pick ARM64,
+//     flash, and get a board that never boots. Say "Raspberry Pi" and stop.
+//
+// Tested hardware, with the evidence behind each row:
+// https://rasputin.geekdojo.com/docs/hardware/
 export const NODE_ARCHES: { value: NodeArch; sku: string; label: string; blurb: string }[] = [
-  { value: 'amd64', sku: 'n100', label: 'AMD64', blurb: 'Intel / AMD x86-64' },
-  { value: 'arm64', sku: 'rpi', label: 'ARM64', blurb: 'Raspberry Pi / ARM64' },
+  { value: 'amd64', sku: 'n100', label: 'AMD64', blurb: 'Intel / AMD, UEFI boot' },
+  { value: 'arm64', sku: 'rpi', label: 'ARM64', blurb: 'Raspberry Pi' },
 ];
 
 // skuForArch maps an arch to the board SKU used in image asset names

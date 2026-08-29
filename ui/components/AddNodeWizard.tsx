@@ -227,8 +227,9 @@ export function AddNodeWizard({
 
           {isFirewall ? (
             <Hint style={{ marginBottom: 16 }}>
-              The firewall runs on an Intel/AMD (<Tok>x86-64</Tok>) board — a Raspberry Pi can&apos;t drive
-              dual high-speed network ports, so this role is x86-only.
+              The firewall runs on an Intel/AMD (<Tok>x86-64</Tok>) board — the firewall image is
+              built x86-only, so there is no Raspberry Pi build of this role. It also needs two
+              network ports.
             </Hint>
           ) : (
             <>
