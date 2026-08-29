@@ -189,5 +189,65 @@ type Node struct {
 	Storage   *StorageInfo `json:"storage,omitempty"`
 	FirstSeen time.Time    `json:"firstSeen"`
 	LastSeen  time.Time    `json:"lastSeen"`
-	Status    NodeStatus   `json:"status"`
+	// Status is LAN liveness ONLY — it is computed from the agent heartbeat,
+	// which travels over the LAN and never touches the tailnet. A node can be
+	// StatusOnline and simultaneously not on the mesh at all. Do not present
+	// this as "online" without saying online *how*; see Mesh.
+	Status NodeStatus `json:"status"`
+	// Mesh is the node's tailnet membership — a property independent of Status,
+	// with a different failure mode and different consequences. Folding the two
+	// into one indicator is what let 16 of 24 bench nodes sit off the mesh for
+	// up to five weeks behind a green "NODES ONLINE 24 / 24", while every one
+	// of them would have failed a tailnet-only app install
+	// (geekdojo/geekdojo-brain#202).
+	//
+	// nil means UNDETERMINED, not "not on the mesh" — the mesh service may be
+	// unconfigured or may never have reconciled. Consumers must render nil as
+	// unknown and never as agreement, exactly as with ImageVersionConfirmedAt.
+	Mesh *MeshMembership `json:"mesh,omitempty"`
+}
+
+// MeshState is a node's tailnet membership, kept deliberately separate from
+// NodeStatus so neither can be mistaken for the other.
+type MeshState string
+
+const (
+	// MeshJoined: Headscale reports the node currently connected.
+	MeshJoined MeshState = "joined"
+	// MeshAbsent: the node is known to the mesh layer but not connected, or has
+	// no tailnet enrollment at all. It cannot serve a tailnet-only app.
+	MeshAbsent MeshState = "absent"
+	// MeshUnknown: we could not establish membership — no mesh service, or no
+	// reconcile has completed yet. Never render this as joined.
+	MeshUnknown MeshState = "unknown"
+)
+
+// MeshMembership is the tailnet view of a node.
+type MeshMembership struct {
+	State MeshState `json:"state"`
+	// LastSeen is Headscale's last-seen for the node. Meaningful mainly when
+	// State is MeshAbsent — it answers "how long has this been broken?", which
+	// is the question nobody could ask for five weeks. Headscale does not
+	// refresh it while a node stays connected, so for a joined node it is the
+	// moment it connected and says nothing about current health. nil when
+	// unknown.
+	LastSeen *time.Time `json:"lastSeen,omitempty"`
+	// TailnetIP is the node's 100.64.0.x address, "" when not enrolled. This is
+	// the address cluster DNS and mesh routes point at, which is why an absent
+	// node's routes resolve to somewhere unreachable.
+	TailnetIP string `json:"tailnetIP,omitempty"`
+}
+
+// KnownAbsent reports a POSITIVE determination that the node is not on the
+// mesh — we looked, and it was not there. Deliberately false for nil (we could
+// not determine), so it is safe to gate a hard refusal on: an operator on a
+// cluster with no mesh service configured must not be blocked from installing,
+// and only a determination we actually made can justify saying no.
+//
+// This is the inverse of how the UI should read the same field. For DISPLAY,
+// unknown must never be shown as healthy. For a BLOCK, unknown must never be
+// treated as broken. Same data, opposite defaults, because the cost of being
+// wrong runs the other way.
+func (m *MeshMembership) KnownAbsent() bool {
+	return m != nil && m.State == MeshAbsent
 }

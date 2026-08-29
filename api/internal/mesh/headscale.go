@@ -91,6 +91,13 @@ type HSNode struct {
 	ApprovedRoutes   []string  `json:"approvedRoutes"`
 	RegisteredAt     time.Time `json:"registeredAt"`
 	LastSeen         time.Time `json:"lastSeen"`
+	// Online is Headscale's own view of whether the node currently holds a
+	// connection. It must be carried explicitly and never derived from
+	// LastSeen: Headscale does not refresh LastSeen while a node stays
+	// connected, so on a healthy cluster every online node's LastSeen is the
+	// moment it connected — hours or days old. Deriving liveness from that
+	// timestamp marks the whole fleet offline (geekdojo/geekdojo-brain#202).
+	Online bool `json:"online"`
 }
 
 // ----- MockClient ---------------------------------------------------------

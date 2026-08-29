@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
@@ -21,10 +23,29 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyMigrations(ctx, db)
 	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// applyMigrations runs each statement in migrations, tolerating the
+// already-applied case. Mirrors inventory.applyMigrations: CREATE TABLE IF NOT
+// EXISTS cannot add a column to a database that predates it, so column
+// additions live here and are expected to fail with "duplicate column name" on
+// every open after the first.
+func applyMigrations(ctx context.Context, db *sql.DB) {
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			msg := err.Error()
+			if strings.Contains(msg, "duplicate column name") ||
+				strings.Contains(msg, "already exists") {
+				continue
+			}
+			log.Printf("mesh: migration %q: %v", stmt, err)
+		}
+	}
+}
 
 func ms(t time.Time) int64     { return t.UnixMilli() }
 func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
@@ -234,14 +255,24 @@ func (s *Store) UpdateAfterReconcile(ctx context.Context, observedHash string, t
 func (s *Store) UpsertDevice(ctx context.Context, d *Device) error {
 	tags, _ := json.Marshal(d.Tags)
 	routes, _ := json.Marshal(d.AdvertisedRoutes)
-	now := ms(time.Now().UTC())
 	if d.FirstSeen.IsZero() {
 		d.FirstSeen = time.Now().UTC()
 	}
+	// last_seen is the DEVICE's last-seen as Headscale reports it, not the
+	// time of this reconcile. It used to be written as time.Now() regardless of
+	// what the caller passed, which made every device — including ones that had
+	// been off the tailnet for weeks — read as seen moments ago. That is the
+	// same defect shape as the count this field exists to fix
+	// (geekdojo/geekdojo-brain#202): a name asserting something nobody checked.
+	// Fall back to now only when the caller genuinely has no value.
+	lastSeen := d.LastSeen
+	if lastSeen.IsZero() {
+		lastSeen = time.Now().UTC()
+	}
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO mesh_devices (hs_id, user, hostname, tailnet_ip, tags, advertised_routes,
-            rasputin_node_id, kind, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            rasputin_node_id, kind, first_seen, last_seen, online)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(hs_id) DO UPDATE SET
             user = excluded.user,
             hostname = excluded.hostname,
@@ -250,16 +281,17 @@ func (s *Store) UpsertDevice(ctx context.Context, d *Device) error {
             advertised_routes = excluded.advertised_routes,
             rasputin_node_id = excluded.rasputin_node_id,
             kind = excluded.kind,
-            last_seen = excluded.last_seen`,
+            last_seen = excluded.last_seen,
+            online = excluded.online`,
 		d.HSID, d.User, d.Hostname, d.TailnetIP, string(tags), string(routes),
-		d.RasputinNodeID, d.Kind, ms(d.FirstSeen), now)
+		d.RasputinNodeID, d.Kind, ms(d.FirstSeen), ms(lastSeen), boolToInt(d.Online))
 	return err
 }
 
 func (s *Store) ListDevices(ctx context.Context) ([]*Device, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT hs_id, user, hostname, tailnet_ip, tags, advertised_routes,
-               rasputin_node_id, kind, first_seen, last_seen
+               rasputin_node_id, kind, first_seen, last_seen, online
         FROM mesh_devices ORDER BY first_seen ASC`)
 	if err != nil {
 		return nil, err
@@ -272,11 +304,13 @@ func (s *Store) ListDevices(ctx context.Context) ([]*Device, error) {
 			tags, routes string
 			firstSeen    int64
 			lastSeen     int64
+			online       int
 		)
 		if err := rows.Scan(&d.HSID, &d.User, &d.Hostname, &d.TailnetIP, &tags, &routes,
-			&d.RasputinNodeID, &d.Kind, &firstSeen, &lastSeen); err != nil {
+			&d.RasputinNodeID, &d.Kind, &firstSeen, &lastSeen, &online); err != nil {
 			return nil, err
 		}
+		d.Online = online != 0
 		_ = json.Unmarshal([]byte(tags), &d.Tags)
 		_ = json.Unmarshal([]byte(routes), &d.AdvertisedRoutes)
 		d.FirstSeen = fromMs(firstSeen)
@@ -293,21 +327,23 @@ func (s *Store) ListDevices(ctx context.Context) ([]*Device, error) {
 func (s *Store) GetDeviceByRasputinNodeID(ctx context.Context, nodeID string) (*Device, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT hs_id, user, hostname, tailnet_ip, tags, advertised_routes,
-               rasputin_node_id, kind, first_seen, last_seen
+               rasputin_node_id, kind, first_seen, last_seen, online
         FROM mesh_devices WHERE rasputin_node_id = ? LIMIT 1`, nodeID)
 	var (
 		d            Device
 		tags, routes string
 		firstSeen    int64
 		lastSeen     int64
+		online       int
 	)
 	if err := row.Scan(&d.HSID, &d.User, &d.Hostname, &d.TailnetIP, &tags, &routes,
-		&d.RasputinNodeID, &d.Kind, &firstSeen, &lastSeen); err != nil {
+		&d.RasputinNodeID, &d.Kind, &firstSeen, &lastSeen, &online); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	d.Online = online != 0
 	_ = json.Unmarshal([]byte(tags), &d.Tags)
 	_ = json.Unmarshal([]byte(routes), &d.AdvertisedRoutes)
 	d.FirstSeen = fromMs(firstSeen)

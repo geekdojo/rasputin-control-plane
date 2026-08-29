@@ -455,6 +455,7 @@ func toHSNode(n hsNode) HSNode {
 		Tags:             append([]string(nil), n.Tags...),
 		AdvertisedRoutes: append([]string(nil), n.AvailableRoutes...),
 		ApprovedRoutes:   append([]string(nil), n.ApprovedRoutes...),
+		Online:           n.Online,
 		LastSeen:         n.LastSeen.UTC(),
 	}
 }

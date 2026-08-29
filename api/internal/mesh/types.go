@@ -47,5 +47,11 @@ type Device struct {
 	RasputinNodeID   string    `json:"rasputinNodeId,omitempty"`
 	Kind             string    `json:"kind"` // "rasputin" | "user"
 	FirstSeen        time.Time `json:"firstSeen"`
-	LastSeen         time.Time `json:"lastSeen"`
+	// LastSeen is Headscale's last-seen for this device, NOT the time we last
+	// reconciled. The difference is the whole point: a device off the tailnet
+	// for five weeks must read as five weeks stale, not as seen just now.
+	LastSeen time.Time `json:"lastSeen"`
+	// Online is Headscale's connection state. Carried explicitly — see the
+	// note on HSNode.Online for why it cannot be derived from LastSeen.
+	Online bool `json:"online"`
 }

@@ -135,6 +135,12 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
   }
 
   const online = nodes.filter((n) => n.status === 'online').length;
+  // Mesh membership is only countable once the API has actually determined it.
+  // If ANY node has undefined membership we report undetermined rather than a
+  // number, because a count that silently omits the nodes we could not check is
+  // the same false confidence this replaced (geekdojo/geekdojo-brain#202).
+  const meshKnown = nodes.length > 0 && nodes.every((n) => n.mesh !== undefined);
+  const onMesh = meshKnown ? nodes.filter((n) => n.mesh?.state === 'joined').length : undefined;
   const alertsCrit = alerts.filter((a) => a.severity === 'crit').length;
   const alertsWarn = alerts.filter((a) => a.severity === 'warn').length;
 
@@ -156,6 +162,7 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
         <TopBar
           clusterName={setup?.installName ?? ''}
           nodesOnline={online}
+          nodesOnMesh={onMesh}
           nodesTotal={nodes.length}
           alertsCrit={alertsCrit}
           alertsWarn={alertsWarn}

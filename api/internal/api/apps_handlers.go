@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -77,6 +78,23 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	if existing, _ := s.apps.GetByName(r.Context(), req.Name); existing != nil {
 		writeError(w, http.StatusConflict, "an app with that name already exists")
 		return
+	}
+
+	// A tailnet-only app on a node that is not on the tailnet cannot work: the
+	// proxy binds the tailnet interface, and there is no tailnet interface. The
+	// install would "succeed" and the app would be unreachable, with the node
+	// showing green the whole time because its agent heartbeat rides the LAN
+	// (geekdojo/geekdojo-brain#202). Refuse at install — the one moment the
+	// mismatch is cheap to fix.
+	//
+	// Gated on KnownAbsent, not on "not joined": undetermined membership must
+	// not block an operator whose cluster has no mesh service at all.
+	if !req.ExposeLAN {
+		applyMeshMembership([]*proto.Node{node}, s.meshMembership(r.Context()))
+		if node.Mesh.KnownAbsent() {
+			writeError(w, http.StatusConflict, tailnetOnlyOffMeshMsg(req.TargetNode, node.Mesh))
+			return
+		}
 	}
 
 	now := time.Now().UTC()
@@ -276,4 +294,21 @@ const appNameRuleMsg = "name must be a DNS-safe label: 1-32 chars of lowercase l
 // uppercase input is folded to lowercase before it reaches here.
 func validAppName(s string) bool {
 	return len(s) <= 32 && catalog.ValidDNSLabel(s)
+}
+
+// tailnetOnlyOffMeshMsg explains a refused tailnet-only install. It names how
+// long the node has been off the mesh, because "is this a blip or has it been
+// broken for a month?" is the question the old reporting made unanswerable, and
+// it states both ways forward so the operator is not left guessing.
+func tailnetOnlyOffMeshMsg(nodeID string, m *proto.MeshMembership) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "node %s is not on the tailnet, so it cannot serve a tailnet-only app", nodeID)
+	if m != nil && m.LastSeen != nil {
+		fmt.Fprintf(&b, " (last seen on the mesh %s, %s ago)",
+			m.LastSeen.UTC().Format(time.RFC3339),
+			time.Since(*m.LastSeen).Truncate(time.Minute))
+	}
+	b.WriteString(". The node is reachable on the LAN — that is what its status reflects — but mesh membership is a separate property. ")
+	b.WriteString("Either bring the node back onto the mesh, or install with exposeLan: true to reach it over the LAN instead.")
+	return b.String()
 }

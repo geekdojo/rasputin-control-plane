@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertTriangle, CheckCircle, Clock, LogOut, Server } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Clock, LogOut, Network, Server } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { ElementType } from 'react';
@@ -9,6 +9,8 @@ import { accentA, MONO } from './ui-theme';
 interface TopBarProps {
   clusterName: string;
   nodesOnline: number;
+  /** Nodes Headscale reports currently on the tailnet. undefined = undetermined. */
+  nodesOnMesh?: number;
   nodesTotal: number;
   alertsCrit: number;
   alertsWarn: number;
@@ -37,6 +39,7 @@ interface Stat {
 export function TopBar({
   clusterName,
   nodesOnline,
+  nodesOnMesh,
   nodesTotal,
   alertsCrit,
   alertsWarn,
@@ -54,13 +57,29 @@ export function TopBar({
   }, []);
 
   const allOnline = nodesTotal > 0 && nodesOnline === nodesTotal;
+  // LAN reachability and mesh membership are two independent properties. This
+  // used to read "NODES ONLINE 24 / 24" while two thirds of the fleet had been
+  // off the tailnet for weeks — the count was correct, the NAME was not, and
+  // the name was load-bearing (geekdojo/geekdojo-brain#202). So: say which
+  // property is being counted, and give mesh its own tile rather than folding
+  // two facts into one number that can only be right about one of them.
+  const meshKnown = nodesOnMesh !== undefined;
+  const allOnMesh = meshKnown && nodesTotal > 0 && nodesOnMesh === nodesTotal;
   const stats: Stat[] = [
     { label: 'CLUSTER', value: clusterName || 'RASPUTIN', icon: Server },
     {
-      label: 'NODES ONLINE',
+      label: 'NODES ON LAN',
       value: `${nodesOnline} / ${nodesTotal}`,
       icon: CheckCircle,
       valueColor: allOnline ? undefined : '#facc15',
+    },
+    {
+      label: 'ON MESH',
+      // Undetermined renders as "—", never as a number that would read as
+      // agreement with the LAN count.
+      value: meshKnown ? `${nodesOnMesh} / ${nodesTotal}` : '—',
+      icon: Network,
+      valueColor: !meshKnown ? undefined : allOnMesh ? undefined : '#facc15',
     },
     (() => {
       const a = formatAlertsLabel(alertsCrit, alertsWarn);
