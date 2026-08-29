@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/clusterdns"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/configfault"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/health"
@@ -370,6 +372,28 @@ func main() {
 		})
 	}
 
+	// Keep the cluster's own names resolvable without depending on the DNS the
+	// DHCP lease handed out. A node otherwise resolves <cluster>.local by mDNS,
+	// where the AAAA query times out on an IPv4-only cluster; tailscaled reads
+	// that as a failed lookup of its control URL, falls back to Tailscale's
+	// public bootstrap DNS (which cannot resolve a .local name), and never
+	// rejoins the mesh. See internal/clusterdns for the full signature.
+	//
+	// The address comes off the live bus socket, never from a name lookup —
+	// resolving a name is precisely what we are here to repair. Excluded on the
+	// control plane: it is the nameserver, and it publishes the name itself.
+	if role != proto.RoleControlPlane {
+		if cpHost, _, aerr := net.SplitHostPort(nc.ConnectedAddr()); aerr != nil {
+			log.Printf("clusterdns: cannot read the bus peer address (%v); not starting", aerr)
+		} else {
+			go clusterdns.Run(ctx, clusterdns.Config{
+				ClusterID: clusterID(),
+				ServerIP:  cpHost,
+				Dir:       envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
+			})
+		}
+	}
+
 	// OS update handlers — every node gets them. The firewall (OpenWrt, no
 	// RAUC) uses the custom A/B backend; compute/controlplane use `rauc` when
 	// the CLI is on PATH; everything else falls back to mock. Force via
@@ -718,11 +742,18 @@ func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *na
 // never chose a name — derives exactly "rasputin.local", the literal both call
 // sites used to hardcode.
 func clusterName() string {
+	return clusterID() + ".local"
+}
+
+// clusterID is the bare cluster id, without the .local suffix clusterName
+// appends. clusterdns needs it raw because it derives two domains from it —
+// the mDNS name and the internal zone apex.
+func clusterID() string {
 	id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID"))
 	if id == "" {
 		id = "rasputin"
 	}
-	return id + ".local"
+	return id
 }
 
 // rolesAsStrings renders proto.AllRoles for an operator-facing message. The
