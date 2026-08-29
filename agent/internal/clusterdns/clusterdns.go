@@ -155,6 +155,13 @@ func Apply(ctx context.Context, cfg Config) (changed bool, err error) {
 		return false, nil
 	}
 
+	// 0755/0644, not 0600/0700, and gosec is overruled on both (G301, G306 in
+	// .github/sast-register.tsv). systemd-resolved runs unprivileged and reads
+	// drop-ins after dropping privileges: at 0600/0700 it SILENTLY ignores this
+	// file — no error, no log, the routing domains simply never appear and the
+	// cluster name falls back to mDNS, which is the exact failure this package
+	// exists to prevent. Verified on the bench 2026-08-29. The contents are a
+	// cluster id and a LAN address; there is no secret here to protect.
 	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
 		return false, fmt.Errorf("clusterdns: mkdir %s: %w", cfg.Dir, err)
 	}

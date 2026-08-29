@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testCfg(t *testing.T, reloads *int) Config {
@@ -169,4 +170,111 @@ func TestRunStopsWhenResolvedIsAbsent(t *testing.T) {
 	done := make(chan struct{})
 	go func() { Run(context.Background(), cfg); close(done) }()
 	<-done // Run returning at all is the assertion; it would block otherwise.
+}
+
+func TestApplyDefaultsInterval(t *testing.T) {
+	// The re-check period must never end up zero or negative: time.NewTicker
+	// panics on a non-positive duration, so a caller that left Interval unset
+	// would take the agent down at startup rather than degrade.
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"unset", 0, DefaultInterval},
+		{"negative", -time.Second, DefaultInterval},
+		{"positive is preserved", 90 * time.Second, 90 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{ClusterID: "rasputin", ServerIP: "10.0.0.1", Interval: tc.in}
+			cfg.applyDefaults()
+			if cfg.Interval != tc.want {
+				t.Errorf("Interval = %s, want %s", cfg.Interval, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyDefaultsDirAndReload(t *testing.T) {
+	cfg := Config{ClusterID: "rasputin", ServerIP: "10.0.0.1"}
+	cfg.applyDefaults()
+	if cfg.Dir != DefaultDir {
+		t.Errorf("Dir = %q, want %q", cfg.Dir, DefaultDir)
+	}
+	if cfg.reload == nil {
+		t.Error("applyDefaults left reload nil; Apply would panic")
+	}
+}
+
+func TestRunRefusesIncompleteConfig(t *testing.T) {
+	// Run must return, not spin, when it has nothing usable. Each field is
+	// checked separately so a mutation that drops one half of the guard is
+	// caught: with only a both-empty case, either half alone still passes.
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"no cluster id", Config{ServerIP: "10.0.0.1"}},
+		{"no server ip", Config{ClusterID: "rasputin"}},
+		{"neither", Config{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			// A real dir, so the absent-resolved guard cannot be what stops it.
+			cfg.Dir = filepath.Join(t.TempDir(), "resolved.conf.d")
+			cfg.reload = func(context.Context) error {
+				t.Error("Run acted on an incomplete config")
+				return nil
+			}
+			done := make(chan struct{})
+			go func() { Run(context.Background(), cfg); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Run did not return on an incomplete config")
+			}
+		})
+	}
+}
+
+func TestRunAppliesThenHonoursContext(t *testing.T) {
+	// One pass through the loop body — including the error branch — then a
+	// clean exit when the context ends.
+	reloads := 0
+	cfg := testCfg(t, &reloads)
+	cfg.Interval = time.Hour // never fires; the context is what ends this
+	cfg.reload = func(context.Context) error {
+		reloads++
+		return errors.New("reload unavailable")
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.Dir), 0o755); err != nil {
+		t.Fatalf("prepare parent dir: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { Run(ctx, cfg); close(done) }()
+
+	// The drop-in should appear even though the reload failed.
+	path := filepath.Join(cfg.Dir, fileName)
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("Run never wrote the drop-in")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run ignored context cancellation")
+	}
+	if reloads == 0 {
+		t.Error("Run never attempted a reload")
+	}
 }
