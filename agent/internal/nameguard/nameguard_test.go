@@ -1,12 +1,28 @@
 package nameguard
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// captureLog redirects the standard logger for the duration of f and returns
+// everything written. Tests run sequentially (no t.Parallel here) and each
+// harness Run goroutine is cancelled in t.Cleanup before the next test, so the
+// global logger is ours alone while f runs.
+func captureLog(f func()) string {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+	f()
+	return buf.String()
+}
 
 func fixedLocal(ips ...string) LocalIPs {
 	return func() []string { return ips }
@@ -490,6 +506,124 @@ func TestRecoveryCommandFailureIsSurvivable(t *testing.T) {
 	}
 	if got := h.last().State; got != StateUnpublished {
 		t.Errorf("state = %q, want the guard still reporting", got)
+	}
+}
+
+// runStartupLog drives Run just far enough to emit its one-time startup line,
+// then cancels and waits for the goroutine to fully exit before the caller reads
+// the captured log — so there is no concurrent write to the buffer. The resolve
+// stub signals once Run has entered its loop, which is strictly after the
+// startup line has been written.
+func runStartupLog(cfg Config) string {
+	return captureLog(func() {
+		entered := make(chan struct{})
+		var once sync.Once
+		cfg.Resolve = func(string, time.Duration) (string, error) {
+			once.Do(func() { close(entered) })
+			return "", errors.New("no answer")
+		}
+		if cfg.Local == nil {
+			cfg.Local = fixedLocal("192.168.1.240")
+		}
+		if cfg.Lookup == nil {
+			cfg.Lookup = failLookup
+		}
+		if cfg.Interval == 0 {
+			cfg.Interval = time.Millisecond
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { Run(ctx, cfg); close(done) }()
+		<-entered
+		cancel()
+		<-done
+	})
+}
+
+// Run logs the recovery command VERBATIM (or "report-only" when unset), never a
+// boolean — rasputin-os #23 was a truncated env var that a boolean `recover=true`
+// happily reported as working. The literal string is the only thing that can
+// tell a mangled command from a good one, and it is what boot smoke asserts on.
+// Pins the `cfg.RecoverCmd == ""` branch: negating it swaps the two lines, so a
+// configured node would announce "report-only" and a report-only node would
+// print an empty `recovery command: ""`.
+func TestRunLogsRecoverCmdVerbatimOrReportOnly(t *testing.T) {
+	// A configured recovery command must appear verbatim, and the line must not
+	// claim report-only.
+	out := runStartupLog(Config{Name: "cfg.local", RecoverCmd: "systemctl restart systemd-resolved"})
+	if !strings.Contains(out, "recovery command: \"systemctl restart systemd-resolved\"") {
+		t.Errorf("startup log must carry the recovery command verbatim; got %q", out)
+	}
+	if strings.Contains(out, "report-only") {
+		t.Errorf("a node WITH a recovery command must not announce report-only; got %q", out)
+	}
+
+	// With no recovery command the line must say report-only, not print an empty
+	// quoted command.
+	out = runStartupLog(Config{Name: "reportonly.local"})
+	if !strings.Contains(out, "report-only") {
+		t.Errorf("a node with no recovery command must announce report-only; got %q", out)
+	}
+	if strings.Contains(out, "recovery command:") {
+		t.Errorf("report-only startup must not print a recovery-command clause; got %q", out)
+	}
+}
+
+// restartResponder logs a recovery-command failure and stays silent on success.
+// The failure line is the ONLY channel an operator (or the QEMU boot smoke) has
+// to learn a mangled RecoverCmd never worked; conflating "it failed" with "it
+// ran" is the rasputin-os #23 shape this guards against. Pins the `err != nil`
+// gate: the negated form would swallow real failures and shout on every success.
+func TestRestartResponderLogsFailureNotSuccess(t *testing.T) {
+	base := Config{Name: "rasputin.local", RecoverCmd: "systemctl restart systemd-resolved"}
+
+	// A command that fails must be reported — with the error and the command's
+	// own output, which is where the actual reason ("Unit not found") lives.
+	failCfg := base
+	failCfg.runCmd = func(context.Context, string) (string, error) {
+		return "Failed to restart systemd-resolved: Unit not found.", errors.New("exit 5")
+	}
+	out := captureLog(func() { restartResponder(context.Background(), failCfg, 1) })
+	if !strings.Contains(out, "recovery command failed") {
+		t.Errorf("a failed recovery must be logged as such; got %q", out)
+	}
+	for _, want := range []string{"exit 5", "Unit not found"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("failure log %q must carry %q so the operator sees the real reason", out, want)
+		}
+	}
+
+	// A command that succeeds must NOT produce a failure line — otherwise a
+	// working responder restart reads as broken.
+	okCfg := base
+	okCfg.runCmd = func(context.Context, string) (string, error) { return "", nil }
+	out = captureLog(func() { restartResponder(context.Background(), okCfg, 1) })
+	if strings.Contains(out, "recovery command failed") {
+		t.Errorf("a successful recovery must not log a failure; got %q", out)
+	}
+}
+
+// logTransition distinguishes a FIRST healthy verdict (from the unknown startup
+// state) from a RECOVERY (from a real prior fault). The wording is operator-
+// facing and the code comment makes it load-bearing: "recovered from conflict"
+// tells a different story than a plain first OK. Pins the `from == StateUnknown`
+// branch — negating it swaps the two messages.
+func TestLogTransitionDistinguishesFirstOKFromRecovery(t *testing.T) {
+	// First-ever OK: no prior fault to recover from.
+	out := captureLog(func() {
+		logTransition("rasputin.local", StateUnknown, StateOK, "192.168.1.240", SourceMDNS)
+	})
+	if !strings.Contains(out, "resolves to us") || strings.Contains(out, "again") || strings.Contains(out, "recovered") {
+		t.Errorf("first OK from the unknown startup state must read as a plain OK, not a recovery; got %q", out)
+	}
+
+	// OK after a conflict: this IS a recovery, and the line must say so and name
+	// the state it recovered from.
+	out = captureLog(func() {
+		logTransition("rasputin.local", StateConflict, StateOK, "192.168.1.240", SourceMDNS)
+	})
+	if !strings.Contains(out, "recovered from") || !strings.Contains(out, "conflict") {
+		t.Errorf("OK following a conflict must be logged as a recovery from conflict; got %q", out)
 	}
 }
 

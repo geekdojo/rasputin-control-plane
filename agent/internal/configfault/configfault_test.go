@@ -118,6 +118,34 @@ func TestSet_MultipleFaultsAllSurvive(t *testing.T) {
 	}
 }
 
+// A fault with no Expected list must NOT print an empty "(expected )" clause.
+// Expected is omitempty on the wire and the whole point of the parenthetical is
+// to name the values that WOULD have worked — with none to name, the clause is
+// noise that reads like a rendering bug. Guards the `len(f.Expected) > 0` gate:
+// a boundary slip to `>= 0` (always true) would append "(expected )" here, and
+// no other test exercises the empty-Expected path.
+func TestFault_StringOmitsExpectedClauseWhenNoneGiven(t *testing.T) {
+	f := Fault{
+		Variable: "RASPUTIN_UPDATE_BACKEND",
+		Value:    "racu",
+		Expected: nil, // operator help lists nothing — omit the clause entirely
+		Effect:   "OS updates are disabled on this node",
+	}
+	got := f.String()
+	if strings.Contains(got, "expected") {
+		t.Errorf("String() = %q, must not carry an '(expected ...)' clause when Expected is empty", got)
+	}
+	if strings.Contains(got, "(") {
+		t.Errorf("String() = %q, must not open a parenthetical with nothing to put in it", got)
+	}
+	// The knob and the consequence must still be there.
+	for _, want := range []string{"RASPUTIN_UPDATE_BACKEND", "racu", "OS updates are disabled on this node"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("String() = %q, missing %q", got, want)
+		}
+	}
+}
+
 // The rendering an operator actually reads. It must lead with the variable and
 // end with the consequence — "unknown backend" is a fact about a string,
 // "updates are disabled" is a fact about their fleet.
