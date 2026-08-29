@@ -16,7 +16,17 @@
 //     and SoL (bus-wide single session with cross-target take-over;
 //     verbs interrupt an open console — see bitscope_sol.go). Framing
 //     and the console-exit escape are bench-pending — see bitscope.go.
-//   - "turingpi" (contemplated) — the Turing Pi BMC over its REST API.
+//   - TuringPiBackend ("turingpi") — the Turing Pi 2/2.5 cluster board
+//     over its REST API; the first *networked* backend, reaching a
+//     chassis BMC over HTTPS instead of owning a local bus. Power
+//     verbs with per-target capabilities, certificate-pinned config,
+//     and an uncredentialed detect probe (probe.go) so the board
+//     identifies itself before a password exists. It declines SOL on
+//     purpose — the board exposes no console this backend can
+//     honestly serve, so OpenSOL errors rather than faking one, which
+//     is where this transport showed the seam has to bend. Shipped
+//     stable 2026.07.6-2026.07.8; hardware-validated on the bench
+//     board.
 //   - the Phase 3 chassis driver — I²C / IPMI / Redfish against the
 //     Rasputin backplane.
 //
