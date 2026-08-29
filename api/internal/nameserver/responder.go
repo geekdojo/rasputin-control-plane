@@ -127,9 +127,18 @@ func (r *Responder) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 
 	// No positive answer. Classify the negative response.
 	switch {
-	case !inZone:
-		// Not in our zone, and not one of the extra unicast names we serve
-		// (those would have matched hasRec above). With the optional AA-11
+	case !inZone && !hasRec:
+		// Not in our zone, and not one of the extra unicast names we serve.
+		// The !hasRec half is load-bearing: the extra unicast names (e.g.
+		// <cluster>.local) are deliberately NOT subdomains of the zone apex, so
+		// they fail inZone. Testing !inZone alone REFUSEd every non-A query for
+		// them — including AAAA, which on an IPv4-only cluster is the single
+		// most common query a resolver makes. tailscaled treats that REFUSE as
+		// a failed lookup for its control URL and falls back to Tailscale's
+		// public bootstrap DNS, which can never resolve a .local name; nodes
+		// then never rejoin the mesh (geekdojo/geekdojo-brain#202). A name we
+		// serve an A for exists, so a different qtype is NODATA, not REFUSED.
+		// With the optional AA-11
 		// forwarding stub attached, proxy the query to the upstream so the CP can
 		// serve as a client's whole-network resolver (ADR-0004 §10); the
 		// forwarder self-guards (source ACL, self-loop, rate limit) and returns
@@ -146,7 +155,8 @@ func (r *Responder) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		// The name exists (it has an A) but not of the requested type: NODATA —
 		// NOERROR with an empty answer section and the SOA in authority so
 		// resolvers cache the negative for MINIMUM. (AAAA lands here: Rasputin
-		// is IPv4-only, LOCKED decision #9.)
+		// is IPv4-only, LOCKED decision #9.) This covers both in-zone names and
+		// the extra unicast names, which are equally ours to answer for.
 		m.Ns = append(m.Ns, r.soa())
 	default:
 		// In-zone name with no records at all: NXDOMAIN, SOA in authority.
