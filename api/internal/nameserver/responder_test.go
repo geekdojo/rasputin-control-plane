@@ -219,3 +219,79 @@ func assertSingleSOA(t *testing.T, rrs []dns.RR) *dns.SOA {
 	}
 	return soa
 }
+
+// TestResponder_ExtraUnicastNameNODATA pins the regression behind
+// geekdojo/geekdojo-brain#202. The extra unicast name (<cluster>.local) is
+// deliberately not a subdomain of the zone apex, so it fails the inZone test.
+// The negative-classification switch used to test !inZone alone, which REFUSEd
+// every non-A query for a name we demonstrably serve an A for. AAAA is the case
+// that mattered: tailscaled read the REFUSE as a failed lookup of its control
+// URL, fell back to Tailscale's public bootstrap DNS (which can never resolve a
+// .local name), and the node never rejoined the mesh.
+//
+// A name we answer an A for exists. A different qtype on it is NODATA.
+func TestResponder_ExtraUnicastNameNODATA(t *testing.T) {
+	r := newTestResponder(testIP)
+
+	for _, tc := range []struct {
+		name  string
+		qtype uint16
+	}{
+		{"AAAA", dns.TypeAAAA}, // the one that broke mesh enrolment
+		{"TXT", dns.TypeTXT},
+		{"MX", dns.TypeMX},
+		{"SRV", dns.TypeSRV},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := ask(r, testLocal, tc.qtype, false)
+			if m.Rcode != dns.RcodeSuccess {
+				t.Errorf("%s %s: rcode = %s, want NOERROR (NODATA)",
+					testLocal, tc.name, dns.RcodeToString[m.Rcode])
+			}
+			if len(m.Answer) != 0 {
+				t.Errorf("%s %s: answer section has %d records, want 0",
+					testLocal, tc.name, len(m.Answer))
+			}
+			if !m.Authoritative {
+				t.Errorf("%s %s: must claim authority — we serve this name",
+					testLocal, tc.name)
+			}
+			assertSingleSOA(t, m.Ns)
+		})
+	}
+}
+
+// TestResponder_NegativeRcodeMatrix locks the full negative-classification
+// matrix so the inZone/hasRec interaction cannot silently regress again.
+func TestResponder_NegativeRcodeMatrix(t *testing.T) {
+	r := newTestResponder(testIP)
+
+	for _, tc := range []struct {
+		desc  string
+		qname string
+		qtype uint16
+		want  int
+	}{
+		{"in-zone name we serve, wrong type", testZone, dns.TypeAAAA, dns.RcodeSuccess},
+		{"extra unicast name we serve, wrong type", testLocal, dns.TypeAAAA, dns.RcodeSuccess},
+		{"in-zone name we do not serve", "nope." + testZone, dns.TypeA, dns.RcodeNameError},
+		{"in-zone name we do not serve, wrong type", "nope." + testZone, dns.TypeAAAA, dns.RcodeNameError},
+		{"off-zone .local that is not ours", "random.local", dns.TypeA, dns.RcodeRefused},
+		{"off-zone .local that is not ours, AAAA", "random.local", dns.TypeAAAA, dns.RcodeRefused},
+		{"off-zone public name", "example.com", dns.TypeA, dns.RcodeRefused},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			m := ask(r, tc.qname, tc.qtype, false)
+			if m.Rcode != tc.want {
+				t.Errorf("%s %s: rcode = %s, want %s", tc.qname,
+					dns.TypeToString[tc.qtype], dns.RcodeToString[m.Rcode],
+					dns.RcodeToString[tc.want])
+			}
+			// We only disclaim authority for names that are not ours at all.
+			if wantAuth := tc.want != dns.RcodeRefused; m.Authoritative != wantAuth {
+				t.Errorf("%s %s: authoritative = %v, want %v", tc.qname,
+					dns.TypeToString[tc.qtype], m.Authoritative, wantAuth)
+			}
+		})
+	}
+}
