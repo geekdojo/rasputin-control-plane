@@ -141,12 +141,13 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 // installed; an exposure toggle has no business rewriting it, and a general
 // "update the app" route is how it would grow the ability to.
 //
-// The flip is not just a database write. The .lan name is a SAN in the app's
-// per-app TLS leaf and a route on the proxy's LAN listener, so revoking it
-// means re-minting the leaf without that name and re-shipping it. That already
-// works — PrepareAppLeaf treats a SAN drift as a reason to re-mint — so this
-// runs the app's rotation NOW rather than leaving the name resolving until the
-// next sweep. An offline node is not an error: the fresh leaf is not committed,
+// The flip is not just a database write. The .lan name is a route on the
+// proxy's LAN listener, so revoking it has to reach the node before it means
+// anything. The leaf itself no longer moves — it carries both of the app's
+// names whatever the exposure — so what ships here is the ROUTE, and
+// PrepareAppLeaf reports renewed=true because the node is holding a stale one.
+// Running it NOW rather than at the next sweep is the point of this call.
+// An offline node is not an error: nothing is committed until the node accepts,
 // so the sweep retries and the change lands when the node returns.
 func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

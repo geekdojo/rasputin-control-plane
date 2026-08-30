@@ -329,12 +329,13 @@ type LeafResult struct {
 // app's node.
 //
 // Extracted from the rotation sweep for #197. Changing an app's LAN exposure
-// changes its leaf's SAN set, and PrepareAppLeaf already treats a SAN drift as
-// a reason to re-mint — so the toggle needs no new machinery, only the ability
-// to run one app's rotation NOW rather than waiting up to a sweep interval for
-// the .lan name to start or stop resolving. Sharing the body rather than
-// copying it is the point: two rotation paths would differ in exactly the
-// place that matters, which is what happens when the node is offline.
+// changes the ROUTE its node should serve, and PrepareAppLeaf reports that as
+// renewed=true the same way it reports a cert that needs replacing — so the
+// toggle needs no new machinery, only the ability to run one app's rotation NOW
+// rather than waiting up to a sweep interval for the .lan name to start or stop
+// being answered. Sharing the body rather than copying it is the point: two
+// rotation paths would differ in exactly the place that matters, which is what
+// happens when the node is offline.
 //
 // Never returns an error for an offline node. The fresh leaf is deliberately
 // NOT committed in that case, so the sweep re-mints and retries — an app's leaf
