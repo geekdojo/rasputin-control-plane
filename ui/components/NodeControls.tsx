@@ -849,8 +849,16 @@ function ImpactRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-// meshLabel renders tailnet membership, including how long an absent node has
-// been gone — the question the old single "online" count made unanswerable.
+// meshLabel renders tailnet membership with Headscale's last-seen for an absent
+// node — which separates "minutes" from "weeks", the distinction the old single
+// "online" count made impossible to draw.
+//
+// Read it as last-seen, NOT as an outage duration: Headscale does not refresh
+// the value while a node stays connected, so a node that held a session for
+// hours before dropping reads older than its outage really is. The label says
+// "last seen" for exactly that reason and should not be reworded to imply
+// elapsed downtime.
+//
 // Undefined membership reads "UNKNOWN", never as healthy.
 function meshLabel(mesh?: MeshMembership): string {
   if (!mesh || mesh.state === 'unknown') return 'UNKNOWN';

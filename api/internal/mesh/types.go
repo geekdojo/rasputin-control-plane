@@ -50,6 +50,13 @@ type Device struct {
 	// LastSeen is Headscale's last-seen for this device, NOT the time we last
 	// reconciled. The difference is the whole point: a device off the tailnet
 	// for five weeks must read as five weeks stale, not as seen just now.
+	//
+	// It is NOT the moment the device dropped and must not be presented as an
+	// outage duration. Headscale does not refresh it while a node stays
+	// connected, so for a node that held a session for hours before dropping it
+	// reads OLDER than the outage actually is. Treat it as "when we last had
+	// evidence of a session", which is the honest reading and still answers the
+	// question that mattered: is this minutes old or weeks old?
 	LastSeen time.Time `json:"lastSeen"`
 	// Online is Headscale's connection state. Carried explicitly — see the
 	// note on HSNode.Online for why it cannot be derived from LastSeen.

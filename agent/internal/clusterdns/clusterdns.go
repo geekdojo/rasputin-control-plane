@@ -28,6 +28,13 @@
 // different route. Observed on e3bench 2026-08-30, on the reboot that shipped
 // the first version of this package with the control plane excluded.
 //
+// The control-plane case is TRANSIENT where the compute case is permanent: it
+// retries into a usable answer on its own, measured at 2m20s on that reboot.
+// It is fixed here anyway because those are minutes with no tailnet route to
+// the cluster at all on every control-plane reboot, and because 2m20s is one
+// sample of a race with no established upper bound. Do not let a later reader
+// cite this as a stuck-forever bug — it is not.
+//
 // It is a race, so it presents as attrition rather than an outage: on the
 // bench cluster it took 16 of 24 nodes off the tailnet over several weeks of
 // ordinary update cycles, a few at a time, while the UI still read 24/24
