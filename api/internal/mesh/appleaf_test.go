@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/pem"
-	"os"
 	"slices"
 	"testing"
 )
@@ -86,7 +85,7 @@ func TestPrepareAppLeaf_RenewsUntilCommitted(t *testing.T) {
 	ca := newCAForTest(t)
 	dir := t.TempDir()
 
-	certPEM, keyPEM, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false)
+	certPEM, keyPEM, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin")
 	if err != nil {
 		t.Fatalf("PrepareAppLeaf: %v", err)
 	}
@@ -98,15 +97,15 @@ func TestPrepareAppLeaf_RenewsUntilCommitted(t *testing.T) {
 	}
 
 	// Uncommitted → a second prepare must STILL renew (offline-retry safety).
-	if _, _, renewed2, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false); err != nil || !renewed2 {
+	if _, _, renewed2, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin"); err != nil || !renewed2 {
 		t.Fatalf("uncommitted leaf must keep renewing: renewed=%v err=%v", renewed2, err)
 	}
 
 	// Commit, then the same still-valid leaf comes back with renewed=false.
-	if err := CommitAppLeaf(dir, certPEM, keyPEM, false); err != nil {
+	if err := CommitAppLeaf(dir, certPEM, keyPEM); err != nil {
 		t.Fatalf("CommitAppLeaf: %v", err)
 	}
-	got, _, renewed3, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false)
+	got, _, renewed3, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin")
 	if err != nil {
 		t.Fatalf("PrepareAppLeaf after commit: %v", err)
 	}
@@ -118,104 +117,67 @@ func TestPrepareAppLeaf_RenewsUntilCommitted(t *testing.T) {
 	}
 }
 
-// TestPrepareAppLeaf_RedeliversOnRouteDrift: changing exposeLAN must make the
-// app due for a delivery even though its certificate is untouched.
-//
-// This is the load-bearing test of the exposure/identity split. Exposure used to
-// live in the SAN set, so a toggle re-minted the leaf and THAT re-mint was what
-// shipped the new route. With the leaf now carrying both names always, nothing
-// about the cert changes when exposure does — so if the delivered-route marker
-// failed to notice, revoking LAN exposure would go back to being a database
-// write the node never hears about. That is #197's original defect, and it went
-// unseen for ten months.
-//
-// BOTH DIRECTIONS. Revoke is the one that matters for security; grant is the one
-// that would break the feature.
-func TestPrepareAppLeaf_RedeliversOnRouteDrift(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		from, want bool
-	}{
-		{"grant LAN exposure", false, true},
-		{"revoke LAN exposure", true, false},
+// A leaf must be re-minted when the app's IDENTITY changes — a rename, a new
+// cluster id — because the old leaf is valid for a name that is no longer the
+// app's. Exposure is NOT an identity change and deliberately does not appear
+// here: the SAN set covers both names either way, and what an exposure toggle
+// changes is the route, which RotateAppLeaf re-asserts on every delivery
+// whether or not anything about the cert moved.
+func TestPrepareAppLeaf_RemintsOnIdentityDrift(t *testing.T) {
+	ca := newCAForTest(t)
+	dir := t.TempDir()
+
+	certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := CommitAppLeaf(dir, certPEM, keyPEM); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	for _, tc := range []struct{ name, clusterID, appName string }{
+		{"renamed app", "home1", "jellyfin2"},
+		{"new cluster id", "home2", "jellyfin"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ca := newCAForTest(t)
-			dir := t.TempDir()
-
-			certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", tc.from)
+			fresh, _, renewed, err := PrepareAppLeaf(ca, dir, tc.clusterID, tc.appName)
 			if err != nil {
 				t.Fatalf("prepare: %v", err)
 			}
-			if err := CommitAppLeaf(dir, certPEM, keyPEM, tc.from); err != nil {
-				t.Fatalf("commit: %v", err)
-			}
-
-			after, _, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", tc.want)
-			if err != nil {
-				t.Fatalf("prepare after toggle: %v", err)
-			}
 			if !renewed {
-				t.Fatal("an exposeLAN toggle must mark the app due for delivery: nothing is shipped otherwise, and the node keeps the route it already had")
+				t.Fatal("an identity change must re-mint: the committed leaf is valid for a name that is no longer the app's")
 			}
-			// The cert itself must NOT have been re-minted — that churn is what
-			// this design removes, and a changing identity is a worse one.
-			if !bytes.Equal(after, certPEM) {
-				t.Error("a route change re-minted the leaf; the cert covers both names and must be reused")
-			}
-			if got := parseLeaf(t, after).DNSNames; !slices.Equal(got, AppLeafDNSNames("home1", "jellyfin")) {
-				t.Errorf("SANs = %v, want both names regardless of exposure", got)
+			want := AppLeafDNSNames(tc.clusterID, tc.appName)
+			if got := parseLeaf(t, fresh).DNSNames; !slices.Equal(got, want) {
+				t.Errorf("SANs = %v, want %v", got, want)
 			}
 		})
 	}
 }
 
-// A leaf committed before the delivered-route marker existed has a valid cert
-// and no record of what route the node holds. It must re-deliver ONCE — which
-// also migrates the leaf to the two-name SAN set — rather than assume.
-func TestPrepareAppLeaf_LegacyLeafWithoutMarkerRedelivers(t *testing.T) {
-	ca := newCAForTest(t)
-	dir := t.TempDir()
-
-	certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false)
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if err := CommitAppLeaf(dir, certPEM, keyPEM, false); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	// Simulate the pre-marker on-disk state: PEMs present, no route.json.
-	if err := os.Remove(appRoutePath(dir)); err != nil {
-		t.Fatalf("remove marker: %v", err)
-	}
-	if _, _, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", false); err != nil || !renewed {
-		t.Fatalf("a leaf with no delivered-route marker must re-deliver: renewed=%v err=%v", renewed, err)
-	}
-}
-
-// And it must SETTLE. Exact SAN matching plus a route marker would be a
-// re-delivery loop if a committed leaf never satisfied its own spec — every
-// sweep would ship to the node forever.
+// And it must SETTLE. ExactDNSNames would be a re-mint loop if a committed leaf
+// never satisfied its own spec — every sweep would ship a new certificate to
+// the node forever.
 func TestPrepareAppLeaf_SettlesAfterCommit(t *testing.T) {
 	ca := newCAForTest(t)
 	dir := t.TempDir()
 
-	for _, expose := range []bool{false, true, false} {
-		certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", expose)
-		if err != nil {
-			t.Fatalf("prepare(%v): %v", expose, err)
-		}
-		if err := CommitAppLeaf(dir, certPEM, keyPEM, expose); err != nil {
-			t.Fatalf("commit(%v): %v", expose, err)
-		}
-		if _, _, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin", expose); err != nil || renewed {
-			t.Fatalf("expose=%v: a committed leaf at an unchanged exposure must be reused, got renewed=%v err=%v", expose, renewed, err)
+	certPEM, keyPEM, _, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := CommitAppLeaf(dir, certPEM, keyPEM); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	for i := range 3 {
+		if _, _, renewed, err := PrepareAppLeaf(ca, dir, "home1", "jellyfin"); err != nil || renewed {
+			t.Fatalf("prepare #%d: a committed leaf must be reused, got renewed=%v err=%v", i, renewed, err)
 		}
 	}
 }
 
 func TestPrepareAppLeaf_NilCA(t *testing.T) {
-	if _, _, _, err := PrepareAppLeaf(nil, t.TempDir(), "home1", "app", false); err == nil {
+	if _, _, _, err := PrepareAppLeaf(nil, t.TempDir(), "home1", "app"); err == nil {
 		t.Error("nil CA must error")
 	}
 }

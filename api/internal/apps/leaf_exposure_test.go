@@ -22,7 +22,7 @@ func realRotator(t *testing.T, ca *mesh.MeshCA, dir, clusterID string) LeafRotat
 	t.Helper()
 	return func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
 		leafDir := filepath.Join(dir, app.ID)
-		certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(ca, leafDir, clusterID, app.Name, app.ExposeLAN)
+		certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(ca, leafDir, clusterID, app.Name)
 		if err != nil {
 			return proto.AppLeafCmd{}, false, nil, err
 		}
@@ -31,8 +31,7 @@ func realRotator(t *testing.T, ca *mesh.MeshCA, dir, clusterID string) LeafRotat
 			AppID: app.ID, Name: app.Name, CertPEM: certPEM, KeyPEM: keyPEM,
 			TailnetFQDN: tailnetFQDN, LANFQDN: lanFQDN, UpstreamPort: app.PublishedPort,
 		}
-		exposeLAN := app.ExposeLAN
-		return cmd, renewed, func() error { return mesh.CommitAppLeaf(leafDir, certPEM, keyPEM, exposeLAN) }, nil
+		return cmd, renewed, func() error { return mesh.CommitAppLeaf(leafDir, certPEM, keyPEM) }, nil
 	}
 }
 
@@ -46,10 +45,11 @@ func realRotator(t *testing.T, ca *mesh.MeshCA, dir, clusterID string) LeafRotat
 // kept a valid <app>.lan certificate and its LAN route for ~10 months.
 //
 // The leaf is now exposure-INDEPENDENT — it carries both names always — so the
-// SAN set no longer moves when exposure does, and this test would regress the
-// same way if the delivered-route marker were the only thing keeping it honest.
-// That is precisely why it is here: it drives the real rotator and asserts on
-// the LANFQDN that reaches the node, not on how the decision was made.
+// SAN set does not move when exposure does, and there is deliberately no
+// mechanism that notices it moving. RotateAppLeaf asserts desired state on
+// every delivery instead, which is what makes this test pass for a reason that
+// cannot silently stop being true. It drives the real rotator and asserts on
+// the LANFQDN that reaches the node, never on how the decision was made.
 func TestRotateAppLeaf_RevokingExposureReachesTheNode(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
@@ -60,7 +60,7 @@ func TestRotateAppLeaf_RevokingExposureReachesTheNode(t *testing.T) {
 	}
 	rotate := realRotator(t, ca, t.TempDir(), "home1")
 
-	got := make(chan proto.AppLeafCmd, 3)
+	got := make(chan proto.AppLeafCmd, 4)
 	sub := fakeLeafAgent(t, nc, "n", got)
 	defer sub.Unsubscribe()
 
@@ -102,10 +102,18 @@ func TestRotateAppLeaf_RevokingExposureReachesTheNode(t *testing.T) {
 		t.Error("revoking exposure re-minted the leaf; the cert carries both names and must survive a route change")
 	}
 
-	// 3. And it settles: a second rotation at the same exposure ships nothing.
-	// Exact SAN matching would otherwise re-mint on every sweep forever.
-	if res := RotateAppLeaf(ctx, inv, nc, rotate, app); res.Outcome != LeafUnchanged {
-		t.Fatalf("a settled leaf must not re-ship, got %q", res.Outcome)
+	// 3. A repeat rotation at the same exposure re-asserts the SAME state: it
+	// delivers again (that is the design — assert, don't detect) but must not
+	// re-mint, or every sweep would hand the node a new certificate forever.
+	repeat := RotateAppLeaf(ctx, inv, nc, rotate, app)
+	if repeat.Outcome != LeafShipped {
+		t.Fatalf("desired state is re-asserted every sweep, got outcome %q", repeat.Outcome)
+	}
+	if repeat.Renewed {
+		t.Error("a settled leaf must not be re-minted just because it was re-delivered")
+	}
+	if again := <-got; again.LANFQDN != "" || again.TailnetFQDN != "jellyfin.home1.internal" {
+		t.Errorf("re-assert changed the route: lan=%q tailnet=%q", again.LANFQDN, again.TailnetFQDN)
 	}
 
 	// 4. Granting it back reaches the node too — the reverse edge of the same

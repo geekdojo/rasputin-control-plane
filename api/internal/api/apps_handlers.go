@@ -143,12 +143,11 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 //
 // The flip is not just a database write. The .lan name is a route on the
 // proxy's LAN listener, so revoking it has to reach the node before it means
-// anything. The leaf itself no longer moves — it carries both of the app's
-// names whatever the exposure — so what ships here is the ROUTE, and
-// PrepareAppLeaf reports renewed=true because the node is holding a stale one.
-// Running it NOW rather than at the next sweep is the point of this call.
-// An offline node is not an error: nothing is committed until the node accepts,
-// so the sweep retries and the change lands when the node returns.
+// anything. RotateAppLeaf asserts the app's desired state unconditionally, so
+// the new exposure ships simply by running it — there is no "did anything
+// change?" question to get wrong. Running it NOW rather than at the next sweep
+// is the whole point of this call. An offline node is not an error: the next
+// sweep re-asserts, so the change lands when the node returns.
 func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	app, err := s.apps.Get(r.Context(), id)

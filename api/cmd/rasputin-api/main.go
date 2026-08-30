@@ -514,19 +514,18 @@ func main() {
 			}
 			return buildAppLeafCmd(app, certPEM, keyPEM), nil
 		}
-		// rotateAppLeaf is the disk-backed, renew-gated form used by the rotation
-		// sweep and by the exposure toggle: renewed=true means this app needs a
-		// delivery — either its cert needs replacing or the node is holding a
-		// stale route — and the commit closure records BOTH the PEMs and the
-		// delivered exposure, only after the node accepts (apps.LeafRotator).
+		// rotateAppLeaf is the disk-backed form used by the rotation sweep and by
+		// the exposure toggle. It always returns the app's CURRENT desired state
+		// — RotateAppLeaf delivers it either way — and renewed reports only
+		// whether the cert in it is new, which is what decides the commit
+		// (apps.LeafRotator).
 		rotateAppLeaf = func(app *apps.App) (proto.AppLeafCmd, bool, func() error, error) {
 			dir := filepath.Join(appLeafDir, app.ID)
-			certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(meshCA, dir, clusterID, app.Name, app.ExposeLAN)
+			certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(meshCA, dir, clusterID, app.Name)
 			if err != nil {
 				return proto.AppLeafCmd{}, false, nil, err
 			}
-			exposeLAN := app.ExposeLAN
-			commit := func() error { return mesh.CommitAppLeaf(dir, certPEM, keyPEM, exposeLAN) }
+			commit := func() error { return mesh.CommitAppLeaf(dir, certPEM, keyPEM) }
 			return buildAppLeafCmd(app, certPEM, keyPEM), renewed, commit, nil
 		}
 		removeAppLeaf = func(appID string) error {
