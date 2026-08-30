@@ -141,10 +141,10 @@ type Config struct {
 	// a name — see the package comment.
 	ServerIP func() string
 
-	// probe reports whether serverIP is actually answering for name. Injected
-	// by tests; nil means a real DNS query. See Apply for why a pin that stops
+	// probe reports whether serverIP still has a nameserver listening. Injected
+	// by tests; nil means a real dial. See Apply for why a pin that stops
 	// answering must be withdrawn rather than left in place.
-	probe func(ctx context.Context, serverIP, name string) bool
+	probe func(ctx context.Context, serverIP string) bool
 
 	// Dir is the drop-in directory. Empty means DefaultDir.
 	Dir string
@@ -168,7 +168,7 @@ func (c *Config) applyDefaults() {
 		c.reload = restartResolved
 	}
 	if c.probe == nil {
-		c.probe = answersFor
+		c.probe = reachableNameserver
 	}
 }
 
@@ -230,7 +230,7 @@ func Apply(ctx context.Context, cfg Config) (changed bool, err error) {
 	// nowhere else: if it is dead, the name does not resolve at all, where
 	// without the drop-in mDNS would at least have answered. Being wrong here
 	// is worse than doing nothing, so verify before asserting.
-	if !cfg.probe(ctx, ip, cfg.ClusterID+".local") {
+	if !cfg.probe(ctx, ip) {
 		return withdraw(ctx, cfg, path, fmt.Sprintf("%s is not answering for the cluster name", ip))
 	}
 
@@ -340,23 +340,33 @@ func withdraw(ctx context.Context, cfg Config, path, why string) (bool, error) {
 	return true, fmt.Errorf("clusterdns: withdrew %s — %s; the cluster name falls back to mDNS until this resolves", path, why)
 }
 
-// answersFor reports whether serverIP will answer an A query for name. Asked
-// directly of that server, bypassing the system resolver entirely: the whole
-// question is whether THAT box is serving the cluster's zone, and routing the
-// check through resolved would answer a different question — possibly using the
-// very drop-in we are trying to validate.
-func answersFor(ctx context.Context, serverIP, name string) bool {
+// reachableNameserver reports whether serverIP has a nameserver accepting
+// connections on port 53.
+//
+// A DIRECT DIAL, deliberately, not a resolver lookup. The obvious
+// implementation — net.Resolver with PreferGo and a custom Dial — is wrong
+// here, and wrong silently: Go consults /etc/hosts before it dials, so any
+// hosts entry for the cluster name makes the probe return true WITHOUT EVER
+// CONTACTING the server. Measured while writing this: dialed=false against an
+// unroutable address, because the name was in /etc/hosts.
+//
+// A probe that can pass while the server is dead is worse than no probe at
+// all — it re-arms the black-hole this check exists to prevent.
+//
+// This verifies liveness, not zone contents, and that is the failure mode being
+// guarded: a pinned address going stale or dead. The address comes from our own
+// bus socket, so it is the control plane rather than an impostor; the question
+// is only whether it is still there.
+func reachableNameserver(ctx context.Context, serverIP string) bool {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	r := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, network, net.JoinHostPort(serverIP, "53"))
-		},
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(serverIP, "53"))
+	if err != nil {
+		return false
 	}
-	addrs, err := r.LookupHost(ctx, name)
-	return err == nil && len(addrs) > 0
+	_ = conn.Close()
+	return true
 }
 
 // restartResolved is the production reload. A restart rather than a reload:

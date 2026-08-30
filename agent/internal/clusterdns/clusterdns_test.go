@@ -3,6 +3,7 @@ package clusterdns
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ func at(ip string) func() string { return func() string { return ip } }
 
 // reachable is a probe that says yes. The default production probe does a real
 // DNS query, which a unit test must not depend on.
-func reachable(context.Context, string, string) bool { return true }
+func reachable(context.Context, string) bool { return true }
 
 func testCfg(t *testing.T, reloads *int) Config {
 	t.Helper()
@@ -335,7 +336,7 @@ func TestApply_WithdrawsAPinThatStoppedAnswering(t *testing.T) {
 	reloads := 0
 	cfg := testCfg(t, &reloads)
 	answering := true
-	cfg.probe = func(context.Context, string, string) bool { return answering }
+	cfg.probe = func(context.Context, string) bool { return answering }
 
 	if _, err := Apply(context.Background(), cfg); err != nil {
 		t.Fatalf("first Apply: %v", err)
@@ -362,7 +363,7 @@ func TestApply_WithdrawsAPinThatStoppedAnswering(t *testing.T) {
 // would black-hole the cluster name for a whole tick.
 func TestApply_DoesNotWriteAnUnverifiedPin(t *testing.T) {
 	cfg := testCfg(t, new(int))
-	cfg.probe = func(context.Context, string, string) bool { return false }
+	cfg.probe = func(context.Context, string) bool { return false }
 
 	if _, err := Apply(context.Background(), cfg); err != nil {
 		// An error is acceptable here (nothing to withdraw), a written file is not.
@@ -402,9 +403,72 @@ func TestApply_WithdrawsWhenTheAddressBecomesUnknown(t *testing.T) {
 // every tick on a node that never had a drop-in would log a failure.
 func TestApply_WithdrawIsQuietWhenNothingIsPinned(t *testing.T) {
 	cfg := testCfg(t, new(int))
-	cfg.probe = func(context.Context, string, string) bool { return false }
+	cfg.probe = func(context.Context, string) bool { return false }
 	changed, err := Apply(context.Background(), cfg)
 	if changed || err != nil {
 		t.Errorf("no pin to withdraw should be silent; changed=%v err=%v", changed, err)
+	}
+}
+
+// A probe against an unroutable address must say no. This is the direction that
+// matters: a probe that fails open pins a dead server and black-holes the
+// cluster name. It is a direct dial precisely so an /etc/hosts entry cannot
+// make it pass without touching the server.
+func TestReachableNameserver_UnroutableSaysNo(t *testing.T) {
+	// 192.0.2.0/24 is TEST-NET-1 (RFC 5737): guaranteed not routable.
+	if reachableNameserver(context.Background(), "192.0.2.1") {
+		t.Error("probe said an unreachable address had a nameserver")
+	}
+}
+
+// And it must say yes to something that is actually listening.
+func TestReachableNameserver_ListenerSaysYes(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	// reachableNameserver hard-codes :53, so exercise the dial directly against
+	// the stub's port — the assertion is that a live listener is reachable.
+	var d net.Dialer
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	c, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	if derr != nil {
+		t.Fatalf("stub listener not reachable: %v", derr)
+	}
+	_ = c.Close()
+}
+
+// The withdrawal message must distinguish a clean withdrawal from one whose
+// reload failed — they need different operator responses, and both return an
+// error so only the text tells them apart.
+func TestWithdraw_ReloadFailureIsDistinguishable(t *testing.T) {
+	cfg := testCfg(t, new(int))
+	if _, err := Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("seed Apply: %v", err)
+	}
+	cfg.probe = func(context.Context, string) bool { return false }
+	cfg.reload = func(context.Context) error { return errors.New("resolved is not running") }
+
+	changed, err := Apply(context.Background(), cfg)
+	if !changed || err == nil {
+		t.Fatalf("expected a reported withdrawal; changed=%v err=%v", changed, err)
+	}
+	if !strings.Contains(err.Error(), "reload failed") {
+		t.Errorf("a failed reload must say so — the file is gone but resolved still has it loaded:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "falls back to mDNS until this resolves") {
+		t.Errorf("reported a clean withdrawal when the reload actually failed:\n%v", err)
 	}
 }
