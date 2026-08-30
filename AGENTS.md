@@ -1,7 +1,7 @@
 # rasputin-control-plane — agent instructions
 
 The Go control plane (api + node agent) and web UI for
-[Rasputin](https://rasputin.geekdojo.com) clusters. Pre-alpha, AGPL-3.0.
+[Rasputin](https://rasputin.geekdojo.com) clusters. Alpha, AGPL-3.0.
 
 **Helping a user install or run Rasputin?** Don't work from this repo — fetch the live
 install contract:

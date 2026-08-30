@@ -22,7 +22,7 @@ nodes) and
 [`rasputin-openwrt-firewall`](https://github.com/geekdojo/rasputin-openwrt-firewall)
 (firewall node).
 
-> **Status: pre-alpha.** Rasputin is in its commodity-hardware proof phase.
+> **Status: alpha.** Rasputin is in its commodity-hardware proof phase.
 > APIs, wire formats, and schemas change without notice. Nothing here is
 > ready to protect a network you care about — yet.
 

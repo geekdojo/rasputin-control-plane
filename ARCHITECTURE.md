@@ -1,6 +1,6 @@
 # Rasputin — System Architecture
 
-> **Status: pre-alpha.** Rasputin is in its commodity-hardware proof phase.
+> **Status: alpha.** Rasputin is in its commodity-hardware proof phase.
 > Everything described here is under active development; APIs, wire formats,
 > and image layouts change without notice.
 

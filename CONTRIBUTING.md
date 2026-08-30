@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in Rasputin! The project is **pre-alpha** and
+Thanks for your interest in Rasputin! The project is **alpha** and
 moving fast — issues, questions, and discussion are very welcome, and so is
 patience with churn.
 
