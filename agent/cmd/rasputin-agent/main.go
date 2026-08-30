@@ -408,15 +408,25 @@ func main() {
 	// proportion to minutes of downtime per CP reboot. Tracked on
 	// geekdojo/geekdojo-brain#202.
 	if role != proto.RoleControlPlane {
-		if cpHost, _, aerr := net.SplitHostPort(nc.ConnectedAddr()); aerr != nil {
-			log.Printf("clusterdns: cannot read the bus peer address (%v); not starting", aerr)
-		} else {
-			go clusterdns.Run(ctx, clusterdns.Config{
-				ClusterID: clusterID(),
-				ServerIP:  cpHost,
-				Dir:       envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
-			})
-		}
+		// Read the peer off the socket EVERY time rather than capturing it
+		// once. nats reconnects when the control plane reboots, so this
+		// follows the CP to its new address; a captured string does not, and a
+		// captured string is what pinned five nodes to a dead server the
+		// moment the control plane took a new lease.
+		go clusterdns.Run(ctx, clusterdns.Config{
+			ClusterID: clusterID(),
+			ServerIP: func() string {
+				if nc == nil {
+					return ""
+				}
+				h, _, err := net.SplitHostPort(nc.ConnectedAddr())
+				if err != nil {
+					return ""
+				}
+				return h
+			},
+			Dir: envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
+		})
 	}
 
 	// OS update handlers — every node gets them. The firewall (OpenWrt, no
