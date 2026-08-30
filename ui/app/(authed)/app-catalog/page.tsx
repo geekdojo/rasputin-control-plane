@@ -628,7 +628,22 @@ function ConsentGate({
 // is tailnet-only; on adds the <app>.lan.<cluster-id>.internal name and a LAN
 // bind so other devices on the local network can reach it. It's a real bind, not
 // just a DNS record — tailnet-only apps aren't reachable from the LAN at all.
-function ExposureField({ exposeLan, onChange }: { exposeLan: boolean; onChange: (v: boolean) => void }) {
+// LAN access applies to EVERY app, not just the ones with a web page. An app's
+// .lan name is a DNS record projected from its exposure and its target node —
+// ports and TLS do not enter into it — so a database or a game server is
+// reachable at <app>.lan.<cluster>.internal on its own port exactly the way a
+// web app is reachable at that name over HTTPS. Only the copy differs: a
+// page-less app is dialled by a client on its published port, so promising a
+// link would be a lie.
+function ExposureField({
+  exposeLan,
+  onChange,
+  hasWebPort,
+}: {
+  exposeLan: boolean;
+  onChange: (v: boolean) => void;
+  hasWebPort: boolean;
+}) {
   return (
     <div>
       <SectionLabel>LAN ACCESS</SectionLabel>
@@ -643,7 +658,9 @@ function ExposureField({ exposeLan, onChange }: { exposeLan: boolean; onChange: 
       </div>
       <Hint style={{ marginTop: 6 }}>
         {exposeLan
-          ? 'Devices on your local network can reach it at its .lan name. It stays reachable over your tailnet too.'
+          ? hasWebPort
+            ? 'Devices on your local network can reach it at its .lan name. It stays reachable over your tailnet too.'
+            : 'Devices on your local network can resolve its .lan name and connect to it there on its own port. It stays reachable over your tailnet too.'
           : 'Reachable only over your tailnet — the safe default. Turn on to also let devices on your LAN reach it.'}
       </Hint>
     </div>
@@ -746,9 +763,10 @@ function InstallDrawer({
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
   const preview = tile.status === 'preview';
-  // Only a fronted port is reachable by name over HTTPS, so LAN access is
-  // meaningful only for apps that declare one — hide the toggle for page-less
-  // tiles.
+  // Whether the built-in proxy fronts anything for this tile. It shapes the
+  // COPY on the ports list and the exposure toggle — not whether the toggle is
+  // offered, which it is either way: a page-less app's .lan name is just as
+  // useful, it is simply dialled on its own port instead of opened as a link.
   const hasWebPort = tile.ports.some((p) => p.web);
   // A routine tile is asked nothing; elevated needs the acknowledgement;
   // host-trusting needs the acknowledgement AND the app's id typed back.
@@ -878,7 +896,7 @@ function InstallDrawer({
                 ))}
               </Select>
             </div>
-            {hasWebPort && <ExposureField exposeLan={exposeLan} onChange={setExposeLan} />}
+            <ExposureField exposeLan={exposeLan} onChange={setExposeLan} hasWebPort={hasWebPort} />
             <ConsentGate
               tile={tile}
               consented={consented}
