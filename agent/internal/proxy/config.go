@@ -19,6 +19,7 @@ type AppRoute struct {
 	TailnetFQDN  string // matched on the tailnet listener — always present
 	LANFQDN      string // matched on the LAN listener; "" when the app is tailnet-only
 	UpstreamPort int
+	UpstreamTLS  bool // the app speaks HTTPS on UpstreamPort — dial it over TLS
 	CertPath     string
 	KeyPath      string
 }
@@ -48,7 +49,7 @@ func RenderCaddyConfig(routes []AppRoute, tailnetAddr, lanAddr string, certPort 
 			if r.TailnetFQDN == "" || r.UpstreamPort == 0 {
 				continue
 			}
-			tr = append(tr, httpRoute(r.TailnetFQDN, r.UpstreamPort))
+			tr = append(tr, httpRoute(r.TailnetFQDN, r.UpstreamPort, r.UpstreamTLS))
 		}
 		servers["tailnet"] = httpServer(fmt.Sprintf("%s:%d", tailnetAddr, certPort), tr)
 	}
@@ -58,7 +59,7 @@ func RenderCaddyConfig(routes []AppRoute, tailnetAddr, lanAddr string, certPort 
 			if r.LANFQDN == "" || r.UpstreamPort == 0 {
 				continue // tailnet-only app: no LAN route
 			}
-			lr = append(lr, httpRoute(r.LANFQDN, r.UpstreamPort))
+			lr = append(lr, httpRoute(r.LANFQDN, r.UpstreamPort, r.UpstreamTLS))
 		}
 		servers["lan"] = httpServer(fmt.Sprintf("%s:%d", lanAddr, certPort), lr)
 	}
@@ -104,12 +105,30 @@ func httpServer(listen string, routes []any) map[string]any {
 	}
 }
 
-func httpRoute(host string, upstreamPort int) map[string]any {
+func httpRoute(host string, upstreamPort int, upstreamTLS bool) map[string]any {
+	handler := map[string]any{
+		"handler":   "reverse_proxy",
+		"upstreams": []any{map[string]any{"dial": fmt.Sprintf("127.0.0.1:%d", upstreamPort)}},
+	}
+	if upstreamTLS {
+		// The app serves HTTPS on its own port, so the upstream leg has to be
+		// TLS or Caddy speaks cleartext at a TLS listener (#387).
+		//
+		// Verification is deliberately skipped, and the reason is the dial
+		// address rather than convenience: the upstream is 127.0.0.1 on this
+		// same host, so the connection never touches a network and there is no
+		// one to be in the middle of. A container's self-signed cert asserts
+		// nothing loopback has not already guaranteed. Approved by Bryce
+		// 2026-08-30 on exactly that reasoning — it does NOT generalise to any
+		// upstream that leaves the host, and the dial above is what keeps it
+		// true.
+		handler["transport"] = map[string]any{
+			"protocol": "http",
+			"tls":      map[string]any{"insecure_skip_verify": true},
+		}
+	}
 	return map[string]any{
-		"match": []any{map[string]any{"host": []string{host}}},
-		"handle": []any{map[string]any{
-			"handler":   "reverse_proxy",
-			"upstreams": []any{map[string]any{"dial": fmt.Sprintf("127.0.0.1:%d", upstreamPort)}},
-		}},
+		"match":  []any{map[string]any{"host": []string{host}}},
+		"handle": []any{handler},
 	}
 }

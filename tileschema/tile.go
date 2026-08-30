@@ -80,19 +80,56 @@ var (
 // refuses that tile rather than installing it with no tier, no badge and no
 // consent. Bounded because #162 landed first: before per-tile refusal, one
 // unknown capability cost a cluster its entire catalog.
+//
+// tile.web-port is the second (Decision 13, #387). Renaming Port.Primary to
+// Port.Web is NOT an additive change, and Decision 7's tolerance is what makes
+// that dangerous: an older reader ignores the field it does not recognise,
+// finds no primary, and — with the count now relaxed to zero-or-one — concludes
+// a web app is page-less. Jellyfin would load, install, and simply have no way
+// to open it. A tile carrying this capability is refused instead, out loud, by
+// any reader that cannot read its web port. Silent degradation is the failure
+// mode Requires exists to prevent; this is the first rename to need it.
 var KnownCapabilities = map[string]bool{
 	CapabilityPrivilegeTiers: true,
+	CapabilityWebPort:        true,
 }
 
 // Port is a structured published port. The reverse proxy must route
-// <app>.<zone> to a concrete host port without parsing compose, so every
-// web-facing tile declares its ports here and marks exactly one Primary.
+// <app>.<zone> to a concrete host port without parsing compose, so a tile with
+// a web UI declares its ports here and marks (at most) one of them Web.
 type Port struct {
 	Name      string `json:"name"`
 	Container int    `json:"container"`
 	Published int    `json:"published"`
 	Protocol  string `json:"protocol,omitempty"` // "tcp" (default) | "udp"
-	Primary   bool   `json:"primary,omitempty"`
+	// Web marks the port serving this app's web UI — the one the node-local
+	// reverse proxy fronts, and the one an OPEN affordance points at.
+	//
+	// It replaces the former Primary (ADR-0006 Decision 13, 2026-08-30), which
+	// conflated two questions: "which port does the proxy front?" and "does
+	// this app have a page at all?". A tile could only answer the first, so a
+	// database or a game server had to nominate a port it did not want fronted
+	// — which is exactly what the minecraft tile did with TCP 25565, earning
+	// itself a certificate and an HTTPS route pointed at a game socket. Bryce,
+	// 2026-08-30: "marking port 3306 (on mysql) as primary does not really
+	// serve any purpose."
+	//
+	// NO web port is now a legitimate, declared shape: the app has no page, the
+	// proxy fronts nothing for it, and the UI offers no OPEN.
+	Web bool `json:"web,omitempty"`
+	// TLS says the app speaks HTTPS on this port, so the proxy's upstream leg
+	// must too. Absent means plaintext HTTP, which is what nearly every tile
+	// serves behind a proxy.
+	//
+	// It has to be DECLARED because the port number does not imply it. Bryce,
+	// 2026-08-30: "I have seen apps where the main site is on 443 and the admin
+	// interface is on 8443." Guessing from the number ships a tile that half
+	// works.
+	//
+	// This is the Caddy→container leg only. What the operator is handed is
+	// unchanged and always https — the proxy terminates TLS with the app's
+	// Mesh-CA leaf, and this port never appears in that URL.
+	TLS bool `json:"tls,omitempty"`
 }
 
 // Tile is one catalog entry as AUTHORED — the hand-written tile.json. Facts
@@ -258,13 +295,26 @@ func (t Tile) DeclaredPrivilege() Privilege {
 // Available reports whether the tile can be installed now.
 func (t Tile) Available() bool { return t.Status != StatusPreview }
 
-// PrimaryPort returns the published host port the reverse proxy fronts, or 0
-// if the tile declares none (a headless tile).
-func (t Tile) PrimaryPort() int {
+// WebPort returns the published host port the reverse proxy fronts, or 0 if the
+// tile declares no web port — a page-less app (a database, a game server, a
+// headless sync backend). 0 is what makes an app headless the whole way down:
+// no leaf is minted, no proxy route is rendered, and the UI offers no OPEN.
+func (t Tile) WebPort() int {
 	for _, p := range t.Ports {
-		if p.Primary {
+		if p.Web {
 			return p.Published
 		}
 	}
 	return 0
+}
+
+// WebPortTLS reports whether the web port speaks HTTPS, so the proxy's upstream
+// leg must too. False for a tile with no web port, which has no upstream leg.
+func (t Tile) WebPortTLS() bool {
+	for _, p := range t.Ports {
+		if p.Web {
+			return p.TLS
+		}
+	}
+	return false
 }

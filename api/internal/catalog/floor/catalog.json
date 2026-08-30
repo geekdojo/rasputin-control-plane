@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "version": 1,
-  "publishedAt": "2026-08-21T02:05:22Z",
-  "source": "geekdojo/rasputin-app-catalog@f778a07f40eec7871af943f72b17e227d483277b",
+  "version": 14,
+  "publishedAt": "2026-08-30T17:18:49Z",
+  "source": "geekdojo/rasputin-app-catalog@c8adfb7a0223b96bcc5ff54fcc7c4481133be3a8",
   "tiles": [
     {
       "tile": {
@@ -15,70 +15,28 @@
         "placementHint": "",
         "ramFloorMB": 256,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 5006,
+            "published": 5006,
+            "protocol": "tcp",
+            "web": true
+          }
+        ],
         "category": "productivity",
-        "status": "preview",
         "website": "https://actualbudget.org",
         "icon": "💰",
-        "postInstall": "Open it and create your budget file — everything stays local."
+        "postInstall": "Open it and create your budget file — everything stays local.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  actual-budget:\n    image: actualbudget/actual-server:26.8.1@sha256:6478d9ddfc0924479c09e6699c205e354c6f2216dfe7de3c0fb7b590d6edcdc5\n    restart: unless-stopped\n    volumes:\n      - actual-data:/data\n    ports:\n      - \"5006:5006\"\n\nvolumes:\n  actual-data:\n",
       "safety": {
-        "images": null,
-        "privileged": false,
-        "hostNetwork": false,
-        "hostPidOrIpc": false
-      }
-    },
-    {
-      "tile": {
-        "id": "adsb-ultrafeeder",
-        "name": "ADS-B Feeder",
-        "tagline": "See the planes flying over your house.",
-        "description": "Decode ADS-B with a cheap SDR and watch a live map + 24h heatmap. Feeds the community aggregators and FlightAware.",
-        "collection": "dongle",
-        "arch": "both",
-        "placementHint": "",
-        "ramFloorMB": 512,
-        "needsHardware": "rtl-sdr",
-        "exposureDefault": "lan-only",
-        "ports": null,
-        "category": "radio",
-        "status": "preview",
-        "website": "https://github.com/sdr-enthusiasts/docker-adsb-ultrafeeder",
-        "icon": "✈️",
-        "postInstall": "Plug in your RTL-SDR + 1090MHz antenna, then open the map. Antenna placement drives your range."
-      },
-      "compose": "",
-      "safety": {
-        "images": null,
-        "privileged": false,
-        "hostNetwork": false,
-        "hostPidOrIpc": false
-      }
-    },
-    {
-      "tile": {
-        "id": "ais-catcher",
-        "name": "AIS-catcher",
-        "tagline": "Track ships in real time on a live map.",
-        "description": "Decode marine AIS with an SDR and see cargo ships and ferries on a built-in map. Best near navigable water.",
-        "collection": "dongle",
-        "arch": "both",
-        "placementHint": "",
-        "ramFloorMB": 256,
-        "needsHardware": "rtl-sdr",
-        "exposureDefault": "lan-only",
-        "ports": null,
-        "category": "radio",
-        "status": "preview",
-        "website": "https://github.com/jvde-github/AIS-catcher",
-        "icon": "🚢",
-        "postInstall": "Plug in your RTL-SDR + VHF antenna near the coast, then open the map."
-      },
-      "compose": "",
-      "safety": {
-        "images": null,
+        "images": [
+          "actualbudget/actual-server:26.8.1@sha256:6478d9ddfc0924479c09e6699c205e354c6f2216dfe7de3c0fb7b590d6edcdc5"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -95,16 +53,49 @@
         "placementHint": "",
         "ramFloorMB": 2048,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "sonarr",
+            "container": 8989,
+            "published": 8989,
+            "protocol": "tcp",
+            "web": true
+          },
+          {
+            "name": "radarr",
+            "container": 7878,
+            "published": 7878,
+            "protocol": "tcp"
+          },
+          {
+            "name": "prowlarr",
+            "container": 9696,
+            "published": 9696,
+            "protocol": "tcp"
+          },
+          {
+            "name": "qbittorrent",
+            "container": 8090,
+            "published": 8090,
+            "protocol": "tcp"
+          }
+        ],
         "category": "media",
-        "status": "preview",
         "website": "https://wiki.servarr.com",
         "icon": "🎞️",
-        "postInstall": "Configure your indexers in Prowlarr and connect qBittorrent — set up a VPN before you do."
+        "postInstall": "Configure your indexers in Prowlarr and connect qBittorrent — set up a VPN before you do.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  prowlarr:\n    image: ghcr.io/linuxserver/prowlarr:2.5.2.5491-ls156@sha256:1295cff29d10b486c0d8324d1559a552140a5932bf8b3d87e398654414f63f92\n    restart: unless-stopped\n    environment: \u0026arrenv\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: UTC\n    volumes:\n      - prowlarr-config:/config\n    ports:\n      - \"9696:9696\"\n\n  sonarr:\n    image: ghcr.io/linuxserver/sonarr:4.0.19.2979-ls322@sha256:c19aa4ecdf03d73e1d5c901da33744cb7eb4d921f89bafed1ca264601d7fa224\n    restart: unless-stopped\n    environment: *arrenv\n    volumes:\n      - sonarr-config:/config\n      - arr-media:/media\n    ports:\n      - \"8989:8989\"\n\n  radarr:\n    image: ghcr.io/linuxserver/radarr:6.3.0.10514-ls313@sha256:a45b5ab0f850f39edb4cc9c95bbd967b52ddc3d4574a4dfb45561177db6c88f4\n    restart: unless-stopped\n    environment: *arrenv\n    volumes:\n      - radarr-config:/config\n      - arr-media:/media\n    ports:\n      - \"7878:7878\"\n\n  qbittorrent:\n    image: ghcr.io/linuxserver/qbittorrent:5.2.3_v2.0.14-ls473@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99\n    restart: unless-stopped\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: UTC\n      WEBUI_PORT: \"8090\"\n    volumes:\n      - qbittorrent-config:/config\n      - arr-media:/media\n    ports:\n      - \"8090:8090\"\n\nvolumes:\n  prowlarr-config:\n  sonarr-config:\n  radarr-config:\n  qbittorrent-config:\n  arr-media:\n",
       "safety": {
-        "images": null,
+        "images": [
+          "ghcr.io/linuxserver/prowlarr:2.5.2.5491-ls156@sha256:1295cff29d10b486c0d8324d1559a552140a5932bf8b3d87e398654414f63f92",
+          "ghcr.io/linuxserver/qbittorrent:5.2.3_v2.0.14-ls473@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99",
+          "ghcr.io/linuxserver/radarr:6.3.0.10514-ls313@sha256:a45b5ab0f850f39edb4cc9c95bbd967b52ddc3d4574a4dfb45561177db6c88f4",
+          "ghcr.io/linuxserver/sonarr:4.0.19.2979-ls322@sha256:c19aa4ecdf03d73e1d5c901da33744cb7eb4d921f89bafed1ca264601d7fa224"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -127,13 +118,16 @@
             "container": 80,
             "published": 13378,
             "protocol": "tcp",
-            "primary": true
+            "web": true
           }
         ],
         "category": "media",
         "website": "https://github.com/advplyr/audiobookshelf",
         "icon": "🎧",
-        "postInstall": "Open it, create your admin account, then add an audiobook or podcast library folder."
+        "postInstall": "Open it, create your admin account, then add an audiobook or podcast library folder.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
       "compose": "# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  audiobookshelf:\n    image: ghcr.io/advplyr/audiobookshelf:2.36.0@sha256:180acad33d69c99ed208676465d8edcb268fa46967735579a7810859885b1a8e\n    restart: unless-stopped\n    volumes:\n      - abs-config:/config\n      - abs-metadata:/metadata\n      - abs-audiobooks:/audiobooks\n      - abs-podcasts:/podcasts\n    ports:\n      - \"13378:80\"\n\nvolumes:\n  abs-config:\n  abs-metadata:\n  abs-audiobooks:\n  abs-podcasts:\n",
       "safety": {
@@ -156,16 +150,28 @@
         "placementHint": "",
         "ramFloorMB": 256,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 80,
+            "published": 8082,
+            "protocol": "tcp",
+            "web": true
+          }
+        ],
         "category": "productivity",
-        "status": "preview",
         "website": "https://freshrss.org",
         "icon": "📰",
-        "postInstall": "Open it, create your account, and add a few feeds to get started."
+        "postInstall": "Open it, create your account, and add a few feeds to get started.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  freshrss:\n    image: freshrss/freshrss:1.29.1@sha256:ab6b363102ccdbc39f6a62db926f567c61a5289bf25ba460f1c34423d8cc1a4d\n    restart: unless-stopped\n    environment:\n      TZ: UTC\n      CRON_MIN: \"13,43\"\n    volumes:\n      - freshrss-data:/var/www/FreshRSS/data\n      - freshrss-extensions:/var/www/FreshRSS/extensions\n    ports:\n      - \"8082:80\"\n\nvolumes:\n  freshrss-data:\n  freshrss-extensions:\n",
       "safety": {
-        "images": null,
+        "images": [
+          "freshrss/freshrss:1.29.1@sha256:ab6b363102ccdbc39f6a62db926f567c61a5289bf25ba460f1c34423d8cc1a4d"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -182,18 +188,40 @@
         "placementHint": "",
         "ramFloorMB": 1024,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 8123,
+            "published": 8123,
+            "protocol": "tcp",
+            "web": true
+          }
+        ],
         "category": "automation",
-        "status": "preview",
         "website": "https://www.home-assistant.io",
         "icon": "🏠",
-        "postInstall": "Open it and follow the onboarding wizard to create your account and add your first devices."
+        "postInstall": "Open it and follow the onboarding wizard to create your account and add your first devices.",
+        "requires": [
+          "privilege-tiers-v1",
+          "tile.web-port"
+        ],
+        "privilege": {
+          "tier": "elevated",
+          "grants": [
+            "host-network"
+          ],
+          "why": "Home Assistant shares your LAN directly so it can discover your devices; without that it still runs, but finds almost nothing to control."
+        },
+        "deployBudgetSeconds": 900
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  # Home Assistant refuses a proxied request outright — 400 Bad Request, empty body —\n  # when it sees an X-Forwarded-For header it was not told to expect. The node-local\n  # Caddy always sets that header, so out of the box every LAN request to this tile\n  # failed (bench, 2026-08-23). This one-shot seeds the trust settings BEFORE Home\n  # Assistant starts, and exits.\n  #\n  # WHY THE SETTINGS GO IN .storage/http AND NOT configuration.yaml\n  #\n  # Since 2026.8 the HTTP settings live in the store at /config/.storage/http, and\n  # `http:` in configuration.yaml is a deprecated one-shot import (it breaks in\n  # 2027.2.0). The store holds TWO slots, `stable` and `pending`. An imported YAML\n  # `http:` block lands in `pending`, and a pending config is a TRIAL: unless an\n  # admin promotes it within five minutes, Home Assistant logs\n  #\n  #   Pending HTTP config was not confirmed within 0:05:00; reverting to the\n  #   stable config and restarting\n  #\n  # marks it `not_promoted`, never applies it again, and restarts on `stable` —\n  # which has no proxy trust in it. Promotion is a websocket call behind\n  # @require_admin, and on a fresh install NO ACCOUNT EXISTS YET, so there is\n  # nobody who can confirm it. That is why seeding configuration.yaml alone made\n  # this tile work for exactly five minutes and then permanently un-work itself\n  # (bench, 2026-08-29).\n  #\n  # So the seed writes the settings straight into the `stable` slot with no\n  # `pending` alongside. Nothing to confirm, nothing to revert, no restart. It is\n  # the same file Home Assistant itself writes on every install, in the schema\n  # version this pinned image defines (2.2, read off a running instance) — and if\n  # a future image ever moves that schema, Home Assistant's own store migration\n  # handles it, and its documented failure path is \"discard and fall back to\n  # defaults\", i.e. back to the 400 this tile started at rather than anything\n  # worse. The image is digest-pinned, so that only ever arrives with a\n  # deliberate bump.\n  #\n  # `yaml_migration_done: true` tells Home Assistant the store is already the\n  # source of truth, so it never stages a YAML import. Correspondingly there is\n  # no `http:` block in the seeded configuration.yaml: with the migration marked\n  # done, one present there would only raise a \"your YAML is being ignored\"\n  # repair notice.\n  #\n  # Both files are seeded only if absent, so a reinstall or an upgrade never\n  # clobbers an owner's edits — and an owner who wants to change these settings\n  # has Settings \u003e System \u003e Network in the UI, which promotes its own pending\n  # config properly.\n  #\n  # It runs the same pinned Home Assistant image rather than a shell image on purpose:\n  # nothing new to pull, nothing new to arch-probe, nothing new to vouch for.\n  home-assistant-config-seed:\n    image: ghcr.io/home-assistant/home-assistant:2026.8.3@sha256:14931c6b13756317849f46da1d01b45937a1150db66c081cfe529d48215943fe\n    restart: \"no\"\n    entrypoint:\n      - /bin/sh\n      - -c\n      - |\n        set -eu\n        mkdir -p /config/.storage\n\n        if [ -f /config/configuration.yaml ]; then\n          echo \"configuration.yaml already present - leaving it alone\"\n        else\n          cat \u003e /config/configuration.yaml \u003c\u003c'YAML'\n        # Seeded by Rasputin when this app was installed.\n        #\n        # Home Assistant is reached through the node-local reverse proxy, which\n        # forwards your real client address in X-Forwarded-For. Home Assistant has\n        # to be told to trust that proxy or it answers every request with\n        # 400 Bad Request.\n        #\n        # Those trust settings are NOT in this file. Since 2026.8 they live in the\n        # store, and Rasputin seeded them there when it installed this app. Change\n        # them in the UI under Settings \u003e System \u003e Network, not here — an `http:`\n        # block added to this file is now ignored.\n\n        default_config:\n\n        automation: !include automations.yaml\n        script: !include scripts.yaml\n        scene: !include scenes.yaml\n        YAML\n          printf '%s\\n' '[]' \u003e /config/automations.yaml\n          printf '%s\\n' '{}' \u003e /config/scripts.yaml\n          printf '%s\\n' '[]' \u003e /config/scenes.yaml\n          echo \"seeded /config/configuration.yaml\"\n        fi\n\n        if [ -f /config/.storage/http ]; then\n          echo \".storage/http already present - leaving it alone\"\n        else\n          # $$ is a literal $ — compose interpolates the compose file before the\n          # shell ever sees this script.\n          now=\"$$(date -u '+%Y-%m-%dT%H:%M:%S+00:00')\"\n          cat \u003e /config/.storage/http \u003c\u003cJSON\n        {\n          \"version\": 2,\n          \"minor_version\": 2,\n          \"key\": \"http\",\n          \"data\": {\n            \"stable\": {\n              \"server_port\": 8123,\n              \"use_x_forwarded_for\": true,\n              \"trusted_proxies\": [\n                \"127.0.0.1/32\",\n                \"::1/128\"\n              ],\n              \"login_attempts_threshold\": -1,\n              \"ip_ban_enabled\": true,\n              \"cors_allowed_origins\": [\n                \"https://cast.home-assistant.io\"\n              ],\n              \"ssl_profile\": \"modern\",\n              \"use_x_frame_options\": true,\n              \"created_at\": \"$$now\",\n              \"error\": null,\n              \"error_message\": null\n            },\n            \"pending\": null,\n            \"yaml_migration_done\": true\n          }\n        }\n        JSON\n          chmod 600 /config/.storage/http\n          echo \"seeded /config/.storage/http\"\n        fi\n    volumes:\n      - homeassistant-config:/config\n\n  home-assistant:\n    image: ghcr.io/home-assistant/home-assistant:2026.8.3@sha256:14931c6b13756317849f46da1d01b45937a1150db66c081cfe529d48215943fe\n    restart: unless-stopped\n    depends_on:\n      home-assistant-config-seed:\n        condition: service_completed_successfully\n    # Host networking is what makes local discovery work — mDNS, SSDP, DHCP\n    # sniffing and matter/thread all need the LAN broadcast domain directly.\n    # In bridge mode Home Assistant runs but finds almost nothing, which is\n    # the feature people install it for. Declared, not silent.\n    network_mode: host\n    environment:\n      TZ: UTC\n    volumes:\n      - homeassistant-config:/config\n\nvolumes:\n  homeassistant-config:\n",
       "safety": {
-        "images": null,
+        "images": [
+          "ghcr.io/home-assistant/home-assistant:2026.8.3@sha256:14931c6b13756317849f46da1d01b45937a1150db66c081cfe529d48215943fe",
+          "ghcr.io/home-assistant/home-assistant:2026.8.3@sha256:14931c6b13756317849f46da1d01b45937a1150db66c081cfe529d48215943fe"
+        ],
         "privileged": false,
-        "hostNetwork": false,
+        "hostNetwork": true,
         "hostPidOrIpc": false
       }
     },
@@ -208,16 +236,31 @@
         "placementHint": "prefer-x86",
         "ramFloorMB": 8192,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 2283,
+            "published": 2283,
+            "protocol": "tcp",
+            "web": true
+          }
+        ],
         "category": "photos",
-        "status": "preview",
         "website": "https://github.com/immich-app/immich",
         "icon": "📸",
-        "postInstall": "Open it, create your admin account, install the mobile app, and turn on auto-backup. Runs its ML best on the x86 node."
+        "postInstall": "Open it, create your admin account, install the mobile app, and turn on auto-backup. Runs its ML best on the x86 node.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  immich-server:\n    image: ghcr.io/immich-app/immich-server:v3.1.0@sha256:b434cb9287eea1471c9974845914d4dd328c9c2d652e446ed4930f99944f0ceb\n    restart: unless-stopped\n    depends_on:\n      - redis\n      - database\n    environment:\n      DB_HOSTNAME: database\n      DB_USERNAME: immich\n      DB_DATABASE_NAME: immich\n      # Internal to this stack's network — postgres publishes no port.\n      DB_PASSWORD: immich\n      REDIS_HOSTNAME: redis\n    volumes:\n      - immich-upload:/data\n    ports:\n      - \"2283:2283\"\n\n  immich-machine-learning:\n    image: ghcr.io/immich-app/immich-machine-learning:v3.1.0@sha256:5a0839dc5303cd7215bcd2180a26aed3af41675aefb3e75e5157e9f10ad16e6e\n    restart: unless-stopped\n    volumes:\n      - immich-model-cache:/cache\n\n  redis:\n    image: valkey/valkey:9@sha256:70739f85ad2ee01a726a965584a0f94895f01b0c60b3cc8b0aeef11eaa6888cf\n    restart: unless-stopped\n\n  database:\n    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23\n    restart: unless-stopped\n    environment:\n      POSTGRES_USER: immich\n      POSTGRES_PASSWORD: immich\n      POSTGRES_DB: immich\n      POSTGRES_INITDB_ARGS: \"--data-checksums\"\n    volumes:\n      - immich-db:/var/lib/postgresql/data\n\nvolumes:\n  immich-upload:\n  immich-model-cache:\n  immich-db:\n",
       "safety": {
-        "images": null,
+        "images": [
+          "ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23",
+          "ghcr.io/immich-app/immich-machine-learning:v3.1.0@sha256:5a0839dc5303cd7215bcd2180a26aed3af41675aefb3e75e5157e9f10ad16e6e",
+          "ghcr.io/immich-app/immich-server:v3.1.0@sha256:b434cb9287eea1471c9974845914d4dd328c9c2d652e446ed4930f99944f0ceb",
+          "valkey/valkey:9@sha256:70739f85ad2ee01a726a965584a0f94895f01b0c60b3cc8b0aeef11eaa6888cf"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -240,13 +283,16 @@
             "container": 8096,
             "published": 8096,
             "protocol": "tcp",
-            "primary": true
+            "web": true
           }
         ],
         "category": "media",
         "website": "https://github.com/jellyfin/jellyfin",
         "icon": "🎬",
-        "postInstall": "Open it to run the setup wizard: create your admin user and add a media library folder."
+        "postInstall": "Open it to run the setup wizard: create your admin user and add a media library folder.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
       "compose": "# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  jellyfin:\n    image: jellyfin/jellyfin:10.11.11@sha256:aefb67e6a7ff1debdd154a78a7bbb780fd0c873d8639210a7f6a2016ad2b35db\n    restart: unless-stopped\n    volumes:\n      - jellyfin-config:/config\n      - jellyfin-cache:/cache\n      - jellyfin-media:/media\n    ports:\n      - \"8096:8096\"\n\nvolumes:\n  jellyfin-config:\n  jellyfin-cache:\n  jellyfin-media:\n",
       "safety": {
@@ -269,16 +315,29 @@
         "placementHint": "",
         "ramFloorMB": 1024,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 3000,
+            "published": 3000,
+            "protocol": "tcp",
+            "web": true
+          }
+        ],
         "category": "productivity",
-        "status": "preview",
         "website": "https://github.com/karakeep-app/karakeep",
         "icon": "🔖",
-        "postInstall": "Open it, create your account; AI tagging needs the Ollama tile or an API key."
+        "postInstall": "Open it, create your account; AI tagging needs the Ollama tile or an API key.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  karakeep:\n    image: ghcr.io/karakeep-app/karakeep:0.33.2@sha256:b069e4307dec06ea06d16989c6861c30a1ff208568be44ed5fb5d422cd3e950c\n    restart: unless-stopped\n    depends_on:\n      - meilisearch\n    environment:\n      MEILI_ADDR: http://meilisearch:7700\n      # Both must be replaced with unique values before this tile ships.\n      NEXTAUTH_SECRET: change-me-on-first-run\n      MEILI_MASTER_KEY: change-me-on-first-run\n      NEXTAUTH_URL: http://localhost:3000\n      DISABLE_NEW_RELEASE_CHECK: \"true\"\n      # Bookmark crawling wants a headless Chrome sidecar upstream ships\n      # separately; without it link previews degrade but the app runs.\n      CRAWLER_ENABLED: \"false\"\n    volumes:\n      - karakeep-data:/data\n    ports:\n      - \"3000:3000\"\n\n  meilisearch:\n    image: getmeili/meilisearch:v1.53.1@sha256:8d6643d86d71fad6ad3cba92cde7ccfce9e4d6c384bda67598eb553571c32431\n    restart: unless-stopped\n    environment:\n      MEILI_NO_ANALYTICS: \"true\"\n      MEILI_MASTER_KEY: change-me-on-first-run\n    volumes:\n      - karakeep-meili:/meili_data\n\nvolumes:\n  karakeep-data:\n  karakeep-meili:\n",
       "safety": {
-        "images": null,
+        "images": [
+          "ghcr.io/karakeep-app/karakeep:0.33.2@sha256:b069e4307dec06ea06d16989c6861c30a1ff208568be44ed5fb5d422cd3e950c",
+          "getmeili/meilisearch:v1.53.1@sha256:8d6643d86d71fad6ad3cba92cde7ccfce9e4d6c384bda67598eb553571c32431"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -295,16 +354,28 @@
         "placementHint": "",
         "ramFloorMB": 512,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 9000,
+            "published": 9000,
+            "protocol": "tcp",
+            "web": true
+          }
+        ],
         "category": "productivity",
-        "status": "preview",
         "website": "https://github.com/mealie-recipes/mealie",
         "icon": "🍲",
-        "postInstall": "Open it, create your account, and paste a recipe URL to import your first recipe."
+        "postInstall": "Open it, create your account, and paste a recipe URL to import your first recipe.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  mealie:\n    image: ghcr.io/mealie-recipes/mealie:v3.23.1@sha256:5fc5cebedddb3952c1ee78f20faf42ab7e49986813fd314745aa97978a4a13eb\n    restart: unless-stopped\n    environment:\n      ALLOW_SIGNUP: \"false\"\n      TZ: UTC\n    volumes:\n      - mealie-data:/app/data\n    ports:\n      - \"9000:9000\"\n\nvolumes:\n  mealie-data:\n",
       "safety": {
-        "images": null,
+        "images": [
+          "ghcr.io/mealie-recipes/mealie:v3.23.1@sha256:5fc5cebedddb3952c1ee78f20faf42ab7e49986813fd314745aa97978a4a13eb"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -321,16 +392,27 @@
         "placementHint": "",
         "ramFloorMB": 2048,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "game",
+            "container": 25565,
+            "published": 25565,
+            "protocol": "tcp"
+          }
+        ],
         "category": "games",
-        "status": "preview",
         "website": "https://github.com/itzg/docker-minecraft-server",
         "icon": "⛏️",
-        "postInstall": "Point your Minecraft client at \u003cnode\u003e.local:25565 to join."
+        "postInstall": "This one has no web page — you join it from the Minecraft client. Connect to \u003capp\u003e.\u003ccluster-id\u003e.internal on port 25565 over your tailnet, or \u003capp\u003e.lan.\u003ccluster-id\u003e.internal from your local network if you turned LAN access on. \u003capp\u003e is the name you gave this install; \u003ccluster-id\u003e is your cluster's id.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  minecraft:\n    image: itzg/minecraft-server:2026.8.2@sha256:efa878ddb49cf5251b2e5f2ad71b08fd2f7236c1f7907433f6697258b31d2ce4\n    restart: unless-stopped\n    environment:\n      # Mojang's EULA (https://aka.ms/MinecraftEULA). The server refuses to\n      # start without this; accepting it here means the catalog accepts on the\n      # owner's behalf at install time.\n      EULA: \"TRUE\"\n      # NOTE: the IMAGE is digest-pinned, but VERSION=LATEST makes the image\n      # download whatever Minecraft server build is current at first run — so\n      # the game version is NOT pinned and two installs can differ. Pin it to a\n      # specific version before this tile goes available.\n      VERSION: \"LATEST\"\n      TYPE: \"VANILLA\"\n      MEMORY: \"2G\"\n    volumes:\n      - minecraft-data:/data\n    ports:\n      - \"25565:25565\"\n\nvolumes:\n  minecraft-data:\n",
       "safety": {
-        "images": null,
+        "images": [
+          "itzg/minecraft-server:2026.8.2@sha256:efa878ddb49cf5251b2e5f2ad71b08fd2f7236c1f7907433f6697258b31d2ce4"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -353,13 +435,16 @@
             "container": 4533,
             "published": 4533,
             "protocol": "tcp",
-            "primary": true
+            "web": true
           }
         ],
         "category": "media",
         "website": "https://github.com/navidrome/navidrome",
         "icon": "🎵",
-        "postInstall": "Open it and create your admin account, then point it at your music folder."
+        "postInstall": "Open it and create your admin account, then point it at your music folder.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
       "compose": "# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  navidrome:\n    image: deluan/navidrome:0.63.2@sha256:9012939114fbb1bb641b81cf96dec5ded15f0aafefe8d47a511d7cb919658e40\n    restart: unless-stopped\n    environment:\n      ND_LOGLEVEL: info\n    volumes:\n      - navidrome-data:/data\n      - navidrome-music:/music:ro\n    ports:\n      - \"4533:4533\"\n\nvolumes:\n  navidrome-data:\n  navidrome-music:\n",
       "safety": {
@@ -382,88 +467,28 @@
         "placementHint": "prefer-x86",
         "ramFloorMB": 4096,
         "exposureDefault": "lan-only",
-        "ports": null,
-        "category": "ai",
-        "status": "preview",
-        "website": "https://github.com/open-webui/open-webui",
-        "icon": "🤖",
-        "postInstall": "Open it, create your account, then pull a small model (llama3.2:3b) — bigger models crawl on CPU."
-      },
-      "compose": "",
-      "safety": {
-        "images": null,
-        "privileged": false,
-        "hostNetwork": false,
-        "hostPidOrIpc": false
-      }
-    },
-    {
-      "tile": {
-        "id": "paperless-ngx",
-        "name": "Paperless-ngx",
-        "tagline": "Scan, OCR, and search every document.",
-        "description": "Turn your paper into a searchable archive. Drop a PDF and get full-text OCR search — 'it found my tax form' is a real minor wow.",
-        "collection": "everyday",
-        "arch": "both",
-        "placementHint": "",
-        "ramFloorMB": 1024,
-        "exposureDefault": "lan-only",
-        "ports": null,
-        "category": "productivity",
-        "status": "preview",
-        "website": "https://github.com/paperless-ngx/paperless-ngx",
-        "icon": "📄",
-        "postInstall": "Open it, create your admin account, then drop PDFs into the consume folder or upload from the web."
-      },
-      "compose": "",
-      "safety": {
-        "images": null,
-        "privileged": false,
-        "hostNetwork": false,
-        "hostPidOrIpc": false
-      }
-    },
-    {
-      "tile": {
-        "id": "pi-hole",
-        "name": "Pi-hole",
-        "tagline": "Network-wide ad blocking — watch the counter climb.",
-        "description": "Point your network's DNS at Pi-hole and every device gets ad and tracker blocking, with a live dashboard of what it caught. The classic first self-hosted app. Change the admin password before exposing it.",
-        "collection": "essentials",
-        "arch": "both",
-        "placementHint": "any",
-        "ramFloorMB": 512,
-        "exposureDefault": "lan-only",
         "ports": [
           {
             "name": "web",
-            "container": 80,
-            "published": 8081,
+            "container": 8080,
+            "published": 3080,
             "protocol": "tcp",
-            "primary": true
-          },
-          {
-            "name": "dns-tcp",
-            "container": 53,
-            "published": 53,
-            "protocol": "tcp"
-          },
-          {
-            "name": "dns-udp",
-            "container": 53,
-            "published": 53,
-            "protocol": "udp"
+            "web": true
           }
         ],
-        "category": "network",
-        "website": "https://github.com/pi-hole/pi-hole",
-        "icon": "🛡️",
-        "postInstall": "The admin password is a placeholder ('changeme') — log in and change it in Settings, then point your devices' DNS at this node."
+        "category": "ai",
+        "website": "https://github.com/open-webui/open-webui",
+        "icon": "🤖",
+        "postInstall": "Open it, create your account, then pull a small model (llama3.2:3b) — bigger models crawl on CPU.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\n# Set a real admin password before exposing this beyond the LAN.\nservices:\n  pihole:\n    image: pihole/pihole:2026.07.2@sha256:f7d1be836e3bc608b56d82fc9904f5a831cdfbc0dc9c6d58f94e4c985c70038b\n    restart: unless-stopped\n    environment:\n      TZ: \"Etc/UTC\"\n      FTLCONF_webserver_api_password: \"changeme\"\n    volumes:\n      - pihole-config:/etc/pihole\n    ports:\n      - \"8081:80/tcp\"\n      - \"53:53/tcp\"\n      - \"53:53/udp\"\n\nvolumes:\n  pihole-config:\n",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  ollama:\n    image: ollama/ollama:0.32.15@sha256:57d60e686821ea81a7748a3ec8141308c8b8f95b27105713954abf7a6529e700\n    restart: unless-stopped\n    volumes:\n      - ollama-models:/root/.ollama\n\n  open-webui:\n    image: ghcr.io/open-webui/open-webui:v0.11.0@sha256:72c0ba641ba75e7aa52655cb242570906ececd09b1140fb736483038a22b3228\n    restart: unless-stopped\n    depends_on:\n      - ollama\n    environment:\n      OLLAMA_BASE_URL: http://ollama:11434\n      WEBUI_AUTH: \"true\"\n    volumes:\n      - open-webui-data:/app/backend/data\n    ports:\n      - \"3080:8080\"\n\nvolumes:\n  ollama-models:\n  open-webui-data:\n",
       "safety": {
         "images": [
-          "pihole/pihole:2026.07.2@sha256:f7d1be836e3bc608b56d82fc9904f5a831cdfbc0dc9c6d58f94e4c985c70038b"
+          "ollama/ollama:0.32.15@sha256:57d60e686821ea81a7748a3ec8141308c8b8f95b27105713954abf7a6529e700",
+          "ghcr.io/open-webui/open-webui:v0.11.0@sha256:72c0ba641ba75e7aa52655cb242570906ececd09b1140fb736483038a22b3228"
         ],
         "privileged": false,
         "hostNetwork": false,
@@ -481,43 +506,29 @@
         "placementHint": "",
         "ramFloorMB": 1024,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 8080,
+            "published": 8084,
+            "protocol": "tcp",
+            "web": true
+          }
+        ],
         "category": "games",
-        "status": "preview",
         "website": "https://github.com/rommapp/romm",
         "icon": "🕹️",
-        "postInstall": "Open it, create your account, and point it at your ROMs folder."
+        "postInstall": "Open it, create your account, and point it at your ROMs folder.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  romm:\n    image: rommapp/romm:5.2.0@sha256:3512f2ca455782f90247271bed23116e6bc675bc74e379be2c41696e607ab11e\n    restart: unless-stopped\n    depends_on:\n      - romm-db\n    environment:\n      DB_HOST: romm-db\n      DB_NAME: romm\n      DB_USER: romm\n      # Internal to this stack's network — mariadb publishes no port.\n      DB_PASSWD: romm\n      ROMM_AUTH_SECRET_KEY: change-me-on-first-run\n    volumes:\n      - romm-resources:/romm/resources\n      - romm-config:/romm/config\n      - romm-library:/romm/library\n      - romm-assets:/romm/assets\n    ports:\n      - \"8084:8080\"\n\n  romm-db:\n    image: mariadb:12.3.2@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc\n    restart: unless-stopped\n    environment:\n      MARIADB_DATABASE: romm\n      MARIADB_USER: romm\n      MARIADB_PASSWORD: romm\n      MARIADB_ROOT_PASSWORD: romm-root\n    volumes:\n      - romm-db:/var/lib/mysql\n\nvolumes:\n  romm-resources:\n  romm-config:\n  romm-library:\n  romm-assets:\n  romm-db:\n",
       "safety": {
-        "images": null,
-        "privileged": false,
-        "hostNetwork": false,
-        "hostPidOrIpc": false
-      }
-    },
-    {
-      "tile": {
-        "id": "rtl-433",
-        "name": "rtl_433",
-        "tagline": "Decode your neighborhood's wireless sensors.",
-        "description": "Sniff 433MHz sensors — weather stations, tire-pressure, thermometers — with a cheap SDR and pipe them to MQTT.",
-        "collection": "dongle",
-        "arch": "both",
-        "placementHint": "",
-        "ramFloorMB": 256,
-        "needsHardware": "rtl-sdr",
-        "exposureDefault": "lan-only",
-        "ports": null,
-        "category": "radio",
-        "status": "preview",
-        "website": "https://github.com/merbanan/rtl_433",
-        "icon": "📡",
-        "postInstall": "Plug in your RTL-SDR; decoded sensor data flows to MQTT and into your dashboards."
-      },
-      "compose": "",
-      "safety": {
-        "images": null,
+        "images": [
+          "rommapp/romm:5.2.0@sha256:3512f2ca455782f90247271bed23116e6bc675bc74e379be2c41696e607ab11e",
+          "mariadb:12.3.2@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -538,42 +549,35 @@
           "AISStream"
         ],
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 3000,
+            "published": 3200,
+            "protocol": "tcp",
+            "web": true
+          },
+          {
+            "name": "api",
+            "container": 8000,
+            "published": 8200,
+            "protocol": "tcp"
+          }
+        ],
         "category": "data",
-        "status": "preview",
         "website": "https://github.com/bigbodycobain/shadowbroker",
         "icon": "🛰️",
-        "postInstall": "Open it and add your OpenSky / AISStream keys in settings for full flight + ship coverage."
+        "postInstall": "Open it and add your OpenSky / AISStream keys in settings for full flight + ship coverage.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\n#\n# UPSTREAM DEFAULTS DELIBERATELY OVERRIDDEN. Shadowbroker ships with its\n# peer-to-peer \"Infonet\" ON: MESH_INFONET_FLEET_JOIN defaults to true and\n# MESH_BOOTSTRAP_SEED_PEERS defaults to a hard-coded .onion address. A tile\n# that quietly enrols an owner's appliance into a third-party mesh on install\n# is not a default we can make for them, so every mesh switch is pinned off\n# here. Turning it on is an informed choice, made once, by the owner.\nservices:\n  backend:\n    image: ghcr.io/bigbodycobain/shadowbroker-backend:0.9.84@sha256:8b4bfdc01da491c37c0523ffbcb5dc3beb29324805abd35fcef436ae11511f18\n    restart: unless-stopped\n    environment:\n      # Infonet OFF. See the header — these five are the whole switch.\n      MESH_INFONET_FLEET_JOIN: \"false\"\n      MESH_BOOTSTRAP_SEED_PEERS: \"\"\n      MESH_INFONET_ALLOW_CLEARNET_SYNC: \"false\"\n      MESH_ARTI_ENABLED: \"false\"\n      MESH_RELAY_PEERS: \"\"\n      # Optional upstream data sources. GDELT works with no key at all, so the\n      # console is useful out of the box; the rest light up as keys are added.\n      AIS_API_KEY: \"\"\n      OPENSKY_CLIENT_ID: \"\"\n      OPENSKY_CLIENT_SECRET: \"\"\n      GFW_API_TOKEN: \"\"\n      WINDY_API_KEY: \"\"\n      FINNHUB_API_KEY: \"\"\n      AIRFRAMES_API_KEY: \"\"\n    volumes:\n      - shadowbroker-data:/app/data\n    ports:\n      - \"8200:8000\"\n\n  frontend:\n    image: ghcr.io/bigbodycobain/shadowbroker-frontend:0.9.84@sha256:c509735c2a0ba75f300db82e16270bc983fb11c33f57f4c027cba4b9721bb48f\n    restart: unless-stopped\n    depends_on:\n      - backend\n    environment:\n      BACKEND_URL: http://backend:8000\n    ports:\n      - \"3200:3000\"\n\nvolumes:\n  shadowbroker-data:\n",
       "safety": {
-        "images": null,
-        "privileged": false,
-        "hostNetwork": false,
-        "hostPidOrIpc": false
-      }
-    },
-    {
-      "tile": {
-        "id": "trilium",
-        "name": "Trilium Notes",
-        "tagline": "A personal knowledge base and wiki.",
-        "description": "A hierarchical note-taking app — great for documenting your homelab. Single container, embedded database.",
-        "collection": "everyday",
-        "arch": "both",
-        "placementHint": "",
-        "ramFloorMB": 256,
-        "exposureDefault": "lan-only",
-        "ports": null,
-        "category": "productivity",
-        "status": "preview",
-        "website": "https://github.com/TriliumNext/Trilium",
-        "icon": "📓",
-        "postInstall": "Open it, set your password, and start a note tree."
-      },
-      "compose": "",
-      "safety": {
-        "images": null,
+        "images": [
+          "ghcr.io/bigbodycobain/shadowbroker-backend:0.9.84@sha256:8b4bfdc01da491c37c0523ffbcb5dc3beb29324805abd35fcef436ae11511f18",
+          "ghcr.io/bigbodycobain/shadowbroker-frontend:0.9.84@sha256:c509735c2a0ba75f300db82e16270bc983fb11c33f57f4c027cba4b9721bb48f"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false
@@ -596,18 +600,21 @@
             "container": 3001,
             "published": 3001,
             "protocol": "tcp",
-            "primary": true
+            "web": true
           }
         ],
         "category": "monitoring",
         "website": "https://github.com/louislam/uptime-kuma",
         "icon": "🟢",
-        "postInstall": "Open it and create your admin account on the first screen, then add your first monitor."
+        "postInstall": "Open it and create your admin account on the first screen, then add your first monitor.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "# On 2.x. The raw CVE count is higher than 1.23.17 (1475 vs 176) and that number\n# is misleading: v2's OWN dependencies are better (92 fixable in node+go vs 174),\n# and the difference is 1383 fixable Debian CVEs from a stale base layer that\n# upstream fixes by rebuilding. Different owner, different remediation.\n#\n# Staying on 1.x was the wrong call for a second reason: 1.23.17 shipped\n# 2025-10-20 and is the only 1.x release in twenty months, while 2.x has had\n# eight. A branch that no longer gets fixes does not stay at 176.\n#\n# Still owed: an ACC-1 bench, since this is a major version.\n#\n# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  uptime-kuma:\n    image: louislam/uptime-kuma:2.5.0@sha256:a8610b3b4c38077922ba51b036691e06887d7cefd91fe620fd3d6d23d03dc240\n    restart: unless-stopped\n    volumes:\n      - uptime-kuma-data:/app/data\n    ports:\n      - \"3001:3001\"\n\nvolumes:\n  uptime-kuma-data:\n",
+      "compose": "# On 2.x. The raw CVE count is higher than 1.23.17 (1475 vs 176) and that number\n# is misleading: v2's OWN dependencies are better (92 fixable in node+go vs 174),\n# and the difference is 1383 fixable Debian CVEs from a stale base layer that\n# upstream fixes by rebuilding. Different owner, different remediation.\n#\n# Staying on 1.x was the wrong call for a second reason: 1.23.17 shipped\n# 2025-10-20 and is the only 1.x release in twenty months, while 2.x has had\n# eight. A branch that no longer gets fixes does not stay at 176.\n#\n# Still owed: an ACC-1 bench, since this is a major version.\n#\n# Version is provisional — the ACC-1 bench gate re-pins before ship. The DIGEST is\n# what actually fixes the contents: a tag is mutable at the registry however\n# specific it looks, so the tag here is human-readable sugar and the digest is the\n# pin (ADR-0006 Decision 8).\nservices:\n  uptime-kuma:\n    image: louislam/uptime-kuma:2.5.3@sha256:3e24e96c89efff0e3a4b0698cbdd36c15ad3022371db57166e5588853002ee5c\n    restart: unless-stopped\n    volumes:\n      - uptime-kuma-data:/app/data\n    ports:\n      - \"3001:3001\"\n\nvolumes:\n  uptime-kuma-data:\n",
       "safety": {
         "images": [
-          "louislam/uptime-kuma:2.5.0@sha256:a8610b3b4c38077922ba51b036691e06887d7cefd91fe620fd3d6d23d03dc240"
+          "louislam/uptime-kuma:2.5.3@sha256:3e24e96c89efff0e3a4b0698cbdd36c15ad3022371db57166e5588853002ee5c"
         ],
         "privileged": false,
         "hostNetwork": false,
@@ -625,43 +632,28 @@
         "placementHint": "",
         "ramFloorMB": 256,
         "exposureDefault": "lan-only",
-        "ports": null,
+        "ports": [
+          {
+            "name": "web",
+            "container": 80,
+            "published": 8083,
+            "protocol": "tcp",
+            "web": true
+          }
+        ],
         "category": "security",
-        "status": "preview",
         "website": "https://github.com/dani-garcia/vaultwarden",
         "icon": "🔒",
-        "postInstall": "Open it, create your admin account, then install the Bitwarden browser extension and point it here."
+        "postInstall": "Open it, create your admin account, then install the Bitwarden browser extension and point it here.",
+        "requires": [
+          "tile.web-port"
+        ]
       },
-      "compose": "",
+      "compose": "# The DIGEST is the pin — a tag stays mutable at the registry however specific it\n# looks, so the tag here is human-readable sugar (ADR-0006 Decision 8). Version is\n# provisional until the tile clears the hardware bench.\nservices:\n  vaultwarden:\n    image: vaultwarden/server:1.37.2@sha256:094b5689ed81549bd293418395c7cf495ae9d960fc2d4928cef2083ef913d912\n    restart: unless-stopped\n    environment:\n      # Signups stay open only until the owner creates their account; close it\n      # from the admin page after first login.\n      SIGNUPS_ALLOWED: \"true\"\n    volumes:\n      - vaultwarden-data:/data\n    ports:\n      - \"8083:80\"\n\nvolumes:\n  vaultwarden-data:\n",
       "safety": {
-        "images": null,
-        "privileged": false,
-        "hostNetwork": false,
-        "hostPidOrIpc": false
-      }
-    },
-    {
-      "tile": {
-        "id": "weewx",
-        "name": "WeeWX",
-        "tagline": "Your own weather station dashboard.",
-        "description": "Publish and archive readings from a real personal weather station. Pairs with an Ecowitt gateway (local LAN) or WeatherFlow Tempest.",
-        "collection": "dongle",
-        "arch": "both",
-        "placementHint": "",
-        "ramFloorMB": 256,
-        "needsHardware": "weather-station",
-        "exposureDefault": "lan-only",
-        "ports": null,
-        "category": "radio",
-        "status": "preview",
-        "website": "https://weewx.com",
-        "icon": "🌦️",
-        "postInstall": "Point it at your Ecowitt gateway (local LAN) or WeatherFlow Tempest."
-      },
-      "compose": "",
-      "safety": {
-        "images": null,
+        "images": [
+          "vaultwarden/server:1.37.2@sha256:094b5689ed81549bd293418395c7cf495ae9d960fc2d4928cef2083ef913d912"
+        ],
         "privileged": false,
         "hostNetwork": false,
         "hostPidOrIpc": false

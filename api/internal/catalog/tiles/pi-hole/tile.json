@@ -14,7 +14,7 @@
       "container": 80,
       "published": 8081,
       "protocol": "tcp",
-      "primary": true
+      "web": true
     },
     {
       "name": "dns-tcp",

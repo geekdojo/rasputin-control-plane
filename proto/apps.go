@@ -183,6 +183,12 @@ type AppLeafCmd struct {
 	LANFQDN     string `json:"lanFqdn,omitempty"`
 	// UpstreamPort is the app's loopback port the node-local Caddy proxies to.
 	UpstreamPort int `json:"upstreamPort,omitempty"`
+	// UpstreamTLS says the app speaks HTTPS on UpstreamPort, so the proxy must
+	// dial it over TLS rather than cleartext. From the tile's web port (#387);
+	// absent for the overwhelming majority of apps, which serve plain HTTP
+	// behind the proxy. This is the Caddy→container leg only — what the
+	// operator is handed is https either way.
+	UpstreamTLS bool `json:"upstreamTls,omitempty"`
 	// Remove tears the leaf down (app delete / re-target). When true the other
 	// fields are ignored and the app's proxy state is removed.
 	Remove bool `json:"remove,omitempty"`

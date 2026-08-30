@@ -438,30 +438,39 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
           )}
         </div>
 
-        {access && (
-          <div>
-            <SectionLabel>LAN ACCESS</SectionLabel>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <EnabledToggle
-                enabled={exposeLan}
-                onToggle={() => {
-                  if (!exposureBusy) void toggleExposure();
-                }}
-                aria-label={`LAN access for ${app.name}`}
-                title={exposeLan ? 'Reachable on your LAN — click for tailnet-only' : 'Tailnet only — click to allow LAN access'}
-              />
-              <span style={{ color: FG, fontSize: 10 }}>
-                {exposureBusy ? 'saving…' : exposeLan ? 'Reachable on your LAN' : 'Tailnet only'}
-              </span>
-            </div>
-            <Hint warn={!!exposureNote} style={{ marginTop: 6 }}>
-              {exposureNote ??
-                (exposeLan
-                  ? 'Devices on your local network can reach it at its .lan name. Turn this off to withdraw it — the app and its data stay put.'
-                  : 'Reachable only over your tailnet. Turning this on adds the .lan name and a LAN bind.')}
-            </Hint>
+        {/*
+          Offered for EVERY app, not only the ones with a web page. An app's
+          .lan name is a DNS record projected from its exposure and its target
+          node — it does not consult ports or TLS — so a page-less app (a
+          database, a game server) is reachable at that name on its own port
+          just as a web app is reachable there over HTTPS. Gating this on
+          `access` meant a page-less app could never be given its .lan name at
+          all, which for a database is the whole point of LAN access.
+        */}
+        <div>
+          <SectionLabel>LAN ACCESS</SectionLabel>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <EnabledToggle
+              enabled={exposeLan}
+              onToggle={() => {
+                if (!exposureBusy) void toggleExposure();
+              }}
+              aria-label={`LAN access for ${app.name}`}
+              title={exposeLan ? 'Reachable on your LAN — click for tailnet-only' : 'Tailnet only — click to allow LAN access'}
+            />
+            <span style={{ color: FG, fontSize: 10 }}>
+              {exposureBusy ? 'saving…' : exposeLan ? 'Reachable on your LAN' : 'Tailnet only'}
+            </span>
           </div>
-        )}
+          <Hint warn={!!exposureNote} style={{ marginTop: 6 }}>
+            {exposureNote ??
+              (exposeLan
+                ? access
+                  ? 'Devices on your local network can reach it at its .lan name. Turn this off to withdraw it — the app and its data stay put.'
+                  : 'Devices on your local network can resolve its .lan name and connect to it there on its own port. Turn this off to withdraw the name — the app and its data stay put.'
+                : 'Reachable only over your tailnet. Turning this on adds the .lan name' + (access ? ' and a LAN bind.' : '.'))}
+          </Hint>
+        </div>
 
         {tile?.postInstall && (
           <div>

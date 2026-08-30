@@ -14,9 +14,17 @@ type App struct {
 	Name        string `json:"name"`
 	ComposeYAML string `json:"composeYaml"`
 	TargetNode  string `json:"targetNode"`
-	// PublishedPort is the primary host port the reverse proxy fronts for this
-	// app (0 = none). Seeded from the catalog tile at install. See app-access.md.
+	// PublishedPort is the host port the reverse proxy fronts for this app
+	// (0 = none — a page-less app). Seeded from the catalog tile's web port at
+	// install. See app-access.md.
 	PublishedPort int `json:"publishedPort,omitempty"`
+	// WebTLS says the app serves HTTPS on PublishedPort, so the proxy's upstream
+	// leg must be TLS too. Copied from the tile's web port at install (#387),
+	// for the same reason DeployBudgetSeconds is: the route is re-asserted to
+	// the node from THIS record on every rotation sweep, so a scheme read back
+	// from the catalog could change under a running install — or be missing
+	// entirely if the tile were withdrawn.
+	WebTLS bool `json:"webTls,omitempty"`
 	// SourceTile is the catalog tile id this app was installed from ("" for a
 	// custom-compose app). Lets the UI show the tile's docs + first-run note (AP-9).
 	SourceTile string `json:"sourceTile,omitempty"`

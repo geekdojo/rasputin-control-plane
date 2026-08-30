@@ -51,6 +51,7 @@ func handleLeaf(store *LeafStore, reconcile func() error, m *nats.Msg) {
 		TailnetFQDN:  cmd.TailnetFQDN,
 		LANFQDN:      cmd.LANFQDN,
 		UpstreamPort: cmd.UpstreamPort,
+		UpstreamTLS:  cmd.UpstreamTLS,
 	}); err != nil {
 		bus.Respond(m, proto.AppLeafAck{OK: false, Detail: err.Error()})
 		log.Printf("rasputin-agent: app.leaf write %s: %v", cmd.AppID, err)

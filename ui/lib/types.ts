@@ -268,9 +268,12 @@ export interface App {
   name: string;
   composeYaml: string;
   targetNode: string;
-  // Primary host port the reverse proxy fronts (0/absent = none). Seeded from
-  // the catalog tile at install. See app-access.md.
+  // Host port the reverse proxy fronts (0/absent = none — a page-less app).
+  // Seeded from the catalog tile's web port at install. See app-access.md.
   publishedPort?: number;
+  // The app serves HTTPS on publishedPort, so the proxy dials its upstream over
+  // TLS. Copied from the tile's web port at install (#387).
+  webTls?: boolean;
   // Catalog tile id this app was installed from ('' / absent = custom compose).
   sourceTile?: string;
   // Whether the app is LAN-exposed (ADR-0004 §9). Default false: tailnet-only —
@@ -304,7 +307,15 @@ export interface CatalogPort {
   container: number;
   published: number;
   protocol?: 'tcp' | 'udp';
-  primary?: boolean;
+  // The port serving this app's web UI — the one the node-local reverse proxy
+  // fronts and the one OPEN points at. Absent on every port means the app has
+  // no page (a database, a game server), which is a declared shape rather than
+  // an omission (ADR-0006 Decision 13). Renamed from `primary` in #387.
+  web?: boolean;
+  // The app speaks HTTPS on this port, so the proxy's upstream leg must too.
+  // Declared because the port number does not imply it. Affects the
+  // proxy→container leg only; what the operator opens is https either way.
+  tls?: boolean;
 }
 
 export type { PrivilegeTier, TilePrivilege } from './privilege';
