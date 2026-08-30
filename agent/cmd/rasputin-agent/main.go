@@ -393,7 +393,13 @@ func main() {
 	//     every cluster-name query into a closed port.
 	//   - everything else: the live bus socket's peer. Never a name lookup —
 	//     resolving a name is precisely what we are here to repair.
-	if cpAddr, why := clusterDNSServerIP(role, nc); cpAddr == "" {
+	busPeer := func() string {
+		if nc == nil {
+			return ""
+		}
+		return nc.ConnectedAddr()
+	}
+	if cpAddr, why := clusterDNSServerIP(role, host.PrimaryLANIP, busPeer); cpAddr == "" {
 		log.Printf("clusterdns: %s; not starting", why)
 	} else {
 		go clusterdns.Run(ctx, clusterdns.Config{
@@ -761,19 +767,25 @@ func clusterName() string {
 // LAN address, because that is where the CP nameserver binds. Every other role
 // points at the control plane it is already connected to on the bus, read off
 // the socket so no name has to resolve for name resolution to be repaired.
-func clusterDNSServerIP(role proto.NodeRole, nc *nats.Conn) (ip, why string) {
+// Both inputs are passed as functions rather than resolved here so every branch
+// is reachable from a test. Taking a *nats.Conn instead left the malformed-peer
+// path unreachable without a live bus, and made the no-LAN-IP path depend on
+// the test machine's own networking — a test that skips on any developer laptop
+// is not covering anything.
+func clusterDNSServerIP(role proto.NodeRole, lanIP, busPeer func() string) (ip, why string) {
 	if role == proto.RoleControlPlane {
-		if lan := host.PrimaryLANIP(); lan != "" {
+		if lan := lanIP(); lan != "" {
 			return lan, ""
 		}
 		return "", "control plane has no LAN IPv4 to point its own cluster names at"
 	}
-	if nc == nil {
+	peer := busPeer()
+	if peer == "" {
 		return "", "no bus connection to read the control-plane address from"
 	}
-	h, _, err := net.SplitHostPort(nc.ConnectedAddr())
+	h, _, err := net.SplitHostPort(peer)
 	if err != nil {
-		return "", fmt.Sprintf("cannot read the bus peer address (%v)", err)
+		return "", fmt.Sprintf("cannot read the bus peer address %q (%v)", peer, err)
 	}
 	return h, ""
 }
