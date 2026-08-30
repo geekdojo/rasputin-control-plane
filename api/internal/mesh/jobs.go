@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -606,7 +608,7 @@ func enrollMintKey(svc *Service) jobs.DoFn {
 	}
 }
 
-func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
+func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		s, err := enrollSessionFrom(sc, "mint_key")
 		if err != nil {
@@ -615,8 +617,36 @@ func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
 		if s.KeyValue == "" {
 			return nil, errors.New("no auth key from mint_key step (saga state lost?)")
 		}
+		// The control plane reaches Headscale on ITSELF. Enrolling it against
+		// the cluster's public name makes its own tailscaled resolve
+		// <cluster>.local to get there, and mDNS answers that with every
+		// address the box has — including docker-bridge and link-local ones.
+		// Dialling an fe80:: without a zone index errors outright, so the
+		// control plane spends ~2m20s off its own mesh after each reboot before
+		// it retries into a usable address (measured twice on e3bench,
+		// geekdojo/geekdojo-brain#202).
+		//
+		// Loopback removes the name from that path entirely. The mesh leaf
+		// already carries 127.0.0.1 in its SANs (see supervisor_docker.go
+		// ensureLeaf), and Headscale accepts a client dialling a URL that
+		// differs from its configured server_url — verified on e3bench
+		// 2026-08-30, the client stays on it rather than being redirected.
+		//
+		// Enrolment-time only, deliberately. Changing an already-enrolled
+		// node's control URL needs `tailscale up --force-reauth`, which mints a
+		// NEW registration: the node gets a new tailnet IP and leaves a
+		// duplicate Headscale entry that nothing prunes automatically. Not
+		// worth forcing on existing clusters for a transient, self-healing,
+		// LAN-invisible delay — they pick this up when next re-provisioned.
+		loginServer := svc.cfg.LoginServer
+		if isControlPlaneNode(sc.Ctx, inv, s.NodeID) {
+			loginServer = loopbackLoginServer(svc.cfg.LoginServer)
+			if loginServer != svc.cfg.LoginServer {
+				sc.Log("info", fmt.Sprintf("%s is the control plane — enrolling against %s so its own tailscaled needs no name resolution", s.NodeID, loginServer))
+			}
+		}
 		cmd, _ := json.Marshal(proto.MeshEnrollCmd{
-			LoginServer:     svc.cfg.LoginServer,
+			LoginServer:     loginServer,
 			AuthKey:         s.KeyValue,
 			Hostname:        s.NodeID,
 			AdvertiseRoutes: s.AdvertiseRoutes,
@@ -671,6 +701,38 @@ func enrollDispatch(svc *Service, _ *inventory.Store) jobs.DoFn {
 			short(s.HSID), s.HSIP, ack.Backend))
 		return json.Marshal(s)
 	}
+}
+
+// isControlPlaneNode reports whether nodeID is this cluster's control plane.
+// A lookup failure answers false: the cluster's normal login server is always
+// correct, just occasionally slow for the control plane, so an unknown role
+// degrades to the existing behaviour rather than to something novel.
+func isControlPlaneNode(ctx context.Context, inv *inventory.Store, nodeID string) bool {
+	if inv == nil || nodeID == "" {
+		return false
+	}
+	n, err := inv.Get(ctx, nodeID)
+	if err != nil || n == nil {
+		return false
+	}
+	return n.Role == proto.RoleControlPlane
+}
+
+// loopbackLoginServer rewrites a login server URL to point at loopback,
+// preserving scheme and port. Returns the input unchanged if it cannot be
+// parsed or carries no host — the caller then enrols against the cluster name
+// exactly as before, which works, so there is nothing to gain by failing here.
+func loopbackLoginServer(loginServer string) string {
+	u, err := url.Parse(loginServer)
+	if err != nil || u.Host == "" {
+		return loginServer
+	}
+	if port := u.Port(); port != "" {
+		u.Host = net.JoinHostPort("127.0.0.1", port)
+	} else {
+		u.Host = "127.0.0.1"
+	}
+	return u.String()
 }
 
 func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
