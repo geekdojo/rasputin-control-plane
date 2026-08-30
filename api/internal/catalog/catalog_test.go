@@ -29,8 +29,11 @@ func TestShippedCatalogLoads(t *testing.T) {
 			if tile.ComposeYAML == "" {
 				t.Errorf("tile %q: available but empty compose", tile.ID)
 			}
-			if len(tile.Ports) > 0 && tile.PrimaryPort() == 0 {
-				t.Errorf("tile %q: has ports but no primary", tile.ID)
+			// No web-port assertion: a tile may legitimately declare ports it
+			// does not want fronted, or none at all (ADR-0006 Decision 13).
+			// What must hold is that the accessors agree with the declaration.
+			if tile.WebPort() == 0 && tile.WebPortTLS() {
+				t.Errorf("tile %q: claims upstream TLS with no web port", tile.ID)
 			}
 		} else {
 			preview++
@@ -89,7 +92,7 @@ func baseTile() map[string]string {
 			"arch": "both",
 			"ramFloorMB": 128,
 			"exposureDefault": "lan-only",
-			"ports": [{"name":"web","container":80,"published":8080,"primary":true}]
+			"ports": [{"name":"web","container":80,"published":8080,"web":true}]
 		}`,
 		"docker-compose.yml": "services:\n  demo:\n    image: traefik/whoami\n",
 	}
@@ -116,17 +119,21 @@ func TestValidateTile_Guards(t *testing.T) {
 			mutate:  func(f map[string]string) { f["tile.json"] = replaceID(f["tile.json"], "Demo_App") },
 		},
 		{
-			name:    "guard1 ports without primary",
-			tileErr: "primary",
+			// Ports with no web port is a PAGE-LESS app and must load — the
+			// shape a database or a game server wants (Decision 13). It was a
+			// load error until 2026-08-30, which is what this case used to
+			// assert.
+			name:    "ports without a web port is valid",
+			tileErr: "",
 			mutate: func(f map[string]string) {
-				f["tile.json"] = `{"id":"demo","name":"Demo","tagline":"x","collection":"everyday","arch":"both","ramFloorMB":128,"exposureDefault":"lan-only","ports":[{"name":"web","container":80,"published":8080}]}`
+				f["tile.json"] = `{"id":"demo","name":"Demo","tagline":"x","collection":"everyday","arch":"both","ramFloorMB":128,"exposureDefault":"lan-only","ports":[{"name":"sql","container":3306,"published":3306}]}`
 			},
 		},
 		{
-			name:    "guard1 two primaries",
-			tileErr: "primary",
+			name:    "guard1 two web ports",
+			tileErr: "web",
 			mutate: func(f map[string]string) {
-				f["tile.json"] = `{"id":"demo","name":"Demo","tagline":"x","collection":"everyday","arch":"both","ramFloorMB":128,"exposureDefault":"lan-only","ports":[{"name":"a","container":80,"published":8080,"primary":true},{"name":"b","container":81,"published":8081,"primary":true}]}`
+				f["tile.json"] = `{"id":"demo","name":"Demo","tagline":"x","collection":"everyday","arch":"both","ramFloorMB":128,"exposureDefault":"lan-only","ports":[{"name":"a","container":80,"published":8080,"web":true},{"name":"b","container":81,"published":8081,"web":true}]}`
 			},
 		},
 		{

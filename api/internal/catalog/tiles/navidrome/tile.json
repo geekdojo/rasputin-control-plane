@@ -14,7 +14,7 @@
       "container": 4533,
       "published": 4533,
       "protocol": "tcp",
-      "primary": true
+      "web": true
     }
   ],
   "website": "https://github.com/navidrome/navidrome",

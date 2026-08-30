@@ -13,7 +13,7 @@ func okTile() Tile {
 		ID: "uptime-kuma", Name: "Uptime Kuma", Tagline: "Watch your things",
 		Collection: CollectionEssentials, Arch: "both", ExposureDefault: "lan-only",
 		RAMFloorMB: 512, ComposeYAML: "services: {}",
-		Ports: []Port{{Name: "web", Container: 3001, Published: 3001, Primary: true}},
+		Ports: []Port{{Name: "web", Container: 3001, Published: 3001, Web: true}},
 	}
 }
 
@@ -50,13 +50,18 @@ func TestValidateTile_Rejects(t *testing.T) {
 		{"published port zero", func(x *Tile) { x.Ports[0].Published = 0 }},
 		{"bad protocol", func(x *Tile) { x.Ports[0].Protocol = "sctp" }},
 		{"available with empty compose", func(x *Tile) { x.ComposeYAML = "  " }},
-		{"two primaries", func(x *Tile) {
-			x.Ports = append(x.Ports, Port{Name: "b", Container: 2, Published: 2, Primary: true})
+		{"two web ports", func(x *Tile) {
+			x.Ports = append(x.Ports, Port{Name: "b", Container: 2, Published: 2, Web: true})
 		}},
-		{"zero primaries", func(x *Tile) { x.Ports[0].Primary = false }},
-		{"public with no primary", func(x *Tile) {
+		// NOT here any more: "zero web ports". A tile that declares ports and
+		// marks none of them web is a page-less app, which is now a legal and
+		// deliberate shape (Decision 13) — see TestValidateTile_PageLessTileIsValid.
+		{"public with no web port", func(x *Tile) {
 			x.ExposureDefault = "public"
 			x.Ports = nil
+		}},
+		{"tls without web", func(x *Tile) {
+			x.Ports = append(x.Ports, Port{Name: "b", Container: 2, Published: 2, TLS: true})
 		}},
 	}
 	for _, tc := range cases {
@@ -392,5 +397,62 @@ func TestTile_DeployBudgetJSONRoundTrip(t *testing.T) {
 	}
 	if back.DeployBudgetSeconds != 900 {
 		t.Fatalf("budget did not survive the round trip: got %d", back.DeployBudgetSeconds)
+	}
+}
+
+// A tile may declare ports it does not want fronted, or no ports at all. Both
+// are page-less apps — a database, a game server, a headless sync backend — and
+// ADR-0006 Decision 13 makes them a declared shape rather than a rejection.
+//
+// The rule this replaces refused precisely the first case: `len(ports) > 0 &&
+// primaries != 1` meant a tile could not say "clients dial 3306, front none of
+// it". That is why the minecraft tile marked its game port primary and got an
+// HTTPS route pointed at a Minecraft socket for its trouble.
+func TestValidateTile_PageLessTileIsValid(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ports []Port
+	}{
+		{"declares a port it does not want fronted", []Port{{Name: "sql", Container: 3306, Published: 3306, Protocol: "tcp"}}},
+		{"declares several, none web", []Port{
+			{Name: "game", Container: 25565, Published: 25565, Protocol: "tcp"},
+			{Name: "rcon", Container: 25575, Published: 25575, Protocol: "tcp"},
+		}},
+		{"declares no ports at all", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := okTile()
+			x.Ports = tc.ports
+			if err := ValidateTile(x); err != nil {
+				t.Fatalf("a page-less tile must validate, got: %v", err)
+			}
+			if got := x.WebPort(); got != 0 {
+				t.Errorf("WebPort() = %d, want 0 — nothing is fronted for a page-less app", got)
+			}
+			if x.WebPortTLS() {
+				t.Error("WebPortTLS() must be false when there is no web port")
+			}
+		})
+	}
+}
+
+// The web port carries the upstream scheme, and it has to be read off the port
+// that is actually marked web — not the first port, and not guessed from the
+// number. Bryce, 2026-08-30: "I have seen apps where the main site is on 443
+// and the admin interface is on 8443."
+func TestTile_WebPortAndTLS(t *testing.T) {
+	x := okTile()
+	x.Ports = []Port{
+		{Name: "metrics", Container: 9090, Published: 9090, Protocol: "tcp"},
+		{Name: "web", Container: 8443, Published: 8443, Protocol: "tcp", Web: true, TLS: true},
+	}
+	if err := ValidateTile(x); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := x.WebPort(); got != 8443 {
+		t.Errorf("WebPort() = %d, want 8443 (the port marked web, not the first one)", got)
+	}
+	if !x.WebPortTLS() {
+		t.Error("WebPortTLS() = false, want true")
 	}
 }

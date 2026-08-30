@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS apps (
     source_tile     TEXT NOT NULL DEFAULT '',  -- catalog tile id this app was installed from ('' = custom compose)
     deploy_budget_s INTEGER NOT NULL DEFAULT 0, -- per-app deploy budget in seconds from the tile (0 = default)
     expose_lan      INTEGER NOT NULL DEFAULT 0, -- LAN exposure opt-in (0 = tailnet-only default); ADR-0004 §9
+    web_tls         INTEGER NOT NULL DEFAULT 0, -- the app serves HTTPS on published_port, so dial the upstream over TLS (#387)
     last_status     TEXT NOT NULL DEFAULT 'stopped',
     last_detail     TEXT NOT NULL DEFAULT '',
     last_deployed   INTEGER,
@@ -47,4 +48,10 @@ var migrations = []string{
 	// installed before this column existed — and 0 maps to the default, not to
 	// zero patience. See proto.AppDeployWorkFor.
 	`ALTER TABLE apps ADD COLUMN deploy_budget_s INTEGER NOT NULL DEFAULT 0`,
+	// web_tls: the app speaks HTTPS on published_port, so the node-local proxy
+	// must dial its upstream over TLS (#387). 0 — plain HTTP — is right for
+	// every app installed before this column existed and for nearly every app
+	// since; a tile has to declare it, because the port number does not imply
+	// it. Only the Caddy→container leg is affected.
+	`ALTER TABLE apps ADD COLUMN web_tls INTEGER NOT NULL DEFAULT 0`,
 }

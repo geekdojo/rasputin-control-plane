@@ -14,7 +14,7 @@
       "container": 8096,
       "published": 8096,
       "protocol": "tcp",
-      "primary": true
+      "web": true
     }
   ],
   "website": "https://github.com/jellyfin/jellyfin",

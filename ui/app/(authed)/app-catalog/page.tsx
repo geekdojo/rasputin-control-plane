@@ -746,9 +746,10 @@ function InstallDrawer({
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
   const preview = tile.status === 'preview';
-  // Only a fronted (primary) port is reachable, so LAN access is meaningful only
-  // for apps that publish one — hide the toggle for port-less tiles.
-  const hasWebPort = tile.ports.some((p) => p.primary);
+  // Only a fronted port is reachable by name over HTTPS, so LAN access is
+  // meaningful only for apps that declare one — hide the toggle for page-less
+  // tiles.
+  const hasWebPort = tile.ports.some((p) => p.web);
   // A routine tile is asked nothing; elevated needs the acknowledgement;
   // host-trusting needs the acknowledgement AND the app's id typed back.
   const tier = tierOf(tile.privilege);
@@ -803,14 +804,18 @@ function InstallDrawer({
             <SectionLabel>PORTS</SectionLabel>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {tile.ports.map((p) => (
-                <Badge key={`${p.name}-${p.published}`} color={p.primary ? ACCENT : DIM}>
+                <Badge key={`${p.name}-${p.published}`} color={p.web ? ACCENT : DIM}>
                   {p.name} {p.published}
                   {p.protocol && p.protocol !== 'tcp' ? `/${p.protocol}` : ''}
-                  {p.primary ? ' ★' : ''}
+                  {p.web ? ' ★' : ''}
                 </Badge>
               ))}
             </div>
-            <Hint style={{ marginTop: 6 }}>★ = the port the built-in reverse proxy will front.</Hint>
+            <Hint style={{ marginTop: 6 }}>
+              {hasWebPort
+                ? '★ = the port the built-in reverse proxy will front.'
+                : 'This app has no web page — connect to it directly on the port above.'}
+            </Hint>
           </div>
         )}
 

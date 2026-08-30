@@ -148,7 +148,8 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		Name:          name,
 		ComposeYAML:   tile.ComposeYAML,
 		TargetNode:    req.TargetNode,
-		PublishedPort: tile.PrimaryPort(),
+		PublishedPort: tile.WebPort(),
+		WebTLS:        tile.WebPortTLS(),
 		SourceTile:    tile.ID,
 		// The tile's budget is COPIED, not looked up at deploy time: a catalog
 		// update can change the tile under a running install, and the budget a

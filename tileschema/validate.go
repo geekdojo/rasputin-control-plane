@@ -96,7 +96,7 @@ func ValidateTile(t Tile) error {
 			t.DeployBudgetSeconds, DeployBudgetMinSeconds, DeployBudgetMaxSeconds)
 	}
 
-	primaries := 0
+	webPorts := 0
 	for i, p := range t.Ports {
 		if p.Container < 1 || p.Container > 65535 {
 			return fmt.Errorf("ports[%d] container %d out of range", i, p.Container)
@@ -107,27 +107,40 @@ func ValidateTile(t Tile) error {
 		if p.Protocol != "" && p.Protocol != "tcp" && p.Protocol != "udp" {
 			return fmt.Errorf("ports[%d] protocol %q is not tcp|udp", i, p.Protocol)
 		}
-		if p.Primary {
-			primaries++
+		if p.Web {
+			webPorts++
+		}
+		if p.TLS && !p.Web {
+			return fmt.Errorf("ports[%d] sets tls without web: tls describes the proxy's upstream leg to the web port, and a port the proxy does not front has no upstream leg", i)
 		}
 	}
 
-	// Installable tiles must ship a compose stack and, if web-facing, mark
-	// exactly one primary port so the proxy knows which host:port to front.
-	// Preview tiles are exempt — metadata only until they bench.
-	if t.Available() {
-		if strings.TrimSpace(t.ComposeYAML) == "" {
-			return fmt.Errorf("docker-compose.yml is empty")
-		}
-		if len(t.Ports) > 0 && primaries != 1 {
-			return fmt.Errorf("exactly one port must be primary (found %d)", primaries)
-		}
+	// ZERO OR ONE web port (ADR-0006 Decision 13). Zero is a page-less app —
+	// a database, a game server, a headless sync backend — and is a declared
+	// shape rather than an omission, which is what the tile.web-port capability
+	// is for. Two is still refused: it is real ambiguity about where OPEN
+	// points, it is cheap to keep, and nothing has asked for it.
+	//
+	// The rule this replaces was `len(ports) > 0 && primaries != 1`, which
+	// refused precisely the shape a client-connect app wants — declare the port
+	// clients dial, front none of it — while letting a tile with no ports at
+	// all through. It was a product assumption living in a validator.
+	if webPorts > 1 {
+		return fmt.Errorf("at most one port may be marked web (found %d): the proxy fronts one port per app", webPorts)
+	}
+
+	// Installable tiles must ship a compose stack. Preview tiles are exempt —
+	// metadata only until they bench.
+	if t.Available() && strings.TrimSpace(t.ComposeYAML) == "" {
+		return fmt.Errorf("docker-compose.yml is empty")
 	}
 
 	// A tile promising public exposure with nothing to expose is a metadata
 	// bug that would otherwise surface as a broken proxy route at install.
-	if t.ExposureDefault == "public" && t.Available() && primaries != 1 {
-		return fmt.Errorf("exposureDefault %q requires exactly one primary port to expose (found %d)", t.ExposureDefault, primaries)
+	// Public exposure is a WEB affordance: there is no public-facing story for
+	// a port the proxy does not front.
+	if t.ExposureDefault == "public" && t.Available() && webPorts != 1 {
+		return fmt.Errorf("exposureDefault %q requires exactly one web port to expose (found %d)", t.ExposureDefault, webPorts)
 	}
 
 	return nil

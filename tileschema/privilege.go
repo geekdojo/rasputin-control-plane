@@ -43,6 +43,11 @@ import (
 // communicate "this app is ordinary".
 const CapabilityPrivilegeTiers = "privilege-tiers-v1"
 
+// CapabilityWebPort is named by a tile that declares its web UI with Port.Web
+// rather than the former Port.Primary (Decision 13, #387). See
+// KnownCapabilities for why a rename needs a must-understand capability at all.
+const CapabilityWebPort = "tile.web-port"
+
 // The three tiers (Decision 12b).
 const (
 	// TierRoutine reaches nothing outside its own container.

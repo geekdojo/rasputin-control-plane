@@ -505,6 +505,7 @@ func main() {
 				TailnetFQDN:  tailnetFQDN,
 				LANFQDN:      lanFQDN,
 				UpstreamPort: app.PublishedPort,
+				UpstreamTLS:  app.WebTLS,
 			}
 		}
 		mintAppLeaf = func(app *apps.App) (proto.AppLeafCmd, error) {

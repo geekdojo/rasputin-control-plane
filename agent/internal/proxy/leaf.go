@@ -20,6 +20,12 @@ type RouteMeta struct {
 	TailnetFQDN  string `json:"tailnetFqdn"`
 	LANFQDN      string `json:"lanFqdn,omitempty"`
 	UpstreamPort int    `json:"upstreamPort"`
+	// UpstreamTLS: the app serves HTTPS on UpstreamPort (#387). Persisted with
+	// the rest of the route because the whole Caddy config is rebuilt from this
+	// file after a restart — losing it would silently downgrade the upstream
+	// leg to cleartext against a TLS listener, which fails as a 502 with no
+	// obvious cause.
+	UpstreamTLS bool `json:"upstreamTls,omitempty"`
 }
 
 // LeafStore holds per-app TLS leaves under <dir>/certs/<appID>/ — dir is
@@ -96,6 +102,7 @@ func (s *LeafStore) Routes() ([]AppRoute, error) {
 			AppID:        appID,
 			TailnetFQDN:  m.TailnetFQDN,
 			LANFQDN:      m.LANFQDN,
+			UpstreamTLS:  m.UpstreamTLS,
 			UpstreamPort: m.UpstreamPort,
 			CertPath:     s.CertPath(appID),
 			KeyPath:      s.KeyPath(appID),

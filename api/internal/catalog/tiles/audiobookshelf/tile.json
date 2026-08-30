@@ -14,7 +14,7 @@
       "container": 80,
       "published": 13378,
       "protocol": "tcp",
-      "primary": true
+      "web": true
     }
   ],
   "website": "https://github.com/advplyr/audiobookshelf",
