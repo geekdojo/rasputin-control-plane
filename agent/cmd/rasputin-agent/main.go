@@ -408,15 +408,21 @@ func main() {
 	// proportion to minutes of downtime per CP reboot. Tracked on
 	// geekdojo/geekdojo-brain#202.
 	if role != proto.RoleControlPlane {
-		if cpHost, _, aerr := net.SplitHostPort(nc.ConnectedAddr()); aerr != nil {
-			log.Printf("clusterdns: cannot read the bus peer address (%v); not starting", aerr)
-		} else {
-			go clusterdns.Run(ctx, clusterdns.Config{
-				ClusterID: clusterID(),
-				ServerIP:  cpHost,
-				Dir:       envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
-			})
-		}
+		// Read the peer off the socket EVERY time rather than capturing it
+		// once. nats reconnects when the control plane reboots, so this
+		// follows the CP to its new address; a captured string does not, and a
+		// captured string is what pinned five nodes to a dead server the
+		// moment the control plane took a new lease.
+		go clusterdns.Run(ctx, clusterdns.Config{
+			ClusterID: clusterID(),
+			ServerIP: func() string {
+				if nc == nil {
+					return ""
+				}
+				return hostOf(nc.ConnectedAddr())
+			},
+			Dir: envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
+		})
 	}
 
 	// OS update handlers — every node gets them. The firewall (OpenWrt, no
@@ -768,6 +774,21 @@ func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *na
 // sites used to hardcode.
 func clusterName() string {
 	return clusterID() + ".local"
+}
+
+// hostOf strips the port from a host:port, returning "" for anything it cannot
+// parse. Extracted from the clusterdns wiring so the parse is testable: it
+// returns "" on failure, which reads as "we do not know where the control plane
+// is" and withdraws the DNS pin — a silent path worth having a test on.
+func hostOf(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return h
 }
 
 // clusterID is the bare cluster id, without the .local suffix clusterName

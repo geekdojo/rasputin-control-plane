@@ -62,6 +62,24 @@
 // DNS and leaving the service alone is both simpler and less privileged than
 // driving it.
 //
+// Two rules this package learned the hard way, both from the same afternoon on
+// e3bench:
+//
+//   - The control plane's address is RE-READ every tick, never captured. These
+//     clusters run without DHCP reservations by design, so the CP takes a new
+//     lease on every reboot — and a rollout reboots it LAST, right after every
+//     other node has just pinned its old address.
+//   - A pin that does not answer is WITHDRAWN. The domains are routing-only, so
+//     a stale pin does not degrade to mDNS, it black-holes the cluster's own
+//     names — strictly worse than never having written anything. Withdrawing
+//     restores mDNS, which is flaky, and flaky beats dead. It also lets the
+//     agent reconnect and learn where the control plane went, so the next tick
+//     can pin it correctly.
+//
+// The second rule is the general one: this package must never leave a node
+// worse off than it found it. It is inserting itself into name resolution,
+// which everything else depends on.
+//
 // The drop-in lives under /run, not /etc: rasputin-os ships a read-only
 // rootfs. That also makes it self-healing rather than sticky — it evaporates
 // on reboot and is rewritten by the agent on the way back up, so a stale
@@ -72,6 +90,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,6 +114,11 @@ const fileName = "50-rasputin-cluster-dns.conf"
 // when the content actually differs.
 const DefaultInterval = 5 * time.Minute
 
+// probeTimeout bounds the reachability check. Short: the control plane is on
+// the LAN, and a check that hangs would stall the loop that is supposed to
+// notice the control plane moved.
+const probeTimeout = 3 * time.Second
+
 // Config parameterises Run. ClusterID and ServerIP are required; everything
 // else has a working default.
 type Config struct {
@@ -102,10 +126,25 @@ type Config struct {
 	// managed domains are derived. Not the full hostname.
 	ClusterID string
 
-	// ServerIP is the control plane's LAN address. Callers should take this
-	// from the live bus connection rather than resolving a name — see the
-	// package comment.
-	ServerIP string
+	// ServerIP returns the control plane's CURRENT address. A function, not a
+	// string, because the control plane's address moves: these clusters run
+	// without DHCP reservations by design, so the CP takes a new lease on every
+	// reboot — and a rollout reboots the CP LAST, immediately after this package
+	// has pinned its old address on every other node.
+	//
+	// Captured once, that pin is a dead address, and because the domains are
+	// routing-only the result is strictly WORSE than no drop-in: the cluster
+	// name stops resolving entirely instead of falling back to mDNS. Measured on
+	// e3bench 2026-08-30, on five nodes at once.
+	//
+	// Callers should read it from the live bus connection rather than resolving
+	// a name — see the package comment.
+	ServerIP func() string
+
+	// probe reports whether serverIP still has a nameserver listening. Injected
+	// by tests; nil means a real dial. See Apply for why a pin that stops
+	// answering must be withdrawn rather than left in place.
+	probe func(ctx context.Context, serverIP string) bool
 
 	// Dir is the drop-in directory. Empty means DefaultDir.
 	Dir string
@@ -127,6 +166,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.reload == nil {
 		c.reload = restartResolved
+	}
+	if c.probe == nil {
+		c.probe = reachableNameserver
 	}
 }
 
@@ -167,12 +209,32 @@ func Apply(ctx context.Context, cfg Config) (changed bool, err error) {
 	if cfg.ClusterID == "" {
 		return false, fmt.Errorf("clusterdns: no cluster id")
 	}
-	if cfg.ServerIP == "" {
-		return false, fmt.Errorf("clusterdns: no control-plane address")
+	if cfg.ServerIP == nil {
+		return false, fmt.Errorf("clusterdns: no control-plane address source")
+	}
+	path := filepath.Join(cfg.Dir, fileName)
+
+	// Re-read the address every time. Capturing it once is what put a dead
+	// address on five nodes at once: a rollout reboots the control plane LAST,
+	// it comes back on a new lease, and every node that was just repaired is
+	// left pinned to where it used to be.
+	ip := cfg.ServerIP()
+	if ip == "" {
+		// We no longer know where the control plane is. An out-of-date pin is
+		// worse than none, so withdraw it and let mDNS answer again.
+		return withdraw(ctx, cfg, path, "control-plane address unknown")
 	}
 
-	want := Render(cfg.ClusterID, cfg.ServerIP)
-	path := filepath.Join(cfg.Dir, fileName)
+	// Never leave a pin in place that does not answer. The domains are
+	// ROUTING-ONLY, so resolved sends the cluster's names to this server and
+	// nowhere else: if it is dead, the name does not resolve at all, where
+	// without the drop-in mDNS would at least have answered. Being wrong here
+	// is worse than doing nothing, so verify before asserting.
+	if !cfg.probe(ctx, ip) {
+		return withdraw(ctx, cfg, path, fmt.Sprintf("%s is not answering for the cluster name", ip))
+	}
+
+	want := Render(cfg.ClusterID, ip)
 
 	if existing, rerr := os.ReadFile(path); rerr == nil && string(existing) == want {
 		return false, nil
@@ -215,8 +277,8 @@ func Apply(ctx context.Context, cfg Config) (changed bool, err error) {
 func Run(ctx context.Context, cfg Config) {
 	cfg.applyDefaults()
 
-	if cfg.ClusterID == "" || cfg.ServerIP == "" {
-		log.Printf("clusterdns: cluster id or control-plane address unknown; not starting")
+	if cfg.ClusterID == "" || cfg.ServerIP == nil {
+		log.Printf("clusterdns: cluster id or control-plane address source missing; not starting")
 		return
 	}
 	// No systemd-resolved (the OpenWrt firewall, dev boxes, CI) means nothing
@@ -230,8 +292,8 @@ func Run(ctx context.Context, cfg Config) {
 		}
 	}
 
-	log.Printf("clusterdns: routing %s at %s every %s",
-		strings.Join(Domains(cfg.ClusterID), " "), cfg.ServerIP, cfg.Interval)
+	log.Printf("clusterdns: keeping %s pointed at the control plane, re-checked every %s",
+		strings.Join(Domains(cfg.ClusterID), " "), cfg.Interval)
 
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
@@ -241,9 +303,12 @@ func Run(ctx context.Context, cfg Config) {
 		case err != nil:
 			log.Printf("clusterdns: %v", err)
 		case changed:
-			log.Printf("clusterdns: wrote %s routing %s at %s",
+			// Log the address as it is NOW, not as it was at startup — a
+			// changed line here is usually the control plane having moved,
+			// which is the event worth seeing.
+			log.Printf("clusterdns: %s now routes %s at %s",
 				filepath.Join(cfg.Dir, fileName),
-				strings.Join(Domains(cfg.ClusterID), " "), cfg.ServerIP)
+				strings.Join(Domains(cfg.ClusterID), " "), cfg.ServerIP())
 		}
 		select {
 		case <-ctx.Done():
@@ -251,6 +316,57 @@ func Run(ctx context.Context, cfg Config) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// withdraw removes the drop-in, if present, and reloads so the removal takes
+// effect. Used whenever we cannot stand behind the pin any more.
+//
+// Removing is deliberately the failure mode. Because the domains are
+// routing-only, a stale or unreachable pin does not degrade to mDNS — it
+// black-holes the cluster's own names, which is worse than never having written
+// anything. Withdrawing hands resolution back to mDNS: flaky, which is the
+// original complaint, but flaky beats dead, and it lets the agent reconnect and
+// learn the control plane's new address so the next tick can pin it correctly.
+func withdraw(ctx context.Context, cfg Config, path, why string) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		return false, nil // nothing pinned; nothing to undo
+	}
+	if err := os.Remove(path); err != nil {
+		return false, fmt.Errorf("clusterdns: %s, but could not remove %s: %w", why, path, err)
+	}
+	if err := cfg.reload(ctx); err != nil {
+		return true, fmt.Errorf("clusterdns: withdrew %s (%s) but reload failed: %w", path, why, err)
+	}
+	return true, fmt.Errorf("clusterdns: withdrew %s — %s; the cluster name falls back to mDNS until this resolves", path, why)
+}
+
+// reachableNameserver reports whether serverIP has a nameserver accepting
+// connections on port 53.
+//
+// A DIRECT DIAL, deliberately, not a resolver lookup. The obvious
+// implementation — net.Resolver with PreferGo and a custom Dial — is wrong
+// here, and wrong silently: Go consults /etc/hosts before it dials, so any
+// hosts entry for the cluster name makes the probe return true WITHOUT EVER
+// CONTACTING the server. Measured while writing this: dialed=false against an
+// unroutable address, because the name was in /etc/hosts.
+//
+// A probe that can pass while the server is dead is worse than no probe at
+// all — it re-arms the black-hole this check exists to prevent.
+//
+// This verifies liveness, not zone contents, and that is the failure mode being
+// guarded: a pinned address going stale or dead. The address comes from our own
+// bus socket, so it is the control plane rather than an impostor; the question
+// is only whether it is still there.
+func reachableNameserver(ctx context.Context, serverIP string) bool {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(serverIP, "53"))
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // restartResolved is the production reload. A restart rather than a reload:
