@@ -380,8 +380,33 @@ func main() {
 	// rejoins the mesh. See internal/clusterdns for the full signature.
 	//
 	// The address comes off the live bus socket, never from a name lookup —
-	// resolving a name is precisely what we are here to repair. Excluded on the
-	// control plane: it is the nameserver, and it publishes the name itself.
+	// resolving a name is precisely what we are here to repair.
+	//
+	// The control plane is excluded, and NOT for the reason first given here
+	// ("it is the nameserver"). That reasoning was wrong: the CP's own
+	// tailscaled does have to resolve <cluster>.local to reach Headscale on
+	// :18080, and on e3bench it failed doing so — mDNS answered the CP's own
+	// name with six addresses including docker-bridge and link-local ones, and
+	// dialling fe80:: without a zone index errors outright.
+	//
+	// It is excluded because THIS MECHANISM CANNOT FIX IT. systemd-resolved
+	// short-circuits its own hostname and answers from its interface list,
+	// ignoring routing domains entirely. Measured on e3bench 2026-08-30 with
+	// the drop-in applied, querying the stub the way Go does:
+	//
+	//	A    e3bench.local -> 100.64.0.1, 172.17.0.1     (not the LAN IP)
+	//	AAAA e3bench.local -> fe80::..., fe80::..., fe80::...
+	//
+	// Identical with and without the drop-in. Do not "fix" the control plane by
+	// deleting this exclusion — it was tried, it changes nothing, and the test
+	// that would have caught the mistake is a live resolver, not a unit test.
+	//
+	// The fault it leaves is real but transient: the CP retried into a usable
+	// address on its own after 2m20s. A genuine fix has to remove the name from
+	// the CP's control URL altogether (the mesh leaf already covers 127.0.0.1),
+	// which is an enrolment change with migration consequences and out of
+	// proportion to minutes of downtime per CP reboot. Tracked on
+	// geekdojo/geekdojo-brain#202.
 	if role != proto.RoleControlPlane {
 		if cpHost, _, aerr := net.SplitHostPort(nc.ConnectedAddr()); aerr != nil {
 			log.Printf("clusterdns: cannot read the bus peer address (%v); not starting", aerr)

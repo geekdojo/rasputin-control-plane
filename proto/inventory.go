@@ -226,11 +226,14 @@ const (
 type MeshMembership struct {
 	State MeshState `json:"state"`
 	// LastSeen is Headscale's last-seen for the node. Meaningful mainly when
-	// State is MeshAbsent — it answers "how long has this been broken?", which
-	// is the question nobody could ask for five weeks. Headscale does not
-	// refresh it while a node stays connected, so for a joined node it is the
-	// moment it connected and says nothing about current health. nil when
-	// unknown.
+	// State is MeshAbsent, where it separates "minutes" from "weeks" — the
+	// distinction nobody could draw for five weeks.
+	//
+	// It is NOT the moment the node dropped. Headscale does not refresh it
+	// while a node stays connected, so for a joined node it is the moment it
+	// connected, and for a node that dropped after a long session it reads
+	// older than the outage really is. Present it as last-seen, never as an
+	// outage duration. nil when unknown.
 	LastSeen *time.Time `json:"lastSeen,omitempty"`
 	// TailnetIP is the node's 100.64.0.x address, "" when not enrolled. This is
 	// the address cluster DNS and mesh routes point at, which is why an absent

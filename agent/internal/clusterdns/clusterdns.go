@@ -16,6 +16,29 @@
 // remain", and parks in NoState. The node drops off the mesh and does not come
 // back across a service restart or a reboot.
 //
+// The control plane fails the same way for a different reason, which is why it
+// is NOT exempt from this. mDNS answers the CP's own cluster name with a
+// link-local address, and dialling one without a zone index is not a timeout
+// but an outright error:
+//
+//	fetch control key: Get "https://e3bench.local:18080/key?v=109":
+//	  dial tcp [fe80::52d5:9eef:adaa:29ca]:18080: connect: invalid argument
+//
+// Same root cause — mDNS in tailscaled's control-URL path — reached by a
+// different route. Observed on e3bench 2026-08-30, on the reboot that shipped
+// the first version of this package with the control plane excluded.
+//
+// The control-plane case is TRANSIENT where the compute case is permanent: it
+// retries into a usable address on its own, measured at 2m20s on that reboot.
+//
+// It is NOT fixed by this package, and cannot be. systemd-resolved
+// short-circuits its own hostname and answers from its interface list,
+// ignoring routing domains, so pointing the control plane at its own
+// nameserver changes nothing — measured, with the drop-in applied, querying
+// the stub the way Go does. See the exclusion comment in
+// cmd/rasputin-agent/main.go for the numbers. A real fix has to take the name
+// out of the control plane's control URL altogether.
+//
 // It is a race, so it presents as attrition rather than an outage: on the
 // bench cluster it took 16 of 24 nodes off the tailnet over several weeks of
 // ordinary update cycles, a few at a time, while the UI still read 24/24
