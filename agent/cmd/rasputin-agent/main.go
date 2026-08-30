@@ -419,11 +419,7 @@ func main() {
 				if nc == nil {
 					return ""
 				}
-				h, _, err := net.SplitHostPort(nc.ConnectedAddr())
-				if err != nil {
-					return ""
-				}
-				return h
+				return hostOf(nc.ConnectedAddr())
 			},
 			Dir: envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
 		})
@@ -778,6 +774,21 @@ func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *na
 // sites used to hardcode.
 func clusterName() string {
 	return clusterID() + ".local"
+}
+
+// hostOf strips the port from a host:port, returning "" for anything it cannot
+// parse. Extracted from the clusterdns wiring so the parse is testable: it
+// returns "" on failure, which reads as "we do not know where the control plane
+// is" and withdraws the DNS pin — a silent path worth having a test on.
+func hostOf(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return h
 }
 
 // clusterID is the bare cluster id, without the .local suffix clusterName
