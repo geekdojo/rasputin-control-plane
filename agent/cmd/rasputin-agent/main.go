@@ -374,39 +374,49 @@ func main() {
 
 	// Keep the cluster's own names resolvable without depending on the DNS the
 	// DHCP lease handed out. A node otherwise resolves <cluster>.local by mDNS,
-	// which breaks tailscaled's control-URL lookup in two different ways
-	// (timeout on compute, an undiallable link-local answer on the control
-	// plane) and takes the node off the mesh permanently. See
-	// internal/clusterdns for the full signature.
+	// where the AAAA query times out on an IPv4-only cluster; tailscaled reads
+	// that as a failed lookup of its control URL, falls back to Tailscale's
+	// public bootstrap DNS (which cannot resolve a .local name), and never
+	// rejoins the mesh. See internal/clusterdns for the full signature.
 	//
-	// EVERY role runs this, the control plane included. It was excluded at
-	// first on the reasoning that the control plane "is the nameserver" — that
-	// was wrong, and the bench proved it: the CP's own tailscaled still has to
-	// resolve <cluster>.local to reach Headscale on :18080, and it resolves it
-	// the same fragile way. e3bench's control plane fell off the mesh on the
-	// very reboot that shipped this file (geekdojo/geekdojo-brain#202).
+	// The address comes off the live bus socket, never from a name lookup —
+	// resolving a name is precisely what we are here to repair.
 	//
-	// The address source differs by role, and must:
-	//   - control plane: its own LAN IPv4. The CP nameserver binds the LAN
-	//     address, not loopback, so pointing at the bus peer (127.0.0.1 here,
-	//     since the CP's agent dials its own bus over loopback) would send
-	//     every cluster-name query into a closed port.
-	//   - everything else: the live bus socket's peer. Never a name lookup —
-	//     resolving a name is precisely what we are here to repair.
-	busPeer := func() string {
-		if nc == nil {
-			return ""
+	// The control plane is excluded, and NOT for the reason first given here
+	// ("it is the nameserver"). That reasoning was wrong: the CP's own
+	// tailscaled does have to resolve <cluster>.local to reach Headscale on
+	// :18080, and on e3bench it failed doing so — mDNS answered the CP's own
+	// name with six addresses including docker-bridge and link-local ones, and
+	// dialling fe80:: without a zone index errors outright.
+	//
+	// It is excluded because THIS MECHANISM CANNOT FIX IT. systemd-resolved
+	// short-circuits its own hostname and answers from its interface list,
+	// ignoring routing domains entirely. Measured on e3bench 2026-08-30 with
+	// the drop-in applied, querying the stub the way Go does:
+	//
+	//	A    e3bench.local -> 100.64.0.1, 172.17.0.1     (not the LAN IP)
+	//	AAAA e3bench.local -> fe80::..., fe80::..., fe80::...
+	//
+	// Identical with and without the drop-in. Do not "fix" the control plane by
+	// deleting this exclusion — it was tried, it changes nothing, and the test
+	// that would have caught the mistake is a live resolver, not a unit test.
+	//
+	// The fault it leaves is real but transient: the CP retried into a usable
+	// address on its own after 2m20s. A genuine fix has to remove the name from
+	// the CP's control URL altogether (the mesh leaf already covers 127.0.0.1),
+	// which is an enrolment change with migration consequences and out of
+	// proportion to minutes of downtime per CP reboot. Tracked on
+	// geekdojo/geekdojo-brain#202.
+	if role != proto.RoleControlPlane {
+		if cpHost, _, aerr := net.SplitHostPort(nc.ConnectedAddr()); aerr != nil {
+			log.Printf("clusterdns: cannot read the bus peer address (%v); not starting", aerr)
+		} else {
+			go clusterdns.Run(ctx, clusterdns.Config{
+				ClusterID: clusterID(),
+				ServerIP:  cpHost,
+				Dir:       envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
+			})
 		}
-		return nc.ConnectedAddr()
-	}
-	if cpAddr, why := clusterDNSServerIP(role, host.PrimaryLANIP, busPeer); cpAddr == "" {
-		log.Printf("clusterdns: %s; not starting", why)
-	} else {
-		go clusterdns.Run(ctx, clusterdns.Config{
-			ClusterID: clusterID(),
-			ServerIP:  cpAddr,
-			Dir:       envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
-		})
 	}
 
 	// OS update handlers — every node gets them. The firewall (OpenWrt, no
@@ -758,36 +768,6 @@ func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *na
 // sites used to hardcode.
 func clusterName() string {
 	return clusterID() + ".local"
-}
-
-// clusterDNSServerIP picks the address clusterdns should route the cluster's
-// own domains at, or "" plus a reason when it cannot be determined.
-//
-// The control plane is its own nameserver, so it points at itself — but at its
-// LAN address, because that is where the CP nameserver binds. Every other role
-// points at the control plane it is already connected to on the bus, read off
-// the socket so no name has to resolve for name resolution to be repaired.
-// Both inputs are passed as functions rather than resolved here so every branch
-// is reachable from a test. Taking a *nats.Conn instead left the malformed-peer
-// path unreachable without a live bus, and made the no-LAN-IP path depend on
-// the test machine's own networking — a test that skips on any developer laptop
-// is not covering anything.
-func clusterDNSServerIP(role proto.NodeRole, lanIP, busPeer func() string) (ip, why string) {
-	if role == proto.RoleControlPlane {
-		if lan := lanIP(); lan != "" {
-			return lan, ""
-		}
-		return "", "control plane has no LAN IPv4 to point its own cluster names at"
-	}
-	peer := busPeer()
-	if peer == "" {
-		return "", "no bus connection to read the control-plane address from"
-	}
-	h, _, err := net.SplitHostPort(peer)
-	if err != nil {
-		return "", fmt.Sprintf("cannot read the bus peer address %q (%v)", peer, err)
-	}
-	return h, ""
 }
 
 // clusterID is the bare cluster id, without the .local suffix clusterName
