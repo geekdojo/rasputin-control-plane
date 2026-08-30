@@ -488,35 +488,40 @@ func main() {
 		// buildAppLeafCmd fills the delivery command from freshly-minted PEMs —
 		// shared by the deploy minter and the rotation path so the wire shape
 		// (FQDNs, upstream port) can't drift between them.
+		//
+		// The cert and the route come from different places on purpose. The leaf
+		// carries BOTH of the app's names whatever its exposure (a cert is an
+		// identity, not an access control), so the route hosts — and only they —
+		// decide what the node's proxy will answer for. AppRouteHosts leaves
+		// LANFQDN empty for a tailnet-only app, and RenderCaddyConfig drops any
+		// app with no LAN host from the LAN listener.
 		buildAppLeafCmd := func(app *apps.App, certPEM, keyPEM []byte) proto.AppLeafCmd {
-			names := mesh.AppLeafDNSNames(clusterID, app.Name, app.ExposeLAN)
-			cmd := proto.AppLeafCmd{
+			tailnetFQDN, lanFQDN := mesh.AppRouteHosts(clusterID, app.Name, app.ExposeLAN)
+			return proto.AppLeafCmd{
 				AppID:        app.ID,
 				Name:         app.Name,
 				CertPEM:      certPEM,
 				KeyPEM:       keyPEM,
-				TailnetFQDN:  names[0],
+				TailnetFQDN:  tailnetFQDN,
+				LANFQDN:      lanFQDN,
 				UpstreamPort: app.PublishedPort,
 			}
-			if len(names) > 1 {
-				cmd.LANFQDN = names[1]
-			}
-			return cmd
 		}
 		mintAppLeaf = func(app *apps.App) (proto.AppLeafCmd, error) {
-			certPEM, keyPEM, err := mesh.MintAppLeaf(meshCA, clusterID, app.Name, app.ExposeLAN)
+			certPEM, keyPEM, err := mesh.MintAppLeaf(meshCA, clusterID, app.Name)
 			if err != nil {
 				return proto.AppLeafCmd{}, err
 			}
 			return buildAppLeafCmd(app, certPEM, keyPEM), nil
 		}
-		// rotateAppLeaf is the disk-backed, renew-gated form used by the rotation
-		// sweep: it returns the current leaf (renewed=false) or a fresh in-memory
-		// one (renewed=true) plus a commit closure to persist it only after the
-		// node accepts delivery (apps.LeafRotator).
+		// rotateAppLeaf is the disk-backed form used by the rotation sweep and by
+		// the exposure toggle. It always returns the app's CURRENT desired state
+		// — RotateAppLeaf delivers it either way — and renewed reports only
+		// whether the cert in it is new, which is what decides the commit
+		// (apps.LeafRotator).
 		rotateAppLeaf = func(app *apps.App) (proto.AppLeafCmd, bool, func() error, error) {
 			dir := filepath.Join(appLeafDir, app.ID)
-			certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(meshCA, dir, clusterID, app.Name, app.ExposeLAN)
+			certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(meshCA, dir, clusterID, app.Name)
 			if err != nil {
 				return proto.AppLeafCmd{}, false, nil, err
 			}

@@ -263,7 +263,11 @@ func rotateLeavesSweep(store *Store, inv *inventory.Store, nc *nats.Conn, rotate
 			return nil, fmt.Errorf("list apps: %w", err)
 		}
 
-		var checked, rotated, shipped, skipped, failed int
+		// delivered counts apps whose desired state reached their node this
+		// sweep; rotated counts the subset that also needed a fresh cert. In a
+		// steady state delivered == checked and rotated == 0 — that is the sweep
+		// working, not the sweep being noisy.
+		var checked, rotated, delivered, skipped, failed int
 		for _, app := range all {
 			if app.PublishedPort == 0 {
 				continue // headless app: no proxy, no leaf
@@ -273,26 +277,24 @@ func rotateLeavesSweep(store *Store, inv *inventory.Store, nc *nats.Conn, rotate
 			for _, m := range out.Log {
 				sc.Log(m.Level, m.Text)
 			}
+			if out.Renewed {
+				rotated++
+			}
 			switch out.Outcome {
-			case LeafUnchanged:
+			case LeafSkipped:
 			case LeafShipped:
-				rotated++
-				shipped++
+				delivered++
 			case LeafNodeOffline:
-				rotated++
 				skipped++
 			case LeafFailed:
-				if out.Renewed {
-					rotated++
-				}
 				failed++
 			}
 		}
 
-		sc.Log("info", fmt.Sprintf("checked=%d rotated=%d shipped=%d skipped=%d failed=%d",
-			checked, rotated, shipped, skipped, failed))
+		sc.Log("info", fmt.Sprintf("checked=%d rotated=%d delivered=%d skipped=%d failed=%d",
+			checked, rotated, delivered, skipped, failed))
 		return json.Marshal(map[string]int{
-			"checked": checked, "rotated": rotated, "shipped": shipped,
+			"checked": checked, "rotated": rotated, "delivered": delivered,
 			"skipped": skipped, "failed": failed,
 		})
 	}
@@ -304,9 +306,9 @@ func rotateLeavesSweep(store *Store, inv *inventory.Store, nc *nats.Conn, rotate
 type LeafOutcome string
 
 const (
-	LeafUnchanged   LeafOutcome = "unchanged"    // still has life and its SANs match
-	LeafShipped     LeafOutcome = "shipped"      // re-minted, delivered, persisted
-	LeafNodeOffline LeafOutcome = "node-offline" // re-minted but not delivered; retried next sweep
+	LeafSkipped     LeafOutcome = "skipped"      // nothing to deliver: no rotator, or a headless app
+	LeafShipped     LeafOutcome = "shipped"      // desired state delivered (and a fresh leaf persisted, if there was one)
+	LeafNodeOffline LeafOutcome = "node-offline" // not delivered; retried next sweep
 	LeafFailed      LeafOutcome = "failed"
 )
 
@@ -328,51 +330,69 @@ type LeafResult struct {
 // RotateAppLeaf re-mints ONE app's TLS leaf if it needs it and ships it to the
 // app's node.
 //
-// Extracted from the rotation sweep for #197. Changing an app's LAN exposure
-// changes its leaf's SAN set, and PrepareAppLeaf already treats a SAN drift as
-// a reason to re-mint — so the toggle needs no new machinery, only the ability
-// to run one app's rotation NOW rather than waiting up to a sweep interval for
-// the .lan name to start or stop resolving. Sharing the body rather than
-// copying it is the point: two rotation paths would differ in exactly the
-// place that matters, which is what happens when the node is offline.
+// It ASSERTS desired state rather than detecting change: whenever the node is
+// online it delivers the app's current cert, route hosts and upstream port,
+// whether or not any of them differ from last time. Delivery is idempotent all
+// the way down — the agent writes the leaf into its store and re-renders the
+// node's whole Caddy config from that store, and Caddy no-ops an unchanged
+// config — so the cost of an unnecessary delivery is one bus round-trip, and
+// the sweep runs daily.
 //
-// Never returns an error for an offline node. The fresh leaf is deliberately
-// NOT committed in that case, so the sweep re-mints and retries — an app's leaf
+// That is deliberate and it is the lesson of #197. Exposure used to reach a
+// node only as a SIDE EFFECT of the leaf's SAN set drifting, so a revoke that
+// drifted nothing shipped nothing, and the node kept its LAN route for ten
+// months while the UI said the app had left the LAN. Any change detector can
+// have that bug; asserting desired state has nothing to miss. Bryce, 2026-08-30:
+// "why aren't we just regenerating everything, every time, from the ground up
+// so that it matches desired state?"
+//
+// So renewed no longer gates delivery. It gates only the COMMIT — a fresh leaf
+// is persisted after the node accepts it, an unchanged one is already on disk.
+//
+// Extracted from the rotation sweep for #197, which needs the same body to run
+// for one app NOW rather than at the next sweep. Sharing it rather than copying
+// is the point: two paths would differ in exactly the place that matters, which
+// is what happens when the node is offline.
+//
+// Never returns an error for an offline node. A fresh leaf is deliberately NOT
+// committed in that case, so the sweep re-mints and retries — an app's leaf
 // cannot quietly expire on a node that was down, and an exposure change made
 // while a node is offline lands when it comes back.
 func RotateAppLeaf(ctx context.Context, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, app *App) LeafResult {
 	if rotate == nil || app.PublishedPort == 0 {
-		return LeafResult{Outcome: LeafUnchanged}
+		return LeafResult{Outcome: LeafSkipped}
 	}
 	cmd, renewed, commit, err := rotate(app)
 	if err != nil {
 		return LeafResult{Outcome: LeafFailed, Err: fmt.Errorf("re-mint leaf: %w", err),
 			Log: []LeafLog{{"warn", fmt.Sprintf("%s: re-mint leaf: %v", app.Name, err)}}}
 	}
-	if !renewed {
-		return LeafResult{Outcome: LeafUnchanged}
-	}
 
 	node, err := inv.Get(ctx, app.TargetNode)
 	if err != nil || node == nil || computeNodeStatus(node.LastSeen) != proto.StatusOnline {
-		return LeafResult{Outcome: LeafNodeOffline, Renewed: true,
-			Log: []LeafLog{{"info", fmt.Sprintf("%s: leaf due for rotation but node %s offline — retrying next sweep", app.Name, app.TargetNode)}}}
+		return LeafResult{Outcome: LeafNodeOffline, Renewed: renewed,
+			Log: []LeafLog{{"info", fmt.Sprintf("%s: node %s offline — redelivering next sweep", app.Name, app.TargetNode)}}}
 	}
 
 	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	ok, detail, derr := deliverLeaf(dctx, nc, app.TargetNode, cmd)
 	cancel()
 	if derr != nil {
-		return LeafResult{Outcome: LeafFailed, Renewed: true, Err: fmt.Errorf("deliver leaf: %w", derr),
+		return LeafResult{Outcome: LeafFailed, Renewed: renewed, Err: fmt.Errorf("deliver leaf: %w", derr),
 			Log: []LeafLog{{"warn", fmt.Sprintf("%s: deliver rotated leaf: %v", app.Name, derr)}}}
 	}
 	if !ok {
-		return LeafResult{Outcome: LeafFailed, Renewed: true, Err: fmt.Errorf("node rejected leaf: %s", detail),
+		return LeafResult{Outcome: LeafFailed, Renewed: renewed, Err: fmt.Errorf("node rejected leaf: %s", detail),
 			Log: []LeafLog{{"warn", fmt.Sprintf("%s: node rejected rotated leaf: %s", app.Name, detail)}}}
 	}
 
-	res := LeafResult{Outcome: LeafShipped, Renewed: true,
-		Log: []LeafLog{{"info", fmt.Sprintf("%s: rotated + delivered fresh TLS leaf", app.Name)}}}
+	res := LeafResult{Outcome: LeafShipped, Renewed: renewed}
+	if !renewed {
+		// The common case: the app's existing leaf and its current route
+		// re-asserted. Not worth a log line per app per sweep.
+		return res
+	}
+	res.Log = []LeafLog{{"info", fmt.Sprintf("%s: rotated + delivered fresh TLS leaf", app.Name)}}
 	if err := commit(); err != nil {
 		// Delivered but not persisted: harmless (the next sweep re-mints and
 		// re-ships an equivalent leaf), but worth surfacing.

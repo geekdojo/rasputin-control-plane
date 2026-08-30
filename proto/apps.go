@@ -173,9 +173,12 @@ type AppLeafCmd struct {
 	Name    string `json:"name,omitempty"` // instance name — logging only
 	CertPEM []byte `json:"certPem,omitempty"`
 	KeyPEM  []byte `json:"keyPem,omitempty"`
-	// TailnetFQDN / LANFQDN are the app's proxy Host names — the same names in
-	// the leaf's SANs (both from mesh.AppLeafDNSNames), so the Caddy route host
-	// matches the cert by construction. LANFQDN is "" for a tailnet-only app.
+	// TailnetFQDN / LANFQDN are the app's proxy Host names, from
+	// mesh.AppRouteHosts. They share their FQDN constructors with the leaf's
+	// SANs, so a route host matches the cert by construction — but the leaf
+	// carries BOTH names always, while these carry the app's EXPOSURE: LANFQDN
+	// is "" for a tailnet-only app, and that empty string is what keeps the app
+	// off the node's LAN listener.
 	TailnetFQDN string `json:"tailnetFqdn,omitempty"`
 	LANFQDN     string `json:"lanFqdn,omitempty"`
 	// UpstreamPort is the app's loopback port the node-local Caddy proxies to.

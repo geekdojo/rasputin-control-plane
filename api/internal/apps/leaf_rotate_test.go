@@ -54,32 +54,57 @@ func TestRotateLeaves_ShipsAndCommitsWhenRenewed(t *testing.T) {
 		t.Errorf("commit called %d times, want 1 (only after delivery)", committed)
 	}
 	c := rotateCounts(t, res)
-	if c["rotated"] != 1 || c["shipped"] != 1 || c["checked"] != 1 {
-		t.Errorf("counts = %v, want checked=1 rotated=1 shipped=1", c)
+	if c["rotated"] != 1 || c["delivered"] != 1 || c["checked"] != 1 {
+		t.Errorf("counts = %v, want checked=1 rotated=1 delivered=1", c)
 	}
 }
 
-// TestRotateLeaves_SkipsWhenNotRenewed: a still-valid leaf (renewed=false) is
-// neither shipped nor committed.
-func TestRotateLeaves_SkipsWhenNotRenewed(t *testing.T) {
+// TestRotateLeaves_DeliversWithoutCommittingWhenNotRenewed: an unchanged leaf
+// is still DELIVERED — the sweep asserts each app's desired state rather than
+// detecting whether it changed — but it is not committed, because there is no
+// new certificate to persist.
+//
+// This inverts what the sweep used to do. Gating delivery on renewed meant the
+// only things that ever reached a node were the things the control plane had
+// noticed changing, and #197 is what that costs when the noticing has a gap:
+// exposure rode on the leaf's SAN set, a revoke that did not move the SANs
+// shipped nothing, and the node served the app on the LAN for ten months after
+// the operator revoked it. Re-asserting daily has no such gap.
+func TestRotateLeaves_DeliversWithoutCommittingWhenNotRenewed(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedAppWithPort(t, "n", "a", "jellyfin", 8096, false)
 
+	got := make(chan proto.AppLeafCmd, 1)
+	sub := fakeLeafAgent(t, nc, "n", got)
+	defer sub.Unsubscribe()
+
 	committed := 0
 	rotate := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
-		return proto.AppLeafCmd{AppID: app.ID}, false, func() error { committed++; return nil }, nil
+		cmd := proto.AppLeafCmd{
+			AppID: app.ID, Name: app.Name, CertPEM: []byte("C"), KeyPEM: []byte("K"),
+			TailnetFQDN: "jellyfin.home1.internal", UpstreamPort: app.PublishedPort,
+		}
+		return cmd, false, func() error { committed++; return nil }, nil
 	}
 
 	res, err := rotateLeavesSweep(store, inv, nc, rotate)(newStepCtxNATS(`{}`, nc))
 	if err != nil {
 		t.Fatalf("rotate sweep: %v", err)
 	}
+	select {
+	case cmd := <-got:
+		if cmd.AppID != "a" || cmd.UpstreamPort != 8096 {
+			t.Errorf("delivered cmd wrong: %+v", cmd)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an unchanged leaf must still be delivered — the sweep asserts desired state, it does not detect change")
+	}
 	if committed != 0 {
-		t.Errorf("commit called %d times, want 0 when not renewed", committed)
+		t.Errorf("commit called %d times, want 0: nothing was re-minted", committed)
 	}
 	c := rotateCounts(t, res)
-	if c["checked"] != 1 || c["rotated"] != 0 || c["shipped"] != 0 {
-		t.Errorf("counts = %v, want checked=1 rotated=0 shipped=0", c)
+	if c["checked"] != 1 || c["rotated"] != 0 || c["delivered"] != 1 {
+		t.Errorf("counts = %v, want checked=1 rotated=0 delivered=1", c)
 	}
 }
 

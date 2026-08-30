@@ -215,10 +215,11 @@ type LeafSpec struct {
 	// re-mint the same way adding one does.
 	//
 	// Off by default because the tolerant check below is right for a leaf
-	// whose names only ever grow. It is wrong wherever a name is withdrawn
-	// as a security control: see appLeafSpec, where revoking an app's LAN
-	// exposure shrinks the set and a leaf still valid for the .lan name is
-	// a live route on the node's LAN listener.
+	// whose names only ever grow. Turn it on wherever a name can be
+	// WITHDRAWN and the leaf must not outlive it — a rename, or a change of
+	// cluster id. App leaves set it for exactly that reason (see
+	// appLeafSpec); note they no longer withdraw a name on an exposure
+	// change, because exposure is enforced by the route, not the SAN set.
 	ExactDNSNames bool
 	// ClientAuth mints a leaf for the CLIENT side of mTLS (ExtKeyUsage
 	// clientAuth) instead of the default server leaf (serverAuth). Used by
