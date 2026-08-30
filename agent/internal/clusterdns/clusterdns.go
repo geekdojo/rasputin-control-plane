@@ -16,6 +16,18 @@
 // remain", and parks in NoState. The node drops off the mesh and does not come
 // back across a service restart or a reboot.
 //
+// The control plane fails the same way for a different reason, which is why it
+// is NOT exempt from this. mDNS answers the CP's own cluster name with a
+// link-local address, and dialling one without a zone index is not a timeout
+// but an outright error:
+//
+//	fetch control key: Get "https://e3bench.local:18080/key?v=109":
+//	  dial tcp [fe80::52d5:9eef:adaa:29ca]:18080: connect: invalid argument
+//
+// Same root cause — mDNS in tailscaled's control-URL path — reached by a
+// different route. Observed on e3bench 2026-08-30, on the reboot that shipped
+// the first version of this package with the control plane excluded.
+//
 // It is a race, so it presents as attrition rather than an outage: on the
 // bench cluster it took 16 of 24 nodes off the tailnet over several weeks of
 // ordinary update cycles, a few at a time, while the UI still read 24/24
