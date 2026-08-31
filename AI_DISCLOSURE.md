@@ -6,9 +6,9 @@ transparency policies like [NLnet's GenAI policy](https://nlnet.nl/foundation/po
 
 ## Approach
 
-- Development happens in interactive sessions between the maintainer and Anthropic Claude
-  models via Claude Code (currently **Claude Fable 5**, model id `claude-fable-5`; earlier
-  work used prior Claude models).
+- Development happens in interactive sessions between the maintainer and Anthropic's family
+  of Claude models (Fable, Opus, etc.) via Claude Code. The specific model varies by session;
+  the commit trailer below names the one used for each change.
 - **Generated-content marker:** AI-assisted commits carry a
   `Co-Authored-By: Claude <model> <noreply@anthropic.com>` trailer naming the model. Commits
   without the trailer are human-authored.
