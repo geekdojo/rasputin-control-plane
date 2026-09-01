@@ -92,6 +92,27 @@ func (k *ArchiveKey) validate() error {
 	return nil
 }
 
+// WipeConfirmation is §4.8's "or wiped only on a second, separate choice": the
+// explicit, destructive decision to claim a disk that ALREADY CARRIES a Rasputin
+// backup set by destroying that set.
+//
+// A struct rather than a `Wipe bool` beside `Adopt bool`, deliberately. A
+// boolean is one typo, one copied request body, one mis-bound checkbox from
+// wiping the only copy of an archive, and a caller can set it without ever
+// having looked at what it is destroying. Reaching this branch requires a token
+// the api minted over the disk as the picker showed it — see wipe.go for what
+// that token is and, just as importantly, what it is not.
+type WipeConfirmation struct {
+	// Token must equal the `wipeToken` GET /api/backup/candidates published for
+	// THIS disk in THIS state. It is re-derived from the live disk at step 3, so
+	// a token minted before the disk's marker or partition table changed no
+	// longer matches and the wipe is refused rather than applied to something
+	// the operator was never shown.
+	//
+	// Empty is a refusal, never a default to wipe.
+	Token string `json:"token"`
+}
+
 // ClaimSpec is the spec body of a backup.target.claim job.
 //
 // It is built by the HTTP handler from a typed request rather than forwarded
@@ -124,6 +145,19 @@ type ClaimSpec struct {
 	// which is what stops a replacement controlplane from wiping the only copy
 	// of the archive it was plugged in to restore from.
 	Adopt bool `json:"adopt,omitempty"`
+	// Wipe is the OTHER answer to the same question, and §4.8's second, separate
+	// choice: destroy the backup set the disk carries and claim it fresh.
+	//
+	// Mutually exclusive with Adopt — they are opposite answers, and a request
+	// setting both is refused rather than resolved in either direction. Absent
+	// (nil) means neither was chosen, which is what makes a disk carrying a
+	// backup set a REFUSAL by default.
+	//
+	// This is also the only exit from the unreadable-marker dead end: a disk
+	// that announces a set whose marker cannot be parsed can be neither adopted
+	// (there is no partition UUID to adopt it by) nor claimed as blank (the
+	// backup-set refusal stands in the way). It can be wiped.
+	Wipe *WipeConfirmation `json:"wipe,omitempty"`
 	// ArchiveKey carries the already-wrapped §4.6 data key. Optional: a target
 	// may be claimed before encryption is configured. Never plaintext.
 	ArchiveKey *ArchiveKey `json:"archiveKey,omitempty"`
@@ -145,6 +179,14 @@ func ParseClaimSpec(raw json.RawMessage) (*ClaimSpec, error) {
 	if strings.TrimSpace(spec.Fingerprint) == "" {
 		// proto/storage.go: "Empty is not a wildcard — it is a refusal."
 		return nil, errors.New("fingerprint is required: a claim with no fingerprint names no particular disk, and the whole point of the fingerprint is that the operator's confirmation binds to one")
+	}
+	if spec.Adopt && spec.Wipe != nil {
+		// Opposite answers to one question. Picking either for the caller would
+		// be guessing, and one of the two guesses destroys an archive.
+		return nil, errors.New("`adopt` and `wipe` are opposite choices: adopt takes the existing backup set over as it stands, wipe destroys it. Choose exactly one")
+	}
+	if spec.Wipe != nil && strings.TrimSpace(spec.Wipe.Token) == "" {
+		return nil, errors.New("wipe.token is required: a wipe must echo the `wipeToken` GET /api/backup/candidates published for the disk being destroyed, which is how a wipe proves it saw what it is destroying. An absent token is a refusal, never a default to wipe")
 	}
 	if err := spec.ArchiveKey.validate(); err != nil {
 		return nil, err
@@ -192,7 +234,15 @@ type BackupTarget struct {
 	wrappedByRecoveryCode string
 	// Adopted is true when this target was taken over as it stood rather than
 	// formatted — an existing backup set the operator chose to keep.
-	Adopted   bool         `json:"adopted,omitempty"`
+	Adopted bool `json:"adopted,omitempty"`
+	// Wiped is Adopted's exact counterpart: this disk carried a Rasputin backup
+	// set and the operator made §4.8's second, separate choice to destroy it.
+	//
+	// Recorded because it is the most consequential thing this product does, and
+	// because the row otherwise reads identically to a fresh format of a blank
+	// disk. Rows are never deleted, so this is a durable answer to "what
+	// happened to the archive that used to be on that disk".
+	Wiped     bool         `json:"wiped,omitempty"`
 	Status    TargetStatus `json:"status"`
 	CreatedAt time.Time    `json:"createdAt"`
 	// ClaimedAt is when the row reached a terminal status, whatever that status

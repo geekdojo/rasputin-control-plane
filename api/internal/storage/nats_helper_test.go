@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -253,8 +254,15 @@ func protectedCandidate() proto.StorageCandidate {
 	return c
 }
 
+// testSetCreated is the marker's creation time. A FIXED instant, not
+// time.Now(): the marker is a file on the disk, so two enumerations of the same
+// unchanged disk report the same one — and the wipe confirmation token commits
+// to it, so a fixture that moved would mint a different token each time it was
+// called and hide exactly the property those tests assert.
+var testSetCreated = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
 // backupSetCandidate is a disk that already carries a Rasputin archive: the
-// restore disk §4.8 refuses to wipe.
+// restore disk §4.8 refuses to wipe without a second, separate choice.
 func backupSetCandidate() proto.StorageCandidate {
 	c := blankCandidate()
 	c.HasBackupSet = true
@@ -264,10 +272,82 @@ func backupSetCandidate() proto.StorageCandidate {
 		PartUUID:      "part-uuid-existing",
 		KeyID:         "key-existing",
 		Label:         "the archive",
-		CreatedAt:     time.Now().UTC().Add(-30 * 24 * time.Hour),
+		CreatedAt:     testSetCreated,
 		Generations:   4,
 	}
 	return c
+}
+
+// unreadableMarkerCandidate announces a Rasputin backup set whose marker could
+// not be parsed. Before the wipe verb this disk was a dead end: nothing to adopt
+// it BY, and the backup-set refusal in the way of formatting it.
+func unreadableMarkerCandidate() proto.StorageCandidate {
+	c := backupSetCandidate()
+	c.BackupSet = nil
+	return c
+}
+
+// protectedBackupSetCandidate is the boot medium, carrying a backup set. The
+// combination exists to prove a wipe cannot outrun the boot-device exclusion.
+func protectedBackupSetCandidate() proto.StorageCandidate {
+	c := backupSetCandidate()
+	c.Protected = true
+	c.ProtectedReason = "holds the mounted persistent partition (/var/lib/rasputin)"
+	return c
+}
+
+func ptr(c proto.StorageCandidate) *proto.StorageCandidate { return &c }
+
+// wipeSpecFor makes the spec mutation for a confirmed wipe of one candidate,
+// with the token the picker would have published for exactly that disk.
+func wipeSpecFor(c proto.StorageCandidate) func(*ClaimSpec) {
+	// Minted from a candidate that is by construction wipe-eligible where the
+	// test means it to be. CandidateWipeToken returns "" for a protected disk,
+	// so the protected case supplies an empty token and refuses twice over —
+	// once at step 1 for the empty token, and at step 2 for being the boot
+	// medium. Force a non-empty token there so the case proves the SECOND.
+	tok := CandidateWipeToken(&c)
+	if tok == "" {
+		tok = WipeToken(c.Fingerprint, c.WWN, c.Serial, c.SizeBytes, c.BackupSet)
+	}
+	return func(s *ClaimSpec) { s.Wipe = &WipeConfirmation{Token: tok} }
+}
+
+// assertTokenNotPublished proves a refusal did not hand the caller the answer.
+// The whole value of the confirmation is that getting one means having looked
+// at the disk; a refusal that prints the expected token converts a wipe from a
+// decision into a retry.
+func assertTokenNotPublished(t *testing.T, h *harness, jobID, token string) {
+	t.Helper()
+	if token == "" {
+		t.Fatal("no token to look for — this assertion would prove nothing")
+	}
+	ctx := context.Background()
+	j, err := h.jobStore.GetJob(ctx, jobID)
+	if err != nil || j == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if strings.Contains(j.Error, token) {
+		t.Errorf("the refusal message carries the expected wipe token: %s", j.Error)
+	}
+	steps, err := h.jobStore.ListSteps(ctx, jobID)
+	if err != nil {
+		t.Fatalf("ListSteps: %v", err)
+	}
+	for _, st := range steps {
+		if strings.Contains(string(st.Result), token) {
+			t.Errorf("step %q result carries the expected wipe token: %s", st.Name, st.Result)
+		}
+	}
+	events, err := h.jobStore.ListEvents(ctx, jobID)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, ev := range events {
+		if strings.Contains(string(ev.Data), token) {
+			t.Errorf("event %q carries the expected wipe token: %s", ev.Type, ev.Data)
+		}
+	}
 }
 
 func ackWith(cands ...proto.StorageCandidate) proto.StorageEnumerateAck {

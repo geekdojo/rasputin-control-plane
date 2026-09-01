@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
@@ -22,7 +24,23 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyMigrations(ctx, db)
 	return &Store{db: db}, nil
+}
+
+// applyMigrations runs the forward-only DDL in schema.go, tolerating the column
+// already being there — which is the normal case on every open after the first.
+func applyMigrations(ctx context.Context, db *sql.DB) {
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			msg := err.Error()
+			if strings.Contains(msg, "duplicate column name") ||
+				strings.Contains(msg, "already exists") {
+				continue // expected: column already present
+			}
+			log.Printf("storage: migration %q: %v", stmt, err)
+		}
+	}
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -32,7 +50,7 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 const targetCols = `job_id, node_id, label, part_uuid, device_path, mount_path, fs_type,
         size_bytes, fingerprint, key_id, key_alg, wrapped_by_passphrase,
-        wrapped_by_recovery_code, adopted, status, created_at, claimed_at, error`
+        wrapped_by_recovery_code, adopted, wiped, status, created_at, claimed_at, error`
 
 // CreatePending records the start of a claim attempt. Called by step 1, before
 // anything on the disk has been touched, so the Backup view shows the attempt
@@ -56,6 +74,9 @@ type ClaimResult struct {
 	SizeBytes   uint64
 	Fingerprint string
 	Adopted     bool
+	// Wiped records that this claim destroyed an existing Rasputin backup set —
+	// §4.8's second, separate choice. Mutually exclusive with Adopted.
+	Wiped bool
 	// Key is the already-wrapped §4.6 material, or nil when the target was
 	// claimed before encryption was configured. Never plaintext.
 	Key *ArchiveKey
@@ -81,18 +102,21 @@ func (s *Store) MarkClaimed(ctx context.Context, jobID string, res ClaimResult) 
 		wrappedPass = res.Key.WrappedByPassphrase
 		wrappedRecovery = res.Key.WrappedByRecoveryCode
 	}
-	adopted := 0
+	adopted, wiped := 0, 0
 	if res.Adopted {
 		adopted = 1
+	}
+	if res.Wiped {
+		wiped = 1
 	}
 	out, err := s.db.ExecContext(ctx, `
         UPDATE backup_targets
         SET part_uuid = ?, device_path = ?, mount_path = ?, fs_type = ?, size_bytes = ?,
             fingerprint = ?, key_id = ?, key_alg = ?, wrapped_by_passphrase = ?,
-            wrapped_by_recovery_code = ?, adopted = ?, status = ?, claimed_at = ?, error = ''
+            wrapped_by_recovery_code = ?, adopted = ?, wiped = ?, status = ?, claimed_at = ?, error = ''
         WHERE job_id = ? AND status = ?`,
 		res.PartUUID, res.DevicePath, res.MountPath, res.FSType, sizeForDB(res.SizeBytes),
-		res.Fingerprint, keyID, keyAlg, wrappedPass, wrappedRecovery, adopted,
+		res.Fingerprint, keyID, keyAlg, wrappedPass, wrappedRecovery, adopted, wiped,
 		string(TargetClaimed), ms(res.At), jobID, string(TargetPending))
 	if err != nil {
 		return err
@@ -218,13 +242,14 @@ func scanTarget(scan func(...any) error) (*BackupTarget, error) {
 		t         BackupTarget
 		sizeBytes int64
 		adopted   int
+		wiped     int
 		status    string
 		createdAt int64
 		claimedAt sql.NullInt64
 	)
 	if err := scan(&t.JobID, &t.NodeID, &t.Label, &t.PartUUID, &t.DevicePath, &t.MountPath,
 		&t.FSType, &sizeBytes, &t.Fingerprint, &t.KeyID, &t.KeyAlg,
-		&t.wrappedByPassphrase, &t.wrappedByRecoveryCode, &adopted, &status,
+		&t.wrappedByPassphrase, &t.wrappedByRecoveryCode, &adopted, &wiped, &status,
 		&createdAt, &claimedAt, &t.Error); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -235,6 +260,7 @@ func scanTarget(scan func(...any) error) (*BackupTarget, error) {
 		t.SizeBytes = uint64(sizeBytes)
 	}
 	t.Adopted = adopted == 1
+	t.Wiped = wiped == 1
 	t.Status = TargetStatus(status)
 	t.CreatedAt = fromMs(createdAt)
 	if claimedAt.Valid {

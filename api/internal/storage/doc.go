@@ -18,8 +18,8 @@
 //	1 validate       (api)   spec sanity; an existing claimed target
 //	2 enumerate      (agent) the disk is present, unprotected, and the one
 //	                         the operator confirmed
-//	3 check_existing (api)   adopt-or-refuse for a disk that already carries
-//	                         a Rasputin backup set
+//	3 check_existing (api)   adopt-or-wipe-or-refuse for a disk that already
+//	                         carries a Rasputin backup set
 //	4 claim          (agent) THE DESTRUCTIVE STEP. Irreversible, never retried,
 //	                         and the last agent step
 //	5 persist_target (api)   record partUUID, node, mount path
@@ -27,6 +27,21 @@
 // Steps 1–3 are all refusals. By the time step 4 runs, every question that
 // could be answered has been answered, and the only remaining failures are the
 // ones the agent itself refuses on live hardware.
+//
+// # Adopt and wipe
+//
+// §4.8: "A disk that already carries a Rasputin backup set is adopted, not
+// wiped — or wiped only on a second, separate choice." Both halves live at step
+// 3. Adopt keeps the set and formats nothing; wipe destroys it and claims the
+// disk fresh, and is reachable only by echoing back a token the api minted over
+// the disk as the picker showed it (wipe.go). Neither is a default: a disk
+// carrying a set with neither choice made is refused, untouched.
+//
+// Wipe adds NOTHING to the wire and nothing to the agent. It selects the same
+// format the blank-disk path already runs — same proto.StorageClaimCmd, same
+// subject, same Irreversible step — so the agent's boot-device exclusion and
+// its fingerprint re-check apply to it unchanged and there is no flag by which
+// either could be bypassed.
 //
 // # Identity
 //

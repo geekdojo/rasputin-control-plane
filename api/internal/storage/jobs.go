@@ -43,8 +43,8 @@ type Config struct {
 //	                        `replace`
 //	2 enumerate      agent  the disk is present, unprotected, and the one the
 //	                        operator confirmed
-//	3 check_existing api    adopt-or-refuse for a disk already carrying a
-//	                        Rasputin backup set (§4.8's restore guard)
+//	3 check_existing api    adopt-or-wipe-or-refuse for a disk already carrying
+//	                        a Rasputin backup set (§4.8's restore guard)
 //	4 claim          agent  THE DESTRUCTIVE STEP — Irreversible, never retried,
 //	                        the last agent step
 //	5 persist_target api    record partUUID, node, mount path, wrapped keys
@@ -89,8 +89,13 @@ type enumerateResult struct {
 	Fingerprint string `json:"fingerprint"`
 	Model       string `json:"model,omitempty"`
 	Serial      string `json:"serial,omitempty"`
-	SizeBytes   uint64 `json:"sizeBytes,omitempty"`
-	Moved       bool   `json:"moved,omitempty"`
+	// WWN is carried so step 3 can re-derive the wipe confirmation token from
+	// the SAME stable identity the picker minted it over. Without it the token
+	// would have to be computed once and passed along, and a token that travels
+	// with the plan is no longer a re-check against live hardware.
+	WWN       string `json:"wwn,omitempty"`
+	SizeBytes uint64 `json:"sizeBytes,omitempty"`
+	Moved     bool   `json:"moved,omitempty"`
 	// HasBackupSet and BackupSet are carried forward so step 3 decides from the
 	// evidence step 2 already gathered rather than paying a second enumeration.
 	HasBackupSet bool                    `json:"hasBackupSet"`
@@ -107,6 +112,18 @@ type claimPlan struct {
 	// Adopt selects the non-destructive branch: the disk already carries a
 	// Rasputin backup set and the operator chose to take it over as it stands.
 	Adopt bool `json:"adopt"`
+	// Wipe records that the disk carried a Rasputin backup set and the operator
+	// made §4.8's second, separate choice to destroy it.
+	//
+	// It selects NO different behaviour at step 4 — a wipe formats through the
+	// same command, the same subject and the same Irreversible step as any other
+	// format, which is exactly why no agent-side safety check can be bypassed by
+	// it. It exists so the log line, the ledger and the Tasks view can say what
+	// was destroyed.
+	Wipe bool `json:"wipe"`
+	// WipedSet is the human description of what the wipe destroys, captured at
+	// the moment it was still readable.
+	WipedSet string `json:"wipedSet,omitempty"`
 	// ExistingPartUUID is the marker's own partition UUID, on the adopt branch.
 	// It is how the disk gets re-adopted by its own account after a claim that
 	// formatted it but never got as far as recording it.
@@ -119,7 +136,9 @@ type claimPlan struct {
 // claimOutcome is step 4's result, in one shape for both branches so step 5
 // does not have to know which one ran.
 type claimOutcome struct {
-	Adopted     bool   `json:"adopted"`
+	Adopted bool `json:"adopted"`
+	// Wiped is true when the format destroyed an existing Rasputin backup set.
+	Wiped       bool   `json:"wiped"`
 	PartUUID    string `json:"partUuid"`
 	DevicePath  string `json:"devicePath,omitempty"`
 	MountPath   string `json:"mountPath,omitempty"`
@@ -161,12 +180,17 @@ func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 		// live event stream. Nothing here is key material: a node, a path the
 		// disk had a moment ago, a truncated fingerprint and a label.
 		sc.Log("info", fmt.Sprintf("claiming backup target %s on %s (fingerprint %s)%s",
-			spec.DevicePath, spec.NodeID, short(spec.Fingerprint), adoptSuffix(spec)))
+			spec.DevicePath, spec.NodeID, short(spec.Fingerprint), choiceSuffix(spec)))
 		return json.Marshal(map[string]any{
 			"nodeId":     spec.NodeID,
 			"devicePath": spec.DevicePath,
 			"replace":    spec.Replace,
 			"adopt":      spec.Adopt,
+			// WHETHER a wipe was chosen, never the confirmation token itself.
+			// The token is evidence the caller looked at the disk; echoing it
+			// into a step result that the Tasks view renders would turn a
+			// refused claim into a how-to for the next one.
+			"wipe": spec.Wipe != nil,
 			// Reports only WHETHER key material was supplied. The blobs
 			// themselves never enter a step result.
 			"archiveKeySupplied": spec.ArchiveKey.present(),
@@ -204,6 +228,7 @@ func claimEnumerate() jobs.DoFn {
 			Fingerprint:  cand.Fingerprint,
 			Model:        cand.Model,
 			Serial:       cand.Serial,
+			WWN:          cand.WWN,
 			SizeBytes:    cand.SizeBytes,
 			Moved:        cand.DevicePath != spec.DevicePath,
 			HasBackupSet: cand.HasBackupSet,
@@ -235,6 +260,18 @@ func claimEnumerate() jobs.DoFn {
 // plug their archive disk into a REPLACEMENT controlplane. A flow that formats
 // whatever it is handed destroys the only copy of the thing being restored, and
 // it does so on the one day the archive was ever going to matter.
+//
+// A disk carrying a set therefore has exactly three outcomes here, and by
+// default it has the first:
+//
+//	neither choice  refuse   — the disk is untouched and the operator is told why
+//	adopt           keep     — take the set over as it stands, format nothing
+//	wipe + token    destroy  — §4.8's "or wiped only on a second, separate choice"
+//
+// The wipe branch is a REFUSAL like the other two until its token matches the
+// disk as it is NOW. Nothing about it reaches the agent: it selects the same
+// format the ordinary blank-disk path already runs, so the agent's boot-device
+// exclusion and fingerprint re-check apply to it unchanged.
 func claimCheckExisting() jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := ParseClaimSpec(sc.Spec)
@@ -253,12 +290,17 @@ func claimCheckExisting() jobs.DoFn {
 		}
 
 		if !res.HasBackupSet {
-			if spec.Adopt {
-				// The operator was shown a disk carrying a backup set and chose
-				// to adopt it; the disk now says it carries none. Whatever they
-				// were looking at, it was not this. Refusing costs a re-run;
-				// proceeding formats a disk on the strength of a stale prompt.
+			// Both choices exist only to answer "what about the set already on
+			// this disk?". A disk that carries none answers neither, and the
+			// operator was therefore looking at something other than this disk.
+			// Refusing costs a re-run; proceeding formats a disk on the strength
+			// of a stale prompt.
+			switch {
+			case spec.Adopt:
 				return nil, fmt.Errorf("refusing to adopt %s: it carries no Rasputin backup set. `adopt` takes over an EXISTING set — re-run the picker and choose again",
+					res.DevicePath)
+			case spec.Wipe != nil:
+				return nil, fmt.Errorf("refusing to wipe %s: it carries no Rasputin backup set. `wipe` destroys an EXISTING set, and an ordinary claim already formats a blank disk — re-run the picker and choose again",
 					res.DevicePath)
 			}
 			sc.Log("info", fmt.Sprintf("%s carries no Rasputin backup set — it will be formatted", res.DevicePath))
@@ -266,18 +308,42 @@ func claimCheckExisting() jobs.DoFn {
 		}
 
 		set := res.BackupSet
+
+		// §4.8's second, separate choice. Checked before the blanket refusal
+		// below because a wipe is not an adopt, and it is deliberately checked
+		// against a token re-derived from THIS enumeration — the disk as it is
+		// now, not as the picker saw it.
+		if spec.Wipe != nil {
+			expected := WipeToken(res.Fingerprint, res.WWN, res.Serial, res.SizeBytes, set)
+			if !wipeTokenMatches(spec.Wipe.Token, expected) {
+				// Deliberately does NOT print the expected token. A refusal is
+				// not a how-to: the fix is to look at the disk again, which is
+				// the whole point of requiring the confirmation.
+				return nil, fmt.Errorf("refusing to wipe %s [%s]: the wipe confirmation does not match this disk as it is NOW — %s. Either the token was not the one the picker published for this disk, or what the disk holds changed since. Nothing was written. Re-run the picker, look at what is on it, and confirm again",
+					res.DevicePath, proto.StorageRefusalBackupSetPresent, describeBackupSet(set))
+			}
+			plan.Wipe = true
+			plan.WipedSet = describeBackupSet(set)
+			// The loudest line the saga writes, and it is written BEFORE the
+			// destructive step rather than after it, so an operator watching the
+			// live stream sees what is about to be destroyed while the format is
+			// still a step away.
+			sc.Log("warn", fmt.Sprintf("WIPING the existing backup set on %s — %s. Confirmed; it will be destroyed and cannot be recovered",
+				res.DevicePath, plan.WipedSet))
+			return json.Marshal(plan)
+		}
+
 		if !spec.Adopt {
-			return nil, fmt.Errorf("refusing to claim %s [%s]: %s. Nothing was written. Choose `adopt` to take this set over as it stands, or pick a different disk",
+			return nil, fmt.Errorf("refusing to claim %s [%s]: %s. Nothing was written. Choose `adopt` to take this set over as it stands, `wipe` with the confirmation token the picker publishes for this disk to destroy it and claim the disk fresh, or pick a different disk",
 				res.DevicePath, proto.StorageRefusalBackupSetPresent, describeBackupSet(set))
 		}
 		// Adopting requires something to adopt BY. A disk that announces a
-		// backup set whose marker could not be read can be neither taken over
-		// (there is no partition UUID to take over) nor formatted (the set is
-		// exactly what the refusal above protects). That is a genuine dead end
-		// and it is the right one: an unreadable marker on a disk claiming to
-		// hold an archive is not a thing to resolve by guessing.
+		// backup set whose marker could not be read has no partition UUID to be
+		// taken over by, so it cannot be adopted — but it is no longer a dead
+		// end, because it is exactly the disk `wipe` exists to reclaim, and the
+		// picker mints a token for it like any other.
 		if set == nil || set.PartUUID == "" {
-			return nil, fmt.Errorf("refusing to adopt %s [%s]: it announces a Rasputin backup set but its marker (%s) is unreadable or carries no partition UUID, so there is nothing to adopt it by — and formatting it is what this refusal exists to prevent. Clear the disk deliberately if that is what you want",
+			return nil, fmt.Errorf("refusing to adopt %s [%s]: it announces a Rasputin backup set but its marker (%s) is unreadable or carries no partition UUID, so there is nothing to adopt it BY. To reclaim this disk, choose `wipe` with the confirmation token the picker publishes for it — that destroys what is on it and claims it fresh",
 				res.DevicePath, proto.StorageRefusalBackupSetPresent, proto.StorageMarkerFile)
 		}
 		// §4.6: the generations already on this disk are encrypted under the
@@ -326,7 +392,7 @@ func priorEnumerate(sc *jobs.StepCtx, spec *ClaimSpec) (*enumerateResult, error)
 	}
 	return &enumerateResult{
 		NodeID: spec.NodeID, DevicePath: cand.DevicePath, Fingerprint: cand.Fingerprint,
-		Model: cand.Model, Serial: cand.Serial, SizeBytes: cand.SizeBytes,
+		Model: cand.Model, Serial: cand.Serial, WWN: cand.WWN, SizeBytes: cand.SizeBytes,
 		HasBackupSet: cand.HasBackupSet, BackupSet: cand.BackupSet, Backend: ack.Backend,
 	}, nil
 }
@@ -377,8 +443,18 @@ func claimClaim(cfg Config) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		sc.Log("warn", fmt.Sprintf("FORMATTING %s on %s — this destroys everything on that disk",
-			plan.DevicePath, plan.NodeID))
+		// One command, one subject, one Irreversible step, whether the disk was
+		// blank or carried a set the operator chose to destroy. The wipe changes
+		// only what this line SAYS: there is no wipe flag on StorageClaimCmd, so
+		// there is no agent-side branch a wipe could take around the boot-device
+		// exclusion or the fingerprint re-check the agent runs before it writes.
+		if plan.Wipe {
+			sc.Log("warn", fmt.Sprintf("WIPING %s on %s — this destroys the Rasputin backup set it carries (%s) and everything else on that disk",
+				plan.DevicePath, plan.NodeID, plan.WipedSet))
+		} else {
+			sc.Log("warn", fmt.Sprintf("FORMATTING %s on %s — this destroys everything on that disk",
+				plan.DevicePath, plan.NodeID))
+		}
 		msg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.StorageClaimSubject(plan.NodeID), cmd)
 		if err != nil {
 			return nil, fmt.Errorf("claim rpc to %s: %w", plan.NodeID, err)
@@ -402,6 +478,7 @@ func claimClaim(cfg Config) jobs.DoFn {
 		// makes a replayed claim fail closed. It is recorded as the target's new
 		// fingerprint and is never read as drift.
 		out := claimOutcome{
+			Wiped:       plan.Wipe,
 			PartUUID:    ack.PartUUID,
 			DevicePath:  firstNonEmpty(ack.DevicePath, plan.DevicePath),
 			MountPath:   ack.MountPath,
@@ -410,8 +487,12 @@ func claimClaim(cfg Config) jobs.DoFn {
 			Fingerprint: ack.Fingerprint,
 			KeyID:       keyID,
 		}
-		sc.Log("info", fmt.Sprintf("claimed %s: partUuid=%s fs=%s mount=%s",
-			out.DevicePath, out.PartUUID, out.FSType, out.MountPath))
+		verb := "claimed"
+		if plan.Wipe {
+			verb = "wiped and claimed"
+		}
+		sc.Log("info", fmt.Sprintf("%s %s: partUuid=%s fs=%s mount=%s",
+			verb, out.DevicePath, out.PartUUID, out.FSType, out.MountPath))
 		return json.Marshal(out)
 	}
 }
@@ -497,6 +578,7 @@ func claimPersist(store *Store) jobs.DoFn {
 			SizeBytes:   out.SizeBytes,
 			Fingerprint: out.Fingerprint,
 			Adopted:     out.Adopted,
+			Wiped:       out.Wiped,
 			// The wrapped blobs come from the SPEC and go straight to the
 			// store. They are the only §4.6 material this package touches, they
 			// are ciphertext, and they never pass through a step result, a log
@@ -645,9 +727,14 @@ func describeBackupSet(set *proto.StorageBackupSet) string {
 	return fmt.Sprintf("it carries a Rasputin backup set written by %s,%s holding %s retained generation(s)", who, label, gens)
 }
 
-func adoptSuffix(spec *ClaimSpec) string {
-	if spec.Adopt {
+// choiceSuffix says, on the live event stream and in the operator's words, which
+// of §4.8's two answers about an existing backup set this claim carries.
+func choiceSuffix(spec *ClaimSpec) string {
+	switch {
+	case spec.Adopt:
 		return " — adopting an existing backup set, nothing will be formatted"
+	case spec.Wipe != nil:
+		return " — WIPING an existing backup set, which is destroyed"
 	}
 	return ""
 }
