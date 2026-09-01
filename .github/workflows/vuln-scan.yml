@@ -61,10 +61,9 @@ jobs:
           # had passed an hour earlier and no re-run could clear it.
           go-version: "1.26"
           check-latest: true
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            artifactsig/go.sum
+          # Glob, not a literal list: every go.work module's go.sum keys the
+          # cache, so adding a module cannot silently leave it out.
+          cache-dependency-path: "*/go.sum"
 
       - name: install govulncheck (pinned)
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0

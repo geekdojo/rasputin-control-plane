@@ -72,9 +72,9 @@ jobs:
           # had passed an hour earlier and no re-run could clear it.
           go-version: "1.26"
           check-latest: true
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
+          # Glob, not a literal list: every go.work module's go.sum keys the
+          # cache, so adding a module cannot silently leave it out.
+          cache-dependency-path: "*/go.sum"
 
       - uses: actions/setup-node@v4
         with:

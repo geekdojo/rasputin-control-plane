@@ -80,9 +80,9 @@ jobs:
           go-version: "1.26"
           check-latest: true
           # cache keyed on the workspace go.sum files
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
+          # Glob, not a literal list: every go.work module's go.sum keys the
+          # cache, so adding a module cannot silently leave it out.
+          cache-dependency-path: "*/go.sum"
 
       # Node for the web UI build (build-release.sh runs npm ci + next
       # build and packs ui/out into the api tarballs). Version pin

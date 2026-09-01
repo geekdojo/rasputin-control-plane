@@ -104,9 +104,9 @@ jobs:
         with:
           go-version: "1.26"
           check-latest: true
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
+          # Glob, not a literal list: every go.work module's go.sum keys the
+          # cache, so adding a module cannot silently leave it out.
+          cache-dependency-path: "*/go.sum"
 
       # security-extended, not the default suite. Measured on 2026-08-16 before
       # choosing: across both languages it produced exactly ONE finding more
@@ -124,7 +124,7 @@ jobs:
       # build-mode: manual, not autobuild.
       #
       # autobuild runs `go build ./...` from the repo root, and this repo's root
-      # holds no Go packages — the code lives in the three go.work modules. The
+      # holds no Go packages — the code lives in the go.work modules. The
       # pattern would match nothing, the database would come back near-empty,
       # and the gate would go green having analysed almost nothing. A gate that
       # passes because it looked at no code is worse than no gate, so the build
@@ -134,10 +134,22 @@ jobs:
       # ~47k lines of test code are not analysed. Deliberate — a finding in a
       # test does not ship — but it means "clean" here means "clean in shipping
       # code", which is the claim this gate is entitled to make and no more.
+      #
+      # The module list is DERIVED from go.work (scripts/workspace-modules.sh),
+      # not written out here. It read `api agent proto` while the workspace had
+      # five members, so the database was built from three of them and
+      # artifactsig — the code that decides whether a downloaded OS image is
+      # authentic — was never in a CodeQL database at all. #214 fixed the same
+      # drift in the gosec and govulncheck gates but not here.
+      #
+      # The extractor's line count cannot catch this: it reports on what it was
+      # given, so a short build list yields a smaller database and an equally
+      # green check.
       - name: build go modules
         if: matrix.language == 'go'
         run: |
-          for m in api agent proto; do
+          modules="$(./scripts/workspace-modules.sh)"
+          for m in $modules; do
             echo "::group::go build ./$m/..."
             (cd "$m" && go build ./...)
             echo "::endgroup::"

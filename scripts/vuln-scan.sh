@@ -17,9 +17,17 @@
 #   + nats-server 2.11 bump cleared them. Remove entries as they get
 #   fixed; the script prints stale entries so the file shrinks over time.
 #
-# GOTOOLCHAIN is forced to go1.26.5 (matching the CI toolchain) so local
+# GOTOOLCHAIN is forced to go1.26.6 (matching the CI toolchain) so local
 # runs on newer dev toolchains produce the same stdlib findings as CI.
 # Override with GOTOOLCHAIN env if needed.
+#
+# Keep this EXACTLY equal to the GOTOOLCHAIN in .github/workflows/vuln-scan.yml.
+# It had drifted to go1.26.5 while the workflow moved to go1.26.6, and the two
+# are not cosmetically different: 1.26.6 fixes GO-2026-5972 (encoding/asn1
+# recursion depth), which artifactsig reaches through pkcs7.Parse when it parses
+# a downloaded .sig. Once artifactsig came into scope, a local run therefore
+# reported a reachable advisory that CI could not see — the exact inversion of
+# the promise this line exists to make.
 #
 # Usage:
 #   scripts/vuln-scan.sh            # gate against the baseline
@@ -32,7 +40,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.5}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.6}"
 
 # The module list is DERIVED from go.work, not written out here.
 #
@@ -43,37 +51,23 @@ export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.5}"
 # gate stayed green the whole time, because a hardcoded list cannot report the
 # code it was never pointed at.
 #
-# Deriving it from go.work makes that drift structurally impossible: go.work is
-# the single file that decides what the workspace is, and this gate now covers
-# exactly what it names. A module added there is scanned on the next run without
-# anyone remembering this file exists.
+# The derivation itself lives in ONE place, scripts/workspace-modules.sh, which
+# also carries the guards (empty list, module with no go.mod) and is shared with
+# codeql.yml and ci.yml. It was briefly an awk parser inlined here and copied
+# verbatim into the other script — two copies of a parser being one edit away
+# from disagreeing about what the workspace contains, which is the original
+# hazard one step removed.
 #
-# Guarded, because the dangerous failure mode of a derived list is the quiet
-# one. An empty or unparseable list would scan nothing and print success, which
-# is strictly worse than the drift it replaces — so both the empty list and a
-# named directory with no go.mod are hard errors.
-MODULES=()
-while IFS= read -r m; do MODULES+=("$m"); done < <(awk '
-  /^[[:space:]]*use[[:space:]]*\(/ { inblock = 1; next }
-  inblock && /^[[:space:]]*\)/     { inblock = 0; next }
-  inblock {
-    sub(/\/\/.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-    if ($0 == "") next
-    sub(/^\.\//, ""); print; next
-  }
-  /^[[:space:]]*use[[:space:]]+[^(]/ { p = $2; sub(/^\.\//, "", p); print p }
-' go.work)
-
-if [ "${#MODULES[@]}" -eq 0 ]; then
-  echo "::error::no modules parsed out of go.work — refusing to run a scan that would cover nothing"
-  exit 1
-fi
-for m in "${MODULES[@]}"; do
-  [ -f "$m/go.mod" ] || {
-    echo "::error::go.work names $m, but $m/go.mod does not exist"
-    exit 1
-  }
-done
+# Command substitution, NOT `mapfile < <(...)`: process substitution does not
+# propagate the helper's exit status, so a failing helper would leave MODULES
+# empty and this gate would pass having scanned nothing. `$( )` fails the
+# script under `set -e`, which is the behaviour a coverage gate needs.
+#
+# Word-split into the array rather than `mapfile`, which is bash 4+ and so
+# absent on macOS's stock bash 3.2 — these gates are run locally too.
+modules_list="$(scripts/workspace-modules.sh)"
+# shellcheck disable=SC2206  # deliberate word splitting; module dirs have no spaces
+MODULES=($modules_list)
 
 BASELINE=.github/vuln-baseline.txt
 
