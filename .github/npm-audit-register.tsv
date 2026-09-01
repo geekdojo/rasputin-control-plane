@@ -1,0 +1,35 @@
+# .github/npm-audit-register.tsv — the reviewed record of every npm advisory
+# accepted against ui/package-lock.json.
+#
+# Policy, gate rules and the reasoning behind this file's shape:
+#   scripts/npm-audit.sh
+# See the current picture with: scripts/npm-audit.sh --report
+#
+# Columns (tab-separated):
+#   advisory  GHSA id, e.g. GHSA-xxxx-xxxx-xxxx (identity — one row each)
+#   package   the vulnerable package
+#   severity  as reported by npm audit; context only, refreshed by eye
+#   scope     runtime | dev — which tree it lands in with --omit=dev
+#   reason    REQUIRED. Why this is accepted, and what would unblock it.
+#   issue     REQUIRED. The issue tracking the eventual fix.
+#
+# A row here suppresses a HIGH or CRITICAL advisory that would otherwise fail
+# the build. It is not a place to record that something is unimportant — the
+# only justification is that a fix is not shippable YET (no upstream release,
+# the fix is in a major version that needs validation, a transitive pin we do
+# not control). "We looked and it's fine" is not a reason to add a row; it is
+# a reason to leave the advisory unregistered and let it be fixed.
+#
+# Moderate, low and info advisories are reported on every run and never
+# blocked, so they do not belong here either.
+#
+# There is no --refresh that generates these rows, deliberately. Each one is
+# written by hand by someone who read the advisory. The gate rejects a row
+# with an empty reason or no issue.
+#
+# Currently EMPTY, and not as a placeholder: on 2026-08-31, the run that
+# introduced this gate, `npm audit` reported ZERO advisories at every severity
+# across all 447 packages (25 prod, 386 dev, 87 optional). The gate landed
+# green with nothing suppressed. If this file is still empty, that is the
+# state being asserted — no exceptions have ever been needed.
+advisory	package	severity	scope	reason	issue

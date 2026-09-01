@@ -1,0 +1,93 @@
+# Dependabot — the other half of dependency hygiene.
+#
+# npm-audit.yml and vuln-scan.yml tell us when a dependency has a PUBLISHED
+# advisory. That is the floor, not the goal: most supply-chain exposure is
+# closed by simply not being far behind. Dependabot is what keeps the distance
+# small enough that a security bump is a patch release rather than a major
+# upgrade nobody has time to validate mid-incident.
+#
+# Grouping is deliberate. Ungrouped, these ecosystems would open roughly a
+# dozen PRs a week, each needing a full CI run and a review, and the reliable
+# outcome of that is a queue nobody reads. Minor and patch updates are grouped
+# into one PR per ecosystem; MAJOR updates are deliberately left ungrouped so
+# each arrives alone, with its own changelog to read.
+#
+# ⚠ CLA GATE: cla.yml allowlists `BryceAshey,bot*`. Dependabot authors PRs as
+# `dependabot[bot]`, which does not begin with "bot", so these PRs are likely
+# to sit blocked on the CLA check until that allowlist includes
+# `dependabot[bot]`. That is a one-line change to cla.yml, but it changes who
+# may contribute without signing, so it is Bryce's call and is NOT made here.
+
+version: 2
+
+updates:
+  # ── npm: the web UI ───────────────────────────────────────────────────────
+  # The tree this repo had no visibility into at all until npm-audit.yml.
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:30"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      # Split prod from dev so a bump to something that ships in the appliance
+      # image is never buried in a PR that is mostly toolchain churn.
+      ui-production:
+        patterns: ["*"]
+        dependency-type: production
+        update-types: [minor, patch]
+      ui-development:
+        patterns: ["*"]
+        dependency-type: development
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # ── Go modules: every member of go.work ───────────────────────────────────
+  # go.work uses agent, artifactsig, api, proto and tileschema. All five are
+  # listed. (Note: scripts/vuln-scan.sh currently scans only api, agent and
+  # proto — artifactsig and tileschema are outside that gate. Not changed here;
+  # it is a separate finding.)
+  - package-ecosystem: gomod
+    directories:
+      - /agent
+      - /api
+      - /artifactsig
+      - /proto
+      - /tileschema
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:30"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      go-modules:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # ── GitHub Actions ────────────────────────────────────────────────────────
+  # The workflows here run with repository secrets (CLA_SIGNATURES_TOKEN,
+  # CLAUDE_CODE_OAUTH_TOKEN) and cut signed releases, so a stale third-party
+  # action is a real supply-chain surface and not just housekeeping. One
+  # grouped PR: these bumps are almost always a tag move.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:30"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+      include: scope
