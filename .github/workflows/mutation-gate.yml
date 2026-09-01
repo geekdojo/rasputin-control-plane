@@ -119,10 +119,36 @@ jobs:
           # mutant is found and KILLED.
           git config diff.relative true
 
-          # gremlins runs per Go module. api/ and agent/ are the two modules
-          # with tests; proto/ is generated. A module with no in-diff Go
-          # changes short-circuits ~instantly.
-          modules="api agent"
+          # gremlins runs per Go module, and this list is a DELIBERATE SUBSET
+          # of go.work — the one module list in this repo that is not derived
+          # from scripts/workspace-modules.sh, and must not be "fixed" to be.
+          # Mutation testing costs minutes of PR time per module actually
+          # touched, so which modules to buy is a judgement call, not a
+          # coverage gap.
+          #
+          # It used to say `api agent`, justified as "the two modules with
+          # tests; proto/ is generated". That justification went stale:
+          # proto/, artifactsig/ and tileschema/ all have tests today, and
+          # proto/ is hand-written, not generated.
+          #
+          # artifactsig/ joins because it is the code that decides whether a
+          # downloaded OS or firmware image is authentic — a surviving mutant
+          # there is a test suite that would not notice signature verification
+          # being weakened. It is also the cheapest module in the workspace to
+          # mutate. Measured on a full unleash (worst case; the diff scoping
+          # below means a whole-module scan only happens when that module
+          # changes):
+          #
+          #   artifactsig   24 mutants,  10s, efficacy 100.00%, coverage 100.00%
+          #   proto         66 mutants,  16s, efficacy  88.89%, coverage  60.00%
+          #   tileschema   117 mutants,  43s, efficacy  92.31%, coverage  88.89%
+          #
+          # proto/ and tileschema/ are affordable and would land with real
+          # survivors to triage on their first touching PR; adding them is a
+          # separate decision, not an oversight.
+          #
+          # A module with no in-diff Go changes short-circuits ~instantly.
+          modules="api agent artifactsig"
 
           summary=""      # per-module one-liners for the comment/summary
           survivors=""    # real survivors: LIVED + genuinely-not-covered lines
