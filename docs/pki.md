@@ -10,6 +10,22 @@ Rasputin signs every OS update bundle with a PKI we own. The keys, in increasing
 
 Trust on the device side: `/etc/rasputin/trust/root-ca.pem`. The api reads the same file from `$RASPUTIN_TRUST_DIR/root-ca.pem` (default `./data/trust/root-ca.pem`).
 
+## The trust root is required
+
+Without it the api **refuses every OS update bundle** — upload and staging return `503` naming the missing file, and nothing installs. It does not degrade to accepting bundles unverified, which is what it used to do: a missing `root-ca.pem` selected a "dev-permissive" verifier that skipped every signature check and marked the bundle `SignedBy "<unverified>"`, on the one artifact that decides what code a node boots.
+
+The api still **starts** with no trust root — it serves `/healthz`, the UI and every other subsystem, because a control plane that won't start can't be used to fix anything (#89). Only the update path refuses.
+
+On Rasputin hardware nothing is needed: the OS image bakes the public root at `/etc/rasputin/trust/root-ca.pem` (CI injects `vars.RASPUTIN_ROOT_CA_PEM`) and `rasputin-os`'s `tmpfiles.d` symlinks it into `/var/lib/rasputin/trust/root-ca.pem` before the api starts.
+
+On a dev box with no PKI at all, ask for the old behaviour by name:
+
+```sh
+RASPUTIN_UPDATE_TRUST=dev-permissive go run ./api/cmd/rasputin-api
+```
+
+`require` (the default) and `dev-permissive` are the only accepted values; anything else falls back to `require`, never to permissive. Setting `dev-permissive` on a box that *does* have a `root-ca.pem` changes nothing — the root is loaded and enforced.
+
 ## One-time bootstrap
 
 ```sh

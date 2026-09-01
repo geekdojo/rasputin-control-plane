@@ -33,11 +33,17 @@ func (s *Server) handleListBundles(w http.ResponseWriter, r *http.Request) {
 	if bs == nil {
 		bs = []*updater.Bundle{}
 	}
+	// trustMode is additive alongside the original bool, which cannot say the
+	// third thing: "no root CA" now means bundles are REFUSED, not merely
+	// unchecked, unless the dev opt-in is set. Those need different words in
+	// front of an operator.
 	resp := struct {
 		TrustConfigured bool              `json:"trustConfigured"`
+		TrustMode       string            `json:"trustMode"`
 		Bundles         []*updater.Bundle `json:"bundles"`
 	}{
 		TrustConfigured: s.updaterVerifier.TrustConfigured(),
+		TrustMode:       s.updaterVerifier.Mode(),
 		Bundles:         bs,
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -58,8 +64,15 @@ func (s *Server) handleUploadBundle(w http.ResponseWriter, r *http.Request) {
 	}
 	// Upload verifies the bundle's own signature + parses its manifest (the
 	// same gate for any operator-supplied bundle).
+	//
+	// The format is declared here, by the ENDPOINT, and is not read out of the
+	// uploaded bytes: this route accepts the .raspbundle JSON envelope, which
+	// is the only format the api can verify host-side (a real .raucb needs the
+	// rauc CLI). The ingest temp file is named ingest-*.bin, so before this
+	// declaration existed the only thing choosing the verification path was the
+	// upload's own first byte.
 	verify := func(tmpPath, sha string) (bundleMeta, error) {
-		man, _, err := s.updaterVerifier.VerifyFile(tmpPath)
+		man, _, err := s.updaterVerifier.VerifyFile(tmpPath, updater.FormatRaspbundle)
 		if err != nil {
 			return bundleMeta{}, err
 		}
@@ -93,7 +106,17 @@ type errBundleVerify struct{ err error }
 
 func (e errBundleVerify) Error() string { return e.err.Error() }
 
+// Unwrap so errors.Is reaches the wrapped cause — ingestStatus needs to tell
+// updater.ErrTrustUnavailable apart from a bad signature.
+func (e errBundleVerify) Unwrap() error { return e.err }
+
 func ingestStatus(err error) int {
+	// "this api cannot verify anything" is an installation fault, not a bad
+	// upload. 400 would tell the operator to fix their bundle; the bundle is
+	// fine and the trust root is missing.
+	if errors.Is(err, updater.ErrTrustUnavailable) {
+		return http.StatusServiceUnavailable
+	}
 	var ve errBundleVerify
 	if errors.As(err, &ve) {
 		return http.StatusBadRequest
@@ -665,8 +688,11 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 			// here and re-verified on the target node at install (RAUC for the OS;
 			// the firewall's detached-CMS verify hook is a follow-up) — host-side
 			// bundle verify needs the rauc CLI and lands with that work.
-			if strings.HasSuffix(assetName, ".raspbundle") {
-				man, _, err := s.updaterVerifier.VerifyFile(tmpPath)
+			if strings.HasSuffix(assetName, string(updater.FormatRaspbundle)) {
+				// assetName comes from the SIGNED release manifest, not from
+				// the downloaded bytes — so the format declared here is one the
+				// artifact cannot choose for itself.
+				man, _, err := s.updaterVerifier.VerifyFile(tmpPath, updater.FormatRaspbundle)
 				if err != nil {
 					return bundleMeta{}, err
 				}

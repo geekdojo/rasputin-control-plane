@@ -6,7 +6,10 @@
 // Components:
 //   - Store: SQLite ledger of bundles + per-node update history.
 //   - Verifier: x509 chain check against the trusted root cert; rejects
-//     bundles whose signature doesn't validate.
+//     bundles whose signature doesn't validate. A MISSING trust root is a
+//     refusal, not a downgrade — see the fail-closed note on Verifier. The
+//     unverified dev mode is opt-in by name (RASPUTIN_UPDATE_TRUST=
+//     dev-permissive) and is never inferred from an absent file.
 //   - UpdateWorkflow: the 7-step saga (validate, precheck, download,
 //     install, reboot, wait-online-and-verify-slot, health-check-and-commit).
 //

@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 )
 
 // Secure is derived from whether this process terminates TLS, because that is
@@ -315,5 +317,60 @@ func TestWireMesh_ExplicitMockIsHonoured(t *testing.T) {
 	}
 	if got := mw.client.Backend(); got != "mock" {
 		t.Errorf("backend = %q, want mock — an explicit request must always win", got)
+	}
+}
+
+// ⚠️ The api half of "an absent trust root is a refusal, not a downgrade".
+//
+// A missing <trustDir>/root-ca.pem used to select a permissive updater.Verifier
+// all by itself: bundle signatures were parsed but never chain-verified, and
+// every bundle was recorded SignedBy "<unverified>". That is a fail-open on the
+// artifact that decides what code a node boots, signalled only by a string
+// nobody watches. `require` is the default and it must mean require.
+func TestWireBundleVerifier_MissingTrustRootIsNeverPermissive(t *testing.T) {
+	for _, mode := range []string{"", "require", "REQUIRE", "permissive", "yes", "1"} {
+		t.Setenv(updateTrustEnv, mode)
+		v := wireBundleVerifier(t.TempDir()) // no root-ca.pem anywhere in it
+		if v.Available() {
+			t.Errorf("%s=%q produced a usable verifier with no trust root — an unrecognised or "+
+				"absent value must fall back to require, never to permissive", updateTrustEnv, mode)
+		}
+		if got := v.Mode(); got != updater.TrustUnavailable {
+			t.Errorf("%s=%q: mode = %q, want %q", updateTrustEnv, mode, got, updater.TrustUnavailable)
+		}
+		// The api still has to BOOT — #89. wireBundleVerifier returning at all,
+		// with no fatal and no error, is that contract.
+		if _, _, err := v.Verify(strings.NewReader("{}"), updater.FormatRaspbundle); !errors.Is(err, updater.ErrTrustUnavailable) {
+			t.Errorf("%s=%q: want ErrTrustUnavailable, got %v", updateTrustEnv, mode, err)
+		}
+	}
+}
+
+// The other half: the dev box the old fail-open was written for still works,
+// once it says so out loud.
+func TestWireBundleVerifier_ExplicitDevPermissiveIsHonoured(t *testing.T) {
+	t.Setenv(updateTrustEnv, "dev-permissive")
+	v := wireBundleVerifier(t.TempDir())
+	if got := v.Mode(); got != updater.TrustDevPermissive {
+		t.Errorf("mode = %q, want %q — an explicit request must be honoured", got, updater.TrustDevPermissive)
+	}
+}
+
+// And a provisioned box verifies for real, which is the case that matters on
+// hardware: the OS image ships root-ca.pem, so this is the normal posture.
+func TestWireBundleVerifier_LoadsTheTrustRootWhenPresent(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := mesh.EnsureMeshCA(dir, "test") // any real CA PEM will do here
+	if err != nil {
+		t.Fatalf("EnsureMeshCA: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Cert.Raw})
+	if err := os.WriteFile(filepath.Join(dir, "root-ca.pem"), pemBytes, 0o600); err != nil {
+		t.Fatalf("write root-ca.pem: %v", err)
+	}
+	t.Setenv(updateTrustEnv, "")
+	v := wireBundleVerifier(dir)
+	if got := v.Mode(); got != updater.TrustEnforced {
+		t.Errorf("mode = %q, want %q", got, updater.TrustEnforced)
 	}
 }

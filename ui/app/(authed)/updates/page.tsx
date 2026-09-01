@@ -21,6 +21,7 @@ import {
 } from '../../../lib/api';
 import type {
   Bundle,
+  BundleTrustMode,
   ComponentUpdate,
   Job,
   JobStatus,
@@ -97,7 +98,7 @@ function changeColor(change: string): string {
 
 export default function UpdatesPage() {
   const [bundles, setBundles] = useState<Bundle[]>([]);
-  const [trustConfigured, setTrustConfigured] = useState(true);
+  const [trustMode, setTrustMode] = useState<BundleTrustMode>('enforced');
   const [nodes, setNodes] = useState<Node[]>([]);
   const [history, setHistory] = useState<NodeUpdate[]>([]);
   const [systemJobs, setSystemJobs] = useState<Job[]>([]);
@@ -136,7 +137,7 @@ export default function UpdatesPage() {
     listBundles()
       .then((b) => {
         setBundles(b.bundles);
-        setTrustConfigured(b.trustConfigured);
+        setTrustMode(b.trustMode);
       })
       .catch((e) => setErr(String(e)));
     listNodes().then(setNodes).catch(() => {});
@@ -164,10 +165,20 @@ export default function UpdatesPage() {
     <PageShell>
       <PageHeader icon={Zap} title="UPDATES" />
       <PageBody>
-        {!trustConfigured && (
+        {trustMode === 'unavailable' && (
           <Hint warn style={{ marginBottom: 14 }}>
-            ⚠ No root CA configured at <Tok>data/trust/root-ca.pem</Tok>. Bundle signatures will not be verified — run{' '}
-            <Tok>./scripts/pki-init.sh</Tok> and copy <Tok>root-ca.pem</Tok> into the trust dir.
+            ⚠ No root CA at <Tok>data/trust/root-ca.pem</Tok>, so OS updates cannot be verified and are{' '}
+            <strong>refused</strong> — nothing stages or installs until it is in place. On Rasputin hardware
+            this ships in the OS image; if you&apos;re seeing this on an appliance, re-flash. Developing
+            locally? Run <Tok>./scripts/pki-init.sh</Tok>, copy <Tok>root-ca.pem</Tok> into the trust dir and
+            restart the api — or start it with <Tok>RASPUTIN_UPDATE_TRUST=dev-permissive</Tok> to work without
+            a PKI.
+          </Hint>
+        )}
+        {trustMode === 'dev-permissive' && (
+          <Hint warn style={{ marginBottom: 14 }}>
+            ⚠ <Tok>RASPUTIN_UPDATE_TRUST=dev-permissive</Tok> — bundle signatures are <strong>not checked</strong>{' '}
+            and everything staged here is recorded as <Tok>&lt;unverified&gt;</Tok>. Dev boxes only.
           </Hint>
         )}
         {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}

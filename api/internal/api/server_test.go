@@ -241,10 +241,11 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	bmcSvc := bmc.NewService(bmc.Config{HostNodeID: "self-node"}, bmcStore, nc)
 
 	bundleDir := filepath.Join(dir, "bundles")
-	verifier, err := updater.NewVerifier(dir)
-	if err != nil {
-		t.Fatalf("NewVerifier: %v", err)
-	}
+	// No root-ca.pem in dir, so this verifier is UNAVAILABLE and refuses every
+	// bundle — the production posture for an unprovisioned box. Tests that need
+	// to ingest a bundle call buildBundleFixture, which installs a real root CA
+	// and re-inits the verifier.
+	verifier := updater.NewVerifier(dir)
 	runner := jobs.NewRunner(jobStore, nc)
 
 	trustDir := dir
