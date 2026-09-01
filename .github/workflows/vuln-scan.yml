@@ -1,6 +1,6 @@
 name: vuln-scan
 
-# govulncheck over the Go workspace modules (api / agent / proto), gated
+# govulncheck over every Go workspace module, gated
 # against the checked-in baseline of known reachable vulnerabilities in
 # .github/vuln-baseline.txt. Fails only when a NEW reachable advisory
 # appears. Policy and rationale are documented in scripts/vuln-scan.sh.
@@ -64,6 +64,7 @@ jobs:
           cache-dependency-path: |
             api/go.sum
             agent/go.sum
+            artifactsig/go.sum
 
       - name: install govulncheck (pinned)
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0

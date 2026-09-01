@@ -34,11 +34,53 @@ cd "$(dirname "$0")/.."
 
 export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.5}"
 
-MODULES=(api agent proto)
+# The module list is DERIVED from go.work, not written out here.
+#
+# It was written out here until 2026-09-01, as `MODULES=(api agent proto)`, and
+# it had drifted: go.work grew ./artifactsig and ./tileschema and this list did
+# not, so the module that verifies every release signature and the module that
+# validates every catalog tile were covered by no run of this gate at all. The
+# gate stayed green the whole time, because a hardcoded list cannot report the
+# code it was never pointed at.
+#
+# Deriving it from go.work makes that drift structurally impossible: go.work is
+# the single file that decides what the workspace is, and this gate now covers
+# exactly what it names. A module added there is scanned on the next run without
+# anyone remembering this file exists.
+#
+# Guarded, because the dangerous failure mode of a derived list is the quiet
+# one. An empty or unparseable list would scan nothing and print success, which
+# is strictly worse than the drift it replaces — so both the empty list and a
+# named directory with no go.mod are hard errors.
+MODULES=()
+while IFS= read -r m; do MODULES+=("$m"); done < <(awk '
+  /^[[:space:]]*use[[:space:]]*\(/ { inblock = 1; next }
+  inblock && /^[[:space:]]*\)/     { inblock = 0; next }
+  inblock {
+    sub(/\/\/.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+    if ($0 == "") next
+    sub(/^\.\//, ""); print; next
+  }
+  /^[[:space:]]*use[[:space:]]+[^(]/ { p = $2; sub(/^\.\//, "", p); print p }
+' go.work)
+
+if [ "${#MODULES[@]}" -eq 0 ]; then
+  echo "::error::no modules parsed out of go.work — refusing to run a scan that would cover nothing"
+  exit 1
+fi
+for m in "${MODULES[@]}"; do
+  [ -f "$m/go.mod" ] || {
+    echo "::error::go.work names $m, but $m/go.mod does not exist"
+    exit 1
+  }
+done
+
 BASELINE=.github/vuln-baseline.txt
 
 found="$(mktemp)"
 trap 'rm -f "$found"' EXIT
+
+echo "govulncheck: ${#MODULES[@]} workspace module(s) from go.work — ${MODULES[*]}"
 
 for m in "${MODULES[@]}"; do
   echo "=== govulncheck: $m ==="
@@ -84,5 +126,6 @@ if [ -n "$new" ]; then
 fi
 
 echo
-echo "OK: no reachable vulnerabilities outside the baseline" \
-     "($(wc -l <"$found" | tr -d ' ') known, tracked in $BASELINE)."
+echo "OK: no reachable vulnerabilities outside the baseline across" \
+     "${#MODULES[@]} module(s) (${MODULES[*]}) —" \
+     "$(wc -l <"$found" | tr -d ' ') known, tracked in $BASELINE."
