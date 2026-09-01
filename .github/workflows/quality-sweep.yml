@@ -111,8 +111,12 @@ jobs:
             Weekly code-quality sweep: duplicative and dead code.
 
             Read AGENTS.md, ARCHITECTURE.md, and CLAUDE.md before changing
-            anything. Scope: the three Go modules (api/, agent/, proto/) and
-            the Next.js ui/.
+            anything. Scope: EVERY Go module go.work names, plus the Next.js
+            ui/. Enumerate them by running ./scripts/workspace-modules.sh —
+            do not trust a module list written in this prompt, and do not
+            assume it is still three. This prompt said api/, agent/, proto/
+            while go.work named five, so artifactsig/ and tileschema/ were
+            silently outside every sweep this workflow has ever run.
 
             Tooling: the Go toolchain, staticcheck, node/npm, git, and gh are
             preinstalled and on PATH. Do not install or work around other
@@ -132,12 +136,14 @@ jobs:
                semantics-preserving — no behavior changes. Keep the total
                diff under ~400 changed lines; if more survives verification,
                fix the best subset and list the remainder in the PR body.
-            4. GATE with the same checks ci.yml runs, and do not push if any
+            4. GATE with the same checks ci.yml runs, over every module
+               ./scripts/workspace-modules.sh prints, and do not push if any
                fail:
-                 gofmt -l api/ agent/ proto/        (output must be empty)
-                 go vet ./api/... ./agent/... ./proto/...
-                 go test -race ./api/... ./agent/... ./proto/...
-                 go build ./api/... ./agent/... ./proto/...
+                 modules="$(./scripts/workspace-modules.sh)"
+                 gofmt -l $modules                  (output must be empty)
+                 for m in $modules; do go vet "./$m/..."; done
+                 for m in $modules; do go test -race "./$m/..."; done
+                 for m in $modules; do go build "./$m/..."; done
                  cd ui && npm ci && npm run type-check && npm run build
             5. SHIP: commit to branch quality-sweep/run-${{ github.run_id }},
                push it, and open a PR to main titled
