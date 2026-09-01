@@ -67,8 +67,8 @@ Auth to the UI is **WebAuthn/passkey only** — there is no password login.
 
 ## The bus: NATS + JetStream, node-bound join tokens
 
-All control traffic is NATS with JetStream persistence, embedded in the api
-process. Subjects are human-readable (`rasputin.node.<id>.cmd.…`,
+All control traffic is NATS, on a server embedded in the api process with
+JetStream enabled. Subjects are human-readable (`rasputin.node.<id>.cmd.…`,
 `rasputin.node.<id>.evt.…`, `rasputin.job.<id>.…`), so `nats sub '>'` gives a
 live view of everything the system is doing.
 
@@ -80,8 +80,37 @@ a store delete; the next reconnect fails. The controlplane's own co-located
 agent connects over loopback and needs no token (it's already on the box that
 is the authority).
 
-JetStream work-queue semantics mean an agent that goes offline drains its
-queued commands when it reconnects, with dedup keys making redelivery safe.
+### What the bus does *not* give you
+
+There is **no work-queue delivery and no dedup**, and reading the bus as if
+there were is the single most expensive mistake to make about this system.
+
+JetStream is used, but for one thing only: the `JOBS` stream
+(`rasputin.job.>`, `LimitsPolicy`, 30-day max age) is a passive archive of
+job events. It has **no consumer** — nothing drains it, nothing replays it,
+and node command subjects are not in it at all.
+
+Commands are plain core-NATS request/reply. The api calls `Request` on
+`rasputin.node.<id>.cmd.…` and waits for a reply until the context deadline.
+An agent that is offline has nothing queued for it and receives nothing on
+reconnect; the request simply times out. `Nats-Msg-Id` is set nowhere in the
+tree, so there are no dedup keys, and there is no agent-side idempotency
+ledger. The consequence that matters: **a lost reply is
+indistinguishable from work that never happened.** The api cannot tell
+whether the command ran.
+
+The discipline that exists instead is declarative, not mechanical. A step
+whose effect cannot be undone declares `WorkflowStep.Irreversible` (merged
+in #198); the runner then never auto-retries it, and refuses to run it at
+all once the job ledger already records an attempt for it, failing it with
+`ErrIrreversibleReplay` so a human decides. That is a *refusal*, not
+idempotency — it stops a double `dd`, it does not make one safe.
+
+This matters because the fiction has already cost design time: the E12
+backup-target-selection saga was drafted around a rollback-and-dedup model
+that does not exist, where the step being rolled back was a disk format.
+Building the real mechanism — an agent operation ledger for irreversible
+RPCs — is tracked as geekdojo/geekdojo-brain#396.
 
 ## The Job model
 
