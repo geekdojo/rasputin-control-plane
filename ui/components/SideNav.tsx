@@ -32,7 +32,10 @@ const NAV: NavItem[] = [
   { icon: LayoutDashboard, label: 'Apps', href: '/apps' },
   { icon: Store, label: 'App Catalog', href: '/app-catalog' },
   { icon: BarChart2, label: 'Metrics', href: '/metrics' },
-  { icon: Database, label: 'Storage' },
+  // Lit up by design/storage.md §4.8: "the sidebar already carries a Storage
+  // nav item, present but disabled pending its subsystem … target selection is
+  // the work that lights Storage up."
+  { icon: Database, label: 'Storage', href: '/storage' },
   { icon: ShieldAlert, label: 'Firewall', href: '/firewall' },
   { icon: GitBranch, label: 'Mesh', href: '/mesh' },
   { icon: UserCog, label: 'IAM' },

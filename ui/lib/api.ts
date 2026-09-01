@@ -1,6 +1,9 @@
 import type {
   Alert,
   App,
+  BackupCandidatesResponse,
+  BackupTarget,
+  ClaimBackupTargetRequest,
   BusTokenInfo,
   CatalogStatus,
   FlashableImage,
@@ -988,6 +991,44 @@ export function setOperatorKeys(keys: string[]): Promise<OperatorKeys> {
 
 export function completeSetup(): Promise<SetupState> {
   return jsonFetch<SetupState>('/api/setup/complete', { method: 'POST' });
+}
+
+// ----- Backup targets (design/storage.md §4.8) ----------------------------
+
+// listBackupCandidates lists every whole disk on a node, PROTECTED ONES
+// INCLUDED. Read-only — it mutates nothing here or on the agent, and it is a
+// plain RPC rather than a job because an operator cannot choose from a list
+// only a running job could produce.
+//
+// Omitting nodeId lets the api default to the node hosting it, which on an
+// appliance is where the backup disk almost always is.
+export function listBackupCandidates(nodeId?: string): Promise<BackupCandidatesResponse> {
+  const q = nodeId ? `?${new URLSearchParams({ nodeId })}` : '';
+  return jsonFetch<BackupCandidatesResponse>(`/api/backup/candidates${q}`);
+}
+
+// listBackupTargets returns every claim attempt, newest first — failures
+// included, which is the point of keeping them: "the claim you started an hour
+// ago was refused because that disk holds the boot partition" is the most
+// useful thing this view says.
+export async function listBackupTargets(): Promise<BackupTarget[]> {
+  return (await jsonFetch<BackupTarget[] | null>('/api/backup/targets')) ?? [];
+}
+
+// claimBackupTarget submits the backup.target.claim saga. THIS IS THE CALL
+// THAT CAN FORMAT A DISK — every §4.8 refusal is evaluated inside the saga, in
+// order, before the one destructive step runs.
+//
+// `archiveKey` is already wrapped when it gets here (lib/archive-key.ts). No
+// plaintext key or passphrase can reach this function: there is no parameter
+// for one, and the api decodes with DisallowUnknownFields so an invented field
+// would be a 400 rather than a secret in the job ledger.
+export function claimBackupTarget(req: ClaimBackupTargetRequest): Promise<Job> {
+  return jsonFetch<Job>('/api/backup/targets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
 }
 
 // ----- WebSocket plumbing -------------------------------------------------

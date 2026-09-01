@@ -467,7 +467,15 @@ export const fieldStyle: CSSProperties = {
   padding: '7px 9px',
 };
 
-export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
+// `ref` is declared explicitly rather than left to the spread. React 19 passes
+// ref to function components as an ordinary prop, so it already reached the
+// <input>; what was missing was the TYPE, which made an uncontrolled field
+// (the archive passphrase — see components/storage/ClaimTargetDrawer.tsx, where
+// keeping the characters out of React state is the point) a type error at the
+// call site for no reason.
+export function Input(
+  props: React.InputHTMLAttributes<HTMLInputElement> & { ref?: React.Ref<HTMLInputElement> },
+) {
   const { style, className, ...rest } = props;
   return <input className={`rasp-field ${className ?? ''}`} style={{ ...fieldStyle, ...style }} {...rest} />;
 }
