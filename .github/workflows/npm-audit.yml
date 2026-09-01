@@ -1,0 +1,66 @@
+name: npm-audit
+
+# npm audit over ui/package-lock.json, gated against the reviewed register in
+# .github/npm-audit-register.tsv. Fails on HIGH and CRITICAL advisories that
+# nobody has recorded a reason for.
+#
+# This is the npm half of the dependency question vuln-scan.yml has been
+# answering for Go only. Until this landed, ui/package-lock.json's ~450 packages
+# were read by no gate at all: govulncheck and gosec are Go-only, and while
+# codeql.yml does analyse ui/ source it excludes node_modules by design. Every
+# appliance image ships that tree.
+#
+# Policy lives in scripts/npm-audit.sh, not here, exactly as vuln-scan.yml
+# defers to scripts/vuln-scan.sh and sast.yml to scripts/sast-register.sh. The
+# short version: high/critical block, moderate/low report, and an accepted
+# advisory carries a written reason and a tracking issue rather than sitting in
+# an unexplained baseline.
+#
+# The weekly schedule is here for the same reason vuln-scan.yml has one, and it
+# matters MORE here than for the static gates: npm advisories are published
+# against a lockfile that is sitting perfectly still, so coverage decays
+# without pushes. sast.yml deliberately has no schedule because its tools are
+# pinned and a re-run can only repeat the last answer; that argument does not
+# apply to an advisory database. Don't remove it.
+#
+# Nothing is installed: the audit runs --package-lock-only, so it reads the
+# lockfile directly and needs no `npm ci` and no node_modules. That also means
+# no setup-node cache — there is nothing to cache.
+#
+# Note on scripts/build-release.sh: its `npm ci --no-audit` is correct and was
+# left alone. Auditing during a release build would put a registry round-trip
+# on the critical path of an artifact build and fail it for a reason unrelated
+# to the build. This gate is where that question gets asked.
+#
+# Conventions match ci.yml: Node 22, actions/setup-node@v4.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC, after vuln-scan's 06:30
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  npm-audit:
+    name: npm audit (register-gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Project Node: current LTS, matching ci.yml's frontend job and
+          # release.yml. No `cache:` — the audit installs nothing.
+          node-version: "22"
+
+      - name: gate
+        run: ./scripts/npm-audit.sh --gate
