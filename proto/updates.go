@@ -128,6 +128,15 @@ type UpdateDownloadProgressEvt struct {
 
 // UpdateInstallCmd tells the agent to install a previously-downloaded bundle.
 // The api sets TargetSlot from the precheck's inactiveSlot.
+//
+// BundleID and LocalPath both become filesystem paths on the agent, so the
+// agent validates them rather than trusting them: BundleID must be a single
+// safe filename component, and a non-empty LocalPath is honoured only if it
+// lands inside the agent's bundle store. The api leaves LocalPath empty today
+// and the agent resolves the path from the id; the field stays here for a
+// future api that pre-stages content, and the agent's check is what makes
+// adding that safe by default rather than by convention. See
+// agent/internal/updater/bundlepath.go.
 type UpdateInstallCmd struct {
 	BundleID   string     `json:"bundleId"`
 	LocalPath  string     `json:"localPath"`

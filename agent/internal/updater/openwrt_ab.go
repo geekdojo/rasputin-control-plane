@@ -245,7 +245,13 @@ func (o *OpenWrtABBackend) pruneBundles(keepID string) {
 
 func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, expectedSHA string, sizeBytes int64,
 	progressFn func(int64, int64)) (string, string, error) {
-	dest := o.bundlePath(bundleID)
+	// bundleID arrives on the bus. resolveBundlePath is what stops a `../` in
+	// it from choosing where half a gigabyte of downloaded artifact lands,
+	// and where its .sig lands beside it. See bundlepath.go.
+	dest, err := resolveBundlePath(o.stateDir, bundleID, "", ".rootfs")
+	if err != nil {
+		return "", "", fmt.Errorf("openwrt-ab download: %w", err)
+	}
 	o.pruneBundles(bundleID)
 
 	// The signature comes FIRST, before half a gigabyte moves. Install will
@@ -366,8 +372,12 @@ const maxSignatureBytes = 1 << 20
 
 func (o *OpenWrtABBackend) Install(ctx context.Context, bundleID, localPath string, targetSlot proto.UpdateSlot,
 	progressFn func(string, int)) (string, error) {
-	if localPath == "" {
-		localPath = o.bundlePath(bundleID)
+	// Both bundleID and localPath arrive on the bus. localPath is the artifact
+	// verifySig hashes and writeSlot streams onto the inactive partition, so
+	// it is resolved against the bundle store before either touches it.
+	localPath, err := resolveBundlePath(o.stateDir, bundleID, localPath, ".rootfs")
+	if err != nil {
+		return "", fmt.Errorf("openwrt-ab install: %w", err)
 	}
 	letter := slotLetter(targetSlot)
 	if letter == "" {
