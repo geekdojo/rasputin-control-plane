@@ -165,27 +165,20 @@ func (m *MockBackend) saveState(st *mockState) error {
 	return os.Rename(tmp, m.statePath())
 }
 
-// seed builds the first-run machine, or loads one from the path in
-// RASPUTIN_STORAGE_MOCK_SEED.
+// seed builds the first-run machine.
 //
-// The default is a two-NVMe controlplane plus a USB stick, because that is the
-// hardware §4.8 is written against (the Geekworm x1004 the BitScope sits in,
-// the LattePanda) and the configuration in which a name-keyed exclusion rule
+// It is a two-NVMe controlplane plus a USB stick, because that is the hardware
+// §4.8 is written against (the Geekworm x1004 the BitScope sits in, the
+// LattePanda) and the configuration in which a name-keyed exclusion rule
 // destroys the cluster. Both NVMes are the same transport and neither is
 // removable, so nothing but the mount table can tell them apart — which is the
 // point.
+//
+// There is deliberately NO env var naming a seed file to load. A bench that
+// wants a different machine edits <stateDir>/storage/state.json, which is the
+// same JSON, is already the thing the mock reads on every call, and does not
+// hand the agent an arbitrary env-supplied path to open.
 func (m *MockBackend) seed() (*mockState, error) {
-	if path := os.Getenv("RASPUTIN_STORAGE_MOCK_SEED"); path != "" {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read RASPUTIN_STORAGE_MOCK_SEED %s: %w", path, err)
-		}
-		var st mockState
-		if err := json.Unmarshal(b, &st); err != nil {
-			return nil, fmt.Errorf("parse RASPUTIN_STORAGE_MOCK_SEED %s: %w", path, err)
-		}
-		return &st, nil
-	}
 	return defaultMockMachine(), nil
 }
 
@@ -274,13 +267,32 @@ func (st *mockState) deviceNames() []string {
 }
 
 func mockDeviceName(family string, n int) string {
+	if n < 0 {
+		n = 0
+	}
 	switch family {
 	case "nvme":
 		return fmt.Sprintf("/dev/nvme%dn1", n)
 	case "mmcblk":
 		return fmt.Sprintf("/dev/mmcblk%d", n)
 	default:
-		return fmt.Sprintf("/dev/sd%c", 'a'+rune(n))
+		return "/dev/sd" + sdSuffix(n)
+	}
+}
+
+// sdSuffix renders the kernel's sd naming: a…z, then aa…az, ba… and so on.
+// Written as a base-26 loop over a letter table rather than 'a'+n, so a machine
+// with more than 26 disks produces "sdaa" rather than a name outside the
+// alphabet — and so the arithmetic cannot overflow a rune.
+func sdSuffix(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz"
+	out := ""
+	for {
+		out = string(letters[n%26]) + out
+		n = n/26 - 1
+		if n < 0 {
+			return out
+		}
 	}
 }
 

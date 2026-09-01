@@ -714,11 +714,11 @@ func writeMarker(mountPath string, set *proto.StorageBackupSet) error {
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(payload); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -728,8 +728,8 @@ func writeMarker(mountPath string, set *proto.StorageBackupSet) error {
 		return err
 	}
 	if d, err := os.Open(mountPath); err == nil {
-		defer d.Close()
 		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }
