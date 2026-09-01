@@ -1,7 +1,7 @@
 name: sast
 
-# Static analysis of code WE wrote — gosec + staticcheck over the Go workspace
-# modules (api / agent / proto). The companion to vuln-scan.yml, which answers
+# Static analysis of code WE wrote — gosec + staticcheck over every Go workspace
+# module. The companion to vuln-scan.yml, which answers
 # a different question: govulncheck finds known advisories in our DEPENDENCIES,
 # and nothing before this looked at our own code for a hardcoded credential, a
 # path traversal or weak crypto.
@@ -78,6 +78,7 @@ jobs:
           cache-dependency-path: |
             api/go.sum
             agent/go.sum
+            artifactsig/go.sum
 
       # Both tools install into GOPATH/bin, which is not on PATH by default for
       # subsequent steps.
