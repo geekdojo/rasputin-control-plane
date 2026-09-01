@@ -32,6 +32,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/proxy"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/sdnotify"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/tailscale"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/updater"
@@ -496,6 +497,52 @@ func main() {
 		}
 	}
 
+	// Backup-target storage handlers (design/storage.md §4.8) — enumerate
+	// candidate disks, claim one, format it, mount it. Real backend when
+	// util-linux is on PATH, otherwise mock. Force via
+	// RASPUTIN_STORAGE_BACKEND=blockdev|mock.
+	//
+	// Registered on the controlplane and on storage-role nodes only, and
+	// deliberately not on every node the way the updater is. `storage.claim` is
+	// the one agent verb that force-formats a disk; a compute node or the
+	// firewall has nothing that uses it today (#302's data-disk contract is
+	// where a storage node will), so arming them would be surface with no
+	// consumer. Widen this when something consumes it, not before.
+	if role == proto.RoleControlPlane || role == proto.RoleStorage {
+		backendChoice := envOr("RASPUTIN_STORAGE_BACKEND", autodetectStorageBackend())
+
+		var stBackend storage.Backend
+		switch backendChoice {
+		case "blockdev":
+			bd, err := storage.NewBlockDevBackend(stateDir)
+			if err != nil {
+				log.Fatalf("rasputin-agent: storage blockdev backend: %v", err)
+			}
+			stBackend = bd
+		case "mock":
+			mb, err := storage.NewMockBackend(stateDir)
+			if err != nil {
+				log.Fatalf("rasputin-agent: storage mock: %v", err)
+			}
+			stBackend = mb
+		default:
+			faults.Reject("RASPUTIN_STORAGE_BACKEND", backendChoice, []string{"blockdev", "mock"},
+				"backup-target selection is disabled on this node — no disk can be claimed as a backup target")
+		}
+		if stBackend != nil {
+			stSubs, err := storage.RegisterHandlers(nc, nodeID, stBackend)
+			if err != nil {
+				log.Fatalf("rasputin-agent: register storage handlers: %v", err)
+			}
+			defer func() {
+				for _, sub := range stSubs {
+					_ = sub.Unsubscribe()
+				}
+			}()
+			log.Printf("rasputin-agent: storage backend=%s", stBackend.Name())
+		}
+	}
+
 	// Tailscale handlers — every node joins the tailnet (per
 	// design/control-plane/mesh.md §5). Picks the real backend if the
 	// tailscale binary is on PATH, otherwise mocks. Force via
@@ -942,6 +989,18 @@ func autodetectUpdaterBackend(role proto.NodeRole) string {
 // override (RASPUTIN_UCI_BACKEND) lets the user force one or the other.
 // The config-file check matters: a dev box could have a stray `uci`
 // binary installed, but only a real OpenWrt root has /etc/config/firewall.
+// autodetectStorageBackend picks the backup-target backend: the real one when
+// every util-linux tool it shells out to is on PATH, else mock. Mirrors the
+// updater's `exec.LookPath("rauc")` test, and for the same reason — a backend
+// that discovers a missing tool halfway through a repartition is worse than one
+// that never started.
+func autodetectStorageBackend() string {
+	if storage.ToolingAvailable() {
+		return "blockdev"
+	}
+	return "mock"
+}
+
 func autodetectUCIBackend() string {
 	return autodetectUCIBackendAt("/etc/config/firewall")
 }
