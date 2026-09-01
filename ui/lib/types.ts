@@ -1,3 +1,10 @@
+// `ArchiveKeyPayload` is defined where it is MINTED (lib/archive-key.ts), not
+// here: it is the one wire type this UI produces with crypto rather than
+// transcribes from Go, and keeping the shape next to the ceremony is what stops
+// a field being added to one and not the other. Type-only import — no runtime
+// coupling, and no WASM pulled into modules that just want a Node type.
+import type { ArchiveKeyPayload } from './archive-key';
+
 export type JobStatus =
   | 'queued'
   | 'running'
@@ -919,4 +926,136 @@ export interface ObsSeries {
   range: string; // Go duration, echoed back
   step: string;
   points: ObsSeriesPoint[];
+}
+
+// ----- Backup targets (design/storage.md §4.8) ----------------------------
+//
+// Mirrors proto/storage.go and api/internal/storage/types.go. The picker's
+// shape is `api/internal/api.backupCandidate`: everything the agent reported,
+// verbatim, plus the api-minted `wipeToken`.
+
+/**
+ * How a candidate disk is attached. Reported so the operator can recognise
+ * "the 2 TB USB one" in a picker — and for nothing else. It is NOT a safety
+ * signal: §4.8's point is that an internal NVMe is as legitimate a backup
+ * target as a USB disk, and the boot medium can be either.
+ */
+export type StorageTransport = 'usb' | 'nvme' | 'sata' | 'mmc' | 'virtual' | 'unknown';
+
+/** One partition on a candidate disk — §4.8's "current contents". */
+export interface StoragePartition {
+  devicePath: string;
+  partUuid?: string;
+  fsType?: string;
+  label?: string;
+  sizeBytes: number;
+  /** Non-empty when mounted right now. */
+  mountpoint?: string;
+}
+
+/** The contents of a disk's `.rasputin-backup-set.json` marker. */
+export interface StorageBackupSet {
+  markerVersion: number;
+  clusterId?: string;
+  partUuid?: string;
+  /** Identifies the §4.6 DATA KEY these generations need. Never key material. */
+  keyId?: string;
+  label?: string;
+  createdAt: string;
+  /** Retained archive generations the agent could see (§4.4 keeps four). */
+  generations?: number;
+}
+
+/** One whole disk the operator could choose. */
+export interface BackupCandidate {
+  /** The kernel name AT THIS MOMENT. A handle for issuing the claim, never an identity. */
+  devicePath: string;
+  model?: string;
+  serial?: string;
+  wwn?: string;
+  sizeBytes: number;
+  transport: StorageTransport;
+  removable: boolean;
+  partitions?: StoragePartition[];
+  hasBackupSet: boolean;
+  backupSet?: StorageBackupSet;
+  /** Holds the currently-mounted boot/persistent partitions. Rendered, never hidden. */
+  protected: boolean;
+  /** Operator-facing prose naming the mount that protects it. Do not parse. */
+  protectedReason?: string;
+  /** What the operator's confirmation binds to; re-derived by the agent before it writes. */
+  fingerprint: string;
+  /** Neither WWN nor serial reported, so two identical sticks can fingerprint alike. */
+  identityWeak?: boolean;
+  /**
+   * Present ONLY when the disk is genuinely eligible to be wiped —
+   * `hasBackupSet && !protected`. Its ABSENCE is the answer, not an omission:
+   * with nothing to put in the field there is no wipe control to render.
+   */
+  wipeToken?: string;
+}
+
+export interface BackupCandidatesResponse {
+  ok: boolean;
+  backend: string; // "blockdev" or "mock"
+  candidates: BackupCandidate[];
+  /** The fingerprints are only as fresh as this. */
+  ts: string;
+}
+
+/** Every value except 'pending' is terminal. */
+export type BackupTargetStatus = 'pending' | 'claimed' | 'replaced' | 'failed';
+
+/** One row of the backup_targets ledger. Wrapped key blobs are never in it. */
+export interface BackupTarget {
+  jobId: string;
+  nodeId: string;
+  label?: string;
+  /** THE identifier for a claimed target, minted at format time. */
+  partUuid?: string;
+  /** Recorded for the operator's benefit only — nothing resolves a target by it. */
+  devicePath?: string;
+  mountPath?: string;
+  fsType?: string;
+  sizeBytes?: number;
+  fingerprint?: string;
+  keyId?: string;
+  keyAlg?: string;
+  /** Both §4.6 wrappings are on file, without exposing either. */
+  hasWrappedKeys: boolean;
+  adopted?: boolean;
+  wiped?: boolean;
+  status: BackupTargetStatus;
+  createdAt: string;
+  /** Absent means still running. */
+  claimedAt?: string;
+  error?: string;
+}
+
+/**
+ * §4.8's second, separate choice. A nested object carrying an api-minted token
+ * rather than a boolean, because a boolean is one typo or one mis-bound
+ * checkbox from destroying the only copy of an archive.
+ */
+export interface WipeConfirmation {
+  token: string;
+}
+
+/**
+ * Body of POST /api/backup/targets. Decoded with DisallowUnknownFields, so any
+ * field not listed here is a 400 — including anything key-shaped.
+ */
+export interface ClaimBackupTargetRequest {
+  nodeId: string;
+  devicePath: string;
+  fingerprint: string;
+  label?: string;
+  /** This cluster already has a claimed target and this one supersedes it. */
+  replace?: boolean;
+  /** Take the existing backup set over AS IT STANDS. Mutually exclusive with wipe. */
+  adopt?: boolean;
+  /** Destroy the existing backup set. Mutually exclusive with adopt. */
+  wipe?: WipeConfirmation;
+  /** The ALREADY-WRAPPED §4.6 data key. Never plaintext — see lib/archive-key.ts. */
+  archiveKey?: ArchiveKeyPayload;
 }
