@@ -43,6 +43,32 @@ type WorkflowStep struct {
 	Do      DoFn
 	Timeout time.Duration
 	Retries int // additional attempts beyond the first
+
+	// Irreversible declares that this step's side effect cannot be undone by
+	// the saga: there is no compensation in this runner, so once the step has
+	// run, running it again does the thing a second time. A `dd` into a slot,
+	// a mkfs, a mint-and-hand-out of a credential.
+	//
+	// Declaring it changes two things in the runner:
+	//
+	//  1. The step is never auto-retried, whatever Retries says. Register
+	//     REJECTS a workflow that declares both (see ValidateWorkflow); the
+	//     runner also clamps maxAttempts to 1 so a Workflow assembled without
+	//     going through Register cannot slip past.
+	//  2. The step refuses to run at all when the ledger already holds a
+	//     record of it for this job — see assertNoPriorAttempt. It fails the
+	//     job with ErrIrreversibleReplay rather than repeating the effect.
+	//
+	// Declarative rather than by convention, deliberately. A step that depends
+	// on its author remembering `Retries: 0` reads as correct in review and is
+	// wrong the first time someone copies an existing workflow as a starting
+	// point.
+	//
+	// This is the DECLARATION, not the mechanism that makes a re-run safe. The
+	// agent-side operation ledger is what would make such a step idempotent;
+	// until that exists the runner's answer to "did this already happen?" is to
+	// refuse, not to reconcile.
+	Irreversible bool
 }
 
 // Workflow is a registered, named sequence of WorkflowSteps. Workflows are
@@ -84,6 +110,29 @@ type Workflow struct {
 // mode, where the box is idle). Distinct from any other error, which fails the
 // job. Not retried — the step is marked succeeded and the job completes.
 var ErrStopWorkflow = errors.New("jobs: stop workflow early")
+
+// ErrIrreversibleReplay is the error a job fails with when the runner declines
+// to run an Irreversible step because the ledger already holds a record of that
+// step for this job — or because it could not read the ledger to find out.
+//
+// The message is deliberately fixed and greppable: it is the string an operator
+// sees on the failed job, and the string a log sweep looks for. It is a refusal,
+// not a crash: the effect did NOT happen a second time, and the job was failed
+// so a human decides what to do next.
+var ErrIrreversibleReplay = errors.New("jobs: irreversible step refused")
+
+// ValidateWorkflow reports programming errors in a Workflow that the runner
+// must not paper over at runtime. Register calls it and panics on a non-nil
+// result; call it directly to check a Workflow without that.
+func ValidateWorkflow(w Workflow) error {
+	for i, s := range w.Steps {
+		if s.Irreversible && s.Retries > 0 {
+			return fmt.Errorf("jobs: workflow %q step %d (%q): an Irreversible step cannot declare Retries (got %d) — a retry would repeat the side effect the declaration exists to protect",
+				w.Kind, i, s.Name, s.Retries)
+		}
+	}
+	return nil
+}
 
 // Runner is the saga executor. One Runner per api process; workflows are
 // registered at startup and looked up at Submit time.
@@ -154,7 +203,20 @@ func (r *Runner) SetRecoverDecider(fn func(j *Job, steps []*JobStep) RecoverDeci
 
 // Register adds a Workflow to the runner's registry. Calling Register after
 // the runner is in use is safe.
+//
+// It PANICS on a workflow that fails ValidateWorkflow. Registration happens
+// once, at api startup, from a call site with no error path (main.go registers
+// two dozen workflows as bare statements), so the only fail-closed option is to
+// refuse to come up. The alternative — accept the workflow and quietly ignore
+// its Retries — leaves the author's stated intent and the runner's behaviour
+// permanently disagreeing, in the one place where that disagreement is
+// unrecoverable. A boot that stops with the offending workflow and step named
+// is a five-minute fix; a saga that silently means something other than what it
+// says is the failure mode this field exists to remove.
 func (r *Runner) Register(w Workflow) {
+	if err := ValidateWorkflow(w); err != nil {
+		panic(err)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.workflows[w.Kind] = w
@@ -357,7 +419,59 @@ func (r *Runner) workflowFor(kind string) (Workflow, bool) {
 	return wf, ok
 }
 
+// assertNoPriorAttempt refuses an Irreversible step whose execution this job's
+// ledger already records.
+//
+// The check reads the ledger rather than trusting the in-memory loop, because
+// the loop is not the only thing that can reach a step: a job can be resumed
+// after a Recover left it running (RecoverDefer), and a workflow's step list
+// can differ between the process that started the job and the process that
+// picks it up. Both are ways for run() to arrive at a step that already
+// happened while believing it is running it for the first time.
+//
+// Matching is on seq OR name, not seq alone, and that asymmetry is on purpose:
+// if a workflow's step list changed between the two processes, seq no longer
+// identifies the same step, and the only safe reading of "there is a record
+// named install" is that install ran. Over-refusing costs a failed job an
+// operator can inspect; under-refusing costs a second `dd`.
+//
+// It does NOT touch the existing step row. That row is the record of what
+// actually happened — succeeded, failed, or running when the process died — and
+// overwriting it with this refusal would destroy the only evidence of the very
+// thing being refused.
+func (r *Runner) assertNoPriorAttempt(ctx context.Context, jobID string, seq int, step WorkflowStep) error {
+	steps, err := r.store.ListSteps(ctx, jobID)
+	if err != nil {
+		// Fail closed. Not knowing whether the side effect already happened is
+		// the same as knowing that it might have.
+		return fmt.Errorf("%w: job %s step %d (%q): cannot read the step ledger: %v",
+			ErrIrreversibleReplay, jobID, seq, step.Name, err)
+	}
+	for _, st := range steps {
+		if st.Seq != seq && st.Name != step.Name {
+			continue
+		}
+		return fmt.Errorf("%w: job %s step %d (%q) already has a recorded attempt (ledger seq %d %q, status %s, attempt %d); an irreversible step is never re-run",
+			ErrIrreversibleReplay, jobID, seq, step.Name, st.Seq, st.Name, st.Status, st.Attempt)
+	}
+	return nil
+}
+
 func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep, prior map[string]json.RawMessage) error {
+	if step.Irreversible {
+		// Before CreateStep, deliberately: creating the row is itself the
+		// record of an attempt, and on a replay the row is already there.
+		if err := r.assertNoPriorAttempt(ctx, j.ID, seq, step); err != nil {
+			log.Printf("jobs: %v", err)
+			// Event only — no store write. The refusal is why the JOB fails
+			// (run() records that); the step row keeps the prior attempt's
+			// verdict.
+			r.emit(ctx, j.ID, proto.JobStepFailed, proto.StepEventData{
+				Seq: seq, Name: step.Name, Error: err.Error(),
+			})
+			return err
+		}
+	}
 	startedAt := time.Now().UTC()
 	stepRow := &JobStep{
 		JobID:     j.ID,
@@ -373,6 +487,14 @@ func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep
 
 	var lastErr error
 	maxAttempts := step.Retries + 1
+	if step.Irreversible {
+		// Never auto-retry, whatever Retries says. Register rejects the
+		// combination outright, so in practice this only fires for a Workflow
+		// that never went through Register (a hand-built one in a test, or a
+		// future caller that bypasses the registry) — which is exactly the case
+		// a validation-only guard would miss.
+		maxAttempts = 1
+	}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			r.emit(ctx, j.ID, proto.JobStepRetrying, proto.StepEventData{
