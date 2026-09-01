@@ -12,7 +12,7 @@ The Go agent binary that runs on every Rasputin node — including the control p
 
 | Package | Purpose |
 |---|---|
-| `internal/bus` | NATS client, subject dispatch, ack/dedup |
+| `internal/bus` | NATS connection (outbound-only, join-token creds) + shared reply helper. No dispatch, no ack/dedup — each subsystem subscribes its own subjects |
 | `internal/host` | Host facts, RAUC slot control, reboot |
 | `internal/docker` | Compose ops (compute nodes only) |
 | `internal/openwrt` | ubus / UCI client (firewall node only) |
