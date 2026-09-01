@@ -43,6 +43,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -232,6 +233,13 @@ func main() {
 		log.Fatalf("rasputin-api: setup store: %v", err)
 	}
 	defer setupStore.Close()
+
+	// backup_targets — design/storage.md §4.8's ledger of claimed backup disks.
+	backupStore, err := storage.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: storage store: %v", err)
+	}
+	defer backupStore.Close()
 
 	// Trust material lives at <trustDir>/. Used by:
 	//   - updater.Verifier (root-ca.pem; bundle signatures)
@@ -548,6 +556,12 @@ func main() {
 	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
+	// backup.target.claim — the only path in the system that formats a disk
+	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
+	// marker so a disk can say which cluster wrote it.
+	runner.Register(storage.ClaimWorkflow(backupStore, invStore, storage.Config{
+		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+	}))
 	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
 	// bmc.configure is registered after NewServer below — it needs the
 	// server's SoL SessionManager to refuse swaps under a live console.
@@ -571,6 +585,11 @@ func main() {
 	// not a reason to refuse to start.
 	if err := updater.ReconcileStrandedRows(ctx, updaterStore, jobStore); err != nil {
 		log.Printf("rasputin-api: reconcile stranded node_updates: %v", err)
+	}
+	// Same sweep for backup-target claims: a row left `pending` by a process
+	// that died mid-saga renders as a claim still running, forever.
+	if err := storage.ReconcileStrandedRows(ctx, backupStore, jobStore); err != nil {
+		log.Printf("rasputin-api: reconcile stranded backup_targets: %v", err)
 	}
 	// Finish any self-update that rebooted us onto the new slot (no-op when
 	// there isn't one). Non-blocking — reconciles in the background once the
@@ -832,6 +851,8 @@ func main() {
 	// sweep. One rotator, two callers — a second one would differ in exactly
 	// the case that matters, an offline node.
 	srv.SetAppLeafRotator(rotateAppLeaf)
+	// The backup-target ledger, for GET/POST /api/backup/targets.
+	srv.SetBackupStore(backupStore)
 
 	// AA-11 DNS forwarding (ADR-0004 §10): reconcile the nameserver's off-zone
 	// forwarding stub from the persisted setting, and hand the api the hook to
