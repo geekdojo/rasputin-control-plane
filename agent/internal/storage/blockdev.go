@@ -64,12 +64,26 @@ var optionalTools = []string{"udevadm", "partprobe"}
 // main.go autodetects on, mirroring the updater's `exec.LookPath("rauc")`.
 // Kept next to requiredTools so the check and the list cannot drift.
 func ToolingAvailable() bool {
+	return len(MissingTools()) == 0
+}
+
+// MissingTools lists the required tools that are NOT on PATH, in requiredTools
+// order. Empty means the real backend can run.
+//
+// This exists because "storage is unavailable" is not an actionable sentence
+// and "wipefs is not on PATH" is. On 2026-09-01 an OS image shipped without
+// wipefs; ToolingAvailable() went false, the agent silently fell back to the
+// mock, and storage.enumerate answered with fixture disks on real hardware. The
+// bool could not have said which tool to add to the image — this can, and the
+// startup fault now quotes it.
+func MissingTools() []string {
+	var missing []string
 	for _, t := range requiredTools {
 		if _, err := exec.LookPath(t); err != nil {
-			return false
+			missing = append(missing, t)
 		}
 	}
-	return true
+	return missing
 }
 
 // NewBlockDevBackend resolves the block tooling and constructs the backend.

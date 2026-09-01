@@ -41,27 +41,30 @@ func TestAgentStateDir(t *testing.T) {
 }
 
 func TestAutodetectUCIBackend(t *testing.T) {
-	// No uci binary on PATH → mock, regardless of the config file.
+	// No uci binary on PATH → unavailable, regardless of the config file.
+	// NOT mock: the file-backed openwrt mock acks rule changes and reads them
+	// back, so an operator would believe a deny rule was enforced by a
+	// firewall that never received it.
 	cfgDir := t.TempDir()
 	cfg := filepath.Join(cfgDir, "firewall")
 	if err := os.WriteFile(cfg, []byte("config defaults\n"), 0o644); err != nil {
 		t.Fatalf("write fake firewall config: %v", err)
 	}
 	t.Setenv("PATH", t.TempDir()) // empty dir — nothing on PATH
-	if got := autodetectUCIBackendAt(cfg); got != "mock" {
-		t.Errorf("no uci on PATH: got %q, want mock", got)
+	if got := autodetectUCIBackendAt(cfg); got != backendUnavailable {
+		t.Errorf("no uci on PATH: got %q, want backendUnavailable", got)
 	}
 
 	// uci on PATH but no /etc/config/firewall (e.g. a dev box with a
-	// stray uci binary) → mock.
+	// stray uci binary) → unavailable.
 	binDir := t.TempDir()
 	fakeUCI := filepath.Join(binDir, "uci")
 	if err := os.WriteFile(fakeUCI, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write fake uci: %v", err)
 	}
 	t.Setenv("PATH", binDir)
-	if got := autodetectUCIBackendAt(filepath.Join(cfgDir, "missing")); got != "mock" {
-		t.Errorf("uci without firewall config: got %q, want mock", got)
+	if got := autodetectUCIBackendAt(filepath.Join(cfgDir, "missing")); got != backendUnavailable {
+		t.Errorf("uci without firewall config: got %q, want backendUnavailable", got)
 	}
 
 	// Both present → uci (a real OpenWrt root).
@@ -71,16 +74,149 @@ func TestAutodetectUCIBackend(t *testing.T) {
 }
 
 func TestUCIBackendSelectionEnvOverride(t *testing.T) {
-	// Autodetect would say mock (nothing on PATH), but the env forces uci.
+	// Autodetect finds nothing on PATH, but the env forces uci.
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("RASPUTIN_UCI_BACKEND", "uci")
 	if got := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend()); got != "uci" {
 		t.Errorf("env override: got %q, want uci", got)
 	}
-	// Empty env falls through to autodetect.
-	t.Setenv("RASPUTIN_UCI_BACKEND", "")
+	// Explicit mock is still honoured — it is a legitimate dev selection,
+	// just never an inferred one.
+	t.Setenv("RASPUTIN_UCI_BACKEND", "mock")
 	if got := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend()); got != "mock" {
-		t.Errorf("autodetect fallback: got %q, want mock", got)
+		t.Errorf("explicit mock: got %q, want mock", got)
+	}
+	// Empty env falls through to autodetect, which on a box with no uci
+	// yields unavailable — NOT mock.
+	t.Setenv("RASPUTIN_UCI_BACKEND", "")
+	if got := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend()); got != backendUnavailable {
+		t.Errorf("autodetect fallback: got %q, want backendUnavailable", got)
+	}
+}
+
+// ⚠️ THE 2026-09-01 REGRESSION GUARD — the whole point of this change.
+//
+// On e3bench, a real n100 controlplane, `wipefs` was missing from the OS image.
+// storage.ToolingAvailable() went false, autodetectStorageBackend() answered
+// "mock", and storage.enumerate replied with the mock's fixture machine: three
+// disks that do not exist in that box, one carrying a plausible exfat volume,
+// with ok:true. The operator would have seen them in the backup-target picker,
+// and storage.claim force-formats. Nothing in the reply said it was fiction.
+//
+// This runs every autodetect on a machine stripped of ALL tooling — the exact
+// condition that used to produce mock — and asserts none of them does. A
+// missing prerequisite must disable a subsystem, never fabricate one.
+func TestNoAutodetectEverYieldsMock(t *testing.T) {
+	// Empty PATH: no docker, no rauc, no tailscale, no uci, no util-linux.
+	t.Setenv("PATH", t.TempDir())
+
+	cases := []struct {
+		name string
+		got  string
+	}{
+		{"docker", autodetectDockerBackend()},
+		{"storage", autodetectStorageBackend()},
+		{"tailscale", autodetectTailscaleBackend()},
+		{"uci", autodetectUCIBackendAt(filepath.Join(t.TempDir(), "no-such-firewall-config"))},
+		{"updater/compute", autodetectUpdaterBackend(proto.RoleCompute)},
+		{"updater/controlplane", autodetectUpdaterBackend(proto.RoleControlPlane)},
+		{"updater/storage", autodetectUpdaterBackend(proto.RoleStorage)},
+	}
+	for _, c := range cases {
+		if c.got == "mock" {
+			t.Errorf("autodetect %s returned %q with no tooling on PATH.\n"+
+				"Mock must be OPT-IN and never inferred: an inferred mock on real hardware "+
+				"reports fixture disks, fixture slots and a fixture tailnet as fact. Return "+
+				"backendUnavailable and let the switch record a configfault instead. See #89 "+
+				"and the e3bench incident in agent/internal/configfault.", c.name, c.got)
+		}
+		if c.got != backendUnavailable {
+			t.Errorf("autodetect %s = %q with no tooling on PATH, want backendUnavailable", c.name, c.got)
+		}
+	}
+
+	// The firewall updater keys off a real absolute path, so only assert it
+	// when this machine genuinely isn't OpenWrt (every dev box and CI runner).
+	if _, err := os.Stat(defaultFirewallConfig); os.IsNotExist(err) {
+		if got := autodetectUpdaterBackend(proto.RoleFirewall); got != backendUnavailable {
+			t.Errorf("autodetect updater/firewall = %q off OpenWrt, want backendUnavailable", got)
+		}
+	}
+}
+
+// The other half of the contract: an operator who ASKS for mock still gets it.
+// Breaking this would push developers back toward re-adding the inference.
+func TestExplicitMockIsAlwaysHonoured(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // autodetect would find nothing
+
+	cases := []struct {
+		env      string
+		fallback string
+	}{
+		{"RASPUTIN_DOCKER_BACKEND", autodetectDockerBackend()},
+		{"RASPUTIN_STORAGE_BACKEND", autodetectStorageBackend()},
+		{"RASPUTIN_TAILSCALE_BACKEND", autodetectTailscaleBackend()},
+		{"RASPUTIN_UCI_BACKEND", autodetectUCIBackend()},
+		{"RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(proto.RoleCompute)},
+	}
+	for _, c := range cases {
+		t.Setenv(c.env, "mock")
+		if got := envOr(c.env, c.fallback); got != "mock" {
+			t.Errorf("%s=mock: got %q, want mock — an explicit request must always win", c.env, got)
+		}
+	}
+}
+
+// A disabled subsystem is only actionable if it names what is missing. The
+// e3bench incident needed the sentence "wipefs is not on PATH" and the bool
+// ToolingAvailable() could not produce it.
+func TestMissingPrereqNamesTheMissingThing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	if got := storageMissingPrereq(); !strings.Contains(got, "wipefs") {
+		t.Errorf("storageMissingPrereq() = %q, must name the absent tools (wipefs was THE one that "+
+			"caused the incident); an operator has to know what to add to the image", got)
+	}
+	if got := dockerMissingPrereq(); !strings.Contains(got, "docker") {
+		t.Errorf("dockerMissingPrereq() = %q, must name docker", got)
+	}
+	if got := tailscaleMissingPrereq(); !strings.Contains(got, "tailscale") {
+		t.Errorf("tailscaleMissingPrereq() = %q, must name tailscale", got)
+	}
+	if got := updaterMissingPrereq(proto.RoleCompute); !strings.Contains(got, "rauc") {
+		t.Errorf("updaterMissingPrereq(compute) = %q, must name rauc", got)
+	}
+	// Role-aware: the firewall has no rauc BY DESIGN, so telling its operator
+	// that rauc is missing would send them after a package that does not exist
+	// for OpenWrt. It must name the OpenWrt signal instead.
+	fw := updaterMissingPrereq(proto.RoleFirewall)
+	if strings.Contains(fw, "rauc") {
+		t.Errorf("updaterMissingPrereq(firewall) = %q — must not blame rauc; a firewall node "+
+			"legitimately has none", fw)
+	}
+	if !strings.Contains(fw, defaultFirewallConfig) {
+		t.Errorf("updaterMissingPrereq(firewall) = %q, must name %s", fw, defaultFirewallConfig)
+	}
+	// And the expected-backend list follows the role, so the fault never
+	// suggests a backend the node could not have run.
+	if got := updaterExpectedFor(proto.RoleFirewall); len(got) != 1 || got[0] != "openwrt-ab" {
+		t.Errorf("updaterExpectedFor(firewall) = %v, want [openwrt-ab]", got)
+	}
+	if got := updaterExpectedFor(proto.RoleCompute); len(got) != 1 || got[0] != "rauc" {
+		t.Errorf("updaterExpectedFor(compute) = %v, want [rauc]", got)
+	}
+
+	// uci distinguishes its two causes, so the operator knows which to fix.
+	if got := uciMissingPrereqAt("/nope"); !strings.Contains(got, "uci") {
+		t.Errorf("uciMissingPrereqAt with no uci = %q, must name uci", got)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "uci"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake uci: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	if got := uciMissingPrereqAt("/nope/firewall"); !strings.Contains(got, "/nope/firewall") {
+		t.Errorf("uciMissingPrereqAt with uci present = %q, must name the absent config path", got)
 	}
 }
 
@@ -361,6 +497,11 @@ func TestNoConfigVariableIsFatal(t *testing.T) {
 		"RASPUTIN_UCI_BACKEND",
 		"RASPUTIN_UPDATE_BACKEND",
 		"RASPUTIN_TAILSCALE_BACKEND",
+		// Added 2026-09-01. Storage landed after #89 and was never added to
+		// this list, so the one subsystem that force-formats disks was the one
+		// not covered by the guard. Nothing was wrong with it — but that is
+		// luck, not a check, and this list is the check.
+		"RASPUTIN_STORAGE_BACKEND",
 	}
 	for _, line := range strings.Split(string(src), "\n") {
 		if !strings.Contains(line, "log.Fatalf") {

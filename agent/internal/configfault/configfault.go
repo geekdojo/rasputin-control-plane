@@ -38,6 +38,36 @@
 //
 // Set.Reject is the only way to record one, and it always logs. There is no way
 // to reject a value quietly — that is the property this package exists to hold.
+//
+// # The second fault kind: a real backend whose prerequisites are absent
+//
+// Reject answers "the operator asked for something that does not exist".
+// Unavailable answers the other half, added after a second hardware incident:
+// "the operator asked for nothing, and the real backend cannot run here."
+//
+// Every environment-selected backend used to autodetect its way to `mock` when
+// the real one's prerequisites were missing. CONFIRMED ON HARDWARE 2026-09-01
+// on e3bench, a real n100 controlplane: `wipefs` was missing from the OS image,
+// so storage.ToolingAvailable() returned false, autodetectStorageBackend()
+// returned "mock", and storage.enumerate answered with the mock's FIXTURE
+// DISKS — three drives that do not exist in that machine, one of them carrying
+// a plausible exfat volume. The operator would have been shown those disks in
+// the backup-target picker and could have confirmed a DESTRUCTIVE FORMAT
+// against a device that was not there. The reply carried `"backend":"mock"`
+// and `"ok":true`; nothing else said the answer was fiction.
+//
+// That is a strictly worse failure than either of the ones above, because it is
+// not a degradation — it is a confident, plausible, wrong answer. A disabled
+// subsystem tells you it is disabled. A mock tells you about a machine that
+// does not exist.
+//
+// So mock is now OPT-IN AND NEVER INFERRED: it is selected only when the
+// operator names it (RASPUTIN_*_BACKEND=mock). When the real backend's
+// prerequisites are absent and nothing was asked for, the subsystem is
+// DISABLED and the missing prerequisite is named — same survive-and-report
+// contract as Reject, same registration metadata, same UI badge. The agent
+// still starts, still heartbeats, still holds the mesh and serves updates; it
+// simply refuses to invent the part it cannot see.
 package configfault
 
 import (
@@ -55,6 +85,16 @@ type Fault struct {
 	Value string `json:"value"`
 	// Expected lists the values that would have been accepted.
 	Expected []string `json:"expected,omitempty"`
+	// Missing names the absent prerequisite when this fault came from
+	// Unavailable rather than Reject — "wipefs not on PATH", "/etc/config/
+	// firewall not present". Empty for a rejected value, and it is what
+	// distinguishes the two kinds: Value is what the operator typed, Missing
+	// is what the machine does not have.
+	//
+	// Additive: consumers that predate it read the same detail from Effect,
+	// which always names the prerequisite too.
+	Missing string `json:"missing,omitempty"`
+
 	// Effect names, in the operator's terms, what this node can no longer do.
 	// The point of the whole package: "unknown backend" is a fact about a
 	// string, "OS updates are disabled on this node" is a fact about the fleet.
@@ -62,6 +102,13 @@ type Fault struct {
 }
 
 func (f Fault) String() string {
+	if f.Missing != "" {
+		s := fmt.Sprintf("no usable backend for %s: %s", f.Variable, f.Missing)
+		if len(f.Expected) > 0 {
+			s += " (would have needed " + strings.Join(f.Expected, "|") + ")"
+		}
+		return s + " — " + f.Effect
+	}
 	s := fmt.Sprintf("%s=%q is not recognised", f.Variable, f.Value)
 	if len(f.Expected) > 0 {
 		s += " (expected " + strings.Join(f.Expected, "|") + ")"
@@ -90,6 +137,28 @@ func (s *Set) Reject(variable, value string, expected []string, effect string) {
 		"reachable and can be fixed; correct it in /var/lib/rasputin/node.env and restart the agent.", f)
 }
 
+// Unavailable records that the real backend cannot run on this node and that
+// NOTHING was substituted for it. Like Reject it always logs, and for the same
+// reason — but the remedy is different, so the wording is too: Reject tells the
+// operator to fix a typo in node.env, Unavailable tells them what the image or
+// the machine is missing.
+//
+// missing must name the absent prerequisite concretely enough to act on ("wipefs
+// not on PATH"), because that is the sentence the 2026-09-01 incident needed and
+// did not have. effect, as with Reject, describes the CONSEQUENCE.
+//
+// This is deliberately NOT a fallback to mock. A mock here would answer with
+// fixture disks, fixture slots or a fixture tailnet, and an operator cannot tell
+// a confident wrong answer from a right one. Disabled is legible; fiction is not.
+func (s *Set) Unavailable(variable string, expected []string, missing, effect string) {
+	f := Fault{Variable: variable, Expected: expected, Missing: missing, Effect: effect}
+	s.faults = append(s.faults, f)
+	log.Printf("rasputin-agent: ⚠️  SUBSYSTEM UNAVAILABLE: %s. No mock was substituted — a mock would "+
+		"report hardware this node does not have. The agent is starting anyway so this node stays "+
+		"reachable; install the missing prerequisite, or set %s=mock explicitly if this is a dev box.",
+		f, variable)
+}
+
 // Any reports whether anything was rejected.
 func (s *Set) Any() bool { return len(s.faults) > 0 }
 
@@ -105,12 +174,18 @@ func (s *Set) Metadata() []map[string]any {
 	}
 	out := make([]map[string]any, 0, len(s.faults))
 	for _, f := range s.faults {
-		out = append(out, map[string]any{
+		m := map[string]any{
 			"variable": f.Variable,
 			"value":    f.Value,
 			"expected": f.Expected,
 			"effect":   f.Effect,
-		})
+		}
+		// Additive, and omitted on a rejected value so the shape older
+		// consumers were written against is byte-for-byte unchanged.
+		if f.Missing != "" {
+			m["missing"] = f.Missing
+		}
+		out = append(out, m)
 	}
 	return out
 }

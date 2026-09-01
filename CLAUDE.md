@@ -13,9 +13,17 @@ don't burn time trying, and don't add dev-login endpoints or auth bypasses witho
 asking first (proposed and declined 2026-07-08). The working methodology:
 
 1. **Local stack:** UI dev server on :3000 (`npm run dev` in `ui/`) + the api on
-   :8080 — run `go run ./api/cmd/rasputin-api` from the **repo root** so the default
-   `./data` dir resolves; `data/rasputin.db` already holds Bryce's account and
-   passkey credential.
+   :8080 — run `RASPUTIN_MESH_BACKEND=mock go run ./api/cmd/rasputin-api` from the
+   **repo root** so the default `./data` dir resolves; `data/rasputin.db` already
+   holds Bryce's account and passkey credential.
+
+   The `RASPUTIN_MESH_BACKEND=mock` is required as of 2026-09-01 and is not
+   optional boilerplate: the default `auto` no longer falls back to the mock when
+   it finds no Headscale and no Docker. A mock mesh mints pre-auth keys and
+   invents `100.64.0.x` tailnet addresses that `/api/mesh/devices` then serves as
+   real, so inferring it on a controlplane means the control plane reports a mesh
+   that does not exist. Without the var the api boots fine and every other page
+   works; the mesh pages show an "unavailable" banner and mesh verbs refuse.
 2. **Verify through Bryce's real Chrome** (claude-in-chrome MCP tools): navigate to
    `localhost:3000/...`, screenshot/zoom for proof. His Chrome holds the 7-day
    session — the dev loop is fully autonomous while it's valid.

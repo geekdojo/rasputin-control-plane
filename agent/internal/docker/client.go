@@ -4,6 +4,8 @@
 //
 //   - compose.go: shells out to `docker compose` for real container lifecycle.
 //   - mock.go: file-backed simulation for dev environments without Docker.
+//     EXPLICIT-ONLY (RASPUTIN_DOCKER_BACKEND=mock) — never autodetected, since
+//     it reports apps as Running that no runtime is running.
 //
 // The handler in handler.go is backend-agnostic — same NATS surface in both.
 package docker

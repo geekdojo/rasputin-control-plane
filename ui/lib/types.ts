@@ -720,6 +720,15 @@ export interface MeshState {
 }
 
 export interface MeshStateEnvelope {
+  /**
+   * "headscale" (real), "mock" (a dev fixture, explicitly requested), or
+   * "unavailable" (no real backend could be resolved and none was substituted).
+   *
+   * "unavailable" exists because `auto` used to fall through to the mock, which
+   * mints keys and reports invented 100.64.0.x tailnet addresses — a control
+   * plane claiming a mesh that does not exist. Anything that renders this must
+   * treat BOTH non-"headscale" values as "these addresses are not real".
+   */
   backend: string;
   loginServer: string;
   defaultUser: string;
