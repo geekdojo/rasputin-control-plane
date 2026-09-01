@@ -75,10 +75,9 @@ jobs:
           # ci.yml and vuln-scan.yml.
           go-version: "1.26"
           check-latest: true
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            artifactsig/go.sum
+          # Glob, not a literal list: every go.work module's go.sum keys the
+          # cache, so adding a module cannot silently leave it out.
+          cache-dependency-path: "*/go.sum"
 
       # Both tools install into GOPATH/bin, which is not on PATH by default for
       # subsequent steps.

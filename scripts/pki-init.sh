@@ -53,7 +53,7 @@ LEAF_NUM=""
 # reproduce the PKI it claims to bootstrap and --rotate-leaf would have quietly
 # issued a 90-day cert.
 #
-# The number is load-bearing, not a preference: agent/internal/artifactsig
+# The number is load-bearing, not a preference: artifactsig
 # verifies the chain at time.Now() rather than at the signature's signingTime,
 # so when a leaf expires every artifact it ever signed stops being installable
 # OTA until re-signed. Shortening this shortens the shelf life of every release
@@ -68,7 +68,7 @@ LEAF_DAYS=730
 EC_CURVE="secp384r1"
 
 # Purpose OIDs under Geekdojo's IANA Private Enterprise Number 66587, assigned
-# 2026-08-20. These MUST stay identical to agent/internal/artifactsig/eku.go —
+# 2026-08-20. These MUST stay identical to artifactsig/eku.go —
 # a leaf minted under a different arc than the verifier expects is refused by
 # the whole fleet, and the symptom is "updates stopped working", not an error
 # anyone can read. eku.go pins the same strings in TestOIDArc_IsPinned.

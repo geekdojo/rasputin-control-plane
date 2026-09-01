@@ -99,45 +99,33 @@ STATICCHECK_VERSION=2025.1.1
 # gate stayed green the whole time, because a hardcoded list cannot report the
 # code it was never pointed at.
 #
-# Deriving it from go.work makes that drift structurally impossible: go.work is
-# the single file that decides what the workspace is, and this gate now covers
-# exactly what it names. A module added there is scanned on the next run without
-# anyone remembering this file exists.
+# The derivation itself lives in ONE place, scripts/workspace-modules.sh, which
+# also carries the guards (empty list, module with no go.mod) and is shared with
+# codeql.yml and ci.yml. It was briefly an awk parser inlined here and copied
+# verbatim into the other script — two copies of a parser being one edit away
+# from disagreeing about what the workspace contains, which is the original
+# hazard one step removed.
 #
-# Guarded, because the dangerous failure mode of a derived list is the quiet
-# one. An empty or unparseable list would scan nothing and print success, which
-# is strictly worse than the drift it replaces — so both the empty list and a
-# named directory with no go.mod are hard errors.
-MODULES=()
-while IFS= read -r m; do MODULES+=("$m"); done < <(awk '
-  /^[[:space:]]*use[[:space:]]*\(/ { inblock = 1; next }
-  inblock && /^[[:space:]]*\)/     { inblock = 0; next }
-  inblock {
-    sub(/\/\/.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-    if ($0 == "") next
-    sub(/^\.\//, ""); print; next
-  }
-  /^[[:space:]]*use[[:space:]]+[^(]/ { p = $2; sub(/^\.\//, "", p); print p }
-' go.work)
-
-if [ "${#MODULES[@]}" -eq 0 ]; then
-  echo "::error::no modules parsed out of go.work — refusing to run a scan that would cover nothing"
-  exit 1
-fi
-for m in "${MODULES[@]}"; do
-  [ -f "$m/go.mod" ] || {
-    echo "::error::go.work names $m, but $m/go.mod does not exist"
-    exit 1
-  }
-done
-
+# Command substitution, NOT `mapfile < <(...)`: process substitution does not
+# propagate the helper's exit status, so a failing helper would leave MODULES
+# empty and this gate would pass having scanned nothing. `$( )` fails the
+# script under `set -e`, which is the behaviour a coverage gate needs.
+#
+# Word-split into the array rather than `mapfile`, which is bash 4+ and so
+# absent on macOS's stock bash 3.2 — these gates are run locally too.
 REGISTER=.github/sast-register.tsv
 
+# Before the module derivation: --install is the bootstrap path that PUTS gosec
+# and staticcheck on PATH, so it must not depend on anything but the go command.
 if [ "${1:-}" = "--install" ]; then
   go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
   go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
   exit 0
 fi
+
+modules_list="$(scripts/workspace-modules.sh)"
+# shellcheck disable=SC2206  # deliberate word splitting; module dirs have no spaces
+MODULES=($modules_list)
 
 MODE="${1:---report}"
 
