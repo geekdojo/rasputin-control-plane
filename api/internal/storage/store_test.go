@@ -37,6 +37,34 @@ func TestParseClaimSpec(t *testing.T) {
 			name: "a whole key",
 			body: `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
 		},
+		{
+			// §4.8's wipe is a SECOND, SEPARATE choice, and the token is what
+			// makes it separate. An empty one is a refusal, never a default.
+			name:    "a wipe with an empty token",
+			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","wipe":{"token":""}}`,
+			wantErr: "wipe.token is required",
+		},
+		{
+			name:    "a wipe with a whitespace token",
+			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","wipe":{"token":"   "}}`,
+			wantErr: "wipe.token is required",
+		},
+		{
+			name:    "a wipe object with no token at all",
+			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","wipe":{}}`,
+			wantErr: "wipe.token is required",
+		},
+		{
+			// Opposite answers to the same question. Resolving it either way
+			// would be guessing, and one of the guesses destroys an archive.
+			name:    "adopt and wipe at once",
+			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","adopt":true,"wipe":{"token":"wipe-abc"}}`,
+			wantErr: "opposite choices",
+		},
+		{
+			name: "a confirmed wipe",
+			body: `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","wipe":{"token":"wipe-abc"}}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

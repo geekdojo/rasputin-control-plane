@@ -237,6 +237,161 @@ func TestListBackupCandidates_ReturnsProtectedDisksToo(t *testing.T) {
 	}
 }
 
+// §4.8's wipe is reachable only by echoing back the token the picker published
+// for that disk — so the picker has to publish one, and it must publish one
+// ONLY where a wipe is a legitimate choice. A UI handed no token has nothing to
+// put in the field and therefore no wipe control to render, which is the
+// fail-closed half of the design.
+func TestListBackupCandidates_MintsAWipeTokenOnlyForAWipeableDisk(t *testing.T) {
+	s, _, nc := storageTestServer(t)
+	set := &proto.StorageBackupSet{
+		MarkerVersion: proto.StorageMarkerVersion, ClusterID: "home1",
+		PartUUID: "pu-existing", Label: "the archive", Generations: 4,
+		CreatedAt: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+	}
+	cands := []proto.StorageCandidate{
+		// A blank disk: an ordinary claim already formats it, so a second,
+		// destructive-sounding choice would be an invention.
+		{DevicePath: "/dev/sdb", Fingerprint: "fp-b", SizeBytes: 1 << 40},
+		// Carries an archive: this is the disk the wipe verb exists for.
+		{DevicePath: "/dev/sdc", Fingerprint: "fp-c", SizeBytes: 2 << 40, HasBackupSet: true, BackupSet: set},
+		// Announces an archive whose marker could not be read — the disk that
+		// could previously be neither adopted nor formatted.
+		{DevicePath: "/dev/sdd", Fingerprint: "fp-d", SizeBytes: 2 << 40, HasBackupSet: true},
+		// The boot medium. Never, under any confirmation.
+		{
+			DevicePath: "/dev/nvme0n1", Fingerprint: "fp-boot", HasBackupSet: true, BackupSet: set,
+			Protected: true, ProtectedReason: "holds the mounted persistent partition",
+		},
+	}
+	sub, err := nc.Subscribe(proto.StorageEnumerateSubject(storageTestNode), func(m *nats.Msg) {
+		b, _ := json.Marshal(proto.StorageEnumerateAck{
+			OK: true, Backend: "blockdev", Ts: time.Now().UTC(), Candidates: cands,
+		})
+		_ = m.Respond(b)
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	rec := httptest.NewRecorder()
+	s.handleListBackupCandidates(rec, httptest.NewRequest(http.MethodGet, "/api/backup/candidates?nodeId="+storageTestNode, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Candidates []struct {
+			DevicePath string `json:"devicePath"`
+			Protected  bool   `json:"protected"`
+			WipeToken  string `json:"wipeToken"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Candidates) != len(cands) {
+		t.Fatalf("want every disk listed, got %d", len(got.Candidates))
+	}
+	wantToken := map[string]bool{"/dev/sdb": false, "/dev/sdc": true, "/dev/sdd": true, "/dev/nvme0n1": false}
+	for i, c := range got.Candidates {
+		if (c.WipeToken != "") != wantToken[c.DevicePath] {
+			t.Errorf("%s: wipeToken = %q, want minted = %v", c.DevicePath, c.WipeToken, wantToken[c.DevicePath])
+		}
+		// And the token published is exactly the one the saga will re-derive
+		// from live hardware. A picker that published a different one would
+		// refuse every wipe an operator confirmed.
+		if want := storage.CandidateWipeToken(&cands[i]); c.WipeToken != want {
+			t.Errorf("%s: wipeToken = %q, want %q", c.DevicePath, c.WipeToken, want)
+		}
+	}
+}
+
+// The picker's list must still carry everything the agent reported — the
+// decoration adds a field, it does not replace the shape.
+func TestListBackupCandidates_DecorationPreservesTheAgentsFields(t *testing.T) {
+	s, _, nc := storageTestServer(t)
+	sub, err := nc.Subscribe(proto.StorageEnumerateSubject(storageTestNode), func(m *nats.Msg) {
+		b, _ := json.Marshal(proto.StorageEnumerateAck{
+			OK: true, Backend: "blockdev", Ts: time.Now().UTC(),
+			Candidates: []proto.StorageCandidate{{
+				DevicePath: "/dev/sdc", Model: "Samsung T7", Serial: "S1234", WWN: "0x5001",
+				SizeBytes: 2 << 40, Transport: proto.StorageTransportUSB, Removable: true,
+				Fingerprint: "fp-c", IdentityWeak: true,
+				Partitions: []proto.StoragePartition{{DevicePath: "/dev/sdc1", FSType: "ext4", SizeBytes: 1 << 40}},
+			}},
+		})
+		_ = m.Respond(b)
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	rec := httptest.NewRecorder()
+	s.handleListBackupCandidates(rec, httptest.NewRequest(http.MethodGet, "/api/backup/candidates?nodeId="+storageTestNode, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	// Decoded through the WIRE type, which is what an existing reader uses.
+	var ack proto.StorageEnumerateAck
+	if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+		t.Fatalf("decode as the agent's ack: %v", err)
+	}
+	if len(ack.Candidates) != 1 {
+		t.Fatalf("want 1 candidate, got %d", len(ack.Candidates))
+	}
+	c := ack.Candidates[0]
+	if c.Model != "Samsung T7" || c.Serial != "S1234" || c.WWN != "0x5001" ||
+		c.Transport != proto.StorageTransportUSB || !c.Removable || !c.IdentityWeak ||
+		c.Fingerprint != "fp-c" || len(c.Partitions) != 1 {
+		t.Errorf("the decoration dropped fields the picker renders: %+v", c)
+	}
+	if !ack.OK || ack.Backend != "blockdev" || ack.Ts.IsZero() {
+		t.Errorf("the envelope lost fields: ok=%v backend=%q ts=%v", ack.OK, ack.Backend, ack.Ts)
+	}
+}
+
+// Absent or contradictory confirmation is refused at the door, with no job
+// created — never resolved into one choice or the other.
+func TestClaimBackupTarget_RefusesAnUnconfirmedOrContradictoryWipe(t *testing.T) {
+	cases := []struct {
+		name, body, wantErr string
+	}{
+		{
+			name:    "a wipe with no token",
+			body:    `{"nodeId":"` + storageTestNode + `","devicePath":"/dev/sdb","fingerprint":"fp","wipe":{}}`,
+			wantErr: "wipe.token is required",
+		},
+		{
+			name:    "a wipe whose token is only whitespace",
+			body:    `{"nodeId":"` + storageTestNode + `","devicePath":"/dev/sdb","fingerprint":"fp","wipe":{"token":"   "}}`,
+			wantErr: "wipe.token is required",
+		},
+		{
+			name:    "adopt and wipe at once",
+			body:    `{"nodeId":"` + storageTestNode + `","devicePath":"/dev/sdb","fingerprint":"fp","adopt":true,"wipe":{"token":"wipe-abc"}}`,
+			wantErr: "opposite choices",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := storageTestServer(t)
+			rec := postClaim(t, s, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantErr) {
+				t.Errorf("body = %s, want it to mention %q", rec.Body.String(), tc.wantErr)
+			}
+			list, _ := s.store.ListJobs(context.Background(), 10)
+			if len(list) != 0 {
+				t.Errorf("a refused confirmation must not create a job, got %d", len(list))
+			}
+		})
+	}
+}
+
 func TestListBackupCandidates_SurfacesAnAgentRefusal(t *testing.T) {
 	s, _, nc := storageTestServer(t)
 	sub, err := nc.Subscribe(proto.StorageEnumerateSubject(storageTestNode), func(m *nats.Msg) {

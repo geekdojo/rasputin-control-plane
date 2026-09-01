@@ -246,6 +246,161 @@ func TestClaimSaga(t *testing.T) {
 			wantTargetStatus: TargetFailed,
 			wantClaimCalls:   0,
 		},
+		// ---- §4.8's second, separate choice: wipe ------------------------
+		{
+			// The refusal a disk carrying a set gets by default now names both
+			// ways past it. Neither is a default; the disk is untouched.
+			name:             "the default refusal offers adopt AND wipe",
+			enumerate:        func(int) proto.StorageEnumerateAck { return ackWith(backupSetCandidate()) },
+			wantJob:          jobs.StatusFailed,
+			wantErrContains:  "`wipe` with the confirmation token",
+			wantTargetStatus: TargetFailed,
+			wantClaimCalls:   0,
+		},
+		{
+			// An absent token is a refusal, never a default to wipe — and it is
+			// caught at step 1, before the attempt is even recorded.
+			name:             "a wipe with no confirmation token is refused",
+			spec:             func(s *ClaimSpec) { s.Wipe = &WipeConfirmation{} },
+			enumerate:        func(int) proto.StorageEnumerateAck { return ackWith(backupSetCandidate()) },
+			wantJob:          jobs.StatusFailed,
+			wantErrContains:  "wipe.token is required",
+			wantTargetStatus: "",
+			wantClaimCalls:   0,
+		},
+		{
+			name:             "a wipe with the wrong confirmation token is refused",
+			spec:             func(s *ClaimSpec) { s.Wipe = &WipeConfirmation{Token: "wipe-000000000000000000000000"} },
+			enumerate:        func(int) proto.StorageEnumerateAck { return ackWith(backupSetCandidate()) },
+			wantJob:          jobs.StatusFailed,
+			wantErrContains:  "the wipe confirmation does not match this disk",
+			wantTargetStatus: TargetFailed,
+			wantClaimCalls:   0,
+			check: func(t *testing.T, h *harness, jobID string) {
+				// A refusal is not a how-to. The expected token must not appear
+				// anywhere an operator could copy it from instead of looking at
+				// the disk again.
+				assertTokenNotPublished(t, h, jobID, CandidateWipeToken(ptr(backupSetCandidate())))
+			},
+		},
+		{
+			// Both are answers to "what about the set already on this disk?".
+			// Neither is picked for the caller, because one of the two guesses
+			// destroys an archive.
+			name: "adopt and wipe together are refused",
+			spec: func(s *ClaimSpec) {
+				s.Adopt = true
+				s.Wipe = &WipeConfirmation{Token: CandidateWipeToken(ptr(backupSetCandidate()))}
+			},
+			enumerate:        func(int) proto.StorageEnumerateAck { return ackWith(backupSetCandidate()) },
+			wantJob:          jobs.StatusFailed,
+			wantErrContains:  "opposite choices",
+			wantTargetStatus: "",
+			wantClaimCalls:   0,
+		},
+		{
+			name:             "a wipe on a disk that carries no backup set is refused",
+			spec:             wipeSpecFor(backupSetCandidate()),
+			enumerate:        func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
+			wantJob:          jobs.StatusFailed,
+			wantErrContains:  "carries no Rasputin backup set",
+			wantTargetStatus: TargetFailed,
+			wantClaimCalls:   0,
+		},
+		{
+			name:             "a confirmed wipe formats the disk and records what it destroyed",
+			spec:             wipeSpecFor(backupSetCandidate()),
+			enumerate:        func(int) proto.StorageEnumerateAck { return ackWith(backupSetCandidate()) },
+			wantJob:          jobs.StatusSucceeded,
+			wantTargetStatus: TargetClaimed,
+			wantClaimCalls:   1,
+			// Never inspect: inspect is the ADOPT verb, and reaching it here
+			// would mean the wipe took the non-destructive branch.
+			wantInspectCalls: 0,
+			check: func(t *testing.T, h *harness, jobID string) {
+				row := h.target(t, jobID)
+				if !row.Wiped {
+					t.Error("the ledger must record that this claim destroyed an existing backup set")
+				}
+				if row.Adopted {
+					t.Error("a wipe is not an adopt")
+				}
+				if row.PartUUID != "part-uuid-new" {
+					t.Errorf("partUuid = %q, want the one minted by the format — the old set's UUID died with it", row.PartUUID)
+				}
+				cmd, ok := h.agent.lastClaim()
+				if !ok {
+					t.Fatal("no claim command captured")
+				}
+				// The heart of the safety argument: a wipe is byte-for-byte the
+				// same command as an ordinary format. There is no wipe flag on
+				// the wire, so there is no agent-side branch that could skip the
+				// boot-device exclusion or the fingerprint re-check.
+				if cmd != (proto.StorageClaimCmd{
+					DevicePath: testDevice, Fingerprint: testFingerpr,
+					Label: "backup disk", ClusterID: "home1",
+				}) {
+					t.Errorf("wipe sent a different command than an ordinary claim: %+v", cmd)
+				}
+			},
+		},
+		{
+			// The dead end §4.8 left open: a disk that announces a set whose
+			// marker cannot be parsed can be neither adopted (nothing to adopt
+			// it by) nor claimed as blank (the backup-set refusal). It is
+			// precisely the disk an operator most needs to reclaim.
+			name: "a confirmed wipe reclaims a disk whose marker is unreadable",
+			spec: wipeSpecFor(unreadableMarkerCandidate()),
+			enumerate: func(int) proto.StorageEnumerateAck {
+				return ackWith(unreadableMarkerCandidate())
+			},
+			wantJob:          jobs.StatusSucceeded,
+			wantTargetStatus: TargetClaimed,
+			wantClaimCalls:   1,
+			wantInspectCalls: 0,
+			check: func(t *testing.T, h *harness, jobID string) {
+				if row := h.target(t, jobID); !row.Wiped {
+					t.Error("the ledger must record the wipe")
+				}
+			},
+		},
+		{
+			// The same disk, the same confirmed token, WITHOUT the wipe choice:
+			// still the dead end, and the refusal now says how to get out of it.
+			name:             "an unreadable marker is still a refusal for adopt, and names wipe as the way out",
+			spec:             func(s *ClaimSpec) { s.Adopt = true },
+			enumerate:        func(int) proto.StorageEnumerateAck { return ackWith(unreadableMarkerCandidate()) },
+			wantJob:          jobs.StatusFailed,
+			wantErrContains:  "choose `wipe` with the confirmation token",
+			wantTargetStatus: TargetFailed,
+			wantClaimCalls:   0,
+		},
+		{
+			// THE HARD SAFETY RULE. A wipe changes which disks are eligible,
+			// never which checks run: step 2's boot-medium refusal still fires,
+			// and it fires before the token is even looked at.
+			name:             "a confirmed wipe is still refused on the disk holding the mounted boot partitions",
+			spec:             wipeSpecFor(protectedBackupSetCandidate()),
+			enumerate:        func(int) proto.StorageEnumerateAck { return ackWith(protectedBackupSetCandidate()) },
+			wantJob:          jobs.StatusFailed,
+			wantErrContains:  string(proto.StorageRefusalProtected),
+			wantTargetStatus: TargetFailed,
+			wantClaimCalls:   0,
+		},
+		{
+			// Likewise the fingerprint. A wipe cannot outrun step 2.
+			name: "a confirmed wipe is still refused when the fingerprint drifted",
+			spec: wipeSpecFor(backupSetCandidate()),
+			enumerate: func(int) proto.StorageEnumerateAck {
+				c := backupSetCandidate()
+				c.Fingerprint = testOtherFing
+				return ackWith(c)
+			},
+			wantJob:          jobs.StatusFailed,
+			wantErrContains:  string(proto.StorageRefusalFingerprintMismatch),
+			wantTargetStatus: TargetFailed,
+			wantClaimCalls:   0,
+		},
 		{
 			name:      "step 4 is not retried when the agent refuses the format",
 			enumerate: func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
@@ -541,6 +696,117 @@ func TestClaimStep_RefusesToClaimWithoutAPlan(t *testing.T) {
 	}
 	if agent.claimCount() != 0 {
 		t.Error("nothing should have reached the agent")
+	}
+}
+
+// ============================================================================
+// §4.8's wipe token: what it binds to, and who it is minted for.
+// ============================================================================
+
+// The token commits to ONE disk in ONE state. Here the picker shows the
+// operator a disk holding four generations; by the time the saga runs, the disk
+// holds five. Nothing about the disk's identity changed, so step 2 is happy —
+// but what the operator confirmed destroying is not what is there now, and the
+// wipe is refused rather than applied to a disk nobody looked at.
+func TestWipe_TokenGoesStaleWhenTheDiskContentsChange(t *testing.T) {
+	h := newHarness(t, &fakeAgent{
+		enumerate: func(call int) proto.StorageEnumerateAck {
+			c := backupSetCandidate()
+			if call > 1 {
+				c.BackupSet.Generations = 5 // a backup landed in between
+			}
+			return ackWith(c)
+		},
+	})
+	// Call 1 is the picker's read-only enumeration, exactly as the HTTP handler
+	// issues it, and the token comes from what it returned.
+	ack, err := Enumerate(context.Background(), h.nc, testNode)
+	if err != nil {
+		t.Fatalf("picker enumerate: %v", err)
+	}
+	token := CandidateWipeToken(&ack.Candidates[0])
+	if token == "" {
+		t.Fatal("the picker minted no token for a wipe-eligible disk")
+	}
+
+	spec := baseSpec()
+	spec.Wipe = &WipeConfirmation{Token: token}
+	jobID := h.submit(t, spec)
+	done := h.waitTerminal(t, jobID)
+
+	if done.Status != jobs.StatusFailed {
+		t.Fatalf("want failed, got %q", done.Status)
+	}
+	if !strings.Contains(done.Error, "does not match this disk as it is NOW") {
+		t.Errorf("error = %q, want a stale-confirmation refusal", done.Error)
+	}
+	if h.agent.claimCount() != 0 {
+		t.Error("a disk whose contents changed since the operator looked must not be wiped")
+	}
+	h.runner.Wait()
+}
+
+// The picker mints a token only for a disk that is genuinely eligible to be
+// wiped. Its absence is the answer, not an omission: a UI handed no token has
+// nothing to put in the field and therefore no wipe control to render.
+func TestCandidateWipeToken_MintedOnlyForAWipeableDisk(t *testing.T) {
+	cases := []struct {
+		name string
+		cand proto.StorageCandidate
+		want bool
+	}{
+		{"a disk carrying a backup set", backupSetCandidate(), true},
+		{"a disk whose marker is unreadable", unreadableMarkerCandidate(), true},
+		{"a blank disk needs no second choice", blankCandidate(), false},
+		{"the boot medium is never wipeable", protectedBackupSetCandidate(), false},
+		{"the boot medium, blank", protectedCandidate(), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CandidateWipeToken(&tc.cand)
+			if (got != "") != tc.want {
+				t.Fatalf("token = %q, want minted = %v", got, tc.want)
+			}
+			if tc.want && !strings.HasPrefix(got, "wipe-") {
+				t.Errorf("token %q should be recognisable as one in a log line", got)
+			}
+		})
+	}
+	if CandidateWipeToken(nil) != "" {
+		t.Error("no candidate is not a wipeable candidate")
+	}
+}
+
+// A token names one disk and one state. Two disks must never share one, or the
+// confirmation for the blank spare would authorise wiping the archive.
+func TestWipeToken_BindsToTheDiskAndItsContents(t *testing.T) {
+	base := backupSetCandidate()
+	token := CandidateWipeToken(&base)
+
+	if again := CandidateWipeToken(ptr(backupSetCandidate())); again != token {
+		t.Fatalf("the same disk in the same state minted two different tokens: %q vs %q", token, again)
+	}
+
+	mutations := map[string]func(*proto.StorageCandidate){
+		"a different fingerprint":   func(c *proto.StorageCandidate) { c.Fingerprint = testOtherFing },
+		"a different serial":        func(c *proto.StorageCandidate) { c.Serial = "SOMEONE-ELSES" },
+		"a different wwn":           func(c *proto.StorageCandidate) { c.WWN = "0x9999" },
+		"a different size":          func(c *proto.StorageCandidate) { c.SizeBytes = 1 << 40 },
+		"another cluster's archive": func(c *proto.StorageCandidate) { c.BackupSet.ClusterID = "someone-else" },
+		"a different partition uuid": func(c *proto.StorageCandidate) {
+			c.BackupSet.PartUUID = "part-uuid-other"
+		},
+		"another generation retained": func(c *proto.StorageCandidate) { c.BackupSet.Generations = 5 },
+		"an unreadable marker":        func(c *proto.StorageCandidate) { c.BackupSet = nil },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			c := backupSetCandidate()
+			mutate(&c)
+			if got := CandidateWipeToken(&c); got == token {
+				t.Errorf("%s minted the SAME token — a confirmation for one disk would authorise wiping another", name)
+			}
+		})
 	}
 }
 
