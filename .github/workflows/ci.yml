@@ -2,11 +2,16 @@ name: ci
 
 # Safety net for every push and PR. Two jobs in parallel:
 #
-#   backend  — gofmt + go vet + go build + go test for the three modules in
-#              the workspace (api / agent / proto). Test coverage is
-#              uploaded as a build artifact so we can watch it trend over
-#              time. Failures gate merges via branch-protection (configured
-#              outside this file).
+#   backend  — gofmt + go vet + go build + go test for EVERY module go.work
+#              names. The module list is derived from go.work rather than
+#              written out here: it used to be written out, as api / agent /
+#              proto, and it had drifted — artifactsig and tileschema were
+#              never formatted, vetted, built or TESTED by CI at all, and the
+#              job stayed green because it cannot report on code it was never
+#              pointed at (same root cause as #214, which fixed the two
+#              security gates). Coverage is uploaded as a build artifact so we
+#              can watch it trend over time. Failures gate merges via
+#              branch-protection (configured outside this file).
 #
 #   frontend — TypeScript type-check + Next.js production build. Catches
 #              type regressions and build-time errors (Server Components,
@@ -85,12 +90,39 @@ jobs:
           cache-dependency-path: |
             api/go.sum
             agent/go.sum
+            artifactsig/go.sum
+
+      # The module list, derived from go.work — see the header. Guarded,
+      # because the dangerous failure of a derived list is the quiet one: an
+      # empty or unparseable list would check nothing and pass. Written to the
+      # env so every step below shares one answer.
+      - name: workspace modules
+        run: |
+          mods=$(awk '
+            /^[[:space:]]*use[[:space:]]*\(/ { inblock = 1; next }
+            inblock && /^[[:space:]]*\)/     { inblock = 0; next }
+            inblock {
+              sub(/\/\/.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+              if ($0 == "") next
+              sub(/^\.\//, ""); print; next
+            }
+            /^[[:space:]]*use[[:space:]]+[^(]/ { p = $2; sub(/^\.\//, "", p); print p }
+          ' go.work | tr '\n' ' ')
+          if [ -z "$mods" ]; then
+            echo "::error::no modules parsed out of go.work — refusing to run a build that would cover nothing"
+            exit 1
+          fi
+          for m in $mods; do
+            [ -f "$m/go.mod" ] || { echo "::error::go.work names $m, but $m/go.mod does not exist"; exit 1; }
+          done
+          echo "GO_MODULES=$mods" >>"$GITHUB_ENV"
+          echo "modules: $mods"
 
       # gofmt -l prints unformatted files; if its output is non-empty,
       # fail the job. Cheaper signal than running goimports in CI.
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l api/ agent/ proto/)
+          unformatted=$(gofmt -l $GO_MODULES)
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt would change these files:"
             echo "$unformatted"
@@ -99,41 +131,51 @@ jobs:
 
       - name: vet
         run: |
-          go vet ./api/...
-          go vet ./agent/...
-          go vet ./proto/...
+          for m in $GO_MODULES; do
+            echo "::group::go vet ./$m/..."
+            go vet "./$m/..."
+            echo "::endgroup::"
+          done
 
-      # Coverage profile only for api (only module with tests today).
-      # Once agent and proto grow tests, fold them into a combined profile.
-      - name: test (api with coverage)
+      # Every module gets a coverage profile, not just api. It was api-only
+      # while api was the only module with tests; agent, proto, artifactsig and
+      # tileschema all have tests now, and a per-module total is the cheapest
+      # way to see a module whose tests stop covering it.
+      - name: test
         run: |
-          go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
-
-      - name: test (agent)
-        run: go test -race ./agent/...
-
-      - name: test (proto)
-        run: go test -race ./proto/...
+          for m in $GO_MODULES; do
+            echo "::group::go test -race ./$m/..."
+            go test -race -coverprofile="$m.coverage.out" -covermode=atomic "./$m/..."
+            echo "::endgroup::"
+          done
 
       - name: coverage summary
         run: |
-          go tool cover -func=api.coverage.out | tail -1
+          for m in $GO_MODULES; do
+            # A profile with only its mode line means the module has no
+            # covered statements; `go tool cover` errors on it rather than
+            # reporting zero, so say so instead of failing the build.
+            if [ "$(wc -l <"$m.coverage.out")" -le 1 ]; then
+              echo "$m: no coverage recorded"
+              continue
+            fi
+            printf '%s\t%s\n' "$m" "$(go tool cover -func="$m.coverage.out" | tail -1)"
+          done
 
-      - name: build (api)
-        run: go build ./api/...
-
-      - name: build (agent)
-        run: go build ./agent/...
-
-      - name: build (proto)
-        run: go build ./proto/...
+      - name: build
+        run: |
+          for m in $GO_MODULES; do
+            echo "::group::go build ./$m/..."
+            go build "./$m/..."
+            echo "::endgroup::"
+          done
 
       - name: upload coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: api-coverage
-          path: api.coverage.out
+          name: go-coverage
+          path: "*.coverage.out"
           retention-days: 30
 
   frontend:
