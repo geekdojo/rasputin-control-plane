@@ -20,6 +20,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -39,6 +40,7 @@ type Server struct {
 	metrics             *metrics.Store
 	updater             *updater.Store
 	updaterVerifier     *updater.Verifier
+	backup              *storage.Store
 	bundleDir           string
 	trustDir            string
 	mesh                *mesh.Service
@@ -103,6 +105,14 @@ func (s *Server) SetReleaseDownloadBase(downloadBase string) {
 // can apply a LAN-exposure change to the proxy immediately. main.go calls this
 // with the same closure the rotation workflow uses, so the two cannot drift.
 func (s *Server) SetAppLeafRotator(rotate apps.LeafRotator) { s.rotateAppLeaf = rotate }
+
+// SetBackupStore wires the backup_targets ledger (design/storage.md §4.8) so
+// the /api/backup routes can read it. Wired by main after NewServer rather than
+// as a twentieth constructor argument, the same way the alerts service and the
+// release source are. Leaving it nil is a supported state: the target routes
+// then answer 503, which is the honest answer for an api built without the
+// store.
+func (s *Server) SetBackupStore(st *storage.Store) { s.backup = st }
 
 // SetAlertsService overrides the default aggregator-only alerts service
 // with one that has a persistence store + nats conn wired. main.go
@@ -273,6 +283,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/updates", reqd(s.handleListUpdates))
 	mux.HandleFunc("POST /api/updates/check", reqd(s.handleCheckUpdates))
 	mux.HandleFunc("POST /api/updates/pull", reqd(s.handlePullUpdate))
+
+	// Backup targets (design/storage.md §4.8). GET candidates is a read-only
+	// agent RPC the picker calls before any job exists; POST targets submits
+	// the backup.target.claim saga, which is the only path that formats a disk.
+	mux.HandleFunc("GET /api/backup/candidates", reqd(s.handleListBackupCandidates))
+	mux.HandleFunc("GET /api/backup/targets", reqd(s.handleListBackupTargets))
+	mux.HandleFunc("POST /api/backup/targets", reqd(s.handleClaimBackupTarget))
 
 	mux.HandleFunc("GET /api/mesh/state", reqd(s.handleMeshState))
 	mux.HandleFunc("GET /api/mesh/devices", reqd(s.handleListMeshDevices))
