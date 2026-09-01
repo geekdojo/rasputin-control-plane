@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -94,6 +95,35 @@ func TestUpdateWorkflow_Kind(t *testing.T) {
 	}
 	if len(wf.Steps) != 7 {
 		t.Errorf("steps: want 7, got %d", len(wf.Steps))
+	}
+}
+
+// install dd's a bundle into the inactive slot and the runner has no
+// compensation for that. It has been safe against a repeat only because RAUC's
+// A/B target makes a re-install harmless — a property of the medium, not of the
+// runner. The declaration is what makes the runner enforce it (#395), and it is
+// also what keeps the workflow registrable: jobs.Register rejects Irreversible
+// alongside Retries, so this pins both halves.
+func TestUpdateWorkflow_InstallIsIrreversible(t *testing.T) {
+	wf := UpdateWorkflow(nil, nil, nil, Config{})
+	if err := jobs.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("ValidateWorkflow: %v", err)
+	}
+	var found bool
+	for _, s := range wf.Steps {
+		if s.Name != "install" {
+			continue
+		}
+		found = true
+		if !s.Irreversible {
+			t.Error("install must be declared Irreversible — a second dd into the slot is not a retry")
+		}
+		if s.Retries != 0 {
+			t.Errorf("install Retries = %d, want 0", s.Retries)
+		}
+	}
+	if !found {
+		t.Fatal("no install step in node.update")
 	}
 }
 

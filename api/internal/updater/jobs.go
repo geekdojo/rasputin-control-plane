@@ -57,7 +57,15 @@ func UpdateWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, cfg Confi
 			{Name: "validate", Timeout: 2 * time.Second, Do: updateValidate(store, inv)},
 			{Name: "precheck", Timeout: 10 * time.Second, Do: updatePrecheck()},
 			{Name: "download", Timeout: 10 * time.Minute, Do: updateDownload(store, cfg)},
-			{Name: "install", Timeout: 10 * time.Minute, Do: updateInstall(store)},
+			// install is Irreversible: it dd's a bundle into the inactive slot,
+			// and the runner has no compensation to undo that. It has been safe
+			// against a repeat only because RAUC's A/B target makes a
+			// re-install harmless — a property of the medium, not of the
+			// runner, and not one every future consumer of this saga will have.
+			// Declaring it means the runner enforces what A/B has so far been
+			// covering for. Retries has always been 0 here, so this changes no
+			// behaviour today; it makes the reason explicit.
+			{Name: "install", Timeout: 10 * time.Minute, Irreversible: true, Do: updateInstall(store)},
 			{Name: "reboot", Timeout: 15 * time.Second, Do: updateReboot()},
 			{Name: "wait_online_and_verify_slot", Timeout: 5 * time.Minute, Do: updateWaitOnlineAndVerifySlot(store, inv)},
 			{Name: "health_check_and_commit", Timeout: 30 * time.Second, Retries: 1, Do: updateHealthCheckAndCommit(store, inv)},

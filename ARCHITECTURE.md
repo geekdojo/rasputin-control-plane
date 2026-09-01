@@ -87,10 +87,15 @@ queued commands when it reconnects, with dedup keys making redelivery safe.
 
 **Every state-changing operation is a Job.** UI buttons, scheduled
 reconciles, event handlers — all of them create a Job row in SQLite and drive
-a linear saga (steps with retries and compensation) whose progress streams to
-the UI's Tasks panel over NATS. There is no hidden background magic: if the
-system is doing something, it's visible as a job. Read-only operations are
-plain HTTP.
+a linear saga whose progress streams to the UI's Tasks panel over NATS. There
+is no hidden background magic: if the system is doing something, it's visible
+as a job. Read-only operations are plain HTTP.
+
+Steps have retries; the saga has **no compensation**. A step's failure
+terminates the job and leaves the steps before it as they are. A step whose
+side effect cannot be undone therefore declares `Irreversible: true`, and the
+runner never auto-retries it and refuses to run it at all once the ledger
+records an attempt for it.
 
 Periodic reconcile jobs (firewall, apps, mesh) compare declared intent
 against observed reality and surface drift instead of silently clobbering it.
