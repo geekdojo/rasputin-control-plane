@@ -26,7 +26,7 @@
 // one string in a crypto path that reliably ends up in a console, a screenshot
 // or a bug report, so none of them carry inputs.
 
-import { PASSPHRASE_KDF, subtle, type Bytes } from './passphrase-kdf';
+import { PASSPHRASE_KDF, resolvePassphraseKdf, subtle, type Bytes } from './passphrase-kdf';
 
 /** The version tag on every blob this module writes. */
 const BLOB_VERSION = 1;
@@ -283,5 +283,279 @@ async function deriveRecoveryKek(code: string, salt: Bytes): Promise<CryptoKey> 
     );
   } finally {
     secret.fill(0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Unwrapping — design/storage.md §4.6's other half, and §4.8's adopt path
+// ---------------------------------------------------------------------------
+//
+// Minting is what happens when a disk is formatted. ADOPTING is what happens
+// when a disk that already carries a backup set is taken over as it stands, and
+// until now that path did nothing with the key at all: the generations on the
+// disk were already sealed under the key its marker names, minting a fresh one
+// would have recorded a key that unlocks nothing there, and so the flow simply
+// stopped. Correct as far as it went, and it left a replacement controlplane
+// holding a target it could never write a new generation to, because the data
+// key was sealed and nobody had been asked to open it.
+//
+// Bryce's ruling, 2026-09-01: "Is there no way to prompt for the key or
+// recovery code during recovery? It's perfectly fine to expect the user to
+// supply something during a recovery operation." So adopt prompts, and this is
+// what it prompts INTO.
+//
+// # What this half does NOT do
+//
+// It does not return the data key. `unlockArchiveKey` recovers it, checks it,
+// derives a one-way proof from it and zeroes it in a `finally`, and the proof
+// is the only thing that comes back. The rule the mint path set — the plaintext
+// key exists as one Uint8Array and does not outlive the call — is the same rule
+// here, and making it a return value would be the easiest way to break it.
+//
+// It does not re-wrap. §4.8's adopt takes the disk over EXACTLY AS IT STANDS;
+// the wrappings that go to the api are the ones that were already on the disk.
+// See the api's checkAdoptedKeyCustody for the other half of that argument.
+
+/** Which of §4.6's two custody paths the operator is supplying. */
+export type CustodyPath = 'passphrase' | 'recovery-code';
+
+/**
+ * The secret the operator typed. Either one is sufficient — that is the whole
+ * point of §4.6's two paths, and an operator who forgot the passphrase but kept
+ * the printed recovery code must be able to adopt.
+ *
+ * `passphrase` is CONSUMED: zeroed before unlockArchiveKey returns, on every
+ * path, exactly as mintArchiveKey consumes it.
+ */
+export type CustodySecret =
+  | { path: 'passphrase'; passphrase: Bytes }
+  | { path: 'recovery-code'; code: string };
+
+/**
+ * What a successful unlock hands back — deliberately not the key.
+ *
+ * `keyDigest` is SHA-256 over a domain-separated encoding of the recovered data
+ * key. It is a one-way digest of 256 bits of CSPRNG output, so it discloses
+ * nothing about the key, and it exists for exactly one reason: two custody
+ * paths can be shown to recover the SAME key without either the test or the UI
+ * ever holding the key to compare.
+ */
+export interface CustodyProof {
+  keyId: string;
+  path: CustodyPath;
+  keyDigest: string;
+}
+
+/**
+ * ArchiveKeyBlobs is what the ADOPT path finds on the disk: the same four
+ * strings mintArchiveKey produced, read back out of the marker file
+ * (proto.StorageBackupSet) rather than built here.
+ *
+ * Structurally identical to ArchiveKeyPayload, and named separately because the
+ * direction of travel is the thing worth being able to see at a call site.
+ */
+export type ArchiveKeyBlobs = ArchiveKeyPayload;
+
+/** Every error thrown out of the unwrap path, so a caller can branch. */
+export class ArchiveKeyError extends Error {
+  /**
+   * `wrong-secret` — the AEAD rejected the unwrap. The blob is intact and the
+   * passphrase or recovery code does not open it. This is the ONLY outcome that
+   * should read to an operator as "try again".
+   *
+   * `unreadable` — the blob itself could not be parsed, or names a construction
+   * this build cannot reproduce. Trying again with a different passphrase will
+   * not help.
+   */
+  readonly kind: 'wrong-secret' | 'unreadable';
+  constructor(kind: 'wrong-secret' | 'unreadable', message: string) {
+    super(message);
+    this.name = 'ArchiveKeyError';
+    this.kind = kind;
+  }
+}
+
+/** Base64url → bytes. Strict: anything outside the alphabet is a refusal. */
+function unb64url(s: string): Bytes {
+  if (!/^[A-Za-z0-9_-]*$/.test(s)) throw new ArchiveKeyError('unreadable', 'malformed blob encoding');
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  const out: Bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * A decoded blob, after the shape checks and before any derivation.
+ *
+ * Everything in here came off a disk. It is parsed defensively for the same
+ * reason a request body is: on the adopt path the marker file was written by
+ * whoever wrote it, and the browser is about to spend real memory on what it
+ * says. Nothing is defaulted — a field this cannot read is a refusal.
+ */
+interface DecodedBlob {
+  kdf: string;
+  params: Record<string, unknown>;
+  salt: Bytes;
+  iv: Bytes;
+  ct: Bytes;
+}
+
+/** Ciphertext bound: the key is 32 bytes and GCM adds a 16-byte tag. */
+const MAX_CT_BYTES = 256;
+/** Salt bound: no derivation here asks for more than 32 bytes of salt. */
+const MAX_SALT_BYTES = 64;
+
+function decodeBlob(blob: string): DecodedBlob {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(unb64url(blob)));
+  } catch {
+    throw new ArchiveKeyError('unreadable', 'the wrapped key on this disk could not be decoded');
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new ArchiveKeyError('unreadable', 'the wrapped key on this disk is not a key blob');
+  }
+  const o = parsed as Record<string, unknown>;
+  if (o.v !== BLOB_VERSION) {
+    throw new ArchiveKeyError(
+      'unreadable',
+      `this disk's key blob is version ${String(o.v)}; this build writes and reads version ${BLOB_VERSION}`,
+    );
+  }
+  if (o.cipher !== 'AES-256-GCM') {
+    throw new ArchiveKeyError('unreadable', 'this disk’s key blob names a cipher this build does not implement');
+  }
+  if (typeof o.kdf !== 'string' || typeof o.salt !== 'string' || typeof o.iv !== 'string' || typeof o.ct !== 'string') {
+    throw new ArchiveKeyError('unreadable', 'the wrapped key on this disk is missing a required field');
+  }
+  const salt = unb64url(o.salt);
+  const iv = unb64url(o.iv);
+  const ct = unb64url(o.ct);
+  if (salt.length === 0 || salt.length > MAX_SALT_BYTES || iv.length !== IV_BYTES || ct.length === 0 || ct.length > MAX_CT_BYTES) {
+    throw new ArchiveKeyError('unreadable', 'the wrapped key on this disk has implausible field sizes');
+  }
+  const params =
+    typeof o.params === 'object' && o.params !== null ? (o.params as Record<string, unknown>) : {};
+  return { kdf: o.kdf, params, salt, iv, ct };
+}
+
+/**
+ * unlockArchiveKey proves custody of an existing target's §4.6 data key.
+ *
+ * It takes the two sealed copies AS THEY SIT ON THE DISK plus whichever secret
+ * the operator supplied, opens the matching one, and returns a proof. It throws
+ * an ArchiveKeyError with kind `wrong-secret` when the AEAD rejects the unwrap
+ * — which is the point of using an AEAD here at all. A wrong passphrase fails
+ * VISIBLY, at unlock time, in the browser. It cannot produce a target that
+ * silently decrypts nothing, because the only way past this function is a tag
+ * that verified.
+ *
+ * The AAD does the rest of the work. It binds the key-id and the custody path
+ * into every wrapping (see `aad`), so a blob lifted from a different target
+ * fails here even with the right passphrase, and the passphrase copy cannot be
+ * presented as the recovery-code copy.
+ *
+ * Errors never carry the passphrase, the recovery code or the key.
+ */
+export async function unlockArchiveKey(
+  blobs: ArchiveKeyBlobs,
+  secret: CustodySecret,
+): Promise<CustodyProof> {
+  const keyId = blobs.keyId?.trim() ?? '';
+  try {
+    if (!keyId) {
+      throw new ArchiveKeyError('unreadable', 'this disk names no archive key to unlock');
+    }
+    const wrapped =
+      secret.path === 'passphrase' ? blobs.wrappedByPassphrase : blobs.wrappedByRecoveryCode;
+    if (!wrapped) {
+      throw new ArchiveKeyError(
+        'unreadable',
+        secret.path === 'passphrase'
+          ? 'this disk carries no passphrase-wrapped copy of its archive key'
+          : 'this disk carries no recovery-code-wrapped copy of its archive key',
+      );
+    }
+    const blob = decodeBlob(wrapped);
+    const kek = await kekFor(blob, secret);
+    const dataKey = await open(kek, blob, aad(keyId, secret.path));
+    try {
+      if (dataKey.length !== DATA_KEY_BYTES) {
+        // A blob that decrypts to the wrong length is not a wrong secret — the
+        // tag verified. It is a blob this build cannot use, and saying "wrong
+        // passphrase" would send the operator hunting for a secret they have.
+        throw new ArchiveKeyError(
+          'unreadable',
+          `this disk's archive key is ${dataKey.length} bytes; §4.6 keys are ${DATA_KEY_BYTES}`,
+        );
+      }
+      return { keyId, path: secret.path, keyDigest: await digestOf(keyId, dataKey) };
+    } finally {
+      dataKey.fill(0);
+    }
+  } finally {
+    // Same contract as mintArchiveKey: the caller's passphrase bytes do not
+    // outlive this call, on the throw path as much as the success path.
+    if (secret.path === 'passphrase') secret.passphrase.fill(0);
+  }
+}
+
+async function kekFor(blob: DecodedBlob, secret: CustodySecret): Promise<CryptoKey> {
+  if (secret.path === 'recovery-code') {
+    if (blob.kdf !== RECOVERY_KDF_ID) {
+      throw new ArchiveKeyError(
+        'unreadable',
+        `this disk's recovery-code wrapping uses ${blob.kdf}, which this build cannot reproduce`,
+      );
+    }
+    return deriveRecoveryKek(secret.code, blob.salt);
+  }
+  const kdf = resolvePassphraseKdf(blob.kdf, blob.params);
+  if (!kdf) {
+    // Covers both "we do not implement this" and "the cost it names is one no
+    // browser should be asked to pay" — see resolvePassphraseKdf's ceilings.
+    throw new ArchiveKeyError(
+      'unreadable',
+      `this disk's passphrase wrapping uses ${blob.kdf}, which this build cannot reproduce`,
+    );
+  }
+  return kdf.deriveKek(secret.passphrase, blob.salt);
+}
+
+async function open(kek: CryptoKey, blob: DecodedBlob, additional: Bytes): Promise<Bytes> {
+  try {
+    return new Uint8Array(
+      await subtle().decrypt({ name: 'AES-GCM', iv: blob.iv, additionalData: additional }, kek, blob.ct),
+    );
+  } catch {
+    // WebCrypto throws an OperationError with no detail on a tag failure, and
+    // that is the right amount of detail: whether the secret was wrong, the
+    // blob was edited, or it belongs to another target, the answer is the same
+    // and none of the three should be distinguishable to a guesser.
+    throw new ArchiveKeyError(
+      'wrong-secret',
+      'that does not open this disk’s archive key — check which passphrase or recovery code belongs to this disk',
+    );
+  }
+}
+
+/**
+ * digestOf turns the recovered key into something safe to hold.
+ *
+ * Domain-separated and bound to the key-id, so the digest is specific to this
+ * target and cannot be compared against a digest computed anywhere else for
+ * another purpose. SHA-256 over 256 bits of CSPRNG output is not invertible and
+ * not searchable; this is a proof that two unwraps agree, not a credential.
+ */
+async function digestOf(keyId: string, dataKey: Bytes): Promise<string> {
+  const label = utf8(`${AAD_DOMAIN}|${keyId}|custody-proof|`);
+  const buf: Bytes = new Uint8Array(label.length + dataKey.length);
+  buf.set(label, 0);
+  buf.set(dataKey, label.length);
+  try {
+    return b64url(new Uint8Array(await subtle().digest('SHA-256', buf)));
+  } finally {
+    buf.fill(0);
   }
 }

@@ -960,6 +960,23 @@ export interface StorageBackupSet {
   partUuid?: string;
   /** Identifies the §4.6 DATA KEY these generations need. Never key material. */
   keyId?: string;
+  /** Names the wrapping construction of the two blobs below. */
+  keyAlg?: string;
+  /**
+   * §4.6's two SEALED copies of the data key, carried by the disk itself.
+   *
+   * Ciphertext. Each is the data key under AES-256-GCM, its key-encryption key
+   * derived in a browser from the operator's passphrase (Argon2id) or from the
+   * recovery code (HKDF-SHA-256). They are on the disk because §4.6's whole
+   * constraint is that the key cannot live on the controlplane — which means a
+   * REPLACEMENT controlplane, adopting this disk with an empty database, finds
+   * the sealed key here and can ask the operator to open it.
+   *
+   * `lib/archive-key.ts`'s unlockArchiveKey is the only thing that opens them,
+   * and it never returns what it recovers.
+   */
+  wrappedByPassphrase?: string;
+  wrappedByRecoveryCode?: string;
   label?: string;
   createdAt: string;
   /** Retained archive generations the agent could see (§4.4 keeps four). */

@@ -123,39 +123,141 @@ export const ARGON2ID: PassphraseKdf = {
     dkLen: ARGON2ID_DK_LEN,
   },
   saltBytes: 16,
-  async deriveKek(passphrase: Bytes, salt: Bytes): Promise<CryptoKey> {
-    const derived = await argon2id({
-      password: passphrase,
+  deriveKek(passphrase: Bytes, salt: Bytes): Promise<CryptoKey> {
+    return deriveArgon2idKek(
+      passphrase,
       salt,
-      iterations: ARGON2ID_ITERATIONS,
-      parallelism: ARGON2ID_PARALLELISM,
-      memorySize: ARGON2ID_MEMORY_KIB,
-      hashLength: ARGON2ID_DK_LEN,
-      outputType: 'binary',
-    });
-    // Copied into an ArrayBuffer-backed view because hash-wasm hands back a
-    // bare Uint8Array (ArrayBufferLike), which WebCrypto's BufferSource will
-    // not take. Both copies are zeroed below — the derived KEK bytes must not
-    // outlive the import that turns them into an opaque CryptoKey.
-    const raw: Bytes = new Uint8Array(derived.length);
-    raw.set(derived);
-    derived.fill(0);
-    try {
-      return await subtle().importKey(
-        'raw',
-        raw,
-        { name: 'AES-GCM', length: 256 },
-        false, // non-extractable: the KEK can wrap, and can never be read back
-        ['encrypt', 'decrypt'],
-      );
-    } finally {
-      // The derived bytes existed in JS memory for as long as it took to import
-      // them into an opaque CryptoKey. Zero them; the KEK survives only as the
-      // non-extractable handle.
-      raw.fill(0);
-    }
+      ARGON2ID_MEMORY_KIB,
+      ARGON2ID_ITERATIONS,
+      ARGON2ID_PARALLELISM,
+      ARGON2ID_DK_LEN,
+    );
   },
 };
 
 /** The derivation the claim flow uses. */
 export const PASSPHRASE_KDF: PassphraseKdf = ARGON2ID;
+
+// ---------------------------------------------------------------------------
+// Reading a derivation back out of a wrapped blob
+// ---------------------------------------------------------------------------
+
+/**
+ * The shape of an argon2id id: `argon2id-m<memoryKiB>-t<iterations>-p<parallelism>`.
+ *
+ * The id is the authority on the parameters, which is the whole reason it is
+ * built out of them — a blob written years ago names its own cost, and the
+ * unwrap reproduces it rather than assuming today's.
+ */
+const ARGON2ID_ID = /^argon2id-m(\d+)-t(\d+)-p(\d+)$/;
+
+/**
+ * Cost ceilings, and why an unwrap needs them at all.
+ *
+ * The blob these numbers come from is read OFF A DISK. On the adopt path that
+ * disk was plugged in by whoever plugged it in, and its marker file is
+ * attacker-controlled input in exactly the way a request body is. A blob
+ * claiming `argon2id-m8388608-t1000-p1` is not a slow unwrap — it is 8 GiB of
+ * WASM memory and a browser tab that dies, or a machine that swaps itself to a
+ * halt, from a disk nobody has agreed to trust yet.
+ *
+ * So the ceilings are refusals, checked BEFORE any derivation is attempted.
+ * They sit far above anything this product mints (64 MiB / t=3) and far below
+ * anything a browser should be asked to do, and a blob outside them is reported
+ * as unreadable rather than attempted.
+ */
+const MAX_MEMORY_KIB = 1024 * 1024; // 1 GiB
+const MAX_ITERATIONS = 64;
+const MAX_PARALLELISM = 16;
+
+/**
+ * resolvePassphraseKdf rebuilds the derivation a wrapped blob was made with.
+ *
+ * Returns null when the id names something this build cannot reproduce, or
+ * names costs outside the ceilings above. Null is "this blob is unreadable
+ * here", never "carry on with the current parameters" — deriving a KEK with
+ * parameters other than the ones the blob was sealed under produces a wrong key
+ * and an AEAD failure that would read to the operator as a wrong passphrase.
+ *
+ * `params` is cross-checked rather than trusted: the id and the params object
+ * are two copies of the same numbers, and a blob whose copies disagree has been
+ * edited or corrupted. Refuse it instead of picking a winner.
+ */
+export function resolvePassphraseKdf(
+  id: string,
+  params?: Readonly<Record<string, unknown>>,
+): PassphraseKdf | null {
+  const m = ARGON2ID_ID.exec(id);
+  if (!m) return null;
+  const memoryKiB = Number(m[1]);
+  const iterations = Number(m[2]);
+  const parallelism = Number(m[3]);
+  if (
+    !(memoryKiB > 0 && memoryKiB <= MAX_MEMORY_KIB) ||
+    !(iterations > 0 && iterations <= MAX_ITERATIONS) ||
+    !(parallelism > 0 && parallelism <= MAX_PARALLELISM)
+  ) {
+    return null;
+  }
+  const dkLen = ARGON2ID_DK_LEN;
+  if (params) {
+    const disagrees =
+      (params.memoryKiB !== undefined && params.memoryKiB !== memoryKiB) ||
+      (params.iterations !== undefined && params.iterations !== iterations) ||
+      (params.parallelism !== undefined && params.parallelism !== parallelism) ||
+      (params.dkLen !== undefined && params.dkLen !== dkLen);
+    if (disagrees) return null;
+  }
+  if (id === ARGON2ID.id) return ARGON2ID;
+  return {
+    id,
+    params: { memoryKiB, iterations, parallelism, dkLen },
+    saltBytes: ARGON2ID.saltBytes,
+    deriveKek: (passphrase, salt) =>
+      deriveArgon2idKek(passphrase, salt, memoryKiB, iterations, parallelism, dkLen),
+  };
+}
+
+/**
+ * The one Argon2id derivation in this module, parameterised.
+ *
+ * Both callers reach it: the shipped ARGON2ID above, and resolvePassphraseKdf
+ * rebuilding a derivation named by an older blob. One implementation, so a
+ * blob's parameters cannot take a different code path from today's.
+ */
+async function deriveArgon2idKek(
+  passphrase: Bytes,
+  salt: Bytes,
+  memoryKiB: number,
+  iterations: number,
+  parallelism: number,
+  dkLen: number,
+): Promise<CryptoKey> {
+  const derived = await argon2id({
+    password: passphrase,
+    salt,
+    iterations,
+    parallelism,
+    memorySize: memoryKiB,
+    hashLength: dkLen,
+    outputType: 'binary',
+  });
+  // Copied into an ArrayBuffer-backed view because hash-wasm hands back a bare
+  // Uint8Array (ArrayBufferLike), which WebCrypto's BufferSource will not take.
+  // Both copies are zeroed below — the derived KEK bytes must not outlive the
+  // import that turns them into an opaque CryptoKey.
+  const raw: Bytes = new Uint8Array(derived.length);
+  raw.set(derived);
+  derived.fill(0);
+  try {
+    return await subtle().importKey(
+      'raw',
+      raw,
+      { name: 'AES-GCM', length: 256 },
+      false, // non-extractable: the KEK can wrap, and can never be read back
+      ['encrypt', 'decrypt'],
+    );
+  } finally {
+    raw.fill(0);
+  }
+}

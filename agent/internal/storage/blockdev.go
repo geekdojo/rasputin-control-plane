@@ -304,7 +304,8 @@ func (b *BlockDevBackend) peek(ctx context.Context, devicePath string) (*proto.S
 // its refusals and then fails leaves the disk formatted. Everything answerable
 // is answered before the first byte is written, and after that there is nothing
 // left that can decide to stop.
-func (b *BlockDevBackend) Claim(ctx context.Context, devicePath, fingerprint, label string) (*proto.StorageClaimAck, error) {
+func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*proto.StorageClaimAck, error) {
+	devicePath, fingerprint, label := cmd.DevicePath, cmd.Fingerprint, cmd.Label
 	if err := checkDevicePath(devicePath); err != nil {
 		return nil, err
 	}
@@ -404,12 +405,11 @@ func (b *BlockDevBackend) Claim(ctx context.Context, devicePath, fingerprint, la
 		return nil, err
 	}
 
-	set := &proto.StorageBackupSet{
-		MarkerVersion: proto.StorageMarkerVersion,
-		PartUUID:      partUUID,
-		Label:         label,
-		CreatedAt:     time.Now().UTC(),
-	}
+	// The marker carries everything the command was given, including the two
+	// WRAPPED §4.6 key blobs. A disk that records its own key custody is one a
+	// replacement controlplane can adopt and actually open; one that records
+	// only a key-id names a key nobody can produce.
+	set := markerFrom(cmd, partUUID, time.Now().UTC())
 	if err := writeMarker(mountPath, set); err != nil {
 		return nil, fmt.Errorf("write marker on %s: %w", mountPath, err)
 	}

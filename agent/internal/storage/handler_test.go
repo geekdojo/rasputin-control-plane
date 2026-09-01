@@ -180,7 +180,7 @@ func TestHandlers_ClaimHappyPathStampsClusterAndKeyID(t *testing.T) {
 func TestHandlers_MountAndInspect(t *testing.T) {
 	nc, m := registered(t)
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
-	claim, err := m.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "backup")
+	claim, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup"))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}

@@ -433,7 +433,8 @@ func (m *MockBackend) enumerateLocked(st *mockState) *proto.StorageEnumerateAck 
 // Claim formats a simulated disk. The refusal order matches blockdev.Claim
 // line for line — that is the property the tests are actually protecting, since
 // a mock whose refusals differ from production tests nothing.
-func (m *MockBackend) Claim(ctx context.Context, devicePath, fingerprint, label string) (*proto.StorageClaimAck, error) {
+func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*proto.StorageClaimAck, error) {
+	devicePath, fingerprint, label := cmd.DevicePath, cmd.Fingerprint, cmd.Label
 	if strings.TrimSpace(fingerprint) == "" {
 		return nil, ErrNoFingerprint
 	}
@@ -484,12 +485,11 @@ func (m *MockBackend) Claim(ctx context.Context, devicePath, fingerprint, label 
 	// ---- past this line the disk is being rewritten ----
 
 	partUUID := m.newUUID()
-	set := &proto.StorageBackupSet{
-		MarkerVersion: proto.StorageMarkerVersion,
-		PartUUID:      partUUID,
-		Label:         label,
-		CreatedAt:     m.now(),
-	}
+	// Same constructor the real backend uses, so the mock cannot drift into
+	// writing a marker production would not — including the two WRAPPED §4.6
+	// key blobs, which are what makes the disk adoptable by a controlplane that
+	// has never seen it.
+	set := markerFrom(cmd, partUUID, m.now())
 	st.Disks[idx].Partitions = []mockPartition{{
 		PartUUID:  partUUID,
 		FSType:    "ext4",
