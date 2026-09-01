@@ -17,6 +17,13 @@ asking first (proposed and declined 2026-07-08). The working methodology:
    **repo root** so the default `./data` dir resolves; `data/rasputin.db` already
    holds Bryce's account and passkey credential.
 
+   Add `RASPUTIN_UPDATE_TRUST=dev-permissive` too if `data/trust/root-ca.pem` is
+   not present locally: as of 2026-09-01 a missing bundle-signing root CA makes the
+   api REFUSE every OS update bundle instead of accepting it unverified, so the
+   Updates page's upload and staging paths return 503 until one or the other is in
+   place. `scripts/pki-init.sh` is the other, better answer. On hardware neither is
+   needed — the OS image bakes the root in.
+
    The `RASPUTIN_MESH_BACKEND=mock` is required as of 2026-09-01 and is not
    optional boilerplate: the default `auto` no longer falls back to the mock when
    it finds no Headscale and no Docker. A mock mesh mints pre-auth keys and

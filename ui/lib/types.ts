@@ -408,8 +408,14 @@ export interface Bundle {
   uploadedBy: string;
 }
 
+// How the api verifies OS update bundles right now. `unavailable` is not a
+// softer `enforced`: with no trust root the api REFUSES every bundle rather
+// than accepting it unchecked, and the banner has to say which one it is.
+export type BundleTrustMode = 'enforced' | 'unavailable' | 'dev-permissive';
+
 export interface BundleList {
   trustConfigured: boolean;
+  trustMode: BundleTrustMode;
   bundles: Bundle[];
 }
 

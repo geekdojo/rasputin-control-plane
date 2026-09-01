@@ -259,11 +259,13 @@ function StepBody({
         <Hint>Update signing is verified — OS updates are checked for authenticity before they install.</Hint>
       ) : (
         <Hint warn>
-          The update trust root is missing, so OS updates can&apos;t be verified. On Rasputin hardware
-          this is preinstalled — if you&apos;re seeing this on a real system, re-flash the OS image
+          The update trust root is missing, so OS updates can&apos;t be verified — and are therefore
+          refused: nothing stages or installs until it is in place. On Rasputin hardware this is
+          preinstalled — if you&apos;re seeing this on a real system, re-flash the OS image
           (images from 2026.06.0-dev.12 onward wire it up automatically). Developing locally? Run{' '}
           <Mono>./scripts/pki-init.sh</Mono> and copy <Mono>root-ca.pem</Mono> into <Mono>data/trust/</Mono>,
-          then restart the api.
+          then restart the api — or start it with <Mono>RASPUTIN_UPDATE_TRUST=dev-permissive</Mono> to
+          work without a PKI.
         </Hint>
       );
     default:

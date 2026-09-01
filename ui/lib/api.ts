@@ -553,7 +553,7 @@ export function openAppsWS(
 
 export async function listBundles(): Promise<BundleList> {
   const r = await jsonFetch<BundleList | null>('/api/bundles');
-  return r ?? { trustConfigured: false, bundles: [] };
+  return r ?? { trustConfigured: false, trustMode: 'unavailable', bundles: [] };
 }
 
 export async function uploadBundle(file: File): Promise<Bundle> {

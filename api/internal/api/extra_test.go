@@ -68,9 +68,9 @@ func buildBundleFixture(t *testing.T, f *apiFixture) ([]byte, string) {
 		t.Fatalf("write root: %v", err)
 	}
 	// Re-init the verifier on the server.
-	v, err := updater.NewVerifier(f.dir)
-	if err != nil {
-		t.Fatalf("NewVerifier: %v", err)
+	v := updater.NewVerifier(f.dir)
+	if !v.TrustConfigured() {
+		t.Fatalf("fixture root CA did not load from %s", f.dir)
 	}
 	f.srv.updaterVerifier = v
 
@@ -146,9 +146,9 @@ func TestHandleUploadAndGetBundle_RoundTrip(t *testing.T) {
 func TestHandleUploadBundle_VerificationFails(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
-	// Garbage body: still gets accepted by verifier in dev-permissive mode
-	// (no root pem set), so this test only verifies the "looks like JSON"
-	// branch when it's NOT a real bundle.
+	buildBundleFixture(t, f) // installs a real root CA, so trust is enforced
+	// A malformed envelope, WITH trust configured: rejected on its own merits
+	// as a bad artifact (400), not because the api cannot verify anything.
 	buf := []byte(`{not a valid envelope`)
 	req := httptest.NewRequest(http.MethodPost, "/api/bundles", strings.NewReader(string(buf)))
 	req.ContentLength = int64(len(buf))
@@ -157,6 +157,42 @@ func TestHandleUploadBundle_VerificationFails(t *testing.T) {
 	f.handler.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("want 400, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// The fail-closed contract at the HTTP boundary. The fixture has no root CA,
+// which is exactly the state a box is in before scripts/pki-init.sh has run or
+// after root-ca.pem goes missing — and the bundle below is a perfectly
+// well-formed envelope. It used to be ingested and stored, SignedBy
+// "<unverified>", and was then installable on every node in the fleet.
+func TestHandleUploadBundle_NoTrustRootRefusesAndStoresNothing(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+
+	// Build a valid envelope against a throwaway PKI, then take the api's trust
+	// root back away so the upload meets an unavailable verifier.
+	buf, sha := buildBundleFixture(t, f)
+	if err := os.Remove(filepath.Join(f.dir, "root-ca.pem")); err != nil {
+		t.Fatalf("remove root: %v", err)
+	}
+	f.srv.updaterVerifier = updater.NewVerifier(f.dir)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/bundles", strings.NewReader(string(buf)))
+	req.ContentLength = int64(len(buf))
+	req.AddCookie(c)
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, req)
+
+	// 503, not 400: the bundle is fine, the api's trust root is missing.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("want 503, got %d body=%s", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, "root-ca.pem") {
+		t.Errorf("the refusal must name the missing trust root; got %s", body)
+	}
+	// And nothing was persisted — a refused bundle must not be stageable.
+	if g := f.do(t, http.MethodGet, "/api/bundles/"+sha, "", nil); g.Code == http.StatusOK {
+		t.Error("a bundle refused for want of a trust root must not be stored")
 	}
 }
 

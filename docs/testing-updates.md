@@ -11,12 +11,18 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
 
 ## Setup
 
-1. **Bootstrap PKI** (once):
+1. **Bootstrap PKI** (once) — not optional. With no `root-ca.pem` the api refuses
+   every bundle (`503`), because a missing trust root is a refusal rather than a
+   downgrade to unverified. See [`pki.md`](pki.md#the-trust-root-is-required).
 
    ```sh
    ./scripts/pki-init.sh --out-dir ./pki-out
    cp ./pki-out/root-ca.pem ./data/trust/root-ca.pem
    ```
+
+   Working without a PKI is still possible, by asking for it: start the api with
+   `RASPUTIN_UPDATE_TRUST=dev-permissive` and bundles are accepted unchecked and
+   recorded `SignedBy "<unverified>"`.
 
 2. **Start the api**:
 
