@@ -215,6 +215,25 @@ func TestFault_UnavailableReadsDifferentlyFromReject(t *testing.T) {
 			t.Errorf("Fault.String() = %q does not mention %q", got, want)
 		}
 	}
+	// Expected is optional, and with none there must be no dangling clause —
+	// "(would have needed )" reads like a bug in the agent rather than a fact
+	// about the node.
+	noExpected := Fault{
+		Variable: "RASPUTIN_STORAGE_BACKEND",
+		Missing:  "not on PATH: wipefs",
+		Effect:   "backup-target selection is disabled on this node",
+	}
+	if got := noExpected.String(); strings.Contains(got, "would have needed") {
+		t.Errorf("Fault.String() = %q — with no Expected there must be no "+
+			"'would have needed' clause", got)
+	}
+	// ...and the prerequisite and effect still survive without it.
+	for _, want := range []string{"wipefs", "backup-target selection is disabled"} {
+		if !strings.Contains(noExpected.String(), want) {
+			t.Errorf("Fault.String() = %q does not mention %q", noExpected.String(), want)
+		}
+	}
+
 	// A rejected value keeps its original wording — this change is additive.
 	rejected := Fault{Variable: "RASPUTIN_UCI_BACKEND", Value: "uic",
 		Expected: []string{"uci", "mock"}, Effect: "firewall configuration is disabled"}
