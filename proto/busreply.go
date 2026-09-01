@@ -44,8 +44,12 @@ import "time"
 const (
 	// AgentWorkBudgetMax is the longest any agent handler may spend before it
 	// answers. Deploy's per-tile ceiling is the largest today (30m); the
-	// updater's download and install contexts (15m each) are the other two.
-	AgentWorkBudgetMax = max(AppDeployWorkMax, UpdateDownloadWork, UpdateInstallWork)
+	// updater's download and install contexts (15m each) and storage's claim
+	// (15m — wipefs + sfdisk + mkfs on a disk that may be a spinning archive
+	// drive) are the others. EVERY agent-side budget belongs in this max():
+	// one left out is a handler that finishes with a real answer and is denied
+	// the publish that carries it.
+	AgentWorkBudgetMax = max(AppDeployWorkMax, UpdateDownloadWork, UpdateInstallWork, StorageClaimWork)
 
 	// BusReplyGrantSlack is headroom on top of that ceiling for the handler's
 	// teardown after its context expires, the marshal, and a queued write on a

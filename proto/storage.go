@@ -1,0 +1,343 @@
+package proto
+
+import "time"
+
+// Backup-target selection — the wire contract for design/storage.md §4.8.
+//
+// The operator picks a local disk in the UI and Rasputin FORMATS it. That makes
+// this the only agent verb in the system that can destroy the cluster it is
+// running on, so the types below are shaped around one question: how does the
+// api name a disk to the agent in a way that cannot silently mean a DIFFERENT
+// disk by the time the format runs?
+//
+// Not by device path. `nvme0n1`/`nvme1n1` enumeration order is not stable across
+// boots, and a two-NVMe controlplane (the Geekworm x1004 the BitScope
+// controlplane sits in, the LattePanda) offers no transport, bus, or size
+// difference to discriminate on. A device path is a handle for one moment, not
+// an identity.
+//
+// So every destructive verb carries a StorageCandidate.Fingerprint — a hash over
+// WWN/serial + size + the current partition table — and the agent recomputes it
+// against live hardware immediately before it writes anything. That closes the
+// TOCTOU window between the operator confirming and mkfs running, and it doubles
+// as the repeat guard: the partition-table half of the hash changes as a SIDE
+// EFFECT of the format, so a Claim replayed with the fingerprint the operator
+// confirmed fails closed on its own without any dedup state anywhere.
+//
+// The second guard is Protected. The device holding the currently-mounted boot
+// and persistent partitions is resolved by walking BACK from the live mounts to
+// their parent block device, never by matching a name, and it is re-resolved
+// inside Claim rather than trusted from the enumerate the operator saw.
+
+// StorageTransport is how a candidate disk is attached. Reported for the
+// operator's benefit — it is what makes "the 2 TB USB one" recognisable in a
+// picker — and for nothing else. It is NOT a safety signal: §4.8's whole point
+// is that an internal NVMe is as legitimate a backup target as a USB disk, and
+// the boot medium can be either.
+type StorageTransport string
+
+const (
+	StorageTransportUSB     StorageTransport = "usb"
+	StorageTransportNVMe    StorageTransport = "nvme"
+	StorageTransportSATA    StorageTransport = "sata"
+	StorageTransportMMC     StorageTransport = "mmc"
+	StorageTransportVirtual StorageTransport = "virtual"
+	StorageTransportUnknown StorageTransport = "unknown"
+)
+
+// StorageBackupLabel is the filesystem label a claimed target carries. §4.8:
+// it survives as a HUMAN-READABLE HINT, not as the identifier — two disks
+// carrying the same label is merely ambiguous today and destructively ambiguous
+// once Rasputin does the formatting. The identifier is the partition UUID.
+const StorageBackupLabel = "RASPUTIN-BACKUP"
+
+// StorageMarkerFile is the file at the root of a claimed target that makes the
+// disk SELF-DESCRIBING. It is what lets a formatted-but-unrecorded disk be found
+// and adopted after a failed persist, and what lets a first-run flow on a
+// replacement controlplane tell "blank disk" from "the only copy of the archive
+// being restored" (§4.8, #291). The DB row is a cache; this file is the record.
+const StorageMarkerFile = ".rasputin-backup-set.json"
+
+// StorageMarkerVersion is the schema version written into StorageBackupSet.
+const StorageMarkerVersion = 1
+
+// Agent-side work budgets for the storage verbs — how long the AGENT may spend
+// before it answers. Same contract as the updater's pair in updates.go: the bus
+// reply grant in busreply.go is DERIVED from these, so a budget added here must
+// be added to AgentWorkBudgetMax or the agent silently loses the right to answer
+// a call that ran long.
+//
+// Claim gets fifteen minutes because it is wipefs + sfdisk + mkfs + a udev
+// settle on a disk that may be a spinning 8 TB archive drive, and because the
+// alternative to waiting is an RPC timeout on a step that is HALFWAY THROUGH
+// REPARTITIONING A DISK. Enumerate and Inspect are read-only and quick.
+const (
+	StorageEnumerateWork = 60 * time.Second
+	StorageClaimWork     = 15 * time.Minute
+	StorageMountWork     = 2 * time.Minute
+	StorageInspectWork   = 60 * time.Second
+)
+
+// StorageRefusal is a machine-readable reason a storage verb declined. The api
+// renders these; the UI branches on them (adopt-or-wipe is a different prompt
+// than "that is the disk you are running on"). Detail carries the prose.
+//
+// Every value here is a REFUSAL, never a warning — §4.8 has no path where the
+// agent proceeds with a caveat.
+type StorageRefusal string
+
+const (
+	// StorageRefusalProtected — the target holds the currently-mounted boot or
+	// persistent partitions. The one refusal the whole feature exists for.
+	StorageRefusalProtected StorageRefusal = "protected"
+	// StorageRefusalFingerprintMismatch — the disk under this path is not the
+	// disk the operator confirmed, or its partition table changed underneath.
+	// Also what a replayed Claim gets after a successful format.
+	StorageRefusalFingerprintMismatch StorageRefusal = "fingerprint-mismatch"
+	// StorageRefusalDeviceAbsent — no such device (unplugged between the
+	// picker and the confirmation).
+	StorageRefusalDeviceAbsent StorageRefusal = "device-absent"
+	// StorageRefusalNotWholeDisk — the path names a partition or a virtual
+	// device, not a whole disk. Claim partitions the whole disk.
+	StorageRefusalNotWholeDisk StorageRefusal = "not-whole-disk"
+	// StorageRefusalBackupSetPresent — the disk already carries a Rasputin
+	// backup set. The api's check_existing step owns adopt-or-wipe; the agent
+	// reports the set and never decides.
+	StorageRefusalBackupSetPresent StorageRefusal = "backup-set-present"
+	// StorageRefusalNotFound — no claimed target with that partition UUID is
+	// attached (Mount / Inspect).
+	StorageRefusalNotFound StorageRefusal = "not-found"
+	// StorageRefusalBackendError — the backend or a shelled-out tool failed.
+	StorageRefusalBackendError StorageRefusal = "backend-error"
+)
+
+// StorageBackupSet is the content of StorageMarkerFile: what a disk says about
+// itself. Read during enumeration (the disk is mounted read-only to look) and
+// written by Claim.
+//
+// ⚠️ KeyID only, never key material. §4.6's data key is minted in this flow and
+// its plaintext must never enter a marker file, a job ledger, or a log line.
+type StorageBackupSet struct {
+	MarkerVersion int `json:"markerVersion"`
+	// ClusterID is which cluster wrote this set. A disk carrying another
+	// cluster's archive is exactly the disk a first-run flow must not wipe.
+	ClusterID string `json:"clusterId,omitempty"`
+	// PartUUID is the target's own key, written into the marker so a disk that
+	// was formatted but never recorded can be re-adopted by its own account.
+	PartUUID string `json:"partUuid,omitempty"`
+	// KeyID identifies the §4.6 DATA KEY the generations on this disk are
+	// encrypted under — which changes on a re-format, not on a passphrase
+	// change. It is what lets restore tell which key a generation needs
+	// instead of guessing. Never the key itself.
+	KeyID string `json:"keyId,omitempty"`
+	// Label is the human-readable name the operator gave this target.
+	Label     string    `json:"label,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	// Generations is how many retained archive generations the agent could see
+	// (§4.4 keeps four). Advisory — it is what the adopt-or-wipe prompt shows
+	// the operator so "wipe" is a decision and not a shrug.
+	Generations int `json:"generations,omitempty"`
+}
+
+// StoragePartition is one partition found on a candidate disk. Reported so the
+// destructive-confirmation dialog can show CURRENT CONTENTS — §4.8 requires the
+// operator see model, size and contents before confirming, and "contents" is
+// the difference between a blank disk and someone's photo archive.
+type StoragePartition struct {
+	DevicePath string `json:"devicePath"`
+	PartUUID   string `json:"partUuid,omitempty"`
+	FSType     string `json:"fsType,omitempty"`
+	Label      string `json:"label,omitempty"`
+	SizeBytes  uint64 `json:"sizeBytes"`
+	// Mountpoint is non-empty when this partition is mounted RIGHT NOW. A
+	// non-empty mountpoint on a candidate is a strong hint and is how Protected
+	// is derived, but the derivation is the agent's, not the UI's.
+	Mountpoint string `json:"mountpoint,omitempty"`
+}
+
+// StorageCandidate is one whole disk the operator could choose.
+type StorageCandidate struct {
+	// DevicePath is the kernel name AT THIS MOMENT (/dev/nvme1n1). It is a
+	// handle for issuing the Claim, not an identity — see the package comment.
+	// Nothing downstream may persist it as the way to find this disk again.
+	DevicePath string `json:"devicePath"`
+
+	Model     string           `json:"model,omitempty"`
+	Serial    string           `json:"serial,omitempty"`
+	WWN       string           `json:"wwn,omitempty"`
+	SizeBytes uint64           `json:"sizeBytes"`
+	Transport StorageTransport `json:"transport"`
+	Removable bool             `json:"removable"`
+
+	// Partitions is the disk's current partition table, in on-disk order.
+	Partitions []StoragePartition `json:"partitions,omitempty"`
+
+	// HasBackupSet is true when the disk already carries a Rasputin backup set
+	// (§4.8's adopt-or-wipe gate). BackupSet carries the marker's contents when
+	// it was readable.
+	//
+	// Restore-before-first-boot (#291) has the operator plug their archive disk
+	// into a REPLACEMENT controlplane, so a flow that force-formats whatever it
+	// is handed can destroy the only copy of the thing being restored. This
+	// field is what makes that a decision rather than an accident.
+	HasBackupSet bool              `json:"hasBackupSet"`
+	BackupSet    *StorageBackupSet `json:"backupSet,omitempty"`
+
+	// Protected marks the disk holding the currently-mounted boot and
+	// persistent partitions. Resolved by walking back from the live mounts to
+	// their parent block device — never by device name, and never by transport
+	// or size (a two-NVMe controlplane has neither to discriminate on).
+	//
+	// A protected candidate is still ENUMERATED rather than hidden: the
+	// operator who plugged in one disk and sees two should be told which one is
+	// the boot medium and why, not shown a list with a silent hole in it.
+	Protected bool `json:"protected"`
+	// ProtectedReason names the mount that protects it, e.g.
+	// "holds the mounted persistent partition (/var/lib/rasputin)". Operator-
+	// facing prose; do not parse it.
+	ProtectedReason string `json:"protectedReason,omitempty"`
+
+	// Fingerprint is the hash the operator's confirmation is bound to: stable
+	// identity (WWN/serial + size) plus a hash of the current partition table.
+	// Passed back verbatim in StorageClaimCmd and re-derived by the agent
+	// against live hardware before it writes.
+	Fingerprint string `json:"fingerprint"`
+
+	// IdentityWeak is true when the disk reported neither WWN nor serial, so
+	// its fingerprint rests on model + size + partition table alone. Two
+	// identical blank USB sticks from the same batch can then fingerprint the
+	// same, which is precisely the collision the fingerprint exists to catch —
+	// surfaced so the UI can say so rather than implying a guarantee the data
+	// does not support. Cheap USB-SATA bridges are the usual cause.
+	IdentityWeak bool `json:"identityWeak,omitempty"`
+}
+
+// StorageEnumerateCmd is sent on rasputin.node.<id>.cmd.storage.enumerate. It
+// mutates nothing.
+//
+// Two callers, both wanted: the UI picker calls it read-only from an HTTP
+// handler, and the claim saga calls it again as step 2 to re-verify what the
+// operator confirmed.
+type StorageEnumerateCmd struct{}
+
+// StorageEnumerateAck lists every candidate disk, protected ones included.
+type StorageEnumerateAck struct {
+	OK         bool               `json:"ok"`
+	Backend    string             `json:"backend"` // "blockdev" or "mock"
+	Candidates []StorageCandidate `json:"candidates,omitempty"`
+	// Ts is when the agent observed this. The fingerprints are only as fresh
+	// as this timestamp — which is why Claim re-derives rather than trusting.
+	Ts      time.Time      `json:"ts"`
+	Refusal StorageRefusal `json:"refusal,omitempty"`
+	Detail  string         `json:"detail,omitempty"`
+}
+
+// StorageClaimCmd formats a disk and claims it as the backup target. THIS IS
+// THE DESTRUCTIVE VERB. Every refusal in §4.8 is answered before it is sent,
+// and it is the last agent step in the saga precisely so nothing needs undoing
+// (api/internal/jobs has no compensation).
+type StorageClaimCmd struct {
+	// DevicePath is the whole disk to format, as reported by the enumerate the
+	// operator confirmed.
+	DevicePath string `json:"devicePath"`
+	// Fingerprint is that candidate's fingerprint. The agent recomputes it
+	// against live hardware and REFUSES on any difference. Empty is not a
+	// wildcard — it is a refusal.
+	Fingerprint string `json:"fingerprint"`
+	// Label is the operator's human-readable name for the target, written into
+	// the marker file. The filesystem label is always StorageBackupLabel.
+	Label string `json:"label,omitempty"`
+	// ClusterID and KeyID are stamped into the marker so the disk can say which
+	// cluster wrote it and which §4.6 data key its generations need. KeyID is
+	// an identifier; the key itself never crosses this wire.
+	ClusterID string `json:"clusterId,omitempty"`
+	KeyID     string `json:"keyId,omitempty"`
+}
+
+// StorageClaimAck reports the claim outcome.
+type StorageClaimAck struct {
+	OK         bool   `json:"ok"`
+	DevicePath string `json:"devicePath,omitempty"`
+	// PartUUID is minted at format time and is THE key for this target
+	// everywhere downstream (§4.8). Persist this, never the device path.
+	PartUUID  string `json:"partUuid,omitempty"`
+	Label     string `json:"label,omitempty"`
+	FSLabel   string `json:"fsLabel,omitempty"`
+	FSType    string `json:"fsType,omitempty"`
+	MountPath string `json:"mountPath,omitempty"`
+	SizeBytes uint64 `json:"sizeBytes,omitempty"`
+	// Fingerprint is the POST-format fingerprint, which necessarily differs
+	// from the one in the command — the partition table it hashes is the thing
+	// that was just replaced. That is deliberate, not drift: it is what makes a
+	// replayed Claim fail closed. Recorded so a later verify has something to
+	// compare against.
+	Fingerprint string            `json:"fingerprint,omitempty"`
+	BackupSet   *StorageBackupSet `json:"backupSet,omitempty"`
+	Refusal     StorageRefusal    `json:"refusal,omitempty"`
+	Detail      string            `json:"detail,omitempty"`
+}
+
+// StorageMountCmd mounts an already-claimed target, addressed by the partition
+// UUID minted at claim time. Never by device path, and never by label — §4.8
+// demoted the label to a hint for exactly this reason.
+//
+// This is the mount primitive §1's Node X data-disk contract is meant to share
+// (#302); it is built to be consumable rather than backup-specific.
+type StorageMountCmd struct {
+	PartUUID string `json:"partUuid"`
+}
+
+// StorageMountAck reports where the target was mounted. Mounting an
+// already-mounted target is a no-op that returns the existing path.
+type StorageMountAck struct {
+	OK        bool           `json:"ok"`
+	PartUUID  string         `json:"partUuid,omitempty"`
+	MountPath string         `json:"mountPath,omitempty"`
+	Refusal   StorageRefusal `json:"refusal,omitempty"`
+	Detail    string         `json:"detail,omitempty"`
+}
+
+// StorageInspectCmd reads a claimed target's marker and free space, mounting it
+// if it is not already mounted. Read-only.
+type StorageInspectCmd struct {
+	PartUUID string `json:"partUuid"`
+}
+
+// StorageInspectAck describes a claimed target as it exists on the disk.
+type StorageInspectAck struct {
+	OK         bool              `json:"ok"`
+	PartUUID   string            `json:"partUuid,omitempty"`
+	DevicePath string            `json:"devicePath,omitempty"`
+	MountPath  string            `json:"mountPath,omitempty"`
+	FSType     string            `json:"fsType,omitempty"`
+	FSLabel    string            `json:"fsLabel,omitempty"`
+	TotalBytes uint64            `json:"totalBytes,omitempty"`
+	FreeBytes  uint64            `json:"freeBytes,omitempty"`
+	BackupSet  *StorageBackupSet `json:"backupSet,omitempty"`
+	// Present is false when nothing with that partition UUID is attached — the
+	// operator unplugged the target. Distinct from OK=false, which means the
+	// agent could not answer.
+	Present bool           `json:"present"`
+	Refusal StorageRefusal `json:"refusal,omitempty"`
+	Detail  string         `json:"detail,omitempty"`
+}
+
+// StorageEnumerateSubject is the read-only candidate enumeration.
+func StorageEnumerateSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "storage.enumerate")
+}
+
+// StorageClaimSubject is the destructive format-and-claim verb.
+func StorageClaimSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "storage.claim")
+}
+
+// StorageMountSubject mounts a claimed target by partition UUID.
+func StorageMountSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "storage.mount")
+}
+
+// StorageInspectSubject reads a claimed target's marker and free space.
+func StorageInspectSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "storage.inspect")
+}

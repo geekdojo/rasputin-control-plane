@@ -98,6 +98,7 @@ which both shipping unit files set:
   RASPUTIN_TRUST_ROOT       publisher root CA (see verify-artifact above)
   RASPUTIN_MESH_CA_BUNDLE   per-installation mesh CA for tailscaled
   RASPUTIN_UPDATE_BACKEND   force an updater backend: rauc | openwrt-ab | mock
+  RASPUTIN_STORAGE_BACKEND  force a backup-target backend: blockdev | mock
 
 Further backend and bench overrides exist for development; they are read at the
 point they are used rather than declared here, so the source is the only honest

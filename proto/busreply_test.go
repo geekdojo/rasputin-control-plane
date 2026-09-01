@@ -36,6 +36,10 @@ func TestReplyGrantOutlivesEveryAgentWorkBudget(t *testing.T) {
 		{"deploy ceiling via an out-of-range per-app budget", AppDeployWorkFor(86400)},
 		{"updater download context", UpdateDownloadWork},
 		{"updater install context", UpdateInstallWork},
+		{"storage enumerate context", StorageEnumerateWork},
+		{"storage claim context", StorageClaimWork},
+		{"storage mount context", StorageMountWork},
+		{"storage inspect context", StorageInspectWork},
 	}
 	for _, b := range budgets {
 		if BusReplyGrantTTL <= b.budget {
