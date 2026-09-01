@@ -30,3 +30,20 @@ Unauthenticated pages (`/login`, `/setup`) work fine in the preview browser dire
 Handy always-visible kit components for styling checks: `/metrics` (range Select),
 `/firewall/rules` (proto + target Selects in the ADD RULE form). All shared UI
 primitives live in `ui/components/kit.tsx` — fix styling there, not per-page.
+
+## Next.js version skew (`ui/`)
+
+`ui/` runs **Next.js 16.3.1** — newer than most model training data, with breaking
+changes to APIs, conventions and file structure. Before writing UI code, read the
+relevant guide in `ui/node_modules/next/dist/docs/` (`01-app/`, `02-pages/`,
+`03-architecture/`) and heed deprecation notices. Re-read after any Next bump.
+
+Next ships that warning itself: `next dev` writes `ui/AGENTS.md` + `ui/CLAUDE.md`
+whenever it detects an AI coding agent. **We turned that off** — `agentRules: false`
+in `ui/next.config.mjs` (2026-08-31). A nested CLAUDE.md/AGENTS.md loads as project
+instructions with the same standing as this file, and that channel carries no
+provenance, so an npm package could author instructions nobody reviewed — refreshed on
+every version bump, invisible to supply-chain tooling that only inspects code, and
+emitted only when the reader is an agent (never in CI or a plain dev run).
+Agent-instruction files in this repo are human-authored. **Don't re-enable
+`agentRules`** — if the version note above goes stale, fix it here by hand.

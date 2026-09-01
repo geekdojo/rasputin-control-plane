@@ -18,6 +18,20 @@ const nextConfig = {
   // instead) and useSearchParams needs a Suspense boundary.
   output: 'export',
   reactStrictMode: true,
+
+  // Do not let `next dev` author agent-instruction files.
+  //
+  // With this unset (default true), `next dev` writes ui/AGENTS.md and
+  // ui/CLAUDE.md whenever it detects an AI coding agent -- see
+  // node_modules/next/dist/server/lib/generate-agent-files.js. Coding agents
+  // load a nested CLAUDE.md/AGENTS.md as project instructions with the same
+  // standing as the ones we wrote, and nothing in that channel records
+  // provenance. That promotes an npm package's content from data the agent
+  // reads to instructions the agent follows, refreshed on every version bump,
+  // invisible to supply-chain tooling that only inspects code, and emitted
+  // only when the reader is an agent (so it never shows up in CI or a plain
+  // dev run). Agent-instruction files in this repo are human-authored.
+  agentRules: false,
   env: {
     NEXT_PUBLIC_API_BASE: isDev ? 'http://localhost:8080' : '',
   },
