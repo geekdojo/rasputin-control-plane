@@ -6,6 +6,11 @@
 // — committing that is worse than useless. So the firewall verifies what it
 // actually must do; every other role uses the baseline liveness check (reaching
 // here means the agent answered). New role-specific checks slot in the same way.
+//
+// A firewall that cannot be verified is not healthy. A firewall-role node with
+// no /etc/config/firewall fails the gate rather than falling back to liveness —
+// the degraded gate is opt-in (RASPUTIN_UCI_BACKEND=mock), never inferred from
+// a missing file, on the same principle as #220.
 package health
 
 import (
@@ -28,12 +33,25 @@ func execRunner(ctx context.Context, name string, args ...string) (string, error
 	return string(out), err
 }
 
-// firewallConfigPath gates the firewall data-plane checks on being a REAL
-// OpenWrt firewall (the same signal the agent's UCI-backend autodetect uses). On
-// a dev/mock box it's absent and Check degrades to the baseline liveness gate,
-// so CI and local runs don't spuriously roll back an update. Package var so
-// tests can point it elsewhere.
+// firewallConfigPath is the OpenWrt firewall configuration every firewall-role
+// node must have — the same signal the agent's UCI-backend and updater-backend
+// autodetects use. It ships inside the read-only squashfs rootfs, so on a real
+// firewall it is present from the moment / is mounted, before any service (the
+// agent included) starts. Package var so tests can point it elsewhere.
+//
+// It used to be an INFERENCE: absent meant "dev box", and Check degraded to the
+// baseline liveness gate. That is a fail-open on the one node where it hurts
+// most — a firewall with no firewall configuration at all answered ok:true and
+// the node.update saga committed. Absence is now a FAILING CHECK, and a dev box
+// says so out loud with the variable #220 already created for exactly this.
 var firewallConfigPath = "/etc/config/firewall"
+
+// uciBackendEnv is the operator's explicit "this box is not a real OpenWrt
+// firewall and I know it" signal. #220 made mock opt-in and never inferred; a
+// firewall-role agent on a dev box already needs RASPUTIN_UCI_BACKEND=mock to
+// get a firewall subsystem at all, so the health gate reads the same signal
+// rather than inventing a second one.
+const uciBackendEnv = "RASPUTIN_UCI_BACKEND"
 
 // Check runs the checks appropriate to role and returns the verdict the saga
 // commits / rolls back on.
@@ -43,10 +61,24 @@ func Check(ctx context.Context, role proto.NodeRole) proto.DiagHealthAck {
 
 func check(ctx context.Context, role proto.NodeRole, run cmdRunner, fwConfig string) proto.DiagHealthAck {
 	var checks []proto.HealthCheck
-	if role == proto.RoleFirewall && fileExists(fwConfig) {
+	switch {
+	case role == proto.RoleFirewall && fileExists(fwConfig):
 		checks = firewallChecks(ctx, run)
-	} else {
+	case role == proto.RoleFirewall && os.Getenv(uciBackendEnv) == "mock":
+		// Explicitly opted into a mock firewall: there is no data plane to
+		// probe and the operator said so, so the baseline liveness gate is the
+		// honest answer. Named in the detail — a degraded gate that does not
+		// say it is degraded is how this bug got written the first time.
+		checks = []proto.HealthCheck{{Name: "agent", OK: true, Critical: true,
+			Detail: "agent responding; firewall data-plane checks skipped (" + uciBackendEnv + "=mock)"}}
+	case role == proto.RoleFirewall:
+		// Firewall role, no firewall configuration, nothing opted into. This is
+		// the state that must fail hardest, not the one that passes by default.
+		checks = []proto.HealthCheck{missingFirewallConfigCheck(fwConfig)}
+	default:
 		// Baseline: reaching here means the agent process is up and answering.
+		// Correct for every non-firewall role — a compute node has no firewall
+		// data plane to check.
 		checks = []proto.HealthCheck{{Name: "agent", OK: true, Critical: true, Detail: "agent responding"}}
 	}
 	if role == proto.RoleControlPlane {
@@ -66,6 +98,21 @@ func check(ctx context.Context, role proto.NodeRole, run cmdRunner, fwConfig str
 		ack.Detail = "failed critical checks: " + strings.Join(failed, ", ")
 	}
 	return ack
+}
+
+// missingFirewallConfigCheck is the verdict for a firewall-role node with no
+// firewall configuration and no explicit opt-in. CRITICAL, and deliberately so:
+// the fan-out orders the firewall LAST (planTargets' roleRank) precisely because
+// losing it mid-update is the worst case, and a node whose data plane cannot be
+// verified at all is not a node whose update should be committed. The detail
+// names the absent path and the one way to opt a dev box out, so the fix does
+// not require reading source.
+func missingFirewallConfigCheck(fwConfig string) proto.HealthCheck {
+	return proto.HealthCheck{
+		Name: "firewall-config", OK: false, Critical: true,
+		Detail: fwConfig + " is not present, so this firewall-role node is not running OpenWrt — " +
+			"its data plane cannot be verified (a dev box must set " + uciBackendEnv + "=mock)",
+	}
 }
 
 // firewallChecks probes the firewall data plane. nft-ruleset and dnsmasq are

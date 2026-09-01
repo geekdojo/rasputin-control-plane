@@ -48,3 +48,12 @@ There is deliberately **no single "mock everything" switch**: one variable that
 turns on five mocks is one variable away from an OS image that fakes the whole
 node, which is the failure this design exists to prevent. Set only the
 subsystems you are actually working on and leave the rest honestly disabled.
+
+`RASPUTIN_UCI_BACKEND` carries one extra meaning on a firewall-role agent: it is
+also the opt-in for the post-update health gate (`diag.health`). A firewall-role
+node with no `/etc/config/firewall` is **unhealthy** — that is a firewall with no
+firewall configuration, and the `node.update` saga commits or rolls back on this
+verdict — unless `RASPUTIN_UCI_BACKEND=mock` says a human knows this box is not a
+real OpenWrt firewall, in which case the gate degrades to the baseline liveness
+check and says so in the check detail. Absence of the file is never taken as
+evidence of a dev box on its own.
