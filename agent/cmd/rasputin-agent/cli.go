@@ -100,6 +100,14 @@ which both shipping unit files set:
   RASPUTIN_UPDATE_BACKEND   force an updater backend: rauc | openwrt-ab | mock
   RASPUTIN_STORAGE_BACKEND  force a backup-target backend: blockdev | mock
 
+Every RASPUTIN_*_BACKEND autodetects a REAL backend from what this machine has.
+"mock" is never autodetected — it is a development fixture and must be asked for
+by name. A node whose real backend is unavailable disables that subsystem, names
+the missing prerequisite in the log and reports it to the control plane; it does
+not substitute fixture hardware. (A mock storage backend on real hardware once
+offered three disks that did not exist for a destructive format — see
+agent/internal/configfault.)
+
 Further backend and bench overrides exist for development; they are read at the
 point they are used rather than declared here, so the source is the only honest
 list. Start with agent/cmd/rasputin-agent/main.go.

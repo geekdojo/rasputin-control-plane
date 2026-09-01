@@ -10,6 +10,13 @@ import type { Node } from './types';
 // value instead, disables the affected subsystem, and reports what it refused
 // (agent/internal/configfault, proto.MetadataConfigFaults).
 //
+// A node also reports a fault of the SECOND kind, added 2026-09-01: the real
+// backend's prerequisites are absent and NOTHING was substituted for it. Those
+// carry `missing` (the absent prerequisite) and an empty `value`, because the
+// operator typed nothing — the machine is simply not equipped. They exist
+// because a missing `wipefs` once made a real controlplane answer with fixture
+// disks; mock backends are now opt-in and never inferred.
+//
 // ⚠️ Rendering it is the half that makes the rest honest. Degrading quietly
 // would trade a dead node for a lying one — an operator who pinned a backend
 // and silently got none has been misled in a quieter way. Until this surfaced
@@ -17,12 +24,22 @@ import type { Node } from './types';
 // marginally better than the journal nobody was tailing.
 
 export type ConfigFault = {
-  /** The environment variable that carried the bad value. */
+  /** The environment variable that carried the bad value, or names the knob. */
   variable: string;
-  /** What the operator actually typed. Echoed so the fix needs no source dive. */
+  /** What the operator actually typed. Empty when nothing was set — see `missing`. */
   value: string;
   /** Values that would have been accepted. May be empty. */
   expected: string[];
+  /**
+   * The absent prerequisite, when this fault is the SECOND kind: the operator
+   * asked for nothing and the real backend cannot run here ("not on PATH:
+   * wipefs"). Empty for a rejected value.
+   *
+   * Added 2026-09-01. Agents predating it never send it, and `effect` always
+   * carries the same detail in prose, so treat it as a nicety and never as the
+   * thing that decides whether to render the fault.
+   */
+  missing?: string;
   /** What this node can no longer do, in the operator's terms. */
   effect: string;
 };
@@ -51,15 +68,18 @@ export function configFaults(node: Node | null | undefined): ConfigFault[] {
     const value = (f as { value?: unknown }).value;
     const effect = (f as { effect?: unknown }).effect;
     const expected = (f as { expected?: unknown }).expected;
+    const missing = (f as { missing?: unknown }).missing;
 
-    out.push({
+    const fault: ConfigFault = {
       variable,
       value: typeof value === 'string' ? value : '',
       effect: typeof effect === 'string' ? effect : '',
       expected: Array.isArray(expected)
         ? expected.filter((e): e is string => typeof e === 'string')
         : [],
-    });
+    };
+    if (typeof missing === 'string' && missing) fault.missing = missing;
+    out.push(fault);
   }
   return out;
 }

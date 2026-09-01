@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -259,5 +260,60 @@ func TestNonDefaultClusterIDDerivesItsOwnName(t *testing.T) {
 	}
 	if got := applianceOr(func(h string) string { return "https://" + h + ":18080" }, ""); got != "https://home1.local:18080" {
 		t.Errorf("headscale server_url = %q, want https://home1.local:18080", got)
+	}
+}
+
+// ⚠️ The api half of "mock is never inferred".
+//
+// RASPUTIN_MESH_BACKEND=auto used to fall through to the mock when it found no
+// external Headscale and no docker CLI. That is the same shape as the
+// 2026-09-01 storage incident: the mock mesh mints keys and the enroll saga
+// invents a 100.64.0.x address per node, which /api/mesh/devices then serves as
+// a real tailnet address. `auto` must detect a REAL backend or report none.
+func TestWireMesh_AutoNeverInfersMock(t *testing.T) {
+	// No external Headscale creds, and a docker binary name that cannot
+	// resolve — the exact condition that used to select the mock.
+	t.Setenv("RASPUTIN_HEADSCALE_URL", "")
+	t.Setenv("RASPUTIN_HEADSCALE_API_KEY", "")
+	t.Setenv("RASPUTIN_HEADSCALE_SUPERVISOR", "")
+	t.Setenv("RASPUTIN_HEADSCALE_DOCKER_BIN", "rasputin-no-such-docker-binary")
+
+	for _, backend := range []string{"auto", ""} {
+		t.Setenv("RASPUTIN_MESH_BACKEND", backend)
+		mw, err := wireMesh(t.TempDir(), nil, "dev@example.com")
+		if err != nil {
+			t.Fatalf("RASPUTIN_MESH_BACKEND=%q: wireMesh must not fail — the api has to boot and "+
+				"serve /healthz even with no mesh: %v", backend, err)
+		}
+		if got := mw.client.Backend(); got == "mock" {
+			t.Errorf("RASPUTIN_MESH_BACKEND=%q selected the mock with no real backend present. "+
+				"A mock mesh reports nodes as enrolled with invented tailnet addresses; the "+
+				"honest result is an unavailable backend.", backend)
+		}
+		if got := mw.client.Backend(); got != "unavailable" {
+			t.Errorf("RASPUTIN_MESH_BACKEND=%q: backend = %q, want unavailable", backend, got)
+		}
+		// And the refusal has to say what is missing, or an operator cannot
+		// act on it.
+		if _, _, err := mw.client.CreatePreAuthKey(context.Background(),
+			mesh.CreatePreAuthKeyInput{User: "u"}); err == nil {
+			t.Error("an unavailable mesh must refuse key creation, not succeed quietly")
+		} else if !errors.Is(err, mesh.ErrMeshUnavailable) {
+			t.Errorf("error %v must wrap ErrMeshUnavailable so callers can tell "+
+				"'not configured' from 'Headscale said no'", err)
+		}
+	}
+}
+
+// The other half: an operator who asks for the mock still gets it. Dev and CI
+// depend on this, and breaking it would push people back to the inference.
+func TestWireMesh_ExplicitMockIsHonoured(t *testing.T) {
+	t.Setenv("RASPUTIN_MESH_BACKEND", "mock")
+	mw, err := wireMesh(t.TempDir(), nil, "dev@example.com")
+	if err != nil {
+		t.Fatalf("wireMesh: %v", err)
+	}
+	if got := mw.client.Backend(); got != "mock" {
+		t.Errorf("backend = %q, want mock — an explicit request must always win", got)
 	}
 }

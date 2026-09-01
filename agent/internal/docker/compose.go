@@ -26,8 +26,9 @@ type ComposeBackend struct {
 }
 
 // NewComposeBackend constructs the real backend. dir is the per-agent state
-// root; the docker CLI is assumed to be on PATH (the caller should LookPath
-// first and fall back to the mock if it isn't).
+// root; the docker CLI is assumed to be on PATH (the caller LookPaths first,
+// and DISABLES the subsystem if it isn't there — it does not fall back to the
+// mock; see agent/internal/configfault).
 func NewComposeBackend(dir string) (*ComposeBackend, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("docker-compose: mkdir: %w", err)

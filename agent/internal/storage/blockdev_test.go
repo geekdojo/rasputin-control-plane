@@ -530,3 +530,55 @@ func isSubsequence(got, want []string) bool {
 	}
 	return i == len(want)
 }
+
+// MissingTools is what turns "storage is unavailable" into an instruction. On
+// 2026-09-01 an OS image shipped without wipefs; the agent inferred the mock
+// and a real controlplane answered storage.enumerate with fixture disks. The
+// bool ToolingAvailable() could not have named the tool to add to the image —
+// this must, and the startup fault quotes it verbatim.
+func TestMissingTools(t *testing.T) {
+	// Nothing on PATH: every required tool is reported, so an operator sees
+	// the whole gap in one line rather than fixing them one restart at a time.
+	t.Setenv("PATH", t.TempDir())
+	missing := MissingTools()
+	if len(missing) != len(requiredTools) {
+		t.Fatalf("MissingTools() with an empty PATH = %v, want all %d required tools",
+			missing, len(requiredTools))
+	}
+	var sawWipefs bool
+	for _, m := range missing {
+		if m == "wipefs" {
+			sawWipefs = true
+		}
+	}
+	if !sawWipefs {
+		t.Error("MissingTools() must name wipefs — it is the tool whose absence caused the incident")
+	}
+	if ToolingAvailable() {
+		t.Error("ToolingAvailable() must be false when tools are missing")
+	}
+
+	// With every required tool present, nothing is missing and the real
+	// backend is selectable. Stubs are enough: this checks PATH resolution,
+	// not the tools' behaviour.
+	binDir := t.TempDir()
+	for _, tool := range requiredTools {
+		if err := os.WriteFile(filepath.Join(binDir, tool), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write stub %s: %v", tool, err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	if got := MissingTools(); len(got) != 0 {
+		t.Errorf("MissingTools() with a complete PATH = %v, want none", got)
+	}
+	if !ToolingAvailable() {
+		t.Error("ToolingAvailable() must be true when every required tool resolves")
+	}
+
+	// The two must never disagree — they are one fact with two shapes, which
+	// is why ToolingAvailable is defined in terms of MissingTools.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+t.TempDir())
+	if ToolingAvailable() != (len(MissingTools()) == 0) {
+		t.Error("ToolingAvailable() and MissingTools() disagree")
+	}
+}

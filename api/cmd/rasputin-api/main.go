@@ -1486,8 +1486,21 @@ func wireMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin string) (meshWi
 		if dockerWanted {
 			return wireSelfHostedMesh(stateDir, meshCA, defaultLogin)
 		}
-		log.Printf("rasputin-api: mesh backend = mock (auto: no Docker and no external Headscale configured)")
-		return wireMockMesh(stateDir, defaultLogin)
+		// ⚠️ THIS USED TO FALL THROUGH TO THE MOCK, and that is the same
+		// class of bug as the 2026-09-01 storage incident: a missing
+		// prerequisite silently became a confident, fabricated answer. The
+		// mock mesh mints keys and the enroll saga invents a 100.64.0.x
+		// tailnet address per node, which /api/mesh/devices then serves as
+		// though the node were really on the tailnet.
+		//
+		// `auto` means "detect a real backend", so when there is no real
+		// backend to detect the honest result is none. The api still boots
+		// and serves everything else; mesh verbs fail with this reason.
+		// Dev and CI ask for the mock by name.
+		return wireUnavailableMesh(defaultLogin,
+			"no external Headscale is configured (RASPUTIN_HEADSCALE_URL + "+
+				"RASPUTIN_HEADSCALE_API_KEY) and the docker CLI needed for the "+
+				"self-hosted one is not on PATH")
 	case "headscale":
 		if hasExternal {
 			return wireExternalMesh(stateDir, meshCA, defaultLogin, extURL, extKey)
@@ -1501,9 +1514,26 @@ func wireMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin string) (meshWi
 	}
 }
 
-// wireMockMesh is the dev/CI fallback: file-backed client, no supervisor.
+// wireUnavailableMesh is what `auto` returns when it finds no real backend. The
+// api boots normally; every mesh verb refuses with reason. See
+// mesh.UnavailableClient for why this is not a fallback to the mock.
+func wireUnavailableMesh(defaultLogin, reason string) (meshWiring, error) {
+	log.Printf("rasputin-api: ⚠️  mesh backend UNAVAILABLE: %s. No mock was substituted — a mock "+
+		"mesh reports nodes as enrolled with invented tailnet addresses. The api is starting "+
+		"anyway; mesh enroll/list will fail with this reason until a real backend is configured, "+
+		"or set RASPUTIN_MESH_BACKEND=mock explicitly if this is a dev box.", reason)
+	return meshWiring{
+		client: mesh.NewUnavailableClient(reason),
+		sup:    mesh.NewNoopSupervisor(),
+		login:  defaultLogin,
+	}, nil
+}
+
+// wireMockMesh is the dev/CI fixture: file-backed client, no supervisor. Only
+// ever reached by an explicit RASPUTIN_MESH_BACKEND=mock — never autodetected.
 func wireMockMesh(stateDir, defaultLogin string) (meshWiring, error) {
-	log.Printf("rasputin-api: mesh backend = mock (file-backed at %s)", stateDir)
+	log.Printf("rasputin-api: mesh backend = mock (file-backed at %s) — EXPLICITLY REQUESTED; "+
+		"enrollments and tailnet addresses reported from here are simulated", stateDir)
 	c, err := mesh.NewMockClient(stateDir)
 	if err != nil {
 		return meshWiring{}, err

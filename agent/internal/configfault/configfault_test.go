@@ -163,3 +163,101 @@ func TestFault_StringNamesTheKnobAndTheCost(t *testing.T) {
 		}
 	}
 }
+
+// ⚠️ THE 2026-09-01 PROPERTY. Unavailable exists because a missing prerequisite
+// used to become a mock, and a mock answers with fixture hardware. Like Reject,
+// recording must be inseparable from announcing — a subsystem that disabled
+// itself in silence is only marginally better than one that lied.
+func TestSet_UnavailableAlwaysLogs(t *testing.T) {
+	var s Set
+	out := captureLog(func() {
+		s.Unavailable("RASPUTIN_STORAGE_BACKEND", []string{"blockdev"}, "not on PATH: wipefs",
+			"backup-target selection is disabled on this node")
+	})
+	if out == "" {
+		t.Fatal("Unavailable recorded a fault without logging it — a fault nobody can see is the " +
+			"failure this package exists to prevent")
+	}
+	for _, want := range []string{"RASPUTIN_STORAGE_BACKEND", "wipefs", "blockdev",
+		"backup-target selection is disabled"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q does not mention %q", out, want)
+		}
+	}
+	// The remedy differs from Reject's: nothing was typed wrong, so telling
+	// the operator to correct node.env would send them looking for a typo
+	// that does not exist. It must point at the missing prerequisite instead.
+	if !strings.Contains(out, "No mock was substituted") {
+		t.Errorf("log %q must say no mock was substituted — that is the guarantee being made", out)
+	}
+	if !s.Any() {
+		t.Error("Unavailable must record the fault, not only log it")
+	}
+}
+
+// Unavailable and Reject are different claims and must not read alike: one says
+// "you asked for something that does not exist", the other "you asked for
+// nothing and this machine cannot do it".
+func TestFault_UnavailableReadsDifferentlyFromReject(t *testing.T) {
+	unavailable := Fault{
+		Variable: "RASPUTIN_STORAGE_BACKEND",
+		Expected: []string{"blockdev"},
+		Missing:  "not on PATH: wipefs",
+		Effect:   "backup-target selection is disabled on this node",
+	}
+	got := unavailable.String()
+	if strings.Contains(got, "is not recognised") {
+		t.Errorf("Fault.String() = %q — an unavailable backend is not an unrecognised value; "+
+			"the operator typed nothing", got)
+	}
+	for _, want := range []string{"RASPUTIN_STORAGE_BACKEND", "wipefs", "blockdev"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Fault.String() = %q does not mention %q", got, want)
+		}
+	}
+	// A rejected value keeps its original wording — this change is additive.
+	rejected := Fault{Variable: "RASPUTIN_UCI_BACKEND", Value: "uic",
+		Expected: []string{"uci", "mock"}, Effect: "firewall configuration is disabled"}
+	if !strings.Contains(rejected.String(), "is not recognised") {
+		t.Errorf("Fault.String() for a rejected value = %q, want the unrecognised wording",
+			rejected.String())
+	}
+}
+
+// The fault has to leave the box, exactly as a rejected value does — the
+// journal on an appliance is not a reporting channel. `missing` rides along so
+// the control plane can say which tool to add; `effect` carries the same detail
+// for consumers written before this field existed.
+func TestSet_UnavailableMetadataCarriesMissing(t *testing.T) {
+	var s Set
+	captureLog(func() {
+		s.Unavailable("RASPUTIN_TAILSCALE_BACKEND", []string{"tailscale"},
+			"the tailscale CLI is not on PATH", "mesh join/leave is disabled on this node")
+	})
+
+	md := s.Metadata()
+	if len(md) != 1 {
+		t.Fatalf("Metadata() = %v, want one entry", md)
+	}
+	if md[0]["missing"] != "the tailscale CLI is not on PATH" {
+		t.Errorf("metadata missing = %v, want the prerequisite", md[0]["missing"])
+	}
+	if md[0]["variable"] != "RASPUTIN_TAILSCALE_BACKEND" {
+		t.Errorf("metadata variable = %v", md[0]["variable"])
+	}
+	// value stays empty: nothing was typed. Consumers distinguish the two
+	// kinds by `missing`, not by guessing from an empty string.
+	if md[0]["value"] != "" {
+		t.Errorf("metadata value = %v, want empty for an unavailable backend", md[0]["value"])
+	}
+
+	// A rejected value must NOT grow the key — the shape older consumers were
+	// written against stays byte-for-byte identical.
+	var r Set
+	captureLog(func() {
+		r.Reject("RASPUTIN_UCI_BACKEND", "uic", []string{"uci", "mock"}, "firewall config disabled")
+	})
+	if _, ok := r.Metadata()[0]["missing"]; ok {
+		t.Error("a rejected value must not carry a `missing` key")
+	}
+}

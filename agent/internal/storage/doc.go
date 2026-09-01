@@ -11,8 +11,13 @@
 //     <stateDir>/storage/. Used in dev and CI, and it is where the safety
 //     rules are actually tested — see the warning below.
 //
-// Backend is selected at startup via RASPUTIN_STORAGE_BACKEND
-// (blockdev|mock), with mock as the default when the block tooling is absent.
+// Backend is selected at startup via RASPUTIN_STORAGE_BACKEND (blockdev|mock).
+// blockdev is autodetected from the tooling on PATH; MOCK IS NEVER
+// AUTODETECTED. When a required tool is missing the subsystem is disabled and
+// the tool named — on 2026-09-01 a `wipefs` missing from an OS image made a
+// real controlplane offer three fixture disks for a destructive format, with
+// ok:true and nothing marking the answer as fiction. Read the next section for
+// why this mock in particular is too convincing to ever infer.
 //
 // # Why the mock carries the weight
 //

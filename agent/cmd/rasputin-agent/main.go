@@ -232,8 +232,9 @@ func main() {
 	log.Printf("rasputin-agent: subscribed to %s", proto.NodeCmdSubject(nodeID, "system.reboot"))
 
 	// Docker handlers — on compute and controlplane agents (the latter hosts
-	// the api's own sidecars in Tier 2). Picks `docker` if the CLI is on
-	// PATH, otherwise mocks. Force via RASPUTIN_DOCKER_BACKEND=mock|docker.
+	// the api's own sidecars in Tier 2). Picks `docker` if the CLI is on PATH;
+	// if it isn't, apps are DISABLED and reported, never pretend-served by the
+	// mock. Force via RASPUTIN_DOCKER_BACKEND=mock|docker.
 	if role == proto.RoleCompute || role == proto.RoleControlPlane {
 		appsDir := filepath.Join(stateDir, "apps")
 		backendChoice := envOr("RASPUTIN_DOCKER_BACKEND", autodetectDockerBackend())
@@ -252,6 +253,9 @@ func main() {
 				log.Fatalf("rasputin-agent: docker mock backend: %v", err)
 			}
 			dockerBackend = mb
+		case backendUnavailable:
+			faults.Unavailable("RASPUTIN_DOCKER_BACKEND", []string{"docker"}, dockerMissingPrereq(),
+				"app deploy/start/stop is disabled on this node — no container runtime is present")
 		default:
 			faults.Reject("RASPUTIN_DOCKER_BACKEND", backendChoice, []string{"docker", "mock"},
 				"app deploy/start/stop is disabled on this node")
@@ -292,9 +296,9 @@ func main() {
 
 	// Firewall handlers — only on firewall-role agents. Picks the real uci
 	// backend when the agent is actually on OpenWrt (uci on PATH AND
-	// /etc/config/firewall present), the file-backed mock otherwise (state
-	// under $RASPUTIN_AGENT_STATE_DIR/openwrt/). Force via
-	// RASPUTIN_UCI_BACKEND=uci|mock.
+	// /etc/config/firewall present); if it isn't, firewall configuration is
+	// DISABLED and reported. The file-backed mock is dev-only and must be
+	// asked for: RASPUTIN_UCI_BACKEND=uci|mock.
 	if role == proto.RoleFirewall {
 		backendChoice := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend())
 		var uciClient openwrt.UCIClient
@@ -312,6 +316,10 @@ func main() {
 				log.Fatalf("rasputin-agent: openwrt mock: %v", err)
 			}
 			uciClient = mock
+		case backendUnavailable:
+			faults.Unavailable("RASPUTIN_UCI_BACKEND", []string{"uci"}, uciMissingPrereq(),
+				"firewall configuration is disabled on this node — rules cannot be read or applied, "+
+					"and none are being silently simulated")
 		default:
 			faults.Reject("RASPUTIN_UCI_BACKEND", backendChoice, []string{"uci", "mock"},
 				"firewall configuration is disabled on this node")
@@ -426,10 +434,12 @@ func main() {
 		})
 	}
 
-	// OS update handlers — every node gets them. The firewall (OpenWrt, no
-	// RAUC) uses the custom A/B backend; compute/controlplane use `rauc` when
-	// the CLI is on PATH; everything else falls back to mock. Force via
-	// RASPUTIN_UPDATE_BACKEND=rauc|openwrt-ab|mock.
+	// OS update handlers — every node that can actually take an image gets
+	// them. The firewall (OpenWrt, no RAUC) uses the custom A/B backend;
+	// compute/controlplane use `rauc` when the CLI is on PATH. A node with
+	// neither has OS updates DISABLED and reported — it does not get the mock,
+	// which would report a successful install of an image never written. Force
+	// via RASPUTIN_UPDATE_BACKEND=rauc|openwrt-ab|mock.
 	{
 		updaterDir := updaterStateDir(stateDir)
 		backendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(role))
@@ -465,6 +475,10 @@ func main() {
 			// fresh process publishes its own registration on connect.
 			mb.SetReregisterHook(func() { reregister(nc) })
 			upBackend = mb
+		case backendUnavailable:
+			faults.Unavailable("RASPUTIN_UPDATE_BACKEND", updaterExpectedFor(role), updaterMissingPrereq(role),
+				"OS updates are disabled on this node — it will not accept a new image, and it will "+
+					"NOT report a fake successful install")
 		default:
 			faults.Reject("RASPUTIN_UPDATE_BACKEND", backendChoice, []string{"rauc", "openwrt-ab", "mock"},
 				"OS updates are disabled on this node — it will not accept a new image")
@@ -499,7 +513,10 @@ func main() {
 
 	// Backup-target storage handlers (design/storage.md §4.8) — enumerate
 	// candidate disks, claim one, format it, mount it. Real backend when
-	// util-linux is on PATH, otherwise mock. Force via
+	// util-linux is on PATH; if any required tool is missing the subsystem is
+	// DISABLED and the missing tool named. It must never fall back to the mock:
+	// that is the 2026-09-01 e3bench incident, where fixture disks were offered
+	// for a destructive format on real hardware. Force via
 	// RASPUTIN_STORAGE_BACKEND=blockdev|mock.
 	//
 	// Registered on the controlplane and on storage-role nodes only, and
@@ -525,6 +542,14 @@ func main() {
 				log.Fatalf("rasputin-agent: storage mock: %v", err)
 			}
 			stBackend = mb
+		case backendUnavailable:
+			// The 2026-09-01 e3bench incident lands here now instead of on the
+			// mock. Everything else the agent does keeps working — this node
+			// still heartbeats, holds the mesh and serves updates; it just
+			// cannot enumerate or claim disks, and says so.
+			faults.Unavailable("RASPUTIN_STORAGE_BACKEND", []string{"blockdev"}, storageMissingPrereq(),
+				"backup-target selection is disabled on this node — no disk can be enumerated or "+
+					"claimed, and NO fixture disks are being reported in their place")
 		default:
 			faults.Reject("RASPUTIN_STORAGE_BACKEND", backendChoice, []string{"blockdev", "mock"},
 				"backup-target selection is disabled on this node — no disk can be claimed as a backup target")
@@ -544,8 +569,9 @@ func main() {
 	}
 
 	// Tailscale handlers — every node joins the tailnet (per
-	// design/control-plane/mesh.md §5). Picks the real backend if the
-	// tailscale binary is on PATH, otherwise mocks. Force via
+	// design/control-plane/mesh.md §5). Picks the real backend if the tailscale
+	// binary is on PATH; without it mesh join/leave is DISABLED and reported,
+	// rather than mocked into looking joined. Force via
 	// RASPUTIN_TAILSCALE_BACKEND=mock|tailscale.
 	{
 		backendChoice := envOr("RASPUTIN_TAILSCALE_BACKEND", autodetectTailscaleBackend())
@@ -563,6 +589,10 @@ func main() {
 				log.Fatalf("rasputin-agent: tailscale mock backend: %v", err)
 			}
 			tsBackend = mb
+		case backendUnavailable:
+			faults.Unavailable("RASPUTIN_TAILSCALE_BACKEND", []string{"tailscale"}, tailscaleMissingPrereq(),
+				"mesh join/leave is disabled on this node — it will not report itself as meshed "+
+					"when it is not")
 		default:
 			faults.Reject("RASPUTIN_TAILSCALE_BACKEND", backendChoice, []string{"tailscale", "mock"},
 				"mesh join/leave is disabled on this node")
@@ -930,15 +960,38 @@ func agentStateDir(nodeID string) string {
 	return filepath.Join("agent-state", nodeID)
 }
 
-// autodetectDockerBackend returns "docker" if the docker CLI is on PATH,
-// "mock" otherwise. Lets the agent come up cleanly on machines without
-// Docker Desktop installed.
+// backendUnavailable is what every autodetect below returns when no REAL
+// backend's prerequisites are met on this node.
+//
+// ⚠️ It is NOT "mock". Autodetecting to mock is the 2026-09-01 e3bench
+// incident: a missing `wipefs` in the OS image made storage.ToolingAvailable()
+// false, the storage autodetect answered "mock", and a real n100 controlplane
+// reported three fixture disks that do not exist in it — with ok:true — into
+// the backup-target picker, one confirmation away from formatting a device that
+// was not there. Mock is opt-in and never inferred; see agent/internal/
+// configfault for the full argument.
+//
+// Empty string rather than a sentinel word so it can never collide with a
+// backend name an operator might type, and so the `case backendUnavailable`
+// arms below also catch RASPUTIN_*_BACKEND="" (set-but-empty in node.env).
+const backendUnavailable = ""
+
+// autodetectDockerBackend returns "docker" if the docker CLI is on PATH, and
+// backendUnavailable otherwise — app deploy/start/stop is then disabled rather
+// than pretend-served by the mock, whose Deploy reports AppStatusRunning and
+// "pretend-deployed" for a container that does not exist.
+//
+// On a dev box without Docker, ask for the mock explicitly:
+// RASPUTIN_DOCKER_BACKEND=mock.
 func autodetectDockerBackend() string {
 	if _, err := exec.LookPath("docker"); err == nil {
 		return "docker"
 	}
-	return "mock"
+	return backendUnavailable
 }
+
+// dockerMissingPrereq names what autodetectDockerBackend could not find.
+func dockerMissingPrereq() string { return "the docker CLI is not on PATH" }
 
 // caddyBinary returns the caddy binary path (RASPUTIN_CADDY_BIN override, else
 // `caddy` on PATH), or "" when absent — the node-local proxy then stays off and
@@ -968,19 +1021,55 @@ func nodeTailnetIP() string {
 // OpenWrt (no RAUC package exists for it) and updates via the custom A/B
 // backend — selected when the node is firewall-role AND actually on OpenWrt
 // (/etc/config/firewall present, same signal autodetectUCIBackend uses). Every
-// other node uses `rauc` when the CLI is on PATH, else mock. The env override
-// (RASPUTIN_UPDATE_BACKEND) forces any of rauc|openwrt-ab|mock.
+// other node uses `rauc` when the CLI is on PATH, else backendUnavailable. The
+// env override (RASPUTIN_UPDATE_BACKEND) forces any of rauc|openwrt-ab|mock.
+//
+// ROLE MATTERS HERE, and it was the one place worth checking before making
+// absence disabling: a firewall node legitimately has no `rauc`, and this
+// function already accounts for that — firewall-role nodes are never asked for
+// it. What each role needs is therefore what each role actually has, and a
+// missing prerequisite means the node genuinely cannot take an image:
+//
+//   - firewall WITHOUT /etc/config/firewall is not on OpenWrt at all, so
+//     openwrt-ab's ESP/GRUB-counter machinery has nothing to drive;
+//   - compute/controlplane/storage WITHOUT rauc has no A/B updater.
+//
+// Neither may fall back to the mock. The mock's Install reports success and
+// SetReregisterHook fakes the post-reboot re-registration, so the node.update
+// saga COMMITS: the fleet run goes green, the canary gate passes, and the
+// failure budget is never charged — for an image that was never written. A
+// disabled updater fails the saga honestly instead (ErrNoResponders, the same
+// shape as a node that is down), which is a result an operator can act on.
 func autodetectUpdaterBackend(role proto.NodeRole) string {
 	if role == proto.RoleFirewall {
 		if _, err := os.Stat("/etc/config/firewall"); err == nil {
 			return "openwrt-ab"
 		}
-		return "mock"
+		return backendUnavailable
 	}
 	if _, err := exec.LookPath("rauc"); err == nil {
 		return "rauc"
 	}
-	return "mock"
+	return backendUnavailable
+}
+
+// updaterExpectedFor names the real backend this role would have used, so the
+// fault says "openwrt-ab" on the firewall and "rauc" everywhere else rather
+// than listing a backend the node could never have run.
+func updaterExpectedFor(role proto.NodeRole) []string {
+	if role == proto.RoleFirewall {
+		return []string{"openwrt-ab"}
+	}
+	return []string{"rauc"}
+}
+
+// updaterMissingPrereq names what autodetectUpdaterBackend could not find, in
+// the terms that role actually needs.
+func updaterMissingPrereq(role proto.NodeRole) string {
+	if role == proto.RoleFirewall {
+		return "/etc/config/firewall is not present, so this firewall-role node is not running OpenWrt"
+	}
+	return "the rauc CLI is not on PATH"
 }
 
 // autodetectUCIBackend returns "uci" when the agent is running on a real
@@ -990,41 +1079,98 @@ func autodetectUpdaterBackend(role proto.NodeRole) string {
 // The config-file check matters: a dev box could have a stray `uci`
 // binary installed, but only a real OpenWrt root has /etc/config/firewall.
 // autodetectStorageBackend picks the backup-target backend: the real one when
-// every util-linux tool it shells out to is on PATH, else mock. Mirrors the
-// updater's `exec.LookPath("rauc")` test, and for the same reason — a backend
-// that discovers a missing tool halfway through a repartition is worse than one
-// that never started.
+// every util-linux tool it shells out to is on PATH, else backendUnavailable —
+// a backend that discovers a missing tool halfway through a repartition is
+// worse than one that never started.
+//
+// ⚠️ THIS IS THE FUNCTION FROM THE 2026-09-01 INCIDENT. It used to return
+// "mock" here. On e3bench — a real n100 controlplane — `wipefs` was absent from
+// the OS image, so this returned "mock" and storage.enumerate answered:
+//
+//	{"backend":"mock","ok":true,"candidates":[
+//	  {"model":"CT500P3SSD8"},{"model":"CT2000P3SSD8"},
+//	  {"model":"SanDisk Ultra","partitions":[{"fsType":"exfat","label":"MYSTUFF"}]}]}
+//
+// None of those disks exist in that machine. The operator would have seen them
+// in Storage → Backups and could have confirmed a destructive format against a
+// device that was not there — and `storage.claim` is the one agent verb that
+// force-formats a disk. The mock's own doc explains why it is so convincing: it
+// models disks, partitions and live mounts precisely so the safety rules can be
+// tested against it. That fidelity is exactly what makes it dangerous to infer.
+//
+// Disabling storage is safe to do this way: the handlers simply do not
+// register, so the controlplane still heartbeats, holds the mesh and serves
+// updates, and only the disk verbs are gone.
 func autodetectStorageBackend() string {
 	if storage.ToolingAvailable() {
 		return "blockdev"
 	}
-	return "mock"
+	return backendUnavailable
+}
+
+// storageMissingPrereq names the util-linux tools that are not on PATH — the
+// sentence the incident needed. Never called when tooling is complete.
+func storageMissingPrereq() string {
+	missing := storage.MissingTools()
+	if len(missing) == 0 {
+		return "the block tooling is incomplete"
+	}
+	return "not on PATH: " + strings.Join(missing, ", ")
 }
 
 func autodetectUCIBackend() string {
-	return autodetectUCIBackendAt("/etc/config/firewall")
+	return autodetectUCIBackendAt(defaultFirewallConfig)
 }
+
+// defaultFirewallConfig is the OpenWrt firewall config whose presence proves
+// this is a real OpenWrt root rather than a dev box with a stray `uci`.
+const defaultFirewallConfig = "/etc/config/firewall"
 
 // autodetectUCIBackendAt is the testable core — the firewall config path
 // is a parameter so tests don't need a real /etc/config/firewall.
+//
+// Returns backendUnavailable rather than "mock" when this is not a real
+// OpenWrt root. The mock here is the sharpest lie of the five after storage:
+// it is file-backed, so an operator who adds a deny rule gets an applied-looking
+// ack and a rule list that reads back correctly, while the actual firewall has
+// no such rule. A security control believed to be enforced and absent is worse
+// than one visibly disabled.
 func autodetectUCIBackendAt(firewallConfig string) string {
 	if _, err := exec.LookPath("uci"); err != nil {
-		return "mock"
+		return backendUnavailable
 	}
 	if _, err := os.Stat(firewallConfig); err != nil {
-		return "mock"
+		return backendUnavailable
 	}
 	return "uci"
 }
 
+// uciMissingPrereq names which of the two OpenWrt signals is absent.
+func uciMissingPrereq() string { return uciMissingPrereqAt(defaultFirewallConfig) }
+
+func uciMissingPrereqAt(firewallConfig string) string {
+	if _, err := exec.LookPath("uci"); err != nil {
+		return "the uci CLI is not on PATH, so this is not a real OpenWrt root"
+	}
+	return firewallConfig + " is not present, so this is not a real OpenWrt root " +
+		"(a stray uci binary on a dev box is not enough)"
+}
+
 // autodetectTailscaleBackend returns "tailscale" if the tailscale CLI is
-// on PATH and a working tailscaled is reachable, "mock" otherwise. v0
-// only checks for the binary — `tailscale status` would prove tailscaled
-// is alive but adds 1-2s to startup; we let the first enroll fail loudly
-// if the daemon isn't running.
+// on PATH, backendUnavailable otherwise. v0 only checks for the binary —
+// `tailscale status` would prove tailscaled is alive but adds 1-2s to startup;
+// we let the first enroll fail loudly if the daemon isn't running.
+//
+// Not mock: the mock's Enroll writes file-backed state and reports a joined
+// tailnet, so the control plane would record the node as meshed and route to a
+// tailnet IP it never obtained. "Mesh join is disabled" is a fact an operator
+// can fix; "joined" when it did not is a fact they will act on wrongly.
 func autodetectTailscaleBackend() string {
 	if _, err := exec.LookPath("tailscale"); err == nil {
 		return "tailscale"
 	}
-	return "mock"
+	return backendUnavailable
 }
+
+// tailscaleMissingPrereq names what autodetectTailscaleBackend could not find.
+func tailscaleMissingPrereq() string { return "the tailscale CLI is not on PATH" }

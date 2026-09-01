@@ -7,10 +7,14 @@
 //     where rauc is on PATH.
 //
 //   - MockBackend simulates the lifecycle with file-backed state under
-//     <stateDir>/updater/. Used in dev and CI where there's no rauc.
+//     <stateDir>/updater/. A dev/CI fixture, and EXPLICIT-ONLY.
 //
 // Backend is selected at startup via RASPUTIN_UPDATE_BACKEND
-// (rauc|mock), with mock as the default when the rauc binary is absent.
+// (rauc|openwrt-ab|mock). The real backends are autodetected from what the node
+// has; mock never is. A node with no usable updater has OS updates disabled and
+// says so, because MockBackend.Install reports success for an image it never
+// wrote — which would carry a node.update saga to COMMIT and let a fleet run go
+// green having installed nothing. See agent/internal/configfault.
 //
 // See projects/rasputin/design/control-plane/updates.md
 //
