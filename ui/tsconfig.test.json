@@ -1,0 +1,33 @@
+// Test build, and why it exists in this shape.
+//
+// `ui/` had no test runner at all before 2026-09-01: CI ran eslint, tsc and
+// `next build`, and the §4.6 crypto in lib/archive-key.ts — the one part of
+// this frontend where a silent mistake costs an operator their archive — was
+// covered by nothing. Adopting a disk now decrypts in the browser, and
+// "unlocking with the wrong passphrase fails visibly" is a claim that has to be
+// executed rather than asserted in a comment.
+//
+// The runner is `node --test`, which ships with Node and adds NOTHING to
+// package.json. That mattered more than the ergonomics of a framework: §4.6's
+// hash-wasm approval was explicitly conditioned on the dependency being scanned
+// (storage.md §4.6), against a ui/ whose npm packages were read by no scanner
+// at the time. Answering "we need tests" with forty more unscanned packages is
+// the wrong trade to make quietly. If a component-rendering framework is wanted
+// later, that is a dependency decision to take on its own merits.
+//
+// `module: commonjs` is the load-bearing setting. The lib sources import each
+// other WITHOUT file extensions (`./passphrase-kdf`), which Node's ESM resolver
+// refuses and its CommonJS resolver handles — so tsc emits CJS into .test-out/
+// and node runs that. hash-wasm ships a UMD main, so it requires cleanly too.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": ".test-out",
+    "incremental": false,
+    "types": ["node"]
+  },
+  "include": ["lib/**/*.ts", "components/storage/*.ts"]
+}

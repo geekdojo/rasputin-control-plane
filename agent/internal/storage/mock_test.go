@@ -132,7 +132,7 @@ func TestMock_ClaimRefusesWhenAReorderMovedThePathToTheBootDisk(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	_, err := m.Claim(context.Background(), "/dev/nvme1n1", spare.Fingerprint, "backup")
+	_, err := m.Claim(context.Background(), claimCmd("/dev/nvme1n1", spare.Fingerprint, "backup"))
 	if err == nil {
 		t.Fatal("claim succeeded against the boot disk after a renumber — the cluster is gone")
 	}
@@ -175,7 +175,7 @@ func TestMock_ClaimRefusesTheBootDisk(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	boot := candidateBySerial(t, enumerate(t, m), "SN-BOOT-0001")
 
-	_, err := m.Claim(context.Background(), boot.DevicePath, boot.Fingerprint, "backup")
+	_, err := m.Claim(context.Background(), claimCmd(boot.DevicePath, boot.Fingerprint, "backup"))
 	if err == nil {
 		t.Fatal("the boot disk was claimed")
 	}
@@ -208,7 +208,7 @@ func TestMock_ClaimRefusesADriftedFingerprint(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	_, err := m.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "backup")
+	_, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup"))
 	if err == nil {
 		t.Fatal("claim succeeded on a disk that changed after confirmation")
 	}
@@ -231,7 +231,7 @@ func TestMock_ClaimRefusesAnEmptyFingerprint(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
 
-	if _, err := m.Claim(context.Background(), spare.DevicePath, "", "backup"); !errors.Is(err, ErrNoFingerprint) {
+	if _, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, "", "backup")); !errors.Is(err, ErrNoFingerprint) {
 		t.Fatalf("want ErrNoFingerprint, got %v", err)
 	}
 	assertUnformatted(t, m, "SN-SPARE-0002", 0)
@@ -293,7 +293,7 @@ func TestMock_ClaimOverABackupSetIsTheAPIsDecision(t *testing.T) {
 	m := newTestMock(t, machine)
 	c := candidateBySerial(t, enumerate(t, m), "USB-0003")
 
-	ack, err := m.Claim(context.Background(), c.DevicePath, c.Fingerprint, "new target")
+	ack, err := m.Claim(context.Background(), claimCmd(c.DevicePath, c.Fingerprint, "new target"))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestMock_ReplayedClaimFailsClosedAfterASuccessfulFormat(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
 
-	first, err := m.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "backup")
+	first, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup"))
 	if err != nil {
 		t.Fatalf("first Claim: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestMock_ReplayedClaimFailsClosedAfterASuccessfulFormat(t *testing.T) {
 	}
 
 	// Exactly the same command again.
-	_, err = m.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "backup")
+	_, err = m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup"))
 	if err == nil {
 		t.Fatal("a replayed claim reformatted the target — every retained generation is gone")
 	}
@@ -352,7 +352,7 @@ func TestMock_ClaimFormatsLabelsAndMints(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
 
-	ack, err := m.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "weekly archive")
+	ack, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "weekly archive"))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestMock_ClaimFormatsLabelsAndMints(t *testing.T) {
 // A claim against a path no disk answers to is a refusal, not a guess.
 func TestMock_ClaimRefusesAnAbsentDevice(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
-	_, err := m.Claim(context.Background(), "/dev/nvme9n1", "anything", "backup")
+	_, err := m.Claim(context.Background(), claimCmd("/dev/nvme9n1", "anything", "backup"))
 	if !errors.Is(err, ErrDeviceAbsent) {
 		t.Fatalf("want ErrDeviceAbsent, got %v", err)
 	}
@@ -398,7 +398,7 @@ func TestMock_ClaimRefusesAnAbsentDevice(t *testing.T) {
 func TestMock_MountIsIdempotentAndKeyedByPartUUID(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
-	ack, err := m.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "backup")
+	ack, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup"))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestMock_InspectAnUnpluggedTargetIsAnAnswerNotAFailure(t *testing.T) {
 func TestMock_InspectCountsRetainedGenerations(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
-	claim, err := m.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "backup")
+	claim, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup"))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestMock_ClaimedTargetSurvivesARestart(t *testing.T) {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
 	spare := candidateBySerial(t, enumerate(t, m1), "SN-SPARE-0002")
-	claim, err := m1.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "backup")
+	claim, err := m1.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup"))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -504,7 +504,7 @@ func TestMock_OrphanedClaimIsRecoverableByReEnumerating(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
 
-	if _, err := m.Claim(context.Background(), spare.DevicePath, spare.Fingerprint, "backup"); err == nil {
+	if _, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup")); err == nil {
 		t.Fatal("the injected failure did not fire")
 	}
 	after := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")

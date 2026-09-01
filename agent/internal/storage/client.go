@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -41,7 +42,14 @@ type Backend interface {
 	//
 	// The returned ack carries the partition UUID minted at format time, which
 	// is the target's identifier everywhere downstream. The device path is not.
-	Claim(ctx context.Context, devicePath, fingerprint, label string) (*proto.StorageClaimAck, error)
+	//
+	// It takes the whole command rather than the four strings it used to,
+	// because the marker it writes is the disk's own record of itself and the
+	// api is the only thing that knows what belongs in it: the cluster id, the
+	// §4.6 key id, and the two WRAPPED key blobs. Those used to be stamped onto
+	// the ACK after the fact, which decorated the reply and left the platter
+	// carrying none of them — see markerFrom.
+	Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*proto.StorageClaimAck, error)
 
 	// Mount mounts an already-claimed target addressed by the partition UUID
 	// minted at claim time, and returns where it landed. Mounting an
@@ -111,6 +119,32 @@ func refusalFor(err error) proto.StorageRefusal {
 		return proto.StorageRefusalNotFound
 	default:
 		return proto.StorageRefusalBackendError
+	}
+}
+
+// markerFrom builds the StorageBackupSet a Claim writes onto the platter.
+//
+// One constructor, shared by both backends, because until 2026-09-01 there was
+// none and the two halves disagreed: the backends wrote a marker holding
+// MarkerVersion, PartUUID, Label and CreatedAt, and the NATS handler then set
+// ClusterID and KeyID on the ACK — the reply, not the file. Every disk this
+// product has ever claimed therefore carries a marker that does not say which
+// cluster wrote it or which §4.6 key its generations need, which are the two
+// things §4.8 and §4.6 respectively say the marker exists to carry.
+//
+// ⚠️ Everything here is an identifier or ciphertext. The plaintext data key has
+// no field on StorageClaimCmd, none on StorageBackupSet, and no way to arrive.
+func markerFrom(cmd proto.StorageClaimCmd, partUUID string, now time.Time) *proto.StorageBackupSet {
+	return &proto.StorageBackupSet{
+		MarkerVersion:         proto.StorageMarkerVersion,
+		ClusterID:             cmd.ClusterID,
+		PartUUID:              partUUID,
+		KeyID:                 cmd.KeyID,
+		KeyAlg:                cmd.KeyAlg,
+		WrappedByPassphrase:   cmd.WrappedByPassphrase,
+		WrappedByRecoveryCode: cmd.WrappedByRecoveryCode,
+		Label:                 cmd.Label,
+		CreatedAt:             now,
 	}
 }
 

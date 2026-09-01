@@ -41,9 +41,12 @@ const a11yRules = Object.fromEntries(
 const config = [
   {
     // Build output and dependencies. `out/` is the static export the release
-    // tarballs ship and `.next/` is the build cache — both generated, and
-    // linting generated code reports on decisions nobody made.
-    ignores: ['.next/**', 'out/**', 'node_modules/**', 'next-env.d.ts'],
+    // tarballs ship, `.next/` is the build cache, and `.test-out/` is the
+    // CommonJS `npm test` compiles for node --test — all generated, and linting
+    // generated code reports on decisions nobody made. (`.test-out/` in
+    // particular is CJS by design, so every file in it trips
+    // no-require-imports; the rule is right and the target is not source.)
+    ignores: ['.next/**', 'out/**', '.test-out/**', 'node_modules/**', 'next-env.d.ts'],
   },
   ...coreWebVitals,
   ...typescript,

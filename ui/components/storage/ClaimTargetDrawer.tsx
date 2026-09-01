@@ -18,12 +18,28 @@
 //  3. **The recovery code is displayed exactly once, behind a forced
 //     acknowledgement**, BEFORE the claim is submitted. See the comment on the
 //     recovery step for why that order and not the other one.
+//  4. **Adopting a keyed disk PROMPTS rather than mints.** The generations on
+//     an adopted disk are already sealed under the key its marker names, so
+//     minting a fresh one would record a key that unlocks nothing there — and
+//     stopping at that, which is what this drawer used to do, left a
+//     replacement controlplane holding a target whose key nobody had been asked
+//     to open. §4.6 puts BOTH sealed copies on the disk; the operator supplies
+//     either the passphrase or the recovery code, the browser opens the key,
+//     and the wrappings travel to the api exactly as they sat on the platter.
 
-import { AlertTriangle, Database, HardDrive, KeyRound, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Database, HardDrive, KeyRound, ShieldCheck, Unlock } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { claimBackupTarget } from '../../lib/api';
-import { mintArchiveKey, type MintedArchiveKey } from '../../lib/archive-key';
-import type { BackupCandidate, BackupTarget, ClaimBackupTargetRequest, Job } from '../../lib/types';
+import {
+  ArchiveKeyError,
+  mintArchiveKey,
+  unlockArchiveKey,
+  type ArchiveKeyPayload,
+  type CustodyPath,
+  type MintedArchiveKey,
+} from '../../lib/archive-key';
+import type { BackupCandidate, BackupTarget, Job } from '../../lib/types';
+import { archiveKeyFromMarker, buildClaimRequest, needsUnlock } from './claim-request';
 import {
   Btn,
   CopyButton,
@@ -57,7 +73,7 @@ const OK_GREEN = '#4ade80';
  * make a four-character passphrase take more than a moment to exhaust. */
 const MIN_PASSPHRASE = 12;
 
-type Step = 'confirm' | 'passphrase' | 'recovery' | 'done';
+type Step = 'confirm' | 'passphrase' | 'recovery' | 'unlock' | 'done';
 
 export function ClaimTargetDrawer({
   candidate,
@@ -92,45 +108,58 @@ export function ClaimTargetDrawer({
   // adopt.
   const mintsFreshKey = action === 'format' || action === 'wipe';
 
+  // …and adoption's counterpart: the disk's sealed key is opened rather than
+  // replaced. `adoptedKey` is what the marker carries, verbatim; it is what
+  // gets submitted, and it is submitted only after the operator has proved with
+  // a passphrase or a recovery code that it opens.
+  const adoptedKey = archiveKeyFromMarker(candidate);
+  const mustUnlock = action === 'adopt' && needsUnlock(candidate);
+
   const needsReplace = Boolean(existingTarget) && existingTarget?.status === 'claimed';
 
-  async function submit(archiveKey?: MintedArchiveKey) {
+  async function submit(archiveKey?: ArchiveKeyPayload, minting = false) {
     setBusy(true);
     setErr(null);
     try {
-      const req: ClaimBackupTargetRequest = {
+      const req = buildClaimRequest({
+        candidate,
         nodeId,
-        devicePath: candidate.devicePath,
-        fingerprint: candidate.fingerprint,
-        ...(label.trim() ? { label: label.trim() } : {}),
-        ...(needsReplace && replace ? { replace: true } : {}),
-        ...(action === 'adopt' ? { adopt: true } : {}),
-        // The token is echoed back verbatim from the picker. Its absence is a
-        // refusal, never a default — and a candidate with no token has no wipe
-        // control to reach this branch from.
-        ...(action === 'wipe' && candidate.wipeToken ? { wipe: { token: candidate.wipeToken } } : {}),
-        ...(archiveKey ? { archiveKey: archiveKey.archiveKey } : {}),
-      };
+        action,
+        label,
+        replace: needsReplace && replace,
+        archiveKey,
+      });
       const j = await claimBackupTarget(req);
       setJob(j);
       setStep('done');
       onSubmitted(j);
     } catch (e) {
       // The passphrase and the data key are not in scope here and cannot reach
-      // this string: `req` above has no field for either.
+      // this string: buildClaimRequest has no field for either.
       setErr(String(e));
-      if (archiveKey) {
+      if (minting) {
         // The wrapped key was built for a claim that did not happen. Drop it and
         // send the operator back to mint a new one rather than re-submitting
         // material whose recovery code they have already been shown and told is
         // final — a second claim under the same code would make "shown once"
         // a lie about which target it belongs to.
+        //
+        // The ADOPT path deliberately does not do this: its key was not minted
+        // here and its recovery code was shown years ago. Re-submitting the
+        // disk's own wrappings is exactly right, so a failed adopt leaves the
+        // operator where they were.
         setMinted(null);
         setStep('passphrase');
       }
     } finally {
       setBusy(false);
     }
+  }
+
+  function continueFromConfirm() {
+    if (mintsFreshKey) return setStep('passphrase');
+    if (mustUnlock) return setStep('unlock');
+    return submit();
   }
 
   return (
@@ -150,7 +179,19 @@ export function ClaimTargetDrawer({
             wipeArmed={wipeArmed}
             onArmWipe={setWipeArmed}
             busy={busy}
-            onContinue={() => (mintsFreshKey ? setStep('passphrase') : submit())}
+            mustUnlock={mustUnlock}
+            onContinue={continueFromConfirm}
+          />
+        )}
+
+        {step === 'unlock' && adoptedKey && (
+          <UnlockStep
+            blobs={adoptedKey}
+            busy={busy}
+            setBusy={setBusy}
+            onBack={() => setStep('confirm')}
+            onError={setErr}
+            onUnlocked={() => submit(adoptedKey)}
           />
         )}
 
@@ -172,11 +213,13 @@ export function ClaimTargetDrawer({
             minted={minted}
             busy={busy}
             action={action}
-            onConfirm={() => submit(minted)}
+            onConfirm={() => submit(minted.archiveKey, true)}
           />
         )}
 
-        {step === 'done' && job && <DoneStep job={job} action={action} encrypted={Boolean(minted)} />}
+        {step === 'done' && job && (
+          <DoneStep job={job} action={action} encrypted={Boolean(minted)} unlocked={mustUnlock} />
+        )}
 
         {err && (
           <div
@@ -194,6 +237,7 @@ export function ClaimTargetDrawer({
 function titleFor(step: Step, action: 'format' | 'adopt' | 'wipe', disp: CandidateDisposition): string {
   if (step === 'passphrase') return 'ARCHIVE ENCRYPTION';
   if (step === 'recovery') return 'RECOVERY CODE — SHOWN ONCE';
+  if (step === 'unlock') return 'UNLOCK THE ARCHIVE KEY';
   if (step === 'done') return 'CLAIM SUBMITTED';
   if (action === 'wipe') return 'DESTROY BACKUP SET';
   // An unreadable marker cannot be adopted, so the drawer must not announce
@@ -267,6 +311,7 @@ function ConfirmStep({
   wipeArmed,
   onArmWipe,
   busy,
+  mustUnlock,
   onContinue,
 }: {
   candidate: BackupCandidate;
@@ -279,6 +324,8 @@ function ConfirmStep({
   wipeArmed: boolean;
   onArmWipe: (v: boolean) => void;
   busy: boolean;
+  /** This disk carries a sealed §4.6 key, so adopting it prompts for custody. */
+  mustUnlock: boolean;
   onContinue: () => void;
 }) {
   const disp = disposition(candidate);
@@ -300,6 +347,9 @@ function ConfirmStep({
           This disk already carries a Rasputin backup set. Adopting takes it over exactly as it
           stands: no format, no data lost. If you plugged this disk in to restore from it, this
           is the choice you want.
+          {mustUnlock
+            ? ' It is encrypted, so the next screen asks for its passphrase or its recovery code — that is what makes the adopted target usable rather than just recorded.'
+            : ''}
         </Callout>
       )}
 
@@ -320,11 +370,20 @@ function ConfirmStep({
           <Row k="GENERATIONS" v={generations > 0 ? String(generations) : 'none reported'} />
           {set.createdAt && <Row k="CREATED" v={new Date(set.createdAt).toLocaleString()} />}
           {set.keyId && <Row k="KEY ID" v={set.keyId} />}
-          {set.keyId && (
+          {set.keyId && mustUnlock && (
             <Hint>
-              These generations are encrypted under key <Tok>{set.keyId}</Tok>. Adopting records the
-              target; reading those archives still needs the passphrase or recovery code from when
-              that key was minted. Adoption does not — and cannot — mint a new one.
+              These generations are encrypted under key <Tok>{set.keyId}</Tok>, and the disk carries
+              both sealed copies of it. Adoption does not — and cannot — mint a new one: it opens
+              this one, with the passphrase you chose when it was minted or with the recovery code
+              you were shown once. Either is enough on its own.
+            </Hint>
+          )}
+          {set.keyId && !mustUnlock && (
+            <Hint warn>
+              These generations name key <Tok>{set.keyId}</Tok>, but this disk carries no sealed copy
+              of it. Nothing here can produce that key — reading those archives needs a copy of the
+              passphrase or recovery code kept somewhere else entirely. Adopting records the target
+              anyway; it does not recover the key.
             </Hint>
           )}
         </div>
@@ -376,7 +435,13 @@ function ConfirmStep({
             onClick={onContinue}
             title={disp === 'unreadable' ? 'This disk cannot be adopted — its marker is unreadable' : undefined}
           >
-            {busy ? 'SUBMITTING…' : disp === 'format' ? 'CONTINUE — SET UP ENCRYPTION' : 'ADOPT THIS DISK'}
+            {busy
+              ? 'SUBMITTING…'
+              : disp === 'format'
+                ? 'CONTINUE — SET UP ENCRYPTION'
+                : mustUnlock
+                  ? 'CONTINUE — UNLOCK THIS DISK'
+                  : 'ADOPT THIS DISK'}
           </Btn>
         </div>
       )}
@@ -624,6 +689,153 @@ function PassphraseStep({
 }
 
 // ---------------------------------------------------------------------------
+// The adopt path's step 2 — unlock the key this disk already has.
+// ---------------------------------------------------------------------------
+
+// The counterpart to PassphraseStep, and the shape is deliberately its mirror:
+// same uncontrolled input for the same reason, same "the secret lives in the
+// DOM node and is cleared the moment it has been used".
+//
+// What is different is that this one can FAIL, and failing is the feature. The
+// wrappings are AEAD-sealed, so a wrong passphrase does not produce a wrong key
+// — it produces a tag that does not verify, here, in front of the operator,
+// before anything is submitted. There is no path through this component that
+// records a target whose key does not open.
+//
+// Both custody paths are offered because §4.6's whole point is that either
+// alone is sufficient. An operator who forgot the passphrase and kept the
+// printed recovery code must be able to adopt, and one who never printed the
+// code but remembers the passphrase must be able to as well.
+function UnlockStep({
+  blobs,
+  busy,
+  setBusy,
+  onBack,
+  onError,
+  onUnlocked,
+}: {
+  blobs: ArchiveKeyPayload;
+  busy: boolean;
+  setBusy: (v: boolean) => void;
+  onBack: () => void;
+  onError: (e: string | null) => void;
+  onUnlocked: () => void;
+}) {
+  const [path, setPath] = useState<CustodyPath>('passphrase');
+  const secret = useRef<HTMLInputElement>(null);
+  const [hasValue, setHasValue] = useState(false);
+
+  function switchTo(next: CustodyPath) {
+    // The field is cleared on the way across so a half-typed passphrase is
+    // never sitting in a box now labelled "recovery code".
+    if (secret.current) secret.current.value = '';
+    setHasValue(false);
+    onError(null);
+    setPath(next);
+  }
+
+  async function unlock() {
+    const value = secret.current?.value ?? '';
+    if (!value.trim()) return;
+    setBusy(true);
+    onError(null);
+    try {
+      // unlockArchiveKey consumes the passphrase bytes and zeroes them, and it
+      // never returns the data key it recovers — only a one-way proof that it
+      // opened. The proof is discarded here: this component needs to know that
+      // the unlock SUCCEEDED, and nothing more.
+      await unlockArchiveKey(
+        blobs,
+        path === 'passphrase'
+          ? { path: 'passphrase', passphrase: new TextEncoder().encode(value) }
+          : { path: 'recovery-code', code: value },
+      );
+      if (secret.current) secret.current.value = '';
+      setHasValue(false);
+      onUnlocked();
+    } catch (e) {
+      // ArchiveKeyError messages never carry the secret that was typed — see
+      // archive-key.ts. Anything else is rendered as-is for the same reason it
+      // is everywhere else in this drawer: an unexpected failure the operator
+      // can quote is worth more than a tidy one they cannot.
+      onError(
+        e instanceof ArchiveKeyError
+          ? e.message
+          : `could not unlock this disk's archive key: ${String(e)}`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const isPass = path === 'passphrase';
+  return (
+    <>
+      <Callout color={ACCENT} icon={Unlock} title="THIS DISK'S KEY IS ALREADY ON IT — OPEN IT">
+        Everything already written here is sealed under key <Tok>{blobs.keyId}</Tok>, and the disk
+        carries two sealed copies of that key: one your passphrase opens, one your recovery code
+        opens. Supply either. Rasputin opens the key in this browser to check it, records the sealed
+        copies unchanged, and never sends the key or what you type anywhere.
+      </Callout>
+
+      <Hint>
+        Adopting does not mint a new key and does not change this one. Nothing on the disk is
+        rewritten, and your existing recovery code stays the one that works.
+      </Hint>
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <Btn small variant={isPass ? 'primary' : 'ghost'} disabled={busy} onClick={() => switchTo('passphrase')}>
+          PASSPHRASE
+        </Btn>
+        <Btn small variant={isPass ? 'ghost' : 'primary'} disabled={busy} onClick={() => switchTo('recovery-code')}>
+          RECOVERY CODE
+        </Btn>
+      </div>
+
+      <label htmlFor="adopt-secret" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <span style={{ color: DIM, fontSize: 9, fontFamily: MONO, letterSpacing: '0.1em' }}>
+          {isPass ? 'ARCHIVE PASSPHRASE' : 'RECOVERY CODE'}
+        </span>
+        <Input
+          id="adopt-secret"
+          key={path}
+          ref={secret}
+          type={isPass ? 'password' : 'text'}
+          onChange={(e) => setHasValue(e.target.value.trim().length > 0)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !busy && hasValue) void unlock();
+          }}
+          autoComplete={isPass ? 'current-password' : 'off'}
+          spellCheck={false}
+          placeholder={isPass ? 'the passphrase chosen when this key was minted' : 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX'}
+        />
+      </label>
+
+      <Hint>
+        {isPass
+          ? 'The passphrase is stretched with Argon2id at the cost this disk recorded, so unlocking takes a moment on purpose.'
+          : 'Dashes and letter case do not matter. The alphabet has no I, L, O or U in it, so there is no 1/I or 0/O to get wrong.'}
+      </Hint>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <Btn variant="primary" disabled={busy || !hasValue} onClick={unlock}>
+          {busy ? 'UNLOCKING…' : 'UNLOCK AND ADOPT'}
+        </Btn>
+        <Btn onClick={onBack} disabled={busy}>
+          BACK
+        </Btn>
+      </div>
+
+      <Hint warn>
+        If you have neither the passphrase nor the recovery code, nothing can open what is on this
+        disk — not Rasputin, not Geekdojo. Adopting it would record a target that can never be
+        written to, so it is refused. Leave the disk alone, or destroy the set and claim it fresh.
+      </Hint>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Step 3 — the recovery code, shown once, behind a forced acknowledgement.
 // ---------------------------------------------------------------------------
 
@@ -714,7 +926,19 @@ function RecoveryStep({
   );
 }
 
-function DoneStep({ job, action, encrypted }: { job: Job; action: 'format' | 'adopt' | 'wipe'; encrypted: boolean }) {
+function DoneStep({
+  job,
+  action,
+  encrypted,
+  unlocked,
+}: {
+  job: Job;
+  action: 'format' | 'adopt' | 'wipe';
+  /** A key was minted here and its recovery code shown once. */
+  encrypted: boolean;
+  /** An existing key was opened here and carried across unchanged. */
+  unlocked: boolean;
+}) {
   return (
     <>
       <Callout color={OK_GREEN} icon={Database} title="CLAIM SUBMITTED">
@@ -727,9 +951,18 @@ function DoneStep({ job, action, encrypted }: { job: Job; action: 'format' | 'ad
       </Callout>
       {encrypted && (
         <Hint>
-          The wrapped key was submitted with the claim. If the job fails, the target is not
-          created and the recovery code you saved belongs to nothing — start again and you will be
-          given a new one.
+          The wrapped key was submitted with the claim, and the disk itself is stamped with both
+          sealed copies of it. Keep the recovery code you just saved even if this job fails: if it
+          failed after the format, the disk carries that key and adopting it later will ask you for
+          exactly this code — or the passphrase. Only a job that failed BEFORE the format leaves the
+          code belonging to nothing, and starting again then gives you a new one.
+        </Hint>
+      )}
+      {unlocked && (
+        <Hint>
+          The disk&apos;s own sealed key was submitted with the claim, unchanged. Your passphrase and
+          recovery code are the same ones as before — adopting does not re-wrap the key and does not
+          issue a new recovery code, so keep the copies you already have.
         </Hint>
       )}
       <Hint>Watch it in Tasks.</Hint>

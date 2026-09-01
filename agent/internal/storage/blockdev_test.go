@@ -228,7 +228,7 @@ func TestBlockDev_ClaimRefusesTheBootDiskAndWritesNothing(t *testing.T) {
 	boot := bdCandidate(t, mustEnumerate(t, b), "/dev/nvme0n1")
 	sh.calls = nil
 
-	_, err := b.Claim(context.Background(), "/dev/nvme0n1", boot.Fingerprint, "backup")
+	_, err := b.Claim(context.Background(), claimCmd("/dev/nvme0n1", boot.Fingerprint, "backup"))
 	if !errors.Is(err, ErrProtected) {
 		t.Fatalf("want ErrProtected, got %v", err)
 	}
@@ -245,7 +245,7 @@ func TestBlockDev_ClaimRefusesADriftedFingerprintAndWritesNothing(t *testing.T) 
 	b := newTestBlockDev(t, sh)
 	sh.calls = nil
 
-	_, err := b.Claim(context.Background(), "/dev/nvme1n1", "a-fingerprint-from-another-disk", "backup")
+	_, err := b.Claim(context.Background(), claimCmd("/dev/nvme1n1", "a-fingerprint-from-another-disk", "backup"))
 	if !errors.Is(err, ErrFingerprintMismatch) {
 		t.Fatalf("want ErrFingerprintMismatch, got %v", err)
 	}
@@ -256,7 +256,7 @@ func TestBlockDev_ClaimRefusesAnEmptyFingerprintBeforeRunningAnything(t *testing
 	sh := &fakeShell{lsblkJSON: twoNVMeLsblk}
 	b := newTestBlockDev(t, sh)
 
-	_, err := b.Claim(context.Background(), "/dev/nvme1n1", "", "backup")
+	_, err := b.Claim(context.Background(), claimCmd("/dev/nvme1n1", "", "backup"))
 	if !errors.Is(err, ErrNoFingerprint) {
 		t.Fatalf("want ErrNoFingerprint, got %v", err)
 	}
@@ -275,7 +275,7 @@ func TestBlockDev_ClaimRefusesWhenProtectionCannotBeResolved(t *testing.T) {
 	b.prot.mountinfoPath = filepath.Join(t.TempDir(), "gone")
 	sh.calls = nil
 
-	if _, err := b.Claim(context.Background(), "/dev/nvme1n1", spare.Fingerprint, "backup"); err == nil {
+	if _, err := b.Claim(context.Background(), claimCmd("/dev/nvme1n1", spare.Fingerprint, "backup")); err == nil {
 		t.Fatal("claim proceeded without being able to identify the boot disk")
 	}
 	sh.assertNothingWasWritten(t)
@@ -289,7 +289,7 @@ func TestBlockDev_ClaimRefusesUnDevicePaths(t *testing.T) {
 		t.Run(bad, func(t *testing.T) {
 			sh := &fakeShell{lsblkJSON: twoNVMeLsblk}
 			b := newTestBlockDev(t, sh)
-			if _, err := b.Claim(context.Background(), bad, "fp", "backup"); err == nil {
+			if _, err := b.Claim(context.Background(), claimCmd(bad, "fp", "backup")); err == nil {
 				t.Fatalf("claim accepted %q", bad)
 			}
 			if len(sh.calls) != 0 {
@@ -316,7 +316,7 @@ func TestBlockDev_ClaimFormatsInTheRightOrder(t *testing.T) {
 	spare := bdCandidate(t, mustEnumerate(t, b), "/dev/nvme1n1")
 	sh.calls = nil
 
-	ack, err := b.Claim(context.Background(), "/dev/nvme1n1", spare.Fingerprint, "weekly archive")
+	ack, err := b.Claim(context.Background(), claimCmd("/dev/nvme1n1", spare.Fingerprint, "weekly archive"))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestBlockDev_ClaimRefusesADiskMountedElsewhere(t *testing.T) {
 	spare := bdCandidate(t, mustEnumerate(t, b), "/dev/nvme1n1")
 	sh.calls = nil
 
-	_, err := b.Claim(context.Background(), "/dev/nvme1n1", spare.Fingerprint, "backup")
+	_, err := b.Claim(context.Background(), claimCmd("/dev/nvme1n1", spare.Fingerprint, "backup"))
 	if err == nil {
 		t.Fatal("claimed a disk with a live mount on it")
 	}

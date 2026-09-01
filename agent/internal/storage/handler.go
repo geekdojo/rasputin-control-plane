@@ -79,7 +79,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		log.Printf("rasputin-agent: storage: CLAIM (destructive) device=%s fingerprint=%s label=%q backend=%s",
 			cmd.DevicePath, short(cmd.Fingerprint), cmd.Label, backend.Name())
 
-		ack, err := backend.Claim(ctx, cmd.DevicePath, cmd.Fingerprint, cmd.Label)
+		ack, err := backend.Claim(ctx, cmd)
 		if err != nil {
 			log.Printf("rasputin-agent: storage: claim REFUSED device=%s: %v", cmd.DevicePath, err)
 			bus.Respond(m, proto.StorageClaimAck{
@@ -90,17 +90,13 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 			})
 			return
 		}
-		// ClusterID and KeyID are stamped by the api into the marker it will
-		// persist; the agent records what it was told rather than inventing
-		// either. KeyID is an identifier for §4.6's data key — never the key.
-		if ack.BackupSet != nil {
-			if cmd.ClusterID != "" {
-				ack.BackupSet.ClusterID = cmd.ClusterID
-			}
-			if cmd.KeyID != "" {
-				ack.BackupSet.KeyID = cmd.KeyID
-			}
-		}
+		// The cluster id, the key id and the two wrapped key blobs are now
+		// stamped by the BACKEND, into the marker file on the platter, because
+		// that is where they have to be for the disk to be self-describing.
+		// This handler used to set them on the ack afterwards, which decorated
+		// the reply and left the disk carrying neither — see markerFrom. The
+		// agent still invents none of them: it records what the api told it,
+		// and none of it is key material in the clear.
 		log.Printf("rasputin-agent: storage: claimed device=%s partuuid=%s mount=%s",
 			ack.DevicePath, ack.PartUUID, ack.MountPath)
 		bus.Respond(m, ack)

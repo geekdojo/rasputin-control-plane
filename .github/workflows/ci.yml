@@ -178,6 +178,15 @@ jobs:
       - name: typecheck
         run: npm run type-check
 
+      # ui/ had no test runner at all until 2026-09-01, which meant the §4.6
+      # archive-key crypto — the part of this frontend where a silent mistake
+      # costs an operator their backup — was covered by nothing. `npm test`
+      # compiles lib/ and components/storage/ to CommonJS and runs them under
+      # node --test; it adds no dependency to package.json, deliberately (see
+      # ui/tsconfig.test.json for why that mattered here).
+      - name: test
+        run: npm test
+
       # Next build catches a class of errors tsc doesn't: missing 'use
       # client' directives, server/client component boundary violations,
       # bad dynamic imports. It also produces the static export (out/)

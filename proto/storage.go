@@ -130,6 +130,43 @@ type StorageBackupSet struct {
 	// change. It is what lets restore tell which key a generation needs
 	// instead of guessing. Never the key itself.
 	KeyID string `json:"keyId,omitempty"`
+	// KeyAlg names the wrapping construction of the two blobs below, so an
+	// unwrap years from now reads what it is looking at instead of assuming
+	// whatever the code does at that moment.
+	KeyAlg string `json:"keyAlg,omitempty"`
+	// WrappedByPassphrase and WrappedByRecoveryCode are §4.6's TWO SEALED
+	// COPIES of the data key, written onto the disk itself.
+	//
+	// ⚠️ Ciphertext, both of them, and the distinction from KeyID above is not
+	// a nuance — it is the whole contract. Each blob is the 32-byte data key
+	// under AES-256-GCM, its key-encryption key derived in the operator's
+	// browser from a passphrase (Argon2id) or from the recovery code
+	// (HKDF-SHA-256). Neither the passphrase, the recovery code, nor the data
+	// key exists anywhere but that browser; what lands here cannot be opened by
+	// this agent, by the api, or by anyone holding the disk alone.
+	//
+	// # Why on the disk, and not only in the controlplane's database
+	//
+	// §4.6's constraint is that the key cannot live on the controlplane: a
+	// backup exists to survive that machine's death, and anything under
+	// /var/lib/rasputin is inside the archive it encrypts. §4.6 answers that by
+	// putting both wrapped copies in the archive header — on the disk — and
+	// these fields are that, at the level of the target as a whole rather than
+	// per generation.
+	//
+	// The consequence is the one that matters: a REPLACEMENT controlplane with
+	// an empty database can adopt this disk and be handed something the
+	// operator can actually open, by typing the passphrase or the recovery
+	// code. Without them, adoption records a target whose key is sealed and
+	// whose custody nobody was ever asked for — which is a target that cannot
+	// be written to, discovered on the day it was needed.
+	//
+	// This is the LUKS/BitLocker header model, deliberately: an attacker
+	// holding the disk holds the ciphertext and the wrapped keys, and is left
+	// with the Argon2id cost and 160 bits of recovery-code entropy. That is the
+	// posture §4.6 chose, and it is what makes the disk self-sufficient.
+	WrappedByPassphrase   string `json:"wrappedByPassphrase,omitempty"`
+	WrappedByRecoveryCode string `json:"wrappedByRecoveryCode,omitempty"`
 	// Label is the human-readable name the operator gave this target.
 	Label     string    `json:"label,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -252,6 +289,18 @@ type StorageClaimCmd struct {
 	// an identifier; the key itself never crosses this wire.
 	ClusterID string `json:"clusterId,omitempty"`
 	KeyID     string `json:"keyId,omitempty"`
+	// KeyAlg, WrappedByPassphrase and WrappedByRecoveryCode are the §4.6
+	// custody material to write into the marker — ciphertext, always, and
+	// exactly the strings the browser produced. See StorageBackupSet for what
+	// they are and why they belong on the disk rather than only in the api's
+	// database.
+	//
+	// There is no field here for a plaintext data key, in this struct or any
+	// other in this file, and adding one would put the key in the one place
+	// §4.6 says it must never be: on the appliance the backup exists to outlive.
+	KeyAlg                string `json:"keyAlg,omitempty"`
+	WrappedByPassphrase   string `json:"wrappedByPassphrase,omitempty"`
+	WrappedByRecoveryCode string `json:"wrappedByRecoveryCode,omitempty"`
 }
 
 // StorageClaimAck reports the claim outcome.

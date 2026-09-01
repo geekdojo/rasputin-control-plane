@@ -26,6 +26,8 @@ vendor/
 # TypeScript
 *.tsbuildinfo
 ui/next-env.d.ts
+# `npm test` compiles ui/ to CommonJS here for node --test. Build output.
+ui/.test-out/
 
 # Env
 .env

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -354,6 +355,19 @@ func claimCheckExisting() jobs.DoFn {
 			return nil, fmt.Errorf("refusing to adopt %s: its generations are encrypted under key %s, and the claim supplies key %s. Supply the wrapped blobs for the disk's own key, or pick a different disk",
 				res.DevicePath, set.KeyID, k.KeyID)
 		}
+		if err := checkAdoptedKeyCustody(res.DevicePath, set, spec.ArchiveKey); err != nil {
+			return nil, err
+		}
+		if set.KeyID != "" && !markerCarriesWrappings(set) {
+			// A disk whose marker names a key but carries neither wrapping is
+			// adoptable — there is nothing to unwrap, so there is nothing to
+			// refuse — but it is worth saying, because it is the shape every
+			// disk claimed before 2026-09-01 has: the marker was written
+			// without the custody material, so the key it names cannot be
+			// produced from the disk alone.
+			sc.Log("warn", fmt.Sprintf("%s names §4.6 key %s but its marker carries no wrapped copies of it, so nothing on this disk can produce that key. Adopting anyway; archives already written under it are readable only with a copy of the key kept elsewhere",
+				res.DevicePath, set.KeyID))
+		}
 		plan.Adopt = true
 		plan.ExistingPartUUID = set.PartUUID
 		plan.ExistingKeyID = set.KeyID
@@ -427,18 +441,32 @@ func claimClaim(cfg Config) jobs.DoFn {
 			return adoptExisting(sc, &plan)
 		}
 
-		keyID := ""
+		keyID, keyAlg, wrappedPass, wrappedRecovery := "", "", "", ""
 		if spec.ArchiveKey.present() {
 			keyID = spec.ArchiveKey.KeyID
+			keyAlg = spec.ArchiveKey.Alg
+			wrappedPass = spec.ArchiveKey.WrappedByPassphrase
+			wrappedRecovery = spec.ArchiveKey.WrappedByRecoveryCode
 		}
 		cmd, err := json.Marshal(proto.StorageClaimCmd{
 			DevicePath:  plan.DevicePath,
 			Fingerprint: plan.Fingerprint,
 			Label:       plan.Label,
 			ClusterID:   cfg.ClusterID,
-			// An identifier. The §4.6 data key itself never crosses this wire,
-			// and there is no field on StorageClaimCmd that could carry it.
-			KeyID: keyID,
+			// An identifier and two ciphertexts. The §4.6 data key itself never
+			// crosses this wire, and there is no field on StorageClaimCmd that
+			// could carry it.
+			//
+			// The wrapped blobs go onto the DISK, not just into the api's
+			// database, and that is the point: a replacement controlplane with
+			// an empty database adopts this disk later and finds the sealed key
+			// sitting on it, openable with the passphrase or the recovery code
+			// the operator is holding. They travel as a marshalled command over
+			// the bus and never enter a step result, a log line or the ledger.
+			KeyID:                 keyID,
+			KeyAlg:                keyAlg,
+			WrappedByPassphrase:   wrappedPass,
+			WrappedByRecoveryCode: wrappedRecovery,
 		})
 		if err != nil {
 			return nil, err
@@ -763,4 +791,54 @@ func short(h string) string {
 		return h[:12]
 	}
 	return h
+}
+
+// markerCarriesWrappings reports whether the disk's own marker holds both §4.6
+// sealed copies of its data key. Both or neither: one wrapping on a disk is a
+// target one forgotten passphrase from an unreadable archive, which is the
+// state ArchiveKey.validate refuses to create on the api side.
+func markerCarriesWrappings(set *proto.StorageBackupSet) bool {
+	if set == nil {
+		return false
+	}
+	return strings.TrimSpace(set.WrappedByPassphrase) != "" &&
+		strings.TrimSpace(set.WrappedByRecoveryCode) != ""
+}
+
+// checkAdoptedKeyCustody is the adopt path's §4.6 gate, and it enforces two
+// things that are really one: an adopted target must end up recording the key
+// the DISK already carries, unchanged.
+//
+// 1. A disk whose marker carries the sealed key must be adopted WITH it. The
+// custody proof itself happens in the browser — the api has no passphrase, no
+// recovery code and no data key, by construction, so it cannot check one. What
+// it can refuse is the outcome that made this gate necessary: a target recorded
+// against a disk whose key is sealed and whose custody nobody was ever asked
+// for. Such a target cannot have a new generation written to it and reads, in
+// every listing, as configured. The operator holding neither custody secret has
+// the choices they always had — leave the disk alone, or wipe it — and both are
+// honest in a way that adopting is not.
+//
+// 2. Adopt PRESERVES the wrappings; it never re-wraps. Re-wrapping under a
+// fresh passphrase during a recovery operation would leave the disk's own
+// marker holding the old KEK while the database held a new one, so a restore
+// reading the disk (the case §4.6 exists for, where the database is gone) would
+// meet the old wrapping and a passphrase the operator was told to forget. Two
+// records of one key, disagreeing, discovered on the worst day. A passphrase
+// change is its own operation: it re-wraps the same data key, leaves the key-id
+// alone, and must rewrite the marker too.
+func checkAdoptedKeyCustody(devicePath string, set *proto.StorageBackupSet, k *ArchiveKey) error {
+	if !markerCarriesWrappings(set) {
+		return nil
+	}
+	if !k.present() {
+		return fmt.Errorf("refusing to adopt %s: its marker carries the sealed §4.6 data key %s, and this claim supplies no key. Adopting without it would record a target whose key nobody has been asked to open — it would list as configured and could never be written to. Unlock the disk with its passphrase or its recovery code and adopt again, or, if both are lost, wipe the disk and claim it fresh",
+			devicePath, displayLabel(set.KeyID))
+	}
+	if k.WrappedByPassphrase != set.WrappedByPassphrase || k.WrappedByRecoveryCode != set.WrappedByRecoveryCode ||
+		(set.KeyAlg != "" && k.Alg != set.KeyAlg) {
+		return fmt.Errorf("refusing to adopt %s: the wrapped key in this claim is not the one on the disk. Adopt takes the disk's key over exactly as it stands and never re-wraps it — a re-wrap that reaches the database and not the marker leaves the disk unreadable by the restore path that only has the disk. Changing the passphrase is a separate operation on an already-claimed target",
+			devicePath)
+	}
+	return nil
 }
