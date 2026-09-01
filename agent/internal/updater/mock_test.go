@@ -458,7 +458,10 @@ func TestInstall_ContextCancelShortCircuits(t *testing.T) {
 
 func TestInstall_MissingBundleFileErrors(t *testing.T) {
 	mb := newUpdaterMock(t)
-	_, err := mb.Install(context.Background(), "nonexistent", "/no/such/path.bin", proto.SlotB, nil)
+	// Empty LocalPath: the backend resolves <stateDir>/bundles/nonexistent.bin,
+	// which does not exist, so ReadFile is what fails. An out-of-store path
+	// would be refused earlier and would not reach the branch under test.
+	_, err := mb.Install(context.Background(), "nonexistent", "", proto.SlotB, nil)
 	if err == nil {
 		t.Errorf("expected read-bundle error on missing path")
 	}

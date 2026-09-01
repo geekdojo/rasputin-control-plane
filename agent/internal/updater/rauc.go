@@ -312,7 +312,12 @@ func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 	progressFn func(int64, int64)) (string, string, error) {
 	// Same HTTP fetch as the mock; rauc doesn't have a native HTTP
 	// fetcher in our setup.
-	dest := filepath.Join(r.stateDir, "bundles", bundleID+".raucb")
+	// bundleID arrives on the bus; resolveBundlePath is what stops a `../` in
+	// it from choosing where this download lands. See bundlepath.go.
+	dest, err := resolveBundlePath(r.stateDir, bundleID, "", ".raucb")
+	if err != nil {
+		return "", "", fmt.Errorf("rauc download: %w", err)
+	}
 	// Free the store before pulling: drop any prior bundles/partials so they
 	// don't accumulate and fill a small data partition (see pruneBundles).
 	r.pruneBundles(bundleID)
@@ -376,8 +381,11 @@ func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 
 func (r *RAUCBackend) Install(ctx context.Context, bundleID, localPath string, targetSlot proto.UpdateSlot,
 	progressFn func(string, int)) (string, error) {
-	if localPath == "" {
-		localPath = filepath.Join(r.stateDir, "bundles", bundleID+".raucb")
+	// Both bundleID and localPath arrive on the bus, and localPath becomes an
+	// argv element of `rauc install` two lines down.
+	localPath, err := resolveBundlePath(r.stateDir, bundleID, localPath, ".raucb")
+	if err != nil {
+		return "", fmt.Errorf("rauc install: %w", err)
 	}
 	if progressFn != nil {
 		progressFn("verify", 5)

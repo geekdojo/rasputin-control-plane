@@ -150,7 +150,12 @@ func (m *MockBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 		return "", "", errors.New("simulated download failure (RASPUTIN_UPDATE_FAIL_MODE=download)")
 	}
 
-	dest := filepath.Join(m.stateDir, "bundles", bundleID+".bin")
+	// Same rule as the real backends, deliberately: the mock is what dev and
+	// CI exercise, so a path check it does not share is one nothing tests.
+	dest, err := resolveBundlePath(m.stateDir, bundleID, "", ".bin")
+	if err != nil {
+		return "", "", err
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", "", err
@@ -218,9 +223,12 @@ func (m *MockBackend) Install(ctx context.Context, bundleID, localPath string, t
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Resolve localPath from cache if the api didn't give us one.
-	if localPath == "" {
-		localPath = filepath.Join(m.stateDir, "bundles", bundleID+".bin")
+	// Resolve localPath from cache if the api didn't give us one, and refuse
+	// one that points outside the bundle store — same rule as the real
+	// backends.
+	localPath, err := resolveBundlePath(m.stateDir, bundleID, localPath, ".bin")
+	if err != nil {
+		return "", err
 	}
 	buf, err := os.ReadFile(localPath)
 	if err != nil {

@@ -243,10 +243,13 @@ func TestRegisterHandlers_InstallBadCmd(t *testing.T) {
 
 func TestRegisterHandlers_InstallBackendError(t *testing.T) {
 	nc, _ := newRegistered(t)
-	// Nonexistent bundle path should bubble up from the mock's ReadFile.
+	// Nonexistent bundle should bubble up from the mock's ReadFile. LocalPath
+	// is empty so the backend resolves it from the id: an out-of-store path
+	// is now refused before ReadFile is reached, which would make this pass
+	// without ever exercising the branch it is named for.
 	var ack proto.UpdateInstallAck
 	request(t, nc, proto.UpdateInstallSubject("node-1"), proto.UpdateInstallCmd{
-		BundleID: "missing", LocalPath: "/no/such/bundle.bin", TargetSlot: proto.SlotB,
+		BundleID: "missing", TargetSlot: proto.SlotB,
 	}, &ack)
 	if ack.OK {
 		t.Error("expected OK=false on backend error")
@@ -605,14 +608,17 @@ func TestRAUCBackend_DownloadBadURL(t *testing.T) {
 
 func TestRAUCBackend_InstallHappyPath(t *testing.T) {
 	fakeRAUC(t, "ok")
-	b, err := NewRAUCBackend(t.TempDir())
+	stateDir := t.TempDir()
+	b, err := NewRAUCBackend(stateDir)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
 	// Install reads the local bundle via `rauc install <path>` then queries
-	// `rauc info`. Our fake binary ignores the actual file content, so we
-	// can pass any path.
-	tmp := filepath.Join(t.TempDir(), "bundle.raucb")
+	// `rauc info`. Our fake binary ignores the actual file content, but the
+	// path still has to be inside the backend's bundle store — a LocalPath
+	// off the bus that points anywhere else is refused (see bundlepath.go),
+	// so a bundle planted in an unrelated temp dir would no longer install.
+	tmp := filepath.Join(stateDir, "bundles", "bundle.raucb")
 	if err := writeFile644(tmp, []byte("x")); err != nil {
 		t.Fatalf("write tmp: %v", err)
 	}
@@ -631,7 +637,11 @@ func TestRAUCBackend_InstallFail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
-	if _, err := b.Install(context.Background(), "b1", "/path/to/bundle", proto.SlotB, nil); err == nil {
+	// Empty LocalPath, so the backend resolves the path itself: this test is
+	// about `rauc install` failing, and an out-of-store path would now be
+	// refused before rauc ran at all — passing for a reason that has nothing
+	// to do with what the test is named after.
+	if _, err := b.Install(context.Background(), "b1", "", proto.SlotB, nil); err == nil {
 		t.Error("expected install error")
 	}
 }
@@ -642,7 +652,8 @@ func TestRAUCBackend_InstallNoVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
-	if _, err := b.Install(context.Background(), "b1", "/path/to/bundle", proto.SlotB, nil); err == nil {
+	// Empty LocalPath for the same reason as TestRAUCBackend_InstallFail.
+	if _, err := b.Install(context.Background(), "b1", "", proto.SlotB, nil); err == nil {
 		t.Error("expected error when RAUC_MF_VERSION missing")
 	}
 }
