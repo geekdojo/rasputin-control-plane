@@ -215,7 +215,7 @@ func MeasureIdentitySet(src IdentitySources, dbBytes uint64) uint64 {
 	total := dbBytes
 	for _, f := range trustFiles(src) {
 		if info, err := os.Stat(f.abs); err == nil && info.Mode().IsRegular() {
-			total += uint64(info.Size())
+			total += byteCount(info.Size())
 		}
 	}
 	_ = filepath.WalkDir(headscaleDir(src), func(p string, d fs.DirEntry, err error) error {
@@ -223,7 +223,7 @@ func MeasureIdentitySet(src IdentitySources, dbBytes uint64) uint64 {
 			return nil //nolint:nilerr // an unreadable subtree contributes zero, it does not fail an estimate
 		}
 		if info, ierr := d.Info(); ierr == nil && info.Mode().IsRegular() {
-			total += uint64(info.Size())
+			total += byteCount(info.Size())
 		}
 		return nil
 	})

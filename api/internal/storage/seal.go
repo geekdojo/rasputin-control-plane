@@ -214,7 +214,7 @@ func Seal(dst io.Writer, src io.Reader, publicKey, keyID, scope string) (*SealRe
 	written := uint64(0)
 	emit := func(b []byte) error {
 		n, err := out.Write(b)
-		written += uint64(n)
+		written += byteCount(int64(n))
 		return err
 	}
 	if err := emit([]byte(SealMagic)); err != nil {
@@ -252,7 +252,7 @@ func Seal(dst io.Writer, src io.Reader, publicKey, keyID, scope string) (*SealRe
 		if err := sealChunk(aead, nonce, counter, last, header, sealed[:0], plain[:n], emit); err != nil {
 			return nil, err
 		}
-		plaintextBytes += uint64(n)
+		plaintextBytes += byteCount(int64(n))
 		counter++
 		if last {
 			break

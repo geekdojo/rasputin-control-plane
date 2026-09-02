@@ -182,7 +182,7 @@ func BackupWrite(ctx context.Context, b Backend, stagingRoot string, cmd proto.B
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %s", ErrStagingMissing, staged)
 	}
-	if cmd.SizeBytes > 0 && uint64(info.Size()) != cmd.SizeBytes {
+	if cmd.SizeBytes > 0 && byteCount(info.Size()) != cmd.SizeBytes {
 		return nil, fmt.Errorf("%w: the staged file is %d bytes and the api sealed %d",
 			ErrDigestMismatch, info.Size(), cmd.SizeBytes)
 	}
@@ -267,7 +267,7 @@ func BackupWrite(ctx context.Context, b Backend, stagingRoot string, cmd proto.B
 			ID:           cmd.GenerationID,
 			ArchivePath:  filepath.Join(final, proto.BackupArchiveFile),
 			ManifestPath: filepath.Join(final, proto.BackupManifestFile),
-			SizeBytes:    uint64(written),
+			SizeBytes:    byteCount(written),
 			Digest:       sum,
 			WrittenAt:    time.Now().UTC(),
 			Scope:        scopeOf(manifest),
@@ -367,7 +367,7 @@ func listGenerations(mountPath string) ([]proto.BackupGeneration, error) {
 			ManifestPath: filepath.Join(gensDir, e.Name(), proto.BackupManifestFile),
 		}
 		if st, serr := os.Stat(g.ArchivePath); serr == nil {
-			g.SizeBytes = uint64(st.Size())
+			g.SizeBytes = byteCount(st.Size())
 			g.WrittenAt = st.ModTime().UTC()
 		} else if di, derr := e.Info(); derr == nil {
 			g.WrittenAt = di.ModTime().UTC()
@@ -515,4 +515,21 @@ func humanBytes(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
+}
+
+// byteCount narrows a signed byte count to uint64.
+//
+// One helper rather than a conversion at each site, and an explicit guard
+// rather than a bare cast. A negative length is impossible for a regular file
+// or a completed io.Copy — but if one ever arrived, a bare `uint64(n)` would
+// turn it into roughly eighteen exabytes, and every size comparison downstream
+// (the write verb's staged-size check, the preflight's free-space arithmetic)
+// would then be reasoning about that number. Clamping to zero keeps a nonsense
+// input reading as "nothing", which is the direction those comparisons fail
+// safely in.
+func byteCount(n int64) uint64 {
+	if n < 0 {
+		return 0
+	}
+	return uint64(n)
 }

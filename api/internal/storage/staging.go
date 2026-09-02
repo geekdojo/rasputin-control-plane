@@ -209,7 +209,7 @@ func SnapshotDB(ctx context.Context, db *sql.DB, dst string) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("snapshot %s: %w", dst, err)
 	}
-	return uint64(info.Size()), nil
+	return byteCount(info.Size()), nil
 }
 
 // humanBytes renders a size for an operator-facing message.
@@ -224,4 +224,21 @@ func humanBytes(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
+}
+
+// byteCount narrows a signed byte count to uint64.
+//
+// One helper rather than a conversion at each site, and an explicit guard
+// rather than a bare cast. A negative length is impossible for a regular file
+// or a completed write — but if one ever arrived, a bare `uint64(n)` would turn
+// it into roughly eighteen exabytes, and the staging guard's arithmetic would
+// then be sizing a run against that number. Clamping to zero keeps a nonsense
+// input reading as "nothing", which is the direction the guard's comparison
+// fails safely in: a zero contribution can only make the estimate smaller and
+// the refusal more likely, never the reverse.
+func byteCount(n int64) uint64 {
+	if n < 0 {
+		return 0
+	}
+	return uint64(n)
 }

@@ -497,7 +497,7 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			return nil, err
 		}
 		for _, e := range manifest.Entries {
-			sc.Log("info", fmt.Sprintf("captured %s (%s)", e.Path, humanBytes(uint64(e.SizeBytes))))
+			sc.Log("info", fmt.Sprintf("captured %s (%s)", e.Path, humanBytes(byteCount(e.SizeBytes))))
 		}
 		// The fan-out phase's own line in the job feed. It runs on every backup
 		// and reports what it found, which is nothing — see FanOutAppVolumes.
@@ -506,7 +506,7 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 
 		return json.Marshal(runAssembleResult{
 			StagingName:        name,
-			SizeBytes:          uint64(info.Size()),
+			SizeBytes:          byteCount(info.Size()),
 			Scope:              manifest.Scope,
 			Complete:           manifest.Complete,
 			EntryCount:         len(manifest.Entries),
@@ -856,5 +856,5 @@ func fileSize(path string) uint64 {
 	if err != nil || !info.Mode().IsRegular() {
 		return 0
 	}
-	return uint64(info.Size())
+	return byteCount(info.Size())
 }
