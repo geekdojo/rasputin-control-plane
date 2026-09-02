@@ -78,11 +78,11 @@ jobs:
     steps:
       # fetch-depth: 0 so gremlins can diff the PR head against the base
       # branch (origin/<base>). Required by gremlins --diff.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # check-latest: fetch the newest 1.26.x rather than reusing whatever
           # patch the runner image happens to have cached. On 2026-08-13 the

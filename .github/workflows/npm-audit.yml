@@ -54,9 +54,9 @@ jobs:
     name: npm audit (register-gated)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # Project Node: current LTS, matching ci.yml's frontend job and
           # release.yml. No `cache:` — the audit installs nothing.
