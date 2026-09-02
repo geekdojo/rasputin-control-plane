@@ -580,6 +580,10 @@ func main() {
 	// at the top of the snapshot step, before the free-space guard sizes the run.
 	runner.Register(storage.RunWorkflow(backupStore, storage.RunConfig{
 		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		// Step 1 refuses a target on any other node: the archive is sealed here
+		// and read by the agent beside it, and that is also what keeps the
+		// staging root the api acts on coming from this host.
+		SelfNodeID: selfNodeID,
 		Sources: storage.IdentitySources{
 			TrustDir:     trustDir,
 			MeshStateDir: meshStateDir,

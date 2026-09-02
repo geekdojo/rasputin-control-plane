@@ -296,6 +296,12 @@ type runHarnessOpts struct {
 	badKey string
 	// retain overrides §4.4's four generations.
 	retain int
+	// targetNodeID claims the target on a node other than the one the api runs
+	// on. Empty means runNodeID, the co-located case.
+	targetNodeID string
+	// selfNodeID overrides what the api believes its own node is. Only set to
+	// "" deliberately, to cover the api that does not know.
+	selfNodeID *string
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -366,12 +372,17 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	r.SetBackoff(func(int) time.Duration { return 0 })
 	// No staging directory is configured here, because the api has none to
 	// configure: it stages where the preflight ack says the agent reads.
+	self := runNodeID
+	if opts.selfNodeID != nil {
+		self = *opts.selfNodeID
+	}
 	r.Register(RunWorkflow(st, RunConfig{
-		ClusterID: "home1",
-		Sources:   IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
-		DB:        st.DB(),
-		DBPath:    dbPath,
-		Retain:    opts.retain,
+		ClusterID:  "home1",
+		SelfNodeID: self,
+		Sources:    IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
+		DB:         st.DB(),
+		DBPath:     dbPath,
+		Retain:     opts.retain,
 	}))
 	h.runner = r
 	return h
@@ -390,7 +401,11 @@ func seedRunTarget(t *testing.T, st *Store, key testKeypair, opts runHarnessOpts
 	t.Helper()
 	ctx := context.Background()
 	jobID := "job-claim-1"
-	if err := st.CreatePending(ctx, jobID, runNodeID, "/dev/sdb", "the archive disk", time.Now().UTC()); err != nil {
+	nodeID := runNodeID
+	if opts.targetNodeID != "" {
+		nodeID = opts.targetNodeID
+	}
+	if err := st.CreatePending(ctx, jobID, nodeID, "/dev/sdb", "the archive disk", time.Now().UTC()); err != nil {
 		t.Fatalf("CreatePending: %v", err)
 	}
 	pub := key.publicB64

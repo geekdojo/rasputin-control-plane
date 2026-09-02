@@ -50,6 +50,24 @@ const (
 type RunConfig struct {
 	// ClusterID is stamped into the manifest.
 	ClusterID string
+	// SelfNodeID is the node this api runs on, and step 1 refuses any target
+	// that is not on it.
+	//
+	// Not a tidiness check. A run seals the archive on THIS host and hands the
+	// agent a file name to find on ITS host, so the handoff only exists when
+	// the two are the same machine — a target claimed on a storage node would
+	// fail at the write today, after a full snapshot, assemble and seal. And
+	// since the staging directory now arrives in that node's preflight ack,
+	// accepting one from a node the api does not share a filesystem with would
+	// mean letting a remote party name a directory this process creates files
+	// in and sweeps files out of. Refusing at step 1 closes both: the only
+	// staging root this api will ever act on comes from the agent running
+	// beside it, which is already root on the same box and gains nothing by
+	// steering the api.
+	//
+	// Empty refuses every run rather than defaulting to "trust whoever
+	// answers": see runValidate.
+	SelfNodeID string
 	// Sources says where the §4.5 identity set lives on this controlplane.
 	Sources IdentitySources
 	// DB is the live control-plane database, snapshotted with VACUUM INTO by
@@ -191,7 +209,7 @@ func RunWorkflow(store *Store, cfg RunConfig) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: RunJobKind,
 		Steps: []jobs.WorkflowStep{
-			{Name: "validate", Timeout: runValidateTimeout, Do: runValidate(store)},
+			{Name: "validate", Timeout: runValidateTimeout, Do: runValidate(store, cfg)},
 			{Name: "preflight", Timeout: runPreflightTimeout, Retries: 1, Do: runPreflight(cfg)},
 			{Name: "snapshot_db", Timeout: runSnapshotTimeout, Do: runSnapshotDB(cfg)},
 			{Name: "assemble", Timeout: runAssembleTimeout, Do: runAssemble(cfg)},
@@ -303,7 +321,7 @@ type runWriteResult struct {
 // runValidate is the whole of the api's own policy check, and it is where four
 // separate refusals live. Each of them costs a re-run; none of them touches a
 // disk.
-func runValidate(store *Store) jobs.DoFn {
+func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := ParseRunSpec(sc.Spec)
 		if err != nil {
@@ -338,6 +356,20 @@ func runValidate(store *Store) jobs.DoFn {
 			return nil, errors.New("no backup target is claimed, so there is nowhere to write. Claim a disk under Storage → Backups first — until then nothing on this cluster is backed up anywhere")
 		}
 		target := claimed[0]
+		// The archive is sealed HERE and read by the agent THERE, by name. That
+		// only works when here and there are the same machine, and it is also
+		// what confines the staging root this run will accept to the agent
+		// sharing this filesystem — see RunConfig.SelfNodeID.
+		self := strings.TrimSpace(cfg.SelfNodeID)
+		if self == "" {
+			return nil, errors.New("this api does not know which node it runs on (RASPUTIN_SELF_NODE_ID is unset), and a backup run has to know that before it will stage an archive for an agent to read. Nothing was staged")
+		}
+		if target.NodeID != self {
+			return nil, fmt.Errorf("the claimed backup target (%s, partUuid %s) is on node %s, and this api runs on %s. "+
+				"A run seals the archive on the control plane and hands the agent BESIDE IT a file name to find; there is no transfer to another node yet, "+
+				"so this would have failed at the write step after a full snapshot and seal. Claim a target on %s",
+				displayLabel(target.Label), target.PartUUID, target.NodeID, self, self)
+		}
 		if strings.TrimSpace(target.PartUUID) == "" {
 			return nil, fmt.Errorf("the claimed backup target (%s on %s) has no partition UUID recorded, which is the only identifier a target has. Re-claim the disk",
 				displayLabel(target.Label), target.NodeID)
@@ -428,6 +460,9 @@ func runPreflight(cfg RunConfig) jobs.DoFn {
 			return nil, refusalError("backup preflight on "+tgt.NodeID, ack.Refusal, ack.Detail)
 		}
 		stagingRoot := strings.TrimSpace(ack.StagingRoot)
+		if err := checkStagingRoot(stagingRoot); err != nil && stagingRoot != "" {
+			return nil, fmt.Errorf("the agent on %s named %q as its backup staging root: %w. Nothing was staged", tgt.NodeID, stagingRoot, err)
+		}
 		if stagingRoot == "" {
 			// Refused HERE, which is the cheapest place: nothing has been
 			// snapshotted, assembled or sealed. An agent that does not name its
@@ -499,7 +534,10 @@ func runSnapshotDB(cfg RunConfig) jobs.DoFn {
 			humanBytes(budget.ReserveBytes)))
 
 		name := stagingName(tgt.GenerationID, "db")
-		dst := filepath.Join(stagingDir, name)
+		dst, err := stagedPath(sc, name)
+		if err != nil {
+			return nil, err
+		}
 		// A leftover from a previous attempt is removed rather than adopted:
 		// SnapshotDB refuses to write onto an existing file, and adopting a
 		// stale snapshot would mean sealing yesterday's database as today's.
@@ -527,14 +565,15 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 		if err := priorResult(sc, "snapshot_db", &snap); err != nil {
 			return nil, err
 		}
-		stagingDir, err := runStagingDir(sc)
+		snapPath, err := stagedPath(sc, snap.StagingName)
 		if err != nil {
 			return nil, err
 		}
-		snapPath := filepath.Join(stagingDir, snap.StagingName)
-
 		name := stagingName(tgt.GenerationID, "tar")
-		dst := filepath.Join(stagingDir, name)
+		dst, err := stagedPath(sc, name)
+		if err != nil {
+			return nil, err
+		}
 		_ = os.Remove(dst)
 		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 		if err != nil {
@@ -607,11 +646,10 @@ func runSeal(cfg RunConfig) jobs.DoFn {
 		if err := priorResult(sc, "assemble", &asm); err != nil {
 			return nil, err
 		}
-		stagingDir, err := runStagingDir(sc)
+		src, err := stagedPath(sc, asm.StagingName)
 		if err != nil {
 			return nil, err
 		}
-		src := filepath.Join(stagingDir, asm.StagingName)
 		in, err := os.Open(src)
 		if err != nil {
 			return nil, fmt.Errorf("open assembled archive: %w", err)
@@ -619,7 +657,10 @@ func runSeal(cfg RunConfig) jobs.DoFn {
 		defer func() { _ = in.Close() }()
 
 		name := stagingName(tgt.GenerationID, "sealed")
-		dst := filepath.Join(stagingDir, name)
+		dst, err := stagedPath(sc, name)
+		if err != nil {
+			return nil, err
+		}
 		_ = os.Remove(dst)
 		out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 		if err != nil {
@@ -708,8 +749,8 @@ func runWrite(cfg RunConfig) jobs.DoFn {
 		// the agent reads it, so deleting it earlier would break the very RPC
 		// that is in flight. And not never: §4.7's third discipline is that an
 		// orphaned staging file is a permanent disk leak with no owner.
-		if stagingDir, derr := runStagingDir(sc); derr == nil {
-			_ = os.Remove(filepath.Join(stagingDir, sealed.StagingName))
+		if staged, derr := stagedPath(sc, sealed.StagingName); derr == nil {
+			_ = os.Remove(staged)
 		}
 
 		// Recorded NOW, not at the end of the saga. Step 7 runs after this one,
@@ -923,6 +964,53 @@ func priorRunTarget(sc *jobs.StepCtx) (*runTarget, error) {
 // configuration — is the bug this saga shipped with. Two independent
 // derivations of one path agree exactly as long as nobody changes either, and
 // then they do not, silently, in the configuration that ships.
+// checkStagingRoot is the shape gate on the one path in this saga that comes
+// off the wire.
+//
+// Step 1 has already established that the answering agent is the one on this
+// host, which is the substantive control — a directory named by a process that
+// is already root beside us is not an escalation. This is the second, cheap
+// one: a value that is not an absolute, already-clean path is not a staging
+// root any agent of ours resolves, so it is a bug or a corrupted reply, and
+// either way it must not reach os.MkdirAll, CleanStaging or a file open. `..`
+// in particular can never travel: filepath.Clean would have removed it, so a
+// path containing one is refused rather than normalised.
+func checkStagingRoot(dir string) error {
+	if dir == "" {
+		return errors.New("it is empty")
+	}
+	if !filepath.IsAbs(dir) {
+		return errors.New("it is not an absolute path")
+	}
+	if filepath.Clean(dir) != dir {
+		return errors.New("it is not a clean path — a staging root with a `..`, a doubled separator or a trailing slash is not one this api will write into")
+	}
+	return nil
+}
+
+// stagedPath is the ONE place a path under the staging root is built, and the
+// only way any step in this saga names a staged file.
+//
+// Both halves are checked HERE, immediately before the join, rather than at the
+// boundary each arrived at. That is the point: the root and the name both
+// round-trip through the job ledger as JSON between steps, so a check that ran
+// once when the value was produced does not cover the read that actually opens
+// the file. The root passes checkStagingRoot (absolute, already clean); the
+// name passes proto.BackupValidStagingName, the SAME predicate the agent's
+// write verb applies to what it is sent — a single path component of
+// [A-Za-z0-9._-], no separator, no leading dot. Neither can contribute a
+// traversal, so the result is always a direct child of the staging root.
+func stagedPath(sc *jobs.StepCtx, name string) (string, error) {
+	dir, err := runStagingDir(sc)
+	if err != nil {
+		return "", err
+	}
+	if !proto.BackupValidStagingName(name) {
+		return "", fmt.Errorf("refusing to touch %q under %s: a staged file is named by a single plain file name and this is not one", name, dir)
+	}
+	return filepath.Join(dir, name), nil
+}
+
 func runStagingDir(sc *jobs.StepCtx) (string, error) {
 	var pre runPreflightResult
 	if err := priorResult(sc, "preflight", &pre); err != nil {
@@ -931,6 +1019,13 @@ func runStagingDir(sc *jobs.StepCtx) (string, error) {
 	dir := strings.TrimSpace(pre.StagingRoot)
 	if dir == "" {
 		return "", errors.New("the preflight step recorded no staging root, so nothing knows where the agent would look for this archive. Nothing was staged")
+	}
+	// Re-checked on the way out of the ledger, not only on the way in. The
+	// value round-trips through JSON in the job store between steps, and a
+	// guard that runs once at the boundary is a guard that does not cover the
+	// read — which is where the path is actually joined and opened.
+	if err := checkStagingRoot(dir); err != nil {
+		return "", fmt.Errorf("the recorded staging root %q is unusable: %w", dir, err)
 	}
 	return dir, nil
 }

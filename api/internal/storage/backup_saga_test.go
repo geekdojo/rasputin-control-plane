@@ -685,3 +685,112 @@ func TestBackupRunSweepsOrphansBeforeSizingTheDisk(t *testing.T) {
 		t.Errorf("staging is not empty after a successful run: %v", left)
 	}
 }
+
+// TestBackupRunRefusesATargetOnAnotherNode: the staging root now arrives in the
+// preflight ack, so the question of WHOSE ack the api will act on is a real
+// one. Step 1 answers it — the target has to be on this node — and the refusal
+// costs nothing, where the old failure cost a full snapshot, assemble and seal
+// before the agent said it could not find the file.
+func TestBackupRunRefusesATargetOnAnotherNode(t *testing.T) {
+	h := newRunHarness(t, &fakeBackupAgent{}, runHarnessOpts{targetNodeID: "n-storage-2"})
+	jobID := h.submit(t, RunSpec{Reason: ReasonManual})
+	j := h.waitTerminal(t, jobID)
+	if j.Status != jobs.StatusFailed {
+		t.Fatalf("job status = %s, want failed", j.Status)
+	}
+	for _, want := range []string{"is on node n-storage-2", "runs on " + runNodeID, "no transfer to another node"} {
+		if !strings.Contains(j.Error, want) {
+			t.Errorf("job error = %q, want it to contain %q", j.Error, want)
+		}
+	}
+	// Before any RPC at all: the agent was never even asked to preflight, so no
+	// staging root from a node this api does not share a filesystem with ever
+	// reached it.
+	h.agent.mu.Lock()
+	preflights := len(h.agent.preflightCmds)
+	h.agent.mu.Unlock()
+	if preflights != 0 {
+		t.Errorf("the agent was preflighted %d time(s) for a target on another node", preflights)
+	}
+	if left := h.stagingEntries(t); len(left) != 0 {
+		t.Errorf("a step-1 refusal staged %v", left)
+	}
+}
+
+// TestBackupRunRefusesWhenTheApiDoesNotKnowItsOwnNode: with RASPUTIN_SELF_NODE_ID
+// unset the co-location check cannot be made, and the answer is a refusal rather
+// than "act on whichever agent answers".
+func TestBackupRunRefusesWhenTheApiDoesNotKnowItsOwnNode(t *testing.T) {
+	none := ""
+	h := newRunHarness(t, &fakeBackupAgent{}, runHarnessOpts{selfNodeID: &none})
+	jobID := h.submit(t, RunSpec{Reason: ReasonScheduled})
+	j := h.waitTerminal(t, jobID)
+	if j.Status != jobs.StatusFailed {
+		t.Fatalf("job status = %s, want failed", j.Status)
+	}
+	if !strings.Contains(j.Error, "does not know which node it runs on") {
+		t.Errorf("job error = %q", j.Error)
+	}
+	if got := h.agent.writeCount(); got != 0 {
+		t.Errorf("the agent was asked to write %d time(s)", got)
+	}
+}
+
+// TestBackupRunRefusesAMisshapenStagingRoot: the one value in this saga that
+// comes off the wire is shape-checked before it reaches os.MkdirAll,
+// CleanStaging or a file open. A relative path or one carrying `..` is not
+// something any agent of ours resolves, so it is a bug or a corrupted reply and
+// gets refused rather than normalised.
+func TestBackupRunRefusesAMisshapenStagingRoot(t *testing.T) {
+	for _, tc := range []struct{ name, root, want string }{
+		{"relative", "var/lib/rasputin/backup-staging", "not an absolute path"},
+		{"traversal", "/var/lib/rasputin/agent-state/../../../etc", "not a clean path"},
+		{"trailing separator", "/var/lib/rasputin/backup-staging/", "not a clean path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := tc.root
+			agent := &fakeBackupAgent{
+				preflight: func(cmd proto.BackupPreflightCmd) proto.BackupPreflightAck {
+					return proto.BackupPreflightAck{
+						OK: true, Present: true, PartUUID: cmd.PartUUID,
+						MountPath: "/mnt/rasputin-backup", TotalBytes: 2 << 40,
+						FreeBytes: 1 << 40, RequiredBytes: cmd.EstimateBytes, Sufficient: true,
+						StagingRoot: root,
+					}
+				},
+			}
+			h := newRunHarness(t, agent, runHarnessOpts{})
+			jobID := h.submit(t, RunSpec{Reason: ReasonManual})
+			j := h.waitTerminal(t, jobID)
+			if j.Status != jobs.StatusFailed {
+				t.Fatalf("job status = %s, want failed", j.Status)
+			}
+			if !strings.Contains(j.Error, tc.want) {
+				t.Errorf("job error = %q, want it to contain %q", j.Error, tc.want)
+			}
+			if got := h.agent.writeCount(); got != 0 {
+				t.Errorf("the agent was asked to write %d time(s)", got)
+			}
+		})
+	}
+}
+
+// TestCheckStagingRootAcceptsWhatTheAgentActuallyResolves: the shape gate must
+// not reject the real answers — the shipping default and a directory an
+// operator pointed RASPUTIN_BACKUP_STAGING_DIR at.
+func TestCheckStagingRootAcceptsWhatTheAgentActuallyResolves(t *testing.T) {
+	for _, ok := range []string{
+		"/var/lib/rasputin/agent-state/backup-staging",
+		"/mnt/elsewhere/staging",
+		"/tmp/x",
+	} {
+		if err := checkStagingRoot(ok); err != nil {
+			t.Errorf("checkStagingRoot(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "relative/dir", "/a/../b", "/a//b", "/a/"} {
+		if err := checkStagingRoot(bad); err == nil {
+			t.Errorf("checkStagingRoot(%q) accepted a path this api must not write into", bad)
+		}
+	}
+}
