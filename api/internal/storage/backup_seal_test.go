@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -532,5 +533,82 @@ func TestDueFuncGatesTheSchedule(t *testing.T) {
 	}
 	if ok, _ := due(ctx); ok {
 		t.Error("the schedule fired again immediately after a success, inside the cadence")
+	}
+}
+
+// TestSealTerminatesOnAnExactChunkBoundary is the branch a plaintext that is a
+// whole multiple of the chunk size takes, and the reason it exists.
+//
+// Without it the stream would end with a chunk whose last-flag is NOT set, and
+// a reader could not distinguish "the archive ended here" from "the archive was
+// truncated at a boundary" — which is precisely the failure a digest alone
+// might miss on a disk that filled mid-write. The mutation gate flagged this
+// path as uncovered; a plaintext of 5000 × 42 bytes never lands on a boundary.
+func TestSealTerminatesOnAnExactChunkBoundary(t *testing.T) {
+	key := newTestKeypair(t)
+	for _, size := range []int{0, sealChunkSize, 2 * sealChunkSize} {
+		t.Run(fmt.Sprintf("%d bytes", size), func(t *testing.T) {
+			plaintext := bytes.Repeat([]byte("x"), size)
+			var out bytes.Buffer
+			res, err := Seal(&out, bytes.NewReader(plaintext), key.publicB64, "key-1", proto.BackupScopeIdentityOnly)
+			if err != nil {
+				t.Fatalf("Seal: %v", err)
+			}
+			if res.PlaintextBytes != uint64(size) {
+				t.Errorf("plaintextBytes = %d, want %d", res.PlaintextBytes, size)
+			}
+			// openSealed asserts a last-flagged chunk was seen, so a stream that
+			// ended without terminating fails here.
+			got, _ := openSealed(t, out.Bytes(), key.priv)
+			if !bytes.Equal(got, plaintext) {
+				t.Errorf("round trip produced %d bytes, want %d", len(got), size)
+			}
+		})
+	}
+}
+
+// TestSealDetectsTruncationAtAChunkBoundary is the property the branch above
+// buys: lopping a whole chunk off the end of a boundary-aligned archive must
+// not open cleanly as a shorter archive.
+func TestSealDetectsTruncationAtAChunkBoundary(t *testing.T) {
+	key := newTestKeypair(t)
+	var out bytes.Buffer
+	if _, err := Seal(&out, bytes.NewReader(bytes.Repeat([]byte("y"), 2*sealChunkSize)),
+		key.publicB64, "key-1", proto.BackupScopeIdentityOnly); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	full := out.Bytes()
+	// Drop the final (empty, last-flagged) chunk: 16 bytes of tag.
+	truncated := full[:len(full)-16]
+
+	rest := truncated[len(SealMagic):]
+	nl := bytes.IndexByte(rest, '\n')
+	headerBytes, body := rest[:nl], rest[nl+1:]
+	var h sealHeader
+	if err := json.Unmarshal(headerBytes, &h); err != nil {
+		t.Fatalf("header: %v", err)
+	}
+	epkRaw, _ := base64.RawURLEncoding.DecodeString(h.EphemeralPublicKey)
+	epk, _ := ecdh.X25519().NewPublicKey(epkRaw)
+	shared, _ := key.priv.ECDH(epk)
+	salt := append(append([]byte{}, epkRaw...), key.priv.PublicKey().Bytes()...)
+	ck, _ := hkdf.Key(sha256.New, shared, salt, sealInfo, chacha20poly1305.KeySize)
+	aead, _ := chacha20poly1305.New(ck)
+
+	// Every remaining chunk is a FULL one, so none of them can carry the
+	// last-chunk flag: a reader walking this stream never sees a terminator and
+	// therefore knows it is looking at a truncation rather than an archive.
+	chunk := h.ChunkSize + aead.Overhead()
+	nonce := make([]byte, chacha20poly1305.NonceSize)
+	for i := 0; i*chunk < len(body); i++ {
+		end := min((i+1)*chunk, len(body))
+		for j := range nonce {
+			nonce[j] = 0
+		}
+		binary.BigEndian.PutUint64(nonce[0:8], uint64(i))
+		nonce[8] = 1 // claim it is the last chunk
+		if _, err := aead.Open(nil, nonce, body[i*chunk:end], headerBytes); err == nil {
+			t.Fatalf("chunk %d opened as a terminating chunk; truncation would be undetectable", i)
+		}
 	}
 }
