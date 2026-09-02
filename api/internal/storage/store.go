@@ -274,3 +274,17 @@ func scanTarget(scan func(...any) error) (*BackupTarget, error) {
 	t.HasWrappedKeys = t.wrappedByPassphrase != "" && t.wrappedByRecoveryCode != ""
 	return &t, nil
 }
+
+// DB exposes the underlying *sql.DB.
+//
+// Narrow and deliberate: the ONE caller is main, wiring backup.run's
+// snapshot_db step, which needs a handle to run `VACUUM INTO` against the live
+// control-plane database. Every store package opens the same SQLite file
+// (dbutil.Open), so any of them would have served — this one is chosen because
+// the backup workflow already holds it, and because a snapshot of the whole
+// database belongs next to the code that decides what goes in an archive.
+//
+// It is not a general escape hatch. Nothing else in this package returns it,
+// and a caller reaching for it to run ad-hoc SQL against another package's
+// tables is doing something this method was not opened for.
+func (s *Store) DB() *sql.DB { return s.db }

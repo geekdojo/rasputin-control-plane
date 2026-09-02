@@ -117,6 +117,12 @@ func refusalFor(err error) proto.StorageRefusal {
 		return proto.StorageRefusalNotWholeDisk
 	case errors.Is(err, ErrNotFound):
 		return proto.StorageRefusalNotFound
+	case errors.Is(err, ErrInsufficientSpace):
+		return proto.BackupRefusalInsufficientSpace
+	case errors.Is(err, ErrStagingMissing):
+		return proto.BackupRefusalStagingMissing
+	case errors.Is(err, ErrDigestMismatch):
+		return proto.BackupRefusalDigestMismatch
 	default:
 		return proto.StorageRefusalBackendError
 	}

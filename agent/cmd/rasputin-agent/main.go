@@ -555,7 +555,24 @@ func main() {
 				"backup-target selection is disabled on this node — no disk can be claimed as a backup target")
 		}
 		if stBackend != nil {
-			stSubs, err := storage.RegisterHandlers(nc, nodeID, stBackend)
+			// §4.7's staging path, and §4.7's third discipline with it: an
+			// orphaned staged archive after a crash or a power cut is a
+			// permanent disk leak with no owner and no alert, on the one
+			// partition §5's budget table is about. Swept at start, before the
+			// write verb is exposed, so a run that died mid-seal cannot leave
+			// its bytes there indefinitely.
+			//
+			// The api writes into this same directory — both halves read
+			// RASPUTIN_BACKUP_STAGING_DIR — and it is the ONLY directory the
+			// backup write verb will read a file from.
+			stagingRoot := storage.StagingRoot(stateDir)
+			if err := os.MkdirAll(stagingRoot, 0o700); err != nil {
+				log.Printf("rasputin-agent: backup staging dir %s: %v", stagingRoot, err)
+			}
+			if n, freed := storage.CleanStaging(stagingRoot); n > 0 {
+				log.Printf("rasputin-agent: swept %d orphaned staged backup archive(s) from %s (%d bytes)", n, stagingRoot, freed)
+			}
+			stSubs, err := storage.RegisterHandlers(nc, nodeID, stBackend, stagingRoot)
 			if err != nil {
 				log.Fatalf("rasputin-agent: register storage handlers: %v", err)
 			}
