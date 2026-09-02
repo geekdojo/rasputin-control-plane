@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -49,11 +50,6 @@ const (
 type RunConfig struct {
 	// ClusterID is stamped into the manifest.
 	ClusterID string
-	// StagingDir is §4.7's staging path — where the snapshot, the assembled tar
-	// and the sealed archive live, and the ONLY directory the agent's write verb
-	// will read a file from. Both halves derive it from
-	// RASPUTIN_BACKUP_STAGING_DIR; see StagingDir.
-	StagingDir string
 	// Sources says where the §4.5 identity set lives on this controlplane.
 	Sources IdentitySources
 	// DB is the live control-plane database, snapshotted with VACUUM INTO by
@@ -68,6 +64,41 @@ type RunConfig struct {
 	// the moment it lands rather than at the end of the saga. Set by
 	// RunWorkflow from its own argument — a caller never fills it in.
 	Store *Store
+	// staging remembers the staging root step 2 was told about, for the ONE
+	// consumer that cannot read a step result: the OnTerminal hook, which is
+	// handed a job id and a verdict and nothing else. Set by RunWorkflow.
+	staging *stagingRootRef
+}
+
+// stagingRootRef carries the agent-reported staging root from step 2 to
+// finalizeRunRow.
+//
+// A field on the config rather than a package variable, and written only by
+// preflight. It is safe to keep one per workflow because step 1 refuses to
+// start a second run while one is in flight, so there is never a second run
+// whose root this could be confused with — the same argument the blanket sweep
+// in finalizeRunRow already rests on.
+type stagingRootRef struct {
+	mu   sync.Mutex
+	root string
+}
+
+func (r *stagingRootRef) set(dir string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.root = dir
+}
+
+func (r *stagingRootRef) get() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.root
 }
 
 func (c RunConfig) retain() int {
@@ -156,6 +187,7 @@ func ParseRunSpec(raw json.RawMessage) (*RunSpec, error) {
 // the benign side of the trade.
 func RunWorkflow(store *Store, cfg RunConfig) jobs.Workflow {
 	cfg.Store = store
+	cfg.staging = &stagingRootRef{}
 	return jobs.Workflow{
 		Kind: RunJobKind,
 		Steps: []jobs.WorkflowStep{
@@ -215,6 +247,13 @@ type runPreflightResult struct {
 	FreeBytes        uint64 `json:"freeBytes,omitempty"`
 	RequiredBytes    uint64 `json:"requiredBytes,omitempty"`
 	GenerationsFound int    `json:"generationsFound"`
+	// StagingRoot is the directory the TARGET NODE'S agent will read the staged
+	// archive from, as that agent reported it. Every later step stages into
+	// this and the api derives no staging path of its own — see runStagingDir.
+	// A path, and it is in the ledger on purpose: the one thing an operator
+	// reading a "staged archive not found" failure needs is both halves of the
+	// disagreement, and this is the api's half.
+	StagingRoot string `json:"stagingRoot,omitempty"`
 }
 
 // runSnapshotResult is step 3's output. StagingName is a plain file name, never
@@ -353,6 +392,10 @@ func runValidate(store *Store) jobs.DoFn {
 
 // runPreflight is §4.4's pre-flight free-space check, on the TARGET side. The
 // SOURCE side's guard is step 3's, because it needs a measurement step 3 makes.
+//
+// It is also where the api learns WHERE TO STAGE. The ack carries the node's
+// staging root, and every step that touches a staged file reads it from this
+// step's result rather than deriving one — see runStagingDir.
 func runPreflight(cfg RunConfig) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		tgt, err := priorRunTarget(sc)
@@ -384,14 +427,29 @@ func runPreflight(cfg RunConfig) jobs.DoFn {
 		if !ack.OK {
 			return nil, refusalError("backup preflight on "+tgt.NodeID, ack.Refusal, ack.Detail)
 		}
+		stagingRoot := strings.TrimSpace(ack.StagingRoot)
+		if stagingRoot == "" {
+			// Refused HERE, which is the cheapest place: nothing has been
+			// snapshotted, assembled or sealed. An agent that does not name its
+			// staging root is one the api would have to guess for, and guessing
+			// is the bug this field exists to end — the guess was wrong on
+			// every shipping image until 2026-09-02.
+			return nil, fmt.Errorf("the agent on %s did not say where its backup staging root is, so there is nowhere to stage an archive it will read. "+
+				"That field arrived with the fix for the staging-root disagreement; this node is running an agent older than its api. Nothing was staged",
+				tgt.NodeID)
+		}
+		// Remembered for the OnTerminal sweep, which gets no step results.
+		cfg.staging.set(stagingRoot)
 		res := runPreflightResult{
 			PartUUID: tgt.PartUUID, MountPath: ack.MountPath,
 			TotalBytes: ack.TotalBytes, FreeBytes: ack.FreeBytes,
 			RequiredBytes: ack.RequiredBytes, GenerationsFound: len(ack.Generations),
+			StagingRoot: stagingRoot,
 		}
 		sc.Log("info", fmt.Sprintf("target %s: %s free of %s, %d generation(s) retained; this run needs about %s",
 			ack.MountPath, humanBytes(ack.FreeBytes), humanBytes(ack.TotalBytes),
 			len(ack.Generations), humanBytes(ack.RequiredBytes)))
+		sc.Log("info", fmt.Sprintf("%s stages backup archives in %s; this run will seal into it", tgt.NodeID, stagingRoot))
 		return json.Marshal(res)
 	}
 }
@@ -411,21 +469,37 @@ func runSnapshotDB(cfg RunConfig) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		if err := EnsureStagingDir(cfg.StagingDir); err != nil {
-			return nil, fmt.Errorf("staging dir %s: %w", cfg.StagingDir, err)
+		stagingDir, err := runStagingDir(sc)
+		if err != nil {
+			return nil, err
+		}
+		if err := EnsureStagingDir(stagingDir); err != nil {
+			return nil, fmt.Errorf("staging dir %s: %w", stagingDir, err)
+		}
+		// §4.7's third discipline, immediately before the guard that cares
+		// about it: an archive orphaned by a run that died between sealing and
+		// writing is a permanent disk leak, and it is also free space this
+		// run's budget would otherwise be denied. Swept here rather than at api
+		// start because this is the first moment the api knows which directory
+		// the handoff uses — and it is the moment the space matters. Safe as a
+		// blanket sweep for the same reason finalizeRunRow's is: step 1 refuses
+		// to start a second run while one is in flight.
+		if n, freed := CleanStaging(stagingDir); n > 0 {
+			sc.Log("warn", fmt.Sprintf("swept %d orphaned staged archive(s) from %s before staging (%s reclaimed) — a previous run died between sealing and writing",
+				n, stagingDir, humanBytes(byteCount(freed))))
 		}
 		dbBytes := fileSize(cfg.DBPath)
 		identityBytes := MeasureIdentitySet(cfg.Sources, dbBytes)
-		budget, err := PlanStaging(cfg.StagingDir, dbBytes, identityBytes)
+		budget, err := PlanStaging(stagingDir, dbBytes, identityBytes)
 		if err != nil {
 			return nil, err
 		}
 		sc.Log("info", fmt.Sprintf("staging %s: %s free, this run peaks at about %s plus a %s reserve",
-			cfg.StagingDir, humanBytes(budget.FreeBytes), humanBytes(budget.PeakBytes),
+			stagingDir, humanBytes(budget.FreeBytes), humanBytes(budget.PeakBytes),
 			humanBytes(budget.ReserveBytes)))
 
 		name := stagingName(tgt.GenerationID, "db")
-		dst := filepath.Join(cfg.StagingDir, name)
+		dst := filepath.Join(stagingDir, name)
 		// A leftover from a previous attempt is removed rather than adopted:
 		// SnapshotDB refuses to write onto an existing file, and adopting a
 		// stale snapshot would mean sealing yesterday's database as today's.
@@ -453,10 +527,14 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 		if err := priorResult(sc, "snapshot_db", &snap); err != nil {
 			return nil, err
 		}
-		snapPath := filepath.Join(cfg.StagingDir, snap.StagingName)
+		stagingDir, err := runStagingDir(sc)
+		if err != nil {
+			return nil, err
+		}
+		snapPath := filepath.Join(stagingDir, snap.StagingName)
 
 		name := stagingName(tgt.GenerationID, "tar")
-		dst := filepath.Join(cfg.StagingDir, name)
+		dst := filepath.Join(stagingDir, name)
 		_ = os.Remove(dst)
 		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 		if err != nil {
@@ -529,7 +607,11 @@ func runSeal(cfg RunConfig) jobs.DoFn {
 		if err := priorResult(sc, "assemble", &asm); err != nil {
 			return nil, err
 		}
-		src := filepath.Join(cfg.StagingDir, asm.StagingName)
+		stagingDir, err := runStagingDir(sc)
+		if err != nil {
+			return nil, err
+		}
+		src := filepath.Join(stagingDir, asm.StagingName)
 		in, err := os.Open(src)
 		if err != nil {
 			return nil, fmt.Errorf("open assembled archive: %w", err)
@@ -537,7 +619,7 @@ func runSeal(cfg RunConfig) jobs.DoFn {
 		defer func() { _ = in.Close() }()
 
 		name := stagingName(tgt.GenerationID, "sealed")
-		dst := filepath.Join(cfg.StagingDir, name)
+		dst := filepath.Join(stagingDir, name)
 		_ = os.Remove(dst)
 		out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 		if err != nil {
@@ -626,7 +708,9 @@ func runWrite(cfg RunConfig) jobs.DoFn {
 		// the agent reads it, so deleting it earlier would break the very RPC
 		// that is in flight. And not never: §4.7's third discipline is that an
 		// orphaned staging file is a permanent disk leak with no owner.
-		_ = os.Remove(filepath.Join(cfg.StagingDir, sealed.StagingName))
+		if stagingDir, derr := runStagingDir(sc); derr == nil {
+			_ = os.Remove(filepath.Join(stagingDir, sealed.StagingName))
+		}
 
 		// Recorded NOW, not at the end of the saga. Step 7 runs after this one,
 		// so a prune failure would otherwise leave a `failed` row naming no
@@ -754,8 +838,13 @@ func finalizeRunRow(store *Store, cfg RunConfig) func(context.Context, string, b
 		// A blanket sweep is safe because step 1 refuses to start a second run
 		// while one is in flight, so there is never another run's staged
 		// artefact here to destroy.
-		if cfg.StagingDir != "" {
-			if n, freed := CleanStaging(cfg.StagingDir); n > 0 {
+		//
+		// The directory is the one step 2 was told about, remembered on the
+		// config. Empty means the run never got past step 1 — no staging root
+		// was ever resolved, so nothing was staged and there is nothing to
+		// sweep.
+		if dir := cfg.staging.get(); dir != "" {
+			if n, freed := CleanStaging(dir); n > 0 {
 				log.Printf("storage: backup run %s left %d staged file(s) behind; removed them (%d bytes)", jobID, n, freed)
 			}
 		}
@@ -824,6 +913,26 @@ func priorRunTarget(sc *jobs.StepCtx) (*runTarget, error) {
 		return nil, errors.New("the validate step left no usable target, so nothing has decided where this backup would go")
 	}
 	return &tgt, nil
+}
+
+// runStagingDir is the ONLY way a step learns where to stage, and it re-derives
+// nothing: the answer came off the target node in step 2 and is read back out
+// of that step's persisted result.
+//
+// The alternative — each step resolving a directory from the api's own
+// configuration — is the bug this saga shipped with. Two independent
+// derivations of one path agree exactly as long as nobody changes either, and
+// then they do not, silently, in the configuration that ships.
+func runStagingDir(sc *jobs.StepCtx) (string, error) {
+	var pre runPreflightResult
+	if err := priorResult(sc, "preflight", &pre); err != nil {
+		return "", err
+	}
+	dir := strings.TrimSpace(pre.StagingRoot)
+	if dir == "" {
+		return "", errors.New("the preflight step recorded no staging root, so nothing knows where the agent would look for this archive. Nothing was staged")
+	}
+	return dir, nil
 }
 
 func priorResult(sc *jobs.StepCtx, step string, into any) error {

@@ -46,15 +46,44 @@ import (
 // path: prune only ever removes a directory it found by listing the target's
 // own generations directory, and never the one the current run just wrote.
 
-// stagingRootFor is where the api leaves sealed archives for this node to pick
-// up. Overridable so the agent and the api can be pointed at the same directory
-// in a test or a dev tree; in production both derive it from the data dir.
+// backupStagingDirName is the staging directory's name under the agent's state
+// dir. It is not a shared constant: nothing outside this package derives this
+// path any more. See StagingRoot.
 const backupStagingDirName = "backup-staging"
 
-// StagingRoot returns the directory the write verb reads staged archives from.
-// It is <stateDir>/backup-staging by default, and RASPUTIN_BACKUP_STAGING_DIR
-// overrides it — the api reads the same variable, which is what keeps the two
-// halves of the handoff pointed at one directory.
+// StagingRoot returns the directory the write verb reads staged archives from,
+// and the ONE place that directory is decided.
+//
+// <stateDir>/backup-staging, with RASPUTIN_BACKUP_STAGING_DIR as an override
+// for a dev tree or a test. Both are local to this process — no part of the
+// answer comes off the wire, which is the point.
+//
+// # Why the agent decides, and the api asks
+//
+// This used to be derived twice. The api joined `backup-staging` onto its DATA
+// dir and the agent joined it onto its STATE dir, and the sentence in both
+// files said the shared RASPUTIN_BACKUP_STAGING_DIR was what kept them pointed
+// at one directory. On the shipping image that variable is set nowhere, so the
+// two halves resolved to /var/lib/rasputin/backup-staging and
+// /var/lib/rasputin/agent-state/backup-staging respectively: the api sealed a
+// 105 MB archive and the agent refused it as missing, every time, in the only
+// configuration that ships (e3bench 2026-09-02). The unit tests passed because
+// each side was asked to resolve the SAME argument, which is not the question
+// production asks.
+//
+// So the derivation happens once, here, and the api learns the answer from
+// BackupPreflightAck.StagingRoot — step 2 of the saga, on the same node, before
+// anything is staged. The direction is not arbitrary. This root is the write
+// verb's containment boundary: BackupWrite joins a validated plain file NAME
+// onto it and will open nothing else. A root supplied by the api would make
+// that boundary something the caller chooses, i.e. not a boundary — one bug in
+// the api and a verb that copies files onto a removable disk could be aimed at
+// /etc. The command still carries a name and never a path, and this function's
+// answer still comes only from this node's own configuration.
+//
+// A compute or storage node keeps its own root under its own state dir with no
+// api co-located, which stays correct: it reports what it will read, and
+// whoever stages has to put the file there.
 func StagingRoot(stateDir string) string {
 	if v := strings.TrimSpace(os.Getenv("RASPUTIN_BACKUP_STAGING_DIR")); v != "" {
 		return v
@@ -82,7 +111,13 @@ var ErrInsufficientSpace = errors.New("storage: the backup target has not got ro
 // with numbers an operator can act on. Note that the numbers are filled in on
 // the refusal too — "there is not room" is useless next to "900 MB free, needs
 // 1.4 GB".
-func BackupPreflight(ctx context.Context, b Backend, cmd proto.BackupPreflightCmd) (*proto.BackupPreflightAck, error) {
+//
+// It also answers the OTHER question the api has to have answered before it
+// stages anything: where this node's staging root is. stagingRoot is echoed
+// into the ack on every path, including the unplugged one, because it is a
+// property of the node and not of the disk. See StagingRoot for why the agent
+// is the one that decides it.
+func BackupPreflight(ctx context.Context, b Backend, stagingRoot string, cmd proto.BackupPreflightCmd) (*proto.BackupPreflightAck, error) {
 	if err := checkPartUUID(cmd.PartUUID); err != nil {
 		return nil, err
 	}
@@ -92,8 +127,9 @@ func BackupPreflight(ctx context.Context, b Backend, cmd proto.BackupPreflightCm
 		// same shape as Inspect, and the api turns it into a clean refusal.
 		return &proto.BackupPreflightAck{
 			OK: true, Present: false, PartUUID: cmd.PartUUID,
-			Refusal: proto.StorageRefusalNotFound,
-			Detail:  "no attached disk carries that partition UUID — the backup target is not plugged in",
+			StagingRoot: stagingRoot,
+			Refusal:     proto.StorageRefusalNotFound,
+			Detail:      "no attached disk carries that partition UUID — the backup target is not plugged in",
 		}, nil
 	}
 	if err != nil {
@@ -101,6 +137,7 @@ func BackupPreflight(ctx context.Context, b Backend, cmd proto.BackupPreflightCm
 	}
 	ack := &proto.BackupPreflightAck{
 		OK: true, Present: true, PartUUID: cmd.PartUUID, MountPath: mountPath, FSType: "ext4",
+		StagingRoot: stagingRoot,
 	}
 	if du, derr := disk.UsageWithContext(ctx, mountPath); derr == nil {
 		ack.TotalBytes = du.Total

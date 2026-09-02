@@ -566,20 +566,20 @@ func main() {
 	// volume anywhere carries a backup class yet (#292/#293). The saga says so
 	// in its own log lines, its manifest, its ledger row and the generation's
 	// name on the platter.
-	backupStagingDir := storage.StagingDir(dataDir)
-	if err := storage.EnsureStagingDir(backupStagingDir); err != nil {
-		log.Fatalf("rasputin-api: backup staging dir: %v", err)
-	}
-	// §4.7's third discipline, on the api's half of the handoff: an orphaned
-	// staged archive after a crash is a permanent disk leak with no owner, on
-	// the partition §5's budget table is about — and the archive is the largest
-	// single thing this product stages.
-	if n, freed := storage.CleanStaging(backupStagingDir); n > 0 {
-		log.Printf("rasputin-api: swept %d orphaned staged backup archive(s) from %s (%d bytes)", n, backupStagingDir, freed)
-	}
+	//
+	// The api does NOT decide where the archive is staged, and nothing here
+	// creates a staging directory. The agent on the target node owns that root
+	// — it is the containment boundary for the verb that reads it — and reports
+	// it in the preflight ack, step 2, before the saga stages anything. The api
+	// deriving its own was the 2026-09-02 e3bench failure: it sealed 105 MB into
+	// <dataDir>/backup-staging and the agent looked in
+	// <stateDir>/backup-staging, on the only configuration that ships.
+	//
+	// §4.7's third discipline is unchanged, just moved to where the directory
+	// is known: the agent sweeps its root at start, and the saga sweeps it again
+	// at the top of the snapshot step, before the free-space guard sizes the run.
 	runner.Register(storage.RunWorkflow(backupStore, storage.RunConfig{
-		ClusterID:  strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
-		StagingDir: backupStagingDir,
+		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
 		Sources: storage.IdentitySources{
 			TrustDir:     trustDir,
 			MeshStateDir: meshStateDir,

@@ -140,6 +140,10 @@ func (f *fakeBackupAgent) start(t *testing.T, nc *nats.Conn) *fakeBackupAgent {
 				OK: true, Present: true, PartUUID: cmd.PartUUID,
 				MountPath: "/mnt/rasputin-backup", TotalBytes: 2 << 40,
 				FreeBytes: 1 << 40, RequiredBytes: cmd.EstimateBytes, Sufficient: true,
+				// The real agent answers with the root its write verb reads,
+				// and so does this one — a fake that omitted it would let the
+				// api go back to guessing without a test noticing.
+				StagingRoot: f.stagingRoot,
 			})
 			return
 		}
@@ -327,7 +331,14 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	writeTestFile(t, filepath.Join(meshDir, "headscale", "config.yaml"), "server_url: https://cp.test\n")
 	writeTestFile(t, filepath.Join(meshDir, "headscale", "db", "headscale.sqlite"), "HEADSCALE-STATE")
 
-	stagingDir := filepath.Join(dir, StagingDirName)
+	// The AGENT's staging root, and deliberately not a directory the api could
+	// have derived from anything it is given: `dir` is this harness's stand-in
+	// for the api's data dir, and the staging root is under an `agent-state`
+	// subdirectory the way the shipping image has it. Under the code this
+	// replaces the api would have staged into <dir>/backup-staging and every
+	// saga test below would fail on the write — which is exactly what the
+	// e3bench run did and no test did.
+	stagingDir := filepath.Join(dir, "agent-state", "backup-staging")
 	if err := EnsureStagingDir(stagingDir); err != nil {
 		t.Fatalf("staging dir: %v", err)
 	}
@@ -353,13 +364,14 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 
 	r := jobs.NewRunner(js, nc)
 	r.SetBackoff(func(int) time.Duration { return 0 })
+	// No staging directory is configured here, because the api has none to
+	// configure: it stages where the preflight ack says the agent reads.
 	r.Register(RunWorkflow(st, RunConfig{
-		ClusterID:  "home1",
-		StagingDir: stagingDir,
-		Sources:    IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
-		DB:         st.DB(),
-		DBPath:     dbPath,
-		Retain:     opts.retain,
+		ClusterID: "home1",
+		Sources:   IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
+		DB:        st.DB(),
+		DBPath:    dbPath,
+		Retain:    opts.retain,
 	}))
 	h.runner = r
 	return h

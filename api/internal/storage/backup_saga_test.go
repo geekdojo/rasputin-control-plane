@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -562,5 +564,124 @@ func TestBackupRunSpecCannotAimTheRun(t *testing.T) {
 	}
 	if spec.Reason != ReasonManual {
 		t.Errorf("an unrecognised reason became %q, want %q", spec.Reason, ReasonManual)
+	}
+}
+
+// TestBackupRunStagesWhereTheAgentSaysAndNowhereElse is the api-side half of
+// the fix for the 2026-09-02 e3bench failure.
+//
+// The harness puts the agent's staging root under an `agent-state`
+// subdirectory, mirroring the shipping image, where nothing the api is
+// configured with points. So a run that completes has proved two things at
+// once: the archive was staged where the agent reads, and the api invented no
+// directory of its own. The old code would have sealed into
+// <dataDir>/backup-staging and this would fail on the write, which is precisely
+// what the bench saw and no test did.
+func TestBackupRunStagesWhereTheAgentSaysAndNowhereElse(t *testing.T) {
+	agent := &fakeBackupAgent{}
+	h := newRunHarness(t, agent, runHarnessOpts{})
+	jobID := h.submit(t, RunSpec{Reason: ReasonManual})
+	j := h.waitTerminal(t, jobID)
+	if j.Status != jobs.StatusSucceeded {
+		t.Fatalf("job status = %s (%s)", j.Status, j.Error)
+	}
+
+	cmd, ok := h.agent.lastWrite()
+	if !ok {
+		t.Fatal("the agent was never asked to write")
+	}
+	// The fake agent re-hashes the file it finds under ITS staging root, and
+	// leaves the digest empty when there is nothing there. A non-empty digest
+	// that matches the api's is the whole handoff, proved on real bytes.
+	h.agent.mu.Lock()
+	digests := append([]string(nil), h.agent.writeDigests...)
+	h.agent.mu.Unlock()
+	if len(digests) != 1 || digests[0] == "" {
+		t.Fatalf("the agent found nothing under its staging root %s — the api staged somewhere else", h.stagingDir)
+	}
+	if digests[0] != cmd.Digest {
+		t.Errorf("the agent hashed %s, the api claimed %s", digests[0], cmd.Digest)
+	}
+
+	// And nothing was created under the api's own data directory. This is the
+	// assertion that fails if an api-side derivation ever comes back.
+	dataDir := filepath.Dir(h.dbPath)
+	if _, err := os.Stat(filepath.Join(dataDir, "backup-staging")); err == nil {
+		t.Error("the api created a staging directory of its own under its data dir — the two halves are deriving the path independently again")
+	}
+
+	// The root is in the ledger, because an operator debugging a
+	// staged-archive-not-found needs both halves of the disagreement and this
+	// is the api's half.
+	if got := h.ledgerText(t, jobID); !strings.Contains(got, h.stagingDir) {
+		t.Errorf("the ledger never names the staging root %s", h.stagingDir)
+	}
+}
+
+// TestBackupRunRefusesWhenTheAgentNamesNoStagingRoot: an agent older than its
+// api answers preflight without the field. The api must refuse THERE, at the
+// cheapest point, rather than fall back to a guess — the guess is the bug.
+func TestBackupRunRefusesWhenTheAgentNamesNoStagingRoot(t *testing.T) {
+	agent := &fakeBackupAgent{
+		preflight: func(cmd proto.BackupPreflightCmd) proto.BackupPreflightAck {
+			return proto.BackupPreflightAck{
+				OK: true, Present: true, PartUUID: cmd.PartUUID,
+				MountPath: "/mnt/rasputin-backup", TotalBytes: 2 << 40,
+				FreeBytes: 1 << 40, RequiredBytes: cmd.EstimateBytes, Sufficient: true,
+				// No StagingRoot.
+			}
+		},
+	}
+	h := newRunHarness(t, agent, runHarnessOpts{})
+	jobID := h.submit(t, RunSpec{Reason: ReasonScheduled})
+	j := h.waitTerminal(t, jobID)
+	if j.Status != jobs.StatusFailed {
+		t.Fatalf("job status = %s, want failed", j.Status)
+	}
+	if !strings.Contains(j.Error, "did not say where its backup staging root is") {
+		t.Errorf("job error = %q, want it to name the missing staging root", j.Error)
+	}
+	if got := h.agent.writeCount(); got != 0 {
+		t.Errorf("the agent was asked to write %d time(s) with nowhere to stage", got)
+	}
+	if left := h.stagingEntries(t); len(left) != 0 {
+		t.Errorf("a run that never learned a staging root left %v behind", left)
+	}
+	row := h.run(t, jobID)
+	if row == nil || row.Status != RunFailed {
+		t.Errorf("run row = %+v, want a failed row", row)
+	}
+}
+
+// TestBackupRunSweepsOrphansBeforeSizingTheDisk covers §4.7's third discipline
+// where it now lives.
+//
+// It used to run at api start, against a directory the api derived for itself.
+// That directory was the wrong one, so the sweep swept nothing — and the sweep
+// and the handoff were broken by the same mistake. It now runs at the top of
+// the snapshot step, on the root the agent named, BEFORE the free-space guard
+// sizes the run: an orphan is both a permanent disk leak and space this run
+// would otherwise be refused for.
+func TestBackupRunSweepsOrphansBeforeSizingTheDisk(t *testing.T) {
+	agent := &fakeBackupAgent{}
+	h := newRunHarness(t, agent, runHarnessOpts{})
+
+	orphan := filepath.Join(h.stagingDir, "20260101T000000Z-old-identity-only.sealed")
+	if err := os.WriteFile(orphan, []byte("a previous run died between sealing and writing"), 0o600); err != nil {
+		t.Fatalf("seed orphan: %v", err)
+	}
+
+	jobID := h.submit(t, RunSpec{Reason: ReasonScheduled})
+	if j := h.waitTerminal(t, jobID); j.Status != jobs.StatusSucceeded {
+		t.Fatalf("job status = %s (%s)", j.Status, j.Error)
+	}
+	if _, err := os.Stat(orphan); err == nil {
+		t.Error("the orphaned staged archive survived the run")
+	}
+	if got := h.ledgerText(t, jobID); !strings.Contains(got, "swept 1 orphaned staged archive") {
+		t.Error("the sweep is not in the ledger, so an operator never learns a previous run died mid-seal")
+	}
+	if left := h.stagingEntries(t); len(left) != 0 {
+		t.Errorf("staging is not empty after a successful run: %v", left)
 	}
 }

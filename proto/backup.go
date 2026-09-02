@@ -242,8 +242,31 @@ type BackupPreflightAck struct {
 	// Generations is what is already retained, so the api can log the retention
 	// picture before it adds to it.
 	Generations []BackupGeneration `json:"generations,omitempty"`
-	Refusal     StorageRefusal     `json:"refusal,omitempty"`
-	Detail      string             `json:"detail,omitempty"`
+	// StagingRoot is the absolute directory THIS node's write verb will read a
+	// staged archive from, and the api stages into it.
+	//
+	// It is reported rather than agreed, because the two halves of the §4.7
+	// handoff derived it independently and got different answers on the
+	// shipping image (e3bench 2026-09-02): the api joined `backup-staging` onto
+	// its data dir, the agent joined it onto its state dir, and the one
+	// variable that made them agree was set nowhere. A value that has to be
+	// configured identically in two places is a value that will eventually be
+	// configured differently in two places.
+	//
+	// The AGENT is the authority, for a security reason and not only a tidiness
+	// one: this root is the containment boundary for the write verb — a plain
+	// file name joined onto a directory the agent itself chose. If the api
+	// named the directory, a bug or a compromise there could aim the verb at
+	// any file on the node and have it copied onto a removable disk. So the
+	// direction of travel is fixed: the agent says where its root is, the api
+	// puts the archive there, and the command still carries a NAME and never a
+	// path.
+	//
+	// Reported whether or not the check passed, and whether or not the target
+	// is present: it is a property of the node, not of the disk.
+	StagingRoot string         `json:"stagingRoot,omitempty"`
+	Refusal     StorageRefusal `json:"refusal,omitempty"`
+	Detail      string         `json:"detail,omitempty"`
 }
 
 // BackupWriteCmd lands one sealed archive on the target as a new generation.
