@@ -588,3 +588,57 @@ func TestStagingRootRespectsTheSharedOverride(t *testing.T) {
 		t.Errorf("the override was ignored: %q", got)
 	}
 }
+
+// TestListGenerationsTieBreaksOnTheID covers the ordering fallback for two
+// generations whose archive files share a modification time.
+//
+// Not a hypothetical: some filesystems have one-second timestamp granularity,
+// and two generations written inside the same second would then sort
+// arbitrarily — which decides which one prune deletes. The tiebreak makes that
+// deterministic and, because generation ids start with a sortable UTC
+// timestamp, correct.
+func TestListGenerationsTieBreaksOnTheID(t *testing.T) {
+	m := newTestMock(t, defaultMockMachine())
+	partUUID, mountPath := claimedTarget(t, m)
+	staging := t.TempDir()
+	ids := []string{
+		"20260801T030000Z-g1-identity-only",
+		"20260808T030000Z-g2-identity-only",
+		"20260815T030000Z-g3-identity-only",
+	}
+	for _, id := range ids {
+		writeGeneration(t, m, partUUID, staging, id)
+	}
+	// Force identical mtimes, as a coarse-granularity filesystem would.
+	same := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	for _, id := range ids {
+		p := filepath.Join(mountPath, proto.BackupGenerationsDir, id, proto.BackupArchiveFile)
+		if err := os.Chtimes(p, same, same); err != nil {
+			t.Fatalf("chtimes %s: %v", id, err)
+		}
+	}
+
+	gens, err := listGenerations(mountPath)
+	if err != nil {
+		t.Fatalf("listGenerations: %v", err)
+	}
+	if len(gens) != 3 {
+		t.Fatalf("got %d generations, want 3", len(gens))
+	}
+	// Newest first, decided by the id when the timestamps cannot decide.
+	want := []string{ids[2], ids[1], ids[0]}
+	for i, id := range want {
+		if gens[i].ID != id {
+			t.Errorf("position %d is %s, want %s — with equal mtimes the id has to break the tie, or prune deletes an arbitrary generation",
+				i, gens[i].ID, id)
+		}
+	}
+	// And prune then removes the genuinely oldest.
+	ack, err := BackupPrune(context.Background(), m, proto.BackupPruneCmd{PartUUID: partUUID, Keep: 2})
+	if err != nil {
+		t.Fatalf("BackupPrune: %v", err)
+	}
+	if len(ack.Pruned) != 1 || ack.Pruned[0] != ids[0] {
+		t.Errorf("pruned %v, want just the oldest (%s)", ack.Pruned, ids[0])
+	}
+}
