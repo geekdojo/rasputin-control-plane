@@ -11,9 +11,11 @@ name: ci
 #              we can watch it trend over time. Failures gate merges via
 #              branch-protection (configured outside this file).
 #
-#   frontend — TypeScript type-check + Next.js production build. Catches
-#              type regressions and build-time errors (Server Components,
-#              missing 'use client', stale imports) that tsc alone misses.
+#   frontend — eslint + TypeScript type-check + `npm test` (node --test) +
+#              Next.js production build. Catches type regressions and
+#              build-time errors (Server Components, missing 'use client',
+#              stale imports) that tsc alone misses, and executes the §4.6
+#              archive-key crypto rather than only compiling it.
 #
 # Conventions match release.yml: Go 1.26, actions/setup-go@v5 with cache
 # keyed on the workspace's go.sum files.
@@ -167,6 +169,18 @@ jobs:
           retention-days: 30
 
   frontend:
+    # ⚠️ This name is an API, not a label. `main`'s branch protection lists it
+    # verbatim as a required status context, and a required context is matched
+    # by NAME — so renaming this job here does not rename the requirement: the
+    # old context simply stops reporting, and every PR sits at `blocked` with a
+    # combined status of `pending` and no failing check to point at. That is
+    # what happened on PR #223, where the rename was the only change and all
+    # twelve checks were green.
+    #
+    # So the name UNDER-DESCRIBES the job on purpose (it also runs eslint and
+    # `npm test` — see the steps below and the header comment). Changing it
+    # requires updating the required_status_checks contexts on `main` in the
+    # same change, which is a repo-settings change and Bryce's call.
     name: frontend (typecheck + build)
     runs-on: ubuntu-latest
     defaults:
