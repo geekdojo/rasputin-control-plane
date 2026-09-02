@@ -1,11 +1,13 @@
 // Building the POST /api/backup/targets body.
 //
 // Pulled out of ClaimTargetDrawer as a pure function for one reason: this is
-// the exact boundary the §4.6 rule is about. "The plaintext data key and the
+// the exact boundary the §4.6 rule is about. "The private key and the
 // passphrase never leave the browser" is a claim about what is in this object,
 // and a claim about an object is testable in a way that a claim about a React
 // component's closure is not. archive-key.test.ts serialises what this returns
-// and asserts nothing secret is in it.
+// and asserts nothing secret is in it. The PUBLIC key is in it, deliberately —
+// that is §4.6's 2026-09-02 amendment, and it is what leaves the controlplane
+// holding no secret at all.
 //
 // It also keeps the drawer honest about the ADOPT path. Adopting does not mint
 // a key and does not re-wrap one — it carries the disk's own sealed key across
@@ -37,22 +39,55 @@ export interface ClaimRequestInput {
 }
 
 /**
- * archiveKeyFromMarker reads the sealed §4.6 key off a candidate's marker.
+ * What a candidate's marker says about its §4.6 key — the four cases the adopt
+ * path has to tell apart, and it does have to tell them apart, because three of
+ * them look identical in a listing and lead to different places.
  *
- * Returns undefined unless BOTH wrappings and the key-id are there. Both or
- * neither, the same rule the api's ArchiveKey.validate enforces and the same
- * one mintArchiveKey enforces before a request is even built: a target holding
- * one wrapping is one forgotten passphrase away from an archive nobody can
- * read, and the operator would not find out until the day they needed it.
+ *   `none` — no key at all. Nothing to unlock; adopt straight through.
+ *   `named-only` — a key-id and no wrappings. Every disk claimed before the
+ *     marker learned to carry custody material. Nothing on the disk can produce
+ *     that key, so demanding a secret would only strand it: adopt, and the api
+ *     says so on the live stream.
+ *   `legacy-symmetric` — both wrappings, no public key. A target from before
+ *     the 2026-09-02 amendment, sealed under a symmetric data key this build no
+ *     longer mints. It CANNOT be adopted, by this build or the api's, and the
+ *     operator needs to be told that in words rather than meet a crypto error.
+ *   `sealed` — a public key and both wrappings. The current shape, and the one
+ *     the unlock prompt exists for.
+ */
+export type MarkerKeyState = 'none' | 'named-only' | 'legacy-symmetric' | 'sealed';
+
+export function markerKeyState(c: BackupCandidate): MarkerKeyState {
+  const set = c.backupSet;
+  if (!set?.keyId) return 'none';
+  // Both or neither: one wrapping on a disk is not custody, it is a target one
+  // forgotten passphrase from unreadable, and §4.6 refuses to create that state
+  // anywhere else either. A half-written marker reads as `named-only` and
+  // adopts with the api's warning rather than pretending to be openable.
+  if (!set.wrappedByPassphrase || !set.wrappedByRecoveryCode) return 'named-only';
+  return set.publicKey ? 'sealed' : 'legacy-symmetric';
+}
+
+/**
+ * archiveKeyFromMarker reads the §4.6 key off a candidate's marker: the public
+ * key in clear plus both sealed copies of the private key.
+ *
+ * Returns undefined unless the key-id, the public key AND both wrappings are
+ * there. Both wrappings or neither is the rule the api's ArchiveKey.validate
+ * enforces and the one mintArchiveKey enforces before a request is even built.
+ * The public key joins them for a different reason: without it there is nothing
+ * to check a recovered private key against, so an unlock could only prove the
+ * secret and not the target.
  */
 export function archiveKeyFromMarker(c: BackupCandidate): ArchiveKeyPayload | undefined {
   const set = c.backupSet;
-  if (!set?.keyId || !set.wrappedByPassphrase || !set.wrappedByRecoveryCode) return undefined;
+  if (markerKeyState(c) !== 'sealed' || !set?.keyId || !set.publicKey) return undefined;
   return {
     keyId: set.keyId,
     alg: set.keyAlg ?? '',
-    wrappedByPassphrase: set.wrappedByPassphrase,
-    wrappedByRecoveryCode: set.wrappedByRecoveryCode,
+    publicKey: set.publicKey,
+    wrappedByPassphrase: set.wrappedByPassphrase!,
+    wrappedByRecoveryCode: set.wrappedByRecoveryCode!,
   };
 }
 
@@ -60,19 +95,22 @@ export function archiveKeyFromMarker(c: BackupCandidate): ArchiveKeyPayload | un
  * needsUnlock reports whether adopting this disk must prompt for a custody
  * secret first.
  *
- * True exactly when the disk carries a sealed key. That is the case this whole
- * change exists for: adopting such a disk without opening the key records a
- * target that lists as configured, cannot have a generation written to it, and
- * announces neither fact. The api refuses it too — the prompt is here so the
- * operator meets a passphrase field rather than a refusal.
+ * True exactly when the disk carries a sealed key with a public key to check it
+ * against. Under the symmetric design the argument for prompting was
+ * capability — a controlplane that had not been handed an openable key could
+ * not write a generation. Asymmetric removes that argument: writing needs only
+ * the public key, which is on the disk in clear. The prompt stays because it is
+ * now the only thing that proves the custody secrets actually open THIS disk;
+ * without it an operator adopts a target whose private key nobody can unwrap
+ * and the schedule seals four generations no one will ever read. See
+ * lib/archive-key.ts's unwrap header for the full argument.
  *
- * False for a disk whose marker names no key, or names one but carries no
- * wrappings (every disk claimed before the marker learned to carry them). There
- * is nothing on such a disk to unlock, so demanding a secret would only strand
- * it.
+ * False for a disk whose marker names no key, names one but carries no
+ * wrappings, or carries symmetric-era wrappings — nothing this build can unlock
+ * lives on any of those, and prompting would only produce a refusal.
  */
 export function needsUnlock(c: BackupCandidate): boolean {
-  return archiveKeyFromMarker(c) !== undefined;
+  return markerKeyState(c) === 'sealed';
 }
 
 export function buildClaimRequest(input: ClaimRequestInput): ClaimBackupTargetRequest {

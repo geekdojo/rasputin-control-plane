@@ -247,7 +247,14 @@ function TargetTable({ targets }: { targets: BackupTarget[] }) {
             <td style={{ ...tdStyle, color: DIM }}>{t.sizeBytes ? formatDiskSize(t.sizeBytes) : '—'}</td>
             <td style={tdStyle}>
               {t.hasWrappedKeys ? (
-                <span style={{ color: OK_GREEN }} title={t.keyAlg || undefined}>
+                // The title carries the public key alongside the construction:
+                // it is not a secret (§4.6, amended 2026-09-02) and it is the
+                // one value an operator can compare against a disk's marker
+                // when two targets are in play.
+                <span
+                  style={{ color: OK_GREEN }}
+                  title={[t.keyAlg, t.publicKey && `public key ${t.publicKey}`].filter(Boolean).join('\n') || undefined}
+                >
                   configured{t.keyId ? ` · ${t.keyId}` : ''}
                 </span>
               ) : (

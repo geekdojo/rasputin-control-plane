@@ -17,9 +17,19 @@ func claimCmd(devicePath, fingerprint, label string) proto.StorageClaimCmd {
 	return proto.StorageClaimCmd{DevicePath: devicePath, Fingerprint: fingerprint, Label: label}
 }
 
-// keyedClaimCmd is a claim carrying design/storage.md §4.6's custody material:
-// a key id and the two WRAPPED copies of the data key. The blob strings stand
-// in for base64url ciphertext — nothing here parses them, which is the point.
+// The §4.6 material a keyed claim carries, as amended 2026-09-02: an X25519
+// PUBLIC key in clear plus the two wrapped copies of the private key. The blob
+// strings stand in for base64url ciphertext — nothing here parses them, which
+// is the point. testPublicKey is a real X25519 public key, because the api
+// validates it as one before any of this is reached.
+const (
+	testKeyAlg    = "X25519;wrap=AES-256-GCM;pp=argon2id-m65536-t3-p1;rc=hkdf-sha256"
+	testPublicKey = "b_37bCmEzeukYs4me3p4ghNn39YLqNC3LAmTdAA_zEo"
+	testWrappedPP = "eyJ2IjoyLCJwcCI6ImJsb2IifQ"
+	testWrappedRC = "eyJ2IjoyLCJyYyI6ImJsb2IifQ"
+)
+
+// keyedClaimCmd is a claim carrying design/storage.md §4.6's key material.
 func keyedClaimCmd(devicePath, fingerprint, label string) proto.StorageClaimCmd {
 	return proto.StorageClaimCmd{
 		DevicePath:            devicePath,
@@ -27,9 +37,10 @@ func keyedClaimCmd(devicePath, fingerprint, label string) proto.StorageClaimCmd 
 		Label:                 label,
 		ClusterID:             "bitscope",
 		KeyID:                 "ak-DEADBEEF",
-		KeyAlg:                "AES-256-GCM;pp=argon2id-m65536-t3-p1;rc=hkdf-sha256",
-		WrappedByPassphrase:   "eyJ2IjoxLCJwcCI6ImJsb2IifQ",
-		WrappedByRecoveryCode: "eyJ2IjoxLCJyYyI6ImJsb2IifQ",
+		KeyAlg:                testKeyAlg,
+		PublicKey:             testPublicKey,
+		WrappedByPassphrase:   testWrappedPP,
+		WrappedByRecoveryCode: testWrappedRC,
 	}
 }
 
@@ -58,11 +69,17 @@ func assertMarkerCarriesCustody(t *testing.T, set *proto.StorageBackupSet, partU
 	if set.KeyID != "ak-DEADBEEF" {
 		t.Errorf("marker keyId = %q — a restore cannot tell which key it needs", set.KeyID)
 	}
-	if set.KeyAlg != "AES-256-GCM;pp=argon2id-m65536-t3-p1;rc=hkdf-sha256" {
+	if set.KeyAlg != testKeyAlg {
 		t.Errorf("marker keyAlg = %q", set.KeyAlg)
 	}
-	if set.WrappedByPassphrase != "eyJ2IjoxLCJwcCI6ImJsb2IifQ" ||
-		set.WrappedByRecoveryCode != "eyJ2IjoxLCJyYyI6ImJsb2IifQ" {
+	// The 2026-09-02 amendment: without the public key on the platter, a
+	// replacement controlplane that adopts this disk has nothing to encrypt the
+	// next generation TO — and unlocking has nothing to check a recovered
+	// private key against. It is not a secret; it is the load-bearing one.
+	if set.PublicKey != testPublicKey {
+		t.Errorf("marker publicKey = %q, want %q — a controlplane that adopts this disk cannot write to it", set.PublicKey, testPublicKey)
+	}
+	if set.WrappedByPassphrase != testWrappedPP || set.WrappedByRecoveryCode != testWrappedRC {
 		t.Errorf("marker is missing a §4.6 wrapping: %+v — a controlplane that adopts this disk has nothing to ask the operator to unlock", set)
 	}
 }
@@ -114,9 +131,10 @@ func TestMock_ClaimWritesTheCustodyMaterialOntoThePlatter(t *testing.T) {
 	assertMarkerCarriesCustody(t, insp.BackupSet, ack.PartUUID)
 }
 
-// The marker holds ciphertext and identifiers. It must never hold the data key,
-// the passphrase or the recovery code — the disk is the one place §4.6 says the
-// wrapped copies belong AND the one place a plaintext key would be worst.
+// The marker holds ciphertext, identifiers and a PUBLIC key. It must never hold
+// the private key, the passphrase or the recovery code — the disk is the one
+// place §4.6 says the wrapped copies belong AND the one place a plaintext
+// private key would be worst.
 func TestMarker_HoldsNothingInTheClear(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
@@ -143,7 +161,11 @@ func TestMarker_HoldsNothingInTheClear(t *testing.T) {
 	}
 	allowed := map[string]bool{
 		"markerVersion": true, "clusterId": true, "partUuid": true, "keyId": true,
-		"keyAlg": true, "wrappedByPassphrase": true, "wrappedByRecoveryCode": true,
+		// publicKey is in clear and belongs here — §4.6 as amended 2026-09-02.
+		// It is the one field on this whitelist that is key material AND not a
+		// secret, which is exactly why it needed a decision rather than a
+		// default.
+		"keyAlg": true, "publicKey": true, "wrappedByPassphrase": true, "wrappedByRecoveryCode": true,
 		"label": true, "createdAt": true, "generations": true,
 	}
 	for k := range raw {
@@ -170,5 +192,12 @@ func TestMarker_OldMarkersWithoutCustodyStillParse(t *testing.T) {
 	}
 	if set.WrappedByPassphrase != "" || set.WrappedByRecoveryCode != "" || set.KeyID != "" {
 		t.Errorf("an old marker invented custody material: %+v", set)
+	}
+	// The 2026-09-02 amendment added publicKey to this struct. A marker written
+	// before it must read back with the field EMPTY, because that absence is
+	// what the api's adopt gate uses to recognise a symmetric-era disk — a
+	// default here would silently make such a disk look adoptable.
+	if set.PublicKey != "" {
+		t.Errorf("an old marker invented a public key: %q", set.PublicKey)
 	}
 }

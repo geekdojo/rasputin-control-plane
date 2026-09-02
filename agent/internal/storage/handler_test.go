@@ -163,14 +163,15 @@ func TestHandlers_ClaimHappyPathStampsClusterAndKeyID(t *testing.T) {
 		t.Errorf("a successful claim carries refusal %q", ack.Refusal)
 	}
 
-	// The whole ack, as JSON, must not contain anything key-shaped. §4.6's
-	// plaintext data key never enters the job ledger, and the ack is what the
-	// saga records.
+	// The whole ack, as JSON, must not contain anything secret. §4.6's private
+	// key never enters the job ledger, and the ack is what the saga records.
+	// (The PUBLIC key may appear inside BackupSet and is not on this list — it
+	// is the one piece of key material that is meant to travel in clear.)
 	b, err := json.Marshal(ack)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, forbidden := range []string{"passphrase", "recoveryCode", "dataKey", "wrappedKey"} {
+	for _, forbidden := range []string{"passphrase", "recoveryCode", "dataKey", "privateKey", "wrappedKey"} {
 		if containsFold(string(b), forbidden) {
 			t.Errorf("the claim ack contains %q: %s", forbidden, b)
 		}

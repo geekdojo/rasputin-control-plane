@@ -1019,10 +1019,11 @@ export async function listBackupTargets(): Promise<BackupTarget[]> {
 // THAT CAN FORMAT A DISK — every §4.8 refusal is evaluated inside the saga, in
 // order, before the one destructive step runs.
 //
-// `archiveKey` is already wrapped when it gets here (lib/archive-key.ts). No
-// plaintext key or passphrase can reach this function: there is no parameter
-// for one, and the api decodes with DisallowUnknownFields so an invented field
-// would be a 400 rather than a secret in the job ledger.
+// `archiveKey` carries §4.6's public key in clear and its private key already
+// wrapped when it gets here (lib/archive-key.ts). No private key or passphrase
+// can reach this function: there is no parameter for one, and the api decodes
+// with DisallowUnknownFields so an invented field would be a 400 rather than a
+// secret in the job ledger.
 export function claimBackupTarget(req: ClaimBackupTargetRequest): Promise<Job> {
   return jsonFetch<Job>('/api/backup/targets', {
     method: 'POST',

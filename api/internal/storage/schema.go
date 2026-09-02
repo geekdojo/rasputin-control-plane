@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS backup_targets (
     fingerprint              TEXT NOT NULL DEFAULT '',
     key_id                   TEXT NOT NULL DEFAULT '',
     key_alg                  TEXT NOT NULL DEFAULT '',
+    public_key               TEXT NOT NULL DEFAULT '',  -- §4.6's X25519 public key: in clear, deliberately, and the only key material here
     wrapped_by_passphrase    TEXT NOT NULL DEFAULT '',
     wrapped_by_recovery_code TEXT NOT NULL DEFAULT '',
     adopted                  INTEGER NOT NULL DEFAULT 0,
@@ -50,6 +51,13 @@ CREATE INDEX IF NOT EXISTS idx_backup_targets_partuuid ON backup_targets(part_uu
 // a developer database from the claim branch. 0 is right for every row written
 // before the column existed: none of them could have wiped anything, because
 // nothing could.
+//
+// public_key: §4.6's 2026-09-02 amendment. Empty is right for every row written
+// before the column existed — those targets were claimed under the symmetric
+// design and genuinely have no public key, which is the same thing their
+// on-disk markers say. Nothing back-fills it; a target gets one by being
+// claimed again.
 var migrations = []string{
 	`ALTER TABLE backup_targets ADD COLUMN wiped INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE backup_targets ADD COLUMN public_key TEXT NOT NULL DEFAULT ''`,
 }

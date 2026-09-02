@@ -20,9 +20,15 @@
 // written into every wrapped blob AND into `ArchiveKey.alg` (persisted by the
 // api as `BackupTarget.keyAlg`). A future parameter bump gets a NEW id, and a
 // restore path meeting an old blob reads which parameters it needs rather than
-// assuming today's. §4.6 already says what such a re-wrap costs: the DATA KEY
-// is unchanged, so the key-id is unchanged, so none of the four retained
+// assuming today's. §4.6 already says what such a re-wrap costs: the KEYPAIR is
+// unchanged, so the key-id is unchanged, so none of the four retained
 // generations (§4.4) need re-encrypting.
+//
+// §4.6's 2026-09-02 amendment made the wrapped secret an X25519 private key
+// rather than a symmetric data key. Nothing in this file changed with it: what
+// a KEK wraps is not this module's business, both are 32 bytes, and "the two
+// custody paths are unchanged" is precisely the property that let the amendment
+// be as small as it was.
 
 import { argon2id } from 'hash-wasm';
 
@@ -55,8 +61,8 @@ export interface PassphraseKdf {
    * CSPRNG output for THIS wrapping. Both belong to the caller, which zeroes
    * them; nothing here retains either.
    *
-   * The returned CryptoKey is NON-EXTRACTABLE — it can wrap the data key, and
-   * nothing can read it back out afterwards, not even us.
+   * The returned CryptoKey is NON-EXTRACTABLE — it can wrap the archive
+   * private key, and nothing can read it back out afterwards, not even us.
    */
   deriveKek(passphrase: Bytes, salt: Bytes): Promise<CryptoKey>;
 }
@@ -105,7 +111,7 @@ export function subtle(): SubtleCrypto {
 const ARGON2ID_MEMORY_KIB = 65536; // 64 MiB
 const ARGON2ID_ITERATIONS = 3;
 const ARGON2ID_PARALLELISM = 1;
-const ARGON2ID_DK_LEN = 32; // 256-bit KEK, matching the 256-bit data key
+const ARGON2ID_DK_LEN = 32; // 256-bit KEK, matching the 256-bit AES-GCM wrapping key
 
 /**
  * §4.6's ratified derivation.

@@ -1,18 +1,27 @@
 // The §4.6 rule, asserted at the boundary it is about.
 //
-// "The plaintext data key and the passphrase never leave the browser" is a
-// claim about one object: the body of POST /api/backup/targets. These tests
-// serialise that body and go looking for anything secret in it — including on
-// the adopt path, which is the one that now asks the operator to type a
-// passphrase and could most plausibly leak one by accident.
+// "The private key and the passphrase never leave the browser" is a claim about
+// one object: the body of POST /api/backup/targets. These tests serialise that
+// body and go looking for anything secret in it — including on the adopt path,
+// which is the one that asks the operator to type a passphrase and could most
+// plausibly leak one by accident.
+//
+// Since the 2026-09-02 amendment the body also carries a PUBLIC key, in clear.
+// That is the change, not a leak: it is what leaves the controlplane holding no
+// secret at all. So the whitelist below grew a field deliberately, and the
+// scans that look for secrets still have to come up empty.
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { mintArchiveKey } from '../../lib/archive-key';
 import type { BackupCandidate } from '../../lib/types';
-import { archiveKeyFromMarker, buildClaimRequest, needsUnlock } from './claim-request';
+import { archiveKeyFromMarker, buildClaimRequest, markerKeyState, needsUnlock } from './claim-request';
 
 const PASSPHRASE = 'correct horse battery staple';
+
+/** A plausible marker public key: 32 bytes, base64url, as the browser writes it. */
+const MARKER_PUBLIC_KEY = 'ZG9udC1zdG9yZS1hLWtleS0zMi1ieXRlcy1vaw';
+const MARKER_KEY_ALG = 'X25519;wrap=AES-256-GCM;pp=argon2id-m65536-t3-p1;rc=hkdf-sha256';
 
 function blankDisk(): BackupCandidate {
   return {
@@ -39,7 +48,8 @@ function keyedDisk(): BackupCandidate {
       clusterId: 'bitscope',
       partUuid: 'aaaa-1111',
       keyId: 'ak-DEADBEEF',
-      keyAlg: 'AES-256-GCM;pp=argon2id-m65536-t3-p1;rc=hkdf-sha256',
+      keyAlg: MARKER_KEY_ALG,
+      publicKey: MARKER_PUBLIC_KEY,
       wrappedByPassphrase: 'cGFzc3BocmFzZS1ibG9i',
       wrappedByRecoveryCode: 'cmVjb3ZlcnktYmxvYg',
       label: 'weekly archive',
@@ -57,14 +67,48 @@ function keylessAdoptableDisk(): BackupCandidate {
     backupSet: {
       ...c.backupSet!,
       keyAlg: undefined,
+      publicKey: undefined,
       wrappedByPassphrase: undefined,
       wrappedByRecoveryCode: undefined,
     },
   };
 }
 
+/**
+ * The shape the two bench disks have: both wrappings, no public key. Claimed
+ * under the pre-2026-09-02 symmetric design, and unadoptable by this build —
+ * the blobs seal a shared data key, not an X25519 private key, and nothing
+ * about their bytes says so.
+ */
+function symmetricEraDisk(): BackupCandidate {
+  const c = keyedDisk();
+  return {
+    ...c,
+    backupSet: {
+      ...c.backupSet!,
+      keyAlg: 'AES-256-GCM;pp=argon2id-m65536-t3-p1;rc=hkdf-sha256',
+      publicKey: undefined,
+    },
+  };
+}
+
+describe('markerKeyState', () => {
+  test('tells the four cases apart', () => {
+    assert.equal(markerKeyState(blankDisk()), 'none');
+    assert.equal(markerKeyState(keylessAdoptableDisk()), 'named-only');
+    assert.equal(markerKeyState(symmetricEraDisk()), 'legacy-symmetric');
+    assert.equal(markerKeyState(keyedDisk()), 'sealed');
+  });
+
+  test('one wrapping is not custody — both or neither', () => {
+    const half = keyedDisk();
+    half.backupSet!.wrappedByRecoveryCode = undefined;
+    assert.equal(markerKeyState(half), 'named-only');
+  });
+});
+
 describe('needsUnlock', () => {
-  test('a disk carrying both sealed copies must be unlocked', () => {
+  test('a disk carrying both sealed copies and a public key must be unlocked', () => {
     assert.equal(needsUnlock(keyedDisk()), true);
   });
 
@@ -76,6 +120,14 @@ describe('needsUnlock', () => {
     // Demanding a secret here would strand the disk: there is no blob on it to
     // open, so no passphrase could ever succeed.
     assert.equal(needsUnlock(keylessAdoptableDisk()), false);
+  });
+
+  // Prompting here would be worse than useless: no secret the operator has can
+  // satisfy an unlock this build cannot perform. The drawer refuses the adopt
+  // outright and says why, so the prompt must not be offered.
+  test('a symmetric-era disk is not offered an unlock it cannot pass', () => {
+    assert.equal(needsUnlock(symmetricEraDisk()), false);
+    assert.equal(archiveKeyFromMarker(symmetricEraDisk()), undefined);
   });
 
   test('one wrapping is not enough — both or neither', () => {
@@ -91,7 +143,8 @@ describe('archiveKeyFromMarker', () => {
     const c = keyedDisk();
     assert.deepEqual(archiveKeyFromMarker(c), {
       keyId: 'ak-DEADBEEF',
-      alg: 'AES-256-GCM;pp=argon2id-m65536-t3-p1;rc=hkdf-sha256',
+      alg: MARKER_KEY_ALG,
+      publicKey: MARKER_PUBLIC_KEY,
       wrappedByPassphrase: 'cGFzc3BocmFzZS1ibG9i',
       wrappedByRecoveryCode: 'cmVjb3ZlcnktYmxvYg',
     });
@@ -148,10 +201,19 @@ describe('the request body carries no key material', () => {
     for (const k of Object.keys(req)) {
       assert.ok(allowed.has(k), `unknown field ${k} would be a 400`);
     }
-    const keyFields = new Set(['keyId', 'alg', 'wrappedByPassphrase', 'wrappedByRecoveryCode']);
+    const keyFields = new Set([
+      'keyId',
+      'alg',
+      // In clear on purpose — §4.6 as amended 2026-09-02. This is the one
+      // addition, and it is the point of the change rather than a leak.
+      'publicKey',
+      'wrappedByPassphrase',
+      'wrappedByRecoveryCode',
+    ]);
     for (const k of Object.keys(req.archiveKey!)) {
       assert.ok(keyFields.has(k), `archiveKey grew field ${k}`);
     }
+    assert.equal(req.archiveKey!.publicKey, MARKER_PUBLIC_KEY, 'the disk’s own public key travels across');
   });
 
   test('format: the freshly minted key travels sealed, and the code does not travel', {
@@ -175,6 +237,10 @@ describe('the request body carries no key material', () => {
     assert.ok(!body.includes(minted.recoveryCode));
     assert.equal(req.adopt, undefined);
     assert.equal(req.label, undefined, 'an empty label is omitted, not sent blank');
+    // The public key is IN the body, and it is 32 bytes of not-a-secret. Named
+    // explicitly so that a future reader does not read its presence as the leak
+    // the rest of this file is hunting for.
+    assert.equal(Buffer.from(req.archiveKey!.publicKey, 'base64url').length, 32);
   });
 
   test('wipe: the token is echoed and adopt is not set', () => {

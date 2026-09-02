@@ -7,10 +7,17 @@
 // on the one day it matters. So these run the real crypto, in Node's WebCrypto
 // and the real hash-wasm Argon2id, and assert the things the design promises:
 //
-//   - either custody path alone recovers the SAME data key (§4.6's whole point);
+//   - either custody path alone recovers the SAME private key (§4.6's whole
+//     point), and that key derives the public key on the disk;
 //   - a wrong secret fails visibly, as an AEAD failure, not silently;
+//   - a key that opens but does not match the disk is reported as a MISMATCH
+//     rather than as a wrong secret — the distinction the symmetric design
+//     could not make, and the one that decides whether an operator goes looking
+//     for a passphrase they are already holding;
+//   - a symmetric-era blob is refused in words, not in the crypto;
 //   - a blob cannot be moved between targets or between custody paths;
-//   - a blob off a disk cannot make this browser do something absurd; and
+//   - a blob off a disk cannot make this browser do something absurd;
+//   - the private key does not outlive the call that minted it; and
 //   - nothing secret is in the request body the adopt path builds.
 
 import assert from 'node:assert/strict';
@@ -25,11 +32,28 @@ import {
   type MintedArchiveKey,
 } from './archive-key';
 import { resolvePassphraseKdf } from './passphrase-kdf';
+import { publicKeyFromPrivateScalar, X25519_KEY_BYTES } from './x25519';
 
 const PASSPHRASE = 'correct horse battery staple';
 
 function bytes(s: string) {
   return new TextEncoder().encode(s);
+}
+
+function b64urlBytes(s: string): Uint8Array {
+  return new Uint8Array(Buffer.from(s, 'base64url'));
+}
+
+/** A payload with no §4.6 material at all, for the shape checks. */
+function emptyPayload(over: Partial<ArchiveKeyPayload> = {}): ArchiveKeyPayload {
+  return {
+    keyId: 'ak-x',
+    alg: '',
+    publicKey: '',
+    wrappedByPassphrase: 'x',
+    wrappedByRecoveryCode: 'x',
+    ...over,
+  };
 }
 
 /** Argon2id at the shipped cost runs a few hundred ms per unwrap. */
@@ -47,13 +71,53 @@ function editBlob(blob: string, edit: (o: Record<string, unknown>) => void): str
 }
 
 describe('minting', () => {
-  test('produces both wrappings, an id, and a recovery code', { timeout: SLOW }, async () => {
+  test('produces a public key, both wrappings, an id, and a recovery code', { timeout: SLOW }, async () => {
     const m = await mint();
     assert.match(m.archiveKey.keyId, /^ak-[A-Za-z0-9_-]{22}$/);
+    assert.equal(b64urlBytes(m.archiveKey.publicKey).length, X25519_KEY_BYTES);
     assert.ok(m.archiveKey.wrappedByPassphrase.length > 0);
     assert.ok(m.archiveKey.wrappedByRecoveryCode.length > 0);
     assert.notEqual(m.archiveKey.wrappedByPassphrase, m.archiveKey.wrappedByRecoveryCode);
     assert.equal(canonicalRecoveryCode(m.recoveryCode).length, 32);
+  });
+
+  // §4.6 as amended: the api stores a public key and nothing secret. `alg` is
+  // what a ledger row shows an operator, and it has to say which era the target
+  // belongs to without anyone opening a blob.
+  test('the alg names the keypair construction, not the symmetric one', { timeout: SLOW }, async () => {
+    const m = await mint();
+    assert.match(m.archiveKey.alg, /^X25519;wrap=AES-256-GCM;pp=argon2id-/);
+    assert.ok(m.archiveKey.alg.includes('rc=hkdf-sha256'));
+  });
+
+  test('two mints never share a keypair', { timeout: SLOW }, async () => {
+    const [a, b] = [await mint(), await mint()];
+    assert.notEqual(a.archiveKey.publicKey, b.archiveKey.publicKey);
+    assert.notEqual(a.archiveKey.keyId, b.archiveKey.keyId);
+  });
+
+  // The private key is the one buffer in this module that must not outlive the
+  // call. It is unobservable from the return value by design, so this reaches
+  // for the buffer where it is genuinely visible: the plaintext handed to
+  // AES-GCM. Same array, checked after the promise settles.
+  test('zeroes the private key before returning', { timeout: SLOW }, async () => {
+    const real = globalThis.crypto.subtle.encrypt.bind(globalThis.crypto.subtle);
+    const sealed: Uint8Array[] = [];
+    globalThis.crypto.subtle.encrypt = ((alg: AlgorithmIdentifier, key: CryptoKey, data: BufferSource) => {
+      if (data instanceof Uint8Array) sealed.push(data);
+      return real(alg, key, data);
+    }) as typeof globalThis.crypto.subtle.encrypt;
+    try {
+      await mint();
+    } finally {
+      globalThis.crypto.subtle.encrypt = real;
+    }
+    assert.equal(sealed.length, 2, 'a mint seals the private key exactly twice');
+    assert.equal(sealed[0], sealed[1], 'both wrappings must seal the SAME buffer');
+    assert.ok(
+      sealed[0].every((b) => b === 0),
+      'the private key must be zeroed before mintArchiveKey returns',
+    );
   });
 
   test('zeroes the passphrase it was handed', { timeout: SLOW }, async () => {
@@ -106,7 +170,7 @@ describe('unlocking — §4.8 adopt', () => {
   // §4.6: "Losing either custody path is survivable." That is only true if both
   // wrappings really do seal the same 32 bytes — this is the assertion the
   // whole two-path model rests on.
-  test('both custody paths recover the SAME data key', { timeout: SLOW }, async () => {
+  test('both custody paths recover the SAME private key', { timeout: SLOW }, async () => {
     const m = await mint();
     const viaPass = await unlockArchiveKey(m.archiveKey, {
       path: 'passphrase',
@@ -117,6 +181,68 @@ describe('unlocking — §4.8 adopt', () => {
       code: m.recoveryCode,
     });
     assert.equal(viaPass.keyDigest, viaCode.keyDigest);
+    assert.equal(viaPass.publicKey, viaCode.publicKey);
+  });
+
+  // The verification the symmetric design could not do. Under one shared key,
+  // any 32 bytes that passed the tag were accepted; now the recovered private
+  // key has to derive the public key the disk carries, and unlockArchiveKey
+  // returns the DERIVED value rather than echoing what it was given.
+  test('the recovered private key derives the stored public key', { timeout: SLOW }, async () => {
+    const m = await mint();
+    const proof = await unlockArchiveKey(m.archiveKey, {
+      path: 'passphrase',
+      passphrase: bytes(PASSPHRASE),
+    });
+    assert.equal(proof.publicKey, m.archiveKey.publicKey);
+  });
+
+  // The whole reason `key-mismatch` exists. This blob DECRYPTS — the tag
+  // verifies, the passphrase is right — and the key inside it is not the one
+  // this disk's archives are sealed to. Calling that a wrong secret would send
+  // the operator hunting for a passphrase they are holding in their hand.
+  test('a private key that does not match the disk’s public key is a MISMATCH, not a wrong secret', {
+    timeout: SLOW,
+  }, async () => {
+    const mine = await mint();
+    const other = await mint();
+    const frankenstein: ArchiveKeyPayload = { ...mine.archiveKey, publicKey: other.archiveKey.publicKey };
+    const err = await unlockArchiveKey(frankenstein, {
+      path: 'passphrase',
+      passphrase: bytes(PASSPHRASE),
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    assert.ok(err instanceof ArchiveKeyError);
+    assert.equal(err.kind, 'key-mismatch');
+    assert.doesNotMatch(err.message, new RegExp(PASSPHRASE));
+    // The message must not read as "try again with a different secret".
+    assert.ok(err.message.includes('opened'), `mismatch message reads wrong: ${err.message}`);
+  });
+
+  test('a mismatch is reported on the recovery-code path too', { timeout: SLOW }, async () => {
+    const mine = await mint();
+    const other = await mint();
+    await assert.rejects(
+      () =>
+        unlockArchiveKey(
+          { ...mine.archiveKey, publicKey: other.archiveKey.publicKey },
+          { path: 'recovery-code', code: mine.recoveryCode },
+        ),
+      (e: unknown) => e instanceof ArchiveKeyError && e.kind === 'key-mismatch',
+    );
+  });
+
+  // Belt and braces on the same property, from the other side: a real X25519
+  // derivation of an unrelated scalar must not happen to equal a minted public
+  // key. (It cannot; this asserts the helper is actually deriving rather than
+  // echoing.)
+  test('publicKeyFromPrivateScalar derives, it does not echo', { timeout: SLOW }, async () => {
+    const m = await mint();
+    const unrelated = await publicKeyFromPrivateScalar(new Uint8Array(X25519_KEY_BYTES).fill(7));
+    assert.equal(unrelated.length, X25519_KEY_BYTES);
+    assert.notEqual(Buffer.from(unrelated).toString('base64url'), m.archiveKey.publicKey);
   });
 
   test('a recovery code unlocks regardless of case and dashes', { timeout: SLOW }, async () => {
@@ -198,10 +324,10 @@ describe('unlocking — §4.8 adopt', () => {
   });
 
   test('a target with no key-id cannot be unlocked', async () => {
-    const err = await unlockArchiveKey(
-      { keyId: '', alg: '', wrappedByPassphrase: 'x', wrappedByRecoveryCode: 'x' },
-      { path: 'passphrase', passphrase: bytes(PASSPHRASE) },
-    ).then(
+    const err = await unlockArchiveKey(emptyPayload({ keyId: '' }), {
+      path: 'passphrase',
+      passphrase: bytes(PASSPHRASE),
+    }).then(
       () => null,
       (e: unknown) => e,
     );
@@ -219,7 +345,7 @@ describe('unlocking — hostile and malformed blobs', () => {
 
   test('a blob that is not base64url is unreadable, not a wrong secret', async () => {
     const err = await unlockArchiveKey(
-      { keyId: 'ak-x', alg: '', wrappedByPassphrase: 'not base64!!', wrappedByRecoveryCode: 'x' },
+      emptyPayload({ publicKey: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', wrappedByPassphrase: 'not base64!!' }),
       secret(),
     ).then(
       () => null,
@@ -227,6 +353,62 @@ describe('unlocking — hostile and malformed blobs', () => {
     );
     assert.ok(err instanceof ArchiveKeyError);
     assert.equal(err.kind, 'unreadable');
+  });
+
+  // The bench has two disks in this shape, and §4.6 does not migrate them. What
+  // it does require is that they fail in words. A v1 blob is byte-identical in
+  // shape to a v2 one — 32 bytes under AES-256-GCM, same KDFs — so it would
+  // DECRYPT under the operator's real passphrase and yield something that is
+  // not a private key for anything. Only the version field can catch it.
+  test('a symmetric-era blob is refused by name, not by a crypto error', { timeout: SLOW }, async () => {
+    const m = await mint();
+    const legacy: ArchiveKeyPayload = {
+      ...m.archiveKey,
+      wrappedByPassphrase: editBlob(m.archiveKey.wrappedByPassphrase, (o) => {
+        o.v = 1;
+      }),
+    };
+    const err = await unlockArchiveKey(legacy, secret()).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    assert.ok(err instanceof ArchiveKeyError);
+    assert.equal(err.kind, 'unreadable');
+    assert.match(err.message, /symmetric/i);
+    assert.match(err.message, /claim/i, 'the refusal must say what to do about it');
+  });
+
+  // The other half of the same disk: a pre-amendment marker has no public key
+  // at all, and the absence is not a detail to route around — it is the check
+  // going missing.
+  test('a sealed key with no public key is refused as symmetric-era', { timeout: SLOW }, async () => {
+    const m = await mint();
+    const err = await unlockArchiveKey({ ...m.archiveKey, publicKey: '' }, secret()).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    assert.ok(err instanceof ArchiveKeyError);
+    assert.equal(err.kind, 'unreadable');
+    assert.match(err.message, /symmetric/i);
+  });
+
+  test('a public key of the wrong length is refused', { timeout: SLOW }, async () => {
+    const m = await mint();
+    await assert.rejects(
+      () => unlockArchiveKey({ ...m.archiveKey, publicKey: 'AAEC' }, secret()),
+      (e: unknown) => e instanceof ArchiveKeyError && e.kind === 'unreadable',
+    );
+  });
+
+  // The one public key with a catastrophic property: every exchange against it
+  // yields zero. It is also exactly what a zeroed marker field decodes to.
+  test('an all-zero public key is refused', { timeout: SLOW }, async () => {
+    const m = await mint();
+    const zeros = Buffer.alloc(X25519_KEY_BYTES).toString('base64url');
+    await assert.rejects(
+      () => unlockArchiveKey({ ...m.archiveKey, publicKey: zeros }, secret()),
+      (e: unknown) => e instanceof ArchiveKeyError && e.kind === 'unreadable',
+    );
   });
 
   test('a future blob version is refused rather than guessed at', { timeout: SLOW }, async () => {

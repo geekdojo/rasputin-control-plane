@@ -132,8 +132,10 @@ func refusalFor(err error) proto.StorageRefusal {
 // cluster wrote it or which §4.6 key its generations need, which are the two
 // things §4.8 and §4.6 respectively say the marker exists to carry.
 //
-// ⚠️ Everything here is an identifier or ciphertext. The plaintext data key has
-// no field on StorageClaimCmd, none on StorageBackupSet, and no way to arrive.
+// ⚠️ Everything here is an identifier, a PUBLIC key, or ciphertext. §4.6's
+// private key has no field on StorageClaimCmd, none on StorageBackupSet, and no
+// way to arrive. The public key is written in clear on purpose: it is what lets
+// a replacement controlplane keep writing to this disk, and it opens nothing.
 func markerFrom(cmd proto.StorageClaimCmd, partUUID string, now time.Time) *proto.StorageBackupSet {
 	return &proto.StorageBackupSet{
 		MarkerVersion:         proto.StorageMarkerVersion,
@@ -141,6 +143,7 @@ func markerFrom(cmd proto.StorageClaimCmd, partUUID string, now time.Time) *prot
 		PartUUID:              partUUID,
 		KeyID:                 cmd.KeyID,
 		KeyAlg:                cmd.KeyAlg,
+		PublicKey:             cmd.PublicKey,
 		WrappedByPassphrase:   cmd.WrappedByPassphrase,
 		WrappedByRecoveryCode: cmd.WrappedByRecoveryCode,
 		Label:                 cmd.Label,

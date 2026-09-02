@@ -80,23 +80,32 @@ func postClaim(t *testing.T, s *Server, body string) *httptest.ResponseRecorder 
 // §4.6: the job spec is persisted into the jobs ledger and rendered in the
 // Tasks view, so anything a caller can smuggle into it is published. The
 // handler builds the spec from a typed request and decodes with
-// DisallowUnknownFields, so a body carrying a plaintext data key is REFUSED
-// rather than quietly stored.
+// DisallowUnknownFields, so a body carrying a private key is REFUSED rather
+// than quietly stored.
+//
+// Both spellings are checked: `dataKey` was the symmetric era's name for it and
+// `privateKey` is this one's. Neither is a declared field and neither ever will
+// be — the point of the 2026-09-02 amendment is that there is no secret for the
+// api to hold at all.
 func TestClaimBackupTarget_RefusesAnUnknownFieldSuchAsAPlaintextKey(t *testing.T) {
-	s, _, _ := storageTestServer(t)
-	rec := postClaim(t, s, `{"nodeId":"`+storageTestNode+`","devicePath":"/dev/sdb","fingerprint":"fp","dataKey":"THE-ACTUAL-SECRET"}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "THE-ACTUAL-SECRET") {
-		t.Errorf("the refusal echoed the value back: %s", rec.Body.String())
-	}
-	list, err := s.store.ListJobs(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListJobs: %v", err)
-	}
-	if len(list) != 0 {
-		t.Errorf("a refused body must not create a job, got %d", len(list))
+	for _, field := range []string{"dataKey", "privateKey"} {
+		t.Run(field, func(t *testing.T) {
+			s, _, _ := storageTestServer(t)
+			rec := postClaim(t, s, `{"nodeId":"`+storageTestNode+`","devicePath":"/dev/sdb","fingerprint":"fp","`+field+`":"THE-ACTUAL-SECRET"}`)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), "THE-ACTUAL-SECRET") {
+				t.Errorf("the refusal echoed the value back: %s", rec.Body.String())
+			}
+			list, err := s.store.ListJobs(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("ListJobs: %v", err)
+			}
+			if len(list) != 0 {
+				t.Errorf("a refused body must not create a job, got %d", len(list))
+			}
+		})
 	}
 }
 

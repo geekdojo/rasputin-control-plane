@@ -13,19 +13,27 @@
 //     cost should say so.
 //  2. **No plaintext key material leaves the browser.** The passphrase lives in
 //     an uncontrolled input — it is never in React state, never in a request,
-//     never in an error string. The data key is minted, wrapped twice and
-//     zeroed inside lib/archive-key.ts and is never seen here at all.
+//     never in an error string. The private key is minted, wrapped twice and
+//     zeroed inside lib/archive-key.ts and is never seen here at all; the
+//     PUBLIC key travels in clear, which is §4.6's amendment, not a leak.
 //  3. **The recovery code is displayed exactly once, behind a forced
 //     acknowledgement**, BEFORE the claim is submitted. See the comment on the
 //     recovery step for why that order and not the other one.
-//  4. **Adopting a keyed disk PROMPTS rather than mints.** The generations on
-//     an adopted disk are already sealed under the key its marker names, so
-//     minting a fresh one would record a key that unlocks nothing there — and
-//     stopping at that, which is what this drawer used to do, left a
-//     replacement controlplane holding a target whose key nobody had been asked
-//     to open. §4.6 puts BOTH sealed copies on the disk; the operator supplies
-//     either the passphrase or the recovery code, the browser opens the key,
-//     and the wrappings travel to the api exactly as they sat on the platter.
+//  4. **Adopting a keyed disk PROMPTS rather than mints, and since the
+//     2026-09-02 amendment the REASON is different.** The old reason was
+//     capability: a symmetric data key was needed to write a generation, so a
+//     controlplane holding a sealed one it had never opened held a target it
+//     could not write to. Asymmetric removes that — writing needs only the
+//     public key, which is on the disk in clear, so a replacement controlplane
+//     could resume backups having proved nothing. The prompt stays because it
+//     is now the only thing that proves the custody secrets actually open THIS
+//     disk. Skip it and the operator adopts a target whose private key nobody
+//     can unwrap, and the schedule seals four generations no one will ever
+//     read — the same hazard the "both wrappings or neither" rule guards
+//     against, one level up. §4.6 puts BOTH sealed copies on the disk; the
+//     operator supplies either secret, the browser opens the private key and
+//     checks it against the disk's public key, and the wrappings travel to the
+//     api exactly as they sat on the platter.
 
 import { AlertTriangle, Database, HardDrive, KeyRound, ShieldCheck, Unlock } from 'lucide-react';
 import { useRef, useState } from 'react';
@@ -39,7 +47,7 @@ import {
   type MintedArchiveKey,
 } from '../../lib/archive-key';
 import type { BackupCandidate, BackupTarget, Job } from '../../lib/types';
-import { archiveKeyFromMarker, buildClaimRequest, needsUnlock } from './claim-request';
+import { archiveKeyFromMarker, buildClaimRequest, markerKeyState, needsUnlock } from './claim-request';
 import {
   Btn,
   CopyButton,
@@ -101,11 +109,10 @@ export function ClaimTargetDrawer({
 
   const action: 'format' | 'adopt' | 'wipe' = disp === 'format' ? 'format' : wipeArmed ? 'wipe' : 'adopt';
 
-  // A fresh backup set means a fresh §4.6 data key. Adoption is the opposite:
-  // the disk's generations are ALREADY encrypted under the key its marker
-  // names, and minting a new one here would record a key that unlocks nothing
-  // on that disk. So the ceremony runs for format and wipe, and never for
-  // adopt.
+  // A fresh backup set means a fresh §4.6 keypair. Adoption is the opposite:
+  // the disk's generations are ALREADY sealed to the key its marker names, and
+  // minting a new one here would record a key that unlocks nothing on that
+  // disk. So the ceremony runs for format and wipe, and never for adopt.
   const mintsFreshKey = action === 'format' || action === 'wipe';
 
   // …and adoption's counterpart: the disk's sealed key is opened rather than
@@ -114,6 +121,13 @@ export function ClaimTargetDrawer({
   // a passphrase or a recovery code that it opens.
   const adoptedKey = archiveKeyFromMarker(candidate);
   const mustUnlock = action === 'adopt' && needsUnlock(candidate);
+
+  // A disk whose marker carries wrappings but no public key was claimed under
+  // the pre-amendment symmetric design. Nothing in this build can open it and
+  // nothing in the api will accept it, so the adopt path is closed here, with
+  // an explanation, rather than at an unlock prompt no secret can satisfy or at
+  // a refusal from the saga. §4.6 does not migrate these; wipe is the exit.
+  const legacyKey = action === 'adopt' && markerKeyState(candidate) === 'legacy-symmetric';
 
   const needsReplace = Boolean(existingTarget) && existingTarget?.status === 'claimed';
 
@@ -134,8 +148,8 @@ export function ClaimTargetDrawer({
       setStep('done');
       onSubmitted(j);
     } catch (e) {
-      // The passphrase and the data key are not in scope here and cannot reach
-      // this string: buildClaimRequest has no field for either.
+      // The passphrase and the private key are not in scope here and cannot
+      // reach this string: buildClaimRequest has no field for either.
       setErr(String(e));
       if (minting) {
         // The wrapped key was built for a claim that did not happen. Drop it and
@@ -180,6 +194,7 @@ export function ClaimTargetDrawer({
             onArmWipe={setWipeArmed}
             busy={busy}
             mustUnlock={mustUnlock}
+            legacyKey={legacyKey}
             onContinue={continueFromConfirm}
           />
         )}
@@ -312,6 +327,7 @@ function ConfirmStep({
   onArmWipe,
   busy,
   mustUnlock,
+  legacyKey,
   onContinue,
 }: {
   candidate: BackupCandidate;
@@ -326,6 +342,8 @@ function ConfirmStep({
   busy: boolean;
   /** This disk carries a sealed §4.6 key, so adopting it prompts for custody. */
   mustUnlock: boolean;
+  /** This disk's key predates the X25519 amendment, so it cannot be adopted. */
+  legacyKey: boolean;
   onContinue: () => void;
 }) {
   const disp = disposition(candidate);
@@ -342,7 +360,18 @@ function ConfirmStep({
         </Callout>
       )}
 
-      {disp === 'adopt' && !wipeArmed && (
+      {legacyKey && !wipeArmed && (
+        <Callout color={WARN} icon={AlertTriangle} title="THIS DISK'S KEY PREDATES THIS BUILD">
+          The archives on this disk are encrypted under a single shared key. Rasputin now uses a
+          keypair instead, so that the controlplane can write a backup at 3 a.m. without holding
+          any secret of its own — and there is no way to convert one into the other. This disk
+          cannot be adopted. Leave it as it is and claim a different disk, or destroy what is on
+          it and claim it fresh. Your passphrase and recovery code still open the generations
+          already on this disk, on a build that understands them.
+        </Callout>
+      )}
+
+      {disp === 'adopt' && !legacyKey && !wipeArmed && (
         <Callout color={OK_GREEN} icon={ShieldCheck} title="ADOPT — NOTHING IS DESTROYED">
           This disk already carries a Rasputin backup set. Adopting takes it over exactly as it
           stands: no format, no data lost. If you plugged this disk in to restore from it, this
@@ -370,6 +399,7 @@ function ConfirmStep({
           <Row k="GENERATIONS" v={generations > 0 ? String(generations) : 'none reported'} />
           {set.createdAt && <Row k="CREATED" v={new Date(set.createdAt).toLocaleString()} />}
           {set.keyId && <Row k="KEY ID" v={set.keyId} />}
+          {set.keyId && set.publicKey && <Row k="PUBLIC KEY" v={set.publicKey} />}
           {set.keyId && mustUnlock && (
             <Hint>
               These generations are encrypted under key <Tok>{set.keyId}</Tok>, and the disk carries
@@ -378,7 +408,7 @@ function ConfirmStep({
               you were shown once. Either is enough on its own.
             </Hint>
           )}
-          {set.keyId && !mustUnlock && (
+          {set.keyId && !mustUnlock && !legacyKey && (
             <Hint warn>
               These generations name key <Tok>{set.keyId}</Tok>, but this disk carries no sealed copy
               of it. Nothing here can produce that key — reading those archives needs a copy of the
@@ -431,17 +461,25 @@ function ConfirmStep({
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <Btn
             variant="primary"
-            disabled={busy || (needsReplace && !replace) || disp === 'unreadable'}
+            disabled={busy || (needsReplace && !replace) || disp === 'unreadable' || legacyKey}
             onClick={onContinue}
-            title={disp === 'unreadable' ? 'This disk cannot be adopted — its marker is unreadable' : undefined}
+            title={
+              disp === 'unreadable'
+                ? 'This disk cannot be adopted — its marker is unreadable'
+                : legacyKey
+                  ? 'This disk cannot be adopted — its archive key predates this build'
+                  : undefined
+            }
           >
             {busy
               ? 'SUBMITTING…'
               : disp === 'format'
                 ? 'CONTINUE — SET UP ENCRYPTION'
-                : mustUnlock
-                  ? 'CONTINUE — UNLOCK THIS DISK'
-                  : 'ADOPT THIS DISK'}
+                : legacyKey
+                  ? 'CANNOT ADOPT THIS DISK'
+                  : mustUnlock
+                    ? 'CONTINUE — UNLOCK THIS DISK'
+                    : 'ADOPT THIS DISK'}
           </Btn>
         </div>
       )}
@@ -626,8 +664,10 @@ function PassphraseStep({
       <Callout color={ACCENT} icon={KeyRound} title="THE ARCHIVE IS ENCRYPTED — THE KEY IS NOT OURS TO KEEP">
         A backup exists to survive this controlplane&apos;s death, so its key cannot live on it: a
         key stored under <Tok>/var/lib/rasputin</Tok> is inside the archive it encrypts. Rasputin
-        generates the key in your browser and keeps only two sealed copies — one openable with the
-        passphrase you choose now, one with a recovery code shown on the next screen.
+        generates a key pair in your browser. It keeps the public half, which is enough to write a
+        backup and useless for reading one, and two sealed copies of the private half — one
+        openable with the passphrase you choose now, one with a recovery code shown on the next
+        screen. Nothing secret is stored on this cluster at all.
       </Callout>
 
       <Hint warn>
@@ -702,6 +742,14 @@ function PassphraseStep({
 // before anything is submitted. There is no path through this component that
 // records a target whose key does not open.
 //
+// Since the 2026-09-02 amendment there is a SECOND way to fail, and it is a
+// different sentence: the blob opens and the private key inside it does not
+// derive the public key this disk carries. That says the disk's records
+// disagree with each other, not that the operator typed the wrong thing, and
+// telling them "wrong passphrase" would send them hunting for a secret they
+// are already holding. archive-key.ts reports it as `key-mismatch`; this
+// renders that message as it stands.
+//
 // Both custody paths are offered because §4.6's whole point is that either
 // alone is sufficient. An operator who forgot the passphrase and kept the
 // printed recovery code must be able to adopt, and one who never printed the
@@ -741,9 +789,10 @@ function UnlockStep({
     onError(null);
     try {
       // unlockArchiveKey consumes the passphrase bytes and zeroes them, and it
-      // never returns the data key it recovers — only a one-way proof that it
-      // opened. The proof is discarded here: this component needs to know that
-      // the unlock SUCCEEDED, and nothing more.
+      // never returns the private key it recovers — only a one-way proof that
+      // it opened AND that it derives the public key on the disk. The proof is
+      // discarded here: this component needs to know that the unlock SUCCEEDED,
+      // and nothing more.
       await unlockArchiveKey(
         blobs,
         path === 'passphrase'
@@ -772,15 +821,23 @@ function UnlockStep({
   return (
     <>
       <Callout color={ACCENT} icon={Unlock} title="THIS DISK'S KEY IS ALREADY ON IT — OPEN IT">
-        Everything already written here is sealed under key <Tok>{blobs.keyId}</Tok>, and the disk
-        carries two sealed copies of that key: one your passphrase opens, one your recovery code
-        opens. Supply either. Rasputin opens the key in this browser to check it, records the sealed
-        copies unchanged, and never sends the key or what you type anywhere.
+        Everything already written here is sealed to key <Tok>{blobs.keyId}</Tok>, and the disk
+        carries two sealed copies of its private half: one your passphrase opens, one your recovery
+        code opens. Supply either. Rasputin opens it in this browser, checks that it matches the
+        key on the disk, records the sealed copies unchanged, and never sends the private key or
+        what you type anywhere.
       </Callout>
 
       <Hint>
         Adopting does not mint a new key and does not change this one. Nothing on the disk is
         rewritten, and your existing recovery code stays the one that works.
+      </Hint>
+
+      <Hint>
+        Rasputin could resume backups to this disk without asking — writing needs only the public
+        key, which is on the disk in the clear. It asks anyway. This is the one moment you are here
+        with the disk to prove your passphrase or recovery code still opens it; skip it, and the
+        first time anyone finds out is the day they try to restore.
       </Hint>
 
       <div style={{ display: 'flex', gap: 8 }}>
@@ -828,8 +885,9 @@ function UnlockStep({
 
       <Hint warn>
         If you have neither the passphrase nor the recovery code, nothing can open what is on this
-        disk — not Rasputin, not Geekdojo. Adopting it would record a target that can never be
-        written to, so it is refused. Leave the disk alone, or destroy the set and claim it fresh.
+        disk — not Rasputin, not Geekdojo. Adopting it would record a target whose archives nobody
+        can ever read, and would go on adding to them, so it is refused. Leave the disk alone, or
+        destroy the set and claim it fresh.
       </Hint>
     </>
   );
@@ -863,7 +921,7 @@ function RecoveryStep({
     <>
       <Callout color={WARN} icon={AlertTriangle} title="WRITE THIS DOWN NOW — IT IS NOT SHOWN AGAIN">
         This is the second of the two ways into your archive. It is not stored anywhere you can
-        read it back: Rasputin holds only a sealed copy of the key it opens.
+        read it back: Rasputin holds only a sealed copy of the private key it opens.
       </Callout>
 
       <div style={{ position: 'relative' }}>

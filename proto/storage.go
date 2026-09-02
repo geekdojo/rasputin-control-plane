@@ -115,8 +115,10 @@ const (
 // itself. Read during enumeration (the disk is mounted read-only to look) and
 // written by Claim.
 //
-// ⚠️ KeyID only, never key material. §4.6's data key is minted in this flow and
-// its plaintext must never enter a marker file, a job ledger, or a log line.
+// ⚠️ Identifiers, a PUBLIC key, and ciphertext. §4.6's keypair is minted in this
+// flow and the PRIVATE key's plaintext must never enter a marker file, a job
+// ledger, or a log line. The public key is a different thing and travels in
+// clear — see PublicKey below.
 type StorageBackupSet struct {
 	MarkerVersion int `json:"markerVersion"`
 	// ClusterID is which cluster wrote this set. A disk carrying another
@@ -125,25 +127,41 @@ type StorageBackupSet struct {
 	// PartUUID is the target's own key, written into the marker so a disk that
 	// was formatted but never recorded can be re-adopted by its own account.
 	PartUUID string `json:"partUuid,omitempty"`
-	// KeyID identifies the §4.6 DATA KEY the generations on this disk are
-	// encrypted under — which changes on a re-format, not on a passphrase
+	// KeyID identifies the §4.6 KEYPAIR the generations on this disk are
+	// encrypted to — which changes on a re-format, not on a passphrase
 	// change. It is what lets restore tell which key a generation needs
-	// instead of guessing. Never the key itself.
+	// instead of guessing. Never key material.
 	KeyID string `json:"keyId,omitempty"`
-	// KeyAlg names the wrapping construction of the two blobs below, so an
+	// KeyAlg names the wrapping construction of the blobs below, so an
 	// unwrap years from now reads what it is looking at instead of assuming
 	// whatever the code does at that moment.
 	KeyAlg string `json:"keyAlg,omitempty"`
-	// WrappedByPassphrase and WrappedByRecoveryCode are §4.6's TWO SEALED
-	// COPIES of the data key, written onto the disk itself.
+	// PublicKey is §4.6's X25519 PUBLIC key, base64url of 32 raw bytes,
+	// written onto the disk IN CLEAR.
 	//
-	// ⚠️ Ciphertext, both of them, and the distinction from KeyID above is not
-	// a nuance — it is the whole contract. Each blob is the 32-byte data key
-	// under AES-256-GCM, its key-encryption key derived in the operator's
-	// browser from a passphrase (Argon2id) or from the recovery code
-	// (HKDF-SHA-256). Neither the passphrase, the recovery code, nor the data
-	// key exists anywhere but that browser; what lands here cannot be opened by
-	// this agent, by the api, or by anyone holding the disk alone.
+	// This is the 2026-09-02 amendment, and it is the field that lets the
+	// controlplane store no secret at all. A weekly 3 a.m. backup.run (#290)
+	// has nobody at a keyboard: under the old single symmetric key it would
+	// have needed that key cached in the clear, which is the exact exposure
+	// §4.6 exists to close. Sealing to a public key needs no secret and no
+	// human. A stolen persistent partition now yields a public key; a stolen
+	// backup disk yields nothing without a custody secret.
+	//
+	// Absent on every disk claimed before the amendment. That absence, next to
+	// non-empty wrappings, is precisely how such a disk is recognised — see
+	// api/internal/storage's adopt gate.
+	PublicKey string `json:"publicKey,omitempty"`
+	// WrappedByPassphrase and WrappedByRecoveryCode are §4.6's TWO SEALED
+	// COPIES of the PRIVATE key, written onto the disk itself.
+	//
+	// ⚠️ Ciphertext, both of them, and the distinction from KeyID and PublicKey
+	// above is not a nuance — it is the whole contract. Each blob is the
+	// 32-byte X25519 private key under AES-256-GCM, its key-encryption key
+	// derived in the operator's browser from a passphrase (Argon2id) or from
+	// the recovery code (HKDF-SHA-256). Neither the passphrase, the recovery
+	// code, nor the private key exists anywhere but that browser; what lands
+	// here cannot be opened by this agent, by the api, or by anyone holding the
+	// disk alone.
 	//
 	// # Why on the disk, and not only in the controlplane's database
 	//
@@ -165,6 +183,14 @@ type StorageBackupSet struct {
 	// holding the disk holds the ciphertext and the wrapped keys, and is left
 	// with the Argon2id cost and 160 bits of recovery-code entropy. That is the
 	// posture §4.6 chose, and it is what makes the disk self-sufficient.
+	//
+	// The marker version does NOT move with the 2026-09-02 amendment, and that
+	// is deliberate. PublicKey is an additive field: a pre-amendment marker
+	// still parses, and it has to, because parsing it is what lets the adopt
+	// path say "this disk's key predates this build" instead of failing at
+	// something lower down. What changed version is the KEY BLOB, which carries
+	// its own — see ui/lib/archive-key.ts's BLOB_VERSION for why the refusal
+	// has to live there and cannot be inferred from lengths.
 	WrappedByPassphrase   string `json:"wrappedByPassphrase,omitempty"`
 	WrappedByRecoveryCode string `json:"wrappedByRecoveryCode,omitempty"`
 	// Label is the human-readable name the operator gave this target.
@@ -285,20 +311,21 @@ type StorageClaimCmd struct {
 	// the marker file. The filesystem label is always StorageBackupLabel.
 	Label string `json:"label,omitempty"`
 	// ClusterID and KeyID are stamped into the marker so the disk can say which
-	// cluster wrote it and which §4.6 data key its generations need. KeyID is
-	// an identifier; the key itself never crosses this wire.
+	// cluster wrote it and which §4.6 keypair its generations need. KeyID is
+	// an identifier; the private key never crosses this wire.
 	ClusterID string `json:"clusterId,omitempty"`
 	KeyID     string `json:"keyId,omitempty"`
-	// KeyAlg, WrappedByPassphrase and WrappedByRecoveryCode are the §4.6
-	// custody material to write into the marker — ciphertext, always, and
-	// exactly the strings the browser produced. See StorageBackupSet for what
-	// they are and why they belong on the disk rather than only in the api's
-	// database.
+	// KeyAlg, PublicKey, WrappedByPassphrase and WrappedByRecoveryCode are the
+	// §4.6 key material to write into the marker — a public key and two
+	// ciphertexts, exactly the strings the browser produced. See
+	// StorageBackupSet for what they are and why they belong on the disk rather
+	// than only in the api's database.
 	//
-	// There is no field here for a plaintext data key, in this struct or any
-	// other in this file, and adding one would put the key in the one place
-	// §4.6 says it must never be: on the appliance the backup exists to outlive.
+	// There is no field here for the PRIVATE key, in this struct or any other
+	// in this file, and adding one would put it in the one place §4.6 says it
+	// must never be: on the appliance the backup exists to outlive.
 	KeyAlg                string `json:"keyAlg,omitempty"`
+	PublicKey             string `json:"publicKey,omitempty"`
 	WrappedByPassphrase   string `json:"wrappedByPassphrase,omitempty"`
 	WrappedByRecoveryCode string `json:"wrappedByRecoveryCode,omitempty"`
 }
