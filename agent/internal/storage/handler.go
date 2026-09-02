@@ -10,19 +10,27 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// RegisterHandlers wires NATS subscriptions for the four storage verbs and
-// returns the subscriptions. Caller unsubscribes on shutdown.
+// RegisterHandlers wires NATS subscriptions for the storage verbs and returns
+// the subscriptions. Caller unsubscribes on shutdown.
 //
-// Every handler acks synchronously. There are no progress events: enumerate and
+// Four target-selection verbs (§4.8) and three backup-run verbs (§4.1). Every
+// handler acks synchronously. There are no progress events: enumerate and
 // inspect are quick, and a claim's phases are not something an operator can act
 // on halfway through — the useful reporting boundary is the saga step, which the
-// api already renders.
+// api already renders. The same holds for a backup write: an operator cannot act
+// on "60% copied".
 //
 // Note what is NOT here. There is no "unclaim", no "reformat", and no verb that
-// takes a device path other than Claim. Adding one is adding a second way to
-// destroy a disk, and it would need its own copy of both guards.
-func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Subscription, error) {
-	subs := make([]*nats.Subscription, 0, 4)
+// takes a device path other than Claim. There is no verb that READS an archive
+// back, either — this node holds no §4.6 private key, so there is nothing it
+// could do with one. Adding any of them is adding a way to destroy or exfiltrate
+// a disk, and each would need its own copy of the guards.
+//
+// stagingRoot is where BackupWrite reads staged archives from; a caller that
+// passes "" disables the write verb rather than defaulting it, because a
+// default staging root is a default answer to "which files may this verb read".
+func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, stagingRoot string) ([]*nats.Subscription, error) {
+	subs := make([]*nats.Subscription, 0, 7)
 
 	bind := func(subj string, fn nats.MsgHandler) error {
 		s, err := nc.Subscribe(subj, fn)
@@ -142,6 +150,106 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 				OK: false, PartUUID: cmd.PartUUID, Refusal: refusalFor(err), Detail: err.Error(),
 			})
 			return
+		}
+		bus.Respond(m, ack)
+	}); err != nil {
+		return subs, err
+	}
+
+	// ----- the backup-run verbs (§4.1) -----------------------------------
+	//
+	// Preflight and prune are cheap and idempotent. Write is neither, and the
+	// api declares its saga step Irreversible around it — see archive.go for
+	// what that step is protecting and why prune deliberately is not.
+
+	if err := bind(proto.BackupPreflightSubject(nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupPreflightCmd
+		if err := json.Unmarshal(m.Data, &cmd); err != nil {
+			bus.Respond(m, proto.BackupPreflightAck{
+				OK: false, Refusal: proto.StorageRefusalBackendError, Detail: err.Error(),
+			})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), proto.BackupPreflightWork)
+		defer cancel()
+		ack, err := BackupPreflight(ctx, backend, cmd)
+		if err != nil {
+			bus.Respond(m, proto.BackupPreflightAck{
+				OK: false, PartUUID: cmd.PartUUID, Refusal: refusalFor(err), Detail: err.Error(),
+			})
+			return
+		}
+		bus.Respond(m, ack)
+	}); err != nil {
+		return subs, err
+	}
+
+	if err := bind(proto.BackupWriteSubject(nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupWriteCmd
+		if err := json.Unmarshal(m.Data, &cmd); err != nil {
+			bus.Respond(m, proto.BackupWriteAck{
+				OK: false, Refusal: proto.StorageRefusalBackendError, Detail: err.Error(),
+			})
+			return
+		}
+		if stagingRoot == "" {
+			// Not a default. A verb that reads a file off this node's disk and
+			// copies it onto a removable one is not something to enable by
+			// falling back to a guessed directory.
+			bus.Respond(m, proto.BackupWriteAck{
+				OK: false, PartUUID: cmd.PartUUID, Refusal: proto.BackupRefusalStagingMissing,
+				Detail: "this agent has no backup staging root configured, so it can accept no archive",
+			})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), proto.BackupWriteWork)
+		defer cancel()
+
+		// Loud and BEFORE the call, like the claim handler above: this is the
+		// verb that puts a cluster's secrets onto a disk somebody can unplug.
+		// Nothing sensitive in the line — a partition UUID, a generation id
+		// that says its own scope, and a digest over ciphertext.
+		log.Printf("rasputin-agent: storage: BACKUP WRITE partuuid=%s generation=%s digest=%s bytes=%d",
+			cmd.PartUUID, cmd.GenerationID, short(cmd.Digest), cmd.SizeBytes)
+
+		ack, err := BackupWrite(ctx, backend, stagingRoot, cmd)
+		if err != nil {
+			log.Printf("rasputin-agent: storage: backup write REFUSED generation=%s: %v", cmd.GenerationID, err)
+			bus.Respond(m, proto.BackupWriteAck{
+				OK: false, PartUUID: cmd.PartUUID, Refusal: refusalFor(err), Detail: err.Error(),
+			})
+			return
+		}
+		log.Printf("rasputin-agent: storage: wrote generation %s (%d bytes) to %s",
+			ack.Generation.ID, ack.Generation.SizeBytes, ack.Generation.ArchivePath)
+		bus.Respond(m, ack)
+	}); err != nil {
+		return subs, err
+	}
+
+	if err := bind(proto.BackupPruneSubject(nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupPruneCmd
+		if err := json.Unmarshal(m.Data, &cmd); err != nil {
+			bus.Respond(m, proto.BackupPruneAck{
+				OK: false, Refusal: proto.StorageRefusalBackendError, Detail: err.Error(),
+			})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), proto.BackupPruneWork)
+		defer cancel()
+		ack, err := BackupPrune(ctx, backend, cmd)
+		if err != nil {
+			bus.Respond(m, proto.BackupPruneAck{
+				OK: false, PartUUID: cmd.PartUUID, Refusal: refusalFor(err), Detail: err.Error(),
+			})
+			return
+		}
+		if len(ack.Pruned) > 0 {
+			// Retention deletes archives. It is convergent and safe to repeat,
+			// which is exactly why it must still leave a record of what it
+			// removed on the node that removed it.
+			log.Printf("rasputin-agent: storage: pruned %d generation(s) on %s, kept %d: %v",
+				len(ack.Pruned), cmd.PartUUID, len(ack.Kept), ack.Pruned)
 		}
 		bus.Respond(m, ack)
 	}); err != nil {

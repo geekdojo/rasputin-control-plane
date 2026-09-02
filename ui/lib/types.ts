@@ -1081,6 +1081,80 @@ export interface BackupTarget {
 }
 
 /**
+ * Every value except 'running' is terminal. A row still 'running' after its job
+ * has finished is the #53 bug — a failed run rendering as one still in progress.
+ */
+export type BackupRunStatus = 'running' | 'succeeded' | 'failed';
+
+/**
+ * The scope of a generation (design/storage.md §4.5).
+ *
+ * `identity-only` is everything this build writes: the control-plane database,
+ * the mesh CA and Headscale state — and NO app data, because no volume anywhere
+ * carries a backup class yet. It is not a complete backup, and every surface
+ * that renders a run has to say so.
+ */
+export type BackupScope = 'identity-only' | 'full';
+
+/** One row of the backup_runs ledger. Carries no key material — a digest is not one. */
+export interface BackupRun {
+  jobId: string;
+  /** The backup_targets row this run wrote to. The target's identity is partUuid. */
+  targetJobId?: string;
+  partUuid?: string;
+  nodeId?: string;
+  /** 'scheduled' or 'manual' — which producer (§4.1) started this run. */
+  reason?: string;
+  scope?: BackupScope;
+  generationId?: string;
+  keyId?: string;
+  /** SHA-256 over the SEALED archive. The only thing that verifies it without a custody secret. */
+  digest?: string;
+  sizeBytes?: number;
+  /** 0 on every run this build writes. A number, so "none" is visible rather than absent. */
+  appVolumesCaptured: number;
+  generationsKept?: number;
+  generationsPruned?: number;
+  status: BackupRunStatus;
+  startedAt: string;
+  /** Absent means still running. */
+  finishedAt?: string;
+  error?: string;
+}
+
+/** GET /api/backup/runs. */
+export interface BackupRunsResponse {
+  runs: BackupRun[];
+  /**
+   * The most recent SUCCESSFUL run, or null when there has never been one.
+   * Null is a real answer and must render as one: "no backup has ever
+   * succeeded" is not "the last one was a while ago".
+   */
+  lastSuccess: BackupRun | null;
+  /** What an archive from this build contains. */
+  scope: BackupScope;
+  /** The prose caveat, authored api-side so every surface says the same words. */
+  scopeWarning: string;
+  /** §4.4's retained generation count. */
+  retain: number;
+}
+
+/** GET/PUT /api/backup/schedule — §4.1's "weekly by default, overridable per installation". */
+export interface BackupSchedule {
+  /** The SCHEDULE's on/off switch. "Back up now" still works when it is off. */
+  enabled: boolean;
+  /** Cadence as a Go duration string, e.g. "168h". */
+  every?: string;
+  /** The resolved cadence in seconds — what the scheduler will actually do. */
+  everySeconds: number;
+  /** When the next scheduled run becomes due, or null when off / never run. */
+  nextDue: string | null;
+  defaultEvery: string;
+  minEvery: string;
+  maxEvery: string;
+}
+
+/**
  * §4.8's second, separate choice. A nested object carrying an api-minted token
  * rather than a boolean, because a boolean is one typo or one mis-bound
  * checkbox from destroying the only copy of an archive.

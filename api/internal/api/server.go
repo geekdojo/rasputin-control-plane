@@ -291,6 +291,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/backup/targets", reqd(s.handleListBackupTargets))
 	mux.HandleFunc("POST /api/backup/targets", reqd(s.handleClaimBackupTarget))
 
+	// Backup RUNS (design/storage.md §4.1). GET runs is the ledger, failures
+	// included — §4.4 wants a failed backup visible, not absent. POST runs is
+	// the on-demand "Back up now", which submits the same saga with the same
+	// refusals as the weekly schedule. The schedule routes are §4.1's
+	// "overridable per installation".
+	mux.HandleFunc("GET /api/backup/runs", reqd(s.handleListBackupRuns))
+	mux.HandleFunc("POST /api/backup/runs", reqd(s.handleStartBackupRun))
+	mux.HandleFunc("GET /api/backup/schedule", reqd(s.handleGetBackupSchedule))
+	mux.HandleFunc("PUT /api/backup/schedule", reqd(s.handleSetBackupSchedule))
+
 	mux.HandleFunc("GET /api/mesh/state", reqd(s.handleMeshState))
 	mux.HandleFunc("GET /api/mesh/devices", reqd(s.handleListMeshDevices))
 	mux.HandleFunc("DELETE /api/mesh/devices/{hsId}", reqd(s.handleDeleteMeshDevice))

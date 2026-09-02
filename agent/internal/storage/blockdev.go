@@ -696,7 +696,12 @@ func readMarker(mountPath string) (*proto.StorageBackupSet, error) {
 // GenerationsDir is where §4.4's retained archive generations live under the
 // target's mount point. Counted so the adopt-or-wipe prompt can say how much
 // the operator is about to destroy — "wipe" should be a decision, not a shrug.
-const GenerationsDir = "generations"
+//
+// Aliased to the wire constant rather than spelled twice: the backup verbs in
+// archive.go write into this directory and the api names it in a manifest, so a
+// second literal here is a way for the writer and the counter to disagree about
+// where generations live.
+const GenerationsDir = proto.BackupGenerationsDir
 
 func countGenerations(mountPath string) (int, error) {
 	ents, err := os.ReadDir(filepath.Join(mountPath, GenerationsDir))
@@ -705,7 +710,11 @@ func countGenerations(mountPath string) (int, error) {
 	}
 	n := 0
 	for _, e := range ents {
-		if e.IsDir() {
+		// `.partial-*` is a write that crashed mid-copy, not a generation.
+		// Counting one would tell the operator a wipe destroys more than it
+		// does, which is the wrong direction for a number whose whole job is to
+		// make a destructive choice legible.
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
 			n++
 		}
 	}

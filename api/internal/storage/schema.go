@@ -39,6 +39,44 @@ CREATE TABLE IF NOT EXISTS backup_targets (
 CREATE INDEX IF NOT EXISTS idx_backup_targets_status ON backup_targets(status);
 CREATE INDEX IF NOT EXISTS idx_backup_targets_node ON backup_targets(node_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_backup_targets_partuuid ON backup_targets(part_uuid);
+
+-- backup_runs: one row per backup.run job (design/storage.md §4.1), created by
+-- step 1 and given a terminal status on every path the job can end on.
+--
+-- Keyed by job_id for the same reason backup_targets is: the row exists before
+-- there is a generation to name it by, and a FAILED run needs a row most of all.
+-- §4.4 requires failure to be loud in three places — the app tile, the alert
+-- path and the job feed. This table is what the first two will read (#298) and
+-- what makes "when did a backup last actually succeed?" answerable without
+-- walking the job ledger's step results.
+--
+-- scope is the honest half. Every generation this build writes is
+-- 'identity-only' (proto.BackupScopeIdentityOnly): the §4.5 contents list also
+-- calls for every volume classed critical or state on any node, and no volume
+-- anywhere carries a class yet. app_volumes_captured therefore reads 0 on every
+-- row, and it is a COLUMN rather than an assumption precisely so the day it
+-- reads something else is visible in the data rather than only in a changelog.
+CREATE TABLE IF NOT EXISTS backup_runs (
+    job_id               TEXT PRIMARY KEY,
+    target_job_id        TEXT NOT NULL DEFAULT '',  -- the backup_targets row this run wrote to
+    part_uuid            TEXT NOT NULL DEFAULT '',
+    node_id              TEXT NOT NULL DEFAULT '',
+    reason               TEXT NOT NULL DEFAULT '',  -- 'scheduled' | 'manual'
+    scope                TEXT NOT NULL DEFAULT '',  -- 'identity-only' | 'full'
+    generation_id        TEXT NOT NULL DEFAULT '',
+    key_id               TEXT NOT NULL DEFAULT '',
+    digest               TEXT NOT NULL DEFAULT '',  -- sha256 over the SEALED bytes; never a key
+    size_bytes           INTEGER NOT NULL DEFAULT 0,
+    app_volumes_captured INTEGER NOT NULL DEFAULT 0,
+    generations_kept     INTEGER NOT NULL DEFAULT 0,
+    generations_pruned   INTEGER NOT NULL DEFAULT 0,
+    status               TEXT NOT NULL,  -- 'running' | 'succeeded' | 'failed'
+    started_at           INTEGER NOT NULL,
+    finished_at          INTEGER,
+    error                TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_backup_runs_status ON backup_runs(status, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backup_runs_started ON backup_runs(started_at DESC);
 `
 
 // migrations are forward-only DDL applied after schema on every open, and must

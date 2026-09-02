@@ -54,11 +54,15 @@ func requestInto[T any](t *testing.T, nc *nats.Conn, subj string, cmd any, out *
 	}
 }
 
-func registered(t *testing.T) (*nats.Conn, *MockBackend) {
+func registered(t *testing.T) (*nats.Conn, *MockBackend, string) {
 	t.Helper()
 	nc := startNATS(t)
 	m := newTestMock(t, defaultMockMachine())
-	subs, err := RegisterHandlers(nc, "node-1", m)
+	// A real staging directory, because the backup write verb reads a file out
+	// of it. Empty would disable that verb, which would make every backup
+	// handler case here assert the disabled path instead of the real one.
+	stagingRoot := t.TempDir()
+	subs, err := RegisterHandlers(nc, "node-1", m, stagingRoot)
 	if err != nil {
 		t.Fatalf("RegisterHandlers: %v", err)
 	}
@@ -67,11 +71,11 @@ func registered(t *testing.T) (*nats.Conn, *MockBackend) {
 			_ = s.Unsubscribe()
 		}
 	})
-	return nc, m
+	return nc, m, stagingRoot
 }
 
 func TestHandlers_EnumerateOverTheBus(t *testing.T) {
-	nc, _ := registered(t)
+	nc, _, _ := registered(t)
 	var ack proto.StorageEnumerateAck
 	requestInto(t, nc, proto.StorageEnumerateSubject("node-1"), proto.StorageEnumerateCmd{}, &ack)
 
@@ -99,7 +103,7 @@ func TestHandlers_EnumerateOverTheBus(t *testing.T) {
 }
 
 func TestHandlers_ClaimRefusalsCarryTheirCode(t *testing.T) {
-	nc, m := registered(t)
+	nc, m, _ := registered(t)
 	list := enumerate(t, m)
 	boot := candidateBySerial(t, list, "SN-BOOT-0001")
 	spare := candidateBySerial(t, list, "SN-SPARE-0002")
@@ -135,7 +139,7 @@ func TestHandlers_ClaimRefusalsCarryTheirCode(t *testing.T) {
 }
 
 func TestHandlers_ClaimHappyPathStampsClusterAndKeyID(t *testing.T) {
-	nc, m := registered(t)
+	nc, m, _ := registered(t)
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
 
 	var ack proto.StorageClaimAck
@@ -179,7 +183,7 @@ func TestHandlers_ClaimHappyPathStampsClusterAndKeyID(t *testing.T) {
 }
 
 func TestHandlers_MountAndInspect(t *testing.T) {
-	nc, m := registered(t)
+	nc, m, _ := registered(t)
 	spare := candidateBySerial(t, enumerate(t, m), "SN-SPARE-0002")
 	claim, err := m.Claim(context.Background(), claimCmd(spare.DevicePath, spare.Fingerprint, "backup"))
 	if err != nil {
@@ -212,7 +216,7 @@ func TestHandlers_MountAndInspect(t *testing.T) {
 // A malformed destructive command is refused at the boundary rather than
 // unmarshalled into a zero value and pushed one layer down.
 func TestHandlers_MalformedClaimIsRefused(t *testing.T) {
-	nc, m := registered(t)
+	nc, m, _ := registered(t)
 	msg, err := nc.Request(proto.StorageClaimSubject("node-1"), []byte("{not json"), 5*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -231,7 +235,7 @@ func TestHandlers_MalformedClaimIsRefused(t *testing.T) {
 // request that times out is indistinguishable from an offline node.
 func TestHandlers_EnumerateFailureStillAnswers(t *testing.T) {
 	t.Setenv("RASPUTIN_STORAGE_FAIL_MODE", "enumerate")
-	nc, _ := registered(t)
+	nc, _, _ := registered(t)
 	var ack proto.StorageEnumerateAck
 	requestInto(t, nc, proto.StorageEnumerateSubject("node-1"), proto.StorageEnumerateCmd{}, &ack)
 	if ack.OK {

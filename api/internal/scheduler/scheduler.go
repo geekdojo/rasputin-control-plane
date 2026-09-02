@@ -40,6 +40,34 @@ type Entry struct {
 	// CreatedBy is the value persisted as the job's creator. Defaults to
 	// "scheduler" if empty.
 	CreatedBy string
+
+	// Due, when set, is consulted on every tick and decides whether this tick
+	// actually submits. Returning false SKIPS the fire, with the reason logged;
+	// nil means "always fire", which is what every entry that predates this
+	// field does.
+	//
+	// It exists for a cadence the operator owns and the scheduler cannot know
+	// at construction time. design/storage.md §4.1 makes backup.run "weekly by
+	// default, overridable per installation" — a persisted setting the operator
+	// can change while the api is running. The three ways to serve that were:
+	// restart the api on a settings change (a backup cadence change is not
+	// worth an outage), rebuild the entry's ticker (state and locking in a
+	// package whose whole virtue is having none), or tick often and let the
+	// entry decide. This is the third, and it costs one predicate call per
+	// tick.
+	//
+	// A gated entry's Interval therefore becomes a CHECK interval rather than a
+	// cadence: set it well below the shortest cadence the gate will ever allow
+	// and let the gate carry the schedule. The gate is also where a
+	// "did the last one succeed, and how long ago?" question belongs, which no
+	// ticker can answer.
+	//
+	// It must be cheap and must not block: it runs on the entry's goroutine
+	// with the tick. A gate that returns an error should return false with the
+	// error as its reason — a scheduler cannot decide what a failed policy
+	// lookup means, and firing anyway would submit a job the policy might have
+	// forbidden.
+	Due func(ctx context.Context) (bool, string)
 }
 
 // Scheduler owns the periodic goroutines for a set of Entries. Start
@@ -115,7 +143,7 @@ func (s *Scheduler) runEntry(ctx context.Context, e Entry) {
 		return
 	case <-time.After(initial):
 	}
-	s.fire(ctx, e.Kind, spec, createdBy)
+	s.tick(ctx, e, spec, createdBy)
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -124,9 +152,28 @@ func (s *Scheduler) runEntry(ctx context.Context, e Entry) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.fire(ctx, e.Kind, spec, createdBy)
+			s.tick(ctx, e, spec, createdBy)
 		}
 	}
+}
+
+// tick consults the entry's Due gate, if it has one, and submits only when the
+// gate says so. A skip is logged rather than silent: a schedule that quietly
+// stops firing is the same shape of bug as a backup that quietly stops running.
+func (s *Scheduler) tick(ctx context.Context, e Entry, spec json.RawMessage, createdBy string) {
+	if e.Due != nil {
+		due, reason := e.Due(ctx)
+		if !due {
+			if reason != "" {
+				log.Printf("scheduler: %s not due — %s", e.Kind, reason)
+			}
+			return
+		}
+		if reason != "" {
+			log.Printf("scheduler: %s due — %s", e.Kind, reason)
+		}
+	}
+	s.fire(ctx, e.Kind, spec, createdBy)
 }
 
 func (s *Scheduler) fire(ctx context.Context, kind string, spec json.RawMessage, createdBy string) {

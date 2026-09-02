@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { listBackupCandidates, listBackupTargets, listNodes } from '../../../lib/api';
 import { timeAgo } from '../../../lib/time';
 import type { BackupCandidate, BackupTarget, Node } from '../../../lib/types';
+import { BackupRuns } from '../../../components/storage/BackupRuns';
 import { ClaimTargetDrawer } from '../../../components/storage/ClaimTargetDrawer';
 import {
   diskName,
@@ -125,6 +126,12 @@ export default function BackupsPage() {
       ) : (
         <TargetTable targets={targets} />
       )}
+
+      {/* The runs panel sits directly under the target, before the disk picker,
+          because "is my data backed up?" is the question this page exists to
+          answer and "which disk could I use?" is the follow-up. It also puts the
+          identity-only warning above the fold rather than below a disk list. */}
+      <BackupRuns hasTarget={Boolean(claimed)} />
 
       <div
         style={{

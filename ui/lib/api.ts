@@ -2,6 +2,8 @@ import type {
   Alert,
   App,
   BackupCandidatesResponse,
+  BackupRunsResponse,
+  BackupSchedule,
   BackupTarget,
   ClaimBackupTargetRequest,
   BusTokenInfo,
@@ -1027,6 +1029,49 @@ export async function listBackupTargets(): Promise<BackupTarget[]> {
 export function claimBackupTarget(req: ClaimBackupTargetRequest): Promise<Job> {
   return jsonFetch<Job>('/api/backup/targets', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+}
+
+// ----- Backup runs (design/storage.md §4.1) -------------------------------
+
+// listBackupRuns returns the run ledger, failures INCLUDED, plus the last
+// successful run and the scope caveat.
+//
+// The wrapper is not ceremony: §4.4 requires a failed backup to be loud, and
+// the two things that make it loud — "when did one last actually succeed" and
+// "what does an archive from this build even contain" — are not derivable from
+// a page of recent rows.
+export function listBackupRuns(limit?: number): Promise<BackupRunsResponse> {
+  const q = limit ? `?${new URLSearchParams({ limit: String(limit) })}` : '';
+  return jsonFetch<BackupRunsResponse>(`/api/backup/runs${q}`);
+}
+
+// startBackupRun is §4.1's on-demand "Back up now". It submits the SAME saga
+// the weekly schedule submits, with the same refusals in the same order —
+// there is no express path for a manual run, because the checks it would skip
+// are the ones that stop a backup filling the disk it protects.
+//
+// A 409 means one is already running.
+export function startBackupRun(): Promise<Job> {
+  return jsonFetch<Job>('/api/backup/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+}
+
+// getBackupSchedule reads the cadence; setBackupSchedule writes it. A change
+// takes effect on the scheduler's next check rather than at the next api
+// restart.
+export function getBackupSchedule(): Promise<BackupSchedule> {
+  return jsonFetch<BackupSchedule>('/api/backup/schedule');
+}
+
+export function setBackupSchedule(req: { enabled: boolean; every?: string }): Promise<BackupSchedule> {
+  return jsonFetch<BackupSchedule>('/api/backup/schedule', {
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
   });

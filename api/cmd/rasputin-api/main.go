@@ -556,6 +556,37 @@ func main() {
 	runner.Register(storage.ClaimWorkflow(backupStore, invStore, storage.Config{
 		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
 	}))
+	// backup.run — design/storage.md §4.1's producer: snapshot the identity
+	// set, seal it to the target's PUBLIC key, land it as a generation, prune
+	// to four. Registered unconditionally; a cluster with no claimed target
+	// gets a clean refusal at step 1 rather than a missing workflow.
+	//
+	// SCOPE: every generation this build writes is `identity-only` — the
+	// database, the mesh CA and Headscale state, and NO app data, because no
+	// volume anywhere carries a backup class yet (#292/#293). The saga says so
+	// in its own log lines, its manifest, its ledger row and the generation's
+	// name on the platter.
+	backupStagingDir := storage.StagingDir(dataDir)
+	if err := storage.EnsureStagingDir(backupStagingDir); err != nil {
+		log.Fatalf("rasputin-api: backup staging dir: %v", err)
+	}
+	// §4.7's third discipline, on the api's half of the handoff: an orphaned
+	// staged archive after a crash is a permanent disk leak with no owner, on
+	// the partition §5's budget table is about — and the archive is the largest
+	// single thing this product stages.
+	if n, freed := storage.CleanStaging(backupStagingDir); n > 0 {
+		log.Printf("rasputin-api: swept %d orphaned staged backup archive(s) from %s (%d bytes)", n, backupStagingDir, freed)
+	}
+	runner.Register(storage.RunWorkflow(backupStore, storage.RunConfig{
+		ClusterID:  strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		StagingDir: backupStagingDir,
+		Sources: storage.IdentitySources{
+			TrustDir:     trustDir,
+			MeshStateDir: meshStateDir,
+		},
+		DB:     backupStore.DB(),
+		DBPath: dbPath,
+	}))
 	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
 	// bmc.configure is registered after NewServer below — it needs the
 	// server's SoL SessionManager to refuse swaps under a live console.
@@ -584,6 +615,12 @@ func main() {
 	// that died mid-saga renders as a claim still running, forever.
 	if err := storage.ReconcileStrandedRows(ctx, backupStore, jobStore); err != nil {
 		log.Printf("rasputin-api: reconcile stranded backup_targets: %v", err)
+	}
+	// And for backup RUNS. A row left `running` by a process that died mid-saga
+	// renders as a backup still in progress, forever — which is the one
+	// appearance §4.4 says a failed backup must never be able to take.
+	if err := storage.ReconcileStrandedRuns(ctx, backupStore, jobStore); err != nil {
+		log.Printf("rasputin-api: reconcile stranded backup_runs: %v", err)
 	}
 	// Finish any self-update that rebooted us onto the new slot (no-op when
 	// there isn't one). Non-blocking — reconciles in the background once the
@@ -834,6 +871,19 @@ func main() {
 		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
 		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
 		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
+		// backup.run (§4.1): weekly by default, overridable per installation.
+		//
+		// The Interval here is a CHECK interval, not the cadence — the cadence
+		// lives in the settings table and the Due gate reads it on every tick,
+		// so an operator changing it does not have to restart the api. Hourly
+		// is well below the one-hour floor an override may set
+		// (storage.MinBackupCadence), so no cadence can outrun the check.
+		{
+			Kind:         storage.RunJobKind,
+			Interval:     parseDurationOr(os.Getenv("RASPUTIN_BACKUP_CHECK_INTERVAL"), time.Hour),
+			InitialDelay: 3 * time.Minute,
+			Due:          storage.DueFunc(backupStore, setupStore, true),
+		},
 	}, obsCollectorEntries...))
 	sched.Start(ctx)
 	defer sched.Stop()
