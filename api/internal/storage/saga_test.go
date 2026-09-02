@@ -237,7 +237,7 @@ func TestClaimSaga(t *testing.T) {
 			spec: func(s *ClaimSpec) {
 				s.Adopt = true
 				s.ArchiveKey = &ArchiveKey{
-					KeyID: "key-brand-new", Alg: "test",
+					KeyID: "key-brand-new", Alg: "test", PublicKey: markerPublicKey,
 					WrappedByPassphrase: "wrapped-a", WrappedByRecoveryCode: "wrapped-b",
 				}
 			},
@@ -530,9 +530,12 @@ func seedClaimedTarget(t *testing.T, store *Store, jobID string) {
 // publishes on the live NATS subject, so a log line is a broadcast, and step
 // results are rendered in the Tasks view.
 //
-// The plaintext data key is excluded structurally rather than by test: ClaimSpec
-// has no field that could hold one, and the HTTP handler decodes with
+// The PRIVATE key is excluded structurally rather than by test: ClaimSpec has no
+// field that could hold one, and the HTTP handler decodes with
 // DisallowUnknownFields so a body carrying one is refused (see the api package).
+// The public key is a different animal — it is in the spec, in the store and in
+// the response on purpose, and §4.6's amendment turns on it being harmless
+// there.
 func TestClaimSaga_KeyMaterialNeverLeavesTheSpecAndTheStore(t *testing.T) {
 	const (
 		wrappedPass     = "SENTINEL-WRAPPED-BY-PASSPHRASE"
@@ -543,7 +546,7 @@ func TestClaimSaga_KeyMaterialNeverLeavesTheSpecAndTheStore(t *testing.T) {
 	})
 	spec := baseSpec()
 	spec.ArchiveKey = &ArchiveKey{
-		KeyID: "key-2026-08", Alg: "aes256-gcm+argon2id",
+		KeyID: "key-2026-08", Alg: markerKeyAlg, PublicKey: markerPublicKey,
 		WrappedByPassphrase: wrappedPass, WrappedByRecoveryCode: wrappedRecovery,
 	}
 	jobID := h.submit(t, spec)

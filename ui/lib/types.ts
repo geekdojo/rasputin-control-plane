@@ -973,19 +973,29 @@ export interface StorageBackupSet {
   markerVersion: number;
   clusterId?: string;
   partUuid?: string;
-  /** Identifies the §4.6 DATA KEY these generations need. Never key material. */
+  /** Identifies the §4.6 KEYPAIR these generations need. Never key material. */
   keyId?: string;
-  /** Names the wrapping construction of the two blobs below. */
+  /** Names the wrapping construction of the blobs below. */
   keyAlg?: string;
   /**
-   * §4.6's two SEALED copies of the data key, carried by the disk itself.
+   * The §4.6 X25519 PUBLIC key, base64url of 32 raw bytes, in clear.
    *
-   * Ciphertext. Each is the data key under AES-256-GCM, its key-encryption key
-   * derived in a browser from the operator's passphrase (Argon2id) or from the
-   * recovery code (HKDF-SHA-256). They are on the disk because §4.6's whole
-   * constraint is that the key cannot live on the controlplane — which means a
-   * REPLACEMENT controlplane, adopting this disk with an empty database, finds
-   * the sealed key here and can ask the operator to open it.
+   * Not a secret, and that is the amendment of 2026-09-02: it is everything an
+   * unattended `backup.run` needs to seal a new generation, so the controlplane
+   * stores no secret at all. Absent on any disk claimed under the earlier
+   * symmetric design — which is how such a disk is recognised.
+   */
+  publicKey?: string;
+  /**
+   * §4.6's two SEALED copies of the PRIVATE key, carried by the disk itself.
+   *
+   * Ciphertext. Each is the X25519 private key under AES-256-GCM, its
+   * key-encryption key derived in a browser from the operator's passphrase
+   * (Argon2id) or from the recovery code (HKDF-SHA-256). They are on the disk
+   * because §4.6's whole constraint is that the key cannot live on the
+   * controlplane — which means a REPLACEMENT controlplane, adopting this disk
+   * with an empty database, finds the sealed key here and can ask the operator
+   * to open it.
    *
    * `lib/archive-key.ts`'s unlockArchiveKey is the only thing that opens them,
    * and it never returns what it recovers.
@@ -1053,7 +1063,13 @@ export interface BackupTarget {
   fingerprint?: string;
   keyId?: string;
   keyAlg?: string;
-  /** Both §4.6 wrappings are on file, without exposing either. */
+  /**
+   * The §4.6 X25519 public key. Exposed, unlike the wrappings, because it is
+   * not a secret and because #290's `backup.run` needs exactly this to seal a
+   * generation.
+   */
+  publicKey?: string;
+  /** Both §4.6 wrappings of the private key are on file, without exposing either. */
   hasWrappedKeys: boolean;
   adopted?: boolean;
   wiped?: boolean;
@@ -1088,6 +1104,10 @@ export interface ClaimBackupTargetRequest {
   adopt?: boolean;
   /** Destroy the existing backup set. Mutually exclusive with adopt. */
   wipe?: WipeConfirmation;
-  /** The ALREADY-WRAPPED §4.6 data key. Never plaintext — see lib/archive-key.ts. */
+  /**
+   * The §4.6 key material: the public key in clear and the private key already
+   * wrapped under both custody paths. The private key is never plaintext here —
+   * see lib/archive-key.ts.
+   */
   archiveKey?: ArchiveKeyPayload;
 }

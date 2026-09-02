@@ -34,8 +34,22 @@ func TestParseClaimSpec(t *testing.T) {
 			wantErr: "wrappedByRecoveryCode",
 		},
 		{
+			// §4.6 as amended: the public key is part of "whole". A target
+			// without it can be written to by nothing — #290 has nothing to
+			// seal a generation to — so it is refused rather than half-stored,
+			// exactly like a missing wrapping.
+			name:    "wrappings but no public key",
+			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
+			wantErr: "publicKey",
+		},
+		{
+			name:    "a public key that is not an X25519 key",
+			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","publicKey":"AAEC","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
+			wantErr: "X25519 public key is 32",
+		},
+		{
 			name: "a whole key",
-			body: `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
+			body: `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","publicKey":"` + markerPublicKey + `","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
 		},
 		{
 			// §4.8's wipe is a SECOND, SEPARATE choice, and the token is what
@@ -108,6 +122,82 @@ func TestFinalizeTargetRow_FailedJobFinalizesTheRow(t *testing.T) {
 	}
 	if row.ClaimedAt == nil {
 		t.Error("a terminal row with no finish time renders as still-running")
+	}
+}
+
+// §4.6's public key, through the ledger and back.
+//
+// It is the only key material this store holds that is meant to come OUT again:
+// the wrappings are read through GetWrappedKeys and never marshalled, while the
+// public key is a field on BackupTarget and goes into every response, because
+// #290's backup.run needs exactly this and nothing else to seal a generation. A
+// column that silently dropped it would leave a target that looks configured
+// and cannot be backed up.
+func TestStore_RoundTripsThePublicKeyAndNotTheWrappings(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	seedPending(t, store, "j")
+
+	if err := store.MarkClaimed(ctx, "j", ClaimResult{
+		PartUUID: "pu",
+		Key: &ArchiveKey{
+			KeyID: "ak-1", Alg: markerKeyAlg, PublicKey: markerPublicKey,
+			WrappedByPassphrase: "sealed-a", WrappedByRecoveryCode: "sealed-b",
+		},
+		At: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("MarkClaimed: %v", err)
+	}
+
+	row, err := store.GetByJob(ctx, "j")
+	if err != nil || row == nil {
+		t.Fatalf("GetByJob: %v", err)
+	}
+	if row.PublicKey != markerPublicKey {
+		t.Errorf("publicKey = %q, want %q", row.PublicKey, markerPublicKey)
+	}
+	if row.KeyID != "ak-1" || row.KeyAlg != markerKeyAlg || !row.HasWrappedKeys {
+		t.Errorf("row = %+v", row)
+	}
+
+	// The wrappings are readable only through the deliberate call.
+	pass, recovery, err := store.GetWrappedKeys(ctx, "j")
+	if err != nil {
+		t.Fatalf("GetWrappedKeys: %v", err)
+	}
+	if pass != "sealed-a" || recovery != "sealed-b" {
+		t.Errorf("wrappings = %q / %q", pass, recovery)
+	}
+
+	// …and not through the JSON, which the UI renders. The public key IS there,
+	// deliberately; the sealed copies are not.
+	b, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), markerPublicKey) {
+		t.Error("the public key must reach the UI — #290 has nothing to encrypt to without it")
+	}
+	for _, forbidden := range []string{"sealed-a", "sealed-b", "wrappedBy"} {
+		if strings.Contains(string(b), forbidden) {
+			t.Errorf("BackupTarget JSON leaked %q: %s", forbidden, b)
+		}
+	}
+}
+
+// A target claimed before the 2026-09-02 amendment has no public key, and
+// nothing back-fills one. The row must read back as it was written rather than
+// inventing a key that would be sealed to nothing.
+func TestStore_AKeylessTargetStaysKeyless(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	seedPending(t, store, "j")
+	if err := store.MarkClaimed(ctx, "j", ClaimResult{PartUUID: "pu", At: time.Now().UTC()}); err != nil {
+		t.Fatalf("MarkClaimed: %v", err)
+	}
+	row, _ := store.GetByJob(ctx, "j")
+	if row.PublicKey != "" || row.HasWrappedKeys {
+		t.Errorf("row = %+v, want no key material at all", row)
 	}
 }
 

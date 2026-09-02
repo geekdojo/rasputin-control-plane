@@ -49,7 +49,7 @@ func ms(t time.Time) int64     { return t.UnixMilli() }
 func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 const targetCols = `job_id, node_id, label, part_uuid, device_path, mount_path, fs_type,
-        size_bytes, fingerprint, key_id, key_alg, wrapped_by_passphrase,
+        size_bytes, fingerprint, key_id, key_alg, public_key, wrapped_by_passphrase,
         wrapped_by_recovery_code, adopted, wiped, status, created_at, claimed_at, error`
 
 // CreatePending records the start of a claim attempt. Called by step 1, before
@@ -77,8 +77,9 @@ type ClaimResult struct {
 	// Wiped records that this claim destroyed an existing Rasputin backup set —
 	// §4.8's second, separate choice. Mutually exclusive with Adopted.
 	Wiped bool
-	// Key is the already-wrapped §4.6 material, or nil when the target was
-	// claimed before encryption was configured. Never plaintext.
+	// Key is the §4.6 material — public key plus the two wrappings of the
+	// private key — or nil when the target was claimed before encryption was
+	// configured. The private key is never here.
 	Key *ArchiveKey
 	// KeyIDOverride, when non-empty, is the KeyID to record regardless of Key —
 	// the adopt path, where the disk's own marker is the authority on which key
@@ -93,12 +94,13 @@ type ClaimResult struct {
 // resurrecting a row that OnTerminal already failed, in the window where a
 // step-5 write and a terminal hook could both be in flight.
 func (s *Store) MarkClaimed(ctx context.Context, jobID string, res ClaimResult) error {
-	keyID, keyAlg, wrappedPass, wrappedRecovery := res.KeyIDOverride, "", "", ""
+	keyID, keyAlg, publicKey, wrappedPass, wrappedRecovery := res.KeyIDOverride, "", "", "", ""
 	if res.Key != nil {
 		if keyID == "" {
 			keyID = res.Key.KeyID
 		}
 		keyAlg = res.Key.Alg
+		publicKey = res.Key.PublicKey
 		wrappedPass = res.Key.WrappedByPassphrase
 		wrappedRecovery = res.Key.WrappedByRecoveryCode
 	}
@@ -112,11 +114,11 @@ func (s *Store) MarkClaimed(ctx context.Context, jobID string, res ClaimResult) 
 	out, err := s.db.ExecContext(ctx, `
         UPDATE backup_targets
         SET part_uuid = ?, device_path = ?, mount_path = ?, fs_type = ?, size_bytes = ?,
-            fingerprint = ?, key_id = ?, key_alg = ?, wrapped_by_passphrase = ?,
+            fingerprint = ?, key_id = ?, key_alg = ?, public_key = ?, wrapped_by_passphrase = ?,
             wrapped_by_recovery_code = ?, adopted = ?, wiped = ?, status = ?, claimed_at = ?, error = ''
         WHERE job_id = ? AND status = ?`,
 		res.PartUUID, res.DevicePath, res.MountPath, res.FSType, sizeForDB(res.SizeBytes),
-		res.Fingerprint, keyID, keyAlg, wrappedPass, wrappedRecovery, adopted, wiped,
+		res.Fingerprint, keyID, keyAlg, publicKey, wrappedPass, wrappedRecovery, adopted, wiped,
 		string(TargetClaimed), ms(res.At), jobID, string(TargetPending))
 	if err != nil {
 		return err
@@ -189,7 +191,9 @@ func (s *Store) ListPending(ctx context.Context) ([]*BackupTarget, error) {
 }
 
 // GetWrappedKeys returns the stored §4.6 wrappings for a target. Both are
-// opaque ciphertext; neither is the data key.
+// opaque ciphertext; neither is the private key. The PUBLIC key is not here —
+// it is a field on BackupTarget, because it is not a secret and reaching it
+// should not look like reaching one.
 //
 // A separate call rather than a field on BackupTarget so that reaching key
 // material is always a deliberate act with its own call site, and never
@@ -248,7 +252,7 @@ func scanTarget(scan func(...any) error) (*BackupTarget, error) {
 		claimedAt sql.NullInt64
 	)
 	if err := scan(&t.JobID, &t.NodeID, &t.Label, &t.PartUUID, &t.DevicePath, &t.MountPath,
-		&t.FSType, &sizeBytes, &t.Fingerprint, &t.KeyID, &t.KeyAlg,
+		&t.FSType, &sizeBytes, &t.Fingerprint, &t.KeyID, &t.KeyAlg, &t.PublicKey,
 		&t.wrappedByPassphrase, &t.wrappedByRecoveryCode, &adopted, &wiped, &status,
 		&createdAt, &claimedAt, &t.Error); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

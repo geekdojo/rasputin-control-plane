@@ -134,9 +134,11 @@ func (s *Server) handleListBackupTargets(w http.ResponseWriter, r *http.Request)
 // A typed request rather than a spec forwarded verbatim, and decoded with
 // DisallowUnknownFields. Both halves matter for §4.6: the job spec is persisted
 // into the jobs ledger and rendered in the Tasks view, so anything a caller can
-// smuggle into it is published. A body carrying a plaintext `dataKey` is
-// REFUSED here rather than quietly stored — and there is no field on the spec
-// this handler builds that could hold one.
+// smuggle into it is published. A body carrying a `privateKey` (or the
+// symmetric era's `dataKey`) is REFUSED here rather than quietly stored — and
+// there is no field on the spec this handler builds that could hold one. The
+// public key IS a declared field, in clear, which is §4.6's amendment of
+// 2026-09-02 rather than an exception to this rule.
 type claimTargetRequest struct {
 	NodeID      string `json:"nodeId"`
 	DevicePath  string `json:"devicePath"`
@@ -150,9 +152,10 @@ type claimTargetRequest struct {
 	// GET /api/backup/candidates published for THIS disk — see
 	// storage.WipeConfirmation. Its absence is a refusal, never a default.
 	Wipe *storage.WipeConfirmation `json:"wipe,omitempty"`
-	// ArchiveKey carries the ALREADY-WRAPPED §4.6 data key. The key is minted
-	// where the passphrase and the recovery code exist — the browser — and the
-	// api never sees it in the clear.
+	// ArchiveKey carries §4.6's keypair: the public half in clear and the
+	// private half already wrapped. The keypair is minted where the passphrase
+	// and the recovery code exist — the browser — and the api never sees the
+	// private half at all.
 	ArchiveKey *storage.ArchiveKey `json:"archiveKey,omitempty"`
 }
 

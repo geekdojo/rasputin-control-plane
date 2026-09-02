@@ -75,7 +75,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 		// agent verb that can destroy the cluster it runs on; if a node is ever
 		// found with an unexpectedly blank disk, this line is the evidence of
 		// what asked for it. Nothing sensitive: a device path, a fingerprint and
-		// an operator's label. §4.6's data key never comes near this handler.
+		// an operator's label. §4.6's private key never comes near this handler.
 		log.Printf("rasputin-agent: storage: CLAIM (destructive) device=%s fingerprint=%s label=%q backend=%s",
 			cmd.DevicePath, short(cmd.Fingerprint), cmd.Label, backend.Name())
 

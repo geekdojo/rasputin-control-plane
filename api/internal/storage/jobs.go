@@ -79,8 +79,9 @@ func ClaimWorkflow(store *Store, inv *inventory.Store, cfg Config) jobs.Workflow
 //
 // Each step's result is a typed struct rather than a raw ack, so the next step
 // reads a shape this package defined instead of re-deriving one. None of these
-// carries key material: KeyID is an identifier, and the wrapped blobs live in
-// the spec and go straight to the store without passing through a step result.
+// carries private key material: KeyID is an identifier, and the public key and
+// the wrapped blobs live in the spec and go straight to the store without
+// passing through a step result.
 
 // enumerateResult is what step 2 proved. The device path here is the one the
 // disk has NOW, resolved from the fingerprint — not the one the operator saw.
@@ -129,8 +130,8 @@ type claimPlan struct {
 	// It is how the disk gets re-adopted by its own account after a claim that
 	// formatted it but never got as far as recording it.
 	ExistingPartUUID string `json:"existingPartUuid,omitempty"`
-	// ExistingKeyID is the §4.6 key the disk's generations are already under.
-	// An identifier, never key material.
+	// ExistingKeyID is the §4.6 keypair the disk's generations are already
+	// sealed to. An identifier, never key material.
 	ExistingKeyID string `json:"existingKeyId,omitempty"`
 }
 
@@ -355,6 +356,9 @@ func claimCheckExisting() jobs.DoFn {
 			return nil, fmt.Errorf("refusing to adopt %s: its generations are encrypted under key %s, and the claim supplies key %s. Supply the wrapped blobs for the disk's own key, or pick a different disk",
 				res.DevicePath, set.KeyID, k.KeyID)
 		}
+		if err := checkLegacySymmetricKey(res.DevicePath, set); err != nil {
+			return nil, err
+		}
 		if err := checkAdoptedKeyCustody(res.DevicePath, set, spec.ArchiveKey); err != nil {
 			return nil, err
 		}
@@ -441,10 +445,11 @@ func claimClaim(cfg Config) jobs.DoFn {
 			return adoptExisting(sc, &plan)
 		}
 
-		keyID, keyAlg, wrappedPass, wrappedRecovery := "", "", "", ""
+		keyID, keyAlg, publicKey, wrappedPass, wrappedRecovery := "", "", "", "", ""
 		if spec.ArchiveKey.present() {
 			keyID = spec.ArchiveKey.KeyID
 			keyAlg = spec.ArchiveKey.Alg
+			publicKey = spec.ArchiveKey.PublicKey
 			wrappedPass = spec.ArchiveKey.WrappedByPassphrase
 			wrappedRecovery = spec.ArchiveKey.WrappedByRecoveryCode
 		}
@@ -453,18 +458,20 @@ func claimClaim(cfg Config) jobs.DoFn {
 			Fingerprint: plan.Fingerprint,
 			Label:       plan.Label,
 			ClusterID:   cfg.ClusterID,
-			// An identifier and two ciphertexts. The §4.6 data key itself never
-			// crosses this wire, and there is no field on StorageClaimCmd that
-			// could carry it.
+			// An identifier, a public key and two ciphertexts. The §4.6 PRIVATE
+			// key never crosses this wire, and there is no field on
+			// StorageClaimCmd that could carry it.
 			//
-			// The wrapped blobs go onto the DISK, not just into the api's
-			// database, and that is the point: a replacement controlplane with
-			// an empty database adopts this disk later and finds the sealed key
-			// sitting on it, openable with the passphrase or the recovery code
-			// the operator is holding. They travel as a marshalled command over
-			// the bus and never enter a step result, a log line or the ledger.
+			// All of it goes onto the DISK, not just into the api's database,
+			// and that is the point: a replacement controlplane with an empty
+			// database adopts this disk later and finds the public key it needs
+			// to keep writing, plus the sealed private key, openable with the
+			// passphrase or the recovery code the operator is holding. They
+			// travel as a marshalled command over the bus and never enter a
+			// step result, a log line or the ledger.
 			KeyID:                 keyID,
 			KeyAlg:                keyAlg,
+			PublicKey:             publicKey,
 			WrappedByPassphrase:   wrappedPass,
 			WrappedByRecoveryCode: wrappedRecovery,
 		})
@@ -794,8 +801,8 @@ func short(h string) string {
 }
 
 // markerCarriesWrappings reports whether the disk's own marker holds both §4.6
-// sealed copies of its data key. Both or neither: one wrapping on a disk is a
-// target one forgotten passphrase from an unreadable archive, which is the
+// sealed copies of its private key. Both or neither: one wrapping on a disk is
+// a target one forgotten passphrase from an unreadable archive, which is the
 // state ArchiveKey.validate refuses to create on the api side.
 func markerCarriesWrappings(set *proto.StorageBackupSet) bool {
 	if set == nil {
@@ -805,19 +812,56 @@ func markerCarriesWrappings(set *proto.StorageBackupSet) bool {
 		strings.TrimSpace(set.WrappedByRecoveryCode) != ""
 }
 
+// checkLegacySymmetricKey refuses a disk claimed under the PRE-2026-09-02
+// symmetric design, in words rather than by accident.
+//
+// Such a marker carries both wrappings and no public key, because there was no
+// public key: the blobs seal a single symmetric data key. This build seals an
+// X25519 private key instead, and the two are indistinguishable by inspection —
+// both are 32 bytes under AES-256-GCM with the same KDFs — so nothing
+// downstream can tell them apart either. §4.6 does not ask for these to be
+// migrated (two bench disks carry them, and they will be re-claimed), but "not
+// migrated" must not mean "fails somewhere confusing".
+//
+// It has to be refused rather than adopted-with-a-warning, which is what the
+// weaker "names a key but carries no wrappings" case gets. That case is
+// harmless: nothing on the disk can produce the key, the target records what it
+// knows, and the operator is told. This one is not. The blobs WOULD open with
+// the operator's real passphrase, yielding 32 bytes that are not a private key
+// for anything, and there is no public key on the disk to catch it — so an
+// adopt would look entirely successful and produce a target whose future
+// generations are sealed to nothing.
+func checkLegacySymmetricKey(devicePath string, set *proto.StorageBackupSet) error {
+	if !markerCarriesWrappings(set) || strings.TrimSpace(set.PublicKey) != "" {
+		return nil
+	}
+	return fmt.Errorf("refusing to adopt %s: its archive key %s was written under the earlier symmetric design (a single shared key, no public key on the disk). Rasputin now seals archives to an X25519 public key so that an unattended backup needs no secret on this controlplane, and there is no way to convert one into the other. Leave this disk as it is and claim a different one, or destroy the set it carries and claim it fresh — your passphrase and recovery code still open the generations already on it, on a build that understands them",
+		devicePath, displayLabel(set.KeyID))
+}
+
 // checkAdoptedKeyCustody is the adopt path's §4.6 gate, and it enforces two
 // things that are really one: an adopted target must end up recording the key
 // the DISK already carries, unchanged.
 //
 // 1. A disk whose marker carries the sealed key must be adopted WITH it. The
 // custody proof itself happens in the browser — the api has no passphrase, no
-// recovery code and no data key, by construction, so it cannot check one. What
-// it can refuse is the outcome that made this gate necessary: a target recorded
-// against a disk whose key is sealed and whose custody nobody was ever asked
-// for. Such a target cannot have a new generation written to it and reads, in
-// every listing, as configured. The operator holding neither custody secret has
-// the choices they always had — leave the disk alone, or wipe it — and both are
-// honest in a way that adopting is not.
+// recovery code and no private key, by construction, so it cannot check one.
+// What it can refuse is the outcome that made this gate necessary: a target
+// recorded against a disk whose private key is sealed and whose custody nobody
+// was ever asked for.
+//
+// ⚠️ The REASON changed with the 2026-09-02 amendment, and the gate did not.
+// It used to be capability: under one symmetric key, a controlplane that had
+// not been handed an openable key could not write a generation at all. That is
+// no longer true — writing needs only the public key, which is on the disk in
+// clear — so this refusal is no longer protecting the api from being unable to
+// work. It is protecting the OPERATOR from a target that works perfectly and is
+// unreadable: adopt without proving custody and the schedule cheerfully seals
+// four generations (§4.4) to a public key whose private half nobody can unwrap,
+// and the discovery happens on restore day. Same shape as the "both wrappings
+// or neither" rule, one level up. The operator holding neither custody secret
+// has the choices they always had — leave the disk alone, or wipe it — and both
+// are honest in a way that adopting is not.
 //
 // 2. Adopt PRESERVES the wrappings; it never re-wraps. Re-wrapping under a
 // fresh passphrase during a recovery operation would leave the disk's own
@@ -825,18 +869,18 @@ func markerCarriesWrappings(set *proto.StorageBackupSet) bool {
 // reading the disk (the case §4.6 exists for, where the database is gone) would
 // meet the old wrapping and a passphrase the operator was told to forget. Two
 // records of one key, disagreeing, discovered on the worst day. A passphrase
-// change is its own operation: it re-wraps the same data key, leaves the key-id
-// alone, and must rewrite the marker too.
+// change is its own operation: it re-wraps the same private key, leaves the
+// key-id and the public key alone, and must rewrite the marker too.
 func checkAdoptedKeyCustody(devicePath string, set *proto.StorageBackupSet, k *ArchiveKey) error {
 	if !markerCarriesWrappings(set) {
 		return nil
 	}
 	if !k.present() {
-		return fmt.Errorf("refusing to adopt %s: its marker carries the sealed §4.6 data key %s, and this claim supplies no key. Adopting without it would record a target whose key nobody has been asked to open — it would list as configured and could never be written to. Unlock the disk with its passphrase or its recovery code and adopt again, or, if both are lost, wipe the disk and claim it fresh",
+		return fmt.Errorf("refusing to adopt %s: its marker carries the sealed §4.6 private key %s, and this claim supplies no key. Adopting without it would record a target whose key nobody has been asked to open — it would list as configured, backups would keep being written to it, and not one of them could ever be read. Unlock the disk with its passphrase or its recovery code and adopt again, or, if both are lost, wipe the disk and claim it fresh",
 			devicePath, displayLabel(set.KeyID))
 	}
 	if k.WrappedByPassphrase != set.WrappedByPassphrase || k.WrappedByRecoveryCode != set.WrappedByRecoveryCode ||
-		(set.KeyAlg != "" && k.Alg != set.KeyAlg) {
+		k.PublicKey != set.PublicKey || (set.KeyAlg != "" && k.Alg != set.KeyAlg) {
 		return fmt.Errorf("refusing to adopt %s: the wrapped key in this claim is not the one on the disk. Adopt takes the disk's key over exactly as it stands and never re-wraps it — a re-wrap that reaches the database and not the marker leaves the disk unreadable by the restore path that only has the disk. Changing the passphrase is a separate operation on an already-claimed target",
 			devicePath)
 	}

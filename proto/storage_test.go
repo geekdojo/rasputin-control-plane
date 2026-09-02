@@ -143,10 +143,14 @@ func TestStorageClaimAckRoundTrip(t *testing.T) {
 	}
 }
 
-// The marker carries a key IDENTIFIER and must have no field capable of holding
-// key material. §4.6's plaintext data key never enters a marker file, a job
-// ledger, or a log line, and the cheapest way to keep that true is for the type
-// to have nowhere to put it.
+// The marker carries key IDENTIFIERS, a PUBLIC key, and ciphertext — and must
+// have no field capable of holding a private key. §4.6's private key never
+// enters a marker file, a job ledger, or a log line, and the cheapest way to
+// keep that true is for the type to have nowhere to put it.
+//
+// "publicKey" is deliberately not on the forbidden list below and "privateKey"
+// deliberately is: since the 2026-09-02 amendment the public half is the only
+// key material at rest anywhere in this system, and it opens nothing.
 func TestStorageBackupSetHasNoKeyMaterialField(t *testing.T) {
 	b, err := json.Marshal(StorageBackupSet{MarkerVersion: 1, KeyID: "k1"})
 	if err != nil {
@@ -158,9 +162,74 @@ func TestStorageBackupSetHasNoKeyMaterialField(t *testing.T) {
 	}
 	for k := range m {
 		switch strings.ToLower(k) {
-		case "key", "datakey", "secret", "passphrase", "wrappedkey", "recoverycode":
+		case "key", "datakey", "privatekey", "secretkey", "secret", "passphrase", "wrappedkey", "recoverycode":
 			t.Errorf("StorageBackupSet carries a %q field — the marker is written to a removable disk", k)
 		}
+	}
+}
+
+// The same rule on the command that PUTS material on the platter. A private-key
+// field here would be the single worst place for one: it crosses the bus, it is
+// marshalled into the claim, and it ends up written to a removable disk.
+func TestStorageClaimCmdHasNoPrivateKeyField(t *testing.T) {
+	b, err := json.Marshal(StorageClaimCmd{DevicePath: "/dev/sdb", Fingerprint: "fp", KeyID: "k1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for k := range m {
+		switch strings.ToLower(k) {
+		case "key", "datakey", "privatekey", "secretkey", "secret", "passphrase", "recoverycode":
+			t.Errorf("StorageClaimCmd carries a %q field — §4.6's private key must have nowhere to ride", k)
+		}
+	}
+}
+
+// §4.6 as amended: the public key travels in clear, on both the command that
+// writes the marker and the marker itself. Round-tripped because a dropped tag
+// here would be silent — the disk would carry a key nobody could write to.
+func TestStoragePublicKeyRoundTrips(t *testing.T) {
+	const pub = "b_37bCmEzeukYs4me3p4ghNn39YLqNC3LAmTdAA_zEo"
+
+	cmdJSON, err := json.Marshal(StorageClaimCmd{DevicePath: "/dev/sdb", Fingerprint: "fp", PublicKey: pub})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var cmd StorageClaimCmd
+	if err := json.Unmarshal(cmdJSON, &cmd); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cmd.PublicKey != pub {
+		t.Errorf("StorageClaimCmd.PublicKey = %q, want %q", cmd.PublicKey, pub)
+	}
+
+	setJSON, err := json.Marshal(StorageBackupSet{MarkerVersion: StorageMarkerVersion, KeyID: "k1", PublicKey: pub})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(setJSON), `"publicKey":"`+pub+`"`) {
+		t.Errorf("the marker does not carry the public key: %s", setJSON)
+	}
+	var set StorageBackupSet
+	if err := json.Unmarshal(setJSON, &set); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if set.PublicKey != pub {
+		t.Errorf("StorageBackupSet.PublicKey = %q, want %q", set.PublicKey, pub)
+	}
+
+	// Omitted when absent, so a pre-amendment marker written by an older agent
+	// and one written by this build with no key look the same — which is what
+	// the api's symmetric-era gate keys off.
+	empty, err := json.Marshal(StorageBackupSet{MarkerVersion: 1})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(empty), "publicKey") {
+		t.Errorf("an empty public key must be omitted, not written blank: %s", empty)
 	}
 }
 

@@ -53,10 +53,13 @@
 //
 // # §4.6 key material
 //
-// The archive data key is minted when the target is configured, OUTSIDE this
-// package, and reaches it already wrapped. The plaintext data key must never
-// enter the job ledger, a step result, a log line, or an event payload —
-// jobs.StepCtx.Log writes to the job_events table AND to the live NATS stream,
-// so a log line is a broadcast. This package handles opaque wrapped blobs and
-// a KeyID, which is an identifier and never key material.
+// The archive KEYPAIR is minted when the target is configured, OUTSIDE this
+// package. The public half reaches it in clear; the private half reaches it
+// already wrapped. The private key must never enter the job ledger, a step
+// result, a log line, or an event payload — jobs.StepCtx.Log writes to the
+// job_events table AND to the live NATS stream, so a log line is a broadcast.
+// This package handles opaque wrapped blobs, a KeyID, and an X25519 public key,
+// which is not a secret: since the 2026-09-02 amendment it is the only key
+// material at rest on this controlplane, and it can encrypt an archive without
+// being able to read one.
 package storage
