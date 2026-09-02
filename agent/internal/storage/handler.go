@@ -29,6 +29,9 @@ import (
 // stagingRoot is where BackupWrite reads staged archives from; a caller that
 // passes "" disables the write verb rather than defaulting it, because a
 // default staging root is a default answer to "which files may this verb read".
+// It is also what preflight reports back, so the api stages into the directory
+// this node will actually read rather than into one it derived for itself —
+// see StagingRoot for the failure that came of deriving it twice.
 func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, stagingRoot string) ([]*nats.Subscription, error) {
 	subs := make([]*nats.Subscription, 0, 7)
 
@@ -172,7 +175,9 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, stagingRoot
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), proto.BackupPreflightWork)
 		defer cancel()
-		ack, err := BackupPreflight(ctx, backend, cmd)
+		// stagingRoot goes out with the answer: the api has to know where to
+		// stage before it seals, and this is the step that runs before it does.
+		ack, err := BackupPreflight(ctx, backend, stagingRoot, cmd)
 		if err != nil {
 			bus.Respond(m, proto.BackupPreflightAck{
 				OK: false, PartUUID: cmd.PartUUID, Refusal: refusalFor(err), Detail: err.Error(),

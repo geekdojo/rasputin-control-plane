@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // §4.7's staging path, and the source-side free-space guard that goes with it.
@@ -53,30 +52,33 @@ import (
 // reserve between this check and the write — the check is a snapshot, not a
 // lease. #393 is where a real reservation belongs.
 
-// StagingDirName is where sealed archives are assembled, under the api's data
-// directory. Named here and in the §5 budget table, per §4.7's second
-// discipline, and excluded from the archive by construction: assemble walks an
-// explicit list of identity files and never a directory tree that could contain
-// this one. An archive that contains the previous archive is a straightforward
-// way to fill a disk.
-const StagingDirName = "backup-staging"
+// # Where the staging directory is, and why that is not decided here
+//
+// It used to be. This file resolved <dataDir>/backup-staging and the agent
+// resolved <stateDir>/backup-staging, and the comment on each said the shared
+// RASPUTIN_BACKUP_STAGING_DIR was what kept them pointed at one directory. That
+// variable is set nowhere on the shipping image, so the default — the only
+// configuration that ships — had the api sealing to
+// /var/lib/rasputin/backup-staging and the agent looking in
+// /var/lib/rasputin/agent-state/backup-staging. A 105 MB archive was built and
+// refused, every run (e3bench 2026-09-02).
+//
+// So there is no api-side derivation any more. The agent owns the root — it is
+// the containment boundary for the verb that reads it, and a boundary the
+// caller names is not one — and reports it in BackupPreflightAck.StagingRoot,
+// step 2, before this file's guard sizes anything. The functions below take the
+// directory as an argument and never invent it. See the agent's StagingRoot.
+//
+// The directory is still excluded from the archive by construction: assemble
+// walks an explicit list of identity files and never a directory tree that
+// could contain this one. An archive that contains the previous archive is a
+// straightforward way to fill a disk.
 
 // StagingReserveBytes is the free space that must REMAIN on the staging
 // partition after a run's estimated peak. See the file comment: it is §5's
 // VictoriaMetrics reservation, so a backup cannot be the thing that blinds the
 // metrics store.
 const StagingReserveBytes uint64 = 2 << 30 // 2 GiB
-
-// StagingDir resolves the staging directory. RASPUTIN_BACKUP_STAGING_DIR
-// overrides it, and the AGENT reads the same variable — the two halves of the
-// §4.7 handoff must point at one directory, and one variable is how that is
-// kept true rather than hoped for.
-func StagingDir(dataDir string) string {
-	if v := strings.TrimSpace(os.Getenv("RASPUTIN_BACKUP_STAGING_DIR")); v != "" {
-		return v
-	}
-	return filepath.Join(dataDir, StagingDirName)
-}
 
 // EnsureStagingDir creates the staging directory 0700. Owner-only because what
 // passes through it is, for the seconds before it is sealed, a plaintext copy

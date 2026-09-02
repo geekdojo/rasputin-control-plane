@@ -243,15 +243,15 @@ func TestMeasureIdentitySetCountsTheWholeSet(t *testing.T) {
 	}
 }
 
-// TestStagingDirRespectsTheSharedOverride: the api and the agent must point at
-// ONE directory, and one variable is how that is kept true rather than hoped
-// for. A drift here is a write verb that cannot find what the api staged.
-func TestStagingDirRespectsTheSharedOverride(t *testing.T) {
-	if got := StagingDir("/var/lib/rasputin"); got != "/var/lib/rasputin/"+StagingDirName {
-		t.Errorf("StagingDir = %q", got)
-	}
-	t.Setenv("RASPUTIN_BACKUP_STAGING_DIR", "/mnt/elsewhere/staging")
-	if got := StagingDir("/var/lib/rasputin"); got != "/mnt/elsewhere/staging" {
-		t.Errorf("the override was ignored: %q", got)
-	}
-}
+// The test that used to live here asserted StagingDir(dataDir) and the agent's
+// StagingRoot(stateDir) agreed — by handing BOTH of them "/var/lib/rasputin".
+// Production hands the api its data dir and the agent its state dir, which are
+// not the same directory on the shipping image, so the two halves disagreed in
+// the only configuration that ships while this test stayed green. It is gone
+// with the function it tested: the api derives no staging path at all now.
+//
+// What replaces it: the agent pins its one derivation with no environment set
+// (agent/internal/storage, TestStagingRootIsTheDeployedDefaultWithNoEnvironment
+// Set and TestPreflightReportsExactlyWhatTheWriteVerbWillRead), and
+// TestBackupRunStagesWhereTheAgentSaysAndNowhereElse below pins the api to the
+// root it is told about.

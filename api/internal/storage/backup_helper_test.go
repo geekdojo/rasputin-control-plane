@@ -140,6 +140,10 @@ func (f *fakeBackupAgent) start(t *testing.T, nc *nats.Conn) *fakeBackupAgent {
 				OK: true, Present: true, PartUUID: cmd.PartUUID,
 				MountPath: "/mnt/rasputin-backup", TotalBytes: 2 << 40,
 				FreeBytes: 1 << 40, RequiredBytes: cmd.EstimateBytes, Sufficient: true,
+				// The real agent answers with the root its write verb reads,
+				// and so does this one — a fake that omitted it would let the
+				// api go back to guessing without a test noticing.
+				StagingRoot: f.stagingRoot,
 			})
 			return
 		}
@@ -292,6 +296,12 @@ type runHarnessOpts struct {
 	badKey string
 	// retain overrides §4.4's four generations.
 	retain int
+	// targetNodeID claims the target on a node other than the one the api runs
+	// on. Empty means runNodeID, the co-located case.
+	targetNodeID string
+	// selfNodeID overrides what the api believes its own node is. Only set to
+	// "" deliberately, to cover the api that does not know.
+	selfNodeID *string
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -327,7 +337,14 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	writeTestFile(t, filepath.Join(meshDir, "headscale", "config.yaml"), "server_url: https://cp.test\n")
 	writeTestFile(t, filepath.Join(meshDir, "headscale", "db", "headscale.sqlite"), "HEADSCALE-STATE")
 
-	stagingDir := filepath.Join(dir, StagingDirName)
+	// The AGENT's staging root, and deliberately not a directory the api could
+	// have derived from anything it is given: `dir` is this harness's stand-in
+	// for the api's data dir, and the staging root is under an `agent-state`
+	// subdirectory the way the shipping image has it. Under the code this
+	// replaces the api would have staged into <dir>/backup-staging and every
+	// saga test below would fail on the write — which is exactly what the
+	// e3bench run did and no test did.
+	stagingDir := filepath.Join(dir, "agent-state", "backup-staging")
 	if err := EnsureStagingDir(stagingDir); err != nil {
 		t.Fatalf("staging dir: %v", err)
 	}
@@ -353,9 +370,15 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 
 	r := jobs.NewRunner(js, nc)
 	r.SetBackoff(func(int) time.Duration { return 0 })
+	// No staging directory is configured here, because the api has none to
+	// configure: it stages where the preflight ack says the agent reads.
+	self := runNodeID
+	if opts.selfNodeID != nil {
+		self = *opts.selfNodeID
+	}
 	r.Register(RunWorkflow(st, RunConfig{
 		ClusterID:  "home1",
-		StagingDir: stagingDir,
+		SelfNodeID: self,
 		Sources:    IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
 		DB:         st.DB(),
 		DBPath:     dbPath,
@@ -378,7 +401,11 @@ func seedRunTarget(t *testing.T, st *Store, key testKeypair, opts runHarnessOpts
 	t.Helper()
 	ctx := context.Background()
 	jobID := "job-claim-1"
-	if err := st.CreatePending(ctx, jobID, runNodeID, "/dev/sdb", "the archive disk", time.Now().UTC()); err != nil {
+	nodeID := runNodeID
+	if opts.targetNodeID != "" {
+		nodeID = opts.targetNodeID
+	}
+	if err := st.CreatePending(ctx, jobID, nodeID, "/dev/sdb", "the archive disk", time.Now().UTC()); err != nil {
 		t.Fatalf("CreatePending: %v", err)
 	}
 	pub := key.publicB64

@@ -446,7 +446,7 @@ func TestBackupPreflightReportsSpaceAndRetention(t *testing.T) {
 	writeGeneration(t, m, partUUID, staging, "gen-1-identity-only")
 	writeGeneration(t, m, partUUID, staging, "gen-2-identity-only")
 
-	ack, err := BackupPreflight(ctx, m, proto.BackupPreflightCmd{PartUUID: partUUID, EstimateBytes: 1024})
+	ack, err := BackupPreflight(ctx, m, staging, proto.BackupPreflightCmd{PartUUID: partUUID, EstimateBytes: 1024})
 	if err != nil {
 		t.Fatalf("BackupPreflight: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestBackupPreflightRefusesOnLowSpace(t *testing.T) {
 	m := newTestMock(t, defaultMockMachine())
 	partUUID, _ := claimedTarget(t, m)
 
-	ack, err := BackupPreflight(ctx, m, proto.BackupPreflightCmd{
+	ack, err := BackupPreflight(ctx, m, t.TempDir(), proto.BackupPreflightCmd{
 		PartUUID: partUUID, EstimateBytes: 1 << 60, // an exabyte
 	})
 	if err != nil {
@@ -526,7 +526,7 @@ func TestBackupVerbsRefuseAnUnattachedTarget(t *testing.T) {
 	staging := t.TempDir()
 	const absent = "00000000-0000-0000-0000-00000000dead"
 
-	pre, err := BackupPreflight(ctx, m, proto.BackupPreflightCmd{PartUUID: absent})
+	pre, err := BackupPreflight(ctx, m, staging, proto.BackupPreflightCmd{PartUUID: absent})
 	if err != nil {
 		t.Fatalf("BackupPreflight: %v", err)
 	}
@@ -577,15 +577,126 @@ func TestCleanStagingSweepsOrphans(t *testing.T) {
 	}
 }
 
-// TestStagingRootRespectsTheSharedOverride: the api and the agent must resolve
-// the SAME directory, and one environment variable is how that stays true.
-func TestStagingRootRespectsTheSharedOverride(t *testing.T) {
-	if got := StagingRoot("/var/lib/rasputin"); got != "/var/lib/rasputin/"+backupStagingDirName {
-		t.Errorf("StagingRoot = %q", got)
+// TestStagingRootIsTheDeployedDefaultWithNoEnvironmentSet pins the DEFAULT —
+// the one configuration that ships, and the one nothing tested.
+//
+// The test this replaces asked both halves of the handoff to resolve the same
+// argument ("/var/lib/rasputin") and found them equal. Production does not ask
+// that question. It gives the api its DATA dir (/var/lib/rasputin) and the
+// agent its STATE dir (/var/lib/rasputin/agent-state, set by the shipping unit
+// file), and the shared RASPUTIN_BACKUP_STAGING_DIR that both files claimed
+// kept them aligned is set nowhere on the image. So the api sealed a 105 MB
+// archive into one directory and the agent refused it as missing from another,
+// on every run, with a green test suite (e3bench 2026-09-02).
+//
+// The fix is not a better-agreed default: it is that only ONE side derives a
+// path at all. This pins that side's answer, with no environment set.
+func TestStagingRootIsTheDeployedDefaultWithNoEnvironmentSet(t *testing.T) {
+	// Explicitly empty rather than merely unset in the runner's environment:
+	// the assertion is about the no-override path, and it must hold whatever
+	// the machine running the test happens to export.
+	t.Setenv("RASPUTIN_BACKUP_STAGING_DIR", "")
+
+	// What RASPUTIN_AGENT_STATE_DIR is on the shipping image.
+	const deployedStateDir = "/var/lib/rasputin/agent-state"
+	const want = deployedStateDir + "/" + backupStagingDirName
+	if got := StagingRoot(deployedStateDir); got != want {
+		t.Errorf("StagingRoot(%q) = %q, want %q", deployedStateDir, got, want)
 	}
-	t.Setenv("RASPUTIN_BACKUP_STAGING_DIR", "/mnt/elsewhere/staging")
-	if got := StagingRoot("/var/lib/rasputin"); got != "/mnt/elsewhere/staging" {
-		t.Errorf("the override was ignored: %q", got)
+}
+
+// TestPreflightReportsExactlyWhatTheWriteVerbWillRead is the assertion that
+// makes the e3bench failure unreachable, and it is deliberately end-to-end with
+// NO environment variable set.
+//
+// The api does not derive a staging path any more; it stages into
+// BackupPreflightAck.StagingRoot. So the property that has to hold is: the
+// directory preflight NAMES is the directory write READS. Both come from one
+// expression here, which is what "by construction" means — there is no second
+// derivation left to drift.
+func TestPreflightReportsExactlyWhatTheWriteVerbWillRead(t *testing.T) {
+	t.Setenv("RASPUTIN_BACKUP_STAGING_DIR", "")
+	ctx := context.Background()
+	m := newTestMock(t, defaultMockMachine())
+	partUUID, _ := claimedTarget(t, m)
+
+	// The agent resolves its root the way main.go does, from its state dir,
+	// with nothing in the environment.
+	stateDir := t.TempDir()
+	root := StagingRoot(stateDir)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("staging root: %v", err)
+	}
+
+	ack, err := BackupPreflight(ctx, m, root, proto.BackupPreflightCmd{PartUUID: partUUID, EstimateBytes: 1024})
+	if err != nil {
+		t.Fatalf("BackupPreflight: %v", err)
+	}
+	if ack.StagingRoot != root {
+		t.Fatalf("preflight reported staging root %q, but the write verb reads %q — that gap IS the bug", ack.StagingRoot, root)
+	}
+
+	// Now do what the api does: stage into the directory it was told about, and
+	// hand the write verb a NAME. It must find it.
+	name, digest := stageArchive(t, ack.StagingRoot, "20260902T195950Z-job-identity-only.sealed", "sealed-bytes")
+	w, err := BackupWrite(ctx, m, root, proto.BackupWriteCmd{
+		PartUUID: partUUID, GenerationID: "20260902T195950Z-job-identity-only",
+		StagingName: name, Digest: digest, SizeBytes: uint64(len("sealed-bytes")),
+		ManifestJSON: testManifest(proto.BackupScopeIdentityOnly),
+	})
+	if err != nil {
+		t.Fatalf("an archive staged where preflight said to stage it was refused: %v", err)
+	}
+	if !w.OK {
+		t.Fatalf("write ack = %+v", w)
+	}
+}
+
+// TestStagingRootOverrideMovesBothHalvesTogether: the override still works, and
+// because the api is TOLD the root rather than resolving one, setting it on the
+// agent moves the api with it. A half-applied override is the original bug in a
+// different hat, and there is no longer a half to apply it to.
+func TestStagingRootOverrideMovesBothHalvesTogether(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMock(t, defaultMockMachine())
+	partUUID, _ := claimedTarget(t, m)
+
+	elsewhere := t.TempDir()
+	t.Setenv("RASPUTIN_BACKUP_STAGING_DIR", elsewhere)
+
+	stateDir := t.TempDir() // deliberately NOT where the archive will go
+	root := StagingRoot(stateDir)
+	if root != elsewhere {
+		t.Fatalf("the override was ignored: %q", root)
+	}
+	ack, err := BackupPreflight(ctx, m, root, proto.BackupPreflightCmd{PartUUID: partUUID})
+	if err != nil {
+		t.Fatalf("BackupPreflight: %v", err)
+	}
+	if ack.StagingRoot != elsewhere {
+		t.Errorf("preflight reported %q, so the api would stage somewhere the override did not move", ack.StagingRoot)
+	}
+}
+
+// TestPreflightReportsTheStagingRootEvenWhenTheTargetIsUnplugged: the root is a
+// property of the node, not of the disk, and an operator reading a
+// target-unplugged refusal should still see where this node stages.
+func TestPreflightReportsTheStagingRootEvenWhenTheTargetIsUnplugged(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMock(t, defaultMockMachine())
+	root := t.TempDir()
+
+	ack, err := BackupPreflight(ctx, m, root, proto.BackupPreflightCmd{
+		PartUUID: "00000000-0000-0000-0000-00000000dead",
+	})
+	if err != nil {
+		t.Fatalf("BackupPreflight: %v", err)
+	}
+	if ack.Present {
+		t.Fatal("an absent target reported present")
+	}
+	if ack.StagingRoot != root {
+		t.Errorf("staging root = %q on the unplugged path, want %q", ack.StagingRoot, root)
 	}
 }
 
