@@ -68,7 +68,7 @@ func newRig(t *testing.T, concurrency int) *rig {
 
 func (r *rig) mint(member string) string {
 	r.t.Helper()
-	tok, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: member, NodeID: nodeID, JobID: jobID}, backupxfer.CredentialTTL)
+	tok, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: member, NodeID: nodeID, JobID: jobID, MaxBytes: 1 << 30}, backupxfer.CredentialTTL)
 	if err != nil {
 		r.t.Fatalf("Mint: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestIngestRefusesASecondMemberOnTheFirstsCredential(t *testing.T) {
 
 func TestIngestRefusesAnExpiredOrForgedCredential(t *testing.T) {
 	r := newRig(t, 1)
-	short, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memVW, NodeID: nodeID, JobID: jobID}, time.Second)
+	short, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memVW, NodeID: nodeID, JobID: jobID, MaxBytes: 1 << 30}, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestIngestRefusesAnExpiredOrForgedCredential(t *testing.T) {
 	refusedWith(t, err, backupxfer.CodeCredentialExpired)
 
 	other, _ := backupxfer.NewAuthority()
-	forged, _ := other.Mint(backupxfer.Grant{Generation: genID, Member: memVW, NodeID: nodeID, JobID: jobID}, time.Minute)
+	forged, _ := other.Mint(backupxfer.Grant{Generation: genID, Member: memVW, NodeID: nodeID, JobID: jobID, MaxBytes: 1 << 30}, time.Minute)
 	_, err = r.put(context.Background(), forged, memVW, []byte("forged"))
 	refusedWith(t, err, backupxfer.CodeCredentialInvalid)
 	_, err = r.put(context.Background(), "garbage", memVW, []byte("garbage"))
@@ -237,10 +237,10 @@ func TestIngestRefusesACredentialForAClosedRun(t *testing.T) {
 	_, err := r.put(context.Background(), cred, memVW, []byte("late"))
 	refusedWith(t, err, backupxfer.CodeNoGeneration)
 	// Nor can one be minted for a run that is not open.
-	if _, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memVW, NodeID: nodeID, JobID: "other"}, time.Minute); err == nil {
+	if _, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memVW, NodeID: nodeID, JobID: "other", MaxBytes: 1 << 30}, time.Minute); err == nil {
 		t.Error("a credential was minted for a run that has no generation open")
 	}
-	if _, err := r.ingest.Mint(backupxfer.Grant{Generation: "20260903T120000Z-OTHER-full", Member: memVW, NodeID: nodeID, JobID: jobID}, time.Minute); err == nil {
+	if _, err := r.ingest.Mint(backupxfer.Grant{Generation: "20260903T120000Z-OTHER-full", Member: memVW, NodeID: nodeID, JobID: jobID, MaxBytes: 1 << 30}, time.Minute); err == nil {
 		t.Error("a credential was minted for a generation that is not open")
 	}
 }
@@ -512,5 +512,36 @@ func TestTransportForRefusesWhatItCannotSpeak(t *testing.T) {
 	if u, err := backupxfer.MemberURL("https://rasputin.local/api/backup/ingest/", genID, memVW); err != nil ||
 		u != "https://rasputin.local/api/backup/ingest/"+genID+"/"+memVW {
 		t.Errorf("MemberURL = %q, %v", u, err)
+	}
+}
+
+// TestIngestRefusesMoreBytesThanTheCredentialAuthorises: a credential minted
+// for a small member cannot be used to stream a large one — the blast radius
+// of a leaked credential is bounded in bytes as well as in name.
+func TestIngestRefusesMoreBytesThanTheCredentialAuthorises(t *testing.T) {
+	r := newRig(t, 1)
+	small := []byte("a small volume")
+	bound := backupxfer.SealedSizeBound(uint64(len(small)))
+	cred, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memVW, NodeID: nodeID, JobID: jobID, MaxBytes: bound}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A seal of the small volume fits the bound exactly as minted.
+	if _, err := r.put(context.Background(), cred, memVW, small); err != nil {
+		t.Fatalf("the member the credential was minted for was refused: %v", err)
+	}
+	// A seal of something far larger, on a credential for the small one,
+	// is cut off at the bound and discarded.
+	big := bytes.Repeat([]byte("x"), 2<<20)
+	cred2, _ := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memPL, NodeID: nodeID, JobID: jobID, MaxBytes: bound}, time.Minute)
+	_, err = r.put(context.Background(), cred2, memPL, big)
+	refusedWith(t, err, backupxfer.CodeOverBound)
+	if _, err := os.Stat(r.memberPath(memPL)); err == nil {
+		t.Fatal("an over-bound upload landed")
+	}
+	r.waitForNoPartials(2 * time.Second)
+	r.noPartials()
+	if _, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memPL, NodeID: nodeID, JobID: jobID}, time.Minute); err == nil {
+		t.Error("a credential with no byte bound was minted")
 	}
 }

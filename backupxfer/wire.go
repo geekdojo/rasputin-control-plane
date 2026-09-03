@@ -74,6 +74,7 @@ const (
 	CodeNotAnArchive      = "not-an-archive"     // 415: the body is not a sealed archive
 	CodeDigestMismatch    = "digest-mismatch"    // 422: the trailer disagrees with the bytes
 	CodeWriteFailed       = "write-failed"       // 500/507: the target could not take it
+	CodeOverBound         = "over-bound"         // 413: more bytes than the credential authorises
 	CodeUnsupported       = "unsupported"        // 501: this build cannot ingest here
 )
 

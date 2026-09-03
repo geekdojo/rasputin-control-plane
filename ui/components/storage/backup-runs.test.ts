@@ -83,6 +83,23 @@ describe('runScopeTitle', () => {
   it('says zero rather than nothing when a run captured none', () => {
     assert.equal(runScopeTitle({ appVolumesCaptured: 0 }), '0 app volumes captured');
   });
+
+  it('puts FAILED volumes first, apart from the ones the run never tried', () => {
+    // §4.4: a node offline at backup time is a FAILED backup, not a skipped
+    // one. Of four not captured, two failed and two (bulk, unclassified) were
+    // never attempted; the row must not fold the two together.
+    assert.equal(
+      runScopeTitle({ appVolumesCaptured: 2, appVolumesSkipped: 4, appVolumesFailed: 2 }),
+      '2 app volumes captured · 2 FAILED · 2 NOT captured',
+    );
+  });
+
+  it('reads an older row with no failed count as nothing failed', () => {
+    assert.equal(
+      runScopeTitle({ appVolumesCaptured: 1, appVolumesSkipped: 1 }),
+      '1 app volume captured · 1 NOT captured',
+    );
+  });
 });
 
 describe('cadenceValue', () => {

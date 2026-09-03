@@ -54,11 +54,16 @@ export function scopeHeadline(data: BackupRunsResponse | null): string {
 export function runScopeTitle(run: {
   appVolumesCaptured: number;
   appVolumesSkipped?: number;
+  appVolumesFailed?: number;
   warning?: string;
 }): string {
   const parts = [appVolumeSummary(run.appVolumesCaptured)];
   const skipped = run.appVolumesSkipped ?? 0;
-  if (skipped > 0) parts.push(`${skipped} NOT captured`);
+  const failed = run.appVolumesFailed ?? 0;
+  // FAILED first and in capitals: §4.4's "failed, not skipped" — a volume the
+  // run tried to take and could not is the loudest thing on the row.
+  if (failed > 0) parts.push(`${failed} FAILED`);
+  if (skipped - failed > 0) parts.push(`${skipped - failed} NOT captured`);
   if (run.warning) parts.push(run.warning);
   return parts.join(' · ');
 }

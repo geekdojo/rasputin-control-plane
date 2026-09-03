@@ -74,7 +74,7 @@ func newXferRig(t *testing.T) *xferRig {
 
 func (r *xferRig) cred(t *testing.T, member string) string {
 	t.Helper()
-	tok, err := r.ingest.Mint(backupxfer.Grant{Generation: xferGen, Member: member, NodeID: xferNode, JobID: xferJob}, backupxfer.CredentialTTL)
+	tok, err := r.ingest.Mint(backupxfer.Grant{Generation: xferGen, Member: member, NodeID: xferNode, JobID: xferJob, MaxBytes: 1 << 30}, backupxfer.CredentialTTL)
 	if err != nil {
 		t.Fatal(err)
 	}

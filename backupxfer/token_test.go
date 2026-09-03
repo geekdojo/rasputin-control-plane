@@ -16,6 +16,7 @@ func testGrant() Grant {
 		Member:     "volumes/vaultwarden/vaultwarden-data.rasputin-archive",
 		NodeID:     "e3bench-compute1",
 		JobID:      "01JOB",
+		MaxBytes:   1 << 30,
 	}
 }
 

@@ -274,11 +274,14 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 				pv.AppName, pv.Volume, node, attempt, transferAttempts))
 		}
 		// The credential: one member, one generation, one run, one node,
-		// minted now and dead by the time the verb's budget is. Never
-		// logged and never in a step result — it goes into the command and
-		// nowhere else.
+		// bounded in bytes, minted now and dead by the time the verb's
+		// budget is. Never logged and never in a step result — it goes into
+		// the command and nowhere else.
 		cred, err := o.Ingest.Mint(backupxfer.Grant{
 			Generation: o.GenerationID, Member: member, NodeID: node, JobID: o.JobID,
+			// Bounded to the member it is for: the stage verb reported the
+			// tar's size, and a seal of it cannot be larger than this.
+			MaxBytes: backupxfer.SealedSizeBound(ack.SizeBytes),
 		}, transferRPCBudget)
 		if err != nil {
 			rec.Reason = fmt.Sprintf("could not mint an upload credential for %s: %v", member, err)

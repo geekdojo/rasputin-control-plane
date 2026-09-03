@@ -59,6 +59,7 @@ type Ingest struct {
 	sem  chan struct{}
 	now  func() time.Time
 	logf func(format string, args ...any)
+	idle time.Duration
 
 	mu  sync.Mutex
 	gen *openGeneration
@@ -80,6 +81,14 @@ type openGeneration struct {
 	dir     string
 }
 
+// IdleTimeout is how long an upload may go without delivering a byte before
+// the endpoint drops it and releases its slot. A node that opens a connection
+// and stalls holds the only slot; without this a stalled — or hostile —
+// upload would block every other node's backup until the run's budget
+// expired. Two minutes is long past any real network hiccup and short
+// against the run's budget.
+const IdleTimeout = 2 * time.Minute
+
 // DefaultConcurrency is the inbound-upload semaphore's size. One: §4.7's
 // point is seek thrash on spinning media, the fan-out is serial anyway, and a
 // wider default would only ever be exercised by a build that parallelises
@@ -96,6 +105,7 @@ func New(auth *Authority, concurrency int) *Ingest {
 		sem:  make(chan struct{}, concurrency),
 		now:  time.Now,
 		logf: log.Printf,
+		idle: IdleTimeout,
 	}
 }
 
@@ -302,7 +312,7 @@ func (i *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { <-i.sem }()
 
-	rc, status, code, detail := i.land(r, gen, grant, member)
+	rc, status, code, detail := i.land(w, r, gen, grant, member)
 	if rc == nil {
 		i.logf("backup ingest: %s/%s from node %s (grant %s) refused: %s — %s", generation, member, grant.NodeID, grant.ID(), code, detail)
 		refuse(w, status, code, detail)
@@ -318,7 +328,7 @@ func (i *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // land streams the body onto the target beneath the open generation.
-func (i *Ingest) land(r *http.Request, gen *openGeneration, grant Grant, member string) (rc *Receipt, status int, code, detail string) {
+func (i *Ingest) land(w http.ResponseWriter, r *http.Request, gen *openGeneration, grant Grant, member string) (rc *Receipt, status int, code, detail string) {
 	parts := strings.Split(member, "/") // validated: volumes/<app>/<file>
 	root, err := openRootDir(gen.gensDir)
 	if err != nil {
@@ -366,8 +376,11 @@ func (i *Ingest) land(r *http.Request, gen *openGeneration, grant Grant, member 
 	}()
 
 	// The first read of the body is what sends 100 Continue. Everything
-	// above happened before the client sent a byte.
-	body := r.Body
+	// above happened before the client sent a byte. Two bounds ride on the
+	// body from here: the credential's MaxBytes (a leaked credential cannot
+	// fill the disk) and an idle deadline (a stalled upload cannot hold the
+	// slot).
+	body := &boundedBody{r: r.Body, rc: http.NewResponseController(w), max: grant.MaxBytes, idle: i.idle}
 	header, prefix, err := ReadHeader(body)
 	if err != nil {
 		return nil, http.StatusUnsupportedMediaType, CodeNotAnArchive, err.Error()
@@ -379,6 +392,10 @@ func (i *Ingest) land(r *http.Request, gen *openGeneration, grant Grant, member 
 	}
 	n, err := io.CopyBuffer(out, body, make([]byte, 256<<10))
 	if err != nil {
+		if errors.Is(err, errOverBound) {
+			return nil, http.StatusRequestEntityTooLarge, CodeOverBound,
+				fmt.Sprintf("the upload exceeded the %d bytes its credential authorises; the member was discarded", grant.MaxBytes)
+		}
 		// A read error is the client going away; a write error is the
 		// disk. Either way the temp is unlinked by the defer.
 		return nil, http.StatusInsufficientStorage, CodeWriteFailed, fmt.Sprintf("the upload did not complete: %v", err)
@@ -427,6 +444,46 @@ func (i *Ingest) land(r *http.Request, gen *openGeneration, grant Grant, member 
 		LandedAt:           i.now().UTC(),
 		GrantID:            grant.ID(),
 	}, http.StatusCreated, "", ""
+}
+
+// errOverBound is the body reader's refusal past the credential's MaxBytes.
+var errOverBound = errors.New("upload exceeds the credential's byte bound")
+
+// boundedBody counts the body against the grant's MaxBytes and refreshes the
+// connection's read deadline before every read, so an upload is bounded in
+// size by its credential and in silence by IdleTimeout.
+type boundedBody struct {
+	r    io.Reader
+	rc   *http.ResponseController
+	max  uint64
+	idle time.Duration
+	seen uint64
+}
+
+func (b *boundedBody) Read(p []byte) (int, error) {
+	if b.seen >= b.max {
+		return 0, errOverBound
+	}
+	if remaining := b.max - b.seen; uint64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	// Best effort: a ResponseWriter that cannot set deadlines (a recorder in
+	// a test) simply is not bounded in time.
+	_ = b.rc.SetReadDeadline(time.Now().Add(b.idle))
+	n, err := b.r.Read(p)
+	b.seen += byteCount(int64(n))
+	if err == nil && b.seen >= b.max {
+		// Exactly at the bound: one more read tells us whether the client
+		// has more. A well-formed upload has ended; a hostile one has not.
+		var probe [1]byte
+		if m, perr := b.r.Read(probe[:]); m > 0 {
+			return n, errOverBound
+		} else if perr != nil && !errors.Is(perr, io.EOF) {
+			return n, perr
+		}
+		return n, io.EOF
+	}
+	return n, err
 }
 
 func refuse(w http.ResponseWriter, status int, code, detail string) {

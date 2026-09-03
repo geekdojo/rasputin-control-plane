@@ -78,6 +78,10 @@ type Grant struct {
 	// JobID is the backup.run this credential belongs to. The endpoint refuses
 	// a credential whose run is not the one with a generation open.
 	JobID string `json:"job"`
+	// MaxBytes bounds what the credential may write: the sealed size of the
+	// staged tar the stage verb reported (SealedSizeBound), so a leaked or
+	// abused credential cannot fill the target. Zero is refused at mint.
+	MaxBytes uint64 `json:"max"`
 	// IssuedAt and ExpiresAt bound the credential's life, Unix seconds.
 	IssuedAt  int64 `json:"iat"`
 	ExpiresAt int64 `json:"exp"`
@@ -133,6 +137,9 @@ func (a *Authority) Mint(g Grant, ttl time.Duration) (string, error) {
 	}
 	if strings.TrimSpace(g.NodeID) == "" || strings.TrimSpace(g.JobID) == "" {
 		return "", errors.New("backupxfer: a grant names its node and its run")
+	}
+	if g.MaxBytes == 0 {
+		return "", errors.New("backupxfer: a grant bounds what it may write; MaxBytes is zero")
 	}
 	if ttl <= 0 || ttl > CredentialTTL {
 		return "", fmt.Errorf("backupxfer: credential ttl %s is outside (0, %s]", ttl, CredentialTTL)
@@ -193,10 +200,20 @@ func (a *Authority) Verify(token string) (Grant, error) {
 		return g, ErrCredentialNotYet
 	}
 	if !proto.BackupValidGenerationID(g.Generation) || !proto.BackupValidMemberPath(g.Member) ||
-		strings.TrimSpace(g.NodeID) == "" || strings.TrimSpace(g.JobID) == "" {
+		strings.TrimSpace(g.NodeID) == "" || strings.TrimSpace(g.JobID) == "" || g.MaxBytes == 0 {
 		return g, ErrGrantShape
 	}
 	return g, nil
+}
+
+// SealedSizeBound is the most bytes a seal of plaintextBytes can produce:
+// the magic and header, the plaintext, a tag per chunk, one terminal chunk,
+// and a little slack for header growth. The api mints each credential with
+// this as its MaxBytes, from the size the stage verb reported, so a credential
+// authorises the member it was minted for and not a disk-filling stream.
+func SealedSizeBound(plaintextBytes uint64) uint64 {
+	chunks := plaintextBytes/sealChunkSize + 2
+	return plaintextBytes + chunks*16 + uint64(len(SealMagic)) + MaxHeaderBytes
 }
 
 func (a *Authority) mac(payload string) []byte {

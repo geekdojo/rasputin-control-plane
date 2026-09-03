@@ -33,13 +33,17 @@
 //
 // # What a credential can do, stated once
 //
-// Upload one named member into one in-flight generation, once. It cannot read
-// anything (there is no read route), cannot list anything, cannot overwrite a
-// member that has landed, cannot name a member outside the generation
-// directory, cannot touch another generation, and is refused after its TTL
-// and after the generation closes. A node that leaks its credential leaks the
+// Upload one named member into one in-flight generation, once, of at most
+// the bytes a seal of the staged tar can produce. It cannot read anything
+// (there is no read route), cannot list anything, cannot overwrite a member
+// that has landed, cannot name a member outside the generation directory,
+// cannot touch another generation, cannot fill the disk, cannot hold the
+// upload slot in silence past IdleTimeout, and is refused after its TTL and
+// after the generation closes. A node that leaks its credential leaks the
 // ability to replace ITS OWN not-yet-landed volume with different sealed
-// bytes for a few minutes — and the api records the digest the node declared,
-// so a substituted member shows up on restore day as a digest the manifest
-// does not vouch for.
+// bytes for a few minutes — and the manifest records the plaintext digest the
+// stage verb reported, so a substituted member shows up on restore day as a
+// digest the manifest does not vouch for. The credential is a bearer: it is
+// not bound to the presenting connection, so its holder need not be the node
+// it names — that is the whole reason its scope is this narrow.
 package backupxfer
