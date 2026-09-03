@@ -2,11 +2,11 @@ package storage
 
 import (
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -28,34 +28,46 @@ import (
 // compose file has no tile and therefore no classification — see
 // ReasonUnclassified for why that is recorded rather than skipped.
 //
-// # What this build can actually capture, and why the rest is named
+// # Every node, one path
 //
-// A staged copy has to travel from the node that made it to the node holding
-// the backup target. For a volume on the CONTROLPLANE node that journey is
-// zero: the agent's staging root and the api's are the same directory on the
-// same filesystem, which is why this fan-out reads the staged tar directly. For
-// a volume on any other node there is no journey at all — the per-node
-// streaming path (#295) and the ingest endpoint (#296) are unbuilt.
+// A staged copy travels from the node that made it to the backup target
+// through the transport in backupxfer: the hosting agent stages the volume
+// (proto.BackupStageVolumeCmd), seals it to the target's public key and
+// uploads it to the api's ingest endpoint on a credential minted for that one
+// member (proto.BackupTransferCmd), and the api unstages it. The controlplane's
+// own volumes take exactly the same path over loopback — there is no local
+// shortcut, so there is one layout on the disk and one code path to test.
 //
-// So the run captures local `critical` and `state` volumes, and RECORDS every
-// other classified volume as not captured, by name, with the reason. The one
-// thing it must never do is skip one silently: an operator discovering on
-// restore day that an app was missing must be able to find the line that said
-// so, in the manifest, on the night it happened.
+// So the plan stages every `critical` and `state` volume on every node. What
+// it will NOT take is still recorded, by name, with the reason: `bulk` (a
+// different lane, §4.7), an app with no tile, a tile the catalog withdrew, a
+// tile that declares nothing. The one thing it must never do is skip one
+// silently.
+//
+// # Failed, not skipped
+//
+// §4.4: a node offline at backup time makes that app's backup FAILED, not
+// skipped. The plan cannot know which nodes are up — that is discovered when
+// the stage verb is sent — so the distinction is on the record, not the plan:
+// VolumeRecord.Failed marks a volume this run TRIED to take and could not,
+// and any such record ends the run failed with the volume named (runPrune).
+// A volume the run never intended to take (bulk, unclassified) is not
+// captured and not failed; it makes the archive incomplete without making
+// the run red.
 
 // The reasons a classified volume was not captured. Each is the sentence an
 // operator reads beside the volume's name in the manifest, so each says what
 // happened AND what would change it.
 const (
-	// ReasonOffNode is the big one, and the reason this build's scope is
-	// proto.BackupScopeControlplaneLocal rather than `full`.
-	ReasonOffNode = "hosted on a node other than the controlplane, and nothing yet moves a staged copy off the node that made it: " +
-		"the per-node streaming path (geekdojo/geekdojo-brain#295) and the ingest endpoint (#296) are unbuilt"
 	// ReasonBulkStreamsDirect: §4.7 streams `bulk` direct rather than staging
 	// it — a terabyte media library cannot be staged on a boot medium smaller
-	// than it — and the agent's stage verb refuses one by design.
-	ReasonBulkStreamsDirect = "classed `bulk`: §4.7 streams bulk volumes direct rather than staging them, and the direct path " +
-		"(geekdojo/geekdojo-brain#295) is unbuilt. The agent's staging verb refuses a bulk volume by design"
+	// than it — and the agent's stage verb refuses one by design. The direct
+	// lane is not part of this transport: it needs a stream-as-it-reads walk
+	// with no staged copy, no known length before the first byte, and (per
+	// §4.6's decision) no seal, and it is opt-in per app. It is recorded here
+	// so no `bulk` volume ever vanishes from a manifest.
+	ReasonBulkStreamsDirect = "classed `bulk`: §4.7 streams bulk volumes direct rather than staging them, and the direct-stream lane " +
+		"is not built — this transport carries staged, sealed `critical`/`state` volumes only. The agent's staging verb refuses a bulk volume by design"
 	// ReasonUnclassified: the app was installed from a custom compose file, so
 	// no tile declares its volumes and nothing knows which of them matter.
 	//
@@ -84,16 +96,6 @@ const (
 		"A catalog whose `%s` tile classifies its volumes is needed: Apps → Catalog → CHECK NOW fetches the newest"
 )
 
-// AppVolumeStagePrefix is the directory every captured volume lands under
-// inside the archive, and it is the restore side's contract (#291, unbuilt).
-//
-// One member per volume, named `app-volumes/<app>/<volume>.tar`, whose content
-// is the agent's tar of that volume's contents with paths relative to the
-// volume root. A flattened tree would make a restore guess which file belonged
-// to which app; this way the name carries both, and an operator holding a
-// decrypted archive can see what they have with `tar tf`.
-const AppVolumeStagePrefix = "app-volumes"
-
 // PlannedVolume is one volume this run intends to stage, in the order it will
 // be staged.
 type PlannedVolume struct {
@@ -106,49 +108,16 @@ type PlannedVolume struct {
 	Quiesce string
 }
 
-// ArchivePath is where this volume's staged tar goes inside the archive.
-func (p PlannedVolume) ArchivePath() string {
-	return path.Join(AppVolumeStagePrefix, sanitizeMember(p.AppName), sanitizeMember(p.Volume)+".tar")
-}
+// Member is this volume's sealed member inside the generation directory —
+// volumes/<app>/<volume>.rasputin-archive, the restore side's contract (#291).
+// One member per volume, named for both, so a restore never guesses which
+// file belonged to which app; the name is minted by proto so the ingest
+// endpoint's containment check and this minting cannot disagree.
+func (p PlannedVolume) Member() string { return proto.BackupMemberPath(p.AppName, p.Volume) }
 
 // String is the "app/volume" identifier used in log lines and in the report's
-// Captured list. Short enough for a log line, unambiguous enough to grep for.
+// Captured list.
 func (p PlannedVolume) String() string { return p.AppName + "/" + p.Volume }
-
-// sanitizeMember keeps an app or volume name to characters that are safe and
-// obvious inside a tar member path.
-//
-// App names and tile volume names are already constrained upstream — an app
-// name is a DNS label and a tile's volume name is a compose volume — but this
-// path is written into an archive a restore will later expand, and a member
-// path is the classic way a tar becomes a write outside its destination. So the
-// shape is enforced HERE, at the moment of writing, rather than trusted from
-// two validators away: anything that is not [A-Za-z0-9._-] becomes an
-// underscore, and a leading dot is refused a leading position.
-func sanitizeMember(s string) string {
-	s = strings.TrimSpace(s)
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
-			out = append(out, r)
-		default:
-			out = append(out, '_')
-		}
-	}
-	res := strings.TrimLeft(string(out), ".")
-	// A doubled dot cannot be a traversal here — the separator is already gone,
-	// so `.._etc` is one ordinary segment. It is collapsed anyway: a member
-	// path containing `..` invites the next reader, and the next extractor, to
-	// treat it as one, and a name is not worth that argument.
-	for strings.Contains(res, "..") {
-		res = strings.ReplaceAll(res, "..", "_")
-	}
-	if res == "" {
-		return "unnamed"
-	}
-	return res
-}
 
 // VolumeRecord is the manifest's row for ONE classified volume — captured or
 // not, and it is present either way.
@@ -174,21 +143,44 @@ type VolumeRecord struct {
 	// Captured is the only field a hurried reader will look at, so everything
 	// else is arranged around making it honest.
 	Captured bool `json:"captured"`
-	// Reason is why it is NOT in the archive. Mandatory whenever Captured is
-	// false — a volume that vanished without a sentence is the failure this
-	// whole structure exists to prevent.
+	// Failed is true when this run TRIED to take the volume and could not —
+	// the node was offline, the agent refused, the upload did not land, a
+	// digest disagreed. §4.4: failed, not skipped, and a run with one ends
+	// FAILED with the volume named. False on a volume the run never intended
+	// to take (bulk, unclassified), which makes the archive incomplete
+	// without making the run red.
+	Failed bool `json:"failed"`
+	// Reason is why it is NOT in the generation. Mandatory whenever Captured
+	// is false — a volume that vanished without a sentence is the failure
+	// this whole structure exists to prevent.
 	Reason string `json:"reason,omitempty"`
 
-	// Path is the member inside the archive, present only when Captured.
-	Path string `json:"path,omitempty"`
-	// SizeBytes is the staged tar's length, PlaintextBytes the sum of the
-	// volume's own file sizes, FileCount how many regular files it held.
+	// Member is the sealed file inside the generation directory, relative to
+	// it: volumes/<app>/<volume>.rasputin-archive. Present only when
+	// Captured. THE index entry a restore reads — a file in the generation
+	// that no record names is not part of the generation.
+	Member string `json:"member,omitempty"`
+	// SealedBy is the node that sealed the member — where the ephemeral key
+	// was minted and where the bytes were encrypted. KeyID is the target
+	// keypair it is sealed to, the same for every member of a generation.
+	SealedBy string `json:"sealedBy,omitempty"`
+	KeyID    string `json:"keyId,omitempty"`
+	// SealedSHA256 and SealedSizeBytes are over the member as it sits on the
+	// disk, computed by the ingest endpoint over the bytes it wrote and equal
+	// to what the sealing node declared. What a restore verifies BEFORE
+	// spending a passphrase.
+	SealedSHA256    string `json:"sealedSha256,omitempty"`
+	SealedSizeBytes uint64 `json:"sealedSizeBytes,omitempty"`
+	// SizeBytes is the staged tar's length inside the seal, PlaintextBytes the
+	// sum of the volume's own file sizes, FileCount how many regular files it
+	// held.
 	SizeBytes      uint64 `json:"sizeBytes,omitempty"`
 	PlaintextBytes uint64 `json:"plaintextBytes,omitempty"`
 	FileCount      int    `json:"fileCount,omitempty"`
-	// SHA256 is over the staged tar, lower-case hex — the digest the agent
-	// computed while writing AND the api re-computed before consuming it. They
-	// agreed, or this record would not exist.
+	// SHA256 is over the staged tar — the plaintext inside the member — as
+	// the agent computed it while staging and re-computed it while sealing.
+	// They agreed, or this record would be a failure. What a restore verifies
+	// AFTER decrypting.
 	SHA256 string `json:"sha256,omitempty"`
 
 	// Consistency is proto.BackupConsistency — what this copy is consistent
@@ -213,6 +205,14 @@ type VolumeRecord struct {
 	// running app rather than copied live, and SnapshotTool what took them.
 	Databases    []string `json:"databases,omitempty"`
 	SnapshotTool string   `json:"snapshotTool,omitempty"`
+}
+
+// failedVolume builds the record for a volume this run tried to take and
+// could not. §4.4's "failed, not skipped".
+func failedVolume(v PlannedVolume, reason string) VolumeRecord {
+	rec := notCaptured(v, reason)
+	rec.Failed = true
+	return rec
 }
 
 // notCaptured builds the record for a volume this run will not take.
@@ -303,11 +303,10 @@ type AppVolumePlan struct {
 // whichever order they are asked for in. Batching them into one stop is a
 // change to that verb, and this fan-out consumes the verb rather than
 // redesigning it.
-func PlanAppVolumes(installed []*apps.App, tiles TileVolumes, controlplaneNodeID string) AppVolumePlan {
+func PlanAppVolumes(installed []*apps.App, tiles TileVolumes) AppVolumePlan {
 	var stage []PlannedVolume
 	var skipped []VolumeRecord
 	enum := AppEnumeration{Catalog: tiles.Source()}
-	self := strings.TrimSpace(controlplaneNodeID)
 	for _, a := range installed {
 		if a == nil {
 			continue
@@ -356,8 +355,11 @@ func PlanAppVolumes(installed []*apps.App, tiles TileVolumes, controlplaneNodeID
 				skipped = append(skipped, notCaptured(pv, ReasonBulkStreamsDirect))
 				continue
 			case tileschema.BackupCritical, tileschema.BackupState:
-				if self == "" || strings.TrimSpace(pv.NodeID) != self {
-					skipped = append(skipped, notCaptured(pv, ReasonOffNode))
+				if strings.TrimSpace(pv.NodeID) == "" {
+					// An app with no node has no agent to stage it. It is a
+					// FAILURE of this run rather than a skip: the app is
+					// installed, classified, and not backed up.
+					skipped = append(skipped, failedVolume(pv, "the app is not deployed to any node, so no agent can stage its volume"))
 					continue
 				}
 				stage = append(stage, pv)

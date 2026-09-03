@@ -1,4 +1,4 @@
-package storage
+package backupxfer
 
 import (
 	"crypto/cipher"
@@ -6,6 +6,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -14,14 +15,20 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
-
-	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // §4.6's write path: seal an archive to the target's PUBLIC key.
+//
+// This lived in the api. It moved here (2026-09-03) because §4.6's amendment
+// puts the per-node encryption cost on the AGENT: a compute node seals its own
+// volume before a byte of it leaves the node, and the api seals the identity
+// set beside it. Two copies of a cipher construction is how two archives on
+// one disk come to need two restore paths, so there is one, here, and both
+// binaries import it.
 //
 // This file is the whole reason the 2026-09-02 amendment exists. A weekly
 // 3 a.m. backup.run has nobody at a keyboard, so under the previous single
@@ -112,16 +119,18 @@ type SealResult struct {
 	EphemeralPublicKey string `json:"ephemeralPublicKey"`
 }
 
-// sealHeader is the archive's clear-text header line.
-type sealHeader struct {
+// Header is the archive's clear-text header line — the second line of every
+// sealed file, after SealMagic. Exported because the ingest endpoint parses it
+// to refuse a body that is not a sealed archive, and because a restore reads it.
+type Header struct {
 	Version int    `json:"v"`
 	Alg     string `json:"alg"`
 	// KeyID identifies the RECIPIENT keypair; EphemeralPublicKey is this run's.
 	KeyID              string `json:"keyId,omitempty"`
 	EphemeralPublicKey string `json:"epk"`
 	ChunkSize          int    `json:"chunkSize"`
-	// Scope repeats proto.BackupScopeIdentityOnly INSIDE the sealed archive as
-	// well as in the clear-text manifest beside it. Duplication on purpose: the
+	// Scope repeats the run's scope INSIDE the sealed archive as well as in
+	// the clear-text manifest beside it. Duplication on purpose: the
 	// manifest can be deleted or replaced by anyone holding the disk, and the
 	// header cannot be edited without invalidating every chunk's tag — it is the
 	// AEAD's additional data. A restore that trusted only the sidecar could be
@@ -152,10 +161,13 @@ var ErrNoPublicKey = errors.New("storage: the backup target has no archive publi
 // and a garbage public key is an archive nobody can ever read, discovered on
 // restore day.
 func Seal(dst io.Writer, src io.Reader, publicKey, keyID, scope string) (*SealResult, error) {
+	if dst == nil || src == nil {
+		return nil, errors.New("backupxfer: Seal needs a destination and a source")
+	}
 	if strings.TrimSpace(publicKey) == "" {
 		return nil, ErrNoPublicKey
 	}
-	if err := validatePublicKey(publicKey); err != nil {
+	if err := ValidatePublicKey(publicKey); err != nil {
 		return nil, err
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(publicKey))
@@ -167,7 +179,7 @@ func Seal(dst io.Writer, src io.Reader, publicKey, keyID, scope string) (*SealRe
 		return nil, fmt.Errorf("archive public key: %w", err)
 	}
 	if scope == "" {
-		scope = proto.BackupScopeIdentityOnly
+		return nil, errors.New("backupxfer: refusing to seal with an empty scope; the scope is authenticated data and an archive without one cannot say what it is")
 	}
 
 	// The one keypair this function mints, uses, and drops. It exists only
@@ -196,7 +208,7 @@ func Seal(dst io.Writer, src io.Reader, publicKey, keyID, scope string) (*SealRe
 		return nil, fmt.Errorf("aead: %w", err)
 	}
 
-	header, err := json.Marshal(sealHeader{
+	header, err := json.Marshal(Header{
 		Version:            1,
 		Alg:                SealAlg,
 		KeyID:              keyID,
@@ -286,4 +298,149 @@ func sealChunk(aead cipher.AEAD, nonce []byte, counter uint64, last bool, aad, d
 		nonce[8] = 1
 	}
 	return emit(aead.Seal(dst, nonce, plaintext, aad))
+}
+
+// byteCount narrows a signed byte count to uint64, clamping a negative to
+// zero. A bare cast would turn a negative into roughly eighteen exabytes, and
+// every size comparison downstream would reason about that number.
+func byteCount(n int64) uint64 {
+	if n < 0 {
+		return 0
+	}
+	return uint64(n)
+}
+
+// x25519PublicKeyBytes is the length of a raw X25519 public key.
+const x25519PublicKeyBytes = 32
+
+// ValidatePublicKey checks that encoded is a usable X25519 public key:
+// unpadded base64url of 32 bytes that crypto/ecdh accepts and that is not the
+// all-zero point (every archive sealed to it would be readable by anyone).
+func ValidatePublicKey(encoded string) error {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		return fmt.Errorf("archive public key is not unpadded base64url: %w", err)
+	}
+	if len(raw) != x25519PublicKeyBytes {
+		return fmt.Errorf("archive public key is %d bytes; an X25519 public key is %d", len(raw), x25519PublicKeyBytes)
+	}
+	if _, err := ecdh.X25519().NewPublicKey(raw); err != nil {
+		return fmt.Errorf("archive public key is not a valid X25519 public key: %w", err)
+	}
+	var zero [x25519PublicKeyBytes]byte
+	if subtle.ConstantTimeCompare(raw, zero[:]) == 1 {
+		return errors.New("archive public key is all zeroes, which is not a usable X25519 key: every archive sealed to it would be readable by anyone")
+	}
+	return nil
+}
+
+// MaxHeaderBytes bounds the header line. A real header is a few hundred
+// bytes; a reader that finds no newline inside this bound is not looking at a
+// sealed archive.
+const MaxHeaderBytes = 4096
+
+// ReadHeader consumes SealMagic and the header line from r and returns the
+// parsed header plus the exact bytes consumed, so a caller that is streaming
+// the archive onward can forward them unchanged. It reads nothing past the
+// header's newline.
+//
+// It opens nothing: the header is clear text and this is a parse, not a
+// decryption. The ingest endpoint uses it to refuse a body that is not a
+// sealed archive before writing it under the generation directory.
+func ReadHeader(r io.Reader) (Header, []byte, error) {
+	var h Header
+	consumed := make([]byte, 0, 512)
+	one := make([]byte, 1)
+	for len(consumed) < len(SealMagic)+MaxHeaderBytes {
+		n, err := r.Read(one)
+		if n == 1 {
+			consumed = append(consumed, one[0])
+			if len(consumed) <= len(SealMagic) {
+				if consumed[len(consumed)-1] != SealMagic[len(consumed)-1] {
+					return h, consumed, errors.New("not a sealed archive: the magic prefix is wrong")
+				}
+				continue
+			}
+			if one[0] == '\n' {
+				if jerr := json.Unmarshal(consumed[len(SealMagic):len(consumed)-1], &h); jerr != nil {
+					return h, consumed, fmt.Errorf("not a sealed archive: the header is not JSON: %w", jerr)
+				}
+				if h.Version != 1 || h.Alg != SealAlg || h.EphemeralPublicKey == "" || h.ChunkSize <= 0 {
+					return h, consumed, errors.New("not a sealed archive this build can name: unknown version, algorithm or an empty ephemeral key")
+				}
+				return h, consumed, nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return h, consumed, errors.New("not a sealed archive: the stream ended inside the header")
+			}
+			return h, consumed, err
+		}
+	}
+	return h, consumed, errors.New("not a sealed archive: no header line within the bound")
+}
+
+// SealedStream is Seal running into a pipe: the agent's upload path.
+//
+// The seal runs in its own goroutine as the consumer reads, so the sealed
+// bytes exist only in flight — no second staged copy, which is what keeps
+// §4.7's peak at one staged volume on the hosting node. Result is valid only
+// after the reader has returned io.EOF (or Err, after a failure).
+type SealedStream struct {
+	pr        *io.PipeReader
+	done      chan struct{}
+	result    *SealResult
+	err       error
+	abandoned atomic.Bool
+}
+
+// ErrStreamAbandoned is Result's answer when the READER closed the stream
+// before the seal finished — a transport that gave up mid-body. It is not a
+// seal failure and callers must not report it as one.
+var ErrStreamAbandoned = errors.New("backupxfer: the sealed stream was closed by its reader before the seal finished")
+
+// NewSealedStream starts sealing src to publicKey. Read the returned stream
+// to EOF, then call Result.
+func NewSealedStream(src io.Reader, publicKey, keyID, scope string) *SealedStream {
+	pr, pw := io.Pipe()
+	s := &SealedStream{pr: pr, done: make(chan struct{})}
+	go func() {
+		defer close(s.done)
+		res, err := Seal(pw, src, publicKey, keyID, scope)
+		s.result, s.err = res, err
+		// CloseWithError(nil) is a clean EOF; an error surfaces to the
+		// reader so the transport aborts rather than sending a truncated
+		// body it would then declare a digest for.
+		_ = pw.CloseWithError(err)
+	}()
+	return s
+}
+
+// Read is the sealed bytes.
+func (s *SealedStream) Read(p []byte) (int, error) { return s.pr.Read(p) }
+
+// Close abandons the stream; the sealing goroutine ends on its next write.
+func (s *SealedStream) Close() error {
+	s.abandoned.Store(true)
+	return s.pr.CloseWithError(ErrStreamAbandoned)
+}
+
+// Result waits for the seal to finish and returns its facts. Called by the
+// transport after EOF, so the wait is already over; called early, it blocks.
+func (s *SealedStream) Result() (*SealResult, error) {
+	<-s.done
+	if s.err != nil && s.abandoned.Load() {
+		return nil, ErrStreamAbandoned
+	}
+	return s.result, s.err
+}
+
+// Sealed is Result in the shape PutRequest.Sealed wants.
+func (s *SealedStream) Sealed() (digest string, size uint64) {
+	res, err := s.Result()
+	if err != nil || res == nil {
+		return "", 0
+	}
+	return res.Digest, res.SizeBytes
 }

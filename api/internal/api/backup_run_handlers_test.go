@@ -58,8 +58,8 @@ func TestListBackupRunsAlwaysCarriesTheScopeCaveat(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 	}
-	if body.Scope != proto.BackupScopeControlplaneLocal {
-		t.Errorf("scope = %q, want %q", body.Scope, proto.BackupScopeControlplaneLocal)
+	if body.Scope != proto.BackupScopeFull {
+		t.Errorf("scope = %q, want %q", body.Scope, proto.BackupScopeFull)
 	}
 	if body.ScopeWarning == "" {
 		t.Error("no scope warning: a client would have nothing to show but a green success line")

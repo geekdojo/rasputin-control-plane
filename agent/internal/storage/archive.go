@@ -187,14 +187,15 @@ func requiredBytes(estimate uint64) uint64 {
 //     generation id that is not, never reaches the filesystem at all;
 //  2. resolve the mount;
 //  3. stat and re-hash the staged file, refusing on size or digest;
-//  4. write into a temporary directory beside the generations directory,
-//     fsync both files;
+//  4. write into the generation's `.partial-` directory — the one the api's
+//     ingest endpoint has been landing per-volume members into — and fsync
+//     both files;
 //  5. rename it into place and fsync the parent.
 //
 // A crash anywhere before (5) leaves a `.partial-*` directory and no
-// generation, which is the correct failure: prune ignores it and the next boot
-// sweep can remove it. A crash during (5) leaves a complete generation, because
-// everything in it was already fsynced.
+// generation, which is the correct failure: prune ignores it, the listing
+// skips it, and the api's terminal hook removes it. A crash during (5) leaves
+// a complete generation, because everything in it was already fsynced.
 func BackupWrite(ctx context.Context, b Backend, stagingRoot string, cmd proto.BackupWriteCmd) (*proto.BackupWriteAck, error) {
 	if err := checkPartUUID(cmd.PartUUID); err != nil {
 		return nil, err
@@ -261,9 +262,24 @@ func BackupWrite(ctx context.Context, b Backend, stagingRoot string, cmd proto.B
 		return nil, fmt.Errorf("refusing to write generation %s: it already exists at %s", cmd.GenerationID, final)
 	}
 
-	tmp, err := os.MkdirTemp(gensDir, ".partial-")
-	if err != nil {
-		return nil, err
+	// The in-flight directory is `.partial-<generation>`, and it may ALREADY
+	// EXIST: the api's ingest endpoint creates it at the start of the fan-out
+	// and lands every per-volume member beneath it (proto.BackupPartialDirName
+	// — one name, two writers). This verb adds the identity archive and the
+	// manifest beside those members and renames the whole directory into
+	// place, which is the commit for the generation as a unit. Adopted only
+	// as a real directory: a symlink or a file of that name is refused.
+	tmp := filepath.Join(gensDir, proto.BackupPartialDirName(cmd.GenerationID))
+	if st, lerr := os.Lstat(tmp); lerr == nil {
+		if !st.IsDir() {
+			return nil, fmt.Errorf("refusing to write generation %s: %s exists and is not a directory", cmd.GenerationID, tmp)
+		}
+	} else if errors.Is(lerr, os.ErrNotExist) {
+		if err := os.Mkdir(tmp, 0o700); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, lerr
 	}
 	committed := false
 	defer func() {

@@ -14,6 +14,7 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
@@ -36,6 +37,11 @@ type Stager struct {
 	releaseWait      time.Duration
 	afterFile        func(rel string) error
 	logf             func(format string, args ...any)
+	// caBundlePath and transportFor are the transfer verb's seams: the
+	// mesh CA the HTTP transport trusts, and a test's replacement for the
+	// transport itself.
+	caBundlePath string
+	transportFor func(destination string) (backupxfer.Transport, error)
 }
 
 // New builds a Stager over the runtime. stagingRoot is the agent's one

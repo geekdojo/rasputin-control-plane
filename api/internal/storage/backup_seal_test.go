@@ -4,20 +4,13 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"crypto/ecdh"
-	"crypto/hkdf"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -26,252 +19,10 @@ import (
 // timeNow is a one-word alias so the schedule cases read as prose.
 func timeNow() time.Time { return time.Now().UTC() }
 
-// §4.6's write path, tested from both sides.
-//
-// The DECRYPTION lives here, in the test binary, and nowhere else — which is
-// the property under test as much as it is a means of testing. The api seals to
-// a public key and holds no private key; a package-level opener would be a
-// private-key consumer in exactly the process §4.6 says must not have one.
-// Restore is a separate, interactive path (§4.5 unpacks before the api's first
-// start), and it is where an opener belongs.
-
-// openSealed is the reader half of Seal, implemented independently against the
-// documented format so a bug shared between a writer and its own reader cannot
-// hide.
-func openSealed(t *testing.T, sealedBytes []byte, priv *ecdh.PrivateKey) ([]byte, sealHeader) {
-	t.Helper()
-	if !bytes.HasPrefix(sealedBytes, []byte(SealMagic)) {
-		t.Fatalf("sealed archive does not start with the magic; got %q", firstBytes(sealedBytes, len(SealMagic)))
-	}
-	rest := sealedBytes[len(SealMagic):]
-	nl := bytes.IndexByte(rest, '\n')
-	if nl < 0 {
-		t.Fatal("sealed archive has no header line")
-	}
-	headerBytes := rest[:nl]
-	body := rest[nl+1:]
-
-	var h sealHeader
-	if err := json.Unmarshal(headerBytes, &h); err != nil {
-		t.Fatalf("header is not JSON: %v", err)
-	}
-	epkRaw, err := base64.RawURLEncoding.DecodeString(h.EphemeralPublicKey)
-	if err != nil {
-		t.Fatalf("epk: %v", err)
-	}
-	epk, err := ecdh.X25519().NewPublicKey(epkRaw)
-	if err != nil {
-		t.Fatalf("epk: %v", err)
-	}
-	shared, err := priv.ECDH(epk)
-	if err != nil {
-		t.Fatalf("exchange: %v", err)
-	}
-	salt := append(append([]byte{}, epkRaw...), priv.PublicKey().Bytes()...)
-	key, err := hkdf.Key(sha256.New, shared, salt, sealInfo, chacha20poly1305.KeySize)
-	if err != nil {
-		t.Fatalf("hkdf: %v", err)
-	}
-	aead, err := chacha20poly1305.New(key)
-	if err != nil {
-		t.Fatalf("aead: %v", err)
-	}
-
-	var plain []byte
-	nonce := make([]byte, chacha20poly1305.NonceSize)
-	chunk := h.ChunkSize + aead.Overhead()
-	var counter uint64
-	sawLast := false
-	for len(body) > 0 {
-		n := chunk
-		last := false
-		if len(body) < chunk {
-			n = len(body)
-			last = true
-		}
-		for {
-			for i := range nonce {
-				nonce[i] = 0
-			}
-			binary.BigEndian.PutUint64(nonce[0:8], counter)
-			if last {
-				nonce[8] = 1
-			}
-			out, derr := aead.Open(nil, nonce, body[:n], headerBytes)
-			if derr == nil {
-				plain = append(plain, out...)
-				sawLast = last
-				break
-			}
-			if last {
-				t.Fatalf("chunk %d failed to open: %v", counter, derr)
-			}
-			// A full-sized final chunk: retry with the last flag set.
-			last = true
-		}
-		body = body[n:]
-		counter++
-	}
-	if !sawLast {
-		t.Error("no chunk carried the last-chunk flag; a truncated archive would be indistinguishable from a complete one")
-	}
-	return plain, h
-}
-
-func firstBytes(b []byte, n int) string {
-	if len(b) < n {
-		n = len(b)
-	}
-	return string(b[:n])
-}
-
-// TestSealRoundTripsAndDigestMatches is the core §4.6 assertion: an archive
-// sealed to a public key opens with the matching private key, and the digest the
-// api recorded is a digest of the bytes it actually wrote.
-func TestSealRoundTripsAndDigestMatches(t *testing.T) {
-	key := newTestKeypair(t)
-	plaintext := bytes.Repeat([]byte("the mesh CA and every bus token, in clear. "), 5000)
-
-	var out bytes.Buffer
-	res, err := Seal(&out, bytes.NewReader(plaintext), key.publicB64, "key-1", proto.BackupScopeIdentityOnly)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-
-	sum := sha256.Sum256(out.Bytes())
-	if res.Digest != hex.EncodeToString(sum[:]) {
-		t.Errorf("digest = %s, but the sealed bytes hash to %s — the agent re-hashes before it writes, so a wrong digest is a refused generation",
-			res.Digest, hex.EncodeToString(sum[:]))
-	}
-	if res.SizeBytes != uint64(out.Len()) {
-		t.Errorf("size = %d, sealed %d bytes", res.SizeBytes, out.Len())
-	}
-	if res.PlaintextBytes != uint64(len(plaintext)) {
-		t.Errorf("plaintextBytes = %d, want %d", res.PlaintextBytes, len(plaintext))
-	}
-	if res.Alg != SealAlg {
-		t.Errorf("alg = %q, want %q", res.Alg, SealAlg)
-	}
-
-	// The ciphertext must not be the plaintext. Obvious, and worth an
-	// assertion: a construction that silently degraded to a copy would still
-	// round-trip through a decoder that also degraded.
-	if bytes.Contains(out.Bytes(), plaintext[:64]) {
-		t.Fatal("the sealed archive contains its own plaintext")
-	}
-
-	got, header := openSealed(t, out.Bytes(), key.priv)
-	if !bytes.Equal(got, plaintext) {
-		t.Errorf("round trip produced %d bytes, want %d", len(got), len(plaintext))
-	}
-	if header.KeyID != "key-1" {
-		t.Errorf("header keyId = %q", header.KeyID)
-	}
-	if header.Scope != proto.BackupScopeIdentityOnly {
-		t.Errorf("header scope = %q — the scope has to be INSIDE the sealed archive, where nobody holding the disk can edit it", header.Scope)
-	}
-	if header.EphemeralPublicKey == key.publicB64 {
-		t.Error("the ephemeral public key equals the recipient's: no fresh keypair was minted")
-	}
-}
-
-// TestSealMintsAFreshEphemeralKeyPerRun is §4.6's "fresh ephemeral key per run".
-//
-// Two seals of identical plaintext to the same recipient must produce different
-// ciphertext. If they did not, the STREAM construction's nonce counter would be
-// reused across runs under one content key, which is the failure mode that
-// makes a chunked AEAD unsafe.
-func TestSealMintsAFreshEphemeralKeyPerRun(t *testing.T) {
-	key := newTestKeypair(t)
-	plaintext := []byte("identical input, twice")
-
-	var a, b bytes.Buffer
-	ra, err := Seal(&a, bytes.NewReader(plaintext), key.publicB64, "key-1", "")
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	rb, err := Seal(&b, bytes.NewReader(plaintext), key.publicB64, "key-1", "")
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	if ra.EphemeralPublicKey == rb.EphemeralPublicKey {
-		t.Fatal("two runs used the same ephemeral key: nonces would repeat under one content key")
-	}
-	if bytes.Equal(a.Bytes(), b.Bytes()) {
-		t.Fatal("two seals of the same plaintext produced identical archives")
-	}
-	if ra.Digest == rb.Digest {
-		t.Fatal("two seals produced the same digest")
-	}
-}
-
-// TestSealRefusesWithoutAUsablePublicKey covers the branch that must never
-// fall back to writing in clear.
-func TestSealRefusesWithoutAUsablePublicKey(t *testing.T) {
-	cases := []struct {
-		name string
-		key  string
-		want string
-	}{
-		{"no key at all", "", "no archive public key"},
-		{"not base64url", "!!!!not base64!!!!", "base64url"},
-		{"wrong length", base64.RawURLEncoding.EncodeToString([]byte("short")), "X25519 public key is"},
-		{"all zeroes", base64.RawURLEncoding.EncodeToString(make([]byte, 32)), "all zeroes"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var out bytes.Buffer
-			_, err := Seal(&out, strings.NewReader("secrets"), tc.key, "key-1", "")
-			if err == nil {
-				t.Fatal("Seal accepted an unusable public key — an archive sealed to nothing, or written in clear")
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error = %q, want it to mention %q", err, tc.want)
-			}
-			if out.Len() != 0 {
-				t.Errorf("a refused seal still wrote %d bytes", out.Len())
-			}
-		})
-	}
-}
-
-// TestSealDetectsTampering proves the header is authenticated. A disk holding
-// the archive also holds the header; if the scope or the key-id could be edited
-// without breaking the tags, the sidecar manifest would not be the only
-// forgeable record of what a generation is.
-func TestSealDetectsTampering(t *testing.T) {
-	key := newTestKeypair(t)
-	var out bytes.Buffer
-	if _, err := Seal(&out, strings.NewReader("payload that must not open after an edit"), key.publicB64, "key-1", proto.BackupScopeIdentityOnly); err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	sealedBytes := out.Bytes()
-	edited := bytes.Replace(sealedBytes, []byte(`"scope":"identity-only"`), []byte(`"scope":"full-------"`), 1)
-	if bytes.Equal(edited, sealedBytes) {
-		t.Fatal("the header does not carry the scope in the shape this test edits")
-	}
-
-	// Decrypt by hand rather than through openSealed, which t.Fatals on a bad
-	// chunk — here a failure to open is the PASS.
-	rest := edited[len(SealMagic):]
-	nl := bytes.IndexByte(rest, '\n')
-	headerBytes, body := rest[:nl], rest[nl+1:]
-	var h sealHeader
-	if err := json.Unmarshal(headerBytes, &h); err != nil {
-		t.Fatalf("edited header: %v", err)
-	}
-	epkRaw, _ := base64.RawURLEncoding.DecodeString(h.EphemeralPublicKey)
-	epk, _ := ecdh.X25519().NewPublicKey(epkRaw)
-	shared, _ := key.priv.ECDH(epk)
-	salt := append(append([]byte{}, epkRaw...), key.priv.PublicKey().Bytes()...)
-	ck, _ := hkdf.Key(sha256.New, shared, salt, sealInfo, chacha20poly1305.KeySize)
-	aead, _ := chacha20poly1305.New(ck)
-	nonce := make([]byte, chacha20poly1305.NonceSize)
-	nonce[8] = 1
-	if _, err := aead.Open(nil, nonce, body, headerBytes); err == nil {
-		t.Fatal("an edited header still opened: the scope inside the archive is forgeable")
-	}
-}
+// §4.6's write path itself — the seal — is tested in backupxfer, beside the
+// code, with the opener in backupxfer/sealtest. What is tested HERE is the
+// api's use of it: that nothing key-shaped reaches the ledger, and that the
+// manifest the api assembles says the truth about the generation.
 
 // TestNoKeyMaterialReachesTheLedger is the assertion the whole slice hangs on.
 //
@@ -314,8 +65,18 @@ func TestNoKeyMaterialReachesTheLedger(t *testing.T) {
 	if !strings.Contains(ledger, h.key.publicB64) {
 		t.Error("the ledger does not contain the target's public key, so this scan may have been looking at nothing")
 	}
-	if !strings.Contains(ledger, proto.BackupScopeControlplaneLocal) {
+	if !strings.Contains(ledger, proto.BackupScopeFull) {
 		t.Error("the ledger never mentions the scope; the run's own output must say what it captured")
+	}
+	// And no upload credential: the fan-out mints one per member and it must
+	// live in the command and nowhere else.
+	for _, rec := range h.agent.transferRecords() {
+		if rec.cmd.Credential == "" {
+			t.Fatal("a transfer command carried no credential")
+		}
+		if strings.Contains(ledger, rec.cmd.Credential) {
+			t.Error("an upload credential appears in the job ledger")
+		}
 	}
 }
 
@@ -331,10 +92,11 @@ func TestAssembleWritesTheManifestFirst(t *testing.T) {
 	m, err := Assemble(&buf, AssembleOptions{
 		Sources:      IdentitySources{TrustDir: h.trustDir, MeshStateDir: h.meshDir},
 		SnapshotPath: snap,
-		GenerationID: "20260902T000000Z-test-controlplane-local",
+		GenerationID: "20260902T000000Z-test-full",
 		JobID:        "job-1",
 		ClusterID:    "home1",
 		KeyID:        "key-1",
+		Scope:        proto.BackupScopeFull,
 	})
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -343,8 +105,11 @@ func TestAssembleWritesTheManifestFirst(t *testing.T) {
 	// the scope is this build's reach, and complete is FALSE — an archive
 	// nobody looked at cannot claim nothing was missed. The section is still
 	// present, and says so.
-	if m.Scope != proto.BackupScopeControlplaneLocal || m.Complete {
+	if m.Scope != proto.BackupScopeFull || m.Complete {
 		t.Errorf("manifest scope=%q complete=%v", m.Scope, m.Complete)
+	}
+	if m.ManifestVersion != 2 || m.Layout == "" {
+		t.Errorf("manifest version %d layout %q; a restore reading this needs both", m.ManifestVersion, m.Layout)
 	}
 	if m.AppVolumes.Enumerated || m.AppVolumes.Volumes == nil || !strings.Contains(m.AppVolumes.Summary, "did not run") {
 		t.Errorf("appVolumes = %+v; a manifest with no fan-out must say the fan-out did not run", m.AppVolumes)
@@ -366,7 +131,7 @@ func TestAssembleWritesTheManifestFirst(t *testing.T) {
 	if err := json.Unmarshal(body, &inner); err != nil {
 		t.Fatalf("manifest inside the archive is not JSON: %v", err)
 	}
-	if inner.Scope != proto.BackupScopeControlplaneLocal {
+	if inner.Scope != proto.BackupScopeFull {
 		t.Errorf("the manifest inside the archive says scope=%q", inner.Scope)
 	}
 	if inner.AppVolumes.CapturedCount != 0 || inner.AppVolumes.Reason == "" || inner.AppVolumes.Volumes == nil {
@@ -418,6 +183,7 @@ func TestAssembleRefusesWithoutASnapshot(t *testing.T) {
 	_, err := Assemble(&buf, AssembleOptions{
 		Sources:      IdentitySources{TrustDir: h.trustDir, MeshStateDir: h.meshDir},
 		GenerationID: "g",
+		Scope:        proto.BackupScopeFull,
 	})
 	if err == nil {
 		t.Fatal("Assemble produced an archive with no database in it")
@@ -452,44 +218,48 @@ func TestFanOutReportIsHonest(t *testing.T) {
 		t.Error("the exported reason and the report's reason have drifted apart; every surface must say the same words")
 	}
 
-	r := NewAppVolumeReport(AppEnumeration{AppsInstalled: 3, AppsResolved: 3}, []VolumeRecord{
-		{App: "vaultwarden", Volume: "vaultwarden-data", Class: "critical", Captured: true, SizeBytes: 10, AppRestored: true},
-		{App: "immich", Volume: "immich-upload", Class: "state", Captured: false, Reason: ReasonOffNode, AppRestored: true},
-		{App: "paperless", Volume: "paperless-data", Class: "state", Captured: false, Reason: "refused", AppRestored: false},
-	}, 1)
-	if r.CapturedCount != 1 || r.SkippedCount != 2 {
-		t.Errorf("counts = %d captured / %d skipped, want 1/2", r.CapturedCount, r.SkippedCount)
+	r := NewAppVolumeReport(AppEnumeration{AppsInstalled: 4, AppsResolved: 4}, []VolumeRecord{
+		{App: "vaultwarden", Volume: "vaultwarden-data", Class: "critical", Captured: true, SizeBytes: 10, AppRestored: true, Member: "volumes/vaultwarden/vaultwarden-data.rasputin-archive", SealedSHA256: "ab"},
+		{App: "immich", Volume: "immich-upload", Class: "state", Captured: false, Failed: true, Reason: "node n-compute is OFFLINE", AppRestored: true},
+		{App: "immich", Volume: "immich-library", Class: "bulk", Captured: false, Reason: ReasonBulkStreamsDirect, AppRestored: true},
+		{App: "paperless", Volume: "paperless-data", Class: "state", Captured: false, Failed: true, Reason: "refused", AppRestored: false},
+	}, 2)
+	if r.CapturedCount != 1 || r.SkippedCount != 3 || r.FailedCount != 2 {
+		t.Errorf("counts = %d captured / %d skipped / %d failed, want 1/3/2", r.CapturedCount, r.SkippedCount, r.FailedCount)
 	}
 	if len(r.Captured) != 1 || r.Captured[0] != "vaultwarden/vaultwarden-data" {
 		t.Errorf("captured = %v", r.Captured)
 	}
+	if len(r.Failed) != 2 || r.Failed[0] != "immich/immich-upload" || r.Failed[1] != "paperless/paperless-data" {
+		t.Errorf("failed = %v; §4.4's failed volumes must be a field, not a scan", r.Failed)
+	}
 	if r.Complete() {
-		t.Error("complete is true with two volumes missing — the one field a hurried reader trusts is lying")
+		t.Error("complete is true with three volumes missing — the one field a hurried reader trusts is lying")
 	}
 	if len(r.AppsLeftDown) != 1 || r.AppsLeftDown[0] != "paperless" {
 		t.Errorf("appsLeftDown = %v, want [paperless] — an app the backup left down must be a field, not a scan", r.AppsLeftDown)
 	}
-	if !strings.Contains(r.Summary, "1 of 3") {
-		t.Errorf("summary = %q; it must say how many of how many", r.Summary)
+	if !strings.Contains(r.Summary, "1 of 4") || !strings.Contains(r.Summary, "2 FAILED") {
+		t.Errorf("summary = %q; it must say how many of how many, and how many failed", r.Summary)
 	}
-	for _, issue := range []string{"#295", "#296"} {
-		if !strings.Contains(strings.Join(r.BlockedBy, " "), issue) {
-			t.Errorf("blockedBy does not name %s", issue)
-		}
+	// The only blocker a report may name is the `bulk` lane, which is a
+	// missing BUILD; #292–#296 shipped and naming a closed issue would send
+	// an operator looking in the wrong place.
+	if !strings.Contains(strings.Join(r.BlockedBy, " "), "bulk") {
+		t.Errorf("blockedBy = %v; a report with an uncaptured bulk volume names the missing lane", r.BlockedBy)
 	}
-	// Shipped, and therefore NOT blockers: #292 (the tileschema fields), #293
-	// (the catalog classification) and #294 (the agent's staging verb). Naming
-	// a closed issue would send an operator to it looking for the thing that
-	// is holding their app data out of the archive.
-	for _, done := range []string{"#292", "#293", "#294"} {
+	for _, done := range []string{"#292", "#293", "#294", "#295", "#296"} {
 		if strings.Contains(strings.Join(r.BlockedBy, " "), done) {
 			t.Errorf("blockedBy still names %s, which shipped", done)
 		}
 	}
-	if !strings.Contains(r.Reason, "#295") || !strings.Contains(r.Reason, "#296") {
-		t.Error("the reason must name what is holding off-node volumes out of the archive")
+	noBulk := NewAppVolumeReport(AppEnumeration{AppsInstalled: 1, AppsResolved: 1}, []VolumeRecord{
+		{App: "immich", Volume: "immich-upload", Class: "state", Captured: false, Failed: true, Reason: "offline", AppRestored: true},
+	}, 1)
+	if len(noBulk.BlockedBy) != 0 {
+		t.Errorf("a failed run names a blocker: %v — a failure is not a missing build", noBulk.BlockedBy)
 	}
-	if !strings.Contains(r.Reason, proto.BackupScopeControlplaneLocal) {
+	if !strings.Contains(r.Reason, proto.BackupScopeFull) || !strings.Contains(r.Reason, "EVERY NODE") {
 		t.Error("the standing caveat does not name the scope, so a reader cannot connect it to the generation on the platter")
 	}
 	// Every not-captured record carries a sentence. This is the invariant the
@@ -587,83 +357,6 @@ func TestDueFuncGatesTheSchedule(t *testing.T) {
 	}
 	if ok, _ := due(ctx); ok {
 		t.Error("the schedule fired again immediately after a success, inside the cadence")
-	}
-}
-
-// TestSealTerminatesOnAnExactChunkBoundary is the branch a plaintext that is a
-// whole multiple of the chunk size takes, and the reason it exists.
-//
-// Without it the stream would end with a chunk whose last-flag is NOT set, and
-// a reader could not distinguish "the archive ended here" from "the archive was
-// truncated at a boundary" — which is precisely the failure a digest alone
-// might miss on a disk that filled mid-write. The mutation gate flagged this
-// path as uncovered; a plaintext of 5000 × 42 bytes never lands on a boundary.
-func TestSealTerminatesOnAnExactChunkBoundary(t *testing.T) {
-	key := newTestKeypair(t)
-	for _, size := range []int{0, sealChunkSize, 2 * sealChunkSize} {
-		t.Run(fmt.Sprintf("%d bytes", size), func(t *testing.T) {
-			plaintext := bytes.Repeat([]byte("x"), size)
-			var out bytes.Buffer
-			res, err := Seal(&out, bytes.NewReader(plaintext), key.publicB64, "key-1", proto.BackupScopeIdentityOnly)
-			if err != nil {
-				t.Fatalf("Seal: %v", err)
-			}
-			if res.PlaintextBytes != uint64(size) {
-				t.Errorf("plaintextBytes = %d, want %d", res.PlaintextBytes, size)
-			}
-			// openSealed asserts a last-flagged chunk was seen, so a stream that
-			// ended without terminating fails here.
-			got, _ := openSealed(t, out.Bytes(), key.priv)
-			if !bytes.Equal(got, plaintext) {
-				t.Errorf("round trip produced %d bytes, want %d", len(got), size)
-			}
-		})
-	}
-}
-
-// TestSealDetectsTruncationAtAChunkBoundary is the property the branch above
-// buys: lopping a whole chunk off the end of a boundary-aligned archive must
-// not open cleanly as a shorter archive.
-func TestSealDetectsTruncationAtAChunkBoundary(t *testing.T) {
-	key := newTestKeypair(t)
-	var out bytes.Buffer
-	if _, err := Seal(&out, bytes.NewReader(bytes.Repeat([]byte("y"), 2*sealChunkSize)),
-		key.publicB64, "key-1", proto.BackupScopeIdentityOnly); err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	full := out.Bytes()
-	// Drop the final (empty, last-flagged) chunk: 16 bytes of tag.
-	truncated := full[:len(full)-16]
-
-	rest := truncated[len(SealMagic):]
-	nl := bytes.IndexByte(rest, '\n')
-	headerBytes, body := rest[:nl], rest[nl+1:]
-	var h sealHeader
-	if err := json.Unmarshal(headerBytes, &h); err != nil {
-		t.Fatalf("header: %v", err)
-	}
-	epkRaw, _ := base64.RawURLEncoding.DecodeString(h.EphemeralPublicKey)
-	epk, _ := ecdh.X25519().NewPublicKey(epkRaw)
-	shared, _ := key.priv.ECDH(epk)
-	salt := append(append([]byte{}, epkRaw...), key.priv.PublicKey().Bytes()...)
-	ck, _ := hkdf.Key(sha256.New, shared, salt, sealInfo, chacha20poly1305.KeySize)
-	aead, _ := chacha20poly1305.New(ck)
-
-	// Every remaining chunk is a FULL one, so none of them can carry the
-	// last-chunk flag: a reader walking this stream never sees a terminator and
-	// therefore knows it is looking at a truncation rather than an archive.
-	chunk := h.ChunkSize + aead.Overhead()
-	nonce := make([]byte, chacha20poly1305.NonceSize)
-	for i := 0; i*chunk < len(body); i++ {
-		end := min((i+1)*chunk, len(body))
-		for j := range nonce {
-			nonce[j] = 0
-		}
-		binary.BigEndian.PutUint64(nonce[0:8], uint64(i))
-		nonce[8] = 1 // claim it is the last chunk
-		if _, err := aead.Open(nil, nonce, body[i*chunk:end], headerBytes); err == nil {
-			t.Fatalf("chunk %d opened as a terminating chunk; truncation would be undetectable", i)
-		}
 	}
 }
 

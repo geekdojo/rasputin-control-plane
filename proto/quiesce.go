@@ -270,3 +270,124 @@ func BackupStageVolumeSubject(nodeID string) string {
 func BackupUnstageSubject(nodeID string) string {
 	return NodeCmdSubject(nodeID, "storage.backup_unstage")
 }
+
+// ----- Transfer: ship a staged volume to the destination (§4.1, §4.7) ------
+//
+// The second half of the per-node path. Stage produced a consistent tar under
+// the agent's staging root and restarted the app; Transfer seals that tar to
+// the target's public key and streams it to the destination the api named,
+// on a credential the api minted for exactly this member. It is a SEPARATE
+// verb from Stage on purpose — §4.7's "retry without re-quiescing": a stalled
+// upload is another transfer of the same staged file, with a fresh
+// credential, and the app is not stopped a second time.
+//
+// The agent-side code is identical whatever the destination is. Today the
+// destination URI is the api's ingest endpoint over HTTPS; later it is an S3
+// prefix. The URI's scheme selects a transport; nothing else in the verb
+// changes. The agent never reads the destination back and never lists it.
+//
+// # What travels in the command, and what must never leave the agent
+//
+// The credential is a bearer token scoped to one member of one generation of
+// one run, with a TTL. The agent presents it and does nothing else with it: it
+// is never logged, never echoed into the ack, and never written to disk. The
+// public key is public. Nothing in this verb can decrypt anything.
+//
+// # The restart contract is not touched
+//
+// Transfer runs after Stage has already released its watchdog and restarted
+// the app. A lost upload, a dead api, a refused credential — none of it can
+// reach the container, because the container's fate was settled before this
+// verb was sent. That is the reason for the split, stated the other way round.
+
+// BackupTransferWork is the agent's budget for one transfer: seal plus upload
+// of one staged volume. Forty-five minutes covers tens of gigabytes over the
+// gigabit fabric §4.7 budgets, with ChaCha20-Poly1305 in software on a Pi 4
+// class node. In AgentWorkBudgetMax like every other budget.
+const BackupTransferWork = 45 * time.Minute
+
+// BackupRefusalDestinationRefused: the destination answered and said no — a
+// credential it did not accept, a member that already exists, a digest that
+// did not match what arrived. The detail carries the destination's own code.
+const BackupRefusalDestinationRefused StorageRefusal = "destination-refused"
+
+// BackupRefusalTransferFailed: the destination could not be reached, or the
+// connection died before the destination confirmed. Nothing is known about
+// whether a member landed; the api checks its own record.
+const BackupRefusalTransferFailed StorageRefusal = "transfer-failed"
+
+// BackupRefusalDestinationUnsupported: the destination URI's scheme has no
+// transport in this build. Named so a future S3 prefix arriving early fails
+// visibly rather than as a network error.
+const BackupRefusalDestinationUnsupported StorageRefusal = "destination-unsupported"
+
+// BackupTransferCmd seals one staged volume and uploads it.
+type BackupTransferCmd struct {
+	// StagingName is the staged tar under the agent's root — the name the
+	// stage verb was given, a plain file name, never a path.
+	StagingName string `json:"stagingName"`
+	// Destination is the URI the sealed member is uploaded to. Its scheme
+	// selects the transport: http/https is the api's ingest endpoint; s3 is
+	// reserved for the cloud target.
+	Destination string `json:"destination"`
+	// Credential is the scoped, short-lived upload credential. See the file
+	// comment: presented, never logged, never echoed.
+	Credential string `json:"credential"`
+	// PublicKey is the target's X25519 public key (base64url, 32 bytes) and
+	// KeyID its identifier — what the member is sealed to. Scope is bound into
+	// the sealed header as additional data, as it is for the identity archive.
+	PublicKey string `json:"publicKey"`
+	KeyID     string `json:"keyId,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	// GenerationID and Member name what the credential is scoped to; the
+	// agent echoes them into the upload so the destination can check that the
+	// credential and the request agree.
+	GenerationID string `json:"generationId"`
+	Member       string `json:"member"`
+	// AppID, AppName and Volume are for log lines.
+	AppID   string `json:"appId,omitempty"`
+	AppName string `json:"appName,omitempty"`
+	Volume  string `json:"volume,omitempty"`
+	// PlaintextDigest and PlaintextBytes are what the stage verb reported.
+	// The agent re-hashes the tar as it seals it and refuses to report a
+	// member whose plaintext no longer matches — a staged file that changed
+	// between stage and transfer is not the copy the manifest describes.
+	PlaintextDigest string `json:"plaintextDigest,omitempty"`
+	PlaintextBytes  uint64 `json:"plaintextBytes,omitempty"`
+}
+
+// BackupTransferAck reports the sealed member as the destination confirmed it.
+type BackupTransferAck struct {
+	OK          bool   `json:"ok"`
+	StagingName string `json:"stagingName,omitempty"`
+	Member      string `json:"member,omitempty"`
+	// Landed is true only when the destination confirmed the member. False
+	// with OK true cannot happen; false with OK false means the api must
+	// consult its own record before concluding anything.
+	Landed bool `json:"landed"`
+	// SealedDigest is the SHA-256 over the sealed bytes as sent, lower-case
+	// hex, and SealedBytes their length — what the destination verified. The
+	// manifest records both so a restore can check the member before spending
+	// a passphrase on it.
+	SealedDigest string `json:"sealedDigest,omitempty"`
+	SealedBytes  uint64 `json:"sealedBytes,omitempty"`
+	// PlaintextDigest and PlaintextBytes are re-computed over the staged tar
+	// as it was sealed.
+	PlaintextDigest string `json:"plaintextDigest,omitempty"`
+	PlaintextBytes  uint64 `json:"plaintextBytes,omitempty"`
+	// Alg, KeyID and EphemeralPublicKey describe the seal: the construction,
+	// the recipient key, and this member's fresh ephemeral public half. All
+	// public by construction.
+	Alg                string `json:"alg,omitempty"`
+	KeyID              string `json:"keyId,omitempty"`
+	EphemeralPublicKey string `json:"ephemeralPublicKey,omitempty"`
+	// DestinationCode is the destination's own refusal code when it refused.
+	DestinationCode string         `json:"destinationCode,omitempty"`
+	Refusal         StorageRefusal `json:"refusal,omitempty"`
+	Detail          string         `json:"detail,omitempty"`
+}
+
+// BackupTransferSubject seals and uploads one staged volume.
+func BackupTransferSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "storage.backup_transfer")
+}

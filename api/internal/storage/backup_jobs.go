@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -69,12 +69,14 @@ type RunConfig struct {
 	// SelfNodeID is the node this api runs on, and step 1 refuses any target
 	// that is not on it.
 	//
-	// Not a tidiness check. A run seals the archive on THIS host and hands the
-	// agent a file name to find on ITS host, so the handoff only exists when
-	// the two are the same machine — a target claimed on a storage node would
-	// fail at the write today, after a full snapshot, assemble and seal. And
-	// since the staging directory now arrives in that node's preflight ack,
-	// accepting one from a node the api does not share a filesystem with would
+	// Not a tidiness check. A run seals the IDENTITY archive on THIS host and
+	// hands the agent a file name to find on ITS host, and the ingest endpoint
+	// writes volume members under the mount that agent reports — so both
+	// handoffs only exist when the two are the same machine. (App volumes on
+	// OTHER nodes travel over the transport and do not need this; the target
+	// disk itself still has to be on the controlplane.) And since the staging
+	// directory and the mount path arrive in that node's preflight ack,
+	// accepting either from a node the api does not share a filesystem with would
 	// mean letting a remote party name a directory this process creates files
 	// in and sweeps files out of. Refusing at step 1 closes both: the only
 	// staging root this api will ever act on comes from the agent running
@@ -106,6 +108,15 @@ type RunConfig struct {
 	DBPath string
 	// Retain is §4.4's retention. Zero means proto.BackupRetainGenerations.
 	Retain int
+	// Ingest is the endpoint volume members land at — the same *Ingest the
+	// HTTP server mounts, so the credentials this run mints are verifiable by
+	// exactly the endpoint that receives them — and IngestBaseURL is the
+	// api's public base URL, from which the destination the agents are handed
+	// is derived (backupxfer.IngestDestination). Both required: step 1
+	// refuses a run that could not land a single app volume rather than
+	// writing an identity-only generation and recording every volume failed.
+	Ingest        *backupxfer.Ingest
+	IngestBaseURL string
 	// Store is the backup ledger, so the write step can record its generation
 	// the moment it lands rather than at the end of the saga. Set by
 	// RunWorkflow from its own argument — a caller never fills it in.
@@ -114,6 +125,10 @@ type RunConfig struct {
 	// consumer that cannot read a step result: the OnTerminal hook, which is
 	// handed a job id and a verdict and nothing else. Set by RunWorkflow.
 	staging *stagingRootRef
+	// generation remembers the generation id step 1 minted, for the same
+	// consumer: the terminal hook has to close the ingest generation and
+	// remove its partial directory on a run that never reached the write.
+	generation *stagingRootRef
 }
 
 // stagingRootRef carries the agent-reported staging root from step 2 to
@@ -189,10 +204,11 @@ func ParseRunSpec(raw json.RawMessage) (*RunSpec, error) {
 //	                      with a §4.6 public key; no other run is in flight
 //	2 preflight    agent  the target is present, mounted and has room (§4.4)
 //	3 snapshot_db  api    VACUUM INTO — never a file copy of a live database
-//	4 fan_out      agent  §4.5's app volumes, one at a time: quiesce, stage,
-//	                      verify the digest, take it, unstage. STOPS APPS.
-//	5 assemble     api    the §4.5 identity set + the captured volumes + the
-//	                      manifest that names every volume that was not
+//	4 fan_out      agent  §4.5's app volumes on EVERY node, one at a time:
+//	                      quiesce, stage, seal on the node, upload to the
+//	                      ingest endpoint, confirm, unstage. STOPS APPS.
+//	5 assemble     api    the §4.5 identity set + the manifest that indexes
+//	                      every member and names every volume that was not
 //	6 seal         api    encrypt to the target's PUBLIC key, fresh ephemeral
 //	                      per run; record a digest
 //	7 write        agent  THE IRREVERSIBLE STEP — land the sealed archive as a
@@ -237,6 +253,7 @@ func ParseRunSpec(raw json.RawMessage) (*RunSpec, error) {
 func RunWorkflow(store *Store, cfg RunConfig) jobs.Workflow {
 	cfg.Store = store
 	cfg.staging = &stagingRootRef{}
+	cfg.generation = &stagingRootRef{}
 	return jobs.Workflow{
 		Kind: RunJobKind,
 		Steps: []jobs.WorkflowStep{
@@ -324,13 +341,14 @@ type runSnapshotResult struct {
 // runFanOutResult is the app-volume phase's own row in the ledger. The whole
 // AppVolumeReport travels in it, because the ledger is a published surface and
 // the per-volume record is the thing an operator needs to be able to read
-// without decrypting an archive.
+// without decrypting an archive. Note what is NOT in it: any credential. They
+// are minted per member, live in one command each, and expire.
 type runFanOutResult struct {
-	// VolsStagingName is the plain file name of the tar holding the captured
-	// members, empty when nothing was captured.
-	VolsStagingName string          `json:"volsStagingName,omitempty"`
-	VolsSizeBytes   uint64          `json:"volsSizeBytes,omitempty"`
-	Report          AppVolumeReport `json:"report"`
+	// Destination is the URI the agents uploaded to, and GenerationDir the
+	// partial generation directory on the target the members landed in.
+	Destination   string          `json:"destination,omitempty"`
+	GenerationDir string          `json:"generationDir,omitempty"`
+	Report        AppVolumeReport `json:"report"`
 }
 
 // runAssembleResult is step 5's, and it is where the fan-out's outcome becomes
@@ -346,6 +364,11 @@ type runAssembleResult struct {
 	// is legible without opening the manifest.
 	AppVolumesCaptured int `json:"appVolumesCaptured"`
 	AppVolumesSkipped  int `json:"appVolumesSkipped"`
+	// AppVolumesFailed and FailedVolumes are §4.4's failed-not-skipped: the
+	// volumes the run tried to take and could not. Non-empty fails the run at
+	// step 8, with the generation still written and recorded.
+	AppVolumesFailed int      `json:"appVolumesFailed"`
+	FailedVolumes    []string `json:"failedVolumes,omitempty"`
 	// AppsLeftDown names every app the fan-out stopped and could not start
 	// again. Non-empty fails the run at step 8 — see runPrune.
 	AppsLeftDown []string `json:"appsLeftDown,omitempty"`
@@ -357,10 +380,11 @@ type runAssembleResult struct {
 	ManifestJSON string `json:"manifestJson"`
 }
 
-// runSealResult is step 5's. See SealResult for why no secret can be here.
+// runSealResult is step 6's. See backupxfer.SealResult for why no secret can
+// be here.
 type runSealResult struct {
-	StagingName string      `json:"stagingName"`
-	Seal        *SealResult `json:"seal"`
+	StagingName string                 `json:"stagingName"`
+	Seal        *backupxfer.SealResult `json:"seal"`
 }
 
 // runWriteResult is step 6's.
@@ -422,8 +446,8 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 		}
 		if target.NodeID != self {
 			return nil, fmt.Errorf("the claimed backup target (%s, partUuid %s) is on node %s, and this api runs on %s. "+
-				"A run seals the archive on the control plane and hands the agent BESIDE IT a file name to find; there is no transfer to another node yet, "+
-				"so this would have failed at the write step after a full snapshot and seal. Claim a target on %s",
+				"A run seals the identity archive on the control plane and hands the agent BESIDE IT a file name to find, and the ingest "+
+				"endpoint writes volume members under the mount that agent reports; a target on another node has no such handoff. Claim a target on %s",
 				displayLabel(target.Label), target.PartUUID, target.NodeID, self, self)
 		}
 		if strings.TrimSpace(target.PartUUID) == "" {
@@ -452,10 +476,18 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 			return nil, errors.New("this api is not wired to the installed-app list or the tile catalog, so it cannot know which app volumes to capture. " +
 				"Refusing rather than writing an archive that would silently contain no app data")
 		}
+		if cfg.Ingest == nil {
+			return nil, errors.New("this api has no backup ingest endpoint, so no app volume could land anywhere. " +
+				"Refusing rather than writing a generation that would record every volume as failed")
+		}
+		if _, err := backupxfer.IngestDestination(cfg.IngestBaseURL); err != nil {
+			return nil, fmt.Errorf("this api cannot tell the nodes where to upload volumes: %v (RASPUTIN_PUBLIC_BASE_URL). Nothing was staged", err)
+		}
 
 		now := time.Now().UTC()
-		gen := proto.BackupGenerationID(now, sc.JobID, proto.BackupScopeControlplaneLocal)
-		if err := store.StartRun(sc.Ctx, sc.JobID, spec.Reason, proto.BackupScopeControlplaneLocal, now); err != nil {
+		gen := proto.BackupGenerationID(now, sc.JobID, proto.BackupScopeFull)
+		cfg.generation.set(gen)
+		if err := store.StartRun(sc.Ctx, sc.JobID, spec.Reason, proto.BackupScopeFull, now); err != nil {
 			return nil, fmt.Errorf("record backup run: %w", err)
 		}
 		if err := store.BindRunTarget(sc.Ctx, sc.JobID, target.JobID, target.PartUUID, target.NodeID, target.KeyID); err != nil {
@@ -471,7 +503,7 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 			KeyID:        target.KeyID,
 			PublicKey:    target.PublicKey,
 			GenerationID: gen,
-			Scope:        proto.BackupScopeControlplaneLocal,
+			Scope:        proto.BackupScopeFull,
 			Reason:       spec.Reason,
 		}
 		sc.Log("info", fmt.Sprintf("backup run %s → target %s (partUuid %s) on %s, sealing to key %s",
@@ -538,10 +570,18 @@ func runPreflight(cfg RunConfig) jobs.DoFn {
 				"That field arrived with the fix for the staging-root disagreement; this node is running an agent older than its api. Nothing was staged",
 				tgt.NodeID)
 		}
+		// The mount path is where the ingest endpoint will write volume
+		// members, under generations/. Same shape gate as the staging root,
+		// for the same reason: it came off the wire, and it is about to be
+		// joined and opened.
+		mountPath := strings.TrimSpace(ack.MountPath)
+		if err := checkStagingRoot(mountPath); err != nil {
+			return nil, fmt.Errorf("the agent on %s named %q as the target's mount path: %w. Nothing was staged", tgt.NodeID, mountPath, err)
+		}
 		// Remembered for the OnTerminal sweep, which gets no step results.
 		cfg.staging.set(stagingRoot)
 		res := runPreflightResult{
-			PartUUID: tgt.PartUUID, MountPath: ack.MountPath,
+			PartUUID: tgt.PartUUID, MountPath: mountPath,
 			TotalBytes: ack.TotalBytes, FreeBytes: ack.FreeBytes,
 			RequiredBytes: ack.RequiredBytes, GenerationsFound: len(ack.Generations),
 			StagingRoot: stagingRoot,
@@ -626,28 +666,37 @@ func runSnapshotDB(cfg RunConfig) jobs.DoFn {
 // runFanOutStep is §4.5's per-node app-volume phase, and it is the step that
 // makes a backup contain something a user would recognise as theirs.
 //
-// It enumerates the installed apps against the catalog's classification, stages
-// every `critical`/`state` volume hosted ON THIS NODE one at a time through
-// proto.BackupStageVolumeSubject, verifies each staged tar against the digest
-// the agent computed, takes it, and unstages it before asking for the next.
+// It opens the generation at the ingest endpoint — `.partial-<generation>`
+// under the target's generations directory — enumerates the installed apps
+// against the catalog's classification, and for every `critical`/`state`
+// volume on every node, one at a time: stages it through the hosting agent
+// (proto.BackupStageVolumeCmd), has that agent seal and upload it on a
+// credential minted for that one member (proto.BackupTransferCmd), confirms
+// against the endpoint's own record, and unstages it before asking for the
+// next. Then it closes the generation, so no member can land after the
+// manifest that indexes them is built.
 //
-// Everything it cannot take — a volume on another node, a `bulk` volume, an app
-// with no tile, a refusal, a digest mismatch — is RECORDED by name with its
-// reason and the run continues. See fanout.go for why continuing is the right
-// trade, and runPrune for the one outcome that is not tolerated: an app the
-// fan-out stopped and could not start again.
+// Everything it cannot take — a node that is offline, a refusal, an upload
+// that did not land, a `bulk` volume, an app with no tile — is RECORDED by
+// name with its reason and the run continues. See fanout.go for why
+// continuing is the right trade, and runPrune for the two outcomes that end
+// the run failed anyway: a volume the run tried to take and could not, and an
+// app the fan-out stopped and could not start again.
 func runFanOutStep(cfg RunConfig) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		tgt, err := priorRunTarget(sc)
 		if err != nil {
 			return nil, err
 		}
-		stagingDir, err := runStagingDir(sc)
-		if err != nil {
+		var pre runPreflightResult
+		if err := priorResult(sc, "preflight", &pre); err != nil {
 			return nil, err
 		}
 		if cfg.Apps == nil || cfg.Tiles == nil {
 			return nil, errors.New("this api cannot enumerate installed apps, so it cannot know which app volumes to capture")
+		}
+		if cfg.Ingest == nil {
+			return nil, errors.New("this api has no backup ingest endpoint for volumes to land at")
 		}
 		installed, err := cfg.Apps.List(sc.Ctx)
 		if err != nil {
@@ -657,47 +706,50 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 			// nothing to say so.
 			return nil, fmt.Errorf("list installed apps: %w", err)
 		}
-		plan := PlanAppVolumes(installed, cfg.Tiles, tgt.NodeID)
-
-		volsName := stagingName(tgt.GenerationID, "vols")
-		volsPath, err := stagedPath(sc, volsName)
+		plan := PlanAppVolumes(installed, cfg.Tiles)
+		destination, err := backupxfer.IngestDestination(cfg.IngestBaseURL)
 		if err != nil {
 			return nil, err
 		}
-		_ = os.Remove(volsPath)
 
-		dbBytes := fileSize(cfg.DBPath)
-		report, volsSize, err := runFanOut(sc.Ctx, fanOutOpts{
-			NATS:          sc.NATS,
-			NodeID:        tgt.NodeID,
-			StagingDir:    stagingDir,
-			GenerationID:  tgt.GenerationID,
-			VolsPath:      volsPath,
-			Plan:          plan.Stage,
-			Skipped:       plan.Skipped,
-			Enumeration:   plan.AppEnumeration,
-			DBBytes:       dbBytes,
-			IdentityBytes: MeasureIdentitySet(cfg.Sources, dbBytes),
-			Now:           time.Now().UTC(),
-			Log:           sc.Log,
+		// The mount path is the co-located agent's answer, shape-checked on
+		// the way in and again here on the way out of the ledger, exactly as
+		// the staging root is. The generations directory beneath it is the
+		// only place the api writes on the target, and the ingest endpoint
+		// writes beneath THAT through openat: nothing below this join is a
+		// path-based open.
+		mountPath := strings.TrimSpace(pre.MountPath)
+		if err := checkStagingRoot(mountPath); err != nil {
+			return nil, fmt.Errorf("the recorded mount path %q is unusable: %w", mountPath, err)
+		}
+		gensDir := filepath.Join(mountPath, proto.BackupGenerationsDir)
+		genDir, err := cfg.Ingest.Open(gensDir, tgt.GenerationID, sc.JobID)
+		if err != nil {
+			return nil, fmt.Errorf("open generation %s for ingest: %w", tgt.GenerationID, err)
+		}
+		// Closed on every path out of this step: after this, no member may
+		// land, because the manifest built next is the index of what did.
+		defer cfg.Ingest.Close(tgt.GenerationID)
+		sc.Log("info", fmt.Sprintf("generation %s is open for ingest at %s; nodes upload sealed volumes to %s", tgt.GenerationID, genDir, destination))
+
+		report, err := runFanOut(sc.Ctx, fanOutOpts{
+			NATS:         sc.NATS,
+			JobID:        sc.JobID,
+			GenerationID: tgt.GenerationID,
+			Ingest:       cfg.Ingest,
+			Destination:  destination,
+			PublicKey:    tgt.PublicKey,
+			KeyID:        tgt.KeyID,
+			Scope:        tgt.Scope,
+			Plan:         plan.Stage,
+			Skipped:      plan.Skipped,
+			Enumeration:  plan.AppEnumeration,
+			Log:          sc.Log,
 		})
 		if err != nil {
-			_ = os.Remove(volsPath)
 			return nil, err
 		}
-		res := runFanOutResult{
-			VolsSizeBytes: volsSize,
-			Report:        report,
-		}
-		if report.CapturedCount > 0 {
-			res.VolsStagingName = volsName
-		} else {
-			// Nothing was captured, so the tar holds nothing. Removed here
-			// rather than left for the sweep: §4.7's third discipline is that a
-			// staged file with no consumer is a disk leak with no owner.
-			_ = os.Remove(volsPath)
-		}
-		return json.Marshal(res)
+		return json.Marshal(runFanOutResult{Destination: destination, GenerationDir: genDir, Report: report})
 	}
 }
 
@@ -721,30 +773,13 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		volsPath := ""
-		var volsFile *os.File
-		if fan.VolsStagingName != "" {
-			if volsPath, err = stagedPath(sc, fan.VolsStagingName); err != nil {
-				return nil, err
-			}
-			// Opened HERE, immediately after stagedPath, and handed to Assemble
-			// as a reader. Every staged file this saga opens is opened within
-			// sight of the two checks that bound it — see the G304 rows in
-			// .github/sast-register.tsv, whose trip-wire is exactly a staged
-			// path built by any other route.
-			if volsFile, err = os.Open(volsPath); err != nil {
-				return nil, fmt.Errorf("open the staged app volumes: %w", err)
-			}
-			defer func() { _ = volsFile.Close() }()
-		}
-		// The whole payload is known now, so the source-side guard can finally
-		// size the run for what it actually is rather than for the identity set
-		// alone. Refused HERE, before a byte of the archive is written, and the
-		// staged volumes are still on disk to be swept.
+		// The api's staging root holds the identity set and nothing else —
+		// the volumes went node-to-target and never touched it — so the
+		// source-side guard is sized for the identity set alone, re-checked
+		// here before a byte of the archive is written.
 		dbBytes := fileSize(cfg.DBPath)
 		identityBytes := MeasureIdentitySet(cfg.Sources, dbBytes)
-		if _, err := PlanStaging(filepath.Dir(snapPath), dbBytes, identityBytes,
-			fan.VolsSizeBytes, largestCaptured(fan.Report)); err != nil {
+		if _, err := PlanStaging(filepath.Dir(snapPath), dbBytes, identityBytes, 0, 0); err != nil {
 			return nil, err
 		}
 		name := stagingName(tgt.GenerationID, "tar")
@@ -766,7 +801,6 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			KeyID:        tgt.KeyID,
 			Now:          time.Now().UTC(),
 			AppVolumes:   fan.Report,
-			Volumes:      readerOrNil(volsFile),
 			Scope:        tgt.Scope,
 		})
 		if cerr := f.Close(); cerr != nil && aerr == nil {
@@ -774,24 +808,16 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 		}
 		if aerr != nil {
 			// Every artefact, not just this step's. The snapshot is a plaintext
-			// copy of the whole database and the staged volumes are plaintext
-			// copies of app data; leaving them for the boot sweep means leaving
-			// them on disk until the next restart.
+			// copy of the whole database; leaving it for the boot sweep means
+			// leaving it on disk until the next restart.
 			_ = os.Remove(dst)
 			_ = os.Remove(snapPath)
-			if volsPath != "" {
-				_ = os.Remove(volsPath)
-			}
 			return nil, aerr
 		}
-		// The snapshot's job is done the moment it is inside the tar, and so is
-		// the fan-out's. Deleting both here rather than at the end of the saga
-		// is what keeps §4.7's peak residency down to the tar plus the sealed
-		// archive.
+		// The snapshot's job is done the moment it is inside the tar. Deleting
+		// it here rather than at the end of the saga is what keeps §4.7's peak
+		// residency down to the tar plus the sealed archive.
 		_ = os.Remove(snapPath)
-		if volsPath != "" {
-			_ = os.Remove(volsPath)
-		}
 
 		manifestJSON, err := manifest.JSON()
 		if err != nil {
@@ -811,9 +837,12 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 		if manifest.Complete {
 			level = "info"
 		}
-		sc.Log(level, fmt.Sprintf("scope %s: %d app volume(s) captured across %d node(s), %d NOT captured. %s",
+		if manifest.AppVolumes.FailedCount > 0 {
+			level = "error"
+		}
+		sc.Log(level, fmt.Sprintf("scope %s: %d app volume(s) captured across %d node(s), %d NOT captured, %d FAILED. %s",
 			manifest.Scope, manifest.AppVolumes.CapturedCount, manifest.AppVolumes.NodesConsulted,
-			manifest.AppVolumes.SkippedCount, manifest.AppVolumes.Summary))
+			manifest.AppVolumes.SkippedCount, manifest.AppVolumes.FailedCount, manifest.AppVolumes.Summary))
 
 		return json.Marshal(runAssembleResult{
 			StagingName:        name,
@@ -823,6 +852,8 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			EntryCount:         len(manifest.Entries),
 			AppVolumesCaptured: manifest.AppVolumes.CapturedCount,
 			AppVolumesSkipped:  manifest.AppVolumes.SkippedCount,
+			AppVolumesFailed:   manifest.AppVolumes.FailedCount,
+			FailedVolumes:      manifest.AppVolumes.Failed,
 			AppsLeftDown:       manifest.AppVolumes.AppsLeftDown,
 			Warning:            manifest.Warning,
 			ManifestJSON:       string(manifestJSON),
@@ -862,7 +893,7 @@ func runSeal(cfg RunConfig) jobs.DoFn {
 		if err != nil {
 			return nil, fmt.Errorf("stage sealed archive: %w", err)
 		}
-		res, serr := Seal(out, in, tgt.PublicKey, tgt.KeyID, asm.Scope)
+		res, serr := backupxfer.Seal(out, in, tgt.PublicKey, tgt.KeyID, asm.Scope)
 		if serr == nil {
 			// fsync before the agent is told the file exists: the write verb
 			// re-hashes what it finds on disk, and a sealed archive still in
@@ -928,8 +959,8 @@ func runWrite(cfg RunConfig) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		sc.Log("info", fmt.Sprintf("writing generation %s (%s) to the backup target on %s",
-			tgt.GenerationID, humanBytes(sealed.Seal.SizeBytes), tgt.NodeID))
+		sc.Log("info", fmt.Sprintf("writing generation %s (%s identity archive, %d volume member(s) already landed) to the backup target on %s",
+			tgt.GenerationID, humanBytes(sealed.Seal.SizeBytes), asm.AppVolumesCaptured, tgt.NodeID))
 		msg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.BackupWriteSubject(tgt.NodeID), cmd)
 		if err != nil {
 			return nil, fmt.Errorf("backup write rpc to %s: %w", tgt.NodeID, err)
@@ -956,7 +987,7 @@ func runWrite(cfg RunConfig) jobs.DoFn {
 		// tonight. They do. Best-effort: a ledger write that fails must not
 		// un-write a generation that is already on the platter.
 		if err := cfg.Store.MarkRunGeneration(sc.Ctx, sc.JobID, ack.Generation.ID,
-			ack.Generation.Digest, ack.Generation.SizeBytes, asm.AppVolumesCaptured, asm.AppVolumesSkipped); err != nil {
+			ack.Generation.Digest, ack.Generation.SizeBytes, asm.AppVolumesCaptured, asm.AppVolumesSkipped, asm.AppVolumesFailed); err != nil {
 			log.Printf("storage: record generation %s for run %s: %v", ack.Generation.ID, sc.JobID, err)
 		}
 		sc.Log("info", fmt.Sprintf("generation %s written: %s at %s (%s free on the target)",
@@ -1026,6 +1057,7 @@ func runPrune(store *Store, cfg RunConfig) jobs.DoFn {
 			SizeBytes:          wrote.SizeBytes,
 			AppVolumesCaptured: asm.AppVolumesCaptured,
 			AppVolumesSkipped:  asm.AppVolumesSkipped,
+			AppVolumesFailed:   asm.AppVolumesFailed,
 			Scope:              asm.Scope,
 			Complete:           asm.Complete,
 			GenerationsKept:    len(ack.Kept),
@@ -1061,6 +1093,26 @@ func runPrune(store *Store, cfg RunConfig) jobs.DoFn {
 			return nil, errors.New(res.Warning)
 		}
 
+		// §4.4's other red outcome: a volume this run tried to take and could
+		// not — its node was offline, its agent refused, its upload did not
+		// land. "Failed, not skipped": the generation is on the target with
+		// everything that DID arrive, the row names it, and the run ends
+		// FAILED with the volumes named so the job feed, the OVERDUE tile and
+		// the alert path (#298) all see red rather than a green run with a
+		// caveat nobody reads.
+		if asm.AppVolumesFailed > 0 {
+			res.Warning = failedVolumesMessage(asm.FailedVolumes)
+			if err := store.MarkRunRetention(sc.Ctx, sc.JobID, res); err != nil {
+				log.Printf("storage: record retention for run %s: %v", sc.JobID, err)
+			}
+			for _, v := range asm.FailedVolumes {
+				sc.Log("error", fmt.Sprintf("VOLUME FAILED: %s was not backed up by this run; the manifest names why", v))
+			}
+			sc.Log("info", fmt.Sprintf("generation %s IS on the target (%s) with %d volume member(s) — this run is failed for the volume(s) above, not for what landed",
+				wrote.GenerationID, humanBytes(wrote.SizeBytes), asm.AppVolumesCaptured))
+			return nil, errors.New(res.Warning)
+		}
+
 		if !asm.Complete {
 			res.Warning = fmt.Sprintf("%d app volume(s) were not captured; the manifest names each one and its reason", asm.AppVolumesSkipped)
 		}
@@ -1072,7 +1124,7 @@ func runPrune(store *Store, cfg RunConfig) jobs.DoFn {
 		// "backup complete" over a skipped volume would be a false statement
 		// about what is on that disk.
 		if asm.Complete {
-			sc.Log("info", fmt.Sprintf("generation %s is on the target, scope %s: the controlplane's identity set and all %d classified app volume(s) on this cluster",
+			sc.Log("info", fmt.Sprintf("generation %s is on the target, scope %s: the controlplane's identity set and all %d classified app volume(s) on this cluster, each sealed on its own node",
 				wrote.GenerationID, asm.Scope, asm.AppVolumesCaptured))
 		} else {
 			sc.Log("warn", fmt.Sprintf("generation %s is on the target, scope %s: %d app volume(s) captured, %d NOT — %s",
@@ -1127,6 +1179,19 @@ func finalizeRunRow(store *Store, cfg RunConfig) func(context.Context, string, b
 		if dir := cfg.staging.get(); dir != "" {
 			if n, freed := CleanStaging(dir); n > 0 {
 				log.Printf("storage: backup run %s left %d staged file(s) behind; removed them (%d bytes)", jobID, n, freed)
+			}
+		}
+		// The ingest generation, on every terminal path. A run that reached
+		// the write has already renamed `.partial-<gen>` into place and this
+		// finds nothing; a run that died before it leaves the partial
+		// directory — with whatever members landed — and that is litter with
+		// no manifest, removed here rather than left for a boot sweep the
+		// target has no owner for.
+		if cfg.Ingest != nil {
+			if gen := cfg.generation.get(); gen != "" {
+				if err := cfg.Ingest.Abandon(gen); err != nil {
+					log.Printf("storage: backup run %s: remove the partial generation %s: %v", jobID, gen, err)
+				}
 			}
 		}
 		if row.Status != RunRunning {
@@ -1313,18 +1378,6 @@ type AppLister interface {
 	List(ctx context.Context) ([]*apps.App, error)
 }
 
-// largestCaptured is §4.7's peak term: the biggest single staged volume this
-// run held, which is the one the free-space guard has to have had room for.
-func largestCaptured(r AppVolumeReport) uint64 {
-	var largest uint64
-	for _, v := range r.Volumes {
-		if v.Captured && v.SizeBytes > largest {
-			largest = v.SizeBytes
-		}
-	}
-	return largest
-}
-
 // appsLeftDownMessage is the sentence a run dies on when a backup stopped an
 // app and could not start it again. It names the apps, says what is happening
 // about it, and says what the operator should check.
@@ -1341,16 +1394,16 @@ func appsLeftDownMessage(apps []string) string {
 		strings.ToUpper(subject), strings.Join(apps, ", "))
 }
 
-// readerOrNil keeps a nil *os.File from becoming a non-nil io.Reader.
-//
-// The classic Go trap: a typed nil in an interface is not nil, so
-// `AssembleOptions.Volumes = (*os.File)(nil)` would pass copyVolumeMembers'
-// nil check and then panic on the first Read. One helper rather than an
-// if-statement at the call site, because the call site is where it would be
-// forgotten.
-func readerOrNil(f *os.File) io.Reader {
-	if f == nil {
-		return nil
+// failedVolumesMessage is the sentence a run dies on when a classified volume
+// it tried to take did not make it into the generation.
+func failedVolumesMessage(vols []string) string {
+	noun := "APP VOLUME"
+	if len(vols) > 1 {
+		noun = "APP VOLUMES"
 	}
-	return f
+	return fmt.Sprintf("BACKUP FAILED FOR %s: %s could not be captured — a node offline at backup time, an agent that refused, "+
+		"or an upload that did not land; the manifest names the reason for each. Everything else this run captured IS on the backup target, "+
+		"sealed and indexed — this run is failed for what is missing, not for what landed. "+
+		"design/storage.md §4.4: an app whose backup did not happen has a FAILED backup, not a skipped one",
+		noun, strings.Join(vols, ", "))
 }

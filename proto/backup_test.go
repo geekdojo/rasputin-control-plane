@@ -163,3 +163,38 @@ func TestBackupRetentionMatchesTheDesign(t *testing.T) {
 		t.Errorf("the scope %q cannot appear in a file name, so it cannot appear in a generation id", BackupScopeIdentityOnly)
 	}
 }
+
+// The member path is the ingest endpoint's containment boundary, so the shapes
+// it refuses matter more than the ones it accepts.
+func TestBackupMemberPathShape(t *testing.T) {
+	good := BackupMemberPath("vaultwarden", "vaultwarden-data")
+	if good != "volumes/vaultwarden/vaultwarden-data.rasputin-archive" {
+		t.Fatalf("member path = %q", good)
+	}
+	if !BackupValidMemberPath(good) {
+		t.Fatalf("a path BackupMemberPath minted is refused: %q", good)
+	}
+	// Names are reduced, never refused: an app name with a space or a slash
+	// still gets a member, and the member is a plain segment.
+	if p := BackupMemberPath("../etc", "a/b"); !BackupValidMemberPath(p) || strings.Contains(p, "..") {
+		t.Errorf("hostile names produced %q", p)
+	}
+	for _, bad := range []string{
+		"", "volumes", "volumes/", "volumes/a", "volumes/a/b", "volumes/a/b.tar",
+		"volumes/../x/y.rasputin-archive", "volumes/a/../y.rasputin-archive",
+		"volumes/a/.rasputin-archive", "volumes/a/..rasputin-archive",
+		"archive.rasputin-archive", "manifest.json",
+		"/volumes/a/b.rasputin-archive", "volumes//b.rasputin-archive",
+		"volumes/a/b.rasputin-archive/", "volumes/a/b.rasputin-archive/c",
+		"Volumes/a/b.rasputin-archive", "volumes/.a/b.rasputin-archive",
+		"volumes/a/b\\c.rasputin-archive", "volumes/a b/c.rasputin-archive",
+		"volumes/a/b.rasputin-archive\x00",
+	} {
+		if BackupValidMemberPath(bad) {
+			t.Errorf("%q accepted as a member path", bad)
+		}
+	}
+	if BackupPartialDirName("g1") != ".partial-g1" {
+		t.Error("partial dir name drifted")
+	}
+}

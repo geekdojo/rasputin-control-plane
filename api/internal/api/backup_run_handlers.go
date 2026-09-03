@@ -23,14 +23,14 @@ import (
 //
 // # The scope field, and why it is on every response here
 //
-// Every generation this build writes is `identity-only`
-// (proto.BackupScopeIdentityOnly): the controlplane's database, the mesh CA and
-// Headscale state, and NO app data — the volumes are classified (#293) and the
-// agent can stage one (#294), but the path that carries a staged copy into
-// this archive (#295, #296) is unbuilt. An archive that omits app data is not
-// the backup a user assumes they have, so no response below can be rendered
-// without the fact being in it: the run rows carry `scope` and
-// `appVolumesCaptured`, and the two summary endpoints carry the prose as well.
+// Every generation this build writes is `full` (proto.BackupScopeFull): the
+// controlplane's identity set plus every `critical`/`state` volume on every
+// node, each sealed on its own node and landed through the ingest endpoint
+// (PUT /api/backup/ingest/…, no session — a scoped credential is the auth).
+// `full` is the REACH; whether a run actually captured everything is the
+// row's `complete`, and a volume the run tried to take and could not is
+// `appVolumesFailed` on a `failed` row. The prose caveat still rides on
+// every response so a client cannot render a run without it.
 
 // backupRunsResponse is GET /api/backup/runs.
 //
@@ -81,7 +81,7 @@ func (s *Server) handleListBackupRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, backupRunsResponse{
 		Runs:         runs,
 		LastSuccess:  last,
-		Scope:        proto.BackupScopeControlplaneLocal,
+		Scope:        proto.BackupScopeFull,
 		ScopeWarning: storage.AppVolumeFanOutReason(),
 		Retain:       proto.BackupRetainGenerations,
 	})

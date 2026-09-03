@@ -5,22 +5,30 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer/sealtest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
-// The app-volume fan-out, end to end over the fake agent.
+// The app-volume fan-out, end to end, over the fake agents on real NATS and
+// the REAL ingest endpoint on a real socket writing to a real temp target —
+// the protocol functional test for geekdojo-brain#295/#296 from the api's
+// side.
 //
-// Every case here is about the same question asked from a different angle: does
-// the archive on the disk, and the manifest beside it, say the truth about what
-// is in it? The answers that would be WRONG are all quiet ones — a volume that
-// vanished, a `complete` that is true, a captured count that includes something
-// the archive does not hold, an app left down that nobody mentions.
+// Every case here is about the same question asked from a different angle:
+// does the generation on the disk, and the manifest beside it, say the truth
+// about what is in it? The answers that would be WRONG are all quiet ones — a
+// volume that vanished, a `complete` that is true, a captured count that
+// includes something the target does not hold, an app left down that nobody
+// mentions, a node that was off rendered as a skip.
 
 // A small cluster: two apps on the controlplane and one on a compute node,
 // carrying every class §4.2 defines.
@@ -46,9 +54,8 @@ func clusterTiles() fakeTiles {
 	}
 }
 
-// runFanOutHarness runs one backup to completion and hands back everything a
-// case needs to look at: the job, the ledger row, and the manifest the agent
-// was told to write beside the archive.
+// fanOutRunResult is everything a case needs to look at: the job, the ledger
+// row, and the manifest the agent was told to write beside the archive.
 type fanOutRunResult struct {
 	h        *runHarness
 	jobID    string
@@ -88,16 +95,18 @@ func (r fanOutRunResult) record(t *testing.T, app, volume string) VolumeRecord {
 	return VolumeRecord{}
 }
 
-// archiveMembers lists what is actually inside the sealed archive, decrypted
-// with the test's private key. The manifest's claims are checked against THIS,
-// never against the manifest.
+// archiveMembers lists what is inside the sealed IDENTITY archive, decrypted
+// with the test's private key.
 func (r fanOutRunResult) archiveMembers(t *testing.T) map[string]string {
 	t.Helper()
 	sealed := r.h.agent.lastSealed()
 	if len(sealed) == 0 {
 		t.Fatal("the agent was never handed a sealed archive")
 	}
-	plain, _ := openSealed(t, sealed, r.h.key.priv)
+	plain, _, err := sealtest.Open(sealed, r.h.key.priv)
+	if err != nil {
+		t.Fatalf("open identity archive: %v", err)
+	}
 	members := map[string]string{}
 	tr := tar.NewReader(bytes.NewReader(plain))
 	for {
@@ -117,162 +126,352 @@ func (r fanOutRunResult) archiveMembers(t *testing.T) map[string]string {
 	return members
 }
 
-// TestFanOutCapturesLocalVolumesAndNothingElse is the headline case: two local
-// volumes go in, a `cache` volume is never even asked for, and the off-node and
-// `bulk` volumes are recorded by name with their reasons.
-func TestFanOutCapturesLocalVolumesAndNothingElse(t *testing.T) {
-	r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles()})
+// volumeMember opens one sealed volume member from the committed generation
+// on the fake target and returns the tar inside it. The manifest's claims are
+// checked against THIS, never against the manifest.
+func (r fanOutRunResult) volumeMember(t *testing.T, member string) (plain []byte, header backupxfer.Header) {
+	t.Helper()
+	genID := r.writeCmd.GenerationID
+	p := filepath.Join(r.h.generationDir(genID), filepath.FromSlash(member))
+	sealed, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("member %s is not on the target: %v", member, err)
+	}
+	plain, header, err = sealtest.Open(sealed, r.h.key.priv)
+	if err != nil {
+		t.Fatalf("member %s does not open: %v", member, err)
+	}
+	return plain, header
+}
+
+// targetFiles lists every file in the committed generation, relative to it.
+func (r fanOutRunResult) targetFiles(t *testing.T) []string {
+	t.Helper()
+	root := r.h.generationDir(r.writeCmd.GenerationID)
+	var out []string
+	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			rel, _ := filepath.Rel(root, p)
+			out = append(out, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return out
+}
+
+// TestFanOutCapturesEveryNodeIntoOneGeneration is the headline case: two
+// volumes on the controlplane and one on a compute node go in, each sealed on
+// its own node and landed as its own member; a `cache` volume is never even
+// asked for; the `bulk` volume is recorded by name. One generation, one
+// layout, one index.
+func TestFanOutCapturesEveryNodeIntoOneGeneration(t *testing.T) {
+	r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles(), computeAgent: true})
 	if r.job.Status != jobs.StatusSucceeded {
 		t.Fatalf("job failed: %s", r.job.Error)
 	}
 
-	// Exactly two staged, and in §4.2's order: `critical` before `state`.
-	if got := r.h.agent.stagedOrder(); len(got) != 2 || got[0] != "vaultwarden-data" || got[1] != "paperless-data" {
-		t.Errorf("staged %v; want [vaultwarden-data paperless-data] — critical first, then state, so a run that dies "+
-			"part-way has already taken what costs most to lose", got)
+	// Three staged, in §4.2's order: `critical` first, then `state`, and
+	// the compute node's volume through ITS agent.
+	cp := r.h.agent.stagedOrder()
+	comp := r.h.compute.stagedOrder()
+	if len(cp) != 2 || cp[0] != "vaultwarden-data" || cp[1] != "paperless-data" {
+		t.Errorf("controlplane staged %v; want [vaultwarden-data paperless-data]", cp)
 	}
-	// The `cache` volume is not refused, it is never ASKED for. §4.2 says it is
-	// never copied, and sending a command the agent would refuse is a caller
-	// bug rather than a policy.
-	for _, name := range r.h.agent.stagedOrder() {
-		if name == "paperless-cache" {
-			t.Error("the fan-out asked the agent to stage a `cache` volume; §4.2 says those are never copied")
+	if len(comp) != 1 || comp[0] != "immich-upload" {
+		t.Errorf("compute staged %v; want [immich-upload]", comp)
+	}
+	for _, name := range append(cp, comp...) {
+		if name == "paperless-cache" || name == "immich-library" {
+			t.Errorf("the fan-out asked an agent to stage %s, which is never staged", name)
 		}
 	}
-	// One staged copy at a time. §4.7's peak, observed rather than assumed.
-	r.h.agent.mu.Lock()
-	peak := r.h.agent.maxLiveStaged
-	unstaged := len(r.h.agent.unstaged)
-	r.h.agent.mu.Unlock()
-	if peak > 1 {
-		t.Errorf("%d staged copies existed at once; §4.7's whole point is that the peak is the largest single volume, not the sum", peak)
-	}
-	if unstaged != 2 {
-		t.Errorf("%d staged copies were unstaged, want 2 — a staged file with no consumer is a permanent disk leak", unstaged)
-	}
-	if left := r.h.stagingEntries(t); len(left) != 0 {
-		t.Errorf("the staging directory still holds %v", left)
-	}
-
-	// The manifest's claims, checked against the archive rather than against
-	// themselves.
-	members := r.archiveMembers(t)
-	for _, want := range []string{"app-volumes/vaultwarden/vaultwarden-data.tar", "app-volumes/paperless/paperless-data.tar"} {
-		if _, ok := members[want]; !ok {
-			t.Errorf("the archive has no member %s; members are %v", want, keysOf(members))
+	// One staged copy at a time, per node, and everything unstaged.
+	for _, a := range []*fakeBackupAgent{r.h.agent, r.h.compute} {
+		a.mu.Lock()
+		peak, unstaged, staged := a.maxLiveStaged, len(a.unstaged), len(a.staged)
+		a.mu.Unlock()
+		if peak > 1 {
+			t.Errorf("%s: %d staged copies existed at once; §4.7's peak is one volume", a.nodeID, peak)
+		}
+		if unstaged != staged {
+			t.Errorf("%s: %d staged, %d unstaged — a staged file with no consumer is a permanent disk leak", a.nodeID, staged, unstaged)
+		}
+		if left, _ := os.ReadDir(a.stagingRoot); len(left) != 0 {
+			t.Errorf("%s: the staging root still holds %d entries", a.nodeID, len(left))
 		}
 	}
-	if _, ok := members["app-volumes/immich/immich-upload.tar"]; ok {
-		t.Error("an off-node volume is in the archive, and nothing could have carried it there")
+
+	// The generation on the target: the identity archive, the manifest, and
+	// one sealed member per captured volume, exactly.
+	files := r.targetFiles(t)
+	want := map[string]bool{
+		proto.BackupArchiveFile: false, proto.BackupManifestFile: false,
+		"volumes/vaultwarden/vaultwarden-data.rasputin-archive": false,
+		"volumes/paperless/paperless-data.rasputin-archive":     false,
+		"volumes/immich/immich-upload.rasputin-archive":         false,
 	}
-	if got := r.manifest.AppVolumes.CapturedCount; got != 2 {
-		t.Errorf("manifest claims %d captured, want 2", got)
+	for _, f := range files {
+		if _, ok := want[f]; !ok {
+			t.Errorf("the generation holds %s, which nothing should have written", f)
+		}
+		want[f] = true
 	}
-	if r.manifest.Complete {
-		t.Error("complete is true with immich's volumes missing — the one field a hurried reader trusts")
+	for f, seen := range want {
+		if !seen {
+			t.Errorf("the generation lacks %s; files are %v", f, files)
+		}
 	}
-	if r.row.AppVolumesCaptured != 2 || r.row.AppVolumesSkipped != 2 || r.row.Complete {
-		t.Errorf("ledger row = %d captured / %d skipped / complete %v, want 2/2/false",
-			r.row.AppVolumesCaptured, r.row.AppVolumesSkipped, r.row.Complete)
+	// The identity archive holds NO app volumes: they are members, not
+	// entries.
+	for name := range r.archiveMembers(t) {
+		if strings.HasPrefix(name, "app-volumes/") || strings.HasPrefix(name, "volumes/") {
+			t.Errorf("the identity archive holds %s; volumes are members of the generation, not entries of the archive", name)
+		}
 	}
 
-	// Per-volume, everything §4.5 and §4.7 make an operator's business.
+	// The manifest is the index, and every claim in it checks out against
+	// the bytes on the target.
+	if r.manifest.ManifestVersion != 2 {
+		t.Errorf("manifest version = %d; the per-member layout is version 2", r.manifest.ManifestVersion)
+	}
+	// Not complete: the `bulk` volume is a lane this transport does not
+	// carry, and an honest manifest says so rather than rounding up. The run
+	// SUCCEEDED, because nothing it tried to take failed.
+	if r.manifest.Complete || r.row.Complete || r.manifest.AppVolumes.CapturedCount != 3 || r.manifest.AppVolumes.NodesConsulted != 2 || r.manifest.AppVolumes.FailedCount != 0 {
+		t.Errorf("manifest complete=%v captured=%d nodes=%d failed=%d; row complete=%v", r.manifest.Complete, r.manifest.AppVolumes.CapturedCount,
+			r.manifest.AppVolumes.NodesConsulted, r.manifest.AppVolumes.FailedCount, r.row.Complete)
+	}
+	if r.row.AppVolumesCaptured != 3 || r.row.AppVolumesSkipped != 1 || r.row.AppVolumesFailed != 0 {
+		t.Errorf("ledger row = %d captured / %d skipped / %d failed, want 3/1/0", r.row.AppVolumesCaptured, r.row.AppVolumesSkipped, r.row.AppVolumesFailed)
+	}
+	for _, c := range []struct{ app, vol, node string }{
+		{"vaultwarden", "vaultwarden-data", runNodeID},
+		{"paperless", "paperless-data", runNodeID},
+		{"immich", "immich-upload", computeNodeID},
+	} {
+		rec := r.record(t, c.app, c.vol)
+		if !rec.Captured || rec.Failed || rec.Member != proto.BackupMemberPath(c.app, c.vol) || rec.SealedBy != c.node || rec.KeyID != "key-1" {
+			t.Errorf("%s/%s record = %+v", c.app, c.vol, rec)
+		}
+		if rec.SHA256 == "" || rec.SealedSHA256 == "" || rec.SizeBytes == 0 || rec.SealedSizeBytes == 0 || rec.FileCount == 0 {
+			t.Errorf("%s/%s: a captured volume with no digests, sizes or file count: %+v", c.app, c.vol, rec)
+		}
+		plain, header := r.volumeMember(t, rec.Member)
+		if string(plain) != "TAR-OF-"+c.vol {
+			t.Errorf("%s opens to %q", rec.Member, plain)
+		}
+		if header.Scope != proto.BackupScopeFull || header.KeyID != "key-1" {
+			t.Errorf("%s header = %+v; the scope and key are sealed into every member", rec.Member, header)
+		}
+		sealed, _ := os.ReadFile(filepath.Join(r.h.generationDir(r.writeCmd.GenerationID), filepath.FromSlash(rec.Member)))
+		if uint64(len(sealed)) != rec.SealedSizeBytes {
+			t.Errorf("%s: manifest says %d sealed bytes, target holds %d", rec.Member, rec.SealedSizeBytes, len(sealed))
+		}
+	}
 	vw := r.record(t, "vaultwarden", "vaultwarden-data")
-	if !vw.Captured || vw.Class != tileschema.BackupCritical || vw.Strategy != tileschema.QuiesceStop {
+	if !vw.ServiceInterrupting || !vw.AppRestored || vw.Class != tileschema.BackupCritical {
 		t.Errorf("vaultwarden record = %+v", vw)
 	}
-	if vw.SHA256 == "" || vw.SizeBytes == 0 || vw.Path == "" || vw.FileCount == 0 {
-		t.Errorf("a captured volume with no digest, size, path or file count: %+v", vw)
-	}
-	if !vw.ServiceInterrupting {
-		t.Error("a `stop`-strategy volume is recorded as not service-interrupting; an operator cannot see that the app went down")
-	}
-	if !vw.AppRestored {
-		t.Error("the app came back and the record says otherwise")
-	}
-}
-
-// TestFanOutRecordsOffNodeVolumesByName is the promise this build makes in
-// place of the one it cannot keep: a volume it could not take is named, with
-// the reason, and the issues that will change it.
-func TestFanOutRecordsOffNodeVolumesByName(t *testing.T) {
-	r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles()})
-
-	off := r.record(t, "immich", "immich-upload")
-	if off.Captured {
-		t.Fatal("an off-node volume is recorded as captured")
-	}
-	if off.Node != computeNodeID {
-		t.Errorf("the record does not say which node holds it: %+v", off)
-	}
-	if !strings.Contains(off.Reason, "#295") || !strings.Contains(off.Reason, "#296") {
-		t.Errorf("reason = %q; it must name what is holding this volume out of the archive", off.Reason)
-	}
-
 	bulk := r.record(t, "immich", "immich-library")
-	if bulk.Captured {
-		t.Fatal("a `bulk` volume is recorded as captured; §4.7 streams those direct and the stage verb refuses them")
+	if bulk.Captured || bulk.Failed || !strings.Contains(bulk.Reason, "bulk") {
+		t.Errorf("bulk record = %+v; a bulk volume is a different lane, recorded and not failed", bulk)
 	}
-	if !strings.Contains(bulk.Reason, "bulk") {
-		t.Errorf("bulk reason = %q", bulk.Reason)
-	}
-
-	// `cache` is excluded by design, not missed. It must NOT appear as a gap —
-	// counting it would mean no archive could ever be complete.
 	for _, v := range r.manifest.AppVolumes.Volumes {
 		if v.Volume == "paperless-cache" {
-			t.Error("a `cache` volume is recorded as a gap; §4.2 says it is never copied, which is an exclusion and not a miss")
+			t.Error("a `cache` volume is recorded as a gap; §4.2 says it is never copied")
 		}
 	}
-	if !strings.Contains(strings.Join(r.manifest.Excluded, " "), "cache") {
-		t.Error("the manifest's exclusion list does not mention `cache` volumes")
+	// The manifest on the platter is the same JSON the api assembled.
+	onDisk, err := os.ReadFile(filepath.Join(r.h.generationDir(r.writeCmd.GenerationID), proto.BackupManifestFile))
+	if err != nil || string(onDisk) != r.writeCmd.ManifestJSON {
+		t.Error("the manifest on the target is not the one the api assembled")
 	}
-
-	// And the run said it out loud while it was happening.
-	if !strings.Contains(r.ledger, "immich-upload") {
-		t.Error("the job feed never named the volume it could not capture")
+	// No credential anywhere in the ledger, and every transfer was on a
+	// DIFFERENT one.
+	seen := map[string]bool{}
+	for _, a := range []*fakeBackupAgent{r.h.agent, r.h.compute} {
+		for _, rec := range a.transferRecords() {
+			if strings.Contains(r.ledger, rec.cmd.Credential) {
+				t.Error("an upload credential is in the job ledger")
+			}
+			if seen[rec.cmd.Credential] {
+				t.Error("two members were uploaded on one credential")
+			}
+			seen[rec.cmd.Credential] = true
+		}
 	}
 }
 
-// TestFanOutCompleteWhenEverythingIsLocal is the other side of the same
-// boolean. A cluster whose apps all live on the controlplane HAS had every
-// classified volume captured, and saying otherwise would be its own dishonesty.
-func TestFanOutCompleteWhenEverythingIsLocal(t *testing.T) {
+// TestFanOutRecordsAnOfflineNodeAsFailed is §4.4's named case: the node
+// hosting immich is not on the bus. Its volume is FAILED — not skipped — the
+// generation is still written with everything else, and the run ends FAILED
+// with the volume named.
+func TestFanOutRecordsAnOfflineNodeAsFailed(t *testing.T) {
+	r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles()}) // no compute agent
+	if r.job.Status != jobs.StatusFailed {
+		t.Fatalf("job status = %s; an offline node's volume must fail the run", r.job.Status)
+	}
+	for _, want := range []string{"immich/immich-upload", "FAILED"} {
+		if !strings.Contains(r.job.Error, want) {
+			t.Errorf("job error = %q; it must say %q", r.job.Error, want)
+		}
+	}
+	off := r.record(t, "immich", "immich-upload")
+	if off.Captured || !off.Failed {
+		t.Fatalf("record = %+v; §4.4: failed, not skipped", off)
+	}
+	if !strings.Contains(off.Reason, "OFFLINE") || off.Node != computeNodeID {
+		t.Errorf("reason = %q node = %q; it must say the node was offline", off.Reason, off.Node)
+	}
+	if r.row.Status != RunFailed || r.row.AppVolumesFailed != 1 || r.row.AppVolumesCaptured != 2 || r.row.Complete {
+		t.Errorf("row = status %s captured %d failed %d complete %v", r.row.Status, r.row.AppVolumesCaptured, r.row.AppVolumesFailed, r.row.Complete)
+	}
+	// The generation IS on the target and the row names it: the other two
+	// volumes are there and the operator can see so.
+	if r.row.GenerationID == "" || r.h.agent.writeCount() != 1 {
+		t.Error("the failed run wrote no generation; the volumes that DID land are worth having")
+	}
+	if !r.manifest.AppVolumes.Complete() == false && r.manifest.Complete {
+		t.Error("complete is true over a failed volume")
+	}
+	if got := r.manifest.AppVolumes.Failed; len(got) != 1 || got[0] != "immich/immich-upload" {
+		t.Errorf("manifest failed = %v", got)
+	}
+	// The manifest names the compute node's member NOWHERE, and the target
+	// holds no file for it.
+	for _, f := range r.targetFiles(t) {
+		if strings.Contains(f, "immich") {
+			t.Errorf("the target holds %s for a volume that never left an offline node", f)
+		}
+	}
+	// And the feed said it in red.
+	if !strings.Contains(r.ledger, "FAILED: immich/immich-upload") || !strings.Contains(r.ledger, "VOLUME FAILED") {
+		t.Error("the job feed never said, in words a human reads first, that a volume failed")
+	}
+	// The partial generation directory was committed by the write, not left
+	// behind: nothing `.partial-*` remains.
+	ents, _ := os.ReadDir(filepath.Join(r.h.mountDir, proto.BackupGenerationsDir))
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), proto.BackupPartialDirPrefix) {
+			t.Errorf("a partial generation survived: %s", e.Name())
+		}
+	}
+}
+
+// TestFanOutRefusesASecondVolumeOnTheFirstsCredential: the compute agent
+// uploads immich-upload on the credential minted for vaultwarden-data. The
+// endpoint refuses, the volume is FAILED with the endpoint's code, and the
+// credential's own member is untouched.
+func TestFanOutRefusesASecondVolumeOnTheFirstsCredential(t *testing.T) {
 	r := runWithApps(t, runHarnessOpts{
-		apps: []*apps.App{testApp("app-vw", "vaultwarden", runNodeID, "vaultwarden")},
-		tiles: fakeTiles{"vaultwarden": testTile("vaultwarden",
-			vol("vaultwarden-data", tileschema.BackupCritical, tileschema.QuiesceStop),
-			vol("vaultwarden-cache", tileschema.BackupCache, tileschema.QuiesceNone))},
+		apps: clusterApps(), tiles: clusterTiles(), computeAgent: true,
+		stageOutcomes: map[string]stageOutcome{
+			// The controlplane's vaultwarden-data is staged and transferred
+			// FIRST (critical, alphabetical), so its credential exists by the
+			// time immich-upload is asked for — but on another agent. Give
+			// the compute agent the controlplane agent's credential by name.
+			"immich-upload": {reuseCredentialOf: "vaultwarden-data"},
+		},
+	})
+	if r.h.agent.credentials.get("vaultwarden-data") == "" {
+		t.Fatal("no credential was minted for vaultwarden-data")
+	}
+	recs := r.h.compute.transferRecords()
+	if len(recs) == 0 {
+		t.Fatal("the compute agent was never asked to transfer")
+	}
+	// What the run recorded for the mis-scoped attempt: refused by the
+	// endpoint with the scope code, and FAILED.
+	im := r.record(t, "immich", "immich-upload")
+	if im.Captured || !im.Failed || !strings.Contains(im.Reason, backupxfer.CodeCredentialScope) {
+		t.Errorf("immich record = %+v; a credential for another member must be refused with the scope code", im)
+	}
+	if r.job.Status != jobs.StatusFailed {
+		t.Errorf("job status = %s; a refused upload is a failed volume and a failed run", r.job.Status)
+	}
+	// vaultwarden-data itself landed, once, and is intact.
+	vw := r.record(t, "vaultwarden", "vaultwarden-data")
+	if !vw.Captured {
+		t.Fatal("the credential's own member did not land")
+	}
+	if plain, _ := r.volumeMember(t, vw.Member); string(plain) != "TAR-OF-vaultwarden-data" {
+		t.Error("the credential's own member was altered")
+	}
+}
+
+// TestFanOutRefusesAReplayAfterLanding: the agent uploads for real and then
+// uploads AGAIN on the same credential. The second is refused member-exists,
+// the member is the first upload's bytes, and the run is unaffected.
+func TestFanOutRefusesAReplayAfterLanding(t *testing.T) {
+	outcomes := map[string]stageOutcome{"vaultwarden-data": {replay: true}}
+	r := runWithApps(t, runHarnessOpts{
+		apps:  []*apps.App{testApp("app-vw", "vaultwarden", runNodeID, "vaultwarden")},
+		tiles: clusterTiles(), stageOutcomes: outcomes,
 	})
 	if r.job.Status != jobs.StatusSucceeded {
 		t.Fatalf("job failed: %s", r.job.Error)
 	}
-	if !r.manifest.Complete || !r.row.Complete {
-		t.Errorf("every classified volume on this cluster was captured and complete is manifest=%v row=%v",
-			r.manifest.Complete, r.row.Complete)
+	r.h.agent.mu.Lock()
+	again := outcomes["vaultwarden-data"].replayAck
+	r.h.agent.mu.Unlock()
+	if again == nil {
+		t.Fatal("the replay never happened")
 	}
-	if len(r.manifest.AppVolumes.BlockedBy) != 0 {
-		t.Errorf("a complete archive names blockers: %v", r.manifest.AppVolumes.BlockedBy)
+	if again.OK || again.DestinationCode != backupxfer.CodeMemberExists {
+		t.Errorf("replay = %+v; a credential reused after its member landed must be refused member-exists", again)
 	}
-	// The scope still says `controlplane-local`. It is the run's REACH, minted
-	// before a volume was staged, and it does not become `full` because this
-	// particular cluster happened to fit inside it.
-	if r.manifest.Scope != proto.BackupScopeControlplaneLocal {
-		t.Errorf("scope = %q", r.manifest.Scope)
+	vw := r.record(t, "vaultwarden", "vaultwarden-data")
+	if !vw.Captured || r.manifest.AppVolumes.CapturedCount != 1 {
+		t.Errorf("record = %+v captured=%d", vw, r.manifest.AppVolumes.CapturedCount)
+	}
+	sealed, _ := os.ReadFile(filepath.Join(r.h.generationDir(r.writeCmd.GenerationID), filepath.FromSlash(vw.Member)))
+	if uint64(len(sealed)) != vw.SealedSizeBytes {
+		t.Error("the member on the target is not the first upload")
+	}
+}
+
+// TestFanOutBelievesTheEndpointNotTheAck covers both directions of the
+// api's rule that the endpoint's own record decides what landed:
+//   - an agent that REPORTS landed without uploading gets a FAILED record;
+//   - an agent that uploads and then answers unreadably (the lost ack) gets a
+//     CAPTURED record from the endpoint's receipt.
+func TestFanOutBelievesTheEndpointNotTheAck(t *testing.T) {
+	r := runWithApps(t, runHarnessOpts{
+		apps:  clusterApps(),
+		tiles: clusterTiles(), computeAgent: true,
+		stageOutcomes: map[string]stageOutcome{
+			"vaultwarden-data": {lieLanded: true},
+			"paperless-data":   {garbleAck: true},
+		},
+	})
+	vw := r.record(t, "vaultwarden", "vaultwarden-data")
+	if vw.Captured || !vw.Failed || !strings.Contains(vw.Reason, "no record") {
+		t.Errorf("a lie about landing was believed: %+v", vw)
+	}
+	if _, err := os.Stat(filepath.Join(r.h.generationDir(r.writeCmd.GenerationID), "volumes", "vaultwarden")); err == nil {
+		t.Error("a member exists for a volume that was never uploaded")
+	}
+	pl := r.record(t, "paperless", "paperless-data")
+	if !pl.Captured || pl.SealedSHA256 == "" {
+		t.Errorf("an upload whose ack was lost is not captured from the endpoint's record: %+v", pl)
+	}
+	if plain, _ := r.volumeMember(t, pl.Member); string(plain) != "TAR-OF-paperless-data" {
+		t.Error("the lost-ack member is not what was staged")
+	}
+	if !strings.Contains(r.ledger, "reply was lost") {
+		t.Error("the feed did not say the ack was lost and the endpoint's record was used")
+	}
+	if r.job.Status != jobs.StatusFailed {
+		t.Errorf("job status = %s; the lie left a volume failed", r.job.Status)
 	}
 }
 
 // TestFanOutFailsTheRunWhenAnAppIsLeftDown is §4.7's intolerable outcome.
-//
-// The archive is still written — throwing away a good backup would turn one
-// problem into two — and the run still ends FAILED, with the app named, because
-// #298's alert path is not built and the job feed is the only place this can be
-// loud today.
 func TestFanOutFailsTheRunWhenAnAppIsLeftDown(t *testing.T) {
 	down := false
 	r := runWithApps(t, runHarnessOpts{
 		apps:  clusterApps(),
-		tiles: clusterTiles(),
+		tiles: clusterTiles(), computeAgent: true,
 		stageOutcomes: map[string]stageOutcome{
 			"vaultwarden-data": {appRestored: &down, interrupting: true, downtimeMillis: 4000},
 		},
@@ -280,163 +479,120 @@ func TestFanOutFailsTheRunWhenAnAppIsLeftDown(t *testing.T) {
 	if r.job.Status != jobs.StatusFailed {
 		t.Fatalf("job status = %s; an app left down by a backup must fail the run", r.job.Status)
 	}
-	if !strings.Contains(r.job.Error, "vaultwarden") {
-		t.Errorf("job error = %q; it must NAME the app that is down", r.job.Error)
+	if !strings.Contains(r.job.Error, "vaultwarden") || !strings.Contains(strings.ToLower(r.job.Error), "down") {
+		t.Errorf("job error = %q; it must NAME the app and say it is down", r.job.Error)
 	}
-	if !strings.Contains(strings.ToLower(r.job.Error), "down") {
-		t.Errorf("job error = %q; it must say the app is down in words", r.job.Error)
+	if r.row.Status != RunFailed || r.row.GenerationID == "" || r.h.agent.writeCount() != 1 {
+		t.Errorf("row = %+v writes=%d; the archive is worth having even though the run failed", r.row, r.h.agent.writeCount())
 	}
-	if r.row.Status != RunFailed {
-		t.Errorf("run row = %s, want failed", r.row.Status)
-	}
-	// The archive IS on the disk, and the row names it. An operator reading a
-	// failed row that named no generation would conclude they had no backup
-	// from tonight. They do.
-	if r.h.agent.writeCount() != 1 {
-		t.Errorf("the agent was asked to write %d time(s); the archive is worth having even though the run failed", r.h.agent.writeCount())
-	}
-	if r.row.GenerationID == "" {
-		t.Error("the failed row names no generation, and there is one on the disk")
-	}
-	// The volume itself was still captured — the copy succeeded, the restart
-	// did not.
 	vw := r.record(t, "vaultwarden", "vaultwarden-data")
-	if !vw.Captured {
-		t.Error("the copy succeeded; the record says it did not")
+	if !vw.Captured || vw.AppRestored || vw.DowntimeMillis != 4000 {
+		t.Errorf("record = %+v; the copy succeeded, the restart did not, and the downtime is recorded", vw)
 	}
-	if vw.AppRestored {
-		t.Error("the record says the app came back and it did not")
+	if !contains(r.manifest.AppVolumes.AppsLeftDown, "vaultwarden") || !strings.Contains(r.ledger, "APP LEFT DOWN") {
+		t.Error("the app left down is not named as a field and in the feed")
 	}
-	if vw.DowntimeMillis != 4000 {
-		t.Errorf("downtime = %dms, want 4000 — an operator should be able to see that the app was down for four seconds", vw.DowntimeMillis)
-	}
-	if !contains(r.manifest.AppVolumes.AppsLeftDown, "vaultwarden") {
-		t.Errorf("appsLeftDown = %v", r.manifest.AppVolumes.AppsLeftDown)
-	}
-	if !strings.Contains(r.ledger, "APP LEFT DOWN") {
-		t.Error("the job feed does not say, in words a human reads first, that an app is down")
-	}
-	// The rest of the fan-out still ran. One misbehaving app does not cost the
-	// others their backup.
 	if got := r.h.agent.stagedOrder(); len(got) != 2 {
 		t.Errorf("staged %v; the fan-out stopped early because one app did not restart", got)
 	}
 }
 
-// TestFanOutContinuesPastARefusal: a refused volume is recorded with the
-// agent's own words and the next one is attempted.
+// TestFanOutContinuesPastARefusal: a refused volume is recorded FAILED with
+// the agent's own words and the next one is attempted.
 func TestFanOutContinuesPastARefusal(t *testing.T) {
 	r := runWithApps(t, runHarnessOpts{
 		apps:  clusterApps(),
-		tiles: clusterTiles(),
+		tiles: clusterTiles(), computeAgent: true,
 		stageOutcomes: map[string]stageOutcome{
 			"vaultwarden-data": {refusal: proto.BackupRefusalVolumeNotFound, detail: "no volume rasp_vaultwarden_vaultwarden-data"},
 		},
 	})
-	if r.job.Status != jobs.StatusSucceeded {
-		t.Fatalf("job failed: %s — one refused volume must not cost the run", r.job.Error)
+	if r.job.Status != jobs.StatusFailed {
+		t.Fatalf("job status = %s — a refused volume is a failed backup for that app (§4.4)", r.job.Status)
 	}
 	vw := r.record(t, "vaultwarden", "vaultwarden-data")
-	if vw.Captured {
-		t.Fatal("a refused volume is recorded as captured")
+	if vw.Captured || !vw.Failed || !strings.Contains(vw.Reason, string(proto.BackupRefusalVolumeNotFound)) || !strings.Contains(vw.Reason, "rasp_vaultwarden") {
+		t.Errorf("record = %+v; it must carry the agent's own refusal and detail, and be failed", vw)
 	}
-	if !strings.Contains(vw.Reason, string(proto.BackupRefusalVolumeNotFound)) || !strings.Contains(vw.Reason, "rasp_vaultwarden") {
-		t.Errorf("reason = %q; it must carry the agent's own refusal and detail", vw.Reason)
-	}
-	// The next volume was still taken, and it is in the archive.
 	pl := r.record(t, "paperless", "paperless-data")
-	if !pl.Captured {
+	im := r.record(t, "immich", "immich-upload")
+	if !pl.Captured || !im.Captured {
 		t.Error("the fan-out gave up after the first refusal")
 	}
-	if _, ok := r.archiveMembers(t)["app-volumes/paperless/paperless-data.tar"]; !ok {
-		t.Error("the volume the run says it captured is not in the archive")
+	if plain, _ := r.volumeMember(t, pl.Member); string(plain) != "TAR-OF-paperless-data" {
+		t.Error("the volume the run says it captured is not on the target")
 	}
-	if r.manifest.Complete {
-		t.Error("complete is true with a refused volume")
+	if r.manifest.Complete || r.row.AppVolumesFailed != 1 {
+		t.Errorf("complete=%v failed=%d", r.manifest.Complete, r.row.AppVolumesFailed)
 	}
 }
 
-// TestFanOutRefusesADigestMismatch: the api re-hashes what it is about to read,
-// and a copy that is not what the agent says it is does not go into an archive
-// whose manifest would claim otherwise.
+// TestFanOutRefusesADigestMismatch: the agent's stage ack claims a digest the
+// staged bytes do not have. The transfer re-hashes what it seals and refuses
+// to call the member the described copy; the api records the volume FAILED
+// and does not index it.
 func TestFanOutRefusesADigestMismatch(t *testing.T) {
 	r := runWithApps(t, runHarnessOpts{
 		apps:  clusterApps(),
-		tiles: clusterTiles(),
+		tiles: clusterTiles(), computeAgent: true,
 		stageOutcomes: map[string]stageOutcome{
 			"vaultwarden-data": {digest: strings.Repeat("0", 64)},
 		},
 	})
-	if r.job.Status != jobs.StatusSucceeded {
-		t.Fatalf("job failed: %s", r.job.Error)
-	}
 	vw := r.record(t, "vaultwarden", "vaultwarden-data")
-	if vw.Captured {
-		t.Fatal("a volume whose staged bytes do not match the agent's digest went into the archive")
+	if vw.Captured || !vw.Failed || !strings.Contains(vw.Reason, "REFUSED") {
+		t.Fatalf("record = %+v; a digest mismatch is a refusal and must read as one", vw)
 	}
-	if !strings.Contains(vw.Reason, "REFUSED") {
-		t.Errorf("reason = %q; a digest mismatch is a refusal and must read as one", vw.Reason)
-	}
-	if _, ok := r.archiveMembers(t)["app-volumes/vaultwarden/vaultwarden-data.tar"]; ok {
-		t.Error("the refused member is in the archive anyway")
-	}
-	if r.manifest.Complete {
-		t.Error("complete is true with a refused volume")
+	if r.manifest.Complete || r.job.Status != jobs.StatusFailed {
+		t.Error("complete is true, or the run succeeded, with a refused volume")
 	}
 }
 
 // TestScopeIsOnEverySurface is the honesty invariant, checked in one place.
-//
-// Six surfaces, one exported constant. Five of them are asserted here; the
-// sixth — the UI banner — is `scopeHeadline` in ui/components/storage, which
-// derives its text from the api's own scope for exactly this reason.
 func TestScopeIsOnEverySurface(t *testing.T) {
-	r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles()})
-	scope := proto.BackupScopeControlplaneLocal
-
+	r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles(), computeAgent: true})
+	scope := proto.BackupScopeFull
 	// 1. The generation's directory name on the platter.
 	if !strings.Contains(r.writeCmd.GenerationID, scope) {
-		t.Errorf("generation id %q does not carry the scope — an operator listing the disk must see what an archive is without opening it", r.writeCmd.GenerationID)
+		t.Errorf("generation id %q does not carry the scope", r.writeCmd.GenerationID)
 	}
-	// 2. The sealed header, where it is the AEAD's additional data and cannot
-	//    be edited without breaking every chunk's tag.
-	sealed := r.h.agent.lastSealed()
-	if len(sealed) == 0 {
-		t.Fatal("no sealed archive was written")
+	// 2. The sealed headers — the identity archive's AND every member's —
+	//    where it is the AEAD's additional data.
+	if _, header, err := sealtest.Open(r.h.agent.lastSealed(), r.h.key.priv); err != nil || header.Scope != scope {
+		t.Errorf("identity archive header scope = %q (%v)", header.Scope, err)
 	}
-	_, header := openSealed(t, sealed, r.h.key.priv)
-	if header.Scope != scope {
-		t.Errorf("sealed header scope = %q — the scope has to be INSIDE the seal, where nobody holding the disk can edit it", header.Scope)
+	for _, v := range r.manifest.AppVolumes.Volumes {
+		if v.Captured {
+			if _, header := r.volumeMember(t, v.Member); header.Scope != scope {
+				t.Errorf("member %s header scope = %q", v.Member, header.Scope)
+			}
+		}
 	}
-	// 3. The clear-text manifest.
-	if r.manifest.Scope != scope {
-		t.Errorf("manifest scope = %q", r.manifest.Scope)
+	// 3. The clear-text manifest. 4. The backup_runs row. 5. The job feed.
+	if r.manifest.Scope != scope || r.row.Scope != scope || !strings.Contains(r.ledger, scope) {
+		t.Errorf("manifest %q row %q feed-has=%v", r.manifest.Scope, r.row.Scope, strings.Contains(r.ledger, scope))
 	}
-	// 4. The backup_runs row.
-	if r.row.Scope != scope {
-		t.Errorf("ledger row scope = %q", r.row.Scope)
-	}
-	// 5. The job's own log lines.
-	if !strings.Contains(r.ledger, scope) {
-		t.Error("the job feed never says the scope; an operator watching a run live must learn it there")
-	}
-	// And the standing caveat, which every surface renders, names it too.
 	if !strings.Contains(AppVolumeFanOutReason(), scope) {
-		t.Error("the exported caveat does not name the scope, so the UI banner and the manifest cannot agree by construction")
+		t.Error("the exported caveat does not name the scope")
 	}
 }
 
-// TestRunRefusesWhenItCannotEnumerateApps: an api that does not know what is
-// installed would write an archive silently containing no app data. That is the
-// precise failure this slice exists to make impossible, so it is refused at
-// step 1 — before anything is snapshotted, staged or sealed.
+// TestRunRefusesWhenItCannotEnumerateApps and TestRunRefusesWithoutAnIngest
+// are the two step-1 refusals for an api that could not do the fan-out.
 func TestRunRefusesWhenItCannotEnumerateApps(t *testing.T) {
 	r := runWithApps(t, runHarnessOpts{noAppSource: true})
-	if r.job.Status != jobs.StatusFailed {
-		t.Fatalf("job status = %s; an api that cannot enumerate apps must refuse", r.job.Status)
+	if r.job.Status != jobs.StatusFailed || !strings.Contains(r.job.Error, "silently contain no app data") {
+		t.Fatalf("job = %s %q", r.job.Status, r.job.Error)
 	}
-	if !strings.Contains(r.job.Error, "silently contain no app data") {
-		t.Errorf("job error = %q", r.job.Error)
+	if r.h.agent.writeCount() != 0 {
+		t.Error("something was written despite the refusal")
+	}
+}
+
+func TestRunRefusesWithoutAnIngestEndpoint(t *testing.T) {
+	r := runWithApps(t, runHarnessOpts{noIngest: true})
+	if r.job.Status != jobs.StatusFailed || !strings.Contains(r.job.Error, "no backup ingest endpoint") {
+		t.Fatalf("job = %s %q", r.job.Status, r.job.Error)
 	}
 	if r.h.agent.writeCount() != 0 {
 		t.Error("something was written despite the refusal")
@@ -444,8 +600,9 @@ func TestRunRefusesWhenItCannotEnumerateApps(t *testing.T) {
 }
 
 // TestFanOutRecordsAnUnclassifiedApp: a custom-compose app has no tile, so
-// nothing knows which of its volumes matter. Recorded rather than skipped —
-// "we did not look" and "there was nothing" must not render identically.
+// nothing knows which of its volumes matter. Recorded rather than skipped,
+// incomplete rather than failed — the run never tried, because it could not
+// know what to try.
 func TestFanOutRecordsAnUnclassifiedApp(t *testing.T) {
 	r := runWithApps(t, runHarnessOpts{
 		apps:  []*apps.App{testApp("app-x", "homebrew", runNodeID, "")},
@@ -458,7 +615,7 @@ func TestFanOutRecordsAnUnclassifiedApp(t *testing.T) {
 		t.Fatalf("app-volume records = %+v", r.manifest.AppVolumes.Volumes)
 	}
 	rec := r.manifest.AppVolumes.Volumes[0]
-	if rec.App != "homebrew" || rec.Captured || !strings.Contains(rec.Reason, "custom compose") {
+	if rec.App != "homebrew" || rec.Captured || rec.Failed || !strings.Contains(rec.Reason, "custom compose") {
 		t.Errorf("record = %+v", rec)
 	}
 	if r.manifest.Complete {
@@ -466,12 +623,30 @@ func TestFanOutRecordsAnUnclassifiedApp(t *testing.T) {
 	}
 }
 
-func keysOf(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// TestAbandonedRunLeavesNoPartialGeneration: a run that dies after members
+// landed but before the write leaves nothing on the target — the terminal
+// hook removes `.partial-<gen>`.
+func TestAbandonedRunLeavesNoPartialGeneration(t *testing.T) {
+	agent := &fakeBackupAgent{
+		write: func(cmd proto.BackupWriteCmd) proto.BackupWriteAck {
+			return proto.BackupWriteAck{OK: false, Refusal: proto.StorageRefusalBackendError, Detail: "disk pulled"}
+		},
 	}
-	return out
+	h := newRunHarness(t, agent, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles(), computeAgent: true})
+	jobID := h.submit(t, RunSpec{})
+	j := h.waitTerminal(t, jobID)
+	if j.Status != jobs.StatusFailed {
+		t.Fatalf("job = %s", j.Status)
+	}
+	ents, _ := os.ReadDir(filepath.Join(h.mountDir, proto.BackupGenerationsDir))
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), proto.BackupPartialDirPrefix) {
+			t.Errorf("a partial generation with landed members survived a failed run: %s", e.Name())
+		}
+	}
+	if _, _, open := h.ingest.OpenGeneration(); open {
+		t.Error("the ingest endpoint still has a generation open after the run ended")
+	}
 }
 
 func contains(list []string, want string) bool {
@@ -481,4 +656,12 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

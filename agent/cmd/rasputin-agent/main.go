@@ -299,6 +299,10 @@ func main() {
 				log.Printf("rasputin-agent: swept %d orphaned staged file(s) from %s (%d bytes)", n, stagingRoot, freed)
 			}
 			stager := quiesce.New(rt, stagingRoot, quiesce.MarkerDir(stateDir))
+			// The transfer verb uploads sealed volumes to the api's ingest
+			// endpoint over the api's mesh-CA HTTPS leaf; the same bundle
+			// the updater's download client trusts.
+			stager.SetCABundle(tailscale.CABundlePath())
 			if n := stager.SweepArmedStops(); n > 0 {
 				log.Printf("rasputin-agent: quiesce: restarted %d app(s) a previous agent left stopped for a backup", n)
 			}

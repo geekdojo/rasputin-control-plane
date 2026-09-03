@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 
@@ -282,34 +281,4 @@ func byteCount(n int64) uint64 {
 		return 0
 	}
 	return uint64(n)
-}
-
-// signedByteCount is byteCount's inverse, guarded the same way and for the same
-// reason: a bare int64(n) on a uint64 above MaxInt64 wraps NEGATIVE, and a
-// negative byte count in a size total reads as an archive that shrank. Nothing
-// in this package can produce a value that large, which is exactly why the
-// guard is cheap and the failure it prevents would be baffling.
-func signedByteCount(n uint64) int64 {
-	if n > math.MaxInt64 {
-		return math.MaxInt64
-	}
-	return int64(n)
-}
-
-// joinStaging is stagedPath's form for a caller that already holds the root —
-// the fan-out, which stages many files under one directory resolved once.
-//
-// The same two checks, in the same order, immediately before the join: the root
-// must be absolute and already clean, and the name must be a single plain file
-// name by proto.BackupValidStagingName — the SAME predicate the agent applies to
-// what it is sent. Neither half can contribute a traversal, so the result is
-// always a direct child of the staging root.
-func joinStaging(dir, name string) string {
-	if err := checkStagingRoot(dir); err != nil {
-		return ""
-	}
-	if !proto.BackupValidStagingName(name) {
-		return ""
-	}
-	return filepath.Join(dir, name)
 }

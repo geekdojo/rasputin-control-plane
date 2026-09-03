@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -22,11 +23,11 @@ func TestPlanAppVolumesOrdersCriticalFirst(t *testing.T) {
 			vol("zulu-critical", tileschema.BackupCritical, tileschema.QuiesceStop)),
 		"alpha": testTile("alpha",
 			vol("alpha-state", tileschema.BackupState, tileschema.QuiesceNone)),
-	}, runNodeID)
+	})
 	stage, skipped := plan.Stage, plan.Skipped
 
 	if len(skipped) != 0 {
-		t.Fatalf("nothing here is off-node or bulk: %+v", skipped)
+		t.Fatalf("nothing here is bulk or unclassified: %+v", skipped)
 	}
 	got := make([]string, 0, len(stage))
 	for _, p := range stage {
@@ -51,20 +52,20 @@ func TestPlanAppVolumesIsDeterministicWithinAnApp(t *testing.T) {
 		"t": testTile("t",
 			vol("zzz-data", tileschema.BackupState, tileschema.QuiesceNone),
 			vol("aaa-data", tileschema.BackupState, tileschema.QuiesceNone)),
-		"off": testTile("off",
-			vol("zzz-remote", tileschema.BackupState, tileschema.QuiesceNone),
-			vol("aaa-remote", tileschema.BackupState, tileschema.QuiesceNone)),
+		"b": testTile("b",
+			vol("zzz-bulk", tileschema.BackupBulk, tileschema.QuiesceNone),
+			vol("aaa-bulk", tileschema.BackupBulk, tileschema.QuiesceNone)),
 	}
 	plan := PlanAppVolumes([]*apps.App{
 		testApp("a", "app", runNodeID, "t"),
-		testApp("b", "app", "n-other", "off"),
-	}, tiles, runNodeID)
+		testApp("b", "app", "n-other", "b"),
+	}, tiles)
 	stage, skipped := plan.Stage, plan.Skipped
 
 	if len(stage) != 2 || stage[0].Volume != "aaa-data" || stage[1].Volume != "zzz-data" {
 		t.Errorf("stage order = %v; two volumes of one app and one class order by name or by nothing", volumeNames(stage))
 	}
-	if len(skipped) != 2 || skipped[0].Volume != "aaa-remote" || skipped[1].Volume != "zzz-remote" {
+	if len(skipped) != 2 || skipped[0].Volume != "aaa-bulk" || skipped[1].Volume != "zzz-bulk" {
 		t.Errorf("skipped order = %+v; the record list is read by a human and must be stable too", skipped)
 	}
 }
@@ -83,21 +84,31 @@ func TestPlanAppVolumesClassifiesEveryOutcome(t *testing.T) {
 		testApp("a-remote", "remote", "n-other", "t"),
 		testApp("a-custom", "custom", runNodeID, ""),
 		testApp("a-gone", "gone", runNodeID, "withdrawn"),
+		testApp("a-nowhere", "nowhere", "", "t"),
 	}, fakeTiles{
 		"t": testTile("t",
 			vol("v-critical", tileschema.BackupCritical, tileschema.QuiesceStop),
 			vol("v-state", tileschema.BackupState, tileschema.QuiesceSQLite),
 			vol("v-cache", tileschema.BackupCache, tileschema.QuiesceNone),
 			vol("v-bulk", tileschema.BackupBulk, tileschema.QuiesceNone)),
-	}, runNodeID)
+	})
 	stage, skipped := plan.Stage, plan.Skipped
 
-	if len(stage) != 2 {
-		t.Fatalf("stage = %+v, want the local critical and state volumes only", stage)
+	// The controlplane's volumes and the compute node's are planned alike:
+	// there is one transport and it runs everywhere. Critical first.
+	if len(stage) != 4 || stage[0].Class != tileschema.BackupCritical || stage[1].Class != tileschema.BackupCritical {
+		t.Fatalf("stage = %+v, want the critical and state volumes of both the local and the remote app", stage)
+	}
+	for _, pv := range stage {
+		if pv.NodeID != runNodeID && pv.NodeID != "n-other" {
+			t.Errorf("planned %s/%s on node %q", pv.AppName, pv.Volume, pv.NodeID)
+		}
 	}
 	byReason := map[string]string{}
+	failed := map[string]bool{}
 	for _, s := range skipped {
 		byReason[s.App+"/"+s.Volume] = s.Reason
+		failed[s.App+"/"+s.Volume] = s.Failed
 		if s.Captured {
 			t.Errorf("%s is in the skipped list and marked captured", s.Volume)
 		}
@@ -105,18 +116,13 @@ func TestPlanAppVolumesClassifiesEveryOutcome(t *testing.T) {
 			t.Errorf("%s/%s was skipped with no reason", s.App, s.Volume)
 		}
 	}
-	// `cache` is excluded by design and is not a gap: counting it would mean no
-	// archive on any cluster could ever be complete.
 	for k := range byReason {
 		if strings.HasSuffix(k, "v-cache") {
 			t.Errorf("%s is recorded as a gap; §4.2 says `cache` is never copied", k)
 		}
 	}
-	if r := byReason["remote/v-critical"]; !strings.Contains(r, "#295") {
-		t.Errorf("off-node reason = %q", r)
-	}
-	if r := byReason["local/v-bulk"]; !strings.Contains(r, "bulk") {
-		t.Errorf("bulk reason = %q", r)
+	if r := byReason["local/v-bulk"]; !strings.Contains(r, "bulk") || failed["local/v-bulk"] {
+		t.Errorf("bulk reason = %q failed=%v; a bulk volume is a different lane, not a failure", r, failed["local/v-bulk"])
 	}
 	if r := byReason["custom/(unknown — no tile)"]; !strings.Contains(r, "custom compose") {
 		t.Errorf("unclassified reason = %q", r)
@@ -124,11 +130,14 @@ func TestPlanAppVolumesClassifiesEveryOutcome(t *testing.T) {
 	if r := byReason["gone/(unknown — tile withdrawn)"]; !strings.Contains(r, "no longer ships") {
 		t.Errorf("withdrawn reason = %q", r)
 	}
-	// Four installed; two resolved to a tile that classifies its volumes (the
-	// local and the remote share one). The custom-compose app and the
-	// withdrawn tile did not, and each is a record above.
-	if plan.AppsInstalled != 4 || plan.AppsResolved != 2 {
-		t.Errorf("enumeration = %d installed / %d resolved, want 4/2", plan.AppsInstalled, plan.AppsResolved)
+	// An app deployed nowhere has no agent to stage on: a FAILURE of the
+	// run, because the app is installed, classified, and not backed up.
+	if !failed["nowhere/v-critical"] || !failed["nowhere/v-state"] {
+		t.Errorf("an app on no node is not recorded as failed: %v", failed)
+	}
+	// Five installed; three resolved to a tile that classifies its volumes.
+	if plan.AppsInstalled != 5 || plan.AppsResolved != 3 {
+		t.Errorf("enumeration = %d installed / %d resolved, want 5/3", plan.AppsInstalled, plan.AppsResolved)
 	}
 	if plan.Catalog != "v0 (test tiles)" {
 		t.Errorf("plan.Catalog = %q; the plan must say which catalog answered", plan.Catalog)
@@ -141,7 +150,7 @@ func TestPlanAppVolumesClassifiesEveryOutcome(t *testing.T) {
 // mentioned — and the manifest said complete.
 func TestPlanAppVolumesRecordsATileThatDeclaresNoVolumes(t *testing.T) {
 	plan := PlanAppVolumes([]*apps.App{testApp("app-vw", "vaultwarden", runNodeID, "vaultwarden")},
-		fakeTiles{"vaultwarden": testTile("vaultwarden")}, runNodeID)
+		fakeTiles{"vaultwarden": testTile("vaultwarden")})
 
 	if len(plan.Stage) != 0 {
 		t.Errorf("stage = %+v; nothing is classified, so nothing can be staged", plan.Stage)
@@ -190,12 +199,13 @@ func TestPlanAppVolumesNeverLosesAnInstalledApp(t *testing.T) {
 		{"tile declares no volumes", testApp("a", "empty", runNodeID, "empty"), 0, 1, 0, false},
 		{"tile declares only cache", testApp("a", "cache", runNodeID, "cache-only"), 0, 0, 1, true},
 		{"critical volume, local", testApp("a", "local", runNodeID, "local"), 1, 0, 1, true},
-		{"critical volume, off-node", testApp("a", "remote", "n-other", "local"), 0, 1, 1, false},
+		{"critical volume, off-node", testApp("a", "remote", "n-other", "local"), 1, 0, 1, true},
+		{"critical volume, deployed nowhere", testApp("a", "nowhere", "", "local"), 0, 1, 1, false},
 		{"bulk volume", testApp("a", "bulk", runNodeID, "bulk"), 0, 1, 1, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			plan := PlanAppVolumes([]*apps.App{c.app}, tiles, runNodeID)
+			plan := PlanAppVolumes([]*apps.App{c.app}, tiles)
 			if len(plan.Stage) != c.wantStage || len(plan.Skipped) != c.wantSkipped {
 				t.Errorf("stage=%d skipped=%d, want %d/%d", len(plan.Stage), len(plan.Skipped), c.wantStage, c.wantSkipped)
 			}
@@ -217,47 +227,33 @@ func TestPlanAppVolumesNeverLosesAnInstalledApp(t *testing.T) {
 	}
 }
 
-// TestPlanAppVolumesStagesNothingWithoutASelfNode is the fail-safe direction.
-// An api that does not know which node it is cannot know which volumes are
-// local, and guessing would mean sending a stage command — which STOPS AN APP —
-// to a node on the strength of an assumption.
-func TestPlanAppVolumesStagesNothingWithoutASelfNode(t *testing.T) {
-	plan := PlanAppVolumes([]*apps.App{testApp("a", "app", runNodeID, "t")},
-		fakeTiles{"t": testTile("t", vol("v", tileschema.BackupCritical, tileschema.QuiesceStop))}, "")
-	stage, skipped := plan.Stage, plan.Skipped
-	if len(stage) != 0 {
-		t.Error("volumes were planned by an api that does not know which node it runs on")
-	}
-	if len(skipped) != 1 || skipped[0].Captured {
-		t.Errorf("skipped = %+v; the volume must still be recorded", skipped)
-	}
-}
-
-// TestArchivePathCarriesAppAndVolume is the restore side's contract (#291,
-// unbuilt). A flattened tree would make a restore guess which file belonged to
-// which app.
-func TestArchivePathCarriesAppAndVolume(t *testing.T) {
+// TestMemberPathCarriesAppAndVolume is the restore side's contract (#291): one
+// sealed member per volume, named for the app and the volume, in the
+// generation directory. A flattened tree would make a restore guess which
+// file belonged to which app.
+func TestMemberPathCarriesAppAndVolume(t *testing.T) {
 	p := PlannedVolume{AppName: "vaultwarden", Volume: "vaultwarden-data"}
-	if got := p.ArchivePath(); got != "app-volumes/vaultwarden/vaultwarden-data.tar" {
-		t.Errorf("archive path = %q", got)
+	if got := p.Member(); got != "volumes/vaultwarden/vaultwarden-data.rasputin-archive" {
+		t.Errorf("member = %q", got)
 	}
-	// The member path is written into an archive a restore later expands, and a
-	// member path is the classic way a tar becomes a write outside its
-	// destination. Nothing that is not [A-Za-z0-9._-] survives, and no member
-	// can start with a dot or climb out of the prefix.
+	// The member name is written onto removable media and later expanded by
+	// a restore, and it is also what the ingest endpoint's containment check
+	// accepts: whatever the app and volume are called, the result must pass
+	// that check and must not climb.
 	for _, bad := range []struct{ app, vol string }{
 		{"../etc", "passwd"},
 		{"app", "../../etc/shadow"},
 		{"..", ".."},
 		{"", ""},
 		{"a/b", "c:d"},
+		{".hidden", ".also"},
 	} {
-		got := (PlannedVolume{AppName: bad.app, Volume: bad.vol}).ArchivePath()
-		if !strings.HasPrefix(got, AppVolumeStagePrefix+"/") {
-			t.Errorf("%q/%q produced %q, which is not under the app-volume prefix", bad.app, bad.vol, got)
+		got := (PlannedVolume{AppName: bad.app, Volume: bad.vol}).Member()
+		if !proto.BackupValidMemberPath(got) {
+			t.Errorf("%q/%q produced %q, which the ingest endpoint would refuse", bad.app, bad.vol, got)
 		}
 		if strings.Contains(got, "..") {
-			t.Errorf("%q/%q produced %q, which climbs out of the archive", bad.app, bad.vol, got)
+			t.Errorf("%q/%q produced %q, which climbs out of the generation", bad.app, bad.vol, got)
 		}
 	}
 }

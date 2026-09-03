@@ -49,12 +49,13 @@ const (
 	// drive), backup's write (15m — copying a sealed archive onto a target
 	// that may be a USB 2.0 stick) and backup's volume staging (30m — a
 	// local copy of one app volume that may be tens of gigabytes on an SD
-	// card, with the app STOPPED for part of it) are the others. EVERY
+	// card, with the app STOPPED for part of it) and backup's transfer (45m —
+	// sealing and uploading one staged volume) are the others. EVERY
 	// agent-side budget belongs in this max(): one left out is a handler that
 	// finishes with a real answer and is denied the publish that carries it.
 	AgentWorkBudgetMax = max(AppDeployWorkMax, UpdateDownloadWork, UpdateInstallWork,
 		StorageClaimWork, BackupWriteWork, BackupPreflightWork, BackupPruneWork,
-		BackupStageWork, BackupUnstageWork)
+		BackupStageWork, BackupUnstageWork, BackupTransferWork)
 
 	// BusReplyGrantSlack is headroom on top of that ceiling for the handler's
 	// teardown after its context expires, the marshal, and a queued write on a

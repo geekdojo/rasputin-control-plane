@@ -19,11 +19,12 @@ import type { BackupRunsResponse, BackupSchedule } from '../../lib/types';
  * Whether to show the "not a complete backup" banner.
  *
  * FAIL LOUD. Anything other than a positive, explicit `scope: "full"` warns:
- * `controlplane-local` (what this build writes — app volumes on any other node
- * are not in the archive), the older `identity-only`, a response that has not
- * arrived, an api that sends no scope at all, a value this build does not
- * recognise. The banner going away is a claim that the archive contains
- * everything, and only the api saying so in those words earns it.
+ * `controlplane-local` and `identity-only` (what earlier builds wrote), a
+ * response that has not arrived, an api that sends no scope at all, a value
+ * this build does not recognise. The banner going away is a claim that the
+ * generation reaches everything, and only the api saying so in those words
+ * earns it — which, since the per-node transport, it does. Whether one RUN
+ * captured everything is the row's `complete`, rendered per run.
  */
 export function shouldWarnIncomplete(data: BackupRunsResponse | null): boolean {
   return data?.scope !== 'full';
@@ -53,11 +54,16 @@ export function scopeHeadline(data: BackupRunsResponse | null): string {
 export function runScopeTitle(run: {
   appVolumesCaptured: number;
   appVolumesSkipped?: number;
+  appVolumesFailed?: number;
   warning?: string;
 }): string {
   const parts = [appVolumeSummary(run.appVolumesCaptured)];
   const skipped = run.appVolumesSkipped ?? 0;
-  if (skipped > 0) parts.push(`${skipped} NOT captured`);
+  const failed = run.appVolumesFailed ?? 0;
+  // FAILED first and in capitals: §4.4's "failed, not skipped" — a volume the
+  // run tried to take and could not is the loudest thing on the row.
+  if (failed > 0) parts.push(`${failed} FAILED`);
+  if (skipped - failed > 0) parts.push(`${skipped - failed} NOT captured`);
   if (run.warning) parts.push(run.warning);
   return parts.join(' · ');
 }

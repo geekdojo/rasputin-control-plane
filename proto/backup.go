@@ -413,3 +413,102 @@ func BackupGenerationID(at time.Time, jobID, scope string) string {
 	}
 	return fmt.Sprintf("%s-%s-%s", at.UTC().Format("20060102T150405Z"), disc, scope)
 }
+
+// ----- Per-volume members: the §4.7 transport's on-disk contract -----------
+//
+// A generation is no longer one sealed archive. The identity set is sealed by
+// the api on the controlplane, and EVERY app volume is sealed by the agent on
+// the node that hosts it (design/storage.md §4.6: "per-node encryption cost
+// lands on the agent, not the api"), then uploaded as its own member. So one
+// generation directory holds:
+//
+//	generations/<id>/
+//	    archive.rasputin-archive              the identity set, sealed by the api
+//	    manifest.json                         the CLEAR-TEXT index of everything
+//	    volumes/<app>/<volume>.rasputin-archive  one sealed archive per volume,
+//	                                          sealed by the hosting agent
+//
+// The manifest is the index: every member the generation holds is a row in
+// appVolumes.volumes, with the digest over its sealed bytes and the digest
+// over the plaintext tar inside it. A restore (#291) reads the manifest and
+// then each member; a member the manifest does not name is not part of the
+// generation. That is one layout whether a volume was sealed on the
+// controlplane or on a compute node — the site is a field in the row, not a
+// difference in shape.
+//
+// While a run is in flight the directory is `.partial-<id>`: the ingest
+// endpoint lands members into it, the write verb adds the identity archive and
+// the manifest, and the rename to `<id>` is the commit. prune and the
+// generation listing skip `.partial-*` by prefix.
+
+// BackupPartialDirPrefix is the prefix of a generation directory that is still
+// being written. One constant, because two halves — the api's ingest endpoint
+// and the agent's write verb — must name the same directory.
+const BackupPartialDirPrefix = ".partial-"
+
+// BackupPartialDirName is the in-flight directory for a generation.
+func BackupPartialDirName(generationID string) string {
+	return BackupPartialDirPrefix + generationID
+}
+
+// BackupVolumesDir is the directory, inside a generation, that holds the
+// per-volume members.
+const BackupVolumesDir = "volumes"
+
+// BackupMemberSuffix is the file suffix of every sealed member — the same
+// suffix as the identity archive, because it is the same format.
+const BackupMemberSuffix = ".rasputin-archive"
+
+// BackupMemberPath is the path, relative to the generation directory, of one
+// app volume's sealed member: volumes/<app>/<volume>.rasputin-archive.
+//
+// App and volume names are reduced to [A-Za-z0-9._-] with a leading dot
+// refused and `..` collapsed — the same reduction the archive member paths
+// used, because the name is about to become a file name on removable media
+// and, later, a path a restore expands.
+func BackupMemberPath(appName, volume string) string {
+	return BackupVolumesDir + "/" + backupMemberSegment(appName) + "/" + backupMemberSegment(volume) + BackupMemberSuffix
+}
+
+// BackupValidMemberPath reports whether p is a path BackupMemberPath could
+// have produced: exactly three slash-separated segments, the first
+// BackupVolumesDir, the other two plain file names (BackupValidStagingName's
+// shape, so no separator, no `.`/`..`, no leading dot), and the last ending in
+// BackupMemberSuffix with a non-empty stem.
+//
+// This is the ingest endpoint's containment check. It is a validation by
+// SHAPE, never a sanitisation: anything that is not obviously a member name the
+// api minted is refused, so the endpoint can never be talked into writing
+// outside the generation directory.
+func BackupValidMemberPath(p string) bool {
+	parts := strings.Split(p, "/")
+	if len(parts) != 3 || parts[0] != BackupVolumesDir {
+		return false
+	}
+	if !BackupValidStagingName(parts[1]) || !BackupValidStagingName(parts[2]) {
+		return false
+	}
+	stem, ok := strings.CutSuffix(parts[2], BackupMemberSuffix)
+	return ok && stem != "" && !strings.HasPrefix(stem, ".")
+}
+
+func backupMemberSegment(s string) string {
+	s = strings.TrimSpace(s)
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			out = append(out, r)
+		default:
+			out = append(out, '_')
+		}
+	}
+	res := strings.TrimLeft(string(out), ".")
+	for strings.Contains(res, "..") {
+		res = strings.ReplaceAll(res, "..", "_")
+	}
+	if res == "" {
+		return "unnamed"
+	}
+	return res
+}

@@ -753,3 +753,63 @@ func TestListGenerationsTieBreaksOnTheID(t *testing.T) {
 		t.Errorf("pruned %v, want just the oldest (%s)", ack.Pruned, ids[0])
 	}
 }
+
+// TestBackupWriteAdoptsThePartialGenerationTheIngestOpened is the commit
+// half of the per-node transport: the api's ingest endpoint has already
+// landed a volume member under `.partial-<generation>`, and the write verb
+// adds the identity archive and the manifest BESIDE it and renames the
+// whole directory into place — one generation, one commit.
+func TestBackupWriteAdoptsThePartialGenerationTheIngestOpened(t *testing.T) {
+	m := newTestMock(t, defaultMockMachine())
+	partUUID, mountPath := claimedTarget(t, m)
+	staging := t.TempDir()
+	genID := "20260903T030000Z-bbbbbbbb-full"
+	gensDir := filepath.Join(mountPath, proto.BackupGenerationsDir)
+
+	// What the ingest endpoint leaves behind before the write step runs.
+	member := proto.BackupMemberPath("vaultwarden", "vaultwarden-data")
+	memberPath := filepath.Join(gensDir, proto.BackupPartialDirName(genID), filepath.FromSlash(member))
+	if err := os.MkdirAll(filepath.Dir(memberPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(memberPath, []byte("SEALED-VOLUME-MEMBER"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	body := "SEALED-IDENTITY-ARCHIVE"
+	name, digest := stageArchive(t, staging, "gen-b.sealed", body)
+	ack, err := BackupWrite(context.Background(), m, staging, proto.BackupWriteCmd{
+		PartUUID: partUUID, GenerationID: genID, StagingName: name,
+		Digest: digest, SizeBytes: uint64(len(body)), ManifestJSON: testManifest(proto.BackupScopeFull),
+	})
+	if err != nil || !ack.OK {
+		t.Fatalf("BackupWrite: %v / %+v", err, ack)
+	}
+	final := filepath.Join(gensDir, genID)
+	for _, want := range []string{proto.BackupArchiveFile, proto.BackupManifestFile, filepath.FromSlash(member)} {
+		if _, err := os.Stat(filepath.Join(final, want)); err != nil {
+			t.Errorf("the committed generation lacks %s: %v", want, err)
+		}
+	}
+	got, _ := os.ReadFile(filepath.Join(final, filepath.FromSlash(member)))
+	if string(got) != "SEALED-VOLUME-MEMBER" {
+		t.Error("the member the ingest landed did not survive the commit unchanged")
+	}
+	if _, err := os.Lstat(filepath.Join(gensDir, proto.BackupPartialDirName(genID))); err == nil {
+		t.Error("the partial directory is still there after the commit")
+	}
+
+	// A `.partial-<generation>` that is not a directory is refused, not
+	// adopted: nothing may make this verb write through a link.
+	genID2 := "20260903T040000Z-cccccccc-full"
+	if err := os.Symlink(t.TempDir(), filepath.Join(gensDir, proto.BackupPartialDirName(genID2))); err != nil {
+		t.Fatal(err)
+	}
+	name2, digest2 := stageArchive(t, staging, "gen-c.sealed", body)
+	if _, err := BackupWrite(context.Background(), m, staging, proto.BackupWriteCmd{
+		PartUUID: partUUID, GenerationID: genID2, StagingName: name2,
+		Digest: digest2, SizeBytes: uint64(len(body)), ManifestJSON: testManifest(proto.BackupScopeFull),
+	}); err == nil {
+		t.Fatal("the write verb adopted a symlink as its partial directory")
+	}
+}
