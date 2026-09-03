@@ -180,15 +180,37 @@ type AppVolumeReport struct {
 	Summary string `json:"summary"`
 	// BlockedBy is the machine-readable form of what holds the rest back.
 	BlockedBy []string `json:"blockedBy,omitempty"`
+
+	// AppEnumeration is what the plan looked at: how many apps are installed,
+	// how many resolved to a tile that classifies its volumes, and which
+	// catalog answered. See the type for why an empty record list needs it.
+	AppEnumeration
+	// Enumerated is true only for a report built from a plan over the
+	// installed-app list. The zero value is a report nobody built, and it is
+	// never complete — "nobody looked" must not be able to render as "nothing
+	// was missed".
+	Enumerated bool `json:"enumerated"`
 }
 
 // Complete reports whether every classified volume in the cluster was captured
 // — which is what Manifest.Complete means and the only thing that earns it.
 //
+// A POSITIVE assertion, in three parts, each of which the manifest states so an
+// operator can check it by hand: the fan-out enumerated the installed apps at
+// all (Enumerated); every one of them resolved to a tile that declares its
+// volumes (AppsResolved == AppsInstalled — an app that did not leaves a record,
+// so this is belt and braces, and cheap); and every record is captured. A
+// cluster with no apps installed passes all three and is complete: nothing
+// was classified, nothing was missed, and the manifest says `appsInstalled:
+// 0` rather than leaving that to be inferred from an empty list.
+//
 // It is a scan of the records rather than `SkippedCount == 0` restated, because
 // the record list is what an operator can check by hand, and the boolean has to
 // be the thing they would arrive at.
 func (r AppVolumeReport) Complete() bool {
+	if !r.Enumerated || r.AppsResolved != r.AppsInstalled {
+		return false
+	}
 	for _, v := range r.Volumes {
 		if !v.Captured {
 			return false
@@ -226,8 +248,15 @@ func AppVolumeFanOutReason() string { return appVolumeFanOutReason }
 // summarize renders what THIS run did, in one sentence, for the job feed and
 // the manifest.
 func summarize(r AppVolumeReport) string {
-	if len(r.Volumes) == 0 {
-		return "No app on this cluster declares a volume classed `critical`, `state` or `bulk`, so there was no app data to capture."
+	switch {
+	case !r.Enumerated:
+		return "The app-volume fan-out did not run for this archive, so nothing here says whether any app data was captured. This is not a complete backup."
+	case r.AppsInstalled == 0:
+		return "No app is installed on this cluster, so there was no app data to capture; the identity set is the whole of it."
+	case len(r.Volumes) == 0:
+		// Every installed app resolved (an unresolved one leaves a record) and
+		// none declared a copied class. The only way here is `cache`-only.
+		return fmt.Sprintf("The %d installed app(s) declare only `cache` volumes, which §4.2 never copies, so there was no app data to capture.", r.AppsInstalled)
 	}
 	if r.Complete() {
 		return fmt.Sprintf("Captured %d of %d classified app volume(s) — every one this cluster has.", r.CapturedCount, len(r.Volumes))
@@ -236,17 +265,20 @@ func summarize(r AppVolumeReport) string {
 		r.CapturedCount, len(r.Volumes), r.SkippedCount)
 }
 
-// NewAppVolumeReport assembles a report from the fan-out's per-volume records.
+// NewAppVolumeReport assembles a report from the fan-out's per-volume records
+// and the enumeration the plan made them from.
 //
 // The counts are derived here, once, rather than incremented at each call site:
 // a CapturedCount that disagreed with the records is the exact failure this
 // structure exists to make impossible.
-func NewAppVolumeReport(records []VolumeRecord, nodesConsulted int) AppVolumeReport {
+func NewAppVolumeReport(enum AppEnumeration, records []VolumeRecord, nodesConsulted int) AppVolumeReport {
 	r := AppVolumeReport{
 		Captured:       []string{},
 		Volumes:        records,
 		NodesConsulted: nodesConsulted,
 		Reason:         appVolumeFanOutReason,
+		AppEnumeration: enum,
+		Enumerated:     true,
 	}
 	if r.Volumes == nil {
 		r.Volumes = []VolumeRecord{}
@@ -282,6 +314,14 @@ func NewAppVolumeReport(records []VolumeRecord, nodesConsulted int) AppVolumeRep
 			"geekdojo/geekdojo-brain#296 ingest endpoint (off-node volumes)",
 		}
 	}
+	return r
+}
+
+// unenumeratedReport is the section an archive gets when no fan-out ran for it.
+// Present, empty, never complete, and its summary says why.
+func unenumeratedReport() AppVolumeReport {
+	r := AppVolumeReport{Captured: []string{}, Volumes: []VolumeRecord{}, Reason: appVolumeFanOutReason}
+	r.Summary = summarize(r)
 	return r
 }
 
@@ -485,11 +525,12 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	// The fan-out already ran, one volume at a time, in its own step. What
 	// arrives here is its finished record — see AppVolumeReport.
 	fanOut := opts.AppVolumes
-	if fanOut.Volumes == nil {
-		// A caller that ran no fan-out at all gets an empty-but-present
-		// section rather than a missing key: "no app volumes" and "nobody
-		// looked" must not render identically.
-		fanOut = NewAppVolumeReport(nil, 0)
+	if !fanOut.Enumerated {
+		// A caller that ran no fan-out at all gets a present section that
+		// SAYS so, and a manifest that is not complete: "no app volumes" and
+		// "nobody looked" must not render identically, and the second cannot
+		// be allowed to earn the boolean.
+		fanOut = unenumeratedReport()
 	}
 	scope := strings.TrimSpace(opts.Scope)
 	if scope == "" {

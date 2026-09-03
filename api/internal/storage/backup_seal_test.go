@@ -339,10 +339,15 @@ func TestAssembleWritesTheManifestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	// No fan-out report was supplied, so nothing was classified and nothing was
-	// missed: the scope is this build's reach and complete is true.
-	if m.Scope != proto.BackupScopeControlplaneLocal || !m.Complete {
+	// No fan-out report was supplied, so nobody enumerated the installed apps:
+	// the scope is this build's reach, and complete is FALSE — an archive
+	// nobody looked at cannot claim nothing was missed. The section is still
+	// present, and says so.
+	if m.Scope != proto.BackupScopeControlplaneLocal || m.Complete {
 		t.Errorf("manifest scope=%q complete=%v", m.Scope, m.Complete)
+	}
+	if m.AppVolumes.Enumerated || m.AppVolumes.Volumes == nil || !strings.Contains(m.AppVolumes.Summary, "did not run") {
+		t.Errorf("appVolumes = %+v; a manifest with no fan-out must say the fan-out did not run", m.AppVolumes)
 	}
 
 	tr := tar.NewReader(&buf)
@@ -430,12 +435,15 @@ func TestAssembleRefusesWithoutASnapshot(t *testing.T) {
 // records, a not-captured volume with no reason, a `complete` that is true
 // while something was missed.
 func TestFanOutReportIsHonest(t *testing.T) {
-	empty := NewAppVolumeReport(nil, 0)
+	empty := NewAppVolumeReport(AppEnumeration{}, nil, 0)
 	if empty.Captured == nil || empty.Volumes == nil {
 		t.Error("nil slices render as `null`, and `null` is not the answer `[]` is")
 	}
 	if !empty.Complete() {
-		t.Error("a cluster with no classified volumes has had every one of them captured")
+		t.Error("a cluster with no apps installed has had every classified volume captured, and the manifest says appsInstalled: 0")
+	}
+	if !strings.Contains(empty.Summary, "No app is installed") {
+		t.Errorf("summary = %q; zero apps must be stated as zero apps, not as zero volumes", empty.Summary)
 	}
 	if empty.Reason == "" {
 		t.Fatal("the report does not carry the standing caveat")
@@ -444,7 +452,7 @@ func TestFanOutReportIsHonest(t *testing.T) {
 		t.Error("the exported reason and the report's reason have drifted apart; every surface must say the same words")
 	}
 
-	r := NewAppVolumeReport([]VolumeRecord{
+	r := NewAppVolumeReport(AppEnumeration{AppsInstalled: 3, AppsResolved: 3}, []VolumeRecord{
 		{App: "vaultwarden", Volume: "vaultwarden-data", Class: "critical", Captured: true, SizeBytes: 10, AppRestored: true},
 		{App: "immich", Volume: "immich-upload", Class: "state", Captured: false, Reason: ReasonOffNode, AppRestored: true},
 		{App: "paperless", Volume: "paperless-data", Class: "state", Captured: false, Reason: "refused", AppRestored: false},
@@ -655,6 +663,61 @@ func TestSealDetectsTruncationAtAChunkBoundary(t *testing.T) {
 		nonce[8] = 1 // claim it is the last chunk
 		if _, err := aead.Open(nil, nonce, body[i*chunk:end], headerBytes); err == nil {
 			t.Fatalf("chunk %d opened as a terminating chunk; truncation would be undetectable", i)
+		}
+	}
+}
+
+// TestFanOutCompleteIsAPositiveAssertion pins what earns `complete: true`: the
+// fan-out enumerated the installed apps, every one resolved to a tile that
+// classifies its volumes, and every classified volume was captured. An empty
+// record list on its own earns nothing — that was the 2026-09-03 e3bench
+// manifest, `complete: true` over one installed app nobody had classified.
+func TestFanOutCompleteIsAPositiveAssertion(t *testing.T) {
+	var nobodyLooked AppVolumeReport
+	if nobodyLooked.Complete() {
+		t.Error("the zero-value report — one nobody built — is complete")
+	}
+	if unenumeratedReport().Complete() {
+		t.Error("the section an archive gets when no fan-out ran is complete")
+	}
+
+	// One installed app, none resolved, no records: the shape the bench
+	// produced. It cannot arise from PlanAppVolumes any more (the unresolved
+	// app leaves a record), and even hand-built it earns nothing.
+	if NewAppVolumeReport(AppEnumeration{AppsInstalled: 1}, nil, 0).Complete() {
+		t.Error("an empty plan over an installed app is complete — this is the bench's exact lie")
+	}
+
+	// Zero apps installed, stated as such: complete, because nothing was
+	// classified and nothing was missed, and appsInstalled: 0 says why.
+	none := NewAppVolumeReport(AppEnumeration{}, nil, 0)
+	if !none.Complete() || !none.Enumerated || none.AppsInstalled != 0 {
+		t.Errorf("a cluster with no apps: complete=%v enumerated=%v installed=%d", none.Complete(), none.Enumerated, none.AppsInstalled)
+	}
+
+	// One app resolved to a tile that declares only `cache`: complete, and
+	// the summary says why there are no records rather than implying nobody
+	// declared anything.
+	cacheOnly := NewAppVolumeReport(AppEnumeration{AppsInstalled: 1, AppsResolved: 1}, nil, 0)
+	if !cacheOnly.Complete() || !strings.Contains(cacheOnly.Summary, "`cache`") {
+		t.Errorf("cache-only cluster: complete=%v summary=%q", cacheOnly.Complete(), cacheOnly.Summary)
+	}
+
+	// The positive case: resolved, captured, consulted.
+	captured := NewAppVolumeReport(AppEnumeration{AppsInstalled: 1, AppsResolved: 1}, []VolumeRecord{
+		{App: "vaultwarden", Volume: "vaultwarden-data", Class: "critical", Captured: true, AppRestored: true},
+	}, 1)
+	if !captured.Complete() {
+		t.Error("one app, one volume, captured — and not complete")
+	}
+	// JSON carries every part of the assertion, so a reader can check it.
+	raw, err := json.Marshal(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"appsInstalled":1`, `"appsResolved":1`, `"enumerated":true`} {
+		if !strings.Contains(string(raw), key) {
+			t.Errorf("manifest JSON lacks %s: %s", key, raw)
 		}
 	}
 }

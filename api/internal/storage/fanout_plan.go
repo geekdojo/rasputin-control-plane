@@ -65,6 +65,23 @@ const (
 		"their backup class (§4.2). Nothing knows which of this app's volumes hold data worth keeping"
 	// ReasonTileWithdrawn: the app names a tile the catalog no longer has.
 	ReasonTileWithdrawn = "was installed from a catalog tile this build no longer ships, so its volumes have no classification to act on"
+	// ReasonTileDeclaresNoVolumes: the tile exists in the catalog in effect and
+	// declares NO volumes. A format, filled with the tile id, the catalog that
+	// answered (TileVolumes.Source) and the tile id again.
+	//
+	// This is the record the 2026-09-03 e3bench run did not have. The plan
+	// found the tile, the tile's `volumes` was empty, the inner loop never ran,
+	// and the app fell out of the manifest without a line — which is
+	// indistinguishable from an app that has no data. tileschema says it in
+	// Tile.Volumes: an empty array "is NOT a promise that the stack has no
+	// volumes", it is what every tile published before §4.2 looks like. So the
+	// app is recorded, per app, exactly like ReasonUnclassified, and the
+	// record names the catalog so an operator can tell "the floor a fresh
+	// cluster boots on" from "the published catalog still has this gap".
+	ReasonTileDeclaresNoVolumes = "was installed from catalog tile `%s`, and that tile as this cluster holds it (catalog %s) declares no volumes. " +
+		"An absent `volumes` array is what every tile published before §4.2's classification looks like — it is not a promise that the app has no data — " +
+		"so nothing knows which of this app's volumes hold data worth keeping, and none was captured. " +
+		"A catalog whose `%s` tile classifies its volumes is needed: Apps → Catalog → CHECK NOW fetches the newest"
 )
 
 // AppVolumeStagePrefix is the directory every captured volume lands under
@@ -211,15 +228,52 @@ func notCaptured(v PlannedVolume, reason string) VolumeRecord {
 	}
 }
 
-// TileVolumes is the catalog lookup the plan needs, narrowed to the one method
-// it calls.
+// TileVolumes is the catalog lookup the plan needs: the tile by id, and a name
+// for the catalog that answered.
 //
-// An interface rather than *catalog.Catalog so a test can plan against a tile
-// set it wrote three lines ago instead of against the shipped catalog — the
-// classification is content, and a planner test that broke every time a tile
-// was re-classified would be testing the content rather than the join.
+// An interface rather than a concrete catalog type so a test can plan against
+// a tile set it wrote three lines ago instead of against the shipped catalog —
+// the classification is content, and a planner test that broke every time a
+// tile was re-classified would be testing the content rather than the join.
+//
+// In production this is *catalogsync.Store, the catalog /api/catalog serves:
+// the verified fetch, or the embedded floor until one succeeds. It is
+// deliberately NOT *catalog.Catalog, the tile set embedded in the binary —
+// that one does not implement Source, and cannot be wired here by accident.
+// The 2026-09-03 e3bench run had it wired there, and its tiles carry no
+// `volumes`, so the plan saw every installed app as volume-less.
 type TileVolumes interface {
 	Get(id string) (tileschema.Tile, bool)
+	// Source names the catalog for the records that have to say which one
+	// answered — "v17 (verified fetch)", "v14 (embedded floor — …)".
+	Source() string
+}
+
+// AppEnumeration is the plan's account of what it LOOKED AT, carried into the
+// manifest beside the per-volume records.
+//
+// It exists so that an empty record list can be read. Zero records with
+// AppsInstalled 0 is a cluster with no apps; zero records with AppsInstalled 1
+// and AppsResolved 0 cannot happen (the unresolved app leaves a record); and a
+// report with no enumeration at all is one nobody built. Before this the three
+// rendered identically, and the middle one shipped as `complete: true`.
+type AppEnumeration struct {
+	// AppsInstalled is how many installed apps the plan enumerated.
+	AppsInstalled int `json:"appsInstalled"`
+	// AppsResolved is how many of them resolved to a tile that declares at
+	// least one volume — the apps the plan could actually classify. Every app
+	// that did not is a not-captured record naming why.
+	AppsResolved int `json:"appsResolved"`
+	// Catalog is TileVolumes.Source: which catalog the tiles came from.
+	Catalog string `json:"catalog,omitempty"`
+}
+
+// AppVolumePlan is §4.5's contents list, resolved: what to stage, in order,
+// every classified volume that will not be, and the enumeration both came from.
+type AppVolumePlan struct {
+	Stage   []PlannedVolume
+	Skipped []VolumeRecord
+	AppEnumeration
 }
 
 // PlanAppVolumes is §4.5's contents list, resolved against what is actually
@@ -249,12 +303,16 @@ type TileVolumes interface {
 // whichever order they are asked for in. Batching them into one stop is a
 // change to that verb, and this fan-out consumes the verb rather than
 // redesigning it.
-func PlanAppVolumes(installed []*apps.App, tiles TileVolumes, controlplaneNodeID string) (stage []PlannedVolume, skipped []VolumeRecord) {
+func PlanAppVolumes(installed []*apps.App, tiles TileVolumes, controlplaneNodeID string) AppVolumePlan {
+	var stage []PlannedVolume
+	var skipped []VolumeRecord
+	enum := AppEnumeration{Catalog: tiles.Source()}
 	self := strings.TrimSpace(controlplaneNodeID)
 	for _, a := range installed {
 		if a == nil {
 			continue
 		}
+		enum.AppsInstalled++
 		tileID := strings.TrimSpace(a.SourceTile)
 		if tileID == "" {
 			skipped = append(skipped, notCaptured(PlannedVolume{
@@ -271,6 +329,17 @@ func PlanAppVolumes(installed []*apps.App, tiles TileVolumes, controlplaneNodeID
 			}, ReasonTileWithdrawn))
 			continue
 		}
+		if len(tile.Volumes) == 0 {
+			// The tile is there and says nothing. Recorded per app, like the
+			// two cases above — the alternative is the loop below running zero
+			// times and the app vanishing, which is what the bench did.
+			skipped = append(skipped, notCaptured(PlannedVolume{
+				AppID: a.ID, AppName: a.Name, TileID: tileID, NodeID: a.TargetNode,
+				Volume: "(unknown — tile declares no volumes)", Class: "unclassified",
+			}, fmt.Sprintf(ReasonTileDeclaresNoVolumes, tileID, enum.Catalog, tileID)))
+			continue
+		}
+		enum.AppsResolved++
 		for _, v := range tile.Volumes {
 			pv := PlannedVolume{
 				AppID: a.ID, AppName: a.Name, TileID: tileID, NodeID: a.TargetNode,
@@ -320,7 +389,7 @@ func PlanAppVolumes(installed []*apps.App, tiles TileVolumes, controlplaneNodeID
 		}
 		return skipped[i].Volume < skipped[j].Volume
 	})
-	return stage, skipped
+	return AppVolumePlan{Stage: stage, Skipped: skipped, AppEnumeration: enum}
 }
 
 // classRank orders the classes by what their loss costs, which is the order a

@@ -359,3 +359,48 @@ func TestApply_EveryTileRefusedIsNotAdopted(t *testing.T) {
 		t.Fatal("the cluster was left with no catalog at all")
 	}
 }
+
+// TestGet_AnswersFromTheCatalogInEffect pins the property the backup fan-out
+// depends on: a tile read through the store is the tile /api/catalog serves —
+// the fetched one once a fetch has succeeded, the floor's until then — never
+// a copy embedded somewhere else in the binary.
+func TestGet_AnswersFromTheCatalogInEffect(t *testing.T) {
+	floor := bundle(14, "vaultwarden")
+	s, _ := newStore(t, &fakeVerifier{}, floor)
+
+	got, ok := s.Get("vaultwarden")
+	if !ok {
+		t.Fatal("the floor's tile is not served before a fetch")
+	}
+	if len(got.Volumes) != 0 {
+		t.Fatalf("the floor tile declares volumes %+v; this fixture predates the field", got.Volumes)
+	}
+	if src := s.Source(); !strings.Contains(src, "v14") || !strings.Contains(src, "embedded floor") {
+		t.Errorf("Source() = %q before any fetch; it must say v14 and that it is the floor", src)
+	}
+	if _, ok := s.Get("no-such-tile"); ok {
+		t.Error("a tile the catalog does not hold was found")
+	}
+
+	fetched := bundle(17, "vaultwarden")
+	fetched.Tiles[0].Tile.Volumes = []tileschema.Volume{{Name: "vaultwarden-data", Backup: tileschema.BackupCritical, Quiesce: tileschema.QuiesceStop}}
+	fetched.Tiles[0].Compose = "services: {}\n"
+	bp, sp := write(t, t.TempDir(), fetched)
+	if err := s.Apply(bp, sp); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	got, ok = s.Get("vaultwarden")
+	if !ok {
+		t.Fatal("the fetched tile is not served after Apply")
+	}
+	if len(got.Volumes) != 1 || got.Volumes[0].Backup != tileschema.BackupCritical {
+		t.Errorf("Get after Apply returned volumes %+v, want the fetched tile's `critical` volume — this is the exact read the backup fan-out makes", got.Volumes)
+	}
+	if got.ComposeYAML != "services: {}\n" {
+		t.Errorf("Get returned compose %q; the tile is served with its compose attached, the same shape /api/catalog/{id} returns", got.ComposeYAML)
+	}
+	if src := s.Source(); src != "v17 (verified fetch)" {
+		t.Errorf("Source() = %q after a fetch", src)
+	}
+}
