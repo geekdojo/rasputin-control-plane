@@ -31,6 +31,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/nameguard"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/proxy"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/quiesce"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
@@ -268,6 +269,45 @@ func main() {
 			}
 			defer func() {
 				for _, sub := range dockerSubs {
+					_ = sub.Unsubscribe()
+				}
+			}()
+
+			// The app-volume staging verbs (design/storage.md §4.3 / §4.7)
+			// go wherever apps are hosted, on the SAME staging root the
+			// backup write verb reads — one derivation, storage.StagingRoot,
+			// so there is one directory to budget, sweep and exclude. Both
+			// docker backends satisfy quiesce.Runtime; the mock is the same
+			// explicit-only mock as above and is never inferred.
+			//
+			// Two §4.7 disciplines run BEFORE the verbs are exposed:
+			//   1. the boot sweep of orphaned staged files (a crash mid-copy
+			//      leaves a `.partial-*` under the root; on a controlplane the
+			//      storage block below sweeps the same root again, harmlessly);
+			//   2. the restart of any app a previous agent process stopped
+			//      for a backup and did not live to start — the watchdog
+			//      surviving the death of the process that armed it.
+			rt, ok := dockerBackend.(quiesce.Runtime)
+			if !ok {
+				log.Fatalf("rasputin-agent: docker backend %s does not implement the quiesce runtime", dockerBackend.Name())
+			}
+			stagingRoot := storage.StagingRoot(stateDir)
+			if err := os.MkdirAll(stagingRoot, 0o700); err != nil {
+				log.Printf("rasputin-agent: backup staging dir %s: %v", stagingRoot, err)
+			}
+			if n, freed := storage.CleanStaging(stagingRoot); n > 0 {
+				log.Printf("rasputin-agent: swept %d orphaned staged file(s) from %s (%d bytes)", n, stagingRoot, freed)
+			}
+			stager := quiesce.New(rt, stagingRoot, quiesce.MarkerDir(stateDir))
+			if n := stager.SweepArmedStops(); n > 0 {
+				log.Printf("rasputin-agent: quiesce: restarted %d app(s) a previous agent left stopped for a backup", n)
+			}
+			qSubs, err := quiesce.RegisterHandlers(nc, nodeID, stager)
+			if err != nil {
+				log.Fatalf("rasputin-agent: register quiesce handlers: %v", err)
+			}
+			defer func() {
+				for _, sub := range qSubs {
 					_ = sub.Unsubscribe()
 				}
 			}()

@@ -562,10 +562,11 @@ func main() {
 	// gets a clean refusal at step 1 rather than a missing workflow.
 	//
 	// SCOPE: every generation this build writes is `identity-only` — the
-	// database, the mesh CA and Headscale state, and NO app data, because no
-	// volume anywhere carries a backup class yet (#293). The saga says so
-	// in its own log lines, its manifest, its ledger row and the generation's
-	// name on the platter.
+	// database, the mesh CA and Headscale state, and NO app data. The catalog
+	// classifies every volume (#293) and the agent can stage a copy of one
+	// (#294), but nothing moves that copy off the node yet (#295, #296) and
+	// the fan-out is not wired to it. The saga says so in its own log lines,
+	// its manifest, its ledger row and the generation's name on the platter.
 	//
 	// The api does NOT decide where the archive is staged, and nothing here
 	// creates a staging directory. The agent on the target node owns that root

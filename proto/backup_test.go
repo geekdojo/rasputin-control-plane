@@ -107,6 +107,8 @@ func TestBackupBudgetsAreInTheReplyGrant(t *testing.T) {
 		"BackupPreflightWork": BackupPreflightWork,
 		"BackupWriteWork":     BackupWriteWork,
 		"BackupPruneWork":     BackupPruneWork,
+		"BackupStageWork":     BackupStageWork,
+		"BackupUnstageWork":   BackupUnstageWork,
 	} {
 		if budget > AgentWorkBudgetMax {
 			t.Errorf("%s (%s) exceeds AgentWorkBudgetMax (%s): the reply grant would expire before the handler answers",
