@@ -9,16 +9,42 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // The copy itself: a volume directory walked into one uncompressed tar under
 // the staging root, with a few substitutions and exclusions the sqlite driver
 // needs. Uncompressed for the same reason the api's identity archive is —
 // the seal is the CPU pass that matters, and it happens on the controlplane.
+//
+// # Nothing here ever follows a symlink, and that is the security property
+//
+// This process is root on the host, and the directory it reads is the
+// host-side mountpoint of a volume whose CONTAINER MAY STILL BE RUNNING —
+// for `sqlite` and `none` the app is up for the whole copy, and even under
+// `stop` the volume holds whatever the app left there. A compromised app
+// can plant a symlink in its own volume at any moment: replace a file the
+// walk has classified but not yet opened with a link to /etc/shadow, another
+// app's volume or the mesh CA key, or swap a directory for a link to /, or
+// plant one in the scratch directory the sqlite snapshot is written to,
+// which the container controls outright. A path-based os.Open follows every
+// one of those, and the host file lands in the archive under an innocent
+// name.
+//
+// So the walk is DIRECTORY-FD RELATIVE, one component at a time: every
+// directory is opened with openat(dirfd, name, O_NOFOLLOW|O_DIRECTORY) and
+// every file with openat(dirfd, name, O_NOFOLLOW), each relative to the
+// already-opened parent, and every opened fd is fstat'd and required to be
+// the kind of thing the walk said it was before a byte is read. A symlink
+// anywhere in a path is ELOOP, not a redirect; a file swapped for something
+// else between stat and open is ErrFileChanged. Sizes come from the fstat of
+// the OPENED fd, so the header and the bytes copied cannot disagree. The
+// snapshot substitute is opened the same way, beneath the same root. There
+// is no path-based open of volume content in this file — see walk_unix.go
+// for the primitives.
 
 // scratchDirName is the directory the sqlite driver asks the container to
 // write snapshots into, INSIDE the volume, because that is the one place a
@@ -35,16 +61,19 @@ const sqliteMagic = "SQLite format 3\x00"
 // it if they were captured alongside.
 var sqliteSidecars = []string{"-wal", "-shm", "-journal"}
 
-// ErrFileChanged is a file that changed size between being sized and being
-// copied. On a live copy that is the window itself showing up; the run fails
-// rather than writing a tar whose member does not match its header.
-var ErrFileChanged = errors.New("quiesce: a file changed size while it was being copied")
+// ErrFileChanged is a file that changed under the copy: a different size
+// than the header was written with, or a different kind of object than the
+// walk classified. On a live copy the first is the window itself showing up;
+// the second is what a planted symlink or a swapped directory looks like
+// from here. Either way the run fails rather than writing a tar whose member
+// does not match its header — or one holding bytes from outside the volume.
+var ErrFileChanged = errors.New("quiesce: a file changed while it was being copied")
 
 // plan is what a first pass over the volume learned.
 type plan struct {
 	bytes   uint64
 	files   int
-	dbs     []string // relative, slash-separated, sorted by the walk
+	dbs     []string // relative, slash-separated, in walk order
 	dbBytes uint64
 }
 
@@ -53,46 +82,54 @@ type plan struct {
 // sixteen bytes of every regular file is cheap next to copying all of them.
 func measure(root string, findDBs bool) (plan, error) {
 	var p plan
-	err := filepath.WalkDir(root, func(abs string, d fs.DirEntry, werr error) error {
-		if werr != nil {
-			return werr
-		}
-		rel, rerr := relSlash(root, abs)
-		if rerr != nil {
-			return rerr
-		}
-		if d.IsDir() {
+	rootDir, err := openRoot(root)
+	if err != nil {
+		return p, err
+	}
+	defer func() { _ = rootDir.Close() }()
+	err = walk(rootDir, "", func(dir *os.File, name, rel string, st *entryStat) error {
+		if st.isDir() {
 			if rel == scratchDirName {
-				return fs.SkipDir
+				return errSkipDir
 			}
 			return nil
 		}
-		info, ierr := d.Info()
-		if ierr != nil || !info.Mode().IsRegular() {
-			return nil //nolint:nilerr // sockets, devices and pipes are skipped, not counted
+		if !st.isRegular() {
+			return nil
 		}
 		p.files++
-		p.bytes += byteCount(info.Size())
-		if findDBs && isSQLite(abs) {
-			p.dbs = append(p.dbs, rel)
-			p.dbBytes += byteCount(info.Size())
+		p.bytes += st.size()
+		if findDBs {
+			isDB, err := sniffSQLite(dir, name)
+			if err != nil {
+				return err
+			}
+			if isDB {
+				p.dbs = append(p.dbs, rel)
+				p.dbBytes += st.size()
+			}
 		}
 		return nil
 	})
 	return p, err
 }
 
-func isSQLite(abs string) bool {
-	f, err := os.Open(abs)
+// sniffSQLite reads the header of dir/name through a no-follow open.
+func sniffSQLite(dir *os.File, name string) (bool, error) {
+	f, _, err := openFileAt(dir, name)
 	if err != nil {
-		return false
+		if errors.Is(err, ErrFileChanged) {
+			// Not a regular file any more; not a database either way.
+			return false, nil
+		}
+		return false, err
 	}
 	defer func() { _ = f.Close() }()
 	var head [len(sqliteMagic)]byte
 	if _, err := io.ReadFull(f, head[:]); err != nil {
-		return false
+		return false, nil //nolint:nilerr // shorter than a header is not a database
 	}
-	return bytes.Equal(head[:], []byte(sqliteMagic))
+	return bytes.Equal(head[:], []byte(sqliteMagic)), nil
 }
 
 // sidecarsOf lists the relative paths of a database's -wal/-shm/-journal.
@@ -126,9 +163,10 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 
 // writeTar walks root into a tar at dst, written through a dot-prefixed
 // partial name and renamed into place. subst maps a relative path to the
-// absolute file to read INSTEAD of it (a snapshot for a database); skip is a
-// set of relative paths to leave out. afterFile, when set, is called after
-// each regular file — the test seam that lets a copy be killed mid-way.
+// relative path (beneath the same root) to read INSTEAD of it — a snapshot
+// for a database; skip is a set of relative paths to leave out. afterFile,
+// when set, is called after each regular file — the test seam that lets a
+// copy be killed mid-way.
 func writeTar(ctx context.Context, root, dst string, subst map[string]string, skip map[string]bool, afterFile func(rel string) error) (tarResult, error) {
 	partial := filepath.Join(filepath.Dir(dst), ".partial-"+filepath.Base(dst))
 	f, err := os.OpenFile(partial, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
@@ -142,65 +180,65 @@ func writeTar(ctx context.Context, root, dst string, subst map[string]string, sk
 			_ = os.Remove(partial)
 		}
 	}()
+	rootDir, err := openRoot(root)
+	if err != nil {
+		return tarResult{}, err
+	}
+	defer func() { _ = rootDir.Close() }()
 
 	h := sha256.New()
 	cw := &countingWriter{w: io.MultiWriter(f, h)}
 	tw := tar.NewWriter(cw)
 	var res tarResult
 
-	err = filepath.WalkDir(root, func(abs string, d fs.DirEntry, werr error) error {
-		if werr != nil {
-			return werr
-		}
+	err = walk(rootDir, "", func(dir *os.File, name, rel string, st *entryStat) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rel, rerr := relSlash(root, abs)
-		if rerr != nil {
-			return rerr
-		}
-		if rel == "." {
-			return nil
-		}
-		if d.IsDir() && rel == scratchDirName {
-			return fs.SkipDir
+		if st.isDir() && rel == scratchDirName {
+			return errSkipDir
 		}
 		if skip[rel] {
 			return nil
 		}
-		info, ierr := d.Info()
-		if ierr != nil {
-			return ierr
-		}
 		switch {
-		case info.IsDir():
-			return writeHeader(tw, info, rel+"/", "")
-		case info.Mode()&fs.ModeSymlink != 0:
-			target, lerr := os.Readlink(abs)
-			if lerr != nil {
-				return lerr
+		case st.isDir():
+			return tw.WriteHeader(st.header(rel+"/", tar.TypeDir, ""))
+		case st.isSymlink():
+			target, err := readlinkAt(dir, name)
+			if err != nil {
+				return err
 			}
-			return writeHeader(tw, info, rel, target)
-		case !info.Mode().IsRegular():
+			return tw.WriteHeader(st.header(rel, tar.TypeSymlink, target))
+		case !st.isRegular():
 			// A socket, a device, a pipe: not state a restore can put back.
 			// Skipped, and the count in the ack says how many regular files
 			// were taken, so what is absent is at least sized.
 			return nil
 		}
-		src := abs
+		var src *os.File
+		var opened *entryStat
 		if sub, ok := subst[rel]; ok {
-			src = sub
-			sinfo, serr := os.Stat(sub)
-			if serr != nil {
-				return fmt.Errorf("snapshot for %s: %w", rel, serr)
+			// The snapshot lives beneath the same root, in a directory the
+			// container wrote. Opened component by component with no
+			// symlink following, like everything else.
+			src, opened, err = openBeneath(rootDir, sub)
+			if err != nil {
+				return fmt.Errorf("snapshot for %s: %w", rel, err)
 			}
-			info = sizedAs{FileInfo: info, size: sinfo.Size()}
+		} else {
+			src, opened, err = openFileAt(dir, name)
+			if err != nil {
+				return fmt.Errorf("%s: %w", rel, err)
+			}
 		}
-		if err := writeFile(tw, info, rel, src); err != nil {
-			return err
+		werr := writeFile(tw, opened, st, rel, src)
+		_ = src.Close()
+		if werr != nil {
+			return werr
 		}
 		res.files++
-		res.plain += byteCount(info.Size())
+		res.plain += opened.size()
 		if afterFile != nil {
 			return afterFile(rel)
 		}
@@ -230,53 +268,32 @@ func writeTar(ctx context.Context, root, dst string, subst map[string]string, sk
 	return res, nil
 }
 
-// sizedAs reports a substitute's size under the original's name, mode and
-// times — the snapshot is written into the tar where the live database was.
-type sizedAs struct {
-	fs.FileInfo
-	size int64
-}
-
-func (s sizedAs) Size() int64 { return s.size }
-
-func writeHeader(tw *tar.Writer, info fs.FileInfo, name, link string) error {
-	hdr, err := tar.FileInfoHeader(info, link)
-	if err != nil {
+// writeFile copies exactly the OPENED file's size in under name, with the
+// walked entry's mode and times. The size is from the fstat of the fd the
+// bytes come from, so header and content cannot disagree by construction; a
+// file that comes up short changed underneath the copy, and a file that grew
+// is captured to its header size, which is the live-copy window doing what
+// the ack says it does.
+func writeFile(tw *tar.Writer, opened, walked *entryStat, name string, src io.Reader) error {
+	hdr := walked.header(name, tar.TypeReg, "")
+	hdr.Size = opened.sizeInt64()
+	if err := tw.WriteHeader(hdr); err != nil {
 		return err
 	}
-	hdr.Name = name
-	hdr.Format = tar.FormatPAX
-	return tw.WriteHeader(hdr)
-}
-
-// writeFile copies exactly info.Size() bytes of src in under name. A file
-// that comes up short changed underneath the copy; a file that grew is
-// captured to the size in its header, which is the live-copy window doing
-// what the ack says it does.
-func writeFile(tw *tar.Writer, info fs.FileInfo, name, src string) error {
-	if err := writeHeader(tw, info, name, ""); err != nil {
-		return err
-	}
-	f, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	n, err := io.CopyN(tw, f, info.Size())
-	if errors.Is(err, io.EOF) || (err == nil && n != info.Size()) {
-		return fmt.Errorf("%w: %s (%d of %d bytes)", ErrFileChanged, name, n, info.Size())
+	n, err := io.CopyN(tw, src, hdr.Size)
+	if errors.Is(err, io.EOF) || (err == nil && n != hdr.Size) {
+		return fmt.Errorf("%w: %s shrank (%d of %d bytes)", ErrFileChanged, name, n, hdr.Size)
 	}
 	return err
 }
 
-// relSlash is the walk's path relative to the root, slash-separated, as the
+// relJoin is the walk's relative path for a child, slash-separated, as the
 // tar names it.
-func relSlash(root, abs string) (string, error) {
-	rel, err := filepath.Rel(root, abs)
-	if err != nil {
-		return "", err
+func relJoin(rel, name string) string {
+	if rel == "" {
+		return name
 	}
-	return filepath.ToSlash(rel), nil
+	return rel + "/" + name
 }
 
 func syncDir(p string) error {
@@ -300,3 +317,19 @@ func byteCount(n int64) uint64 {
 // scratchRel is where a database's snapshot goes, relative to the volume
 // root, mirroring the database's own path under the scratch dir.
 func scratchRel(dbRel string) string { return path.Join(scratchDirName, dbRel) }
+
+// splitRel breaks a slash-separated relative path into components, refusing
+// anything that is not a plain descent — `.`, `..`, an absolute path or an
+// empty component would let a caller name something outside the root.
+func splitRel(rel string) ([]string, error) {
+	if rel == "" || strings.HasPrefix(rel, "/") {
+		return nil, fmt.Errorf("%w: %q is not a relative path", ErrFileChanged, rel)
+	}
+	parts := strings.Split(rel, "/")
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return nil, fmt.Errorf("%w: %q is not a plain descent", ErrFileChanged, rel)
+		}
+	}
+	return parts, nil
+}

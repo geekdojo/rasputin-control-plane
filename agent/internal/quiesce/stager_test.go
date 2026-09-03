@@ -2,6 +2,7 @@ package quiesce
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -822,28 +823,285 @@ func TestSweepIgnoresForeignMarkers(t *testing.T) {
 	}
 }
 
-// A file that shrinks between being sized and being copied fails the run
+// A file that shrinks between being opened and being copied fails the run
 // rather than producing a tar whose member does not match its header. Tested
-// at the writer, because the window is between one stat and one read.
+// at the writer, because the window is between one fstat and one read.
 func TestWriteFileRefusesAFileThatShrank(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "f")
-	if err := os.WriteFile(p, []byte("twelve bytes"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("twelve bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(p)
+	root, err := openRoot(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+	defer func() { _ = root.Close() }()
+	walked, err := lstatAt(root, "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, opened, err := openFileAt(root, "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	// Truncate AFTER the open: the header carries the opened size, the read
+	// comes up short.
+	if err := os.Truncate(filepath.Join(dir, "f"), 1); err != nil {
 		t.Fatal(err)
 	}
 	var sink strings.Builder
 	tw := tar.NewWriter(&sink)
-	err = writeFile(tw, info, "f", p)
-	if !errors.Is(err, ErrFileChanged) {
+	if err := writeFile(tw, opened, walked, "f", f); !errors.Is(err, ErrFileChanged) {
 		t.Fatalf("writeFile on a shrunk file: %v, want ErrFileChanged", err)
 	}
+}
+
+// ----- symlinks: the container-to-host boundary ---------------------------
+//
+// The agent is root on the host and the volume's container may be running
+// while it copies. Nothing a container can plant in its own volume may make
+// the agent read outside it.
+
+// secretOutsideVolume writes a file that must never appear in an archive and
+// returns its path and bytes.
+func secretOutsideVolume(t *testing.T) (string, []byte) {
+	t.Helper()
+	secret := []byte("root:$6$THIS-IS-THE-HOST-SHADOW-FILE")
+	p := filepath.Join(t.TempDir(), "shadow")
+	if err := os.WriteFile(p, secret, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p, secret
+}
+
+func assertNoSecretUnderRoot(t *testing.T, root string, secret []byte) {
+	t.Helper()
+	ents, _ := os.ReadDir(root)
+	for _, e := range ents {
+		b, err := os.ReadFile(filepath.Join(root, e.Name()))
+		if err == nil && bytes.Contains(b, secret) {
+			t.Fatalf("the host secret is in %s", e.Name())
+		}
+	}
+}
+
+// A file the walk has not reached yet is swapped for a symlink to a host
+// file while the copy runs (the `none`/`sqlite` case: the app is up). The
+// walk sees a symlink and records it as one; the host file's bytes are
+// nowhere under the staging root. (The narrower race — swapped between the
+// walk's lstat and the open — is TestOpenFileAtRefusesASymlinkSwappedInAfterTheStat.)
+func TestLiveCopyNeverReadsThroughAFileSwappedForASymlink(t *testing.T) {
+	rt, s := prepared(t)
+	secretPath, secret := secretOutsideVolume(t)
+	vol := rt.volDir("ha", "homeassistant-config")
+	target := filepath.Join(vol, "www", "custom.js")
+	s.afterFile = func(rel string) error {
+		if rel == "configuration.yaml" {
+			if err := os.Remove(target); err != nil {
+				return err
+			}
+			return os.Symlink(secretPath, target)
+		}
+		return nil
+	}
+	ack := s.Stage(context.Background(), stageCmd("ha", "homeassistant-config", "state", "none", "x.tar"))
+	if !ack.OK {
+		// A refusal is also acceptable; what is not is reading through.
+		assertStagingEmpty(t, s.stagingRoot)
+		return
+	}
+	files, links, _ := readTar(t, ack.StagedPath)
+	if _, ok := files["www/custom.js"]; ok {
+		t.Fatal("the swapped-in symlink was archived as a regular file")
+	}
+	if links["www/custom.js"] != secretPath {
+		t.Errorf("the swapped-in symlink was not recorded as a link: %v", links)
+	}
+	assertNoSecretUnderRoot(t, s.stagingRoot, secret)
+}
+
+// The exact race the security review named: the walk has lstat'd a regular
+// file and not yet opened it, and in between it becomes a symlink to a host
+// file. The open must refuse rather than follow.
+func TestOpenFileAtRefusesASymlinkSwappedInAfterTheStat(t *testing.T) {
+	dir := t.TempDir()
+	secretPath, _ := secretOutsideVolume(t)
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("innocent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := openRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	st, err := lstatAt(root, "f")
+	if err != nil || !st.isRegular() {
+		t.Fatalf("lstat before the swap: %v regular=%v", err, st != nil && st.isRegular())
+	}
+	if err := os.Remove(filepath.Join(dir, "f")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secretPath, filepath.Join(dir, "f")); err != nil {
+		t.Fatal(err)
+	}
+	f, _, err := openFileAt(root, "f")
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("openFileAt followed a symlink swapped in after the stat")
+	}
+	if !errors.Is(err, ErrFileChanged) {
+		t.Errorf("err = %v, want ErrFileChanged", err)
+	}
+	// And the same for a directory component swapped for a link: the
+	// no-follow open of the directory refuses, so nothing beneath it is
+	// reached by path.
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "d")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(secretPath), filepath.Join(dir, "d")); err != nil {
+		t.Fatal(err)
+	}
+	if sub, err := openDirAt(root, "d"); err == nil {
+		_ = sub.Close()
+		t.Fatal("openDirAt followed a symlinked directory")
+	}
+	if _, _, err := openBeneath(root, "d/shadow"); err == nil {
+		t.Fatal("openBeneath reached a host file through a symlinked directory")
+	}
+}
+
+// A directory the walk has not reached yet is swapped for a symlink to a host
+// directory. The walk must not descend it.
+func TestLiveCopyRefusesADirectorySwappedForASymlink(t *testing.T) {
+	rt, s := prepared(t)
+	outside := t.TempDir()
+	_, secret := secretOutsideVolume(t)
+	if err := os.WriteFile(filepath.Join(outside, "shadow"), secret, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vol := rt.volDir("ha", "homeassistant-config")
+	s.afterFile = func(rel string) error {
+		if rel == "configuration.yaml" {
+			if err := os.RemoveAll(filepath.Join(vol, "www")); err != nil {
+				return err
+			}
+			return os.Symlink(outside, filepath.Join(vol, "www"))
+		}
+		return nil
+	}
+	ack := s.Stage(context.Background(), stageCmd("ha", "homeassistant-config", "state", "none", "x.tar"))
+	// Either outcome is acceptable EXCEPT reading through the link: the walk
+	// may see a symlink (recorded as one, no descent) or a swap mid-open
+	// (refused). What it must never do is archive outside/shadow.
+	if ack.OK {
+		files, links, _ := readTar(t, ack.StagedPath)
+		if _, ok := files["www/shadow"]; ok {
+			t.Fatal("the walk descended a symlinked directory and archived a host file")
+		}
+		if links["www"] == "" {
+			t.Errorf("www is neither a recorded symlink nor a refusal: %v", links)
+		}
+		assertNoSecretUnderRoot(t, s.stagingRoot, secret)
+		return
+	}
+	assertStagingEmpty(t, s.stagingRoot)
+}
+
+// A symlink that was in the volume all along (the `stop` case: nothing can
+// race, but the link is there) is archived AS a symlink; its target's bytes
+// are not read.
+func TestStopCopyRecordsAPlantedSymlinkWithoutFollowingIt(t *testing.T) {
+	rt, s := prepared(t)
+	secretPath, secret := secretOutsideVolume(t)
+	vol := rt.volDir("ha", "homeassistant-config")
+	if err := os.Symlink(secretPath, filepath.Join(vol, "shadow-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(secretPath), filepath.Join(vol, "dir-link")); err != nil {
+		t.Fatal(err)
+	}
+	ack := s.Stage(context.Background(), stageCmd("ha", "homeassistant-config", "state", "stop", "x.tar"))
+	if !ack.OK {
+		t.Fatalf("ack = %+v", ack)
+	}
+	files, links, _ := readTar(t, ack.StagedPath)
+	if links["shadow-link"] != secretPath || links["dir-link"] != filepath.Dir(secretPath) {
+		t.Errorf("planted links not recorded as links: %v", links)
+	}
+	if _, ok := files["shadow-link"]; ok {
+		t.Fatal("a planted symlink was archived as a regular file")
+	}
+	for name := range files {
+		if strings.HasPrefix(name, "dir-link/") {
+			t.Fatalf("the walk descended a symlinked directory: %s", name)
+		}
+	}
+	assertNoSecretUnderRoot(t, s.stagingRoot, secret)
+}
+
+// The scratch directory is written by the container, so the container
+// controls what is at the snapshot path. A symlink there is refused, and the
+// host file it points at is never read.
+func TestSQLiteRefusesAPlantedSymlinkWhereTheSnapshotShouldBe(t *testing.T) {
+	rt, s := prepared(t)
+	secretPath, secret := secretOutsideVolume(t)
+	vol := rt.volDir("ha", "homeassistant-config")
+	// A runtime whose "snapshot" is the container planting a symlink at the
+	// destination instead of writing a database there.
+	planter := &plantingRuntime{fakeRuntime: rt, plant: func(dstRel string) error {
+		dst := filepath.Join(vol, filepath.FromSlash(dstRel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return err
+		}
+		return os.Symlink(secretPath, dst)
+	}}
+	s.rt = planter
+	ack := s.Stage(context.Background(), stageCmd("ha", "homeassistant-config", "state", "sqlite", "x.tar"))
+	if ack.OK {
+		t.Fatalf("a snapshot that was a symlink was archived: %+v", ack)
+	}
+	if !strings.Contains(ack.Detail, "snapshot for home-assistant_v2.db") {
+		t.Errorf("detail = %q", ack.Detail)
+	}
+	assertStagingEmpty(t, s.stagingRoot)
+	assertNoSecretUnderRoot(t, s.stagingRoot, secret)
+
+	// And a symlink planted as the scratch DIRECTORY itself, pointing at a
+	// host directory that happens to hold a file of the right name.
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "home-assistant_v2.db"), secret, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	planter.plant = func(string) error {
+		_ = os.RemoveAll(filepath.Join(vol, scratchDirName))
+		return os.Symlink(outside, filepath.Join(vol, scratchDirName))
+	}
+	ack = s.Stage(context.Background(), stageCmd("ha", "homeassistant-config", "state", "sqlite", "y.tar"))
+	if ack.OK {
+		t.Fatalf("a snapshot reached through a symlinked scratch dir was archived: %+v", ack)
+	}
+	assertNoSecretUnderRoot(t, s.stagingRoot, secret)
+	if _, err := os.ReadFile(filepath.Join(outside, "home-assistant_v2.db")); err != nil {
+		t.Errorf("the host-side cleanup of the scratch dir followed the symlink and removed a host file: %v", err)
+	}
+}
+
+// plantingRuntime is a fakeRuntime whose SnapshotSQLite does what a hostile
+// container would.
+type plantingRuntime struct {
+	*fakeRuntime
+	plant func(dstRel string) error
+}
+
+func (p *plantingRuntime) SnapshotSQLite(_ context.Context, _, _, _, dstRel string) (string, error) {
+	return "hostile", p.plant(dstRel)
 }
 
 // fileDigest hashes a staged file the way the writer did, so the ack can be

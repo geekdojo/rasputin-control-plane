@@ -192,7 +192,7 @@ func (s *Stager) Stage(ctx context.Context, cmd proto.BackupStageVolumeCmd) (ack
 				return s.fail(ack, fmt.Errorf("%w: snapshot %s: %v", ErrQuiesceFailed, dbRel, err))
 			}
 			ack.SnapshotTool = tool
-			subst[dbRel] = filepath.Join(scratch, filepath.FromSlash(dbRel))
+			subst[dbRel] = scratchRel(dbRel)
 			for _, sc := range sidecarsOf(dbRel) {
 				skip[sc] = true
 			}

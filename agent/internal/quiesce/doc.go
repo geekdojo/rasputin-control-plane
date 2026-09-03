@@ -93,6 +93,22 @@
 // reply if need be, and the ack says AppRestored=false — which the fan-out
 // must treat as louder than a failed backup, because it is worse than one.
 //
+// # The copy never follows a symlink
+//
+// This process is root on the host and reads the host-side mountpoint of a
+// volume whose container may be running. A compromised app can plant a
+// symlink in its own volume — swap a file for a link to /etc/shadow or the
+// mesh CA key between the walk seeing it and the copy opening it, swap a
+// directory for a link to /, or plant one in the scratch directory the
+// snapshot is written to, which the container controls outright. So the
+// walk is directory-fd relative with O_NOFOLLOW on every component, every
+// opened fd is fstat'd and required to be what the walk said it was, and
+// sizes come from the opened fd. A symlink anywhere in a path is a refusal,
+// never a redirect; a symlink that was there all along is archived as a
+// symlink. The snapshot substitute is opened beneath the same root the same
+// way, so what the container wrote there is read only if it is a regular
+// file reachable without following a link. See tarwalk.go and walk_unix.go.
+//
 // # Staging discipline (§4.7)
 //
 // Same root as the write verb (storage.StagingRoot — one derivation, the
