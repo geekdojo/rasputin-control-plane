@@ -11,7 +11,8 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// RegisterHandlers wires the two staging verbs and returns the subscriptions.
+// RegisterHandlers wires the staging verbs — stage, transfer, unstage — and
+// returns the subscriptions.
 // Registered wherever the docker handlers are — compute and controlplane
 // agents — because those are the nodes that host app volumes; the
 // backup-target storage verbs live on the controlplane and storage roles and
@@ -23,7 +24,7 @@ import (
 // could act on — the app is down — is over before the ack goes out or is
 // reported in it.
 func RegisterHandlers(nc *nats.Conn, nodeID string, s *Stager) ([]*nats.Subscription, error) {
-	subs := make([]*nats.Subscription, 0, 2)
+	subs := make([]*nats.Subscription, 0, 3)
 	bind := func(subj string, fn nats.MsgHandler) error {
 		sub, err := nc.Subscribe(subj, fn)
 		if err != nil {
@@ -71,6 +72,33 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, s *Stager) ([]*nats.Subscrip
 		}
 		if !ack.AppRestored {
 			log.Printf("rasputin-agent: quiesce: APP %s IS NOT BACK after staging %s: %s", cmd.AppID, cmd.Volume, ack.RestoreDetail)
+		}
+		bus.Respond(m, ack)
+	}); err != nil {
+		return subs, err
+	}
+
+	if err := bind(proto.BackupTransferSubject(nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupTransferCmd
+		if err := json.Unmarshal(m.Data, &cmd); err != nil {
+			bus.Respond(m, proto.BackupTransferAck{
+				OK: false, Refusal: proto.StorageRefusalBackendError, Detail: err.Error(),
+			})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), proto.BackupTransferWork)
+		defer cancel()
+		// The credential is NOT in this line, or any line. The destination
+		// is: an operator debugging an upload needs to know where it went.
+		log.Printf("rasputin-agent: transfer: SEAL+UPLOAD app=%s name=%q volume=%s staging=%s member=%s generation=%s destination=%s",
+			cmd.AppID, cmd.AppName, cmd.Volume, cmd.StagingName, cmd.Member, cmd.GenerationID, cmd.Destination)
+		ack := s.Transfer(ctx, cmd)
+		if ack.OK {
+			log.Printf("rasputin-agent: transfer: landed %s as %s (%d sealed bytes, sha256 %s)",
+				cmd.StagingName, cmd.Member, ack.SealedBytes, ack.SealedDigest)
+		} else {
+			log.Printf("rasputin-agent: transfer: %s NOT landed refusal=%s destination-code=%s: %s",
+				cmd.StagingName, ack.Refusal, ack.DestinationCode, ack.Detail)
 		}
 		bus.Respond(m, ack)
 	}); err != nil {

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -387,11 +388,17 @@ func ReadHeader(r io.Reader) (Header, []byte, error) {
 // §4.7's peak at one staged volume on the hosting node. Result is valid only
 // after the reader has returned io.EOF (or Err, after a failure).
 type SealedStream struct {
-	pr     *io.PipeReader
-	done   chan struct{}
-	result *SealResult
-	err    error
+	pr        *io.PipeReader
+	done      chan struct{}
+	result    *SealResult
+	err       error
+	abandoned atomic.Bool
 }
+
+// ErrStreamAbandoned is Result's answer when the READER closed the stream
+// before the seal finished — a transport that gave up mid-body. It is not a
+// seal failure and callers must not report it as one.
+var ErrStreamAbandoned = errors.New("backupxfer: the sealed stream was closed by its reader before the seal finished")
 
 // NewSealedStream starts sealing src to publicKey. Read the returned stream
 // to EOF, then call Result.
@@ -415,13 +422,17 @@ func (s *SealedStream) Read(p []byte) (int, error) { return s.pr.Read(p) }
 
 // Close abandons the stream; the sealing goroutine ends on its next write.
 func (s *SealedStream) Close() error {
-	return s.pr.CloseWithError(errors.New("sealed stream closed by the reader"))
+	s.abandoned.Store(true)
+	return s.pr.CloseWithError(ErrStreamAbandoned)
 }
 
 // Result waits for the seal to finish and returns its facts. Called by the
 // transport after EOF, so the wait is already over; called early, it blocks.
 func (s *SealedStream) Result() (*SealResult, error) {
 	<-s.done
+	if s.err != nil && s.abandoned.Load() {
+		return nil, ErrStreamAbandoned
+	}
 	return s.result, s.err
 }
 
