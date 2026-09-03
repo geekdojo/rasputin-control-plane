@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -51,11 +52,14 @@ const (
 	// volume on an SD card is genuinely slow. A cluster whose app data cannot
 	// be staged inside two hours has a backup that does not fit its weekly
 	// window, and the record of which volumes were dropped is the signal.
-	runFanOutTimeout   = 2 * time.Hour
+	runFanOutTimeout   = runFanOutBudget
 	runAssembleTimeout = 20 * time.Minute
-	runSealTimeout     = 20 * time.Minute
-	runWriteTimeout    = proto.BackupWriteWork + 90*time.Second
-	runPruneTimeout    = proto.BackupPruneWork + rpcSlack
+	// runFanOutBudget is the same number, named, because the fan-out quotes it
+	// back to an operator when it runs out of it.
+	runFanOutBudget = 2 * time.Hour
+	runSealTimeout  = 20 * time.Minute
+	runWriteTimeout = proto.BackupWriteWork + 90*time.Second
+	runPruneTimeout = proto.BackupPruneWork + rpcSlack
 )
 
 // RunConfig is the environment a backup run executes in.
@@ -717,10 +721,20 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			return nil, err
 		}
 		volsPath := ""
+		var volsFile *os.File
 		if fan.VolsStagingName != "" {
 			if volsPath, err = stagedPath(sc, fan.VolsStagingName); err != nil {
 				return nil, err
 			}
+			// Opened HERE, immediately after stagedPath, and handed to Assemble
+			// as a reader. Every staged file this saga opens is opened within
+			// sight of the two checks that bound it — see the G304 rows in
+			// .github/sast-register.tsv, whose trip-wire is exactly a staged
+			// path built by any other route.
+			if volsFile, err = os.Open(volsPath); err != nil {
+				return nil, fmt.Errorf("open the staged app volumes: %w", err)
+			}
+			defer func() { _ = volsFile.Close() }()
 		}
 		// The whole payload is known now, so the source-side guard can finally
 		// size the run for what it actually is rather than for the identity set
@@ -751,7 +765,7 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			KeyID:        tgt.KeyID,
 			Now:          time.Now().UTC(),
 			AppVolumes:   fan.Report,
-			VolumesTar:   volsPath,
+			Volumes:      readerOrNil(volsFile),
 			Scope:        tgt.Scope,
 		})
 		if cerr := f.Close(); cerr != nil && aerr == nil {
@@ -1324,4 +1338,18 @@ func appsLeftDownMessage(apps []string) string {
 		"if it is still down. design/storage.md §4.7 treats an app left down by a backup as worse than a failed backup, "+
 		"which is why this run ends red",
 		strings.ToUpper(subject), strings.Join(apps, ", "))
+}
+
+// readerOrNil keeps a nil *os.File from becoming a non-nil io.Reader.
+//
+// The classic Go trap: a typed nil in an interface is not nil, so
+// `AssembleOptions.Volumes = (*os.File)(nil)` would pass copyVolumeMembers'
+// nil check and then panic on the first Read. One helper rather than an
+// if-statement at the call site, because the call site is where it would be
+// forgotten.
+func readerOrNil(f *os.File) io.Reader {
+	if f == nil {
+		return nil
+	}
+	return f
 }

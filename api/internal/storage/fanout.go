@@ -50,6 +50,13 @@ import (
 // remaining volumes are still worth having, and the agent's watchdog is already
 // retrying), but it ends the run FAILED with the app named.
 
+// stageRPCBudget is how long ONE stage verb may take: the agent's own work
+// budget plus room for the round trip and the marshal, the same shape every
+// other agent step in this saga uses. The api must outwait the agent or it
+// gives up on a handler that is about to answer — and for this verb, on a
+// handler that has an app STOPPED.
+const stageRPCBudget = proto.BackupStageWork + 90*time.Second
+
 // requester is the one method the fan-out needs from NATS, named so the
 // orchestration below can be exercised without a bus.
 type requester interface {
@@ -83,6 +90,17 @@ type fanOutOpts struct {
 	Now time.Time
 	// Log writes to the job feed.
 	Log func(level, msg string)
+}
+
+// budgetAllows reports whether what is left of the step's deadline could hold
+// another volume. A context with no deadline always allows one — the step
+// always has one in the saga, and a caller without one has said it will wait.
+func (o fanOutOpts) budgetAllows(ctx context.Context) bool {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Until(deadline) > stageRPCBudget
 }
 
 func (o fanOutOpts) log(level, msg string) {
@@ -128,6 +146,24 @@ func runFanOut(ctx context.Context, o fanOutOpts) (AppVolumeReport, uint64, erro
 
 	var volumeBytes, largest uint64
 	for i, pv := range o.Plan {
+		// The phase's own budget, checked BEFORE each volume rather than
+		// discovered mid-copy. Being cut off by a step timeout with an app
+		// stopped is the one shape §4.7's restart contract exists to keep off
+		// the normal path — the agent's watchdog would bring it back, but a
+		// backstop that fires every week is not a backstop. So a volume that
+		// would not fit in what is left is RECORDED as not captured, with the
+		// budget named, and the phase ends cleanly.
+		if !o.budgetAllows(ctx) {
+			for _, rest := range o.Plan[i:] {
+				records = append(records, notCaptured(rest, fmt.Sprintf(
+					"the run's %s app-volume budget was exhausted before this volume was reached. Volumes are staged one at a time "+
+						"and each may take up to %s; a cluster whose app data cannot be staged inside the budget needs a longer one, "+
+						"or fewer volumes classed `critical`/`state`", runFanOutBudget, proto.BackupStageWork)))
+			}
+			o.log("warn", fmt.Sprintf("app-volume fan-out: out of time after %d of %d volume(s); the rest are recorded as not captured",
+				i, len(o.Plan)))
+			break
+		}
 		rec, size := o.stageOne(ctx, i, pv, tw, volumeBytes, largest)
 		records = append(records, rec)
 		if rec.Captured {
@@ -214,7 +250,13 @@ func (o fanOutOpts) stageOne(ctx context.Context, i int, pv PlannedVolume, tw *t
 		// find it in a downtime number afterwards.
 		o.log("warn", fmt.Sprintf("stopping %s to copy %s consistently — the app is unavailable for the length of the copy", pv.AppName, pv.Volume))
 	}
-	msg, err := o.NATS.RequestWithContext(ctx, proto.BackupStageVolumeSubject(o.NodeID), cmd)
+	// Each stage gets its OWN deadline, derived from the agent's budget rather
+	// than from what is left of the phase's. Sharing the phase's would let one
+	// slow volume consume the budget for every volume after it, and the failure
+	// would look like an RPC timeout rather than like the disk being slow.
+	stageCtx, cancel := context.WithTimeout(ctx, stageRPCBudget)
+	defer cancel()
+	msg, err := o.NATS.RequestWithContext(stageCtx, proto.BackupStageVolumeSubject(o.NodeID), cmd)
 	if err != nil {
 		// No ack, so nothing is known about the app's state. The agent's
 		// watchdog is armed before the stop and fires on a lost reply and on a
@@ -317,7 +359,13 @@ func (o fanOutOpts) unstage(ctx context.Context, name string) {
 	if err != nil {
 		return
 	}
-	msg, err := o.NATS.RequestWithContext(ctx, proto.BackupUnstageSubject(o.NodeID), cmd)
+	// Its own deadline too, and deliberately NOT the caller's: unstage is the
+	// call that gives the space back, and a phase that has run out of time is
+	// exactly when the space matters most. context.WithoutCancel keeps a
+	// cancelled phase from skipping its own cleanup.
+	unstageCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proto.BackupUnstageWork+rpcSlack)
+	defer cancel()
+	msg, err := o.NATS.RequestWithContext(unstageCtx, proto.BackupUnstageSubject(o.NodeID), cmd)
 	if err != nil {
 		o.log("warn", fmt.Sprintf("could not ask %s to remove the staged copy %s: %v — it will be swept at the end of this run", o.NodeID, name, err))
 		return
@@ -360,11 +408,17 @@ func refusalReason(nodeID string, refusal proto.StorageRefusal, detail string) s
 // copyVolumeMembers copies the fan-out's tar into the archive member by member,
 // and refuses an archive whose manifest would over-claim.
 //
+// It takes an OPEN READER rather than a path, deliberately. The only safe way
+// to name a staged file is stagedPath, which checks the agent-reported root and
+// the api-minted name at the join; a function that took a path would be a
+// second route to a file open, reachable by any caller of Assemble, with the
+// control two call frames away. The caller opens it where the check lives.
+//
 // The final check is the one that matters: every volume the manifest says was
 // captured must actually be a member here. A manifest that named a member the
 // archive does not contain would be discovered on restore day, which is the one
 // day it must not be.
-func copyVolumeMembers(tw *tar.Writer, volsTar string, report AppVolumeReport) error {
+func copyVolumeMembers(tw *tar.Writer, vols io.Reader, report AppVolumeReport) error {
 	want := map[string]bool{}
 	for _, v := range report.Volumes {
 		if v.Captured {
@@ -377,16 +431,11 @@ func copyVolumeMembers(tw *tar.Writer, volsTar string, report AppVolumeReport) e
 	if len(want) == 0 {
 		return nil
 	}
-	if strings.TrimSpace(volsTar) == "" {
-		return errors.New("internal: the manifest records captured app volumes and the fan-out produced no tar to take them from")
+	if vols == nil {
+		return errors.New("internal: the manifest records captured app volumes and the fan-out handed over no tar to take them from")
 	}
-	f, err := os.Open(volsTar)
-	if err != nil {
-		return fmt.Errorf("open staged app volumes: %w", err)
-	}
-	defer func() { _ = f.Close() }()
 
-	tr := tar.NewReader(f)
+	tr := tar.NewReader(vols)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {

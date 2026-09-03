@@ -372,11 +372,16 @@ type AssembleOptions struct {
 	// staging a volume STOPS AN APP and that is not something an archive writer
 	// should be doing behind its caller.
 	AppVolumes AppVolumeReport
-	// VolumesTar is the tar of captured volume members the fan-out built, whose
-	// members are copied into this archive verbatim. Empty when nothing was
+	// Volumes is the OPEN tar of captured volume members the fan-out built,
+	// whose members are copied into this archive verbatim. Nil when nothing was
 	// captured, and Assemble then produces exactly what it produced before app
 	// volumes existed.
-	VolumesTar string
+	//
+	// A reader rather than a path: the only safe way to name a staged file is
+	// stagedPath, which checks the agent-reported root and the api-minted name
+	// at the join, and this option would otherwise be a second route to a file
+	// open with the control two call frames away.
+	Volumes io.Reader
 	// Scope is the run's scope, minted at step 1 and stamped into the
 	// generation id. Passed in rather than read from a constant here so the id
 	// on the platter and the scope inside the seal can never be two different
@@ -577,7 +582,7 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	// already on the same disk and leaves Assemble producing a complete,
 	// self-contained tar, which is what every caller and every future restore
 	// reads it as.
-	if err := copyVolumeMembers(tw, opts.VolumesTar, m.AppVolumes); err != nil {
+	if err := copyVolumeMembers(tw, opts.Volumes, m.AppVolumes); err != nil {
 		return nil, err
 	}
 	if err := tw.Close(); err != nil {
