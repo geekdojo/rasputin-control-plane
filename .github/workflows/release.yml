@@ -67,9 +67,9 @@ jobs:
     needs: codeql
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # check-latest: fetch the newest 1.26.x rather than reusing whatever
           # patch the runner image happens to have cached. On 2026-08-13 the
@@ -87,7 +87,7 @@ jobs:
       # Node for the web UI build (build-release.sh runs npm ci + next
       # build and packs ui/out into the api tarballs). Version pin
       # rationale lives in ci.yml's frontend job.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -145,7 +145,7 @@ jobs:
       # Bench dispatch (publish=false) → just keep the artifacts for inspection.
       - name: Upload artifacts (dispatch dry-run)
         if: ${{ github.event_name == 'workflow_dispatch' && !(inputs.publish == true || inputs.publish == 'true') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ steps.ver.outputs.version }}
           path: dist/

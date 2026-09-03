@@ -58,11 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Toolchains cached the same way ci.yml does, so the agent's gate
       # checks (go test, npm run build) don't burn turns on cold installs.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # check-latest: fetch the newest 1.26.x rather than reusing whatever
           # patch the runner image happens to have cached. On 2026-08-13 the
@@ -76,7 +76,7 @@ jobs:
           # cache, so adding a module cannot silently leave it out.
           cache-dependency-path: "*/go.sum"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
