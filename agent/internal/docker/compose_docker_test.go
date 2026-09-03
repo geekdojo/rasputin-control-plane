@@ -95,7 +95,7 @@ func newLiveBackend(t *testing.T, appID string) (*ComposeBackend, string) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		if _, _, err := c.Stop(ctx, appID); err != nil {
+		if _, _, err := c.Stop(ctx, appID, false); err != nil {
 			t.Logf("cleanup: stop %s: %v", appID, err)
 		}
 	})

@@ -185,7 +185,7 @@ func (errBackend) Name() string { return "err" }
 func (errBackend) Deploy(_ context.Context, _, _, _ string) (proto.AppStatus, string, error) {
 	return proto.AppStatusFailed, "boom", errOh
 }
-func (errBackend) Stop(_ context.Context, _ string) (proto.AppStatus, string, error) {
+func (errBackend) Stop(_ context.Context, _ string, _ bool) (proto.AppStatus, string, error) {
 	return proto.AppStatusFailed, "boom", errOh
 }
 func (errBackend) Status(_ context.Context, _ string) (proto.AppStatus, []proto.AppServiceStatus, error) {
@@ -236,7 +236,7 @@ func TestComposeBackend_NameAndProjectName(t *testing.T) {
 
 func TestComposeBackend_StopWhenNoComposeFile(t *testing.T) {
 	c := composeBackendWithoutLookPath(t)
-	status, _, err := c.Stop(context.Background(), "never-deployed")
+	status, _, err := c.Stop(context.Background(), "never-deployed", false)
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -288,5 +288,87 @@ func TestRegisterHandlers_BackendErrorsAckFalse(t *testing.T) {
 	request(t, nc, proto.AppStatusSubject("node-1"), proto.AppStatusCmd{AppID: "a"}, &stat)
 	if stat.Status != proto.AppStatusUnknown {
 		t.Errorf("status: %q", stat.Status)
+	}
+}
+
+// The deleteVolumes flag on docker.stop reaches the backend, and its absence
+// is false — an api older than the field, or an operator who left the box
+// unticked, gets a plain `down` (geekdojo/geekdojo-brain#399).
+func TestRegisterHandlers_StopCarriesDeleteVolumes(t *testing.T) {
+	nc, b := newRegistered(t)
+	var dack proto.AppDeployAck
+	request(t, nc, proto.AppDeploySubject("node-1"), proto.AppDeployCmd{
+		AppID: "app-1", Name: "x", ComposeYAML: "services: {}\n",
+	}, &dack)
+
+	// A cmd with no deleteVolumes key at all — the pre-#399 wire shape.
+	msg, err := nc.Request(proto.AppStopSubject("node-1"), []byte(`{"appId":"app-1"}`), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack proto.AppStopAck
+	if err := json.Unmarshal(msg.Data, &ack); err != nil || !ack.OK {
+		t.Fatalf("stop: %v %+v", err, ack)
+	}
+	st, err := b.loadState("app-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.VolumesDeleted {
+		t.Fatal("a stop with no deleteVolumes key must not delete volumes")
+	}
+
+	request(t, nc, proto.AppStopSubject("node-1"), proto.AppStopCmd{AppID: "app-1", DeleteVolumes: true}, &ack)
+	if !ack.OK {
+		t.Fatalf("stop -v: %+v", ack)
+	}
+	st, _ = b.loadState("app-1")
+	if !st.VolumesDeleted {
+		t.Fatal("deleteVolumes:true did not reach the backend")
+	}
+}
+
+// The orphan-volume verbs are registered only for a backend that can answer
+// them: the compose backend has them, the mock does not.
+func TestRegisterHandlers_VolumeVerbsOnlyWithAReaper(t *testing.T) {
+	// Mock: no reaper, no subscription — a request times out with no reply.
+	nc, _ := newRegistered(t)
+	if _, err := nc.Request(proto.AppVolumesListSubject("node-1"), []byte(`{}`), 300*time.Millisecond); err == nil {
+		t.Fatal("the mock backend must not answer docker.volumes.list")
+	}
+
+	// Compose backend with a scripted daemon: both verbs answer.
+	nc2 := startNATS(t)
+	f := scriptedDocker()
+	cb := newFakeBackend(t, f)
+	subs, err := RegisterHandlers(nc2, "node-2", cb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+	var list proto.AppVolumesListAck
+	request(t, nc2, proto.AppVolumesListSubject("node-2"), proto.AppVolumesListCmd{}, &list)
+	if !list.OK || len(list.Volumes) != 4 {
+		t.Fatalf("list: %+v", list)
+	}
+	var rm proto.AppVolumesRemoveAck
+	request(t, nc2, proto.AppVolumesRemoveSubject("node-2"), proto.AppVolumesRemoveCmd{
+		Names: []string{orphanDB, liveData}, LiveAppIDs: []string{liveULID},
+	}, &rm)
+	if !rm.OK || len(rm.Removed) != 1 || rm.Removed[0] != orphanDB || len(rm.Refused) != 1 {
+		t.Fatalf("remove: %+v", rm)
+	}
+	// Bad JSON is a refusal, not a hang.
+	msg, err := nc2.Request(proto.AppVolumesRemoveSubject("node-2"), []byte("nope"), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bad proto.AppVolumesRemoveAck
+	if err := json.Unmarshal(msg.Data, &bad); err != nil || bad.OK {
+		t.Fatalf("bad cmd: %v %+v", err, bad)
 	}
 }

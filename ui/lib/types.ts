@@ -383,6 +383,85 @@ export interface CatalogTile {
   composeYaml?: string;
 }
 
+// ----- App volumes (geekdojo/geekdojo-brain#399) ----------------------------
+
+// VolumeCapture is when a volume was last captured into a backup generation
+// that is still on the target. Absent (null) on the wire means never.
+export interface VolumeCapture {
+  generationId: string;
+  at: string;
+  runJobId?: string;
+}
+
+// AppVolume is one of an installed app's volumes as the uninstall prompt lists
+// it: the tile's compose name, docker's name for it, its §4.2 class, and its
+// backup state.
+export interface AppVolume {
+  name: string;
+  dockerName: string;
+  backup: 'critical' | 'state' | 'cache' | 'bulk' | string;
+  quiesce?: string;
+  lastCaptured: VolumeCapture | null;
+}
+
+// AppVolumesResponse is GET /api/apps/{id}/volumes.
+export interface AppVolumesResponse {
+  appId: string;
+  appName: string;
+  tileId?: string;
+  // Which catalog classified the volumes — the same string the catalog status
+  // reports.
+  catalog?: string;
+  // false: the volumes could not be listed (custom app, tile not in the live
+  // catalog, no live catalog). `note` says which.
+  classified: boolean;
+  note?: string;
+  // Why every volume reads "never", when that is the case.
+  backupNote?: string;
+  volumes: AppVolume[];
+}
+
+// OrphanVolume is a rasp_<appId>_* volume on a node whose appId has no row in
+// the apps ledger — data an earlier uninstall left behind.
+export interface OrphanVolume {
+  nodeId: string;
+  name: string;
+  appId: string;
+  volume: string;
+  sizeBytes: number;
+  createdAt: string;
+  inUse: boolean;
+  // From the backup manifest, when one ever recorded this volume; the app row
+  // is gone, so the manifest is the only place its name and class survive.
+  appName?: string;
+  tileId?: string;
+  backup?: string;
+  lastCaptured: VolumeCapture | null;
+}
+
+// OrphanVolumesResponse is GET /api/volumes/orphans.
+export interface OrphanVolumesResponse {
+  volumes: OrphanVolume[];
+  nodesAsked: number;
+  unreachable: { nodeId: string; reason: string }[];
+  backupNote?: string;
+}
+
+// VolumeRefusal is one name the reclaim declined, with the reason.
+export interface VolumeRefusal {
+  name: string;
+  reason: string;
+}
+
+// ReclaimResponse is POST /api/volumes/orphans/reclaim.
+export interface ReclaimResponse {
+  nodeId: string;
+  ok: boolean;
+  detail?: string;
+  removed: string[];
+  refused: VolumeRefusal[];
+}
+
 // ----- Updates ------------------------------------------------------------
 
 export type UpdateSlot = 'a' | 'b' | 'unknown';

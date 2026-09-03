@@ -1,6 +1,7 @@
 package apps
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -15,14 +16,24 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// DeploySpec is the spec body of an app.deploy job (and, by alias, app.stop /
-// app.delete — all three are keyed only by appId).
+// DeploySpec is the spec body of an app.deploy job and of app.stop — both are
+// keyed only by appId. Decoded strictly: a field this saga does not know is a
+// refusal, which is what keeps app.delete's deleteVolumes from ever meaning
+// anything to a stop or a deploy.
 type DeploySpec struct {
 	AppID string `json:"appId"`
 }
 
-// DeleteSpec is the spec body of an app.delete job. Same shape as DeploySpec.
-type DeleteSpec = DeploySpec
+// DeleteSpec is the spec body of an app.delete job.
+type DeleteSpec struct {
+	AppID string `json:"appId"`
+	// DeleteVolumes is the operator's answer to "Delete volumes?" on the
+	// uninstall confirmation (geekdojo/geekdojo-brain#399). Absent is false:
+	// the app's named volumes stay on the node and the app row goes, which is
+	// what every uninstall did before the question existed. True carries to
+	// the agent as `compose down -v`, scoped to the app's own compose project.
+	DeleteVolumes bool `json:"deleteVolumes,omitempty"`
+}
 
 // DeployWorkflow drives the deploy saga:
 //
@@ -147,12 +158,16 @@ type LeafRemover func(appID string) error
 // go when it's reflashed / the app never returns).
 func deleteLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		app, err := loadApp(sc, store, inv)
+		spec, err := parseDeleteSpec(sc.Spec)
+		if err != nil {
+			return nil, err
+		}
+		app, err := loadAppByID(sc, store, inv, spec.AppID)
 		if err != nil {
 			// Node gone/de-registered: nothing to tear down on it. Let delete
 			// proceed, but still clean the CP-side leaf dir if we can name the app.
 			sc.Log("warn", "skip leaf teardown: "+err.Error())
-			if spec, perr := parseSpec(sc.Spec); perr == nil && removeLeaf != nil {
+			if removeLeaf != nil {
 				_ = removeLeaf(spec.AppID)
 			}
 			return nil, nil
@@ -185,13 +200,25 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 // target node (docker compose down), THEN remove the api's ledger row. This is
 // what makes "delete" actually tear down containers instead of orphaning them.
 //
-//  1. stop   — if the node is online, RPC docker.stop (compose down); this must
+//  1. stop   — if the node is online, RPC docker.stop (compose down, or
+//     compose down -v when the spec's deleteVolumes is set); this must
 //     succeed, else the saga fails and the row stays (no silent orphan
 //     on a reachable node — the user can retry). If the node is offline
 //     or de-registered, we can't reach it: log a warning and proceed to
 //     remove the record (delete should still work on a dead node), with
-//     the caveat that a container may reappear if that node returns.
+//     the caveat that a container may reappear if that node returns —
+//     UNLESS deleteVolumes is set, in which case the step refuses naming
+//     the node, because data the operator asked to destroy would
+//     otherwise be left behind as an orphan they believe is gone.
 //  2. remove — delete the ledger row + emit the `deleted` change event.
+//
+// Ordering, and the failure between the two steps (geekdojo/geekdojo-brain#399):
+// with deleteVolumes the volumes are gone at the end of step 1, and if step 2
+// then fails the app row remains with no data behind it. That is accepted:
+// an app with no data is recoverable by reinstall, and the saga is retryable
+// (deleteStop treats a missing compose file as stopped and says the volumes
+// were not touched). The reverse ordering — row first, volumes second — is
+// the failure mode this issue exists to fix: data with no owner.
 func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.delete",
@@ -569,8 +596,8 @@ func computeNodeStatus(lastSeen time.Time) proto.NodeStatus {
 
 func parseSpec(raw json.RawMessage) (*DeploySpec, error) {
 	var spec DeploySpec
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		return nil, fmt.Errorf("invalid spec: %w", err)
+	if err := decodeStrict(raw, &spec); err != nil {
+		return nil, err
 	}
 	if spec.AppID == "" {
 		return nil, errors.New("appId is required")
@@ -578,17 +605,52 @@ func parseSpec(raw json.RawMessage) (*DeploySpec, error) {
 	return &spec, nil
 }
 
+// parseDeleteSpec decodes an app.delete spec. Strict for the same reason the
+// HTTP layer is: the spec is persisted and rendered, and the one field that
+// destroys data must be the one this saga declared, spelled the way it
+// declared it — a misspelled `deleteVolume` is refused, not silently false.
+func parseDeleteSpec(raw json.RawMessage) (*DeleteSpec, error) {
+	var spec DeleteSpec
+	if err := decodeStrict(raw, &spec); err != nil {
+		return nil, err
+	}
+	if spec.AppID == "" {
+		return nil, errors.New("appId is required")
+	}
+	return &spec, nil
+}
+
+// decodeStrict unmarshals raw into v refusing unknown fields.
+func decodeStrict(raw json.RawMessage, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("invalid spec: %w", err)
+	}
+	return nil
+}
+
+// loadApp is the deploy/stop sagas' loader: a STRICT DeploySpec, then the app
+// and its node. Strict because this is where an app.stop spec smuggling
+// app.delete's deleteVolumes is refused — the field means nothing to a stop,
+// and "means nothing" has to be "is refused", not "is quietly dropped".
 func loadApp(sc *jobs.StepCtx, store *Store, inv *inventory.Store) (*App, error) {
 	spec, err := parseSpec(sc.Spec)
 	if err != nil {
 		return nil, err
 	}
-	app, err := store.Get(sc.Ctx, spec.AppID)
+	return loadAppByID(sc, store, inv, spec.AppID)
+}
+
+// loadAppByID loads an app and validates its target node. The kind-specific
+// parser has already run; this is the half every saga shares.
+func loadAppByID(sc *jobs.StepCtx, store *Store, inv *inventory.Store, appID string) (*App, error) {
+	app, err := store.Get(sc.Ctx, appID)
 	if err != nil {
 		return nil, fmt.Errorf("get app: %w", err)
 	}
 	if app == nil {
-		return nil, fmt.Errorf("app %q not found", spec.AppID)
+		return nil, fmt.Errorf("app %q not found", appID)
 	}
 	node, err := inv.Get(sc.Ctx, app.TargetNode)
 	if err != nil {
@@ -740,7 +802,7 @@ func stopPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 // on an unreachable one it warns and lets the delete proceed (best-effort).
 func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		spec, err := parseSpec(sc.Spec)
+		spec, err := parseDeleteSpec(sc.Spec)
 		if err != nil {
 			return nil, err
 		}
@@ -758,6 +820,15 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		node, _ := inv.Get(sc.Ctx, app.TargetNode)
 		online := node != nil && computeNodeStatus(node.LastSeen) == proto.StatusOnline
 		if !online {
+			if spec.DeleteVolumes {
+				// The operator asked for the data to go, and the node holding
+				// it cannot be reached. Removing the row anyway would leave the
+				// volumes behind as orphans while the operator believes they
+				// were deleted — the one thing #399 exists to prevent. Refuse,
+				// name the node, keep the row: uninstall without deleting
+				// volumes is still available, and so is retrying later.
+				return nil, fmt.Errorf("node %q is unreachable, so its volumes cannot be deleted; uninstall without deleting volumes, or retry when the node is back", app.TargetNode)
+			}
 			// Can't reach the node to stop it. Delete should still work (a user
 			// expects "delete" to remove the record), but warn loudly: if that
 			// node returns, its container may reappear until reconciled.
@@ -765,12 +836,16 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 			return json.Marshal(map[string]string{"appId": app.ID, "stop": "skipped-unreachable"})
 		}
 
-		sc.Log("info", fmt.Sprintf("stopping %q on %s before delete", app.Name, app.TargetNode))
+		if spec.DeleteVolumes {
+			sc.Log("info", fmt.Sprintf("stopping %q on %s and DELETING its volumes before delete", app.Name, app.TargetNode))
+		} else {
+			sc.Log("info", fmt.Sprintf("stopping %q on %s before delete (volumes kept)", app.Name, app.TargetNode))
+		}
 		now := time.Now().UTC()
 		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusStopping, "", now)
 		emitChange(nc, app.ID, proto.AppStopping, proto.AppStatusStopping, "", now)
 
-		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID})
+		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID, DeleteVolumes: spec.DeleteVolumes})
 		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)
 		if err != nil {
 			fctx, cancel := detachCtx(sc.Ctx)
@@ -793,8 +868,12 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 			_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusFailed, detail, now)
 			return nil, errors.New(detail)
 		}
-		sc.Log("info", "stopped")
-		return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok"})
+		if spec.DeleteVolumes {
+			sc.Log("info", "stopped; volumes deleted")
+			return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok", "volumes": "deleted"})
+		}
+		sc.Log("info", "stopped; volumes kept")
+		return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok", "volumes": "kept"})
 	}
 }
 
@@ -802,7 +881,7 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 // a missing row is treated as already-removed.
 func deleteRemove(store *Store, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		spec, err := parseSpec(sc.Spec)
+		spec, err := parseDeleteSpec(sc.Spec)
 		if err != nil {
 			return nil, err
 		}

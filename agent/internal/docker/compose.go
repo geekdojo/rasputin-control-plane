@@ -23,6 +23,11 @@ import (
 type ComposeBackend struct {
 	mu  sync.Mutex
 	dir string
+	// exec and sizeOf are the docker CLI and the volume sizer the orphan-volume
+	// verbs (volumes.go) use. nil means the real ones; tests inject fakes so
+	// the refusal rules can be exercised without a daemon.
+	exec   dockerExec
+	sizeOf func(mountpoint string) (uint64, error)
 }
 
 // NewComposeBackend constructs the real backend. dir is the per-agent state
@@ -85,15 +90,29 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 	return status, "", nil
 }
 
-func (c *ComposeBackend) Stop(ctx context.Context, appID string) (proto.AppStatus, string, error) {
+func (c *ComposeBackend) Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, err := os.Stat(c.composePath(appID)); errors.Is(err, os.ErrNotExist) {
+		if deleteVolumes {
+			// No compose file means compose cannot resolve the project's
+			// volumes to remove them, and pretending otherwise would let an
+			// operator believe data was deleted that is still on the disk.
+			// The volumes, if any, are exactly what the orphan path lists.
+			return proto.AppStatusStopped, "no compose file on disk — volumes were NOT deleted; if any exist they will appear as orphans", nil
+		}
 		return proto.AppStatusStopped, "no compose file on disk", nil
 	}
-	out, err := c.run(ctx, appID, "down")
+	label := "docker compose down"
+	if deleteVolumes {
+		label = "docker compose down -v"
+	}
+	out, err := c.run(ctx, appID, composeDownArgs(deleteVolumes)...)
 	if err != nil {
-		return proto.AppStatusFailed, formatCmdErr("docker compose down", out, err), err
+		return proto.AppStatusFailed, formatCmdErr(label, out, err), err
+	}
+	if deleteVolumes {
+		return proto.AppStatusStopped, "containers and volumes removed", nil
 	}
 	return proto.AppStatusStopped, "", nil
 }
@@ -153,6 +172,22 @@ func composeArgs(composePath, project string, args ...string) []string {
 // template), so there is no version floor to worry about here.
 func composeUpArgs() []string {
 	return []string{"up", "-d", "--remove-orphans", "--quiet-pull"}
+}
+
+// composeDownArgs is the `down` invocation Stop uses.
+//
+// `-v` is the ONLY difference between an uninstall that keeps an app's data and
+// one that destroys it, and it is passed through here rather than inline so a
+// test can assert which one the flag produces. Compose scopes `down -v` to the
+// project's own named volumes (and its anonymous ones) — it cannot reach a
+// volume another project created, and it cannot be handed a name — which is
+// what makes this the safe way to delete an app's data. Keep it that way: do
+// not add a code path that removes a volume by name here.
+func composeDownArgs(deleteVolumes bool) []string {
+	if deleteVolumes {
+		return []string{"down", "-v"}
+	}
+	return []string{"down"}
 }
 
 // maxDetailBytes caps the compose output we attach to a failed task. Nothing
