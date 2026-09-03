@@ -26,7 +26,7 @@ import (
 // Every generation this build writes is `identity-only`
 // (proto.BackupScopeIdentityOnly): the controlplane's database, the mesh CA and
 // Headscale state, and NO app data — because no volume anywhere carries a
-// backup class yet (#292/#293 unbuilt). An archive that omits app data is not
+// backup class yet (#293 unbuilt). An archive that omits app data is not
 // the backup a user assumes they have, so no response below can be rendered
 // without the fact being in it: the run rows carry `scope` and
 // `appVolumesCaptured`, and the two summary endpoints carry the prose as well.

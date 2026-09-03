@@ -13,7 +13,7 @@
 //
 // Every generation this build writes contains the control-plane's identity —
 // the database, the mesh CA, Headscale state — and NO app data, because no
-// volume anywhere carries a backup class yet (#292/#293 unbuilt). A Vaultwarden
+// volume anywhere carries a backup class yet (#293 unbuilt). A Vaultwarden
 // vault is exactly what §4.2 classes `critical`, and it is not in the archive.
 //
 // A user who sees a green "backed up 2 hours ago" and nothing else will believe

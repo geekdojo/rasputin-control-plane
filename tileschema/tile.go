@@ -174,6 +174,31 @@ type Tile struct {
 	// bundle. Read it through DeclaredPrivilege rather than dereferencing.
 	Privilege *Privilege `json:"privilege,omitempty"`
 
+	// Volumes classifies every data volume the tile's stack declares — what
+	// losing it would cost, and what it takes to copy it consistently
+	// (storage.md §4.2, §4.3).
+	//
+	// Every entry MUST carry both fields; there is no default for either, and
+	// ValidateTile refuses a volume missing one. The point of the refusal is
+	// stated in backup.go: a default is silently correct for the seventeen
+	// tiles where it does not matter and silently wrong for the one where it
+	// does, so an unanswered question stops the publish rather than acquiring
+	// an answer nobody chose.
+	//
+	// An EMPTY array is a tile that declares no volumes, and it is a legal
+	// shape — every tile published before this field existed is one, and so is
+	// a genuinely stateless app. What it is NOT is a promise that the stack has
+	// no volumes: this contract classifies what a tile DECLARES, and reconciling
+	// a declaration against the volumes its compose actually creates needs a
+	// derived, signature-covered fact the publisher does not extract yet. That
+	// is the catalog-side half, the same split as the privilege declaration
+	// (#198 contract / #199 publisher lint).
+	//
+	// `omitempty`, so a tile with nothing to declare does not emit an empty
+	// array into every published bundle — the same byte-stability reasoning
+	// that made Privilege a pointer.
+	Volumes []Volume `json:"volumes,omitempty"`
+
 	// DeployBudgetSeconds is how long the agent may spend bringing THIS tile up
 	// before the install is called failed. Absent (0) means the control plane's
 	// default, which is what almost every tile should say.

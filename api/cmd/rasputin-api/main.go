@@ -563,7 +563,7 @@ func main() {
 	//
 	// SCOPE: every generation this build writes is `identity-only` — the
 	// database, the mesh CA and Headscale state, and NO app data, because no
-	// volume anywhere carries a backup class yet (#292/#293). The saga says so
+	// volume anywhere carries a backup class yet (#293). The saga says so
 	// in its own log lines, its manifest, its ledger row and the generation's
 	// name on the platter.
 	//

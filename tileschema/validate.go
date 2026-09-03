@@ -96,6 +96,14 @@ func ValidateTile(t Tile) error {
 			t.DeployBudgetSeconds, DeployBudgetMinSeconds, DeployBudgetMaxSeconds)
 	}
 
+	// Volume classification is authored metadata, so it is checked here for the
+	// same reason the privilege tier is: a PREVIEW tile ships no compose and
+	// never reaches ValidateTileSafety, and an unclassified volume should
+	// surface at publish rather than on the day the tile flips to available.
+	if err := validateVolumes(t.Volumes); err != nil {
+		return err
+	}
+
 	webPorts := 0
 	for i, p := range t.Ports {
 		if p.Container < 1 || p.Container > 65535 {
@@ -143,6 +151,79 @@ func ValidateTile(t Tile) error {
 		return fmt.Errorf("exposureDefault %q requires exactly one web port to expose (found %d)", t.ExposureDefault, webPorts)
 	}
 
+	return nil
+}
+
+// validateVolumes enforces storage.md §4.2: every volume a tile declares
+// carries a backup class, and §4.3: it carries a quiesce strategy too. Both
+// from closed enums, neither with a default.
+//
+// THE MESSAGES ARE THE FEATURE. A tile author who omits a class is not reading
+// this file — they are reading one line of CI output — so every refusal names
+// the volume by index AND by name (so a tile with a dozen volumes says WHICH
+// one), names the field, and prints the legal set. "there is no default" is
+// said out loud rather than left to be inferred from the absence of one,
+// because the first thing anyone tries on a required-field error is to find
+// out what it defaults to.
+func validateVolumes(volumes []Volume) error {
+	seen := make(map[string]bool, len(volumes))
+	for i, v := range volumes {
+		name := strings.TrimSpace(v.Name)
+		if name == "" {
+			return fmt.Errorf("volumes[%d]: name is required — it must match the volume the compose stack declares", i)
+		}
+		if seen[name] {
+			return fmt.Errorf("volumes[%d] %q: duplicate volume name — a classification attached to an ambiguous name is attached to nothing", i, name)
+		}
+		seen[name] = true
+
+		// Absent and empty are the same case on purpose. Both decode to "",
+		// and an empty string is exactly the value a half-finished tile
+		// carries; letting it through would reintroduce the default by the
+		// back door.
+		if strings.TrimSpace(v.Backup) == "" {
+			return fmt.Errorf("volumes[%d] %q: backup is required and has no default — declare one of %s",
+				i, name, legalValues(BackupClasses))
+		}
+		if !ValidBackupClass[v.Backup] {
+			return fmt.Errorf("volumes[%d] %q: backup %q is not one of %s",
+				i, name, v.Backup, legalValues(BackupClasses))
+		}
+		if strings.TrimSpace(v.Quiesce) == "" {
+			return fmt.Errorf("volumes[%d] %q: quiesce is required and has no default — declare one of %s (%q suits most apps; the engine-aware dumps are for the few where a brief outage is harmful)",
+				i, name, legalValues(QuiesceStrategies), QuiesceStop)
+		}
+		if !ValidQuiesce[v.Quiesce] {
+			return fmt.Errorf("volumes[%d] %q: quiesce %q is not one of %s",
+				i, name, v.Quiesce, legalValues(QuiesceStrategies))
+		}
+
+		// --- The one cross-field rule, and the reason it is only one. ---
+		//
+		// §4.3 observes that `none` is what `cache` AND `bulk` volumes take in
+		// the current catalog. Only half of that is an invariant.
+		//
+		// `cache` is: §4.2 says a cache volume is NEVER copied, so a quiesce
+		// strategy on one describes work that cannot happen. It is the same
+		// shape as the tls-without-web refusal above — a field qualifying an
+		// operation the tile has just said it does not perform — and it fails
+		// the same way if allowed, by reading to a reviewer as protection that
+		// is not there. Refusing it is cheap and the fix is one word.
+		//
+		// `bulk` is NOT, and is deliberately left free. A bulk volume IS
+		// copied once its app opts in, so a `stop` on a media library the app
+		// writes continuously is a legitimate thing for an author to declare.
+		// §4.3's table describes how today's eighteen tiles came out, which is
+		// an observation about the catalog and not a property of the class;
+		// promoting it to a rule would refuse a correct future tile to enforce
+		// a pattern nothing depends on. The schema's job here is to make the
+		// author answer, not to grade the answer — except where the answer
+		// contradicts itself.
+		if v.Backup == BackupCache && v.Quiesce != QuiesceNone {
+			return fmt.Errorf("volumes[%d] %q: backup %q is never copied, so quiesce %q describes work that never runs — declare quiesce %q, or reclassify the volume if it does need backing up",
+				i, name, BackupCache, v.Quiesce, QuiesceNone)
+		}
+	}
 	return nil
 }
 
