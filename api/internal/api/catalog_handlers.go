@@ -32,18 +32,14 @@ func (s *Server) effectiveTiles() []catalog.Tile {
 	return out
 }
 
+// effectiveTile is one tile from the catalog in effect. The lookup lives on
+// the store so this handler and the backup fan-out cannot resolve a tile id
+// two different ways.
 func (s *Server) effectiveTile(id string) (catalog.Tile, bool) {
 	if s.catalogStore == nil {
 		return s.catalog.Get(id)
 	}
-	for _, bt := range s.catalogStore.Current().Tiles {
-		if bt.Tile.ID == id {
-			t := bt.Tile
-			t.ComposeYAML = bt.Compose
-			return t, true
-		}
-	}
-	return catalog.Tile{}, false
+	return s.catalogStore.Get(id)
 }
 
 // GET /api/catalog — list every curated tile in display order.

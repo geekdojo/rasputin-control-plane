@@ -121,6 +121,46 @@ func (s *Store) Current() tileschema.Bundle {
 	return s.current
 }
 
+// Get returns one tile from the catalog in effect, with its compose attached.
+//
+// This is the lookup /api/catalog/{id} performs and the one the backup
+// fan-out joins installed apps against — the SAME lookup, deliberately. The
+// 2026-09-03 e3bench run had the fan-out reading the tile set embedded in the
+// binary while /api/catalog served a verified v17 whose tiles carried the
+// volume classifications the fan-out needed; the two disagreed, and a
+// `critical` volume vanished from a manifest stamped complete. A lookup that
+// lives here cannot be wired to the wrong object.
+func (s *Store) Get(id string) (tileschema.Tile, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, bt := range s.current.Tiles {
+		if bt.Tile.ID == id {
+			t := bt.Tile
+			t.ComposeYAML = bt.Compose
+			return t, true
+		}
+	}
+	return tileschema.Tile{}, false
+}
+
+// Source names the catalog in effect for a record that has to say which one
+// answered: "v17 (verified fetch)" while a fetched bundle is live, or
+// "v14 (embedded floor — no verified catalog has been fetched)" before one is.
+//
+// The provenance travels with the version on purpose. A backup manifest that
+// says a tile "declares no volumes" is read weeks later, and whether that was
+// the published catalog or the floor a fresh cluster boots on is the
+// difference between "the tile needs classifying" and "this cluster has never
+// reached the catalog".
+func (s *Store) Source() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.fetched {
+		return fmt.Sprintf("v%d (verified fetch)", s.current.Version)
+	}
+	return fmt.Sprintf("v%d (embedded floor — no verified catalog has been fetched)", s.current.Version)
+}
+
 // State reports what the operator needs to answer "which catalog am I on, and
 // is that because a fetch worked or because nothing ever has".
 func (s *Store) State() (version int, fromFetch bool, note string) {

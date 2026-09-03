@@ -333,7 +333,7 @@ type runHarnessOpts struct {
 	// an api that cannot enumerate at all — and only the test for that refusal
 	// should reach it.
 	apps  []*apps.App
-	tiles fakeTiles
+	tiles TileVolumes
 	// noAppSource leaves RunConfig.Apps and .Tiles nil, for the step-1 refusal.
 	noAppSource bool
 	// appsErr makes the installed-app list fail.

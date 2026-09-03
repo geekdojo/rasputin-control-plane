@@ -29,7 +29,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog/floor"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
@@ -551,6 +550,30 @@ func main() {
 	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
+	// App catalog (ADR-0006). The floor embedded in this build is what a
+	// cluster has before it has ever completed a verified fetch; the poller
+	// (started further down, once the server exists) replaces it with the
+	// newest signed catalog it can verify. Resolution has no third case, so
+	// nothing here merges the two.
+	//
+	// Built HERE, ahead of the backup workflow, because the backup fan-out
+	// reads it: this store is the catalog /api/catalog serves, and the
+	// fan-out must join installed apps against THAT — not against the tile
+	// set embedded in the binary. On e3bench 2026-09-03 the fan-out was wired
+	// to catalog.MustLoad(), whose tiles carry no `volumes`, while the store
+	// served a verified v17 that classified Vaultwarden's; the run recorded no
+	// app volumes and stamped the archive complete.
+	//
+	// A floor that does not parse is a BUILD defect — every cluster from this
+	// image would inherit it — so it is fatal rather than degraded.
+	catalogFloor, err := floor.Load()
+	if err != nil {
+		log.Fatalf("rasputin-api: %v", err)
+	}
+	catalogStore, err := catalogsync.New(dataDir, catalogsync.NewVerifier(filepath.Join(trustDir, "root-ca.pem")), catalogFloor)
+	if err != nil {
+		log.Fatalf("rasputin-api: catalog store: %v", err)
+	}
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.
@@ -598,8 +621,14 @@ func main() {
 		// volumes. Both required — step 1 refuses a run that cannot enumerate
 		// them rather than writing an archive that would silently contain no
 		// app data.
+		//
+		// Tiles is the LIVE catalog — the same store /api/catalog serves from,
+		// fetched bundle or floor — never catalog.MustLoad(). The embedded
+		// tile set is a second copy of the catalog that predates the volume
+		// classifications, and a fan-out reading it sees every app as
+		// volume-less; see the catalogStore comment above.
 		Apps:  appsStore,
-		Tiles: catalog.MustLoad(),
+		Tiles: catalogStore,
 	}))
 	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
 	// bmc.configure is registered after NewServer below — it needs the
@@ -1043,21 +1072,9 @@ func main() {
 	srv.SetReleaseDownloadBase(envOr("RASPUTIN_RELEASE_DOWNLOAD_BASE", "https://github.com"))
 	log.Printf("rasputin-api: update channel = %s (direct from source repos)", releaseChannel)
 
-	// App catalog (ADR-0006). The floor embedded in this build is what a
-	// cluster has before it has ever completed a verified fetch; the poller
-	// replaces it with the newest signed catalog it can verify. Resolution has
-	// no third case, so nothing here merges the two.
-	//
-	// A floor that does not parse is a BUILD defect — every cluster from this
-	// image would inherit it — so it is fatal rather than degraded.
-	catalogFloor, err := floor.Load()
-	if err != nil {
-		log.Fatalf("rasputin-api: %v", err)
-	}
-	catalogStore, err := catalogsync.New(dataDir, catalogsync.NewVerifier(filepath.Join(trustDir, "root-ca.pem")), catalogFloor)
-	if err != nil {
-		log.Fatalf("rasputin-api: catalog store: %v", err)
-	}
+	// App catalog polling (ADR-0006). catalogStore itself is built above,
+	// before the backup workflow registers, because the fan-out reads it; the
+	// poller replaces its floor with the newest signed catalog it can verify.
 	catalogPoller := catalogsync.NewPoller(
 		catalogsync.NewFetcher(
 			envOr("RASPUTIN_CATALOG_REPO", ""),
