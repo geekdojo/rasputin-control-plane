@@ -138,6 +138,9 @@ type reclaimResponse struct {
 	Detail  string                   `json:"detail,omitempty"`
 	Removed []string                 `json:"removed"`
 	Refused []proto.AppVolumeRefusal `json:"refused"`
+	// Error is set on a 400 so the UI's generic error path, which reads
+	// `error`, shows the refusals rather than a bare status code.
+	Error string `json:"error,omitempty"`
 }
 
 // GET /api/apps/{id}/volumes
@@ -285,10 +288,15 @@ func (s *Server) handleReclaimOrphanVolumes(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	if len(refused) > 0 {
+		reasons := make([]string, 0, len(refused))
+		for _, rf := range refused {
+			reasons = append(reasons, rf.Name+": "+rf.Reason)
+		}
 		writeJSON(w, http.StatusBadRequest, reclaimResponse{
 			NodeID: node.ID, OK: false,
 			Detail:  "refused: nothing was removed",
 			Removed: []string{}, Refused: refused,
+			Error: "refused, nothing was removed — " + strings.Join(reasons, "; "),
 		})
 		return
 	}

@@ -1,19 +1,23 @@
 'use client';
 
-import { ClipboardList, ExternalLink, Package, Play, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
+import { ClipboardList, Database, ExternalLink, Package, Play, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   deleteApp,
   deployApp,
+  getAppVolumes,
   getCatalogTile,
   getSetupState,
   listApps,
+  listOrphanVolumes,
   openAppsWS,
+  reclaimOrphanVolumes,
   setAppExposure,
   stopApp,
 } from '../../../lib/api';
-import type { App, CatalogTile } from '../../../lib/types';
+import type { App, AppVolumesResponse, CatalogTile, OrphanVolume, OrphanVolumesResponse } from '../../../lib/types';
+import { formatBytes, timeAgo } from '../../../lib/volumes';
 import { appAccess, preferredAppUrl, type AppAccess } from '../../../lib/appurl';
 import {
   Badge,
@@ -35,7 +39,7 @@ import {
   tdStyle,
   thStyle,
 } from '../../../components/kit';
-import { ConfirmModal } from '../../../components/ConfirmModal';
+import { UninstallAppModal, type UninstallVolumeRow } from '../../../components/UninstallAppModal';
 import { ACCENT, MONO } from '../../../components/ui-theme';
 
 // Fixed column widths so the table doesn't reflow as per-row action buttons
@@ -83,6 +87,14 @@ export default function AppsPage() {
   // nothing to click, and automation that auto-dismisses it aborts the delete
   // without a trace.
   const [pendingDelete, setPendingDelete] = useState<App | null>(null);
+  // The uninstall prompt's facts (#399): the app's volumes by class and when
+  // each was last backed up. null while loading; the prompt's confirm waits.
+  const [deleteInfo, setDeleteInfo] = useState<AppVolumesResponse | null>(null);
+  // Volumes earlier uninstalls left behind, and the one group the operator is
+  // reclaiming right now.
+  const [orphans, setOrphans] = useState<OrphanVolumesResponse | null>(null);
+  const [pendingReclaim, setPendingReclaim] = useState<OrphanGroup | null>(null);
+  const [reclaimNote, setReclaimNote] = useState<string | null>(null);
   // Cluster id seeds the app-access hostname (<app>.<cluster-id>.internal). ''
   // until the fetch lands and '' on a dev box — appAccess falls back to
   // "rasputin" then, matching the api's baseDomainFor.
@@ -91,6 +103,9 @@ export default function AppsPage() {
   useEffect(() => {
     const refreshApps = () => listApps().then(setApps).catch((e) => setErr(String(e)));
     refreshApps();
+    // Orphans are a slower question (the agent sizes each volume), asked once
+    // per page load and after every reclaim — not on the 20s poll.
+    listOrphanVolumes().then(setOrphans).catch(() => setOrphans(null));
     getSetupState().then((s) => setClusterId(s.clusterId ?? '')).catch(() => {});
     // WS drives instant updates; the onOpen callback re-syncs on every
     // (re)connect so a dropped socket can't leave the list stale.
@@ -112,7 +127,15 @@ export default function AppsPage() {
 
   async function handle(action: 'deploy' | 'stop' | 'delete', app: App) {
     if (action === 'delete') {
+      setDeleteInfo(null);
       setPendingDelete(app);
+      getAppVolumes(app.id)
+        .then(setDeleteInfo)
+        .catch((e) =>
+          // The prompt still opens, with the reason the facts are missing —
+          // never a silent "no volumes".
+          setDeleteInfo({ appId: app.id, appName: app.name, classified: false, note: `Could not read this app's volumes: ${String(e)}`, volumes: [] })
+        );
       return;
     }
     setBusy(app.id);
@@ -127,17 +150,37 @@ export default function AppsPage() {
     }
   }
 
-  async function confirmDelete(app: App) {
+  async function confirmDelete(app: App, deleteVolumes: boolean) {
     setBusy(app.id);
     setErr(null);
     try {
       // Async: the stop → remove saga emits a `deleted` event; the WS refresh
       // drops the row once the container is actually torn down.
-      await deleteApp(app.id);
+      await deleteApp(app.id, { deleteVolumes });
+      // A keep-volumes uninstall creates orphans; show them once the row goes.
+      if (!deleteVolumes) setTimeout(() => listOrphanVolumes().then(setOrphans).catch(() => {}), 5_000);
     } catch (e) {
       setErr(String(e));
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function confirmReclaim(group: OrphanGroup) {
+    setBusy(group.key);
+    setReclaimNote(null);
+    try {
+      const res = await reclaimOrphanVolumes(group.nodeId, group.volumes.map((v) => v.name));
+      const parts: string[] = [];
+      if (res.removed.length) parts.push(`Removed ${res.removed.length} volume(s) on ${res.nodeId}.`);
+      for (const r of res.refused) parts.push(`${r.name}: ${r.reason}`);
+      if (res.detail) parts.push(res.detail);
+      setReclaimNote(parts.join(' '));
+    } catch (e) {
+      setReclaimNote(String(e));
+    } finally {
+      setBusy(null);
+      listOrphanVolumes().then(setOrphans).catch(() => {});
     }
   }
 
@@ -193,16 +236,47 @@ export default function AppsPage() {
         )}
       </PageBody>
 
+      {orphans && (orphans.volumes.length > 0 || orphans.unreachable.length > 0) && (
+        <OrphanedVolumes
+          orphans={orphans}
+          busy={busy}
+          note={reclaimNote}
+          onReclaim={(g) => setPendingReclaim(g)}
+        />
+      )}
+
       {detail && <AppDetail app={detail} clusterId={clusterId} onClose={() => setDetail(null)} />}
 
       {pendingDelete && (
-        <ConfirmModal
-          title="DELETE APP"
-          message={`Stop and remove "${pendingDelete.name}" and its containers?`}
-          confirmLabel="DELETE"
-          danger
-          onConfirm={() => void confirmDelete(pendingDelete)}
+        <UninstallAppModal
+          mode="uninstall"
+          subject={pendingDelete.name}
+          nodeId={pendingDelete.targetNode}
+          volumes={deleteInfo ? deleteInfo.volumes : null}
+          note={deleteInfo?.note}
+          backupNote={deleteInfo?.backupNote}
+          onConfirm={(deleteVolumes) => void confirmDelete(pendingDelete, deleteVolumes)}
           onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingReclaim && (
+        <UninstallAppModal
+          mode="reclaim"
+          subject={pendingReclaim.label}
+          nodeId={pendingReclaim.nodeId}
+          volumes={pendingReclaim.volumes.map(
+            (v): UninstallVolumeRow => ({
+              name: v.volume,
+              dockerName: v.name,
+              backup: v.backup ?? '',
+              lastCaptured: v.lastCaptured,
+              sizeBytes: v.sizeBytes,
+            })
+          )}
+          backupNote={orphans?.backupNote}
+          onConfirm={() => void confirmReclaim(pendingReclaim)}
+          onCancel={() => setPendingReclaim(null)}
         />
       )}
     </PageShell>
@@ -500,5 +574,134 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
         <LinkBtn href="/app-catalog">BACK TO CATALOG</LinkBtn>
       </div>
     </Drawer>
+  );
+}
+
+// --- Orphaned volumes (geekdojo/geekdojo-brain#399) -------------------------
+
+// OrphanGroup is one former app's volumes on one node — the unit the operator
+// reclaims, so the prompt can list "everything immich left behind" together.
+interface OrphanGroup {
+  key: string;
+  nodeId: string;
+  appId: string;
+  label: string;
+  volumes: OrphanVolume[];
+  sizeBytes: number;
+  createdAt: string;
+}
+
+function groupOrphans(vols: OrphanVolume[]): OrphanGroup[] {
+  const groups = new Map<string, OrphanGroup>();
+  for (const v of vols) {
+    const key = `${v.nodeId}/${v.appId}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        key,
+        nodeId: v.nodeId,
+        appId: v.appId,
+        label: v.appName ? `${v.appName} (${v.appId.slice(-6).toLowerCase()})` : v.appId.toLowerCase(),
+        volumes: [],
+        sizeBytes: 0,
+        createdAt: v.createdAt,
+      };
+      groups.set(key, g);
+    }
+    g.volumes.push(v);
+    g.sizeBytes += v.sizeBytes;
+    if (v.createdAt < g.createdAt) g.createdAt = v.createdAt;
+  }
+  return [...groups.values()];
+}
+
+// Volumes named rasp_<appId>_* on a node whose appId no longer has an app row:
+// data an earlier uninstall left behind. Every uninstall before #399 did, so
+// this is where those go to be seen, and reclaimed with the same informed
+// confirmation an uninstall now gets.
+function OrphanedVolumes({
+  orphans,
+  busy,
+  note,
+  onReclaim,
+}: {
+  orphans: OrphanVolumesResponse;
+  busy: string | null;
+  note: string | null;
+  onReclaim: (g: OrphanGroup) => void;
+}) {
+  const groups = groupOrphans(orphans.volumes);
+  return (
+    <div style={{ marginTop: 28 }}>
+      <SectionLabel>
+        <Database size={10} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+        ORPHANED VOLUMES — {orphans.volumes.length}
+      </SectionLabel>
+      <Hint style={{ marginBottom: 10 }}>
+        Data left on a node by apps that are no longer installed. Nothing owns it and nothing backs it up; it counts against the
+        node&apos;s disk until reclaimed.
+      </Hint>
+      {orphans.unreachable.length > 0 && (
+        <Hint warn style={{ marginBottom: 10 }}>
+          Not checked: {orphans.unreachable.map((u) => `${u.nodeId} (${u.reason})`).join(', ')}. Reclaim on an offline node is
+          refused, not queued.
+        </Hint>
+      )}
+      {note && <Hint style={{ marginBottom: 10 }}>{note}</Hint>}
+      {groups.length > 0 && (
+        <table aria-label="Orphaned volumes" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+          <colgroup>
+            <col style={{ width: '22%' }} />
+            <col style={{ width: '14%' }} />
+            <col style={{ width: '36%' }} />
+            <col style={{ width: '14%' }} />
+            <col style={{ width: '14%' }} />
+          </colgroup>
+          <thead>
+            <tr>
+              {['FORMER APP', 'NODE', 'VOLUMES', 'CREATED', 'ACTIONS'].map((h) => (
+                <th key={h} scope="col" style={thStyle}>
+                  {h === 'ACTIONS' ? <span style={srOnly}>{h}</span> : h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((g) => (
+              <tr key={g.key}>
+                <td style={tdStyle} title={g.appId}>
+                  {g.label}
+                </td>
+                <td style={{ ...tdStyle, color: DIM }}>{g.nodeId}</td>
+                <td style={{ ...tdStyle, color: DIM, whiteSpace: 'normal' }}>
+                  {g.volumes.map((v) => (
+                    <div key={v.name} title={v.name}>
+                      {v.volume}{' '}
+                      <span style={{ color: DIM }}>
+                        {formatBytes(v.sizeBytes)}
+                        {v.backup ? ` · ${v.backup}` : ''}
+                        {' · backup: '}
+                        {v.lastCaptured ? `${v.lastCaptured.generationId}, ${timeAgo(v.lastCaptured.at)}` : 'never'}
+                        {v.inUse ? ' · in use' : ''}
+                      </span>
+                    </div>
+                  ))}
+                </td>
+                <td style={{ ...tdStyle, color: DIM }} title={g.createdAt}>
+                  {timeAgo(g.createdAt)}
+                </td>
+                <td style={{ ...tdStyle, paddingRight: 0 }}>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <Btn variant="danger" small disabled={busy === g.key} aria-label={`Reclaim volumes of ${g.label}`} onClick={() => onReclaim(g)}>
+                      <Trash2 size={10} /> RECLAIM
+                    </Btn>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }

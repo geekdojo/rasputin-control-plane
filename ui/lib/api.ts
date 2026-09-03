@@ -1,6 +1,9 @@
 import type {
   Alert,
   App,
+  AppVolumesResponse,
+  OrphanVolumesResponse,
+  ReclaimResponse,
   BackupCandidatesResponse,
   BackupRunsResponse,
   BackupSchedule,
@@ -468,8 +471,41 @@ export function createApp(input: {
 // deleteApp runs the app.delete saga (stop the deployment, then remove the
 // record) and returns the job. Removal is async — the row disappears on the
 // `deleted` change event once the stop completes.
-export function deleteApp(id: string): Promise<Job> {
-  return jsonFetch<Job>(`/api/apps/${id}`, { method: 'DELETE' });
+//
+// deleteVolumes is the operator's answer to "Delete volumes?" on the uninstall
+// confirmation (geekdojo/geekdojo-brain#399). false — the default, and what a
+// caller that passes nothing sends — keeps the app's named volumes on the
+// node. true makes the stop a `compose down -v`.
+export function deleteApp(id: string, opts?: { deleteVolumes: boolean }): Promise<Job> {
+  if (!opts) return jsonFetch<Job>(`/api/apps/${id}`, { method: 'DELETE' });
+  return jsonFetch<Job>(`/api/apps/${id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deleteVolumes: opts.deleteVolumes }),
+  });
+}
+
+// getAppVolumes lists an app's volumes by class with when each was last
+// captured into a retained backup generation — the uninstall prompt's facts.
+export function getAppVolumes(id: string): Promise<AppVolumesResponse> {
+  return jsonFetch<AppVolumesResponse>(`/api/apps/${id}/volumes`);
+}
+
+// listOrphanVolumes lists rasp_<appId>_* volumes on every reachable node whose
+// appId has no row in the apps ledger.
+export function listOrphanVolumes(): Promise<OrphanVolumesResponse> {
+  return jsonFetch<OrphanVolumesResponse>('/api/volumes/orphans');
+}
+
+// reclaimOrphanVolumes removes the named orphan volumes on one node. The api
+// refuses an offline node (409), a live app's volume or a malformed name (400)
+// before anything reaches the agent.
+export function reclaimOrphanVolumes(nodeId: string, names: string[]): Promise<ReclaimResponse> {
+  return jsonFetch<ReclaimResponse>('/api/volumes/orphans/reclaim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nodeId, names }),
+  });
 }
 
 export function deployApp(id: string): Promise<Job> {
