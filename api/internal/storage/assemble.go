@@ -209,8 +209,9 @@ const appVolumeFanOutReason = "This archive covers the CONTROLPLANE NODE only (s
 	"design/storage.md §4.5 calls for those volumes on ANY node, and app volumes on a compute node are NOT in here: nothing " +
 	"yet moves a staged copy off the node that made it (geekdojo/geekdojo-brain#295 per-node streaming, #296 ingest). " +
 	"`bulk` volumes stream direct (§4.7) and are not in here either; `cache` volumes are never copied by design. " +
-	"Every volume that was not captured is listed by name, with its reason, under `appVolumes.volumes` — and `complete` is " +
-	"false whenever that list is not empty. Read it before assuming an app's data is in this archive."
+	"Every volume that was not captured is listed by name, with its reason, under `appVolumes.volumes`, and `complete` is " +
+	"false whenever any of them was missed — when it is false, THIS IS NOT A COMPLETE BACKUP OF THIS CLUSTER. " +
+	"Read that list before assuming an app's data is in this archive."
 
 // AppVolumeFanOutReason is the fan-out's standing prose, exported so the api's
 // HTTP surface and the UI say the SAME words as the manifest on the platter and
@@ -250,13 +251,22 @@ func NewAppVolumeReport(records []VolumeRecord, nodesConsulted int) AppVolumeRep
 	if r.Volumes == nil {
 		r.Volumes = []VolumeRecord{}
 	}
+	down := map[string]bool{}
 	for _, v := range r.Volumes {
 		if v.Captured {
 			r.Captured = append(r.Captured, v.App+"/"+v.Volume)
-			continue
+		} else {
+			r.SkippedCount++
 		}
-		r.SkippedCount++
-		if !v.AppRestored {
+		// Checked on EVERY record, captured or not. proto says it plainly: the
+		// copy may have succeeded and the app still be down, and that is the
+		// case that matters most — a backup that worked and left the service
+		// off. Scanning only the failures would miss exactly it.
+		//
+		// De-duplicated by app: a two-volume app that did not come back is one
+		// app down, not two, and the operator-facing sentence names apps.
+		if !v.AppRestored && !down[v.App] {
+			down[v.App] = true
 			r.AppsLeftDown = append(r.AppsLeftDown, v.App)
 		}
 	}

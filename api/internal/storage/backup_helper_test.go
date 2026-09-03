@@ -90,6 +90,10 @@ type fakeBackupAgent struct {
 	// writeDigests is what the agent computed over the staged bytes itself,
 	// one per write call, so a test can compare it with what the api claimed.
 	writeDigests []string
+	// writeBodies is the sealed archive the agent actually read, kept so a test
+	// can open the header and check what is bound into the AEAD — the one
+	// surface that cannot be edited after the fact.
+	writeBodies [][]byte
 	// staged and unstaged are the app-volume phase's record, and
 	// maxLiveStaged is the most staged copies that existed at once — §4.7's
 	// peak, observed rather than assumed.
@@ -168,15 +172,18 @@ func (f *fakeBackupAgent) start(t *testing.T, nc *nats.Conn) *fakeBackupAgent {
 		// Re-hash the staged file for real, like the agent does. A fake that
 		// echoed the digest back would make the digest untestable.
 		digest := ""
+		var body []byte
 		if f.stagingRoot != "" && proto.BackupValidStagingName(cmd.StagingName) {
 			if b, rerr := os.ReadFile(filepath.Join(f.stagingRoot, cmd.StagingName)); rerr == nil {
 				sum := sha256.Sum256(b)
 				digest = hex.EncodeToString(sum[:])
+				body = b
 			}
 		}
 		f.mu.Lock()
 		f.writeCmds = append(f.writeCmds, cmd)
 		f.writeDigests = append(f.writeDigests, digest)
+		f.writeBodies = append(f.writeBodies, body)
 		f.generations = append(f.generations, cmd.GenerationID)
 		fn := f.write
 		f.mu.Unlock()
@@ -218,6 +225,17 @@ func (f *fakeBackupAgent) start(t *testing.T, nc *nats.Conn) *fakeBackupAgent {
 	return f
 }
 
+// lastSealed is the sealed archive the agent last read, for the test that
+// checks the scope is bound into the AEAD's additional data.
+func (f *fakeBackupAgent) lastSealed() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.writeBodies) == 0 {
+		return nil
+	}
+	return f.writeBodies[len(f.writeBodies)-1]
+}
+
 func defaultWriteAck(cmd proto.BackupWriteCmd, digest string) proto.BackupWriteAck {
 	return proto.BackupWriteAck{
 		OK: true, PartUUID: cmd.PartUUID,
@@ -228,7 +246,7 @@ func defaultWriteAck(cmd proto.BackupWriteCmd, digest string) proto.BackupWriteA
 			SizeBytes:    cmd.SizeBytes,
 			Digest:       digest,
 			WrittenAt:    time.Now().UTC(),
-			Scope:        proto.BackupScopeIdentityOnly,
+			Scope:        proto.BackupScopeControlplaneLocal,
 		},
 		FreeBytes: 1 << 40,
 	}

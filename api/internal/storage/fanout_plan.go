@@ -120,6 +120,13 @@ func sanitizeMember(s string) string {
 		}
 	}
 	res := strings.TrimLeft(string(out), ".")
+	// A doubled dot cannot be a traversal here — the separator is already gone,
+	// so `.._etc` is one ordinary segment. It is collapsed anyway: a member
+	// path containing `..` invites the next reader, and the next extractor, to
+	// treat it as one, and a name is not worth that argument.
+	for strings.Contains(res, "..") {
+		res = strings.ReplaceAll(res, "..", "_")
+	}
 	if res == "" {
 		return "unnamed"
 	}
