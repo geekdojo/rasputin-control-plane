@@ -81,7 +81,7 @@ func (s *Server) handleListBackupRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, backupRunsResponse{
 		Runs:         runs,
 		LastSuccess:  last,
-		Scope:        proto.BackupScopeIdentityOnly,
+		Scope:        proto.BackupScopeControlplaneLocal,
 		ScopeWarning: storage.AppVolumeFanOutReason(),
 		Retain:       proto.BackupRetainGenerations,
 	})
