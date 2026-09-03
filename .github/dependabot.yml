@@ -47,8 +47,8 @@ updates:
       include: scope
 
   # ── Go modules: every member of go.work ───────────────────────────────────
-  # go.work uses agent, artifactsig, api, proto and tileschema. All five are
-  # listed. (The note that used to sit here — that vuln-scan.sh scanned only
+  # go.work uses agent, artifactsig, backupxfer, api, proto and tileschema. All
+  # six are listed. (The note that used to sit here — that vuln-scan.sh scanned only
   # api, agent and proto, leaving artifactsig and tileschema outside the gate —
   # was the separate finding it called itself. It is fixed: every scan gate now
   # derives its module list from go.work via scripts/workspace-modules.sh.
@@ -60,6 +60,7 @@ updates:
       - /agent
       - /api
       - /artifactsig
+      - /backupxfer
       - /proto
       - /tileschema
     schedule:
