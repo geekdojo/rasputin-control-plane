@@ -38,6 +38,43 @@ func TestPlanAppVolumesOrdersCriticalFirst(t *testing.T) {
 	}
 }
 
+// TestPlanAppVolumesIsDeterministicWithinAnApp covers the last tie-break, which
+// is the one the PR's "two runs over an unchanged cluster agree" claim rests on.
+//
+// Two volumes of the same class belonging to the same app have nothing left to
+// order them by but their names, and a comparator that returned a constant
+// there would leave the sequence up to the sort's internals — so a diff between
+// two generations would stop meaning anything.
+func TestPlanAppVolumesIsDeterministicWithinAnApp(t *testing.T) {
+	tiles := fakeTiles{
+		"t": testTile("t",
+			vol("zzz-data", tileschema.BackupState, tileschema.QuiesceNone),
+			vol("aaa-data", tileschema.BackupState, tileschema.QuiesceNone)),
+		"off": testTile("off",
+			vol("zzz-remote", tileschema.BackupState, tileschema.QuiesceNone),
+			vol("aaa-remote", tileschema.BackupState, tileschema.QuiesceNone)),
+	}
+	stage, skipped := PlanAppVolumes([]*apps.App{
+		testApp("a", "app", runNodeID, "t"),
+		testApp("b", "app", "n-other", "off"),
+	}, tiles, runNodeID)
+
+	if len(stage) != 2 || stage[0].Volume != "aaa-data" || stage[1].Volume != "zzz-data" {
+		t.Errorf("stage order = %v; two volumes of one app and one class order by name or by nothing", volumeNames(stage))
+	}
+	if len(skipped) != 2 || skipped[0].Volume != "aaa-remote" || skipped[1].Volume != "zzz-remote" {
+		t.Errorf("skipped order = %+v; the record list is read by a human and must be stable too", skipped)
+	}
+}
+
+func volumeNames(v []PlannedVolume) []string {
+	out := make([]string, 0, len(v))
+	for _, p := range v {
+		out = append(out, p.Volume)
+	}
+	return out
+}
+
 func TestPlanAppVolumesClassifiesEveryOutcome(t *testing.T) {
 	stage, skipped := PlanAppVolumes([]*apps.App{
 		testApp("a-local", "local", runNodeID, "t"),
