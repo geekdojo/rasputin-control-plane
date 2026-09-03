@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // §4.7's staging path, and the source-side free-space guard that goes with it.
@@ -78,7 +80,11 @@ import (
 // partition after a run's estimated peak. See the file comment: it is §5's
 // VictoriaMetrics reservation, so a backup cannot be the thing that blinds the
 // metrics store.
-const StagingReserveBytes uint64 = 2 << 30 // 2 GiB
+//
+// Derived from proto rather than typed here, because the agent applies the
+// same reserve to its own staging root when it stages an app volume (#294):
+// one number, so the two halves of §4.7's guard cannot drift.
+const StagingReserveBytes uint64 = proto.BackupStagingReserveBytes // 2 GiB
 
 // EnsureStagingDir creates the staging directory 0700. Owner-only because what
 // passes through it is, for the seconds before it is sealed, a plaintext copy

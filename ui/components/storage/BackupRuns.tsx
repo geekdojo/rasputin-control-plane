@@ -12,8 +12,9 @@
 // # Why the scope banner is at the top and cannot be dismissed
 //
 // Every generation this build writes contains the control-plane's identity —
-// the database, the mesh CA, Headscale state — and NO app data, because no
-// volume anywhere carries a backup class yet (#293 unbuilt). A Vaultwarden
+// the database, the mesh CA, Headscale state — and NO app data: the volumes
+// are classified (#293) and the agent can stage a copy of one (#294), but
+// nothing carries that copy into the archive yet (#295, #296). A Vaultwarden
 // vault is exactly what §4.2 classes `critical`, and it is not in the archive.
 //
 // A user who sees a green "backed up 2 hours ago" and nothing else will believe

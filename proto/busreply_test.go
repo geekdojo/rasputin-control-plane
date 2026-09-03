@@ -40,6 +40,11 @@ func TestReplyGrantOutlivesEveryAgentWorkBudget(t *testing.T) {
 		{"storage claim context", StorageClaimWork},
 		{"storage mount context", StorageMountWork},
 		{"storage inspect context", StorageInspectWork},
+		{"backup preflight context", BackupPreflightWork},
+		{"backup write context", BackupWriteWork},
+		{"backup prune context", BackupPruneWork},
+		{"backup stage-volume context", BackupStageWork},
+		{"backup unstage context", BackupUnstageWork},
 	}
 	for _, b := range budgets {
 		if BusReplyGrantTTL <= b.budget {

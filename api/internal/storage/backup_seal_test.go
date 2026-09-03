@@ -434,17 +434,22 @@ func TestFanOutIsDeclaredAndEmpty(t *testing.T) {
 	if r.Reason == "" {
 		t.Fatal("the fan-out reports nothing captured and does not say why")
 	}
-	for _, issue := range []string{"#293", "#294", "#295", "#296"} {
+	for _, issue := range []string{"#295", "#296", "#290"} {
 		if !strings.Contains(strings.Join(r.BlockedBy, " "), issue) {
 			t.Errorf("blockedBy does not name %s", issue)
 		}
 	}
-	// #292 landed: tileschema carries the backup class and quiesce strategy, so
-	// a tile CAN be classified now. Listing it as a blocker would send an
-	// operator to a closed issue looking for the thing that is holding their
-	// app data out of the archive.
-	if strings.Contains(strings.Join(r.BlockedBy, " "), "#292") {
-		t.Error("blockedBy still names #292, which shipped with the tileschema volume fields")
+	// Shipped, and therefore NOT blockers: #292 (the tileschema fields), #293
+	// (the catalog classification) and #294 (the agent's staging verb). Naming
+	// a closed issue would send an operator to it looking for the thing that
+	// is holding their app data out of the archive.
+	for _, done := range []string{"#292", "#293", "#294"} {
+		if strings.Contains(strings.Join(r.BlockedBy, " "), done) {
+			t.Errorf("blockedBy still names %s, which shipped", done)
+		}
+	}
+	if !strings.Contains(r.Reason, "#294") || !strings.Contains(r.Reason, "#295") {
+		t.Error("the reason must say the agent can stage a copy (#294) and that moving it is what is missing (#295)")
 	}
 	if !strings.Contains(r.Reason, "not a complete backup") {
 		t.Error("the reason does not say, in words, that this is not a complete backup")

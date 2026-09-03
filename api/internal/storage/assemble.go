@@ -35,11 +35,13 @@ import (
 // # What does not, and why it is the loudest thing in this file
 //
 // §4.5 also calls for "app volumes classed `critical` or `state`, on any node".
-// NO VOLUME ANYWHERE CARRIES A CLASS. The tileschema fields that declare one
-// landed with #292, and nothing has filled them in: the catalog classification
-// that would populate them (#293), the quiesce drivers that would make a copy
-// safe (#294), the streaming path (#295) and the ingest endpoint (#296) are all
-// unbuilt. So the per-node fan-out below is DECLARED AND EMPTY: it runs, it
+// Two of the four pieces exist: the catalog classifies every volume (#293,
+// 35 volumes across 16 tiles) and the agent stages a consistent copy of one
+// on request (#294, `storage.backup_stage_volume`, with the §4.7 restart
+// contract held agent-side). What does NOT exist is the path that moves a
+// staged copy off the hosting node — the per-node streaming (#295) and the
+// ingest endpoint (#296) — and this fan-out is not yet wired to the verb. So
+// the per-node fan-out below is still DECLARED AND EMPTY: it runs, it
 // enumerates nothing, and it writes down that it enumerated nothing and why.
 //
 // An archive that omits app data is not the backup a user assumes they have — a
@@ -150,10 +152,10 @@ type AppVolumeReport struct {
 // appVolumeFanOutReason is the prose above, in one place, so the manifest, the
 // job log and the UI all say the same words.
 const appVolumeFanOutReason = "No app volumes were captured. design/storage.md §4.5 requires every volume " +
-	"classed `critical` or `state` on any node, but no volume anywhere carries a backup class yet: the tileschema " +
-	"fields that declare one landed (#292) and nothing has filled them in — the catalog classification (#293), the " +
-	"quiesce drivers that make a copy safe (#294), the per-node streaming path (#295) and the ingest endpoint " +
-	"(#296) are all unbuilt. " +
+	"classed `critical` or `state` on any node. The catalog classifies every volume (#293) and the agent on each " +
+	"node can produce a consistent, staged copy of one (#294) — but nothing yet moves that copy off the node and " +
+	"into this archive: the per-node streaming path (#295) and the ingest endpoint (#296) are unbuilt, and this " +
+	"fan-out is not wired to the agent's staging verb. " +
 	"This archive therefore restores the controlplane's identity — the database, the mesh CA and Headscale state — " +
 	"and NOT the data belonging to any installed app, including a password vault. It is not a complete backup."
 
@@ -172,27 +174,32 @@ func AppVolumeFanOutReason() string { return appVolumeFanOutReason }
 //
 // A function rather than a comment, and called rather than skipped, because the
 // shape of the thing that is missing should be visible in the code that will
-// eventually contain it. When #293 lands, this is where the classified volumes
-// come from and this is the report that stops being empty; nothing else in the
-// saga has to move.
+// eventually contain it. The pieces it will call now exist on both sides: the
+// tile's Volumes carry a class and a strategy (#293), and the agent answers
+// proto.BackupStageVolumeSubject with a consistent, digested tar under its
+// staging root and the app put back as it was found (#294). What this phase
+// will do, when #290 wires it, is walk the installed apps, send that verb for
+// each `critical`/`state` volume in turn, and bring the staged copy here —
+// which is the part that does not exist (#295, #296). Nothing else in the saga
+// has to move.
 //
-// It takes no arguments today for the same reason it returns an empty set:
-// there is no classification to consult and no node to ask. Giving it a node
-// list now would be modelling a conversation that cannot happen.
+// It still takes no arguments, for the same reason it returns an empty set:
+// there is no transport to hand it. Giving it a node list now would be
+// modelling a conversation whose reply cannot be carried anywhere.
 func FanOutAppVolumes() AppVolumeReport {
 	return AppVolumeReport{
 		Captured:       []string{},
 		CapturedCount:  0,
 		NodesConsulted: 0,
 		Reason:         appVolumeFanOutReason,
-		// #292 is NOT here any more: tileschema.Volume, the backup class and
-		// the quiesce strategy exist, so a tile can now be classified. What
-		// stops this fan-out is that nothing has classified one.
+		// #292 (the schema fields), #293 (the classification) and #294 (the
+		// agent's staging verb) are NOT here: each shipped, and naming a
+		// closed issue would send an operator looking in the wrong place for
+		// what holds their app data out of the archive.
 		BlockedBy: []string{
-			"geekdojo/geekdojo-brain#293 catalog volume classification",
-			"geekdojo/geekdojo-brain#294 quiesce drivers",
 			"geekdojo/geekdojo-brain#295 per-node streaming",
 			"geekdojo/geekdojo-brain#296 ingest endpoint",
+			"geekdojo/geekdojo-brain#290 fan-out wiring to storage.backup_stage_volume",
 		},
 	}
 }

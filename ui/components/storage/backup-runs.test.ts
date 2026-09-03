@@ -38,7 +38,7 @@ describe('shouldWarnIncomplete', () => {
   });
 
   it('stops warning only for an explicit full scope', () => {
-    // The day #293 lands and the fan-out stops being empty, the api starts
+    // The day the fan-out stops being empty (#295/#296 landed and wired), the api starts
     // sending `full` and this banner disappears with no UI change.
     assert.equal(shouldWarnIncomplete(runsResponse('full')), false);
   });

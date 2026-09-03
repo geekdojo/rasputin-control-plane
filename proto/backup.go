@@ -102,11 +102,12 @@ const BackupTargetReserveBytes uint64 = 256 << 20 // 256 MiB
 // it is stamped into the generation id, the manifest, the ledger and the UI.
 //
 // §4.5's contents list is the identity set PLUS every volume classed `critical`
-// or `state` on any node. No volume anywhere carries a class yet — the
-// tileschema fields that declare one landed with #292, but the catalog
-// classification that fills them in (#293), the quiesce drivers (#294), the
-// streaming path (#295) and the ingest endpoint (#296) are all unbuilt — so
-// the per-node fan-out runs and captures nothing.
+// or `state` on any node. The catalog now classifies every volume (#293) and
+// the agent can stage a consistent copy of one on request (#294,
+// BackupStageVolumeSubject) — but nothing moves that copy off the node yet:
+// the per-node streaming path (#295) and the ingest endpoint (#296) are
+// unbuilt and the fan-out is not wired to the verb, so it runs and captures
+// nothing.
 //
 // That is a legitimate state to ship, and it is NOT a legitimate state to leave
 // implicit. An archive missing every app's data is not the backup an operator
