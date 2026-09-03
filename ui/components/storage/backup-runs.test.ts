@@ -6,6 +6,8 @@ import {
   appVolumeSummary,
   cadenceRequest,
   cadenceValue,
+  runScopeTitle,
+  scopeHeadline,
   shouldWarnIncomplete,
 } from './backup-runs';
 import type { BackupRunsResponse, BackupSchedule } from '../../lib/types';
@@ -17,6 +19,12 @@ function runsResponse(scope: BackupRunsResponse['scope']): BackupRunsResponse {
 describe('shouldWarnIncomplete', () => {
   it('warns for an identity-only archive', () => {
     assert.equal(shouldWarnIncomplete(runsResponse('identity-only')), true);
+  });
+
+  it('warns for a controlplane-local archive — app volumes on other nodes are not in it', () => {
+    // What this build writes. It captures real app data for the first time and
+    // it still is not a complete backup of the cluster, so the banner stays.
+    assert.equal(shouldWarnIncomplete(runsResponse('controlplane-local')), true);
   });
 
   it('warns when the response has not arrived', () => {
@@ -41,6 +49,39 @@ describe('shouldWarnIncomplete', () => {
     // The day the fan-out stops being empty (#295/#296 landed and wired), the api starts
     // sending `full` and this banner disappears with no UI change.
     assert.equal(shouldWarnIncomplete(runsResponse('full')), false);
+  });
+});
+
+describe('scopeHeadline', () => {
+  it('takes the scope from the api rather than hard-coding one', () => {
+    // The six surfaces all read one exported string. A headline typed in here
+    // is the seventh, and it is the one that goes stale.
+    assert.equal(scopeHeadline(runsResponse('controlplane-local')), 'CONTROLPLANE-LOCAL — NOT A COMPLETE BACKUP');
+  });
+
+  it('says the scope is unknown rather than inventing one', () => {
+    assert.equal(scopeHeadline(null), 'SCOPE UNKNOWN — NOT A COMPLETE BACKUP');
+  });
+});
+
+describe('runScopeTitle', () => {
+  it('names what was NOT captured beside what was', () => {
+    // "2 app volumes captured" alone reads as success on a run that missed four.
+    assert.equal(
+      runScopeTitle({ appVolumesCaptured: 2, appVolumesSkipped: 4 }),
+      '2 app volumes captured · 4 NOT captured',
+    );
+  });
+
+  it('carries a run warning into the tooltip', () => {
+    assert.equal(
+      runScopeTitle({ appVolumesCaptured: 1, appVolumesSkipped: 0, warning: 'vaultwarden did not restart' }),
+      '1 app volume captured · vaultwarden did not restart',
+    );
+  });
+
+  it('says zero rather than nothing when a run captured none', () => {
+    assert.equal(runScopeTitle({ appVolumesCaptured: 0 }), '0 app volumes captured');
   });
 });
 

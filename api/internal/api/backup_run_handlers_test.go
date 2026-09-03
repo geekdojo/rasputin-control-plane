@@ -58,13 +58,13 @@ func TestListBackupRunsAlwaysCarriesTheScopeCaveat(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 	}
-	if body.Scope != proto.BackupScopeIdentityOnly {
-		t.Errorf("scope = %q, want %q", body.Scope, proto.BackupScopeIdentityOnly)
+	if body.Scope != proto.BackupScopeControlplaneLocal {
+		t.Errorf("scope = %q, want %q", body.Scope, proto.BackupScopeControlplaneLocal)
 	}
 	if body.ScopeWarning == "" {
 		t.Error("no scope warning: a client would have nothing to show but a green success line")
 	}
-	if !strings.Contains(body.ScopeWarning, "not a complete backup") {
+	if !strings.Contains(strings.ToLower(body.ScopeWarning), "not a complete backup") {
 		t.Errorf("the warning does not say, in words, that this is not a complete backup: %q", body.ScopeWarning)
 	}
 	if body.Retain != proto.BackupRetainGenerations {

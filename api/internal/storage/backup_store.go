@@ -42,10 +42,11 @@ type BackupRun struct {
 	// Reason is "scheduled" or "manual" — §4.1 has both producers and an
 	// operator looking at a 3 a.m. failure wants to know which one it was.
 	Reason string `json:"reason,omitempty"`
-	// Scope is proto.BackupScopeIdentityOnly for everything this build writes.
+	// Scope is proto.BackupScopeControlplaneLocal for everything this build
+	// writes — the archive's REACH, one machine.
 	//
 	// Marshalled on every row, deliberately, so no view can render a run
-	// without having been handed the fact that it captured no app data.
+	// without having been handed the fact that it did not reach the cluster.
 	Scope        string `json:"scope,omitempty"`
 	GenerationID string `json:"generationId,omitempty"`
 	KeyID        string `json:"keyId,omitempty"`
@@ -53,20 +54,31 @@ type BackupRun struct {
 	// only thing that can verify a generation without a custody secret.
 	Digest    string `json:"digest,omitempty"`
 	SizeBytes uint64 `json:"sizeBytes,omitempty"`
-	// AppVolumesCaptured is 0 on every row this build writes, and it is here to
-	// say so out loud rather than to leave "no volumes" indistinguishable from
-	// "the field was never populated".
-	AppVolumesCaptured int        `json:"appVolumesCaptured"`
-	GenerationsKept    int        `json:"generationsKept,omitempty"`
-	GenerationsPruned  int        `json:"generationsPruned,omitempty"`
-	Status             RunStatus  `json:"status"`
-	StartedAt          time.Time  `json:"startedAt"`
-	FinishedAt         *time.Time `json:"finishedAt,omitempty"`
-	Error              string     `json:"error,omitempty"`
+	// AppVolumesCaptured and AppVolumesSkipped are the two halves of what the
+	// fan-out did, and both are always marshalled: "2 captured" alone is not an
+	// answer, and "no volumes" must never be indistinguishable from "the field
+	// was never populated".
+	AppVolumesCaptured int `json:"appVolumesCaptured"`
+	AppVolumesSkipped  int `json:"appVolumesSkipped"`
+	// Complete is true only when every classified volume in the cluster was
+	// captured. A `succeeded` run with Complete false is the normal state of
+	// this build on any cluster with an app on a compute node.
+	Complete bool `json:"complete"`
+	// Warning is a caveat on a row that is NOT failed — volumes that were
+	// skipped, or an app the backup left down. Distinct from Error, which is
+	// why the run died.
+	Warning           string     `json:"warning,omitempty"`
+	GenerationsKept   int        `json:"generationsKept,omitempty"`
+	GenerationsPruned int        `json:"generationsPruned,omitempty"`
+	Status            RunStatus  `json:"status"`
+	StartedAt         time.Time  `json:"startedAt"`
+	FinishedAt        *time.Time `json:"finishedAt,omitempty"`
+	Error             string     `json:"error,omitempty"`
 }
 
 const runCols = `job_id, target_job_id, part_uuid, node_id, reason, scope, generation_id,
-        key_id, digest, size_bytes, app_volumes_captured, generations_kept,
+        key_id, digest, size_bytes, app_volumes_captured, app_volumes_skipped,
+        complete, warning, generations_kept,
         generations_pruned, status, started_at, finished_at, error`
 
 // StartRun records a run at step 1, before anything has been snapshotted.
@@ -103,12 +115,12 @@ func (s *Store) BindRunTarget(ctx context.Context, jobID, targetJobID, partUUID,
 //
 // It deliberately does not touch `status`: a run whose retention did not
 // converge has not finished, and this is not the call that decides it has.
-func (s *Store) MarkRunGeneration(ctx context.Context, jobID, generationID, digest string, sizeBytes uint64, appVolumes int) error {
+func (s *Store) MarkRunGeneration(ctx context.Context, jobID, generationID, digest string, sizeBytes uint64, appVolumes, appVolumesSkipped int) error {
 	_, err := s.db.ExecContext(ctx, `
         UPDATE backup_runs
-        SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?
+        SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?, app_volumes_skipped = ?
         WHERE job_id = ?`,
-		generationID, digest, sizeForDB(sizeBytes), appVolumes, jobID)
+		generationID, digest, sizeForDB(sizeBytes), appVolumes, appVolumesSkipped, jobID)
 	return err
 }
 
@@ -119,9 +131,15 @@ type RunResult struct {
 	Digest             string
 	SizeBytes          uint64
 	AppVolumesCaptured int
-	GenerationsKept    int
-	GenerationsPruned  int
-	At                 time.Time
+	AppVolumesSkipped  int
+	Scope              string
+	Complete           bool
+	// Warning is the caveat a SUCCEEDED row still has to carry — volumes that
+	// were not captured. It is not an error and it is not silence.
+	Warning           string
+	GenerationsKept   int
+	GenerationsPruned int
+	At                time.Time
 }
 
 // FinishRun moves a running row to `succeeded`.
@@ -133,9 +151,11 @@ func (s *Store) FinishRun(ctx context.Context, jobID string, res RunResult) erro
 	out, err := s.db.ExecContext(ctx, `
         UPDATE backup_runs
         SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?,
+            app_volumes_skipped = ?, complete = ?, warning = ?,
             generations_kept = ?, generations_pruned = ?, status = ?, finished_at = ?, error = ''
         WHERE job_id = ? AND status = ?`,
 		res.GenerationID, res.Digest, sizeForDB(res.SizeBytes), res.AppVolumesCaptured,
+		res.AppVolumesSkipped, boolForDB(res.Complete), res.Warning,
 		res.GenerationsKept, res.GenerationsPruned, string(RunSucceeded), ms(res.At),
 		jobID, string(RunRunning))
 	if err != nil {
@@ -145,6 +165,43 @@ func (s *Store) FinishRun(ctx context.Context, jobID string, res RunResult) erro
 		return errors.New("no running backup_runs row for this job")
 	}
 	return nil
+}
+
+// MarkRunRetention records everything a finished run knows WITHOUT giving the
+// row a verdict.
+//
+// It exists for exactly one caller: a run whose archive landed and whose
+// retention converged, and which is about to fail anyway because the fan-out
+// left an app down. The generation, the counts and the warning belong on the
+// row — an operator must be able to see that tonight's archive IS on the disk —
+// and the verdict belongs to the terminal hook, which will mark it `failed`
+// with the app named.
+//
+// Deliberately NOT a variant of FinishRun with a status argument. "Record the
+// facts" and "declare the run over" are two decisions, and a single function
+// taking a status is one typo away from marking a red run green.
+func (s *Store) MarkRunRetention(ctx context.Context, jobID string, res RunResult) error {
+	_, err := s.db.ExecContext(ctx, `
+        UPDATE backup_runs
+        SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?,
+            app_volumes_skipped = ?, complete = ?, warning = ?,
+            generations_kept = ?, generations_pruned = ?
+        WHERE job_id = ?`,
+		res.GenerationID, res.Digest, sizeForDB(res.SizeBytes), res.AppVolumesCaptured,
+		res.AppVolumesSkipped, boolForDB(res.Complete), res.Warning,
+		res.GenerationsKept, res.GenerationsPruned, jobID)
+	return err
+}
+
+// boolForDB stores a boolean as SQLite's 0/1. One helper rather than an inline
+// ternary at each site, so `complete` can never be written as the string
+// "false" — which SQLite would happily accept and every reader would treat as
+// truthy.
+func boolForDB(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // FailRun gives a still-running row a terminal status. A no-op on a row that
@@ -217,12 +274,14 @@ func scanRun(scan func(...any) error) (*BackupRun, error) {
 	var (
 		r          BackupRun
 		sizeBytes  int64
+		complete   int64
 		status     string
 		startedAt  int64
 		finishedAt sql.NullInt64
 	)
 	if err := scan(&r.JobID, &r.TargetJobID, &r.PartUUID, &r.NodeID, &r.Reason, &r.Scope,
 		&r.GenerationID, &r.KeyID, &r.Digest, &sizeBytes, &r.AppVolumesCaptured,
+		&r.AppVolumesSkipped, &complete, &r.Warning,
 		&r.GenerationsKept, &r.GenerationsPruned, &status, &startedAt, &finishedAt,
 		&r.Error); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -233,6 +292,7 @@ func scanRun(scan func(...any) error) (*BackupRun, error) {
 	if sizeBytes > 0 {
 		r.SizeBytes = uint64(sizeBytes)
 	}
+	r.Complete = complete != 0
 	r.Status = RunStatus(status)
 	r.StartedAt = fromMs(startedAt)
 	if finishedAt.Valid {

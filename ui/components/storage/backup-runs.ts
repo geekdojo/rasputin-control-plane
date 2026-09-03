@@ -16,16 +16,50 @@
 import type { BackupRunsResponse, BackupSchedule } from '../../lib/types';
 
 /**
- * Whether to show the "identity only — not a complete backup" banner.
+ * Whether to show the "not a complete backup" banner.
  *
  * FAIL LOUD. Anything other than a positive, explicit `scope: "full"` warns:
- * a response that has not arrived, an older api that sends no scope at all, a
- * value this build does not recognise. The banner going away is a claim that
- * the archive contains everything, and only the api saying so in those words
- * earns it.
+ * `controlplane-local` (what this build writes — app volumes on any other node
+ * are not in the archive), the older `identity-only`, a response that has not
+ * arrived, an api that sends no scope at all, a value this build does not
+ * recognise. The banner going away is a claim that the archive contains
+ * everything, and only the api saying so in those words earns it.
  */
 export function shouldWarnIncomplete(data: BackupRunsResponse | null): boolean {
   return data?.scope !== 'full';
+}
+
+/**
+ * The banner's headline, from the api's scope rather than from a constant here.
+ *
+ * The api owns the scope string (proto.BackupScopeControlplaneLocal) and the
+ * prose beneath it; this turns the one into a heading in the same words. A
+ * hard-coded "IDENTITY ONLY" survived one scope change already by saying
+ * something that was no longer true, which is the drift the single exported
+ * string exists to prevent.
+ */
+export function scopeHeadline(data: BackupRunsResponse | null): string {
+  const scope = data?.scope;
+  if (!scope) return 'SCOPE UNKNOWN — NOT A COMPLETE BACKUP';
+  return `${scope.toUpperCase()} — NOT A COMPLETE BACKUP`;
+}
+
+/**
+ * The per-run scope tooltip: what went in and what did not, in one line.
+ *
+ * Both numbers, always. "2 app volumes captured" on its own reads as success on
+ * a run that missed four.
+ */
+export function runScopeTitle(run: {
+  appVolumesCaptured: number;
+  appVolumesSkipped?: number;
+  warning?: string;
+}): string {
+  const parts = [appVolumeSummary(run.appVolumesCaptured)];
+  const skipped = run.appVolumesSkipped ?? 0;
+  if (skipped > 0) parts.push(`${skipped} NOT captured`);
+  if (run.warning) parts.push(run.warning);
+  return parts.join(' · ');
 }
 
 /** The `off` sentinel the cadence select uses for a disabled schedule. */

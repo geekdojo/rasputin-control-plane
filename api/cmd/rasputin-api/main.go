@@ -29,6 +29,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog/floor"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
@@ -561,12 +562,13 @@ func main() {
 	// to four. Registered unconditionally; a cluster with no claimed target
 	// gets a clean refusal at step 1 rather than a missing workflow.
 	//
-	// SCOPE: every generation this build writes is `identity-only` — the
-	// database, the mesh CA and Headscale state, and NO app data. The catalog
-	// classifies every volume (#293) and the agent can stage a copy of one
-	// (#294), but nothing moves that copy off the node yet (#295, #296) and
-	// the fan-out is not wired to it. The saga says so in its own log lines,
-	// its manifest, its ledger row and the generation's name on the platter.
+	// SCOPE: every generation this build writes is `controlplane-local` — the
+	// database, the mesh CA, Headscale state, AND every `critical`/`state`
+	// volume of every app installed on THIS node. An app on a compute node is
+	// still not in it: nothing moves a staged copy off the node that made it
+	// (#295, #296). The saga says so in its own log lines, its manifest, its
+	// ledger row and the generation's name on the platter, and names every
+	// volume it could not take.
 	//
 	// The api does NOT decide where the archive is staged, and nothing here
 	// creates a staging directory. The agent on the target node owns that root
@@ -591,6 +593,13 @@ func main() {
 		},
 		DB:     backupStore.DB(),
 		DBPath: dbPath,
+		// §4.5's app-volume fan-out, and its only two inputs: what is installed
+		// (and on which node) joined to the tile that classifies each of its
+		// volumes. Both required — step 1 refuses a run that cannot enumerate
+		// them rather than writing an archive that would silently contain no
+		// app data.
+		Apps:  appsStore,
+		Tiles: catalog.MustLoad(),
 	}))
 	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
 	// bmc.configure is registered after NewServer below — it needs the

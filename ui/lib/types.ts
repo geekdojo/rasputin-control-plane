@@ -1087,14 +1087,19 @@ export interface BackupTarget {
 export type BackupRunStatus = 'running' | 'succeeded' | 'failed';
 
 /**
- * The scope of a generation (design/storage.md §4.5).
+ * The scope of a generation (design/storage.md §4.5) — the archive's REACH.
  *
- * `identity-only` is everything this build writes: the control-plane database,
- * the mesh CA and Headscale state — and NO app data, because no volume anywhere
- * carries a backup class yet. It is not a complete backup, and every surface
- * that renders a run has to say so.
+ * `controlplane-local` is everything this build writes: the control-plane
+ * database, the mesh CA and Headscale state, PLUS every volume classed
+ * `critical` or `state` belonging to an app installed on the controlplane node.
+ * An app on a compute node is still not in it — nothing yet moves a staged copy
+ * off the node that made it — so it is not a complete backup of the cluster and
+ * every surface that renders a run has to say so.
+ *
+ * `identity-only` is what earlier builds wrote and is still readable on disk.
+ * `full` is what a build that reaches every node will write.
  */
-export type BackupScope = 'identity-only' | 'full';
+export type BackupScope = 'identity-only' | 'controlplane-local' | 'full';
 
 /** One row of the backup_runs ledger. Carries no key material — a digest is not one. */
 export interface BackupRun {
@@ -1111,8 +1116,14 @@ export interface BackupRun {
   /** SHA-256 over the SEALED archive. The only thing that verifies it without a custody secret. */
   digest?: string;
   sizeBytes?: number;
-  /** 0 on every run this build writes. A number, so "none" is visible rather than absent. */
+  /** How many app volumes went into the archive. A number, so "none" is visible rather than absent. */
   appVolumesCaptured: number;
+  /** How many CLASSIFIED volumes did NOT. The other half of the sentence — "2 of 3". */
+  appVolumesSkipped: number;
+  /** True only when every classified volume in the cluster was captured. */
+  complete: boolean;
+  /** A caveat on a run that is not failed — skipped volumes, or an app left down. */
+  warning?: string;
   generationsKept?: number;
   generationsPruned?: number;
   status: BackupRunStatus;

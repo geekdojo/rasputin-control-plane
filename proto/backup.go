@@ -116,11 +116,34 @@ const BackupTargetReserveBytes uint64 = 256 << 20 // 256 MiB
 // contract, that ends up in the file name on the platter.
 const BackupScopeIdentityOnly = "identity-only"
 
-// BackupScopeFull is what a build that captures the §4.5 volume set will stamp
-// instead. Defined now so the manifest's `scope` field is a closed set from the
-// first generation ever written rather than a string that acquires meaning
-// later, and so a restore reading a generation can branch on a value it knows
-// instead of on the absence of one.
+// BackupScopeControlplaneLocal is the scope of every archive THIS build writes:
+// the identity set, plus every `critical` and `state` volume of every installed
+// app HOSTED ON THE CONTROLPLANE NODE, in one sealed generation.
+//
+// The name is the point. It says what the archive reaches — the controlplane's
+// own disk — and by saying it, says what it does not: an app installed on a
+// compute node has its volumes on that node, and nothing yet moves a staged
+// copy off the node it was taken on (#295 per-node streaming, #296 ingest). A
+// scope called `full` or `apps` would read as a claim about the cluster; this
+// one reads as a claim about one machine, which is the true one.
+//
+// It is stamped into the generation's directory name, the sealed header's AEAD
+// additional data, the manifest, the backup_runs row, the job's log lines and
+// the UI banner — six surfaces, one constant, so no paraphrase can drift into
+// saying something weaker than the truth.
+//
+// It describes the run's REACH and is therefore fixed for the build: the
+// generation id is minted at step 1, before a single volume has been staged, so
+// the scope cannot depend on the outcome. What the outcome decides is
+// Manifest.Complete, which is true only when every classified volume in the
+// cluster was in fact captured.
+const BackupScopeControlplaneLocal = "controlplane-local"
+
+// BackupScopeFull is what a build that captures the §4.5 volume set ON EVERY
+// NODE will stamp instead. Defined now so the manifest's `scope` field is a
+// closed set from the first generation ever written rather than a string that
+// acquires meaning later, and so a restore reading a generation can branch on a
+// value it knows instead of on the absence of one.
 const BackupScopeFull = "full"
 
 // BackupRefusalInsufficientSpace is the preflight refusal §4.4 asks for: the

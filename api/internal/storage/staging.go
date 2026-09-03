@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -27,13 +28,22 @@ import (
 // A run materialises up to three things under the staging directory:
 //
 //	1. the `VACUUM INTO` snapshot of rasputin.db          ~ db size
-//	2. the assembled tar (snapshot + trust dir + headscale) ~ identity size
-//	3. the sealed archive                                  ~ identity size
+//	2. one staged app-volume copy, from the agent          ~ largest volume
+//	3. the fan-out's tar of the captured volumes           ~ volume total
+//	4. the assembled tar (snapshot + identity + volumes)   ~ identity + volumes
+//	5. the sealed archive                                  ~ identity + volumes
 //
-// (1) is deleted as soon as (2) is built and (2) as soon as (3) is sealed, so
-// the true peak is lower — but the guard sizes for the pessimistic case,
+// (1) is deleted as soon as (4) is built, (2) as soon as it is copied into (3),
+// (3) as soon as (4) has taken its members, and (4) as soon as (5) is sealed —
+// so the true peak is lower. The guard sizes for the pessimistic case anyway,
 // because an estimate that is optimistic about a disk-full failure is not a
-// guard. So: peak ≈ dbSize + 2 × identitySize.
+// guard. So: peak ≈ dbSize + 2 × (identitySize + volumeSize) + largestVolume.
+//
+// The volume terms are ZERO until the fan-out has staged something, and that is
+// not a gap in the estimate — it is the fact. A volume's size cannot be known
+// before it is staged, so the fan-out re-runs this guard before EVERY stage
+// with what it has measured, and records the volumes it refuses rather than
+// taking the partition down.
 //
 // The reserve it must leave behind is StagingReserveBytes, and the number is
 // not arbitrary: it is VictoriaMetrics' `-storage.minFreeDiskSpaceBytes=2GB`
@@ -131,6 +141,18 @@ type StagingBudget struct {
 	// IdentityBytes is the whole §4.5 identity set: the database plus the trust
 	// directory plus Headscale state.
 	IdentityBytes uint64 `json:"identityBytes"`
+	// VolumeBytes is the app-volume data captured so far — the staged tars the
+	// fan-out has already taken — and LargestVolumeBytes the biggest single one
+	// of them.
+	//
+	// Both are zero at the top of a run, and they are not a guess that has not
+	// been made yet: a volume's size is unknowable until it has been staged, so
+	// the fan-out re-sizes before EVERY stage with what it has measured, and
+	// refuses the rest rather than filling the disk. LargestVolumeBytes is
+	// §4.7's peak term — the one staged copy that exists on the agent's root
+	// alongside everything the api is holding.
+	VolumeBytes        uint64 `json:"volumeBytes"`
+	LargestVolumeBytes uint64 `json:"largestVolumeBytes"`
 	// PeakBytes is the pessimistic simultaneous residency — see the file
 	// comment for why it does not model the deletes.
 	PeakBytes uint64 `json:"peakBytes"`
@@ -153,28 +175,39 @@ func (b StagingBudget) Sufficient() bool {
 // Explain renders the refusal an operator reads. Both numbers, always: "not
 // enough space" is not actionable and "3.1 GiB free, needs 4.4 GiB" is.
 func (b StagingBudget) Explain(dir string) string {
-	return fmt.Sprintf("%s has %s free; staging this backup needs about %s (a %s identity set, assembled and then sealed) "+
+	return fmt.Sprintf("%s has %s free; staging this backup needs about %s (a %s identity set plus %s of app-volume data, "+
+		"assembled and then sealed, alongside a staged copy of the largest single volume at %s) "+
 		"while leaving the %s reserve that keeps the metrics store writable. Nothing was written, and the previous "+
 		"generations on the backup target are untouched",
 		dir, humanBytes(b.FreeBytes), humanBytes(b.PeakBytes+b.ReserveBytes),
-		humanBytes(b.IdentityBytes), humanBytes(b.ReserveBytes))
+		humanBytes(b.IdentityBytes), humanBytes(b.VolumeBytes), humanBytes(b.LargestVolumeBytes),
+		humanBytes(b.ReserveBytes))
 }
 
 // PlanStaging sizes a run and checks the staging partition against it.
 //
-// identityBytes is the measured size of the §4.5 set; dbBytes is the live
-// database's size within it.
-func PlanStaging(dir string, dbBytes, identityBytes uint64) (StagingBudget, error) {
+// identityBytes is the measured size of the §4.5 set and dbBytes the live
+// database's size within it. volumeBytes is the app-volume data captured so far
+// and largestVolumeBytes the biggest single volume among it — both zero before
+// the fan-out has staged anything, and both re-supplied before every subsequent
+// stage, because that is the only moment either number exists.
+func PlanStaging(dir string, dbBytes, identityBytes, volumeBytes, largestVolumeBytes uint64) (StagingBudget, error) {
 	free, err := FreeBytes(dir)
 	if err != nil {
 		return StagingBudget{}, err
 	}
 	b := StagingBudget{
-		DBBytes:       dbBytes,
-		IdentityBytes: identityBytes,
-		PeakBytes:     dbBytes + 2*identityBytes,
-		FreeBytes:     free,
-		ReserveBytes:  StagingReserveBytes,
+		DBBytes:            dbBytes,
+		IdentityBytes:      identityBytes,
+		VolumeBytes:        volumeBytes,
+		LargestVolumeBytes: largestVolumeBytes,
+		// The payload is assembled once and sealed once, so it is resident
+		// twice; the largest single staged volume is resident alongside both
+		// for the length of one copy. See the file comment for why the deletes
+		// are not modelled.
+		PeakBytes:    dbBytes + 2*(identityBytes+volumeBytes) + largestVolumeBytes,
+		FreeBytes:    free,
+		ReserveBytes: StagingReserveBytes,
 	}
 	if !b.Sufficient() {
 		return b, fmt.Errorf("%w: %s", ErrStagingFull, b.Explain(dir))
@@ -249,4 +282,34 @@ func byteCount(n int64) uint64 {
 		return 0
 	}
 	return uint64(n)
+}
+
+// signedByteCount is byteCount's inverse, guarded the same way and for the same
+// reason: a bare int64(n) on a uint64 above MaxInt64 wraps NEGATIVE, and a
+// negative byte count in a size total reads as an archive that shrank. Nothing
+// in this package can produce a value that large, which is exactly why the
+// guard is cheap and the failure it prevents would be baffling.
+func signedByteCount(n uint64) int64 {
+	if n > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(n)
+}
+
+// joinStaging is stagedPath's form for a caller that already holds the root —
+// the fan-out, which stages many files under one directory resolved once.
+//
+// The same two checks, in the same order, immediately before the join: the root
+// must be absolute and already clean, and the name must be a single plain file
+// name by proto.BackupValidStagingName — the SAME predicate the agent applies to
+// what it is sent. Neither half can contribute a traversal, so the result is
+// always a direct child of the staging root.
+func joinStaging(dir, name string) string {
+	if err := checkStagingRoot(dir); err != nil {
+		return ""
+	}
+	if !proto.BackupValidStagingName(name) {
+		return ""
+	}
+	return filepath.Join(dir, name)
 }

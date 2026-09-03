@@ -314,7 +314,7 @@ func TestNoKeyMaterialReachesTheLedger(t *testing.T) {
 	if !strings.Contains(ledger, h.key.publicB64) {
 		t.Error("the ledger does not contain the target's public key, so this scan may have been looking at nothing")
 	}
-	if !strings.Contains(ledger, "identity-only") {
+	if !strings.Contains(ledger, proto.BackupScopeControlplaneLocal) {
 		t.Error("the ledger never mentions the scope; the run's own output must say what it captured")
 	}
 }
@@ -331,7 +331,7 @@ func TestAssembleWritesTheManifestFirst(t *testing.T) {
 	m, err := Assemble(&buf, AssembleOptions{
 		Sources:      IdentitySources{TrustDir: h.trustDir, MeshStateDir: h.meshDir},
 		SnapshotPath: snap,
-		GenerationID: "20260902T000000Z-test-identity-only",
+		GenerationID: "20260902T000000Z-test-controlplane-local",
 		JobID:        "job-1",
 		ClusterID:    "home1",
 		KeyID:        "key-1",
@@ -339,7 +339,9 @@ func TestAssembleWritesTheManifestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if m.Scope != proto.BackupScopeIdentityOnly || m.Complete {
+	// No fan-out report was supplied, so nothing was classified and nothing was
+	// missed: the scope is this build's reach and complete is true.
+	if m.Scope != proto.BackupScopeControlplaneLocal || !m.Complete {
 		t.Errorf("manifest scope=%q complete=%v", m.Scope, m.Complete)
 	}
 
@@ -359,11 +361,11 @@ func TestAssembleWritesTheManifestFirst(t *testing.T) {
 	if err := json.Unmarshal(body, &inner); err != nil {
 		t.Fatalf("manifest inside the archive is not JSON: %v", err)
 	}
-	if inner.Scope != proto.BackupScopeIdentityOnly {
+	if inner.Scope != proto.BackupScopeControlplaneLocal {
 		t.Errorf("the manifest inside the archive says scope=%q", inner.Scope)
 	}
-	if inner.AppVolumes.CapturedCount != 0 || inner.AppVolumes.Reason == "" {
-		t.Error("the archive's own manifest does not carry the empty fan-out's report")
+	if inner.AppVolumes.CapturedCount != 0 || inner.AppVolumes.Reason == "" || inner.AppVolumes.Volumes == nil {
+		t.Error("the archive's own manifest does not carry the fan-out's report")
 	}
 
 	// Every remaining entry is listed, in order, with the digest the manifest
@@ -420,21 +422,49 @@ func TestAssembleRefusesWithoutASnapshot(t *testing.T) {
 	}
 }
 
-// TestFanOutIsDeclaredAndEmpty pins the shape of the phase that will eventually
-// stop being empty. It asserts the report says what is missing and names the
-// issues, so a future edit that quietly drops the reason fails here.
-func TestFanOutIsDeclaredAndEmpty(t *testing.T) {
-	r := FanOutAppVolumes()
-	if r.Captured == nil {
-		t.Error("Captured is nil rather than an empty slice: `\"captured\": null` is not the answer `[]` is")
+// TestFanOutReportIsHonest pins the shape of the report an operator reads on
+// the day they discover an app is not in their archive.
+//
+// Every assertion here is about a way the report could be quietly weaker than
+// the truth: a nil slice rendering as `null`, a count that disagrees with the
+// records, a not-captured volume with no reason, a `complete` that is true
+// while something was missed.
+func TestFanOutReportIsHonest(t *testing.T) {
+	empty := NewAppVolumeReport(nil, 0)
+	if empty.Captured == nil || empty.Volumes == nil {
+		t.Error("nil slices render as `null`, and `null` is not the answer `[]` is")
 	}
-	if r.CapturedCount != 0 || len(r.Captured) != 0 {
-		t.Errorf("this build captures no app volumes; got %d", r.CapturedCount)
+	if !empty.Complete() {
+		t.Error("a cluster with no classified volumes has had every one of them captured")
 	}
-	if r.Reason == "" {
-		t.Fatal("the fan-out reports nothing captured and does not say why")
+	if empty.Reason == "" {
+		t.Fatal("the report does not carry the standing caveat")
 	}
-	for _, issue := range []string{"#295", "#296", "#290"} {
+	if AppVolumeFanOutReason() != empty.Reason {
+		t.Error("the exported reason and the report's reason have drifted apart; every surface must say the same words")
+	}
+
+	r := NewAppVolumeReport([]VolumeRecord{
+		{App: "vaultwarden", Volume: "vaultwarden-data", Class: "critical", Captured: true, SizeBytes: 10, AppRestored: true},
+		{App: "immich", Volume: "immich-upload", Class: "state", Captured: false, Reason: ReasonOffNode, AppRestored: true},
+		{App: "paperless", Volume: "paperless-data", Class: "state", Captured: false, Reason: "refused", AppRestored: false},
+	}, 1)
+	if r.CapturedCount != 1 || r.SkippedCount != 2 {
+		t.Errorf("counts = %d captured / %d skipped, want 1/2", r.CapturedCount, r.SkippedCount)
+	}
+	if len(r.Captured) != 1 || r.Captured[0] != "vaultwarden/vaultwarden-data" {
+		t.Errorf("captured = %v", r.Captured)
+	}
+	if r.Complete() {
+		t.Error("complete is true with two volumes missing — the one field a hurried reader trusts is lying")
+	}
+	if len(r.AppsLeftDown) != 1 || r.AppsLeftDown[0] != "paperless" {
+		t.Errorf("appsLeftDown = %v, want [paperless] — an app the backup left down must be a field, not a scan", r.AppsLeftDown)
+	}
+	if !strings.Contains(r.Summary, "1 of 3") {
+		t.Errorf("summary = %q; it must say how many of how many", r.Summary)
+	}
+	for _, issue := range []string{"#295", "#296"} {
 		if !strings.Contains(strings.Join(r.BlockedBy, " "), issue) {
 			t.Errorf("blockedBy does not name %s", issue)
 		}
@@ -448,14 +478,18 @@ func TestFanOutIsDeclaredAndEmpty(t *testing.T) {
 			t.Errorf("blockedBy still names %s, which shipped", done)
 		}
 	}
-	if !strings.Contains(r.Reason, "#294") || !strings.Contains(r.Reason, "#295") {
-		t.Error("the reason must say the agent can stage a copy (#294) and that moving it is what is missing (#295)")
+	if !strings.Contains(r.Reason, "#295") || !strings.Contains(r.Reason, "#296") {
+		t.Error("the reason must name what is holding off-node volumes out of the archive")
 	}
-	if !strings.Contains(r.Reason, "not a complete backup") {
-		t.Error("the reason does not say, in words, that this is not a complete backup")
+	if !strings.Contains(r.Reason, proto.BackupScopeControlplaneLocal) {
+		t.Error("the standing caveat does not name the scope, so a reader cannot connect it to the generation on the platter")
 	}
-	if AppVolumeFanOutReason() != r.Reason {
-		t.Error("the exported reason and the report's reason have drifted apart; every surface must say the same words")
+	// Every not-captured record carries a sentence. This is the invariant the
+	// whole structure exists for.
+	for _, v := range r.Volumes {
+		if !v.Captured && strings.TrimSpace(v.Reason) == "" {
+			t.Errorf("%s/%s is recorded as not captured with no reason", v.App, v.Volume)
+		}
 	}
 }
 

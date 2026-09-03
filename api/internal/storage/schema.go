@@ -51,11 +51,11 @@ CREATE INDEX IF NOT EXISTS idx_backup_targets_partuuid ON backup_targets(part_uu
 -- walking the job ledger's step results.
 --
 -- scope is the honest half. Every generation this build writes is
--- 'identity-only' (proto.BackupScopeIdentityOnly): the §4.5 contents list also
--- calls for every volume classed critical or state on any node, and no volume
--- anywhere carries a class yet. app_volumes_captured therefore reads 0 on every
--- row, and it is a COLUMN rather than an assumption precisely so the day it
--- reads something else is visible in the data rather than only in a changelog.
+-- 'controlplane-local' (proto.BackupScopeControlplaneLocal): the §4.5 contents
+-- list calls for every volume classed critical or state on ANY node, and this
+-- build can only reach the ones on the controlplane. app_volumes_captured and
+-- app_volumes_skipped are the two halves of that sentence, and the complete
+-- column is 1 only when the second is zero.
 CREATE TABLE IF NOT EXISTS backup_runs (
     job_id               TEXT PRIMARY KEY,
     target_job_id        TEXT NOT NULL DEFAULT '',  -- the backup_targets row this run wrote to
@@ -68,6 +68,9 @@ CREATE TABLE IF NOT EXISTS backup_runs (
     digest               TEXT NOT NULL DEFAULT '',  -- sha256 over the SEALED bytes; never a key
     size_bytes           INTEGER NOT NULL DEFAULT 0,
     app_volumes_captured INTEGER NOT NULL DEFAULT 0,
+    app_volumes_skipped  INTEGER NOT NULL DEFAULT 0,  -- classified volumes NOT captured
+    complete             INTEGER NOT NULL DEFAULT 0,  -- 1 only when nothing classified was missed
+    warning              TEXT NOT NULL DEFAULT '',    -- a caveat on a row that is not failed
     generations_kept     INTEGER NOT NULL DEFAULT 0,
     generations_pruned   INTEGER NOT NULL DEFAULT 0,
     status               TEXT NOT NULL,  -- 'running' | 'succeeded' | 'failed'
@@ -95,7 +98,16 @@ CREATE INDEX IF NOT EXISTS idx_backup_runs_started ON backup_runs(started_at DES
 // design and genuinely have no public key, which is the same thing their
 // on-disk markers say. Nothing back-fills it; a target gets one by being
 // claimed again.
+//
+// app_volumes_skipped, complete and warning: #290's second half. 0/0/” is right
+// for every row written before the columns existed — those runs captured no app
+// volumes and skipped none, because the fan-out enumerated nothing at all, and
+// they were honest about it in the only field they had (scope 'identity-only').
+// Nothing back-fills them; a row gets them by being written by this build.
 var migrations = []string{
 	`ALTER TABLE backup_targets ADD COLUMN wiped INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE backup_targets ADD COLUMN public_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE backup_runs ADD COLUMN app_volumes_skipped INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE backup_runs ADD COLUMN complete INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE backup_runs ADD COLUMN warning TEXT NOT NULL DEFAULT ''`,
 }

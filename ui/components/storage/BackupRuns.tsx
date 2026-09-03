@@ -21,8 +21,8 @@
 // their apps are safe. That belief is the failure mode this whole panel is
 // shaped around, so the caveat is rendered ABOVE the success line, in the
 // api's own words (scopeWarning), on every render, with no way to hide it —
-// and the per-run rows repeat it as a scope tag. When the fan-out stops being
-// empty the api starts sending `scope: "full"` and this banner goes away on its
+// and the per-run rows repeat it as a scope tag. When the fan-out reaches every
+// node the api starts sending `scope: "full"` and this banner goes away on its
 // own.
 
 import { AlertTriangle, Clock, Play, RefreshCw } from 'lucide-react';
@@ -39,7 +39,8 @@ import { Badge, Btn, DIM, FG, HAIR_SOFT, Hint, SectionLabel, Select, srOnly, tdS
 import { MONO } from '../ui-theme';
 import {
   CADENCE_OFF,
-  appVolumeSummary,
+  runScopeTitle,
+  scopeHeadline,
   cadenceRequest,
   cadenceValue,
   shouldWarnIncomplete,
@@ -140,7 +141,7 @@ export function BackupRuns({ hasTarget }: { hasTarget: boolean }) {
           <AlertTriangle size={14} color={WARN} style={{ flexShrink: 0, marginTop: 2 }} aria-hidden />
           <div>
             <strong style={{ color: WARN, fontFamily: MONO, fontSize: 10, letterSpacing: '0.1em' }}>
-              IDENTITY ONLY — NOT A COMPLETE BACKUP
+              {scopeHeadline(data)}
             </strong>
             <div style={{ marginTop: 5, color: DIM }}>
               {data?.scopeWarning ??
@@ -273,7 +274,7 @@ function RunRow({ run }: { run: BackupRun }) {
             say what the archive it names contains. */}
         <span
           style={{ color: run.scope === 'full' ? OK_GREEN : WARN, fontSize: 10 }}
-          title={appVolumeSummary(run.appVolumesCaptured)}
+          title={runScopeTitle(run)}
         >
           {run.scope ?? '—'}
         </span>

@@ -169,16 +169,44 @@ func TestSufficientSaturates(t *testing.T) {
 // with the numbers in it.
 func TestPlanStagingRefusesOnARealDirectory(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := PlanStaging(dir, 1<<20, 1<<20); err != nil {
+	if _, err := PlanStaging(dir, 1<<20, 1<<20, 0, 0); err != nil {
 		t.Fatalf("a megabyte should fit in a temp dir: %v", err)
 	}
 	// An exabyte will not.
-	_, err := PlanStaging(dir, 1<<60, 1<<60)
+	_, err := PlanStaging(dir, 1<<60, 1<<60, 0, 0)
 	if err == nil {
 		t.Fatal("PlanStaging accepted an exabyte")
 	}
 	if !strings.Contains(err.Error(), "not enough free space") {
 		t.Errorf("error = %q", err)
+	}
+}
+
+// TestPlanStagingSizesForTheLargestSingleVolume is §4.7's peak, with app
+// volumes in it: the payload is resident twice (assembled, then sealed) and the
+// largest single staged volume is resident alongside both.
+//
+// The assertion that matters is the LAST one — a run whose volumes are small
+// enough to fit but whose largest single volume is not must be refused. Sizing
+// only for the total would let a backup fill the disk it is protecting on the
+// one volume that mattered.
+func TestPlanStagingSizesForTheLargestSingleVolume(t *testing.T) {
+	dir := t.TempDir()
+	b, err := PlanStaging(dir, 1<<20, 4<<20, 8<<20, 5<<20)
+	if err != nil {
+		t.Fatalf("a few megabytes should fit in a temp dir: %v", err)
+	}
+	want := uint64(1<<20) + 2*(4<<20+8<<20) + 5<<20
+	if b.PeakBytes != want {
+		t.Errorf("peak = %d, want %d (db + 2×(identity+volumes) + largest single volume)", b.PeakBytes, want)
+	}
+	if b.VolumeBytes != 8<<20 || b.LargestVolumeBytes != 5<<20 {
+		t.Errorf("the budget did not carry the volume terms it was sized from: %+v", b)
+	}
+	// The largest single volume alone is what tips it over. Everything else is
+	// tiny; if the guard ignored LargestVolumeBytes this would be accepted.
+	if _, err := PlanStaging(dir, 0, 0, 0, 1<<60); err == nil {
+		t.Fatal("PlanStaging accepted an exabyte-sized single volume — the peak is not being sized for it")
 	}
 }
 
