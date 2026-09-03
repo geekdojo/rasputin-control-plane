@@ -36,6 +36,9 @@ type mockState struct {
 	Status     string    `json:"status"`
 	DeployedAt time.Time `json:"deployedAt,omitempty"`
 	StoppedAt  time.Time `json:"stoppedAt,omitempty"`
+	// VolumesDeleted records that the last Stop asked for `down -v`. The mock
+	// has no volumes; this is so a test can see the flag arrived.
+	VolumesDeleted bool `json:"volumesDeleted,omitempty"`
 }
 
 func (m *MockBackend) appDir(appID string) string {
@@ -101,7 +104,7 @@ func (m *MockBackend) Deploy(ctx context.Context, appID, name, composeYAML strin
 	return proto.AppStatusRunning, "mock backend: pretend-deployed", nil
 }
 
-func (m *MockBackend) Stop(ctx context.Context, appID string) (proto.AppStatus, string, error) {
+func (m *MockBackend) Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, err := m.loadState(appID)
@@ -110,8 +113,12 @@ func (m *MockBackend) Stop(ctx context.Context, appID string) (proto.AppStatus, 
 	}
 	s.Status = string(proto.AppStatusStopped)
 	s.StoppedAt = time.Now().UTC()
+	s.VolumesDeleted = deleteVolumes
 	if err := m.saveState(s); err != nil {
 		return proto.AppStatusFailed, "save state: " + err.Error(), err
+	}
+	if deleteVolumes {
+		return proto.AppStatusStopped, "mock backend: pretend-stopped, pretend-deleted volumes", nil
 	}
 	return proto.AppStatusStopped, "mock backend: pretend-stopped", nil
 }

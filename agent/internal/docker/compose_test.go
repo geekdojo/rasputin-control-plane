@@ -637,3 +637,22 @@ func TestDeployOneShotStackReportsRunningWithNoDetail(t *testing.T) {
 		t.Errorf("a successful deploy should carry no detail, got %q", detail)
 	}
 }
+
+// `-v` is the whole difference between an uninstall that keeps an app's data
+// and one that destroys it (geekdojo/geekdojo-brain#399). Pinned so the flag
+// cannot appear on the keep path or vanish from the delete path unnoticed.
+func TestComposeDownArgs(t *testing.T) {
+	if got := composeDownArgs(false); len(got) != 1 || got[0] != "down" {
+		t.Fatalf("keep: %v, want [down] — plain down never removes volumes", got)
+	}
+	if got := composeDownArgs(true); len(got) != 2 || got[0] != "down" || got[1] != "-v" {
+		t.Fatalf("delete: %v, want [down -v]", got)
+	}
+	// And the full invocation stays project-scoped: -p is what confines -v to
+	// this app's own volumes.
+	full := composeArgs("/x/docker-compose.yml", projectName("01J6ZK3Q9V8XKX2M5TQ7R4A9BE"), composeDownArgs(true)...)
+	want := []string{"compose", "-f", "/x/docker-compose.yml", "-p", "rasp_01j6zk3q9v8xkx2m5tq7r4a9be", "down", "-v"}
+	if strings.Join(full, " ") != strings.Join(want, " ") {
+		t.Fatalf("full args: %v, want %v", full, want)
+	}
+}

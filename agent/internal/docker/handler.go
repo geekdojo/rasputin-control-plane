@@ -50,7 +50,67 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscrip
 	subs = append(subs, sub)
 	log.Printf("rasputin-agent: subscribed to %s", statusSubj)
 
+	// The orphan-volume verbs exist only where the backend can answer them
+	// honestly. The mock has no volumes and does not implement the interface.
+	if reaper, ok := b.(VolumeReaper); ok {
+		listSubj := proto.AppVolumesListSubject(nodeID)
+		sub, err = nc.Subscribe(listSubj, func(m *nats.Msg) {
+			handleVolumesList(reaper, m)
+		})
+		if err != nil {
+			return subs, err
+		}
+		subs = append(subs, sub)
+		log.Printf("rasputin-agent: subscribed to %s", listSubj)
+
+		removeSubj := proto.AppVolumesRemoveSubject(nodeID)
+		sub, err = nc.Subscribe(removeSubj, func(m *nats.Msg) {
+			handleVolumesRemove(reaper, m)
+		})
+		if err != nil {
+			return subs, err
+		}
+		subs = append(subs, sub)
+		log.Printf("rasputin-agent: subscribed to %s", removeSubj)
+	}
+
 	return subs, nil
+}
+
+func handleVolumesList(r VolumeReaper, m *nats.Msg) {
+	// Sizing walks every managed volume's files; a node with a large bulk
+	// volume needs longer than the other verbs get.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	vols, err := r.ListProjectVolumes(ctx)
+	if err != nil {
+		bus.Respond(m, proto.AppVolumesListAck{OK: false, Detail: err.Error(), Volumes: []proto.AppVolumeInfo{}})
+		log.Printf("rasputin-agent: docker.volumes.list: %v", err)
+		return
+	}
+	if vols == nil {
+		vols = []proto.AppVolumeInfo{}
+	}
+	bus.Respond(m, proto.AppVolumesListAck{OK: true, Volumes: vols})
+}
+
+func handleVolumesRemove(r VolumeReaper, m *nats.Msg) {
+	var cmd proto.AppVolumesRemoveCmd
+	if err := json.Unmarshal(m.Data, &cmd); err != nil {
+		bus.Respond(m, proto.AppVolumesRemoveAck{OK: false, Detail: "bad cmd",
+			Removed: []string{}, Refused: []proto.AppVolumeRefusal{}})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	ack := r.RemoveProjectVolumes(ctx, cmd)
+	for _, ref := range ack.Refused {
+		log.Printf("rasputin-agent: docker.volumes.remove: refused %s: %s", ref.Name, ref.Reason)
+	}
+	for _, name := range ack.Removed {
+		log.Printf("rasputin-agent: docker.volumes.remove: removed %s", name)
+	}
+	bus.Respond(m, ack)
 }
 
 func handleDeploy(b Backend, m *nats.Msg) {
@@ -85,7 +145,7 @@ func handleStop(b Backend, m *nats.Msg) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	status, detail, err := b.Stop(ctx, cmd.AppID)
+	status, detail, err := b.Stop(ctx, cmd.AppID, cmd.DeleteVolumes)
 	if err != nil {
 		bus.Respond(m, proto.AppStopAck{OK: false, Status: status, Detail: detail})
 		log.Printf("rasputin-agent: docker.stop %s: %v", cmd.AppID, err)

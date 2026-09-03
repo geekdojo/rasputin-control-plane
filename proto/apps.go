@@ -2,6 +2,7 @@ package proto
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -120,6 +121,17 @@ type AppDeployAck struct {
 // AppStopCmd is sent on rasputin.node.<id>.cmd.docker.stop.
 type AppStopCmd struct {
 	AppID string `json:"appId"`
+	// DeleteVolumes asks the agent to run `compose down -v` rather than
+	// `compose down`: the project's named volumes go with its containers.
+	//
+	// Set ONLY by the app.delete saga, and only when the operator answered
+	// "Delete volumes?" with a deliberate yes (geekdojo/geekdojo-brain#399).
+	// Absent is false, which is what an api older than this field sends and
+	// what an operator who did not tick the box sends — destroying data is
+	// never the default. `compose down -v` is scoped to the compose project,
+	// which is the property that makes this safe: it can only remove volumes
+	// named rasp_<appID>_*, never another app's and never a volume by name.
+	DeleteVolumes bool `json:"deleteVolumes,omitempty"`
 }
 
 type AppStopAck struct {
@@ -246,6 +258,18 @@ func AppStatusSubject(nodeID string) string {
 	return NodeCmdSubject(nodeID, "docker.status")
 }
 
+// AppVolumesListSubject is the cmd subject for enumerating the Rasputin-managed
+// compose volumes on nodeID (read-only).
+func AppVolumesListSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "docker.volumes.list")
+}
+
+// AppVolumesRemoveSubject is the cmd subject for removing orphaned
+// Rasputin-managed compose volumes on nodeID by exact name.
+func AppVolumesRemoveSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "docker.volumes.remove")
+}
+
 // AppChangeSubject is the publish subject for an app-lifecycle event.
 func AppChangeSubject(appID string, change AppChangeType) string {
 	return fmt.Sprintf("rasputin.apps.%s.%s", appID, string(change))
@@ -254,3 +278,154 @@ func AppChangeSubject(appID string, change AppChangeType) string {
 // AllAppsFilter matches every app change event. Used by the UI WebSocket
 // bridge.
 const AllAppsFilter = "rasputin.apps.>"
+
+// --- Rasputin-managed volume names -----------------------------------------
+//
+// Every app's compose project is named rasp_<appID> (agent/internal/docker
+// projectName), so compose names each of its volumes rasp_<appID>_<volume>.
+// Both the api and the agent read that shape, and they read it from HERE so
+// they cannot disagree about it: the api uses it to decide which volumes have
+// no owner in the apps ledger, and the agent uses it to refuse to touch
+// anything else.
+
+// AppVolumePrefix is the prefix every Rasputin-managed compose volume carries.
+const AppVolumePrefix = "rasp_"
+
+// appIDLen is the length of a ULID, which is what every app id is
+// (api/internal/api/apps_handlers.go mints them with ulid.Make).
+const appIDLen = 26
+
+// AppProjectName is the compose project name for appID: rasp_<appid>, lower-
+// cased because that is what the agent hands `docker compose -p`.
+func AppProjectName(appID string) string {
+	return AppVolumePrefix + strings.ToLower(appID)
+}
+
+// AppVolumeName is the docker volume name compose gives volume `volume` of the
+// app appID's project.
+func AppVolumeName(appID, volume string) string {
+	return AppProjectName(appID) + "_" + volume
+}
+
+// ParseAppVolumeName splits a docker volume name of the shape
+// rasp_<ulid>_<volume> into its app id (upper-cased, as the ledger stores it)
+// and its compose volume name. ok is false for anything else: a name outside
+// the prefix, a project segment that is not a 26-character ULID, or an empty
+// volume segment. It is the whole of the name check the remove verb applies,
+// so it is deliberately strict — a ULID is Crockford base32, and nothing in
+// that alphabet is an underscore, so the first underscore after the prefix is
+// unambiguous.
+func ParseAppVolumeName(name string) (appID, volume string, ok bool) {
+	if !strings.HasPrefix(name, AppVolumePrefix) {
+		return "", "", false
+	}
+	rest := name[len(AppVolumePrefix):]
+	if len(rest) < appIDLen+2 || rest[appIDLen] != '_' {
+		return "", "", false
+	}
+	id := rest[:appIDLen]
+	for _, r := range id {
+		if !isCrockford(r) {
+			return "", "", false
+		}
+	}
+	volume = rest[appIDLen+1:]
+	if volume == "" {
+		return "", "", false
+	}
+	return strings.ToUpper(id), volume, true
+}
+
+// isCrockford reports whether r is in ULID's Crockford base32 alphabet, either
+// case (compose lower-cases the project name; the ledger holds upper).
+func isCrockford(r rune) bool {
+	switch {
+	case r >= '0' && r <= '9':
+		return true
+	case r >= 'a' && r <= 'z':
+		r -= 'a' - 'A'
+	}
+	if r < 'A' || r > 'Z' {
+		return false
+	}
+	// Crockford excludes I, L, O and U.
+	return r != 'I' && r != 'L' && r != 'O' && r != 'U'
+}
+
+// AppVolumeInfo is one Rasputin-managed compose volume as the agent sees it.
+type AppVolumeInfo struct {
+	// Name is the docker volume name, rasp_<appid>_<volume>.
+	Name string `json:"name"`
+	// AppID is the ULID parsed out of Name, upper-cased to match the ledger.
+	AppID string `json:"appId"`
+	// Volume is the compose volume name parsed out of Name — what the tile
+	// declares and what the backup manifest records.
+	Volume string `json:"volume"`
+	// SizeBytes is the sum of the volume's file sizes on the node's disk.
+	SizeBytes uint64 `json:"sizeBytes"`
+	// CreatedAt is docker's creation timestamp for the volume.
+	CreatedAt time.Time `json:"createdAt"`
+	// InUse says at least one container (running or not) references the
+	// volume. An in-use volume is never removed.
+	InUse bool `json:"inUse"`
+}
+
+// AppVolumesListCmd is the (empty) request body on docker.volumes.list.
+type AppVolumesListCmd struct{}
+
+// AppVolumesListAck is the reply: every volume on the node whose name parses
+// as rasp_<ulid>_<volume> AND that docker labels as belonging to that compose
+// project. Nothing else is listed — the api, not the agent, knows which of
+// these still have an owner.
+type AppVolumesListAck struct {
+	OK      bool            `json:"ok"`
+	Detail  string          `json:"detail,omitempty"`
+	Volumes []AppVolumeInfo `json:"volumes"`
+}
+
+// AppVolumesRemoveCmd is the request body on docker.volumes.remove.
+type AppVolumesRemoveCmd struct {
+	// Names is the exact volume names to remove. Each must parse as
+	// rasp_<ulid>_<volume>; anything else is refused by name, not skipped.
+	Names []string `json:"names"`
+	// LiveAppIDs is every app id the api's ledger currently holds. The agent
+	// refuses any name whose app id appears here — a live app's volume must be
+	// unreachable through this verb even if the api that called it is wrong.
+	// The api also refuses before sending; this is the second, independent
+	// gate.
+	LiveAppIDs []string `json:"liveAppIds"`
+}
+
+// AppVolumeRefusal is one name the remove verb declined, with the reason.
+type AppVolumeRefusal struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// AppVolumesRemoveAck is the reply. A refused name is never an error: the
+// removed and refused lists together account for every name in the command.
+type AppVolumesRemoveAck struct {
+	OK      bool               `json:"ok"`
+	Detail  string             `json:"detail,omitempty"`
+	Removed []string           `json:"removed"`
+	Refused []AppVolumeRefusal `json:"refused"`
+}
+
+// RefuseAppVolumeName applies the two rules that need no daemon — the name shape
+// and the ledger — and returns the refusal reason, or "" when the name may go
+// on to the docker-side checks. Exported because the api applies exactly the
+// same two rules before it sends a remove command, and the wording should
+// match wherever an operator meets it.
+func RefuseAppVolumeName(name string, liveAppIDs map[string]bool) string {
+	if !strings.HasPrefix(name, AppVolumePrefix) {
+		return fmt.Sprintf("not a Rasputin-managed volume: the name does not start with %q", AppVolumePrefix)
+	}
+	appID, _, ok := ParseAppVolumeName(name)
+	if !ok {
+		return "not a Rasputin-managed volume: the name is not of the form rasp_<app-id>_<volume>"
+	}
+	if liveAppIDs[strings.ToUpper(appID)] {
+		return fmt.Sprintf("app %s is still installed; uninstall it to delete its volumes", appID)
+	}
+	return ""
+}

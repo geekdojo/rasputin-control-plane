@@ -75,7 +75,7 @@ func TestMockBackend_StopAfterDeploy(t *testing.T) {
 	if _, _, err := mb.Deploy(ctx, "a1", "minecraft", "services: {}"); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
-	status, detail, err := mb.Stop(ctx, "a1")
+	status, detail, err := mb.Stop(ctx, "a1", false)
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestMockBackend_StopUnknownAppIsClean(t *testing.T) {
 	// stopped state, and Stop just persists that. This mirrors what the
 	// real backend does when the compose file is missing.
 	mb := newDockerMock(t)
-	status, _, err := mb.Stop(context.Background(), "never-deployed")
+	status, _, err := mb.Stop(context.Background(), "never-deployed", false)
 	if err != nil {
 		t.Fatalf("Stop on missing app: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestMockBackend_StatusReturnsLastWrittenStatus(t *testing.T) {
 		t.Errorf("mock should report nil services, got %+v", svcs)
 	}
 	// After Stop, Status flips.
-	if _, _, err := mb.Stop(ctx, "a1"); err != nil {
+	if _, _, err := mb.Stop(ctx, "a1", false); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	st, _, err = mb.Status(ctx, "a1")

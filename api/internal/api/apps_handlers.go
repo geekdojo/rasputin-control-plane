@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -198,6 +200,8 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /api/apps/{id}
+// Body (optional): { "deleteVolumes": true }
+//
 // Runs the app.delete saga: stop the running deployment on the target node
 // (docker compose down) THEN remove the api's record — so delete actually tears
 // the containers down instead of orphaning them. Async, like deploy/stop:
@@ -205,13 +209,38 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 // stop completes. On a reachable node the stop must succeed or the delete fails
 // (the record stays); on an unreachable node it removes the record with a
 // logged warning.
+//
+// deleteVolumes is the operator's answer to "Delete volumes?" on the uninstall
+// confirmation (geekdojo/geekdojo-brain#399). No body, or false, keeps the
+// app's named volumes on the node — the pre-#399 behaviour and the default.
+// True makes the stop a `compose down -v`, and makes an unreachable node a
+// refusal rather than a warning: data the operator asked to destroy is not
+// left behind as an orphan they believe is gone. Decoded strictly for the same
+// reason every job-spec body is: it is persisted and rendered, and the one
+// field that destroys data must be spelled the way it was declared.
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if existing, _ := s.apps.Get(r.Context(), id); existing == nil {
 		writeError(w, http.StatusNotFound, "app not found")
 		return
 	}
-	spec, _ := json.Marshal(apps.DeleteSpec{AppID: id})
+	var req struct {
+		DeleteVolumes bool `json:"deleteVolumes"`
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "unreadable body")
+		return
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+	}
+	spec, _ := json.Marshal(apps.DeleteSpec{AppID: id, DeleteVolumes: req.DeleteVolumes})
 	j, err := s.runner.Submit(r.Context(), "app.delete", spec, creator(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

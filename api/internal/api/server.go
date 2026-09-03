@@ -276,6 +276,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/apps/{id}", reqd(s.handleDeleteApp))
 	mux.HandleFunc("POST /api/apps/{id}/deploy", reqd(s.handleDeployApp))
 	mux.HandleFunc("POST /api/apps/{id}/stop", reqd(s.handleStopApp))
+	// geekdojo/geekdojo-brain#399: the uninstall prompt's facts, and the path
+	// for volumes earlier uninstalls left behind.
+	mux.HandleFunc("GET /api/apps/{id}/volumes", reqd(s.handleAppVolumes))
+	mux.HandleFunc("GET /api/volumes/orphans", reqd(s.handleListOrphanVolumes))
+	mux.HandleFunc("POST /api/volumes/orphans/reclaim", reqd(s.handleReclaimOrphanVolumes))
 	mux.HandleFunc("GET /api/catalog", reqd(s.handleListCatalog))
 	// Registered BEFORE the {id} route for readability; Go's mux prefers the
 	// more specific pattern regardless, and "_status" cannot be a tile id.

@@ -25,7 +25,13 @@ type Backend interface {
 	Deploy(ctx context.Context, appID, name, composeYAML string) (proto.AppStatus, string, error)
 
 	// Stop brings the app's services down. Returns the post-stop status.
-	Stop(ctx context.Context, appID string) (proto.AppStatus, string, error)
+	//
+	// deleteVolumes additionally removes the project's named volumes —
+	// `compose down -v` — and is set only by the app.delete saga when the
+	// operator deliberately chose it (geekdojo/geekdojo-brain#399). It is
+	// scoped to the compose project by construction: the only volumes it can
+	// reach are the ones compose created for rasp_<appID>.
+	Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error)
 
 	// Status returns the current status of an app's services. Used by the
 	// docker.status handler — not currently exercised in v0 workflows but
@@ -34,4 +40,23 @@ type Backend interface {
 
 	// Name identifies the backend in logs ("docker" or "mock").
 	Name() string
+}
+
+// VolumeReaper is the OPTIONAL surface for the two orphan-volume verbs
+// (docker.volumes.list / docker.volumes.remove). A Backend that implements it
+// gets those handlers registered beside deploy/stop/status; one that does not
+// simply has no such verbs, and the api reports the node as unable to answer.
+//
+// Separate from Backend because these verbs are about volumes the docker
+// daemon holds for projects that may no longer exist — not about any app's
+// lifecycle — and because the mock backend, which runs no containers, has no
+// honest answer to give.
+type VolumeReaper interface {
+	// ListProjectVolumes enumerates every volume on this node whose name is
+	// rasp_<ulid>_<volume> and whose compose labels agree. Read-only.
+	ListProjectVolumes(ctx context.Context) ([]proto.AppVolumeInfo, error)
+	// RemoveProjectVolumes removes exactly the named volumes that pass every
+	// refusal rule (see volumes.go) and reports the rest by name with a
+	// reason. A refusal is not an error.
+	RemoveProjectVolumes(ctx context.Context, cmd proto.AppVolumesRemoveCmd) proto.AppVolumesRemoveAck
 }
