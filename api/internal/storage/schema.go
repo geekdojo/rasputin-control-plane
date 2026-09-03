@@ -51,7 +51,8 @@ CREATE INDEX IF NOT EXISTS idx_backup_targets_partuuid ON backup_targets(part_uu
 -- walking the job ledger's step results.
 --
 -- scope is the honest half. Every generation this build writes is
--- 'controlplane-local' (proto.BackupScopeControlplaneLocal): the §4.5 contents
+-- 'full' (proto.BackupScopeFull) since the per-node transport: the §4.5 contents on every node;
+-- 'controlplane-local' before it: the §4.5 contents
 -- list calls for every volume classed critical or state on ANY node, and this
 -- build can only reach the ones on the controlplane. app_volumes_captured and
 -- app_volumes_skipped are the two halves of that sentence, and the complete
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS backup_runs (
     size_bytes           INTEGER NOT NULL DEFAULT 0,
     app_volumes_captured INTEGER NOT NULL DEFAULT 0,
     app_volumes_skipped  INTEGER NOT NULL DEFAULT 0,  -- classified volumes NOT captured
+    app_volumes_failed   INTEGER NOT NULL DEFAULT 0,  -- of those, the ones the run TRIED to take (§4.4: failed, not skipped)
     complete             INTEGER NOT NULL DEFAULT 0,  -- 1 only when nothing classified was missed
     warning              TEXT NOT NULL DEFAULT '',    -- a caveat on a row that is not failed
     generations_kept     INTEGER NOT NULL DEFAULT 0,
@@ -110,4 +112,5 @@ var migrations = []string{
 	`ALTER TABLE backup_runs ADD COLUMN app_volumes_skipped INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE backup_runs ADD COLUMN complete INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE backup_runs ADD COLUMN warning TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE backup_runs ADD COLUMN app_volumes_failed INTEGER NOT NULL DEFAULT 0`,
 }

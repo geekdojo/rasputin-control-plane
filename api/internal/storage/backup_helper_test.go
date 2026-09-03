@@ -8,6 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
@@ -24,13 +28,15 @@ import (
 
 // Harness for the backup.run saga: a real jobs.Runner over an in-process NATS
 // server, a real SQLite database (so `VACUUM INTO` is exercised rather than
-// mocked), a real staging directory on disk, and a fake agent answering the
-// three backup verbs.
+// mocked), a real staging directory on disk, a REAL ingest endpoint
+// (backupxfer.Ingest, the handler the api mounts) served over a real socket
+// onto a real temp target, and fake agents answering the backup verbs.
 //
-// The fake agent RE-HASHES what it is told to write, exactly as the real one
-// does. That is deliberate: the api's half of §4.7's handoff is "stage these
-// bytes and tell the agent their digest", and a fake that trusted the digest
-// would pass whatever the api computed, including a wrong one.
+// The fake agents RE-HASH what they are told to write, exactly as the real
+// one does, and their transfer verb is the REAL transport client
+// (backupxfer.TransportFor) sealing with the REAL seal — so the protocol
+// functional test drives both ends of backupxfer for real; only the docker
+// runtime and the block-device backend are faked.
 
 // testKeypair is a real X25519 keypair. The PRIVATE half exists only in the
 // test binary — this package has no field, parameter or return value that
@@ -78,7 +84,11 @@ const (
 type fakeBackupAgent struct {
 	nodeID      string
 	stagingRoot string
-
+	// mountPath is the target's mount on the fake's node — a real temp
+	// directory, because the ingest endpoint writes members under it.
+	mountPath string
+	// key is the target keypair the transfer verb seals to (public half
+	// only, as the command carries it).
 	mu        sync.Mutex
 	preflight func(cmd proto.BackupPreflightCmd) proto.BackupPreflightAck
 	write     func(cmd proto.BackupWriteCmd) proto.BackupWriteAck
@@ -100,8 +110,48 @@ type fakeBackupAgent struct {
 	staged        []stagedVolume
 	unstaged      []string
 	maxLiveStaged int
+	// transfers is every transfer command and ack, in order; credentials
+	// remembers the credential each member was handed so a test can replay
+	// or mis-scope one.
+	transfers []transferRecord
+	// credentials is SHARED between the harness's fakes (one book per
+	// harness), so a case can have one node present another node's
+	// credential — the mis-scoped upload the endpoint must refuse.
+	credentials *credentialBook
 	// generations is the fake target's contents, oldest first.
 	generations []string
+}
+
+// credentialBook remembers the credential each volume was handed.
+type credentialBook struct {
+	mu sync.Mutex
+	by map[string]string
+}
+
+func (b *credentialBook) put(volume, cred string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.by == nil {
+		b.by = map[string]string{}
+	}
+	b.by[volume] = cred
+}
+
+func (b *credentialBook) get(volume string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.by[volume]
+}
+
+type transferRecord struct {
+	cmd proto.BackupTransferCmd
+	ack proto.BackupTransferAck
+}
+
+func (f *fakeBackupAgent) transferRecords() []transferRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]transferRecord(nil), f.transfers...)
 }
 
 func (f *fakeBackupAgent) writeCount() int {
@@ -150,7 +200,7 @@ func (f *fakeBackupAgent) start(t *testing.T, nc *nats.Conn) *fakeBackupAgent {
 		if fn == nil {
 			respond(m, proto.BackupPreflightAck{
 				OK: true, Present: true, PartUUID: cmd.PartUUID,
-				MountPath: "/mnt/rasputin-backup", TotalBytes: 2 << 40,
+				MountPath: f.mountPath, TotalBytes: 2 << 40,
 				FreeBytes: 1 << 40, RequiredBytes: cmd.EstimateBytes, Sufficient: true,
 				// The real agent answers with the root its write verb reads,
 				// and so does this one — a fake that omitted it would let the
@@ -188,6 +238,27 @@ func (f *fakeBackupAgent) start(t *testing.T, nc *nats.Conn) *fakeBackupAgent {
 		fn := f.write
 		f.mu.Unlock()
 		if fn == nil {
+			// The commit, the way the real write verb does it: the identity
+			// archive and the manifest go BESIDE the members the ingest
+			// endpoint landed in `.partial-<gen>`, and the rename is the
+			// generation. A fake that only recorded the command would leave
+			// the layout untested.
+			if f.mountPath != "" && body != nil {
+				gens := filepath.Join(f.mountPath, proto.BackupGenerationsDir)
+				partial := filepath.Join(gens, proto.BackupPartialDirName(cmd.GenerationID))
+				if err := os.MkdirAll(partial, 0o700); err != nil {
+					t.Errorf("fake write: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(partial, proto.BackupArchiveFile), body, 0o600); err != nil {
+					t.Errorf("fake write: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(partial, proto.BackupManifestFile), []byte(cmd.ManifestJSON), 0o600); err != nil {
+					t.Errorf("fake write: %v", err)
+				}
+				if err := os.Rename(partial, filepath.Join(gens, cmd.GenerationID)); err != nil {
+					t.Errorf("fake write: commit: %v", err)
+				}
+			}
 			respond(m, defaultWriteAck(cmd, digest))
 			return
 		}
@@ -246,7 +317,7 @@ func defaultWriteAck(cmd proto.BackupWriteCmd, digest string) proto.BackupWriteA
 			SizeBytes:    cmd.SizeBytes,
 			Digest:       digest,
 			WrittenAt:    time.Now().UTC(),
-			Scope:        proto.BackupScopeControlplaneLocal,
+			Scope:        proto.BackupScopeFull,
 		},
 		FreeBytes: 1 << 40,
 	}
@@ -273,18 +344,30 @@ func defaultPruneAck(cmd proto.BackupPruneCmd, gens []string) proto.BackupPruneA
 // ----- runner harness -----------------------------------------------------
 
 type runHarness struct {
-	nc          *nats.Conn
-	store       *Store
-	jobStore    *jobs.Store
-	runner      *jobs.Runner
+	nc       *nats.Conn
+	store    *Store
+	jobStore *jobs.Store
+	runner   *jobs.Runner
+	// agent is the controlplane node's fake; compute is the compute node's
+	// (stage/transfer/unstage only), present when opts.computeAgent asked for
+	// it. A case with an app on computeNodeID and no compute agent is the
+	// offline-node case.
 	agent       *fakeBackupAgent
+	compute     *fakeBackupAgent
 	key         testKeypair
 	stagingDir  string
 	trustDir    string
 	meshDir     string
 	dbPath      string
+	mountDir    string
+	ingest      *backupxfer.Ingest
 	settings    *memorySettings
 	targetJobID string
+}
+
+// generationDir is the committed generation's directory on the fake target.
+func (h *runHarness) generationDir(genID string) string {
+	return filepath.Join(h.mountDir, proto.BackupGenerationsDir, genID)
 }
 
 // memorySettings is the ScheduleSettings slice, in memory. The real one is the
@@ -338,9 +421,14 @@ type runHarnessOpts struct {
 	noAppSource bool
 	// appsErr makes the installed-app list fail.
 	appsErr error
-	// stageOutcomes decides what the fake agent does with each volume, keyed by
-	// volume name.
+	// stageOutcomes decides what the fake agents do with each volume, keyed
+	// by volume name.
 	stageOutcomes map[string]stageOutcome
+	// computeAgent starts a second fake agent on computeNodeID, so an app
+	// deployed there has a node to stage on. Without it that node is offline.
+	computeAgent bool
+	// noIngest leaves RunConfig.Ingest nil, for the step-1 refusal.
+	noIngest bool
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -390,18 +478,48 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 
 	nc := startNATS(t)
 	key := newTestKeypair(t)
+
+	// The target: a real directory standing in for the claimed disk's mount,
+	// and the REAL ingest endpoint served on a real socket. The api's fan-out
+	// mints credentials through this Ingest and the fake agents upload to
+	// this server, exactly as the shipping halves do.
+	mountDir := filepath.Join(dir, "mnt", "rasputin-backup")
+	if err := os.MkdirAll(mountDir, 0o700); err != nil {
+		t.Fatalf("mount dir: %v", err)
+	}
+	auth, err := backupxfer.NewAuthority()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingest := backupxfer.New(auth, 1)
+	mux := http.NewServeMux()
+	mux.Handle("PUT "+backupxfer.IngestPathPrefix, ingest)
+	ingestSrv := httptest.NewServer(mux)
+	t.Cleanup(ingestSrv.Close)
+
 	if agent == nil {
 		agent = &fakeBackupAgent{}
 	}
+	book := &credentialBook{}
 	agent.nodeID = runNodeID
 	agent.stagingRoot = stagingDir
+	agent.mountPath = mountDir
+	agent.credentials = book
 	agent.start(t, nc)
 	agent.startVolumeAgent(t, nc, opts.stageOutcomes)
 
 	h := &runHarness{
 		nc: nc, store: st, jobStore: js, agent: agent, key: key,
 		stagingDir: stagingDir, trustDir: trustDir, meshDir: meshDir,
-		dbPath: dbPath, settings: newMemorySettings(),
+		dbPath: dbPath, mountDir: mountDir, ingest: ingest, settings: newMemorySettings(),
+	}
+	if opts.computeAgent {
+		computeStaging := filepath.Join(dir, "compute-state", "backup-staging")
+		if err := EnsureStagingDir(computeStaging); err != nil {
+			t.Fatalf("compute staging dir: %v", err)
+		}
+		h.compute = &fakeBackupAgent{nodeID: computeNodeID, stagingRoot: computeStaging, credentials: book}
+		h.compute.startVolumeAgent(t, nc, opts.stageOutcomes)
 	}
 
 	if !opts.noTarget {
@@ -417,12 +535,16 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		self = *opts.selfNodeID
 	}
 	cfg := RunConfig{
-		ClusterID:  "home1",
-		SelfNodeID: self,
-		Sources:    IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
-		DB:         st.DB(),
-		DBPath:     dbPath,
-		Retain:     opts.retain,
+		ClusterID:     "home1",
+		SelfNodeID:    self,
+		Sources:       IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
+		DB:            st.DB(),
+		DBPath:        dbPath,
+		Retain:        opts.retain,
+		IngestBaseURL: ingestSrv.URL,
+	}
+	if !opts.noIngest {
+		cfg.Ingest = ingest
 	}
 	if !opts.noAppSource {
 		tiles := opts.tiles
@@ -671,6 +793,26 @@ type stageOutcome struct {
 	downtimeMillis int64
 	interrupting   bool
 	consistency    proto.BackupConsistency
+
+	// The transfer knobs. Each is one way the protocol can be abused or
+	// can fail, exercised over the real endpoint:
+	//   reuseCredentialOf  upload on the credential minted for ANOTHER
+	//                      volume (by volume name) — the scope check;
+	//   replay             upload for real, then upload AGAIN on the same
+	//                      credential — the replay-after-landing check;
+	//   lieLanded          report landed without uploading — the api must
+	//                      believe its own endpoint, not the ack;
+	//   garbleAck          upload for real, then answer with an unreadable
+	//                      reply — the lost-ack case, which the endpoint's
+	//                      record must carry;
+	//   transferRefusal    refuse the transfer agent-side without uploading.
+	reuseCredentialOf string
+	replay            bool
+	lieLanded         bool
+	garbleAck         bool
+	transferRefusal   proto.StorageRefusal
+	// replayAck records what the endpoint said to the replay.
+	replayAck *proto.BackupTransferAck
 }
 
 // startVolumeAgent answers the two staging verbs against a real staging root,
@@ -751,6 +893,62 @@ func (f *fakeBackupAgent) startVolumeAgent(t *testing.T, nc *nats.Conn, outcomes
 	}
 	subs = append(subs, sub)
 
+	sub, err = nc.Subscribe(proto.BackupTransferSubject(f.nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupTransferCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		out := outcomes[cmd.Volume]
+		f.mu.Lock()
+		if f.credentials == nil {
+			f.credentials = &credentialBook{}
+		}
+		book := f.credentials
+		f.mu.Unlock()
+		book.put(cmd.Volume, cmd.Credential)
+		record := func(ack proto.BackupTransferAck) {
+			f.mu.Lock()
+			f.transfers = append(f.transfers, transferRecord{cmd: cmd, ack: ack})
+			f.mu.Unlock()
+		}
+		if out.transferRefusal != "" {
+			ack := proto.BackupTransferAck{OK: false, StagingName: cmd.StagingName, Member: cmd.Member, Refusal: out.transferRefusal, Detail: "injected"}
+			record(ack)
+			respond(m, ack)
+			return
+		}
+		if out.lieLanded {
+			ack := proto.BackupTransferAck{OK: true, Landed: true, StagingName: cmd.StagingName, Member: cmd.Member,
+				SealedDigest: strings.Repeat("f", 64), SealedBytes: 12, PlaintextDigest: cmd.PlaintextDigest}
+			record(ack)
+			respond(m, ack)
+			return
+		}
+		cred := cmd.Credential
+		if out.reuseCredentialOf != "" {
+			cred = book.get(out.reuseCredentialOf)
+			if cred == "" {
+				t.Errorf("no credential recorded for %s to reuse", out.reuseCredentialOf)
+			}
+		}
+		ack := realTransfer(t, f.stagingRoot, cmd, cred)
+		if out.replay && ack.OK {
+			again := realTransfer(t, f.stagingRoot, cmd, cred)
+			f.mu.Lock()
+			out.replayAck = &again
+			outcomes[cmd.Volume] = out
+			f.mu.Unlock()
+		}
+		record(ack)
+		if out.garbleAck {
+			_ = m.Respond([]byte("{not json"))
+			return
+		}
+		respond(m, ack)
+	})
+	if err != nil {
+		t.Fatalf("fake transfer sub: %v", err)
+	}
+	subs = append(subs, sub)
+
 	sub, err = nc.Subscribe(proto.BackupUnstageSubject(f.nodeID), func(m *nats.Msg) {
 		var cmd proto.BackupUnstageCmd
 		_ = json.Unmarshal(m.Data, &cmd)
@@ -804,4 +1002,70 @@ func (f *fakeBackupAgent) stagedOrder() []string {
 		out = append(out, s.cmd.Volume)
 	}
 	return out
+}
+
+// realTransfer is the agent's transfer verb, reduced to the protocol: the
+// staged file, sealed with backupxfer.Seal through a pipe, uploaded with the
+// REAL HTTP transport on the credential given. The agent module has the full
+// verb (quiesce.Stager.Transfer) and tests it against the same endpoint; this
+// is the same client code path, minus the runtime.
+func realTransfer(t *testing.T, stagingRoot string, cmd proto.BackupTransferCmd, credential string) proto.BackupTransferAck {
+	t.Helper()
+	ack := proto.BackupTransferAck{StagingName: cmd.StagingName, Member: cmd.Member, KeyID: cmd.KeyID}
+	f, err := os.Open(filepath.Join(stagingRoot, cmd.StagingName))
+	if err != nil {
+		ack.Refusal, ack.Detail = proto.BackupRefusalStagingMissing, err.Error()
+		return ack
+	}
+	defer func() { _ = f.Close() }()
+	plain := sha256.New()
+	stream := backupxfer.NewSealedStream(io.TeeReader(f, plain), cmd.PublicKey, cmd.KeyID, cmd.Scope)
+	defer func() { _ = stream.Close() }()
+	tr, err := backupxfer.TransportFor(cmd.Destination, backupxfer.HTTPOptions{AcceptWait: 5 * time.Second})
+	if err != nil {
+		ack.Refusal, ack.Detail = proto.BackupRefusalDestinationUnsupported, err.Error()
+		return ack
+	}
+	rc, err := tr.Put(context.Background(), backupxfer.PutRequest{
+		Destination: cmd.Destination, Generation: cmd.GenerationID, Member: cmd.Member, Credential: credential,
+		PlaintextDigest: cmd.PlaintextDigest, PlaintextBytes: cmd.PlaintextBytes,
+		Body: stream, Sealed: stream.Sealed,
+	})
+	if err != nil {
+		var refused *backupxfer.RefusedError
+		if errorsAs(err, &refused) {
+			ack.Refusal, ack.DestinationCode, ack.Detail = proto.BackupRefusalDestinationRefused, refused.Problem.Code, err.Error()
+		} else {
+			ack.Refusal, ack.Detail = proto.BackupRefusalTransferFailed, err.Error()
+		}
+		return ack
+	}
+	res, serr := stream.Result()
+	if serr != nil {
+		ack.Refusal, ack.Detail = proto.StorageRefusalBackendError, serr.Error()
+		return ack
+	}
+	ack.OK, ack.Landed = true, true
+	ack.SealedDigest, ack.SealedBytes = rc.SealedDigest, rc.SealedBytes
+	ack.PlaintextDigest = hex.EncodeToString(plain.Sum(nil))
+	ack.PlaintextBytes = res.PlaintextBytes
+	ack.Alg, ack.EphemeralPublicKey = res.Alg, res.EphemeralPublicKey
+	return ack
+}
+
+// errorsAs is errors.As without importing errors into a file that has no
+// other use for it.
+func errorsAs(err error, target **backupxfer.RefusedError) bool {
+	for err != nil {
+		if re, ok := err.(*backupxfer.RefusedError); ok {
+			*target = re
+			return true
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
 }

@@ -97,16 +97,19 @@ func benchFetched() tileschema.Bundle {
 // TestFanOutReadsTheCatalogInEffect is the e3bench run of 2026-09-03, job
 // 01M1M8K44120MAVB9CPKJN3C2V, as a test: Vaultwarden deployed on a compute
 // node, the catalog in effect a verified v17 whose tile classifies
-// vaultwarden-data `critical`, and a backup run. The only honest manifest has
-// one record — not captured, off-node — and `complete: false`.
+// vaultwarden-data `critical`, and a backup run. With the transport built,
+// the only honest outcome is that the compute node's agent stages it, seals
+// it and lands it as a member: one record, captured, `complete: true`.
 //
 // Against the wiring this replaces (RunConfig.Tiles = catalog.MustLoad()),
-// this test FAILS with the bench's exact symptom: zero records, complete true.
+// this test FAILS with the bench's exact symptom: zero records, complete true
+// over nothing captured.
 func TestFanOutReadsTheCatalogInEffect(t *testing.T) {
 	fetched := benchFetched()
 	r := runWithApps(t, runHarnessOpts{
-		apps:  []*apps.App{testApp("app-vw", "vaultwarden", computeNodeID, "vaultwarden")},
-		tiles: newCatalogStore(t, benchFloor(), &fetched),
+		apps:         []*apps.App{testApp("app-vw", "vaultwarden", computeNodeID, "vaultwarden")},
+		tiles:        newCatalogStore(t, benchFloor(), &fetched),
+		computeAgent: true,
 	})
 	if r.job.Status != "succeeded" {
 		t.Fatalf("job failed: %s", r.job.Error)
@@ -116,24 +119,23 @@ func TestFanOutReadsTheCatalogInEffect(t *testing.T) {
 			"summary: %s", n, r.manifest.AppVolumes.Volumes, r.manifest.AppVolumes.Summary)
 	}
 	rec := r.record(t, "vaultwarden", "vaultwarden-data")
-	if rec.Captured {
-		t.Error("an off-node volume is marked captured, and nothing could have carried it here")
-	}
-	if rec.Reason != ReasonOffNode {
-		t.Errorf("reason = %q, want ReasonOffNode", rec.Reason)
+	if !rec.Captured || rec.SealedBy != computeNodeID || rec.Member == "" {
+		t.Errorf("record = %+v; the compute node's volume must have been sealed there and landed", rec)
 	}
 	if rec.Class != tileschema.BackupCritical || rec.TileID != "vaultwarden" || rec.Node != computeNodeID {
 		t.Errorf("record = %+v; class, tile and node come from the join and must all be there", rec)
 	}
-	if r.manifest.Complete || r.row.Complete {
-		t.Errorf("complete is manifest=%v row=%v over an archive that omits a `critical` volume — the bench's exact lie",
-			r.manifest.Complete, r.row.Complete)
+	if plain, _ := r.volumeMember(t, rec.Member); string(plain) != "TAR-OF-vaultwarden-data" {
+		t.Error("the member on the target is not the staged volume")
 	}
-	if r.manifest.AppVolumes.SkippedCount != 1 || r.manifest.AppVolumes.CapturedCount != 0 {
-		t.Errorf("counts = %d captured / %d skipped, want 0/1", r.manifest.AppVolumes.CapturedCount, r.manifest.AppVolumes.SkippedCount)
+	if !r.manifest.Complete || !r.row.Complete {
+		t.Errorf("complete is manifest=%v row=%v with the cluster's only classified volume captured", r.manifest.Complete, r.row.Complete)
+	}
+	if r.manifest.AppVolumes.SkippedCount != 0 || r.manifest.AppVolumes.CapturedCount != 1 {
+		t.Errorf("counts = %d captured / %d skipped, want 1/0", r.manifest.AppVolumes.CapturedCount, r.manifest.AppVolumes.SkippedCount)
 	}
 	if !strings.Contains(r.ledger, "vaultwarden-data") {
-		t.Error("the job feed never named the volume it could not capture")
+		t.Error("the job feed never named the volume")
 	}
 	// The manifest says what was looked at, and which catalog answered.
 	e := r.manifest.AppVolumes
@@ -191,8 +193,10 @@ func TestFanOutRecordsATileThatDeclaresNoVolumes(t *testing.T) {
 			t.Errorf("the archive has no member %s; members are %v", want, keysOf(members))
 		}
 	}
-	if _, ok := members["app-volumes/vaultwarden/vaultwarden-data.tar"]; ok {
-		t.Error("an unclassified volume is in the archive; nothing could have known to stage it")
+	for _, f := range r.targetFiles(t) {
+		if strings.HasPrefix(f, "volumes/") {
+			t.Errorf("the generation holds %s; nothing could have known to stage an unclassified volume", f)
+		}
 	}
 	// And the job feed said so while it was happening — with the catalog
 	// named, which is the one line that would have explained the bench.

@@ -1,14 +1,13 @@
 package storage
 
 import (
-	"crypto/ecdh"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 )
 
 // TargetStatus is the rollup an operator sees for one claim attempt. The
@@ -98,9 +97,6 @@ func (k *ArchiveKey) present() bool {
 		k.WrappedByPassphrase != "" || k.WrappedByRecoveryCode != ""
 }
 
-// x25519PublicKeyBytes is the length of a raw X25519 public key (RFC 7748).
-const x25519PublicKeyBytes = 32
-
 // validate enforces all-or-nothing, and checks the one field it can check.
 //
 // A partially-supplied key is refused rather than stored, because a half-formed
@@ -135,27 +131,12 @@ func (k *ArchiveKey) validate() error {
 }
 
 // validatePublicKey checks that an ArchiveKey's public key is a usable X25519
-// public key: 32 raw bytes, base64url, and not all zeroes.
-//
-// The all-zero refusal is not pedantry. It is the one public key with a
-// catastrophic property — every X25519 exchange against it yields zero, so
-// every archive sealed to it would be encrypted under a key an attacker derives
-// too — and it is exactly what a zeroed or truncated marker field decodes to.
-// crypto/ecdh checks the length and nothing else, so this says the rest.
+// key. The check itself lives in backupxfer, beside the seal that consumes
+// the key, so the claim path and the seal path cannot disagree about what a
+// usable key is.
 func validatePublicKey(encoded string) error {
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(encoded))
-	if err != nil {
-		return fmt.Errorf("archiveKey.publicKey is not unpadded base64url: %w", err)
-	}
-	if len(raw) != x25519PublicKeyBytes {
-		return fmt.Errorf("archiveKey.publicKey is %d bytes; an X25519 public key is %d", len(raw), x25519PublicKeyBytes)
-	}
-	if _, err := ecdh.X25519().NewPublicKey(raw); err != nil {
-		return fmt.Errorf("archiveKey.publicKey is not a valid X25519 public key: %w", err)
-	}
-	var zero [x25519PublicKeyBytes]byte
-	if subtle.ConstantTimeCompare(raw, zero[:]) == 1 {
-		return errors.New("archiveKey.publicKey is all zeroes, which is not a usable X25519 key: every archive sealed to it would be readable by anyone")
+	if err := backupxfer.ValidatePublicKey(encoded); err != nil {
+		return fmt.Errorf("archiveKey.publicKey: %w", err)
 	}
 	return nil
 }

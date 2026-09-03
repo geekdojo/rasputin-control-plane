@@ -54,12 +54,12 @@ func TestBackupRunSaga(t *testing.T) {
 				if row.GenerationID == "" {
 					t.Error("no generation recorded")
 				}
-				if !strings.Contains(row.GenerationID, proto.BackupScopeControlplaneLocal) {
+				if !strings.Contains(row.GenerationID, proto.BackupScopeFull) {
 					t.Errorf("generation id %q does not carry the scope — an operator listing the disk "+
 						"must be able to see what an archive is without opening it", row.GenerationID)
 				}
-				if row.Scope != proto.BackupScopeControlplaneLocal {
-					t.Errorf("scope = %q, want %q", row.Scope, proto.BackupScopeControlplaneLocal)
+				if row.Scope != proto.BackupScopeFull {
+					t.Errorf("scope = %q, want %q", row.Scope, proto.BackupScopeFull)
 				}
 				if row.AppVolumesCaptured != 0 {
 					t.Errorf("appVolumesCaptured = %d — this build captures none", row.AppVolumesCaptured)
@@ -105,7 +105,7 @@ func TestBackupRunSaga(t *testing.T) {
 				if !m.Complete {
 					t.Error("nothing was classified and nothing was missed, so the manifest should say so")
 				}
-				if m.Scope != proto.BackupScopeControlplaneLocal {
+				if m.Scope != proto.BackupScopeFull {
 					t.Errorf("manifest scope = %q", m.Scope)
 				}
 				if m.AppVolumes.CapturedCount != 0 || len(m.AppVolumes.Captured) != 0 {
@@ -707,7 +707,7 @@ func TestBackupRunRefusesATargetOnAnotherNode(t *testing.T) {
 	if j.Status != jobs.StatusFailed {
 		t.Fatalf("job status = %s, want failed", j.Status)
 	}
-	for _, want := range []string{"is on node n-storage-2", "runs on " + runNodeID, "no transfer to another node"} {
+	for _, want := range []string{"is on node n-storage-2", "runs on " + runNodeID, "no such handoff"} {
 		if !strings.Contains(j.Error, want) {
 			t.Errorf("job error = %q, want it to contain %q", j.Error, want)
 		}

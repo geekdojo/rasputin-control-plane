@@ -1087,17 +1087,18 @@ export interface BackupTarget {
 export type BackupRunStatus = 'running' | 'succeeded' | 'failed';
 
 /**
- * The scope of a generation (design/storage.md §4.5) — the archive's REACH.
+ * The scope of a generation (design/storage.md §4.5) — the generation's REACH.
  *
- * `controlplane-local` is everything this build writes: the control-plane
- * database, the mesh CA and Headscale state, PLUS every volume classed
- * `critical` or `state` belonging to an app installed on the controlplane node.
- * An app on a compute node is still not in it — nothing yet moves a staged copy
- * off the node that made it — so it is not a complete backup of the cluster and
- * every surface that renders a run has to say so.
+ * `full` is what this build writes: the control-plane database, the mesh CA
+ * and Headscale state, PLUS every volume classed `critical` or `state` of
+ * every installed app on EVERY node — each sealed on the node that hosts it
+ * and landed as its own member of the generation through the api's ingest
+ * endpoint. Reach is not outcome: `complete` says whether a run actually
+ * captured everything, and `appVolumesFailed` on a `failed` row counts the
+ * volumes it tried to take and could not (§4.4: failed, not skipped).
  *
- * `identity-only` is what earlier builds wrote and is still readable on disk.
- * `full` is what a build that reaches every node will write.
+ * `identity-only` and `controlplane-local` are what earlier builds wrote and
+ * are still readable on disk.
  */
 export type BackupScope = 'identity-only' | 'controlplane-local' | 'full';
 
@@ -1120,6 +1121,13 @@ export interface BackupRun {
   appVolumesCaptured: number;
   /** How many CLASSIFIED volumes did NOT. The other half of the sentence — "2 of 3". */
   appVolumesSkipped: number;
+  /**
+   * Of those, how many the run TRIED to take and could not — a node offline
+   * at backup time, an agent that refused, an upload that did not land.
+   * Non-zero is a `failed` row with the volumes named in `error`. Absent from
+   * rows written by earlier builds.
+   */
+  appVolumesFailed?: number;
   /** True only when every classified volume in the cluster was captured. */
   complete: boolean;
   /** A caveat on a run that is not failed — skipped volumes, or an app left down. */

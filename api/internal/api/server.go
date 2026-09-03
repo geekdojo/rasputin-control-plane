@@ -22,6 +22,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -41,6 +42,7 @@ type Server struct {
 	updater             *updater.Store
 	updaterVerifier     *updater.Verifier
 	backup              *storage.Store
+	backupIngest        *backupxfer.Ingest
 	bundleDir           string
 	trustDir            string
 	mesh                *mesh.Service
@@ -113,6 +115,21 @@ func (s *Server) SetAppLeafRotator(rotate apps.LeafRotator) { s.rotateAppLeaf = 
 // then answer 503, which is the honest answer for an api built without the
 // store.
 func (s *Server) SetBackupStore(st *storage.Store) { s.backup = st }
+
+// SetBackupIngest mounts the backup transport's ingest endpoint — the SAME
+// *Ingest the backup.run workflow mints credentials through, so a credential
+// is verifiable by exactly the endpoint that receives it.
+func (s *Server) SetBackupIngest(in *backupxfer.Ingest) { s.backupIngest = in }
+
+// handleBackupIngest is PUT /api/backup/ingest/{generation}/{member}. The
+// whole handler lives in backupxfer, beside the client that speaks to it.
+func (s *Server) handleBackupIngest(w http.ResponseWriter, r *http.Request) {
+	if s.backupIngest == nil {
+		writeError(w, http.StatusServiceUnavailable, "backup ingest is not configured on this api")
+		return
+	}
+	s.backupIngest.ServeHTTP(w, r)
+}
 
 // SetAlertsService overrides the default aggregator-only alerts service
 // with one that has a persistence store + nats conn wired. main.go
@@ -296,6 +313,14 @@ func (s *Server) Handler() http.Handler {
 	// the on-demand "Back up now", which submits the same saga with the same
 	// refusals as the weekly schedule. The schedule routes are §4.1's
 	// "overridable per installation".
+	// The backup INGEST endpoint is deliberately NOT behind the session
+	// middleware: its caller is a node's agent, not a browser, and its
+	// authentication is the per-member upload credential the backup.run
+	// saga minted (backupxfer). A credential can PUT one named member into
+	// the one generation that is open and nothing else — it cannot read,
+	// list, overwrite or reach another generation. 503 until main wires an
+	// endpoint, exactly like the other backup routes without a ledger.
+	mux.HandleFunc("PUT "+backupxfer.IngestPathPrefix, s.handleBackupIngest)
 	mux.HandleFunc("GET /api/backup/runs", reqd(s.handleListBackupRuns))
 	mux.HandleFunc("POST /api/backup/runs", reqd(s.handleStartBackupRun))
 	mux.HandleFunc("GET /api/backup/schedule", reqd(s.handleGetBackupSchedule))

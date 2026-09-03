@@ -1,61 +1,77 @@
 package storage
 
 import (
-	"archive/tar"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
-// The fan-out itself: stage one volume, verify it, take it, give the space
-// back, move to the next.
+// The fan-out itself: stage one volume on its node, have that node seal and
+// upload it, confirm it landed, give the space back, move to the next.
 //
 // # Why one at a time
 //
 // §4.7 is explicit about it, and the reason is the peak. Staging every volume
-// and then consuming them would put the SUM of an installation's app data on
-// the staging partition at once — on a controlplane whose writable partition
-// has a 100%-full incident on record. Staging one, consuming it, and unstaging
-// it before asking for the next keeps the agent's staging root holding at most
+// and then consuming them would put the SUM of a node's app data on its
+// staging partition at once. Staging one, transferring it, and unstaging it
+// before asking for the next keeps every agent's staging root holding at most
 // one copy, so the peak is the largest single volume rather than the sum.
 //
-// It has a second effect that matters more than the disk: staging a volume with
-// a `stop` strategy STOPS THE APP. Doing them one at a time means one app is
-// down at a time, for seconds. Doing them in parallel would be a house-wide
-// outage every backup night.
+// It has a second effect that matters more than the disk: staging a volume
+// with a `stop` strategy STOPS THE APP. Doing them one at a time means one
+// app is down at a time, for seconds. Doing them in parallel would be a
+// house-wide outage every backup night. It also means the ingest endpoint's
+// semaphore is never contended by this run — the backpressure exists for the
+// day a build parallelises nodes, and it costs nothing today.
+//
+// # Where the bytes go
+//
+// Nowhere near the api's staging root. The hosting agent seals the staged
+// tar to the target's public key and streams it straight to the ingest
+// endpoint (backupxfer), which lands it as a member of the open generation
+// on the claimed disk. The api holds no copy of any volume, sealed or
+// otherwise, at any point. The controlplane's own volumes take the same path
+// over loopback.
 //
 // # What the run does when something goes wrong
 //
-// It CONTINUES, and fails at the end. A volume that refuses, times out or fails
-// its digest is recorded as not captured, with the agent's own words, and the
-// next volume is attempted. The archive still gets written, still gets sealed,
-// still lands as a generation — and the manifest beside it names every gap.
+// It CONTINUES, records the volume as FAILED, and fails at the end. A volume
+// whose node is offline, whose agent refuses, whose upload does not land or
+// whose digest disagrees is recorded with the reason and the next volume is
+// attempted. The identity archive still gets written, still gets sealed,
+// still lands as a generation beside every member that did arrive — and the
+// manifest names every gap. Then runPrune ends the run failed with the
+// volumes named, because §4.4 says a backup that did not happen must never
+// render like ordinary green.
 //
-// The alternative is to abort the whole run on the first bad volume, and it is
-// worse in the case that actually happens: one app misbehaves, and an
-// installation that would have had a complete copy of its identity set and
-// eleven of its twelve volumes gets nothing at all. A partial archive that
-// names its gaps can be restored from. A run that aborted cannot.
-//
-// The one thing that is NOT tolerated quietly is an app left down — see
-// AppsLeftDown and runVerifyApps. That does not abort the fan-out either (the
-// remaining volumes are still worth having, and the agent's watchdog is already
-// retrying), but it ends the run FAILED with the app named.
+// The alternative — abort on the first bad volume — is worse in the case that
+// actually happens: one node is off, and an installation that would have had
+// eleven of its twelve volumes gets nothing at all.
 
 // stageRPCBudget is how long ONE stage verb may take: the agent's own work
-// budget plus room for the round trip and the marshal, the same shape every
-// other agent step in this saga uses. The api must outwait the agent or it
-// gives up on a handler that is about to answer — and for this verb, on a
-// handler that has an app STOPPED.
+// budget plus room for the round trip and the marshal. The api must outwait
+// the agent or it gives up on a handler that is about to answer — and for
+// this verb, on a handler that has an app STOPPED.
 const stageRPCBudget = proto.BackupStageWork + 90*time.Second
+
+// transferRPCBudget is the same for the transfer verb, and it is also the
+// credential's life: the credential is minted immediately before the verb is
+// sent, for exactly as long as the verb may run plus the round trip.
+const transferRPCBudget = proto.BackupTransferWork + 90*time.Second
+
+// transferAttempts is how many times a transfer is tried per volume. Two:
+// §4.7's "retry without re-quiescing" — a stalled upload is another upload
+// of the same staged file on a fresh credential, and the app is not stopped
+// again. More than one retry is a slow disk or a dead api, and the run
+// should say so rather than spend its two-hour budget on one volume.
+const transferAttempts = 2
 
 // requester is the one method the fan-out needs from NATS, named so the
 // orchestration below can be exercised without a bus.
@@ -66,44 +82,37 @@ type requester interface {
 // fanOutOpts is one fan-out pass.
 type fanOutOpts struct {
 	NATS requester
-	// NodeID is the controlplane's node — the only node this build stages
-	// from, and the node whose agent shares this filesystem.
-	NodeID string
-	// StagingDir is the root the agent reported in the preflight ack. The api
-	// derives no path of its own; see runStagingDir.
-	StagingDir string
-	// GenerationID names every staged file this pass mints.
+	// JobID is the run, which the credential is scoped to.
+	JobID string
+	// GenerationID names every staged file this pass mints and the
+	// generation every member lands in.
 	GenerationID string
-	// VolsPath is the tar the captured members are written to, under the
-	// staging root.
-	VolsPath string
+	// Ingest is the endpoint the members land at; Destination is the URI the
+	// agents are handed for it. PublicKey, KeyID and Scope are what every
+	// member is sealed to and with.
+	Ingest      *backupxfer.Ingest
+	Destination string
+	PublicKey   string
+	KeyID       string
+	Scope       string
 	// Plan is what to stage, in order; Skipped is everything already known not
 	// to be capturable, records complete; Enumeration is what the plan looked
-	// at to arrive at both, carried into the report so an empty one can be
-	// read.
+	// at to arrive at both.
 	Plan        []PlannedVolume
 	Skipped     []VolumeRecord
 	Enumeration AppEnumeration
-	// DBBytes and IdentityBytes size the free-space guard alongside the volume
-	// bytes this pass accumulates.
-	DBBytes       uint64
-	IdentityBytes uint64
-	// Now stamps the tar members, so every member of one generation carries
-	// one timestamp.
-	Now time.Time
 	// Log writes to the job feed.
 	Log func(level, msg string)
 }
 
 // budgetAllows reports whether what is left of the step's deadline could hold
-// another volume. A context with no deadline always allows one — the step
-// always has one in the saga, and a caller without one has said it will wait.
+// another volume — a stage and a transfer.
 func (o fanOutOpts) budgetAllows(ctx context.Context) bool {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return true
 	}
-	return time.Until(deadline) > stageRPCBudget
+	return time.Until(deadline) > stageRPCBudget+transferRPCBudget
 }
 
 func (o fanOutOpts) log(level, msg string) {
@@ -112,100 +121,63 @@ func (o fanOutOpts) log(level, msg string) {
 	}
 }
 
-// runFanOut stages every planned volume in turn and returns the finished
-// report plus the size of the tar it built.
+// runFanOut stages, transfers and unstages every planned volume in turn and
+// returns the finished report.
 //
-// It returns an error only for a failure that is NOT about one volume — an
-// unwritable staging root, a tar it cannot close. A volume that could not be
-// captured is a record, not an error, which is the whole point.
-func runFanOut(ctx context.Context, o fanOutOpts) (AppVolumeReport, uint64, error) {
+// It returns an error only for a failure that is NOT about one volume — no
+// ingest endpoint to land on. A volume that could not be captured is a
+// record, not an error, which is the whole point.
+func runFanOut(ctx context.Context, o fanOutOpts) (AppVolumeReport, error) {
 	records := append([]VolumeRecord(nil), o.Skipped...)
-	nodes := 0
-	// Which catalog the tiles came from, in the job feed, on every run: the
-	// 2026-09-03 e3bench manifest would have been explicable in one line had
-	// it said the fan-out read a catalog with no volume classifications.
+	nodes := map[string]bool{}
 	o.log("info", fmt.Sprintf("app-volume fan-out: %d installed app(s), %d resolved to a tile that classifies its volumes, against catalog %s",
 		o.Enumeration.AppsInstalled, o.Enumeration.AppsResolved, o.Enumeration.Catalog))
 	if len(o.Plan) == 0 {
 		if len(records) > 0 {
-			o.log("warn", fmt.Sprintf("app-volume fan-out: nothing on %s is eligible to stage; %d volume(s) are recorded as NOT captured",
-				o.NodeID, len(records)))
+			o.log("warn", fmt.Sprintf("app-volume fan-out: nothing is eligible to stage; %d volume(s) are recorded as NOT captured", len(records)))
 			for _, v := range records {
 				o.log("warn", fmt.Sprintf("NOT captured: %s/%s (class %s) — %s", v.App, v.Volume, v.Class, v.Reason))
 			}
 		}
-		return NewAppVolumeReport(o.Enumeration, records, nodes), 0, nil
+		return NewAppVolumeReport(o.Enumeration, records, 0), nil
 	}
-	nodes = 1
-
-	f, err := os.OpenFile(o.VolsPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
-	if err != nil {
-		return AppVolumeReport{}, 0, fmt.Errorf("stage app volumes: %w", err)
+	if o.Ingest == nil || strings.TrimSpace(o.Destination) == "" {
+		return AppVolumeReport{}, errors.New("this api has no ingest endpoint for volumes to land at, so no app volume can be captured; refusing rather than recording every one as failed")
 	}
-	tw := tar.NewWriter(f)
-	closed := false
-	defer func() {
-		if !closed {
-			_ = tw.Close()
-			_ = f.Close()
-		}
-	}()
 
-	o.log("info", fmt.Sprintf("app-volume fan-out: %d volume(s) to stage from %s, one at a time — `critical` first, then `state`. "+
-		"A volume whose tile declares the `stop` strategy takes its app DOWN for the length of the copy",
-		len(o.Plan), o.NodeID))
+	o.log("info", fmt.Sprintf("app-volume fan-out: %d volume(s) to stage, one at a time — `critical` first, then `state` — each sealed on its own node and uploaded to %s. "+
+		"A volume whose tile declares the `stop` strategy takes its app DOWN for the length of the local copy, and not for the upload",
+		len(o.Plan), o.Destination))
 
-	var volumeBytes, largest uint64
 	for i, pv := range o.Plan {
 		// The phase's own budget, checked BEFORE each volume rather than
 		// discovered mid-copy. Being cut off by a step timeout with an app
 		// stopped is the one shape §4.7's restart contract exists to keep off
 		// the normal path — the agent's watchdog would bring it back, but a
 		// backstop that fires every week is not a backstop. So a volume that
-		// would not fit in what is left is RECORDED as not captured, with the
+		// would not fit in what is left is recorded as FAILED, with the
 		// budget named, and the phase ends cleanly.
 		if !o.budgetAllows(ctx) {
 			for _, rest := range o.Plan[i:] {
-				records = append(records, notCaptured(rest, fmt.Sprintf(
+				records = append(records, failedVolume(rest, fmt.Sprintf(
 					"the run's %s app-volume budget was exhausted before this volume was reached. Volumes are staged one at a time "+
-						"and each may take up to %s; a cluster whose app data cannot be staged inside the budget needs a longer one, "+
-						"or fewer volumes classed `critical`/`state`", runFanOutBudget, proto.BackupStageWork)))
+						"and each may take up to %s to stage and %s to transfer; a cluster whose app data cannot be moved inside the budget needs a longer one, "+
+						"or fewer volumes classed `critical`/`state`", runFanOutBudget, proto.BackupStageWork, proto.BackupTransferWork)))
 			}
-			o.log("warn", fmt.Sprintf("app-volume fan-out: out of time after %d of %d volume(s); the rest are recorded as not captured",
-				i, len(o.Plan)))
+			o.log("error", fmt.Sprintf("app-volume fan-out: out of time after %d of %d volume(s); the rest are FAILED", i, len(o.Plan)))
 			break
 		}
-		rec, size := o.stageOne(ctx, i, pv, tw, volumeBytes, largest)
-		records = append(records, rec)
-		if rec.Captured {
-			volumeBytes += size
-			if size > largest {
-				largest = size
-			}
-		}
+		nodes[pv.NodeID] = true
+		records = append(records, o.captureOne(ctx, i, pv))
 	}
 
-	if err := tw.Close(); err != nil {
-		_ = f.Close()
-		return AppVolumeReport{}, 0, fmt.Errorf("close app-volume tar: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return AppVolumeReport{}, 0, fmt.Errorf("sync app-volume tar: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return AppVolumeReport{}, 0, fmt.Errorf("close app-volume tar: %w", err)
-	}
-	info, err := os.Stat(o.VolsPath)
-	if err != nil {
-		return AppVolumeReport{}, 0, err
-	}
-	closed = true
-
-	rep := NewAppVolumeReport(o.Enumeration, records, nodes)
+	rep := NewAppVolumeReport(o.Enumeration, records, len(nodes))
 	o.log("info", fmt.Sprintf("app-volume fan-out: %s", rep.Summary))
 	for _, v := range rep.Volumes {
-		if !v.Captured {
+		switch {
+		case v.Failed:
+			o.log("error", fmt.Sprintf("FAILED: %s/%s (class %s, on %s) — %s", v.App, v.Volume, v.Class, v.Node, v.Reason))
+		case !v.Captured:
 			o.log("warn", fmt.Sprintf("NOT captured: %s/%s (class %s) — %s", v.App, v.Volume, v.Class, v.Reason))
 		}
 	}
@@ -217,71 +189,56 @@ func runFanOut(ctx context.Context, o fanOutOpts) (AppVolumeReport, uint64, erro
 			"The agent's watchdog keeps retrying and a boot sweep will restart it, but the app is unavailable until it does. "+
 			"§4.7 treats this as worse than a failed backup; this run will end FAILED because of it", app))
 	}
-	return rep, byteCount(info.Size()), nil
+	return rep, nil
 }
 
-// stageOne is the whole per-volume dance: guard, stage, verify, copy, unstage.
+// captureOne is the whole per-volume dance: stage, transfer, confirm, unstage.
 //
 // It never returns an error. Every way it can go wrong is a VolumeRecord with
-// Captured false and a Reason, because that is the artefact an operator reads
-// on restore day — and an error would end the run before the next volume, which
-// is the trade this file's header argues against.
-func (o fanOutOpts) stageOne(ctx context.Context, i int, pv PlannedVolume, tw *tar.Writer, volumeBytes, largest uint64) (VolumeRecord, uint64) {
+// Captured false and a Reason — and Failed true, because every one of them is
+// a volume this run tried to take.
+func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) VolumeRecord {
 	name := stagingName(o.GenerationID, fmt.Sprintf("vol%d", i))
 	if !proto.BackupValidStagingName(name) {
-		return notCaptured(pv, fmt.Sprintf("internal: %q is not a valid staging name", name)), 0
+		return failedVolume(pv, fmt.Sprintf("internal: %q is not a valid staging name", name))
 	}
-	staged := joinStaging(o.StagingDir, name)
+	node := strings.TrimSpace(pv.NodeID)
 
-	// §4.7's source-side guard, re-run before every stage rather than once at
-	// the top of the saga. It is the only place the numbers exist: a volume's
-	// size is not knowable until it has been staged, so the run sizes with what
-	// it has measured so far and refuses the REST rather than filling the disk.
-	// See StagingBudget.
-	if budget, err := PlanStaging(o.StagingDir, o.DBBytes, o.IdentityBytes, volumeBytes, largest); err != nil {
-		_ = budget
-		return notCaptured(pv, fmt.Sprintf("staging it would take the controlplane's disk below its reserve: %v", err)), 0
-	}
-
-	// A leftover from a previous attempt is removed rather than adopted: the
-	// agent refuses to stage onto an existing name (BackupRefusalStagingExists)
-	// and adopting one would mean archiving yesterday's copy as today's.
-	_ = os.Remove(staged)
-
+	// ----- stage -----------------------------------------------------------
 	cmd, err := json.Marshal(proto.BackupStageVolumeCmd{
 		AppID: pv.AppID, AppName: pv.AppName, Volume: pv.Volume,
 		Class: pv.Class, Quiesce: pv.Quiesce, StagingName: name,
 	})
 	if err != nil {
-		return notCaptured(pv, fmt.Sprintf("internal: %v", err)), 0
+		return failedVolume(pv, fmt.Sprintf("internal: %v", err))
 	}
 	if pv.Quiesce == "stop" {
 		// Said BEFORE the verb is sent, as proto.BackupStageVolumeCmd asks: an
-		// operator watching the feed should see the outage coming rather than
-		// find it in a downtime number afterwards.
-		o.log("warn", fmt.Sprintf("stopping %s to copy %s consistently — the app is unavailable for the length of the copy", pv.AppName, pv.Volume))
+		// operator watching the feed should see the outage coming.
+		o.log("warn", fmt.Sprintf("stopping %s on %s to copy %s consistently — the app is unavailable for the length of the local copy", pv.AppName, node, pv.Volume))
 	}
-	// Each stage gets its OWN deadline, derived from the agent's budget rather
-	// than from what is left of the phase's. Sharing the phase's would let one
-	// slow volume consume the budget for every volume after it, and the failure
-	// would look like an RPC timeout rather than like the disk being slow.
 	stageCtx, cancel := context.WithTimeout(ctx, stageRPCBudget)
-	defer cancel()
-	msg, err := o.NATS.RequestWithContext(stageCtx, proto.BackupStageVolumeSubject(o.NodeID), cmd)
+	msg, err := o.NATS.RequestWithContext(stageCtx, proto.BackupStageVolumeSubject(node), cmd)
+	cancel()
 	if err != nil {
+		if errors.Is(err, nats.ErrNoResponders) {
+			// §4.4's named case. No agent on that node is on the bus, so the
+			// node is offline (or its agent is down), and this app's backup
+			// is FAILED — not skipped, not deferred.
+			return failedVolume(pv, fmt.Sprintf("node %s is OFFLINE: no agent answered the staging request on the bus, so nothing could copy this volume. "+
+				"§4.4: an app whose node is offline at backup time has a FAILED backup, not a skipped one", node))
+		}
 		// No ack, so nothing is known about the app's state. The agent's
 		// watchdog is armed before the stop and fires on a lost reply and on a
-		// deadline, which is why this is not reported as an app left down: that
-		// field means "the agent reported it did not come back", and no agent
-		// reported anything.
-		o.unstage(ctx, name)
-		return notCaptured(pv, fmt.Sprintf("the staging request to %s failed: %v. Whether the app was stopped is unknown from here; "+
-			"the agent's watchdog restarts it on a lost reply and again at its next start", o.NodeID, err)), 0
+		// deadline, which is why this is not reported as an app left down.
+		o.unstage(ctx, node, name)
+		return failedVolume(pv, fmt.Sprintf("the staging request to %s failed: %v. Whether the app was stopped is unknown from here; "+
+			"the agent's watchdog restarts it on a lost reply and again at its next start", node, err))
 	}
 	var ack proto.BackupStageVolumeAck
 	if err := json.Unmarshal(msg.Data, &ack); err != nil {
-		o.unstage(ctx, name)
-		return notCaptured(pv, fmt.Sprintf("the reply from %s was unreadable: %v", o.NodeID, err)), 0
+		o.unstage(ctx, node, name)
+		return failedVolume(pv, fmt.Sprintf("the reply from %s was unreadable: %v", node, err))
 	}
 
 	rec := VolumeRecord{
@@ -295,96 +252,151 @@ func (o fanOutOpts) stageOne(ctx context.Context, i int, pv PlannedVolume, tw *t
 		Window:              ack.Window,
 		Databases:           ack.Databases,
 		SnapshotTool:        ack.SnapshotTool,
+		Failed:              true, // until it lands
 	}
-	defer o.unstage(ctx, name)
+	defer o.unstage(ctx, node, name)
 
 	if !ack.OK {
-		rec.Reason = refusalReason(o.NodeID, ack.Refusal, ack.Detail)
-		return rec, 0
+		rec.Reason = refusalReason(node, ack.Refusal, ack.Detail)
+		return rec
 	}
 	if ack.Digest == "" || ack.SizeBytes == 0 {
-		rec.Reason = fmt.Sprintf("%s reported a successful copy with no digest or a zero length, so there is nothing this run can verify before sealing it", o.NodeID)
-		return rec, 0
+		rec.Reason = fmt.Sprintf("%s reported a successful copy with no digest or a zero length, so there is nothing this run can verify before sealing it", node)
+		return rec
 	}
 
-	info, err := os.Stat(staged)
-	if err != nil {
-		rec.Reason = fmt.Sprintf("%s said it staged the copy as %s, and there is no such file under %s: %v. "+
-			"This is the staging-root handoff failing — both halves must name the same directory", o.NodeID, name, o.StagingDir, err)
-		return rec, 0
-	}
-	if !info.Mode().IsRegular() {
-		rec.Reason = fmt.Sprintf("the staged copy %s is not a regular file; refusing to read it", name)
-		return rec, 0
-	}
-	if got := byteCount(info.Size()); got != ack.SizeBytes {
-		rec.Reason = fmt.Sprintf("%s reported a %d-byte staged copy and the file on disk is %d bytes", o.NodeID, ack.SizeBytes, got)
-		return rec, 0
-	}
+	// ----- transfer --------------------------------------------------------
+	member := pv.Member()
+	var last string
+	for attempt := 1; attempt <= transferAttempts; attempt++ {
+		if attempt > 1 {
+			o.log("warn", fmt.Sprintf("retrying the upload of %s/%s from %s (attempt %d of %d) — the staged copy is reused; the app is NOT stopped again",
+				pv.AppName, pv.Volume, node, attempt, transferAttempts))
+		}
+		// The credential: one member, one generation, one run, one node,
+		// minted now and dead by the time the verb's budget is. Never
+		// logged and never in a step result — it goes into the command and
+		// nowhere else.
+		cred, err := o.Ingest.Mint(backupxfer.Grant{
+			Generation: o.GenerationID, Member: member, NodeID: node, JobID: o.JobID,
+		}, transferRPCBudget)
+		if err != nil {
+			rec.Reason = fmt.Sprintf("could not mint an upload credential for %s: %v", member, err)
+			return rec
+		}
+		tcmd, err := json.Marshal(proto.BackupTransferCmd{
+			StagingName: name, Destination: o.Destination, Credential: cred,
+			PublicKey: o.PublicKey, KeyID: o.KeyID, Scope: o.Scope,
+			GenerationID: o.GenerationID, Member: member,
+			AppID: pv.AppID, AppName: pv.AppName, Volume: pv.Volume,
+			PlaintextDigest: ack.Digest, PlaintextBytes: ack.SizeBytes,
+		})
+		if err != nil {
+			rec.Reason = fmt.Sprintf("internal: %v", err)
+			return rec
+		}
+		xferCtx, cancel := context.WithTimeout(ctx, transferRPCBudget)
+		tmsg, terr := o.NATS.RequestWithContext(xferCtx, proto.BackupTransferSubject(node), tcmd)
+		cancel()
 
-	// The api re-hashes what it is about to read, exactly as the agent
-	// re-hashes what it is about to write. §4.6's rule is that integrity is
-	// verified from a digest and never by decrypting, and this is the one place
-	// on the api's side of the handoff where that check is available: the bytes
-	// that go into the archive must be the bytes the agent said it wrote, or
-	// the archive's own manifest would be a false statement about its contents.
-	sum, err := fileSHA256(staged)
-	if err != nil {
-		rec.Reason = fmt.Sprintf("the staged copy %s could not be read to verify it: %v", name, err)
-		return rec, 0
+		var tack proto.BackupTransferAck
+		if terr == nil {
+			terr = json.Unmarshal(tmsg.Data, &tack)
+		}
+		// THE record of what landed is the endpoint's, not the agent's. An
+		// ack can be lost on the bus after the member landed; the endpoint
+		// wrote the file and it knows. Consulted on every path.
+		if rc, landed := o.Ingest.Landed(o.GenerationID, member); landed {
+			if terr != nil {
+				o.log("warn", fmt.Sprintf("%s landed %s/%s and its reply was lost (%v); the endpoint's own record is used", node, pv.AppName, pv.Volume, terr))
+			}
+			return o.landed(rec, pv, ack, tack, rc, node)
+		}
+		switch {
+		case terr != nil:
+			last = fmt.Sprintf("the transfer request to %s failed: %v", node, terr)
+		case !tack.OK:
+			last = transferReason(node, tack)
+			if tack.Refusal == proto.BackupRefusalDestinationRefused || tack.Refusal == proto.BackupRefusalDestinationUnsupported ||
+				tack.Refusal == proto.BackupRefusalStagingMissing || tack.Refusal == proto.BackupRefusalDigestMismatch {
+				// The destination said no, or the agent could not even
+				// start: a second attempt on a fresh credential would say
+				// the same thing.
+				rec.Reason = last
+				return rec
+			}
+		default:
+			last = fmt.Sprintf("%s reported the upload of %s as landed and the endpoint has no record of it", node, member)
+		}
+		o.log("warn", fmt.Sprintf("upload of %s/%s from %s did not land: %s", pv.AppName, pv.Volume, node, last))
 	}
-	if sum != ack.Digest {
-		rec.Reason = fmt.Sprintf("REFUSED: %s reported digest %s for %s and the staged bytes hash to %s. "+
-			"The copy is not what the agent says it is, so it is not going into an archive whose manifest would claim otherwise",
-			o.NodeID, short(ack.Digest), name, short(sum))
-		o.log("error", fmt.Sprintf("digest mismatch staging %s/%s: %s", pv.AppName, pv.Volume, rec.Reason))
-		return rec, 0
-	}
-
-	arc := pv.ArchivePath()
-	if err := writeTarFile(tw, arc, staged, info.Size(), o.Now); err != nil {
-		rec.Reason = fmt.Sprintf("the staged copy %s could not be written into the archive: %v", name, err)
-		return rec, 0
-	}
-
-	rec.Captured = true
-	rec.Path = arc
-	rec.SizeBytes = ack.SizeBytes
-	rec.PlaintextBytes = ack.PlaintextBytes
-	rec.FileCount = ack.FileCount
-	rec.SHA256 = sum
-	o.log("info", fmt.Sprintf("captured %s (%s, %d file(s), %s, %s)%s",
-		arc, humanBytes(ack.SizeBytes), ack.FileCount, pv.Class, consistencyText(ack),
-		downtimeText(ack)))
-	return rec, ack.SizeBytes
+	rec.Reason = fmt.Sprintf("the upload did not land after %d attempt(s); last: %s", transferAttempts, last)
+	return rec
 }
 
-// unstage gives the space back. §4.7's "delete each after a confirmed upload",
-// which is what keeps the peak at one volume rather than the sum.
+// landed fills in a record from the endpoint's receipt — and refuses to call
+// the volume captured when the agent's own account of the plaintext disagrees
+// with what it staged, because the member on the disk would then not be the
+// copy the manifest describes.
+func (o fanOutOpts) landed(rec VolumeRecord, pv PlannedVolume, stage proto.BackupStageVolumeAck, xfer proto.BackupTransferAck, rc *backupxfer.Receipt, node string) VolumeRecord {
+	if xfer.OK && xfer.PlaintextDigest != "" && !strings.EqualFold(xfer.PlaintextDigest, stage.Digest) {
+		rec.Reason = fmt.Sprintf("REFUSED: %s staged %s with digest %s and sealed bytes hashing to %s; the member on the target is not the copy the stage verb described and is not indexed",
+			node, pv.Volume, short(stage.Digest), short(xfer.PlaintextDigest))
+		return rec
+	}
+	if rc.PlaintextDigest != "" && !strings.EqualFold(rc.PlaintextDigest, stage.Digest) {
+		rec.Reason = fmt.Sprintf("REFUSED: the member that landed declares plaintext digest %s and the stage verb reported %s; not indexed", short(rc.PlaintextDigest), short(stage.Digest))
+		return rec
+	}
+	if !xfer.OK && xfer.Refusal == proto.BackupRefusalDigestMismatch {
+		// The member landed, and the agent says its plaintext is not the
+		// staged copy. The endpoint cannot see inside the seal; the agent's
+		// word is the only check, and it said no.
+		rec.Reason = transferReason(node, xfer)
+		return rec
+	}
+	rec.Captured = true
+	rec.Failed = false
+	rec.Member = rc.Member
+	rec.SealedBy = rc.NodeID
+	rec.KeyID = o.KeyID
+	rec.SealedSHA256 = rc.SealedDigest
+	rec.SealedSizeBytes = rc.SealedBytes
+	rec.SizeBytes = stage.SizeBytes
+	rec.PlaintextBytes = stage.PlaintextBytes
+	rec.FileCount = stage.FileCount
+	rec.SHA256 = stage.Digest
+	o.log("info", fmt.Sprintf("captured %s from %s (%s staged, %s sealed, %d file(s), %s, %s)%s",
+		rc.Member, node, humanBytes(stage.SizeBytes), humanBytes(rc.SealedBytes), stage.FileCount, pv.Class, consistencyText(stage), downtimeText(stage)))
+	return rec
+}
+
+// unstage gives the space back on the node that staged. §4.7's "delete each
+// after a confirmed upload", which is what keeps the peak at one volume.
 //
 // Best-effort and never fatal: the file is under the agent's root, the agent
-// sweeps its own root at start, and the api's own terminal hook sweeps it too.
-// A failure here costs disk, and failing the run over it would cost the backup.
-func (o fanOutOpts) unstage(ctx context.Context, name string) {
+// sweeps its own root at start. A failure here costs disk on that node, and
+// failing the run over it would cost the backup.
+func (o fanOutOpts) unstage(ctx context.Context, node, name string) {
 	cmd, err := json.Marshal(proto.BackupUnstageCmd{StagingName: name})
 	if err != nil {
 		return
 	}
-	// Its own deadline too, and deliberately NOT the caller's: unstage is the
-	// call that gives the space back, and a phase that has run out of time is
-	// exactly when the space matters most. context.WithoutCancel keeps a
-	// cancelled phase from skipping its own cleanup.
+	// Its own deadline, and deliberately NOT the caller's: a phase that has
+	// run out of time is exactly when the space matters most.
 	unstageCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proto.BackupUnstageWork+rpcSlack)
 	defer cancel()
-	msg, err := o.NATS.RequestWithContext(unstageCtx, proto.BackupUnstageSubject(o.NodeID), cmd)
+	msg, err := o.NATS.RequestWithContext(unstageCtx, proto.BackupUnstageSubject(node), cmd)
 	if err != nil {
-		o.log("warn", fmt.Sprintf("could not ask %s to remove the staged copy %s: %v — it will be swept at the end of this run", o.NodeID, name, err))
+		if !errors.Is(err, nats.ErrNoResponders) {
+			o.log("warn", fmt.Sprintf("could not ask %s to remove the staged copy %s: %v — that agent sweeps its staging root at its next start", node, name, err))
+		}
 		return
 	}
 	var ack proto.BackupUnstageAck
 	if err := json.Unmarshal(msg.Data, &ack); err != nil || !ack.OK {
-		o.log("warn", fmt.Sprintf("%s did not remove the staged copy %s (%s) — it will be swept at the end of this run",
-			o.NodeID, name, strings.TrimSpace(string(ack.Refusal)+" "+ack.Detail)))
+		o.log("warn", fmt.Sprintf("%s did not remove the staged copy %s (%s) — that agent sweeps its staging root at its next start",
+			node, name, strings.TrimSpace(string(ack.Refusal)+" "+ack.Detail)))
 	}
 }
 
@@ -416,75 +428,19 @@ func refusalReason(nodeID string, refusal proto.StorageRefusal, detail string) s
 	return fmt.Sprintf("%s refused to stage it (%s): %s", nodeID, r, d)
 }
 
-// copyVolumeMembers copies the fan-out's tar into the archive member by member,
-// and refuses an archive whose manifest would over-claim.
-//
-// It takes an OPEN READER rather than a path, deliberately. The only safe way
-// to name a staged file is stagedPath, which checks the agent-reported root and
-// the api-minted name at the join; a function that took a path would be a
-// second route to a file open, reachable by any caller of Assemble, with the
-// control two call frames away. The caller opens it where the check lives.
-//
-// The final check is the one that matters: every volume the manifest says was
-// captured must actually be a member here. A manifest that named a member the
-// archive does not contain would be discovered on restore day, which is the one
-// day it must not be.
-func copyVolumeMembers(tw *tar.Writer, vols io.Reader, report AppVolumeReport) error {
-	want := map[string]bool{}
-	for _, v := range report.Volumes {
-		if v.Captured {
-			if v.Path == "" {
-				return fmt.Errorf("internal: %s/%s is recorded as captured with no archive path", v.App, v.Volume)
-			}
-			want[v.Path] = false
-		}
+// transferReason renders a transfer refusal, with the destination's own code
+// when it was the destination that said no.
+func transferReason(nodeID string, ack proto.BackupTransferAck) string {
+	r := strings.TrimSpace(string(ack.Refusal))
+	if r == "" {
+		r = "refused"
 	}
-	if len(want) == 0 {
-		return nil
+	if ack.DestinationCode != "" {
+		r += ", destination said " + ack.DestinationCode
 	}
-	if vols == nil {
-		return errors.New("internal: the manifest records captured app volumes and the fan-out handed over no tar to take them from")
+	d := strings.TrimSpace(ack.Detail)
+	if d == "" {
+		d = "no detail given"
 	}
-
-	tr := tar.NewReader(vols)
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("read staged app volumes: %w", err)
-		}
-		seen, ok := want[hdr.Name]
-		if !ok {
-			// A member nobody recorded. It cannot happen — this file is written
-			// by stageOne and by nothing else — and if it ever did, silently
-			// copying an unrecorded member into an archive whose manifest does
-			// not list it is the exact dishonesty this file is about.
-			return fmt.Errorf("the staged app-volume tar holds a member %q that no manifest record names", hdr.Name)
-		}
-		if seen {
-			return fmt.Errorf("the staged app-volume tar holds two members named %q", hdr.Name)
-		}
-		want[hdr.Name] = true
-		if err := tw.WriteHeader(&tar.Header{
-			Name: hdr.Name, Mode: 0o600, Size: hdr.Size, ModTime: hdr.ModTime, Typeflag: tar.TypeReg,
-		}); err != nil {
-			return err
-		}
-		n, err := io.Copy(tw, io.LimitReader(tr, hdr.Size))
-		if err != nil {
-			return fmt.Errorf("copy %s into the archive: %w", hdr.Name, err)
-		}
-		if n != hdr.Size {
-			return fmt.Errorf("%s: copied %d of %d bytes into the archive", hdr.Name, n, hdr.Size)
-		}
-	}
-	for name, seen := range want {
-		if !seen {
-			return fmt.Errorf("the manifest records %s as captured and it is not in the staged app-volume tar; "+
-				"refusing to write an archive whose own manifest over-claims", name)
-		}
-	}
-	return nil
+	return fmt.Sprintf("%s could not upload it (%s): %s", nodeID, r, d)
 }

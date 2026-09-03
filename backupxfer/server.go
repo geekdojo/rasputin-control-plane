@@ -60,8 +60,13 @@ type Ingest struct {
 	now  func() time.Time
 	logf func(format string, args ...any)
 
-	mu       sync.Mutex
-	gen      *openGeneration
+	mu  sync.Mutex
+	gen *openGeneration
+	// last is the generation most recently closed, kept so Abandon can
+	// remove its partial directory after the run that closed it fails —
+	// the fan-out closes the generation before the manifest is built, and
+	// the write that commits the directory may still refuse.
+	last     *openGeneration
 	landed   map[string]*Receipt
 	inflight map[string]bool
 }
@@ -148,6 +153,7 @@ func (i *Ingest) Open(gensDir, generationID, jobID string) (string, error) {
 	}
 	_ = d.Close()
 	i.gen = &openGeneration{id: generationID, jobID: jobID, gensDir: gensDir, dir: filepath.Join(gensDir, partial)}
+	i.last = nil
 	i.landed = map[string]*Receipt{}
 	i.inflight = map[string]bool{}
 	return i.gen.dir, nil
@@ -159,19 +165,28 @@ func (i *Ingest) Close(generationID string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.gen != nil && i.gen.id == generationID {
+		i.last = i.gen
 		i.gen = nil
 	}
 }
 
 // Abandon closes the generation AND removes its partial directory — the
-// terminal path of a run that did not reach the write. Removes only a
-// directory named `.partial-<generationID>` that is still a real directory
-// under the generations directory it was opened in.
+// terminal path of a run that did not reach the write, or whose write
+// refused. Works on the open generation or the one most recently closed;
+// removes only a directory named `.partial-<generationID>` that is still a
+// real directory under the generations directory it was opened in. A
+// generation the write verb committed has been renamed and is untouched.
 func (i *Ingest) Abandon(generationID string) error {
 	i.mu.Lock()
 	gen := i.gen
-	if gen != nil && gen.id == generationID {
+	if gen == nil || gen.id != generationID {
+		gen = i.last
+	}
+	if i.gen != nil && i.gen.id == generationID {
 		i.gen = nil
+	}
+	if i.last != nil && i.last.id == generationID {
+		i.last = nil
 	}
 	i.mu.Unlock()
 	if gen == nil || gen.id != generationID {

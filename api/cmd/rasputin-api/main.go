@@ -45,6 +45,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -585,13 +586,20 @@ func main() {
 	// to four. Registered unconditionally; a cluster with no claimed target
 	// gets a clean refusal at step 1 rather than a missing workflow.
 	//
-	// SCOPE: every generation this build writes is `controlplane-local` — the
-	// database, the mesh CA, Headscale state, AND every `critical`/`state`
-	// volume of every app installed on THIS node. An app on a compute node is
-	// still not in it: nothing moves a staged copy off the node that made it
-	// (#295, #296). The saga says so in its own log lines, its manifest, its
-	// ledger row and the generation's name on the platter, and names every
-	// volume it could not take.
+	// SCOPE: every generation this build writes is `full` — the database,
+	// the mesh CA, Headscale state, AND every `critical`/`state` volume of
+	// every installed app on EVERY node, each sealed on the node that hosts
+	// it and uploaded to this api's ingest endpoint on a per-member
+	// credential (backupxfer, #295/#296). A volume the run could not take is
+	// FAILED, named, and fails the run. The saga says so in its own log
+	// lines, its manifest, its ledger row and the generation's name on the
+	// platter.
+	//
+	// The ingest endpoint and the workflow share ONE *backupxfer.Ingest: the
+	// credentials the fan-out mints are verifiable by exactly the handler
+	// that receives them, and by nothing else. The signing key is minted
+	// here, per process, from crypto/rand, and lives nowhere else — a run
+	// does not survive an api restart, so neither need its credentials.
 	//
 	// The api does NOT decide where the archive is staged, and nothing here
 	// creates a staging directory. The agent on the target node owns that root
@@ -604,8 +612,22 @@ func main() {
 	// §4.7's third discipline is unchanged, just moved to where the directory
 	// is known: the agent sweeps its root at start, and the saga sweeps it again
 	// at the top of the snapshot step, before the free-space guard sizes the run.
+	backupAuthority, err := backupxfer.NewAuthority()
+	if err != nil {
+		log.Fatalf("rasputin-api: backup ingest authority: %v", err)
+	}
+	// RASPUTIN_BACKUP_INGEST_CONCURRENCY is the inbound-upload semaphore —
+	// design/storage.md §4.7's backpressure. One by default: the fan-out is
+	// serial and the target may be spinning media.
+	backupIngest := backupxfer.New(backupAuthority, parseIntOr(os.Getenv("RASPUTIN_BACKUP_INGEST_CONCURRENCY"), backupxfer.DefaultConcurrency))
 	runner.Register(storage.RunWorkflow(backupStore, storage.RunConfig{
 		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		// The transport: the endpoint members land at, and the URL the
+		// nodes are handed for it — the same public base the update
+		// bundles are served from, so a node that can pull a bundle can
+		// push a volume.
+		Ingest:        backupIngest,
+		IngestBaseURL: publicBaseURL,
 		// Step 1 refuses a target on any other node: the archive is sealed here
 		// and read by the agent beside it, and that is also what keeps the
 		// staging root the api acts on coming from this host.
@@ -938,8 +960,10 @@ func main() {
 	// sweep. One rotator, two callers — a second one would differ in exactly
 	// the case that matters, an offline node.
 	srv.SetAppLeafRotator(rotateAppLeaf)
-	// The backup-target ledger, for GET/POST /api/backup/targets.
+	// The backup-target ledger, for GET/POST /api/backup/targets, and the
+	// ingest endpoint the nodes upload sealed volumes to.
 	srv.SetBackupStore(backupStore)
+	srv.SetBackupIngest(backupIngest)
 
 	// AA-11 DNS forwarding (ADR-0004 §10): reconcile the nameserver's off-zone
 	// forwarding stub from the persisted setting, and hand the api the hook to
@@ -2007,4 +2031,13 @@ func parseDurationOr(s string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// parseIntOr reads a positive integer from an env value, or returns def.
+func parseIntOr(v string, def int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }

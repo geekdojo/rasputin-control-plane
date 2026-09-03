@@ -42,8 +42,8 @@ type BackupRun struct {
 	// Reason is "scheduled" or "manual" — §4.1 has both producers and an
 	// operator looking at a 3 a.m. failure wants to know which one it was.
 	Reason string `json:"reason,omitempty"`
-	// Scope is proto.BackupScopeControlplaneLocal for everything this build
-	// writes — the archive's REACH, one machine.
+	// Scope is proto.BackupScopeFull for everything this build writes — the
+	// generation's REACH, every node.
 	//
 	// Marshalled on every row, deliberately, so no view can render a run
 	// without having been handed the fact that it did not reach the cluster.
@@ -60,9 +60,13 @@ type BackupRun struct {
 	// was never populated".
 	AppVolumesCaptured int `json:"appVolumesCaptured"`
 	AppVolumesSkipped  int `json:"appVolumesSkipped"`
+	// AppVolumesFailed is how many of the skipped ones the run TRIED to take
+	// and could not — an offline node, a refusal, an upload that did not land.
+	// §4.4's failed-not-skipped; non-zero is a failed run with the volumes
+	// named in Error.
+	AppVolumesFailed int `json:"appVolumesFailed"`
 	// Complete is true only when every classified volume in the cluster was
-	// captured. A `succeeded` run with Complete false is the normal state of
-	// this build on any cluster with an app on a compute node.
+	// captured.
 	Complete bool `json:"complete"`
 	// Warning is a caveat on a row that is NOT failed — volumes that were
 	// skipped, or an app the backup left down. Distinct from Error, which is
@@ -77,7 +81,7 @@ type BackupRun struct {
 }
 
 const runCols = `job_id, target_job_id, part_uuid, node_id, reason, scope, generation_id,
-        key_id, digest, size_bytes, app_volumes_captured, app_volumes_skipped,
+        key_id, digest, size_bytes, app_volumes_captured, app_volumes_skipped, app_volumes_failed,
         complete, warning, generations_kept,
         generations_pruned, status, started_at, finished_at, error`
 
@@ -115,12 +119,12 @@ func (s *Store) BindRunTarget(ctx context.Context, jobID, targetJobID, partUUID,
 //
 // It deliberately does not touch `status`: a run whose retention did not
 // converge has not finished, and this is not the call that decides it has.
-func (s *Store) MarkRunGeneration(ctx context.Context, jobID, generationID, digest string, sizeBytes uint64, appVolumes, appVolumesSkipped int) error {
+func (s *Store) MarkRunGeneration(ctx context.Context, jobID, generationID, digest string, sizeBytes uint64, appVolumes, appVolumesSkipped, appVolumesFailed int) error {
 	_, err := s.db.ExecContext(ctx, `
         UPDATE backup_runs
-        SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?, app_volumes_skipped = ?
+        SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?, app_volumes_skipped = ?, app_volumes_failed = ?
         WHERE job_id = ?`,
-		generationID, digest, sizeForDB(sizeBytes), appVolumes, appVolumesSkipped, jobID)
+		generationID, digest, sizeForDB(sizeBytes), appVolumes, appVolumesSkipped, appVolumesFailed, jobID)
 	return err
 }
 
@@ -132,6 +136,7 @@ type RunResult struct {
 	SizeBytes          uint64
 	AppVolumesCaptured int
 	AppVolumesSkipped  int
+	AppVolumesFailed   int
 	Scope              string
 	Complete           bool
 	// Warning is the caveat a SUCCEEDED row still has to carry — volumes that
@@ -151,11 +156,11 @@ func (s *Store) FinishRun(ctx context.Context, jobID string, res RunResult) erro
 	out, err := s.db.ExecContext(ctx, `
         UPDATE backup_runs
         SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?,
-            app_volumes_skipped = ?, complete = ?, warning = ?,
+            app_volumes_skipped = ?, app_volumes_failed = ?, complete = ?, warning = ?,
             generations_kept = ?, generations_pruned = ?, status = ?, finished_at = ?, error = ''
         WHERE job_id = ? AND status = ?`,
 		res.GenerationID, res.Digest, sizeForDB(res.SizeBytes), res.AppVolumesCaptured,
-		res.AppVolumesSkipped, boolForDB(res.Complete), res.Warning,
+		res.AppVolumesSkipped, res.AppVolumesFailed, boolForDB(res.Complete), res.Warning,
 		res.GenerationsKept, res.GenerationsPruned, string(RunSucceeded), ms(res.At),
 		jobID, string(RunRunning))
 	if err != nil {
@@ -184,11 +189,11 @@ func (s *Store) MarkRunRetention(ctx context.Context, jobID string, res RunResul
 	_, err := s.db.ExecContext(ctx, `
         UPDATE backup_runs
         SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?,
-            app_volumes_skipped = ?, complete = ?, warning = ?,
+            app_volumes_skipped = ?, app_volumes_failed = ?, complete = ?, warning = ?,
             generations_kept = ?, generations_pruned = ?
         WHERE job_id = ?`,
 		res.GenerationID, res.Digest, sizeForDB(res.SizeBytes), res.AppVolumesCaptured,
-		res.AppVolumesSkipped, boolForDB(res.Complete), res.Warning,
+		res.AppVolumesSkipped, res.AppVolumesFailed, boolForDB(res.Complete), res.Warning,
 		res.GenerationsKept, res.GenerationsPruned, jobID)
 	return err
 }
@@ -281,7 +286,7 @@ func scanRun(scan func(...any) error) (*BackupRun, error) {
 	)
 	if err := scan(&r.JobID, &r.TargetJobID, &r.PartUUID, &r.NodeID, &r.Reason, &r.Scope,
 		&r.GenerationID, &r.KeyID, &r.Digest, &sizeBytes, &r.AppVolumesCaptured,
-		&r.AppVolumesSkipped, &complete, &r.Warning,
+		&r.AppVolumesSkipped, &r.AppVolumesFailed, &complete, &r.Warning,
 		&r.GenerationsKept, &r.GenerationsPruned, &status, &startedAt, &finishedAt,
 		&r.Error); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

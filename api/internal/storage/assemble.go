@@ -21,7 +21,7 @@ import (
 // §4.5's contents list, assembled — and, just as importantly, §4.5's contents
 // list NOT assembled, recorded in writing.
 //
-// # What goes in
+// # What goes in the identity archive
 //
 //	rasputin.db                 jobs, inventory, users + passkey credentials,
 //	                            bus-token store, app declarations, mesh intents
@@ -29,37 +29,44 @@ import (
 //	                            operator device's installed trust is orphaned
 //	<dataDir>/mesh/headscale/    tailnet identity; nodes stay enrolled
 //
-// Every one of those is a local file on the controlplane, which is the node
-// with the claimed target mounted. That is why this slice is buildable today.
+// Every one of those is a local file on the controlplane, sealed HERE by the
+// api to the target's public key.
 //
-// # What goes in from the apps, and what does not
+// # Where the app volumes are, and why they are not in this archive
 //
-// §4.5 also calls for "app volumes classed `critical` or `state`, on any node".
-// This build captures those volumes for every app installed ON THE
-// CONTROLPLANE NODE — the fan-out step stages each one through the agent
-// (proto.BackupStageVolumeCmd, #294), verifies the digest, copies the staged
-// tar in, and unstages it before asking for the next. That works without any
-// transport because the agent's staging root and the api's are the same
-// directory on the same filesystem.
+// §4.5 calls for "app volumes classed `critical` or `state`, on any node".
+// Each one is sealed by the agent on the node that hosts it (§4.6: the
+// per-node encryption cost lands on the agent) and uploaded to the api's
+// ingest endpoint as its OWN member of the generation —
+// volumes/<app>/<volume>.rasputin-archive beside this archive. It is not
+// copied into this archive, on any node, including the controlplane's own:
+// one layout whatever the site, one path to test, and the api never holds a
+// volume's bytes.
 //
-// It does NOT capture a volume on any other node. Nothing yet moves a staged
-// copy off the node that made it — the per-node streaming path (#295) and the
-// ingest endpoint (#296) are unbuilt — so a compute node's app data cannot
-// travel. Nor `bulk`, which §4.7 streams direct rather than staging. Every one
-// of those is RECORDED, by name, with its reason, in AppVolumeReport.Volumes.
-// Silence is the one outcome that is not permitted.
+// The manifest is the INDEX. AppVolumes.Volumes names every member the
+// generation holds with the digest over its sealed bytes and the digest over
+// the tar inside; a restore (#291) reads the manifest and then each member. A
+// file in the generation that no record names is not part of the generation.
 //
-// An archive that omits app data is not the backup a user assumes they have — a
-// Vaultwarden vault is exactly the thing §4.2 classes `critical`. The defence
-// against that misunderstanding is not a release note. It is that the scope is
-// in the generation's directory name on the platter, in the sealed header, in
-// the clear-text manifest, in the backup_runs row, in the job's own log lines,
-// and in the UI — one exported constant behind all six. This file writes four
-// of them.
+// Every classified volume that is NOT a member is recorded by name with its
+// reason — `bulk` (a different lane, §4.7), an app with no tile, a node that
+// was offline, an upload that did not land. Silence is the one outcome that is
+// not permitted, and a volume the run TRIED to take and could not is a
+// FAILURE (§4.4) that ends the run red with the volume named.
+//
+// The scope is in the generation's directory name on the platter, in the
+// sealed header of every member, in the clear-text manifest, in the
+// backup_runs row, in the job's own log lines, and in the UI — one exported
+// constant behind all six. This file writes four of them.
 
 // ManifestVersion is the manifest schema version. Bumped when a field changes
 // meaning, so a restore reading a two-year-old generation knows what it has.
-const ManifestVersion = 1
+//
+// 2 (2026-09-03): app volumes are per-volume sealed members in the generation
+// directory (appVolumes.volumes[].member), not `app-volumes/` entries inside
+// the identity archive. A version-1 generation holds its volumes inside the
+// archive; a version-2 one holds none there.
+const ManifestVersion = 2
 
 // IdentitySources says where on this controlplane the §4.5 identity set lives.
 //
@@ -102,20 +109,17 @@ type Manifest struct {
 	JobID           string    `json:"jobId,omitempty"`
 	ClusterID       string    `json:"clusterId,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
-	// Scope is the run's REACH — proto.BackupScopeControlplaneLocal for
-	// everything this build writes. The single most important field in the
-	// file, and the same string that is in the generation's directory name and
-	// bound into the sealed header's AEAD additional data.
+	// Scope is the run's REACH — proto.BackupScopeFull for everything this
+	// build writes: every node. The same string that is in the generation's
+	// directory name and bound into every sealed header's AEAD additional
+	// data.
 	Scope string `json:"scope"`
 	// Complete is the run's OUTCOME: true only when every classified volume in
-	// the cluster is actually in this archive. Separate from Scope because the
-	// scope is minted before the fan-out has staged anything and cannot depend
-	// on what it found — and stated as a boolean because a reader skimming JSON
-	// for reassurance finds one before they find a string to interpret.
-	//
-	// A `controlplane-local` archive on a cluster whose only apps live on the
-	// controlplane is complete. On a cluster with one app on a compute node it
-	// is not, and appVolumes.volumes names which.
+	// the cluster is actually a member of this generation. Separate from Scope
+	// because the scope is minted before the fan-out has staged anything and
+	// cannot depend on what it found — and stated as a boolean because a
+	// reader skimming JSON for reassurance finds one before they find a string
+	// to interpret. When it is false, appVolumes.volumes names which.
 	Complete bool `json:"complete"`
 	// Warning is prose, present on every manifest, and written to be understood
 	// by somebody who has never read design/storage.md. It states the BUILD's
@@ -125,7 +129,10 @@ type Manifest struct {
 	// encrypted to. An identifier — never key material, and there is no field
 	// here for any.
 	KeyID string `json:"keyId,omitempty"`
-	// Entries is what was captured.
+	// Layout says, for a reader with no access to this source, how the
+	// generation directory is arranged. Prose; the fields are the contract.
+	Layout string `json:"layout"`
+	// Entries is what the identity archive beside this manifest holds.
 	Entries []ManifestEntry `json:"entries"`
 	// AppVolumes is the fan-out's own record — every classified volume in the
 	// cluster, captured or not, each with its size, digest, consistency,
@@ -136,12 +143,20 @@ type Manifest struct {
 	// Excluded is §4.5's exclusion list, restated so a restore does not go
 	// looking for observability data it was never given.
 	Excluded []string `json:"excluded,omitempty"`
-	// AppVolumeBytes is the sum of the CAPTURED volumes' staged tars.
-	AppVolumeBytes uint64 `json:"appVolumeBytes"`
-	// PlaintextBytes is the whole archive's payload: Entries' sizes plus
-	// AppVolumeBytes.
+	// AppVolumeBytes is the sum of the CAPTURED volumes' staged tars — the
+	// plaintext inside the members — and SealedVolumeBytes the sum of the
+	// members as they sit on the disk.
+	AppVolumeBytes    uint64 `json:"appVolumeBytes"`
+	SealedVolumeBytes uint64 `json:"sealedVolumeBytes"`
+	// PlaintextBytes is the identity archive's payload: Entries' sizes.
 	PlaintextBytes int64 `json:"plaintextBytes"`
 }
+
+// manifestLayout is Manifest.Layout.
+const manifestLayout = "generations/<id>/manifest.json is this index; archive.rasputin-archive is the identity set, sealed by the controlplane; " +
+	"volumes/<app>/<volume>.rasputin-archive is one app volume each, sealed by the node named in its record's `sealedBy`. " +
+	"Every member is listed under appVolumes.volumes with `sealedSha256` over the file and `sha256` over the tar inside it; " +
+	"a file no record names is not part of this generation. Every sealed file opens with the private half of key `keyId`."
 
 // AppVolumeReport is the per-node volume fan-out's own record: what it
 // captured, what it did not, and — for every one it did not — why, by name.
@@ -162,8 +177,12 @@ type AppVolumeReport struct {
 	// counterpart, and it is a peer field rather than a derived one because the
 	// two together are the sentence: "two of three".
 	SkippedCount int `json:"skippedCount"`
-	// NodesConsulted is how many nodes the fan-out actually asked. One at most
-	// in this build — the controlplane — and zero when nothing was eligible.
+	// FailedCount is how many of those the run TRIED to take and could not —
+	// §4.4's failed-not-skipped. Non-zero ends the run failed; Failed names
+	// them so a reader need not scan Volumes.
+	FailedCount int      `json:"failedCount"`
+	Failed      []string `json:"failed,omitempty"`
+	// NodesConsulted is how many nodes the fan-out sent a staging request to.
 	NodesConsulted int `json:"nodesConsulted"`
 	// Volumes is the per-volume record, captured and not, in the order the run
 	// considered them. THE honest artefact: every classified volume in the
@@ -225,15 +244,15 @@ func (r AppVolumeReport) Complete() bool {
 //
 // It is about the BUILD, not about one run, which is why it says nothing about
 // counts. The per-run facts are AppVolumeReport.Summary and Volumes.
-const appVolumeFanOutReason = "This archive covers the CONTROLPLANE NODE only (scope `" + proto.BackupScopeControlplaneLocal + "`). " +
-	"It contains the control-plane identity set — the database, the mesh CA and Headscale state — plus every volume classed " +
-	"`critical` or `state` belonging to an app installed ON THE CONTROLPLANE. " +
-	"design/storage.md §4.5 calls for those volumes on ANY node, and app volumes on a compute node are NOT in here: nothing " +
-	"yet moves a staged copy off the node that made it (geekdojo/geekdojo-brain#295 per-node streaming, #296 ingest). " +
-	"`bulk` volumes stream direct (§4.7) and are not in here either; `cache` volumes are never copied by design. " +
-	"Every volume that was not captured is listed by name, with its reason, under `appVolumes.volumes`, and `complete` is " +
-	"false whenever any of them was missed — when it is false, THIS IS NOT A COMPLETE BACKUP OF THIS CLUSTER. " +
-	"Read that list before assuming an app's data is in this archive."
+const appVolumeFanOutReason = "This generation covers EVERY NODE (scope `" + proto.BackupScopeFull + "`). " +
+	"It contains the control-plane identity set — the database, the mesh CA and Headscale state — sealed by the controlplane, " +
+	"plus every volume classed `critical` or `state` belonging to every installed app, each sealed on the node that hosts it and " +
+	"landed as its own member under volumes/. " +
+	"`bulk` volumes are a different lane (design/storage.md §4.7: streamed direct, never staged, not sealed) and that lane is not built; " +
+	"they are listed by name and are not in here. `cache` volumes are never copied by design. " +
+	"Every volume that was not captured is listed by name, with its reason, under `appVolumes.volumes`; one the run TRIED to take " +
+	"and could not is marked `failed` and the run ends failed. `complete` is false whenever anything classified was missed — " +
+	"when it is false, THIS IS NOT A COMPLETE BACKUP OF THIS CLUSTER. Read that list before assuming an app's data is in this generation."
 
 // AppVolumeFanOutReason is the fan-out's standing prose, exported so the api's
 // HTTP surface and the UI say the SAME words as the manifest on the platter and
@@ -259,7 +278,11 @@ func summarize(r AppVolumeReport) string {
 		return fmt.Sprintf("The %d installed app(s) declare only `cache` volumes, which §4.2 never copies, so there was no app data to capture.", r.AppsInstalled)
 	}
 	if r.Complete() {
-		return fmt.Sprintf("Captured %d of %d classified app volume(s) — every one this cluster has.", r.CapturedCount, len(r.Volumes))
+		return fmt.Sprintf("Captured %d of %d classified app volume(s) across %d node(s) — every one this cluster has.", r.CapturedCount, len(r.Volumes), r.NodesConsulted)
+	}
+	if r.FailedCount > 0 {
+		return fmt.Sprintf("Captured %d of %d classified app volume(s); %d FAILED (%s) and %d more were not captured — each is listed by name with its reason.",
+			r.CapturedCount, len(r.Volumes), r.FailedCount, strings.Join(r.Failed, ", "), r.SkippedCount-r.FailedCount)
 	}
 	return fmt.Sprintf("Captured %d of %d classified app volume(s); %d were NOT captured and are listed by name with their reason.",
 		r.CapturedCount, len(r.Volumes), r.SkippedCount)
@@ -289,6 +312,10 @@ func NewAppVolumeReport(enum AppEnumeration, records []VolumeRecord, nodesConsul
 			r.Captured = append(r.Captured, v.App+"/"+v.Volume)
 		} else {
 			r.SkippedCount++
+			if v.Failed {
+				r.FailedCount++
+				r.Failed = append(r.Failed, v.App+"/"+v.Volume)
+			}
 		}
 		// Checked on EVERY record, captured or not. proto says it plainly: the
 		// copy may have succeeded and the app still be down, and that is the
@@ -304,14 +331,14 @@ func NewAppVolumeReport(enum AppEnumeration, records []VolumeRecord, nodesConsul
 	}
 	r.CapturedCount = len(r.Captured)
 	r.Summary = summarize(r)
-	if !r.Complete() {
-		// #292 (schema), #293 (classification) and #294 (the agent's staging
-		// verb) are NOT here: each shipped, and naming a closed issue would
-		// send an operator looking in the wrong place for what holds their app
-		// data out of the archive.
-		r.BlockedBy = []string{
-			"geekdojo/geekdojo-brain#295 per-node streaming (off-node and `bulk` volumes)",
-			"geekdojo/geekdojo-brain#296 ingest endpoint (off-node volumes)",
+	for _, v := range r.Volumes {
+		if !v.Captured && v.Class == "bulk" {
+			// The one gap that is a missing BUILD rather than a failed run,
+			// so it is named as such. Nothing else is: #292–#296 shipped,
+			// and naming a closed issue would send an operator looking in
+			// the wrong place.
+			r.BlockedBy = []string{"design/storage.md §4.7 direct-stream lane for `bulk` volumes (not built)"}
+			break
 		}
 	}
 	return r
@@ -327,9 +354,9 @@ func unenumeratedReport() AppVolumeReport {
 
 // identityExclusions is §4.5's "Excluded" column, restated in the manifest.
 var identityExclusions = []string{
-	"app volumes on any node other than the controlplane (see appVolumes — each is listed by name with its reason)",
+	"app volumes are NOT inside this archive — each captured one is its own sealed member under volumes/, indexed under appVolumes",
 	"`cache`-class volumes (regenerable index, queue and model caches) — §4.2 says these are never copied, on any node",
-	"`bulk`-class volumes — §4.7 streams these direct rather than staging them; each is listed by name under appVolumes",
+	"`bulk`-class volumes — §4.7 streams these direct rather than staging them, and that lane is not built; each is listed by name under appVolumes",
 	"the bundle store (`bundles/`) — re-downloadable",
 	"observability data (`vm-data/`, Loki) — re-accumulates",
 	"IDS JSONL — bounded and re-accumulates",
@@ -412,16 +439,6 @@ type AssembleOptions struct {
 	// staging a volume STOPS AN APP and that is not something an archive writer
 	// should be doing behind its caller.
 	AppVolumes AppVolumeReport
-	// Volumes is the OPEN tar of captured volume members the fan-out built,
-	// whose members are copied into this archive verbatim. Nil when nothing was
-	// captured, and Assemble then produces exactly what it produced before app
-	// volumes existed.
-	//
-	// A reader rather than a path: the only safe way to name a staged file is
-	// stagedPath, which checks the agent-reported root and the api-minted name
-	// at the join, and this option would otherwise be a second route to a file
-	// open with the control two call frames away.
-	Volumes io.Reader
 	// Scope is the run's scope, minted at step 1 and stamped into the
 	// generation id. Passed in rather than read from a constant here so the id
 	// on the platter and the scope inside the seal can never be two different
@@ -446,18 +463,16 @@ type AssembleOptions struct {
 // BEFORE this one — the manifest cannot go first and also describe volumes
 // nobody has staged yet.
 //
-// Layout, and it is the contract the restore side (#291, unbuilt) will read:
+// Layout of the identity archive, the contract the restore side (#291) reads:
 //
 //	manifest.json                         the record, first
 //	rasputin.db                           the §4.5 identity set
 //	trust/mesh-ca.{key,pem}
 //	mesh/headscale/...
-//	app-volumes/<app>/<volume>.tar        one member per captured volume
 //
-// A per-volume member whose NAME carries the app and the volume, rather than a
-// flattened tree: a restore should never have to guess which file belonged to
-// which app, and an operator holding a decrypted archive should be able to see
-// what they have with `tar tf`.
+// The app volumes are NOT in here. Each is its own sealed member beside this
+// archive in the generation directory, and the manifest is their index — see
+// the file comment.
 func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	if strings.TrimSpace(opts.SnapshotPath) == "" {
 		return nil, fmt.Errorf("refusing to assemble generation %s: no database snapshot was produced, and an archive without rasputin.db restores as an appliance with no users, no nodes and no apps", opts.GenerationID)
@@ -534,7 +549,7 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	}
 	scope := strings.TrimSpace(opts.Scope)
 	if scope == "" {
-		scope = proto.BackupScopeControlplaneLocal
+		return nil, fmt.Errorf("refusing to assemble generation %s with no scope: the scope is the one field every surface repeats", opts.GenerationID)
 	}
 
 	m := &Manifest{
@@ -552,6 +567,7 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 		Complete:   fanOut.Complete(),
 		Warning:    appVolumeFanOutReason,
 		KeyID:      opts.KeyID,
+		Layout:     manifestLayout,
 		AppVolumes: fanOut,
 		Excluded:   identityExclusions,
 	}
@@ -579,15 +595,15 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 		})
 		m.PlaintextBytes += info.Size()
 	}
-	// The captured volumes' bytes count towards the archive's plaintext size
-	// too — an operator comparing `plaintextBytes` with the sealed file's
-	// length should not find the app data missing from one side of it.
+	// The captured volumes are summed for the reader, not for this archive:
+	// they are members beside it, and `plaintextBytes` describes only what
+	// is inside this file.
 	for _, v := range m.AppVolumes.Volumes {
 		if v.Captured {
 			m.AppVolumeBytes += v.SizeBytes
+			m.SealedVolumeBytes += v.SealedSizeBytes
 		}
 	}
-	m.PlaintextBytes += signedByteCount(m.AppVolumeBytes)
 
 	manifestJSON, err := m.JSON()
 	if err != nil {
@@ -613,18 +629,13 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 			return nil, err
 		}
 	}
-	// The captured app volumes, last, copied member-for-member out of the tar
-	// the fan-out built.
-	//
-	// Copied rather than concatenated: a tar IS a concatenation of member
-	// blocks, so appending the fan-out's file raw would be cheaper — and it
-	// would make this function's output depend on a second file being a valid,
-	// trailer-less fragment. A member-by-member copy costs one pass over data
-	// already on the same disk and leaves Assemble producing a complete,
-	// self-contained tar, which is what every caller and every future restore
-	// reads it as.
-	if err := copyVolumeMembers(tw, opts.Volumes, m.AppVolumes); err != nil {
-		return nil, err
+	// Every volume the manifest calls captured must name its member: a
+	// record with no member is an index entry pointing at nothing, and it
+	// would be discovered on restore day.
+	for _, v := range m.AppVolumes.Volumes {
+		if v.Captured && (v.Member == "" || v.SealedSHA256 == "") {
+			return nil, fmt.Errorf("internal: %s/%s is recorded as captured with no member or no sealed digest; refusing to write an index that over-claims", v.App, v.Volume)
+		}
 	}
 	if err := tw.Close(); err != nil {
 		return nil, err
