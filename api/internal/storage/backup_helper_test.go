@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
 )
 
@@ -88,6 +90,12 @@ type fakeBackupAgent struct {
 	// writeDigests is what the agent computed over the staged bytes itself,
 	// one per write call, so a test can compare it with what the api claimed.
 	writeDigests []string
+	// staged and unstaged are the app-volume phase's record, and
+	// maxLiveStaged is the most staged copies that existed at once — §4.7's
+	// peak, observed rather than assumed.
+	staged        []stagedVolume
+	unstaged      []string
+	maxLiveStaged int
 	// generations is the fake target's contents, oldest first.
 	generations []string
 }
@@ -302,6 +310,19 @@ type runHarnessOpts struct {
 	// selfNodeID overrides what the api believes its own node is. Only set to
 	// "" deliberately, to cover the api that does not know.
 	selfNodeID *string
+	// apps and tiles are the fan-out's two inputs. Nil `tiles` still supplies
+	// an empty catalog, because a nil one is a DIFFERENT case — step 1 refuses
+	// an api that cannot enumerate at all — and only the test for that refusal
+	// should reach it.
+	apps  []*apps.App
+	tiles fakeTiles
+	// noAppSource leaves RunConfig.Apps and .Tiles nil, for the step-1 refusal.
+	noAppSource bool
+	// appsErr makes the installed-app list fail.
+	appsErr error
+	// stageOutcomes decides what the fake agent does with each volume, keyed by
+	// volume name.
+	stageOutcomes map[string]stageOutcome
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -357,6 +378,7 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	agent.nodeID = runNodeID
 	agent.stagingRoot = stagingDir
 	agent.start(t, nc)
+	agent.startVolumeAgent(t, nc, opts.stageOutcomes)
 
 	h := &runHarness{
 		nc: nc, store: st, jobStore: js, agent: agent, key: key,
@@ -376,14 +398,23 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	if opts.selfNodeID != nil {
 		self = *opts.selfNodeID
 	}
-	r.Register(RunWorkflow(st, RunConfig{
+	cfg := RunConfig{
 		ClusterID:  "home1",
 		SelfNodeID: self,
 		Sources:    IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
 		DB:         st.DB(),
 		DBPath:     dbPath,
 		Retain:     opts.retain,
-	}))
+	}
+	if !opts.noAppSource {
+		tiles := opts.tiles
+		if tiles == nil {
+			tiles = fakeTiles{}
+		}
+		cfg.Apps = &fakeApps{list: opts.apps, err: opts.appsErr}
+		cfg.Tiles = tiles
+	}
+	r.Register(RunWorkflow(st, cfg))
 	h.runner = r
 	return h
 }
@@ -548,6 +579,207 @@ func (h *runHarness) stagingEntries(t *testing.T) []string {
 	out := make([]string, 0, len(ents))
 	for _, e := range ents {
 		out = append(out, e.Name())
+	}
+	return out
+}
+
+// ----- the app-volume fan-out's two inputs --------------------------------
+
+// fakeApps is the installed-app list. A slice rather than a database: the join
+// PlanAppVolumes performs is between two facts, and standing up an app store to
+// supply one of them would test the store instead.
+type fakeApps struct {
+	list []*apps.App
+	err  error
+}
+
+func (f *fakeApps) List(context.Context) ([]*apps.App, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.list, nil
+}
+
+// fakeTiles is the catalog side of the join, written per test rather than
+// loaded from the shipped catalog. The classification is CONTENT; a saga test
+// that broke every time a tile was re-classed would be testing the content.
+type fakeTiles map[string]tileschema.Tile
+
+func (f fakeTiles) Get(id string) (tileschema.Tile, bool) {
+	t, ok := f[id]
+	return t, ok
+}
+
+// testApp and testTile build the two halves of one installed app in one line
+// each, so a case reads as the cluster it describes.
+func testApp(id, name, node, tile string) *apps.App {
+	return &apps.App{ID: id, Name: name, TargetNode: node, SourceTile: tile}
+}
+
+func testTile(id string, vols ...tileschema.Volume) tileschema.Tile {
+	return tileschema.Tile{ID: id, Volumes: vols}
+}
+
+func vol(name, class, quiesce string) tileschema.Volume {
+	return tileschema.Volume{Name: name, Backup: class, Quiesce: quiesce}
+}
+
+// stagedVolume is what the fake agent was asked to stage and what it produced,
+// so a test can assert on the ORDER volumes were asked for as well as on the
+// archive that came out.
+type stagedVolume struct {
+	cmd proto.BackupStageVolumeCmd
+	ack proto.BackupStageVolumeAck
+}
+
+// stageOutcome lets a case decide, per volume, what the agent does with it —
+// a refusal, an app that does not come back, a wrong digest.
+type stageOutcome struct {
+	// body is the volume's content. Empty means a default.
+	body string
+	// refusal, when set, is answered instead of a copy.
+	refusal proto.StorageRefusal
+	detail  string
+	// appRestored false is §4.7's intolerable outcome.
+	appRestored *bool
+	// digest, when set, is what the agent CLAIMS — a value other than the real
+	// hash is the corrupted-handoff case.
+	digest string
+	// downtimeMillis and interrupting describe a `stop`.
+	downtimeMillis int64
+	interrupting   bool
+	consistency    proto.BackupConsistency
+}
+
+// startVolumeAgent answers the two staging verbs against a real staging root,
+// writing real tar files the api then re-hashes. A fake that echoed a digest
+// back would make the digest check untestable, which is the same reason the
+// write verb's fake re-hashes.
+func (f *fakeBackupAgent) startVolumeAgent(t *testing.T, nc *nats.Conn, outcomes map[string]stageOutcome) *fakeBackupAgent {
+	t.Helper()
+	respond := func(m *nats.Msg, v any) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Errorf("fake volume agent marshal: %v", err)
+			return
+		}
+		_ = m.Respond(b)
+	}
+	var subs []*nats.Subscription
+
+	sub, err := nc.Subscribe(proto.BackupStageVolumeSubject(f.nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupStageVolumeCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		out := outcomes[cmd.Volume]
+
+		// The refusals the real stager applies before it copies anything, so a
+		// test cannot accidentally assert on a build that stages a `bulk`
+		// volume the shipped agent would refuse.
+		if cmd.Class == "bulk" || cmd.Class == "cache" {
+			out.refusal = proto.BackupRefusalClassNotStaged
+			out.detail = "class " + cmd.Class + " is never staged"
+		}
+		ack := proto.BackupStageVolumeAck{
+			AppID: cmd.AppID, Volume: cmd.Volume, StagingName: cmd.StagingName,
+			ServiceInterrupting: out.interrupting || cmd.Quiesce == "stop",
+			DowntimeMillis:      out.downtimeMillis,
+			WasRunning:          true,
+			Stopped:             cmd.Quiesce == "stop",
+			AppRestored:         true,
+			Consistency:         out.consistency,
+		}
+		if out.appRestored != nil {
+			ack.AppRestored = *out.appRestored
+			ack.RestoreDetail = "the compose stack did not come up"
+		}
+		if out.refusal != "" {
+			ack.OK = false
+			ack.Refusal = out.refusal
+			ack.Detail = out.detail
+			f.recordStage(cmd, ack)
+			respond(m, ack)
+			return
+		}
+		body := out.body
+		if body == "" {
+			body = "TAR-OF-" + cmd.Volume
+		}
+		path := filepath.Join(f.stagingRoot, cmd.StagingName)
+		if !proto.BackupValidStagingName(cmd.StagingName) {
+			t.Errorf("the api asked for staging name %q, which the real agent would refuse", cmd.StagingName)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Errorf("fake stage write: %v", err)
+		}
+		sum := sha256.Sum256([]byte(body))
+		ack.OK = true
+		ack.StagedPath = path
+		ack.SizeBytes = uint64(len(body))
+		ack.PlaintextBytes = uint64(len(body))
+		ack.FileCount = 1
+		ack.Digest = hex.EncodeToString(sum[:])
+		if out.digest != "" {
+			ack.Digest = out.digest
+		}
+		f.recordStage(cmd, ack)
+		respond(m, ack)
+	})
+	if err != nil {
+		t.Fatalf("fake stage sub: %v", err)
+	}
+	subs = append(subs, sub)
+
+	sub, err = nc.Subscribe(proto.BackupUnstageSubject(f.nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupUnstageCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		f.mu.Lock()
+		f.unstaged = append(f.unstaged, cmd.StagingName)
+		f.mu.Unlock()
+		ack := proto.BackupUnstageAck{OK: true, StagingName: cmd.StagingName}
+		if proto.BackupValidStagingName(cmd.StagingName) {
+			p := filepath.Join(f.stagingRoot, cmd.StagingName)
+			if info, err := os.Stat(p); err == nil {
+				ack.Existed = true
+				ack.FreedBytes = uint64(info.Size())
+				_ = os.Remove(p)
+			}
+		}
+		respond(m, ack)
+	})
+	if err != nil {
+		t.Fatalf("fake unstage sub: %v", err)
+	}
+	subs = append(subs, sub)
+
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+	return f
+}
+
+func (f *fakeBackupAgent) recordStage(cmd proto.BackupStageVolumeCmd, ack proto.BackupStageVolumeAck) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.staged = append(f.staged, stagedVolume{cmd: cmd, ack: ack})
+	// The §4.7 invariant this whole phase is arranged around: never more than
+	// one staged copy on the agent's root at a time. Recorded here rather than
+	// asserted, because the assertion belongs to the test that cares.
+	live := len(f.staged) - len(f.unstaged)
+	if live > f.maxLiveStaged {
+		f.maxLiveStaged = live
+	}
+}
+
+// stagedOrder is the sequence of volume names the api asked for, which is the
+// only way to assert on the fan-out's ordering.
+func (f *fakeBackupAgent) stagedOrder() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.staged))
+	for _, s := range f.staged {
+		out = append(out, s.cmd.Volume)
 	}
 	return out
 }

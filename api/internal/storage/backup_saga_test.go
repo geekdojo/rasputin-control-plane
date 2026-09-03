@@ -54,12 +54,12 @@ func TestBackupRunSaga(t *testing.T) {
 				if row.GenerationID == "" {
 					t.Error("no generation recorded")
 				}
-				if !strings.Contains(row.GenerationID, proto.BackupScopeIdentityOnly) {
+				if !strings.Contains(row.GenerationID, proto.BackupScopeControlplaneLocal) {
 					t.Errorf("generation id %q does not carry the scope — an operator listing the disk "+
 						"must be able to see what an archive is without opening it", row.GenerationID)
 				}
-				if row.Scope != proto.BackupScopeIdentityOnly {
-					t.Errorf("scope = %q, want %q", row.Scope, proto.BackupScopeIdentityOnly)
+				if row.Scope != proto.BackupScopeControlplaneLocal {
+					t.Errorf("scope = %q, want %q", row.Scope, proto.BackupScopeControlplaneLocal)
 				}
 				if row.AppVolumesCaptured != 0 {
 					t.Errorf("appVolumesCaptured = %d — this build captures none", row.AppVolumesCaptured)
@@ -99,17 +99,20 @@ func TestBackupRunSaga(t *testing.T) {
 				if err := json.Unmarshal([]byte(cmd.ManifestJSON), &m); err != nil {
 					t.Fatalf("manifest is not parseable JSON: %v", err)
 				}
-				if m.Complete {
-					t.Error("the manifest says the archive is complete; it contains no app data")
+				// This cluster has no apps installed at all, so there was
+				// nothing classified to miss — complete is TRUE, and that is
+				// the honest answer rather than a reflexive caveat.
+				if !m.Complete {
+					t.Error("nothing was classified and nothing was missed, so the manifest should say so")
 				}
-				if m.Scope != proto.BackupScopeIdentityOnly {
+				if m.Scope != proto.BackupScopeControlplaneLocal {
 					t.Errorf("manifest scope = %q", m.Scope)
 				}
 				if m.AppVolumes.CapturedCount != 0 || len(m.AppVolumes.Captured) != 0 {
 					t.Errorf("manifest claims %d app volumes captured", m.AppVolumes.CapturedCount)
 				}
-				if m.AppVolumes.Reason == "" || len(m.AppVolumes.BlockedBy) == 0 {
-					t.Error("the manifest's app-volume section does not say WHY nothing was captured, which is the one thing it exists to say")
+				if m.AppVolumes.Volumes == nil || m.AppVolumes.Summary == "" || m.AppVolumes.Reason == "" {
+					t.Error("the manifest's app-volume section does not say what the fan-out did, which is the one thing it exists to say")
 				}
 				if m.Warning == "" {
 					t.Error("the manifest carries no warning; an operator reading it could take this for a complete backup")
