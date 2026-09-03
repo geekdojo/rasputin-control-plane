@@ -135,4 +135,73 @@ func TestFanOutReadsTheCatalogInEffect(t *testing.T) {
 	if !strings.Contains(r.ledger, "vaultwarden-data") {
 		t.Error("the job feed never named the volume it could not capture")
 	}
+	// The manifest says what was looked at, and which catalog answered.
+	e := r.manifest.AppVolumes
+	if !e.Enumerated || e.AppsInstalled != 1 || e.AppsResolved != 1 || e.Catalog != "v17 (verified fetch)" {
+		t.Errorf("enumeration = enumerated=%v installed=%d resolved=%d catalog=%q", e.Enumerated, e.AppsInstalled, e.AppsResolved, e.Catalog)
+	}
+	if !strings.Contains(r.ledger, "against catalog v17 (verified fetch)") {
+		t.Error("the job feed never said which catalog the fan-out read")
+	}
+}
+
+// TestFanOutRecordsATileThatDeclaresNoVolumes is the same cluster before any
+// catalog fetch has succeeded — first boot, an airgapped install — running on
+// the embedded floor, whose vaultwarden tile predates §4.2 and declares
+// nothing. Vaultwarden is on the controlplane this time, so the ONLY thing
+// between it and the archive is the missing classification.
+//
+// The run is not refused. It captures the identity set — the database, the
+// mesh CA, Headscale — which is what a cluster in this state most needs on a
+// disk, and it records Vaultwarden as not captured with a reason that names
+// the tile and the catalog, so the manifest says `complete: false` and the
+// job feed says why. A refusal would have left this cluster with no backup of
+// anything, and said less.
+func TestFanOutRecordsATileThatDeclaresNoVolumes(t *testing.T) {
+	r := runWithApps(t, runHarnessOpts{
+		apps:  []*apps.App{testApp("app-vw", "vaultwarden", runNodeID, "vaultwarden")},
+		tiles: newCatalogStore(t, benchFloor(), nil),
+	})
+	if r.job.Status != "succeeded" {
+		t.Fatalf("job failed: %s — the identity set is still worth writing when an app cannot be classified", r.job.Error)
+	}
+	if n := len(r.manifest.AppVolumes.Volumes); n != 1 {
+		t.Fatalf("the manifest has %d app-volume record(s), want one for vaultwarden: %+v", n, r.manifest.AppVolumes.Volumes)
+	}
+	rec := r.manifest.AppVolumes.Volumes[0]
+	if rec.App != "vaultwarden" || rec.TileID != "vaultwarden" || rec.Captured || rec.Class != "unclassified" {
+		t.Errorf("record = %+v", rec)
+	}
+	for _, want := range []string{"declares no volumes", "`vaultwarden`", "v14 (embedded floor"} {
+		if !strings.Contains(rec.Reason, want) {
+			t.Errorf("reason does not say %q: %q", want, rec.Reason)
+		}
+	}
+	if r.manifest.Complete || r.row.Complete {
+		t.Errorf("complete is manifest=%v row=%v with an installed app nobody classified", r.manifest.Complete, r.row.Complete)
+	}
+	e := r.manifest.AppVolumes
+	if e.AppsInstalled != 1 || e.AppsResolved != 0 || !strings.Contains(e.Catalog, "embedded floor") {
+		t.Errorf("enumeration = installed=%d resolved=%d catalog=%q", e.AppsInstalled, e.AppsResolved, e.Catalog)
+	}
+	// The identity set went in regardless.
+	members := r.archiveMembers(t)
+	for _, want := range []string{"manifest.json", "trust/mesh-ca.pem"} {
+		if _, ok := members[want]; !ok {
+			t.Errorf("the archive has no member %s; members are %v", want, keysOf(members))
+		}
+	}
+	if _, ok := members["app-volumes/vaultwarden/vaultwarden-data.tar"]; ok {
+		t.Error("an unclassified volume is in the archive; nothing could have known to stage it")
+	}
+	// And the job feed said so while it was happening — with the catalog
+	// named, which is the one line that would have explained the bench.
+	for _, want := range []string{"NOT captured: vaultwarden/", "against catalog v14 (embedded floor"} {
+		if !strings.Contains(r.ledger, want) {
+			t.Errorf("the job feed lacks %q", want)
+		}
+	}
+	if !strings.Contains(r.row.Warning, "1 app volume(s) were not captured") {
+		t.Errorf("ledger row warning = %q", r.row.Warning)
+	}
 }

@@ -657,7 +657,7 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 			// nothing to say so.
 			return nil, fmt.Errorf("list installed apps: %w", err)
 		}
-		plan, skipped := PlanAppVolumes(installed, cfg.Tiles, tgt.NodeID)
+		plan := PlanAppVolumes(installed, cfg.Tiles, tgt.NodeID)
 
 		volsName := stagingName(tgt.GenerationID, "vols")
 		volsPath, err := stagedPath(sc, volsName)
@@ -673,8 +673,9 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 			StagingDir:    stagingDir,
 			GenerationID:  tgt.GenerationID,
 			VolsPath:      volsPath,
-			Plan:          plan,
-			Skipped:       skipped,
+			Plan:          plan.Stage,
+			Skipped:       plan.Skipped,
+			Enumeration:   plan.AppEnumeration,
 			DBBytes:       dbBytes,
 			IdentityBytes: MeasureIdentitySet(cfg.Sources, dbBytes),
 			Now:           time.Now().UTC(),
@@ -1061,7 +1062,7 @@ func runPrune(store *Store, cfg RunConfig) jobs.DoFn {
 		}
 
 		if !asm.Complete {
-			res.Warning = fmt.Sprintf("%d classified app volume(s) were not captured; the manifest names each one and its reason", asm.AppVolumesSkipped)
+			res.Warning = fmt.Sprintf("%d app volume(s) were not captured; the manifest names each one and its reason", asm.AppVolumesSkipped)
 		}
 		if err := store.FinishRun(sc.Ctx, sc.JobID, res); err != nil {
 			return nil, fmt.Errorf("record backup run outcome: %w", err)

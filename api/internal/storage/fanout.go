@@ -78,9 +78,12 @@ type fanOutOpts struct {
 	// staging root.
 	VolsPath string
 	// Plan is what to stage, in order; Skipped is everything already known not
-	// to be capturable, records complete.
-	Plan    []PlannedVolume
-	Skipped []VolumeRecord
+	// to be capturable, records complete; Enumeration is what the plan looked
+	// at to arrive at both, carried into the report so an empty one can be
+	// read.
+	Plan        []PlannedVolume
+	Skipped     []VolumeRecord
+	Enumeration AppEnumeration
 	// DBBytes and IdentityBytes size the free-space guard alongside the volume
 	// bytes this pass accumulates.
 	DBBytes       uint64
@@ -118,12 +121,20 @@ func (o fanOutOpts) log(level, msg string) {
 func runFanOut(ctx context.Context, o fanOutOpts) (AppVolumeReport, uint64, error) {
 	records := append([]VolumeRecord(nil), o.Skipped...)
 	nodes := 0
+	// Which catalog the tiles came from, in the job feed, on every run: the
+	// 2026-09-03 e3bench manifest would have been explicable in one line had
+	// it said the fan-out read a catalog with no volume classifications.
+	o.log("info", fmt.Sprintf("app-volume fan-out: %d installed app(s), %d resolved to a tile that classifies its volumes, against catalog %s",
+		o.Enumeration.AppsInstalled, o.Enumeration.AppsResolved, o.Enumeration.Catalog))
 	if len(o.Plan) == 0 {
 		if len(records) > 0 {
-			o.log("warn", fmt.Sprintf("app-volume fan-out: nothing on %s is eligible to stage; %d classified volume(s) are recorded as NOT captured",
+			o.log("warn", fmt.Sprintf("app-volume fan-out: nothing on %s is eligible to stage; %d volume(s) are recorded as NOT captured",
 				o.NodeID, len(records)))
+			for _, v := range records {
+				o.log("warn", fmt.Sprintf("NOT captured: %s/%s (class %s) — %s", v.App, v.Volume, v.Class, v.Reason))
+			}
 		}
-		return NewAppVolumeReport(records, nodes), 0, nil
+		return NewAppVolumeReport(o.Enumeration, records, nodes), 0, nil
 	}
 	nodes = 1
 
@@ -191,7 +202,7 @@ func runFanOut(ctx context.Context, o fanOutOpts) (AppVolumeReport, uint64, erro
 	}
 	closed = true
 
-	rep := NewAppVolumeReport(records, nodes)
+	rep := NewAppVolumeReport(o.Enumeration, records, nodes)
 	o.log("info", fmt.Sprintf("app-volume fan-out: %s", rep.Summary))
 	for _, v := range rep.Volumes {
 		if !v.Captured {

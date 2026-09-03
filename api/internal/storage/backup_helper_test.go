@@ -628,6 +628,10 @@ func (f fakeTiles) Get(id string) (tileschema.Tile, bool) {
 	return t, ok
 }
 
+// Source names the fake the way the store names a real catalog, so a record
+// that quotes it reads the same shape in a test as on a cluster.
+func (f fakeTiles) Source() string { return "v0 (test tiles)" }
+
 // testApp and testTile build the two halves of one installed app in one line
 // each, so a case reads as the cluster it describes.
 func testApp(id, name, node, tile string) *apps.App {

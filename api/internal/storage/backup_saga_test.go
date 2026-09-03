@@ -114,6 +114,12 @@ func TestBackupRunSaga(t *testing.T) {
 				if m.AppVolumes.Volumes == nil || m.AppVolumes.Summary == "" || m.AppVolumes.Reason == "" {
 					t.Error("the manifest's app-volume section does not say what the fan-out did, which is the one thing it exists to say")
 				}
+				// Complete because ZERO apps were enumerated — stated, so
+				// this manifest and one nobody looked at differ on the page.
+				if !m.AppVolumes.Enumerated || m.AppVolumes.AppsInstalled != 0 {
+					t.Errorf("appVolumes enumerated=%v appsInstalled=%d; an empty section has to say it looked and found no apps",
+						m.AppVolumes.Enumerated, m.AppVolumes.AppsInstalled)
+				}
 				if m.Warning == "" {
 					t.Error("the manifest carries no warning; an operator reading it could take this for a complete backup")
 				}
