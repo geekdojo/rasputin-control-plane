@@ -55,6 +55,12 @@ const (
 // a field so tests can substitute a fake; the real one is runDocker.
 type dockerExec func(ctx context.Context, args ...string) ([]byte, error)
 
+// runDocker is argv-form exec of the literal "docker" binary — no shell, so
+// no argument can become a command. What constrains the arguments: every
+// vector is built by the *Args builders in this file from constants plus
+// volume names, and every volume name has passed proto.ParseAppVolumeName
+// (rasp_<26-char Crockford ULID>_<volume>) before it is used — as a
+// `--filter` VALUE, or as a free operand after `--`.
 func runDocker(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	var buf bytes.Buffer
@@ -106,8 +112,10 @@ func dirSize(root string) (uint64, error) {
 		if err != nil {
 			return err
 		}
-		if info.Size() > 0 {
-			total += uint64(info.Size())
+		// A size is never negative, but the conversion below is only sound
+		// once that is checked on the value itself.
+		if size := info.Size(); size > 0 {
+			total += uint64(size)
 		}
 		return nil
 	})
@@ -121,8 +129,13 @@ func volumeLsArgs() []string {
 	return []string{"volume", "ls", "--quiet", "--filter", "label=" + labelComposeProject}
 }
 
+// Every free operand below sits after a `--`, so a volume name can never be
+// read as an option however it is shaped. Belt and braces: every name that
+// reaches these has already passed proto.ParseAppVolumeName, which requires
+// the rasp_ prefix, so none can begin with `-`; the `--` makes that a property
+// of the argv rather than of the caller.
 func volumeInspectJSONArgs(names ...string) []string {
-	return append([]string{"volume", "inspect", "--format", "{{json .}}"}, names...)
+	return append([]string{"volume", "inspect", "--format", "{{json .}}", "--"}, names...)
 }
 
 // volumeUsersArgs lists (by id) every container, running or not, that
@@ -132,7 +145,7 @@ func volumeUsersArgs(name string) []string {
 }
 
 func volumeRmArgs(name string) []string {
-	return []string{"volume", "rm", name}
+	return []string{"volume", "rm", "--", name}
 }
 
 // ListProjectVolumes implements VolumeReaper.

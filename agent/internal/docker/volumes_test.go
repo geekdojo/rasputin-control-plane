@@ -53,7 +53,10 @@ func (f *fakeDocker) run(_ context.Context, args ...string) ([]byte, error) {
 	case strings.HasPrefix(joined, "volume ls"):
 		return []byte(strings.Join(f.lsNames, "\n") + "\n"), nil
 	case strings.HasPrefix(joined, "volume inspect"):
-		names := args[4:]
+		if args[4] != "--" {
+			return nil, errors.New("volume inspect: free operands must follow --")
+		}
+		names := args[5:]
 		var out strings.Builder
 		for _, n := range names {
 			label, ok := f.labels[n]
@@ -75,10 +78,13 @@ func (f *fakeDocker) run(_ context.Context, args ...string) ([]byte, error) {
 		name := strings.TrimPrefix(args[4], "volume=")
 		return []byte(strings.Join(f.users[name], "\n")), nil
 	case strings.HasPrefix(joined, "volume rm "):
+		if args[2] != "--" {
+			return nil, errors.New("volume rm: the name must follow --")
+		}
 		if f.rmErr != nil {
 			return []byte("Error response from daemon: boom"), f.rmErr
 		}
-		f.removed = append(f.removed, args[2])
+		f.removed = append(f.removed, args[3])
 		return nil, nil
 	}
 	return nil, errors.New("unexpected docker invocation: " + joined)

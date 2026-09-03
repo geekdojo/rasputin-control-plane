@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -445,5 +446,58 @@ func TestDeleteApp_BodyCarriesDeleteVolumes(t *testing.T) {
 	}
 	if w := f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, `{"deleteVolumes":`, cookie); w.Code != http.StatusBadRequest {
 		t.Errorf("bad json: want 400, got %d", w.Code)
+	}
+}
+
+// A tile the catalog in effect no longer carries is "unclassified, and here is
+// which catalog said so" — not an empty list.
+func TestAppVolumes_TileMissingFromLiveCatalog(t *testing.T) {
+	f, cookie, _ := volumesFixture(t)
+	now := time.Now().UTC()
+	if err := f.appsStore.Create(f.ctx, &apps.App{
+		ID: volULIDLive, Name: "gone", ComposeYAML: "services: {}", TargetNode: "n1", SourceTile: "withdrawn-tile",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := f.do(t, http.MethodGet, "/api/apps/"+volULIDLive+"/volumes", "", cookie)
+	resp := decodeBody[appVolumesResponse](t, w.Body.String())
+	if resp.Classified || len(resp.Volumes) != 0 {
+		t.Fatalf("must not classify: %+v", resp)
+	}
+	if !strings.Contains(resp.Note, "withdrawn-tile") || !strings.Contains(resp.Note, "v7") {
+		t.Errorf("note must name the tile and the catalog: %q", resp.Note)
+	}
+}
+
+// When the newest run left no prune result (a run that died after write, an
+// older build), the retained set is unknown: the newest BackupRetainGenerations
+// generations are assumed and the response says so, and a generation older
+// than that window does NOT count as a capture.
+func TestAppVolumes_RetentionUnknownFallsBackToTheWindow(t *testing.T) {
+	f, cookie, backup := volumesFixture(t)
+	seedVolumesApp(t, f, volULIDLive, "immich")
+	base := time.Now().Add(-240 * time.Hour).UTC()
+	// Oldest run captured the upload; it is outside the assumed window.
+	seedBackupRun(t, f, backup, "run-0", "gen-0", volULIDLive, []string{"immich-upload"}, nil, base)
+	for i := 1; i <= proto.BackupRetainGenerations; i++ {
+		seedBackupRun(t, f, backup, fmt.Sprintf("run-%d", i), fmt.Sprintf("gen-%d", i), volULIDLive, []string{"immich-db"}, nil, base.Add(time.Duration(i)*24*time.Hour))
+	}
+	w := f.do(t, http.MethodGet, "/api/apps/"+volULIDLive+"/volumes", "", cookie)
+	resp := decodeBody[appVolumesResponse](t, w.Body.String())
+	if !strings.Contains(resp.BackupNote, "retention state unknown") {
+		t.Errorf("backupNote: %q", resp.BackupNote)
+	}
+	for _, v := range resp.Volumes {
+		switch v.Name {
+		case "immich-db":
+			if v.LastCaptured == nil || v.LastCaptured.GenerationID != fmt.Sprintf("gen-%d", proto.BackupRetainGenerations) {
+				t.Errorf("db: %+v", v.LastCaptured)
+			}
+		case "immich-upload":
+			if v.LastCaptured != nil {
+				t.Errorf("upload's capture is outside the assumed window; must read never, got %+v", v.LastCaptured)
+			}
+		}
 	}
 }
