@@ -207,7 +207,7 @@ func (s *Server) handleListOrphanVolumes(w http.ResponseWriter, r *http.Request)
 			resp.Unreachable = append(resp.Unreachable, unreachableNode{NodeID: n.ID, Reason: "node is offline"})
 			continue
 		}
-		vols, err := listNodeVolumes(r.Context(), s.nc, n.ID)
+		vols, err := listNodeVolumes(r.Context(), s.nc, n)
 		if err != nil {
 			resp.Unreachable = append(resp.Unreachable, unreachableNode{NodeID: n.ID, Reason: err.Error()})
 			continue
@@ -308,10 +308,14 @@ func (s *Server) handleReclaimOrphanVolumes(w http.ResponseWriter, r *http.Reque
 	cmd, _ := json.Marshal(proto.AppVolumesRemoveCmd{Names: req.Names, LiveAppIDs: liveList})
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	msg, err := s.nc.RequestWithContext(ctx, proto.AppVolumesRemoveSubject(node.ID), cmd)
+	subject := proto.AppVolumesRemoveSubject(node.ID)
+	msg, err := s.nc.RequestWithContext(ctx, subject, cmd)
 	if err != nil {
 		if errors.Is(err, nats.ErrNoResponders) {
-			writeError(w, http.StatusConflict, fmt.Sprintf("node %s has no container runtime answering for volumes", node.ID))
+			// The node was online a moment ago (checked above), so this is an
+			// agent that predates docker.volumes.remove, or one that should
+			// have answered and did not — and the 409 says which.
+			writeError(w, http.StatusConflict, inventory.ExplainNoResponder(node, subject).String()+"; nothing was removed")
 			return
 		}
 		writeError(w, http.StatusBadGateway, "reclaim rpc to "+node.ID+": "+err.Error())
@@ -358,15 +362,21 @@ func (s *Server) liveAppIDs(ctx context.Context) (map[string]bool, error) {
 }
 
 // listNodeVolumes asks one node's agent for its Rasputin-managed volumes.
-func listNodeVolumes(ctx context.Context, nc *nats.Conn, nodeID string) ([]proto.AppVolumeInfo, error) {
+//
+// Silence is read against the node's inventory row (inventory.ExplainNoResponder):
+// an agent that predates docker.volumes.list is named as such, with the
+// release that answers it — not as a missing container runtime, which is
+// what this said on e3bench 2026-09-04 about nodes whose Docker was fine.
+func listNodeVolumes(ctx context.Context, nc *nats.Conn, node *proto.Node) ([]proto.AppVolumeInfo, error) {
 	cmd, _ := json.Marshal(proto.AppVolumesListCmd{})
 	// Sizing walks every managed volume; give a node with a big one time.
 	rctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	msg, err := nc.RequestWithContext(rctx, proto.AppVolumesListSubject(nodeID), cmd)
+	subject := proto.AppVolumesListSubject(node.ID)
+	msg, err := nc.RequestWithContext(rctx, subject, cmd)
 	if err != nil {
 		if errors.Is(err, nats.ErrNoResponders) {
-			return nil, errors.New("no container runtime answering for volumes on this node")
+			return nil, errors.New(inventory.ExplainNoResponder(node, subject).String())
 		}
 		return nil, fmt.Errorf("volumes rpc: %w", err)
 	}

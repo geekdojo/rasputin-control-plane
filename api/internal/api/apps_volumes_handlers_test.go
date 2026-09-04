@@ -60,13 +60,30 @@ func volumesFixture(t *testing.T) (*apiFixture, *http.Cookie, *storage.Store) {
 	t.Cleanup(func() { _ = backup.Close() })
 	f.srv.SetBackupStore(backup)
 	now := time.Now().UTC()
+	// n1 runs an agent that answers the docker.volumes verbs, so a silence
+	// from it is a fault and not a version gap.
 	if err := f.inv.Insert(f.ctx, &proto.Node{
-		ID: "n1", Role: proto.RoleCompute, Hostname: "n1.test", FirstSeen: now, LastSeen: now,
+		ID: "n1", Role: proto.RoleCompute, Hostname: "n1.test", AgentVersion: volumesAgentVersion(t), FirstSeen: now, LastSeen: now,
 	}); err != nil {
 		t.Fatalf("inv insert: %v", err)
 	}
 	return f, cookie, backup
 }
+
+// volumesAgentVersion is the first agent release that answers the
+// docker.volumes verbs, as proto records it.
+func volumesAgentVersion(t *testing.T) string {
+	t.Helper()
+	v, ok := proto.VerbMinAgentVersion("docker.volumes.list")
+	if !ok {
+		t.Fatal("docker.volumes.list has no minimum agent version recorded in proto")
+	}
+	return v
+}
+
+// preVolumesAgentVersion is the agent e3bench-compute1 ran on 2026-09-04:
+// online, Docker fine, and no subscription for either docker.volumes verb.
+const preVolumesAgentVersion = "2026.08.4-dev.130"
 
 func seedVolumesApp(t *testing.T, f *apiFixture, id, name string) {
 	t.Helper()
@@ -404,13 +421,86 @@ func TestReclaimOrphanVolumes_Refusals(t *testing.T) {
 	}
 }
 
-// A node whose agent has no docker verbs (no runtime) is a 409, not a hang.
-func TestReclaimOrphanVolumes_NoRuntimeIsARefusal(t *testing.T) {
+// An online node whose agent does not answer docker.volumes.remove is a 409,
+// not a hang — and the 409 says WHY. n1's agent is new enough, so its
+// silence is a fault named as one; n-old runs the e3bench agent, so its
+// silence is a version gap, with the verb and the release that answers it.
+// Neither is called offline, and neither is blamed on the container runtime.
+func TestReclaimOrphanVolumes_SilenceIsReadAgainstInventory(t *testing.T) {
 	f, cookie, _ := volumesFixture(t)
-	w := f.do(t, http.MethodPost, "/api/volumes/orphans/reclaim",
-		`{"nodeId":"n1","names":["`+proto.AppVolumeName(volULIDOrphan, "x")+`"]}`, cookie)
-	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "no container runtime") {
-		t.Fatalf("want 409 no runtime, got %d %s", w.Code, w.Body.String())
+	now := time.Now().UTC()
+	_ = f.inv.Insert(f.ctx, &proto.Node{ID: "n-old", Role: proto.RoleCompute, Hostname: "n-old", AgentVersion: preVolumesAgentVersion, FirstSeen: now, LastSeen: now})
+	body := `{"nodeId":"%s","names":["` + proto.AppVolumeName(volULIDOrphan, "x") + `"]}`
+
+	w := f.do(t, http.MethodPost, "/api/volumes/orphans/reclaim", fmt.Sprintf(body, "n1"), cookie)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("n1: want 409, got %d %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{"n1 is online", "should answer docker.volumes.remove", "did not", "nothing was removed"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("n1: %q does not say %q", w.Body.String(), want)
+		}
+	}
+	for _, not := range []string{"offline", "no container runtime", "predates"} {
+		if strings.Contains(w.Body.String(), not) {
+			t.Errorf("n1: %q must not say %q", w.Body.String(), not)
+		}
+	}
+
+	w = f.do(t, http.MethodPost, "/api/volumes/orphans/reclaim", fmt.Sprintf(body, "n-old"), cookie)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("n-old: want 409, got %d %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{"n-old is online", "(v" + preVolumesAgentVersion + ") predates docker.volumes.remove", "update the node to ≥ v" + volumesAgentVersion(t)} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("n-old: %q does not say %q", w.Body.String(), want)
+		}
+	}
+	for _, not := range []string{"offline", "no container runtime"} {
+		if strings.Contains(w.Body.String(), not) {
+			t.Errorf("n-old: %q must not say %q", w.Body.String(), not)
+		}
+	}
+}
+
+// The orphan list's "not checked" line reads each silent node against
+// inventory: an offline node is offline; an online node running the e3bench
+// agent predates docker.volumes.list and says so, naming the verb and the
+// release; an online node whose agent should answer and did not is a fault.
+// None of them says "no container runtime" — Docker was fine on all of them.
+func TestOrphanVolumes_UnreachableReasonsAreHonest(t *testing.T) {
+	f, cookie, _ := volumesFixture(t)
+	now := time.Now().UTC()
+	stale := now.Add(-10 * time.Minute)
+	_ = f.inv.Insert(f.ctx, &proto.Node{ID: "n-off", Role: proto.RoleCompute, Hostname: "n-off", AgentVersion: preVolumesAgentVersion, FirstSeen: stale, LastSeen: stale})
+	_ = f.inv.Insert(f.ctx, &proto.Node{ID: "n-old", Role: proto.RoleCompute, Hostname: "n-old", AgentVersion: preVolumesAgentVersion, FirstSeen: now, LastSeen: now})
+	// n1 (from the fixture) is online on a current agent, with nobody serving.
+
+	w := f.do(t, http.MethodGet, "/api/volumes/orphans", "", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	resp := decodeBody[orphanVolumesResponse](t, w.Body.String())
+	if resp.NodesAsked != 3 || len(resp.Unreachable) != 3 {
+		t.Fatalf("asked %d, unreachable %+v", resp.NodesAsked, resp.Unreachable)
+	}
+	reasons := map[string]string{}
+	for _, u := range resp.Unreachable {
+		reasons[u.NodeID] = u.Reason
+		if strings.Contains(u.Reason, "no container runtime") {
+			t.Errorf("%s: %q blames the container runtime", u.NodeID, u.Reason)
+		}
+	}
+	if r := reasons["n-off"]; !strings.Contains(r, "offline") {
+		t.Errorf("n-off: %q", r)
+	}
+	if r := reasons["n-old"]; !strings.Contains(r, "n-old is online") || !strings.Contains(r, "predates docker.volumes.list") ||
+		!strings.Contains(r, "update the node to ≥ v"+volumesAgentVersion(t)) || strings.Contains(r, "offline") {
+		t.Errorf("n-old: %q", r)
+	}
+	if r := reasons["n1"]; !strings.Contains(r, "n1 is online") || !strings.Contains(r, "should answer docker.volumes.list") ||
+		!strings.Contains(r, "did not") || strings.Contains(r, "predates") || strings.Contains(r, "offline") {
+		t.Errorf("n1: %q", r)
 	}
 }
 
