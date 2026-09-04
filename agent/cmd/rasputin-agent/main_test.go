@@ -274,7 +274,8 @@ func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bm
 	// the publish path CARRIES, and reading the test machine's own routing
 	// table would make that assertion depend on where the suite runs.
 	lanAddr := func() (string, string) { return "192.168.1.50", "192.168.1.50/24" }
-	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr)
+	trust := func() string { return "fp-test" }
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr, trust)
 	msg, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
 		t.Fatalf("no registered event: %v", err)
@@ -610,5 +611,22 @@ func TestUCILANAddr_PassesADeadline(t *testing.T) {
 	resolve()
 	if !hadDeadline {
 		t.Error("uciLANAddr called the lookup with no deadline")
+	}
+}
+
+// The registration carries the fingerprint of the mesh CA this node trusts,
+// under the key the api's converge_trust reads — and never the PEM. This is
+// the one fact that lets the api re-deliver a CA it changed under an enrolled
+// node (e3bench 2026-09-04).
+func TestPublishRegistered_CarriesMeshCAFingerprint(t *testing.T) {
+	nc := testBus(t)
+	ev := registeredEvt(t, nc, "cp-test", nil)
+	if got := ev.Metadata[proto.MetadataMeshCAFingerprint]; got != "fp-test" {
+		t.Errorf("metadata %s = %v, want the backend's fingerprint", proto.MetadataMeshCAFingerprint, got)
+	}
+	for k, v := range ev.Metadata {
+		if s, ok := v.(string); ok && strings.Contains(s, "BEGIN CERTIFICATE") {
+			t.Errorf("metadata %s carries PEM material", k)
+		}
 	}
 }

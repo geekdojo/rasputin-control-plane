@@ -183,6 +183,7 @@ func (errBackend) Leave(_ context.Context) error { return errStr("leave bad") }
 func (errBackend) Status(_ context.Context) (Status, error) {
 	return Status{}, errStr("status bad")
 }
+func (errBackend) TrustFingerprint() string { return proto.MeshCAFingerprintNone }
 
 type errStr string
 
@@ -366,5 +367,62 @@ func TestRealBackend_EnrollSuccessAndFailureViaFakeBin(t *testing.T) {
 		LoginServer: "x", AuthKey: "y",
 	}); err == nil {
 		t.Error("Enroll should error when `up` exits non-zero")
+	}
+}
+
+// A successful enroll answers with the CA the node now trusts and fires the
+// post-enroll hook (main's re-register), so the api learns the new
+// fingerprint from the registration that follows rather than from the next
+// reconnect. A failed enroll fires nothing.
+func TestRegisterHandlers_EnrollReportsTrustAndFiresHook(t *testing.T) {
+	nc := startNATS(t)
+	mb, err := NewMockBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewMockBackend: %v", err)
+	}
+	fired := make(chan struct{}, 4)
+	subs, err := RegisterHandlers(nc, "node-1", mb, func() { fired <- struct{}{} })
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+	if got := mb.TrustFingerprint(); got != proto.MeshCAFingerprintNone {
+		t.Fatalf("before enroll: trust = %q, want none", got)
+	}
+
+	ca := []byte("-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE-----\n")
+	var ack proto.MeshEnrollAck
+	request(t, nc, proto.MeshEnrollSubject("node-1"), proto.MeshEnrollCmd{
+		LoginServer: "https://hs", AuthKey: "k", Hostname: "node-1", MeshCAPEM: ca,
+	}, &ack)
+	if !ack.OK {
+		t.Fatalf("enroll failed: %s", ack.Detail)
+	}
+	if ack.TrustFingerprint != proto.MeshCAFingerprint(ca) {
+		t.Errorf("ack trust = %q, want fingerprint of the delivered CA", ack.TrustFingerprint)
+	}
+	if got := mb.TrustFingerprint(); got != proto.MeshCAFingerprint(ca) {
+		t.Errorf("backend trust after enroll = %q", got)
+	}
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-enroll hook did not fire")
+	}
+
+	// A rejected enroll (empty auth key) must not fire the hook.
+	var bad proto.MeshEnrollAck
+	request(t, nc, proto.MeshEnrollSubject("node-1"), proto.MeshEnrollCmd{LoginServer: "https://hs"}, &bad)
+	if bad.OK {
+		t.Fatal("enroll with no key succeeded")
+	}
+	select {
+	case <-fired:
+		t.Fatal("hook fired for a failed enroll")
+	case <-time.After(200 * time.Millisecond):
 	}
 }

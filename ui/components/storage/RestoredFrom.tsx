@@ -63,6 +63,47 @@ export function RestoredFrom() {
           ? `App volumes present in that generation and NOT restored: ${latest.appVolumesPresent.map((v) => v.name).join(', ')}. They are still sealed on the backup disk.`
           : 'That generation held no app volumes.'}
       </div>
+      <TrustRedeliveryLine rec={latest.trustRedelivery} />
+    </div>
+  );
+}
+
+// The restore swapped the mesh CA under every node enrolled since the box was
+// re-flashed; each of those kept trusting the replaced CA, and every node→api
+// TLS client on it failed, until the restored CA was delivered again. The
+// api kicks that re-delivery once the mesh is up and records what it found
+// here; the live per-node state is on Mesh → Devices.
+function TrustRedeliveryLine({ rec }: { rec?: RestoreReport['trustRedelivery'] }) {
+  if (!rec) {
+    return (
+      <div style={{ color: DIM }}>
+        Mesh CA re-delivery to enrolled nodes: pending — checked once the mesh is up after the restart.
+      </div>
+    );
+  }
+  const heldBack = rec.stale.filter((n) => !rec.redelivered.includes(n));
+  const parts: string[] = [];
+  parts.push(
+    rec.redelivered.length > 0
+      ? `re-delivered to ${rec.redelivered.length} node(s): ${rec.redelivered.join(', ')}`
+      : 'no node needed it',
+  );
+  if (rec.current.length > 0) parts.push(`${rec.current.length} already held it`);
+  if (heldBack.length > 0) {
+    const why = Object.entries(rec.skipped ?? {})
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(', ');
+    parts.push(`${heldBack.length} stale not yet re-delivered (${heldBack.join(', ')}${why ? `; ${why}` : ''})`);
+  }
+  if (rec.unreported.length > 0) {
+    parts.push(`pending: ${rec.unreported.length} node(s) have not reported what they trust (${rec.unreported.join(', ')})`);
+  }
+  const attention = heldBack.length > 0 || rec.unreported.length > 0 || !!rec.detail;
+  return (
+    <div style={{ color: attention ? WARN : DIM }}>
+      Mesh CA{rec.caFingerprint ? ` ${rec.caFingerprint.slice(0, 12)}` : ''}{' '}
+      <span title={rec.checkedAt}>{timeAgo(rec.checkedAt)}</span>: {parts.join(' · ')}.
+      {rec.detail ? ` ${rec.detail}` : ''}
     </div>
   );
 }

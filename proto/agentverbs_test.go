@@ -14,6 +14,22 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 			t.Errorf("%s: %q is not bare CalVer (YYYY.MM.PATCH[-dev.N])", verb, v)
 		}
 	}
+	for key, v := range metadataMinAgentVersion {
+		if !calver.MatchString(v) {
+			t.Errorf("metadata %s: %q is not bare CalVer (YYYY.MM.PATCH[-dev.N])", key, v)
+		}
+	}
+}
+
+// The metadata key converge_trust acts on has a floor, so a silent node can
+// be told apart from one whose agent never heard of the key.
+func TestMetadataMinAgentVersionLookup(t *testing.T) {
+	if _, ok := MetadataMinAgentVersion(MetadataMeshCAFingerprint); !ok {
+		t.Errorf("%s has no minimum agent version recorded", MetadataMeshCAFingerprint)
+	}
+	if v, ok := MetadataMinAgentVersion("primaryLanCidr"); ok || v != "" {
+		t.Errorf("primaryLanCidr: got (%q, %v), want unrecorded", v, ok)
+	}
 }
 
 // The verbs the two misdiagnosed sites send are recorded, and a verb nobody

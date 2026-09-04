@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // defaultCABundlePath is where the agent writes the Mesh CA so tailscaled
@@ -36,6 +38,23 @@ func caBundlePath() string {
 // and the agent's process (unlike tailscaled's) has no SSL_CERT_FILE, so its
 // default client would otherwise reject that cert.
 func CABundlePath() string { return caBundlePath() }
+
+// InstalledCAFingerprint reports proto.MeshCAFingerprint of the mesh CA bundle
+// at path, or proto.MeshCAFingerprintNone when there is no bundle there (or it
+// is empty, or unreadable — every one of which means "this node trusts no
+// mesh CA", which is what the api needs to know). Read fresh on every call:
+// installMeshCA replaces the file atomically, so the answer is always the
+// bundle tailscaled and the agent's HTTPS clients actually use.
+func InstalledCAFingerprint(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return proto.MeshCAFingerprintNone
+	}
+	if fp := proto.MeshCAFingerprint(b); fp != "" {
+		return fp
+	}
+	return proto.MeshCAFingerprintNone
+}
 
 // installMeshCA writes the Mesh CA PEM to path, atomically, and reports
 // whether the on-disk content actually changed. Idempotent: a re-enroll with

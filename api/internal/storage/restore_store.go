@@ -40,6 +40,33 @@ func (s *Store) RecordRestore(ctx context.Context, r *RestoreReport) error {
 	return err
 }
 
+// RecordRestoreTrustRedelivery amends the report id with the mesh-CA
+// re-delivery its kick found. The one field of a report that is written
+// after the record: the kick can only run once the mesh is up, minutes after
+// the report was recorded. Overwrites a previous amendment (a re-run says
+// what is true now). Unknown id → sql.ErrNoRows.
+func (s *Store) RecordRestoreTrustRedelivery(ctx context.Context, id string, rec *TrustRedeliveryRecord) error {
+	if rec == nil {
+		return errors.New("no trust re-delivery record")
+	}
+	var raw string
+	if err := s.db.QueryRowContext(ctx, `SELECT report FROM restore_reports WHERE id = ?`, id).Scan(&raw); err != nil {
+		return err
+	}
+	var r RestoreReport
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		return err
+	}
+	cp := *rec
+	r.TrustRedelivery = &cp
+	b, err := json.Marshal(&r)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE restore_reports SET report = ? WHERE id = ?`, string(b), id)
+	return err
+}
+
 // ListRestores returns every restore this cluster came back from, newest
 // first.
 func (s *Store) ListRestores(ctx context.Context) ([]*RestoreReport, error) {

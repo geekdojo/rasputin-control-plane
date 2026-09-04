@@ -78,6 +78,12 @@ type MeshEnrollAck struct {
 	Routes    []string `json:"routes,omitempty"`
 	Backend   string   `json:"backend"` // "tailscale" or "mock"
 	Detail    string   `json:"detail,omitempty"`
+	// TrustFingerprint is the MeshCAFingerprint of the CA bundle the node
+	// holds AFTER this enroll — what it will report under
+	// MetadataMeshCAFingerprint from now on. Lets the saga log that the
+	// delivery landed as the CA the api meant to deliver. Empty from a
+	// pre-fingerprint agent.
+	TrustFingerprint string `json:"trustFingerprint,omitempty"`
 }
 
 // MeshLeaveCmd asks the agent to leave the tailnet (tailscale logout +

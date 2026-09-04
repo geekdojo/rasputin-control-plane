@@ -281,6 +281,42 @@ type RestoreReport struct {
 	PreparedAt time.Time  `json:"preparedAt"`
 	AppliedAt  *time.Time `json:"appliedAt,omitempty"`
 	RecordedAt *time.Time `json:"recordedAt,omitempty"`
+	// TrustRedelivery is what the start that applied an identity restore
+	// found when it kicked the mesh reconcile: which enrolled nodes were
+	// still trusting the CA the restore replaced and were re-delivered the
+	// restored one, and which had not yet said what they trust. Nil until
+	// that kick has run (the mesh takes a while to come up after the
+	// restart); see RecordRestoreTrustRedelivery.
+	TrustRedelivery *TrustRedeliveryRecord `json:"trustRedelivery,omitempty"`
+}
+
+// TrustRedeliveryRecord is the mesh-CA re-delivery an identity restore
+// kicked (mesh converge_trust), as the report records it. An identity
+// restore swaps the mesh CA under every node enrolled since the box was
+// re-flashed; each of those keeps trusting the interim CA, and every
+// node→api TLS client on it fails, until the restored CA is delivered again
+// (e3bench 2026-09-04). Fingerprints only, never PEMs.
+type TrustRedeliveryRecord struct {
+	CheckedAt time.Time `json:"checkedAt"`
+	// CAFingerprint is the restored mesh CA the nodes were compared against.
+	CAFingerprint string `json:"caFingerprint,omitempty"`
+	// Redelivered is every enrolled node the kick re-delivered the CA to.
+	Redelivered []string `json:"redelivered"`
+	// Stale is every enrolled node trusting something else — Redelivered
+	// plus any a guard held back (Skipped says why).
+	Stale []string `json:"stale"`
+	// Current is every enrolled node already trusting the restored CA.
+	Current []string `json:"current"`
+	// Unreported is every enrolled node that had not reported what it
+	// trusts when the kick ran: pending, left alone — an older agent, or one
+	// not yet registered since the restart. The scheduled reconcile picks
+	// them up as they report.
+	Unreported []string       `json:"unreported"`
+	Skipped    map[string]int `json:"skipped,omitempty"`
+	// Detail is why the kick could not run or finish, when it could not:
+	// the mesh never became ready in time, or the reconcile failed. The
+	// scheduled reconcile converges regardless.
+	Detail string `json:"detail,omitempty"`
 }
 
 // restoreWarning is the report's standing caveat.

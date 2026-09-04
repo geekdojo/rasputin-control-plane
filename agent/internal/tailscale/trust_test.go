@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 const testCAPEM = "-----BEGIN CERTIFICATE-----\nMIIBdummytestcacontent\n-----END CERTIFICATE-----"
@@ -188,5 +190,37 @@ func TestCABundlePath_EnvOverride(t *testing.T) {
 	t.Setenv("RASPUTIN_MESH_CA_BUNDLE", "")
 	if got := caBundlePath(); got != defaultCABundlePath {
 		t.Fatalf("default not used: %q", got)
+	}
+}
+
+// What a node reports it trusts is what is on disk: "none" before any CA is
+// installed, the CA's fingerprint after, and a NEW fingerprint after a
+// re-delivery replaces it — the fact the api's converge_trust turns on.
+func TestInstalledCAFingerprint_TracksTheBundle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tailscaled-ca.pem")
+	if got := InstalledCAFingerprint(path); got != proto.MeshCAFingerprintNone {
+		t.Fatalf("no bundle: fingerprint = %q, want %q", got, proto.MeshCAFingerprintNone)
+	}
+	first := []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+	if _, err := installMeshCA(first, path); err != nil {
+		t.Fatalf("installMeshCA: %v", err)
+	}
+	got := InstalledCAFingerprint(path)
+	if want := proto.MeshCAFingerprint(first); got != want {
+		t.Fatalf("after install: fingerprint = %s, want %s (the api's fingerprint of the same PEM)", got, want)
+	}
+	second := []byte("-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n")
+	if changed, err := installMeshCA(second, path); err != nil || !changed {
+		t.Fatalf("re-deliver: changed=%v err=%v", changed, err)
+	}
+	if again := InstalledCAFingerprint(path); again == got || again != proto.MeshCAFingerprint(second) {
+		t.Fatalf("after re-delivery: fingerprint = %s, want %s", again, proto.MeshCAFingerprint(second))
+	}
+	// An empty bundle is "none", not the fingerprint of nothing.
+	if err := os.WriteFile(path, []byte("\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := InstalledCAFingerprint(path); got != proto.MeshCAFingerprintNone {
+		t.Errorf("empty bundle: fingerprint = %q, want %q", got, proto.MeshCAFingerprintNone)
 	}
 }

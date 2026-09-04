@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -260,6 +261,7 @@ func ReconcileWorkflow(svc *Service, inv *inventory.Store, jstore *jobs.Store, r
 			{Name: "fetch_observed", Timeout: 30 * time.Second, Do: reconcileFetch(svc, nc)},
 			{Name: "compare", Timeout: 2 * time.Second, Do: reconcileCompare(svc, nc)},
 			{Name: "converge_enrollment", Timeout: 10 * time.Second, Do: reconcileConvergeEnrollment(svc, inv, jstore, runner)},
+			{Name: "converge_trust", Timeout: 10 * time.Second, Do: reconcileConvergeTrust(svc, inv, jstore, runner)},
 			{Name: "reconcile_app_dns", Timeout: 10 * time.Second, Do: reconcileAppDNS(svc)},
 		},
 	}
@@ -446,39 +448,11 @@ func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *job
 		}
 
 		// One pass over recent enroll jobs (newest first) gives both guards:
-		// nodes with an in-flight enroll and each node's newest terminal job.
-		recent, err := jstore.ListJobsByKind(sc.Ctx, "mesh.enroll_node", 200)
+		// nodes with an in-flight enroll and each node's newest terminal job
+		// (with its failure streak). Shared with converge_trust.
+		guards, err := loadEnrollGuards(sc, jstore)
 		if err != nil {
-			return nil, fmt.Errorf("list enroll jobs: %w", err)
-		}
-		inflight := map[string]bool{}
-		lastTerminal := map[string]*jobs.Job{}
-		// Consecutive failures per node, newest-first: count leading FAILED
-		// jobs and stop at the first terminal job that is not a failure, so a
-		// node that once succeeded starts its backoff over rather than
-		// inheriting an old streak.
-		consecutiveFailures := map[string]int{}
-		streakEnded := map[string]bool{}
-		for _, j := range recent {
-			var spec EnrollSpec
-			if json.Unmarshal(j.Spec, &spec) != nil || spec.NodeID == "" {
-				continue
-			}
-			switch j.Status {
-			case jobs.StatusQueued, jobs.StatusRunning:
-				inflight[spec.NodeID] = true
-			default:
-				if _, seen := lastTerminal[spec.NodeID]; !seen {
-					lastTerminal[spec.NodeID] = j
-				}
-				if !streakEnded[spec.NodeID] {
-					if j.Status == jobs.StatusFailed {
-						consecutiveFailures[spec.NodeID]++
-					} else {
-						streakEnded[spec.NodeID] = true
-					}
-				}
-			}
+			return nil, err
 		}
 
 		var submitted []string
@@ -491,12 +465,11 @@ func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *job
 				skipped["offline"]++
 				continue
 			}
-			if inflight[n.ID] {
+			if guards.inflight[n.ID] {
 				skipped["inflight"]++
 				continue
 			}
-			if last := lastTerminal[n.ID]; last != nil && last.Status == jobs.StatusFailed &&
-				time.Since(last.CreatedAt) < enrollRetryBackoff(consecutiveFailures[n.ID]) {
+			if guards.inBackoff(n.ID) {
 				skipped["backoff"]++
 				continue
 			}
@@ -699,6 +672,18 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 
 		sc.Log("info", fmt.Sprintf("agent enrolled (hsId=%s ip=%s backend=%s)",
 			short(s.HSID), s.HSIP, ack.Backend))
+		// What the node trusts now, against what was sent. A mismatch here
+		// is a real fault (the agent installed something other than what it
+		// was handed); a pre-fingerprint agent reports nothing and is not
+		// called out for it.
+		if want := svc.MeshCAFingerprint(); want != "" && ack.TrustFingerprint != "" {
+			if ack.TrustFingerprint == want {
+				sc.Log("info", fmt.Sprintf("%s now trusts mesh CA %s", s.NodeID, proto.ShortFingerprint(want)))
+			} else {
+				sc.Log("warn", fmt.Sprintf("%s reports trusting %s after enroll, but the api delivered %s",
+					s.NodeID, proto.ShortFingerprint(ack.TrustFingerprint), proto.ShortFingerprint(want)))
+			}
+		}
 		return json.Marshal(s)
 	}
 }
@@ -759,6 +744,7 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 		}); err != nil {
 			return nil, fmt.Errorf("upsert device: %w", err)
 		}
+		pruneSupersededRegistrations(sc, svc, s.NodeID, s.HSID)
 		publishChange(nc, proto.MeshChangeEvt{
 			Scope:     s.NodeID,
 			Change:    proto.MeshNodeEnrolled,
@@ -768,6 +754,61 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 		})
 		sc.Log("info", fmt.Sprintf("%s enrolled in tailnet as %s", s.NodeID, short(s.HSID)))
 		return json.Marshal(s)
+	}
+}
+
+// pruneSupersededRegistrations removes, from Headscale and mesh_devices, any
+// OTHER Rasputin-tagged registration carrying nodeID's hostname once nodeID
+// has enrolled as hsID.
+//
+// Re-enrolling a node whose tailscaled state survived updates the node
+// Headscale already has (same machine key, same user — headscale 0.28
+// HandleNodeFromPreAuthKey refreshes it in place). But a node whose
+// tailscaled state is gone — a re-flashed box, or the controlplane itself
+// after a restore put back a Headscale database that remembers the machine
+// it was before the re-flash — presents a NEW machine key, and Headscale
+// registers a second node under the same hostname. The old one never
+// connects again; fetch_observed would otherwise sync it into mesh_devices
+// beside the live one, both claiming the same RasputinNodeID. Same for a
+// `--force-reauth` re-registration, which enrollDispatch's comment notes
+// nothing pruned.
+//
+// Guarded by the live registration being FOUND in Headscale's list under
+// hsID: if the id the agent reported does not match Headscale's id format,
+// nothing is pruned, because "everything but the live one" cannot be told
+// apart from "everything". Best-effort: a failure here is logged, never
+// fails the enroll.
+func pruneSupersededRegistrations(sc *jobs.StepCtx, svc *Service, nodeID, hsID string) {
+	nodes, err := svc.Client().ListNodes(sc.Ctx)
+	if err != nil {
+		sc.Log("warn", fmt.Sprintf("%s: could not list Headscale nodes to prune superseded registrations: %v", nodeID, err))
+		return
+	}
+	live := false
+	var ghosts []HSNode
+	for _, n := range nodes {
+		if n.Hostname != nodeID || !slices.Contains(n.Tags, meshNodeTag) {
+			continue
+		}
+		if n.ID == hsID {
+			live = true
+			continue
+		}
+		ghosts = append(ghosts, n)
+	}
+	if !live || len(ghosts) == 0 {
+		return
+	}
+	for _, g := range ghosts {
+		if err := svc.Client().DeleteNode(sc.Ctx, g.ID); err != nil {
+			sc.Log("warn", fmt.Sprintf("%s: superseded registration %s (ip %s) could not be removed from Headscale: %v", nodeID, short(g.ID), g.IPv4, err))
+			continue
+		}
+		if err := svc.store.DeleteDevice(sc.Ctx, g.ID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			sc.Log("warn", fmt.Sprintf("%s: superseded device row %s: %v", nodeID, short(g.ID), err))
+		}
+		sc.Log("info", fmt.Sprintf("%s: removed superseded Headscale registration %s (ip %s) — the node re-registered with a new machine key as %s",
+			nodeID, short(g.ID), g.IPv4, short(hsID)))
 	}
 }
 

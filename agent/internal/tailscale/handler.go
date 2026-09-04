@@ -14,11 +14,25 @@ import (
 // RegisterHandlers subscribes to mesh.enroll, mesh.leave, mesh.status for
 // nodeID and dispatches to the supplied Backend. Returns the subscriptions
 // so the caller can Unsubscribe them on shutdown.
-func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Subscription, error) {
+//
+// onEnrolled hooks run after every enroll that succeeded, once the ack has
+// gone back. main passes its re-register closure: the registration event is
+// what carries the CA fingerprint this node trusts (proto
+// MetadataMeshCAFingerprint), and it otherwise fires only on a NATS
+// (re)connect — so without this the api would keep seeing the OLD
+// fingerprint after a re-delivery, until the next reconnect, and keep
+// re-delivering to a node that had already converged.
+func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, onEnrolled ...func()) ([]*nats.Subscription, error) {
 	subs := make([]*nats.Subscription, 0, 3)
 
 	enrollSub, err := nc.Subscribe(proto.MeshEnrollSubject(nodeID), func(m *nats.Msg) {
-		handleEnroll(backend, m)
+		if handleEnroll(backend, m) {
+			for _, fn := range onEnrolled {
+				if fn != nil {
+					fn()
+				}
+			}
+		}
 	})
 	if err != nil {
 		return nil, err
@@ -47,11 +61,13 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Su
 	return subs, nil
 }
 
-func handleEnroll(backend Backend, m *nats.Msg) {
+// handleEnroll answers one mesh.enroll and reports whether the enroll
+// succeeded (so the caller can fire its post-enroll hooks).
+func handleEnroll(backend Backend, m *nats.Msg) bool {
 	var cmd proto.MeshEnrollCmd
 	if err := json.Unmarshal(m.Data, &cmd); err != nil {
 		bus.Respond(m, proto.MeshEnrollAck{OK: false, Detail: "bad cmd: " + err.Error()})
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -67,16 +83,18 @@ func handleEnroll(backend Backend, m *nats.Msg) {
 	if err != nil {
 		bus.Respond(m, proto.MeshEnrollAck{OK: false, Backend: backend.Name(), Detail: err.Error()})
 		log.Printf("rasputin-agent: mesh.enroll: %v", err)
-		return
+		return false
 	}
 	bus.Respond(m, proto.MeshEnrollAck{
-		OK:        true,
-		TailnetID: st.TailnetID,
-		TailnetIP: st.TailnetIP,
-		Hostname:  st.Hostname,
-		Routes:    st.Routes,
-		Backend:   backend.Name(),
+		OK:               true,
+		TailnetID:        st.TailnetID,
+		TailnetIP:        st.TailnetIP,
+		Hostname:         st.Hostname,
+		Routes:           st.Routes,
+		Backend:          backend.Name(),
+		TrustFingerprint: backend.TrustFingerprint(),
 	})
+	return true
 }
 
 func handleLeave(backend Backend, m *nats.Msg) {

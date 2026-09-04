@@ -65,6 +65,32 @@ var verbMinAgentVersion = map[string]string{
 	"storage.backup_restore_volume": "2026.08.5-dev.140",
 }
 
+// metadataMinAgentVersion is the same table for registration-metadata keys
+// the api acts on: the first agent release whose registration carries the
+// key. A node whose agent predates the key has not failed to report it —
+// it never could — and a consumer that tells the two apart can say "update
+// the node" instead of "the node did not answer". Same conventions as
+// verbMinAgentVersion: bare CalVer, the release the key ships.
+var metadataMinAgentVersion = map[string]string{
+	// meshCaFingerprint (converge_trust, e3bench 2026-09-04): entered when
+	// the field was authored, before its release existed, as the NEXT release
+	// run after v2026.08.5-dev.140 (the newest published control-plane
+	// release at the time). If a release was cut between this entry and the
+	// one that ships the field, an agent at that in-between version reads as
+	// "should report and did not" rather than "predates the field"; confirm
+	// with `git tag --contains` once the release exists and correct the
+	// floor.
+	MetadataMeshCAFingerprint: "2026.08.5-dev.141",
+}
+
+// MetadataMinAgentVersion reports the first agent release whose registration
+// carries the metadata key, as the bare CalVer string the agent reports
+// itself under. ok is false for a key this table does not record.
+func MetadataMinAgentVersion(key string) (version string, ok bool) {
+	version, ok = metadataMinAgentVersion[key]
+	return version, ok
+}
+
 // VerbMinAgentVersion reports the first agent release that answers verb (a
 // dotted cmd verb such as "storage.backup_stage_volume"), as the bare CalVer
 // string the agent reports itself under. ok is false for a verb this table

@@ -16,6 +16,7 @@ import (
 type MockBackend struct {
 	mu        sync.Mutex
 	statePath string
+	caBundle  string // where the mock installs a delivered Mesh CA, so it reports trust like the real backend
 	state     mockTSState
 }
 
@@ -31,7 +32,10 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return nil, fmt.Errorf("tailscale mock: mkdir %s: %w", stateDir, err)
 	}
-	b := &MockBackend{statePath: filepath.Join(stateDir, "tailscale.json")}
+	b := &MockBackend{
+		statePath: filepath.Join(stateDir, "tailscale.json"),
+		caBundle:  filepath.Join(stateDir, "tailscaled-ca.pem"),
+	}
 	if err := b.load(); err != nil {
 		return nil, err
 	}
@@ -39,6 +43,11 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 }
 
 func (b *MockBackend) Name() string { return "mock" }
+
+// TrustFingerprint reports the CA the mock last installed (or "none"), so a
+// mock-backed node converges under the api's trust reconcile exactly as a
+// real one does instead of reading as stale forever.
+func (b *MockBackend) TrustFingerprint() string { return InstalledCAFingerprint(b.caBundle) }
 
 func (b *MockBackend) load() error {
 	buf, err := os.ReadFile(b.statePath)
@@ -68,6 +77,12 @@ func (b *MockBackend) Enroll(_ context.Context, in EnrollInput) (Status, error) 
 	defer b.mu.Unlock()
 	if in.AuthKey == "" {
 		return Status{}, errors.New("tailscale mock: empty auth key")
+	}
+	// Keep the delivered CA the way the real backend does (minus the
+	// tailscaled restart, there being no tailscaled), so what the mock
+	// reports it trusts is what it was last handed.
+	if _, err := installMeshCA(in.MeshCAPEM, b.caBundle); err != nil {
+		return Status{}, fmt.Errorf("tailscale mock: install mesh CA: %w", err)
 	}
 	b.state = mockTSState{
 		Enrolled:   true,

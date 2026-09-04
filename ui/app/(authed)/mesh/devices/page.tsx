@@ -18,6 +18,8 @@ import {
 } from '../../../../components/kit';
 import { ACCENT, MONO } from '../../../../components/ui-theme';
 
+const WARN = '#facc15';
+
 export default function DevicesPage() {
   const [devices, setDevices] = useState<MeshDevice[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
@@ -58,7 +60,10 @@ export default function DevicesPage() {
           <tbody>
             {devices.map((d) => (
               <tr key={d.hsId}>
-                <td style={{ ...tdStyle, color: FG }}>{d.hostname || d.hsId}</td>
+                <td style={{ ...tdStyle, color: FG }}>
+                  {d.hostname || d.hsId}
+                  <TrustMarker trust={d.trust} />
+                </td>
                 <td style={tdStyle}>
                   <Badge color={d.kind === 'rasputin' ? ACCENT : DIM}>{d.kind.toUpperCase()}</Badge>
                 </td>
@@ -82,6 +87,41 @@ export default function DevicesPage() {
         }}
       />
     </>
+  );
+}
+
+// A node whose agent reports trusting a mesh CA other than the api's current
+// one cannot verify anything the api serves over the mesh-CA listener (backup
+// transfer, bundle downloads) until the CA is re-delivered — which the next
+// mesh.reconcile does on its own. Say so on the row; an "unreported" node's
+// agent has not said what it trusts (older agent), and the api leaves it alone.
+function TrustMarker({ trust }: { trust?: MeshDevice['trust'] }) {
+  if (!trust || trust.state === 'current') return null;
+  if (trust.state === 'stale') {
+    return (
+      <span style={{ marginLeft: 8 }}>
+        <Badge
+          color={WARN}
+          title={`this node trusts mesh CA ${trust.fingerprint === 'none' ? 'NONE' : (trust.fingerprint ?? '?').slice(0, 12)}, not the current one — the next mesh reconcile re-delivers it`}
+        >
+          TRUST STALE · re-delivering
+        </Badge>
+      </span>
+    );
+  }
+  return (
+    <span style={{ marginLeft: 8 }}>
+      <Badge
+        color={DIM}
+        title={
+          trust.agentPredatesField
+            ? 'this node\'s agent predates trust reporting — update the node to have it report which mesh CA it trusts'
+            : 'this node has not reported which mesh CA it trusts; it is left alone until it does'
+        }
+      >
+        TRUST UNREPORTED
+      </Badge>
+    </span>
   );
 }
 
