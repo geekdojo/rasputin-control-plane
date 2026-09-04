@@ -10,10 +10,14 @@ name: mutation-gate
 # ONLY the code a PR changes vs the base branch, so a run is tens of
 # mutants (a few minutes) instead of the ~2600 repo-wide mutants that make
 # full-module mutation infeasible per-PR. A PR that changes no Go code
-# short-circuits in under a second.
+# short-circuits in under a second. (Only NON-TEST Go files count: tests are
+# never mutated, so a test-only change is not "changed Go code" here.)
 #
 # PHASE: ADVISORY (calibration). This job posts the mutation result as a PR
-# comment and ALWAYS succeeds — it does not block merges yet. Once we've
+# comment and ALWAYS succeeds on the mutation result — it does not block
+# merges yet. (The one thing that fails it is the scoping self-check at the
+# bottom: a comment that misdescribes which modules it mutated is a CI bug.)
+# Once we've
 # seen what real PRs score, flip it to blocking (see "TO MAKE BLOCKING"
 # below) and add it to branch-protection required checks.
 #
@@ -119,36 +123,56 @@ jobs:
           # mutant is found and KILLED.
           git config diff.relative true
 
-          # gremlins runs per Go module, and this list is a DELIBERATE SUBSET
-          # of go.work — the one module list in this repo that is not derived
-          # from scripts/workspace-modules.sh, and must not be "fixed" to be.
-          # Mutation testing costs minutes of PR time per module actually
-          # touched, so which modules to buy is a judgement call, not a
-          # coverage gap.
-          #
-          # It used to say `api agent`, justified as "the two modules with
-          # tests; proto/ is generated". That justification went stale:
-          # proto/, artifactsig/ and tileschema/ all have tests today, and
-          # proto/ is hand-written, not generated.
-          #
-          # artifactsig/ joins because it is the code that decides whether a
-          # downloaded OS or firmware image is authentic — a surviving mutant
-          # there is a test suite that would not notice signature verification
-          # being weakened. It is also the cheapest module in the workspace to
-          # mutate. Measured on a full unleash (worst case; the diff scoping
-          # below means a whole-module scan only happens when that module
-          # changes):
-          #
-          #   artifactsig   24 mutants,  10s, efficacy 100.00%, coverage 100.00%
-          #   proto         66 mutants,  16s, efficacy  88.89%, coverage  60.00%
-          #   tileschema   117 mutants,  43s, efficacy  92.31%, coverage  88.89%
-          #
-          # proto/ and tileschema/ are affordable and would land with real
-          # survivors to triage on their first touching PR; adding them is a
-          # separate decision, not an oversight.
-          #
-          # A module with no in-diff Go changes short-circuits ~instantly.
-          modules="api agent artifactsig"
+          # HUNK-RANGE FIX (load-bearing): gremlins v0.6.0 turns each diff hunk
+          # into ONE line range, [new_start + leading_context, + lines_added),
+          # i.e. it assumes every added line in a hunk sits in a single block
+          # right after the leading context (internal/diff/diff.go, newChanges).
+          # With git's default 3 lines of context that assumption fails for the
+          # ordinary shape of a change — an edited line plus a new function a
+          # few lines below it share one hunk, with unchanged lines BETWEEN the
+          # added ones. The range then lands short and shifted: the last N added
+          # lines of the hunk (N = unchanged lines inside the hunk) are never
+          # mutated, silently SKIPPED, while N unchanged lines are treated as
+          # changed instead. Seen on #242: agent/internal/host/network.go hunk
+          # `@@ -84,12 +85,24 @@` became range 88–100 although the added lines
+          # were 88 and 94–105, so a mutable line placed at the block's tail was
+          # SKIPPED. With ZERO context every hunk is exactly its added lines and
+          # the arithmetic is exact (verified: the same mutant is reported).
+          # diff.context is honoured by the `git diff` gremlins runs itself.
+          git config diff.context 0
+
+          # MODULES: every go.work module, derived by scripts/workspace-modules.sh
+          # like every other Go gate in this repo. This replaced a hand-written
+          # `api agent artifactsig` subset, kept then on the argument that
+          # mutation minutes are bought per module. They are not: the diff
+          # scoping below means a module with no changed non-test Go files is
+          # never handed to gremlins at all, and one with changes is mutated only
+          # on its changed lines. What the subset did buy was a way for a module
+          # to be silently missed by not being named — the failure the
+          # self-check at the bottom now guards against.
+          modules="$(./scripts/workspace-modules.sh)"
+
+          # IN-SCOPE MODULES, derived ONCE at the repo root so the self-check
+          # below has a second, independent answer to compare the per-module
+          # loop against. A module is in scope when it has at least one changed
+          # NON-TEST Go file that gremlins would not exclude anyway:
+          #   - --merge-base "origin/$BASE": the exact diff gremlins runs, so the
+          #     two cannot disagree about what "changed" means;
+          #   - _test.go excluded: gremlins never mutates tests, so a test-only
+          #     change would run gremlins to find nothing;
+          #   - .pb.go / _gen.go excluded: mirrors the -E patterns given to
+          #     gremlins below.
+          # (Paths here are repo-relative because this runs at the root; the
+          # loop's per-module `cd` + --relative is the other derivation.)
+          changed_files=$(git diff --name-only --merge-base "origin/$BASE" -- '*.go' \
+                            | grep -v -E '(_test\.go|\.pb\.go|_gen\.go)$' || true)
+          in_scope=""
+          for m in $modules; do
+            if printf '%s\n' "$changed_files" | grep -q "^${m}/"; then
+              in_scope="${in_scope}${m}"$'\n'
+            fi
+          done
+          echo "modules with changed non-test Go code: $(echo $in_scope)"
 
           summary=""      # per-module one-liners for the comment/summary
           survivors=""    # real survivors: LIVED + genuinely-not-covered lines
@@ -161,11 +185,13 @@ jobs:
             # touches only one module would trigger a full (minutes-long,
             # hundreds-of-mutants) scan of every other module and flood the
             # comment. Only invoke gremlins when THIS module actually has
-            # changed .go files vs the base. (--relative scopes the path list
-            # to the module dir, matching gremlins' own path handling.)
-            changed=$(cd "$m" && git diff --name-only --relative "origin/$BASE" -- '*.go')
+            # changed non-test .go files vs the base (same filters as the
+            # in-scope derivation above; --relative scopes the path list to
+            # the module dir, matching gremlins' own path handling).
+            changed=$(cd "$m" && git diff --name-only --relative --merge-base "origin/$BASE" -- '*.go' \
+                        | grep -v -E '(_test\.go|\.pb\.go|_gen\.go)$' || true)
             if [ -z "$changed" ]; then
-              summary="${summary}- **${m}** — no changed Go code"$'\n'
+              summary="${summary}- **${m}** — no changed non-test Go code"$'\n'
               continue
             fi
 
@@ -187,7 +213,12 @@ jobs:
             run=$((killed + lived + notcov))
             total=$((total + run))
             if [ "$run" -eq 0 ]; then
-              summary="${summary}- **${m}** — no changed Go code"$'\n'
+              # Changed lines exist but carry no operator gremlins can mutate
+              # (a call, an assignment, a comment). Say exactly that — this used
+              # to read "no changed Go code", which on #242 hid that the agent
+              # module WAS in scope and WAS scanned.
+              files=$(echo "$changed" | sed 's/^/`/; s/$/`/' | paste -sd, - | sed 's/,/, /g')
+              summary="${summary}- **${m}** — mutated: changed lines have no mutable sites (0 mutants) · changed: ${files}"$'\n'
             else
               # Split gremlins' surviving-mutant lines by verdict.
               lived_raw=$(echo "$out"  | grep -E '^\s*LIVED' || true)
@@ -215,7 +246,7 @@ jobs:
               # can't be misread as "N faults your tests miss".
               notcov_disp="$notcov"
               [ "$nart" -gt 0 ] && notcov_disp="${notcov} (${nart} on covered lines — see note)"
-              summary="${summary}- **${m}** — efficacy ${eff:-n/a} · coverage ${mcov:-n/a} · killed ${killed} / lived ${lived} / not-covered ${notcov_disp}"$'\n'
+              summary="${summary}- **${m}** — mutated: efficacy ${eff:-n/a} · coverage ${mcov:-n/a} · killed ${killed} / lived ${lived} / not-covered ${notcov_disp}"$'\n'
 
               # Real survivors (LIVED + genuinely-not-covered), module-qualified.
               real_surv=$(printf '%s\n' "$lived_raw" "$real_notcov" | grep -E '^\s*(LIVED|NOT COVERED)' | sed "s#at #at ${m}/#" || true)
@@ -256,11 +287,42 @@ jobs:
             echo "<sub>Mutation testing checks whether tests *catch* faults, not just *execute* lines. LIVED = a code change the tests still passed on. Once calibrated, this becomes a required check.</sub>"
           } > /tmp/mutation-report.md
 
+          # SCOPING SELF-CHECK: the comment must name every go.work module, and
+          # the set it reports as mutated must equal the set with changed
+          # non-test Go code as derived at the repo root above. This reads the
+          # report TEXT — the artifact people see — not the loop's variables, so
+          # a label edit, a parsing slip, or a module the loop skipped all trip
+          # it. The gate is advisory about MUTATION RESULTS; a comment that
+          # misdescribes its own scope is a CI bug and fails the job outright.
+          listed_all=$(sed -n 's/^- \*\*\([^*]*\)\*\* — .*$/\1/p' /tmp/mutation-report.md | sort)
+          listed_mutated=$(sed -n 's/^- \*\*\([^*]*\)\*\* — mutated: .*$/\1/p' /tmp/mutation-report.md | sort)
+          want_all=$(printf '%s\n' $modules | sort)
+          want_mutated=$(printf '%s\n' $in_scope | sort)
+          selfcheck=ok
+          if [ "$listed_all" != "$want_all" ] || [ "$listed_mutated" != "$want_mutated" ]; then
+            selfcheck=failed
+            {
+              echo
+              echo "### ⚠️ Scoping self-check FAILED — treat the results above as incomplete"
+              echo
+              echo "The modules this comment reports as mutated do not match the modules with changed non-test Go code. This is a bug in the gate, not in the PR."
+              echo
+              echo "- go.work modules: \`$(echo $want_all)\`"
+              echo "- modules named above: \`$(echo $listed_all)\`"
+              echo "- modules with changed non-test Go code: \`$(echo ${want_mutated:-none})\`"
+              echo "- modules reported as mutated: \`$(echo ${listed_mutated:-none})\`"
+            } >> /tmp/mutation-report.md
+            echo "::error::mutation-gate scoping self-check failed — want mutated [$(echo $want_mutated)], comment reports [$(echo $listed_mutated)]"
+          else
+            echo "scoping self-check ok — mutated: [$(echo ${listed_mutated:-none})]"
+          fi
+
           cat /tmp/mutation-report.md >> "$GITHUB_STEP_SUMMARY"
 
-          # Only comment when there was Go code to mutate — no noise on
-          # docs/ui-only PRs. Update our previous comment in place if present.
-          if [ "$total" -gt 0 ]; then
+          # Only comment when some module had non-test Go code in scope — no
+          # noise on docs/ui/test-only PRs — or when the self-check failed
+          # (that must be seen). Update our previous comment in place if present.
+          if [ -n "$in_scope" ] || [ "$selfcheck" = failed ]; then
             existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
                         --jq '[.[] | select(.body | contains("mutation-gate-marker"))][0].id' 2>/dev/null || true)
             if [ -n "$existing" ] && [ "$existing" != "null" ]; then
@@ -270,5 +332,7 @@ jobs:
               gh pr comment "$PR" --body-file /tmp/mutation-report.md
             fi
           else
-            echo "No changed Go code to mutate; skipping PR comment."
+            echo "No changed non-test Go code to mutate; skipping PR comment."
           fi
+
+          [ "$selfcheck" = ok ]
