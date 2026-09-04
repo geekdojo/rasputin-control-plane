@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
 )
 
 // LANAddress answers "which address do other cluster members reach this node
@@ -59,9 +61,11 @@ func lanAddress(ctx context.Context, runner CmdRunner, addrs ifaceAddrsByName) (
 		if v4 == nil {
 			continue
 		}
-		// host-address/prefix (e.g. 192.168.1.1/24), matching what
-		// host.PrimaryLanCIDR already publishes, so consumers see one shape.
-		return v4.String(), ipNet.String(), nil
+		// The ip is the LAN address (192.168.1.1); the cidr is the NETWORK it
+		// sits in (192.168.1.0/24), the same shape host.PrimaryLanCIDR
+		// publishes, so consumers see one — and so it is a route: the value
+		// feeds --advertise-routes, which rejects a prefix with host bits set.
+		return v4.String(), host.NetworkCIDR(ipNet), nil
 	}
 	return "", "", fmt.Errorf("LAN interface %s has no IPv4 address", dev)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1214,7 +1215,7 @@ func TestMockClient_PersistsAcrossInstances(t *testing.T) {
 	}
 }
 
-// TestEnrollWorkflow_KeyChainsAcrossSteps drives all three enroll steps the
+// TestEnrollWorkflow_KeyChainsAcrossSteps drives every enroll step the
 // way the saga runner does — every step gets the ORIGINAL job spec, and
 // prior step results accumulate in PriorResults keyed by step name. The
 // regression this guards: dispatch used to re-parse the spec instead of
@@ -1276,5 +1277,90 @@ func TestEnrollWorkflow_KeyChainsAcrossSteps(t *testing.T) {
 	}
 	if len(devices) != 1 || devices[0].HSID != "hs-42" || devices[0].RasputinNodeID != "node-1" {
 		t.Fatalf("record step: want one device hs-42/node-1, got %+v", devices)
+	}
+}
+
+// enrollStep finds a step of the enroll workflow by name.
+func enrollStep(t *testing.T, wf jobs.Workflow, name string) jobs.WorkflowStep {
+	t.Helper()
+	for _, st := range wf.Steps {
+		if st.Name == name {
+			return st
+		}
+	}
+	t.Fatalf("enroll workflow has no %q step; steps: %+v", name, wf.Steps)
+	return jobs.WorkflowStep{}
+}
+
+// The bench failure (e3bench-compute1, 2026-09-04): an enroll submitted with
+// the host address as its route reached the agent, which installed the mesh
+// CA, restarted tailscaled and then failed `tailscale up` with "192.168.1.149/24
+// has non-address bits set; expected 192.168.1.0/24". The saga now refuses
+// that spec in its FIRST step — before a key is minted and before the agent is
+// touched — naming the value and the network it should have been. The value
+// is not rewritten: it is the operator's to correct.
+func TestEnrollWorkflow_ValidateRefusesHostBitsBeforeMintingAKey(t *testing.T) {
+	f := newMeshFixture(t)
+	wf := EnrollNodeWorkflow(f.svc, nil, f.nc)
+	if wf.Steps[0].Name != "validate" {
+		t.Fatalf("validate must be the first step so nothing is minted for a doomed enroll; got %q", wf.Steps[0].Name)
+	}
+
+	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1", AdvertiseRoutes: []string{"192.168.1.149/24"}})
+	sc := &jobs.StepCtx{
+		Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc,
+		PriorResults: map[string]json.RawMessage{}, Log: func(string, string) {},
+	}
+	_, err := enrollStep(t, wf, "validate").Do(sc)
+	if err == nil {
+		t.Fatal("validate accepted 192.168.1.149/24, which tailscale refuses")
+	}
+	for _, want := range []string{"192.168.1.149/24", "192.168.1.0/24"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("validate error %q should name %q", err, want)
+		}
+	}
+	if keys, _ := f.svc.Client().ListPreAuthKeys(f.ctx, f.svc.cfg.DefaultUser); len(keys) != 0 {
+		t.Errorf("a refused enroll must not have minted a key, got %d", len(keys))
+	}
+}
+
+// The canonical form goes all the way through, and the agent receives it
+// verbatim as the advertise list.
+func TestEnrollWorkflow_AcceptsCanonicalRouteAndDispatchesIt(t *testing.T) {
+	f := newMeshFixture(t)
+	gotRoutes := make(chan []string, 1)
+	sub, err := f.nc.Subscribe(proto.MeshEnrollSubject("node-1"), func(m *nats.Msg) {
+		var cmd proto.MeshEnrollCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		gotRoutes <- cmd.AdvertiseRoutes
+		ack, _ := json.Marshal(proto.MeshEnrollAck{OK: true, TailnetID: "hs-43", TailnetIP: "100.64.0.10", Backend: "test"})
+		_ = m.Respond(ack)
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	wf := EnrollNodeWorkflow(f.svc, nil, f.nc)
+	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1", AdvertiseRoutes: []string{"192.168.1.0/24"}})
+	prior := map[string]json.RawMessage{}
+	for _, st := range wf.Steps {
+		sc := &jobs.StepCtx{Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
+		res, err := st.Do(sc)
+		if err != nil {
+			t.Fatalf("step %s: %v", st.Name, err)
+		}
+		if res != nil {
+			prior[st.Name] = res
+		}
+	}
+	select {
+	case routes := <-gotRoutes:
+		if len(routes) != 1 || routes[0] != "192.168.1.0/24" {
+			t.Errorf("agent received routes %v, want [192.168.1.0/24]", routes)
+		}
+	default:
+		t.Fatal("agent never received the enroll cmd")
 	}
 }

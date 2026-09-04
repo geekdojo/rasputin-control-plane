@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { enrollMeshNode, getJob, listMeshDevices, listNodes } from '../../../../lib/api';
+import { parseAdvertiseRoutes } from '../../../../lib/cidr';
 import { useMeshStateRefresh } from '../../../../lib/mesh-state-context';
 import type { MeshDevice, Node } from '../../../../lib/types';
 import {
@@ -147,15 +148,23 @@ function EnrollNodeForm({
   // chosen yet" falls back to the first candidate. Writing it was a synchronous
   // setState on effect entry (set-state-in-effect).
   const selectedNodeId = nodeId || (candidates[0]?.id ?? '');
+  // Checked as typed, and the api applies the same rule: a route with host
+  // bits set (192.168.1.149/24) is what `tailscale up` refuses on the node,
+  // after the mesh CA is already installed (e3bench 2026-09-04). Refuse it
+  // here, naming the network — never rewrite what the operator typed.
+  const parsedRoutes = parseAdvertiseRoutes(routes);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedNodeId) return;
+    if (parsedRoutes.error) {
+      setErr(parsedRoutes.error);
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
-      const cidrs = routes.split(',').map((s) => s.trim()).filter(Boolean);
-      const job = await enrollMeshNode(selectedNodeId, cidrs);
+      const job = await enrollMeshNode(selectedNodeId, parsedRoutes.routes);
       setRoutes('');
       // Poll the enroll job to a terminal state before refreshing. The saga
       // runs async (the agent restarts tailscaled, runs `tailscale up`, then
@@ -205,12 +214,15 @@ function EnrollNodeForm({
         placeholder="advertise routes (CIDRs, comma-sep; optional)"
         value={routes}
         onChange={(e) => setRoutes(e.target.value)}
+        aria-invalid={parsedRoutes.error ? true : undefined}
         style={{ flex: '1 1 240px' }}
       />
-      <Btn type="submit" variant="primary" disabled={busy || !selectedNodeId}>
+      <Btn type="submit" variant="primary" disabled={busy || !selectedNodeId || !!parsedRoutes.error}>
         {busy ? 'ENROLLING…' : 'ENROLL NODE'}
       </Btn>
-      {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
+      {(err || parsedRoutes.error) && (
+        <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err ?? parsedRoutes.error}</span>
+      )}
     </form>
   );
 }

@@ -157,6 +157,18 @@ func (s *Server) handleMeshEnrollDefaults(w http.ResponseWriter, r *http.Request
 	}
 	if v, ok := node.Metadata["primaryLanCidr"]; ok {
 		if cidr, ok := v.(string); ok && cidr != "" {
+			// Agents before 2026-09-04 reported the interface address with
+			// its mask (192.168.1.149/24) rather than the network
+			// (192.168.1.0/24), and `tailscale up --advertise-routes` refuses
+			// the former. This is a DEFAULT the api is about to suggest —
+			// nobody typed it — so rewriting it to the network is fine
+			// here, where rewriting operator input in the enroll handler
+			// is not. A value that cannot be parsed at all is passed
+			// through unchanged rather than hidden: the enroll validation
+			// then names it.
+			if canon, err := mesh.CanonicalRoute(cidr); err == nil {
+				cidr = canon
+			}
 			advertise = []string{cidr}
 		}
 	}
@@ -622,6 +634,13 @@ func (s *Server) handleMeshEnrollNode(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
+	}
+	// Refuse, don't rewrite: these routes are operator input. The saga's
+	// validate step applies the same rule, but a 400 here says so at the
+	// form instead of as a failed task (e3bench 2026-09-04).
+	if err := mesh.ValidateAdvertiseRoutes(req.AdvertiseRoutes); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	spec, _ := json.Marshal(mesh.EnrollSpec{NodeID: nodeID, AdvertiseRoutes: req.AdvertiseRoutes})
 	j, err := s.runner.Submit(r.Context(), "mesh.enroll_node", spec, creator(r))

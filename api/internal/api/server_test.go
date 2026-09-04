@@ -1723,6 +1723,39 @@ func TestHandleMeshEnrollDefaults_PrefillsFromAgentMetadata(t *testing.T) {
 	}
 }
 
+// An agent from before 2026-09-04 reports the interface address with its
+// mask. That is a DEFAULT the api is about to suggest, not something an
+// operator typed, so it is canonicalized to the network here — the enroll
+// endpoint itself refuses the host form (TestHandleMeshEnrollNode_RefusesHostBits).
+func TestHandleMeshEnrollDefaults_CanonicalizesOldHostFormMetadata(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	if err := f.inv.Insert(f.ctx, &proto.Node{
+		ID: "node-old", Role: proto.RoleCompute, Hostname: "node-old",
+		Metadata:  map[string]any{"primaryLanCidr": "192.168.1.149/24"},
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("inv.Insert: %v", err)
+	}
+	w := f.do(t, http.MethodGet, "/api/mesh/enroll-defaults/node-old", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		AdvertiseRoutes []string `json:"advertiseRoutes"`
+		PrimaryLanCidr  string   `json:"primaryLanCidr"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.PrimaryLanCidr != "192.168.1.0/24" {
+		t.Errorf("primaryLanCidr: %q, want the network 192.168.1.0/24", resp.PrimaryLanCidr)
+	}
+	if len(resp.AdvertiseRoutes) != 1 || resp.AdvertiseRoutes[0] != "192.168.1.0/24" {
+		t.Errorf("advertiseRoutes: %v, want [192.168.1.0/24]", resp.AdvertiseRoutes)
+	}
+}
+
 func TestHandleMeshEnrollDefaults_LANPeerAdvertisesNothing(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
@@ -1990,6 +2023,25 @@ func TestHandleMeshEnroll_UnknownKind(t *testing.T) {
 	w := f.do(t, http.MethodPost, "/api/mesh/enroll/node-x", "", c)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("want 400, got %d", w.Code)
+	}
+}
+
+// Operator input with host bits set is refused at the form (400), with the
+// value and the network it should be both named — not rewritten. This is
+// what `tailscale up` would have said on the node twenty seconds later
+// (e3bench-compute1 2026-09-04).
+func TestHandleMeshEnrollNode_RefusesHostBits(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodPost, "/api/mesh/enroll/node-x",
+		`{"advertiseRoutes":["192.168.1.149/24"]}`, c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{"192.168.1.149/24", "192.168.1.0/24"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("400 body should name %q, got %s", want, w.Body.String())
+		}
 	}
 }
 
