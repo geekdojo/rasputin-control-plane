@@ -26,6 +26,7 @@ import {
   ArchiveKeyError,
   canonicalRecoveryCode,
   generateRecoveryCode,
+  lendArchiveKeyForRestore,
   mintArchiveKey,
   unlockArchiveKey,
   type ArchiveKeyPayload,
@@ -506,5 +507,78 @@ describe('resolvePassphraseKdf', () => {
   test('refuses anything that is not argon2id', () => {
     assert.equal(resolvePassphraseKdf('pbkdf2-sha256-600000'), null);
     assert.equal(resolvePassphraseKdf('hkdf-sha256'), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The restore-only lend path (design/storage.md §4.5, #291)
+// ---------------------------------------------------------------------------
+//
+// unlockArchiveKey never returns key material and still does not. The restore
+// LENDS it: the key exists inside `use` and is zero afterwards, on every path.
+
+describe('lendArchiveKeyForRestore', () => {
+  test('lends the 32-byte key that derives the disk’s public key, then zeroes it', async () => {
+    const { archiveKey, recoveryCode } = await mintArchiveKey(bytes('correct horse'));
+    let seen: Uint8Array | null = null;
+    let lengthInside = 0;
+    const result = await lendArchiveKeyForRestore(archiveKey, { path: 'recovery-code', code: recoveryCode }, async (key) => {
+      seen = key;
+      lengthInside = key.length;
+      assert.ok(key.some((b) => b !== 0), 'the key is live inside use');
+      return 'response';
+    });
+    assert.equal(result, 'response');
+    assert.equal(lengthInside, 32);
+    assert.ok(seen !== null && (seen as Uint8Array).every((b) => b === 0), 'zeroed after use resolved');
+  });
+
+  test('zeroes the key when use rejects, and the rejection is what comes back', async () => {
+    const { archiveKey, recoveryCode } = await mintArchiveKey(bytes('correct horse'));
+    let seen: Uint8Array | null = null;
+    await assert.rejects(
+      lendArchiveKeyForRestore(archiveKey, { path: 'recovery-code', code: recoveryCode }, async (key) => {
+        seen = key;
+        throw new Error('api said no');
+      }),
+      /api said no/,
+    );
+    assert.ok(seen !== null && (seen as Uint8Array).every((b) => b === 0));
+  });
+
+  test('a wrong secret never reaches use', async () => {
+    const { archiveKey } = await mintArchiveKey(bytes('correct horse'));
+    let called = false;
+    await assert.rejects(
+      lendArchiveKeyForRestore(archiveKey, { path: 'passphrase', passphrase: bytes('wrong') }, async () => {
+        called = true;
+      }),
+      (e: unknown) => e instanceof ArchiveKeyError && e.kind === 'wrong-secret',
+    );
+    assert.equal(called, false);
+  });
+
+  test('a key that opens but is not the disk’s never reaches use', async () => {
+    const a = await mintArchiveKey(bytes('pw'));
+    const b = await mintArchiveKey(bytes('pw'));
+    const frankenstein = { ...a.archiveKey, publicKey: b.archiveKey.publicKey };
+    let called = false;
+    await assert.rejects(
+      lendArchiveKeyForRestore(frankenstein, { path: 'recovery-code', code: a.recoveryCode }, async () => {
+        called = true;
+      }),
+      (e: unknown) => e instanceof ArchiveKeyError && e.kind === 'key-mismatch',
+    );
+    assert.equal(called, false);
+  });
+
+  test('both custody paths lend the same key', async () => {
+    const { archiveKey, recoveryCode } = await mintArchiveKey(bytes('correct horse'));
+    const viaPassphrase = await lendArchiveKeyForRestore(archiveKey, { path: 'passphrase', passphrase: bytes('correct horse') }, async (k) =>
+      Array.from(k),
+    );
+    const viaCode = await lendArchiveKeyForRestore(archiveKey, { path: 'recovery-code', code: recoveryCode }, async (k) => Array.from(k));
+    assert.deepEqual(viaPassphrase, viaCode);
+    assert.equal(viaCode.length, 32);
   });
 });

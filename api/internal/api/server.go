@@ -29,20 +29,26 @@ import (
 
 // Server bundles the HTTP handlers for the api.
 type Server struct {
-	store               *jobs.Store
-	runner              *jobs.Runner
-	inv                 *inventory.Store
-	invSvc              *inventory.Service
-	fw                  *firewall.Store
-	apps                *apps.Store
-	catalog             *catalog.Catalog
-	catalogStore        *catalogsync.Store
-	catalogPoller       *catalogsync.Poller
-	metrics             *metrics.Store
-	updater             *updater.Store
-	updaterVerifier     *updater.Verifier
-	backup              *storage.Store
-	backupIngest        *backupxfer.Ingest
+	store           *jobs.Store
+	runner          *jobs.Runner
+	inv             *inventory.Store
+	invSvc          *inventory.Service
+	fw              *firewall.Store
+	apps            *apps.Store
+	catalog         *catalog.Catalog
+	catalogStore    *catalogsync.Store
+	catalogPoller   *catalogsync.Poller
+	metrics         *metrics.Store
+	updater         *updater.Store
+	updaterVerifier *updater.Verifier
+	backup          *storage.Store
+	backupIngest    *backupxfer.Ingest
+	// restore is the first-run restore surface (design/storage.md §4.5,
+	// #291); nil keeps its routes at 503. restoreRestart is what a prepared
+	// restore calls to have the process exit and come back on the restored
+	// identity — main.go's shutdown, so the unit restarts it.
+	restore             *storage.RestoreConfig
+	restoreRestart      func()
 	bundleDir           string
 	trustDir            string
 	mesh                *mesh.Service
@@ -244,6 +250,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /flash.sh", s.handleGetFlashScript)
 	mux.HandleFunc("GET /api/cluster/node-image", s.handleClusterNodeImage)
 	mux.HandleFunc("GET /api/cluster/firewall-image", s.handleClusterFirewallImage)
+	// Restore-before-first-boot (design/storage.md §4.5, #291) is open by
+	// necessity — a re-flashed controlplane has no users to authenticate —
+	// and gated by the fact that defines first-run: both routes answer 409
+	// the moment an operator exists. See restore_handlers.go.
+	mux.HandleFunc("GET /api/restore/candidates", s.handleListRestoreCandidates)
+	mux.HandleFunc("POST /api/restore", s.handleRestore)
 
 	// Authenticated
 	reqd := s.auth.RequireSessionFunc
@@ -328,6 +340,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT "+backupxfer.IngestPathPrefix, s.handleBackupIngest)
 	mux.HandleFunc("GET /api/backup/runs", reqd(s.handleListBackupRuns))
 	mux.HandleFunc("POST /api/backup/runs", reqd(s.handleStartBackupRun))
+	mux.HandleFunc("GET /api/backup/restores", reqd(s.handleListRestores))
 	mux.HandleFunc("GET /api/backup/schedule", reqd(s.handleGetBackupSchedule))
 	mux.HandleFunc("PUT /api/backup/schedule", reqd(s.handleSetBackupSchedule))
 

@@ -1,0 +1,10 @@
+{
+  "comment": "TEST VECTOR — a throwaway keypair wrapped by ui/lib/archive-key.ts. Regenerate with scripts/gen-recovery-code-vector.sh.",
+  "keyId": "ak-PRZe4ayS5t3LMOlsoaVarA",
+  "alg": "X25519;wrap=AES-256-GCM;pp=argon2id-m65536-t3-p1;rc=hkdf-sha256",
+  "publicKey": "CVP53fmKJMPK8EYRz9HcRSfrl3zXJP2gXir6nsf6ghE",
+  "wrappedByPassphrase": "eyJ2IjoyLCJjaXBoZXIiOiJBRVMtMjU2LUdDTSIsImtkZiI6ImFyZ29uMmlkLW02NTUzNi10My1wMSIsInBhcmFtcyI6eyJtZW1vcnlLaUIiOjY1NTM2LCJpdGVyYXRpb25zIjozLCJwYXJhbGxlbGlzbSI6MSwiZGtMZW4iOjMyfSwic2FsdCI6Ik9KN29CVk9TRGI5UDJPLVFpeWpQT2ciLCJpdiI6ImhNNnVOX2NNVmV1aW8wTUkiLCJjdCI6Ijl3TUlnTWZrMHQ5Rnh6VTFkQ01Ld1ptWkhIbEVvQ1pQMGVjNmxYZGNmc1NGMFNlVGlNSXRWRjl6Uy1ZQ0k3RWMifQ",
+  "wrappedByRecoveryCode": "eyJ2IjoyLCJjaXBoZXIiOiJBRVMtMjU2LUdDTSIsImtkZiI6ImhrZGYtc2hhMjU2IiwicGFyYW1zIjp7ImRrTGVuIjozMn0sInNhbHQiOiJKR19pMzIwWXltMXFhWG1BX0tDQnNBIiwiaXYiOiJHYmFubWprX0tDRzhLUXR0IiwiY3QiOiIzNFVwTzU2TTlFUTRkcTY3ejlwLXdHXy1tZTQ1VS1LTDJUQ0h3OXlTX3M0TjBEa0ZKZlprempSMnpDVVJIaGtBIn0",
+  "recoveryCode": "Z4SA-70RM-TPE1-ZC18-SYXC-B86X-0NHD-995E",
+  "privateKey": "GKJWQi9PnMZi4AlYguATtx6rdzIcf6oL4JT9B6ETyVQ"
+}

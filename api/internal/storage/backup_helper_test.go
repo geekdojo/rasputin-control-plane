@@ -434,6 +434,11 @@ type runHarnessOpts struct {
 	// inventory says about it. Nil leaves Inventory nil: every silence then
 	// reads as offline.
 	nodes []*proto.Node
+	// key, when set, is the target keypair the run seals to instead of a
+	// fresh one — the restore round-trip supplies the keypair a browser-
+	// produced fixture wrapped. keyID likewise overrides the target's key id.
+	key   *testKeypair
+	keyID string
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -483,6 +488,9 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 
 	nc := startNATS(t)
 	key := newTestKeypair(t)
+	if opts.key != nil {
+		key = *opts.key
+	}
 
 	// The target: a real directory standing in for the claimed disk's mount,
 	// and the REAL ingest endpoint served on a real socket. The api's fan-out
@@ -612,9 +620,13 @@ func seedRunTarget(t *testing.T, st *Store, key testKeypair, opts runHarnessOpts
 		SizeBytes:  2 << 40,
 		At:         time.Now().UTC(),
 	}
+	keyID := "key-1"
+	if opts.keyID != "" {
+		keyID = opts.keyID
+	}
 	if pub != "" {
 		res.Key = &ArchiveKey{
-			KeyID:                 "key-1",
+			KeyID:                 keyID,
 			Alg:                   "x25519+argon2id",
 			PublicKey:             pub,
 			WrappedByPassphrase:   testWrappedPass,
@@ -623,7 +635,7 @@ func seedRunTarget(t *testing.T, st *Store, key testKeypair, opts runHarnessOpts
 	} else if opts.noPartUUID {
 		// A row with no partition UUID still needs to be claimed for step 1 to
 		// reach the check that refuses it.
-		res.KeyIDOverride = "key-1"
+		res.KeyIDOverride = keyID
 	}
 	if err := st.MarkClaimed(ctx, jobID, res); err != nil {
 		t.Fatalf("MarkClaimed: %v", err)

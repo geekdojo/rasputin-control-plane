@@ -1283,3 +1283,118 @@ export interface ClaimBackupTargetRequest {
    */
   archiveKey?: ArchiveKeyPayload;
 }
+
+// ----- Restore-before-first-boot (design/storage.md §4.5, #291) --------------
+//
+// GET /api/restore/candidates and POST /api/restore are open only while no
+// operator exists; GET /api/backup/restores is the authenticated record.
+
+/** One app volume named in a restore record: present in the generation (member set) or absent from it (reason set). */
+export interface AppVolumeMention {
+  name: string;
+  class?: string;
+  nodeId?: string;
+  member?: string;
+  sizeBytes?: number;
+  reason?: string;
+}
+
+/** One generation on a candidate disk, as its clear-text manifest describes it. */
+export interface RestoreGeneration {
+  id: string;
+  createdAt: string;
+  scope?: BackupScope;
+  complete: boolean;
+  keyId?: string;
+  clusterId?: string;
+  manifestVersion: number;
+  archiveBytes: number;
+  identityEntries: number;
+  /** App volumes the generation HOLDS — which this phase does NOT restore. */
+  appVolumesPresent: AppVolumeMention[];
+  /** Classified volumes the run did not capture, with the reason. */
+  appVolumesAbsent: AppVolumeMention[];
+  restorable: boolean;
+  problem?: string;
+}
+
+/** One attached disk carrying a Rasputin backup set. */
+export interface RestoreCandidate {
+  nodeId: string;
+  devicePath: string;
+  model?: string;
+  serial?: string;
+  sizeBytes: number;
+  transport: StorageTransport;
+  removable: boolean;
+  /** The disk's own marker: identifiers, the public key, and the two wrapped copies the browser unwraps. */
+  marker?: StorageBackupSet;
+  generations: RestoreGeneration[];
+  restorable: boolean;
+  problem?: string;
+}
+
+/** GET /api/restore/candidates. */
+export interface RestoreCandidatesResponse {
+  nodeId: string;
+  /** THIS box's cluster id — the archive's must match for the restored passkeys to work. */
+  clusterId: string;
+  candidates: RestoreCandidate[];
+  ts: string;
+}
+
+export interface RestoredEntry {
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+  note?: string;
+}
+
+export interface NotRestoredItem {
+  path: string;
+  reason: string;
+}
+
+/** The record of one restore this cluster came back from. Never carries key material. */
+export interface RestoreReport {
+  id: string;
+  phase: string;
+  generationId: string;
+  generationCreatedAt: string;
+  clusterId?: string;
+  keyId?: string;
+  scope?: BackupScope;
+  complete: boolean;
+  manifestVersion: number;
+  partUuid: string;
+  sourceLabel?: string;
+  nodeId: string;
+  sealedDigest: string;
+  sealedBytes: number;
+  restored: RestoredEntry[];
+  notRestored: NotRestoredItem[];
+  /** PRESENT AND NOT RESTORED: app volumes are a later phase. */
+  appVolumesPresent: AppVolumeMention[];
+  appVolumesAbsent: AppVolumeMention[];
+  warning: string;
+  preparedAt: string;
+  appliedAt?: string;
+  recordedAt?: string;
+}
+
+/** POST /api/restore. The private key transits ONCE, over TLS, for one restore. */
+export interface RestoreStartRequest {
+  partUuid: string;
+  generationId: string;
+  keyId: string;
+  /** base64url of the 32-byte X25519 private key. */
+  privateKey: string;
+}
+
+/** POST /api/restore's 202. */
+export interface RestoreStartResponse {
+  report: RestoreReport;
+  /** The api is exiting so the unit restarts it onto the restored identity. */
+  restarting: boolean;
+  detail: string;
+}
