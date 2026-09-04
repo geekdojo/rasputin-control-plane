@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -355,6 +356,80 @@ func TestFanOutRecordsAnOfflineNodeAsFailed(t *testing.T) {
 		if strings.HasPrefix(e.Name(), proto.BackupPartialDirPrefix) {
 			t.Errorf("a partial generation survived: %s", e.Name())
 		}
+	}
+}
+
+// TestFanOutReadsASilentNodeAgainstInventory is the e3bench 2026-09-04 case
+// and its two neighbours. The compute node hosting immich has nobody on the
+// bus for storage.backup_stage_volume in all three; what inventory says
+// about the node decides what the manifest says. Offline: §4.4's OFFLINE
+// wording. Online on an agent that predates the verb: the record names the
+// verb and the release that answers it, and does NOT say offline. Online on
+// an agent that should answer: a fault, named as one. FAILED in all three —
+// the volume was not captured whichever it was.
+func TestFanOutReadsASilentNodeAgainstInventory(t *testing.T) {
+	minStage, ok := proto.VerbMinAgentVersion("storage.backup_stage_volume")
+	if !ok {
+		t.Fatal("storage.backup_stage_volume has no minimum agent version recorded in proto")
+	}
+	now := time.Now().UTC()
+	cases := []struct {
+		name string
+		node *proto.Node
+		want []string
+		not  []string
+	}{
+		{
+			name: "offline",
+			node: &proto.Node{ID: computeNodeID, Role: proto.RoleCompute, Hostname: computeNodeID, AgentVersion: "2026.08.4-dev.130",
+				FirstSeen: now.Add(-time.Hour), LastSeen: now.Add(-time.Hour)},
+			want: []string{"node " + computeNodeID + " is OFFLINE", "§4.4"},
+			not:  []string{"predates", "online"},
+		},
+		{
+			name: "online, agent predates the verb",
+			node: &proto.Node{ID: computeNodeID, Role: proto.RoleCompute, Hostname: computeNodeID, AgentVersion: "2026.08.4-dev.130",
+				FirstSeen: now, LastSeen: now},
+			want: []string{"node " + computeNodeID + " is online", "(v2026.08.4-dev.130) predates storage.backup_stage_volume",
+				"update the node to ≥ v" + minStage, "FAILED, not skipped"},
+			not: []string{"OFFLINE", "is offline"},
+		},
+		{
+			name: "online, agent should answer",
+			node: &proto.Node{ID: computeNodeID, Role: proto.RoleCompute, Hostname: computeNodeID, AgentVersion: minStage,
+				FirstSeen: now, LastSeen: now},
+			want: []string{"node " + computeNodeID + " is online", "(v" + minStage + ") should answer storage.backup_stage_volume", "did not", "FAILED, not skipped"},
+			not:  []string{"OFFLINE", "is offline", "predates"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles(), nodes: []*proto.Node{tc.node}}) // no compute agent
+			if r.job.Status != jobs.StatusFailed {
+				t.Fatalf("job status = %s; a silent node's volume must fail the run", r.job.Status)
+			}
+			rec := r.record(t, "immich", "immich-upload")
+			if rec.Captured || !rec.Failed {
+				t.Fatalf("record = %+v; failed, not skipped, whatever the reason", rec)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(rec.Reason, w) {
+					t.Errorf("reason %q does not say %q", rec.Reason, w)
+				}
+			}
+			for _, w := range tc.not {
+				if strings.Contains(rec.Reason, w) {
+					t.Errorf("reason %q must not say %q", rec.Reason, w)
+				}
+			}
+			// The same sentence reaches the job feed and the run's error.
+			if !strings.Contains(r.ledger, tc.want[0]) {
+				t.Errorf("the job feed never said %q", tc.want[0])
+			}
+			if !strings.Contains(r.job.Error, "immich/immich-upload") {
+				t.Errorf("job error = %q; it must name the volume", r.job.Error)
+			}
+		})
 	}
 }
 

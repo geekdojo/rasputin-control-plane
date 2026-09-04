@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -100,6 +101,13 @@ type RunConfig struct {
 	// refuses rather than proceeding without them.
 	Apps  AppLister
 	Tiles TileVolumes
+	// Inventory is what the fan-out consults when nobody on a node answers a
+	// stage request, so the manifest says whether the node was offline or
+	// online with an agent that predates the verb
+	// (inventory.ExplainNoResponder). Nil reads every silence as offline —
+	// the 2026-09-04 e3bench misreport — so main wires it and only the tests
+	// that are not about it leave it out.
+	Inventory *inventory.Store
 	// DB is the live control-plane database, snapshotted with VACUUM INTO by
 	// step 3. Never copied as a file — see SnapshotDB.
 	DB *sql.DB
@@ -734,6 +742,7 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 
 		report, err := runFanOut(sc.Ctx, fanOutOpts{
 			NATS:         sc.NATS,
+			Nodes:        nodeLookupOrNil(cfg.Inventory),
 			JobID:        sc.JobID,
 			GenerationID: tgt.GenerationID,
 			Ingest:       cfg.Ingest,

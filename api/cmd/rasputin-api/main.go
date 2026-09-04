@@ -636,8 +636,12 @@ func main() {
 			TrustDir:     trustDir,
 			MeshStateDir: meshStateDir,
 		},
-		DB:     backupStore.DB(),
-		DBPath: dbPath,
+		// So a node whose agent does not answer a stage request is recorded
+		// as offline, or as online with an agent that predates the verb —
+		// whichever inventory says it is.
+		Inventory: invStore,
+		DB:        backupStore.DB(),
+		DBPath:    dbPath,
 		// §4.5's app-volume fan-out, and its only two inputs: what is installed
 		// (and on which node) joined to the tile that classifies each of its
 		// volumes. Both required — step 1 refuses a run that cannot enumerate

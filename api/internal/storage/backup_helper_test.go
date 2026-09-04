@@ -429,6 +429,11 @@ type runHarnessOpts struct {
 	computeAgent bool
 	// noIngest leaves RunConfig.Ingest nil, for the step-1 refusal.
 	noIngest bool
+	// nodes seeds an inventory store with these rows and hands it to the
+	// run as RunConfig.Inventory, so a silent node is read against what
+	// inventory says about it. Nil leaves Inventory nil: every silence then
+	// reads as offline.
+	nodes []*proto.Node
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -545,6 +550,15 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	}
 	if !opts.noIngest {
 		cfg.Ingest = ingest
+	}
+	if len(opts.nodes) > 0 {
+		inv := newInventory(t)
+		for _, n := range opts.nodes {
+			if err := inv.Insert(ctx, n); err != nil {
+				t.Fatalf("inv insert %s: %v", n.ID, err)
+			}
+		}
+		cfg.Inventory = inv
 	}
 	if !opts.noAppSource {
 		tiles := opts.tiles

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -79,9 +80,28 @@ type requester interface {
 	RequestWithContext(ctx context.Context, subj string, data []byte) (*nats.Msg, error)
 }
 
+// nodeLookup is the one question the fan-out asks inventory: why did nobody
+// on that node answer? *inventory.Store answers it.
+type nodeLookup interface {
+	ExplainNoResponder(ctx context.Context, subject string) inventory.NoResponder
+}
+
+// nodeLookupOrNil keeps a nil *inventory.Store a nil interface, so the nil
+// check in silenceReason means what it says.
+func nodeLookupOrNil(inv *inventory.Store) nodeLookup {
+	if inv == nil {
+		return nil
+	}
+	return inv
+}
+
 // fanOutOpts is one fan-out pass.
 type fanOutOpts struct {
 	NATS requester
+	// Nodes reads a stage request nobody answered against inventory, so the
+	// manifest says whether the node was offline or online with an agent
+	// that predates the verb. Nil reads every silence as offline.
+	Nodes nodeLookup
 	// JobID is the run, which the credential is scoped to.
 	JobID string
 	// GenerationID names every staged file this pass mints and the
@@ -222,11 +242,9 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 	cancel()
 	if err != nil {
 		if errors.Is(err, nats.ErrNoResponders) {
-			// §4.4's named case. No agent on that node is on the bus, so the
-			// node is offline (or its agent is down), and this app's backup
-			// is FAILED — not skipped, not deferred.
-			return failedVolume(pv, fmt.Sprintf("node %s is OFFLINE: no agent answered the staging request on the bus, so nothing could copy this volume. "+
-				"§4.4: an app whose node is offline at backup time has a FAILED backup, not a skipped one", node))
+			// Nobody on that node answered. FAILED either way — not skipped,
+			// not deferred — but the REASON depends on what inventory knows.
+			return failedVolume(pv, o.silenceReason(ctx, node, proto.BackupStageVolumeSubject(node)))
 		}
 		// No ack, so nothing is known about the app's state. The agent's
 		// watchdog is armed before the stop and fires on a lost reply and on a
@@ -401,6 +419,29 @@ func (o fanOutOpts) unstage(ctx context.Context, node, name string) {
 		o.log("warn", fmt.Sprintf("%s did not remove the staged copy %s (%s) — that agent sweeps its staging root at its next start",
 			node, name, strings.TrimSpace(string(ack.Refusal)+" "+ack.Detail)))
 	}
+}
+
+// silenceReason is the manifest's reason for a stage request nobody answered.
+//
+// Three readings, and the record says which. The node is offline: §4.4's
+// named case, and its wording. The node is online but its agent predates
+// the verb: the sentence names the verb and the release that answers it,
+// because "update the node" is the fix and OFFLINE would send the operator
+// to check a cable. The node is online and its agent should have answered:
+// a fault, said as one. All three are FAILED — the volume was not captured
+// whichever it was.
+//
+// Without inventory to consult (Nodes nil) every silence reads as offline,
+// which is what this saga said on e3bench 2026-09-04 about a node that was
+// online running 2026.08.4-dev.130.
+func (o fanOutOpts) silenceReason(ctx context.Context, node, subject string) string {
+	if o.Nodes != nil {
+		if why := o.Nodes.ExplainNoResponder(ctx, subject); why.Online() {
+			return why.String() + ". Nothing could copy this volume, so this app's backup is FAILED, not skipped — §4.4 as for an offline node, though this node is NOT offline"
+		}
+	}
+	return fmt.Sprintf("node %s is OFFLINE: no agent answered the staging request on the bus, so nothing could copy this volume. "+
+		"§4.4: an app whose node is offline at backup time has a FAILED backup, not a skipped one", node)
 }
 
 func consistencyText(ack proto.BackupStageVolumeAck) string {
