@@ -4,6 +4,10 @@ This project is developed by a human maintainer working with AI coding assistant
 document describes how, and what that means for the code you're reading — in the spirit of
 transparency policies like [NLnet's GenAI policy](https://nlnet.nl/foundation/policies/generativeAI/).
 
+**Machine-readable declaration:** [`AI-DECLARATION.md`](AI-DECLARATION.md) states the same
+disclosure as per-process levels in the [AI-DECLARATION.md v0.1.2](https://ai-declaration.md/en/0.1.2/)
+format. This document is the long-form version of it.
+
 ## Approach
 
 - Development happens in interactive sessions between the maintainer and Anthropic's family
