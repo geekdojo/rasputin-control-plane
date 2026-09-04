@@ -31,6 +31,14 @@ func OpenRoot(path string) (*os.File, error) {
 
 // OpenDir opens parent/name with O_NOFOLLOW|O_DIRECTORY and fstats the result,
 // refusing a symlink (ELOOP) and anything that is not a directory.
+//
+// CodeQL reports go/path-injection on the Openat below and the register
+// records it false-positive: `name` is ONE component, joined onto nothing —
+// the kernel resolves it relative to parent's fd, O_NOFOLLOW refuses a
+// symlink in it, and the fstat after requires a directory. What decides
+// whether the caller may name this component is the caller's own shape
+// check (a validated archive member, a generation id, a marker constant);
+// this primitive cannot be made to open a path, only a child of an fd.
 func OpenDir(parent *os.File, name string) (*os.File, error) {
 	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {

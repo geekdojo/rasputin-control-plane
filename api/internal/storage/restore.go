@@ -814,6 +814,19 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 			return nil, fmt.Errorf("%w: reading the archive: %v", ErrRestoreArchive, u.explain(err))
 		}
 		name := hdr.Name
+		// The archive-entry name is the one string in this function that came
+		// off the disk and is about to become a path. Two refusals, and the
+		// second is not redundant with the first: validateRestorePath refuses
+		// every component that is not a plain name (so `..`, `.`, empty and
+		// absolute all fail), and the explicit `..` check is the shape the
+		// CodeQL zip-slip query recognises as a sanitiser — stated in the form
+		// the scanner reads so the control is visible to it, not only to us.
+		// Below this point every open is fd-relative through fsat, so even a
+		// component that slipped past both could not leave the staging
+		// directory by traversal; it could only name a child of it.
+		if strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
+			return nil, fmt.Errorf("%w: member path %q is not beneath the archive root", ErrRestoreArchive, name)
+		}
 		if err := validateRestorePath(name); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrRestoreArchive, err)
 		}

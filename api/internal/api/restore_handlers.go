@@ -181,8 +181,13 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	log.Printf("restore: prepared restore %s from generation %s (key %s, %d identity file(s), %d app volume(s) present and not restored); restarting onto it",
-		report.ID, report.GenerationID, report.KeyID, len(report.Restored), len(report.AppVolumesPresent))
+	// Nothing request-derived in this line: the report id is minted by the
+	// api, the counts are counts. The generation and key ids the operator
+	// named are in the report the response carries and the record the next
+	// start writes — the log is the one surface that would take them
+	// unquoted, so it does not take them at all.
+	log.Printf("restore: prepared restore %s (%d identity file(s) staged, %d app volume(s) present and not restored); restarting onto it",
+		report.ID, len(report.Restored), len(report.AppVolumesPresent))
 	writeJSON(w, http.StatusAccepted, restoreResponse{
 		Report:     report,
 		Restarting: s.restoreRestart != nil,
