@@ -4,6 +4,10 @@ This project is developed by a human maintainer working with AI coding assistant
 document describes how, and what that means for the code you're reading — in the spirit of
 transparency policies like [NLnet's GenAI policy](https://nlnet.nl/foundation/policies/generativeAI/).
 
+**Machine-readable declaration:** [`AI-DECLARATION.md`](AI-DECLARATION.md) states the same
+disclosure as per-process levels in the [AI-DECLARATION.md v0.1.2](https://ai-declaration.md/en/0.1.2/)
+format. This document is the long-form version of it.
+
 ## Approach
 
 - Development happens in interactive sessions between the maintainer and Anthropic's family
@@ -13,10 +17,25 @@ transparency policies like [NLnet's GenAI policy](https://nlnet.nl/foundation/po
   `Co-Authored-By: Claude <model> <noreply@anthropic.com>` trailer naming the model. Commits
   without the trailer are human-authored.
 
+## Review
+
+Code review is itself AI-assisted in this project, so it is disclosed here rather than left
+implicit in the section above.
+
+- Where enabled, automated Claude Code workflows post review feedback on pull requests: a
+  diff-scoped security review that runs on each PR, plus scheduled code-quality and
+  mutation-testing sweeps that raise their own findings. Comments from these workflows are
+  authored by `claude[bot]`. Which of them run in a given repository is visible in
+  `.github/workflows/`.
+- **This feedback is advisory and holds no merge rights.** No automation can approve or merge
+  a pull request. The maintainer reads the findings, decides what to act on, and performs
+  every merge.
+
 ## Human accountability
 
-- Every AI-assisted change is reviewed by the maintainer before it lands; CI (build, tests,
-  vulnerability scanning where configured) gates pushes.
+- Every AI-assisted change is reviewed by the maintainer before it lands, and the maintainer
+  merges every pull request personally; CI (build, tests, vulnerability scanning where
+  configured) gates pushes.
 - The maintainer takes full responsibility for all published code — AI assistance does not
   dilute that accountability.
 - AI-assisted code is reviewed with attention to licensing: nothing knowingly reproducing
