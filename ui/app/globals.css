@@ -125,6 +125,21 @@
     transform: rotate(360deg);
   }
 }
+/* One-shot flash for the task row /tasks?id= opened, so the eye lands on it
+   without hunting. Plays once when the row gains the animation and never
+   again. background-color, not box-shadow: a <tr> under border-collapse
+   does not reliably paint a shadow. It ends on the expanded row's own
+   resting tint (accentA(0.06) in tasks/page.tsx) so there is no jump when
+   the animation hands back to the inline style. */
+@keyframes task-flash {
+  0%,
+  35% {
+    background-color: rgba(var(--rasp-accent-rgb), 0.3);
+  }
+  100% {
+    background-color: rgba(var(--rasp-accent-rgb), 0.06);
+  }
+}
 /* Focus. The border tint alone is the mouse-user's cue; keyboard focus needs
    a ring you cannot miss, so :focus-visible paints one on every interactive
    element. This used to be `outline: none` on .rasp-field with nothing put

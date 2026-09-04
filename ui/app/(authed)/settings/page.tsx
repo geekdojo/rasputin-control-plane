@@ -769,7 +769,11 @@ function ObservabilitySection() {
             <Hint style={{ marginBottom: 10 }}>
               Downloading and starting. The first run fetches roughly 500 MB and can take several
               minutes — you can leave this page.{' '}
-              {jobId && <a href="/tasks" style={{ color: ACCENT }}>Follow it in Tasks →</a>}
+              {jobId && (
+                <a href={`/tasks?id=${encodeURIComponent(jobId)}`} style={{ color: ACCENT }}>
+                  Follow it in Tasks →
+                </a>
+              )}
             </Hint>
           )}
 

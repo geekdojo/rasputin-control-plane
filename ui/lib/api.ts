@@ -65,6 +65,25 @@ import type {
 // In production, BASE is empty and the UI uses same-origin relative paths.
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
+// ApiError is what jsonFetch throws for a non-2xx reply. The message is the
+// same `${path} → ${status}: ${detail}` string it always was — everything that
+// renders `String(e)` is unchanged — and the status rides along as a field so
+// a caller that has to tell "this job does not exist" (404) from "the api is
+// down" can do so without parsing the message.
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+/** True when `e` is a jsonFetch failure with HTTP status 404. */
+export function isNotFound(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404;
+}
+
 async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${input}`, {
     credentials: 'include',
@@ -78,7 +97,7 @@ async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
     } catch {
       // ignore body parse failure
     }
-    throw new Error(`${input} → ${res.status}${detail}`);
+    throw new ApiError(`${input} → ${res.status}${detail}`, res.status);
   }
   return (await res.json()) as T;
 }
@@ -108,7 +127,7 @@ export async function listJobs(limit = 50): Promise<Job[]> {
 }
 
 export function getJob(jobId: string): Promise<Job> {
-  return jsonFetch<Job>(`/api/jobs/${jobId}`);
+  return jsonFetch<Job>(`/api/jobs/${encodeURIComponent(jobId)}`);
 }
 
 export async function listSteps(jobId: string): Promise<JobStep[]> {
