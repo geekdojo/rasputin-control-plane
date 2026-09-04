@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -159,14 +158,29 @@ func main() {
 			log.Fatalf("rasputin-agent: bmc host: %v", err)
 		}
 	}
-	// Registration is gated until every command handler is subscribed:
-	// the registration event advertises capabilities (bmc-targets among
-	// them) and the api acts on it immediately — the BMC status seed's
-	// first sweep raced the handler subscriptions and got "no
-	// responders" (dev bench 2026-07-26). handlersReady flips after the
-	// full handler setup below, which then registers explicitly;
-	// reconnects (handlers long since up) re-register as before.
-	var handlersReady atomic.Bool
+	// Every command handler the agent serves is collected here and
+	// subscribed by subscribeAll on EVERY bus connection the agent makes —
+	// not once, inline, on a conn assumed to live forever. nats.go closes a
+	// conn for good when it decides a failure is permanent, and the bus
+	// Client then dials a new one on which nothing is subscribed (e3bench
+	// 2026-09-04: five nodes off the bus for 17 hours after a controlplane
+	// wipe; see agent/internal/bus). Registration follows subscription on
+	// each conn, so the api never acts on a registration whose handlers are
+	// not up yet — the BMC status seed's first sweep once raced exactly that
+	// and got "no responders" (dev bench 2026-07-26).
+	//
+	// The backends the handlers serve are constructed ONCE, below, before
+	// the first dial; only the subscriptions are per-conn.
+	var subscribers []func(*nats.Conn) error
+	subscribe := func(fn func(*nats.Conn) error) { subscribers = append(subscribers, fn) }
+	subscribeAll := func(c *nats.Conn) error {
+		for _, fn := range subscribers {
+			if err := fn(c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	// How this node answers "which address do others reach me on". The default
 	// is the default-route heuristic, which is right everywhere EXCEPT the
 	// router — see the openwrt override below and
@@ -185,62 +199,49 @@ func main() {
 		return tsBackend.TrustFingerprint()
 	}
 	reregister := func(c *nats.Conn) {
-		if !handlersReady.Load() {
-			return
-		}
 		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint)
 	}
-	// Retry the initial NATS connect instead of exiting on failure. On real
-	// hardware the firewall can boot before the control plane (it IS the
-	// network), so rasputin.local may not resolve yet at startup. Exiting let
-	// procd exhaust its respawn budget and the agent never recovered (bench
-	// 2026-06-18). Loop here with capped backoff until the control plane
-	// appears; only a shutdown signal aborts.
-	var nc *nats.Conn
-	for attempt := 1; ; attempt++ {
-		var cerr error
-		nc, cerr = bus.Connect(natsURL, nodeID, joinToken, reregister)
-		if cerr == nil {
-			break
-		}
-		wait := min(time.Duration(attempt)*2*time.Second, 30*time.Second)
-		log.Printf("rasputin-agent: NATS connect to %s failed (%v); retry %d in %s (control plane may still be coming up)", natsURL, cerr, attempt, wait)
-		select {
-		case <-ctx.Done():
-			log.Fatalf("rasputin-agent: aborted waiting for NATS: %v", ctx.Err())
-		case <-time.After(wait):
-		}
-	}
-	defer func() { _ = nc.Drain() }()
+	// The bus connection, for the life of the process. Not dialed yet: the
+	// handlers below are collected first and subscribed on each conn by
+	// subscribeAll, then the registration goes out. Everything that
+	// publishes on a timer takes the client rather than a conn, so a
+	// publish lands on whichever connection is current.
+	client := bus.New(natsURL, nodeID, joinToken, subscribeAll, reregister)
+	defer client.Close()
+	// For hooks that re-register outside a bus event (a simulated reboot, a
+	// mesh enroll, a BMC swap): always the current conn, never a captured one.
+	rereg := func() { reregister(client.Conn()) }
 
 	pingSubj := proto.NodeCmdSubject(nodeID, "diag.ping")
-	pingSub, err := nc.Subscribe(pingSubj, func(m *nats.Msg) {
-		handlePing(nodeID, m)
+	subscribe(func(c *nats.Conn) error {
+		if _, err := c.Subscribe(pingSubj, func(m *nats.Msg) { handlePing(nodeID, m) }); err != nil {
+			return fmt.Errorf("subscribe %s: %w", pingSubj, err)
+		}
+		log.Printf("rasputin-agent: subscribed to %s", pingSubj)
+		return nil
 	})
-	if err != nil {
-		log.Fatalf("rasputin-agent: subscribe %s: %v", pingSubj, err)
-	}
-	defer func() { _ = pingSub.Unsubscribe() }()
-	log.Printf("rasputin-agent: subscribed to %s", pingSubj)
 
 	// diag.health — role-aware health probe the node.update saga uses as its
 	// post-reboot commit/rollback gate (richer than diag.ping's liveness).
 	healthSubj := proto.NodeCmdSubject(nodeID, "diag.health")
-	healthSub, err := nc.Subscribe(healthSubj, func(m *nats.Msg) {
-		handleHealth(ctx, nodeID, role, m, updateFault == updater.FaultFailHealth)
+	subscribe(func(c *nats.Conn) error {
+		_, err := c.Subscribe(healthSubj, func(m *nats.Msg) {
+			handleHealth(ctx, nodeID, role, m, updateFault == updater.FaultFailHealth)
+		})
+		if err != nil {
+			return fmt.Errorf("subscribe %s: %w", healthSubj, err)
+		}
+		log.Printf("rasputin-agent: subscribed to %s", healthSubj)
+		return nil
 	})
-	if err != nil {
-		log.Fatalf("rasputin-agent: subscribe %s: %v", healthSubj, err)
-	}
-	defer func() { _ = healthSub.Unsubscribe() }()
-	log.Printf("rasputin-agent: subscribed to %s", healthSubj)
 
-	rebootSub, err := system.RegisterRebootHandler(nc, nodeID, reregister)
-	if err != nil {
-		log.Fatalf("rasputin-agent: register reboot handler: %v", err)
-	}
-	defer func() { _ = rebootSub.Unsubscribe() }()
-	log.Printf("rasputin-agent: subscribed to %s", proto.NodeCmdSubject(nodeID, "system.reboot"))
+	subscribe(func(c *nats.Conn) error {
+		if _, err := system.RegisterRebootHandler(c, nodeID, reregister); err != nil {
+			return fmt.Errorf("register reboot handler: %w", err)
+		}
+		log.Printf("rasputin-agent: subscribed to %s", proto.NodeCmdSubject(nodeID, "system.reboot"))
+		return nil
+	})
 
 	// Docker handlers — on compute and controlplane agents (the latter hosts
 	// the api's own sidecars in Tier 2). Picks `docker` if the CLI is on PATH;
@@ -273,15 +274,12 @@ func main() {
 		}
 
 		if dockerBackend != nil {
-			dockerSubs, err := docker.RegisterHandlers(nc, nodeID, dockerBackend)
-			if err != nil {
-				log.Fatalf("rasputin-agent: register docker handlers: %v", err)
-			}
-			defer func() {
-				for _, sub := range dockerSubs {
-					_ = sub.Unsubscribe()
+			subscribe(func(c *nats.Conn) error {
+				if _, err := docker.RegisterHandlers(c, nodeID, dockerBackend); err != nil {
+					return fmt.Errorf("register docker handlers: %w", err)
 				}
-			}()
+				return nil
+			})
 
 			// The app-volume staging verbs (design/storage.md §4.3 / §4.7)
 			// go wherever apps are hosted, on the SAME staging root the
@@ -323,15 +321,12 @@ func main() {
 			if n := stager.SweepRestoreStaging(); n > 0 {
 				log.Printf("rasputin-agent: restore: removed %d staging tree(s) a previous agent left beside app volumes", n)
 			}
-			qSubs, err := quiesce.RegisterHandlers(nc, nodeID, stager)
-			if err != nil {
-				log.Fatalf("rasputin-agent: register quiesce handlers: %v", err)
-			}
-			defer func() {
-				for _, sub := range qSubs {
-					_ = sub.Unsubscribe()
+			subscribe(func(c *nats.Conn) error {
+				if _, err := quiesce.RegisterHandlers(c, nodeID, stager); err != nil {
+					return fmt.Errorf("register quiesce handlers: %w", err)
 				}
-			}()
+				return nil
+			})
 		}
 
 		// Node-local reverse proxy (ADR-0004 §1/§6/§9): the agent runs the stock
@@ -348,11 +343,12 @@ func main() {
 		} else {
 			log.Printf("rasputin-agent: caddy binary not found on PATH — node-local proxy disabled (leaves still delivered)")
 		}
-		leafSub, err := proxy.RegisterHandlers(nc, nodeID, leafStore, reconciler.Reconcile)
-		if err != nil {
-			log.Fatalf("rasputin-agent: register proxy handlers: %v", err)
-		}
-		defer func() { _ = leafSub.Unsubscribe() }()
+		subscribe(func(c *nats.Conn) error {
+			if _, err := proxy.RegisterHandlers(c, nodeID, leafStore, reconciler.Reconcile); err != nil {
+				return fmt.Errorf("register proxy handlers: %w", err)
+			}
+			return nil
+		})
 	}
 
 	// Firewall handlers — only on firewall-role agents. Picks the real uci
@@ -387,26 +383,13 @@ func main() {
 		}
 		if uciClient != nil {
 			log.Printf("rasputin-agent: uci backend=%s", backendChoice)
-			fwSubs, err := openwrt.RegisterHandlers(nc, nodeID, uciClient)
-			if err != nil {
-				log.Fatalf("rasputin-agent: register firewall handlers: %v", err)
-			}
-			defer func() {
-				for _, sub := range fwSubs {
-					_ = sub.Unsubscribe()
+			subscribe(func(c *nats.Conn) error {
+				if _, err := openwrt.RegisterHandlers(c, nodeID, uciClient); err != nil {
+					return fmt.Errorf("register firewall handlers: %w", err)
 				}
-			}()
+				return nil
+			})
 		}
-
-		// IDS alert tailer — tails snort3's alert_fast log (path comes
-		// from the firewall image's /etc/config/snort log_dir UCI option;
-		// 99-rasputin seeds it to /var/log/snort) and publishes one event
-		// per parsed alert on rasputin.node.<id>.evt.ids.alert. Only
-		// firewall-role agents start this loop (compute/controlplane
-		// agents don't run snort and have no log to tail). The path
-		// override is honored via RASPUTIN_IDS_ALERT_LOG for dev/test;
-		// blank means use the default in the ids package.
-		go ids.Run(ctx, nc, nodeID, os.Getenv("RASPUTIN_IDS_ALERT_LOG"))
 	}
 
 	// Publish rasputin.local into a local resolver dir (a dnsmasq hostsdir) so
@@ -485,13 +468,8 @@ func main() {
 		// moment the control plane took a new lease.
 		go clusterdns.Run(ctx, clusterdns.Config{
 			ClusterID: clusterID(),
-			ServerIP: func() string {
-				if nc == nil {
-					return ""
-				}
-				return hostOf(nc.ConnectedAddr())
-			},
-			Dir: envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
+			ServerIP:  func() string { return hostOf(client.ConnectedAddr()) },
+			Dir:       envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
 		})
 	}
 
@@ -534,7 +512,7 @@ func main() {
 			// Reregister after a simulated reboot so the api's saga step 6
 			// unblocks. Real rauc reboots the whole agent process, so the
 			// fresh process publishes its own registration on connect.
-			mb.SetReregisterHook(func() { reregister(nc) })
+			mb.SetReregisterHook(rereg)
 			upBackend = mb
 		case backendUnavailable:
 			faults.Unavailable("RASPUTIN_UPDATE_BACKEND", updaterExpectedFor(role), updaterMissingPrereq(role),
@@ -545,15 +523,12 @@ func main() {
 				"OS updates are disabled on this node — it will not accept a new image")
 		}
 		if upBackend != nil {
-			upSubs, err := updater.RegisterHandlersWithFault(nc, nodeID, upBackend, updateFault)
-			if err != nil {
-				log.Fatalf("rasputin-agent: register update handlers: %v", err)
-			}
-			defer func() {
-				for _, sub := range upSubs {
-					_ = sub.Unsubscribe()
+			subscribe(func(c *nats.Conn) error {
+				if _, err := updater.RegisterHandlersWithFault(c, nodeID, upBackend, updateFault); err != nil {
+					return fmt.Errorf("register update handlers: %w", err)
 				}
-			}()
+				return nil
+			})
 			log.Printf("rasputin-agent: update backend=%s", upBackend.Name())
 		}
 
@@ -633,15 +608,12 @@ func main() {
 			if n, freed := storage.CleanStaging(stagingRoot); n > 0 {
 				log.Printf("rasputin-agent: swept %d orphaned staged backup archive(s) from %s (%d bytes)", n, stagingRoot, freed)
 			}
-			stSubs, err := storage.RegisterHandlers(nc, nodeID, stBackend, stagingRoot)
-			if err != nil {
-				log.Fatalf("rasputin-agent: register storage handlers: %v", err)
-			}
-			defer func() {
-				for _, sub := range stSubs {
-					_ = sub.Unsubscribe()
+			subscribe(func(c *nats.Conn) error {
+				if _, err := storage.RegisterHandlers(c, nodeID, stBackend, stagingRoot); err != nil {
+					return fmt.Errorf("register storage handlers: %w", err)
 				}
-			}()
+				return nil
+			})
 			log.Printf("rasputin-agent: storage backend=%s", stBackend.Name())
 		}
 	}
@@ -679,15 +651,12 @@ func main() {
 			// carries the CA fingerprint this node now trusts, and the api's
 			// converge_trust reads it from inventory — without this the api
 			// would see the pre-delivery fingerprint until the next reconnect.
-			tsSubs, err := tailscale.RegisterHandlers(nc, nodeID, tsBackend, func() { reregister(nc) })
-			if err != nil {
-				log.Fatalf("rasputin-agent: register tailscale handlers: %v", err)
-			}
-			defer func() {
-				for _, sub := range tsSubs {
-					_ = sub.Unsubscribe()
+			subscribe(func(c *nats.Conn) error {
+				if _, err := tailscale.RegisterHandlers(c, nodeID, tsBackend, rereg); err != nil {
+					return fmt.Errorf("register tailscale handlers: %w", err)
 				}
-			}()
+				return nil
+			})
 			log.Printf("rasputin-agent: tailscale backend=%s", tsBackend.Name())
 		}
 	}
@@ -695,32 +664,67 @@ func main() {
 	// BMC handlers — the backend itself was constructed before the bus
 	// connect (see above) so registration could advertise bmc-targets.
 	// Attach subscribes bmc.configure on every agent (a Settings push can
-	// turn BMC on) and the power/SoL handlers when a backend is active.
-	if err := bmcHost.Attach(nc, func() { reregister(nc) }); err != nil {
-		log.Fatalf("rasputin-agent: bmc host attach: %v", err)
-	}
+	// turn BMC on) and the power/SoL handlers when a backend is active; it
+	// is re-callable, and re-attaches on every new conn.
+	subscribe(func(c *nats.Conn) error {
+		if err := bmcHost.Attach(c, rereg); err != nil {
+			return fmt.Errorf("bmc host attach: %w", err)
+		}
+		return nil
+	})
 	defer bmcHost.Shutdown()
 	if bmcHost.Active() {
 		adv := bmcHost.Advertisement()
 		log.Printf("rasputin-agent: bmc backend=%s (host, targets=%d, pinned=%t)", bmcHost.Name(), len(adv.Targets), adv.Pinned)
 	}
 
-	// Every command handler is subscribed — announce ourselves. (The
-	// connect-time registration above was suppressed by the gate.)
-	handlersReady.Store(true)
-	reregister(nc)
+	// Every backend is built and every handler is collected — dial. The
+	// client subscribes them all on the new conn and then publishes the
+	// registration, and keeps doing both for the life of the process.
+	//
+	// Retry the first connect instead of exiting on failure. On real hardware
+	// the firewall can boot before the control plane (it IS the network), so
+	// rasputin.local may not resolve yet at startup. Exiting let procd exhaust
+	// its respawn budget and the agent never recovered (bench 2026-06-18).
+	// Loop here with capped backoff until the control plane appears; only a
+	// shutdown signal aborts. After the first success the client re-dials on
+	// its own — see agent/internal/bus.
+	for attempt := 1; ; attempt++ {
+		cerr := client.Dial()
+		if cerr == nil {
+			break
+		}
+		wait := min(time.Duration(attempt)*2*time.Second, 30*time.Second)
+		log.Printf("rasputin-agent: NATS connect to %s failed (%v); retry %d in %s (control plane may still be coming up)", natsURL, cerr, attempt, wait)
+		select {
+		case <-ctx.Done():
+			log.Fatalf("rasputin-agent: aborted waiting for NATS: %v", ctx.Err())
+		case <-time.After(wait):
+		}
+	}
 	if faults.Any() {
 		log.Printf("rasputin-agent: ⚠️  started WITH %s — this node is reachable but degraded; "+
 			"the control plane has been told, and the detail is above.", faults.Summary())
 	}
 
-	go runHeartbeats(ctx, nc, nodeID)
+	// IDS alert tailer — tails snort3's alert_fast log (path comes from the
+	// firewall image's /etc/config/snort log_dir UCI option; 99-rasputin
+	// seeds it to /var/log/snort) and publishes one event per parsed alert
+	// on rasputin.node.<id>.evt.ids.alert. Only firewall-role agents start
+	// this loop (compute/controlplane agents don't run snort and have no log
+	// to tail). The path override is honored via RASPUTIN_IDS_ALERT_LOG for
+	// dev/test; blank means use the default in the ids package.
+	if role == proto.RoleFirewall {
+		go ids.Run(ctx, client, nodeID, os.Getenv("RASPUTIN_IDS_ALERT_LOG"))
+	}
+
+	go runHeartbeats(ctx, client, nodeID)
 	// Disk metric measures the persistent data partition, not "/" (the
 	// read-only squashfs rootfs, ~100% by design on the appliance). Default to
 	// the agent's own state dir — on the appliance that's
 	// /var/lib/rasputin/agent-state, the same partition as Docker + obs data —
 	// and statfs is filesystem-level. Overridable if a node's layout differs.
-	go metrics.Run(ctx, nc, nodeID, storageDataPath, host.Uptime)
+	go metrics.Run(ctx, client, nodeID, storageDataPath, host.Uptime)
 
 	// systemd integration (Buildroot nodes; procd on OpenWrt has no
 	// NOTIFY_SOCKET so both calls no-op there). The liveness probe is
@@ -847,10 +851,14 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 	log.Printf("rasputin-agent: registered as %s (role=%s)", nodeID, role)
 }
 
-func runHeartbeats(ctx context.Context, nc *nats.Conn, nodeID string) {
+// runHeartbeats publishes a heartbeat every heartbeatInterval on the current
+// bus connection. A run of publish failures — the bus is down, the client is
+// re-dialing — logs once and is counted, not written every 10s (bus.Squelch).
+func runHeartbeats(ctx context.Context, pub bus.Publisher, nodeID string) {
 	t := time.NewTicker(heartbeatInterval)
 	defer t.Stop()
 	subj := proto.NodeHeartbeatSubject(nodeID)
+	publishLog := bus.Squelch{What: "publish heartbeat"}
 	for {
 		select {
 		case <-ctx.Done():
@@ -870,9 +878,7 @@ func runHeartbeats(ctx context.Context, nc *nats.Conn, nodeID string) {
 				log.Printf("rasputin-agent: marshal heartbeat: %v", err)
 				continue
 			}
-			if err := nc.Publish(subj, payload); err != nil {
-				log.Printf("rasputin-agent: publish heartbeat: %v", err)
-			}
+			publishLog.Report(pub.Publish(subj, payload))
 		}
 	}
 }
