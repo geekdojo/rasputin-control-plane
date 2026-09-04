@@ -74,6 +74,11 @@ const ROLE_PRIORITY: Record<string, number> = {
 function MetricsPageInner() {
   const [status, setStatus] = useState<ObsStatus | null>(null);
   const [statusErr, setStatusErr] = useState<string | null>(null);
+  // The obs.enable job this page started, so "Follow progress in Tasks" can
+  // open that job (/tasks?id=) rather than the queue. Unknown when the stack
+  // was turned on elsewhere (Settings, or before this page loaded) — the
+  // link then falls back to the plain queue.
+  const [enableJobId, setEnableJobId] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [range, setRange] = useState<RangeKey>('30m');
   const [seriesByNode, setSeriesByNode] = useState<Record<string, NodeSeries>>({});
@@ -265,8 +270,15 @@ function MetricsPageInner() {
 
         <ClusterStrip nodes={nodes} status={status} />
 
-        {status?.state === 'off' && <DisabledPanel onEnabled={setStatus} />}
-        {status?.state === 'starting' && <StartingPanel status={status} />}
+        {status?.state === 'off' && (
+          <DisabledPanel
+            onEnabled={(s, jobId) => {
+              setEnableJobId(jobId);
+              setStatus(s);
+            }}
+          />
+        )}
+        {status?.state === 'starting' && <StartingPanel status={status} jobId={enableJobId} />}
 
         {nodes.length === 0 && (
           <div style={{ marginTop: 20 }}>
@@ -434,7 +446,7 @@ function RangeSelector({ value, onChange }: { value: RangeKey; onChange: (r: Ran
 // Settings → Metrics & Logs remains the canonical home; this is the CTA at
 // the point of discovery, because /metrics is where an operator finds out
 // they don't have metrics.
-function DisabledPanel({ onEnabled }: { onEnabled: (s: ObsStatus) => void }) {
+function DisabledPanel({ onEnabled }: { onEnabled: (s: ObsStatus, jobId: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -443,8 +455,8 @@ function DisabledPanel({ onEnabled }: { onEnabled: (s: ObsStatus) => void }) {
     setBusy(true);
     setErr(null);
     try {
-      await enableObs();
-      onEnabled(await getObsStatus());
+      const job = await enableObs();
+      onEnabled(await getObsStatus(), job.id);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -496,14 +508,14 @@ function DisabledPanel({ onEnabled }: { onEnabled: (s: ObsStatus) => void }) {
 // StartingPanel covers the cold-start window. Without it the page would show
 // the "off" CTA for the several minutes the stack spends pulling — inviting
 // the operator to turn on something that's already turning on.
-function StartingPanel({ status }: { status: ObsStatus }) {
+function StartingPanel({ status, jobId }: { status: ObsStatus; jobId: string | null }) {
   return (
     <div style={{ marginTop: 20, padding: '16px 18px', border: `1px solid ${HAIR}`, background: PANEL }}>
       <SectionLabel>METRICS &amp; LOGS ARE STARTING</SectionLabel>
       <Hint style={{ marginBottom: 10 }}>
         Downloading and starting services. The first run fetches roughly 500 MB and can take several
         minutes — charts fill in on their own once it&apos;s up. You can leave this page.{' '}
-        <a href="/tasks" style={{ color: DIM }}>
+        <a href={jobId ? `/tasks?id=${encodeURIComponent(jobId)}` : '/tasks'} style={{ color: DIM }}>
           Follow progress in Tasks →
         </a>
       </Hint>

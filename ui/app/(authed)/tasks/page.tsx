@@ -1,10 +1,12 @@
 'use client';
 
 import { Ban, CheckCircle, Circle, ClipboardList, Loader, XCircle } from 'lucide-react';
-import { Fragment, Suspense, useEffect, useState } from 'react';
+import { Fragment, Suspense, useEffect, useRef, useState } from 'react';
 import type { ElementType } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { createJob, listApps, listEvents, listJobs, listSteps, openJobsWS } from '../../../lib/api';
+import { createJob, getJob, listApps, listEvents, listJobs, listSteps, openJobsWS } from '../../../lib/api';
+import { focusNote, resolveFocus } from '../../../lib/task-focus';
+import type { TaskFocus } from '../../../lib/task-focus';
 import type { Job, JobEvent, JobStatus, JobStep, StepStatus } from '../../../lib/types';
 import { Badge, Btn, DIM, FG, HAIR_SOFT, Input, LinkBtn, PageBody, PageHeader, PageShell, SectionLabel, tdStyle, thStyle } from '../../../components/kit';
 import { ACCENT, accentA, MONO } from '../../../components/ui-theme';
@@ -74,12 +76,32 @@ function fmtDuration(j: Job): string {
 }
 
 function TasksInner() {
-  const appFilter = useSearchParams()?.get('app') ?? null;
+  const search = useSearchParams();
+  const appFilter = search?.get('app') ?? null;
+  // ?id=<jobId>: the job "Watch in Tasks" and the /alerts drill-through point
+  // at. It is opened once per id (lib/task-focus.ts has the rules) and the
+  // parameter stays in the URL so a refresh reopens it.
+  const focusId = search?.get('id') ?? null;
   const [jobs, setJobs] = useState<Job[]>([]);
+  // True once listJobs has answered, either way. The ?id= lookup waits for
+  // it: deciding "not in the list" against an empty list that simply has not
+  // arrived yet would fetch every focused job and mislabel it as outside.
+  const [loaded, setLoaded] = useState(false);
+  const [focus, setFocus] = useState<TaskFocus | null>(null);
+  // The ?id= this page has already acted on. A ref, not state: it is a
+  // guard read inside the effect, never rendered, and it is what stops a
+  // job the operator has collapsed from popping open again on the next
+  // render — the id is applied once per value, not once per render.
+  const focusApplied = useRef<string | null>(null);
   // appId -> target node, so app.* jobs can fill the NODE column they have no
   // spec field for. See jobNode.
   const [appNodes, setAppNodes] = useState<Map<string, string>>(new Map());
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Mirror of `expanded` for the jobs WebSocket handler, which is installed
+  // once on mount and would otherwise close over the initial null forever —
+  // so an open detail never refreshed on a live event, which is the one
+  // thing "watch" needs it to do.
+  const expandedRef = useRef<string | null>(null);
   const [steps, setSteps] = useState<JobStep[]>([]);
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [nodeId, setNodeId] = useState('node-dev');
@@ -97,8 +119,16 @@ function TasksInner() {
   useEffect(() => {
     let active = true;
     listJobs()
-      .then((js) => active && setJobs(js))
-      .catch((e) => active && setErr(String(e)));
+      .then((js) => {
+        if (!active) return;
+        setJobs(js);
+        setLoaded(true);
+      })
+      .catch((e) => {
+        if (!active) return;
+        setErr(String(e));
+        setLoaded(true);
+      });
     // Best-effort: the NODE column degrades to a dash without this, so a
     // failure here is not worth surfacing over the jobs themselves.
     listApps()
@@ -106,7 +136,14 @@ function TasksInner() {
       .catch(() => {});
     const close = openJobsWS((ev) => {
       setJobs((prev) => applyJobEvent(prev, ev));
-      if (ev.jobId === expanded) refreshDetail(ev.jobId);
+      // A pinned job (outside the list) is not in `jobs`, so its status
+      // would otherwise freeze at whatever the fetch returned.
+      setFocus((f) =>
+        f && f.state === 'outside' && ev.type !== 'created' && ev.jobId === f.job.id
+          ? { ...f, job: applyJobEvent([f.job], ev)[0] ?? f.job }
+          : f,
+      );
+      if (ev.jobId === expandedRef.current) refreshDetail(ev.jobId);
     });
     return () => {
       active = false;
@@ -118,8 +155,23 @@ function TasksInner() {
   // so wiping state here was redundant with the guard below AND was a
   // synchronous setState inside an effect (react-hooks/set-state-in-effect).
   useEffect(() => {
+    expandedRef.current = expanded;
     if (expanded) refreshDetail(expanded);
   }, [expanded]);
+
+  // Open the job named by ?id=, once the list is in. Runs again whenever the
+  // list changes (live events) but the guard makes every run after the first
+  // for a given id a no-op — including after the operator collapses it.
+  // Nothing is set synchronously here; the result lands from the promise.
+  useEffect(() => {
+    if (!focusId || !loaded || focusApplied.current === focusId) return;
+    focusApplied.current = focusId;
+    const visible = appFilter ? jobs.filter((j) => jobApp(j) === appFilter) : jobs;
+    resolveFocus(focusId, jobs, visible, getJob).then((f) => {
+      setFocus(f);
+      if (f.state === 'listed' || f.state === 'outside') setExpanded(f.job.id);
+    });
+  }, [focusId, loaded, jobs, appFilter]);
 
   async function handlePing() {
     setBusy(true);
@@ -134,6 +186,12 @@ function TasksInner() {
   }
 
   const shown = appFilter ? jobs.filter((j) => jobApp(j) === appFilter) : jobs;
+  // The focused job sits above the table when the page would not otherwise
+  // show it. Not when the list has since caught up with it (a live 'created'
+  // event, say): one row per job.
+  const pinned = focus?.state === 'outside' && !shown.some((j) => j.id === focus.job.id) ? focus.job : null;
+  const focusedId = focus && (focus.state === 'listed' || focus.state === 'outside') ? focus.job.id : null;
+  const note = focus ? focusNote(focus, appFilter) : null;
   const running = shown.filter((j) => j.status === 'running').length;
   const queued = shown.filter((j) => j.status === 'queued').length;
   const failed = shown.filter((j) => j.status === 'failed').length;
@@ -169,6 +227,15 @@ function TasksInner() {
           </div>
         )}
 
+        {note && (
+          <div
+            role="status"
+            style={{ color: focus?.state === 'outside' ? DIM : '#facc15', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}
+          >
+            {note}
+          </div>
+        )}
+
         <table aria-label="Task queue" style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
@@ -180,6 +247,18 @@ function TasksInner() {
             </tr>
           </thead>
           <tbody>
+            {pinned && (
+              <JobRow
+                key={pinned.id}
+                job={pinned}
+                node={jobNode(pinned, appNodes)}
+                expanded={expanded === pinned.id}
+                focused={focusedId === pinned.id}
+                steps={expanded === pinned.id ? steps : []}
+                events={expanded === pinned.id ? events : []}
+                onToggle={() => setExpanded(expanded === pinned.id ? null : pinned.id)}
+              />
+            )}
             {shown.length === 0 && (
               <tr>
                 <td colSpan={COLS.length} style={{ ...tdStyle, color: DIM, padding: '16px 0' }}>
@@ -195,6 +274,7 @@ function TasksInner() {
                 job={j}
                 node={jobNode(j, appNodes)}
                 expanded={expanded === j.id}
+                focused={focusedId === j.id}
                 steps={expanded === j.id ? steps : []}
                 events={expanded === j.id ? events : []}
                 onToggle={() => setExpanded(expanded === j.id ? null : j.id)}
@@ -221,6 +301,7 @@ function JobRow({
   job,
   node,
   expanded,
+  focused,
   steps,
   events,
   onToggle,
@@ -228,21 +309,38 @@ function JobRow({
   job: Job;
   node: string;
   expanded: boolean;
+  // The row ?id= named: scrolled into view and flashed once when it becomes
+  // focused. The flash is a one-shot CSS animation (globals.css task-flash)
+  // rather than state with a timer, so it needs no cleanup and cannot
+  // re-run when the row re-renders.
+  focused: boolean;
   steps: JobStep[];
   events: JobEvent[];
   onToggle: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const rowRef = useRef<HTMLTableRowElement | null>(null);
   const meta = statusMeta(job.status);
   const Icon = meta.icon;
+
+  useEffect(() => {
+    if (focused) rowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [focused]);
 
   return (
     <Fragment>
       <tr
+        ref={rowRef}
         onClick={onToggle}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
-        style={{ cursor: 'pointer', background: expanded || hover ? accentA(0.06) : 'transparent', transition: 'background 0.1s' }}
+        data-focused={focused || undefined}
+        style={{
+          cursor: 'pointer',
+          background: expanded || hover ? accentA(0.06) : 'transparent',
+          transition: 'background 0.1s',
+          animation: focused ? 'task-flash 1.8s ease-out' : undefined,
+        }}
       >
         <td style={{ ...tdStyle, color: DIM }}>{job.id.slice(0, 8)}…</td>
         <td style={{ ...tdStyle, color: FG }}>{job.kind}</td>
