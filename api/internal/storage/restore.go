@@ -595,6 +595,13 @@ func PrepareRestore(ctx context.Context, cfg RestoreConfig, req RestoreRequest) 
 	if !safePartUUID.MatchString(req.PartUUID) {
 		return nil, fmt.Errorf("%w: %q is not a partition UUID", ErrRestoreArchive, req.PartUUID)
 	}
+	if strings.TrimSpace(req.GenerationID) == "" ||
+		req.GenerationID == "." ||
+		req.GenerationID == ".." ||
+		strings.Contains(req.GenerationID, "/") ||
+		strings.Contains(req.GenerationID, "\\") {
+		return nil, fmt.Errorf("%w: invalid generation id %q", ErrRestoreArchive, req.GenerationID)
+	}
 	if !proto.BackupValidGenerationID(req.GenerationID) {
 		return nil, fmt.Errorf("%w: %q is not a generation id", ErrRestoreArchive, req.GenerationID)
 	}
