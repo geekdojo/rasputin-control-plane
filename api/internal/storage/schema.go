@@ -82,6 +82,28 @@ CREATE TABLE IF NOT EXISTS backup_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_backup_runs_status ON backup_runs(status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_backup_runs_started ON backup_runs(started_at DESC);
+
+-- restore_reports: one row per restore this cluster came back from
+-- (design/storage.md §4.5, #291). Written by the START that applied the
+-- restore, into the database it restored, so the record lives with the
+-- identity it describes. The full report is the JSON column; the scalar
+-- columns are what a listing sorts and filters on. No key material has a
+-- column here and none may be added: this table is served.
+CREATE TABLE IF NOT EXISTS restore_reports (
+    id            TEXT PRIMARY KEY,
+    phase         TEXT NOT NULL,             -- 'identity'
+    generation_id TEXT NOT NULL,
+    cluster_id    TEXT NOT NULL DEFAULT '',
+    key_id        TEXT NOT NULL DEFAULT '',
+    scope         TEXT NOT NULL DEFAULT '',
+    complete      INTEGER NOT NULL DEFAULT 0,
+    part_uuid     TEXT NOT NULL DEFAULT '',
+    prepared_at   INTEGER NOT NULL,
+    applied_at    INTEGER,
+    recorded_at   INTEGER NOT NULL,
+    report        TEXT NOT NULL              -- the RestoreReport, JSON
+);
+CREATE INDEX IF NOT EXISTS idx_restore_reports_recorded ON restore_reports(recorded_at DESC);
 `
 
 // migrations are forward-only DDL applied after schema on every open, and must

@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -87,6 +88,38 @@ func main() {
 		log.Fatalf("rasputin-api: data dir: %v", err)
 	}
 	dbPath := filepath.Join(dataDir, "rasputin.db")
+
+	// Restore-before-first-boot (design/storage.md §4.5, #291): if the
+	// previous process prepared a restore, swap the restored identity set into
+	// place NOW — before the bus, before the first OpenStore, before the mesh
+	// CA is loaded — so everything below boots onto it exactly as it would on
+	// any other start. Fatal on failure: a partition holding a prepared
+	// restore that could not be applied must not come up as a fresh cluster
+	// and offer first-run setup over the top of it. The trust and mesh dirs
+	// are resolved here from the same env the sections below read, so the
+	// files land where those sections will look.
+	restoreLayout := storage.RestoreLayout{
+		DataDir:      dataDir,
+		TrustDir:     envOr("RASPUTIN_TRUST_DIR", filepath.Join(dataDir, "trust")),
+		MeshStateDir: envOr("RASPUTIN_MESH_STATE_DIR", filepath.Join(dataDir, "mesh")),
+	}
+	appliedRestore, restored, restoreErr := storage.ApplyPendingRestore(restoreLayout)
+	if restoreErr != nil {
+		log.Fatalf("rasputin-api: %v", restoreErr)
+	}
+	if restored {
+		log.Printf("rasputin-api: RESTORED the identity set from backup generation %s (cluster %q, key %s): %d file(s) put back, %d app volume(s) present in the generation and NOT restored (phase 2). Booting onto the restored identity.",
+			appliedRestore.GenerationID, appliedRestore.ClusterID, appliedRestore.KeyID, len(appliedRestore.Restored), len(appliedRestore.AppVolumesPresent))
+	}
+	if n := storage.SweepRestoreStaging(dataDir); n > 0 {
+		log.Printf("rasputin-api: swept %d abandoned restore staging director(ies)", n)
+	}
+	// A prepared restore ends this process so the unit can start a new one
+	// onto the restored files. The exit is NON-ZERO on purpose: it restarts
+	// under Restart=on-failure as well as Restart=always, and it is the
+	// first deferred call registered so it runs last, after every store
+	// below has closed. See restoreExit.
+	defer restoreExit()
 
 	// NATS bind defaults to 127.0.0.1:4222 (api-local agents only). Operators
 	// federating agents from other nodes set RASPUTIN_NATS_HOST=0.0.0.0
@@ -241,6 +274,14 @@ func main() {
 		log.Fatalf("rasputin-api: storage store: %v", err)
 	}
 	defer backupStore.Close()
+	// The record of a restore this start applied goes into the database it
+	// restored — the one just opened. Idempotent; nothing to do on an
+	// ordinary start.
+	if rep, err := storage.RecordAppliedRestore(ctx, backupStore, dataDir); err != nil {
+		log.Printf("rasputin-api: record applied restore: %v", err)
+	} else if rep != nil {
+		log.Printf("rasputin-api: restore %s from generation %s recorded in the restored database", rep.ID, rep.GenerationID)
+	}
 
 	// Trust material lives at <trustDir>/. Used by:
 	//   - updater.Verifier (root-ca.pem; bundle signatures)
@@ -968,6 +1009,19 @@ func main() {
 	// ingest endpoint the nodes upload sealed volumes to.
 	srv.SetBackupStore(backupStore)
 	srv.SetBackupIngest(backupIngest)
+	// The first-run restore surface. A prepared restore asks the process to
+	// exit: cancel the signal context so the ordinary shutdown runs, and mark
+	// the exit non-zero so the unit restarts it onto the restored identity.
+	srv.SetRestore(&storage.RestoreConfig{
+		NC:         busSrv.Conn(),
+		SelfNodeID: selfNodeID,
+		DataDir:    dataDir,
+		ClusterID:  strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+	}, func() {
+		log.Printf("rasputin-api: a restore is prepared; shutting down to restart onto the restored identity")
+		requestRestoreExit()
+		cancel()
+	})
 
 	// AA-11 DNS forwarding (ADR-0004 §10): reconcile the nameserver's off-zone
 	// forwarding stub from the persisted setting, and hand the api the hook to
@@ -2044,4 +2098,27 @@ func parseIntOr(v string, def int) int {
 		return def
 	}
 	return n
+}
+
+// restoreExitCode is what the process exits with after preparing a restore,
+// so the unit's Restart= policy — on-failure or always — starts it again onto
+// the restored identity. 75 is EX_TEMPFAIL: "try again", which is exactly
+// the instruction.
+const restoreExitCode = 75
+
+var restoreExitRequested atomic.Bool
+
+// requestRestoreExit marks that this process should exit non-zero once its
+// ordinary shutdown has run. Called by the restore handler's restart hook.
+func requestRestoreExit() { restoreExitRequested.Store(true) }
+
+// restoreExit is deferred FIRST in main, so it runs LAST — after every store
+// has closed and every subsystem has stopped — and turns a clean shutdown
+// into the non-zero exit a restart needs. On every other run it does
+// nothing.
+func restoreExit() {
+	if restoreExitRequested.Load() {
+		log.Printf("rasputin-api: exiting %d so the unit restarts this api onto the restored identity", restoreExitCode)
+		os.Exit(restoreExitCode)
+	}
 }
