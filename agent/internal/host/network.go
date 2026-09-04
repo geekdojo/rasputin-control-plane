@@ -17,13 +17,14 @@ import (
 //
 // Once the kernel tells us which IP it would source from, we walk the
 // interface address list to find the IPNet that contains that IP and
-// return its CIDR. The first matching IPv4 prefix wins; IPv6-only nodes
-// fall back to whatever the kernel picked.
+// return its NETWORK prefix (NetworkCIDR). The first matching IPv4 prefix
+// wins; IPv6-only nodes fall back to whatever the kernel picked.
 //
 // This value is published once on agent registration via the node
 // metadata so the controlplane UI can pre-fill the "advertise routes"
 // field on the mesh enroll form. Re-detection on every restart keeps
-// the value fresh as operators move nodes between subnets.
+// the value fresh as operators move nodes between subnets. The host
+// address itself is PrimaryLANIP; this is the subnet it sits in.
 func PrimaryLanCIDR() string {
 	ip := primarySourceIP()
 	if ip == nil {
@@ -84,10 +85,22 @@ func findCIDR(ip net.IP, list addrLister) string {
 			continue
 		}
 		if ipNet.Contains(ip) {
-			return ipNet.String()
+			return NetworkCIDR(ipNet)
 		}
 	}
 	return ""
+}
+
+// NetworkCIDR renders an interface address as its network prefix — the
+// form a route takes. net.Interface.Addrs() hands back the INTERFACE
+// address with the network's mask (192.168.1.149/24), and net.IPNet.String()
+// prints exactly that; but a route is the network (192.168.1.0/24), and
+// `tailscale up --advertise-routes` refuses the other shape outright
+// ("192.168.1.149/24 has non-address bits set; expected 192.168.1.0/24" —
+// e3bench-compute1, 2026-09-04, every operator-driven enroll). Masking the
+// address here is what makes primaryLanCidr a route rather than a location.
+func NetworkCIDR(ipNet *net.IPNet) string {
+	return (&net.IPNet{IP: ipNet.IP.Mask(ipNet.Mask), Mask: ipNet.Mask}).String()
 }
 
 // addrLister is a thin seam over net.InterfaceAddrs so the unit test can

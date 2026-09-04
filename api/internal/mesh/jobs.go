@@ -505,6 +505,8 @@ type EnrollSpec struct {
 // target node's agent, waits for the agent's MeshEnrollAck, and writes
 // the resulting Headscale node id back into mesh_devices.
 //
+//  0. validate — refuse a spec `tailscale up` would refuse, before a key
+//     is minted or the agent touched.
 //  1. mint_key — CreatePreAuthKey for the rasputin-operator user
 //     with the Rasputin tag.
 //  2. dispatch — RPC the agent's mesh.enroll handler with the key + URL.
@@ -513,6 +515,7 @@ func EnrollNodeWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.
 	return jobs.Workflow{
 		Kind: "mesh.enroll_node",
 		Steps: []jobs.WorkflowStep{
+			{Name: "validate", Timeout: 5 * time.Second, Do: enrollValidate()},
 			{Name: "mint_key", Timeout: 10 * time.Second, Do: enrollMintKey(svc)},
 			{Name: "dispatch", Timeout: 30 * time.Second, Do: enrollDispatch(svc, inv)},
 			{Name: "record", Timeout: 5 * time.Second, Do: enrollRecord(svc, nc)},
@@ -556,6 +559,32 @@ func enrollSessionFrom(sc *jobs.StepCtx, priorStep string) (*enrollSession, erro
 		return parseEnrollSession(raw)
 	}
 	return parseEnrollSession(sc.Spec)
+}
+
+// enrollValidate fails the job on a spec the agent's `tailscale up` would
+// fail on anyway — but here, before a preauth key is minted and before the
+// agent has installed the mesh CA and restarted tailscaled for nothing.
+// Today that is an advertised route that is not a canonical network
+// (192.168.1.149/24 for 192.168.1.0/24; e3bench-compute1 2026-09-04, where
+// the enroll-defaults suggestion itself carried the host form). The
+// operator's value is refused with the canonical form named, never
+// rewritten: a route someone typed is theirs to correct. The auto-enroll
+// paths (the onNodeAdded hook, converge_enrollment, converge_trust and the
+// setup wizard's self-enroll) submit no routes and pass through untouched.
+func enrollValidate() jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		s, err := parseEnrollSession(sc.Spec)
+		if err != nil {
+			return nil, err
+		}
+		if err := ValidateAdvertiseRoutes(s.AdvertiseRoutes); err != nil {
+			return nil, err
+		}
+		if len(s.AdvertiseRoutes) > 0 {
+			sc.Log("info", fmt.Sprintf("advertising %s from %s", strings.Join(s.AdvertiseRoutes, ", "), s.NodeID))
+		}
+		return json.Marshal(s)
+	}
 }
 
 func enrollMintKey(svc *Service) jobs.DoFn {

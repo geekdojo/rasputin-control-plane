@@ -57,8 +57,8 @@ func TestLANAddress_ReturnsTheLANNotTheDefaultRoute(t *testing.T) {
 	if ip != "192.168.1.1" {
 		t.Errorf("ip = %q, want the LAN address 192.168.1.1", ip)
 	}
-	if cidr != "192.168.1.1/24" {
-		t.Errorf("cidr = %q, want 192.168.1.1/24 (host address + prefix, matching PrimaryLanCIDR)", cidr)
+	if cidr != "192.168.1.0/24" {
+		t.Errorf("cidr = %q, want the NETWORK 192.168.1.0/24 (a route, matching PrimaryLanCIDR), not the interface address", cidr)
 	}
 	if len(r.calls) == 0 || !strings.Contains(r.calls[0], "network.lan.device") {
 		t.Errorf("expected the modern `device` key to be asked first, calls: %v", r.calls)
@@ -90,8 +90,25 @@ func TestLANAddress_PrefersIPv4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lanAddress: %v", err)
 	}
-	if ip != "192.168.1.1" || cidr != "192.168.1.1/24" {
+	if ip != "192.168.1.1" || cidr != "192.168.1.0/24" {
 		t.Errorf("got %q / %q, want the IPv4", ip, cidr)
+	}
+}
+
+// The cidr must be the network even when the LAN address is nowhere near the
+// bottom of the range and the prefix does not fall on an octet boundary —
+// the ip keeps the host address, the cidr loses it.
+func TestLANAddress_CIDRIsTheNetworkNotTheAddress(t *testing.T) {
+	r := &stubRunner{values: map[string]string{"network.lan.device": "br-lan"}}
+	ip, cidr, err := lanAddress(context.Background(), r, addrs("10.20.37.9/20"))
+	if err != nil {
+		t.Fatalf("lanAddress: %v", err)
+	}
+	if ip != "10.20.37.9" {
+		t.Errorf("ip = %q, want the host address 10.20.37.9", ip)
+	}
+	if cidr != "10.20.32.0/20" {
+		t.Errorf("cidr = %q, want the network 10.20.32.0/20", cidr)
 	}
 }
 

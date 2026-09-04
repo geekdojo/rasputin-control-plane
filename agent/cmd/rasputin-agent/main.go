@@ -778,7 +778,10 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 		// Carried in Metadata rather than as a top-level field so the
 		// shared proto.NodeRegisteredEvt stays small / additive: anything
 		// that needs the value reads metadata["primaryLanCidr"]. The api's
-		// mesh enroll-defaults endpoint surfaces it to the UI.
+		// mesh enroll-defaults endpoint surfaces it to the UI as the
+		// suggested advertise route, so it is the NETWORK (192.168.1.0/24),
+		// never this node's address with a mask — the top-level LANIP
+		// carries the address.
 		meta["primaryLanCidr"] = cidr
 	}
 	// Configuration faults ride along on every registration, so a node that
