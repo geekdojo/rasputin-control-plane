@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -18,10 +19,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
 )
 
@@ -61,10 +64,20 @@ import (
 //     target; and the private key appears in no log line, no ledger row and
 //     no report.
 //
-// What it does NOT prove, said plainly: app data. Phase 1 restores the
-// identity set; every app volume in the generation is named as present and
-// not restored, and this test asserts that naming. The app-data half of #300
-// waits on the phase-2 reverse transport.
+// And the app-data half (#291 phase 2, which is what closes #300): the
+// harness deploys an app with a `critical` volume holding known bytes, the
+// same backup.run captures it — the fake agent stages a real tar of the
+// real directory, seals it on its node with the real seal and uploads it
+// through the real transport to the real ingest — the live volume is then
+// CORRUPTED, and the app's data is restored from the generation with the
+// recovered key: the real backup.restore_app saga, the real restore-stream
+// endpoint unsealing the member, the real client fetching it and the real
+// fsat unpack putting it back. It asserts the volume's bytes are the bytes
+// that were backed up, the app was stopped and restarted around the swap,
+// the record names the volume, and the key and the credential reached no
+// log line, ledger row or report. What the fake agent stands in for is the
+// container runtime and the atomic exchange; the agent module's own tests
+// hold those (quiesce/restore_test.go), against the docker mock.
 
 // recoveryVector is testdata/recovery-code-vector.json.
 type recoveryVector struct {
@@ -220,7 +233,25 @@ func TestRestoreRoundTrip(t *testing.T) {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-	h := newRunHarness(t, nil, runHarnessOpts{key: &key, keyID: vec.KeyID})
+	// The app: one `critical` volume of known bytes on the controlplane
+	// node, backed by a real directory the fake agent stages for real.
+	volDir := filepath.Join(t.TempDir(), "vaultwarden-data")
+	if err := os.MkdirAll(filepath.Join(volDir, "attachments"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(volDir, "db.sqlite3"), "SQLite format 3\x00 the vault "+strings.Repeat("row ", 4000))
+	writeTestFile(t, filepath.Join(volDir, "rsa_key.pem"), "-----BEGIN RSA PRIVATE KEY-----\nVAULT\n")
+	writeTestFile(t, filepath.Join(volDir, "attachments", "note.txt"), "an attachment")
+	appRow := testApp("app-vw", "vaultwarden", runNodeID, "vaultwarden")
+	h := newRunHarness(t, nil, runHarnessOpts{
+		key: &key, keyID: vec.KeyID,
+		apps:          []*apps.App{appRow},
+		tiles:         fakeTiles{"vaultwarden": testTile("vaultwarden", vol("vaultwarden-data", tileschema.BackupCritical, tileschema.QuiesceStop))},
+		stageOutcomes: map[string]stageOutcome{"vaultwarden-data": {dir: volDir, interrupting: true, consistency: proto.BackupConsistencyCleanShutdown}},
+		restore:       true,
+	})
+	h.agent.registerVolume(appRow.ID, "vaultwarden-data", volDir)
+	volumeBefore := dirSnapshot(t, volDir)
 	// The marker the claim would have written, so the restore's custody check
 	// has the disk's own public key to compare against.
 	marker := proto.StorageBackupSet{
@@ -474,5 +505,106 @@ func TestRestoreRoundTrip(t *testing.T) {
 		if strings.Contains(text, key.privateB64()) || strings.Contains(text, key.privateHex()) || strings.Contains(text, vec.RecoveryCode) {
 			t.Fatalf("custody material reached the %s", name)
 		}
+	}
+
+	// --- the app-data half (#291 phase 2, #300) -----------------------------
+	// The generation holds the app's volume, captured for real.
+	var volRec *VolumeRecord
+	for i := range manifest.AppVolumes.Volumes {
+		if manifest.AppVolumes.Volumes[i].Volume == "vaultwarden-data" {
+			volRec = &manifest.AppVolumes.Volumes[i]
+		}
+	}
+	if volRec == nil || !volRec.Captured || volRec.Member == "" {
+		t.Fatalf("the generation does not hold the app's volume: %+v", manifest.AppVolumes)
+	}
+	if len(latest.AppVolumesPresent) != 1 || latest.AppVolumesPresent[0].Name != "vaultwarden/vaultwarden-data" {
+		t.Fatalf("the identity restore did not name the volume as present and not restored: %+v", latest.AppVolumesPresent)
+	}
+	// The live volume is corrupted: the database emptied, the key gone, a
+	// stray file present. Nothing has restored it — the identity restore
+	// leaves app volumes alone, by design.
+	writeTestFile(t, filepath.Join(volDir, "db.sqlite3"), "")
+	if err := os.Remove(filepath.Join(volDir, "rsa_key.pem")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(volDir, "ransom.txt"), "your files")
+	if fmt.Sprint(dirSnapshot(t, volDir)) == fmt.Sprint(volumeBefore) {
+		t.Fatal("the corruption did nothing; the test would prove nothing")
+	}
+	// The restored database was snapshotted BY the run, mid-run, so it holds
+	// that run's own row as `running`; the api's start reconciles it against
+	// the job ledger (main.go → ReconcileStrandedRuns), and so does this.
+	if err := ReconcileStrandedRuns(ctx, restoredStore, h.jobStore); err != nil {
+		t.Fatal(err)
+	}
+	// The restore records into the RESTORED database, like everything else
+	// after the identity came back; the workflow is re-registered on it.
+	restoredCfg := h.restoreCfg
+	restoredCfg.Store = restoredStore
+	h.runner.Register(RestoreAppWorkflow(restoredStore, restoredCfg))
+	// The operator's choice, with the recovered key lent once more — the
+	// browser's restore-only unwrap, in Go, the same as above.
+	priv2 := openRecoveryCodeWrapping(t, vec.KeyID, vec.WrappedByRecoveryCode, vec.RecoveryCode)
+	sid, err := h.sessions.Open(priv2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range priv2 {
+		priv2[i] = 0
+	}
+	spec, _ := json.Marshal(RestoreAppSpec{AppID: appRow.ID, PartUUID: runPartUUID, GenerationID: run.GenerationID, KeyID: vec.KeyID, SessionID: sid})
+	rjob, err := h.runner.Submit(ctx, RestoreAppJobKind, spec, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.sessions.Bind(sid, rjob.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := h.waitTerminal(t, rjob.ID)
+	if done.Status != jobs.StatusSucceeded {
+		t.Fatalf("backup.restore_app %s: %s", done.Status, done.Error)
+	}
+	// 7. The volume's bytes are the bytes that were backed up.
+	if got := dirSnapshot(t, volDir); fmt.Sprint(got) != fmt.Sprint(volumeBefore) {
+		t.Fatalf("the restored volume is not the backup:\n got  %v\n want %v", got, volumeBefore)
+	}
+	// 8. The app was stopped once and restarted once around the swap, and
+	//    the ack says so.
+	calls := h.agent.restoreCalls()
+	if len(calls) != 1 || !calls[0].ack.OK || !calls[0].ack.Replaced || !calls[0].ack.Stopped || !calls[0].ack.AppRestored || calls[0].ack.RestoredBy != "driver" {
+		t.Fatalf("restore verb: %+v", calls)
+	}
+	if stops, starts := h.agent.quiesceCounts(); stops != 1 || starts != 1 {
+		t.Fatalf("stops=%d starts=%d", stops, starts)
+	}
+	if calls[0].cmd.PlaintextDigest != volRec.SHA256 || calls[0].cmd.PlaintextBytes != volRec.SizeBytes {
+		t.Fatalf("the node was handed %s/%d; the manifest recorded %s/%d", calls[0].cmd.PlaintextDigest, calls[0].cmd.PlaintextBytes, volRec.SHA256, volRec.SizeBytes)
+	}
+	// 9. The record, per volume, in the restored database's restore_reports.
+	appRep, err := restoredStore.LatestRestore(ctx)
+	if err != nil || appRep == nil || appRep.Phase != RestorePhaseAppVolumes || appRep.JobID != rjob.ID {
+		t.Fatalf("app restore record: %v %+v", err, appRep)
+	}
+	if len(appRep.AppVolumes) != 1 || !appRep.AppVolumes[0].Restored || appRep.AppVolumes[0].Volume != "vaultwarden-data" || appRep.AppVolumes[0].SHA256 != volRec.SHA256 || !appRep.AppVolumes[0].Stopped || !appRep.AppVolumes[0].AppRestored {
+		t.Fatalf("app restore record volumes: %+v", appRep.AppVolumes)
+	}
+	// 10. The key and the credential are nowhere.
+	cred := h.agent.credentials.get("restore:vaultwarden-data")
+	if cred == "" {
+		t.Fatal("no credential was handed to the node")
+	}
+	rledger := h.ledgerText(t, rjob.ID)
+	arj, _ := json.Marshal(appRep)
+	for name, text := range map[string]string{"restore job ledger": rledger, "log": logs.String(), "app restore record": string(arj)} {
+		if strings.Contains(text, key.privateB64()) || strings.Contains(text, key.privateHex()) || strings.Contains(text, vec.RecoveryCode) {
+			t.Fatalf("custody material reached the %s", name)
+		}
+		if strings.Contains(text, cred) {
+			t.Fatalf("the restore credential reached the %s", name)
+		}
+	}
+	if _, active := h.sessions.Active(); active {
+		t.Fatal("the restore session outlived the job")
 	}
 }

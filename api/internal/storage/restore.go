@@ -238,8 +238,12 @@ type NotRestoredItem struct {
 // No field here carries key material, and none can be added: this struct is
 // persisted and served.
 type RestoreReport struct {
-	ID    string `json:"id"`
+	ID string `json:"id"`
+	// Phase is RestorePhase (identity, phase 1) or RestorePhaseAppVolumes
+	// (one app's data, phase 2). JobID is the saga for a phase-2 restore;
+	// phase 1 has none.
 	Phase string `json:"phase"`
+	JobID string `json:"jobId,omitempty"`
 	// The generation, as its manifest described it.
 	GenerationID        string    `json:"generationId"`
 	GenerationCreatedAt time.Time `json:"generationCreatedAt"`
@@ -265,6 +269,12 @@ type RestoreReport struct {
 	AppVolumesPresent []AppVolumeMention `json:"appVolumesPresent"`
 	// AppVolumesAbsent names every classified volume the run did not capture.
 	AppVolumesAbsent []AppVolumeMention `json:"appVolumesAbsent"`
+	// AppID, AppName and AppVolumes are a phase-2 report's own: which app,
+	// and every volume the restore considered — restored, failed or
+	// skipped, each with its reason and the restart facts.
+	AppID      string                   `json:"appId,omitempty"`
+	AppName    string                   `json:"appName,omitempty"`
+	AppVolumes []AppVolumeRestoreRecord `json:"appVolumes,omitempty"`
 	// Warning is the standing caveat, in prose, for a reader who has this
 	// record and nothing else.
 	Warning    string     `json:"warning"`

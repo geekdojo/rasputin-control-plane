@@ -137,6 +137,11 @@ type RunConfig struct {
 	// consumer: the terminal hook has to close the ingest generation and
 	// remove its partial directory on a run that never reached the write.
 	generation *stagingRootRef
+	// Restores is the app-volume restore registry (#291 phase 2). Step 1
+	// refuses to start a run while a restore holds a session: the run's
+	// prune could delete the generation the restore is reading. Nil means
+	// no restore surface is wired and nothing is checked.
+	Restores *RestoreSessions
 }
 
 // stagingRootRef carries the agent-reported staging root from step 2 to
@@ -432,6 +437,11 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 			}
 		}
 
+		if cfg.Restores != nil {
+			if jobID, active := cfg.Restores.Active(); active {
+				return nil, fmt.Errorf("%w (restore job %s). Wait for it to finish", ErrRestoreActive, jobID)
+			}
+		}
 		claimed, err := store.ListClaimed(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("claimed targets: %w", err)
