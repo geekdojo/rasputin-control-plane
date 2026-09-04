@@ -46,6 +46,7 @@ func TestReplyGrantOutlivesEveryAgentWorkBudget(t *testing.T) {
 		{"backup stage-volume context", BackupStageWork},
 		{"backup unstage context", BackupUnstageWork},
 		{"backup transfer context", BackupTransferWork},
+		{"backup restore-volume context", BackupRestoreVolumeWork},
 	}
 	for _, b := range budgets {
 		if BusReplyGrantTTL <= b.budget {
