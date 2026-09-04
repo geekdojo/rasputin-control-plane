@@ -234,16 +234,20 @@ export default function AppsPage() {
             </tbody>
           </table>
         )}
-      </PageBody>
 
-      {orphans && (orphans.volumes.length > 0 || orphans.unreachable.length > 0) && (
-        <OrphanedVolumes
-          orphans={orphans}
-          busy={busy}
-          note={reclaimNote}
-          onReclaim={(g) => setPendingReclaim(g)}
-        />
-      )}
+        {/* Inside PageBody with the apps table, not beside it: PageBody is
+            what supplies the page's padding and its scroll region, so a
+            sibling rendered flush against the content edge with RECLAIM
+            clipped by the shell's overflow (e3bench, 2026-09-04). */}
+        {orphans && (orphans.volumes.length > 0 || orphans.unreachable.length > 0) && (
+          <OrphanedVolumes
+            orphans={orphans}
+            busy={busy}
+            note={reclaimNote}
+            onReclaim={(g) => setPendingReclaim(g)}
+          />
+        )}
+      </PageBody>
 
       {detail && <AppDetail app={detail} clusterId={clusterId} onClose={() => setDetail(null)} />}
 
