@@ -108,7 +108,7 @@ func Unpack(dst *os.File, r io.Reader, b UnpackBounds) (*UnpackResult, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%w: reading the tar: %v", ErrUnpackRefused, err)
+			return nil, fmt.Errorf("%w: reading the tar: %w", ErrUnpackRefused, err)
 		}
 		entries++
 		if entries > b.MaxEntries {
@@ -159,7 +159,7 @@ func Unpack(dst *os.File, r io.Reader, b UnpackBounds) (*UnpackResult, error) {
 				_ = parent.Close()
 			}
 			if werr != nil {
-				return nil, fmt.Errorf("%w: %s: %v", ErrUnpackRefused, clean, werr)
+				return nil, fmt.Errorf("%w: %s: %w", ErrUnpackRefused, clean, werr)
 			}
 			res.Files++
 			res.Bytes += size
@@ -173,7 +173,7 @@ func Unpack(dst *os.File, r io.Reader, b UnpackBounds) (*UnpackResult, error) {
 	// (padding to a block boundary, which the writer emits) is part of the
 	// stream the manifest hashed, so it is read too.
 	if _, err := io.Copy(io.Discard, counter); err != nil {
-		return nil, fmt.Errorf("%w: reading past the archive's end: %v", ErrUnpackRefused, err)
+		return nil, fmt.Errorf("%w: reading past the archive's end: %w", ErrUnpackRefused, err)
 	}
 	res.Digest = hex.EncodeToString(digest.Sum(nil))
 	res.StreamBytes = counter.n
