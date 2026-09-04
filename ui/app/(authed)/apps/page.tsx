@@ -1,6 +1,6 @@
 'use client';
 
-import { ClipboardList, Database, ExternalLink, Package, Play, Plus, Square, Trash2, UploadCloud } from 'lucide-react';
+import { ClipboardList, Database, ExternalLink, Package, Play, Plus, RotateCcw, Square, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
@@ -40,6 +40,7 @@ import {
   thStyle,
 } from '../../../components/kit';
 import { UninstallAppModal, type UninstallVolumeRow } from '../../../components/UninstallAppModal';
+import { RestoreAppDataModal } from '../../../components/RestoreAppDataModal';
 import { ACCENT, MONO } from '../../../components/ui-theme';
 
 // Fixed column widths so the table doesn't reflow as per-row action buttons
@@ -413,6 +414,10 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
   const [exposeLan, setExposeLan] = useState(app.exposeLan ?? false);
   const [exposureBusy, setExposureBusy] = useState(false);
   const [exposureNote, setExposureNote] = useState<string | null>(null);
+  // "Restore data from a backup…" (geekdojo/geekdojo-brain#291 phase 2):
+  // explicit, per app, never automatic. Offered only for an app installed
+  // from a tile, because only a tile classifies the volumes a backup holds.
+  const [restoreOpen, setRestoreOpen] = useState(false);
 
   useEffect(() => {
     if (app.sourceTile) getCatalogTile(app.sourceTile).then(setTile).catch(() => {});
@@ -550,6 +555,21 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
           </Hint>
         </div>
 
+        {app.sourceTile && (
+          <div>
+            <SectionLabel>DATA</SectionLabel>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <Btn small aria-label={`Restore data of ${app.name} from a backup`} onClick={() => setRestoreOpen(true)}>
+                <RotateCcw size={10} /> RESTORE DATA FROM A BACKUP…
+              </Btn>
+            </div>
+            <Hint style={{ marginTop: 6 }}>
+              Puts this app&apos;s volumes back from a backup generation you choose, replacing what it holds now. Nothing is
+              restored automatically, and you confirm what is replaced before anything is stopped.
+            </Hint>
+          </div>
+        )}
+
         {tile?.postInstall && (
           <div>
             <SectionLabel>FIRST RUN</SectionLabel>
@@ -577,6 +597,7 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
       <div style={{ borderTop: `1px solid ${HAIR}`, padding: '14px 20px' }}>
         <LinkBtn href="/app-catalog">BACK TO CATALOG</LinkBtn>
       </div>
+      {restoreOpen && <RestoreAppDataModal app={app} onClose={() => setRestoreOpen(false)} />}
     </Drawer>
   );
 }

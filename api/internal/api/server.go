@@ -47,8 +47,12 @@ type Server struct {
 	// #291); nil keeps its routes at 503. restoreRestart is what a prepared
 	// restore calls to have the process exit and come back on the restored
 	// identity — main.go's shutdown, so the unit restarts it.
-	restore             *storage.RestoreConfig
-	restoreRestart      func()
+	restore        *storage.RestoreConfig
+	restoreRestart func()
+	// appRestore and restoreEgress are the app-volume restore surface
+	// (design/storage.md §4.5 phase 2, #291); nil keeps their routes at 503.
+	appRestore          *storage.RestoreAppConfig
+	restoreEgress       *storage.RestoreEgress
 	bundleDir           string
 	trustDir            string
 	mesh                *mesh.Service
@@ -291,6 +295,10 @@ func (s *Server) Handler() http.Handler {
 	// geekdojo/geekdojo-brain#399: the uninstall prompt's facts, and the path
 	// for volumes earlier uninstalls left behind.
 	mux.HandleFunc("GET /api/apps/{id}/volumes", reqd(s.handleAppVolumes))
+	// geekdojo/geekdojo-brain#291 phase 2: restore one app's data from a
+	// backup generation. Explicit, per app, operator-initiated.
+	mux.HandleFunc("GET /api/apps/{id}/restore-sources", reqd(s.handleAppRestoreSources))
+	mux.HandleFunc("POST /api/apps/{id}/restore", reqd(s.handleAppRestore))
 	mux.HandleFunc("GET /api/volumes/orphans", reqd(s.handleListOrphanVolumes))
 	mux.HandleFunc("POST /api/volumes/orphans/reclaim", reqd(s.handleReclaimOrphanVolumes))
 	mux.HandleFunc("GET /api/catalog", reqd(s.handleListCatalog))
@@ -338,6 +346,12 @@ func (s *Server) Handler() http.Handler {
 	// list, overwrite or reach another generation. 503 until main wires an
 	// endpoint, exactly like the other backup routes without a ledger.
 	mux.HandleFunc("PUT "+backupxfer.IngestPathPrefix, s.handleBackupIngest)
+	// The restore EGRESS endpoint is the ingest's mirror and is likewise not
+	// behind the session middleware: its caller is a node's agent presenting
+	// the per-member restore credential the backup.restore_app saga minted.
+	// It serves ONE member of the one generation a restore has open, unsealed
+	// here — the key never leaves this process — and nothing else.
+	mux.HandleFunc("GET "+backupxfer.EgressPathPrefix, s.handleRestoreEgress)
 	mux.HandleFunc("GET /api/backup/runs", reqd(s.handleListBackupRuns))
 	mux.HandleFunc("POST /api/backup/runs", reqd(s.handleStartBackupRun))
 	mux.HandleFunc("GET /api/backup/restores", reqd(s.handleListRestores))

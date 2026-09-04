@@ -661,7 +661,32 @@ func main() {
 	// design/storage.md §4.7's backpressure. One by default: the fan-out is
 	// serial and the target may be spinning media.
 	backupIngest := backupxfer.New(backupAuthority, parseIntOr(os.Getenv("RASPUTIN_BACKUP_INGEST_CONCURRENCY"), backupxfer.DefaultConcurrency))
+	// backup.restore_app — design/storage.md §4.5's restore, phase 2 (#291):
+	// one app's classified volumes, from one generation, back to the node
+	// that hosts the app. The operator's browser lends the archive's private
+	// key for one restore; it lives in restoreSessions, in memory, never in
+	// a job spec, and dies with the job. The api unseals each member and
+	// streams the PLAINTEXT tar to the hosting node from restoreEgress on a
+	// credential signed by the SAME authority as the upload credentials,
+	// with a Use the ingest refuses. backup.run refuses to start while a
+	// restore holds a session, and a restore refuses while a run is in
+	// flight: one party on the target at a time.
+	restoreSessions := storage.NewRestoreSessions()
+	restoreEgress := storage.NewRestoreEgress(backupAuthority, restoreSessions)
+	appRestoreCfg := storage.RestoreAppConfig{
+		NC:            busSrv.Conn(),
+		SelfNodeID:    selfNodeID,
+		Apps:          appsStore,
+		Tiles:         catalogStore,
+		Inventory:     invStore,
+		Sessions:      restoreSessions,
+		Egress:        restoreEgress,
+		EgressBaseURL: publicBaseURL,
+		Store:         backupStore,
+	}
+	runner.Register(storage.RestoreAppWorkflow(backupStore, appRestoreCfg))
 	runner.Register(storage.RunWorkflow(backupStore, storage.RunConfig{
+		Restores:  restoreSessions,
 		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
 		// The transport: the endpoint members land at, and the URL the
 		// nodes are handed for it — the same public base the update
@@ -1009,6 +1034,9 @@ func main() {
 	// ingest endpoint the nodes upload sealed volumes to.
 	srv.SetBackupStore(backupStore)
 	srv.SetBackupIngest(backupIngest)
+	// The app-volume restore surface (#291 phase 2): the listing and the
+	// custody-checked submit, and the egress endpoint the nodes fetch from.
+	srv.SetAppRestore(&appRestoreCfg, restoreEgress)
 	// The first-run restore surface. A prepared restore asks the process to
 	// exit: cancel the signal context so the ordinary shutdown runs, and mark
 	// the exit non-zero so the unit restarts it onto the restored identity.

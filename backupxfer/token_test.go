@@ -119,3 +119,34 @@ func TestGrantShapeIsEnforcedAtMint(t *testing.T) {
 		}
 	}
 }
+
+// A grant's Use is signed with the rest and closed: upload (empty) or restore.
+func TestCredentialUseIsSignedAndClosed(t *testing.T) {
+	a, _ := NewAuthority()
+	g := testGrant()
+	g.Use = UseRestore
+	tok, err := a.Mint(g, RestoreCredentialTTL)
+	if err != nil {
+		t.Fatalf("Mint restore: %v", err)
+	}
+	got, err := a.Verify(tok)
+	if err != nil || !got.ForRestore() || got.ForUpload() {
+		t.Fatalf("Verify: %+v %v", got, err)
+	}
+	up, _ := a.Mint(testGrant(), CredentialTTL)
+	if got, err := a.Verify(up); err != nil || !got.ForUpload() || got.ForRestore() {
+		t.Fatalf("upload grant: %+v %v", got, err)
+	}
+	g.Use = "list"
+	if _, err := a.Mint(g, CredentialTTL); err == nil {
+		t.Fatal("an unknown use was minted")
+	}
+	// A use edited into the payload after signing does not verify.
+	parts := strings.Split(tok, ".")
+	body, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	edited := strings.Replace(string(body), `"use":"restore"`, `"use":""`, 1)
+	forged := parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(edited)) + "." + parts[2]
+	if _, err := a.Verify(forged); !errors.Is(err, ErrCredentialSignature) {
+		t.Fatalf("edited use verified: %v", err)
+	}
+}

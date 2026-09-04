@@ -272,6 +272,15 @@ func (i *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusUnauthorized, CodeCredentialInvalid, "the upload credential does not verify")
 		return
 	}
+	if !grant.ForUpload() {
+		// A restore credential. Valid, signed by this authority, and for
+		// the other direction: it may fetch a member and must never land
+		// one. Refused before its scope is even compared.
+		i.logf("backup ingest: restore credential %s (%s/%s, node %s) presented to the ingest endpoint — refused",
+			grant.ID(), grant.Generation, grant.Member, grant.NodeID)
+		refuse(w, http.StatusForbidden, CodeCredentialScope, "that is a restore credential; the ingest endpoint takes upload credentials only")
+		return
+	}
 	if grant.Generation != generation || grant.Member != member {
 		// Valid, and not for this. A credential names one member, and this
 		// is where "cannot upload a second volume on the first volume's

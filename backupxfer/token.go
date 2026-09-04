@@ -61,6 +61,10 @@ const tokenPrefix = "rbx1"
 // credential is dead within it whether or not anything else happens.
 const CredentialTTL = proto.BackupTransferWork + 5*time.Minute
 
+// maxCredentialTTL is the longest life Mint will grant a credential of either
+// kind: the larger of the upload and restore windows.
+const maxCredentialTTL = max(CredentialTTL, RestoreCredentialTTL)
+
 // clockSkew is how far into the future a grant's IssuedAt may sit before it is
 // refused as not-yet-valid. Both ends are on one LAN with one NTP source; a
 // minute is generous.
@@ -88,7 +92,19 @@ type Grant struct {
 	// Nonce makes two grants for the same member distinguishable in a log
 	// (a retry after a stalled upload mints a fresh one).
 	Nonce string `json:"n"`
+	// Use says which endpoint honours the credential: "" (absent) is an
+	// UPLOAD credential for the ingest endpoint, UseRestore a DOWNLOAD
+	// credential for the restore-stream endpoint (#291 phase 2). Each
+	// endpoint refuses the other's, so a leaked credential of either kind
+	// cannot be turned into the other capability. Signed with the rest.
+	Use string `json:"use,omitempty"`
 }
+
+// ForUpload reports whether the grant is an upload credential.
+func (g Grant) ForUpload() bool { return g.Use == "" }
+
+// ForRestore reports whether the grant is a restore (download) credential.
+func (g Grant) ForRestore() bool { return g.Use == UseRestore }
 
 // ID is a short, publishable name for the grant — the nonce. Safe in a log
 // line or a ledger row; it is not the credential and cannot be turned into one.
@@ -141,8 +157,11 @@ func (a *Authority) Mint(g Grant, ttl time.Duration) (string, error) {
 	if g.MaxBytes == 0 {
 		return "", errors.New("backupxfer: a grant bounds what it may write; MaxBytes is zero")
 	}
-	if ttl <= 0 || ttl > CredentialTTL {
-		return "", fmt.Errorf("backupxfer: credential ttl %s is outside (0, %s]", ttl, CredentialTTL)
+	if g.Use != "" && g.Use != UseRestore {
+		return "", fmt.Errorf("backupxfer: a grant's use is upload (empty) or %q, not %q", UseRestore, g.Use)
+	}
+	if ttl <= 0 || ttl > maxCredentialTTL {
+		return "", fmt.Errorf("backupxfer: credential ttl %s is outside (0, %s]", ttl, maxCredentialTTL)
 	}
 	nonce := make([]byte, 12)
 	if _, err := rand.Read(nonce); err != nil {
@@ -200,7 +219,8 @@ func (a *Authority) Verify(token string) (Grant, error) {
 		return g, ErrCredentialNotYet
 	}
 	if !proto.BackupValidGenerationID(g.Generation) || !proto.BackupValidMemberPath(g.Member) ||
-		strings.TrimSpace(g.NodeID) == "" || strings.TrimSpace(g.JobID) == "" || g.MaxBytes == 0 {
+		strings.TrimSpace(g.NodeID) == "" || strings.TrimSpace(g.JobID) == "" || g.MaxBytes == 0 ||
+		(g.Use != "" && g.Use != UseRestore) {
 		return g, ErrGrantShape
 	}
 	return g, nil

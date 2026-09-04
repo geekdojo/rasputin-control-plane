@@ -1373,13 +1373,103 @@ export interface RestoreReport {
   sealedBytes: number;
   restored: RestoredEntry[];
   notRestored: NotRestoredItem[];
-  /** PRESENT AND NOT RESTORED: app volumes are a later phase. */
+  /** PRESENT AND NOT RESTORED by an identity restore: app volumes are phase 2's own action. */
   appVolumesPresent: AppVolumeMention[];
   appVolumesAbsent: AppVolumeMention[];
+  /** A phase-2 (app-volumes) report's own: which app, the job, and every volume considered. */
+  jobId?: string;
+  appId?: string;
+  appName?: string;
+  appVolumes?: AppVolumeRestoreRecord[];
   warning: string;
   preparedAt: string;
   appliedAt?: string;
   recordedAt?: string;
+}
+
+// ----- Restoring one app's data (design/storage.md §4.5 phase 2, #291) -------
+
+/** One volume of an app restore: restored, or failed/skipped with its reason and the restart facts. */
+export interface AppVolumeRestoreRecord {
+  app: string;
+  appId?: string;
+  volume: string;
+  class?: string;
+  node?: string;
+  capturedFrom?: string;
+  member?: string;
+  restored: boolean;
+  failed: boolean;
+  reason?: string;
+  sizeBytes?: number;
+  sha256?: string;
+  fileCount?: number;
+  consistency?: string;
+  wasRunning: boolean;
+  stopped: boolean;
+  downtimeMillis?: number;
+  appRestored: boolean;
+  restoreDetail?: string;
+  previousKept?: string;
+}
+
+/** One of an app's volumes as one generation holds it, with the plan's verdict for it today. */
+export interface AppRestoreVolumeView {
+  volume: string;
+  class: string;
+  sizeBytes: number;
+  fileCount: number;
+  capturedFrom?: string;
+  consistency?: string;
+  restorable: boolean;
+  reason?: string;
+}
+
+/** One generation as it concerns one app. */
+export interface AppRestoreGeneration {
+  id: string;
+  createdAt: string;
+  ageHuman: string;
+  scope?: BackupScope;
+  complete: boolean;
+  keyId?: string;
+  volumes: AppRestoreVolumeView[];
+  /** "appId", or "tile+name" when the app was reinstalled since the backup. */
+  matchedBy: string;
+  restorable: boolean;
+  problem?: string;
+}
+
+/** GET /api/apps/{id}/restore-sources. */
+export interface AppRestoreSources {
+  appId: string;
+  appName: string;
+  tileId?: string;
+  installed: boolean;
+  nodeId?: string;
+  nodeOnline: boolean;
+  target?: BackupTarget;
+  /** The disk's marker: identifiers, the public key, the two wrapped copies the browser unwraps. */
+  marker?: StorageBackupSet;
+  declaredVolumes: { name: string; backup: string; quiesce: string }[];
+  generations: AppRestoreGeneration[];
+  problem?: string;
+}
+
+/** POST /api/apps/{id}/restore. The private key transits ONCE, over TLS, for one restore. */
+export interface AppRestoreRequest {
+  partUuid: string;
+  generationId: string;
+  keyId: string;
+  /** base64url of the 32-byte X25519 private key. */
+  privateKey: string;
+  volumes?: string[];
+}
+
+/** POST /api/apps/{id}/restore's 202: the job that carries the restore. */
+export interface AppRestoreResponse {
+  job: Job;
+  detail: string;
 }
 
 /** POST /api/restore. The private key transits ONCE, over TLS, for one restore. */

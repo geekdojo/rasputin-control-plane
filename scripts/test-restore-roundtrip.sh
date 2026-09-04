@@ -21,8 +21,15 @@
 #      bus tokens; a pre-wipe bus token still validates; the mesh CA and the
 #      Headscale state are byte-identical.
 #
-# Phase 1 restores the IDENTITY SET only. App volumes are recorded present
-# and not restored; the app-data half of #300 waits on phase 2.
+#   6. the app-data half (#291 phase 2): the same run captured an app's
+#      `critical` volume for real (a real tar, sealed on its node, uploaded
+#      through the real transport); the live volume is CORRUPTED; the app's
+#      data is restored from the generation with the recovered key through
+#      the real backup.restore_app saga, the real restore-stream endpoint
+#      (the api unseals) and the real fsat unpack; the bytes match, the app
+#      was stopped and restarted around the swap, the record names the
+#      volume, and neither the key nor the credential reached a log line,
+#      ledger row or report.
 #
 # Runs anywhere `go test` runs — no bench, no hardware, no root. CI runs it
 # with the rest of ./api/...; this script is for running it alone, verbosely,

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -19,8 +20,10 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer/fsat"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
@@ -120,6 +123,12 @@ type fakeBackupAgent struct {
 	credentials *credentialBook
 	// generations is the fake target's contents, oldest first.
 	generations []string
+	// The restore verb's record: where each app's volumes live on this
+	// node, every call answered, and the stop/start counts.
+	volumeDirs map[string]string
+	restores   []restoreCall
+	stops      int
+	starts     int
 }
 
 // credentialBook remembers the credential each volume was handed.
@@ -363,6 +372,15 @@ type runHarness struct {
 	ingest      *backupxfer.Ingest
 	settings    *memorySettings
 	targetJobID string
+	// The app-volume restore surface (#291 phase 2), wired when
+	// opts.restore is set: the session registry, the egress endpoint served
+	// on the SAME socket as the ingest, and the config the workflow was
+	// registered with.
+	sessions   *RestoreSessions
+	egress     *RestoreEgress
+	restoreCfg RestoreAppConfig
+	baseURL    string
+	inv        *inventory.Store
 }
 
 // generationDir is the committed generation's directory on the fake target.
@@ -439,6 +457,13 @@ type runHarnessOpts struct {
 	// produced fixture wrapped. keyID likewise overrides the target's key id.
 	key   *testKeypair
 	keyID string
+	// restore registers backup.restore_app beside backup.run, with the
+	// restore-stream endpoint on the ingest's socket and the fake agents
+	// answering the restore verb (startRestoreAgent).
+	restore bool
+	// restoreOutcomes decides what the fake agents do with each restore,
+	// keyed by volume name.
+	restoreOutcomes map[string]restoreOutcome
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -505,8 +530,11 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		t.Fatal(err)
 	}
 	ingest := backupxfer.New(auth, 1)
+	sessions := NewRestoreSessions()
+	egress := NewRestoreEgress(auth, sessions)
 	mux := http.NewServeMux()
 	mux.Handle("PUT "+backupxfer.IngestPathPrefix, ingest)
+	mux.Handle("GET "+backupxfer.EgressPathPrefix, egress)
 	ingestSrv := httptest.NewServer(mux)
 	t.Cleanup(ingestSrv.Close)
 
@@ -520,11 +548,15 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	agent.credentials = book
 	agent.start(t, nc)
 	agent.startVolumeAgent(t, nc, opts.stageOutcomes)
+	if opts.restore {
+		agent.startRestoreAgent(t, nc, opts.restoreOutcomes)
+	}
 
 	h := &runHarness{
 		nc: nc, store: st, jobStore: js, agent: agent, key: key,
 		stagingDir: stagingDir, trustDir: trustDir, meshDir: meshDir,
 		dbPath: dbPath, mountDir: mountDir, ingest: ingest, settings: newMemorySettings(),
+		sessions: sessions, egress: egress, baseURL: ingestSrv.URL,
 	}
 	if opts.computeAgent {
 		computeStaging := filepath.Join(dir, "compute-state", "backup-staging")
@@ -533,6 +565,9 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		}
 		h.compute = &fakeBackupAgent{nodeID: computeNodeID, stagingRoot: computeStaging, credentials: book}
 		h.compute.startVolumeAgent(t, nc, opts.stageOutcomes)
+		if opts.restore {
+			h.compute.startRestoreAgent(t, nc, opts.restoreOutcomes)
+		}
 	}
 
 	if !opts.noTarget {
@@ -567,6 +602,7 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 			}
 		}
 		cfg.Inventory = inv
+		h.inv = inv
 	}
 	if !opts.noAppSource {
 		tiles := opts.tiles
@@ -576,9 +612,42 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		cfg.Apps = &fakeApps{list: opts.apps, err: opts.appsErr}
 		cfg.Tiles = tiles
 	}
+	if opts.restore {
+		cfg.Restores = sessions
+		h.restoreCfg = RestoreAppConfig{
+			NC: nc, SelfNodeID: self, Apps: &fakeApps{list: opts.apps, err: opts.appsErr}, Tiles: cfg.Tiles,
+			Inventory: h.inv, Sessions: sessions, Egress: egress, EgressBaseURL: ingestSrv.URL, Store: st,
+		}
+		r.Register(RestoreAppWorkflow(st, h.restoreCfg))
+	}
 	r.Register(RunWorkflow(st, cfg))
 	h.runner = r
 	return h
+}
+
+// submitRestore opens a session for the harness's private key, submits a
+// backup.restore_app job for it, binds the two, and returns the job id —
+// the handler's sequence, without the HTTP.
+func (h *runHarness) submitRestore(t *testing.T, spec RestoreAppSpec) string {
+	t.Helper()
+	priv := h.key.priv.Bytes()
+	sid, err := h.sessions.Open(priv)
+	if err != nil {
+		t.Fatalf("sessions.Open: %v", err)
+	}
+	spec.SessionID = sid
+	body, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := h.runner.Submit(context.Background(), RestoreAppJobKind, body, "test")
+	if err != nil {
+		t.Fatalf("Submit restore: %v", err)
+	}
+	if err := h.sessions.Bind(sid, j.ID); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	return j.ID
 }
 
 func writeTestFile(t *testing.T, path, body string) {
@@ -766,6 +835,20 @@ func (f *fakeApps) List(context.Context) ([]*apps.App, error) {
 	return f.list, nil
 }
 
+// Get is AppGetter: the app by id, or nil — the store's own contract for a
+// missing row.
+func (f *fakeApps) Get(_ context.Context, id string) (*apps.App, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	for _, a := range f.list {
+		if a != nil && a.ID == id {
+			return a, nil
+		}
+	}
+	return nil, nil
+}
+
 // fakeTiles is the catalog side of the join, written per test rather than
 // loaded from the shipped catalog. The classification is CONTENT; a saga test
 // that broke every time a tile was re-classed would be testing the content.
@@ -807,6 +890,10 @@ type stagedVolume struct {
 type stageOutcome struct {
 	// body is the volume's content. Empty means a default.
 	body string
+	// dir, when set, is a REAL directory the fake stages as a real tar —
+	// the shape the agent's walk produces — so a restore can put it back
+	// and a test can compare bytes.
+	dir string
 	// refusal, when set, is answered instead of a copy.
 	refusal proto.StorageRefusal
 	detail  string
@@ -894,6 +981,12 @@ func (f *fakeBackupAgent) startVolumeAgent(t *testing.T, nc *nats.Conn, outcomes
 		if body == "" {
 			body = "TAR-OF-" + cmd.Volume
 		}
+		files := 1
+		if out.dir != "" {
+			var n int
+			body, n = tarOfDir(t, out.dir)
+			files = n
+		}
 		path := filepath.Join(f.stagingRoot, cmd.StagingName)
 		if !proto.BackupValidStagingName(cmd.StagingName) {
 			t.Errorf("the api asked for staging name %q, which the real agent would refuse", cmd.StagingName)
@@ -906,7 +999,7 @@ func (f *fakeBackupAgent) startVolumeAgent(t *testing.T, nc *nats.Conn, outcomes
 		ack.StagedPath = path
 		ack.SizeBytes = uint64(len(body))
 		ack.PlaintextBytes = uint64(len(body))
-		ack.FileCount = 1
+		ack.FileCount = files
 		ack.Digest = hex.EncodeToString(sum[:])
 		if out.digest != "" {
 			ack.Digest = out.digest
@@ -1094,4 +1187,227 @@ func errorsAs(err error, target **backupxfer.RefusedError) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+// ----- the restore verb's fake -----------------------------------------------
+
+// restoreOutcome lets a case decide what the fake agent does with a restore.
+type restoreOutcome struct {
+	// refusal, when set, is answered instead of a restore.
+	refusal proto.StorageRefusal
+	detail  string
+	// appRestored false is §4.7's intolerable outcome.
+	appRestored *bool
+	// silent drops the request on the floor — the api's RPC times out or
+	// sees no responder. Used with a short budget.
+	silent bool
+}
+
+// restoreCall is one restore verb the fake answered: the command and the
+// ack, plus what it saw of the stream.
+type restoreCall struct {
+	cmd proto.BackupRestoreVolumeCmd
+	ack proto.BackupRestoreVolumeAck
+}
+
+// tarOfDir writes a deterministic tar of dir's regular files and
+// directories, in walk order — the shape the agent's walk produces — and
+// returns it with the regular-file count.
+func tarOfDir(t *testing.T, dir string) (string, int) {
+	t.Helper()
+	var buf strings.Builder
+	tw := tar.NewWriter(&buf)
+	files := 0
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if rel == "." {
+			return nil
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		hdr.Format = tar.FormatPAX
+		if info.IsDir() {
+			hdr.Name += "/"
+			return tw.WriteHeader(hdr)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		b, err := os.ReadFile(p) //nolint:gosec // G304: the test's own temp dir
+		if err != nil {
+			return err
+		}
+		_, err = tw.Write(b)
+		files++
+		return err
+	})
+	if err != nil {
+		t.Fatalf("tarOfDir: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String(), files
+}
+
+// registerVolume tells the fake agent where an app's volume lives on its
+// node, so the restore verb has a directory to replace.
+func (f *fakeBackupAgent) registerVolume(appID, volume, dir string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.volumeDirs == nil {
+		f.volumeDirs = map[string]string{}
+	}
+	f.volumeDirs[appID+"/"+volume] = dir
+}
+
+func (f *fakeBackupAgent) restoreCalls() []restoreCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]restoreCall(nil), f.restores...)
+}
+
+// startRestoreAgent answers storage.backup_restore_volume the way the real
+// verb does, reduced to the protocol: fetch on the credential with the REAL
+// client (backupxfer.FetcherFor), unpack with the REAL fsat unpack into a
+// staging tree beside the volume, verify the stream's length and digest
+// against the command, then "stop" the app, exchange the trees, "start" it.
+// The runtime is the fake — stop and start are counters — and the exchange
+// is two renames, which is what a fake may do and the agent may not; the
+// agent module's own tests hold the atomic exchange and the watchdog.
+func (f *fakeBackupAgent) startRestoreAgent(t *testing.T, nc *nats.Conn, outcomes map[string]restoreOutcome) {
+	t.Helper()
+	respond := func(m *nats.Msg, v any) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Errorf("fake restore agent marshal: %v", err)
+			return
+		}
+		_ = m.Respond(b)
+	}
+	sub, err := nc.Subscribe(proto.BackupRestoreVolumeSubject(f.nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupRestoreVolumeCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		out := outcomes[cmd.Volume]
+		if out.silent {
+			return
+		}
+		f.mu.Lock()
+		if f.credentials == nil {
+			f.credentials = &credentialBook{}
+		}
+		book := f.credentials
+		dir := f.volumeDirs[cmd.AppID+"/"+cmd.Volume]
+		f.mu.Unlock()
+		book.put("restore:"+cmd.Volume, cmd.Credential)
+		ack := proto.BackupRestoreVolumeAck{AppID: cmd.AppID, Volume: cmd.Volume, Member: cmd.Member, AppRestored: true, WasRunning: true}
+		record := func() {
+			f.mu.Lock()
+			f.restores = append(f.restores, restoreCall{cmd: cmd, ack: ack})
+			f.mu.Unlock()
+			respond(m, ack)
+		}
+		if out.refusal != "" {
+			ack.Refusal, ack.Detail = out.refusal, out.detail
+			record()
+			return
+		}
+		if dir == "" {
+			ack.Refusal, ack.Detail = proto.BackupRefusalVolumeNotFound, "the app is not deployed on this node; install it first"
+			record()
+			return
+		}
+		fetcher, err := backupxfer.FetcherFor(cmd.Source, backupxfer.HTTPOptions{})
+		if err != nil {
+			ack.Refusal, ack.Detail = proto.BackupRefusalSourceRefused, err.Error()
+			record()
+			return
+		}
+		stream, err := fetcher.Get(context.Background(), backupxfer.GetRequest{Source: cmd.Source, Generation: cmd.GenerationID, Member: cmd.Member, Credential: cmd.Credential})
+		if err != nil {
+			var refused *backupxfer.RefusedError
+			if errorsAs(err, &refused) {
+				ack.Refusal, ack.SourceCode = proto.BackupRefusalSourceRefused, refused.Problem.Code
+			} else {
+				ack.Refusal = proto.BackupRefusalTransferFailed
+			}
+			ack.Detail = err.Error()
+			record()
+			return
+		}
+		staging := dir + ".restore-staging"
+		_ = os.RemoveAll(staging)
+		if err := os.Mkdir(staging, 0o700); err != nil {
+			t.Errorf("fake restore staging: %v", err)
+		}
+		root, err := fsat.OpenRoot(staging)
+		if err != nil {
+			t.Errorf("fake restore staging: %v", err)
+		}
+		res, uerr := backupxfer.Unpack(root, io.LimitReader(stream.Body, int64(cmd.PlaintextBytes)+1), backupxfer.UnpackBounds{MaxBytes: cmd.PlaintextBytes})
+		_ = root.Close()
+		_ = stream.Body.Close()
+		if uerr != nil {
+			_ = os.RemoveAll(staging)
+			ack.Refusal, ack.Detail = proto.BackupRefusalArchiveInvalid, uerr.Error()
+			record()
+			return
+		}
+		ack.ReceivedBytes, ack.Digest, ack.FileCount, ack.DirCount, ack.UnpackedBytes = res.StreamBytes, res.Digest, res.Files, res.Dirs, res.Bytes
+		if res.StreamBytes != cmd.PlaintextBytes || !strings.EqualFold(res.Digest, cmd.PlaintextDigest) {
+			_ = os.RemoveAll(staging)
+			ack.Refusal, ack.Detail = proto.BackupRefusalDigestMismatch, "the stream is not what the manifest recorded"
+			record()
+			return
+		}
+		// The quiesce, faked: stop, swap, start — counted so a test can
+		// assert the app was stopped exactly once per volume and is back.
+		f.mu.Lock()
+		f.stops++
+		f.mu.Unlock()
+		ack.Stopped = true
+		ack.StoppedAt = time.Now().UTC()
+		previous := dir + ".previous"
+		_ = os.RemoveAll(previous)
+		if err := os.Rename(dir, previous); err != nil {
+			t.Errorf("fake restore swap: %v", err)
+		}
+		if err := os.Rename(staging, dir); err != nil {
+			t.Errorf("fake restore swap: %v", err)
+		}
+		ack.Replaced, ack.OK, ack.PreviousKept = true, true, previous
+		f.mu.Lock()
+		f.starts++
+		f.mu.Unlock()
+		ack.RestartedAt = time.Now().UTC()
+		ack.DowntimeMillis = ack.RestartedAt.Sub(ack.StoppedAt).Milliseconds()
+		ack.RestoredBy = "driver"
+		if out.appRestored != nil {
+			ack.AppRestored = *out.appRestored
+			ack.RestoreDetail = "the compose stack did not come up"
+		}
+		record()
+	})
+	if err != nil {
+		t.Fatalf("fake restore sub: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+}
+
+// quiesceCounts reports how many times the fake restore agent stopped and
+// started the app — under the lock, so a test reading them after the job
+// ended does not race the handler goroutine that wrote them.
+func (f *fakeBackupAgent) quiesceCounts() (stops, starts int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stops, f.starts
 }

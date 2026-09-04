@@ -55,6 +55,14 @@ var verbMinAgentVersion = map[string]string{
 	// v2026.08.5-dev.138.
 	"docker.volumes.list":   "2026.08.5-dev.138",
 	"docker.volumes.remove": "2026.08.5-dev.138",
+	// storage.backup_restore_volume (#291 phase 2): entered when the verb was
+	// authored, before its release existed, as the NEXT release run after
+	// v2026.08.5-dev.139 (the newest published control-plane release at the
+	// time). If a release was cut between this entry and the one that ships
+	// the verb, an agent at that in-between version is reported as "should
+	// answer and did not" rather than "predates the verb"; confirm with
+	// `git tag --contains` once the release exists and correct the floor.
+	"storage.backup_restore_volume": "2026.08.5-dev.140",
 }
 
 // VerbMinAgentVersion reports the first agent release that answers verb (a

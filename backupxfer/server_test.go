@@ -545,3 +545,25 @@ func TestIngestRefusesMoreBytesThanTheCredentialAuthorises(t *testing.T) {
 		t.Error("a credential with no byte bound was minted")
 	}
 }
+
+// A restore credential — valid, signed by the same authority, naming this very
+// member — is refused by the ingest endpoint: it may fetch, never land. The
+// other direction is the api's restore endpoint's test.
+func TestIngestRefusesARestoreCredential(t *testing.T) {
+	r := newRig(t, 1)
+	tok, err := r.ingest.Authority().Mint(backupxfer.Grant{
+		Generation: genID, Member: memVW, NodeID: nodeID, JobID: jobID, MaxBytes: 1 << 30, Use: backupxfer.UseRestore,
+	}, backupxfer.RestoreCredentialTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.put(context.Background(), tok, memVW, []byte("plaintext"))
+	var refused *backupxfer.RefusedError
+	if !errors.As(err, &refused) || refused.Problem.Code != backupxfer.CodeCredentialScope || refused.Status != http.StatusForbidden {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(r.memberPath(memVW)); err == nil {
+		t.Fatal("the member landed on a restore credential")
+	}
+	r.noPartials()
+}

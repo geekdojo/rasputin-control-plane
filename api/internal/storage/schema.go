@@ -91,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_backup_runs_started ON backup_runs(started_at DES
 -- column here and none may be added: this table is served.
 CREATE TABLE IF NOT EXISTS restore_reports (
     id            TEXT PRIMARY KEY,
-    phase         TEXT NOT NULL,             -- 'identity'
+    phase         TEXT NOT NULL,             -- 'identity' (phase 1) | 'app-volumes' (phase 2, #291)
     generation_id TEXT NOT NULL,
     cluster_id    TEXT NOT NULL DEFAULT '',
     key_id        TEXT NOT NULL DEFAULT '',
