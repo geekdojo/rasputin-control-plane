@@ -22,7 +22,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
-	"github.com/geekdojo/rasputin-control-plane/backupxfer/fsat"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
@@ -196,7 +195,10 @@ func TestRestoreSessionsHoldOneKeyForOneJobAndZeroIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := r.Bind(id, "job-2"); err == nil {
-		t.Fatal("bound twice")
+		t.Fatal("bound to a second job")
+	}
+	if err := r.Bind(id, "job-1"); err != nil {
+		t.Fatalf("binding the same job again is not a no-op: %v", err)
 	}
 	if r.ByJob("job-1") != s || r.ByJob("job-9") != nil {
 		t.Fatal("ByJob")
@@ -520,20 +522,6 @@ func writeMarker(t *testing.T, h *runHarness, keyID string) {
 	if err := os.WriteFile(filepath.Join(h.mountDir, proto.StorageMarkerFile), mb, 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// answerMount answers the mount verb on the controlplane node with the
-// harness's mount, the way the restore harness's fake did for phase 1.
-func answerMount(t *testing.T, nc *nats.Conn) {
-	t.Helper()
-	sub, err := nc.Subscribe(proto.StorageMountSubject(runNodeID), func(m *nats.Msg) {
-		b, _ := json.Marshal(proto.StorageMountAck{OK: true, PartUUID: runPartUUID, MountPath: ""})
-		_ = m.Respond(b)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
 }
 
 func dirSnapshot(t *testing.T, dir string) map[string]string {
@@ -864,6 +852,3 @@ func TestRestoreAppTrustsTheSealedManifestOverTheSidecar(t *testing.T) {
 		t.Fatal("the volume did not go back")
 	}
 }
-
-// Keep fsat referenced: the fake agent's unpack is the real one.
-var _ = fsat.Supported

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer/fsat"
-	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // RestoreEgress is the restore-stream endpoint: GET one member of the
@@ -70,15 +68,8 @@ func (e *RestoreEgress) Mint(g backupxfer.Grant, ttl time.Duration) (string, err
 	if !g.ForRestore() {
 		return "", errors.New("the restore endpoint mints restore credentials only")
 	}
-	s := e.sessions.ByJob(g.JobID)
-	if s == nil || !s.armed || s.genID != g.Generation {
-		return "", fmt.Errorf("no restore of generation %s is open for job %s", g.Generation, g.JobID)
-	}
-	if _, ok := s.members[g.Member]; !ok {
-		return "", fmt.Errorf("member %s is not in the restore's plan", g.Member)
-	}
-	if s.nodeID != g.NodeID {
-		return "", fmt.Errorf("the restore's app is on node %s; a credential for node %s is not minted", s.nodeID, g.NodeID)
+	if ok, why := e.sessions.MemberPlanned(g.JobID, g.Generation, g.Member, g.NodeID); !ok {
+		return "", errors.New(why)
 	}
 	return e.auth.Mint(g, ttl)
 }
@@ -123,16 +114,17 @@ func (e *RestoreEgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		egressRefuse(w, http.StatusForbidden, backupxfer.CodeCredentialScope, "the credential is scoped to a different member")
 		return
 	}
-	s := e.sessions.ByJob(grant.JobID)
-	if s == nil || !s.armed || s.genID != generation {
-		egressRefuse(w, http.StatusConflict, backupxfer.CodeNoRestore, "no restore has that generation open")
-		return
-	}
-	facts, ok := s.members[member]
+	// One locked read answers "is there an armed restore for this job,
+	// reading this generation, that plans this member" and hands back a
+	// COPY of the key that outlives a session closing mid-stream. Zeroed
+	// when this handler returns, whatever happened.
+	s, ok := e.sessions.Lookup(grant.JobID, generation, member)
 	if !ok {
-		egressRefuse(w, http.StatusForbidden, backupxfer.CodeCredentialScope, "that member is not in the restore's plan")
+		egressRefuse(w, http.StatusConflict, backupxfer.CodeNoRestore, "no restore has that generation open with that member in its plan")
 		return
 	}
+	defer s.Release()
+	facts := s
 
 	// One stream at a time: the target may be spinning media, and the
 	// restore is serial anyway.
@@ -143,7 +135,7 @@ func (e *RestoreEgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { <-e.sem }()
 
-	root, err := fsat.OpenRoot(s.mountPath)
+	root, err := fsat.OpenRoot(s.MountPath)
 	if err != nil {
 		egressRefuse(w, http.StatusInternalServerError, backupxfer.CodeReadFailed, err.Error())
 		return
@@ -184,8 +176,8 @@ func (e *RestoreEgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	got := hex.EncodeToString(h.Sum(nil))
-	if facts.sealedSHA256 != "" && (!strings.EqualFold(got, facts.sealedSHA256) || (facts.sealedBytes != 0 && uint64(n) != facts.sealedBytes)) {
-		e.logf("restore egress: %s/%s on the target hashes to %s over %d bytes; the manifest recorded %s over %d — refused", generation, member, short(got), n, short(facts.sealedSHA256), facts.sealedBytes)
+	if facts.SealedSHA256 != "" && (!strings.EqualFold(got, facts.SealedSHA256) || (facts.SealedBytes != 0 && byteCount(n) != facts.SealedBytes)) {
+		e.logf("restore egress: %s/%s on the target hashes to %s over %d bytes; the manifest recorded %s over %d — refused", generation, member, short(got), n, short(facts.SealedSHA256), facts.SealedBytes)
 		egressRefuse(w, http.StatusUnprocessableEntity, backupxfer.CodeDigestMismatch, "the member on the target is not the one the manifest recorded; it is not served")
 		return
 	}
@@ -195,12 +187,12 @@ func (e *RestoreEgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", backupxfer.EgressContentType)
-	w.Header().Set(backupxfer.HeaderPlaintextDigest, facts.plaintextSHA256)
-	w.Header().Set(backupxfer.HeaderPlaintextBytes, strconv.FormatUint(facts.plaintextBytes, 10))
+	w.Header().Set(backupxfer.HeaderPlaintextDigest, facts.PlaintextSHA256)
+	w.Header().Set(backupxfer.HeaderPlaintextBytes, strconv.FormatUint(facts.PlaintextBytes, 10))
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	e.logf("restore egress: streaming %s/%s to node %s (grant %s, %d sealed bytes)", generation, member, grant.NodeID, grant.ID(), n)
-	res, err := Unseal(&flushWriter{w: w, rc: http.NewResponseController(w)}, f, s.key)
+	res, err := Unseal(&flushWriter{w: w, rc: http.NewResponseController(w)}, f, s.Key())
 	if err != nil {
 		// The status is gone. Abort the connection so the node sees a cut
 		// stream — which its byte count and digest then refuse — rather
@@ -231,6 +223,3 @@ func egressRefuse(w http.ResponseWriter, status int, code, detail string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(backupxfer.Problem{Code: code, Detail: detail})
 }
-
-// Keep proto referenced for the member-path contract this handler relies on.
-var _ = proto.BackupValidMemberPath

@@ -209,8 +209,10 @@ func (s *Server) handleAppRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	// Nothing request-derived beyond identifiers: the app, the node, the job.
-	log.Printf("restore: app %s (%s) on %s: restore from a backup generation submitted as job %s", app.Name, app.ID, node, j.ID)
+	// Nothing request-derived in this line: the job id is minted by the api.
+	// The app, the node and the generation are in the job's spec and its
+	// first step's log lines, where they are rendered quoted.
+	log.Printf("restore: an app-volume restore from a backup generation was submitted as job %s", j.ID)
 	writeJSON(w, http.StatusAccepted, appRestoreResponse{
 		Job:    j,
 		Detail: "the restore is running as a job; the app is stopped while each volume is swapped and the previous contents are kept beside it on " + node,

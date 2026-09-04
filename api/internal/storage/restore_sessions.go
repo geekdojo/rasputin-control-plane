@@ -1,9 +1,9 @@
 package storage
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -115,7 +115,12 @@ func (r *RestoreSessions) Open(key []byte) (string, error) {
 }
 
 // Bind ties a session to the job that carries its id. Refused for a session
-// that is not open or already bound.
+// that is not open or bound to ANOTHER job; binding the same job twice is a
+// no-op. Two callers bind: the handler, once Submit has minted the job id,
+// and the saga's step 1, which may run first — Submit starts the job's
+// goroutine before it returns — and binds the session to the job whose
+// spec names it. Whichever comes first wins; a second job naming the same
+// session finds it bound elsewhere and refuses.
 func (r *RestoreSessions) Bind(id, jobID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -123,11 +128,91 @@ func (r *RestoreSessions) Bind(id, jobID string) error {
 	if !ok {
 		return ErrRestoreSessionGone
 	}
-	if s.jobID != "" {
-		return errors.New("the restore session is already bound to a job")
+	if strings.TrimSpace(jobID) == "" {
+		return errors.New("a session is bound to a job id")
+	}
+	if s.jobID != "" && s.jobID != jobID {
+		return errors.New("the restore session is already bound to another job")
 	}
 	s.jobID = jobID
 	return nil
+}
+
+// StreamGrant is what the restore-stream endpoint needs to serve one member:
+// where the generation is, the manifest's facts for the member, and a COPY
+// of the key — taken under the lock, so a session closing mid-stream cannot
+// zero the bytes an unseal is reading. The endpoint zeroes the copy when
+// the stream ends.
+type StreamGrant struct {
+	MountPath       string
+	SealedSHA256    string
+	SealedBytes     uint64
+	PlaintextSHA256 string
+	PlaintextBytes  uint64
+	key             []byte
+}
+
+// Key is the borrowed copy. Zero it with Release when done.
+func (g *StreamGrant) Key() []byte { return g.key }
+
+// Release zeroes the copy.
+func (g *StreamGrant) Release() {
+	if g == nil {
+		return
+	}
+	zeroBytes(g.key)
+	g.key = nil
+}
+
+// Lookup answers the endpoint's question in one locked read: is there an
+// ARMED session for jobID reading generation, and is member in its plan? A
+// grant is returned only when all three hold.
+func (r *RestoreSessions) Lookup(jobID, generation, member string) (*StreamGrant, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if jobID == "" {
+		return nil, false
+	}
+	for _, s := range r.by {
+		if s.jobID != jobID {
+			continue
+		}
+		if !s.armed || s.genID != generation {
+			return nil, false
+		}
+		f, ok := s.members[member]
+		if !ok {
+			return nil, false
+		}
+		key := make([]byte, len(s.key))
+		copy(key, s.key)
+		return &StreamGrant{MountPath: s.mountPath, SealedSHA256: f.sealedSHA256, SealedBytes: f.sealedBytes,
+			PlaintextSHA256: f.plaintextSHA256, PlaintextBytes: f.plaintextBytes, key: key}, true
+	}
+	return nil, false
+}
+
+// MemberPlanned reports whether an armed session for jobID reading
+// generation plans member, for the node it plans it for — what Mint checks.
+func (r *RestoreSessions) MemberPlanned(jobID, generation, member, nodeID string) (planned bool, why string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.by {
+		if s.jobID != jobID || jobID == "" {
+			continue
+		}
+		if !s.armed || s.genID != generation {
+			return false, fmt.Sprintf("no restore of generation %s is open for job %s", generation, jobID)
+		}
+		if _, ok := s.members[member]; !ok {
+			return false, fmt.Sprintf("member %s is not in the restore's plan", member)
+		}
+		if s.nodeID != nodeID {
+			return false, fmt.Sprintf("the restore's app is on node %s; a credential for node %s is not minted", s.nodeID, nodeID)
+		}
+		return true, ""
+	}
+	return false, fmt.Sprintf("no restore of generation %s is open for job %s", generation, jobID)
 }
 
 // Arm records what the saga's step 1 decided: where the generation is, and
@@ -223,12 +308,3 @@ func (r *RestoreSessions) sweepLocked() {
 
 // ID is the session's handle.
 func (s *RestoreSession) ID() string { return s.id }
-
-// randomHex is shared with restore.go.
-func randomHexBytes(n int) []byte {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return []byte("0000000000000000")
-	}
-	return []byte(hex.EncodeToString(b))
-}

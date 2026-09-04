@@ -699,6 +699,13 @@ func restoreAppValidate(cfg RestoreAppConfig) jobs.DoFn {
 		if cfg.Sessions == nil || cfg.Egress == nil || cfg.Apps == nil || cfg.Tiles == nil || cfg.Store == nil {
 			return nil, errors.New("this api is not wired for app-volume restores (sessions, egress, apps, tiles or the ledger is missing)")
 		}
+		// The session named by the spec is bound to THIS job — by the
+		// handler after Submit, or here first, since Submit starts the
+		// job's goroutine before it returns. A session bound to another job
+		// is refused.
+		if err := cfg.Sessions.Bind(spec.SessionID, sc.JobID); err != nil {
+			return nil, fmt.Errorf("%w (%v)", ErrRestoreSessionGone, err)
+		}
 		session := cfg.Sessions.Get(spec.SessionID)
 		if session == nil || session.jobID != sc.JobID {
 			return nil, ErrRestoreSessionGone

@@ -297,8 +297,10 @@ func (s *Stager) fetchAndUnpack(ctx context.Context, cmd proto.BackupRestoreVolu
 	}
 	defer func() { _ = root.Close() }()
 	// One byte past the manifest's length: an over-long stream is detected
-	// by count rather than read to the end of whatever it is.
-	res, err := backupxfer.Unpack(root, io.LimitReader(stream.Body, int64(cmd.PlaintextBytes)+1), backupxfer.UnpackBounds{
+	// by count rather than read to the end of whatever it is. The length
+	// was bounded to maxRestoreBytes at validation, so the widening is safe.
+	limit := int64(min(cmd.PlaintextBytes, maxRestoreBytes)) + 1
+	res, err := backupxfer.Unpack(root, io.LimitReader(stream.Body, limit), backupxfer.UnpackBounds{
 		MaxBytes:       cmd.PlaintextBytes,
 		ApplyOwnership: os.Geteuid() == 0,
 	})
@@ -501,8 +503,16 @@ func validateRestore(recordDir string, cmd proto.BackupRestoreVolumeCmd) error {
 	if cmd.PlaintextBytes == 0 {
 		return fmt.Errorf("%w: the command carries no manifest length for the plaintext, and an unbounded stream is not restored", ErrBadName)
 	}
+	if cmd.PlaintextBytes > maxRestoreBytes {
+		return fmt.Errorf("%w: the manifest length %d exceeds the %d bytes this verb will restore in one volume", ErrBadName, cmd.PlaintextBytes, uint64(maxRestoreBytes))
+	}
 	return nil
 }
+
+// maxRestoreBytes bounds one volume's plaintext: 64 TiB, past any disk this
+// verb could unpack onto and comfortably inside what an int64 read limit
+// can express.
+const maxRestoreBytes = 64 << 40
 
 func isHex(s string) bool {
 	_, err := hex.DecodeString(s)
