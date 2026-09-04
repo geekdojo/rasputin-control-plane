@@ -174,11 +174,21 @@ func main() {
 	// registration is gated on handlersReady, which flips after the backend
 	// selection that may replace this.
 	lanAddr := func() (ip, cidr string) { return host.PrimaryLANIP(), host.PrimaryLanCIDR() }
+	// The mesh backend, chosen below (before handlersReady flips, so every
+	// registration can ask it which mesh CA this node trusts). nil when mesh
+	// join is disabled on this node, which reports as trusting none.
+	var tsBackend tailscale.Backend
+	trustFingerprint := func() string {
+		if tsBackend == nil {
+			return proto.MeshCAFingerprintNone
+		}
+		return tsBackend.TrustFingerprint()
+	}
 	reregister := func(c *nats.Conn) {
 		if !handlersReady.Load() {
 			return
 		}
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr)
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint)
 	}
 	// Retry the initial NATS connect instead of exiting on failure. On real
 	// hardware the firewall can boot before the control plane (it IS the
@@ -643,7 +653,6 @@ func main() {
 	// RASPUTIN_TAILSCALE_BACKEND=mock|tailscale.
 	{
 		backendChoice := envOr("RASPUTIN_TAILSCALE_BACKEND", autodetectTailscaleBackend())
-		var tsBackend tailscale.Backend
 		switch backendChoice {
 		case "tailscale":
 			rb, err := tailscale.NewRealBackend()
@@ -666,7 +675,11 @@ func main() {
 				"mesh join/leave is disabled on this node")
 		}
 		if tsBackend != nil {
-			tsSubs, err := tailscale.RegisterHandlers(nc, nodeID, tsBackend)
+			// Re-register after every successful enroll: the registration
+			// carries the CA fingerprint this node now trusts, and the api's
+			// converge_trust reads it from inventory — without this the api
+			// would see the pre-delivery fingerprint until the next reconnect.
+			tsSubs, err := tailscale.RegisterHandlers(nc, nodeID, tsBackend, func() { reregister(nc) })
 			if err != nil {
 				log.Fatalf("rasputin-agent: register tailscale handlers: %v", err)
 			}
@@ -749,8 +762,17 @@ func uciLANAddr(lookup func(context.Context) (string, string, error), fallback f
 	}
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string)) {
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), trustFingerprint func() string) {
 	meta := map[string]any{}
+	// Which mesh CA this node trusts, as a fingerprint — never the PEM. The
+	// api compares it with its own on every mesh.reconcile and re-delivers
+	// the CA when they differ (converge_trust; e3bench 2026-09-04, where an
+	// identity restore changed the api's CA under an enrolled node).
+	if trustFingerprint != nil {
+		if fp := trustFingerprint(); fp != "" {
+			meta[proto.MetadataMeshCAFingerprint] = fp
+		}
+	}
 	lanIP, lanCIDR := lanAddr()
 	if cidr := lanCIDR; cidr != "" {
 		// Carried in Metadata rather than as a top-level field so the

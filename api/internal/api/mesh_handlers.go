@@ -61,16 +61,36 @@ func (s *Server) handleMeshState(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/mesh/devices
+//
+// Each Rasputin device carries `trust`: how the CA its agent reports trusting
+// compares with the api's current mesh CA (mesh.NodeTrustFor). "stale" means
+// the next mesh.reconcile re-delivers it; "unreported" means the agent has
+// not said. User devices carry none — the api does not deliver a CA to them.
 func (s *Server) handleListMeshDevices(w http.ResponseWriter, r *http.Request) {
-	out, err := s.mesh.Store().ListDevices(r.Context())
+	devices, err := s.mesh.Store().ListDevices(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if out == nil {
-		out = []*mesh.Device{}
+	want := s.mesh.MeshCAFingerprint()
+	out := make([]meshDeviceView, 0, len(devices))
+	for _, d := range devices {
+		v := meshDeviceView{Device: d}
+		if d.Kind == "rasputin" && d.RasputinNodeID != "" {
+			if n, err := s.inv.Get(r.Context(), d.RasputinNodeID); err == nil && n != nil {
+				t := mesh.NodeTrustFor(want, n)
+				v.Trust = &t
+			}
+		}
+		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// meshDeviceView is a mesh_devices row plus the node's trust reading.
+type meshDeviceView struct {
+	*mesh.Device
+	Trust *mesh.NodeTrust `json:"trust,omitempty"`
 }
 
 // DELETE /api/mesh/devices/{hsId} — removes the device from Headscale and

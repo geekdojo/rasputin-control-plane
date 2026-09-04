@@ -1612,6 +1612,73 @@ func TestHandleListMeshDevices_Empty(t *testing.T) {
 	}
 }
 
+// Each Rasputin device carries how the CA its agent reports trusting compares
+// with the api's: a node still holding the CA an identity restore replaced
+// reads "stale" (the next reconcile re-delivers), one that has not said
+// reads "unreported", and user devices carry nothing.
+func TestHandleListMeshDevices_CarriesTrust(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	ca := []byte("-----BEGIN CERTIFICATE-----\nORIGINAL\n-----END CERTIFICATE-----\n")
+	meshSvc := mesh.NewService(mesh.Config{MeshCAPEM: ca}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
+	srv := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
+		f.fw, f.appsStore,
+		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
+		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc)
+	now := time.Now().UTC()
+	ctx := context.Background()
+	for id, meta := range map[string]map[string]any{
+		"stale-1":   {proto.MetadataMeshCAFingerprint: "not-the-one"},
+		"current-1": {proto.MetadataMeshCAFingerprint: proto.MeshCAFingerprint(ca)},
+		"silent-1":  nil,
+	} {
+		if err := f.inv.Insert(ctx, &proto.Node{ID: id, Role: proto.RoleCompute, Hostname: id, Metadata: meta, FirstSeen: now, LastSeen: now}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.mesh.Store().UpsertDevice(ctx, &mesh.Device{HSID: "hs-" + id, Hostname: id, Kind: "rasputin", RasputinNodeID: id, FirstSeen: now, LastSeen: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.mesh.Store().UpsertDevice(ctx, &mesh.Device{HSID: "hs-laptop", Hostname: "laptop", Kind: "user", FirstSeen: now, LastSeen: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/mesh/devices", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out []struct {
+		HSID  string `json:"hsId"`
+		Trust *struct {
+			State       string `json:"state"`
+			Fingerprint string `json:"fingerprint"`
+		} `json:"trust"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := map[string]string{}
+	for _, d := range out {
+		if d.Trust == nil {
+			got[d.HSID] = "(none)"
+			continue
+		}
+		got[d.HSID] = d.Trust.State
+		if strings.Contains(d.Trust.Fingerprint, "CERTIFICATE") {
+			t.Errorf("%s: trust carries PEM material", d.HSID)
+		}
+	}
+	want := map[string]string{"hs-stale-1": "stale", "hs-current-1": "current", "hs-silent-1": "unreported", "hs-laptop": "(none)"}
+	for id, state := range want {
+		if got[id] != state {
+			t.Errorf("%s: trust = %q, want %q (all: %v)", id, got[id], state, got)
+		}
+	}
+}
+
 func TestHandleDeleteMeshDevice_NotFound(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)

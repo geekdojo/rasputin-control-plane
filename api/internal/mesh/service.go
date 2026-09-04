@@ -4,7 +4,10 @@ import (
 	"context"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // Config is what the package needs from main beyond what its constructor
@@ -59,6 +62,16 @@ type Service struct {
 	// appLister supplies the apps for the tailnet DNS projection (ADR-0004 §9).
 	// nil (default) means project nothing. main backs it with the apps store.
 	appLister func() []AppDNS
+
+	// caFingerprint is proto.MeshCAFingerprint(cfg.MeshCAPEM), computed once:
+	// what every enrolled node's reported fingerprint is compared against
+	// (converge_trust). "" when no CA is shipped.
+	caFingerprint string
+
+	// ready flips once bringUp completes (client swapped in, user ensured).
+	// Read by main to kick a reconcile the moment the mesh can take one,
+	// rather than on a timer.
+	ready atomic.Bool
 }
 
 func NewService(cfg Config, store *Store, client Client, sup Supervisor) *Service {
@@ -68,8 +81,13 @@ func NewService(cfg Config, store *Store, client Client, sup Supervisor) *Servic
 	if cfg.DefaultUser == "" {
 		cfg.DefaultUser = "rasputin-operator"
 	}
-	return &Service{cfg: cfg, store: store, client: client, sup: sup}
+	return &Service{cfg: cfg, store: store, client: client, sup: sup, caFingerprint: proto.MeshCAFingerprint(cfg.MeshCAPEM)}
 }
+
+// Ready reports whether bring-up has completed: the real client is in place
+// and the default user exists, so a mesh.reconcile submitted now will run
+// against Headscale rather than fail on ErrMeshNotReady.
+func (s *Service) Ready() bool { return s.ready.Load() }
 
 // SetBootstrap installs a deferred client builder, used by self-hosted mesh
 // where the real client can't be constructed until the supervised Headscale
@@ -127,6 +145,7 @@ func (s *Service) bringUp(ctx context.Context) {
 		return
 	}
 	log.Printf("mesh: ready (backend=%s, user=%s)", s.Client().Backend(), s.cfg.DefaultUser)
+	s.ready.Store(true)
 	// Seed the tailnet app-name projection once Headscale is up; the
 	// mesh.reconcile tick keeps it fresh thereafter (ADR-0004 §9). Best-effort —
 	// a failure here must not fail bring-up.

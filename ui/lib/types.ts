@@ -793,6 +793,21 @@ export interface MeshDevice {
   kind: 'rasputin' | 'user';
   firstSeen: string;
   lastSeen: string;
+  /** Rasputin devices only: how the mesh CA the node's agent reports trusting compares with the api's current one. */
+  trust?: MeshDeviceTrust;
+}
+
+/**
+ * A node's trust reading. "stale": the node trusts a different CA (or none) —
+ * the next mesh.reconcile re-delivers the current one. "unreported": the agent
+ * has not said what it trusts (older agent); left alone.
+ */
+export interface MeshDeviceTrust {
+  nodeId: string;
+  state: 'current' | 'stale' | 'unreported';
+  /** What the node reported: a sha256 fingerprint, or "none". Never a PEM. */
+  fingerprint?: string;
+  agentPredatesField?: boolean;
 }
 
 export interface MeshState {
@@ -1385,6 +1400,20 @@ export interface RestoreReport {
   preparedAt: string;
   appliedAt?: string;
   recordedAt?: string;
+  /** Identity restores: the mesh-CA re-delivery the restore kicked once the mesh came up; absent until then. */
+  trustRedelivery?: TrustRedeliveryRecord;
+}
+
+/** What the post-restore reconcile found: which enrolled nodes were re-delivered the restored mesh CA, and which had not yet said what they trust. */
+export interface TrustRedeliveryRecord {
+  checkedAt: string;
+  caFingerprint?: string;
+  redelivered: string[];
+  stale: string[];
+  current: string[];
+  unreported: string[];
+  skipped?: Record<string, number>;
+  detail?: string;
 }
 
 // ----- Restoring one app's data (design/storage.md §4.5 phase 2, #291) -------

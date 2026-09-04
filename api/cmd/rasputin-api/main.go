@@ -1023,6 +1023,14 @@ func main() {
 	sched.Start(ctx)
 	defer sched.Stop()
 
+	// This start applied an identity restore: once the mesh is up, kick a
+	// reconcile so converge_trust re-delivers the restored mesh CA to every
+	// node still trusting the one the restore replaced, and record on the
+	// report what it found. See restore_trust.go.
+	if restored && appliedRestore != nil {
+		go kickTrustConvergenceAfterRestore(ctx, meshSvc, runner, jobStore, backupStore, appliedRestore.ID)
+	}
+
 	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn())
 	// The SAME rotator closure the leaf-rotation workflow uses, so PATCH
 	// /api/apps/{id} applies a LAN-exposure change (#197) to the proxy

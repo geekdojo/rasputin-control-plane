@@ -38,6 +38,10 @@ func execRun(ctx context.Context, name string, args ...string) ([]byte, error) {
 
 func (b *RealBackend) Name() string { return "tailscale" }
 
+// TrustFingerprint is the fingerprint of the bundle at b.caBundle — the one
+// SSL_CERT_FILE points tailscaled at and the agent's own HTTPS clients read.
+func (b *RealBackend) TrustFingerprint() string { return InstalledCAFingerprint(b.caBundle) }
+
 func (b *RealBackend) Enroll(ctx context.Context, in EnrollInput) (Status, error) {
 	if in.LoginServer == "" || in.AuthKey == "" {
 		return Status{}, errors.New("tailscale: login server and auth key are required")

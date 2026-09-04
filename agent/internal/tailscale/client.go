@@ -12,6 +12,11 @@ type Backend interface {
 	Leave(ctx context.Context) error
 	// Status fetches the current daemon state.
 	Status(ctx context.Context) (Status, error)
+	// TrustFingerprint is proto.MeshCAFingerprint of the mesh CA bundle this
+	// backend has installed, or proto.MeshCAFingerprintNone when none is.
+	// Reported on every registration so the api can tell when the CA a node
+	// trusts is not the CA the api holds, and re-deliver it (converge_trust).
+	TrustFingerprint() string
 }
 
 // EnrollInput captures the parameters for a fresh `tailscale up`.
