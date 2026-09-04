@@ -30,6 +30,7 @@ export function RestoredFrom() {
   }, []);
   if (!latest) return null;
   const when = latest.appliedAt ?? latest.recordedAt ?? latest.preparedAt;
+  if (latest.phase === 'app-volumes') return <AppDataRestored report={latest} when={when} />;
   return (
     <div
       style={{
@@ -62,6 +63,51 @@ export function RestoredFrom() {
           ? `App volumes present in that generation and NOT restored: ${latest.appVolumesPresent.map((v) => v.name).join(', ')}. They are still sealed on the backup disk.`
           : 'That generation held no app volumes.'}
       </div>
+    </div>
+  );
+}
+
+// A phase-2 record (#291): one app's data put back from a generation. The
+// volumes are named as the record names them — restored, or not, with why.
+function AppDataRestored({ report, when }: { report: RestoreReport; when: string }) {
+  const vols = report.appVolumes ?? [];
+  const restored = vols.filter((v) => v.restored);
+  const failed = vols.filter((v) => v.failed);
+  const skipped = vols.filter((v) => !v.restored && !v.failed);
+  return (
+    <div
+      style={{
+        border: `1px solid ${HAIR_SOFT}`,
+        padding: '10px 12px',
+        marginBottom: 14,
+        fontFamily: MONO,
+        fontSize: 11,
+        lineHeight: 1.6,
+        color: FG,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <RotateCcw size={12} />
+        <span>
+          {report.appName ?? 'An app'}&apos;s data was restored from generation <Tok>{report.generationId}</Tok>{' '}
+          <span style={{ color: DIM }} title={when}>
+            {timeAgo(when)}
+          </span>
+        </span>
+        <Badge color={failed.length > 0 ? WARN : OK_GREEN}>{report.phase}</Badge>
+        {report.nodeId && <Badge>on {report.nodeId}</Badge>}
+      </div>
+      <div style={{ color: DIM }}>
+        {restored.length > 0
+          ? `Put back: ${restored.map((v) => v.volume).join(', ')} — the previous contents were kept beside each volume on ${report.nodeId ?? 'the node'}.`
+          : 'No volume was put back.'}
+      </div>
+      {failed.length > 0 && (
+        <div style={{ color: WARN }}>NOT restored: {failed.map((v) => `${v.volume} (${v.reason ?? 'no reason recorded'})`).join('; ')}</div>
+      )}
+      {skipped.length > 0 && (
+        <div style={{ color: DIM }}>Skipped: {skipped.map((v) => `${v.volume} (${v.reason ?? 'by design'})`).join('; ')}</div>
+      )}
     </div>
   );
 }

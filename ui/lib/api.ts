@@ -2,6 +2,9 @@ import type {
   Alert,
   App,
   AppVolumesResponse,
+  AppRestoreRequest,
+  AppRestoreResponse,
+  AppRestoreSources,
   OrphanVolumesResponse,
   ReclaimResponse,
   BackupCandidatesResponse,
@@ -1199,4 +1202,23 @@ export function startRestore(req: RestoreStartRequest): Promise<RestoreStartResp
 // newest first. Authenticated.
 export async function listRestores(): Promise<RestoreReport[]> {
   return (await jsonFetch<RestoreReport[] | null>('/api/backup/restores')) ?? [];
+}
+
+// ----- Restoring one app's data (design/storage.md §4.5 phase 2, #291) -------
+
+// getAppRestoreSources lists the generations on the backup target that hold
+// this app's volumes, with the disk's wrapped key for the browser to open.
+export function getAppRestoreSources(id: string): Promise<AppRestoreSources> {
+  return jsonFetch<AppRestoreSources>(`/api/apps/${id}/restore-sources`);
+}
+
+// startAppRestore submits the restore of one app's data from one generation.
+// Callers do not build this request by hand — see lib/app-restore.ts, which
+// is the only path that holds the private key, and only for this call.
+export function startAppRestore(id: string, req: AppRestoreRequest): Promise<AppRestoreResponse> {
+  return jsonFetch<AppRestoreResponse>(`/api/apps/${id}/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
 }
