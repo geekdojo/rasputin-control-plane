@@ -155,7 +155,7 @@ func Unseal(dst io.Writer, src io.Reader, privateKey []byte) (*UnsealResult, err
 	}
 	for {
 		n, rerr := io.ReadFull(body, buf)
-		sealedLen += uint64(n)
+		sealedLen += byteCount(int64(n))
 		if n == 0 {
 			if rerr != nil && !errors.Is(rerr, io.EOF) && !errors.Is(rerr, io.ErrUnexpectedEOF) {
 				return nil, fmt.Errorf("read sealed archive: %w", rerr)

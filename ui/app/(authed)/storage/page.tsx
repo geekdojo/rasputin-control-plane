@@ -17,6 +17,7 @@ import { listBackupCandidates, listBackupTargets, listNodes } from '../../../lib
 import { timeAgo } from '../../../lib/time';
 import type { BackupCandidate, BackupTarget, Node } from '../../../lib/types';
 import { BackupRuns } from '../../../components/storage/BackupRuns';
+import { RestoredFrom } from '../../../components/storage/RestoredFrom';
 import { ClaimTargetDrawer } from '../../../components/storage/ClaimTargetDrawer';
 import {
   diskName,
@@ -131,6 +132,9 @@ export default function BackupsPage() {
           because "is my data backed up?" is the question this page exists to
           answer and "which disk could I use?" is the follow-up. It also puts the
           identity-only warning above the fold rather than below a disk list. */}
+      {/* A cluster that came back from a backup says so here, above the
+          runs, with what the restore did NOT put back named by volume. */}
+      <RestoredFrom />
       <BackupRuns hasTarget={Boolean(claimed)} />
 
       <div

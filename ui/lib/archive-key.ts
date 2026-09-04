@@ -592,6 +592,110 @@ export async function unlockArchiveKey(
   blobs: ArchiveKeyBlobs,
   secret: CustodySecret,
 ): Promise<CustodyProof> {
+  const { keyId, privateKey, publicKey } = await recoverArchivePrivateKey(blobs, secret);
+  try {
+    return {
+      keyId,
+      path: secret.path,
+      keyDigest: await digestOf(keyId, privateKey),
+      publicKey: b64url(publicKey),
+    };
+  } finally {
+    privateKey.fill(0);
+  }
+}
+
+/**
+ * lendArchiveKeyForRestore is the RESTORE-ONLY path that hands the recovered
+ * private key to a caller — for exactly as long as `withKey` runs, and never
+ * as a return value.
+ *
+ * # Why this exists beside unlockArchiveKey, and why it is not the same thing
+ *
+ * unlockArchiveKey deliberately never returns key material: adopt only needs
+ * a PROOF that the secret opens this disk, and a function that returned the
+ * key would be the easiest way to break the rule that the plaintext key
+ * exists as one Uint8Array and does not outlive the call. That rule stands,
+ * and unlockArchiveKey keeps it.
+ *
+ * Restore (design/storage.md §4.5, #291) is the one operation that genuinely
+ * needs the key to leave the browser: the api holds the sealed archives and
+ * cannot open them — §4.6's whole point is that the controlplane keeps no
+ * secret — so either the browser decrypts hundreds of megabytes and uploads
+ * plaintext, or the key transits once over TLS to the process that has the
+ * bytes. Bryce ruled that supplying a secret during recovery is acceptable,
+ * and the second is better on every axis: one 32-byte value, in memory on
+ * the api for the duration of one restore, then zeroed.
+ *
+ * So this function LENDS. It performs the same recovery as unlockArchiveKey,
+ * including the check that the recovered key derives the public key on the
+ * disk's marker (a key that opens but does not match is `key-mismatch`, not
+ * something to send), calls `withKey` with the key, and zeroes it in a
+ * `finally` whether `withKey` resolved, rejected, or was never reached. The
+ * caller's passphrase bytes are consumed the same way. What `withKey` returns
+ * is what comes back — a response from the api, never the key.
+ *
+ * `withKey` MUST NOT retain the array it is given: after it resolves the
+ * bytes are zero. A caller that copies them out has re-created the return
+ * value this function exists to avoid.
+ */
+export async function lendArchiveKeyForRestore<T>(
+  blobs: ArchiveKeyBlobs,
+  secret: CustodySecret,
+  withKey: (privateKey: Bytes) => Promise<T>,
+): Promise<T> {
+  const { privateKey } = await recoverArchivePrivateKey(blobs, secret);
+  try {
+    return await withKey(privateKey);
+  } finally {
+    privateKey.fill(0);
+  }
+}
+
+/**
+ * What the two callers above share: the recovered key, the id it belongs to,
+ * and the public half that was CHECKED against the disk.
+ *
+ * Internal. The private key in here is live and the caller owns zeroing it;
+ * both callers do so in a `finally`.
+ */
+interface RecoveredArchiveKey {
+  keyId: string;
+  privateKey: Bytes;
+  publicKey: Bytes;
+}
+
+/**
+ * recoverArchivePrivateKey opens one wrapping and verifies what it held.
+ *
+ * Three distinct failures, and keeping them distinct is the point:
+ *
+ *   - `wrong-secret` — the AEAD rejected the unwrap, which is why an AEAD is
+ *     used here at all. A wrong passphrase fails VISIBLY, at unlock time, in
+ *     the browser. It cannot produce a target that silently seals nothing,
+ *     because the only way past this function is a tag that verified;
+ *   - `unreadable` — the blob could not be parsed, or names a construction this
+ *     build cannot reproduce (a symmetric-era v1 blob among them);
+ *   - `key-mismatch` — the blob opened and the private key inside it does not
+ *     derive this disk's public key. NEW with the asymmetric design, and the
+ *     thing the symmetric one could not express: a tag that verifies proves the
+ *     secret was right, and now the public key proves the DISK is right too.
+ *     An operator told "wrong passphrase" here would go looking for a secret
+ *     they already have.
+ *
+ * The AAD does the rest of the work. It binds the key-id and the custody path
+ * into every wrapping (see `aad`), so a blob lifted from a different target
+ * fails here even with the right passphrase, and the passphrase copy cannot be
+ * presented as the recovery-code copy.
+ *
+ * Errors never carry the passphrase, the recovery code or the private key.
+ * The caller's passphrase bytes are zeroed before this returns, on every
+ * path.
+ */
+async function recoverArchivePrivateKey(
+  blobs: ArchiveKeyBlobs,
+  secret: CustodySecret,
+): Promise<RecoveredArchiveKey> {
   const keyId = blobs.keyId?.trim() ?? '';
   try {
     if (!keyId) {
@@ -634,17 +738,14 @@ export async function unlockArchiveKey(
       if (!publicKeysEqual(derived, expectedPublic)) {
         throw new ArchiveKeyError(
           'key-mismatch',
-          "that secret opened this disk's wrapped key, but the key inside it is not the one this disk's archives are encrypted to. The passphrase or recovery code is right and the disk's records disagree with each other — its marker has been edited, corrupted, or assembled from two different targets. Do not adopt it; nothing written under this key would be readable",
+          "that secret opened this disk's wrapped key, but the key inside it is not the one this disk's archives are encrypted to. The passphrase or recovery code is right and the disk's records disagree with each other — its marker has been edited, corrupted, or assembled from two different targets. Do not adopt or restore from it; nothing written under this key would be readable",
         );
       }
-      return {
-        keyId,
-        path: secret.path,
-        keyDigest: await digestOf(keyId, privateKey),
-        publicKey: b64url(derived),
-      };
-    } finally {
+      return { keyId, privateKey, publicKey: derived };
+    } catch (e) {
+      // Only the throw path: on success the caller owns the key and zeroes it.
       privateKey.fill(0);
+      throw e;
     }
   } finally {
     // Same contract as mintArchiveKey: the caller's passphrase bytes do not

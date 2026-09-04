@@ -2,9 +2,9 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { getSetupState } from '../../lib/api';
+import { getSetupState, listRestoreCandidates } from '../../lib/api';
 import { getStatus, loginWithPasskey, registerPasskey, type AuthStatus } from '../../lib/auth';
-import { Btn, DIM, FG, HAIR, Input, PANEL } from '../../components/kit';
+import { Btn, DIM, FG, HAIR, HAIR_SOFT, Input, LinkBtn, PANEL } from '../../components/kit';
 import { MONO } from '../../components/ui-theme';
 
 async function postAuthDestination(): Promise<string> {
@@ -23,12 +23,21 @@ export default function LoginPage() {
   const [displayName, setDisplayName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Restore-before-first-boot (design/storage.md §4.5, #291): on a box with
+  // no operator, a backup disk beside it is offered as the other way in.
+  // Best-effort — the register form must never wait on a disk scan.
+  const [restorable, setRestorable] = useState(0);
 
   useEffect(() => {
     getStatus()
       .then(async (s) => {
         setStatus(s);
         if (s.user) router.replace(await postAuthDestination());
+        if (!s.hasUsers) {
+          listRestoreCandidates()
+            .then((r) => setRestorable(r.candidates.filter((c) => c.restorable).length))
+            .catch(() => setRestorable(0));
+        }
       })
       .catch((e) => setErr(String(e)));
   }, [router]);
@@ -125,6 +134,15 @@ export default function LoginPage() {
                 <Btn variant="primary" type="submit" disabled={busy || !name}>
                   {busy ? 'REGISTERING…' : 'REGISTER PASSKEY'}
                 </Btn>
+                {restorable > 0 && (
+                  <div style={{ borderTop: `1px solid ${HAIR_SOFT}`, paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <p style={{ color: DIM, fontSize: 11, lineHeight: 1.6, margin: 0 }}>
+                      A backup disk with {restorable === 1 ? 'a Rasputin backup set' : `${restorable} Rasputin backup sets`} is
+                      attached. Restore this cluster&apos;s identity from it instead of setting up fresh.
+                    </p>
+                    <LinkBtn href="/restore">RESTORE FROM BACKUP →</LinkBtn>
+                  </div>
+                )}
               </form>
             ) : (
               <form

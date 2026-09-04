@@ -42,6 +42,10 @@ import type {
   FirewallRuleSpec,
   PortForwardSpec,
   PullResult,
+  RestoreCandidatesResponse,
+  RestoreReport,
+  RestoreStartRequest,
+  RestoreStartResponse,
   WANConfigSpec,
   DeploymentMode,
   DNSForwarding,
@@ -1168,4 +1172,31 @@ function wsURL(path: string): string {
   }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${location.host}${path}`;
+}
+
+// ----- Restore-before-first-boot (design/storage.md §4.5, #291) ------------
+
+// listRestoreCandidates lists the disks beside this controlplane that carry a
+// Rasputin backup set, with their generations. Open only while no operator
+// exists — 409 afterwards, for the life of the installation.
+export function listRestoreCandidates(): Promise<RestoreCandidatesResponse> {
+  return jsonFetch<RestoreCandidatesResponse>('/api/restore/candidates');
+}
+
+// startRestore prepares a restore of one generation's identity set and asks
+// the api to restart onto it. Callers do not build this request by hand — see
+// lib/restore.ts, which is the only path that holds the private key, and
+// only for the duration of this call.
+export function startRestore(req: RestoreStartRequest): Promise<RestoreStartResponse> {
+  return jsonFetch<RestoreStartResponse>('/api/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+}
+
+// listRestores is the record of every restore this cluster came back from,
+// newest first. Authenticated.
+export async function listRestores(): Promise<RestoreReport[]> {
+  return (await jsonFetch<RestoreReport[] | null>('/api/backup/restores')) ?? [];
 }
