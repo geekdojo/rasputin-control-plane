@@ -12,7 +12,7 @@ import (
 )
 
 // RegisterHandlers wires the staging verbs — stage, transfer, unstage — and
-// returns the subscriptions.
+// the restore verb, and returns the subscriptions.
 // Registered wherever the docker handlers are — compute and controlplane
 // agents — because those are the nodes that host app volumes; the
 // backup-target storage verbs live on the controlplane and storage roles and
@@ -24,7 +24,7 @@ import (
 // could act on — the app is down — is over before the ack goes out or is
 // reported in it.
 func RegisterHandlers(nc *nats.Conn, nodeID string, s *Stager) ([]*nats.Subscription, error) {
-	subs := make([]*nats.Subscription, 0, 3)
+	subs := make([]*nats.Subscription, 0, 4)
 	bind := func(subj string, fn nats.MsgHandler) error {
 		sub, err := nc.Subscribe(subj, fn)
 		if err != nil {
@@ -99,6 +99,41 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, s *Stager) ([]*nats.Subscrip
 		} else {
 			log.Printf("rasputin-agent: transfer: %s NOT landed refusal=%s destination-code=%s: %s",
 				cmd.StagingName, ack.Refusal, ack.DestinationCode, ack.Detail)
+		}
+		bus.Respond(m, ack)
+	}); err != nil {
+		return subs, err
+	}
+
+	if err := bind(proto.BackupRestoreVolumeSubject(nodeID), func(m *nats.Msg) {
+		var cmd proto.BackupRestoreVolumeCmd
+		if err := json.Unmarshal(m.Data, &cmd); err != nil {
+			bus.Respond(m, proto.BackupRestoreVolumeAck{
+				OK: false, AppRestored: true, Refusal: proto.StorageRefusalBackendError, Detail: err.Error(),
+			})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), proto.BackupRestoreVolumeWork)
+		defer cancel()
+		// Loud and BEFORE the call, like the stage verb: this is the verb
+		// that REPLACES an app's data. Identifiers, the member and the
+		// source — the credential is NOT in this line, or any line.
+		log.Printf("rasputin-agent: restore: RESTORE VOLUME (service-interrupting, REPLACES DATA) app=%s name=%q volume=%s class=%s generation=%s member=%s restore=%s source=%s backend=%s",
+			cmd.AppID, cmd.AppName, cmd.Volume, cmd.Class, cmd.GenerationID, cmd.Member, cmd.RestoreID, cmd.Source, s.rt.Name())
+		ack := s.RestoreVolume(ctx, cmd)
+		switch {
+		case !ack.OK:
+			log.Printf("rasputin-agent: restore: REFUSED app=%s volume=%s refusal=%s source-code=%s restored=%t: %s",
+				cmd.AppID, cmd.Volume, ack.Refusal, ack.SourceCode, ack.AppRestored, ack.Detail)
+		case ack.Stopped:
+			log.Printf("rasputin-agent: restore: replaced %s of app %s from %s (%d files, %d bytes; previous contents kept at %s); app was down %dms, restored=%t by %s",
+				cmd.Volume, cmd.AppID, cmd.Member, ack.FileCount, ack.UnpackedBytes, ack.PreviousKept, ack.DowntimeMillis, ack.AppRestored, ack.RestoredBy)
+		default:
+			log.Printf("rasputin-agent: restore: replaced %s of app %s from %s (%d files, %d bytes; previous contents kept at %s); the app was not running and was not started",
+				cmd.Volume, cmd.AppID, cmd.Member, ack.FileCount, ack.UnpackedBytes, ack.PreviousKept)
+		}
+		if !ack.AppRestored {
+			log.Printf("rasputin-agent: restore: APP %s IS NOT BACK after restoring %s: %s", cmd.AppID, cmd.Volume, ack.RestoreDetail)
 		}
 		bus.Respond(m, ack)
 	}); err != nil {

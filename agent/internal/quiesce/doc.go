@@ -7,7 +7,10 @@
 // root as one tar file with a known length and a digest, and put the app back
 // exactly as it was found. One companion verb, storage.backup_unstage, deletes
 // a staged file by name so the fan-out can hold §4.7's "one volume at a time"
-// peak.
+// peak. And the inverse, storage.backup_restore_volume (restore.go): fetch the
+// plaintext tar the api unsealed, unpack it beside the volume, and — with the
+// app quiesced under the same restart guard — exchange it for the live tree
+// in one move (#291 phase 2).
 //
 // # What is built, and what is deliberately not
 //

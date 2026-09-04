@@ -303,8 +303,15 @@ func main() {
 			// endpoint over the api's mesh-CA HTTPS leaf; the same bundle
 			// the updater's download client trusts.
 			stager.SetCABundle(tailscale.CABundlePath())
+			// The restore verb (#291 phase 2) stages beside each volume and
+			// records where, so a tree a dying process left is swept here —
+			// the previous contents a restore keeps aside are never touched.
+			stager.SetRestoreRecordDir(quiesce.RestoreRecordDir(stateDir))
 			if n := stager.SweepArmedStops(); n > 0 {
 				log.Printf("rasputin-agent: quiesce: restarted %d app(s) a previous agent left stopped for a backup", n)
+			}
+			if n := stager.SweepRestoreStaging(); n > 0 {
+				log.Printf("rasputin-agent: restore: removed %d staging tree(s) a previous agent left beside app volumes", n)
 			}
 			qSubs, err := quiesce.RegisterHandlers(nc, nodeID, stager)
 			if err != nil {

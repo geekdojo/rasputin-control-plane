@@ -2,6 +2,8 @@ package quiesce
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"strings"
@@ -159,5 +161,48 @@ func TestHandlers_UnbuiltStrategyRefusesLoudly(t *testing.T) {
 	}
 	if running, _ := mb.AppRunning(context.Background(), "ha"); !running {
 		t.Error("a refused strategy stopped the app")
+	}
+}
+
+// The restore verb over the bus, against the docker mock: the mock's volume
+// directory is what the real ResolveVolume answers for it, so the staging
+// tree lands beside it and the exchange is the real one.
+func TestHandlers_RestoreVolumeOverTheBus(t *testing.T) {
+	nc, mb, s := registered(t)
+	s.SetRestoreRecordDir(t.TempDir())
+	if _, _, err := mb.Deploy(context.Background(), "vw", "vaultwarden", "services: {}\n"); err != nil {
+		t.Fatal(err)
+	}
+	vol, err := mb.VolumeDir("vw", "vaultwarden-data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeVolFile(t, vol+"/db.sqlite3", "ORIGINAL")
+	tarPath := t.TempDir() + "/vw.tar"
+	if _, err := writeTar(context.Background(), vol, tarPath, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	backup, _ := os.ReadFile(tarPath)
+	sum := sha256.Sum256(backup)
+	e := newEgress(t, backup)
+	writeVolFile(t, vol+"/db.sqlite3", "CORRUPT")
+
+	var ack proto.BackupRestoreVolumeAck
+	requestInto(t, nc, proto.BackupRestoreVolumeSubject("node-1"), proto.BackupRestoreVolumeCmd{
+		AppID: "vw", AppName: "vaultwarden", Volume: "vaultwarden-data", Class: tileschema.BackupCritical,
+		Source: e.source(t), Credential: rsCred, GenerationID: rsGen, Member: rsMember,
+		PlaintextDigest: hex.EncodeToString(sum[:]), PlaintextBytes: uint64(len(backup)),
+	}, &ack)
+	if !ack.OK || !ack.Replaced || !ack.Stopped || !ack.AppRestored {
+		t.Fatalf("ack = %+v", ack)
+	}
+	if got, _ := os.ReadFile(vol + "/db.sqlite3"); string(got) != "ORIGINAL" {
+		t.Fatalf("db.sqlite3 = %q after the restore", got)
+	}
+	if running, _ := mb.AppRunning(context.Background(), "vw"); !running {
+		t.Error("the app is not running after the verb answered")
+	}
+	if got, _ := os.ReadFile(ack.PreviousKept + "/db.sqlite3"); string(got) != "CORRUPT" {
+		t.Fatalf("the previous contents are not kept at %s: %q", ack.PreviousKept, got)
 	}
 }

@@ -42,6 +42,12 @@ type Stager struct {
 	// transport itself.
 	caBundlePath string
 	transportFor func(destination string) (backupxfer.Transport, error)
+	// The restore verb's seams (restore.go): the fetcher for a source, the
+	// directory in-flight staging trees are recorded in for the boot sweep,
+	// and the atomic exchange itself.
+	fetcherFor       func(source string) (backupxfer.Fetcher, error)
+	restoreRecordDir string
+	swapFn           func(live, staging string) error
 }
 
 // New builds a Stager over the runtime. stagingRoot is the agent's one
