@@ -136,9 +136,30 @@ func (h *Host) Advertisement() *Advertisement {
 // with a typed reply), plus power/SoL handlers when a backend was
 // boot-resolved. rereg re-publishes the registration event after a
 // swap so the advertisement updates immediately.
+//
+// Attach runs on EVERY bus connection the agent makes, not once: the agent
+// re-dials a new *nats.Conn from the closed state (see bus.Client) and
+// subscriptions do not carry over. A second Attach tears down what the
+// previous conn held — its subscriptions are dead with it, and any SoL
+// session pumped over it has lost its transport — and subscribes afresh.
+// The backend itself is untouched: a configured BMC stays configured.
 func (h *Host) Attach(nc *nats.Conn, rereg func()) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.nc != nil {
+		if h.h != nil {
+			h.h.closeAll("bus connection replaced")
+			h.h = nil
+		}
+		for _, s := range h.subs {
+			_ = s.Unsubscribe()
+		}
+		h.subs = nil
+		if h.cfgSub != nil {
+			_ = h.cfgSub.Unsubscribe()
+			h.cfgSub = nil
+		}
+	}
 	h.nc = nc
 	h.rereg = rereg
 

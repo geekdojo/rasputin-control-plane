@@ -1,11 +1,34 @@
-// Package bus is the agent's NATS connection: an outbound-only client that
+// Package bus is the agent's NATS connection: an outbound-only Client that
 // dials the controlplane, presents the node-bound join token as its NATS
-// credentials, and reconnects forever on its own. It also owns Respond, the
-// shared reply encoder every subsystem handler uses.
+// credentials, and keeps a connection up for the life of the process. It also
+// owns Respond, the shared reply encoder every subsystem handler uses.
+//
+// "Keeps a connection up" is two mechanisms, and it matters which is which:
+//
+//  1. Within one *nats.Conn, nats.go reconnects on its own through network
+//     loss (MaxReconnects(-1)); subscriptions survive, and the agent only
+//     re-publishes its registration (Client's onConnected).
+//  2. nats.go also has a CLOSED state it enters when it decides a failure is
+//     permanent — and a closed conn is dead for good, subscriptions included.
+//     The Client then re-dials: a brand new conn, bounded exponential backoff
+//     (2s doubling to a 60s cap, jittered), forever, and on success re-runs
+//     the agent's subscription setup (onConn) before onConnected.
+//
+// The route to CLOSED that bit on hardware is repeated auth errors: by
+// default nats.go closes the conn the second time the same server rejects its
+// credentials (Conn.processAuthError). A controlplane that comes back from a
+// wipe accepts TCP before its token store is seeded, so every node's
+// reconnect is rejected twice and closed, and nothing short of a process
+// restart got them back (e3bench, 2026-09-04, 17 hours off the bus). The
+// Client opts out of that default with nats.IgnoreAuthErrorAbort AND re-dials
+// from closed, because closed is also reachable by other routes (a Drain, a
+// server error the client treats as fatal).
 //
 // Subject dispatch does NOT live here. Each subsystem (docker, storage,
-// updater, openwrt, tailscale, bmc, …) subscribes its own subjects directly on
-// the *nats.Conn this package hands back.
+// updater, openwrt, tailscale, bmc, …) subscribes its own subjects on the
+// *nats.Conn the Client hands to onConn — on EVERY new conn, which is why the
+// agent collects its handler registrations as a list it can re-run rather
+// than subscribing once inline.
 //
 // There is no ack/dedup here, and none anywhere else either. Commands are core
 // NATS request/reply, not JetStream: the api Requests on

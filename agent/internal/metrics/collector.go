@@ -15,8 +15,8 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/proto"
-	"github.com/nats-io/nats.go"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -30,7 +30,9 @@ var Interval = 10 * time.Second
 
 // Run is the collector loop. Blocks until ctx is cancelled. Errors during
 // individual probes (e.g. disk usage on a path we can't reach) are logged
-// and skipped — a single bad probe shouldn't take down the loop.
+// and skipped — a single bad probe shouldn't take down the loop. pub is the
+// agent's bus.Client so every sample lands on the current connection; a run
+// of publish failures logs once and counts (bus.Squelch), not once per tick.
 //
 // diskPath is the filesystem the disk metric measures. It must be a path on
 // the node's persistent DATA partition — NOT "/", which on the appliance is the
@@ -38,7 +40,7 @@ var Interval = 10 * time.Second
 // reports filesystem-level totals, so any path on that partition works; the
 // caller passes the agent's own state dir (`/var/lib/rasputin/agent-state` on
 // the appliance), the same partition Docker data and the obs stack live on.
-func Run(ctx context.Context, nc *nats.Conn, nodeID, diskPath string, uptime func() time.Duration) {
+func Run(ctx context.Context, pub bus.Publisher, nodeID, diskPath string, uptime func() time.Duration) {
 	// Prime the CPU sampler — the first non-blocking call returns 0 because
 	// it has no prior reading to delta against. This 100ms call gives us a
 	// baseline so the first published sample is real.
@@ -47,6 +49,7 @@ func Run(ctx context.Context, nc *nats.Conn, nodeID, diskPath string, uptime fun
 	subj := proto.NodeMetricsSubject(nodeID)
 	t := time.NewTicker(Interval)
 	defer t.Stop()
+	publishLog := bus.Squelch{What: "metrics: publish"}
 
 	for {
 		select {
@@ -59,9 +62,7 @@ func Run(ctx context.Context, nc *nats.Conn, nodeID, diskPath string, uptime fun
 				log.Printf("metrics: marshal: %v", err)
 				continue
 			}
-			if err := nc.Publish(subj, payload); err != nil {
-				log.Printf("metrics: publish: %v", err)
-			}
+			publishLog.Report(pub.Publish(subj, payload))
 		}
 	}
 }

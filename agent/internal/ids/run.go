@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/proto"
-	"github.com/nats-io/nats.go"
 )
 
 // DefaultAlertLogPath is where the firewall's snort.uc template writes
@@ -24,13 +24,14 @@ const DefaultAlertLogPath = "/var/log/snort/alert_fast.txt"
 // skipped — the operator's snort might emit a header line or a future
 // snort version might add a field we don't model. We never block snort
 // over a parse failure; the line is preserved in the source log on the
-// firewall regardless. Publish errors are logged and skipped; the
-// in-process NATS client buffers + reconnects on its own.
+// firewall regardless. Publish errors are logged (the first of a run, then
+// a count on recovery — see bus.Squelch) and skipped; pub is the agent's
+// bus.Client, so a publish always lands on the current connection.
 //
 // On a path other than DefaultAlertLogPath (tests, dev), pass the
 // override as the path arg. nodeID is the agent's stable identity (the
 // same one published in metrics/heartbeats).
-func Run(ctx context.Context, nc *nats.Conn, nodeID, path string) {
+func Run(ctx context.Context, pub bus.Publisher, nodeID, path string) {
 	if path == "" {
 		path = DefaultAlertLogPath
 	}
@@ -47,6 +48,7 @@ func Run(ctx context.Context, nc *nats.Conn, nodeID, path string) {
 
 	tail := NewTailer(path)
 	go tail.Run(ctx)
+	publishLog := bus.Squelch{What: "ids: publish"}
 
 	for {
 		select {
@@ -70,9 +72,7 @@ func Run(ctx context.Context, nc *nats.Conn, nodeID, path string) {
 				log.Printf("ids: marshal: %v", err)
 				continue
 			}
-			if err := nc.Publish(subj, payload); err != nil {
-				log.Printf("ids: publish: %v", err)
-			}
+			publishLog.Report(pub.Publish(subj, payload))
 		}
 	}
 }
