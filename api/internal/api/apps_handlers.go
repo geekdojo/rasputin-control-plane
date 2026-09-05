@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -15,15 +16,43 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
+// appView is an /api/apps row: the app record plus where it stands against
+// its backup cadence (design/storage.md §4.4, #298). The backup state rides on
+// the row the Apps page already fetches, so the OVERDUE badge costs no second
+// request and cannot lag the list it decorates. Absent when no backup ledger
+// is wired.
+type appView struct {
+	*apps.App
+	Backup *proto.AppBackupState `json:"backup,omitempty"`
+}
+
 // GET /api/apps
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
-	out, err := s.apps.List(r.Context())
+	all, err := s.apps.List(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if out == nil {
-		out = []*apps.App{}
+	out := make([]appView, 0, len(all))
+	for _, a := range all {
+		out = append(out, appView{App: a})
+	}
+	if s.backupStates != nil && len(out) > 0 {
+		states, err := s.backupStates.AppBackupStates(r.Context())
+		if err != nil {
+			// The rows are still the answer; a derivation that failed is
+			// logged, and the field's absence is what the UI reads as
+			// "unknown" — never as "fine".
+			log.Printf("apps: backup state: %v", err)
+		} else {
+			byID := make(map[string]*proto.AppBackupState, len(states))
+			for i := range states {
+				byID[states[i].AppID] = &states[i].AppBackupState
+			}
+			for i := range out {
+				out[i].Backup = byID[out[i].ID]
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -128,7 +157,16 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "app not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, app)
+	view := appView{App: app}
+	if s.backupStates != nil {
+		if st, err := s.backupStates.AppBackupState(r.Context(), app.ID); err != nil {
+			// The id is request-supplied and stays out of the log line.
+			log.Printf("apps: backup state (GET /api/apps/{id}): %v", err)
+		} else {
+			view.Backup = st
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // PATCH /api/apps/{id}

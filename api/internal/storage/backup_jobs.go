@@ -382,6 +382,12 @@ type runAssembleResult struct {
 	// step 8, with the generation still written and recorded.
 	AppVolumesFailed int      `json:"appVolumesFailed"`
 	FailedVolumes    []string `json:"failedVolumes,omitempty"`
+	// FailedApps is the same failure grouped BY APP with each app's reason —
+	// the structured form of the terminal error, so the Tasks page can render
+	// "immich (n-compute): node is OFFLINE" as its own line rather than
+	// finding it inside a paragraph (#298). One entry per app, never a
+	// synthetic job per app.
+	FailedApps []AppFailure `json:"failedApps,omitempty"`
 	// AppsLeftDown names every app the fan-out stopped and could not start
 	// again. Non-empty fails the run at step 8 — see runPrune.
 	AppsLeftDown []string `json:"appsLeftDown,omitempty"`
@@ -873,6 +879,7 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			AppVolumesSkipped:  manifest.AppVolumes.SkippedCount,
 			AppVolumesFailed:   manifest.AppVolumes.FailedCount,
 			FailedVolumes:      manifest.AppVolumes.Failed,
+			FailedApps:         manifest.AppVolumes.FailedApps(),
 			AppsLeftDown:       manifest.AppVolumes.AppsLeftDown,
 			Warning:            manifest.Warning,
 			ManifestJSON:       string(manifestJSON),
@@ -1120,7 +1127,7 @@ func runPrune(store *Store, cfg RunConfig) jobs.DoFn {
 		// the alert path (#298) all see red rather than a green run with a
 		// caveat nobody reads.
 		if asm.AppVolumesFailed > 0 {
-			res.Warning = failedVolumesMessage(asm.FailedVolumes)
+			res.Warning = failedVolumesMessage(asm.FailedApps, asm.FailedVolumes)
 			if err := store.MarkRunRetention(sc.Ctx, sc.JobID, res); err != nil {
 				log.Printf("storage: record retention for run %s: %v", sc.JobID, err)
 			}
@@ -1413,16 +1420,42 @@ func appsLeftDownMessage(apps []string) string {
 		strings.ToUpper(subject), strings.Join(apps, ", "))
 }
 
-// failedVolumesMessage is the sentence a run dies on when a classified volume
-// it tried to take did not make it into the generation.
-func failedVolumesMessage(vols []string) string {
-	noun := "APP VOLUME"
-	if len(vols) > 1 {
-		noun = "APP VOLUMES"
+// failedVolumesMessage is the terminal entry a run dies on when a classified
+// volume it tried to take did not make it into the generation.
+//
+// One line per APP, each naming the app, its node, the volumes and the
+// fan-out's own reason — the job feed's terminal entry is the third of §4.4's
+// three surfaces, and "the manifest names the reason" is not naming it. The
+// flat volume list is the fallback for a result written by a build that
+// carried no per-app grouping.
+func failedVolumesMessage(apps []AppFailure, vols []string) string {
+	var b strings.Builder
+	switch {
+	case len(apps) == 1:
+		fmt.Fprintf(&b, "BACKUP FAILED FOR APP %s", apps[0].App)
+	case len(apps) > 1:
+		fmt.Fprintf(&b, "BACKUP FAILED FOR %d APPS", len(apps))
+	case len(vols) == 1:
+		fmt.Fprintf(&b, "BACKUP FAILED FOR APP VOLUME %s", vols[0])
+	default:
+		fmt.Fprintf(&b, "BACKUP FAILED FOR APP VOLUMES %s", strings.Join(vols, ", "))
 	}
-	return fmt.Sprintf("BACKUP FAILED FOR %s: %s could not be captured — a node offline at backup time, an agent that refused, "+
-		"or an upload that did not land; the manifest names the reason for each. Everything else this run captured IS on the backup target, "+
-		"sealed and indexed — this run is failed for what is missing, not for what landed. "+
-		"design/storage.md §4.4: an app whose backup did not happen has a FAILED backup, not a skipped one",
-		noun, strings.Join(vols, ", "))
+	b.WriteString(" — each app's backup did not happen, and here is why:")
+	if len(apps) == 0 {
+		b.WriteString(" a node offline at backup time, an agent that refused, or an upload that did not land; the manifest names the reason for each.")
+	}
+	for _, f := range apps {
+		ids := make([]string, 0, len(f.Volumes))
+		for _, v := range f.Volumes {
+			ids = append(ids, f.App+"/"+v)
+		}
+		where := ""
+		if f.Node != "" {
+			where = " on " + f.Node
+		}
+		fmt.Fprintf(&b, "\n  • %s%s: %s — %s", f.App, where, strings.Join(ids, ", "), f.Reason)
+	}
+	b.WriteString("\nEverything else this run captured IS on the backup target, sealed and indexed — this run is failed for what is missing, not for what landed. " +
+		"design/storage.md §4.4: an app whose backup did not happen has a FAILED backup, not a skipped one")
+	return b.String()
 }

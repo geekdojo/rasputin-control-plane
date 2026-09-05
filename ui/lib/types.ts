@@ -270,6 +270,36 @@ export type AppStatus =
 
 export type AppChange = 'deploying' | 'stopping' | 'deployed' | 'stopped' | 'failed' | 'deleted';
 
+/**
+ * Where an app stands against its backup cadence (design/storage.md §4.4,
+ * #298). Derived on the api from the backup ledger and served on every
+ * /api/apps row as `backup`.
+ *
+ *   ok           — a generation holds every backed-up volume, inside the cadence
+ *   overdue      — §4.4's red: not captured within cadence + grace, never captured
+ *                  and installed longer than that, or the most recent attempt
+ *                  FAILED (node offline, agent refused, upload did not land)
+ *   never        — nothing captured yet, install still inside the grace
+ *   unconfigured — no target claimed or the schedule is off (#299's nag, NOT overdue)
+ *   none         — nothing to back up: every volume is cache/bulk, or no tile
+ */
+export type AppBackupStateKind = 'ok' | 'overdue' | 'never' | 'unconfigured' | 'none';
+
+export interface AppBackupState {
+  state: AppBackupStateKind;
+  /** Highest §4.2 class among the backed-up volumes: 'critical' or 'state'. */
+  class?: string;
+  /** When a generation last captured EVERY backed-up volume. Absent = never. */
+  lastSuccessAt?: string;
+  lastAttemptAt?: string;
+  /** When the state became overdue. Only on `overdue`. */
+  overdueSince?: string;
+  /** The sentence beside the state — for overdue, the fan-out's own reason. */
+  reason?: string;
+  /** The cadence judged against, as a Go duration string. */
+  cadence?: string;
+}
+
 export interface App {
   id: string;
   name: string;
@@ -295,6 +325,8 @@ export interface App {
   lastStatusAt?: string;
   createdAt: string;
   updatedAt: string;
+  /** Backup state (§4.4, #298). Absent when the api does not derive it. */
+  backup?: AppBackupState;
 }
 
 export interface AppChangeEvent {
