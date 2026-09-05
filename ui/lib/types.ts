@@ -327,6 +327,21 @@ export interface App {
   updatedAt: string;
   /** Backup state (§4.4, #298). Absent when the api does not derive it. */
   backup?: AppBackupState;
+  /**
+   * The §4.4 install-time acknowledgement (#299): this app has a critical
+   * volume and was installed while no backup target was claimed, and the
+   * operator said so explicitly. A record, not a state — the standing nag is
+   * `backup.state === 'unconfigured'`, derived from the ledger. Absent when
+   * the install needed no acknowledgement.
+   */
+  backupAck?: BackupAck;
+}
+
+/** Who acknowledged installing with no backup target, and when (#299). */
+export interface BackupAck {
+  at: string;
+  /** The user's name — never a token. */
+  by: string;
 }
 
 export interface AppChangeEvent {
@@ -413,6 +428,17 @@ export interface CatalogTile {
   requires?: string[];
   // Present only on the single-tile detail response, not the list.
   composeYaml?: string;
+  // The tile's declared data volumes with their §4.2 backup class and §4.3
+  // quiesce strategy. Absent on tiles that declare none (the embedded floor
+  // predates classification); the live catalog carries them.
+  volumes?: TileVolume[];
+}
+
+/** One volume a tile declares, as tileschema.Volume serialises it. */
+export interface TileVolume {
+  name: string;
+  backup: 'critical' | 'state' | 'cache' | 'bulk' | string;
+  quiesce: string;
 }
 
 // ----- App volumes (geekdojo/geekdojo-brain#399) ----------------------------

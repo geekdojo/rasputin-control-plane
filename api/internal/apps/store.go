@@ -45,12 +45,20 @@ func ms(t time.Time) int64     { return t.UnixMilli() }
 func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 func (s *Store) Create(ctx context.Context, a *App) error {
+	var ackAt sql.NullInt64
+	ackBy := ""
+	if a.BackupAck != nil {
+		ackAt = sql.NullInt64{Int64: ms(a.BackupAck.At), Valid: true}
+		ackBy = a.BackupAck.By
+	}
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO apps (id, name, compose_yaml, target_node, published_port,
-                          source_tile, deploy_budget_s, expose_lan, web_tls, last_status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          source_tile, deploy_budget_s, expose_lan, web_tls, last_status, created_at, updated_at,
+                          backup_ack_at, backup_ack_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.Name, a.ComposeYAML, a.TargetNode, a.PublishedPort,
-		a.SourceTile, a.DeployBudgetSeconds, a.ExposeLAN, a.WebTLS, string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt))
+		a.SourceTile, a.DeployBudgetSeconds, a.ExposeLAN, a.WebTLS, string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt),
+		ackAt, ackBy)
 	return err
 }
 
@@ -186,7 +194,7 @@ func (s *Store) DeleteByTargetNode(ctx context.Context, nodeID string) ([]string
 func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
-               last_deployed, last_stopped, last_status_at, created_at, updated_at
+               last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by
         FROM apps WHERE id = ?`, id)
 	return scanApp(row.Scan)
 }
@@ -194,7 +202,7 @@ func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
-               last_deployed, last_stopped, last_status_at, created_at, updated_at
+               last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by
         FROM apps WHERE name = ?`, name)
 	return scanApp(row.Scan)
 }
@@ -202,7 +210,7 @@ func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 func (s *Store) List(ctx context.Context) ([]*App, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
-               last_deployed, last_stopped, last_status_at, created_at, updated_at
+               last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by
         FROM apps ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
@@ -228,10 +236,12 @@ func scanApp(scan func(...any) error) (*App, error) {
 		lastStatusAt sql.NullInt64
 		createdAt    int64
 		updatedAt    int64
+		ackAt        sql.NullInt64
+		ackBy        string
 	)
 	if err := scan(&a.ID, &a.Name, &a.ComposeYAML, &a.TargetNode, &a.PublishedPort,
 		&a.SourceTile, &a.DeployBudgetSeconds, &a.ExposeLAN, &a.WebTLS, &status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
-		&createdAt, &updatedAt); err != nil {
+		&createdAt, &updatedAt, &ackAt, &ackBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -252,5 +262,8 @@ func scanApp(scan func(...any) error) (*App, error) {
 	}
 	a.CreatedAt = fromMs(createdAt)
 	a.UpdatedAt = fromMs(updatedAt)
+	if ackAt.Valid {
+		a.BackupAck = &BackupAck{At: fromMs(ackAt.Int64), By: ackBy}
+	}
 	return &a, nil
 }

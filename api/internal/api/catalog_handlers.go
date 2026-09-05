@@ -88,6 +88,12 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		// pre-filling this; the stored default stays tailnet-only unless the
 		// operator explicitly opts in.
 		ExposeLAN bool `json:"exposeLan"`
+		// AcknowledgeNoBackup is §4.4's install-time acknowledgement (#299):
+		// the operator has read that this tile's critical data will not be
+		// backed up until a target is claimed, and installs anyway. Required
+		// only when the tile declares a `critical` volume AND backups are
+		// unconfigured; ignored otherwise. Absent in that case → 409.
+		AcknowledgeNoBackup bool `json:"acknowledgeNoBackup"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -139,6 +145,18 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 	}
 
 	now := time.Now().UTC()
+	// §4.4's install-time gate (#299), last: every cheaper refusal above has
+	// had its turn, so an operator ticking the acknowledgement is not then
+	// told the node was wrong. See apps_install_gate.go.
+	backupAck, refusal, err := s.noBackupGate(r.Context(), tile, req.AcknowledgeNoBackup, now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if refusal != "" {
+		writeError(w, http.StatusConflict, refusal)
+		return
+	}
 	app := &apps.App{
 		ID:            ulid.Make().String(),
 		Name:          name,
@@ -155,6 +173,7 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		LastStatus:          proto.AppStatusStopped,
 		CreatedAt:           now,
 		UpdatedAt:           now,
+		BackupAck:           backupAck,
 	}
 	if err := s.apps.Create(r.Context(), app); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

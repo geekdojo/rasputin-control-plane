@@ -552,7 +552,18 @@ export function getCatalogTile(id: string): Promise<CatalogTile> {
 // from the tile); it does not deploy — call deployApp with the returned app id.
 export function installCatalogApp(
   id: string,
-  input: { targetNode: string; name?: string; exposeLan?: boolean }
+  input: {
+    targetNode: string;
+    name?: string;
+    exposeLan?: boolean;
+    /**
+     * §4.4's install-time acknowledgement (#299): the operator has read that
+     * this tile's critical data will not be backed up until a target is
+     * claimed. Required — the api answers 409 without it — only when the tile
+     * declares a critical volume and backups are unconfigured.
+     */
+    acknowledgeNoBackup?: boolean;
+  }
 ): Promise<App> {
   return jsonFetch<App>(`/api/catalog/${id}/install`, {
     method: 'POST',
