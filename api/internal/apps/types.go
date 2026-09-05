@@ -47,4 +47,21 @@ type App struct {
 	LastStatusAt *time.Time      `json:"lastStatusAt,omitempty"`
 	CreatedAt    time.Time       `json:"createdAt"`
 	UpdatedAt    time.Time       `json:"updatedAt"`
+	// BackupAck is the install-time acknowledgement design/storage.md §4.4
+	// requires when a tile with a `critical` volume is installed while backups
+	// are unconfigured (geekdojo/geekdojo-brain#299): the operator was told the
+	// data would not be backed up and installed anyway. Nil when the install
+	// needed no acknowledgement. It is a record, not a state: the standing nag
+	// is derived from the backup ledger, not from this field.
+	BackupAck *BackupAck `json:"backupAck,omitempty"`
+}
+
+// BackupAck records that an operator installed an app knowing its critical
+// data had nowhere to be backed up to (§4.4's install-time gate, #299).
+type BackupAck struct {
+	// At is when the acknowledgement was given — the install time.
+	At time.Time `json:"at"`
+	// By is the authenticated user's NAME. Never a session token, never an
+	// id: this is rendered in the drawer as "acknowledged by bryce".
+	By string `json:"by"`
 }

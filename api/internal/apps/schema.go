@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS apps (
     last_stopped    INTEGER,
     last_status_at  INTEGER,
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    backup_ack_at   INTEGER,                  -- §4.4 install-time no-backup acknowledgement (#299); NULL = none was needed
+    backup_ack_by   TEXT NOT NULL DEFAULT ''  -- the acknowledging user's name (never a token)
 );
 CREATE INDEX IF NOT EXISTS idx_apps_target_node ON apps(target_node);
 CREATE INDEX IF NOT EXISTS idx_apps_status      ON apps(last_status);
@@ -54,4 +56,12 @@ var migrations = []string{
 	// since; a tile has to declare it, because the port number does not imply
 	// it. Only the Caddy→container leg is affected.
 	`ALTER TABLE apps ADD COLUMN web_tls INTEGER NOT NULL DEFAULT 0`,
+	// backup_ack_at / backup_ack_by: the §4.4 install-time acknowledgement
+	// (#299) — a tile with a `critical` volume installed while no backup target
+	// was claimed. NULL for every app installed before this column existed and
+	// for every install that needed no acknowledgement; the two are the same
+	// answer ("nobody was asked"), and the nag does not read this column, so
+	// an old install with no target is nagged exactly like a new one.
+	`ALTER TABLE apps ADD COLUMN backup_ack_at INTEGER`,
+	`ALTER TABLE apps ADD COLUMN backup_ack_by TEXT NOT NULL DEFAULT ''`,
 }

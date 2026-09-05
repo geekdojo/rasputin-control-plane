@@ -1,14 +1,16 @@
 'use client';
 
-import { ExternalLink, FilePlus2, RefreshCw, Search, ShieldAlert, Store, UploadCloud } from 'lucide-react';
+import { ExternalLink, FilePlus2, HardDrive, RefreshCw, Search, ShieldAlert, Store, UploadCloud } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   createApp,
   deployApp,
+  getBackupSchedule,
   getCatalogStatus,
   getCatalogTile,
   getSetupState,
   installCatalogApp,
+  listBackupTargets,
   listCatalog,
   listNodes,
   openInventoryWS,
@@ -17,6 +19,15 @@ import {
 import type { App, CatalogCollection, CatalogStatus, CatalogTile, Node } from '../../../lib/types';
 import { grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
 import { appAccess } from '../../../lib/appurl';
+import {
+  backupsConfigured,
+  criticalVolumes,
+  installAllowed,
+  installNeedsAck,
+  isNoBackupHold,
+  noBackupAckCopy,
+  type BackupConfiguration,
+} from '../../../lib/backup-gate';
 import {
   Badge,
   Btn,
@@ -624,6 +635,54 @@ function ConsentGate({
   );
 }
 
+// NoBackupGate — design/storage.md §4.4's install-time gate (#299). Shown only
+// when the tile declares a `critical` volume and backups are unconfigured (no
+// claimed target, or the schedule off). It is an acknowledgement, not a
+// refusal: the words say what is true, the link goes where the fix is, and
+// the checkbox starts unticked so install waits for the operator to read it.
+// The api enforces the same rule (409 without the flag), records who ticked
+// it and when on the app, and nags with a NO BACKUP TARGET badge and an alert
+// until a target exists.
+function NoBackupGate({
+  tile,
+  volumes,
+  reason,
+  acknowledged,
+  onAcknowledge,
+}: {
+  tile: CatalogTile;
+  volumes: string[];
+  reason: string;
+  acknowledged: boolean;
+  onAcknowledge: (v: boolean) => void;
+}) {
+  const copy = noBackupAckCopy(tile, volumes, reason);
+  const id = `ack-no-backup-${tile.id}`;
+  return (
+    <div>
+      <SectionLabel>BACKUP</SectionLabel>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+        <Badge color="#facc15">NO BACKUP TARGET</Badge>
+        <LinkBtn href={copy.href} small aria-label="Claim a backup target under Storage">
+          <HardDrive size={10} /> {copy.link}
+        </LinkBtn>
+      </div>
+      <Hint warn>{copy.body}</Hint>
+      <label htmlFor={id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 8, cursor: 'pointer' }}>
+        <input
+          id={id}
+          type="checkbox"
+          checked={acknowledged}
+          onChange={(e) => onAcknowledge(e.target.checked)}
+          aria-label={copy.checkbox}
+          style={{ marginTop: 1 }}
+        />
+        <span style={{ color: FG, fontSize: 10, lineHeight: 1.5 }}>{copy.checkbox}</span>
+      </label>
+    </div>
+  );
+}
+
 // ExposureField — the per-app LAN opt-in (ADR-0004 §9). Off (default) = the app
 // is tailnet-only; on adds the <app>.lan.<cluster-id>.internal name and a LAN
 // bind so other devices on the local network can reach it. It's a real bind, not
@@ -773,6 +832,16 @@ function InstallDrawer({
   const tier = tierOf(tile.privilege);
   const consentSatisfied =
     tier === 'routine' || (consented && (tier !== 'host-trusting' || typedConfirm.trim() === tile.id));
+  // §4.4's install-time gate (#299). Only a tile with a critical volume is
+  // ever asked; whether backups are configured is read once on open (null =
+  // could not tell — no gate is invented, the api's 409 is the backstop and
+  // reveals it). The acknowledgement starts unticked on every open.
+  const critical = criticalVolumes(tile);
+  const [backupCfg, setBackupCfg] = useState<BackupConfiguration | null>(null);
+  const [apiHeld, setApiHeld] = useState(false);
+  const [ackNoBackup, setAckNoBackup] = useState(false);
+  const needsAck = installNeedsAck({ criticalVolumes: critical, configured: backupCfg?.configured ?? null, apiHeld });
+  const ackSatisfied = installAllowed({ needsAck, acknowledged: ackNoBackup });
 
   useEffect(() => {
     if (!preview && compose === null) {
@@ -780,14 +849,31 @@ function InstallDrawer({
         .then((full) => setCompose(full.composeYaml ?? ''))
         .catch(() => setCompose(''));
     }
+    if (!preview && critical.length > 0) {
+      Promise.all([listBackupTargets(), getBackupSchedule()])
+        .then(([targets, schedule]) => setBackupCfg(backupsConfigured(targets, schedule)))
+        .catch(() => setBackupCfg(null));
+    }
   }, []);
 
   async function install() {
     setBusy(true);
     setErr(null);
     try {
-      setInstalled(await installCatalogApp(tile.id, { targetNode: selectedTarget, name, exposeLan }));
+      setInstalled(
+        await installCatalogApp(tile.id, {
+          targetNode: selectedTarget,
+          name,
+          exposeLan,
+          // Sent only when the dialog asked: an acknowledgement of a fact
+          // the operator was not shown is not one.
+          ...(needsAck && ackNoBackup ? { acknowledgeNoBackup: true } : {}),
+        }),
+      );
     } catch (e) {
+      // The api held the install for §4.4: show the acknowledgement rather
+      // than a dead button, whatever the dialog managed to read on open.
+      if (isNoBackupHold(e)) setApiHeld(true);
       setErr(String(e));
     } finally {
       setBusy(false);
@@ -904,12 +990,27 @@ function InstallDrawer({
               typed={typedConfirm}
               onType={setTypedConfirm}
             />
+            {needsAck && (
+              <NoBackupGate
+                tile={tile}
+                volumes={critical}
+                reason={backupCfg?.reason ?? ''}
+                acknowledged={ackNoBackup}
+                onAcknowledge={setAckNoBackup}
+              />
+            )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <Btn
                 variant="primary"
-                disabled={busy || !name || !selectedTarget || !consentSatisfied}
+                disabled={busy || !name || !selectedTarget || !consentSatisfied || !ackSatisfied}
                 aria-label={`Install ${tile.name}`}
-                title={consentSatisfied ? undefined : 'Consent to what this app can do before installing'}
+                title={
+                  !consentSatisfied
+                    ? 'Consent to what this app can do before installing'
+                    : !ackSatisfied
+                      ? 'Acknowledge that this app will not be backed up before installing'
+                      : undefined
+                }
                 onClick={install}
               >
                 <UploadCloud size={11} /> {busy ? 'INSTALLING…' : 'INSTALL'}

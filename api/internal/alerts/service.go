@@ -20,6 +20,10 @@
 //     the same per-app derivation the app tile renders, so it raises once
 //     (a stable id), never duplicates across ticks, and resolves on its own
 //     the moment a generation captures the app again.
+//   - backups    → backup-unconfigured (warn), one per app with a `critical`
+//     volume while no backup target is claimed or the schedule is off
+//     (§4.4's persistent nag, #299). Same derivation, same lifecycle; see
+//     backup_unconfigured.go for why it is warn and why only `critical`.
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -308,9 +312,11 @@ func (s *Service) securityAlerts(now time.Time) []proto.Alert {
 // its own when a generation captures the app again — the derivation is the
 // lifecycle, exactly as node-offline's is.
 //
-// An app whose backups are UNCONFIGURED (no target, schedule off) or that has
-// nothing to back up raises nothing here: nothing was due. That standing nag
-// is #299's, and it must not wear this alert's words.
+// An app whose backups are UNCONFIGURED (no target, schedule off) raises
+// #299's backup-unconfigured instead — from the same read of the derivation,
+// so the two cannot disagree and the ledger is consulted once per tick — and
+// never this one: nothing was due, and the nag must not wear OVERDUE's words.
+// An app with nothing to back up raises neither.
 func (s *Service) backupAlerts(ctx context.Context, now time.Time) ([]proto.Alert, error) {
 	if s.backups == nil {
 		return nil, nil
@@ -321,6 +327,10 @@ func (s *Service) backupAlerts(ctx context.Context, now time.Time) ([]proto.Aler
 	}
 	out := make([]proto.Alert, 0)
 	for _, st := range states {
+		if a, ok := backupUnconfiguredAlert(st, now); ok {
+			out = append(out, a)
+			continue
+		}
 		if !st.Overdue() {
 			continue
 		}

@@ -20,6 +20,7 @@ import type { App, AppVolumesResponse, CatalogTile, OrphanVolume, OrphanVolumesR
 import { formatBytes, timeAgo } from '../../../lib/volumes';
 import { appAccess, preferredAppUrl, type AppAccess } from '../../../lib/appurl';
 import { backupBadge, backupSummary, sortAppsOverdueFirst } from '../../../lib/backup-state';
+import { backupAckLine, noBackupBadge } from '../../../lib/backup-gate';
 import {
   Badge,
   Btn,
@@ -325,6 +326,10 @@ function AppRow({
   // a fresh install inside its grace, an unconfigured cluster (#299's nag)
   // and an app with nothing to back up show nothing here.
   const overdue = backupBadge(app.backup);
+  // The NO BACKUP TARGET badge (§4.4's persistent nag, #299), amber, for an
+  // app with something to back up and nowhere to back it up to. The api's
+  // states are exclusive, so a row never wears this beside OVERDUE.
+  const noTarget = noBackupBadge(app.backup);
 
   // No row-level hover affordance: the row has no onClick, and highlighting
   // the whole row told the operator (and the bench agents) that the row was
@@ -342,6 +347,16 @@ function AppRow({
             style={{ textDecoration: 'none', marginLeft: 8 }}
           >
             <Badge color="#f87171">{overdue.label}</Badge>
+          </Link>
+        )}
+        {noTarget && (
+          <Link
+            href={noTarget.href}
+            title={noTarget.title}
+            aria-label={`${app.name} has no backup target — open backups`}
+            style={{ textDecoration: 'none', marginLeft: 8 }}
+          >
+            <Badge color="#facc15">{noTarget.label}</Badge>
           </Link>
         )}
       </td>
@@ -586,12 +601,26 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
           <SectionLabel>BACKUP</SectionLabel>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             {app.backup?.state === 'overdue' && <Badge color="#f87171">OVERDUE</Badge>}
-            <span style={{ color: app.backup?.state === 'overdue' ? '#f87171' : FG, fontSize: 10 }}>{backupSummary(app.backup)}</span>
+            {app.backup?.state === 'unconfigured' && <Badge color="#facc15">NO BACKUP TARGET</Badge>}
+            <span
+              style={{
+                color: app.backup?.state === 'overdue' ? '#f87171' : app.backup?.state === 'unconfigured' ? '#facc15' : FG,
+                fontSize: 10,
+              }}
+            >
+              {backupSummary(app.backup)}
+            </span>
           </div>
           {app.backup?.reason && (
-            <Hint warn={app.backup.state === 'overdue'} style={{ marginTop: 6 }}>
+            <Hint warn={app.backup.state === 'overdue' || app.backup.state === 'unconfigured'} style={{ marginTop: 6 }}>
               {app.backup.reason}
             </Hint>
+          )}
+          {/* The §4.4 install-time record (#299): who installed this with no
+              backup target, and when. A record, so it stays once a target is
+              claimed — the badge above is the state. */}
+          {backupAckLine(app) && (
+            <Hint style={{ marginTop: 6 }}>{backupAckLine(app)}</Hint>
           )}
           {app.backup && app.backup.state !== 'none' && (
             <div style={{ marginTop: 8 }}>
