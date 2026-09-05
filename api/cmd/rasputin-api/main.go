@@ -685,6 +685,11 @@ func main() {
 		Store:         backupStore,
 	}
 	runner.Register(storage.RestoreAppWorkflow(backupStore, appRestoreCfg))
+	// storage.reconcile — #398: every five minutes, storage.inspect plus a
+	// write probe on each claimed target, recorded on the row beside the
+	// claim status, alerted on, and cited by backup.run's refusal. The gap
+	// between weekly runs is where a target leaves the bus unnoticed.
+	runner.Register(storage.TargetHealthWorkflow(backupStore, invStore))
 	runner.Register(storage.RunWorkflow(backupStore, storage.RunConfig{
 		Restores:  restoreSessions,
 		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
@@ -1013,6 +1018,14 @@ func main() {
 		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
 		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
 		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
+		// storage.reconcile (#398): the claimed backup target's health, with
+		// a write probe. Fires only while a target is claimed (Due).
+		{
+			Kind:         storage.TargetHealthJobKind,
+			Interval:     parseDurationOr(os.Getenv("RASPUTIN_STORAGE_RECONCILE_INTERVAL"), proto.BackupTargetHealthInterval),
+			InitialDelay: 2 * time.Minute,
+			Due:          storage.TargetHealthDue(backupStore),
+		},
 		// backup.run (§4.1): weekly by default, overridable per installation.
 		//
 		// The Interval here is a CHECK interval, not the cadence — the cadence
@@ -1060,6 +1073,7 @@ func main() {
 		SelfNodeID: selfNodeID,
 		DataDir:    dataDir,
 		ClusterID:  strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		Store:      backupStore,
 	}, func() {
 		log.Printf("rasputin-api: a restore is prepared; shutting down to restart onto the restored identity")
 		requestRestoreExit()
@@ -1188,6 +1202,9 @@ func main() {
 	backupStates := storage.NewBackupStates(backupStore, jobStore, appsStore, catalogStore, setupStore, true)
 	srv.SetBackupStates(backupStates)
 	alertsSvc.SetBackupStates(backupStates)
+	// Backup-target health (#398): one crit alert per claimed target the
+	// five-minute poll found missing, unmounted, unwritable or unreachable.
+	alertsSvc.SetBackupTargets(backupStore)
 	srv.SetAlertsService(alertsSvc)
 	if secret := os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"); secret != "" {
 		srv.SetAlertsWebhookSecret(secret)

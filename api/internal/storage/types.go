@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // TargetStatus is the rollup an operator sees for one claim attempt. The
@@ -310,4 +311,10 @@ type BackupTarget struct {
 	// is. Its absence is what a list renders as still-running.
 	ClaimedAt *time.Time `json:"claimedAt,omitempty"`
 	Error     string     `json:"error,omitempty"`
+	// Health is what the five-minute poll last found about the disk (#398),
+	// on a `claimed` row only. It sits BESIDE Status rather than replacing
+	// it: Status is the operator's intent and does not change when a disk
+	// falls off the bus; Health is what the disk is doing, and it does.
+	// `unknown` until the first poll, never afterwards.
+	Health *proto.BackupTargetHealth `json:"health,omitempty"`
 }

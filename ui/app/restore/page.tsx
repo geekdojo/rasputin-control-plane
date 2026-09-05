@@ -293,6 +293,14 @@ function Picker(props: {
           No attached disk carries a Rasputin backup set. Plug the backup disk into this controlplane and scan again,
           or set up fresh.
         </Hint>
+        {/* #398: the disk this cluster believes is its backup target, and what
+            the last health check said about it — the same sentence the storage
+            page and the run's refusal use. */}
+        {(data.claimedAbsent ?? []).map((a) => (
+          <Hint key={a.partUuid} warn>
+            {a.problem}
+          </Hint>
+        ))}
         <div style={{ display: 'flex', gap: 10 }}>
           <Btn onClick={props.onRescan}>
             <RefreshCw size={12} /> SCAN AGAIN

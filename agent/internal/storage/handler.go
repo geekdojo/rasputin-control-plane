@@ -154,6 +154,18 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, stagingRoot
 			})
 			return
 		}
+		// The write probe (#398), only when asked for and only on a target
+		// that is present and mounted: a probe of nothing would report the
+		// absence twice. Presence is not health — the e3bench stick listed
+		// fine while refusing writes — and this is the half of the check
+		// that can tell.
+		if cmd.Probe && ack.OK && ack.Present && ack.MountPath != "" {
+			ack.WriteProbe = WriteProbe(ctx, ack.MountPath)
+			if !ack.WriteProbe.OK {
+				log.Printf("rasputin-agent: storage: write probe FAILED partuuid=%s mount=%s: %s",
+					cmd.PartUUID, ack.MountPath, ack.WriteProbe.Detail)
+			}
+		}
 		bus.Respond(m, ack)
 	}); err != nil {
 		return subs, err

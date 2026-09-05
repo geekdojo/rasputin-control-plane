@@ -627,7 +627,15 @@ func (b *BlockDevBackend) Inspect(ctx context.Context, partUUID string) (*proto.
 	}
 	if mountPoint == "" {
 		if mountPoint, err = b.mountPartition(ctx, part, partUUID); err != nil {
-			return nil, err
+			// Attached and not mountable is its own answer, distinct from
+			// "not attached" and from "the agent could not look": the health
+			// poll renders it UNMOUNTED (#398). Present says the partition is
+			// there; OK=false says it could not be used.
+			return &proto.StorageInspectAck{
+				OK: false, Present: true, PartUUID: partUUID, DevicePath: part,
+				Refusal: refusalFor(err),
+				Detail:  fmt.Sprintf("%s is attached but could not be mounted: %v", part, err),
+			}, nil
 		}
 	}
 	ack := &proto.StorageInspectAck{

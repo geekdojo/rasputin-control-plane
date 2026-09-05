@@ -27,6 +27,7 @@ import {
   partitionSummary,
   transportLabel,
 } from '../../../components/storage/format';
+import { HEALTH_CAVEAT, healthBadge } from '../../../components/storage/target-health';
 import {
   Badge,
   Btn,
@@ -125,7 +126,13 @@ export default function BackupsPage() {
           again on a later backup run.
         </Hint>
       ) : (
-        <TargetTable targets={targets} />
+        <>
+          <TargetTable targets={targets} />
+          {/* #398: what the health badge can and cannot promise, said where
+              it is read. A 4 KiB probe that passes at 03:55 says nothing
+              about a gigabyte at 04:00. */}
+          {claimed && <Hint style={{ marginBottom: 14 }}>{HEALTH_CAVEAT}</Hint>}
+        </>
       )}
 
       {/* The runs panel sits directly under the target, before the disk picker,
@@ -231,7 +238,7 @@ function TargetTable({ targets }: { targets: BackupTarget[] }) {
     <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 4 }}>
       <thead>
         <tr>
-          {['STATUS', 'LABEL', 'PARTITION UUID', 'SIZE', 'ENCRYPTION', 'WHEN'].map((c) => (
+          {['STATUS', 'HEALTH', 'LABEL', 'PARTITION UUID', 'SIZE', 'ENCRYPTION', 'WHEN'].map((c) => (
             <th key={c} style={thStyle}>
               {c}
             </th>
@@ -243,6 +250,9 @@ function TargetTable({ targets }: { targets: BackupTarget[] }) {
           <tr key={t.jobId}>
             <td style={tdStyle}>
               <StatusBadge target={t} />
+            </td>
+            <td style={tdStyle}>
+              <HealthCell target={t} />
             </td>
             <td style={{ ...tdStyle, color: FG }}>
               {t.label || '—'}
@@ -279,6 +289,19 @@ function TargetTable({ targets }: { targets: BackupTarget[] }) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+// The disk's health BESIDE the claim status, never in place of it (#398).
+// CLAIMED says what the operator decided; MISSING · since 3h says what the
+// disk is doing. The detail — the probe's own finding — is the hover text.
+function HealthCell({ target }: { target: BackupTarget }) {
+  const b = healthBadge(target);
+  if (!b) return <span style={{ color: DIM }}>—</span>;
+  return (
+    <Badge color={b.color} title={b.title}>
+      {b.text}
+    </Badge>
   );
 }
 

@@ -138,6 +138,25 @@ type RestoreConfig struct {
 	// is derived from it, so the two must agree for the restored passkeys to
 	// work.
 	ClusterID string
+	// Store is the backup ledger, optional. When wired, a CLAIMED target that
+	// is not among the attached disks is named in the response with its last
+	// health check (#398), so the restore surface says "your backup disk is
+	// MISSING since …" rather than showing an empty list. A fresh
+	// replacement controlplane has no ledger and no such rows.
+	Store *Store
+}
+
+// ClaimedTargetAbsent is a claimed target the candidate scan did not find
+// (#398): the disk this cluster believes is its backup target is not attached
+// to the node that should hold it.
+type ClaimedTargetAbsent struct {
+	PartUUID string                    `json:"partUuid"`
+	Label    string                    `json:"label,omitempty"`
+	NodeID   string                    `json:"nodeId"`
+	Health   *proto.BackupTargetHealth `json:"health,omitempty"`
+	// Problem is the sentence: the target's label, and its last health check
+	// in the same words the storage page and the run's refusal use.
+	Problem string `json:"problem"`
 }
 
 // RestoreCandidate is one attached disk carrying a Rasputin backup set, as
@@ -202,7 +221,11 @@ type RestoreCandidatesResponse struct {
 	// ClusterID is this box's own cluster id, for the mismatch warning.
 	ClusterID  string             `json:"clusterId"`
 	Candidates []RestoreCandidate `json:"candidates"`
-	Ts         time.Time          `json:"ts"`
+	// ClaimedAbsent names every claimed target the scan did not find (#398).
+	// Empty on a fresh controlplane with no ledger, and whenever every claimed
+	// disk is attached.
+	ClaimedAbsent []ClaimedTargetAbsent `json:"claimedAbsent"`
+	Ts            time.Time             `json:"ts"`
 }
 
 // RestoreRequest is one restore, as PrepareRestore takes it.
@@ -392,8 +415,9 @@ func ListRestoreCandidates(ctx context.Context, cfg RestoreConfig) (*RestoreCand
 	}
 	out := &RestoreCandidatesResponse{
 		NodeID: cfg.SelfNodeID, ClusterID: cfg.ClusterID, Ts: ack.Ts,
-		Candidates: []RestoreCandidate{},
+		Candidates: []RestoreCandidate{}, ClaimedAbsent: []ClaimedTargetAbsent{},
 	}
+	out.ClaimedAbsent = claimedTargetsAbsent(ctx, cfg.Store, ack)
 	for i := range ack.Candidates {
 		c := ack.Candidates[i]
 		if !c.HasBackupSet {
@@ -437,6 +461,44 @@ func ListRestoreCandidates(ctx context.Context, cfg RestoreConfig) (*RestoreCand
 		out.Candidates = append(out.Candidates, cand)
 	}
 	return out, nil
+}
+
+// claimedTargetsAbsent lists the claimed targets whose partition UUID no
+// attached disk's marker carries, each with its last health check (#398).
+// The restore surface's version of "your backup disk is MISSING": the same
+// record, in the same words, as the storage page and the run's refusal.
+func claimedTargetsAbsent(ctx context.Context, store *Store, ack *proto.StorageEnumerateAck) []ClaimedTargetAbsent {
+	out := []ClaimedTargetAbsent{}
+	if store == nil {
+		return out
+	}
+	claimed, err := store.ListClaimed(ctx)
+	if err != nil {
+		return out
+	}
+	present := map[string]bool{}
+	for _, c := range ack.Candidates {
+		if c.BackupSet != nil && c.BackupSet.PartUUID != "" {
+			present[c.BackupSet.PartUUID] = true
+		}
+		for _, p := range c.Partitions {
+			if p.PartUUID != "" {
+				present[p.PartUUID] = true
+			}
+		}
+	}
+	for _, t := range claimed {
+		if t.PartUUID == "" || present[t.PartUUID] {
+			continue
+		}
+		a := ClaimedTargetAbsent{PartUUID: t.PartUUID, Label: t.Label, NodeID: t.NodeID, Health: t.Health}
+		a.Problem = fmt.Sprintf("the claimed backup target %s (partUuid %s) is not attached to %s", displayLabel(t.Label), t.PartUUID, t.NodeID)
+		if t.Health != nil && t.Health.State != proto.BackupTargetHealthUnknown {
+			a.Problem += " — " + DescribeHealth(*t.Health)
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // mountTarget asks the agent to mount a claimed target by partition UUID and

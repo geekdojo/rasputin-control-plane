@@ -1200,6 +1200,28 @@ export interface BackupCandidatesResponse {
 /** Every value except 'pending' is terminal. */
 export type BackupTargetStatus = 'pending' | 'claimed' | 'replaced' | 'failed';
 
+/**
+ * Where a claimed target stands as of its last five-minute health check
+ * (#398). `unknown` only until the first poll — a poll that gets no answer
+ * records `unreachable`, never this.
+ */
+export type BackupTargetHealthState = 'unknown' | 'ok' | 'missing' | 'unmounted' | 'unwritable' | 'unreachable';
+
+/**
+ * The poll's verdict, beside the claim status — never in place of it. Status
+ * is the operator's intent; health is what the disk is doing.
+ */
+export interface BackupTargetHealth {
+  state: BackupTargetHealthState;
+  /** When the last check completed. Absent for `unknown`. */
+  checkedAt?: string;
+  /** When the current state was first observed — "MISSING · since 3h" counts from here. */
+  since?: string;
+  /** The probe's finding, in prose. The row's hover text and the alert's body. */
+  detail?: string;
+  probeDurationMs?: number;
+}
+
 /** One row of the backup_targets ledger. Wrapped key blobs are never in it. */
 export interface BackupTarget {
   jobId: string;
@@ -1230,6 +1252,8 @@ export interface BackupTarget {
   /** Absent means still running. */
   claimedAt?: string;
   error?: string;
+  /** Present on a `claimed` row only. */
+  health?: BackupTargetHealth;
 }
 
 /**
@@ -1453,7 +1477,22 @@ export interface RestoreCandidatesResponse {
   /** THIS box's cluster id — the archive's must match for the restored passkeys to work. */
   clusterId: string;
   candidates: RestoreCandidate[];
+  /**
+   * Claimed targets the scan did not find (#398), each with its last health
+   * check. Empty on a fresh controlplane and whenever every claimed disk is attached.
+   */
+  claimedAbsent?: ClaimedTargetAbsent[];
   ts: string;
+}
+
+/** A claimed backup target that is not attached to the node that should hold it. */
+export interface ClaimedTargetAbsent {
+  partUuid: string;
+  label?: string;
+  nodeId: string;
+  health?: BackupTargetHealth;
+  /** The sentence: label plus the last health check, in the api's words. */
+  problem: string;
 }
 
 export interface RestoredEntry {

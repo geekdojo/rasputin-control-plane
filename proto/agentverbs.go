@@ -65,6 +65,21 @@ var verbMinAgentVersion = map[string]string{
 	"storage.backup_restore_volume": "2026.08.5-dev.140",
 }
 
+// StorageInspectProbeMinAgentVersion is the first agent release whose
+// storage.inspect honours StorageInspectCmd.Probe and answers with a
+// WriteProbe. Not a verb — the subject is unchanged, so an older agent still
+// ANSWERS, just without the probe — which is why it is a separate floor and
+// not an entry in verbMinAgentVersion: a no-responder explanation would never
+// fire for it. The health poll compares the node's reported agent version
+// against this when an ack comes back without a probe, so the row can say
+// "update the node" rather than "the agent did not probe" (#398).
+//
+// Entered when the field was authored, before its release existed, as the
+// NEXT release run after v2026.08.5-dev.143 (the newest published
+// control-plane release at the time). Confirm with `git tag --contains` once
+// the release exists and correct the floor if a release was cut in between.
+const StorageInspectProbeMinAgentVersion = "2026.08.5-dev.144"
+
 // metadataMinAgentVersion is the same table for registration-metadata keys
 // the api acts on: the first agent release whose registration carries the
 // key. A node whose agent predates the key has not failed to report it —

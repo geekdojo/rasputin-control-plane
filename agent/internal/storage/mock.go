@@ -618,7 +618,13 @@ func (m *MockBackend) Inspect(ctx context.Context, partUUID string) (*proto.Stor
 	}
 	mountPath, err := m.mountLocked(st, partUUID)
 	if err != nil {
-		return nil, err
+		// Same shape as the blockdev backend: attached, not mountable, and
+		// said so — the health poll's UNMOUNTED (#398).
+		return &proto.StorageInspectAck{
+			OK: false, Present: true, PartUUID: partUUID, DevicePath: st.deviceNames()[idx],
+			Refusal: refusalFor(err),
+			Detail:  fmt.Sprintf("%s is attached but could not be mounted: %v", st.deviceNames()[idx], err),
+		}, nil
 	}
 	if err := m.saveState(st); err != nil {
 		return nil, err
