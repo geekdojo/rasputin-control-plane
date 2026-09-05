@@ -1286,11 +1286,38 @@ export interface BackupRun {
   warning?: string;
   generationsKept?: number;
   generationsPruned?: number;
+  /**
+   * The target-side pre-flight estimate this run sent: the identity set, the
+   * app volumes (with the ones no earlier generation had sized named) and the
+   * margin. Recorded before the agent answered, so a run refused for space
+   * carries the numbers it was refused on. Absent on rows from earlier builds.
+   */
+  preflight?: BackupPreflightEstimate;
   status: BackupRunStatus;
   startedAt: string;
   /** Absent means still running. */
   finishedAt?: string;
   error?: string;
+}
+
+/** One run's target-side estimate — sizes and names only. */
+export interface BackupPreflightEstimate {
+  identityBytes: number;
+  volumeBytes: number;
+  marginBytes: number;
+  /** identity + volumes + margin. */
+  estimateBytes: number;
+  volumes?: {
+    app: string;
+    volume: string;
+    class: string;
+    bytes: number;
+    /** True when `bytes` is a recorded size; false when it is the class placeholder. */
+    known: boolean;
+    generation?: string;
+  }[];
+  /** "app/volume" for every volume counted at its class placeholder. */
+  unknownVolumes?: string[];
 }
 
 /** GET /api/backup/runs. */
@@ -1306,11 +1333,15 @@ export interface BackupRunsResponse {
   scope: BackupScope;
   /** The prose caveat, authored api-side so every surface says the same words. */
   scopeWarning: string;
-  /** §4.4's retained generation count. */
+  /** §4.4's retained generation count, as currently set — what the next run will keep. */
   retain: number;
 }
 
-/** GET/PUT /api/backup/schedule — §4.1's "weekly by default, overridable per installation". */
+/**
+ * GET/PUT /api/backup/schedule — §4.1's "weekly by default, overridable per
+ * installation", and §4.4's retention depth beside it. A PUT is the whole
+ * setting: a field left out is the default, not "keep what was there".
+ */
 export interface BackupSchedule {
   /** The SCHEDULE's on/off switch. "Back up now" still works when it is off. */
   enabled: boolean;
@@ -1323,6 +1354,15 @@ export interface BackupSchedule {
   defaultEvery: string;
   minEvery: string;
   maxEvery: string;
+  /**
+   * How many generations the target keeps, newest first. Always resolved
+   * (never 0). Read at the start of every run; lowering it prunes the oldest
+   * on the next run.
+   */
+  retain: number;
+  defaultRetain: number;
+  minRetain: number;
+  maxRetain: number;
 }
 
 /**

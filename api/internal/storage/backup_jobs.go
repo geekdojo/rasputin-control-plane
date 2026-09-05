@@ -114,8 +114,20 @@ type RunConfig struct {
 	// DBPath is the live database file, used only to SIZE it for the staging
 	// guard before the snapshot is taken.
 	DBPath string
-	// Retain is §4.4's retention. Zero means proto.BackupRetainGenerations.
+	// Retain is §4.4's retention when there is no settings store to read one
+	// from. Zero means proto.BackupRetainGenerations. With Settings wired the
+	// schedule's depth wins: step 1 reads it live, so an operator's change is
+	// the next run's policy without an api restart — the cadence already
+	// behaves that way (DueFunc) and the two knobs sit beside each other.
 	Retain int
+	// Settings is where the operator's schedule — cadence AND retention —
+	// lives. Nil means Retain (or the default) is the depth.
+	Settings ScheduleSettings
+	// Jobs is the job ledger, read by step 2 for the manifests earlier runs
+	// kept, which is where every captured volume's size on the target is
+	// recorded. Nil means no volume has a known size and every one is counted
+	// at its class placeholder — documented in target_estimate.go.
+	Jobs StepLister
 	// Ingest is the endpoint volume members land at — the same *Ingest the
 	// HTTP server mounts, so the credentials this run mints are verifiable by
 	// exactly the endpoint that receives them — and IngestBaseURL is the
@@ -180,6 +192,22 @@ func (c RunConfig) retain() int {
 		return proto.BackupRetainGenerations
 	}
 	return c.Retain
+}
+
+// resolveRetain is the depth THIS run prunes to: the schedule setting when
+// there is one, read now. The second value is a warning for the log when the
+// setting could not be read — the run proceeds on the fallback rather than
+// failing, because a settings hiccup is not a reason to skip a backup, but it
+// is a reason to say which depth was used.
+func (c RunConfig) resolveRetain(ctx context.Context) (int, string) {
+	if c.Settings == nil {
+		return c.retain(), ""
+	}
+	sched, err := GetBackupSchedule(ctx, c.Settings, true)
+	if err != nil {
+		return c.retain(), fmt.Sprintf("could not read the backup schedule (%v); this run keeps %d generation(s), the fallback", err, c.retain())
+	}
+	return sched.Generations(), ""
 }
 
 // RunSpec is the spec body of a backup.run job.
@@ -324,6 +352,11 @@ type runTarget struct {
 	// EstimateBytes is the measured size of the §4.5 identity set, used as the
 	// target-side preflight estimate. A measurement, not a guess.
 	EstimateBytes uint64 `json:"estimateBytes"`
+	// Retain is the retention depth this run prunes to, read from the
+	// schedule setting at the start so the whole run — and a retried prune —
+	// works from one number, and so the ledger says what it was before
+	// anything is deleted.
+	Retain int `json:"retain"`
 }
 
 // runPreflightResult is what the target said about itself.
@@ -334,6 +367,12 @@ type runPreflightResult struct {
 	FreeBytes        uint64 `json:"freeBytes,omitempty"`
 	RequiredBytes    uint64 `json:"requiredBytes,omitempty"`
 	GenerationsFound int    `json:"generationsFound"`
+	// Estimate is what the api told the agent the generation would need and
+	// how it got there: the identity set, each app volume at its recorded
+	// size or its class placeholder (named), and the margin. RequiredBytes
+	// above is the agent's arithmetic over the same input; the two should
+	// agree, and a reader can check.
+	Estimate TargetEstimate `json:"estimate"`
 	// StagingRoot is the directory the TARGET NODE'S agent will read the staged
 	// archive from, as that agent reported it. Every later step stages into
 	// this and the api derives no staging path of its own — see runStagingDir.
@@ -508,6 +547,15 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 			return nil, fmt.Errorf("this api cannot tell the nodes where to upload volumes: %v (RASPUTIN_PUBLIC_BASE_URL). Nothing was staged", err)
 		}
 
+		// The retention depth, read NOW rather than at api start, so an
+		// operator's change is this run's policy. The agent is handed it at
+		// step 8 as Keep; it is in the ledger from here so a reader knows
+		// what the run intended before the prune has happened.
+		retain, retainWarning := cfg.resolveRetain(sc.Ctx)
+		if retainWarning != "" {
+			sc.Log("warn", retainWarning)
+		}
+
 		now := time.Now().UTC()
 		gen := proto.BackupGenerationID(now, sc.JobID, proto.BackupScopeFull)
 		cfg.generation.set(gen)
@@ -529,9 +577,10 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 			GenerationID: gen,
 			Scope:        proto.BackupScopeFull,
 			Reason:       spec.Reason,
+			Retain:       retain,
 		}
-		sc.Log("info", fmt.Sprintf("backup run %s → target %s (partUuid %s) on %s, sealing to key %s",
-			gen, displayLabel(target.Label), target.PartUUID, target.NodeID, displayLabel(target.KeyID)))
+		sc.Log("info", fmt.Sprintf("backup run %s → target %s (partUuid %s) on %s, sealing to key %s; retention keeps %d generation(s)",
+			gen, displayLabel(target.Label), target.PartUUID, target.NodeID, displayLabel(target.KeyID), retain))
 		// Said at the START of every run, not only in the manifest at the end.
 		// An operator watching the live stream should learn the scope before
 		// the run has done anything, so "my apps are not in this" is never a
@@ -546,6 +595,12 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 // runPreflight is §4.4's pre-flight free-space check, on the TARGET side. The
 // SOURCE side's guard is step 3's, because it needs a measurement step 3 makes.
 //
+// The estimate it sends is the whole generation, not the archive alone: the
+// measured identity set, plus every app volume the fan-out will land on the
+// same disk — at the size the most recent generation holding it recorded, or
+// at a named class placeholder when none has — and the agent adds its margin.
+// See target_estimate.go for the composition and its honest limits.
+//
 // It is also where the api learns WHERE TO STAGE. The ack carries the node's
 // staging root, and every step that touches a staged file reads it from this
 // step's result rather than deriving one — see runStagingDir.
@@ -558,9 +613,37 @@ func runPreflight(cfg RunConfig) jobs.DoFn {
 		// Size the estimate from the live identity set. A measurement, so the
 		// target-side check is against real numbers rather than a constant that
 		// was true when it was written.
-		estimate := MeasureIdentitySet(cfg.Sources, fileSize(cfg.DBPath))
+		identityBytes := MeasureIdentitySet(cfg.Sources, fileSize(cfg.DBPath))
+		// The volumes this run will take, planned here exactly as step 4 will
+		// plan them, so the estimate counts what the fan-out will land. A
+		// cluster that cannot be enumerated cannot be sized: step 1 already
+		// refused an api with no app source, and the guard is repeated here
+		// for the same reason the fan-out repeats it — an error, never a nil
+		// dereference, on a step that is retried.
+		if cfg.Apps == nil || cfg.Tiles == nil {
+			return nil, errors.New("this api cannot enumerate installed apps, so it cannot size the backup")
+		}
+		installed, err := cfg.Apps.List(sc.Ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list installed apps to size the backup: %w", err)
+		}
+		plan := PlanAppVolumes(installed, cfg.Tiles)
+		want := make(map[string]bool, len(plan.Stage))
+		for _, p := range plan.Stage {
+			want[p.Member()] = true
+		}
+		est := EstimateTargetPayload(identityBytes, plan.Stage, PriorVolumeSizes(sc.Ctx, cfg.Store, cfg.Jobs, want))
+		// On the row BEFORE the agent answers: a run refused for space is the
+		// one whose numbers the operator needs, and it never reaches a step
+		// that would otherwise record them.
+		if cfg.Store != nil {
+			if err := cfg.Store.MarkRunPreflight(sc.Ctx, sc.JobID, est); err != nil {
+				log.Printf("storage: record preflight estimate for run %s: %v", sc.JobID, err)
+			}
+		}
+		sc.Log("info", est.Explain())
 		cmd, err := json.Marshal(proto.BackupPreflightCmd{
-			PartUUID: tgt.PartUUID, EstimateBytes: estimate,
+			PartUUID: tgt.PartUUID, EstimateBytes: est.PayloadBytes(),
 		})
 		if err != nil {
 			return nil, err
@@ -578,7 +661,15 @@ func runPreflight(cfg RunConfig) jobs.DoFn {
 				tgt.PartUUID, tgt.NodeID)
 		}
 		if !ack.OK {
-			return nil, refusalError("backup preflight on "+tgt.NodeID, ack.Refusal, ack.Detail)
+			refused := refusalError("backup preflight on "+tgt.NodeID, ack.Refusal, ack.Detail)
+			if ack.Refusal == proto.BackupRefusalInsufficientSpace {
+				// Both numbers are the agent's; the BREAKDOWN is ours, and a
+				// refusal that names which terms were guesses is one an
+				// operator can act on — free the disk, or run once so the
+				// placeholders become measurements.
+				return nil, fmt.Errorf("%w. %s", refused, est.Explain())
+			}
+			return nil, refused
 		}
 		stagingRoot := strings.TrimSpace(ack.StagingRoot)
 		if err := checkStagingRoot(stagingRoot); err != nil && stagingRoot != "" {
@@ -608,11 +699,12 @@ func runPreflight(cfg RunConfig) jobs.DoFn {
 			PartUUID: tgt.PartUUID, MountPath: mountPath,
 			TotalBytes: ack.TotalBytes, FreeBytes: ack.FreeBytes,
 			RequiredBytes: ack.RequiredBytes, GenerationsFound: len(ack.Generations),
+			Estimate:    est,
 			StagingRoot: stagingRoot,
 		}
-		sc.Log("info", fmt.Sprintf("target %s: %s free of %s, %d generation(s) retained; this run needs about %s",
+		sc.Log("info", fmt.Sprintf("target %s: %s free of %s, %d generation(s) retained; this run needs about %s (%s of app volumes in that)",
 			ack.MountPath, humanBytes(ack.FreeBytes), humanBytes(ack.TotalBytes),
-			len(ack.Generations), humanBytes(ack.RequiredBytes)))
+			len(ack.Generations), humanBytes(ack.RequiredBytes), humanBytes(est.VolumeBytes)))
 		sc.Log("info", fmt.Sprintf("%s stages backup archives in %s; this run will seal into it", tgt.NodeID, stagingRoot))
 		return json.Marshal(res)
 	}
@@ -1050,7 +1142,16 @@ func runPrune(store *Store, cfg RunConfig) jobs.DoFn {
 		if err := priorResult(sc, "write", &wrote); err != nil {
 			return nil, err
 		}
-		keep := cfg.retain()
+		// The depth step 1 read from the schedule. A row from a build that
+		// did not record one — a run stranded across an upgrade and retried —
+		// falls back to the config's, never to zero, which the agent would
+		// refuse.
+		keep := tgt.Retain
+		if keep < MinBackupRetain {
+			keep = cfg.retain()
+		}
+		sc.Log("info", fmt.Sprintf("retention depth %d: the target keeps the newest %d generation(s) including this one; a lower setting takes effect here on the next run",
+			keep, keep))
 		cmd, err := json.Marshal(proto.BackupPruneCmd{
 			PartUUID: tgt.PartUUID, Keep: keep,
 			// The run's own output, named so no ordering accident can cost it.

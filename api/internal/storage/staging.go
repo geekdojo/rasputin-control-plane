@@ -24,25 +24,30 @@ import (
 //
 // # What is guarded, and how much
 //
-// A run materialises up to three things under the staging directory:
+// A run materialises three things under the staging directory, in sequence:
 //
 //	1. the `VACUUM INTO` snapshot of rasputin.db          ~ db size
-//	2. one staged app-volume copy, from the agent          ~ largest volume
-//	3. the fan-out's tar of the captured volumes           ~ volume total
-//	4. the assembled tar (snapshot + identity + volumes)   ~ identity + volumes
-//	5. the sealed archive                                  ~ identity + volumes
+//	2. the assembled tar (manifest + snapshot + identity)  ~ identity set
+//	3. the sealed archive                                  ~ identity set
 //
-// (1) is deleted as soon as (4) is built, (2) as soon as it is copied into (3),
-// (3) as soon as (4) has taken its members, and (4) as soon as (5) is sealed —
-// so the true peak is lower. The guard sizes for the pessimistic case anyway,
+// (1) is deleted as soon as (2) is built and (2) as soon as (3) is sealed, so
+// the true peak is lower. The guard sizes for the pessimistic case anyway,
 // because an estimate that is optimistic about a disk-full failure is not a
-// guard. So: peak ≈ dbSize + 2 × (identitySize + volumeSize) + largestVolume.
+// guard. So: peak ≈ dbSize + 2 × identitySize, plus the volume terms below.
 //
-// The volume terms are ZERO until the fan-out has staged something, and that is
-// not a gap in the estimate — it is the fact. A volume's size cannot be known
-// before it is staged, so the fan-out re-runs this guard before EVERY stage
-// with what it has measured, and records the volumes it refuses rather than
-// taking the partition down.
+// The APP VOLUMES ARE NOT IN THIS BUDGET, and that is a fact about the design
+// rather than a gap in the arithmetic: since the per-node transport (#296) a
+// volume is staged and sealed on the node that hosts it and uploaded straight
+// into the generation directory on the backup target through the ingest
+// endpoint. It never touches the api's staging root — not on a compute node,
+// and not on the controlplane either, where the agent's staging root is a
+// different directory guarded by the agent's own copy of this reserve (#294).
+// PlanStaging still takes a volumeBytes and a largestVolumeBytes term from
+// the design that copied volumes through here; both call sites pass zero,
+// and the arithmetic and its tests are kept so the terms are ready if a
+// volume ever does route through the api again. The volumes' effect on the
+// TARGET disk is sized by the target-side pre-flight instead
+// (target_estimate.go).
 //
 // The reserve it must leave behind is StagingReserveBytes, and the number is
 // not arbitrary: it is VictoriaMetrics' `-storage.minFreeDiskSpaceBytes=2GB`
@@ -52,16 +57,22 @@ import (
 // above the same line means a backup can never be the cause of an observability
 // outage, and the operator gets a job failure naming both numbers instead.
 //
-// # What this is NOT, and what is left to #393
+// # What this is NOT
 //
-// This is the minimum that stops THIS job filling the disk. It is not the
-// general facility #393 describes: there is no shared preflight every stager
-// calls, no integration with the 85% DiskAlmostFull vmalert rule, no bound on
-// Loki (which §5 records as having no free-space guard at all), and no
-// cross-subsystem accounting of what else might stage concurrently. A second
-// stager running at the same moment can still take the partition below the
-// reserve between this check and the write — the check is a snapshot, not a
-// lease. #393 is where a real reservation belongs.
+// This is the guard for THIS job's staging, and it is the whole of what #393
+// asked for on the source side — #393 closed as shipped on 2026-09-05: the
+// pre-flight guard before anything is quiesced, with the 2 GiB reserve; a
+// staging root the api requires the agent to name; the directory excluded
+// from the archive by construction; and cleanup per volume, on every terminal
+// path, and at boot on every app-hosting node (the agent's CleanStaging at
+// start-up, the api's in finalizeRunRow). What it is NOT, and what is
+// deliberately not attempted here, is a RESERVATION: a second stager running
+// at the same moment can still take the partition below the reserve between
+// this check and the write, because the check is a snapshot of free space,
+// not a lease on it. #393's revisit trigger names exactly that — a lease
+// between check and write if two stagers ever share a node, or if Loki gains
+// a staging path without a guard — and until one does, a lease would be
+// machinery with nothing to hold off.
 
 // # Where the staging directory is, and why that is not decided here
 //
@@ -140,16 +151,12 @@ type StagingBudget struct {
 	// IdentityBytes is the whole §4.5 identity set: the database plus the trust
 	// directory plus Headscale state.
 	IdentityBytes uint64 `json:"identityBytes"`
-	// VolumeBytes is the app-volume data captured so far — the staged tars the
-	// fan-out has already taken — and LargestVolumeBytes the biggest single one
-	// of them.
-	//
-	// Both are zero at the top of a run, and they are not a guess that has not
-	// been made yet: a volume's size is unknowable until it has been staged, so
-	// the fan-out re-sizes before EVERY stage with what it has measured, and
-	// refuses the rest rather than filling the disk. LargestVolumeBytes is
-	// §4.7's peak term — the one staged copy that exists on the agent's root
-	// alongside everything the api is holding.
+	// VolumeBytes and LargestVolumeBytes are the app-volume terms from the
+	// design that copied volumes through this directory. They are ZERO on
+	// every run this build makes: volumes go node → ingest → target and never
+	// touch the api's staging root (see the file comment). Kept, with the
+	// arithmetic that uses them, so the budget can take a volume term again
+	// without the shape of this record changing.
 	VolumeBytes        uint64 `json:"volumeBytes"`
 	LargestVolumeBytes uint64 `json:"largestVolumeBytes"`
 	// PeakBytes is the pessimistic simultaneous residency — see the file
@@ -186,10 +193,9 @@ func (b StagingBudget) Explain(dir string) string {
 // PlanStaging sizes a run and checks the staging partition against it.
 //
 // identityBytes is the measured size of the §4.5 set and dbBytes the live
-// database's size within it. volumeBytes is the app-volume data captured so far
-// and largestVolumeBytes the biggest single volume among it — both zero before
-// the fan-out has staged anything, and both re-supplied before every subsequent
-// stage, because that is the only moment either number exists.
+// database's size within it. volumeBytes and largestVolumeBytes are the terms
+// for app-volume data staged HERE, which no run does any more (volumes go
+// node → ingest → target); both call sites pass zero. See the file comment.
 func PlanStaging(dir string, dbBytes, identityBytes, volumeBytes, largestVolumeBytes uint64) (StagingBudget, error) {
 	free, err := FreeBytes(dir)
 	if err != nil {

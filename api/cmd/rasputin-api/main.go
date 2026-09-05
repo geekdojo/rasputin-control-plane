@@ -688,6 +688,13 @@ func main() {
 	runner.Register(storage.RunWorkflow(backupStore, storage.RunConfig{
 		Restores:  restoreSessions,
 		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		// The operator's schedule — cadence and retention depth — read live
+		// at the start of every run, the way the Due gate reads the cadence
+		// on every tick; and the job ledger, read at pre-flight for the
+		// manifests earlier runs kept, which is where every captured volume's
+		// size on the target is recorded (storage/target_estimate.go).
+		Settings: setupStore,
+		Jobs:     jobStore,
 		// The transport: the endpoint members land at, and the URL the
 		// nodes are handed for it — the same public base the update
 		// bundles are served from, so a node that can pull a bundle can

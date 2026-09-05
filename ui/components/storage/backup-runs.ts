@@ -13,6 +13,7 @@
 // get it wrong in the other and they believe their password vault is on that
 // disk when it is not.
 
+import type { BackupScheduleRequest } from '../../lib/api';
 import type { BackupRunsResponse, BackupSchedule } from '../../lib/types';
 
 /**
@@ -85,10 +86,68 @@ export function cadenceValue(schedule: BackupSchedule | null): string {
   return schedule.every ?? schedule.defaultEvery;
 }
 
-/** The PUT body for a cadence the operator picked. */
-export function cadenceRequest(value: string): { enabled: boolean; every?: string } {
-  if (value === CADENCE_OFF) return { enabled: false };
-  return { enabled: true, every: value };
+/**
+ * The PUT body for a cadence the operator picked.
+ *
+ * Carries the CURRENT retention depth along, because the api's PUT is the
+ * whole setting and a body without `retain` would silently reset the depth to
+ * the default — a cadence change must not be able to change how many
+ * generations are kept.
+ */
+export function cadenceRequest(value: string, current?: BackupSchedule | null): BackupScheduleRequest {
+  const retain = current?.retain;
+  if (value === CADENCE_OFF) return retain ? { enabled: false, retain } : { enabled: false };
+  return retain ? { enabled: true, every: value, retain } : { enabled: true, every: value };
+}
+
+/**
+ * The retention depths the "Generations kept" control offers, inside the api's
+ * bounds (1..52). A curated list rather than every integer: the choice is
+ * "how much history", and these are the sizes that mean something at a weekly
+ * cadence — a month (the default), a quarter, a year.
+ */
+export const RETAIN_OPTIONS: number[] = [1, 2, 3, 4, 6, 8, 12, 26, 52];
+
+/**
+ * The options the retention select renders: the curated list, with the
+ * current value inserted if it is not one of them — a depth set through the
+ * api to a number the list does not carry must still render as itself, not
+ * as the nearest option.
+ */
+export function retainOptions(schedule: BackupSchedule | null): number[] {
+  const current = retainValue(schedule);
+  if (RETAIN_OPTIONS.includes(current)) return RETAIN_OPTIONS;
+  return [...RETAIN_OPTIONS, current].sort((a, b) => a - b);
+}
+
+/** The retention select's current value: the api's resolved depth, or its default. */
+export function retainValue(schedule: BackupSchedule | null): number {
+  if (!schedule) return 4;
+  if (schedule.retain >= 1) return schedule.retain;
+  return schedule.defaultRetain >= 1 ? schedule.defaultRetain : 4;
+}
+
+/**
+ * The PUT body for a retention depth the operator picked. Carries the current
+ * cadence and on/off state along, for the same reason cadenceRequest carries
+ * the depth: the PUT is the whole setting.
+ */
+export function retainRequest(value: number, current: BackupSchedule | null): BackupScheduleRequest {
+  const retain = Number.isInteger(value) && value >= 1 ? value : retainValue(current);
+  if (!current || !current.enabled) return { enabled: false, retain };
+  const every = current.every ?? current.defaultEvery;
+  return every ? { enabled: true, every, retain } : { enabled: true, retain };
+}
+
+/**
+ * The helper text under the retention control. It says the one thing an
+ * operator lowering the number needs to hear before they do it: the oldest
+ * generations go on the NEXT run, not now — prune is a step of a run, and it
+ * converges the disk on the depth whatever it held before.
+ */
+export function retainHelpText(schedule: BackupSchedule | null): string {
+  const n = retainValue(schedule);
+  return `${n} generation${n === 1 ? '' : 's'} kept on the target, newest first. Lowering it prunes the oldest on the next backup run; nothing is deleted until then.`;
 }
 
 /**

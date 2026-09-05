@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS backup_runs (
     warning              TEXT NOT NULL DEFAULT '',    -- a caveat on a row that is not failed
     generations_kept     INTEGER NOT NULL DEFAULT 0,
     generations_pruned   INTEGER NOT NULL DEFAULT 0,
+    preflight            TEXT NOT NULL DEFAULT '',    -- the target-side estimate, as JSON (TargetEstimate); sizes and names only
     status               TEXT NOT NULL,  -- 'running' | 'succeeded' | 'failed'
     started_at           INTEGER NOT NULL,
     finished_at          INTEGER,
@@ -128,6 +129,12 @@ CREATE INDEX IF NOT EXISTS idx_restore_reports_recorded ON restore_reports(recor
 // volumes and skipped none, because the fan-out enumerated nothing at all, and
 // they were honest about it in the only field they had (scope 'identity-only').
 // Nothing back-fills them; a row gets them by being written by this build.
+//
+// preflight: #297's target-side estimate — what the run told the agent the
+// generation would need, broken into the identity set, the app volumes (and
+// which of those were guessed at) and the margin. An empty value is right for
+// every row written before the column existed: those runs estimated the
+// identity set alone and recorded nothing about it.
 var migrations = []string{
 	`ALTER TABLE backup_targets ADD COLUMN wiped INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE backup_targets ADD COLUMN public_key TEXT NOT NULL DEFAULT ''`,
@@ -135,4 +142,5 @@ var migrations = []string{
 	`ALTER TABLE backup_runs ADD COLUMN complete INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE backup_runs ADD COLUMN warning TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE backup_runs ADD COLUMN app_volumes_failed INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE backup_runs ADD COLUMN preflight TEXT NOT NULL DEFAULT ''`,
 }

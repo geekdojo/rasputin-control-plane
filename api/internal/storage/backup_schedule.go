@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // design/storage.md §4.1's cadence: "Default cadence weekly, overridable per
@@ -65,7 +67,25 @@ const MinBackupCadence = time.Hour
 // able to say so in words rather than by typing a large number.
 const MaxBackupCadence = 365 * 24 * time.Hour
 
-// BackupSchedule is the operator's cadence choice.
+// DefaultBackupRetain is §4.4's retention depth when the operator has not
+// chosen one: proto's four generations.
+const DefaultBackupRetain = proto.BackupRetainGenerations
+
+// MinBackupRetain is the floor: one. A depth of zero would be a prune that
+// empties the disk, which the agent refuses outright (BackupPruneCmd.Keep) —
+// so the setting refuses it first, with a sentence, rather than persisting a
+// value every run would then be refused on.
+const MinBackupRetain = 1
+
+// MaxBackupRetain is the ceiling: fifty-two, a year of weekly fulls. Every
+// generation is a FULL copy of the identity set and every classified volume,
+// so the depth multiplies the target's footprint directly; past a year of
+// history the operator wants a bigger disk, not a bigger number.
+const MaxBackupRetain = 52
+
+// BackupSchedule is the operator's cadence and retention choice — the two
+// knobs §4.1 and §4.4 put beside each other ("overridable alongside the
+// cadence"), persisted as one setting so they cannot be read inconsistently.
 type BackupSchedule struct {
 	// Enabled is the operator's on/off switch for the SCHEDULE only. False
 	// stops the weekly run; "Back up now" still works, and §4.4's loudness is
@@ -75,10 +95,19 @@ type BackupSchedule struct {
 	// Every is the cadence, as a Go duration string ("168h"). Empty means
 	// DefaultBackupCadence.
 	Every string `json:"every,omitempty"`
+	// Retain is how many generations the target keeps, newest first. Zero
+	// means DefaultBackupRetain. Read at the START of every run and handed to
+	// the agent as BackupPruneCmd.Keep, so lowering it takes effect on the
+	// next run's prune — convergently, because prune is declarative: the
+	// target ends up holding this many, whatever it held before.
+	Retain int `json:"retain,omitempty"`
 }
 
 // ErrInvalidCadence rejects a cadence outside the bounds above.
 var ErrInvalidCadence = fmt.Errorf("backup cadence must be a duration between %s and %s", MinBackupCadence, MaxBackupCadence)
+
+// ErrInvalidRetain rejects a retention depth outside the bounds above.
+var ErrInvalidRetain = fmt.Errorf("backup retention must keep between %d and %d generations", MinBackupRetain, MaxBackupRetain)
 
 // Interval resolves the schedule's cadence, falling back to the default for an
 // empty or unparseable value.
@@ -95,8 +124,30 @@ func (s BackupSchedule) Interval() time.Duration {
 	return d
 }
 
+// Generations resolves the schedule's retention depth, falling back to the
+// default for a zero or out-of-range value.
+//
+// The same shape as Interval, for the same reason: this is what a run reads at
+// step 1, and a corrupt stored value must not be able to reach the agent as a
+// Keep it would refuse (and so fail every run) or as a depth that empties the
+// disk. SetBackupSchedule is where a bad value is refused.
+func (s BackupSchedule) Generations() int {
+	if s.Retain < MinBackupRetain || s.Retain > MaxBackupRetain {
+		return DefaultBackupRetain
+	}
+	return s.Retain
+}
+
 // ValidateBackupSchedule checks an operator-supplied schedule.
 func ValidateBackupSchedule(s BackupSchedule) (BackupSchedule, error) {
+	// Retention first, because it is the cheaper check and the one whose
+	// failure is easier to say. Zero is "not chosen", not "keep nothing".
+	switch {
+	case s.Retain == 0:
+		s.Retain = DefaultBackupRetain
+	case s.Retain < MinBackupRetain || s.Retain > MaxBackupRetain:
+		return BackupSchedule{}, ErrInvalidRetain
+	}
 	s.Every = strings.TrimSpace(s.Every)
 	if s.Every == "" {
 		s.Every = DefaultBackupCadence.String()
@@ -133,14 +184,14 @@ type ScheduleSettings interface {
 // looked at the setting.
 func GetBackupSchedule(ctx context.Context, st ScheduleSettings, defaultEnabled bool) (BackupSchedule, error) {
 	if st == nil {
-		return BackupSchedule{Enabled: defaultEnabled, Every: DefaultBackupCadence.String()}, nil
+		return BackupSchedule{Enabled: defaultEnabled, Every: DefaultBackupCadence.String(), Retain: DefaultBackupRetain}, nil
 	}
 	raw, err := st.Get(ctx, KeyBackupSchedule)
 	if err != nil {
 		return BackupSchedule{}, err
 	}
 	if strings.TrimSpace(raw) == "" {
-		return BackupSchedule{Enabled: defaultEnabled, Every: DefaultBackupCadence.String()}, nil
+		return BackupSchedule{Enabled: defaultEnabled, Every: DefaultBackupCadence.String(), Retain: DefaultBackupRetain}, nil
 	}
 	var s BackupSchedule
 	if err := json.Unmarshal([]byte(raw), &s); err != nil {
@@ -149,6 +200,10 @@ func GetBackupSchedule(ctx context.Context, st ScheduleSettings, defaultEnabled 
 	if strings.TrimSpace(s.Every) == "" {
 		s.Every = DefaultBackupCadence.String()
 	}
+	// Resolved on the way out, so a value persisted before the field existed
+	// (or one edited by hand out of range) is SERVED as the depth a run will
+	// actually use rather than as a zero a client would have to interpret.
+	s.Retain = s.Generations()
 	return s, nil
 }
 
