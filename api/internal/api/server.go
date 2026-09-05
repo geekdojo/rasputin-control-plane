@@ -61,11 +61,14 @@ type Server struct {
 	setup               *setup.Service
 	alerts              *alerts.Service
 	alertsWebhookSecret string
-	auth                *auth.Service
-	obs                 *obs.Status
-	busTokens           *busauth.Store
-	nc                  *nats.Conn
-	uiDir               string
+	// backupStates is the per-app backup derivation the /api/apps rows carry
+	// as `backup` (design/storage.md §4.4, #298); nil omits the field.
+	backupStates *storage.BackupStates
+	auth         *auth.Service
+	obs          *obs.Status
+	busTokens    *busauth.Store
+	nc           *nats.Conn
+	uiDir        string
 	// releaseSource discovers the latest releases from the public channel
 	// (Check for Updates). nil when not configured — the endpoints then
 	// return 503. releaseChannel is the default channel ("stable" | "dev").
@@ -130,6 +133,11 @@ func (s *Server) SetBackupStore(st *storage.Store) { s.backup = st }
 // *Ingest the backup.run workflow mints credentials through, so a credential
 // is verifiable by exactly the endpoint that receives it.
 func (s *Server) SetBackupIngest(in *backupxfer.Ingest) { s.backupIngest = in }
+
+// SetBackupStates wires the per-app backup derivation so every /api/apps row
+// says where the app stands against its backup cadence. Wired by main beside
+// the alerts service that reads the same derivation.
+func (s *Server) SetBackupStates(b *storage.BackupStates) { s.backupStates = b }
 
 // handleBackupIngest is PUT /api/backup/ingest/{generation}/{member}. The
 // whole handler lives in backupxfer, beside the client that speaks to it.

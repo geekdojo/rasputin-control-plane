@@ -1,6 +1,6 @@
 'use client';
 
-import { ClipboardList, Database, ExternalLink, Package, Play, Plus, RotateCcw, Square, Trash2, UploadCloud } from 'lucide-react';
+import { ClipboardList, Database, ExternalLink, HardDrive, Package, Play, Plus, RotateCcw, Square, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
@@ -19,6 +19,7 @@ import {
 import type { App, AppVolumesResponse, CatalogTile, OrphanVolume, OrphanVolumesResponse } from '../../../lib/types';
 import { formatBytes, timeAgo } from '../../../lib/volumes';
 import { appAccess, preferredAppUrl, type AppAccess } from '../../../lib/appurl';
+import { backupBadge, backupSummary, sortAppsOverdueFirst } from '../../../lib/backup-state';
 import {
   Badge,
   Btn,
@@ -191,6 +192,10 @@ export default function AppsPage() {
     </LinkBtn>
   );
 
+  // §4.4's top billing: an app whose backup did not happen is listed first,
+  // not found by scanning. The rest keep install order.
+  const shown = sortAppsOverdueFirst(apps);
+
   return (
     <PageShell>
       <PageHeader icon={Package} title={`APPS — ${apps.length}`} right={addButton} />
@@ -222,7 +227,7 @@ export default function AppsPage() {
               </tr>
             </thead>
             <tbody>
-              {apps.map((a) => (
+              {shown.map((a) => (
                 <AppRow
                   key={a.id}
                   app={a}
@@ -313,14 +318,32 @@ function AppRow({
   // back up is a start, not a fresh deploy). Same underlying action either way.
   const started = !!app.lastDeployed;
 
+  // The OVERDUE badge (design/storage.md §4.4, #298), beside the name — the
+  // first thing in the row, in red, with the elapsed time since the last
+  // success. It links to the storage page, whose runs table names which app
+  // failed and why; the reason is also on hover. Only `overdue` earns it:
+  // a fresh install inside its grace, an unconfigured cluster (#299's nag)
+  // and an app with nothing to back up show nothing here.
+  const overdue = backupBadge(app.backup);
+
   // No row-level hover affordance: the row has no onClick, and highlighting
   // the whole row told the operator (and the bench agents) that the row was
   // the target when only the controls inside it are. The name button carries
   // its own hover instead.
   return (
     <tr>
-      <td style={tdStyle}>
+      <td style={{ ...tdStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         <NameButton name={app.name} onClick={onOpenDetail} />
+        {overdue && (
+          <Link
+            href={overdue.href}
+            title={overdue.title}
+            aria-label={`Backup of ${app.name} is overdue — open backups`}
+            style={{ textDecoration: 'none', marginLeft: 8 }}
+          >
+            <Badge color="#f87171">{overdue.label}</Badge>
+          </Link>
+        )}
       </td>
       <td style={{ ...tdStyle, color: DIM }}>{app.targetNode}</td>
       <td style={{ ...tdStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -553,6 +576,30 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
                   : 'Devices on your local network can resolve its .lan name and connect to it there on its own port. Turn this off to withdraw the name — the app and its data stay put.'
                 : 'Reachable only over your tailnet. Turning this on adds the .lan name' + (access ? ' and a LAN bind.' : '.'))}
           </Hint>
+        </div>
+
+        {/* Every app, every state: the drawer is where "is this backed up?"
+            gets a sentence. OVERDUE is red and carries the api's own reason —
+            the fan-out's off-node / refused / did-not-land sentence — and the
+            way through to the runs table. */}
+        <div>
+          <SectionLabel>BACKUP</SectionLabel>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {app.backup?.state === 'overdue' && <Badge color="#f87171">OVERDUE</Badge>}
+            <span style={{ color: app.backup?.state === 'overdue' ? '#f87171' : FG, fontSize: 10 }}>{backupSummary(app.backup)}</span>
+          </div>
+          {app.backup?.reason && (
+            <Hint warn={app.backup.state === 'overdue'} style={{ marginTop: 6 }}>
+              {app.backup.reason}
+            </Hint>
+          )}
+          {app.backup && app.backup.state !== 'none' && (
+            <div style={{ marginTop: 8 }}>
+              <LinkBtn href="/storage" small aria-label={`Backups for ${app.name}`}>
+                <HardDrive size={10} /> VIEW BACKUPS
+              </LinkBtn>
+            </div>
+          )}
         </div>
 
         {app.sourceTile && (

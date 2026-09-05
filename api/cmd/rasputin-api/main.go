@@ -1171,7 +1171,17 @@ func main() {
 		log.Fatalf("rasputin-api: alerts store: %v", err)
 	}
 	defer alertsStore.Close()
-	srv.SetAlertsService(alerts.New(invStore, jobStore, appsStore, setupSvc, alertsStore, busSrv.Conn(), busAuthEnforce))
+	alertsSvc := alerts.New(invStore, jobStore, appsStore, setupSvc, alertsStore, busSrv.Conn(), busAuthEnforce)
+	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
+	// the backup ledger, the fan-out records in the job ledger, the installed
+	// apps joined to the LIVE catalog, and the schedule — read by the /api/apps
+	// rows (the OVERDUE tile) and by the alerts aggregator (the alert), so the
+	// two surfaces cannot disagree. `true` is the schedule's default-on, the
+	// same value the scheduler's gate is given.
+	backupStates := storage.NewBackupStates(backupStore, jobStore, appsStore, catalogStore, setupStore, true)
+	srv.SetBackupStates(backupStates)
+	alertsSvc.SetBackupStates(backupStates)
+	srv.SetAlertsService(alertsSvc)
 	if secret := os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"); secret != "" {
 		srv.SetAlertsWebhookSecret(secret)
 		log.Printf("rasputin-api: alerts webhook protected by shared secret")

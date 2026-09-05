@@ -14,6 +14,12 @@
 //   - apps       → app-failed (warn), one per app whose last status is failed
 //   - setup      → setup-incomplete (warn), at most one
 //   - security   → bus-auth-off (warn), at most one
+//   - backups    → backup-overdue (warn for `state`, crit for `critical`),
+//     one per app whose data has not been captured within its cadence
+//     (design/storage.md §4.4, #298). Computed on read like the rest, from
+//     the same per-app derivation the app tile renders, so it raises once
+//     (a stable id), never duplicates across ticks, and resolves on its own
+//     the moment a generation captures the app again.
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -43,6 +49,14 @@ import (
 // they care, not be nagged by a banner.
 const failedJobLookback = 24 * time.Hour
 
+// BackupStates is the per-app backup derivation the aggregator reads for
+// backup-overdue alerts. Satisfied by *storage.BackupStates; an interface so
+// this package depends on the wire type in proto rather than on the backup
+// package, which lets the backup package's own tests drive this aggregator.
+type BackupStates interface {
+	AppBackupStates(ctx context.Context) ([]proto.AppBackupStatus, error)
+}
+
 // Service aggregates alerts from the subsystem stores AND merges in
 // rule-engine alerts persisted via the webhook (Slice 1.5). The
 // aggregator's view stays computed-on-read; persisted alerts come from
@@ -55,6 +69,9 @@ type Service struct {
 	setup *setup.Service
 	store *Store     // optional — nil means "no persistence; aggregator only"
 	nc    *nats.Conn // optional — nil disables NATS push of alert changes
+	// backups is optional — nil means no backup-overdue alerts, which is
+	// the state of an api with no backup ledger wired.
+	backups BackupStates
 
 	// busAuthEnforced mirrors the api's RASPUTIN_BUS_AUTH=enforce state.
 	// When false the aggregator emits a standing bus-auth-off warn — the
@@ -72,6 +89,12 @@ type Service struct {
 func New(inv *inventory.Store, j *jobs.Store, a *apps.Store, s *setup.Service, store *Store, nc *nats.Conn, busAuthEnforced bool) *Service {
 	return &Service{inv: inv, jobs: j, apps: a, setup: s, store: store, nc: nc, busAuthEnforced: busAuthEnforced}
 }
+
+// SetBackupStates wires the per-app backup derivation. Wired by main after
+// New, the same way the api server takes the backup store: the derivation
+// needs the job ledger, the catalog and the settings, none of which the
+// aggregator otherwise knows about.
+func (s *Service) SetBackupStates(b BackupStates) { s.backups = b }
 
 // List returns the current alert snapshot, sorted by severity descending
 // then by Since ascending (oldest concern first within a severity tier).
@@ -100,6 +123,11 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 		out = append(out, alerts...)
 	}
 	out = append(out, s.securityAlerts(now)...)
+	if alerts, err := s.backupAlerts(ctx, now); err != nil {
+		return nil, fmt.Errorf("alerts: backups: %w", err)
+	} else {
+		out = append(out, alerts...)
+	}
 	if alerts, err := s.ruleAlerts(ctx); err != nil {
 		return nil, fmt.Errorf("alerts: rules: %w", err)
 	} else {
@@ -266,6 +294,60 @@ func (s *Service) securityAlerts(now time.Time) []proto.Alert {
 		Detail:   "The NATS bus accepts any connection — any device on the LAN can join as any node. Provision node join tokens and set RASPUTIN_BUS_AUTH=enforce on the controlplane to close it.",
 		Since:    now,
 	}}
+}
+
+// backupAlerts is design/storage.md §4.4's alert path (#298): one alert per
+// app whose backup is OVERDUE — its data not captured within its cadence plus
+// grace, never captured since an install older than that, or its most recent
+// attempt FAILED (node offline, agent refused, upload did not land).
+//
+// Severity follows the app's §4.2 class: `critical` (a password vault) is
+// crit, `state` is warn. The id is stable per app, so a second read is the
+// same alert and not a second one; Since is when the state became overdue,
+// so the row's age reads as "how long has this been wrong". It disappears on
+// its own when a generation captures the app again — the derivation is the
+// lifecycle, exactly as node-offline's is.
+//
+// An app whose backups are UNCONFIGURED (no target, schedule off) or that has
+// nothing to back up raises nothing here: nothing was due. That standing nag
+// is #299's, and it must not wear this alert's words.
+func (s *Service) backupAlerts(ctx context.Context, now time.Time) ([]proto.Alert, error) {
+	if s.backups == nil {
+		return nil, nil
+	}
+	states, err := s.backups.AppBackupStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]proto.Alert, 0)
+	for _, st := range states {
+		if !st.Overdue() {
+			continue
+		}
+		sev := proto.AlertWarn
+		if st.Class == "critical" {
+			sev = proto.AlertCrit
+		}
+		since := now
+		if st.OverdueSince != nil {
+			since = *st.OverdueSince
+		}
+		elapsed := "never backed up"
+		if st.LastSuccessAt != nil {
+			elapsed = "last backed up " + humanizeDuration(now.Sub(*st.LastSuccessAt)) + " ago"
+		}
+		out = append(out, proto.Alert{
+			ID:          "backup-overdue:" + st.AppID,
+			Severity:    sev,
+			Source:      proto.AlertSourceApp,
+			Title:       fmt.Sprintf("Backup of %s is OVERDUE — %s", st.AppName, elapsed),
+			Detail:      st.Reason,
+			Since:       since,
+			RelatedKind: "app",
+			RelatedID:   st.AppID,
+		})
+	}
+	return out, nil
 }
 
 // ruleAlerts pulls every non-dismissed persisted (rule-engine) alert.

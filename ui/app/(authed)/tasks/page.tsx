@@ -6,6 +6,7 @@ import type { ElementType } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { createJob, getJob, listApps, listEvents, listJobs, listSteps, openJobsWS } from '../../../lib/api';
 import { focusNote, resolveFocus } from '../../../lib/task-focus';
+import { failedAppsOf, failureLine } from '../../../lib/job-failures';
 import type { TaskFocus } from '../../../lib/task-focus';
 import type { Job, JobEvent, JobStatus, JobStep, StepStatus } from '../../../lib/types';
 import { Badge, Btn, DIM, FG, HAIR_SOFT, Input, LinkBtn, PageBody, PageHeader, PageShell, SectionLabel, tdStyle, thStyle } from '../../../components/kit';
@@ -366,10 +367,29 @@ function JobRow({
 }
 
 function Detail({ job, steps, events }: { job: Job; steps: JobStep[]; events: JobEvent[] }) {
+  // A backup.run that could not capture an app's volumes says so per app in
+  // its step result (design/storage.md §4.4, #298). Rendered as one line per
+  // app, above the raw JSON, so "which app, and why" is read rather than
+  // found — the job feed's third surface of the same signal.
+  const failedApps = failedAppsOf(steps);
   return (
     <div style={{ borderLeft: `2px solid ${accentA(0.4)}`, paddingLeft: 14, marginLeft: 2, display: 'flex', flexDirection: 'column', gap: 14 }}>
       {job.error && (
         <pre style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{job.error}</pre>
+      )}
+
+      {failedApps.length > 0 && (
+        <div>
+          <SectionLabel>BACKUP FAILED FOR {failedApps.length} APP{failedApps.length === 1 ? '' : 'S'}</SectionLabel>
+          <ul aria-label="Apps whose backup failed" style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {failedApps.map((f, i) => (
+              <li key={`${f.appId ?? f.app}-${i}`} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <Badge color="#f87171">FAILED</Badge>
+                <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, wordBreak: 'break-word' }}>{failureLine(f)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       <div>
