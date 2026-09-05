@@ -616,8 +616,13 @@ func runPreflight(cfg RunConfig) jobs.DoFn {
 		identityBytes := MeasureIdentitySet(cfg.Sources, fileSize(cfg.DBPath))
 		// The volumes this run will take, planned here exactly as step 4 will
 		// plan them, so the estimate counts what the fan-out will land. A
-		// cluster that cannot be enumerated cannot be sized; step 1 already
-		// refused the api with no app source, so this is the LIST failing.
+		// cluster that cannot be enumerated cannot be sized: step 1 already
+		// refused an api with no app source, and the guard is repeated here
+		// for the same reason the fan-out repeats it — an error, never a nil
+		// dereference, on a step that is retried.
+		if cfg.Apps == nil || cfg.Tiles == nil {
+			return nil, errors.New("this api cannot enumerate installed apps, so it cannot size the backup")
+		}
 		installed, err := cfg.Apps.List(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("list installed apps to size the backup: %w", err)
