@@ -25,7 +25,7 @@
 // node the api starts sending `scope: "full"` and this banner goes away on its
 // own.
 
-import { AlertTriangle, Clock, Play, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Clock, Layers, Play, RefreshCw } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import {
   getBackupSchedule,
@@ -33,6 +33,7 @@ import {
   setBackupSchedule,
   startBackupRun,
 } from '../../lib/api';
+import type { BackupScheduleRequest } from '../../lib/api';
 import { timeAgo } from '../../lib/time';
 import type { BackupRun, BackupRunsResponse, BackupSchedule } from '../../lib/types';
 import { Badge, Btn, DIM, FG, HAIR_SOFT, Hint, SectionLabel, Select, srOnly, tdStyle, thStyle } from '../kit';
@@ -43,6 +44,10 @@ import {
   scopeHeadline,
   cadenceRequest,
   cadenceValue,
+  retainHelpText,
+  retainOptions,
+  retainRequest,
+  retainValue,
   shouldWarnIncomplete,
 } from './backup-runs';
 import { formatDiskSize } from './format';
@@ -99,17 +104,17 @@ export function BackupRuns({ hasTarget }: { hasTarget: boolean }) {
       .finally(() => setBusy(false));
   }, [refresh]);
 
-  const changeCadence = useCallback(
-    (next: { enabled: boolean; every?: string }) => {
-      setBackupSchedule(next)
-        .then((s) => {
-          setSchedule(s);
-          setErr(null);
-        })
-        .catch((e) => setErr(String(e)));
-    },
-    [],
-  );
+  // One writer for both knobs. The api's PUT is the whole setting, so each
+  // request is built from the current schedule (see cadenceRequest /
+  // retainRequest) — changing one must not reset the other.
+  const changeSchedule = useCallback((next: BackupScheduleRequest) => {
+    setBackupSchedule(next)
+      .then((s) => {
+        setSchedule(s);
+        setErr(null);
+      })
+      .catch((e) => setErr(String(e)));
+  }, []);
 
   const runs = data?.runs ?? [];
   const last = data?.lastSuccess ?? null;
@@ -173,7 +178,7 @@ export function BackupRuns({ hasTarget }: { hasTarget: boolean }) {
             <Select
               id="backup-cadence"
               value={cadenceValue(schedule)}
-              onChange={(e) => changeCadence(cadenceRequest(e.target.value))}
+              onChange={(e) => changeSchedule(cadenceRequest(e.target.value, schedule))}
               style={{ fontSize: 10 }}
             >
               {CADENCES.map((c) => (
@@ -185,6 +190,29 @@ export function BackupRuns({ hasTarget }: { hasTarget: boolean }) {
             </Select>
           </label>
         )}
+        {schedule && (
+          /* §4.4's retention depth, beside the cadence it is overridable
+             alongside, in the same control. Lowering it is not destructive
+             NOW — prune runs as a step of the next run — and the helper
+             line below the row says so before the operator finds out. */
+          <label htmlFor="backup-retain" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={srOnly}>Generations kept on the backup target</span>
+            <Layers size={11} color={DIM} aria-hidden />
+            <Select
+              id="backup-retain"
+              value={retainValue(schedule)}
+              onChange={(e) => changeSchedule(retainRequest(Number(e.target.value), schedule))}
+              title={retainHelpText(schedule)}
+              style={{ fontSize: 10 }}
+            >
+              {retainOptions(schedule).map((n) => (
+                <option key={n} value={n}>
+                  {n === schedule.defaultRetain ? `Keep ${n} (default)` : `Keep ${n}`}
+                </option>
+              ))}
+            </Select>
+          </label>
+        )}
         <Btn small onClick={refresh}>
           <RefreshCw size={10} /> REFRESH
         </Btn>
@@ -192,6 +220,12 @@ export function BackupRuns({ hasTarget }: { hasTarget: boolean }) {
           <Play size={10} /> {busy ? 'STARTING…' : 'BACK UP NOW'}
         </Btn>
       </div>
+
+      {schedule && (
+        <Hint style={{ marginBottom: 10 }}>
+          {retainHelpText(schedule)}
+        </Hint>
+      )}
 
       {/* A disabled schedule is shown, not hidden. §4.4's whole posture is that
           the absence of backups must never render like ordinary green. */}
@@ -253,6 +287,24 @@ function LastSuccess({ last, hasTarget }: { last: BackupRun | null; hasTarget: b
   );
 }
 
+// preflightTitle is the size cell's tooltip: what the run told the target it
+// would need, term by term, with the guessed volumes named. The size in the
+// cell is the identity archive alone; the estimate is the whole generation.
+function preflightTitle(run: BackupRun): string | undefined {
+  const p = run.preflight;
+  if (!p) return undefined;
+  const parts = [
+    `Estimated before the run: ${formatDiskSize(p.estimateBytes)}`,
+    `identity ${formatDiskSize(p.identityBytes)}`,
+    `app volumes ${formatDiskSize(p.volumeBytes)}`,
+    `margin ${formatDiskSize(p.marginBytes)}`,
+  ];
+  if (p.unknownVolumes && p.unknownVolumes.length > 0) {
+    parts.push(`never captured, counted at a default: ${p.unknownVolumes.join(', ')}`);
+  }
+  return parts.join(' · ');
+}
+
 function RunRow({ run }: { run: BackupRun }) {
   const color = run.status === 'succeeded' ? OK_GREEN : run.status === 'failed' ? DANGER : WARN;
   return (
@@ -279,7 +331,9 @@ function RunRow({ run }: { run: BackupRun }) {
           {run.scope ?? '—'}
         </span>
       </td>
-      <td style={{ ...tdStyle, color: DIM }}>{run.sizeBytes ? formatDiskSize(run.sizeBytes) : '—'}</td>
+      <td style={{ ...tdStyle, color: DIM }} title={preflightTitle(run)}>
+        {run.sizeBytes ? formatDiskSize(run.sizeBytes) : '—'}
+      </td>
       <td style={{ ...tdStyle, color: DIM }}>
         {run.status === 'succeeded'
           ? `${run.generationsKept ?? 0} kept${run.generationsPruned ? ` · ${run.generationsPruned} pruned` : ''}`

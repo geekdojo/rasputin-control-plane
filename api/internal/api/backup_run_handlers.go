@@ -15,8 +15,8 @@ import (
 //
 //	GET  /api/backup/runs      the ledger, failures included
 //	POST /api/backup/runs      "Back up now": submits the backup.run saga
-//	GET  /api/backup/schedule  the cadence
-//	PUT  /api/backup/schedule  set the cadence, per installation
+//	GET  /api/backup/schedule  the cadence and the retention depth
+//	PUT  /api/backup/schedule  set both, per installation
 //
 // The split from the §4.8 target routes next door is the split §4.1 draws:
 // those choose and format a disk, these write to the one already chosen.
@@ -48,9 +48,25 @@ type backupRunsResponse struct {
 	// Served on the list so a client cannot render a run without them.
 	Scope        string `json:"scope"`
 	ScopeWarning string `json:"scopeWarning"`
-	// Retain is §4.4's generation count, so the view can say "4 kept" without
-	// hard-coding it.
+	// Retain is §4.4's generation count AS CURRENTLY SET — the schedule
+	// setting's live value, the same number the next run will hand the agent
+	// — so the view can say "4 kept" without hard-coding it and says "2 kept"
+	// the moment an operator lowers it.
 	Retain int `json:"retain"`
+}
+
+// liveRetain is the retention depth the next run will use: the schedule
+// setting, read now. Falls back to the default when there is no settings store
+// or the read fails, which is also what a run does (RunConfig.resolveRetain).
+func (s *Server) liveRetain(r *http.Request) int {
+	if s.setup == nil {
+		return storage.DefaultBackupRetain
+	}
+	sched, err := storage.GetBackupSchedule(r.Context(), s.setup.Store(), true)
+	if err != nil {
+		return storage.DefaultBackupRetain
+	}
+	return sched.Generations()
 }
 
 // GET /api/backup/runs?limit=N
@@ -83,7 +99,7 @@ func (s *Server) handleListBackupRuns(w http.ResponseWriter, r *http.Request) {
 		LastSuccess:  last,
 		Scope:        proto.BackupScopeFull,
 		ScopeWarning: storage.AppVolumeFanOutReason(),
-		Retain:       proto.BackupRetainGenerations,
+		Retain:       s.liveRetain(r),
 	})
 }
 
@@ -159,6 +175,12 @@ type backupScheduleResponse struct {
 	DefaultEvery string `json:"defaultEvery"`
 	MinEvery     string `json:"minEvery"`
 	MaxEvery     string `json:"maxEvery"`
+	// DefaultRetain and bounds, for the retention control beside the cadence.
+	// `retain` itself rides in the embedded schedule, always resolved to the
+	// depth a run will use (never zero).
+	DefaultRetain int `json:"defaultRetain"`
+	MinRetain     int `json:"minRetain"`
+	MaxRetain     int `json:"maxRetain"`
 }
 
 func (s *Server) backupScheduleView(r *http.Request, sched storage.BackupSchedule) backupScheduleResponse {
@@ -168,7 +190,11 @@ func (s *Server) backupScheduleView(r *http.Request, sched storage.BackupSchedul
 		DefaultEvery:   storage.DefaultBackupCadence.String(),
 		MinEvery:       storage.MinBackupCadence.String(),
 		MaxEvery:       storage.MaxBackupCadence.String(),
+		DefaultRetain:  storage.DefaultBackupRetain,
+		MinRetain:      storage.MinBackupRetain,
+		MaxRetain:      storage.MaxBackupRetain,
 	}
+	out.Retain = sched.Generations()
 	if !sched.Enabled || s.backup == nil {
 		return out
 	}
@@ -195,9 +221,12 @@ func (s *Server) handleGetBackupSchedule(w http.ResponseWriter, r *http.Request)
 
 // PUT /api/backup/schedule
 //
-// §4.1's "overridable per installation". Takes effect on the scheduler's next
-// check rather than on the next api restart — see storage.DueFunc, which reads
-// this setting on every tick.
+// §4.1's "overridable per installation", and §4.4's retention "overridable
+// alongside the cadence". Takes effect on the scheduler's next check rather
+// than on the next api restart — see storage.DueFunc, which reads this setting
+// on every tick — and the retention depth on the next run's prune, which reads
+// it at step 1. The body is the WHOLE setting: a field left out is the
+// default, not "keep what was there", so a client sends what it has.
 func (s *Server) handleSetBackupSchedule(w http.ResponseWriter, r *http.Request) {
 	if s.setup == nil {
 		writeError(w, http.StatusServiceUnavailable, "settings are not configured on this api")

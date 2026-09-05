@@ -590,6 +590,11 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		DBPath:        dbPath,
 		Retain:        opts.retain,
 		IngestBaseURL: ingestSrv.URL,
+		// The schedule setting and the job ledger, wired the way main wires
+		// them: a run reads its retention depth from the one and the sizes
+		// of earlier captures from the other.
+		Settings: h.settings,
+		Jobs:     js,
 	}
 	if !opts.noIngest {
 		cfg.Ingest = ingest

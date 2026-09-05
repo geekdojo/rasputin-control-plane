@@ -3,9 +3,14 @@ import { describe, it } from 'node:test';
 
 import {
   CADENCE_OFF,
+  RETAIN_OPTIONS,
   appVolumeSummary,
   cadenceRequest,
   cadenceValue,
+  retainHelpText,
+  retainOptions,
+  retainRequest,
+  retainValue,
   runScopeTitle,
   scopeHeadline,
   shouldWarnIncomplete,
@@ -111,6 +116,10 @@ describe('cadenceValue', () => {
     defaultEvery: '168h',
     minEvery: '1h',
     maxEvery: '8760h',
+    retain: 4,
+    defaultRetain: 4,
+    minRetain: 1,
+    maxRetain: 52,
   };
 
   it('shows the operator’s cadence when the schedule is on', () => {
@@ -149,5 +158,102 @@ describe('appVolumeSummary', () => {
 
   it('is singular for one', () => {
     assert.equal(appVolumeSummary(1), '1 app volume captured');
+  });
+});
+
+// The retention control (geekdojo-brain#297): §4.4's depth, overridable
+// alongside the cadence. The api's PUT is the WHOLE setting, so the two
+// controls' requests must each carry the other's current value — a cadence
+// change that silently reset the depth to four would delete generations an
+// operator chose to keep, on the next run, with nothing on the page saying so.
+
+function schedule(over: Partial<BackupSchedule> = {}): BackupSchedule {
+  return {
+    enabled: true,
+    every: '168h',
+    everySeconds: 604800,
+    nextDue: null,
+    defaultEvery: '168h',
+    minEvery: '1h',
+    maxEvery: '8760h',
+    retain: 4,
+    defaultRetain: 4,
+    minRetain: 1,
+    maxRetain: 52,
+    ...over,
+  };
+}
+
+describe('retainValue', () => {
+  it('is the api\'s resolved depth', () => {
+    assert.equal(retainValue(schedule({ retain: 2 })), 2);
+  });
+
+  it('falls back to the default, then to four, before the schedule has loaded', () => {
+    assert.equal(retainValue(schedule({ retain: 0, defaultRetain: 4 })), 4);
+    assert.equal(retainValue(null), 4);
+  });
+});
+
+describe('retainOptions', () => {
+  it('offers the curated depths inside the api\'s bounds', () => {
+    for (const n of RETAIN_OPTIONS) {
+      assert.ok(n >= 1 && n <= 52, `${n} is outside 1..52`);
+    }
+    assert.deepEqual(retainOptions(schedule({ retain: 4 })), RETAIN_OPTIONS);
+  });
+
+  it('renders a depth the list does not carry as itself, in order', () => {
+    // Set through the api to 7. The select must show 7, not snap to 6 or 8
+    // and thereby misreport what the next run will keep.
+    const opts = retainOptions(schedule({ retain: 7 }));
+    assert.ok(opts.includes(7));
+    assert.deepEqual(opts, [...opts].sort((a, b) => a - b));
+  });
+});
+
+describe('retainRequest', () => {
+  it('round-trips the chosen depth with the current cadence and switch', () => {
+    assert.deepEqual(retainRequest(2, schedule({ every: '24h' })), { enabled: true, every: '24h', retain: 2 });
+  });
+
+  it('keeps a disabled schedule disabled', () => {
+    // Choosing a depth is not consent to turn scheduled backups back on.
+    assert.deepEqual(retainRequest(8, schedule({ enabled: false })), { enabled: false, retain: 8 });
+  });
+
+  it('refuses to send a depth the api would refuse', () => {
+    // A depth of zero is a prune that empties the disk; the agent refuses it
+    // and so does the api. The control never asks.
+    assert.equal(retainRequest(0, schedule({ retain: 4 })).retain, 4);
+    assert.equal(retainRequest(Number.NaN, schedule({ retain: 3 })).retain, 3);
+  });
+});
+
+describe('cadenceRequest carries the retention depth', () => {
+  it('sends the current depth with a new cadence', () => {
+    assert.deepEqual(cadenceRequest('24h', schedule({ retain: 12 })), { enabled: true, every: '24h', retain: 12 });
+  });
+
+  it('sends the current depth when turning the schedule off', () => {
+    assert.deepEqual(cadenceRequest(CADENCE_OFF, schedule({ retain: 12 })), { enabled: false, retain: 12 });
+  });
+
+  it('still works with no schedule loaded, as it did before the depth existed', () => {
+    assert.deepEqual(cadenceRequest('24h'), { enabled: true, every: '24h' });
+    assert.deepEqual(cadenceRequest(CADENCE_OFF, null), { enabled: false });
+  });
+});
+
+describe('retainHelpText', () => {
+  it('says the depth, and that lowering it prunes on the NEXT run', () => {
+    const text = retainHelpText(schedule({ retain: 2 }));
+    assert.match(text, /^2 generations kept/);
+    assert.match(text, /next backup run/);
+    assert.match(text, /nothing is deleted until then/i);
+  });
+
+  it('agrees with English on one', () => {
+    assert.match(retainHelpText(schedule({ retain: 1 })), /^1 generation kept/);
   });
 });

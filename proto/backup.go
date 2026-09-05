@@ -82,9 +82,15 @@ const (
 	BackupManifestFile = "manifest.json"
 )
 
-// BackupRetainGenerations is §4.4's retention: four full generations on the
-// target, oldest pruned first. At the default weekly cadence that is roughly a
-// month of history.
+// BackupRetainGenerations is §4.4's DEFAULT retention: four full generations
+// on the target, oldest pruned first. At the default weekly cadence that is
+// roughly a month of history.
+//
+// A default, not the policy. The operator overrides it beside the cadence
+// (the api's backup schedule setting, `retain`), and each run reads the live
+// value at its start, the way the scheduler reads the cadence on every tick.
+// The agent never sees this constant: it is handed the depth in
+// BackupPruneCmd.Keep and converges the disk on whatever it is told.
 const BackupRetainGenerations = 4
 
 // BackupTargetReserveBytes is the free space the target must retain BEYOND the
@@ -97,6 +103,25 @@ const BackupRetainGenerations = 4
 // starting, and refusing with a margin is the only version of that which leaves
 // room to recover.
 const BackupTargetReserveBytes uint64 = 256 << 20 // 256 MiB
+
+// BackupUnknownVolumeBytesCritical and BackupUnknownVolumeBytesState are what
+// the api's target-side pre-flight counts for a classified app volume whose
+// size NO earlier generation records — the first run on an installation, or an
+// app installed since the last one. Per §4.2 class, because the two classes
+// are different shapes of data: `critical` is secrets and credentials (a
+// Vaultwarden vault is the archetype, tens of megabytes), `state` is whatever
+// an app calls its data and has no natural bound.
+//
+// These are ROUND PLACEHOLDERS, not measurements, and they are deliberately
+// modest rather than generous: a volume's real size only becomes known once a
+// run has captured it and written the size into a manifest, so a default large
+// enough to refuse the first run on a small target would keep the estimate
+// guessing forever. Every run names which volumes it guessed for, and the guess
+// is replaced by the recorded size on the run after the first capture.
+const (
+	BackupUnknownVolumeBytesCritical uint64 = 256 << 20 // 256 MiB
+	BackupUnknownVolumeBytesState    uint64 = 1 << 30   // 1 GiB
+)
 
 // BackupScopeIdentityOnly is the scope of every archive this build writes, and
 // it is stamped into the generation id, the manifest, the ledger and the UI.

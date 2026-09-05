@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -310,6 +311,68 @@ func TestBackupScheduleDefaultsAndBounds(t *testing.T) {
 	}
 	if got.Interval() != DefaultBackupCadence {
 		t.Errorf("a corrupt cadence resolved to %s rather than falling back to the default — a bad value that read as `never` would be an outage nobody sees until they need a restore", got.Interval())
+	}
+}
+
+// TestBackupRetainDefaultsAndBounds covers §4.4's retention depth beside the
+// cadence (#297): four by default, overridable, floored at one — a prune that
+// keeps nothing is not a retention policy — and ceilinged at a year of weekly
+// fulls.
+func TestBackupRetainDefaultsAndBounds(t *testing.T) {
+	ctx := context.Background()
+	st := newMemorySettings()
+
+	got, err := GetBackupSchedule(ctx, st, true)
+	if err != nil {
+		t.Fatalf("GetBackupSchedule: %v", err)
+	}
+	if got.Retain != proto.BackupRetainGenerations || got.Generations() != 4 {
+		t.Errorf("default retain = %d (resolved %d), want §4.4's 4", got.Retain, got.Generations())
+	}
+
+	// A schedule saved before the field existed — cadence only — keeps the
+	// default depth, and is SERVED with it resolved rather than as zero.
+	if _, err := SetBackupSchedule(ctx, st, BackupSchedule{Enabled: true, Every: "24h"}); err != nil {
+		t.Fatalf("SetBackupSchedule: %v", err)
+	}
+	got, _ = GetBackupSchedule(ctx, st, true)
+	if got.Retain != 4 {
+		t.Errorf("a schedule set without a depth is served with retain = %d, want 4", got.Retain)
+	}
+
+	for _, bad := range []int{-1, 53, 1000} {
+		if _, err := SetBackupSchedule(ctx, st, BackupSchedule{Enabled: true, Retain: bad}); err == nil {
+			t.Errorf("retain %d was accepted", bad)
+		} else if !errors.Is(err, ErrInvalidRetain) {
+			t.Errorf("retain %d refused with %v, want ErrInvalidRetain", bad, err)
+		}
+	}
+	for _, ok := range []int{1, 2, 52} {
+		saved, err := SetBackupSchedule(ctx, st, BackupSchedule{Enabled: true, Retain: ok})
+		if err != nil {
+			t.Errorf("retain %d refused: %v", ok, err)
+			continue
+		}
+		if saved.Generations() != ok {
+			t.Errorf("retain %d saved as %d", ok, saved.Generations())
+		}
+	}
+
+	// A depth persisted out of range — by hand, or by a build with different
+	// bounds — resolves to the default rather than reaching the agent as a
+	// Keep it would refuse (which would fail every run) or as zero.
+	_ = st.Set(ctx, KeyBackupSchedule, `{"enabled":true,"every":"168h","retain":0}`)
+	got, err = GetBackupSchedule(ctx, st, true)
+	if err != nil {
+		t.Fatalf("GetBackupSchedule: %v", err)
+	}
+	if got.Generations() != 4 || got.Retain != 4 {
+		t.Errorf("a stored zero depth resolved to %d, want the default 4", got.Generations())
+	}
+	_ = st.Set(ctx, KeyBackupSchedule, `{"enabled":true,"every":"168h","retain":999}`)
+	got, _ = GetBackupSchedule(ctx, st, true)
+	if got.Generations() != 4 {
+		t.Errorf("a stored out-of-range depth resolved to %d, want the default 4", got.Generations())
 	}
 }
 

@@ -68,7 +68,7 @@ func TestListBackupRunsAlwaysCarriesTheScopeCaveat(t *testing.T) {
 		t.Errorf("the warning does not say, in words, that this is not a complete backup: %q", body.ScopeWarning)
 	}
 	if body.Retain != proto.BackupRetainGenerations {
-		t.Errorf("retain = %d, want §4.4's %d", body.Retain, proto.BackupRetainGenerations)
+		t.Errorf("retain = %d, want §4.4's default %d before anyone has set one", body.Retain, proto.BackupRetainGenerations)
 	}
 	// An empty ledger returns [] rather than null: a client mapping over the
 	// list should not have to special-case a first boot.
@@ -242,5 +242,67 @@ func TestBackupRunRoutesAnswer503WithoutAStore(t *testing.T) {
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("%s: status = %d, want 503", name, rec.Code)
 		}
+	}
+}
+
+// TestBackupRetainRoundTrips covers §4.4's retention depth beside the cadence
+// (#297): served with its bounds, persisted through the same PUT, refused
+// outside the bounds, and reflected on GET /api/backup/runs as the LIVE value
+// rather than the constant — so a view saying "N kept" says what the next run
+// will actually do.
+func TestBackupRetainRoundTrips(t *testing.T) {
+	s, _ := runsTestServer(t)
+
+	var got backupScheduleResponse
+	getJSON(t, s, s.handleGetBackupSchedule, "/api/backup/schedule", &got)
+	if got.Retain != storage.DefaultBackupRetain || got.DefaultRetain != storage.DefaultBackupRetain {
+		t.Errorf("retain = %d default %d, want %d", got.Retain, got.DefaultRetain, storage.DefaultBackupRetain)
+	}
+	if got.MinRetain != storage.MinBackupRetain || got.MaxRetain != storage.MaxBackupRetain {
+		t.Errorf("the schedule response does not carry the retention bounds: %+v", got)
+	}
+
+	put := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.handleSetBackupSchedule(rec, httptest.NewRequest(http.MethodPut, "/api/backup/schedule", strings.NewReader(body)))
+		return rec
+	}
+	if rec := put(`{"enabled":true,"every":"24h","retain":2}`); rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d: %s", rec.Code, rec.Body)
+	}
+	getJSON(t, s, s.handleGetBackupSchedule, "/api/backup/schedule", &got)
+	if got.Retain != 2 || got.EverySeconds != 86400 {
+		t.Errorf("the depth did not persist beside the cadence: retain = %d, everySeconds = %d", got.Retain, got.EverySeconds)
+	}
+
+	// The runs listing reports the LIVE depth, not the constant.
+	var runs backupRunsResponse
+	getJSON(t, s, s.handleListBackupRuns, "/api/backup/runs", &runs)
+	if runs.Retain != 2 {
+		t.Errorf("GET /api/backup/runs reports retain = %d after the operator set 2", runs.Retain)
+	}
+
+	// Out of bounds is refused with a reason, not clamped. Zero in the body
+	// is "not chosen" and means the default, which is a legal thing to say.
+	for _, body := range []string{`{"enabled":true,"retain":-1}`, `{"enabled":true,"retain":53}`, `{"enabled":true,"retain":"four"}`} {
+		if rec := put(body); rec.Code != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400 (%s)", body, rec.Code, rec.Body)
+		}
+	}
+	if rec := put(`{"enabled":true,"every":"24h","retain":0}`); rec.Code != http.StatusOK {
+		t.Fatalf("a body with retain 0 was refused: %d %s", rec.Code, rec.Body)
+	}
+	getJSON(t, s, s.handleGetBackupSchedule, "/api/backup/schedule", &got)
+	if got.Retain != storage.DefaultBackupRetain {
+		t.Errorf("retain 0 in the body persisted as %d, want the default", got.Retain)
+	}
+	// A PUT that leaves the field out is the WHOLE setting: the depth goes
+	// back to the default. That is the contract the UI's request builders
+	// exist to honour by always sending it.
+	_ = put(`{"enabled":true,"every":"24h","retain":8}`)
+	_ = put(`{"enabled":true,"every":"48h"}`)
+	getJSON(t, s, s.handleGetBackupSchedule, "/api/backup/schedule", &got)
+	if got.Retain != storage.DefaultBackupRetain {
+		t.Errorf("a PUT without retain left %d, want the default %d", got.Retain, storage.DefaultBackupRetain)
 	}
 }

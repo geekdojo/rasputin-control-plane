@@ -1124,14 +1124,18 @@ export function startBackupRun(): Promise<Job> {
   });
 }
 
-// getBackupSchedule reads the cadence; setBackupSchedule writes it. A change
-// takes effect on the scheduler's next check rather than at the next api
-// restart.
+// getBackupSchedule reads the cadence and the retention depth;
+// setBackupSchedule writes both. A cadence change takes effect on the
+// scheduler's next check rather than at the next api restart; a retention
+// change on the next run's prune. The PUT body is the whole setting — send
+// every field, or the ones left out revert to their defaults.
 export function getBackupSchedule(): Promise<BackupSchedule> {
   return jsonFetch<BackupSchedule>('/api/backup/schedule');
 }
 
-export function setBackupSchedule(req: { enabled: boolean; every?: string }): Promise<BackupSchedule> {
+export type BackupScheduleRequest = { enabled: boolean; every?: string; retain?: number };
+
+export function setBackupSchedule(req: BackupScheduleRequest): Promise<BackupSchedule> {
   return jsonFetch<BackupSchedule>('/api/backup/schedule', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

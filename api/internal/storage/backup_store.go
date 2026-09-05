@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -71,19 +72,25 @@ type BackupRun struct {
 	// Warning is a caveat on a row that is NOT failed — volumes that were
 	// skipped, or an app the backup left down. Distinct from Error, which is
 	// why the run died.
-	Warning           string     `json:"warning,omitempty"`
-	GenerationsKept   int        `json:"generationsKept,omitempty"`
-	GenerationsPruned int        `json:"generationsPruned,omitempty"`
-	Status            RunStatus  `json:"status"`
-	StartedAt         time.Time  `json:"startedAt"`
-	FinishedAt        *time.Time `json:"finishedAt,omitempty"`
-	Error             string     `json:"error,omitempty"`
+	Warning           string `json:"warning,omitempty"`
+	GenerationsKept   int    `json:"generationsKept,omitempty"`
+	GenerationsPruned int    `json:"generationsPruned,omitempty"`
+	// Preflight is the target-side estimate step 2 sent — the identity set,
+	// the app volumes (with the ones no earlier generation had sized named),
+	// and the margin. Recorded BEFORE the agent answers, so a run refused for
+	// space carries the numbers it was refused on. Nil on rows from builds
+	// that estimated the identity set alone.
+	Preflight  *TargetEstimate `json:"preflight,omitempty"`
+	Status     RunStatus       `json:"status"`
+	StartedAt  time.Time       `json:"startedAt"`
+	FinishedAt *time.Time      `json:"finishedAt,omitempty"`
+	Error      string          `json:"error,omitempty"`
 }
 
 const runCols = `job_id, target_job_id, part_uuid, node_id, reason, scope, generation_id,
         key_id, digest, size_bytes, app_volumes_captured, app_volumes_skipped, app_volumes_failed,
         complete, warning, generations_kept,
-        generations_pruned, status, started_at, finished_at, error`
+        generations_pruned, preflight, status, started_at, finished_at, error`
 
 // StartRun records a run at step 1, before anything has been snapshotted.
 //
@@ -125,6 +132,20 @@ func (s *Store) MarkRunGeneration(ctx context.Context, jobID, generationID, dige
         SET generation_id = ?, digest = ?, size_bytes = ?, app_volumes_captured = ?, app_volumes_skipped = ?, app_volumes_failed = ?
         WHERE job_id = ?`,
 		generationID, digest, sizeForDB(sizeBytes), appVolumes, appVolumesSkipped, appVolumesFailed, jobID)
+	return err
+}
+
+// MarkRunPreflight records the target-side estimate a run sent at step 2.
+//
+// Written before the agent is asked, on purpose: a run the target refuses for
+// space is the run whose numbers an operator most needs to see, and a record
+// written only on success would be missing from exactly that row.
+func (s *Store) MarkRunPreflight(ctx context.Context, jobID string, est TargetEstimate) error {
+	raw, err := json.Marshal(est)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE backup_runs SET preflight = ? WHERE job_id = ?`, string(raw), jobID)
 	return err
 }
 
@@ -280,6 +301,7 @@ func scanRun(scan func(...any) error) (*BackupRun, error) {
 		r          BackupRun
 		sizeBytes  int64
 		complete   int64
+		preflight  string
 		status     string
 		startedAt  int64
 		finishedAt sql.NullInt64
@@ -287,7 +309,7 @@ func scanRun(scan func(...any) error) (*BackupRun, error) {
 	if err := scan(&r.JobID, &r.TargetJobID, &r.PartUUID, &r.NodeID, &r.Reason, &r.Scope,
 		&r.GenerationID, &r.KeyID, &r.Digest, &sizeBytes, &r.AppVolumesCaptured,
 		&r.AppVolumesSkipped, &r.AppVolumesFailed, &complete, &r.Warning,
-		&r.GenerationsKept, &r.GenerationsPruned, &status, &startedAt, &finishedAt,
+		&r.GenerationsKept, &r.GenerationsPruned, &preflight, &status, &startedAt, &finishedAt,
 		&r.Error); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -298,6 +320,15 @@ func scanRun(scan func(...any) error) (*BackupRun, error) {
 		r.SizeBytes = uint64(sizeBytes)
 	}
 	r.Complete = complete != 0
+	if preflight != "" {
+		var est TargetEstimate
+		// A column this process wrote and cannot parse is a row worth serving
+		// without it, not a listing worth failing: the run's status, error and
+		// generation are the answers an operator is reading for.
+		if json.Unmarshal([]byte(preflight), &est) == nil {
+			r.Preflight = &est
+		}
+	}
 	r.Status = RunStatus(status)
 	r.StartedAt = fromMs(startedAt)
 	if finishedAt.Valid {
