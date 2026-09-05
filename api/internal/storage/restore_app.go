@@ -278,9 +278,18 @@ func ListAppRestoreSources(ctx context.Context, cfg RestoreAppConfig, app *apps.
 		out.Problem = fmt.Sprintf("the claimed target is on node %s and this api runs on %s; the disk is read beside the api", target.NodeID, displayLabel(cfg.SelfNodeID))
 		return out, nil
 	}
+	if h := target.Health; h != nil && h.State.Unhealthy() && HealthFresh(h, time.Now().UTC()) {
+		// #398: the poll already knows the disk is not there (or not usable);
+		// say so in the poll's words rather than a mount error's.
+		out.Problem = fmt.Sprintf("the backup target %s is not available to restore from — %s", displayLabel(target.Label), DescribeHealth(*h))
+		return out, nil
+	}
 	mountPath, err := mountTarget(ctx, cfg.NC, cfg.SelfNodeID, target.PartUUID)
 	if err != nil {
 		out.Problem = "the backup target could not be mounted: " + err.Error()
+		if h := target.Health; h != nil && h.State != proto.BackupTargetHealthUnknown {
+			out.Problem += " — last health check: " + DescribeHealth(*h)
+		}
 		return out, nil
 	}
 	root, err := fsat.OpenRoot(mountPath)

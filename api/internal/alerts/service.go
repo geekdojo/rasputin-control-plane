@@ -24,6 +24,10 @@
 //     volume while no backup target is claimed or the schedule is off
 //     (§4.4's persistent nag, #299). Same derivation, same lifecycle; see
 //     backup_unconfigured.go for why it is warn and why only `critical`.
+//   - backup targets → backup-target (crit), one per claimed target whose
+//     last five-minute health check found it missing, unmounted, unwritable
+//     or unreachable (#398, backup_target.go). Resolves on the next healthy
+//     poll.
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -76,6 +80,8 @@ type Service struct {
 	// backups is optional — nil means no backup-overdue alerts, which is
 	// the state of an api with no backup ledger wired.
 	backups BackupStates
+	// targets is optional — nil means no backup-target health alerts (#398).
+	targets BackupTargets
 
 	// busAuthEnforced mirrors the api's RASPUTIN_BUS_AUTH=enforce state.
 	// When false the aggregator emits a standing bus-auth-off warn — the
@@ -129,6 +135,11 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	out = append(out, s.securityAlerts(now)...)
 	if alerts, err := s.backupAlerts(ctx, now); err != nil {
 		return nil, fmt.Errorf("alerts: backups: %w", err)
+	} else {
+		out = append(out, alerts...)
+	}
+	if alerts, err := s.backupTargetAlerts(ctx, now); err != nil {
+		return nil, fmt.Errorf("alerts: backup targets: %w", err)
 	} else {
 		out = append(out, alerts...)
 	}

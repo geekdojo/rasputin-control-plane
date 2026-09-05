@@ -374,9 +374,45 @@ type StorageMountAck struct {
 }
 
 // StorageInspectCmd reads a claimed target's marker and free space, mounting it
-// if it is not already mounted. Read-only.
+// if it is not already mounted. Read-only unless Probe is set.
 type StorageInspectCmd struct {
 	PartUUID string `json:"partUuid"`
+	// Probe asks for a WRITE PROBE on top of the read-only inspect: create,
+	// fsync, read back and delete a small file under StorageHealthProbeDir on
+	// the mount. Opt-in, so the callers that exist for reading — adopt, the
+	// restore surfaces — stay read-only, and only the health poll pays for it.
+	//
+	// It exists because presence is not health. The e3bench stick (2026-09-02)
+	// answered enumeration for some time after it had begun failing writes: a
+	// dying disk can be listed, mounted and statfs'd and still refuse the one
+	// thing a backup target is for. An agent that predates this field ignores
+	// it and answers without WriteProbe; the api reads that absence honestly
+	// (StorageInspectProbeMinAgentVersion).
+	Probe bool `json:"probe,omitempty"`
+}
+
+// StorageHealthProbeDir is the dot-directory at the root of a claimed target
+// that the write probe works in. A dot-name because the archive walker
+// (listGenerations, countGenerations) reads generations/ only and skips
+// dot-entries everywhere, so nothing the probe leaves behind after a crash can
+// ever be counted as, pruned as, or restored from as a generation.
+const StorageHealthProbeDir = ".rasputin-health"
+
+// StorageWriteProbe is what the write probe found. Present on a
+// StorageInspectAck only when the command asked for one and the target was
+// present and mounted; absent otherwise, and absent from any agent that
+// predates the probe.
+type StorageWriteProbe struct {
+	// OK is true when a small file was created, fsynced, read back
+	// byte-identical and deleted under StorageHealthProbeDir.
+	OK bool `json:"ok"`
+	// Detail names the failing operation and the error when OK is false, and
+	// says what was done when it is true. Operator-facing prose.
+	Detail string `json:"detail,omitempty"`
+	// DurationMs is how long the probe took. Advisory: a probe that took
+	// twenty seconds on a disk that used to take twenty milliseconds is a
+	// disk on its way out, and this is the only number that would show it.
+	DurationMs int64 `json:"durationMs"`
 }
 
 // StorageInspectAck describes a claimed target as it exists on the disk.
@@ -392,10 +428,16 @@ type StorageInspectAck struct {
 	BackupSet  *StorageBackupSet `json:"backupSet,omitempty"`
 	// Present is false when nothing with that partition UUID is attached — the
 	// operator unplugged the target. Distinct from OK=false, which means the
-	// agent could not answer.
+	// agent could not answer. The two combine in one more way: OK=false with
+	// Present=true is a disk that IS attached and could not be mounted, which
+	// the health poll renders as UNMOUNTED rather than MISSING.
 	Present bool           `json:"present"`
 	Refusal StorageRefusal `json:"refusal,omitempty"`
 	Detail  string         `json:"detail,omitempty"`
+	// WriteProbe is the result of the write probe StorageInspectCmd.Probe asked
+	// for. nil when none was asked for, when the target was not present or
+	// mounted, or when the answering agent predates the probe.
+	WriteProbe *StorageWriteProbe `json:"writeProbe,omitempty"`
 }
 
 // StorageEnumerateSubject is the read-only candidate enumeration.

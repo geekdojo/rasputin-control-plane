@@ -530,6 +530,16 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 		if err := validatePublicKey(target.PublicKey); err != nil {
 			return nil, fmt.Errorf("the claimed backup target's archive public key is unusable: %w. Nothing was written; re-claim the disk", err)
 		}
+		// #398: a target the five-minute poll has found missing, unmounted,
+		// unwritable or unreachable — and found so RECENTLY — refuses the run
+		// here, citing the poll's own record, so the run's failure and the
+		// target row tell one story. A stale record (an api that was down)
+		// refuses nothing: step 2's preflight decides against the live disk,
+		// and records what it finds.
+		if h := target.Health; h != nil && h.State.Unhealthy() && HealthFresh(h, time.Now().UTC()) {
+			return nil, fmt.Errorf("the backup target %s has been %s; nothing was written. %s",
+				displayLabel(target.Label), DescribeHealth(*h), healthNextStep(h.State))
+		}
 		if cfg.Apps == nil || cfg.Tiles == nil {
 			// Refused rather than proceeding with an empty fan-out. An api that
 			// cannot enumerate installed apps would write an archive containing
@@ -588,6 +598,21 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 		sc.Log("warn", "SCOPE: "+appVolumeFanOutReason)
 		return json.Marshal(out)
 	}
+}
+
+// healthNextStep is the one line of advice a refusal on health carries.
+func healthNextStep(state proto.BackupTargetHealthState) string {
+	switch state {
+	case proto.BackupTargetHealthMissing:
+		return "Plug the claimed disk back in (the same disk — a different one at the same port is reported as a different disk), or claim another under Storage → Backups"
+	case proto.BackupTargetHealthUnmounted:
+		return "The disk is attached and its filesystem will not mount; check it on another machine before trusting it again, or claim another"
+	case proto.BackupTargetHealthUnwritable:
+		return "The disk is attached and mounted and refuses writes — the way a failing USB stick fails. Replace it"
+	case proto.BackupTargetHealthUnreachable:
+		return "The node holding the disk did not answer; the health check runs again within " + proto.BackupTargetHealthInterval.String()
+	}
+	return ""
 }
 
 // ----- Step 2: preflight --------------------------------------------------
@@ -657,8 +682,20 @@ func runPreflight(cfg RunConfig) jobs.DoFn {
 			return nil, fmt.Errorf("backup preflight: unreadable reply from %s: %w", tgt.NodeID, err)
 		}
 		if !ack.Present {
-			return nil, fmt.Errorf("the backup target (partUuid %s) is not attached to %s — it was unplugged. Nothing was written",
-				tgt.PartUUID, tgt.NodeID)
+			// The live check disagreed with (or predates) the last poll:
+			// record it, so the row says what the run found, then cite it.
+			h := proto.BackupTargetHealth{
+				State:     proto.BackupTargetHealthMissing,
+				CheckedAt: time.Now().UTC(),
+				Detail:    fmt.Sprintf("backup preflight: nothing attached to %s carries partition UUID %s", tgt.NodeID, tgt.PartUUID),
+			}
+			if cfg.Store != nil {
+				if rec, rerr := cfg.Store.RecordHealth(sc.Ctx, tgt.PartUUID, h); rerr == nil {
+					h = rec
+				}
+			}
+			return nil, fmt.Errorf("the backup target %s (partUuid %s) is not attached to %s — it was unplugged. Nothing was written. Health: %s",
+				displayLabel(tgt.Label), tgt.PartUUID, tgt.NodeID, DescribeHealth(h))
 		}
 		if !ack.OK {
 			refused := refusalError("backup preflight on "+tgt.NodeID, ack.Refusal, ack.Detail)

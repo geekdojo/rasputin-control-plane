@@ -34,7 +34,14 @@ CREATE TABLE IF NOT EXISTS backup_targets (
     status                   TEXT NOT NULL,  -- 'pending' | 'claimed' | 'replaced' | 'failed'
     created_at               INTEGER NOT NULL,
     claimed_at               INTEGER,
-    error                    TEXT NOT NULL DEFAULT ''
+    error                    TEXT NOT NULL DEFAULT '',
+    -- health (#398): what the five-minute poll last found. Beside status, never
+    -- in place of it: status is the operator's intent, health is the disk.
+    health_state             TEXT NOT NULL DEFAULT '',  -- '' (never checked) | 'ok' | 'missing' | 'unmounted' | 'unwritable' | 'unreachable'
+    health_checked_at        INTEGER,
+    health_since             INTEGER,                   -- when the current state was first observed
+    health_detail            TEXT NOT NULL DEFAULT '',
+    health_probe_ms          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_backup_targets_status ON backup_targets(status);
 CREATE INDEX IF NOT EXISTS idx_backup_targets_node ON backup_targets(node_id, created_at DESC);
@@ -135,6 +142,9 @@ CREATE INDEX IF NOT EXISTS idx_restore_reports_recorded ON restore_reports(recor
 // which of those were guessed at) and the margin. An empty value is right for
 // every row written before the column existed: those runs estimated the
 // identity set alone and recorded nothing about it.
+// health_*: #398's target health. Empty/NULL is right for every row written
+// before the columns existed — no poll had run — and reads back as "unknown"
+// until the first one does, minutes after the api that carries this starts.
 var migrations = []string{
 	`ALTER TABLE backup_targets ADD COLUMN wiped INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE backup_targets ADD COLUMN public_key TEXT NOT NULL DEFAULT ''`,
@@ -143,4 +153,9 @@ var migrations = []string{
 	`ALTER TABLE backup_runs ADD COLUMN warning TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE backup_runs ADD COLUMN app_volumes_failed INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE backup_runs ADD COLUMN preflight TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE backup_targets ADD COLUMN health_state TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE backup_targets ADD COLUMN health_checked_at INTEGER`,
+	`ALTER TABLE backup_targets ADD COLUMN health_since INTEGER`,
+	`ALTER TABLE backup_targets ADD COLUMN health_detail TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE backup_targets ADD COLUMN health_probe_ms INTEGER NOT NULL DEFAULT 0`,
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // Store is the SQLite-backed backup_targets ledger.
@@ -50,7 +51,8 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 const targetCols = `job_id, node_id, label, part_uuid, device_path, mount_path, fs_type,
         size_bytes, fingerprint, key_id, key_alg, public_key, wrapped_by_passphrase,
-        wrapped_by_recovery_code, adopted, wiped, status, created_at, claimed_at, error`
+        wrapped_by_recovery_code, adopted, wiped, status, created_at, claimed_at, error,
+        health_state, health_checked_at, health_since, health_detail, health_probe_ms`
 
 // CreatePending records the start of a claim attempt. Called by step 1, before
 // anything on the disk has been touched, so the Backup view shows the attempt
@@ -243,18 +245,24 @@ func sizeForDB(v uint64) int64 {
 
 func scanTarget(scan func(...any) error) (*BackupTarget, error) {
 	var (
-		t         BackupTarget
-		sizeBytes int64
-		adopted   int
-		wiped     int
-		status    string
-		createdAt int64
-		claimedAt sql.NullInt64
+		t               BackupTarget
+		sizeBytes       int64
+		adopted         int
+		wiped           int
+		status          string
+		createdAt       int64
+		claimedAt       sql.NullInt64
+		healthState     string
+		healthCheckedAt sql.NullInt64
+		healthSince     sql.NullInt64
+		healthDetail    string
+		healthProbeMs   int64
 	)
 	if err := scan(&t.JobID, &t.NodeID, &t.Label, &t.PartUUID, &t.DevicePath, &t.MountPath,
 		&t.FSType, &sizeBytes, &t.Fingerprint, &t.KeyID, &t.KeyAlg, &t.PublicKey,
 		&t.wrappedByPassphrase, &t.wrappedByRecoveryCode, &adopted, &wiped, &status,
-		&createdAt, &claimedAt, &t.Error); err != nil {
+		&createdAt, &claimedAt, &t.Error,
+		&healthState, &healthCheckedAt, &healthSince, &healthDetail, &healthProbeMs); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -272,7 +280,87 @@ func scanTarget(scan func(...any) error) (*BackupTarget, error) {
 		t.ClaimedAt = &ts
 	}
 	t.HasWrappedKeys = t.wrappedByPassphrase != "" && t.wrappedByRecoveryCode != ""
+	// Health rides only on the row that is in service: a failed or replaced
+	// claim has no disk to be healthy, and a `health` field on it would
+	// invite the UI to render one. Until the first poll the claimed row says
+	// `unknown`, with the detail saying when that changes.
+	if t.Status == TargetClaimed {
+		h := proto.BackupTargetHealth{State: proto.BackupTargetHealthUnknown,
+			Detail: "not checked yet — the first health check runs within " + proto.BackupTargetHealthInterval.String() + " of the api starting"}
+		if healthState != "" && healthCheckedAt.Valid {
+			h = proto.BackupTargetHealth{
+				State:           proto.BackupTargetHealthState(healthState),
+				CheckedAt:       fromMs(healthCheckedAt.Int64),
+				Detail:          healthDetail,
+				ProbeDurationMs: healthProbeMs,
+			}
+			if healthSince.Valid {
+				h.Since = fromMs(healthSince.Int64)
+			} else {
+				h.Since = h.CheckedAt
+			}
+		}
+		t.Health = &h
+	}
 	return &t, nil
+}
+
+// RecordHealth writes what a health check found against the claimed row for
+// partUUID (#398). Since is PRESERVED across checks that find the same state,
+// so the row's "MISSING · since 3h" counts from the first poll that noticed
+// rather than from the most recent one; it resets when the state changes.
+//
+// Returns the health as recorded (with Since resolved), so a caller that is
+// about to cite it — a run's refusal, an alert — cites what the row says.
+func (s *Store) RecordHealth(ctx context.Context, partUUID string, h proto.BackupTargetHealth) (proto.BackupTargetHealth, error) {
+	if h.State == "" || h.State == proto.BackupTargetHealthUnknown {
+		return h, errors.New("a health check that records nothing is not a check: state is required and may not be unknown")
+	}
+	if h.CheckedAt.IsZero() {
+		h.CheckedAt = time.Now().UTC()
+	}
+	// Millisecond precision, the column's: what this returns must equal what
+	// the next read scans, or a caller comparing Since across polls sees a
+	// change that is only rounding.
+	h.CheckedAt = h.CheckedAt.UTC().Truncate(time.Millisecond)
+	prev, err := s.GetByPartUUID(ctx, partUUID)
+	if err != nil {
+		return h, err
+	}
+	if prev == nil {
+		return h, errors.New("no claimed backup target with that partition UUID")
+	}
+	h.Since = h.CheckedAt
+	if prev.Health != nil && prev.Health.State == h.State && !prev.Health.Since.IsZero() {
+		h.Since = prev.Health.Since
+	}
+	_, err = s.db.ExecContext(ctx, `
+        UPDATE backup_targets
+        SET health_state = ?, health_checked_at = ?, health_since = ?, health_detail = ?, health_probe_ms = ?
+        WHERE job_id = ? AND status = ?`,
+		string(h.State), ms(h.CheckedAt), ms(h.Since), h.Detail, h.ProbeDurationMs,
+		prev.JobID, string(TargetClaimed))
+	return h, err
+}
+
+// ClaimedTargetHealth is every claimed target with its health — the shape the
+// alerts aggregator reads (alerts.BackupTargets). A target never polled reports
+// `unknown`, which raises nothing.
+func (s *Store) ClaimedTargetHealth(ctx context.Context) ([]proto.BackupTargetHealthReport, error) {
+	claimed, err := s.ListClaimed(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]proto.BackupTargetHealthReport, 0, len(claimed))
+	for _, t := range claimed {
+		if t.Health == nil {
+			continue
+		}
+		out = append(out, proto.BackupTargetHealthReport{
+			PartUUID: t.PartUUID, Label: t.Label, NodeID: t.NodeID, Health: *t.Health,
+		})
+	}
+	return out, nil
 }
 
 // DB exposes the underlying *sql.DB.
