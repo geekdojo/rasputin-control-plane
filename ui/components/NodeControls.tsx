@@ -32,6 +32,7 @@ import type { App, BMCPowerState, DeploymentMode, MeshMembership, Node } from '.
 import { appAccess, preferredAppUrl } from '../lib/appurl';
 import { BMC_CAP_CONSOLE, BMC_CAP_POWER, BMC_CAP_RESET, type BmcCaps } from '../lib/bmc';
 import { configFaults } from '../lib/configFaults';
+import { presenceBadge, presenceExplainer } from '../lib/node-presence';
 import { ConfirmModal } from './ConfirmModal';
 import { ModalPortal, useModalChrome } from './modal';
 import { ACCENT, accentA, MONO, STATUS_COLOR } from './ui-theme';
@@ -306,7 +307,10 @@ export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, 
   // MEM 3% (bench 2026-07-28, tp-n1 powered off via BMC). NodeGrid
   // already guards this and shows OFFL; the detail panel did not.
   // StatBar renders null as "—" with an empty bar.
-  const isOffline = node?.status === 'offline';
+  // Off the bus is off the metrics feed too (it rides the bus).
+  const isOffline = node?.status === 'offline' || node?.status === 'off-bus';
+  const badge = node ? presenceBadge(node) : null;
+  const explainer = node ? presenceExplainer(node.status) : null;
   const liveCpu = isOffline ? null : cpu;
   const liveMem = isOffline ? null : mem;
 
@@ -396,7 +400,15 @@ export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, 
                 // as two rows, adjacent and separately labelled, because
                 // collapsing them into one indicator is what hid 16 nodes for
                 // five weeks (geekdojo/geekdojo-brain#202).
-                { label: 'LAN', value: node.status.toUpperCase() },
+                // OFF BUS · on mesh (geekdojo/geekdojo-brain#401): the one
+                // state where LAN and MESH disagree, said in the LAN row with
+                // both timestamps on hover.
+                {
+                  label: 'LAN',
+                  value: badge?.label ?? node.status.toUpperCase(),
+                  color: badge?.tone === 'offbus' ? STATUS_COLOR.offbus : undefined,
+                  title: badge?.title,
+                },
                 {
                   label: 'MESH',
                   value: meshLabel(node.mesh),
@@ -419,10 +431,11 @@ export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, 
                       ? STATUS_COLOR.warning
                       : undefined,
                 },
-              ].map(({ label, value, color }: { label: string; value: string; color?: string }) => (
+              ].map(({ label, value, color, title }: { label: string; value: string; color?: string; title?: string }) => (
                 <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
                   <span style={{ color: 'var(--rasp-dim)', fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>{label}</span>
                   <span
+                    title={title}
                     style={{
                       color: color ?? 'var(--rasp-fg)',
                       fontSize: 10,
@@ -438,6 +451,26 @@ export function NodeControls({ node, cpu, mem, apps, clusterId, deploymentMode, 
                 </div>
               ))}
             </div>
+
+            {/* OFF BUS — what it means and what to do. The badge names the
+                state; this says why the controls below are disabled for a
+                machine that is demonstrably up. */}
+            {explainer && (
+              <div
+                style={{
+                  border: `1px solid ${STATUS_COLOR.offbus}`,
+                  padding: 8,
+                  marginTop: -8,
+                  marginBottom: 16,
+                  display: 'flex',
+                  gap: 6,
+                  alignItems: 'flex-start',
+                }}
+              >
+                <AlertTriangle size={12} color={STATUS_COLOR.offbus} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span style={{ color: 'var(--rasp-fg)', fontSize: 10, fontFamily: MONO, lineHeight: 1.5 }}>{explainer}</span>
+              </div>
+            )}
 
             {/* CONFIG FAULT — values this node's node.env asked for and the
                 agent REFUSED. It is running, reachable and reporting; the named

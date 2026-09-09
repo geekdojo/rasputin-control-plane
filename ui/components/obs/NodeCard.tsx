@@ -30,12 +30,16 @@ const STATUS_COLOR: Record<Node['status'], string> = {
   online: '#4ade80',
   stale: '#facc15',
   offline: '#f87171',
+  // Amber, distinct from red OFFLINE: the machine is up, only its agent is
+  // off the bus (geekdojo/geekdojo-brain#401).
+  'off-bus': '#f59e0b',
 };
 
 const STATUS_LABEL: Record<Node['status'], string> = {
   online: 'ONLINE',
   stale: 'STALE',
   offline: 'OFFLINE',
+  'off-bus': 'OFF BUS · on mesh',
 };
 
 function lastValue(series: ObsSeries | null): number | null {

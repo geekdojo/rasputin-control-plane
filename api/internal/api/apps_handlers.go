@@ -12,6 +12,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/oklog/ulid/v2"
 )
@@ -121,7 +122,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// Gated on KnownAbsent, not on "not joined": undetermined membership must
 	// not block an operator whose cluster has no mesh service at all.
 	if !req.ExposeLAN {
-		applyMeshMembership([]*proto.Node{node}, s.meshMembership(r.Context()))
+		inventory.ApplyMesh([]*proto.Node{node}, s.meshMembership(r.Context()))
 		if node.Mesh.KnownAbsent() {
 			writeError(w, http.StatusConflict, tailnetOnlyOffMeshMsg(req.TargetNode, node.Mesh))
 			return

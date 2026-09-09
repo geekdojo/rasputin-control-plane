@@ -153,3 +153,61 @@ func TestStoreExplainNoResponder(t *testing.T) {
 		t.Errorf("ghost: %+v (%s)", n, n)
 	}
 }
+
+// A lapsed node whose mesh device is online is named OFF BUS (on mesh), not
+// OFFLINE, so a failed backup fan-out names the right cause
+// (geekdojo/geekdojo-brain#401). Still not Online(): nothing on the bus
+// answers, and the fan-out's refusal logic must keep treating it so.
+func TestExplainNoResponderOffBus(t *testing.T) {
+	now := time.Now().UTC()
+	subject := proto.BackupStageVolumeSubject("e3bench-compute2")
+	seen := now.Add(-40 * time.Second)
+	node := &proto.Node{
+		ID: "e3bench-compute2", AgentVersion: "2026.08.5-dev.143", LastSeen: now.Add(-3 * time.Hour),
+		Mesh: &proto.MeshMembership{State: proto.MeshJoined, Enrolled: true, Online: true, LastSeen: &seen},
+	}
+	n := ExplainNoResponder(node, subject)
+	if n.Kind != SilenceOffline || n.Online() {
+		t.Fatalf("kind = %v, Online() = %v; want SilenceOffline and not online", n.Kind, n.Online())
+	}
+	if n.Status != proto.StatusOffBus {
+		t.Errorf("status = %q, want off-bus", n.Status)
+	}
+	got := n.String()
+	for _, want := range []string{"e3bench-compute2 is OFF BUS (on mesh)", "reachable over the mesh (seen 40s ago)", "agent is not on the bus", "storage.backup_stage_volume", "restart the agent"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q lacks %q", got, want)
+		}
+	}
+	if strings.Contains(got, "offline") {
+		t.Errorf("%q must not say offline", got)
+	}
+
+	// Mesh device not online: the plain offline sentence, unchanged.
+	node.Mesh.Online = false
+	if got := ExplainNoResponder(node, subject).String(); !strings.Contains(got, "e3bench-compute2 is offline") {
+		t.Errorf("both down: %q", got)
+	}
+}
+
+// Store.ExplainNoResponder joins the row with the wired mesh lookup, so the
+// storage fan-out — which only has the store — gets the same reading.
+func TestStoreExplainNoResponderJoinsMesh(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenStore(ctx, filepath.Join(t.TempDir(), "inv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	lapsed := time.Now().UTC().Add(-3 * time.Hour)
+	if err := st.Insert(ctx, &proto.Node{ID: "c2", Role: proto.RoleCompute, Hostname: "c2", FirstSeen: lapsed, LastSeen: lapsed}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetMeshLookup(func(context.Context) map[string]*proto.MeshMembership {
+		return map[string]*proto.MeshMembership{"c2": {State: proto.MeshJoined, Enrolled: true, Online: true}}
+	})
+	n := st.ExplainNoResponder(ctx, proto.BackupStageVolumeSubject("c2"))
+	if n.Status != proto.StatusOffBus || !strings.Contains(n.String(), "OFF BUS (on mesh)") {
+		t.Errorf("%+v (%s)", n, n)
+	}
+}

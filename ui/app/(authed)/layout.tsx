@@ -12,6 +12,7 @@ import {
   openJobsWS,
 } from '../../lib/api';
 import { getMe, logout, type CurrentUser } from '../../lib/auth';
+import { countOnLan } from '../../lib/node-presence';
 import type { Alert, Node, SetupState } from '../../lib/types';
 import { HudBackground } from '../../components/HudBackground';
 import { SideNav } from '../../components/SideNav';
@@ -134,7 +135,9 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
     router.replace('/login');
   }
 
-  const online = nodes.filter((n) => n.status === 'online').length;
+  // Off-bus nodes are not counted here (see countOnLan): the tile counts what
+  // the bus can hear; ON MESH beside it is where an off-bus node still shows.
+  const online = countOnLan(nodes);
   // Mesh membership is only countable once the API has actually determined it.
   // If ANY node has undefined membership we report undetermined rather than a
   // number, because a count that silently omits the nodes we could not check is

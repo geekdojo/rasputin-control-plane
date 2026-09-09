@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -37,7 +38,9 @@ const (
 	// SilenceNodeUnknown: inventory has no row for the node the subject
 	// names, so nothing is known about it.
 	SilenceNodeUnknown Silence = iota
-	// SilenceOffline: the node's presence is stale or offline.
+	// SilenceOffline: the node is not on the bus — its presence is stale,
+	// offline, or off-bus (lapsed heartbeat, mesh device online; Status says
+	// which, and String names the off-bus case as such).
 	SilenceOffline
 	// SilenceOldAgent: the node is online, and its agent reported a version
 	// below the first release that answers the verb.
@@ -57,8 +60,13 @@ type NoResponder struct {
 	// not a cmd subject at all).
 	Verb string
 	Kind Silence
-	// Status is the node's computed presence; "" when the node is unknown.
+	// Status is the node's computed presence (DeriveStatus); "" when the
+	// node is unknown.
 	Status proto.NodeStatus
+	// MeshLastSeen is the mesh device's last-seen when Status is
+	// StatusOffBus — the evidence that the machine is reachable; nil
+	// otherwise.
+	MeshLastSeen *time.Time
 	// AgentVersion is what the node reported, bare CalVer; "" if it never
 	// reported one.
 	AgentVersion string
@@ -89,9 +97,12 @@ func ExplainNoResponder(node *proto.Node, subject string) NoResponder {
 		return n
 	}
 	n.AgentVersion = strings.TrimPrefix(strings.TrimSpace(node.AgentVersion), "v")
-	n.Status = ComputeStatus(node.LastSeen)
+	n.Status = DeriveStatus(node.LastSeen, node.Mesh)
 	if n.Status != proto.StatusOnline {
 		n.Kind = SilenceOffline
+		if n.Status == proto.StatusOffBus && node.Mesh != nil {
+			n.MeshLastSeen = node.Mesh.LastSeen
+		}
 		return n
 	}
 	n.Kind = SilenceUnexplained
@@ -106,7 +117,8 @@ func ExplainNoResponder(node *proto.Node, subject string) NoResponder {
 }
 
 // ExplainNoResponder is ExplainNoResponder against this store's row for the
-// node the subject names.
+// node the subject names, joined with its mesh membership (presence.go) so a
+// node that is off the bus but on the mesh is named as such.
 func (s *Store) ExplainNoResponder(ctx context.Context, subject string) NoResponder {
 	nodeID, _, _ := proto.CmdSubjectVerb(subject)
 	node, err := s.Get(ctx, nodeID)
@@ -114,6 +126,9 @@ func (s *Store) ExplainNoResponder(ctx context.Context, subject string) NoRespon
 		n := ExplainNoResponder(nil, subject)
 		n.Err = err
 		return n
+	}
+	if node != nil {
+		s.Presence(ctx, []*proto.Node{node})
 	}
 	return ExplainNoResponder(node, subject)
 }
@@ -144,12 +159,39 @@ func (n NoResponder) String() string {
 				n.NodeID, vtag(n.AgentVersion), n.Verb)
 		}
 	case SilenceOffline:
+		if n.Status == proto.StatusOffBus {
+			seen := ""
+			if n.MeshLastSeen != nil {
+				seen = fmt.Sprintf(" (seen %s ago)", humanAgo(time.Since(*n.MeshLastSeen)))
+			}
+			return fmt.Sprintf("node %s is OFF BUS (on mesh): reachable over the mesh%s but its agent is not on the bus, so nothing answered %s; restart the agent or check its log",
+				n.NodeID, seen, n.Verb)
+		}
 		return fmt.Sprintf("node %s is %s: no agent on it answered %s", n.NodeID, n.Status, n.Verb)
 	default:
 		if n.Err != nil {
 			return fmt.Sprintf("node %s could not be looked up in inventory (%v), and no agent answered %s", n.NodeID, n.Err, n.Verb)
 		}
 		return fmt.Sprintf("node %s is not in inventory, and no agent answered %s", n.NodeID, n.Verb)
+	}
+}
+
+// humanAgo renders an elapsed duration coarsely — "40s", "3m", "3h", "2d" —
+// for the off-bus sentence. Coarse on purpose: the reader needs "seconds" vs
+// "hours", not a stopwatch.
+func humanAgo(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
 }
 

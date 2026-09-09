@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,39 +13,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// TestApplyMeshMembership_NilMapLeavesUndetermined is the load-bearing case.
-// A nil map means we could not establish membership at all — no mesh service,
-// or no reconcile yet. Painting those nodes "absent" would be the same unchecked
-// assertion as the green 24/24, just pointing the other way.
-func TestApplyMeshMembership_NilMapLeavesUndetermined(t *testing.T) {
-	nodes := []*proto.Node{{ID: "c01"}, {ID: "c02"}}
-	applyMeshMembership(nodes, nil)
-	for _, n := range nodes {
-		if n.Mesh != nil {
-			t.Errorf("%s: Mesh = %+v, want nil (undetermined)", n.ID, n.Mesh)
-		}
-	}
-}
-
-// TestApplyMeshMembership_MissingNodeIsAbsent covers the other half: given a
-// map we actually built, a node with no device row has genuinely never enrolled.
-// We looked, and it was not there.
-func TestApplyMeshMembership_MissingNodeIsAbsent(t *testing.T) {
-	nodes := []*proto.Node{{ID: "c01"}, {ID: "never-enrolled"}}
-	applyMeshMembership(nodes, map[string]*proto.MeshMembership{
-		"c01": {State: proto.MeshJoined, TailnetIP: "100.64.0.1"},
-	})
-	if nodes[0].Mesh == nil || nodes[0].Mesh.State != proto.MeshJoined {
-		t.Errorf("c01: want joined, got %+v", nodes[0].Mesh)
-	}
-	if nodes[1].Mesh == nil || nodes[1].Mesh.State != proto.MeshAbsent {
-		t.Errorf("never-enrolled: want absent, got %+v", nodes[1].Mesh)
-	}
-}
-
-func TestApplyMeshMembership_ToleratesNilNodes(t *testing.T) {
-	applyMeshMembership([]*proto.Node{nil, {ID: "c01"}}, map[string]*proto.MeshMembership{})
-}
+// applyMeshMembership moved to inventory.ApplyMesh (presence_test.go).
 
 // TestKnownAbsent_DefaultsOppositeToDisplay pins the asymmetry that the install
 // gate depends on. Undetermined must NOT block an install (an operator with no
@@ -195,5 +165,84 @@ func TestMeshMembership_StoreErrorIsUndetermined(t *testing.T) {
 
 	if got := (&Server{mesh: svc}).meshMembership(ctx); got != nil {
 		t.Errorf("store unreadable: want nil (undetermined), got %v", got)
+	}
+}
+
+// ---- /api/nodes carries the join and the derived state ---------------------
+
+// A node whose heartbeat lapsed while its mesh device is online — the
+// e3bench 2026-09-04 shape — comes out of /api/nodes as off-bus with a mesh
+// block saying enrolled + online + when; a node with both down stays offline
+// (geekdojo/geekdojo-brain#401). Nothing on the nodes page fetches mesh
+// itself: the row already says.
+func TestHandleListNodes_OffBusOnMesh(t *testing.T) {
+	f := newAPIFixture(t)
+	now := time.Now().UTC()
+	lapsed := now.Add(-3 * time.Hour)
+	for _, id := range []string{"compute2", "compute3", "compute4"} {
+		if err := f.inv.Insert(f.ctx, &proto.Node{ID: id, Role: proto.RoleCompute, Hostname: id, FirstSeen: lapsed, LastSeen: lapsed}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// compute2: enrolled and online. compute3: enrolled, dropped. compute4: never enrolled.
+	for _, d := range []*mesh.Device{
+		{HSID: "hs-2", RasputinNodeID: "compute2", Kind: "rasputin", TailnetIP: "100.64.0.2", FirstSeen: lapsed, LastSeen: lapsed, Online: true},
+		{HSID: "hs-3", RasputinNodeID: "compute3", Kind: "rasputin", TailnetIP: "100.64.0.3", FirstSeen: lapsed, LastSeen: lapsed, Online: false},
+	} {
+		if err := f.mesh.Store().UpsertDevice(f.ctx, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observed := now.Add(-40 * time.Second)
+	if err := f.mesh.Store().UpdateAfterReconcile(f.ctx, "obs", observed); err != nil {
+		t.Fatal(err)
+	}
+
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodGet, "/api/nodes", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var rows []struct {
+		ID     string           `json:"id"`
+		Status proto.NodeStatus `json:"status"`
+		Mesh   *struct {
+			State    string     `json:"state"`
+			Enrolled bool       `json:"enrolled"`
+			Online   bool       `json:"online"`
+			LastSeen *time.Time `json:"lastSeen"`
+		} `json:"mesh"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]int{}
+	for i, r := range rows {
+		byID[r.ID] = i
+	}
+	r := rows[byID["compute2"]]
+	if r.Status != proto.StatusOffBus || r.Mesh == nil || !r.Mesh.Enrolled || !r.Mesh.Online || r.Mesh.State != "joined" {
+		t.Errorf("compute2: want off-bus with mesh enrolled+online, got status %q mesh %+v", r.Status, r.Mesh)
+	}
+	if r.Mesh != nil && (r.Mesh.LastSeen == nil || !r.Mesh.LastSeen.Equal(observed.Truncate(time.Millisecond))) {
+		t.Errorf("compute2: mesh.lastSeen = %v, want the reconcile that saw it online (%v)", r.Mesh.LastSeen, observed)
+	}
+	r = rows[byID["compute3"]]
+	if r.Status != proto.StatusOffline || r.Mesh == nil || !r.Mesh.Enrolled || r.Mesh.Online {
+		t.Errorf("compute3: want offline, enrolled, not online; got status %q mesh %+v", r.Status, r.Mesh)
+	}
+	r = rows[byID["compute4"]]
+	if r.Status != proto.StatusOffline || r.Mesh == nil || r.Mesh.Enrolled || r.Mesh.State != "absent" {
+		t.Errorf("compute4: want offline and not enrolled; got status %q mesh %+v", r.Status, r.Mesh)
+	}
+
+	// The single-node handler agrees.
+	w = f.do(t, http.MethodGet, "/api/nodes/compute2", "", c)
+	var one proto.Node
+	if err := json.Unmarshal(w.Body.Bytes(), &one); err != nil {
+		t.Fatal(err)
+	}
+	if one.Status != proto.StatusOffBus {
+		t.Errorf("GET /api/nodes/compute2: status %q, want off-bus", one.Status)
 	}
 }

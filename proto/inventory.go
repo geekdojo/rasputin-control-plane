@@ -59,6 +59,16 @@ const (
 	StatusOnline  NodeStatus = "online"
 	StatusStale   NodeStatus = "stale"
 	StatusOffline NodeStatus = "offline"
+	// StatusOffBus: the heartbeat has lapsed as far as StatusOffline, but the
+	// node's mesh device is still online — the machine is up and reachable
+	// over the tailnet, and only its agent has dropped off the bus. Observed
+	// on e3bench 2026-09-04 after a controlplane wipe: five nodes' agents had
+	// their NATS connection permanently closed while tailscaled stayed
+	// enrolled, and a flat OFFLINE sent the operator to the wrong place
+	// (geekdojo/geekdojo-brain#401). Every consumer that gates on
+	// StatusOnline still refuses this node — it is not on the bus — but the
+	// refusal names the right cause.
+	StatusOffBus NodeStatus = "off-bus"
 )
 
 // NodeRegisteredEvt is published by an agent on every NATS connect and
@@ -140,6 +150,9 @@ const (
 	InventoryOnline  InventoryChangeType = "online"
 	InventoryStale   InventoryChangeType = "stale"
 	InventoryOffline InventoryChangeType = "offline"
+	// InventoryOffBus is the transition into StatusOffBus — emitted when a
+	// lapsed node's mesh device is (still, or again) online.
+	InventoryOffBus  InventoryChangeType = "off-bus"
 	InventoryUpdated InventoryChangeType = "updated"
 	InventoryRemoved InventoryChangeType = "removed"
 )
@@ -225,6 +238,18 @@ const (
 // MeshMembership is the tailnet view of a node.
 type MeshMembership struct {
 	State MeshState `json:"state"`
+	// Enrolled: Headscale has a device registered for this node at all. False
+	// with State == MeshAbsent means the node never enrolled; true with
+	// MeshAbsent means it enrolled and is not currently connected.
+	Enrolled bool `json:"enrolled"`
+	// Online is Headscale's connection state for the device as of the last
+	// reconcile, and FALSE when that observation is older than the mesh
+	// service's staleness bound (three reconcile intervals — see
+	// mesh.Service.Membership). It is the input to StatusOffBus: a node whose
+	// heartbeat has lapsed is off-bus only while this is true, so a cache the
+	// reconcile stopped refreshing cannot keep calling a dead machine
+	// reachable. State is the raw observation; Online is the bounded one.
+	Online bool `json:"online"`
 	// LastSeen is Headscale's last-seen for the node. Meaningful mainly when
 	// State is MeshAbsent, where it separates "minutes" from "weeks" — the
 	// distinction nobody could draw for five weeks.
@@ -234,6 +259,11 @@ type MeshMembership struct {
 	// connected, and for a node that dropped after a long session it reads
 	// older than the outage really is. Present it as last-seen, never as an
 	// outage duration. nil when unknown.
+	//
+	// For an Online device it is never older than the reconcile that observed
+	// it connected — Headscale saying "online" at that moment is evidence of a
+	// session at that moment — so "mesh seen 40s ago" on an off-bus node reads
+	// as recently as the observation really is.
 	LastSeen *time.Time `json:"lastSeen,omitempty"`
 	// TailnetIP is the node's 100.64.0.x address, "" when not enrolled. This is
 	// the address cluster DNS and mesh routes point at, which is why an absent
