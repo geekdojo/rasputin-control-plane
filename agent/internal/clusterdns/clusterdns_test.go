@@ -2,7 +2,9 @@ package clusterdns
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,26 +12,299 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
-// at makes a static address source. Production passes a live one; a test that
-// needs the address to CHANGE builds its own closure.
-func at(ip string) func() string { return func() string { return ip } }
+// ---- an in-process nameserver ------------------------------------------
+//
+// The probe's verdict is what every keep and every withdrawal rests on, so
+// these tests do not stub it. They run the production query (queryA) against
+// a nameserver that speaks DNS on loopback and vary what it says: an answer
+// for the cluster's apex, NXDOMAIN, SERVFAIL, an empty NOERROR, a port that
+// listens and never replies, a truncated UDP reply, or nothing listening at
+// all. Each of those is a fact on the wire, and the test asserts what the
+// package does with it.
 
-// reachable is a probe that says yes. The default production probe does a real
-// dial, which a unit test must not depend on.
-func reachable(context.Context, string) bool { return true }
+type nsMode int
 
-func testCfg(t *testing.T, reloads *int) Config {
+const (
+	nsAnswers   nsMode = iota // authoritative: an A record for its zone apex
+	nsNXDomain                // listens, answers NXDOMAIN to everything
+	nsServFail                // listens, answers SERVFAIL
+	nsEmpty                   // NOERROR with nothing in the answer section
+	nsSilent                  // holds the port and never replies
+	nsTruncates               // over UDP: TC set and no answer; over TCP: the answer
+)
+
+// fakeNS is a nameserver authoritative for one cluster's internal apex,
+// bound UDP and TCP on the same loopback port, whose behaviour a test can
+// switch while it runs.
+type fakeNS struct {
+	t    *testing.T
+	udp  *net.UDPConn
+	tcp  net.Listener
+	addr string // "127.0.0.1:<port>" — one port, both transports
+	zone string // canonical apex it holds, e.g. "rasputin.internal."
+
+	mu    sync.Mutex
+	mode  nsMode
+	asked []string // every name queried, in order, as the wire carried it
+}
+
+func startNS(t *testing.T, clusterID string) *fakeNS {
 	t.Helper()
-	return Config{
-		ClusterID: "rasputin",
-		ServerIP:  at("192.168.197.224"),
-		probe:     reachable,
-		Dir:       filepath.Join(t.TempDir(), "resolved.conf.d"),
-		reload:    func(context.Context) error { *reloads++; return nil },
+	ns := &fakeNS{t: t, zone: clusterID + ".internal."}
+	// One port for both transports, as a real nameserver has: bind UDP on an
+	// ephemeral port, then TCP on the same one; retry if TCP loses the race.
+	for try := 0; ; try++ {
+		udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("listen udp: %v", err)
+		}
+		tcp, err := net.Listen("tcp", udp.LocalAddr().String())
+		if err == nil {
+			ns.udp, ns.tcp, ns.addr = udp, tcp, udp.LocalAddr().String()
+			break
+		}
+		_ = udp.Close()
+		if try == 10 {
+			t.Fatalf("no port free on both udp and tcp: %v", err)
+		}
+	}
+	t.Cleanup(func() { _ = ns.udp.Close(); _ = ns.tcp.Close() })
+	go ns.serveUDP()
+	go ns.serveTCP()
+	return ns
+}
+
+func (ns *fakeNS) set(m nsMode) { ns.mu.Lock(); ns.mode = m; ns.mu.Unlock() }
+
+func (ns *fakeNS) queries() []string {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	return append([]string(nil), ns.asked...)
+}
+
+func (ns *fakeNS) serveUDP() {
+	buf := make([]byte, 4096)
+	for {
+		n, peer, err := ns.udp.ReadFromUDP(buf)
+		if err != nil {
+			return // closed by Cleanup
+		}
+		if reply := ns.reply(buf[:n], false); reply != nil {
+			_, _ = ns.udp.WriteToUDP(reply, peer)
+		}
 	}
 }
+
+func (ns *fakeNS) serveTCP() {
+	for {
+		c, err := ns.tcp.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer func() { _ = c.Close() }()
+			var hdr [2]byte
+			if _, err := io.ReadFull(c, hdr[:]); err != nil {
+				return
+			}
+			q := make([]byte, binary.BigEndian.Uint16(hdr[:]))
+			if _, err := io.ReadFull(c, q); err != nil {
+				return
+			}
+			reply := ns.reply(q, true)
+			if reply == nil || len(reply) > 0xffff {
+				return
+			}
+			framed := make([]byte, 2+len(reply))
+			binary.BigEndian.PutUint16(framed, uint16(len(reply)))
+			copy(framed[2:], reply)
+			_, _ = c.Write(framed)
+		}()
+	}
+}
+
+// reply is the nameserver's answer to one query under the current mode, or
+// nil for no reply at all.
+func (ns *fakeNS) reply(query []byte, overTCP bool) []byte {
+	var p dnsmessage.Parser
+	qh, err := p.Start(query)
+	if err != nil {
+		return nil
+	}
+	q, err := p.Question()
+	if err != nil {
+		return nil
+	}
+	ns.mu.Lock()
+	mode := ns.mode
+	ns.asked = append(ns.asked, q.Name.String())
+	ns.mu.Unlock()
+
+	holds := strings.EqualFold(q.Name.String(), ns.zone) && q.Type == dnsmessage.TypeA && q.Class == dnsmessage.ClassINET
+	h := dnsmessage.Header{ID: qh.ID, Response: true, Authoritative: true, RecursionDesired: qh.RecursionDesired}
+	answer := false
+	switch mode {
+	case nsSilent:
+		return nil
+	case nsNXDomain:
+		h.RCode = dnsmessage.RCodeNameError
+	case nsServFail:
+		h.RCode = dnsmessage.RCodeServerFailure
+	case nsEmpty:
+	case nsTruncates:
+		if overTCP {
+			answer = holds
+		} else {
+			h.Truncated = true
+		}
+	case nsAnswers:
+		if holds {
+			answer = true
+		} else {
+			h.RCode = dnsmessage.RCodeNameError // authoritative, and this is not its name
+		}
+	}
+	b := dnsmessage.NewBuilder(nil, h)
+	must := func(err error) {
+		if err != nil {
+			ns.t.Errorf("fake nameserver building a reply: %v", err)
+		}
+	}
+	must(b.StartQuestions())
+	must(b.Question(q))
+	must(b.StartAnswers())
+	if answer {
+		must(b.AResource(
+			dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 30},
+			dnsmessage.AResource{A: [4]byte{192, 168, 1, 181}}))
+	}
+	msg, err := b.Finish()
+	must(err)
+	return msg
+}
+
+// directory stands in for port 53, which a test cannot bind: it maps the
+// address the bus or the drop-in names to the loopback port of the fake
+// serving as that control plane. Everything from the query onward is the
+// production path (queryA); only the port is substituted. An address with no
+// fake behind it is dialed at a loopback port nothing listens on, so a gone
+// server fails the way it fails on the wire — refused — not by a stub's
+// say-so.
+type directory struct {
+	mu   sync.Mutex
+	at   map[string]*fakeNS
+	dead string
+}
+
+func newDirectory(t *testing.T) *directory {
+	t.Helper()
+	l, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := l.LocalAddr().String()
+	_ = l.Close()
+	return &directory{at: map[string]*fakeNS{}, dead: dead}
+}
+
+func (d *directory) serve(t *testing.T, ip, clusterID string) *fakeNS {
+	ns := startNS(t, clusterID)
+	d.mu.Lock()
+	d.at[ip] = ns
+	d.mu.Unlock()
+	return ns
+}
+
+func (d *directory) gone(ip string) { d.mu.Lock(); delete(d.at, ip); d.mu.Unlock() }
+
+func (d *directory) probe(ctx context.Context, ip, name string) error {
+	d.mu.Lock()
+	addr := d.dead
+	if ns, ok := d.at[ip]; ok {
+		addr = ns.addr
+	}
+	d.mu.Unlock()
+	return queryA(ctx, addr, name)
+}
+
+// harness is one node under test: the config Apply and Run see, the bus
+// address as the client would report it, the nameservers behind each
+// address, and how many times resolved was restarted. Guarded for -race,
+// since Run-level tests change it while Run is looking.
+type harness struct {
+	t       *testing.T
+	cfg     Config
+	servers *directory
+
+	mu      sync.Mutex
+	addr    string
+	reloads int
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	h := &harness{t: t, servers: newDirectory(t)}
+	h.cfg = Config{
+		ClusterID: "rasputin",
+		ServerIP:  h.serverIP,
+		probe:     h.servers.probe,
+		Dir:       filepath.Join(t.TempDir(), "resolved.conf.d"),
+		reload:    h.reload,
+	}
+	return h
+}
+
+// serve starts a nameserver for this cluster behind ip.
+func (h *harness) serve(ip string) *fakeNS { return h.servers.serve(h.t, ip, h.cfg.ClusterID) }
+
+// bus sets what the bus client reports as the control plane's address; ""
+// is not connected.
+func (h *harness) bus(ip string) { h.mu.Lock(); h.addr = ip; h.mu.Unlock() }
+
+func (h *harness) serverIP() string { h.mu.Lock(); defer h.mu.Unlock(); return h.addr }
+func (h *harness) reload(context.Context) error {
+	h.mu.Lock()
+	h.reloads++
+	h.mu.Unlock()
+	return nil
+}
+func (h *harness) reloaded() int { h.mu.Lock(); defer h.mu.Unlock(); return h.reloads }
+func (h *harness) path() string  { return filepath.Join(h.cfg.Dir, fileName) }
+
+// run starts Run with a Trigger and a tick that cannot fire unless the test
+// set one, so anything that happens happened because of a trigger.
+func (h *harness) run(ctx context.Context) <-chan struct{} {
+	if h.cfg.Interval == 0 {
+		h.cfg.Interval = time.Hour
+	}
+	if h.cfg.Trigger == nil {
+		h.cfg.Trigger = NewTrigger()
+	}
+	done := make(chan struct{})
+	go func() { Run(ctx, h.cfg); close(done) }()
+	return done
+}
+
+// connected is the common starting point: a control plane at ip whose
+// nameserver answers, and the bus connected to it.
+func connected(t *testing.T, ip string) (*harness, *fakeNS) {
+	t.Helper()
+	h := newHarness(t)
+	ns := h.serve(ip)
+	h.bus(ip)
+	return h, ns
+}
+
+// answering is a probe that says yes without asking anything, for the tests
+// of config validation, where the probe is not what is under test.
+func answering(context.Context, string, string) error { return nil }
+
+// at makes a static address source.
+func at(ip string) func() string { return func() string { return ip } }
 
 func TestDomainsAreRoutingOnly(t *testing.T) {
 	// The "~" prefix is the whole safety argument: without it this would make
@@ -52,6 +327,25 @@ func TestDomainsAreRoutingOnly(t *testing.T) {
 	}
 }
 
+// The name the probe asks for must be one the drop-in routes at the pinned
+// server — otherwise the probe would be proving something the pin does not
+// assert. Canonical, so it goes on the wire as-is.
+func TestProbeNameIsARoutedDomain(t *testing.T) {
+	name := probeName("rasputin")
+	if name != "rasputin.internal." {
+		t.Fatalf("probeName = %q, want the internal apex, canonical", name)
+	}
+	routed := false
+	for _, d := range Domains("rasputin") {
+		if d == "~"+strings.TrimSuffix(name, ".") {
+			routed = true
+		}
+	}
+	if !routed {
+		t.Errorf("%q is not among the routed domains %v", name, Domains("rasputin"))
+	}
+}
+
 func TestRenderContainsDNSAndDomains(t *testing.T) {
 	body := Render("home1", "10.0.0.5")
 	for _, want := range []string{
@@ -66,25 +360,24 @@ func TestRenderContainsDNSAndDomains(t *testing.T) {
 }
 
 func TestApplyWritesAndReloads(t *testing.T) {
-	reloads := 0
-	cfg := testCfg(t, &reloads)
+	h, _ := connected(t, "192.168.197.224")
 
-	changed, err := Apply(context.Background(), cfg, TriggerTick)
+	changed, err := Apply(context.Background(), h.cfg, TriggerTick)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !changed {
 		t.Error("first Apply reported no change")
 	}
-	if reloads != 1 {
-		t.Errorf("reloads = %d, want 1", reloads)
+	if h.reloaded() != 1 {
+		t.Errorf("reloads = %d, want 1", h.reloaded())
 	}
 
-	body, err := os.ReadFile(filepath.Join(cfg.Dir, fileName))
+	body, err := os.ReadFile(h.path())
 	if err != nil {
 		t.Fatalf("read written file: %v", err)
 	}
-	if string(body) != Render(cfg.ClusterID, cfg.ServerIP()) {
+	if string(body) != Render(h.cfg.ClusterID, "192.168.197.224") {
 		t.Errorf("written body does not match Render():\n%s", body)
 	}
 }
@@ -93,45 +386,20 @@ func TestApplyIsIdempotent(t *testing.T) {
 	// The steady-state call must not restart systemd-resolved. A restart
 	// flushes the DNS cache, so an unconditional rewrite on a 5-minute ticker
 	// would be a self-inflicted cache flush forever.
-	reloads := 0
-	cfg := testCfg(t, &reloads)
+	h, _ := connected(t, "192.168.197.224")
 
-	if _, err := Apply(context.Background(), cfg, TriggerTick); err != nil {
+	if _, err := Apply(context.Background(), h.cfg, TriggerTick); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
-	changed, err := Apply(context.Background(), cfg, TriggerTick)
+	changed, err := Apply(context.Background(), h.cfg, TriggerTick)
 	if err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 	if changed {
 		t.Error("second Apply reported a change with identical config")
 	}
-	if reloads != 1 {
-		t.Errorf("reloads = %d after two identical Applies, want 1", reloads)
-	}
-}
-
-func TestApplyRewritesWhenServerMoves(t *testing.T) {
-	reloads := 0
-	cfg := testCfg(t, &reloads)
-	if _, err := Apply(context.Background(), cfg, TriggerTick); err != nil {
-		t.Fatalf("first Apply: %v", err)
-	}
-
-	cfg.ServerIP = at("192.168.197.9")
-	changed, err := Apply(context.Background(), cfg, TriggerTick)
-	if err != nil {
-		t.Fatalf("Apply after move: %v", err)
-	}
-	if !changed {
-		t.Error("Apply reported no change after the control plane moved")
-	}
-	if reloads != 2 {
-		t.Errorf("reloads = %d, want 2", reloads)
-	}
-	body, _ := os.ReadFile(filepath.Join(cfg.Dir, fileName))
-	if !strings.Contains(string(body), "DNS=192.168.197.9") {
-		t.Errorf("drop-in still points at the old address:\n%s", body)
+	if h.reloaded() != 1 {
+		t.Errorf("reloads = %d after two identical Applies, want 1", h.reloaded())
 	}
 }
 
@@ -140,8 +408,8 @@ func TestApplyRequiresClusterAndServer(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{"no cluster id", Config{ServerIP: at("10.0.0.1"), probe: reachable, Dir: t.TempDir()}},
-		{"no address source", Config{ClusterID: "rasputin", Dir: t.TempDir(), probe: reachable}},
+		{"no cluster id", Config{ServerIP: at("10.0.0.1"), probe: answering, Dir: t.TempDir()}},
+		{"no address source", Config{ClusterID: "rasputin", Dir: t.TempDir(), probe: answering}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Apply(context.Background(), tc.cfg, TriggerTick); err == nil {
@@ -154,17 +422,17 @@ func TestApplyRequiresClusterAndServer(t *testing.T) {
 func TestApplyReportsReloadFailureButKeepsFile(t *testing.T) {
 	// A failed reload still leaves correct config on disk — it takes effect at
 	// the next resolved restart. Removing it would be strictly worse.
-	cfg := testCfg(t, new(int))
-	cfg.reload = func(context.Context) error { return errors.New("boom") }
+	h, _ := connected(t, "192.168.197.224")
+	h.cfg.reload = func(context.Context) error { return errors.New("boom") }
 
-	changed, err := Apply(context.Background(), cfg, TriggerTick)
+	changed, err := Apply(context.Background(), h.cfg, TriggerTick)
 	if err == nil {
 		t.Error("Apply hid a reload failure")
 	}
 	if !changed {
 		t.Error("Apply reported no change despite writing the file")
 	}
-	if _, serr := os.Stat(filepath.Join(cfg.Dir, fileName)); serr != nil {
+	if _, serr := os.Stat(h.path()); serr != nil {
 		t.Errorf("drop-in was removed after a failed reload: %v", serr)
 	}
 }
@@ -174,7 +442,7 @@ func TestRunStopsWhenResolvedIsAbsent(t *testing.T) {
 	// notice and return rather than spin writing files nothing will read.
 	cfg := Config{
 		ClusterID: "rasputin",
-		ServerIP:  at("10.0.0.1"), probe: reachable,
+		ServerIP:  at("10.0.0.1"), probe: answering,
 		Dir:    filepath.Join(t.TempDir(), "definitely", "absent", "resolved.conf.d"),
 		reload: func(context.Context) error { t.Error("reloaded on a host with no resolved"); return nil },
 	}
@@ -197,7 +465,7 @@ func TestApplyDefaultsInterval(t *testing.T) {
 		{"positive is preserved", 90 * time.Second, 90 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{ClusterID: "rasputin", ServerIP: at("10.0.0.1"), probe: reachable, Interval: tc.in}
+			cfg := Config{ClusterID: "rasputin", ServerIP: at("10.0.0.1"), probe: answering, Interval: tc.in}
 			cfg.applyDefaults()
 			if cfg.Interval != tc.want {
 				t.Errorf("Interval = %s, want %s", cfg.Interval, tc.want)
@@ -206,14 +474,17 @@ func TestApplyDefaultsInterval(t *testing.T) {
 	}
 }
 
-func TestApplyDefaultsDirAndReload(t *testing.T) {
-	cfg := Config{ClusterID: "rasputin", ServerIP: at("10.0.0.1"), probe: reachable}
+func TestApplyDefaultsDirReloadAndProbe(t *testing.T) {
+	cfg := Config{ClusterID: "rasputin", ServerIP: at("10.0.0.1")}
 	cfg.applyDefaults()
 	if cfg.Dir != DefaultDir {
 		t.Errorf("Dir = %q, want %q", cfg.Dir, DefaultDir)
 	}
 	if cfg.reload == nil {
 		t.Error("applyDefaults left reload nil; Apply would panic")
+	}
+	if cfg.probe == nil {
+		t.Error("applyDefaults left probe nil; Apply would panic")
 	}
 }
 
@@ -225,7 +496,7 @@ func TestRunRefusesIncompleteConfig(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{"no cluster id", Config{ServerIP: at("10.0.0.1"), probe: reachable}},
+		{"no cluster id", Config{ServerIP: at("10.0.0.1"), probe: answering}},
 		{"no server ip", Config{ClusterID: "rasputin"}},
 		{"neither", Config{}},
 	} {
@@ -251,34 +522,18 @@ func TestRunRefusesIncompleteConfig(t *testing.T) {
 func TestRunAppliesThenHonoursContext(t *testing.T) {
 	// One pass through the loop body — including the error branch — then a
 	// clean exit when the context ends.
+	h, _ := connected(t, "192.168.197.224")
 	reloads := 0
-	cfg := testCfg(t, &reloads)
-	cfg.Interval = time.Hour // never fires; the context is what ends this
-	cfg.reload = func(context.Context) error {
+	h.cfg.reload = func(context.Context) error {
 		reloads++
 		return errors.New("reload unavailable")
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg.Dir), 0o755); err != nil {
-		t.Fatalf("prepare parent dir: %v", err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { Run(ctx, cfg); close(done) }()
+	done := h.run(ctx)
 
 	// The drop-in should appear even though the reload failed.
-	path := filepath.Join(cfg.Dir, fileName)
-	deadline := time.After(5 * time.Second)
-	for {
-		if _, err := os.Stat(path); err == nil {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("Run never wrote the drop-in")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
+	waitFor(t, "the drop-in", func() bool { _, err := os.Stat(h.path()); return err == nil })
 	cancel()
 	select {
 	case <-done:
@@ -301,77 +556,156 @@ func TestRunAppliesThenHonoursContext(t *testing.T) {
 // would still have answered. Five nodes at once on e3bench, 2026-08-30.
 
 func TestApply_FollowsTheControlPlaneWhenItMoves(t *testing.T) {
-	reloads := 0
-	cfg := testCfg(t, &reloads)
-	current := "192.168.1.182"
-	cfg.ServerIP = func() string { return current }
+	h, _ := connected(t, "192.168.1.182")
 
-	if _, err := Apply(context.Background(), cfg, TriggerTick); err != nil {
+	if _, err := Apply(context.Background(), h.cfg, TriggerTick); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
-	body, _ := os.ReadFile(filepath.Join(cfg.Dir, fileName))
-	if !strings.Contains(string(body), "DNS=192.168.1.182") {
-		t.Fatalf("initial pin wrong:\n%s", body)
+	if pinnedIP(h.path()) != "192.168.1.182" {
+		t.Fatalf("initial pin wrong: %q", pinnedIP(h.path()))
 	}
 
-	// The control plane reboots and comes back elsewhere.
-	current = "192.168.1.183"
-	changed, err := Apply(context.Background(), cfg, TriggerTick)
+	// The control plane reboots and comes back elsewhere; its nameserver
+	// answers from the new address, and the bus re-dialed it.
+	h.serve("192.168.1.183")
+	h.servers.gone("192.168.1.182")
+	h.bus("192.168.1.183")
+	changed, err := Apply(context.Background(), h.cfg, TriggerConnected)
 	if err != nil {
 		t.Fatalf("Apply after the CP moved: %v", err)
 	}
 	if !changed {
 		t.Error("Apply did not react to the control plane moving")
 	}
-	body, _ = os.ReadFile(filepath.Join(cfg.Dir, fileName))
-	if !strings.Contains(string(body), "DNS=192.168.1.183") {
-		t.Errorf("still pinned to the old address:\n%s", body)
+	if pinnedIP(h.path()) != "192.168.1.183" {
+		t.Errorf("still pinned to the old address: %q", pinnedIP(h.path()))
+	}
+	if h.reloaded() != 2 {
+		t.Errorf("reloads = %d, want 2", h.reloaded())
 	}
 }
 
-// A pin that stops answering must be WITHDRAWN, not left in place. Leaving it
-// black-holes the cluster's names; removing it hands them back to mDNS — flaky,
-// which is the original complaint, but flaky beats dead, and it lets the agent
-// reconnect and learn where the control plane went.
-func TestApply_WithdrawsAPinThatStoppedAnswering(t *testing.T) {
-	reloads := 0
-	cfg := testCfg(t, &reloads)
-	answering := true
-	cfg.probe = func(context.Context, string) bool { return answering }
+// ---- what "answers" means ----------------------------------------------
+//
+// The pin asserts that the cluster's names, sent to this address, come back
+// answered. A server that merely listens on :53 does not satisfy that — a
+// stub, a forwarder, a half-started api all accept a connection — and the
+// previous probe, a TCP connect, could not tell them from the real thing. The
+// probe now asks the actual question, on the wire, and these are its verdicts.
 
-	if _, err := Apply(context.Background(), cfg, TriggerTick); err != nil {
-		t.Fatalf("first Apply: %v", err)
+// The probe asks the pinned server for the cluster's internal apex, and for
+// nothing else.
+func TestApply_ProbeAsksForTheClusterApex(t *testing.T) {
+	h, ns := connected(t, "192.168.1.181")
+	if _, err := Apply(context.Background(), h.cfg, TriggerConnected); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
-	path := filepath.Join(cfg.Dir, fileName)
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("drop-in was not written: %v", err)
+	if got := ns.queries(); len(got) != 1 || got[0] != "rasputin.internal." {
+		t.Errorf("the nameserver was asked %v, want exactly [rasputin.internal.]", got)
 	}
+}
 
-	answering = false
-	changed, err := Apply(context.Background(), cfg, TriggerTick)
-	if !changed {
-		t.Error("Apply left a dead pin in place")
-	}
-	if err == nil {
-		t.Error("withdrawing a dead pin must be reported, not silent")
-	}
-	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
-		t.Error("drop-in still present after the server stopped answering")
+// Every way a server can fail to answer, from an address the bus vouches
+// for: the pin is withdrawn, and the reason is in the line.
+func TestApply_WithdrawsWhenTheServerDoesNotAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arrange func(h *harness, ns *fakeNS)
+		reason  string
+	}{
+		{"nothing listening", func(h *harness, _ *fakeNS) { h.servers.gone("192.168.1.181") }, "connection refused"},
+		{"NXDOMAIN", func(_ *harness, ns *fakeNS) { ns.set(nsNXDomain) }, "NXDOMAIN"},
+		{"SERVFAIL", func(_ *harness, ns *fakeNS) { ns.set(nsServFail) }, "SERVFAIL"},
+		{"NOERROR with no answer", func(_ *harness, ns *fakeNS) { ns.set(nsEmpty) }, "no address in the answer"},
+		// A nameserver — a real, answering one — for a DIFFERENT cluster: it
+		// listens, it speaks DNS, and it does not hold this cluster's name.
+		// The old TCP-connect probe would have kept this pin.
+		{"another cluster's nameserver", func(h *harness, _ *fakeNS) { h.servers.serve(h.t, "192.168.1.181", "other") }, "NXDOMAIN"},
+		// Holds the port and never replies. This one costs the full
+		// probeTimeout, which is the bound's reason to exist.
+		{"listens but never replies", func(_ *harness, ns *fakeNS) { ns.set(nsSilent) }, "i/o timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, ns := connected(t, "192.168.1.181")
+			if _, err := Apply(context.Background(), h.cfg, TriggerConnected); err != nil {
+				t.Fatalf("seed pin: %v", err)
+			}
+			tc.arrange(h, ns)
+
+			changed, err := Apply(context.Background(), h.cfg, TriggerTick)
+			if !changed {
+				t.Error("Apply left a pin whose server does not answer")
+			}
+			if err == nil {
+				t.Fatal("withdrawing must be reported, not silent")
+			}
+			if !strings.Contains(err.Error(), "192.168.1.181 does not answer rasputin.internal.") || !strings.Contains(err.Error(), tc.reason) {
+				t.Errorf("withdrawal must name the address, the name and the reason (%s):\n%v", tc.reason, err)
+			}
+			if _, serr := os.Stat(h.path()); !os.IsNotExist(serr) {
+				t.Error("drop-in still present after the server stopped answering")
+			}
+			if h.reloaded() != 2 {
+				t.Errorf("reloads = %d, want 2 (pin, withdrawal)", h.reloaded())
+			}
+		})
 	}
 }
 
 // Never write a pin we have not verified. Writing first and checking later
 // would black-hole the cluster name for a whole tick.
 func TestApply_DoesNotWriteAnUnverifiedPin(t *testing.T) {
-	cfg := testCfg(t, new(int))
-	cfg.probe = func(context.Context, string) bool { return false }
+	h, ns := connected(t, "192.168.1.181")
+	ns.set(nsNXDomain)
 
-	if _, err := Apply(context.Background(), cfg, TriggerTick); err != nil {
-		// An error is acceptable here (nothing to withdraw), a written file is not.
-		_ = err
+	changed, err := Apply(context.Background(), h.cfg, TriggerConnected)
+	if changed || err != nil {
+		// Nothing was pinned, so there is nothing to withdraw and nothing to say.
+		t.Errorf("changed=%v err=%v, want a quiet no-op", changed, err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Dir, fileName)); !os.IsNotExist(err) {
+	if _, err := os.Stat(h.path()); !os.IsNotExist(err) {
 		t.Error("wrote a drop-in pointing at a server that never answered")
+	}
+	if h.reloaded() != 0 {
+		t.Errorf("resolved restarted %d time(s) for a pin that was never written", h.reloaded())
+	}
+}
+
+// A UDP reply cut short is asked again over TCP, under the same bound, and
+// the answer that arrives there counts.
+func TestQueryA_RetriesOverTCPWhenTruncated(t *testing.T) {
+	ns := startNS(t, "rasputin")
+	ns.set(nsTruncates)
+	if err := queryA(context.Background(), ns.addr, "rasputin.internal."); err != nil {
+		t.Fatalf("truncated over UDP, answered over TCP, yet: %v", err)
+	}
+	if got := ns.queries(); len(got) != 2 {
+		t.Errorf("queries = %v, want the UDP ask and the TCP retry", got)
+	}
+}
+
+// An address that is not on the network does not answer, and the probe says
+// so within its bound rather than waiting on the kernel.
+func TestQueryA_UnroutableSaysNoWithinTheBound(t *testing.T) {
+	// 192.0.2.0/24 is TEST-NET-1 (RFC 5737): guaranteed not routable.
+	start := time.Now()
+	err := queryA(context.Background(), "192.0.2.1:53", "rasputin.internal.")
+	if err == nil {
+		t.Fatal("probe said an unreachable address answered the cluster name")
+	}
+	if took := time.Since(start); took > probeTimeout+time.Second {
+		t.Errorf("probe took %s, want within probeTimeout (%s)", took, probeTimeout)
+	}
+}
+
+// A query name that cannot go on the wire is an error, not a pass.
+func TestQueryA_RejectsANonCanonicalName(t *testing.T) {
+	ns := startNS(t, "rasputin")
+	if err := queryA(context.Background(), ns.addr, "rasputin.internal"); err == nil {
+		t.Error("a name without its trailing dot was sent, or worse, counted as answered")
+	}
+	if got := ns.queries(); len(got) != 0 {
+		t.Errorf("queries = %v, want none", got)
 	}
 }
 
@@ -387,9 +721,9 @@ func TestApply_DoesNotWriteAnUnverifiedPin(t *testing.T) {
 // ordinary control-plane reboot, and was ruled out: "we keep relying on
 // timeouts to do work and those keep biting us."
 //
-// Now there is no clock. An existing pin is read back and its server PROBED;
-// it answers, the pin stays; it does not, the pin goes. The bus state is not
-// an input and neither is elapsed time.
+// Now there is no clock. An existing pin is read back and its server ASKED
+// for the cluster's name; it answers, the pin stays; it does not, the pin
+// goes. The bus state is not an input and neither is elapsed time.
 
 func seedPin(t *testing.T, cfg Config, ip string) string {
 	t.Helper()
@@ -404,28 +738,30 @@ func seedPin(t *testing.T, cfg Config, ip string) string {
 }
 
 // Start with the previous process's pin on disk and the bus not yet dialed:
-// the pinned server is probed, answers, and the pin is kept — no write, no
-// resolved restart.
+// the PINNED server — read back out of the drop-in, not any other — is asked
+// for the cluster's name, answers, and the pin is kept: no write, no resolved
+// restart.
 func TestApply_StartWithUnknownAddressKeepsAnAnsweringPin(t *testing.T) {
-	reloads := 0
-	cfg := testCfg(t, &reloads)
-	cfg.ServerIP = at("")
-	var probed []string
-	cfg.probe = func(_ context.Context, ip string) bool { probed = append(probed, ip); return true }
-	path := seedPin(t, cfg, "192.168.1.181")
+	h := newHarness(t)
+	pinned := h.serve("192.168.1.181")
+	other := h.serve("192.168.1.182") // also a live nameserver; must not be the one asked
+	path := seedPin(t, h.cfg, "192.168.1.181")
 
-	changed, err := Apply(context.Background(), cfg, TriggerStart)
+	changed, err := Apply(context.Background(), h.cfg, TriggerStart)
 	if changed || err != nil {
 		t.Fatalf("start with an unknown address touched the pin: changed=%v err=%v", changed, err)
 	}
 	if _, serr := os.Stat(path); serr != nil {
 		t.Fatal("the pin the previous process left was withdrawn on start")
 	}
-	if len(probed) != 1 || probed[0] != "192.168.1.181" {
-		t.Errorf("probed %v, want exactly the pinned address — the pin is kept because it ANSWERED, not because it exists", probed)
+	if got := pinned.queries(); len(got) != 1 || got[0] != "rasputin.internal." {
+		t.Errorf("the pinned server was asked %v, want exactly [rasputin.internal.] — the pin is kept because it ANSWERED, not because it exists", got)
 	}
-	if reloads != 0 {
-		t.Errorf("resolved restarted %d time(s) while nothing changed", reloads)
+	if got := other.queries(); len(got) != 0 {
+		t.Errorf("a server that is not the pinned one was asked %v", got)
+	}
+	if h.reloaded() != 0 {
+		t.Errorf("resolved restarted %d time(s) while nothing changed", h.reloaded())
 	}
 }
 
@@ -434,13 +770,13 @@ func TestApply_StartWithUnknownAddressKeepsAnAnsweringPin(t *testing.T) {
 // and still kept. Nothing about how many looks or how long withdraws a pin
 // whose server answers.
 func TestApply_LostBusKeepsAnAnsweringPinOnEveryLook(t *testing.T) {
-	reloads := 0
-	cfg := testCfg(t, &reloads)
-	cfg.ServerIP = at("")
-	path := seedPin(t, cfg, "192.168.1.181")
+	h := newHarness(t)
+	ns := h.serve("192.168.1.181")
+	path := seedPin(t, h.cfg, "192.168.1.181")
 
-	for i, trigger := range []string{TriggerLost, TriggerTick, TriggerTick, TriggerLost, TriggerTick} {
-		changed, err := Apply(context.Background(), cfg, trigger)
+	looks := []string{TriggerLost, TriggerTick, TriggerTick, TriggerLost, TriggerTick}
+	for i, trigger := range looks {
+		changed, err := Apply(context.Background(), h.cfg, trigger)
 		if changed || err != nil {
 			t.Fatalf("look %d [%s] withdrew an answering pin: changed=%v err=%v", i, trigger, changed, err)
 		}
@@ -448,57 +784,70 @@ func TestApply_LostBusKeepsAnAnsweringPinOnEveryLook(t *testing.T) {
 	if pinnedIP(path) != "192.168.1.181" {
 		t.Error("pin gone or changed with the bus down and the server answering")
 	}
-	if reloads != 0 {
-		t.Errorf("resolved restarted %d time(s) while nothing changed", reloads)
+	if got := ns.queries(); len(got) != len(looks) {
+		t.Errorf("the server was asked %d time(s) over %d looks — every look must ask, none may assume", len(got), len(looks))
+	}
+	if h.reloaded() != 0 {
+		t.Errorf("resolved restarted %d time(s) while nothing changed", h.reloaded())
 	}
 }
 
-// The bus dropped and the pinned server does NOT answer: withdrawn, at once,
-// naming the dead address. This is the only thing that removes a pin.
-func TestApply_LostBusWithdrawsAPinWhoseServerStoppedAnswering(t *testing.T) {
-	reloads := 0
-	cfg := testCfg(t, &reloads)
-	cfg.ServerIP = at("")
-	var probed []string
-	cfg.probe = func(_ context.Context, ip string) bool { probed = append(probed, ip); return false }
-	path := seedPin(t, cfg, "192.168.1.181")
+// The bus dropped and the pinned server does NOT answer the cluster's name:
+// withdrawn, at once, naming the dead address and why. Gone from the network
+// and still listening but not serving the zone are the same fact here.
+func TestApply_LostBusWithdrawsAPinWhoseServerDoesNotAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arrange func(h *harness, ns *fakeNS)
+		reason  string
+	}{
+		{"server gone", func(h *harness, _ *fakeNS) { h.servers.gone("192.168.1.181") }, "connection refused"},
+		{"server up but not serving the zone", func(_ *harness, ns *fakeNS) { ns.set(nsNXDomain) }, "NXDOMAIN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			ns := h.serve("192.168.1.181")
+			path := seedPin(t, h.cfg, "192.168.1.181")
+			tc.arrange(h, ns)
 
-	changed, err := Apply(context.Background(), cfg, TriggerLost)
-	if !changed || err == nil {
-		t.Fatalf("a dead pin survived the bus dropping: changed=%v err=%v", changed, err)
-	}
-	if len(probed) != 1 || probed[0] != "192.168.1.181" {
-		t.Errorf("probed %v, want exactly the pinned address", probed)
-	}
-	if !strings.Contains(err.Error(), "pinned 192.168.1.181 is not answering") || !strings.Contains(err.Error(), "["+TriggerLost+"]") {
-		t.Errorf("withdrawal must name the dead pinned address and the trigger that saw it:\n%v", err)
-	}
-	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
-		t.Error("dead pin still present")
-	}
-	if reloads != 1 {
-		t.Errorf("reloads = %d, want 1 (the withdrawal)", reloads)
+			changed, err := Apply(context.Background(), h.cfg, TriggerLost)
+			if !changed || err == nil {
+				t.Fatalf("a dead pin survived the bus dropping: changed=%v err=%v", changed, err)
+			}
+			for _, want := range []string{"pinned 192.168.1.181 does not answer rasputin.internal.", tc.reason, "[" + TriggerLost + "]"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("withdrawal must say %q:\n%v", want, err)
+				}
+			}
+			if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+				t.Error("dead pin still present")
+			}
+			if h.reloaded() != 1 {
+				t.Errorf("reloads = %d, want 1 (the withdrawal)", h.reloaded())
+			}
+		})
 	}
 }
 
 // A drop-in with no DNS= line cannot be probed and is not one this package
 // wrote; withdrawn rather than kept on faith.
 func TestApply_UnknownAddressWithdrawsADropInThatNamesNoServer(t *testing.T) {
-	cfg := testCfg(t, new(int))
-	cfg.ServerIP = at("")
-	cfg.probe = func(context.Context, string) bool { t.Error("probed with no address to probe"); return true }
-	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
+	h := newHarness(t)
+	h.cfg.probe = func(context.Context, string, string) error {
+		t.Error("probed with no address to probe")
+		return nil
+	}
+	if err := os.MkdirAll(h.cfg.Dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(cfg.Dir, fileName)
-	if err := os.WriteFile(path, []byte("[Resolve]\nDomains=~rasputin.local\n"), 0o644); err != nil {
+	if err := os.WriteFile(h.path(), []byte("[Resolve]\nDomains=~rasputin.local\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := Apply(context.Background(), cfg, TriggerStart)
+	changed, err := Apply(context.Background(), h.cfg, TriggerStart)
 	if !changed || err == nil || !strings.Contains(err.Error(), "names no server") {
 		t.Fatalf("changed=%v err=%v, want a reported withdrawal", changed, err)
 	}
-	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+	if _, serr := os.Stat(h.path()); !os.IsNotExist(serr) {
 		t.Error("unverifiable drop-in still present")
 	}
 }
@@ -524,12 +873,14 @@ func TestPinnedIP(t *testing.T) {
 }
 
 // Nothing pinned and no address is the boot case: nothing to keep, nothing to
-// withdraw, and nothing to probe.
+// withdraw, and nothing to ask.
 func TestApply_UnknownAddressWithNothingPinnedIsQuiet(t *testing.T) {
-	cfg := testCfg(t, new(int))
-	cfg.ServerIP = at("")
-	cfg.probe = func(context.Context, string) bool { t.Error("probed with nothing pinned"); return true }
-	changed, err := Apply(context.Background(), cfg, TriggerStart)
+	h := newHarness(t)
+	h.cfg.probe = func(context.Context, string, string) error {
+		t.Error("probed with nothing pinned")
+		return nil
+	}
+	changed, err := Apply(context.Background(), h.cfg, TriggerStart)
 	if changed || err != nil {
 		t.Errorf("changed=%v err=%v, want a silent no-op", changed, err)
 	}
@@ -538,66 +889,26 @@ func TestApply_UnknownAddressWithNothingPinnedIsQuiet(t *testing.T) {
 // Withdrawing when there is nothing pinned is a no-op, not an error — otherwise
 // every tick on a node that never had a drop-in would log a failure.
 func TestApply_WithdrawIsQuietWhenNothingIsPinned(t *testing.T) {
-	cfg := testCfg(t, new(int))
-	cfg.probe = func(context.Context, string) bool { return false }
-	changed, err := Apply(context.Background(), cfg, TriggerTick)
+	h, ns := connected(t, "192.168.1.181")
+	ns.set(nsServFail)
+	changed, err := Apply(context.Background(), h.cfg, TriggerTick)
 	if changed || err != nil {
 		t.Errorf("no pin to withdraw should be silent; changed=%v err=%v", changed, err)
 	}
-}
-
-// A probe against an unroutable address must say no. This is the direction that
-// matters: a probe that fails open pins a dead server and black-holes the
-// cluster name. It is a direct dial precisely so an /etc/hosts entry cannot
-// make it pass without touching the server.
-func TestReachableNameserver_UnroutableSaysNo(t *testing.T) {
-	// 192.0.2.0/24 is TEST-NET-1 (RFC 5737): guaranteed not routable.
-	if reachableNameserver(context.Background(), "192.0.2.1") {
-		t.Error("probe said an unreachable address had a nameserver")
-	}
-}
-
-// And it must say yes to something that is actually listening.
-func TestReachableNameserver_ListenerSaysYes(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_ = c.Close()
-		}
-	}()
-	host, port, _ := net.SplitHostPort(ln.Addr().String())
-	// reachableNameserver hard-codes :53, so exercise the dial directly against
-	// the stub's port — the assertion is that a live listener is reachable.
-	var d net.Dialer
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer cancel()
-	c, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
-	if derr != nil {
-		t.Fatalf("stub listener not reachable: %v", derr)
-	}
-	_ = c.Close()
 }
 
 // The withdrawal message must distinguish a clean withdrawal from one whose
 // reload failed — they need different operator responses, and both return an
 // error so only the text tells them apart.
 func TestWithdraw_ReloadFailureIsDistinguishable(t *testing.T) {
-	cfg := testCfg(t, new(int))
-	if _, err := Apply(context.Background(), cfg, TriggerTick); err != nil {
+	h, ns := connected(t, "192.168.1.181")
+	if _, err := Apply(context.Background(), h.cfg, TriggerTick); err != nil {
 		t.Fatalf("seed Apply: %v", err)
 	}
-	cfg.probe = func(context.Context, string) bool { return false }
-	cfg.reload = func(context.Context) error { return errors.New("resolved is not running") }
+	ns.set(nsNXDomain)
+	h.cfg.reload = func(context.Context) error { return errors.New("resolved is not running") }
 
-	changed, err := Apply(context.Background(), cfg, TriggerTick)
+	changed, err := Apply(context.Background(), h.cfg, TriggerTick)
 	if !changed || err == nil {
 		t.Fatalf("expected a reported withdrawal; changed=%v err=%v", changed, err)
 	}
@@ -624,80 +935,40 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// runCfg is a Run-level config whose tick can never fire: anything that
-// happens inside the test happened because of a trigger, not the interval.
-func runCfg(t *testing.T, reloads *int) Config {
-	t.Helper()
-	cfg := testCfg(t, reloads)
-	cfg.Interval = time.Hour
-	if err := os.MkdirAll(filepath.Dir(cfg.Dir), 0o755); err != nil {
-		t.Fatalf("prepare parent dir: %v", err)
-	}
-	return cfg
-}
-
-// bench is the moving parts of a Run-level test, guarded for -race: the bus
-// address as the client would report it, whether the pinned server answers,
-// and how many times resolved was restarted.
-type bench struct {
-	mu        sync.Mutex
-	addr      string
-	answering bool
-	reloads   int
-}
-
-func (b *bench) serverIP() string { b.mu.Lock(); defer b.mu.Unlock(); return b.addr }
-func (b *bench) probe(context.Context, string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.answering
-}
-func (b *bench) reload(context.Context) error { b.mu.Lock(); b.reloads++; b.mu.Unlock(); return nil }
-func (b *bench) reloaded() int                { b.mu.Lock(); defer b.mu.Unlock(); return b.reloads }
-func (b *bench) set(addr string, answering bool) {
-	b.mu.Lock()
-	b.addr, b.answering = addr, answering
-	b.mu.Unlock()
-}
-
-func newBench(t *testing.T, addr string) (*bench, Config) {
-	t.Helper()
-	b := &bench{addr: addr, answering: true}
-	cfg := runCfg(t, new(int))
-	cfg.ServerIP = b.serverIP
-	cfg.probe = b.probe
-	cfg.reload = b.reload
-	cfg.Trigger = NewTrigger()
-	return b, cfg
-}
-
-func pinnedNow(path string) string { return pinnedIP(path) }
+func absent(path string) bool { _, err := os.Stat(path); return os.IsNotExist(err) }
 
 // The bench timeline this exists for: agent up, bus connected seconds later,
 // pin written five MINUTES later on the tick. With the trigger the pin follows
 // the connection.
 func TestRun_PinsOnBusConnectWithoutWaitingForATick(t *testing.T) {
-	b, cfg := newBench(t, "")
-	path := filepath.Join(cfg.Dir, fileName)
+	h := newHarness(t)
+	ns := h.serve("192.168.1.181")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan struct{})
-	go func() { Run(ctx, cfg); close(done) }()
+	done := h.run(ctx)
 
 	// Boot case: nothing pinned, address unknown, and Run must not have
-	// invented one. Give it a moment to make its start pass.
+	// invented one — nor asked anyone, since there is no address to ask.
 	time.Sleep(50 * time.Millisecond)
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
+	if !absent(h.path()) {
 		t.Fatal("Run wrote a pin before the bus had an address")
 	}
+	if got := ns.queries(); len(got) != 0 {
+		t.Fatalf("Run asked %v before the bus had an address", got)
+	}
 
-	// The bus connects: onConnected fires the trigger.
-	b.set("192.168.1.181", true)
-	cfg.Trigger.Fire()
-	waitFor(t, "the pin after the bus connected", func() bool { return pinnedNow(path) == "192.168.1.181" })
-	if got := b.reloaded(); got != 1 {
-		t.Errorf("reloads = %d, want 1", got)
+	// The bus connects: onConnected fires the trigger. A change ends with
+	// the reload, so that is what the test waits on; the file is then
+	// settled and can be read.
+	h.bus("192.168.1.181")
+	h.cfg.Trigger.Fire()
+	waitFor(t, "the pin after the bus connected", func() bool { return h.reloaded() == 1 })
+	if pinnedIP(h.path()) != "192.168.1.181" {
+		t.Errorf("pinned %q, want 192.168.1.181", pinnedIP(h.path()))
+	}
+	if got := ns.queries(); len(got) != 1 || got[0] != "rasputin.internal." {
+		t.Errorf("the pin was written on %v, want one ask for rasputin.internal.", got)
 	}
 
 	cancel()
@@ -711,52 +982,57 @@ func TestRun_PinsOnBusConnectWithoutWaitingForATick(t *testing.T) {
 // A re-dial that lands on a control plane that moved re-pins to where it is
 // now; a re-fire with the same address does not restart resolved.
 func TestRun_RepinsOnRedialToANewAddressAndIsQuietWhenUnchanged(t *testing.T) {
-	b, cfg := newBench(t, "192.168.1.181")
-	path := filepath.Join(cfg.Dir, fileName)
+	h, _ := connected(t, "192.168.1.181")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Run(ctx, cfg)
-	waitFor(t, "the first pin", func() bool { return pinnedNow(path) == "192.168.1.181" })
+	h.run(ctx)
+	waitFor(t, "the first pin", func() bool { return h.reloaded() == 1 })
+	if pinnedIP(h.path()) != "192.168.1.181" {
+		t.Fatalf("pinned %q, want 192.168.1.181", pinnedIP(h.path()))
+	}
 
 	// nats reconnect to the same server: onConnected fires again.
-	cfg.Trigger.Fire()
+	h.cfg.Trigger.Fire()
 	time.Sleep(100 * time.Millisecond)
-	if got := b.reloaded(); got != 1 {
+	if got := h.reloaded(); got != 1 {
 		t.Errorf("an unchanged re-fire restarted resolved: reloads = %d, want 1", got)
 	}
 	// The control plane rebooted on a new lease; the client re-dialed it.
-	b.set("192.168.1.183", true)
-	cfg.Trigger.Fire()
-	waitFor(t, "the re-pin to the new address", func() bool { return pinnedNow(path) == "192.168.1.183" })
-	if got := b.reloaded(); got != 2 {
-		t.Errorf("reloads = %d, want 2", got)
+	h.serve("192.168.1.183")
+	h.servers.gone("192.168.1.181")
+	h.bus("192.168.1.183")
+	h.cfg.Trigger.Fire()
+	waitFor(t, "the re-pin to the new address", func() bool { return h.reloaded() == 2 })
+	if pinnedIP(h.path()) != "192.168.1.183" {
+		t.Errorf("pinned %q, want 192.168.1.183", pinnedIP(h.path()))
 	}
 }
 
 // Agent restart: the previous process's pin is under /run, the bus has not
-// dialed yet. Run's start pass probes the pinned server, it answers, and the
+// dialed yet. Run's start pass asks the pinned server, it answers, and the
 // pin stays — the node never leaves the mesh. Then the bus connects to the
 // same address and nothing is rewritten.
 func TestRun_StartKeepsTheAnsweringPinUntilTheBusConfirmsIt(t *testing.T) {
-	b, cfg := newBench(t, "")
-	path := seedPin(t, cfg, "192.168.1.181")
+	h := newHarness(t)
+	ns := h.serve("192.168.1.181")
+	seedPin(t, h.cfg, "192.168.1.181")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Run(ctx, cfg)
+	h.run(ctx)
 
-	time.Sleep(100 * time.Millisecond)
-	if pinnedNow(path) != "192.168.1.181" {
+	waitFor(t, "the start pass to ask the pinned server", func() bool { return len(ns.queries()) >= 1 })
+	if pinnedIP(h.path()) != "192.168.1.181" {
 		t.Fatal("pin withdrawn at start although its server answers")
 	}
-	b.set("192.168.1.181", true)
-	cfg.Trigger.Fire()
-	time.Sleep(100 * time.Millisecond)
-	if pinnedNow(path) != "192.168.1.181" {
+	h.bus("192.168.1.181")
+	h.cfg.Trigger.Fire()
+	waitFor(t, "the connect pass to ask again", func() bool { return len(ns.queries()) >= 2 })
+	if pinnedIP(h.path()) != "192.168.1.181" {
 		t.Error("pin changed when the bus connected to the address already pinned")
 	}
-	if got := b.reloaded(); got != 0 {
+	if got := h.reloaded(); got != 0 {
 		t.Errorf("resolved restarted %d time(s) although nothing changed", got)
 	}
 }
@@ -766,75 +1042,74 @@ func TestRun_StartKeepsTheAnsweringPinUntilTheBusConfirmsIt(t *testing.T) {
 // move, and the nameserver is back long before the bus is), so through the
 // loss and every tick that goes by inside it, the pin stays. No clock is
 // consulted, so there is no duration after which this test would fail — the
-// ticks here are the proof: looks happen, and none of them withdraws.
+// ticks here are the proof: looks happen, each one asks, and none withdraws.
 func TestRun_LostBusKeepsAnAnsweringPinThroughAnyNumberOfTicks(t *testing.T) {
-	b, cfg := newBench(t, "192.168.1.181")
-	cfg.Interval = 20 * time.Millisecond // many looks in a short test
-	path := filepath.Join(cfg.Dir, fileName)
+	h, ns := connected(t, "192.168.1.181")
+	h.cfg.Interval = 20 * time.Millisecond // many looks in a short test
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Run(ctx, cfg)
-	waitFor(t, "the first pin", func() bool { return pinnedNow(path) == "192.168.1.181" })
+	h.run(ctx)
+	waitFor(t, "the first pin", func() bool { return h.reloaded() == 1 })
 
 	// The bus drops; the server still answers.
-	b.set("", true)
-	cfg.Trigger.Lost()
+	h.bus("")
+	h.cfg.Trigger.Lost()
 	// Dozens of ticks with the bus down.
 	time.Sleep(400 * time.Millisecond)
-	if pinnedNow(path) != "192.168.1.181" {
+	if pinnedIP(h.path()) != "192.168.1.181" {
 		t.Error("pin withdrawn while the bus was down and the server answering")
 	}
-	if got := b.reloaded(); got != 1 {
+	if got := len(ns.queries()); got < 10 {
+		t.Errorf("only %d asks in 400 ms of 20 ms ticks — the looks are not happening", got)
+	}
+	if got := h.reloaded(); got != 1 {
 		t.Errorf("reloads = %d, want 1 (only the original pin)", got)
 	}
 }
 
 // The control plane is gone, not rebooting: the bus drops and the pinned
-// server does not answer. The loss event itself withdraws the pin — not a
-// later tick, not a timer.
-func TestRun_LostBusWithdrawsWhenThePinnedServerIsDead(t *testing.T) {
-	b, cfg := newBench(t, "192.168.1.181")
-	path := filepath.Join(cfg.Dir, fileName)
+// address has nothing listening. The loss event itself withdraws the pin —
+// not a later tick, not a timer.
+func TestRun_LostBusWithdrawsWhenThePinnedServerIsGone(t *testing.T) {
+	h, _ := connected(t, "192.168.1.181")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Run(ctx, cfg)
-	waitFor(t, "the first pin", func() bool { return pinnedNow(path) == "192.168.1.181" })
+	h.run(ctx)
+	waitFor(t, "the first pin", func() bool { return h.reloaded() == 1 })
 
-	b.set("", false)
-	cfg.Trigger.Lost()
-	waitFor(t, "the withdrawal on bus lost", func() bool {
-		_, err := os.Stat(path)
-		return os.IsNotExist(err)
-	})
-	if got := b.reloaded(); got != 2 {
-		t.Errorf("reloads = %d, want 2 (pin, then withdrawal)", got)
+	h.servers.gone("192.168.1.181")
+	h.bus("")
+	h.cfg.Trigger.Lost()
+	waitFor(t, "the withdrawal on bus lost", func() bool { return h.reloaded() == 2 })
+	if !absent(h.path()) {
+		t.Error("resolved was restarted for the withdrawal but the drop-in is still there")
 	}
 }
 
 // The safety net: the bus went quiet without a loss event we saw, and the
-// pinned server has died. The tick's probe finds it and withdraws.
-func TestRun_TickWithdrawsWhenThePinnedServerIsDead(t *testing.T) {
-	b, cfg := newBench(t, "")
-	cfg.Interval = 20 * time.Millisecond
-	path := seedPin(t, cfg, "192.168.1.181")
+// pinned server — still up, still on :53 — has stopped serving the cluster's
+// zone. The tick's ask finds it and withdraws. A connect probe would have
+// kept this pin forever.
+func TestRun_TickWithdrawsWhenThePinnedServerStopsServingTheZone(t *testing.T) {
+	h := newHarness(t)
+	ns := h.serve("192.168.1.181")
+	h.cfg.Interval = 20 * time.Millisecond
+	seedPin(t, h.cfg, "192.168.1.181")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Run(ctx, cfg)
+	h.run(ctx)
 
-	time.Sleep(100 * time.Millisecond)
-	if pinnedNow(path) != "192.168.1.181" {
-		t.Fatal("answering pin withdrawn before its server died")
+	waitFor(t, "a few ticks", func() bool { return len(ns.queries()) >= 3 })
+	if pinnedIP(h.path()) != "192.168.1.181" {
+		t.Fatal("answering pin withdrawn before its server stopped serving the zone")
 	}
-	b.set("", false)
-	waitFor(t, "the tick to withdraw the dead pin", func() bool {
-		_, err := os.Stat(path)
-		return os.IsNotExist(err)
-	})
-	if got := b.reloaded(); got != 1 {
-		t.Errorf("reloads = %d, want 1 (the withdrawal)", got)
+	ns.set(nsNXDomain)
+	waitFor(t, "the tick to withdraw the pin", func() bool { return h.reloaded() == 1 })
+	if !absent(h.path()) {
+		t.Error("resolved was restarted for the withdrawal but the drop-in is still there")
 	}
 }
 
