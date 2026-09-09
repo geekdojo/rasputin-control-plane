@@ -24,6 +24,9 @@ const (
 	storageTestNode = "n-backup"
 	// storageTestShelf is a storage-role node: enumerable, never claimable.
 	storageTestShelf = "n-shelf"
+	// storageTestCompute is a compute node: no storage backend, so nothing on
+	// it answers storage.enumerate — the e3bench 2026-09-08 502.
+	storageTestCompute = "n-compute"
 )
 
 func storageTestNATS(t *testing.T) *nats.Conn {
@@ -63,6 +66,7 @@ func storageTestServer(t *testing.T) (*Server, *storage.Store, *nats.Conn) {
 	for _, n := range []*proto.Node{
 		{ID: storageTestNode, Role: proto.RoleControlPlane, Hostname: "backup.test"},
 		{ID: storageTestShelf, Role: proto.RoleStorage, Hostname: "shelf.test"},
+		{ID: storageTestCompute, Role: proto.RoleCompute, Hostname: "compute.test"},
 	} {
 		n.FirstSeen, n.LastSeen = time.Now().UTC(), time.Now().UTC()
 		if err := inv.Insert(ctx, n); err != nil {
@@ -489,41 +493,68 @@ func getCandidates(t *testing.T, s *Server, nodeID string) (int, candidatesBody)
 	return rec.Code, body
 }
 
-// #397: a storage-role node's disks are LISTED — the operator may want to
-// see what is attached — but every one is ineligible with the reason, and
-// none carries a wipe token. The vocabulary is the boot medium's: `eligible`
-// and `ineligibleReason`, so a UI disables on one field whatever the cause.
-func TestListBackupCandidates_ANodeThatCannotHoldATargetListsDisksAsIneligible(t *testing.T) {
-	s, _, nc := storageTestServer(t)
-	enumerateFor(t, nc, storageTestShelf)
+// enumerateMustNotBeAsked fails the test if anything on the bus asks nodeID
+// to enumerate — a responder that answers nothing and records the request,
+// so the assertion is that the fake bus saw no request at all.
+func enumerateMustNotBeAsked(t *testing.T, nc *nats.Conn, nodeID string) {
+	t.Helper()
+	sub, err := nc.Subscribe(proto.StorageEnumerateSubject(nodeID), func(m *nats.Msg) {
+		t.Errorf("storage.enumerate was sent to %s; a node that cannot hold a target must be answered without an RPC", nodeID)
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+}
 
-	code, body := getCandidates(t, s, storageTestShelf)
-	if code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: the disks are still listed", code)
-	}
-	if body.NodeEligible {
-		t.Error("nodeEligible = true for a storage node")
-	}
-	wantReason := "a disk on shelf.test (storage) cannot receive backups yet — archives are written by the controlplane's ingest to a disk attached to the controlplane; a storage-node target arrives with the storage SKU (#302)"
-	if body.NodeIneligibleReason != wantReason {
-		t.Errorf("nodeIneligibleReason = %q\nwant %q", body.NodeIneligibleReason, wantReason)
-	}
-	if len(body.Candidates) != 3 {
-		t.Fatalf("want all 3 disks listed, got %d", len(body.Candidates))
-	}
-	for _, c := range body.Candidates {
-		if c.Eligible {
-			t.Errorf("%s: eligible on a node nothing can send an archive to", c.DevicePath)
-		}
-		if c.IneligibleReason != wantReason {
-			t.Errorf("%s: ineligibleReason = %q, want the node's reason on every row", c.DevicePath, c.IneligibleReason)
-		}
-		if c.WipeToken != "" {
-			t.Errorf("%s: a wipe token was minted for a disk that cannot be claimed", c.DevicePath)
-		}
-	}
-	if !body.Candidates[1].Protected {
-		t.Error("the boot medium lost its `protected` label — the node reason is added beside it, not instead of it")
+// #397, as e3bench 2026-09-08 found it: a compute node has no storage
+// backend, so nothing on it answers storage.enumerate, and asking it was a
+// NATS no-responders error surfacing as a 502. The rule is consulted FIRST:
+// 200, nodeEligible:false with the reason, an empty list, and the bus never
+// sees a request.
+func TestListBackupCandidates_ANodeThatCannotHoldATargetIsAnsweredWithoutAnRPC(t *testing.T) {
+	for _, tc := range []struct {
+		node, wantReason string
+	}{
+		{storageTestCompute, "a disk on compute.test (compute) cannot receive backups yet — archives are written by the controlplane's ingest to a disk attached to the controlplane; a storage-node target arrives with the storage SKU (#302)"},
+		{storageTestShelf, "a disk on shelf.test (storage) cannot receive backups yet — archives are written by the controlplane's ingest to a disk attached to the controlplane; a storage-node target arrives with the storage SKU (#302)"},
+	} {
+		t.Run(tc.node, func(t *testing.T) {
+			s, _, nc := storageTestServer(t)
+			enumerateMustNotBeAsked(t, nc, tc.node)
+
+			rec := httptest.NewRecorder()
+			s.handleListBackupCandidates(rec, httptest.NewRequest(http.MethodGet, "/api/backup/candidates?nodeId="+tc.node, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+			}
+			var body struct {
+				candidatesBody
+				OK      bool   `json:"ok"`
+				Backend string `json:"backend"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !body.OK || body.NodeEligible {
+				t.Errorf("ok=%v nodeEligible=%v; want ok with the node ineligible", body.OK, body.NodeEligible)
+			}
+			if body.NodeIneligibleReason != tc.wantReason {
+				t.Errorf("nodeIneligibleReason = %q\nwant %q", body.NodeIneligibleReason, tc.wantReason)
+			}
+			if body.Candidates == nil || len(body.Candidates) != 0 {
+				t.Errorf("candidates = %v; want an empty list (present, not null) — nothing on this node was asked", body.Candidates)
+			}
+			if body.Backend != "" {
+				t.Errorf("backend = %q; no agent answered, so none was reported", body.Backend)
+			}
+			// The subscription's t.Errorf fires asynchronously; give a request
+			// that should never be sent a moment to arrive before the test ends.
+			time.Sleep(50 * time.Millisecond)
+		})
 	}
 }
 
@@ -554,11 +585,13 @@ func TestListBackupCandidates_TheControlplaneIsUnchanged(t *testing.T) {
 }
 
 func TestListBackupCandidates_AnUnregisteredNodeIs404(t *testing.T) {
-	s, _, _ := storageTestServer(t)
+	s, _, nc := storageTestServer(t)
+	enumerateMustNotBeAsked(t, nc, "n-nobody")
 	code, _ := getCandidates(t, s, "n-nobody")
 	if code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 before any agent RPC", code)
 	}
+	time.Sleep(50 * time.Millisecond)
 }
 
 // #397: the claim is refused with a 409 and the same sentence, before a job

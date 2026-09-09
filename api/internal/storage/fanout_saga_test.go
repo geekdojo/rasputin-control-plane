@@ -3,6 +3,7 @@ package storage
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer/sealtest"
@@ -367,15 +369,26 @@ func TestFanOutRecordsAnOfflineNodeAsFailed(t *testing.T) {
 // verb and the release that answers it, and does NOT say offline. Online on
 // an agent that should answer: a fault, named as one. FAILED in all three —
 // the volume was not captured whichever it was.
+//
+// The fourth case is e3bench 2026-09-08 (geekdojo-brain#401): the agent
+// stopped, tailscaled up. /api/nodes and the alert said OFF BUS; this fan-out
+// still said OFFLINE, because it only let inventory speak for an online
+// node. The record now carries inventory's off-bus sentence — the mesh
+// evidence and "restart the agent" — and does not say OFFLINE.
 func TestFanOutReadsASilentNodeAgainstInventory(t *testing.T) {
 	minStage, ok := proto.VerbMinAgentVersion("storage.backup_stage_volume")
 	if !ok {
 		t.Fatal("storage.backup_stage_volume has no minimum agent version recorded in proto")
 	}
 	now := time.Now().UTC()
+	meshSeen := now.Add(-20 * time.Second)
+	onMesh := func(context.Context) map[string]*proto.MeshMembership {
+		return map[string]*proto.MeshMembership{computeNodeID: {State: proto.MeshJoined, Enrolled: true, Online: true, LastSeen: &meshSeen}}
+	}
 	cases := []struct {
 		name string
 		node *proto.Node
+		mesh inventory.MeshLookup
 		want []string
 		not  []string
 	}{
@@ -383,8 +396,17 @@ func TestFanOutReadsASilentNodeAgainstInventory(t *testing.T) {
 			name: "offline",
 			node: &proto.Node{ID: computeNodeID, Role: proto.RoleCompute, Hostname: computeNodeID, AgentVersion: "2026.08.4-dev.130",
 				FirstSeen: now.Add(-time.Hour), LastSeen: now.Add(-time.Hour)},
-			want: []string{"node " + computeNodeID + " is OFFLINE", "§4.4"},
-			not:  []string{"predates", "online"},
+			want: []string{"node " + computeNodeID + " is OFFLINE: no agent answered the staging request on the bus", "§4.4"},
+			not:  []string{"predates", "online", "OFF BUS"},
+		},
+		{
+			name: "off-bus: heartbeat lapsed, mesh device online",
+			node: &proto.Node{ID: computeNodeID, Role: proto.RoleCompute, Hostname: computeNodeID, AgentVersion: "2026.08.4-dev.130",
+				FirstSeen: now.Add(-time.Hour), LastSeen: now.Add(-time.Hour)},
+			mesh: onMesh,
+			want: []string{"node " + computeNodeID + " is OFF BUS (on mesh)", "reachable over the mesh (seen 20s ago)", "agent is not on the bus",
+				"restart the agent", "FAILED, not skipped", "§4.4"},
+			not: []string{"OFFLINE", "is offline", "predates"},
 		},
 		{
 			name: "online, agent predates the verb",
@@ -404,7 +426,7 @@ func TestFanOutReadsASilentNodeAgainstInventory(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles(), nodes: []*proto.Node{tc.node}}) // no compute agent
+			r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles(), nodes: []*proto.Node{tc.node}, meshLookup: tc.mesh}) // no compute agent
 			if r.job.Status != jobs.StatusFailed {
 				t.Fatalf("job status = %s; a silent node's volume must fail the run", r.job.Status)
 			}

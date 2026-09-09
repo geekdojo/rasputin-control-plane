@@ -452,6 +452,10 @@ type runHarnessOpts struct {
 	// inventory says about it. Nil leaves Inventory nil: every silence then
 	// reads as offline.
 	nodes []*proto.Node
+	// meshLookup, when set beside nodes, is the mesh side of inventory's
+	// presence join (inventory.Store.SetMeshLookup), so a seeded node whose
+	// heartbeat has lapsed can be read as off-bus rather than offline.
+	meshLookup inventory.MeshLookup
 	// key, when set, is the target keypair the run seals to instead of a
 	// fresh one — the restore round-trip supplies the keypair a browser-
 	// produced fixture wrapped. keyID likewise overrides the target's key id.
@@ -605,6 +609,9 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 			if err := inv.Insert(ctx, n); err != nil {
 				t.Fatalf("inv insert %s: %v", n.ID, err)
 			}
+		}
+		if opts.meshLookup != nil {
+			inv.SetMeshLookup(opts.meshLookup)
 		}
 		cfg.Inventory = inv
 		h.inv = inv

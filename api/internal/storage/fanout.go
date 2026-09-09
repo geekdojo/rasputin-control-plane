@@ -423,21 +423,35 @@ func (o fanOutOpts) unstage(ctx context.Context, node, name string) {
 
 // silenceReason is the manifest's reason for a stage request nobody answered.
 //
-// Three readings, and the record says which. The node is offline: §4.4's
-// named case, and its wording. The node is online but its agent predates
-// the verb: the sentence names the verb and the release that answers it,
-// because "update the node" is the fix and OFFLINE would send the operator
-// to check a cable. The node is online and its agent should have answered:
-// a fault, said as one. All three are FAILED — the volume was not captured
-// whichever it was.
+// The record says which reading applies. The node is offline: §4.4's named
+// case, and its wording. The node is OFF BUS — reachable over the mesh, its
+// agent not on the bus (geekdojo-brain#401): inventory's sentence, which
+// names the mesh evidence and says "restart the agent", because OFFLINE
+// would send the operator to check a cable on a machine that is up. The
+// node is online but its agent predates the verb: the sentence names the
+// verb and the release that answers it, because "update the node" is the
+// fix. The node is online and its agent should have answered: a fault, said
+// as one. Every other reading inventory distinguishes (stale, not in
+// inventory) is carried in its own words too. All of them are FAILED — the
+// volume was not captured whichever it was.
+//
+// Only the plain-offline case keeps the fixed sentence: it is the one §4.4
+// wrote, and the one the alert and backup-state readers match on.
 //
 // Without inventory to consult (Nodes nil) every silence reads as offline,
 // which is what this saga said on e3bench 2026-09-04 about a node that was
-// online running 2026.08.4-dev.130.
+// online running 2026.08.4-dev.130 — and again on 2026-09-08 about a node
+// that /api/nodes was at that moment calling off-bus.
 func (o fanOutOpts) silenceReason(ctx context.Context, node, subject string) string {
 	if o.Nodes != nil {
-		if why := o.Nodes.ExplainNoResponder(ctx, subject); why.Online() {
+		why := o.Nodes.ExplainNoResponder(ctx, subject)
+		switch {
+		case why.Online():
 			return why.String() + ". Nothing could copy this volume, so this app's backup is FAILED, not skipped — §4.4 as for an offline node, though this node is NOT offline"
+		case why.Kind != inventory.SilenceOffline || why.Status != proto.StatusOffline:
+			// Off-bus, stale, or unknown to inventory: inventory's reading,
+			// not the flat OFFLINE that hid it.
+			return why.String() + ". Nothing could copy this volume, so this app's backup is FAILED, not skipped — §4.4 as for an offline node"
 		}
 	}
 	return fmt.Sprintf("node %s is OFFLINE: no agent answered the staging request on the bus, so nothing could copy this volume. "+
