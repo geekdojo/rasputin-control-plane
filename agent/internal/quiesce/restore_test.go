@@ -940,3 +940,38 @@ func TestRestoreVolumeAFailedRestoreLeavesThePriorRecord(t *testing.T) {
 		t.Fatalf("rs-1 no longer replays after a failed rs-2: %+v", ack)
 	}
 }
+
+// The record cannot be written after the swap: the swap stands, the ack is
+// OK, and the ack says a repeat would run again — the one thing a lost
+// reply could then not be settled from.
+func TestRestoreVolumeSaysWhenTheOutcomeCannotBeRecorded(t *testing.T) {
+	r := newRestoreRig(t)
+	want := r.snapshot(t)
+	r.corrupt(t)
+	// A regular file where the outcome directory should be: MkdirAll fails.
+	if err := os.WriteFile(r.s.restoreOutcomeDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ack := r.s.RestoreVolume(context.Background(), r.cmd(t))
+	if !ack.OK || !ack.Replaced || ack.Replayed {
+		t.Fatalf("ack: %+v", ack)
+	}
+	if got := r.snapshot(t); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the volume did not go back: %v", got)
+	}
+	if !strings.Contains(ack.Detail, "the outcome could not be recorded on the node") || !strings.Contains(ack.Detail, "would run again") {
+		t.Fatalf("detail: %q", ack.Detail)
+	}
+	if !strings.Contains(r.logs.String(), "could NOT be recorded under restore rs-1") {
+		t.Fatal("the failure to record was not said out loud")
+	}
+	r.assertNoSecretInLogs(t, ack)
+	// And a repeat of the id is, as the ack said, a new restore.
+	stops, _ := r.rt.counts()
+	if again := r.s.RestoreVolume(context.Background(), r.cmd(t)); again.Replayed || !again.OK {
+		t.Fatalf("repeat: %+v", again)
+	}
+	if s2, _ := r.rt.counts(); s2 != stops+1 {
+		t.Fatal("the repeat did not run as a new restore")
+	}
+}
