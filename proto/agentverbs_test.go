@@ -19,6 +19,14 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 			t.Errorf("metadata %s: %q is not bare CalVer (YYYY.MM.PATCH[-dev.N])", key, v)
 		}
 	}
+	for name, v := range map[string]string{
+		"StorageInspectProbeMinAgentVersion": StorageInspectProbeMinAgentVersion,
+		"MeshEnrollDeadlineMinAgentVersion":  MeshEnrollDeadlineMinAgentVersion,
+	} {
+		if !calver.MatchString(v) {
+			t.Errorf("%s: %q is not bare CalVer (YYYY.MM.PATCH[-dev.N])", name, v)
+		}
+	}
 }
 
 // The metadata key converge_trust acts on has a floor, so a silent node can

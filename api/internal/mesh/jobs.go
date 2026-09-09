@@ -16,6 +16,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -501,6 +502,17 @@ type EnrollSpec struct {
 	AdvertiseRoutes []string `json:"advertiseRoutes,omitempty"`
 }
 
+// enrollDispatchTimeout bounds the dispatch step: the agent's whole enroll
+// budget (proto.MeshEnrollWork — mesh CA install, tailscaled restart,
+// `tailscale up`) plus the bus round trip and a queued ack. The api must
+// LOSE this race on purpose. An agent that used its whole budget answers
+// with a real verdict — which command it was in, for how long, what
+// tailscaled says — and an api that gave up first replaced that with
+// "enroll rpc: context deadline exceeded" and left the agent's ack to die in
+// an inbox nobody was reading. Both clocks were 30 s when e3bench-compute1's
+// first login was killed (geekdojo/geekdojo-brain#402).
+const enrollDispatchTimeout = proto.MeshEnrollWork + 30*time.Second
+
 // EnrollNodeWorkflow mints an ephemeral preauth key, NATSes it to the
 // target node's agent, waits for the agent's MeshEnrollAck, and writes
 // the resulting Headscale node id back into mesh_devices.
@@ -517,7 +529,7 @@ func EnrollNodeWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.
 		Steps: []jobs.WorkflowStep{
 			{Name: "validate", Timeout: 5 * time.Second, Do: enrollValidate()},
 			{Name: "mint_key", Timeout: 10 * time.Second, Do: enrollMintKey(svc)},
-			{Name: "dispatch", Timeout: 30 * time.Second, Do: enrollDispatch(svc, inv)},
+			{Name: "dispatch", Timeout: enrollDispatchTimeout, Do: enrollDispatch(svc, inv)},
 			{Name: "record", Timeout: 5 * time.Second, Do: enrollRecord(svc, nc)},
 		},
 	}
@@ -660,16 +672,18 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 			MeshCAPEM: svc.cfg.MeshCAPEM,
 		})
 		sc.Log("info", fmt.Sprintf("dispatching mesh.enroll to %s", s.NodeID))
-		msg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.MeshEnrollSubject(s.NodeID), cmd)
+		subject := proto.MeshEnrollSubject(s.NodeID)
+		sent := time.Now()
+		msg, err := sc.NATS.RequestWithContext(sc.Ctx, subject, cmd)
 		if err != nil {
-			return nil, fmt.Errorf("enroll rpc: %w", err)
+			return nil, enrollDispatchError(sc.Ctx, inv, s.NodeID, subject, err, time.Since(sent))
 		}
 		var ack proto.MeshEnrollAck
 		if err := json.Unmarshal(msg.Data, &ack); err != nil {
 			return nil, fmt.Errorf("decode ack: %w", err)
 		}
 		if !ack.OK {
-			return nil, fmt.Errorf("agent rejected enroll: %s", ack.Detail)
+			return nil, enrollRejected(sc.Ctx, inv, s.NodeID, ack)
 		}
 		s.HSID = ack.TailnetID
 		s.HSIP = ack.TailnetIP
@@ -715,6 +729,65 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		}
 		return json.Marshal(s)
 	}
+}
+
+// enrollDispatchError is the step error for an enroll RPC that returned no
+// ack — the line the job feed carries, written so an operator does not need
+// the agent log. A timeout says it timed out, after how long, and what the
+// agent on the other end was budgeted; the dispatch step waits longer than
+// that budget (enrollDispatchTimeout), so an agent that is honouring it has
+// answered by now, and the honest readings of its silence are the two
+// named. A silence with no responder is read against inventory (offline,
+// old agent, real fault) when inventory is at hand. Either way the job
+// fails, and converge_enrollment's backoff retries it on a later tick.
+func enrollDispatchError(ctx context.Context, inv *inventory.Store, nodeID, subject string, err error, waited time.Duration) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("dispatch timed out after %s with no ack from %s: its agent is budgeted %s for the enroll (mesh CA install, tailscaled restart, tailscale up) and should have answered by now — either it was still running tailscale up past that budget, or it went away mid-enroll, or its ack was lost on the bus; the next reconcile pass retries after backoff",
+			waited.Round(time.Second), nodeID, proto.MeshEnrollWork)
+	case errors.Is(err, nats.ErrNoResponders) && inv != nil:
+		return fmt.Errorf("enroll rpc: %s", inv.ExplainNoResponder(ctx, subject))
+	}
+	return fmt.Errorf("enroll rpc: %w", err)
+}
+
+// enrollRejected is the step error for a negative ack. An agent that
+// predates proto.MeshEnrollDeadlineMinAgentVersion reports a deadline kill
+// of `tailscale up` only as `tailscale up: signal: killed (stderr=)` — its
+// own 30 s deadline firing while the CLI waited on the login, with nothing
+// printed — so the saga reads that shape for what it is and names the
+// release that fixes it. A newer agent names the kill itself and is relayed
+// verbatim; so is a newer agent's bare signal, which is then a real kill
+// from outside (an OOM, say) and not this bug wearing a new coat.
+func enrollRejected(ctx context.Context, inv *inventory.Store, nodeID string, ack proto.MeshEnrollAck) error {
+	if !strings.Contains(ack.Detail, "signal: killed") || strings.Contains(ack.Detail, "enroll deadline") {
+		return fmt.Errorf("agent rejected enroll: %s", ack.Detail)
+	}
+	version := nodeAgentVersion(ctx, inv, nodeID)
+	if version != "" {
+		if c, err := releases.Compare(releases.SchemeCalVer, version, proto.MeshEnrollDeadlineMinAgentVersion); err == nil && c >= 0 {
+			return fmt.Errorf("agent rejected enroll: %s", ack.Detail)
+		}
+	}
+	who := "an agent that reported no version"
+	if version != "" {
+		who = fmt.Sprintf("agent %s", version)
+	}
+	return fmt.Errorf("agent's tailscale up was killed while it waited on the login: %s answered only %q, which is the shape of that agent's own 30s enroll deadline (it predates %s, which names the kill and gives the enroll %s) — update the node; the next reconcile pass retries after backoff",
+		who, ack.Detail, proto.MeshEnrollDeadlineMinAgentVersion, proto.MeshEnrollWork)
+}
+
+// nodeAgentVersion is the bare CalVer the node reported at registration, or
+// "" when inventory is absent, the node unknown, or nothing was reported.
+func nodeAgentVersion(ctx context.Context, inv *inventory.Store, nodeID string) string {
+	if inv == nil || nodeID == "" {
+		return ""
+	}
+	n, err := inv.Get(ctx, nodeID)
+	if err != nil || n == nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSpace(n.AgentVersion), "v")
 }
 
 // isControlPlaneNode reports whether nodeID is this cluster's control plane.

@@ -49,6 +49,35 @@ type SubnetRouteSpec struct {
 	CIDR   string `json:"cidr"`
 }
 
+// MeshEnrollWork is the agent's budget for one mesh.enroll, from the cmd
+// arriving to the ack going back: installing the mesh CA, restarting
+// tailscaled and waiting for its socket, and `tailscale up` — which blocks
+// until tailscaled has logged in to Headscale, however long that takes.
+//
+// It was 30 s, hand-typed in the agent's handler, and it covered all of the
+// above. On e3bench-compute1 (agent 2026.08.5-dev.142, 2026-09-05) a wiped
+// controlplane came back and auto-enrolled the node the moment it
+// re-registered: the cmd arrived at 00:19:24Z, the CA was installed and
+// tailscaled restarted within the same second, and at 00:19:54Z — 30 s
+// after the handler started its clock — the deadline killed `tailscale up`
+// mid-login. exec.CommandContext's cancel is Process.Kill, the CLI had
+// printed nothing, and the agent reported `tailscale up: signal: killed
+// (stderr=)`: no deadline named, no hint of what the CLI was waiting on. A
+// retry 51 s later succeeded. geekdojo/geekdojo-brain#402.
+//
+// Two minutes: the 30 s the preparation already had, plus 90 s for the
+// login itself — enough for tailscaled's control-client backoff to come
+// round more than once against a Headscale that is answering slowly, and
+// short enough that one that is NOT answering is reported, by name and
+// with the seconds, well inside the reconcile tick that retries it. The
+// kill is never silent now, whatever the budget (see
+// agent/internal/tailscale/real.go). The api's dispatch step waits this
+// plus a margin (api/internal/mesh/jobs.go enrollDispatchTimeout) so the
+// agent's own verdict, not an api timeout, is what the job records. Part
+// of AgentWorkBudgetMax, as every agent-side budget is, so the reply grant
+// outlives it.
+const MeshEnrollWork = 2 * time.Minute
+
 // MeshEnrollCmd is sent on rasputin.node.<id>.cmd.mesh.enroll. The agent
 // runs `tailscale up --login-server=<loginServer> --auth-key=<authKey>`,
 // optionally advertising routes.

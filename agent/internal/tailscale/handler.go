@@ -61,6 +61,14 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, onEnrolled 
 	return subs, nil
 }
 
+// enrollBudget is how long one mesh.enroll may run before the agent answers:
+// the mesh CA install, the tailscaled restart and `tailscale up` together.
+// A NATS request carries no deadline of its own, so this is the ONLY clock
+// on the agent side — the one that killed `tailscale up` on e3bench-compute1
+// when it was a hand-typed 30 s (geekdojo/geekdojo-brain#402). A var only so
+// the deadline path can be driven in tests without waiting the budget out.
+var enrollBudget = proto.MeshEnrollWork
+
 // handleEnroll answers one mesh.enroll and reports whether the enroll
 // succeeded (so the caller can fire its post-enroll hooks).
 func handleEnroll(backend Backend, m *nats.Msg) bool {
@@ -69,7 +77,7 @@ func handleEnroll(backend Backend, m *nats.Msg) bool {
 		bus.Respond(m, proto.MeshEnrollAck{OK: false, Detail: "bad cmd: " + err.Error()})
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), enrollBudget)
 	defer cancel()
 	st, err := backend.Enroll(ctx, EnrollInput{
 		LoginServer:     cmd.LoginServer,
