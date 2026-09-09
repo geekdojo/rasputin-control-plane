@@ -132,9 +132,9 @@ export default function BackupsPage() {
   const claimed = targets.find((t) => t.status === 'claimed');
   const scanning = candidates === null && candidateErr === null;
   // The selector groups nodes by whether a target can live on them, so the
-  // storage node is still THERE — an operator may want to see its disks — but
-  // is not mistaken for a place to put the backup. The mirror rule labels the
-  // groups; the api's answer per row is what actually disables a claim.
+  // storage node is still THERE — selectable, and answered with the reason —
+  // but is not mistaken for a place to put the backup. The mirror rule labels
+  // the groups; the api's answer per row is what actually disables a claim.
   const holders = nodes.filter((n) => canHoldTarget(n).ok);
   const nonHolders = nodes.filter((n) => !canHoldTarget(n).ok);
   const selectedNode = nodes.find((n) => n.id === nodeId);
@@ -255,7 +255,10 @@ export default function BackupsPage() {
         </Hint>
       )}
 
-      {candidates && candidates.length === 0 && !candidateErr && (
+      {/* A node that cannot hold a target is answered without asking its
+          agent (its list is empty by construction), so "no disks reported"
+          is only said of a node that was actually asked. */}
+      {candidates && candidates.length === 0 && !candidateErr && !nodeIneligible && (
         <Hint>No disks reported on this node.</Hint>
       )}
 

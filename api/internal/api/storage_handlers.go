@@ -42,10 +42,16 @@ import (
 // backupCandidate.
 //
 // A node that cannot hold a target at all (storage.CanHoldTarget — today,
-// anything but the controlplane; geekdojo-brain#397) is treated the way a
-// protected disk is: the disks are still LISTED, because the operator may
-// want to see what is attached, and every one arrives `eligible:false` with
-// the reason, so nothing on that node is offered as a target.
+// anything but the controlplane; geekdojo-brain#397) is answered WITHOUT
+// asking its agent: 200, `nodeEligible:false` with the reason, and an empty
+// list. The rule is consulted before the RPC, not after, because a node that
+// cannot hold a target may have no storage backend at all — a compute node
+// registers no storage.enumerate responder, and asking it was a NATS
+// no-responders error surfacing as a 502 (e3bench 2026-09-08). Listing that
+// node's disks anyway is not on offer: nothing on it answers the verb. Should
+// a node that cannot hold a target ever answer (a storage-role node with a
+// backend, once #302 gives it one), that is the moment CanHoldTarget widens
+// and the list comes back with it.
 func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Request) {
 	nodeID := strings.TrimSpace(r.URL.Query().Get("nodeId"))
 	if nodeID == "" {
@@ -67,7 +73,16 @@ func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotFound, fmt.Sprintf("node %s is not registered", nodeID))
 		return
 	}
-	nodeOK, nodeReason := storage.CanHoldTarget(node)
+	if nodeOK, nodeReason := storage.CanHoldTarget(node); !nodeOK {
+		writeJSON(w, http.StatusOK, backupCandidatesResponse{
+			OK:                   true,
+			NodeEligible:         false,
+			NodeIneligibleReason: nodeReason,
+			Candidates:           []backupCandidate{},
+			Ts:                   time.Now().UTC(),
+		})
+		return
+	}
 
 	ack, err := storage.Enumerate(r.Context(), s.nc, nodeID)
 	if err != nil {
@@ -77,23 +92,16 @@ func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	out := backupCandidatesResponse{
-		OK:                   ack.OK,
-		Backend:              ack.Backend,
-		Ts:                   ack.Ts,
-		NodeEligible:         nodeOK,
-		NodeIneligibleReason: nodeReason,
-		Candidates:           make([]backupCandidate, 0, len(ack.Candidates)),
+		OK:           ack.OK,
+		Backend:      ack.Backend,
+		Ts:           ack.Ts,
+		NodeEligible: true,
+		Candidates:   make([]backupCandidate, 0, len(ack.Candidates)),
 	}
 	for i := range ack.Candidates {
 		c := ack.Candidates[i]
 		bc := backupCandidate{StorageCandidate: c}
 		switch {
-		case !nodeOK:
-			// The node's reason, not the disk's, even on a protected disk:
-			// it applies to every disk in the list and it is the one the
-			// operator can act on (pick another node). `protected` still
-			// travels, so the boot medium is still labelled as such.
-			bc.IneligibleReason = nodeReason
 		case c.Protected:
 			bc.IneligibleReason = c.ProtectedReason
 			if bc.IneligibleReason == "" {
@@ -163,9 +171,10 @@ type backupCandidatesResponse struct {
 	OK      bool   `json:"ok"`
 	Backend string `json:"backend"`
 	// NodeEligible / NodeIneligibleReason answer for the NODE, once, so a
-	// picker can say "nothing on this node can be a target" above the list
-	// rather than only on each row — and can say it even when the list is
-	// empty.
+	// picker can say "nothing on this node can be a target" above the list.
+	// When NodeEligible is false the list IS empty: the node's agent was not
+	// asked (see handleListBackupCandidates), and Backend is blank for the
+	// same reason.
 	NodeEligible         bool              `json:"nodeEligible"`
 	NodeIneligibleReason string            `json:"nodeIneligibleReason,omitempty"`
 	Candidates           []backupCandidate `json:"candidates"`
