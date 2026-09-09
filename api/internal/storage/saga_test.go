@@ -555,7 +555,7 @@ func TestClaimSaga_Step1RefusesANodeThatCannotHoldATarget(t *testing.T) {
 	if j.Status != jobs.StatusFailed {
 		t.Fatalf("job status = %s, want failed", j.Status)
 	}
-	for _, want := range []string{"a disk on n-shelf.test (storage) cannot receive backups yet", "controlplane's ingest", "storage SKU (#302)"} {
+	for _, want := range []string{"a disk on n-shelf.test (storage) cannot receive backups yet", "controlplane's own ingest", targetTransportExplanation} {
 		if !strings.Contains(j.Error, want) {
 			t.Errorf("job error = %q, want it to contain %q", j.Error, want)
 		}
@@ -724,7 +724,7 @@ func TestClaimStep_RefusesToClaimWithoutAPlan(t *testing.T) {
 	nc := startNATS(t)
 	agent := (&fakeAgent{nodeID: testNode}).start(t, nc)
 	sc := stepCtx("j", baseSpec(), nc, nil)
-	if _, err := claimClaim(Config{})(sc); err == nil {
+	if _, err := claimClaim(Config{}, nil)(sc); err == nil {
 		t.Fatal("want a refusal when check_existing left no plan")
 	} else if !strings.Contains(err.Error(), "does not reconstruct its own authorization") {
 		t.Errorf("error = %q", err)

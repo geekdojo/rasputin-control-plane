@@ -47,9 +47,20 @@ import (
 //	                                        from by re-enumerating
 //	RASPUTIN_STORAGE_FAIL_MODE=mount      — Mount returns an error
 type MockBackend struct {
-	stateDir  string
+	stateDir string
+	// mountRoot is the BACKUP purpose's root, <stateDir>/mounts. Kept under
+	// its old name and at its old path because the dev api reads it (see
+	// MountRoot) and a backup target's mount point is part of what this mock
+	// makes real.
 	mountRoot string
-	mu        sync.Mutex
+	// dataMountRoot is §6.5's second root. It exists for the same reason the
+	// real backend has two — one purpose mounts job-scoped, the other
+	// durably — and it is a DIFFERENT directory here for the property that
+	// actually needs testing: that a data disk does not land where backup
+	// targets do. It cannot be /var/lib/rasputin/data in a mock that must run
+	// as an unprivileged CI process, so it is that role played under stateDir.
+	dataMountRoot string
+	mu            sync.Mutex
 	// newUUID mints partition UUIDs. A field so tests get deterministic ones.
 	newUUID func() string
 	// now is the clock, for the same reason.
@@ -91,11 +102,16 @@ type mockDisk struct {
 }
 
 type mockPartition struct {
-	PartUUID  string                  `json:"partUuid"`
-	FSType    string                  `json:"fsType,omitempty"`
-	Label     string                  `json:"label,omitempty"`
-	SizeBytes uint64                  `json:"sizeBytes"`
+	PartUUID  string `json:"partUuid"`
+	FSType    string `json:"fsType,omitempty"`
+	Label     string `json:"label,omitempty"`
+	SizeBytes uint64 `json:"sizeBytes"`
+	// BackupSet and DataSet stand in for the marker file the real backend
+	// writes at the root of the new filesystem. At most one is ever set, for
+	// the same reason the real backend writes at most one marker: a claim
+	// formats one filesystem for one purpose.
 	BackupSet *proto.StorageBackupSet `json:"backupSet,omitempty"`
+	DataSet   *proto.StorageDataSet   `json:"dataSet,omitempty"`
 }
 
 type mockMount struct {
@@ -113,6 +129,7 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 	m := &MockBackend{
 		stateDir:       root,
 		mountRoot:      filepath.Join(root, "mounts"),
+		dataMountRoot:  filepath.Join(root, "data"),
 		newUUID:        randomPartUUID,
 		now:            func() time.Time { return time.Now().UTC() },
 		criticalMounts: defaultCriticalMounts,
@@ -135,9 +152,28 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 
 func (m *MockBackend) Name() string { return "mock" }
 
-// MountRoot is where this mock puts claimed targets. Exposed for the dev api,
-// which otherwise has no way to know the path is not /run/rasputin/storage.
+// MountRoot is where this mock puts claimed BACKUP targets. Exposed for the
+// dev api, which otherwise has no way to know the path is not
+// /run/rasputin/storage.
 func (m *MockBackend) MountRoot() string { return m.mountRoot }
+
+// DataMountRoot is MountRoot's opposite number for §6 data disks.
+func (m *MockBackend) DataMountRoot() string { return m.dataMountRoot }
+
+// mountRootFor picks the root by purpose, the way BlockDevBackend does. The
+// paths differ from production's — a CI process cannot mount anything under
+// /run or /var/lib — but the SHAPE does not, and the shape is what a test can
+// hold production to: two purposes, two roots, <root>/<partUUID>.
+func (m *MockBackend) mountRootFor(purpose proto.StoragePurpose) (string, error) {
+	switch purpose {
+	case proto.StoragePurposeBackup:
+		return m.mountRoot, nil
+	case proto.StoragePurposeData:
+		return m.dataMountRoot, nil
+	default:
+		return "", fmt.Errorf("%w: no mount root is defined for purpose %q", ErrBadPurpose, purpose)
+	}
+}
 
 func (m *MockBackend) statePath() string { return filepath.Join(m.stateDir, "state.json") }
 
@@ -371,7 +407,18 @@ func diskHolding(st *mockState, partUUID string) (int, bool) {
 // Backend implementation
 // ---------------------------------------------------------------------------
 
+// Enumerate is the operator-facing enumeration: every purpose's marker, as the
+// disk picker needs it.
 func (m *MockBackend) Enumerate(ctx context.Context) (*proto.StorageEnumerateAck, error) {
+	return m.enumerate(ctx, proto.AllStoragePurposes)
+}
+
+// enumerate mirrors the real backend's, scan included. Nothing here mounts
+// anything, so narrowing the scan costs the mock no side effect — it is
+// carried so the ACK the startup sweep works from has the same shape in both
+// backends. A sweep that saw a backup set in the mock and not on hardware
+// would be a difference CI could come to depend on.
+func (m *MockBackend) enumerate(_ context.Context, scan markerScan) (*proto.StorageEnumerateAck, error) {
 	if os.Getenv("RASPUTIN_STORAGE_FAIL_MODE") == "enumerate" {
 		return nil, errors.New("simulated enumerate failure (RASPUTIN_STORAGE_FAIL_MODE=enumerate)")
 	}
@@ -381,10 +428,10 @@ func (m *MockBackend) Enumerate(ctx context.Context) (*proto.StorageEnumerateAck
 	if err != nil {
 		return nil, err
 	}
-	return m.enumerateLocked(st), nil
+	return m.enumerateLocked(st, scan), nil
 }
 
-func (m *MockBackend) enumerateLocked(st *mockState) *proto.StorageEnumerateAck {
+func (m *MockBackend) enumerateLocked(st *mockState, scan markerScan) *proto.StorageEnumerateAck {
 	names := st.deviceNames()
 	protected := m.protectedSet(st)
 	mountedAt := map[string]string{}
@@ -414,10 +461,18 @@ func (m *MockBackend) enumerateLocked(st *mockState) *proto.StorageEnumerateAck 
 				SizeBytes:  p.SizeBytes,
 				Mountpoint: mountedAt[p.PartUUID],
 			})
-			if p.BackupSet != nil {
+			if p.BackupSet != nil && scan.wants(proto.StoragePurposeBackup) {
 				c.HasBackupSet = true
 				set := *p.BackupSet
 				c.BackupSet = &set
+			}
+			// Reported alongside the backup set, never merged with it: a §6
+			// data disk must not reach §4.8's adopt-or-wipe prompt, which is a
+			// prompt about an archive it does not hold.
+			if p.DataSet != nil && scan.wants(proto.StoragePurposeData) {
+				c.HasDataSet = true
+				set := *p.DataSet
+				c.DataSet = &set
 			}
 		}
 		if reason, ok := protected[i]; ok {
@@ -437,6 +492,14 @@ func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*pr
 	devicePath, fingerprint, label := cmd.DevicePath, cmd.Fingerprint, cmd.Label
 	if strings.TrimSpace(fingerprint) == "" {
 		return nil, ErrNoFingerprint
+	}
+	// Same gate, same place in the order as blockdev.Claim: an unrecognised
+	// purpose, or §4.6 key custody riding on a data claim, is refused before
+	// anything is written. A mock that accepted what production refuses would
+	// make CI green on a command the real backend will not perform.
+	spec, err := claimSpec(cmd)
+	if err != nil {
+		return nil, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -464,7 +527,10 @@ func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*pr
 	}
 
 	// (b) Re-compute the fingerprint against current state.
-	current := m.enumerateLocked(st)
+	// Every purpose: this is the re-derived enumeration a destructive claim
+	// checks its fingerprint against, and it has to see the whole disk exactly
+	// as the operator's picker did.
+	current := m.enumerateLocked(st, proto.AllStoragePurposes)
 	var cand *proto.StorageCandidate
 	for i := range current.Candidates {
 		if current.Candidates[i].DevicePath == devicePath {
@@ -485,18 +551,33 @@ func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*pr
 	// ---- past this line the disk is being rewritten ----
 
 	partUUID := m.newUUID()
-	// Same constructor the real backend uses, so the mock cannot drift into
-	// writing a marker production would not — including the two WRAPPED §4.6
-	// key blobs, which are what makes the disk adoptable by a controlplane that
-	// has never seen it.
-	set := markerFrom(cmd, partUUID, m.now())
-	st.Disks[idx].Partitions = []mockPartition{{
+	// Same constructors and the same spec table the real backend uses, so the
+	// mock cannot drift into writing a marker — or applying a label — that
+	// production would not. For a backup claim that includes the two WRAPPED
+	// §4.6 key blobs, which are what makes the disk adoptable by a controlplane
+	// that has never seen it; for a data claim it is identity and nothing else.
+	part := mockPartition{
 		PartUUID:  partUUID,
 		FSType:    "ext4",
-		Label:     proto.StorageBackupLabel,
+		Label:     spec.FSLabel,
 		SizeBytes: st.Disks[idx].SizeBytes,
-		BackupSet: set,
-	}}
+	}
+	var backupSet *proto.StorageBackupSet
+	var dataSet *proto.StorageDataSet
+	switch spec.Purpose {
+	case proto.StoragePurposeBackup:
+		backupSet = markerFrom(cmd, partUUID, m.now())
+		part.BackupSet = backupSet
+	case proto.StoragePurposeData:
+		dataSet = dataMarkerFrom(cmd, partUUID, m.now())
+		part.DataSet = dataSet
+	default:
+		// Unreachable while claimSpec and the spec table agree, and refused
+		// here anyway — blockdev.Claim refuses at the same point, and the
+		// mock's whole value is that it refuses where production refuses.
+		return nil, fmt.Errorf("%w: no marker is defined for purpose %q", ErrBadPurpose, spec.Purpose)
+	}
+	st.Disks[idx].Partitions = []mockPartition{part}
 	// Any prior mount of a partition that no longer exists is gone with it.
 	st.Mounts = keepMounts(st)
 	if err := m.saveState(st); err != nil {
@@ -516,7 +597,7 @@ func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*pr
 		return nil, err
 	}
 
-	after := m.enumerateLocked(st)
+	after := m.enumerateLocked(st, proto.AllStoragePurposes)
 	fpAfter := ""
 	for _, c := range after.Candidates {
 		if c.DevicePath == devicePath {
@@ -528,12 +609,14 @@ func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*pr
 		DevicePath:  devicePath,
 		PartUUID:    partUUID,
 		Label:       label,
-		FSLabel:     proto.StorageBackupLabel,
+		Purpose:     spec.Purpose,
+		FSLabel:     spec.FSLabel,
 		FSType:      "ext4",
 		MountPath:   mountPath,
 		SizeBytes:   st.Disks[idx].SizeBytes,
 		Fingerprint: fpAfter,
-		BackupSet:   set,
+		BackupSet:   backupSet,
+		DataSet:     dataSet,
 	}, nil
 }
 
@@ -571,6 +654,93 @@ func (m *MockBackend) Mount(ctx context.Context, partUUID string) (string, error
 	return path, m.saveState(st)
 }
 
+// materialiseMarker writes the marker the partition carries into its mount
+// point, through the same writeMarker the real backend's Claim uses and under
+// the same spec-table filename. A partition carrying no marker writes none,
+// which is how an unclaimed disk stays unclaimed.
+func (m *MockBackend) materialiseMarker(st *mockState, idx int, partUUID, dir string) error {
+	for _, p := range st.Disks[idx].Partitions {
+		if p.PartUUID != partUUID {
+			continue
+		}
+		switch {
+		case p.BackupSet != nil:
+			spec, err := proto.StoragePurposeSpecFor(proto.StoragePurposeBackup)
+			if err != nil {
+				return err
+			}
+			return writeMarker(dir, spec.MarkerFile, p.BackupSet)
+		case p.DataSet != nil:
+			spec, err := proto.StoragePurposeSpecFor(proto.StoragePurposeData)
+			if err != nil {
+				return err
+			}
+			return writeMarker(dir, spec.MarkerFile, p.DataSet)
+		}
+	}
+	return nil
+}
+
+// purposeOf reports what the partition carrying partUUID is FOR, from its
+// filesystem label. A label that is none of ours means backup — the answer
+// every claimed target gave before §6 — so a target claimed by an older build
+// still mounts where it always did. Same rule, same fallback, as the real
+// backend's mountSpecForLabel.
+func (m *MockBackend) purposeOf(st *mockState, idx int, partUUID string) proto.StoragePurpose {
+	for _, p := range st.Disks[idx].Partitions {
+		if p.PartUUID != partUUID {
+			continue
+		}
+		if purpose, ok := proto.StoragePurposeForFSLabel(strings.TrimSpace(p.Label)); ok {
+			return purpose
+		}
+	}
+	return proto.StoragePurposeBackup
+}
+
+// MountClaimedData is the mock's half of §6.5's startup sweep. Same discovery
+// (enumerate for the data purpose alone, then dataDiskCandidates) and same
+// refusals as the real backend, because a mock that mounted disks production
+// would skip would make CI green on a startup path that does not exist.
+//
+// The narrowed scan buys the mock nothing on its own — nothing here mounts
+// anything — and is passed because the real backend's version of this line is
+// what keeps a controlplane's backup target off the boot path. Diverging would
+// leave that property with no expression in the backend CI runs.
+func (m *MockBackend) MountClaimedData(ctx context.Context) ([]DataMount, error) {
+	ack, err := m.enumerate(ctx, dataOnlyScan)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate disks to find claimed data disks: %w", err)
+	}
+	claimed, out := dataDiskCandidates(ack)
+	for _, c := range claimed {
+		dm := DataMount{PartUUID: c.DataSet.PartUUID, DevicePath: c.DevicePath}
+		for _, p := range c.Partitions {
+			if p.PartUUID == dm.PartUUID && p.Mountpoint != "" {
+				dm.MountPath, dm.AlreadyMounted = p.Mountpoint, true
+			}
+		}
+		if !dm.AlreadyMounted {
+			path, mErr := m.Mount(ctx, dm.PartUUID)
+			if mErr != nil {
+				dm.Err = mErr
+				out = append(out, dm)
+				continue
+			}
+			dm.MountPath = path
+		}
+		// The marker check on what actually landed, as in production. The
+		// mock's Claim writes a real marker file under its mount root, so
+		// this is the same read against the same file — it is only the
+		// filesystem underneath that is simulated.
+		if _, vErr := VerifyDataMarker(dm.MountPath, dm.PartUUID); vErr != nil {
+			dm.Err = vErr
+		}
+		out = append(out, dm)
+	}
+	return out, nil
+}
+
 // mountLocked mounts a claimed target and records it in the mount table. The
 // caller holds m.mu and is responsible for persisting st.
 func (m *MockBackend) mountLocked(st *mockState, partUUID string) (string, error) {
@@ -587,8 +757,27 @@ func (m *MockBackend) mountLocked(st *mockState, partUUID string) (string, error
 	if reason, prot := m.protectedSet(st)[idx]; prot {
 		return "", protectedError(st.deviceNames()[idx], reason)
 	}
-	dir := filepath.Join(m.mountRoot, partUUID)
+	// The root follows the PURPOSE, read off the partition's filesystem label
+	// exactly as the real backend reads it off lsblk's — including the
+	// fallback to backup for a label that is none of ours, which is where
+	// every target claimed before §6 lands.
+	root, err := m.mountRootFor(m.purposeOf(st, idx, partUUID))
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, partUUID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	// Mounting is what makes a filesystem's own contents appear at the mount
+	// point, and the marker file is part of those contents. This mock keeps a
+	// partition's marker in state.json — that is its platter — so mounting
+	// projects it into the directory. It matters for §6.3: the check that
+	// gates a deploy reads a FILE, and the failure it is written against is a
+	// mount point with no marker in it. Both are then the same code path here
+	// as on hardware, rather than a state lookup that can never fail the way
+	// the real one does.
+	if err := m.materialiseMarker(st, idx, partUUID, dir); err != nil {
 		return "", err
 	}
 	for i, mt := range st.Mounts {
@@ -651,6 +840,13 @@ func (m *MockBackend) Inspect(ctx context.Context, partUUID string) (*proto.Stor
 				set.Generations = n
 			}
 			ack.BackupSet = &set
+		}
+		// No generation count on a data set: generations are §4.4's retained
+		// archives, and a data disk holds none. Same omission as
+		// readDataMarker in the real backend.
+		if p.DataSet != nil {
+			set := *p.DataSet
+			ack.DataSet = &set
 		}
 	}
 	return ack, nil

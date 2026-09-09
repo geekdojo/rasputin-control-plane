@@ -68,7 +68,7 @@ func ClaimWorkflow(store *Store, inv *inventory.Store, cfg Config) jobs.Workflow
 			// Declared unconditionally even though the ADOPT branch only reads:
 			// the declaration describes what the step MAY do, and a flag cannot
 			// make a static declaration conditional.
-			{Name: "claim", Timeout: claimStepTimeout, Retries: 0, Irreversible: true, Do: claimClaim(cfg)},
+			{Name: "claim", Timeout: claimStepTimeout, Retries: 0, Irreversible: true, Do: claimClaim(cfg, inv)},
 			{Name: "persist_target", Timeout: persistStepTimeout, Retries: 1, Do: claimPersist(store)},
 		},
 		OnTerminal: finalizeTargetRow(store),
@@ -170,8 +170,14 @@ func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 		// re-checks a protected device: a coerced spec — a hand-built job, a
 		// UI from before this rule — must meet the refusal before a row is
 		// written, not after a target exists that nothing can write to. See
-		// CanHoldTarget for what relaxes it (#302).
-		if ok, reason := CanHoldTarget(node); !ok {
+		// CanHoldTarget for what would relax it — the ingest reaching a
+		// remote mount (§4.1), not #302's disk claiming.
+		//
+		// This saga claims BACKUP targets and nothing else — every row it
+		// writes is a backup-target row — so the purpose is named here rather
+		// than taken from the spec. A data claim reaching this workflow would
+		// be a data disk recorded in the backup ledger.
+		if ok, reason := CanHoldTarget(node, proto.StoragePurposeBackup); !ok {
 			return nil, errors.New(reason)
 		}
 		claimed, err := store.ListClaimed(sc.Ctx)
@@ -432,7 +438,7 @@ func priorEnumerate(sc *jobs.StepCtx, spec *ClaimSpec) (*enumerateResult, error)
 // re-derives the plan from the spec the way step 3 re-derives an enumeration:
 // re-deriving is how a step ends up formatting a disk on the strength of
 // evidence nothing checked. A missing plan fails the job with nothing written.
-func claimClaim(cfg Config) jobs.DoFn {
+func claimClaim(cfg Config, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := ParseClaimSpec(sc.Spec)
 		if err != nil {
@@ -462,7 +468,14 @@ func claimClaim(cfg Config) jobs.DoFn {
 			wrappedPass = spec.ArchiveKey.WrappedByPassphrase
 			wrappedRecovery = spec.ArchiveKey.WrappedByRecoveryCode
 		}
-		cmd, err := json.Marshal(proto.StorageClaimCmd{
+		// Through claimCmdBytes, never json.Marshal: that is where the
+		// version-skew gate on Purpose lives, and a claim this agent would
+		// misread produces no bytes to send. This saga sends no purpose at
+		// all — an empty Purpose is the documented way to ask for a backup
+		// target from any agent, including ones that predate the field — so
+		// the gate passes here by construction and is waiting for the first
+		// caller that sends something else.
+		cmd, err := claimCmdBytes(sc.Ctx, inv, plan.NodeID, proto.StorageClaimCmd{
 			DevicePath:  plan.DevicePath,
 			Fingerprint: plan.Fingerprint,
 			Label:       plan.Label,

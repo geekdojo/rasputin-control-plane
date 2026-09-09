@@ -99,6 +99,29 @@ const RestoreReplayMinAgentVersion = "2026.08.5-dev.147"
 // the release exists and correct the floor if a release was cut in between.
 const StorageInspectProbeMinAgentVersion = "2026.08.5-dev.144"
 
+// StorageClaimPurposeMinAgentVersion is the first agent release whose
+// storage.claim reads StorageClaimCmd.Purpose. Not a verb — the subject is
+// unchanged, so an older agent still ANSWERS storage.claim — which is why it
+// is a separate floor and not an entry in verbMinAgentVersion: a no-responder
+// explanation would never fire for it.
+//
+// What it protects is worse than a missing feature. An agent below this floor
+// does not ignore an unknown purpose and refuse; it ignores the FIELD, and an
+// unmarshalled StorageClaimCmd whose Purpose never arrived is
+// indistinguishable from one that was never sent — which EffectivePurpose
+// resolves to backup, deliberately, so that an api predating §6 keeps working.
+// So a `data` claim sent to such an agent formats the disk with the backup
+// GPT name and filesystem label, drops the BACKUP marker on it, and the disk
+// then reads back to discovery as a backup target. The api refuses to send a
+// non-backup purpose below this floor for exactly that reason: silently
+// downgrading to backup is the failure, not the fallback.
+//
+// Entered when the field was authored, before its release existed, as the
+// NEXT release run after v2026.08.5-dev.147 (the newest published
+// control-plane release at the time). Confirm with `git tag --contains` once
+// the release exists and correct the floor if a release was cut in between.
+const StorageClaimPurposeMinAgentVersion = "2026.08.5-dev.148"
+
 // MeshEnrollDeadlineMinAgentVersion is the first agent release whose
 // mesh.enroll runs under MeshEnrollWork and, when that deadline kills
 // `tailscale up`, says so in its ack — which command, after how long, what

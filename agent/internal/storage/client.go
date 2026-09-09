@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -27,8 +28,9 @@ type Backend interface {
 	// re-verification unable to distinguish "protected" from "gone".
 	Enumerate(ctx context.Context) (*proto.StorageEnumerateAck, error)
 
-	// Claim formats devicePath and claims it as a backup target. It is the only
-	// destructive verb in this package.
+	// Claim formats devicePath and claims it for cmd's purpose — §4.8's backup
+	// target or §6's data disk. It is the only destructive verb in this
+	// package.
 	//
 	// Before writing anything it MUST, in this order:
 	//
@@ -38,7 +40,14 @@ type Backend interface {
 	//      one passed in.
 	//
 	// Both are hard errors — an implementation that logs and proceeds is a bug,
-	// and an empty fingerprint is a refusal rather than a wildcard.
+	// and an empty fingerprint is a refusal rather than a wildcard. Neither is
+	// conditioned on the purpose, and neither ever may be: (1) in particular is
+	// protect.go's guarantee, which §6.5 restates as unconditional across every
+	// purpose.
+	//
+	// The purpose itself is resolved by claimSpec, which decides the GPT name,
+	// the filesystem label and the marker file, and which refuses an
+	// unrecognised purpose outright rather than defaulting it to backup.
 	//
 	// The returned ack carries the partition UUID minted at format time, which
 	// is the target's identifier everywhere downstream. The device path is not.
@@ -55,9 +64,35 @@ type Backend interface {
 	// minted at claim time, and returns where it landed. Mounting an
 	// already-mounted target is a no-op returning the existing path.
 	//
-	// This is the shared mount primitive #302's data-disk contract is meant to
-	// consume; keep it target-agnostic.
+	// This is the shared mount primitive #302's data-disk contract consumes.
+	// It stays addressed by partition UUID alone: the mount ROOT and OPTIONS
+	// come from the target's purpose (§6.5, proto's spec table), which the
+	// implementation resolves from the filesystem label it observes rather
+	// than from an argument no wire type carries.
 	Mount(ctx context.Context, partUUID string) (mountPath string, err error)
+
+	// MountClaimedData mounts every claimed §6 data disk attached to this
+	// node. The agent calls it at STARTUP, because §6.5 makes the agent the
+	// thing that mounts the data disk — the rootfs is read-only squashfs, so
+	// no mount unit can be written, and a systemd generator would mean an OS
+	// change this contract deliberately keeps out.
+	//
+	// It makes NO api round-trip: the marker on the disk is the record and the
+	// DB row is a cache, so the disks are found by enumerating this node's own
+	// hardware. A node whose controlplane is unreachable still mounts its own
+	// disks.
+	//
+	// That enumeration is for the DATA purpose ONLY, and an implementation
+	// must keep it that way. Reading a marker means mounting the partition,
+	// so an unnarrowed sweep would mount §4's backup target at every boot —
+	// a controlplane path that shipped without it.
+	//
+	// NOTHING it reports is fatal, and a caller must not make it so. §6.3: a
+	// data disk that is absent, unreadable, unclaimed or protected is logged
+	// and skipped — a missing data disk must never make a node unbootable.
+	// The error return means only that enumeration itself failed, i.e. the
+	// sweep could not look; per-disk outcomes ride in the DataMounts.
+	MountClaimedData(ctx context.Context) ([]DataMount, error)
 
 	// Inspect reads a claimed target's marker file and free space, mounting it
 	// first if needed. Read-only. A target that is not attached comes back with
@@ -98,6 +133,13 @@ var (
 	// not "skip the check" — a caller that cannot name the disk it confirmed
 	// has not confirmed a disk.
 	ErrNoFingerprint = errors.New("storage: claim requires the fingerprint the operator confirmed")
+
+	// ErrBadPurpose means the claim named a purpose this build does not
+	// implement, or carried fields that purpose may not carry. Both are the
+	// same kind of thing — a command whose contents this agent will not act on
+	// — and neither is a backend failure, which is why they do not fall through
+	// to StorageRefusalBackendError.
+	ErrBadPurpose = errors.New("storage: claim purpose refused")
 )
 
 // refusalFor maps a backend error onto the machine-readable code the api and UI
@@ -117,6 +159,8 @@ func refusalFor(err error) proto.StorageRefusal {
 		return proto.StorageRefusalNotWholeDisk
 	case errors.Is(err, ErrNotFound):
 		return proto.StorageRefusalNotFound
+	case errors.Is(err, ErrBadPurpose):
+		return proto.StorageRefusalBadPurpose
 	case errors.Is(err, ErrInsufficientSpace):
 		return proto.BackupRefusalInsufficientSpace
 	case errors.Is(err, ErrStagingMissing):
@@ -126,6 +170,58 @@ func refusalFor(err error) proto.StorageRefusal {
 	default:
 		return proto.StorageRefusalBackendError
 	}
+}
+
+// claimSpec resolves what a claim is FOR and refuses a command whose purpose
+// and contents disagree. Both backends call it, and both call it before they
+// touch a disk — a purpose refusal that arrives after mkfs is not a refusal.
+//
+// Two things are decided here:
+//
+//  1. WHICH PURPOSE. proto.StoragePurposeSpecFor fails closed, so a value this
+//     build does not recognise is refused by name rather than falling back to
+//     backup. The one value that is not refused is the empty string, resolved
+//     by EffectivePurpose to backup before the table sees it — the
+//     wire-compatibility default for an api that predates §6, documented on
+//     proto.StorageClaimCmd.Purpose and nowhere generalised.
+//
+//  2. WHETHER THE §4.6 CUSTODY FIELDS MAY RIDE. KeyID, KeyAlg, PublicKey and
+//     the two wrappings exist to make a BACKUP disk adoptable by a replacement
+//     controlplane that has never seen it. A data disk holds no archive, so
+//     they would mean nothing in its marker — and writing them there would put
+//     §4.6 material on a disk no unlock path ever reads, which is the sort of
+//     thing that is discovered years later by someone holding the disk. The api
+//     should never send that combination; if it does, this is where it stops,
+//     not the platter.
+func claimSpec(cmd proto.StorageClaimCmd) (proto.StoragePurposeSpec, error) {
+	spec, err := proto.StoragePurposeSpecFor(cmd.EffectivePurpose())
+	if err != nil {
+		return proto.StoragePurposeSpec{}, fmt.Errorf("%w: %v", ErrBadPurpose, err)
+	}
+	if spec.Purpose == proto.StoragePurposeBackup {
+		return spec, nil
+	}
+	var carried []string
+	for _, f := range []struct {
+		name  string
+		value string
+	}{
+		{"keyId", cmd.KeyID},
+		{"keyAlg", cmd.KeyAlg},
+		{"publicKey", cmd.PublicKey},
+		{"wrappedByPassphrase", cmd.WrappedByPassphrase},
+		{"wrappedByRecoveryCode", cmd.WrappedByRecoveryCode},
+	} {
+		if strings.TrimSpace(f.value) != "" {
+			carried = append(carried, f.name)
+		}
+	}
+	if len(carried) > 0 {
+		return proto.StoragePurposeSpec{}, fmt.Errorf(
+			"%w: a %q claim carries §4.6 backup-key custody (%s) — those belong to a backup target and nowhere else",
+			ErrBadPurpose, spec.Purpose, strings.Join(carried, ", "))
+	}
+	return spec, nil
 }
 
 // markerFrom builds the StorageBackupSet a Claim writes onto the platter.
@@ -154,6 +250,25 @@ func markerFrom(cmd proto.StorageClaimCmd, partUUID string, now time.Time) *prot
 		WrappedByRecoveryCode: cmd.WrappedByRecoveryCode,
 		Label:                 cmd.Label,
 		CreatedAt:             now,
+	}
+}
+
+// dataMarkerFrom builds the StorageDataSet a §6 data claim writes onto the
+// platter. markerFrom's opposite number, and shared by both backends for the
+// same reason: one constructor is what stops the mock and production from
+// writing different files.
+//
+// It takes the same command and copies four fields out of it. Everything it
+// leaves behind is §4.6 backup-key custody, which claimSpec has already refused
+// on this path — so the omission here is belt to that brace, not the guard
+// itself. A data disk that carried key blobs would be carrying them for nobody.
+func dataMarkerFrom(cmd proto.StorageClaimCmd, partUUID string, now time.Time) *proto.StorageDataSet {
+	return &proto.StorageDataSet{
+		MarkerVersion: proto.StorageDataMarkerVersion,
+		ClusterID:     cmd.ClusterID,
+		PartUUID:      partUUID,
+		Label:         cmd.Label,
+		CreatedAt:     now,
 	}
 }
 
