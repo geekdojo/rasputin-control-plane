@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -964,19 +965,37 @@ func (b *BlockDevBackend) lsblk(ctx context.Context, devicePath string) (*lsblkO
 // Marker file
 // ---------------------------------------------------------------------------
 
+// markerMaxBytes bounds a marker file. A marker is a few hundred bytes; the
+// cap is generous by three orders of magnitude and still small enough that a
+// hostile one cannot matter.
+const markerMaxBytes = 64 * 1024
+
 // readMarkerFile reads one marker file off a mounted target into set.
 //
-// Shared by both markers so the bound below is applied to both. It is not
+// Shared by both markers so the bound is applied to both. It is not
 // belt-and-braces: enumeration reads markers off disks the operator has
 // confirmed nothing about, so this is untrusted input from a filesystem
 // somebody else wrote, and a marker is a few hundred bytes.
+//
+// The bound is enforced by READING AT MOST markerMaxBytes+1, never by checking
+// the length afterwards. os.ReadFile would pull the whole file into memory
+// first and only then discover it was too big, which on a Pi 4 hands any disk
+// the operator plugs in a memory-exhaustion lever — and enumeration runs
+// against exactly such disks, before anyone has confirmed anything about them.
+// The +1 is what distinguishes "exactly at the cap" from "over it".
 func readMarkerFile(mountPath, name string, set any) error {
-	b, err := os.ReadFile(filepath.Join(mountPath, name))
+	f, err := os.Open(filepath.Join(mountPath, name))
 	if err != nil {
 		return err
 	}
-	if len(b) > 64*1024 {
-		return fmt.Errorf("marker %s on %s is %d bytes — refusing to parse it", name, mountPath, len(b))
+	defer f.Close()
+
+	b, err := io.ReadAll(io.LimitReader(f, markerMaxBytes+1))
+	if err != nil {
+		return fmt.Errorf("read marker %s on %s: %w", name, mountPath, err)
+	}
+	if len(b) > markerMaxBytes {
+		return fmt.Errorf("marker %s on %s is larger than %d bytes — refusing to parse it", name, mountPath, markerMaxBytes)
 	}
 	if err := json.Unmarshal(b, set); err != nil {
 		return fmt.Errorf("parse marker %s on %s: %w", name, mountPath, err)

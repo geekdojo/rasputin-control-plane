@@ -2,9 +2,11 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -849,5 +851,71 @@ func TestMock_MountClaimedDataIgnoresTheBackupTarget(t *testing.T) {
 	}
 	if !seen {
 		t.Error("the operator-facing enumeration lost the backup target")
+	}
+}
+
+// TestReadMarkerFileRefusesAnOversizedMarkerWithoutReadingItAll pins the bound
+// that gosec's G304 at this call site made me look at: enumeration reads
+// markers off disks nobody has confirmed anything about, so an oversized marker
+// has to be refused by NOT READING IT, not by measuring it afterwards. A
+// length check after os.ReadFile is a memory-exhaustion lever on a Pi 4.
+//
+// The proxy for "did not read it all" is the error text: the old code could
+// only report the true size, because it had the whole file. This one reports
+// the cap, because it deliberately never learned the size.
+func TestReadMarkerFileRefusesAnOversizedMarkerWithoutReadingItAll(t *testing.T) {
+	dir := t.TempDir()
+	name := ".rasputin-data-set.json"
+
+	big := make([]byte, markerMaxBytes+4096)
+	for i := range big {
+		big[i] = 'a'
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), big, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var set proto.StorageDataSet
+	err := readMarkerFile(dir, name, &set)
+	if err == nil {
+		t.Fatal("an oversized marker was accepted; the bound is not doing anything")
+	}
+	if !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("refusal should name the cap it enforced, got: %v", err)
+	}
+	if strings.Contains(err.Error(), strconv.Itoa(len(big))) {
+		t.Fatalf("refusal quotes the file's true size (%d), which means the whole file was read: %v", len(big), err)
+	}
+}
+
+// TestReadMarkerFileAcceptsAMarkerExactlyAtTheCap is the other half: the
+// LimitReader takes markerMaxBytes+1 so that "exactly at the cap" and "one over"
+// are distinguishable. Without the +1 a marker of exactly markerMaxBytes would
+// be refused as though it were too big.
+func TestReadMarkerFileAcceptsAMarkerExactlyAtTheCap(t *testing.T) {
+	dir := t.TempDir()
+	name := ".rasputin-data-set.json"
+
+	set := proto.StorageDataSet{MarkerVersion: proto.StorageMarkerVersion, ClusterID: "c1"}
+	body, err := json.Marshal(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pad the JSON with trailing spaces up to exactly the cap. Trailing
+	// whitespace is still valid JSON, so this stays parseable at the boundary.
+	pad := make([]byte, markerMaxBytes-len(body))
+	for i := range pad {
+		pad[i] = ' '
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), append(body, pad...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var got proto.StorageDataSet
+	if err := readMarkerFile(dir, name, &got); err != nil {
+		t.Fatalf("a marker of exactly markerMaxBytes was refused: %v", err)
+	}
+	if got.ClusterID != "c1" {
+		t.Fatalf("marker at the cap parsed wrong: %+v", got)
 	}
 }
