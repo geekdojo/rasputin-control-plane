@@ -211,3 +211,29 @@ func TestStoreExplainNoResponderJoinsMesh(t *testing.T) {
 		t.Errorf("%+v (%s)", n, n)
 	}
 }
+
+// humanAgo is the "(seen 40s ago)" in the off-bus sentence: coarse buckets,
+// and a slightly-future timestamp (clock skew) reads as 0s, never negative.
+func TestHumanAgo(t *testing.T) {
+	for _, c := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{-5 * time.Second, "0s"},
+		{0, "0s"},
+		{40 * time.Second, "40s"},
+		{59 * time.Second, "59s"},
+		{time.Minute, "1m"},
+		{3 * time.Minute, "3m"},
+		{59 * time.Minute, "59m"},
+		{time.Hour, "1h"},
+		{3 * time.Hour, "3h"},
+		{47 * time.Hour, "47h"},
+		{48 * time.Hour, "2d"},
+		{5 * 24 * time.Hour, "5d"},
+	} {
+		if got := humanAgo(c.d); got != c.want {
+			t.Errorf("humanAgo(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}
