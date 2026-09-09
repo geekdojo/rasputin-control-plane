@@ -121,6 +121,23 @@ func TestEnrollWorkflow_NoResponderIsReadAgainstInventory(t *testing.T) {
 	}
 }
 
+// Without inventory to read the silence against, the bus error is relayed
+// as it is — never hidden, never guessed at.
+func TestEnrollWorkflow_NoResponderWithoutInventoryIsRelayed(t *testing.T) {
+	f := newMeshFixture(t)
+	wf := EnrollNodeWorkflow(f.svc, nil, f.nc)
+	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
+	prior, key := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
+	sc := &jobs.StepCtx{Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
+	_, err := enrollStep(t, wf, "dispatch").Do(sc)
+	if err == nil || !strings.Contains(err.Error(), "enroll rpc: ") || !strings.Contains(err.Error(), "no responders") {
+		t.Errorf("without inventory the bus error must be relayed, got %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), key) {
+		t.Errorf("step error carries the auth key: %q", err)
+	}
+}
+
 // fakeAgent answers every enroll on nodeID with ack.
 func fakeAgent(t *testing.T, nc *nats.Conn, nodeID string, ack proto.MeshEnrollAck) {
 	t.Helper()
@@ -134,14 +151,14 @@ func fakeAgent(t *testing.T, nc *nats.Conn, nodeID string, ack proto.MeshEnrollA
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 }
 
-func dispatchAgainst(t *testing.T, f *convergeFixture, nodeID string) (error, string) {
+func dispatchAgainst(t *testing.T, f *convergeFixture, nodeID string) (key string, err error) {
 	t.Helper()
 	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: nodeID})
 	prior, key := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
 	sc := &jobs.StepCtx{Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
-	_, err := enrollStep(t, wf, "dispatch").Do(sc)
-	return err, key
+	_, err = enrollStep(t, wf, "dispatch").Do(sc)
+	return key, err
 }
 
 // The bench ack, from the bench agent: `tailscale up: signal: killed
@@ -156,7 +173,7 @@ func TestEnrollWorkflow_OldAgentBareKillIsNamed(t *testing.T) {
 		t.Fatalf("inv.Insert: %v", err)
 	}
 	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: "tailscale up: signal: killed (stderr=)"})
-	err, key := dispatchAgainst(t, f, "node-1")
+	key, err := dispatchAgainst(t, f, "node-1")
 	if err == nil {
 		t.Fatal("dispatch succeeded on a negative ack")
 	}
@@ -183,7 +200,7 @@ func TestEnrollWorkflow_NewAgentNamedKillIsRelayed(t *testing.T) {
 	}
 	const detail = "tailscale up killed after 1m58s by the 2m0s enroll deadline while still running; headscale at https://cp.local:8443 had not answered the login (tailscaled reports NeedsLogin)"
 	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: detail})
-	err, _ := dispatchAgainst(t, f, "node-1")
+	_, err := dispatchAgainst(t, f, "node-1")
 	if err == nil {
 		t.Fatal("dispatch succeeded on a negative ack")
 	}
@@ -202,7 +219,7 @@ func TestEnrollWorkflow_NewAgentNamedKillIsRelayed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inv.Insert: %v", err)
 	}
-	err, _ = dispatchAgainst(t, f, "node-2")
+	_, err = dispatchAgainst(t, f, "node-2")
 	if err == nil || strings.Contains(err.Error(), "predates") || !strings.Contains(err.Error(), "agent rejected enroll: tailscale up: signal: killed") {
 		t.Errorf("a newer agent's bare signal is not this bug; got %v", err)
 	}
@@ -212,7 +229,7 @@ func TestEnrollWorkflow_NewAgentNamedKillIsRelayed(t *testing.T) {
 func TestEnrollWorkflow_OrdinaryRejectionUnchanged(t *testing.T) {
 	f := newConvergeFixture(t)
 	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: "tailscale: install mesh CA: read-only file system"})
-	err, _ := dispatchAgainst(t, f, "node-1")
+	_, err := dispatchAgainst(t, f, "node-1")
 	if err == nil || err.Error() != "agent rejected enroll: tailscale: install mesh CA: read-only file system" {
 		t.Errorf("ordinary rejection changed: %v", err)
 	}
