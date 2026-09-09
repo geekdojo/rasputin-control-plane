@@ -12,7 +12,8 @@
 // not exist, and the next thing that operator does is go looking for it.
 //
 // The same treatment covers a whole NODE that cannot hold a target (#397 —
-// today, anything but the controlplane, until the storage SKU): its disks are
+// anything but the controlplane, until the ingest can write to a remote
+// node's mount, which is §4.1 transport work): its disks are
 // listed, every one ineligible with the reason, and the selector says so before
 // the scan. The api decides (`eligible` on every row); this page only renders.
 
@@ -135,10 +136,10 @@ export default function BackupsPage() {
   // storage node is still THERE — selectable, and answered with the reason —
   // but is not mistaken for a place to put the backup. The mirror rule labels
   // the groups; the api's answer per row is what actually disables a claim.
-  const holders = nodes.filter((n) => canHoldTarget(n).ok);
-  const nonHolders = nodes.filter((n) => !canHoldTarget(n).ok);
+  const holders = nodes.filter((n) => canHoldTarget(n, 'backup').ok);
+  const nonHolders = nodes.filter((n) => !canHoldTarget(n, 'backup').ok);
   const selectedNode = nodes.find((n) => n.id === nodeId);
-  const selectedEligibility = selectedNode ? canHoldTarget(selectedNode) : undefined;
+  const selectedEligibility = selectedNode ? canHoldTarget(selectedNode, 'backup') : undefined;
 
   return (
     <>
@@ -201,7 +202,7 @@ export default function BackupsPage() {
             {nonHolders.length === 0 ? (
               holders.map((n) => (
                 <option key={n.id} value={n.id}>
-                  {nodeOptionLabel(n)}
+                  {nodeOptionLabel(n, 'backup')}
                 </option>
               ))
             ) : (
@@ -209,14 +210,14 @@ export default function BackupsPage() {
                 <optgroup label="Can hold a backup target">
                   {holders.map((n) => (
                     <option key={n.id} value={n.id}>
-                      {nodeOptionLabel(n)}
+                      {nodeOptionLabel(n, 'backup')}
                     </option>
                   ))}
                 </optgroup>
                 <optgroup label={`Can't hold a backup target yet`}>
                   {nonHolders.map((n) => (
-                    <option key={n.id} value={n.id} title={canHoldTarget(n).reason}>
-                      {nodeOptionLabel(n)}
+                    <option key={n.id} value={n.id} title={canHoldTarget(n, 'backup').reason}>
+                      {nodeOptionLabel(n, 'backup')}
                     </option>
                   ))}
                 </optgroup>

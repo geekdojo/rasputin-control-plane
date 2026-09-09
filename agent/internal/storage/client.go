@@ -64,9 +64,35 @@ type Backend interface {
 	// minted at claim time, and returns where it landed. Mounting an
 	// already-mounted target is a no-op returning the existing path.
 	//
-	// This is the shared mount primitive #302's data-disk contract is meant to
-	// consume; keep it target-agnostic.
+	// This is the shared mount primitive #302's data-disk contract consumes.
+	// It stays addressed by partition UUID alone: the mount ROOT and OPTIONS
+	// come from the target's purpose (§6.5, proto's spec table), which the
+	// implementation resolves from the filesystem label it observes rather
+	// than from an argument no wire type carries.
 	Mount(ctx context.Context, partUUID string) (mountPath string, err error)
+
+	// MountClaimedData mounts every claimed §6 data disk attached to this
+	// node. The agent calls it at STARTUP, because §6.5 makes the agent the
+	// thing that mounts the data disk — the rootfs is read-only squashfs, so
+	// no mount unit can be written, and a systemd generator would mean an OS
+	// change this contract deliberately keeps out.
+	//
+	// It makes NO api round-trip: the marker on the disk is the record and the
+	// DB row is a cache, so the disks are found by enumerating this node's own
+	// hardware. A node whose controlplane is unreachable still mounts its own
+	// disks.
+	//
+	// That enumeration is for the DATA purpose ONLY, and an implementation
+	// must keep it that way. Reading a marker means mounting the partition,
+	// so an unnarrowed sweep would mount §4's backup target at every boot —
+	// a controlplane path that shipped without it.
+	//
+	// NOTHING it reports is fatal, and a caller must not make it so. §6.3: a
+	// data disk that is absent, unreadable, unclaimed or protected is logged
+	// and skipped — a missing data disk must never make a node unbootable.
+	// The error return means only that enumeration itself failed, i.e. the
+	// sweep could not look; per-disk outcomes ride in the DataMounts.
+	MountClaimedData(ctx context.Context) ([]DataMount, error)
 
 	// Inspect reads a claimed target's marker file and free space, mounting it
 	// first if needed. Read-only. A target that is not attached comes back with

@@ -1222,8 +1222,10 @@ export interface BackupCandidatesResponse {
   backend: string; // "blockdev" or "mock"
   /**
    * The NODE's answer, once: can any disk here be a target? False on every
-   * node but the controlplane until the storage SKU (#302); the reason is
-   * the same sentence every ineligible row carries.
+   * node but the controlplane — what lifts that is the ingest being able to
+   * write to a remote node's mount (§4.1 transport work), not the disk
+   * claiming of #302; the reason is the same sentence every ineligible row
+   * carries.
    */
   nodeEligible?: boolean;
   nodeIneligibleReason?: string;

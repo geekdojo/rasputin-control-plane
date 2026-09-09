@@ -510,6 +510,12 @@ func enumerateMustNotBeAsked(t *testing.T, nc *nats.Conn, nodeID string) {
 	}
 }
 
+// storageTestTransportExplanation is storage.targetTransportExplanation, which
+// is unexported. Repeated here so a change to the sentence the operator reads
+// fails this test rather than passing it silently — four surfaces render it and
+// they have to agree.
+const storageTestTransportExplanation = "archives are written by the controlplane's own ingest to a disk attached to the controlplane, and a target on any other node would need that ingest to write to a REMOTE node's mount — §4.1 transport work, which claiming a disk on that node does not provide"
+
 // #397, as e3bench 2026-09-08 found it: a compute node has no storage
 // backend, so nothing on it answers storage.enumerate, and asking it was a
 // NATS no-responders error surfacing as a 502. The rule is consulted FIRST:
@@ -519,8 +525,8 @@ func TestListBackupCandidates_ANodeThatCannotHoldATargetIsAnsweredWithoutAnRPC(t
 	for _, tc := range []struct {
 		node, wantReason string
 	}{
-		{storageTestCompute, "a disk on compute.test (compute) cannot receive backups yet — archives are written by the controlplane's ingest to a disk attached to the controlplane; a storage-node target arrives with the storage SKU (#302)"},
-		{storageTestShelf, "a disk on shelf.test (storage) cannot receive backups yet — archives are written by the controlplane's ingest to a disk attached to the controlplane; a storage-node target arrives with the storage SKU (#302)"},
+		{storageTestCompute, "a disk on compute.test (compute) cannot receive backups yet — " + storageTestTransportExplanation},
+		{storageTestShelf, "a disk on shelf.test (storage) cannot receive backups yet — " + storageTestTransportExplanation},
 	} {
 		t.Run(tc.node, func(t *testing.T) {
 			s, _, nc := storageTestServer(t)
@@ -603,7 +609,7 @@ func TestClaimBackupTarget_RefusesANodeThatCannotHoldATarget(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (body %s)", rec.Code, rec.Body.String())
 	}
-	for _, want := range []string{"a disk on shelf.test (storage) cannot receive backups yet", "controlplane's ingest", "storage SKU (#302)"} {
+	for _, want := range []string{"a disk on shelf.test (storage) cannot receive backups yet", "controlplane's own ingest", "§4.1 transport work"} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("body = %s, want it to contain %q", rec.Body.String(), want)
 		}

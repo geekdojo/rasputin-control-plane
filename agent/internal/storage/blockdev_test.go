@@ -140,11 +140,32 @@ func newTestBlockDev(t *testing.T, sh *fakeShell) *BlockDevBackend {
 	b := newBlockDevBackend(t.TempDir(), map[string]string{}, sh.run)
 	b.prot.sysfsRoot = sys.root
 	b.prot.mountinfoPath = mi
-	b.mountRoot = filepath.Join(t.TempDir(), "mounts")
-	if err := os.MkdirAll(b.mountRoot, 0o700); err != nil {
-		t.Fatalf("mkdir mount root: %v", err)
+	// Both §6.5 roots are redirected into the test's own tree, keeping the
+	// production relationship between them: distinct directories, and the
+	// scratch root peek uses is the backup root (on hardware both are
+	// /run/rasputin/storage).
+	roots := t.TempDir()
+	b.mountRoots = map[proto.StoragePurpose]string{
+		proto.StoragePurposeBackup: filepath.Join(roots, "mounts"),
+		proto.StoragePurposeData:   filepath.Join(roots, "data"),
+	}
+	b.scratchRoot = b.mountRoots[proto.StoragePurposeBackup]
+	for _, root := range b.mountRoots {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatalf("mkdir mount root: %v", err)
+		}
 	}
 	return b
+}
+
+// bdMountRoot is where this backend mounts a target of that purpose.
+func bdMountRoot(t *testing.T, b *BlockDevBackend, purpose proto.StoragePurpose) string {
+	t.Helper()
+	root, err := b.mountRootFor(purpose)
+	if err != nil {
+		t.Fatalf("mount root for %q: %v", purpose, err)
+	}
+	return root
 }
 
 func bdCandidate(t *testing.T, ack *proto.StorageEnumerateAck, path string) proto.StorageCandidate {
@@ -350,7 +371,7 @@ func TestBlockDev_ClaimFormatsInTheRightOrder(t *testing.T) {
 	if ack.PartUUID != "9d0f4a2b-01" {
 		t.Errorf("partUUID = %q, want the one blkid reported", ack.PartUUID)
 	}
-	if ack.MountPath != filepath.Join(b.mountRoot, "9d0f4a2b-01") {
+	if ack.MountPath != filepath.Join(bdMountRoot(t, b, proto.StoragePurposeBackup), "9d0f4a2b-01") {
 		t.Errorf("mount path = %q", ack.MountPath)
 	}
 	if ack.Fingerprint == spare.Fingerprint {

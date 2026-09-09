@@ -36,10 +36,19 @@ type BlockDevBackend struct {
 	// prot resolves the protected set from live mounts. Its paths are fields,
 	// so a test can hand it a fabricated /proc and /sys.
 	prot *protector
-	// mountRoot is where claimed targets are mounted. /run is tmpfs, so the
-	// mount points vanish on reboot, which is correct: a mount is not a
-	// durable fact and must be re-established from the partition UUID.
-	mountRoot string
+	// mountRoots is where claimed targets are mounted, PER PURPOSE, seeded
+	// from proto's spec table. It replaced a single field for §6.5: a backup
+	// mount belongs on tmpfs, where it is job-scoped and vanishes on reboot,
+	// and a data mount belongs on the persistent partition, where it survives
+	// one. Held as a field, like prot's paths, so a test can point every root
+	// at a temp dir.
+	mountRoots map[proto.StoragePurpose]string
+	// scratchRoot is where peek makes its throwaway read-only mount points.
+	// NOT a purpose root: peek runs against a disk whose purpose is not known
+	// yet — reading the marker is how it finds out — and the mount lives for
+	// the length of one read. tmpfs is right for that whatever the disk turns
+	// out to be.
+	scratchRoot string
 	// tools maps a logical tool name to its resolved absolute path.
 	tools map[string]string
 }
@@ -47,8 +56,21 @@ type BlockDevBackend struct {
 // runner is the shell-out seam. Implementations must not use a shell.
 type runner func(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error)
 
-// DefaultMountRoot is where claimed targets are mounted.
-const DefaultMountRoot = "/run/rasputin/storage"
+// defaultMountRoots is the per-purpose root table, read straight out of proto
+// so the agent spells no mount root of its own. A purpose the table does not
+// know cannot be mounted at all, which is the same fail-closed answer
+// StoragePurposeSpecFor gives the format path.
+func defaultMountRoots() map[proto.StoragePurpose]string {
+	roots := make(map[proto.StoragePurpose]string, len(proto.AllStoragePurposes))
+	for _, p := range proto.AllStoragePurposes {
+		spec, err := proto.StoragePurposeSpecFor(p)
+		if err != nil {
+			continue
+		}
+		roots[p] = spec.MountRoot
+	}
+	return roots
+}
 
 // requiredTools must all be present for the real backend to be usable. Missing
 // any one of them means falling through to the mock rather than discovering the
@@ -110,12 +132,51 @@ func NewBlockDevBackend(stateDir string) (*BlockDevBackend, error) {
 // runner and a fabricated sysfs.
 func newBlockDevBackend(stateDir string, tools map[string]string, run runner) *BlockDevBackend {
 	return &BlockDevBackend{
-		stateDir:  stateDir,
-		run:       run,
-		prot:      newProtector(),
-		mountRoot: DefaultMountRoot,
-		tools:     tools,
+		stateDir:    stateDir,
+		run:         run,
+		prot:        newProtector(),
+		mountRoots:  defaultMountRoots(),
+		scratchRoot: proto.StorageBackupMountRoot,
+		tools:       tools,
 	}
+}
+
+// mountRootFor is where a target of this purpose is mounted. A purpose with no
+// root is an error rather than a guess: mounting a disk somewhere nobody
+// expects it is how an app comes to write to the boot medium believing it is
+// on the data disk (§6.3).
+func (b *BlockDevBackend) mountRootFor(purpose proto.StoragePurpose) (string, error) {
+	root, ok := b.mountRoots[purpose]
+	if !ok || root == "" {
+		return "", fmt.Errorf("%w: no mount root is defined for purpose %q", ErrBadPurpose, purpose)
+	}
+	return root, nil
+}
+
+// isOurMount reports whether a path is one of OUR mount points — under any
+// purpose's root, plus the scratch root peek uses.
+//
+// Claim asks this about every mounted partition on the disk it is about to
+// format: ours are released, anything else means the disk is in use by
+// something we did not put there and the claim stops. Before §6.5 there was
+// one root and this was a single HasPrefix; with two, checking only the backup
+// root would read a mounted data disk as "in use by a stranger".
+func (b *BlockDevBackend) isOurMount(path string) bool {
+	clean := filepath.Clean(path) + "/"
+	roots := make([]string, 0, len(b.mountRoots)+1)
+	for _, r := range b.mountRoots {
+		roots = append(roots, r)
+	}
+	roots = append(roots, b.scratchRoot)
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		if strings.HasPrefix(clean, filepath.Clean(root)+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // execRunner is the production runner: exec, no shell, combined output.
@@ -174,13 +235,65 @@ func checkPartUUID(u string) error {
 // Enumerate
 // ---------------------------------------------------------------------------
 
+// markerScan is the set of purposes an enumeration will MOUNT a partition to
+// read the marker of. Everything else about an enumeration is unaffected: the
+// disks, their partitions, the labels lsblk reports and the protected set are
+// the same list whatever is in here.
+//
+// It exists because reading a marker is not a read. readClaimedSets peeks —
+// it mounts the partition read-only, reads the file and unmounts — so the
+// purposes in this set decide which filesystems on the machine are made live
+// for a moment, and §6.5's startup sweep is a caller that wants exactly one of
+// them. See enumerate.
+type markerScan []proto.StoragePurpose
+
+// wants reports whether p's marker is in scope for this scan. A nil or empty
+// scan wants nothing, which is the fail-closed direction: the mistake this
+// guards is a scan that mounts MORE than the caller asked for.
+func (s markerScan) wants(p proto.StoragePurpose) bool {
+	for _, want := range s {
+		if want == p {
+			return true
+		}
+	}
+	return false
+}
+
 // Enumerate lists candidate whole disks. Mutates nothing.
+//
+// This is the OPERATOR-FACING enumeration — the storage.enumerate verb behind
+// the disk picker — and it looks for every purpose's marker, because the
+// picker has to tell an unclaimed disk from a backup target from a data disk
+// before the operator confirms a format. Narrowing THIS would hide a claimed
+// disk from the one screen whose whole job is to show what is on it.
+func (b *BlockDevBackend) Enumerate(ctx context.Context) (*proto.StorageEnumerateAck, error) {
+	return b.enumerate(ctx, proto.AllStoragePurposes)
+}
+
+// enumerate is Enumerate with the marker-reading NARROWED to scan.
+//
+// The narrowing is not an optimisation. Reading a marker means mounting the
+// partition read-only and unmounting it again (peek), so an enumeration has
+// the side effect of briefly making every Rasputin-labelled filesystem on the
+// machine live — including the §4 backup target, which on a controlplane is
+// usually a removable disk holding the only copy of the archives.
+//
+// That is the right trade for the picker, which is answering "what is on this
+// machine" for an operator standing in front of it. It is the wrong trade for
+// §6.5's startup sweep, which wants data disks and would otherwise mount the
+// backup target on every boot — a behaviour §4's shipped path never had and
+// nobody asked for. So the sweep says which purpose it came for.
+//
+// There is deliberately no second scanner. One discovery path finds Rasputin's
+// disks by filesystem label, confirms each by its marker and resolves the
+// protected set from live mounts; a parallel one would be a second answer to
+// "which disks are ours" and the two would drift.
 //
 // The protected set is resolved FIRST and a failure to resolve it fails the
 // whole call. Listing candidates while unable to say which disk we boot from
 // would put an unmarked boot disk in front of an operator and a destructive
 // confirm button next to it.
-func (b *BlockDevBackend) Enumerate(ctx context.Context) (*proto.StorageEnumerateAck, error) {
+func (b *BlockDevBackend) enumerate(ctx context.Context, scan markerScan) (*proto.StorageEnumerateAck, error) {
 	protected, err := b.prot.resolve()
 	if err != nil {
 		return nil, fmt.Errorf("resolve the protected set: %w", err)
@@ -198,14 +311,15 @@ func (b *BlockDevBackend) Enumerate(ctx context.Context) (*proto.StorageEnumerat
 		if !isCandidateDisk(d) {
 			continue
 		}
-		c := b.candidateFrom(ctx, d, protected)
+		c := b.candidateFrom(ctx, d, protected, scan)
 		ack.Candidates = append(ack.Candidates, c)
 	}
 	return ack, nil
 }
 
-// candidateFrom builds one candidate from an lsblk disk node.
-func (b *BlockDevBackend) candidateFrom(ctx context.Context, d lsblkDevice, protected map[string]protectedDisk) proto.StorageCandidate {
+// candidateFrom builds one candidate from an lsblk disk node. scan says which
+// purposes' markers are read; everything else it reports is independent of it.
+func (b *BlockDevBackend) candidateFrom(ctx context.Context, d lsblkDevice, protected map[string]protectedDisk, scan markerScan) proto.StorageCandidate {
 	path := d.Path
 	if path == "" {
 		path = "/dev/" + d.KName
@@ -244,7 +358,7 @@ func (b *BlockDevBackend) candidateFrom(ctx context.Context, d lsblkDevice, prot
 	// filesystem labels. Mounting every partition of every attached disk to peek
 	// at its root would be an enumeration with side effects, and the disks that
 	// can carry a Rasputin set are exactly the disks Rasputin labelled.
-	backup, data := b.readClaimedSets(ctx, c.Partitions)
+	backup, data := b.readClaimedSets(ctx, c.Partitions, scan)
 	if backup != nil {
 		c.HasBackupSet = true
 		c.BackupSet = backup
@@ -270,12 +384,18 @@ func (b *BlockDevBackend) candidateFrom(ctx context.Context, d lsblkDevice, prot
 //
 // Best-effort and read-only throughout: a partition that will not mount, or
 // mounts without a marker, simply yields nothing.
-func (b *BlockDevBackend) readClaimedSets(ctx context.Context, parts []proto.StoragePartition) (*proto.StorageBackupSet, *proto.StorageDataSet) {
+//
+// scan is the caller's answer to "which purposes did you come for", and it is
+// applied HERE, before the peek, because the peek is the side effect: a
+// purpose outside the scan is never mounted at all, not mounted and then
+// discarded. §6.5's startup sweep passes data alone so a controlplane's backup
+// target is not made live on every boot.
+func (b *BlockDevBackend) readClaimedSets(ctx context.Context, parts []proto.StoragePartition, scan markerScan) (*proto.StorageBackupSet, *proto.StorageDataSet) {
 	var backup *proto.StorageBackupSet
 	var data *proto.StorageDataSet
 	for _, p := range parts {
 		purpose, ok := proto.StoragePurposeForFSLabel(p.Label)
-		if !ok {
+		if !ok || !scan.wants(purpose) {
 			continue
 		}
 		// One answer per purpose: the first partition that yields a marker
@@ -326,12 +446,12 @@ func (b *BlockDevBackend) peek(ctx context.Context, devicePath string, read func
 	if err := checkDevicePath(devicePath); err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp(b.mountRoot, "peek-")
+	dir, err := os.MkdirTemp(b.scratchRoot, "peek-")
 	if err != nil {
-		if err = os.MkdirAll(b.mountRoot, 0o700); err != nil {
+		if err = os.MkdirAll(b.scratchRoot, 0o700); err != nil {
 			return err
 		}
-		if dir, err = os.MkdirTemp(b.mountRoot, "peek-"); err != nil {
+		if dir, err = os.MkdirTemp(b.scratchRoot, "peek-"); err != nil {
 			return err
 		}
 	}
@@ -410,7 +530,11 @@ func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) 
 	if node.Type != "disk" {
 		return nil, fmt.Errorf("%w: %s is a %q", ErrNotWholeDisk, devicePath, node.Type)
 	}
-	cand := b.candidateFrom(ctx, *node, protected)
+	// Every purpose. This is the re-verification a DESTRUCTIVE claim is about
+	// to act on, and it has to see the disk exactly as the picker the operator
+	// confirmed against saw it — §4.8's adopt-or-wipe question is asked of a
+	// backup set found right here.
+	cand := b.candidateFrom(ctx, *node, protected, proto.AllStoragePurposes)
 	// Belt and braces: candidateFrom stamps Protected from the same map, but
 	// the check is repeated against the candidate so a future bug in the
 	// stamping cannot quietly turn the guard off.
@@ -429,7 +553,7 @@ func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) 
 		if p.Mountpoint == "" {
 			continue
 		}
-		if !strings.HasPrefix(filepath.Clean(p.Mountpoint)+"/", filepath.Clean(b.mountRoot)+"/") {
+		if !b.isOurMount(p.Mountpoint) {
 			return nil, fmt.Errorf("%s is mounted at %s — unmount it before claiming %s",
 				p.DevicePath, p.Mountpoint, devicePath)
 		}
@@ -471,7 +595,10 @@ func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) 
 	if err != nil {
 		return nil, err
 	}
-	mountPath, err := b.mountPartition(ctx, part, partUUID)
+	// Mounted under the purpose's own root, with the purpose's own options —
+	// the spec resolved at the top of this function, not re-derived from the
+	// label we just wrote.
+	mountPath, err := b.mountPartition(ctx, part, partUUID, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +728,7 @@ func (b *BlockDevBackend) fingerprintOf(ctx context.Context, devicePath string, 
 	}
 	for _, d := range devices.BlockDevices {
 		if d.Path == devicePath || "/dev/"+d.KName == devicePath {
-			c := b.candidateFrom(ctx, d, protected)
+			c := b.candidateFrom(ctx, d, protected, proto.AllStoragePurposes)
 			return c.Fingerprint
 		}
 	}
@@ -614,10 +741,23 @@ func (b *BlockDevBackend) fingerprintOf(ctx context.Context, devicePath string, 
 
 // Mount mounts a claimed target by partition UUID.
 //
-// The mount root and options are the same for every purpose in this change.
-// §6.5 says they must eventually differ — /run is tmpfs, which is right for a
-// job-scoped archive mount and wrong for a data disk that has to survive
-// reboot and host live app volumes — and that is a separate change on purpose.
+// The root and the options now come from the target's PURPOSE (§6.5), which
+// this verb is not told — the partition UUID is the whole address, and adding
+// a purpose to StorageMountCmd would mean an agent below
+// proto.StorageClaimPurposeMinAgentVersion mounting a data disk at the backup
+// root, which is the skew this change exists to close. So the purpose is read
+// off the filesystem LABEL lsblk observed.
+//
+// That is the label's blessed use, and only that use: readClaimedSets already
+// decides which of the two markers to read the same way. Nothing destructive
+// follows from it, and a partition whose label is none of ours falls back to
+// backup — the answer every claimed target gave before §6, so a disk claimed
+// by an older agent still mounts where it always did.
+//
+// The important property is that it is ONE answer per disk however the mount
+// was reached. If the api's inspect mounted a data disk at /run while the
+// startup sweep mounted it at /var/lib/rasputin/data, the same filesystem
+// would be live at two paths and only one of them would survive a reboot.
 func (b *BlockDevBackend) Mount(ctx context.Context, partUUID string) (string, error) {
 	if err := checkPartUUID(partUUID); err != nil {
 		return "", err
@@ -629,20 +769,40 @@ func (b *BlockDevBackend) Mount(ctx context.Context, partUUID string) (string, e
 	if found.mountPoint != "" {
 		return found.mountPoint, nil
 	}
-	return b.mountPartition(ctx, found.devicePath, partUUID)
+	spec, err := mountSpecForLabel(found.fsLabel)
+	if err != nil {
+		return "", err
+	}
+	return b.mountPartition(ctx, found.devicePath, partUUID, spec)
 }
 
-// mountPartition mounts part at mountRoot/<partUUID>.
+// mountSpecForLabel resolves the purpose spec to mount a partition under from
+// the filesystem label lsblk saw. An unrecognised label means backup, which is
+// what every claimed target was before §6 — see Mount.
+func mountSpecForLabel(fsLabel string) (proto.StoragePurposeSpec, error) {
+	purpose, ok := proto.StoragePurposeForFSLabel(strings.TrimSpace(fsLabel))
+	if !ok {
+		purpose = proto.StoragePurposeBackup
+	}
+	return proto.StoragePurposeSpecFor(purpose)
+}
+
+// mountPartition mounts part at the purpose's root, as <root>/<partUUID>.
 //
-// nodev,nosuid,noexec because the contents are an archive written by a previous
-// installation of this software and, after a restore-before-first-boot, are the
-// first thing a replacement controlplane reads off a disk it has never seen.
-func (b *BlockDevBackend) mountPartition(ctx context.Context, part, partUUID string) (string, error) {
-	dir := filepath.Join(b.mountRoot, partUUID)
+// Both the root and the options are the purpose's (§6.5, proto's spec table):
+// a backup target lands job-scoped on tmpfs with noexec, a data disk lands
+// durably beside the persistent partition WITHOUT it. The reasoning for each
+// lives on the proto constants, which is the only place either is spelled.
+func (b *BlockDevBackend) mountPartition(ctx context.Context, part, partUUID string, spec proto.StoragePurposeSpec) (string, error) {
+	root, err := b.mountRootFor(spec.Purpose)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, partUUID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	if _, err := b.run(ctx, nil, b.tool("mount"), "-o", "noexec,nosuid,nodev", part, dir); err != nil {
+	if _, err := b.run(ctx, nil, b.tool("mount"), "-o", spec.MountOptions, part, dir); err != nil {
 		return "", fmt.Errorf("mount %s at %s: %w", part, dir, err)
 	}
 	return dir, nil
@@ -732,7 +892,11 @@ func (b *BlockDevBackend) Inspect(ctx context.Context, partUUID string) (*proto.
 	}
 	mountPoint := found.mountPoint
 	if mountPoint == "" {
-		if mountPoint, err = b.mountPartition(ctx, found.devicePath, partUUID); err != nil {
+		spec, serr := mountSpecForLabel(found.fsLabel)
+		if serr != nil {
+			return nil, serr
+		}
+		if mountPoint, err = b.mountPartition(ctx, found.devicePath, partUUID, spec); err != nil {
 			// Attached and not mountable is its own answer, distinct from
 			// "not attached" and from "the agent could not look": the health
 			// poll renders it UNMOUNTED (#398). Present says the partition is

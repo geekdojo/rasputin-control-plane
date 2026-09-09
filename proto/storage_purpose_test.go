@@ -266,3 +266,110 @@ func TestStorageCandidateClaimedPurpose(t *testing.T) {
 		})
 	}
 }
+
+// §6.5 moved the mount root and the mount options into the table, so the two
+// purposes can differ where they have to. These cases pin BOTH answers: the
+// backup target's must be byte-for-byte what shipped (the agent has been
+// mounting archives at /run/rasputin/storage with noexec,nosuid,nodev since
+// §4.8, and this change is not allowed to alter that), and the data disk's
+// must be the deliberately different one.
+func TestStoragePurposeSpecMountRootAndOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		purpose StoragePurpose
+		root    string
+		options string
+	}{
+		{
+			name:    "backup mounts job-scoped on tmpfs, noexec — unchanged",
+			purpose: StoragePurposeBackup,
+			root:    "/run/rasputin/storage",
+			options: "noexec,nosuid,nodev",
+		},
+		{
+			name:    "data mounts durably beside the persistent partition, and NOT noexec",
+			purpose: StoragePurposeData,
+			root:    "/var/lib/rasputin/data",
+			options: "nosuid,nodev",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := StoragePurposeSpecFor(tc.purpose)
+			if err != nil {
+				t.Fatalf("StoragePurposeSpecFor(%q): %v", tc.purpose, err)
+			}
+			if spec.MountRoot != tc.root {
+				t.Errorf("MountRoot = %q, want %q", spec.MountRoot, tc.root)
+			}
+			if spec.MountOptions != tc.options {
+				t.Errorf("MountOptions = %q, want %q", spec.MountOptions, tc.options)
+			}
+			// nosuid and nodev are the two that are NOT negotiable per
+			// purpose: a claimed disk is one an operator can unplug, and
+			// neither a setuid binary nor a device node on it has any
+			// legitimate reader.
+			for _, opt := range []string{"nosuid", "nodev"} {
+				if !strings.Contains(spec.MountOptions, opt) {
+					t.Errorf("%s lost %s: %q", tc.purpose, opt, spec.MountOptions)
+				}
+			}
+		})
+	}
+}
+
+// noexec on the data disk is the mistake this asserts against, and it would be
+// made in good faith — it is on the backup target two rows up, and copying it
+// across looks like consistency. It would break app volumes that legitimately
+// hold executables, to buy a property /var/lib/rasputin (mounted `defaults`,
+// where those same volumes live today) does not have.
+func TestStorageDataMountIsNotNoexec(t *testing.T) {
+	spec, err := StoragePurposeSpecFor(StoragePurposeData)
+	if err != nil {
+		t.Fatalf("data spec: %v", err)
+	}
+	if strings.Contains(spec.MountOptions, "noexec") {
+		t.Errorf("the data disk is mounted noexec (%q) — app volumes can hold executables, and the partition they migrate from is mounted `defaults`", spec.MountOptions)
+	}
+}
+
+// The roots must not collide, and the data root must not be on tmpfs: a data
+// disk that mounted under /run would be unmounted by a reboot and its apps
+// would silently start writing to the boot medium, which is §6.3's whole
+// failure mode arriving by a different door.
+func TestStorageMountRootsDoNotCollide(t *testing.T) {
+	seen := map[string]StoragePurpose{}
+	for _, p := range AllStoragePurposes {
+		spec, err := StoragePurposeSpecFor(p)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if spec.MountRoot == "" || spec.MountOptions == "" {
+			t.Errorf("%s has an incomplete mount spec: root=%q options=%q", p, spec.MountRoot, spec.MountOptions)
+		}
+		if other, dup := seen[spec.MountRoot]; dup {
+			t.Errorf("%s and %s share the mount root %q — one disk would be mounted over the other", p, other, spec.MountRoot)
+		}
+		seen[spec.MountRoot] = p
+	}
+	data, err := StoragePurposeSpecFor(StoragePurposeData)
+	if err != nil {
+		t.Fatalf("data spec: %v", err)
+	}
+	if strings.HasPrefix(data.MountRoot, "/run/") {
+		t.Errorf("the data disk mounts under /run (%q), which is tmpfs — the mount would not survive a reboot", data.MountRoot)
+	}
+}
+
+// AllStoragePurposes has to BE the table, not a hand-kept list beside it: a
+// purpose missing from it is one every per-purpose loop silently skips.
+func TestAllStoragePurposesMatchesTheTable(t *testing.T) {
+	if len(AllStoragePurposes) != len(storagePurposeSpecs) {
+		t.Fatalf("AllStoragePurposes has %d entries, the spec table has %d", len(AllStoragePurposes), len(storagePurposeSpecs))
+	}
+	for _, p := range AllStoragePurposes {
+		if _, err := StoragePurposeSpecFor(p); err != nil {
+			t.Errorf("AllStoragePurposes lists %q, which the table does not know: %v", p, err)
+		}
+	}
+}

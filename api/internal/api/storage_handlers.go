@@ -49,9 +49,11 @@ import (
 // registers no storage.enumerate responder, and asking it was a NATS
 // no-responders error surfacing as a 502 (e3bench 2026-09-08). Listing that
 // node's disks anyway is not on offer: nothing on it answers the verb. Should
-// a node that cannot hold a target ever answer (a storage-role node with a
-// backend, once #302 gives it one), that is the moment CanHoldTarget widens
-// and the list comes back with it.
+// a node that cannot hold a target ever answer — a storage-role node with a
+// backend, once the ingest can reach a remote mount (§4.1) — that is the
+// moment CanHoldTarget widens and the list comes back with it. #302's disk
+// claiming is not that moment: it formats and mounts disks, and the ingest is
+// what blocks a target off the controlplane.
 func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Request) {
 	nodeID := strings.TrimSpace(r.URL.Query().Get("nodeId"))
 	if nodeID == "" {
@@ -73,7 +75,7 @@ func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotFound, fmt.Sprintf("node %s is not registered", nodeID))
 		return
 	}
-	if nodeOK, nodeReason := storage.CanHoldTarget(node); !nodeOK {
+	if nodeOK, nodeReason := storage.CanHoldTarget(node, proto.StoragePurposeBackup); !nodeOK {
 		writeJSON(w, http.StatusOK, backupCandidatesResponse{
 			OK:                   true,
 			NodeEligible:         false,
@@ -209,7 +211,7 @@ func (s *Server) handleListBackupTargets(w http.ResponseWriter, r *http.Request)
 		// but it is told, in the same words the run's refusal uses, so the
 		// Storage page and the failed run tell one story.
 		if node, err := s.lookupNode(r.Context(), row.NodeID); err == nil && node != nil {
-			if ok, reason := storage.CanHoldTarget(node); !ok {
+			if ok, reason := storage.CanHoldTarget(node, proto.StoragePurposeBackup); !ok {
 				tr.NodeIneligibleReason = reason
 			}
 		}
@@ -318,7 +320,7 @@ func (s *Server) handleClaimBackupTarget(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	} else if node != nil {
-		if ok, reason := storage.CanHoldTarget(node); !ok {
+		if ok, reason := storage.CanHoldTarget(node, proto.StoragePurposeBackup); !ok {
 			writeError(w, http.StatusConflict, reason)
 			return
 		}

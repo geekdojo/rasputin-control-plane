@@ -635,6 +635,49 @@ func main() {
 			if n, freed := storage.CleanStaging(stagingRoot); n > 0 {
 				log.Printf("rasputin-agent: swept %d orphaned staged backup archive(s) from %s (%d bytes)", n, stagingRoot, freed)
 			}
+
+			// §6.5: the agent mounts the data disk itself. The rootfs is
+			// read-only squashfs, so there is no /etc/systemd/system to write
+			// a mount unit into, and a generator baked into the image would
+			// mean an `os` change this contract keeps out — the agent already
+			// runs as a service and already owns the mount primitive.
+			//
+			// NOTHING here is fatal, and that is §6.3's first bullet rather
+			// than laziness: a data disk that is absent, unreadable, unclaimed
+			// or protected must never make a node unbootable. It costs the
+			// converse guarantee, which §6.5 records — the mount is only as
+			// early as the agent, and nothing mounts the disk if the agent
+			// does not start.
+			//
+			// No api round-trip either: the marker on the platter is the
+			// record, the DB row is a cache, so this resolves against local
+			// hardware and works with the controlplane unreachable.
+			//
+			// It runs in its own goroutine, under a deadline, and BOTH are
+			// about not wedging startup. A mount(8) against a failing disk
+			// blocks in the kernel — uninterruptibly, so the deadline alone
+			// would not save a synchronous sweep — and the rest of this
+			// agent's startup, the NATS subscriptions included, must not sit
+			// behind it. The deadline bounds the I/O rather than driving any
+			// state: when it fires, the sweep gives up and says so.
+			//
+			// The cost is that a deploy arriving in the same second as boot
+			// can outrun the mount. What protects an app from that is
+			// storage.VerifyDataMarker in the deploy path (§6.3), not this
+			// ordering — and nothing places an app on the data disk today,
+			// because the per-app placement field §6.4 calls for does not
+			// exist yet.
+			go func() {
+				sweepCtx, cancel := context.WithTimeout(ctx, proto.StorageEnumerateWork+proto.StorageMountWork)
+				defer cancel()
+				mounts, err := stBackend.MountClaimedData(sweepCtx)
+				if err != nil {
+					log.Printf("rasputin-agent: storage: could not look for claimed data disks (none were mounted): %v", err)
+					return
+				}
+				storage.LogDataMounts(mounts)
+			}()
+
 			subscribe(func(c *nats.Conn) error {
 				if _, err := storage.RegisterHandlers(c, nodeID, stBackend, stagingRoot); err != nil {
 					return fmt.Errorf("register storage handlers: %w", err)

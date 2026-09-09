@@ -2,11 +2,34 @@
 // candidate disks, claim one, format it, mount it.
 //
 // A claim carries a PURPOSE (proto.StoragePurpose): §4.8's backup target or
-// §6's Node X data disk. The purpose decides three constants — the GPT
-// partition name, the filesystem label and the marker file — and decides
-// nothing else. Every refusal below runs identically whatever the purpose is,
-// and §6.5 says protect.go's exclusion in particular must stay unconditional
-// across all of them.
+// §6's Node X data disk. The purpose decides five constants, all of them in
+// proto's spec table and nowhere else — the GPT partition name, the filesystem
+// label, the marker file, and (§6.5) the mount root and mount options. It
+// decides nothing beyond those: every refusal below runs identically whatever
+// the purpose is, and §6.5 says protect.go's exclusion in particular must stay
+// unconditional across all of them.
+//
+// The two mounts differ because the disks do. A backup target lands
+// job-scoped on tmpfs with noexec — its contents are an archive. A data disk
+// lands on the persistent partition WITHOUT noexec, because it hosts live app
+// volumes that can legitimately hold executables and it has to survive a
+// reboot.
+//
+// # The data disk is mounted by the agent, at startup
+//
+// §6.5: the rootfs is read-only squashfs, so nothing can write a mount unit,
+// and a generator would mean an `os` change this contract keeps out. So
+// MountClaimedData sweeps at startup — no api round-trip, because the marker
+// on the platter is the record and the DB row is a cache — and NOTHING it
+// finds is fatal. §6.3's first bullet is that a missing data disk must never
+// make a node unbootable, and under §6.5 the agent is the thing that mounts
+// it, so an agent that refused to start over one would be the hazard itself.
+//
+// VerifyDataMarker is the other half, and §6.3 makes it the whole of the
+// enforcement: the test is the MARKER, never "the mount point is non-empty",
+// because an unmounted mount point a previous deploy already filled is exactly
+// the failure being caught and it is not empty. Marker absent means refuse,
+// never create.
 //
 // Two backends:
 //

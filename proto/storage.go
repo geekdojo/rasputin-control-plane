@@ -131,16 +131,61 @@ const StorageMarkerVersion = 1
 // would make each type's version move for the other type's reasons.
 const StorageDataMarkerVersion = 1
 
-// StoragePurposeSpec is everything about a claim that varies BY PURPOSE: the
-// GPT partition name it writes, the filesystem label mkfs applies, and the
-// marker file it drops at the root of the new filesystem.
+// The mount ROOTS a claimed target lands under, one per purpose. The mount
+// point itself is <root>/<partUUID> for both — the identifier, never the
+// label or the device path.
 //
-// One struct, one table, one lookup, because these three constants have to
-// agree across two backends and an api that never sees the disk. They used to
-// be literals inside BlockDevBackend.Claim and MockBackend.Claim — which is how
+// §6.5 is the whole reason there are two. /run is tmpfs, so a backup mount is
+// job-scoped in exactly the way §4.1's "mounted for the duration of the job"
+// wants and vanishes on reboot, which is correct for a disk whose contents are
+// an archive read by a controlplane that has never seen it. A DATA disk is the
+// opposite case on both counts: it hosts live app volumes and it has to survive
+// a reboot, so its root is on the persistent partition beside everything else
+// Rasputin keeps.
+const (
+	StorageBackupMountRoot = "/run/rasputin/storage"
+	StorageDataMountRoot   = "/var/lib/rasputin/data"
+)
+
+// The mount OPTIONS, one per purpose, and the difference between them is
+// deliberate rather than an oversight.
+//
+// A backup target gets noexec on top of nosuid,nodev: its contents are an
+// archive written by a previous installation of this software, and nothing
+// there is ever meant to be executed.
+//
+// A data disk deliberately does NOT get noexec. It holds app volumes, which
+// can legitimately contain executables — an app shipping a helper script or a
+// plugin directory is ordinary — and /var/lib/rasputin, where those same
+// volumes live today, is mounted `defaults`. So noexec here would break apps
+// to buy a property the partition they migrate FROM does not have. nosuid and
+// nodev stay: a removable disk must not be able to introduce a setuid binary
+// or a device node, and neither is something an app volume has any use for.
+const (
+	StorageBackupMountOptions = "noexec,nosuid,nodev"
+	StorageDataMountOptions   = "nosuid,nodev"
+)
+
+// AllStoragePurposes is every purpose, in a stable order — the same service
+// AllRoles does for NodeRole. It exists so a caller that has to do something
+// once per purpose (seed a mount root, assert the table has no holes) iterates
+// a list rather than re-spelling the constants and missing the next one added.
+var AllStoragePurposes = []StoragePurpose{StoragePurposeBackup, StoragePurposeData}
+
+// StoragePurposeSpec is everything about a claim that varies BY PURPOSE: the
+// GPT partition name it writes, the filesystem label mkfs applies, the marker
+// file it drops at the root of the new filesystem, and where and how that
+// filesystem is mounted.
+//
+// One struct, one table, one lookup, because these constants have to agree
+// across two backends and an api that never sees the disk. They used to be
+// literals inside BlockDevBackend.Claim and MockBackend.Claim — which is how
 // the mock and the real backend came to be the same decision written twice, and
 // a second purpose added to one and not the other would leave CI green against
-// a backend that no longer resembles production.
+// a backend that no longer resembles production. The mount root and options
+// joined them for §6.5, which is the same argument one step further out: the
+// mount was the last per-purpose decision still spelled as a literal in the
+// agent, and the one whose two answers differ most.
 type StoragePurposeSpec struct {
 	// Purpose is the purpose this spec describes, echoed back so a caller that
 	// resolved it from an empty wire value can see what it actually got.
@@ -153,6 +198,13 @@ type StoragePurposeSpec struct {
 	// MarkerFile is the dot-file written at the root of the claimed filesystem
 	// that makes the disk self-describing.
 	MarkerFile string
+	// MountRoot is the directory claimed targets of this purpose are mounted
+	// under; the mount point is MountRoot/<partUUID>. See the constants.
+	MountRoot string
+	// MountOptions is the -o list the mount is made with. A string rather than
+	// a slice because that is exactly what mount(8) takes, and splitting it
+	// would only invite a caller to reassemble it in a different order.
+	MountOptions string
 }
 
 // storagePurposeSpecs is the table. Keyed by the wire value, so adding a
@@ -160,16 +212,20 @@ type StoragePurposeSpec struct {
 // nowhere else a per-purpose constant is allowed to be spelled.
 var storagePurposeSpecs = map[StoragePurpose]StoragePurposeSpec{
 	StoragePurposeBackup: {
-		Purpose:    StoragePurposeBackup,
-		PartName:   StorageBackupPartName,
-		FSLabel:    StorageBackupLabel,
-		MarkerFile: StorageMarkerFile,
+		Purpose:      StoragePurposeBackup,
+		PartName:     StorageBackupPartName,
+		FSLabel:      StorageBackupLabel,
+		MarkerFile:   StorageMarkerFile,
+		MountRoot:    StorageBackupMountRoot,
+		MountOptions: StorageBackupMountOptions,
 	},
 	StoragePurposeData: {
-		Purpose:    StoragePurposeData,
-		PartName:   StorageDataPartName,
-		FSLabel:    StorageDataLabel,
-		MarkerFile: StorageDataMarkerFile,
+		Purpose:      StoragePurposeData,
+		PartName:     StorageDataPartName,
+		FSLabel:      StorageDataLabel,
+		MarkerFile:   StorageDataMarkerFile,
+		MountRoot:    StorageDataMountRoot,
+		MountOptions: StorageDataMountOptions,
 	},
 }
 
