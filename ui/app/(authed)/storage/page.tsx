@@ -10,6 +10,11 @@
 // disk and sees two should be told which one is the boot medium and why. A list
 // with a silent hole in it makes the machine's own boot disk look like it does
 // not exist, and the next thing that operator does is go looking for it.
+//
+// The same treatment covers a whole NODE that cannot hold a target (#397 —
+// today, anything but the controlplane, until the storage SKU): its disks are
+// listed, every one ineligible with the reason, and the selector says so before
+// the scan. The api decides (`eligible` on every row); this page only renders.
 
 import { HardDrive, Lock, RefreshCw } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
@@ -28,6 +33,13 @@ import {
   transportLabel,
 } from '../../../components/storage/format';
 import { HEALTH_CAVEAT, healthBadge } from '../../../components/storage/target-health';
+import {
+  CANNOT_HOLD_TARGET_SHORT,
+  candidateIneligibility,
+  canHoldTarget,
+  nodeOptionLabel,
+  targetRowNodeNote,
+} from '../../../components/storage/target-eligibility';
 import {
   Badge,
   Btn,
@@ -54,6 +66,7 @@ export default function BackupsPage() {
   const [nodeId, setNodeId] = useState<string>('');
   const [candidates, setCandidates] = useState<BackupCandidate[] | null>(null);
   const [backend, setBackend] = useState<string>('');
+  const [nodeIneligible, setNodeIneligible] = useState<string | null>(null);
   const [scannedAt, setScannedAt] = useState<string>('');
   const [targets, setTargets] = useState<BackupTarget[]>([]);
   const [candidateErr, setCandidateErr] = useState<string | null>(null);
@@ -96,10 +109,14 @@ export default function BackupsPage() {
         setCandidates(r.candidates ?? []);
         setBackend(r.backend);
         setScannedAt(r.ts);
+        // The node's own answer, said once above the list — and said even
+        // when the list is empty.
+        setNodeIneligible(r.nodeEligible === false ? r.nodeIneligibleReason || CANNOT_HOLD_TARGET_SHORT : null);
         setCandidateErr(null);
       })
       .catch((e) => {
         setCandidates(null);
+        setNodeIneligible(null);
         setCandidateErr(String(e));
       });
   }, []);
@@ -114,6 +131,14 @@ export default function BackupsPage() {
 
   const claimed = targets.find((t) => t.status === 'claimed');
   const scanning = candidates === null && candidateErr === null;
+  // The selector groups nodes by whether a target can live on them, so the
+  // storage node is still THERE — an operator may want to see its disks — but
+  // is not mistaken for a place to put the backup. The mirror rule labels the
+  // groups; the api's answer per row is what actually disables a claim.
+  const holders = nodes.filter((n) => canHoldTarget(n).ok);
+  const nonHolders = nodes.filter((n) => !canHoldTarget(n).ok);
+  const selectedNode = nodes.find((n) => n.id === nodeId);
+  const selectedEligibility = selectedNode ? canHoldTarget(selectedNode) : undefined;
 
   return (
     <>
@@ -166,16 +191,37 @@ export default function BackupsPage() {
             onChange={(e) => {
               setCandidates(null);
               setCandidateErr(null);
+              setNodeIneligible(null);
               setNodeId(e.target.value);
             }}
             style={{ fontSize: 10 }}
+            title={selectedEligibility && !selectedEligibility.ok ? selectedEligibility.reason : undefined}
           >
             {nodes.length === 0 && <option value="">loading…</option>}
-            {nodes.map((n) => (
-              <option key={n.id} value={n.id}>
-                {n.hostname} ({n.role})
-              </option>
-            ))}
+            {nonHolders.length === 0 ? (
+              holders.map((n) => (
+                <option key={n.id} value={n.id}>
+                  {nodeOptionLabel(n)}
+                </option>
+              ))
+            ) : (
+              <>
+                <optgroup label="Can hold a backup target">
+                  {holders.map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {nodeOptionLabel(n)}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label={`Can't hold a backup target yet`}>
+                  {nonHolders.map((n) => (
+                    <option key={n.id} value={n.id} title={canHoldTarget(n).reason}>
+                      {nodeOptionLabel(n)}
+                    </option>
+                  ))}
+                </optgroup>
+              </>
+            )}
           </Select>
         </label>
         <Btn
@@ -199,6 +245,14 @@ export default function BackupsPage() {
 
       {candidateErr && (
         <Hint warn style={{ marginBottom: 12 }}>{candidateErr}</Hint>
+      )}
+
+      {/* #397: the node's answer, once, above the list. Every row below
+          repeats it as its own reason, so nothing here is claimable. */}
+      {nodeIneligible && !candidateErr && (
+        <Hint warn style={{ marginBottom: 12 }}>
+          Nothing on this node can be claimed as a backup target: {nodeIneligible}
+        </Hint>
       )}
 
       {candidates && candidates.length === 0 && !candidateErr && (
@@ -250,6 +304,16 @@ function TargetTable({ targets }: { targets: BackupTarget[] }) {
           <tr key={t.jobId}>
             <td style={tdStyle}>
               <StatusBadge target={t} />
+              {/* #397: a target claimed on a node nothing can send an archive
+                  to, before the picker refused such nodes. Said beside the
+                  status in the api's words — the same words backup.run
+                  refuses with — and the row is otherwise left exactly as it
+                  is: it may name the only copy of an archive. */}
+              {targetRowNodeNote(t) && (
+                <div style={{ color: WARN, fontSize: 9, marginTop: 4, lineHeight: 1.5, maxWidth: 260 }}>
+                  {targetRowNodeNote(t)}
+                </div>
+              )}
             </td>
             <td style={tdStyle}>
               <HealthCell target={t} />
@@ -328,17 +392,20 @@ function StatusBadge({ target }: { target: BackupTarget }) {
 function CandidateRow({ candidate, onPick }: { candidate: BackupCandidate; onPick: () => void }) {
   const disp = disposition(candidate);
   const isProtected = disp === 'protected';
+  // The api's verdict on THIS disk, whatever the cause: the boot medium, or a
+  // node that cannot hold a target (#397). Null means claimable.
+  const ineligible = candidateIneligibility(candidate);
   const parts = candidate.partitions ?? [];
 
   return (
     <div
       style={{
-        border: `1px solid ${isProtected ? HAIR_SOFT : HAIR}`,
+        border: `1px solid ${ineligible ? HAIR_SOFT : HAIR}`,
         padding: '12px 14px',
         display: 'flex',
         gap: 14,
         alignItems: 'flex-start',
-        opacity: isProtected ? 0.72 : 1,
+        opacity: ineligible ? 0.72 : 1,
       }}
     >
       <div style={{ paddingTop: 2 }}>
@@ -385,6 +452,11 @@ function CandidateRow({ candidate, onPick }: { candidate: BackupCandidate; onPic
           </Hint>
         )}
 
+        {/* A disk that is ineligible for a reason OTHER than being the boot
+            medium — today, that its node cannot hold a target. The reason is
+            the api's, and it is the same sentence the claim would refuse with. */}
+        {ineligible && !isProtected && <Hint warn>{ineligible}</Hint>}
+
         {disp === 'adopt' && candidate.backupSet && (
           <Hint>
             {candidate.backupSet.generations
@@ -405,8 +477,8 @@ function CandidateRow({ candidate, onPick }: { candidate: BackupCandidate; onPic
       </div>
 
       <div style={{ paddingTop: 2 }}>
-        {isProtected ? (
-          <Badge color={DIM} title={candidate.protectedReason}>
+        {ineligible ? (
+          <Badge color={DIM} title={ineligible}>
             NOT ELIGIBLE
           </Badge>
         ) : (

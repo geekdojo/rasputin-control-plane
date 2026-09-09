@@ -536,6 +536,38 @@ func seedClaimedTarget(t *testing.T, store *Store, jobID string) {
 // The public key is a different animal — it is in the spec, in the store and in
 // the response on purpose, and §4.6's amendment turns on it being harmless
 // there.
+// #397: a disk on a node that cannot hold a target is refused at step 1 —
+// before a row is written, before the agent is asked anything — even when
+// the spec reaches the saga without passing through the handler that would
+// have said 409. The same words as the picker and the handler, so an operator
+// who finds this in the Tasks view reads one story.
+func TestClaimSaga_Step1RefusesANodeThatCannotHoldATarget(t *testing.T) {
+	agent := &fakeAgent{}
+	h := newHarness(t, agent)
+	const shelf = "n-shelf"
+	registerNode(t, h.inv, shelf, proto.RoleStorage)
+	// The fake agent answers for testNode only; a storage-node claim must be
+	// refused before any RPC, so nobody needs to answer for the shelf.
+	spec := baseSpec()
+	spec.NodeID = shelf
+	jobID := h.submit(t, spec)
+	j := h.waitTerminal(t, jobID)
+	if j.Status != jobs.StatusFailed {
+		t.Fatalf("job status = %s, want failed", j.Status)
+	}
+	for _, want := range []string{"a disk on n-shelf.test (storage) cannot receive backups yet", "controlplane's ingest", "storage SKU (#302)"} {
+		if !strings.Contains(j.Error, want) {
+			t.Errorf("job error = %q, want it to contain %q", j.Error, want)
+		}
+	}
+	if row := h.target(t, jobID); row != nil {
+		t.Errorf("a refused claim left a target row (%s): the ledger now names a target nothing can write to", row.Status)
+	}
+	if n := agent.claimCount(); n != 0 {
+		t.Errorf("the agent was asked to format %d times for a claim step 1 refused", n)
+	}
+}
+
 func TestClaimSaga_KeyMaterialNeverLeavesTheSpecAndTheStore(t *testing.T) {
 	const (
 		wrappedPass     = "SENTINEL-WRAPPED-BY-PASSPHRASE"

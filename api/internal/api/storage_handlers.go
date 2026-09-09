@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -35,8 +37,15 @@ import (
 // operator who plugged in one disk and sees two should be told which one is the
 // boot medium and why, not handed a list with a silent hole in it.
 //
-// Every candidate the agent reported is passed through unchanged, plus one
-// api-minted field: `wipeToken`. See backupCandidate.
+// Every candidate the agent reported is passed through unchanged, plus the
+// api-minted fields: `eligible` / `ineligibleReason` and `wipeToken`. See
+// backupCandidate.
+//
+// A node that cannot hold a target at all (storage.CanHoldTarget — today,
+// anything but the controlplane; geekdojo-brain#397) is treated the way a
+// protected disk is: the disks are still LISTED, because the operator may
+// want to see what is attached, and every one arrives `eligible:false` with
+// the reason, so nothing on that node is offered as a target.
 func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Request) {
 	nodeID := strings.TrimSpace(r.URL.Query().Get("nodeId"))
 	if nodeID == "" {
@@ -49,6 +58,17 @@ func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "nodeId is required (this api has no self node id to fall back on)")
 		return
 	}
+	node, err := s.lookupNode(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if node == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("node %s is not registered", nodeID))
+		return
+	}
+	nodeOK, nodeReason := storage.CanHoldTarget(node)
+
 	ack, err := storage.Enumerate(r.Context(), s.nc, nodeID)
 	if err != nil {
 		// A refusal is the agent answering, not the api failing — but from
@@ -57,19 +77,52 @@ func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	out := backupCandidatesResponse{
-		OK:         ack.OK,
-		Backend:    ack.Backend,
-		Ts:         ack.Ts,
-		Candidates: make([]backupCandidate, 0, len(ack.Candidates)),
+		OK:                   ack.OK,
+		Backend:              ack.Backend,
+		Ts:                   ack.Ts,
+		NodeEligible:         nodeOK,
+		NodeIneligibleReason: nodeReason,
+		Candidates:           make([]backupCandidate, 0, len(ack.Candidates)),
 	}
 	for i := range ack.Candidates {
 		c := ack.Candidates[i]
-		out.Candidates = append(out.Candidates, backupCandidate{
-			StorageCandidate: c,
-			WipeToken:        storage.CandidateWipeToken(&c),
-		})
+		bc := backupCandidate{StorageCandidate: c}
+		switch {
+		case !nodeOK:
+			// The node's reason, not the disk's, even on a protected disk:
+			// it applies to every disk in the list and it is the one the
+			// operator can act on (pick another node). `protected` still
+			// travels, so the boot medium is still labelled as such.
+			bc.IneligibleReason = nodeReason
+		case c.Protected:
+			bc.IneligibleReason = c.ProtectedReason
+			if bc.IneligibleReason == "" {
+				bc.IneligibleReason = "holds the currently-mounted boot or persistent partitions"
+			}
+		default:
+			bc.Eligible = true
+			// A wipe token is minted ONLY for a disk that could actually be
+			// claimed: a token for a disk on a node that cannot hold a target
+			// would be a confirmation for a destruction nothing can follow.
+			bc.WipeToken = storage.CandidateWipeToken(&c)
+		}
+		out.Candidates = append(out.Candidates, bc)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// lookupNode reads one node from inventory. An api with no inventory wired
+// cannot decide whether a node may hold a target, and says so rather than
+// guessing in either direction.
+func (s *Server) lookupNode(ctx context.Context, nodeID string) (*proto.Node, error) {
+	if s.inv == nil {
+		return nil, fmt.Errorf("this api is not wired to the node inventory, so it cannot tell whether %s can hold a backup target", nodeID)
+	}
+	node, err := s.inv.Get(ctx, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("inventory: %w", err)
+	}
+	return node, nil
 }
 
 // backupCandidate is one candidate as the PICKER sees it: everything the agent
@@ -80,6 +133,15 @@ func (s *Server) handleListBackupCandidates(w http.ResponseWriter, r *http.Reque
 // unaffected.
 type backupCandidate struct {
 	proto.StorageCandidate
+	// Eligible says whether THIS disk can be claimed as the target right now,
+	// and IneligibleReason says why not when it cannot — one vocabulary for
+	// every cause. A protected boot medium is ineligible with its
+	// protectedReason; every disk on a node that cannot hold a target
+	// (storage.CanHoldTarget, #397) is ineligible with the node's reason.
+	// `protected` still travels beside them, so a UI can label the boot
+	// medium specifically while disabling on `eligible` alone.
+	Eligible         bool   `json:"eligible"`
+	IneligibleReason string `json:"ineligibleReason,omitempty"`
 	// WipeToken is the confirmation a caller must echo back in
 	// `wipe.token` to claim this disk by DESTROYING the Rasputin backup set it
 	// carries (design/storage.md §4.8's "or wiped only on a second, separate
@@ -98,10 +160,16 @@ type backupCandidate struct {
 // because `wipeToken` is the API's, not the agent's: the agent never mints one
 // and there is no field on the wire type that could carry it.
 type backupCandidatesResponse struct {
-	OK         bool              `json:"ok"`
-	Backend    string            `json:"backend"`
-	Candidates []backupCandidate `json:"candidates"`
-	Ts         time.Time         `json:"ts"`
+	OK      bool   `json:"ok"`
+	Backend string `json:"backend"`
+	// NodeEligible / NodeIneligibleReason answer for the NODE, once, so a
+	// picker can say "nothing on this node can be a target" above the list
+	// rather than only on each row — and can say it even when the list is
+	// empty.
+	NodeEligible         bool              `json:"nodeEligible"`
+	NodeIneligibleReason string            `json:"nodeIneligibleReason,omitempty"`
+	Candidates           []backupCandidate `json:"candidates"`
+	Ts                   time.Time         `json:"ts"`
 }
 
 // GET /api/backup/targets
@@ -123,10 +191,33 @@ func (s *Server) handleListBackupTargets(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if rows == nil {
-		rows = []*storage.BackupTarget{}
+	out := make([]backupTargetRow, 0, len(rows))
+	for _, row := range rows {
+		tr := backupTargetRow{BackupTarget: row}
+		// A row on a node that cannot hold a target is an operator who hit
+		// #397's dead end before the picker refused it. The row is NOT
+		// altered or released — it may name the only copy of an archive —
+		// but it is told, in the same words the run's refusal uses, so the
+		// Storage page and the failed run tell one story.
+		if node, err := s.lookupNode(r.Context(), row.NodeID); err == nil && node != nil {
+			if ok, reason := storage.CanHoldTarget(node); !ok {
+				tr.NodeIneligibleReason = reason
+			}
+		}
+		out = append(out, tr)
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// backupTargetRow is one ledger row as the Storage page sees it: the row
+// verbatim, plus the api's answer to whether its node can hold a target.
+// The embedded pointer is flattened by encoding/json, so the wire shape is
+// BackupTarget with one optional field — existing readers are unaffected.
+type backupTargetRow struct {
+	*storage.BackupTarget
+	// NodeIneligibleReason is present only when the row's node cannot hold
+	// a backup target (storage.CanHoldTarget); absent otherwise.
+	NodeIneligibleReason string `json:"nodeIneligibleReason,omitempty"`
 }
 
 // claimTargetRequest is the body of POST /api/backup/targets.
@@ -209,6 +300,19 @@ func (s *Server) handleClaimBackupTarget(w http.ResponseWriter, r *http.Request)
 	if _, err := storage.ParseClaimSpec(body); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// A disk on a node that cannot hold a target is refused HERE, with the
+	// same sentence the picker attached to it, before any job exists (#397).
+	// Step 1 refuses identically if a spec reaches it some other way; an
+	// unregistered node is left for step 1 to name, as before.
+	if node, err := s.lookupNode(r.Context(), spec.NodeID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if node != nil {
+		if ok, reason := storage.CanHoldTarget(node); !ok {
+			writeError(w, http.StatusConflict, reason)
+			return
+		}
 	}
 	j, err := s.runner.Submit(r.Context(), storage.ClaimJobKind, body, creator(r))
 	if err != nil {

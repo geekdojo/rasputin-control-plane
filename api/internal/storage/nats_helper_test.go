@@ -40,6 +40,9 @@ func newStore(t *testing.T) *Store {
 	return st
 }
 
+// newInventory registers each id as a CONTROLPLANE node: since #397 only a
+// controlplane disk can be claimed, so that is the role a claim test needs
+// unless it is the refusal itself under test (see registerNode).
 func newInventory(t *testing.T, nodeIDs ...string) *inventory.Store {
 	t.Helper()
 	inv, err := inventory.OpenStore(context.Background(), filepath.Join(t.TempDir(), "inv.db"))
@@ -48,14 +51,19 @@ func newInventory(t *testing.T, nodeIDs ...string) *inventory.Store {
 	}
 	t.Cleanup(func() { _ = inv.Close() })
 	for _, id := range nodeIDs {
-		if err := inv.Insert(context.Background(), &proto.Node{
-			ID: id, Role: proto.RoleCompute, Hostname: id + ".test",
-			FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
-		}); err != nil {
-			t.Fatalf("inv insert %s: %v", id, err)
-		}
+		registerNode(t, inv, id, proto.RoleControlPlane)
 	}
 	return inv
+}
+
+func registerNode(t *testing.T, inv *inventory.Store, id string, role proto.NodeRole) {
+	t.Helper()
+	if err := inv.Insert(context.Background(), &proto.Node{
+		ID: id, Role: role, Hostname: id + ".test",
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("inv insert %s: %v", id, err)
+	}
 }
 
 // ----- the fake agent -----------------------------------------------------

@@ -1182,6 +1182,16 @@ export interface BackupCandidate {
   /** Neither WWN nor serial reported, so two identical sticks can fingerprint alike. */
   identityWeak?: boolean;
   /**
+   * Whether THIS disk can be claimed right now, and why not when it cannot —
+   * one vocabulary for every cause (#397). The boot medium is ineligible with
+   * its protectedReason; every disk on a node that cannot hold a target is
+   * ineligible with the node's reason. Optional only for an api that predates
+   * the field; components/storage/target-eligibility.ts falls back to
+   * `protected` then.
+   */
+  eligible?: boolean;
+  ineligibleReason?: string;
+  /**
    * Present ONLY when the disk is genuinely eligible to be wiped —
    * `hasBackupSet && !protected`. Its ABSENCE is the answer, not an omission:
    * with nothing to put in the field there is no wipe control to render.
@@ -1192,6 +1202,13 @@ export interface BackupCandidate {
 export interface BackupCandidatesResponse {
   ok: boolean;
   backend: string; // "blockdev" or "mock"
+  /**
+   * The NODE's answer, once: can any disk here be a target? False on every
+   * node but the controlplane until the storage SKU (#302); the reason is
+   * the same sentence every ineligible row carries.
+   */
+  nodeEligible?: boolean;
+  nodeIneligibleReason?: string;
   candidates: BackupCandidate[];
   /** The fingerprints are only as fresh as this. */
   ts: string;
@@ -1254,6 +1271,13 @@ export interface BackupTarget {
   error?: string;
   /** Present on a `claimed` row only. */
   health?: BackupTargetHealth;
+  /**
+   * Present only when this row's node cannot hold a backup target (#397) — a
+   * claim made before the picker refused such nodes. The api's sentence; the
+   * row repeats it beside its status and backup.run refuses with the same
+   * words. The row itself is never altered or released.
+   */
+  nodeIneligibleReason?: string;
 }
 
 /**

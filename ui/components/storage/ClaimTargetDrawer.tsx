@@ -48,6 +48,7 @@ import {
 } from '../../lib/archive-key';
 import type { BackupCandidate, BackupTarget, Job } from '../../lib/types';
 import { archiveKeyFromMarker, buildClaimRequest, markerKeyState, needsUnlock } from './claim-request';
+import { candidateIneligibility } from './target-eligibility';
 import {
   Btn,
   CopyButton,
@@ -349,9 +350,20 @@ function ConfirmStep({
   const disp = disposition(candidate);
   const set = candidate.backupSet;
   const generations = set?.generations ?? 0;
+  // Defence in depth for #397: the picker never opens this drawer for a disk
+  // the api called ineligible, but if it is reached anyway the button says
+  // why it will not continue, in the api's words — the same words the claim
+  // would be refused with.
+  const ineligible = candidateIneligibility(candidate);
 
   return (
     <>
+      {ineligible && (
+        <Callout color={WARN} icon={AlertTriangle} title="THIS DISK CANNOT BE A BACKUP TARGET">
+          {ineligible}
+        </Callout>
+      )}
+
       {disp === 'format' && (
         <Callout color={WARN} icon={AlertTriangle} title="THIS DISK WILL BE FORMATTED">
           Rasputin will repartition and format the whole disk, then claim it as the cluster&apos;s
@@ -461,19 +473,23 @@ function ConfirmStep({
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <Btn
             variant="primary"
-            disabled={busy || (needsReplace && !replace) || disp === 'unreadable' || legacyKey}
+            disabled={busy || (needsReplace && !replace) || disp === 'unreadable' || legacyKey || Boolean(ineligible)}
             onClick={onContinue}
             title={
-              disp === 'unreadable'
-                ? 'This disk cannot be adopted — its marker is unreadable'
-                : legacyKey
-                  ? 'This disk cannot be adopted — its archive key predates this build'
-                  : undefined
+              ineligible
+                ? ineligible
+                : disp === 'unreadable'
+                  ? 'This disk cannot be adopted — its marker is unreadable'
+                  : legacyKey
+                    ? 'This disk cannot be adopted — its archive key predates this build'
+                    : undefined
             }
           >
             {busy
               ? 'SUBMITTING…'
-              : disp === 'format'
+              : ineligible
+                ? 'CANNOT CLAIM THIS DISK'
+                : disp === 'format'
                 ? 'CONTINUE — SET UP ENCRYPTION'
                 : legacyKey
                   ? 'CANNOT ADOPT THIS DISK'

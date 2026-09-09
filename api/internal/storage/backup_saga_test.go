@@ -707,7 +707,9 @@ func TestBackupRunRefusesATargetOnAnotherNode(t *testing.T) {
 	if j.Status != jobs.StatusFailed {
 		t.Fatalf("job status = %s, want failed", j.Status)
 	}
-	for _, want := range []string{"is on node n-storage-2", "runs on " + runNodeID, "no such handoff"} {
+	// The tail is CanHoldTarget's sentence (#397): the run's refusal and the
+	// target row on the Storage page say the same thing.
+	for _, want := range []string{"is on node n-storage-2", "runs on " + runNodeID, "no such handoff", "storage SKU (#302)"} {
 		if !strings.Contains(j.Error, want) {
 			t.Errorf("job error = %q, want it to contain %q", j.Error, want)
 		}

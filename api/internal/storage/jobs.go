@@ -165,6 +165,15 @@ func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 		if node == nil {
 			return nil, fmt.Errorf("node %s is not registered", spec.NodeID)
 		}
+		// The handler already refused this with a 409, and the picker never
+		// offered the disk. Re-checked here for the same reason the agent
+		// re-checks a protected device: a coerced spec — a hand-built job, a
+		// UI from before this rule — must meet the refusal before a row is
+		// written, not after a target exists that nothing can write to. See
+		// CanHoldTarget for what relaxes it (#302).
+		if ok, reason := CanHoldTarget(node); !ok {
+			return nil, errors.New(reason)
+		}
 		claimed, err := store.ListClaimed(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("existing targets: %w", err)
