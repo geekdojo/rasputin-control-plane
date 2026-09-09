@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -122,6 +123,9 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, s *Stager) ([]*nats.Subscrip
 			cmd.AppID, cmd.AppName, cmd.Volume, cmd.Class, cmd.GenerationID, cmd.Member, cmd.RestoreID, cmd.Source, s.rt.Name())
 		ack := s.RestoreVolume(ctx, cmd)
 		switch {
+		case ack.Replayed:
+			log.Printf("rasputin-agent: restore: REPLAYED restore %s of %s/%s from the record (completed %s): %s",
+				cmd.RestoreID, cmd.AppID, cmd.Volume, ack.ReplayedFrom.Format(time.RFC3339), ack.Detail)
 		case !ack.OK:
 			log.Printf("rasputin-agent: restore: REFUSED app=%s volume=%s refusal=%s source-code=%s restored=%t: %s",
 				cmd.AppID, cmd.Volume, ack.Refusal, ack.SourceCode, ack.AppRestored, ack.Detail)

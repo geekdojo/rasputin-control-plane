@@ -105,8 +105,13 @@ type BackupRestoreVolumeCmd struct {
 	// and the marker.
 	GenerationID string `json:"generationId"`
 	Member       string `json:"member"`
-	// RestoreID names the restore for the log line and the marker; the api
-	// mints it.
+	// RestoreID names the restore; the api mints it once per restore job and
+	// sends it with every volume of that job. It is also the key the agent
+	// records a completed swap under: a second command for the same volume
+	// carrying the same RestoreID is answered from that record (Replayed in
+	// the ack) rather than run again, which is how the api settles a reply
+	// it never received (geekdojo-brain#396). A different RestoreID is a new
+	// restore.
 	RestoreID string `json:"restoreId,omitempty"`
 	// PlaintextDigest and PlaintextBytes are what the MANIFEST recorded for
 	// this member's plaintext tar — the digest the stage verb computed when
@@ -159,6 +164,16 @@ type BackupRestoreVolumeAck struct {
 	AppRestored    bool      `json:"appRestored"`
 	RestoreDetail  string    `json:"restoreDetail,omitempty"`
 	RestoredBy     string    `json:"restoredBy,omitempty"`
+
+	// Replayed says this ack was answered from the node's durable record of
+	// a restore it already completed under the command's RestoreID — nothing
+	// was fetched, the app was not stopped and the kept copy was not touched.
+	// Every other field is what the original ack carried; ReplayedFrom is
+	// when that restore completed. Detail says whether the kept copy still
+	// exists. Agents before 2026.08.5-dev.147 never set either, so a reader
+	// sees a fresh ack, which is what those agents send.
+	Replayed     bool      `json:"replayed,omitempty"`
+	ReplayedFrom time.Time `json:"replayedFrom,omitempty"`
 
 	// SourceCode is the source's own refusal code when it refused.
 	SourceCode string         `json:"sourceCode,omitempty"`

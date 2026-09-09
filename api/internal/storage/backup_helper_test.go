@@ -129,6 +129,14 @@ type fakeBackupAgent struct {
 	restores   []restoreCall
 	stops      int
 	starts     int
+	// restoreDone is the fake's stand-in for the agent's outcome record: the
+	// ack each completed swap was answered with, keyed by RestoreID and
+	// volume, so a repeat of the id is answered from it with Replayed set,
+	// the way the real agent does (geekdojo-brain#396).
+	restoreDone map[string]proto.BackupRestoreVolumeAck
+	// restoreOutcomes is the per-volume script, kept on the fake so the
+	// one-shot drops below can be counted down under the lock.
+	restoreOutcomes map[string]restoreOutcome
 }
 
 // credentialBook remembers the credential each volume was handed.
@@ -465,6 +473,9 @@ type runHarnessOpts struct {
 	// restore-stream endpoint on the ingest's socket and the fake agents
 	// answering the restore verb (startRestoreAgent).
 	restore bool
+	// restoreRPCBudget shortens the restore verb's RPC budget so a dropped
+	// reply costs the test seconds, not the agent's 45-minute budget.
+	restoreRPCBudget time.Duration
 	// restoreOutcomes decides what the fake agents do with each restore,
 	// keyed by volume name.
 	restoreOutcomes map[string]restoreOutcome
@@ -629,6 +640,7 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		h.restoreCfg = RestoreAppConfig{
 			NC: nc, SelfNodeID: self, Apps: &fakeApps{list: opts.apps, err: opts.appsErr}, Tiles: cfg.Tiles,
 			Inventory: h.inv, Sessions: sessions, Egress: egress, EgressBaseURL: ingestSrv.URL, Store: st,
+			VolumeRPCBudget: opts.restoreRPCBudget,
 		}
 		r.Register(RestoreAppWorkflow(st, h.restoreCfg))
 	}
@@ -1213,6 +1225,14 @@ type restoreOutcome struct {
 	// silent drops the request on the floor — the api's RPC times out or
 	// sees no responder. Used with a short budget.
 	silent bool
+	// dropReplies performs that many restores IN FULL and then swallows the
+	// reply — the lost-reply case where the volume WAS replaced; the next
+	// request under the same RestoreID is answered from restoreDone.
+	// dropRequests ignores that many requests outright — the lost-reply
+	// case where nothing happened. Both count down. Used with a short
+	// budget.
+	dropReplies  int
+	dropRequests int
 }
 
 // restoreCall is one restore verb the fake answered: the command and the
@@ -1306,14 +1326,53 @@ func (f *fakeBackupAgent) startRestoreAgent(t *testing.T, nc *nats.Conn, outcome
 		}
 		_ = m.Respond(b)
 	}
+	f.mu.Lock()
+	if f.restoreOutcomes == nil {
+		f.restoreOutcomes = map[string]restoreOutcome{}
+	}
+	for volume, out := range outcomes {
+		f.restoreOutcomes[volume] = out
+	}
+	if f.restoreDone == nil {
+		f.restoreDone = map[string]proto.BackupRestoreVolumeAck{}
+	}
+	f.mu.Unlock()
 	sub, err := nc.Subscribe(proto.BackupRestoreVolumeSubject(f.nodeID), func(m *nats.Msg) {
 		var cmd proto.BackupRestoreVolumeCmd
 		_ = json.Unmarshal(m.Data, &cmd)
-		out := outcomes[cmd.Volume]
+		f.mu.Lock()
+		out := f.restoreOutcomes[cmd.Volume]
 		if out.silent {
+			f.mu.Unlock()
 			return
 		}
-		f.mu.Lock()
+		if out.dropRequests > 0 {
+			out.dropRequests--
+			f.restoreOutcomes[cmd.Volume] = out
+			f.mu.Unlock()
+			return
+		}
+		dropReply := false
+		if out.dropReplies > 0 {
+			out.dropReplies--
+			f.restoreOutcomes[cmd.Volume] = out
+			dropReply = true
+		}
+		// The record: a RestoreID this fake already completed for this
+		// volume is answered from memory — the real agent's outcome record
+		// — with nothing fetched, stopped or moved.
+		if prior, ok := f.restoreDone[cmd.RestoreID+"/"+cmd.Volume]; ok && cmd.RestoreID != "" {
+			f.mu.Unlock()
+			prior.Replayed = true
+			prior.Detail = "answered from this node's record"
+			f.mu.Lock()
+			f.restores = append(f.restores, restoreCall{cmd: cmd, ack: prior})
+			f.mu.Unlock()
+			if !dropReply {
+				respond(m, prior)
+			}
+			return
+		}
 		if f.credentials == nil {
 			f.credentials = &credentialBook{}
 		}
@@ -1325,7 +1384,15 @@ func (f *fakeBackupAgent) startRestoreAgent(t *testing.T, nc *nats.Conn, outcome
 		record := func() {
 			f.mu.Lock()
 			f.restores = append(f.restores, restoreCall{cmd: cmd, ack: ack})
+			if ack.OK && ack.Replaced && cmd.RestoreID != "" {
+				done := ack
+				done.ReplayedFrom = time.Now().UTC()
+				f.restoreDone[cmd.RestoreID+"/"+cmd.Volume] = done
+			}
 			f.mu.Unlock()
+			if dropReply {
+				return
+			}
 			respond(m, ack)
 		}
 		if out.refusal != "" {

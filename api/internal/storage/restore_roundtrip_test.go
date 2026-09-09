@@ -243,12 +243,20 @@ func TestRestoreRoundTrip(t *testing.T) {
 	writeTestFile(t, filepath.Join(volDir, "rsa_key.pem"), "-----BEGIN RSA PRIVATE KEY-----\nVAULT\n")
 	writeTestFile(t, filepath.Join(volDir, "attachments", "note.txt"), "an attachment")
 	appRow := testApp("app-vw", "vaultwarden", runNodeID, "vaultwarden")
+	// The node is in inventory, online, at the agent release that keeps a
+	// restore record, and the fake drops the FIRST restore reply after
+	// doing the restore in full: the lost-reply case geekdojo-brain#396 is
+	// about, on the real saga — the api re-issues the same RestoreID once,
+	// the node answers from its record, and nothing runs twice.
 	h := newRunHarness(t, nil, runHarnessOpts{
 		key: &key, keyID: vec.KeyID,
-		apps:          []*apps.App{appRow},
-		tiles:         fakeTiles{"vaultwarden": testTile("vaultwarden", vol("vaultwarden-data", tileschema.BackupCritical, tileschema.QuiesceStop))},
-		stageOutcomes: map[string]stageOutcome{"vaultwarden-data": {dir: volDir, interrupting: true, consistency: proto.BackupConsistencyCleanShutdown}},
-		restore:       true,
+		apps:             []*apps.App{appRow},
+		tiles:            fakeTiles{"vaultwarden": testTile("vaultwarden", vol("vaultwarden-data", tileschema.BackupCritical, tileschema.QuiesceStop))},
+		stageOutcomes:    map[string]stageOutcome{"vaultwarden-data": {dir: volDir, interrupting: true, consistency: proto.BackupConsistencyCleanShutdown}},
+		restore:          true,
+		nodes:            []*proto.Node{replayNode(proto.RestoreReplayMinAgentVersion)},
+		restoreRPCBudget: 2 * time.Second,
+		restoreOutcomes:  map[string]restoreOutcome{"vaultwarden-data": {dropReplies: 1}},
 	})
 	h.agent.registerVolume(appRow.ID, "vaultwarden-data", volDir)
 	volumeBefore := dirSnapshot(t, volDir)
@@ -570,13 +578,18 @@ func TestRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("the restored volume is not the backup:\n got  %v\n want %v", got, volumeBefore)
 	}
 	// 8. The app was stopped once and restarted once around the swap, and
-	//    the ack says so.
+	//    the ack says so — across a lost reply: the node was asked twice
+	//    under one RestoreID, restored once, and answered the second from
+	//    its record.
 	calls := h.agent.restoreCalls()
-	if len(calls) != 1 || !calls[0].ack.OK || !calls[0].ack.Replaced || !calls[0].ack.Stopped || !calls[0].ack.AppRestored || calls[0].ack.RestoredBy != "driver" {
+	if len(calls) != 2 || !calls[0].ack.OK || !calls[0].ack.Replaced || !calls[0].ack.Stopped || !calls[0].ack.AppRestored || calls[0].ack.RestoredBy != "driver" {
 		t.Fatalf("restore verb: %+v", calls)
 	}
+	if calls[0].ack.Replayed || !calls[1].ack.Replayed || calls[0].cmd.RestoreID == "" || calls[1].cmd.RestoreID != calls[0].cmd.RestoreID {
+		t.Fatalf("the lost reply was not settled from the record under one id: %+v", calls)
+	}
 	if stops, starts := h.agent.quiesceCounts(); stops != 1 || starts != 1 {
-		t.Fatalf("stops=%d starts=%d", stops, starts)
+		t.Fatalf("stops=%d starts=%d: the volume was restored more than once", stops, starts)
 	}
 	if calls[0].cmd.PlaintextDigest != volRec.SHA256 || calls[0].cmd.PlaintextBytes != volRec.SizeBytes {
 		t.Fatalf("the node was handed %s/%d; the manifest recorded %s/%d", calls[0].cmd.PlaintextDigest, calls[0].cmd.PlaintextBytes, volRec.SHA256, volRec.SizeBytes)
@@ -588,6 +601,9 @@ func TestRestoreRoundTrip(t *testing.T) {
 	}
 	if len(appRep.AppVolumes) != 1 || !appRep.AppVolumes[0].Restored || appRep.AppVolumes[0].Volume != "vaultwarden-data" || appRep.AppVolumes[0].SHA256 != volRec.SHA256 || !appRep.AppVolumes[0].Stopped || !appRep.AppVolumes[0].AppRestored {
 		t.Fatalf("app restore record volumes: %+v", appRep.AppVolumes)
+	}
+	if v := appRep.AppVolumes[0]; !v.Replayed || !strings.Contains(v.ReplyLost, "the node's record says the volume was replaced at") {
+		t.Fatalf("the record does not say the lost reply was settled from the node's record: %+v", v)
 	}
 	// 10. The key and the credential are nowhere.
 	cred := h.agent.credentials.get("restore:vaultwarden-data")

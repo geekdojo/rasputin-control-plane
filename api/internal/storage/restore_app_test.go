@@ -852,3 +852,175 @@ func TestRestoreAppTrustsTheSealedManifestOverTheSidecar(t *testing.T) {
 		t.Fatal("the volume did not go back")
 	}
 }
+
+// ----- the lost reply (geekdojo-brain#396) -----------------------------------
+
+// TestRestoreAppVolumesStepIsIrreversible covers the declaration: the one
+// step that stops an app, replaces its data and removes the previous kept
+// copy is Irreversible, so the runner never re-runs it and a same-job
+// replay is refused naming the prior attempt — and the workflow stays
+// registrable (ValidateWorkflow rejects Irreversible with Retries).
+func TestRestoreAppVolumesStepIsIrreversible(t *testing.T) {
+	wf := RestoreAppWorkflow(nil, RestoreAppConfig{})
+	if err := jobs.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("the backup.restore_app workflow is not valid: %v", err)
+	}
+	var step *jobs.WorkflowStep
+	for i := range wf.Steps {
+		if wf.Steps[i].Name == "restore_volumes" {
+			step = &wf.Steps[i]
+		}
+	}
+	if step == nil {
+		t.Fatal("the workflow has no restore_volumes step")
+	}
+	if !step.Irreversible {
+		t.Error("restore_volumes is not declared Irreversible: a re-run stops the app again and removes the kept copy")
+	}
+	if step.Retries != 0 {
+		t.Errorf("restore_volumes declares %d retries", step.Retries)
+	}
+}
+
+// replayNode is an online node whose agent keeps the restore record.
+func replayNode(agentVersion string) *proto.Node {
+	now := time.Now().UTC()
+	return &proto.Node{ID: runNodeID, Role: proto.RoleControlPlane, Hostname: runNodeID + ".test", FirstSeen: now, LastSeen: now, AgentVersion: agentVersion}
+}
+
+// lostReplyCase is a restore case whose node is online at the given agent
+// version and whose RPC budget is seconds, so a dropped reply is cheap.
+func lostReplyCase(t *testing.T, agentVersion string, out restoreOutcome) *restoreCase {
+	t.Helper()
+	return newRestoreCase(t, runHarnessOpts{
+		nodes:            []*proto.Node{replayNode(agentVersion)},
+		restoreRPCBudget: 2 * time.Second,
+		restoreOutcomes:  map[string]restoreOutcome{"vaultwarden-data": out},
+	})
+}
+
+func (c *restoreCase) volumeRecord(t *testing.T) AppVolumeRestoreRecord {
+	t.Helper()
+	rep, err := c.h.store.LatestRestore(context.Background())
+	if err != nil || rep == nil || len(rep.AppVolumes) != 1 {
+		t.Fatalf("LatestRestore: %v %+v", err, rep)
+	}
+	return rep.AppVolumes[0]
+}
+
+// The node replaced the volume and its reply was lost: the same command is
+// re-issued under the same RestoreID, the node answers from its record,
+// nothing ran twice, and the volume's record says the reply was lost and
+// how it was settled.
+func TestRestoreAppSettlesALostReplyFromTheNodesRecord(t *testing.T) {
+	c := lostReplyCase(t, proto.RestoreReplayMinAgentVersion, restoreOutcome{dropReplies: 1})
+	c.corrupt(t)
+	j, jobID := c.restore(t, c.spec())
+	if j.Status != jobs.StatusSucceeded {
+		t.Fatalf("restore job %s: %s", j.Status, j.Error)
+	}
+	if got := dirSnapshot(t, c.volDir); fmt.Sprint(got) != fmt.Sprint(c.want) {
+		t.Fatalf("the volume is not the backup:\n got  %v\n want %v", got, c.want)
+	}
+	// Asked twice under ONE id; restored once; the second answer replayed.
+	calls := c.h.agent.restoreCalls()
+	if len(calls) != 2 || calls[0].cmd.RestoreID == "" || calls[0].cmd.RestoreID != calls[1].cmd.RestoreID {
+		t.Fatalf("restore calls: %+v", calls)
+	}
+	if calls[0].ack.Replayed || !calls[1].ack.Replayed || !calls[1].ack.Replaced {
+		t.Fatalf("the second answer was not a replay: %+v", calls)
+	}
+	if calls[0].cmd.Credential == calls[1].cmd.Credential {
+		t.Fatal("the re-issued request carried the first, expired credential")
+	}
+	if stops, starts := c.h.agent.quiesceCounts(); stops != 1 || starts != 1 {
+		t.Fatalf("stops=%d starts=%d: the volume was restored more than once", stops, starts)
+	}
+	rec := c.volumeRecord(t)
+	if !rec.Restored || rec.Failed || !rec.Replayed || !strings.Contains(rec.ReplyLost, "reply lost; the node's record says the volume was replaced at ") {
+		t.Fatalf("record: %+v", rec)
+	}
+	ledger := c.h.ledgerText(t, jobID)
+	for _, want := range []string{"asking it once more under the same restore id", "the node's record says the volume was replaced at"} {
+		if !strings.Contains(ledger, want) {
+			t.Fatalf("the job feed does not say %q:\n%s", want, ledger)
+		}
+	}
+	if cred := c.h.agent.credentials.get("restore:vaultwarden-data"); cred == "" || strings.Contains(ledger, cred) {
+		t.Fatal("the restore credential reached the job ledger, or the fake never saw one")
+	}
+}
+
+// The request itself was lost — the node never saw it: the re-issued
+// request finds no record and the restore runs now, once, and the record
+// says the first never happened.
+func TestRestoreAppRunsALostRequestOnceOnTheReissue(t *testing.T) {
+	c := lostReplyCase(t, proto.RestoreReplayMinAgentVersion, restoreOutcome{dropRequests: 1})
+	c.corrupt(t)
+	j, _ := c.restore(t, c.spec())
+	if j.Status != jobs.StatusSucceeded {
+		t.Fatalf("restore job %s: %s", j.Status, j.Error)
+	}
+	if got := dirSnapshot(t, c.volDir); fmt.Sprint(got) != fmt.Sprint(c.want) {
+		t.Fatal("the volume is not the backup")
+	}
+	calls := c.h.agent.restoreCalls()
+	if len(calls) != 1 || calls[0].ack.Replayed || !calls[0].ack.Replaced {
+		t.Fatalf("restore calls: %+v", calls)
+	}
+	if stops, starts := c.h.agent.quiesceCounts(); stops != 1 || starts != 1 {
+		t.Fatalf("stops=%d starts=%d", stops, starts)
+	}
+	rec := c.volumeRecord(t)
+	if !rec.Restored || rec.Replayed || !strings.Contains(rec.ReplyLost, "the node holds no record of this restore") || !strings.Contains(rec.ReplyLost, "ran now") {
+		t.Fatalf("record: %+v", rec)
+	}
+}
+
+// Neither reply arrives: the volume is recorded failed with the wording
+// that says the outcome is unknown, the request was re-issued exactly once,
+// and the job fails naming the volume.
+func TestRestoreAppFailsWhenBothRepliesAreLost(t *testing.T) {
+	c := lostReplyCase(t, proto.RestoreReplayMinAgentVersion, restoreOutcome{silent: true})
+	c.corrupt(t)
+	corrupted := dirSnapshot(t, c.volDir)
+	j, jobID := c.restore(t, c.spec())
+	if j.Status != jobs.StatusFailed || !strings.Contains(j.Error, "did NOT go back") || !strings.Contains(j.Error, "vaultwarden-data") {
+		t.Fatalf("job: %s %s", j.Status, j.Error)
+	}
+	if fmt.Sprint(dirSnapshot(t, c.volDir)) != fmt.Sprint(corrupted) {
+		t.Fatal("the volume changed with no reply")
+	}
+	rec := c.volumeRecord(t)
+	if !rec.Failed || rec.Restored || rec.ReplyLost != "" || !strings.Contains(rec.Reason, "asked twice under restore id") || !strings.Contains(rec.Reason, "Whether the volume was replaced is unknown from here") {
+		t.Fatalf("record: %+v", rec)
+	}
+	if n := strings.Count(c.h.ledgerText(t, jobID), "asking it once more"); n != 1 {
+		t.Fatalf("the request was re-issued %d times; once is the rule", n)
+	}
+}
+
+// An agent below the record's floor would run a re-issued request as a
+// second restore, so it is never asked twice: the volume fails with the
+// unknown-outcome wording and the reason names the floor.
+func TestRestoreAppDoesNotReissueToAnAgentThatKeepsNoRecord(t *testing.T) {
+	c := lostReplyCase(t, "2026.08.5-dev.146", restoreOutcome{dropRequests: 1})
+	c.corrupt(t)
+	j, jobID := c.restore(t, c.spec())
+	if j.Status != jobs.StatusFailed || !strings.Contains(j.Error, "did NOT go back") {
+		t.Fatalf("job: %s %s", j.Status, j.Error)
+	}
+	if calls := c.h.agent.restoreCalls(); len(calls) != 0 {
+		t.Fatalf("the node was asked again: %+v", calls)
+	}
+	if stops, _ := c.h.agent.quiesceCounts(); stops != 0 {
+		t.Fatal("something was stopped")
+	}
+	rec := c.volumeRecord(t)
+	if !rec.Failed || !strings.Contains(rec.Reason, "unknown from here") || !strings.Contains(rec.Reason, "predates the restore record") || !strings.Contains(rec.Reason, "v"+proto.RestoreReplayMinAgentVersion) {
+		t.Fatalf("record: %+v", rec)
+	}
+	if strings.Contains(c.h.ledgerText(t, jobID), "asking it once more") {
+		t.Fatal("the request was re-issued to an agent that keeps no record")
+	}
+}

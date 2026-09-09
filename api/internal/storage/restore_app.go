@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer/fsat"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -120,8 +121,13 @@ type RestoreAppConfig struct {
 	Apps  AppGetter
 	Tiles TileVolumes
 	// Inventory answers "is the node online" before anything is sent, and
-	// reads a silence afterwards.
+	// reads a silence afterwards — including whether the node's agent keeps
+	// the restore record a lost reply is settled from (see restoreOne).
 	Inventory *inventory.Store
+	// VolumeRPCBudget bounds one restore verb's round trip; zero is the
+	// default (the agent's own budget plus slack). Tests shorten it to make
+	// a lost reply cheap to produce.
+	VolumeRPCBudget time.Duration
 	// Sessions holds the lent key; Egress serves the plaintext stream and
 	// mints its credentials; EgressBaseURL is the public base the nodes are
 	// handed for it.
@@ -450,6 +456,14 @@ type AppVolumeRestoreRecord struct {
 	RestoreDetail  string `json:"restoreDetail,omitempty"`
 	// PreviousKept is where the node moved the previous contents.
 	PreviousKept string `json:"previousKept,omitempty"`
+	// ReplyLost, when set, says the first request's reply never arrived and
+	// how the outcome was settled: from the node's own record of the
+	// restore (Replayed true — the volume was replaced when the record
+	// says, and nothing ran twice), or by the restore running on the
+	// re-issued request because the node held no record (Replayed false —
+	// the first request never ran). Empty when the first reply arrived.
+	ReplyLost string `json:"replyLost,omitempty"`
+	Replayed  bool   `json:"replayed,omitempty"`
 }
 
 // AppRestorePlan is what the restore will do and everything it will not.
@@ -655,10 +669,15 @@ func RestoreAppWorkflow(store *Store, cfg RestoreAppConfig) jobs.Workflow {
 		Kind: RestoreAppJobKind,
 		Steps: []jobs.WorkflowStep{
 			{Name: "validate", Timeout: restoreValidateTimeout, Do: restoreAppValidate(cfg)},
-			// Retries: 0. A retried phase would stop the app a second time
-			// and re-fetch gigabytes; a volume that did not go back is
-			// recorded, and the record step fails the job for it.
-			{Name: "restore_volumes", Timeout: restoreVolumesBudget, Retries: 0, Do: restoreAppVolumes(cfg)},
+			// Irreversible, and Retries: 0. A retried phase would stop the
+			// app a second time, re-fetch gigabytes and REMOVE THE KEPT
+			// COPY — the operator's way back — so the runner never re-runs
+			// it, and a same-job replay (a resume after an api restart) is
+			// refused naming the prior attempt (geekdojo-brain#396). A
+			// volume that did not go back is recorded, and the record step
+			// fails the job for it. A reply lost INSIDE the step is settled
+			// by restoreOne from the node's own record, not by a retry.
+			{Name: "restore_volumes", Timeout: restoreVolumesBudget, Retries: 0, Irreversible: true, Do: restoreAppVolumes(cfg)},
 			{Name: "record", Timeout: restoreRecordTimeout, Do: restoreAppRecord(cfg)},
 		},
 		// The key dies with the job, whichever way it ended.
@@ -854,7 +873,7 @@ func restoreAppVolumes(cfg RestoreAppConfig) jobs.DoFn {
 		}
 		records := append([]AppVolumeRestoreRecord(nil), tgt.Skipped...)
 		for i, p := range tgt.Restore {
-			if deadline, ok := sc.Ctx.Deadline(); ok && time.Until(deadline) < restoreVolumeRPCBudget {
+			if deadline, ok := sc.Ctx.Deadline(); ok && time.Until(deadline) < cfg.volumeRPCBudget() {
 				for _, rest := range tgt.Restore[i:] {
 					records = append(records, failedRestore(tgt, rest, fmt.Sprintf("the restore's %s budget was exhausted before this volume was reached; each volume may take up to %s", restoreVolumesBudget, proto.BackupRestoreVolumeWork)))
 				}
@@ -877,15 +896,93 @@ func failedRestore(tgt restoreAppTarget, p RestoreVolumePlan, reason string) App
 
 // restoreOne is the per-volume dance: mint, send, record. It never returns
 // an error — every way it can go wrong is a record with Failed true.
+//
+// # A reply that never arrives
+//
+// The request can lose its reply — the bus drops it, the RPC budget runs
+// out while the node is still downloading — and then this side knows only
+// that it asked. The verb stops the app, replaces its data and removes the
+// previous restore's kept copy, so asking again with a NEW id would do all
+// of that a second time. Instead the SAME command, under the SAME
+// RestoreID, is re-issued once: an agent at or above
+// proto.RestoreReplayMinAgentVersion keeps a record of every swap it
+// completed under that id and answers a repeat from it (ack.Replayed) —
+// nothing fetched, nothing stopped, the kept copy untouched — while a
+// fresh, non-replayed answer from such an agent is proof the first request
+// never ran, so the restore ran now, once. Either way the volume's record
+// says which (ReplyLost). The decision to re-issue rests on facts inventory
+// holds — the node is on the bus, its agent keeps the record — never on a
+// clock: below the floor, or with the node offline, or with no inventory to
+// ask, the request is NOT re-issued and the record says the outcome is
+// unknown, as it did before. A second lost reply fails the same way. The id
+// is never re-minted for a re-issue; the credential is, because the first
+// one dies with the first budget.
 func restoreOne(sc *jobs.StepCtx, cfg RestoreAppConfig, tgt restoreAppTarget, p RestoreVolumePlan) AppVolumeRestoreRecord {
-	// The credential: one member, one generation, one node, this restore,
-	// bounded to the plaintext's length, minted now and dead by the time
-	// the verb's budget is. Into the command and nowhere else.
+	sc.Log("warn", fmt.Sprintf("replacing %s/%s on %s from %s (%s) — the app is stopped while the volume is swapped", tgt.AppName, p.Volume, tgt.NodeID, p.Member, humanBytes(p.SizeBytes)))
+	subject := proto.BackupRestoreVolumeSubject(tgt.NodeID)
+	msg, err := sendRestoreVolume(sc, cfg, tgt, p, subject)
+	if err != nil {
+		if errors.Is(err, errRestoreMint) || errors.Is(err, errRestoreMarshal) {
+			return failedRestore(tgt, p, err.Error())
+		}
+		// The reply is lost. Re-issue once, if the facts allow it.
+		reissue, why := restoreReissueVerdict(sc.Ctx, cfg, tgt.NodeID, subject, err)
+		if !reissue {
+			return failedRestore(tgt, p, lostReplyReason(sc.Ctx, cfg, tgt.NodeID, subject, err)+"; "+why)
+		}
+		sc.Log("warn", fmt.Sprintf("no reply from %s for %s/%s (%v); asking it once more under the same restore id %s — a node that already replaced the volume answers from its record without touching it", tgt.NodeID, tgt.AppName, p.Volume, err, tgt.RestoreID))
+		first := err
+		msg, err = sendRestoreVolume(sc, cfg, tgt, p, subject)
+		if err != nil {
+			if errors.Is(err, errRestoreMint) || errors.Is(err, errRestoreMarshal) {
+				return failedRestore(tgt, p, err.Error())
+			}
+			// Not "the volume was not touched", whatever the second error
+			// is: the first request may have run.
+			return failedRestore(tgt, p, fmt.Sprintf("asked twice under restore id %s and neither reply arrived (%v, then %v). Whether the volume was replaced is unknown from here; the agent's guard restarts the app on a lost reply and again at its next start", tgt.RestoreID, first, err))
+		}
+		var ack proto.BackupRestoreVolumeAck
+		if uerr := json.Unmarshal(msg.Data, &ack); uerr != nil {
+			return failedRestore(tgt, p, fmt.Sprintf("the reply from %s to the re-issued request was unreadable: %v", tgt.NodeID, uerr))
+		}
+		rec := restoreRecordFromAck(sc, tgt, p, ack)
+		rec.Replayed = ack.Replayed
+		if ack.Replayed {
+			rec.ReplyLost = fmt.Sprintf("reply lost; the node's record says the volume was replaced at %s (restore %s), and the re-issued request fetched nothing, stopped nothing and left the kept copy alone", ack.ReplayedFrom.UTC().Format(time.RFC3339), tgt.RestoreID)
+			if strings.Contains(ack.Detail, "no longer exists") {
+				rec.ReplyLost += "; the node reports the kept copy is no longer there"
+			}
+		} else {
+			rec.ReplyLost = "reply lost; the node holds no record of this restore, so the first request never replaced the volume, and the restore ran now on the re-issued request"
+		}
+		sc.Log("warn", fmt.Sprintf("%s/%s on %s: %s", tgt.AppName, p.Volume, tgt.NodeID, rec.ReplyLost))
+		return rec
+	}
+	var ack proto.BackupRestoreVolumeAck
+	if err := json.Unmarshal(msg.Data, &ack); err != nil {
+		return failedRestore(tgt, p, fmt.Sprintf("the reply from %s was unreadable: %v", tgt.NodeID, err))
+	}
+	return restoreRecordFromAck(sc, tgt, p, ack)
+}
+
+// The two ways sendRestoreVolume fails before anything is sent, so the
+// caller can tell them from a lost reply.
+var (
+	errRestoreMint    = errors.New("could not mint a restore credential")
+	errRestoreMarshal = errors.New("internal")
+)
+
+// sendRestoreVolume mints the credential, builds the command and sends it,
+// bounded by the RPC budget. Every send mints afresh: one member, one
+// generation, one node, this restore, bounded to the plaintext's length,
+// dead by the time the verb's budget is. Into the command and nowhere else.
+// The RestoreID is the job's and is the same on every send.
+func sendRestoreVolume(sc *jobs.StepCtx, cfg RestoreAppConfig, tgt restoreAppTarget, p RestoreVolumePlan, subject string) (*nats.Msg, error) {
 	cred, err := cfg.Egress.Mint(backupxfer.Grant{
 		Generation: tgt.GenerationID, Member: p.Member, NodeID: tgt.NodeID, JobID: sc.JobID, MaxBytes: p.SizeBytes, Use: backupxfer.UseRestore,
-	}, restoreVolumeRPCBudget)
+	}, cfg.volumeRPCBudget())
 	if err != nil {
-		return failedRestore(tgt, p, fmt.Sprintf("could not mint a restore credential for %s: %v", p.Member, err))
+		return nil, fmt.Errorf("%w for %s: %v", errRestoreMint, p.Member, err)
 	}
 	cmd, err := json.Marshal(proto.BackupRestoreVolumeCmd{
 		AppID: tgt.AppID, AppName: tgt.AppName, Volume: p.Volume, Class: p.Class,
@@ -893,27 +990,74 @@ func restoreOne(sc *jobs.StepCtx, cfg RestoreAppConfig, tgt restoreAppTarget, p 
 		PlaintextDigest: p.SHA256, PlaintextBytes: p.SizeBytes, FileCount: p.FileCount,
 	})
 	if err != nil {
-		return failedRestore(tgt, p, "internal: "+err.Error())
+		return nil, fmt.Errorf("%w: %v", errRestoreMarshal, err)
 	}
-	sc.Log("warn", fmt.Sprintf("replacing %s/%s on %s from %s (%s) — the app is stopped while the volume is swapped", tgt.AppName, p.Volume, tgt.NodeID, p.Member, humanBytes(p.SizeBytes)))
-	rctx, cancel := context.WithTimeout(sc.Ctx, restoreVolumeRPCBudget)
-	subject := proto.BackupRestoreVolumeSubject(tgt.NodeID)
-	msg, err := sc.NATS.RequestWithContext(rctx, subject, cmd)
-	cancel()
-	if err != nil {
-		if errors.Is(err, nats.ErrNoResponders) {
-			why := fmt.Sprintf("node %s did not answer the restore request; the volume was not touched", tgt.NodeID)
-			if cfg.Inventory != nil {
-				why = cfg.Inventory.ExplainNoResponder(sc.Ctx, subject).String() + "; the volume was not touched"
-			}
-			return failedRestore(tgt, p, why)
+	rctx, cancel := context.WithTimeout(sc.Ctx, cfg.volumeRPCBudget())
+	defer cancel()
+	return sc.NATS.RequestWithContext(rctx, subject, cmd)
+}
+
+// volumeRPCBudget is the configured RPC budget or the default.
+func (cfg RestoreAppConfig) volumeRPCBudget() time.Duration {
+	if cfg.VolumeRPCBudget > 0 {
+		return cfg.VolumeRPCBudget
+	}
+	return restoreVolumeRPCBudget
+}
+
+// restoreReissueVerdict decides whether a request whose reply was lost is
+// sent again under the same RestoreID, on facts and never on a clock: the
+// step still has time; inventory can be asked; the node is on the bus; and
+// its agent is one that records a completed swap and answers a repeat from
+// it (proto.RestoreReplayMinAgentVersion) — because a re-issue to an agent
+// below that floor is a second restore, which is the thing this exists to
+// prevent. The reason is what the record carries when the answer is no.
+func restoreReissueVerdict(ctx context.Context, cfg RestoreAppConfig, nodeID, subject string, sendErr error) (bool, string) {
+	if ctx.Err() != nil {
+		return false, "the step's budget is spent, so the request was not re-issued"
+	}
+	if cfg.Inventory == nil {
+		return false, "inventory is not wired, so whether the node's agent keeps a restore record could not be checked and the request was not re-issued"
+	}
+	if errors.Is(sendErr, nats.ErrNoResponders) {
+		if n := cfg.Inventory.ExplainNoResponder(ctx, subject); !n.Online() {
+			return false, "the request was not re-issued"
 		}
-		return failedRestore(tgt, p, fmt.Sprintf("the restore request to %s failed: %v. Whether the volume was replaced is unknown from here; the agent's guard restarts the app on a lost reply and again at its next start", tgt.NodeID, err))
 	}
-	var ack proto.BackupRestoreVolumeAck
-	if err := json.Unmarshal(msg.Data, &ack); err != nil {
-		return failedRestore(tgt, p, fmt.Sprintf("the reply from %s was unreadable: %v", tgt.NodeID, err))
+	node, err := cfg.Inventory.Get(ctx, nodeID)
+	if err != nil || node == nil {
+		return false, fmt.Sprintf("node %s could not be read from inventory, so the request was not re-issued", nodeID)
 	}
+	if inventory.ComputeStatus(node.LastSeen) != proto.StatusOnline {
+		return false, fmt.Sprintf("node %s is not on the bus now, so the request was not re-issued", nodeID)
+	}
+	v := strings.TrimPrefix(strings.TrimSpace(node.AgentVersion), "v")
+	if v == "" {
+		return false, fmt.Sprintf("node %s never reported an agent version, so whether its agent keeps a restore record is unknown and the request was not re-issued (first recorded by agent v%s)", nodeID, proto.RestoreReplayMinAgentVersion)
+	}
+	if c, cerr := releases.Compare(releases.SchemeCalVer, v, proto.RestoreReplayMinAgentVersion); cerr != nil || c < 0 {
+		return false, fmt.Sprintf("the agent on %s (v%s) predates the restore record (first kept by agent v%s), so a re-issued request would restore a second time and remove the kept copy; it was not re-issued — update the node", nodeID, v, proto.RestoreReplayMinAgentVersion)
+	}
+	return true, ""
+}
+
+// lostReplyReason is the sentence for a request that drew no reply, as it
+// was before re-issue existed: a silence read against inventory, or the
+// honest "unknown from here".
+func lostReplyReason(ctx context.Context, cfg RestoreAppConfig, nodeID, subject string, err error) string {
+	if errors.Is(err, nats.ErrNoResponders) {
+		why := fmt.Sprintf("node %s did not answer the restore request; the volume was not touched", nodeID)
+		if cfg.Inventory != nil {
+			why = cfg.Inventory.ExplainNoResponder(ctx, subject).String() + "; the volume was not touched"
+		}
+		return why
+	}
+	return fmt.Sprintf("the restore request to %s failed: %v. Whether the volume was replaced is unknown from here; the agent's guard restarts the app on a lost reply and again at its next start", nodeID, err)
+}
+
+// restoreRecordFromAck turns the agent's answer into the volume's record and
+// says it in the job feed.
+func restoreRecordFromAck(sc *jobs.StepCtx, tgt restoreAppTarget, p RestoreVolumePlan, ack proto.BackupRestoreVolumeAck) AppVolumeRestoreRecord {
 	rec := AppVolumeRestoreRecord{
 		App: tgt.AppName, AppID: tgt.AppID, Volume: p.Volume, Class: p.Class, Node: tgt.NodeID, CapturedFrom: p.CapturedFrom,
 		Member: p.Member, SizeBytes: p.SizeBytes, SHA256: p.SHA256, FileCount: ack.FileCount, Consistency: p.Consistency,

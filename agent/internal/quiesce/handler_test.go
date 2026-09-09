@@ -170,6 +170,7 @@ func TestHandlers_UnbuiltStrategyRefusesLoudly(t *testing.T) {
 func TestHandlers_RestoreVolumeOverTheBus(t *testing.T) {
 	nc, mb, s := registered(t)
 	s.SetRestoreRecordDir(t.TempDir())
+	s.SetRestoreOutcomeDir(t.TempDir())
 	if _, _, err := mb.Deploy(context.Background(), "vw", "vaultwarden", "services: {}\n"); err != nil {
 		t.Fatal(err)
 	}
