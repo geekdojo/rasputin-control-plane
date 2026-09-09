@@ -91,11 +91,16 @@ type mockDisk struct {
 }
 
 type mockPartition struct {
-	PartUUID  string                  `json:"partUuid"`
-	FSType    string                  `json:"fsType,omitempty"`
-	Label     string                  `json:"label,omitempty"`
-	SizeBytes uint64                  `json:"sizeBytes"`
+	PartUUID  string `json:"partUuid"`
+	FSType    string `json:"fsType,omitempty"`
+	Label     string `json:"label,omitempty"`
+	SizeBytes uint64 `json:"sizeBytes"`
+	// BackupSet and DataSet stand in for the marker file the real backend
+	// writes at the root of the new filesystem. At most one is ever set, for
+	// the same reason the real backend writes at most one marker: a claim
+	// formats one filesystem for one purpose.
 	BackupSet *proto.StorageBackupSet `json:"backupSet,omitempty"`
+	DataSet   *proto.StorageDataSet   `json:"dataSet,omitempty"`
 }
 
 type mockMount struct {
@@ -419,6 +424,14 @@ func (m *MockBackend) enumerateLocked(st *mockState) *proto.StorageEnumerateAck 
 				set := *p.BackupSet
 				c.BackupSet = &set
 			}
+			// Reported alongside the backup set, never merged with it: a §6
+			// data disk must not reach §4.8's adopt-or-wipe prompt, which is a
+			// prompt about an archive it does not hold.
+			if p.DataSet != nil {
+				c.HasDataSet = true
+				set := *p.DataSet
+				c.DataSet = &set
+			}
 		}
 		if reason, ok := protected[i]; ok {
 			c.Protected = true
@@ -437,6 +450,14 @@ func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*pr
 	devicePath, fingerprint, label := cmd.DevicePath, cmd.Fingerprint, cmd.Label
 	if strings.TrimSpace(fingerprint) == "" {
 		return nil, ErrNoFingerprint
+	}
+	// Same gate, same place in the order as blockdev.Claim: an unrecognised
+	// purpose, or §4.6 key custody riding on a data claim, is refused before
+	// anything is written. A mock that accepted what production refuses would
+	// make CI green on a command the real backend will not perform.
+	spec, err := claimSpec(cmd)
+	if err != nil {
+		return nil, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -485,18 +506,33 @@ func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*pr
 	// ---- past this line the disk is being rewritten ----
 
 	partUUID := m.newUUID()
-	// Same constructor the real backend uses, so the mock cannot drift into
-	// writing a marker production would not — including the two WRAPPED §4.6
-	// key blobs, which are what makes the disk adoptable by a controlplane that
-	// has never seen it.
-	set := markerFrom(cmd, partUUID, m.now())
-	st.Disks[idx].Partitions = []mockPartition{{
+	// Same constructors and the same spec table the real backend uses, so the
+	// mock cannot drift into writing a marker — or applying a label — that
+	// production would not. For a backup claim that includes the two WRAPPED
+	// §4.6 key blobs, which are what makes the disk adoptable by a controlplane
+	// that has never seen it; for a data claim it is identity and nothing else.
+	part := mockPartition{
 		PartUUID:  partUUID,
 		FSType:    "ext4",
-		Label:     proto.StorageBackupLabel,
+		Label:     spec.FSLabel,
 		SizeBytes: st.Disks[idx].SizeBytes,
-		BackupSet: set,
-	}}
+	}
+	var backupSet *proto.StorageBackupSet
+	var dataSet *proto.StorageDataSet
+	switch spec.Purpose {
+	case proto.StoragePurposeBackup:
+		backupSet = markerFrom(cmd, partUUID, m.now())
+		part.BackupSet = backupSet
+	case proto.StoragePurposeData:
+		dataSet = dataMarkerFrom(cmd, partUUID, m.now())
+		part.DataSet = dataSet
+	default:
+		// Unreachable while claimSpec and the spec table agree, and refused
+		// here anyway — blockdev.Claim refuses at the same point, and the
+		// mock's whole value is that it refuses where production refuses.
+		return nil, fmt.Errorf("%w: no marker is defined for purpose %q", ErrBadPurpose, spec.Purpose)
+	}
+	st.Disks[idx].Partitions = []mockPartition{part}
 	// Any prior mount of a partition that no longer exists is gone with it.
 	st.Mounts = keepMounts(st)
 	if err := m.saveState(st); err != nil {
@@ -528,12 +564,14 @@ func (m *MockBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*pr
 		DevicePath:  devicePath,
 		PartUUID:    partUUID,
 		Label:       label,
-		FSLabel:     proto.StorageBackupLabel,
+		Purpose:     spec.Purpose,
+		FSLabel:     spec.FSLabel,
 		FSType:      "ext4",
 		MountPath:   mountPath,
 		SizeBytes:   st.Disks[idx].SizeBytes,
 		Fingerprint: fpAfter,
-		BackupSet:   set,
+		BackupSet:   backupSet,
+		DataSet:     dataSet,
 	}, nil
 }
 
@@ -651,6 +689,13 @@ func (m *MockBackend) Inspect(ctx context.Context, partUUID string) (*proto.Stor
 				set.Generations = n
 			}
 			ack.BackupSet = &set
+		}
+		// No generation count on a data set: generations are §4.4's retained
+		// archives, and a data disk holds none. Same omission as
+		// readDataMarker in the real backend.
+		if p.DataSet != nil {
+			set := *p.DataSet
+			ack.DataSet = &set
 		}
 	}
 	return ack, nil

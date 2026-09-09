@@ -1,5 +1,12 @@
-// Package storage implements the agent side of backup-target selection —
-// enumerate candidate disks, claim one, format it, mount it.
+// Package storage implements the agent side of disk claiming — enumerate
+// candidate disks, claim one, format it, mount it.
+//
+// A claim carries a PURPOSE (proto.StoragePurpose): §4.8's backup target or
+// §6's Node X data disk. The purpose decides three constants — the GPT
+// partition name, the filesystem label and the marker file — and decides
+// nothing else. Every refusal below runs identically whatever the purpose is,
+// and §6.5 says protect.go's exclusion in particular must stay unconditional
+// across all of them.
 //
 // Two backends:
 //
@@ -51,5 +58,5 @@
 // api/internal/jobs publishes over core NATS and has neither dedup nor
 // compensation.
 //
-// See projects/rasputin/design/storage.md §4.8 in the geekdojo-brain.
+// See projects/rasputin/design/storage.md §4.8 and §6 in the geekdojo-brain.
 package storage

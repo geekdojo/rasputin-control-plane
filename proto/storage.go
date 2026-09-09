@@ -1,8 +1,14 @@
 package proto
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
-// Backup-target selection — the wire contract for design/storage.md §4.8.
+// Disk claiming — the wire contract for design/storage.md §4.8 (the backup
+// target) and §6 (the Node X data disk). Which of the two a claim is for is
+// StorageClaimCmd.Purpose; everything else below is common to both, because
+// what makes this dangerous is common to both.
 //
 // The operator picks a local disk in the UI and Rasputin FORMATS it. That makes
 // this the only agent verb in the system that can destroy the cluster it is
@@ -45,11 +51,58 @@ const (
 	StorageTransportUnknown StorageTransport = "unknown"
 )
 
+// StoragePurpose says what a claimed disk is FOR.
+//
+// It exists because until §6 there was only one answer. `agent/internal/storage`
+// could only ever format a disk as THE BACKUP TARGET: the GPT partition name,
+// the filesystem label and the marker filename were literals inside the format
+// path, and StorageClaimCmd carried §4.6 key custody unconditionally. §6's own
+// correction to §1 and §4.8 says so in as many words — the claim/format half was
+// not half of a reusable contract, it was hardcoded. This type is what makes it
+// one (#302).
+//
+// It is a CLOSED enum, and StoragePurposeSpecFor fails closed on anything that
+// is not one of the constants below. The single exception lives on the wire and
+// nowhere else: an ABSENT purpose means backup, so an api that predates this
+// field keeps working. See StorageClaimCmd.Purpose.
+type StoragePurpose string
+
+const (
+	// StoragePurposeBackup is §4.8's backup target — the disk archive
+	// generations are written to, and the only purpose that carries §4.6's
+	// backup-key custody.
+	StoragePurposeBackup StoragePurpose = "backup"
+	// StoragePurposeData is §6's Node X data disk — the disk app volumes are
+	// placed on. It holds no archive, so it holds no key material of any kind.
+	StoragePurposeData StoragePurpose = "data"
+)
+
+// The GPT partition NAMES a claim writes, one per purpose. A GPT name is not
+// the filesystem label and is not the identifier either — the identifier is the
+// PARTUUID the kernel mints at format time.
+//
+// §6.2 keeps them distinct from each other and from `persistent` so that
+// `lsblk` reads sensibly to a human. That is the whole job: nothing in this
+// system resolves a disk by GPT name, and the reason is #307 — every Rasputin
+// OS disk is flashed with the same partition names and the amd64 fstab already
+// finds its persistent partition by PARTLABEL, so by-name lookups resolve
+// ACROSS drives the moment two Rasputin disks share a machine. A data disk is a
+// second disk by definition.
+const (
+	StorageBackupPartName = "rasputin-backup"
+	StorageDataPartName   = "rasputin-data"
+)
+
 // StorageBackupLabel is the filesystem label a claimed target carries. §4.8:
 // it survives as a HUMAN-READABLE HINT, not as the identifier — two disks
 // carrying the same label is merely ambiguous today and destructively ambiguous
 // once Rasputin does the formatting. The identifier is the partition UUID.
 const StorageBackupLabel = "RASPUTIN-BACKUP"
+
+// StorageDataLabel is StorageBackupLabel's opposite number for §6's data disk.
+// Same hint-not-identifier rule, and distinct from both StorageBackupLabel and
+// `persistent` for the reason given on StorageDataPartName.
+const StorageDataLabel = "RASPUTIN-DATA"
 
 // StorageMarkerFile is the file at the root of a claimed target that makes the
 // disk SELF-DESCRIBING. It is what lets a formatted-but-unrecorded disk be found
@@ -58,8 +111,108 @@ const StorageBackupLabel = "RASPUTIN-BACKUP"
 // being restored" (§4.8, #291). The DB row is a cache; this file is the record.
 const StorageMarkerFile = ".rasputin-backup-set.json"
 
+// StorageDataMarkerFile is the same idea for a §6 data disk, and §6.3 leans on
+// it harder than §4.8 leans on its own: the agent verifies this file on the
+// MOUNTED filesystem before deploying onto it, because a data mount point that
+// is merely an empty directory sends every app write to the boot medium and the
+// operator concludes their data is gone. Marker absent means "this is not the
+// disk you think it is" — refuse, never create.
+const StorageDataMarkerFile = ".rasputin-data-set.json"
+
 // StorageMarkerVersion is the schema version written into StorageBackupSet.
 const StorageMarkerVersion = 1
+
+// StorageDataMarkerVersion is the schema version written into StorageDataSet.
+//
+// A separate line from StorageMarkerVersion on purpose. StorageBackupSet is
+// frozen — disks carrying it are in the field and a replacement controlplane
+// has to parse them at first-run restore — while StorageDataSet has claimed no
+// disk yet and will grow as §6.4's placement work lands. One shared counter
+// would make each type's version move for the other type's reasons.
+const StorageDataMarkerVersion = 1
+
+// StoragePurposeSpec is everything about a claim that varies BY PURPOSE: the
+// GPT partition name it writes, the filesystem label mkfs applies, and the
+// marker file it drops at the root of the new filesystem.
+//
+// One struct, one table, one lookup, because these three constants have to
+// agree across two backends and an api that never sees the disk. They used to
+// be literals inside BlockDevBackend.Claim and MockBackend.Claim — which is how
+// the mock and the real backend came to be the same decision written twice, and
+// a second purpose added to one and not the other would leave CI green against
+// a backend that no longer resembles production.
+type StoragePurposeSpec struct {
+	// Purpose is the purpose this spec describes, echoed back so a caller that
+	// resolved it from an empty wire value can see what it actually got.
+	Purpose StoragePurpose
+	// PartName is the GPT partition name written into the new table.
+	PartName string
+	// FSLabel is the filesystem label mkfs applies. A hint, never an
+	// identifier — see StorageBackupLabel.
+	FSLabel string
+	// MarkerFile is the dot-file written at the root of the claimed filesystem
+	// that makes the disk self-describing.
+	MarkerFile string
+}
+
+// storagePurposeSpecs is the table. Keyed by the wire value, so adding a
+// purpose means adding a row here and the format path picks it up — there is
+// nowhere else a per-purpose constant is allowed to be spelled.
+var storagePurposeSpecs = map[StoragePurpose]StoragePurposeSpec{
+	StoragePurposeBackup: {
+		Purpose:    StoragePurposeBackup,
+		PartName:   StorageBackupPartName,
+		FSLabel:    StorageBackupLabel,
+		MarkerFile: StorageMarkerFile,
+	},
+	StoragePurposeData: {
+		Purpose:    StoragePurposeData,
+		PartName:   StorageDataPartName,
+		FSLabel:    StorageDataLabel,
+		MarkerFile: StorageDataMarkerFile,
+	},
+}
+
+// StoragePurposeSpecFor returns the per-purpose constants for p.
+//
+// It FAILS CLOSED, and that is the entire point of it being a function rather
+// than a map read at the call site. The caller on the other end is the one
+// agent verb in this system that can destroy the cluster it runs on, so a
+// purpose this build does not recognise is an error and never a quiet fall back
+// to backup — "format it as a backup target because we did not understand the
+// request" is the sentence §4.8 exists to make unsayable.
+//
+// The empty string is unrecognised here TOO, deliberately. Its
+// wire-compatibility meaning is applied by StorageClaimCmd.EffectivePurpose
+// before it ever reaches this table, so the default stays attached to the wire
+// type that needs it and cannot leak into every other caller — a zero-valued
+// StoragePurpose anywhere else in the codebase is a bug, and this returns an
+// error rather than backup constants when it meets one.
+func StoragePurposeSpecFor(p StoragePurpose) (StoragePurposeSpec, error) {
+	spec, ok := storagePurposeSpecs[p]
+	if !ok {
+		return StoragePurposeSpec{}, fmt.Errorf("unrecognised storage purpose %q (want %q or %q)",
+			p, StoragePurposeBackup, StoragePurposeData)
+	}
+	return spec, nil
+}
+
+// StoragePurposeForFSLabel reverses the table: it names the purpose a partition
+// announces by its filesystem label, or reports that the label is none of ours.
+//
+// This is a HINT, and the same hint §4.8 demoted the label to. It is what lets
+// enumeration decide which partitions are worth mounting read-only to peek at —
+// mounting every partition of every attached disk would be an enumeration with
+// side effects — and which of the two markers to look for once it does. It is
+// not identity and nothing destructive may key off it.
+func StoragePurposeForFSLabel(label string) (StoragePurpose, bool) {
+	for purpose, spec := range storagePurposeSpecs {
+		if spec.FSLabel == label {
+			return purpose, true
+		}
+	}
+	return "", false
+}
 
 // Agent-side work budgets for the storage verbs — how long the AGENT may spend
 // before it answers. Same contract as the updater's pair in updates.go: the bus
@@ -107,6 +260,17 @@ const (
 	// StorageRefusalNotFound — no claimed target with that partition UUID is
 	// attached (Mount / Inspect).
 	StorageRefusalNotFound StorageRefusal = "not-found"
+	// StorageRefusalBadPurpose — the claim named a StoragePurpose this agent
+	// does not implement, or carried fields that purpose may not carry (§4.6
+	// backup-key custody on a §6 data claim).
+	//
+	// Deliberately not StorageRefusalBackendError: nothing broke. The agent
+	// understood the command perfectly and will not perform it, which is a
+	// different sentence to show an operator and a different one to page on.
+	// An older agent that predates §6 cannot send this — it does not know the
+	// purpose field exists — so the api must gate on agent version rather than
+	// read the absence of this code as consent.
+	StorageRefusalBadPurpose StorageRefusal = "bad-purpose"
 	// StorageRefusalBackendError — the backend or a shelled-out tool failed.
 	StorageRefusalBackendError StorageRefusal = "backend-error"
 )
@@ -202,6 +366,42 @@ type StorageBackupSet struct {
 	Generations int `json:"generations,omitempty"`
 }
 
+// StorageDataSet is the content of StorageDataMarkerFile: what a §6 data disk
+// says about itself. Read during enumeration (the disk is mounted read-only to
+// look) and written by Claim.
+//
+// It is a SEPARATE type from StorageBackupSet rather than a widening of it, and
+// that is the decision worth reading twice.
+//
+// StorageBackupSet is FROZEN. It is what makes a backup disk self-describing so
+// that a replacement controlplane can adopt it at first-run restore (§4.8,
+// #291); disks carrying it are already in the field; and its parse path is what
+// tells a symmetric-era disk from a post-amendment one by which fields are
+// absent. Adding a purpose discriminator or data-disk fields to it would put
+// every one of those disks behind a struct that has changed meaning, for the
+// convenience of not writing four field names twice.
+//
+// The other half is what is NOT here. Every field on StorageBackupSet that is
+// not an identifier is §4.6 backup-key custody, and a data disk holds no
+// archive to encrypt: sharing the struct would give this marker four
+// key-shaped fields whose only possible value is empty, sitting on a disk
+// nothing expects to find key material on. StorageClaimCmd's custody fields are
+// refused outright on a data claim for the same reason.
+type StorageDataSet struct {
+	MarkerVersion int `json:"markerVersion"`
+	// ClusterID is which cluster wrote this set. A data disk carrying another
+	// cluster's app volumes is exactly the disk that must not be silently
+	// adopted, and §6.1 does not extend §4.8's adopt-not-wipe rule to it: the
+	// operator confirms a destructive format or nothing happens.
+	ClusterID string `json:"clusterId,omitempty"`
+	// PartUUID is the disk's own key, written into the marker so a disk that
+	// was formatted but never recorded can be re-adopted by its own account.
+	PartUUID string `json:"partUuid,omitempty"`
+	// Label is the human-readable name the operator gave this disk.
+	Label     string    `json:"label,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // StoragePartition is one partition found on a candidate disk. Reported so the
 // destructive-confirmation dialog can show CURRENT CONTENTS — §4.8 requires the
 // operator see model, size and contents before confirming, and "contents" is
@@ -246,6 +446,15 @@ type StorageCandidate struct {
 	HasBackupSet bool              `json:"hasBackupSet"`
 	BackupSet    *StorageBackupSet `json:"backupSet,omitempty"`
 
+	// HasDataSet and DataSet are the same pair for §6's data disk, reported
+	// ALONGSIDE the backup pair rather than merged with it. A data disk is not
+	// a backup set and must not reach §4.8's adopt-or-wipe prompt, which offers
+	// the operator a choice about an archive this disk does not hold; §6.1
+	// declines to generalise adopt-not-wipe at all. Between them the two pairs
+	// say which purpose, if any, the disk announces — see ClaimedPurpose.
+	HasDataSet bool            `json:"hasDataSet,omitempty"`
+	DataSet    *StorageDataSet `json:"dataSet,omitempty"`
+
 	// Protected marks the disk holding the currently-mounted boot and
 	// persistent partitions. Resolved by walking back from the live mounts to
 	// their parent block device — never by device name, and never by transport
@@ -275,6 +484,26 @@ type StorageCandidate struct {
 	IdentityWeak bool `json:"identityWeak,omitempty"`
 }
 
+// ClaimedPurpose names which purpose this disk announces itself claimed for,
+// and reports false when it announces none.
+//
+// DERIVED from the two set pairs rather than carried as a third field, so there
+// is no way for a candidate to say "backup" while holding a data set. A disk
+// carrying both markers — which nothing this code path can produce, since a
+// claim writes one filesystem with one marker on it — is reported as neither,
+// because "it is one of the two, pick one" is not an answer worth handing a
+// destructive-confirmation dialog.
+func (c StorageCandidate) ClaimedPurpose() (StoragePurpose, bool) {
+	switch {
+	case c.HasBackupSet && !c.HasDataSet:
+		return StoragePurposeBackup, true
+	case c.HasDataSet && !c.HasBackupSet:
+		return StoragePurposeData, true
+	default:
+		return "", false
+	}
+}
+
 // StorageEnumerateCmd is sent on rasputin.node.<id>.cmd.storage.enumerate. It
 // mutates nothing.
 //
@@ -295,10 +524,11 @@ type StorageEnumerateAck struct {
 	Detail  string         `json:"detail,omitempty"`
 }
 
-// StorageClaimCmd formats a disk and claims it as the backup target. THIS IS
-// THE DESTRUCTIVE VERB. Every refusal in §4.8 is answered before it is sent,
-// and it is the last agent step in the saga precisely so nothing needs undoing
-// (api/internal/jobs has no compensation).
+// StorageClaimCmd formats a disk and claims it — for §4.8's backup target or
+// for §6's data disk, per Purpose. THIS IS THE DESTRUCTIVE VERB. Every refusal
+// in §4.8 is answered before it is sent, and it is the last agent step in the
+// saga precisely so nothing needs undoing (api/internal/jobs has no
+// compensation).
 type StorageClaimCmd struct {
 	// DevicePath is the whole disk to format, as reported by the enumerate the
 	// operator confirmed.
@@ -307,8 +537,27 @@ type StorageClaimCmd struct {
 	// against live hardware and REFUSES on any difference. Empty is not a
 	// wildcard — it is a refusal.
 	Fingerprint string `json:"fingerprint"`
+	// Purpose is what the disk is being claimed FOR: the GPT name, filesystem
+	// label and marker file all follow from it via StoragePurposeSpecFor.
+	//
+	// ABSENT MEANS BACKUP, and that is a WIRE-COMPATIBILITY default rather than
+	// a general-purpose one. Every claim sent before this field existed carries
+	// no purpose and means the backup target, so an api that predates §6 has to
+	// keep working against an agent that does not. The codebase has this exact
+	// precedent and this exact shape: backupxfer.Grant.Use is empty for the
+	// upload credential that was the only kind when it was minted, with
+	// Grant.ForUpload() reading that absence — see backupxfer/token.go.
+	//
+	// It is emphatically NOT "we could not tell, so backup". An unrecognised
+	// NON-EMPTY purpose is a refusal (StorageRefusalBadPurpose), because the
+	// value came from a caller that meant something this build cannot do, and
+	// formatting a disk as the wrong thing is exactly the outcome §4.8 exists
+	// to prevent. StoragePurposeSpecFor never sees the empty string:
+	// EffectivePurpose resolves it first, and the table itself fails closed.
+	Purpose StoragePurpose `json:"purpose,omitempty"`
 	// Label is the operator's human-readable name for the target, written into
-	// the marker file. The filesystem label is always StorageBackupLabel.
+	// the marker file. The filesystem label is not the operator's to choose —
+	// it comes from the purpose's spec.
 	Label string `json:"label,omitempty"`
 	// ClusterID and KeyID are stamped into the marker so the disk can say which
 	// cluster wrote it and which §4.6 keypair its generations need. KeyID is
@@ -321,6 +570,14 @@ type StorageClaimCmd struct {
 	// StorageBackupSet for what they are and why they belong on the disk rather
 	// than only in the api's database.
 	//
+	// They belong to StoragePurposeBackup and to nothing else. A data disk
+	// holds no archive to encrypt, so a data claim carrying any of them is
+	// REFUSED rather than having them dropped quietly: writing key blobs onto a
+	// data disk would mean nothing there and would scatter §4.6 material onto a
+	// disk no unlock path ever looks at, and a command whose purpose and
+	// contents disagree is a caller bug the platter is the wrong place to
+	// discover.
+	//
 	// There is no field here for the PRIVATE key, in this struct or any other
 	// in this file, and adding one would put it in the one place §4.6 says it
 	// must never be: on the appliance the backup exists to outlive.
@@ -328,6 +585,21 @@ type StorageClaimCmd struct {
 	PublicKey             string `json:"publicKey,omitempty"`
 	WrappedByPassphrase   string `json:"wrappedByPassphrase,omitempty"`
 	WrappedByRecoveryCode string `json:"wrappedByRecoveryCode,omitempty"`
+}
+
+// EffectivePurpose resolves the purpose this command is asking for, applying
+// the empty-means-backup rule documented on Purpose and nothing else.
+//
+// An unrecognised non-empty value is returned UNCHANGED so that
+// StoragePurposeSpecFor refuses it by name and the operator is told which value
+// was rejected. This method is the only place the empty-string default is
+// allowed to live: every other caller goes through the table, which fails
+// closed.
+func (c StorageClaimCmd) EffectivePurpose() StoragePurpose {
+	if c.Purpose == "" {
+		return StoragePurposeBackup
+	}
+	return c.Purpose
 }
 
 // StorageClaimAck reports the claim outcome.
@@ -347,10 +619,18 @@ type StorageClaimAck struct {
 	// that was just replaced. That is deliberate, not drift: it is what makes a
 	// replayed Claim fail closed. Recorded so a later verify has something to
 	// compare against.
-	Fingerprint string            `json:"fingerprint,omitempty"`
-	BackupSet   *StorageBackupSet `json:"backupSet,omitempty"`
-	Refusal     StorageRefusal    `json:"refusal,omitempty"`
-	Detail      string            `json:"detail,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// Purpose echoes the purpose the agent actually claimed the disk for —
+	// RESOLVED, so a command that sent none comes back saying "backup" rather
+	// than saying nothing. That is what lets the api record what happened
+	// instead of re-deriving it from a default it also has to remember.
+	Purpose StoragePurpose `json:"purpose,omitempty"`
+	// BackupSet and DataSet are the marker that was written, and exactly one of
+	// them is set: a claim formats one filesystem and drops one marker on it.
+	BackupSet *StorageBackupSet `json:"backupSet,omitempty"`
+	DataSet   *StorageDataSet   `json:"dataSet,omitempty"`
+	Refusal   StorageRefusal    `json:"refusal,omitempty"`
+	Detail    string            `json:"detail,omitempty"`
 }
 
 // StorageMountCmd mounts an already-claimed target, addressed by the partition
@@ -426,6 +706,11 @@ type StorageInspectAck struct {
 	TotalBytes uint64            `json:"totalBytes,omitempty"`
 	FreeBytes  uint64            `json:"freeBytes,omitempty"`
 	BackupSet  *StorageBackupSet `json:"backupSet,omitempty"`
+	// DataSet is the §6 data-disk marker, when the target carries one. Reported
+	// alongside BackupSet rather than instead of it for the reason given on
+	// StorageCandidate.HasDataSet, and it is what §6.3's
+	// verify-the-marker-before-deploying check reads.
+	DataSet *StorageDataSet `json:"dataSet,omitempty"`
 	// Present is false when nothing with that partition UUID is attached — the
 	// operator unplugged the target. Distinct from OK=false, which means the
 	// agent could not answer. The two combine in one more way: OK=false with

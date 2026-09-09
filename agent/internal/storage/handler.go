@@ -85,10 +85,16 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, stagingRoot
 		// Deliberately loud, and deliberately BEFORE the call. This is the only
 		// agent verb that can destroy the cluster it runs on; if a node is ever
 		// found with an unexpectedly blank disk, this line is the evidence of
-		// what asked for it. Nothing sensitive: a device path, a fingerprint and
-		// an operator's label. §4.6's private key never comes near this handler.
-		log.Printf("rasputin-agent: storage: CLAIM (destructive) device=%s fingerprint=%s label=%q backend=%s",
-			cmd.DevicePath, short(cmd.Fingerprint), cmd.Label, backend.Name())
+		// what asked for it. Nothing sensitive: a device path, a purpose, a
+		// fingerprint and an operator's label. §4.6's private key never comes
+		// near this handler.
+		//
+		// The purpose is logged RESOLVED rather than as it arrived, so a claim
+		// from an api that predates §6 says "backup" here — which is what the
+		// backend is about to do — instead of an empty string the reader would
+		// have to know the default for.
+		log.Printf("rasputin-agent: storage: CLAIM (destructive) device=%s purpose=%s fingerprint=%s label=%q backend=%s",
+			cmd.DevicePath, cmd.EffectivePurpose(), short(cmd.Fingerprint), cmd.Label, backend.Name())
 
 		ack, err := backend.Claim(ctx, cmd)
 		if err != nil {

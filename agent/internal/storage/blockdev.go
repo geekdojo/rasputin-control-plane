@@ -240,84 +240,129 @@ func (b *BlockDevBackend) candidateFrom(ctx context.Context, d lsblkDevice, prot
 		c.Protected = true
 		c.ProtectedReason = pd.reason
 	}
-	// A backup set is looked for only on partitions already carrying our
-	// filesystem label. Mounting every partition of every attached disk to peek
+	// A claimed set is looked for only on partitions already carrying one of our
+	// filesystem labels. Mounting every partition of every attached disk to peek
 	// at its root would be an enumeration with side effects, and the disks that
 	// can carry a Rasputin set are exactly the disks Rasputin labelled.
-	if set := b.readBackupSet(ctx, c.Partitions); set != nil {
+	backup, data := b.readClaimedSets(ctx, c.Partitions)
+	if backup != nil {
 		c.HasBackupSet = true
-		c.BackupSet = set
+		c.BackupSet = backup
+	}
+	if data != nil {
+		c.HasDataSet = true
+		c.DataSet = data
 	}
 	stampFingerprint(&c)
 	return c
 }
 
-// readBackupSet looks for the marker on any partition labelled
-// StorageBackupLabel. Best-effort and read-only: a partition that will not
-// mount, or mounts without a marker, simply yields nothing.
-func (b *BlockDevBackend) readBackupSet(ctx context.Context, parts []proto.StoragePartition) *proto.StorageBackupSet {
+// readClaimedSets looks for a Rasputin marker on the candidate's partitions and
+// reports what it found, PER PURPOSE.
+//
+// Only partitions carrying one of our filesystem labels are looked at, for the
+// reason given at the call site. Since §6 the label also decides WHICH of the
+// two markers to read: a data disk reported as a backup set would arrive at
+// §4.8's adopt-or-wipe prompt, which offers the operator a choice about an
+// archive that disk does not hold. The label is still only a hint — nothing
+// destructive keys off it, and a mislabelled disk yields nothing rather than
+// the wrong thing.
+//
+// Best-effort and read-only throughout: a partition that will not mount, or
+// mounts without a marker, simply yields nothing.
+func (b *BlockDevBackend) readClaimedSets(ctx context.Context, parts []proto.StoragePartition) (*proto.StorageBackupSet, *proto.StorageDataSet) {
+	var backup *proto.StorageBackupSet
+	var data *proto.StorageDataSet
 	for _, p := range parts {
-		if p.Label != proto.StorageBackupLabel {
+		purpose, ok := proto.StoragePurposeForFSLabel(p.Label)
+		if !ok {
 			continue
+		}
+		// One answer per purpose: the first partition that yields a marker
+		// wins, as it did when backup was the only purpose there was.
+		if (purpose == proto.StoragePurposeBackup && backup != nil) ||
+			(purpose == proto.StoragePurposeData && data != nil) {
+			continue
+		}
+		read := func(mountPath string) error {
+			switch purpose {
+			case proto.StoragePurposeBackup:
+				set, err := readMarker(mountPath)
+				if err != nil {
+					return err
+				}
+				backup = set
+			case proto.StoragePurposeData:
+				set, err := readDataMarker(mountPath)
+				if err != nil {
+					return err
+				}
+				data = set
+			}
+			return nil
 		}
 		if p.Mountpoint != "" {
-			if set, err := readMarker(p.Mountpoint); err == nil {
-				return set
-			}
+			// Already mounted by somebody: read it where it is rather than
+			// mounting the same filesystem a second time.
+			_ = read(p.Mountpoint)
 			continue
 		}
-		set, err := b.peek(ctx, p.DevicePath)
-		if err != nil {
+		if err := b.peek(ctx, p.DevicePath, read); err != nil {
 			log.Printf("rasputin-agent: storage: peek %s: %v", p.DevicePath, err)
-			continue
-		}
-		if set != nil {
-			return set
 		}
 	}
-	return nil
+	return backup, data
 }
 
-// peek mounts a partition READ-ONLY at a scratch mount point, reads the marker,
-// and unmounts. Read-only is not a nicety: enumeration runs against a disk the
-// operator has not confirmed anything about, and one of those disks may be the
-// only copy of the archive being restored (#291).
-func (b *BlockDevBackend) peek(ctx context.Context, devicePath string) (*proto.StorageBackupSet, error) {
+// peek mounts a partition READ-ONLY at a scratch mount point, hands the mount
+// point to read, and unmounts. Read-only is not a nicety: enumeration runs
+// against a disk the operator has not confirmed anything about, and one of
+// those disks may be the only copy of the archive being restored (#291).
+//
+// It takes a callback rather than returning a marker because there are two
+// marker types now and a method cannot be generic over them. What must not
+// change is that the unmount happens whatever the callback does.
+func (b *BlockDevBackend) peek(ctx context.Context, devicePath string, read func(mountPath string) error) error {
 	if err := checkDevicePath(devicePath); err != nil {
-		return nil, err
+		return err
 	}
 	dir, err := os.MkdirTemp(b.mountRoot, "peek-")
 	if err != nil {
 		if err = os.MkdirAll(b.mountRoot, 0o700); err != nil {
-			return nil, err
+			return err
 		}
 		if dir, err = os.MkdirTemp(b.mountRoot, "peek-"); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	defer os.Remove(dir)
 	if _, err := b.run(ctx, nil, b.tool("mount"), "-o", "ro,noexec,nosuid,nodev", devicePath, dir); err != nil {
-		return nil, err
+		return err
 	}
 	defer func() {
 		if _, err := b.run(ctx, nil, b.tool("umount"), dir); err != nil {
 			log.Printf("rasputin-agent: storage: umount %s: %v", dir, err)
 		}
 	}()
-	return readMarker(dir)
+	return read(dir)
 }
 
 // ---------------------------------------------------------------------------
 // Claim — the destructive verb
 // ---------------------------------------------------------------------------
 
-// Claim formats devicePath and claims it as a backup target.
+// Claim formats devicePath and claims it for the command's purpose.
 //
 // The order below is the whole safety argument, and it is the order the saga
 // depends on: api/internal/jobs has no compensation, so a step that gets past
 // its refusals and then fails leaves the disk formatted. Everything answerable
 // is answered before the first byte is written, and after that there is nothing
 // left that can decide to stop.
+//
+// The purpose changes three constants and nothing else about that order. Every
+// refusal below runs identically for a §6 data claim and a §4.8 backup claim,
+// which is the property §6.1 and §6.5 both insist on: a data disk is the disk
+// an operator is MOST likely to arrive with full.
 func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) (*proto.StorageClaimAck, error) {
 	devicePath, fingerprint, label := cmd.DevicePath, cmd.Fingerprint, cmd.Label
 	if err := checkDevicePath(devicePath); err != nil {
@@ -326,6 +371,13 @@ func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) 
 	// (0) An absent fingerprint is a refusal, not a wildcard.
 	if strings.TrimSpace(fingerprint) == "" {
 		return nil, ErrNoFingerprint
+	}
+	// (0b) And so is a purpose this build does not implement, or one carrying
+	// key custody it has no business carrying. Resolved here, at the top, so
+	// that a command this agent will not act on costs the disk nothing.
+	spec, err := claimSpec(cmd)
+	if err != nil {
+		return nil, err
 	}
 
 	// (a) Re-resolve the protected set from LIVE MOUNTS. Not from the enumerate
@@ -391,11 +443,12 @@ func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) 
 	if _, err := b.run(ctx, nil, b.tool("wipefs"), "-a", devicePath); err != nil {
 		return nil, fmt.Errorf("wipe signatures on %s: %w", devicePath, err)
 	}
-	// One GPT partition spanning the disk. type= is the Linux filesystem GUID;
-	// name= is the GPT partition NAME, which is not the filesystem label and is
-	// not the identifier either — the identifier is the PARTUUID the kernel
+	// One GPT partition spanning the disk. type= is the Linux filesystem GUID
+	// and is the same whatever the disk is for; name= is the GPT partition
+	// NAME, which comes from the purpose's spec and is not the filesystem label
+	// and not the identifier either — the identifier is the PARTUUID the kernel
 	// mints below.
-	script := "label: gpt\nname=\"rasputin-backup\", type=0FC63DAF-8483-4772-8E79-3D69D8477DE4\n"
+	script := fmt.Sprintf("label: gpt\nname=%q, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4\n", spec.PartName)
 	if _, err := b.run(ctx, []byte(script), b.tool("sfdisk"), "--wipe", "always", devicePath); err != nil {
 		return nil, fmt.Errorf("write partition table on %s: %w", devicePath, err)
 	}
@@ -405,7 +458,11 @@ func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) 
 	if err != nil {
 		return nil, err
 	}
-	if _, err := b.run(ctx, nil, b.tool("mkfs.ext4"), "-F", "-m", "0", "-L", proto.StorageBackupLabel, part); err != nil {
+	// The label comes from the spec for the same reason the GPT name does. -F
+	// because the device was just repartitioned and mkfs must not stop to ask;
+	// -m 0 because reserving 5% of an archive or a media disk for root is
+	// tens of gigabytes spent on nothing.
+	if _, err := b.run(ctx, nil, b.tool("mkfs.ext4"), "-F", "-m", "0", "-L", spec.FSLabel, part); err != nil {
 		return nil, fmt.Errorf("mkfs on %s: %w", part, err)
 	}
 	b.settle(ctx, devicePath)
@@ -419,12 +476,34 @@ func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) 
 		return nil, err
 	}
 
-	// The marker carries everything the command was given, including the two
-	// WRAPPED §4.6 key blobs. A disk that records its own key custody is one a
-	// replacement controlplane can adopt and actually open; one that records
-	// only a key-id names a key nobody can produce.
-	set := markerFrom(cmd, partUUID, time.Now().UTC())
-	if err := writeMarker(mountPath, set); err != nil {
+	// The marker is what makes the disk self-describing, and WHICH marker
+	// follows from the purpose.
+	//
+	// A backup target's carries everything the command was given, including the
+	// two WRAPPED §4.6 key blobs: a disk that records its own key custody is one
+	// a replacement controlplane can adopt and actually open, while one that
+	// records only a key-id names a key nobody can produce. A data disk's
+	// carries identity and nothing else — there is no archive on it to encrypt,
+	// and claimSpec has already refused a command that tried to put custody
+	// there.
+	now := time.Now().UTC()
+	var backupSet *proto.StorageBackupSet
+	var dataSet *proto.StorageDataSet
+	switch spec.Purpose {
+	case proto.StoragePurposeBackup:
+		backupSet = markerFrom(cmd, partUUID, now)
+		err = writeMarker(mountPath, spec.MarkerFile, backupSet)
+	case proto.StoragePurposeData:
+		dataSet = dataMarkerFrom(cmd, partUUID, now)
+		err = writeMarker(mountPath, spec.MarkerFile, dataSet)
+	default:
+		// Unreachable while claimSpec and the spec table agree, and here
+		// anyway: a purpose that reached this line with no marker defined for
+		// it would leave a formatted disk that cannot say what it is, which is
+		// the one case §4.8's recovery story does not cover.
+		return nil, fmt.Errorf("%w: no marker is defined for purpose %q", ErrBadPurpose, spec.Purpose)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("write marker on %s: %w", mountPath, err)
 	}
 
@@ -438,12 +517,14 @@ func (b *BlockDevBackend) Claim(ctx context.Context, cmd proto.StorageClaimCmd) 
 		DevicePath:  devicePath,
 		PartUUID:    partUUID,
 		Label:       label,
-		FSLabel:     proto.StorageBackupLabel,
+		Purpose:     spec.Purpose,
+		FSLabel:     spec.FSLabel,
 		FSType:      "ext4",
 		MountPath:   mountPath,
 		SizeBytes:   cand.SizeBytes,
 		Fingerprint: after,
-		BackupSet:   set,
+		BackupSet:   backupSet,
+		DataSet:     dataSet,
 	}
 	return ack, nil
 }
@@ -532,18 +613,23 @@ func (b *BlockDevBackend) fingerprintOf(ctx context.Context, devicePath string, 
 // ---------------------------------------------------------------------------
 
 // Mount mounts a claimed target by partition UUID.
+//
+// The mount root and options are the same for every purpose in this change.
+// §6.5 says they must eventually differ — /run is tmpfs, which is right for a
+// job-scoped archive mount and wrong for a data disk that has to survive
+// reboot and host live app volumes — and that is a separate change on purpose.
 func (b *BlockDevBackend) Mount(ctx context.Context, partUUID string) (string, error) {
 	if err := checkPartUUID(partUUID); err != nil {
 		return "", err
 	}
-	part, existing, err := b.findByPartUUID(ctx, partUUID)
+	found, err := b.findByPartUUID(ctx, partUUID)
 	if err != nil {
 		return "", err
 	}
-	if existing != "" {
-		return existing, nil
+	if found.mountPoint != "" {
+		return found.mountPoint, nil
 	}
-	return b.mountPartition(ctx, part, partUUID)
+	return b.mountPartition(ctx, found.devicePath, partUUID)
 }
 
 // mountPartition mounts part at mountRoot/<partUUID>.
@@ -562,22 +648,35 @@ func (b *BlockDevBackend) mountPartition(ctx context.Context, part, partUUID str
 	return dir, nil
 }
 
-// findByPartUUID locates the partition carrying partUUID. Returns the device
-// path and, when it is already mounted, its current mount point.
+// claimedPartition is what findByPartUUID resolved: the partition carrying a
+// claimed target's UUID, and what the kernel says is actually on it.
+type claimedPartition struct {
+	devicePath string
+	// mountPoint is non-empty when the partition is already mounted.
+	mountPoint string
+	// fsType and fsLabel are what lsblk OBSERVED, carried out of the lookup so
+	// Inspect can report them instead of asserting them. They used to be the
+	// literals "ext4" and StorageBackupLabel at the Inspect call site, which
+	// was true only while backup was the only purpose a claim could have.
+	fsType  string
+	fsLabel string
+}
+
+// findByPartUUID locates the partition carrying partUUID.
 //
 // Resolution is by scanning lsblk for the PARTUUID rather than by stat-ing
 // /dev/disk/by-partuuid/<uuid>: the by-partuuid symlinks are udev's, so they are
 // absent in a container and stale for a few milliseconds after a repartition,
 // and "the symlink is not there yet" would read as "the operator unplugged the
 // disk".
-func (b *BlockDevBackend) findByPartUUID(ctx context.Context, partUUID string) (device string, mountPoint string, err error) {
+func (b *BlockDevBackend) findByPartUUID(ctx context.Context, partUUID string) (claimedPartition, error) {
 	devices, err := b.lsblk(ctx, "")
 	if err != nil {
-		return "", "", err
+		return claimedPartition{}, err
 	}
 	protected, perr := b.prot.resolve()
 	if perr != nil {
-		return "", "", fmt.Errorf("resolve the protected set: %w", perr)
+		return claimedPartition{}, fmt.Errorf("resolve the protected set: %w", perr)
 	}
 	for _, d := range devices.BlockDevices {
 		for _, c := range d.Children {
@@ -591,18 +690,24 @@ func (b *BlockDevBackend) findByPartUUID(ctx context.Context, partUUID string) (
 			// Refuse to touch a partition on a protected disk even here. This
 			// verb is not destructive, but a claimed-target UUID that resolves
 			// onto the boot disk means something is badly wrong, and mounting
-			// it would hand the backup writer a path on the boot medium.
+			// it would hand the backup writer a path on the boot medium. Not
+			// conditioned on the purpose, and §6.5 says it never may be.
 			if pd, ok := protected[parent]; ok {
-				return "", "", protectedError(parent, pd.reason)
+				return claimedPartition{}, protectedError(parent, pd.reason)
 			}
 			path := c.Path
 			if path == "" {
 				path = "/dev/" + c.KName
 			}
-			return path, strings.TrimSpace(c.MountPoint), nil
+			return claimedPartition{
+				devicePath: path,
+				mountPoint: strings.TrimSpace(c.MountPoint),
+				fsType:     strings.TrimSpace(c.FSType),
+				fsLabel:    strings.TrimSpace(c.Label),
+			}, nil
 		}
 	}
-	return "", "", fmt.Errorf("%w: %s", ErrNotFound, partUUID)
+	return claimedPartition{}, fmt.Errorf("%w: %s", ErrNotFound, partUUID)
 }
 
 // Inspect reports a claimed target's marker and free space.
@@ -614,7 +719,7 @@ func (b *BlockDevBackend) Inspect(ctx context.Context, partUUID string) (*proto.
 	if err := checkPartUUID(partUUID); err != nil {
 		return nil, err
 	}
-	part, mountPoint, err := b.findByPartUUID(ctx, partUUID)
+	found, err := b.findByPartUUID(ctx, partUUID)
 	if errors.Is(err, ErrNotFound) {
 		return &proto.StorageInspectAck{
 			OK: true, PartUUID: partUUID, Present: false,
@@ -625,34 +730,49 @@ func (b *BlockDevBackend) Inspect(ctx context.Context, partUUID string) (*proto.
 	if err != nil {
 		return nil, err
 	}
+	mountPoint := found.mountPoint
 	if mountPoint == "" {
-		if mountPoint, err = b.mountPartition(ctx, part, partUUID); err != nil {
+		if mountPoint, err = b.mountPartition(ctx, found.devicePath, partUUID); err != nil {
 			// Attached and not mountable is its own answer, distinct from
 			// "not attached" and from "the agent could not look": the health
 			// poll renders it UNMOUNTED (#398). Present says the partition is
 			// there; OK=false says it could not be used.
 			return &proto.StorageInspectAck{
-				OK: false, Present: true, PartUUID: partUUID, DevicePath: part,
+				OK: false, Present: true, PartUUID: partUUID, DevicePath: found.devicePath,
 				Refusal: refusalFor(err),
-				Detail:  fmt.Sprintf("%s is attached but could not be mounted: %v", part, err),
+				Detail:  fmt.Sprintf("%s is attached but could not be mounted: %v", found.devicePath, err),
 			}, nil
 		}
 	}
+	// FSType and FSLabel are what lsblk saw, not what a claim of one particular
+	// purpose would have written. The two used to be the constants "ext4" and
+	// StorageBackupLabel, which reported the truth only because backup was the
+	// only purpose there was; with §6's second purpose the same two literals
+	// would report a data disk as a backup one.
 	ack := &proto.StorageInspectAck{
 		OK:         true,
 		Present:    true,
 		PartUUID:   partUUID,
-		DevicePath: part,
+		DevicePath: found.devicePath,
 		MountPath:  mountPoint,
-		FSType:     "ext4",
-		FSLabel:    proto.StorageBackupLabel,
+		FSType:     found.fsType,
+		FSLabel:    found.fsLabel,
 	}
 	if du, derr := disk.UsageWithContext(ctx, mountPoint); derr == nil {
 		ack.TotalBytes = du.Total
 		ack.FreeBytes = du.Free
 	}
+	// Both markers are looked for rather than the one the label implies, and
+	// the label is exactly why: §4.8 demoted it to a hint, so a target whose
+	// label was changed underneath us is the target whose marker is the only
+	// thing still saying what it is. Inspect writes nothing, so looking for a
+	// file that is not there costs one failed open — this is not the
+	// destructive path where guessing would matter.
 	if set, merr := readMarker(mountPoint); merr == nil {
 		ack.BackupSet = set
+	}
+	if set, merr := readDataMarker(mountPoint); merr == nil {
+		ack.DataSet = set
 	}
 	return ack, nil
 }
@@ -680,23 +800,49 @@ func (b *BlockDevBackend) lsblk(ctx context.Context, devicePath string) (*lsblkO
 // Marker file
 // ---------------------------------------------------------------------------
 
-// readMarker reads StorageMarkerFile from a mounted target.
-func readMarker(mountPath string) (*proto.StorageBackupSet, error) {
-	b, err := os.ReadFile(filepath.Join(mountPath, proto.StorageMarkerFile))
+// readMarkerFile reads one marker file off a mounted target into set.
+//
+// Shared by both markers so the bound below is applied to both. It is not
+// belt-and-braces: enumeration reads markers off disks the operator has
+// confirmed nothing about, so this is untrusted input from a filesystem
+// somebody else wrote, and a marker is a few hundred bytes.
+func readMarkerFile(mountPath, name string, set any) error {
+	b, err := os.ReadFile(filepath.Join(mountPath, name))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	// Bound the read: the marker is a few hundred bytes and arrives from a disk
-	// somebody else may have written.
 	if len(b) > 64*1024 {
-		return nil, fmt.Errorf("marker on %s is %d bytes — refusing to parse it", mountPath, len(b))
+		return fmt.Errorf("marker %s on %s is %d bytes — refusing to parse it", name, mountPath, len(b))
 	}
+	if err := json.Unmarshal(b, set); err != nil {
+		return fmt.Errorf("parse marker %s on %s: %w", name, mountPath, err)
+	}
+	return nil
+}
+
+// readMarker reads StorageMarkerFile — the §4.8 backup set — from a mounted
+// target.
+func readMarker(mountPath string) (*proto.StorageBackupSet, error) {
 	var set proto.StorageBackupSet
-	if err := json.Unmarshal(b, &set); err != nil {
-		return nil, fmt.Errorf("parse marker on %s: %w", mountPath, err)
+	if err := readMarkerFile(mountPath, proto.StorageMarkerFile, &set); err != nil {
+		return nil, err
 	}
 	if n, err := countGenerations(mountPath); err == nil {
 		set.Generations = n
+	}
+	return &set, nil
+}
+
+// readDataMarker reads StorageDataMarkerFile — the §6 data set — from a mounted
+// disk.
+//
+// No generation count: generations are §4.4's retained archives and a data disk
+// holds none. The count exists so §4.8's adopt-or-wipe prompt can say how much
+// a wipe destroys, and §6.1 deliberately does not give a data disk that prompt.
+func readDataMarker(mountPath string) (*proto.StorageDataSet, error) {
+	var set proto.StorageDataSet
+	if err := readMarkerFile(mountPath, proto.StorageDataMarkerFile, &set); err != nil {
+		return nil, err
 	}
 	return &set, nil
 }
@@ -729,16 +875,21 @@ func countGenerations(mountPath string) (int, error) {
 	return n, nil
 }
 
-// writeMarker writes StorageMarkerFile durably: temp file, fsync, rename, then
+// writeMarker writes a marker file durably: temp file, fsync, rename, then
 // fsync the directory. The marker is what makes the disk self-describing, and a
 // disk that is formatted but whose marker never reached the platter is the one
 // case §4.8's recovery story does not cover.
-func writeMarker(mountPath string, set *proto.StorageBackupSet) error {
+//
+// name and set travel together — the caller passes the purpose spec's
+// MarkerFile and the matching set type — because the durable-write dance below
+// is the load-bearing part and there must be exactly one copy of it, not one
+// per marker type.
+func writeMarker(mountPath, name string, set any) error {
 	payload, err := json.MarshalIndent(set, "", "  ")
 	if err != nil {
 		return err
 	}
-	final := filepath.Join(mountPath, proto.StorageMarkerFile)
+	final := filepath.Join(mountPath, name)
 	tmp, err := os.CreateTemp(mountPath, ".marker-*.tmp")
 	if err != nil {
 		return err
