@@ -80,6 +80,24 @@ var verbMinAgentVersion = map[string]string{
 // the release exists and correct the floor if a release was cut in between.
 const StorageInspectProbeMinAgentVersion = "2026.08.5-dev.144"
 
+// MeshEnrollDeadlineMinAgentVersion is the first agent release whose
+// mesh.enroll runs under MeshEnrollWork and, when that deadline kills
+// `tailscale up`, says so in its ack — which command, after how long, what
+// it was waiting on (geekdojo/geekdojo-brain#402). Not a verb, for the same
+// reason as StorageInspectProbeMinAgentVersion: an older agent still
+// ANSWERS mesh.enroll, and when its own 30 s deadline fires mid-login the
+// answer is the bare `tailscale up: signal: killed (stderr=)`. The enroll
+// saga compares the node's reported agent version against this when such
+// an ack comes back, so the job can name the kill and the release that
+// fixes it instead of relaying a string nobody can read.
+//
+// Entered when the change was authored, before its release existed, as the
+// NEXT release run after v2026.08.5-dev.144 (the newest published
+// control-plane release at the time). Confirm with `git tag --contains`
+// once the release exists and correct the floor if a release was cut in
+// between.
+const MeshEnrollDeadlineMinAgentVersion = "2026.08.5-dev.145"
+
 // metadataMinAgentVersion is the same table for registration-metadata keys
 // the api acts on: the first agent release whose registration carries the
 // key. A node whose agent predates the key has not failed to report it —
