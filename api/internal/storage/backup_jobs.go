@@ -508,10 +508,14 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 			return nil, errors.New("this api does not know which node it runs on (RASPUTIN_SELF_NODE_ID is unset), and a backup run has to know that before it will stage an archive for an agent to read. Nothing was staged")
 		}
 		if target.NodeID != self {
+			// The wording after the dash is CanHoldTarget's: a target that
+			// reached this row on another node predates the picker refusing
+			// it (#397), and the run's refusal and the target row on the
+			// Storage page must tell the operator one story.
 			return nil, fmt.Errorf("the claimed backup target (%s, partUuid %s) is on node %s, and this api runs on %s. "+
 				"A run seals the identity archive on the control plane and hands the agent BESIDE IT a file name to find, and the ingest "+
-				"endpoint writes volume members under the mount that agent reports; a target on another node has no such handoff. Claim a target on %s",
-				displayLabel(target.Label), target.PartUUID, target.NodeID, self, self)
+				"endpoint writes volume members under the mount that agent reports; a target on another node has no such handoff — %s. Claim a target on %s",
+				displayLabel(target.Label), target.PartUUID, target.NodeID, self, targetTransportExplanation, self)
 		}
 		if strings.TrimSpace(target.PartUUID) == "" {
 			return nil, fmt.Errorf("the claimed backup target (%s on %s) has no partition UUID recorded, which is the only identifier a target has. Re-claim the disk",

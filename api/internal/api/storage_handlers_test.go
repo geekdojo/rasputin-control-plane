@@ -18,7 +18,13 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-const storageTestNode = "n-backup"
+const (
+	// storageTestNode is the controlplane — the one node whose disks can be
+	// claimed (storage.CanHoldTarget, #397).
+	storageTestNode = "n-backup"
+	// storageTestShelf is a storage-role node: enumerable, never claimable.
+	storageTestShelf = "n-shelf"
+)
 
 func storageTestNATS(t *testing.T) *nats.Conn {
 	t.Helper()
@@ -54,11 +60,14 @@ func storageTestServer(t *testing.T) (*Server, *storage.Store, *nats.Conn) {
 		t.Fatalf("inventory OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = inv.Close() })
-	if err := inv.Insert(ctx, &proto.Node{
-		ID: storageTestNode, Role: proto.RoleCompute, Hostname: "backup.test",
-		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("inv insert: %v", err)
+	for _, n := range []*proto.Node{
+		{ID: storageTestNode, Role: proto.RoleControlPlane, Hostname: "backup.test"},
+		{ID: storageTestShelf, Role: proto.RoleStorage, Hostname: "shelf.test"},
+	} {
+		n.FirstSeen, n.LastSeen = time.Now().UTC(), time.Now().UTC()
+		if err := inv.Insert(ctx, n); err != nil {
+			t.Fatalf("inv insert %s: %v", n.ID, err)
+		}
 	}
 
 	nc := storageTestNATS(t)
@@ -66,7 +75,7 @@ func storageTestServer(t *testing.T) (*Server, *storage.Store, *nats.Conn) {
 	runner.Register(storage.ClaimWorkflow(backupStore, inv, storage.Config{ClusterID: "home1"}))
 	t.Cleanup(runner.Wait)
 
-	return &Server{store: jobStore, runner: runner, backup: backupStore, nc: nc}, backupStore, nc
+	return &Server{store: jobStore, runner: runner, backup: backupStore, nc: nc, inv: inv}, backupStore, nc
 }
 
 func postClaim(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
@@ -422,5 +431,205 @@ func TestListBackupCandidates_SurfacesAnAgentRefusal(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "lsblk: not found") {
 		t.Errorf("the agent's own detail should reach the operator: %s", rec.Body.String())
+	}
+}
+
+// enumerateFor answers storage.enumerate for one node with the given disks —
+// a blank one, a protected boot medium, and one carrying a backup set, so a
+// case can see every disposition at once.
+func enumerateFor(t *testing.T, nc *nats.Conn, nodeID string) {
+	t.Helper()
+	set := &proto.StorageBackupSet{
+		MarkerVersion: proto.StorageMarkerVersion, ClusterID: "home1",
+		PartUUID: "pu-existing", Label: "the archive", Generations: 4,
+		CreatedAt: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+	}
+	sub, err := nc.Subscribe(proto.StorageEnumerateSubject(nodeID), func(m *nats.Msg) {
+		b, _ := json.Marshal(proto.StorageEnumerateAck{
+			OK: true, Backend: "blockdev", Ts: time.Now().UTC(),
+			Candidates: []proto.StorageCandidate{
+				{DevicePath: "/dev/sdb", Fingerprint: "fp-b", SizeBytes: 1 << 40},
+				{
+					DevicePath: "/dev/nvme0n1", Fingerprint: "fp-boot",
+					Protected: true, ProtectedReason: "holds the mounted persistent partition",
+				},
+				{DevicePath: "/dev/sdc", Fingerprint: "fp-c", Serial: "S-C", SizeBytes: 2 << 40, HasBackupSet: true, BackupSet: set},
+			},
+		})
+		_ = m.Respond(b)
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+}
+
+type candidatesBody struct {
+	NodeEligible         bool   `json:"nodeEligible"`
+	NodeIneligibleReason string `json:"nodeIneligibleReason"`
+	Candidates           []struct {
+		DevicePath       string `json:"devicePath"`
+		Protected        bool   `json:"protected"`
+		Eligible         bool   `json:"eligible"`
+		IneligibleReason string `json:"ineligibleReason"`
+		WipeToken        string `json:"wipeToken"`
+	} `json:"candidates"`
+}
+
+func getCandidates(t *testing.T, s *Server, nodeID string) (int, candidatesBody) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	s.handleListBackupCandidates(rec, httptest.NewRequest(http.MethodGet, "/api/backup/candidates?nodeId="+nodeID, nil))
+	var body candidatesBody
+	if rec.Code == http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	}
+	return rec.Code, body
+}
+
+// #397: a storage-role node's disks are LISTED — the operator may want to
+// see what is attached — but every one is ineligible with the reason, and
+// none carries a wipe token. The vocabulary is the boot medium's: `eligible`
+// and `ineligibleReason`, so a UI disables on one field whatever the cause.
+func TestListBackupCandidates_ANodeThatCannotHoldATargetListsDisksAsIneligible(t *testing.T) {
+	s, _, nc := storageTestServer(t)
+	enumerateFor(t, nc, storageTestShelf)
+
+	code, body := getCandidates(t, s, storageTestShelf)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the disks are still listed", code)
+	}
+	if body.NodeEligible {
+		t.Error("nodeEligible = true for a storage node")
+	}
+	wantReason := "a disk on shelf.test (storage) cannot receive backups yet — archives are written by the controlplane's ingest to a disk attached to the controlplane; a storage-node target arrives with the storage SKU (#302)"
+	if body.NodeIneligibleReason != wantReason {
+		t.Errorf("nodeIneligibleReason = %q\nwant %q", body.NodeIneligibleReason, wantReason)
+	}
+	if len(body.Candidates) != 3 {
+		t.Fatalf("want all 3 disks listed, got %d", len(body.Candidates))
+	}
+	for _, c := range body.Candidates {
+		if c.Eligible {
+			t.Errorf("%s: eligible on a node nothing can send an archive to", c.DevicePath)
+		}
+		if c.IneligibleReason != wantReason {
+			t.Errorf("%s: ineligibleReason = %q, want the node's reason on every row", c.DevicePath, c.IneligibleReason)
+		}
+		if c.WipeToken != "" {
+			t.Errorf("%s: a wipe token was minted for a disk that cannot be claimed", c.DevicePath)
+		}
+	}
+	if !body.Candidates[1].Protected {
+		t.Error("the boot medium lost its `protected` label — the node reason is added beside it, not instead of it")
+	}
+}
+
+// The controlplane is unchanged by #397: its blank disk is eligible, its boot
+// medium is ineligible with the protected reason, and its backup-set disk is
+// eligible with a wipe token.
+func TestListBackupCandidates_TheControlplaneIsUnchanged(t *testing.T) {
+	s, _, nc := storageTestServer(t)
+	enumerateFor(t, nc, storageTestNode)
+
+	code, body := getCandidates(t, s, storageTestNode)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if !body.NodeEligible || body.NodeIneligibleReason != "" {
+		t.Errorf("nodeEligible=%v reason=%q on the controlplane", body.NodeEligible, body.NodeIneligibleReason)
+	}
+	blank, boot, withSet := body.Candidates[0], body.Candidates[1], body.Candidates[2]
+	if !blank.Eligible || blank.IneligibleReason != "" || blank.WipeToken != "" {
+		t.Errorf("blank disk: eligible=%v reason=%q token=%q", blank.Eligible, blank.IneligibleReason, blank.WipeToken)
+	}
+	if boot.Eligible || boot.IneligibleReason != "holds the mounted persistent partition" || !boot.Protected || boot.WipeToken != "" {
+		t.Errorf("boot medium: eligible=%v reason=%q protected=%v token=%q", boot.Eligible, boot.IneligibleReason, boot.Protected, boot.WipeToken)
+	}
+	if !withSet.Eligible || withSet.WipeToken == "" {
+		t.Errorf("backup-set disk: eligible=%v token=%q — adopt or wipe are both still on offer here", withSet.Eligible, withSet.WipeToken)
+	}
+}
+
+func TestListBackupCandidates_AnUnregisteredNodeIs404(t *testing.T) {
+	s, _, _ := storageTestServer(t)
+	code, _ := getCandidates(t, s, "n-nobody")
+	if code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 before any agent RPC", code)
+	}
+}
+
+// #397: the claim is refused with a 409 and the same sentence, before a job
+// exists — the operator never reaches a dead end that only backup.run would
+// have named.
+func TestClaimBackupTarget_RefusesANodeThatCannotHoldATarget(t *testing.T) {
+	s, store, _ := storageTestServer(t)
+	rec := postClaim(t, s, `{"nodeId":"`+storageTestShelf+`","devicePath":"/dev/sdb","fingerprint":"fp-b"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"a disk on shelf.test (storage) cannot receive backups yet", "controlplane's ingest", "storage SKU (#302)"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("body = %s, want it to contain %q", rec.Body.String(), want)
+		}
+	}
+	rows, err := store.ListTargets(context.Background())
+	if err != nil {
+		t.Fatalf("ListTargets: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("a refused claim wrote %d target row(s)", len(rows))
+	}
+}
+
+// A target row that already sits on a node that cannot hold a target (an
+// operator who hit the dead end before #397) is told so in the listing, in
+// the same words — and is NOT altered or released. A controlplane row carries
+// no such field.
+func TestListBackupTargets_SaysWhenARowIsOnANodeThatCannotHoldATarget(t *testing.T) {
+	s, store, _ := storageTestServer(t)
+	ctx := context.Background()
+	for i, node := range []string{storageTestShelf, storageTestNode} {
+		jobID := "j" + string(rune('1'+i))
+		if err := store.CreatePending(ctx, jobID, node, "/dev/sdb", "disk", time.Now().UTC()); err != nil {
+			t.Fatalf("CreatePending: %v", err)
+		}
+		if err := store.MarkClaimed(ctx, jobID, storage.ClaimResult{PartUUID: "pu-" + jobID, MountPath: "/mnt/backup", FSType: "ext4", At: time.Now().UTC()}); err != nil {
+			t.Fatalf("MarkClaimed: %v", err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	s.handleListBackupTargets(rec, httptest.NewRequest(http.MethodGet, "/api/backup/targets", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var rows []struct {
+		JobID                string `json:"jobId"`
+		NodeID               string `json:"nodeId"`
+		Status               string `json:"status"`
+		NodeIneligibleReason string `json:"nodeIneligibleReason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(rows))
+	}
+	for _, r := range rows {
+		switch r.NodeID {
+		case storageTestShelf:
+			if !strings.Contains(r.NodeIneligibleReason, "a disk on shelf.test (storage) cannot receive backups yet") {
+				t.Errorf("shelf row: nodeIneligibleReason = %q", r.NodeIneligibleReason)
+			}
+			if r.Status != "claimed" {
+				t.Errorf("shelf row status = %q — the row is told, never altered", r.Status)
+			}
+		case storageTestNode:
+			if r.NodeIneligibleReason != "" {
+				t.Errorf("controlplane row carries a reason: %q", r.NodeIneligibleReason)
+			}
+		}
 	}
 }
