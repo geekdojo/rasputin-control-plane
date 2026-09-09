@@ -201,12 +201,27 @@ func main() {
 	reregister := func(c *nats.Conn) {
 		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint)
 	}
+	// The cluster-DNS pin follows the bus connection: every successful
+	// connect — first dial, nats reconnect, re-dial — fires this right after
+	// the registration goes out, and clusterdns pins the address the bus is
+	// now connected to; every loss fires it too (client.OnLost, below), and
+	// clusterdns re-verifies the pin it already holds. Before this the pin
+	// waited for clusterdns's own five-minute tick, and every agent restart
+	// cost the node up to five minutes off the mesh
+	// (geekdojo/geekdojo-brain#403). Harmless on roles that do not run
+	// clusterdns: a fire with no listener is dropped.
+	dnsPin := clusterdns.NewTrigger()
+	onConnected := func(c *nats.Conn) {
+		reregister(c)
+		dnsPin.Fire()
+	}
 	// The bus connection, for the life of the process. Not dialed yet: the
 	// handlers below are collected first and subscribed on each conn by
 	// subscribeAll, then the registration goes out. Everything that
 	// publishes on a timer takes the client rather than a conn, so a
 	// publish lands on whichever connection is current.
-	client := bus.New(natsURL, nodeID, joinToken, subscribeAll, reregister)
+	client := bus.New(natsURL, nodeID, joinToken, subscribeAll, onConnected)
+	client.OnLost(dnsPin.Lost)
 	defer client.Close()
 	// For hooks that re-register outside a bus event (a simulated reboot, a
 	// mesh enroll, a BMC swap): always the current conn, never a captured one.
@@ -466,10 +481,17 @@ func main() {
 		// follows the CP to its new address; a captured string does not, and a
 		// captured string is what pinned five nodes to a dead server the
 		// moment the control plane took a new lease.
+		//
+		// This starts BEFORE the first dial, so its first look finds no
+		// address. That is a startup, not a loss: clusterdns probes whatever
+		// pin the previous process left under /run and keeps it while its
+		// server answers, and the trigger fired from onConnected confirms or
+		// replaces it seconds later.
 		go clusterdns.Run(ctx, clusterdns.Config{
 			ClusterID: clusterID(),
 			ServerIP:  func() string { return hostOf(client.ConnectedAddr()) },
 			Dir:       envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
+			Trigger:   dnsPin,
 		})
 	}
 
@@ -955,7 +977,8 @@ func clusterName() string {
 // hostOf strips the port from a host:port, returning "" for anything it cannot
 // parse. Extracted from the clusterdns wiring so the parse is testable: it
 // returns "" on failure, which reads as "we do not know where the control plane
-// is" and withdraws the DNS pin — a silent path worth having a test on.
+// is" — an existing DNS pin is then probed rather than confirmed off the bus —
+// a silent path worth having a test on.
 func hostOf(addr string) string {
 	if addr == "" {
 		return ""

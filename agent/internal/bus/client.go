@@ -79,6 +79,11 @@ type Client struct {
 	// nats-level reconnect (same conn, subscriptions intact) and each
 	// re-dial. The agent (re-)publishes its registration here.
 	onConnected func(*nats.Conn)
+	// onLost runs whenever the current connection is lost: nats.go reports a
+	// disconnect it will reconnect from, or closes the conn for good. Set
+	// with OnLost before Dial. The agent re-verifies its cluster-DNS pin from
+	// here — on the event, rather than on a clock (see internal/clusterdns).
+	onLost func()
 
 	reconnectWait time.Duration
 	backoff       Backoff
@@ -167,6 +172,7 @@ func (c *Client) dial() (*nats.Conn, error) {
 			if err != nil {
 				log.Printf("agent/bus: disconnected: %v", err)
 			}
+			c.lost()
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			log.Printf("agent/bus: reconnected to %s", nc.ConnectedUrl())
@@ -266,7 +272,26 @@ func (c *Client) onClosed(nc *nats.Conn) {
 		reason = err.Error()
 	}
 	log.Printf("agent/bus: connection CLOSED (%s) — the nats client will not reconnect this one; re-dialing %s from scratch", reason, c.url)
+	c.lost()
 	go c.redial()
+}
+
+// OnLost registers f to run each time the connection is lost — a nats-level
+// disconnect or a close — for as long as the Client is open. Call before
+// Dial; it is read without a lock from nats.go's callback goroutine.
+func (c *Client) OnLost(f func()) { c.onLost = f }
+
+// lost runs the OnLost hook unless the Client itself is closing: the agent's
+// own shutdown drains the conn through the same handlers, and that is not a
+// loss anyone needs to react to.
+func (c *Client) lost() {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed || c.onLost == nil {
+		return
+	}
+	c.onLost()
 }
 
 // redial dials until it succeeds or the Client is closed. Each failure is
