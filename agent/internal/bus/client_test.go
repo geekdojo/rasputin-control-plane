@@ -397,3 +397,34 @@ func TestClient_PublishBeforeDial(t *testing.T) {
 		t.Fatalf("ConnectedAddr before Dial = %q, want empty", got)
 	}
 }
+
+// TestClient_OnLostFiresWhenTheServerGoesAwayAndNotOnClose: the hook runs
+// when the connection is lost under the Client, and stays quiet for the
+// Client's own shutdown, which drains through the same nats handlers.
+func TestClient_OnLostFiresWhenTheServerGoesAwayAndNotOnClose(t *testing.T) {
+	s := startServer(t, -1, testNode, "tok-A")
+	tc := newTestClient(t, s.ClientURL(), "tok-A")
+	var lost atomic.Int32
+	tc.OnLost(func() { lost.Add(1) })
+	if err := tc.Dial(); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if lost.Load() != 0 {
+		t.Fatalf("OnLost fired %d time(s) on a healthy connect", lost.Load())
+	}
+	stopServer(s)
+	waitFor(t, "OnLost after the server went away", 10*time.Second, func() bool { return lost.Load() >= 1 })
+
+	before := lost.Load()
+	done := make(chan struct{})
+	go func() { tc.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked")
+	}
+	time.Sleep(200 * time.Millisecond) // long enough for the drain's handlers to have run
+	if got := lost.Load(); got != before {
+		t.Errorf("OnLost fired %d more time(s) for the Client's own Close", got-before)
+	}
+}
