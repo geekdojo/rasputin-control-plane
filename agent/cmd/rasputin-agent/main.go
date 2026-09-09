@@ -330,6 +330,11 @@ func main() {
 			// records where, so a tree a dying process left is swept here —
 			// the previous contents a restore keeps aside are never touched.
 			stager.SetRestoreRecordDir(quiesce.RestoreRecordDir(stateDir))
+			// A completed swap is recorded under its RestoreID so a repeat
+			// of the command — the api settling a reply it never received
+			// (geekdojo-brain#396) — is answered from the record, not run
+			// again. Never swept: the next restore of the volume supersedes it.
+			stager.SetRestoreOutcomeDir(quiesce.RestoreOutcomeDir(stateDir))
 			if n := stager.SweepArmedStops(); n > 0 {
 				log.Printf("rasputin-agent: quiesce: restarted %d app(s) a previous agent left stopped for a backup", n)
 			}

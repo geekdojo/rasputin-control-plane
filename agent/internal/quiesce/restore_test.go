@@ -151,7 +151,9 @@ func newRestoreRig(t *testing.T) *restoreRig {
 		defer lmu.Unlock()
 		fmt.Fprintf(&logs, format+"\n", args...)
 	}
-	s.SetRestoreRecordDir(filepath.Join(t.TempDir(), "restore-staging"))
+	stateDir := t.TempDir()
+	s.SetRestoreRecordDir(RestoreRecordDir(stateDir))
+	s.SetRestoreOutcomeDir(RestoreOutcomeDir(stateDir))
 	e := newEgress(t, backup)
 	return &restoreRig{rt: rt, s: s, e: e, volRoot: volRoot, logs: &logs, backup: backup, digest: hex.EncodeToString(sum[:])}
 }
@@ -683,4 +685,258 @@ func TestRestoreVolumeRefusesAnOverLongStream(t *testing.T) {
 	}
 	r.assertUntouched(t, want, ack)
 	_ = io.EOF
+}
+
+// ----- the outcome record (geekdojo-brain#396) -------------------------------
+//
+// A completed swap is recorded under its RestoreID; a repeat of that id is
+// answered from the record. Every case below asks the same two things: was
+// the kept copy left alone, and was the app left alone?
+
+// outcomes counts the records in the outcome directory.
+func (r *restoreRig) outcomes(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir(r.s.restoreOutcomeDir)
+	if err != nil {
+		return 0
+	}
+	return len(ents)
+}
+
+// A repeat carrying the same RestoreID is answered from the record: nothing
+// fetched, nothing stopped, the kept copy untouched, the ack the original's.
+func TestRestoreVolumeReplaysACompletedRestoreFromItsRecord(t *testing.T) {
+	r := newRestoreRig(t)
+	want := r.snapshot(t)
+	r.corrupt(t)
+	first := r.s.RestoreVolume(context.Background(), r.cmd(t))
+	if !first.OK || !first.Replaced || first.Replayed {
+		t.Fatalf("first: %+v", first)
+	}
+	if r.outcomes(t) != 1 {
+		t.Fatalf("outcome records after the swap: %d", r.outcomes(t))
+	}
+	// A witness inside the kept copy, and a change to the live volume after
+	// the restore, so "untouched" is provable on both.
+	writeVolFile(t, filepath.Join(first.PreviousKept, "witness"), "still here")
+	writeVolFile(t, filepath.Join(r.volRoot, "after-restore.txt"), "written by the app")
+	live := r.snapshot(t)
+	stops, starts := r.rt.counts()
+	fetches := r.e.requests()
+
+	again := r.s.RestoreVolume(context.Background(), r.cmd(t))
+	if !again.OK || !again.Replaced || !again.Replayed || again.ReplayedFrom.IsZero() {
+		t.Fatalf("replay: %+v", again)
+	}
+	if again.PreviousKept != first.PreviousKept || again.FileCount != first.FileCount || again.Digest != first.Digest || !again.Stopped || again.DowntimeMillis != first.DowntimeMillis || again.RestoredBy != first.RestoredBy {
+		t.Fatalf("the replay is not the original ack:\n first %+v\n again %+v", first, again)
+	}
+	if !strings.Contains(again.Detail, "answered from this node's record") || !strings.Contains(again.Detail, "rs-1") || strings.Contains(again.Detail, "no longer exists") {
+		t.Fatalf("detail: %q", again.Detail)
+	}
+	if s2, st2 := r.rt.counts(); s2 != stops || st2 != starts {
+		t.Fatalf("the replay touched the app: stops %d→%d starts %d→%d", stops, s2, starts, st2)
+	}
+	if r.e.requests() != fetches {
+		t.Fatal("the replay fetched the stream")
+	}
+	if got := r.snapshot(t); fmt.Sprint(got) != fmt.Sprint(live) {
+		t.Fatalf("the replay changed the live volume:\n got  %v\n want %v", got, live)
+	}
+	if b, err := os.ReadFile(filepath.Join(first.PreviousKept, "witness")); err != nil || string(b) != "still here" {
+		t.Fatalf("the kept copy was touched: %q %v", b, err)
+	}
+	if kept := r.beside(t, restoreReplacedPrefix); len(kept) != 1 {
+		t.Fatalf("kept copies after the replay: %v", kept)
+	}
+	if b, err := os.ReadFile(filepath.Join(first.PreviousKept, "ransom.txt")); err != nil || string(b) != "your files" {
+		t.Fatalf("the kept copy is not the pre-restore contents: %q %v", b, err)
+	}
+	// The record is still one, still this restore; the staging record dir
+	// is still empty.
+	if r.outcomes(t) != 1 || r.records(t) != 0 {
+		t.Fatalf("outcomes=%d staging records=%d", r.outcomes(t), r.records(t))
+	}
+	_ = want
+	r.assertNoSecretInLogs(t, again)
+	if !strings.Contains(r.logs.String(), "REPLAY restore rs-1") {
+		t.Fatal("the replay was not said out loud")
+	}
+	// And the record itself carries no credential.
+	ents, _ := os.ReadDir(r.s.restoreOutcomeDir)
+	raw, err := os.ReadFile(filepath.Join(r.s.restoreOutcomeDir, ents[0].Name())) //nolint:gosec // G304: the test's own temp dir
+	if err != nil || strings.Contains(string(raw), rsCred) {
+		t.Fatalf("the record holds the credential or is unreadable: %v", err)
+	}
+}
+
+// A different RestoreID is a new restore: it runs, replaces the volume
+// again, keeps a new previous copy, and its record supersedes the first —
+// after which the FIRST id no longer replays.
+func TestRestoreVolumeADifferentIDRestoresAgainAndSupersedesTheRecord(t *testing.T) {
+	r := newRestoreRig(t)
+	want := r.snapshot(t)
+	r.corrupt(t)
+	first := r.s.RestoreVolume(context.Background(), r.cmd(t))
+	if !first.OK {
+		t.Fatalf("first: %+v", first)
+	}
+	time.Sleep(1100 * time.Millisecond) // the kept name carries a second-resolution timestamp
+	writeVolFile(t, filepath.Join(r.volRoot, "after-first.txt"), "between restores")
+	cmd := r.cmd(t)
+	cmd.RestoreID = "rs-2"
+	second := r.s.RestoreVolume(context.Background(), cmd)
+	if !second.OK || !second.Replaced || second.Replayed {
+		t.Fatalf("second: %+v", second)
+	}
+	if stops, starts := r.rt.counts(); stops != 2 || starts != 2 {
+		t.Fatalf("stops=%d starts=%d", stops, starts)
+	}
+	if got := r.snapshot(t); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the second restore did not put the backup back: %v", got)
+	}
+	if second.PreviousKept == first.PreviousKept {
+		t.Fatal("the second restore did not keep a new previous copy")
+	}
+	if b, err := os.ReadFile(filepath.Join(second.PreviousKept, "after-first.txt")); err != nil || string(b) != "between restores" {
+		t.Fatalf("the second kept copy is not what the volume held between restores: %q %v", b, err)
+	}
+	if kept := r.beside(t, restoreReplacedPrefix); len(kept) != 1 || r.outcomes(t) != 1 {
+		t.Fatalf("kept=%v outcomes=%d", kept, r.outcomes(t))
+	}
+	// The record is now rs-2's: rs-2 replays; rs-1 is a new restore.
+	if ack := r.s.RestoreVolume(context.Background(), cmd); !ack.Replayed || ack.PreviousKept != second.PreviousKept {
+		t.Fatalf("rs-2 did not replay from its record: %+v", ack)
+	}
+	stops, _ := r.rt.counts()
+	if ack := r.s.RestoreVolume(context.Background(), r.cmd(t)); ack.Replayed || !ack.OK {
+		t.Fatalf("rs-1 after rs-2 superseded it: %+v", ack)
+	}
+	if s2, _ := r.rt.counts(); s2 != stops+1 {
+		t.Fatal("rs-1 did not run as a new restore")
+	}
+}
+
+// The record survives the agent: a new Stager over the same state dir,
+// after the boot sweeps, answers the id from the record — and the sweep
+// removed nothing of it.
+func TestRestoreVolumeRecordSurvivesAnAgentRestart(t *testing.T) {
+	r := newRestoreRig(t)
+	r.corrupt(t)
+	first := r.s.RestoreVolume(context.Background(), r.cmd(t))
+	if !first.OK {
+		t.Fatalf("first: %+v", first)
+	}
+	// A staging tree from a run that died, recorded, so the sweep has work
+	// to do beside the outcome record it must leave alone.
+	stale := filepath.Join(filepath.Dir(r.volRoot), restoreStagingPrefix+"vaultwarden-data-deadbeef")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.s.writeRestoreRecord(restoreRecord{Staging: stale, AppID: "vw", Volume: "vaultwarden-data", RestoreID: "rs-1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The next agent process: the same runtime, marker dir and state dir.
+	s2 := New(r.rt, r.s.stagingRoot, r.s.markerDir)
+	s2.logf = r.s.logf
+	s2.SetRestoreRecordDir(r.s.restoreRecordDir)
+	s2.SetRestoreOutcomeDir(r.s.restoreOutcomeDir)
+	_ = s2.SweepArmedStops()
+	if n := s2.SweepRestoreStaging(); n != 1 {
+		t.Fatalf("swept %d staging trees", n)
+	}
+	if _, err := os.Lstat(stale); err == nil {
+		t.Fatal("the stale staging tree survived the sweep")
+	}
+	if r.outcomes(t) != 1 || r.records(t) != 0 {
+		t.Fatalf("after the sweep: outcomes=%d staging records=%d", r.outcomes(t), r.records(t))
+	}
+	if _, err := os.Lstat(first.PreviousKept); err != nil {
+		t.Fatal("the sweep removed the kept copy")
+	}
+	stops, _ := r.rt.counts()
+	fetches := r.e.requests()
+	ack := s2.RestoreVolume(context.Background(), r.cmd(t))
+	if !ack.OK || !ack.Replayed || ack.PreviousKept != first.PreviousKept || ack.ReplayedFrom.IsZero() {
+		t.Fatalf("after restart: %+v", ack)
+	}
+	if s3, _ := r.rt.counts(); s3 != stops || r.e.requests() != fetches {
+		t.Fatal("the replay after a restart fetched or stopped something")
+	}
+}
+
+// The kept copy is gone — the operator removed it, or a later restore's
+// swap failed after clearing it — and the id still replays, because the
+// record is of the outcome; the detail says the copy is gone.
+func TestRestoreVolumeReplaysWhenTheKeptCopyIsGone(t *testing.T) {
+	r := newRestoreRig(t)
+	r.corrupt(t)
+	first := r.s.RestoreVolume(context.Background(), r.cmd(t))
+	if !first.OK {
+		t.Fatalf("first: %+v", first)
+	}
+	if err := os.RemoveAll(first.PreviousKept); err != nil {
+		t.Fatal(err)
+	}
+	stops, _ := r.rt.counts()
+	ack := r.s.RestoreVolume(context.Background(), r.cmd(t))
+	if !ack.OK || !ack.Replaced || !ack.Replayed {
+		t.Fatalf("replay: %+v", ack)
+	}
+	if !strings.Contains(ack.Detail, "no longer exists") || !strings.Contains(ack.Detail, first.PreviousKept) {
+		t.Fatalf("detail does not say the kept copy is gone: %q", ack.Detail)
+	}
+	if ack.PreviousKept != first.PreviousKept {
+		t.Fatalf("the replay rewrote where the copy was kept: %q", ack.PreviousKept)
+	}
+	if s2, _ := r.rt.counts(); s2 != stops {
+		t.Fatal("the replay stopped the app")
+	}
+}
+
+// The same RestoreID for a different member or generation is a caller
+// bug, and it is refused rather than answered with the wrong record — and
+// rather than run.
+func TestRestoreVolumeRefusesAReusedIDForADifferentRestore(t *testing.T) {
+	r := newRestoreRig(t)
+	r.corrupt(t)
+	if first := r.s.RestoreVolume(context.Background(), r.cmd(t)); !first.OK {
+		t.Fatalf("first: %+v", first)
+	}
+	live := r.snapshot(t)
+	stops, _ := r.rt.counts()
+	fetches := r.e.requests()
+	cmd := r.cmd(t)
+	cmd.GenerationID = "20260905T041601Z-1WF3849B-full"
+	ack := r.s.RestoreVolume(context.Background(), cmd)
+	if ack.OK || ack.Replayed || ack.Refusal != proto.BackupRefusalStagingMissing || !strings.Contains(ack.Detail, "already names a completed restore") {
+		t.Fatalf("ack: %+v", ack)
+	}
+	if s2, _ := r.rt.counts(); s2 != stops || r.e.requests() != fetches {
+		t.Fatal("a reused id ran a restore")
+	}
+	if got := r.snapshot(t); fmt.Sprint(got) != fmt.Sprint(live) {
+		t.Fatal("a reused id changed the volume")
+	}
+}
+
+// A failed restore under a new id leaves the previous record standing: the
+// previous outcome is still what last happened to the volume.
+func TestRestoreVolumeAFailedRestoreLeavesThePriorRecord(t *testing.T) {
+	r := newRestoreRig(t)
+	r.corrupt(t)
+	first := r.s.RestoreVolume(context.Background(), r.cmd(t))
+	if !first.OK {
+		t.Fatalf("first: %+v", first)
+	}
+	cmd := r.cmd(t)
+	cmd.RestoreID = "rs-2"
+	cmd.PlaintextDigest = strings.Repeat("0", 64)
+	if ack := r.s.RestoreVolume(context.Background(), cmd); ack.OK || ack.Refusal != proto.BackupRefusalDigestMismatch {
+		t.Fatalf("rs-2: %+v", ack)
+	}
+	if ack := r.s.RestoreVolume(context.Background(), r.cmd(t)); !ack.Replayed || ack.PreviousKept != first.PreviousKept {
+		t.Fatalf("rs-1 no longer replays after a failed rs-2: %+v", ack)
+	}
 }

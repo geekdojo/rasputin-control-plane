@@ -45,9 +45,12 @@ type Stager struct {
 	// The restore verb's seams (restore.go): the fetcher for a source, the
 	// directory in-flight staging trees are recorded in for the boot sweep,
 	// and the atomic exchange itself.
-	fetcherFor       func(source string) (backupxfer.Fetcher, error)
-	restoreRecordDir string
-	swapFn           func(live, staging string) error
+	// restoreOutcomeDir is where each volume's last completed restore is
+	// recorded, keyed by RestoreID, so a repeat is answered, not run.
+	fetcherFor        func(source string) (backupxfer.Fetcher, error)
+	restoreRecordDir  string
+	restoreOutcomeDir string
+	swapFn            func(live, staging string) error
 }
 
 // New builds a Stager over the runtime. stagingRoot is the agent's one

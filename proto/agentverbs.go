@@ -65,6 +65,25 @@ var verbMinAgentVersion = map[string]string{
 	"storage.backup_restore_volume": "2026.08.5-dev.140",
 }
 
+// RestoreReplayMinAgentVersion is the first agent release whose
+// storage.backup_restore_volume keeps a durable record of a completed swap
+// under the command's RestoreID and answers a repeat of that id from it
+// (BackupRestoreVolumeAck.Replayed) instead of restoring again
+// (geekdojo/geekdojo-brain#396). Not a verb — the subject is unchanged, so
+// an older agent still ANSWERS, just by running the restore a second time —
+// which is why it is a separate floor and not an entry in
+// verbMinAgentVersion. The restore saga re-issues a command whose reply was
+// lost and reads the answer against this floor: at or above it a fresh,
+// non-replayed ack is proof the first request never ran; below it the ack
+// is only what the second run did, and the record says so.
+//
+// Entered when the change was authored, before its release existed, as the
+// NEXT release run after v2026.08.5-dev.146 (the newest published
+// control-plane release at the time). Confirm with `git tag --contains`
+// once the release exists and correct the floor if a release was cut in
+// between.
+const RestoreReplayMinAgentVersion = "2026.08.5-dev.147"
+
 // StorageInspectProbeMinAgentVersion is the first agent release whose
 // storage.inspect honours StorageInspectCmd.Probe and answers with a
 // WriteProbe. Not a verb — the subject is unchanged, so an older agent still

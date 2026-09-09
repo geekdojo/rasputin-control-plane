@@ -1619,6 +1619,10 @@ export interface AppVolumeRestoreRecord {
   appRestored: boolean;
   restoreDetail?: string;
   previousKept?: string;
+  /** Set when the first request's reply was lost: how the outcome was settled. */
+  replyLost?: string;
+  /** True when that settlement came from the node's own record of the restore. */
+  replayed?: boolean;
 }
 
 /** One of an app's volumes as one generation holds it, with the plan's verdict for it today. */

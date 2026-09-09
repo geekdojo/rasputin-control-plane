@@ -3,6 +3,7 @@ package quiesce
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,21 @@ import (
 // a sweep that removed it silently would be the thing this verb exists to
 // prevent from the other side. A staging tree a dying process left behind
 // IS swept at boot, through a record written beside the armed-stop markers.
+//
+// # The outcome record, and the reply that never arrived
+//
+// The api's request can lose its reply — the bus drops it, the api restarts
+// mid-verb, the RPC budget runs out while the download is still going — and
+// then the api knows only that it asked. Asking again is not safe: a second
+// restore stops the app a second time and REMOVES THE KEPT COPY, the
+// operator's way back. So a completed swap is recorded, durably, under the
+// command's RestoreID (geekdojo-brain#396): one record per volume, in the
+// agent's state dir, superseded by the next successful restore of that
+// volume, and never swept — the boot sweep clears staging trees, not
+// history. A command carrying a RestoreID this node has a record of for
+// that volume is answered FROM THE RECORD (Replayed in the ack) without
+// fetching, stopping the app or touching the kept copy. That is how "did it
+// happen?" is settled on a fact this node wrote rather than on a clock.
 
 // Directory names beside a volume. Both dot-prefixed so nothing that lists
 // a volume's parent by name mistakes them for volumes.
@@ -84,6 +100,24 @@ func RestoreRecordDir(stateDir string) string { return filepath.Join(stateDir, r
 // tree nothing would sweep.
 func (s *Stager) SetRestoreRecordDir(dir string) { s.restoreRecordDir = dir }
 
+// restoreOutcomeDirName is the directory under the agent's state dir where
+// each volume's last completed restore is recorded, keyed by RestoreID, so
+// a repeat of that command is answered rather than run again. Separate from
+// the staging records on purpose: the boot sweep reads that directory and
+// removes what it finds; it never reads this one.
+const restoreOutcomeDirName = "restore-outcomes"
+
+// RestoreOutcomeDir is where completed restores are recorded, and the one
+// place that is decided.
+func RestoreOutcomeDir(stateDir string) string {
+	return filepath.Join(stateDir, restoreOutcomeDirName)
+}
+
+// SetRestoreOutcomeDir points the stager at RestoreOutcomeDir(stateDir). Set
+// by main; a stager without one refuses every restore, because a swap it
+// could not record is one the api could never settle on a lost reply.
+func (s *Stager) SetRestoreOutcomeDir(dir string) { s.restoreOutcomeDir = dir }
+
 // restoreRecord is what is written for one staging tree. Identifiers and a
 // path on this node; nothing else.
 type restoreRecord struct {
@@ -92,6 +126,26 @@ type restoreRecord struct {
 	Volume    string    `json:"volume"`
 	RestoreID string    `json:"restoreId,omitempty"`
 	StartedAt time.Time `json:"startedAt"`
+}
+
+// restoreOutcome is the durable record of one volume's last completed
+// restore: what was asked (the ids and the manifest's digest, so a repeat is
+// matched on more than the RestoreID), what was done (the ack as it was
+// sent, restart facts and all) and when. It holds the ack, not the command,
+// and the ack never carries the credential — nothing here is a secret.
+type restoreOutcome struct {
+	RestoreID       string    `json:"restoreId"`
+	AppID           string    `json:"appId"`
+	Volume          string    `json:"volume"`
+	GenerationID    string    `json:"generationId"`
+	Member          string    `json:"member"`
+	PlaintextDigest string    `json:"plaintextDigest"`
+	PreviousKept    string    `json:"previousKept,omitempty"`
+	StartedAt       time.Time `json:"startedAt"`
+	CompletedAt     time.Time `json:"completedAt"`
+	// Ack is the ack the swap was answered with, so a replay says exactly
+	// what the original did.
+	Ack proto.BackupRestoreVolumeAck `json:"ack"`
 }
 
 // The restore refusals, as sentinel errors so the ack's code is derived from
@@ -135,7 +189,7 @@ func (s *Stager) RestoreVolume(ctx context.Context, cmd proto.BackupRestoreVolum
 		}
 	}()
 
-	if err := validateRestore(s.restoreRecordDir, cmd); err != nil {
+	if err := validateRestore(s.restoreRecordDir, s.restoreOutcomeDir, cmd); err != nil {
 		return s.failRestore(ack, err)
 	}
 	switch cmd.Class {
@@ -147,6 +201,13 @@ func (s *Stager) RestoreVolume(ctx context.Context, cmd proto.BackupRestoreVolum
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// A RestoreID this node already completed for this volume is answered
+	// from the record, before anything is resolved, fetched or stopped.
+	if prior, err := s.readRestoreOutcome(cmd.AppID, cmd.Volume); err == nil && prior != nil && prior.RestoreID == cmd.RestoreID {
+		return s.replayRestore(ack, cmd, prior)
+	}
+	startedAt := time.Now().UTC()
 
 	volRoot, err := s.rt.ResolveVolume(ctx, cmd.AppID, cmd.Volume)
 	if err != nil {
@@ -173,7 +234,7 @@ func (s *Stager) RestoreVolume(ctx context.Context, cmd proto.BackupRestoreVolum
 	if err := os.Mkdir(staging, 0o700); err != nil {
 		return s.failRestore(ack, fmt.Errorf("create staging directory beside the volume: %w", err))
 	}
-	record, err := s.writeRestoreRecord(restoreRecord{Staging: staging, AppID: cmd.AppID, Volume: cmd.Volume, RestoreID: cmd.RestoreID, StartedAt: time.Now().UTC()})
+	record, err := s.writeRestoreRecord(restoreRecord{Staging: staging, AppID: cmd.AppID, Volume: cmd.Volume, RestoreID: cmd.RestoreID, StartedAt: startedAt})
 	if err != nil {
 		_ = os.RemoveAll(staging)
 		return s.failRestore(ack, fmt.Errorf("record the staging tree so a crash can be swept: %w", err))
@@ -184,6 +245,27 @@ func (s *Stager) RestoreVolume(ctx context.Context, cmd proto.BackupRestoreVolum
 			_ = os.RemoveAll(staging)
 		}
 		_ = os.Remove(record)
+	}()
+	// Registered before the guard's release so it runs AFTER it: the record
+	// holds the ack as it is sent, restart facts included. Only a swap that
+	// happened is recorded — a refusal leaves the previous record standing,
+	// because the previous outcome is still what last happened to this
+	// volume.
+	defer func() {
+		if !swapped {
+			return
+		}
+		if err := s.writeRestoreOutcome(restoreOutcome{
+			RestoreID: cmd.RestoreID, AppID: cmd.AppID, Volume: cmd.Volume,
+			GenerationID: cmd.GenerationID, Member: cmd.Member, PlaintextDigest: strings.ToLower(strings.TrimSpace(cmd.PlaintextDigest)),
+			PreviousKept: ack.PreviousKept, StartedAt: startedAt, CompletedAt: time.Now().UTC(), Ack: *ack,
+		}); err != nil {
+			// The swap stands and the ack says so; what is lost is the answer
+			// to a repeat of this RestoreID, and that is said here so the api
+			// records it beside the volume.
+			s.logf("rasputin-agent: restore: volume %s/%s was replaced but the outcome could NOT be recorded under restore %s: %v — a repeat of this restore would run again", cmd.AppID, cmd.Volume, cmd.RestoreID, err)
+			ack.Detail = strings.TrimSpace(ack.Detail + "; the outcome could not be recorded on the node (" + err.Error() + "), so a repeat of this restore would run again")
+		}
 	}()
 
 	// ----- fetch and unpack, with the app still running ------------------
@@ -389,11 +471,88 @@ func (s *Stager) writeRestoreRecord(r restoreRecord) (string, error) {
 	return path, nil
 }
 
+// replayRestore answers a command from the record of the restore it names:
+// the recorded ack, marked Replayed, with the completion time. A record whose
+// generation, member or digest is not the command's is a RestoreID reused
+// for something else, and that is refused rather than answered — an id names
+// one restore of one member, and an answer to a different question is worse
+// than none.
+func (s *Stager) replayRestore(ack *proto.BackupRestoreVolumeAck, cmd proto.BackupRestoreVolumeCmd, prior *restoreOutcome) *proto.BackupRestoreVolumeAck {
+	if prior.GenerationID != cmd.GenerationID || prior.Member != cmd.Member || !strings.EqualFold(prior.PlaintextDigest, cmd.PlaintextDigest) {
+		return s.failRestore(ack, fmt.Errorf("%w: restore id %s already names a completed restore of %s/%s from generation %s member %s (digest %s), and this command asks for generation %s member %s (digest %s) under the same id; a restore id names one restore, so nothing was done",
+			ErrBadName, cmd.RestoreID, cmd.AppID, cmd.Volume, prior.GenerationID, prior.Member, short(prior.PlaintextDigest), cmd.GenerationID, cmd.Member, short(cmd.PlaintextDigest)))
+	}
+	*ack = prior.Ack
+	ack.Replayed = true
+	ack.ReplayedFrom = prior.CompletedAt
+	detail := fmt.Sprintf("answered from this node's record: restore %s replaced %s/%s at %s; nothing was fetched, the app was not stopped and the kept copy was not touched",
+		cmd.RestoreID, cmd.AppID, cmd.Volume, prior.CompletedAt.Format(time.RFC3339))
+	if prior.PreviousKept != "" {
+		if st, err := os.Lstat(prior.PreviousKept); err != nil || !st.IsDir() {
+			detail += fmt.Sprintf("; the kept copy at %s no longer exists (the swap still happened — the record is of the outcome, not of the copy)", prior.PreviousKept)
+		}
+	}
+	ack.Detail = detail
+	s.logf("rasputin-agent: restore: REPLAY restore %s of %s/%s answered from the record (completed %s); nothing was fetched, stopped or touched", cmd.RestoreID, cmd.AppID, cmd.Volume, prior.CompletedAt.Format(time.RFC3339))
+	return ack
+}
+
+// restoreOutcomePath is the record's file name for one volume: the app id
+// and volume name mapped to plain characters, with a digest of the exact
+// pair so two names that map to the same characters cannot share a file.
+func (s *Stager) restoreOutcomePath(appID, volume string) string {
+	sum := sha256.Sum256([]byte(appID + "\x00" + volume))
+	return filepath.Join(s.restoreOutcomeDir, strings.TrimSuffix(markerName(appID), ".json")+"--"+strings.TrimSuffix(markerName(volume), ".json")+"-"+hex.EncodeToString(sum[:6])+".json")
+}
+
+// readRestoreOutcome reads the volume's record; nil, nil when there is none
+// or it is not one this package wrote.
+func (s *Stager) readRestoreOutcome(appID, volume string) (*restoreOutcome, error) {
+	raw, err := os.ReadFile(s.restoreOutcomePath(appID, volume)) //nolint:gosec // G304: a record this agent wrote under its own state dir, at a path it derived
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var o restoreOutcome
+	if err := json.Unmarshal(raw, &o); err != nil || o.AppID != appID || o.Volume != volume || o.RestoreID == "" {
+		return nil, nil
+	}
+	return &o, nil
+}
+
+// writeRestoreOutcome records the volume's completed restore: written whole
+// to a temporary name and renamed into place, so a reader never sees half
+// of one, and synced so it survives the power going.
+func (s *Stager) writeRestoreOutcome(o restoreOutcome) error {
+	if err := os.MkdirAll(s.restoreOutcomeDir, 0o700); err != nil {
+		return err
+	}
+	body, err := json.Marshal(o)
+	if err != nil {
+		return err
+	}
+	path := s.restoreOutcomePath(o.AppID, o.Volume)
+	tmp := path + ".tmp-" + randomHex(4)
+	if err := writeFileSync(tmp, body); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return syncDir(s.restoreOutcomeDir)
+}
+
 // SweepRestoreStaging removes every staging tree a previous agent process
 // recorded and did not live to remove or swap — §4.7's "cleanup on boot",
 // for the reverse direction. A record whose tree is gone is just removed. A
-// replaced copy (`.rasputin-replaced-*`) is never touched here. Called at
-// agent start; returns how many trees were removed.
+// replaced copy (`.rasputin-replaced-*`) is never touched here, and neither
+// is a completed restore's outcome record (RestoreOutcomeDir) — that is
+// history, not staging, and the next restore of the volume supersedes it.
+// Called at agent start; returns how many trees were removed.
 func (s *Stager) SweepRestoreStaging() int {
 	ents, err := os.ReadDir(s.restoreRecordDir)
 	if err != nil {
@@ -472,9 +631,12 @@ func restoreRefusalFor(err error) proto.StorageRefusal {
 	return refusalFor(err)
 }
 
-func validateRestore(recordDir string, cmd proto.BackupRestoreVolumeCmd) error {
+func validateRestore(recordDir, outcomeDir string, cmd proto.BackupRestoreVolumeCmd) error {
 	if strings.TrimSpace(recordDir) == "" {
 		return fmt.Errorf("%w: this agent has no restore record directory configured, so a staging tree it left could never be swept", ErrBadName)
+	}
+	if strings.TrimSpace(outcomeDir) == "" {
+		return fmt.Errorf("%w: this agent has no restore outcome directory configured, so a swap it completed could never be answered for on a lost reply", ErrBadName)
 	}
 	if strings.TrimSpace(cmd.AppID) == "" {
 		return fmt.Errorf("%w: the command names no app", ErrBadName)
