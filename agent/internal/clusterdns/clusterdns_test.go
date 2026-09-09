@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -68,7 +69,7 @@ func TestApplyWritesAndReloads(t *testing.T) {
 	reloads := 0
 	cfg := testCfg(t, &reloads)
 
-	changed, err := Apply(context.Background(), cfg)
+	changed, err := New(cfg).Apply(context.Background(), TriggerTick)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -95,10 +96,10 @@ func TestApplyIsIdempotent(t *testing.T) {
 	reloads := 0
 	cfg := testCfg(t, &reloads)
 
-	if _, err := Apply(context.Background(), cfg); err != nil {
+	if _, err := New(cfg).Apply(context.Background(), TriggerTick); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
-	changed, err := Apply(context.Background(), cfg)
+	changed, err := New(cfg).Apply(context.Background(), TriggerTick)
 	if err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
@@ -113,12 +114,12 @@ func TestApplyIsIdempotent(t *testing.T) {
 func TestApplyRewritesWhenServerMoves(t *testing.T) {
 	reloads := 0
 	cfg := testCfg(t, &reloads)
-	if _, err := Apply(context.Background(), cfg); err != nil {
+	if _, err := New(cfg).Apply(context.Background(), TriggerTick); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 
 	cfg.ServerIP = at("192.168.197.9")
-	changed, err := Apply(context.Background(), cfg)
+	changed, err := New(cfg).Apply(context.Background(), TriggerTick)
 	if err != nil {
 		t.Fatalf("Apply after move: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestApplyRequiresClusterAndServer(t *testing.T) {
 		{"no address source", Config{ClusterID: "rasputin", Dir: t.TempDir(), probe: reachable}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := Apply(context.Background(), tc.cfg); err == nil {
+			if _, err := New(tc.cfg).Apply(context.Background(), TriggerTick); err == nil {
 				t.Error("Apply succeeded with incomplete config")
 			}
 		})
@@ -156,7 +157,7 @@ func TestApplyReportsReloadFailureButKeepsFile(t *testing.T) {
 	cfg := testCfg(t, new(int))
 	cfg.reload = func(context.Context) error { return errors.New("boom") }
 
-	changed, err := Apply(context.Background(), cfg)
+	changed, err := New(cfg).Apply(context.Background(), TriggerTick)
 	if err == nil {
 		t.Error("Apply hid a reload failure")
 	}
@@ -305,7 +306,7 @@ func TestApply_FollowsTheControlPlaneWhenItMoves(t *testing.T) {
 	current := "192.168.1.182"
 	cfg.ServerIP = func() string { return current }
 
-	if _, err := Apply(context.Background(), cfg); err != nil {
+	if _, err := New(cfg).Apply(context.Background(), TriggerTick); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 	body, _ := os.ReadFile(filepath.Join(cfg.Dir, fileName))
@@ -315,7 +316,7 @@ func TestApply_FollowsTheControlPlaneWhenItMoves(t *testing.T) {
 
 	// The control plane reboots and comes back elsewhere.
 	current = "192.168.1.183"
-	changed, err := Apply(context.Background(), cfg)
+	changed, err := New(cfg).Apply(context.Background(), TriggerTick)
 	if err != nil {
 		t.Fatalf("Apply after the CP moved: %v", err)
 	}
@@ -338,7 +339,7 @@ func TestApply_WithdrawsAPinThatStoppedAnswering(t *testing.T) {
 	answering := true
 	cfg.probe = func(context.Context, string) bool { return answering }
 
-	if _, err := Apply(context.Background(), cfg); err != nil {
+	if _, err := New(cfg).Apply(context.Background(), TriggerTick); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 	path := filepath.Join(cfg.Dir, fileName)
@@ -347,7 +348,7 @@ func TestApply_WithdrawsAPinThatStoppedAnswering(t *testing.T) {
 	}
 
 	answering = false
-	changed, err := Apply(context.Background(), cfg)
+	changed, err := New(cfg).Apply(context.Background(), TriggerTick)
 	if !changed {
 		t.Error("Apply left a dead pin in place")
 	}
@@ -365,7 +366,7 @@ func TestApply_DoesNotWriteAnUnverifiedPin(t *testing.T) {
 	cfg := testCfg(t, new(int))
 	cfg.probe = func(context.Context, string) bool { return false }
 
-	if _, err := Apply(context.Background(), cfg); err != nil {
+	if _, err := New(cfg).Apply(context.Background(), TriggerTick); err != nil {
 		// An error is acceptable here (nothing to withdraw), a written file is not.
 		_ = err
 	}
@@ -374,28 +375,198 @@ func TestApply_DoesNotWriteAnUnverifiedPin(t *testing.T) {
 	}
 }
 
-// Losing the address entirely (bus down, so no peer to read) must also withdraw
-// rather than leave the last known pin asserting something we can no longer
-// stand behind.
-func TestApply_WithdrawsWhenTheAddressBecomesUnknown(t *testing.T) {
+// ---- the address is unknown ---------------------------------------------
+//
+// ServerIP returns "" whenever the bus is not connected — which includes the
+// seconds between the agent starting and its first dial, because Run starts
+// before the dial. The first version withdrew on sight, and the next look was
+// the five-minute tick: every agent restart took the node off the mesh for up
+// to five minutes (e3bench 2026-09-09, geekdojo/geekdojo-brain#403). Now an
+// existing pin is kept for a grace, probed while kept, and withdrawn only when
+// the grace runs out or the pinned server stops answering.
+
+// clock is a test clock: start it, then advance it.
+type clock struct{ t time.Time }
+
+func (c *clock) now() time.Time          { return c.t }
+func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func newClock() *clock                   { return &clock{t: time.Date(2026, 9, 9, 3, 30, 37, 0, time.UTC)} }
+func seedPin(t *testing.T, cfg Config, ip string) string {
+	t.Helper()
+	path := filepath.Join(cfg.Dir, fileName)
+	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(Render(cfg.ClusterID, ip)), 0o644); err != nil {
+		t.Fatalf("seed pin: %v", err)
+	}
+	return path
+}
+
+func TestApply_StartWithUnknownAddressKeepsAnExistingPinInsideTheGrace(t *testing.T) {
+	reloads := 0
+	cfg := testCfg(t, &reloads)
+	cfg.ServerIP = at("")
+	cfg.Grace = 20 * time.Second
+	clk := newClock()
+	cfg.now = clk.now
+	path := seedPin(t, cfg, "192.168.1.181")
+
+	p := New(cfg)
+	changed, err := p.Apply(context.Background(), TriggerStart)
+	if changed || err != nil {
+		t.Fatalf("start with an unknown address touched the pin: changed=%v err=%v", changed, err)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Fatal("the pin the previous process left was withdrawn on start")
+	}
+	// Still inside the grace: still kept.
+	clk.advance(19 * time.Second)
+	if changed, err := p.Apply(context.Background(), TriggerTick); changed || err != nil {
+		t.Fatalf("withdrew inside the grace: changed=%v err=%v", changed, err)
+	}
+	if reloads != 0 {
+		t.Errorf("resolved restarted %d time(s) while nothing changed", reloads)
+	}
+}
+
+func TestApply_WithdrawsWhenTheAddressStaysUnknownPastTheGrace(t *testing.T) {
 	cfg := testCfg(t, new(int))
-	known := true
-	cfg.ServerIP = func() string {
-		if known {
-			return "192.168.1.182"
-		}
-		return ""
+	cfg.ServerIP = at("")
+	cfg.Grace = 20 * time.Second
+	clk := newClock()
+	cfg.now = clk.now
+	path := seedPin(t, cfg, "192.168.1.181")
+
+	p := New(cfg)
+	if _, err := p.Apply(context.Background(), TriggerStart); err != nil {
+		t.Fatalf("start: %v", err)
 	}
-	if _, err := Apply(context.Background(), cfg); err != nil {
-		t.Fatalf("first Apply: %v", err)
-	}
-	known = false
-	changed, _ := Apply(context.Background(), cfg)
+	clk.advance(20 * time.Second)
+	changed, err := p.Apply(context.Background(), TriggerGrace)
 	if !changed {
-		t.Error("Apply kept a pin it could no longer justify")
+		t.Error("kept a pin past the grace with the bus still unconnected")
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Dir, fileName)); !os.IsNotExist(err) {
-		t.Error("drop-in still present after the control-plane address became unknown")
+	if err == nil || !strings.Contains(err.Error(), "longer than the 20s grace") || !strings.Contains(err.Error(), "["+TriggerGrace+"]") {
+		t.Errorf("withdrawal must say the grace ran out and which trigger saw it:\n%v", err)
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Error("drop-in still present after the grace")
+	}
+}
+
+// A fresh Pinner per look would restart the grace clock every time and never
+// withdraw. The clock lives on the Pinner; this pins that down.
+func TestApply_GraceClockSurvivesAcrossLooks(t *testing.T) {
+	cfg := testCfg(t, new(int))
+	cfg.ServerIP = at("")
+	cfg.Grace = 20 * time.Second
+	clk := newClock()
+	cfg.now = clk.now
+	seedPin(t, cfg, "192.168.1.181")
+
+	p := New(cfg)
+	for i := 0; i < 4; i++ {
+		if changed, _ := p.Apply(context.Background(), TriggerTick); changed {
+			t.Fatalf("look %d withdrew at %s into a 20s grace", i, clk.t.Sub(newClock().t))
+		}
+		clk.advance(6 * time.Second)
+	}
+	// 24 s in: due.
+	if changed, _ := p.Apply(context.Background(), TriggerTick); !changed {
+		t.Error("never withdrew; the grace clock is being reset between looks")
+	}
+}
+
+// Inside the grace the pin is kept, not trusted: the pinned server is read
+// back out of the drop-in and probed, and a dead one goes at once. Otherwise
+// the grace would re-arm the black-hole #202 exists to prevent.
+func TestApply_UnknownAddressStillWithdrawsAPinThatStoppedAnswering(t *testing.T) {
+	cfg := testCfg(t, new(int))
+	cfg.ServerIP = at("")
+	cfg.Grace = time.Hour
+	var probed []string
+	cfg.probe = func(_ context.Context, ip string) bool { probed = append(probed, ip); return false }
+	path := seedPin(t, cfg, "192.168.1.181")
+
+	changed, err := New(cfg).Apply(context.Background(), TriggerStart)
+	if !changed || err == nil {
+		t.Fatalf("a dead pin rode the grace out: changed=%v err=%v", changed, err)
+	}
+	if len(probed) != 1 || probed[0] != "192.168.1.181" {
+		t.Errorf("probed %v, want exactly the pinned address", probed)
+	}
+	if !strings.Contains(err.Error(), "pinned 192.168.1.181 is not answering") {
+		t.Errorf("withdrawal must name the dead pinned address:\n%v", err)
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Error("dead pin still present")
+	}
+}
+
+// The grace clock clears the moment the address is known again, so a later
+// loss starts a fresh grace rather than inheriting a half-spent one.
+func TestApply_KnownAddressResetsTheGrace(t *testing.T) {
+	cfg := testCfg(t, new(int))
+	cfg.Grace = 20 * time.Second
+	clk := newClock()
+	cfg.now = clk.now
+	known := ""
+	cfg.ServerIP = func() string { return known }
+	path := seedPin(t, cfg, "192.168.1.181")
+
+	p := New(cfg)
+	p.Apply(context.Background(), TriggerStart) // unknown: clock starts
+	clk.advance(15 * time.Second)
+	known = "192.168.1.181"
+	if changed, err := p.Apply(context.Background(), TriggerConnected); changed || err != nil {
+		t.Fatalf("re-pinning the same address should be a no-op: changed=%v err=%v", changed, err)
+	}
+	if p.graceRemaining() != 0 {
+		t.Error("grace still armed after the address became known")
+	}
+	known = ""
+	clk.advance(15 * time.Second) // 30 s since the FIRST loss, 15 s since the second
+	if changed, _ := p.Apply(context.Background(), TriggerTick); changed {
+		t.Error("withdrew on a grace inherited from an earlier loss")
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Error("pin gone inside a fresh grace")
+	}
+}
+
+func TestPinnedIP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, fileName)
+	if got := pinnedIP(path); got != "" {
+		t.Errorf("missing file: pinnedIP = %q, want empty", got)
+	}
+	if err := os.WriteFile(path, []byte(Render("e3bench", "192.168.1.181")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := pinnedIP(path); got != "192.168.1.181" {
+		t.Errorf("pinnedIP = %q, want 192.168.1.181", got)
+	}
+	if err := os.WriteFile(path, []byte("[Resolve]\nDomains=~x.local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := pinnedIP(path); got != "" {
+		t.Errorf("no DNS= line: pinnedIP = %q, want empty", got)
+	}
+}
+
+// Nothing pinned and no address is the boot case: nothing to keep, nothing to
+// withdraw, and no grace clock started for a pin that does not exist.
+func TestApply_UnknownAddressWithNothingPinnedIsQuiet(t *testing.T) {
+	cfg := testCfg(t, new(int))
+	cfg.ServerIP = at("")
+	p := New(cfg)
+	changed, err := p.Apply(context.Background(), TriggerStart)
+	if changed || err != nil {
+		t.Errorf("changed=%v err=%v, want a silent no-op", changed, err)
+	}
+	if p.graceRemaining() != 0 {
+		t.Error("grace armed with nothing pinned")
 	}
 }
 
@@ -404,7 +575,7 @@ func TestApply_WithdrawsWhenTheAddressBecomesUnknown(t *testing.T) {
 func TestApply_WithdrawIsQuietWhenNothingIsPinned(t *testing.T) {
 	cfg := testCfg(t, new(int))
 	cfg.probe = func(context.Context, string) bool { return false }
-	changed, err := Apply(context.Background(), cfg)
+	changed, err := New(cfg).Apply(context.Background(), TriggerTick)
 	if changed || err != nil {
 		t.Errorf("no pin to withdraw should be silent; changed=%v err=%v", changed, err)
 	}
@@ -455,13 +626,13 @@ func TestReachableNameserver_ListenerSaysYes(t *testing.T) {
 // error so only the text tells them apart.
 func TestWithdraw_ReloadFailureIsDistinguishable(t *testing.T) {
 	cfg := testCfg(t, new(int))
-	if _, err := Apply(context.Background(), cfg); err != nil {
+	if _, err := New(cfg).Apply(context.Background(), TriggerTick); err != nil {
 		t.Fatalf("seed Apply: %v", err)
 	}
 	cfg.probe = func(context.Context, string) bool { return false }
 	cfg.reload = func(context.Context) error { return errors.New("resolved is not running") }
 
-	changed, err := Apply(context.Background(), cfg)
+	changed, err := New(cfg).Apply(context.Background(), TriggerTick)
 	if !changed || err == nil {
 		t.Fatalf("expected a reported withdrawal; changed=%v err=%v", changed, err)
 	}
@@ -470,5 +641,209 @@ func TestWithdraw_ReloadFailureIsDistinguishable(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "falls back to mDNS until this resolves") {
 		t.Errorf("reported a clean withdrawal when the reload actually failed:\n%v", err)
+	}
+}
+
+// ---- Run follows the bus, not the tick -----------------------------------
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for !cond() {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", what)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// runCfg is a Run-level config whose tick can never fire: anything that
+// happens inside the test happened because of a trigger or a grace, not the
+// interval.
+func runCfg(t *testing.T, reloads *int) Config {
+	t.Helper()
+	cfg := testCfg(t, reloads)
+	cfg.Interval = time.Hour
+	if err := os.MkdirAll(filepath.Dir(cfg.Dir), 0o755); err != nil {
+		t.Fatalf("prepare parent dir: %v", err)
+	}
+	return cfg
+}
+
+func pinnedNow(path string) string { return pinnedIP(path) }
+
+// The bench timeline this exists for: agent up, bus connected seconds later,
+// pin written five MINUTES later on the tick. With the trigger the pin follows
+// the connection.
+func TestRun_PinsOnBusConnectWithoutWaitingForATick(t *testing.T) {
+	var mu sync.Mutex
+	reloads := 0
+	cfg := runCfg(t, &reloads)
+	cfg.reload = func(context.Context) error { mu.Lock(); reloads++; mu.Unlock(); return nil }
+	addr := ""
+	cfg.ServerIP = func() string { mu.Lock(); defer mu.Unlock(); return addr }
+	cfg.Trigger = NewTrigger()
+	path := filepath.Join(cfg.Dir, fileName)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { Run(ctx, cfg); close(done) }()
+
+	// Boot case: nothing pinned, address unknown, and Run must not have
+	// invented one. Give it a moment to make its start pass.
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("Run wrote a pin before the bus had an address")
+	}
+
+	// The bus connects: onConnected fires the trigger.
+	mu.Lock()
+	addr = "192.168.1.181"
+	mu.Unlock()
+	cfg.Trigger.Fire()
+	waitFor(t, "the pin after the bus connected", func() bool { return pinnedNow(path) == "192.168.1.181" })
+	mu.Lock()
+	if reloads != 1 {
+		t.Errorf("reloads = %d, want 1", reloads)
+	}
+	mu.Unlock()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run ignored context cancellation")
+	}
+}
+
+// A re-dial that lands on a control plane that moved re-pins to where it is
+// now; a re-fire with the same address does not restart resolved.
+func TestRun_RepinsOnRedialToANewAddressAndIsQuietWhenUnchanged(t *testing.T) {
+	var mu sync.Mutex
+	reloads := 0
+	cfg := runCfg(t, &reloads)
+	cfg.reload = func(context.Context) error { mu.Lock(); reloads++; mu.Unlock(); return nil }
+	addr := "192.168.1.181"
+	cfg.ServerIP = func() string { mu.Lock(); defer mu.Unlock(); return addr }
+	cfg.Trigger = NewTrigger()
+	path := filepath.Join(cfg.Dir, fileName)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, cfg)
+	waitFor(t, "the first pin", func() bool { return pinnedNow(path) == "192.168.1.181" })
+
+	// nats reconnect to the same server: onConnected fires again.
+	cfg.Trigger.Fire()
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	if reloads != 1 {
+		t.Errorf("an unchanged re-fire restarted resolved: reloads = %d, want 1", reloads)
+	}
+	// The control plane rebooted on a new lease; the client re-dialed it.
+	addr = "192.168.1.183"
+	mu.Unlock()
+	cfg.Trigger.Fire()
+	waitFor(t, "the re-pin to the new address", func() bool { return pinnedNow(path) == "192.168.1.183" })
+	mu.Lock()
+	if reloads != 2 {
+		t.Errorf("reloads = %d, want 2", reloads)
+	}
+	mu.Unlock()
+}
+
+// The grace runs on its own timer. With the tick an hour away and no trigger,
+// a pin kept at start is still withdrawn when the grace is up — not at the
+// next tick.
+func TestRun_GraceExpiresOnItsOwnClockNotTheTick(t *testing.T) {
+	var mu sync.Mutex
+	reloads := 0
+	cfg := runCfg(t, &reloads)
+	cfg.reload = func(context.Context) error { mu.Lock(); reloads++; mu.Unlock(); return nil }
+	cfg.ServerIP = at("")
+	cfg.Grace = 100 * time.Millisecond
+	cfg.Trigger = NewTrigger()
+	path := seedPin(t, cfg, "192.168.1.181")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, cfg)
+
+	// Kept at start.
+	time.Sleep(30 * time.Millisecond)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("pin withdrawn at start, inside the grace")
+	}
+	waitFor(t, "the withdrawal when the grace ran out", func() bool {
+		_, err := os.Stat(path)
+		return os.IsNotExist(err)
+	})
+	mu.Lock()
+	if reloads != 1 {
+		t.Errorf("reloads = %d, want 1 (the withdrawal)", reloads)
+	}
+	mu.Unlock()
+}
+
+// A bus that connects inside the grace cancels the withdrawal: the pin is
+// confirmed against the live address and the grace timer is disarmed.
+func TestRun_ConnectInsideTheGraceKeepsThePin(t *testing.T) {
+	var mu sync.Mutex
+	reloads := 0
+	cfg := runCfg(t, &reloads)
+	cfg.reload = func(context.Context) error { mu.Lock(); reloads++; mu.Unlock(); return nil }
+	addr := ""
+	cfg.ServerIP = func() string { mu.Lock(); defer mu.Unlock(); return addr }
+	cfg.Grace = 200 * time.Millisecond
+	cfg.Trigger = NewTrigger()
+	path := seedPin(t, cfg, "192.168.1.181")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, cfg)
+
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	addr = "192.168.1.181"
+	mu.Unlock()
+	cfg.Trigger.Fire()
+	// Well past where the grace would have expired.
+	time.Sleep(400 * time.Millisecond)
+	if pinnedNow(path) != "192.168.1.181" {
+		t.Error("pin withdrawn although the bus connected inside the grace")
+	}
+	mu.Lock()
+	if reloads != 0 {
+		t.Errorf("resolved restarted %d time(s) although nothing changed", reloads)
+	}
+	mu.Unlock()
+}
+
+func TestTrigger_FireNeverBlocksAndNilIsSafe(t *testing.T) {
+	var none *Trigger
+	none.Fire() // must not panic
+	if none.wait() != nil {
+		t.Error("a nil Trigger must select as never-ready")
+	}
+	tr := NewTrigger()
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			tr.Fire()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Fire blocked with nobody receiving")
+	}
+	select {
+	case <-tr.wait():
+	default:
+		t.Error("a fired Trigger had nothing to receive")
 	}
 }

@@ -80,6 +80,24 @@
 // worse off than it found it. It is inserting itself into name resolution,
 // which everything else depends on.
 //
+// A third rule, from a different afternoon (e3bench 2026-09-09,
+// geekdojo/geekdojo-brain#403): NOT KNOWING the address yet is not the same
+// as having LOST it. The first version applied once at start — before the bus
+// had dialed, so the address read as unknown — and withdrew the pin the
+// previous process had left under /run; the next look was the five-minute
+// tick. Every agent restart therefore took the node off the mesh for up to
+// five minutes: tailscaled failed its control-URL lookup every 15 s until the
+// tick re-pinned, and reached Running 4 s after. So now:
+//
+//   - The bus connecting is a TRIGGER, not something the tick discovers. The
+//     agent fires it from the bus client's onConnected — first dial, nats
+//     reconnect and re-dial alike — and the pin is written seconds after the
+//     registration goes out, from the address the bus actually connected to.
+//   - An unknown address withdraws an existing pin only after a GRACE
+//     (DefaultGrace) has passed with the bus still unconnected, or at once if
+//     the pinned server itself stops answering. Inside the grace the pin is
+//     kept and verified, not trusted.
+//
 // The drop-in lives under /run, not /etc: rasputin-os ships a read-only
 // rootfs. That also makes it self-healing rather than sticky — it evaporates
 // on reboot and is rewritten by the agent on the way back up, so a stale
@@ -113,6 +131,27 @@ const fileName = "50-rasputin-cluster-dns.conf"
 // think it says. Cheap — a stat and a string compare — and only ever writes
 // when the content actually differs.
 const DefaultInterval = 5 * time.Minute
+
+// DefaultGrace is how long an unknown control-plane address is tolerated
+// before an existing pin is withdrawn. The address is unknown whenever the bus
+// is not connected — including the seconds between the agent starting and its
+// first dial succeeding, which is a startup, not a loss. Two heartbeat
+// intervals (the agent heartbeats every 10 s): long enough that a restart or a
+// re-dial completes inside it, short enough that a control plane that really
+// has gone is handed back to mDNS promptly. Inside the grace the pinned server
+// is still probed on every look, so a dead pin never rides the grace out.
+const DefaultGrace = 20 * time.Second
+
+// Trigger names, for the log lines: which event asked for the pin to be
+// checked. Every pin, keep and withdrawal says which one it was, because the
+// bug this package last had was only findable by matching those against
+// tailscaled's own timestamps.
+const (
+	TriggerStart     = "start"
+	TriggerConnected = "bus connected"
+	TriggerTick      = "tick"
+	TriggerGrace     = "grace expired"
+)
 
 // probeTimeout bounds the reachability check. Short: the control plane is on
 // the LAN, and a check that hangs would stall the loop that is supposed to
@@ -152,9 +191,52 @@ type Config struct {
 	// Interval is the re-check period. Empty means DefaultInterval.
 	Interval time.Duration
 
+	// Grace is how long ServerIP may return "" before an existing pin is
+	// withdrawn. Empty means DefaultGrace.
+	Grace time.Duration
+
+	// Trigger, when set, wakes Run outside the tick. The agent fires it from
+	// the bus client's onConnected so the pin follows the connection rather
+	// than waiting for the next Interval. Nil means the tick is the only
+	// clock, which is the state that cost five minutes per restart.
+	Trigger *Trigger
+
 	// reload applies the written config. Nil means restart systemd-resolved.
 	// Injected by tests.
 	reload func(context.Context) error
+
+	// now is the clock the grace is measured on. Injected by tests.
+	now func() time.Time
+}
+
+// Trigger is a wake-up for Run: Fire when the bus (re)connects and the pin is
+// checked immediately, against the address the bus is now connected to.
+type Trigger struct{ ch chan struct{} }
+
+// NewTrigger makes a Trigger. One is enough for the life of the agent.
+func NewTrigger() *Trigger { return &Trigger{ch: make(chan struct{}, 1)} }
+
+// Fire asks for an immediate check. Never blocks and never queues more than
+// one: Run re-reads the address when it wakes, so two fires before it does are
+// one check against the current address, which is all a second fire could ask
+// for anyway.
+func (t *Trigger) Fire() {
+	if t == nil {
+		return
+	}
+	select {
+	case t.ch <- struct{}{}:
+	default:
+	}
+}
+
+// wait is the channel Run selects on; nil (never ready) when there is no
+// Trigger, so the select degrades to the tick alone.
+func (t *Trigger) wait() <-chan struct{} {
+	if t == nil {
+		return nil
+	}
+	return t.ch
 }
 
 func (c *Config) applyDefaults() {
@@ -170,6 +252,29 @@ func (c *Config) applyDefaults() {
 	if c.probe == nil {
 		c.probe = reachableNameserver
 	}
+	if c.Grace <= 0 {
+		c.Grace = DefaultGrace
+	}
+	if c.now == nil {
+		c.now = time.Now
+	}
+}
+
+// Pinner holds the one piece of state Apply needs across calls: how long the
+// control-plane address has been unknown. Build one with New and keep it for
+// the life of the loop; a fresh Pinner per call would restart the grace clock
+// and never withdraw.
+type Pinner struct {
+	cfg Config
+	// unknownSince is when ServerIP first returned "" with a pin on disk, or
+	// zero when the address is known (or nothing is pinned).
+	unknownSince time.Time
+}
+
+// New builds a Pinner. Defaults are applied here, once.
+func New(cfg Config) *Pinner {
+	cfg.applyDefaults()
+	return &Pinner{cfg: cfg}
 }
 
 // Domains returns the routing-only domains we claim for the cluster: the mDNS
@@ -188,8 +293,8 @@ func Domains(clusterID string) []string {
 // bytes we would write, and so the content is inspectable without a filesystem.
 func Render(clusterID, serverIP string) string {
 	var b strings.Builder
-	b.WriteString("# Written by rasputin-agent (clusterdns). Do not edit — rewritten on\n")
-	b.WriteString("# every agent start. See geekdojo/geekdojo-brain#202.\n")
+	b.WriteString("# Written by rasputin-agent (clusterdns). Do not edit — rewritten each\n")
+	b.WriteString("# time the agent connects to the bus. See geekdojo/geekdojo-brain#202.\n")
 	b.WriteString("#\n")
 	b.WriteString("# Routes ONLY the cluster's own domains at the control plane. Every other\n")
 	b.WriteString("# query stays on the DNS servers DHCP provided.\n")
@@ -204,8 +309,12 @@ func Render(clusterID, serverIP string) string {
 // Idempotent: the steady-state call does a read and a compare and nothing else,
 // which is what makes it safe to run on an interval — restarting resolved
 // flushes its cache, so we do it only on an actual change.
-func Apply(ctx context.Context, cfg Config) (changed bool, err error) {
-	cfg.applyDefaults()
+//
+// trigger names the event that asked (TriggerStart, TriggerConnected, …) and
+// appears in every line this produces, so a withdrawal can be matched against
+// what the rest of the node was doing at the time.
+func (p *Pinner) Apply(ctx context.Context, trigger string) (changed bool, err error) {
+	cfg := p.cfg
 	if cfg.ClusterID == "" {
 		return false, fmt.Errorf("clusterdns: no cluster id")
 	}
@@ -220,10 +329,9 @@ func Apply(ctx context.Context, cfg Config) (changed bool, err error) {
 	// left pinned to where it used to be.
 	ip := cfg.ServerIP()
 	if ip == "" {
-		// We no longer know where the control plane is. An out-of-date pin is
-		// worse than none, so withdraw it and let mDNS answer again.
-		return withdraw(ctx, cfg, path, "control-plane address unknown")
+		return p.addressUnknown(ctx, path, trigger)
 	}
+	p.unknownSince = time.Time{}
 
 	// Never leave a pin in place that does not answer. The domains are
 	// ROUTING-ONLY, so resolved sends the cluster's names to this server and
@@ -231,7 +339,7 @@ func Apply(ctx context.Context, cfg Config) (changed bool, err error) {
 	// without the drop-in mDNS would at least have answered. Being wrong here
 	// is worse than doing nothing, so verify before asserting.
 	if !cfg.probe(ctx, ip) {
-		return withdraw(ctx, cfg, path, fmt.Sprintf("%s is not answering for the cluster name", ip))
+		return withdraw(ctx, cfg, path, trigger, fmt.Sprintf("%s is not answering for the cluster name", ip))
 	}
 
 	want := Render(cfg.ClusterID, ip)
@@ -270,9 +378,73 @@ func Apply(ctx context.Context, cfg Config) (changed bool, err error) {
 	return true, nil
 }
 
-// Run applies the drop-in and then re-applies on an interval until ctx ends.
-// It is report-only about its own failures: a node whose DNS we cannot steer
-// is still a working node for everything that does not need the mesh, so this
+// addressUnknown is Apply when ServerIP returned "": the bus is not connected,
+// so there is no peer to read. That is a startup as often as it is a loss —
+// the agent applies once before its first dial, and /run still holds the pin
+// the previous process wrote — so an existing pin is not withdrawn on sight.
+// It is KEPT for the grace and VERIFIED while kept: the pinned server is
+// probed every look, and a pin that has stopped answering goes at once,
+// grace or not. Only when the grace runs out with the bus still unconnected
+// is a live pin withdrawn, on the reasoning the package comment gives —
+// flaky mDNS beats a pin nobody can vouch for.
+func (p *Pinner) addressUnknown(ctx context.Context, path, trigger string) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		p.unknownSince = time.Time{}
+		return false, nil // nothing pinned; nothing to keep or withdraw
+	}
+	now := p.cfg.now()
+	if p.unknownSince.IsZero() {
+		p.unknownSince = now
+		log.Printf("clusterdns: [%s] control-plane address not known yet; keeping the existing pin for up to %s while the bus connects",
+			trigger, p.cfg.Grace)
+	}
+	if pinned := pinnedIP(path); pinned != "" && !p.cfg.probe(ctx, pinned) {
+		return withdraw(ctx, p.cfg, path, trigger,
+			fmt.Sprintf("control-plane address unknown and the pinned %s is not answering", pinned))
+	}
+	if elapsed := now.Sub(p.unknownSince); elapsed < p.cfg.Grace {
+		return false, nil
+	}
+	return withdraw(ctx, p.cfg, path, trigger,
+		fmt.Sprintf("control-plane address unknown for %s, longer than the %s grace",
+			now.Sub(p.unknownSince).Round(time.Second), p.cfg.Grace))
+}
+
+// graceRemaining is how long until a pin kept under the grace is due to be
+// withdrawn, or 0 when nothing is deferred. Run arms a timer on it so the
+// grace expires on its own clock rather than at the next tick.
+func (p *Pinner) graceRemaining() time.Duration {
+	if p.unknownSince.IsZero() {
+		return 0
+	}
+	if left := p.cfg.Grace - p.cfg.now().Sub(p.unknownSince); left > 0 {
+		return left
+	}
+	// Due already; a nanosecond keeps the timer distinguishable from "none".
+	return time.Nanosecond
+}
+
+// pinnedIP reads the DNS= address back out of a drop-in we wrote, or "" if
+// the file is unreadable or not ours. Used only when the bus cannot tell us
+// where the control plane is: the pin is then the only address we have, and
+// it is probed rather than trusted.
+func pinnedIP(path string) string {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if v, ok := strings.CutPrefix(line, "DNS="); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// Run applies the drop-in and then re-applies whenever the Trigger fires, when
+// a grace runs out, and on an interval as the safety net, until ctx ends. It
+// is report-only about its own failures: a node whose DNS we cannot steer is
+// still a working node for everything that does not need the mesh, so this
 // never takes the agent down with it.
 func Run(ctx context.Context, cfg Config) {
 	cfg.applyDefaults()
@@ -292,13 +464,15 @@ func Run(ctx context.Context, cfg Config) {
 		}
 	}
 
-	log.Printf("clusterdns: keeping %s pointed at the control plane, re-checked every %s",
-		strings.Join(Domains(cfg.ClusterID), " "), cfg.Interval)
+	log.Printf("clusterdns: keeping %s pointed at the control plane — pinned when the bus connects, re-checked every %s, an unknown address tolerated for %s",
+		strings.Join(Domains(cfg.ClusterID), " "), cfg.Interval, cfg.Grace)
 
+	p := New(cfg)
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
+	trigger := TriggerStart
 	for {
-		changed, err := Apply(ctx, cfg)
+		changed, err := p.Apply(ctx, trigger)
 		switch {
 		case err != nil:
 			log.Printf("clusterdns: %v", err)
@@ -306,14 +480,31 @@ func Run(ctx context.Context, cfg Config) {
 			// Log the address as it is NOW, not as it was at startup — a
 			// changed line here is usually the control plane having moved,
 			// which is the event worth seeing.
-			log.Printf("clusterdns: %s now routes %s at %s",
+			log.Printf("clusterdns: [%s] %s now routes %s at %s", trigger,
 				filepath.Join(cfg.Dir, fileName),
 				strings.Join(Domains(cfg.ClusterID), " "), cfg.ServerIP())
+		}
+		// A pin kept under the grace is re-examined when the grace is up,
+		// not at the next tick — otherwise "withdraw after 20 s" would read
+		// "withdraw after up to five minutes".
+		var graceUp <-chan time.Time
+		var graceTimer *time.Timer
+		if left := p.graceRemaining(); left > 0 {
+			graceTimer = time.NewTimer(left)
+			graceUp = graceTimer.C
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			trigger = TriggerTick
+		case <-cfg.Trigger.wait():
+			trigger = TriggerConnected
+		case <-graceUp:
+			trigger = TriggerGrace
+		}
+		if graceTimer != nil {
+			graceTimer.Stop()
 		}
 	}
 }
@@ -327,17 +518,17 @@ func Run(ctx context.Context, cfg Config) {
 // anything. Withdrawing hands resolution back to mDNS: flaky, which is the
 // original complaint, but flaky beats dead, and it lets the agent reconnect and
 // learn the control plane's new address so the next tick can pin it correctly.
-func withdraw(ctx context.Context, cfg Config, path, why string) (bool, error) {
+func withdraw(ctx context.Context, cfg Config, path, trigger, why string) (bool, error) {
 	if _, err := os.Stat(path); err != nil {
 		return false, nil // nothing pinned; nothing to undo
 	}
 	if err := os.Remove(path); err != nil {
-		return false, fmt.Errorf("clusterdns: %s, but could not remove %s: %w", why, path, err)
+		return false, fmt.Errorf("clusterdns: [%s] %s, but could not remove %s: %w", trigger, why, path, err)
 	}
 	if err := cfg.reload(ctx); err != nil {
-		return true, fmt.Errorf("clusterdns: withdrew %s (%s) but reload failed: %w", path, why, err)
+		return true, fmt.Errorf("clusterdns: [%s] withdrew %s (%s) but reload failed: %w", trigger, path, why, err)
 	}
-	return true, fmt.Errorf("clusterdns: withdrew %s — %s; the cluster name falls back to mDNS until this resolves", path, why)
+	return true, fmt.Errorf("clusterdns: [%s] withdrew %s — %s; the cluster name falls back to mDNS until this resolves", trigger, path, why)
 }
 
 // reachableNameserver reports whether serverIP has a nameserver accepting
