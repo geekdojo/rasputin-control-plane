@@ -97,11 +97,14 @@
 //   - KEEP an existing pin as long as the pinned server answers. Whenever the
 //     bus cannot say where the control plane is — at start before the first
 //     dial, and on every bus-lost event — the pinned address is read back out
-//     of the drop-in and PROBED. It answers: the pin stays, however long the
-//     bus is down. The bus state and the clock are not inputs.
-//   - WITHDRAW only when the probe fails: the pinned server has stopped
-//     answering. That is the one fact that makes a pin harmful, and it is the
-//     only thing that removes one.
+//     of the drop-in and PROBED: asked, on the wire, for the cluster's own
+//     name (see answersClusterName). It answers with an address: the pin
+//     stays, however long the bus is down. The bus state and the clock are
+//     not inputs.
+//   - WITHDRAW only when the probe fails: the pinned server does not answer
+//     the cluster's name — gone, or listening but not serving it. That is the
+//     one fact that makes a pin harmful, and it is the only thing that
+//     removes one.
 //   - REPLACE when the bus connects to a different address than the one
 //     pinned. A write and a resolved restart, and only on an actual change.
 //
@@ -121,14 +124,21 @@ package clusterdns
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 // DefaultDir is the systemd-resolved drop-in directory we write to. /run
@@ -161,19 +171,20 @@ const (
 	TriggerTick      = "tick"
 )
 
-// probeTimeout bounds one probe's I/O: the connect to <server>:53.
+// probeTimeout bounds one probe's I/O: the query to <server>:53 and the wait
+// for its answer, TCP retry included.
 //
 // It is the ONE timeout this package keeps, and it is not a decision — it is
-// the bound a blocking syscall needs so that the question "does the pinned
-// server answer?" can come back NO at all. A dial to an address that has left
-// the network does not fail, it hangs until the kernel gives up on the SYN
-// retries (minutes), and the loop would sit inside that dial past the next
-// tick and the next bus event, holding a pin it was in the middle of checking.
-// Every other timeout this package once had decided something on the clock's
-// say-so (a grace before withdrawing a pin the bus could not vouch for) and was
-// removed for it; this one only says how long we are willing to wait to hear
-// the answer. Short, because the control plane is on the LAN and a LAN peer
-// that is up answers a SYN in milliseconds.
+// the bound a blocking read needs so that the question "does the pinned
+// server answer?" can come back NO at all. A datagram to an address that has
+// left the network is not refused, it is simply never answered, and the read
+// would wait forever; the loop would sit inside it past the next tick and the
+// next bus event, holding a pin it was in the middle of checking. Every other
+// timeout this package once had decided something on the clock's say-so (a
+// grace before withdrawing a pin the bus could not vouch for) and was removed
+// for it; this one only says how long we are willing to wait to hear the
+// answer. Short, because the control plane is on the LAN and a LAN nameserver
+// that is up answers its own zone from memory in milliseconds.
 const probeTimeout = 3 * time.Second
 
 // Config parameterises Run. ClusterID and ServerIP are required; everything
@@ -199,10 +210,14 @@ type Config struct {
 	// a name — see the package comment.
 	ServerIP func() string
 
-	// probe reports whether serverIP still has a nameserver listening. Injected
-	// by tests; nil means a real dial. See Apply for why a pin that stops
-	// answering must be withdrawn rather than left in place.
-	probe func(ctx context.Context, serverIP string) bool
+	// probe asks the nameserver at serverIP for name (the cluster's internal
+	// apex, see probeName) and returns nil when the answer carries an
+	// address — the one fact a pin rests on — or an error saying why it did
+	// not. Injected by tests, which point it at an in-process nameserver;
+	// nil means the real query (answersClusterName). See Apply for why a pin
+	// whose server does not answer must be withdrawn rather than left in
+	// place.
+	probe func(ctx context.Context, serverIP, name string) error
 
 	// Dir is the drop-in directory. Empty means DefaultDir.
 	Dir string
@@ -287,7 +302,7 @@ func (c *Config) applyDefaults() {
 		c.reload = restartResolved
 	}
 	if c.probe == nil {
-		c.probe = reachableNameserver
+		c.probe = answersClusterName
 	}
 }
 
@@ -356,11 +371,13 @@ func Apply(ctx context.Context, cfg Config, trigger string) (changed bool, err e
 
 	// Never leave a pin in place that does not answer. The domains are
 	// ROUTING-ONLY, so resolved sends the cluster's names to this server and
-	// nowhere else: if it is dead, the name does not resolve at all, where
-	// without the drop-in mDNS would at least have answered. Being wrong here
-	// is worse than doing nothing, so verify before asserting.
-	if !cfg.probe(ctx, ip) {
-		return withdraw(ctx, cfg, path, trigger, fmt.Sprintf("%s is not answering for the cluster name", ip))
+	// nowhere else: if it does not answer them, the name does not resolve at
+	// all, where without the drop-in mDNS would at least have answered. Being
+	// wrong here is worse than doing nothing, so ask before asserting — for
+	// the cluster's own name, not for a listening port (see answersClusterName).
+	name := probeName(cfg.ClusterID)
+	if perr := cfg.probe(ctx, ip, name); perr != nil {
+		return withdraw(ctx, cfg, path, trigger, fmt.Sprintf("%s does not answer %s (%v)", ip, name, perr))
 	}
 
 	want := Render(cfg.ClusterID, ip)
@@ -421,12 +438,13 @@ func verifyPinned(ctx context.Context, cfg Config, path, trigger string) (bool, 
 	if pinned == "" {
 		return withdraw(ctx, cfg, path, trigger, "control-plane address unknown and the drop-in names no server to verify")
 	}
-	if !cfg.probe(ctx, pinned) {
+	name := probeName(cfg.ClusterID)
+	if perr := cfg.probe(ctx, pinned, name); perr != nil {
 		return withdraw(ctx, cfg, path, trigger,
-			fmt.Sprintf("control-plane address unknown and the pinned %s is not answering for the cluster name", pinned))
+			fmt.Sprintf("control-plane address unknown and the pinned %s does not answer %s (%v)", pinned, name, perr))
 	}
-	log.Printf("clusterdns: [%s] control-plane address not known from the bus; keeping the pin at %s — it still answers for the cluster name",
-		trigger, pinned)
+	log.Printf("clusterdns: [%s] control-plane address not known from the bus; keeping the pin at %s — it answers %s",
+		trigger, pinned, name)
 	return false, nil
 }
 
@@ -524,33 +542,236 @@ func withdraw(ctx context.Context, cfg Config, path, trigger, why string) (bool,
 	return true, fmt.Errorf("clusterdns: [%s] withdrew %s — %s; the cluster name falls back to mDNS until this resolves", trigger, path, why)
 }
 
-// reachableNameserver reports whether serverIP has a nameserver accepting
-// connections on port 53.
+// probeName is the name the probe asks the pinned server for: the apex of
+// the cluster's internal zone, which the control plane's nameserver
+// (api/internal/nameserver) is authoritative for and answers with its own LAN
+// address. It is one of the two names the drop-in routes at the pinned
+// server (see Domains), so an answer for it proves the exact thing the pin
+// asserts. Canonical form, with the trailing dot the wire format needs.
+func probeName(clusterID string) string {
+	return clusterID + ".internal."
+}
+
+// answersClusterName is the production probe: one A query for name, put on
+// the wire to <serverIP>:53, and the answer read back. nil means the server
+// answered with an address; anything else says why it did not.
 //
-// A DIRECT DIAL, deliberately, not a resolver lookup. The obvious
-// implementation — net.Resolver with PreferGo and a custom Dial — is wrong
-// here, and wrong silently: Go consults /etc/hosts before it dials, so any
-// hosts entry for the cluster name makes the probe return true WITHOUT EVER
-// CONTACTING the server. Measured while writing this: dialed=false against an
-// unroutable address, because the name was in /etc/hosts.
+// A WIRE-LEVEL QUERY, deliberately — a packet this package builds and parses
+// itself — and neither of the two obvious shortcuts, each of which fails in
+// a way that re-arms the black hole the probe exists to prevent:
 //
-// A probe that can pass while the server is dead is worse than no probe at
-// all — it re-arms the black-hole this check exists to prevent.
+//   - Not a net.Resolver lookup, even with PreferGo and a custom Dial. That
+//     is still a name-service lookup: Go's goLookupIPCNAMEOrder consults
+//     /etc/hosts, in the order nsswitch says, BEFORE it dials anything, so a
+//     hosts entry for the cluster name makes the lookup pass without ever
+//     contacting the server. Measured on the first version of this package
+//     (dialed=false against an unroutable address, because the name was in
+//     /etc/hosts) and checked again against the Go 1.26 source before this
+//     rewrite: the resolver has no option that skips the files stage. The
+//     bypass is not a resolver setting; it is not using the resolver. Nothing
+//     below consults hosts, nsswitch or resolv.conf, by construction — there
+//     is no name-service layer between the query and the socket.
+//   - Not a TCP connect to :53, which the previous probe did. That proves a
+//     process is listening. It does not prove it is the cluster's nameserver,
+//     that it holds the zone, or that it is answering — a resolver stub, a
+//     forwarder, a half-started api all accept the SYN, and a pin resting on
+//     any of them black-holes the cluster's names exactly as a dead one does.
 //
-// This verifies liveness, not zone contents, and that is the failure mode being
-// guarded: a pinned address going stale or dead. The address comes from our own
-// bus socket, so it is the control plane rather than an impostor; the question
-// is only whether it is still there.
-func reachableNameserver(ctx context.Context, serverIP string) bool {
+// The pin asserts one thing: "send the cluster's names here and they will be
+// answered". So the probe asks exactly that question, of exactly that server,
+// over the same wire resolved will use, and requires an answer carrying an
+// address. NXDOMAIN, SERVFAIL, REFUSED, an empty NOERROR, a port nothing
+// listens on and a server that listens but never replies are all the same
+// verdict — does not answer — and the reason is carried into the withdrawal
+// line so it can be read against tailscaled's own timestamps.
+//
+// The address comes from our own bus socket or from a drop-in we wrote, so
+// impersonation is not the concern, and the zone's contents are the api's
+// tests' concern, not this one's. The question is only whether the pinned
+// address is, right now, a working nameserver for the cluster.
+func answersClusterName(ctx context.Context, serverIP, name string) error {
+	return queryA(ctx, net.JoinHostPort(serverIP, "53"), name)
+}
+
+// queryA sends one A query for name to addr and returns nil if the reply
+// carries at least one address. UDP first, as a stub resolver would; if the
+// reply comes back truncated before any address, once more over TCP (RFC
+// 1035 §4.2.1), inside the same bound. The whole exchange — dial, send, wait,
+// and the TCP retry if there is one — sits under the single probeTimeout.
+func queryA(ctx context.Context, addr, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(serverIP, "53"))
+
+	query, id, err := buildAQuery(name)
 	if err != nil {
-		return false
+		return err
 	}
-	_ = conn.Close()
-	return true
+	reply, err := exchange(ctx, "udp", addr, id, query)
+	if err != nil {
+		return err
+	}
+	answered, truncated, err := replyHasAddress(reply, id)
+	if err == nil && !answered && truncated {
+		if reply, err = exchange(ctx, "tcp", addr, id, query); err != nil {
+			return err
+		}
+		answered, _, err = replyHasAddress(reply, id)
+	}
+	if err != nil {
+		return err
+	}
+	if !answered {
+		return errors.New("NOERROR with no address in the answer")
+	}
+	return nil
+}
+
+// buildAQuery is a standard query for the A record of name: a random id,
+// recursion desired (what resolved's stub sends; an authoritative server
+// ignores the bit, so the probe's question is shaped like the real ones).
+func buildAQuery(name string) ([]byte, uint16, error) {
+	var idb [2]byte
+	if _, err := rand.Read(idb[:]); err != nil {
+		return nil, 0, fmt.Errorf("query id: %w", err)
+	}
+	id := binary.BigEndian.Uint16(idb[:])
+	n, err := dnsmessage.NewName(name)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query name %q: %w", name, err)
+	}
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: id, RecursionDesired: true})
+	if err := b.StartQuestions(); err != nil {
+		return nil, 0, err
+	}
+	if err := b.Question(dnsmessage.Question{Name: n, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}); err != nil {
+		return nil, 0, err
+	}
+	msg, err := b.Finish()
+	if err != nil {
+		return nil, 0, err
+	}
+	return msg, id, nil
+}
+
+// exchange sends query to addr over network ("udp" or "tcp") and returns the
+// first reply bearing our id, or the error that stood in the way. Every read
+// and write is bounded by the deadline on ctx, which queryA has already set.
+func exchange(ctx context.Context, network, addr string, id uint16, query []byte) ([]byte, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	if dl, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(dl); err != nil {
+			return nil, err
+		}
+	}
+
+	if network == "tcp" {
+		// RFC 1035 §4.2.2: a two-byte length prefix each way.
+		n := len(query)
+		if n > math.MaxUint16 {
+			return nil, fmt.Errorf("query of %d bytes cannot be framed for tcp", n)
+		}
+		framed := make([]byte, 2+n)
+		binary.BigEndian.PutUint16(framed, uint16(n))
+		copy(framed[2:], query)
+		if _, err := conn.Write(framed); err != nil {
+			return nil, err
+		}
+		var hdr [2]byte
+		if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+			return nil, err
+		}
+		reply := make([]byte, binary.BigEndian.Uint16(hdr[:]))
+		if _, err := io.ReadFull(conn, reply); err != nil {
+			return nil, err
+		}
+		if len(reply) < 2 || binary.BigEndian.Uint16(reply[:2]) != id {
+			return nil, errors.New("reply id does not match the query")
+		}
+		return reply, nil
+	}
+
+	if _, err := conn.Write(query); err != nil {
+		return nil, err
+	}
+	// The socket is connected, so only the server's datagrams arrive; a
+	// stray one with the wrong id is skipped and the wait continues, still
+	// under the deadline. No EDNS, so a reply is at most 512 bytes; the
+	// buffer is larger only so an over-size one is read whole and then
+	// judged, not silently cut.
+	buf := make([]byte, 4096)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		if n >= 2 && binary.BigEndian.Uint16(buf[:2]) == id {
+			return buf[:n], nil
+		}
+	}
+}
+
+// replyHasAddress judges one reply: answered is whether the answer section
+// holds at least one A record; truncated is the TC bit, so the caller can try
+// again over TCP when a truncated reply held no address; err is a reply that
+// is not an answer at all — malformed, not a response, not for our id, or an
+// error RCODE, named the way an operator would look it up.
+func replyHasAddress(reply []byte, id uint16) (answered, truncated bool, err error) {
+	var p dnsmessage.Parser
+	h, err := p.Start(reply)
+	if err != nil {
+		return false, false, fmt.Errorf("malformed reply: %w", err)
+	}
+	if h.ID != id {
+		return false, false, errors.New("reply id does not match the query")
+	}
+	if !h.Response {
+		return false, false, errors.New("reply is not a response")
+	}
+	if h.RCode != dnsmessage.RCodeSuccess {
+		return false, h.Truncated, errors.New(rcodeName(h.RCode))
+	}
+	if err := p.SkipAllQuestions(); err != nil {
+		return false, h.Truncated, fmt.Errorf("malformed reply: %w", err)
+	}
+	for {
+		ah, err := p.AnswerHeader()
+		if errors.Is(err, dnsmessage.ErrSectionDone) {
+			return false, h.Truncated, nil
+		}
+		if err != nil {
+			return false, h.Truncated, fmt.Errorf("malformed reply: %w", err)
+		}
+		if ah.Type == dnsmessage.TypeA {
+			return true, h.Truncated, nil
+		}
+		if err := p.SkipAnswer(); err != nil {
+			return false, h.Truncated, fmt.Errorf("malformed reply: %w", err)
+		}
+	}
+}
+
+// rcodeName spells an error RCODE the way dig and resolvectl do, so the
+// withdrawal line reads as a DNS operator expects.
+func rcodeName(rc dnsmessage.RCode) string {
+	switch rc {
+	case dnsmessage.RCodeFormatError:
+		return "FORMERR"
+	case dnsmessage.RCodeServerFailure:
+		return "SERVFAIL"
+	case dnsmessage.RCodeNameError:
+		return "NXDOMAIN"
+	case dnsmessage.RCodeNotImplemented:
+		return "NOTIMP"
+	case dnsmessage.RCodeRefused:
+		return "REFUSED"
+	default:
+		return rc.String()
+	}
 }
 
 // restartResolved is the production reload. A restart rather than a reload:
