@@ -131,10 +131,11 @@ func (s *Service) seed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.store.Presence(ctx, nodes)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, n := range nodes {
-		s.statusByNode[n.ID] = ComputeStatus(n.LastSeen)
+		s.statusByNode[n.ID] = n.Status
 	}
 	return nil
 }
@@ -310,8 +311,13 @@ func (s *Service) scanForTransitions() {
 	if err != nil {
 		return
 	}
+	// One mesh read per scan, not per node: the derived status (presence.go)
+	// is what the ws payload carries, so a node that lapses while its mesh
+	// device is online transitions to off-bus, not to a flat offline that the
+	// next poll would silently correct.
+	s.store.Presence(s.ctx, nodes)
 	for _, n := range nodes {
-		cur := ComputeStatus(n.LastSeen)
+		cur := n.Status
 		s.mu.Lock()
 		prev := s.statusByNode[n.ID]
 		if cur != prev {
@@ -321,7 +327,6 @@ func (s *Service) scanForTransitions() {
 		if cur == prev {
 			continue
 		}
-		n.Status = cur
 		switch cur {
 		case proto.StatusOnline:
 			s.emit(n, proto.InventoryOnline)
@@ -329,11 +334,26 @@ func (s *Service) scanForTransitions() {
 			s.emit(n, proto.InventoryStale)
 		case proto.StatusOffline:
 			s.emit(n, proto.InventoryOffline)
+		case proto.StatusOffBus:
+			s.emit(n, proto.InventoryOffBus)
 		}
 	}
 }
 
 func (s *Service) emit(n *proto.Node, change proto.InventoryChangeType) {
+	// The UI replaces its copy of the node with this payload wholesale, so it
+	// carries membership too — otherwise every transition would blank the
+	// MESH row until the next poll. Status is left as the caller set it: a
+	// heartbeat or registration IS online, whatever the mesh says.
+	if n.Mesh == nil {
+		if byNode := s.store.mesh(s.ctx); byNode != nil {
+			if m, ok := byNode[n.ID]; ok {
+				n.Mesh = m
+			} else {
+				n.Mesh = &proto.MeshMembership{State: proto.MeshAbsent}
+			}
+		}
+	}
 	ev := proto.InventoryChangeEvt{
 		Change: change,
 		Node:   *n,
@@ -349,10 +369,12 @@ func (s *Service) emit(n *proto.Node, change proto.InventoryChangeType) {
 	}
 }
 
-// ComputeStatus derives a node's status from its last heartbeat timestamp
-// against staleAfter (30s) / offlineAfter (2m) thresholds. Exported so the
-// HTTP handlers and the alerts aggregator can share the same logic — the
-// nodes table doesn't persist status, every consumer has to compute it.
+// ComputeStatus derives a node's HEARTBEAT status from its last heartbeat
+// timestamp against staleAfter (30s) / offlineAfter (2m) thresholds. Exported
+// so every consumer shares the thresholds — the nodes table doesn't persist
+// status. It never returns StatusOffBus: that needs the mesh side of the join,
+// which is DeriveStatus (presence.go). Gating on "== StatusOnline" against
+// either function means the same thing.
 func ComputeStatus(lastSeen time.Time) proto.NodeStatus {
 	gap := time.Since(lastSeen)
 	switch {

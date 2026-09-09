@@ -153,3 +153,87 @@ func TestStoreExplainNoResponder(t *testing.T) {
 		t.Errorf("ghost: %+v (%s)", n, n)
 	}
 }
+
+// A lapsed node whose mesh device is online is named OFF BUS (on mesh), not
+// OFFLINE, so a failed backup fan-out names the right cause
+// (geekdojo/geekdojo-brain#401). Still not Online(): nothing on the bus
+// answers, and the fan-out's refusal logic must keep treating it so.
+func TestExplainNoResponderOffBus(t *testing.T) {
+	now := time.Now().UTC()
+	subject := proto.BackupStageVolumeSubject("e3bench-compute2")
+	seen := now.Add(-40 * time.Second)
+	node := &proto.Node{
+		ID: "e3bench-compute2", AgentVersion: "2026.08.5-dev.143", LastSeen: now.Add(-3 * time.Hour),
+		Mesh: &proto.MeshMembership{State: proto.MeshJoined, Enrolled: true, Online: true, LastSeen: &seen},
+	}
+	n := ExplainNoResponder(node, subject)
+	if n.Kind != SilenceOffline || n.Online() {
+		t.Fatalf("kind = %v, Online() = %v; want SilenceOffline and not online", n.Kind, n.Online())
+	}
+	if n.Status != proto.StatusOffBus {
+		t.Errorf("status = %q, want off-bus", n.Status)
+	}
+	got := n.String()
+	for _, want := range []string{"e3bench-compute2 is OFF BUS (on mesh)", "reachable over the mesh (seen 40s ago)", "agent is not on the bus", "storage.backup_stage_volume", "restart the agent"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q lacks %q", got, want)
+		}
+	}
+	if strings.Contains(got, "offline") {
+		t.Errorf("%q must not say offline", got)
+	}
+
+	// Mesh device not online: the plain offline sentence, unchanged.
+	node.Mesh.Online = false
+	if got := ExplainNoResponder(node, subject).String(); !strings.Contains(got, "e3bench-compute2 is offline") {
+		t.Errorf("both down: %q", got)
+	}
+}
+
+// Store.ExplainNoResponder joins the row with the wired mesh lookup, so the
+// storage fan-out — which only has the store — gets the same reading.
+func TestStoreExplainNoResponderJoinsMesh(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenStore(ctx, filepath.Join(t.TempDir(), "inv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	lapsed := time.Now().UTC().Add(-3 * time.Hour)
+	if err := st.Insert(ctx, &proto.Node{ID: "c2", Role: proto.RoleCompute, Hostname: "c2", FirstSeen: lapsed, LastSeen: lapsed}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetMeshLookup(func(context.Context) map[string]*proto.MeshMembership {
+		return map[string]*proto.MeshMembership{"c2": {State: proto.MeshJoined, Enrolled: true, Online: true}}
+	})
+	n := st.ExplainNoResponder(ctx, proto.BackupStageVolumeSubject("c2"))
+	if n.Status != proto.StatusOffBus || !strings.Contains(n.String(), "OFF BUS (on mesh)") {
+		t.Errorf("%+v (%s)", n, n)
+	}
+}
+
+// humanAgo is the "(seen 40s ago)" in the off-bus sentence: coarse buckets,
+// and a slightly-future timestamp (clock skew) reads as 0s, never negative.
+func TestHumanAgo(t *testing.T) {
+	for _, c := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{-5 * time.Second, "0s"},
+		{0, "0s"},
+		{40 * time.Second, "40s"},
+		{59 * time.Second, "59s"},
+		{time.Minute, "1m"},
+		{3 * time.Minute, "3m"},
+		{59 * time.Minute, "59m"},
+		{time.Hour, "1h"},
+		{3 * time.Hour, "3h"},
+		{47 * time.Hour, "47h"},
+		{48 * time.Hour, "2d"},
+		{5 * 24 * time.Hour, "5d"},
+	} {
+		if got := humanAgo(c.d); got != c.want {
+			t.Errorf("humanAgo(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}

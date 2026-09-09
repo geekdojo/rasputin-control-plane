@@ -53,12 +53,20 @@ export interface JobEvent {
 }
 
 export type NodeRole = 'controlplane' | 'firewall' | 'compute' | 'storage';
-export type NodeStatus = 'online' | 'stale' | 'offline';
+/**
+ * Heartbeat presence, joined with mesh membership by the api
+ * (inventory.DeriveStatus). `off-bus` is a node whose heartbeat has lapsed
+ * as far as `offline` but whose mesh device is online: the machine is up and
+ * reachable over the tailnet, only its agent has dropped off the bus. Every
+ * gate that wants `online` still refuses it (geekdojo/geekdojo-brain#401).
+ */
+export type NodeStatus = 'online' | 'stale' | 'offline' | 'off-bus';
 export type InventoryChange =
   | 'added'
   | 'online'
   | 'stale'
   | 'offline'
+  | 'off-bus'
   | 'updated'
   | 'removed';
 
@@ -112,10 +120,20 @@ export type MeshMembershipState = 'joined' | 'absent' | 'unknown';
 
 export interface MeshMembership {
   state: MeshMembershipState;
+  /** Headscale has a device registered for this node at all. */
+  enrolled?: boolean;
+  /**
+   * Headscale's connection state as of the last reconcile, and false once
+   * that observation is older than the api's staleness bound (three reconcile
+   * intervals). The input to `status: 'off-bus'`.
+   */
+  online?: boolean;
   /**
    * Headscale's last-seen. Meaningful mainly when `state` is 'absent' — it
    * answers "how long has this been broken?". Not refreshed while a node stays
-   * connected, so for a joined node it is the moment it connected.
+   * connected, so for a joined node the api floors it at the reconcile that
+   * observed the node online — "mesh seen 40s ago" is as recent as the
+   * observation really is.
    */
   lastSeen?: string;
   /** The 100.64.0.x address; absent when not enrolled. */

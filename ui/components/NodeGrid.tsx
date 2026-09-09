@@ -216,8 +216,15 @@ function HexCell({
   const strokeColor = selected ? ACCENT : 'rgba(var(--rasp-fg-rgb),0.18)';
   const strokeW = selected ? 1.5 : 0.75;
 
+  // No live utilization off the bus either — the metrics ride the bus.
   const cpuLabel =
-    node.status === 'offline' ? 'OFFL' : node.cpu == null ? '—' : `${Math.round(node.cpu)}%`;
+    node.status === 'offline'
+      ? 'OFFL'
+      : node.status === 'offbus'
+        ? 'OFF BUS'
+        : node.cpu == null
+          ? '—'
+          : `${Math.round(node.cpu)}%`;
 
   return (
     <g
@@ -434,6 +441,7 @@ export function NodeGrid({ nodes, pending = [], selectedId, onSelect, onAddNode,
             {[
               { label: 'ONLINE', color: STATUS_COLOR.online, dashed: false },
               { label: 'WARNING', color: STATUS_COLOR.warning, dashed: false },
+              { label: 'OFF BUS', color: STATUS_COLOR.offbus, dashed: false },
               { label: 'UPDATING', color: STATUS_COLOR.updating, dashed: false },
               { label: 'OFFLINE', color: 'rgba(148,163,184,0.5)', dashed: false },
               { label: 'PENDING', color: accentA(0.8), dashed: true },

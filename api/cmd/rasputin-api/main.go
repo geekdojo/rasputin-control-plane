@@ -319,13 +319,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: mesh: %v", err)
 	}
+	// The scheduler's mesh.reconcile cadence (also read where the scheduler
+	// is built). The mesh service needs it too: the staleness bound on "on
+	// the mesh" is three of these (mesh.Service.MembershipMaxAge), so the
+	// two must agree.
+	meshReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_MESH_RECONCILE_INTERVAL"), 5*time.Minute)
 	meshSvc := mesh.NewService(mesh.Config{
-		LoginServer:  mw.login,
-		DefaultUser:  envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
-		HeadplaneURL: os.Getenv("RASPUTIN_HEADPLANE_URL"),
-		MeshCAPEM:    mw.caPEM,
-		ClusterID:    strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		LoginServer:       mw.login,
+		DefaultUser:       envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
+		HeadplaneURL:      os.Getenv("RASPUTIN_HEADPLANE_URL"),
+		ReconcileInterval: meshReconcileEvery,
+		MeshCAPEM:         mw.caPEM,
+		ClusterID:         strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
 	}, meshStore, mw.client, mw.sup)
+	// The node↔mesh-device join (geekdojo/geekdojo-brain#401): every reader
+	// of a node's status — /api/nodes, the transition ticker, the alerts
+	// aggregator, ExplainNoResponder — derives OFF BUS from this one lookup.
+	invStore.SetMeshLookup(meshSvc.Membership)
 	if mw.bootstrap != nil {
 		meshSvc.SetBootstrap(mw.bootstrap)
 	}
@@ -1008,7 +1018,7 @@ func main() {
 	// Defaults match the firewall + mesh §6 docs (5 min).
 	fwReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_FW_RECONCILE_INTERVAL"), 5*time.Minute)
 	appsReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_RECONCILE_INTERVAL"), 5*time.Minute)
-	meshReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_MESH_RECONCILE_INTERVAL"), 5*time.Minute)
+	// meshReconcileEvery is parsed where the mesh service is built, above.
 	// Per-app TLS leaves live a year and renew at <60d left (mesh.renewWindow);
 	// a daily sweep is ample and cheap (it no-ops until a leaf enters the window).
 	leafRotateEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_LEAF_ROTATE_INTERVAL"), 24*time.Hour)
@@ -1205,6 +1215,8 @@ func main() {
 	// Backup-target health (#398): one crit alert per claimed target the
 	// five-minute poll found missing, unmounted, unwritable or unreachable.
 	alertsSvc.SetBackupTargets(backupStore)
+	// OFF BUS vs OFFLINE (#401): the same join /api/nodes reads.
+	alertsSvc.SetMeshMembership(meshSvc.Membership)
 	srv.SetAlertsService(alertsSvc)
 	if secret := os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"); secret != "" {
 		srv.SetAlertsWebhookSecret(secret)

@@ -14,13 +14,17 @@ export const ACCENT = 'var(--rasp-accent)'; // resolves to the active theme's ac
 /** Translucent accent, e.g. accentA(0.12) → 'rgba(var(--rasp-accent-rgb), 0.12)'. */
 export const accentA = (alpha: number) => `rgba(var(--rasp-accent-rgb), ${alpha})`;
 
-export type NodeViewStatus = 'online' | 'offline' | 'warning' | 'updating';
+export type NodeViewStatus = 'online' | 'offline' | 'warning' | 'updating' | 'offbus';
 
 export const STATUS_COLOR: Record<NodeViewStatus, string> = {
   online: '#4ade80',
   offline: 'rgba(148, 163, 184, 0.35)',
   warning: '#facc15',
   updating: ACCENT,
+  // OFF BUS · on mesh (geekdojo/geekdojo-brain#401): amber, so it reads as
+  // neither the dim grey of OFFLINE (the machine is up) nor the yellow of
+  // WARNING (it is not merely stale — the agent is gone from the bus).
+  offbus: '#f59e0b',
 };
 
 export const MONO = 'JetBrains Mono, monospace';

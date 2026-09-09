@@ -115,10 +115,10 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	for _, n := range nodes {
-		n.Status = inventory.ComputeStatus(n.LastSeen)
-	}
-	applyMeshMembership(nodes, s.meshMembership(r.Context()))
+	// Status and mesh are one derivation (inventory.ApplyMesh): a node whose
+	// heartbeat lapsed while its mesh device is online is off-bus, not
+	// offline, and the row carries the mesh block that says so.
+	inventory.ApplyMesh(nodes, s.meshMembership(r.Context()))
 	writeJSON(w, http.StatusOK, nodes)
 }
 
@@ -134,8 +134,7 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "node not found")
 		return
 	}
-	n.Status = inventory.ComputeStatus(n.LastSeen)
-	applyMeshMembership([]*proto.Node{n}, s.meshMembership(r.Context()))
+	inventory.ApplyMesh([]*proto.Node{n}, s.meshMembership(r.Context()))
 	writeJSON(w, http.StatusOK, n)
 }
 

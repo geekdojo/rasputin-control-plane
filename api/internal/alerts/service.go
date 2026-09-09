@@ -50,7 +50,7 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// Status derivation lives in inventory.ComputeStatus — see nodeAlerts.
+// Status derivation lives in inventory.DeriveStatus — see nodeAlerts (node.go).
 
 // failedJobLookback bounds how far back we surface failed jobs. Past this
 // window the failure is "history" — the operator should look at /tasks if
@@ -82,6 +82,9 @@ type Service struct {
 	backups BackupStates
 	// targets is optional — nil means no backup-target health alerts (#398).
 	targets BackupTargets
+	// mesh is optional — nil leaves mesh membership undetermined, so a lapsed
+	// node is OFFLINE rather than OFF BUS (node.go).
+	mesh inventory.MeshLookup
 
 	// busAuthEnforced mirrors the api's RASPUTIN_BUS_AUTH=enforce state.
 	// When false the aggregator emits a standing bus-auth-off warn — the
@@ -155,44 +158,6 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 		}
 		return out[i].Since.Before(out[j].Since)
 	})
-	return out, nil
-}
-
-func (s *Service) nodeAlerts(ctx context.Context, _ time.Time) ([]proto.Alert, error) {
-	nodes, err := s.inv.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]proto.Alert, 0, len(nodes))
-	for _, n := range nodes {
-		// inventory.Store.List doesn't populate Status — the column doesn't
-		// exist, status is derived from last_seen. Use the same helper the
-		// /api/nodes handler uses so all three readers agree.
-		switch inventory.ComputeStatus(n.LastSeen) {
-		case proto.StatusOffline:
-			out = append(out, proto.Alert{
-				ID:          "node-offline:" + n.ID,
-				Severity:    proto.AlertCrit,
-				Source:      proto.AlertSourceNode,
-				Title:       fmt.Sprintf("Node %s is offline", n.ID),
-				Detail:      fmt.Sprintf("Last heartbeat %s ago", humanizeDuration(time.Since(n.LastSeen))),
-				Since:       n.LastSeen,
-				RelatedKind: "node",
-				RelatedID:   n.ID,
-			})
-		case proto.StatusStale:
-			out = append(out, proto.Alert{
-				ID:          "node-stale:" + n.ID,
-				Severity:    proto.AlertWarn,
-				Source:      proto.AlertSourceNode,
-				Title:       fmt.Sprintf("Node %s heartbeat is stale", n.ID),
-				Detail:      fmt.Sprintf("Last heartbeat %s ago", humanizeDuration(time.Since(n.LastSeen))),
-				Since:       n.LastSeen,
-				RelatedKind: "node",
-				RelatedID:   n.ID,
-			})
-		}
-	}
 	return out, nil
 }
 

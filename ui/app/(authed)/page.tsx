@@ -3,14 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSetupState, listApps, listBusTokens, listNodes, getMetrics, openInventoryWS, revokeBusToken } from '../../lib/api';
-import type { App, BusTokenInfo, DeploymentMode, InventoryChangeEvent, Node, NodeRole, NodeStatus } from '../../lib/types';
+import type { App, BusTokenInfo, DeploymentMode, InventoryChangeEvent, Node, NodeRole } from '../../lib/types';
 import { NodeGrid, sortNodeViews, type NodeView, type PendingView } from '../../components/NodeGrid';
 import { NodeControls } from '../../components/NodeControls';
 import { AddNodeWizard } from '../../components/AddNodeWizard';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { clusterPrefixOf } from '../../lib/enroll';
 import { bmcNodeCaps } from '../../lib/bmc';
-import type { NodeViewStatus } from '../../components/ui-theme';
+import { presenceView } from '../../lib/node-presence';
 
 interface Util {
   cpu: number | null;
@@ -23,12 +23,6 @@ const ROLE_SHORT: Record<NodeRole, string> = {
   compute: 'work',
   storage: 'stor',
 };
-
-function viewStatus(s: NodeStatus): NodeViewStatus {
-  if (s === 'online') return 'online';
-  if (s === 'offline') return 'offline';
-  return 'warning'; // stale → warning
-}
 
 function shortId(n: Node): string {
   const raw = n.id;
@@ -143,7 +137,7 @@ export default function NodesPage() {
       nodes.map((n) => ({
         id: n.id,
         name: shortId(n),
-        status: viewStatus(n.status),
+        status: presenceView(n.status),
         role: ROLE_SHORT[n.role] ?? n.role,
         cpu: util[n.id]?.cpu ?? null,
       })),

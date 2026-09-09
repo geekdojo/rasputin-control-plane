@@ -16,6 +16,9 @@ import (
 // Store is the SQLite-backed ledger of known nodes.
 type Store struct {
 	db *sql.DB
+	// meshLookup is the mesh side of the presence join (presence.go); nil
+	// leaves membership undetermined.
+	meshLookup MeshLookup
 }
 
 // OpenStore opens (and migrates) the SQLite database at path. Safe to point
