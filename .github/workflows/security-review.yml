@@ -46,7 +46,26 @@ jobs:
     # Same-repo PRs only — see the prompt-injection note above. Fork PRs
     # also would not receive the OAuth secret, so this makes the skip
     # explicit instead of a confusing auth failure.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    #
+    # Dependabot is the same auth situation the line above does not catch:
+    # its branches ARE same-repo, but a dependabot-triggered run draws
+    # secrets from the separate Dependabot store, so an Actions secret
+    # resolves to the empty string. The action then fails with
+    # `"claude_code_oauth_token": ""` — which read as seven independent
+    # broken PRs and was one permanently-red required check blocking every
+    # dependency bump.
+    #
+    # Skipping is the correct fix, not the convenient one. Adding the token
+    # to the Dependabot secret store would hand an OAuth credential to the
+    # one context GitHub isolates precisely because it evaluates untrusted
+    # dependency metadata — the same prompt-injection posture the note above
+    # is about, made worse. And a version bump has no authored code for this
+    # reviewer to read: the checks that matter for a dependency change
+    # (gosec, staticcheck, CodeQL, govulncheck, npm audit, build + tests) all
+    # still run and still gate.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
