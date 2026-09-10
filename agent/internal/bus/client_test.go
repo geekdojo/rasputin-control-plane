@@ -388,6 +388,21 @@ func TestClient_RejectsConnWhoseSetupFails(t *testing.T) {
 	}
 }
 
+// TestNew_DefaultsReconnectWaitAndBackoff pins the connection-recovery timers
+// New wires in: a 2s nats-level ReconnectWait and the DefaultBackoff re-dial
+// schedule. Nothing else asserted these constructor values, so an arithmetic
+// slip that zeroed reconnectWait (2 * time.Second → 2 / time.Second) went
+// unnoticed — a zero wait would hammer a rebuilt controlplane with no pause.
+func TestNew_DefaultsReconnectWaitAndBackoff(t *testing.T) {
+	c := New("nats://127.0.0.1:1", testNode, "", nil, nil)
+	if c.reconnectWait != 2*time.Second {
+		t.Errorf("reconnectWait = %s, want 2s", c.reconnectWait)
+	}
+	if c.backoff != DefaultBackoff {
+		t.Errorf("backoff = %+v, want DefaultBackoff %+v", c.backoff, DefaultBackoff)
+	}
+}
+
 func TestClient_PublishBeforeDial(t *testing.T) {
 	c := New("nats://127.0.0.1:1", testNode, "", nil, nil)
 	if err := c.Publish("x", nil); err != ErrNotConnected {

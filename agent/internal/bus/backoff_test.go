@@ -55,6 +55,39 @@ func TestBackoff_JitterStaysWithinBounds(t *testing.T) {
 	}
 }
 
+// TestBackoff_JitterSpreadsBothDirections pins that the ±Jitter spread is
+// genuinely two-sided: over many samples at a fixed attempt some delays land
+// STRICTLY above the un-jittered base and some STRICTLY below it. The bounds
+// test above only checks the envelope, so a jitter that was silently disabled
+// (always == base) or that pushed only one way (always below / always above)
+// would slip past it — this catches all three.
+//
+// attempt 3 gives base = 8s with a ±2s spread, comfortably inside [Min, Max],
+// so neither clamp can mask a direction.
+func TestBackoff_JitterSpreadsBothDirections(t *testing.T) {
+	b := DefaultBackoff
+	const attempt = 3
+	base := Backoff{Min: b.Min, Max: b.Max}.Delay(attempt)
+	if base <= b.Min || base >= b.Max {
+		t.Fatalf("base %s is not strictly inside (%s, %s); a clamp could hide a direction", base, b.Min, b.Max)
+	}
+	var sawAbove, sawBelow bool
+	for i := 0; i < 2000 && !(sawAbove && sawBelow); i++ {
+		switch got := b.Delay(attempt); {
+		case got > base:
+			sawAbove = true
+		case got < base:
+			sawBelow = true
+		}
+	}
+	if !sawAbove {
+		t.Errorf("no delay ever exceeded base %s — jitter never spreads upward", base)
+	}
+	if !sawBelow {
+		t.Errorf("no delay ever fell below base %s — jitter never spreads downward", base)
+	}
+}
+
 // TestSquelch_LogsOnceThenCounts: a run of failures is one line in, one line
 // out — the counter in between is what tells an operator how long the bus was
 // gone from a log that would otherwise be nothing but the failures.
