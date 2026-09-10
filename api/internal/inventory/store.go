@@ -19,6 +19,9 @@ type Store struct {
 	// meshLookup is the mesh side of the presence join (presence.go); nil
 	// leaves membership undetermined.
 	meshLookup MeshLookup
+	// now is the clock stamped on the readings ExplainNoResponder returns
+	// (noresponder.go); nil is time.Now, which is what production leaves it.
+	now func() time.Time
 }
 
 // OpenStore opens (and migrates) the SQLite database at path. Safe to point

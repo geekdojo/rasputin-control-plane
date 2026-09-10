@@ -385,6 +385,15 @@ func TestFanOutReadsASilentNodeAgainstInventory(t *testing.T) {
 	onMesh := func(context.Context) map[string]*proto.MeshMembership {
 		return map[string]*proto.MeshMembership{computeNodeID: {State: proto.MeshJoined, Enrolled: true, Online: true, LastSeen: &meshSeen}}
 	}
+	// The off-bus case asserts the rendered elapsed time exactly, and
+	// inventory renders it when the assertion runs, not when meshSeen was
+	// computed — humanAgo counts whole seconds below a minute, so a run that
+	// takes one second of wall clock turns "20s" into "21s". Pinning the
+	// clock inventory reads makes the sentence the fixture's, not the
+	// machine's. It does not touch heartbeat presence: LastSeen below is
+	// still measured against the real clock, so each case is online, lapsed
+	// or off-bus exactly as before.
+	frozen := func() time.Time { return now }
 	cases := []struct {
 		name string
 		node *proto.Node
@@ -426,7 +435,7 @@ func TestFanOutReadsASilentNodeAgainstInventory(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles(), nodes: []*proto.Node{tc.node}, meshLookup: tc.mesh}) // no compute agent
+			r := runWithApps(t, runHarnessOpts{apps: clusterApps(), tiles: clusterTiles(), nodes: []*proto.Node{tc.node}, meshLookup: tc.mesh, now: frozen}) // no compute agent
 			if r.job.Status != jobs.StatusFailed {
 				t.Fatalf("job status = %s; a silent node's volume must fail the run", r.job.Status)
 			}
