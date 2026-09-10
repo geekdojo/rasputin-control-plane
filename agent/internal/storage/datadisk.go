@@ -321,3 +321,30 @@ func DataMountPath(partUUID string) (string, error) {
 	}
 	return filepath.Join(spec.MountRoot, partUUID), nil
 }
+
+// ResolveDataDisk answers §6.4's deploy-time question — "where on THIS node is
+// the claimed data disk partUUID, and is the filesystem at that path really
+// that disk?" — and is the one way a caller is allowed to ask it.
+//
+// The two halves are inseparable and that is why they are one function. Naming
+// the path is arithmetic on a constant and always succeeds; it says nothing at
+// all about whether anything is mounted there. A caller that took the path and
+// skipped the marker would get a real directory on the persistent partition
+// with the mount point's name — §6.3's failure exactly — and would fill it in
+// the belief it was writing to the operator's disk. So the path is not
+// returned unless the marker on it verifies.
+//
+// The error is the operator's to read: it says whether the disk is unmounted,
+// is a different disk, or was never claimed, and it is what a refused deploy
+// puts in the job feed. No error is retried and none is softened — the caller's
+// only correct response to any of them is to place nothing.
+func ResolveDataDisk(partUUID string) (string, error) {
+	path, err := DataMountPath(partUUID)
+	if err != nil {
+		return "", err
+	}
+	if _, err := VerifyDataMarker(path, partUUID); err != nil {
+		return "", err
+	}
+	return path, nil
+}

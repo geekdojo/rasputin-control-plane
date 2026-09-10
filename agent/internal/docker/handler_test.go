@@ -55,12 +55,21 @@ func request[T any](t *testing.T, nc *nats.Conn, subj string, cmd any, out *T) {
 
 func newRegistered(t *testing.T) (*nats.Conn, *MockBackend) {
 	t.Helper()
+	return newRegisteredWithResolver(t, nil)
+}
+
+// newRegisteredWithResolver is newRegistered with §6.4's placement resolver
+// under the test's control. nil is the ordinary case — an agent that places
+// nothing — and every test above this one deploys without a placement, so nil
+// is exactly what they exercise.
+func newRegisteredWithResolver(t *testing.T, resolve DataDiskResolver) (*nats.Conn, *MockBackend) {
+	t.Helper()
 	nc := startNATS(t)
 	b, err := NewMockBackend(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
-	subs, err := RegisterHandlers(nc, "node-1", b)
+	subs, err := RegisterHandlers(nc, "node-1", b, resolve)
 	if err != nil {
 		t.Fatalf("RegisterHandlers: %v", err)
 	}
@@ -261,7 +270,7 @@ func TestComposeBackend_StatusWhenNoComposeFile(t *testing.T) {
 
 func TestRegisterHandlers_BackendErrorsAckFalse(t *testing.T) {
 	nc := startNATS(t)
-	subs, err := RegisterHandlers(nc, "node-1", errBackend{})
+	subs, err := RegisterHandlers(nc, "node-1", errBackend{}, nil)
 	if err != nil {
 		t.Fatalf("RegisterHandlers: %v", err)
 	}
@@ -341,7 +350,7 @@ func TestRegisterHandlers_VolumeVerbsOnlyWithAReaper(t *testing.T) {
 	nc2 := startNATS(t)
 	f := scriptedDocker()
 	cb := newFakeBackend(t, f)
-	subs, err := RegisterHandlers(nc2, "node-2", cb)
+	subs, err := RegisterHandlers(nc2, "node-2", cb, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

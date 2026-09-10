@@ -717,6 +717,34 @@ func TestDataMountPath(t *testing.T) {
 	}
 }
 
+// ResolveDataDisk is what §6.4's deploy path calls, and its contract is that a
+// path comes back ONLY with the marker behind it. The two halves cannot be
+// taken separately: naming the path is arithmetic on a constant and always
+// succeeds, so a caller that skipped the marker would be handed a real
+// directory on the persistent partition and would fill it believing it was the
+// operator's disk.
+func TestResolveDataDisk(t *testing.T) {
+	// Nothing is mounted at the data root in a test, which is the case being
+	// asserted: no marker, no path, and an error the operator can act on.
+	path, err := ResolveDataDisk("resolve-nothing-is-mounted-here")
+	if err == nil {
+		t.Fatalf("ResolveDataDisk returned %q for a disk that is not mounted", path)
+	}
+	if path != "" {
+		t.Errorf("a refused resolution still returned a path: %q", path)
+	}
+	if !errors.Is(err, ErrDataMarkerMissing) {
+		t.Errorf("error = %v, want %v", err, ErrDataMarkerMissing)
+	}
+
+	// The same argument guard DataMountPath applies, and it has to survive
+	// being reached through here: a value that is not a partition UUID names
+	// no path, so nothing is even looked at.
+	if _, err := ResolveDataDisk("../../etc"); err == nil {
+		t.Error("ResolveDataDisk accepted a traversal")
+	}
+}
+
 func mustWriteDataMarker(t *testing.T, dir string, set *proto.StorageDataSet) {
 	t.Helper()
 	if err := writeMarker(dir, proto.StorageDataMarkerFile, set); err != nil {

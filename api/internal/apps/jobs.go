@@ -691,11 +691,19 @@ func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusDeploying, "", now)
 		emitChange(nc, app.ID, proto.AppDeploying, proto.AppStatusDeploying, "", now)
 
+		// The placement travels as the app recorded it and is not resolved
+		// here: an empty value is the boot medium and the agent does nothing
+		// with it, and a non-empty one is a partition UUID only the agent can
+		// turn into a path it has proved is the disk (design/storage.md §6.3).
+		// The api's own gate on it ran before this job existed — see
+		// dataPlacementRefusal in the HTTP layer — so a placement reaching the
+		// agent has already been checked against the node's eligibility.
 		cmd, _ := json.Marshal(proto.AppDeployCmd{
 			AppID:             app.ID,
 			Name:              app.Name,
 			ComposeYAML:       app.ComposeYAML,
 			WorkBudgetSeconds: app.DeployBudgetSeconds,
+			DataDiskPartUUID:  app.DataDiskPartUUID,
 		})
 
 		// The deadline is this app's, not the catalog's. The agent gets the same

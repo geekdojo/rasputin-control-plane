@@ -109,6 +109,23 @@ type AppDeployCmd struct {
 	// the behaviour it expects rather than an instant timeout. Read it through
 	// AppDeployWorkFor, never directly.
 	WorkBudgetSeconds int `json:"workBudgetSeconds,omitempty"`
+
+	// DataDiskPartUUID asks the agent to place this app's named volumes on the
+	// claimed data disk with that partition UUID (design/storage.md §6.4).
+	// EMPTY IS THE DEFAULT AND MEANS THE BOOT MEDIUM: the compose reaches
+	// `docker compose` exactly as the api sent it, which is what every app
+	// installed before §6.4 existed gets and what an api predating this field
+	// sends.
+	//
+	// It is the APP's placement, copied onto the deploy command, not the
+	// tile's — a data disk is an operator's choice about one install on one
+	// node, and a tile author cannot know whether a node has one. Which is
+	// also why the value travels as a bare partition UUID and not as a path:
+	// only the agent knows where it mounted the disk (§6.5), and only the
+	// agent can prove the filesystem at that path IS the disk before writing
+	// to it. §6.3 makes that proof the whole enforcement, so the resolution
+	// and the refusal both belong on the agent side of this field.
+	DataDiskPartUUID string `json:"dataDiskPartUuid,omitempty"`
 }
 
 // AppDeployAck is the synchronous reply.

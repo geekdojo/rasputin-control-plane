@@ -290,7 +290,15 @@ func main() {
 
 		if dockerBackend != nil {
 			subscribe(func(c *nats.Conn) error {
-				if _, err := docker.RegisterHandlers(c, nodeID, dockerBackend); err != nil {
+				// storage.ResolveDataDisk is §6.4's placement resolver, and it
+				// is wired here on EVERY node that hosts apps rather than
+				// beside the storage backend below. It reads this node's own
+				// filesystem — no backend, no api round-trip, no NATS — so a
+				// node without a claimed data disk needs no special case: a
+				// placement it cannot honour resolves to a missing marker and
+				// the deploy is refused with the reason in it, which is the
+				// answer §6.3 wants anyway.
+				if _, err := docker.RegisterHandlers(c, nodeID, dockerBackend, storage.ResolveDataDisk); err != nil {
 					return fmt.Errorf("register docker handlers: %w", err)
 				}
 				return nil
@@ -663,10 +671,12 @@ func main() {
 			//
 			// The cost is that a deploy arriving in the same second as boot
 			// can outrun the mount. What protects an app from that is
-			// storage.VerifyDataMarker in the deploy path (§6.3), not this
-			// ordering — and nothing places an app on the data disk today,
-			// because the per-app placement field §6.4 calls for does not
-			// exist yet.
+			// §6.3's marker check in the deploy path — storage.ResolveDataDisk,
+			// wired into the docker handlers above — and not this ordering. A
+			// deploy that beats the sweep finds no marker and is refused, which
+			// is a failed job the operator can retry; a deploy that did not
+			// check would silently refill the boot medium, which is not
+			// recoverable by retrying anything.
 			go func() {
 				sweepCtx, cancel := context.WithTimeout(ctx, proto.StorageEnumerateWork+proto.StorageMountWork)
 				defer cancel()

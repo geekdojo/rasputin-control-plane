@@ -94,6 +94,12 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		// only when the tile declares a `critical` volume AND backups are
 		// unconfigured; ignored otherwise. Absent in that case → 409.
 		AcknowledgeNoBackup bool `json:"acknowledgeNoBackup"`
+		// DataDiskPartUUID places this install's named volumes on a claimed
+		// data disk (design/storage.md §6.4). Absent → the boot medium. It is
+		// asked of the OPERATOR and never read from the tile: whether a node
+		// has a second disk is a fact about one machine, and a tile author
+		// cannot know it.
+		DataDiskPartUUID string `json:"dataDiskPartUuid"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -129,6 +135,13 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 	}
 	if node.Role != proto.RoleCompute {
 		writeError(w, http.StatusBadRequest, appTargetRoleMsg)
+		return
+	}
+	// §6.4: refuse a placement this node cannot honour before it is recorded,
+	// so it never becomes a deploy job that fails on the agent. See
+	// dataPlacementRefusal.
+	if refusal := dataPlacementRefusal(node, req.DataDiskPartUUID); refusal != "" {
+		writeError(w, http.StatusBadRequest, refusal)
 		return
 	}
 	// Arch gate: block only on a clear mismatch. An unreported arch ("") is
@@ -170,10 +183,13 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		// deploy is judged against should be the one the owner installed.
 		DeployBudgetSeconds: tile.DeployBudgetSeconds,
 		ExposeLAN:           req.ExposeLAN,
-		LastStatus:          proto.AppStatusStopped,
-		CreatedAt:           now,
-		UpdatedAt:           now,
-		BackupAck:           backupAck,
+		// The placement is the OPERATOR's, not the tile's — the one field on
+		// this record that no catalog update can ever change.
+		DataDiskPartUUID: strings.TrimSpace(req.DataDiskPartUUID),
+		LastStatus:       proto.AppStatusStopped,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		BackupAck:        backupAck,
 	}
 	if err := s.apps.Create(r.Context(), app); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

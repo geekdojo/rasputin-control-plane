@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
@@ -17,12 +18,17 @@ import (
 //
 // Only register on compute (or controlplane) role agents. Firewall and
 // storage nodes don't host user apps.
-func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscription, error) {
+//
+// resolve is how a deploy carrying design/storage.md §6.4's placement finds and
+// PROVES the data disk it names; nil means this agent places nothing and
+// refuses any deploy that asks it to. It is passed in rather than reached for
+// so the deploy path has one seam a test can hold — see DataDiskResolver.
+func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend, resolve DataDiskResolver) ([]*nats.Subscription, error) {
 	subs := make([]*nats.Subscription, 0, 3)
 
 	deploySubj := proto.AppDeploySubject(nodeID)
 	sub, err := nc.Subscribe(deploySubj, func(m *nats.Msg) {
-		handleDeploy(b, m)
+		handleDeploy(b, resolve, m)
 	})
 	if err != nil {
 		return nil, err
@@ -113,12 +119,38 @@ func handleVolumesRemove(r VolumeReaper, m *nats.Msg) {
 	bus.Respond(m, ack)
 }
 
-func handleDeploy(b Backend, m *nats.Msg) {
+func handleDeploy(b Backend, resolve DataDiskResolver, m *nats.Msg) {
 	var cmd proto.AppDeployCmd
 	if err := json.Unmarshal(m.Data, &cmd); err != nil {
 		bus.Respond(m, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: "bad cmd"})
 		log.Printf("rasputin-agent: docker.deploy: bad cmd: %v", err)
 		return
+	}
+	// §6.4's placement, BEFORE the backend is touched and before the deploy
+	// budget starts running.
+	//
+	// An empty partition UUID is the default and the overwhelming majority:
+	// the compose goes to the backend exactly as the api sent it, byte for
+	// byte, and this branch is the only difference between a placed app and
+	// every app that came before §6.4.
+	//
+	// A refusal here creates NOTHING — no compose file, no project, no volume
+	// — which is §6.3's requirement rather than tidiness: the case being
+	// caught is a mount that did not happen, and anything this deploy created
+	// would be created on the boot medium underneath it. It is reported as an
+	// ordinary failed deploy, so it reaches the operator through the job feed
+	// like any other, carrying the resolver's sentence about which disk and
+	// why.
+	composeYAML := cmd.ComposeYAML
+	if partUUID := strings.TrimSpace(cmd.DataDiskPartUUID); partUUID != "" {
+		placed, err := placeOnDataDisk(cmd.AppID, composeYAML, partUUID, resolve)
+		if err != nil {
+			bus.Respond(m, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: err.Error()})
+			log.Printf("rasputin-agent: docker.deploy %s: REFUSED, nothing was created: %v", cmd.AppID, err)
+			return
+		}
+		composeYAML = placed
+		log.Printf("rasputin-agent: docker.deploy %s: volumes placed on data disk %s", cmd.AppID, partUUID)
 	}
 	// Deploy is slow because of the image pull. The window is proto's, shared
 	// with the api's RPC deadline so the two cannot drift apart — see
@@ -128,7 +160,7 @@ func handleDeploy(b Backend, m *nats.Msg) {
 	budget := proto.AppDeployWorkFor(cmd.WorkBudgetSeconds)
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	status, detail, err := b.Deploy(ctx, cmd.AppID, cmd.Name, cmd.ComposeYAML)
+	status, detail, err := b.Deploy(ctx, cmd.AppID, cmd.Name, composeYAML)
 	if err != nil {
 		bus.Respond(m, proto.AppDeployAck{OK: false, Status: status, Detail: detail})
 		log.Printf("rasputin-agent: docker.deploy %s: %v", cmd.AppID, err)

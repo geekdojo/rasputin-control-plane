@@ -39,6 +39,10 @@ import (
 //     a guess at the data root: the appliance moves Docker's data-root onto
 //     the persistent partition and a dev box does not.
 
+// ErrPlacedVolumeUnsupported means the volume is bound onto a data disk (§6.4)
+// and the §4 backup path cannot capture it correctly yet. See ResolveVolume.
+var ErrPlacedVolumeUnsupported = errors.New("docker: backing up a volume placed on a data disk is not supported yet")
+
 // ErrVolumeNotFound means the runtime has no compose volume by that name for
 // that app.
 var ErrVolumeNotFound = errors.New("docker: no such compose volume for that app")
@@ -62,7 +66,39 @@ func (c *ComposeBackend) ResolveVolume(ctx context.Context, appID, volume string
 	if err != nil {
 		return "", fmt.Errorf("docker volume inspect %s: %w", name, err)
 	}
-	mp := strings.TrimSpace(string(out))
+	return parseVolumeInspect(name, out)
+}
+
+// parseVolumeInspect turns `docker volume inspect`'s Mountpoint+device output
+// into the host path to copy, or a refusal.
+//
+// Pure, and separate from ResolveVolume, because ComposeBackend.docker shells
+// out to the real binary unconditionally — the exec seam next to it belongs to
+// volumes.go's orphan verbs — so this decision is only testable if it is not
+// behind a process boundary.
+func parseVolumeInspect(name string, out []byte) (string, error) {
+	mp, device, _ := strings.Cut(strings.TrimSpace(string(out)), "\t")
+	mp = strings.TrimSpace(mp)
+	device = strings.TrimSpace(device)
+
+	// A volume placed on a data disk (§6.4) is a local-driver BIND: docker
+	// reports the usual /var/lib/docker/volumes/<name>/_data as Mountpoint and
+	// keeps the real path in Options.device. That _data directory only has the
+	// device mounted over it WHILE A CONTAINER HOLDS IT — and §4.3's default
+	// quiesce is `stop`, so by the time the backup copies, the refcount has
+	// dropped and _data is an empty directory.
+	//
+	// Copying it would produce an archive that is empty and a run that reports
+	// SUCCESS, which is the one outcome §4.4 exists to prevent. Refuse instead.
+	//
+	// Preferring Options.device is very probably the right fix, but it is a
+	// conclusion from reading docker's bind semantics and has NOT been proven
+	// on hardware. Fail closed until it has: a loud refusal costs nothing today
+	// (nothing can place a volume yet) and a silent empty archive costs
+	// everything on the one day it matters.
+	if device != "" && device != "<no value>" {
+		return "", fmt.Errorf("%w: %s is placed on a data disk (bind device %s)", ErrPlacedVolumeUnsupported, name, device)
+	}
 	if mp == "" || !path.IsAbs(mp) {
 		return "", fmt.Errorf("docker volume inspect %s: mountpoint %q is not an absolute path", name, mp)
 	}
@@ -230,7 +266,11 @@ func volumeLookupArgs(project, volume string) []string {
 }
 
 func volumeInspectArgs(name string) []string {
-	return []string{"volume", "inspect", "--format", "{{.Mountpoint}}", name}
+	// Mountpoint AND the bind device, tab-separated. The device is empty for an
+	// ordinary named volume and set for the bind form §6.4's placement renders.
+	// Asking for both in one call is what lets ResolveVolume tell them apart —
+	// see the refusal there for why that distinction is load-bearing.
+	return []string{"volume", "inspect", "--format", "{{.Mountpoint}}\t{{index .Options \"device\"}}", name}
 }
 
 func runningWithVolumeArgs(project, volumeName string) []string {

@@ -372,6 +372,13 @@ var safePathSegment = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // blkid prints, and nothing that could be a path.
 var safePartUUID = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
 
+// ValidPartUUID reports whether s has the shape of a partition UUID, for
+// callers outside this package that take one from an operator — §6.4's per-app
+// placement is one. Exported as a predicate over the SAME regexp the restore
+// paths use rather than copied, because a second spelling of "what a partition
+// UUID looks like" is a second answer waiting to disagree with this one.
+func ValidPartUUID(s string) bool { return safePartUUID.MatchString(s) }
+
 // validateRestorePath refuses anything that is not a clean, relative,
 // slash-separated path of safe components. It is a validation by SHAPE, not a
 // sanitisation: a member the writer could not have named is refused, never

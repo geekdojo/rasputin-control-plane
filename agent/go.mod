@@ -12,6 +12,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.24.8
 	golang.org/x/net v0.52.0
 	golang.org/x/sys v0.43.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

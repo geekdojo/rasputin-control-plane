@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS apps (
     deploy_budget_s INTEGER NOT NULL DEFAULT 0, -- per-app deploy budget in seconds from the tile (0 = default)
     expose_lan      INTEGER NOT NULL DEFAULT 0, -- LAN exposure opt-in (0 = tailnet-only default); ADR-0004 §9
     web_tls         INTEGER NOT NULL DEFAULT 0, -- the app serves HTTPS on published_port, so dial the upstream over TLS (#387)
+    data_disk_part_uuid TEXT NOT NULL DEFAULT '', -- §6.4 placement: the claimed data disk this app's volumes live on ('' = the boot medium)
     last_status     TEXT NOT NULL DEFAULT 'stopped',
     last_detail     TEXT NOT NULL DEFAULT '',
     last_deployed   INTEGER,
@@ -64,4 +65,12 @@ var migrations = []string{
 	// an old install with no target is nagged exactly like a new one.
 	`ALTER TABLE apps ADD COLUMN backup_ack_at INTEGER`,
 	`ALTER TABLE apps ADD COLUMN backup_ack_by TEXT NOT NULL DEFAULT ''`,
+	// data_disk_part_uuid: design/storage.md §6.4's per-app placement. '' is
+	// right for every app installed before this column existed AND is the
+	// permanent default for every app since — it means the boot medium, which
+	// is where every volume has always gone. Nothing back-fills it and nothing
+	// infers it: an app gets a placement only by an operator choosing a disk
+	// for it at install, so an upgraded cluster's apps deploy byte-identically
+	// to how they did before this column was added.
+	`ALTER TABLE apps ADD COLUMN data_disk_part_uuid TEXT NOT NULL DEFAULT ''`,
 }

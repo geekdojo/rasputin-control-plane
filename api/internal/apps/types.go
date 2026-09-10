@@ -39,14 +39,30 @@ type App struct {
 	// the app is tailnet-only — bare <app>.<cluster-id>.internal (tailnet) name,
 	// proxy bound to the tailnet interface only. When true it also gets the
 	// <app>.lan.<cluster-id>.internal name (LAN IP) and a LAN-interface bind.
-	ExposeLAN    bool            `json:"exposeLan"`
-	LastStatus   proto.AppStatus `json:"lastStatus"`
-	LastDetail   string          `json:"lastDetail,omitempty"`
-	LastDeployed *time.Time      `json:"lastDeployed,omitempty"`
-	LastStopped  *time.Time      `json:"lastStopped,omitempty"`
-	LastStatusAt *time.Time      `json:"lastStatusAt,omitempty"`
-	CreatedAt    time.Time       `json:"createdAt"`
-	UpdatedAt    time.Time       `json:"updatedAt"`
+	ExposeLAN bool `json:"exposeLan"`
+	// DataDiskPartUUID places this app's named volumes on the claimed data disk
+	// with that partition UUID (design/storage.md §6.4). Empty — the default,
+	// and every app installed before this column existed — means the boot
+	// medium, and a deploy for such an app carries no placement at all.
+	//
+	// Placement is a property of THIS INSTALL, not of its tile, and it is
+	// stored here for the same reason DeployBudgetSeconds and WebTLS are: the
+	// value that a deploy acts on should be the one the operator chose, and a
+	// tile cannot supply it anyway. Whether a node has a second disk is an
+	// operator's fact about one machine; a tile author cannot know it.
+	//
+	// The api records it and gates it against the node's eligibility; it never
+	// resolves it to a path. Only the agent knows where it mounted the disk,
+	// and only the agent can prove the filesystem at that path is that disk
+	// (§6.3) — see proto.AppDeployCmd.DataDiskPartUUID.
+	DataDiskPartUUID string          `json:"dataDiskPartUuid,omitempty"`
+	LastStatus       proto.AppStatus `json:"lastStatus"`
+	LastDetail       string          `json:"lastDetail,omitempty"`
+	LastDeployed     *time.Time      `json:"lastDeployed,omitempty"`
+	LastStopped      *time.Time      `json:"lastStopped,omitempty"`
+	LastStatusAt     *time.Time      `json:"lastStatusAt,omitempty"`
+	CreatedAt        time.Time       `json:"createdAt"`
+	UpdatedAt        time.Time       `json:"updatedAt"`
 	// BackupAck is the install-time acknowledgement design/storage.md §4.4
 	// requires when a tile with a `critical` volume is installed while backups
 	// are unconfigured (geekdojo/geekdojo-brain#299): the operator was told the

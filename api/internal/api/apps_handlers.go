@@ -68,6 +68,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		// ExposeLAN opts the app into LAN reachability (ADR-0004 §9). Absent →
 		// false: tailnet-only by default; LAN is always an explicit opt-in.
 		ExposeLAN bool `json:"exposeLan"`
+		// DataDiskPartUUID places this app's named volumes on a claimed data
+		// disk (design/storage.md §6.4). Absent → the boot medium, which is
+		// where they have always gone and what every existing caller sends.
+		DataDiskPartUUID string `json:"dataDiskPartUuid"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -106,6 +110,15 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, appTargetRoleMsg)
 		return
 	}
+	// §6.4: a placement this node cannot honour is refused HERE, so it is never
+	// recorded and therefore never becomes a deploy job that fails on the
+	// agent. The agent refuses it too — §6.3's marker check is the enforcement
+	// and nothing replaces it — but a refusal that only happens there reaches
+	// the operator as a failed deploy long after they chose the disk.
+	if refusal := dataPlacementRefusal(node, req.DataDiskPartUUID); refusal != "" {
+		writeError(w, http.StatusBadRequest, refusal)
+		return
+	}
 
 	if existing, _ := s.apps.GetByName(r.Context(), req.Name); existing != nil {
 		writeError(w, http.StatusConflict, "an app with that name already exists")
@@ -131,14 +144,15 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC()
 	app := &apps.App{
-		ID:          ulid.Make().String(),
-		Name:        req.Name,
-		ComposeYAML: req.ComposeYAML,
-		TargetNode:  req.TargetNode,
-		ExposeLAN:   req.ExposeLAN,
-		LastStatus:  proto.AppStatusStopped,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:               ulid.Make().String(),
+		Name:             req.Name,
+		ComposeYAML:      req.ComposeYAML,
+		TargetNode:       req.TargetNode,
+		ExposeLAN:        req.ExposeLAN,
+		DataDiskPartUUID: strings.TrimSpace(req.DataDiskPartUUID),
+		LastStatus:       proto.AppStatusStopped,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if err := s.apps.Create(r.Context(), app); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -289,8 +303,18 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/apps/{id}/deploy
+//
+// §6.4's placement is re-checked here rather than trusted from the install,
+// because the one input it depends on — the target node's role — is inventory
+// state that can change after an app is recorded. Re-checking costs two reads
+// and turns "the deploy job failed on the agent" into a 400 the operator gets
+// while they are still looking at the app.
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if refusal := s.deployPlacementRefusal(r, id); refusal != "" {
+		writeError(w, http.StatusBadRequest, refusal)
+		return
+	}
 	spec, _ := json.Marshal(map[string]string{"appId": id})
 	j, err := s.runner.Submit(r.Context(), "app.deploy", spec, creator(r))
 	if err != nil {
