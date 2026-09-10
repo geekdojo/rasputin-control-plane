@@ -25,7 +25,7 @@ func (s *Service) SetMeshMembership(fn inventory.MeshLookup) { s.mesh = fn }
 // silence when the mesh cache catches up. Severity stays crit for the same
 // reason: a node the api cannot drive is a node the api cannot drive,
 // however reachable the machine underneath is.
-func (s *Service) nodeAlerts(ctx context.Context, _ time.Time) ([]proto.Alert, error) {
+func (s *Service) nodeAlerts(ctx context.Context, now time.Time) ([]proto.Alert, error) {
 	nodes, err := s.inv.List(ctx)
 	if err != nil {
 		return nil, err
@@ -44,7 +44,7 @@ func (s *Service) nodeAlerts(ctx context.Context, _ time.Time) ([]proto.Alert, e
 				Severity:    proto.AlertCrit,
 				Source:      proto.AlertSourceNode,
 				Title:       fmt.Sprintf("Node %s is OFF BUS", n.ID),
-				Detail:      offBusDetail(n),
+				Detail:      offBusDetail(n, now),
 				Since:       n.LastSeen,
 				RelatedKind: "node",
 				RelatedID:   n.ID,
@@ -55,7 +55,7 @@ func (s *Service) nodeAlerts(ctx context.Context, _ time.Time) ([]proto.Alert, e
 				Severity:    proto.AlertCrit,
 				Source:      proto.AlertSourceNode,
 				Title:       fmt.Sprintf("Node %s is offline", n.ID),
-				Detail:      fmt.Sprintf("Last heartbeat %s ago", humanizeDuration(time.Since(n.LastSeen))),
+				Detail:      fmt.Sprintf("Last heartbeat %s ago", humanizeDuration(now.Sub(n.LastSeen))),
 				Since:       n.LastSeen,
 				RelatedKind: "node",
 				RelatedID:   n.ID,
@@ -66,7 +66,7 @@ func (s *Service) nodeAlerts(ctx context.Context, _ time.Time) ([]proto.Alert, e
 				Severity:    proto.AlertWarn,
 				Source:      proto.AlertSourceNode,
 				Title:       fmt.Sprintf("Node %s heartbeat is stale", n.ID),
-				Detail:      fmt.Sprintf("Last heartbeat %s ago", humanizeDuration(time.Since(n.LastSeen))),
+				Detail:      fmt.Sprintf("Last heartbeat %s ago", humanizeDuration(now.Sub(n.LastSeen))),
 				Since:       n.LastSeen,
 				RelatedKind: "node",
 				RelatedID:   n.ID,
@@ -79,11 +79,17 @@ func (s *Service) nodeAlerts(ctx context.Context, _ time.Time) ([]proto.Alert, e
 // offBusDetail: "reachable over the mesh (seen 40s ago) but its agent has not
 // heartbeated for 3h; restart the agent". Names both facts the operator would
 // otherwise have to cross-reference across two pages, and the one action.
-func offBusDetail(n *proto.Node) string {
+//
+// Both elapsed times are measured against now — the instant List stamped on
+// this whole snapshot — rather than against the wall clock at each Sprintf.
+// One alert then describes one moment, and the sub-minute bucket, which
+// counts whole seconds, cannot print a different number depending on how
+// long the inventory query before it took.
+func offBusDetail(n *proto.Node, now time.Time) string {
 	seen := ""
 	if n.Mesh != nil && n.Mesh.LastSeen != nil {
-		seen = fmt.Sprintf(" (seen %s ago)", humanizeDuration(time.Since(*n.Mesh.LastSeen)))
+		seen = fmt.Sprintf(" (seen %s ago)", humanizeDuration(now.Sub(*n.Mesh.LastSeen)))
 	}
 	return fmt.Sprintf("Reachable over the mesh%s but its agent has not heartbeated for %s; restart the agent or check its log",
-		seen, humanizeDuration(time.Since(n.LastSeen)))
+		seen, humanizeDuration(now.Sub(n.LastSeen)))
 }

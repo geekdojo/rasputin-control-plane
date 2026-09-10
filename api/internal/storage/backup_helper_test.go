@@ -464,6 +464,13 @@ type runHarnessOpts struct {
 	// presence join (inventory.Store.SetMeshLookup), so a seeded node whose
 	// heartbeat has lapsed can be read as off-bus rather than offline.
 	meshLookup inventory.MeshLookup
+	// now, when set beside nodes, pins the clock inventory renders elapsed
+	// times against (inventory.Store.SetNow), so the off-bus sentence's
+	// "(seen 20s ago)" is the fixture's offset and not the fixture's offset
+	// plus however long the run took. It reaches nothing else: heartbeat
+	// presence still derives from the real clock, so a seeded node is
+	// online or lapsed exactly as it would be without this.
+	now func() time.Time
 	// key, when set, is the target keypair the run seals to instead of a
 	// fresh one — the restore round-trip supplies the keypair a browser-
 	// produced fixture wrapped. keyID likewise overrides the target's key id.
@@ -623,6 +630,9 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		}
 		if opts.meshLookup != nil {
 			inv.SetMeshLookup(opts.meshLookup)
+		}
+		if opts.now != nil {
+			inv.SetNow(opts.now)
 		}
 		cfg.Inventory = inv
 		h.inv = inv

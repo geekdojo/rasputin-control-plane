@@ -85,6 +85,11 @@ type Service struct {
 	// mesh is optional — nil leaves mesh membership undetermined, so a lapsed
 	// node is OFFLINE rather than OFF BUS (node.go).
 	mesh inventory.MeshLookup
+	// now is the clock List stamps on a snapshot; nil (production) is
+	// time.Now. A test pins it because the details rendered from it count
+	// whole seconds below a minute, so an unpinned snapshot taken a second
+	// after its fixture says "41s ago" where the fixture said 40.
+	now func() time.Time
 
 	// busAuthEnforced mirrors the api's RASPUTIN_BUS_AUTH=enforce state.
 	// When false the aggregator emits a standing bus-auth-off warn — the
@@ -109,10 +114,22 @@ func New(inv *inventory.Store, j *jobs.Store, a *apps.Store, s *setup.Service, s
 // aggregator otherwise knows about.
 func (s *Service) SetBackupStates(b BackupStates) { s.backups = b }
 
+// SetNow wires the clock a snapshot is stamped with. Nil (what production
+// leaves it) is time.Now. Set before List, as SetMeshMembership is.
+func (s *Service) SetNow(fn func() time.Time) { s.now = fn }
+
+// clock is now, or the wall clock when none was injected.
+func (s *Service) clock() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 // List returns the current alert snapshot, sorted by severity descending
 // then by Since ascending (oldest concern first within a severity tier).
 func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
-	now := time.Now().UTC()
+	now := s.clock()
 	out := make([]proto.Alert, 0, 8)
 
 	if alerts, err := s.nodeAlerts(ctx, now); err != nil {

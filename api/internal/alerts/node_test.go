@@ -29,7 +29,13 @@ func TestNodeAlerts_OffBusReplacesOfflineUnderTheSameID(t *testing.T) {
 	f := newFixture(t)
 	f.insertNode(t, "compute2", 3*time.Hour)
 	f.markSetupComplete(t)
-	f.meshOnline(time.Now().Add(-40*time.Second), "compute2")
+	// The detail asserted below names the elapsed time to the second, and
+	// List renders it when it runs — after this fixture's inserts. Pin the
+	// snapshot's clock to the instant the fixture was built so "40s" is the
+	// offset written here and not that offset plus however long SQLite took.
+	at := time.Now()
+	f.svc.SetNow(func() time.Time { return at })
+	f.meshOnline(at.Add(-40*time.Second), "compute2")
 
 	alerts, err := f.svc.List(f.ctx)
 	if err != nil {

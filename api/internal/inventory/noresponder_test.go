@@ -167,6 +167,11 @@ func TestExplainNoResponderOffBus(t *testing.T) {
 		Mesh: &proto.MeshMembership{State: proto.MeshJoined, Enrolled: true, Online: true, LastSeen: &seen},
 	}
 	n := ExplainNoResponder(node, subject)
+	// Pin the clock to the same instant `seen` was computed from: the
+	// sentence below asserts "40s" exactly, and String renders it when it is
+	// called, so an unpinned clock would say 41s the moment this test ran a
+	// second slow.
+	n.Now = func() time.Time { return now }
 	if n.Kind != SilenceOffline || n.Online() {
 		t.Fatalf("kind = %v, Online() = %v; want SilenceOffline and not online", n.Kind, n.Online())
 	}
@@ -209,6 +214,83 @@ func TestStoreExplainNoResponderJoinsMesh(t *testing.T) {
 	n := st.ExplainNoResponder(ctx, proto.BackupStageVolumeSubject("c2"))
 	if n.Status != proto.StatusOffBus || !strings.Contains(n.String(), "OFF BUS (on mesh)") {
 		t.Errorf("%+v (%s)", n, n)
+	}
+}
+
+// The off-bus sentence prints an elapsed time, and it prints it when String
+// is called — so a reading held for a second says a different number than one
+// rendered immediately. NoResponder.Now is the seam that removes the wall
+// clock from that: frozen at a known instant, the sentence is the fixture's
+// offset exactly, whatever the machine does between building the reading and
+// reading it. That is what lets a caller assert the whole string rather than
+// the shape of it.
+func TestNoResponderRendersAgainstTheInjectedClock(t *testing.T) {
+	at := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		ago  time.Duration
+		want string
+	}{
+		{20 * time.Second, "(seen 20s ago)"},
+		{59 * time.Second, "(seen 59s ago)"},
+		{90 * time.Second, "(seen 1m ago)"},
+		{3 * time.Hour, "(seen 3h ago)"},
+	} {
+		seen := at.Add(-c.ago)
+		n := NoResponder{
+			NodeID: "c2", Verb: "storage.backup_stage_volume", Kind: SilenceOffline,
+			Status: proto.StatusOffBus, MeshLastSeen: &seen,
+			Now: func() time.Time { return at },
+		}
+		// Rendered twice, a real interval apart: the injected clock does not
+		// advance, so neither does the sentence.
+		first := n.String()
+		if !strings.Contains(first, c.want) {
+			t.Errorf("%q lacks %q", first, c.want)
+		}
+		if second := n.String(); second != first {
+			t.Errorf("re-rendered differently:\n%q\n%q", first, second)
+		}
+	}
+
+	// Unset, the field is the wall clock — a zero-value NoResponder is what
+	// production builds, and it renders what it always has.
+	seen := time.Now().Add(-3 * time.Hour)
+	n := NoResponder{NodeID: "c2", Verb: "storage.backup_stage_volume", Kind: SilenceOffline,
+		Status: proto.StatusOffBus, MeshLastSeen: &seen}
+	if n.Now != nil {
+		t.Error("a zero-value NoResponder must carry no clock")
+	}
+	if got := n.String(); !strings.Contains(got, "(seen 3h ago)") {
+		t.Errorf("unpinned: %q lacks the wall-clock elapsed time", got)
+	}
+}
+
+// SetNow is how a caller that holds only the store — the storage fan-out and
+// its tests — reaches that seam: the store stamps its clock on every reading
+// it returns. Unwired, the readings carry none and fall back to time.Now.
+func TestStoreSetNowReachesTheReading(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenStore(ctx, filepath.Join(t.TempDir(), "inv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	at := time.Now().UTC()
+	lapsed := at.Add(-3 * time.Hour)
+	seen := at.Add(-20 * time.Second)
+	if err := st.Insert(ctx, &proto.Node{ID: "c2", Role: proto.RoleCompute, Hostname: "c2", FirstSeen: lapsed, LastSeen: lapsed}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetMeshLookup(func(context.Context) map[string]*proto.MeshMembership {
+		return map[string]*proto.MeshMembership{"c2": {State: proto.MeshJoined, Enrolled: true, Online: true, LastSeen: &seen}}
+	})
+	subject := proto.BackupStageVolumeSubject("c2")
+	if n := st.ExplainNoResponder(ctx, subject); n.Now != nil {
+		t.Error("an unwired store must stamp no clock")
+	}
+	st.SetNow(func() time.Time { return at })
+	if got := st.ExplainNoResponder(ctx, subject).String(); !strings.Contains(got, "reachable over the mesh (seen 20s ago)") {
+		t.Errorf("%q; the pinned clock must fix the elapsed time at the fixture's offset", got)
 	}
 }
 

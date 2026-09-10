@@ -75,6 +75,24 @@ type NoResponder struct {
 	MinVersion string
 	// Err is set when inventory itself could not be read.
 	Err error
+	// Now is the clock String renders MeshLastSeen against, and the only
+	// place this type reads a clock at all. Nil means time.Now, so a
+	// zero-value NoResponder — every one production builds — renders
+	// exactly what it always has. A test sets it to pin the elapsed time
+	// the off-bus sentence prints: humanAgo's sub-minute bucket counts
+	// whole seconds, so a reading rendered a second after its fixture was
+	// built says "21s ago" where the fixture said 20. Store.SetNow stamps
+	// it on the readings Store.ExplainNoResponder returns, which is how a
+	// caller in another package reaches it.
+	Now func() time.Time
+}
+
+// now is Now, or the wall clock when no clock was injected.
+func (n NoResponder) now() time.Time {
+	if n.Now != nil {
+		return n.Now()
+	}
+	return time.Now()
 }
 
 // ExplainNoResponder reads the silence on subject — a subject built by
@@ -116,6 +134,13 @@ func ExplainNoResponder(node *proto.Node, subject string) NoResponder {
 	return n
 }
 
+// SetNow wires the clock the readings from this store render elapsed times
+// against — the off-bus sentence's "(seen 20s ago)". Nil (what production
+// leaves it) is time.Now. Set before the reader runs, as SetMeshLookup is;
+// it exists so a caller in another package — the storage fan-out's tests
+// hold the store and nothing else — can pin that string.
+func (s *Store) SetNow(fn func() time.Time) { s.now = fn }
+
 // ExplainNoResponder is ExplainNoResponder against this store's row for the
 // node the subject names, joined with its mesh membership (presence.go) so a
 // node that is off the bus but on the mesh is named as such.
@@ -125,12 +150,15 @@ func (s *Store) ExplainNoResponder(ctx context.Context, subject string) NoRespon
 	if err != nil {
 		n := ExplainNoResponder(nil, subject)
 		n.Err = err
+		n.Now = s.now
 		return n
 	}
 	if node != nil {
 		s.Presence(ctx, []*proto.Node{node})
 	}
-	return ExplainNoResponder(node, subject)
+	n := ExplainNoResponder(node, subject)
+	n.Now = s.now
+	return n
 }
 
 // Online reports whether the reading is of a node that IS on the bus — the
@@ -162,7 +190,7 @@ func (n NoResponder) String() string {
 		if n.Status == proto.StatusOffBus {
 			seen := ""
 			if n.MeshLastSeen != nil {
-				seen = fmt.Sprintf(" (seen %s ago)", humanAgo(time.Since(*n.MeshLastSeen)))
+				seen = fmt.Sprintf(" (seen %s ago)", humanAgo(n.now().Sub(*n.MeshLastSeen)))
 			}
 			return fmt.Sprintf("node %s is OFF BUS (on mesh): reachable over the mesh%s but its agent is not on the bus, so nothing answered %s; restart the agent or check its log",
 				n.NodeID, seen, n.Verb)
