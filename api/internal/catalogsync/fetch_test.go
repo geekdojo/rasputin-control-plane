@@ -54,6 +54,29 @@ func (h *fakeHub) release(version int, prerelease bool, bundle, sig []byte) {
 	})
 }
 
+// unsigned registers a catalog release that carries catalog.json but no .sig —
+// a publish that failed halfway.
+func (h *fakeHub) unsigned(version int, prerelease bool) {
+	h.releases = append(h.releases, map[string]any{
+		"tag_name": fmt.Sprintf("catalog-v%d", version), "prerelease": prerelease,
+		"assets": []map[string]any{{"name": assetBundle, "browser_download_url": "http://x/b"}},
+	})
+}
+
+// promote does what the catalog repo does to promote a version to stable:
+// turn the prerelease flag off on the release that already exists.
+func (h *fakeHub) promote(t *testing.T, version int) {
+	t.Helper()
+	tag := fmt.Sprintf("catalog-v%d", version)
+	for _, r := range h.releases {
+		if r["tag_name"] == tag {
+			r["prerelease"] = false
+			return
+		}
+	}
+	t.Fatalf("no release %s to promote", tag)
+}
+
 func (h *fakeHub) fetcher(channel string) *Fetcher {
 	f := NewFetcher("geekdojo/rasputin-app-catalog", h.srv.URL, channel)
 	return f
@@ -69,37 +92,116 @@ func mustBundle(t *testing.T, version int) []byte {
 }
 
 func TestAvailable_PicksTheHighestOnTheChannel(t *testing.T) {
-	h := newHub(t)
-	h.release(2, true, mustBundle(t, 2), []byte("s"))
-	h.release(11, true, mustBundle(t, 11), []byte("s")) // lexically < "2"
-	h.release(7, true, mustBundle(t, 7), []byte("s"))
-	h.release(99, false, mustBundle(t, 99), []byte("s")) // stable, wrong channel
+	cases := map[string]struct {
+		channel    string
+		prerelease bool
+	}{
+		// Dev takes prereleases (among everything else).
+		"dev": {channel: "dev", prerelease: true},
+		// Stable takes full releases, and the prerelease v99 added below is on
+		// the wrong channel for it.
+		"stable": {channel: "stable", prerelease: false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHub(t)
+			h.release(2, c.prerelease, mustBundle(t, 2), []byte("s"))
+			h.release(11, c.prerelease, mustBundle(t, 11), []byte("s")) // lexically < "2"
+			h.release(7, c.prerelease, mustBundle(t, 7), []byte("s"))
+			if c.channel == "stable" {
+				h.release(99, true, mustBundle(t, 99), []byte("s")) // prerelease, wrong channel
+			}
 
-	v, bURL, sURL, err := h.fetcher("dev").Available(context.Background())
-	if err != nil {
-		t.Fatalf("Available: %v", err)
-	}
-	if v != 11 {
-		t.Fatalf("got v%d, want v11 — versions must order numerically, not lexically", v)
-	}
-	if !strings.Contains(bURL, "catalog-v11") || !strings.Contains(sURL, "catalog-v11") {
-		t.Errorf("asset URLs point at the wrong release: %s %s", bURL, sURL)
+			v, bURL, sURL, err := h.fetcher(c.channel).Available(context.Background())
+			if err != nil {
+				t.Fatalf("Available: %v", err)
+			}
+			if v != 11 {
+				t.Fatalf("got v%d, want v11 — versions must order numerically, not lexically, and stable must skip prereleases", v)
+			}
+			if !strings.Contains(bURL, "catalog-v11") || !strings.Contains(sURL, "catalog-v11") {
+				t.Errorf("asset URLs point at the wrong release: %s %s", bURL, sURL)
+			}
+		})
 	}
 }
 
-func TestAvailable_ChannelSelectsPrereleaseOrStable(t *testing.T) {
-	h := newHub(t)
-	h.release(3, true, mustBundle(t, 3), []byte("s"))
-	h.release(9, false, mustBundle(t, 9), []byte("s"))
-
-	for channel, want := range map[string]int{"dev": 3, "stable": 9} {
-		v, _, _, err := h.fetcher(channel).Available(context.Background())
-		if err != nil {
-			t.Fatalf("%s: %v", channel, err)
-		}
-		if v != want {
-			t.Errorf("channel %q got v%d, want v%d", channel, v, want)
-		}
+// Dev is a superset of stable: it considers every catalog release, prerelease
+// or not, and takes the highest. Stable takes full releases only. The catalog
+// repo promotes a version by flipping the prerelease flag on the existing
+// release (ADR-0006 Decision 9, 2026-09-11 note); an either/or filter made
+// that promotion drop the version out of dev, so a freshly provisioned dev
+// cluster adopted an older prerelease than stable clusters were running.
+func TestAvailable_DevIsASupersetOfStable(t *testing.T) {
+	cases := map[string]struct {
+		setup func(h *fakeHub)
+		want  map[string]int // channel -> version Available must report
+	}{
+		// The 2026-09-11 state: v18 and v19 promoted, v17 still a prerelease.
+		// Under the old filter dev resolved to v17.
+		"prerelease under two full releases": {
+			setup: func(h *fakeHub) {
+				h.release(17, true, mustBundle(t, 17), []byte("s"))
+				h.release(18, false, mustBundle(t, 18), []byte("s"))
+				h.release(19, false, mustBundle(t, 19), []byte("s"))
+			},
+			want: map[string]int{"dev": 19, "stable": 19},
+		},
+		"prerelease on top of a full release": {
+			setup: func(h *fakeHub) {
+				h.release(19, false, mustBundle(t, 19), []byte("s"))
+				h.release(20, true, mustBundle(t, 20), []byte("s"))
+			},
+			want: map[string]int{"dev": 20, "stable": 19},
+		},
+		// Stable finding nothing is the normal empty-stream state (0, nil),
+		// not an error.
+		"only prereleases": {
+			setup: func(h *fakeHub) {
+				h.release(3, true, mustBundle(t, 3), []byte("s"))
+				h.release(12, true, mustBundle(t, 12), []byte("s"))
+				h.release(8, true, mustBundle(t, 8), []byte("s"))
+			},
+			want: map[string]int{"dev": 12, "stable": 0},
+		},
+		// Accepting full releases on dev must not relax the asset rule: a
+		// full release without its signature is skipped on both channels, and
+		// dev does not fall back to the lower prerelease over the full v18.
+		"full release missing its signature": {
+			setup: func(h *fakeHub) {
+				h.release(17, true, mustBundle(t, 17), []byte("s"))
+				h.release(18, false, mustBundle(t, 18), []byte("s"))
+				h.unsigned(19, false)
+			},
+			want: map[string]int{"dev": 18, "stable": 18},
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHub(t)
+			c.setup(h)
+			for _, channel := range []string{"dev", "stable"} {
+				want := c.want[channel]
+				v, bURL, sURL, err := h.fetcher(channel).Available(context.Background())
+				if err != nil {
+					t.Fatalf("%s: Available: %v", channel, err)
+				}
+				if v != want {
+					t.Errorf("channel %q got v%d, want v%d", channel, v, want)
+					continue
+				}
+				if want == 0 {
+					if bURL != "" || sURL != "" {
+						t.Errorf("channel %q found nothing but returned asset URLs %q %q", channel, bURL, sURL)
+					}
+					continue
+				}
+				tag := fmt.Sprintf("catalog-v%d/", want)
+				if !strings.Contains(bURL, tag) || !strings.Contains(sURL, tag) {
+					t.Errorf("channel %q asset URLs point at the wrong release: %s %s", channel, bURL, sURL)
+				}
+			}
+		})
 	}
 }
 
@@ -196,6 +298,64 @@ func TestSync_SkipsTheDownloadWhenNothingIsNewer(t *testing.T) {
 		if strings.HasPrefix(path, "/dl/") && n > 0 {
 			t.Errorf("downloaded %s despite having nothing to gain (%d hits)", path, n)
 		}
+	}
+}
+
+// The reported failure, end to end: a dev cluster fresh on its v14 floor, with
+// v18 and v19 already promoted to stable and v17 left as a prerelease, must
+// adopt v19 — not v17, which lacks tiles current apps need.
+func TestSync_FreshDevClusterAdoptsAPromotedCatalog(t *testing.T) {
+	h := newHub(t)
+	h.release(17, true, mustBundle(t, 17), []byte("sig"))
+	h.release(18, false, mustBundle(t, 18), []byte("sig"))
+	h.release(19, false, mustBundle(t, 19), []byte("sig"))
+	s, _ := newStore(t, &fakeVerifier{}, bundle(14, "floor"))
+
+	changed, err := Sync(context.Background(), h.fetcher("dev"), s)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if !changed || s.Current().Version != 19 {
+		t.Fatalf("changed=%v version=v%d, want true/v19", changed, s.Current().Version)
+	}
+}
+
+// Promotion must not move a dev cluster that is already on the top version:
+// no re-download, no change, and never a step down (ADR-0006 Decision 5).
+func TestSync_PromotionDoesNotMoveADevClusterAlreadyOnIt(t *testing.T) {
+	h := newHub(t)
+	h.release(17, true, mustBundle(t, 17), []byte("sig"))
+	h.release(18, true, mustBundle(t, 18), []byte("sig"))
+	h.release(19, true, mustBundle(t, 19), []byte("sig"))
+	s, _ := newStore(t, &fakeVerifier{}, bundle(14, "floor"))
+
+	if changed, err := Sync(context.Background(), h.fetcher("dev"), s); err != nil || !changed || s.Current().Version != 19 {
+		t.Fatalf("first sync: changed=%v version=v%d err=%v, want true/v19/nil", changed, s.Current().Version, err)
+	}
+	downloads := func() int {
+		n := 0
+		for path, hits := range h.hits {
+			if strings.HasPrefix(path, "/dl/") {
+				n += hits
+			}
+		}
+		return n
+	}
+	before := downloads()
+
+	h.promote(t, 18)
+	h.promote(t, 19)
+	for i := 0; i < 3; i++ {
+		changed, err := Sync(context.Background(), h.fetcher("dev"), s)
+		if err != nil || changed {
+			t.Fatalf("sync %d after promotion: (changed=%v, %v), want (false, nil)", i, changed, err)
+		}
+		if got := s.Current().Version; got != 19 {
+			t.Fatalf("sync %d after promotion moved the cluster to v%d; it must stay on v19", i, got)
+		}
+	}
+	if after := downloads(); after != before {
+		t.Errorf("promotion caused %d re-downloads of a catalog the cluster already runs", after-before)
 	}
 }
 
