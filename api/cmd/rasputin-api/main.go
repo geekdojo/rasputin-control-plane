@@ -64,11 +64,12 @@ func main() {
 	httpAddr := envOr("RASPUTIN_HTTP_ADDR", ":8080")
 	// Native HTTPS for first-run WebAuthn bootstrap: browsers only run the
 	// passkey ceremony in a secure context with a domain-name RP ID, so an
-	// appliance reached as https://rasputin.local must terminate TLS itself.
-	// Empty (the default) keeps dev behavior exactly as before — plain HTTP
-	// only. The OS image's systemd unit sets :443 (plus RASPUTIN_HTTP_ADDR=:80,
-	// RASPUTIN_RP_ID=rasputin.local, RASPUTIN_RP_ORIGINS=https://rasputin.local,
-	// RASPUTIN_PUBLIC_BASE_URL=https://rasputin.local).
+	// appliance reached as https://<cluster-id>.local must terminate TLS
+	// itself. Empty (the default) keeps dev behavior exactly as before — plain
+	// HTTP only. The OS image's systemd unit sets :443 (plus
+	// RASPUTIN_HTTP_ADDR=:80). It deliberately does NOT set RASPUTIN_RP_ID,
+	// RASPUTIN_RP_ORIGINS or RASPUTIN_PUBLIC_BASE_URL: those derive from
+	// RASPUTIN_CLUSTER_ID as <cluster-id>.local (ADR-0003; see applianceOr).
 	httpsAddr := os.Getenv("RASPUTIN_HTTPS_ADDR")
 	// obsIngestAddr is the dedicated mTLS remote-write ingress for per-node obs
 	// collectors (Slice 1.2b, observability-stack.md §3.10). It comes up only in
@@ -435,8 +436,9 @@ func main() {
 	// Default origins cover both ways the UI reaches the api on localhost:
 	// the Next dev server (:3000, cross-origin) and the api-served static
 	// export (:8080, same-origin — including `ssh -L 8080:localhost:8080`
-	// tunnels, still a valid escape hatch). On a real appliance the OS
-	// image overrides these to rasputin.local + https origins and enables
+	// tunnels, still a valid escape hatch). On a real appliance the defaults
+	// derive from RASPUTIN_CLUSTER_ID instead — RP ID <cluster-id>.local and
+	// origin https://<cluster-id>.local (ADR-0003) — and the OS image enables
 	// the native HTTPS listener (RASPUTIN_HTTPS_ADDR above) so the passkey
 	// ceremony gets its secure context without any tunnel.
 	authCfg := auth.Config{
@@ -1569,7 +1571,7 @@ func hardwareAddrForIP(ip net.IP) string {
 //
 // Per ADR-0003 the id defaults to "rasputin", so a node that predates
 // per-cluster naming — or any node whose operator never chose a name —
-// derives exactly the values the OS image hardcodes today. That is the
+// derives exactly the values the OS image used to hardcode. That is the
 // mechanism by which per-cluster naming ships with no migration.
 func clusterHostname() string {
 	id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID"))
