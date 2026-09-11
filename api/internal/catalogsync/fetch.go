@@ -29,8 +29,18 @@ type Fetcher struct {
 	// APIBase is the GitHub API root. Swappable for tests and for the
 	// aggregation endpoint ADR-0006's revisit criteria anticipate.
 	APIBase string
-	// Channel selects the release stream: "dev" takes prereleases, anything
-	// else takes stable, mirroring how components resolve a channel.
+	// Channel selects the release stream. Anything other than "dev" is stable
+	// and takes full (non-prerelease) releases only. "dev" takes every catalog
+	// release, prerelease or not, so the dev stream is a superset of stable and
+	// a dev cluster is never behind a stable one.
+	//
+	// This deliberately does NOT mirror how components resolve a channel:
+	// releases.githubPublicSource.LatestFor still treats dev as prereleases
+	// only, and that is unchanged. The catalog diverges because a catalog is
+	// promoted to stable by turning off the prerelease flag on the EXISTING
+	// release (ADR-0006 Decision 9, 2026-09-11 note). Under an either/or filter
+	// that promotion removed the version from dev, and a freshly provisioned
+	// dev cluster adopted an older prerelease than stable clusters were running.
 	Channel string
 
 	HTTP *http.Client
@@ -86,10 +96,13 @@ func (f *Fetcher) Available(ctx context.Context) (version int, bundleURL, sigURL
 		return 0, "", "", err
 	}
 
-	wantPrerelease := f.Channel == "dev"
+	// Stable skips prereleases; dev skips nothing (see Channel). With dev as a
+	// superset, flipping a release's prerelease flag cannot change what a dev
+	// cluster resolves to — only what a stable one does.
+	stableOnly := f.Channel != "dev"
 	best := 0
 	for _, r := range rels {
-		if r.Prerelease != wantPrerelease {
+		if stableOnly && r.Prerelease {
 			continue
 		}
 		v, ok := parseCatalogTag(r.TagName)
