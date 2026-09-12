@@ -63,22 +63,17 @@ var verbMinAgentVersion = map[string]string{
 	// answer and did not" rather than "predates the verb"; confirm with
 	// `git tag --contains` once the release exists and correct the floor.
 	"storage.backup_restore_volume": "2026.08.5-dev.140",
-	// docker.pull (#411): entered when the verb was authored, before its
-	// release existed, as the NEXT release run after v2026.08.5-dev.149 (the
-	// newest published control-plane release at the time), on the version
-	// line the org var carried then (2026.09.0). Confirm with
-	// `git tag --contains` once the release exists and correct the floor if a
-	// release was cut in between.
-	"docker.pull": "2026.09.0-dev.150",
-	// docker.volumes.check/drop (#412): entered when the verbs were authored,
-	// before their release existed, as the NEXT release run after
-	// v2026.08.5-dev.149 (still the newest published control-plane release),
-	// on the version line the org var carries (2026.09.0) — the same run
-	// docker.pull was entered as, since no release has been cut since. Confirm
-	// with `git tag --contains` once the release exists and correct the floor
-	// if a release was cut in between.
-	"docker.volumes.check": "2026.09.0-dev.150",
-	"docker.volumes.drop":  "2026.09.0-dev.150",
+	// docker.pull (#411): ce9a3c2, first in v2026.09.0-dev.151 (confirmed
+	// with `git tag --contains`). Entered at authoring as dev.150, the guessed
+	// next release run; run 150 went to the stable v2026.08.5 tag push, so no
+	// v2026.09.0-dev.150 release exists.
+	"docker.pull": "2026.09.0-dev.151",
+	// docker.volumes.check/drop (#412): 9cc7ca0, first in
+	// v2026.09.0-dev.151 (confirmed with `git tag --contains`), the same
+	// release as docker.pull. Entered at authoring as dev.150 for the same
+	// reason, and corrected for the same reason.
+	"docker.volumes.check": "2026.09.0-dev.151",
+	"docker.volumes.drop":  "2026.09.0-dev.151",
 }
 
 // RestoreReplayMinAgentVersion is the first agent release whose
