@@ -383,19 +383,41 @@ func fakePullAgent(t *testing.T, nc *nats.Conn, ack proto.AppPullAck, during fun
 // returns the name of the step that failed, or "".
 func runSteps(t *testing.T, w jobs.Workflow, nc *nats.Conn, appID string) (string, error) {
 	t.Helper()
-	prior := map[string]json.RawMessage{}
+	r := runWorkflow(t, w, nc, `{"appId":"`+appID+`"}`, "job-test")
+	return r.failedAt, r.err
+}
+
+// workflowRun is what runWorkflow saw: the step that ended the run and why
+// (jobs.ErrStopWorkflow for a step that ended it successfully), every recorded
+// step result, and every log line — the three places a job's content is
+// persisted and rendered.
+type workflowRun struct {
+	failedAt string
+	err      error
+	results  map[string]json.RawMessage
+	logs     []string
+}
+
+// runWorkflow runs w's steps in order against spec under jobID, as the runner
+// does, stopping at the first error.
+func runWorkflow(t *testing.T, w jobs.Workflow, nc *nats.Conn, spec, jobID string) workflowRun {
+	t.Helper()
+	run := workflowRun{results: map[string]json.RawMessage{}}
 	for _, s := range w.Steps {
-		sc := newStepCtxNATS(`{"appId":"`+appID+`"}`, nc)
-		sc.PriorResults = prior
+		sc := newStepCtxNATS(spec, nc)
+		sc.JobID = jobID
+		sc.PriorResults = run.results
+		sc.Log = func(level, message string) { run.logs = append(run.logs, level+": "+message) }
 		out, err := s.Do(sc)
-		if err != nil {
-			return s.Name, err
-		}
 		if out != nil {
-			prior[s.Name] = out
+			run.results[s.Name] = out
+		}
+		if err != nil {
+			run.failedAt, run.err = s.Name, err
+			return run
 		}
 	}
-	return "", nil
+	return run
 }
 
 // runUpgrade runs the app.upgrade steps in order, stopping at the first

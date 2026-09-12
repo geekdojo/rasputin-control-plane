@@ -14,18 +14,23 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// In-place catalog upgrade through the routes (geekdojo/geekdojo-brain#409):
-// upgradeAvailable on both reads, every refusal, and an upgrade that keeps the
-// app's identity while taking its compose from the verified store — whatever
-// the request body says.
+// In-place catalog upgrade through PUT /api/apps/{id}/compose with
+// {"source":"catalog"} (geekdojo/geekdojo-brain#409, #410): upgradeAvailable on
+// both reads, every refusal, the no-op an already-current app answers, and an
+// upgrade that keeps the app's identity while taking its compose from the
+// verified store.
+
+// catalogBody is the body that upgrades an app to its tile's compose.
+const catalogBody = `{"source":"catalog"}`
 
 // upgradeCatalogVersion is the version of the catalog in effect in these tests.
 const upgradeCatalogVersion = 7
 
 // upgradeFixture is gateFixture's live catalog (vaultwarden and jellyfin,
-// both available) plus a preview tile, the app.upgrade saga registered against
-// that store, the app.revert saga, and a fake agent that acks every pull and
-// every deploy on n1.
+// both available) plus a preview tile, the three compose sagas registered as
+// main registers them (app.upgrade against that store; app.edit with the
+// server's compose stash), and a fake agent that acks every pull and every
+// deploy on n1.
 func upgradeFixture(t *testing.T) (*apiFixture, *http.Cookie, *catalogsync.Store, <-chan proto.AppDeployCmd) {
 	t.Helper()
 	f, cookie, _ := gateFixture(t)
@@ -38,6 +43,9 @@ func upgradeFixture(t *testing.T) (*apiFixture, *http.Cookie, *catalogsync.Store
 	f.srv.SetCatalogSync(cat, nil)
 	f.runner.Register(apps.UpgradeWorkflow(f.appsStore, f.inv, f.nc, nil, cat.GetVersioned))
 	f.runner.Register(apps.RevertWorkflow(f.appsStore, f.inv, f.nc, nil))
+	stash := apps.NewComposeStash()
+	f.runner.Register(apps.EditWorkflow(f.appsStore, f.inv, f.nc, nil, stash))
+	f.srv.SetComposeStash(stash)
 
 	// The pull every compose change runs first (#411); this agent's pulls all
 	// succeed.
@@ -166,34 +174,32 @@ func TestAppsUpgradeAvailable_FalseWithoutALiveCatalog(t *testing.T) {
 	if r.UpgradeAvailable {
 		t.Error("upgradeAvailable must be false when the api has no live catalog")
 	}
-	if w := f.do(t, http.MethodPost, "/api/apps/a/upgrade", "", cookie); w.Code != http.StatusConflict {
+	if w := f.do(t, http.MethodPut, "/api/apps/a/compose", catalogBody, cookie); w.Code != http.StatusConflict {
 		t.Errorf("upgrade without a live catalog: want 409, got %d (%s)", w.Code, w.Body.String())
 	}
 }
 
 func TestAppsUpgrade_Refusals(t *testing.T) {
-	f, cookie, cat, got := upgradeFixture(t)
-	seedUpgradeApp(t, f, "current", "jf", "jellyfin", tileCompose(t, cat, "jellyfin"), upgradeCatalogVersion)
+	f, cookie, _, got := upgradeFixture(t)
 	seedUpgradeApp(t, f, "custom", "mine", "", "services: {old: {}}\n", 0)
 	seedUpgradeApp(t, f, "withdrawn", "gone", "no-longer-published", "services: {old: {}}\n", 3)
 	seedUpgradeApp(t, f, "preview", "pv", "preview-app", "services: {old: {}}\n", 3)
 	seedUpgradeApp(t, f, "backwards", "bw", "vaultwarden", "services: {old: {}}\n", upgradeCatalogVersion+2)
 
-	if w := f.do(t, http.MethodPost, "/api/apps/ghost/upgrade", "", cookie); w.Code != http.StatusNotFound {
+	if w := f.do(t, http.MethodPut, "/api/apps/ghost/compose", catalogBody, cookie); w.Code != http.StatusNotFound {
 		t.Errorf("unknown app: want 404, got %d (%s)", w.Code, w.Body.String())
 	}
 	for _, c := range []struct {
 		id   string
 		says string
 	}{
-		{"custom", "editing"},
+		{"custom", "composeYaml"},
 		{"withdrawn", "not in the catalog in effect"},
 		{"preview", "preview"},
-		{"current", "already runs"},
 		{"backwards", "downgrade"},
 	} {
 		before, _ := f.appsStore.Get(f.ctx, c.id)
-		w := f.do(t, http.MethodPost, "/api/apps/"+c.id+"/upgrade", "", cookie)
+		w := f.do(t, http.MethodPut, "/api/apps/"+c.id+"/compose", catalogBody, cookie)
 		if w.Code != http.StatusConflict {
 			t.Errorf("%s: want 409, got %d (%s)", c.id, w.Code, w.Body.String())
 			continue
@@ -216,23 +222,58 @@ func TestAppsUpgrade_Refusals(t *testing.T) {
 	}
 }
 
-// The compose an upgrade installs comes from the verified store. A body naming
-// a compose — or any other field — is not read: the app ends up on its tile's
-// compose, with its name, node and exposure unchanged.
+// An app already on its tile's compose is the idempotent case: the PUT changes
+// nothing, starts no job and answers 200 with the app as GET shows it. This
+// replaced #272's "409 already current".
+func TestAppsUpgrade_AlreadyCurrentIsANoOp(t *testing.T) {
+	f, cookie, cat, got := upgradeFixture(t)
+	seedUpgradeApp(t, f, "current", "jf", "jellyfin", tileCompose(t, cat, "jellyfin"), upgradeCatalogVersion)
+	before, _ := f.appsStore.Get(f.ctx, "current")
+
+	w := f.do(t, http.MethodPut, "/api/apps/current/compose", catalogBody, cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("already current: want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	r := decodeBody[revertRow](t, w.Body.String())
+	if r.ID != "current" || r.ComposeSHA256 != before.ComposeSHA256 || r.UpgradeAvailable {
+		t.Errorf("200 body = %+v, want the app's current state", r)
+	}
+	assertNoComposeJob(t, f, got)
+	if after, _ := f.appsStore.Get(f.ctx, "current"); after.UpdatedAt != before.UpdatedAt || after.PreviousComposeYAML != "" {
+		t.Error("a no-op wrote the row")
+	}
+}
+
+// The compose an upgrade installs comes from the verified store, and the body
+// cannot say otherwise: anything besides the source is a 400, not ignored.
+// The app ends up on its tile's compose, with its name, node and exposure
+// unchanged.
 func TestAppsUpgrade_TakesTheComposeFromTheStoreAndKeepsTheAppsIdentity(t *testing.T) {
 	f, cookie, cat, got := upgradeFixture(t)
 	const id = "01J9ZK3Q0M8X7Y6W5V4T3S2R1P"
 	before := seedUpgradeApp(t, f, id, "vw", "vaultwarden", "services: {old: {}}\n", 3)
 	want := tileCompose(t, cat, "vaultwarden")
 
-	body := `{"composeYaml":"services:\n  evil:\n    image: evil/evil:latest\n","name":"other","targetNode":"elsewhere","exposeLan":false,"sourceTile":"jellyfin"}`
-	w := f.do(t, http.MethodPost, "/api/apps/"+id+"/upgrade", body, cookie)
+	for _, body := range []string{
+		`{"source":"catalog","composeYaml":"services:\n  evil:\n    image: evil/evil:latest\n"}`,
+		`{"source":"catalog","name":"other","targetNode":"elsewhere","exposeLan":false,"sourceTile":"jellyfin"}`,
+	} {
+		if w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", body, cookie); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d (%s)", body, w.Code, w.Body.String())
+		}
+	}
+	assertNoComposeJob(t, f, got)
+
+	w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", catalogBody, cookie)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("upgrade: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
 	job := decodeBody[jobs.Job](t, w.Body.String())
 	if job.Kind != "app.upgrade" || strings.Contains(string(job.Spec), "evil") {
 		t.Fatalf("job = %s %s, want app.upgrade keyed only by appId", job.Kind, job.Spec)
+	}
+	if string(job.Spec) != `{"appId":"`+id+`"}` {
+		t.Errorf("spec = %s, want only the app id", job.Spec)
 	}
 	f.runner.Wait()
 	if j, _ := f.jobsStore.GetJob(f.ctx, job.ID); j == nil || j.Status != jobs.StatusSucceeded {
@@ -276,8 +317,12 @@ func TestAppsUpgrade_TakesTheComposeFromTheStoreAndKeepsTheAppsIdentity(t *testi
 	if r.UpgradeAvailable {
 		t.Error("upgradeAvailable must clear once the app is on its tile's compose")
 	}
-	if w := f.do(t, http.MethodPost, "/api/apps/"+id+"/upgrade", "", cookie); w.Code != http.StatusConflict {
-		t.Errorf("second upgrade: want 409 already current, got %d", w.Code)
+	if w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", catalogBody, cookie); w.Code != http.StatusOK {
+		t.Errorf("repeated upgrade: want 200 no-op, got %d (%s)", w.Code, w.Body.String())
+	}
+	f.runner.Wait()
+	if js, _ := f.jobsStore.ListJobsByKind(f.ctx, "app.upgrade", 10); len(js) != 1 {
+		t.Errorf("the repeated PUT started a job: %d app.upgrade jobs", len(js))
 	}
 }
 

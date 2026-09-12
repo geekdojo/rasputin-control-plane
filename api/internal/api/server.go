@@ -92,6 +92,9 @@ type Server struct {
 	// never enrolled) — the exposure flip still persists and still changes DNS;
 	// only the proxy half waits.
 	rotateAppLeaf apps.LeafRotator
+	// composeStash holds custom composes submitted to PUT
+	// /api/apps/{id}/compose until their app.edit job ends (#410).
+	composeStash *apps.ComposeStash
 	// selfNodeID is the node hosting this api. Read from the same env the saga's
 	// SystemUpdateConfig is built from, so the plan preview excludes the
 	// controlplane exactly as the real cascade does. Empty off-appliance.
@@ -120,6 +123,12 @@ func (s *Server) SetReleaseDownloadBase(downloadBase string) {
 // can apply a LAN-exposure change to the proxy immediately. main.go calls this
 // with the same closure the rotation workflow uses, so the two cannot drift.
 func (s *Server) SetAppLeafRotator(rotate apps.LeafRotator) { s.rotateAppLeaf = rotate }
+
+// SetComposeStash wires where PUT /api/apps/{id}/compose holds a submitted
+// compose for its app.edit job. It must be the stash apps.EditWorkflow was
+// registered with, or the job finds nothing to install. Unset, custom compose
+// edits answer 503.
+func (s *Server) SetComposeStash(stash *apps.ComposeStash) { s.composeStash = stash }
 
 // SetBackupStore wires the backup_targets ledger (design/storage.md §4.8) so
 // the /api/backup routes can read it. Wired by main after NewServer rather than
@@ -300,8 +309,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/apps/{id}", reqd(s.handleDeleteApp))
 	mux.HandleFunc("POST /api/apps/{id}/deploy", reqd(s.handleDeployApp))
 	mux.HandleFunc("POST /api/apps/{id}/stop", reqd(s.handleStopApp))
-	mux.HandleFunc("POST /api/apps/{id}/upgrade", reqd(s.handleUpgradeApp))
-	mux.HandleFunc("POST /api/apps/{id}/revert", reqd(s.handleRevertApp))
+	// The app's compose, as a resource: upgrade, custom edit and re-apply by
+	// hash (geekdojo/geekdojo-brain#410). It replaced POST .../upgrade and
+	// POST .../revert, which no release ever carried.
+	mux.HandleFunc("PUT /api/apps/{id}/compose", reqd(s.handlePutAppCompose))
 	// geekdojo/geekdojo-brain#399: the uninstall prompt's facts, and the path
 	// for volumes earlier uninstalls left behind.
 	mux.HandleFunc("GET /api/apps/{id}/volumes", reqd(s.handleAppVolumes))

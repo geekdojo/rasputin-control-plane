@@ -224,17 +224,76 @@ func (s *Store) UpgradeCompose(ctx context.Context, id, fromHash string, up Comp
 	return ErrComposeChanged
 }
 
+// ErrEditCatalogApp is a compose supplied by the owner for an app installed
+// from the catalog. The HTTP layer answers it with a 409, so the text is
+// written for the owner.
+var ErrEditCatalogApp = errors.New(`this app was installed from the catalog, so its compose changes only to its tile's current one ({"source":"catalog"}) or back to one it already ran ({"sha256":…}), never to a compose sent with the request`)
+
+// EditCompose replaces a custom app's compose with one its owner supplied, in
+// place (geekdojo/geekdojo-brain#410), keeping the one it replaces in
+// previous_compose_yaml with the rest of its record, exactly as UpgradeCompose
+// does.
+//
+// Only the compose and its hash change. A custom app's port, scheme and budget
+// were never copied from a tile, so there is nothing to re-copy; they stay as
+// they are, and the previous record gets the same values so a re-apply leaves
+// them unchanged too. compose_catalog_version is 0 — the compose came from no
+// catalog — whatever it said before. ID, Name, TargetNode, ExposeLAN and
+// BackupAck are not written: the ULID is the Compose project and the volume
+// namespace.
+//
+// Conditional twice. fromHash is the compose_sha256 the caller read, as for
+// UpgradeCompose. And the row must have no source_tile: a catalog app's
+// compose changes only to its tile's or to one it already ran, never to one a
+// client sent, and the store refuses that on its own rather than trusting the
+// caller to have checked. An unknown id is sql.ErrNoRows, a catalog app is
+// ErrEditCatalogApp, a stale hash is ErrComposeChanged.
+//
+// The compose is not validated, as it is not at custom create (ADR-0006 D12).
+func (s *Store) EditCompose(ctx context.Context, id, fromHash, composeYAML string, now time.Time) error {
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE apps SET previous_compose_yaml = compose_yaml,
+                        previous_compose_catalog_version = compose_catalog_version,
+                        previous_published_port = published_port, previous_web_tls = web_tls,
+                        previous_deploy_budget_s = deploy_budget_s,
+                        compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = 0, updated_at = ?
+        WHERE id = ? AND compose_sha256 = ? AND source_tile = ''`,
+		composeYAML, ComposeHash(composeYAML), ms(now), id, fromHash)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var tile string
+	switch err := s.db.QueryRowContext(ctx, `SELECT source_tile FROM apps WHERE id = ?`, id).Scan(&tile); {
+	case errors.Is(err, sql.ErrNoRows):
+		return sql.ErrNoRows
+	case err != nil:
+		return err
+	case tile != "":
+		return ErrEditCatalogApp
+	}
+	return ErrComposeChanged
+}
+
 // ErrNoPreviousCompose is RevertCompose finding nothing to re-apply: the app's
 // compose has never been replaced. The HTTP layer answers it with a 409, so the
 // text is written for the owner.
 var ErrNoPreviousCompose = errors.New("this app has no previous compose to re-apply: its compose has never been replaced")
 
-// RevertCompose re-applies an app's previous compose to its row: it swaps the
-// installed record and the previous one — compose, catalog version, published
-// port, web TLS and deploy budget — in one statement, so the compose being
-// left becomes the previous one and re-applying again goes back
+// RevertCompose re-applies an app's previous compose to its row: the previous
+// record — compose, catalog version, published port, web TLS and deploy budget
+// — becomes the installed one, and the record being left is retained as the
+// previous, as every compose change retains what it replaced
 // (geekdojo/geekdojo-brain#411). SQLite evaluates every right-hand side
-// against the row as it was, which is what makes the swap a single write.
+// against the row as it was, which is what makes that a single write.
+//
+// The caller names the compose it is installing (previousYAML), and the write
+// only lands if that is still the previous one. That is what keeps a repeated
+// re-apply from bouncing: the app.revert saga names its target by hash, so a
+// second request for the same compose finds it installed and writes nothing
+// (#410).
 //
 // It is conditional twice, in the style of UpgradeCompose. fromHash is the
 // compose_sha256 the caller read, and previousYAML is the previous compose the

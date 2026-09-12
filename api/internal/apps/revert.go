@@ -12,9 +12,9 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// CanRevert decides whether app has a previous compose to re-apply. One answer
-// for the revertAvailable flag and for POST /api/apps/{id}/revert, so the UI
-// cannot offer a re-apply the route refuses.
+// CanRevert decides whether app has a previous compose to re-apply. It is the
+// revertAvailable flag's answer; which compose that is, the client names by
+// hash (previousComposeSha256) and ResolveReapply checks.
 func CanRevert(app *App) error {
 	if app.PreviousComposeYAML == "" {
 		return ErrNoPreviousCompose
@@ -22,28 +22,113 @@ func CanRevert(app *App) error {
 	return nil
 }
 
-// RevertWorkflow drives app.revert (geekdojo/geekdojo-brain#411): re-apply the
-// compose an app ran before its compose was last replaced, in place. It is the
-// owner's way back after a change whose pull succeeded and whose `up` did not
-// — the one failure the upgrade saga deliberately does not undo on its own.
+// ErrUnknownComposeHash is a re-apply naming a compose this app cannot go to:
+// neither the one installed nor the one retained as previous. The HTTP layer
+// answers it with a 409, so the text is written for the owner.
+var ErrUnknownComposeHash = errors.New("this app has no compose with that sha256 to re-apply: it is neither the installed compose nor the retained previous one")
+
+// ValidComposeHash reports whether s is spelled as ComposeHash spells a hash:
+// 64 lower-case hex digits.
+func ValidComposeHash(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ResolveReapply decides what re-applying the compose whose hash is sha does
+// to app. current is true when that compose is already installed — the no-op
+// an idempotent PUT must be. Otherwise a nil error means sha names the
+// retained previous compose and there is something to do, and
+// ErrUnknownComposeHash means it names nothing this app can go to.
 //
-//  1. load  — the app and its node, checked as a deploy checks them
-//  2. pull  — the previous compose's images; nothing else on the node or the
+// One answer for PUT /api/apps/{id}/compose with {"sha256":…} and for the
+// app.revert saga, which asks again when it runs.
+func ResolveReapply(app *App, sha string) (current bool, err error) {
+	if sha == app.ComposeSHA256 {
+		return true, nil
+	}
+	if app.PreviousComposeYAML != "" && ComposeHash(app.PreviousComposeYAML) == sha {
+		return false, nil
+	}
+	return false, ErrUnknownComposeHash
+}
+
+// RevertSpec is the spec body of an app.revert job: the app, and the hash of
+// the compose to re-apply. The hash is what makes a re-apply idempotent. A
+// re-apply keyed only by appId meant "go to whichever compose is not
+// installed", so the same request sent twice went there and back again. A
+// hash names one compose, and once it is installed the same request is a
+// no-op.
+//
+// A hash is safe in a spec where a compose is not: it names a compose the api
+// already holds and reveals nothing of what the compose says.
+type RevertSpec struct {
+	AppID         string `json:"appId"`
+	ComposeSHA256 string `json:"sha256"`
+}
+
+// parseRevertSpec decodes an app.revert spec, strictly, like every app spec.
+func parseRevertSpec(raw json.RawMessage) (*RevertSpec, error) {
+	var spec RevertSpec
+	if err := decodeStrict(raw, &spec); err != nil {
+		return nil, err
+	}
+	if spec.AppID == "" {
+		return nil, errors.New("appId is required")
+	}
+	if !ValidComposeHash(spec.ComposeSHA256) {
+		return nil, errors.New("sha256 must be the 64 lower-case hex digits of a compose's sha256")
+	}
+	return &spec, nil
+}
+
+func revertSpecAppID(raw json.RawMessage) (string, error) {
+	spec, err := parseRevertSpec(raw)
+	if err != nil {
+		return "", err
+	}
+	return spec.AppID, nil
+}
+
+// RevertWorkflow drives app.revert (geekdojo/geekdojo-brain#411, #410):
+// re-apply, in place, the compose an app ran before its compose was last
+// replaced, named by its hash. It is the owner's way back after a change whose
+// pull succeeded and whose `up` did not — the one failure the other compose
+// sagas deliberately do not undo on their own.
+//
+//  1. load  — the app and its node, checked as a deploy checks them; a hash
+//     that is already installed ends the job here, successfully, changing
+//     nothing
+//  2. pull  — the named compose's images; nothing else on the node or the
 //     row changes, and a failure ends the job with the status put back
-//  3. swap  — Store.RevertCompose: the installed record and the previous one
-//     trade places, conditional on both being what was read and pulled
+//  3. apply — Store.RevertCompose installs the named previous record,
+//     conditional on the installed and previous composes being the ones read
+//     and pulled
 //  4. push  — the deploy saga's push, unchanged
-//  5. leaf  — the deploy saga's leaf step: the swap restored the previous
-//     compose's port and scheme, and the route is built from the row
+//  5. leaf  — the deploy saga's leaf step: the previous record carries its
+//     own port and scheme, and the route is built from the row
+//
+// The target is named, not implied. The compose being left is retained as the
+// previous one, as every compose change retains what it replaced, so the owner
+// can name it to go forward again. But a request naming a hash can only ever
+// arrive at that hash: repeating it finds the compose installed and does
+// nothing. The route this replaced took no target, went to "whichever one is
+// not installed", and so bounced between two composes when it was repeated.
 //
 // It is a re-deploy of a compose that already ran on this node, not a catalog
 // operation, and it asks the catalog nothing:
 //
-//   - The compose comes from the row, where UpgradeCompose (or, later, the
-//     custom edit) put it. For a catalog app that compose came out of the
-//     verified store when it was installed; re-applying it passes no new
-//     compose through the api, so no trust check is skipped.
-//   - compose_catalog_version swaps with the compose. After re-applying a v2
+//   - The compose comes from the row, where UpgradeCompose or EditCompose put
+//     it. For a catalog app that compose came out of the verified store when
+//     it was installed; re-applying it passes no new compose through the api,
+//     so no trust check is skipped.
+//   - compose_catalog_version moves with the compose. After re-applying a v2
 //     app's v1 compose the row says v1, so ResolveUpgrade offers the v2 tile
 //     again — the badge tells the truth about what is installed.
 //   - ResolveUpgrade's downgrade refusal is not consulted, on purpose. That
@@ -55,53 +140,75 @@ func CanRevert(app *App) error {
 //     the route cannot tell whether one ran. That warning is the UI's to give
 //     (#414); consent stays in the UI (Bryce, 2026-09-12).
 //
-// Swapping rather than clearing means a re-apply can itself be re-applied:
-// the compose it replaced is now the previous one. Like the upgrade, a failure
-// after the pull is not reverted automatically.
+// Like the other compose sagas, a failure after the pull is not reverted
+// automatically.
 func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.revert",
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: revertLoad(store, inv)},
 			// Backstops, as in UpgradeWorkflow; the real deadlines are the
-			// previous compose's budget, applied inside each step.
-			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "re-apply of the previous compose", revertPullSource)},
-			{Name: "swap", Timeout: 2 * time.Second, Do: revertSwap(store, inv, nc)},
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc)},
-			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, mint)},
+			// named compose's budget, applied inside each step.
+			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "re-apply of the previous compose", revertSpecAppID, revertPullSource)},
+			{Name: "apply", Timeout: 2 * time.Second, Do: revertApply(store, inv, nc)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, revertSpecAppID)},
+			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, mint, revertSpecAppID)},
 		},
 	}
 }
 
 func revertLoad(store *Store, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		app, err := loadApp(sc, store, inv)
+		spec, err := parseRevertSpec(sc.Spec)
 		if err != nil {
 			return nil, err
 		}
-		if err := CanRevert(app); err != nil {
+		app, err := loadAppByID(sc, store, inv, spec.AppID)
+		if err != nil {
 			return nil, err
 		}
-		sc.Log("info", fmt.Sprintf("re-applying the previous compose of %q on %s (%.12s → %.12s)",
-			app.Name, app.TargetNode, app.ComposeSHA256, ComposeHash(app.PreviousComposeYAML)))
-		return json.Marshal(map[string]string{"appId": app.ID, "targetNode": app.TargetNode})
+		current, err := ResolveReapply(app, spec.ComposeSHA256)
+		if err != nil {
+			return nil, err
+		}
+		result, _ := json.Marshal(map[string]any{"appId": app.ID, "targetNode": app.TargetNode, "composeSha256": spec.ComposeSHA256, "alreadyInstalled": current})
+		if current {
+			// The handler answers this with a no-op and starts no job, so
+			// something else installed the compose between the request and
+			// now. There is nothing to pull, write or push.
+			sc.Log("info", fmt.Sprintf("compose %.12s is already installed on %q; nothing to do", spec.ComposeSHA256, app.Name))
+			return result, jobs.ErrStopWorkflow
+		}
+		sc.Log("info", fmt.Sprintf("re-applying compose %.12s to %q on %s (installed: %.12s)",
+			spec.ComposeSHA256, app.Name, app.TargetNode, app.ComposeSHA256))
+		return result, nil
 	}
 }
 
-// revertPullSource is the compose a re-apply is about to write: the previous
-// one, under the budget it ran with.
-func revertPullSource(_ *jobs.StepCtx, app *App) (pullTarget, error) {
-	if err := CanRevert(app); err != nil {
+// revertPullSource is the compose a re-apply is about to install: the one the
+// spec names, under the budget it ran with.
+func revertPullSource(sc *jobs.StepCtx, app *App) (pullTarget, error) {
+	spec, err := parseRevertSpec(sc.Spec)
+	if err != nil {
 		return pullTarget{}, err
+	}
+	current, err := ResolveReapply(app, spec.ComposeSHA256)
+	switch {
+	case err != nil:
+		return pullTarget{}, err
+	case current:
+		// Installed since load looked. apply will deploy what the row holds,
+		// so that is what gets pulled.
+		return pullTarget{ComposeYAML: app.ComposeYAML, DeployBudgetSeconds: app.DeployBudgetSeconds}, nil
 	}
 	return pullTarget{ComposeYAML: app.PreviousComposeYAML, DeployBudgetSeconds: app.PreviousDeployBudgetSeconds}, nil
 }
 
-// revertSwap trades the installed record and the previous one. The previous
-// compose must still be the one whose images were pulled, and the installed
-// compose the one read — a change to either since means this job's view of the
-// app is stale, and it stops with nothing changed.
-func revertSwap(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+// revertApply installs the named previous record. The compose it installs must
+// be the one whose images were pulled, and the installed compose the one read
+// — a change to either since means this job's view of the app is stale, and
+// it stops with nothing changed.
+func revertApply(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		pulled, err := pulledCompose(sc)
 		if err != nil {
@@ -111,26 +218,42 @@ func revertSwap(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 			abandonAfterPull(sc, store, nc, pulled, err.Error())
 			return nil, err
 		}
-		app, err := loadApp(sc, store, inv)
+		spec, err := parseRevertSpec(sc.Spec)
 		if err != nil {
 			return abandon(fmt.Errorf("re-apply not done: %w", err))
 		}
-		if err := CanRevert(app); err != nil {
+		if pulled.ComposeSHA256 != spec.ComposeSHA256 {
+			return abandon(fmt.Errorf("re-apply not done: the compose pulled (%.12s) is not the one named (%.12s), and nothing on the node was changed — check the app and try again: %w",
+				pulled.ComposeSHA256, spec.ComposeSHA256, ErrComposeChanged))
+		}
+		app, err := loadAppByID(sc, store, inv, spec.AppID)
+		if err != nil {
 			return abandon(fmt.Errorf("re-apply not done: %w", err))
 		}
-		if ComposeHash(app.PreviousComposeYAML) != pulled.ComposeSHA256 {
+		current, err := ResolveReapply(app, spec.ComposeSHA256)
+		switch {
+		case errors.Is(err, ErrUnknownComposeHash):
 			return abandon(fmt.Errorf("re-apply not done: the app's previous compose changed while its images were being pulled, and nothing on the node was changed — check the app and try again: %w", ErrComposeChanged))
+		case err != nil:
+			return abandon(fmt.Errorf("re-apply not done: %w", err))
+		case current:
+			// Another job installed the named compose during the pull. The row
+			// already says what this job was asked to bring about; pushing it
+			// is still that, and `up -d` on an unchanged compose changes
+			// nothing.
+			sc.Log("info", "the row already holds the named compose; deploying it")
+			return json.Marshal(map[string]any{"appId": app.ID, "persisted": false, "composeSha256": app.ComposeSHA256})
 		}
 		fromHash := app.ComposeSHA256
 		if err := store.RevertCompose(sc.Ctx, app.ID, fromHash, app.PreviousComposeYAML, time.Now().UTC()); err != nil {
 			if errors.Is(err, ErrComposeChanged) {
 				return abandon(fmt.Errorf("re-apply not done: the app's compose changed while this was starting, and nothing on the node was changed — check the app and try again: %w", err))
 			}
-			return abandon(fmt.Errorf("re-apply not done: swap compose: %w", err))
+			return abandon(fmt.Errorf("re-apply not done: install the previous compose: %w", err))
 		}
-		sc.Log("info", fmt.Sprintf("row now holds the previous compose (%.12s → %.12s); pushing it", fromHash, pulled.ComposeSHA256))
+		sc.Log("info", fmt.Sprintf("row now holds compose %.12s (was %.12s, kept as the previous); pushing it", pulled.ComposeSHA256, fromHash))
 		return json.Marshal(map[string]any{
-			"appId": app.ID, "fromComposeSha256": fromHash, "toComposeSha256": pulled.ComposeSHA256,
+			"appId": app.ID, "persisted": true, "fromComposeSha256": fromHash, "toComposeSha256": pulled.ComposeSHA256,
 			"catalogVersion": app.PreviousComposeCatalogVersion,
 		})
 	}

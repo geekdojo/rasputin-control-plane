@@ -48,10 +48,11 @@ func (t UpgradeTarget) ComposeUpgrade() ComposeUpgrade {
 }
 
 // The reasons ResolveUpgrade finds nothing to upgrade to. The HTTP layer
-// answers each with a 409 carrying the error text, so the text is written for
-// the owner.
+// answers ErrUpgradeAlreadyCurrent as the no-op PUT /api/apps/{id}/compose is
+// (200, current state, no job), and each of the others with a 409 carrying the
+// error text, so the text is written for the owner.
 var (
-	ErrUpgradeCustomApp       = errors.New("this app was not installed from the catalog, so there is no tile to upgrade it to; a custom app's compose is changed by editing it, not by upgrading")
+	ErrUpgradeCustomApp       = errors.New("this app was not installed from the catalog, so there is no tile to upgrade it to; a custom app's compose is replaced by sending it as composeYaml")
 	ErrUpgradeTileUnavailable = errors.New("this app's catalog tile is not available")
 	ErrUpgradeAlreadyCurrent  = errors.New("this app already runs its tile's current compose")
 	ErrUpgradeCatalogOlder    = errors.New("the catalog in effect is older than the one this app's compose came from")
@@ -60,8 +61,8 @@ var (
 // ResolveUpgrade decides whether app has an upgrade, and to what.
 //
 // One implementation, three callers: the upgradeAvailable flag on GET
-// /api/apps, the refusals on POST /api/apps/{id}/upgrade, and the saga's
-// persist step. If the badge and the route answered the question two ways, the
+// /api/apps, PUT /api/apps/{id}/compose with {"source":"catalog"}, and the
+// saga's persist step. If the badge and the route answered the question two ways, the
 // UI would offer upgrades the route refuses, or hide ones it would take.
 //
 // The new compose comes from lookup and nowhere else. Signature, tile-safety
@@ -156,7 +157,7 @@ func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Lea
 			{Name: "load", Timeout: 2 * time.Second, Do: upgradeLoad(store, inv)},
 			// A backstop, like push's: the real deadline is the tile's budget,
 			// applied inside the step once the tile is resolved.
-			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "upgrade", upgradePullSource(lookup))},
+			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "upgrade", deploySpecAppID, upgradePullSource(lookup))},
 			{Name: "persist", Timeout: 2 * time.Second, Do: upgradePersist(store, inv, nc, lookup)},
 			// Same backstop as DeployWorkflow's push, for the same reason: the
 			// real deadline is the app's own budget, applied inside deployPush,
@@ -231,8 +232,9 @@ func upgradePersist(store *Store, inv *inventory.Store, nc *nats.Conn, lookup Ti
 			if app.ComposeSHA256 != pulled.ComposeSHA256 {
 				return abandon(errCatalogMovedDuringPull)
 			}
-			// The handler refuses an app that is already current, so this is
-			// a second upgrade that got here first. The row already holds the
+			// The handler answers an app that is already current with a no-op
+			// and starts no job, so this is a second upgrade that got here
+			// first. The row already holds the
 			// tile's compose; pushing it is still what this job was asked to
 			// bring about, and `up -d` on an unchanged compose changes nothing.
 			sc.Log("info", "the row already holds the tile's current compose; deploying it")

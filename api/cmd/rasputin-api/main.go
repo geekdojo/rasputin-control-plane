@@ -591,9 +591,16 @@ func main() {
 	}
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
-	// app.revert (#411): re-apply an app's previous compose. Its compose comes
-	// from the row, so unlike app.upgrade it needs nothing from the catalog.
+	// app.revert (#411): re-apply an app's previous compose, named by hash. Its
+	// compose comes from the row, so unlike app.upgrade it needs nothing from
+	// the catalog.
 	runner.Register(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
+	// app.edit (#410): replace a custom app's compose with one its owner sent.
+	// The compose is held in composeStash, never in the job spec; the server
+	// is given the same stash below, and the workflow discards what it holds
+	// when the job ends.
+	composeStash := apps.NewComposeStash()
+	runner.Register(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf, composeStash))
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
@@ -1076,6 +1083,7 @@ func main() {
 	// sweep. One rotator, two callers — a second one would differ in exactly
 	// the case that matters, an offline node.
 	srv.SetAppLeafRotator(rotateAppLeaf)
+	srv.SetComposeStash(composeStash)
 	// The backup-target ledger, for GET/POST /api/backup/targets, and the
 	// ingest endpoint the nodes upload sealed volumes to.
 	srv.SetBackupStore(backupStore)

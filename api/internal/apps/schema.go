@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS apps (
     backup_ack_by   TEXT NOT NULL DEFAULT '', -- the acknowledging user's name (never a token)
     compose_sha256  TEXT NOT NULL DEFAULT '',  -- hex sha256 of compose_yaml: what is installed, compared against the tile (#409)
     compose_catalog_version INTEGER NOT NULL DEFAULT 0, -- catalog version compose_yaml came from (0 = unknown or custom)
-    previous_compose_yaml   TEXT NOT NULL DEFAULT '',  -- the compose an upgrade replaced ('' = never upgraded)
+    previous_compose_yaml   TEXT NOT NULL DEFAULT '',  -- the compose the last compose change replaced ('' = never changed)
     previous_compose_catalog_version INTEGER NOT NULL DEFAULT 0, -- compose_catalog_version as it was beside previous_compose_yaml (#411)
     previous_published_port INTEGER NOT NULL DEFAULT 0, -- published_port as it was beside previous_compose_yaml
     previous_web_tls        INTEGER NOT NULL DEFAULT 0, -- web_tls as it was beside previous_compose_yaml

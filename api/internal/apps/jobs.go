@@ -16,10 +16,12 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// DeploySpec is the spec body of an app.deploy job, of app.stop, app.upgrade
-// and app.revert — all four are keyed only by appId. Decoded strictly: a field this saga does not know is a
-// refusal, which is what keeps app.delete's deleteVolumes from ever meaning
-// anything to a stop or a deploy.
+// DeploySpec is the spec body of an app.deploy job, and of app.stop,
+// app.upgrade and app.edit — all four are keyed only by appId. (app.revert
+// names its target compose too; see RevertSpec. app.edit's compose is never
+// in its spec; see ComposeStash.) Decoded strictly: a field this saga does not
+// know is a refusal, which is what keeps app.delete's deleteVolumes from ever
+// meaning anything to a stop or a deploy.
 type DeploySpec struct {
 	AppID string `json:"appId"`
 }
@@ -81,11 +83,16 @@ func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 // startup reconcile) retries. Skipped for a headless app (no published port) or
 // when leaf delivery is disabled (nil minter).
 func deployLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.DoFn {
+	return leafStep(store, inv, nc, mint, deploySpecAppID)
+}
+
+// leafStep is deployLeaf for a saga whose spec has its own shape.
+func leafStep(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter, appID specAppID) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		if mint == nil {
 			return nil, nil
 		}
-		app, err := loadApp(sc, store, inv)
+		app, err := loadAppFor(sc, store, inv, appID)
 		if err != nil {
 			return nil, err
 		}
@@ -682,11 +689,31 @@ func decodeStrict(raw json.RawMessage, v any) error {
 // app.delete's deleteVolumes is refused — the field means nothing to a stop,
 // and "means nothing" has to be "is refused", not "is quietly dropped".
 func loadApp(sc *jobs.StepCtx, store *Store, inv *inventory.Store) (*App, error) {
-	spec, err := parseSpec(sc.Spec)
+	return loadAppFor(sc, store, inv, deploySpecAppID)
+}
+
+// specAppID reads a job spec in the one shape a saga kind declares, strictly,
+// and returns the app id it names. The steps a kind shares with the deploy
+// saga (pull, push, leaf) take one, so a kind whose spec carries more than
+// appId (app.revert's target hash) is still decoded strictly, and a
+// DeploySpec kind is never loosened to accept that field.
+type specAppID func(raw json.RawMessage) (string, error)
+
+func deploySpecAppID(raw json.RawMessage) (string, error) {
+	spec, err := parseSpec(raw)
+	if err != nil {
+		return "", err
+	}
+	return spec.AppID, nil
+}
+
+// loadAppFor is loadApp for a spec in appID's shape.
+func loadAppFor(sc *jobs.StepCtx, store *Store, inv *inventory.Store, appID specAppID) (*App, error) {
+	id, err := appID(sc.Spec)
 	if err != nil {
 		return nil, err
 	}
-	return loadAppByID(sc, store, inv, spec.AppID)
+	return loadAppByID(sc, store, inv, id)
 }
 
 // loadAppByID loads an app and validates its target node. The kind-specific
@@ -725,8 +752,13 @@ func deployLoad(store *Store, inv *inventory.Store) jobs.DoFn {
 }
 
 func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+	return pushStep(store, inv, nc, deploySpecAppID)
+}
+
+// pushStep is deployPush for a saga whose spec has its own shape.
+func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		app, err := loadApp(sc, store, inv)
+		app, err := loadAppFor(sc, store, inv, appID)
 		if err != nil {
 			return nil, err
 		}
