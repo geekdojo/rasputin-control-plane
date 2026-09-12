@@ -153,12 +153,30 @@ describe('parseComposeResponse', () => {
     });
     assert.equal(o.kind, 'dropped');
     if (o.kind !== 'dropped') return;
-    assert.equal(o.message, 'the change drops volumes');
+    assert.deepEqual(Object.keys(o).sort(), ['dropped', 'kind', 'notDropped']);
     assert.deepEqual(o.dropped, [
       { name: 'rasp_01abc_data', volume: 'data', backup: 'critical', lastCaptured: { generationId: 'g1', at: '2026-09-01T00:00:00Z' } },
       { name: 'rasp_01abc_cache', volume: 'cache', lastCaptured: null },
     ]);
     assert.deepEqual(o.notDropped, []);
+  });
+
+  test("the dropped-volume refusal does not carry the API's raw error text", () => {
+    const raw =
+      'the new compose no longer declares 2 volume(s) this app has on disk: rasp_01abc_library, rasp_01abc_thumbs; name them in deleteVolumes to delete them';
+    const o = parseComposeResponse(409, {
+      error: raw,
+      droppedVolumes: [
+        { name: 'rasp_01abc_library', volume: 'library', lastCaptured: null },
+        { name: 'rasp_01abc_thumbs', volume: 'thumbs', lastCaptured: null },
+      ],
+      notDropped: [],
+    });
+    assert.equal(o.kind, 'dropped');
+    const text = JSON.stringify(o);
+    assert.equal(text.includes(raw), false);
+    assert.equal(text.includes('deleteVolumes'), false);
+    assert.equal('message' in o, false);
   });
 
   test('a missing lastCaptured reads as never, and malformed rows are dropped', () => {

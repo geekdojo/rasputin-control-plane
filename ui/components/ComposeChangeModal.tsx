@@ -53,7 +53,7 @@ export interface ComposeChangeModalProps {
   onClose: () => void;
 }
 
-type Refusal = { message: string; dropped: DroppedVolume[]; notDropped: string[] };
+type Refusal = { dropped: DroppedVolume[]; notDropped: string[] };
 
 const DANGER = '#f87171';
 const WARN = '#facc15';
@@ -116,7 +116,7 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
         return;
       case 'dropped':
         setRefusedBody(body);
-        setRefusal({ message: outcome.message, dropped: outcome.dropped, notDropped: outcome.notDropped });
+        setRefusal({ dropped: outcome.dropped, notDropped: outcome.notDropped });
         setSelected([...DROP_SELECTION_DEFAULT]);
         return;
       case 'error':
@@ -329,9 +329,6 @@ function DroppedBody({
           <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, margin: '6px 0 0', lineHeight: 1.5 }}>
             Not dropped by this change, so not deletable here: {refusal.notDropped.join(', ')}.
           </p>
-        )}
-        {refusal.message && (
-          <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, margin: '6px 0 0', lineHeight: 1.5, wordBreak: 'break-word' }}>{refusal.message}</p>
         )}
       </div>
 

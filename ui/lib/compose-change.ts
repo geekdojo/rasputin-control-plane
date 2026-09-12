@@ -150,8 +150,13 @@ export type ComposeOutcome =
   | { kind: 'started'; job: Job }
   /** 200: the body names what is already installed. Nothing started. */
   | { kind: 'noop'; app: App }
-  /** 409 with droppedVolumes: the change would orphan these volumes. */
-  | { kind: 'dropped'; message: string; dropped: DroppedVolume[]; notDropped: string[] }
+  /**
+   * 409 with droppedVolumes: the change would orphan these volumes. The API's
+   * `error` string is deliberately not carried: it names the request field
+   * (deleteVolumes) and the full volume names, and the dropped-volume view
+   * already explains the choice in its own words (Bryce, 2026-09-12).
+   */
+  | { kind: 'dropped'; dropped: DroppedVolume[]; notDropped: string[] }
   /** Any other refusal, in words an owner can act on. */
   | { kind: 'error'; status: number; message: string };
 
@@ -206,7 +211,7 @@ export function parseComposeResponse(status: number, body: unknown): ComposeOutc
       lastCaptured: v.lastCaptured ?? null,
     }));
     const notDropped = Array.isArray(raw.notDropped) ? raw.notDropped.filter((n): n is string => typeof n === 'string') : [];
-    if (dropped.length > 0) return { kind: 'dropped', message, dropped, notDropped };
+    if (dropped.length > 0) return { kind: 'dropped', dropped, notDropped };
     // Nothing is dropped, but deleteVolumes named volumes the change keeps:
     // there is nothing to ask the owner, only a refusal to explain.
     const kept = notDropped.length ? ` (still declared or not on the node: ${notDropped.join(', ')})` : '';
