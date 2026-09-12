@@ -47,6 +47,17 @@ func upgradeFixture(t *testing.T) (*apiFixture, *http.Cookie, *catalogsync.Store
 	f.runner.Register(apps.EditWorkflow(f.appsStore, f.inv, f.nc, nil, stash))
 	f.srv.SetComposeStash(stash)
 
+	// The volumes check every compose change's pull step makes first (#412);
+	// this node has no volume any compose drops.
+	checkSub, err := f.nc.Subscribe(proto.AppVolumesCheckSubject("n1"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.AppVolumesCheckAck{OK: true, Declared: []string{}, Dropped: []proto.AppDroppedVolume{}})
+		_ = m.Respond(ack)
+	})
+	if err != nil {
+		t.Fatalf("agent check sub: %v", err)
+	}
+	t.Cleanup(func() { _ = checkSub.Unsubscribe() })
+
 	// The pull every compose change runs first (#411); this agent's pulls all
 	// succeed.
 	pullSub, err := f.nc.Subscribe(proto.AppPullSubject("n1"), func(m *nats.Msg) {

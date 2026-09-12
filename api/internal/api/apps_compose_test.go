@@ -230,6 +230,14 @@ func TestAppsCompose_AFailedEditDiscardsTheComposeAndDoesNotRecordIt(t *testing.
 	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "n2", Role: proto.RoleCompute, Hostname: "n2.test", FirstSeen: now, LastSeen: now}); err != nil {
 		t.Fatal(err)
 	}
+	checkSub, err := f.nc.Subscribe(proto.AppVolumesCheckSubject("n2"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.AppVolumesCheckAck{OK: true, Declared: []string{}, Dropped: []proto.AppDroppedVolume{}})
+		_ = m.Respond(ack)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = checkSub.Unsubscribe() })
 	sub, err := f.nc.Subscribe(proto.AppPullSubject("n2"), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.AppPullAck{OK: false, Detail: "docker compose pull: manifest unknown"})
 		_ = m.Respond(ack)

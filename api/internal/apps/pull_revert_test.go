@@ -145,6 +145,7 @@ func TestUpgradeSaga_AFailedPullChangesNothingAndPutsTheStatusBack(t *testing.T)
 func TestUpgradeSaga_APullNobodyAnswersChangesNothing(t *testing.T) {
 	store, inv, before, row := upgradedToV2(t)
 	nc := startNATS(t)
+	fakeVolumeCheckAgent(t, nc)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 
 	step, err := runUpgrade(t, store, inv, nc, lookupOf(tileV3(), 3), "a")
@@ -313,8 +314,8 @@ func TestRevertWorkflowShape(t *testing.T) {
 	for _, s := range w.Steps {
 		names = append(names, s.Name)
 	}
-	if w.Kind != "app.revert" || strings.Join(names, ",") != "load,pull,apply,push,leaf" {
-		t.Errorf("workflow = %s %v, want app.revert load,pull,apply,push,leaf", w.Kind, names)
+	if w.Kind != "app.revert" || strings.Join(names, ",") != "load,pull,apply,push,leaf,drop_volumes" {
+		t.Errorf("workflow = %s %v, want app.revert load,pull,apply,push,leaf,drop_volumes", w.Kind, names)
 	}
 }
 
@@ -504,6 +505,7 @@ func TestPullStep_ATimedOutOrUnreadableReplyChangesNothing(t *testing.T) {
 		says  string
 	}{
 		{"rpc times out", func(t *testing.T, nc *nats.Conn) {
+			fakeVolumeCheckAgent(t, nc)
 			sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) {}) // never answers
 			if err != nil {
 				t.Fatal(err)
@@ -513,6 +515,7 @@ func TestPullStep_ATimedOutOrUnreadableReplyChangesNothing(t *testing.T) {
 			return context.WithTimeout(context.Background(), 200*time.Millisecond)
 		}, "pull rpc"},
 		{"ack is not json", func(t *testing.T, nc *nats.Conn) {
+			fakeVolumeCheckAgent(t, nc)
 			sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) { _ = m.Respond([]byte("not-json")) })
 			if err != nil {
 				t.Fatal(err)
@@ -537,7 +540,7 @@ func TestPullStep_ATimedOutOrUnreadableReplyChangesNothing(t *testing.T) {
 			sc := newStepCtxNATS(`{"appId":"a"}`, nc)
 			sc.Ctx = ctx
 
-			_, err := pullStep(store, inv, nc, "upgrade", deploySpecAppID, upgradePullSource(lookupOf(tileV3(), 3)))(sc)
+			_, err := pullStep(store, inv, nc, "upgrade", composeChangeSpecAppID, composeChangeSpecDeleteVolumes, upgradePullSource(lookupOf(tileV3(), 3)))(sc)
 			if err == nil || !strings.Contains(err.Error(), c.says) {
 				t.Fatalf("err = %v, want one saying %q", err, c.says)
 			}

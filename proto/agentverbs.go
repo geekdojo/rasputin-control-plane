@@ -70,6 +70,15 @@ var verbMinAgentVersion = map[string]string{
 	// `git tag --contains` once the release exists and correct the floor if a
 	// release was cut in between.
 	"docker.pull": "2026.09.0-dev.150",
+	// docker.volumes.check/drop (#412): entered when the verbs were authored,
+	// before their release existed, as the NEXT release run after
+	// v2026.08.5-dev.149 (still the newest published control-plane release),
+	// on the version line the org var carries (2026.09.0) — the same run
+	// docker.pull was entered as, since no release has been cut since. Confirm
+	// with `git tag --contains` once the release exists and correct the floor
+	// if a release was cut in between.
+	"docker.volumes.check": "2026.09.0-dev.150",
+	"docker.volumes.drop":  "2026.09.0-dev.150",
 }
 
 // RestoreReplayMinAgentVersion is the first agent release whose

@@ -98,6 +98,8 @@ var errEditComposeNotHeld = errors.New("compose edit not applied: the submitted 
 //     refusing any compose other than the one just pulled
 //  4. push    — the deploy saga's push, unchanged
 //  5. leaf    — the deploy saga's leaf step
+//  6. drop_volumes — delete the volumes the new compose drops that the owner
+//     named in deleteVolumes, now that `up` has succeeded (#412)
 //
 // In place is the point, as for the upgrade: the app keeps its ULID, so its
 // Compose project (proto.AppProjectName) and named volumes
@@ -106,8 +108,8 @@ var errEditComposeNotHeld = errors.New("compose edit not applied: the submitted 
 // edit that drops a service or an anonymous mount leaves them findable by a
 // later delete with data exactly as an upgrade does.
 //
-// The ordering and failure branches are UpgradeWorkflow's, for the same
-// reasons: a failed pull changes nothing, the row is written before the push,
+// The ordering, the dropped-volume gate and the failure branches are
+// UpgradeWorkflow's, for the same reasons: a failed pull changes nothing, the row is written before the push,
 // and a failure after the pull is not reverted — going back is the owner's
 // re-apply of the previous compose, by hash (RevertWorkflow).
 //
@@ -121,10 +123,11 @@ func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMi
 			{Name: "load", Timeout: 2 * time.Second, Do: editLoad(store, inv)},
 			// Backstops, as in UpgradeWorkflow; the real deadline is the app's
 			// own budget, applied inside each step.
-			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "compose edit", deploySpecAppID, editPullSource(stash))},
+			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "compose edit", composeChangeSpecAppID, composeChangeSpecDeleteVolumes, editPullSource(stash))},
 			{Name: "persist", Timeout: 2 * time.Second, Do: editPersist(store, inv, nc, stash)},
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc)},
-			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, mint)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID)},
+			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, mint, composeChangeSpecAppID)},
+			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
 		},
 		// Every terminal path — success, a failed step, and an orphan failed at
 		// startup — ends here, so a held compose never outlives its job.
@@ -138,7 +141,7 @@ func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMi
 
 func editLoad(store *Store, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		app, err := loadApp(sc, store, inv)
+		app, err := loadAppFor(sc, store, inv, composeChangeSpecAppID)
 		if err != nil {
 			return nil, err
 		}
@@ -184,7 +187,7 @@ func editPersist(store *Store, inv *inventory.Store, nc *nats.Conn, stash *Compo
 			abandonAfterPull(sc, store, nc, pulled, err.Error())
 			return nil, err
 		}
-		app, err := loadApp(sc, store, inv)
+		app, err := loadAppFor(sc, store, inv, composeChangeSpecAppID)
 		if err != nil {
 			return abandon(fmt.Errorf("compose edit not applied: %w", err))
 		}

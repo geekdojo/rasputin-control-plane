@@ -110,6 +110,14 @@ func (m *MockBackend) Pull(ctx context.Context, appID, composeYAML string) (stri
 	return "", nil
 }
 
+// CheckVolumes answers that the mock drops nothing: it runs no containers and
+// has no volumes, so no compose can orphan one. Nothing is declared either —
+// the mock cannot read a compose the way Compose does, and says nothing rather
+// than guess.
+func (m *MockBackend) CheckVolumes(ctx context.Context, appID, composeYAML string) ([]string, []proto.AppDroppedVolume, error) {
+	return []string{}, []proto.AppDroppedVolume{}, nil
+}
+
 func (m *MockBackend) Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

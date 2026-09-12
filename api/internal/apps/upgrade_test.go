@@ -316,8 +316,8 @@ func TestUpgradeWorkflowShape(t *testing.T) {
 	}
 	// #411: the pull runs before anything is written, and the push is still
 	// after the row write.
-	if got := strings.Join(names, ","); got != "load,pull,persist,push,leaf" {
-		t.Errorf("steps = %s, want load,pull,persist,push,leaf", got)
+	if got := strings.Join(names, ","); got != "load,pull,persist,push,leaf,drop_volumes" {
+		t.Errorf("steps = %s, want load,pull,persist,push,leaf,drop_volumes", got)
 	}
 }
 
@@ -358,7 +358,19 @@ func fakeDeployAgent(t *testing.T, nc *nats.Conn, ack proto.AppDeployAck) <-chan
 // fakePullAgent answers docker.pull on node n with ack, and hands every
 // command it received to the test. during, when set, runs inside the agent
 // before it answers — the window in which the node is pulling.
+//
+// It also answers docker.volumes.check on n with nothing dropped, as a node
+// whose app has no volume the new compose leaves undeclared: every compose
+// change asks that before it pulls (#412). A test about the gate itself uses
+// fakeVolumeCheckAgent on its own instead.
 func fakePullAgent(t *testing.T, nc *nats.Conn, ack proto.AppPullAck, during func()) <-chan proto.AppPullCmd {
+	t.Helper()
+	fakeVolumeCheckAgent(t, nc)
+	return fakePullOnly(t, nc, ack, during)
+}
+
+// fakePullOnly is fakePullAgent without the volumes check.
+func fakePullOnly(t *testing.T, nc *nats.Conn, ack proto.AppPullAck, during func()) <-chan proto.AppPullCmd {
 	t.Helper()
 	got := make(chan proto.AppPullCmd, 4)
 	sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) {
@@ -518,13 +530,16 @@ func TestUpgradeSaga_AFailedPushLeavesTheNewComposeOnTheRowAndTheOldOneKept(t *t
 	}
 }
 
-// A second upgrade that reaches persist after the first has already written the
-// row is not an error and does not shift previous_compose_yaml again.
-func TestUpgradeSaga_AnUpgradeThatLostTheRaceStillDeploysAndKeepsTheRealPrevious(t *testing.T) {
+// An app.upgrade job for an app that already runs its tile's current compose
+// — submitted without the handler, which would have answered 200 and started
+// nothing — ends successfully at load: no pull, no persist, no push, and the
+// row, previous compose included, untouched.
+func TestUpgradeSaga_SubmittedDirectlyForACurrentAppChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store, inv := seedUpgradeApp(t, "a")
-	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
+	checks := fakeVolumeCheckAgent(t, nc)
+	pulls := fakePullOnly(t, nc, proto.AppPullAck{OK: true}, nil)
 	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	lookup := lookupOf(upgradeTile(composeV2), 2)
 
@@ -532,19 +547,66 @@ func TestUpgradeSaga_AnUpgradeThatLostTheRaceStillDeploysAndKeepsTheRealPrevious
 		t.Fatal(err)
 	}
 	<-got
-	if step, err := runUpgrade(t, store, inv, nc, lookup, "a"); err != nil {
-		t.Fatalf("second upgrade failed at %s: %v", step, err)
+	<-pulls
+	<-checks
+	before, _ := store.Get(ctx, "a")
+
+	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"a"}`, "job-direct")
+	if !errors.Is(r.err, jobs.ErrStopWorkflow) || r.failedAt != "load" {
+		t.Fatalf("want the job to end successfully at load, got step=%q err=%v", r.failedAt, r.err)
+	}
+	for _, step := range []string{"pull", "persist", "push", "leaf", "drop_volumes"} {
+		if _, ran := r.results[step]; ran {
+			t.Errorf("step %s ran for an app already on its tile's compose", step)
+		}
+	}
+	select {
+	case cmd := <-checks:
+		t.Fatalf("the node was asked to check volumes: %+v", cmd)
+	case cmd := <-pulls:
+		t.Fatalf("the node was asked to pull: %+v", cmd)
+	case cmd := <-got:
+		t.Fatalf("the node was sent a deploy: %+v", cmd)
+	case <-time.After(100 * time.Millisecond):
+	}
+	after, _ := store.Get(ctx, "a")
+	if field := sameRecord(before, after); field != "" || after.LastStatus != before.LastStatus || after.PreviousComposeYAML != composeV1 {
+		t.Errorf("the no-op job changed the row (%s): %+v", field, after)
+	}
+}
+
+// The same, when the other upgrade lands while this one is pulling: persist
+// finds the pulled compose already installed, puts the status back, and ends
+// successfully without writing or pushing, and without shifting
+// previous_compose_yaml again.
+func TestUpgradeSaga_AnUpgradeThatLostTheRaceDuringThePullEndsWithoutPushing(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store, inv := seedUpgradeApp(t, "a")
+	lookup := lookupOf(upgradeTile(composeV2), 2)
+	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, func() {
+		// The winner's persist, during this job's pull.
+		if err := store.UpgradeCompose(ctx, "a", ComposeHash(composeV1), UpgradeTarget{Tile: upgradeTile(composeV2), CatalogVersion: 2}.ComposeUpgrade(), time.Now().UTC()); err != nil {
+			t.Error(err)
+		}
+	})
+	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
+
+	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"a"}`, "job-loser")
+	if !errors.Is(r.err, jobs.ErrStopWorkflow) || r.failedAt != "persist" {
+		t.Fatalf("want the job to end successfully at persist, got step=%q err=%v", r.failedAt, r.err)
 	}
 	select {
 	case cmd := <-got:
-		if cmd.ComposeYAML != composeV2 {
-			t.Errorf("second push sent %q", cmd.ComposeYAML)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("second upgrade never pushed")
+		t.Fatalf("the losing upgrade pushed: %+v", cmd)
+	case <-time.After(100 * time.Millisecond):
 	}
-	if row, _ := store.Get(ctx, "a"); row.PreviousComposeYAML != composeV1 {
-		t.Errorf("previous_compose_yaml = %q, want the compose that ran before either upgrade", row.PreviousComposeYAML)
+	row, _ := store.Get(ctx, "a")
+	if row.PreviousComposeYAML != composeV1 || row.ComposeYAML != composeV2 {
+		t.Errorf("row = compose %q previous %q, want v2 with v1 kept as the previous", row.ComposeYAML, row.PreviousComposeYAML)
+	}
+	if row.LastStatus != proto.AppStatusRunning {
+		t.Errorf("status = %s, want the status the pull marked put back", row.LastStatus)
 	}
 }
 

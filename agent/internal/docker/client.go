@@ -31,6 +31,13 @@ type Backend interface {
 	// failure detail ("" on success).
 	Pull(ctx context.Context, appID, composeYAML string) (string, error)
 
+	// CheckVolumes reports the volume keys composeYAML declares, as Compose
+	// resolves them for appID's project, and every named volume appID has on
+	// this node that it does not declare (geekdojo/geekdojo-brain#412) — the
+	// volumes applying that compose would orphan. Read-only: nothing is
+	// pulled, created or removed, and the live compose file is not written.
+	CheckVolumes(ctx context.Context, appID, composeYAML string) (declared []string, dropped []proto.AppDroppedVolume, err error)
+
 	// Stop brings the app's services down. Returns the post-stop status.
 	//
 	// deleteVolumes additionally removes every volume the app ever had —
@@ -69,4 +76,10 @@ type VolumeReaper interface {
 	// refusal rule (see volumes.go) and reports the rest by name with a
 	// reason. A refusal is not an error.
 	RemoveProjectVolumes(ctx context.Context, cmd proto.AppVolumesRemoveCmd) proto.AppVolumesRemoveAck
+	// DropAppVolumes removes, by exact name, named volumes of a still-installed
+	// app that its compose on this node no longer declares — the deleteVolumes
+	// of a compose change, after its `up` succeeded (#412). Every name that is
+	// not the app's own, that the live compose still declares, or that a
+	// container references is refused by name with a reason.
+	DropAppVolumes(ctx context.Context, cmd proto.AppVolumesDropCmd) proto.AppVolumesRemoveAck
 }

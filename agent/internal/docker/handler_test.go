@@ -225,6 +225,9 @@ func (errBackend) Deploy(_ context.Context, _, _, _ string) (proto.AppStatus, st
 func (errBackend) Pull(_ context.Context, _, _ string) (string, error) {
 	return "boom", errOh
 }
+func (errBackend) CheckVolumes(_ context.Context, _, _ string) ([]string, []proto.AppDroppedVolume, error) {
+	return nil, nil, errOh
+}
 func (errBackend) Stop(_ context.Context, _ string, _ bool) (proto.AppStatus, string, error) {
 	return proto.AppStatusFailed, "boom", errOh
 }
