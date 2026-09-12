@@ -226,7 +226,25 @@ func (r *Runner) Register(w Workflow) {
 // returned Job is the initial persisted state; callers should not assume it
 // reflects later step progress (use GetJob for that).
 func (r *Runner) Submit(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
-	return r.submit(ctx, kind, spec, createdBy, "")
+	return r.submit(ctx, kind, spec, createdBy, "", nil)
+}
+
+// SubmitPrepared is Submit with a prepare callback that runs with the job's id
+// after the id is minted and BEFORE the job is recorded or started. A non-nil
+// error from prepare is returned as is and no job exists.
+//
+// It exists for input a job needs that must not be in its spec. A spec is
+// persisted and rendered on the Tasks page, so anything secret has to be held
+// somewhere else, keyed to the job — and it has to be there before the job's
+// first step runs. Submit starts the job's goroutine before it returns, so a
+// caller that stored the input after Submit would race its own job.
+//
+// If SubmitPrepared returns an error after prepare succeeded (the job could not
+// be recorded), no job will ever run under that id and the workflow's
+// OnTerminal hook will not fire for it: whatever prepare stored is the caller's
+// to discard.
+func (r *Runner) SubmitPrepared(ctx context.Context, kind string, spec json.RawMessage, createdBy string, prepare func(jobID string) error) (*Job, error) {
+	return r.submit(ctx, kind, spec, createdBy, "", prepare)
 }
 
 // SubmitChild creates a new Job whose parent_id is set to parentID. The
@@ -237,10 +255,10 @@ func (r *Runner) SubmitChild(ctx context.Context, kind string, spec json.RawMess
 	if parentID == "" {
 		return nil, errors.New("SubmitChild requires a parentID; call Submit for a root job")
 	}
-	return r.submit(ctx, kind, spec, createdBy, parentID)
+	return r.submit(ctx, kind, spec, createdBy, parentID, nil)
 }
 
-func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, createdBy, parentID string) (*Job, error) {
+func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, createdBy, parentID string, prepare func(jobID string) error) (*Job, error) {
 	// Normalize an absent spec to an empty object.
 	//
 	// spec is persisted verbatim into a TEXT column and scanned straight back
@@ -272,6 +290,11 @@ func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, 
 	}
 	if parentID != "" {
 		j.ParentID = &parentID
+	}
+	if prepare != nil {
+		if err := prepare(j.ID); err != nil {
+			return nil, err
+		}
 	}
 	if err := r.store.CreateJob(ctx, j); err != nil {
 		return nil, fmt.Errorf("create job: %w", err)
