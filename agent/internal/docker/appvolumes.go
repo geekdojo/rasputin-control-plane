@@ -60,9 +60,12 @@ import (
 // directory, beside docker-compose.yml.
 const volumeRecordFile = "volumes.json"
 
-// labelAnonymousVolume is the label docker (engine 23 and later) puts on a
-// volume it created for an unnamed mount. It is docker's own statement that
-// the volume is anonymous; a volume without it is never treated as one.
+// labelAnonymousVolume is the label docker puts on a volume it created for an
+// unnamed mount — measured on Docker Engine 29.1.3 / Compose v5.0.1; which
+// engine release introduced it, and whether the OS image's engine sets it, was
+// not checked. It is docker's own statement that the volume is anonymous; a
+// volume without it is never treated as one, so an engine that does not set
+// it records nothing and removes nothing on this path.
 const labelAnonymousVolume = "com.docker.volume.anonymous"
 
 // labelComposeService is the label compose puts on each container naming its

@@ -641,7 +641,7 @@ func TestIsDockerAnonymous(t *testing.T) {
 		want bool
 	}{
 		{"docker's anonymous volume", volumeInspect{Name: hex64("a"), Labels: map[string]string{labelAnonymousVolume: ""}}, true},
-		{"no anonymous label (engine < 23, or made by hand)", volumeInspect{Name: hex64("a"), Labels: map[string]string{}}, false},
+		{"no anonymous label (an engine that does not set it, or made by hand)", volumeInspect{Name: hex64("a"), Labels: map[string]string{}}, false},
 		{"labelled for a project too", volumeInspect{Name: hex64("a"), Labels: map[string]string{labelAnonymousVolume: "", labelComposeProject: "p"}}, false},
 		{"not hex-shaped", volumeInspect{Name: "rasp_x_data", Labels: map[string]string{labelAnonymousVolume: ""}}, false},
 	}
