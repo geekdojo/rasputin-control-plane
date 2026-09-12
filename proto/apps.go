@@ -118,6 +118,35 @@ type AppDeployAck struct {
 	Detail string    `json:"detail,omitempty"`
 }
 
+// AppPullCmd is the request body on rasputin.node.<id>.cmd.docker.pull
+// (geekdojo/geekdojo-brain#411): fetch every image ComposeYAML names, under
+// the app's compose project, and do nothing else.
+//
+// It exists so a compose change can fail at the pull BEFORE anything on the
+// node has changed. `up` pulls too, but by the time `up` runs the agent has
+// already overwritten the app's compose file, and a pull that fails inside
+// `up` leaves a node whose file names a compose it is not running. The agent
+// stages this compose apart from the app's live file and never writes the
+// live one, so a failed pull leaves the node exactly as it was — the old
+// containers running (measured case 7, app-catalog.md §8a.2) and the file
+// that `down` and `ps` read still describing them.
+type AppPullCmd struct {
+	AppID       string `json:"appId"`
+	ComposeYAML string `json:"composeYaml"`
+
+	// WorkBudgetSeconds bounds the pull, and is the same budget the deploy of
+	// this compose gets: nearly all of a deploy's budget is its pull. Read it
+	// through AppDeployWorkFor, never directly; zero is the default.
+	WorkBudgetSeconds int `json:"workBudgetSeconds,omitempty"`
+}
+
+// AppPullAck is the synchronous reply to an AppPullCmd. There is no status:
+// a pull changes no container, so the app's status is whatever it was.
+type AppPullAck struct {
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // AppStopCmd is sent on rasputin.node.<id>.cmd.docker.stop.
 type AppStopCmd struct {
 	AppID string `json:"appId"`
@@ -172,6 +201,27 @@ type AppServiceStatus struct {
 	// the misreading this field exists to prevent. nil means unknown, and an
 	// exited container with an unknown exit code is treated as a failure.
 	ExitCode *int `json:"exitCode,omitempty"`
+
+	// Outdated says this container was created from a service definition
+	// other than the one in the app's compose file on disk — compose's own
+	// com.docker.compose.config-hash label on the container differs from
+	// `compose config --hash` of the file, or the file no longer declares the
+	// service at all. Only reported for running containers.
+	//
+	// It is how the api tells "the app recovered" from "the app is still
+	// running the compose it had before" (#411). The agent writes the new
+	// compose before `up`, and an `up` that fails before it reaches a service
+	// — a network it cannot create, a dependency that did not converge —
+	// leaves that service's OLD container running under the NEW file.
+	// Measured 2026-09-12 (compose v5.0.1): a network-pool conflict in the new
+	// compose failed `up` with the previous container untouched and running.
+	// Read as plain "running", that flipped a failed upgrade back to running
+	// and routed the proxy to the new compose's port.
+	//
+	// false means current OR unknown — an agent older than the field, or a
+	// hash that could not be read — which is exactly what every reader did
+	// before the field existed.
+	Outdated bool `json:"outdated,omitempty"`
 }
 
 // AppLeafCmd delivers a per-app TLS leaf (ADR-0004 §6) to the node hosting the
@@ -251,6 +301,12 @@ func AppDeploySubject(nodeID string) string {
 // AppStopSubject is the cmd subject for stopping an app on nodeID.
 func AppStopSubject(nodeID string) string {
 	return NodeCmdSubject(nodeID, "docker.stop")
+}
+
+// AppPullSubject is the cmd subject for pulling an app's images on nodeID
+// without deploying them (#411).
+func AppPullSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "docker.pull")
 }
 
 // AppStatusSubject is the cmd subject for fetching app status from nodeID.

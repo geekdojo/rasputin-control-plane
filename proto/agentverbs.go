@@ -63,6 +63,13 @@ var verbMinAgentVersion = map[string]string{
 	// answer and did not" rather than "predates the verb"; confirm with
 	// `git tag --contains` once the release exists and correct the floor.
 	"storage.backup_restore_volume": "2026.08.5-dev.140",
+	// docker.pull (#411): entered when the verb was authored, before its
+	// release existed, as the NEXT release run after v2026.08.5-dev.149 (the
+	// newest published control-plane release at the time), on the version
+	// line the org var carried then (2026.09.0). Confirm with
+	// `git tag --contains` once the release exists and correct the floor if a
+	// release was cut in between.
+	"docker.pull": "2026.09.0-dev.150",
 }
 
 // RestoreReplayMinAgentVersion is the first agent release whose

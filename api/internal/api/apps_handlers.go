@@ -35,6 +35,11 @@ type appView struct {
 	// UpgradeCatalogVersion is the catalog version an upgrade would take the
 	// compose from. Absent unless UpgradeAvailable.
 	UpgradeCatalogVersion int `json:"upgradeCatalogVersion,omitempty"`
+	// RevertAvailable says the app has a previous compose that POST
+	// /api/apps/{id}/revert would re-apply (#411) — apps.CanRevert's answer,
+	// the same function the route asks. Always present, like
+	// upgradeAvailable, so false is never inferred from absence.
+	RevertAvailable bool `json:"revertAvailable"`
 }
 
 // newAppView decorates one app row with what the catalog in effect says about
@@ -46,6 +51,7 @@ func (s *Server) newAppView(a *apps.App) appView {
 		v.UpgradeAvailable = true
 		v.UpgradeCatalogVersion = target.CatalogVersion
 	}
+	v.RevertAvailable = apps.CanRevert(a) == nil
 	return v
 }
 
@@ -336,9 +342,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 //
 // Upgrades a catalog app in place to the compose its tile carries in the
 // catalog in effect (geekdojo/geekdojo-brain#409), by running the app.upgrade
-// saga: persist the tile's compose on the row, then the deploy push to the same
-// ULID — so the Compose project and its named volumes are the ones the app
-// already has. Async, like deploy: returns the job.
+// saga: pull the tile's images, persist the tile's compose on the row, then the
+// deploy push to the same ULID — so the Compose project and its named volumes
+// are the ones the app already has. A pull that fails changes nothing (#411).
+// Async, like deploy: returns the job.
 //
 // There is no body, and any body sent is not read. The compose comes only from
 // the verified catalog store, which is the one place a tile's compose has been
@@ -370,6 +377,47 @@ func (s *Server) handleUpgradeApp(w http.ResponseWriter, r *http.Request) {
 	}
 	spec, _ := json.Marshal(apps.DeploySpec{AppID: app.ID})
 	j, err := s.runner.Submit(r.Context(), "app.upgrade", spec, creator(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, j)
+}
+
+// POST /api/apps/{id}/revert
+//
+// Re-applies the compose the app ran before its compose was last replaced
+// (geekdojo/geekdojo-brain#411), in place, by running the app.revert saga:
+// pull the previous compose's images, swap the installed and previous records
+// on the row, push, re-route. It is the owner's way back from a change whose
+// images pulled and whose `up` then failed — the one failure no saga undoes on
+// its own, because the new containers may already have migrated the app's
+// data. Async, like deploy: returns the job.
+//
+// There is no body, and any body sent is not read: the compose comes from the
+// row, never from the client. 404 for an unknown app; 409 when the app has no
+// previous compose. The catalog is not consulted — not for availability and
+// not for the downgrade refusal the upgrade route makes — because this names a
+// compose that already ran on this node rather than one the catalog offers;
+// apps.RevertWorkflow says why in full. As for upgrade, no re-consent is asked
+// for here: that is the UI's (Bryce, 2026-09-12).
+func (s *Server) handleRevertApp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	app, err := s.apps.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if app == nil {
+		writeError(w, http.StatusNotFound, "app not found")
+		return
+	}
+	if err := apps.CanRevert(app); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	spec, _ := json.Marshal(apps.DeploySpec{AppID: app.ID})
+	j, err := s.runner.Submit(r.Context(), "app.revert", spec, creator(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

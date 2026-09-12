@@ -301,6 +301,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/apps/{id}/deploy", reqd(s.handleDeployApp))
 	mux.HandleFunc("POST /api/apps/{id}/stop", reqd(s.handleStopApp))
 	mux.HandleFunc("POST /api/apps/{id}/upgrade", reqd(s.handleUpgradeApp))
+	mux.HandleFunc("POST /api/apps/{id}/revert", reqd(s.handleRevertApp))
 	// geekdojo/geekdojo-brain#399: the uninstall prompt's facts, and the path
 	// for volumes earlier uninstalls left behind.
 	mux.HandleFunc("GET /api/apps/{id}/volumes", reqd(s.handleAppVolumes))

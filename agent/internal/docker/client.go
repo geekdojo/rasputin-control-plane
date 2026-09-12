@@ -24,6 +24,13 @@ type Backend interface {
 	// brings the app up. Returns the post-deploy status.
 	Deploy(ctx context.Context, appID, name, composeYAML string) (proto.AppStatus, string, error)
 
+	// Pull fetches the images composeYAML names for appID's compose project
+	// WITHOUT writing the app's compose file and without creating, stopping or
+	// recreating any container (geekdojo/geekdojo-brain#411). A failed pull
+	// therefore leaves the node exactly as it was. The returned string is the
+	// failure detail ("" on success).
+	Pull(ctx context.Context, appID, composeYAML string) (string, error)
+
 	// Stop brings the app's services down. Returns the post-stop status.
 	//
 	// deleteVolumes additionally removes the project's named volumes —

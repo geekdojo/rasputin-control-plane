@@ -103,9 +103,12 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 // catalog app's compose with its tile's current one and redeploy it, in place.
 //
 //  1. load    — the app and its node, checked as a deploy checks them
-//  2. persist — resolve the tile again and write its compose onto the row
-//  3. push    — the deploy saga's push, unchanged
-//  4. leaf    — the deploy saga's leaf step: the tile may have moved its web
+//  2. pull    — resolve the tile and pull its compose's images on the node,
+//     changing nothing else there and nothing on the row (#411, see pull.go)
+//  3. persist — resolve the tile again and write its compose onto the row,
+//     refusing any compose other than the one just pulled
+//  4. push    — the deploy saga's push, unchanged
+//  5. leaf    — the deploy saga's leaf step: the tile may have moved its web
 //     port or changed its scheme, and the route is built from the row
 //
 // In place is the point. The app keeps its ULID, so the agent's Compose
@@ -134,19 +137,27 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 //     this saga) does. So the row holding the new compose cannot cause a
 //     deploy nobody asked for.
 //
-// On a failed push the row keeps the NEW compose, the replaced one is in
-// previous_compose_yaml, the status is failed with the agent's reason, and
-// upgradeAvailable reads false because the installed hash now matches the
-// tile. Retrying is an ordinary deploy. Going back is a forward step that
-// restores previous_compose_yaml and pushes again — which is what the
-// failure path (#411) builds on, alongside a separate pull step inserted
-// between persist and push, so a pull that fails never reaches `up`.
+// The pull goes before the row write because it does not touch the node's
+// compose (pull.go says why that makes a failed pull need no undo at all). A
+// failed pull therefore leaves the row, previous_compose_yaml included, and
+// the running app exactly as they were, puts the status back, and records the
+// registry's error; upgradeAvailable still reads true.
+//
+// On a failed push — the pull succeeded, so `up` itself failed — the row keeps
+// the NEW compose, the replaced one is in previous_compose_yaml, the status is
+// failed with the agent's reason, and upgradeAvailable reads false because the
+// installed hash now matches the tile. Nothing is reverted automatically: new
+// containers may have started and migrated the data. Retrying is an ordinary
+// deploy; going back is the owner's explicit re-apply (RevertWorkflow).
 func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter, lookup TileLookup) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.upgrade",
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: upgradeLoad(store, inv)},
-			{Name: "persist", Timeout: 2 * time.Second, Do: upgradePersist(store, inv, lookup)},
+			// A backstop, like push's: the real deadline is the tile's budget,
+			// applied inside the step once the tile is resolved.
+			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "upgrade", upgradePullSource(lookup))},
+			{Name: "persist", Timeout: 2 * time.Second, Do: upgradePersist(store, inv, nc, lookup)},
 			// Same backstop as DeployWorkflow's push, for the same reason: the
 			// real deadline is the app's own budget, applied inside deployPush,
 			// and here that is the budget persist just re-copied from the tile.
@@ -167,20 +178,59 @@ func upgradeLoad(store *Store, inv *inventory.Store) jobs.DoFn {
 	}
 }
 
+// upgradePullSource is the compose an upgrade is about to write: the tile's,
+// resolved exactly as persist will resolve it. Every refusal ResolveUpgrade
+// makes is made here first, before the app is marked or the node is asked
+// anything.
+func upgradePullSource(lookup TileLookup) pullSource {
+	return func(sc *jobs.StepCtx, app *App) (pullTarget, error) {
+		target, err := ResolveUpgrade(app, lookup)
+		if errors.Is(err, ErrUpgradeAlreadyCurrent) {
+			// A second upgrade that lost the race; persist will deploy what
+			// the row holds, so that is what gets pulled.
+			return pullTarget{ComposeYAML: app.ComposeYAML, DeployBudgetSeconds: app.DeployBudgetSeconds}, nil
+		}
+		if err != nil {
+			return pullTarget{}, err
+		}
+		return pullTarget{ComposeYAML: target.Tile.ComposeYAML, DeployBudgetSeconds: target.Tile.DeployBudgetSeconds}, nil
+	}
+}
+
+// errCatalogMovedDuringPull is persist finding that the tile's compose is no
+// longer the one whose images the pull step fetched.
+var errCatalogMovedDuringPull = errors.New("upgrade not applied: the catalog changed while the images were being pulled, and nothing on the node was changed — request the upgrade again")
+
 // upgradePersist writes the tile's compose onto the app row.
 //
 // The tile is resolved again here rather than carried from the handler in the
 // job spec. A spec is persisted and rendered on the Tasks page, and a compose
 // that can travel in a spec is a compose some later caller can put there; the
 // spec stays {appId} and the verified store stays the only source.
-func upgradePersist(store *Store, inv *inventory.Store, lookup TileLookup) jobs.DoFn {
+//
+// Resolving again means the catalog can have moved during the pull. The
+// compose written must be the one whose images were pulled, so a different
+// one is refused — with nothing on the node or the row changed, the status put
+// back, and the owner told to ask again.
+func upgradePersist(store *Store, inv *inventory.Store, nc *nats.Conn, lookup TileLookup) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		app, err := loadApp(sc, store, inv)
+		pulled, err := pulledCompose(sc)
 		if err != nil {
 			return nil, err
 		}
+		abandon := func(err error) (json.RawMessage, error) {
+			abandonAfterPull(sc, store, nc, pulled, err.Error())
+			return nil, err
+		}
+		app, err := loadApp(sc, store, inv)
+		if err != nil {
+			return abandon(fmt.Errorf("upgrade not applied: %w", err))
+		}
 		target, err := ResolveUpgrade(app, lookup)
 		if errors.Is(err, ErrUpgradeAlreadyCurrent) {
+			if app.ComposeSHA256 != pulled.ComposeSHA256 {
+				return abandon(errCatalogMovedDuringPull)
+			}
 			// The handler refuses an app that is already current, so this is
 			// a second upgrade that got here first. The row already holds the
 			// tile's compose; pushing it is still what this job was asked to
@@ -189,16 +239,19 @@ func upgradePersist(store *Store, inv *inventory.Store, lookup TileLookup) jobs.
 			return json.Marshal(map[string]any{"appId": app.ID, "persisted": false, "composeSha256": app.ComposeSHA256})
 		}
 		if err != nil {
-			return nil, err
+			return abandon(fmt.Errorf("upgrade not applied: %w", err))
 		}
 		up := target.ComposeUpgrade()
+		toHash := ComposeHash(up.ComposeYAML)
+		if toHash != pulled.ComposeSHA256 {
+			return abandon(errCatalogMovedDuringPull)
+		}
 		if err := store.UpgradeCompose(sc.Ctx, app.ID, app.ComposeSHA256, up, time.Now().UTC()); err != nil {
 			if errors.Is(err, ErrComposeChanged) {
-				return nil, errors.New("the app's compose changed while this upgrade was starting; nothing was deployed — check the app and request the upgrade again")
+				return abandon(fmt.Errorf("the app's compose changed while this upgrade was starting; nothing was deployed — check the app and request the upgrade again: %w", err))
 			}
-			return nil, fmt.Errorf("persist upgraded compose: %w", err)
+			return abandon(fmt.Errorf("upgrade not applied: persist upgraded compose: %w", err))
 		}
-		toHash := ComposeHash(up.ComposeYAML)
 		sc.Log("info", fmt.Sprintf("compose replaced with tile %q from catalog v%d (%.12s → %.12s)",
 			app.SourceTile, target.CatalogVersion, app.ComposeSHA256, toHash))
 		return json.Marshal(map[string]any{

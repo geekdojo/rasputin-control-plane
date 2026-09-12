@@ -22,7 +22,11 @@ CREATE TABLE IF NOT EXISTS apps (
     backup_ack_by   TEXT NOT NULL DEFAULT '', -- the acknowledging user's name (never a token)
     compose_sha256  TEXT NOT NULL DEFAULT '',  -- hex sha256 of compose_yaml: what is installed, compared against the tile (#409)
     compose_catalog_version INTEGER NOT NULL DEFAULT 0, -- catalog version compose_yaml came from (0 = unknown or custom)
-    previous_compose_yaml   TEXT NOT NULL DEFAULT ''   -- the compose an upgrade replaced ('' = never upgraded)
+    previous_compose_yaml   TEXT NOT NULL DEFAULT '',  -- the compose an upgrade replaced ('' = never upgraded)
+    previous_compose_catalog_version INTEGER NOT NULL DEFAULT 0, -- compose_catalog_version as it was beside previous_compose_yaml (#411)
+    previous_published_port INTEGER NOT NULL DEFAULT 0, -- published_port as it was beside previous_compose_yaml
+    previous_web_tls        INTEGER NOT NULL DEFAULT 0, -- web_tls as it was beside previous_compose_yaml
+    previous_deploy_budget_s INTEGER NOT NULL DEFAULT 0 -- deploy_budget_s as it was beside previous_compose_yaml
 );
 CREATE INDEX IF NOT EXISTS idx_apps_target_node ON apps(target_node);
 CREATE INDEX IF NOT EXISTS idx_apps_status      ON apps(last_status);
@@ -79,4 +83,23 @@ var migrations = []string{
 	`ALTER TABLE apps ADD COLUMN compose_sha256 TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE apps ADD COLUMN compose_catalog_version INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE apps ADD COLUMN previous_compose_yaml TEXT NOT NULL DEFAULT ''`,
+	// previous_compose_catalog_version / previous_published_port /
+	// previous_web_tls / previous_deploy_budget_s: the rest of the record that
+	// went with previous_compose_yaml (geekdojo/geekdojo-brain#411), so
+	// re-applying the previous compose restores the route, the budget and the
+	// catalog version it ran with, not just its text. The route is built from
+	// the row, so a previous compose re-applied under the current port would
+	// run on one port and be proxied to another.
+	//
+	// Not backfilled, and nothing to backfill from: the only rows with a
+	// previous compose are ones the #409 build upgraded, and no published
+	// control-plane release contains that build (the newest release when this
+	// was written, v2026.08.5-dev.149 / v2026.08.5, predates its merge). A row
+	// upgraded by an unreleased build between the two would re-apply its
+	// previous compose with port 0, no TLS, the default budget and an unknown
+	// catalog version.
+	`ALTER TABLE apps ADD COLUMN previous_compose_catalog_version INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE apps ADD COLUMN previous_published_port INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE apps ADD COLUMN previous_web_tls INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE apps ADD COLUMN previous_deploy_budget_s INTEGER NOT NULL DEFAULT 0`,
 }

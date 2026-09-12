@@ -3,6 +3,8 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -116,6 +118,41 @@ func TestRegisterHandlers_DeployBadCmd(t *testing.T) {
 	}
 }
 
+// docker.pull answers, and a pull writes no compose file: the app a pull was
+// for is exactly as undeployed afterwards as before (#411).
+func TestRegisterHandlers_PullAnswersAndDeploysNothing(t *testing.T) {
+	nc, b := newRegistered(t)
+
+	var ack proto.AppPullAck
+	request(t, nc, proto.AppPullSubject("node-1"), proto.AppPullCmd{
+		AppID: "app-1", ComposeYAML: "services: {whoami: {image: traefik/whoami}}\n", WorkBudgetSeconds: 90,
+	}, &ack)
+	if !ack.OK {
+		t.Fatalf("pull ack: %+v", ack)
+	}
+	if _, err := os.Stat(b.composePath("app-1")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a pull wrote the app's compose file (stat err = %v)", err)
+	}
+	if status, _, _ := b.Status(context.Background(), "app-1"); status != proto.AppStatusStopped {
+		t.Errorf("status after a pull = %q, want stopped", status)
+	}
+}
+
+func TestRegisterHandlers_PullBadCmd(t *testing.T) {
+	nc, _ := newRegistered(t)
+	msg, err := nc.Request(proto.AppPullSubject("node-1"), []byte("not-json"), 2*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	var ack proto.AppPullAck
+	if err := json.Unmarshal(msg.Data, &ack); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ack.OK {
+		t.Error("expected OK=false on bad cmd")
+	}
+}
+
 func TestRegisterHandlers_StopHappyPath(t *testing.T) {
 	nc, _ := newRegistered(t)
 
@@ -184,6 +221,9 @@ type errBackend struct{}
 func (errBackend) Name() string { return "err" }
 func (errBackend) Deploy(_ context.Context, _, _, _ string) (proto.AppStatus, string, error) {
 	return proto.AppStatusFailed, "boom", errOh
+}
+func (errBackend) Pull(_ context.Context, _, _ string) (string, error) {
+	return "boom", errOh
 }
 func (errBackend) Stop(_ context.Context, _ string, _ bool) (proto.AppStatus, string, error) {
 	return proto.AppStatusFailed, "boom", errOh
@@ -275,6 +315,12 @@ func TestRegisterHandlers_BackendErrorsAckFalse(t *testing.T) {
 	request(t, nc, proto.AppDeploySubject("node-1"), proto.AppDeployCmd{AppID: "a"}, &dack)
 	if dack.OK {
 		t.Error("deploy OK on backend err")
+	}
+
+	var pack proto.AppPullAck
+	request(t, nc, proto.AppPullSubject("node-1"), proto.AppPullCmd{AppID: "a"}, &pack)
+	if pack.OK || pack.Detail != "boom" {
+		t.Errorf("pull ack on backend err = %+v, want not OK with the backend's detail", pack)
 	}
 
 	var sack proto.AppStopAck

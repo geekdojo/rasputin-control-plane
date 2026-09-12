@@ -68,6 +68,14 @@ type App struct {
 	// something to go back to without asking the catalog, which may no longer
 	// carry that version.
 	PreviousComposeYAML string `json:"previousComposeYaml,omitempty"`
+	// The rest of the record that went with PreviousComposeYAML (#411): the
+	// catalog version it came from, and the route and budget it ran with.
+	// Re-applying the previous compose swaps all five back together, so the
+	// proxy is pointed where that compose actually listens.
+	PreviousComposeCatalogVersion int  `json:"previousComposeCatalogVersion,omitempty"`
+	PreviousPublishedPort         int  `json:"previousPublishedPort,omitempty"`
+	PreviousWebTLS                bool `json:"previousWebTls,omitempty"`
+	PreviousDeployBudgetSeconds   int  `json:"previousDeployBudgetSeconds,omitempty"`
 }
 
 // BackupAck records that an operator installed an app knowing its critical

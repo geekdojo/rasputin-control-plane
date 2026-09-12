@@ -16,8 +16,8 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// DeploySpec is the spec body of an app.deploy job, of app.stop and of
-// app.upgrade — all three are keyed only by appId. Decoded strictly: a field this saga does not know is a
+// DeploySpec is the spec body of an app.deploy job, of app.stop, app.upgrade
+// and app.revert — all four are keyed only by appId. Decoded strictly: a field this saga does not know is a
 // refusal, which is what keeps app.delete's deleteVolumes from ever meaning
 // anything to a stop or a deploy.
 type DeploySpec struct {
@@ -271,6 +271,27 @@ type LeafRotator func(app *App) (cmd proto.AppLeafCmd, renewed bool, commit func
 // Mint-on-deploy and teardown-on-delete are the saga's job; this closes the
 // "leaves must not expire" gap. Like the reconcile sweep it never fails as a
 // whole — per-app errors are logged and counted, not fatal.
+//
+// The route it asserts is the ROW's — published port and scheme — whatever the
+// node is running, and that holds after a compose change too (#411):
+//
+//   - A pull that failed wrote nothing, so the row still names the compose the
+//     node runs, and the route it asserts is the one already in place.
+//   - An `up` that failed after its pull leaves the row on the new compose (it
+//     is never reverted automatically), so this asserts the new compose's
+//     route, and the change's own leaf step — which never ran — is in effect
+//     applied by the next sweep. That is right whenever the new containers
+//     are what is up. The one case it is not is an `up` that failed before it
+//     reached the web service, whose OLD container keeps listening on the old
+//     port: the app's name stops reaching it at the next sweep. The row says
+//     failed, and stays failed — the reconcile sweep does not read an
+//     outdated survivor as a recovery (isRealDrift) — so the name going quiet
+//     agrees with what the owner is shown. Both ways out leave a coherent
+//     route: re-applying the previous compose swaps its port back onto the
+//     row and re-routes, and a retried deploy converges the containers onto
+//     the port the row already names. Asserting a route from anything but
+//     the row would mean guessing which compose is listening, and #197 is
+//     what guessing costs.
 func RotateLeavesWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "apps.leaf_rotate",
@@ -466,8 +487,18 @@ func reconcileList(store *Store) jobs.DoFn {
 //	stopped" about a minute after failing, and the operator was left with no
 //	trace of why. Only "running" is genuine news — the app recovered.
 //
+//	And only when what is running is the compose the row names. outdated says
+//	at least one running container was created from a different definition
+//	than the node's compose file (proto.AppServiceStatus.Outdated). A compose
+//	change whose `up` failed before it reached a service leaves that
+//	service's OLD container running under the new file (#411; measured with a
+//	network the new compose could not create). That is not a recovery: the
+//	change did not apply, and reading it as one would clear the failure and
+//	its reason, and route the proxy to where the new compose listens while
+//	the old one answers somewhere else.
+//
 // Anything else is ordinary drift and is recorded as before.
-func isRealDrift(app *App, observed proto.AppStatus, now time.Time) bool {
+func isRealDrift(app *App, observed proto.AppStatus, outdated bool, now time.Time) bool {
 	if observed == app.LastStatus {
 		return false
 	}
@@ -478,9 +509,20 @@ func isRealDrift(app *App, observed proto.AppStatus, now time.Time) bool {
 		// correct it would strand the app in a transitional state forever.
 		return now.Sub(app.UpdatedAt) > proto.AppDeployRPCFor(app.DeployBudgetSeconds)
 	case proto.AppStatusFailed:
-		return observed == proto.AppStatusRunning
+		return observed == proto.AppStatusRunning && !outdated
 	}
 	return true
+}
+
+// anyOutdated reports whether any container the agent reported was created
+// from a definition other than the node's compose file.
+func anyOutdated(services []proto.AppServiceStatus) bool {
+	for _, s := range services {
+		if s.Outdated {
+			return true
+		}
+	}
+	return false
 }
 
 func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.DoFn {
@@ -529,7 +571,7 @@ func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 				continue
 			}
 			checked++
-			if !isRealDrift(app, ack.Status, time.Now().UTC()) {
+			if !isRealDrift(app, ack.Status, anyOutdated(ack.Services), time.Now().UTC()) {
 				continue
 			}
 			// Drift detected — update store + publish.

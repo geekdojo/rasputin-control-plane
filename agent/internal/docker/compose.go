@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,6 +91,97 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 	return status, "", nil
 }
 
+// stagedPullPattern names the throwaway compose file Pull hands `compose pull`.
+// A dotfile so nobody reading an app's state directory mistakes it for the
+// app's compose, and never docker-compose.yml, which is the one name Pull must
+// not write.
+const stagedPullPattern = ".pull-*.docker-compose.yml"
+
+// Pull fetches every image composeYAML names, under appID's compose project,
+// and changes nothing else on the node (geekdojo/geekdojo-brain#411).
+//
+// The compose is STAGED — written to a temporary file of its own and removed
+// again — and the app's live docker-compose.yml is never opened. That is the
+// whole point of the verb. Stop runs `down` against the live file and Status
+// runs `ps` against it, so if a pull that fails has already replaced it, the
+// node is left describing a compose it is not running. Deploy cannot offer
+// this: it must write the file before `up`, so a pull that fails inside `up`
+// fails after the file has moved.
+//
+// The staged file sits in the app's own directory, beside the live one,
+// because compose takes the project directory from the first -f file: `.env`
+// interpolation and relative paths then resolve exactly as they will when the
+// same compose is deployed. The directory is created if the app has none yet;
+// an empty directory is not state — Status and Stop key on the compose file.
+//
+// `pull` creates no container, network or volume, so the running app is not
+// touched whether the pull succeeds or not (measured, case 7 of
+// app-catalog.md §8a.2, and pinned by the docker-tagged test).
+//
+// c.mu is deliberately NOT held. It serialises every app on the node, and a
+// pull can take the app's whole deploy budget — minutes — during which every
+// other app's status and stop would queue behind it. Nothing Pull does needs
+// it: the staged file's name is unique, and the image store is the daemon's.
+func (c *ComposeBackend) Pull(ctx context.Context, appID, composeYAML string) (string, error) {
+	if !safeAppID(appID) {
+		err := fmt.Errorf("refusing app id %q: not a single path element", appID)
+		return err.Error(), err
+	}
+	if err := os.MkdirAll(c.appDir(appID), 0o755); err != nil {
+		return "mkdir: " + err.Error(), err
+	}
+	staged, err := os.CreateTemp(c.appDir(appID), stagedPullPattern)
+	if err != nil {
+		return "stage compose: " + err.Error(), err
+	}
+	defer func() { _ = os.Remove(staged.Name()) }()
+	if _, err := staged.WriteString(composeYAML); err != nil {
+		_ = staged.Close()
+		return "stage compose: " + err.Error(), err
+	}
+	if err := staged.Close(); err != nil {
+		return "stage compose: " + err.Error(), err
+	}
+	out, err := c.dockerFor()(ctx, composeArgs(staged.Name(), projectName(appID), composePullArgs()...)...)
+	if err != nil {
+		return formatCmdErr("docker compose pull", out, err), err
+	}
+	return "", nil
+}
+
+// safeAppID reports whether appID can name a directory under the state root:
+// one path element, never "." or "..". Pull creates a file under it, and the
+// id arrives on the bus.
+func safeAppID(appID string) bool {
+	return appID != "" && appID != "." && appID != ".." && filepath.Base(appID) == appID &&
+		!strings.ContainsAny(appID, `/\`)
+}
+
+// composePullArgs is the `pull` invocation Pull uses. Each flag makes the pull
+// establish what `up` will then need, and nothing `up` would not do:
+//
+//   - --policy missing: an image already on the node is not fetched again.
+//     That is `up`'s own default for a service with no pull_policy, and it is
+//     what lets re-applying a compose whose images are still cached succeed
+//     with the registry unreachable — the owner's way back must not depend on
+//     the registry. Digest-pinned references count as present when the digest
+//     is (checked against compose v5.0.1). It overrides a service's own
+//     pull_policy, so a service that says `always` is still pulled again by
+//     `up`, and a failure there lands in the after-pull branch — the
+//     conservative one, where nothing is reverted automatically.
+//   - --ignore-buildable: a service `up` would build is not pulled, so a
+//     custom compose with a build section does not fail a pull `up` would
+//     never have attempted.
+//   - --quiet: no per-layer progress. Unlike the root `--progress quiet` it
+//     keeps the daemon's error, the one line worth reading (checked: a bad
+//     digest's "not found" survives it).
+//
+// All three exist in compose v2.32.4, the version Buildroot 2025.02.17
+// packages, as well as in v5.0.1.
+func composePullArgs() []string {
+	return []string{"pull", "--quiet", "--policy", "missing", "--ignore-buildable"}
+}
+
 func (c *ComposeBackend) Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -131,14 +223,118 @@ func (c *ComposeBackend) statusLocked(ctx context.Context, appID string) (proto.
 	if err != nil {
 		return proto.AppStatusUnknown, nil, fmt.Errorf("docker compose ps: %w", err)
 	}
-	services, err := parsePsOutput(out)
+	lines, err := parsePsLines(out)
 	if err != nil {
 		return proto.AppStatusUnknown, nil, err
 	}
-	if len(services) == 0 {
+	if len(lines) == 0 {
 		return proto.AppStatusStopped, nil, nil
 	}
+	services := toServiceStatuses(lines)
+	c.markOutdated(ctx, appID, lines, services)
 	return aggregateStatus(services), services, nil
+}
+
+// markOutdated sets Outdated on every running service whose container was
+// created from a definition other than the one in the live compose file
+// (#411; see proto.AppServiceStatus.Outdated for why the api needs to know).
+//
+// Compose stamps each container with com.docker.compose.config-hash — the hash
+// of its service's definition when it was created — and `compose config
+// --hash '*'` prints the same hash for the file as it stands. They match
+// exactly when `up` has converged the service onto this file, which is also
+// the test compose itself uses to decide whether `up` must recreate it.
+//
+// Anything that stops the comparison being made leaves the flag false:
+// no running service, a container without the label, or a hash listing that
+// could not be run or read. Unknown must read as the status did before this
+// existed, never as outdated, or a failed app that genuinely recovered could
+// never be recorded as running again.
+func (c *ComposeBackend) markOutdated(ctx context.Context, appID string, lines []composePsLine, services []proto.AppServiceStatus) {
+	anyRunning := false
+	for _, s := range services {
+		if classifyService(s) == outcomeRunning {
+			anyRunning = true
+			break
+		}
+	}
+	if !anyRunning {
+		return
+	}
+	out, err := c.run(ctx, appID, composeConfigHashArgs()...)
+	if err != nil {
+		log.Printf("rasputin-agent: docker.status %s: %s", appID, formatCmdErr("docker compose config --hash", out, err))
+		return
+	}
+	want := parseConfigHashes(out)
+	if len(want) == 0 {
+		return
+	}
+	for i, s := range services {
+		if classifyService(s) != outcomeRunning {
+			continue
+		}
+		have := configHashLabel(lines[i].Labels)
+		if have == "" {
+			continue
+		}
+		// A running service the file no longer declares is outdated too: it
+		// is left over from a compose `up` never finished replacing.
+		if want[lines[i].Service] != have {
+			services[i].Outdated = true
+		}
+	}
+}
+
+// composeConfigHashArgs prints one "<service> <hash>" line per service of the
+// live compose file.
+func composeConfigHashArgs() []string {
+	return []string{"config", "--hash", "*"}
+}
+
+// configHashLabelKey is the label compose stamps a service's definition hash
+// under.
+const configHashLabelKey = "com.docker.compose.config-hash"
+
+// parseConfigHashes reads `compose config --hash '*'` output. The run merges
+// stderr into stdout, so a warning compose prints on the way ("No services to
+// build", a `level=warning` line) is in the same buffer; only lines that are
+// exactly a service name and a 64-hex hash are taken.
+func parseConfigHashes(out []byte) map[string]string {
+	hashes := map[string]string{}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) != 2 || !isHexHash(fields[1]) {
+			continue
+		}
+		hashes[fields[0]] = fields[1]
+	}
+	return hashes
+}
+
+// configHashLabel pulls compose's config-hash out of the comma-joined Labels
+// string `compose ps --format json` carries. "" when it is absent or not a
+// hash.
+func configHashLabel(labels string) string {
+	for _, kv := range strings.Split(labels, ",") {
+		if v, ok := strings.CutPrefix(kv, configHashLabelKey+"="); ok && isHexHash(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+func isHexHash(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // run executes `docker compose -f <path> -p <project> <args...>` and returns
@@ -251,10 +447,31 @@ type composePsLine struct {
 	// eats hand-rolled and older output, and guessing 0 there would invent a
 	// clean exit out of nothing.
 	ExitCode *int `json:"ExitCode,omitempty"`
+	// Labels is the container's labels, comma-joined — read only for compose's
+	// config-hash (markOutdated).
+	Labels string `json:"Labels,omitempty"`
 }
 
 func parsePsOutput(out []byte) ([]proto.AppServiceStatus, error) {
-	services := []proto.AppServiceStatus{}
+	lines, err := parsePsLines(out)
+	if err != nil {
+		return nil, err
+	}
+	return toServiceStatuses(lines), nil
+}
+
+func toServiceStatuses(lines []composePsLine) []proto.AppServiceStatus {
+	services := make([]proto.AppServiceStatus, 0, len(lines))
+	for _, p := range lines {
+		services = append(services, toServiceStatus(p))
+	}
+	return services
+}
+
+// parsePsLines decodes `compose ps --format json` in either shape compose has
+// emitted it.
+func parsePsLines(out []byte) ([]composePsLine, error) {
+	lines := []composePsLine{}
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -269,21 +486,19 @@ func parsePsOutput(out []byte) ([]proto.AppServiceStatus, error) {
 			if err := json.Unmarshal(line, &batch); err != nil {
 				return nil, fmt.Errorf("parse compose ps array: %w", err)
 			}
-			for _, p := range batch {
-				services = append(services, toServiceStatus(p))
-			}
+			lines = append(lines, batch...)
 			continue
 		}
 		var p composePsLine
 		if err := json.Unmarshal(line, &p); err != nil {
 			return nil, fmt.Errorf("parse compose ps line: %w", err)
 		}
-		services = append(services, toServiceStatus(p))
+		lines = append(lines, p)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	return services, nil
+	return lines, nil
 }
 
 func toServiceStatus(p composePsLine) proto.AppServiceStatus {

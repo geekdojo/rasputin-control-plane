@@ -104,6 +104,12 @@ func (m *MockBackend) Deploy(ctx context.Context, appID, name, composeYAML strin
 	return proto.AppStatusRunning, "mock backend: pretend-deployed", nil
 }
 
+// Pull pretends to fetch the images. It writes nothing — in particular not the
+// app's compose file, which is the contract the real backend keeps.
+func (m *MockBackend) Pull(ctx context.Context, appID, composeYAML string) (string, error) {
+	return "", nil
+}
+
 func (m *MockBackend) Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

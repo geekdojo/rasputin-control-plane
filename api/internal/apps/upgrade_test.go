@@ -12,6 +12,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
@@ -117,6 +118,12 @@ func TestStore_UpgradeComposeCarriesOverIdentityAndReCopiesTheTileFields(t *test
 	}
 	if got.PreviousComposeYAML != composeV1 {
 		t.Errorf("PreviousComposeYAML = %q, want the compose the upgrade replaced", got.PreviousComposeYAML)
+	}
+	// And the record that went with it (#411), so re-applying it restores the
+	// route and budget it actually ran with.
+	if got.PreviousComposeCatalogVersion != 1 || got.PreviousPublishedPort != 3001 || got.PreviousWebTLS || got.PreviousDeployBudgetSeconds != 0 {
+		t.Errorf("previous record = v%d port=%d tls=%v budget=%d, want v1 3001 false 0",
+			got.PreviousComposeCatalogVersion, got.PreviousPublishedPort, got.PreviousWebTLS, got.PreviousDeployBudgetSeconds)
 	}
 }
 
@@ -307,8 +314,10 @@ func TestUpgradeWorkflowShape(t *testing.T) {
 	for _, s := range w.Steps {
 		names = append(names, s.Name)
 	}
-	if got := strings.Join(names, ","); got != "load,persist,push,leaf" {
-		t.Errorf("steps = %s, want load,persist,push,leaf", got)
+	// #411: the pull runs before anything is written, and the push is still
+	// after the row write.
+	if got := strings.Join(names, ","); got != "load,pull,persist,push,leaf" {
+		t.Errorf("steps = %s, want load,pull,persist,push,leaf", got)
 	}
 }
 
@@ -346,16 +355,54 @@ func fakeDeployAgent(t *testing.T, nc *nats.Conn, ack proto.AppDeployAck) <-chan
 	return got
 }
 
-// runUpgrade runs the app.upgrade steps in order, as the runner does, stopping
-// at the first failure. It returns the name of the step that failed, or "".
-func runUpgrade(t *testing.T, store *Store, inv *inventory.Store, nc *nats.Conn, lookup TileLookup, appID string) (string, error) {
+// fakePullAgent answers docker.pull on node n with ack, and hands every
+// command it received to the test. during, when set, runs inside the agent
+// before it answers — the window in which the node is pulling.
+func fakePullAgent(t *testing.T, nc *nats.Conn, ack proto.AppPullAck, during func()) <-chan proto.AppPullCmd {
 	t.Helper()
-	for _, s := range UpgradeWorkflow(store, inv, nc, nil, lookup).Steps {
-		if _, err := s.Do(newStepCtxNATS(`{"appId":"`+appID+`"}`, nc)); err != nil {
+	got := make(chan proto.AppPullCmd, 4)
+	sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) {
+		var cmd proto.AppPullCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		got <- cmd
+		if during != nil {
+			during()
+		}
+		b, _ := json.Marshal(ack)
+		_ = m.Respond(b)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	return got
+}
+
+// runSteps runs a workflow's steps in order, as the runner does — each step
+// sees the results of the ones before it — stopping at the first failure. It
+// returns the name of the step that failed, or "".
+func runSteps(t *testing.T, w jobs.Workflow, nc *nats.Conn, appID string) (string, error) {
+	t.Helper()
+	prior := map[string]json.RawMessage{}
+	for _, s := range w.Steps {
+		sc := newStepCtxNATS(`{"appId":"`+appID+`"}`, nc)
+		sc.PriorResults = prior
+		out, err := s.Do(sc)
+		if err != nil {
 			return s.Name, err
+		}
+		if out != nil {
+			prior[s.Name] = out
 		}
 	}
 	return "", nil
+}
+
+// runUpgrade runs the app.upgrade steps in order, stopping at the first
+// failure. It returns the name of the step that failed, or "".
+func runUpgrade(t *testing.T, store *Store, inv *inventory.Store, nc *nats.Conn, lookup TileLookup, appID string) (string, error) {
+	t.Helper()
+	return runSteps(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, appID)
 }
 
 // The done-means of #409, on the wire: the agent is sent the tile's new compose
@@ -367,6 +414,7 @@ func TestUpgradeSaga_DeploysTheTilesComposeToTheSameULID(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedUpgradeApp(t, id)
 	before, _ := store.Get(ctx, id)
+	pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 
 	if step, err := runUpgrade(t, store, inv, nc, lookupOf(upgradeTile(composeV2), 2), id); err != nil {
@@ -391,6 +439,14 @@ func TestUpgradeSaga_DeploysTheTilesComposeToTheSameULID(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("agent never received a deploy command")
 	}
+	select {
+	case cmd := <-pulls:
+		if cmd.AppID != id || cmd.ComposeYAML != composeV2 || cmd.WorkBudgetSeconds != 600 {
+			t.Errorf("agent was asked to pull app=%q compose=%q budget=%d, want the tile's compose under its budget", cmd.AppID, cmd.ComposeYAML, cmd.WorkBudgetSeconds)
+		}
+	default:
+		t.Fatal("the upgrade deployed without pulling first")
+	}
 
 	after, _ := store.Get(ctx, id)
 	if after.ID != before.ID || after.Name != before.Name || after.TargetNode != before.TargetNode ||
@@ -411,11 +467,15 @@ func TestUpgradeSaga_DeploysTheTilesComposeToTheSameULID(t *testing.T) {
 // The ordering decision, pinned: the row is written before the push, so a push
 // the agent fails leaves the row naming the compose the node was last sent,
 // with the replaced one kept for going back and the agent's reason recorded.
+//
+// #411's second branch: the pull SUCCEEDED, so this is `up` failing, and it is
+// not reverted — the new containers may have migrated the data.
 func TestUpgradeSaga_AFailedPushLeavesTheNewComposeOnTheRowAndTheOldOneKept(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store, inv := seedUpgradeApp(t, "a")
-	fakeDeployAgent(t, nc, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: "pull: manifest unknown"})
+	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
+	fakeDeployAgent(t, nc, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: "up: port is already allocated"})
 
 	step, err := runUpgrade(t, store, inv, nc, lookupOf(upgradeTile(composeV2), 2), "a")
 	if err == nil || step != "push" {
@@ -425,8 +485,14 @@ func TestUpgradeSaga_AFailedPushLeavesTheNewComposeOnTheRowAndTheOldOneKept(t *t
 	if got.ComposeYAML != composeV2 || got.PreviousComposeYAML != composeV1 {
 		t.Errorf("row compose = %q previous = %q", got.ComposeYAML, got.PreviousComposeYAML)
 	}
-	if got.LastStatus != proto.AppStatusFailed || got.LastDetail != "pull: manifest unknown" {
+	if got.LastStatus != proto.AppStatusFailed || got.LastDetail != "up: port is already allocated" {
 		t.Errorf("status = %s %q, want failed with the agent's reason", got.LastStatus, got.LastDetail)
+	}
+	if got.PreviousPublishedPort != 3001 || got.PublishedPort != 3443 {
+		t.Errorf("route: port=%d previous=%d, want the new port installed and the old one kept", got.PublishedPort, got.PreviousPublishedPort)
+	}
+	if err := CanRevert(got); err != nil {
+		t.Errorf("the owner's way back must be open after a failed up: %v", err)
 	}
 }
 
@@ -436,6 +502,7 @@ func TestUpgradeSaga_AnUpgradeThatLostTheRaceStillDeploysAndKeepsTheRealPrevious
 	ctx := context.Background()
 	nc := startNATS(t)
 	store, inv := seedUpgradeApp(t, "a")
+	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	lookup := lookupOf(upgradeTile(composeV2), 2)
 
@@ -460,27 +527,36 @@ func TestUpgradeSaga_AnUpgradeThatLostTheRaceStillDeploysAndKeepsTheRealPrevious
 }
 
 // The saga refuses on its own, not only behind the handler: the catalog can
-// change between the request and the job.
-func TestUpgradeSaga_RefusesAtPersistWithoutTouchingTheRowOrTheNode(t *testing.T) {
+// change between the request and the job. The refusal comes at the pull, the
+// first step that resolves the tile, before the app is marked or the node is
+// asked anything.
+func TestUpgradeSaga_RefusesBeforeTouchingTheRowOrTheNode(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store, inv := seedUpgradeApp(t, "a")
+	pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 
 	if _, err := runUpgrade(t, store, inv, nc, lookupOf(upgradeTile(composeV2), 2), "a"); err != nil {
 		t.Fatal(err)
 	}
 	<-got
+	<-pulls
 
 	// Withdraw the tile, then ask again.
 	step, err := runUpgrade(t, store, inv, nc, nil, "a")
-	if !errors.Is(err, ErrUpgradeTileUnavailable) || step != "persist" {
-		t.Fatalf("want persist to refuse an unavailable tile, got step=%q err=%v", step, err)
+	if !errors.Is(err, ErrUpgradeTileUnavailable) || step != "pull" {
+		t.Fatalf("want the pull step to refuse an unavailable tile, got step=%q err=%v", step, err)
 	}
 	select {
 	case cmd := <-got:
 		t.Fatalf("a refused upgrade reached the node: %+v", cmd)
+	case cmd := <-pulls:
+		t.Fatalf("a refused upgrade asked the node to pull: %+v", cmd)
 	case <-time.After(100 * time.Millisecond):
+	}
+	if row, _ := store.Get(ctx, "a"); row.LastStatus != proto.AppStatusRunning {
+		t.Errorf("a refusal marked the app %s", row.LastStatus)
 	}
 	if row, _ := store.Get(ctx, "a"); row.ComposeYAML != composeV2 {
 		t.Errorf("a refused upgrade wrote the row: %q", row.ComposeYAML)
