@@ -55,27 +55,29 @@ func ComposeHash(composeYAML string) string {
 // be "upgrading" to whatever the catalog holds today from a state nothing
 // recorded.
 func backfillComposeHash(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `SELECT id, compose_yaml FROM apps WHERE compose_sha256 = ''`)
+	type pending struct{ id, hash string }
+	// Read everything, and close the cursor, before the first UPDATE: the pool
+	// is one connection, so writing while the cursor still holds it would
+	// deadlock.
+	todo, err := func() ([]pending, error) {
+		rows, err := db.QueryContext(ctx, `SELECT id, compose_yaml FROM apps WHERE compose_sha256 = ''`)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		var out []pending
+		for rows.Next() {
+			var id, compose string
+			if err := rows.Scan(&id, &compose); err != nil {
+				return nil, err
+			}
+			out = append(out, pending{id, ComposeHash(compose)})
+		}
+		return out, rows.Err()
+	}()
 	if err != nil {
 		return fmt.Errorf("apps: backfill compose hash: %w", err)
 	}
-	type pending struct{ id, hash string }
-	var todo []pending
-	for rows.Next() {
-		var id, compose string
-		if err := rows.Scan(&id, &compose); err != nil {
-			rows.Close()
-			return fmt.Errorf("apps: backfill compose hash: %w", err)
-		}
-		todo = append(todo, pending{id, ComposeHash(compose)})
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("apps: backfill compose hash: %w", err)
-	}
-	// Closed before the UPDATEs: the pool is one connection, so writing while
-	// the cursor still holds it would deadlock.
-	rows.Close()
 	for _, p := range todo {
 		if _, err := db.ExecContext(ctx, `UPDATE apps SET compose_sha256 = ? WHERE id = ? AND compose_sha256 = ''`, p.hash, p.id); err != nil {
 			return fmt.Errorf("apps: backfill compose hash for %s: %w", p.id, err)
