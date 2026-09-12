@@ -45,7 +45,7 @@ func TestMetadataMinAgentVersionLookup(t *testing.T) {
 // The verbs the two misdiagnosed sites send are recorded, and a verb nobody
 // recorded says so rather than inventing a floor.
 func TestVerbMinAgentVersionLookup(t *testing.T) {
-	for _, verb := range []string{"storage.backup_stage_volume", "docker.volumes.list", "docker.volumes.remove", "storage.backup_restore_volume", "docker.pull"} {
+	for _, verb := range []string{"storage.backup_stage_volume", "docker.volumes.list", "docker.volumes.remove", "storage.backup_restore_volume", "docker.pull", "docker.volumes.check", "docker.volumes.drop"} {
 		if _, ok := VerbMinAgentVersion(verb); !ok {
 			t.Errorf("%s has no minimum agent version recorded", verb)
 		}
@@ -64,6 +64,8 @@ func TestCmdSubjectVerbRoundTrips(t *testing.T) {
 		AppVolumesListSubject("n1"):                  "docker.volumes.list",
 		AppVolumesRemoveSubject("n1"):                "docker.volumes.remove",
 		AppPullSubject("n1"):                         "docker.pull",
+		AppVolumesCheckSubject("n1"):                 "docker.volumes.check",
+		AppVolumesDropSubject("n1"):                  "docker.volumes.drop",
 		BackupRestoreVolumeSubject("compute1"):       "storage.backup_restore_volume",
 		NodeCmdSubject("n1", "diag.ping"):            "diag.ping",
 	}

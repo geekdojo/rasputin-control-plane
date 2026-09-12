@@ -135,30 +135,46 @@ const stagedPullPattern = ".pull-*.docker-compose.yml"
 // other app's status and stop would queue behind it. Nothing Pull does needs
 // it: the staged file's name is unique, and the image store is the daemon's.
 func (c *ComposeBackend) Pull(ctx context.Context, appID, composeYAML string) (string, error) {
-	if !safeAppID(appID) {
-		err := fmt.Errorf("refusing app id %q: not a single path element", appID)
+	staged, cleanup, err := c.stageCompose(appID, stagedPullPattern, composeYAML)
+	if err != nil {
 		return err.Error(), err
 	}
-	if err := os.MkdirAll(c.appDir(appID), 0o755); err != nil {
-		return "mkdir: " + err.Error(), err
-	}
-	staged, err := os.CreateTemp(c.appDir(appID), stagedPullPattern)
-	if err != nil {
-		return "stage compose: " + err.Error(), err
-	}
-	defer func() { _ = os.Remove(staged.Name()) }()
-	if _, err := staged.WriteString(composeYAML); err != nil {
-		_ = staged.Close()
-		return "stage compose: " + err.Error(), err
-	}
-	if err := staged.Close(); err != nil {
-		return "stage compose: " + err.Error(), err
-	}
-	out, err := c.dockerFor()(ctx, composeArgs(staged.Name(), projectName(appID), composePullArgs()...)...)
+	defer cleanup()
+	out, err := c.dockerFor()(ctx, composeArgs(staged, projectName(appID), composePullArgs()...)...)
 	if err != nil {
 		return formatCmdErr("docker compose pull", out, err), err
 	}
 	return "", nil
+}
+
+// stageCompose writes composeYAML to a throwaway file matching pattern in
+// appID's state directory — beside the live docker-compose.yml, so compose
+// resolves `.env` and relative paths from the same project directory it will
+// use at deploy — and returns its path and the func that removes it. The live
+// file is never opened. Refuses an app id that is not a single path element:
+// the id arrives on the bus, and this creates a file under it.
+func (c *ComposeBackend) stageCompose(appID, pattern, composeYAML string) (string, func(), error) {
+	if !safeAppID(appID) {
+		return "", nil, fmt.Errorf("refusing app id %q: not a single path element", appID)
+	}
+	if err := os.MkdirAll(c.appDir(appID), 0o755); err != nil {
+		return "", nil, fmt.Errorf("mkdir: %w", err)
+	}
+	staged, err := os.CreateTemp(c.appDir(appID), pattern)
+	if err != nil {
+		return "", nil, fmt.Errorf("stage compose: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(staged.Name()) }
+	if _, err := staged.WriteString(composeYAML); err != nil {
+		_ = staged.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("stage compose: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("stage compose: %w", err)
+	}
+	return staged.Name(), cleanup, nil
 }
 
 // safeAppID reports whether appID can name a directory under the state root:

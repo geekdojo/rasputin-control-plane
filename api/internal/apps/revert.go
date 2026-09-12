@@ -71,6 +71,9 @@ func ResolveReapply(app *App, sha string) (current bool, err error) {
 type RevertSpec struct {
 	AppID         string `json:"appId"`
 	ComposeSHA256 string `json:"sha256"`
+	// DeleteVolumes is ComposeChangeSpec's: the named volumes the owner asked
+	// to delete because re-applying this compose drops them (#412).
+	DeleteVolumes []string `json:"deleteVolumes,omitempty"`
 }
 
 // parseRevertSpec decodes an app.revert spec, strictly, like every app spec.
@@ -85,7 +88,18 @@ func parseRevertSpec(raw json.RawMessage) (*RevertSpec, error) {
 	if !ValidComposeHash(spec.ComposeSHA256) {
 		return nil, errors.New("sha256 must be the 64 lower-case hex digits of a compose's sha256")
 	}
+	if err := ValidateDeleteVolumes(spec.AppID, spec.DeleteVolumes); err != nil {
+		return nil, err
+	}
 	return &spec, nil
+}
+
+func revertSpecDeleteVolumes(raw json.RawMessage) ([]string, error) {
+	spec, err := parseRevertSpec(raw)
+	if err != nil {
+		return nil, err
+	}
+	return spec.DeleteVolumes, nil
 }
 
 func revertSpecAppID(raw json.RawMessage) (string, error) {
@@ -113,6 +127,13 @@ func revertSpecAppID(raw json.RawMessage) (string, error) {
 //  4. push  — the deploy saga's push, unchanged
 //  5. leaf  — the deploy saga's leaf step: the previous record carries its
 //     own port and scheme, and the route is built from the row
+//  6. drop_volumes — delete the volumes the re-applied compose drops that
+//     the owner named in deleteVolumes, now that `up` has succeeded (#412)
+//
+// The pull step applies the dropped-volume gate to a re-apply exactly as to
+// any other change: a previous compose is not exempt, because the volumes the
+// compose being left created are on disk, and going back to a compose that
+// does not declare them orphans their data just the same.
 //
 // The target is named, not implied. The compose being left is retained as the
 // previous one, as every compose change retains what it replaced, so the owner
@@ -149,10 +170,11 @@ func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 			{Name: "load", Timeout: 2 * time.Second, Do: revertLoad(store, inv)},
 			// Backstops, as in UpgradeWorkflow; the real deadlines are the
 			// named compose's budget, applied inside each step.
-			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "re-apply of the previous compose", revertSpecAppID, revertPullSource)},
+			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "re-apply of the previous compose", revertSpecAppID, revertSpecDeleteVolumes, revertPullSource)},
 			{Name: "apply", Timeout: 2 * time.Second, Do: revertApply(store, inv, nc)},
 			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, revertSpecAppID)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, mint, revertSpecAppID)},
+			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, revertSpecAppID)},
 		},
 	}
 }

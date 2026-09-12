@@ -111,6 +111,13 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 //  4. push    — the deploy saga's push, unchanged
 //  5. leaf    — the deploy saga's leaf step: the tile may have moved its web
 //     port or changed its scheme, and the route is built from the row
+//  6. drop_volumes — delete the volumes the new compose drops that the owner
+//     named in deleteVolumes, now that `up` has succeeded (#412, volumegate.go)
+//
+// The pull step refuses, before it pulls, a compose that would leave a named
+// volume the app has on disk undeclared unless the owner named exactly those
+// volumes for deletion — a renamed key or a dropped service would otherwise
+// start the app empty with its data orphaned.
 //
 // In place is the point. The app keeps its ULID, so the agent's Compose
 // project (proto.AppProjectName) and every named volume (proto.AppVolumeName)
@@ -154,28 +161,47 @@ func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Lea
 	return jobs.Workflow{
 		Kind: "app.upgrade",
 		Steps: []jobs.WorkflowStep{
-			{Name: "load", Timeout: 2 * time.Second, Do: upgradeLoad(store, inv)},
+			{Name: "load", Timeout: 2 * time.Second, Do: upgradeLoad(store, inv, lookup)},
 			// A backstop, like push's: the real deadline is the tile's budget,
 			// applied inside the step once the tile is resolved.
-			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "upgrade", deploySpecAppID, upgradePullSource(lookup))},
+			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "upgrade", composeChangeSpecAppID, composeChangeSpecDeleteVolumes, upgradePullSource(lookup))},
 			{Name: "persist", Timeout: 2 * time.Second, Do: upgradePersist(store, inv, nc, lookup)},
 			// Same backstop as DeployWorkflow's push, for the same reason: the
-			// real deadline is the app's own budget, applied inside deployPush,
+			// real deadline is the app's own budget, applied inside the push,
 			// and here that is the budget persist just re-copied from the tile.
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc)},
-			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, mint)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID)},
+			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, mint, composeChangeSpecAppID)},
+			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
 		},
 	}
 }
 
-func upgradeLoad(store *Store, inv *inventory.Store) jobs.DoFn {
+// upgradeLoad loads the app and ends the job, successfully and having touched
+// nothing, when the app already runs its tile's current compose.
+//
+// The handler answers that case with a 200 and starts no job, but a job can be
+// submitted without the handler (POST /api/jobs names any kind), and every
+// workflow checks its own preconditions as if the handler did not exist
+// (Bryce, 2026-09-12). Without this an upgrade to the compose already
+// installed pulled and redeployed it — app.revert's load already stops here
+// for a hash that is installed.
+func upgradeLoad(store *Store, inv *inventory.Store, lookup TileLookup) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		app, err := loadApp(sc, store, inv)
+		app, err := loadAppFor(sc, store, inv, composeChangeSpecAppID)
 		if err != nil {
 			return nil, err
 		}
+		_, resolveErr := ResolveUpgrade(app, lookup)
+		current := errors.Is(resolveErr, ErrUpgradeAlreadyCurrent)
+		result, _ := json.Marshal(map[string]any{"appId": app.ID, "targetNode": app.TargetNode, "sourceTile": app.SourceTile, "alreadyCurrent": current})
+		if current {
+			sc.Log("info", fmt.Sprintf("%q already runs its tile's current compose (%.12s); nothing to do", app.Name, app.ComposeSHA256))
+			return result, jobs.ErrStopWorkflow
+		}
+		// Every other refusal is left to the pull step's source, which makes it
+		// again against the catalog as it stands when the step runs.
 		sc.Log("info", fmt.Sprintf("upgrading %q on %s from tile %q", app.Name, app.TargetNode, app.SourceTile))
-		return json.Marshal(map[string]string{"appId": app.ID, "targetNode": app.TargetNode, "sourceTile": app.SourceTile})
+		return result, nil
 	}
 }
 
@@ -187,9 +213,11 @@ func upgradePullSource(lookup TileLookup) pullSource {
 	return func(sc *jobs.StepCtx, app *App) (pullTarget, error) {
 		target, err := ResolveUpgrade(app, lookup)
 		if errors.Is(err, ErrUpgradeAlreadyCurrent) {
-			// A second upgrade that lost the race; persist will deploy what
-			// the row holds, so that is what gets pulled.
-			return pullTarget{ComposeYAML: app.ComposeYAML, DeployBudgetSeconds: app.DeployBudgetSeconds}, nil
+			// Installed since load looked — another upgrade got there first.
+			// Nothing is marked or asked yet, so the job ends here, as load
+			// would have ended it.
+			sc.Log("info", "the app already runs its tile's current compose; nothing to do")
+			return pullTarget{}, jobs.ErrStopWorkflow
 		}
 		if err != nil {
 			return pullTarget{}, err
@@ -223,7 +251,7 @@ func upgradePersist(store *Store, inv *inventory.Store, nc *nats.Conn, lookup Ti
 			abandonAfterPull(sc, store, nc, pulled, err.Error())
 			return nil, err
 		}
-		app, err := loadApp(sc, store, inv)
+		app, err := loadAppFor(sc, store, inv, composeChangeSpecAppID)
 		if err != nil {
 			return abandon(fmt.Errorf("upgrade not applied: %w", err))
 		}
@@ -232,13 +260,15 @@ func upgradePersist(store *Store, inv *inventory.Store, nc *nats.Conn, lookup Ti
 			if app.ComposeSHA256 != pulled.ComposeSHA256 {
 				return abandon(errCatalogMovedDuringPull)
 			}
-			// The handler answers an app that is already current with a no-op
-			// and starts no job, so this is a second upgrade that got here
-			// first. The row already holds the
-			// tile's compose; pushing it is still what this job was asked to
-			// bring about, and `up -d` on an unchanged compose changes nothing.
-			sc.Log("info", "the row already holds the tile's current compose; deploying it")
-			return json.Marshal(map[string]any{"appId": app.ID, "persisted": false, "composeSha256": app.ComposeSHA256})
+			// Another upgrade installed this very compose while this one was
+			// pulling. That job pushes it, and deletes whatever volumes it was
+			// asked to — its own gate required them named. This one has
+			// nothing left to bring about: it puts back the status its pull
+			// marked (a newer status the other job recorded wins) and ends,
+			// successfully, having written and pushed nothing.
+			abandonAfterPull(sc, store, nc, pulled, "upgrade: the app already runs its tile's current compose; nothing to do")
+			result, _ := json.Marshal(map[string]any{"appId": app.ID, "persisted": false, "composeSha256": app.ComposeSHA256})
+			return result, jobs.ErrStopWorkflow
 		}
 		if err != nil {
 			return abandon(fmt.Errorf("upgrade not applied: %w", err))

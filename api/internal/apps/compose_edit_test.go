@@ -109,8 +109,8 @@ func TestEditWorkflowShape(t *testing.T) {
 	for _, s := range w.Steps {
 		names = append(names, s.Name)
 	}
-	if w.Kind != "app.edit" || strings.Join(names, ",") != "load,pull,persist,push,leaf" {
-		t.Errorf("workflow = %s %v, want app.edit load,pull,persist,push,leaf", w.Kind, names)
+	if w.Kind != "app.edit" || strings.Join(names, ",") != "load,pull,persist,push,leaf,drop_volumes" {
+		t.Errorf("workflow = %s %v, want app.edit load,pull,persist,push,leaf,drop_volumes", w.Kind, names)
 	}
 	if w.OnTerminal == nil {
 		t.Fatal("app.edit must discard the held compose when the job ends")

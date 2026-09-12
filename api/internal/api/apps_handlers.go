@@ -367,6 +367,10 @@ type composeRequest struct {
 	Source      *string `json:"source"`
 	ComposeYAML *string `json:"composeYaml"`
 	SHA256      *string `json:"sha256"`
+	// DeleteVolumes rides beside whichever of the three is set: the named
+	// volumes the owner asks to delete because the change drops them (#412).
+	// Not a fourth variant, so it is not counted among them.
+	DeleteVolumes []string `json:"deleteVolumes"`
 }
 
 // PUT /api/apps/{id}/compose
@@ -407,6 +411,19 @@ type composeRequest struct {
 //
 // No privilege re-consent is asked for here: consent is the UI's, as it is at
 // install (Bryce, 2026-09-12).
+//
+// A change must not orphan a volume (#412). A compose that no longer declares
+// a named volume the app has on disk — a renamed key, a dropped service — is
+// refused with 409 and the list of those volumes (volumeGateResponse), unless
+// the body's optional "deleteVolumes" names exactly them; they are then
+// deleted once the new compose is up. Every name must be one of this app's
+// named volumes, rasp_<appid>_<volume>, and appear once, or the body is a 400.
+// A name the change does not drop — one the new compose still declares, or
+// one not on the node — is a 409, since a volume the compose declares is never
+// deleted. This check asks the node and is advisory: when it gets no answer
+// the job starts anyway, and the job's pull step applies the same gate before
+// it changes anything. A body that is already installed is still the 200
+// no-op, whatever deleteVolumes says.
 func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
 	app, err := s.apps.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -451,11 +468,11 @@ func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case req.Source != nil:
-		s.putComposeFromCatalog(w, r, app, *req.Source)
+		s.putComposeFromCatalog(w, r, app, *req.Source, req.DeleteVolumes)
 	case req.ComposeYAML != nil:
-		s.putComposeYAML(w, r, app, *req.ComposeYAML)
+		s.putComposeYAML(w, r, app, *req.ComposeYAML, req.DeleteVolumes)
 	default:
-		s.putComposeByHash(w, r, app, *req.SHA256)
+		s.putComposeByHash(w, r, app, *req.SHA256, req.DeleteVolumes)
 	}
 }
 
@@ -464,12 +481,12 @@ func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
 // flag and the saga ask, so the badge cannot offer an upgrade this refuses.
 // The compose itself is not taken from the request; the saga resolves it from
 // the verified store when it runs.
-func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, app *apps.App, source string) {
+func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, app *apps.App, source string, deleteVolumes []string) {
 	if source != "catalog" {
 		writeError(w, http.StatusBadRequest, `source must be "catalog"`)
 		return
 	}
-	_, err := apps.ResolveUpgrade(app, s.tileLookup())
+	target, err := apps.ResolveUpgrade(app, s.tileLookup())
 	switch {
 	case errors.Is(err, apps.ErrUpgradeAlreadyCurrent):
 		s.writeAppView(w, r, app)
@@ -478,11 +495,18 @@ func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, a
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	s.submitComposeJob(w, r, "app.upgrade", apps.DeploySpec{AppID: app.ID}, nil)
+	named, ok := s.deleteVolumesFor(w, app, deleteVolumes)
+	if !ok {
+		return
+	}
+	if s.refuseDroppedVolumes(w, r, app, named, s.catalogDropped(r, app, target.Tile)) {
+		return
+	}
+	s.submitComposeJob(w, r, "app.upgrade", apps.ComposeChangeSpec{AppID: app.ID, DeleteVolumes: named}, nil)
 }
 
 // putComposeYAML is {"composeYaml":"…"}: replace a custom app's compose.
-func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *apps.App, compose string) {
+func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *apps.App, compose string, deleteVolumes []string) {
 	if strings.TrimSpace(compose) == "" {
 		writeError(w, http.StatusBadRequest, "composeYaml must not be empty")
 		return
@@ -499,13 +523,20 @@ func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *app
 		writeError(w, http.StatusServiceUnavailable, "compose editing is not available on this api")
 		return
 	}
-	s.submitComposeJob(w, r, "app.edit", apps.DeploySpec{AppID: app.ID}, func(jobID string) error {
+	named, ok := s.deleteVolumesFor(w, app, deleteVolumes)
+	if !ok {
+		return
+	}
+	if s.refuseDroppedVolumes(w, r, app, named, s.nodeDropped(r, app, compose)) {
+		return
+	}
+	s.submitComposeJob(w, r, "app.edit", apps.ComposeChangeSpec{AppID: app.ID, DeleteVolumes: named}, func(jobID string) error {
 		return s.composeStash.Put(jobID, compose)
 	})
 }
 
 // putComposeByHash is {"sha256":"…"}: re-apply the compose with that hash.
-func (s *Server) putComposeByHash(w http.ResponseWriter, r *http.Request, app *apps.App, sha string) {
+func (s *Server) putComposeByHash(w http.ResponseWriter, r *http.Request, app *apps.App, sha string, deleteVolumes []string) {
 	sha = strings.ToLower(sha)
 	if !apps.ValidComposeHash(sha) {
 		writeError(w, http.StatusBadRequest, "sha256 must be the 64 hex digits of a compose's sha256")
@@ -520,7 +551,16 @@ func (s *Server) putComposeByHash(w http.ResponseWriter, r *http.Request, app *a
 		s.writeAppView(w, r, app)
 		return
 	}
-	s.submitComposeJob(w, r, "app.revert", apps.RevertSpec{AppID: app.ID, ComposeSHA256: sha}, nil)
+	named, ok := s.deleteVolumesFor(w, app, deleteVolumes)
+	if !ok {
+		return
+	}
+	// ResolveReapply said sha is the retained previous compose, so that is
+	// the compose the node is asked about.
+	if s.refuseDroppedVolumes(w, r, app, named, s.nodeDropped(r, app, app.PreviousComposeYAML)) {
+		return
+	}
+	s.submitComposeJob(w, r, "app.revert", apps.RevertSpec{AppID: app.ID, ComposeSHA256: sha, DeleteVolumes: named}, nil)
 }
 
 // submitComposeJob starts a compose change and answers 202 with its job.

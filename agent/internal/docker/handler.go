@@ -11,14 +11,14 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// RegisterHandlers wires the agent's docker.deploy / docker.pull / docker.stop /
-// docker.status subscriptions to the supplied Backend. Returns the subscriptions
+// RegisterHandlers wires the agent's docker.deploy / docker.pull /
+// docker.volumes.check / docker.stop / docker.status subscriptions to the supplied Backend. Returns the subscriptions
 // so the caller can unsubscribe at shutdown.
 //
 // Only register on compute (or controlplane) role agents. Firewall and
 // storage nodes don't host user apps.
 func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscription, error) {
-	subs := make([]*nats.Subscription, 0, 4)
+	subs := make([]*nats.Subscription, 0, 7)
 
 	deploySubj := proto.AppDeploySubject(nodeID)
 	sub, err := nc.Subscribe(deploySubj, func(m *nats.Msg) {
@@ -39,6 +39,16 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscrip
 	}
 	subs = append(subs, sub)
 	log.Printf("rasputin-agent: subscribed to %s", pullSubj)
+
+	checkSubj := proto.AppVolumesCheckSubject(nodeID)
+	sub, err = nc.Subscribe(checkSubj, func(m *nats.Msg) {
+		handleVolumesCheck(b, m)
+	})
+	if err != nil {
+		return subs, err
+	}
+	subs = append(subs, sub)
+	log.Printf("rasputin-agent: subscribed to %s", checkSubj)
 
 	stopSubj := proto.AppStopSubject(nodeID)
 	sub, err = nc.Subscribe(stopSubj, func(m *nats.Msg) {
@@ -72,6 +82,16 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscrip
 		}
 		subs = append(subs, sub)
 		log.Printf("rasputin-agent: subscribed to %s", listSubj)
+
+		dropSubj := proto.AppVolumesDropSubject(nodeID)
+		sub, err = nc.Subscribe(dropSubj, func(m *nats.Msg) {
+			handleVolumesDrop(reaper, m)
+		})
+		if err != nil {
+			return subs, err
+		}
+		subs = append(subs, sub)
+		log.Printf("rasputin-agent: subscribed to %s", dropSubj)
 
 		removeSubj := proto.AppVolumesRemoveSubject(nodeID)
 		sub, err = nc.Subscribe(removeSubj, func(m *nats.Msg) {
@@ -123,6 +143,54 @@ func handleVolumesRemove(r VolumeReaper, m *nats.Msg) {
 	}
 	for _, name := range ack.Removed {
 		log.Printf("rasputin-agent: docker.volumes.remove: removed %s", name)
+	}
+	bus.Respond(m, ack)
+}
+
+// handleVolumesCheck answers docker.volumes.check (#412). Registered for every
+// backend, the mock included: every compose change asks before it pulls, and
+// a verb nobody answers is a refusal, so a backend that has no volumes must
+// still be able to say so.
+func handleVolumesCheck(b Backend, m *nats.Msg) {
+	var cmd proto.AppVolumesCheckCmd
+	if err := json.Unmarshal(m.Data, &cmd); err != nil {
+		bus.Respond(m, proto.AppVolumesCheckAck{OK: false, Detail: "bad cmd", Declared: []string{}, Dropped: []proto.AppDroppedVolume{}})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), proto.AppVolumesCheckWork)
+	defer cancel()
+	declared, dropped, err := b.CheckVolumes(ctx, cmd.AppID, cmd.ComposeYAML)
+	if err != nil {
+		bus.Respond(m, proto.AppVolumesCheckAck{OK: false, Detail: err.Error(), Declared: []string{}, Dropped: []proto.AppDroppedVolume{}})
+		log.Printf("rasputin-agent: docker.volumes.check %s: %v", cmd.AppID, err)
+		return
+	}
+	if declared == nil {
+		declared = []string{}
+	}
+	if dropped == nil {
+		dropped = []proto.AppDroppedVolume{}
+	}
+	bus.Respond(m, proto.AppVolumesCheckAck{OK: true, Declared: declared, Dropped: dropped})
+}
+
+// handleVolumesDrop answers docker.volumes.drop (#412). Only a backend with
+// volumes registers it.
+func handleVolumesDrop(r VolumeReaper, m *nats.Msg) {
+	var cmd proto.AppVolumesDropCmd
+	if err := json.Unmarshal(m.Data, &cmd); err != nil {
+		bus.Respond(m, proto.AppVolumesRemoveAck{OK: false, Detail: "bad cmd",
+			Removed: []string{}, Refused: []proto.AppVolumeRefusal{}})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	ack := r.DropAppVolumes(ctx, cmd)
+	for _, ref := range ack.Refused {
+		log.Printf("rasputin-agent: docker.volumes.drop %s: refused %s: %s", cmd.AppID, ref.Name, ref.Reason)
+	}
+	for _, name := range ack.Removed {
+		log.Printf("rasputin-agent: docker.volumes.drop %s: removed %s", cmd.AppID, name)
 	}
 	bus.Respond(m, ack)
 }

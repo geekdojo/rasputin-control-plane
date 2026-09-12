@@ -37,6 +37,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"os"
 	"os/exec"
@@ -736,5 +737,229 @@ func TestComposeBackendLiveDeleteKeepingDataIsListedAndReclaimable(t *testing.T)
 	}
 	if _, err := os.Stat(a.c.recordPath(a.appID)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the record still names reclaimed volumes (stat err %v)", err)
+	}
+}
+
+// --- geekdojo/geekdojo-brain#412: the dropped-volume gate, live -------------
+//
+// Ownership: Docker on a developer machine is shared. This test mints an app
+// id no other run can have, so its compose project, rasp_<id>, is its own; it
+// records the exact name of every container, network and volume that project
+// gets as it creates them, and its cleanup removes those names and nothing
+// else — never by pattern. No anonymous volume is created, and busybox:latest
+// is used from the local cache when present and never removed.
+
+// gateLiveV1 is the app as installed: one named volume.
+const gateLiveV1 = `services:
+  app:
+    image: busybox:latest
+    command: ` + liveLoop + `
+    volumes:
+      - data:/data
+volumes:
+  data: {}
+`
+
+// gateLiveRenamed renames the key — measured case 3: `up` would exit 0 and
+// mount an empty data2. The unset variable makes compose print a warning into
+// the merged output, which must not read as a key.
+const gateLiveRenamed = `services:
+  app:
+    image: busybox:${RASP412_UNSET_TAG:-latest}
+    command: ` + liveLoop + `
+    volumes:
+      - data2:/data
+volumes:
+  data2: {}
+  declared-but-unmounted: {}
+`
+
+// gateLiveDropped drops the service that mounted the volume.
+const gateLiveDropped = `services:
+  other:
+    image: busybox:latest
+    command: ` + liveLoop + `
+`
+
+// liveGateID is a fresh app id: a fixed prefix that says what made it, and
+// random Crockford base32 for the rest, so two runs never share a project.
+func liveGateID(t *testing.T) string {
+	t.Helper()
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	id := []byte("01K4Z412GATE")
+	for _, x := range b[:26-len(id)] {
+		id = append(id, alphabet[int(x)%len(alphabet)])
+	}
+	if !proto.ValidAppID(string(id)) {
+		t.Fatalf("minted id %q is not an app id", id)
+	}
+	return string(id)
+}
+
+// liveOwned is the exact set of docker objects one test created.
+type liveOwned struct {
+	t          *testing.T
+	project    string
+	containers map[string]bool
+	networks   map[string]bool
+	volumes    map[string]bool
+}
+
+// record adds what the test's own project holds right now. The project name
+// is unique to this run, so a label filter on it matches only what this run
+// created; the exact names are kept and cleanup never filters again.
+func (o *liveOwned) record() {
+	o.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	list := func(args ...string) []string {
+		out, err := exec.CommandContext(ctx, "docker", args...).Output()
+		if err != nil {
+			o.t.Fatalf("docker %s: %v", strings.Join(args, " "), err)
+		}
+		return strings.Fields(string(out))
+	}
+	label := "label=com.docker.compose.project=" + o.project
+	for _, id := range list("ps", "-aq", "--no-trunc", "--filter", label) {
+		o.containers[id] = true
+	}
+	for _, n := range list("network", "ls", "-q", "--no-trunc", "--filter", label) {
+		o.networks[n] = true
+	}
+	for _, v := range list("volume", "ls", "-q", "--filter", label) {
+		if proto.IsAnonymousVolumeName(v) {
+			o.t.Fatalf("an anonymous volume %s appeared; this test creates none", v)
+		}
+		o.volumes[v] = true
+	}
+}
+
+func (o *liveOwned) cleanup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	for id := range o.containers {
+		_ = exec.CommandContext(ctx, "docker", "rm", "-f", "--", id).Run()
+	}
+	for n := range o.networks {
+		_ = exec.CommandContext(ctx, "docker", "network", "rm", "--", n).Run()
+	}
+	for v := range o.volumes {
+		_ = exec.CommandContext(ctx, "docker", "volume", "rm", "--", v).Run()
+	}
+	o.t.Logf("cleanup targeted exactly these, by name (a volume the test already dropped is simply gone): containers %v, networks %v, volumes %v", keys(o.containers), keys(o.networks), keys(o.volumes))
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func volumeExists(t *testing.T, name string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "docker", "volume", "inspect", "--", name).Run() == nil
+}
+
+// Compose's own `config --volumes` over the staged compose lists what the
+// compose declares, and a renamed key or a dropped service is reported as
+// dropped BEFORE any `up` — the live compose untouched, no staged file left,
+// and the renamed-to volume not created. After the owner's `up`, drop removes
+// exactly the volume named, and refuses one the compose still declares.
+func TestComposeBackendLiveVolumeGate(t *testing.T) {
+	requireDocker(t)
+	appID := liveGateID(t)
+	c, err := NewComposeBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewComposeBackend: %v", err)
+	}
+	owned := &liveOwned{t: t, project: projectName(appID), containers: map[string]bool{}, networks: map[string]bool{}, volumes: map[string]bool{}}
+	t.Cleanup(owned.cleanup)
+	t.Logf("app id %s, compose project %s", appID, owned.project)
+	data, data2 := proto.AppVolumeName(appID, "data"), proto.AppVolumeName(appID, "data2")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	status, detail, err := c.Deploy(ctx, appID, appID, gateLiveV1)
+	owned.record()
+	if err != nil || status != proto.AppStatusRunning {
+		t.Fatalf("Deploy v1: %v (status=%s detail=%s)", err, status, detail)
+	}
+	if !owned.volumes[data] {
+		t.Fatalf("fixture: %s not created (owned volumes %v)", data, keys(owned.volumes))
+	}
+	liveBefore, err := os.ReadFile(c.composePath(appID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declared, dropped, err := c.CheckVolumes(ctx, appID, gateLiveV1)
+	if err != nil || strings.Join(declared, ",") != "data" || len(dropped) != 0 {
+		t.Fatalf("check of the installed compose: declared %v dropped %v err %v", declared, dropped, err)
+	}
+
+	declared, dropped, err = c.CheckVolumes(ctx, appID, gateLiveRenamed)
+	if err != nil {
+		t.Fatalf("check renamed: %v", err)
+	}
+	if strings.Join(declared, ",") != "data2" {
+		t.Errorf("declared = %v, want only data2: an unmounted top-level volume is not created by up, and a warning is not a key", declared)
+	}
+	if len(dropped) != 1 || dropped[0].Name != data || dropped[0].Volume != "data" {
+		t.Errorf("dropped = %+v, want %s", dropped, data)
+	}
+
+	declared, dropped, err = c.CheckVolumes(ctx, appID, gateLiveDropped)
+	if err != nil || len(declared) != 0 || len(dropped) != 1 || dropped[0].Name != data {
+		t.Errorf("check dropped service: declared %v dropped %+v err %v", declared, dropped, err)
+	}
+
+	if _, _, err := c.CheckVolumes(ctx, appID, "services:\n  app:\n    image: busybox:latest\n    volumes:\n      - nope:/x\n"); err == nil {
+		t.Error("a compose naming an undeclared volume was read as an answer")
+	}
+
+	// Nothing the checks did reached the node's state.
+	if after, _ := os.ReadFile(c.composePath(appID)); string(after) != string(liveBefore) {
+		t.Error("a check wrote the live compose")
+	}
+	entries, _ := os.ReadDir(c.appDir(appID))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".volumes-") {
+			t.Errorf("staged compose left behind: %s", e.Name())
+		}
+	}
+	if volumeExists(t, data2) {
+		owned.volumes[data2] = true
+		t.Fatalf("a check created %s", data2)
+	}
+
+	// The owner applies the rename, naming data for deletion.
+	status, detail, err = c.Deploy(ctx, appID, appID, gateLiveRenamed)
+	owned.record()
+	if err != nil || status != proto.AppStatusRunning {
+		t.Fatalf("Deploy renamed: %v (status=%s detail=%s)", err, status, detail)
+	}
+	if !volumeExists(t, data) {
+		t.Fatal("premise (case 3): up removed the renamed-away volume itself")
+	}
+
+	ack := c.DropAppVolumes(ctx, proto.AppVolumesDropCmd{AppID: appID, Names: []string{data2}})
+	if len(ack.Removed) != 0 || len(ack.Refused) != 1 || !strings.Contains(ack.Refused[0].Reason, "still declares") || !volumeExists(t, data2) {
+		t.Fatalf("drop of a declared volume: %+v", ack)
+	}
+	ack = c.DropAppVolumes(ctx, proto.AppVolumesDropCmd{AppID: appID, Names: []string{data}})
+	if !ack.OK || len(ack.Refused) != 0 || strings.Join(ack.Removed, ",") != data {
+		t.Fatalf("drop of the renamed-away volume: %+v", ack)
+	}
+	if volumeExists(t, data) || !volumeExists(t, data2) {
+		t.Errorf("after drop: %s exists=%v, %s exists=%v", data, volumeExists(t, data), data2, volumeExists(t, data2))
 	}
 }

@@ -16,10 +16,11 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// DeploySpec is the spec body of an app.deploy job, and of app.stop,
-// app.upgrade and app.edit — all four are keyed only by appId. (app.revert
-// names its target compose too; see RevertSpec. app.edit's compose is never
-// in its spec; see ComposeStash.) Decoded strictly: a field this saga does not
+// DeploySpec is the spec body of an app.deploy job and of app.stop — both are
+// keyed only by appId. (app.upgrade and app.edit also carry the volumes the
+// owner named for deletion, see ComposeChangeSpec; app.revert names its target
+// compose too, see RevertSpec; app.edit's compose is never in its spec, see
+// ComposeStash.) Decoded strictly: a field this saga does not
 // know is a refusal, which is what keeps app.delete's deleteVolumes from ever
 // meaning anything to a stop or a deploy.
 type DeploySpec struct {

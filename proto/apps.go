@@ -332,6 +332,18 @@ func AppVolumesRemoveSubject(nodeID string) string {
 	return NodeCmdSubject(nodeID, "docker.volumes.remove")
 }
 
+// AppVolumesCheckSubject is the cmd subject for asking nodeID which of an
+// app's named volumes a compose would leave undeclared (#412; read-only).
+func AppVolumesCheckSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "docker.volumes.check")
+}
+
+// AppVolumesDropSubject is the cmd subject for removing, by exact name, named
+// volumes of a LIVE app that its compose on nodeID no longer declares (#412).
+func AppVolumesDropSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, "docker.volumes.drop")
+}
+
 // AppChangeSubject is the publish subject for an app-lifecycle event.
 func AppChangeSubject(appID string, change AppChangeType) string {
 	return fmt.Sprintf("rasputin.apps.%s.%s", appID, string(change))
@@ -563,6 +575,95 @@ func RefuseAppVolumeName(name string, liveAppIDs map[string]bool) string {
 func RefuseAppVolumeOwner(appID string, liveAppIDs map[string]bool) string {
 	if liveAppIDs[strings.ToUpper(appID)] {
 		return fmt.Sprintf("app %s is still installed; uninstall it to delete its volumes", strings.ToUpper(appID))
+	}
+	return ""
+}
+
+// --- Volumes a compose change would drop (geekdojo/geekdojo-brain#412) -------
+//
+// Renaming a volume key, or dropping the service that mounted it, makes `up`
+// exit 0 and leave the old named volume on the node with nothing mounting it:
+// the app starts empty and its data is orphaned (measured case 3,
+// app-catalog.md §8a.2). So every compose change first asks the node which of
+// the app's named volumes on disk the new compose does not declare, and is
+// refused unless the owner names exactly those volumes for deletion — which
+// then happens only after `up` has succeeded.
+//
+// The api holds no YAML parser (ADR-0006 D4), so it is Compose on the node
+// that says what a compose declares: `docker compose config --volumes` over
+// the staged compose, under the app's project. Anonymous volumes are outside
+// this gate: they have no key to compare, and #413 already records every one
+// an app's containers mount and removes them with the app's data.
+
+// AppVolumesCheckWork is how long the agent may spend on a volumes check — a
+// `compose config` and a `volume ls`, neither of which touches a registry.
+// AppVolumesCheckRPC is the api's wait, the longer of the pair for the same
+// reason AppDeployRPC is.
+const (
+	AppVolumesCheckWork = 15 * time.Second
+	AppVolumesCheckRPC  = AppVolumesCheckWork + 5*time.Second
+)
+
+// AppVolumesCheckCmd is the request body on docker.volumes.check: which named
+// volumes of AppID's project, on this node, does ComposeYAML not declare?
+// Read-only: the compose is staged beside the app's live one and removed
+// again, and nothing is created, pulled or removed.
+type AppVolumesCheckCmd struct {
+	AppID       string `json:"appId"`
+	ComposeYAML string `json:"composeYaml"`
+}
+
+// AppDroppedVolume is one named volume the app has on disk that a compose
+// does not declare.
+type AppDroppedVolume struct {
+	// Name is the docker volume name, rasp_<appid>_<volume> — the exact name
+	// an owner puts in deleteVolumes.
+	Name string `json:"name"`
+	// Volume is the compose key the volume was declared under.
+	Volume string `json:"volume"`
+}
+
+// AppVolumesCheckAck is the reply. Declared is the compose's volume keys as
+// Compose itself resolved them — only volumes some active service mounts,
+// which is exactly the set `up` creates and keeps. Dropped is every named
+// volume labelled for the app's project whose key is not among them, sorted
+// by name.
+type AppVolumesCheckAck struct {
+	OK       bool               `json:"ok"`
+	Detail   string             `json:"detail,omitempty"`
+	Declared []string           `json:"declared"`
+	Dropped  []AppDroppedVolume `json:"dropped"`
+}
+
+// AppVolumesDropCmd is the request body on docker.volumes.drop: remove these
+// named volumes of AppID, which is still installed. Sent only by a compose
+// change's saga, only after its `up` succeeded, and only with the names the
+// owner put in deleteVolumes and the check confirmed the change drops. The
+// agent refuses, by name, anything that is not a volume of AppID's project,
+// anything the app's compose on disk still declares, and anything a container
+// still references. The reply is an AppVolumesRemoveAck.
+type AppVolumesDropCmd struct {
+	AppID string   `json:"appId"`
+	Names []string `json:"names"`
+}
+
+// RefuseAppDeleteVolumeName is the daemon-free half of the rule for a name an
+// owner puts in a compose change's deleteVolumes: it must be a named volume of
+// appID's own project, rasp_<appid>_<volume>. An anonymous volume's 64-hex
+// name is refused by name: anonymous volumes are outside the dropped-volume
+// gate (#413 removes them with the app's data). Returns "" for an acceptable
+// name. The api applies it before a job exists, the saga to its spec, and the
+// agent again before it removes anything, so the wording is one.
+func RefuseAppDeleteVolumeName(appID, name string) string {
+	if IsAnonymousVolumeName(name) {
+		return "an anonymous volume cannot be named for deletion with a compose change: it has no compose key to drop, and it is removed with the app's data when the app is deleted"
+	}
+	owner, _, ok := ParseAppVolumeName(name)
+	if !ok {
+		return "not a named volume of this app: the name is not of the form " + AppProjectName(appID) + "_<volume>"
+	}
+	if !strings.EqualFold(owner, appID) {
+		return fmt.Sprintf("a volume of app %s, not of this app (%s)", owner, strings.ToUpper(appID))
 	}
 	return ""
 }

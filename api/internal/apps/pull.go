@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -76,6 +77,10 @@ type pullResult struct {
 	// uses both to put the status back.
 	PriorStatus proto.AppStatus `json:"priorStatus"`
 	MarkedAtMs  int64           `json:"markedAtMs"`
+	// DeleteVolumes is the owner's deleteVolumes as the volume gate accepted
+	// it: exactly the named volumes the pulled compose drops (#412). The drop
+	// step removes these and nothing else, once `up` has succeeded.
+	DeleteVolumes []string `json:"deleteVolumes,omitempty"`
 }
 
 // pullStep is a saga step that pulls source's compose on the app's node and
@@ -87,9 +92,22 @@ type pullResult struct {
 // the UI shows the operation the moment it starts rather than after a pull
 // that can take the app's whole budget. When the pull fails the status goes
 // back (Store.RestoreStatus), because nothing on the node changed.
-func pullStep(store *Store, inv *inventory.Store, nc *nats.Conn, change string, appID specAppID, source pullSource) jobs.DoFn {
+//
+// Before it pulls, it applies the dropped-volume gate (#412, volumegate.go):
+// the node says which of the app's named volumes on disk the compose does not
+// declare, and unless deleteVolumes names exactly those, the change ends here
+// the way a failed pull does — nothing pulled, nothing written, status put
+// back, and the volumes named in the reason. This is the authoritative check;
+// the one PUT /api/apps/{id}/compose makes first is advisory. It runs before
+// the pull, not after, so a refused change does not spend the app's budget
+// fetching images it will not use.
+func pullStep(store *Store, inv *inventory.Store, nc *nats.Conn, change string, appID specAppID, deleteVolumes specDeleteVolumes, source pullSource) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		app, err := loadAppFor(sc, store, inv, appID)
+		if err != nil {
+			return nil, err
+		}
+		named, err := deleteVolumes(sc.Spec)
 		if err != nil {
 			return nil, err
 		}
@@ -106,6 +124,26 @@ func pullStep(store *Store, inv *inventory.Store, nc *nats.Conn, change string, 
 			ComposeSHA256: ComposeHash(target.ComposeYAML),
 			PriorStatus:   app.LastStatus,
 			MarkedAtMs:    ms(markedAt),
+		}
+
+		dropped, err := DroppedVolumesOnNode(sc.Ctx, inv, nc, app, target.ComposeYAML)
+		if err != nil {
+			reason := fmt.Sprintf("%s not applied: which of the app's volumes the new compose would drop could not be checked, so nothing on the node was changed — %s", change, err)
+			abandonAfterPull(sc, store, nc, pulled, reason)
+			return nil, errors.New(reason)
+		}
+		if err := GateDroppedVolumes(dropped, named); err != nil {
+			reason := fmt.Sprintf("%s not applied, and nothing on the node was changed: %s", change, err)
+			abandonAfterPull(sc, store, nc, pulled, reason)
+			return nil, fmt.Errorf("%s not applied, and nothing on the node was changed: %w", change, err)
+		}
+		if len(dropped) > 0 {
+			names := make([]string, 0, len(dropped))
+			for _, v := range dropped {
+				names = append(names, v.Name)
+			}
+			pulled.DeleteVolumes = names
+			sc.Log("info", "the new compose drops volume(s) the owner named for deletion; they are deleted once it is up: "+strings.Join(names, ", "))
 		}
 
 		sc.Log("info", fmt.Sprintf("pulling images for %q on %s (compose %.12s)", app.Name, app.TargetNode, pulled.ComposeSHA256))
