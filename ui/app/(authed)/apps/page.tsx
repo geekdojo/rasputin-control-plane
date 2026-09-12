@@ -1,8 +1,8 @@
 'use client';
 
-import { ClipboardList, Database, ExternalLink, HardDrive, Package, Play, Plus, RotateCcw, Square, Trash2, UploadCloud } from 'lucide-react';
+import { ArrowUpCircle, ClipboardList, Database, ExternalLink, FileCode, HardDrive, Package, Play, Plus, RotateCcw, Square, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   deleteApp,
   deployApp,
@@ -21,6 +21,7 @@ import { formatBytes, timeAgo } from '../../../lib/volumes';
 import { appAccess, preferredAppUrl, type AppAccess } from '../../../lib/appurl';
 import { backupBadge, backupSummary, sortAppsOverdueFirst } from '../../../lib/backup-state';
 import { backupAckLine, noBackupBadge } from '../../../lib/backup-gate';
+import { composeActions, noopNote, orphanVolumeLabel, startedNote, type ComposeChangeKind } from '../../../lib/compose-change';
 import {
   Badge,
   Btn,
@@ -43,6 +44,7 @@ import {
 } from '../../../components/kit';
 import { UninstallAppModal, type UninstallVolumeRow } from '../../../components/UninstallAppModal';
 import { RestoreAppDataModal } from '../../../components/RestoreAppDataModal';
+import { ComposeChangeModal, type ComposeChangeResult } from '../../../components/ComposeChangeModal';
 import { ACCENT, MONO } from '../../../components/ui-theme';
 
 // Fixed column widths so the table doesn't reflow as per-row action buttons
@@ -102,6 +104,22 @@ export default function AppsPage() {
   // until the fetch lands and '' on a dev box — appAccess falls back to
   // "rasputin" then, matching the api's baseDomainFor.
   const [clusterId, setClusterId] = useState('');
+  // A compose change in progress (#414): upgrade, custom edit or revert, and
+  // what the page says once it has started or turned out to be a no-op.
+  const [change, setChange] = useState<{ app: App; kind: ComposeChangeKind } | null>(null);
+  const [changeNote, setChangeNote] = useState<{ text: string; jobId?: string } | null>(null);
+  // Stable, because useModalChrome re-runs its focus effect whenever onClose
+  // changes identity, and this page re-renders on every apps refresh — an
+  // inline arrow would pull focus out of the compose editor mid-edit.
+  const closeChange = useCallback(() => setChange(null), []);
+  const finishChange = useCallback((kind: ComposeChangeKind, app: App, result: ComposeChangeResult) => {
+    // A started change is watched the way deploy and stop are: the apps
+    // socket moves the row's status. The note adds the way through to the
+    // job. A no-op started nothing, so it says so quietly and links nowhere.
+    if (result.kind === 'noop') setChangeNote({ text: noopNote(kind, app.name) });
+    else setChangeNote({ text: startedNote(kind, app.name), jobId: result.job.id });
+    listApps().then(setApps).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const refreshApps = () => listApps().then(setApps).catch((e) => setErr(String(e)));
@@ -202,6 +220,19 @@ export default function AppsPage() {
       <PageHeader icon={Package} title={`APPS — ${apps.length}`} right={addButton} />
       <PageBody>
         {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
+        {changeNote && (
+          <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+            <Hint>{changeNote.text}</Hint>
+            {changeNote.jobId && (
+              <LinkBtn href={`/tasks?id=${encodeURIComponent(changeNote.jobId)}`} small aria-label="View the task for this change">
+                <ClipboardList size={10} /> VIEW TASK
+              </LinkBtn>
+            )}
+            <Btn variant="ghost" small aria-label="Dismiss" onClick={() => setChangeNote(null)}>
+              DISMISS
+            </Btn>
+          </div>
+        )}
 
         {apps.length === 0 ? (
           <Hint>
@@ -235,6 +266,7 @@ export default function AppsPage() {
                   access={appAccess(a, clusterId)}
                   busy={busy === a.id}
                   onAction={handle}
+                  onCompose={(kind) => setChange({ app: a, kind })}
                   onOpenDetail={() => setDetail(a)}
                 />
               ))}
@@ -256,7 +288,18 @@ export default function AppsPage() {
         )}
       </PageBody>
 
-      {detail && <AppDetail app={detail} clusterId={clusterId} onClose={() => setDetail(null)} />}
+      {detail && (
+        <AppDetail
+          // The drawer reads the live row, so its compose actions follow the
+          // app's flags as they change instead of the snapshot it opened on.
+          app={apps.find((a) => a.id === detail.id) ?? detail}
+          clusterId={clusterId}
+          onClose={() => setDetail(null)}
+          onCompose={(app, kind) => setChange({ app, kind })}
+        />
+      )}
+
+      {change && <ComposeChangeModal app={change.app} kind={change.kind} onFinished={finishChange} onClose={closeChange} />}
 
       {pendingDelete && (
         <UninstallAppModal
@@ -278,7 +321,7 @@ export default function AppsPage() {
           nodeId={pendingReclaim.nodeId}
           volumes={pendingReclaim.volumes.map(
             (v): UninstallVolumeRow => ({
-              name: v.volume,
+              name: orphanVolumeLabel(v),
               dockerName: v.name,
               backup: v.backup ?? '',
               lastCaptured: v.lastCaptured,
@@ -299,12 +342,14 @@ function AppRow({
   access,
   busy,
   onAction,
+  onCompose,
   onOpenDetail,
 }: {
   app: App;
   access: AppAccess | null;
   busy: boolean;
   onAction: (action: 'deploy' | 'stop' | 'delete', app: App) => void;
+  onCompose: (kind: ComposeChangeKind) => void;
   onOpenDetail: () => void;
 }) {
   const transient = app.lastStatus === 'deploying' || app.lastStatus === 'stopping';
@@ -330,6 +375,9 @@ function AppRow({
   // app with something to back up and nowhere to back it up to. The api's
   // states are exclusive, so a row never wears this beside OVERDUE.
   const noTarget = noBackupBadge(app.backup);
+  // Upgrade / edit / revert (#414). Upgrade is explicit: the badge says one is
+  // available, and nothing happens until the owner confirms it.
+  const compose = composeActions(app);
 
   // No row-level hover affordance: the row has no onClick, and highlighting
   // the whole row told the operator (and the bench agents) that the row was
@@ -358,6 +406,13 @@ function AppRow({
           >
             <Badge color="#facc15">{noTarget.label}</Badge>
           </Link>
+        )}
+        {compose.updateBadge && (
+          <span style={{ marginLeft: 8 }}>
+            <Badge color={ACCENT} title={app.upgradeCatalogVersion ? `Catalog v${app.upgradeCatalogVersion} carries a newer compose` : 'The catalog carries a newer compose'}>
+              UPDATE AVAILABLE
+            </Badge>
+          </span>
         )}
       </td>
       <td style={{ ...tdStyle, color: DIM }}>{app.targetNode}</td>
@@ -397,6 +452,21 @@ function AppRow({
                   <UploadCloud size={10} /> DEPLOY
                 </>
               )}
+            </Btn>
+          )}
+          {compose.upgrade && (
+            <Btn variant="primary" small disabled={busy} aria-label={`Upgrade ${app.name}`} onClick={() => onCompose('upgrade')}>
+              <ArrowUpCircle size={10} /> UPGRADE
+            </Btn>
+          )}
+          {compose.revert && (
+            <Btn small disabled={busy} aria-label={`Revert ${app.name} to its previous compose`} onClick={() => onCompose('revert')}>
+              <RotateCcw size={10} /> REVERT
+            </Btn>
+          )}
+          {compose.edit && (
+            <Btn small disabled={busy} aria-label={`Edit compose of ${app.name}`} onClick={() => onCompose('edit')}>
+              <FileCode size={10} /> EDIT
             </Btn>
           )}
           {canStop && (
@@ -443,7 +513,17 @@ function NameButton({ name, onClick }: { name: string; onClick: () => void }) {
 // AppDetail — the "what next" for a running app: where to open it, what it is,
 // and the first-run step. Tile info (docs + first-run note) is fetched lazily
 // for apps installed from the catalog; custom-compose apps show just access.
-function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; onClose: () => void }) {
+function AppDetail({
+  app,
+  clusterId,
+  onClose,
+  onCompose,
+}: {
+  app: App;
+  clusterId: string;
+  onClose: () => void;
+  onCompose: (app: App, kind: ComposeChangeKind) => void;
+}) {
   const [tile, setTile] = useState<CatalogTile | null>(null);
   // Exposure is edited HERE, on a live app, which is the whole of #197: it used
   // to be settable only in the install drawer, so the only way back was delete.
@@ -463,6 +543,7 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
 
   const access = appAccess(app, clusterId);
   const running = app.lastStatus === 'running';
+  const compose = composeActions(app);
 
   async function toggleExposure() {
     const want = !exposeLan;
@@ -515,10 +596,15 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
             >
               {app.lastDetail}
             </pre>
-            <div style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <LinkBtn href={`/tasks?app=${encodeURIComponent(app.id)}`} small aria-label={`Tasks for ${app.name}`}>
                 <ClipboardList size={10} /> VIEW TASKS
               </LinkBtn>
+              {compose.revert && (
+                <Btn small aria-label={`Revert ${app.name} to its previous compose`} onClick={() => onCompose(app, 'revert')}>
+                  <RotateCcw size={10} /> REVERT TO PREVIOUS COMPOSE…
+                </Btn>
+              )}
             </div>
           </div>
         )}
@@ -630,6 +716,30 @@ function AppDetail({ app, clusterId, onClose }: { app: App; clusterId: string; o
             </div>
           )}
         </div>
+
+        {(compose.updateBadge || compose.edit) && (
+          <div>
+            <SectionLabel>COMPOSE</SectionLabel>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              {compose.updateBadge && <Badge color={ACCENT}>UPDATE AVAILABLE</Badge>}
+              {compose.upgrade && (
+                <Btn variant="primary" small aria-label={`Upgrade ${app.name}`} onClick={() => onCompose(app, 'upgrade')}>
+                  <ArrowUpCircle size={10} /> UPGRADE…
+                </Btn>
+              )}
+              {compose.edit && (
+                <Btn small aria-label={`Edit compose of ${app.name}`} onClick={() => onCompose(app, 'edit')}>
+                  <FileCode size={10} /> EDIT COMPOSE…
+                </Btn>
+              )}
+            </div>
+            <Hint style={{ marginTop: 6 }}>
+              {compose.updateBadge
+                ? `The catalog${app.upgradeCatalogVersion ? ` (v${app.upgradeCatalogVersion})` : ''} carries a newer compose for this app. Nothing changes until you upgrade.`
+                : 'A custom app: edit its compose and redeploy it in place, keeping its volumes.'}
+            </Hint>
+          </div>
+        )}
 
         {app.sourceTile && (
           <div>
@@ -778,7 +888,7 @@ function OrphanedVolumes({
                 <td style={{ ...tdStyle, color: DIM, whiteSpace: 'normal' }}>
                   {g.volumes.map((v) => (
                     <div key={v.name} title={v.name}>
-                      {v.volume}{' '}
+                      {orphanVolumeLabel(v)}{' '}
                       <span style={{ color: DIM }}>
                         {formatBytes(v.sizeBytes)}
                         {v.backup ? ` · ${v.backup}` : ''}
