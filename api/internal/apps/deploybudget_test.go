@@ -101,18 +101,18 @@ func TestIsRealDrift_StalenessWindowFollowsTheAppsBudget(t *testing.T) {
 
 	heavy := &App{LastStatus: proto.AppStatusDeploying, DeployBudgetSeconds: 900}
 	heavy.UpdatedAt = now.Add(-6 * time.Minute)
-	if isRealDrift(heavy, proto.AppStatusStopped, now) {
+	if isRealDrift(heavy, proto.AppStatusStopped, false, now) {
 		t.Error("a tile with a 15-minute budget was called stale after 6 minutes — " +
 			"reconcile would clobber a deploy that is still pulling")
 	}
 	heavy.UpdatedAt = now.Add(-20 * time.Minute)
-	if !isRealDrift(heavy, proto.AppStatusStopped, now) {
+	if !isRealDrift(heavy, proto.AppStatusStopped, false, now) {
 		t.Error("past its own budget the row is stale, not busy, and must be corrected")
 	}
 
 	light := &App{LastStatus: proto.AppStatusDeploying, DeployBudgetSeconds: 90}
 	light.UpdatedAt = now.Add(-3 * time.Minute)
-	if !isRealDrift(light, proto.AppStatusStopped, now) {
+	if !isRealDrift(light, proto.AppStatusStopped, false, now) {
 		t.Error("a tile with a 90-second budget was still considered in-flight after " +
 			"3 minutes — the point of a short budget is a short wait")
 	}
@@ -120,7 +120,7 @@ func TestIsRealDrift_StalenessWindowFollowsTheAppsBudget(t *testing.T) {
 	// Undeclared falls back to the default window, unchanged from before.
 	deflt := &App{LastStatus: proto.AppStatusDeploying}
 	deflt.UpdatedAt = now.Add(-1 * time.Minute)
-	if isRealDrift(deflt, proto.AppStatusStopped, now) {
+	if isRealDrift(deflt, proto.AppStatusStopped, false, now) {
 		t.Error("an app with no declared budget must keep the default grace period")
 	}
 }

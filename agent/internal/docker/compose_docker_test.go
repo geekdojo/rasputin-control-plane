@@ -35,8 +35,11 @@
 package docker
 
 import (
+	"bytes"
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -241,4 +244,168 @@ func crashed(services []proto.AppServiceStatus) bool {
 		}
 	}
 	return false
+}
+
+// runningCompose is the app as it runs before an owner changes its compose.
+const runningCompose = `services:
+  app:
+    image: busybox:latest
+    command: ["sh", "-c", "while true; do sleep 5; done"]
+`
+
+// badDigestCompose is the change whose pull fails: a digest no registry has.
+// Nothing is pulled — the registry answers "not found" for the manifest.
+const badDigestCompose = `services:
+  app:
+    image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    command: ["sh", "-c", "while true; do sleep 5; done"]
+`
+
+// containerIdentity is what "the running app was not touched" means: the same
+// container, started at the same instant, still running.
+func containerIdentity(t *testing.T, appID string) (id, startedAt string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--quiet", "--no-trunc",
+		"--filter", "label=com.docker.compose.project="+projectName(appID),
+		"--filter", "label=com.docker.compose.service=app").Output()
+	if err != nil {
+		t.Fatalf("docker ps: %v", err)
+	}
+	ids := strings.Fields(string(out))
+	if len(ids) != 1 {
+		t.Fatalf("want exactly one running app container, got %v", ids)
+	}
+	started, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.StartedAt}}", ids[0]).Output()
+	if err != nil {
+		t.Fatalf("docker inspect: %v", err)
+	}
+	return ids[0], strings.TrimSpace(string(started))
+}
+
+// geekdojo/geekdojo-brain#411, against a real daemon: a pull of a compose whose
+// image digest does not exist fails, and leaves the running container (same
+// id, same StartedAt) and the app's live compose file exactly as they were.
+// This is measured case 7 of app-catalog.md §8a.2, pinned through the agent's
+// own verb rather than a hand-typed `compose up`.
+func TestComposeBackendLiveBadDigestPullChangesNothing(t *testing.T) {
+	requireDocker(t)
+	c, appID := newLiveBackend(t, "01livebadpull")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose); err != nil || status != proto.AppStatusRunning {
+		t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
+	}
+	idBefore, startedBefore := containerIdentity(t, appID)
+	liveBefore, err := os.ReadFile(c.composePath(appID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statBefore, _ := os.Stat(c.composePath(appID))
+
+	detail, err := c.Pull(ctx, appID, badDigestCompose)
+	if err == nil {
+		t.Fatalf("a pull of a nonexistent digest succeeded (detail: %s)", detail)
+	}
+	if !strings.Contains(detail, "docker compose pull") || !strings.Contains(detail, "0000000000") {
+		t.Errorf("detail %q does not carry compose's reason naming the image", detail)
+	}
+	t.Logf("pull detail: %s", detail)
+
+	idAfter, startedAfter := containerIdentity(t, appID)
+	if idAfter != idBefore || startedAfter != startedBefore {
+		t.Errorf("the running container changed: %s@%s → %s@%s", idBefore, startedBefore, idAfter, startedAfter)
+	}
+	liveAfter, err := os.ReadFile(c.composePath(appID))
+	if err != nil {
+		t.Fatalf("live compose after the pull: %v", err)
+	}
+	statAfter, _ := os.Stat(c.composePath(appID))
+	if !bytes.Equal(liveAfter, liveBefore) || !statAfter.ModTime().Equal(statBefore.ModTime()) {
+		t.Errorf("the live compose file was rewritten by a pull")
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(c.appDir(appID), ".pull-*")); len(leftovers) != 0 {
+		t.Errorf("staged compose left behind: %v", leftovers)
+	}
+	if status, services, err := c.Status(ctx, appID); err != nil || status != proto.AppStatusRunning {
+		t.Errorf("status after the failed pull = %s %+v %v, want running", status, services, err)
+	} else if services[0].Outdated {
+		t.Errorf("the untouched container reads as outdated: %+v", services)
+	}
+
+	// And a pull of the compose that is running succeeds without the
+	// registry: its image is already on the node (--policy missing).
+	if detail, err := c.Pull(ctx, appID, runningCompose); err != nil {
+		t.Errorf("pull of the running compose: %v (%s)", err, detail)
+	}
+}
+
+// networkConflictCompose changes the service AND declares two networks with
+// the same subnet, so `up` fails creating the second network — before it ever
+// reaches the service. No port is bound; the subnets are private and only ever
+// exist for the life of this test.
+const networkConflictCompose = `services:
+  app:
+    image: busybox:latest
+    command: ["sh", "-c", "while true; do sleep 7; done"]
+    networks: [n1, n2]
+networks:
+  n1:
+    ipam:
+      config: [{subnet: 10.231.77.0/24}]
+  n2:
+    ipam:
+      config: [{subnet: 10.231.77.0/24}]
+`
+
+// The after-pull failure branch of #411: an `up` that fails before converging
+// a service leaves that service's OLD container running under the NEW compose
+// file. Status must still say running — it is — and flag the container
+// outdated, which is what keeps the api's reconcile from reading a failed
+// upgrade as recovered. Re-applying the running compose clears the flag.
+func TestComposeBackendLiveFailedUpLeavesAnOutdatedContainer(t *testing.T) {
+	requireDocker(t)
+	c, appID := newLiveBackend(t, "01liveoutdated")
+	// `down` runs against whatever compose is live at cleanup, which no longer
+	// declares the networks the failed up created, so they are removed by name.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, n := range []string{"n1", "n2"} {
+			_ = exec.CommandContext(ctx, "docker", "network", "rm", projectName(appID)+"_"+n).Run()
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose); err != nil || status != proto.AppStatusRunning {
+		t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
+	}
+	idBefore, startedBefore := containerIdentity(t, appID)
+
+	if _, detail, err := c.Deploy(ctx, appID, appID, networkConflictCompose); err == nil {
+		t.Fatalf("up with two networks on one subnet succeeded (detail: %s) — the fixture no longer fails before the service", detail)
+	} else {
+		t.Logf("up detail: %s", detail)
+	}
+	if idAfter, startedAfter := containerIdentity(t, appID); idAfter != idBefore || startedAfter != startedBefore {
+		t.Fatalf("the fixture's failed up touched the container (%s@%s → %s@%s); it no longer exercises an outdated survivor",
+			idBefore, startedBefore, idAfter, startedAfter)
+	}
+	status, services, err := c.Status(ctx, appID)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status != proto.AppStatusRunning || len(services) != 1 || !services[0].Outdated {
+		t.Fatalf("status = %s %+v, want running with the surviving container outdated", status, services)
+	}
+
+	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose); err != nil || status != proto.AppStatusRunning {
+		t.Fatalf("re-apply: %v (status=%s detail=%s)", err, status, detail)
+	}
+	if _, services, err := c.Status(ctx, appID); err != nil || len(services) != 1 || services[0].Outdated {
+		t.Errorf("after re-applying the running compose: %+v %v, want one current container", services, err)
+	}
 }

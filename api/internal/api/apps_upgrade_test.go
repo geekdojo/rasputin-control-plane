@@ -24,7 +24,8 @@ const upgradeCatalogVersion = 7
 
 // upgradeFixture is gateFixture's live catalog (vaultwarden and jellyfin,
 // both available) plus a preview tile, the app.upgrade saga registered against
-// that store, and a fake agent that acks every deploy on n1.
+// that store, the app.revert saga, and a fake agent that acks every pull and
+// every deploy on n1.
 func upgradeFixture(t *testing.T) (*apiFixture, *http.Cookie, *catalogsync.Store, <-chan proto.AppDeployCmd) {
 	t.Helper()
 	f, cookie, _ := gateFixture(t)
@@ -36,6 +37,18 @@ func upgradeFixture(t *testing.T) (*apiFixture, *http.Cookie, *catalogsync.Store
 	}
 	f.srv.SetCatalogSync(cat, nil)
 	f.runner.Register(apps.UpgradeWorkflow(f.appsStore, f.inv, f.nc, nil, cat.GetVersioned))
+	f.runner.Register(apps.RevertWorkflow(f.appsStore, f.inv, f.nc, nil))
+
+	// The pull every compose change runs first (#411); this agent's pulls all
+	// succeed.
+	pullSub, err := f.nc.Subscribe(proto.AppPullSubject("n1"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.AppPullAck{OK: true})
+		_ = m.Respond(ack)
+	})
+	if err != nil {
+		t.Fatalf("agent pull sub: %v", err)
+	}
+	t.Cleanup(func() { _ = pullSub.Unsubscribe() })
 
 	got := make(chan proto.AppDeployCmd, 4)
 	sub, err := f.nc.Subscribe(proto.AppDeploySubject("n1"), func(m *nats.Msg) {

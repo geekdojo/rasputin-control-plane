@@ -17,6 +17,7 @@ func TestIsRealDrift(t *testing.T) {
 		last     proto.AppStatus
 		updated  time.Time
 		observed proto.AppStatus
+		outdated bool
 		want     bool
 		why      string
 	}{
@@ -24,37 +25,44 @@ func TestIsRealDrift(t *testing.T) {
 		// so the agent says "stopped" — which agrees with the verdict rather
 		// than contradicting it. Recording it destroyed the error detail and
 		// left the row looking merely un-deployed.
-		{"failed stays failed when observed stopped", proto.AppStatusFailed, fresh, proto.AppStatusStopped, false,
+		{"failed stays failed when observed stopped", proto.AppStatusFailed, fresh, proto.AppStatusStopped, false, false,
 			"observing stopped CONFIRMS a failed deploy; overwriting it erases why it failed"},
-		{"failed stays failed when observed unknown", proto.AppStatusFailed, fresh, proto.AppStatusUnknown, false,
+		{"failed stays failed when observed unknown", proto.AppStatusFailed, fresh, proto.AppStatusUnknown, false, false,
 			"unknown is not evidence the failure was wrong"},
-		{"failed yields to a genuine recovery", proto.AppStatusFailed, fresh, proto.AppStatusRunning, true,
+		{"failed yields to a genuine recovery", proto.AppStatusFailed, fresh, proto.AppStatusRunning, false, true,
 			"running IS news — the containers came up after all"},
+		// #411: a compose change whose `up` failed before reaching a service
+		// leaves the old container running under the new file. That is the
+		// change not applying, not the app recovering.
+		{"failed stays failed when what runs is an outdated container", proto.AppStatusFailed, fresh, proto.AppStatusRunning, true, false,
+			"the running container predates the compose the row names; the change did not apply"},
+		{"outdated does not hide ordinary drift", proto.AppStatusRunning, fresh, proto.AppStatusStopped, true, true, ""},
+		{"outdated does not block a stopped app observed running", proto.AppStatusStopped, fresh, proto.AppStatusRunning, true, true, ""},
 
 		// In-flight operations own the record. Newly load-bearing: a 300s deploy
 		// budget and a 5-minute sweep overlap by design.
-		{"deploying is left alone mid-flight", proto.AppStatusDeploying, fresh, proto.AppStatusStopped, false,
+		{"deploying is left alone mid-flight", proto.AppStatusDeploying, fresh, proto.AppStatusStopped, false, false,
 			"containers legitimately do not exist yet while the image is still pulling"},
-		{"stopping is left alone mid-flight", proto.AppStatusStopping, fresh, proto.AppStatusRunning, false,
+		{"stopping is left alone mid-flight", proto.AppStatusStopping, fresh, proto.AppStatusRunning, false, false,
 			"the stop is still in progress"},
-		{"a stale deploying row is corrected", proto.AppStatusDeploying, stale, proto.AppStatusStopped, true,
+		{"a stale deploying row is corrected", proto.AppStatusDeploying, stale, proto.AppStatusStopped, false, true,
 			"past the deploy window it is stuck, not busy — never correcting it strands the app"},
 
 		// The symptom the sweep was built for (the api says running but it isn't).
-		{"running to stopped is real drift", proto.AppStatusRunning, fresh, proto.AppStatusStopped, true, ""},
-		{"running to failed is real drift", proto.AppStatusRunning, fresh, proto.AppStatusFailed, true, ""},
-		{"stopped to running is real drift", proto.AppStatusStopped, fresh, proto.AppStatusRunning, true, ""},
+		{"running to stopped is real drift", proto.AppStatusRunning, fresh, proto.AppStatusStopped, false, true, ""},
+		{"running to failed is real drift", proto.AppStatusRunning, fresh, proto.AppStatusFailed, false, true, ""},
+		{"stopped to running is real drift", proto.AppStatusStopped, fresh, proto.AppStatusRunning, false, true, ""},
 
-		{"no change is not drift", proto.AppStatusRunning, fresh, proto.AppStatusRunning, false, ""},
-		{"failed observed failed is not drift", proto.AppStatusFailed, fresh, proto.AppStatusFailed, false, ""},
+		{"no change is not drift", proto.AppStatusRunning, fresh, proto.AppStatusRunning, false, false, ""},
+		{"failed observed failed is not drift", proto.AppStatusFailed, fresh, proto.AppStatusFailed, false, false, ""},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			app := &App{LastStatus: c.last, UpdatedAt: c.updated}
-			if got := isRealDrift(app, c.observed, now); got != c.want {
-				t.Errorf("isRealDrift(last=%s, observed=%s) = %v, want %v\n%s",
-					c.last, c.observed, got, c.want, c.why)
+			if got := isRealDrift(app, c.observed, c.outdated, now); got != c.want {
+				t.Errorf("isRealDrift(last=%s, observed=%s, outdated=%v) = %v, want %v\n%s",
+					c.last, c.observed, c.outdated, got, c.want, c.why)
 			}
 		})
 	}

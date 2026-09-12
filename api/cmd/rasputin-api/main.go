@@ -591,6 +591,9 @@ func main() {
 	}
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
+	// app.revert (#411): re-apply an app's previous compose. Its compose comes
+	// from the row, so unlike app.upgrade it needs nothing from the catalog.
+	runner.Register(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))

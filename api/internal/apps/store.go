@@ -186,7 +186,9 @@ type ComposeUpgrade struct {
 var ErrComposeChanged = errors.New("apps: the installed compose changed since it was read")
 
 // UpgradeCompose replaces an installed app's compose with a catalog tile's, in
-// place, keeping the one it replaces in previous_compose_yaml.
+// place, keeping the one it replaces in previous_compose_yaml — together with
+// the catalog version, route and budget that went with it (#411), so the
+// previous compose can be re-applied as the whole record it was.
 //
 // fromHash is the compose_sha256 the caller read, and the write is conditional
 // on it. Two upgrades racing, or an upgrade racing any later compose edit,
@@ -197,6 +199,9 @@ var ErrComposeChanged = errors.New("apps: the installed compose changed since it
 func (s *Store) UpgradeCompose(ctx context.Context, id, fromHash string, up ComposeUpgrade, now time.Time) error {
 	res, err := s.db.ExecContext(ctx, `
         UPDATE apps SET previous_compose_yaml = compose_yaml,
+                        previous_compose_catalog_version = compose_catalog_version,
+                        previous_published_port = published_port, previous_web_tls = web_tls,
+                        previous_deploy_budget_s = deploy_budget_s,
                         compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = ?,
                         published_port = ?, web_tls = ?, deploy_budget_s = ?, updated_at = ?
         WHERE id = ? AND compose_sha256 = ?`,
@@ -217,6 +222,88 @@ func (s *Store) UpgradeCompose(ctx context.Context, id, fromHash string, up Comp
 		return err
 	}
 	return ErrComposeChanged
+}
+
+// ErrNoPreviousCompose is RevertCompose finding nothing to re-apply: the app's
+// compose has never been replaced. The HTTP layer answers it with a 409, so the
+// text is written for the owner.
+var ErrNoPreviousCompose = errors.New("this app has no previous compose to re-apply: its compose has never been replaced")
+
+// RevertCompose re-applies an app's previous compose to its row: it swaps the
+// installed record and the previous one — compose, catalog version, published
+// port, web TLS and deploy budget — in one statement, so the compose being
+// left becomes the previous one and re-applying again goes back
+// (geekdojo/geekdojo-brain#411). SQLite evaluates every right-hand side
+// against the row as it was, which is what makes the swap a single write.
+//
+// It is conditional twice, in the style of UpgradeCompose. fromHash is the
+// compose_sha256 the caller read, and previousYAML is the previous compose the
+// caller read — and pulled. A write that matched only the first could install
+// a previous compose some other job put there after the pull, one whose images
+// were never fetched. A mismatch is ErrComposeChanged; a row whose previous
+// compose is empty is ErrNoPreviousCompose; an unknown id is sql.ErrNoRows.
+//
+// Status is not written: the push that follows records what the agent reports.
+func (s *Store) RevertCompose(ctx context.Context, id, fromHash, previousYAML string, now time.Time) error {
+	if previousYAML == "" {
+		return ErrNoPreviousCompose
+	}
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE apps SET compose_yaml = previous_compose_yaml, previous_compose_yaml = compose_yaml,
+                        compose_sha256 = ?,
+                        compose_catalog_version = previous_compose_catalog_version,
+                        previous_compose_catalog_version = compose_catalog_version,
+                        published_port = previous_published_port, previous_published_port = published_port,
+                        web_tls = previous_web_tls, previous_web_tls = web_tls,
+                        deploy_budget_s = previous_deploy_budget_s, previous_deploy_budget_s = deploy_budget_s,
+                        updated_at = ?
+        WHERE id = ? AND compose_sha256 = ? AND previous_compose_yaml = ?`,
+		ComposeHash(previousYAML), ms(now), id, fromHash, previousYAML)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var previous string
+	switch err := s.db.QueryRowContext(ctx, `SELECT previous_compose_yaml FROM apps WHERE id = ?`, id).Scan(&previous); {
+	case errors.Is(err, sql.ErrNoRows):
+		return sql.ErrNoRows
+	case err != nil:
+		return err
+	case previous == "":
+		return ErrNoPreviousCompose
+	}
+	return ErrComposeChanged
+}
+
+// RestoreStatus puts back the status a step displaced when it marked the app
+// deploying, and records why (#411).
+//
+// A pull that fails, or a compose write refused after one, has changed nothing
+// on the node: the app is still doing whatever it was doing before the step
+// said "deploying". Leaving it "deploying" strands a running app in a
+// transitional badge until the reconcile window lapses, and recording "failed"
+// says the app broke when it did not. So the status goes back, and detail
+// carries the reason the change was not applied.
+//
+// Only if nothing has recorded a status since: the write is conditional on the
+// row still holding deploying at exactly markedAt, the last_status_at the step
+// wrote. Anything newer — a stop, a deploy, a sweep — is later news than the
+// status being restored, and wins. restored reports whether the write landed.
+//
+// last_deployed and last_stopped are deliberately untouched, unlike
+// RecordStatus: nothing was deployed or stopped.
+func (s *Store) RestoreStatus(ctx context.Context, id string, markedAt time.Time, status proto.AppStatus, detail string, now time.Time) (restored bool, err error) {
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE apps SET last_status = ?, last_detail = ?, last_status_at = ?, updated_at = ?
+        WHERE id = ? AND last_status = ? AND last_status_at = ?`,
+		string(status), detail, ms(now), ms(now), id, string(proto.AppStatusDeploying), ms(markedAt))
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // RecordStatus persists the agent-reported status for an app. status is the
@@ -313,7 +400,8 @@ func (s *Store) Get(ctx context.Context, id string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
-               compose_sha256, compose_catalog_version, previous_compose_yaml
+               compose_sha256, compose_catalog_version, previous_compose_yaml,
+               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s
         FROM apps WHERE id = ?`, id)
 	return scanApp(row.Scan)
 }
@@ -322,7 +410,8 @@ func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
-               compose_sha256, compose_catalog_version, previous_compose_yaml
+               compose_sha256, compose_catalog_version, previous_compose_yaml,
+               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s
         FROM apps WHERE name = ?`, name)
 	return scanApp(row.Scan)
 }
@@ -331,7 +420,8 @@ func (s *Store) List(ctx context.Context) ([]*App, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
-               compose_sha256, compose_catalog_version, previous_compose_yaml
+               compose_sha256, compose_catalog_version, previous_compose_yaml,
+               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s
         FROM apps ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
@@ -363,7 +453,8 @@ func scanApp(scan func(...any) error) (*App, error) {
 	if err := scan(&a.ID, &a.Name, &a.ComposeYAML, &a.TargetNode, &a.PublishedPort,
 		&a.SourceTile, &a.DeployBudgetSeconds, &a.ExposeLAN, &a.WebTLS, &status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
 		&createdAt, &updatedAt, &ackAt, &ackBy,
-		&a.ComposeSHA256, &a.ComposeCatalogVersion, &a.PreviousComposeYAML); err != nil {
+		&a.ComposeSHA256, &a.ComposeCatalogVersion, &a.PreviousComposeYAML,
+		&a.PreviousComposeCatalogVersion, &a.PreviousPublishedPort, &a.PreviousWebTLS, &a.PreviousDeployBudgetSeconds); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}

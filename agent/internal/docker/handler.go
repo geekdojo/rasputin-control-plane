@@ -11,14 +11,14 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// RegisterHandlers wires the agent's docker.deploy / docker.stop /
-// docker.status subscriptions to the supplied Backend. Returns the
-// subscriptions so the caller can unsubscribe at shutdown.
+// RegisterHandlers wires the agent's docker.deploy / docker.pull / docker.stop /
+// docker.status subscriptions to the supplied Backend. Returns the subscriptions
+// so the caller can unsubscribe at shutdown.
 //
 // Only register on compute (or controlplane) role agents. Firewall and
 // storage nodes don't host user apps.
 func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscription, error) {
-	subs := make([]*nats.Subscription, 0, 3)
+	subs := make([]*nats.Subscription, 0, 4)
 
 	deploySubj := proto.AppDeploySubject(nodeID)
 	sub, err := nc.Subscribe(deploySubj, func(m *nats.Msg) {
@@ -29,6 +29,16 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscrip
 	}
 	subs = append(subs, sub)
 	log.Printf("rasputin-agent: subscribed to %s (backend=%s)", deploySubj, b.Name())
+
+	pullSubj := proto.AppPullSubject(nodeID)
+	sub, err = nc.Subscribe(pullSubj, func(m *nats.Msg) {
+		handlePull(b, m)
+	})
+	if err != nil {
+		return subs, err
+	}
+	subs = append(subs, sub)
+	log.Printf("rasputin-agent: subscribed to %s", pullSubj)
 
 	stopSubj := proto.AppStopSubject(nodeID)
 	sub, err = nc.Subscribe(stopSubj, func(m *nats.Msg) {
@@ -135,6 +145,31 @@ func handleDeploy(b Backend, m *nats.Msg) {
 		return
 	}
 	bus.Respond(m, proto.AppDeployAck{OK: status == proto.AppStatusRunning, Status: status, Detail: detail})
+}
+
+func handlePull(b Backend, m *nats.Msg) {
+	var cmd proto.AppPullCmd
+	if err := json.Unmarshal(m.Data, &cmd); err != nil {
+		bus.Respond(m, proto.AppPullAck{OK: false, Detail: "bad cmd"})
+		log.Printf("rasputin-agent: docker.pull: bad cmd: %v", err)
+		return
+	}
+	// The same budget the deploy of this compose gets, and for the same
+	// reason: the pull IS nearly all of a deploy's time. The api waits
+	// AppDeployRPCFor, the slack longer, so this agent answers with the
+	// registry's error rather than the api timing out on top of it.
+	ctx, cancel := context.WithTimeout(context.Background(), proto.AppDeployWorkFor(cmd.WorkBudgetSeconds))
+	defer cancel()
+	detail, err := b.Pull(ctx, cmd.AppID, cmd.ComposeYAML)
+	if err != nil {
+		if detail == "" {
+			detail = err.Error()
+		}
+		bus.Respond(m, proto.AppPullAck{OK: false, Detail: detail})
+		log.Printf("rasputin-agent: docker.pull %s: %v", cmd.AppID, err)
+		return
+	}
+	bus.Respond(m, proto.AppPullAck{OK: true})
 }
 
 func handleStop(b Backend, m *nats.Msg) {
