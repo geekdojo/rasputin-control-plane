@@ -11,12 +11,19 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// delAppID is the app every test in this file seeds. Delete specs are refused
+// unless their appId is shaped like an app id, so it is a real ULID.
+const delAppID = "01J8Z3K5QW6X7Y8Z9A0B1C2D3E"
+
+// missingAppID is a well-formed id that no test seeds.
+const missingAppID = "01J8Z3K5QW6X7Y8Z9A0B1C2D3F"
+
 // Online node: deleteStop RPCs the agent's docker.stop and succeeds; deleteRemove
 // then drops the row and emits the deleted event.
 func TestDelete_OnlineStopsThenRemoves(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "uptime-kuma")
+	store, inv := seedOnlineApp(t, "n", delAppID, "uptime-kuma")
 
 	sub, err := nc.Subscribe(proto.AppStopSubject("n"), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.AppStopAck{OK: true, Status: proto.AppStatusStopped})
@@ -27,22 +34,22 @@ func TestDelete_OnlineStopsThenRemoves(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	deletedSub, err := nc.SubscribeSync(proto.AppChangeSubject("a", proto.AppDeleted))
+	deletedSub, err := nc.SubscribeSync(proto.AppChangeSubject(delAppID, proto.AppDeleted))
 	if err != nil {
 		t.Fatalf("change sub: %v", err)
 	}
 	defer func() { _ = deletedSub.Unsubscribe() }()
 
 	// Step 1: stop.
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deleteStop: %v", err)
 	}
 	// Step 2: remove.
-	if _, err := deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deleteRemove: %v", err)
 	}
 
-	if got, _ := store.Get(ctx, "a"); got != nil {
+	if got, _ := store.Get(ctx, delAppID); got != nil {
 		t.Errorf("app row should be gone, got %+v", got)
 	}
 	if _, err := deletedSub.NextMsg(time.Second); err != nil {
@@ -55,7 +62,7 @@ func TestDelete_OnlineStopsThenRemoves(t *testing.T) {
 func TestDelete_OnlineStopFailsKeepsRow(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "uptime-kuma")
+	store, inv := seedOnlineApp(t, "n", delAppID, "uptime-kuma")
 
 	sub, _ := nc.Subscribe(proto.AppStopSubject("n"), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.AppStopAck{OK: false, Detail: "compose down failed"})
@@ -63,10 +70,10 @@ func TestDelete_OnlineStopFailsKeepsRow(t *testing.T) {
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err == nil {
+	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err == nil {
 		t.Fatal("expected deleteStop to fail when the agent reports stop failed")
 	}
-	if got, _ := store.Get(ctx, "a"); got == nil {
+	if got, _ := store.Get(ctx, delAppID); got == nil {
 		t.Error("app row must remain after a failed stop on a reachable node")
 	}
 }
@@ -84,24 +91,24 @@ func TestDelete_OfflineNodeSkipsStopButRemoves(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inv insert: %v", err)
 	}
-	a := makeApp("a", "uptime-kuma")
+	a := makeApp(delAppID, "uptime-kuma")
 	a.TargetNode = "n"
 	if err := store.Create(ctx, a); err != nil {
 		t.Fatalf("Create app: %v", err)
 	}
 
 	// No agent responder — the node is offline; deleteStop must not block on it.
-	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc))
+	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
 	if err != nil {
 		t.Fatalf("deleteStop on offline node should not fail: %v", err)
 	}
 	if len(out) == 0 {
 		t.Error("expected a step result")
 	}
-	if _, err := deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deleteRemove: %v", err)
 	}
-	if got, _ := store.Get(ctx, "a"); got != nil {
+	if got, _ := store.Get(ctx, delAppID); got != nil {
 		t.Errorf("app row should be gone, got %+v", got)
 	}
 }
@@ -112,10 +119,10 @@ func TestDelete_MissingAppIsIdempotent(t *testing.T) {
 	nc := startNATS(t)
 	store := newStore(t)
 	inv := newInventory(t)
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"ghost"}`, nc)); err != nil {
+	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+missingAppID+`"}`, nc)); err != nil {
 		t.Errorf("deleteStop on a missing app should succeed, got %v", err)
 	}
-	if _, err := deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"ghost"}`, nc)); err != nil {
+	if _, err := deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"`+missingAppID+`"}`, nc)); err != nil {
 		t.Errorf("deleteRemove on a missing app should succeed, got %v", err)
 	}
 }
@@ -143,13 +150,13 @@ func captureStopCmd(t *testing.T, nc *nats.Conn, nodeID string) *proto.AppStopCm
 // — stops with plain `compose down`: the agent sees false.
 func TestDelete_DefaultKeepsVolumes(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "immich")
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	got := captureStopCmd(t, nc, "n")
-	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc))
+	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
 	if err != nil {
 		t.Fatalf("deleteStop: %v", err)
 	}
-	if got.AppID != "a" || got.DeleteVolumes {
+	if got.AppID != delAppID || got.DeleteVolumes {
 		t.Fatalf("agent received %+v; deleteVolumes must default to false", got)
 	}
 	if !strings.Contains(string(out), `"volumes":"kept"`) {
@@ -160,9 +167,9 @@ func TestDelete_DefaultKeepsVolumes(t *testing.T) {
 // deleteVolumes:true reaches the agent as DeleteVolumes on the stop command.
 func TestDelete_DeleteVolumesReachesAgent(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "immich")
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	got := captureStopCmd(t, nc, "n")
-	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a","deleteVolumes":true}`, nc))
+	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`","deleteVolumes":true}`, nc))
 	if err != nil {
 		t.Fatalf("deleteStop: %v", err)
 	}
@@ -179,20 +186,20 @@ func TestDelete_DeleteVolumesReachesAgent(t *testing.T) {
 // turn a stop into a `down -v`.
 func TestDelete_FlagNeverLeaksIntoOtherKinds(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "immich")
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	got := captureStopCmd(t, nc, "n")
 
-	if _, err := stopPush(store, inv, nc)(newStepCtxNATS(`{"appId":"a","deleteVolumes":true}`, nc)); err == nil {
+	if _, err := stopPush(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`","deleteVolumes":true}`, nc)); err == nil {
 		t.Fatal("app.stop must refuse a spec carrying deleteVolumes")
 	}
 	if got.DeleteVolumes {
 		t.Fatal("app.stop sent deleteVolumes to the agent")
 	}
-	if _, err := parseSpec(json.RawMessage(`{"appId":"a","deleteVolumes":true}`)); err == nil {
+	if _, err := parseSpec(json.RawMessage(`{"appId":"` + delAppID + `","deleteVolumes":true}`)); err == nil {
 		t.Fatal("parseSpec (deploy/stop) must refuse deleteVolumes")
 	}
 	// A plain stop never sends the flag at all.
-	if _, err := stopPush(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := stopPush(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
 		t.Fatalf("stopPush: %v", err)
 	}
 	if got.DeleteVolumes {
@@ -203,10 +210,10 @@ func TestDelete_FlagNeverLeaksIntoOtherKinds(t *testing.T) {
 // A misspelling of the one field that destroys data is a refusal, not a
 // silent false.
 func TestDelete_SpecIsStrict(t *testing.T) {
-	if _, err := parseDeleteSpec(json.RawMessage(`{"appId":"a","deleteVolume":true}`)); err == nil {
+	if _, err := parseDeleteSpec(json.RawMessage(`{"appId":"` + delAppID + `","deleteVolume":true}`)); err == nil {
 		t.Fatal("parseDeleteSpec must refuse an unknown field")
 	}
-	spec, err := parseDeleteSpec(json.RawMessage(`{"appId":"a","deleteVolumes":true}`))
+	spec, err := parseDeleteSpec(json.RawMessage(`{"appId":"` + delAppID + `","deleteVolumes":true}`))
 	if err != nil || !spec.DeleteVolumes {
 		t.Fatalf("parseDeleteSpec: %v %+v", err, spec)
 	}
@@ -226,23 +233,23 @@ func TestDelete_DeleteVolumesOnOfflineNodeRefuses(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inv insert: %v", err)
 	}
-	a := makeApp("a", "immich")
+	a := makeApp(delAppID, "immich")
 	a.TargetNode = "n"
 	if err := store.Create(ctx, a); err != nil {
 		t.Fatalf("Create app: %v", err)
 	}
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a","deleteVolumes":true}`, nc))
+	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`","deleteVolumes":true}`, nc))
 	if err == nil {
 		t.Fatal("expected a refusal on an offline node")
 	}
 	if !strings.Contains(err.Error(), `"n"`) || !strings.Contains(err.Error(), "unreachable") {
 		t.Errorf("refusal must name the node: %v", err)
 	}
-	if got, _ := store.Get(ctx, "a"); got == nil {
+	if got, _ := store.Get(ctx, delAppID); got == nil {
 		t.Error("the app row must remain when the delete was refused")
 	}
 	// And the keep path on the same offline node still proceeds, as before.
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
 		t.Errorf("keep-volumes delete on an offline node must still proceed: %v", err)
 	}
 }
@@ -255,7 +262,7 @@ func TestDelete_DeleteVolumesOnOfflineNodeRefuses(t *testing.T) {
 func TestDelete_DeleteVolumesWithVolumesLeftBehindKeepsRow(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "immich")
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	const detail = "containers removed, but 1 of the app's volume(s) were NOT deleted — deadbeef: still referenced by 1 container(s): c1"
 	sub, _ := nc.Subscribe(proto.AppStopSubject("n"), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.AppStopAck{OK: false, Status: proto.AppStatusStopped, Detail: detail})
@@ -263,11 +270,11 @@ func TestDelete_DeleteVolumesWithVolumesLeftBehindKeepsRow(t *testing.T) {
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a","deleteVolumes":true}`, nc))
+	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`","deleteVolumes":true}`, nc))
 	if err == nil || !strings.Contains(err.Error(), "NOT deleted") || !strings.Contains(err.Error(), "deadbeef") {
 		t.Fatalf("deleteStop = %v, want the agent's naming of the volume left behind", err)
 	}
-	got, _ := store.Get(ctx, "a")
+	got, _ := store.Get(ctx, delAppID)
 	if got == nil {
 		t.Fatal("app row must remain when a volume the operator asked to delete is still on the node")
 	}

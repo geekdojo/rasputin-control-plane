@@ -586,7 +586,7 @@ func main() {
 			return buildAppLeafCmd(app, certPEM, keyPEM), renewed, commit, nil
 		}
 		removeAppLeaf = func(appID string) error {
-			return os.RemoveAll(filepath.Join(appLeafDir, appID))
+			return removeAppLeafDir(appLeafDir, appID)
 		}
 	}
 	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
@@ -2219,4 +2219,20 @@ func restoreExit() {
 		log.Printf("rasputin-api: exiting %d so the unit restarts this api onto the restored identity", restoreExitCode)
 		os.Exit(restoreExitCode)
 	}
+}
+
+// removeAppLeafDir removes one app's leaf directory under root. It refuses an
+// id that is not shaped like an app id, and any path that does not clean to a
+// direct child of root, so a caller can only ever remove a single app's
+// directory, whatever string it was handed.
+func removeAppLeafDir(root, appID string) error {
+	if !proto.ValidAppID(appID) {
+		return fmt.Errorf("remove app leaf: %q is not an app id", appID)
+	}
+	root = filepath.Clean(root)
+	dir := filepath.Join(root, appID)
+	if filepath.Dir(dir) != root || filepath.Base(dir) != appID {
+		return fmt.Errorf("remove app leaf: %q is not a direct child of %q", dir, root)
+	}
+	return os.RemoveAll(dir)
 }

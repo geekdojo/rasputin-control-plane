@@ -176,10 +176,16 @@ func deleteLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf Le
 		app, err := loadAppByID(sc, store, inv, spec.AppID)
 		if err != nil {
 			// Node gone/de-registered: nothing to tear down on it. Let delete
-			// proceed, but still clean the CP-side leaf dir if we can name the app.
+			// proceed, but still clean the CP-side leaf dir of an app that has
+			// a row. The dir is named by the row's id, never the spec's: an
+			// app with no row owns no leaf dir, so there is nothing to clean.
 			sc.Log("warn", "skip leaf teardown: "+err.Error())
 			if removeLeaf != nil {
-				_ = removeLeaf(spec.AppID)
+				if row, gerr := store.Get(sc.Ctx, spec.AppID); gerr == nil && row != nil {
+					if err := removeLeaf(row.ID); err != nil {
+						sc.Log("warn", "remove CP leaf dir failed: "+err.Error())
+					}
+				}
 			}
 			return nil, nil
 		}
@@ -663,6 +669,10 @@ func parseSpec(raw json.RawMessage) (*DeploySpec, error) {
 // HTTP layer is: the spec is persisted and rendered, and the one field that
 // destroys data must be the one this saga declared, spelled the way it
 // declared it — a misspelled `deleteVolume` is refused, not silently false.
+//
+// The id must be shaped like an app id. A spec arrives from the jobs endpoint
+// as submitted, and this saga keys removals by it, so it is checked here,
+// before any step runs, rather than trusted to name a row.
 func parseDeleteSpec(raw json.RawMessage) (*DeleteSpec, error) {
 	var spec DeleteSpec
 	if err := decodeStrict(raw, &spec); err != nil {
@@ -670,6 +680,9 @@ func parseDeleteSpec(raw json.RawMessage) (*DeleteSpec, error) {
 	}
 	if spec.AppID == "" {
 		return nil, errors.New("appId is required")
+	}
+	if !proto.ValidAppID(spec.AppID) {
+		return nil, errors.New("appId must be an app id (a 26-character ULID)")
 	}
 	return &spec, nil
 }
