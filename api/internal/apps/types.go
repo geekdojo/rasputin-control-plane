@@ -54,6 +54,20 @@ type App struct {
 	// needed no acknowledgement. It is a record, not a state: the standing nag
 	// is derived from the backup ledger, not from this field.
 	BackupAck *BackupAck `json:"backupAck,omitempty"`
+	// ComposeSHA256 is the hex sha256 of ComposeYAML — the installed compose,
+	// as the thing an upgrade check compares against the current tile's
+	// (geekdojo/geekdojo-brain#409). Derived by the store on every write that
+	// sets the compose, never taken from a caller, so the two cannot disagree.
+	ComposeSHA256 string `json:"composeSha256,omitempty"`
+	// ComposeCatalogVersion is the catalog version ComposeYAML was taken from.
+	// 0 means unknown: a custom-compose app, or a catalog app installed before
+	// the column existed, where nothing recorded it.
+	ComposeCatalogVersion int `json:"composeCatalogVersion,omitempty"`
+	// PreviousComposeYAML is the compose the most recent upgrade replaced; ""
+	// if the app has never been upgraded. Kept so a failed upgrade has
+	// something to go back to without asking the catalog, which may no longer
+	// carry that version.
+	PreviousComposeYAML string `json:"previousComposeYaml,omitempty"`
 }
 
 // BackupAck records that an operator installed an app knowing its critical

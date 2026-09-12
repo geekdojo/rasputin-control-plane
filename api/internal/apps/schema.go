@@ -19,7 +19,10 @@ CREATE TABLE IF NOT EXISTS apps (
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     backup_ack_at   INTEGER,                  -- §4.4 install-time no-backup acknowledgement (#299); NULL = none was needed
-    backup_ack_by   TEXT NOT NULL DEFAULT ''  -- the acknowledging user's name (never a token)
+    backup_ack_by   TEXT NOT NULL DEFAULT '', -- the acknowledging user's name (never a token)
+    compose_sha256  TEXT NOT NULL DEFAULT '',  -- hex sha256 of compose_yaml: what is installed, compared against the tile (#409)
+    compose_catalog_version INTEGER NOT NULL DEFAULT 0, -- catalog version compose_yaml came from (0 = unknown or custom)
+    previous_compose_yaml   TEXT NOT NULL DEFAULT ''   -- the compose an upgrade replaced ('' = never upgraded)
 );
 CREATE INDEX IF NOT EXISTS idx_apps_target_node ON apps(target_node);
 CREATE INDEX IF NOT EXISTS idx_apps_status      ON apps(last_status);
@@ -64,4 +67,16 @@ var migrations = []string{
 	// an old install with no target is nagged exactly like a new one.
 	`ALTER TABLE apps ADD COLUMN backup_ack_at INTEGER`,
 	`ALTER TABLE apps ADD COLUMN backup_ack_by TEXT NOT NULL DEFAULT ''`,
+	// compose_sha256 / compose_catalog_version / previous_compose_yaml: the
+	// in-place upgrade's record (geekdojo/geekdojo-brain#409). The hash is
+	// what "is an upgrade available?" compares against the current tile, so
+	// it is backfilled from compose_yaml straight after these run (see
+	// backfillComposeHash) — the installed compose is by definition what is
+	// installed, so every existing app starts in a known state rather than
+	// reading as upgradable because its hash is blank. The catalog version is
+	// NOT backfilled: nothing recorded which catalog an existing install came
+	// from, and 0 says "unknown" instead of inventing one.
+	`ALTER TABLE apps ADD COLUMN compose_sha256 TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE apps ADD COLUMN compose_catalog_version INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE apps ADD COLUMN previous_compose_yaml TEXT NOT NULL DEFAULT ''`,
 }

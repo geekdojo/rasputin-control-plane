@@ -36,10 +36,19 @@ func (s *Server) effectiveTiles() []catalog.Tile {
 // the store so this handler and the backup fan-out cannot resolve a tile id
 // two different ways.
 func (s *Server) effectiveTile(id string) (catalog.Tile, bool) {
+	t, _, ok := s.effectiveTileVersioned(id)
+	return t, ok
+}
+
+// effectiveTileVersioned is effectiveTile plus the version of the catalog that
+// supplied the tile, read together (#409). 0 for the embedded catalog when no
+// store is wired, which is also what "not recorded" means on an app row.
+func (s *Server) effectiveTileVersioned(id string) (catalog.Tile, int, bool) {
 	if s.catalogStore == nil {
-		return s.catalog.Get(id)
+		t, ok := s.catalog.Get(id)
+		return t, 0, ok
 	}
-	return s.catalogStore.Get(id)
+	return s.catalogStore.GetVersioned(id)
 }
 
 // GET /api/catalog — list every curated tile in display order.
@@ -70,7 +79,7 @@ func (s *Server) handleGetCatalogTile(w http.ResponseWriter, r *http.Request) {
 // tile); it does NOT deploy — the caller POSTs /api/apps/{id}/deploy after,
 // same as a hand-authored app. Keeps the create/deploy split consistent.
 func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request) {
-	tile, ok := s.effectiveTile(r.PathValue("id"))
+	tile, catalogVersion, ok := s.effectiveTileVersioned(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "catalog tile not found")
 		return
@@ -169,11 +178,14 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		// update can change the tile under a running install, and the budget a
 		// deploy is judged against should be the one the owner installed.
 		DeployBudgetSeconds: tile.DeployBudgetSeconds,
-		ExposeLAN:           req.ExposeLAN,
-		LastStatus:          proto.AppStatusStopped,
-		CreatedAt:           now,
-		UpdatedAt:           now,
-		BackupAck:           backupAck,
+		// Which catalog the compose came from, so a later upgrade check can
+		// tell a newer tile from a catalog that went backwards (#409).
+		ComposeCatalogVersion: catalogVersion,
+		ExposeLAN:             req.ExposeLAN,
+		LastStatus:            proto.AppStatusStopped,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+		BackupAck:             backupAck,
 	}
 	if err := s.apps.Create(r.Context(), app); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

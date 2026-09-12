@@ -16,8 +16,8 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// DeploySpec is the spec body of an app.deploy job and of app.stop — both are
-// keyed only by appId. Decoded strictly: a field this saga does not know is a
+// DeploySpec is the spec body of an app.deploy job, of app.stop and of
+// app.upgrade — all three are keyed only by appId. Decoded strictly: a field this saga does not know is a
 // refusal, which is what keeps app.delete's deleteVolumes from ever meaning
 // anything to a stop or a deploy.
 type DeploySpec struct {
