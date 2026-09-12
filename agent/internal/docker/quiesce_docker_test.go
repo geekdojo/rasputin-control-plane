@@ -78,7 +78,7 @@ volumes:
 
 func TestQuiesceLiveVolumeStopStart(t *testing.T) {
 	requireDocker(t)
-	c, appID := newLiveBackend(t, "qvol1")
+	c, appID := newLiveBackend(t, "QV011")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if status, detail, err := c.Deploy(ctx, appID, appID, volumeCompose); err != nil || status != "running" {
@@ -126,7 +126,7 @@ func TestQuiesceLiveSQLiteSnapshot(t *testing.T) {
 	if image == "" {
 		image = "python:3.13-alpine"
 	}
-	c, appID := newLiveBackend(t, "qsql1")
+	c, appID := newLiveBackend(t, "QSQ11")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if status, detail, err := c.Deploy(ctx, appID, appID, sqliteCompose(image)); err != nil || status != "running" {

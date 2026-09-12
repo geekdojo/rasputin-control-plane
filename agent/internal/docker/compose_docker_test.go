@@ -29,8 +29,10 @@
 // Verified against compose v5.0.1 / engine 29.1.3 (2026-08-24), the same
 // compose the appliance ships.
 //
-// Side effects: creates and removes compose projects named rasp_<appid> using
-// the throwaway app IDs below. Cleanup runs via t.Cleanup even on failure.
+// Side effects: creates and removes compose projects named rasp_<appid>. Every
+// run mints its own app ids (liveAppID), so concurrent runs — two sessions on
+// one laptop — never share a project, and cleanup removes, by exact name, only
+// what the run itself created. Cleanup runs via t.Cleanup even on failure.
 
 package docker
 
@@ -39,6 +41,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,30 +92,174 @@ func requireDocker(t *testing.T) {
 	}
 }
 
-// newLiveBackend builds a ComposeBackend over a throwaway state dir and
-// registers the `compose down` teardown, so a failing assertion can never
-// leave containers behind on a developer's machine.
-func newLiveBackend(t *testing.T, appID string) (*ComposeBackend, string) {
+// --- Ownership --------------------------------------------------------------
+//
+// Docker on a developer machine is shared, and more than one session may run
+// these tests at once. So no test uses a fixed app id: each mints one no other
+// run can have, which makes its compose project, rasp_<id>, its own. What that
+// project holds is recorded as exact names — full container and network ids,
+// volume names — and cleanup removes those names and nothing else, never by
+// pattern. A volume is owned only if it carries the run's project label or one
+// of the run's own containers mounted it; nothing is claimed by its shape.
+
+// liveAppID is a fresh app id: "01", a tag that says which test made it, and
+// random Crockford base32 for the rest. The tag must itself be Crockford (no
+// I, L, O or U — spell them 1, 1, 0 and V) and short enough to leave at least
+// ten random characters.
+func liveAppID(t *testing.T, tag string) string {
 	t.Helper()
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	id := []byte("01" + tag)
+	if len(id) > appIDLen-10 {
+		t.Fatalf("app id tag %q is too long", tag)
+	}
+	b := make([]byte, appIDLen-len(id))
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range b {
+		id = append(id, alphabet[int(x)%len(alphabet)])
+	}
+	if !proto.ValidAppID(string(id)) {
+		t.Fatalf("minted id %q is not an app id", id)
+	}
+	return string(id)
+}
+
+// appIDLen is the length of an app id, a ULID.
+const appIDLen = 26
+
+// liveOwned is the exact set of docker objects one test created.
+type liveOwned struct {
+	t          *testing.T
+	project    string
+	containers map[string]bool
+	networks   map[string]bool
+	volumes    map[string]bool
+	// anonymousOK is false for a test that creates no anonymous volume, so
+	// one appearing fails it.
+	anonymousOK bool
+}
+
+func newLiveOwned(t *testing.T, appID string) *liveOwned {
+	return &liveOwned{t: t, project: projectName(appID), containers: map[string]bool{}, networks: map[string]bool{}, volumes: map[string]bool{}}
+}
+
+// record adds what the test's own project holds right now, and fails the test
+// if docker cannot be asked.
+func (o *liveOwned) record() {
+	o.t.Helper()
+	if err := o.snapshot(); err != nil {
+		o.t.Fatal(err)
+	}
+}
+
+// snapshot adds what the test's own project holds right now. The project name
+// is unique to this run, so a label filter on it matches only what this run
+// created; the exact names are kept and cleanup never filters again. Anonymous
+// volumes carry no project label, so they are taken from the mounts of the
+// run's own containers.
+func (o *liveOwned) snapshot() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	list := func(args ...string) ([]string, error) {
+		out, err := exec.CommandContext(ctx, "docker", args...).Output()
+		if err != nil {
+			return nil, fmt.Errorf("docker %s: %w", strings.Join(args, " "), err)
+		}
+		return strings.Fields(string(out)), nil
+	}
+	label := "label=com.docker.compose.project=" + o.project
+	ids, err := list("ps", "-aq", "--no-trunc", "--filter", label)
+	if err != nil {
+		return err
+	}
+	vols, err := list("volume", "ls", "-q", "--filter", label)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		o.containers[id] = true
+		mounted, err := list("inspect", "--format", `{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`, "--", id)
+		if err != nil {
+			return err
+		}
+		vols = append(vols, mounted...)
+	}
+	nets, err := list("network", "ls", "-q", "--no-trunc", "--filter", label)
+	if err != nil {
+		return err
+	}
+	for _, n := range nets {
+		o.networks[n] = true
+	}
+	for _, v := range vols {
+		if proto.IsAnonymousVolumeName(v) && !o.anonymousOK {
+			return fmt.Errorf("an anonymous volume %s appeared; this test creates none", v)
+		}
+		o.volumes[v] = true
+	}
+	return nil
+}
+
+func (o *liveOwned) cleanup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	for id := range o.containers {
+		_ = exec.CommandContext(ctx, "docker", "rm", "-f", "--", id).Run()
+	}
+	for n := range o.networks {
+		_ = exec.CommandContext(ctx, "docker", "network", "rm", "--", n).Run()
+	}
+	for v := range o.volumes {
+		_ = exec.CommandContext(ctx, "docker", "volume", "rm", "--", v).Run()
+	}
+	o.t.Logf("cleanup targeted exactly these, by name (one the test already removed is simply gone): containers %v, networks %v, volumes %v", keys(o.containers), keys(o.networks), keys(o.volumes))
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// newLiveBackend builds a ComposeBackend over a throwaway state dir for an app
+// id minted from tag, and registers the teardown, so a failing assertion can
+// never leave containers, networks or volumes behind on a developer's machine.
+// The teardown records what the project holds, lets `compose down` run, then
+// removes whatever is left — the volumes `down` keeps — by exact name.
+func newLiveBackend(t *testing.T, tag string) (*ComposeBackend, string) {
+	t.Helper()
+	appID := liveAppID(t, tag)
 	c, err := NewComposeBackend(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewComposeBackend: %v", err)
 	}
+	owned := newLiveOwned(t, appID)
+	owned.anonymousOK = true
+	t.Logf("app id %s, compose project %s", appID, owned.project)
 	t.Cleanup(func() {
+		if err := owned.snapshot(); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if _, _, err := c.Stop(ctx, appID, false); err != nil {
 			t.Logf("cleanup: stop %s: %v", appID, err)
 		}
+		owned.cleanup()
 	})
 	return c, appID
 }
 
 // deployLive brings the stack up, guarantees teardown, and returns Deploy's
 // verdict.
-func deployLive(t *testing.T, appID, yaml string) (proto.AppStatus, string, []proto.AppServiceStatus) {
+func deployLive(t *testing.T, tag, yaml string) (proto.AppStatus, string, []proto.AppServiceStatus) {
 	t.Helper()
-	c, appID := newLiveBackend(t, appID)
+	c, appID := newLiveBackend(t, tag)
 
 	// Generous: the first run pulls busybox.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -130,7 +277,7 @@ func deployLive(t *testing.T, appID, yaml string) (proto.AppStatus, string, []pr
 
 func TestComposeBackendLiveOneShotDeploysClean(t *testing.T) {
 	requireDocker(t)
-	status, detail, services := deployLive(t, "01liveoneshot", oneShotCompose)
+	status, detail, services := deployLive(t, "0NESH0T", oneShotCompose)
 
 	if status != proto.AppStatusRunning {
 		t.Fatalf("status = %q, want %q (detail: %s; services: %+v)", status, proto.AppStatusRunning, detail, services)
@@ -191,7 +338,7 @@ func TestComposeBackendLiveOneShotDeploysClean(t *testing.T) {
 // verdict the wrong thing to pin a crash test to.
 func TestComposeBackendLiveCrashStillFails(t *testing.T) {
 	requireDocker(t)
-	c, appID := newLiveBackend(t, "01livecrasher")
+	c, appID := newLiveBackend(t, "CRASHER")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -294,7 +441,7 @@ func containerIdentity(t *testing.T, appID string) (id, startedAt string) {
 // own verb rather than a hand-typed `compose up`.
 func TestComposeBackendLiveBadDigestPullChangesNothing(t *testing.T) {
 	requireDocker(t)
-	c, appID := newLiveBackend(t, "01livebadpull")
+	c, appID := newLiveBackend(t, "BADPV11")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -370,7 +517,7 @@ networks:
 // upgrade as recovered. Re-applying the running compose clears the flag.
 func TestComposeBackendLiveFailedUpLeavesAnOutdatedContainer(t *testing.T) {
 	requireDocker(t)
-	c, appID := newLiveBackend(t, "01liveoutdated")
+	c, appID := newLiveBackend(t, "0VTDATED")
 	// `down` runs against whatever compose is live at cleanup, which no longer
 	// declares the networks the failed up created, so they are removed by name.
 	t.Cleanup(func() {
@@ -421,8 +568,8 @@ func TestComposeBackendLiveFailedUpLeavesAnOutdatedContainer(t *testing.T) {
 // agent's own verbs and asserts the delete-with-data leaves nothing, or that a
 // keep-data delete leaves everything and every kept volume is reclaimable.
 //
-// The app ids are real ULIDs, because the orphan listing trusts only a
-// ULID-named state directory as an anonymous volume's owner.
+// The app ids are real ULIDs (liveAppID), because the orphan listing trusts
+// only a ULID-named state directory as an anonymous volume's owner.
 
 const liveLoop = `["sh", "-c", "while true; do sleep 5; done"]`
 
@@ -463,22 +610,25 @@ type liveVolumeApp struct {
 	t     *testing.T
 	c     *ComposeBackend
 	appID string
+	owned *liveOwned
 	// seen is every volume the test has observed belonging to the app, so
-	// cleanup removes them even when the code under test did not.
+	// cleanup removes them even when the code under test did not. It is
+	// owned.volumes.
 	seen map[string]bool
 }
 
-func newLiveVolumeApp(t *testing.T, appID string) *liveVolumeApp {
+func newLiveVolumeApp(t *testing.T, tag string) *liveVolumeApp {
 	t.Helper()
 	requireDocker(t)
-	if !proto.ValidAppID(appID) {
-		t.Fatalf("test app id %q is not a ULID", appID)
-	}
+	appID := liveAppID(t, tag)
 	c, err := NewComposeBackend(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewComposeBackend: %v", err)
 	}
-	a := &liveVolumeApp{t: t, c: c, appID: appID, seen: map[string]bool{}}
+	owned := newLiveOwned(t, appID)
+	owned.anonymousOK = true
+	t.Logf("app id %s, compose project %s", appID, owned.project)
+	a := &liveVolumeApp{t: t, c: c, appID: appID, owned: owned, seen: owned.volumes}
 	t.Cleanup(a.cleanup)
 	return a
 }
@@ -494,19 +644,11 @@ func (a *liveVolumeApp) docker(args ...string) string {
 	return string(out)
 }
 
-// observe adds every volume the project's containers mount and every volume
-// labelled for the project to seen.
+// observe adds every container, network and volume the app's project holds
+// right now to what the test owns.
 func (a *liveVolumeApp) observe() {
 	a.t.Helper()
-	project := projectName(a.appID)
-	for _, n := range strings.Fields(a.docker("volume", "ls", "-q", "--filter", "label=com.docker.compose.project="+project)) {
-		a.seen[n] = true
-	}
-	for _, id := range strings.Fields(a.docker("ps", "-aq", "--filter", "label=com.docker.compose.project="+project)) {
-		for _, n := range strings.Fields(a.docker("inspect", "--format", `{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`, id)) {
-			a.seen[n] = true
-		}
-	}
+	a.owned.record()
 }
 
 func (a *liveVolumeApp) deploy(yaml string) {
@@ -560,18 +702,10 @@ func (a *liveVolumeApp) anonymousSeen() []string {
 }
 
 func (a *liveVolumeApp) cleanup() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	project := projectName(a.appID)
-	if ids, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+project).Output(); err == nil {
-		for _, id := range strings.Fields(string(ids)) {
-			_ = exec.CommandContext(ctx, "docker", "rm", "-f", id).Run()
-		}
+	if err := a.owned.snapshot(); err != nil {
+		a.t.Errorf("cleanup: %v", err)
 	}
-	_ = exec.CommandContext(ctx, "docker", "network", "rm", project+"_default").Run()
-	for n := range a.seen {
-		_ = exec.CommandContext(ctx, "docker", "volume", "rm", "--", n).Run()
-	}
+	a.owned.cleanup()
 }
 
 func (a *liveVolumeApp) assertAllGone(what string) {
@@ -586,7 +720,7 @@ func (a *liveVolumeApp) assertAllGone(what string) {
 
 // Case 1: a named volume.
 func TestComposeBackendLiveDeleteWithDataNamedVolume(t *testing.T) {
-	a := newLiveVolumeApp(t, "01K4Z413NAMED0000000000001")
+	a := newLiveVolumeApp(t, "NAMED")
 	a.deploy(v1Compose)
 	if !a.seen[proto.AppVolumeName(a.appID, "data")] {
 		t.Fatalf("fixture: no named data volume in %v", a.seen)
@@ -597,7 +731,7 @@ func TestComposeBackendLiveDeleteWithDataNamedVolume(t *testing.T) {
 
 // Case 2: a volume key renamed across an upgrade — `down -v` sees only data2.
 func TestComposeBackendLiveDeleteWithDataRenamedKey(t *testing.T) {
-	a := newLiveVolumeApp(t, "01K4Z413RENAMED00000000001")
+	a := newLiveVolumeApp(t, "RENAMED")
 	a.deploy(v1Compose)
 	a.deploy(v2Compose)
 	for _, key := range []string{"data", "data2"} {
@@ -615,7 +749,7 @@ func TestComposeBackendLiveDeleteWithDataRenamedKey(t *testing.T) {
 // Case 3: a service dropped across an upgrade — its volume survives `up
 // --remove-orphans` and `down -v` alike.
 func TestComposeBackendLiveDeleteWithDataDroppedService(t *testing.T) {
-	a := newLiveVolumeApp(t, "01K4Z413DR0PPED00000000001")
+	a := newLiveVolumeApp(t, "DR0PPED")
 	a.deploy(v1Compose)
 	a.deploy(v2Compose)
 	cache := proto.AppVolumeName(a.appID, "cache")
@@ -628,7 +762,7 @@ func TestComposeBackendLiveDeleteWithDataDroppedService(t *testing.T) {
 
 // Case 4: an anonymous volume, which carries no project label.
 func TestComposeBackendLiveDeleteWithDataAnonymousVolume(t *testing.T) {
-	a := newLiveVolumeApp(t, "01K4Z413AN0NYM000000000001")
+	a := newLiveVolumeApp(t, "AN0NYM")
 	a.deploy(v1Compose)
 	anon := a.anonymousSeen()
 	if len(anon) != 1 {
@@ -645,7 +779,7 @@ func TestComposeBackendLiveDeleteWithDataAnonymousVolume(t *testing.T) {
 // Case 5: stop, THEN delete with data. The stop's `down` removes the only
 // container that named the anonymous volume; the volume must still go.
 func TestComposeBackendLiveStopThenDeleteWithData(t *testing.T) {
-	a := newLiveVolumeApp(t, "01K4Z413ST0PDE1ETE00000001")
+	a := newLiveVolumeApp(t, "ST0PDE1ETE")
 	a.deploy(v1Compose)
 	a.deploy(v2Compose)
 	anon := a.anonymousSeen()
@@ -670,7 +804,7 @@ func TestComposeBackendLiveStopThenDeleteWithData(t *testing.T) {
 // volume is in the orphan listing with an owner, and reclaimable through the
 // reaper's gates once the app is no longer in the ledger.
 func TestComposeBackendLiveDeleteKeepingDataIsListedAndReclaimable(t *testing.T) {
-	a := newLiveVolumeApp(t, "01K4Z413KEEPDATA0000000001")
+	a := newLiveVolumeApp(t, "KEEPDATA")
 	a.deploy(v1Compose)
 	a.deploy(v2Compose)
 	a.observe()
@@ -742,12 +876,10 @@ func TestComposeBackendLiveDeleteKeepingDataIsListedAndReclaimable(t *testing.T)
 
 // --- geekdojo/geekdojo-brain#412: the dropped-volume gate, live -------------
 //
-// Ownership: Docker on a developer machine is shared. This test mints an app
-// id no other run can have, so its compose project, rasp_<id>, is its own; it
-// records the exact name of every container, network and volume that project
-// gets as it creates them, and its cleanup removes those names and nothing
-// else — never by pattern. No anonymous volume is created, and busybox:latest
-// is used from the local cache when present and never removed.
+// Ownership (see liveOwned): this test records the exact name of every
+// container, network and volume its project gets as it creates them. No
+// anonymous volume is created, and busybox:latest is used from the local cache
+// when present and never removed.
 
 // gateLiveV1 is the app as installed: one named volume.
 const gateLiveV1 = `services:
@@ -781,87 +913,6 @@ const gateLiveDropped = `services:
     command: ` + liveLoop + `
 `
 
-// liveGateID is a fresh app id: a fixed prefix that says what made it, and
-// random Crockford base32 for the rest, so two runs never share a project.
-func liveGateID(t *testing.T) string {
-	t.Helper()
-	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
-	}
-	id := []byte("01K4Z412GATE")
-	for _, x := range b[:26-len(id)] {
-		id = append(id, alphabet[int(x)%len(alphabet)])
-	}
-	if !proto.ValidAppID(string(id)) {
-		t.Fatalf("minted id %q is not an app id", id)
-	}
-	return string(id)
-}
-
-// liveOwned is the exact set of docker objects one test created.
-type liveOwned struct {
-	t          *testing.T
-	project    string
-	containers map[string]bool
-	networks   map[string]bool
-	volumes    map[string]bool
-}
-
-// record adds what the test's own project holds right now. The project name
-// is unique to this run, so a label filter on it matches only what this run
-// created; the exact names are kept and cleanup never filters again.
-func (o *liveOwned) record() {
-	o.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	list := func(args ...string) []string {
-		out, err := exec.CommandContext(ctx, "docker", args...).Output()
-		if err != nil {
-			o.t.Fatalf("docker %s: %v", strings.Join(args, " "), err)
-		}
-		return strings.Fields(string(out))
-	}
-	label := "label=com.docker.compose.project=" + o.project
-	for _, id := range list("ps", "-aq", "--no-trunc", "--filter", label) {
-		o.containers[id] = true
-	}
-	for _, n := range list("network", "ls", "-q", "--no-trunc", "--filter", label) {
-		o.networks[n] = true
-	}
-	for _, v := range list("volume", "ls", "-q", "--filter", label) {
-		if proto.IsAnonymousVolumeName(v) {
-			o.t.Fatalf("an anonymous volume %s appeared; this test creates none", v)
-		}
-		o.volumes[v] = true
-	}
-}
-
-func (o *liveOwned) cleanup() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	for id := range o.containers {
-		_ = exec.CommandContext(ctx, "docker", "rm", "-f", "--", id).Run()
-	}
-	for n := range o.networks {
-		_ = exec.CommandContext(ctx, "docker", "network", "rm", "--", n).Run()
-	}
-	for v := range o.volumes {
-		_ = exec.CommandContext(ctx, "docker", "volume", "rm", "--", v).Run()
-	}
-	o.t.Logf("cleanup targeted exactly these, by name (a volume the test already dropped is simply gone): containers %v, networks %v, volumes %v", keys(o.containers), keys(o.networks), keys(o.volumes))
-}
-
-func keys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func volumeExists(t *testing.T, name string) bool {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -876,12 +927,12 @@ func volumeExists(t *testing.T, name string) bool {
 // exactly the volume named, and refuses one the compose still declares.
 func TestComposeBackendLiveVolumeGate(t *testing.T) {
 	requireDocker(t)
-	appID := liveGateID(t)
+	appID := liveAppID(t, "GATE")
 	c, err := NewComposeBackend(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewComposeBackend: %v", err)
 	}
-	owned := &liveOwned{t: t, project: projectName(appID), containers: map[string]bool{}, networks: map[string]bool{}, volumes: map[string]bool{}}
+	owned := newLiveOwned(t, appID)
 	t.Cleanup(owned.cleanup)
 	t.Logf("app id %s, compose project %s", appID, owned.project)
 	data, data2 := proto.AppVolumeName(appID, "data"), proto.AppVolumeName(appID, "data2")
