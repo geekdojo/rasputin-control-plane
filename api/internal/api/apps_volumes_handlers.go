@@ -26,9 +26,10 @@ import (
 //
 //   GET  /api/apps/{id}/volumes         the app's volumes by name and class,
 //                                       each with when it was last captured
-//   GET  /api/volumes/orphans           rasp_<appID>_* volumes on every
-//                                       reachable node whose appID has no row
-//                                       in the ledger
+//   GET  /api/volumes/orphans           rasp_<appID>_* volumes, and the
+//                                       anonymous volumes agents recorded for
+//                                       an app, on every reachable node whose
+//                                       appID has no row in the ledger
 //   POST /api/volumes/orphans/reclaim   remove named orphans on one node
 //
 // # What "last captured" means, and what it costs
@@ -90,8 +91,9 @@ type appVolumesResponse struct {
 	Volumes    []appVolumeView `json:"volumes"`
 }
 
-// orphanVolumeView is one reclaimable volume: a rasp_<appID>_* volume on a
-// node whose appID has no row in the apps ledger.
+// orphanVolumeView is one reclaimable volume: a rasp_<appID>_* volume, or an
+// anonymous volume the node's agent recorded for appID, on a node whose appID
+// has no row in the apps ledger.
 type orphanVolumeView struct {
 	NodeID    string    `json:"nodeId"`
 	Name      string    `json:"name"`
@@ -100,6 +102,13 @@ type orphanVolumeView struct {
 	SizeBytes uint64    `json:"sizeBytes"`
 	CreatedAt time.Time `json:"createdAt"`
 	InUse     bool      `json:"inUse"`
+	// Anonymous marks a volume docker created for an unnamed mount, which an
+	// uninstall that kept its data left behind (geekdojo/geekdojo-brain#413).
+	// It has no compose volume name, so Volume is empty; Service and Path say
+	// where it was mounted. No backup manifest records one.
+	Anonymous bool   `json:"anonymous,omitempty"`
+	Service   string `json:"service,omitempty"`
+	Path      string `json:"path,omitempty"`
 	// AppName, TileID and Backup come from the backup manifest when a
 	// retained generation ever recorded this volume — the app row is gone,
 	// so the manifest is the only place its name and class survive. Empty
@@ -216,14 +225,20 @@ func (s *Server) handleListOrphanVolumes(w http.ResponseWriter, r *http.Request)
 			if live[strings.ToUpper(v.AppID)] {
 				continue
 			}
-			key := captureKey(v.AppID, v.Volume)
-			meta := idx.known[key]
-			resp.Volumes = append(resp.Volumes, orphanVolumeView{
+			view := orphanVolumeView{
 				NodeID: n.ID, Name: v.Name, AppID: v.AppID, Volume: v.Volume,
 				SizeBytes: v.SizeBytes, CreatedAt: v.CreatedAt, InUse: v.InUse,
-				AppName: meta.appName, TileID: meta.tileID, Backup: meta.class,
-				LastCaptured: idx.captured[key],
-			})
+				Anonymous: v.Anonymous, Service: v.Service, Path: v.Path,
+			}
+			if !v.Anonymous {
+				// The manifest keys volumes by their compose name, which an
+				// anonymous volume does not have.
+				key := captureKey(v.AppID, v.Volume)
+				meta := idx.known[key]
+				view.AppName, view.TileID, view.Backup = meta.appName, meta.tileID, meta.class
+				view.LastCaptured = idx.captured[key]
+			}
+			resp.Volumes = append(resp.Volumes, view)
 		}
 	}
 	sort.Slice(resp.Volumes, func(i, j int) bool {
@@ -242,6 +257,15 @@ func (s *Server) handleListOrphanVolumes(w http.ResponseWriter, r *http.Request)
 // here, and one bad name refuses the whole request — a client that asked for a
 // live app's volume is a client whose whole request is suspect. The agent then
 // applies the same two rules again plus docker's labels and container refs.
+//
+// An anonymous volume's name carries no app id (geekdojo/geekdojo-brain#413),
+// so the ledger rule cannot be read off it. Its owner is on the node, in the
+// agent's per-app record, so this asks the node — the same listing the orphan
+// page reads, without sizes — and applies the ledger rule to the owner that
+// comes back. A name the node does not list as an app's anonymous volume is
+// refused here, exactly as an unshaped name is. The agent resolves the owner
+// from its record again when it removes, so both gates still stand, and
+// neither is loosened for any volume that is not anonymous.
 func (s *Server) handleReclaimOrphanVolumes(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -282,9 +306,38 @@ func (s *Server) handleReclaimOrphanVolumes(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var refused []proto.AppVolumeRefusal
+	var anonymous []string
 	for _, name := range req.Names {
+		if proto.IsAnonymousVolumeName(name) {
+			anonymous = append(anonymous, name)
+			continue
+		}
 		if reason := proto.RefuseAppVolumeName(name, live); reason != "" {
 			refused = append(refused, proto.AppVolumeRefusal{Name: name, Reason: reason})
+		}
+	}
+	if len(anonymous) > 0 {
+		vols, err := listNodeVolumesWith(r.Context(), s.nc, node, proto.AppVolumesListCmd{SkipSizes: true})
+		if err != nil {
+			writeError(w, http.StatusConflict, fmt.Sprintf("node %s could not say which app owns the anonymous volume(s) named: %s; nothing was removed", node.ID, err.Error()))
+			return
+		}
+		owner := map[string]string{}
+		for _, v := range vols {
+			if v.Anonymous {
+				owner[v.Name] = v.AppID
+			}
+		}
+		for _, name := range anonymous {
+			appID, ok := owner[name]
+			if !ok {
+				refused = append(refused, proto.AppVolumeRefusal{Name: name,
+					Reason: "not a Rasputin-managed volume: " + node.ID + " lists no app's anonymous volume by this name"})
+				continue
+			}
+			if reason := proto.RefuseAppVolumeOwner(appID, live); reason != "" {
+				refused = append(refused, proto.AppVolumeRefusal{Name: name, Reason: reason})
+			}
 		}
 	}
 	if len(refused) > 0 {
@@ -368,7 +421,12 @@ func (s *Server) liveAppIDs(ctx context.Context) (map[string]bool, error) {
 // release that answers it — not as a missing container runtime, which is
 // what this said on e3bench 2026-09-04 about nodes whose Docker was fine.
 func listNodeVolumes(ctx context.Context, nc *nats.Conn, node *proto.Node) ([]proto.AppVolumeInfo, error) {
-	cmd, _ := json.Marshal(proto.AppVolumesListCmd{})
+	return listNodeVolumesWith(ctx, nc, node, proto.AppVolumesListCmd{})
+}
+
+// listNodeVolumesWith is listNodeVolumes with the list options spelled out.
+func listNodeVolumesWith(ctx context.Context, nc *nats.Conn, node *proto.Node, opts proto.AppVolumesListCmd) ([]proto.AppVolumeInfo, error) {
+	cmd, _ := json.Marshal(opts)
 	// Sizing walks every managed volume; give a node with a big one time.
 	rctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()

@@ -65,14 +65,26 @@ func projectName(appID string) string {
 func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML string) (proto.AppStatus, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !safeAppID(appID) {
+		err := fmt.Errorf("refusing app id %q: not a single path element", appID)
+		return proto.AppStatusFailed, err.Error(), err
+	}
 	if err := os.MkdirAll(c.appDir(appID), 0o755); err != nil {
 		return proto.AppStatusFailed, "mkdir: " + err.Error(), err
 	}
+	// Record the anonymous volumes of the containers `up` may be about to
+	// replace or remove (#413; see appvolumes.go). An `up --remove-orphans`
+	// that drops a service takes the only container that named its anonymous
+	// volume with it, and an app an older agent deployed has no record yet.
+	c.recordVolumesOrLog(ctx, appID, "docker.deploy")
 	if err := os.WriteFile(c.composePath(appID), []byte(composeYAML), 0o644); err != nil {
 		return proto.AppStatusFailed, "write compose: " + err.Error(), err
 	}
 
 	out, err := c.run(ctx, appID, composeUpArgs()...)
+	// And the ones the containers `up` left mount now — whether or not `up`
+	// succeeded, since a failed `up` can still have created some of them.
+	c.recordVolumesOrLog(ctx, appID, "docker.deploy")
 	if err != nil {
 		return proto.AppStatusFailed, formatCmdErr("docker compose up", out, err), err
 	}
@@ -185,28 +197,73 @@ func composePullArgs() []string {
 func (c *ComposeBackend) Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, err := os.Stat(c.composePath(appID)); errors.Is(err, os.ErrNotExist) {
-		if deleteVolumes {
-			// No compose file means compose cannot resolve the project's
-			// volumes to remove them, and pretending otherwise would let an
-			// operator believe data was deleted that is still on the disk.
-			// The volumes, if any, are exactly what the orphan path lists.
-			return proto.AppStatusStopped, "no compose file on disk — volumes were NOT deleted; if any exist they will appear as orphans", nil
-		}
+	if !safeAppID(appID) {
+		// The id names a directory this verb can now remove.
+		err := fmt.Errorf("refusing app id %q: not a single path element", appID)
+		return proto.AppStatusFailed, err.Error(), err
+	}
+	_, statErr := os.Stat(c.composePath(appID))
+	composeMissing := errors.Is(statErr, os.ErrNotExist)
+	switch {
+	case composeMissing && !deleteVolumes:
 		return proto.AppStatusStopped, "no compose file on disk", nil
+	case !composeMissing:
+		// `down` removes the containers, and with them the only link between
+		// the app and its anonymous volumes. This is the last moment to record
+		// them — for app.stop too, which is how stop-then-delete keeps them
+		// findable (#413; see appvolumes.go).
+		c.recordVolumesOrLog(ctx, appID, "docker.stop")
+		label := "docker compose down"
+		if deleteVolumes {
+			label = "docker compose down -v"
+		}
+		out, err := c.run(ctx, appID, composeDownArgs(deleteVolumes)...)
+		if err != nil {
+			return proto.AppStatusFailed, formatCmdErr(label, out, err), err
+		}
 	}
-	label := "docker compose down"
-	if deleteVolumes {
-		label = "docker compose down -v"
+	if !deleteVolumes {
+		// Keeping the data keeps ALL of it: named, renamed-away, dropped and
+		// anonymous alike. Nothing below runs, and the record stays so the
+		// orphan reaper can list what was kept once the app row is gone.
+		return proto.AppStatusStopped, "", nil
 	}
-	out, err := c.run(ctx, appID, composeDownArgs(deleteVolumes)...)
+
+	// `down -v` removed what the current compose declares. Everything else the
+	// app ever had goes now, by exact name, through the reaper's gates. This
+	// runs without a compose file too — labels and the record need none — so
+	// a retried delete, or an app whose compose went missing, still leaves
+	// nothing behind.
+	sweep, err := c.removeAppVolumes(ctx, appID)
 	if err != nil {
-		return proto.AppStatusFailed, formatCmdErr(label, out, err), err
+		return proto.AppStatusFailed, "containers removed; the app's remaining volumes could not be enumerated, so some may still be on the node: " + err.Error(), err
 	}
-	if deleteVolumes {
-		return proto.AppStatusStopped, "containers and volumes removed", nil
+	if len(sweep.Refused) > 0 {
+		// The operator asked for the data to go and some of it is still here.
+		// Reporting success would let the row be removed on a belief that is
+		// false, so the stop fails and names what stayed. The state directory,
+		// and the record in it, stay too: a retry finds the same volumes, and
+		// an uninstall that keeps volumes leaves them listed as orphans.
+		reasons := make([]string, 0, len(sweep.Refused))
+		for _, r := range sweep.Refused {
+			reasons = append(reasons, r.Name+": "+r.Reason)
+		}
+		err := fmt.Errorf("%d volume(s) not removed", len(sweep.Refused))
+		return proto.AppStatusStopped, fmt.Sprintf("containers removed, but %d of the app's volume(s) were NOT deleted — %s", len(sweep.Refused), strings.Join(reasons, "; ")), err
 	}
-	return proto.AppStatusStopped, "", nil
+	// Every volume is handled, so nothing on the node needs the app's state
+	// any more — the record included.
+	detail := "containers and volumes removed"
+	if composeMissing {
+		detail = "no compose file on disk; the volumes the app's project label and volume record name were removed"
+	}
+	if len(sweep.Removed) > 0 {
+		detail += fmt.Sprintf("; including %d volume(s) the current compose does not declare: %s", len(sweep.Removed), strings.Join(sweep.Removed, ", "))
+	}
+	if err := os.RemoveAll(c.appDir(appID)); err != nil {
+		detail += "; the app's agent state directory could not be removed: " + err.Error()
+	}
+	return proto.AppStatusStopped, detail, nil
 }
 
 func (c *ComposeBackend) Status(ctx context.Context, appID string) (proto.AppStatus, []proto.AppServiceStatus, error) {
@@ -340,18 +397,15 @@ func isHexHash(s string) bool {
 // run executes `docker compose -f <path> -p <project> <args...>` and returns
 // combined stdout+stderr. ctx is honored — if it cancels, the command is
 // killed.
+//
+// It goes through dockerFor, so a test that injects a docker CLI sees every
+// compose invocation too.
 func (c *ComposeBackend) run(ctx context.Context, appID string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "docker", composeArgs(c.composePath(appID), projectName(appID), args...)...)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	err := cmd.Run()
-	return buf.Bytes(), err
+	return c.dockerFor()(ctx, composeArgs(c.composePath(appID), projectName(appID), args...)...)
 }
 
 // composeArgs builds the docker CLI arg vector for one compose invocation.
-// It exists so the flags are assertable in a test — run() shells out through
-// exec.CommandContext, which nothing can inspect.
+// It exists so the flags are assertable in a test.
 func composeArgs(composePath, project string, args ...string) []string {
 	return append([]string{"compose", "-f", composePath, "-p", project}, args...)
 }
@@ -372,13 +426,18 @@ func composeUpArgs() []string {
 
 // composeDownArgs is the `down` invocation Stop uses.
 //
-// `-v` is the ONLY difference between an uninstall that keeps an app's data and
-// one that destroys it, and it is passed through here rather than inline so a
-// test can assert which one the flag produces. Compose scopes `down -v` to the
-// project's own named volumes (and its anonymous ones) — it cannot reach a
-// volume another project created, and it cannot be handed a name — which is
-// what makes this the safe way to delete an app's data. Keep it that way: do
-// not add a code path that removes a volume by name here.
+// `-v` is the difference between an uninstall that keeps an app's data and one
+// that destroys it, and it is passed through here rather than inline so a test
+// can assert which one the flag produces. Compose scopes `down -v` to the
+// volumes the CURRENT compose declares, and to the anonymous volumes of the
+// containers it is removing — it cannot reach a volume another project
+// created, and it cannot be handed a name.
+//
+// That scope is also why `down -v` alone is not a delete (#413, measured case
+// 8 of app-catalog.md §8a.2): it leaves renamed-away and dropped volumes, and
+// every anonymous volume whose container a stop or an upgrade already removed.
+// Stop removes those afterwards, by exact name, through gateAndRemove — the
+// orphan reaper's gates. Keep by-name removal there, never here.
 func composeDownArgs(deleteVolumes bool) []string {
 	if deleteVolumes {
 		return []string{"down", "-v"}

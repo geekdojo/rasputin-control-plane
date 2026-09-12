@@ -150,16 +150,22 @@ type AppPullAck struct {
 // AppStopCmd is sent on rasputin.node.<id>.cmd.docker.stop.
 type AppStopCmd struct {
 	AppID string `json:"appId"`
-	// DeleteVolumes asks the agent to run `compose down -v` rather than
-	// `compose down`: the project's named volumes go with its containers.
+	// DeleteVolumes asks the agent to remove every volume the app ever had:
+	// `compose down -v` for the volumes the current compose declares, then —
+	// by exact name, through the same refusal gates the orphan reaper uses —
+	// every volume `down -v` cannot see (geekdojo/geekdojo-brain#413): a
+	// volume whose key an upgrade renamed away, a dropped service's volume, and
+	// an anonymous volume, which carries no project label at all.
 	//
 	// Set ONLY by the app.delete saga, and only when the operator answered
 	// "Delete volumes?" with a deliberate yes (geekdojo/geekdojo-brain#399).
 	// Absent is false, which is what an api older than this field sends and
 	// what an operator who did not tick the box sends — destroying data is
-	// never the default. `compose down -v` is scoped to the compose project,
-	// which is the property that makes this safe: it can only remove volumes
-	// named rasp_<appID>_*, never another app's and never a volume by name.
+	// never the default, and false removes NO volume of any class. What makes
+	// true safe is identity, not a pattern: a named volume must be named
+	// rasp_<appID>_* AND carry this project's compose label; an anonymous one
+	// must be in the agent's own record of volumes this app's containers
+	// mounted; and no volume any container still references is removed.
 	DeleteVolumes bool `json:"deleteVolumes,omitempty"`
 }
 
@@ -380,16 +386,56 @@ func ParseAppVolumeName(name string) (appID, volume string, ok bool) {
 		return "", "", false
 	}
 	id := rest[:appIDLen]
-	for _, r := range id {
-		if !isCrockford(r) {
-			return "", "", false
-		}
+	if !ValidAppID(id) {
+		return "", "", false
 	}
 	volume = rest[appIDLen+1:]
 	if volume == "" {
 		return "", "", false
 	}
 	return strings.ToUpper(id), volume, true
+}
+
+// ValidAppID reports whether id is shaped like an app id: a 26-character
+// ULID in Crockford base32, either case. The agent uses it before it trusts a
+// directory name under its state root as the owner of a volume.
+func ValidAppID(id string) bool {
+	if len(id) != appIDLen {
+		return false
+	}
+	for _, r := range id {
+		if !isCrockford(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// anonymousVolumeNameLen is the length of the name docker gives a volume it
+// creates for an unnamed mount: 64 lower-case hex characters.
+const anonymousVolumeNameLen = 64
+
+// IsAnonymousVolumeName reports whether name has the shape of a volume docker
+// created for an unnamed mount — a service's `- /path`, or an image's
+// Dockerfile VOLUME that the compose maps nothing to
+// (geekdojo/geekdojo-brain#413).
+//
+// The shape is only a shape. It says nothing about which app, if any, the
+// volume belongs to: docker labels such a volume com.docker.volume.anonymous
+// and nothing else, so it carries no compose project label to check. Ownership
+// comes from the agent's per-app record of the volumes an app's containers
+// mounted, and every gate that removes one resolves it there. A name of this
+// shape can never start with `-`, which keeps it an operand on any argv.
+func IsAnonymousVolumeName(name string) bool {
+	if len(name) != anonymousVolumeNameLen {
+		return false
+	}
+	for _, r := range name {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // isCrockford reports whether r is in ULID's Crockford base32 alphabet, either
@@ -408,15 +454,31 @@ func isCrockford(r rune) bool {
 	return r != 'I' && r != 'L' && r != 'O' && r != 'U'
 }
 
-// AppVolumeInfo is one Rasputin-managed compose volume as the agent sees it.
+// AppVolumeInfo is one Rasputin-managed volume as the agent sees it: a named
+// compose volume, or an anonymous volume the agent recorded one of an app's
+// containers mounting (Anonymous).
 type AppVolumeInfo struct {
-	// Name is the docker volume name, rasp_<appid>_<volume>.
+	// Name is the docker volume name: rasp_<appid>_<volume> for a named
+	// volume, docker's 64-hex id for an anonymous one. It is the exact name
+	// the remove verb takes.
 	Name string `json:"name"`
-	// AppID is the ULID parsed out of Name, upper-cased to match the ledger.
+	// AppID is the owning app, upper-cased to match the ledger: parsed out of
+	// Name for a named volume, taken from the agent's per-app record for an
+	// anonymous one.
 	AppID string `json:"appId"`
 	// Volume is the compose volume name parsed out of Name — what the tile
-	// declares and what the backup manifest records.
+	// declares and what the backup manifest records. Empty for an anonymous
+	// volume, which has no compose name.
 	Volume string `json:"volume"`
+	// Anonymous marks a volume docker created for an unnamed mount. It has
+	// no project label, so it is listed only because the agent recorded one
+	// of this app's containers mounting it (geekdojo/geekdojo-brain#413).
+	Anonymous bool `json:"anonymous,omitempty"`
+	// Service and Path say where an anonymous volume was mounted when the
+	// agent recorded it — the compose service and the path inside its
+	// container — which is the only description such a volume has.
+	Service string `json:"service,omitempty"`
+	Path    string `json:"path,omitempty"`
 	// SizeBytes is the sum of the volume's file sizes on the node's disk.
 	SizeBytes uint64 `json:"sizeBytes"`
 	// CreatedAt is docker's creation timestamp for the volume.
@@ -426,13 +488,21 @@ type AppVolumeInfo struct {
 	InUse bool `json:"inUse"`
 }
 
-// AppVolumesListCmd is the (empty) request body on docker.volumes.list.
-type AppVolumesListCmd struct{}
+// AppVolumesListCmd is the request body on docker.volumes.list.
+type AppVolumesListCmd struct {
+	// SkipSizes leaves SizeBytes zero instead of walking every volume's
+	// files. The api sets it when it lists only to resolve which app owns an
+	// anonymous volume before a reclaim; a sizing walk of a large bulk volume
+	// is the slow part of a listing and answers nothing that check needs. An
+	// agent older than the field ignores it and sizes anyway.
+	SkipSizes bool `json:"skipSizes,omitempty"`
+}
 
 // AppVolumesListAck is the reply: every volume on the node whose name parses
 // as rasp_<ulid>_<volume> AND that docker labels as belonging to that compose
-// project. Nothing else is listed — the api, not the agent, knows which of
-// these still have an owner.
+// project, plus every anonymous volume exactly one app's record on the node
+// names and docker still labels anonymous. Nothing else is listed — the api,
+// not the agent, knows which of these still have an owner.
 type AppVolumesListAck struct {
 	OK      bool            `json:"ok"`
 	Detail  string          `json:"detail,omitempty"`
@@ -442,7 +512,9 @@ type AppVolumesListAck struct {
 // AppVolumesRemoveCmd is the request body on docker.volumes.remove.
 type AppVolumesRemoveCmd struct {
 	// Names is the exact volume names to remove. Each must parse as
-	// rasp_<ulid>_<volume>; anything else is refused by name, not skipped.
+	// rasp_<ulid>_<volume>, or be an anonymous volume's 64-hex name that the
+	// agent's per-app record attributes to exactly one app; anything else is
+	// refused by name, not skipped.
 	Names []string `json:"names"`
 	// LiveAppIDs is every app id the api's ledger currently holds. The agent
 	// refuses any name whose app id appears here — a live app's volume must be
@@ -480,8 +552,17 @@ func RefuseAppVolumeName(name string, liveAppIDs map[string]bool) string {
 	if !ok {
 		return "not a Rasputin-managed volume: the name is not of the form rasp_<app-id>_<volume>"
 	}
+	return RefuseAppVolumeOwner(appID, liveAppIDs)
+}
+
+// RefuseAppVolumeOwner is the ledger rule on its own: the refusal reason when
+// appID still has a row, "" otherwise. RefuseAppVolumeName applies it to the
+// app id a named volume carries; an anonymous volume carries none, so its
+// owner is resolved from the agent's record first and then checked here, in
+// the same words.
+func RefuseAppVolumeOwner(appID string, liveAppIDs map[string]bool) string {
 	if liveAppIDs[strings.ToUpper(appID)] {
-		return fmt.Sprintf("app %s is still installed; uninstall it to delete its volumes", appID)
+		return fmt.Sprintf("app %s is still installed; uninstall it to delete its volumes", strings.ToUpper(appID))
 	}
 	return ""
 }

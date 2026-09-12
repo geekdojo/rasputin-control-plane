@@ -246,3 +246,32 @@ func TestDelete_DeleteVolumesOnOfflineNodeRefuses(t *testing.T) {
 		t.Errorf("keep-volumes delete on an offline node must still proceed: %v", err)
 	}
 }
+
+// Delete-with-volumes where the agent removed the containers but could not
+// remove every volume the app ever had (#413: one still referenced by a
+// container outside the app) fails the step, keeps the row, and carries the
+// agent's naming of what stayed — so the operator is never told data is gone
+// that is still on the node.
+func TestDelete_DeleteVolumesWithVolumesLeftBehindKeepsRow(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store, inv := seedOnlineApp(t, "n", "a", "immich")
+	const detail = "containers removed, but 1 of the app's volume(s) were NOT deleted — deadbeef: still referenced by 1 container(s): c1"
+	sub, _ := nc.Subscribe(proto.AppStopSubject("n"), func(m *nats.Msg) {
+		ack, _ := json.Marshal(proto.AppStopAck{OK: false, Status: proto.AppStatusStopped, Detail: detail})
+		_ = m.Respond(ack)
+	})
+	defer func() { _ = sub.Unsubscribe() }()
+
+	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"a","deleteVolumes":true}`, nc))
+	if err == nil || !strings.Contains(err.Error(), "NOT deleted") || !strings.Contains(err.Error(), "deadbeef") {
+		t.Fatalf("deleteStop = %v, want the agent's naming of the volume left behind", err)
+	}
+	got, _ := store.Get(ctx, "a")
+	if got == nil {
+		t.Fatal("app row must remain when a volume the operator asked to delete is still on the node")
+	}
+	if !strings.Contains(got.LastDetail, "NOT deleted") {
+		t.Errorf("lastDetail = %q, want the agent's detail recorded", got.LastDetail)
+	}
+}
