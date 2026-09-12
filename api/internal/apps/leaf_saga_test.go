@@ -99,7 +99,7 @@ func TestDeployLeaf_SkipsWhenNoPortOrNilMinter(t *testing.T) {
 
 func TestDeleteLeaf_SendsRemove(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedAppWithPort(t, "n", "a", "jellyfin", 8096, false)
+	store, inv := seedAppWithPort(t, "n", delAppID, "jellyfin", 8096, false)
 
 	got := make(chan proto.AppLeafCmd, 1)
 	sub := fakeLeafAgent(t, nc, "n", got)
@@ -107,18 +107,18 @@ func TestDeleteLeaf_SendsRemove(t *testing.T) {
 
 	removed := ""
 	rm := func(appID string) error { removed = appID; return nil }
-	if _, err := deleteLeaf(store, inv, nc, rm)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := deleteLeaf(store, inv, nc, rm)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deleteLeaf: %v", err)
 	}
 	select {
 	case cmd := <-got:
-		if cmd.AppID != "a" || !cmd.Remove {
+		if cmd.AppID != delAppID || !cmd.Remove {
 			t.Errorf("teardown cmd wrong: %+v", cmd)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("agent never received the teardown")
 	}
-	if removed != "a" {
-		t.Errorf("removeLeaf called with %q, want \"a\" (CP-side leaf dir cleanup)", removed)
+	if removed != delAppID {
+		t.Errorf("removeLeaf called with %q, want %q (CP-side leaf dir cleanup)", removed, delAppID)
 	}
 }
