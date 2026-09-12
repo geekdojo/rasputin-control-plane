@@ -500,8 +500,10 @@ export function createApp(input: {
 //
 // deleteVolumes is the operator's answer to "Delete volumes?" on the uninstall
 // confirmation (geekdojo/geekdojo-brain#399). false — the default, and what a
-// caller that passes nothing sends — keeps the app's named volumes on the
-// node. true makes the stop a `compose down -v`.
+// caller that passes nothing sends — keeps every one of the app's volumes on
+// the node, anonymous ones included, and they are then listed as orphans. true
+// removes every volume the app ever had: `compose down -v`, then whatever that
+// cannot see (geekdojo/geekdojo-brain#413).
 export function deleteApp(id: string, opts?: { deleteVolumes: boolean }): Promise<Job> {
   if (!opts) return jsonFetch<Job>(`/api/apps/${id}`, { method: 'DELETE' });
   return jsonFetch<Job>(`/api/apps/${id}`, {
@@ -517,8 +519,9 @@ export function getAppVolumes(id: string): Promise<AppVolumesResponse> {
   return jsonFetch<AppVolumesResponse>(`/api/apps/${id}/volumes`);
 }
 
-// listOrphanVolumes lists rasp_<appId>_* volumes on every reachable node whose
-// appId has no row in the apps ledger.
+// listOrphanVolumes lists rasp_<appId>_* volumes, and the anonymous volumes an
+// agent recorded for an app, on every reachable node whose appId has no row in
+// the apps ledger.
 export function listOrphanVolumes(): Promise<OrphanVolumesResponse> {
   return jsonFetch<OrphanVolumesResponse>('/api/volumes/orphans');
 }

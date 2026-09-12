@@ -276,11 +276,16 @@ type fakeVolumeAgent struct {
 	vols    []proto.AppVolumeInfo
 	removed []string
 	live    []string
+	// lists is every list command it was sent, in order.
+	lists []proto.AppVolumesListCmd
 }
 
 func (a *fakeVolumeAgent) serve(t *testing.T, nc *nats.Conn, nodeID string) {
 	t.Helper()
 	s1, err := nc.Subscribe(proto.AppVolumesListSubject(nodeID), func(m *nats.Msg) {
+		var cmd proto.AppVolumesListCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		a.lists = append(a.lists, cmd)
 		b, _ := json.Marshal(proto.AppVolumesListAck{OK: true, Volumes: a.vols})
 		_ = m.Respond(b)
 	})
@@ -589,5 +594,103 @@ func TestAppVolumes_RetentionUnknownFallsBackToTheWindow(t *testing.T) {
 				t.Errorf("upload's capture is outside the assumed window; must read never, got %+v", v.LastCaptured)
 			}
 		}
+	}
+}
+
+// anonName is a docker-shaped anonymous volume name.
+func anonName(c byte) string { return strings.Repeat(string(c), 64) }
+
+// An anonymous volume an uninstall kept (#413) is an orphan like any other: it
+// is listed with its owner, where it was mounted, and no invented manifest
+// metadata — and a live app's anonymous volume is not listed.
+func TestOrphanVolumes_ListsKeptAnonymousVolumes(t *testing.T) {
+	f, cookie, backup := volumesFixture(t)
+	seedVolumesApp(t, f, volULIDLive, "immich")
+	created := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	agent := &fakeVolumeAgent{vols: []proto.AppVolumeInfo{
+		{Name: anonName('a'), AppID: volULIDOrphan, Anonymous: true, Service: "valkey", Path: "/data", SizeBytes: 5, CreatedAt: created},
+		{Name: anonName('b'), AppID: volULIDLive, Anonymous: true, Service: "valkey", Path: "/data", CreatedAt: created},
+	}}
+	agent.serve(t, f.nc, "n1")
+	seedBackupRun(t, f, backup, "run-1", "gen-1", volULIDOrphan, []string{"immich-db"}, []string{"gen-1"}, time.Now().Add(-time.Hour).UTC())
+
+	w := f.do(t, http.MethodGet, "/api/volumes/orphans", "", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	resp := decodeBody[orphanVolumesResponse](t, w.Body.String())
+	if len(resp.Volumes) != 1 {
+		t.Fatalf("orphans: %+v", resp.Volumes)
+	}
+	v := resp.Volumes[0]
+	if v.Name != anonName('a') || v.AppID != volULIDOrphan || !v.Anonymous || v.Service != "valkey" || v.Path != "/data" || v.Volume != "" {
+		t.Errorf("anonymous orphan: %+v", v)
+	}
+	if v.Backup != "" || v.LastCaptured != nil {
+		t.Errorf("an anonymous volume has no manifest record, got class %q capture %+v", v.Backup, v.LastCaptured)
+	}
+	if len(agent.lists) != 1 || agent.lists[0].SkipSizes {
+		t.Errorf("the orphan page wants sizes: %+v", agent.lists)
+	}
+}
+
+// Reclaiming an anonymous volume: the api resolves its owner from the node
+// (without sizing), applies the ledger rule to that owner, and refuses the
+// whole request for a live owner or a name the node does not list as an app's
+// anonymous volume. Named volumes' gates are unchanged beside it.
+func TestReclaimOrphanVolumes_AnonymousVolumes(t *testing.T) {
+	f, cookie, _ := volumesFixture(t)
+	seedVolumesApp(t, f, volULIDLive, "immich")
+	orphanAnon, liveAnon, unknownAnon := anonName('a'), anonName('b'), anonName('c')
+	agent := &fakeVolumeAgent{vols: []proto.AppVolumeInfo{
+		{Name: orphanAnon, AppID: volULIDOrphan, Anonymous: true},
+		{Name: liveAnon, AppID: volULIDLive, Anonymous: true},
+		// A named volume listed under the hex name must not lend it an owner.
+		{Name: unknownAnon, AppID: volULIDOrphan, Anonymous: false},
+	}}
+	agent.serve(t, f.nc, "n1")
+	orphanNamed := proto.AppVolumeName(volULIDOrphan, "immich-db")
+	post := func(names ...string) (int, reclaimResponse) {
+		b, _ := json.Marshal(reclaimRequest{NodeID: "n1", Names: names})
+		w := f.do(t, http.MethodPost, "/api/volumes/orphans/reclaim", string(b), cookie)
+		return w.Code, decodeBody[reclaimResponse](t, w.Body.String())
+	}
+
+	for bad, frag := range map[string]string{
+		liveAnon:    "still installed",
+		unknownAnon: "lists no app's anonymous volume",
+	} {
+		code, resp := post(orphanNamed, orphanAnon, bad)
+		if code != http.StatusBadRequest || len(resp.Refused) != 1 || resp.Refused[0].Name != bad || !strings.Contains(resp.Refused[0].Reason, frag) {
+			t.Errorf("%s: %d %+v", bad, code, resp)
+		}
+	}
+	if len(agent.removed) != 0 {
+		t.Fatalf("a refused request reached the agent: %v", agent.removed)
+	}
+	for _, l := range agent.lists {
+		if !l.SkipSizes {
+			t.Errorf("the owner lookup must not size volumes: %+v", agent.lists)
+		}
+	}
+
+	code, resp := post(orphanNamed, orphanAnon)
+	if code != http.StatusOK || !resp.OK || len(resp.Removed) != 2 {
+		t.Fatalf("reclaim: %d %+v", code, resp)
+	}
+	if strings.Join(agent.removed, ",") != orphanNamed+","+orphanAnon {
+		t.Errorf("agent asked to remove %v", agent.removed)
+	}
+	if len(agent.live) != 1 || agent.live[0] != volULIDLive {
+		t.Errorf("agent must still be handed the ledger, got %v", agent.live)
+	}
+
+	// A request naming only named volumes never asks the node to list.
+	before := len(agent.lists)
+	if code, _ := post(orphanNamed); code != http.StatusOK {
+		t.Fatalf("named-only reclaim: %d", code)
+	}
+	if len(agent.lists) != before {
+		t.Error("a reclaim with no anonymous name listed the node")
 	}
 }

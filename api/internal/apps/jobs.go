@@ -29,9 +29,13 @@ type DeleteSpec struct {
 	AppID string `json:"appId"`
 	// DeleteVolumes is the operator's answer to "Delete volumes?" on the
 	// uninstall confirmation (geekdojo/geekdojo-brain#399). Absent is false:
-	// the app's named volumes stay on the node and the app row goes, which is
-	// what every uninstall did before the question existed. True carries to
-	// the agent as `compose down -v`, scoped to the app's own compose project.
+	// every volume the app has stays on the node — named, anonymous, and any
+	// an earlier compose version left — and the app row goes, which is what
+	// every uninstall did before the question existed; the agent keeps what
+	// the orphan reaper needs to list them. True carries to the agent, which
+	// removes every volume the app ever had (geekdojo/geekdojo-brain#413):
+	// `compose down -v`, then by exact name, through the reaper's refusal
+	// gates, what `down -v` cannot see.
 	DeleteVolumes bool `json:"deleteVolumes,omitempty"`
 }
 
@@ -200,8 +204,9 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 // target node (docker compose down), THEN remove the api's ledger row. This is
 // what makes "delete" actually tear down containers instead of orphaning them.
 //
-//  1. stop   — if the node is online, RPC docker.stop (compose down, or
-//     compose down -v when the spec's deleteVolumes is set); this must
+//  1. stop   — if the node is online, RPC docker.stop (compose down, or,
+//     when the spec's deleteVolumes is set, compose down -v followed by the
+//     agent removing every other volume the app ever had — #413); this must
 //     succeed, else the saga fails and the row stays (no silent orphan
 //     on a reachable node — the user can retry). If the node is offline
 //     or de-registered, we can't reach it: log a warning and proceed to
@@ -911,7 +916,10 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 			return nil, errors.New(detail)
 		}
 		if spec.DeleteVolumes {
-			sc.Log("info", "stopped; volumes deleted")
+			// The agent names any volume beyond what the current compose
+			// declares — a renamed-away key, a dropped service's, an
+			// anonymous one — so the job log says what actually went.
+			sc.Log("info", "stopped; volumes deleted: "+ack.Detail)
 			return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok", "volumes": "deleted"})
 		}
 		sc.Log("info", "stopped; volumes kept")

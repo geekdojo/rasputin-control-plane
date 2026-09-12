@@ -37,9 +37,11 @@ package docker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -407,5 +409,332 @@ func TestComposeBackendLiveFailedUpLeavesAnOutdatedContainer(t *testing.T) {
 	}
 	if _, services, err := c.Status(ctx, appID); err != nil || len(services) != 1 || services[0].Outdated {
 		t.Errorf("after re-applying the running compose: %+v %v, want one current container", services, err)
+	}
+}
+
+// --- #413: every volume an app ever had ---------------------------------------
+//
+// geekdojo/geekdojo-brain#413, against a real daemon. Measured case 8 of
+// app-catalog.md §8a.2 is the premise: `down -v` removes only the volumes the
+// current compose declares. Each test below builds one leak class through the
+// agent's own verbs and asserts the delete-with-data leaves nothing, or that a
+// keep-data delete leaves everything and every kept volume is reclaimable.
+//
+// The app ids are real ULIDs, because the orphan listing trusts only a
+// ULID-named state directory as an anonymous volume's owner.
+
+const liveLoop = `["sh", "-c", "while true; do sleep 5; done"]`
+
+// v1Compose is an app with a named volume, an anonymous volume (an unnamed
+// mount — the same thing immich's valkey gets from its image's VOLUME) and a
+// second service with a named volume of its own.
+const v1Compose = `services:
+  app:
+    image: busybox:latest
+    command: ` + liveLoop + `
+    volumes:
+      - data:/data
+      - /anon
+  worker:
+    image: busybox:latest
+    command: ` + liveLoop + `
+    volumes:
+      - cache:/cache
+volumes:
+  data: {}
+  cache: {}
+`
+
+// v2Compose renames the `data` key and drops the worker service.
+const v2Compose = `services:
+  app:
+    image: busybox:latest
+    command: ` + liveLoop + `
+    volumes:
+      - data2:/data
+      - /anon
+volumes:
+  data2: {}
+`
+
+// liveVolumeApp is one app under test and everything it must clean up.
+type liveVolumeApp struct {
+	t     *testing.T
+	c     *ComposeBackend
+	appID string
+	// seen is every volume the test has observed belonging to the app, so
+	// cleanup removes them even when the code under test did not.
+	seen map[string]bool
+}
+
+func newLiveVolumeApp(t *testing.T, appID string) *liveVolumeApp {
+	t.Helper()
+	requireDocker(t)
+	if !proto.ValidAppID(appID) {
+		t.Fatalf("test app id %q is not a ULID", appID)
+	}
+	c, err := NewComposeBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewComposeBackend: %v", err)
+	}
+	a := &liveVolumeApp{t: t, c: c, appID: appID, seen: map[string]bool{}}
+	t.Cleanup(a.cleanup)
+	return a
+}
+
+func (a *liveVolumeApp) docker(args ...string) string {
+	a.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	if err != nil {
+		a.t.Fatalf("docker %s: %v — %s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// observe adds every volume the project's containers mount and every volume
+// labelled for the project to seen.
+func (a *liveVolumeApp) observe() {
+	a.t.Helper()
+	project := projectName(a.appID)
+	for _, n := range strings.Fields(a.docker("volume", "ls", "-q", "--filter", "label=com.docker.compose.project="+project)) {
+		a.seen[n] = true
+	}
+	for _, id := range strings.Fields(a.docker("ps", "-aq", "--filter", "label=com.docker.compose.project="+project)) {
+		for _, n := range strings.Fields(a.docker("inspect", "--format", `{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`, id)) {
+			a.seen[n] = true
+		}
+	}
+}
+
+func (a *liveVolumeApp) deploy(yaml string) {
+	a.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if status, detail, err := a.c.Deploy(ctx, a.appID, a.appID, yaml); err != nil || status != proto.AppStatusRunning {
+		a.t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
+	}
+	a.observe()
+}
+
+func (a *liveVolumeApp) stop(deleteVolumes bool) string {
+	a.t.Helper()
+	a.observe()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	status, detail, err := a.c.Stop(ctx, a.appID, deleteVolumes)
+	if err != nil || status != proto.AppStatusStopped {
+		a.t.Fatalf("Stop(deleteVolumes=%v): %v (status=%s detail=%s)", deleteVolumes, err, status, detail)
+	}
+	return detail
+}
+
+// existing returns the volumes in seen that docker still has.
+func (a *liveVolumeApp) existing() []string {
+	a.t.Helper()
+	have := map[string]bool{}
+	for _, n := range strings.Fields(a.docker("volume", "ls", "-q")) {
+		have[n] = true
+	}
+	var out []string
+	for n := range a.seen {
+		if have[n] {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (a *liveVolumeApp) anonymousSeen() []string {
+	var out []string
+	for n := range a.seen {
+		if proto.IsAnonymousVolumeName(n) {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (a *liveVolumeApp) cleanup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	project := projectName(a.appID)
+	if ids, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+project).Output(); err == nil {
+		for _, id := range strings.Fields(string(ids)) {
+			_ = exec.CommandContext(ctx, "docker", "rm", "-f", id).Run()
+		}
+	}
+	_ = exec.CommandContext(ctx, "docker", "network", "rm", project+"_default").Run()
+	for n := range a.seen {
+		_ = exec.CommandContext(ctx, "docker", "volume", "rm", "--", n).Run()
+	}
+}
+
+func (a *liveVolumeApp) assertAllGone(what string) {
+	a.t.Helper()
+	if left := a.existing(); len(left) != 0 {
+		a.t.Fatalf("%s: volumes the app had are still on the node: %v", what, left)
+	}
+	if _, err := os.Stat(a.c.appDir(a.appID)); !errors.Is(err, os.ErrNotExist) {
+		a.t.Errorf("%s: the app's agent state directory survived (stat err %v)", what, err)
+	}
+}
+
+// Case 1: a named volume.
+func TestComposeBackendLiveDeleteWithDataNamedVolume(t *testing.T) {
+	a := newLiveVolumeApp(t, "01K4Z413NAMED0000000000001")
+	a.deploy(v1Compose)
+	if !a.seen[proto.AppVolumeName(a.appID, "data")] {
+		t.Fatalf("fixture: no named data volume in %v", a.seen)
+	}
+	a.stop(true)
+	a.assertAllGone("delete with data")
+}
+
+// Case 2: a volume key renamed across an upgrade — `down -v` sees only data2.
+func TestComposeBackendLiveDeleteWithDataRenamedKey(t *testing.T) {
+	a := newLiveVolumeApp(t, "01K4Z413RENAMED00000000001")
+	a.deploy(v1Compose)
+	a.deploy(v2Compose)
+	for _, key := range []string{"data", "data2"} {
+		if !a.seen[proto.AppVolumeName(a.appID, key)] {
+			t.Fatalf("fixture: no %s volume in %v", key, a.seen)
+		}
+	}
+	detail := a.stop(true)
+	if !strings.Contains(detail, proto.AppVolumeName(a.appID, "data")) {
+		t.Errorf("detail %q does not name the renamed-away volume", detail)
+	}
+	a.assertAllGone("delete with data after a key rename")
+}
+
+// Case 3: a service dropped across an upgrade — its volume survives `up
+// --remove-orphans` and `down -v` alike.
+func TestComposeBackendLiveDeleteWithDataDroppedService(t *testing.T) {
+	a := newLiveVolumeApp(t, "01K4Z413DR0PPED00000000001")
+	a.deploy(v1Compose)
+	a.deploy(v2Compose)
+	cache := proto.AppVolumeName(a.appID, "cache")
+	if got := strings.TrimSpace(a.docker("volume", "ls", "-q", "--filter", "name="+cache)); got != cache {
+		t.Fatalf("fixture: the dropped worker's volume is not on the node after the upgrade (%q)", got)
+	}
+	a.stop(true)
+	a.assertAllGone("delete with data after a service was dropped")
+}
+
+// Case 4: an anonymous volume, which carries no project label.
+func TestComposeBackendLiveDeleteWithDataAnonymousVolume(t *testing.T) {
+	a := newLiveVolumeApp(t, "01K4Z413AN0NYM000000000001")
+	a.deploy(v1Compose)
+	anon := a.anonymousSeen()
+	if len(anon) != 1 {
+		t.Fatalf("fixture: want one anonymous volume, saw %v", a.seen)
+	}
+	labels := a.docker("volume", "inspect", "--format", "{{json .Labels}}", anon[0])
+	if strings.Contains(labels, "com.docker.compose.project") || !strings.Contains(labels, labelAnonymousVolume) {
+		t.Fatalf("premise: the anonymous volume's labels are %s — measured case 8 said no project label, and docker's anonymous label", labels)
+	}
+	a.stop(true)
+	a.assertAllGone("delete with data")
+}
+
+// Case 5: stop, THEN delete with data. The stop's `down` removes the only
+// container that named the anonymous volume; the volume must still go.
+func TestComposeBackendLiveStopThenDeleteWithData(t *testing.T) {
+	a := newLiveVolumeApp(t, "01K4Z413ST0PDE1ETE00000001")
+	a.deploy(v1Compose)
+	a.deploy(v2Compose)
+	anon := a.anonymousSeen()
+	if len(anon) == 0 {
+		t.Fatalf("fixture: no anonymous volume in %v", a.seen)
+	}
+	a.stop(false)
+	// The premise the recording point was chosen for: after the stop nothing
+	// on the node links the anonymous volume to the app.
+	if ids := strings.TrimSpace(a.docker("ps", "-aq", "--filter", "volume="+anon[0])); ids != "" {
+		t.Fatalf("premise: a container still references %s after stop: %s", anon[0], ids)
+	}
+	if strings.Contains(a.docker("volume", "inspect", "--format", "{{json .Labels}}", anon[0]), projectName(a.appID)) {
+		t.Fatal("premise: the anonymous volume names the project after all")
+	}
+	a.stop(true)
+	a.assertAllGone("stop, then delete with data")
+}
+
+// Case 6: delete KEEPING data. Nothing is removed — not the current volumes,
+// not the renamed-away or dropped ones, not the anonymous one — and every kept
+// volume is in the orphan listing with an owner, and reclaimable through the
+// reaper's gates once the app is no longer in the ledger.
+func TestComposeBackendLiveDeleteKeepingDataIsListedAndReclaimable(t *testing.T) {
+	a := newLiveVolumeApp(t, "01K4Z413KEEPDATA0000000001")
+	a.deploy(v1Compose)
+	a.deploy(v2Compose)
+	a.observe()
+	before := a.existing()
+	wantKinds := map[string]bool{
+		proto.AppVolumeName(a.appID, "data"):  false,
+		proto.AppVolumeName(a.appID, "data2"): false,
+		proto.AppVolumeName(a.appID, "cache"): false,
+	}
+	for k := range wantKinds {
+		if !a.seen[k] {
+			t.Fatalf("fixture: %s missing from %v", k, a.seen)
+		}
+	}
+	if len(a.anonymousSeen()) == 0 {
+		t.Fatalf("fixture: no anonymous volume in %v", a.seen)
+	}
+
+	a.stop(false)
+	if after := a.existing(); strings.Join(after, ",") != strings.Join(before, ",") {
+		t.Fatalf("a keep-data delete removed volumes: before %v, after %v", before, after)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	vols, err := a.c.ListProjectVolumes(ctx, proto.AppVolumesListCmd{})
+	if err != nil {
+		t.Fatalf("ListProjectVolumes: %v", err)
+	}
+	listed := map[string]proto.AppVolumeInfo{}
+	var names []string
+	for _, v := range vols {
+		if v.AppID == strings.ToUpper(a.appID) {
+			listed[v.Name] = v
+			names = append(names, v.Name)
+		}
+	}
+	for _, kept := range before {
+		v, ok := listed[kept]
+		if !ok {
+			t.Errorf("kept volume %s is not in the orphan listing", kept)
+			continue
+		}
+		if proto.IsAnonymousVolumeName(kept) && (!v.Anonymous || v.Service != "app" || v.Path != "/anon") {
+			t.Errorf("anonymous listing: %+v", v)
+		}
+	}
+	if len(names) != len(before) {
+		t.Errorf("listing for the app = %v, want exactly %v", names, before)
+	}
+
+	// While the app is still in the ledger, the reaper refuses every one.
+	ack := a.c.RemoveProjectVolumes(ctx, proto.AppVolumesRemoveCmd{Names: names, LiveAppIDs: []string{a.appID}})
+	if len(ack.Removed) != 0 || len(a.existing()) != len(before) {
+		t.Fatalf("the reaper removed a live app's volume: %+v", ack)
+	}
+	// Once it is not, it removes every one.
+	ack = a.c.RemoveProjectVolumes(ctx, proto.AppVolumesRemoveCmd{Names: names})
+	if !ack.OK || len(ack.Refused) != 0 || len(ack.Removed) != len(names) {
+		t.Fatalf("reclaim: %+v", ack)
+	}
+	if left := a.existing(); len(left) != 0 {
+		t.Fatalf("reclaim left %v", left)
+	}
+	if _, err := os.Stat(a.c.recordPath(a.appID)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the record still names reclaimed volumes (stat err %v)", err)
 	}
 }

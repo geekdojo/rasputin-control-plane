@@ -90,9 +90,13 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscrip
 func handleVolumesList(r VolumeReaper, m *nats.Msg) {
 	// Sizing walks every managed volume's files; a node with a large bulk
 	// volume needs longer than the other verbs get.
+	// An empty or unreadable body is the default listing: the cmd was empty
+	// until SkipSizes, and an api that predates it still sends {}.
+	var cmd proto.AppVolumesListCmd
+	_ = json.Unmarshal(m.Data, &cmd)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	vols, err := r.ListProjectVolumes(ctx)
+	vols, err := r.ListProjectVolumes(ctx, cmd)
 	if err != nil {
 		bus.Respond(m, proto.AppVolumesListAck{OK: false, Detail: err.Error(), Volumes: []proto.AppVolumeInfo{}})
 		log.Printf("rasputin-agent: docker.volumes.list: %v", err)

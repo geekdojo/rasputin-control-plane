@@ -132,7 +132,7 @@ func scriptedDocker() *fakeDocker {
 func TestListProjectVolumes_OnlyLabelledProjectVolumes(t *testing.T) {
 	f := scriptedDocker()
 	b := newFakeBackend(t, f)
-	vols, err := b.ListProjectVolumes(context.Background())
+	vols, err := b.ListProjectVolumes(context.Background(), proto.AppVolumesListCmd{})
 	if err != nil {
 		t.Fatalf("ListProjectVolumes: %v", err)
 	}

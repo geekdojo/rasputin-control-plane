@@ -76,3 +76,60 @@ func TestRefuseAppVolumeName(t *testing.T) {
 		t.Errorf("malformed: %q", r)
 	}
 }
+
+// An anonymous volume's name is docker's 64-hex id. The shape admits nothing
+// else — in particular no rasp_ name, and nothing that could begin with `-` —
+// and it confers no ownership: that is the agent record's to say (#413).
+func TestIsAnonymousVolumeName(t *testing.T) {
+	hex := "0e86382a2c39722bcd8f0edc143841aafa446e025e27f76e8fbbe0f0c374ed8f"
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{hex, true},
+		{strings.ToUpper(hex), false},
+		{hex[:63], false},
+		{hex + "0", false},
+		{"-" + hex[1:], false},
+		{"g" + hex[1:], false},
+		{"rasp_01j6zk3q9v8xkx2m5tq7r4a9be_immich-db", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := IsAnonymousVolumeName(tc.in); got != tc.want {
+			t.Errorf("IsAnonymousVolumeName(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestValidAppID(t *testing.T) {
+	for in, want := range map[string]bool{
+		"01J6ZK3Q9V8XKX2M5TQ7R4A9BE":  true,
+		"01j6zk3q9v8xkx2m5tq7r4a9be":  true,
+		"01J6ZK3Q9V8XKX2M5TQ7R4A9BI":  false, // I is not Crockford
+		"01J6ZK3Q9V8XKX2M5TQ7R4A9B":   false,
+		"01J6ZK3Q9V8XKX2M5TQ7R4A9BEE": false,
+		"..":                          false,
+		"":                            false,
+	} {
+		if got := ValidAppID(in); got != want {
+			t.Errorf("ValidAppID(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// The ledger rule reads the same whether the app id came off a volume's name
+// or out of the agent's record for an anonymous volume.
+func TestRefuseAppVolumeOwner(t *testing.T) {
+	const ulid = "01J6ZK3Q9V8XKX2M5TQ7R4A9BE"
+	live := map[string]bool{ulid: true}
+	if r := RefuseAppVolumeOwner(strings.ToLower(ulid), live); !strings.Contains(r, ulid) || !strings.Contains(r, "still installed") {
+		t.Errorf("live owner: %q", r)
+	}
+	if r := RefuseAppVolumeOwner("01J6ZK3Q9V8XKX2M5TQ7R4A9BF", live); r != "" {
+		t.Errorf("gone owner refused: %q", r)
+	}
+	if RefuseAppVolumeName(AppVolumeName(ulid, "db"), live) != RefuseAppVolumeOwner(ulid, live) {
+		t.Error("the named-volume rule and the owner rule word the refusal differently")
+	}
+}

@@ -33,11 +33,13 @@ type Backend interface {
 
 	// Stop brings the app's services down. Returns the post-stop status.
 	//
-	// deleteVolumes additionally removes the project's named volumes —
-	// `compose down -v` — and is set only by the app.delete saga when the
-	// operator deliberately chose it (geekdojo/geekdojo-brain#399). It is
-	// scoped to the compose project by construction: the only volumes it can
-	// reach are the ones compose created for rasp_<appID>.
+	// deleteVolumes additionally removes every volume the app ever had —
+	// `compose down -v`, then by exact name whatever that could not see: a
+	// renamed-away or dropped service's volume still labelled for the
+	// project, and the anonymous volumes the agent recorded the app's
+	// containers mounting (geekdojo/geekdojo-brain#413). It is set only by
+	// the app.delete saga when the operator deliberately chose it (#399).
+	// Without it, Stop removes no volume of any class.
 	Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error)
 
 	// Status returns the current status of an app's services. Used by the
@@ -60,8 +62,9 @@ type Backend interface {
 // honest answer to give.
 type VolumeReaper interface {
 	// ListProjectVolumes enumerates every volume on this node whose name is
-	// rasp_<ulid>_<volume> and whose compose labels agree. Read-only.
-	ListProjectVolumes(ctx context.Context) ([]proto.AppVolumeInfo, error)
+	// rasp_<ulid>_<volume> and whose compose labels agree, and every anonymous
+	// volume exactly one app's record names. Read-only.
+	ListProjectVolumes(ctx context.Context, opts proto.AppVolumesListCmd) ([]proto.AppVolumeInfo, error)
 	// RemoveProjectVolumes removes exactly the named volumes that pass every
 	// refusal rule (see volumes.go) and reports the rest by name with a
 	// reason. A refusal is not an error.
