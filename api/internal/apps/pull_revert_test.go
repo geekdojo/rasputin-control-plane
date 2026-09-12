@@ -248,9 +248,9 @@ func TestStore_RestoreStatusOnlyOverTheStepsOwnMark(t *testing.T) {
 	}
 }
 
-// The swap moves the whole record both ways, in one write, so a re-apply can
-// itself be re-applied.
-func TestStore_RevertComposeSwapsTheWholeRecord(t *testing.T) {
+// The previous record is installed whole, in one write, and the record left is
+// retained as the previous one, so the owner can name it to go forward again.
+func TestStore_RevertComposeInstallsThePreviousRecordAndKeepsTheOneItLeaves(t *testing.T) {
 	ctx := context.Background()
 	s, _, v2, _ := upgradedToV2(t)
 
@@ -313,8 +313,8 @@ func TestRevertWorkflowShape(t *testing.T) {
 	for _, s := range w.Steps {
 		names = append(names, s.Name)
 	}
-	if w.Kind != "app.revert" || strings.Join(names, ",") != "load,pull,swap,push,leaf" {
-		t.Errorf("workflow = %s %v, want app.revert load,pull,swap,push,leaf", w.Kind, names)
+	if w.Kind != "app.revert" || strings.Join(names, ",") != "load,pull,apply,push,leaf" {
+		t.Errorf("workflow = %s %v, want app.revert load,pull,apply,push,leaf", w.Kind, names)
 	}
 }
 
@@ -345,7 +345,7 @@ func TestRevertSaga_AfterAFailedUpReappliesThePreviousComposeAndItsRoute(t *test
 		routed <- [2]any{app.PublishedPort, app.WebTLS}
 		return proto.AppLeafCmd{AppID: app.ID, UpstreamPort: app.PublishedPort, UpstreamTLS: app.WebTLS}, nil
 	}
-	if step, err := runSteps(t, RevertWorkflow(store, inv, nc2, mint), nc2, "a"); err != nil {
+	if step, err := runRevert(t, store, inv, nc2, mint, "a", composeV1); err != nil {
 		t.Fatalf("re-apply failed at %s: %v", step, err)
 	}
 
@@ -389,8 +389,8 @@ func TestRevertSaga_RefusesAnAppWithNoPreviousCompose(t *testing.T) {
 	nc := startNATS(t)
 	pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 
-	step, err := runSteps(t, RevertWorkflow(store, inv, nc, nil), nc, "a")
-	if step != "load" || !errors.Is(err, ErrNoPreviousCompose) {
+	step, err := runRevert(t, store, inv, nc, nil, "a", composeV2)
+	if step != "load" || !errors.Is(err, ErrUnknownComposeHash) {
 		t.Fatalf("want load to refuse, got step=%q err=%v", step, err)
 	}
 	select {
@@ -407,7 +407,7 @@ func TestRevertSaga_AFailedPullChangesNothing(t *testing.T) {
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	fakePullAgent(t, nc, proto.AppPullAck{OK: false, Detail: "registry unreachable"}, nil)
 
-	step, err := runSteps(t, RevertWorkflow(store, inv, nc, nil), nc, "a")
+	step, err := runRevert(t, store, inv, nc, nil, "a", composeV1)
 	if step != "pull" || err == nil {
 		t.Fatalf("want the pull to fail, got step=%q err=%v", step, err)
 	}
@@ -425,10 +425,10 @@ func TestRevertSaga_AFailedPullChangesNothing(t *testing.T) {
 	}
 }
 
-// The swap is conditional on the previous compose still being the one that was
-// pulled. Another change landing during the pull makes this job's view stale,
-// and it stops without writing.
-func TestRevertSaga_AChangeDuringThePullIsRefusedAtTheSwap(t *testing.T) {
+// The write is conditional on the previous compose still being the one that
+// was pulled. Another change landing during the pull makes this job's view
+// stale, and it stops without writing.
+func TestRevertSaga_AChangeDuringThePullIsRefusedAtApply(t *testing.T) {
 	store, inv, _, row := upgradedToV2(t)
 	nc := startNATS(t)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
@@ -438,17 +438,17 @@ func TestRevertSaga_AChangeDuringThePullIsRefusedAtTheSwap(t *testing.T) {
 		_ = store.UpgradeCompose(context.Background(), "a", ComposeHash(composeV2), UpgradeTarget{Tile: tileV3(), CatalogVersion: 3}.ComposeUpgrade(), time.Now().UTC())
 	})
 
-	step, err := runSteps(t, RevertWorkflow(store, inv, nc, nil), nc, "a")
-	if step != "swap" || !errors.Is(err, ErrComposeChanged) {
-		t.Fatalf("want the swap to refuse, got step=%q err=%v", step, err)
+	step, err := runRevert(t, store, inv, nc, nil, "a", composeV1)
+	if step != "apply" || !errors.Is(err, ErrComposeChanged) {
+		t.Fatalf("want apply to refuse, got step=%q err=%v", step, err)
 	}
 	select {
 	case cmd := <-deploys:
-		t.Fatalf("a refused swap pushed: %+v", cmd)
+		t.Fatalf("a refused apply pushed: %+v", cmd)
 	case <-time.After(100 * time.Millisecond):
 	}
 	if got := row(); got.ComposeYAML != composeV3 || got.PreviousComposeYAML != composeV2 {
-		t.Errorf("the refused swap wrote over the change that landed: compose=%q previous=%q", got.ComposeYAML, got.PreviousComposeYAML)
+		t.Errorf("the refused apply wrote over the change that landed: compose=%q previous=%q", got.ComposeYAML, got.PreviousComposeYAML)
 	}
 }
 
@@ -537,7 +537,7 @@ func TestPullStep_ATimedOutOrUnreadableReplyChangesNothing(t *testing.T) {
 			sc := newStepCtxNATS(`{"appId":"a"}`, nc)
 			sc.Ctx = ctx
 
-			_, err := pullStep(store, inv, nc, "upgrade", upgradePullSource(lookupOf(tileV3(), 3)))(sc)
+			_, err := pullStep(store, inv, nc, "upgrade", deploySpecAppID, upgradePullSource(lookupOf(tileV3(), 3)))(sc)
 			if err == nil || !strings.Contains(err.Error(), c.says) {
 				t.Fatalf("err = %v, want one saying %q", err, c.says)
 			}

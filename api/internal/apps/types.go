@@ -63,10 +63,11 @@ type App struct {
 	// 0 means unknown: a custom-compose app, or a catalog app installed before
 	// the column existed, where nothing recorded it.
 	ComposeCatalogVersion int `json:"composeCatalogVersion,omitempty"`
-	// PreviousComposeYAML is the compose the most recent upgrade replaced; ""
-	// if the app has never been upgraded. Kept so a failed upgrade has
-	// something to go back to without asking the catalog, which may no longer
-	// carry that version.
+	// PreviousComposeYAML is the compose the most recent compose change — an
+	// upgrade, a custom edit or a re-apply — replaced; "" if the app's compose
+	// has never changed. Kept so a failed change has something to go back to
+	// without asking the catalog, which may no longer carry that version, and
+	// for a custom app, whose compose exists nowhere else.
 	PreviousComposeYAML string `json:"previousComposeYaml,omitempty"`
 	// The rest of the record that went with PreviousComposeYAML (#411): the
 	// catalog version it came from, and the route and budget it ran with.

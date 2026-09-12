@@ -45,9 +45,10 @@ import (
 // keeps the old, the status is failed with the agent's reason, and going back
 // is the owner's explicit call (RevertWorkflow).
 //
-// The step is built from a pullSource so any saga that changes a compose can
-// put it in front of its write: the catalog upgrade and the re-apply of the
-// previous compose here, and the custom compose edit (#410) next.
+// The step is built from a pullSource so every saga that changes a compose puts
+// it in front of its write: the catalog upgrade, the re-apply of the previous
+// compose, and the custom compose edit (#410, which reads the submitted compose
+// from the ComposeStash rather than from the row or the spec).
 
 // pullTarget is the compose a pull step fetches images for, and the budget the
 // pull runs under — the budget the deploy of that compose will get, since
@@ -86,9 +87,9 @@ type pullResult struct {
 // the UI shows the operation the moment it starts rather than after a pull
 // that can take the app's whole budget. When the pull fails the status goes
 // back (Store.RestoreStatus), because nothing on the node changed.
-func pullStep(store *Store, inv *inventory.Store, nc *nats.Conn, change string, source pullSource) jobs.DoFn {
+func pullStep(store *Store, inv *inventory.Store, nc *nats.Conn, change string, appID specAppID, source pullSource) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		app, err := loadApp(sc, store, inv)
+		app, err := loadAppFor(sc, store, inv, appID)
 		if err != nil {
 			return nil, err
 		}

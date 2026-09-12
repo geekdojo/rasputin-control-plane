@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,17 +30,23 @@ type appView struct {
 	// a compose other than the installed one (#409). False for a custom app,
 	// for a tile the catalog no longer offers, and for a catalog older than
 	// the one the app's compose came from. It is apps.ResolveUpgrade's answer,
-	// the same function POST /api/apps/{id}/upgrade asks, so the badge cannot
-	// offer an upgrade the route would refuse.
+	// the same function PUT /api/apps/{id}/compose asks for
+	// {"source":"catalog"}, so the badge cannot offer an upgrade the route
+	// would refuse.
 	UpgradeAvailable bool `json:"upgradeAvailable"`
 	// UpgradeCatalogVersion is the catalog version an upgrade would take the
 	// compose from. Absent unless UpgradeAvailable.
 	UpgradeCatalogVersion int `json:"upgradeCatalogVersion,omitempty"`
-	// RevertAvailable says the app has a previous compose that POST
-	// /api/apps/{id}/revert would re-apply (#411) — apps.CanRevert's answer,
-	// the same function the route asks. Always present, like
-	// upgradeAvailable, so false is never inferred from absence.
+	// RevertAvailable says the app has a previous compose that PUT
+	// /api/apps/{id}/compose would re-apply (#411) — apps.CanRevert's answer.
+	// Always present, like upgradeAvailable, so false is never inferred from
+	// absence.
 	RevertAvailable bool `json:"revertAvailable"`
+	// PreviousComposeSHA256 is the hash a re-apply names: {"sha256": this}.
+	// A re-apply names its target (#410), so a client needs the hash, and
+	// computing it from previousComposeYaml would make every client
+	// reimplement ComposeHash byte for byte. Absent unless RevertAvailable.
+	PreviousComposeSHA256 string `json:"previousComposeSha256,omitempty"`
 }
 
 // newAppView decorates one app row with what the catalog in effect says about
@@ -51,7 +58,10 @@ func (s *Server) newAppView(a *apps.App) appView {
 		v.UpgradeAvailable = true
 		v.UpgradeCatalogVersion = target.CatalogVersion
 	}
-	v.RevertAvailable = apps.CanRevert(a) == nil
+	if apps.CanRevert(a) == nil {
+		v.RevertAvailable = true
+		v.PreviousComposeSHA256 = apps.ComposeHash(a.PreviousComposeYAML)
+	}
 	return v
 }
 
@@ -196,11 +206,18 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "app not found")
 		return
 	}
+	s.writeAppView(w, r, app)
+}
+
+// writeAppView answers 200 with app as GET /api/apps/{id} shows it: the row,
+// what the catalog says about upgrading it, and its backup state.
+func (s *Server) writeAppView(w http.ResponseWriter, r *http.Request, app *apps.App) {
 	view := s.newAppView(app)
 	if s.backupStates != nil {
 		if st, err := s.backupStates.AppBackupState(r.Context(), app.ID); err != nil {
-			// The id is request-supplied and stays out of the log line.
-			log.Printf("apps: backup state (GET /api/apps/{id}): %v", err)
+			// The id is request-supplied and stays out of the log line; so does
+			// anything else from the request.
+			log.Printf("apps: backup state (GET /api/apps/{id} or a no-op PUT .../compose): %v", err)
 		} else {
 			view.Backup = st
 		}
@@ -338,31 +355,60 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, j)
 }
 
-// POST /api/apps/{id}/upgrade
+// maxComposeBody caps a PUT /api/apps/{id}/compose body. A compose file is a
+// few kilobytes; a megabyte is room for any real one, and the whole body is
+// read into memory and held until its job ends.
+const maxComposeBody = 1 << 20
+
+// composeRequest is the body of PUT /api/apps/{id}/compose. Exactly one field
+// is set; pointers, so a field that is present is told apart from one that is
+// absent.
+type composeRequest struct {
+	Source      *string `json:"source"`
+	ComposeYAML *string `json:"composeYaml"`
+	SHA256      *string `json:"sha256"`
+}
+
+// PUT /api/apps/{id}/compose
 //
-// Upgrades a catalog app in place to the compose its tile carries in the
-// catalog in effect (geekdojo/geekdojo-brain#409), by running the app.upgrade
-// saga: pull the tile's images, persist the tile's compose on the row, then the
-// deploy push to the same ULID — so the Compose project and its named volumes
-// are the ones the app already has. A pull that fails changes nothing (#411).
-// Async, like deploy: returns the job.
+// The app's compose, as one resource (geekdojo/geekdojo-brain#410). The body
+// names the compose the app should run, in one of three ways:
 //
-// There is no body, and any body sent is not read. The compose comes only from
-// the verified catalog store, which is the one place a tile's compose has been
-// through the bundle's signature, safety and pin checks; a route that accepted
-// one from the client would skip all three.
+//	{"source": "catalog"}   its tile's compose in the verified catalog (#409) — catalog apps only
+//	{"composeYaml": "…"}    a compose the owner supplies — custom apps only
+//	{"sha256": "<hash>"}    the installed or retained previous compose with that hash (#411) — both
 //
-// Every refusal is decided here, before a job exists, with the same function
-// the upgradeAvailable flag uses: 404 for an unknown app; 409 for a custom app,
-// a tile the catalog in effect does not offer, a catalog older than the app's
-// compose, and an app already on its tile's current compose. The saga checks
-// again when it runs — the catalog can change in between.
+// Every change runs in place, as a job whose first step pulls the new
+// compose's images and changes nothing if that fails: app.upgrade, app.edit
+// and app.revert respectively. The app keeps its ULID, so its Compose project
+// and named volumes are the ones it already has. 202 with the job.
+//
+// PUT is idempotent, and so is this. A body naming the compose that is already
+// installed — the tile's current compose, the installed compose's own hash, or
+// the same composeYaml again — changes nothing, starts no job, and answers 200
+// with the app as GET /api/apps/{id} shows it.
+//
+// Refusals come before a job exists. 404 for an unknown app. 400 for a body
+// that is not JSON, names an unknown field, or sets none or more than one of
+// the three (an ambiguous request is not guessed at), and for a source other
+// than "catalog", an empty composeYaml, or a sha256 that is not a sha256. 409
+// for a body the app's kind does not allow — composeYaml on a catalog app,
+// whose compose changes only to a signed tile's or back to one that already
+// ran; source catalog on a custom app — and for everything the upgrade refuses
+// (a tile the catalog in effect does not offer, a catalog older than the app's
+// compose), and for a sha256 that is neither the installed compose nor the
+// retained previous one.
+//
+// A composeYaml is not validated, as it is not at custom create (ADR-0006
+// D12). It is also never put in the job's spec: specs are rendered on the
+// Tasks page, and a custom compose can inline secrets. It is held in the
+// ComposeStash under the job's id before the job starts, read from there by
+// the job's pull and persist steps, and discarded when the job ends.
 //
 // No privilege re-consent is asked for here: consent is the UI's, as it is at
 // install (Bryce, 2026-09-12).
-func (s *Server) handleUpgradeApp(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	app, err := s.apps.Get(r.Context(), id)
+func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
+	app, err := s.apps.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -371,54 +417,140 @@ func (s *Server) handleUpgradeApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "app not found")
 		return
 	}
-	if _, err := apps.ResolveUpgrade(app, s.tileLookup()); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-	spec, _ := json.Marshal(apps.DeploySpec{AppID: app.ID})
-	j, err := s.runner.Submit(r.Context(), "app.upgrade", spec, creator(r))
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxComposeBody+1))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "unreadable body")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, j)
+	if len(body) > maxComposeBody {
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("body larger than %d bytes", maxComposeBody))
+		return
+	}
+	var req composeRequest
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if dec.More() {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: more than one JSON value")
+		return
+	}
+	set := 0
+	for _, f := range []*string{req.Source, req.ComposeYAML, req.SHA256} {
+		if f != nil {
+			set++
+		}
+	}
+	if set != 1 {
+		writeError(w, http.StatusBadRequest, `name exactly one of "source", "composeYaml" or "sha256"`)
+		return
+	}
+
+	switch {
+	case req.Source != nil:
+		s.putComposeFromCatalog(w, r, app, *req.Source)
+	case req.ComposeYAML != nil:
+		s.putComposeYAML(w, r, app, *req.ComposeYAML)
+	default:
+		s.putComposeByHash(w, r, app, *req.SHA256)
+	}
 }
 
-// POST /api/apps/{id}/revert
-//
-// Re-applies the compose the app ran before its compose was last replaced
-// (geekdojo/geekdojo-brain#411), in place, by running the app.revert saga:
-// pull the previous compose's images, swap the installed and previous records
-// on the row, push, re-route. It is the owner's way back from a change whose
-// images pulled and whose `up` then failed — the one failure no saga undoes on
-// its own, because the new containers may already have migrated the app's
-// data. Async, like deploy: returns the job.
-//
-// There is no body, and any body sent is not read: the compose comes from the
-// row, never from the client. 404 for an unknown app; 409 when the app has no
-// previous compose. The catalog is not consulted — not for availability and
-// not for the downgrade refusal the upgrade route makes — because this names a
-// compose that already ran on this node rather than one the catalog offers;
-// apps.RevertWorkflow says why in full. As for upgrade, no re-consent is asked
-// for here: that is the UI's (Bryce, 2026-09-12).
-func (s *Server) handleRevertApp(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	app, err := s.apps.Get(r.Context(), id)
+// putComposeFromCatalog is {"source":"catalog"}: upgrade to the tile's
+// compose. apps.ResolveUpgrade decides, the same function the upgradeAvailable
+// flag and the saga ask, so the badge cannot offer an upgrade this refuses.
+// The compose itself is not taken from the request; the saga resolves it from
+// the verified store when it runs.
+func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, app *apps.App, source string) {
+	if source != "catalog" {
+		writeError(w, http.StatusBadRequest, `source must be "catalog"`)
+		return
+	}
+	_, err := apps.ResolveUpgrade(app, s.tileLookup())
+	switch {
+	case errors.Is(err, apps.ErrUpgradeAlreadyCurrent):
+		s.writeAppView(w, r, app)
+		return
+	case err != nil:
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	s.submitComposeJob(w, r, "app.upgrade", apps.DeploySpec{AppID: app.ID}, nil)
+}
+
+// putComposeYAML is {"composeYaml":"…"}: replace a custom app's compose.
+func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *apps.App, compose string) {
+	if strings.TrimSpace(compose) == "" {
+		writeError(w, http.StatusBadRequest, "composeYaml must not be empty")
+		return
+	}
+	if app.SourceTile != "" {
+		writeError(w, http.StatusConflict, apps.ErrEditCatalogApp.Error())
+		return
+	}
+	if apps.ComposeHash(compose) == app.ComposeSHA256 {
+		s.writeAppView(w, r, app)
+		return
+	}
+	if s.composeStash == nil {
+		writeError(w, http.StatusServiceUnavailable, "compose editing is not available on this api")
+		return
+	}
+	s.submitComposeJob(w, r, "app.edit", apps.DeploySpec{AppID: app.ID}, func(jobID string) error {
+		return s.composeStash.Put(jobID, compose)
+	})
+}
+
+// putComposeByHash is {"sha256":"…"}: re-apply the compose with that hash.
+func (s *Server) putComposeByHash(w http.ResponseWriter, r *http.Request, app *apps.App, sha string) {
+	sha = strings.ToLower(sha)
+	if !apps.ValidComposeHash(sha) {
+		writeError(w, http.StatusBadRequest, "sha256 must be the 64 hex digits of a compose's sha256")
+		return
+	}
+	current, err := apps.ResolveReapply(app, sha)
+	switch {
+	case err != nil:
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case current:
+		s.writeAppView(w, r, app)
+		return
+	}
+	s.submitComposeJob(w, r, "app.revert", apps.RevertSpec{AppID: app.ID, ComposeSHA256: sha}, nil)
+}
+
+// submitComposeJob starts a compose change and answers 202 with its job.
+// stash, when set, runs with the job's id before the job starts, so a compose
+// that must not be in the spec is where the job will look for it by the time
+// its first step runs.
+func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind string, spec any, stash func(jobID string) error) {
+	raw, err := json.Marshal(spec)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if app == nil {
-		writeError(w, http.StatusNotFound, "app not found")
-		return
+	var stashedFor string
+	prepare := func(jobID string) error {
+		if stash == nil {
+			return nil
+		}
+		if err := stash(jobID); err != nil {
+			return err
+		}
+		stashedFor = jobID
+		return nil
 	}
-	if err := apps.CanRevert(app); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-	spec, _ := json.Marshal(apps.DeploySpec{AppID: app.ID})
-	j, err := s.runner.Submit(r.Context(), "app.revert", spec, creator(r))
+	j, err := s.runner.SubmitPrepared(r.Context(), kind, raw, creator(r), prepare)
 	if err != nil {
+		// No job will run under that id, so no OnTerminal will discard what
+		// was held for it.
+		if stashedFor != "" {
+			s.composeStash.Discard(stashedFor)
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
