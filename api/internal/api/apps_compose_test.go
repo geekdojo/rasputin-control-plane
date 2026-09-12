@@ -225,6 +225,7 @@ func TestAppsCompose_CustomEditRedeploysInPlaceAndNeverRecordsTheCompose(t *test
 // A failed edit discards the held compose too, and its failure — the job's
 // error, its steps, its events — does not carry it.
 func TestAppsCompose_AFailedEditDiscardsTheComposeAndDoesNotRecordIt(t *testing.T) {
+	const id = "01J9ZK3Q0M8X7Y6W5V4T3S2R1P"
 	f, cookie, _, _ := upgradeFixture(t)
 	now := time.Now().UTC()
 	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "n2", Role: proto.RoleCompute, Hostname: "n2.test", FirstSeen: now, LastSeen: now}); err != nil {
@@ -246,12 +247,12 @@ func TestAppsCompose_AFailedEditDiscardsTheComposeAndDoesNotRecordIt(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
-	a := seedUpgradeApp(t, f, "a", "mine", "", customOld, 0)
+	a := seedUpgradeApp(t, f, id, "mine", "", customOld, 0)
 	if _, err := f.appsStore.Get(f.ctx, a.ID); err != nil {
 		t.Fatal(err)
 	}
 	// seedUpgradeApp targets n1; this one needs the failing node.
-	if err := f.appsStore.Delete(f.ctx, "a"); err != nil {
+	if err := f.appsStore.Delete(f.ctx, id); err != nil {
 		t.Fatal(err)
 	}
 	a.TargetNode = "n2"
@@ -259,7 +260,7 @@ func TestAppsCompose_AFailedEditDiscardsTheComposeAndDoesNotRecordIt(t *testing.
 		t.Fatal(err)
 	}
 
-	w := f.do(t, http.MethodPut, "/api/apps/a/compose", composeYAMLBody(t, customNew), cookie)
+	w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", composeYAMLBody(t, customNew), cookie)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("edit: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
@@ -273,7 +274,7 @@ func TestAppsCompose_AFailedEditDiscardsTheComposeAndDoesNotRecordIt(t *testing.
 	if n := f.srv.composeStash.Len(); n != 0 {
 		t.Errorf("%d composes still held after the job failed", n)
 	}
-	if after, _ := f.appsStore.Get(f.ctx, "a"); after.ComposeYAML != customOld || after.PreviousComposeYAML != "" {
+	if after, _ := f.appsStore.Get(f.ctx, id); after.ComposeYAML != customOld || after.PreviousComposeYAML != "" {
 		t.Errorf("a failed pull wrote the row: compose=%q previous=%q", after.ComposeYAML, after.PreviousComposeYAML)
 	}
 }
@@ -424,24 +425,25 @@ func TestAppsCompose_ReapplyByHashDoesNotBounce(t *testing.T) {
 // A custom app goes back by hash too, after an edit, and its previous compose
 // is re-applied from the row.
 func TestAppsCompose_CustomAppReappliesByHash(t *testing.T) {
+	const id = "01J9ZK3Q0M8X7Y6W5V4T3S2R1P"
 	f, cookie, _, got := upgradeFixture(t)
-	seedUpgradeApp(t, f, "c", "mine", "", customOld, 0)
-	if w := f.do(t, http.MethodPut, "/api/apps/c/compose", composeYAMLBody(t, customNew), cookie); w.Code != http.StatusAccepted {
+	seedUpgradeApp(t, f, id, "mine", "", customOld, 0)
+	if w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", composeYAMLBody(t, customNew), cookie); w.Code != http.StatusAccepted {
 		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
 	}
 	f.runner.Wait()
 	<-got
-	w := f.do(t, http.MethodPut, "/api/apps/c/compose", shaBody(customOld), cookie)
+	w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", shaBody(customOld), cookie)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("re-apply: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
 	job := decodeBody[jobs.Job](t, w.Body.String())
 	f.runner.Wait()
-	if cmd := <-got; cmd.AppID != "c" || cmd.ComposeYAML != customOld {
+	if cmd := <-got; cmd.AppID != id || cmd.ComposeYAML != customOld {
 		t.Errorf("agent was sent %s %q, want the old compose", cmd.AppID, cmd.ComposeYAML)
 	}
 	assertJobCarriesNoCompose(t, f, cookie, job.ID)
-	if r := getRow(t, f, cookie, "c"); r.ComposeYAML != customOld || r.PreviousComposeYAML != customNew {
+	if r := getRow(t, f, cookie, id); r.ComposeYAML != customOld || r.PreviousComposeYAML != customNew {
 		t.Errorf("row = %+v", r)
 	}
 }

@@ -660,8 +660,8 @@ func parseSpec(raw json.RawMessage) (*DeploySpec, error) {
 	if err := decodeStrict(raw, &spec); err != nil {
 		return nil, err
 	}
-	if spec.AppID == "" {
-		return nil, errors.New("appId is required")
+	if err := checkSpecAppID(spec.AppID); err != nil {
+		return nil, err
 	}
 	return &spec, nil
 }
@@ -679,13 +679,24 @@ func parseDeleteSpec(raw json.RawMessage) (*DeleteSpec, error) {
 	if err := decodeStrict(raw, &spec); err != nil {
 		return nil, err
 	}
-	if spec.AppID == "" {
-		return nil, errors.New("appId is required")
-	}
-	if !proto.ValidAppID(spec.AppID) {
-		return nil, errors.New("appId must be an app id (a 26-character ULID)")
+	if err := checkSpecAppID(spec.AppID); err != nil {
+		return nil, err
 	}
 	return &spec, nil
+}
+
+// checkSpecAppID is the appId check every app.* spec parser makes. A spec
+// arrives from the jobs endpoint as submitted, and each saga validates its
+// own spec as if the HTTP handler did not exist, so the id is checked to be
+// shaped like an app id before any step uses it.
+func checkSpecAppID(id string) error {
+	if id == "" {
+		return errors.New("appId is required")
+	}
+	if !proto.ValidAppID(id) {
+		return errors.New("appId must be an app id (a 26-character ULID)")
+	}
+	return nil
 }
 
 // decodeStrict unmarshals raw into v refusing unknown fields.

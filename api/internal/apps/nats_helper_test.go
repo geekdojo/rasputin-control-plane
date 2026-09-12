@@ -71,7 +71,7 @@ func seedOnlineApp(t *testing.T, nodeID, appID, appName string) (*Store, *invent
 func TestDeployPush_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "minecraft")
+	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
 
 	// Fake agent: handle docker.deploy with an OK ack reporting Running.
 	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
@@ -88,13 +88,13 @@ func TestDeployPush_HappyPath(t *testing.T) {
 	defer func() { _ = sub.Unsubscribe() }()
 
 	// Subscribe to the app-change channel to observe emitChange.
-	changeSub, err := nc.SubscribeSync(proto.AppChangeSubject("a", proto.AppDeployed))
+	changeSub, err := nc.SubscribeSync(proto.AppChangeSubject(testAppID, proto.AppDeployed))
 	if err != nil {
 		t.Fatalf("change sub: %v", err)
 	}
 	defer func() { _ = changeSub.Unsubscribe() }()
 
-	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	out, err := deployPush(store, inv, nc)(sc)
 	if err != nil {
 		t.Fatalf("deployPush: %v", err)
@@ -104,7 +104,7 @@ func TestDeployPush_HappyPath(t *testing.T) {
 	}
 
 	// Store should reflect the running state.
-	got, _ := store.Get(ctx, "a")
+	got, _ := store.Get(ctx, testAppID)
 	if got.LastStatus != proto.AppStatusRunning || got.LastDetail != "containers up" {
 		t.Errorf("RecordStatus not applied: %+v", got)
 	}
@@ -119,7 +119,7 @@ func TestDeployPush_HappyPath(t *testing.T) {
 func TestDeployPush_AgentReportsFailure(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "minecraft")
+	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
 
 	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.AppDeployAck{
@@ -134,11 +134,11 @@ func TestDeployPush_AgentReportsFailure(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	if _, err := deployPush(store, inv, nc)(sc); err == nil {
 		t.Error("agent failure: want error, got nil")
 	}
-	got, _ := store.Get(ctx, "a")
+	got, _ := store.Get(ctx, testAppID)
 	if got.LastStatus != proto.AppStatusFailed {
 		t.Errorf("LastStatus: want failed, got %q", got.LastStatus)
 	}
@@ -149,16 +149,16 @@ func TestDeployPush_AgentReportsFailure(t *testing.T) {
 func TestDeployPush_RPCFails(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "minecraft")
+	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
 
-	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	tctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	sc.Ctx = tctx
 	if _, err := deployPush(store, inv, nc)(sc); err == nil {
 		t.Error("RPC timeout: want error")
 	}
-	got, _ := store.Get(ctx, "a")
+	got, _ := store.Get(ctx, testAppID)
 	if got.LastStatus != proto.AppStatusFailed {
 		t.Errorf("LastStatus: want failed, got %q", got.LastStatus)
 	}
@@ -167,12 +167,12 @@ func TestDeployPush_RPCFails(t *testing.T) {
 // TestDeployPush_BadAck: agent replies with garbage JSON → decode-ack error.
 func TestDeployPush_BadAck(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "minecraft")
+	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
 	sub, _ := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
 		_ = m.Respond([]byte("not-json"))
 	})
 	defer func() { _ = sub.Unsubscribe() }()
-	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	if _, err := deployPush(store, inv, nc)(sc); err == nil {
 		t.Error("bad ack: want error")
 	}
@@ -185,7 +185,7 @@ func TestDeployPush_BadAck(t *testing.T) {
 func TestStopPush_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "minecraft")
+	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
 
 	sub, err := nc.Subscribe(proto.AppStopSubject("n"), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.AppStopAck{
@@ -202,20 +202,20 @@ func TestStopPush_HappyPath(t *testing.T) {
 
 	// A transitional `stopping` event must fire immediately so the UI reflects
 	// the in-progress state instead of looking unresponsive.
-	stoppingSub, err := nc.SubscribeSync(proto.AppChangeSubject("a", proto.AppStopping))
+	stoppingSub, err := nc.SubscribeSync(proto.AppChangeSubject(testAppID, proto.AppStopping))
 	if err != nil {
 		t.Fatalf("stopping sub: %v", err)
 	}
 	defer func() { _ = stoppingSub.Unsubscribe() }()
 
-	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	if _, err := stopPush(store, inv, nc)(sc); err != nil {
 		t.Fatalf("stopPush: %v", err)
 	}
 	if _, err := stoppingSub.NextMsg(time.Second); err != nil {
 		t.Errorf("expected a transitional AppStopping event: %v", err)
 	}
-	got, _ := store.Get(ctx, "a")
+	got, _ := store.Get(ctx, testAppID)
 	if got.LastStatus != proto.AppStatusStopped {
 		t.Errorf("LastStatus: want stopped, got %q", got.LastStatus)
 	}
@@ -223,13 +223,13 @@ func TestStopPush_HappyPath(t *testing.T) {
 
 func TestStopPush_AgentReportsFailure(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "minecraft")
+	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
 	sub, _ := nc.Subscribe(proto.AppStopSubject("n"), func(m *nats.Msg) {
 		ack, _ := json.Marshal(proto.AppStopAck{OK: false, Status: proto.AppStatusFailed, Detail: "kill -9 failed"})
 		_ = m.Respond(ack)
 	})
 	defer func() { _ = sub.Unsubscribe() }()
-	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	if _, err := stopPush(store, inv, nc)(sc); err == nil {
 		t.Error("want error on OK=false")
 	}
@@ -237,8 +237,8 @@ func TestStopPush_AgentReportsFailure(t *testing.T) {
 
 func TestStopPush_RPCFails(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "minecraft")
-	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
+	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	tctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	sc.Ctx = tctx
@@ -249,12 +249,12 @@ func TestStopPush_RPCFails(t *testing.T) {
 
 func TestStopPush_BadAck(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "minecraft")
+	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
 	sub, _ := nc.Subscribe(proto.AppStopSubject("n"), func(m *nats.Msg) {
 		_ = m.Respond([]byte("bogus"))
 	})
 	defer func() { _ = sub.Unsubscribe() }()
-	sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	if _, err := stopPush(store, inv, nc)(sc); err == nil {
 		t.Error("bad ack: want error")
 	}

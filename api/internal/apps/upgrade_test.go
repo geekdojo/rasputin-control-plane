@@ -507,15 +507,15 @@ func TestUpgradeSaga_DeploysTheTilesComposeToTheSameULID(t *testing.T) {
 func TestUpgradeSaga_AFailedPushLeavesTheNewComposeOnTheRowAndTheOldOneKept(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedUpgradeApp(t, "a")
+	store, inv := seedUpgradeApp(t, testAppID)
 	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	fakeDeployAgent(t, nc, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: "up: port is already allocated"})
 
-	step, err := runUpgrade(t, store, inv, nc, lookupOf(upgradeTile(composeV2), 2), "a")
+	step, err := runUpgrade(t, store, inv, nc, lookupOf(upgradeTile(composeV2), 2), testAppID)
 	if err == nil || step != "push" {
 		t.Fatalf("want the push step to fail, got step=%q err=%v", step, err)
 	}
-	got, _ := store.Get(ctx, "a")
+	got, _ := store.Get(ctx, testAppID)
 	if got.ComposeYAML != composeV2 || got.PreviousComposeYAML != composeV1 {
 		t.Errorf("row compose = %q previous = %q", got.ComposeYAML, got.PreviousComposeYAML)
 	}
@@ -537,21 +537,21 @@ func TestUpgradeSaga_AFailedPushLeavesTheNewComposeOnTheRowAndTheOldOneKept(t *t
 func TestUpgradeSaga_SubmittedDirectlyForACurrentAppChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedUpgradeApp(t, "a")
+	store, inv := seedUpgradeApp(t, testAppID)
 	checks := fakeVolumeCheckAgent(t, nc)
 	pulls := fakePullOnly(t, nc, proto.AppPullAck{OK: true}, nil)
 	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	lookup := lookupOf(upgradeTile(composeV2), 2)
 
-	if _, err := runUpgrade(t, store, inv, nc, lookup, "a"); err != nil {
+	if _, err := runUpgrade(t, store, inv, nc, lookup, testAppID); err != nil {
 		t.Fatal(err)
 	}
 	<-got
 	<-pulls
 	<-checks
-	before, _ := store.Get(ctx, "a")
+	before, _ := store.Get(ctx, testAppID)
 
-	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"a"}`, "job-direct")
+	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"`+testAppID+`"}`, "job-direct")
 	if !errors.Is(r.err, jobs.ErrStopWorkflow) || r.failedAt != "load" {
 		t.Fatalf("want the job to end successfully at load, got step=%q err=%v", r.failedAt, r.err)
 	}
@@ -569,7 +569,7 @@ func TestUpgradeSaga_SubmittedDirectlyForACurrentAppChangesNothing(t *testing.T)
 		t.Fatalf("the node was sent a deploy: %+v", cmd)
 	case <-time.After(100 * time.Millisecond):
 	}
-	after, _ := store.Get(ctx, "a")
+	after, _ := store.Get(ctx, testAppID)
 	if field := sameRecord(before, after); field != "" || after.LastStatus != before.LastStatus || after.PreviousComposeYAML != composeV1 {
 		t.Errorf("the no-op job changed the row (%s): %+v", field, after)
 	}
@@ -582,17 +582,17 @@ func TestUpgradeSaga_SubmittedDirectlyForACurrentAppChangesNothing(t *testing.T)
 func TestUpgradeSaga_AnUpgradeThatLostTheRaceDuringThePullEndsWithoutPushing(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedUpgradeApp(t, "a")
+	store, inv := seedUpgradeApp(t, testAppID)
 	lookup := lookupOf(upgradeTile(composeV2), 2)
 	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, func() {
 		// The winner's persist, during this job's pull.
-		if err := store.UpgradeCompose(ctx, "a", ComposeHash(composeV1), UpgradeTarget{Tile: upgradeTile(composeV2), CatalogVersion: 2}.ComposeUpgrade(), time.Now().UTC()); err != nil {
+		if err := store.UpgradeCompose(ctx, testAppID, ComposeHash(composeV1), UpgradeTarget{Tile: upgradeTile(composeV2), CatalogVersion: 2}.ComposeUpgrade(), time.Now().UTC()); err != nil {
 			t.Error(err)
 		}
 	})
 	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 
-	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"a"}`, "job-loser")
+	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"`+testAppID+`"}`, "job-loser")
 	if !errors.Is(r.err, jobs.ErrStopWorkflow) || r.failedAt != "persist" {
 		t.Fatalf("want the job to end successfully at persist, got step=%q err=%v", r.failedAt, r.err)
 	}
@@ -601,7 +601,7 @@ func TestUpgradeSaga_AnUpgradeThatLostTheRaceDuringThePullEndsWithoutPushing(t *
 		t.Fatalf("the losing upgrade pushed: %+v", cmd)
 	case <-time.After(100 * time.Millisecond):
 	}
-	row, _ := store.Get(ctx, "a")
+	row, _ := store.Get(ctx, testAppID)
 	if row.PreviousComposeYAML != composeV1 || row.ComposeYAML != composeV2 {
 		t.Errorf("row = compose %q previous %q, want v2 with v1 kept as the previous", row.ComposeYAML, row.PreviousComposeYAML)
 	}
@@ -617,18 +617,18 @@ func TestUpgradeSaga_AnUpgradeThatLostTheRaceDuringThePullEndsWithoutPushing(t *
 func TestUpgradeSaga_RefusesBeforeTouchingTheRowOrTheNode(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedUpgradeApp(t, "a")
+	store, inv := seedUpgradeApp(t, testAppID)
 	pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 
-	if _, err := runUpgrade(t, store, inv, nc, lookupOf(upgradeTile(composeV2), 2), "a"); err != nil {
+	if _, err := runUpgrade(t, store, inv, nc, lookupOf(upgradeTile(composeV2), 2), testAppID); err != nil {
 		t.Fatal(err)
 	}
 	<-got
 	<-pulls
 
 	// Withdraw the tile, then ask again.
-	step, err := runUpgrade(t, store, inv, nc, nil, "a")
+	step, err := runUpgrade(t, store, inv, nc, nil, testAppID)
 	if !errors.Is(err, ErrUpgradeTileUnavailable) || step != "pull" {
 		t.Fatalf("want the pull step to refuse an unavailable tile, got step=%q err=%v", step, err)
 	}
@@ -639,10 +639,10 @@ func TestUpgradeSaga_RefusesBeforeTouchingTheRowOrTheNode(t *testing.T) {
 		t.Fatalf("a refused upgrade asked the node to pull: %+v", cmd)
 	case <-time.After(100 * time.Millisecond):
 	}
-	if row, _ := store.Get(ctx, "a"); row.LastStatus != proto.AppStatusRunning {
+	if row, _ := store.Get(ctx, testAppID); row.LastStatus != proto.AppStatusRunning {
 		t.Errorf("a refusal marked the app %s", row.LastStatus)
 	}
-	if row, _ := store.Get(ctx, "a"); row.ComposeYAML != composeV2 {
+	if row, _ := store.Get(ctx, testAppID); row.ComposeYAML != composeV2 {
 		t.Errorf("a refused upgrade wrote the row: %q", row.ComposeYAML)
 	}
 }

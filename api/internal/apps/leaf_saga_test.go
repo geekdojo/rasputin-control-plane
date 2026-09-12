@@ -49,7 +49,7 @@ func fakeLeafAgent(t *testing.T, nc *nats.Conn, nodeID string, got chan<- proto.
 
 func TestDeployLeaf_MintsAndDelivers(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedAppWithPort(t, "n", "a", "jellyfin", 8096, true)
+	store, inv := seedAppWithPort(t, "n", testAppID, "jellyfin", 8096, true)
 
 	got := make(chan proto.AppLeafCmd, 1)
 	sub := fakeLeafAgent(t, nc, "n", got)
@@ -64,12 +64,12 @@ func TestDeployLeaf_MintsAndDelivers(t *testing.T) {
 		}, nil
 	}
 
-	if _, err := deployLeaf(store, inv, nc, mint)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := deployLeaf(store, inv, nc, mint)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployLeaf: %v", err)
 	}
 	select {
 	case cmd := <-got:
-		if cmd.AppID != "a" || cmd.UpstreamPort != 8096 || cmd.TailnetFQDN != "jellyfin.home1.internal" || cmd.Remove {
+		if cmd.AppID != testAppID || cmd.UpstreamPort != 8096 || cmd.TailnetFQDN != "jellyfin.home1.internal" || cmd.Remove {
 			t.Errorf("delivered cmd wrong: %+v", cmd)
 		}
 	case <-time.After(2 * time.Second):
@@ -85,14 +85,14 @@ func TestDeployLeaf_SkipsWhenNoPortOrNilMinter(t *testing.T) {
 	}
 
 	// Headless app (port 0): minter not called, no delivery.
-	store, inv := seedAppWithPort(t, "n", "a", "headless", 0, false)
-	if _, err := deployLeaf(store, inv, nc, mint)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	store, inv := seedAppWithPort(t, "n", testAppID, "headless", 0, false)
+	if _, err := deployLeaf(store, inv, nc, mint)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployLeaf (headless): %v", err)
 	}
 
 	// nil minter: leaf delivery disabled, no-op.
-	store2, inv2 := seedAppWithPort(t, "n2", "b", "app", 80, false)
-	if _, err := deployLeaf(store2, inv2, nc, nil)(newStepCtxNATS(`{"appId":"b"}`, nc)); err != nil {
+	store2, inv2 := seedAppWithPort(t, "n2", otherAppID, "app", 80, false)
+	if _, err := deployLeaf(store2, inv2, nc, nil)(newStepCtxNATS(`{"appId":"`+otherAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployLeaf (nil minter): %v", err)
 	}
 }

@@ -69,16 +69,16 @@ func sameRecord(a, b *App) string {
 func upgradedToV2(t *testing.T) (*Store, *inventory.Store, *App, func() *App) {
 	t.Helper()
 	ctx := context.Background()
-	store, inv := seedUpgradeApp(t, "a")
-	if err := store.UpgradeCompose(ctx, "a", ComposeHash(composeV1), UpgradeTarget{Tile: upgradeTile(composeV2), CatalogVersion: 2}.ComposeUpgrade(), time.Now().UTC()); err != nil {
+	store, inv := seedUpgradeApp(t, testAppID)
+	if err := store.UpgradeCompose(ctx, testAppID, ComposeHash(composeV1), UpgradeTarget{Tile: upgradeTile(composeV2), CatalogVersion: 2}.ComposeUpgrade(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordStatus(ctx, "a", proto.AppStatusRunning, "", time.Now().UTC()); err != nil {
+	if err := store.RecordStatus(ctx, testAppID, proto.AppStatusRunning, "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := store.Get(ctx, "a")
+	before, _ := store.Get(ctx, testAppID)
 	return store, inv, before, func() *App {
-		got, err := store.Get(ctx, "a")
+		got, err := store.Get(ctx, testAppID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: %v %v", got, err)
 		}
@@ -96,20 +96,20 @@ func TestUpgradeSaga_AFailedPullChangesNothingAndPutsTheStatusBack(t *testing.T)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	var sawDeploying atomic.Bool
 	pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: false, Detail: "docker compose pull: exit status 1 — manifest unknown"}, func() {
-		if got, _ := store.Get(context.Background(), "a"); got.LastStatus == proto.AppStatusDeploying {
+		if got, _ := store.Get(context.Background(), testAppID); got.LastStatus == proto.AppStatusDeploying {
 			sawDeploying.Store(true)
 		}
 	})
 	lookup := lookupOf(tileV3(), 3)
 
-	step, err := runUpgrade(t, store, inv, nc, lookup, "a")
+	step, err := runUpgrade(t, store, inv, nc, lookup, testAppID)
 	if step != "pull" || err == nil || !strings.Contains(err.Error(), "manifest unknown") {
 		t.Fatalf("want the pull step to fail with the agent's reason, got step=%q err=%v", step, err)
 	}
 
 	select {
 	case cmd := <-pulls:
-		if cmd.AppID != "a" || cmd.ComposeYAML != composeV3 || cmd.WorkBudgetSeconds != 900 {
+		if cmd.AppID != testAppID || cmd.ComposeYAML != composeV3 || cmd.WorkBudgetSeconds != 900 {
 			t.Errorf("pull cmd = %+v, want the v3 tile's compose under its budget", cmd)
 		}
 	default:
@@ -148,7 +148,7 @@ func TestUpgradeSaga_APullNobodyAnswersChangesNothing(t *testing.T) {
 	fakeVolumeCheckAgent(t, nc)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 
-	step, err := runUpgrade(t, store, inv, nc, lookupOf(tileV3(), 3), "a")
+	step, err := runUpgrade(t, store, inv, nc, lookupOf(tileV3(), 3), testAppID)
 	if step != "pull" || err == nil || !strings.Contains(err.Error(), "docker.pull") {
 		t.Fatalf("want the pull step to fail naming docker.pull, got step=%q err=%v", step, err)
 	}
@@ -185,7 +185,7 @@ func TestUpgradeSaga_TheCatalogMovingDuringThePullIsRefused(t *testing.T) {
 	}
 	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, func() { moved.Store(true) })
 
-	step, err := runUpgrade(t, store, inv, nc, lookup, "a")
+	step, err := runUpgrade(t, store, inv, nc, lookup, testAppID)
 	if step != "persist" || !errors.Is(err, errCatalogMovedDuringPull) {
 		t.Fatalf("want persist to refuse a compose that was not pulled, got step=%q err=%v", step, err)
 	}
@@ -209,10 +209,10 @@ func TestUpgradeSaga_AFailedPullLeavesANewerStatusAlone(t *testing.T) {
 	store, inv, _, row := upgradedToV2(t)
 	nc := startNATS(t)
 	fakePullAgent(t, nc, proto.AppPullAck{OK: false, Detail: "manifest unknown"}, func() {
-		_ = store.RecordStatus(context.Background(), "a", proto.AppStatusStopped, "stopped by the owner", time.Now().UTC().Add(time.Millisecond))
+		_ = store.RecordStatus(context.Background(), testAppID, proto.AppStatusStopped, "stopped by the owner", time.Now().UTC().Add(time.Millisecond))
 	})
 
-	if step, _ := runUpgrade(t, store, inv, nc, lookupOf(tileV3(), 3), "a"); step != "pull" {
+	if step, _ := runUpgrade(t, store, inv, nc, lookupOf(tileV3(), 3), testAppID); step != "pull" {
 		t.Fatalf("want the pull to fail, failed at %q", step)
 	}
 	if got := row(); got.LastStatus != proto.AppStatusStopped || got.LastDetail != "stopped by the owner" {
@@ -255,10 +255,10 @@ func TestStore_RevertComposeInstallsThePreviousRecordAndKeepsTheOneItLeaves(t *t
 	ctx := context.Background()
 	s, _, v2, _ := upgradedToV2(t)
 
-	if err := s.RevertCompose(ctx, "a", v2.ComposeSHA256, v2.PreviousComposeYAML, time.Now().UTC()); err != nil {
+	if err := s.RevertCompose(ctx, testAppID, v2.ComposeSHA256, v2.PreviousComposeYAML, time.Now().UTC()); err != nil {
 		t.Fatalf("RevertCompose: %v", err)
 	}
-	got, _ := s.Get(ctx, "a")
+	got, _ := s.Get(ctx, testAppID)
 	if got.ComposeYAML != composeV1 || got.ComposeSHA256 != ComposeHash(composeV1) || got.ComposeCatalogVersion != 1 ||
 		got.PublishedPort != 3001 || got.WebTLS || got.DeployBudgetSeconds != 0 {
 		t.Errorf("installed record after re-apply = %+v, want v1's", got)
@@ -271,10 +271,10 @@ func TestStore_RevertComposeInstallsThePreviousRecordAndKeepsTheOneItLeaves(t *t
 		t.Errorf("a re-apply changed identity or an owner choice: %+v", got)
 	}
 
-	if err := s.RevertCompose(ctx, "a", got.ComposeSHA256, got.PreviousComposeYAML, time.Now().UTC()); err != nil {
+	if err := s.RevertCompose(ctx, testAppID, got.ComposeSHA256, got.PreviousComposeYAML, time.Now().UTC()); err != nil {
 		t.Fatalf("re-apply again: %v", err)
 	}
-	back, _ := s.Get(ctx, "a")
+	back, _ := s.Get(ctx, testAppID)
 	if field := sameRecord(v2, back); field != "" {
 		t.Errorf("two re-applies did not return the record to where it started (%s)", field)
 	}
@@ -288,10 +288,10 @@ func TestStore_RevertComposeRefusals(t *testing.T) {
 	}
 	now := time.Now().UTC()
 
-	if err := s.RevertCompose(ctx, "a", ComposeHash("stale"), v2.PreviousComposeYAML, now); !errors.Is(err, ErrComposeChanged) {
+	if err := s.RevertCompose(ctx, testAppID, ComposeHash("stale"), v2.PreviousComposeYAML, now); !errors.Is(err, ErrComposeChanged) {
 		t.Errorf("stale installed hash: want ErrComposeChanged, got %v", err)
 	}
-	if err := s.RevertCompose(ctx, "a", v2.ComposeSHA256, composeV3, now); !errors.Is(err, ErrComposeChanged) {
+	if err := s.RevertCompose(ctx, testAppID, v2.ComposeSHA256, composeV3, now); !errors.Is(err, ErrComposeChanged) {
 		t.Errorf("a previous compose other than the one read (and pulled): want ErrComposeChanged, got %v", err)
 	}
 	if err := s.RevertCompose(ctx, "never", ComposeHash(composeV1), "", now); !errors.Is(err, ErrNoPreviousCompose) {
@@ -303,7 +303,7 @@ func TestStore_RevertComposeRefusals(t *testing.T) {
 	if err := s.RevertCompose(ctx, "ghost", v2.ComposeSHA256, v2.PreviousComposeYAML, now); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("unknown app: want sql.ErrNoRows, got %v", err)
 	}
-	if got, _ := s.Get(ctx, "a"); sameRecord(v2, got) != "" {
+	if got, _ := s.Get(ctx, testAppID); sameRecord(v2, got) != "" {
 		t.Errorf("a refused re-apply wrote the row")
 	}
 }
@@ -325,14 +325,14 @@ func TestRevertWorkflowShape(t *testing.T) {
 // row's record swaps whole, and the upgrade is offered again.
 func TestRevertSaga_AfterAFailedUpReappliesThePreviousComposeAndItsRoute(t *testing.T) {
 	ctx := context.Background()
-	store, inv := seedUpgradeApp(t, "a")
+	store, inv := seedUpgradeApp(t, testAppID)
 
 	// The upgrade: pull fine, up fails.
 	nc := startNATS(t)
 	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	fakeDeployAgent(t, nc, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: "up: failed to create network"})
 	lookup := lookupOf(upgradeTile(composeV2), 2)
-	if step, _ := runUpgrade(t, store, inv, nc, lookup, "a"); step != "push" {
+	if step, _ := runUpgrade(t, store, inv, nc, lookup, testAppID); step != "push" {
 		t.Fatalf("setup: want the upgrade to fail at push, failed at %q", step)
 	}
 
@@ -346,14 +346,14 @@ func TestRevertSaga_AfterAFailedUpReappliesThePreviousComposeAndItsRoute(t *test
 		routed <- [2]any{app.PublishedPort, app.WebTLS}
 		return proto.AppLeafCmd{AppID: app.ID, UpstreamPort: app.PublishedPort, UpstreamTLS: app.WebTLS}, nil
 	}
-	if step, err := runRevert(t, store, inv, nc2, mint, "a", composeV1); err != nil {
+	if step, err := runRevert(t, store, inv, nc2, mint, testAppID, composeV1); err != nil {
 		t.Fatalf("re-apply failed at %s: %v", step, err)
 	}
 
 	if cmd := <-pulls; cmd.ComposeYAML != composeV1 || cmd.WorkBudgetSeconds != 0 {
 		t.Errorf("pull = %q budget %d, want v1 under v1's budget", cmd.ComposeYAML, cmd.WorkBudgetSeconds)
 	}
-	if cmd := <-deploys; cmd.AppID != "a" || cmd.ComposeYAML != composeV1 || cmd.WorkBudgetSeconds != 0 {
+	if cmd := <-deploys; cmd.AppID != testAppID || cmd.ComposeYAML != composeV1 || cmd.WorkBudgetSeconds != 0 {
 		t.Errorf("push = %s %q budget %d, want v1 to the same app", cmd.AppID, cmd.ComposeYAML, cmd.WorkBudgetSeconds)
 	}
 	select {
@@ -368,7 +368,7 @@ func TestRevertSaga_AfterAFailedUpReappliesThePreviousComposeAndItsRoute(t *test
 		t.Errorf("leaf delivered %d times, want 1", atomic.LoadInt32(delivered))
 	}
 
-	got, _ := store.Get(ctx, "a")
+	got, _ := store.Get(ctx, testAppID)
 	if got.ComposeYAML != composeV1 || got.ComposeCatalogVersion != 1 || got.PublishedPort != 3001 || got.WebTLS || got.DeployBudgetSeconds != 0 {
 		t.Errorf("installed record = %+v, want v1's", got)
 	}
@@ -386,11 +386,11 @@ func TestRevertSaga_AfterAFailedUpReappliesThePreviousComposeAndItsRoute(t *test
 }
 
 func TestRevertSaga_RefusesAnAppWithNoPreviousCompose(t *testing.T) {
-	store, inv := seedUpgradeApp(t, "a")
+	store, inv := seedUpgradeApp(t, testAppID)
 	nc := startNATS(t)
 	pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 
-	step, err := runRevert(t, store, inv, nc, nil, "a", composeV2)
+	step, err := runRevert(t, store, inv, nc, nil, testAppID, composeV2)
 	if step != "load" || !errors.Is(err, ErrUnknownComposeHash) {
 		t.Fatalf("want load to refuse, got step=%q err=%v", step, err)
 	}
@@ -408,7 +408,7 @@ func TestRevertSaga_AFailedPullChangesNothing(t *testing.T) {
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	fakePullAgent(t, nc, proto.AppPullAck{OK: false, Detail: "registry unreachable"}, nil)
 
-	step, err := runRevert(t, store, inv, nc, nil, "a", composeV1)
+	step, err := runRevert(t, store, inv, nc, nil, testAppID, composeV1)
 	if step != "pull" || err == nil {
 		t.Fatalf("want the pull to fail, got step=%q err=%v", step, err)
 	}
@@ -436,10 +436,10 @@ func TestRevertSaga_AChangeDuringThePullIsRefusedAtApply(t *testing.T) {
 	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, func() {
 		// An upgrade to v3 lands while the re-apply is pulling v1: the
 		// previous compose is now v2.
-		_ = store.UpgradeCompose(context.Background(), "a", ComposeHash(composeV2), UpgradeTarget{Tile: tileV3(), CatalogVersion: 3}.ComposeUpgrade(), time.Now().UTC())
+		_ = store.UpgradeCompose(context.Background(), testAppID, ComposeHash(composeV2), UpgradeTarget{Tile: tileV3(), CatalogVersion: 3}.ComposeUpgrade(), time.Now().UTC())
 	})
 
-	step, err := runRevert(t, store, inv, nc, nil, "a", composeV1)
+	step, err := runRevert(t, store, inv, nc, nil, testAppID, composeV1)
 	if step != "apply" || !errors.Is(err, ErrComposeChanged) {
 		t.Fatalf("want apply to refuse, got step=%q err=%v", step, err)
 	}
@@ -537,7 +537,7 @@ func TestPullStep_ATimedOutOrUnreadableReplyChangesNothing(t *testing.T) {
 			c.agent(t, nc)
 			ctx, cancel := c.ctx()
 			defer cancel()
-			sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+			sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 			sc.Ctx = ctx
 
 			_, err := pullStep(store, inv, nc, "upgrade", composeChangeSpecAppID, composeChangeSpecDeleteVolumes, upgradePullSource(lookupOf(tileV3(), 3)))(sc)

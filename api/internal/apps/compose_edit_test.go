@@ -189,14 +189,14 @@ func TestEditSaga_DeploysTheSubmittedComposeToTheSameULIDWithoutRecordingIt(t *t
 func TestEditSaga_AFailedPullChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
-	store, inv := seedCustomApp(t, "a")
-	before, _ := store.Get(ctx, "a")
+	store, inv := seedCustomApp(t, testAppID)
+	before, _ := store.Get(ctx, testAppID)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	fakePullAgent(t, nc, proto.AppPullAck{OK: false, Detail: "docker compose pull: manifest unknown"}, nil)
 	stash := NewComposeStash()
 	_ = stash.Put("j", customV2)
 
-	run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash), nc, `{"appId":"a"}`, "j")
+	run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash), nc, `{"appId":"`+testAppID+`"}`, "j")
 	if run.failedAt != "pull" || !strings.Contains(run.err.Error(), "manifest unknown") {
 		t.Fatalf("want the pull to fail with the agent's reason, got step=%q err=%v", run.failedAt, run.err)
 	}
@@ -206,7 +206,7 @@ func TestEditSaga_AFailedPullChangesNothing(t *testing.T) {
 		t.Fatalf("a failed pull went on to push: %+v", cmd)
 	case <-time.After(100 * time.Millisecond):
 	}
-	after, _ := store.Get(ctx, "a")
+	after, _ := store.Get(ctx, testAppID)
 	if field := sameRecord(before, after); field != "" {
 		t.Errorf("a failed pull changed the row's %s", field)
 	}
@@ -225,10 +225,10 @@ func TestEditSaga_Refusals(t *testing.T) {
 	t.Run("no compose held", func(t *testing.T) {
 		ctx := context.Background()
 		nc := startNATS(t)
-		store, inv := seedCustomApp(t, "a")
-		before, _ := store.Get(ctx, "a")
+		store, inv := seedCustomApp(t, testAppID)
+		before, _ := store.Get(ctx, testAppID)
 		pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
-		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, NewComposeStash()), nc, `{"appId":"a"}`, "j")
+		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, NewComposeStash()), nc, `{"appId":"`+testAppID+`"}`, "j")
 		if run.failedAt != "pull" || !errors.Is(run.err, errEditComposeNotHeld) {
 			t.Fatalf("got step=%q err=%v", run.failedAt, run.err)
 		}
@@ -237,25 +237,25 @@ func TestEditSaga_Refusals(t *testing.T) {
 			t.Fatalf("the node was asked to pull with nothing held: %+v", cmd)
 		case <-time.After(100 * time.Millisecond):
 		}
-		after, _ := store.Get(ctx, "a")
+		after, _ := store.Get(ctx, testAppID)
 		if field := sameRecord(before, after); field != "" || after.LastStatus != proto.AppStatusRunning {
 			t.Errorf("row changed (%s) or status %s", field, after.LastStatus)
 		}
 	})
 	t.Run("catalog app", func(t *testing.T) {
 		nc := startNATS(t)
-		store, inv := seedUpgradeApp(t, "a")
+		store, inv := seedUpgradeApp(t, testAppID)
 		stash := NewComposeStash()
 		_ = stash.Put("j", customV2)
-		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash), nc, `{"appId":"a"}`, "j")
+		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash), nc, `{"appId":"`+testAppID+`"}`, "j")
 		if run.failedAt != "load" || !errors.Is(run.err, ErrEditCatalogApp) {
 			t.Fatalf("got step=%q err=%v", run.failedAt, run.err)
 		}
 	})
 	t.Run("spec carrying a compose", func(t *testing.T) {
 		nc := startNATS(t)
-		store, inv := seedCustomApp(t, "a")
-		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, NewComposeStash()), nc, `{"appId":"a","composeYaml":"x"}`, "j")
+		store, inv := seedCustomApp(t, testAppID)
+		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, NewComposeStash()), nc, `{"appId":"`+testAppID+`","composeYaml":"x"}`, "j")
 		if run.failedAt != "load" || run.err == nil {
 			t.Fatalf("a spec with a compose in it must be refused, got step=%q err=%v", run.failedAt, run.err)
 		}
@@ -315,12 +315,12 @@ func TestParseRevertSpec_IsStrict(t *testing.T) {
 		spec string
 		ok   bool
 	}{
-		{`{"appId":"a","sha256":"` + good + `"}`, true},
-		{`{"appId":"a"}`, false},
-		{`{"appId":"a","sha256":"` + strings.ToUpper(good) + `"}`, false},
-		{`{"appId":"a","sha256":"abc"}`, false},
+		{`{"appId":"` + testAppID + `","sha256":"` + good + `"}`, true},
+		{`{"appId":"` + testAppID + `"}`, false},
+		{`{"appId":"` + testAppID + `","sha256":"` + strings.ToUpper(good) + `"}`, false},
+		{`{"appId":"` + testAppID + `","sha256":"abc"}`, false},
 		{`{"sha256":"` + good + `"}`, false},
-		{`{"appId":"a","sha256":"` + good + `","deleteVolumes":true}`, false},
+		{`{"appId":"` + testAppID + `","sha256":"` + good + `","deleteVolumes":true}`, false},
 	} {
 		if _, err := parseRevertSpec(json.RawMessage(c.spec)); (err == nil) != c.ok {
 			t.Errorf("%s: err = %v, want ok=%v", c.spec, err, c.ok)
@@ -339,7 +339,7 @@ func TestRevertSaga_ARepeatedReapplyIsANoOpNotABounce(t *testing.T) {
 	pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 
-	if step, err := runRevert(t, store, inv, nc, nil, "a", composeV1); err != nil {
+	if step, err := runRevert(t, store, inv, nc, nil, testAppID, composeV1); err != nil {
 		t.Fatalf("first re-apply failed at %s: %v", step, err)
 	}
 	<-pulls
@@ -349,7 +349,7 @@ func TestRevertSaga_ARepeatedReapplyIsANoOpNotABounce(t *testing.T) {
 		t.Fatalf("after the re-apply: compose=%q previous=%q", first.ComposeYAML, first.PreviousComposeYAML)
 	}
 
-	run := runWorkflow(t, RevertWorkflow(store, inv, nc, nil), nc, revertSpec("a", composeV1), "job-2")
+	run := runWorkflow(t, RevertWorkflow(store, inv, nc, nil), nc, revertSpec(testAppID, composeV1), "job-2")
 	if run.failedAt != "load" || !errors.Is(run.err, jobs.ErrStopWorkflow) {
 		t.Fatalf("the repeat must end at load as a successful no-op, got step=%q err=%v", run.failedAt, run.err)
 	}
@@ -365,10 +365,10 @@ func TestRevertSaga_ARepeatedReapplyIsANoOpNotABounce(t *testing.T) {
 	}
 
 	// Going forward again is its own request, naming the other hash.
-	if step, err := runRevert(t, store, inv, nc, nil, "a", composeV2); err != nil {
+	if step, err := runRevert(t, store, inv, nc, nil, testAppID, composeV2); err != nil {
 		t.Fatalf("forward re-apply failed at %s: %v", step, err)
 	}
-	if got, _ := store.Get(ctx, "a"); sameRecord(v2, got) != "" {
+	if got, _ := store.Get(ctx, testAppID); sameRecord(v2, got) != "" {
 		t.Errorf("naming the v2 hash did not return the record to v2")
 	}
 }
@@ -380,9 +380,9 @@ func TestRevertSaga_TargetInstalledDuringThePullDeploysTheRow(t *testing.T) {
 	nc := startNATS(t)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, func() {
-		_ = store.RevertCompose(context.Background(), "a", v2.ComposeSHA256, v2.PreviousComposeYAML, time.Now().UTC())
+		_ = store.RevertCompose(context.Background(), testAppID, v2.ComposeSHA256, v2.PreviousComposeYAML, time.Now().UTC())
 	})
-	if step, err := runRevert(t, store, inv, nc, nil, "a", composeV1); err != nil {
+	if step, err := runRevert(t, store, inv, nc, nil, testAppID, composeV1); err != nil {
 		t.Fatalf("failed at %s: %v", step, err)
 	}
 	if cmd := <-deploys; cmd.ComposeYAML != composeV1 {
@@ -398,20 +398,20 @@ func TestRevertSaga_TargetInstalledDuringThePullDeploysTheRow(t *testing.T) {
 // request — and the edited one is retained.
 func TestRevertSaga_ACustomAppReappliesItsPreviousCompose(t *testing.T) {
 	ctx := context.Background()
-	store, inv := seedCustomApp(t, "a")
+	store, inv := seedCustomApp(t, testAppID)
 	nc := startNATS(t)
 	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
-	if err := store.EditCompose(ctx, "a", ComposeHash(customV1), customV2, time.Now().UTC()); err != nil {
+	if err := store.EditCompose(ctx, testAppID, ComposeHash(customV1), customV2, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if step, err := runRevert(t, store, inv, nc, nil, "a", customV1); err != nil {
+	if step, err := runRevert(t, store, inv, nc, nil, testAppID, customV1); err != nil {
 		t.Fatalf("failed at %s: %v", step, err)
 	}
-	if cmd := <-deploys; cmd.AppID != "a" || cmd.ComposeYAML != customV1 {
+	if cmd := <-deploys; cmd.AppID != testAppID || cmd.ComposeYAML != customV1 {
 		t.Errorf("pushed %s %q, want v1 to the same app", cmd.AppID, cmd.ComposeYAML)
 	}
-	got, _ := store.Get(ctx, "a")
+	got, _ := store.Get(ctx, testAppID)
 	if got.ComposeYAML != customV1 || got.PreviousComposeYAML != customV2 || got.PublishedPort != 8080 || got.SourceTile != "" {
 		t.Errorf("row = %+v", got)
 	}
