@@ -716,7 +716,8 @@ function groupOrphans(vols: OrphanVolume[]): OrphanGroup[] {
   return [...groups.values()];
 }
 
-// Volumes named rasp_<appId>_* on a node whose appId no longer has an app row:
+// Volumes named rasp_<appId>_* — and anonymous volumes the node's agent recorded
+// for an app — on a node whose appId no longer has an app row:
 // data an earlier uninstall left behind. Every uninstall before #399 did, so
 // this is where those go to be seen, and reclaimed with the same informed
 // confirmation an uninstall now gets.

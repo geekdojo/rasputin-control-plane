@@ -497,16 +497,23 @@ export interface AppVolumesResponse {
   volumes: AppVolume[];
 }
 
-// OrphanVolume is a rasp_<appId>_* volume on a node whose appId has no row in
-// the apps ledger — data an earlier uninstall left behind.
+// OrphanVolume is a rasp_<appId>_* volume, or an anonymous volume the node's
+// agent recorded for appId, on a node whose appId has no row in the apps
+// ledger — data an earlier uninstall left behind.
 export interface OrphanVolume {
   nodeId: string;
   name: string;
   appId: string;
+  // Empty for an anonymous volume, which has no compose volume name.
   volume: string;
   sizeBytes: number;
   createdAt: string;
   inUse: boolean;
+  // An anonymous volume (geekdojo/geekdojo-brain#413): docker's 64-hex name,
+  // and where the app's container mounted it — service and path in it.
+  anonymous?: boolean;
+  service?: string;
+  path?: string;
   // From the backup manifest, when one ever recorded this volume; the app row
   // is gone, so the manifest is the only place its name and class survive.
   appName?: string;
