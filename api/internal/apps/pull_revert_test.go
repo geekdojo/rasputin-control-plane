@@ -491,3 +491,63 @@ func TestReconcileSweep_AnOutdatedSurvivorDoesNotRecoverAFailedApp(t *testing.T)
 		t.Errorf("status = %s %q, want the failure and its reason kept", got.LastStatus, got.LastDetail)
 	}
 }
+
+// A pull whose reply never arrives, or arrives unreadable, is the failed-pull
+// branch too. The timeout case pins why the status write is detached: the
+// step's own context is spent by the time the status goes back, and a write on
+// it would silently leave the app DEPLOYING.
+func TestPullStep_ATimedOutOrUnreadableReplyChangesNothing(t *testing.T) {
+	cases := []struct {
+		name  string
+		agent func(t *testing.T, nc *nats.Conn)
+		ctx   func() (context.Context, context.CancelFunc)
+		says  string
+	}{
+		{"rpc times out", func(t *testing.T, nc *nats.Conn) {
+			sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) {}) // never answers
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = sub.Unsubscribe() })
+		}, func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 200*time.Millisecond)
+		}, "pull rpc"},
+		{"ack is not json", func(t *testing.T, nc *nats.Conn) {
+			sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) { _ = m.Respond([]byte("not-json")) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = sub.Unsubscribe() })
+		}, func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		}, "decode pull ack"},
+		{"ack fails with no detail", func(t *testing.T, nc *nats.Conn) {
+			fakePullAgent(t, nc, proto.AppPullAck{OK: false}, nil)
+		}, func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		}, "agent reported the pull failed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store, inv, before, row := upgradedToV2(t)
+			nc := startNATS(t)
+			c.agent(t, nc)
+			ctx, cancel := c.ctx()
+			defer cancel()
+			sc := newStepCtxNATS(`{"appId":"a"}`, nc)
+			sc.Ctx = ctx
+
+			_, err := pullStep(store, inv, nc, "upgrade", upgradePullSource(lookupOf(tileV3(), 3)))(sc)
+			if err == nil || !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("err = %v, want one saying %q", err, c.says)
+			}
+			after := row()
+			if field := sameRecord(before, after); field != "" {
+				t.Errorf("the row's %s changed", field)
+			}
+			if after.LastStatus != proto.AppStatusRunning || !strings.Contains(after.LastDetail, c.says) {
+				t.Errorf("status = %s %q, want running with the reason", after.LastStatus, after.LastDetail)
+			}
+		})
+	}
+}
