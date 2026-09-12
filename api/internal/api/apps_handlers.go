@@ -25,6 +25,38 @@ import (
 type appView struct {
 	*apps.App
 	Backup *proto.AppBackupState `json:"backup,omitempty"`
+	// UpgradeAvailable says the app's tile, in the catalog in effect, carries
+	// a compose other than the installed one (#409). False for a custom app,
+	// for a tile the catalog no longer offers, and for a catalog older than
+	// the one the app's compose came from. It is apps.ResolveUpgrade's answer,
+	// the same function POST /api/apps/{id}/upgrade asks, so the badge cannot
+	// offer an upgrade the route would refuse.
+	UpgradeAvailable bool `json:"upgradeAvailable"`
+	// UpgradeCatalogVersion is the catalog version an upgrade would take the
+	// compose from. Absent unless UpgradeAvailable.
+	UpgradeCatalogVersion int `json:"upgradeCatalogVersion,omitempty"`
+}
+
+// newAppView decorates one app row with what the catalog in effect says about
+// upgrading it. Backup state is attached by the callers, which fetch it in bulk
+// or singly.
+func (s *Server) newAppView(a *apps.App) appView {
+	v := appView{App: a}
+	if target, err := apps.ResolveUpgrade(a, s.tileLookup()); err == nil {
+		v.UpgradeAvailable = true
+		v.UpgradeCatalogVersion = target.CatalogVersion
+	}
+	return v
+}
+
+// tileLookup is the verified catalog store's versioned lookup, or nil when this
+// api has no live catalog. Never the embedded catalog: an upgrade's compose
+// comes from the store whose bundle was verified, and nothing else.
+func (s *Server) tileLookup() apps.TileLookup {
+	if s.catalogStore == nil {
+		return nil
+	}
+	return s.catalogStore.GetVersioned
 }
 
 // GET /api/apps
@@ -36,7 +68,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]appView, 0, len(all))
 	for _, a := range all {
-		out = append(out, appView{App: a})
+		out = append(out, s.newAppView(a))
 	}
 	if s.backupStates != nil && len(out) > 0 {
 		states, err := s.backupStates.AppBackupStates(r.Context())
@@ -158,7 +190,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "app not found")
 		return
 	}
-	view := appView{App: app}
+	view := s.newAppView(app)
 	if s.backupStates != nil {
 		if st, err := s.backupStates.AppBackupState(r.Context(), app.ID); err != nil {
 			// The id is request-supplied and stays out of the log line.
@@ -293,6 +325,51 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	spec, _ := json.Marshal(map[string]string{"appId": id})
 	j, err := s.runner.Submit(r.Context(), "app.deploy", spec, creator(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, j)
+}
+
+// POST /api/apps/{id}/upgrade
+//
+// Upgrades a catalog app in place to the compose its tile carries in the
+// catalog in effect (geekdojo/geekdojo-brain#409), by running the app.upgrade
+// saga: persist the tile's compose on the row, then the deploy push to the same
+// ULID — so the Compose project and its named volumes are the ones the app
+// already has. Async, like deploy: returns the job.
+//
+// There is no body, and any body sent is not read. The compose comes only from
+// the verified catalog store, which is the one place a tile's compose has been
+// through the bundle's signature, safety and pin checks; a route that accepted
+// one from the client would skip all three.
+//
+// Every refusal is decided here, before a job exists, with the same function
+// the upgradeAvailable flag uses: 404 for an unknown app; 409 for a custom app,
+// a tile the catalog in effect does not offer, a catalog older than the app's
+// compose, and an app already on its tile's current compose. The saga checks
+// again when it runs — the catalog can change in between.
+//
+// No privilege re-consent is asked for here: consent is the UI's, as it is at
+// install (Bryce, 2026-09-12).
+func (s *Server) handleUpgradeApp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	app, err := s.apps.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if app == nil {
+		writeError(w, http.StatusNotFound, "app not found")
+		return
+	}
+	if _, err := apps.ResolveUpgrade(app, s.tileLookup()); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	spec, _ := json.Marshal(apps.DeploySpec{AppID: app.ID})
+	j, err := s.runner.Submit(r.Context(), "app.upgrade", spec, creator(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

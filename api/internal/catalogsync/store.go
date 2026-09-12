@@ -131,16 +131,28 @@ func (s *Store) Current() tileschema.Bundle {
 // `critical` volume vanished from a manifest stamped complete. A lookup that
 // lives here cannot be wired to the wrong object.
 func (s *Store) Get(id string) (tileschema.Tile, bool) {
+	t, _, ok := s.GetVersioned(id)
+	return t, ok
+}
+
+// GetVersioned is Get plus the version of the catalog the tile was read from,
+// both taken under one lock.
+//
+// An app records which catalog its compose came from (#409), and reading the
+// tile and then State() separately would let a bundle Apply land between the
+// two — stamping a compose with the version of a catalog that did not supply
+// it. The pair has to be read together or the record is a guess.
+func (s *Store) GetVersioned(id string) (tileschema.Tile, int, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, bt := range s.current.Tiles {
 		if bt.Tile.ID == id {
 			t := bt.Tile
 			t.ComposeYAML = bt.Compose
-			return t, true
+			return t, s.current.Version, true
 		}
 	}
-	return tileschema.Tile{}, false
+	return tileschema.Tile{}, 0, false
 }
 
 // Source names the catalog in effect for a record that has to say which one

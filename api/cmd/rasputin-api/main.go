@@ -628,6 +628,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: catalog store: %v", err)
 	}
+	// app.upgrade (#409) registers here rather than with the other app sagas
+	// above because its new compose comes from this store and nowhere else.
+	runner.Register(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf, catalogStore.GetVersioned))
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.
