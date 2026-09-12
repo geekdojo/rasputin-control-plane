@@ -353,6 +353,45 @@ export interface App {
    * the install needed no acknowledgement.
    */
   backupAck?: BackupAck;
+  /** Hex sha256 of composeYaml, derived by the api (#409). */
+  composeSha256?: string;
+  /** Catalog version composeYaml was taken from; absent/0 = unknown or custom. */
+  composeCatalogVersion?: number;
+  /**
+   * The app's tile, in the catalog in effect, carries a compose other than
+   * the installed one (#409). Always present on GET /api/apps and
+   * /api/apps/{id}; false for a custom app. Optional here only because
+   * POST /api/apps answers the bare row.
+   */
+  upgradeAvailable?: boolean;
+  /** The catalog version an upgrade would take the compose from. Absent unless upgradeAvailable. */
+  upgradeCatalogVersion?: number;
+  /** The app has a previous compose PUT .../compose {"sha256"} would re-apply (#411). */
+  revertAvailable?: boolean;
+  /** The hash a re-apply names. Absent unless revertAvailable. */
+  previousComposeSha256?: string;
+}
+
+/**
+ * One volume a compose change would orphan, as PUT /api/apps/{id}/compose's
+ * 409 lists it (#412).
+ */
+export interface DroppedVolume {
+  /** The docker volume name — what deleteVolumes takes. */
+  name: string;
+  /** Its compose key. */
+  volume: string;
+  /** Backup class when a retained manifest recorded it; absent otherwise. */
+  backup?: string;
+  /** null when no retained generation holds the volume. */
+  lastCaptured: VolumeCapture | null;
+}
+
+/** The 409 PUT /api/apps/{id}/compose answers when a change would drop volumes. */
+export interface VolumeGateResponse {
+  error: string;
+  droppedVolumes: DroppedVolume[];
+  notDropped: string[];
 }
 
 /** Who acknowledged installing with no backup target, and when (#299). */

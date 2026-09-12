@@ -4,14 +4,9 @@ import { AlertTriangle, X } from 'lucide-react';
 import { useId, useState } from 'react';
 import { ModalPortal, useModalChrome } from './modal';
 import { MONO } from './ui-theme';
-import { Badge, DIM, FG, HAIR_SOFT } from './kit';
-import {
-  DELETE_VOLUMES_DEFAULT,
-  deleteWarning,
-  describeCapture,
-  formatBytes,
-  type PromptVolume,
-} from '../lib/volumes';
+import { DIM, FG, HAIR_SOFT } from './kit';
+import { DELETE_VOLUMES_DEFAULT, deleteWarning } from '../lib/volumes';
+import { VolumeBackupTable, type VolumeTableRow } from './VolumeBackupTable';
 
 // The uninstall confirmation, and the reclaim confirmation, which are the same
 // question asked of different volumes (geekdojo/geekdojo-brain#399).
@@ -26,10 +21,7 @@ import {
 // In `reclaim` mode there is no app to remove — the volumes ARE the act — so
 // the confirm button stays disabled until the box is ticked.
 
-export interface UninstallVolumeRow extends PromptVolume {
-  dockerName?: string;
-  sizeBytes?: number;
-}
+export type UninstallVolumeRow = VolumeTableRow;
 
 export interface UninstallAppModalProps {
   mode: 'uninstall' | 'reclaim';
@@ -45,20 +37,6 @@ export interface UninstallAppModalProps {
   backupNote?: string;
   onConfirm: (deleteVolumes: boolean) => void;
   onCancel: () => void;
-}
-
-function classColor(backup: string): string {
-  switch (backup) {
-    case 'critical':
-      return '#f87171';
-    case 'state':
-      return '#facc15';
-    case 'cache':
-    case 'bulk':
-      return DIM;
-    default:
-      return '#fb923c'; // unclassified — not knowing is worth a colour
-  }
 }
 
 export function UninstallAppModal({
@@ -134,35 +112,7 @@ export function UninstallAppModal({
               {note ?? 'This app declares no data volumes.'}
             </p>
           )}
-          {hasVolumes && (
-            <table aria-label="Volumes" style={{ width: '100%', borderCollapse: 'collapse', fontFamily: MONO, fontSize: 10 }}>
-              <thead>
-                <tr>
-                  {['VOLUME', 'CLASS', 'LAST BACKUP'].map((h) => (
-                    <th key={h} scope="col" style={{ textAlign: 'left', color: DIM, fontWeight: 400, fontSize: 9, letterSpacing: '0.1em', padding: '2px 6px 4px 0' }}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {volumes!.map((v) => (
-                  <tr key={v.dockerName ?? v.name}>
-                    <td style={{ color: FG, padding: '3px 6px 3px 0', verticalAlign: 'top' }} title={v.dockerName}>
-                      {v.name}
-                      {typeof v.sizeBytes === 'number' && <span style={{ color: DIM, marginLeft: 6 }}>{formatBytes(v.sizeBytes)}</span>}
-                    </td>
-                    <td style={{ padding: '3px 6px 3px 0', verticalAlign: 'top' }}>
-                      <Badge color={classColor(v.backup)}>{(v.backup || 'unclassified').toUpperCase()}</Badge>
-                    </td>
-                    <td style={{ color: v.lastCaptured ? DIM : '#f87171', padding: '3px 0', verticalAlign: 'top' }}>
-                      {describeCapture(v)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          {hasVolumes && <VolumeBackupTable volumes={volumes!} tone="warn" />}
           {hasVolumes && note && <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, margin: '6px 0 0', lineHeight: 1.5 }}>{note}</p>}
           {!loading && backupNote && <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, margin: '6px 0 0', lineHeight: 1.5 }}>{backupNote}</p>}
         </div>

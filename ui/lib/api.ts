@@ -58,6 +58,7 @@ import type {
   UpdateChangeEvent,
   UpdateCheckResult,
 } from './types';
+import { parseComposeResponse, type ComposeChangeBody, type ComposeOutcome } from './compose-change';
 
 // In dev, next.config.mjs sets NEXT_PUBLIC_API_BASE to http://localhost:8080
 // so the browser hits the api directly (cross-origin same-site, cookies sent
@@ -539,6 +540,31 @@ export function reclaimOrphanVolumes(nodeId: string, names: string[]): Promise<R
 
 export function deployApp(id: string): Promise<Job> {
   return jsonFetch<Job>(`/api/apps/${id}/deploy`, { method: 'POST' });
+}
+
+// putAppCompose is PUT /api/apps/{id}/compose — every compose change: upgrade
+// ({"source":"catalog"}), custom edit ({"composeYaml"}), re-apply by hash
+// ({"sha256"}), each optionally with deleteVolumes (geekdojo/geekdojo-brain#414).
+//
+// It does not throw on a refusal, unlike jsonFetch: 200 (no-op) and 202 (job)
+// are different successes, and the 409 dropped-volume answer carries a body
+// the caller has to read. Only a network failure throws. The body can hold a
+// custom compose, which may inline secrets: it is sent and nothing else — not
+// logged, not kept.
+export async function putAppCompose(id: string, body: ComposeChangeBody): Promise<ComposeOutcome> {
+  const res = await fetch(`${BASE}/api/apps/${encodeURIComponent(id)}/compose`, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  let parsed: unknown;
+  try {
+    parsed = await res.json();
+  } catch {
+    parsed = undefined;
+  }
+  return parseComposeResponse(res.status, parsed);
 }
 
 // ---- App catalog (curated first-party tiles) ----
