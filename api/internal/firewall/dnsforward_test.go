@@ -3,7 +3,9 @@ package firewall
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,6 +129,12 @@ func onlyDNSForward(t *testing.T, s *Store) *Intent {
 // so a test sees whether the dns_forward step auto-applied.
 func applyCounter(t *testing.T) (*jobs.Runner, chan struct{}) {
 	t.Helper()
+	r, _, ran := applyCounterStore(t)
+	return r, ran
+}
+
+func applyCounterStore(t *testing.T) (*jobs.Runner, *jobs.Store, chan struct{}) {
+	t.Helper()
 	nc := startNATS(t)
 	js, err := jobs.OpenStore(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
@@ -139,7 +147,7 @@ func applyCounter(t *testing.T) (*jobs.Runner, chan struct{}) {
 		Name: "count", Timeout: time.Second,
 		Do: func(*jobs.StepCtx) (json.RawMessage, error) { ran <- struct{}{}; return nil, nil },
 	}}})
-	return runner, ran
+	return runner, js, ran
 }
 
 func expectApply(t *testing.T, ran chan struct{}, want bool, why string) {
@@ -260,5 +268,78 @@ func TestForwardUnapplied(t *testing.T) {
 	seedFirewallNode(t, inv, "fw-2")
 	if u, _ := forwardUnapplied(ctx, store, inv); u {
 		t.Fatal("two firewall nodes: no apply could target one, want false")
+	}
+}
+
+// TestDNSForwardWorkflow_BoundedRetries runs the registered workflow through
+// the real runner. A step that fails twice and then succeeds ends with the job
+// succeeding and exactly one firewall.apply submitted, not one per attempt. A
+// step that always fails ends failed after dnsForwardAttempts attempts, with
+// nothing else submitted: no apply, and no further dns_forward job.
+func TestDNSForwardWorkflow_BoundedRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		failures    int32 // how many leading attempts fail
+		wantStatus  jobs.Status
+		wantAttempt int
+		wantApplies int
+	}{
+		{"fails twice then succeeds", 2, jobs.StatusSucceeded, 3, 1},
+		{"always fails", 1 << 30, jobs.StatusFailed, dnsForwardAttempts, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newStore(t)
+			runner, js, ran := applyCounterStore(t)
+			// Production spaces retries with jobs.DefaultBackoff; zero keeps the
+			// test fast and changes nothing about how many attempts run.
+			runner.SetBackoff(func(int) time.Duration { return 0 })
+
+			var calls atomic.Int32
+			wf := DNSForwardWorkflow(store, runner, DNSForwardConfig{
+				Zone:   func() string { return "e12bench.internal" },
+				Target: func() string { return "192.168.1.226" },
+				// The step's first input; failing it fails the attempt before
+				// anything is written, as a transient setup-store error would.
+				Managed: func(context.Context) (bool, error) {
+					if calls.Add(1) <= tc.failures {
+						return false, errors.New("setup store: database is locked")
+					}
+					return true, nil
+				},
+			})
+			if err := jobs.ValidateWorkflow(wf); err != nil {
+				t.Fatalf("workflow does not validate: %v", err)
+			}
+			runner.Register(wf)
+
+			j, err := runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.Wait()
+
+			got, err := js.GetJob(ctx, j.ID)
+			if err != nil || got == nil {
+				t.Fatalf("GetJob: %v %v", got, err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("job status = %s (%s), want %s", got.Status, got.Error, tc.wantStatus)
+			}
+			if n := calls.Load(); int(n) != tc.wantAttempt {
+				t.Fatalf("step attempts = %d, want %d", n, tc.wantAttempt)
+			}
+			applies := 0
+			for len(ran) > 0 {
+				<-ran
+				applies++
+			}
+			if applies != tc.wantApplies {
+				t.Fatalf("firewall.apply runs = %d, want %d", applies, tc.wantApplies)
+			}
+			if fwd, _ := js.ListJobsByKind(ctx, "firewall.dns_forward", 100); len(fwd) != 1 {
+				t.Fatalf("dns_forward jobs = %d, want only the one submitted", len(fwd))
+			}
+		})
 	}
 }

@@ -156,10 +156,32 @@ func DNSForwardWorkflow(store *Store, runner *jobs.Runner, cfg DNSForwardConfig)
 	return jobs.Workflow{
 		Kind: "firewall.dns_forward",
 		Steps: []jobs.WorkflowStep{
-			{Name: "reconcile_forward", Timeout: 5 * time.Second, Do: dnsForwardReconcile(store, runner, cfg)},
+			{
+				Name:    "reconcile_forward",
+				Timeout: 5 * time.Second,
+				Retries: dnsForwardAttempts - 1,
+				Do:      dnsForwardReconcile(store, runner, cfg),
+			},
 		},
 	}
 }
+
+// dnsForwardAttempts bounds how often one firewall.dns_forward job runs its step
+// before failing. The runner spaces the retries with its own backoff; nothing
+// here, or anywhere, re-submits the job on a timer. After a job has exhausted
+// its attempts the next fact — an address change, the firewall registering, a
+// mode change, an edit to the forward — submits a fresh one.
+//
+// Retrying is safe because the step converges rather than acts. Everything that
+// can fail comes before its one side effect: the mode read, the intent upsert
+// (which adopts the existing row and rewrites it only on drift, so a repeat is a
+// no-op), and the unapplied check. The side effect, submitting firewall.apply,
+// is its last act and has no error return after it. An attempt that fails part
+// way — say the upsert wrote the row and then errored — leaves the forward
+// written but unapplied, and the retry's unapplied check submits the apply it
+// never reached. The step does not push to the firewall itself: that is
+// firewall.apply's push, a separate job this does not retry.
+const dnsForwardAttempts = 3
 
 func dnsForwardReconcile(store *Store, runner *jobs.Runner, cfg DNSForwardConfig) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
