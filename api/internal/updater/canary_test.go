@@ -1022,7 +1022,7 @@ func TestClampMaxInFlight(t *testing.T) {
 	cases := []struct{ k, tierSize, want int }{
 		{4, 22, 4}, // inert on a big tier — the default is meant to be
 		{4, 5, 4},  // 4 < 5-1, still inert
-		{4, 4, 3},  // one held back
+		{4, 4, 3},  // capped at tierSize-1; with one canary, all 3 fan-out nodes start at once
 		{4, 2, 1},  // forced serial
 		{4, 1, 1},  // a lone node: nothing to hold back, but never zero
 		{4, 0, 1},  // empty tier, defensive

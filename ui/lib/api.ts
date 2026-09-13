@@ -761,9 +761,10 @@ export function createSystemUpdate(input: {
    *  plan rejects the run rather than quietly canarying somebody else. */
   canaryNodes?: string[];
   /** How many nodes of one TIER update at once — `4` or `"20%"`, default 4.
-   *  Always clamped to `min(k, max(1, tierSize - 1))`, so at least one node is
-   *  held back in every tier at every cluster size. `1` is the old serial
-   *  cascade exactly. */
+   *  Always clamped to `min(k, max(1, tierSize - 1))`. tierSize includes the
+   *  canary, so the clamp does not hold a node back: at the default 4, every
+   *  post-canary node in a tier of five or fewer starts at once. `1` is the old
+   *  serial cascade exactly. */
   maxInFlight?: number | string;
   /** How many nodes of one TIER may fail before the cascade stops STARTING new
    *  ones — `3` or `"15%"`, default `"15%"`. In-flight nodes finish. An
