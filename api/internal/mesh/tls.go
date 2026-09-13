@@ -26,10 +26,12 @@ import (
 // controlplane HTTPS service is "real TLS" to that device.
 //
 // Deliberately separated from the bundle-signing CA: the bundle root
-// belongs to Rasputin-Inc and never needs to leave Geekdojo's offline
-// custody. Mixing it with a TLS CA would either leak the cross-fleet
-// intermediate onto every customer's box, or make operators trust
-// Rasputin-Inc keys to verify their own Rasputin — both wrong.
+// belongs to Rasputin-Inc and a controlplane never needs its private key.
+// (That key is not held offline today; offline custody is intended and
+// tracked in geekdojo/geekdojo-brain#256.) Mixing it with a TLS CA would
+// either leak the cross-fleet intermediate onto every customer's box, or
+// make operators trust Rasputin-Inc keys to verify their own Rasputin —
+// both wrong.
 
 const (
 	// MeshCAFileName is the public cert delivered via .mobileconfig and
