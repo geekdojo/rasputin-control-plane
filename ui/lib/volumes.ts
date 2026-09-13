@@ -9,6 +9,29 @@
 
 import { timeAgo } from './time';
 
+/**
+ * What the uninstall prompt says about a custom app's volumes, in place of the
+ * api's note (geekdojo/geekdojo-brain#424). A custom app has no tile, so its
+ * volumes are not classified and cannot be listed; what the prompt CAN say is
+ * what "delete volumes" covers. The api's note named only the compose
+ * project's rasp_<id>_* volumes, but since #413 (rasputin-control-plane#274)
+ * a delete with data also removes the anonymous volumes the node's agent
+ * recorded for the app — which have docker's 64-hex names, not rasp_<id>_*,
+ * and which a keep-data delete leaves under Orphaned volumes by service and
+ * path. The project name is the api's proto.AppProjectName: "rasp_" plus the
+ * lower-cased id.
+ */
+export function customAppVolumesNote(appId: string, targetNode: string): string {
+  const project = `rasp_${appId.toLowerCase()}`;
+  const where = targetNode ? ` on ${targetNode}` : '';
+  return (
+    'A custom app: its compose was not installed from a catalog tile, so its volumes are not classified and cannot be ' +
+    `listed here. Its data is the named volumes of its compose project (${project}_*)${where}, plus the anonymous ` +
+    'volumes the node recorded for it: unnamed mounts, and paths its images declare as VOLUME. Deleting volumes ' +
+    'removes both kinds.'
+  );
+}
+
 // The checkbox's initial state. Destroying data is never the path of least
 // resistance: delete requires a deliberate act.
 export const DELETE_VOLUMES_DEFAULT = false;

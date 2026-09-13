@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   DELETE_VOLUMES_DEFAULT,
+  customAppVolumesNote,
   deleteWarning,
   describeCapture,
   isProtectedClass,
@@ -96,5 +97,37 @@ describe('class rules', () => {
       unbackedProtected([critical, state, cache, backedUp]).map((v) => v.name),
       ['vaultwarden-data', 'immich-upload'],
     );
+  });
+});
+
+// geekdojo/geekdojo-brain#424: a custom app's uninstall note says what a
+// delete with data covers — named project volumes AND recorded anonymous ones.
+describe('customAppVolumesNote', () => {
+  const ID = '01M2C4P3KTPY1RYQZ150535ZGJ';
+
+  test('names the project volumes by the lower-cased project name, on the node', () => {
+    const note = customAppVolumesNote(ID, 'cp-compute2');
+    assert.ok(note.includes('rasp_01m2c4p3ktpy1ryqz150535zgj_*'), note);
+    assert.ok(note.includes('on cp-compute2'), note);
+    assert.ok(!note.includes(ID), 'the upper-case ledger id is not a docker name');
+  });
+
+  test('includes the anonymous volumes, which the old note omitted', () => {
+    const note = customAppVolumesNote(ID, 'cp-compute2');
+    assert.match(note, /anonymous volumes/);
+    assert.match(note, /VOLUME/);
+    assert.match(note, /removes both kinds/);
+  });
+
+  test('no longer claims every volume of the app is named rasp_<id>_*', () => {
+    assert.doesNotMatch(customAppVolumesNote(ID, 'cp-compute2'), /Any volume named/);
+  });
+
+  test('an app with no recorded node still reads cleanly', () => {
+    assert.doesNotMatch(customAppVolumesNote(ID, ''), / on [.,]|on  /);
+  });
+
+  test('says nothing about the checkbox default, which stays keep', () => {
+    assert.equal(DELETE_VOLUMES_DEFAULT, false);
   });
 });

@@ -19,6 +19,7 @@ import {
 import type { App, CatalogCollection, CatalogStatus, CatalogTile, Node } from '../../../lib/types';
 import { grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
 import { appAccess } from '../../../lib/appurl';
+import { defaultDeployTarget, deployTargetLabel, offMeshTargetWarning } from '../../../lib/deploy-target';
 import {
   backupsConfigured,
   criticalVolumes,
@@ -82,9 +83,6 @@ function archOK(tile: CatalogTile, node: Node): boolean {
   return node.architecture === tile.arch;
 }
 
-function nodeOptionLabel(n: Node): string {
-  return `${n.id} (${n.role}${n.architecture ? `, ${n.architecture}` : ''}, ${n.status})`;
-}
 
 function isPreview(t: CatalogTile): boolean {
   return t.status === 'preview';
@@ -807,9 +805,10 @@ function InstallDrawer({
   const [name, setName] = useState(tile.id);
   const [targetNode, setTargetNode] = useState('');
   // Default selection DERIVED rather than written from an effect — "nothing
-  // chosen yet" falls back to the first deploy target. Writing it was a
+  // chosen yet" falls back to defaultDeployTarget: an online node on the mesh,
+  // first joined, never merely the first in the list (#426). Writing it was a
   // synchronous setState on effect entry (set-state-in-effect).
-  const selectedTarget = targetNode || (deployTargets[0]?.id ?? '');
+  const selectedTarget = targetNode || defaultDeployTarget(deployTargets);
   const [compose, setCompose] = useState<string | null>(tile.composeYaml ?? null);
   // LAN exposure opt-in. Default off (tailnet-only) — the safe default per
   // ADR-0004 §9; not pre-filled from tile.exposureDefault (see PR note).
@@ -881,6 +880,10 @@ function InstallDrawer({
   }
 
   const noTargets = deployTargets.length === 0;
+  const offMeshWarning = offMeshTargetWarning(
+    deployTargets.find((n) => n.id === selectedTarget),
+    { exposeLan, route: 'catalog' },
+  );
 
   return (
     <Drawer title={tile.name.toUpperCase()} icon={tile.icon} onClose={onClose}>
@@ -975,14 +978,22 @@ function InstallDrawer({
                 aria-label="Target node"
                 style={{ minWidth: 200 }}
               >
+                {/* No node qualifies as the default: say so, rather than
+                    let the browser show the first option as if chosen. */}
+                {!selectedTarget && (
+                  <option value="" disabled>
+                    choose a node
+                  </option>
+                )}
                 {deployTargets.map((n) => (
                   <option key={n.id} value={n.id}>
-                    {nodeOptionLabel(n)}
+                    {deployTargetLabel(n)}
                   </option>
                 ))}
               </Select>
             </div>
             <ExposureField exposeLan={exposeLan} onChange={setExposeLan} hasWebPort={hasWebPort} />
+            {offMeshWarning && <Hint warn>{offMeshWarning}</Hint>}
             <ConsentGate
               tile={tile}
               consented={consented}
@@ -1034,9 +1045,14 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
   const [installed, setInstalled] = useState<App | null>(null);
 
   // Default selection DERIVED rather than written from an effect — "nothing
-  // chosen yet" falls back to the first deploy target. Writing it was a
+  // chosen yet" falls back to defaultDeployTarget: an online node on the mesh,
+  // first joined, never merely the first in the list (#426). Writing it was a
   // synchronous setState on effect entry (set-state-in-effect).
-  const selectedTarget = targetNode || (deployTargets[0]?.id ?? '');
+  const selectedTarget = targetNode || defaultDeployTarget(deployTargets);
+  const offMeshWarning = offMeshTargetWarning(
+    deployTargets.find((n) => n.id === selectedTarget),
+    { exposeLan: false, route: 'custom' },
+  );
 
   async function create() {
     setBusy(true);
@@ -1077,13 +1093,23 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
                   aria-label="Target node"
                   style={{ minWidth: 200 }}
                 >
+                  {!selectedTarget && (
+                    <option value="" disabled>
+                      choose a node
+                    </option>
+                  )}
                   {deployTargets.map((n) => (
                     <option key={n.id} value={n.id}>
-                      {nodeOptionLabel(n)}
+                      {deployTargetLabel(n)}
                     </option>
                   ))}
                 </Select>
               </div>
+              {offMeshWarning && (
+                <Hint warn style={{ marginTop: 6 }}>
+                  {offMeshWarning}
+                </Hint>
+              )}
             </div>
             <div>
               <SectionLabel>COMPOSE</SectionLabel>

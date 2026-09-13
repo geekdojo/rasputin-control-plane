@@ -90,13 +90,46 @@ describe('composeActions', () => {
     }
   });
 
-  test('REVERT only for a failed app with a previous compose and its hash', () => {
-    assert.equal(composeActions(app({ lastStatus: 'failed', revertAvailable: true, previousComposeSha256: HASH })).revert, true);
-    assert.equal(composeActions(app({ lastStatus: 'failed', sourceTile: '', revertAvailable: true, previousComposeSha256: HASH })).revert, true);
-    assert.equal(composeActions(app({ lastStatus: 'running', revertAvailable: true, previousComposeSha256: HASH })).revert, false);
-    assert.equal(composeActions(app({ lastStatus: 'stopped', revertAvailable: true, previousComposeSha256: HASH })).revert, false);
+  test('REVERT for any app with a previous compose and its hash, whatever its status', () => {
+    for (const lastStatus of ['running', 'stopped', 'failed'] as AppStatus[]) {
+      for (const sourceTile of ['immich', '']) {
+        assert.equal(
+          composeActions(app({ lastStatus, sourceTile, revertAvailable: true, previousComposeSha256: HASH })).revert,
+          true,
+          `${lastStatus} ${sourceTile || 'custom'}`,
+        );
+      }
+    }
+  });
+
+  test('a running app that upgraded offers REVERT beside its other actions', () => {
+    assert.deepEqual(composeActions(app({ revertAvailable: true, previousComposeSha256: HASH })), {
+      updateBadge: false,
+      upgrade: false,
+      edit: false,
+      revert: true,
+    });
+    assert.deepEqual(composeActions(app({ sourceTile: '', revertAvailable: true, previousComposeSha256: HASH })), {
+      updateBadge: false,
+      upgrade: false,
+      edit: true,
+      revert: true,
+    });
+  });
+
+  test('no REVERT without a previous compose, or without its hash', () => {
     assert.equal(composeActions(app({ lastStatus: 'failed', revertAvailable: false, previousComposeSha256: HASH })).revert, false);
+    assert.equal(composeActions(app({ lastStatus: 'running', revertAvailable: false, previousComposeSha256: HASH })).revert, false);
     assert.equal(composeActions(app({ lastStatus: 'failed', revertAvailable: true })).revert, false);
+    assert.equal(composeActions(app({ lastStatus: 'running', revertAvailable: true, previousComposeSha256: '' })).revert, false);
+  });
+
+  test('REVERT is hidden while a deploy or stop is mid-flight, like UPGRADE and EDIT', () => {
+    for (const lastStatus of ['deploying', 'stopping'] as AppStatus[]) {
+      for (const sourceTile of ['immich', '']) {
+        assert.equal(composeActions(app({ lastStatus, sourceTile, revertAvailable: true, previousComposeSha256: HASH })).revert, false);
+      }
+    }
   });
 });
 
