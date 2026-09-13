@@ -37,6 +37,7 @@ type simUCI struct {
 	dnsmasq      []string       // the dnsmasq section's `server` list (forwards + upstreams)
 	rebindDomain []string       // the dnsmasq section's `rebind_domain` whitelist
 	reloads      []string
+	simDnsmasq   // the RUNNING dnsmasq (dnsmasq_test.go)
 }
 
 // stockSim models a Node N fresh from the firewall image's uci-defaults:
@@ -70,7 +71,10 @@ func (s *simUCI) Run(_ context.Context, name string, args ...string) (string, er
 		s.reloads = append(s.reloads, "network")
 		return "", nil
 	case "/etc/init.d/dnsmasq":
-		s.reloads = append(s.reloads, "dnsmasq")
+		s.reloads = append(s.reloads, "dnsmasq "+strings.Join(args, " "))
+		if len(args) == 1 && args[0] == "restart" {
+			return "", s.restart()
+		}
 		return "", nil
 	}
 	return "", fmt.Errorf("sim: unknown binary %q", name)
@@ -282,6 +286,7 @@ func newSimClient(t *testing.T, sim *simUCI) (*UCIRealClient, string) {
 	if err != nil {
 		t.Fatalf("newRealClient: %v", err)
 	}
+	c.dnsmasq = sim
 	return c, dir
 }
 
@@ -960,8 +965,8 @@ func TestApply_AddsDNSForwardAndRoundTrips(t *testing.T) {
 	if !slices.Contains(sim.rebindDomain, "home1.internal") {
 		t.Errorf("rebind_domain %v missing zone %q", sim.rebindDomain, "home1.internal")
 	}
-	if !slices.Contains(sim.reloads, "dnsmasq") {
-		t.Errorf("dnsmasq not reloaded: %v", sim.reloads)
+	if !slices.Contains(sim.reloads, "dnsmasq restart") {
+		t.Errorf("dnsmasq not restarted: %v", sim.reloads)
 	}
 	if m := loadManifestFile(t, dir); m.DNSForward != fwd {
 		t.Errorf("manifest.DNSForward = %q, want %q", m.DNSForward, fwd)
@@ -1033,8 +1038,10 @@ func TestApply_DNSForwardIdempotentNoReload(t *testing.T) {
 	if _, err := c.Apply(context.Background(), st); err != nil {
 		t.Fatalf("apply 2: %v", err)
 	}
-	if slices.Contains(sim.reloads, "dnsmasq") {
-		t.Errorf("dnsmasq reloaded on an unchanged apply: %v", sim.reloads)
+	for _, r := range sim.reloads {
+		if strings.HasPrefix(r, "dnsmasq") {
+			t.Errorf("dnsmasq touched (%q) on an unchanged apply: %v", r, sim.reloads)
+		}
 	}
 	if n := countStr(sim.dnsmasq, fwd); n != 1 {
 		t.Errorf("forward present %d times, want exactly 1: %v", n, sim.dnsmasq)

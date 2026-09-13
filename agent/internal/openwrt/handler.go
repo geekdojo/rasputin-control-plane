@@ -53,6 +53,9 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, client UCIClient) ([]*nats.S
 	return subs, nil
 }
 
+// applyTimeout bounds one firewall.apply on the agent. See handleApply.
+const applyTimeout = 30 * time.Second
+
 func handleApply(_ *nats.Conn, client UCIClient, m *nats.Msg) {
 	var cmd proto.FirewallApplyCmd
 	if err := json.Unmarshal(m.Data, &cmd); err != nil {
@@ -60,7 +63,13 @@ func handleApply(_ *nats.Conn, client UCIClient, m *nats.Msg) {
 		log.Printf("rasputin-agent: firewall.apply: bad cmd: %v", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Sized for the slow path, not the usual one: an apply that changes the DNS
+	// forward restarts dnsmasq and waits for the new process's startup log lines
+	// (dnsmasqLogTimeout per wait, uci.go), and a deadline expiring mid-wait
+	// fails an apply whose restart did land — which the next apply would then
+	// repeat, bouncing DNS again. The api's push step has its own, shorter
+	// timeout; that side is geekdojo/geekdojo-brain#433's.
+	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
 	defer cancel()
 	hash, err := client.Apply(ctx, cmd.State)
 	if err != nil {
