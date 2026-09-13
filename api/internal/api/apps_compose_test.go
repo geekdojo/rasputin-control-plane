@@ -63,7 +63,7 @@ func getRow(t *testing.T, f *apiFixture, cookie *http.Cookie, id string) revertR
 // anything: the check behind every refusal and every no-op.
 func assertNoComposeJob(t *testing.T, f *apiFixture, got <-chan proto.AppDeployCmd) {
 	t.Helper()
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	for _, kind := range []string{"app.upgrade", "app.edit", "app.revert"} {
 		if js, _ := f.jobsStore.ListJobsByKind(f.ctx, kind, 10); len(js) != 0 {
 			t.Errorf("expected no job, found %d %s", len(js), kind)
@@ -178,7 +178,7 @@ func TestAppsCompose_CustomEditRedeploysInPlaceAndNeverRecordsTheCompose(t *test
 	if job.Kind != "app.edit" || string(job.Spec) != `{"appId":"`+id+`"}` {
 		t.Fatalf("job = %s %s, want app.edit keyed only by appId", job.Kind, job.Spec)
 	}
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	if j, _ := f.jobsStore.GetJob(f.ctx, job.ID); j == nil || j.Status != jobs.StatusSucceeded {
 		t.Fatalf("edit job did not succeed: %+v", j)
 	}
@@ -216,7 +216,7 @@ func TestAppsCompose_CustomEditRedeploysInPlaceAndNeverRecordsTheCompose(t *test
 	if decodeBody[revertRow](t, w.Body.String()).ComposeSHA256 != apps.ComposeHash(customNew) {
 		t.Errorf("the no-op did not answer with the app's current state: %s", w.Body.String())
 	}
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	if js, _ := f.jobsStore.ListJobsByKind(f.ctx, "app.edit", 10); len(js) != 1 {
 		t.Errorf("the repeated PUT started a job: %d app.edit jobs", len(js))
 	}
@@ -265,7 +265,7 @@ func TestAppsCompose_AFailedEditDiscardsTheComposeAndDoesNotRecordIt(t *testing.
 		t.Fatalf("edit: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
 	job := decodeBody[jobs.Job](t, w.Body.String())
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	j, _ := f.jobsStore.GetJob(f.ctx, job.ID)
 	if j == nil || j.Status != jobs.StatusFailed || !strings.Contains(j.Error, "manifest unknown") {
 		t.Fatalf("job = %+v, want failed at the pull", j)
@@ -352,8 +352,8 @@ func TestAppsCompose_ReapplyByHashDoesNotBounce(t *testing.T) {
 	if w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", catalogBody, cookie); w.Code != http.StatusAccepted {
 		t.Fatalf("upgrade: %d %s", w.Code, w.Body.String())
 	}
-	f.runner.Wait()
-	<-got
+	waitForJobs(t, f.runner)
+	receiveWithin(t, got, "no deploy reached the agent for the upgrade")
 
 	r := getRow(t, f, cookie, id)
 	if !r.RevertAvailable || r.UpgradeAvailable || r.PreviousComposeSHA256 != apps.ComposeHash(old) {
@@ -369,7 +369,7 @@ func TestAppsCompose_ReapplyByHashDoesNotBounce(t *testing.T) {
 	if job.Kind != "app.revert" || spec.AppID != id || spec.ComposeSHA256 != apps.ComposeHash(old) {
 		t.Fatalf("job = %s %s, want app.revert naming the old compose's hash", job.Kind, job.Spec)
 	}
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	if j, _ := f.jobsStore.GetJob(f.ctx, job.ID); j == nil || j.Status != jobs.StatusSucceeded {
 		t.Fatalf("re-apply job did not succeed: %+v", j)
 	}
@@ -395,7 +395,7 @@ func TestAppsCompose_ReapplyByHashDoesNotBounce(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("repeated re-apply: want 200, got %d (%s)", w.Code, w.Body.String())
 	}
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	if js, _ := f.jobsStore.ListJobsByKind(f.ctx, "app.revert", 10); len(js) != 1 {
 		t.Errorf("the repeated PUT started a job: %d app.revert jobs", len(js))
 	}
@@ -412,8 +412,8 @@ func TestAppsCompose_ReapplyByHashDoesNotBounce(t *testing.T) {
 	if w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", shaBody(tile), cookie); w.Code != http.StatusAccepted {
 		t.Fatalf("forward re-apply: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
-	f.runner.Wait()
-	<-got
+	waitForJobs(t, f.runner)
+	receiveWithin(t, got, "no deploy reached the agent for the forward re-apply")
 	if r := getRow(t, f, cookie, id); r.ComposeYAML != tile || r.UpgradeAvailable {
 		t.Errorf("forward re-apply: compose=%q upgradeAvailable=%v", r.ComposeYAML, r.UpgradeAvailable)
 	}
@@ -431,15 +431,15 @@ func TestAppsCompose_CustomAppReappliesByHash(t *testing.T) {
 	if w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", composeYAMLBody(t, customNew), cookie); w.Code != http.StatusAccepted {
 		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
 	}
-	f.runner.Wait()
-	<-got
+	waitForJobs(t, f.runner)
+	receiveWithin(t, got, "no deploy reached the agent for the edit")
 	w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", shaBody(customOld), cookie)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("re-apply: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
 	job := decodeBody[jobs.Job](t, w.Body.String())
-	f.runner.Wait()
-	if cmd := <-got; cmd.AppID != id || cmd.ComposeYAML != customOld {
+	waitForJobs(t, f.runner)
+	if cmd := receiveWithin(t, got, "no deploy reached the agent for the re-apply"); cmd.AppID != id || cmd.ComposeYAML != customOld {
 		t.Errorf("agent was sent %s %q, want the old compose", cmd.AppID, cmd.ComposeYAML)
 	}
 	assertJobCarriesNoCompose(t, f, cookie, job.ID)

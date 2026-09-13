@@ -73,7 +73,7 @@ func TestRotateAppLeaf_RevokingExposureReachesTheNode(t *testing.T) {
 	if res := RotateAppLeaf(ctx, inv, nc, rotate, app); res.Outcome != LeafShipped {
 		t.Fatalf("first rotation: outcome %q err %v", res.Outcome, res.Err)
 	}
-	first := <-got
+	first := receiveWithin(t, got, "no leaf reached the node on the first rotation")
 	if first.LANFQDN != "jellyfin.lan.home1.internal" {
 		t.Fatalf("exposed app should carry the .lan name, got %q", first.LANFQDN)
 	}
@@ -87,7 +87,7 @@ func TestRotateAppLeaf_RevokingExposureReachesTheNode(t *testing.T) {
 	if res.Outcome != LeafShipped {
 		t.Fatalf("revoking exposure must ship a fresh leaf, got outcome %q err %v — the node keeps its LAN route otherwise", res.Outcome, res.Err)
 	}
-	second := <-got
+	second := receiveWithin(t, got, "no leaf reached the node after revoking exposure")
 	if second.LANFQDN != "" {
 		t.Fatalf("revoked app must ship an EMPTY LANFQDN so the proxy drops the LAN host route, got %q", second.LANFQDN)
 	}
@@ -112,7 +112,7 @@ func TestRotateAppLeaf_RevokingExposureReachesTheNode(t *testing.T) {
 	if repeat.Renewed {
 		t.Error("a settled leaf must not be re-minted just because it was re-delivered")
 	}
-	if again := <-got; again.LANFQDN != "" || again.TailnetFQDN != "jellyfin.home1.internal" {
+	if again := receiveWithin(t, got, "no leaf reached the node on the repeat rotation"); again.LANFQDN != "" || again.TailnetFQDN != "jellyfin.home1.internal" {
 		t.Errorf("re-assert changed the route: lan=%q tailnet=%q", again.LANFQDN, again.TailnetFQDN)
 	}
 
@@ -125,7 +125,7 @@ func TestRotateAppLeaf_RevokingExposureReachesTheNode(t *testing.T) {
 	if res := RotateAppLeaf(ctx, inv, nc, rotate, app); res.Outcome != LeafShipped {
 		t.Fatalf("re-granting exposure must ship, got outcome %q err %v", res.Outcome, res.Err)
 	}
-	if third := <-got; third.LANFQDN != "jellyfin.lan.home1.internal" {
+	if third := receiveWithin(t, got, "no leaf reached the node after re-granting exposure"); third.LANFQDN != "jellyfin.lan.home1.internal" {
 		t.Fatalf("re-granted app must carry the .lan name again, got %q", third.LANFQDN)
 	}
 }

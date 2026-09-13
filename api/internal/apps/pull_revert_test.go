@@ -350,10 +350,10 @@ func TestRevertSaga_AfterAFailedUpReappliesThePreviousComposeAndItsRoute(t *test
 		t.Fatalf("re-apply failed at %s: %v", step, err)
 	}
 
-	if cmd := <-pulls; cmd.ComposeYAML != composeV1 || cmd.WorkBudgetSeconds != 0 {
+	if cmd := receiveWithin(t, pulls, "no pull reached the agent"); cmd.ComposeYAML != composeV1 || cmd.WorkBudgetSeconds != 0 {
 		t.Errorf("pull = %q budget %d, want v1 under v1's budget", cmd.ComposeYAML, cmd.WorkBudgetSeconds)
 	}
-	if cmd := <-deploys; cmd.AppID != testAppID || cmd.ComposeYAML != composeV1 || cmd.WorkBudgetSeconds != 0 {
+	if cmd := receiveWithin(t, deploys, "no deploy reached the agent"); cmd.AppID != testAppID || cmd.ComposeYAML != composeV1 || cmd.WorkBudgetSeconds != 0 {
 		t.Errorf("push = %s %q budget %d, want v1 to the same app", cmd.AppID, cmd.ComposeYAML, cmd.WorkBudgetSeconds)
 	}
 	select {

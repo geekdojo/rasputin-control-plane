@@ -546,9 +546,9 @@ func TestUpgradeSaga_SubmittedDirectlyForACurrentAppChangesNothing(t *testing.T)
 	if _, err := runUpgrade(t, store, inv, nc, lookup, testAppID); err != nil {
 		t.Fatal(err)
 	}
-	<-got
-	<-pulls
-	<-checks
+	receiveWithin(t, got, "no deploy reached the agent")
+	receiveWithin(t, pulls, "no pull reached the agent")
+	receiveWithin(t, checks, "no volumes check reached the agent")
 	before, _ := store.Get(ctx, testAppID)
 
 	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"`+testAppID+`"}`, "job-direct")
@@ -624,8 +624,8 @@ func TestUpgradeSaga_RefusesBeforeTouchingTheRowOrTheNode(t *testing.T) {
 	if _, err := runUpgrade(t, store, inv, nc, lookupOf(upgradeTile(composeV2), 2), testAppID); err != nil {
 		t.Fatal(err)
 	}
-	<-got
-	<-pulls
+	receiveWithin(t, got, "no deploy reached the agent")
+	receiveWithin(t, pulls, "no pull reached the agent")
 
 	// Withdraw the tile, then ask again.
 	step, err := runUpgrade(t, store, inv, nc, nil, testAppID)

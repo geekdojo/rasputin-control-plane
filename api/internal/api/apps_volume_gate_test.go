@@ -200,7 +200,7 @@ func (g *gateNode) renamed(keys ...string) {
 
 func assertNoJobOfKind(t *testing.T, f *apiFixture, kind string) {
 	t.Helper()
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	if js, _ := f.jobsStore.ListJobsByKind(f.ctx, kind, 10); len(js) != 0 {
 		t.Errorf("expected no %s job, found %d", kind, len(js))
 	}
@@ -259,7 +259,7 @@ func TestAppsComposeVolumeGate_TheExactSetProceedsAndDeletesAfterUp(t *testing.T
 			if job.Kind != c.kind || !strings.Contains(string(job.Spec), `"deleteVolumes":["`+gateVolume("jellyfin-data")+`","`+gateVolume("worker-cache")+`"]`) {
 				t.Errorf("job = %s %s", job.Kind, job.Spec)
 			}
-			f.runner.Wait()
+			waitForJobs(t, f.runner)
 			if j, _ := f.jobsStore.GetJob(f.ctx, job.ID); j == nil || j.Status != jobs.StatusSucceeded {
 				t.Fatalf("job did not succeed: %+v", j)
 			}
@@ -287,7 +287,7 @@ func TestAppsComposeVolumeGate_AnAddedVolumeProceeds(t *testing.T) {
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("want 202, got %d (%s)", w.Code, w.Body.String())
 			}
-			f.runner.Wait()
+			waitForJobs(t, f.runner)
 			if got := g.log(); strings.Contains(got, "drop") || !strings.Contains(got, "deploy") {
 				t.Errorf("node was asked %q", got)
 			}
@@ -361,7 +361,7 @@ func TestAppsComposeVolumeGate_AFailedUpDeletesNothing(t *testing.T) {
 				t.Fatalf("want 202, got %d (%s)", w.Code, w.Body.String())
 			}
 			job := decodeBody[jobs.Job](t, w.Body.String())
-			f.runner.Wait()
+			waitForJobs(t, f.runner)
 			if j, _ := f.jobsStore.GetJob(f.ctx, job.ID); j == nil || j.Status != jobs.StatusFailed {
 				t.Fatalf("job = %+v, want failed at the push", j)
 			}
@@ -396,7 +396,7 @@ func TestAppsComposeVolumeGate_TheJobRefusesWhenTheRequestCouldNotCheck(t *testi
 				t.Fatalf("want 202 when the request's check has no answer, got %d (%s)", w.Code, w.Body.String())
 			}
 			job := decodeBody[jobs.Job](t, w.Body.String())
-			f.runner.Wait()
+			waitForJobs(t, f.runner)
 			j, _ := f.jobsStore.GetJob(f.ctx, job.ID)
 			if j == nil || j.Status != jobs.StatusFailed || !strings.Contains(j.Error, gateVolume("jellyfin-data")) {
 				t.Fatalf("job = %+v, want failed naming the dropped volume", j)

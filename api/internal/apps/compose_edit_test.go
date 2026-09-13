@@ -342,8 +342,8 @@ func TestRevertSaga_ARepeatedReapplyIsANoOpNotABounce(t *testing.T) {
 	if step, err := runRevert(t, store, inv, nc, nil, testAppID, composeV1); err != nil {
 		t.Fatalf("first re-apply failed at %s: %v", step, err)
 	}
-	<-pulls
-	<-deploys
+	receiveWithin(t, pulls, "no pull reached the agent")
+	receiveWithin(t, deploys, "no deploy reached the agent")
 	first := row()
 	if first.ComposeYAML != composeV1 || first.PreviousComposeYAML != composeV2 {
 		t.Fatalf("after the re-apply: compose=%q previous=%q", first.ComposeYAML, first.PreviousComposeYAML)
@@ -385,7 +385,7 @@ func TestRevertSaga_TargetInstalledDuringThePullDeploysTheRow(t *testing.T) {
 	if step, err := runRevert(t, store, inv, nc, nil, testAppID, composeV1); err != nil {
 		t.Fatalf("failed at %s: %v", step, err)
 	}
-	if cmd := <-deploys; cmd.ComposeYAML != composeV1 {
+	if cmd := receiveWithin(t, deploys, "no deploy reached the agent"); cmd.ComposeYAML != composeV1 {
 		t.Errorf("pushed %q, want v1", cmd.ComposeYAML)
 	}
 	if got := row(); got.ComposeYAML != composeV1 || got.PreviousComposeYAML != composeV2 {
@@ -408,7 +408,7 @@ func TestRevertSaga_ACustomAppReappliesItsPreviousCompose(t *testing.T) {
 	if step, err := runRevert(t, store, inv, nc, nil, testAppID, customV1); err != nil {
 		t.Fatalf("failed at %s: %v", step, err)
 	}
-	if cmd := <-deploys; cmd.AppID != testAppID || cmd.ComposeYAML != customV1 {
+	if cmd := receiveWithin(t, deploys, "no deploy reached the agent"); cmd.AppID != testAppID || cmd.ComposeYAML != customV1 {
 		t.Errorf("pushed %s %q, want v1 to the same app", cmd.AppID, cmd.ComposeYAML)
 	}
 	got, _ := store.Get(ctx, testAppID)
