@@ -26,6 +26,14 @@ func newStore(t *testing.T) *Store {
 	return s
 }
 
+// testAppID is the app the saga tests seed, and otherAppID a second one. Every
+// app.* spec parser refuses an appId that is not shaped like an app id, so
+// both are real ULIDs.
+const (
+	testAppID  = "01J8Z3K5QW6X7Y8Z9A0B1C2D3A"
+	otherAppID = "01J8Z3K5QW6X7Y8Z9A0B1C2D3G"
+)
+
 // makeApp builds an app suitable for Store.Create. Important gotcha: Create
 // persists only declarative fields (ID/Name/ComposeYAML/TargetNode/LastStatus
 // /Created/Updated). LastDetail/LastDeployed/LastStopped/LastStatusAt are
@@ -373,11 +381,11 @@ func TestJoinCols(t *testing.T) {
 // ============================================================================
 
 func TestParseSpec(t *testing.T) {
-	got, err := parseSpec(json.RawMessage(`{"appId":"a-1"}`))
+	got, err := parseSpec(json.RawMessage(`{"appId":"` + testAppID + `"}`))
 	if err != nil {
 		t.Fatalf("parseSpec: %v", err)
 	}
-	if got.AppID != "a-1" {
+	if got.AppID != testAppID {
 		t.Errorf("AppID: %q", got.AppID)
 	}
 
@@ -454,18 +462,18 @@ func TestLoadApp_Happy(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inv insert: %v", err)
 	}
-	a := makeApp("a", "minecraft")
+	a := makeApp(testAppID, "minecraft")
 	a.TargetNode = "n-x"
 	if err := store.Create(ctx, a); err != nil {
 		t.Fatalf("Create app: %v", err)
 	}
 
-	sc := newStepCtx(`{"appId":"a"}`)
+	sc := newStepCtx(`{"appId":"` + testAppID + `"}`)
 	got, err := loadApp(sc, store, inv)
 	if err != nil {
 		t.Fatalf("loadApp: %v", err)
 	}
-	if got == nil || got.ID != "a" {
+	if got == nil || got.ID != testAppID {
 		t.Errorf("loadApp got %+v", got)
 	}
 }
@@ -474,10 +482,11 @@ func TestLoadApp_ErrorCases(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	inv := newInventory(t)
+	const noNodeAppID, wrongRoleAppID = "01J8Z3K5QW6X7Y8Z9A0B1C2D3B", "01J8Z3K5QW6X7Y8Z9A0B1C2D3C"
 
 	// Set up: app with target node that isn't in inventory yet.
 	if err := store.Create(ctx, &App{
-		ID:          "a-no-node",
+		ID:          noNodeAppID,
 		Name:        "no-node",
 		ComposeYAML: "x",
 		TargetNode:  "missing-node",
@@ -494,7 +503,7 @@ func TestLoadApp_ErrorCases(t *testing.T) {
 		t.Fatalf("inv insert: %v", err)
 	}
 	if err := store.Create(ctx, &App{
-		ID:          "a-wrong-role",
+		ID:          wrongRoleAppID,
 		Name:        "wrong-role",
 		ComposeYAML: "x",
 		TargetNode:  "fw",
@@ -511,9 +520,9 @@ func TestLoadApp_ErrorCases(t *testing.T) {
 		wantMatch string
 	}{
 		{"bad spec", `{}`, "appId"},
-		{"unknown app", `{"appId":"no-such"}`, "not found"},
-		{"target node not registered", `{"appId":"a-no-node"}`, "not registered"},
-		{"target node has wrong role", `{"appId":"a-wrong-role"}`, "apps run on compute nodes only"},
+		{"unknown app", `{"appId":"` + missingAppID + `"}`, "not found"},
+		{"target node not registered", `{"appId":"` + noNodeAppID + `"}`, "not registered"},
+		{"target node has wrong role", `{"appId":"` + wrongRoleAppID + `"}`, "apps run on compute nodes only"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -540,19 +549,19 @@ func TestDeployLoad_And_StopLoad_HappyPath(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inv insert: %v", err)
 	}
-	a := makeApp("a", "x")
+	a := makeApp(testAppID, "x")
 	a.TargetNode = "n"
 	if err := store.Create(ctx, a); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	sc := newStepCtx(`{"appId":"a"}`)
+	sc := newStepCtx(`{"appId":"` + testAppID + `"}`)
 
 	dRaw, err := deployLoad(store, inv)(sc)
 	if err != nil {
 		t.Fatalf("deployLoad: %v", err)
 	}
-	if !strings.Contains(string(dRaw), `"appId":"a"`) {
+	if !strings.Contains(string(dRaw), `"appId":"`+testAppID+`"`) {
 		t.Errorf("deployLoad result: %s", dRaw)
 	}
 
@@ -560,7 +569,7 @@ func TestDeployLoad_And_StopLoad_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stopLoad: %v", err)
 	}
-	if !strings.Contains(string(sRaw), `"appId":"a"`) {
+	if !strings.Contains(string(sRaw), `"appId":"`+testAppID+`"`) {
 		t.Errorf("stopLoad result: %s", sRaw)
 	}
 }

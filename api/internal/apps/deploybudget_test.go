@@ -16,12 +16,12 @@ import (
 // the intention.
 func TestDeployPush_SendsTheAppsOwnBudgetToTheAgent(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "immich")
+	store, inv := seedOnlineApp(t, "n", testAppID, "immich")
 
 	// Give the app a budget the way an install from a heavy tile would.
-	app, _ := store.Get(context.Background(), "a")
+	app, _ := store.Get(context.Background(), testAppID)
 	app.DeployBudgetSeconds = 900
-	if err := store.Delete(context.Background(), "a"); err != nil {
+	if err := store.Delete(context.Background(), testAppID); err != nil {
 		t.Fatalf("reseed delete: %v", err)
 	}
 	if err := store.Create(context.Background(), app); err != nil {
@@ -41,7 +41,7 @@ func TestDeployPush_SendsTheAppsOwnBudgetToTheAgent(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deployPush(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestDeployPush_SendsTheAppsOwnBudgetToTheAgent(t *testing.T) {
 // would silently override an agent that knew better.
 func TestDeployPush_UndeclaredBudgetIsSentAsZero(t *testing.T) {
 	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", "a", "freshrss")
+	store, inv := seedOnlineApp(t, "n", testAppID, "freshrss")
 
 	got := make(chan proto.AppDeployCmd, 1)
 	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
@@ -77,7 +77,7 @@ func TestDeployPush_UndeclaredBudgetIsSentAsZero(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deployPush(store, inv, nc)(newStepCtxNATS(`{"appId":"a"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 

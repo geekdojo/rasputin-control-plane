@@ -222,7 +222,7 @@ func TestAppsUpgrade_Refusals(t *testing.T) {
 			t.Errorf("%s: a refused upgrade changed the row", c.id)
 		}
 	}
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	if js, _ := f.jobsStore.ListJobsByKind(f.ctx, "app.upgrade", 10); len(js) != 0 {
 		t.Errorf("a refusal must not create a job; found %d", len(js))
 	}
@@ -286,7 +286,7 @@ func TestAppsUpgrade_TakesTheComposeFromTheStoreAndKeepsTheAppsIdentity(t *testi
 	if string(job.Spec) != `{"appId":"`+id+`"}` {
 		t.Errorf("spec = %s, want only the app id", job.Spec)
 	}
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	if j, _ := f.jobsStore.GetJob(f.ctx, job.ID); j == nil || j.Status != jobs.StatusSucceeded {
 		t.Fatalf("job did not succeed: %+v", j)
 	}
@@ -331,7 +331,7 @@ func TestAppsUpgrade_TakesTheComposeFromTheStoreAndKeepsTheAppsIdentity(t *testi
 	if w := f.do(t, http.MethodPut, "/api/apps/"+id+"/compose", catalogBody, cookie); w.Code != http.StatusOK {
 		t.Errorf("repeated upgrade: want 200 no-op, got %d (%s)", w.Code, w.Body.String())
 	}
-	f.runner.Wait()
+	waitForJobs(t, f.runner)
 	if js, _ := f.jobsStore.ListJobsByKind(f.ctx, "app.upgrade", 10); len(js) != 1 {
 		t.Errorf("the repeated PUT started a job: %d app.upgrade jobs", len(js))
 	}

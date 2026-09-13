@@ -225,7 +225,7 @@ func TestComposeSpecs_RefuseBadDeleteVolumes(t *testing.T) {
 	if _, err := parseRevertSpec(json.RawMessage(`{"appId":"` + gateAppID + `","sha256":"` + ComposeHash(composeV1) + `","deleteVolumes":["` + bad + `"]}`)); err == nil {
 		t.Error("RevertSpec accepted another app's volume")
 	}
-	if _, err := parseSpec(json.RawMessage(`{"appId":"a","deleteVolumes":[]}`)); err == nil {
+	if _, err := parseSpec(json.RawMessage(`{"appId":"` + testAppID + `","deleteVolumes":[]}`)); err == nil {
 		t.Error("app.deploy's spec must still refuse deleteVolumes")
 	}
 }

@@ -82,8 +82,8 @@ func parseRevertSpec(raw json.RawMessage) (*RevertSpec, error) {
 	if err := decodeStrict(raw, &spec); err != nil {
 		return nil, err
 	}
-	if spec.AppID == "" {
-		return nil, errors.New("appId is required")
+	if err := checkSpecAppID(spec.AppID); err != nil {
+		return nil, err
 	}
 	if !ValidComposeHash(spec.ComposeSHA256) {
 		return nil, errors.New("sha256 must be the 64 lower-case hex digits of a compose's sha256")

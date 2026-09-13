@@ -64,8 +64,8 @@ func parseComposeChangeSpec(raw json.RawMessage) (*ComposeChangeSpec, error) {
 	if err := decodeStrict(raw, &spec); err != nil {
 		return nil, err
 	}
-	if spec.AppID == "" {
-		return nil, errors.New("appId is required")
+	if err := checkSpecAppID(spec.AppID); err != nil {
+		return nil, err
 	}
 	if err := ValidateDeleteVolumes(spec.AppID, spec.DeleteVolumes); err != nil {
 		return nil, err

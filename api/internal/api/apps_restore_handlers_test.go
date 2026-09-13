@@ -302,7 +302,7 @@ func TestAppRestoreSubmitsAJobWithASessionHandleAndNeverTheKey(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	af.srv.runner.Wait()
+	waitForJobs(t, af.srv.runner)
 	if _, active := af.sessions.Active(); active {
 		t.Fatal("the session outlived the job")
 	}
