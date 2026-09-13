@@ -120,8 +120,7 @@ EKU_RELEASE="codeSigning,emailProtection,${OID_RELEASE}"
 # A CATALOG leaf carries the catalog OID and NOTHING ELSE — deliberately not
 # codeSigning. That single omission is the whole blast-radius separation: a
 # holder of the catalog key cannot produce a signature the OTA path accepts,
-# and cannot grant themselves the release purpose without the intermediate key,
-# which is offline.
+# and cannot grant themselves the release purpose without the intermediate key.
 EKU_CATALOG="${OID_CATALOG}"
 
 while [[ $# -gt 0 ]]; do
@@ -204,11 +203,9 @@ verify_release_leaf() {
     local leaf=$1
     local anchor=(-CAfile root-ca.pem -untrusted intermediate-ca.pem)
     if [[ ! -f root-ca.pem ]]; then
-        # Rotating with only the intermediate to hand is normal — the root key
-        # is not needed to issue, only the intermediate key is. (The root is
-        # meant to be kept offline; that custody is tracked in
-        # geekdojo/geekdojo-brain#256 and is not in place today.) Anchor on the
-        # intermediate instead.
+        # Rotating with only the intermediate to hand is normal — the root is
+        # offline, and only the intermediate key is needed to issue. Anchor on
+        # the intermediate instead.
         #
         # -partial_chain is REQUIRED here and is not optional politeness: the
         # intermediate is not self-signed, so without it openssl refuses to

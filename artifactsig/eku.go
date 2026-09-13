@@ -22,10 +22,10 @@ import (
 // a naming convention: a holder of the catalog leaf's private key cannot grant
 // themselves the release purpose without the intermediate key.
 //
-// Key custody today: neither the root nor the intermediate private key is held
-// offline or in hardware. Both are file-based keys made by scripts/pki-init.sh.
-// Offline custody of the signing root is intended and tracked in
-// geekdojo/geekdojo-brain#256; it is not in place yet.
+// Key custody, per docs/pki.md: the root CA private key is kept offline on a
+// YubiKey. The intermediate private key is not offline; it lives on the release
+// machine or in a sealed CI secret. Whether to move to hardware-rooted signing
+// is a separate open question, tracked in geekdojo/geekdojo-brain#256.
 //
 // THE ARC: 1.3.6.1.4.1.66587, Geekdojo's IANA Private Enterprise Number.
 // Assigned 2026-08-20. https://www.iana.org/assignments/enterprise-numbers/
