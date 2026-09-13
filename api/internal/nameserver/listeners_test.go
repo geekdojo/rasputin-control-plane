@@ -209,11 +209,18 @@ func TestListeners_RealRebind(t *testing.T) {
 	assertPortFree(t, first.Started[0])
 }
 
-// TestServer_StopRightAfterStartReleasesPort is the regression for the
-// miekg/dns race Start now waits out: a Shutdown that lands before the serve
-// loop starts is refused, and the socket stays bound forever. A rebind is
-// exactly a Stop close behind a Start, so repeat it on one fixed port — every
-// iteration must find the port free.
+// TestServer_StopRightAfterStartReleasesPort is the regression for two
+// miekg/dns races a rebind walks straight into, because a rebind is exactly a
+// Stop close behind a Start on the same port:
+//
+//   - a Shutdown that lands before the serve loop starts is refused and the
+//     socket stays bound forever (fails on the first iteration without Start's
+//     wait for NotifyStartedFunc);
+//   - Shutdown can return while the serve loop's own Close is still releasing
+//     the descriptor (fails a few iterations in ten thousand without Stop's
+//     wait for ActivateAndServe to return — caught by CI on this test).
+//
+// Every iteration must find the port free.
 func TestServer_StopRightAfterStartReleasesPort(t *testing.T) {
 	loopback := net.IPv4(127, 0, 0, 1)
 	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: loopback})
