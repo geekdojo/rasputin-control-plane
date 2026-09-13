@@ -147,12 +147,20 @@ func (s *Server) handleUpdateIntent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if proto.FirewallIntentKind(existing.Kind) == proto.IntentDNSForward {
+		// The forward is CP-owned: an edit is put back to the control plane's
+		// address by the dns_forward saga, now rather than on a timer (#431).
+		s.submitDNSForward(r.Context(), "dns-forward-edited")
+	}
 	writeJSON(w, http.StatusOK, existing)
 }
 
 // DELETE /api/firewall/intents/{id}
 func (s *Server) handleDeleteIntent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Read the kind first: deleting the CP-owned forward re-runs the saga that
+	// recreates it (#431). A lookup error here is not the delete's business.
+	prior, _ := s.fw.GetIntent(r.Context(), id)
 	if err := s.fw.DeleteIntent(r.Context(), id); err != nil {
 		if errors.Is(err, errNoRowsSentinel) || err.Error() == "sql: no rows in result set" {
 			writeError(w, http.StatusNotFound, "intent not found")
@@ -160,6 +168,9 @@ func (s *Server) handleDeleteIntent(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if prior != nil && proto.FirewallIntentKind(prior.Kind) == proto.IntentDNSForward {
+		s.submitDNSForward(r.Context(), "dns-forward-deleted")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

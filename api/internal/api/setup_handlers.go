@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -83,7 +84,23 @@ func (s *Server) handleSetupMode(w http.ResponseWriter, r *http.Request) {
 			log.Printf("setup: submit firewall.set_active after mode change: %v", err)
 		}
 	}
+	// The mode decides whether the firewall's cluster-domain forward should
+	// exist at all (firewall.DNSForwardWorkflow's Managed gate), so a mode change
+	// is one of the facts that re-runs it. There is no timer behind it (#431).
+	s.submitDNSForward(r.Context(), "setup-mode-change")
 	writeJSON(w, http.StatusOK, state)
+}
+
+// submitDNSForward queues firewall.dns_forward, best-effort: the caller's own
+// write has already succeeded and must not fail over this. The saga decides
+// whether anything needs doing, so an unneeded run is a no-op.
+func (s *Server) submitDNSForward(ctx context.Context, createdBy string) {
+	if s.runner == nil {
+		return
+	}
+	if _, err := s.runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), createdBy); err != nil {
+		log.Printf("api: submit firewall.dns_forward (%s): %v", createdBy, err)
+	}
 }
 
 // POST /api/setup/mesh

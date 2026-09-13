@@ -15,11 +15,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -313,5 +315,84 @@ func TestCORS_NonOptionsSetsHeaders(t *testing.T) {
 	f.handler.ServeHTTP(w, req)
 	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
 		t.Errorf("ACAC: %q", got)
+	}
+}
+
+// ============================================================================
+// firewall.dns_forward is re-run by facts, not a timer (#431)
+// ============================================================================
+
+// registerDNSForwardStub gives the fixture runner a no-op firewall.dns_forward
+// so submissions persist as jobs the test can count.
+func registerDNSForwardStub(f *apiFixture) {
+	f.runner.Register(jobs.Workflow{Kind: "firewall.dns_forward", Steps: []jobs.WorkflowStep{{
+		Name: "noop", Timeout: time.Second,
+		Do: func(*jobs.StepCtx) (json.RawMessage, error) { return nil, nil },
+	}}})
+}
+
+func dnsForwardJobs(t *testing.T, f *apiFixture) []string {
+	t.Helper()
+	js, err := f.jobsStore.ListJobsByKind(f.ctx, "firewall.dns_forward", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var by []string
+	for _, j := range js {
+		by = append(by, j.CreatedBy)
+	}
+	return by
+}
+
+func TestHandleSetupMode_SubmitsDNSForward(t *testing.T) {
+	f := newAPIFixture(t)
+	registerDNSForwardStub(f)
+	c := f.authenticate(t)
+	if w := f.do(t, http.MethodPost, "/api/setup/mode", `{"mode":"lan_peer"}`, c); w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := dnsForwardJobs(t, f); len(got) != 1 || got[0] != "setup-mode-change" {
+		t.Fatalf("dns_forward jobs = %v, want one from the mode change", got)
+	}
+	// A rejected mode write changes nothing, so it re-runs nothing.
+	f.do(t, http.MethodPost, "/api/setup/mode", `{"mode":"nope"}`, c)
+	if got := dnsForwardJobs(t, f); len(got) != 1 {
+		t.Fatalf("dns_forward jobs after a rejected mode = %v, want still one", got)
+	}
+}
+
+func TestHandleIntent_DNSForwardEditOrDeleteResubmits(t *testing.T) {
+	f := newAPIFixture(t)
+	registerDNSForwardStub(f)
+	c := f.authenticate(t)
+	now := time.Now().UTC()
+	for _, in := range []*firewall.Intent{
+		{ID: "fwd", Kind: string(proto.IntentDNSForward), Name: "DNS-Forward-Internal", Enabled: true,
+			Spec: json.RawMessage(`{"zone":"test1.internal","target":"192.168.1.2"}`), CreatedAt: now, UpdatedAt: now},
+		{ID: "pf", Kind: string(proto.IntentPortForward), Name: "pf", Enabled: true,
+			Spec: json.RawMessage(`{"wanPort":80,"lanPort":80,"lanHost":"h","protocol":"tcp"}`), CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := f.fw.CreateIntent(f.ctx, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Operator intents never trigger it.
+	f.do(t, http.MethodPatch, "/api/firewall/intents/pf", `{"enabled":false}`, c)
+	f.do(t, http.MethodDelete, "/api/firewall/intents/pf", "", c)
+	if got := dnsForwardJobs(t, f); len(got) != 0 {
+		t.Fatalf("operator intent edits submitted dns_forward: %v", got)
+	}
+
+	if w := f.do(t, http.MethodPatch, "/api/firewall/intents/fwd", `{"enabled":false}`, c); w.Code != http.StatusOK {
+		t.Fatalf("patch forward: %d %s", w.Code, w.Body.String())
+	}
+	if w := f.do(t, http.MethodDelete, "/api/firewall/intents/fwd", "", c); w.Code != http.StatusNoContent {
+		t.Fatalf("delete forward: %d %s", w.Code, w.Body.String())
+	}
+	got := dnsForwardJobs(t, f)
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"dns-forward-deleted", "dns-forward-edited"}) {
+		t.Fatalf("dns_forward jobs = %v, want one per edit and delete of the forward", got)
 	}
 }

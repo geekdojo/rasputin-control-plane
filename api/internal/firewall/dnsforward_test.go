@@ -3,9 +3,13 @@ package firewall
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -119,4 +123,223 @@ func onlyDNSForward(t *testing.T, s *Store) *Intent {
 		}
 	}
 	return found
+}
+
+// applyCounter is a runner with a stand-in firewall.apply that counts its runs,
+// so a test sees whether the dns_forward step auto-applied.
+func applyCounter(t *testing.T) (*jobs.Runner, chan struct{}) {
+	t.Helper()
+	r, _, ran := applyCounterStore(t)
+	return r, ran
+}
+
+func applyCounterStore(t *testing.T) (*jobs.Runner, *jobs.Store, chan struct{}) {
+	t.Helper()
+	nc := startNATS(t)
+	js, err := jobs.OpenStore(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("jobs store: %v", err)
+	}
+	t.Cleanup(func() { _ = js.Close() })
+	runner := jobs.NewRunner(js, nc)
+	ran := make(chan struct{}, 8)
+	runner.Register(jobs.Workflow{Kind: "firewall.apply", Steps: []jobs.WorkflowStep{{
+		Name: "count", Timeout: time.Second,
+		Do: func(*jobs.StepCtx) (json.RawMessage, error) { ran <- struct{}{}; return nil, nil },
+	}}})
+	return runner, js, ran
+}
+
+func expectApply(t *testing.T, ran chan struct{}, want bool, why string) {
+	t.Helper()
+	select {
+	case <-ran:
+		if !want {
+			t.Fatalf("auto-applied, but should not have: %s", why)
+		}
+	case <-time.After(500 * time.Millisecond): // bounds the test only
+		if want {
+			t.Fatalf("no auto-apply: %s", why)
+		}
+	}
+}
+
+// TestDNSForwardReconcile_AppliesWhatNeverLanded is the case the registration
+// trigger depends on (#431): the forward moved while the firewall was away, so
+// its apply failed. The run when the firewall comes back finds the intent
+// unchanged — and must still push it, because it has never been applied. Once
+// an apply has landed, a further run is a no-op.
+func TestDNSForwardReconcile_AppliesWhatNeverLanded(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	inv := newInventory(t)
+	fwID := seedFirewallNode(t, inv, "fw-1")
+	runner, ran := applyCounter(t)
+	target := "192.168.1.225"
+	cfg := DNSForwardConfig{
+		Zone:   func() string { return "e12bench.internal" },
+		Target: func() string { return target },
+		Inv:    inv,
+	}
+	run := func() map[string]any {
+		t.Helper()
+		out, err := dnsForwardReconcile(store, runner, cfg)(newStepCtxNATS(`{}`, nil))
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		var m map[string]any
+		_ = json.Unmarshal(out, &m)
+		return m
+	}
+
+	// First creation applies, and the apply lands.
+	run()
+	expectApply(t, ran, true, "first creation")
+	if err := store.UpdateAfterApply(ctx, fwID, "h1", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if m := run(); m["changed"] != false || m["unapplied"] == true {
+		t.Fatalf("after a landed apply: %v, want a no-op", m)
+	}
+	expectApply(t, ran, false, "forward unchanged and applied")
+
+	// The address moves while the firewall is away: changed, apply submitted,
+	// but it never lands (no UpdateAfterApply).
+	target = "192.168.1.226"
+	if err := store.UpdateAfterApply(ctx, fwID, "h1", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	expectApply(t, ran, true, "address changed")
+
+	// The firewall registers again: nothing changed, but it is unapplied.
+	if m := run(); m["changed"] != false || m["unapplied"] != true {
+		t.Fatalf("firewall back: %v, want unchanged but unapplied", m)
+	}
+	expectApply(t, ran, true, "unchanged but never applied")
+
+	// That apply lands; the next registration is a no-op.
+	if err := store.UpdateAfterApply(ctx, fwID, "h2", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	expectApply(t, ran, false, "applied after it landed")
+}
+
+func TestForwardUnapplied(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	inv := newInventory(t)
+
+	if u, err := forwardUnapplied(ctx, store, inv); err != nil || u {
+		t.Fatalf("no firewall node: %v %v, want false", u, err)
+	}
+	fwID := seedFirewallNode(t, inv, "fw-1")
+	if u, err := forwardUnapplied(ctx, store, inv); err != nil || u {
+		t.Fatalf("no forward intent: %v %v, want false", u, err)
+	}
+	updated := time.Now().UTC().Truncate(time.Millisecond)
+	fwd := dnsForwardIntent(t, "d1", true, "e12bench.internal", "192.168.1.2")
+	fwd.UpdatedAt = updated
+	if err := store.CreateIntent(ctx, fwd); err != nil {
+		t.Fatal(err)
+	}
+	if u, err := forwardUnapplied(ctx, store, inv); err != nil || !u {
+		t.Fatalf("never applied: %v %v, want true", u, err)
+	}
+	if err := store.UpdateAfterApply(ctx, fwID, "h", updated.Add(-time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := forwardUnapplied(ctx, store, inv); !u {
+		t.Fatal("applied before the forward was written: want true")
+	}
+	if err := store.UpdateAfterApply(ctx, fwID, "h", updated); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := forwardUnapplied(ctx, store, inv); u {
+		t.Fatal("applied in the same millisecond the forward was written: want false (apply follows the write)")
+	}
+	if err := store.UpdateAfterApply(ctx, fwID, "h", updated.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := forwardUnapplied(ctx, store, inv); u {
+		t.Fatal("applied after: want false")
+	}
+	seedFirewallNode(t, inv, "fw-2")
+	if u, _ := forwardUnapplied(ctx, store, inv); u {
+		t.Fatal("two firewall nodes: no apply could target one, want false")
+	}
+}
+
+// TestDNSForwardWorkflow_BoundedRetries runs the registered workflow through
+// the real runner. A step that fails twice and then succeeds ends with the job
+// succeeding and exactly one firewall.apply submitted, not one per attempt. A
+// step that always fails ends failed after dnsForwardAttempts attempts, with
+// nothing else submitted: no apply, and no further dns_forward job.
+func TestDNSForwardWorkflow_BoundedRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		failures    int32 // how many leading attempts fail
+		wantStatus  jobs.Status
+		wantAttempt int
+		wantApplies int
+	}{
+		{"fails twice then succeeds", 2, jobs.StatusSucceeded, 3, 1},
+		{"always fails", 1 << 30, jobs.StatusFailed, dnsForwardAttempts, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newStore(t)
+			runner, js, ran := applyCounterStore(t)
+			// Production spaces retries with jobs.DefaultBackoff; zero keeps the
+			// test fast and changes nothing about how many attempts run.
+			runner.SetBackoff(func(int) time.Duration { return 0 })
+
+			var calls atomic.Int32
+			wf := DNSForwardWorkflow(store, runner, DNSForwardConfig{
+				Zone:   func() string { return "e12bench.internal" },
+				Target: func() string { return "192.168.1.226" },
+				// The step's first input; failing it fails the attempt before
+				// anything is written, as a transient setup-store error would.
+				Managed: func(context.Context) (bool, error) {
+					if calls.Add(1) <= tc.failures {
+						return false, errors.New("setup store: database is locked")
+					}
+					return true, nil
+				},
+			})
+			if err := jobs.ValidateWorkflow(wf); err != nil {
+				t.Fatalf("workflow does not validate: %v", err)
+			}
+			runner.Register(wf)
+
+			j, err := runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.Wait()
+
+			got, err := js.GetJob(ctx, j.ID)
+			if err != nil || got == nil {
+				t.Fatalf("GetJob: %v %v", got, err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("job status = %s (%s), want %s", got.Status, got.Error, tc.wantStatus)
+			}
+			if n := calls.Load(); int(n) != tc.wantAttempt {
+				t.Fatalf("step attempts = %d, want %d", n, tc.wantAttempt)
+			}
+			applies := 0
+			for len(ran) > 0 {
+				<-ran
+				applies++
+			}
+			if applies != tc.wantApplies {
+				t.Fatalf("firewall.apply runs = %d, want %d", applies, tc.wantApplies)
+			}
+			if fwd, _ := js.ListJobsByKind(ctx, "firewall.dns_forward", 100); len(fwd) != 1 {
+				t.Fatalf("dns_forward jobs = %d, want only the one submitted", len(fwd))
+			}
+		})
+	}
 }

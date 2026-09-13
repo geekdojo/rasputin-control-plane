@@ -36,6 +36,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nameserver"
@@ -376,6 +377,16 @@ func main() {
 	// The api's own node id — the system.update saga skips this one (the
 	// operator updates the controlplane node manually after the cascade).
 	selfNodeID := os.Getenv("RASPUTIN_SELF_NODE_ID")
+	// The control plane's own LAN IPv4, followed from kernel address events
+	// rather than looked up once at start (geekdojo/geekdojo-brain#431). Every
+	// consumer below — the nameserver's listeners and self answers, the
+	// firewall's DNS forward, this node's inventory row, the HTTPS leaf's IP
+	// SAN — reads it from here or subscribes to its changes. Started this early
+	// so the address is known before anything that reports it is wired.
+	lanWatch := lanaddr.NewWatcher(lanaddr.SystemSource())
+	if err := lanWatch.Start(ctx); err != nil {
+		log.Printf("rasputin-api: LAN address changes will not be followed (%v); using the start-time address: %s", err, lanWatch.Snapshot())
+	}
 	// The BMC host's node id lives in settings (bmc.host_node_id,
 	// bmc-settings.md S-5) and is read live so a Settings change
 	// redirects routing without a restart. The env var seeds first boot
@@ -514,7 +525,10 @@ func main() {
 	// AA-11 Mode-A/C zero-touch DNS (ADR-0004 §10): keep the firewall's dnsmasq
 	// conditional-forward for <cluster-id>.internal pointed at the control plane's
 	// current LAN IP, auto-applying when it moves. Gated to firewall-present modes
-	// by fwManaged; a dev box with no cluster id emits no forward.
+	// by fwManaged; a dev box with no cluster id emits no forward. Submitted on
+	// facts only — a LAN address change, the firewall agent registering, a mode
+	// change, an edit to the forward — never on a timer (#431); see
+	// submitDNSForward below and the api's setup/intent handlers.
 	runner.Register(firewall.DNSForwardWorkflow(fwStore, runner, firewall.DNSForwardConfig{
 		Zone: func() string {
 			if id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")); id != "" {
@@ -523,13 +537,16 @@ func main() {
 			return ""
 		},
 		Target: func() string {
-			if ip := primaryLanIP(); ip != nil {
-				return ip.String()
-			}
-			return ""
+			return ipString(lanWatch.PrimaryIP())
 		},
 		Managed: fwManaged,
+		Inv:     invStore,
 	}))
+	submitDNSForward := func(reason string) {
+		if _, err := runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), reason); err != nil {
+			log.Printf("rasputin-api: dns_forward submit (%s): %v", reason, err)
+		}
+	}
 	// Per-app TLS-leaf minter for the deploy saga (ADR-0004 §6): mints a Mesh-CA
 	// leaf for the app's FQDN(s) and fills the delivery command. nil (no CA)
 	// disables leaf delivery; the app still deploys, just without the proxy.
@@ -840,10 +857,29 @@ func main() {
 			}
 		}
 	})
+	// This node's own row takes its LAN address from lanWatch, not from the
+	// co-located agent's default-route guess, and moves when the address does
+	// (see SetSelfLANIP). The RASPUTIN_SELF_NODE_ID guard keeps a dev api, which
+	// has no node of its own, from writing anything.
+	if selfNodeID != "" {
+		invSvc.SetSelfLANIP(selfNodeID, func() string { return ipString(lanWatch.PrimaryIP()) })
+	}
+	// The firewall agent registers on every bus (re)connect. A dns_forward that
+	// moved while the firewall was away could not be applied then; this is the
+	// fact that says it can be now (#431). The saga applies only a forward that
+	// changed or never landed, so a routine reconnect costs one no-op job.
+	invSvc.SetOnRegistered(dnsForwardOnFirewallRegistration(submitDNSForward))
 	if err := invSvc.Start(ctx); err != nil {
 		log.Fatalf("rasputin-api: inventory service: %v", err)
 	}
 	defer invSvc.Stop()
+	if selfNodeID != "" {
+		followLANPrimary(lanWatch, func(net.IP) {
+			if err := invSvc.RefreshSelfLANIP(ctx); err != nil {
+				log.Printf("rasputin-api: inventory: refresh this node's LAN IP: %v", err)
+			}
+		})
+	}
 
 	metricsSvc := metrics.NewService(metricsStore, busSrv.Conn())
 	if err := metricsSvc.Start(ctx); err != nil {
@@ -854,11 +890,18 @@ func main() {
 	// Authoritative DNS for the internal zone <cluster-id>.internal, plus the
 	// <cluster>.local unicast name, both → the control plane's own LAN IP
 	// (ADR-0004 §3/§8). Slice 1 serves CP-self answers only; node + app records
-	// arrive with Slice 2. Binds the LAN IP:53 by value — never 0.0.0.0 — so
-	// systemd-resolved's 127.0.0.53 stub, which publishes the cluster's mDNS
-	// .local (ADR-0003), is left untouched. A bind failure (no LAN route, or no
-	// privilege on a dev box) is logged and skipped, never fatal: a control
-	// plane that won't start is worse than one without name resolution.
+	// arrive with Slice 2. Binds each LAN address:53 by value — never 0.0.0.0 —
+	// so systemd-resolved's 127.0.0.53 stub, which publishes the cluster's mDNS
+	// .local (ADR-0003), is left untouched. A bind failure (no privilege on a
+	// dev box) is logged and skipped, never fatal: a control plane that won't
+	// start is worse than one without name resolution.
+	//
+	// The listeners follow lanWatch (#431): none while the node has no usable
+	// LAN IPv4, started when one appears, rebound when the addresses on the
+	// primary link change. It used to be one bind at start, on an address found
+	// by a default-route lookup, so a control plane whose only address was the
+	// no-DHCP fallback (no gateway, so no default route) never served DNS, and
+	// one whose lease arrived or moved later kept its start-time bind.
 	// nsResp is hoisted so the api server can hot-swap its AA-11 forwarding stub
 	// after construction (below); nil when the nameserver is disabled/unstarted.
 	var nsResp *nameserver.Responder
@@ -901,15 +944,11 @@ func main() {
 				return out
 			})
 		nsResp = nameserver.NewResponder(zone,
-			nameserver.NewSelfSource(zone, clusterHostname(), primaryLanIP),
+			nameserver.NewSelfSource(zone, clusterHostname(), lanWatch.PrimaryIP),
 			clusterSrc)
-		nsSrv := nameserver.NewServer(primaryLanIP, 53, nsResp)
-		if err := nsSrv.Start(ctx); err != nil {
-			log.Printf("rasputin-api: nameserver not started (%v) — %s won't resolve via the CP", err, zone)
-		} else {
-			log.Printf("rasputin-api: nameserver authoritative for %s on %s (udp+tcp)", zone, nsSrv.UDPAddr())
-			defer nsSrv.Stop()
-		}
+		nsListeners := nameserver.NewListeners(ctx, 53, nsResp)
+		defer func() { _ = nsListeners.Close() }()
+		followLANNameserver(lanWatch, nsListeners, zone)
 	}
 
 	// IDS alert subscriber — appends each firewall snort alert to a JSONL
@@ -1037,12 +1076,7 @@ func main() {
 	// Per-app TLS leaves live a year and renew at <60d left (mesh.renewWindow);
 	// a daily sweep is ample and cheap (it no-ops until a leaf enters the window).
 	leafRotateEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_LEAF_ROTATE_INTERVAL"), 24*time.Hour)
-	sched := scheduler.New(runner, append([]scheduler.Entry{
-		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
-		{Kind: "firewall.dns_forward", Interval: fwReconcileEvery, InitialDelay: 100 * time.Second},
-		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
-		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
-		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
+	sched := scheduler.New(runner, append(append(reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafRotateEvery), []scheduler.Entry{
 		// storage.reconcile (#398): the claimed backup target's health, with
 		// a write probe. Fires only while a target is claimed (Due).
 		{
@@ -1064,9 +1098,15 @@ func main() {
 			InitialDelay: 3 * time.Minute,
 			Due:          storage.DueFunc(backupStore, setupStore, true),
 		},
-	}, obsCollectorEntries...))
+	}...), obsCollectorEntries...))
 	sched.Start(ctx)
 	defer sched.Stop()
+	// firewall.dns_forward runs the moment the primary LAN address changes, and
+	// once at start for the address this boot came up on. Every control-plane
+	// reboot without a DHCP reservation is such a change, and until the forward
+	// follows, the firewall sends <cluster-id>.internal to an address this node
+	// no longer holds.
+	followLANPrimary(lanWatch, func(net.IP) { submitDNSForward("lan-address-change") })
 
 	// This start applied an identity restore: once the mesh is up, kick a
 	// reconcile so converge_trust re-delivers the restored mesh CA to every
@@ -1121,24 +1161,29 @@ func main() {
 				nsResp.SetForwarder(nil)
 				return "", false, nil
 			}
-			up := nameserver.ResolveUpstream(cfg.Upstream, primaryLanIP(),
+			up := nameserver.ResolveUpstream(cfg.Upstream, lanWatch.PrimaryIP(),
 				nameserver.SystemUpstreams("/etc/resolv.conf", "/run/systemd/netif/leases"))
 			nsResp.SetForwarder(nameserver.NewForwarder(nameserver.ForwarderConfig{
 				Upstream: up.Addr,
-				SelfIP:   primaryLanIP,
+				SelfIP:   lanWatch.PrimaryIP,
 			}))
 			return up.Addr, up.FellBack, nil
 		}
-		if _, _, err := applyDNS(ctx); err != nil {
-			log.Printf("rasputin-api: DNS forwarding initial apply: %v", err)
-		}
+		// Applied now, and again whenever the primary LAN address changes: the
+		// inherited upstream skips our own address, and it comes from the DHCP
+		// lease, so a lease arriving after start changes both inputs.
+		followLANPrimary(lanWatch, func(net.IP) {
+			if _, _, err := applyDNS(ctx); err != nil {
+				log.Printf("rasputin-api: DNS forwarding apply: %v", err)
+			}
+		})
 		srv.SetDNSForwardingApplier(applyDNS)
 	}
 
 	// Host LAN IP + MAC for the DNS-forwarding reservation guidance (AA-11) —
 	// available whether or not the nameserver runs.
 	srv.SetHostLANInfo(func() (string, string) {
-		ip := primaryLanIP()
+		ip := lanWatch.PrimaryIP()
 		if ip == nil {
 			return "", ""
 		}
@@ -1285,6 +1330,12 @@ func main() {
 	httpHandler := handler
 	var httpsSrv, obsIngestSrv *http.Server
 	if httpsAddr != "" {
+		// Served from memory through GetCertificate rather than from files at
+		// ListenAndServeTLS, so a LAN address change re-mints the leaf's IP SAN
+		// without a restart (#431).
+		leaf := &apiLeaf{mint: func(lanIP net.IP) (mesh.LeafPaths, error) {
+			return ensureAPILeaf(meshCA, dataDir, lanIP)
+		}}
 		httpsSrv = &http.Server{
 			Addr:              httpsAddr,
 			Handler:           handler,
@@ -1300,6 +1351,7 @@ func main() {
 				NextProtos: []string{"http/1.1"},
 			},
 		}
+		httpsSrv.TLSConfig.GetCertificate = leaf.getCertificate
 		// The obs mTLS ingress shares the api's own server leaf for its
 		// identity (started with the same cert/key below, once minted) but
 		// adds RequireAndVerifyClientCert against the mesh CA — a per-node
@@ -1315,9 +1367,10 @@ func main() {
 				Handler:           srv.ObsIngestHandler(),
 				ReadHeaderTimeout: 10 * time.Second,
 				TLSConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-					ClientAuth: tls.RequireAndVerifyClientCert,
-					ClientCAs:  clientCAs,
+					MinVersion:     tls.VersionTLS12,
+					ClientAuth:     tls.RequireAndVerifyClientCert,
+					ClientCAs:      clientCAs,
+					GetCertificate: leaf.getCertificate,
 				},
 			}
 		}
@@ -1345,24 +1398,31 @@ func main() {
 					"minting the HTTPS leaf against the current clock. If the UI shows an expired or "+
 					"not-yet-valid certificate, fix time sync (NTP) and restart rasputin-api.", clockGateTimeout)
 			}
-			leafPaths, err := ensureAPILeaf(meshCA, dataDir)
-			if err != nil {
+			if err := leaf.load(lanWatch.PrimaryIP()); err != nil {
 				log.Fatalf("rasputin-api: https leaf: %v", err)
 			}
-			log.Printf("rasputin-api: https listening on %s (leaf %s)", httpsAddr, leafPaths.CertPath)
+			// Re-mint when the primary LAN address changes. A failure keeps the
+			// previous leaf in service and is not retried on a timer; the next
+			// address change, or a restart, tries again.
+			followLANPrimary(lanWatch, func(ip net.IP) {
+				if err := leaf.load(ip); err != nil {
+					log.Printf("rasputin-api: https leaf re-mint for LAN address %q: %v (previous leaf still served)", ipString(ip), err)
+				}
+			})
+			log.Printf("rasputin-api: https listening on %s (leaf %s)", httpsAddr, filepath.Join(dataDir, "tls", "api", "leaf.pem"))
 			// Bring up the obs mTLS ingress on the same leaf, in its own
 			// goroutine so it serves alongside (not after) HTTPS. Both listeners
-			// load the leaf files at serve time; the leaf's SAN-drift re-mint
-			// path (MintLeafToDisk) applies on the next restart, same as HTTPS.
+			// read the leaf per handshake through leaf.getCertificate, so a
+			// re-mint reaches them together.
 			if obsIngestSrv != nil {
 				go func() {
 					log.Printf("rasputin-api: obs mTLS ingress listening on %s", obsIngestAddr)
-					if err := obsIngestSrv.ListenAndServeTLS(leafPaths.CertPath, leafPaths.KeyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					if err := obsIngestSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 						log.Fatalf("rasputin-api: obs ingress: %v", err)
 					}
 				}()
 			}
-			if err := httpsSrv.ListenAndServeTLS(leafPaths.CertPath, leafPaths.KeyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("rasputin-api: https: %v", err)
 			}
 		}()
@@ -1476,9 +1536,9 @@ func waitForTrustworthyClock(ctx context.Context, timeout time.Duration) bool {
 // SAN-drift and <60d re-mint logic) the api's own HTTPS server leaf under
 // the Mesh CA. Lives at <dataDir>/tls/api/leaf.{pem,key}, parallel to the
 // Headscale leaf at <dataDir>/mesh/headscale/certs/.
-func ensureAPILeaf(meshCA *mesh.MeshCA, dataDir string) (mesh.LeafPaths, error) {
+func ensureAPILeaf(meshCA *mesh.MeshCA, dataDir string, lanIP net.IP) (mesh.LeafPaths, error) {
 	hostname, _ := os.Hostname()
-	spec := apiLeafSpec(hostname, primaryLanIP())
+	spec := apiLeafSpec(hostname, lanIP)
 	return mesh.MintLeafToDisk(meshCA, filepath.Join(dataDir, "tls", "api"), spec)
 }
 
@@ -1519,23 +1579,24 @@ func apiLeafSpec(hostname string, lanIP net.IP) mesh.LeafSpec {
 	}
 }
 
-// primaryLanIP returns the IP of the interface holding the default route,
-// or nil when there is none (air-gapped box). Mirrors the "dial 8.8.8.8
-// and inspect LocalAddr" trick in agent/internal/host.PrimaryLanCIDR —
-// mirrored rather than imported because that package is internal to the
-// agent module and the api can't reach across the module boundary. No
-// packet leaves the host: net.Dial("udp", ...) only does a route lookup.
-func primaryLanIP() net.IP {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		return nil
+// reconcileEntries is the fixed part of the api's schedule: the drift
+// reconciles, whose job is to notice divergence nobody announced, and the
+// leaf-rotation sweep.
+//
+// firewall.dns_forward is deliberately absent. It used to tick here every
+// fwReconcileEvery, re-deriving the forward from the address on a timer. It is
+// now submitted on the facts that change its inputs — the LAN address, the
+// firewall agent registering, the mode, an edit to the forward — so a tick would
+// only re-check what those already cover (#431). firewall.reconcile keeps its
+// own entry and cadence; it compares observed state and never rewrites the
+// forward.
+func reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafRotateEvery time.Duration) []scheduler.Entry {
+	return []scheduler.Entry{
+		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
+		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
+		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
+		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
 	}
-	defer conn.Close()
-	local, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return nil
-	}
-	return local.IP
 }
 
 func envOr(key, def string) string {

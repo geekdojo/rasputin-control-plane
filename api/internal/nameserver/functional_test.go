@@ -83,7 +83,7 @@ func TestFunctional_ReflectsLiveChanges(t *testing.T) {
 	loopback := net.IPv4(127, 0, 0, 1)
 	// The server reads the IP from a handler goroutine while the test changes it,
 	// so the holder must be concurrency-safe — exactly what a real Source must be
-	// (production's primaryLanIP shares no state). An atomic models that honestly.
+	// (production's lanaddr.Watcher is read from handler goroutines too). An atomic models that honestly.
 	var current atomic.Pointer[net.IP]
 	ip1 := net.ParseIP("192.168.1.10")
 	current.Store(&ip1)

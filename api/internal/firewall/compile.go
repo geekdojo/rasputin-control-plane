@@ -237,7 +237,7 @@ func compilePortForward(in *Intent) (map[string]any, error) {
 // compileDNSForward produces the single dnsmasq `server` list entry for the
 // cluster's conditional-forward, in dnsmasq's `/<domain>/<server>` form. Both
 // fields are CP-derived; Target must be a literal IPv4 address (decision #9,
-// and it's always primaryLanIP() on the api side). Zone must not contain '/'
+// and it's always the api's primary LAN address, from package lanaddr). Zone must not contain '/'
 // (it becomes a path segment in the server-entry string).
 func compileDNSForward(in *Intent) (string, error) {
 	var spec proto.DNSForwardSpec
