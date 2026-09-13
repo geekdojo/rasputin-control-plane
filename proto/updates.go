@@ -406,18 +406,20 @@ var DefaultMaxInFlight = Int(4)
 // ClampMaxInFlight is the rule that makes a flat default safe to leave alone
 // at every cluster size: min(k, max(1, tierSize−1)).
 //
-// The subtraction is the whole point — it holds AT LEAST ONE NODE BACK in
-// every tier however small. At 22 compute nodes the clamp is inert (4 < 21);
-// at 2 nodes it forces 1, which is serial. Without it, `k=4` on a two-node
-// tier is not a bounded fan-out at all, it is one unbounded batch wearing the
-// word "bounded".
+// tierSize counts EVERY target in the tier, canaries included, but the value
+// bounds only the fan-out that runs after the canaries (system_jobs.go). At 22
+// compute nodes the clamp is inert (4 < 21); at 2 nodes it forces 1, which is
+// serial. Without it, `k=4` on a two-node tier is not a bounded fan-out at
+// all, it is one unbounded batch wearing the word "bounded".
 //
-// It also partly rescues the failure budget. That breaker can only act while
-// nodes are still WAITING to start, so it is inert once tierSize ≤ k; the
-// clamp guarantees k < tierSize whenever tierSize ≥ 2, which keeps the final
-// node gated behind the failure count. One held-back node is a thin brake and
-// this does not make the breaker useful at three nodes — on small fleets the
-// canary is the real gate — but it stops it being structurally dead.
+// It does NOT hold a node back behind the failure budget. That breaker can
+// only act while nodes are still WAITING to start, i.e. when the fan-out is
+// longer than k. With one canary the fan-out is tierSize−1, and the clamp
+// allows k up to tierSize−1, so whenever the clamp binds every fan-out node
+// starts at once. At the default k=4 that means the budget never acts on a
+// tier of five or fewer nodes, and a tier with one canary per architecture
+// has a shorter fan-out still. On small fleets the canary and per-node A/B
+// rollback are the gate; a lower k is what leaves nodes waiting.
 //
 // ADR-0005 Decision 6.
 func ClampMaxInFlight(k, tierSize int) int {
@@ -456,11 +458,11 @@ const UnlimitedFailures = 0
 //     never a request to remove it.
 //
 // ⚠️ The breaker is weak on a small cluster whatever this returns, because it
-// can only act while nodes are still WAITING to start — it bites only when
-// tierSize > k. Decision 6's clamp stops that being structurally dead by
-// always holding one node back, but one node is a thin brake. On small fleets
-// safety comes from the canary and from per-node A/B rollback, and the ADR
-// states that rather than implying otherwise.
+// can only act while nodes are still WAITING to start — it bites only when the
+// post-canary fan-out is longer than k. Decision 6's clamp does not guarantee
+// that: it counts the canary as part of the tier, so at the default k=4 no
+// node waits in a tier of five or fewer (see ClampMaxInFlight). On small
+// fleets safety comes from the canary and from per-node A/B rollback.
 func ResolveMaxFailures(v IntOrString, tierSize int) int {
 	if !v.Percent {
 		return v.Value
