@@ -34,6 +34,48 @@ import type { App, DroppedVolume, Job } from './types';
  */
 export const UPGRADE_WARNING = 'Be sure you have reviewed changes on GitHub before upgrading!';
 
+/**
+ * UPGRADE_WARNING split around the word that links to the catalog changes.
+ * `before + link + after` is the warning, verbatim.
+ */
+export const UPGRADE_WARNING_PARTS = (() => {
+  const link = 'GitHub';
+  const at = UPGRADE_WARNING.indexOf(link);
+  return { before: UPGRADE_WARNING.slice(0, at), link, after: UPGRADE_WARNING.slice(at + link.length) };
+})();
+
+// A github.com owner or repository name. The repo comes from the API, and a
+// URL is built from it, so anything else is not linked.
+const REPO_SEGMENT = /^(?!\.{1,2}$)[A-Za-z0-9._-]+$/;
+
+function catalogVersion(v: number | undefined): number {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v > 0 ? v : 0;
+}
+
+/**
+ * Where "GitHub" in the upgrade warning points: the catalog changes the owner
+ * should review before upgrading.
+ *
+ *   - installed and target both known, target newer: the compare view between
+ *     the two catalog releases, which is exactly what changed;
+ *   - installed unknown (0 or absent): the target catalog release;
+ *   - no github.com source repo, or no target version: null, and "GitHub"
+ *     stays plain text rather than a guessed link.
+ */
+export function upgradeReviewUrl(
+  sourceRepo: string | undefined,
+  app: Pick<App, 'composeCatalogVersion' | 'upgradeCatalogVersion'>,
+): string | null {
+  const [owner, name, ...rest] = (sourceRepo ?? '').split('/');
+  if (rest.length > 0 || !REPO_SEGMENT.test(owner ?? '') || !REPO_SEGMENT.test(name ?? '')) return null;
+  const target = catalogVersion(app.upgradeCatalogVersion);
+  if (!target) return null;
+  const base = `https://github.com/${owner}/${name}`;
+  const installed = catalogVersion(app.composeCatalogVersion);
+  if (installed && installed < target) return `${base}/compare/catalog-v${installed}...catalog-v${target}`;
+  return `${base}/releases/tag/catalog-v${target}`;
+}
+
 /** The revert confirm's one static prompt, verbatim (Bryce, 2026-09-12). */
 export const REVERT_PROMPT = 'Reverting does not restore your data and may cause unexpected behavior. Proceed?';
 

@@ -2,16 +2,17 @@
 
 import { AlertTriangle, ArrowUpCircle, FileCode, RotateCcw, X } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
-import { getAppVolumes, putAppCompose } from '../lib/api';
+import { getAppVolumes, getCatalogStatus, putAppCompose } from '../lib/api';
 import {
   DROP_SELECTION_DEFAULT,
   REVERT_PROMPT,
-  UPGRADE_WARNING,
+  UPGRADE_WARNING_PARTS,
   bodyFor,
   canResubmitWithDeletions,
   canSubmitEdit,
   dropDeletionStatement,
   toggleDropSelection,
+  upgradeReviewUrl,
   withDeleteVolumes,
   type ComposeChangeBody,
   type ComposeChangeKind,
@@ -29,7 +30,8 @@ import { VolumeBackupTable, type VolumeTableRow } from './VolumeBackupTable';
 //
 //   upgrade  a catalog app to its tile's compose. The confirm shows the app's
 //            volumes by name and class with each one's last capture, as
-//            information, and exactly one static warning: UPGRADE_WARNING.
+//            information, and exactly one static warning: UPGRADE_WARNING,
+//            whose "GitHub" links to the catalog changes (upgradeReviewUrl).
 //   edit     a custom app's compose, edited here and redeployed in place.
 //   revert   re-apply a failed app's previous compose. The confirm is one
 //            static prompt, REVERT_PROMPT, and nothing else.
@@ -68,6 +70,8 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
   const { initialFocusRef } = useModalChrome({ open: true, onClose });
   const editorId = useId();
   const [volumes, setVolumes] = useState<AppVolumesResponse | null>(null);
+  // The github.com repo catalog releases come from, for the warning's link.
+  const [sourceRepo, setSourceRepo] = useState<string | undefined>(undefined);
   const [draft, setDraft] = useState<string>(kind === 'edit' ? app.composeYaml : '');
   // The body of the change that was refused, held only so the resubmit can
   // send the same thing again.
@@ -95,6 +99,21 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
       cancelled = true;
     };
   }, [app.id, app.name, kind]);
+
+  useEffect(() => {
+    if (kind !== 'upgrade') return;
+    let cancelled = false;
+    // Only the link depends on this. Until it answers, or if it fails,
+    // "GitHub" is plain text and the confirm works as before.
+    getCatalogStatus()
+      .then((st) => {
+        if (!cancelled) setSourceRepo(st.sourceRepo);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [kind]);
 
   async function submit(body: ComposeChangeBody) {
     setBusy(true);
@@ -182,7 +201,7 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
         {inDropped ? (
           <DroppedBody app={app} refusal={refusal} selected={selected} busy={busy} onToggle={(name) => setSelected((s) => toggleDropSelection(refusal.dropped, s, name))} />
         ) : kind === 'upgrade' ? (
-          <UpgradeBody app={app} volumes={volumes} />
+          <UpgradeBody app={app} volumes={volumes} reviewUrl={upgradeReviewUrl(sourceRepo, app)} />
         ) : kind === 'revert' ? (
           <p style={{ color: FG, fontSize: 11, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{REVERT_PROMPT}</p>
         ) : (
@@ -247,7 +266,7 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
   );
 }
 
-function UpgradeBody({ app, volumes }: { app: App; volumes: AppVolumesResponse | null }) {
+function UpgradeBody({ app, volumes, reviewUrl }: { app: App; volumes: AppVolumesResponse | null; reviewUrl: string | null }) {
   const rows: VolumeTableRow[] = volumes?.volumes ?? [];
   return (
     <>
@@ -279,7 +298,15 @@ function UpgradeBody({ app, volumes }: { app: App; volumes: AppVolumesResponse |
           background: 'rgba(250,204,21,0.07)',
         }}
       >
-        {UPGRADE_WARNING}
+        {UPGRADE_WARNING_PARTS.before}
+        {reviewUrl ? (
+          <a href={reviewUrl} target="_blank" rel="noopener noreferrer" style={{ color: WARN, textDecoration: 'underline' }}>
+            {UPGRADE_WARNING_PARTS.link}
+          </a>
+        ) : (
+          UPGRADE_WARNING_PARTS.link
+        )}
+        {UPGRADE_WARNING_PARTS.after}
       </div>
     </>
   );

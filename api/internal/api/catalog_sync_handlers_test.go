@@ -235,3 +235,60 @@ func TestCatalogSync_StatusReportsRefusedTiles(t *testing.T) {
 		t.Errorf("the reason must say why, got %q", st.Rejected[0].Reason)
 	}
 }
+
+// _status names the GitHub repository the poller reads, from the poller's own
+// configuration, so the upgrade confirm can link to what changed. It names
+// nothing when there is no poller or the poller does not read github.com.
+func TestCatalogSync_StatusNamesTheGitHubSourceRepo(t *testing.T) {
+	status := func(t *testing.T, poller *catalogsync.Poller) (catalogStatus, string) {
+		t.Helper()
+		f := newAPIFixture(t)
+		cookie := f.authenticate(t)
+		store, err := catalogsync.New(t.TempDir(), stubVerifier{}, oneTileBundle(1, "floor-tile"))
+		if err != nil {
+			t.Fatalf("store: %v", err)
+		}
+		f.srv.SetCatalogSync(store, poller)
+		w := f.do(t, http.MethodGet, "/api/catalog/_status", "", cookie)
+		if w.Code != http.StatusOK {
+			t.Fatalf("want 200, got %d (%s)", w.Code, w.Body.String())
+		}
+		var st catalogStatus
+		if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return st, w.Body.String()
+	}
+	newPoller := func(t *testing.T, repo, apiBase string) *catalogsync.Poller {
+		store, err := catalogsync.New(t.TempDir(), stubVerifier{}, oneTileBundle(1, "floor-tile"))
+		if err != nil {
+			t.Fatalf("store: %v", err)
+		}
+		return catalogsync.NewPoller(catalogsync.NewFetcher(repo, apiBase, "stable"), store)
+	}
+
+	t.Run("default GitHub source", func(t *testing.T) {
+		st, _ := status(t, newPoller(t, "", ""))
+		if st.SourceRepo != "geekdojo/rasputin-app-catalog" {
+			t.Errorf("sourceRepo = %q, want geekdojo/rasputin-app-catalog", st.SourceRepo)
+		}
+	})
+	t.Run("configured repo", func(t *testing.T) {
+		st, _ := status(t, newPoller(t, "someone/their-catalog", "https://api.github.com"))
+		if st.SourceRepo != "someone/their-catalog" {
+			t.Errorf("sourceRepo = %q, want someone/their-catalog", st.SourceRepo)
+		}
+	})
+	t.Run("not GitHub", func(t *testing.T) {
+		st, raw := status(t, newPoller(t, "", "https://mirror.example.com"))
+		if st.SourceRepo != "" || strings.Contains(raw, "sourceRepo") {
+			t.Errorf("a non-GitHub source must name no repo, got %s", raw)
+		}
+	})
+	t.Run("no poller", func(t *testing.T) {
+		_, raw := status(t, nil)
+		if strings.Contains(raw, "sourceRepo") {
+			t.Errorf("nothing polls, so no repo is named, got %s", raw)
+		}
+	})
+}

@@ -7,7 +7,8 @@
 //     exact dropped set can be resubmitted, and the body is the same body
 //     plus deleteVolumes;
 //   - anonymous orphan rows are named by service and path;
-//   - the two static strings, verbatim.
+//   - the two static strings, verbatim;
+//   - where "GitHub" in the upgrade warning links to.
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
@@ -15,6 +16,7 @@ import {
   DROP_SELECTION_DEFAULT,
   REVERT_PROMPT,
   UPGRADE_WARNING,
+  UPGRADE_WARNING_PARTS,
   bodyFor,
   canResubmitWithDeletions,
   canSubmitEdit,
@@ -29,6 +31,7 @@ import {
   startedNote,
   toggleDropSelection,
   upgradeBody,
+  upgradeReviewUrl,
   withDeleteVolumes,
 } from './compose-change';
 import type { App, AppStatus, DroppedVolume } from './types';
@@ -327,5 +330,54 @@ describe('orphanVolumeLabel', () => {
   });
   test('never an empty label', () => {
     assert.equal(orphanVolumeLabel({ name: hex, volume: '', anonymous: true }), `anonymous ${hex.slice(0, 12)}`);
+  });
+});
+
+describe('upgradeReviewUrl', () => {
+  const REPO = 'geekdojo/rasputin-app-catalog';
+
+  test('installed and target known: the compare view between the two catalog releases', () => {
+    assert.equal(
+      upgradeReviewUrl(REPO, { composeCatalogVersion: 17, upgradeCatalogVersion: 18 }),
+      'https://github.com/geekdojo/rasputin-app-catalog/compare/catalog-v17...catalog-v18',
+    );
+  });
+
+  test('installed version unknown (0 or absent): the target catalog release', () => {
+    const want = 'https://github.com/geekdojo/rasputin-app-catalog/releases/tag/catalog-v18';
+    assert.equal(upgradeReviewUrl(REPO, { composeCatalogVersion: 0, upgradeCatalogVersion: 18 }), want);
+    assert.equal(upgradeReviewUrl(REPO, { upgradeCatalogVersion: 18 }), want);
+  });
+
+  test('installed not older than the target: the target release, never an empty or reversed compare', () => {
+    const want = 'https://github.com/geekdojo/rasputin-app-catalog/releases/tag/catalog-v18';
+    assert.equal(upgradeReviewUrl(REPO, { composeCatalogVersion: 18, upgradeCatalogVersion: 18 }), want);
+  });
+
+  test('the repo comes from the API, not a constant', () => {
+    assert.equal(
+      upgradeReviewUrl('someone/their-catalog', { composeCatalogVersion: 3, upgradeCatalogVersion: 5 }),
+      'https://github.com/someone/their-catalog/compare/catalog-v3...catalog-v5',
+    );
+  });
+
+  test('no github.com source: no link, so "GitHub" renders as plain text', () => {
+    const versions = { composeCatalogVersion: 17, upgradeCatalogVersion: 18 };
+    assert.equal(upgradeReviewUrl(undefined, versions), null);
+    assert.equal(upgradeReviewUrl('', versions), null);
+    for (const bad of ['no-slash', 'a/b/c', '../x', 'a/..', 'a/b?c', 'a/b c', '/b', 'a/', 'https://evil.example/x']) {
+      assert.equal(upgradeReviewUrl(bad, versions), null, bad);
+    }
+  });
+
+  test('no target version: no link', () => {
+    assert.equal(upgradeReviewUrl(REPO, { composeCatalogVersion: 17 }), null);
+    assert.equal(upgradeReviewUrl(REPO, { composeCatalogVersion: 17, upgradeCatalogVersion: 0 }), null);
+  });
+
+  test('the warning is split around "GitHub" and still reads word for word', () => {
+    assert.equal(UPGRADE_WARNING_PARTS.link, 'GitHub');
+    assert.equal(UPGRADE_WARNING_PARTS.before + UPGRADE_WARNING_PARTS.link + UPGRADE_WARNING_PARTS.after, UPGRADE_WARNING);
+    assert.equal(UPGRADE_WARNING, 'Be sure you have reviewed changes on GitHub before upgrading!');
   });
 });

@@ -453,6 +453,9 @@ export interface CatalogStatus {
   lastError?: string;
   note?: string;
   rejectedTiles?: TileRejection[];
+  // owner/name of the github.com repository catalog releases are fetched
+  // from. Absent when nothing polls or the source is not github.com.
+  sourceRepo?: string;
 }
 import type { TilePrivilege } from './privilege';
 
