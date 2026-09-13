@@ -60,13 +60,16 @@ const (
 	tagPrefix   = "catalog-v"
 )
 
+// githubAPIBase is public GitHub's API root, and the default APIBase.
+const githubAPIBase = "https://api.github.com"
+
 // NewFetcher applies the defaults a control plane should run with.
 func NewFetcher(repo, apiBase, channel string) *Fetcher {
 	if repo == "" {
 		repo = "geekdojo/rasputin-app-catalog"
 	}
 	if apiBase == "" {
-		apiBase = "https://api.github.com"
+		apiBase = githubAPIBase
 	}
 	return &Fetcher{
 		Repo:    repo,
@@ -140,6 +143,42 @@ func (f *Fetcher) FetchInto(ctx context.Context, dir, bundleURL, sigURL string) 
 		return "", "", err
 	}
 	return bp, sp, nil
+}
+
+// GitHubRepo names the github.com repository this fetcher reads catalog
+// releases from, as owner/name, so the UI can link an owner to what changed
+// between two catalog releases. It is "" when there is no such repository to
+// name: an APIBase other than public GitHub's (a proxy, a mirror, a GitHub
+// Enterprise host) publishes release pages somewhere this code cannot know,
+// and a link guessed at github.com would be a broken one.
+//
+// The repo is configuration (RASPUTIN_CATALOG_REPO), and the UI builds a URL
+// from it, so anything that is not a plain owner/name is refused here too.
+func (f *Fetcher) GitHubRepo() string {
+	if f == nil || strings.TrimRight(f.APIBase, "/") != githubAPIBase {
+		return ""
+	}
+	owner, name, ok := strings.Cut(f.Repo, "/")
+	if !ok || !repoSegment(owner) || !repoSegment(name) {
+		return ""
+	}
+	return f.Repo
+}
+
+// repoSegment accepts one GitHub owner or repository name: letters, digits,
+// '.', '_' and '-', and never "." or "..".
+func repoSegment(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parseCatalogTag reads "catalog-v42" as 42.

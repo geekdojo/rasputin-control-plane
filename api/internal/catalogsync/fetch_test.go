@@ -389,3 +389,35 @@ func TestSync_RefusedBundleKeepsTheCurrentCatalog(t *testing.T) {
 		t.Errorf("operator-visible state should show the failure; fetched=%v note=%q", fetched, note)
 	}
 }
+
+// GitHubRepo is what the UI builds a github.com link from, so it names a repo
+// only when releases really are read from public GitHub, and only a plain
+// owner/name.
+func TestGitHubRepo_OnlyAPlainRepoOnPublicGitHub(t *testing.T) {
+	for _, tc := range []struct {
+		repo, apiBase, want string
+	}{
+		{"", "", "geekdojo/rasputin-app-catalog"},
+		{"", "https://api.github.com/", "geekdojo/rasputin-app-catalog"},
+		{"someone/their-catalog", "https://api.github.com", "someone/their-catalog"},
+		{"Some.One_x/cat-a.log", "", "Some.One_x/cat-a.log"},
+		{"", "https://mirror.example.com", ""},
+		{"", "https://ghe.example.com/api/v3", ""},
+		{"", "http://api.github.com", ""},
+		{"no-slash", "", ""},
+		{"a/b/c", "", ""},
+		{"../x", "", ""},
+		{"a/..", "", ""},
+		{"a/b?c", "", ""},
+		{"a/b c", "", ""},
+		{"/b", "", ""},
+	} {
+		if got := NewFetcher(tc.repo, tc.apiBase, "stable").GitHubRepo(); got != tc.want {
+			t.Errorf("repo %q at %q: GitHubRepo() = %q, want %q", tc.repo, tc.apiBase, got, tc.want)
+		}
+	}
+	var nilPoller *Poller
+	if got := nilPoller.SourceRepo(); got != "" {
+		t.Errorf("a nil poller names %q", got)
+	}
+}

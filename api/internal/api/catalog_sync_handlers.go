@@ -42,6 +42,13 @@ type catalogStatus struct {
 	// which is the situation Decision 7 was written for and is worth saying
 	// out loud rather than absorbing.
 	Rejected []tileschema.TileRejection `json:"rejectedTiles,omitempty"`
+
+	// SourceRepo is the github.com repository catalog releases are fetched
+	// from, as owner/name — the same configuration the poller reads. The UI
+	// uses it to link an upgrade to the catalog changes it would take. Absent
+	// when nothing polls, or when the poller does not read github.com: no
+	// repository is named rather than one that would be a broken link.
+	SourceRepo string `json:"sourceRepo,omitempty"`
 }
 
 // GET /api/catalog/_status — provenance of the catalog currently in effect.
@@ -75,6 +82,7 @@ func (s *Server) handleCatalogStatus(w http.ResponseWriter, r *http.Request) {
 		out.Source = "fetched"
 	}
 	if s.catalogPoller != nil {
+		out.SourceRepo = s.catalogPoller.SourceRepo()
 		if at, err := s.catalogPoller.LastChecked(); !at.IsZero() {
 			t := at
 			out.Checked = &t

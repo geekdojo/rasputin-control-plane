@@ -69,6 +69,15 @@ func (p *Poller) LastChecked() (time.Time, error) {
 	return p.lastChecked, p.lastErr
 }
 
+// SourceRepo is the github.com owner/name the poller fetches catalog releases
+// from, or "" when it does not fetch from github.com (see Fetcher.GitHubRepo).
+func (p *Poller) SourceRepo() string {
+	if p == nil {
+		return ""
+	}
+	return p.fetch.GitHubRepo()
+}
+
 // Run polls until ctx is cancelled. Blocking; callers run it in a goroutine.
 func (p *Poller) Run(ctx context.Context) {
 	interval := p.Interval
