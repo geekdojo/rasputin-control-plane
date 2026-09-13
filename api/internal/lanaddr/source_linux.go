@@ -76,31 +76,62 @@ func (netlinkSource) Subscribe(ctx context.Context) (<-chan struct{}, error) {
 			if err != nil {
 				return // the file was closed: ctx ended
 			}
-			if errors.Is(rerr, syscall.ENOBUFS) {
-				// The socket buffer overflowed and events were dropped. That is
-				// exactly why the receiver re-lists instead of applying deltas:
-				// one more list recovers the true set.
-				notify()
-				continue
+			var datagram []byte
+			if rerr == nil && n > 0 {
+				datagram = buf[:n]
 			}
-			if rerr != nil {
+			switch classifyDatagram(datagram, rerr) {
+			case datagramNotify:
+				notify()
+			case datagramStop:
 				log.Printf("lanaddr: netlink receive: %v", rerr)
 				return
-			}
-			msgs, perr := syscall.ParseNetlinkMessage(buf[:n])
-			if perr != nil {
-				notify() // unparseable, but it was an address-group message
-				continue
-			}
-			for _, m := range msgs {
-				if m.Header.Type == syscall.RTM_NEWADDR || m.Header.Type == syscall.RTM_DELADDR {
-					notify()
-					break
-				}
 			}
 		}
 	}()
 	return ch, nil
+}
+
+// datagramAction is what the subscription loop does with one receive.
+type datagramAction int
+
+const (
+	datagramIgnore datagramAction = iota // nothing address-related: keep reading
+	datagramNotify                       // the address set may have changed: signal once
+	datagramStop                         // the socket is unusable: end the subscription
+)
+
+// classifyDatagram decides what one recvfrom result means. It is the whole
+// policy of the receive loop, split out so it is testable with hand-built
+// netlink bytes; the loop around it only reads and acts.
+//
+//   - ENOBUFS: the socket buffer overflowed and events were dropped. That is
+//     exactly why the receiver re-lists instead of applying deltas, so one
+//     notification recovers the true set.
+//   - Any other receive error: stop. Nothing is retried on a timer; the Watcher
+//     logs that changes are no longer followed.
+//   - A datagram that does not parse: notify. The socket is only subscribed to
+//     the IPv4 address group, so whatever it was, a re-list is the safe answer.
+//   - RTM_NEWADDR or RTM_DELADDR anywhere in the datagram: notify, once, however
+//     many messages it carries.
+//   - Anything else: ignore.
+func classifyDatagram(datagram []byte, rerr error) datagramAction {
+	if errors.Is(rerr, syscall.ENOBUFS) {
+		return datagramNotify
+	}
+	if rerr != nil {
+		return datagramStop
+	}
+	msgs, err := syscall.ParseNetlinkMessage(datagram)
+	if err != nil {
+		return datagramNotify
+	}
+	for _, m := range msgs {
+		if m.Header.Type == syscall.RTM_NEWADDR || m.Header.Type == syscall.RTM_DELADDR {
+			return datagramNotify
+		}
+	}
+	return datagramIgnore
 }
 
 // List dumps every IPv4 address (RTM_GETADDR) and joins each to its interface.

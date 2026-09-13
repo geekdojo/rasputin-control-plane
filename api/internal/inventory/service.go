@@ -37,6 +37,10 @@ type Service struct {
 	// auth.Service.SetLoginHook → mesh.EnsureUser pattern.
 	onNodeAdded func(ctx context.Context, n *proto.Node)
 
+	// onRegistered, if set, is invoked after EVERY successful registration —
+	// the first one and every reconnect alike. See SetOnRegistered.
+	onRegistered func(ctx context.Context, n *proto.Node)
+
 	// selfNodeID / selfLANIP: the node this api runs on, and its LAN address as
 	// the api itself knows it. See SetSelfLANIP. selfMu serializes that node's
 	// registration writes with RefreshSelfLANIP, so a registration that read the
@@ -106,6 +110,17 @@ func (s *Service) Store() *Store { return s.store }
 // errors and never lets a hook block registration. Set before Start.
 func (s *Service) SetOnNodeAdded(fn func(ctx context.Context, n *proto.Node)) {
 	s.onNodeAdded = fn
+}
+
+// SetOnRegistered registers a callback fired after every successful
+// registration, first or repeat, once the row is written and the change event
+// emitted. An agent registers on every bus (re)connect, so this is the fact
+// "this node is back and reachable now" — the trigger for work that could not
+// reach it while it was away, instead of retrying that work on a timer. Same
+// contract as SetOnNodeAdded: it must not block, and it runs on the bus
+// callback goroutine. Set before Start.
+func (s *Service) SetOnRegistered(fn func(ctx context.Context, n *proto.Node)) {
+	s.onRegistered = fn
 }
 
 // SetSelfLANIP makes the api authoritative for its own node's LAN address.
@@ -305,6 +320,9 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 			// responsible for its own error handling; we just guard the call.
 			s.onNodeAdded(s.ctx, n)
 		}
+		if s.onRegistered != nil {
+			s.onRegistered(s.ctx, n)
+		}
 		return
 	}
 
@@ -352,6 +370,9 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 		s.emit(existing, proto.InventoryOnline)
 	} else {
 		s.emit(existing, proto.InventoryUpdated)
+	}
+	if s.onRegistered != nil {
+		s.onRegistered(s.ctx, existing)
 	}
 }
 

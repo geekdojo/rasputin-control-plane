@@ -35,11 +35,15 @@ type Watcher struct {
 	// order they happened and never two at once.
 	dispatchMu sync.Mutex
 	subs       []func(prev, next Snapshot)
+
+	// loopDone is closed when the change loop exits (or at once, when there was
+	// no subscription to loop over). Tests wait on it; nothing else needs to.
+	loopDone chan struct{}
 }
 
 // NewWatcher builds a Watcher over src. Call Start to begin.
 func NewWatcher(src Source) *Watcher {
-	return &Watcher{src: src}
+	return &Watcher{src: src, loopDone: make(chan struct{})}
 }
 
 // Start subscribes to address changes, takes the initial snapshot, and follows
@@ -54,9 +58,11 @@ func (w *Watcher) Start(ctx context.Context) error {
 	ch, subErr := w.src.Subscribe(ctx)
 	w.refresh()
 	if subErr != nil {
+		close(w.loopDone)
 		return subErr
 	}
 	go func() {
+		defer close(w.loopDone)
 		for range ch {
 			w.refresh()
 		}

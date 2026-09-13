@@ -173,3 +173,56 @@ func TestService_SelfLANIP(t *testing.T) {
 		t.Fatalf("self row with no address = %q, want empty", got)
 	}
 }
+
+// TestService_OnRegisteredFiresOnEveryRegistration: the hook is the "node is
+// back" fact, so it must fire on the first registration AND on every reconnect
+// (which SetOnNodeAdded deliberately does not), carrying the stored node, and
+// not for a registration that was rejected.
+func TestService_OnRegisteredFiresOnEveryRegistration(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store := newStore(t)
+	svc := NewService(store, nc)
+
+	got := make(chan proto.Node, 8)
+	svc.SetOnRegistered(func(_ context.Context, n *proto.Node) { got <- *n })
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(svc.Stop)
+
+	publish := func(ev proto.NodeRegisteredEvt) {
+		t.Helper()
+		b, _ := json.Marshal(ev)
+		if err := nc.Publish(proto.NodeRegisteredSubject(ev.NodeID), b); err != nil {
+			t.Fatal(err)
+		}
+		_ = nc.Flush()
+	}
+	next := func(what string) proto.Node {
+		t.Helper()
+		select {
+		case n := <-got:
+			return n
+		case <-time.After(2 * time.Second): // bounds the test only
+			t.Fatalf("no OnRegistered for %s", what)
+			return proto.Node{}
+		}
+	}
+
+	publish(proto.NodeRegisteredEvt{NodeID: "fw-1", Role: proto.RoleFirewall, Hostname: "fw", LANIP: "192.168.1.1"})
+	if n := next("first registration"); n.ID != "fw-1" || n.Role != proto.RoleFirewall {
+		t.Fatalf("first: %+v", n)
+	}
+	publish(proto.NodeRegisteredEvt{NodeID: "fw-1", Role: proto.RoleFirewall, Hostname: "fw", LANIP: "192.168.1.1"})
+	if n := next("reconnect"); n.ID != "fw-1" {
+		t.Fatalf("reconnect: %+v", n)
+	}
+
+	// Rejected (invalid role), then a valid one: only the valid one reports.
+	publish(proto.NodeRegisteredEvt{NodeID: "bad", Role: "toaster"})
+	publish(proto.NodeRegisteredEvt{NodeID: "cp-compute1", Role: proto.RoleCompute, Hostname: "c1"})
+	if n := next("valid after rejected"); n.ID != "cp-compute1" {
+		t.Fatalf("a rejected registration fired the hook: %+v", n)
+	}
+}

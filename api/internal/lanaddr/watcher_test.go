@@ -3,6 +3,8 @@ package lanaddr
 import (
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -231,4 +233,82 @@ func TestWatcher_SubscribeErrorStillScans(t *testing.T) {
 	if got := w.PrimaryIP(); got == nil || got.String() != "192.168.1.2" {
 		t.Fatalf("primary = %v, want the start-time scan", got)
 	}
+}
+
+// syncBuffer is a goroutine-safe log sink: the Watcher logs from its own
+// goroutine while the test reads.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func captureLog(t *testing.T) *syncBuffer {
+	t.Helper()
+	b := &syncBuffer{}
+	prev := log.Writer()
+	log.SetOutput(b)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return b
+}
+
+const subscriptionEnded = "address subscription ended"
+
+// TestWatcher_SubscriptionEndWarns: the kernel subscription breaking while the
+// api is still running is the one case where changes silently stop being
+// followed, so it must say so. The channel closing because ctx was cancelled is
+// a shutdown, and must not.
+func TestWatcher_SubscriptionEndWarns(t *testing.T) {
+	waitLoop := func(t *testing.T, w *Watcher) {
+		t.Helper()
+		select {
+		case <-w.loopDone:
+		case <-time.After(5 * time.Second): // bounds a broken test only
+			t.Fatal("watcher loop did not exit after its channel closed")
+		}
+	}
+
+	t.Run("channel closes with ctx live: warns", func(t *testing.T) {
+		out := captureLog(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		src := newFakeSource(lease)
+		w := NewWatcher(src)
+		if err := w.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		close(src.ch)
+		waitLoop(t, w)
+		if !strings.Contains(out.String(), subscriptionEnded) || !strings.Contains(out.String(), "192.168.1.226") {
+			t.Fatalf("want a %q warning naming the address still in use; log:\n%s", subscriptionEnded, out.String())
+		}
+	})
+
+	t.Run("ctx cancelled: silent", func(t *testing.T) {
+		out := captureLog(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		src := newFakeSource(lease)
+		w := NewWatcher(src)
+		if err := w.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		// A real Source closes its channel because ctx ended.
+		cancel()
+		close(src.ch)
+		waitLoop(t, w)
+		if strings.Contains(out.String(), subscriptionEnded) {
+			t.Fatalf("warned on a normal shutdown; log:\n%s", out.String())
+		}
+	})
 }

@@ -525,7 +525,10 @@ func main() {
 	// AA-11 Mode-A/C zero-touch DNS (ADR-0004 §10): keep the firewall's dnsmasq
 	// conditional-forward for <cluster-id>.internal pointed at the control plane's
 	// current LAN IP, auto-applying when it moves. Gated to firewall-present modes
-	// by fwManaged; a dev box with no cluster id emits no forward.
+	// by fwManaged; a dev box with no cluster id emits no forward. Submitted on
+	// facts only — a LAN address change, the firewall agent registering, a mode
+	// change, an edit to the forward — never on a timer (#431); see
+	// submitDNSForward below and the api's setup/intent handlers.
 	runner.Register(firewall.DNSForwardWorkflow(fwStore, runner, firewall.DNSForwardConfig{
 		Zone: func() string {
 			if id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")); id != "" {
@@ -537,7 +540,13 @@ func main() {
 			return ipString(lanWatch.PrimaryIP())
 		},
 		Managed: fwManaged,
+		Inv:     invStore,
 	}))
+	submitDNSForward := func(reason string) {
+		if _, err := runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), reason); err != nil {
+			log.Printf("rasputin-api: dns_forward submit (%s): %v", reason, err)
+		}
+	}
 	// Per-app TLS-leaf minter for the deploy saga (ADR-0004 §6): mints a Mesh-CA
 	// leaf for the app's FQDN(s) and fills the delivery command. nil (no CA)
 	// disables leaf delivery; the app still deploys, just without the proxy.
@@ -855,6 +864,11 @@ func main() {
 	if selfNodeID != "" {
 		invSvc.SetSelfLANIP(selfNodeID, func() string { return ipString(lanWatch.PrimaryIP()) })
 	}
+	// The firewall agent registers on every bus (re)connect. A dns_forward that
+	// moved while the firewall was away could not be applied then; this is the
+	// fact that says it can be now (#431). The saga applies only a forward that
+	// changed or never landed, so a routine reconnect costs one no-op job.
+	invSvc.SetOnRegistered(dnsForwardOnFirewallRegistration(submitDNSForward))
 	if err := invSvc.Start(ctx); err != nil {
 		log.Fatalf("rasputin-api: inventory service: %v", err)
 	}
@@ -1062,12 +1076,7 @@ func main() {
 	// Per-app TLS leaves live a year and renew at <60d left (mesh.renewWindow);
 	// a daily sweep is ample and cheap (it no-ops until a leaf enters the window).
 	leafRotateEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_LEAF_ROTATE_INTERVAL"), 24*time.Hour)
-	sched := scheduler.New(runner, append([]scheduler.Entry{
-		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
-		{Kind: "firewall.dns_forward", Interval: fwReconcileEvery, InitialDelay: 100 * time.Second},
-		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
-		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
-		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
+	sched := scheduler.New(runner, append(append(reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafRotateEvery), []scheduler.Entry{
 		// storage.reconcile (#398): the claimed backup target's health, with
 		// a write probe. Fires only while a target is claimed (Due).
 		{
@@ -1089,20 +1098,15 @@ func main() {
 			InitialDelay: 3 * time.Minute,
 			Due:          storage.DueFunc(backupStore, setupStore, true),
 		},
-	}, obsCollectorEntries...))
+	}...), obsCollectorEntries...))
 	sched.Start(ctx)
 	defer sched.Stop()
-	// firewall.dns_forward also runs the moment the primary LAN address changes,
-	// rather than waiting for the tick above. Every control-plane reboot without
-	// a DHCP reservation is such a change, and until the forward follows, the
-	// firewall sends <cluster-id>.internal to an address this node no longer
-	// holds. The tick stays as the drift backstop; the saga itself decides
-	// whether anything changed, so an unnecessary run is a no-op.
-	followLANPrimary(lanWatch, func(ip net.IP) {
-		if _, err := runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), "lan-address-change"); err != nil {
-			log.Printf("rasputin-api: dns_forward submit for LAN address %q: %v", ipString(ip), err)
-		}
-	})
+	// firewall.dns_forward runs the moment the primary LAN address changes, and
+	// once at start for the address this boot came up on. Every control-plane
+	// reboot without a DHCP reservation is such a change, and until the forward
+	// follows, the firewall sends <cluster-id>.internal to an address this node
+	// no longer holds.
+	followLANPrimary(lanWatch, func(net.IP) { submitDNSForward("lan-address-change") })
 
 	// This start applied an identity restore: once the mesh is up, kick a
 	// reconcile so converge_trust re-delivers the restored mesh CA to every
@@ -1572,6 +1576,26 @@ func apiLeafSpec(hostname string, lanIP net.IP) mesh.LeafSpec {
 		CommonName:  "rasputin.local",
 		DNSNames:    dns,
 		IPAddresses: ips,
+	}
+}
+
+// reconcileEntries is the fixed part of the api's schedule: the drift
+// reconciles, whose job is to notice divergence nobody announced, and the
+// leaf-rotation sweep.
+//
+// firewall.dns_forward is deliberately absent. It used to tick here every
+// fwReconcileEvery, re-deriving the forward from the address on a timer. It is
+// now submitted on the facts that change its inputs — the LAN address, the
+// firewall agent registering, the mode, an edit to the forward — so a tick would
+// only re-check what those already cover (#431). firewall.reconcile keeps its
+// own entry and cadence; it compares observed state and never rewrites the
+// forward.
+func reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafRotateEvery time.Duration) []scheduler.Entry {
+	return []scheduler.Entry{
+		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
+		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
+		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
+		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
 	}
 }
 

@@ -3,15 +3,22 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nameserver"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
+	"github.com/geekdojo/rasputin-control-plane/proto"
+	natsserver "github.com/nats-io/nats-server/v2/test"
+	"github.com/nats-io/nats.go"
 )
 
 // addrSource is an injectable lanaddr.Source standing in for the kernel.
@@ -234,5 +241,94 @@ func TestAPILeaf_FollowsLANAddress(t *testing.T) {
 	}
 	if !hasIP("192.168.1.226") || hasIP("192.168.1.2") {
 		t.Fatal("leaf did not move to the lease's IP SAN")
+	}
+}
+
+// TestDNSForward_FirewallRegistrationSubmits wires the real inventory service's
+// registration path to the hook main installs: the firewall agent registering
+// (first time, and again on reconnect) submits firewall.dns_forward; other roles
+// do not.
+func TestDNSForward_FirewallRegistrationSubmits(t *testing.T) {
+	ctx := context.Background()
+	srv := natsserver.RunRandClientPortServer()
+	t.Cleanup(srv.Shutdown)
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	store, err := inventory.OpenStore(ctx, filepath.Join(t.TempDir(), "inv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	submitted := make(chan string, 8)
+	svc := inventory.NewService(store, nc)
+	svc.SetOnRegistered(dnsForwardOnFirewallRegistration(func(reason string) { submitted <- reason }))
+	if err := svc.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(svc.Stop)
+
+	register := func(id string, role proto.NodeRole) {
+		t.Helper()
+		b, _ := json.Marshal(proto.NodeRegisteredEvt{NodeID: id, Role: role, Hostname: id})
+		if err := nc.Publish(proto.NodeRegisteredSubject(id), b); err != nil {
+			t.Fatal(err)
+		}
+		_ = nc.Flush()
+	}
+	expect := func(what string) {
+		t.Helper()
+		select {
+		case reason := <-submitted:
+			if reason != "firewall-registered" {
+				t.Fatalf("%s: submitted with reason %q", what, reason)
+			}
+		case <-time.After(2 * time.Second): // bounds the test only
+			t.Fatalf("%s: no dns_forward submission", what)
+		}
+	}
+
+	register("cp-firewall1", proto.RoleFirewall)
+	expect("firewall first registration")
+	register("cp-firewall1", proto.RoleFirewall)
+	expect("firewall reconnect")
+
+	// Compute and controlplane registrations submit nothing. A firewall one
+	// after them proves they were processed (the bus delivers in order) rather
+	// than still pending.
+	register("cp-compute1", proto.RoleCompute)
+	register("cp-1", proto.RoleControlPlane)
+	register("cp-firewall1", proto.RoleFirewall)
+	expect("firewall after other roles")
+	select {
+	case reason := <-submitted:
+		t.Fatalf("a non-firewall registration submitted dns_forward (%q)", reason)
+	default:
+	}
+}
+
+// Nothing re-submits firewall.dns_forward on a timer: the fixed schedule has no
+// entry for it, and the reconcile the old tick shared an interval with is still
+// there, unchanged.
+func TestReconcileEntries_NoDNSForwardTick(t *testing.T) {
+	entries := reconcileEntries(5*time.Minute, 5*time.Minute, 5*time.Minute, 24*time.Hour)
+	kinds := map[string]scheduler.Entry{}
+	for _, e := range entries {
+		kinds[e.Kind] = e
+	}
+	if _, ok := kinds["firewall.dns_forward"]; ok {
+		t.Fatal("firewall.dns_forward is back on a timer; it must run on facts only (#431)")
+	}
+	fw, ok := kinds["firewall.reconcile"]
+	if !ok || fw.Interval != 5*time.Minute || fw.InitialDelay != 30*time.Second {
+		t.Fatalf("firewall.reconcile entry = %+v (present %v), want it unchanged", fw, ok)
+	}
+	for _, k := range []string{"apps.reconcile", "mesh.reconcile", "apps.leaf_rotate"} {
+		if _, ok := kinds[k]; !ok {
+			t.Errorf("%s missing from the schedule", k)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nameserver"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // The functions here connect the control plane's LAN address (package lanaddr)
@@ -75,6 +77,18 @@ func followLANPrimary(w *lanaddr.Watcher, fn func(ip net.IP)) {
 		seen, last = true, ipString(ip)
 		fn(ip)
 	})
+}
+
+// dnsForwardOnFirewallRegistration returns the inventory registration hook that
+// re-runs firewall.dns_forward when the firewall node's agent registers — which
+// it does on every bus (re)connect. Other roles' registrations do not touch the
+// forward and do not trigger it.
+func dnsForwardOnFirewallRegistration(submit func(reason string)) func(context.Context, *proto.Node) {
+	return func(_ context.Context, n *proto.Node) {
+		if n != nil && n.Role == proto.RoleFirewall {
+			submit("firewall-registered")
+		}
+	}
 }
 
 // apiLeaf holds the api's HTTPS server leaf in memory and re-mints it when the

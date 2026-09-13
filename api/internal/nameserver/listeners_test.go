@@ -2,6 +2,7 @@ package nameserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -16,11 +17,12 @@ import (
 // fakeBound records the order of binds and stops across one Listeners, so the
 // stop-before-bind rule is checkable without sockets.
 type fakeBound struct {
-	ip  string
-	log *eventLog
+	ip      string
+	log     *eventLog
+	stopErr error
 }
 
-func (f *fakeBound) Stop() error     { f.log.add("stop " + f.ip); return nil }
+func (f *fakeBound) Stop() error     { f.log.add("stop " + f.ip); return f.stopErr }
 func (f *fakeBound) UDPAddr() string { return f.ip + ":53" }
 
 type eventLog struct {
@@ -43,6 +45,12 @@ func (e *eventLog) take() []string {
 }
 
 func fakeListeners(ctx context.Context, fail map[string]bool) (*Listeners, *eventLog) {
+	return fakeListenersStopErr(ctx, fail, nil)
+}
+
+// fakeListenersStopErr is fakeListeners whose listeners on the addresses in
+// stopFail return an error from Stop.
+func fakeListenersStopErr(ctx context.Context, fail map[string]bool, stopFail map[string]error) (*Listeners, *eventLog) {
 	log := &eventLog{}
 	l := NewListeners(ctx, 53, dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {}))
 	l.listen = func(_ context.Context, ip net.IP) (boundListener, error) {
@@ -51,7 +59,7 @@ func fakeListeners(ctx context.Context, fail map[string]bool) (*Listeners, *even
 			return nil, fmt.Errorf("bind %s: address already in use", ip)
 		}
 		log.add("bind " + ip.String())
-		return &fakeBound{ip: ip.String(), log: log}, nil
+		return &fakeBound{ip: ip.String(), log: log, stopErr: stopFail[ip.String()]}, nil
 	}
 	return l, log
 }
@@ -132,6 +140,61 @@ func TestListeners_FailedBindRetriedOnNextSync(t *testing.T) {
 	}
 	if got := log.take(); !eq(got, []string{"bind 192.168.1.2"}) {
 		t.Fatalf("retry events = %v", got)
+	}
+}
+
+// A listener whose Stop fails is still forgotten — its address is no longer
+// wanted, and keeping the key would make Sync believe it is bound — the error is
+// returned, and the rest of the Sync goes ahead: the other stale listeners stop
+// and the new address binds.
+func TestListeners_StopErrorOnRebind(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopErr := errors.New("shutdown: boom")
+	l, log := fakeListenersStopErr(ctx, nil, map[string]error{"192.168.1.2": stopErr})
+	if _, err := l.Sync(ips("192.168.1.2", "192.168.1.3")); err != nil {
+		t.Fatal(err)
+	}
+	log.take()
+
+	res, err := l.Sync(ips("192.168.1.226"))
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("Sync err = %v, want it to carry the Stop error", err)
+	}
+	if !eq(res.Stopped, []string{"192.168.1.2", "192.168.1.3"}) {
+		t.Fatalf("stopped = %v, want both old addresses, the failing one included", res.Stopped)
+	}
+	if !eq(res.Started, []string{"192.168.1.226:53"}) || !eq(l.Bound(), []string{"192.168.1.226:53"}) {
+		t.Fatalf("started = %v bound = %v, want only the new address", res.Started, l.Bound())
+	}
+	// And the failed one is not "still bound": asking for it again binds it anew.
+	if _, err := l.Sync(ips("192.168.1.226", "192.168.1.2")); err != nil {
+		t.Fatal(err)
+	}
+	if got := log.take(); !eq(got[len(got)-1:], []string{"bind 192.168.1.2"}) {
+		t.Fatalf("events = %v, want 192.168.1.2 bound again", got)
+	}
+}
+
+func TestListeners_StopErrorOnClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errA, errB := errors.New("stop a"), errors.New("stop b")
+	l, log := fakeListenersStopErr(ctx, nil, map[string]error{"10.0.0.1": errA, "10.0.0.3": errB})
+	if _, err := l.Sync(ips("10.0.0.1", "10.0.0.2", "10.0.0.3")); err != nil {
+		t.Fatal(err)
+	}
+	log.take()
+
+	err := l.Close()
+	if !errors.Is(err, errA) || !errors.Is(err, errB) {
+		t.Fatalf("Close err = %v, want both Stop errors joined", err)
+	}
+	if got := log.take(); len(got) != 3 {
+		t.Fatalf("Close stopped %v, want all three despite the errors", got)
+	}
+	if b := l.Bound(); len(b) != 0 {
+		t.Fatalf("bound after Close = %v, want none", b)
 	}
 }
 
