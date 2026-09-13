@@ -37,6 +37,14 @@ type Service struct {
 	// auth.Service.SetLoginHook → mesh.EnsureUser pattern.
 	onNodeAdded func(ctx context.Context, n *proto.Node)
 
+	// selfNodeID / selfLANIP: the node this api runs on, and its LAN address as
+	// the api itself knows it. See SetSelfLANIP. selfMu serializes that node's
+	// registration writes with RefreshSelfLANIP, so a registration that read the
+	// old address cannot land after the refresh that replaced it.
+	selfNodeID string
+	selfLANIP  func() string
+	selfMu     sync.Mutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	subs   []*nats.Subscription
@@ -98,6 +106,54 @@ func (s *Service) Store() *Store { return s.store }
 // errors and never lets a hook block registration. Set before Start.
 func (s *Service) SetOnNodeAdded(fn func(ctx context.Context, n *proto.Node)) {
 	s.onNodeAdded = fn
+}
+
+// SetSelfLANIP makes the api authoritative for its own node's LAN address.
+// Set before Start.
+//
+// Every other node's address is what its agent reports on registration, and
+// that stays true. The control plane's own row is different because the api is
+// on the same host and follows the address from kernel events (package
+// lanaddr), while the co-located agent measures it with a default-route lookup
+// and only on a bus (re)connect. That agent connects over the local host, so a
+// new lease never makes it reconnect, and with only the 192.168.1.2 fallback —
+// which has no gateway — it reports no address at all. /api/nodes therefore
+// kept showing the address from API start, both while the node was on .2 and
+// after it moved to a new lease (geekdojo/geekdojo-brain#431).
+//
+// fn returns the current address, or "" when the node has none. A registration
+// for nodeID takes fn's address in place of the agent's whenever fn has one.
+func (s *Service) SetSelfLANIP(nodeID string, fn func() string) {
+	s.selfNodeID = nodeID
+	s.selfLANIP = fn
+}
+
+// RefreshSelfLANIP writes the api's current address into its own node's row and
+// emits InventoryUpdated when that changed it. Call it when the address changes.
+// "" is written too: a control plane that holds no usable LAN address should
+// not go on advertising the last one it had. A node with no row yet (its agent
+// has not registered) is left alone; the registration will carry the address.
+func (s *Service) RefreshSelfLANIP(ctx context.Context) error {
+	if s.selfLANIP == nil || s.selfNodeID == "" {
+		return nil
+	}
+	s.selfMu.Lock()
+	defer s.selfMu.Unlock()
+	changed, err := s.store.SetLANIP(ctx, s.selfNodeID, s.selfLANIP())
+	if err != nil || !changed {
+		return err
+	}
+	n, err := s.store.Get(ctx, s.selfNodeID)
+	if err != nil || n == nil {
+		return err
+	}
+	s.mu.Lock()
+	if st, ok := s.statusByNode[n.ID]; ok {
+		n.Status = st
+	}
+	s.mu.Unlock()
+	s.emit(n, proto.InventoryUpdated)
+	return nil
 }
 
 // Remove deletes a node from inventory, clears its in-memory status entry,
@@ -184,6 +240,13 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	if !proto.ValidRole(ev.Role) {
 		log.Printf("inventory: reject %s: invalid role %q", ev.NodeID, ev.Role)
 		return
+	}
+	if s.selfLANIP != nil && ev.NodeID == s.selfNodeID {
+		s.selfMu.Lock()
+		defer s.selfMu.Unlock()
+		if ip := s.selfLANIP(); ip != "" {
+			ev.LANIP = ip
+		}
 	}
 	now := time.Now().UTC()
 

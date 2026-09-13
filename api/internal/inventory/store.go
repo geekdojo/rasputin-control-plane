@@ -103,6 +103,22 @@ func (s *Store) Update(ctx context.Context, n *proto.Node) error {
 	return err
 }
 
+// SetLANIP writes only the lan_ip column, and only when it differs. It reports
+// whether a row changed: false for an unchanged address and for an unknown id.
+// Used by the api for its own node, whose address it learns from the kernel
+// rather than from a registration (see Service.SetSelfLANIP).
+func (s *Store) SetLANIP(ctx context.Context, id, ip string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE nodes SET lan_ip=? WHERE id=? AND lan_ip <> ?`, ip, id, ip)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // marshalStorage renders the storage snapshot for its TEXT column: "" for
 // nil (never learned) so scanNode round-trips nil, JSON otherwise.
 func marshalStorage(st *proto.StorageInfo) string {

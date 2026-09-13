@@ -10,10 +10,10 @@ import (
 	"github.com/miekg/dns"
 )
 
-// ErrNoLANRoute is returned by Start when the control plane has no LAN IPv4 to
-// bind — e.g. a dev box with no default route. Callers treat it as "run without
-// the nameserver," not a fatal error: a control plane that won't start is worse
-// than one without name resolution (the same posture main takes elsewhere).
+// ErrNoLANRoute is returned by Start when it is given no IPv4 to bind. The name
+// predates #431, when "no LAN IPv4" was decided by a default-route lookup; the
+// address now comes from the kernel's address list (package lanaddr), and
+// [Listeners] never starts a Server without one.
 var ErrNoLANRoute = errors.New("nameserver: no LAN IPv4 to bind")
 
 // Server binds the authoritative responder on the control plane's LAN IP for
@@ -23,19 +23,20 @@ var ErrNoLANRoute = errors.New("nameserver: no LAN IPv4 to bind")
 // cluster discovery.
 type Server struct {
 	handler dns.Handler
-	ipFn    func() net.IP // the CP's LAN IPv4, re-resolved at Start (it moves per lease)
+	ipFn    func() net.IP // the address to bind, read once at Start; Listeners replaces the Server when it moves
 	port    int           // 53 in production; 0 asks the OS for an ephemeral port (tests)
 
 	mu               sync.Mutex
 	udp, tcp         *dns.Server
 	udpAddr, tcpAddr string // the actual bound host:port per transport (meaningful after Start)
 	stopped          bool
+	done             chan struct{} // closed by Stop, so Start's ctx watcher exits with it
 }
 
 // NewServer builds a nameserver that binds ipFn()'s address on the given port
 // (use 0 for an OS-assigned port in tests). handler is normally a *Responder.
 func NewServer(ipFn func() net.IP, port int, handler dns.Handler) *Server {
-	return &Server{handler: handler, ipFn: ipFn, port: port}
+	return &Server{handler: handler, ipFn: ipFn, port: port, done: make(chan struct{})}
 }
 
 // Start resolves the LAN IP, binds UDP+TCP, and serves until ctx is cancelled
@@ -64,18 +65,46 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("nameserver: bind tcp %s:%d: %w", ip, s.port, err)
 	}
 
+	// Start returns only once both servers report started. miekg/dns's Shutdown
+	// refuses a server that has not reached its serve loop yet ("server not
+	// started") and leaves the socket open, after which ActivateAndServe serves
+	// on it forever. A Stop that follows Start closely — which is what a rebind
+	// to a new LAN address is — would then leak the bind and hold the port on
+	// an address the node may no longer have.
+	udpUp, tcpUp := make(chan struct{}), make(chan struct{})
+	udp := &dns.Server{PacketConn: pc, Handler: s.handler, NotifyStartedFunc: func() { close(udpUp) }}
+	tcp := &dns.Server{Listener: ln, Handler: s.handler, NotifyStartedFunc: func() { close(tcpUp) }}
+
 	s.mu.Lock()
-	s.udp = &dns.Server{PacketConn: pc, Handler: s.handler}
-	s.tcp = &dns.Server{Listener: ln, Handler: s.handler}
+	s.udp, s.tcp = udp, tcp
 	s.udpAddr = pc.LocalAddr().String()
 	s.tcpAddr = ln.Addr().String()
 	s.mu.Unlock()
 
-	go func() { _ = s.udp.ActivateAndServe() }()
-	go func() { _ = s.tcp.ActivateAndServe() }()
+	udpErr, tcpErr := make(chan error, 1), make(chan error, 1)
+	go func() { udpErr <- udp.ActivateAndServe() }()
+	go func() { tcpErr <- tcp.ActivateAndServe() }()
+	for _, w := range []struct {
+		up  chan struct{}
+		err chan error
+	}{{udpUp, udpErr}, {tcpUp, tcpErr}} {
+		select {
+		case <-w.up:
+		case err := <-w.err:
+			// It returned before serving (e.g. socket options refused). Nothing
+			// is serving on this address, so release both binds.
+			_ = pc.Close()
+			_ = ln.Close()
+			_ = s.Stop()
+			return fmt.Errorf("nameserver: serve %s:%d: %w", ip, s.port, err)
+		}
+	}
 	go func() {
-		<-ctx.Done()
-		_ = s.Stop()
+		select {
+		case <-ctx.Done():
+			_ = s.Stop()
+		case <-s.done:
+		}
 	}()
 	return nil
 }
@@ -89,6 +118,7 @@ func (s *Server) Stop() error {
 		return nil
 	}
 	s.stopped = true
+	close(s.done)
 	udp, tcp := s.udp, s.tcp
 	s.mu.Unlock()
 

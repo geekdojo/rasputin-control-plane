@@ -13,10 +13,10 @@
 //
 // The responder, the constrained LAN-interface bind, and the CP-self answers —
 // the zone apex <cluster-id>.internal and the unicast <cluster>.local name, both
-// resolving to the control plane's own LAN IP (which the api already knows via a
-// default-route lookup). These need no node/app data, so they build and prove
-// the whole novel path — authoritative semantics, the bind, resolved
-// coexistence — ahead of the node-IP plumbing. The <cluster>.local answer
+// resolving to the control plane's own LAN IP (which the api follows from
+// kernel address events, package lanaddr). These need no node/app data, so they
+// build and prove the whole novel path — authoritative semantics, the bind,
+// resolved coexistence — ahead of the node-IP plumbing. The <cluster>.local answer
 // retires the E2 .local reach stopgaps.
 //
 // # Slice 2 (shipped)
@@ -36,5 +36,8 @@
 // 0.0.0.0:53) and must never displace systemd-resolved's 127.0.0.53:53 stub —
 // resolved also publishes the cluster's mDNS <cluster>.local (ADR-0003), so
 // freeing port 53 by disabling resolved would break cluster discovery. Because
-// the LAN IP moves per DHCP lease, it is re-resolved at Start.
+// the LAN IP moves per DHCP lease — and a control plane with no DHCP holds only
+// its static fallback — the bind is not decided once: [Listeners] keeps one
+// Server on each usable address of the primary LAN link, driven by address
+// events (#431).
 package nameserver
