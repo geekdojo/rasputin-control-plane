@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // CmdRunner runs a binary and returns its stdout. Injected so tests can
@@ -81,23 +82,34 @@ func (realRunner) Run(ctx context.Context, name string, args ...string) (string,
 type UCIRealClient struct {
 	mu           sync.Mutex
 	runner       CmdRunner
+	dnsmasq      dnsmasqObserver
 	manifestPath string
+	// logTimeout and probeTimeout bound the waits on the running dnsmasq; see
+	// dnsmasqLogTimeout and dnsmasqProbeTimeout. Fields so tests can shorten them.
+	logTimeout   time.Duration
+	probeTimeout time.Duration
 }
 
-// NewRealClient creates a UCIRealClient with the production exec runner.
+// NewRealClient creates a UCIRealClient with the production exec runner and
+// the production observer of the running dnsmasq.
 // dir is the agent's openwrt state subdir (same dir the mock uses); it
 // holds only managed.json. dir is created if missing.
 func NewRealClient(dir string) (*UCIRealClient, error) {
 	return newRealClient(dir, realRunner{})
 }
 
+// newRealClient uses the production observer of the running dnsmasq; tests
+// replace the dnsmasq field.
 func newRealClient(dir string, runner CmdRunner) (*UCIRealClient, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("openwrt-uci: mkdir %s: %w", dir, err)
 	}
 	return &UCIRealClient{
 		runner:       runner,
+		dnsmasq:      realDnsmasq{server: dnsmasqListen},
 		manifestPath: filepath.Join(dir, "managed.json"),
+		logTimeout:   dnsmasqLogTimeout,
+		probeTimeout: dnsmasqProbeTimeout,
 	}, nil
 }
 
@@ -120,6 +132,12 @@ type managedManifest struct {
 	// del_list the exact prior entry (preserving any non-Rasputin `server`
 	// upstreams) and Get can tell whether our entry is still present.
 	DNSForward string `json:"dnsForward,omitempty"`
+	// DNSForwardUnverified is true from the moment a DNSForward change is
+	// committed to UCI until a restarted dnsmasq has been seen using it. While
+	// it is set, every apply restarts dnsmasq again (even with the forward
+	// unchanged) and Get reports the forward as not in place — a restart that
+	// failed or could not be verified is never remembered as done.
+	DNSForwardUnverified bool `json:"dnsForwardUnverified,omitempty"`
 }
 
 // wanProtoKeys maps an observed network.wan proto to the proto-specific
@@ -227,7 +245,6 @@ func (c *UCIRealClient) Apply(ctx context.Context, state map[string]any) (string
 	// forward differs from what we last managed, so an unrelated apply doesn't
 	// needlessly bounce dnsmasq. An absent dhcp key (plan.dnsForward "") removes
 	// our forward — it's purely Rasputin's, unlike network.wan.
-	dnsmasqTouched := false
 	if plan.dnsForward != manifest.DNSForward {
 		if _, err := c.runner.Run(ctx, "uci", "-q", "revert", "dhcp"); err != nil {
 			return "", fmt.Errorf("openwrt-uci: revert dhcp: %w", err)
@@ -253,8 +270,11 @@ func (c *UCIRealClient) Apply(ctx context.Context, state map[string]any) (string
 			return "", fmt.Errorf("openwrt-uci: commit dhcp: %w", err)
 		}
 		manifest.DNSForward = plan.dnsForward
-		dnsmasqTouched = true
+		manifest.DNSForwardUnverified = true
 	}
+	// Both options are read only when dnsmasq starts (see dnsmasq.go), so a
+	// committed change reaches the running process only through a restart.
+	restartDnsmasq := manifest.DNSForwardUnverified
 
 	// Persist the manifest after the commits (it describes committed
 	// state) and before the reloads (a failed reload doesn't change what
@@ -272,10 +292,16 @@ func (c *UCIRealClient) Apply(ctx context.Context, state map[string]any) (string
 			return "", fmt.Errorf("openwrt-uci: network reload: %w", err)
 		}
 	}
-	if dnsmasqTouched {
-		// reload (not restart) applies the server change without dropping DNS.
-		if _, err := c.runner.Run(ctx, "/etc/init.d/dnsmasq", "reload"); err != nil {
-			return "", fmt.Errorf("openwrt-uci: dnsmasq reload: %w", err)
+	if restartDnsmasq {
+		// NOT reload: SIGHUP never re-reads server= or rebind-domain-ok=
+		// (geekdojo/geekdojo-brain#436). On failure the manifest keeps
+		// DNSForwardUnverified, so the next apply restarts again.
+		if err := c.restartDnsmasq(ctx, manifest.DNSForward); err != nil {
+			return "", fmt.Errorf("openwrt-uci: %w", err)
+		}
+		manifest.DNSForwardUnverified = false
+		if err := c.saveManifest(manifest); err != nil {
+			return "", err
 		}
 	}
 
@@ -389,16 +415,23 @@ func (c *UCIRealClient) Get(ctx context.Context) (map[string]any, string, error)
 
 	// dhcp: emitted only when Rasputin manages a forward (manifest), mirroring
 	// Compile — so a box with no forward hashes to a Compile with no dns_forward.
-	// We report the OBSERVED presence of our exact entry: gone out-of-band →
-	// server "" → won't match the intent's "/<zone>/<ip>" → surfaces as drift.
-	if manifest.DNSForward != "" {
-		present, err := c.dnsForwardPresent(ctx, manifest.DNSForward)
-		if err != nil {
-			return nil, "", err
-		}
+	// We report the OBSERVED forward, and it is in place only when all three
+	// hold: our exact entry is in UCI, the last restart was verified, and the
+	// RUNNING dnsmasq resolves the zone through it. UCI alone is not enough —
+	// it is what dnsmasq reads at its next start, not what it uses now (#436).
+	// Anything else → server "" → won't match the intent's "/<zone>/<ip>" →
+	// surfaces as drift. An unverified removal is emitted the same way, so it
+	// is drift too rather than silently in sync.
+	if manifest.DNSForward != "" || manifest.DNSForwardUnverified {
 		server := ""
-		if present {
-			server = manifest.DNSForward
+		if manifest.DNSForward != "" && !manifest.DNSForwardUnverified {
+			present, err := c.dnsForwardPresent(ctx, manifest.DNSForward)
+			if err != nil {
+				return nil, "", err
+			}
+			if present && c.dnsForwardServing(ctx, manifest.DNSForward) {
+				server = manifest.DNSForward
+			}
 		}
 		state["dhcp"] = map[string]any{"server": server}
 	}
