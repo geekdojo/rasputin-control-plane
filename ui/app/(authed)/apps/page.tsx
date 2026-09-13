@@ -17,11 +17,11 @@ import {
   stopApp,
 } from '../../../lib/api';
 import type { App, AppVolumesResponse, CatalogTile, OrphanVolume, OrphanVolumesResponse } from '../../../lib/types';
-import { formatBytes, timeAgo } from '../../../lib/volumes';
+import { customAppVolumesNote, formatBytes, timeAgo } from '../../../lib/volumes';
 import { appAccess, preferredAppUrl, type AppAccess } from '../../../lib/appurl';
 import { backupBadge, backupSummary, sortAppsOverdueFirst } from '../../../lib/backup-state';
 import { backupAckLine, noBackupBadge } from '../../../lib/backup-gate';
-import { composeActions, noopNote, orphanVolumeLabel, startedNote, type ComposeChangeKind } from '../../../lib/compose-change';
+import { composeActions, isCustomApp, noopNote, orphanVolumeLabel, startedNote, type ComposeChangeKind } from '../../../lib/compose-change';
 import {
   Badge,
   Btn,
@@ -151,7 +151,9 @@ export default function AppsPage() {
       setDeleteInfo(null);
       setPendingDelete(app);
       getAppVolumes(app.id)
-        .then(setDeleteInfo)
+        // A custom app's volumes cannot be listed; the prompt says what a
+        // delete with data covers instead, anonymous volumes included (#424).
+        .then((info) => setDeleteInfo(isCustomApp(app) ? { ...info, note: customAppVolumesNote(app.id, app.targetNode) } : info))
         .catch((e) =>
           // The prompt still opens, with the reason the facts are missing —
           // never a silent "no volumes".
@@ -600,11 +602,6 @@ function AppDetail({
               <LinkBtn href={`/tasks?app=${encodeURIComponent(app.id)}`} small aria-label={`Tasks for ${app.name}`}>
                 <ClipboardList size={10} /> VIEW TASKS
               </LinkBtn>
-              {compose.revert && (
-                <Btn small aria-label={`Revert ${app.name} to its previous compose`} onClick={() => onCompose(app, 'revert')}>
-                  <RotateCcw size={10} /> REVERT TO PREVIOUS COMPOSE…
-                </Btn>
-              )}
             </div>
           </div>
         )}
@@ -717,7 +714,11 @@ function AppDetail({
           )}
         </div>
 
-        {(compose.updateBadge || compose.edit) && (
+        {/* REVERT sits here with UPGRADE and EDIT, for every app that has a
+            previous compose and is not mid-deploy or mid-stop — not only under
+            FAILURE, so an upgrade that succeeded but misbehaves can be
+            reverted too (#414, Bryce 2026-09-12). */}
+        {(compose.updateBadge || compose.edit || compose.revert) && (
           <div>
             <SectionLabel>COMPOSE</SectionLabel>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -732,12 +733,19 @@ function AppDetail({
                   <FileCode size={10} /> EDIT COMPOSE…
                 </Btn>
               )}
+              {compose.revert && (
+                <Btn small aria-label={`Revert ${app.name} to its previous compose`} onClick={() => onCompose(app, 'revert')}>
+                  <RotateCcw size={10} /> REVERT TO PREVIOUS COMPOSE…
+                </Btn>
+              )}
             </div>
-            <Hint style={{ marginTop: 6 }}>
-              {compose.updateBadge
-                ? `The catalog${app.upgradeCatalogVersion ? ` (v${app.upgradeCatalogVersion})` : ''} carries a newer compose for this app. Nothing changes until you upgrade.`
-                : 'A custom app: edit its compose and redeploy it in place, keeping its volumes.'}
-            </Hint>
+            {(compose.updateBadge || compose.edit) && (
+              <Hint style={{ marginTop: 6 }}>
+                {compose.updateBadge
+                  ? `The catalog${app.upgradeCatalogVersion ? ` (v${app.upgradeCatalogVersion})` : ''} carries a newer compose for this app. Nothing changes until you upgrade.`
+                  : 'A custom app: edit its compose and redeploy it in place, keeping its volumes.'}
+              </Hint>
+            )}
           </div>
         )}
 

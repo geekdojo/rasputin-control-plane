@@ -65,7 +65,7 @@ export interface ComposeActions {
   upgrade: boolean;
   /** EDIT COMPOSE, for a custom app. */
   edit: boolean;
-  /** REVERT: re-apply the previous compose of a failed app. */
+  /** REVERT: re-apply the app's previous compose. */
   revert: boolean;
 }
 
@@ -75,7 +75,10 @@ export interface ComposeActions {
  *
  *   - the badge and UPGRADE: a catalog app whose tile carries a newer compose;
  *   - EDIT COMPOSE: a custom app (no source tile);
- *   - REVERT: a FAILED app that has a previous compose, and its hash.
+ *   - REVERT: any app that has a previous compose, and its hash, whatever its
+ *     status — so an upgrade that succeeded but misbehaves can be reverted
+ *     too, not only a failed one (Bryce, 2026-09-12: "show on any app that
+ *     has a previous compose").
  */
 export function composeActions(
   app: Pick<App, 'sourceTile' | 'lastStatus' | 'upgradeAvailable' | 'revertAvailable' | 'previousComposeSha256'>,
@@ -87,7 +90,7 @@ export function composeActions(
     updateBadge,
     upgrade: updateBadge && idle,
     edit: !catalog && idle,
-    revert: app.lastStatus === 'failed' && app.revertAvailable === true && !!app.previousComposeSha256,
+    revert: app.revertAvailable === true && !!app.previousComposeSha256 && idle,
   };
 }
 
