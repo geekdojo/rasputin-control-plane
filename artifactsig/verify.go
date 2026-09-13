@@ -15,8 +15,11 @@
 // intermediate, no `-nodetach` — so the artifact on the wire is a DER
 // SignedData with an ABSENT eContent, carrying the leaf and intermediate certs
 // and the standard authenticated attributes (contentType, signingTime,
-// messageDigest). The chain terminates at the offline, YubiKey-backed root
-// whose public half is baked to /etc/rasputin/trust/root-ca.pem.
+// messageDigest). The chain terminates at the Rasputin root CA, whose public
+// half is baked to /etc/rasputin/trust/root-ca.pem. The root's private key is a
+// file-based key made by scripts/pki-init.sh; it is not held offline or in
+// hardware today. Offline custody is intended and tracked in
+// geekdojo/geekdojo-brain#256.
 //
 // Two deliberate choices, both of which a future reader will want the reason for:
 //

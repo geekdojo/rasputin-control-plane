@@ -20,7 +20,12 @@ import (
 // The purpose is carried in the certificate's extended key usage, which is
 // signed by the intermediate. That is what makes this authorization rather than
 // a naming convention: a holder of the catalog leaf's private key cannot grant
-// themselves the release purpose without the intermediate key, which is offline.
+// themselves the release purpose without the intermediate key.
+//
+// Key custody today: neither the root nor the intermediate private key is held
+// offline or in hardware. Both are file-based keys made by scripts/pki-init.sh.
+// Offline custody of the signing root is intended and tracked in
+// geekdojo/geekdojo-brain#256; it is not in place yet.
 //
 // THE ARC: 1.3.6.1.4.1.66587, Geekdojo's IANA Private Enterprise Number.
 // Assigned 2026-08-20. https://www.iana.org/assignments/enterprise-numbers/
