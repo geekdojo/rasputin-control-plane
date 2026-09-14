@@ -349,8 +349,8 @@ func partitionName(disk string, n int) string {
 // protectedSet returns the indices of disks that hold a critical mount, with
 // the reason.
 //
-// It walks the SAME longest-prefix rule as protect.go's carryingMount, over the
-// same critical paths, and resolves a mount to a disk through the partition
+// It walks the SAME rules as protect.go's protectingMount, over the same
+// critical paths, and resolves a mount to a disk through the partition
 // UUID — the mock's stand-in for major:minor. What it must never do is look at
 // a device name, because the whole point of the mock is to prove the production
 // path does not either.
@@ -367,7 +367,7 @@ func (m *MockBackend) protectedSet(st *mockState) map[int]string {
 	}
 	out := map[int]string{}
 	for _, path := range wanted {
-		ent, ok := carryingMount(entries, path)
+		ent, ok := protectingMount(entries, path, m.persistentDir)
 		if !ok {
 			continue
 		}

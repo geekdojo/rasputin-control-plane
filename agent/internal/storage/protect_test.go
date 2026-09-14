@@ -287,6 +287,150 @@ func TestProtector_WholeDiskMountedDirectly(t *testing.T) {
 	}
 }
 
+// The boot mounts match exactly (geekdojo-brain#440). On a box with "/" and a
+// persistent partition and no boot mount, the longest-prefix rule used to
+// resolve /boot to "/", and the card read "holds the mounted boot partition
+// (/)". The root and persistent disks must stay protected, with nothing said
+// about a boot partition.
+func TestProtector_NoBootMountSaysNothingAboutBoot(t *testing.T) {
+	sys := newFakeSys(t)
+	sys.addDisk("mmcblk0", "179:0")
+	sys.addPartition("mmcblk0", "mmcblk0p2", "179:2")
+	sys.addPartition("mmcblk0", "mmcblk0p3", "179:3")
+	sys.addDisk("sda", "8:0")
+
+	mi := mountinfoFile(t, [][3]string{
+		{"179:2", "/", "/dev/root"},
+		{"179:3", DefaultPersistentDir, "/dev/mmcblk0p3"},
+	})
+	p := testProtector(t, sys, mi)
+	got, err := p.resolve()
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	pd, ok := got["/dev/mmcblk0"]
+	if !ok {
+		t.Fatalf("the disk holding / and the persistent partition is not protected: %+v", got)
+	}
+	if strings.Contains(pd.reason, "boot") {
+		t.Errorf("no boot mount exists, but the reason mentions one: %q", pd.reason)
+	}
+	if !strings.Contains(pd.reason, "root filesystem (/)") || !strings.Contains(pd.reason, "persistent partition") {
+		t.Errorf("reason should name the root filesystem and the persistent partition, got %q", pd.reason)
+	}
+	if _, ok := got["/dev/sda"]; ok {
+		t.Errorf("the unmounted disk was protected: %+v", got)
+	}
+	assertSetUnchanged(t, p, got)
+}
+
+// A real boot mount still gets its own wording, naming that mount — on the
+// boot disk alongside the root filesystem, and on a disk of its own.
+func TestProtector_RealBootMountKeepsItsWording(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		espMajor string
+		espDisk  string
+	}{
+		{"ESP on the boot disk", "259:1", "/dev/nvme0n1"},
+		{"ESP on a disk of its own", "8:1", "/dev/sda"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := newFakeSys(t)
+			sys.addDisk("nvme0n1", "259:0")
+			sys.addPartition("nvme0n1", "nvme0n1p1", "259:1")
+			sys.addPartition("nvme0n1", "nvme0n1p2", "259:2")
+			sys.addPartition("nvme0n1", "nvme0n1p3", "259:3")
+			sys.addDisk("sda", "8:0")
+			sys.addPartition("sda", "sda1", "8:1")
+			sys.addDisk("nvme1n1", "259:8")
+
+			mi := mountinfoFile(t, [][3]string{
+				{"259:2", "/", "/dev/root"},
+				{tc.espMajor, "/boot/efi", "/dev/esp"},
+				{"259:3", DefaultPersistentDir, "/dev/nvme0n1p3"},
+			})
+			p := testProtector(t, sys, mi)
+			got, err := p.resolve()
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			esp, ok := got[tc.espDisk]
+			if !ok {
+				t.Fatalf("the disk holding /boot/efi is not protected: %+v", got)
+			}
+			if !strings.Contains(esp.reason, "holds the mounted boot partition (/boot/efi)") {
+				t.Errorf("reason should name the /boot/efi mount, got %q", esp.reason)
+			}
+			if strings.Contains(got["/dev/nvme0n1"].reason, "boot partition (/)") {
+				t.Errorf("a boot partition at / was reported: %q", got["/dev/nvme0n1"].reason)
+			}
+			if _, ok := got["/dev/nvme1n1"]; ok {
+				t.Errorf("the unmounted NVMe was protected: %+v", got)
+			}
+			assertSetUnchanged(t, p, got)
+		})
+	}
+}
+
+// assertSetUnchanged checks got against the protected set the longest-prefix
+// rule resolves for EVERY path, which is what the resolver did before the boot
+// mounts matched exactly. Exact matching may change a reason; it must never
+// drop a disk.
+func assertSetUnchanged(t *testing.T, p *protector, got map[string]protectedDisk) {
+	t.Helper()
+	entries, err := p.readMountinfo()
+	if err != nil {
+		t.Fatalf("read mountinfo: %v", err)
+	}
+	want := map[string]bool{}
+	for _, path := range append(append([]string{}, p.criticalMounts...), p.persistentDir) {
+		ent, ok := carryingMount(entries, path)
+		if !ok {
+			continue
+		}
+		disks, err := p.wholeDisksFor(ent.majMin)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", path, err)
+		}
+		for _, d := range disks {
+			want[d] = true
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("protected set changed: got %+v, longest-prefix rule gives %v", got, want)
+	}
+	for d := range want {
+		if _, ok := got[d]; !ok {
+			t.Errorf("%s dropped from the protected set: got %+v", d, got)
+		}
+	}
+}
+
+func TestExactMount(t *testing.T) {
+	entries := []mountEntry{
+		{mountPoint: "/", source: "root"},
+		{mountPoint: "/boot/efi", source: "esp"},
+		{mountPoint: DefaultPersistentDir, source: "data"},
+	}
+	for path, want := range map[string]string{"/": "root", "/boot/efi": "esp", "/boot/efi/": "esp"} {
+		got, ok := exactMount(entries, path)
+		if !ok || got.source != want {
+			t.Errorf("%s: got %q (ok=%v), want %q", path, got.source, ok, want)
+		}
+	}
+	for _, path := range []string{"/boot", "/boot/firmware", "/efi"} {
+		if got, ok := exactMount(entries, path); ok {
+			t.Errorf("%s is not mounted, but matched %q", path, got.source)
+		}
+	}
+	// The persistent dir keeps the longest prefix: on a box without its own
+	// partition it is carried by "/".
+	if got, ok := protectingMount(entries[:2], DefaultPersistentDir, DefaultPersistentDir); !ok || got.source != "root" {
+		t.Errorf("persistent dir without its own mount: got %q (ok=%v), want root", got.source, ok)
+	}
+}
+
 func TestCarryingMount_LongestPrefixWins(t *testing.T) {
 	entries := []mountEntry{
 		{mountPoint: "/", source: "root"},
