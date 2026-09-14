@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
-	golang.org/x/crypto v0.50.0
+	golang.org/x/crypto v0.55.0
 )
 
 require golang.org/x/sys v0.43.0
