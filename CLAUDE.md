@@ -31,10 +31,13 @@ asking first (proposed and declined 2026-07-08). The working methodology:
    real, so inferring it on a controlplane means the control plane reports a mesh
    that does not exist. Without the var the api boots fine and every other page
    works; the mesh pages show an "unavailable" banner and mesh verbs refuse.
-2. **Verify through Bryce's real Chrome** (claude-in-chrome MCP tools): navigate to
-   `localhost:3000/...`, screenshot/zoom for proof. His Chrome holds the 7-day
-   session — the dev loop is fully autonomous while it's valid.
-3. **Session expired?** Open `localhost:3000/login` in his Chrome, click "Sign in
+2. **Verify through Bryce's real Chrome** (claude-in-chrome MCP tools) — not the in-app
+   preview browser, which can't hold the passkey session. **Open your own tab** with
+   `tabs_create` and navigate *that* tab to `localhost:3000/...`; never navigate, click in
+   or close one of his existing tabs, and close your tab when done. A new tab shares his
+   Chrome's 7-day session, so the dev loop stays fully autonomous while it's valid.
+   Screenshot/zoom for proof.
+3. **Session expired?** Open `localhost:3000/login` in your own tab in his Chrome, click "Sign in
    with passkey" to raise the prompt, then ask Bryce for one Touch ID and wait for
    his confirmation. One tap buys another 7 days.
 4. **Deployed UI** (`rasputin.local`) can be verified the same way — his Chrome
