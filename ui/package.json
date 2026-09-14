@@ -11,7 +11,7 @@
     "test": "rm -rf .test-out && tsc -p tsconfig.test.json && node --test \".test-out/**/*.test.js\""
   },
   "dependencies": {
-    "@simplewebauthn/browser": "^11.0.0",
+    "@simplewebauthn/browser": "^14.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "hash-wasm": "4.12.0",
