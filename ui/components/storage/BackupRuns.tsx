@@ -40,6 +40,7 @@ import { Badge, Btn, DIM, FG, HAIR_SOFT, Hint, SectionLabel, Select, srOnly, tdS
 import { MONO } from '../ui-theme';
 import {
   CADENCE_OFF,
+  cadenceOptions,
   runScopeTitle,
   scopeHeadline,
   cadenceRequest,
@@ -55,16 +56,6 @@ import { formatDiskSize } from './format';
 const DANGER = '#f87171';
 const WARN = '#facc15';
 const OK_GREEN = '#4ade80';
-
-// The cadences a form offers. §4.1's default is weekly; the api's floor is an
-// hour and its ceiling a year, so every option here is inside both.
-const CADENCES: { label: string; value: string }[] = [
-  { label: 'Daily', value: '24h' },
-  { label: 'Every 3 days', value: '72h' },
-  { label: 'Weekly (default)', value: '168h' },
-  { label: 'Fortnightly', value: '336h' },
-  { label: 'Monthly', value: '720h' },
-];
 
 export function BackupRuns({ hasTarget }: { hasTarget: boolean }) {
   const [data, setData] = useState<BackupRunsResponse | null>(null);
@@ -181,7 +172,7 @@ export function BackupRuns({ hasTarget }: { hasTarget: boolean }) {
               onChange={(e) => changeSchedule(cadenceRequest(e.target.value, schedule))}
               style={{ fontSize: 10 }}
             >
-              {CADENCES.map((c) => (
+              {cadenceOptions(schedule).map((c) => (
                 <option key={c.value} value={c.value}>
                   {c.label}
                 </option>

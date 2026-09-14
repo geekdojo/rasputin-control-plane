@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  CADENCES,
   CADENCE_OFF,
   RETAIN_OPTIONS,
   appVolumeSummary,
+  cadenceLabel,
+  cadenceOptions,
   cadenceRequest,
   cadenceValue,
   retainHelpText,
@@ -110,10 +113,10 @@ describe('runScopeTitle', () => {
 describe('cadenceValue', () => {
   const base: BackupSchedule = {
     enabled: true,
-    every: '168h',
+    every: '168h0m0s',
     everySeconds: 604800,
     nextDue: null,
-    defaultEvery: '168h',
+    defaultEvery: '168h0m0s',
     minEvery: '1h',
     maxEvery: '8760h',
     retain: 4,
@@ -122,12 +125,51 @@ describe('cadenceValue', () => {
     maxRetain: 52,
   };
 
+  // The fixture above is the api's real response shape: the cadence is Go's
+  // Duration.String(), so a week is '168h0m0s' and never '168h'
+  // (geekdojo-brain#437). Short spellings here once let these tests pass
+  // against a shape the api never sends, while the page showed Daily.
+  it('selects the weekly option for the api’s own 168h0m0s spelling', () => {
+    assert.equal(cadenceValue(base), '168h');
+    assert.ok(cadenceOptions(base).some((c) => c.value === cadenceValue(base)));
+  });
+
   it('shows the operator’s cadence when the schedule is on', () => {
-    assert.equal(cadenceValue({ ...base, every: '24h' }), '24h');
+    assert.equal(cadenceValue({ ...base, every: '24h0m0s', everySeconds: 86400 }), '24h');
   });
 
   it('falls back to the default when no cadence is stored', () => {
     assert.equal(cadenceValue({ ...base, every: undefined }), '168h');
+  });
+
+  it('matches every curated option in the api’s spelling', () => {
+    for (const c of CADENCES) {
+      const s = { ...base, every: `${c.seconds / 3600}h0m0s`, everySeconds: c.seconds };
+      assert.equal(cadenceValue(s), c.value);
+      assert.deepEqual(cadenceOptions(s), CADENCES);
+    }
+  });
+
+  it('renders a cadence the list does not carry as itself, not as the first option', () => {
+    const s = { ...base, every: '12h0m0s', everySeconds: 43200 };
+    assert.equal(cadenceValue(s), '12h0m0s');
+    const opts = cadenceOptions(s);
+    assert.equal(opts.length, CADENCES.length + 1);
+    assert.deepEqual(opts[0], { label: 'Every 12 hours', value: '12h0m0s', seconds: 43200 });
+  });
+
+  it('keeps an unlisted cadence in order among the curated ones', () => {
+    const s = { ...base, every: '240h0m0s', everySeconds: 864000 };
+    assert.deepEqual(
+      cadenceOptions(s).map((c) => c.value),
+      ['24h', '72h', '168h', '240h0m0s', '336h', '720h'],
+    );
+  });
+
+  it('shows the resolved cadence, not the stored string, when the two differ', () => {
+    // The api falls back to the default for an unusable stored value and says
+    // so in everySeconds; the control renders what the scheduler will do.
+    assert.equal(cadenceValue({ ...base, every: 'nonsense', everySeconds: 604800 }), '168h');
   });
 
   it('renders a disabled schedule as an explicit off, never as a blank', () => {
@@ -148,6 +190,31 @@ describe('cadenceRequest', () => {
 
   it('turns a duration into an enable with that cadence', () => {
     assert.deepEqual(cadenceRequest('72h'), { enabled: true, every: '72h' });
+  });
+
+  it('sends every option’s value as a Go duration string the api parses', () => {
+    // The api's PUT runs time.ParseDuration on `every`. Each value here is one
+    // it accepts, including an unlisted cadence carried back in its own
+    // '12h0m0s' spelling.
+    const goDuration = /^(\d+h)?(\d+m)?(\d+s)?$/;
+    const unlisted = cadenceOptions({ ...schedule(), every: '12h0m0s', everySeconds: 43200 });
+    for (const c of unlisted) {
+      assert.match(c.value, goDuration);
+      assert.equal(cadenceRequest(c.value, schedule()).every, c.value);
+    }
+  });
+});
+
+describe('cadenceLabel', () => {
+  it('names whole days and hours', () => {
+    assert.equal(cadenceLabel(10 * 86400, '240h0m0s'), 'Every 10 days');
+    assert.equal(cadenceLabel(43200, '12h0m0s'), 'Every 12 hours');
+    assert.equal(cadenceLabel(3600, '1h0m0s'), 'Every hour');
+  });
+
+  it('falls back to the api’s string for anything else', () => {
+    assert.equal(cadenceLabel(5400, '1h30m0s'), 'Every 1h30m0s');
+    assert.equal(cadenceLabel(Number.NaN, '1h30m0s'), 'Every 1h30m0s');
   });
 });
 
@@ -170,10 +237,10 @@ describe('appVolumeSummary', () => {
 function schedule(over: Partial<BackupSchedule> = {}): BackupSchedule {
   return {
     enabled: true,
-    every: '168h',
+    every: '168h0m0s',
     everySeconds: 604800,
     nextDue: null,
-    defaultEvery: '168h',
+    defaultEvery: '168h0m0s',
     minEvery: '1h',
     maxEvery: '8760h',
     retain: 4,
