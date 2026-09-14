@@ -1,0 +1,27 @@
+name: gitleaks
+
+# Secret-scanning gate (geekdojo/geekdojo-brain#105). Calls the org's reusable
+# gitleaks workflow in geekdojo/.github, which scans this repository's FULL
+# history, every commit on every ref, on each pull request and each push to the
+# default branch. Any finding fails the check `gitleaks / scan`.
+#
+# A finding verified as a false positive gets its fingerprint in .gitleaksignore,
+# preceded by a `#` comment giving the reason. Never a disabled rule or an
+# excluded path. The job id `gitleaks` is part of the required check name; do not
+# rename it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    uses: geekdojo/.github/.github/workflows/gitleaks.yml@main
