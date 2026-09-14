@@ -6,7 +6,7 @@
 // against, so these functions bias towards saying MORE — a nameless disk still
 // gets its device path, an empty partition table still gets a sentence.
 
-import type { BackupCandidate, StoragePartition, StorageTransport } from '../../lib/types';
+import type { BackupCandidate, BackupTarget, StoragePartition, StorageTransport } from '../../lib/types';
 
 /**
  * Disk vendors sell in decimal gigabytes and the label on the drive says
@@ -82,16 +82,32 @@ export function partitionLine(p: StoragePartition): string {
  *  - `protected`  the boot medium. Not claimable at all, and shown saying so.
  *  - `format`     blank (to Rasputin's eye): format and claim.
  *  - `adopt`      carries a Rasputin backup set: take it over as it stands.
+ *  - `current`    carries the backup set that IS the claimed target. There is
+ *                 nothing to claim, and offering to adopt it tells the operator
+ *                 to take over the disk backups are already written to.
  *  - `unreadable` announces a set whose marker could not be parsed. It can be
  *                 neither adopted (no partition UUID to adopt it by) nor
  *                 claimed as blank (the backup-set refusal stands in the way).
  *                 Wipe is the only exit, which is why the api mints a token for
  *                 it like any other.
  */
-export type CandidateDisposition = 'protected' | 'format' | 'adopt' | 'unreadable';
+export type CandidateDisposition = 'protected' | 'format' | 'adopt' | 'current' | 'unreadable';
 
-export function disposition(c: BackupCandidate): CandidateDisposition {
+/**
+ * `claimed` is the cluster's claimed target, when there is one. It is matched
+ * by partition UUID — the only identity §4.8 lets anything resolve a target by
+ * — against the one the disk's own marker records; a device path or a
+ * fingerprint can change while the disk stays the same. A caller that passes no
+ * target gets the four-way answer it always did.
+ */
+export function disposition(
+  c: BackupCandidate,
+  claimed?: Pick<BackupTarget, 'partUuid'> | null,
+): CandidateDisposition {
   if (c.protected) return 'protected';
   if (!c.hasBackupSet) return 'format';
-  return c.backupSet ? 'adopt' : 'unreadable';
+  if (!c.backupSet) return 'unreadable';
+  const target = claimed?.partUuid;
+  if (target && c.backupSet.partUuid === target) return 'current';
+  return 'adopt';
 }

@@ -265,7 +265,12 @@ export default function BackupsPage() {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {(candidates ?? []).map((c) => (
-          <CandidateRow key={c.fingerprint || c.devicePath} candidate={c} onPick={() => setPicked(c)} />
+          <CandidateRow
+            key={c.fingerprint || c.devicePath}
+            candidate={c}
+            claimed={claimed}
+            onPick={() => setPicked(c)}
+          />
         ))}
       </div>
 
@@ -393,8 +398,16 @@ function StatusBadge({ target }: { target: BackupTarget }) {
 
 // ---------------------------------------------------------------------------
 
-function CandidateRow({ candidate, onPick }: { candidate: BackupCandidate; onPick: () => void }) {
-  const disp = disposition(candidate);
+function CandidateRow({
+  candidate,
+  claimed,
+  onPick,
+}: {
+  candidate: BackupCandidate;
+  claimed?: BackupTarget;
+  onPick: () => void;
+}) {
+  const disp = disposition(candidate, claimed);
   const isProtected = disp === 'protected';
   // The api's verdict on THIS disk, whatever the cause: the boot medium, or a
   // node that cannot hold a target (#397). Null means claimable.
@@ -425,6 +438,7 @@ function CandidateRow({ candidate, onPick }: { candidate: BackupCandidate; onPic
           </span>
           {isProtected && <Badge color={WARN}>BOOT MEDIUM</Badge>}
           {disp === 'adopt' && <Badge color={OK_GREEN}>RASPUTIN BACKUP SET</Badge>}
+          {disp === 'current' && <Badge color={OK_GREEN}>CURRENT BACKUP TARGET</Badge>}
           {disp === 'unreadable' && <Badge color={WARN}>MARKER UNREADABLE</Badge>}
           {candidate.identityWeak && !isProtected && (
             <Badge color={WARN} title="No WWN or serial reported — identified by model, size and partition table alone">
@@ -472,6 +486,19 @@ function CandidateRow({ candidate, onPick }: { candidate: BackupCandidate; onPic
           </Hint>
         )}
 
+        {/* The claimed target's own disk (#439). Nothing to adopt or claim:
+            say what it is, and leave the target table above to say how it
+            is doing. */}
+        {disp === 'current' && candidate.backupSet && (
+          <Hint>
+            {candidate.backupSet.generations
+              ? `${candidate.backupSet.generations} retained generation${candidate.backupSet.generations === 1 ? '' : 's'}`
+              : 'A Rasputin backup set'}
+            {candidate.backupSet.label ? ` · “${candidate.backupSet.label}”` : ''}. This is the
+            cluster’s current backup target; backup runs write to it.
+          </Hint>
+        )}
+
         {disp === 'unreadable' && (
           <Hint warn>
             The disk announces a backup set whose marker (<Tok>.rasputin-backup-set.json</Tok>)
@@ -485,7 +512,7 @@ function CandidateRow({ candidate, onPick }: { candidate: BackupCandidate; onPic
           <Badge color={DIM} title={ineligible}>
             NOT ELIGIBLE
           </Badge>
-        ) : (
+        ) : disp === 'current' ? null : (
           <Btn
             variant={disp === 'adopt' ? 'default' : 'primary'}
             small
