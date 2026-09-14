@@ -72,6 +72,38 @@ export function runScopeTitle(run: {
 /** The `off` sentinel the cadence select uses for a disabled schedule. */
 export const CADENCE_OFF = 'off';
 
+/** One option in the cadence select. */
+export interface CadenceOption {
+  label: string;
+  /** What a PUT sends: a Go duration string the api parses. */
+  value: string;
+  /** The same cadence in seconds — what an option is matched on. */
+  seconds: number;
+}
+
+// The cadences a form offers. §4.1's default is weekly; the api's floor is an
+// hour and its ceiling a year, so every option here is inside both.
+export const CADENCES: CadenceOption[] = [
+  { label: 'Daily', value: '24h', seconds: 24 * 3600 },
+  { label: 'Every 3 days', value: '72h', seconds: 72 * 3600 },
+  { label: 'Weekly (default)', value: '168h', seconds: 168 * 3600 },
+  { label: 'Fortnightly', value: '336h', seconds: 336 * 3600 },
+  { label: 'Monthly', value: '720h', seconds: 720 * 3600 },
+];
+
+/**
+ * The option matching the schedule's resolved cadence, or null.
+ *
+ * Matched on `everySeconds`, never on the `every` string. The api stores and
+ * serves the cadence as Go's `Duration.String()`, which spells a week
+ * `"168h0m0s"` — no option's value is ever equal to it, including one the UI
+ * itself just saved, and a select given a value none of its options carries
+ * renders its FIRST option. That showed a weekly schedule as Daily.
+ */
+function matchCadence(schedule: BackupSchedule): CadenceOption | null {
+  return CADENCES.find((c) => c.seconds === schedule.everySeconds) ?? null;
+}
+
 /**
  * The cadence select's current value.
  *
@@ -79,11 +111,44 @@ export const CADENCE_OFF = 'off';
  * blank or a greyed control: §4.4's posture is that the absence of backups must
  * never look like ordinary green, and an operator has to be able to SEE that
  * nothing is scheduled.
+ *
+ * A cadence none of the options carries is returned as the api's own string,
+ * which cadenceOptions adds as an option of its own — so it renders as itself.
  */
 export function cadenceValue(schedule: BackupSchedule | null): string {
   if (!schedule) return CADENCE_OFF;
   if (!schedule.enabled) return CADENCE_OFF;
-  return schedule.every ?? schedule.defaultEvery;
+  return matchCadence(schedule)?.value ?? schedule.every ?? schedule.defaultEvery;
+}
+
+/**
+ * The options the cadence select renders: the curated list, with the current
+ * cadence inserted in order if it is not one of them. Without it a cadence set
+ * through the api to, say, twelve hours would render as the first option and
+ * tell the operator the schedule is daily. Its value is the api's own string,
+ * which the api's PUT accepts back unchanged.
+ */
+export function cadenceOptions(schedule: BackupSchedule | null): CadenceOption[] {
+  if (!schedule || !schedule.enabled || matchCadence(schedule)) return CADENCES;
+  const value = cadenceValue(schedule);
+  const seconds = schedule.everySeconds;
+  const current = { label: cadenceLabel(seconds, value), value, seconds };
+  if (!Number.isFinite(seconds) || seconds <= 0) return [...CADENCES, current];
+  return [...CADENCES, current].sort((a, b) => a.seconds - b.seconds);
+}
+
+/** A readable label for a cadence the curated list does not carry. */
+export function cadenceLabel(seconds: number, raw: string): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return `Every ${raw}`;
+  if (seconds % 86400 === 0) {
+    const d = seconds / 86400;
+    return d === 1 ? 'Every day' : `Every ${d} days`;
+  }
+  if (seconds % 3600 === 0) {
+    const h = seconds / 3600;
+    return h === 1 ? 'Every hour' : `Every ${h} hours`;
+  }
+  return `Every ${raw}`;
 }
 
 /**

@@ -33,6 +33,11 @@ import (
 // on a dev box it is everything. The boot mounts differ per platform — GRUB's
 // ESP on the n100, /boot/firmware on a Pi — so all the plausible spellings are
 // listed and the ones that do not exist are simply absent from mountinfo.
+//
+// Each of these is matched EXACTLY against a mount point (see protectingMount).
+// A boot path with no mount of its own lives on whichever mount carries it,
+// and the prefix of a boot path is "/" or "/boot" — both listed here, so
+// resolving it again adds no disk and only mislabels one.
 var defaultCriticalMounts = []string{
 	"/",
 	"/boot",
@@ -104,12 +109,13 @@ func (p *protector) resolve() (map[string]protectedDisk, error) {
 
 	out := map[string]protectedDisk{}
 	for _, path := range wanted {
-		ent, ok := carryingMount(entries, path)
+		ent, ok := protectingMount(entries, path, p.persistentDir)
 		if !ok {
-			// No mount carries this path — e.g. a platform with no separate
-			// /boot. Nothing to protect from it. "/" always matches, so an
-			// empty result overall is impossible on a real system and is
-			// caught below.
+			// Not mounted — e.g. a platform with no separate /boot. Nothing to
+			// protect from it: the disk that holds the directory is protected
+			// through "/" already. "/" is always a mount point, so an empty
+			// result overall is impossible on a real system and is caught
+			// below.
 			continue
 		}
 		disks, err := p.wholeDisksFor(ent.majMin)
@@ -154,6 +160,39 @@ func describeProtection(path string, ent mountEntry, persistentDir string) strin
 	}
 }
 
+// protectingMount returns the mount entry a protected path resolves to.
+//
+// Two rules, because the paths ask two different questions:
+//
+//   - the persistent dir asks "which filesystem holds this directory?" — the
+//     data is there whether or not it has a partition of its own — so it takes
+//     carryingMount's longest prefix.
+//   - the critical mounts ask "is THIS mounted?", so they match exactly. The
+//     longest prefix of "/boot" on a box with no separate boot mount is "/",
+//     and describeProtection then told the operator the disk "holds the
+//     mounted boot partition (/)" — a partition that does not exist. The disk
+//     was protected either way; only the sentence was false.
+//
+// Neither rule can shrink the protected set: see defaultCriticalMounts.
+func protectingMount(entries []mountEntry, path, persistentDir string) (mountEntry, bool) {
+	if path == persistentDir {
+		return carryingMount(entries, path)
+	}
+	return exactMount(entries, path)
+}
+
+// exactMount returns the first mount entry whose mount point is path. The
+// first, to agree with carryingMount on a path mounted twice.
+func exactMount(entries []mountEntry, path string) (mountEntry, bool) {
+	path = filepath.Clean(path)
+	for _, e := range entries {
+		if filepath.Clean(e.mountPoint) == path {
+			return e, true
+		}
+	}
+	return mountEntry{}, false
+}
+
 // carryingMount returns the mount entry that actually carries path — the entry
 // whose mount point is the longest prefix of it.
 //
@@ -161,6 +200,7 @@ func describeProtection(path string, ent mountEntry, persistentDir string) strin
 // per-platform table: /var/lib/rasputin on its own partition matches its own
 // entry, and /var/lib/rasputin on a box with no separate data partition matches
 // "/" and protects the root disk, which is the correct answer in both cases.
+// It is used for the persistent dir only; see protectingMount.
 func carryingMount(entries []mountEntry, path string) (mountEntry, bool) {
 	path = filepath.Clean(path)
 	best := mountEntry{}
