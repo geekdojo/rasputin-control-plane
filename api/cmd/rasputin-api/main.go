@@ -1085,19 +1085,10 @@ func main() {
 			InitialDelay: 2 * time.Minute,
 			Due:          storage.TargetHealthDue(backupStore),
 		},
-		// backup.run (§4.1): weekly by default, overridable per installation.
-		//
-		// The Interval here is a CHECK interval, not the cadence — the cadence
-		// lives in the settings table and the Due gate reads it on every tick,
-		// so an operator changing it does not have to restart the api. Hourly
-		// is well below the one-hour floor an override may set
-		// (storage.MinBackupCadence), so no cadence can outrun the check.
-		{
-			Kind:         storage.RunJobKind,
-			Interval:     parseDurationOr(os.Getenv("RASPUTIN_BACKUP_CHECK_INTERVAL"), time.Hour),
-			InitialDelay: 3 * time.Minute,
-			Due:          storage.DueFunc(backupStore, setupStore, true),
-		},
+		backupRunEntry(
+			parseDurationOr(os.Getenv("RASPUTIN_BACKUP_CHECK_INTERVAL"), time.Hour),
+			storage.DueFunc(backupStore, setupStore, true),
+		),
 	}...), obsCollectorEntries...))
 	sched.Start(ctx)
 	defer sched.Stop()
@@ -1596,6 +1587,29 @@ func reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, 
 		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
 		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
 		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
+	}
+}
+
+// backupRunEntry is the scheduler entry for backup.run (§4.1): weekly by
+// default, overridable per installation.
+//
+// The Interval here is a CHECK interval, not the cadence — the cadence lives in
+// the settings table and the Due gate reads it on every tick, so an operator
+// changing it does not have to restart the api. Hourly is well below the
+// one-hour floor an override may set (storage.MinBackupCadence), so no cadence
+// can outrun the check.
+//
+// The spec names its reason explicitly. The scheduler substitutes {} for an
+// empty spec, and storage.ParseRunSpec reads anything that is not "scheduled"
+// as manual — so an entry without one recorded every scheduled run as a press
+// of Back up now, and the run list could not tell the two apart.
+func backupRunEntry(checkEvery time.Duration, due func(context.Context) (bool, string)) scheduler.Entry {
+	return scheduler.Entry{
+		Kind:         storage.RunJobKind,
+		Spec:         json.RawMessage(`{"reason":"` + storage.ReasonScheduled + `"}`),
+		Interval:     checkEvery,
+		InitialDelay: 3 * time.Minute,
+		Due:          due,
 	}
 }
 

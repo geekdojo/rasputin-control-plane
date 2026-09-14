@@ -11,10 +11,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 )
 
@@ -372,5 +374,30 @@ func TestWireBundleVerifier_LoadsTheTrustRootWhenPresent(t *testing.T) {
 	v := wireBundleVerifier(dir)
 	if got := v.Mode(); got != updater.TrustEnforced {
 		t.Errorf("mode = %q, want %q", got, updater.TrustEnforced)
+	}
+}
+
+// A run the scheduler starts records reason "scheduled" (geekdojo-brain#438).
+// The entry once carried no Spec: the scheduler substituted {} and
+// ParseRunSpec read that as manual, so every scheduled run was labelled a
+// press of Back up now. This parses the spec the ENTRY submits, not a spec
+// written for the test.
+func TestBackupRunEntry_SpecRecordsScheduled(t *testing.T) {
+	e := backupRunEntry(time.Hour, nil)
+	if e.Kind != storage.RunJobKind {
+		t.Fatalf("Kind = %q, want %q", e.Kind, storage.RunJobKind)
+	}
+	if len(e.Spec) == 0 {
+		t.Fatal("Spec is empty; the scheduler would submit {} and the run would record manual")
+	}
+	spec, err := storage.ParseRunSpec(e.Spec)
+	if err != nil {
+		t.Fatalf("ParseRunSpec(%s): %v", e.Spec, err)
+	}
+	if spec.Reason != storage.ReasonScheduled {
+		t.Fatalf("Reason = %q, want %q", spec.Reason, storage.ReasonScheduled)
+	}
+	if e.Interval != time.Hour {
+		t.Fatalf("Interval = %s, want the check interval passed in", e.Interval)
 	}
 }
