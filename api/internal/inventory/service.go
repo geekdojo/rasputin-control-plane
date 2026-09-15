@@ -326,7 +326,19 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 		return
 	}
 
-	existing.Role = ev.Role
+	// A node cannot change roles once enrolled: changing role means remove,
+	// reflash, re-add. A re-registration presenting a different role is
+	// rejected outright and the row is left exactly as it was — no field
+	// updates, no re-confirmed image version, no last-seen bump. Removal
+	// deletes the row, so a re-added node takes the insert path above with
+	// whatever role it presents.
+	if existing.Role != ev.Role {
+		log.Printf("inventory: WARN reject registration from %s: node is enrolled as role %q but presented role %q; "+
+			"a node cannot change roles once enrolled (remove it, reflash, and re-add it)",
+			ev.NodeID, existing.Role, ev.Role)
+		return
+	}
+
 	existing.Hostname = ev.Hostname
 	existing.AgentVersion = ev.AgentVersion
 	existing.ImageVersion = ev.ImageVersion
