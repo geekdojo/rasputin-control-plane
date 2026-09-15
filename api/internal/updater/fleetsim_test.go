@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -139,20 +140,30 @@ type simNodeSpec struct {
 	// InstallFor / RebootFor let one node be slower than its neighbours, which
 	// is what makes a bounded fan-out's overlap observable at all. Zero takes
 	// the fleet default.
+	//
+	// ⚠️ RebootFor is pacing only — a MINIMUM time down. It never decides when
+	// a node comes back: see simNode.comeBack for the fact that does.
 	InstallFor time.Duration
 	RebootFor  time.Duration
-	// RebootDelay is how long the node keeps answering ON THE OLD BOOT after
-	// acking the reboot — the real UpdateRebootCmd carries a delay, so every
-	// healthy update has this window.
+	// OldBootAnswers is how many post-reboot prechecks the node keeps answering
+	// ON THE OLD BOOT after acking the reboot — the real UpdateRebootCmd carries
+	// a delay, so every healthy update has this window.
 	//
 	// Zero means the node goes quiet before it even answers the ack, which
 	// makes the reboot handshake deterministic and is what the ordinary
 	// scenarios want. A NON-zero value is how the #90 shape is reproduced: the
-	// pre-reboot agent answers a poll or two on the old boot, and a run that
-	// then vanishes must be reported as "stopped answering", not as "still
+	// pre-reboot agent answers a poll on the old boot, and a run that then
+	// vanishes must be reported as "stopped answering", not as "still
 	// answering". That distinction was a latch bug, and a harness with no
 	// window cannot catch it coming back.
-	RebootDelay time.Duration
+	//
+	// It is a COUNT of answers, not a duration, on purpose. It used to be a
+	// RebootDelay of 2.5s chosen to "outlive the first 2s poll", which only
+	// held while the api reached step 6 promptly; on a loaded machine the first
+	// poll landed after the window closed, the old boot was never seen, and the
+	// scenario silently became a different one. Counting the answers makes "the
+	// api saw the pre-reboot agent" true by construction.
+	OldBootAnswers int
 }
 
 // simNode is a live simulated agent: a set of NATS responders over a slot
@@ -193,6 +204,22 @@ type simNode struct {
 	// at once (always ≤ 1) — the fleet aggregates them.
 	fleetEnter func()
 	fleetExit  func()
+
+	// oldBootAnswersLeft counts down the OldBootAnswers window once the reboot
+	// has been acked; the answer that takes it to zero takes the node down.
+	oldBootAnswersLeft int
+	// seenDown is armed when the node goes down and closed when the api
+	// reports, on its own job log, that it polled this node and got no answer
+	// (see fleet.watchSeenDown). A node comes back only after that — the fact
+	// the degraded verify path is waiting for.
+	seenDown       chan struct{}
+	seenDownClosed bool
+	// awaitingSeenDown is true while comeBack is blocked on seenDown, so a run
+	// can name a node that is still waiting instead of reporting a mystery.
+	awaitingSeenDown bool
+	// stop is closed on test cleanup so a node still waiting to come back does
+	// not outlive its test.
+	stop chan struct{}
 }
 
 func (n *simNode) lock() func() {
@@ -262,7 +289,7 @@ func (n *simNode) silence() {
 }
 
 func (n *simNode) onPrecheck(m *nats.Msg) {
-	defer n.lock()()
+	unlock := n.lock()
 	n.prechecks++
 	ack := proto.UpdatePrecheckAck{
 		OK:             true,
@@ -274,6 +301,20 @@ func (n *simNode) onPrecheck(m *nats.Msg) {
 		BootID:         n.bootID,
 	}
 	n.respond(m, ack)
+	// Inside an OldBootAnswers window: this answer went out on the old boot,
+	// and the last one of the window is the moment the reboot actually
+	// happens. Going down HERE, synchronously, rather than on a timer is what
+	// guarantees the api saw exactly that many old-boot answers.
+	rebootNow := false
+	if n.oldBootAnswersLeft > 0 {
+		n.oldBootAnswersLeft--
+		rebootNow = n.oldBootAnswersLeft == 0
+	}
+	unlock()
+	if rebootNow {
+		n.goDown()
+		go n.comeBack()
+	}
 }
 
 func (n *simNode) onDownload(m *nats.Msg) {
@@ -324,40 +365,94 @@ func (n *simNode) onInstall(m *nats.Msg) {
 }
 
 func (n *simNode) onReboot(m *nats.Msg) {
-	// Go quiet BEFORE acking unless the spec asks for a delay window. Replying
-	// does not need a subscription, so the ack still lands; what it removes is
-	// the race between "the api's first post-reboot poll" and "the node going
-	// away", which would otherwise make two scenarios flaky in opposite
-	// directions. RebootDelay > 0 puts the window back deliberately.
-	if n.spec.Behaviour != simNoReboot && n.spec.RebootDelay == 0 {
-		n.silence()
+	// Go quiet BEFORE acking unless the spec asks for an old-boot window.
+	// Replying does not need a subscription, so the ack still lands; what it
+	// removes is the race between "the api's first post-reboot poll" and "the
+	// node going away", which would otherwise make two scenarios flaky in
+	// opposite directions. OldBootAnswers > 0 puts the window back deliberately.
+	if n.spec.Behaviour != simNoReboot && n.spec.OldBootAnswers == 0 {
+		n.goDown()
 	}
 	n.respond(m, proto.UpdateRebootAck{OK: true, DelaySeconds: 0})
 	// The rebooting event is what step 5 blocks on. Published even by a node
 	// that is lying about rebooting (c13) — that is the whole shape of c13: it
 	// ACKS, it announces, and then it stays exactly where it was.
 	_ = n.nc.Publish(proto.NodeEvtSubject(n.spec.ID, "rebooting"), []byte(`{"delaySeconds":0}`))
-	if n.spec.Behaviour == simNoReboot {
+	switch {
+	case n.spec.Behaviour == simNoReboot:
+		return
+	case n.spec.OldBootAnswers > 0:
+		// Still answering, still on the old boot: the reboot has been ordered
+		// and has not happened yet. onPrecheck takes the node down when the
+		// window is used up.
+		unlock := n.lock()
+		n.oldBootAnswersLeft = n.spec.OldBootAnswers
+		unlock()
 		return
 	}
-	go n.reboot()
+	go n.comeBack()
 }
 
-// reboot models the window a real node is unreachable for, then comes back with
-// whatever identity its behaviour dictates.
-func (n *simNode) reboot() {
-	if n.spec.RebootDelay > 0 {
-		// Still answering, still on the old boot: the reboot has been ordered
-		// and has not happened yet.
-		time.Sleep(n.spec.RebootDelay)
+// goDown takes the node off the bus. seenDown is armed FIRST: the api can only
+// report a node it could not reach after the node has gone, so arming before
+// silencing means that report can never arrive with nothing to close.
+func (n *simNode) goDown() {
+	unlock := n.lock()
+	if n.seenDown == nil {
+		n.seenDown = make(chan struct{})
+		n.seenDownClosed = false
 	}
+	unlock()
 	n.silence()
+}
+
+// markSeenDown records that the api polled this node while it was down and
+// said so. Idempotent: the api logs it once per verify step, but nothing here
+// depends on that.
+func (n *simNode) markSeenDown() {
+	defer n.lock()()
+	if n.seenDown == nil {
+		// Not armed: the node is up. A report about an earlier outage has
+		// nothing left to release.
+		return
+	}
+	if !n.seenDownClosed {
+		close(n.seenDown)
+		n.seenDownClosed = true
+	}
+}
+
+// comeBack models the window a real node is unreachable for, then comes back
+// with whatever identity its behaviour dictates.
+//
+// ⚠️ WHEN it comes back is decided by a FACT, never by the clock: the api has
+// polled this node, got no answer, and logged that it saw it go quiet. On real
+// hardware that is always true — a reboot is tens of seconds and the api polls
+// every two — but a simulated reboot is milliseconds, and it used to be just
+// RebootFor (25ms). On a loaded machine the api reached step 6 after the node
+// was already back, so a pre-bootId agent (simNoBootID) was only ever seen
+// answering without a boot id and never going quiet — which is, correctly,
+// "node never rebooted" — and the degraded canary failed the whole run.
+// RebootFor is still slept first, as pacing.
+func (n *simNode) comeBack() {
 	time.Sleep(n.spec.RebootFor)
 	if n.spec.Behaviour == simNeverReturns {
 		return // c08: it is gone, and nothing later says otherwise
 	}
 
 	unlock := n.lock()
+	seen := n.seenDown
+	n.awaitingSeenDown = true
+	unlock()
+	select {
+	case <-seen:
+	case <-n.stop:
+		return // the test is over; a run that ended with us here names us (fleet.run)
+	}
+
+	unlock = n.lock()
+	n.awaitingSeenDown = false
+	n.seenDown, n.seenDownClosed = nil, false
 	switch n.spec.Behaviour {
 	case simBootloaderRollback:
 		// A NEW boot — it really did reboot — onto the OLD slot. Conjunct (a)
@@ -608,6 +703,7 @@ func newFleet(t *testing.T, nodes []simNodeSpec, bundles []bundleSpec) *fleet {
 			active:    proto.SlotA,
 			inactive:  proto.SlotB,
 			version:   spec.Version,
+			stop:      make(chan struct{}),
 			fleetEnter: func() {
 				f.gaugeMu.Lock()
 				f.inFlight++
@@ -629,9 +725,11 @@ func newFleet(t *testing.T, nodes []simNodeSpec, bundles []bundleSpec) *fleet {
 			t.Fatalf("node %s listen: %v", spec.ID, err)
 		}
 		t.Cleanup(n.silence)
+		t.Cleanup(func() { close(n.stop) })
 		f.nodes[spec.ID] = n
 		f.order = append(f.order, spec.ID)
 	}
+	f.watchSeenDown(t)
 
 	runner := jobs.NewRunner(jobStore, nc)
 	// Retries exist in the saga for genuinely transient RPC failures; a
@@ -646,6 +744,52 @@ func newFleet(t *testing.T, nodes []simNodeSpec, bundles []bundleSpec) *fleet {
 	t.Cleanup(runner.Wait)
 
 	return f
+}
+
+// apiSawNodeDownLog is the job-log line waitForNewBoot writes the first time a
+// post-reboot poll gets no answer (verify.go). It is the api saying, on the
+// record an operator reads, "I looked and this node was down" — the one fact a
+// simulated node may come back on.
+//
+// ⚠️ Coupled to that message's wording on purpose; there is no structured
+// event for it. If the wording changes, returning nodes wait forever and every
+// run that reboots one fails naming them (see fleet.run) — loudly, never as a
+// quiet pass.
+const apiSawNodeDownLog = "node stopped answering"
+
+// watchSeenDown releases a rebooting simulated node once the api has logged
+// that it polled that node and found it down. The log is a job event on the
+// node.update child's own subject; the child's spec says which node it is.
+func (f *fleet) watchSeenDown(t *testing.T) {
+	t.Helper()
+	sub, err := f.nc.Subscribe(proto.JobEventsSubject("*"), func(m *nats.Msg) {
+		var ev proto.JobEvent
+		if json.Unmarshal(m.Data, &ev) != nil || ev.Type != proto.JobLog {
+			return
+		}
+		var line proto.LogEventData
+		if json.Unmarshal(ev.Data, &line) != nil || !strings.Contains(line.Message, apiSawNodeDownLog) {
+			return
+		}
+		j, err := f.jobStore.GetJob(context.Background(), ev.JobID)
+		if err != nil || j == nil {
+			return
+		}
+		spec, err := parseSpec(j.Spec)
+		if err != nil {
+			return
+		}
+		if n, ok := f.nodes[spec.NodeID]; ok {
+			n.markSeenDown()
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe job events: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := f.nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 }
 
 func (f *fleet) versionFor(sha string) string {
@@ -717,6 +861,12 @@ func (f *fleet) run(spec proto.SystemUpdateSpec) fleetRun {
 
 	run := fleetRun{t: f.t, PeakInFlightTier: map[proto.NodeRole]int{}}
 
+	// The barrier is a message the harness publishes to itself once the run is
+	// over (see below). Its id is fixed before subscribing so the callback can
+	// recognise it without touching anything outside evMu.
+	barrierID := fmt.Sprintf("fleetsim-barrier-%d", time.Now().UnixNano())
+	barrier := make(chan struct{})
+
 	// Subscribe BEFORE submitting: the planned event fires inside the first
 	// step, which starts as soon as Submit returns.
 	sub, err := f.nc.Subscribe(proto.AllSystemUpdatesFilter, func(m *nats.Msg) {
@@ -724,10 +874,13 @@ func (f *fleet) run(spec proto.SystemUpdateSpec) fleetRun {
 		if json.Unmarshal(m.Data, &ev) != nil {
 			return
 		}
+		if ev.ParentJobID == barrierID {
+			close(barrier) // published exactly once, below
+			return
+		}
 		// Everything the callback touches lives on the fleet under evMu and is
-		// copied out once the job is terminal. Writing into `run` from here
-		// instead would be a data race with the goroutine assembling it — the
-		// subscription outlives the last event only by a hair.
+		// copied out once the barrier is through. Writing into `run` from here
+		// instead would be a data race with the goroutine assembling it.
 		f.evMu.Lock()
 		defer f.evMu.Unlock()
 		f.events = append(f.events, ev)
@@ -765,24 +918,77 @@ func (f *fleet) run(spec proto.SystemUpdateSpec) fleetRun {
 	}
 	run.JobID = job.ID
 
-	// A hard deadline, not an open-ended poll: a harness that hangs forever on a
-	// wedged cascade tells you nothing and costs an afternoon.
+	// "The run is over" is two facts, and the run is not read until both hold.
+	// Each wait has a hard deadline that names what never came true: a harness
+	// that hangs forever on a wedged cascade tells you nothing and costs an
+	// afternoon.
+	//
+	// ⚠️ It used to be ONE fact — the parent's row turning terminal in the job
+	// store — and the run was read the instant it did. That raced two things
+	// the parent's row does not wait for, and under load it lost both:
+	//
+	//  1. The wire events. The completed event (the grid) and every node_* and
+	//     budget_spent event before it are published BEFORE the parent is
+	//     marked terminal, but delivered to this subscription asynchronously.
+	//     Read at the terminal flip, the grid could still be in flight: the run
+	//     came back with no rows and no budget_spent, and the budget test said
+	//     "failed nodes = [] (0)" about a run that had failed exactly two.
+	//  2. The children's OnTerminal hooks (finalizeNodeUpdateRow), which run
+	//     AFTER a child is marked terminal and so can still be writing the
+	//     node_update ledger when the parent — which only waits for the
+	//     child's status — has already finished.
 	deadline := time.Now().Add(systemStepCap + 30*time.Second)
-	for {
-		if time.Now().After(deadline) {
-			f.t.Fatalf("system.update %s never reached a terminal state within %s", job.ID, time.Since(started))
-		}
-		j, err := f.jobStore.GetJob(ctx, job.ID)
-		if err != nil {
-			f.t.Fatalf("get job: %v", err)
-		}
-		if j != nil && (j.Status == jobs.StatusSucceeded || j.Status == jobs.StatusFailed || j.Status == jobs.StatusCancelled) {
-			run.Status, run.Error = j.Status, j.Error
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+
+	// Fact 1: every job the runner started — the parent, every child, and each
+	// one's OnTerminal hook — has returned. Nothing after this writes a store or
+	// publishes an event.
+	idle := make(chan struct{})
+	go func() { f.runner.Wait(); close(idle) }()
+	select {
+	case <-idle:
+	case <-time.After(time.Until(deadline)):
+		f.t.Fatalf("system.update %s: the runner still had jobs running after %s — the cascade, a child, or an "+
+			"OnTerminal hook never returned", job.ID, time.Since(started).Round(time.Millisecond))
+	}
+	j, err := f.jobStore.GetJob(ctx, job.ID)
+	if err != nil {
+		f.t.Fatalf("get job: %v", err)
+	}
+	if j == nil || (j.Status != jobs.StatusSucceeded && j.Status != jobs.StatusFailed && j.Status != jobs.StatusCancelled) {
+		f.t.Fatalf("system.update %s: the runner is idle but the job is not terminal (%+v)", job.ID, j)
+	}
+	run.Status, run.Error = j.Status, j.Error
+
+	// Fact 2: this subscription has delivered everything published before the
+	// run ended. The saga publishes on f.nc, the barrier goes out on f.nc
+	// after it, and NATS delivers one connection's messages to one subscription
+	// in publish order — so once the barrier is back, nothing the run published
+	// is still in flight.
+	barrierEv, _ := json.Marshal(proto.SystemUpdateChangeEvt{ParentJobID: barrierID})
+	if err := f.nc.Publish(proto.SystemUpdateChangeSubject(barrierID, "fleetsim_barrier"), barrierEv); err != nil {
+		f.t.Fatalf("publish barrier: %v", err)
+	}
+	select {
+	case <-barrier:
+	case <-time.After(time.Until(deadline)):
+		f.t.Fatalf("system.update %s: the harness's barrier never came back through the event subscription — "+
+			"the events below would be a partial record", job.ID)
 	}
 	run.Duration = time.Since(started)
+
+	// A node that rebooted and is still waiting for the api to report it down
+	// means the gate in simNode.comeBack never opened. Name it: the alternative
+	// is a verify-step timeout that looks like a product bug.
+	for _, id := range f.order {
+		n := f.nodes[id]
+		n.mu.Lock()
+		waiting := n.awaitingSeenDown
+		n.mu.Unlock()
+		if waiting {
+			f.t.Errorf("%s rebooted and never came back: the api never logged %q for it, which is the only "+
+				"thing a simulated node comes back on", id, apiSawNodeDownLog)
+		}
+	}
 
 	f.evMu.Lock()
 	run.Events = append([]proto.SystemUpdateChangeEvt(nil), f.events...)
@@ -797,13 +1003,37 @@ func (f *fleet) run(spec proto.SystemUpdateSpec) fleetRun {
 
 	// The completed event is the report. It fires on every outcome — that is the
 	// point of it (#76) — so its absence is itself a finding.
+	completed := 0
 	for _, ev := range run.Events {
 		if ev.Change == proto.SystemUpdateCompleted {
+			completed++
 			run.Results, run.Skipped = ev.Results, ev.Skipped
 			if ev.Counts != nil {
 				run.Counts = *ev.Counts
 			}
 		}
+	}
+	// Enforced rather than merely said: a run whose summarize step started owes
+	// exactly one completed event, and without this check its absence read as
+	// an empty grid — which the assertions downstream then reported as a
+	// cascade that failed nothing and stopped nothing. A run that never got
+	// that far (a failed plan) legitimately has none.
+	steps, err := f.jobStore.ListSteps(ctx, job.ID)
+	if err != nil {
+		f.t.Fatalf("list steps: %v", err)
+	}
+	summarized := false
+	for _, st := range steps {
+		if st.Name == "summarize" {
+			summarized = true
+		}
+	}
+	switch {
+	case summarized && completed != 1:
+		f.t.Fatalf("system.update %s reached summarize but published %d completed event(s), want exactly 1 — "+
+			"the report is the feature (#76)", job.ID, completed)
+	case !summarized && completed != 0:
+		f.t.Fatalf("system.update %s published %d completed event(s) without reaching summarize", job.ID, completed)
 	}
 	return run
 }
