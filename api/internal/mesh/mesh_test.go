@@ -1223,7 +1223,8 @@ func TestMockClient_PersistsAcrossInstances(t *testing.T) {
 // rejected enroll: tailscale mock: empty auth key" — first Mu wizard run,
 // 2026-06-12).
 func TestEnrollWorkflow_KeyChainsAcrossSteps(t *testing.T) {
-	f := newMeshFixture(t)
+	f := newConvergeFixture(t)
+	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC())
 
 	// Fake agent on the embedded bus: capture the dispatched cmd, ack OK.
 	gotKey := make(chan string, 1)
@@ -1241,7 +1242,7 @@ func TestEnrollWorkflow_KeyChainsAcrossSteps(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	wf := EnrollNodeWorkflow(f.svc, nil, f.nc)
+	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
 	prior := map[string]json.RawMessage{}
 	for _, st := range wf.Steps {
@@ -1328,7 +1329,8 @@ func TestEnrollWorkflow_ValidateRefusesHostBitsBeforeMintingAKey(t *testing.T) {
 // The canonical form goes all the way through, and the agent receives it
 // verbatim as the advertise list.
 func TestEnrollWorkflow_AcceptsCanonicalRouteAndDispatchesIt(t *testing.T) {
-	f := newMeshFixture(t)
+	f := newConvergeFixture(t)
+	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC())
 	gotRoutes := make(chan []string, 1)
 	sub, err := f.nc.Subscribe(proto.MeshEnrollSubject("node-1"), func(m *nats.Msg) {
 		var cmd proto.MeshEnrollCmd
@@ -1342,7 +1344,7 @@ func TestEnrollWorkflow_AcceptsCanonicalRouteAndDispatchesIt(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	wf := EnrollNodeWorkflow(f.svc, nil, f.nc)
+	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1", AdvertiseRoutes: []string{"192.168.1.0/24"}})
 	prior := map[string]json.RawMessage{}
 	for _, st := range wf.Steps {

@@ -68,7 +68,8 @@ func TestEnrollWorkflow_DispatchOutlivesTheAgentBudget(t *testing.T) {
 // budget — the job feed line, readable without the agent log — and carries
 // no key.
 func TestEnrollWorkflow_DispatchTimeoutIsNamed(t *testing.T) {
-	f := newMeshFixture(t)
+	f := newConvergeFixture(t)
+	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC())
 	// An agent that takes the cmd and never answers.
 	sub, err := f.nc.Subscribe(proto.MeshEnrollSubject("node-1"), func(*nats.Msg) {})
 	if err != nil {
@@ -76,7 +77,7 @@ func TestEnrollWorkflow_DispatchTimeoutIsNamed(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	wf := EnrollNodeWorkflow(f.svc, nil, f.nc)
+	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
 	prior, key := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
 	ctx, cancel := context.WithTimeout(f.ctx, 300*time.Millisecond)
@@ -122,14 +123,17 @@ func TestEnrollWorkflow_NoResponderIsReadAgainstInventory(t *testing.T) {
 }
 
 // Without inventory to read the silence against, the bus error is relayed
-// as it is — never hidden, never guessed at.
+// as it is — never hidden, never guessed at. (The validate step needs
+// inventory, so the steps before dispatch run with it; the dispatch step
+// itself is built without.)
 func TestEnrollWorkflow_NoResponderWithoutInventoryIsRelayed(t *testing.T) {
-	f := newMeshFixture(t)
-	wf := EnrollNodeWorkflow(f.svc, nil, f.nc)
+	f := newConvergeFixture(t)
+	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC().Add(-time.Hour))
+	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
 	prior, key := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
 	sc := &jobs.StepCtx{Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
-	_, err := enrollStep(t, wf, "dispatch").Do(sc)
+	_, err := enrollDispatch(f.svc, nil)(sc)
 	if err == nil || !strings.Contains(err.Error(), "enroll rpc: ") || !strings.Contains(err.Error(), "no responders") {
 		t.Errorf("without inventory the bus error must be relayed, got %v", err)
 	}
@@ -228,6 +232,7 @@ func TestEnrollWorkflow_NewAgentNamedKillIsRelayed(t *testing.T) {
 // An ordinary rejection is unchanged.
 func TestEnrollWorkflow_OrdinaryRejectionUnchanged(t *testing.T) {
 	f := newConvergeFixture(t)
+	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC())
 	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: "tailscale: install mesh CA: read-only file system"})
 	_, err := dispatchAgainst(t, f, "node-1")
 	if err == nil || err.Error() != "agent rejected enroll: tailscale: install mesh CA: read-only file system" {

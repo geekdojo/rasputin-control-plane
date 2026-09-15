@@ -2020,6 +2020,10 @@ func TestHandleMeshReconcile_UnknownKind(t *testing.T) {
 func TestHandleMeshEnroll_UnknownKind(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
+	now := time.Now().UTC()
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "node-x", Role: proto.RoleCompute, FirstSeen: now, LastSeen: now}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
 	w := f.do(t, http.MethodPost, "/api/mesh/enroll/node-x", "", c)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("want 400, got %d", w.Code)
