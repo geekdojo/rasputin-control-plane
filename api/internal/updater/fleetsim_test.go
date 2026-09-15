@@ -194,6 +194,10 @@ type simNode struct {
 	// installs is the same for installs, and is what the sim-side concurrency
 	// observation is built from.
 	installs int
+	// markGoods counts mark-good commands — the last thing a healthy update
+	// asks of the node. From its first precheck to its mark-good a node is
+	// provably inside its slot, which is how installGate counts starts.
+	markGoods int
 	// sigURLs records the SigURL on every download command this node received.
 	// The bug class it exists to catch is the one that produced #154 in the
 	// first place: a field that is modelled, populated somewhere, and never
@@ -204,6 +208,9 @@ type simNode struct {
 	// at once (always ≤ 1) — the fleet aggregates them.
 	fleetEnter func()
 	fleetExit  func()
+	// holdInstall, when the fleet has an installGate, blocks inside the
+	// install until the gate releases this node.
+	holdInstall func(nodeID string)
 
 	// oldBootAnswersLeft counts down the OldBootAnswers window once the reboot
 	// has been acked; the answer that takes it to zero takes the node down.
@@ -344,6 +351,9 @@ func (n *simNode) onInstall(m *nats.Msg) {
 	}
 	if n.fleetEnter != nil {
 		n.fleetEnter()
+	}
+	if n.holdInstall != nil {
+		n.holdInstall(n.spec.ID)
 	}
 	time.Sleep(n.spec.InstallFor)
 	if n.fleetExit != nil {
@@ -516,6 +526,9 @@ func (n *simNode) onHealth(m *nats.Msg) {
 func (n *simNode) onPing(m *nats.Msg) { n.respond(m, map[string]any{"ok": true}) }
 
 func (n *simNode) onMarkGood(m *nats.Msg) {
+	unlock := n.lock()
+	n.markGoods++
+	unlock()
 	n.respond(m, proto.UpdateMarkGoodAck{OK: true})
 }
 
@@ -608,6 +621,11 @@ type fleet struct {
 	livePeakAll int
 	livePeak    map[proto.NodeRole]int
 	liveNow     map[proto.NodeRole]int
+
+	// gate, when set by holdInstallsInBatches, turns install overlap from a
+	// timing accident into a barrier. nil for every other scenario. Guarded
+	// by gaugeMu.
+	gate *installGate
 }
 
 // bundleSpec is one artifact staged on the control plane.
@@ -704,6 +722,11 @@ func newFleet(t *testing.T, nodes []simNodeSpec, bundles []bundleSpec) *fleet {
 			inactive:  proto.SlotB,
 			version:   spec.Version,
 			stop:      make(chan struct{}),
+			holdInstall: func(id string) {
+				if g := f.installGate(); g != nil {
+					g.hold(id)
+				}
+			},
 			fleetEnter: func() {
 				f.gaugeMu.Lock()
 				f.inFlight++
@@ -807,12 +830,22 @@ func (f *fleet) versionFor(sha string) string {
 // test nobody runs. What the harness asserts is what the code does when a
 // deadline fires; the production values are what they are, and this does not
 // claim otherwise.
+//
+// The install step is the one exception, capped at systemStepCap instead: no
+// scenario is defined by an install deadline, and installGate deliberately
+// holds installs open. Under the node cap a held install on a loaded machine
+// would fail on the step deadline before the gate's own deadline could name
+// what it was waiting for.
 func cappedTimeouts(wf jobs.Workflow, cap time.Duration) jobs.Workflow {
 	steps := make([]jobs.WorkflowStep, len(wf.Steps))
 	copy(steps, wf.Steps)
 	for i := range steps {
-		if steps[i].Timeout > cap {
-			steps[i].Timeout = cap
+		stepCap := cap
+		if steps[i].Name == "install" {
+			stepCap = systemStepCap
+		}
+		if steps[i].Timeout > stepCap {
+			steps[i].Timeout = stepCap
 		}
 	}
 	wf.Steps = steps
@@ -886,6 +919,9 @@ func (f *fleet) run(spec proto.SystemUpdateSpec) fleetRun {
 		f.events = append(f.events, ev)
 		switch ev.Change {
 		case proto.SystemUpdateNodeStarted:
+			if g := f.installGate(); g != nil {
+				g.sawStarted(ev.NodeID)
+			}
 			f.liveCount++
 			f.liveNow[ev.Tier]++
 			if f.liveNow[ev.Tier] > f.livePeak[ev.Tier] {
@@ -987,6 +1023,12 @@ func (f *fleet) run(spec proto.SystemUpdateSpec) fleetRun {
 		if waiting {
 			f.t.Errorf("%s rebooted and never came back: the api never logged %q for it, which is the only "+
 				"thing a simulated node comes back on", id, apiSawNodeDownLog)
+		}
+	}
+
+	if g := f.installGate(); g != nil {
+		for _, fault := range g.faultList() {
+			f.t.Errorf("install gate: %s", fault)
 		}
 	}
 
