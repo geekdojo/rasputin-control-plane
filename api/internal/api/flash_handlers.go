@@ -112,6 +112,12 @@ func clusterOSVersion(cps []*proto.Node) string {
 // secret-free — it carries only the version, the public image URL, its sha256,
 // and the arch (always amd64). The enrollment seed is delivered separately,
 // out of band, over SSH; this endpoint never sees it.
+//
+// ?channel= overrides the configured channel and must name a known one
+// (releases.ParseChannel); anything else is a 400. This endpoint is
+// unauthenticated and the channel reaches a log line, so an unvalidated value
+// would let any caller forge log lines with an encoded newline
+// (geekdojo/geekdojo-brain#145).
 func (s *Server) handleClusterFirewallImage(w http.ResponseWriter, r *http.Request) {
 	if s.releaseSource == nil {
 		writeError(w, http.StatusServiceUnavailable, "update channel not configured on this control plane")
@@ -122,9 +128,14 @@ func (s *Server) handleClusterFirewallImage(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "firewall component not registered")
 		return
 	}
-	channel := r.URL.Query().Get("channel")
-	if channel == "" {
-		channel = s.releaseChannel
+	channel := s.releaseChannel
+	if q := r.URL.Query().Get("channel"); q != "" {
+		known, ok := releases.ParseChannel(q)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unknown release channel (want "+releases.ChannelStable+" or "+releases.ChannelDev+")")
+			return
+		}
+		channel = known
 	}
 	info, err := s.releaseSource.LatestFor(r.Context(), comp, channel)
 	if err != nil {

@@ -5,6 +5,27 @@ import (
 	"io"
 )
 
+// The release channels a control plane can follow. dev takes prereleases;
+// stable takes full releases.
+const (
+	ChannelStable = "stable"
+	ChannelDev    = "dev"
+)
+
+// ParseChannel returns the channel s names, and false when s is not a known
+// channel. The value returned is the package constant, never s itself, so a
+// caller that logs or echoes it cannot carry request bytes (a newline, say)
+// along with it.
+func ParseChannel(s string) (string, bool) {
+	switch s {
+	case ChannelStable:
+		return ChannelStable, true
+	case ChannelDev:
+		return ChannelDev, true
+	}
+	return "", false
+}
+
 // Manifest mirrors the `manifest.json` asset published on every Rasputin OS
 // and firewall release. Only the fields the control plane needs are modeled.
 type Manifest struct {
