@@ -3,11 +3,13 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -626,6 +628,10 @@ func (s *Server) handleMeshReconcile(w http.ResponseWriter, r *http.Request) {
 // Body (optional): { "advertiseRoutes": ["10.0.0.0/24"] }
 func (s *Server) handleMeshEnrollNode(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.PathValue("nodeId")
+	if !busauth.ValidNodeID(nodeID) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid nodeId %q: %s", nodeID, busauth.NodeIDRule))
+		return
+	}
 	var req struct {
 		AdvertiseRoutes []string `json:"advertiseRoutes"`
 	}
@@ -640,6 +646,17 @@ func (s *Server) handleMeshEnrollNode(w http.ResponseWriter, r *http.Request) {
 	// form instead of as a failed task (e3bench 2026-09-04).
 	if err := mesh.ValidateAdvertiseRoutes(req.AdvertiseRoutes); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// An enroll targets an onboarded node. The saga's validate step checks
+	// this too; a 404 here says so before a job is queued.
+	n, err := s.inv.Get(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n == nil {
+		writeError(w, http.StatusNotFound, "node not found")
 		return
 	}
 	spec, _ := json.Marshal(mesh.EnrollSpec{NodeID: nodeID, AdvertiseRoutes: req.AdvertiseRoutes})

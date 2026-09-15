@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
@@ -517,8 +518,8 @@ const enrollDispatchTimeout = proto.MeshEnrollWork + 30*time.Second
 // target node's agent, waits for the agent's MeshEnrollAck, and writes
 // the resulting Headscale node id back into mesh_devices.
 //
-//  0. validate — refuse a spec `tailscale up` would refuse, before a key
-//     is minted or the agent touched.
+//  0. validate — refuse a spec `tailscale up` would refuse, or one whose
+//     node is not registered, before a key is minted or the agent touched.
 //  1. mint_key — CreatePreAuthKey for the rasputin-operator user
 //     with the Rasputin tag.
 //  2. dispatch — RPC the agent's mesh.enroll handler with the key + URL.
@@ -527,7 +528,7 @@ func EnrollNodeWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.
 	return jobs.Workflow{
 		Kind: "mesh.enroll_node",
 		Steps: []jobs.WorkflowStep{
-			{Name: "validate", Timeout: 5 * time.Second, Do: enrollValidate()},
+			{Name: "validate", Timeout: 5 * time.Second, Do: enrollValidate(inv)},
 			{Name: "mint_key", Timeout: 10 * time.Second, Do: enrollMintKey(svc)},
 			{Name: "dispatch", Timeout: enrollDispatchTimeout, Do: enrollDispatch(svc, inv)},
 			{Name: "record", Timeout: 5 * time.Second, Do: enrollRecord(svc, nc)},
@@ -559,6 +560,13 @@ func parseEnrollSession(raw json.RawMessage) (*enrollSession, error) {
 	if s.NodeID == "" {
 		return nil, errors.New("nodeId is required")
 	}
+	// Every step parses through here, so no step addresses a bus subject or a
+	// Headscale hostname built from an id that is not a single DNS label. The
+	// spec may arrive from the jobs endpoint as submitted, so the saga checks
+	// it as if the HTTP handler did not exist.
+	if !busauth.ValidNodeID(s.NodeID) {
+		return nil, fmt.Errorf("invalid nodeId %q: %s", s.NodeID, busauth.NodeIDRule)
+	}
 	return &s, nil
 }
 
@@ -583,7 +591,12 @@ func enrollSessionFrom(sc *jobs.StepCtx, priorStep string) (*enrollSession, erro
 // rewritten: a route someone typed is theirs to correct. The auto-enroll
 // paths (the onNodeAdded hook, converge_enrollment, converge_trust and the
 // setup wizard's self-enroll) submit no routes and pass through untouched.
-func enrollValidate() jobs.DoFn {
+//
+// It also refuses a node that is not in inventory: an enroll targets an
+// onboarded node, and nothing downstream should mint a key for, or dispatch to,
+// an id no node registered under. Without inventory the check cannot be made,
+// so the step fails rather than skipping it.
+func enrollValidate(inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		s, err := parseEnrollSession(sc.Spec)
 		if err != nil {
@@ -591,6 +604,16 @@ func enrollValidate() jobs.DoFn {
 		}
 		if err := ValidateAdvertiseRoutes(s.AdvertiseRoutes); err != nil {
 			return nil, err
+		}
+		if inv == nil {
+			return nil, errors.New("inventory unavailable: cannot confirm the enroll target is a registered node")
+		}
+		n, err := inv.Get(sc.Ctx, s.NodeID)
+		if err != nil {
+			return nil, fmt.Errorf("look up node %s: %w", s.NodeID, err)
+		}
+		if n == nil {
+			return nil, fmt.Errorf("node %s is not registered", s.NodeID)
 		}
 		if len(s.AdvertiseRoutes) > 0 {
 			sc.Log("info", fmt.Sprintf("advertising %s from %s", strings.Join(s.AdvertiseRoutes, ", "), s.NodeID))
