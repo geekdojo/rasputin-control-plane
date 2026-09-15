@@ -72,7 +72,7 @@ func (g *githubPublicSource) LatestFor(ctx context.Context, comp Component, chan
 		return nil, err
 	}
 
-	wantPrerelease := channel == "dev"
+	wantPrerelease := channel == ChannelDev
 	var best *ghRelease
 	var bestVer string
 	for i := range rels {

@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -150,6 +152,57 @@ func TestClusterFirewallImage(t *testing.T) {
 	}
 	if !strings.HasSuffix(desc.URL, "/"+img) {
 		t.Fatalf("url = %q", desc.URL)
+	}
+}
+
+// channelRecordingSource records the channel every LatestFor call was asked
+// for and resolves nothing, so a test can tell which requests reached the
+// release source at all.
+type channelRecordingSource struct{ channels []string }
+
+func (c *channelRecordingSource) LatestFor(_ context.Context, _ releases.Component, channel string) (*releases.ReleaseInfo, error) {
+	c.channels = append(c.channels, channel)
+	return nil, nil
+}
+
+func (c *channelRecordingSource) Open(context.Context, string) (io.ReadCloser, error) {
+	return nil, nil
+}
+
+// The firewall-image endpoint is unauthenticated and its channel reaches a log
+// line, so a channel that is not a known one is refused before it reaches the
+// release source (or the log): an encoded newline would otherwise forge log
+// lines (geekdojo/geekdojo-brain#145).
+func TestClusterFirewallImage_RejectsUnknownChannel(t *testing.T) {
+	f := newAPIFixture(t)
+	src := &channelRecordingSource{}
+	f.srv.SetReleaseSource(src, releases.ChannelStable)
+
+	for _, q := range []string{"x%0Ay", "nightly", "Dev", "stable%0A"} {
+		rec := f.do(t, http.MethodGet, "/api/cluster/firewall-image?channel="+q, "", nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("channel=%s: status %d, want 400 (body %s)", q, rec.Code, rec.Body.String())
+		}
+	}
+	if len(src.channels) != 0 {
+		t.Fatalf("LatestFor called for a rejected channel: %q", src.channels)
+	}
+
+	// Known channels, and no channel at all (the configured default), still
+	// reach the source — with the canonical value.
+	for _, tc := range []struct{ query, want string }{
+		{"?channel=stable", releases.ChannelStable},
+		{"?channel=dev", releases.ChannelDev},
+		{"", releases.ChannelStable},
+	} {
+		src.channels = nil
+		rec := f.do(t, http.MethodGet, "/api/cluster/firewall-image"+tc.query, "", nil)
+		if rec.Code != http.StatusNotFound { // the recording source resolves no release
+			t.Errorf("%q: status %d, want 404 (body %s)", tc.query, rec.Code, rec.Body.String())
+		}
+		if len(src.channels) != 1 || src.channels[0] != tc.want {
+			t.Errorf("%q: LatestFor channels = %q, want [%q]", tc.query, src.channels, tc.want)
+		}
 	}
 }
 
