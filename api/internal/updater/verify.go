@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -214,12 +215,56 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 	// happened, and nothing later can unhappen it.
 	everAnswered := false
 	wentQuiet := false
+
+	// deadlineVerdict names the failure from those three facts once the step's
+	// deadline has fired. Four distinct failures, and telling them apart IS the
+	// deliverable — this message is the only thing an operator has to go on,
+	// and naming the wrong one sends them to the wrong machine. Ordered
+	// most-specific first.
+	deadlineVerdict := func() (bootIdentity, error) {
+		switch {
+		case answeringPriorBoot:
+			// Answering on the boot we told to reboot, in the last answer we
+			// got: alive and well, it simply never rebooted. c13. This is the
+			// only shape that earns the bootSame verdict.
+			return bootSame, fmt.Errorf("node never rebooted: still answering on boot %s after %w",
+				short(req.PriorBootID), ctx.Err())
+		case degraded && !wentQuiet:
+			// The degraded flavour of the same observation, and the case
+			// that used to pass in 2ms. No identity to name, so name the
+			// evidence instead.
+			return bootUnknown, fmt.Errorf("node never rebooted: it answered prechecks throughout and never went quiet: %w", ctx.Err())
+		case everAnswered:
+			// It answered, then went silent and stayed silent. THE c08
+			// SHAPE: the reboot almost certainly happened — that is what
+			// stopped the answers — and the node never came back to say so.
+			// Emphatically NOT "still answering", and not a rollback either:
+			// nothing here says which slot it is on, only that we cannot ask.
+			return bootUnknown, fmt.Errorf(
+				"node stopped answering and never came back — it rebooted or died and did not return: %w", ctx.Err())
+		}
+		// Never heard from it at all in this step. Different from c08: the
+		// node was already unreachable when we started waiting, so the
+		// reboot RPC's ack may be the last true thing we know.
+		return bootUnknown, fmt.Errorf("node never answered after the reboot was issued: %w", ctx.Err())
+	}
+
 	for {
 		rctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 		msg, err := nc.RequestWithContext(rctx, proto.UpdatePrecheckSubject(req.NodeID), mustJSON(proto.UpdatePrecheckCmd{}))
 		cancel()
+		if pollCancelledByStep(ctx, err) {
+			// The step's deadline ended this poll, not the node. Nothing was
+			// observed, so nothing is recorded: the verdict stands on the last
+			// poll that actually completed. Counting this as "went quiet" is
+			// what reported a node answering on its old boot — cut off one
+			// slow answer short — as c08, naming a failure it did not have.
+			return deadlineVerdict()
+		}
 		switch {
 		case err != nil:
+			// A poll that failed on its own terms — no responders, the
+			// per-request timeout, a bus error — with the step still running.
 			if !wentQuiet {
 				wentQuiet = true
 				lg.log("info", "node stopped answering — the reboot is under way")
@@ -264,39 +309,36 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 
 		select {
 		case <-ctx.Done():
-			// Four distinct failures, and telling them apart IS the deliverable
-			// — this message is the only thing an operator has to go on, and
-			// naming the wrong one sends them to the wrong machine. Ordered
-			// most-specific first.
-			switch {
-			case answeringPriorBoot:
-				// Answering RIGHT NOW on the boot we told to reboot: alive and
-				// well, it simply never rebooted. c13. This is the only shape
-				// that earns the bootSame verdict.
-				return bootSame, fmt.Errorf("node never rebooted: still answering on boot %s after %w",
-					short(req.PriorBootID), ctx.Err())
-			case degraded && !wentQuiet:
-				// The degraded flavour of the same observation, and the case
-				// that used to pass in 2ms. No identity to name, so name the
-				// evidence instead.
-				return bootUnknown, fmt.Errorf("node never rebooted: it answered prechecks throughout and never went quiet: %w", ctx.Err())
-			case everAnswered:
-				// It answered, then went silent and stayed silent. THE c08
-				// SHAPE: the reboot almost certainly happened — that is what
-				// stopped the answers — and the node never came back to say so.
-				// Emphatically NOT "still answering", and not a rollback either:
-				// nothing here says which slot it is on, only that we cannot ask.
-				return bootUnknown, fmt.Errorf(
-					"node stopped answering and never came back — it rebooted or died and did not return: %w", ctx.Err())
-			}
-			// Never heard from it at all in this step. Different from c08: the
-			// node was already unreachable when we started waiting, so the
-			// reboot RPC's ack may be the last true thing we know.
-			return bootUnknown, fmt.Errorf("node never answered after the reboot was issued: %w", ctx.Err())
+			return deadlineVerdict()
 		case <-regCh:
 			// Registration is a hint that something changed — poll immediately
 			// rather than sitting out the interval.
 		case <-time.After(pollInterval):
 		}
 	}
+}
+
+// pollCancelledByStep reports whether a failed poll was ended by the STEP's own
+// bound — ctx's deadline or cancellation — rather than by anything the node or
+// the bus did. Only the second kind is an observation.
+//
+// Both bounds surface as context errors, and the per-request timeout is a
+// child of ctx, so the error value alone cannot tell them apart:
+//
+//   - ctx still live, err a context error: the per-request timeout fired. The
+//     node had the full rpcTimeout to answer and did not — a real failure.
+//   - ctx done, err a context error: the step's bound cut the poll off while
+//     the node may well have been answering. Not an observation.
+//   - any other error (no responders, connection closed, a timeout reported
+//     by the bus) completed on its own terms and is an observation, even if
+//     ctx happens to expire a moment later.
+//
+// If the per-request timeout and the step deadline land together, the poll is
+// treated as cut off: the step is over either way, and the verdict then rests
+// on the last poll that completed rather than on one that did not.
+func pollCancelledByStep(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() == nil {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
