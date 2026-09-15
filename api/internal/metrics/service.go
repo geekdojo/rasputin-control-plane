@@ -2,11 +2,11 @@ package metrics
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busident"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -85,11 +85,14 @@ func (s *Service) Stop() {
 func (s *Service) Store() *Store { return s.store }
 
 func (s *Service) handle(m *nats.Msg) {
-	var ev proto.MetricsEvt
-	if err := json.Unmarshal(m.Data, &ev); err != nil {
+	// The node id comes from the subject, which the bus scopes to the
+	// publisher's credential; a payload naming a different node is dropped.
+	ev, err := busident.DecodeMetrics(m.Subject, m.Data)
+	if err != nil {
+		log.Printf("metrics: drop sample on %q: %v", m.Subject, err)
 		return
 	}
-	if ev.NodeID == "" || len(ev.Metrics) == 0 {
+	if len(ev.Metrics) == 0 {
 		return
 	}
 	if err := s.store.Insert(s.ctx, &ev); err != nil {

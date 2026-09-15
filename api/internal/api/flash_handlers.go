@@ -58,6 +58,14 @@ func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "cluster OS version not known yet")
 		return
 	}
+	// The version is inventory data reported by a node, and it becomes a path
+	// segment of the download URL: refuse anything that is not a plain release
+	// tag rather than resolve it.
+	if !releases.ValidReleaseVersion(version) {
+		log.Printf("cluster node-image: controlplane OS version %q is not a valid release version", version)
+		writeError(w, http.StatusServiceUnavailable, "cluster OS version is not a valid release version")
+		return
+	}
 	base := s.releaseDownloadBase
 	if base == "" {
 		base = "https://github.com"

@@ -102,7 +102,9 @@ func TestService_PublishedAlertLandsInJSONLFile(t *testing.T) {
 	}
 }
 
-func TestService_DropsEventsWithEmptyNodeID(t *testing.T) {
+// An empty payload nodeId is filled from the subject (the bus-scoped identity);
+// a payload naming a different node than its subject is dropped.
+func TestService_BindsNodeIDToSubject(t *testing.T) {
 	nc := startNATS(t)
 	path := filepath.Join(t.TempDir(), "ids.jsonl")
 	w, err := NewWriter(path)
@@ -119,20 +121,38 @@ func TestService_DropsEventsWithEmptyNodeID(t *testing.T) {
 	}
 	t.Cleanup(svc.Stop)
 
-	// Empty-nodeID payload should be silently dropped (logged, not written).
-	bad := *sampleEvt()
-	bad.NodeID = ""
-	payload, _ := json.Marshal(&bad)
-	// Need a real subject (the filter is wildcard); use a placeholder one.
-	if err := nc.Publish("rasputin.node.unknown.evt.ids.alert", payload); err != nil {
+	mismatched := *sampleEvt()
+	mismatched.NodeID = "beta"
+	mismatched.SID = 1
+	empty := *sampleEvt()
+	empty.NodeID = ""
+	empty.SID = 2
+	// One subscription delivers in order, so once the second message's line
+	// is written the first has already been handled.
+	for _, ev := range []proto.IDSAlertEvt{mismatched, empty} {
+		payload, _ := json.Marshal(&ev)
+		if err := nc.Publish(proto.IDSAlertSubject("alpha"), payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := nc.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	_ = nc.Flush()
 
-	time.Sleep(100 * time.Millisecond)
-	lines := readJSONLines(t, path)
-	if len(lines) != 0 {
-		t.Errorf("expected 0 written lines for empty-nodeId event; got %d", len(lines))
+	deadline := time.Now().Add(5 * time.Second)
+	var lines []proto.IDSAlertEvt
+	for {
+		lines = readJSONLines(t, path)
+		if len(lines) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no alert written within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(lines) != 1 || lines[0].SID != 2 || lines[0].NodeID != "alpha" {
+		t.Errorf("got %+v, want only the empty-nodeId alert (sid 2), attributed to alpha", lines)
 	}
 }
 

@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busident"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -212,7 +212,7 @@ func (s *Service) seed(ctx context.Context) error {
 }
 
 func (s *Service) handleHeartbeat(m *nats.Msg) {
-	nodeID, ok := nodeIDFromSubject(m.Subject)
+	nodeID, ok := busident.NodeIDFromSubject(m.Subject)
 	if !ok {
 		return
 	}
@@ -245,11 +245,11 @@ func (s *Service) handleHeartbeat(m *nats.Msg) {
 }
 
 func (s *Service) handleRegistered(m *nats.Msg) {
-	var ev proto.NodeRegisteredEvt
-	if err := json.Unmarshal(m.Data, &ev); err != nil {
-		return
-	}
-	if ev.NodeID == "" {
+	// The node id comes from the subject, which the bus scopes to the
+	// publisher's credential; a payload naming a different node is dropped.
+	ev, err := busident.DecodeRegistered(m.Subject, m.Data)
+	if err != nil {
+		log.Printf("inventory: drop registration on %q: %v", m.Subject, err)
 		return
 	}
 	if !proto.ValidRole(ev.Role) {
@@ -469,13 +469,4 @@ func ComputeStatus(lastSeen time.Time) proto.NodeStatus {
 	default:
 		return proto.StatusOffline
 	}
-}
-
-// nodeIDFromSubject extracts the id from "rasputin.node.<id>.<rest>".
-func nodeIDFromSubject(subject string) (string, bool) {
-	parts := strings.Split(subject, ".")
-	if len(parts) < 4 || parts[0] != "rasputin" || parts[1] != "node" {
-		return "", false
-	}
-	return parts[2], true
 }

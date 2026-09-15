@@ -358,37 +358,6 @@ func TestService_Seed_PopulatesCache(t *testing.T) {
 }
 
 // ============================================================================
-// nodeIDFromSubject — pure helper.
-// ============================================================================
-
-func TestNodeIDFromSubject(t *testing.T) {
-	cases := []struct {
-		subject string
-		wantID  string
-		wantOK  bool
-	}{
-		{"rasputin.node.cp-1.heartbeat", "cp-1", true},
-		{"rasputin.node.fw-x.evt.registered", "fw-x", true},
-		{"rasputin.node.x.cmd.something.deep", "x", true},
-		// Negative cases:
-		{"", "", false},
-		{"rasputin.node", "", false},
-		{"rasputin.node.x", "", false}, // only 3 parts — needs at least 4.
-		{"other.node.x.heartbeat", "", false},
-		{"rasputin.other.x.heartbeat", "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.subject, func(t *testing.T) {
-			id, ok := nodeIDFromSubject(tc.subject)
-			if ok != tc.wantOK || id != tc.wantID {
-				t.Errorf("nodeIDFromSubject(%q) = (%q, %v), want (%q, %v)",
-					tc.subject, id, ok, tc.wantID, tc.wantOK)
-			}
-		})
-	}
-}
-
-// ============================================================================
 // Service.Store accessor.
 // ============================================================================
 
