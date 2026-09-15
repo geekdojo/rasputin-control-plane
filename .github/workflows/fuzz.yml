@@ -1,11 +1,17 @@
 name: fuzz
 
-# Weekly deep-fuzz of the agent's untrusted-input parsers — the continuous
+# Weekly deep-fuzz of the untrusted-input parsers in every module — the continuous
 # layer of step 5 ("AI Agents for Continuous Quality", geekdojo-brain
 # research/). OSS-Fuzz-Gen targets C/C++ and Rasputin owns no first-party C,
 # so this is the research's fallback: Go-native `go test -fuzz` of the parsers
-# that ingest attacker-influenced bytes (mDNS packets off the LAN, IDS alert
-# lines, the grubenv A/B block). PR-time `go test` already runs each harness's
+# that ingest attacker-influenced bytes — on the agent side mDNS packets off the
+# LAN, IDS alert lines and the grubenv A/B block; on the api side the values an
+# unauthenticated client reaches first: the node id in a NATS username, the node
+# identity carried by a bus subject, and the version/asset names spliced into a
+# public image-download URL (geekdojo-brain#106).
+#
+# Targets live in several modules, so the job runs from the REPO ROOT and each
+# target is written "<module>/<pkg-dir>:<FuzzFunc>"; go.work resolves them. PR-time `go test` already runs each harness's
 # SEED corpus as a regression check; this job does the deep exploration a
 # 45-second local run can't.
 #
@@ -91,16 +97,26 @@ jobs:
 
       - name: Deep-fuzz the parsers
         id: fuzz
-        working-directory: agent
         run: |
           set -uo pipefail   # NOT -e: a crash must not abort the loop
-          # Fuzz targets: "<pkg-dir>:<FuzzFunc>". Add untrusted-input parsers
-          # here as harnesses land.
+          # Fuzz targets: "<module>/<pkg-dir>:<FuzzFunc>", resolved from the repo
+          # root through go.work. Add untrusted-input parsers here as harnesses
+          # land — a harness nobody lists here only ever runs its seed corpus.
           targets="
-            internal/mdns:FuzzParseAnswer
-            internal/mdns:FuzzReadName
-            internal/ids:FuzzParseAlertFast
-            internal/updater:FuzzParseGrubenv
+            agent/internal/mdns:FuzzParseAnswer
+            agent/internal/mdns:FuzzReadName
+            agent/internal/ids:FuzzParseAlertFast
+            agent/internal/updater:FuzzParseGrubenv
+            api/internal/busauth:FuzzValidNodeID
+            api/internal/busauth:FuzzMintUserJWT
+            api/internal/busauth:FuzzParsePreseed
+            api/internal/busident:FuzzDecodeRegistered
+            api/internal/busident:FuzzDecodeIDSAlert
+            api/internal/busident:FuzzDecodeMetrics
+            api/internal/busident:FuzzNodeIDFromSubject
+            api/internal/releases:FuzzPublicNodeImage
+            api/internal/releases:FuzzValidReleaseVersion
+            api/internal/releases:FuzzArchCompatible
           "
           for t in $targets; do
             [ -n "$t" ] || continue
@@ -113,8 +129,8 @@ jobs:
           done
           # Crashers are written to <dir>/testdata/fuzz/<Fuzz>/<hash>. There are
           # no committed seeds there, so any such file is a new crasher.
-          mkdir -p ../fuzz-out
-          find . -path '*/testdata/fuzz/*' -type f -exec cp --parents {} ../fuzz-out/ \; 2>/dev/null || true
+          mkdir -p fuzz-out
+          find . -path '*/testdata/fuzz/*' -type f -exec cp --parents {} fuzz-out/ \; 2>/dev/null || true
           n=$(find . -path '*/testdata/fuzz/*' -type f | wc -l | tr -d ' ')
           echo "crashers=$n" >> "$GITHUB_OUTPUT"
 
@@ -134,20 +150,19 @@ jobs:
 
       - name: Build issue body
         if: steps.fuzz.outputs.crashers != '0'
-        working-directory: agent
         run: |
           set -eu
           today=$(date -u +%Y-%m-%d)
           {
             echo "## Fuzz crash — $today"
             echo
-            echo "\`go test -fuzz\` found reproducing input(s) in the agent's untrusted-input parsers."
+            echo "\`go test -fuzz\` found reproducing input(s) in an untrusted-input parser."
             echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
             echo "### Crashers"
             echo
             for f in $(find . -path '*/testdata/fuzz/*' -type f | sort); do
-              # f = ./internal/<pkg>/testdata/fuzz/<Fuzz>/<hash>
+              # f = ./<module>/<pkg>/testdata/fuzz/<Fuzz>/<hash>
               rel="${f#./}"
               fuzzname=$(echo "$rel" | sed -E 's#.*/testdata/fuzz/([^/]+)/.*#\1#')
               hash=$(basename "$f")
@@ -155,7 +170,7 @@ jobs:
               echo "- **$fuzzname** — \`$rel\`"
               echo "  Reproduce:"
               echo '  ```sh'
-              echo "  cd agent && go test -run='${fuzzname}/${hash}' ./${pkgdir}"
+              echo "  go test -run='${fuzzname}/${hash}' ./${pkgdir}"
               echo '  ```'
               echo "  Input:"
               echo '  ```'
@@ -172,8 +187,8 @@ jobs:
             echo
             echo "---"
             echo "*Opened by the fuzz workflow. Close once fixed/triaged.*"
-          } > ../fuzz-out/issue-body.md
-          cat ../fuzz-out/issue-body.md
+          } > fuzz-out/issue-body.md
+          cat fuzz-out/issue-body.md
 
       - name: Ensure 'fuzz' label
         if: steps.fuzz.outputs.crashers != '0'
