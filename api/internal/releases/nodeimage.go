@@ -3,10 +3,57 @@ package releases
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
+
+// ErrInvalidVersion is returned (wrapped) when a version is not usable as a
+// single release-tag path segment.
+var ErrInvalidVersion = errors.New("invalid release version")
+
+// ErrInvalidAssetName is returned (wrapped) when a manifest names an image
+// that is not a single file name.
+var ErrInvalidAssetName = errors.New("invalid release asset name")
+
+// maxPathSegment bounds a version or asset name. Real values are ~40 bytes
+// ("rasputin-os-n100-2026.09.2-dev.214.img.xz").
+const maxPathSegment = 128
+
+// validPathSegment reports whether s is safe to splice into a release download
+// URL as exactly one path segment: 1-128 bytes of ASCII letters, digits, '.',
+// '_', '+' and '-', starting with a letter or digit, and never containing "..".
+// That admits every tag and asset name the release pipelines publish (CalVer
+// "2026.09.1", "2026.09.2-dev.214", semver "v0.8.7-dev.2", image files like
+// "rasputin-os-n100-2026.09.1.img.xz") and excludes path separators, dot
+// segments, query/fragment/percent characters, whitespace and control bytes.
+func validPathSegment(s string) bool {
+	if len(s) == 0 || len(s) > maxPathSegment || strings.Contains(s, "..") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == '+' || c == '-':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ValidReleaseVersion reports whether version can name a release tag in a
+// download URL. It is deliberately a shape check, not a CalVer parse: it
+// rejects only values that could change the URL's structure.
+func ValidReleaseVersion(version string) bool {
+	return validPathSegment(version)
+}
 
 // NodeImageDescriptor is the public flashable OS image for an exact version:
 // the anonymous download URL plus the checksum to verify it against. It backs
@@ -28,13 +75,15 @@ type NodeImageDescriptor struct {
 // prefix). It fetches the release's manifest.json over anonymous HTTPS and
 // returns the image asset URL + its imageSha256.
 func PublicNodeImage(ctx context.Context, hc *http.Client, downloadBase, repo, version, compatible string) (*NodeImageDescriptor, error) {
-	if version == "" {
-		return nil, fmt.Errorf("no version given")
+	if !ValidReleaseVersion(version) {
+		return nil, fmt.Errorf("%w %q", ErrInvalidVersion, version)
 	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	tagBase := fmt.Sprintf("%s/%s/releases/download/%s", strings.TrimRight(downloadBase, "/"), repo, version)
+	// Validated above, and escaped anyway so the tag can only ever be one
+	// path segment.
+	tagBase := fmt.Sprintf("%s/%s/releases/download/%s", strings.TrimRight(downloadBase, "/"), repo, url.PathEscape(version))
 	manifestURL := tagBase + "/manifest.json"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
@@ -61,10 +110,13 @@ func PublicNodeImage(ctx context.Context, hc *http.Client, downloadBase, repo, v
 		if a.Image == "" || a.ImageSha256 == "" {
 			continue
 		}
+		if !validPathSegment(a.Image) {
+			return nil, fmt.Errorf("manifest for %s: %w %q", version, ErrInvalidAssetName, a.Image)
+		}
 		return &NodeImageDescriptor{
 			Version:      version,
 			Architecture: a.Architecture,
-			URL:          tagBase + "/" + a.Image,
+			URL:          tagBase + "/" + url.PathEscape(a.Image),
 			SHA256:       a.ImageSha256,
 			Image:        a.Image,
 		}, nil

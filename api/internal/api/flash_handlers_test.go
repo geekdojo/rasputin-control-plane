@@ -99,6 +99,40 @@ func TestClusterNodeImage(t *testing.T) {
 	}
 }
 
+// A controlplane OS version that is not a plain release tag is refused with a
+// clean 503 — no manifest request is made and no internals are returned.
+func TestClusterNodeImage_InvalidVersion(t *testing.T) {
+	for _, version := range []string{"../../other/repo/releases/download/x", "x/../../y", "x?y", "x#y", "x%2fy", "x y", "x\ny"} {
+		t.Run(version, func(t *testing.T) {
+			requests := 0
+			rel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer rel.Close()
+
+			f := newAPIFixture(t)
+			f.srv.SetReleaseDownloadBase(rel.URL)
+			now := time.Now().UTC()
+			if err := f.inv.Insert(f.ctx, &proto.Node{
+				ID: "x", Role: proto.RoleControlPlane, ImageVersion: version, ImageVersionConfirmedAt: &now,
+			}); err != nil {
+				t.Fatalf("seed cp node: %v", err)
+			}
+			rec := f.do(t, http.MethodGet, "/api/cluster/node-image", "", nil)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status %d, want 503; body %s", rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), version) {
+				t.Errorf("error body echoes the version: %s", rec.Body.String())
+			}
+			if requests != 0 {
+				t.Errorf("made %d release requests for an invalid version, want 0", requests)
+			}
+		})
+	}
+}
+
 func TestClusterFirewallImage(t *testing.T) {
 	const version = "2026.07.1-dev.20"
 	const img = "rasputin-fw-n100-2026.07.1-dev.20-ab.img.gz"
