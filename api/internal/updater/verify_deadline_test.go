@@ -3,6 +3,8 @@ package updater
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -307,5 +309,43 @@ func TestWaitForNewBoot_DeadlineCancelledPollIsNotLoggedAsTheNodeGoingQuiet(t *t
 	}
 	if containsSubstr(run.logs, "stopped answering") {
 		t.Errorf("logs = %q — the node never stopped answering; the api's own deadline cut the poll off", run.logs)
+	}
+}
+
+// The distinction the verdict rests on, one error at a time: a poll the step's
+// own bound ended is not an observation; a poll the node or the bus ended is,
+// whenever it lands.
+func TestPollCancelledByStep(t *testing.T) {
+	live := context.Background()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer cancelExpired()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cases := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"poll succeeded", live, nil, false},
+		{"poll succeeded as the deadline fired", expired, nil, false},
+		{"per-request timeout, step still running", live, context.DeadlineExceeded, false},
+		{"no responders, step still running", live, nats.ErrNoResponders, false},
+		{"bus timeout, step still running", live, nats.ErrTimeout, false},
+		{"connection closed, step still running", live, nats.ErrConnectionClosed, false},
+		{"step deadline cut the poll off", expired, context.DeadlineExceeded, true},
+		{"step deadline cut the poll off, wrapped", expired, fmt.Errorf("request: %w", context.DeadlineExceeded), true},
+		{"step cancelled mid-poll", cancelled, context.Canceled, true},
+		{"no responders, then the deadline fired", expired, nats.ErrNoResponders, false},
+		{"connection closed, then the deadline fired", expired, nats.ErrConnectionClosed, false},
+		{"unrelated error, step cancelled", cancelled, errors.New("boom"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pollCancelledByStep(tc.ctx, tc.err); got != tc.want {
+				t.Errorf("pollCancelledByStep(ctx.Err=%v, %v) = %v, want %v", tc.ctx.Err(), tc.err, got, tc.want)
+			}
+		})
 	}
 }
