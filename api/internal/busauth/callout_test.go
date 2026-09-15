@@ -231,8 +231,34 @@ func TestMintedJWTBoundsTheReplyGrantExplicitly(t *testing.T) {
 // The TTL is injected at ~200ms so this runs in milliseconds. The production
 // value is asserted separately, in TestMintedJWTBoundsTheReplyGrantExplicitly:
 // this test proves the mechanism, that one proves the number.
+//
+// # Why there are no guessed sleeps
+//
+// nats-server offers no clock to inject: it stamps the grant with time.Now()
+// when it delivers the command to the agent, and denies the reply when
+// time.Since(stamp) > Expires at the moment it processes the publish
+// (client.go deliverMsg / responseAllowed). So every timing claim here is
+// derived by bracketing those two server readings with the test's own
+// monotonic clock, in the same process:
+//
+//   - a reading taken BEFORE the api publishes the command is <= the stamp;
+//   - a reading taken AFTER the command reaches the agent is >= the stamp;
+//   - a reading taken after agent.Flush() returns is >= the server's check,
+//     because the server answers the agent's PING only after it has processed
+//     (and, if denied, sent -ERR for) every publish ahead of it.
+//
+// That turns "was this reply inside the grant?" into a checkable fact instead
+// of a hope that a loaded machine stays fast. Every wait for something to
+// arrive is bounded by waitLimit and fails naming what never came true.
 func TestReplyGrantExpires(t *testing.T) {
-	const injectedTTL = 200 * time.Millisecond
+	const (
+		injectedTTL = 200 * time.Millisecond
+		// waitLimit bounds each single wait for a message, error or PONG.
+		waitLimit = 10 * time.Second
+		// controlLimit bounds the whole control: how long we keep trying to get
+		// one round trip that provably completes inside the grant.
+		controlLimit = 60 * time.Second
+	)
 
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -276,10 +302,15 @@ func TestReplyGrantExpires(t *testing.T) {
 
 	// The fake agent: connects as a node, and hands every command it receives
 	// to the test so the test controls when the reply goes out.
-	asyncErr := make(chan error, 8)
+	asyncErr := make(chan error, 64)
 	agent, err := nats.Connect(srv.ClientURL(),
 		nats.UserInfo("fw-1", token),
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, e error) { asyncErr <- e }),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, e error) {
+			select {
+			case asyncErr <- e:
+			default: // never block the client's callback goroutine
+			}
+		}),
 	)
 	if err != nil {
 		t.Fatalf("agent connect: %v", err)
@@ -296,16 +327,35 @@ func TestReplyGrantExpires(t *testing.T) {
 		t.Fatalf("agent flush: %v", err)
 	}
 
+	// The api watches a subject the agent may always publish to. The server
+	// routes one connection's publishes in order and the client queues them in
+	// order, so once a sentinel the agent sent AFTER its reply reaches the api,
+	// the reply — had it been routed — is already sitting in the api's queue.
+	const sentinelSubject = "rasputin.node.fw-1.evt.sentinel"
+	sentinels, err := srv.Conn().SubscribeSync(sentinelSubject)
+	if err != nil {
+		t.Fatalf("api subscribe sentinel: %v", err)
+	}
+	if err := srv.Conn().Flush(); err != nil {
+		t.Fatalf("api flush: %v", err)
+	}
+
 	// request sends one command from the api's own (fully privileged)
-	// connection and returns the command as the agent saw it, plus the
-	// subscription the reply would land on.
-	request := func(t *testing.T) (*nats.Msg, *nats.Subscription) {
+	// connection and returns the command as the agent saw it, the subscription
+	// the reply would land on, and a clock reading taken before the send (so it
+	// is no later than the server's grant stamp).
+	request := func(t *testing.T) (*nats.Msg, *nats.Subscription, time.Time) {
 		t.Helper()
 		inbox := nats.NewInbox()
 		replies, err := srv.Conn().SubscribeSync(inbox)
 		if err != nil {
 			t.Fatalf("api subscribe inbox: %v", err)
 		}
+		t.Cleanup(func() { _ = replies.Unsubscribe() })
+		if err := srv.Conn().Flush(); err != nil {
+			t.Fatalf("api flush: %v", err)
+		}
+		sent := time.Now()
 		if err := srv.Conn().PublishRequest("rasputin.node.fw-1.cmd.slow", inbox, []byte("work")); err != nil {
 			t.Fatalf("api request: %v", err)
 		}
@@ -314,43 +364,77 @@ func TestReplyGrantExpires(t *testing.T) {
 		}
 		select {
 		case m := <-commands:
-			return m, replies
-		case <-time.After(5 * time.Second):
-			t.Fatal("agent never received the command")
-			return nil, nil
+			return m, replies, sent
+		case <-time.After(waitLimit):
+			t.Fatalf("agent never received the command within %s", waitLimit)
+			return nil, nil, time.Time{}
 		}
 	}
 
-	drain := func() {
-		for {
-			select {
-			case <-asyncErr:
-			default:
-				return
-			}
+	// deniedReply reports whether the server refused the agent's publish to
+	// reply. It must be called right after agent.Flush() has returned: the
+	// client records a -ERR as its last error while reading, before it can see
+	// the PONG that unblocks Flush. The violation text names the subject, and
+	// every request uses a fresh inbox, so an older denial cannot match.
+	deniedReply := func(reply string) error {
+		if e := agent.LastError(); e != nil &&
+			errors.Is(e, nats.ErrPermissionViolation) && strings.Contains(e.Error(), reply) {
+			return e
 		}
+		return nil
 	}
 
-	// 1. A fast handler — replies well inside the grant — must be delivered.
+	// 1. A handler that replies inside the grant must be delivered.
 	//    This is the control: it proves the denial below is about the clock and
 	//    not about the subject space.
+	//
+	//    The assertion is on attempts that PROVABLY finished inside the grant:
+	//    if the server denied a reply whose whole round trip, measured around
+	//    both server clock readings, took no longer than the TTL, that is a real
+	//    bug and fails immediately. A denied attempt that took longer than the
+	//    TTL is correct behaviour on a stalled machine and proves nothing either
+	//    way, so it is repeated — until one attempt is delivered or controlLimit
+	//    passes, which fails naming that no attempt ever landed.
 	t.Run("reply inside the grant is delivered", func(t *testing.T) {
-		drain()
-		cmd, replies := request(t)
-		if err := cmd.Respond([]byte("done")); err != nil {
-			t.Fatalf("agent Respond: %v", err)
-		}
-		reply, err := replies.NextMsg(2 * time.Second)
-		if err != nil {
-			t.Fatalf("api never got the reply: %v", err)
-		}
-		if string(reply.Data) != "done" {
-			t.Errorf("reply = %q, want %q", reply.Data, "done")
-		}
-		select {
-		case e := <-asyncErr:
-			t.Errorf("unexpected async error on a reply inside the grant: %v", e)
-		case <-time.After(200 * time.Millisecond):
+		deadline := time.Now().Add(controlLimit)
+		for attempt := 1; ; attempt++ {
+			cmd, replies, sent := request(t)
+			// Answer late in the grant, not instantly: a grant that lapses early
+			// (say, a unit slip turning 200ms into 1ms) would still pass a reply
+			// sent within a millisecond. This is the handler's simulated work,
+			// not a wait for anything; the verdict below does not depend on it.
+			time.Sleep(injectedTTL / 2)
+			if err := cmd.Respond([]byte("done")); err != nil {
+				t.Fatalf("agent Respond: %v", err)
+			}
+			if err := agent.FlushTimeout(waitLimit); err != nil {
+				t.Fatalf("agent flush after Respond: %v", err)
+			}
+			roundTrip := time.Since(sent) // >= server's check - server's stamp
+
+			if denial := deniedReply(cmd.Reply); denial != nil {
+				if roundTrip <= injectedTTL {
+					t.Fatalf("reply denied although the whole round trip took %s, inside the %s grant: "+
+						"the grant is being refused while still live: %v", roundTrip, injectedTTL, denial)
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("after %d attempts over %s, no reply round trip completed inside the %s grant "+
+						"(last took %s and was correctly denied), so the control never ran",
+						attempt, controlLimit, injectedTTL, roundTrip)
+				}
+				t.Logf("attempt %d: round trip took %s, longer than the %s grant, and was correctly "+
+					"denied; inconclusive for the control, retrying", attempt, roundTrip, injectedTTL)
+				continue
+			}
+
+			reply, err := replies.NextMsg(waitLimit)
+			if err != nil {
+				t.Fatalf("server accepted the reply but the api never got it within %s: %v", waitLimit, err)
+			}
+			if string(reply.Data) != "done" {
+				t.Errorf("reply = %q, want %q", reply.Data, "done")
+			}
+			return
 		}
 	})
 
@@ -359,10 +443,16 @@ func TestReplyGrantExpires(t *testing.T) {
 	//    agent's work finished and it had a real answer, the bus dropped it, and
 	//    the api saw nothing but its own deadline expiring.
 	t.Run("reply after the grant expires is denied", func(t *testing.T) {
-		drain()
-		cmd, replies := request(t)
-
-		time.Sleep(injectedTTL * 3)
+		cmd, replies, _ := request(t)
+		// The command is in hand, so the server's stamp is at or before now.
+		// Holding the reply until strictly more than the TTL has passed on this
+		// clock guarantees more than the TTL has passed on the server's by the
+		// time it checks. This wait IS the fact under test — the grant's
+		// lifetime running out — not a margin for slowness.
+		received := time.Now()
+		for time.Since(received) <= injectedTTL {
+			time.Sleep(injectedTTL - time.Since(received) + time.Millisecond)
+		}
 
 		// Msg.Respond is an async publish: it reports success even when the
 		// server is about to refuse the message. That nil is exactly why the
@@ -371,24 +461,59 @@ func TestReplyGrantExpires(t *testing.T) {
 		if err := cmd.Respond([]byte("done, but too late")); err != nil {
 			t.Fatalf("agent Respond returned an error; expected the async path: %v", err)
 		}
+		if err := agent.Publish(sentinelSubject, []byte(cmd.Reply)); err != nil {
+			t.Fatalf("agent publish sentinel: %v", err)
+		}
+		if err := agent.FlushTimeout(waitLimit); err != nil {
+			t.Fatalf("agent flush after Respond: %v", err)
+		}
 
-		if reply, err := replies.NextMsg(2 * time.Second); err == nil {
+		if deniedReply(cmd.Reply) == nil {
+			t.Fatalf("server processed the reply without a permissions violation (last error: %v): "+
+				"the reply grant did not expire, so this test is not exercising the bug", agent.LastError())
+		}
+
+		// Nothing reached the api: the sentinel sent after the reply has
+		// arrived, so a routed reply would already be queued ahead of it.
+		for {
+			s, err := sentinels.NextMsg(waitLimit)
+			if err != nil {
+				t.Fatalf("the agent's sentinel never reached the api within %s: %v", waitLimit, err)
+			}
+			if string(s.Data) == cmd.Reply {
+				break
+			}
+		}
+		if n, _, err := replies.Pending(); err != nil {
+			t.Fatalf("reply subscription pending: %v", err)
+		} else if n != 0 {
+			reply, _ := replies.NextMsg(waitLimit)
 			t.Fatalf("api received %q after the grant expired: the reply grant did not "+
 				"expire, so this test is not exercising the bug", reply.Data)
 		}
 
-		select {
-		case e := <-asyncErr:
-			if e == nil {
-				t.Fatal("expected a permissions violation, got a nil error")
+		// And the denial reached the agent's error handler, the path bus.Connect
+		// relies on to make it visible.
+		timeout := time.After(waitLimit)
+		for {
+			select {
+			case e := <-asyncErr:
+				if e == nil {
+					t.Fatal("expected a permissions violation, got a nil error")
+				}
+				if !strings.Contains(e.Error(), cmd.Reply) {
+					continue // an earlier, correctly denied control attempt
+				}
+				if !errors.Is(e, nats.ErrPermissionViolation) &&
+					!strings.Contains(strings.ToLower(e.Error()), "permissions violation") {
+					t.Errorf("expected a permissions violation, got %v", e)
+				}
+				t.Logf("expired reply grant denied as expected: %v", e)
+				return
+			case <-timeout:
+				t.Fatalf("no permissions violation for %s reached the agent's error handler within %s",
+					cmd.Reply, waitLimit)
 			}
-			if !errors.Is(e, nats.ErrPermissionViolation) &&
-				!strings.Contains(strings.ToLower(e.Error()), "permissions violation") {
-				t.Errorf("expected a permissions violation, got %v", e)
-			}
-			t.Logf("expired reply grant denied as expected: %v", e)
-		case <-time.After(3 * time.Second):
-			t.Fatal("no permissions violation reached the agent's error handler")
 		}
 	})
 }
