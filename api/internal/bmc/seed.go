@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busident"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -30,7 +31,7 @@ import (
 // die with the agent.
 func StartStatusSeed(nc *nats.Conn, svc *Service) (unsubscribe func(), err error) {
 	s := &statusSeeder{nc: nc, svc: svc}
-	sub, err := nc.Subscribe("rasputin.node.*.evt.registered", func(m *nats.Msg) { s.onRegistered(m.Data) })
+	sub, err := nc.Subscribe("rasputin.node.*.evt.registered", func(m *nats.Msg) { s.onRegistered(m.Subject, m.Data) })
 	if err != nil {
 		return nil, err
 	}
@@ -55,9 +56,11 @@ type statusSeeder struct {
 	lastDone time.Time
 }
 
-func (s *statusSeeder) onRegistered(data []byte) {
-	var ev proto.NodeRegisteredEvt
-	if err := json.Unmarshal(data, &ev); err != nil {
+func (s *statusSeeder) onRegistered(subject string, data []byte) {
+	// The host id comes from the subject, which the bus scopes to the
+	// publisher's credential; a payload naming a different node is dropped.
+	ev, err := busident.DecodeRegistered(subject, data)
+	if err != nil {
 		return
 	}
 	targets := proto.NodeBMCTargets(&proto.Node{Metadata: ev.Metadata})

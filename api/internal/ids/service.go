@@ -2,9 +2,9 @@ package ids
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busident"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -54,13 +54,11 @@ func (s *Service) Stop() {
 }
 
 func (s *Service) handle(m *nats.Msg) {
-	var ev proto.IDSAlertEvt
-	if err := json.Unmarshal(m.Data, &ev); err != nil {
-		log.Printf("ids: decode %s: %v", m.Subject, err)
-		return
-	}
-	if ev.NodeID == "" {
-		log.Printf("ids: drop event on %s: empty nodeId", m.Subject)
+	// The node id comes from the subject, which the bus scopes to the
+	// publisher's credential; a payload naming a different node is dropped.
+	ev, err := busident.DecodeIDSAlert(m.Subject, m.Data)
+	if err != nil {
+		log.Printf("ids: drop event on %q: %v", m.Subject, err)
 		return
 	}
 	if err := s.writer.Write(&ev); err != nil {

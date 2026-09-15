@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busident"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -35,7 +36,7 @@ type BusyFn func(ctx context.Context) (bool, error)
 // the running job is already converging the cluster.
 func StartReconcile(nc *nats.Conn, st *setup.Store, busy BusyFn, submit SubmitFn) (unsubscribe func(), err error) {
 	r := &reconciler{st: st, busy: busy, submit: submit}
-	sub, err := nc.Subscribe("rasputin.node.*.evt.registered", func(m *nats.Msg) { r.onRegistered(m.Data) })
+	sub, err := nc.Subscribe("rasputin.node.*.evt.registered", func(m *nats.Msg) { r.onRegistered(m.Subject, m.Data) })
 	if err != nil {
 		return nil, err
 	}
@@ -52,9 +53,11 @@ type reconciler struct {
 	lastSubmitted time.Time
 }
 
-func (r *reconciler) onRegistered(data []byte) {
-	var ev proto.NodeRegisteredEvt
-	if err := json.Unmarshal(data, &ev); err != nil {
+func (r *reconciler) onRegistered(subject string, data []byte) {
+	// The host id comes from the subject, which the bus scopes to the
+	// publisher's credential; a payload naming a different node is dropped.
+	ev, err := busident.DecodeRegistered(subject, data)
+	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
