@@ -80,6 +80,13 @@ a store delete; the next reconnect fails. The controlplane's own co-located
 agent connects over loopback and needs no token (it's already on the box that
 is the authority).
 
+A node id is a lowercase DNS label — the first label of the node's FQDN:
+`a-z`, `0-9` and `-`, at most 63 characters, no leading or trailing hyphen.
+The api refuses any other id, loopback included, when it mints or preloads a
+bound token and when a connection authenticates. Ids are rejected, never
+rewritten, so the id a node presents is byte-for-byte the id its token is
+bound to.
+
 ### What the bus does *not* give you
 
 There is **no work-queue delivery and no dedup**, and reading the bus as if

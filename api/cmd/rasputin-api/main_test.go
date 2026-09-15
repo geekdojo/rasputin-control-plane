@@ -170,6 +170,27 @@ func TestLoadBusPreseed(t *testing.T) {
 	if _, err := loadBusPreseed(ctx, store, bad); err == nil {
 		t.Error("malformed preseed should error")
 	}
+
+	// A preseed binding a token to an invalid node id is refused as a whole:
+	// the error names it, and not even the valid entry beside it is stored.
+	ptOK, hOK, _ := busauth.GenerateToken()
+	_, hBad, _ := busauth.GenerateToken()
+	invalid := filepath.Join(dir, "invalid-node.json")
+	invalidBody := `[{"hash":"` + hOK + `","nodeId":"node-c","label":"compute"},` +
+		`{"hash":"` + hBad + `","nodeId":"Node_D","label":"compute"}]`
+	if err := os.WriteFile(invalid, []byte(invalidBody), 0o600); err != nil {
+		t.Fatalf("write invalid: %v", err)
+	}
+	n, err := loadBusPreseed(ctx, store, invalid)
+	if !errors.Is(err, busauth.ErrInvalidNodeID) || n != 0 {
+		t.Fatalf("preseed with an invalid node id = (%d,%v); want (0, ErrInvalidNodeID)", n, err)
+	}
+	if !strings.Contains(err.Error(), "Node_D") {
+		t.Errorf("preseed error %q should name the offending node id", err)
+	}
+	if ok, _ := store.Validate(ctx, ptOK, "node-c"); ok {
+		t.Error("a rejected preseed must not store any of its entries")
+	}
 }
 
 func TestSeedBMCHostNode(t *testing.T) {

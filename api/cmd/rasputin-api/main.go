@@ -195,7 +195,9 @@ func main() {
 	// partition (token-provisioning-pipeline.md §4c). Idempotent, so it's safe on
 	// every boot; done regardless of enforcement so the tokens are known before a
 	// later flip to enforce. A bad/missing file never blocks boot — a node that
-	// can't join is a better failure than a controlplane that won't start.
+	// can't join is a better failure than a controlplane that won't start. A file
+	// binding a token to an invalid node id is refused whole (nothing loads) and
+	// the error names the entry; see busauth.Store.PreloadHashes.
 	if n, err := loadBusPreseed(ctx, busTokenStore, busPreseedPath(dataDir)); err != nil {
 		log.Printf("rasputin-api: bus token preseed: %v (continuing)", err)
 	} else if n > 0 {

@@ -266,10 +266,31 @@ export function clusterPrefixOf(ids: string[]): string {
   return cut >= 0 ? lcp.slice(0, cut + 1) : '';
 }
 
+// NODE_ID_RULE is the node-name rule in words, for the wizard's hint.
+export const NODE_ID_RULE =
+  'use lowercase letters, digits and hyphens only, at most 63 characters, not starting or ending with a hyphen';
+
+// validNodeId mirrors busauth.ValidNodeID (tileschema.ValidDNSLabel) in the api:
+// a node id is a lowercase RFC 1123 DNS label — the first label of the node's
+// FQDN, and exactly one token of every bus subject it is scoped to. The api
+// rejects (never rewrites) anything else with a 400, so the wizard checks the
+// same rule before minting and says why instead of failing on submit.
+export function validNodeId(id: string): boolean {
+  return id.length >= 1 && id.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(id);
+}
+
 // suggestNodeId proposes the next free "<prefix><role><n>" id, matching the
 // rasputin-provision auto-naming convention and skipping any id already taken
-// (live nodes or pending enrollments).
+// (live nodes or pending enrollments). The prefix comes from existing ids, so
+// it is only used when the result is a valid node id (an inventory with an
+// older non-conforming name, or a very long shared prefix, would otherwise
+// suggest a name the api refuses); the fallback "<role><n>" is always valid.
 export function suggestNodeId(prefix: string, role: AddableRole, taken: Set<string>): string {
+  const withPrefix = nextFreeNodeId(prefix, role, taken);
+  return validNodeId(withPrefix) ? withPrefix : nextFreeNodeId('', role, taken);
+}
+
+function nextFreeNodeId(prefix: string, role: AddableRole, taken: Set<string>): string {
   const re = new RegExp(`^${escapeRe(prefix + role)}(\\d+)$`);
   let max = 0;
   for (const id of taken) {
