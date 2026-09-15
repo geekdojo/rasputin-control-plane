@@ -221,16 +221,24 @@ func TestFleetFunctional_DegradedCanaryStillAuthorisesFanOut(t *testing.T) {
 // RPCs, real store writes — and it asserts the bound is REACHED as well as not
 // exceeded, because a fan-out that never reaches k is not bounded, it is just
 // slow, and both look green if you only assert ≤.
+//
+// Reaching k is a barrier, not a race: the twelve fan-out nodes are held
+// inside their installs and let go in batches of exactly k, each only once all
+// k are in their installs together and the harness has seen each one's
+// node_started (see installGate). It used to rest on 150ms installs happening
+// to overlap, which a loaded machine is free to serialise.
 func TestFleetFunctional_FanOutIsBoundedByKUnderRealSagas(t *testing.T) {
 	specs := computeFleet(13, "amd64")
-	for i := range specs {
-		// Long enough that the overlap is unambiguous, short enough that the
-		// whole run is a few seconds.
-		specs[i].InstallFor = 150 * time.Millisecond
-	}
 	f := newFleet(t, specs, osBundles(fleetVersion))
 
-	k := proto.Int(3)
+	const kVal = 3
+	var fanOut []string
+	for _, s := range specs[1:] { // c01 is the tier's canary and runs alone, ungated
+		fanOut = append(fanOut, s.ID)
+	}
+	gate := f.holdInstallsInBatches(kVal, fanOut)
+
+	k := proto.Int(kVal)
 	spec := releaseSpec(fleetVersion)
 	spec.MaxInFlight = &k
 	run := f.run(spec)
@@ -238,12 +246,16 @@ func TestFleetFunctional_FanOutIsBoundedByKUnderRealSagas(t *testing.T) {
 	if run.Status != jobs.StatusSucceeded {
 		t.Fatalf("parent job = %s (%s); grid: %s", run.Status, run.Error, formatGrid(run))
 	}
-	if run.PeakInFlight != 3 {
-		t.Errorf("peak in-flight = %d, want exactly 3: at ≤2 the fan-out never reached K "+
-			"(bounded in name only); at ≥4 the bound leaked. Start order: %v", run.PeakInFlight, run.startOrder())
+	if got, want := fmt.Sprint(gate.batchSizes()), "[3 3 3 3]"; got != want {
+		t.Errorf("install batches released = %s, want %s — every batch of the twelve fan-out nodes must be "+
+			"exactly k in flight together", got, want)
 	}
-	if run.PeakInstalling > 3 {
-		t.Errorf("peak concurrent installs observed on the nodes = %d, want ≤ 3", run.PeakInstalling)
+	if run.PeakInFlight != kVal {
+		t.Errorf("peak in-flight = %d, want exactly %d: below it the fan-out never reached K "+
+			"(bounded in name only); above it the bound leaked. Start order: %v", run.PeakInFlight, kVal, run.startOrder())
+	}
+	if run.PeakInstalling != kVal {
+		t.Errorf("peak concurrent installs observed on the nodes = %d, want exactly %d", run.PeakInstalling, kVal)
 	}
 	// The canary is never one of the k. It runs alone, ahead of them.
 	assertCanariesGateTheirTier(t, run)
