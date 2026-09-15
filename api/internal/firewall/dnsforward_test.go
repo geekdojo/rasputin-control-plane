@@ -150,17 +150,36 @@ func applyCounterStore(t *testing.T) (*jobs.Runner, *jobs.Store, chan struct{}) 
 	return runner, js, ran
 }
 
-func expectApply(t *testing.T, ran chan struct{}, want bool, why string) {
+// expectApply asserts how many firewall.apply jobs the reconcile run just before
+// it submitted: exactly one when want is true, none when it is false.
+//
+// It waits for a fact, not a timer: the reconcile step calls runner.Submit
+// synchronously, so by the time it returns every job it submitted is already
+// counted by the runner's WaitGroup, and runner.Wait returns only once each of
+// them has finished — the stand-in step has sent on ran, or never will. Only
+// then is ran read, without blocking. A late apply cannot slip past a "none"
+// check and a slow one cannot fail a "one" check, however loaded the host is.
+// The deadline bounds the single wait so a wedged runner fails naming what
+// never happened, instead of hanging to the package timeout.
+func expectApply(t *testing.T, runner *jobs.Runner, ran chan struct{}, want bool, why string) {
 	t.Helper()
+	done := make(chan struct{})
+	go func() { runner.Wait(); close(done) }()
 	select {
-	case <-ran:
-		if !want {
-			t.Fatalf("auto-applied, but should not have: %s", why)
-		}
-	case <-time.After(500 * time.Millisecond): // bounds the test only
-		if want {
-			t.Fatalf("no auto-apply: %s", why)
-		}
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("submitted jobs never finished within 30s: %s", why)
+	}
+	got := 0
+	for len(ran) > 0 {
+		<-ran
+		got++
+	}
+	switch {
+	case want && got != 1:
+		t.Fatalf("firewall.apply runs = %d, want 1: %s", got, why)
+	case !want && got != 0:
+		t.Fatalf("auto-applied %d time(s), but should not have: %s", got, why)
 	}
 }
 
@@ -194,14 +213,14 @@ func TestDNSForwardReconcile_AppliesWhatNeverLanded(t *testing.T) {
 
 	// First creation applies, and the apply lands.
 	run()
-	expectApply(t, ran, true, "first creation")
+	expectApply(t, runner, ran, true, "first creation")
 	if err := store.UpdateAfterApply(ctx, fwID, "h1", time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if m := run(); m["changed"] != false || m["unapplied"] == true {
 		t.Fatalf("after a landed apply: %v, want a no-op", m)
 	}
-	expectApply(t, ran, false, "forward unchanged and applied")
+	expectApply(t, runner, ran, false, "forward unchanged and applied")
 
 	// The address moves while the firewall is away: changed, apply submitted,
 	// but it never lands (no UpdateAfterApply).
@@ -210,20 +229,20 @@ func TestDNSForwardReconcile_AppliesWhatNeverLanded(t *testing.T) {
 		t.Fatal(err)
 	}
 	run()
-	expectApply(t, ran, true, "address changed")
+	expectApply(t, runner, ran, true, "address changed")
 
 	// The firewall registers again: nothing changed, but it is unapplied.
 	if m := run(); m["changed"] != false || m["unapplied"] != true {
 		t.Fatalf("firewall back: %v, want unchanged but unapplied", m)
 	}
-	expectApply(t, ran, true, "unchanged but never applied")
+	expectApply(t, runner, ran, true, "unchanged but never applied")
 
 	// That apply lands; the next registration is a no-op.
 	if err := store.UpdateAfterApply(ctx, fwID, "h2", time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	run()
-	expectApply(t, ran, false, "applied after it landed")
+	expectApply(t, runner, ran, false, "applied after it landed")
 }
 
 func TestForwardUnapplied(t *testing.T) {
