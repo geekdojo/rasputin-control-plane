@@ -16,8 +16,10 @@ import {
   nodeImageFor,
   renderFirewallSeed,
   renderNodeSeed,
+  NODE_ID_RULE,
   suggestNodeId,
   validateSSHKey,
+  validNodeId,
 } from '../lib/enroll';
 import { Btn, CopyButton, DIM, FG, HAIR, Hint, Input, SectionLabel, Tok } from './kit';
 import { ModalPortal, useModalChrome } from './modal';
@@ -119,15 +121,18 @@ export function AddNodeWizard({
     if (!edited) setNodeId(suggestNodeId(clusterPrefix, r, taken));
   }
 
-  const collision = taken.has(nodeId.trim());
-  const valid = nodeId.trim().length > 0 && !collision && !sshCheck.error;
+  const trimmedId = nodeId.trim();
+  const collision = taken.has(trimmedId);
+  // Same rule the api enforces on POST /api/bus/tokens (busauth.ValidNodeID).
+  const badName = trimmedId.length > 0 && !validNodeId(trimmedId);
+  const valid = trimmedId.length > 0 && !badName && !collision && !sshCheck.error;
 
   async function generate() {
     if (!valid) return;
     setBusy(true);
     setErr(null);
     try {
-      const id = nodeId.trim();
+      const id = trimmedId;
       const m = await mintBusToken(role, id);
       setMinted(m);
       onMinted({ id: m.nodeId || id, tokenId: m.id, role });
@@ -276,9 +281,13 @@ export function AddNodeWizard({
             spellCheck={false}
             style={{ width: '100%', marginBottom: 6 }}
           />
-          {collision ? (
+          {badName ? (
             <Hint warn style={{ marginBottom: 16 }}>
-              <Tok>{nodeId.trim()}</Tok> is already taken — pick another name.
+              <Tok>{trimmedId}</Tok> isn&apos;t a valid node name — {NODE_ID_RULE}.
+            </Hint>
+          ) : collision ? (
+            <Hint warn style={{ marginBottom: 16 }}>
+              <Tok>{trimmedId}</Tok> is already taken — pick another name.
             </Hint>
           ) : (
             <Hint style={{ marginBottom: 16 }}>
