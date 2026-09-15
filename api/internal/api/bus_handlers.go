@@ -37,6 +37,15 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	// Body is optional; ignore decode errors on an empty body.
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
+	// A given node id must be one the bus will accept as a username; a token
+	// bound to anything else could never authenticate. Rejected, not
+	// normalized, so the id the operator sees is the id the node presents.
+	// An omitted node id still mints an unbound token.
+	if body.NodeID != "" && !busauth.ValidNodeID(body.NodeID) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid nodeId %q: %s", body.NodeID, busauth.NodeIDRule))
+		return
+	}
+
 	// Cluster-size cap (proto.MaxClusterNodes): refuse a mint that would
 	// commit a NEW prospective node past the cap. Committed = live nodes +
 	// pending enrollments (bound, unrevoked tokens whose node hasn't

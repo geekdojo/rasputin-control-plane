@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,5 +72,37 @@ func TestMintBusToken_ClusterCap(t *testing.T) {
 	}
 	if code := mint(`{"label":"t","nodeId":"new-25"}`); code != http.StatusCreated {
 		t.Fatalf("mint after revoke = %d, want 201", code)
+	}
+}
+
+// A given nodeId must be a valid node id (a lowercase DNS label): a token bound
+// to anything else could never authenticate on the bus. Omitting nodeId still
+// mints an unbound token.
+func TestMintBusToken_RejectsInvalidNodeID(t *testing.T) {
+	f := newAPIFixture(t)
+	cookie := f.authenticate(t)
+
+	for _, id := range []string{
+		"*", ">", "a.b", "a b", "a\\tb", "Alpha", "node_1", "-alpha", "alpha-",
+		strings.Repeat("a", 64),
+	} {
+		body := fmt.Sprintf(`{"label":"t","nodeId":"%s"}`, id)
+		if w := f.do(t, http.MethodPost, "/api/bus/tokens", body, cookie); w.Code != http.StatusBadRequest {
+			t.Errorf("mint with nodeId %q = %d, want 400 (body %s)", id, w.Code, w.Body.String())
+		}
+	}
+	tokens, err := f.srv.busTokens.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List tokens: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("rejected mints stored %d tokens, want 0", len(tokens))
+	}
+
+	if w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"label":"t","nodeId":"e3bench-compute1"}`, cookie); w.Code != http.StatusCreated {
+		t.Errorf("mint with a valid nodeId = %d, want 201", w.Code)
+	}
+	if w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"label":"unbound"}`, cookie); w.Code != http.StatusCreated {
+		t.Errorf("unbound mint = %d, want 201", w.Code)
 	}
 }

@@ -134,8 +134,13 @@ func (s *Store) Mint(ctx context.Context, label string) (plaintext, id string, e
 }
 
 // MintBound is Mint but binds the token to nodeID: only a connection presenting
-// that node id as its NATS username can authenticate with it.
+// that node id as its NATS username can authenticate with it. An id that fails
+// ValidNodeID is refused (ErrInvalidNodeID): the callout would never accept it
+// as a username, so the token could never authenticate.
 func (s *Store) MintBound(ctx context.Context, label, nodeID string) (plaintext, id string, err error) {
+	if err := checkNodeID(nodeID); err != nil {
+		return "", "", err
+	}
 	return s.mint(ctx, label, &nodeID)
 }
 
@@ -157,7 +162,22 @@ func (s *Store) mint(ctx context.Context, label string, nodeID *string) (plainte
 // (INSERT OR IGNORE on the hash PK), so it's safe to call on every boot, matching
 // firstboot's derived-state contract. It inserts hashes directly and never sees
 // a plaintext token. Returns the count of newly-inserted rows.
+//
+// Every bound node id is checked BEFORE anything is inserted, and one invalid
+// id fails the whole load (ErrInvalidNodeID, naming the entry) with nothing
+// stored. Such a binding could never authenticate, and rasputin-provision
+// never emits one, so a manifest carrying one was hand-edited or corrupted —
+// the same treatment an unparseable manifest already gets. An entry with no
+// node id stays unbound, as before.
 func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, error) {
+	for i, tk := range toks {
+		if tk.Hash == "" || tk.NodeID == "" {
+			continue
+		}
+		if err := checkNodeID(tk.NodeID); err != nil {
+			return 0, fmt.Errorf("busauth: preload entry %d: %w", i, err)
+		}
+	}
 	now := ms(time.Now().UTC())
 	inserted := 0
 	for _, tk := range toks {
