@@ -1700,9 +1700,9 @@ func loadBusPreseed(ctx context.Context, store *busauth.Store, path string) (int
 	if err != nil {
 		return 0, err
 	}
-	var toks []busauth.PreseedToken
-	if err := json.Unmarshal(data, &toks); err != nil {
-		return 0, fmt.Errorf("parse %s: %w", path, err)
+	toks, err := busauth.ParsePreseed(data)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", path, err)
 	}
 	return store.PreloadHashes(ctx, toks)
 }
