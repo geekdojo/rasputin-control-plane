@@ -371,16 +371,17 @@ func TestFleetFunctional_UnlimitedBudgetAttemptsEveryNode(t *testing.T) {
 // must carry its own message, and both must leave inventory unable to vouch for
 // what the node is running.
 //
-// c08 here carries a RebootDelay, so the pre-reboot agent answers a poll on the
-// old boot before vanishing — the #90 shape. A latch on "we saw the old boot"
-// reports c13's message for it, which is the exact opposite of what happened.
+// c08 here carries an OldBootAnswers window, so the pre-reboot agent answers a
+// poll on the old boot before vanishing — the #90 shape. A latch on "we saw the
+// old boot" reports c13's message for it, which is the exact opposite of what
+// happened.
 func TestFleetFunctional_C13AndC08AreToldApart(t *testing.T) {
 	specs := computeFleet(8, "amd64")
 	specs = behave(specs, "c02", simNoReboot)
 	specs = behave(specs, "c03", simNeverReturns)
 	for i := range specs {
 		if specs[i].ID == "c03" {
-			specs[i].RebootDelay = 2500 * time.Millisecond // outlives the first 2s poll
+			specs[i].OldBootAnswers = 1 // the api's first verify poll sees the old boot, by construction
 		}
 	}
 	f := newFleet(t, specs, osBundles(fleetVersion))
