@@ -129,13 +129,16 @@ func (m *MockBackend) Precheck(ctx context.Context) (*proto.UpdatePrecheckAck, e
 	}
 	// "Available bytes" is a believable made-up number for the inactive
 	// slot. Real backends report from statfs.
+	committed, why := mockBootCommitted(st)
 	return &proto.UpdatePrecheckAck{
-		OK:             true,
-		ActiveSlot:     st.ActiveSlot,
-		InactiveSlot:   st.InactiveSlot,
-		CurrentVersion: st.CurrentVersion,
-		AvailableBytes: 16 * (1 << 30), // 16 GiB
-		Backend:        "mock",
+		OK:                  true,
+		ActiveSlot:          st.ActiveSlot,
+		InactiveSlot:        st.InactiveSlot,
+		CurrentVersion:      st.CurrentVersion,
+		AvailableBytes:      16 * (1 << 30), // 16 GiB
+		Backend:             "mock",
+		BootCommitted:       &committed,
+		BootCommittedDetail: why,
 	}, nil
 }
 

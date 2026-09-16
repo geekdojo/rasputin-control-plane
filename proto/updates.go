@@ -75,7 +75,19 @@ type UpdatePrecheckAck struct {
 	// could ever adopt the feature. Same tolerance as Architecture / LANIP /
 	// Storage on NodeRegisteredEvt.
 	BootID string `json:"bootId,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	// BootCommitted reports whether the build this node is running is
+	// COMMITTED on its A/B slot: the bootloader will boot this slot again on
+	// the next plain reboot, and no trial is armed or in progress. nil means
+	// the backend cannot say (an agent that predates the field, or a backend
+	// with no A/B slots); consumers treat nil as NOT committed.
+	//
+	// It is the fact the controlplane's bus TLS waits for before it starts
+	// handing out pins (geekdojo/geekdojo-brain#448): a pin cannot be taken
+	// back, so a build that could still roll back to a pre-TLS one must not
+	// distribute it. BootCommittedDetail says why, in words.
+	BootCommitted       *bool  `json:"bootCommitted,omitempty"`
+	BootCommittedDetail string `json:"bootCommittedDetail,omitempty"`
+	Detail              string `json:"detail,omitempty"`
 }
 
 // UpdateDownloadCmd tells the agent where to fetch the bundle. URL is

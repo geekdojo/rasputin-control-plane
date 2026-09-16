@@ -146,13 +146,16 @@ func (r *RAUCBackend) Precheck(ctx context.Context) (*proto.UpdatePrecheckAck, e
 	// Intent is wrong only inside the install→reboot window; unknown is wrong
 	// always.
 
+	committed, why := raucBootCommitted(string(out), active, fileExists(trialPendingMarker))
 	ack := &proto.UpdatePrecheckAck{
-		OK:             true,
-		ActiveSlot:     active,
-		InactiveSlot:   inactive,
-		CurrentVersion: parsed.activeVersion,
-		AvailableBytes: 0, // TODO: statfs the inactive slot's partition
-		Backend:        "rauc",
+		OK:                  true,
+		ActiveSlot:          active,
+		InactiveSlot:        inactive,
+		CurrentVersion:      parsed.activeVersion,
+		AvailableBytes:      0, // TODO: statfs the inactive slot's partition
+		Backend:             "rauc",
+		BootCommitted:       &committed,
+		BootCommittedDetail: why,
 	}
 	return ack, nil
 }
