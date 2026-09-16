@@ -21,11 +21,11 @@ import (
 func TestResponder_Authorize(t *testing.T) {
 	ctx := context.Background()
 	store := newTokenStore(t)
-	good, _, err := store.Mint(ctx, "test")
+	good, _, err := store.MintBound(ctx, "test", "fw-1")
 	if err != nil {
-		t.Fatalf("Mint: %v", err)
+		t.Fatalf("MintBound: %v", err)
 	}
-	revoked, revID, _ := store.Mint(ctx, "revoked")
+	revoked, revID, _ := store.MintBound(ctx, "revoked", "fw-1")
 	if _, err := store.Revoke(ctx, revID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
@@ -33,6 +33,7 @@ func TestResponder_Authorize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
+	legacy, _ := insertLegacyUnbound(t, store, "legacy")
 
 	r := &Responder{tokens: store}
 
@@ -52,6 +53,8 @@ func TestResponder_Authorize(t *testing.T) {
 		{"empty node id even on loopback denied", "", "", "127.0.0.1", false},
 		{"bound token as its node", "fw-1", bound, "192.168.1.50", true},
 		{"bound token as a different node denied", "fw-2", bound, "192.168.1.50", false},
+		{"legacy unbound token denied", "fw-1", legacy, "192.168.1.50", false},
+		{"legacy unbound token denied as another node", "fw-2", legacy, "192.168.1.50", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,9 +86,9 @@ func TestCallout_EndToEnd(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
-	token, _, err := tokens.Mint(ctx, "fw")
+	token, _, err := tokens.MintBound(ctx, "fw", "fw-1")
 	if err != nil {
-		t.Fatalf("Mint: %v", err)
+		t.Fatalf("MintBound: %v", err)
 	}
 
 	srv, err := bus.Start(ctx, bus.Config{
@@ -275,9 +278,9 @@ func TestReplyGrantExpires(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
-	token, _, err := tokens.Mint(ctx, "fw")
+	token, _, err := tokens.MintBound(ctx, "fw", "fw-1")
 	if err != nil {
-		t.Fatalf("Mint: %v", err)
+		t.Fatalf("MintBound: %v", err)
 	}
 
 	srv, err := bus.Start(ctx, bus.Config{

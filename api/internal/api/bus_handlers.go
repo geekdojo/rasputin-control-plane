@@ -33,16 +33,22 @@ func (s *Server) handleListBusTokens(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Label  string `json:"label"`
-		NodeID string `json:"nodeId"` // optional: bind the token to this node id
+		NodeID string `json:"nodeId"` // required: the node id the token is bound to
 	}
 	// Body is optional; ignore decode errors on an empty body.
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	// A given node id must be one the bus will accept as a username; a token
-	// bound to anything else could never authenticate. Rejected, not
-	// normalized, so the id the operator sees is the id the node presents.
-	// An omitted node id still mints an unbound token.
-	if body.NodeID != "" && !busauth.ValidNodeID(body.NodeID) {
+	// Every token is bound to one node (geekdojo-brain#423): there is no
+	// unbound mint, because an unbound token authenticated as whatever node id
+	// the connecting client chose. The id must also be one the bus will accept
+	// as a username; a token bound to anything else could never authenticate.
+	// Rejected, not normalized, so the id the operator sees is the id the node
+	// presents.
+	if body.NodeID == "" {
+		writeError(w, http.StatusBadRequest, "nodeId is required: every join token is bound to the node id it will authenticate as")
+		return
+	}
+	if !busauth.ValidNodeID(body.NodeID) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid nodeId %q: %s", body.NodeID, busauth.NodeIDRule))
 		return
 	}
@@ -51,8 +57,7 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	// commit a NEW prospective node past the cap. Committed = live nodes +
 	// pending enrollments (bound, unrevoked tokens whose node hasn't
 	// registered). A re-mint for an id that's already live or pending is a
-	// token replacement, not growth, and is always allowed. Unbound tokens
-	// are only useful for adding a node, so they count as growth here.
+	// token replacement, not growth, and is always allowed.
 	// Registration is the backstop for anything that slips past this.
 	grows, used, err := s.mintGrowsCluster(r.Context(), body.NodeID)
 	if err != nil {
@@ -66,14 +71,7 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		plaintext, id string
-	)
-	if body.NodeID != "" {
-		plaintext, id, err = s.busTokens.MintBound(r.Context(), body.Label, body.NodeID)
-	} else {
-		plaintext, id, err = s.busTokens.Mint(r.Context(), body.Label)
-	}
+	plaintext, id, err := s.busTokens.MintBound(r.Context(), body.Label, body.NodeID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -88,8 +86,8 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// mintGrowsCluster reports whether minting a token bound to nodeID (or an
-// unbound token when nodeID is "") would commit a new prospective node, and
+// mintGrowsCluster reports whether minting a token bound to nodeID would
+// commit a new prospective node, and
 // returns the committed count: live nodes plus distinct pending enrollments
 // (bound, unrevoked tokens whose node id isn't in inventory). Mirrors the
 // UI's pending-bay accounting so the API and the wizard agree on "full".
@@ -116,7 +114,7 @@ func (s *Server) mintGrowsCluster(ctx context.Context, nodeID string) (grows boo
 		}
 	}
 	used = len(nodes) + len(pending)
-	grows = nodeID == "" || (!live[nodeID] && !pending[nodeID])
+	grows = !live[nodeID] && !pending[nodeID]
 	return grows, used, nil
 }
 

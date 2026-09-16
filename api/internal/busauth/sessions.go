@@ -25,8 +25,8 @@ import (
 //     name a callout user is registered under is only set once the server has
 //     processed the callout's reply, so a connection whose callout is still in
 //     flight is invisible to the scan — exactly the race below — and a scan
-//     cannot tell which TOKEN a connection used, which revoking one unbound
-//     token (valid for any node id) needs.
+//     cannot tell which TOKEN a connection used, which revoking one of a
+//     node's tokens (a re-mint leaves it holding two) needs.
 //   - JWT user revocation on the account. The callout mints a fresh user nkey
 //     per connection, so there is no stable key to revoke, and account
 //     revocations are an operator-mode (JWT account) feature the non-operator

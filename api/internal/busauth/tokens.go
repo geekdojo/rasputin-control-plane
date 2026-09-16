@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -20,10 +21,17 @@ import (
 // preauth keys).
 //
 // node_id binds a token to a single node id (the NATS username it will present):
-// a bound token only authenticates as that node, so a token lifted from one
-// node's seed is useless presented as any other. NULL = unbound (legal for the
-// interactive / pairing-beacon path, where the id isn't known at mint time).
-// See design/os-images/token-provisioning-pipeline.md §3.
+// a token only authenticates as that node, so a token lifted from one node's
+// seed is useless presented as any other. See
+// design/os-images/token-provisioning-pipeline.md §3.
+//
+// Every token is bound (geekdojo-brain#423, decided 2026-09-16). The column
+// stays nullable only because databases minted before that decision may hold
+// UNBOUND rows (node_id NULL), which used to validate for any node id the
+// connection chose. Nothing creates one any more — MintBound and PreloadHashes
+// both refuse — and Validate refuses the ones that exist, so a legacy unbound
+// token authenticates nothing. CountActiveUnbound finds them for the operator,
+// who revokes them (DELETE /api/bus/tokens/{id}) and mints bound replacements.
 const schema = `
 CREATE TABLE IF NOT EXISTS bus_tokens (
     token_hash   TEXT PRIMARY KEY,   -- sha256(plaintext) hex; the id
@@ -31,7 +39,7 @@ CREATE TABLE IF NOT EXISTS bus_tokens (
     created_at   INTEGER NOT NULL,
     last_used_at INTEGER,
     revoked_at   INTEGER,
-    node_id      TEXT                -- bound node id, or NULL when unbound
+    node_id      TEXT                -- bound node id; NULL only on a legacy unbound row
 );`
 
 // Store is the SQLite-backed bus join-token ledger.
@@ -110,7 +118,7 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 // operator-typed secret — a password, a passphrase, a PSK someone picks —
 // whether through HashToken, PreloadHashes or anything else, this verdict is
 // void and the finding becomes real. Today HashToken's callers are
-// GenerateToken (used by mint and by rasputin-provision) and Validate (hashing
+// GenerateToken (used by MintBound and by rasputin-provision) and Validate (hashing
 // a presented token for lookup), and PreloadHashes stores only the hashes
 // rasputin-provision got from GenerateToken.
 func HashToken(plaintext string) string {
@@ -119,7 +127,7 @@ func HashToken(plaintext string) string {
 }
 
 // GenerateToken returns a fresh high-entropy token and its hash (the id). Used
-// by Mint and by the offline rasputin-provision CLI. The plaintext is
+// by MintBound and by the offline rasputin-provision CLI. The plaintext is
 // unrecoverable from the hash.
 func GenerateToken() (plaintext, hash string, err error) {
 	raw := make([]byte, 32)
@@ -130,25 +138,26 @@ func GenerateToken() (plaintext, hash string, err error) {
 	return plaintext, HashToken(plaintext), nil
 }
 
-// Mint generates a fresh UNBOUND token (any node id may present it), stores its
-// hash, and returns the plaintext ONCE along with its id (the hash). The
-// plaintext is unrecoverable after this.
-func (s *Store) Mint(ctx context.Context, label string) (plaintext, id string, err error) {
-	return s.mint(ctx, label, nil)
-}
+// ErrUnboundToken is returned (wrapped) wherever a token that names no node id
+// is refused. Every token is bound to one node (geekdojo-brain#423).
+var ErrUnboundToken = errors.New("unbound join token: every token must be bound to a node id")
 
-// MintBound is Mint but binds the token to nodeID: only a connection presenting
-// that node id as its NATS username can authenticate with it. An id that fails
-// ValidNodeID is refused (ErrInvalidNodeID): the callout would never accept it
-// as a username, so the token could never authenticate.
+// MintBound generates a fresh token bound to nodeID, stores its hash, and
+// returns the plaintext ONCE along with its id (the hash); the plaintext is
+// unrecoverable after this. Only a connection presenting nodeID as its NATS
+// username can authenticate with the token.
+//
+// It is the only way to mint: there is no unbound mint (geekdojo-brain#423). An
+// empty nodeID is refused with ErrUnboundToken, and any other id that fails
+// ValidNodeID with ErrInvalidNodeID — the callout would never accept it as a
+// username, so the token could never authenticate.
 func (s *Store) MintBound(ctx context.Context, label, nodeID string) (plaintext, id string, err error) {
+	if nodeID == "" {
+		return "", "", ErrUnboundToken
+	}
 	if err := checkNodeID(nodeID); err != nil {
 		return "", "", err
 	}
-	return s.mint(ctx, label, &nodeID)
-}
-
-func (s *Store) mint(ctx context.Context, label string, nodeID *string) (plaintext, id string, err error) {
 	plaintext, id, err = GenerateToken()
 	if err != nil {
 		return "", "", err
@@ -167,16 +176,21 @@ func (s *Store) mint(ctx context.Context, label string, nodeID *string) (plainte
 // firstboot's derived-state contract. It inserts hashes directly and never sees
 // a plaintext token. Returns the count of newly-inserted rows.
 //
-// Every bound node id is checked BEFORE anything is inserted, and one invalid
-// id fails the whole load (ErrInvalidNodeID, naming the entry) with nothing
-// stored. Such a binding could never authenticate, and rasputin-provision
-// never emits one, so a manifest carrying one was hand-edited or corrupted —
-// the same treatment an unparseable manifest already gets. An entry with no
-// node id stays unbound, as before.
+// Every entry's node id is checked BEFORE anything is inserted, and one bad
+// entry fails the whole load with nothing stored: an entry naming no node id
+// (ErrUnboundToken — every token is bound, geekdojo-brain#423) or an invalid
+// one (ErrInvalidNodeID), the error naming the entry. Neither could ever
+// authenticate, and rasputin-provision never emits either, so a manifest
+// carrying one was hand-edited or corrupted — the same treatment an
+// unparseable manifest already gets. An entry with no hash carries nothing to
+// store and is skipped.
 func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, error) {
 	for i, tk := range toks {
-		if tk.Hash == "" || tk.NodeID == "" {
+		if tk.Hash == "" {
 			continue
+		}
+		if tk.NodeID == "" {
+			return 0, fmt.Errorf("busauth: preload entry %d: %w", i, ErrUnboundToken)
 		}
 		if err := checkNodeID(tk.NodeID); err != nil {
 			return 0, fmt.Errorf("busauth: preload entry %d: %w", i, err)
@@ -188,13 +202,9 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 		if tk.Hash == "" {
 			continue
 		}
-		var nodeID *string
-		if tk.NodeID != "" {
-			nodeID = &tk.NodeID
-		}
 		res, err := s.db.ExecContext(ctx, `
             INSERT OR IGNORE INTO bus_tokens (token_hash, label, created_at, node_id) VALUES (?, ?, ?, ?)`,
-			tk.Hash, tk.Label, now, nodeID)
+			tk.Hash, tk.Label, now, tk.NodeID)
 		if err != nil {
 			return inserted, fmt.Errorf("busauth: preload: %w", err)
 		}
@@ -205,10 +215,11 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 	return inserted, nil
 }
 
-// Validate reports whether plaintext matches a live (non-revoked) token that is
-// also permitted for presentedNodeID — a bound token only validates for its
-// bound node; an unbound token (node_id NULL) validates for any node. It
-// best-effort touches last_used_at. Constant work regardless of match isn't
+// Validate reports whether plaintext matches a live (non-revoked) token bound to
+// presentedNodeID. A legacy UNBOUND token (node_id NULL, minted before
+// geekdojo-brain#423) never validates, whatever id it is presented under, and
+// the refusal is logged with the token's id so a node stranded by it can be
+// found and re-provisioned. It best-effort touches last_used_at. Constant work regardless of match isn't
 // attempted — tokens are 256-bit random, so timing oracles on the indexed
 // lookup don't help an attacker.
 func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string) (bool, error) {
@@ -231,8 +242,13 @@ func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string)
 	if revoked.Valid {
 		return false, nil
 	}
-	// A bound token only authenticates as the node it was provisioned for.
-	if boundNode.Valid && boundNode.String != presentedNodeID {
+	// Every token must be bound; a legacy unbound row authenticates nothing.
+	if !boundNode.Valid || boundNode.String == "" {
+		log.Printf("busauth: refused unbound join token id=%q presented as node=%q: every token must be bound to a node id (revoke it and mint one bound to the node)", id, presentedNodeID)
+		return false, nil
+	}
+	// A token only authenticates as the node it was provisioned for.
+	if boundNode.String != presentedNodeID {
 		return false, nil
 	}
 	_, _ = s.db.ExecContext(ctx,
@@ -274,9 +290,10 @@ func (s *Store) Revoke(ctx context.Context, id string) (disconnected int, err er
 // revoking zero tokens is not an error.
 //
 // It closes by node id rather than by the tokens it revoked: removal evicts
-// the node, whichever token its session used. (A session opened with an
-// UNBOUND token is closed too, but that token is not bound to nodeID, so it
-// is not revoked here and could authenticate again.)
+// the node, whichever token its session used. Every session Admit records was
+// authenticated by a token bound to the node it presented, so a node's
+// sessions and its tokens are the same set; a legacy unbound token cannot
+// reconnect either, because Validate refuses it (geekdojo-brain#423).
 func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, disconnected int, err error) {
 	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
@@ -291,6 +308,20 @@ func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, dis
 	d := s.sess.disc
 	s.sess.mu.Unlock()
 	return int(n), s.disconnect(d, cids), nil
+}
+
+// CountActiveUnbound returns how many live (unrevoked) legacy unbound tokens
+// the store holds. Validate refuses every one of them, so a nonzero count
+// means a node seeded with one cannot join; the api logs it at startup, and
+// the tokens are listed by GET /api/bus/tokens with no nodeId.
+func (s *Store) CountActiveUnbound(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM bus_tokens
+        WHERE (node_id IS NULL OR node_id = '') AND revoked_at IS NULL`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("busauth: count unbound: %w", err)
+	}
+	return n, nil
 }
 
 // List returns all tokens (secret-free), newest first.

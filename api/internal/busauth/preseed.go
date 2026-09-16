@@ -11,8 +11,8 @@ import (
 //
 // It is parse-only, and pure so it can be fuzzed (geekdojo-brain#106): the
 // entries it returns are validated by Store.PreloadHashes, which owns the rules
-// about node binding. An entry naming no node is legal here and means an
-// unbound token (see geekdojo-brain#423).
+// about node binding. An entry naming no node parses here and is refused there:
+// every token is bound to a node (geekdojo-brain#423).
 func ParsePreseed(data []byte) ([]PreseedToken, error) {
 	var toks []PreseedToken
 	if err := json.Unmarshal(data, &toks); err != nil {

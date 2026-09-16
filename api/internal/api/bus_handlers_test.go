@@ -42,11 +42,6 @@ func TestMintBusToken_ClusterCap(t *testing.T) {
 		t.Fatalf("mint past cap = %d, want 409", code)
 	}
 
-	// Unbound tokens are only useful for growth — refused at the cap too.
-	if code := mint(`{"label":"unbound"}`); code != http.StatusConflict {
-		t.Fatalf("unbound mint at cap = %d, want 409", code)
-	}
-
 	// Re-mint for a live node id is a replacement, not growth.
 	if code := mint(`{"label":"replace","nodeId":"n-00"}`); code != http.StatusCreated {
 		t.Fatalf("re-mint for live node = %d, want 201", code)
@@ -75,9 +70,8 @@ func TestMintBusToken_ClusterCap(t *testing.T) {
 	}
 }
 
-// A given nodeId must be a valid node id (a lowercase DNS label): a token bound
-// to anything else could never authenticate on the bus. Omitting nodeId still
-// mints an unbound token.
+// nodeId must be a valid node id (a lowercase DNS label): a token bound to
+// anything else could never authenticate on the bus.
 func TestMintBusToken_RejectsInvalidNodeID(t *testing.T) {
 	f := newAPIFixture(t)
 	cookie := f.authenticate(t)
@@ -102,7 +96,29 @@ func TestMintBusToken_RejectsInvalidNodeID(t *testing.T) {
 	if w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"label":"t","nodeId":"e3bench-compute1"}`, cookie); w.Code != http.StatusCreated {
 		t.Errorf("mint with a valid nodeId = %d, want 201", w.Code)
 	}
-	if w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"label":"unbound"}`, cookie); w.Code != http.StatusCreated {
-		t.Errorf("unbound mint = %d, want 201", w.Code)
+}
+
+// There is no unbound mint (geekdojo-brain#423): a request that names no node
+// id — omitted, empty, or no body at all — is a 400 and stores nothing.
+func TestMintBusToken_RequiresNodeID(t *testing.T) {
+	f := newAPIFixture(t)
+	cookie := f.authenticate(t)
+
+	for _, body := range []string{`{"label":"unbound"}`, `{"label":"t","nodeId":""}`, `{}`, ``} {
+		w := f.do(t, http.MethodPost, "/api/bus/tokens", body, cookie)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("mint with body %q = %d, want 400 (body %s)", body, w.Code, w.Body.String())
+			continue
+		}
+		if !strings.Contains(w.Body.String(), "nodeId is required") {
+			t.Errorf("mint with body %q: error %s should say nodeId is required", body, w.Body.String())
+		}
+	}
+	tokens, err := f.srv.busTokens.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List tokens: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("refused unbound mints stored %d tokens, want 0", len(tokens))
 	}
 }

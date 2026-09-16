@@ -2,8 +2,10 @@ package busauth
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTokenStore(t *testing.T) *Store {
@@ -16,37 +18,54 @@ func newTokenStore(t *testing.T) *Store {
 	return s
 }
 
+// insertLegacyUnbound writes an UNBOUND token row the way stores did before
+// geekdojo-brain#423 (node_id NULL) — nothing in the store can create one any
+// more, but a database from before that decision may still hold them. It
+// returns the plaintext and id, as a mint did.
+func insertLegacyUnbound(t *testing.T, s *Store, label string) (plaintext, id string) {
+	t.Helper()
+	plaintext, id, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if _, err := s.db.ExecContext(context.Background(),
+		`INSERT INTO bus_tokens (token_hash, label, created_at, node_id) VALUES (?, ?, ?, NULL)`,
+		id, label, ms(time.Now().UTC())); err != nil {
+		t.Fatalf("insert legacy unbound token: %v", err)
+	}
+	return plaintext, id
+}
+
 func TestStore_MintValidateRevoke(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 
-	plaintext, id, err := s.Mint(ctx, "firewall")
+	plaintext, id, err := s.MintBound(ctx, "firewall", "fw-1")
 	if err != nil {
-		t.Fatalf("Mint: %v", err)
+		t.Fatalf("MintBound: %v", err)
 	}
 	if plaintext == "" || id == "" {
-		t.Fatal("Mint returned empty plaintext/id")
+		t.Fatal("MintBound returned empty plaintext/id")
 	}
 	if plaintext == id {
 		t.Fatal("id must be the hash, not the plaintext")
 	}
 
-	// An unbound token validates for any presented node id.
-	ok, err := s.Validate(ctx, plaintext, "any-node")
+	ok, err := s.Validate(ctx, plaintext, "fw-1")
 	if err != nil || !ok {
 		t.Fatalf("Validate(good) = %v, %v; want true, nil", ok, err)
 	}
-	if ok, _ := s.Validate(ctx, "not-a-real-token", "any-node"); ok {
+	if ok, _ := s.Validate(ctx, "not-a-real-token", "fw-1"); ok {
 		t.Error("Validate(garbage) must be false")
 	}
-	if ok, _ := s.Validate(ctx, "", "any-node"); ok {
+	if ok, _ := s.Validate(ctx, "", "fw-1"); ok {
 		t.Error("Validate(empty) must be false")
 	}
 
 	if _, err := s.Revoke(ctx, id); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if ok, _ := s.Validate(ctx, plaintext, "any-node"); ok {
+	if ok, _ := s.Validate(ctx, plaintext, "fw-1"); ok {
 		t.Error("Validate after revoke must be false")
 	}
 	// Revoking again (no live row) reports ErrNoRows.
@@ -58,9 +77,9 @@ func TestStore_MintValidateRevoke(t *testing.T) {
 func TestStore_HashAtRest(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
-	plaintext, id, err := s.Mint(ctx, "")
+	plaintext, id, err := s.MintBound(ctx, "", "node-a")
 	if err != nil {
-		t.Fatalf("Mint: %v", err)
+		t.Fatalf("MintBound: %v", err)
 	}
 	// The stored id is sha256(plaintext) — a DB read never yields the secret.
 	if id != HashToken(plaintext) {
@@ -104,6 +123,97 @@ func TestStore_BoundToken(t *testing.T) {
 	}
 	if len(infos) != 1 || infos[0].NodeID == nil || *infos[0].NodeID != "fw-1" {
 		t.Fatalf("List should report node binding fw-1, got %+v", infos)
+	}
+}
+
+// There is no unbound mint (geekdojo-brain#423): MintBound with no node id is
+// refused and stores nothing.
+func TestStore_MintBoundRefusesUnbound(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+	if pt, id, err := s.MintBound(ctx, "unbound", ""); !errors.Is(err, ErrUnboundToken) || pt != "" || id != "" {
+		t.Fatalf("MintBound(no node id) = (%q, %q, %v); want (\"\", \"\", ErrUnboundToken)", pt, id, err)
+	}
+	infos, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("a refused unbound mint stored %d rows; want 0", len(infos))
+	}
+}
+
+// A legacy unbound token — a row from before geekdojo-brain#423 — validates
+// for no node id at all, including the ids it used to accept, and
+// CountActiveUnbound finds it until it is revoked.
+func TestStore_LegacyUnboundTokenNeverValidates(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+
+	if n, err := s.CountActiveUnbound(ctx); err != nil || n != 0 {
+		t.Fatalf("CountActiveUnbound on an empty store = (%d, %v); want (0, nil)", n, err)
+	}
+
+	legacy, legacyID := insertLegacyUnbound(t, s, "legacy")
+	// A row whose node_id is an empty string is just as unbound.
+	emptyPT, emptyID, _ := GenerateToken()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO bus_tokens (token_hash, label, created_at, node_id) VALUES (?, 'empty', ?, '')`,
+		emptyID, ms(time.Now().UTC())); err != nil {
+		t.Fatalf("insert empty-node token: %v", err)
+	}
+	// Bound and revoked tokens are not counted.
+	if _, _, err := s.MintBound(ctx, "bound", "node-a"); err != nil {
+		t.Fatalf("MintBound: %v", err)
+	}
+	_, revokedID := insertLegacyUnbound(t, s, "legacy-revoked")
+	if _, err := s.Revoke(ctx, revokedID); err != nil {
+		t.Fatalf("Revoke(legacy-revoked): %v", err)
+	}
+
+	for _, node := range []string{"node-a", "node-b", "fw-1", ""} {
+		if ok, err := s.Validate(ctx, legacy, node); err != nil || ok {
+			t.Errorf("Validate(legacy unbound, %q) = (%v, %v); want (false, nil)", node, ok, err)
+		}
+		if ok, err := s.Validate(ctx, emptyPT, node); err != nil || ok {
+			t.Errorf("Validate(empty-node token, %q) = (%v, %v); want (false, nil)", node, ok, err)
+		}
+	}
+
+	if n, err := s.CountActiveUnbound(ctx); err != nil || n != 2 {
+		t.Fatalf("CountActiveUnbound = (%d, %v); want (2, nil)", n, err)
+	}
+	// The existing revoke clears them.
+	for _, id := range []string{legacyID, emptyID} {
+		if _, err := s.Revoke(ctx, id); err != nil {
+			t.Fatalf("Revoke(%s): %v", id, err)
+		}
+	}
+	if n, err := s.CountActiveUnbound(ctx); err != nil || n != 0 {
+		t.Fatalf("CountActiveUnbound after revoking them = (%d, %v); want (0, nil)", n, err)
+	}
+}
+
+// A preseed entry naming no node id fails the whole load: nothing is stored,
+// not even the bound entry beside it.
+func TestStore_PreloadHashesRefusesUnboundEntry(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+	_, h1, _ := GenerateToken()
+	_, h2, _ := GenerateToken()
+	n, err := s.PreloadHashes(ctx, []PreseedToken{
+		{Hash: h1, NodeID: "node-a", Label: "compute"},
+		{Hash: h2, Label: "unbound"},
+	})
+	if !errors.Is(err, ErrUnboundToken) || n != 0 {
+		t.Fatalf("PreloadHashes with an unbound entry = (%d, %v); want (0, ErrUnboundToken)", n, err)
+	}
+	infos, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("a refused preseed stored %d rows; want 0", len(infos))
 	}
 }
 

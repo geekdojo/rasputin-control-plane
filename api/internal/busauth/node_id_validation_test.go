@@ -164,8 +164,10 @@ func assertNodeIDRejected(t *testing.T, eb *enforcedBus, username, token string)
 	}
 }
 
-// An unbound token (Store.Mint — POST /api/bus/tokens with no nodeId) presented
-// from a non-loopback address, so the token really is validated.
+// A legacy unbound token (a row from before geekdojo-brain#423, when POST
+// /api/bus/tokens with no nodeId minted one) presented from a non-loopback
+// address, so the token really is validated. It used to authenticate as any
+// node id; it now authenticates as none.
 func TestCallout_RejectsNonLiteralNodeID_UnboundToken_NonLoopback(t *testing.T) {
 	ip := nonLoopbackIPv4()
 	if ip == "" {
@@ -175,16 +177,9 @@ func TestCallout_RejectsNonLiteralNodeID_UnboundToken_NonLoopback(t *testing.T) 
 	if strings.HasPrefix(eb.url, "nats://127.") {
 		t.Fatalf("server URL %s is loopback; the test would not exercise token validation", eb.url)
 	}
-	token, _, err := eb.tokens.Mint(context.Background(), "unbound")
-	if err != nil {
-		t.Fatalf("Mint: %v", err)
-	}
-	// Control: the same token under a valid node id is accepted.
-	nc, err := connect(eb.url, "alpha", token)
-	if err != nil {
-		t.Fatalf("unbound token under a valid node id should connect: %v", err)
-	}
-	nc.Close()
+	token, _ := insertLegacyUnbound(t, eb.tokens, "unbound")
+	// Refused under a valid node id too: no unbound token authenticates.
+	assertNodeIDRejected(t, eb, "alpha", token)
 
 	for _, u := range nonLiteralNodeIDs {
 		t.Run("username="+u, func(t *testing.T) {
@@ -251,11 +246,7 @@ func assertNoCrossNodeCommand(t *testing.T, host string, useToken bool) {
 
 	var token string
 	if useToken {
-		tok, _, err := eb.tokens.Mint(ctx, "unbound")
-		if err != nil {
-			t.Fatalf("Mint unbound: %v", err)
-		}
-		token = tok
+		token, _ = insertLegacyUnbound(t, eb.tokens, "unbound")
 	}
 
 	betaTok, _, err := eb.tokens.MintBound(ctx, "beta", "beta")
@@ -324,9 +315,10 @@ var invalidNodeIDs = []string{
 func TestResponder_AuthorizeRejectsInvalidNodeID(t *testing.T) {
 	ctx := context.Background()
 	store := newTokenStore(t)
-	unbound, _, err := store.Mint(ctx, "unbound")
+	unbound, _ := insertLegacyUnbound(t, store, "unbound")
+	alpha, _, err := store.MintBound(ctx, "alpha", "alpha")
 	if err != nil {
-		t.Fatalf("Mint: %v", err)
+		t.Fatalf("MintBound: %v", err)
 	}
 	r := &Responder{tokens: store}
 
@@ -334,6 +326,9 @@ func TestResponder_AuthorizeRejectsInvalidNodeID(t *testing.T) {
 		for _, host := range []string{"127.0.0.1", "::1", "192.168.1.50"} {
 			if ok, _ := r.authorize(1, id, unbound, host); ok {
 				t.Errorf("authorize(%q, unbound token, %s) = true; want denied", id, host)
+			}
+			if ok, _ := r.authorize(1, id, alpha, host); ok {
+				t.Errorf("authorize(%q, token bound to alpha, %s) = true; want denied", id, host)
 			}
 			if ok, _ := r.authorize(1, id, "", host); ok {
 				t.Errorf("authorize(%q, no token, %s) = true; want denied", id, host)
@@ -344,8 +339,8 @@ func TestResponder_AuthorizeRejectsInvalidNodeID(t *testing.T) {
 	if ok, reason := r.authorize(1, "alpha", "", "127.0.0.1"); !ok {
 		t.Errorf("loopback alpha denied: %s", reason)
 	}
-	if ok, reason := r.authorize(2, "alpha", unbound, "192.168.1.50"); !ok {
-		t.Errorf("remote alpha with unbound token denied: %s", reason)
+	if ok, reason := r.authorize(2, "alpha", alpha, "192.168.1.50"); !ok {
+		t.Errorf("remote alpha with its bound token denied: %s", reason)
 	}
 }
 
