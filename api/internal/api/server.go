@@ -243,7 +243,8 @@ func NewServer(
 //
 // Route protection:
 //   - /healthz, /api/auth/*, GET /api/setup/state and the CA-download
-//     endpoints (GET /mesh-ca.pem, GET /api/mesh/ios-profile) are open.
+//     endpoints (GET /mesh-ca.pem, GET /mesh-ca.crt, GET /api/mesh/ios-profile)
+//     are open.
 //   - everything else requires a valid session cookie.
 //   - WebSocket endpoints (/ws/*) receive the cookie on upgrade and are
 //     gated by the same middleware.
@@ -263,6 +264,8 @@ func (s *Server) Handler() http.Handler {
 	// ceremony can happen over HTTPS. See the handlers' comments.
 	mux.HandleFunc("GET /api/mesh/ios-profile", s.handleMeshIOSProfile)
 	mux.HandleFunc("GET /mesh-ca.pem", s.handleMeshCAPEM)
+	// Same bytes, Windows-installable envelope — see handleMeshCACRT.
+	mux.HandleFunc("GET /mesh-ca.crt", s.handleMeshCACRT)
 	// The one-command node flasher runs on a laptop (no session) and is
 	// secret-free; these endpoints are intentionally open. flash.sh is a static
 	// script; the *-image endpoints return only the public image URL + checksum
