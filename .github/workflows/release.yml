@@ -69,6 +69,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The exact commit this job checked out and builds. The release tag must
+      # land HERE, not on whatever the default branch points at when the
+      # publish step runs minutes later: with no explicit target, GitHub creates
+      # a new tag from the default branch at publish time, so a PR merged
+      # mid-run tags a commit the binaries were never built from
+      # (v2026.09.4-dev.164: built from 08ed3f7, tagged dd860d0 after #320
+      # merged). Read from the checkout rather than GITHUB_SHA so it is, by
+      # construction, the tree build-release.sh compiles.
+      - name: Record built commit
+        id: src
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@v7
         with:
           # check-latest: fetch the newest 1.26.x rather than reusing whatever
@@ -133,10 +145,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.ver.outputs.tag }}
+          # --target pins a NEW tag (dispatch-publish) to the built commit. On a
+          # tag push the tag already exists and GitHub ignores target_commitish,
+          # so that path is unchanged — and there the checked-out commit is the
+          # tagged commit anyway.
+          TARGET_SHA: ${{ steps.src.outputs.sha }}
         run: |
           PRERELEASE_FLAG=""
           [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
           gh release create "$TAG" \
+            --target "$TARGET_SHA" \
             --title "Rasputin control plane $TAG" \
             --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64; the api tarball bundles the web UI). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
             $PRERELEASE_FLAG \
