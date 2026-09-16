@@ -3,18 +3,20 @@
 # run alone and verbosely. CI runs the same tests with the rest of ./api/...
 #
 # What runs (api/internal/bustls/functional_test.go): the real embedded bus
-# with auth callout enforced, the real inventory and bustls services, and the
-# REAL rasputin-agent binary (built from this workspace) as subprocesses:
+# with auth callout enforced, the real inventory, job store/runner and bustls
+# service with its real commit check, and the REAL rasputin-agent binary
+# (built from this workspace) as subprocesses:
 #
-#   * offer mode — the right pin connects over TLS and registers busTls=true;
-#     a wrong pin is refused by the agent and never registers; no pin still
-#     connects in plaintext and is listed as what holds require back;
-#   * migrate → require — the controlplane's loopback agent and a compute node,
-#     both enrolled without a pin, get it delivered, save it, re-dial over TLS
-#     and register busTls=true; require is refused before that and accepted
-#     after; the controlplane restarts TLS-required, both agents restart with
-#     no pin in their environment and come back over TLS from the saved pin;
-#     an unpinned node is refused;
+#   * the automatic ladder, no operator action — offer while the controlplane's
+#     build is an uncommitted trial and a self-update is in flight (each half
+#     proven on its own); commit → migrate → pins delivered → both agents
+#     (the controlplane's own and a compute node) re-dial over TLS and report
+#     busTls=true; a job in flight holds require back; the job ends → require
+#     recorded, job intake closed, one restart request; the controlplane
+#     restarts TLS-required, the agents rejoin over TLS (and again from their
+#     saved pin with none in their env); an unpinned node is refused;
+#   * a pinned offer (RASPUTIN_BUS_TLS) — right pin TLS, wrong pin refused, no
+#     pin plaintext, and the pinned mode does not move;
 #   * clock independence — a bus certificate not valid until decades from now,
 #     and one expired in 1991, both accepted by a pinned agent.
 #

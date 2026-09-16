@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,23 +31,22 @@ func (s *memBusTLSSettings) Set(_ context.Context, k, v string) error {
 	return nil
 }
 
-func wireBusTLS(t *testing.T, f *apiFixture) (*bustls.Service, *atomic.Int32) {
+func wireBusTLS(t *testing.T, f *apiFixture) *bustls.Service {
 	t.Helper()
 	key, _, err := bustls.EnsureKey(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var restarts atomic.Int32
+	// Not started: no evaluation runs, so the rung stays where this puts it.
 	svc := bustls.NewService(bustls.Config{
 		Key:       key,
 		Settings:  &memBusTLSSettings{m: map[string]string{}},
-		StartMode: bustls.ModeOffer,
+		StartMode: bustls.ModeMigrate,
 		Nodes:     f.inv.List,
 		Plaintext: func() ([]bus.PlaintextClient, error) { return nil, nil },
-		Restart:   func() { restarts.Add(1) },
 	})
 	f.srv.SetBusTLS(svc)
-	return svc, &restarts
+	return svc
 }
 
 // The seed the UI renders comes from the mint response, so the pin must be in
@@ -66,7 +64,7 @@ func TestMintBusToken_CarriesTheLivePin(t *testing.T) {
 		t.Fatalf("with bus TLS unavailable, busPin = (%q, present=%t), want present and empty", v, ok)
 	}
 
-	svc, _ := wireBusTLS(t, f)
+	svc := wireBusTLS(t, f)
 	w = f.do(t, http.MethodPost, "/api/bus/tokens", `{"label":"t","nodeId":"n2"}`, cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("mint = %d %s", w.Code, w.Body)
@@ -80,7 +78,10 @@ func TestMintBusToken_CarriesTheLivePin(t *testing.T) {
 	}
 }
 
-func TestBusTLSEndpoints(t *testing.T) {
+// GET /api/bus/tls is session-gated, 503 without a bus key, and otherwise the
+// read-only status: the rung, the pin, and the facts holding the next rung
+// back. There is no PUT — the api moves the ladder itself.
+func TestBusTLSEndpoint(t *testing.T) {
 	f := newAPIFixture(t)
 	cookie := f.authenticate(t)
 
@@ -91,7 +92,7 @@ func TestBusTLSEndpoints(t *testing.T) {
 		t.Fatalf("GET without a session = %d, want 401", w.Code)
 	}
 
-	svc, restarts := wireBusTLS(t, f)
+	svc := wireBusTLS(t, f)
 	now := time.Now().UTC()
 	if err := f.inv.Insert(f.ctx, &proto.Node{
 		ID: "n1", Role: proto.RoleCompute, FirstSeen: now, LastSeen: now,
@@ -108,40 +109,11 @@ func TestBusTLSEndpoints(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.Pin != svc.Pin() || st.Mode != bustls.ModeOffer || st.Ready || len(st.Blockers) != 1 {
-		t.Fatalf("status = %+v", st)
+	if st.Pin != svc.Pin() || st.Mode != bustls.ModeMigrate || st.Next != bustls.ModeRequire || len(st.Blockers) != 1 {
+		t.Fatalf("status = %+v, want migrate → require held back by n1 alone", st)
 	}
 
-	if w := f.do(t, http.MethodPut, "/api/bus/tls", `{"mode":"sideways"}`, cookie); w.Code != http.StatusBadRequest {
-		t.Fatalf("PUT bad mode = %d, want 400", w.Code)
-	}
-	w = f.do(t, http.MethodPut, "/api/bus/tls", `{"mode":"require"}`, cookie)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("PUT require while n1 is plaintext = %d %s, want 409", w.Code, w.Body)
-	}
-	var refused struct {
-		Error  string        `json:"error"`
-		Status bustls.Status `json:"status"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &refused); err != nil {
-		t.Fatal(err)
-	}
-	if refused.Error == "" || len(refused.Status.Blockers) != 1 {
-		t.Fatalf("409 body = %s, want the error and the blocker", w.Body)
-	}
-
-	n, err := f.inv.Get(f.ctx, "n1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	n.Metadata = map[string]any{proto.MetadataBusTLS: true}
-	if err := f.inv.Update(f.ctx, n); err != nil {
-		t.Fatal(err)
-	}
-	if w := f.do(t, http.MethodPut, "/api/bus/tls", `{"mode":"require"}`, cookie); w.Code != http.StatusOK {
-		t.Fatalf("PUT require when ready = %d %s, want 200", w.Code, w.Body)
-	}
-	if got := restarts.Load(); got != 1 {
-		t.Fatalf("restart requested %d times, want 1", got)
+	if w := f.do(t, http.MethodPut, "/api/bus/tls", `{"mode":"require"}`, cookie); w.Code == http.StatusOK {
+		t.Fatalf("PUT /api/bus/tls = %d; the mode must not be settable over the api", w.Code)
 	}
 }

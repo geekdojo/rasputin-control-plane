@@ -885,14 +885,33 @@ func main() {
 			},
 			Plaintext: busSrv.PlaintextClients,
 			NC:        busSrv.Conn(),
+			// offer → migrate waits for this: no self-update in flight, and
+			// the controlplane's own agent reports its slot committed.
+			Committed: func(ctx context.Context) (bool, string, error) {
+				return updater.SelfBuildCommitted(ctx, jobStore, busSrv.Conn(), selfNodeID, 10*time.Second)
+			},
+			InFlight: func(ctx context.Context) ([]string, error) { return jobs.InFlight(ctx, jobStore) },
+			// migrate → require closes job intake atomically with "nothing in
+			// flight", so a job submitted during the restart window is refused
+			// with an error its caller sees rather than recorded and then
+			// failed by the restart.
+			Quiesce: runner.QuiesceIfIdle,
+			Reopen:  runner.Reopen,
 			// Same shape as the restore restart below: end this process
-			// through the ordinary shutdown, non-zero, so the unit starts
-			// one whose server is built with the new plaintext setting.
+			// through the ordinary shutdown, then exit non-zero, so the unit
+			// (Restart=always on the appliance) starts one whose server
+			// refuses plaintext. The new process reads require from the
+			// setting, so it never asks to restart again.
 			Restart: func() {
 				requestBusTLSRestartExit()
 				cancel()
 			},
 		})
+		// A client connection closing can be the last plaintext one: re-decide
+		// on the event, not on a clock.
+		if err := busSrv.OnClientDisconnect(busTLSSvc.NoteDisconnect); err != nil {
+			log.Printf("rasputin-api: bus TLS: %v — the switch to TLS-only waits for the next registration or job end instead", err)
+		}
 	}
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent
 	// baseline firewall rules (Allow-DHCP-Renew / Allow-Ping / Allow-IGMP) as
@@ -952,6 +971,12 @@ func main() {
 	})
 	if err := invSvc.Start(ctx); err != nil {
 		log.Fatalf("rasputin-api: inventory service: %v", err)
+	}
+	if busTLSSvc != nil {
+		if err := busTLSSvc.Start(); err != nil {
+			log.Printf("rasputin-api: bus TLS: %v", err)
+		}
+		defer busTLSSvc.Stop()
 	}
 	defer invSvc.Stop()
 	if selfNodeID != "" {
@@ -1338,6 +1363,13 @@ func main() {
 	}
 	defer alertsStore.Close()
 	alertsSvc := alerts.New(invStore, jobStore, appsStore, setupSvc, alertsStore, busSrv.Conn(), busAuthEnforce)
+	// Bus TLS posture: a pinned mode below require, or a bus key that did not
+	// load, is a standing warning like bus-auth-off.
+	if busTLSSvc != nil {
+		alertsSvc.SetBusTLSAlert(busTLSSvc.Alert)
+	} else {
+		alertsSvc.SetBusTLSAlert(bustls.UnavailableAlert)
+	}
 	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
 	// the backup ledger, the fan-out records in the job ledger, the installed
 	// apps joined to the LIVE catalog, and the schedule — read by the /api/apps

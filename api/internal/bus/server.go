@@ -175,6 +175,8 @@ const InProcessClientName = "rasputin-api (in-process)"
 
 // PlaintextClient is one client connection to the bus that is not using TLS.
 type PlaintextClient struct {
+	// CID is the server's connection id.
+	CID  uint64 `json:"cid"`
 	Name string `json:"name,omitempty"`
 	// User is the authorised username — the node id an agent presents — when
 	// auth is on. Empty with auth off.
@@ -187,6 +189,19 @@ type PlaintextClient struct {
 // the api's own in-process connection excluded. It is the server's view,
 // independent of anything an agent reports about itself: the fact that says
 // turning plaintext off would cut someone off right now.
+//
+// Only connections that have completed their CONNECT count. The server lists a
+// connection from the moment it accepts the socket, so one still negotiating
+// TLS — a pinned agent mid-handshake, or an unpinned one about to be refused —
+// is listed with no TLS version yet. It is not a plaintext client: it has not
+// spoken the protocol, and nothing would be cut off. A completed CONNECT shows
+// as an authorised user (auth on) or a client language (every client library
+// sends one).
+//
+// Connz can wait up to TLSTimeout: in the migration window the server holds a
+// new connection's lock while it waits for the first bytes to tell TLS from
+// plaintext, and Connz takes that lock. That bounds a status read or an
+// evaluation; it never makes one wrong.
 func (s *Server) PlaintextClients() ([]PlaintextClient, error) {
 	cz, err := s.ns.Connz(&server.ConnzOptions{Limit: 4096})
 	if err != nil {
@@ -194,10 +209,19 @@ func (s *Server) PlaintextClients() ([]PlaintextClient, error) {
 	}
 	out := []PlaintextClient{}
 	for _, c := range cz.Conns {
-		if c.TLSVersion != "" || c.Name == InProcessClientName {
+		if !isPlaintextClient(c) {
 			continue
 		}
-		out = append(out, PlaintextClient{Name: c.Name, User: c.AuthorizedUser, IP: c.IP, Port: c.Port})
+		out = append(out, PlaintextClient{CID: c.Cid, Name: c.Name, User: c.AuthorizedUser, IP: c.IP, Port: c.Port})
 	}
 	return out, nil
+}
+
+// isPlaintextClient is PlaintextClients' rule for one connection.
+func isPlaintextClient(c *server.ConnInfo) bool {
+	if c.TLSVersion != "" || c.Name == InProcessClientName {
+		return false
+	}
+	// No CONNECT processed yet: not a client, whatever the socket turns into.
+	return c.AuthorizedUser != "" || c.Lang != ""
 }

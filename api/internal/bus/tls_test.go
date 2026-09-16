@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
 
@@ -142,6 +143,30 @@ func TestStart_MigrationAcceptsBothAndListsOnlyPlaintext(t *testing.T) {
 	}
 }
 
+// A connection counts as a plaintext CLIENT only once its CONNECT is processed.
+// The server lists a socket from accept, so one still negotiating TLS — the
+// flake this rule fixed: an unpinned agent mid-refusal on a TLS-required bus —
+// shows no TLS version yet and must not count. (Driven through the pure rule:
+// a real stalled socket holds the server's client lock for TLSTimeout inside
+// Connz, see PlaintextClients.)
+func TestPlaintextClientRule(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		c    server.ConnInfo
+		want bool
+	}{
+		{"plaintext client after CONNECT (auth on)", server.ConnInfo{AuthorizedUser: "n1", Lang: "go"}, true},
+		{"plaintext client after CONNECT (auth off)", server.ConnInfo{Lang: "go"}, true},
+		{"TLS client", server.ConnInfo{TLSVersion: "1.3", Lang: "go", AuthorizedUser: "n1"}, false},
+		{"socket still negotiating TLS / never spoke", server.ConnInfo{}, false},
+		{"the api's own in-process connection", server.ConnInfo{Name: InProcessClientName, Lang: "go"}, false},
+	} {
+		if got := isPlaintextClient(&tc.c); got != tc.want {
+			t.Errorf("%s: isPlaintextClient = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
 // No TLS configured: exactly the bus as it was.
 func TestStart_NoTLSIsPlaintextAsBefore(t *testing.T) {
 	s, err := Start(context.Background(), Config{Host: "127.0.0.1", Port: -1, StoreDir: t.TempDir()})
@@ -157,5 +182,36 @@ func TestStart_NoTLSIsPlaintextAsBefore(t *testing.T) {
 	info, _ := readInfo(t, conn)
 	if info["tls_required"] == true || info["tls_available"] == true {
 		t.Fatalf("a server with no TLS config advertises TLS: %v", info)
+	}
+}
+
+// A client closing is an event the api receives, carrying the id the
+// plaintext listing reports for that connection — the pair a readiness check
+// needs to re-decide when the last plaintext connection goes.
+func TestOnClientDisconnect_ReportsTheClosedConnection(t *testing.T) {
+	s := startTLSBus(t, true)
+	closed := make(chan uint64, 8)
+	if err := s.OnClientDisconnect(func(cid uint64) { closed <- cid }); err != nil {
+		t.Fatalf("OnClientDisconnect: %v", err)
+	}
+	plain, err := nats.Connect("nats://"+addrOf(s), nats.Name("leaving"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := s.PlaintextClients()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].Name != "leaving" || listed[0].CID == 0 {
+		t.Fatalf("PlaintextClients = %+v, want the one client with its id", listed)
+	}
+	plain.Close()
+	select {
+	case cid := <-closed:
+		if cid != listed[0].CID {
+			t.Fatalf("disconnect reported cid %d, the listing said %d", cid, listed[0].CID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no disconnect event within 10s")
 	}
 }

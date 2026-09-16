@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -29,6 +31,13 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.runner.Submit(r.Context(), req.Kind, req.Spec, "user")
 	if err != nil {
+		if errors.Is(err, jobs.ErrQuiesced) {
+			// The api is restarting (the bus switching to TLS-only); nothing
+			// was recorded, so a retry once it is back is safe.
+			w.Header().Set("Retry-After", "5")
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

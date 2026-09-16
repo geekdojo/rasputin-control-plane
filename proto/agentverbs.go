@@ -101,6 +101,13 @@ var verbMinAgentVersion = map[string]string{
 // between.
 const RestoreReplayMinAgentVersion = "2026.08.5-dev.147"
 
+// BootCommittedMinAgentVersion is the first agent release whose
+// update.precheck answers UpdatePrecheckAck.BootCommitted. Not a verb — an older
+// agent still answers precheck, without the field — so a separate floor.
+// Entered at authoring as the guessed next release (see BusPinVerb's entry);
+// confirm with `git tag --contains` once the release exists.
+const BootCommittedMinAgentVersion = "2026.09.4-dev.163"
+
 // StorageInspectProbeMinAgentVersion is the first agent release whose
 // storage.inspect honours StorageInspectCmd.Probe and answers with a
 // WriteProbe. Not a verb — the subject is unchanged, so an older agent still

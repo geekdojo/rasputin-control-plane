@@ -24,6 +24,7 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 		"MeshEnrollDeadlineMinAgentVersion":  MeshEnrollDeadlineMinAgentVersion,
 		"RestoreReplayMinAgentVersion":       RestoreReplayMinAgentVersion,
 		"StorageClaimPurposeMinAgentVersion": StorageClaimPurposeMinAgentVersion,
+		"BootCommittedMinAgentVersion":       BootCommittedMinAgentVersion,
 	} {
 		if !calver.MatchString(v) {
 			t.Errorf("%s: %q is not bare CalVer (YYYY.MM.PATCH[-dev.N])", name, v)

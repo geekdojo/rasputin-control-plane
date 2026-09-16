@@ -409,6 +409,35 @@ func TestList_BusAuthOffFiresStandingWarn(t *testing.T) {
 	}
 }
 
+// The bus TLS posture warning (a pinned mode below require, or an unusable
+// bus key) rides the security source beside bus-auth-off, and is absent when
+// the hook reports nothing.
+func TestList_BusTLSAlertHook(t *testing.T) {
+	f := newFixture(t)
+	f.markSetupComplete(t)
+
+	f.svc.SetBusTLSAlert(func(now time.Time) *proto.Alert { return nil })
+	quiet, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if _, ok := find(quiet, "bus-tls-pinned"); ok {
+		t.Fatalf("a nil hook result produced an alert: %+v", quiet)
+	}
+
+	f.svc.SetBusTLSAlert(func(now time.Time) *proto.Alert {
+		return &proto.Alert{ID: "bus-tls-pinned", Severity: proto.AlertWarn, Source: proto.AlertSourceSecurity, Title: "t", Since: now}
+	})
+	loud, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got, ok := find(loud, "bus-tls-pinned")
+	if !ok || got.Severity != proto.AlertWarn || got.Source != proto.AlertSourceSecurity {
+		t.Fatalf("bus-tls-pinned = (%+v, %t), want a security warn", got, ok)
+	}
+}
+
 // ============================================================================
 // Empty / sort / stability
 // ============================================================================
