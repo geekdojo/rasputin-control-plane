@@ -12,12 +12,13 @@ import type { OperatorKey } from './api';
 import { validateSSHKey } from './enroll';
 
 // Where the manual "replace or revoke the operator key on an enrolled node"
-// procedure lives. null until that procedure has been run on the bench and
-// written up (geekdojo/geekdojo-brain#246 — nothing goes in it that was not
-// run on hardware). Settings renders the pointer as plain text while this is
-// null and as a link once it is set, so no dead link ships in the meantime.
-// TODO(geekdojo/geekdojo-brain#246): set to the published procedure's URL.
-export const ENROLLED_NODE_KEY_PROCEDURE_URL: string | null = null;
+// procedure lives: the bench-verified page in the public docs
+// (geekdojo/geekdojo-brain#246), published from rasputin-site's
+// content/docs/replace-or-revoke-an-ssh-key.md. Settings links to it from the
+// sentence saying that changing the key on an enrolled node is a manual step.
+// The trailing slash is the page's canonical URL, so the link does not
+// redirect. Renaming that page breaks this link: change both together.
+export const ENROLLED_NODE_KEY_PROCEDURE_URL = 'https://rasputin.geekdojo.com/docs/replace-or-revoke-an-ssh-key/';
 
 // keyToRemember decides whether an enrollment should save the key it used as
 // the operator key. Only when no key is saved: the first enrollment with a key

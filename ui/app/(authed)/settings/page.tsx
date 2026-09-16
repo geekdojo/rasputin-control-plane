@@ -866,18 +866,11 @@ function OperatorSSHKeySection() {
       <Hint style={{ marginBottom: 16 }}>
         It does <em>not</em> change nodes that are already enrolled. Each keeps the key it was enrolled with —
         replacing or clearing the key here does not remove it from any node. Changing the key on an enrolled
-        node is a manual step on that node
-        {ENROLLED_NODE_KEY_PROCEDURE_URL ? (
-          <>
-            {' '}— see{' '}
-            <a href={ENROLLED_NODE_KEY_PROCEDURE_URL} target="_blank" rel="noreferrer" style={{ color: ACCENT }}>
-              replacing the operator key on an enrolled node
-            </a>
-            .
-          </>
-        ) : (
-          '.'
-        )}
+        node is a manual step on that node — see{' '}
+        <a href={ENROLLED_NODE_KEY_PROCEDURE_URL} target="_blank" rel="noreferrer" style={{ color: ACCENT }}>
+          replacing the operator key on an enrolled node
+        </a>
+        .
       </Hint>
 
       {stored === null && !err && <Hint>Loading…</Hint>}
