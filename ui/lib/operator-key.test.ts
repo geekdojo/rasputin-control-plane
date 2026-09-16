@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { OperatorKey } from './api';
-import { keyToRemember, operatorKeyDraft } from './operator-key';
+import { ENROLLED_NODE_KEY_PROCEDURE_URL, keyToRemember, operatorKeyDraft } from './operator-key';
 
 const A = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK2AcGjrl5kW bryce@laptop';
 const B = 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB other@host';
@@ -54,5 +54,21 @@ describe('operatorKeyDraft', () => {
     assert.equal(bad.canSave, false);
     assert.ok(bad.error);
     assert.equal(operatorKeyDraft(saved, `${A}\n${B}`).canSave, false);
+  });
+});
+
+describe('ENROLLED_NODE_KEY_PROCEDURE_URL', () => {
+  // Settings always renders this as a link, so it has to be the published
+  // docs page itself: https on the public site, a /docs/ page, and the
+  // canonical trailing-slash form Hugo publishes (no redirect, no fragment or
+  // query that could point at an anchor the page does not have).
+  test('is the canonical URL of the published procedure page', () => {
+    const u = new URL(ENROLLED_NODE_KEY_PROCEDURE_URL);
+    assert.equal(u.protocol, 'https:');
+    assert.equal(u.host, 'rasputin.geekdojo.com');
+    assert.equal(u.pathname, '/docs/replace-or-revoke-an-ssh-key/');
+    assert.equal(u.search, '');
+    assert.equal(u.hash, '');
+    assert.equal(u.href, ENROLLED_NODE_KEY_PROCEDURE_URL);
   });
 });
