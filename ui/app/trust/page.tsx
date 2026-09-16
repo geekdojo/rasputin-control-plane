@@ -180,12 +180,22 @@ export default function TrustPage() {
 
         <section>
           <SectionLabel>WINDOWS</SectionLabel>
-          <LinkBtn href="/mesh-ca.pem" download>
+          {/* .crt, not .pem: Windows has no shell association for .pem, so the
+              download could not be opened at all and these steps dead-ended
+              (found 2026-09-15). Same bytes either way — crypt32 reads base64
+              inside a .crt — so this is the envelope, not a conversion. */}
+          <LinkBtn href="/mesh-ca.crt" download>
             <Download size={11} /> DOWNLOAD CERTIFICATE
           </LinkBtn>
           <Hint style={{ marginTop: 8 }}>
-            Open the downloaded file → Install Certificate… → Local Machine → Place all certificates in
-            the following store → Trusted Root Certification Authorities.
+            Right-click the downloaded file → Install Certificate… → Local Machine (this prompts for
+            an administrator) → Place all certificates in the following store → Browse → Trusted Root
+            Certification Authorities.
+          </Hint>
+          <Hint style={{ marginTop: 6 }}>
+            Choose Local Machine, not Current User. Current User is the default and installs the
+            certificate for your account only — other accounts, and services on that machine, keep
+            warning.
           </Hint>
         </section>
 

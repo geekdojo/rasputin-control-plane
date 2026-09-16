@@ -243,11 +243,44 @@ func (s *Server) handleMeshIOSProfile(w http.ResponseWriter, r *http.Request) {
 
 // GET /mesh-ca.pem — the Mesh TLS CA public cert as raw PEM. The non-Apple
 // counterpart to /api/mesh/ios-profile above: laptops curl this straight
-// into their OS trust store (the /trust page shows the per-OS one-liners),
-// Windows downloads and double-clicks it. Same auth posture and 404
-// semantics as the ios-profile handler — unauthenticated by design, 404
-// when the CA hasn't been provisioned.
+// into their OS trust store (the /trust page shows the per-OS one-liners).
+// Same auth posture and 404 semantics as the ios-profile handler —
+// unauthenticated by design, 404 when the CA hasn't been provisioned.
+//
+// Windows uses /mesh-ca.crt instead — same bytes, different envelope. See
+// handleMeshCACRT.
 func (s *Server) handleMeshCAPEM(w http.ResponseWriter, r *http.Request) {
+	s.serveMeshCA(w, "application/x-pem-file", "rasputin-mesh-ca.pem")
+}
+
+// GET /mesh-ca.crt — the SAME CA bytes as /mesh-ca.pem, wrapped for Windows.
+//
+// Windows has no shell association for .pem: double-clicking one opens the
+// "How do you want to open this file?" picker, which offers no "Install
+// Certificate…" verb, so the /trust page's documented Windows steps used to
+// dead-end (found 2026-09-15 bringing up a Windows workstation).
+//
+// This is deliberately NOT a format conversion. Windows crypt32 opens .cer
+// and .crt with the Certificate Import Wizard and accepts base64 (PEM) inside
+// them just as readily as DER, so the delivered bytes are already correct —
+// only the extension and content-type were wrong. The same page's Debian
+// one-liner has always renamed to .crt on the way down; Windows simply never
+// got the same treatment.
+//
+// PKCS#12 (.pfx) would be the wrong shape: it is a private-key container, and
+// the import wizard defaults it into the Personal store rather than Trusted
+// Root — the wrong store for a public CA root.
+//
+// Byte-identical to /mesh-ca.pem by construction (both go through
+// serveMeshCA), so the two routes cannot drift into advertising different CAs.
+func (s *Server) handleMeshCACRT(w http.ResponseWriter, r *http.Request) {
+	s.serveMeshCA(w, "application/x-x509-ca-cert", "rasputin-mesh-ca.crt")
+}
+
+// serveMeshCA writes the Mesh TLS CA public cert with the given content-type
+// and download filename. The bytes are read from the trust dir on every
+// request so a CA rotation is picked up without a restart.
+func (s *Server) serveMeshCA(w http.ResponseWriter, contentType, filename string) {
 	if s.trustDir == "" {
 		writeError(w, http.StatusNotFound, "trust dir not configured")
 		return
@@ -261,8 +294,8 @@ func (s *Server) handleMeshCAPEM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-pem-file")
-	w.Header().Set("Content-Disposition", `attachment; filename="rasputin-mesh-ca.pem"`)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(caPEM)
 }

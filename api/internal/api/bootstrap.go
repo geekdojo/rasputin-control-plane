@@ -39,6 +39,7 @@ func (s *Server) BootstrapHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /mesh-ca.pem", s.handleMeshCAPEM)
+	mux.HandleFunc("GET /mesh-ca.crt", s.handleMeshCACRT)
 	mux.HandleFunc("GET /api/mesh/ios-profile", s.handleMeshIOSProfile)
 	mux.HandleFunc("/", s.handleBootstrapFallback)
 	return mux

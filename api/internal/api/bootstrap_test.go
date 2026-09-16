@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,6 +45,49 @@ func TestMeshCAPEM_OpenAndServed(t *testing.T) {
 	}
 }
 
+func TestMeshCACRT_WindowsInstallableEnvelope(t *testing.T) {
+	f := newAPIFixture(t)
+	provisionMeshCA(t, f)
+
+	w := f.do(t, http.MethodGet, "/mesh-ca.crt", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200 without auth, got %d (%s)", w.Code, w.Body.String())
+	}
+	// The whole point of the route: Windows keys the Certificate Import
+	// Wizard off the extension and content-type, not the encoding. Serving
+	// this as .pem left the operator with a file Windows would not open at
+	// all (#445).
+	if got := w.Header().Get("Content-Type"); got != "application/x-x509-ca-cert" {
+		t.Errorf("Content-Type = %q, want application/x-x509-ca-cert", got)
+	}
+	if got := w.Header().Get("Content-Disposition"); !strings.Contains(got, `filename="rasputin-mesh-ca.crt"`) {
+		t.Errorf("Content-Disposition = %q, want rasputin-mesh-ca.crt filename", got)
+	}
+	// Base64/PEM content is correct INSIDE a .crt — crypt32 accepts it. This
+	// asserts we did not "helpfully" convert to DER somewhere along the way.
+	if !strings.Contains(w.Body.String(), "BEGIN CERTIFICATE") {
+		t.Errorf("body is not PEM: %q", w.Body.String()[:min(80, w.Body.Len())])
+	}
+}
+
+// The two CA routes must advertise the SAME certificate. They are separate
+// handlers with separate content-types, which is exactly the shape that drifts
+// into serving two different CAs after an unrelated edit.
+func TestMeshCARoutes_ServeIdenticalBytes(t *testing.T) {
+	f := newAPIFixture(t)
+	provisionMeshCA(t, f)
+
+	pem := f.do(t, http.MethodGet, "/mesh-ca.pem", "", nil)
+	crt := f.do(t, http.MethodGet, "/mesh-ca.crt", "", nil)
+	if pem.Code != http.StatusOK || crt.Code != http.StatusOK {
+		t.Fatalf("want 200/200, got %d/%d", pem.Code, crt.Code)
+	}
+	if !bytes.Equal(pem.Body.Bytes(), crt.Body.Bytes()) {
+		t.Errorf("/mesh-ca.pem and /mesh-ca.crt serve different bytes:\n pem=%q\n crt=%q",
+			pem.Body.String(), crt.Body.String())
+	}
+}
+
 func TestMeshIOSProfile_Open(t *testing.T) {
 	f := newAPIFixture(t)
 	provisionMeshCA(t, f)
@@ -60,7 +104,7 @@ func TestMeshIOSProfile_Open(t *testing.T) {
 
 func TestCAEndpoints_404WhenCAMissing(t *testing.T) {
 	f := newAPIFixture(t) // trustDir exists but holds no mesh-ca.pem
-	for _, p := range []string{"/mesh-ca.pem", "/api/mesh/ios-profile"} {
+	for _, p := range []string{"/mesh-ca.pem", "/mesh-ca.crt", "/api/mesh/ios-profile"} {
 		w := f.do(t, http.MethodGet, p, "", nil)
 		if w.Code != http.StatusNotFound {
 			t.Errorf("GET %s: want 404 when CA missing, got %d", p, w.Code)
@@ -97,7 +141,10 @@ func TestBootstrap_HealthzStaysHTTP(t *testing.T) {
 func TestBootstrap_CAEndpointsServed(t *testing.T) {
 	f := newAPIFixture(t)
 	provisionMeshCA(t, f)
-	for _, p := range []string{"/mesh-ca.pem", "/api/mesh/ios-profile"} {
+	// /mesh-ca.crt matters most here: a Windows operator fetches the CA over
+	// plain HTTP, precisely because nothing trusts the CA yet. An HTTPS-only
+	// route would be useless to the machine that needs it.
+	for _, p := range []string{"/mesh-ca.pem", "/mesh-ca.crt", "/api/mesh/ios-profile"} {
 		w := doBootstrap(f, http.MethodGet, p, "")
 		if w.Code != http.StatusOK {
 			t.Errorf("GET %s over bootstrap HTTP: want 200, got %d", p, w.Code)
