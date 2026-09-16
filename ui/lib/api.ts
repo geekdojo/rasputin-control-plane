@@ -216,7 +216,9 @@ export async function getFirewallImage(): Promise<FlashableImage | null> {
 }
 
 // revokeBusToken cancels a token by id — used to cancel a pending enrollment
-// that was never finished. DELETE returns 204 with no body.
+// that was never finished. Revoking also closes any live bus connection the
+// token authenticated; DELETE returns 200 with {id, disconnected} (the count of
+// connections closed), which this caller does not need.
 export async function revokeBusToken(id: string): Promise<void> {
   const res = await fetch(`${BASE}/api/bus/tokens/${encodeURIComponent(id)}`, {
     method: 'DELETE',

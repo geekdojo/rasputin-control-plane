@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
@@ -125,7 +126,8 @@ func (s *Server) handleRevokeBusToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing token id")
 		return
 	}
-	if err := s.busTokens.Revoke(r.Context(), id); err != nil {
+	disconnected, err := s.busTokens.Revoke(r.Context(), id)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "no live token with that id")
 			return
@@ -133,5 +135,20 @@ func (s *Server) handleRevokeBusToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// Revoke also closed every live bus session the token authenticated
+	// (certificates.md §4.2(1)). Say how many: an operator revoking a token in
+	// response to a compromise needs to know whether a live session was cut,
+	// and "0" is a real answer (the node was offline) rather than a silence.
+	if disconnected > 0 {
+		log.Printf("rasputin-api: revoked bus token %s and closed %d live bus connection(s)", id, disconnected)
+	}
+	writeJSON(w, http.StatusOK, revokeBusTokenResponse{ID: id, Disconnected: disconnected})
+}
+
+// revokeBusTokenResponse is DELETE /api/bus/tokens/{id}'s reply.
+type revokeBusTokenResponse struct {
+	ID string `json:"id"`
+	// Disconnected is how many live bus connections authenticated with the
+	// token were closed by the revoke. Their reconnects are refused.
+	Disconnected int `json:"disconnected"`
 }

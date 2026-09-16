@@ -26,7 +26,7 @@ func TestResponder_Authorize(t *testing.T) {
 		t.Fatalf("Mint: %v", err)
 	}
 	revoked, revID, _ := store.Mint(ctx, "revoked")
-	if err := store.Revoke(ctx, revID); err != nil {
+	if _, err := store.Revoke(ctx, revID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	bound, _, err := store.MintBound(ctx, "bound", "fw-1")
@@ -55,7 +55,7 @@ func TestResponder_Authorize(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, reason := r.authorize(tc.nodeID, tc.token, tc.host)
+			ok, reason := r.authorize(1, tc.nodeID, tc.token, tc.host)
 			if ok != tc.wantAuthorized {
 				t.Errorf("authorize(%q,token,%q) = %v (%q); want %v",
 					tc.nodeID, tc.host, ok, reason, tc.wantAuthorized)
