@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
@@ -190,6 +193,69 @@ func TestLoadBusPreseed(t *testing.T) {
 	}
 	if ok, _ := store.Validate(ctx, ptOK, "node-c"); ok {
 		t.Error("a rejected preseed must not store any of its entries")
+	}
+}
+
+// A preseed entry naming no node id is refused as a whole (every token is
+// bound, geekdojo-brain#423), and a live legacy unbound token already in the
+// database is reported at startup until it is revoked.
+func TestUnboundBusTokens_PreseedRefusedAndStartupLogged(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "rasputin.db")
+	store, err := busauth.OpenStore(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, h, _ := busauth.GenerateToken()
+	path := filepath.Join(dir, "unbound.json")
+	if err := os.WriteFile(path, []byte(`[{"hash":"`+h+`","label":"compute"}]`), 0o600); err != nil {
+		t.Fatalf("write preseed: %v", err)
+	}
+	if n, err := loadBusPreseed(ctx, store, path); !errors.Is(err, busauth.ErrUnboundToken) || n != 0 {
+		t.Fatalf("preseed with an unbound entry = (%d, %v); want (0, ErrUnboundToken)", n, err)
+	}
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	// No unbound tokens: nothing is logged.
+	if _, _, err := store.MintBound(ctx, "compute", "node-a"); err != nil {
+		t.Fatalf("MintBound: %v", err)
+	}
+	logUnboundBusTokens(ctx, store)
+	if logs.Len() != 0 {
+		t.Fatalf("logged %q with no unbound tokens; want nothing", logs.String())
+	}
+
+	// A legacy row, written as a pre-#423 store wrote it.
+	_, legacyID, _ := busauth.GenerateToken()
+	raw, err := dbutil.Open(ctx, dbPath, "SELECT 1", "test")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO bus_tokens (token_hash, label, created_at, node_id) VALUES (?, 'legacy', ?, NULL)`,
+		legacyID, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("insert legacy unbound token: %v", err)
+	}
+	logUnboundBusTokens(ctx, store)
+	if got := logs.String(); !strings.Contains(got, "1 live UNBOUND bus join token(s)") {
+		t.Fatalf("startup log %q should report 1 live unbound token", got)
+	}
+
+	// Revoked, it is no longer reported.
+	logs.Reset()
+	if _, err := store.Revoke(ctx, legacyID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	logUnboundBusTokens(ctx, store)
+	if logs.Len() != 0 {
+		t.Fatalf("logged %q after the unbound token was revoked; want nothing", logs.String())
 	}
 }
 

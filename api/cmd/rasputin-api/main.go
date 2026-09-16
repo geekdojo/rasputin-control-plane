@@ -203,6 +203,7 @@ func main() {
 	} else if n > 0 {
 		log.Printf("rasputin-api: preloaded %d bus token(s) from provisioning seed", n)
 	}
+	logUnboundBusTokens(ctx, busTokenStore)
 
 	if busAuthEnforce {
 		// Before the responder starts, so every connection it admits is
@@ -1708,6 +1709,23 @@ func loadBusPreseed(ctx context.Context, store *busauth.Store, path string) (int
 		return 0, fmt.Errorf("%s: %w", path, err)
 	}
 	return store.PreloadHashes(ctx, toks)
+}
+
+// logUnboundBusTokens reports live legacy unbound join tokens at startup. Every
+// token is bound to one node (geekdojo-brain#423) and the store refuses an
+// unbound one at the bus, so a node still seeded with one cannot join; this
+// line is how that node is diagnosed. Such a token appears in GET
+// /api/bus/tokens with no nodeId and is revoked with DELETE
+// /api/bus/tokens/{id}; the node is re-provisioned with a bound token.
+func logUnboundBusTokens(ctx context.Context, store *busauth.Store) {
+	n, err := store.CountActiveUnbound(ctx)
+	if err != nil {
+		log.Printf("rasputin-api: counting unbound bus tokens: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("rasputin-api: WARNING %d live UNBOUND bus join token(s) — the bus refuses them, so a node seeded with one cannot join; list them with GET /api/bus/tokens (no nodeId), revoke them, and re-provision those nodes with a token bound to their node id", n)
+	}
 }
 
 // randomSecret returns a 32-byte hex secret for the bus AuthUser. Generated

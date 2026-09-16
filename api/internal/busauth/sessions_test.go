@@ -76,12 +76,12 @@ func TestRevoke_ClosesOnlyThatTokensConnections(t *testing.T) {
 
 	tokA, idA, _ := s.MintBound(ctx, "a", "node-a")
 	tokB, idB, _ := s.MintBound(ctx, "b", "node-b")
-	tokU, idU, _ := s.Mint(ctx, "unbound")
+	tokC, idC, _ := s.MintBound(ctx, "c", "node-c")
 
 	mustAdmit(t, s, 1, tokA, "node-a", true)
 	mustAdmit(t, s, 2, tokB, "node-b", true)
-	mustAdmit(t, s, 3, tokU, "node-c", true)
-	mustAdmit(t, s, 4, tokU, "node-d", true)
+	mustAdmit(t, s, 3, tokC, "node-c", true)
+	mustAdmit(t, s, 4, tokC, "node-c", true) // a second session on the same token
 
 	n, err := s.Revoke(ctx, idA)
 	if err != nil {
@@ -97,16 +97,16 @@ func TestRevoke_ClosesOnlyThatTokensConnections(t *testing.T) {
 	// The revoked token's reconnect is refused, and the refusal records nothing.
 	mustAdmit(t, s, 5, tokA, "node-a", false)
 
-	// An unbound token authenticates any node id; revoking it closes all of them.
-	n, err = s.Revoke(ctx, idU)
+	// Revoking a token closes every session it authenticated.
+	n, err = s.Revoke(ctx, idC)
 	if err != nil {
-		t.Fatalf("Revoke(U): %v", err)
+		t.Fatalf("Revoke(C): %v", err)
 	}
 	if n != 2 {
-		t.Errorf("Revoke(U) disconnected %d, want 2", n)
+		t.Errorf("Revoke(C) disconnected %d, want 2", n)
 	}
 	if got := bus.kickedIDs(); !slices.Equal(got, []uint64{1, 3, 4}) {
-		t.Fatalf("after Revoke(U) closed %v, want [1 3 4]", got)
+		t.Fatalf("after Revoke(C) closed %v, want [1 3 4]", got)
 	}
 	if !bus.ClientOpen(2) {
 		t.Error("node-b's connection was closed by revokes of other tokens")
@@ -154,19 +154,19 @@ func TestRevokeByNodeID_ClosesEveryTokenSessionOfTheNode(t *testing.T) {
 	s.TrackSessions(bus)
 
 	tokA, _, _ := s.MintBound(ctx, "a", "node-a")
+	tokA2, _, _ := s.MintBound(ctx, "a re-mint", "node-a") // a node can hold two
 	tokB, _, _ := s.MintBound(ctx, "b", "node-b")
-	tokU, idU, _ := s.Mint(ctx, "unbound")
 
 	mustAdmit(t, s, 1, tokA, "node-a", true)
-	mustAdmit(t, s, 2, tokU, "node-a", true) // same node, unbound token
+	mustAdmit(t, s, 2, tokA2, "node-a", true)
 	mustAdmit(t, s, 3, tokB, "node-b", true)
 
 	revoked, disconnected, err := s.RevokeByNodeID(ctx, "node-a")
 	if err != nil {
 		t.Fatalf("RevokeByNodeID: %v", err)
 	}
-	if revoked != 1 || disconnected != 2 {
-		t.Errorf("RevokeByNodeID = (revoked %d, disconnected %d), want (1, 2)", revoked, disconnected)
+	if revoked != 2 || disconnected != 2 {
+		t.Errorf("RevokeByNodeID = (revoked %d, disconnected %d), want (2, 2)", revoked, disconnected)
 	}
 	if got := bus.kickedIDs(); !slices.Equal(got, []uint64{1, 2}) {
 		t.Fatalf("closed %v, want [1 2]", got)
@@ -174,11 +174,31 @@ func TestRevokeByNodeID_ClosesEveryTokenSessionOfTheNode(t *testing.T) {
 	if !bus.ClientOpen(3) {
 		t.Error("node-b's connection was closed by node-a's removal")
 	}
-	// The unbound token is not node-a's to revoke: it still exists, live.
-	if n, err := s.Revoke(ctx, idU); err != nil || n != 0 {
-		t.Errorf("Revoke(unbound) after removal = (%d, %v), want (0, nil): the unbound token must still be live and its record gone", n, err)
-	}
+	// Neither of the removed node's tokens can reconnect.
 	mustAdmit(t, s, 4, tokA, "node-a", false)
+	mustAdmit(t, s, 5, tokA2, "node-a", false)
+}
+
+// The #247 removal gap was a node whose session used an UNBOUND token: removal
+// closed the session but could not revoke a token bound to no node, so it
+// reconnected. With every token bound, the only unbound tokens are legacy
+// rows, and Admit refuses them outright — no session is admitted, none is
+// recorded, so there is nothing for a removal to miss.
+func TestAdmit_RefusesLegacyUnboundToken(t *testing.T) {
+	s := newTokenStore(t)
+	bus := newFakeBus(1, 2)
+	s.TrackSessions(bus)
+	legacy, _ := insertLegacyUnbound(t, s, "legacy")
+
+	mustAdmit(t, s, 1, legacy, "node-a", false)
+	mustAdmit(t, s, 2, legacy, "node-b", false)
+
+	s.sess.mu.Lock()
+	recorded := len(s.sess.grants)
+	s.sess.mu.Unlock()
+	if recorded != 0 {
+		t.Errorf("a refused unbound token recorded %d grants; want 0", recorded)
+	}
 }
 
 func TestAdmit_RefusedTokensAreNotRecorded(t *testing.T) {

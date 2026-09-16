@@ -57,8 +57,12 @@ func TestInvalidNodeIDErrorsAreTyped(t *testing.T) {
 	if _, err := s.PreloadHashes(ctx, []PreseedToken{{Hash: h, NodeID: "*"}}); !errors.Is(err, ErrInvalidNodeID) {
 		t.Errorf("PreloadHashes error = %v, want ErrInvalidNodeID", err)
 	}
-	// An entry with no node id is still an unbound token, as before.
-	if n, err := s.PreloadHashes(ctx, []PreseedToken{{Hash: h, Label: "unbound"}}); err != nil || n != 1 {
-		t.Errorf("PreloadHashes unbound entry = (%d, %v), want (1, nil)", n, err)
+	// An entry with no node id is refused with its own error: every token is
+	// bound (geekdojo-brain#423).
+	if n, err := s.PreloadHashes(ctx, []PreseedToken{{Hash: h, Label: "unbound"}}); !errors.Is(err, ErrUnboundToken) || n != 0 {
+		t.Errorf("PreloadHashes unbound entry = (%d, %v), want (0, ErrUnboundToken)", n, err)
+	}
+	if _, _, err := s.MintBound(ctx, "t", ""); !errors.Is(err, ErrUnboundToken) {
+		t.Errorf("MintBound with no node id error = %v, want ErrUnboundToken", err)
 	}
 }
