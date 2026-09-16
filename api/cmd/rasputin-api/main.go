@@ -434,16 +434,16 @@ func main() {
 	}, selfNodeID, clusterHostname(), strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")))
 
 	// Capture the operator's SSH key as a cluster setting on first sight:
-	// the control plane's own authorized_keys holds exactly the bootstrap
-	// seed's key, so a fresh cluster prefills the Add-node wizard before
-	// it's ever opened. Only fires while the setting has NEVER been set
-	// (an operator's explicit empty list sticks); best-effort — a missing
+	// the first key line of the control plane's own authorized_keys is the
+	// bootstrap seed's key, so a fresh cluster prefills the Add-node wizard
+	// before it's ever opened. Only fires while the setting has NEVER been set
+	// (an operator's explicit clear sticks); best-effort — a missing
 	// or unreadable file must never block boot (dev api has no seed).
 	akPath := envOr("RASPUTIN_CP_AUTHORIZED_KEYS", "/var/lib/rasputin/dropbear/authorized_keys")
-	if keys, err := setupSvc.SeedOperatorSSHKeysFromFile(ctx, akPath); err != nil {
-		log.Printf("setup: seed operator SSH keys from %s: %v (continuing)", akPath, err)
-	} else if len(keys) > 0 {
-		log.Printf("setup: captured %d operator SSH key(s) from %s", len(keys), akPath)
+	if key, others, err := setupSvc.SeedOperatorSSHKeyFromFile(ctx, akPath); err != nil {
+		log.Printf("setup: seed operator SSH key from %s: %v (continuing)", akPath, err)
+	} else if key != "" {
+		log.Printf("setup: captured operator SSH key from %s (first of %d key line(s); the setting holds one)", akPath, others+1)
 	}
 
 	// Default origins cover both ways the UI reaches the api on localhost:

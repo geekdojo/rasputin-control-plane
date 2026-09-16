@@ -412,10 +412,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings/dns-forwarding", reqd(s.handleGetDNSForwarding))
 	mux.HandleFunc("POST /api/settings/dns-forwarding", reqd(s.handleSetDNSForwarding))
 
-	// Operator SSH keys — cluster-remembered wizard prefill (public-key
+	// Operator SSH key — the one key the Add-node wizard prefills (public-key
 	// material; authed because it's operator configuration).
-	mux.HandleFunc("GET /api/enroll/operator-keys", reqd(s.handleGetOperatorKeys))
-	mux.HandleFunc("PUT /api/enroll/operator-keys", reqd(s.handlePutOperatorKeys))
+	mux.HandleFunc("GET /api/enroll/operator-key", reqd(s.handleGetOperatorKey))
+	mux.HandleFunc("PUT /api/enroll/operator-key", reqd(s.handlePutOperatorKey))
 
 	mux.HandleFunc("GET /api/bmc", reqd(s.handleListBMCStates))
 	mux.HandleFunc("GET /api/bmc/backends", reqd(s.handleBMCBackends))
