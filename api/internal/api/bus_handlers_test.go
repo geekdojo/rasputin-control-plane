@@ -65,8 +65,8 @@ func TestMintBusToken_ClusterCap(t *testing.T) {
 	}
 	for _, tk := range tokens {
 		if tk.NodeID != nil && *tk.NodeID == "pend-24" && tk.RevokedAt == nil {
-			if w := f.do(t, http.MethodDelete, "/api/bus/tokens/"+tk.ID, "", cookie); w.Code != http.StatusNoContent {
-				t.Fatalf("revoke = %d, want 204", w.Code)
+			if w := f.do(t, http.MethodDelete, "/api/bus/tokens/"+tk.ID, "", cookie); w.Code != http.StatusOK {
+				t.Fatalf("revoke = %d, want 200", w.Code)
 			}
 		}
 	}

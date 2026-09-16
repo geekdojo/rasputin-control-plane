@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS bus_tokens (
 // Store is the SQLite-backed bus join-token ledger.
 type Store struct {
 	db *sql.DB
+
+	// sess records the connections each token authenticated so a revoke can
+	// close them (sessions.go). Empty until TrackSessions is called.
+	sess sessions
 }
 
 // TokenInfo is the non-secret view of a token row (no plaintext, ever).
@@ -236,36 +240,57 @@ func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string)
 	return true, nil
 }
 
-// Revoke marks a token revoked by its id (token_hash). Returns sql.ErrNoRows
-// if no such live token existed.
-func (s *Store) Revoke(ctx context.Context, id string) error {
+// Revoke marks a token revoked by its id (token_hash) and closes every live
+// bus connection that authenticated with it, returning how many it closed.
+// Returns sql.ErrNoRows if no such live token existed.
+//
+// The closed count is exact for connections this process admitted: a revoked
+// token's connections are all closed before Revoke returns (sessions.go). The
+// agent's reconnect is then refused by the callout, because the row is revoked.
+func (s *Store) Revoke(ctx context.Context, id string) (disconnected int, err error) {
+	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`,
 		ms(time.Now().UTC()), id)
 	if err != nil {
-		return fmt.Errorf("busauth: revoke: %w", err)
+		s.sess.mu.Unlock()
+		return 0, fmt.Errorf("busauth: revoke: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return sql.ErrNoRows
+	if n, _ := res.RowsAffected(); n == 0 {
+		s.sess.mu.Unlock()
+		return 0, sql.ErrNoRows
 	}
-	return nil
+	cids := s.takeLocked(func(g grant) bool { return g.tokenID == id })
+	d := s.sess.disc
+	s.sess.mu.Unlock()
+	return s.disconnect(d, cids), nil
 }
 
-// RevokeByNodeID revokes every still-active token bound to nodeID and returns
-// how many it revoked. The node-removal cascade calls it so a removed node
+// RevokeByNodeID revokes every still-active token bound to nodeID and closes
+// every live bus connection that authenticated as nodeID with a token,
+// returning both counts. The node-removal cascade calls it so a removed node
 // leaves no dangling enrollment token — which would otherwise resurface as a
-// ghost "pending" bay on the node grid. Idempotent: revoking zero tokens is not
-// an error.
-func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (int, error) {
+// ghost "pending" bay on the node grid — and no live session. Idempotent:
+// revoking zero tokens is not an error.
+//
+// It closes by node id rather than by the tokens it revoked: removal evicts
+// the node, whichever token its session used. (A session opened with an
+// UNBOUND token is closed too, but that token is not bound to nodeID, so it
+// is not revoked here and could authenticate again.)
+func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, disconnected int, err error) {
+	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL`,
 		ms(time.Now().UTC()), nodeID)
 	if err != nil {
-		return 0, fmt.Errorf("busauth: revoke by node: %w", err)
+		s.sess.mu.Unlock()
+		return 0, 0, fmt.Errorf("busauth: revoke by node: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	return int(n), nil
+	cids := s.takeLocked(func(g grant) bool { return g.nodeID == nodeID })
+	d := s.sess.disc
+	s.sess.mu.Unlock()
+	return int(n), s.disconnect(d, cids), nil
 }
 
 // List returns all tokens (secret-free), newest first.

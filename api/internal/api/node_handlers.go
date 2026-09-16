@@ -118,12 +118,15 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 
 	// Revoke the node's enrollment token(s) so a removed node leaves no dangling
 	// bound token — which would otherwise resurface as a ghost "pending" bay and
-	// let the node silently rejoin. Best-effort: a leftover token is less harmful
+	// let the node silently rejoin — and close its live bus session, so a
+	// removed node is evicted now rather than whenever it next reconnects
+	// (certificates.md §4.2(1)). Best-effort: a leftover token is less harmful
 	// than blocking the removal.
-	if n, err := s.busTokens.RevokeByNodeID(ctx, id); err != nil {
-		log.Printf("rasputin-api: revoke bus tokens for removed node %s: %v", id, err)
-	} else if n > 0 {
-		log.Printf("rasputin-api: revoked %d enrollment token(s) for removed node %s", n, id)
+	if revoked, disconnected, err := s.busTokens.RevokeByNodeID(ctx, id); err != nil {
+		log.Printf("rasputin-api: revoke bus tokens for removed node %q: %v", id, err)
+	} else if revoked > 0 || disconnected > 0 {
+		log.Printf("rasputin-api: revoked %d enrollment token(s) and closed %d live bus connection(s) for removed node %q",
+			revoked, disconnected, id)
 	}
 
 	if err := s.invSvc.Remove(ctx, id); err != nil {

@@ -43,14 +43,14 @@ func TestStore_MintValidateRevoke(t *testing.T) {
 		t.Error("Validate(empty) must be false")
 	}
 
-	if err := s.Revoke(ctx, id); err != nil {
+	if _, err := s.Revoke(ctx, id); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if ok, _ := s.Validate(ctx, plaintext, "any-node"); ok {
 		t.Error("Validate after revoke must be false")
 	}
 	// Revoking again (no live row) reports ErrNoRows.
-	if err := s.Revoke(ctx, id); err == nil {
+	if _, err := s.Revoke(ctx, id); err == nil {
 		t.Error("second Revoke should error (no live token)")
 	}
 }
@@ -181,7 +181,7 @@ func TestStore_RevokeByNodeID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := s.RevokeByNodeID(ctx, "bench-compute1")
+	n, _, err := s.RevokeByNodeID(ctx, "bench-compute1")
 	if err != nil {
 		t.Fatalf("RevokeByNodeID: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestStore_RevokeByNodeID(t *testing.T) {
 		t.Fatalf("revoked %d tokens, want 2", n)
 	}
 	// Idempotent: a second pass revokes nothing.
-	if n2, _ := s.RevokeByNodeID(ctx, "bench-compute1"); n2 != 0 {
+	if n2, _, _ := s.RevokeByNodeID(ctx, "bench-compute1"); n2 != 0 {
 		t.Errorf("second call revoked %d, want 0", n2)
 	}
 	// bench-compute2's token is untouched.

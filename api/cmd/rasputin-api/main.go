@@ -205,6 +205,9 @@ func main() {
 	}
 
 	if busAuthEnforce {
+		// Before the responder starts, so every connection it admits is
+		// recorded and a revoke can close it (certificates.md §4.2(1)).
+		busTokenStore.TrackSessions(busSrv)
 		responder := busauth.NewResponder(busSrv.Conn(), busIssuer, busTokenStore)
 		if err := responder.Start(); err != nil {
 			log.Fatalf("rasputin-api: bus auth responder: %v", err)

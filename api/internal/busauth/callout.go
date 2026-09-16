@@ -33,8 +33,10 @@ const (
 )
 
 // Validator is the subset of *Store the responder needs (eases testing).
+// Admit validates a join token for the connection with server id cid and, on
+// success, records the grant so revoking the token closes that connection.
 type Validator interface {
-	Validate(ctx context.Context, plaintext, presentedNodeID string) (bool, error)
+	Admit(ctx context.Context, cid uint64, plaintext, presentedNodeID string) (bool, error)
 }
 
 // Responder handles NATS auth-callout requests on the in-process connection:
@@ -86,8 +88,9 @@ func (r *Responder) handle(m *nats.Msg) {
 	nodeID := arc.ConnectOptions.Username
 	token := arc.ConnectOptions.Password
 	host := arc.ClientInformation.Host
+	cid := arc.ClientInformation.ID // server connection id; what a revoke closes
 
-	ok, reason := r.authorize(nodeID, token, host)
+	ok, reason := r.authorize(cid, nodeID, token, host)
 	if !ok {
 		log.Printf("busauth: deny node=%q host=%q: %s", nodeID, host, reason)
 		r.respond(m, userNkey, serverID, "", reason)
@@ -106,12 +109,13 @@ func (r *Responder) handle(m *nats.Msg) {
 // authorize implements the trust model: a valid node id is always required (it
 // scopes the grant); loopback connections are trusted same-box-as-the-authority
 // (the controlplane's co-located agent, which carries no join token); every
-// other connection must present a live token.
+// other connection must present a live token. cid is the server's id for the
+// connection, recorded on a token grant so revoking the token can close it.
 //
 // The node id check runs BEFORE the loopback short-circuit so it covers both
 // paths: the id becomes one token of every subject in the minted credential,
 // and nats-server passes the username through to the callout unvalidated.
-func (r *Responder) authorize(nodeID, token, host string) (bool, string) {
+func (r *Responder) authorize(cid uint64, nodeID, token, host string) (bool, string) {
 	if nodeID == "" {
 		return false, "missing node id (NATS username)"
 	}
@@ -128,7 +132,7 @@ func (r *Responder) authorize(nodeID, token, host string) (bool, string) {
 	defer cancel()
 	// Pass the presented node id: a token bound to a different node is rejected
 	// here, so a leaked token can't be replayed as another node.
-	valid, err := r.tokens.Validate(ctx, token, nodeID)
+	valid, err := r.tokens.Admit(ctx, cid, token, nodeID)
 	if err != nil {
 		return false, "token validation error"
 	}
