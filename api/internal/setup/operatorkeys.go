@@ -10,24 +10,43 @@ import (
 	"strings"
 )
 
-// Operator SSH keys — the public key(s) the operator uses for SSH access to
-// nodes, persisted as a cluster setting so the Add-node wizard can prefill
-// instead of re-asking on every enrollment (backlog: nodes.md "reuse the
-// operator SSH key"). The cluster has seen the key on every seed it ever
-// minted; this makes it first-class.
+// Operator SSH key — the ONE public key the Add-node wizard fills in for the
+// operator, persisted as a cluster setting so they aren't re-asked on every
+// enrollment (backlog: nodes.md "reuse the operator SSH key").
+//
+// What the setting does, and what it does not (geekdojo/geekdojo-brain#246):
+//   - It is the key the wizard prefills, so it is written into the seed of
+//     each node enrolled FROM NOW ON. That is all it does.
+//   - It never changes an already-enrolled node. Each node's authorized_keys
+//     is operator-owned and was written once, from its seed; replacing or
+//     revoking a key there is a manual step on that node. The fleet re-key
+//     saga that would have changed this (#244) was closed as not planned.
+//
+// It is ONE key, not a list. The setting shipped as a list with add/remove,
+// but a second key was inert (the seed carries one line and the wizard only
+// ever prefilled the first) and "remove" revoked nothing — the UI promised
+// more than the setting did.
 //
 // Semantics:
 //   - UNSET (no row) means "never captured" — the api seeds it once at
 //     startup from the control plane's own authorized_keys (the bootstrap
 //     seed put the operator's key there), so a bootstrap-flashed cluster
 //     prefills before the wizard is ever opened.
-//   - An explicit empty list is a valid operator choice ("don't prefill")
-//     and is never re-seeded over.
-//   - Rotation is forward-only: editing the list changes future seeds; it
-//     does not re-key already-enrolled nodes (that's a separate job kind).
+//   - An explicit clear is a valid operator choice ("don't prefill") and is
+//     never re-seeded over at startup.
 //
-// Stored as a JSON string array under KeyOperatorSSHKeys. Public-key
-// material only — never store private keys or secrets here.
+// Storage keeps the original shape — a JSON string array under
+// KeyOperatorSSHKeys — so no migration is needed and a stored value stays
+// readable by an older api. Writes store zero or one element.
+//
+// Legacy lists with more than one key (written by the list UI): the
+// effective key is the FIRST element, which is exactly the key the wizard
+// has always prefilled, so enrollment behaviour does not change. The extras
+// are not deleted on read — reads never write — and are reported as
+// IgnoredKeys so Settings can say so; the operator's next save or clear
+// writes a single-key value and they are gone.
+//
+// Public-key material only — never store private keys or secrets here.
 const KeyOperatorSSHKeys = "enroll.operator_ssh_keys"
 
 // ErrInvalidSSHKey rejects a key line that doesn't look like an OpenSSH
@@ -49,93 +68,88 @@ func ValidOperatorSSHKey(key string) bool {
 	return sshKeyRe.MatchString(key)
 }
 
-// OperatorSSHKeys returns the stored operator keys. nil means the setting
-// has never been captured; an empty non-nil slice is an explicit "none".
-func (s *Service) OperatorSSHKeys(ctx context.Context) ([]string, error) {
+// OperatorKey is the operator SSH key setting as read.
+type OperatorKey struct {
+	// Key is the key the Add-node wizard prefills; "" when none is saved.
+	Key string
+	// Captured is false only while the setting has never been set. A
+	// cleared setting is captured with an empty Key.
+	Captured bool
+	// IgnoredKeys counts extra keys in a legacy multi-key value. They have
+	// no effect and are dropped by the next SetOperatorSSHKey.
+	IgnoredKeys int
+}
+
+// OperatorSSHKey returns the stored operator key (see KeyOperatorSSHKeys for
+// the legacy multi-key rule).
+func (s *Service) OperatorSSHKey(ctx context.Context) (OperatorKey, error) {
 	raw, err := s.store.Get(ctx, KeyOperatorSSHKeys)
 	if err != nil {
-		return nil, err
+		return OperatorKey{}, err
 	}
 	if raw == "" {
-		return nil, nil // never captured
+		return OperatorKey{}, nil // never captured
 	}
 	var keys []string
 	if err := json.Unmarshal([]byte(raw), &keys); err != nil {
-		return nil, fmt.Errorf("setup: corrupt %s value: %w", KeyOperatorSSHKeys, err)
+		return OperatorKey{}, fmt.Errorf("setup: corrupt %s value: %w", KeyOperatorSSHKeys, err)
 	}
-	if keys == nil {
-		keys = []string{}
+	out := OperatorKey{Captured: true}
+	if len(keys) > 0 {
+		out.Key = keys[0]
+		out.IgnoredKeys = len(keys) - 1
 	}
-	return keys, nil
+	return out, nil
 }
 
-// SetOperatorSSHKeys validates and replaces the stored list. Keys are
-// trimmed and de-duplicated preserving order; an empty list is allowed
-// (explicit "no prefill") and sticks — the startup seed never overwrites it.
-func (s *Service) SetOperatorSSHKeys(ctx context.Context, keys []string) ([]string, error) {
-	clean := make([]string, 0, len(keys))
-	seen := map[string]bool{}
-	for _, k := range keys {
-		k = strings.TrimSpace(k)
-		if k == "" || seen[k] {
-			continue
+// SetOperatorSSHKey replaces the stored value with exactly one key, or
+// clears it when key is blank. A clear is an explicit "no prefill" and
+// sticks — the startup capture never overwrites it. Either way any legacy
+// extra keys are dropped. Returns the trimmed key that was stored.
+func (s *Service) SetOperatorSSHKey(ctx context.Context, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	keys := []string{}
+	if key != "" {
+		if !ValidOperatorSSHKey(key) {
+			return "", fmt.Errorf("%w: %q", ErrInvalidSSHKey, truncateKey(key))
 		}
-		if !ValidOperatorSSHKey(k) {
-			return nil, fmt.Errorf("%w: %q", ErrInvalidSSHKey, truncateKey(k))
-		}
-		seen[k] = true
-		clean = append(clean, k)
+		keys = append(keys, key)
 	}
-	raw, err := json.Marshal(clean)
+	raw, err := json.Marshal(keys)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := s.store.Set(ctx, KeyOperatorSSHKeys, string(raw)); err != nil {
-		return nil, err
+		return "", err
 	}
-	return clean, nil
+	return key, nil
 }
 
-// RememberOperatorSSHKey appends a key if it isn't already stored. Used by
-// the wizard's persist-on-mint path; a no-op (not an error) for duplicates.
-func (s *Service) RememberOperatorSSHKey(ctx context.Context, key string) ([]string, error) {
-	key = strings.TrimSpace(key)
-	if !ValidOperatorSSHKey(key) {
-		return nil, fmt.Errorf("%w: %q", ErrInvalidSSHKey, truncateKey(key))
-	}
-	keys, err := s.OperatorSSHKeys(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, k := range keys {
-		if k == key {
-			return keys, nil
-		}
-	}
-	return s.SetOperatorSSHKeys(ctx, append(keys, key))
-}
-
-// SeedOperatorSSHKeysFromFile captures the control plane's own
-// authorized_keys as the initial operator-key list — but only when the
-// setting has NEVER been set (an explicit empty list sticks). On a
-// bootstrap-flashed control plane that file holds exactly the seed's key,
-// so the wizard prefills without ever having been run. Invalid or comment
-// lines are skipped; a missing file is not an error (dev api, no seed).
-// Returns the seeded keys, or nil if nothing was done.
-func (s *Service) SeedOperatorSSHKeysFromFile(ctx context.Context, path string) ([]string, error) {
+// SeedOperatorSSHKeyFromFile captures the operator key from the control
+// plane's own authorized_keys — but only when the setting has NEVER been set
+// (an explicit clear sticks). On a bootstrap-flashed control plane the first
+// key line is the seed's key: firstboot creates the file from the seed, and
+// anything added by hand is appended after it. So the first valid line is
+// captured and any further valid lines are counted and left alone — they
+// were never the wizard's key. Comment and invalid lines are skipped; a
+// missing file is not an error (dev api, no seed).
+//
+// Returns the captured key ("" if nothing was done) and how many other
+// valid key lines the file held.
+func (s *Service) SeedOperatorSSHKeyFromFile(ctx context.Context, path string) (string, int, error) {
 	raw, err := s.store.Get(ctx, KeyOperatorSSHKeys)
 	if err != nil {
-		return nil, err
+		return "", 0, err
 	}
 	if raw != "" {
-		return nil, nil // already captured (possibly an explicit empty list)
+		return "", 0, nil // already captured (possibly an explicit clear)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return "", 0, nil
 		}
-		return nil, err
+		return "", 0, err
 	}
 	var keys []string
 	for _, line := range strings.Split(string(data), "\n") {
@@ -146,9 +160,13 @@ func (s *Service) SeedOperatorSSHKeysFromFile(ctx context.Context, path string) 
 		keys = append(keys, line)
 	}
 	if len(keys) == 0 {
-		return nil, nil // nothing usable; stay unset so a later boot can seed
+		return "", 0, nil // nothing usable; stay unset so a later boot can seed
 	}
-	return s.SetOperatorSSHKeys(ctx, keys)
+	key, err := s.SetOperatorSSHKey(ctx, keys[0])
+	if err != nil {
+		return "", 0, err
+	}
+	return key, len(keys) - 1, nil
 }
 
 // truncateKey keeps error messages readable (keys are ~100s of chars).

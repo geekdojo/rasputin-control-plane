@@ -10,12 +10,12 @@
 //     as deployment mode: the stack shipped complete but could only be turned on
 //     by restarting the api with an env var, which an appliance operator cannot
 //     do. Backend: POST /api/obs/{enable,disable} (async — returns a job).
-//   • Operator SSH key(s) — the cluster-remembered key(s) the Add-node wizard
-//     prefills from. Rotation here is forward-only (future seeds only); it
-//     never re-keys already-enrolled nodes.
+//   • Operator SSH key — the one key the Add-node wizard prefills, so it goes
+//     into nodes enrolled from now on. It never changes an already-enrolled
+//     node (geekdojo/geekdojo-brain#246).
 // The Settings icon in the sidebar routes here.
 
-import { Check, Settings as SettingsIcon, X } from 'lucide-react';
+import { Check, Settings as SettingsIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Btn, PageShell, PageHeader, PageBody, SectionLabel, Hint, Input, Select, Tok, EnabledToggle, CopyButton, DIM, FG, HAIR } from '../../../components/kit';
 import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
@@ -30,17 +30,18 @@ import {
   getDNSForwarding,
   getJob,
   getObsStatus,
-  getOperatorKeys,
+  getOperatorKey,
   getSetupState,
   listNodes,
   setBMCConfig,
   setDeploymentMode,
   setDNSForwarding,
-  setOperatorKeys,
+  setOperatorKey,
   probeBMC,
   type BMCProbeResult,
+  type OperatorKey,
 } from '../../../lib/api';
-import { validateSSHKey } from '../../../lib/enroll';
+import { ENROLLED_NODE_KEY_PROCEDURE_URL, operatorKeyDraft } from '../../../lib/operator-key';
 import type { BMCBackendInfo, BMCConfigView, DeploymentMode, DNSForwarding, Node, ObsStatus, SetupState } from '../../../lib/types';
 
 export default function SettingsPage() {
@@ -822,64 +823,70 @@ function ObservabilitySection() {
 
 // --- Operator SSH key -------------------------------------------------------
 
+// One key, forward-only (geekdojo/geekdojo-brain#246). The copy has to say
+// both halves plainly: the key goes into nodes enrolled from now on, and
+// nothing here reaches a node that is already enrolled. The section used to
+// be a list with add/remove, and neither did anything to a running node.
 function OperatorSSHKeySection() {
-  const [keys, setKeys] = useState<string[] | null>(null);
-  const [captured, setCaptured] = useState(false);
+  const [stored, setStored] = useState<OperatorKey | null>(null);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   useEffect(() => {
-    getOperatorKeys()
-      .then((ok) => {
-        setKeys(ok.keys);
-        setCaptured(ok.captured);
-      })
+    getOperatorKey()
+      .then(setStored)
       .catch((e) => setErr(String(e)));
   }, []);
 
-  async function save(next: string[]) {
+  async function save(key: string) {
     setBusy(true);
     setErr(null);
     try {
-      const ok = await setOperatorKeys(next);
-      setKeys(ok.keys);
-      setCaptured(ok.captured);
+      setStored(await setOperatorKey(key));
       setDraft('');
     } catch (e) {
       setErr(String(e));
     } finally {
       setBusy(false);
+      setConfirmClear(false);
     }
   }
 
-  const draftCheck = validateSSHKey(draft);
-  const canAdd = draft.trim() !== '' && !draftCheck.error && !(keys ?? []).includes(draftCheck.key);
+  const draftState = stored ? operatorKeyDraft(stored, draft) : { key: '', canSave: false };
 
   return (
     <>
       <SectionLabel>OPERATOR SSH KEY</SectionLabel>
+      <Hint style={{ marginBottom: 8 }}>
+        The SSH <em>public</em> key the Add-node wizard fills in for you. It is written into the enrollment
+        file of each node you add <em>from now on</em>.
+      </Hint>
       <Hint style={{ marginBottom: 16 }}>
-        The SSH <em>public</em> key(s) this cluster remembers for you — the Add-node wizard prefills
-        from the first one so you aren&apos;t re-asked on every enrollment. Changes apply to{' '}
-        <em>future</em> enrollments only; nodes already running keep the key they were seeded with.
+        It does <em>not</em> change nodes that are already enrolled. Each keeps the key it was enrolled with —
+        replacing or clearing the key here does not remove it from any node. Changing the key on an enrolled
+        node is a manual step on that node
+        {ENROLLED_NODE_KEY_PROCEDURE_URL ? (
+          <>
+            {' '}— see{' '}
+            <a href={ENROLLED_NODE_KEY_PROCEDURE_URL} target="_blank" rel="noreferrer" style={{ color: ACCENT }}>
+              replacing the operator key on an enrolled node
+            </a>
+            .
+          </>
+        ) : (
+          '.'
+        )}
       </Hint>
 
-      {keys === null && !err && <Hint>Loading…</Hint>}
+      {stored === null && !err && <Hint>Loading…</Hint>}
       {err && <Hint warn style={{ marginBottom: 12 }}>{err}</Hint>}
 
-      {keys !== null && (
+      {stored !== null && (
         <div style={{ maxWidth: 720 }}>
-          {keys.length === 0 && (
-            <Hint style={{ marginBottom: 12 }}>
-              {captured
-                ? 'No key stored. The wizard won’t prefill until one is added here or used in an enrollment.'
-                : 'No key captured yet — the first Add-node enrollment that uses a key stores it here automatically.'}
-            </Hint>
-          )}
-          {keys.map((k) => (
+          {stored.key ? (
             <div
-              key={k}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -899,41 +906,63 @@ function OperatorSSHKeySection() {
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                 }}
-                title={k}
+                title={stored.key}
               >
-                {k}
+                {stored.key}
               </span>
-              <button
-                onClick={() => save(keys.filter((x) => x !== k))}
-                disabled={busy}
-                title="Remove this key (future enrollments only)"
-                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, flexShrink: 0 }}
-              >
-                <X size={12} color={DIM} />
-              </button>
+              <Btn small variant="ghost" onClick={() => setConfirmClear(true)} disabled={busy}>
+                CLEAR
+              </Btn>
             </div>
-          ))}
+          ) : (
+            <Hint style={{ marginBottom: 8 }}>
+              No key saved — the wizard won&apos;t fill one in. The next node you add with a key saves that key
+              here.
+            </Hint>
+          )}
+
+          {stored.ignoredKeys > 0 && (
+            <Hint warn style={{ marginBottom: 8 }}>
+              An earlier version saved {stored.ignoredKeys} more {stored.ignoredKeys === 1 ? 'key' : 'keys'} here.
+              Only the key above was ever filled in by the wizard, so {stored.ignoredKeys === 1 ? 'it is' : 'they are'}{' '}
+              ignored. Saving or clearing the key removes {stored.ignoredKeys === 1 ? 'it' : 'them'}.
+            </Hint>
+          )}
 
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <Input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="ssh-ed25519 AAAA… you@laptop"
+              aria-label={stored.key ? 'Replacement operator SSH public key' : 'Operator SSH public key'}
               spellCheck={false}
               style={{ flex: 1 }}
             />
-            <Btn variant="primary" small onClick={() => save([...(keys ?? []), draftCheck.key])} disabled={busy || !canAdd}>
-              {busy ? 'SAVING…' : 'ADD KEY'}
+            <Btn variant="primary" small onClick={() => save(draftState.key)} disabled={busy || !draftState.canSave}>
+              {busy ? 'SAVING…' : stored.key ? 'REPLACE KEY' : 'SAVE KEY'}
             </Btn>
           </div>
-          {draft.trim() !== '' && draftCheck.error ? (
-            <Hint warn style={{ marginTop: 6 }}>{draftCheck.error}</Hint>
+          {draftState.error ? (
+            <Hint warn style={{ marginTop: 6 }}>{draftState.error}</Hint>
           ) : (
             <Hint style={{ marginTop: 6 }}>
               Paste a public key line, e.g. from <Tok>~/.ssh/id_ed25519.pub</Tok>.
             </Hint>
           )}
         </div>
+      )}
+
+      {confirmClear && (
+        <ConfirmModal
+          title="Clear the operator SSH key?"
+          message={
+            'The Add-node wizard will stop filling in a key for new nodes.\n\n' +
+            'Nodes already enrolled keep their key — clearing it here does not remove it from any node.'
+          }
+          confirmLabel={busy ? 'CLEARING…' : 'CLEAR KEY'}
+          onConfirm={() => save('')}
+          onCancel={() => setConfirmClear(false)}
+        />
       )}
     </>
   );

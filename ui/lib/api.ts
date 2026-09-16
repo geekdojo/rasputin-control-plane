@@ -1073,24 +1073,27 @@ export function setupEnrollSelf(): Promise<Job> {
   return jsonFetch<Job>('/api/setup/mesh', { method: 'POST' });
 }
 
-// ----- Operator SSH keys ----------------------------------------------------
+// ----- Operator SSH key -----------------------------------------------------
 
-// The cluster-remembered operator SSH public key(s) the Add-node wizard
-// prefills from. `captured: false` means never set (nothing to prefill —
-// the wizard remembers whatever the operator enters on the next mint).
-export type OperatorKeys = { keys: string[]; captured: boolean };
+// The one operator SSH public key the Add-node wizard prefills. It is written
+// into the seeds of nodes enrolled from now on and changes nothing on nodes
+// already enrolled. `key` is '' when none is saved; `captured: false` means
+// never set (the wizard remembers the key used on the next enrollment);
+// `ignoredKeys` counts extra keys left by the old list UI, which have no
+// effect and are dropped by the next save or clear.
+export type OperatorKey = { key: string; captured: boolean; ignoredKeys: number };
 
-export function getOperatorKeys(): Promise<OperatorKeys> {
-  return jsonFetch<OperatorKeys>('/api/enroll/operator-keys');
+export function getOperatorKey(): Promise<OperatorKey> {
+  return jsonFetch<OperatorKey>('/api/enroll/operator-key');
 }
 
-// Replaces the stored list. An empty list is an explicit "don't prefill"
-// and sticks. Rotation is forward-only: it changes future seeds only.
-export function setOperatorKeys(keys: string[]): Promise<OperatorKeys> {
-  return jsonFetch<OperatorKeys>('/api/enroll/operator-keys', {
+// Replaces the saved key, or clears it with ''. A clear is an explicit "don't
+// prefill" and sticks.
+export function setOperatorKey(key: string): Promise<OperatorKey> {
+  return jsonFetch<OperatorKey>('/api/enroll/operator-key', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keys }),
+    body: JSON.stringify({ key }),
   });
 }
 
