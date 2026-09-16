@@ -10,6 +10,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
@@ -99,6 +100,9 @@ type Server struct {
 	// SystemUpdateConfig is built from, so the plan preview excludes the
 	// controlplane exactly as the real cascade does. Empty off-appliance.
 	selfNodeID string
+	// busTLS is the bus TLS ladder and the live pin (#448); nil when the bus
+	// key did not load. Wired by main after NewServer.
+	busTLS *bustls.Service
 }
 
 // SetReleaseSource wires the update-channel source used by
@@ -403,6 +407,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bus/tokens", reqd(s.handleListBusTokens))
 	mux.HandleFunc("POST /api/bus/tokens", reqd(s.handleMintBusToken))
 	mux.HandleFunc("DELETE /api/bus/tokens/{id}", reqd(s.handleRevokeBusToken))
+	// Bus TLS: the mode ladder, the pin and the readiness fact (#448).
+	mux.HandleFunc("GET /api/bus/tls", reqd(s.handleGetBusTLS))
+	mux.HandleFunc("PUT /api/bus/tls", reqd(s.handlePutBusTLS))
 
 	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))
 	mux.HandleFunc("POST /api/setup/mode", reqd(s.handleSetupMode))

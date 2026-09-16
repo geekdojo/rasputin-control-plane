@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"time"
 
@@ -33,6 +34,23 @@ type Config struct {
 	IssuerPublicKey string // account public key the callout responder signs with
 	APIUser         string // AuthUser name for the api's in-process connection
 	APIPass         string // AuthUser secret (per-boot random is fine)
+
+	// TLS, when non-nil, is served on the client port: server-auth TLS with
+	// the dedicated bus key, which agents trust by pin
+	// (geekdojo/geekdojo-brain#448, api/internal/bustls). nil keeps the bus
+	// plaintext, exactly as before — which is what every test helper that
+	// dials an embedded server still wants.
+	TLS *tls.Config
+	// AllowNonTLS, with TLS set, accepts plaintext clients beside TLS ones:
+	// the migration window, while nodes enrolled before the bus key existed
+	// have no pin yet. false with TLS set is TLS-required — the server's INFO
+	// says so, and a client that does not upgrade is refused before it can
+	// send its CONNECT, so its join token never crosses the wire.
+	//
+	// nats-server cannot change this on reload ("config reload not supported
+	// for AllowNonTLS"), so switching modes is a process restart; see
+	// bustls.Service.SetMode.
+	AllowNonTLS bool
 }
 
 // Start brings up the embedded NATS server, opens an in-process client,
@@ -55,6 +73,14 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		JetStream:  true,
 		StoreDir:   cfg.StoreDir,
 		NoSigs:     true,
+	}
+	if cfg.TLS != nil {
+		opts.TLSConfig = cfg.TLS
+		opts.AllowNonTLS = cfg.AllowNonTLS
+		// A few seconds, not the 0.5s default: a Pi 4 has no AES or SHA
+		// extensions and a boot-time handshake competes with everything
+		// else coming up.
+		opts.TLSTimeout = 5
 	}
 	if cfg.AuthEnforce {
 		if cfg.IssuerPublicKey == "" || cfg.APIUser == "" || cfg.APIPass == "" {
@@ -86,7 +112,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("bus: nats server not ready in 10s")
 	}
 
-	inProcOpts := []nats.Option{nats.InProcessServer(ns)}
+	inProcOpts := []nats.Option{nats.InProcessServer(ns), nats.Name(InProcessClientName)}
 	if cfg.AuthEnforce {
 		inProcOpts = append(inProcOpts, nats.UserInfo(cfg.APIUser, cfg.APIPass))
 	}
@@ -141,3 +167,37 @@ func (s *Server) Conn() *nats.Conn { return s.nc }
 
 // ClientURL is the URL external clients (e.g. the agent during dev) can dial.
 func (s *Server) ClientURL() string { return s.ns.ClientURL() }
+
+// InProcessClientName is the NATS client name of the api's own in-process
+// connection, so a listing of connections can leave it out: it never crosses
+// a network and has no TLS to report.
+const InProcessClientName = "rasputin-api (in-process)"
+
+// PlaintextClient is one client connection to the bus that is not using TLS.
+type PlaintextClient struct {
+	Name string `json:"name,omitempty"`
+	// User is the authorised username — the node id an agent presents — when
+	// auth is on. Empty with auth off.
+	User string `json:"user,omitempty"`
+	IP   string `json:"ip"`
+	Port int    `json:"port"`
+}
+
+// PlaintextClients lists the client connections currently open without TLS,
+// the api's own in-process connection excluded. It is the server's view,
+// independent of anything an agent reports about itself: the fact that says
+// turning plaintext off would cut someone off right now.
+func (s *Server) PlaintextClients() ([]PlaintextClient, error) {
+	cz, err := s.ns.Connz(&server.ConnzOptions{Limit: 4096})
+	if err != nil {
+		return nil, fmt.Errorf("bus: connz: %w", err)
+	}
+	out := []PlaintextClient{}
+	for _, c := range cz.Conns {
+		if c.TLSVersion != "" || c.Name == InProcessClientName {
+			continue
+		}
+		out = append(out, PlaintextClient{Name: c.Name, User: c.AuthorizedUser, IP: c.IP, Port: c.Port})
+	}
+	return out, nil
+}
