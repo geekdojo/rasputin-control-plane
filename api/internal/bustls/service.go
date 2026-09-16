@@ -60,11 +60,17 @@ const SettingKey = "bus.tls_mode"
 // node.env turns plaintext back on after a restart.
 const EnvMode = "RASPUTIN_BUS_TLS"
 
-// ParseMode accepts the three names, case-insensitively.
+// ParseMode accepts the three names, case-insensitively. It returns the
+// package constant, never the caller's string, so a mode that reaches a log
+// line or the settings table is one of three literals.
 func ParseMode(s string) (Mode, error) {
-	switch m := Mode(strings.ToLower(strings.TrimSpace(s))); m {
-	case ModeOffer, ModeMigrate, ModeRequire:
-		return m, nil
+	switch Mode(strings.ToLower(strings.TrimSpace(s))) {
+	case ModeOffer:
+		return ModeOffer, nil
+	case ModeMigrate:
+		return ModeMigrate, nil
+	case ModeRequire:
+		return ModeRequire, nil
 	}
 	return "", fmt.Errorf("bus TLS mode %q: want offer, migrate or require", s)
 }
