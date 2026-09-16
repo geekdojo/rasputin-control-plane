@@ -161,13 +161,13 @@ func (c *Client) handlePin(nc *nats.Conn, m *nats.Msg, nodeID, pinFile string) {
 	case cur != "":
 		ack.Pin = cur
 		ack.Detail = fmt.Sprintf("this node already pins %s; replacing a pin is key rotation, which the bus cannot serve — refusing rather than stranding the node", cur)
-		log.Printf("agent/bus: REFUSED a bus pin delivery: holds %s, offered %s", cur, want)
+		log.Printf("agent/bus: REFUSED a bus pin delivery: holds %q, offered %q", cur, want)
 		Respond(m, ack)
 		return
 	}
 	if err := WritePinFile(pinFile, want); err != nil {
 		ack.Detail = fmt.Sprintf("could not persist the pin to %s: %v — staying on the current connection rather than switching to a pin a reboot would forget", pinFile, err)
-		log.Printf("agent/bus: %s", ack.Detail)
+		log.Printf("agent/bus: %q", ack.Detail)
 		Respond(m, ack)
 		return
 	}
@@ -176,7 +176,7 @@ func (c *Client) handlePin(nc *nats.Conn, m *nats.Msg, nodeID, pinFile string) {
 	if err := nc.FlushTimeout(5 * time.Second); err != nil {
 		log.Printf("agent/bus: flush before re-dialing over TLS: %v", err)
 	}
-	log.Printf("agent/bus: bus pin %s delivered and saved to %s", want, pinFile)
+	log.Printf("agent/bus: bus pin %q delivered and saved to %q", want, pinFile)
 	// The pin is set before this handler returns, so a second delivery racing
 	// the re-dial reads "already pinned" rather than writing it again. The
 	// close is not on the subscription's goroutine: closing a conn from inside

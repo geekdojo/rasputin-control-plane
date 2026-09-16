@@ -245,12 +245,12 @@ func main() {
 		if err := client.SetPin(busPin); err != nil {
 			// ResolvePin already validated it; this is unreachable short of a
 			// bug, and a bug here must not take the node off the bus.
-			log.Printf("rasputin-agent: bus pin %s (%s): %v — dialing without it", busPin, busPinSource, err)
+			log.Printf("rasputin-agent: bus pin %q (%s): %q — dialing without it", busPin, busPinSource, err.Error())
 		} else {
-			log.Printf("rasputin-agent: bus pin %s (from %s) — the bus is dialed over TLS and the server's key must match", busPin, busPinSource)
+			log.Printf("rasputin-agent: bus pin %q (from %s) — the bus is dialed over TLS and the server's key must match", busPin, busPinSource)
 		}
 	} else {
-		log.Printf("rasputin-agent: no bus pin — the bus is dialed in PLAINTEXT until the control plane delivers one (%s)", busPinFile)
+		log.Printf("rasputin-agent: no bus pin — the bus is dialed in PLAINTEXT until the control plane delivers one (%q)", busPinFile)
 	}
 	subscribe(client.PinSubscriber(nodeID, busPinFile))
 	defer client.Close()

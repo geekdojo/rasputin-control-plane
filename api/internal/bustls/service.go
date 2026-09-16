@@ -313,7 +313,7 @@ func (s *Service) SetMode(ctx context.Context, m Mode) (Status, error) {
 		s.restarting = true
 	}
 	s.mu.Unlock()
-	log.Printf("bustls: mode %s → %s", prev, m)
+	log.Printf("bustls: mode %q → %q", prev, m)
 
 	if m == ModeMigrate && prev != ModeMigrate {
 		s.DeliverToAll(ctx)
@@ -355,7 +355,7 @@ func (s *Service) OnRegistered(_ context.Context, n *proto.Node) {
 func (s *Service) DeliverToAll(ctx context.Context) {
 	nodes, err := s.cfg.Nodes(ctx)
 	if err != nil {
-		log.Printf("bustls: deliver pin: list inventory: %v", err)
+		log.Printf("bustls: deliver pin: list inventory: %q", err.Error())
 		return
 	}
 	for _, n := range nodes {
@@ -390,11 +390,11 @@ func (s *Service) deliverAsync(nodeID string) {
 		ack, err := s.Deliver(ctx, nodeID)
 		switch {
 		case err != nil:
-			log.Printf("bustls: deliver pin to %s: %v", nodeID, err)
+			log.Printf("bustls: deliver pin to %q: %q", nodeID, err.Error())
 		case !ack.OK:
-			log.Printf("bustls: %s refused the pin: %s", nodeID, ack.Detail)
+			log.Printf("bustls: %q refused the pin: %q", nodeID, ack.Detail)
 		default:
-			log.Printf("bustls: %s holds the pin (reconnecting=%t)", nodeID, ack.Reconnecting)
+			log.Printf("bustls: %q holds the pin (reconnecting=%t)", nodeID, ack.Reconnecting)
 		}
 	}()
 }
