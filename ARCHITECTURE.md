@@ -80,6 +80,16 @@ a store delete; the next reconnect fails. The controlplane's own co-located
 agent connects over loopback and needs no token (it's already on the box that
 is the authority).
 
+The bus server offers **TLS with a dedicated bus key**, and nodes trust it by
+**pin**: the SHA-256 of that key, carried in their seed as `RASPUTIN_BUS_PIN`
+or delivered over the bus to nodes enrolled before it existed. The check is the
+key and nothing else — no CA chain, no hostname, no validity dates — so a node
+with a wrong clock still joins, and a mesh CA change cannot lock the fleet out.
+Plaintext stays accepted until the operator turns it off, which the api allows
+only once every enrolled node reports it is connected over TLS with the pin
+verified. The seed/file contract and the migration ladder are in
+[`docs/bus-tls-contract.md`](docs/bus-tls-contract.md).
+
 A node id is a lowercase DNS label — the first label of the node's FQDN:
 `a-z`, `0-9` and `-`, at most 63 characters, no leading or trailing hyphen.
 The api refuses any other id, loopback included, when it mints or preloads a

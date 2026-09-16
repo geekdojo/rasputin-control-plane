@@ -68,6 +68,8 @@ type RestoreLayout struct {
 	DataDir      string
 	TrustDir     string
 	MeshStateDir string
+	// BusDir holds bus.key; <DataDir>/bus when empty.
+	BusDir string
 }
 
 // restoreMove is one rename the apply performs, recorded for rollback.
@@ -120,6 +122,10 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 	if meshDir == "" {
 		meshDir = filepath.Join(layout.DataDir, "mesh")
 	}
+	busDir := layout.BusDir
+	if busDir == "" {
+		busDir = filepath.Join(layout.DataDir, "bus")
+	}
 
 	// Each staged path and where the live one lives. Only what the report
 	// says was restored is moved; a dev archive with no CA leaves the fresh
@@ -140,6 +146,10 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 			targets = append(targets, target{staged: "trust/mesh-ca.key", live: filepath.Join(trustDir, "mesh-ca.key"), aside: "trust/mesh-ca.key"})
 		case e.Path == "trust/mesh-ca.pem":
 			targets = append(targets, target{staged: "trust/mesh-ca.pem", live: filepath.Join(trustDir, "mesh-ca.pem"), aside: "trust/mesh-ca.pem"})
+		case e.Path == busKeyArchivePath:
+			// The restored key replaces the one this fresh install generated,
+			// so every node that pinned the original joins again (#448).
+			targets = append(targets, target{staged: busKeyArchivePath, live: filepath.Join(busDir, "bus.key"), aside: busKeyArchivePath})
 		case strings.HasPrefix(e.Path, "mesh/headscale/"):
 			restoredHeadscale = true
 		}
@@ -204,6 +214,7 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 	syncDir(layout.DataDir)
 	syncDir(trustDir)
 	syncDir(meshDir)
+	syncDir(busDir)
 
 	report.AppliedAt = &now
 	applied := filepath.Join(layout.DataDir, restoreAppliedDirName)

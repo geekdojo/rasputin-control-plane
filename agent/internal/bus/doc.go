@@ -24,6 +24,12 @@
 // from closed, because closed is also reachable by other routes (a Drain, a
 // server error the client treats as fatal).
 //
+// With a bus pin (RASPUTIN_BUS_PIN, or the pin file a bus.pin delivery wrote)
+// every connection is TLS and the server is trusted by the SHA-256 of its key
+// alone — no chain, no hostname, no dates; without one the Client dials in
+// plaintext, as every node did before geekdojo/geekdojo-brain#448. See pin.go
+// and docs/bus-tls-contract.md.
+//
 // Subject dispatch does NOT live here. Each subsystem (docker, storage,
 // updater, openwrt, tailscale, bmc, …) subscribes its own subjects on the
 // *nats.Conn the Client hands to onConn — on EVERY new conn, which is why the

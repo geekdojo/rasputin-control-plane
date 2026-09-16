@@ -36,6 +36,8 @@ const (
 // can compare what comes out with what went in.
 type identityFixture struct {
 	db, caKey, caPem, hsConfig, hsDB []byte
+	// busKey is the cluster bus key (#448), in the one-line seed form.
+	busKey []byte
 }
 
 func newIdentityFixture() identityFixture {
@@ -45,6 +47,7 @@ func newIdentityFixture() identityFixture {
 		caPem:    []byte("-----BEGIN CERTIFICATE-----\nMESH-CA-CERT\n-----END CERTIFICATE-----\n"),
 		hsConfig: []byte("server_url: https://cp.test\n"),
 		hsDB:     []byte("HEADSCALE-STATE"),
+		busKey:   []byte("QlVTLUtFWS1TVEFORC1JTg==\n"),
 	}
 }
 
@@ -98,6 +101,11 @@ func buildGeneration(t *testing.T, mount string, key testKeypair, fx identityFix
 	}
 	writeTestFile(t, filepath.Join(trust, "mesh-ca.key"), string(fx.caKey))
 	writeTestFile(t, filepath.Join(trust, "mesh-ca.pem"), string(fx.caPem))
+	busDir := filepath.Join(src, "bus")
+	if err := os.MkdirAll(busDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(busDir, "bus.key"), string(fx.busKey))
 	if err := os.MkdirAll(filepath.Join(mesh, "headscale", "db"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +121,7 @@ func buildGeneration(t *testing.T, mount string, key testKeypair, fx identityFix
 	report := NewAppVolumeReport(AppEnumeration{AppsInstalled: len(opts.volumes), AppsResolved: len(opts.volumes), Catalog: "test"}, opts.volumes, 1)
 	var tarBuf bytes.Buffer
 	m, err := Assemble(&tarBuf, AssembleOptions{
-		Sources:      IdentitySources{TrustDir: trust, MeshStateDir: mesh},
+		Sources:      IdentitySources{TrustDir: trust, MeshStateDir: mesh, BusDir: busDir},
 		SnapshotPath: filepath.Join(src, "snapshot.db"),
 		GenerationID: opts.id, JobID: "job-1", ClusterID: "home1", KeyID: restoreKeyID,
 		Now: time.Now().UTC(), AppVolumes: report, Scope: opts.scope,
@@ -372,6 +380,7 @@ func TestPrepareRestoreStagesTheIdentitySetAndReportsTheGap(t *testing.T) {
 		"rasputin.db":                        h.fx.db,
 		"trust/mesh-ca.key":                  h.fx.caKey,
 		"trust/mesh-ca.pem":                  h.fx.caPem,
+		"bus/bus.key":                        h.fx.busKey,
 		"mesh/headscale/config.yaml":         h.fx.hsConfig,
 		"mesh/headscale/db/headscale.sqlite": h.fx.hsDB,
 	}
@@ -627,7 +636,7 @@ func TestListRestoreCandidatesDescribesTheDisk(t *testing.T) {
 		t.Fatalf("generations = %+v", c.Generations)
 	}
 	g := c.Generations[0]
-	if g.ID != h.manifest.GenerationID || !g.Restorable || g.Complete || g.Scope != proto.BackupScopeFull || g.KeyID != restoreKeyID || g.IdentityEntries != 5 || g.ArchiveBytes == 0 {
+	if g.ID != h.manifest.GenerationID || !g.Restorable || g.Complete || g.Scope != proto.BackupScopeFull || g.KeyID != restoreKeyID || g.IdentityEntries != 6 || g.ArchiveBytes == 0 {
 		t.Fatalf("generation = %+v", g)
 	}
 	if len(g.AppVolumesPresent) != 1 || g.AppVolumesPresent[0].Name != "vaultwarden/data" || len(g.AppVolumesAbsent) != 1 || g.AppVolumesAbsent[0].Name != "photos/library" {
@@ -710,6 +719,13 @@ func seedFreshInstall(t *testing.T, dataDir string) {
 	writeTestFile(t, filepath.Join(dataDir, "trust", "mesh-ca.key"), "FRESH-CA-KEY")
 	writeTestFile(t, filepath.Join(dataDir, "trust", "mesh-ca.pem"), "FRESH-CA-PEM")
 	writeTestFile(t, filepath.Join(dataDir, "trust", "root-ca.pem"), "BUNDLE-ROOT")
+	// The bus key a reflashed controlplane generated at first start; the
+	// restore must replace it with the one every node pins (#448).
+	if err := os.MkdirAll(filepath.Join(dataDir, "bus"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(dataDir, "bus", "bus.key"), "FRESH-BUS-KEY")
+	writeTestFile(t, filepath.Join(dataDir, "bus", "issuer.nk"), "FRESH-ISSUER")
 	if err := os.MkdirAll(filepath.Join(dataDir, "mesh", "headscale"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -731,10 +747,12 @@ func TestApplyPendingRestoreSwapsTheIdentityIntoPlaceAndRecordsIt(t *testing.T) 
 		"rasputin.db":                        h.fx.db,
 		"trust/mesh-ca.key":                  h.fx.caKey,
 		"trust/mesh-ca.pem":                  h.fx.caPem,
+		"bus/bus.key":                        h.fx.busKey,
 		"mesh/headscale/config.yaml":         h.fx.hsConfig,
 		"mesh/headscale/db/headscale.sqlite": h.fx.hsDB,
 		// Untouched: not part of the identity set.
 		"trust/root-ca.pem": []byte("BUNDLE-ROOT"),
+		"bus/issuer.nk":     []byte("FRESH-ISSUER"),
 	}
 	for rel, body := range want {
 		got, err := os.ReadFile(filepath.Join(h.dataDir, filepath.FromSlash(rel)))
@@ -760,7 +778,7 @@ func TestApplyPendingRestoreSwapsTheIdentityIntoPlaceAndRecordsIt(t *testing.T) 
 	if replaced == "" {
 		t.Fatalf("no replaced dir among %v", ents)
 	}
-	for rel, body := range map[string]string{"rasputin.db": "FRESH-DB", "rasputin.db-wal": "FRESH-WAL", "trust/mesh-ca.key": "FRESH-CA-KEY", "mesh/headscale/fresh.yaml": "FRESH-HS"} {
+	for rel, body := range map[string]string{"rasputin.db": "FRESH-DB", "rasputin.db-wal": "FRESH-WAL", "trust/mesh-ca.key": "FRESH-CA-KEY", "bus/bus.key": "FRESH-BUS-KEY", "mesh/headscale/fresh.yaml": "FRESH-HS"} {
 		got, err := os.ReadFile(filepath.Join(replaced, filepath.FromSlash(rel)))
 		if err != nil || string(got) != body {
 			t.Fatalf("replaced %s: %v / %q", rel, err, got)

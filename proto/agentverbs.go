@@ -74,6 +74,12 @@ var verbMinAgentVersion = map[string]string{
 	// reason, and corrected for the same reason.
 	"docker.volumes.check": "2026.09.0-dev.151",
 	"docker.volumes.drop":  "2026.09.0-dev.151",
+	// bus.pin (geekdojo/geekdojo-brain#448): entered when the verb was
+	// authored, before its release existed, as the NEXT release run after
+	// v2026.09.3 (release run 162, the newest published control-plane release
+	// at the time), assuming the org var moves to 2026.09.4. Confirm with
+	// `git tag --contains` once the release exists and correct the floor.
+	BusPinVerb: "2026.09.4-dev.163",
 }
 
 // RestoreReplayMinAgentVersion is the first agent release whose
@@ -167,6 +173,9 @@ var metadataMinAgentVersion = map[string]string{
 	// with `git tag --contains` once the release exists and correct the
 	// floor.
 	MetadataMeshCAFingerprint: "2026.08.5-dev.141",
+	// busTls (geekdojo/geekdojo-brain#448): same release as the bus.pin verb,
+	// and the same caveat — confirm once the release exists.
+	MetadataBusTLS: "2026.09.4-dev.163",
 }
 
 // MetadataMinAgentVersion reports the first agent release whose registration

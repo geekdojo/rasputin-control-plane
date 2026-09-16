@@ -79,6 +79,9 @@ type IdentitySources struct {
 	// MeshStateDir is <dataDir>/mesh; its `headscale` subdirectory is the
 	// tailnet state §4.5 lists.
 	MeshStateDir string
+	// BusDir is <dataDir>/bus; its bus.key is the key every node pins the bus
+	// by (geekdojo/geekdojo-brain#448).
+	BusDir string
 }
 
 // ManifestEntry is one file captured into an archive.
@@ -245,7 +248,7 @@ func (r AppVolumeReport) Complete() bool {
 // It is about the BUILD, not about one run, which is why it says nothing about
 // counts. The per-run facts are AppVolumeReport.Summary and Volumes.
 const appVolumeFanOutReason = "This generation covers EVERY NODE (scope `" + proto.BackupScopeFull + "`). " +
-	"It contains the control-plane identity set — the database, the mesh CA and Headscale state — sealed by the controlplane, " +
+	"It contains the control-plane identity set — the database, the mesh CA, the bus key and Headscale state — sealed by the controlplane, " +
 	"plus every volume classed `critical` or `state` belonging to every installed app, each sealed on the node that hosts it and " +
 	"landed as its own member under volumes/. " +
 	"`bulk` volumes are a different lane (design/storage.md §4.7: streamed direct, never staged, not sealed) and that lane is not built; " +
@@ -396,22 +399,36 @@ type trustFile struct {
 }
 
 func trustFiles(src IdentitySources) []trustFile {
-	if strings.TrimSpace(src.TrustDir) == "" {
-		return nil
+	var out []trustFile
+	if strings.TrimSpace(src.TrustDir) != "" {
+		out = append(out,
+			trustFile{
+				abs:  filepath.Join(src.TrustDir, "mesh-ca.key"),
+				arc:  "trust/mesh-ca.key",
+				note: "the per-installation mesh CA's PRIVATE key — without it every operator device's installed trust is orphaned after a restore",
+			},
+			trustFile{
+				abs:  filepath.Join(src.TrustDir, "mesh-ca.pem"),
+				arc:  "trust/mesh-ca.pem",
+				note: "the per-installation mesh CA certificate",
+			},
+		)
 	}
-	return []trustFile{
-		{
-			abs:  filepath.Join(src.TrustDir, "mesh-ca.key"),
-			arc:  "trust/mesh-ca.key",
-			note: "the per-installation mesh CA's PRIVATE key — without it every operator device's installed trust is orphaned after a restore",
-		},
-		{
-			abs:  filepath.Join(src.TrustDir, "mesh-ca.pem"),
-			arc:  "trust/mesh-ca.pem",
-			note: "the per-installation mesh CA certificate",
-		},
+	if strings.TrimSpace(src.BusDir) != "" {
+		out = append(out, trustFile{
+			abs:  filepath.Join(src.BusDir, "bus.key"),
+			arc:  busKeyArchivePath,
+			note: busKeyNote,
+		})
 	}
+	return out
 }
+
+// busKeyArchivePath is where the bus key sits in an identity archive, and so
+// where a restore puts it back relative to /var/lib/rasputin.
+const busKeyArchivePath = "bus/bus.key"
+
+const busKeyNote = "the cluster bus's PRIVATE key — every node verifies the bus by its pin, so without it a restored or reflashed controlplane generates a new key and no node can join its bus"
 
 func headscaleDir(src IdentitySources) string {
 	if strings.TrimSpace(src.MeshStateDir) == "" {
@@ -468,6 +485,7 @@ type AssembleOptions struct {
 //	manifest.json                         the record, first
 //	rasputin.db                           the §4.5 identity set
 //	trust/mesh-ca.{key,pem}
+//	bus/bus.key
 //	mesh/headscale/...
 //
 // The app volumes are NOT in here. Each is its own sealed member beside this

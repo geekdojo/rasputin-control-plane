@@ -72,7 +72,7 @@ import (
 //
 // # Scope: identity only, and said so
 //
-// rasputin.db, trust/mesh-ca.{key,pem} and mesh/headscale. App volumes live
+// rasputin.db, trust/mesh-ca.{key,pem}, bus/bus.key and mesh/headscale. App volumes live
 // on compute nodes and their restore is the reverse transport — phase 2.
 // Every app-volume member the generation holds is recorded BY NAME in the
 // restore's own report as present and not restored, so nobody mistakes an
@@ -344,7 +344,7 @@ type TrustRedeliveryRecord struct {
 
 // restoreWarning is the report's standing caveat.
 const restoreWarning = "This restore put back the control-plane IDENTITY SET only — the database (users and passkeys, node bus tokens, app declarations, mesh intents), " +
-	"the mesh CA and Headscale state. Every operator device, user and node re-authenticates with no ceremony. " +
+	"the mesh CA, the bus key and Headscale state. Every operator device, user and node re-authenticates with no ceremony. " +
 	"APP DATA WAS NOT RESTORED: every app volume the generation holds is listed by name under appVolumesPresent and is still on the backup disk, sealed. " +
 	"Restoring app volumes to the nodes that host them is a later phase. Do not read this record as a full restore of the cluster."
 
@@ -358,6 +358,8 @@ func identityRestorePath(p string) (note string, ok bool) {
 		return "the per-installation mesh CA private key — every operator device's installed trust", true
 	case p == "trust/mesh-ca.pem":
 		return "the per-installation mesh CA certificate", true
+	case p == busKeyArchivePath:
+		return busKeyNote, true
 	case strings.HasPrefix(p, "mesh/headscale/"):
 		return "Headscale state — tailnet identity; nodes stay enrolled", true
 	}

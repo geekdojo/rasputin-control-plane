@@ -34,8 +34,10 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 // The metadata key converge_trust acts on has a floor, so a silent node can
 // be told apart from one whose agent never heard of the key.
 func TestMetadataMinAgentVersionLookup(t *testing.T) {
-	if _, ok := MetadataMinAgentVersion(MetadataMeshCAFingerprint); !ok {
-		t.Errorf("%s has no minimum agent version recorded", MetadataMeshCAFingerprint)
+	for _, key := range []string{MetadataMeshCAFingerprint, MetadataBusTLS} {
+		if _, ok := MetadataMinAgentVersion(key); !ok {
+			t.Errorf("%s has no minimum agent version recorded", key)
+		}
 	}
 	if v, ok := MetadataMinAgentVersion("primaryLanCidr"); ok || v != "" {
 		t.Errorf("primaryLanCidr: got (%q, %v), want unrecorded", v, ok)
@@ -45,7 +47,7 @@ func TestMetadataMinAgentVersionLookup(t *testing.T) {
 // The verbs the two misdiagnosed sites send are recorded, and a verb nobody
 // recorded says so rather than inventing a floor.
 func TestVerbMinAgentVersionLookup(t *testing.T) {
-	for _, verb := range []string{"storage.backup_stage_volume", "docker.volumes.list", "docker.volumes.remove", "storage.backup_restore_volume", "docker.pull", "docker.volumes.check", "docker.volumes.drop"} {
+	for _, verb := range []string{"storage.backup_stage_volume", "docker.volumes.list", "docker.volumes.remove", "storage.backup_restore_volume", "docker.pull", "docker.volumes.check", "docker.volumes.drop", BusPinVerb} {
 		if _, ok := VerbMinAgentVersion(verb); !ok {
 			t.Errorf("%s has no minimum agent version recorded", verb)
 		}

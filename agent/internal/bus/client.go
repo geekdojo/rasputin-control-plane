@@ -2,6 +2,8 @@ package bus
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/mdns"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
@@ -100,6 +103,13 @@ type Client struct {
 	conn      *nats.Conn
 	closed    bool // Close was called; never re-dial again
 	redialing bool
+	// pin is the bus key pin (proto.ParseBusPin form) every NEW conn is
+	// dialed with, "" for none; pinDigest is its parsed digest. See SetPin.
+	pin       string
+	pinDigest [sha256.Size]byte
+	// connPinned says the current conn was dialed with a pin, i.e. it can
+	// only exist at all because the TLS handshake verified the server's key.
+	connPinned bool
 
 	// redials counts successful re-dials from the closed state.
 	redials atomic.Int64
@@ -139,18 +149,21 @@ func New(url, nodeID, token string, onConn func(*nats.Conn) error, onConnected f
 // control plane it is dialing). Once Dial has succeeded the Client keeps the
 // connection alive on its own for the rest of the process.
 func (c *Client) Dial() error {
-	nc, err := c.dial()
+	nc, pinned, err := c.dial()
 	if err != nil {
 		return err
 	}
-	c.install(nc, false)
+	c.install(nc, pinned, false)
 	return nil
 }
 
 // dial connects and runs onConn. The returned conn is not yet the Client's
 // current conn — install does that — so a ClosedHandler firing on it before
 // install is ignored, and a rejected conn is closed without a re-dial.
-func (c *Client) dial() (*nats.Conn, error) {
+func (c *Client) dial() (*nats.Conn, bool, error) {
+	c.mu.Lock()
+	pin, digest := c.pin, c.pinDigest
+	c.mu.Unlock()
 	connOpts := []nats.Option{
 		nats.Name(fmt.Sprintf("rasputin-agent/%s", c.nodeID)),
 		// Resolve rasputin.local via mDNS on every (re)connect (see mdnsDialer).
@@ -217,33 +230,85 @@ func (c *Client) dial() (*nats.Conn, error) {
 	// non-loopback node is correctly denied. Harmless when the server has no
 	// auth — NATS ignores creds it doesn't require.
 	connOpts = append(connOpts, nats.UserInfo(c.nodeID, c.token))
+	if pin != "" {
+		// nats.Secure sets Opts.Secure, so a server whose INFO offers no TLS
+		// is refused with ErrSecureConnWanted BEFORE the CONNECT carrying the
+		// join token is written: a pinned node never speaks plaintext, and a
+		// man in the middle cannot talk it down to it. The verification is
+		// the pin and nothing else — see pinnedTLSConfig.
+		connOpts = append(connOpts, nats.Secure(pinnedTLSConfig(digest)))
+	}
 	connOpts = append(connOpts, c.extraOpts...)
 	nc, err := nats.Connect(c.url, connOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("agent/bus: connect %s: %w", c.url, err)
+		if pin != "" {
+			return nil, false, fmt.Errorf("agent/bus: connect %s (TLS, pinned %s): %w", c.url, pin, err)
+		}
+		return nil, false, fmt.Errorf("agent/bus: connect %s: %w", c.url, err)
 	}
 	if c.onConn != nil {
 		if err := c.onConn(nc); err != nil {
 			nc.Close()
-			return nil, fmt.Errorf("agent/bus: set up %s: %w", c.url, err)
+			return nil, false, fmt.Errorf("agent/bus: set up %s: %w", c.url, err)
 		}
 	}
-	return nc, nil
+	return nc, pin != "", nil
+}
+
+// errPinMismatch is what the TLS handshake fails with when the server's key is
+// not the pinned one.
+var errPinMismatch = errors.New("the bus server's key does not match RASPUTIN_BUS_PIN — refusing the connection (a controlplane with a different bus key: reflashed without restoring its identity, or not this cluster's)")
+
+// pinnedTLSConfig verifies the server by the SHA-256 of its leaf certificate's
+// SubjectPublicKeyInfo, and by nothing else: no CA chain, no hostname, no
+// validity dates (geekdojo/geekdojo-brain#448 — a chain would lock the fleet
+// out on a CA change, dates would make bus membership depend on a Pi's clock
+// at boot, before NTP).
+//
+// CodeQL/gosec flag InsecureSkipVerify, and here it is the opposite of
+// insecure: the chain check it skips would accept any certificate a trusted
+// CA signed, while VerifyConnection accepts exactly one public key.
+//
+// TRIP-WIRE: the safety of the InsecureSkipVerify line lives in the
+// VerifyConnection assignment beside it. VerifyConnection — not
+// VerifyPeerCertificate — because it runs on EVERY handshake, resumed ones
+// included; if it is removed, made conditional, or swapped for a check that
+// does not compare the full digest, this config accepts any server at all.
+func pinnedTLSConfig(want [sha256.Size]byte) *tls.Config {
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true, // verified by pin in VerifyConnection, below — see the doc comment
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("the bus server presented no certificate")
+			}
+			if !proto.BusPinMatchesSPKI(want, cs.PeerCertificates[0].RawSubjectPublicKeyInfo) {
+				return errPinMismatch
+			}
+			return nil
+		},
+	}
 }
 
 // install makes nc the current conn, announces it, and runs onConnected.
-// redialed says whether this is the first Dial or a re-dial from the closed
-// state — the log line and the counter differ, the rest is identical.
-func (c *Client) install(nc *nats.Conn, redialed bool) {
+// pinned says nc was dialed with a pin. redialed says whether this is the
+// first Dial or a re-dial from the closed state — the log line and the counter
+// differ, the rest is identical.
+func (c *Client) install(nc *nats.Conn, pinned, redialed bool) {
 	c.mu.Lock()
 	c.conn = nc
+	c.connPinned = pinned
 	c.redialing = false
 	c.mu.Unlock()
+	transport := "PLAINTEXT (no bus pin)"
+	if pinned {
+		transport = "TLS, server key pin verified"
+	}
 	if redialed {
 		c.redials.Add(1)
-		log.Printf("agent/bus: re-dialed %s as %s — new connection, handlers re-subscribed", nc.ConnectedUrl(), c.nodeID)
+		log.Printf("agent/bus: re-dialed %s as %s over %s — new connection, handlers re-subscribed", nc.ConnectedUrl(), c.nodeID, transport)
 	} else {
-		log.Printf("agent/bus: connected to %s as %s", nc.ConnectedUrl(), c.nodeID)
+		log.Printf("agent/bus: connected to %s as %s over %s", nc.ConnectedUrl(), c.nodeID, transport)
 	}
 	if c.onConnected != nil {
 		c.onConnected(nc)
@@ -299,9 +364,9 @@ func (c *Client) lost() {
 func (c *Client) redial() {
 	defer c.wg.Done()
 	for attempt := 1; ; attempt++ {
-		nc, err := c.dial()
+		nc, pinned, err := c.dial()
 		if err == nil {
-			c.install(nc, true)
+			c.install(nc, pinned, true)
 			return
 		}
 		wait := c.backoff.Delay(attempt)
@@ -340,6 +405,60 @@ func (c *Client) ConnectedAddr() string {
 		return ""
 	}
 	return nc.ConnectedAddr()
+}
+
+// SetPin sets the bus key pin every new connection is dialed with ("" for
+// none). It does not touch a connection that is already up — a delivered pin
+// (handlePin) replaces that one itself. Call before Dial.
+func (c *Client) SetPin(pin string) error {
+	pin = strings.TrimSpace(pin)
+	var digest [sha256.Size]byte
+	if pin != "" {
+		d, err := proto.ParseBusPin(pin)
+		if err != nil {
+			return err
+		}
+		digest = d
+	}
+	c.mu.Lock()
+	c.pin, c.pinDigest = pin, digest
+	c.mu.Unlock()
+	return nil
+}
+
+// Pin is the pin new connections are dialed with, "" for none.
+func (c *Client) Pin() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pin
+}
+
+// redialUnderPin closes nc when it is still the current connection, so the
+// closed-state re-dial replaces it with one dialed under the current pin. A
+// nil or already-closed conn needs nothing: the next dial reads the pin.
+func (c *Client) redialUnderPin(nc *nats.Conn) {
+	if nc == nil || nc.IsClosed() || nc != c.Conn() {
+		return
+	}
+	log.Printf("agent/bus: bus pin is %s — closing the current connection to re-dial over TLS", c.Pin())
+	nc.Close()
+}
+
+// BusTLS reports whether nc is the Client's current connection and is TLS with
+// the server's key verified against the pin. It is what the registration
+// reports as busTls.
+func (c *Client) BusTLS(nc *nats.Conn) bool {
+	if nc == nil {
+		return false
+	}
+	c.mu.Lock()
+	pinned := nc == c.conn && c.connPinned
+	c.mu.Unlock()
+	if !pinned {
+		return false
+	}
+	_, err := nc.TLSConnectionState()
+	return err == nil
 }
 
 // Redials reports how many times the Client has re-dialed from the closed

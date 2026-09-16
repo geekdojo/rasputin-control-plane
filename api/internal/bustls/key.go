@@ -1,0 +1,255 @@
+// Package bustls is the controlplane's half of TLS on the cluster bus
+// (geekdojo/geekdojo-brain#448): the dedicated bus key, the self-signed
+// certificate the embedded NATS server wraps it in, the pin nodes trust it by,
+// the migration mode that decides whether plaintext is still accepted, and the
+// delivery of the pin to nodes that were enrolled before it existed.
+//
+// The seed and file contract the OS and firewall images consume is
+// docs/bus-tls-contract.md; keep the two in step.
+package bustls
+
+import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
+)
+
+// KeyFileName is the bus key under the api's bus directory
+// (<dataDir>/bus/bus.key, /var/lib/rasputin/bus/bus.key on an appliance) —
+// beside issuer.nk and the token preseed.
+//
+// Format: ONE line, the standard base64 of the PKCS#8 DER private key, then a
+// newline. It is the same string a controlplane seed carries as
+// RASPUTIN_BUS_KEY, so the OS firstboot's whole job is to write the seed value
+// into this file verbatim — no decoding in shell. A PEM "PRIVATE KEY" (or "EC
+// PRIVATE KEY") block is accepted too, for an operator who made one with
+// openssl; the api only ever writes the one-line form.
+const KeyFileName = "bus.key"
+
+// Key is the dedicated, long-lived bus key.
+type Key struct {
+	signer crypto.Signer
+	pin    string
+}
+
+// Pin is the value nodes carry as RASPUTIN_BUS_PIN.
+func (k *Key) Pin() string { return k.pin }
+
+// Signer is the private key.
+func (k *Key) Signer() crypto.Signer { return k.signer }
+
+// EnsureKey loads dir/bus.key, generating and persisting a fresh ECDSA P-256
+// key (0600) when there is none — the same idiom as busauth.EnsureIssuer and
+// mesh.EnsureMeshCA. generated reports which happened, so the caller can say
+// so: a generated key on a cluster whose nodes already carry a pin is a
+// stranded fleet, and the log line is where that is first visible.
+//
+// A file that exists and does not parse is an error, never a reason to
+// generate: replacing a key the nodes pin would strand every one of them.
+func EnsureKey(dir string) (key *Key, generated bool, err error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, false, errors.New("bustls: EnsureKey: dir required")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, false, fmt.Errorf("bustls: mkdir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, KeyFileName)
+	data, err := os.ReadFile(path)
+	if err == nil {
+		signer, perr := ParseKey(data)
+		if perr != nil {
+			return nil, false, fmt.Errorf("bustls: %s exists but is not a usable bus key (refusing to replace it — every node pins this key): %w", path, perr)
+		}
+		// A seed consumer that forgot the mode leaves the private key world-
+		// readable; tighten it rather than refuse the key the nodes pin.
+		if info, serr := os.Stat(path); serr == nil && info.Mode().Perm()&0o077 != 0 {
+			if cerr := os.Chmod(path, 0o600); cerr != nil {
+				return nil, false, fmt.Errorf("bustls: %s is readable beyond its owner and could not be made 0600: %w", path, cerr)
+			}
+		}
+		k, kerr := keyFrom(signer)
+		return k, false, kerr
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, false, fmt.Errorf("bustls: read %s: %w", path, err)
+	}
+
+	signer, err := GenerateKey()
+	if err != nil {
+		return nil, false, err
+	}
+	line, err := EncodeKey(signer)
+	if err != nil {
+		return nil, false, err
+	}
+	// O_EXCL: two api processes racing a first start must not each write a
+	// different key and leave the loser's pin handed out.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, false, fmt.Errorf("bustls: create %s: %w", path, err)
+	}
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, false, fmt.Errorf("bustls: write %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, false, fmt.Errorf("bustls: sync %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, false, fmt.Errorf("bustls: close %s: %w", path, err)
+	}
+	k, err := keyFrom(signer)
+	return k, true, err
+}
+
+// GenerateKey makes a fresh bus key: ECDSA P-256. Chosen over Ed25519 for
+// reach, not speed — every Go TLS stack and every openssl an operator will
+// debug with speaks it — and over RSA for size and handshake cost on a Pi 4
+// with no crypto extensions.
+func GenerateKey() (crypto.Signer, error) {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("bustls: generate key: %w", err)
+	}
+	return k, nil
+}
+
+// EncodeKey renders a key in the one-line seed/file form: standard base64 of
+// PKCS#8 DER. No PEM armour, no line breaks, nothing a sourced sh file or a
+// UCI value would mangle (the alphabet is A-Z a-z 0-9 + / =).
+func EncodeKey(signer crypto.Signer) (string, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(signer)
+	if err != nil {
+		return "", fmt.Errorf("bustls: marshal key: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(der), nil
+}
+
+// ParseKey reads either form EnsureKey accepts: the one-line base64 PKCS#8
+// DER, or a PEM block. Surrounding whitespace is ignored.
+func ParseKey(data []byte) (crypto.Signer, error) {
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return nil, errors.New("empty")
+	}
+	var der []byte
+	if strings.HasPrefix(s, "-----BEGIN") {
+		block, _ := pem.Decode([]byte(s))
+		if block == nil {
+			return nil, errors.New("PEM armour with no decodable block")
+		}
+		if block.Type == "EC PRIVATE KEY" {
+			k, err := x509.ParseECPrivateKey(block.Bytes)
+			if err != nil {
+				return nil, fmt.Errorf("parse EC private key: %w", err)
+			}
+			return k, nil
+		}
+		der = block.Bytes
+	} else {
+		b, err := base64.StdEncoding.Strict().DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("not standard base64 of a PKCS#8 key: %w", err)
+		}
+		der = b
+	}
+	k, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("parse PKCS#8 private key: %w", err)
+	}
+	switch v := k.(type) {
+	case *ecdsa.PrivateKey:
+		return v, nil
+	case ed25519.PrivateKey:
+		return v, nil
+	case *rsa.PrivateKey:
+		return v, nil
+	}
+	return nil, fmt.Errorf("unsupported key type %T", k)
+}
+
+func keyFrom(signer crypto.Signer) (*Key, error) {
+	pin, err := proto.BusPinForPublicKey(signer.Public())
+	if err != nil {
+		return nil, fmt.Errorf("bustls: %w", err)
+	}
+	return &Key{signer: signer, pin: pin}, nil
+}
+
+// certNotBefore / certNotAfter bracket every certificate the api wraps the
+// key in. The dates mean nothing to a Rasputin node, which checks the key's
+// hash and nothing else; they are wide so a client that DOES look at them — an
+// operator's `nats` CLI with --tlsca, say — is not tripped by a node clock or
+// by the passage of time. 9999-12-31 is RFC 5280's "no well-defined expiration".
+var (
+	certNotBefore = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	certNotAfter  = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+)
+
+// SelfSignedCert wraps signer in a self-signed certificate valid from
+// notBefore to notAfter. Exported so a test can build a certificate that is
+// not yet valid, or long expired, around the same key and prove the pin check
+// ignores both.
+func SelfSignedCert(signer crypto.Signer, notBefore, notAfter time.Time) (tls.Certificate, error) {
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("bustls: serial: %w", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "rasputin-bus"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, signer.Public(), signer)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("bustls: self-sign: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("bustls: parse self-signed: %w", err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: signer, Leaf: leaf}, nil
+}
+
+// ServerTLSConfig is what the embedded NATS server serves: the key in a
+// freshly self-signed certificate, TLS 1.3 only (every client is a Go agent),
+// no client certificates (mTLS is out of scope, #448 decided design step 6).
+func (k *Key) ServerTLSConfig() (*tls.Config, error) {
+	cert, err := SelfSignedCert(k.signer, certNotBefore, certNotAfter)
+	if err != nil {
+		return nil, err
+	}
+	return ServerTLSConfigFor(cert), nil
+}
+
+// ServerTLSConfigFor is ServerTLSConfig around an existing certificate.
+func ServerTLSConfigFor(cert tls.Certificate) *tls.Config {
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+	}
+}

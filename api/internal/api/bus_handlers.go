@@ -77,12 +77,15 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// token is returned ONCE — the operator seeds it into the node and it's
-	// unrecoverable afterward.
+	// unrecoverable afterward. busPin rides along so the seed the UI renders
+	// from this response carries RASPUTIN_BUS_PIN (#448) — the same response,
+	// so a seed can never pair a token with a pin fetched at another moment.
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"id":     id,
 		"label":  body.Label,
 		"nodeId": body.NodeID,
 		"token":  plaintext,
+		"busPin": s.busPin(),
 	})
 }
 

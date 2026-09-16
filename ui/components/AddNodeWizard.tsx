@@ -177,6 +177,7 @@ export function AddNodeWizard({
           <FirewallSuccessView
             nodeId={minted.nodeId}
             token={minted.token}
+            busPin={minted.busPin}
             sshKey={sshCheck.key}
             clusterHostname={clusterHostname}
             clusterId={clusterId}
@@ -188,6 +189,7 @@ export function AddNodeWizard({
             arch={arch}
             nodeId={minted.nodeId}
             token={minted.token}
+            busPin={minted.busPin}
             sshKey={sshCheck.key}
             clusterOsVersion={clusterOsVersion}
             clusterHostname={clusterHostname}
@@ -340,6 +342,7 @@ function SuccessView({
   arch,
   nodeId,
   token,
+  busPin,
   sshKey,
   clusterOsVersion,
   clusterHostname,
@@ -350,6 +353,8 @@ function SuccessView({
   arch: NodeArch;
   nodeId: string;
   token: string;
+  // The live bus pin from the mint response ('' if the controlplane has none).
+  busPin: string;
   sshKey: string;
   clusterOsVersion?: string;
   clusterHostname: string;
@@ -357,7 +362,7 @@ function SuccessView({
   clusterId: string;
   onClose: () => void;
 }) {
-  const seed = renderNodeSeed(role, nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId);
+  const seed = renderNodeSeed(role, nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId, busPin);
   const image = nodeImageFor(clusterOsVersion, arch);
   const command = flashCommand(seed, arch, cpBaseFor(clusterHostname));
   const archLabel = NODE_ARCHES.find((a) => a.value === arch)?.label ?? arch.toUpperCase();
@@ -494,6 +499,7 @@ function SuccessView({
 function FirewallSuccessView({
   nodeId,
   token,
+  busPin,
   sshKey,
   clusterHostname,
   clusterId,
@@ -501,13 +507,15 @@ function FirewallSuccessView({
 }: {
   nodeId: string;
   token: string;
+  // The live bus pin from the mint response ('' if the controlplane has none).
+  busPin: string;
   sshKey: string;
   clusterHostname: string;
   // Bare cluster id — seeds carry it as RASPUTIN_CLUSTER_ID.
   clusterId: string;
   onClose: () => void;
 }) {
-  const seed = renderFirewallSeed(nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId);
+  const seed = renderFirewallSeed(nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId, busPin);
   const flashCmd = firewallFlashCommand(seed, cpBaseFor(clusterHostname));
   const [showManual, setShowManual] = useState(false);
   const [image, setImage] = useState<FlashableImage | null>(null);
