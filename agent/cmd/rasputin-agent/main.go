@@ -121,6 +121,21 @@ func main() {
 	// controlplane (trusted via loopback) and harmless when the server has no
 	// auth enabled. See agent/internal/bus.Connect.
 	joinToken := os.Getenv("RASPUTIN_CP_JOIN_TOKEN")
+	// Bus pin (geekdojo/geekdojo-brain#448): the SHA-256 of the controlplane's
+	// bus key, which this node verifies the bus server against over TLS.
+	// RASPUTIN_BUS_PIN from the seed, else the pin the controlplane delivered
+	// over the bus and this agent saved under its state dir. None: the node
+	// dials plaintext, as every node did before, until one is delivered.
+	busPinFile := bus.PinFilePath(stateDir)
+	busPin, busPinSource, busPinEnvErr, busPinFileErr := bus.ResolvePin(os.Getenv(bus.EnvPin), busPinFile)
+	if busPinEnvErr != nil {
+		faults.Reject(bus.EnvPin, os.Getenv(bus.EnvPin), []string{"sha256/<44-character base64>"},
+			"this node does not verify the bus server by that value; it uses the pin the control plane delivered, if any, else plaintext")
+	}
+	if busPinFileErr != nil {
+		faults.Reject(busPinFile, "", []string{"sha256/<44-character base64>"},
+			"the saved bus pin is unreadable, so this node dials the bus in plaintext until the control plane delivers the pin again")
+	}
 	// Storage snapshot paths for the register event: statfs the same
 	// filesystem the disk metric measures (the persistent partition — never
 	// "/", the read-only squashfs), and read the growpart breadcrumb from the
@@ -198,8 +213,11 @@ func main() {
 		}
 		return tsBackend.TrustFingerprint()
 	}
+	// busTLS reports the registering connection's transport; set once the
+	// client exists, below, and read only from bus callbacks after Dial.
+	var busTLS func(*nats.Conn) bool
 	reregister := func(c *nats.Conn) {
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint)
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint, busTLS)
 	}
 	// The cluster-DNS pin follows the bus connection: every successful
 	// connect — first dial, nats reconnect, re-dial — fires this right after
@@ -222,6 +240,19 @@ func main() {
 	// publish lands on whichever connection is current.
 	client := bus.New(natsURL, nodeID, joinToken, subscribeAll, onConnected)
 	client.OnLost(dnsPin.Lost)
+	busTLS = client.BusTLS
+	if busPin != "" {
+		if err := client.SetPin(busPin); err != nil {
+			// ResolvePin already validated it; this is unreachable short of a
+			// bug, and a bug here must not take the node off the bus.
+			log.Printf("rasputin-agent: bus pin %s (%s): %v — dialing without it", busPin, busPinSource, err)
+		} else {
+			log.Printf("rasputin-agent: bus pin %s (from %s) — the bus is dialed over TLS and the server's key must match", busPin, busPinSource)
+		}
+	} else {
+		log.Printf("rasputin-agent: no bus pin — the bus is dialed in PLAINTEXT until the control plane delivers one (%s)", busPinFile)
+	}
+	subscribe(client.PinSubscriber(nodeID, busPinFile))
 	defer client.Close()
 	// For hooks that re-register outside a bus event (a simulated reboot, a
 	// mesh enroll, a BMC swap): always the current conn, never a captured one.
@@ -836,8 +867,14 @@ func uciLANAddr(lookup func(context.Context) (string, string, error), fallback f
 	}
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), trustFingerprint func() string) {
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), trustFingerprint func() string, busTLS func(*nats.Conn) bool) {
 	meta := map[string]any{}
+	// Whether THIS connection is TLS with the bus key pin verified. Always
+	// present from an agent that knows the field, false included: the api
+	// turns plaintext off only when every node says true, so "said false" and
+	// "cannot say" both hold it back, and only the first is a node that needs
+	// the pin delivered (geekdojo/geekdojo-brain#448).
+	meta[proto.MetadataBusTLS] = busTLS != nil && busTLS(nc)
 	// Which mesh CA this node trusts, as a fingerprint — never the PEM. The
 	// api compares it with its own on every mesh.reconcile and re-delivers
 	// the CA when they differ (converge_trust; e3bench 2026-09-04, where an

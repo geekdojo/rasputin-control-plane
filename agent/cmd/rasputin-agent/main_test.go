@@ -264,6 +264,11 @@ func registeredEvt(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertis
 // registeredEvtWithFaults is registeredEvt plus the startup config-fault set,
 // so the reporting half of #89 can be exercised on the real publish path.
 func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set) proto.NodeRegisteredEvt {
+	return registeredEvtFull(t, nc, nodeID, adv, faults, nil)
+}
+
+// registeredEvtFull is registeredEvtWithFaults plus the bus-TLS reporter.
+func registeredEvtFull(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool) proto.NodeRegisteredEvt {
 	t.Helper()
 	sub, err := nc.SubscribeSync(proto.NodeRegisteredSubject(nodeID))
 	if err != nil {
@@ -275,7 +280,7 @@ func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bm
 	// table would make that assertion depend on where the suite runs.
 	lanAddr := func() (string, string) { return "192.168.1.50", "192.168.1.50/24" }
 	trust := func() string { return "fp-test" }
-	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr, trust)
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr, trust, busTLS)
 	msg, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
 		t.Fatalf("no registered event: %v", err)
@@ -307,6 +312,33 @@ func TestPublishRegistered_AdvertisesBMCTargets(t *testing.T) {
 	}
 	if ev.Metadata[proto.MetadataBMCConfigPinned] != true {
 		t.Errorf("metadata %s: %v", proto.MetadataBMCConfigPinned, ev.Metadata[proto.MetadataBMCConfigPinned])
+	}
+}
+
+// busTls is on every registration, false included: the api holds plaintext
+// on until every node says true, and a missing key reads as an agent too old
+// to say — which is a different fix (update it) from false (deliver the pin).
+func TestPublishRegistered_ReportsBusTLS(t *testing.T) {
+	nc := testBus(t)
+	for _, tc := range []struct {
+		name   string
+		busTLS func(*nats.Conn) bool
+		want   bool
+	}{
+		{"no reporter", nil, false},
+		{"plaintext", func(*nats.Conn) bool { return false }, false},
+		{"tls with pin verified", func(*nats.Conn) bool { return true }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := registeredEvtFull(t, nc, "cp-test", nil, nil, tc.busTLS)
+			got, present := ev.Metadata[proto.MetadataBusTLS]
+			if !present {
+				t.Fatalf("metadata %s absent: %v", proto.MetadataBusTLS, ev.Metadata)
+			}
+			if got != tc.want {
+				t.Errorf("metadata %s = %v, want %v", proto.MetadataBusTLS, got, tc.want)
+			}
+		})
 	}
 }
 
