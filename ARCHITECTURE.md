@@ -85,9 +85,11 @@ The bus server offers **TLS with a dedicated bus key**, and nodes trust it by
 or delivered over the bus to nodes enrolled before it existed. The check is the
 key and nothing else — no CA chain, no hostname, no validity dates — so a node
 with a wrong clock still joins, and a mesh CA change cannot lock the fleet out.
-Plaintext stays accepted until the operator turns it off, which the api allows
-only once every enrolled node reports it is connected over TLS with the pin
-verified. The seed/file contract and the migration ladder are in
+The api migrates an existing cluster by itself: once
+its own build is committed on its A/B slot it hands the pin to nodes that lack
+it, and once every enrolled node reports TLS with the pin verified, no
+plaintext connection is open and no job is in flight, it records TLS-only and
+restarts to refuse plaintext. The seed/file contract and the mode ladder are in
 [`docs/bus-tls-contract.md`](docs/bus-tls-contract.md).
 
 A node id is a lowercase DNS label — the first label of the node's FQDN:

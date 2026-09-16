@@ -17,31 +17,37 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// Mode is how the bus treats plaintext, and whether the api is pushing the pin.
+// Mode is how the bus treats plaintext, and whether the api is handing out the
+// pin. The api moves itself up the ladder; nobody calls anything (Bryce,
+// 2026-09-16: "alpha users are not going to run Postman queries").
 //
-// The ladder is #448's migration order, one rung per step, each moved by an
-// operator action and — for the last rung — only when a checkable fact says
-// it is safe. Nothing here moves on a timer.
+//	offer    TLS is served beside plaintext. Nodes that already carry a pin (a
+//	         provisioned set, an Add-node seed) use TLS; nobody is told a pin.
+//	migrate  As offer, and the api delivers the pin to every node that is not
+//	         on TLS. Each node saves it and re-dials over TLS.
+//	require  The server refuses plaintext.
 //
-//	offer    TLS is served beside plaintext. Nodes that already carry a pin
-//	         (a provisioned set, an Add-node seed) connect over TLS; nobody is
-//	         told a pin. The default, and the only rung that changes nothing
-//	         for a node — so upgrading the controlplane is not itself the
-//	         migration.
-//	migrate  As offer, and the api delivers the pin to every node that
-//	         registers without reporting busTls=true (and to every online one
-//	         the moment the mode is entered). Each node persists it and
-//	         reconnects over TLS.
-//	require  Plaintext is refused by the server. Entered only when every
-//	         inventory node reports busTls=true and no plaintext connection is
-//	         open. Needs an api restart, because nats-server cannot reload the
-//	         setting.
+// Transitions, each on a checkable fact and never on a clock:
 //
-// Why offer and migrate are separate rungs: a delivered pin cannot be taken
-// back over the bus. A node that holds one refuses plaintext for good, so an
-// api that is rolled back to a build with no TLS strands every pinned node.
-// Delivery therefore starts when the operator says the controlplane build is
-// the one they are keeping — not the moment it boots.
+//	offer → migrate    the controlplane's running build is COMMITTED on its A/B
+//	                   slot (Config.Committed). A delivered pin cannot be taken
+//	                   back over the bus, and an api rolled back to a pre-TLS
+//	                   build would strand every pinned node, so delivery waits
+//	                   until nothing automatic can roll this build back.
+//	migrate → require  every enrolled node reports busTls=true, the server holds
+//	                   no plaintext client connection (the controlplane's own
+//	                   loopback agent included), and no job is in flight. Then
+//	                   job intake closes, require is persisted, and the api
+//	                   restarts once — nats-server cannot change the setting on
+//	                   reload.
+//
+// Nothing moves back down on its own. RASPUTIN_BUS_TLS pins a mode (the escape
+// hatch for a controlplane with a node that cannot speak TLS); a pinned mode is
+// never changed, and a pinned mode other than require raises a standing warning.
+//
+// Re-evaluation is event-driven: a node registering, a client connection
+// closing, a job ending, and the service starting. Each evaluation's I/O is
+// bounded by a timeout; nothing waits on a clock for a fact to change.
 type Mode string
 
 const (
@@ -50,19 +56,15 @@ const (
 	ModeRequire Mode = "require"
 )
 
-// SettingKey is where the chosen mode is persisted (the settings table, so it
-// is in the identity backup with everything else the operator decided).
+// SettingKey is where the api records the rung it reached (the settings table,
+// so an identity restore brings it back with everything else).
 const SettingKey = "bus.tls_mode"
 
-// EnvMode, when set, pins the mode: the api reads it instead of the setting
-// and refuses to change it. The escape hatch for a controlplane whose setting
-// is wrong and whose UI is unreachable — `RASPUTIN_BUS_TLS=migrate` in
-// node.env turns plaintext back on after a restart.
+// EnvMode, when set, pins the mode and stops the automatic ladder.
 const EnvMode = "RASPUTIN_BUS_TLS"
 
 // ParseMode accepts the three names, case-insensitively. It returns the
-// package constant, never the caller's string, so a mode that reaches a log
-// line or the settings table is one of three literals.
+// package constant, never the caller's string.
 func ParseMode(s string) (Mode, error) {
 	switch Mode(strings.ToLower(strings.TrimSpace(s))) {
 	case ModeOffer:
@@ -85,8 +87,8 @@ type Settings interface {
 }
 
 // ResolveStartMode decides the mode for this process start: the env pin when
-// set, else the persisted setting, else offer. A malformed value is an error
-// the caller reports and survives — as offer, the rung that changes nothing.
+// set, else the recorded rung, else offer. A malformed value is an error the
+// caller reports and survives — as offer, the rung that changes nothing.
 func ResolveStartMode(ctx context.Context, settings Settings) (mode Mode, pinned bool, err error) {
 	if v := strings.TrimSpace(os.Getenv(EnvMode)); v != "" {
 		m, perr := ParseMode(v)
@@ -124,40 +126,111 @@ type Config struct {
 	Nodes func(ctx context.Context) ([]*proto.Node, error)
 	// Plaintext lists open plaintext client connections (bus.Server).
 	Plaintext func() ([]bus.PlaintextClient, error)
-	// NC delivers the pin.
+	// NC delivers the pin and carries the job events the service listens to.
 	NC *nats.Conn
-	// Restart ends this process so the unit starts a new one with the new
-	// server option. Called at most once, after the mode is persisted.
+	// Committed reports whether the controlplane's running build is committed
+	// (updater.SelfBuildCommitted), with the reason either way.
+	Committed func(ctx context.Context) (bool, string, error)
+	// InFlight lists jobs in flight, for the status page (jobs.InFlight).
+	InFlight func(ctx context.Context) ([]string, error)
+	// Quiesce closes job intake if and only if nothing is in flight
+	// (jobs.Runner.QuiesceIfIdle); Reopen undoes it (jobs.Runner.Reopen).
+	Quiesce func(ctx context.Context) (bool, []string, error)
+	Reopen  func()
+	// Restart ends this process so the unit starts one with the new server
+	// option. Called at most once per process.
 	Restart func()
-	// DeliverTimeout bounds one bus.pin request. Default 10s.
+	// DeliverTimeout bounds one bus.pin request; EvalTimeout bounds one
+	// evaluation's I/O. Defaults 10s and 30s.
 	DeliverTimeout time.Duration
+	EvalTimeout    time.Duration
+	// OnEvaluated, when set, is called after every evaluation with the rung it
+	// left the ladder on. A test seam: it makes "an evaluation ran and did not
+	// move" something a test can wait for instead of sleeping.
+	OnEvaluated func(mode Mode, err error)
 }
 
-// Service owns the mode, the readiness fact and pin delivery.
+// Service owns the ladder, the facts and pin delivery.
 type Service struct {
 	cfg Config
 
-	mu      sync.Mutex
-	mode    Mode // the configured mode (what the setting now says)
-	pending map[string]bool
-	// restarting is set once Restart has been called.
-	restarting bool
+	mu         sync.Mutex
+	mode       Mode // the rung reached (what the setting now says)
+	restarting bool // Restart has been called
+	stopped    bool
+	pending    map[string]bool // node ids with a delivery in flight
+	// closedCIDs are connections a disconnect advisory reported closed. The
+	// advisory can precede the server dropping the connection from Connz, so
+	// the listing is filtered through this set. Pruned to ids still listed.
+	closedCIDs map[uint64]bool
+	// evaluating / dirty coalesce kicks: one evaluation at a time, and a kick
+	// during one makes it run once more.
+	evaluating bool
+	dirty      bool
 	wg         sync.WaitGroup
+	sub        *nats.Subscription
 }
 
-// NewService builds the service. It does no I/O.
+// NewService builds the service. It does no I/O; Start begins listening.
 func NewService(cfg Config) *Service {
 	if cfg.DeliverTimeout <= 0 {
 		cfg.DeliverTimeout = 10 * time.Second
 	}
+	if cfg.EvalTimeout <= 0 {
+		cfg.EvalTimeout = 30 * time.Second
+	}
 	if cfg.StartMode == "" {
 		cfg.StartMode = ModeOffer
 	}
-	return &Service{cfg: cfg, mode: cfg.StartMode, pending: map[string]bool{}}
+	return &Service{cfg: cfg, mode: cfg.StartMode, pending: map[string]bool{}, closedCIDs: map[uint64]bool{}}
 }
+
+// Start subscribes to job events (a job ending can release both transitions)
+// and runs the first evaluation. Node registrations and client disconnects
+// arrive through OnRegistered and NoteDisconnect, which the caller wires.
+func (s *Service) Start() error {
+	if s.cfg.NC != nil {
+		sub, err := s.cfg.NC.Subscribe(proto.JobEventsSubject("*"), func(m *nats.Msg) {
+			var ev proto.JobEvent
+			if json.Unmarshal(m.Data, &ev) != nil {
+				return
+			}
+			if ev.Type == proto.JobSucceeded || ev.Type == proto.JobFailed {
+				s.Kick("job " + ev.JobID + " " + string(ev.Type))
+			}
+		})
+		if err != nil {
+			return fmt.Errorf("bustls: subscribe job events: %w", err)
+		}
+		s.sub = sub
+	}
+	s.Kick("start")
+	return nil
+}
+
+// Stop stops evaluating and waits for evaluations and deliveries in flight.
+func (s *Service) Stop() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+	if s.sub != nil {
+		_ = s.sub.Unsubscribe()
+	}
+	s.wg.Wait()
+}
+
+// Wait blocks until every evaluation and delivery started so far has finished.
+func (s *Service) Wait() { s.wg.Wait() }
 
 // Pin is the live pin.
 func (s *Service) Pin() string { return s.cfg.Key.Pin() }
+
+// Mode is the rung reached.
+func (s *Service) Mode() Mode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mode
+}
 
 // NodeTLS is one inventory node's report.
 type NodeTLS struct {
@@ -165,71 +238,135 @@ type NodeTLS struct {
 	Role   proto.NodeRole   `json:"role"`
 	Status proto.NodeStatus `json:"status"`
 	// BusTLS is what the node last reported at registration: true only for a
-	// connection that was TLS with the pin verified. false covers "reported
-	// plaintext" and "never reported" (an agent that predates the field) —
-	// both block require; Reported tells them apart.
+	// connection that was TLS with the pin verified. Reported tells "said
+	// false" from "never said" (an agent that predates the field).
 	BusTLS   bool `json:"busTls"`
 	Reported bool `json:"reported"`
 }
 
 // Status is the whole picture GET /api/bus/tls serves.
 type Status struct {
-	// Mode is the configured mode; ModePinned says it came from EnvMode and
-	// cannot be changed through the api.
 	Mode       Mode `json:"mode"`
 	ModePinned bool `json:"modePinned"`
-	// PlaintextAllowed is what the RUNNING server does, which differs from
-	// Mode only between a mode change that needs a restart and that restart.
+	// PlaintextAllowed is what the RUNNING server does. It differs from Mode
+	// only between persisting require and the restart that applies it.
 	PlaintextAllowed bool `json:"plaintextAllowed"`
 	RestartPending   bool `json:"restartPending"`
-	// Pin is the value to seed as RASPUTIN_BUS_PIN. Public: it is a hash of a
-	// public key.
+	// Pin is the value to seed as RASPUTIN_BUS_PIN. Public.
 	Pin string `json:"pin"`
-	// Ready is the fact require waits for: at least one node, every inventory
-	// node reporting busTls=true, and no plaintext connection open.
-	Ready                bool                  `json:"ready"`
-	Blockers             []string              `json:"blockers"`
+	// Next is the rung the api moves to once Blockers is empty; "" at require
+	// or when the mode is pinned.
+	Next Mode `json:"next,omitempty"`
+	// Blockers is every fact holding Next back, in words. Empty with Next set
+	// means the move is under way.
+	Blockers []string `json:"blockers"`
+
+	Committed            *bool                 `json:"controlplaneCommitted,omitempty"`
+	CommittedDetail      string                `json:"controlplaneCommittedDetail,omitempty"`
 	Nodes                []NodeTLS             `json:"nodes"`
 	PlaintextConnections []bus.PlaintextClient `json:"plaintextConnections"`
+	JobsInFlight         []string              `json:"jobsInFlight"`
 }
 
-// Status computes the picture from inventory and the server, now.
+// Status computes the picture now. It changes nothing.
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	s.mu.Lock()
-	mode := s.mode
+	mode, restarting := s.mode, s.restarting
 	s.mu.Unlock()
 	st := Status{
-		Mode:             mode,
-		ModePinned:       s.cfg.StartModePinned,
-		PlaintextAllowed: s.cfg.StartMode.AllowsPlaintext(),
-		RestartPending:   mode.AllowsPlaintext() != s.cfg.StartMode.AllowsPlaintext(),
-		Pin:              s.Pin(),
-		Blockers:         []string{},
-		Nodes:            []NodeTLS{},
+		Mode:                 mode,
+		ModePinned:           s.cfg.StartModePinned,
+		PlaintextAllowed:     s.cfg.StartMode.AllowsPlaintext(),
+		RestartPending:       restarting || mode.AllowsPlaintext() != s.cfg.StartMode.AllowsPlaintext(),
+		Pin:                  s.Pin(),
+		Blockers:             []string{},
+		Nodes:                []NodeTLS{},
+		PlaintextConnections: []bus.PlaintextClient{},
+		JobsInFlight:         []string{},
 	}
 	nodes, err := s.cfg.Nodes(ctx)
 	if err != nil {
 		return st, fmt.Errorf("bustls: list inventory: %w", err)
 	}
 	for _, n := range nodes {
-		tlsOn, reported := BusTLSOf(n)
-		st.Nodes = append(st.Nodes, NodeTLS{ID: n.ID, Role: n.Role, Status: n.Status, BusTLS: tlsOn, Reported: reported})
+		on, reported := BusTLSOf(n)
+		st.Nodes = append(st.Nodes, NodeTLS{ID: n.ID, Role: n.Role, Status: n.Status, BusTLS: on, Reported: reported})
 	}
 	sort.Slice(st.Nodes, func(i, j int) bool { return st.Nodes[i].ID < st.Nodes[j].ID })
-	plain, err := s.cfg.Plaintext()
-	if err != nil {
-		return st, fmt.Errorf("bustls: list plaintext connections: %w", err)
+	if st.PlaintextConnections, err = s.openPlaintext(); err != nil {
+		return st, err
 	}
-	st.PlaintextConnections = plain
-	st.Blockers = blockers(st.Nodes, plain)
-	st.Ready = len(st.Blockers) == 0
+	if s.cfg.InFlight != nil {
+		if st.JobsInFlight, err = s.cfg.InFlight(ctx); err != nil {
+			return st, fmt.Errorf("bustls: list jobs in flight: %w", err)
+		}
+	}
+	if s.cfg.StartModePinned {
+		if mode != ModeRequire {
+			st.Blockers = append(st.Blockers, fmt.Sprintf("the mode is pinned to %q by %s on the controlplane; the api will not move it", mode, EnvMode))
+		}
+		return st, nil
+	}
+	switch mode {
+	case ModeOffer:
+		st.Next = ModeMigrate
+		ok, why, cerr := s.committed(ctx)
+		st.Committed, st.CommittedDetail = &ok, why
+		if cerr != nil {
+			st.CommittedDetail = cerr.Error()
+		}
+		if !ok {
+			st.Blockers = append(st.Blockers, "the controlplane's build is not committed: "+st.CommittedDetail)
+		}
+	case ModeMigrate:
+		st.Next = ModeRequire
+		st.Blockers = append(st.Blockers, requireBlockers(st.Nodes, st.PlaintextConnections, st.JobsInFlight)...)
+	}
 	return st, nil
 }
 
-func blockers(nodes []NodeTLS, plain []bus.PlaintextClient) []string {
+func (s *Service) committed(ctx context.Context) (bool, string, error) {
+	if s.cfg.Committed == nil {
+		return false, "no commit check is wired", nil
+	}
+	ok, why, err := s.cfg.Committed(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	return ok, why, nil
+}
+
+// openPlaintext is the server's plaintext listing minus connections a
+// disconnect advisory already reported closed.
+func (s *Service) openPlaintext() ([]bus.PlaintextClient, error) {
+	listed, err := s.cfg.Plaintext()
+	if err != nil {
+		return nil, fmt.Errorf("bustls: list plaintext connections: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stillListed := map[uint64]bool{}
+	out := []bus.PlaintextClient{}
+	for _, c := range listed {
+		stillListed[c.CID] = true
+		if !s.closedCIDs[c.CID] {
+			out = append(out, c)
+		}
+	}
+	// A closed id the server no longer lists will never be listed again (ids
+	// are not reused), so it is no longer needed.
+	for cid := range s.closedCIDs {
+		if !stillListed[cid] {
+			delete(s.closedCIDs, cid)
+		}
+	}
+	return out, nil
+}
+
+func requireBlockers(nodes []NodeTLS, plain []bus.PlaintextClient, jobs []string) []string {
 	out := []string{}
 	if len(nodes) == 0 {
-		out = append(out, "no node is enrolled — a bus with nobody on it proves nothing about the nodes that will join it")
+		out = append(out, "no node is enrolled yet — the controlplane's own agent has not registered")
 	}
 	for _, n := range nodes {
 		switch {
@@ -250,6 +387,9 @@ func blockers(nodes []NodeTLS, plain []bus.PlaintextClient) []string {
 		}
 		out = append(out, fmt.Sprintf("%s is connected over plaintext from %s", who, c.IP))
 	}
+	for _, j := range jobs {
+		out = append(out, "job in flight: "+j)
+	}
 	return out
 }
 
@@ -266,92 +406,131 @@ func BusTLSOf(n *proto.Node) (tlsOn, reported bool) {
 	return isBool && b, true
 }
 
-// ErrModePinned: the mode comes from EnvMode.
-var ErrModePinned = errors.New("the bus TLS mode is pinned by " + EnvMode + " on the controlplane; change it there")
-
-// NotReadyError is require refused, with the reasons.
-type NotReadyError struct{ Blockers []string }
-
-func (e *NotReadyError) Error() string {
-	return "plaintext cannot be turned off yet: " + strings.Join(e.Blockers, "; ")
+// Kick asks for an evaluation. Coalesced: at most one runs at a time, and kicks
+// that arrive during one make it run once more. Never blocks.
+func (s *Service) Kick(reason string) {
+	s.mu.Lock()
+	if s.stopped || s.restarting {
+		s.mu.Unlock()
+		return
+	}
+	s.dirty = true
+	if s.evaluating {
+		s.mu.Unlock()
+		return
+	}
+	s.evaluating = true
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		for {
+			s.mu.Lock()
+			if !s.dirty || s.stopped || s.restarting {
+				s.evaluating = false
+				s.mu.Unlock()
+				return
+			}
+			s.dirty = false
+			s.mu.Unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), s.cfg.EvalTimeout)
+			err := s.evaluate(ctx)
+			if err != nil {
+				log.Printf("bustls: evaluate (after %q): %q", reason, err.Error())
+			}
+			cancel()
+			if s.cfg.OnEvaluated != nil {
+				s.cfg.OnEvaluated(s.Mode(), err)
+			}
+		}
+	}()
 }
 
-// SetMode moves the ladder.
-//
-// require is refused unless Status says Ready at the moment of the call —
-// the checkable fact, re-derived here rather than trusted from an earlier
-// read. Leaving require (back to migrate or offer) is never refused: it is
-// the recovery path for a node that cannot speak TLS.
-//
-// A change that flips whether plaintext is allowed persists the mode and then
-// restarts the api, because nats-server cannot reload that option. The restart
-// is the same one a prepared restore takes: every job in flight ends the way
-// any api restart ends it. Entering migrate delivers the pin to every online
-// node that is not already on TLS.
-func (s *Service) SetMode(ctx context.Context, m Mode) (Status, error) {
+// evaluate moves the ladder as far as the facts allow right now.
+func (s *Service) evaluate(ctx context.Context) error {
 	if s.cfg.StartModePinned {
-		st, _ := s.Status(ctx)
-		return st, ErrModePinned
+		return nil
 	}
-	if m == ModeRequire {
-		st, err := s.Status(ctx)
+	if s.Mode() == ModeOffer {
+		ok, why, err := s.committed(ctx)
 		if err != nil {
-			return st, err
+			return err
 		}
-		if !st.Ready {
-			return st, &NotReadyError{Blockers: st.Blockers}
+		if !ok {
+			return nil
 		}
-	}
-	if err := s.cfg.Settings.Set(ctx, SettingKey, string(m)); err != nil {
-		return Status{}, fmt.Errorf("bustls: persist mode: %w", err)
-	}
-	s.mu.Lock()
-	prev := s.mode
-	s.mode = m
-	restart := m.AllowsPlaintext() != s.cfg.StartMode.AllowsPlaintext() && !s.restarting
-	if restart {
-		s.restarting = true
-	}
-	s.mu.Unlock()
-	log.Printf("bustls: mode %q → %q", prev, m)
-
-	if m == ModeMigrate && prev != ModeMigrate {
+		if err := s.cfg.Settings.Set(ctx, SettingKey, string(ModeMigrate)); err != nil {
+			return fmt.Errorf("persist %q: %w", ModeMigrate, err)
+		}
+		s.mu.Lock()
+		s.mode = ModeMigrate
+		s.mu.Unlock()
+		log.Printf("bustls: offer → migrate: the controlplane's build is committed (%q); delivering the bus pin to nodes not on TLS", why)
 		s.DeliverToAll(ctx)
 	}
+	if s.Mode() != ModeMigrate || !s.cfg.StartMode.AllowsPlaintext() {
+		return nil
+	}
 	st, err := s.Status(ctx)
-	if restart && s.cfg.Restart != nil {
-		log.Printf("bustls: plaintext is now %s by the configured mode and nats-server cannot reload that — restarting the api", allowWord(m.AllowsPlaintext()))
+	if err != nil {
+		return err
+	}
+	if len(st.Blockers) > 0 {
+		return nil
+	}
+	// Close job intake, atomically with the check that nothing is in flight:
+	// a job submitted from here on is refused, not lost to the restart.
+	if s.cfg.Quiesce != nil {
+		ok, inFlight, qerr := s.cfg.Quiesce(ctx)
+		if qerr != nil {
+			return fmt.Errorf("quiesce jobs: %w", qerr)
+		}
+		if !ok {
+			log.Printf("bustls: ready for require but jobs are in flight (%q); waiting for them to end", inFlight)
+			return nil
+		}
+	}
+	if err := s.cfg.Settings.Set(ctx, SettingKey, string(ModeRequire)); err != nil {
+		if s.cfg.Reopen != nil {
+			s.cfg.Reopen()
+		}
+		return fmt.Errorf("persist %q (job intake reopened): %w", ModeRequire, err)
+	}
+	s.mu.Lock()
+	s.mode = ModeRequire
+	s.restarting = true
+	s.mu.Unlock()
+	log.Printf("bustls: migrate → require: every node is on TLS with the pin verified, no plaintext connection is open and no job is in flight; restarting the api so the bus refuses plaintext")
+	if s.cfg.Restart != nil {
 		s.cfg.Restart()
 	}
-	return st, err
+	return nil
 }
 
-func allowWord(b bool) string {
-	if b {
-		return "allowed"
-	}
-	return "refused"
-}
-
-// OnRegistered is the inventory hook: in migrate, a node that just registered
-// without TLS is handed the pin. Registration is the fact "this node is here
-// and reachable now", so delivery follows it instead of a retry timer. Never
-// blocks — delivery runs on its own goroutine, one at a time per node.
+// OnRegistered is the inventory hook: in migrate, a node that registered
+// without TLS is handed the pin; any registration re-evaluates the ladder.
 func (s *Service) OnRegistered(_ context.Context, n *proto.Node) {
+	if n == nil {
+		return
+	}
+	if s.Mode() == ModeMigrate {
+		if on, _ := BusTLSOf(n); !on {
+			s.deliverAsync(n.ID)
+		}
+	}
+	s.Kick("registration of " + n.ID)
+}
+
+// NoteDisconnect is the disconnect-advisory hook (bus.Server.OnClientDisconnect).
+func (s *Service) NoteDisconnect(cid uint64) {
 	s.mu.Lock()
-	mode := s.mode
+	s.closedCIDs[cid] = true
 	s.mu.Unlock()
-	if mode != ModeMigrate || n == nil {
-		return
-	}
-	if on, _ := BusTLSOf(n); on {
-		return
-	}
-	s.deliverAsync(n.ID)
+	s.Kick(fmt.Sprintf("connection %d closed", cid))
 }
 
 // DeliverToAll hands the pin to every ONLINE node not reporting TLS. Offline
-// nodes get it when they register (OnRegistered).
+// nodes get it when they register.
 func (s *Service) DeliverToAll(ctx context.Context) {
 	nodes, err := s.cfg.Nodes(ctx)
 	if err != nil {
@@ -371,7 +550,7 @@ func (s *Service) DeliverToAll(ctx context.Context) {
 
 func (s *Service) deliverAsync(nodeID string) {
 	s.mu.Lock()
-	if s.pending[nodeID] {
+	if s.pending[nodeID] || s.stopped {
 		s.mu.Unlock()
 		return
 	}
@@ -399,10 +578,6 @@ func (s *Service) deliverAsync(nodeID string) {
 	}()
 }
 
-// Wait blocks until every delivery started so far has finished. For tests and
-// shutdown.
-func (s *Service) Wait() { s.wg.Wait() }
-
 // Deliver sends the pin to one node and returns its answer.
 func (s *Service) Deliver(ctx context.Context, nodeID string) (*proto.BusPinAck, error) {
 	if s.cfg.NC == nil {
@@ -421,4 +596,35 @@ func (s *Service) Deliver(ctx context.Context, nodeID string) (*proto.BusPinAck,
 		return nil, fmt.Errorf("bustls: decode ack from %s: %w", nodeID, err)
 	}
 	return &ack, nil
+}
+
+// Alert is the standing security warning the ladder's state deserves, or nil:
+// a pinned mode other than require keeps plaintext accepted on purpose, and
+// that must not look healthy in the UI (the bus-auth-off precedent, #123).
+func (s *Service) Alert(now time.Time) *proto.Alert {
+	if !s.cfg.StartModePinned || s.cfg.StartMode == ModeRequire {
+		return nil
+	}
+	return &proto.Alert{
+		ID:       "bus-tls-pinned",
+		Severity: proto.AlertWarn,
+		Source:   proto.AlertSourceSecurity,
+		Title:    "Node bus accepts plaintext (bus TLS mode pinned)",
+		Detail: fmt.Sprintf("%s=%s on the controlplane pins the bus TLS mode, so the bus keeps accepting unencrypted connections and will not move to TLS-only by itself. "+
+			"Remove it from node.env once every node can use TLS.", EnvMode, s.cfg.StartMode),
+		Since: now,
+	}
+}
+
+// UnavailableAlert is the standing warning for a controlplane whose bus key did
+// not load: the bus is plaintext-only.
+func UnavailableAlert(now time.Time) *proto.Alert {
+	return &proto.Alert{
+		ID:       "bus-tls-unavailable",
+		Severity: proto.AlertWarn,
+		Source:   proto.AlertSourceSecurity,
+		Title:    "Node bus is not encrypted (bus key did not load)",
+		Detail:   "The controlplane could not load /var/lib/rasputin/bus/bus.key, so the bus runs plaintext-only and nodes that pin its key cannot join. The api log names the error; restoring the identity backup puts the key back.",
+		Since:    now,
+	}
 }

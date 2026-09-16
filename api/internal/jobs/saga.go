@@ -154,6 +154,8 @@ type Runner struct {
 	// resume handler finishes the job). Default (nil) = fail everything, the
 	// v0 "abort, not resume" policy. See architecture O-8.
 	recoverDecider func(j *Job, steps []*JobStep) RecoverDecision
+	// intake gates submits for QuiesceIfIdle (quiesce.go).
+	intake intake
 }
 
 // RecoverDecision is what to do with an in-flight job found at startup.
@@ -279,6 +281,18 @@ func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, 
 	if !ok {
 		return nil, fmt.Errorf("unknown job kind %q", kind)
 	}
+	// An intake slot before anything is persisted: a runner closed for a
+	// restart refuses here, and a job that is created holds its slot until
+	// its run ends (quiesce.go).
+	if err := r.acquire(); err != nil {
+		return nil, err
+	}
+	started := false
+	defer func() {
+		if !started {
+			r.release()
+		}
+	}()
 
 	j := &Job{
 		ID:        ulid.Make().String(),
@@ -302,7 +316,11 @@ func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, 
 	r.emit(ctx, j.ID, proto.JobCreated, j)
 
 	r.wg.Add(1)
-	go r.run(j, wf)
+	started = true
+	go func() {
+		defer r.release()
+		r.run(j, wf)
+	}()
 	return j, nil
 }
 

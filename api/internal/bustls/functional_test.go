@@ -1,10 +1,12 @@
 package bustls_test
 
 // THE FUNCTIONAL TEST for bus TLS (geekdojo/geekdojo-brain#448): the real
-// embedded bus (bus.Start, with auth callout enforced), the real inventory
-// service and the real bustls service, wired the way cmd/rasputin-api wires
+// embedded bus (bus.Start, with the auth callout enforced), the real inventory
+// service, job store and runner, the real bustls service and its real commit
+// check (updater.SelfBuildCommitted), wired the way cmd/rasputin-api wires
 // them — and the REAL rasputin-agent binary, built from this workspace and run
-// as a subprocess, doing the TLS handshake and the pin check itself.
+// as subprocesses, doing the TLS handshake, the pin check, the pin delivery
+// and the commit report itself.
 //
 // Why a subprocess: the agent's client lives in agent/internal and cannot be
 // imported from the api module, and the parts most likely to be wrong are in
@@ -12,12 +14,15 @@ package bustls_test
 // what the registration reports. A copy of the client wired by this test would
 // prove the copy.
 //
-// Every wait is for a checkable fact with a deadline — a registration that
-// says busTls, a log line naming the refusal — never a sleep.
+// Every wait is for a fact, signalled when it changes, under a hard deadline:
+// a registration that says busTls, a log line naming a refusal, the restart
+// request. Nothing here sleeps to let something happen.
 //
-// What it does NOT prove: anything about the OS or firewall images (firstboot,
-// apply-seed, the seed scrub), mDNS resolution of <cluster>.local, or real
-// clocks on real hardware. That is the bench plan in the PR.
+// What it does NOT prove: the OS or firewall images (firstboot, apply-seed,
+// the seed scrub), mDNS resolution of <cluster>.local, a real RAUC slot commit
+// (the controlplane agent runs the mock updater backend, whose commit model is
+// unit-tested beside the RAUC one), systemd restarting the api, or real clocks
+// on real hardware. That is the bench plan in the PR.
 //
 // Run alone: scripts/test-bus-tls.sh.
 
@@ -26,6 +31,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -34,7 +40,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -43,12 +48,59 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
 const factDeadline = 45 * time.Second
+
+// signal is a broadcast "something changed": waiters grab the current channel,
+// re-check their condition, and block on it; a change closes it and installs a
+// fresh one.
+type signal struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func (s *signal) wait() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ch == nil {
+		s.ch = make(chan struct{})
+	}
+	return s.ch
+}
+
+func (s *signal) fire() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ch != nil {
+		close(s.ch)
+	}
+	s.ch = make(chan struct{})
+}
+
+// waitFact blocks until cond() holds, re-checking only when changed fires, and
+// fails the test at the deadline.
+func waitFact(t *testing.T, what string, changed *signal, cond func() bool, describe func() string) {
+	t.Helper()
+	deadline := time.NewTimer(factDeadline)
+	defer deadline.Stop()
+	for {
+		ch := changed.wait()
+		if cond() {
+			return
+		}
+		select {
+		case <-ch:
+		case <-deadline.C:
+			t.Fatalf("no %s within %s\n%s", what, factDeadline, describe())
+		}
+	}
+}
 
 // --- the agent binary --------------------------------------------------------
 
@@ -92,9 +144,10 @@ type agentProc struct {
 	stateDir string
 	cmd      *exec.Cmd
 
-	mu    sync.Mutex
-	lines []string
-	done  chan struct{}
+	mu      sync.Mutex
+	lines   []string
+	changed signal
+	done    chan struct{}
 }
 
 type agentOpts struct {
@@ -127,7 +180,8 @@ func startAgent(t *testing.T, o agentOpts) *agentProc {
 		"RASPUTIN_AGENT_STATE_DIR=" + o.stateDir,
 		// Mock every backend: this test is about the bus, and an autodetect
 		// that found a real docker or tailscale on the runner would make it
-		// about the runner.
+		// about the runner. The mock updater is also what answers the
+		// controlplane's commit question.
 		"RASPUTIN_DOCKER_BACKEND=mock",
 		"RASPUTIN_UPDATE_BACKEND=mock",
 		"RASPUTIN_STORAGE_BACKEND=mock",
@@ -153,12 +207,14 @@ func startAgent(t *testing.T, o agentOpts) *agentProc {
 	a.cmd = cmd
 	go func() {
 		defer close(a.done)
+		defer a.changed.fire()
 		sc := bufio.NewScanner(stderr)
 		sc.Buffer(make([]byte, 64*1024), 1024*1024)
 		for sc.Scan() {
 			a.mu.Lock()
 			a.lines = append(a.lines, sc.Text())
 			a.mu.Unlock()
+			a.changed.fire()
 		}
 	}()
 	t.Cleanup(func() { a.stop(t) })
@@ -172,45 +228,65 @@ func (a *agentProc) stop(t *testing.T) {
 	_ = a.cmd.Process.Signal(syscall.SIGTERM)
 	select {
 	case <-a.done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second): // bounds the one wait for exit
 		_ = a.cmd.Process.Kill()
 		<-a.done
 	}
 	_ = a.cmd.Wait()
 	if t.Failed() {
-		a.mu.Lock()
-		t.Logf("--- agent %s log ---\n%s", a.id, strings.Join(a.lines, "\n"))
-		a.mu.Unlock()
+		t.Logf("--- agent %s log ---\n%s", a.id, a.log())
 	}
 }
 
+func (a *agentProc) log() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return strings.Join(a.lines, "\n")
+}
+
 // waitLog waits for a log line containing every one of subs.
-func (a *agentProc) waitLog(t *testing.T, what string, subs ...string) string {
+func (a *agentProc) waitLog(t *testing.T, what string, subs ...string) {
 	t.Helper()
-	end := time.Now().Add(factDeadline)
-	for time.Now().Before(end) {
+	waitFact(t, what+" in agent "+a.id+"'s log", &a.changed, func() bool {
 		a.mu.Lock()
+		defer a.mu.Unlock()
 		for _, l := range a.lines {
 			all := true
 			for _, s := range subs {
 				all = all && strings.Contains(l, s)
 			}
 			if all {
-				a.mu.Unlock()
-				return l
+				return true
 			}
 		}
-		a.mu.Unlock()
-		select {
-		case <-a.done:
-			t.Fatalf("agent %s exited before %s", a.id, what)
-		case <-time.After(50 * time.Millisecond):
-		}
+		return false
+	}, a.log)
+}
+
+// seedUncommittedMock writes the mock updater state an agent starts from: a
+// build booted as a TRIAL on slot b (marked active, not good) — what a
+// controlplane looks like after a self-update's reboot and before the saga's
+// mark-good.
+func seedUncommittedMock(t *testing.T, stateDir string) {
+	t.Helper()
+	dir := filepath.Join(stateDir, "updater")
+	if err := os.MkdirAll(filepath.Join(dir, "bundles"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	t.Fatalf("agent %s: no log line for %s within %s (wanted %q)\n%s", a.id, what, factDeadline, subs, strings.Join(a.lines, "\n"))
-	return ""
+	st := map[string]any{
+		"activeSlot":     proto.SlotB,
+		"inactiveSlot":   proto.SlotA,
+		"currentVersion": "0.0.1-trial",
+		"pendingSlot":    proto.SlotUnknown,
+		"marks":          map[proto.UpdateSlot]proto.UpdateSlotState{proto.SlotA: proto.SlotStateInactive, proto.SlotB: proto.SlotStateActive},
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // --- the controlplane --------------------------------------------------------
@@ -218,29 +294,39 @@ func (a *agentProc) waitLog(t *testing.T, what string, subs ...string) string {
 type cp struct {
 	dataDir  string
 	port     int
+	selfNode string
 	srv      *bus.Server
-	inv      *inventory.Store
 	svc      *bustls.Service
 	key      *bustls.Key
-	restarts atomic.Int32
+	tokens   *busauth.Store
+	jobStore *jobs.Store
+	runner   *jobs.Runner
+	settings *setup.Store
+	mode     bustls.Mode
+	restart  chan struct{} // closed when the service asks to restart
 
-	regMu sync.Mutex
-	regs  []proto.NodeRegisteredEvt
+	regMu   sync.Mutex
+	regs    []proto.NodeRegisteredEvt
+	changed signal
 
-	// tokens is the bus join-token store, so a scenario can mint a real
-	// node-bound token (unbound tokens do not exist).
-	tokens *busauth.Store
+	evalMu    sync.Mutex
+	evals     int
+	evaluated signal
 
 	stopFn func()
 }
 
-// stop shuts this controlplane instance down (idempotent).
 func (c *cp) stop() { c.stopFn() }
 
 type cpOpts struct {
 	dataDir string // reuse (a restart); "" is fresh
 	port    int    // reuse (a restart); 0 lets the server pick
-	mode    bustls.Mode
+	// selfNode is RASPUTIN_SELF_NODE_ID: the controlplane's own node id, whose
+	// agent answers the commit question.
+	selfNode string
+	// pinMode pins the mode the way RASPUTIN_BUS_TLS does; "" resolves it
+	// from the recorded setting, as a real start does.
+	pinMode bustls.Mode
 	// cert overrides the certificate wrapped around the bus key.
 	cert *tls.Certificate
 }
@@ -254,8 +340,21 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if o.port == 0 {
 		o.port = -1 // the server picks; read back below
 	}
-	c := &cp{dataDir: o.dataDir}
+	c := &cp{dataDir: o.dataDir, selfNode: o.selfNode, restart: make(chan struct{})}
 	dbPath := filepath.Join(o.dataDir, "rasputin.db")
+
+	settings, err := setup.OpenStore(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.settings = settings
+	mode, pinned := o.pinMode, o.pinMode != ""
+	if !pinned {
+		if mode, _, err = bustls.ResolveStartMode(ctx, settings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.mode = mode
 
 	key, _, err := bustls.EnsureKey(filepath.Join(o.dataDir, "bus"))
 	if err != nil {
@@ -276,7 +375,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	srv, err := bus.Start(ctx, bus.Config{
 		Host: "127.0.0.1", Port: o.port, StoreDir: filepath.Join(o.dataDir, "nats"),
 		AuthEnforce: true, IssuerPublicKey: issuer.PublicKey(), APIUser: "rasputin-api", APIPass: "functional-test",
-		TLS: serverTLS, AllowNonTLS: o.mode.AllowsPlaintext(),
+		TLS: serverTLS, AllowNonTLS: mode.AllowsPlaintext(),
 	})
 	if err != nil {
 		t.Fatalf("bus.Start: %v", err)
@@ -298,20 +397,23 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if err := responder.Start(); err != nil {
 		t.Fatal(err)
 	}
-	settings, err := setup.OpenStore(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	invStore, err := inventory.OpenStore(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.inv = invStore
+	jobStore, err := jobs.OpenStore(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.jobStore = jobStore
+	c.runner = jobs.NewRunner(jobStore, srv.Conn())
 	invSvc := inventory.NewService(invStore, srv.Conn())
+	var restartOnce sync.Once
 	c.svc = bustls.NewService(bustls.Config{
-		Key:       key,
-		Settings:  settings,
-		StartMode: o.mode,
+		Key:             key,
+		Settings:        settings,
+		StartMode:       mode,
+		StartModePinned: pinned,
 		Nodes: func(ctx context.Context) ([]*proto.Node, error) {
 			nodes, err := invStore.List(ctx)
 			if err == nil {
@@ -321,8 +423,23 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		},
 		Plaintext: srv.PlaintextClients,
 		NC:        srv.Conn(),
-		Restart:   func() { c.restarts.Add(1) },
+		Committed: func(ctx context.Context) (bool, string, error) {
+			return updater.SelfBuildCommitted(ctx, jobStore, srv.Conn(), o.selfNode, 10*time.Second)
+		},
+		InFlight: func(ctx context.Context) ([]string, error) { return jobs.InFlight(ctx, jobStore) },
+		Quiesce:  c.runner.QuiesceIfIdle,
+		Reopen:   c.runner.Reopen,
+		Restart:  func() { restartOnce.Do(func() { close(c.restart) }) },
+		OnEvaluated: func(bustls.Mode, error) {
+			c.evalMu.Lock()
+			c.evals++
+			c.evalMu.Unlock()
+			c.evaluated.fire()
+		},
 	})
+	if err := srv.OnClientDisconnect(c.svc.NoteDisconnect); err != nil {
+		t.Fatal(err)
+	}
 	invSvc.SetOnRegistered(c.svc.OnRegistered)
 	if err := invSvc.Start(ctx); err != nil {
 		t.Fatal(err)
@@ -335,51 +452,68 @@ func startCP(t *testing.T, o cpOpts) *cp {
 			c.regMu.Lock()
 			c.regs = append(c.regs, ev)
 			c.regMu.Unlock()
+			c.changed.fire()
 		}
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.svc.Start(); err != nil {
+		t.Fatal(err)
+	}
 	var once sync.Once
-	stop := func() {
+	c.stopFn = func() {
 		once.Do(func() {
-			c.svc.Wait()
+			c.svc.Stop()
 			invSvc.Stop()
 			responder.Stop()
 			srv.Stop()
 			cancel()
 			_ = invStore.Close()
+			_ = jobStore.Close()
 			_ = settings.Close()
 			_ = tokens.Close()
 		})
 	}
-	c.stopFn = stop
-	t.Cleanup(stop)
+	t.Cleanup(c.stop)
 	return c
 }
 
 func (c *cp) url() string { return fmt.Sprintf("nats://127.0.0.1:%d", c.port) }
 
+func (c *cp) evaluations() int {
+	c.evalMu.Lock()
+	defer c.evalMu.Unlock()
+	return c.evals
+}
+
+// waitEvaluatedAfter waits for an evaluation to complete after the count n was
+// read — the positive fact behind "it looked, and did not move".
+func (c *cp) waitEvaluatedAfter(t *testing.T, n int, what string) {
+	t.Helper()
+	waitFact(t, "evaluation after "+what, &c.evaluated, func() bool { return c.evaluations() > n }, func() string { return "" })
+	c.svc.Wait()
+}
+
+func (c *cp) describeRegs() string {
+	c.regMu.Lock()
+	defer c.regMu.Unlock()
+	return fmt.Sprintf("registrations: %+v", c.regs)
+}
+
 // waitRegistered waits for THIS instance to receive a registration from id
 // whose busTls is want.
 func (c *cp) waitRegistered(t *testing.T, id string, want bool) {
 	t.Helper()
-	end := time.Now().Add(factDeadline)
-	for time.Now().Before(end) {
+	waitFact(t, fmt.Sprintf("registration from %s with busTls=%t", id, want), &c.changed, func() bool {
 		c.regMu.Lock()
+		defer c.regMu.Unlock()
 		for _, ev := range c.regs {
-			if ev.NodeID == id {
-				if v, ok := ev.Metadata[proto.MetadataBusTLS].(bool); ok && v == want {
-					c.regMu.Unlock()
-					return
-				}
+			if v, ok := ev.Metadata[proto.MetadataBusTLS].(bool); ev.NodeID == id && ok && v == want {
+				return true
 			}
 		}
-		c.regMu.Unlock()
-		time.Sleep(50 * time.Millisecond)
-	}
-	c.regMu.Lock()
-	defer c.regMu.Unlock()
-	t.Fatalf("no registration from %s with busTls=%t within %s; got %+v", id, want, factDeadline, c.regs)
+		return false
+	}, c.describeRegs)
 }
 
 func (c *cp) registeredAtAll(id string) bool {
@@ -391,6 +525,17 @@ func (c *cp) registeredAtAll(id string) bool {
 		}
 	}
 	return false
+}
+
+// waitRestart waits for the service's restart request.
+func (c *cp) waitRestart(t *testing.T) {
+	t.Helper()
+	select {
+	case <-c.restart:
+	case <-time.After(factDeadline):
+		st, _ := c.svc.Status(context.Background())
+		t.Fatalf("no restart request within %s; status %+v", factDeadline, st)
+	}
 }
 
 func otherPin(t *testing.T) string {
@@ -411,12 +556,13 @@ func skipShort(t *testing.T) {
 
 // --- the scenarios -----------------------------------------------------------
 
-// During migration (offer): the right pin connects over TLS and says so; a
-// wrong pin is refused by the agent and never registers; no pin still connects,
-// in plaintext, and the server lists it as the thing holding require back.
-func TestFunctional_OfferMode(t *testing.T) {
+// With the mode pinned to offer (RASPUTIN_BUS_TLS, the escape hatch): the
+// right pin connects over TLS and says so; a wrong pin is refused by the agent
+// and never registers; no pin still connects, in plaintext, and the server
+// lists it. A pinned mode never moves, however ready things look.
+func TestFunctional_PinnedOffer(t *testing.T) {
 	skipShort(t)
-	c := startCP(t, cpOpts{mode: bustls.ModeOffer})
+	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
 
 	startAgent(t, agentOpts{id: "n-good", url: c.url(), pin: c.key.Pin()})
 	c.waitRegistered(t, "n-good", true)
@@ -434,8 +580,8 @@ func TestFunctional_OfferMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Ready {
-		t.Fatalf("ready with a plaintext node: %+v", st)
+	if st.Mode != bustls.ModeOffer || !st.ModePinned || st.Next != "" {
+		t.Fatalf("pinned status = %+v, want offer, pinned, going nowhere", st)
 	}
 	var plainListed bool
 	for _, pc := range st.PlaintextConnections {
@@ -449,23 +595,45 @@ func TestFunctional_OfferMode(t *testing.T) {
 	}
 }
 
-// The whole migration, end to end: two nodes enrolled before the pin existed —
-// the controlplane's own tokenless loopback agent and a compute node — get it
-// delivered over the plaintext bus, save it, come back over TLS and say so;
-// the readiness fact turns true; require is accepted and asks for the restart;
-// the restarted controlplane refuses plaintext; both agents, restarted with no
-// pin in their environment, come back over TLS from the pin they saved; and a
-// node that never got one is refused.
-func TestFunctional_MigrateThenRequire(t *testing.T) {
+// The whole automatic ladder, end to end, with no operator action:
+//
+//  1. offer: the controlplane (cp1) booted a build as a trial, and a
+//     self-update job is in flight; it and a compute node (n1), both enrolled
+//     before the pin existed, connect in plaintext. Nothing moves.
+//  2. commit, each half on its own: the self-update job ends while cp1's agent
+//     still reports the trial — nothing moves; the saga's mark-good lands and
+//     the next job end re-evaluates — the api moves to migrate and delivers
+//     the pin.
+//  3. both agents save the pin, re-dial over TLS and register busTls=true; the
+//     plaintext connections they closed are reported by disconnect events; a
+//     job in flight still holds require back until it ends.
+//  4. require: job intake closes, require is recorded, the restart is asked
+//     for exactly once, and a job submitted now is refused, not lost.
+//  5. restart: the controlplane comes back, reads require, refuses plaintext;
+//     both running agents rejoin over TLS by themselves; restarted with no pin
+//     in their environment they rejoin from the pin they saved; a node that
+//     never got a pin is refused.
+func TestFunctional_AutomaticLadder(t *testing.T) {
 	skipShort(t)
 	ctx := context.Background()
-	c := startCP(t, cpOpts{mode: bustls.ModeOffer})
+	c := startCP(t, cpOpts{selfNode: "cp1"})
+	if c.mode != bustls.ModeOffer {
+		t.Fatalf("a fresh controlplane starts in %s, want offer", c.mode)
+	}
 	pin := c.key.Pin()
 
-	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url()})
-	// A real token bound to n1, as Add-node mints it. On loopback the callout
-	// trusts the connection before it reads the token, so this is realism,
-	// not the thing under test.
+	// 1. An uncommitted build and a self-update in flight.
+	now := time.Now().UTC()
+	selfUpdate := &jobs.Job{ID: "01SELFUPDATE", Kind: "node.update", Spec: json.RawMessage(`{"nodeId":"cp1"}`), Status: jobs.StatusQueued, CreatedAt: now}
+	if err := c.jobStore.CreateJob(ctx, selfUpdate); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.jobStore.MarkJobStarted(ctx, selfUpdate.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	cpState := t.TempDir()
+	seedUncommittedMock(t, cpState)
+	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), stateDir: cpState})
 	n1Token, _, err := c.tokens.MintBound(ctx, "n1", "n1")
 	if err != nil {
 		t.Fatal(err)
@@ -473,13 +641,56 @@ func TestFunctional_MigrateThenRequire(t *testing.T) {
 	n1 := startAgent(t, agentOpts{id: "n1", url: c.url(), token: n1Token})
 	c.waitRegistered(t, "cp1", false)
 	c.waitRegistered(t, "n1", false)
-
-	if _, err := c.svc.SetMode(ctx, bustls.ModeRequire); err == nil {
-		t.Fatal("require accepted while both nodes are on plaintext")
-	}
-	if _, err := c.svc.SetMode(ctx, bustls.ModeMigrate); err != nil {
+	c.svc.Wait() // the evaluations those registrations kicked
+	st, err := c.svc.Status(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if st.Mode != bustls.ModeOffer || st.Committed == nil || *st.Committed {
+		t.Fatalf("status before commit = %+v, want offer and not committed", st)
+	}
+	if _, err := os.Stat(filepath.Join(n1.stateDir, "bus", "pin")); !os.IsNotExist(err) {
+		t.Fatalf("a pin was delivered before the build committed (stat: %v)", err)
+	}
+
+	// Two more jobs in flight: one whose end is the trigger after mark-good,
+	// one that holds require back.
+	var others []*jobs.Job
+	for _, id := range []string{"01TRIGGER", "01BLOCKER"} {
+		j := &jobs.Job{ID: id, Kind: "mesh.reconcile", Spec: json.RawMessage(`{}`), Status: jobs.StatusQueued, CreatedAt: now}
+		if err := c.jobStore.CreateJob(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.jobStore.MarkJobStarted(ctx, j.ID, now); err != nil {
+			t.Fatal(err)
+		}
+		others = append(others, j)
+	}
+
+	// 2a. The self-update job ends, but the slot is still a trial.
+	n := c.evaluations()
+	c.runner.FinishDeferred(ctx, selfUpdate.ID, true, "")
+	c.waitEvaluatedAfter(t, n, "the self-update job ended")
+	if st, err = c.svc.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode != bustls.ModeOffer || st.Committed == nil || *st.Committed || !strings.Contains(st.CommittedDetail, "not good") {
+		t.Fatalf("after the job ended with the slot uncommitted: %+v, want offer held back by the agent's report", st)
+	}
+
+	// 2b. mark-good on cp1's agent, as the saga does; the next job end is the
+	// event that re-decides.
+	markGood, err := json.Marshal(proto.UpdateMarkGoodCmd{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.srv.Conn().Request(proto.UpdateMarkGoodSubject("cp1"), markGood, 10*time.Second); err != nil {
+		t.Fatalf("mark-good on cp1: %v", err)
+	}
+	c.runner.FinishDeferred(ctx, others[0].ID, true, "")
+	blocker := others[1]
+
+	// 3. Pins delivered, TLS re-dials, busTls=true everywhere.
 	c.waitRegistered(t, "cp1", true)
 	c.waitRegistered(t, "n1", true)
 	for _, a := range []*agentProc{cpAgent, n1} {
@@ -488,44 +699,44 @@ func TestFunctional_MigrateThenRequire(t *testing.T) {
 			t.Fatalf("%s saved pin = (%q, %v), want %s", a.id, saved, err, pin)
 		}
 	}
-
-	// The plaintext connections the delivery replaced are gone: the fact.
-	var st bustls.Status
-	end := time.Now().Add(factDeadline)
-	for {
-		var err error
-		st, err = c.svc.Status(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if st.Ready || time.Now().After(end) {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	if got, _ := c.settings.Get(ctx, bustls.SettingKey); got != string(bustls.ModeMigrate) {
+		t.Fatalf("recorded mode = %q with a job in flight, want migrate", got)
 	}
-	if !st.Ready {
-		t.Fatalf("not ready after every node moved to TLS: %v", st.Blockers)
-	}
-	if _, err := c.svc.SetMode(ctx, bustls.ModeRequire); err != nil {
-		t.Fatalf("require refused once ready: %v", err)
-	}
-	if got := c.restarts.Load(); got != 1 {
-		t.Fatalf("restart requested %d times, want 1", got)
+	select {
+	case <-c.restart:
+		t.Fatal("restart requested while a job was in flight")
+	default:
 	}
 
-	// The restart: agents down, controlplane down, controlplane up in require
-	// on the same data dir and port, agents up with NO pin in their env.
-	cpAgent.stop(t)
-	n1.stop(t)
+	// 4. The last job ends: require, once.
+	c.runner.FinishDeferred(ctx, blocker.ID, true, "")
+	c.waitRestart(t)
+	if got, _ := c.settings.Get(ctx, bustls.SettingKey); got != string(bustls.ModeRequire) {
+		t.Fatalf("recorded mode = %q after the restart request, want require", got)
+	}
+	if _, err := c.runner.Submit(ctx, "anything", nil, "test"); err == nil || (!errors.Is(err, jobs.ErrQuiesced) && !strings.Contains(err.Error(), "unknown job kind")) {
+		t.Fatalf("Submit during the restart window = %v", err)
+	}
+	c.runner.Register(jobs.Workflow{Kind: "probe", Steps: []jobs.WorkflowStep{{Name: "noop", Do: func(*jobs.StepCtx) (json.RawMessage, error) { return nil, nil }}}})
+	if _, err := c.runner.Submit(ctx, "probe", nil, "test"); !errors.Is(err, jobs.ErrQuiesced) {
+		t.Fatalf("Submit during the restart window = %v, want ErrQuiesced (refused, not lost)", err)
+	}
+
+	// 5. The restart the unit performs, same data dir and port.
 	c.stop()
-	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, mode: bustls.ModeRequire})
-	if c2.key.Pin() != pin {
-		t.Fatalf("the restarted controlplane has pin %s, want %s", c2.key.Pin(), pin)
+	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1"})
+	if c2.mode != bustls.ModeRequire || c2.key.Pin() != pin {
+		t.Fatalf("restarted controlplane: mode %s pin %s, want require and %s", c2.mode, c2.key.Pin(), pin)
 	}
-	startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c2.url(), stateDir: cpAgent.stateDir})
-	startAgent(t, agentOpts{id: "n1", url: c2.url(), token: n1Token, stateDir: n1.stateDir})
 	c2.waitRegistered(t, "cp1", true)
 	c2.waitRegistered(t, "n1", true)
+
+	cpAgent.stop(t)
+	n1.stop(t)
+	startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c2.url(), stateDir: cpAgent.stateDir})
+	n1b := startAgent(t, agentOpts{id: "n1", url: c2.url(), token: n1Token, stateDir: n1.stateDir})
+	n1b.waitLog(t, "the saved pin", "from file")
+	n1b.waitLog(t, "a pinned TLS connection", "over TLS, server key pin verified")
 
 	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: c2.url()})
 	stray.waitLog(t, "the TLS-required refusal of an unpinned node", "NATS connect", "tls")
@@ -538,6 +749,11 @@ func TestFunctional_MigrateThenRequire(t *testing.T) {
 	}
 	if len(plain) != 0 {
 		t.Fatalf("plaintext connections on a TLS-required bus: %+v", plain)
+	}
+	select {
+	case <-c2.restart:
+		t.Fatal("the restarted controlplane asked to restart again")
+	default:
 	}
 }
 
@@ -559,7 +775,7 @@ func TestFunctional_ClockIndependence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c := startCP(t, cpOpts{dataDir: dataDir, mode: bustls.ModeRequire, cert: &cert})
+			c := startCP(t, cpOpts{dataDir: dataDir, pinMode: bustls.ModeRequire, cert: &cert})
 			id := "n-" + name
 			startAgent(t, agentOpts{id: id, url: c.url(), pin: key.Pin()})
 			c.waitRegistered(t, id, true)

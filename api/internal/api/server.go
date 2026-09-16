@@ -407,9 +407,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bus/tokens", reqd(s.handleListBusTokens))
 	mux.HandleFunc("POST /api/bus/tokens", reqd(s.handleMintBusToken))
 	mux.HandleFunc("DELETE /api/bus/tokens/{id}", reqd(s.handleRevokeBusToken))
-	// Bus TLS: the mode ladder, the pin and the readiness fact (#448).
+	// Bus TLS: read-only status of the automatic mode ladder and the pin (#448).
 	mux.HandleFunc("GET /api/bus/tls", reqd(s.handleGetBusTLS))
-	mux.HandleFunc("PUT /api/bus/tls", reqd(s.handlePutBusTLS))
 
 	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))
 	mux.HandleFunc("POST /api/setup/mode", reqd(s.handleSetupMode))

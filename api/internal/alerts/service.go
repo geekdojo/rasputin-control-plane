@@ -97,7 +97,14 @@ type Service struct {
 	// pass the real value produces a visible false warning, not a silently
 	// missing security alert.
 	busAuthEnforced bool
+	// busTLSAlert, when set, reports the bus TLS posture's standing warning
+	// (bus TLS mode pinned below require, or the bus key unusable), or nil.
+	busTLSAlert func(now time.Time) *proto.Alert
 }
+
+// SetBusTLSAlert wires the bus TLS posture warning (bustls.Service.Alert, or
+// bustls.UnavailableAlert when the bus key did not load). Set before List.
+func (s *Service) SetBusTLSAlert(fn func(now time.Time) *proto.Alert) { s.busTLSAlert = fn }
 
 // New constructs an alerts Service. The store + nats.Conn are optional;
 // dev-time wiring may pass nil for both (the aggregator still works).
@@ -277,20 +284,26 @@ func (s *Service) setupAlerts(ctx context.Context, now time.Time) ([]proto.Alert
 // warn keeps the posture honest without blocking dev clusters that are
 // deliberately open.
 func (s *Service) securityAlerts(now time.Time) []proto.Alert {
+	var out []proto.Alert
+	if s.busTLSAlert != nil {
+		if a := s.busTLSAlert(now); a != nil {
+			out = append(out, *a)
+		}
+	}
 	if s.busAuthEnforced {
-		return nil
+		return out
 	}
 	// Like setup-incomplete, Since is "now" — the condition holds since api
 	// start but we don't track that; the UI doesn't render duration for
 	// cluster-wide standing alerts.
-	return []proto.Alert{{
+	return append(out, proto.Alert{
 		ID:       "bus-auth-off",
 		Severity: proto.AlertWarn,
 		Source:   proto.AlertSourceSecurity,
 		Title:    "Node bus authentication is off",
 		Detail:   "The NATS bus accepts any connection — any device on the LAN can join as any node. Provision node join tokens and set RASPUTIN_BUS_AUTH=enforce on the controlplane to close it.",
 		Since:    now,
-	}}
+	})
 }
 
 // backupAlerts is design/storage.md §4.4's alert path (#298): one alert per
