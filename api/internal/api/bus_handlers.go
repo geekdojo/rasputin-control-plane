@@ -140,7 +140,7 @@ func (s *Server) handleRevokeBusToken(w http.ResponseWriter, r *http.Request) {
 	// response to a compromise needs to know whether a live session was cut,
 	// and "0" is a real answer (the node was offline) rather than a silence.
 	if disconnected > 0 {
-		log.Printf("rasputin-api: revoked bus token %s and closed %d live bus connection(s)", id, disconnected)
+		log.Printf("rasputin-api: revoked bus token %q and closed %d live bus connection(s)", id, disconnected)
 	}
 	writeJSON(w, http.StatusOK, revokeBusTokenResponse{ID: id, Disconnected: disconnected})
 }

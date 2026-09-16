@@ -123,9 +123,9 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	// (certificates.md §4.2(1)). Best-effort: a leftover token is less harmful
 	// than blocking the removal.
 	if revoked, disconnected, err := s.busTokens.RevokeByNodeID(ctx, id); err != nil {
-		log.Printf("rasputin-api: revoke bus tokens for removed node %s: %v", id, err)
+		log.Printf("rasputin-api: revoke bus tokens for removed node %q: %v", id, err)
 	} else if revoked > 0 || disconnected > 0 {
-		log.Printf("rasputin-api: revoked %d enrollment token(s) and closed %d live bus connection(s) for removed node %s",
+		log.Printf("rasputin-api: revoked %d enrollment token(s) and closed %d live bus connection(s) for removed node %q",
 			revoked, disconnected, id)
 	}
 
