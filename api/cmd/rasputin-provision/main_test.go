@@ -270,11 +270,11 @@ func TestGenerate_ClusterIDInEverySeed(t *testing.T) {
 // token. A value needing quotes would break every field after it — the same
 // class of defect that shipped a truncated recovery command in the agent unit.
 func TestBuildrootSeed_ClusterIDIsBareToken(t *testing.T) {
-	seed := buildrootSeed("controlplane", "cp1", "home1", "nats://127.0.0.1:4222", "", "")
+	seed := buildrootSeed("controlplane", "cp1", "home1", "nats://127.0.0.1:4222", "", "", "")
 	if !strings.Contains(seed, "\nRASPUTIN_CLUSTER_ID=home1\n") {
 		t.Errorf("cluster id should render bare and unquoted, got:\n%s", seed)
 	}
-	fw := openwrtSeed("fw1", "home1", "nats://rasputin.local:4222", "tok", "")
+	fw := openwrtSeed("fw1", "home1", "nats://rasputin.local:4222", "tok", "", "")
 	if !strings.Contains(fw, "\nRASPUTIN_CLUSTER_ID=home1\n") {
 		t.Errorf("firewall seed should carry the cluster id, got:\n%s", fw)
 	}

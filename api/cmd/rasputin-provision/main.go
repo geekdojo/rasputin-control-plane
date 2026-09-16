@@ -23,6 +23,13 @@
 // A --node value is "role[:node-id]". When the id is omitted it's auto-assigned
 // as "<cluster-id>-<role><seq>". Roles: controlplane | firewall | compute | storage.
 //
+// Every matched set also gets its own bus key (geekdojo/geekdojo-brain#448,
+// docs/bus-tls-contract.md): the controlplane's seed carries the private key as
+// RASPUTIN_BUS_KEY, and EVERY seed — the controlplane's included, for its own
+// loopback agent — carries RASPUTIN_BUS_PIN, the hash nodes verify the bus
+// server's TLS key against. The key exists only in the controlplane seed;
+// firstboot moves it to /var/lib/rasputin/bus/bus.key and scrubs the seed.
+//
 // --ssh-authorized-key / --ssh-authorized-key-file put the OPERATOR's public
 // key into every node's seed (RASPUTIN_SSH_AUTHORIZED_KEY, double-quoted — the
 // seed is sourced by sh). Images bake no SSH key at all (pre-GA vendor-key
@@ -40,6 +47,8 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // defaultNATSURLFor is the bus address baked into every non-controlplane seed:
@@ -97,6 +106,7 @@ type manifest struct {
 	SSHKey      bool           `json:"sshAuthorizedKey"` // whether seeds carry an operator SSH key (never the key itself)
 	Nodes       []manifestNode `json:"nodes"`
 	PreseedFile string         `json:"preseedFile"`
+	BusPin      string         `json:"busPin"` // the pin every seed carries (public); the key is only in the controlplane seed
 }
 
 func main() {
@@ -148,6 +158,7 @@ func run() error {
 	fmt.Printf("  • per-node seeds (the tokens live ONLY here — treat as secrets)\n")
 	fmt.Printf("  • %s → the controlplane's seed (preload via firstboot)\n", man.PreseedFile)
 	fmt.Printf("  • manifest.json → audit record (no plaintext)\n")
+	fmt.Printf("  • every seed pins the bus key %s; the controlplane seed carries the bus PRIVATE key (secret — firstboot moves it off the card)\n", man.BusPin)
 	if man.SSHKey {
 		fmt.Printf("  • every seed carries the operator SSH key (key-only network SSH enabled)\n")
 	} else {
@@ -281,6 +292,21 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 		return manifest{}, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 
+	// The set's bus key: offline, before any controlplane exists — which is
+	// one of the reasons #448 pins a key instead of chaining to the mesh CA.
+	busSigner, err := bustls.GenerateKey()
+	if err != nil {
+		return manifest{}, err
+	}
+	busKeyLine, err := bustls.EncodeKey(busSigner)
+	if err != nil {
+		return manifest{}, err
+	}
+	busPin, err := proto.BusPinForPublicKey(busSigner.Public())
+	if err != nil {
+		return manifest{}, err
+	}
+
 	var (
 		preseed []busauth.PreseedToken
 		man     = manifest{
@@ -289,6 +315,7 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 			NATSURL:     natsURL,
 			Enforce:     enforce,
 			SSHKey:      sshKey != "",
+			BusPin:      busPin,
 			PreseedFile: "controlplane-bus-tokens.json",
 		}
 	)
@@ -300,10 +327,13 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 			// and is the recipient of the preseed (everyone else's hashes). A
 			// matched set ships enforced — carried in the controlplane seed.
 			mn.SeedFile = seedFileName(n)
-			seed := buildrootSeed(n.Role, n.ID, clusterID, loopbackNATSURL, "", sshKey)
+			seed := buildrootSeed(n.Role, n.ID, clusterID, loopbackNATSURL, "", sshKey, busPin)
 			if enforce {
 				seed += "RASPUTIN_BUS_AUTH=enforce\n"
 			}
+			// The bus private key, in the controlplane's seed only. One line
+			// of base64, unquoted: nothing in its alphabet means anything to sh.
+			seed += "RASPUTIN_BUS_KEY=" + busKeyLine + "\n"
 			if err := writeFile(filepath.Join(dir, mn.SeedFile), seed, 0o600); err != nil {
 				return manifest{}, err
 			}
@@ -322,9 +352,9 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 
 		var seed string
 		if n.Role == "firewall" {
-			seed = openwrtSeed(n.ID, clusterID, natsURL, plaintext, sshKey)
+			seed = openwrtSeed(n.ID, clusterID, natsURL, plaintext, sshKey, busPin)
 		} else {
-			seed = buildrootSeed(n.Role, n.ID, clusterID, natsURL, plaintext, sshKey)
+			seed = buildrootSeed(n.Role, n.ID, clusterID, natsURL, plaintext, sshKey, busPin)
 		}
 		if err := writeFile(filepath.Join(dir, mn.SeedFile), seed, 0o600); err != nil {
 			return manifest{}, err
@@ -364,8 +394,10 @@ func seedFileName(n nodeSpec) string {
 // firstboot oneshot (provisioning.md §1). An empty token (controlplane) omits
 // the join-token line; an empty sshKey omits the key line (console/UI-only).
 // The key line is double-quoted — the seed is sourced by sh and the value
-// contains spaces; an unquoted key would break every field's sourcing.
-func buildrootSeed(role, id, clusterID, natsURL, token, sshKey string) string {
+// contains spaces; an unquoted key would break every field's sourcing. An
+// empty busPin omits the pin line (the node dials the bus in plaintext until
+// the controlplane delivers one).
+func buildrootSeed(role, id, clusterID, natsURL, token, sshKey, busPin string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# rasputin-seed.env — generated by rasputin-provision\n")
 	fmt.Fprintf(&b, "RASPUTIN_NODE_ROLE=%s\n", role)
@@ -375,6 +407,9 @@ func buildrootSeed(role, id, clusterID, natsURL, token, sshKey string) string {
 	if token != "" {
 		fmt.Fprintf(&b, "RASPUTIN_CP_JOIN_TOKEN=%s\n", token)
 	}
+	if busPin != "" {
+		fmt.Fprintf(&b, "RASPUTIN_BUS_PIN=%s\n", busPin)
+	}
 	if sshKey != "" {
 		fmt.Fprintf(&b, "RASPUTIN_SSH_AUTHORIZED_KEY=%q\n", sshKey)
 	}
@@ -383,8 +418,8 @@ func buildrootSeed(role, id, clusterID, natsURL, token, sshKey string) string {
 
 // openwrtSeed renders the firewall image's /etc/rasputin/seed.env. RASPUTIN_NODE_ID
 // is honored by apply-seed (overriding the on-box DMI/machine-id derivation) so
-// the bound token matches. sshKey as in buildrootSeed.
-func openwrtSeed(id, clusterID, natsURL, token, sshKey string) string {
+// the bound token matches. sshKey and busPin as in buildrootSeed.
+func openwrtSeed(id, clusterID, natsURL, token, sshKey, busPin string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# seed.env (firewall) — generated by rasputin-provision\n")
 	fmt.Fprintf(&b, "RASPUTIN_NODE_ROLE=firewall\n")
@@ -392,6 +427,9 @@ func openwrtSeed(id, clusterID, natsURL, token, sshKey string) string {
 	fmt.Fprintf(&b, "RASPUTIN_CLUSTER_ID=%s\n", clusterID)
 	fmt.Fprintf(&b, "RASPUTIN_NATS_URL=%s\n", natsURL)
 	fmt.Fprintf(&b, "RASPUTIN_CP_JOIN_TOKEN=%s\n", token)
+	if busPin != "" {
+		fmt.Fprintf(&b, "RASPUTIN_BUS_PIN=%s\n", busPin)
+	}
 	if sshKey != "" {
 		fmt.Fprintf(&b, "RASPUTIN_SSH_AUTHORIZED_KEY=%q\n", sshKey)
 	}

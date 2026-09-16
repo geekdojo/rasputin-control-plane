@@ -170,6 +170,11 @@ export interface MintedBusToken {
   label: string;
   nodeId: string;
   token: string;
+  // The live bus pin (sha256/…) the seed carries as RASPUTIN_BUS_PIN, from the
+  // same response so a seed never pairs a token with a pin read at another
+  // moment. '' when the controlplane's bus key did not load (the seed then
+  // omits the line and the node dials plaintext). geekdojo-brain#448.
+  busPin: string;
 }
 
 // FlashableImage is the public, verifiable image descriptor returned by the
