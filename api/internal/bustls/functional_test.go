@@ -227,6 +227,10 @@ type cp struct {
 	regMu sync.Mutex
 	regs  []proto.NodeRegisteredEvt
 
+	// tokens is the bus join-token store, so a scenario can mint a real
+	// node-bound token (unbound tokens do not exist).
+	tokens *busauth.Store
+
 	stopFn func()
 }
 
@@ -289,6 +293,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.tokens = tokens
 	responder := busauth.NewResponder(srv.Conn(), issuer, tokens)
 	if err := responder.Start(); err != nil {
 		t.Fatal(err)
@@ -458,7 +463,14 @@ func TestFunctional_MigrateThenRequire(t *testing.T) {
 	pin := c.key.Pin()
 
 	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url()})
-	n1 := startAgent(t, agentOpts{id: "n1", url: c.url(), token: "loopback-trusted-anyway"})
+	// A real token bound to n1, as Add-node mints it. On loopback the callout
+	// trusts the connection before it reads the token, so this is realism,
+	// not the thing under test.
+	n1Token, _, err := c.tokens.MintBound(ctx, "n1", "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n1 := startAgent(t, agentOpts{id: "n1", url: c.url(), token: n1Token})
 	c.waitRegistered(t, "cp1", false)
 	c.waitRegistered(t, "n1", false)
 
@@ -511,7 +523,7 @@ func TestFunctional_MigrateThenRequire(t *testing.T) {
 		t.Fatalf("the restarted controlplane has pin %s, want %s", c2.key.Pin(), pin)
 	}
 	startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c2.url(), stateDir: cpAgent.stateDir})
-	startAgent(t, agentOpts{id: "n1", url: c2.url(), stateDir: n1.stateDir})
+	startAgent(t, agentOpts{id: "n1", url: c2.url(), token: n1Token, stateDir: n1.stateDir})
 	c2.waitRegistered(t, "cp1", true)
 	c2.waitRegistered(t, "n1", true)
 

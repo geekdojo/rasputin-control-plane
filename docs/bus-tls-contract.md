@@ -9,6 +9,8 @@ This page is the contract between this repo (the api, the agent and `rasputin-pr
 
 If you change anything on this page, change the consumers in the same release.
 
+The current consumers are [rasputin-os#74](https://github.com/geekdojo/rasputin-os/pull/74) (firstboot) and [rasputin-openwrt-firewall#49](https://github.com/geekdojo/rasputin-openwrt-firewall/pull/49) (`apply-seed`, `bus-pin.sh`, `init.d/rasputin-agent`, `keep.d`). Both were merged on 2026-09-16 and implement this page as written.
+
 ## The two values
 
 | Seed variable | In which seeds | What it is | Secret? |
@@ -43,7 +45,7 @@ The agent accepts **only** the exact form above. It trims surrounding whitespace
 Hand the value to the agent as the environment variable `RASPUTIN_BUS_PIN`, exactly as you already hand over `RASPUTIN_CP_JOIN_TOKEN`:
 
 - **Rasputin OS:** firstboot copies the line into `/var/lib/rasputin/node.env`. The pin is public, so it needs no scrubbing and may stay in the seed.
-- **Firewall:** `apply-seed` stores the value in UCI (proposed: `rasputin.main.bus_pin`), and `init.d/rasputin-agent` passes it on with `procd_append_param env RASPUTIN_BUS_PIN="$bus_pin"`. It is trust material, so it lives in `/etc/rasputin` / UCI, which survives sysupgrade. It must **not** go in the system CA bundle, because it is not a CA.
+- **Firewall:** `apply-seed` stores the value in UCI as `rasputin.main.bus_pin`, and `init.d/rasputin-agent` passes it on with `procd_append_param env RASPUTIN_BUS_PIN="$bus_pin"`. It is trust material, so it lives in `/etc/rasputin` / UCI, which survives sysupgrade. It must **not** go in the system CA bundle, because it is not a CA.
 - **If the seed has no pin line** (an older seed, or a hand-written one), write nothing. The agent then dials in plaintext, as it does today, until the controlplane delivers a pin (see [below](#pin-delivery-to-nodes-enrolled-before-the-pin-existed)).
 
 ### Controlplane only: `RASPUTIN_BUS_KEY`
@@ -112,7 +114,8 @@ Changing between `require` and any other mode flips a nats-server option that ca
 
 ## Bad values
 
-- **An invalid `RASPUTIN_BUS_PIN`** is reported as a configuration fault (it appears in the node's registration and the startup log). The agent then uses the pin file if one exists, and otherwise plaintext.
+- **An invalid pin or key in a seed is refused by the seed consumer.** Both images stop provisioning with an error rather than applying a partial seed; the firewall's `apply-seed` leaves `/etc/config/rasputin` untouched. Dropping a bad pin and carrying on would provision the node straight into plaintext. So the agent-side fallback in the next bullet only applies to a value that got past the seed (for example, a hand-edited `node.env` or UCI value).
+- **An invalid `RASPUTIN_BUS_PIN` that reaches the agent** is reported as a configuration fault (it appears in the node's registration and the startup log). The agent then uses the pin file if one exists, and otherwise plaintext.
 - **An unreadable pin file** is also reported as a fault, and the agent dials in plaintext.
 - **An unusable `bus.key` on the controlplane** does not stop the api from starting. The bus runs **plaintext-only** and the api logs why. `GET /api/bus/tls` answers 503. Pinned nodes stay off the bus rather than speak plaintext.
 
