@@ -150,15 +150,49 @@ jobs:
           # so that path is unchanged — and there the checked-out commit is the
           # tagged commit anyway.
           TARGET_SHA: ${{ steps.src.outputs.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
         run: |
           PRERELEASE_FLAG=""
           [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
+
+          # Before publishing: a tag already on ANOTHER commit would make
+          # gh ignore --target and publish these binaries under it. Refuse
+          # (status 1), and refuse if the remote cannot be read (2). Status 0
+          # is the tag-push path (the tag is the checked-out commit); 3 means
+          # this run creates the tag.
+          created_tag=false
+          rc=0
+          ./scripts/release-target-guard.sh "$REPO_URL" "$TAG" "$TARGET_SHA" || rc=$?
+          case "$rc" in
+            0) ;;
+            3) created_tag=true ;;
+            *) echo "::error::refusing to publish $TAG: see release-target-guard above"; exit 1 ;;
+          esac
+
           gh release create "$TAG" \
             --target "$TARGET_SHA" \
             --title "Rasputin control plane $TAG" \
             --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64; the api tarball bundles the web UI). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
             $PRERELEASE_FLAG \
             dist/*.tar.gz dist/*.sha256 dist/*.hash
+
+          # After publishing: prove the tag landed on the built commit. A tag
+          # this run created on the wrong commit is deleted with its release so
+          # nothing mis-tagged stays published (releases here are immutable, so
+          # the dev.N name is burned; the next dispatch gets a new run number).
+          # A tag that existed before this step was pushed by a person and is
+          # never deleted. Only a proven mismatch (1) deletes; an unreadable
+          # remote fails without touching the release.
+          rc=0
+          ./scripts/release-target-guard.sh "$REPO_URL" "$TAG" "$TARGET_SHA" || rc=$?
+          if [ "$rc" != 0 ]; then
+            if [ "$rc" = 1 ] && [ "$created_tag" = true ]; then
+              echo "::error::deleting release $TAG and its tag: this run created them on the wrong commit"
+              gh release delete "$TAG" --cleanup-tag --yes \
+                || echo "::error::could not delete release $TAG; delete it and its tag by hand"
+            fi
+            exit 1
+          fi
 
       # Bench dispatch (publish=false) → just keep the artifacts for inspection.
       - name: Upload artifacts (dispatch dry-run)

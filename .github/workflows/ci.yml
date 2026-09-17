@@ -1,6 +1,12 @@
 name: ci
 
-# Safety net for every push and PR. Two jobs in parallel:
+# Safety net for every push and PR. Jobs, in parallel:
+#
+#   catalog-floor — the embedded catalog floor still carries the publisher's
+#              signature (scripts/embed-catalog.sh --verify).
+#
+#   release-target-guard — tests for scripts/release-target-guard.sh, which
+#              release.yml runs to prove a release tag is on the built commit.
 #
 #   backend  — gofmt + go vet + go build + go test for EVERY module in
 #              go.work, enumerated by scripts/workspace-modules.sh rather
@@ -70,6 +76,21 @@ jobs:
             exit 1
           fi
           ./scripts/embed-catalog.sh --verify
+
+  release-target-guard:
+    # release.yml's publish step runs scripts/release-target-guard.sh before
+    # and after `gh release create` to prove the tag is on the commit the
+    # binaries were built from (v2026.09.4-dev.164 was tagged on a commit
+    # merged mid-build). Every exit status, against a throwaway git remote
+    # with lightweight, annotated and nested tags. No network.
+    name: release target guard tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: guard tests
+        run: ./scripts/test-release-target-guard.sh
 
   backend:
     name: backend (vet + test + build)
