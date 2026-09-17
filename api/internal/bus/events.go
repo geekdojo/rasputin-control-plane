@@ -18,7 +18,7 @@ import (
 // connection lives in the global account, so the one subject is exported from
 // $SYS and imported into $G under disconnectSubject. Nodes cannot read it: the
 // credentials the auth callout mints allow subscribing only to their own
-// rasputin.node.<id>.cmd.> and _INBOX.>.
+// rasputin.node.<id>.cmd.>.
 
 // disconnectSubject is the prefix the advisory is imported under.
 const disconnectSubject = "rasputin.internal.bus.disconnect"

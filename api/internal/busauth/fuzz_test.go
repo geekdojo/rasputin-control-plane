@@ -80,6 +80,9 @@ func FuzzValidNodeID(f *testing.F) {
 // minted permissions never name more than one node. This is the invariant the
 // wildcard-username bug broke: every subject under the node prefix must carry
 // exactly one literal token, so a credential can only ever address its own lane.
+// Every subject must be under that prefix at all: a grant outside it (the
+// shared _INBOX.> subscribe of geekdojo/geekdojo-brain#451) reaches other
+// nodes' traffic whatever the node id is.
 func FuzzMintUserJWT(f *testing.F) {
 	issuer, err := EnsureIssuer(f.TempDir())
 	if err != nil {
@@ -114,7 +117,8 @@ func FuzzMintUserJWT(f *testing.F) {
 			for _, s := range subjects {
 				rest, ok := strings.CutPrefix(s, "rasputin.node.")
 				if !ok {
-					continue // _INBOX.> and friends are not node-scoped
+					t.Fatalf("%s subject %q is not under rasputin.node.%s: it is not "+
+						"scoped to this node at all", kind, s, nodeID)
 				}
 				first, _, _ := strings.Cut(rest, ".")
 				if first != nodeID {

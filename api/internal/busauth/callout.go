@@ -218,8 +218,16 @@ func (r *Responder) mintUserJWT(userNkey, nodeID string) (string, error) {
 
 	scope := "rasputin.node." + nodeID
 	uc.Permissions.Pub.Allow.Add(scope + ".>") // events, heartbeat, logs
+	// A node subscribes to its own commands and NOTHING else — in particular
+	// not _INBOX.>. Inbox subscriptions exist only to receive replies to
+	// requests a connection makes, and the agent makes none: it only answers,
+	// through the Resp grant below. The api's requests to every node use
+	// nats.go's shared _INBOX. prefix, so an _INBOX.> subscribe grant let any
+	// node read every other node's replies to the api — the PPPoE WAN password
+	// in firewall.get, the passphrase-sealed backup key in storage.* (geekdojo/
+	// geekdojo-brain#451). If the agent ever needs to make a request, give it a
+	// per-node inbox prefix; do not re-add the shared one.
 	uc.Permissions.Sub.Allow.Add(scope + ".cmd.>")
-	uc.Permissions.Sub.Allow.Add("_INBOX.>") // replies to requests the agent makes
 	// Let the agent answer request-reply (api → agent commands) by publishing
 	// to the reply subject it received, without granting blanket pub. Both
 	// bounds are set EXPLICITLY because nats-server fills a zero with its own
