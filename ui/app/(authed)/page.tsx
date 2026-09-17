@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { getSetupState, listApps, listBusTokens, listNodes, getMetrics, openInventoryWS, revokeBusToken } from '../../lib/api';
 import type { App, BusTokenInfo, DeploymentMode, InventoryChangeEvent, Node, NodeRole } from '../../lib/types';
 import { NodeGrid, sortNodeViews, type NodeView, type PendingView } from '../../components/NodeGrid';
+import { pendingEnrollments } from '../../lib/bus-tokens';
 import { NodeControls } from '../../components/NodeControls';
 import { AddNodeWizard } from '../../components/AddNodeWizard';
 import { ConfirmModal } from '../../components/ConfirmModal';
@@ -159,13 +160,10 @@ export default function NodesPage() {
   const bmcCaps = useMemo(() => bmcNodeCaps(nodes, selectedId ?? undefined), [nodes, selectedId]);
   const pending: PendingView[] = useMemo(
     () =>
-      busTokens
-        .filter((t) => t.nodeId && !t.revokedAt && !nodeIds.has(t.nodeId))
-        .map((t) => ({
-          id: t.nodeId as string,
-          tokenId: t.id,
-          role: ROLE_SHORT[t.label as NodeRole] ?? t.label,
-        })),
+      pendingEnrollments(busTokens, nodeIds).map((p) => ({
+        ...p,
+        role: ROLE_SHORT[p.label as NodeRole] ?? p.label,
+      })),
     [busTokens, nodeIds],
   );
 
@@ -193,7 +191,10 @@ export default function NodesPage() {
         selectedId={selectedId}
         onSelect={(id) => setSelectedId((prev) => (prev === id ? null : id))}
         onAddNode={() => setWizardOpen(true)}
+        // Only ever fired for a cancelable bay: the grid makes the others
+        // inert, because the api refuses that revoke (lib/bus-tokens.ts).
         onCancelPending={(p) => {
+          if (!p.cancelable) return;
           setCancelErr(null);
           setCancelTarget(p);
         }}

@@ -160,6 +160,12 @@ export interface BusTokenInfo {
   createdAt: string;
   lastUsedAt?: string;
   revokedAt?: string;
+  // True on the one token the api minted for THIS controlplane's own agent.
+  // DELETE /api/bus/tokens/{id} answers 409 for it — revoking it takes the
+  // controlplane's agent off the bus until the api restarts — so nothing may
+  // offer the action for it (geekdojo-brain#140). Omitted, not false, on every
+  // other token, and absent entirely from an older api's response.
+  selfAgent?: boolean;
 }
 
 // MintedBusToken is the one-shot reply from POST /api/bus/tokens. token is the

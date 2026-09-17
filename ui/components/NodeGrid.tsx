@@ -77,11 +77,19 @@ function hexPoints(cx: number, cy: number, r: number): string {
 
 // A pending enrollment — a node id that's been issued a join token but whose
 // agent hasn't registered yet. Occupies a slot, drawn distinct from a live
-// node, and clickable to cancel (revoke the token).
+// node, and clickable to cancel (revoke the token) — except where the api
+// refuses that revoke, which is its own agent's token (see lib/bus-tokens.ts).
+// Such a bay is inert and says why instead, rather than offering a click that
+// comes back 409.
 export interface PendingView {
   id: string;
   tokenId: string;
   role: string;
+  cancelable: boolean;
+  // Shown in the bay in place of the cancel affordance, and its longer form in
+  // the tooltip. Set only when cancelable is false.
+  reason?: string;
+  reasonDetail?: string;
 }
 
 interface NodeGridProps {
@@ -155,18 +163,38 @@ function AddCell({ cx, cy, onClick }: Slot & { onClick: () => void }) {
 }
 
 // Pending enrollment — a reserved node id that's been issued a token but hasn't
-// come online. Dashed accent hex with a slow pulse; clicking cancels it.
-function PendingCell({ cx, cy, label, onClick }: Slot & { label: string; onClick: () => void }) {
+// come online. Dashed accent hex with a slow pulse; clicking cancels it, unless
+// the token is one the api won't revoke — then the bay is inert and the caption
+// carries the reason.
+function PendingCell({
+  cx,
+  cy,
+  label,
+  cancelable,
+  reason,
+  reasonDetail,
+  onClick,
+}: Slot & {
+  label: string;
+  cancelable: boolean;
+  reason?: string;
+  reasonDetail?: string;
+  onClick: () => void;
+}) {
   const [hovered, setHovered] = useState(false);
   const shown = label.length > 10 ? label.slice(0, 9) + '…' : label;
   return (
     <g
-      onClick={onClick}
+      onClick={cancelable ? onClick : undefined}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      style={{ cursor: 'pointer' }}
+      style={{ cursor: cancelable ? 'pointer' : 'default' }}
     >
-      <title>{`${label} — waiting to come online · click to cancel`}</title>
+      <title>
+        {cancelable
+          ? `${label} — waiting to come online · click to cancel`
+          : `${label} — waiting to come online · ${reasonDetail ?? "this one can't be cancelled"}`}
+      </title>
       <g style={{ transformOrigin: `${cx}px ${cy}px`, animation: 'hex-pulse 2.4s ease-out infinite' }}>
         <polygon points={hexPoints(cx, cy, R)} fill="none" stroke={ACCENT} strokeWidth={1} />
       </g>
@@ -185,7 +213,7 @@ function PendingCell({ cx, cy, label, onClick }: Slot & { label: string; onClick
         PENDING
       </text>
       <text x={cx} y={cy + 25} textAnchor="middle" fill="rgba(var(--rasp-fg-rgb),0.4)" fontSize={8} fontFamily={MONO} letterSpacing="0.06em" style={{ userSelect: 'none' }}>
-        {hovered ? 'CLICK TO CANCEL' : 'waiting…'}
+        {cancelable ? (hovered ? 'CLICK TO CANCEL' : 'waiting…') : (reason ?? 'waiting…')}
       </text>
     </g>
   );
@@ -406,6 +434,9 @@ export function NodeGrid({ nodes, pending = [], selectedId, onSelect, onAddNode,
                   cx={pos.cx}
                   cy={pos.cy}
                   label={p.id}
+                  cancelable={p.cancelable}
+                  reason={p.reason}
+                  reasonDetail={p.reasonDetail}
                   onClick={() => onCancelPending?.(p)}
                 />
               );

@@ -274,7 +274,10 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	if existing == nil {
 		// Cluster-size cap: never insert a row past proto.MaxClusterNodes.
 		// This is the backstop for enrollment paths that don't pass through
-		// token minting (preseeded matched sets, loopback-trusted connects).
+		// a mint on this api — a preseeded matched set, whose hashes are
+		// loaded straight into the token store, and the controlplane's own
+		// agent, whose token the api mints at start rather than through
+		// POST /api/bus/tokens (geekdojo-brain#140).
 		// Re-registrations of known nodes take the update path below and are
 		// never affected. Bench-verified 2026-07-15 that without this, a 25th
 		// node enrolls straight into inventory.

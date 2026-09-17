@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
@@ -39,7 +40,8 @@ CREATE TABLE IF NOT EXISTS bus_tokens (
     created_at   INTEGER NOT NULL,
     last_used_at INTEGER,
     revoked_at   INTEGER,
-    node_id      TEXT                -- bound node id; NULL only on a legacy unbound row
+    node_id      TEXT,               -- bound node id; NULL only on a legacy unbound row
+    self_agent   INTEGER NOT NULL DEFAULT 0  -- 1 on the token the api minted for this controlplane's own agent
 );`
 
 // Store is the SQLite-backed bus join-token ledger.
@@ -49,6 +51,15 @@ type Store struct {
 	// sess records the connections each token authenticated so a revoke can
 	// close them (sessions.go). Empty until TrackSessions is called.
 	sess sessions
+
+	// selfMu guards selfNodeID, which EnsureAgentToken sets at api start and
+	// the revoke paths read while serving.
+	selfMu sync.RWMutex
+	// selfNodeID is THIS controlplane's own node id — the id its co-located
+	// agent authenticates as. Empty until EnsureAgentToken is called, which a
+	// dev api with no RASPUTIN_SELF_NODE_ID never does; nothing is protected
+	// then, because there is no api-minted agent token to protect.
+	selfNodeID string
 }
 
 // TokenInfo is the non-secret view of a token row (no plaintext, ever).
@@ -59,6 +70,11 @@ type TokenInfo struct {
 	CreatedAt  time.Time  `json:"createdAt"`
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
 	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
+	// SelfAgent marks the one token this api minted for its own controlplane's
+	// agent: live, bound to this controlplane's node id, and carrying the
+	// marker EnsureAgentToken sets. It is the token the revoke paths refuse
+	// (ErrSelfAgentToken), so the UI must not offer the action for it.
+	SelfAgent bool `json:"selfAgent,omitempty"`
 }
 
 // PreseedToken is a hash-only token record for preloading the store from a
@@ -83,6 +99,15 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		_ = db.Close()
 		return nil, fmt.Errorf("busauth: migrate node_id: %w", err)
+	}
+	// Same additive migration for the self_agent marker (agenttoken.go). Rows
+	// written before it existed read as 0 — unmarked, and so revocable — until
+	// EnsureAgentToken adopts the one the agent token file actually names at
+	// the next start.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE bus_tokens ADD COLUMN self_agent INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		_ = db.Close()
+		return nil, fmt.Errorf("busauth: migrate self_agent: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -260,10 +285,28 @@ func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string)
 // bus connection that authenticated with it, returning how many it closed.
 // Returns sql.ErrNoRows if no such live token existed.
 //
+// It refuses THIS controlplane's own agent token with ErrSelfAgentToken: that
+// revoke is a one-click self-inflicted outage with no way back from the UI
+// (geekdojo-brain#140, decided 2026-09-17). See ErrSelfAgentToken.
+//
 // The closed count is exact for connections this process admitted: a revoked
 // token's connections are all closed before Revoke returns (sessions.go). The
 // agent's reconnect is then refused by the callout, because the row is revoked.
 func (s *Store) Revoke(ctx context.Context, id string) (disconnected int, err error) {
+	protected, err := s.isSelfAgentToken(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if protected {
+		return 0, ErrSelfAgentToken
+	}
+	return s.revoke(ctx, id)
+}
+
+// revoke is Revoke without the self-agent guard — the statement the api's own
+// re-mint uses to retire a token it has just replaced (EnsureAgentToken). No
+// request-driven path may call it: an operator revoke goes through Revoke.
+func (s *Store) revoke(ctx context.Context, id string) (disconnected int, err error) {
 	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`,
@@ -294,7 +337,20 @@ func (s *Store) Revoke(ctx context.Context, id string) (disconnected int, err er
 // authenticated by a token bound to the node it presented, so a node's
 // sessions and its tokens are the same set; a legacy unbound token cannot
 // reconnect either, because Validate refuses it (geekdojo-brain#423).
+//
+// It refuses the controlplane's own node id with ErrSelfAgentToken and revokes
+// nothing, for the same reason Revoke does. Its one caller — node removal —
+// already refuses the controlplane node ahead of this (409, "the controlplane
+// node cannot be removed"), so this is the backstop for a future caller, not a
+// reachable path today.
 func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, disconnected int, err error) {
+	protected, err := s.nodeHasSelfAgentToken(ctx, nodeID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if protected {
+		return 0, 0, ErrSelfAgentToken
+	}
 	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL`,
@@ -324,10 +380,13 @@ func (s *Store) CountActiveUnbound(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// List returns all tokens (secret-free), newest first.
+// List returns all tokens (secret-free), newest first. SelfAgent is set on the
+// one this controlplane's own agent holds, so a client can tell the token it
+// must not offer to revoke from a node's enrollment token.
 func (s *Store) List(ctx context.Context) ([]TokenInfo, error) {
+	self := s.SelfNodeID()
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT token_hash, label, node_id, created_at, last_used_at, revoked_at
+        SELECT token_hash, label, node_id, created_at, last_used_at, revoked_at, self_agent
         FROM bus_tokens ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("busauth: list: %w", err)
@@ -340,10 +399,14 @@ func (s *Store) List(ctx context.Context) ([]TokenInfo, error) {
 			createdAt         int64
 			nodeID            sql.NullString
 			lastUsed, revoked sql.NullInt64
+			selfAgent         int
 		)
-		if err := rows.Scan(&t.ID, &t.Label, &nodeID, &createdAt, &lastUsed, &revoked); err != nil {
+		if err := rows.Scan(&t.ID, &t.Label, &nodeID, &createdAt, &lastUsed, &revoked, &selfAgent); err != nil {
 			return nil, err
 		}
+		// Exactly the predicate the revoke paths refuse on, so the UI never
+		// offers an action the api would answer 409 to.
+		t.SelfAgent = selfAgent == 1 && self != "" && nodeID.Valid && nodeID.String == self && !revoked.Valid
 		t.CreatedAt = fromMs(createdAt)
 		if nodeID.Valid {
 			n := nodeID.String

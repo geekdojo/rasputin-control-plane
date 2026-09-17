@@ -2,8 +2,11 @@
 // agents present a per-node join token (NATS username=node-id, password=token),
 // an in-process responder validates it against the token store, and mints a
 // short-lived user JWT scoped to that node's subjects. The api's own
-// in-process connection bypasses the callout as a configured AuthUser; the
-// controlplane's co-located agent is trusted via loopback.
+// in-process connection bypasses the callout as a configured AuthUser. The
+// controlplane's co-located agent is not special: loopback is trusted no
+// further than any other address, and the agent presents a join token like
+// every other node — one the api mints for it at start (agenttoken.go,
+// geekdojo-brain#140).
 //
 // See the bus-auth design (plan) and architecture.md §5.4. Mechanism verified
 // against nats-server v2.11.17: auth callout + JetStream coexist on the global
