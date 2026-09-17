@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -408,8 +409,9 @@ RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
 
 func TestParseRAUCStatus_StateFallbackBootedB(t *testing.T) {
 	// No boot key present → fall back to the slot whose STATE is booted,
-	// resolved via its device partlabel (rootfs-1 → SlotB).
-	in := `RAUC_SLOTS='1 2'
+	// named by its position in RAUC_SYSTEM_SLOTS (index 1 → rootfs.1 → SlotB).
+	in := `RAUC_SYSTEM_SLOTS='rootfs.1 rootfs.0'
+RAUC_SLOTS='1 2'
 RAUC_SLOT_STATE_1='booted'
 RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'
 RAUC_SLOT_STATE_2='inactive'
@@ -418,6 +420,34 @@ RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
 	got := parseRAUCStatus(in)
 	if got.activeSlot != proto.SlotB || got.inactiveSlot != proto.SlotA {
 		t.Fatalf("state fallback: active/inactive = %+v, want B/A", got)
+	}
+}
+
+// The same fallback on the Pi, whose slot devices are by-partuuid paths that
+// carry no slot name: the real cp-1 and cp-compute1 captures with the boot key
+// removed must still resolve the booted slot from RAUC_SYSTEM_SLOTS.
+func TestParseRAUCStatus_StateFallbackPi(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       string
+		primary      string
+		active, idle proto.UpdateSlot
+	}{
+		{"cp-1 booted B", realPiCP1Status, "RAUC_BOOT_PRIMARY='rootfs.1'\n", proto.SlotB, proto.SlotA},
+		{"cp-compute1 booted A", realPiComputeStatus, "RAUC_BOOT_PRIMARY='rootfs.0'\n", proto.SlotA, proto.SlotB},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseRAUCStatus(tc.status); got.activeSlot != tc.active || got.inactiveSlot != tc.idle {
+				t.Fatalf("real capture: active/inactive = %+v, want %s/%s", got, tc.active, tc.idle)
+			}
+			in := strings.Replace(tc.status, tc.primary, "", 1)
+			if in == tc.status {
+				t.Fatal("fixture still carries RAUC_BOOT_PRIMARY: the fallback is not exercised")
+			}
+			if got := parseRAUCStatus(in); got.activeSlot != tc.active || got.inactiveSlot != tc.idle {
+				t.Fatalf("state fallback: active/inactive = %+v, want %s/%s", got, tc.active, tc.idle)
+			}
+		})
 	}
 }
 

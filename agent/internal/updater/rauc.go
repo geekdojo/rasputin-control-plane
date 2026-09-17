@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -166,28 +167,72 @@ type raucStatus struct {
 	activeVersion string
 }
 
-// slotNameFromDevice maps a RAUC slot device path to our rootfs.N name via the
-// partlabel the images use (rootfs-0 / rootfs-1).
-func slotNameFromDevice(dev string) string {
-	switch {
-	case strings.Contains(dev, "rootfs-0"):
-		return "rootfs.0"
-	case strings.Contains(dev, "rootfs-1"):
-		return "rootfs.1"
+// parseRAUCShell reads `rauc status --output-format=shell` into key → value.
+func parseRAUCShell(s string) map[string]string {
+	kv := map[string]string{}
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.IndexByte(line, '='); i > 0 {
+			kv[line[:i]] = strings.Trim(line[i+1:], "'")
+		}
 	}
-	return ""
+	return kv
+}
+
+type raucSlot struct {
+	name     string // rootfs.0 / rootfs.1, or "" when RAUC named none
+	bootname string // A / B
+	state    string // booted / active / inactive
+	status   string // good / bad
+}
+
+// raucSlots lists the slots `rauc status --output-format=shell` describes,
+// each NAMED the way RAUC names it.
+//
+// RAUC prints no per-slot name key. It prints the slot names once, in
+// RAUC_SYSTEM_SLOTS, and numbers the per-slot keys by position in that same
+// list: RAUC_SLOTS='1 2' and RAUC_SLOT_<key>_N describe the Nth name. Captured
+// on both layouts (rauc 1.13 on the Pi, 2026-09-16; the n100, 2026-08-12):
+//
+//	RAUC_SYSTEM_SLOTS='rootfs.1 rootfs.0'
+//	RAUC_SLOTS='1 2'
+//	RAUC_SLOT_BOOTNAME_1='B'  RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'     (n100)
+//	RAUC_SLOT_BOOTNAME_1='B'  RAUC_SLOT_DEVICE_1='/dev/disk/by-partuuid/52415350-06'   (Pi)
+//
+// ⚠️ Never name a slot from its device path. The n100's partlabel happens to
+// spell the slot; the Pi's by-partuuid path does not, and a parser that read
+// the device left every Pi slot unnamed, so the Pi controlplane never read as
+// committed and bus TLS stayed in offer (geekdojo-brain#448, e12bench
+// 2026-09-16). A slot RAUC does not name keeps name "", which no caller
+// matches: unparseable stays not committed, never guessed.
+func raucSlots(kv map[string]string) []raucSlot {
+	names := strings.Fields(kv["RAUC_SYSTEM_SLOTS"])
+	var slots []raucSlot
+	for _, idx := range strings.Fields(kv["RAUC_SLOTS"]) {
+		s := raucSlot{
+			bootname: kv["RAUC_SLOT_BOOTNAME_"+idx],
+			state:    kv["RAUC_SLOT_STATE_"+idx],
+			status:   kv["RAUC_SLOT_BOOT_STATUS_"+idx],
+		}
+		if n, err := strconv.Atoi(idx); err == nil && n >= 1 && n <= len(names) {
+			s.name = names[n-1]
+		}
+		slots = append(slots, s)
+	}
+	return slots
 }
 
 // parseRAUCStatus extracts the active/inactive slot from
 // `rauc status --output-format=shell`. Real RAUC (the version on our image)
-// names the booted slot in RAUC_BOOT_PRIMARY and describes each slot with
-// per-index RAUC_SLOT_STATE_N / RAUC_SLOT_DEVICE_N fields:
+// names the bootloader's primary slot in RAUC_BOOT_PRIMARY and describes each
+// slot with per-index fields numbered by position in RAUC_SYSTEM_SLOTS (see
+// raucSlots):
 //
 //	RAUC_SYSTEM_COMPATIBLE='rasputin-n100'
 //	RAUC_BOOT_PRIMARY='rootfs.0'
+//	RAUC_SYSTEM_SLOTS='rootfs.1 rootfs.0'
 //	RAUC_SLOTS='1 2'
-//	RAUC_SLOT_STATE_1='inactive'   RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'
-//	RAUC_SLOT_STATE_2='booted'     RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
+//	RAUC_SLOT_STATE_1='inactive'
+//	RAUC_SLOT_STATE_2='booted'
 //
 // We also still accept the older schema (RAUC_BOOT_SLOT +
 // RAUC_SLOT_STATUS_N_BUNDLE_VERSION). The booted rootfs (rootfs.0 / rootfs.1)
@@ -203,17 +248,12 @@ func parseRAUCStatus(s string) raucStatus {
 		activeSlot:   proto.SlotUnknown,
 		inactiveSlot: proto.SlotUnknown,
 	}
-	kv := map[string]string{}
-	for _, line := range strings.Split(s, "\n") {
-		if i := strings.IndexByte(line, '='); i > 0 {
-			kv[line[:i]] = strings.Trim(line[i+1:], "'")
-		}
-	}
+	kv := parseRAUCShell(s)
 
 	// Which rootfs slot does the BOOTLOADER consider primary? Prefer the
 	// explicit boot key (RAUC_BOOT_PRIMARY, or legacy RAUC_BOOT_SLOT); else
-	// fall back to the slot whose STATE is booted, resolved to a name via its
-	// device partlabel.
+	// fall back to the slot whose STATE is booted, by the name RAUC gives it
+	// (raucSlots — never its device path, which on the Pi names nothing).
 	//
 	// ⚠️ This is the bootloader's primary slot, NOT necessarily the slot we are
 	// running from, and an earlier version of this comment claimed otherwise.
@@ -236,18 +276,18 @@ func parseRAUCStatus(s string) raucStatus {
 		boot = kv["RAUC_BOOT_SLOT"]
 	}
 	if boot == "" {
-		for _, idx := range strings.Fields(kv["RAUC_SLOTS"]) {
-			if st := kv["RAUC_SLOT_STATE_"+idx]; st == "booted" || st == "active" {
-				boot = slotNameFromDevice(kv["RAUC_SLOT_DEVICE_"+idx])
+		for _, slot := range raucSlots(kv) {
+			if slot.state == "booted" || slot.state == "active" {
+				boot = slot.name
 				break
 			}
 		}
 	}
 
 	switch {
-	case strings.HasSuffix(boot, ".0") || strings.Contains(boot, "rootfs-0"):
+	case strings.HasSuffix(boot, ".0"):
 		out.activeSlot, out.inactiveSlot = proto.SlotA, proto.SlotB
-	case strings.HasSuffix(boot, ".1") || strings.Contains(boot, "rootfs-1"):
+	case strings.HasSuffix(boot, ".1"):
 		out.activeSlot, out.inactiveSlot = proto.SlotB, proto.SlotA
 	}
 

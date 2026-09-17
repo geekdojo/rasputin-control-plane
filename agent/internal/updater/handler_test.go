@@ -417,6 +417,7 @@ case "$1" in
     cat <<EOF
 RAUC_SYSTEM_COMPATIBLE='rasputin-n100'
 RAUC_BOOT_PRIMARY='rootfs.0'
+RAUC_SYSTEM_SLOTS='rootfs.1 rootfs.0'
 RAUC_SLOTS='1 2'
 RAUC_SLOT_STATE_1='inactive'
 RAUC_SLOT_DEVICE_1='/dev/disk/by-partlabel/rootfs-1'

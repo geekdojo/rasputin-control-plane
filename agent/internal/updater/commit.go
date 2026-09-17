@@ -3,7 +3,6 @@ package updater
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -39,29 +38,11 @@ import (
 // elsewhere; it sits beside trybootMarker on the same FAT.
 var trialPendingMarker = "/run/rasputin-seed/rauc-trial.pending"
 
-type raucSlot struct {
-	name     string // rootfs.0 / rootfs.1
-	bootname string // A / B
-	status   string // good / bad
-}
-
 // raucBootCommitted decides commit from `rauc status --output-format=shell`
 // output and the slot the kernel says it booted.
 func raucBootCommitted(statusOut string, booted proto.UpdateSlot, trialPending bool) (bool, string) {
-	kv := map[string]string{}
-	for _, line := range strings.Split(statusOut, "\n") {
-		if i := strings.IndexByte(line, '='); i > 0 {
-			kv[line[:i]] = strings.Trim(line[i+1:], "'")
-		}
-	}
-	var slots []raucSlot
-	for _, idx := range strings.Fields(kv["RAUC_SLOTS"]) {
-		slots = append(slots, raucSlot{
-			name:     slotNameFromDevice(kv["RAUC_SLOT_DEVICE_"+idx]),
-			bootname: kv["RAUC_SLOT_BOOTNAME_"+idx],
-			status:   kv["RAUC_SLOT_BOOT_STATUS_"+idx],
-		})
-	}
+	kv := parseRAUCShell(statusOut)
+	slots := raucSlots(kv)
 	bootedName := map[proto.UpdateSlot]string{proto.SlotA: "rootfs.0", proto.SlotB: "rootfs.1"}[booted]
 	if bootedName == "" {
 		return false, "the booted slot is unknown"
