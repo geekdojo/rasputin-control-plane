@@ -8,7 +8,7 @@ import (
 
 func renderAndParse(t *testing.T, routes []AppRoute, tailnetAddr, lanAddr string) map[string]any {
 	t.Helper()
-	data, err := RenderCaddyConfig(routes, tailnetAddr, lanAddr, 443)
+	data, err := RenderCaddyConfig(routes, tailnetAddr, lanAddr, 443, testAdminSocket)
 	if err != nil {
 		t.Fatalf("RenderCaddyConfig: %v", err)
 	}
@@ -115,7 +115,7 @@ func keysOf(m map[string]any) []string {
 // first leaf arrived.
 func TestRenderCaddyConfig_EmptyLoadFilesIsArrayNotNull(t *testing.T) {
 	// No routes at all — the zero-app case a fresh node starts in.
-	data, err := RenderCaddyConfig(nil, "100.64.0.2", "192.168.1.2", 443)
+	data, err := RenderCaddyConfig(nil, "100.64.0.2", "192.168.1.2", 443, testAdminSocket)
 	if err != nil {
 		t.Fatalf("RenderCaddyConfig: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRenderCaddyConfig_UpstreamTLS(t *testing.T) {
 	base := AppRoute{AppID: "a", TailnetFQDN: "app.home1.internal", UpstreamPort: 8443,
 		CertPath: "/c.pem", KeyPath: "/c.key"}
 
-	plain, err := RenderCaddyConfig([]AppRoute{base}, "100.64.0.1", "", 443)
+	plain, err := RenderCaddyConfig([]AppRoute{base}, "100.64.0.1", "", 443, testAdminSocket)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRenderCaddyConfig_UpstreamTLS(t *testing.T) {
 
 	tlsRoute := base
 	tlsRoute.UpstreamTLS = true
-	secure, err := RenderCaddyConfig([]AppRoute{tlsRoute}, "100.64.0.1", "", 443)
+	secure, err := RenderCaddyConfig([]AppRoute{tlsRoute}, "100.64.0.1", "", 443, testAdminSocket)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}

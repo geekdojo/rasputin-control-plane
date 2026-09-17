@@ -6,11 +6,6 @@ import (
 	"sort"
 )
 
-// CaddyAdminAddr is where the node-local Caddy exposes its admin API — loopback
-// only. The agent pushes config there (a later slice); this file just renders
-// the config that gets pushed.
-const CaddyAdminAddr = "localhost:2019"
-
 // AppRoute is one app's routing into the node-local Caddy: the Host names to
 // match, the loopback upstream port the app's container listens on, and the
 // paths to the app's delivered TLS leaf (LeafStore.CertPath/KeyPath).
@@ -36,7 +31,17 @@ type AppRoute struct {
 // tailnet address; a node with no LAN route has no LAN server). auto_https is
 // OFF — TLS uses the per-app leaves the control plane delivers, never Caddy's
 // own ACME (ADR-0004 §7). certPort is normally 443.
-func RenderCaddyConfig(routes []AppRoute, tailnetAddr, lanAddr string, certPort int) ([]byte, error) {
+//
+// adminSocket is the unix socket the admin API stays on (normally
+// DefaultAdminSocket). Every pushed config names it: a config that omitted
+// `admin` would move Caddy's admin API back to its built-in default, TCP
+// localhost:2019, which any local user can reach (geekdojo-brain#450).
+func RenderCaddyConfig(routes []AppRoute, tailnetAddr, lanAddr string, certPort int, adminSocket string) ([]byte, error) {
+	adminListen, err := AdminListen(adminSocket)
+	if err != nil {
+		return nil, err
+	}
+
 	// Stable order so the same app set renders byte-identical config (cheap
 	// idempotence for the admin-API push).
 	sorted := append([]AppRoute(nil), routes...)
@@ -82,7 +87,7 @@ func RenderCaddyConfig(routes []AppRoute, tailnetAddr, lanAddr string, certPort 
 	}
 
 	cfg := map[string]any{
-		"admin": map[string]any{"listen": CaddyAdminAddr},
+		"admin": map[string]any{"listen": adminListen},
 		"apps": map[string]any{
 			"http": map[string]any{"servers": servers},
 			"tls":  map[string]any{"certificates": map[string]any{"load_files": loadFiles}},

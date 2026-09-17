@@ -388,10 +388,12 @@ func main() {
 		// Node-local reverse proxy (ADR-0004 §1/§6/§9): the agent runs the stock
 		// caddy binary, receives per-app TLS leaves + route metadata, and pushes
 		// the Caddy config (Host-routes to loopback, TLS from the leaves) via the
-		// admin API. Listen addresses: the node's LAN IP (host) and tailnet IP
-		// (tailscale). Best-effort — a proxy failure never blocks the agent.
+		// admin API — on a root-only unix socket, never TCP (geekdojo-brain#450;
+		// see proxy.DefaultAdminSocket). Listen addresses: the node's LAN IP
+		// (host) and tailnet IP (tailscale). Best-effort — a proxy failure never
+		// blocks the agent.
 		leafStore := proxy.NewLeafStore(filepath.Join(stateDir, "proxy"))
-		reconciler := proxy.NewReconciler(leafStore, proxy.CaddyAdminAddr,
+		reconciler := proxy.NewReconciler(leafStore, proxy.DefaultAdminSocket,
 			func() string { return nodeTailnetIP() },
 			host.PrimaryLANIP)
 		if caddyBin := caddyBinary(); caddyBin != "" {
