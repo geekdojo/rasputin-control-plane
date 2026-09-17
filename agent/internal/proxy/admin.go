@@ -56,7 +56,8 @@ const adminHost = "caddy"
 
 // AdminListen renders socketPath as a Caddy admin listen address. The
 // "unix/<path>|<mode>" form makes Caddy chmod the socket to mode after bind
-// (supported since Caddy 2.8; rasputin-os vendors 2.11.4).
+// (verified in Caddy 2.11.4, the version rasputin-os vendors, and exercised by
+// the real-Caddy functional test).
 func AdminListen(socketPath string) (string, error) {
 	if err := validateAdminSocket(socketPath); err != nil {
 		return "", err
