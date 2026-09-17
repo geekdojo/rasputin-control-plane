@@ -86,10 +86,8 @@ func TestMintedCredentialHasNoInboxSubscribe(t *testing.T) {
 //   - A receives nothing on the inbox space;
 //   - A still cannot publish to the api's live inbox (the forge stays closed).
 //
-// Both nodes present bound join tokens. The bus listens on loopback, which
-// today admits a node without checking its token (geekdojo-brain#140) — but
-// admission is all loopback changes: the credential is minted by the same
-// mintUserJWT on both paths, and that credential is what this test exercises.
+// Both nodes present bound join tokens, and the bus checks them: it listens on
+// loopback, which earns a connection nothing (geekdojo-brain#140).
 //
 // No sleeps: every "nothing arrived" is made a fact by flushing the connection
 // whose publish would have been routed, then the one that would have received
