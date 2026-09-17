@@ -17,6 +17,10 @@ name: ci
 #              we can watch it trend over time. Failures gate merges via
 #              branch-protection (configured outside this file).
 #
+#   caddy-admin-socket — the agent's Caddy supervisor against the real Caddy
+#              the OS image ships, run as root: the admin API is reachable
+#              only through a root-only unix socket (geekdojo-brain#450).
+#
 #   frontend — eslint + TypeScript type-check + `npm test` (node --test) +
 #              Next.js production build. Catches type regressions and
 #              build-time errors (Server Components, missing 'use client',
@@ -188,6 +192,61 @@ jobs:
           name: api-coverage
           path: api.coverage.out
           retention-days: 30
+
+  caddy-admin-socket:
+    # The node-local Caddy runs as root, and its admin API can rewrite that root
+    # process's config. geekdojo-brain#450 moved it off unauthenticated TCP
+    # localhost:2019 onto a root-only unix socket. Unit tests can only check the
+    # rendered JSON; this runs the agent's own supervisor against the REAL Caddy
+    # the OS image ships and proves it on the process: no TCP admin listener even
+    # before the first config push, a non-root uid refused by the 0700 directory
+    # and by the 0600 socket on its own, a leftover TCP-admin Caddy retired, and
+    # a killed Caddy / restarted agent converging back to the same state.
+    #
+    # It needs root (to be the agent, and to drop to uid 65534 for the refusal),
+    # so the test binary is built as the runner user and only RUN under sudo.
+    # RASPUTIN_CADDY_FUNCTIONAL=required turns the test's skips into failures,
+    # so this job cannot pass by not running.
+    name: caddy admin socket (real caddy, root)
+    runs-on: ubuntu-latest
+    env:
+      # Keep in step with rasputin-os package/caddy (caddy.mk + caddy.hash): the
+      # point is to test the Caddy the appliance runs. sha512 from the release's
+      # caddy_<version>_checksums.txt.
+      CADDY_VERSION: "2.11.4"
+      CADDY_SHA512: 8220d1f013b6f27510247b2360c9e0ca9f018feebd82515f07635318b34ff9777ccc8fd0b6e6f2486ce3a33fe389fbb7db12d05baa474f4587509fb4f5ebf1c9
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache-dependency-path: "*/go.sum"
+
+      - name: install the pinned caddy
+        run: |
+          set -eu
+          tarball="caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/${tarball}"
+          echo "${CADDY_SHA512}  $RUNNER_TEMP/$tarball" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/caddy"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/caddy" caddy
+          "$RUNNER_TEMP/caddy/caddy" version
+
+      - name: build the proxy test binary
+        run: go test -c -race -o "$RUNNER_TEMP/proxy.test" ./agent/internal/proxy
+
+      - name: run the proxy tests as root, against real caddy
+        # The whole package, so the root-only unit tests run too.
+        run: |
+          sudo env \
+            RASPUTIN_CADDY_BIN="$RUNNER_TEMP/caddy/caddy" \
+            RASPUTIN_CADDY_FUNCTIONAL=required \
+            "$RUNNER_TEMP/proxy.test" -test.v -test.count=1
 
   frontend:
     # ⚠️ This name is an API, not a label. `main`'s branch protection lists it
