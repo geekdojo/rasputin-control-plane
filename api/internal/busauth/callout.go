@@ -25,9 +25,12 @@ const (
 	// gate them while they share the bus.
 	globalAccount = "$G"
 
-	// mintedTTL bounds an authorized connection. Agents reconnect (and re-auth)
-	// well within this; a short-ish TTL caps the blast radius of a minted JWT
-	// while not generating churn.
+	// mintedTTL bounds an authorized connection. When it lapses the server
+	// closes the connection ("User Authentication Expired") and the agent's
+	// reconnect re-authenticates through the callout, so a token revoked while
+	// a kick was somehow missed stops working within this bound (the backstop
+	// to revoke's force-disconnect; see sessions.go). A short-ish TTL caps the
+	// blast radius of a minted JWT while not generating churn.
 	mintedTTL = 24 * time.Hour
 
 	validateTimeout = 3 * time.Second
@@ -58,10 +61,15 @@ type Responder struct {
 	// integration test shortens it so the expiry path runs in milliseconds
 	// instead of forty-five minutes.
 	replyTTL time.Duration
+
+	// userTTL is the lifetime of every minted user JWT. Production is always
+	// mintedTTL; the expiry integration test shortens it so the server's
+	// expiry disconnect runs in seconds instead of a day.
+	userTTL time.Duration
 }
 
 func NewResponder(nc *nats.Conn, issuer *Issuer, tokens Validator) *Responder {
-	return &Responder{nc: nc, issuer: issuer, tokens: tokens, replyTTL: proto.BusReplyGrantTTL}
+	return &Responder{nc: nc, issuer: issuer, tokens: tokens, replyTTL: proto.BusReplyGrantTTL, userTTL: mintedTTL}
 }
 
 // Start subscribes to the auth-callout subject. The connection MUST be the
@@ -191,7 +199,14 @@ func (r *Responder) mintUserJWT(userNkey, nodeID string) (string, error) {
 	uc := jwt.NewUserClaims(userNkey)
 	uc.Name = nodeID
 	uc.Audience = globalAccount // placement (non-operator mode)
-	uc.Expires = time.Now().Add(mintedTTL).Unix()
+
+	// A zero-value Responder must still mint a bounded credential: a zero
+	// Expires is read by nats-server as "never expires".
+	userTTL := r.userTTL
+	if userTTL <= 0 {
+		userTTL = mintedTTL
+	}
+	uc.Expires = time.Now().Add(userTTL).Unix()
 
 	// A Responder built as a zero value (tests, a future constructor that
 	// forgets the field) must not fall back to the server's two-minute default

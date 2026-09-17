@@ -32,7 +32,10 @@ type enforcedBus struct {
 	url    string
 }
 
-func startEnforcedBus(t *testing.T, host string) *enforcedBus {
+// startEnforcedBus starts the enforced bus. Each configure func runs on the
+// responder after it is built and before it starts answering, so a test can
+// shorten a lifetime or wrap its validator without racing the callout.
+func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) *enforcedBus {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -65,6 +68,9 @@ func startEnforcedBus(t *testing.T, host string) *enforcedBus {
 
 	tokens.TrackSessions(srv) // as main.go does, before the responder starts
 	resp := NewResponder(srv.Conn(), issuer, tokens)
+	for _, fn := range configure {
+		fn(resp)
+	}
 	if err := resp.Start(); err != nil {
 		t.Fatalf("responder.Start: %v", err)
 	}
