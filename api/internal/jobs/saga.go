@@ -281,8 +281,8 @@ func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, 
 	if !ok {
 		return nil, fmt.Errorf("unknown job kind %q", kind)
 	}
-	// An intake slot before anything is persisted: a runner closed for a
-	// restart refuses here, and a job that is created holds its slot until
+	// An intake slot before anything is persisted: a runner closed for the
+	// bus switch refuses here, and a job that is created holds its slot until
 	// its run ends (quiesce.go).
 	if err := r.acquire(); err != nil {
 		return nil, err

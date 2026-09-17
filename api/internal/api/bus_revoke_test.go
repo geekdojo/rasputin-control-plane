@@ -172,7 +172,7 @@ func waitEvent(t *testing.T, ch <-chan struct{}, what string) {
 // reconnect was refused by the callout, and it never got back on.
 func assertEvicted(t *testing.T, srv *bus.Server, a *testAgent) {
 	t.Helper()
-	if srv.ClientOpen(a.cid) {
+	if srv.ClientOpen(srv.ServerID(), a.cid) {
 		t.Fatalf("%s: server still holds connection %d after the revoke returned", a.name, a.cid)
 	}
 	waitEvent(t, a.disconnected, a.name+"'s client observing the disconnect")
@@ -186,7 +186,7 @@ func assertEvicted(t *testing.T, srv *bus.Server, a *testAgent) {
 // saw a disconnect, and a round trip to the server completes on it.
 func assertLive(t *testing.T, srv *bus.Server, a *testAgent) {
 	t.Helper()
-	if !srv.ClientOpen(a.cid) {
+	if !srv.ClientOpen(srv.ServerID(), a.cid) {
 		t.Fatalf("%s: connection %d was closed, but its credential was not revoked", a.name, a.cid)
 	}
 	if err := a.nc.FlushTimeout(revokeWaitLimit); err != nil {

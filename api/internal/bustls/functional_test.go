@@ -15,14 +15,18 @@ package bustls_test
 // prove the copy.
 //
 // Every wait is for a fact, signalled when it changes, under a hard deadline:
-// a registration that says busTls, a log line naming a refusal, the restart
-// request. Nothing here sleeps to let something happen.
+// a registration that says busTls, a log line naming a refusal, the switch to
+// TLS-only completing. Nothing here sleeps to let something happen.
+//
+// TestFunctional_RealAPIProcess (functional_api_test.go) runs the REAL
+// rasputin-api binary too, for what only a process shows: the same PID and an
+// HTTP server that never stops answering while the bus switches.
 //
 // What it does NOT prove: the OS or firewall images (firstboot, apply-seed,
 // the seed scrub), mDNS resolution of <cluster>.local, a real RAUC slot commit
 // (the controlplane agent runs the mock updater backend, whose commit model is
-// unit-tested beside the RAUC one), systemd restarting the api, or real clocks
-// on real hardware. That is the bench plan in the PR.
+// unit-tested beside the RAUC one), or real clocks on real hardware. That is
+// the bench plan in the PR.
 //
 // Run alone: scripts/test-bus-tls.sh.
 
@@ -40,6 +44,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -303,7 +308,14 @@ type cp struct {
 	runner   *jobs.Runner
 	settings *setup.Store
 	mode     bustls.Mode
-	restart  chan struct{} // closed when the service asks to restart
+	// switched is closed when the switch to TLS-only has returned without
+	// error; switches counts the calls. onSwitch, when set before the switch,
+	// runs twice inside it with job intake closed and require recorded:
+	// "before" the bus server is replaced and "after" it is, before intake
+	// reopens.
+	switched chan struct{}
+	switches atomic.Int32
+	onSwitch atomic.Pointer[func(phase string)]
 
 	regMu   sync.Mutex
 	regs    []proto.NodeRegisteredEvt
@@ -340,7 +352,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if o.port == 0 {
 		o.port = -1 // the server picks; read back below
 	}
-	c := &cp{dataDir: o.dataDir, selfNode: o.selfNode, restart: make(chan struct{})}
+	c := &cp{dataDir: o.dataDir, selfNode: o.selfNode, switched: make(chan struct{})}
 	dbPath := filepath.Join(o.dataDir, "rasputin.db")
 
 	settings, err := setup.OpenStore(ctx, dbPath)
@@ -393,7 +405,15 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		t.Fatal(err)
 	}
 	c.tokens = tokens
+	tokens.TrackSessions(srv)
 	responder := busauth.NewResponder(srv.Conn(), issuer, tokens)
+	var holdSvc atomic.Pointer[bustls.Service] // as cmd/rasputin-api wires it
+	responder.SetHold(func() (bool, string) {
+		if svc := holdSvc.Load(); svc != nil {
+			return svc.Switching()
+		}
+		return false, ""
+	})
 	if err := responder.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +428,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	c.jobStore = jobStore
 	c.runner = jobs.NewRunner(jobStore, srv.Conn())
 	invSvc := inventory.NewService(invStore, srv.Conn())
-	var restartOnce sync.Once
+	var switchedOnce sync.Once
 	c.svc = bustls.NewService(bustls.Config{
 		Key:             key,
 		Settings:        settings,
@@ -429,7 +449,22 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		InFlight: func(ctx context.Context) ([]string, error) { return jobs.InFlight(ctx, jobStore) },
 		Quiesce:  c.runner.QuiesceIfIdle,
 		Reopen:   c.runner.Reopen,
-		Restart:  func() { restartOnce.Do(func() { close(c.restart) }) },
+		RequireTLS: func(ctx context.Context) error {
+			c.switches.Add(1)
+			hook := c.onSwitch.Load()
+			if hook != nil {
+				(*hook)("before")
+			}
+			err := srv.SetAllowNonTLS(ctx, false)
+			if hook != nil {
+				(*hook)("after")
+			}
+			if err == nil {
+				switchedOnce.Do(func() { close(c.switched) })
+			}
+			return err
+		},
+		NoBus: func(err error) { t.Errorf("the switch left no bus: %v", err) },
 		OnEvaluated: func(bustls.Mode, error) {
 			c.evalMu.Lock()
 			c.evals++
@@ -437,6 +472,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 			c.evaluated.fire()
 		},
 	})
+	holdSvc.Store(c.svc)
 	if err := srv.OnClientDisconnect(c.svc.NoteDisconnect); err != nil {
 		t.Fatal(err)
 	}
@@ -504,10 +540,23 @@ func (c *cp) describeRegs() string {
 // whose busTls is want.
 func (c *cp) waitRegistered(t *testing.T, id string, want bool) {
 	t.Helper()
-	waitFact(t, fmt.Sprintf("registration from %s with busTls=%t", id, want), &c.changed, func() bool {
+	c.waitRegisteredSince(t, 0, id, want)
+}
+
+func (c *cp) regCount() int {
+	c.regMu.Lock()
+	defer c.regMu.Unlock()
+	return len(c.regs)
+}
+
+// waitRegisteredSince is waitRegistered counting only registrations after the
+// first `since` this instance received.
+func (c *cp) waitRegisteredSince(t *testing.T, since int, id string, want bool) {
+	t.Helper()
+	waitFact(t, fmt.Sprintf("registration from %s with busTls=%t (after #%d)", id, want, since), &c.changed, func() bool {
 		c.regMu.Lock()
 		defer c.regMu.Unlock()
-		for _, ev := range c.regs {
+		for _, ev := range c.regs[since:] {
 			if v, ok := ev.Metadata[proto.MetadataBusTLS].(bool); ev.NodeID == id && ok && v == want {
 				return true
 			}
@@ -527,15 +576,16 @@ func (c *cp) registeredAtAll(id string) bool {
 	return false
 }
 
-// waitRestart waits for the service's restart request.
-func (c *cp) waitRestart(t *testing.T) {
+// waitSwitched waits for the switch to TLS-only to complete.
+func (c *cp) waitSwitched(t *testing.T) {
 	t.Helper()
 	select {
-	case <-c.restart:
+	case <-c.switched:
 	case <-time.After(factDeadline):
 		st, _ := c.svc.Status(context.Background())
-		t.Fatalf("no restart request within %s; status %+v", factDeadline, st)
+		t.Fatalf("no switch to TLS-only within %s; status %+v", factDeadline, st)
 	}
+	c.svc.Wait()
 }
 
 func otherPin(t *testing.T) string {
@@ -607,12 +657,17 @@ func TestFunctional_PinnedOffer(t *testing.T) {
 //  3. both agents save the pin, re-dial over TLS and register busTls=true; the
 //     plaintext connections they closed are reported by disconnect events; a
 //     job in flight still holds require back until it ends.
-//  4. require: job intake closes, require is recorded, the restart is asked
-//     for exactly once, and a job submitted now is refused, not lost.
-//  5. restart: the controlplane comes back, reads require, refuses plaintext;
-//     both running agents rejoin over TLS by themselves; restarted with no pin
-//     in their environment they rejoin from the pin they saved; a node that
-//     never got a pin is refused.
+//  4. require, IN-PROCESS: job intake closes, require is recorded, the bus
+//     server is replaced by one that refuses plaintext — the same bus.Server,
+//     the same api connection, no restart — and a job submitted before and
+//     after the server swap is refused with the retryable error, not lost.
+//     Intake reopens; the same job then runs, over the new bus, to both
+//     agents, which rejoined over TLS by themselves.
+//  5. afterwards: plaintext is refused on the wire, no plaintext client is
+//     listed, a node that never got a pin is refused, both agents restarted
+//     with no pin in their environment rejoin from the pin they saved, and
+//     the switch never runs again. A later restart of the controlplane comes
+//     up in require and does not switch either.
 func TestFunctional_AutomaticLadder(t *testing.T) {
 	skipShort(t)
 	ctx := context.Background()
@@ -702,27 +757,111 @@ func TestFunctional_AutomaticLadder(t *testing.T) {
 	if got, _ := c.settings.Get(ctx, bustls.SettingKey); got != string(bustls.ModeMigrate) {
 		t.Fatalf("recorded mode = %q with a job in flight, want migrate", got)
 	}
-	select {
-	case <-c.restart:
-		t.Fatal("restart requested while a job was in flight")
-	default:
+	if got := c.switches.Load(); got != 0 {
+		t.Fatalf("switched %d time(s) while a job was in flight", got)
 	}
 
-	// 4. The last job ends: require, once.
+	// 4. The last job ends: require, switched in-process, once.
+	pingOK := make(chan string, 4)
+	c.runner.Register(jobs.Workflow{Kind: "probe.ping", Steps: []jobs.WorkflowStep{{Name: "ping", Timeout: 20 * time.Second, Do: func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		for _, id := range []string{"cp1", "n1"} {
+			cmd, _ := json.Marshal(proto.DiagPingCmd{JobID: sc.JobID})
+			if _, err := sc.NATS.RequestWithContext(sc.Ctx, proto.NodeCmdSubject(id, "diag.ping"), cmd); err != nil {
+				return nil, fmt.Errorf("ping %s: %w", id, err)
+			}
+			pingOK <- id
+		}
+		return nil, nil
+	}}}})
+	api := c.srv.Conn()
+	regsBefore := c.regCount()
+	refused := map[string]error{}
+	onSwitch := func(phase string) {
+		_, refused[phase] = c.runner.Submit(ctx, "probe.ping", nil, "test")
+		if got, _ := c.settings.Get(ctx, bustls.SettingKey); got != string(bustls.ModeRequire) {
+			t.Errorf("%s the server swap the recorded mode is %q, want require", phase, got)
+		}
+		if on, _ := c.svc.Switching(); !on {
+			t.Errorf("%s the server swap Switching() = false", phase)
+		}
+	}
+	c.onSwitch.Store(&onSwitch)
 	c.runner.FinishDeferred(ctx, blocker.ID, true, "")
-	c.waitRestart(t)
+	c.waitSwitched(t)
+	for _, phase := range []string{"before", "after"} {
+		if !errors.Is(refused[phase], jobs.ErrQuiesced) {
+			t.Fatalf("Submit %s the server swap = %v, want ErrQuiesced (refused, retryable, not lost)", phase, refused[phase])
+		}
+	}
+	if n, err := jobs.InFlight(ctx, c.jobStore); err != nil || len(n) != 0 {
+		t.Fatalf("jobs in flight after refused submits: %q (%v)", n, err)
+	}
 	if got, _ := c.settings.Get(ctx, bustls.SettingKey); got != string(bustls.ModeRequire) {
-		t.Fatalf("recorded mode = %q after the restart request, want require", got)
+		t.Fatalf("recorded mode = %q after the switch, want require", got)
 	}
-	if _, err := c.runner.Submit(ctx, "anything", nil, "test"); err == nil || (!errors.Is(err, jobs.ErrQuiesced) && !strings.Contains(err.Error(), "unknown job kind")) {
-		t.Fatalf("Submit during the restart window = %v", err)
+	if c.srv.Conn() != api || !api.IsConnected() || c.srv.AllowsPlaintext() {
+		t.Fatalf("after the switch: same conn %t, connected %t, plaintext allowed %t", c.srv.Conn() == api, api.IsConnected(), c.srv.AllowsPlaintext())
 	}
-	c.runner.Register(jobs.Workflow{Kind: "probe", Steps: []jobs.WorkflowStep{{Name: "noop", Do: func(*jobs.StepCtx) (json.RawMessage, error) { return nil, nil }}}})
-	if _, err := c.runner.Submit(ctx, "probe", nil, "test"); !errors.Is(err, jobs.ErrQuiesced) {
-		t.Fatalf("Submit during the restart window = %v, want ErrQuiesced (refused, not lost)", err)
+	st, err = c.svc.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode != bustls.ModeRequire || st.PlaintextAllowed || st.Switching || st.SwitchFailed != "" {
+		t.Fatalf("status after the switch = %+v", st)
+	}
+	// The agents rejoin the new server over TLS on their own reconnect loops.
+	c.waitRegisteredSince(t, regsBefore, "cp1", true)
+	c.waitRegisteredSince(t, regsBefore, "n1", true)
+	// The retry of the refused submit is accepted and runs over the new bus.
+	j, err := c.runner.Submit(ctx, "probe.ping", nil, "test")
+	if err != nil {
+		t.Fatalf("Submit after the switch = %v, want accepted", err)
+	}
+	for range 2 {
+		select {
+		case <-pingOK:
+		case <-time.After(factDeadline):
+			got, _ := c.jobStore.GetJob(ctx, j.ID)
+			t.Fatalf("job %s did not reach both agents over the new bus: %+v", j.ID, got)
+		}
+	}
+	c.runner.Wait()
+	if got, err := c.jobStore.GetJob(ctx, j.ID); err != nil || got.Status != jobs.StatusSucceeded {
+		t.Fatalf("job after the switch = %+v (%v), want succeeded", got, err)
 	}
 
-	// 5. The restart the unit performs, same data dir and port.
+	// 5. Plaintext is refused, nobody is on it, an unpinned node is refused,
+	// and the saved pins bring the agents back from a restart of their own.
+	assertPlaintextRefused(t, c.port)
+	plain, err := c.srv.PlaintextClients()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain) != 0 {
+		t.Fatalf("plaintext connections on a TLS-required bus: %+v", plain)
+	}
+	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: c.url()})
+	stray.waitLog(t, "the TLS-required refusal of an unpinned node", "NATS connect", "tls")
+	if c.registeredAtAll("n-unmigrated") {
+		t.Fatal("an unpinned node registered on a TLS-required bus")
+	}
+	stray.stop(t)
+
+	cpAgent.stop(t)
+	n1.stop(t)
+	regsBefore = c.regCount()
+	startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), stateDir: cpAgent.stateDir})
+	n1b := startAgent(t, agentOpts{id: "n1", url: c.url(), token: n1Token, stateDir: n1.stateDir})
+	n1b.waitLog(t, "the saved pin", "from file")
+	n1b.waitLog(t, "a pinned TLS connection", "over TLS, server key pin verified")
+	c.waitRegisteredSince(t, regsBefore, "cp1", true)
+	c.waitRegisteredSince(t, regsBefore, "n1", true)
+	if got := c.switches.Load(); got != 1 {
+		t.Fatalf("switches = %d, want exactly 1", got)
+	}
+
+	// A later restart of the controlplane (a reboot, an update) starts in
+	// require and has nothing to switch.
 	c.stop()
 	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1"})
 	if c2.mode != bustls.ModeRequire || c2.key.Pin() != pin {
@@ -730,30 +869,49 @@ func TestFunctional_AutomaticLadder(t *testing.T) {
 	}
 	c2.waitRegistered(t, "cp1", true)
 	c2.waitRegistered(t, "n1", true)
-
-	cpAgent.stop(t)
-	n1.stop(t)
-	startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c2.url(), stateDir: cpAgent.stateDir})
-	n1b := startAgent(t, agentOpts{id: "n1", url: c2.url(), token: n1Token, stateDir: n1.stateDir})
-	n1b.waitLog(t, "the saved pin", "from file")
-	n1b.waitLog(t, "a pinned TLS connection", "over TLS, server key pin verified")
-
-	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: c2.url()})
-	stray.waitLog(t, "the TLS-required refusal of an unpinned node", "NATS connect", "tls")
-	if c2.registeredAtAll("n-unmigrated") {
-		t.Fatal("an unpinned node registered on a TLS-required bus")
+	if got := c2.switches.Load(); got != 0 {
+		t.Fatalf("a controlplane started in require switched %d time(s)", got)
 	}
-	plain, err := c2.srv.PlaintextClients()
+}
+
+// assertPlaintextRefused dials the bus port in plaintext: the server's INFO
+// says TLS is required, and a CONNECT written anyway gets no PONG — the
+// connection is closed.
+func assertPlaintextRefused(t *testing.T, port int) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plain) != 0 {
-		t.Fatalf("plaintext connections on a TLS-required bus: %+v", plain)
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second)) // bounds this one exchange
+	r := bufio.NewReader(conn)
+	line, err := r.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "INFO ") {
+		t.Fatalf("first line from the bus = (%q, %v), want INFO", line, err)
 	}
-	select {
-	case <-c2.restart:
-		t.Fatal("the restarted controlplane asked to restart again")
-	default:
+	var info map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(strings.TrimSpace(line), "INFO ")), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info["tls_required"] != true {
+		t.Fatalf("INFO tls_required = %v, want true", info["tls_required"])
+	}
+	if _, err := conn.Write([]byte("CONNECT {\"verbose\":false,\"user\":\"n1\"}\r\nPING\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.Fatalf("the bus neither answered nor closed a plaintext CONNECT: %v", err)
+			}
+			return
+		}
+		if strings.HasPrefix(line, "PONG") {
+			t.Fatal("a plaintext CONNECT got PONG from a TLS-required bus")
+		}
 	}
 }
 

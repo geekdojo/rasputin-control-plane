@@ -129,17 +129,22 @@ Why pin delivery waits for commit: **a delivered pin cannot be taken back over t
 
 A time limit applies only to each check's individual calls.
 
-**The switch to `require`**, in this order:
+**The switch to `require`** happens inside the running api. The api process, its HTTP server and its own bus connection stay up. nats-server cannot change whether it accepts plaintext on a config reload (`config reload not supported for AllowNonTLS`, checked by a test against the vendored version), so the api replaces its embedded bus server instead. In this order:
 
-1. Close job intake. This happens under the same lock as the "no job in flight" check, so a job submitted from this point is **refused** with an error its caller sees. It is never recorded and then failed by the restart. `POST /api/jobs` answers 503 with `Retry-After`.
-2. Record `require` in the `bus.tls_mode` setting. If that fails, job intake reopens and nothing restarts.
-3. End the process through its normal shutdown and exit 75. The unit (`Restart=always`) starts a new api, which reads `require`, starts the server refusing plaintext, and never asks to restart again.
+1. **Close job intake.** This happens under the same lock as the "no job in flight" check. From this point a job submit is **refused** with an error its caller can retry, and nothing is recorded. Every HTTP endpoint that submits a job answers `503` with `Retry-After`.
+2. **Record `require`** in the `bus.tls_mode` setting. If that fails, job intake reopens and the bus is not touched.
+3. **Replace the bus server.** The old server shuts down, which closes every client connection. A new one starts on the same port and JetStream store, with the same bus key, the same auth callout and the same disconnect-advisory wiring, and it refuses plaintext. The api's own connection is the same connection object before and after: it is sent to the new server at once, every subscription on it (the auth-callout responder, heartbeats, registrations, job events, the disconnect advisory, request replies) is re-sent, and a round trip confirms the server has them.
+4. **Reopen job intake.** While steps 2 to 4 run, the auth callout refuses every node, so no node can register and trigger a job before intake reopens.
 
-**A fresh cluster whose seeds all carry the pin** (a provisioned matched set, Add-node) never speaks plaintext, because every agent is pinned from its first boot. A freshly flashed controlplane is committed, so the first check after its own agent registers moves `offer` → `migrate` (nothing to deliver) → `require` in one pass, as soon as no job is in flight. The restart follows. Until then the server accepts plaintext that no node uses.
+Nodes rejoin over TLS on their own reconnect loop, the controlplane's own agent included. The switch runs at most once per process, and a process that starts in `require` starts its server refusing plaintext.
+
+**If the new server does not start** (for example, the port is taken), the api starts a server with the previous options again. The bus accepts plaintext as before, and every node reconnects. The api records `migrate` again, reopens job intake, and raises a standing security warning, `bus-tls-require-failed`. It does not try again until the api next starts: a retry on the next event would drop every node again each time it failed. **If no server starts at all**, or the api's own connection cannot rejoin, the api has no bus. It exits non-zero, as it does when the bus cannot start at boot, and the unit restarts it.
+
+**A fresh cluster whose seeds all carry the pin** (a provisioned matched set, Add-node) never speaks plaintext, because every agent is pinned from its first boot. A freshly flashed controlplane is committed, so the first check after its own agent registers moves `offer` → `migrate` (nothing to deliver) → `require` in one pass, as soon as no job is in flight, and the bus server is replaced once. Until then the server accepts plaintext that no node uses.
 
 **Status and the escape hatch:**
 
-- `GET /api/bus/tls` (authenticated) is read-only. It shows the mode, the pin, the next mode, and exactly which facts hold that next mode back.
+- `GET /api/bus/tls` (authenticated) is read-only. It shows the mode, the pin, the next mode, and exactly which facts hold that next mode back. `plaintextAllowed` is what the running server does, `switching` is true while the server is being replaced, and `switchFailed` names the error when a switch fell back.
 - `RASPUTIN_BUS_TLS=offer|migrate|require` in `node.env` pins the mode. This is the escape hatch for a controlplane with a node that cannot speak TLS. A pinned mode never moves, and a pinned mode below `require` raises a standing security warning (`bus-tls-pinned`), like `bus-auth-off`.
 
 ## Bad values

@@ -31,14 +31,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.runner.Submit(r.Context(), req.Kind, req.Spec, "user")
 	if err != nil {
-		if errors.Is(err, jobs.ErrQuiesced) {
-			// The api is restarting (the bus switching to TLS-only); nothing
-			// was recorded, so a retry once it is back is safe.
-			w.Header().Set("Retry-After", "5")
-			writeError(w, http.StatusServiceUnavailable, err.Error())
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, j)
@@ -155,6 +148,24 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// submitRetryAfter is the Retry-After, in seconds, on a submit refused while
+// job intake is closed. The closure lasts one in-process replacement of the
+// bus server: a shutdown, a start and a local reconnect.
+const submitRetryAfter = "2"
+
+// writeSubmitError answers a refused job submit. A submit refused because job
+// intake is closed for the bus switch to TLS-only (jobs.ErrQuiesced) is 503
+// with Retry-After, whatever the endpoint: nothing was recorded, and the same
+// request succeeds once the switch is over. Any other error gets status.
+func writeSubmitError(w http.ResponseWriter, status int, err error) {
+	if errors.Is(err, jobs.ErrQuiesced) {
+		w.Header().Set("Retry-After", submitRetryAfter)
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeError(w, status, err.Error())
 }
 
 func atoiOr(s string, def int) int {

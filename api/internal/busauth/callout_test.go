@@ -58,7 +58,7 @@ func TestResponder_Authorize(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, reason := r.authorize(1, tc.nodeID, tc.token, tc.host)
+			ok, reason := r.authorize("test-server", 1, tc.nodeID, tc.token, tc.host)
 			if ok != tc.wantAuthorized {
 				t.Errorf("authorize(%q,token,%q) = %v (%q); want %v",
 					tc.nodeID, tc.host, ok, reason, tc.wantAuthorized)

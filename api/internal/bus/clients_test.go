@@ -31,18 +31,25 @@ func TestClientOpenAndDisconnectClient(t *testing.T) {
 		t.Fatalf("client id: %v", err)
 	}
 
-	if !srv.ClientOpen(cid) {
+	id := srv.ServerID()
+	if id == "" {
+		t.Fatal("ServerID is empty on a running server")
+	}
+	if !srv.ClientOpen(id, cid) {
 		t.Fatalf("ClientOpen(%d) = false for a connected client", cid)
 	}
-	if srv.ClientOpen(cid + 1000) {
+	if srv.ClientOpen("another-server", cid) || srv.DisconnectClient("another-server", cid) {
+		t.Fatal("a connection id on another server's id names this server's connection")
+	}
+	if srv.ClientOpen(id, cid+1000) {
 		t.Errorf("ClientOpen reports an id no client has as open")
 	}
 
-	if !srv.DisconnectClient(cid) {
+	if !srv.DisconnectClient(id, cid) {
 		t.Fatalf("DisconnectClient(%d) = false for a connected client", cid)
 	}
 	// Closing unregisters the client synchronously, before DisconnectClient returns.
-	if srv.ClientOpen(cid) {
+	if srv.ClientOpen(id, cid) {
 		t.Errorf("ClientOpen(%d) = true after DisconnectClient returned", cid)
 	}
 	select {
@@ -50,7 +57,7 @@ func TestClientOpenAndDisconnectClient(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the client did not observe the disconnect within 10s")
 	}
-	if srv.DisconnectClient(cid) {
+	if srv.DisconnectClient(id, cid) {
 		t.Errorf("DisconnectClient(%d) = true for a connection that is already closed", cid)
 	}
 }

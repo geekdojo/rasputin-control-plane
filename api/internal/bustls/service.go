@@ -37,9 +37,12 @@ import (
 //	migrate → require  every enrolled node reports busTls=true, the server holds
 //	                   no plaintext client connection (the controlplane's own
 //	                   loopback agent included), and no job is in flight. Then
-//	                   job intake closes, require is persisted, and the api
-//	                   restarts once — nats-server cannot change the setting on
-//	                   reload.
+//	                   job intake closes, require is persisted, the embedded
+//	                   bus server is replaced in-process by one that refuses
+//	                   plaintext (Config.RequireTLS; nats-server cannot change
+//	                   the setting on reload), and intake reopens once the
+//	                   api's own bus connection is back. The api process and
+//	                   its HTTP server stay up throughout.
 //
 // Nothing moves back down on its own. RASPUTIN_BUS_TLS pins a mode (the escape
 // hatch for a controlplane with a node that cannot speak TLS); a pinned mode is
@@ -137,13 +140,25 @@ type Config struct {
 	// (jobs.Runner.QuiesceIfIdle); Reopen undoes it (jobs.Runner.Reopen).
 	Quiesce func(ctx context.Context) (bool, []string, error)
 	Reopen  func()
-	// Restart ends this process so the unit starts one with the new server
-	// option. Called at most once per process.
-	Restart func()
+	// RequireTLS makes the running bus refuse plaintext without ending this
+	// process (bus.Server.SetAllowNonTLS(ctx, false)). It returns nil once
+	// the new server is up and the api's own bus connection is back on it; an
+	// error wrapping bus.ErrFellBack when the new server did not start and
+	// the bus came back as it was, still accepting plaintext; and any other
+	// error when there is no working bus. Called at most once per process.
+	RequireTLS func(ctx context.Context) error
+	// NoBus is called when RequireTLS left the api without a working bus. The
+	// api cannot run like that; the caller ends the process the way a bus
+	// that fails to start at boot does. nil (tests) only logs and halts the
+	// ladder.
+	NoBus func(err error)
 	// DeliverTimeout bounds one bus.pin request; EvalTimeout bounds one
-	// evaluation's I/O. Defaults 10s and 30s.
+	// evaluation's I/O; SwitchTimeout bounds RequireTLS (the old server's
+	// shutdown, the new one's start and the api's in-process reconnect).
+	// Defaults 10s, 30s and 60s.
 	DeliverTimeout time.Duration
 	EvalTimeout    time.Duration
+	SwitchTimeout  time.Duration
 	// OnEvaluated, when set, is called after every evaluation with the rung it
 	// left the ladder on. A test seam: it makes "an evaluation ran and did not
 	// move" something a test can wait for instead of sleeping.
@@ -154,11 +169,18 @@ type Config struct {
 type Service struct {
 	cfg Config
 
-	mu         sync.Mutex
-	mode       Mode // the rung reached (what the setting now says)
-	restarting bool // Restart has been called
-	stopped    bool
-	pending    map[string]bool // node ids with a delivery in flight
+	mu   sync.Mutex
+	mode Mode // the rung reached (what the setting now says)
+	// plaintextAllowed is what the RUNNING bus server does.
+	plaintextAllowed bool
+	// switching is true from persisting require until the replaced bus is
+	// up and job intake has reopened (or the switch failed).
+	switching bool
+	// switchFailed is why the switch to TLS-only did not happen; the ladder
+	// does not try again in this process (see evaluate).
+	switchFailed string
+	stopped      bool
+	pending      map[string]bool // node ids with a delivery in flight
 	// closedCIDs are connections a disconnect advisory reported closed. The
 	// advisory can precede the server dropping the connection from Connz, so
 	// the listing is filtered through this set. Pruned to ids still listed.
@@ -167,8 +189,13 @@ type Service struct {
 	// during one makes it run once more.
 	evaluating bool
 	dirty      bool
-	wg         sync.WaitGroup
-	sub        *nats.Subscription
+	// active counts evaluation loops and deliveries running; idle (on mu) is
+	// broadcast when it reaches zero. Not a sync.WaitGroup: events keep
+	// starting work while Wait or Stop waits, and a WaitGroup's Add from zero
+	// concurrent with its Wait is a data race.
+	active int
+	idle   *sync.Cond
+	sub    *nats.Subscription
 }
 
 // NewService builds the service. It does no I/O; Start begins listening.
@@ -179,10 +206,15 @@ func NewService(cfg Config) *Service {
 	if cfg.EvalTimeout <= 0 {
 		cfg.EvalTimeout = 30 * time.Second
 	}
+	if cfg.SwitchTimeout <= 0 {
+		cfg.SwitchTimeout = 60 * time.Second
+	}
 	if cfg.StartMode == "" {
 		cfg.StartMode = ModeOffer
 	}
-	return &Service{cfg: cfg, mode: cfg.StartMode, pending: map[string]bool{}, closedCIDs: map[uint64]bool{}}
+	s := &Service{cfg: cfg, mode: cfg.StartMode, plaintextAllowed: cfg.StartMode.AllowsPlaintext(), pending: map[string]bool{}, closedCIDs: map[uint64]bool{}}
+	s.idle = sync.NewCond(&s.mu)
+	return s
 }
 
 // Start subscribes to job events (a job ending can release both transitions)
@@ -216,11 +248,28 @@ func (s *Service) Stop() {
 	if s.sub != nil {
 		_ = s.sub.Unsubscribe()
 	}
-	s.wg.Wait()
+	s.Wait()
 }
 
-// Wait blocks until every evaluation and delivery started so far has finished.
-func (s *Service) Wait() { s.wg.Wait() }
+// Wait blocks until no evaluation or delivery is running: every one started
+// so far, and any they started in turn, has finished.
+func (s *Service) Wait() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for s.active > 0 {
+		s.idle.Wait()
+	}
+}
+
+// finished marks one evaluation loop or delivery done. Called without mu.
+func (s *Service) finished() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.active--
+	if s.active == 0 {
+		s.idle.Broadcast()
+	}
+}
 
 // Pin is the live pin.
 func (s *Service) Pin() string { return s.cfg.Key.Pin() }
@@ -230,6 +279,20 @@ func (s *Service) Mode() Mode {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mode
+}
+
+// Switching reports whether the bus is being switched to TLS-only right now:
+// require is recorded, and the replaced server is not up with job intake
+// reopened yet. The auth-callout responder holds new connections while it is
+// true (busauth.Responder.SetHold), so no node registers — and no registration
+// hook submits a job — before intake reopens.
+func (s *Service) Switching() (bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.switching {
+		return false, ""
+	}
+	return true, "the control plane is switching its bus to TLS-only; retry in a moment"
 }
 
 // NodeTLS is one inventory node's report.
@@ -249,9 +312,14 @@ type Status struct {
 	Mode       Mode `json:"mode"`
 	ModePinned bool `json:"modePinned"`
 	// PlaintextAllowed is what the RUNNING server does. It differs from Mode
-	// only between persisting require and the restart that applies it.
+	// only while the bus is being switched (Switching).
 	PlaintextAllowed bool `json:"plaintextAllowed"`
-	RestartPending   bool `json:"restartPending"`
+	// Switching is true while the embedded bus server is being replaced by
+	// one that refuses plaintext: job intake is closed for that moment.
+	Switching bool `json:"switching"`
+	// SwitchFailed says why the last switch to TLS-only did not happen. The
+	// bus runs as before, and the api tries again only after it restarts.
+	SwitchFailed string `json:"switchFailed,omitempty"`
 	// Pin is the value to seed as RASPUTIN_BUS_PIN. Public.
 	Pin string `json:"pin"`
 	// Next is the rung the api moves to once Blockers is empty; "" at require
@@ -271,13 +339,14 @@ type Status struct {
 // Status computes the picture now. It changes nothing.
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	s.mu.Lock()
-	mode, restarting := s.mode, s.restarting
+	mode, plaintext, switching, failed := s.mode, s.plaintextAllowed, s.switching, s.switchFailed
 	s.mu.Unlock()
 	st := Status{
 		Mode:                 mode,
 		ModePinned:           s.cfg.StartModePinned,
-		PlaintextAllowed:     s.cfg.StartMode.AllowsPlaintext(),
-		RestartPending:       restarting || mode.AllowsPlaintext() != s.cfg.StartMode.AllowsPlaintext(),
+		PlaintextAllowed:     plaintext,
+		Switching:            switching,
+		SwitchFailed:         failed,
 		Pin:                  s.Pin(),
 		Blockers:             []string{},
 		Nodes:                []NodeTLS{},
@@ -293,6 +362,11 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		st.Nodes = append(st.Nodes, NodeTLS{ID: n.ID, Role: n.Role, Status: n.Status, BusTLS: on, Reported: reported})
 	}
 	sort.Slice(st.Nodes, func(i, j int) bool { return st.Nodes[i].ID < st.Nodes[j].ID })
+	if switching {
+		// The server is being replaced; there is no listing to read, and the
+		// old server's connections are all closing.
+		return st, nil
+	}
 	if st.PlaintextConnections, err = s.openPlaintext(); err != nil {
 		return st, err
 	}
@@ -320,6 +394,9 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		}
 	case ModeMigrate:
 		st.Next = ModeRequire
+		if failed != "" {
+			st.Blockers = append(st.Blockers, "the last switch to TLS-only failed and the bus came back accepting plaintext ("+failed+"); the api tries again when it restarts")
+		}
 		st.Blockers = append(st.Blockers, requireBlockers(st.Nodes, st.PlaintextConnections, st.JobsInFlight)...)
 	}
 	return st, nil
@@ -410,7 +487,7 @@ func BusTLSOf(n *proto.Node) (tlsOn, reported bool) {
 // that arrive during one make it run once more. Never blocks.
 func (s *Service) Kick(reason string) {
 	s.mu.Lock()
-	if s.stopped || s.restarting {
+	if s.stopped {
 		s.mu.Unlock()
 		return
 	}
@@ -420,13 +497,13 @@ func (s *Service) Kick(reason string) {
 		return
 	}
 	s.evaluating = true
-	s.wg.Add(1)
+	s.active++
 	s.mu.Unlock()
 	go func() {
-		defer s.wg.Done()
+		defer s.finished()
 		for {
 			s.mu.Lock()
-			if !s.dirty || s.stopped || s.restarting {
+			if !s.dirty || s.stopped {
 				s.evaluating = false
 				s.mu.Unlock()
 				return
@@ -468,7 +545,10 @@ func (s *Service) evaluate(ctx context.Context) error {
 		log.Printf("bustls: offer → migrate: the controlplane's build is committed (%q); delivering the bus pin to nodes not on TLS", why)
 		s.DeliverToAll(ctx)
 	}
-	if s.Mode() != ModeMigrate || !s.cfg.StartMode.AllowsPlaintext() {
+	s.mu.Lock()
+	ready := s.mode == ModeMigrate && s.plaintextAllowed && s.switchFailed == "" && s.cfg.RequireTLS != nil
+	s.mu.Unlock()
+	if !ready {
 		return nil
 	}
 	st, err := s.Status(ctx)
@@ -479,7 +559,8 @@ func (s *Service) evaluate(ctx context.Context) error {
 		return nil
 	}
 	// Close job intake, atomically with the check that nothing is in flight:
-	// a job submitted from here on is refused, not lost to the restart.
+	// a job submitted from here on is refused with an error its caller can
+	// retry, not started on a bus that is about to be replaced.
 	if s.cfg.Quiesce != nil {
 		ok, inFlight, qerr := s.cfg.Quiesce(ctx)
 		if qerr != nil {
@@ -491,20 +572,82 @@ func (s *Service) evaluate(ctx context.Context) error {
 		}
 	}
 	if err := s.cfg.Settings.Set(ctx, SettingKey, string(ModeRequire)); err != nil {
-		if s.cfg.Reopen != nil {
-			s.cfg.Reopen()
-		}
+		s.reopen()
 		return fmt.Errorf("persist %q (job intake reopened): %w", ModeRequire, err)
 	}
 	s.mu.Lock()
 	s.mode = ModeRequire
-	s.restarting = true
+	s.switching = true
 	s.mu.Unlock()
-	log.Printf("bustls: migrate → require: every node is on TLS with the pin verified, no plaintext connection is open and no job is in flight; restarting the api so the bus refuses plaintext")
-	if s.cfg.Restart != nil {
-		s.cfg.Restart()
+	log.Printf("bustls: migrate → require: every node is on TLS with the pin verified, no plaintext connection is open and no job is in flight; replacing the bus server in-process so it refuses plaintext (the api keeps running)")
+	return s.switchToRequire()
+}
+
+// switchToRequire replaces the running bus server with one that refuses
+// plaintext, with job intake closed and require recorded, and then reopens
+// intake. The order is the guarantee: intake reopens only once RequireTLS has
+// returned, which is once the api's own bus connection — the one every job,
+// subscription and the auth-callout responder use — is back on the server.
+func (s *Service) switchToRequire() error {
+	// Its own bound: the evaluation's context has already spent time on the
+	// facts, and a replacement is a shutdown, a start and a reconnect.
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.SwitchTimeout)
+	defer cancel()
+	err := s.cfg.RequireTLS(ctx)
+	switch {
+	case err == nil:
+		s.mu.Lock()
+		// Connection ids restart on a new server; an id noted on the old one
+		// must not hide a connection on this one.
+		s.closedCIDs = map[uint64]bool{}
+		s.mu.Unlock()
+		s.finishSwitch(ModeRequire, false, "")
+		log.Printf("bustls: require: the bus refuses plaintext; job intake reopened; nodes rejoin over TLS on their own reconnect")
+		return nil
+	case errors.Is(err, bus.ErrFellBack):
+		// The bus is back as it was. Record migrate again, so what the
+		// setting says is what the server does and a restart comes up in a
+		// mode that is known to start. Do not try again in this process: the
+		// fallback just dropped every node, their registrations would re-run
+		// this evaluation, and a switch that fails again would drop them
+		// again, over and over. A restart is the next attempt.
+		why := err.Error()
+		back, cancelBack := context.WithTimeout(context.Background(), s.cfg.EvalTimeout)
+		perr := s.cfg.Settings.Set(back, SettingKey, string(ModeMigrate))
+		cancelBack()
+		if perr != nil {
+			why += fmt.Sprintf(" (and recording %q again failed: %v; the next start comes up in require)", ModeMigrate, perr)
+		}
+		s.finishSwitch(ModeMigrate, true, why)
+		return fmt.Errorf("the switch to TLS-only failed; the bus accepts plaintext as before and job intake reopened: %s", why)
+	default:
+		s.mu.Lock()
+		s.switchFailed = err.Error()
+		s.mu.Unlock()
+		if s.cfg.NoBus != nil {
+			s.cfg.NoBus(err)
+		}
+		return fmt.Errorf("the switch to TLS-only left no working bus: %w", err)
 	}
-	return nil
+}
+
+// finishSwitch records the outcome of a switch and reopens job intake, in
+// that order, and only then clears switching (which releases the
+// auth-callout hold).
+func (s *Service) finishSwitch(mode Mode, plaintext bool, failed string) {
+	s.mu.Lock()
+	s.mode, s.plaintextAllowed, s.switchFailed = mode, plaintext, failed
+	s.mu.Unlock()
+	s.reopen()
+	s.mu.Lock()
+	s.switching = false
+	s.mu.Unlock()
+}
+
+func (s *Service) reopen() {
+	if s.cfg.Reopen != nil {
+		s.cfg.Reopen()
+	}
 }
 
 // OnRegistered is the inventory hook: in migrate, a node that registered
@@ -555,10 +698,10 @@ func (s *Service) deliverAsync(nodeID string) {
 		return
 	}
 	s.pending[nodeID] = true
-	s.wg.Add(1)
+	s.active++
 	s.mu.Unlock()
 	go func() {
-		defer s.wg.Done()
+		defer s.finished()
 		defer func() {
 			s.mu.Lock()
 			delete(s.pending, nodeID)
@@ -600,8 +743,23 @@ func (s *Service) Deliver(ctx context.Context, nodeID string) (*proto.BusPinAck,
 
 // Alert is the standing security warning the ladder's state deserves, or nil:
 // a pinned mode other than require keeps plaintext accepted on purpose, and
-// that must not look healthy in the UI (the bus-auth-off precedent, #123).
+// that must not look healthy in the UI (the bus-auth-off precedent, #123); a
+// switch to TLS-only that failed keeps it accepted by accident.
 func (s *Service) Alert(now time.Time) *proto.Alert {
+	s.mu.Lock()
+	failed, plaintext, mode := s.switchFailed, s.plaintextAllowed, s.mode
+	s.mu.Unlock()
+	if failed != "" && plaintext && mode == ModeMigrate {
+		return &proto.Alert{
+			ID:       SwitchFailedAlertID,
+			Severity: proto.AlertWarn,
+			Source:   proto.AlertSourceSecurity,
+			Title:    "Node bus still accepts plaintext (switch to TLS-only failed)",
+			Detail: "Every node is on TLS, so the controlplane tried to restart its node bus to refuse unencrypted connections, but the new bus did not start: " + failed + ". " +
+				"The bus came back as it was and nodes reconnected. The api tries again the next time it starts; its log names the error.",
+			Since: now,
+		}
+	}
 	if !s.cfg.StartModePinned || s.cfg.StartMode == ModeRequire {
 		return nil
 	}
@@ -615,6 +773,10 @@ func (s *Service) Alert(now time.Time) *proto.Alert {
 		Since: now,
 	}
 }
+
+// SwitchFailedAlertID is the alert raised when the switch to TLS-only failed
+// and the bus fell back to accepting plaintext.
+const SwitchFailedAlertID = "bus-tls-require-failed"
 
 // UnavailableAlert is the standing warning for a controlplane whose bus key did
 // not load: the bus is plaintext-only.
