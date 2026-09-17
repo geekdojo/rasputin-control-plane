@@ -5,11 +5,10 @@ package busauth
 // from that id ("rasputin.node.<id>.>"). nats-server hands the username to the
 // callout as-is, so these tests pin that the callout, the credential minter and
 // the token store all require the id to be a single lowercase DNS label — one
-// literal subject token — on every path, loopback included.
+// literal subject token — with a token or without one.
 
 import (
 	"context"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,32 +78,6 @@ func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) 
 	return &enforcedBus{srv: srv, tokens: tokens, resp: resp, url: srv.ClientURL()}
 }
 
-// nonLoopbackIPv4 returns an up, non-loopback IPv4 address of this machine so
-// the server can be bound somewhere the callout does NOT treat as trusted
-// loopback. Empty when the machine has none.
-func nonLoopbackIPv4() string {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
-	for _, ifc := range ifaces {
-		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, _ := ifc.Addrs()
-		for _, a := range addrs {
-			ipn, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			if ip4 := ipn.IP.To4(); ip4 != nil && !ip4.IsLoopback() && !ip4.IsLinkLocalUnicast() {
-				return ip4.String()
-			}
-		}
-	}
-	return ""
-}
-
 func connect(url, username, token string, opts ...nats.Option) (*nats.Conn, error) {
 	all := append([]nats.Option{
 		nats.UserInfo(username, token), // token "" = tokenless
@@ -172,18 +145,10 @@ func assertNodeIDRejected(t *testing.T, eb *enforcedBus, username, token string)
 }
 
 // A legacy unbound token (a row from before geekdojo-brain#423, when POST
-// /api/bus/tokens with no nodeId minted one) presented from a non-loopback
-// address, so the token really is validated. It used to authenticate as any
+// /api/bus/tokens with no nodeId minted one). It used to authenticate as any
 // node id; it now authenticates as none.
-func TestCallout_RejectsNonLiteralNodeID_UnboundToken_NonLoopback(t *testing.T) {
-	ip := nonLoopbackIPv4()
-	if ip == "" {
-		t.Skip("no non-loopback IPv4 interface on this machine; see the loopback variant")
-	}
-	eb := startEnforcedBus(t, ip)
-	if strings.HasPrefix(eb.url, "nats://127.") {
-		t.Fatalf("server URL %s is loopback; the test would not exercise token validation", eb.url)
-	}
+func TestCallout_RejectsNonLiteralNodeID_UnboundToken(t *testing.T) {
+	eb := startEnforcedBus(t, "127.0.0.1")
 	token, _ := insertLegacyUnbound(t, eb.tokens, "unbound")
 	// Refused under a valid node id too: no unbound token authenticates.
 	assertNodeIDRejected(t, eb, "alpha", token)
@@ -195,15 +160,11 @@ func TestCallout_RejectsNonLiteralNodeID_UnboundToken_NonLoopback(t *testing.T) 
 	}
 }
 
-// Loopback, no token: the path authorize trusts without a token.
-func TestCallout_RejectsNonLiteralNodeID_LoopbackTokenless(t *testing.T) {
+// No token, over loopback: the path authorize trusted until geekdojo-brain#140.
+// A valid node id is refused now as well as a non-literal one.
+func TestCallout_RejectsNodeID_Tokenless(t *testing.T) {
 	eb := startEnforcedBus(t, "127.0.0.1")
-	// Control: a valid node id on loopback is still trusted.
-	nc, err := connect(eb.url, "alpha", "")
-	if err != nil {
-		t.Fatalf("tokenless loopback connection with a valid node id should connect: %v", err)
-	}
-	nc.Close()
+	assertNodeIDRejected(t, eb, "alpha", "")
 
 	for _, u := range nonLiteralNodeIDs {
 		t.Run("username="+u, func(t *testing.T) {
@@ -215,11 +176,7 @@ func TestCallout_RejectsNonLiteralNodeID_LoopbackTokenless(t *testing.T) {
 // A token BOUND to alpha is only accepted as alpha; Validate compares the bound
 // id to the presented username literally.
 func TestCallout_BoundTokenRejectedUnderNonLiteralNodeID(t *testing.T) {
-	ip := nonLoopbackIPv4()
-	if ip == "" {
-		t.Skip("no non-loopback IPv4 interface; loopback would bypass the token check entirely")
-	}
-	eb := startEnforcedBus(t, ip)
+	eb := startEnforcedBus(t, "127.0.0.1")
 	token, _, err := eb.tokens.MintBound(context.Background(), "alpha", "alpha")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
@@ -246,9 +203,9 @@ func TestCallout_BoundTokenRejectedUnderNonLiteralNodeID(t *testing.T) {
 // command to another node's command subjects — neither fire-and-forget nor
 // request-reply. Node beta is a real, correctly bound node subscribed to its
 // own commands.
-func assertNoCrossNodeCommand(t *testing.T, host string, useToken bool) {
+func assertNoCrossNodeCommand(t *testing.T, useToken bool) {
 	t.Helper()
-	eb := startEnforcedBus(t, host)
+	eb := startEnforcedBus(t, "127.0.0.1")
 	ctx := context.Background()
 
 	var token string
@@ -300,16 +257,12 @@ func assertNoCrossNodeCommand(t *testing.T, host string, useToken bool) {
 	}
 }
 
-func TestCallout_NoCrossNodeCommand_UnboundToken_NonLoopback(t *testing.T) {
-	ip := nonLoopbackIPv4()
-	if ip == "" {
-		t.Skip("no non-loopback IPv4 interface on this machine")
-	}
-	assertNoCrossNodeCommand(t, ip, true)
+func TestCallout_NoCrossNodeCommand_UnboundToken(t *testing.T) {
+	assertNoCrossNodeCommand(t, true)
 }
 
-func TestCallout_NoCrossNodeCommand_LoopbackTokenless(t *testing.T) {
-	assertNoCrossNodeCommand(t, "127.0.0.1", false)
+func TestCallout_NoCrossNodeCommand_Tokenless(t *testing.T) {
+	assertNoCrossNodeCommand(t, false)
 }
 
 // invalidNodeIDs fail the node id rule; each is a shape that is not one
@@ -330,24 +283,22 @@ func TestResponder_AuthorizeRejectsInvalidNodeID(t *testing.T) {
 	r := &Responder{tokens: store}
 
 	for _, id := range invalidNodeIDs {
-		for _, host := range []string{"127.0.0.1", "::1", "192.168.1.50"} {
-			if ok, _ := r.authorize("test-server", 1, id, unbound, host); ok {
-				t.Errorf("authorize(%q, unbound token, %s) = true; want denied", id, host)
-			}
-			if ok, _ := r.authorize("test-server", 1, id, alpha, host); ok {
-				t.Errorf("authorize(%q, token bound to alpha, %s) = true; want denied", id, host)
-			}
-			if ok, _ := r.authorize("test-server", 1, id, "", host); ok {
-				t.Errorf("authorize(%q, no token, %s) = true; want denied", id, host)
-			}
+		if ok, _ := r.authorize("test-server", 1, id, unbound); ok {
+			t.Errorf("authorize(%q, unbound token) = true; want denied", id)
+		}
+		if ok, _ := r.authorize("test-server", 1, id, alpha); ok {
+			t.Errorf("authorize(%q, token bound to alpha) = true; want denied", id)
+		}
+		if ok, _ := r.authorize("test-server", 1, id, ""); ok {
+			t.Errorf("authorize(%q, no token) = true; want denied", id)
 		}
 	}
-	// Valid ids still pass on both paths.
-	if ok, reason := r.authorize("test-server", 1, "alpha", "", "127.0.0.1"); !ok {
-		t.Errorf("loopback alpha denied: %s", reason)
+	// A valid id passes with its bound token, and only with it.
+	if ok, reason := r.authorize("test-server", 2, "alpha", alpha); !ok {
+		t.Errorf("alpha with its bound token denied: %s", reason)
 	}
-	if ok, reason := r.authorize("test-server", 2, "alpha", alpha, "192.168.1.50"); !ok {
-		t.Errorf("remote alpha with its bound token denied: %s", reason)
+	if ok, _ := r.authorize("test-server", 3, "alpha", ""); ok {
+		t.Error("alpha with no token authorized")
 	}
 }
 

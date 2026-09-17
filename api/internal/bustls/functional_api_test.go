@@ -2,7 +2,7 @@ package bustls_test
 
 // The bus TLS switch with the REAL rasputin-api binary: what only a running
 // process can show. On a fresh controlplane the api reaches require by itself
-// — offer → migrate → pin delivered to its own loopback agent → require — and
+// — offer → migrate → pin delivered to its own agent → require — and
 // it does so WITHOUT ending: the same process (same PID, never exits, one
 // "http listening" line) answers GET /healthz on every one of a tight,
 // back-to-back series of polls from before the switch until after it. The
@@ -10,8 +10,8 @@ package bustls_test
 // switch restarted the api (rasputin-os run 35146258476).
 //
 // It also checks, from outside, what the in-process test checks from inside:
-// plaintext refused on the wire; both agents (the loopback controlplane agent
-// and a pinned compute node) back over TLS after the switch; an unpinned node
+// plaintext refused on the wire; both agents (the controlplane's own agent, on
+// the token the api minted for it, and a pinned compute node) back over TLS after the switch; an unpinned node
 // refused; the recorded mode; and job submits across the switch — 503 with
 // Retry-After or accepted, never anything else, and accepted on retry.
 //
@@ -100,6 +100,8 @@ type apiProc struct {
 	httpBase string
 	natsPort int
 	cookie   *http.Cookie
+	// agentTokenFile is where the api mints its own agent's bus token.
+	agentTokenFile string
 
 	mu      sync.Mutex
 	lines   []string
@@ -187,10 +189,11 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 
 	httpPort, natsPort, ingestPort := freePort(t), freePort(t), freePort(t)
 	a = &apiProc{
-		httpBase: fmt.Sprintf("http://127.0.0.1:%d", httpPort),
-		natsPort: natsPort,
-		cookie:   &http.Cookie{Name: "rasputin-session", Value: sess.Token},
-		exited:   make(chan struct{}),
+		httpBase:       fmt.Sprintf("http://127.0.0.1:%d", httpPort),
+		natsPort:       natsPort,
+		cookie:         &http.Cookie{Name: "rasputin-session", Value: sess.Token},
+		agentTokenFile: filepath.Join(dataDir, "bus", proto.BusAgentTokenFileName),
+		exited:         make(chan struct{}),
 	}
 	dead := "http://127.0.0.1:1"     // no network: release and catalog checks fail fast
 	cmd := exec.Command(buildAPI(t)) // G204: the binary this test just built
@@ -270,6 +273,23 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 	})
 	a.waitLog(t, "the HTTP listener", "rasputin-api: http listening on")
 	return a, key.Pin(), n1Token
+}
+
+// mint returns a join token bound to id from the api's own endpoint, as
+// Add-node mints one.
+func (a *apiProc) mint(t *testing.T, id string) string {
+	t.Helper()
+	resp, body, err := a.do(http.MethodPost, "/api/bus/tokens", fmt.Sprintf(`{"label":%q,"nodeId":%q}`, id, id))
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/bus/tokens for %s = (%v, %s, %v)", id, resp, body, err)
+	}
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &tok); err != nil || tok.Token == "" {
+		t.Fatalf("mint body %s: %v", body, err)
+	}
+	return tok.Token
 }
 
 // do is one bounded HTTP round trip, signed in.
@@ -405,12 +425,15 @@ func TestFunctional_RealAPIProcess_RequireWithoutRestart(t *testing.T) {
 		}
 	}
 	api.onLine.Store(&onLine)
+	// Zero-touch: the api minted its own agent's token before it was ready.
+	api.waitLog(t, "the api minting its own agent's bus token", `minted a bus token for this controlplane's agent "cp1"`)
 	hp := startHealthPoller(api)
 	poller.Store(hp)
 
-	// The controlplane's own agent: loopback, tokenless, no pin yet (it is
-	// delivered). A compute node seeded with the pin, as a matched set is.
-	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: url})
+	// The controlplane's own agent: the token the api minted into its data dir
+	// at start, no pin yet (it is delivered). A compute node seeded with the
+	// pin, as a matched set is.
+	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: url, tokenFile: api.agentTokenFile})
 	n1 := startAgent(t, agentOpts{id: "n1", url: url, token: n1Token, pin: pin})
 
 	api.waitLog(t, "the pin delivery to the controlplane's own agent", `bustls: "cp1" holds the pin`)
@@ -497,7 +520,7 @@ func TestFunctional_RealAPIProcess_RequireWithoutRestart(t *testing.T) {
 
 	// Plaintext is refused on the wire, and an unpinned node cannot join.
 	assertPlaintextRefused(t, api.natsPort)
-	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: url})
+	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: url, token: api.mint(t, "n-unmigrated")})
 	stray.waitLog(t, "the TLS-required refusal of an unpinned node", "NATS connect", "tls")
 	stray.stop(t)
 	if api.count("bus: replacing the embedded server") != 1 {

@@ -55,9 +55,11 @@ import (
 // the server before its CONNECT is processed, so a kick that lands while the
 // callout reply is still in flight makes the server refuse the authentication.
 //
-// Loopback connections (the controlplane's own tokenless agent) never pass
-// through Admit, so no revoke disconnects them: they present no token, and
-// the controlplane node cannot be removed.
+// Every connection passes through Admit, the controlplane's own agent's
+// included: the bus trusts no connection for coming from loopback
+// (geekdojo/geekdojo-brain#140). Revoking the token the api minted for that
+// agent disconnects it like any other node, and the api mints it a new one at
+// its next start (Store.EnsureAgentToken).
 
 // Disconnector closes client connections on the embedded bus.
 // *bus.Server implements it. A connection is named by the id of the server it

@@ -116,11 +116,15 @@ func main() {
 	updateFault := updater.Arm(host.ImageVersion())
 	updateFault.Announce()
 
-	// Bus join token (RASPUTIN_CP_JOIN_TOKEN): presented to the api's
-	// auth-callout so it can mint a per-node scoped credential. Empty on a
-	// controlplane (trusted via loopback) and harmless when the server has no
-	// auth enabled. See agent/internal/bus.Connect.
-	joinToken := os.Getenv("RASPUTIN_CP_JOIN_TOKEN")
+	// Bus join token: presented to the api's auth-callout so it can mint a
+	// per-node scoped credential, and harmless when the server has no auth
+	// enabled. Every node has one, the controlplane's own agent included — the
+	// bus trusts nothing for coming from loopback (geekdojo/geekdojo-brain#140).
+	// A seeded RASPUTIN_CP_JOIN_TOKEN (compute, firewall) is used as is; the
+	// controlplane reads the token its api mints into a file, again on every
+	// connect attempt. See bus.ResolveTokenSource for the order.
+	joinToken, joinTokenFrom := bus.ResolveTokenSource(os.Getenv(bus.EnvJoinToken), os.Getenv(bus.EnvJoinTokenFile), role, proto.BusAgentTokenPath)
+	log.Printf("rasputin-agent: bus join token from %q", joinTokenFrom)
 	// Bus pin (geekdojo/geekdojo-brain#448): the SHA-256 of the controlplane's
 	// bus key, which this node verifies the bus server against over TLS.
 	// RASPUTIN_BUS_PIN from the seed, else the pin the controlplane delivered
@@ -238,7 +242,8 @@ func main() {
 	// subscribeAll, then the registration goes out. Everything that
 	// publishes on a timer takes the client rather than a conn, so a
 	// publish lands on whichever connection is current.
-	client := bus.New(natsURL, nodeID, joinToken, subscribeAll, onConnected)
+	client := bus.New(natsURL, nodeID, "", subscribeAll, onConnected)
+	client.SetTokenSource(joinToken)
 	client.OnLost(dnsPin.Lost)
 	busTLS = client.BusTLS
 	if busPin != "" {

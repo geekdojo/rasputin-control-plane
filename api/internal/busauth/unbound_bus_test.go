@@ -4,43 +4,21 @@ package busauth
 // the real embedded nats-server with enforced auth and the real callout
 // responder, and connects the way agents do, to pin the three outcomes on the
 // bus itself: a legacy unbound token is refused at connect, a token bound to
-// the node presenting it still connects and works, and the controlplane's
-// tokenless loopback agent is unaffected.
+// the node presenting it still connects and works, and so does the
+// controlplane's own agent with the token the api mints for it.
 
 import (
 	"context"
-	"net"
-	"net/url"
-	"strconv"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
-// startEnforcedBusAllInterfaces starts the enforced bus listening on every
-// interface and returns URLs reaching it over loopback and over ip, so one
-// server sees both a trusted loopback client and a token-checked remote one.
-func startEnforcedBusAllInterfaces(t *testing.T, ip string) (eb *enforcedBus, loopbackURL, remoteURL string) {
-	t.Helper()
-	eb = startEnforcedBus(t, "0.0.0.0")
-	u, err := url.Parse(eb.url)
-	if err != nil {
-		t.Fatalf("parse client URL %q: %v", eb.url, err)
-	}
-	port := u.Port()
-	if _, err := strconv.Atoi(port); err != nil {
-		t.Fatalf("client URL %q has no port", eb.url)
-	}
-	return eb, "nats://" + net.JoinHostPort("127.0.0.1", port), "nats://" + net.JoinHostPort(ip, port)
-}
-
-func TestBus_UnboundTokenRefused_BoundAndLoopbackUnaffected(t *testing.T) {
-	ip := nonLoopbackIPv4()
-	if ip == "" {
-		t.Skip("no non-loopback IPv4 interface on this machine; the token check only runs for a non-loopback client")
-	}
-	eb, loopbackURL, remoteURL := startEnforcedBusAllInterfaces(t, ip)
+func TestBus_UnboundTokenRefused_BoundUnaffected(t *testing.T) {
+	eb := startEnforcedBus(t, "127.0.0.1")
 	ctx := context.Background()
 	api := eb.srv.Conn()
 
@@ -53,30 +31,33 @@ func TestBus_UnboundTokenRefused_BoundAndLoopbackUnaffected(t *testing.T) {
 	// 1. The legacy unbound token is refused at connect, under the id a node
 	//    seeded with it would present and under any other.
 	for _, node := range []string{"alpha", "beta"} {
-		nc, err := connect(remoteURL, node, legacy)
+		nc, err := connect(eb.url, node, legacy)
 		if err == nil {
 			nc.Close()
-			t.Errorf("unbound token presented as %q from %s connected; want it refused", node, ip)
+			t.Errorf("unbound token presented as %q connected; want it refused", node)
 			continue
 		}
 		t.Logf("unbound token as %q refused: %v", node, err)
 	}
 
-	// 2. A token bound to the node presenting it connects from the same
-	//    address, and its grant works: the api receives its event and it
-	//    receives the api's command.
-	beta, err := connect(remoteURL, "beta", bound)
+	// 2. A token bound to the node presenting it connects, and its grant
+	//    works: the api receives its event and it receives the api's command.
+	beta, err := connect(eb.url, "beta", bound)
 	if err != nil {
 		t.Fatalf("bound token presented as its own node was refused: %v", err)
 	}
 	defer beta.Close()
 	assertNodeRoundTrip(t, api, beta, "beta")
 
-	// 3. The controlplane's co-located agent connects over loopback with no
-	//    token, exactly as before.
-	cp, err := connect(loopbackURL, "controlplane1", "")
+	// 3. The controlplane's co-located agent connects with the token the api
+	//    minted for it at start.
+	cpTokenFile := filepath.Join(t.TempDir(), "bus", proto.BusAgentTokenFileName)
+	if _, err := eb.tokens.EnsureAgentToken(ctx, cpTokenFile, "controlplane1"); err != nil {
+		t.Fatalf("EnsureAgentToken: %v", err)
+	}
+	cp, err := connect(eb.url, "controlplane1", readTokenFile(t, cpTokenFile))
 	if err != nil {
-		t.Fatalf("tokenless loopback agent was refused: %v", err)
+		t.Fatalf("the controlplane agent with its minted token was refused: %v", err)
 	}
 	defer cp.Close()
 	assertNodeRoundTrip(t, api, cp, "controlplane1")

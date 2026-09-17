@@ -26,7 +26,7 @@
 // Every matched set also gets its own bus key (geekdojo/geekdojo-brain#448,
 // docs/bus-tls-contract.md): the controlplane's seed carries the private key as
 // RASPUTIN_BUS_KEY, and EVERY seed — the controlplane's included, for its own
-// loopback agent — carries RASPUTIN_BUS_PIN, the hash nodes verify the bus
+// co-located agent — carries RASPUTIN_BUS_PIN, the hash nodes verify the bus
 // server's TLS key against. The key exists only in the controlplane seed;
 // firstboot moves it to /var/lib/rasputin/bus/bus.key and scrubs the seed.
 //
@@ -63,8 +63,11 @@ func defaultNATSURLFor(clusterID string) string {
 	return "nats://" + clusterID + ".local:4222"
 }
 
-// loopbackNATSURL is what the controlplane's own co-located agent dials so it's
-// trusted via loopback (it carries no token). See token-provisioning-pipeline.md.
+// loopbackNATSURL is what the controlplane's own co-located agent dials: its
+// own box, with no dependency on the cluster name resolving. Loopback earns it
+// no trust (geekdojo-brain#140) — it authenticates with the token its api
+// mints at start (proto.BusAgentTokenPath), which is why its seed carries none.
+// See token-provisioning-pipeline.md.
 const loopbackNATSURL = "nats://127.0.0.1:4222"
 
 type nodeSpec struct {
@@ -326,7 +329,8 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 	for _, n := range nodes {
 		mn := manifestNode{ID: n.ID, Role: n.Role}
 		if n.Role == "controlplane" {
-			// The controlplane self-inits: no token, dials its own loopback NATS,
+			// The controlplane self-inits: no token in its seed (its api mints
+			// its agent's token at start), dials its own NATS over loopback,
 			// and is the recipient of the preseed (everyone else's hashes). A
 			// matched set ships enforced — carried in the controlplane seed.
 			mn.SeedFile = seedFileName(n)

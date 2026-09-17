@@ -4,16 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
 
@@ -22,24 +22,21 @@ import (
 // auth-callout responder, the real HTTP handlers, and agent clients configured
 // the way the agent configures its own (agent/internal/bus/client.go).
 //
-// Transport: the bus listens on all interfaces. Node agents dial this machine's
-// non-loopback IPv4 address, so the callout sees a non-loopback source and
-// requires a join token — the path a LAN node takes. The controlplane's own
-// agent dials 127.0.0.1 with no token and is trusted as loopback, exactly as in
-// production.
+// Transport: every client dials 127.0.0.1, the controlplane's own agent and
+// the nodes alike. Loopback earns no trust (geekdojo-brain#140), so the address
+// makes no difference to authentication: each presents a token bound to its
+// node id, the controlplane's agent the one the api mints for it at start.
 //
 // Every wait is event-driven (connection callbacks, server state read
 // synchronously) and bounded by revokeWaitLimit.
 
 const revokeWaitLimit = 10 * time.Second
 
-// startAuthBus brings up an auth-enforced bus on all interfaces whose callout
+// startAuthBus brings up an auth-enforced bus on loopback whose callout
 // validates against tokens — the store the api handlers revoke through — wired
-// as main.go does. It returns the server and the URLs a LAN node and the
-// controlplane's loopback agent dial.
-func startAuthBus(t *testing.T, tokens *busauth.Store) (srv *bus.Server, nodeURL, loopbackURL string) {
+// as main.go does, and returns the server and the URL every agent dials.
+func startAuthBus(t *testing.T, tokens *busauth.Store) (srv *bus.Server, url string) {
 	t.Helper()
-	ip := nonLoopbackIPv4ForBus(t)
 	dir := t.TempDir()
 	issuer, err := busauth.EnsureIssuer(filepath.Join(dir, "bus"))
 	if err != nil {
@@ -49,7 +46,7 @@ func startAuthBus(t *testing.T, tokens *busauth.Store) (srv *bus.Server, nodeURL
 		t.Fatalf("mkdir nats: %v", err)
 	}
 	srv, err = bus.Start(context.Background(), bus.Config{
-		Host: "0.0.0.0", Port: -1,
+		Host: "127.0.0.1", Port: -1,
 		StoreDir:        filepath.Join(dir, "nats"),
 		AuthEnforce:     true,
 		IssuerPublicKey: issuer.PublicKey(),
@@ -66,40 +63,7 @@ func startAuthBus(t *testing.T, tokens *busauth.Store) (srv *bus.Server, nodeURL
 		t.Fatalf("responder.Start: %v", err)
 	}
 	t.Cleanup(resp.Stop)
-	u, err := url.Parse(srv.ClientURL())
-	if err != nil {
-		t.Fatalf("parse client URL %q: %v", srv.ClientURL(), err)
-	}
-	return srv, "nats://" + net.JoinHostPort(ip, u.Port()), "nats://" + net.JoinHostPort("127.0.0.1", u.Port())
-}
-
-// nonLoopbackIPv4ForBus returns an up, non-loopback IPv4 address of this
-// machine. A developer machine with none skips; CI must have one, so there it
-// fails rather than silently not running the test.
-func nonLoopbackIPv4ForBus(t *testing.T) string {
-	t.Helper()
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		t.Fatalf("list interfaces: %v", err)
-	}
-	for _, ifc := range ifaces {
-		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, _ := ifc.Addrs()
-		for _, a := range addrs {
-			if ipn, ok := a.(*net.IPNet); ok {
-				if ip4 := ipn.IP.To4(); ip4 != nil && !ip4.IsLoopback() && !ip4.IsLinkLocalUnicast() {
-					return ip4.String()
-				}
-			}
-		}
-	}
-	if os.Getenv("CI") != "" {
-		t.Fatal("no non-loopback IPv4 interface in CI: the revoke test cannot exercise token authentication")
-	}
-	t.Skip("no non-loopback IPv4 interface on this machine; loopback would bypass the token check entirely")
-	return ""
+	return srv, srv.ClientURL()
 }
 
 // testAgent is a connected agent-equivalent client and the events it saw.
@@ -216,7 +180,7 @@ func mintBoundViaAPI(t *testing.T, f *apiFixture, cookie *http.Cookie, nodeID st
 func TestBusRevoke_ForceDisconnectsLiveSessions(t *testing.T) {
 	f := newAPIFixture(t)
 	cookie := f.authenticate(t)
-	busSrv, nodeURL, loopbackURL := startAuthBus(t, f.srv.busTokens)
+	busSrv, busURL := startAuthBus(t, f.srv.busTokens)
 
 	tokA, idA := mintBoundViaAPI(t, f, cookie, "node-a")
 	tokB, _ := mintBoundViaAPI(t, f, cookie, "node-b")
@@ -224,20 +188,31 @@ func TestBusRevoke_ForceDisconnectsLiveSessions(t *testing.T) {
 	_, idOff := mintBoundViaAPI(t, f, cookie, "node-off")
 	seedNodeWithCascade(t, f, "node-rm")
 
-	// The controlplane's co-located agent: TCP loopback, no token.
-	cp := dialAgent(t, loopbackURL, "cp-1", "")
-	a := dialAgent(t, nodeURL, "node-a", tokA)
-	b := dialAgent(t, nodeURL, "node-b", tokB)
-	rm := dialAgent(t, nodeURL, "node-rm", tokRm)
+	// The controlplane's co-located agent, with the token the api mints for it
+	// at start.
+	cpTokenFile := filepath.Join(t.TempDir(), "bus", proto.BusAgentTokenFileName)
+	if _, err := f.srv.busTokens.EnsureAgentToken(context.Background(), cpTokenFile, "cp-1"); err != nil {
+		t.Fatalf("EnsureAgentToken: %v", err)
+	}
+	cpToken, err := os.ReadFile(cpTokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := dialAgent(t, busURL, "cp-1", strings.TrimSpace(string(cpToken)))
+	a := dialAgent(t, busURL, "node-a", tokA)
+	b := dialAgent(t, busURL, "node-b", tokB)
+	rm := dialAgent(t, busURL, "node-rm", tokRm)
 
-	// Premise: a node dialing the non-loopback address really is on the token
-	// path — without a token it is refused. If this ever stopped holding, the
-	// nodes above would be loopback-trusted and never recorded for revocation.
-	if nc, err := nats.Connect(nodeURL, nats.UserInfo("node-x", ""), nats.MaxReconnects(0)); err == nil {
-		nc.Close()
-		t.Fatal("tokenless node connection on the non-loopback address was accepted")
-	} else if !errors.Is(err, nats.ErrAuthorization) {
-		t.Fatalf("tokenless node connection failed with %v, want an authorization violation", err)
+	// Premise: every connection is on the token path — without a token it is
+	// refused, loopback or not. If this ever stopped holding, an agent above
+	// could be admitted without a token and never recorded for revocation.
+	for _, id := range []string{"node-x", "cp-1", "node-b"} {
+		if nc, err := nats.Connect(busURL, nats.UserInfo(id, ""), nats.MaxReconnects(0)); err == nil {
+			nc.Close()
+			t.Fatalf("tokenless connection as %s over loopback was accepted", id)
+		} else if !errors.Is(err, nats.ErrAuthorization) {
+			t.Fatalf("tokenless connection as %s failed with %v, want an authorization violation", id, err)
+		}
 	}
 
 	t.Run("API revoke closes the token's live session and its reconnect is refused", func(t *testing.T) {

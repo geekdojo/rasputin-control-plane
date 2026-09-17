@@ -59,7 +59,8 @@ func TestGenerate_MatchedSetRoundTrips(t *testing.T) {
 	var someToken, someID, otherID string
 	for _, mn := range man.Nodes {
 		if mn.Role == "controlplane" {
-			// Controlplane seed carries no token, dials loopback.
+			// Controlplane seed carries no token (its api mints its agent's),
+			// dials loopback.
 			seed := readSeed(t, dir, mn.SeedFile)
 			if strings.Contains(seed, "RASPUTIN_CP_JOIN_TOKEN") {
 				t.Errorf("controlplane seed must not carry a join token:\n%s", seed)
@@ -306,8 +307,8 @@ func TestGenerate_NATSURLDerivesFromClusterID(t *testing.T) {
 	if !strings.Contains(string(b), "RASPUTIN_NATS_URL=nats://home1.local:4222\n") {
 		t.Errorf("compute seed should dial the cluster's own name:\n%s", b)
 	}
-	// The controlplane always dials its own loopback so it is trusted without a
-	// token — that must NOT follow the cluster name.
+	// The controlplane always dials its own bus over loopback — that must NOT
+	// follow the cluster name.
 	var cp manifestNode
 	for _, n := range man.Nodes {
 		if n.Role == "controlplane" {

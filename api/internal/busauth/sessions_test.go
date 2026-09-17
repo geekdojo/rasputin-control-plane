@@ -379,26 +379,26 @@ func (v *recordingValidator) Admit(_ context.Context, serverID string, cid uint6
 }
 
 // The responder must hand the store the asking server's id and its connection
-// id — the pair is what a revoke closes — and must not admit (record) a
-// loopback connection, which holds no token for a revoke to act on.
+// id — the pair is what a revoke closes. A tokenless connection is refused
+// before the store is asked, so nothing is recorded for it.
 func TestResponder_AdmitsTokenConnectionsByConnectionID(t *testing.T) {
 	v := &recordingValidator{}
 	r := &Responder{tokens: v}
 
-	if ok, reason := r.authorize("srv-a", 42, "node-a", "some-token", "192.168.1.50"); !ok {
-		t.Fatalf("remote token connection denied: %s", reason)
+	if ok, reason := r.authorize("srv-a", 42, "node-a", "some-token"); !ok {
+		t.Fatalf("token connection denied: %s", reason)
 	}
 	if !slices.Equal(v.calls, []uint64{42}) || !slices.Equal(v.servers, []string{"srv-a"}) {
 		t.Fatalf("Admit called with cids %v on servers %v, want [42] on [srv-a]", v.calls, v.servers)
 	}
-	if ok, reason := r.authorize("srv-a", 43, "cp-1", "", "127.0.0.1"); !ok {
-		t.Fatalf("loopback connection denied: %s", reason)
+	if ok, reason := r.authorize("srv-a", 43, "cp-1", "cp-token"); !ok {
+		t.Fatalf("the controlplane agent's token connection denied: %s", reason)
 	}
-	if ok, _ := r.authorize("srv-a", 44, "cp-1", "", "192.168.1.50"); ok {
-		t.Fatal("tokenless remote connection admitted")
+	if ok, _ := r.authorize("srv-a", 44, "cp-1", ""); ok {
+		t.Fatal("tokenless connection admitted")
 	}
-	if !slices.Equal(v.calls, []uint64{42}) {
-		t.Errorf("Admit called with cids %v; loopback and tokenless connections must not reach the store", v.calls)
+	if !slices.Equal(v.calls, []uint64{42, 43}) {
+		t.Errorf("Admit called with cids %v, want [42 43]: every token connection is recorded, a tokenless one never reaches the store", v.calls)
 	}
 }
 

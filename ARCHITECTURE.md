@@ -76,9 +76,12 @@ Agents authenticate with a **join token bound to their node id**. The api
 validates the token against a hashed store and mints a short-lived user JWT
 scoped to that node's own subject subtree — a compromised compute node cannot
 impersonate the firewall or read another node's command stream. Revocation is
-a store delete; the next reconnect fails. The controlplane's own co-located
-agent connects over loopback and needs no token (it's already on the box that
-is the authority).
+a store delete; the next reconnect fails. No connection is trusted for where it
+comes from: the controlplane's own co-located agent presents a token bound to
+its node id too, which the api mints into `/var/lib/rasputin/bus/agent.token`
+at every start (and re-mints when it stops validating, as after an identity
+restore), and the agent reads that file on every connect. Nobody provisions
+it.
 
 The bus server offers **TLS with a dedicated bus key**, and nodes trust it by
 **pin**: the SHA-256 of that key, carried in their seed as `RASPUTIN_BUS_PIN`
@@ -96,7 +99,7 @@ the mode ladder are in
 
 A node id is a lowercase DNS label — the first label of the node's FQDN:
 `a-z`, `0-9` and `-`, at most 63 characters, no leading or trailing hyphen.
-The api refuses any other id, loopback included, when it mints or preloads a
+The api refuses any other id when it mints or preloads a
 bound token and when a connection authenticates. Ids are rejected, never
 rewritten, so the id a node presents is byte-for-byte the id its token is
 bound to.
