@@ -21,14 +21,18 @@
 #   * the REAL rasputin-api binary (built with -race under -race) on a fresh
 #     controlplane: it reaches require by itself with the SAME process — one
 #     PID, never exits, GET /healthz answered on every back-to-back poll across
-#     the switch — pin delivered to its loopback agent, both agents back over
+#     the switch — pin delivered to its own agent, both agents back over
 #     TLS, a job submitted at the decision answered 503+Retry-After (or 201 if
 #     the switch had already finished) and jobs running afterwards, plaintext
 #     refused, an unpinned node refused;
 #   * a pinned offer (RASPUTIN_BUS_TLS) — right pin TLS, wrong pin refused, no
 #     pin plaintext, and the pinned mode does not move;
 #   * clock independence — a bus certificate not valid until decades from now,
-#     and one expired in 1991, both accepted by a pinned agent.
+#     and one expired in 1991, both accepted by a pinned agent;
+#   * the controlplane's own agent on the token its api mints
+#     (geekdojo-brain#140) — an agent started before the file exists joins once
+#     it appears, a tokenless impostor on 127.0.0.1 is refused, and a deleted
+#     file re-mints on restart with the same agent process rejoining.
 #
 # No bench, no hardware, no root. What it does NOT cover: the OS firstboot and
 # firewall apply-seed consumers, mDNS, real hardware clocks — see the PR's

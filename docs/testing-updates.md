@@ -28,8 +28,30 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
 
    ```sh
    RASPUTIN_PUBLIC_BASE_URL=http://localhost:8080 \
+   RASPUTIN_BUS_AUTH=off \
    ./api/rasputin-api
    ```
+
+   - `RASPUTIN_BUS_AUTH=off` lets the agent in step 3 join the bus without a join token.
+     The bus normally refuses every connection that has no token bound to the node id it
+     claims, including one from `127.0.0.1`
+     ([geekdojo-brain#140](https://github.com/geekdojo/geekdojo-brain/issues/140)). A laptop
+     api has no node of its own to mint a token for, so without this line the agent is
+     refused with `Authorization Violation`. It is safe here because the dev api's bus
+     listens on `127.0.0.1` only (`RASPUTIN_NATS_HOST` is unset). The api logs that bus auth
+     is off and raises its bus-auth-off alert; both are expected.
+   - To keep bus auth on instead, sign in (step 4), mint a token bound to `node-dev`, and
+     give it to the agent as `RASPUTIN_CP_JOIN_TOKEN=<token>` in step 3. `<token>` is the
+     `token` field of the response, which is shown only once:
+
+     ```sh
+     curl -s -b cookies.txt -H 'Content-Type: application/json' \
+       -d '{"label":"laptop agent","nodeId":"node-dev"}' \
+       http://localhost:8080/api/bus/tokens
+     ```
+
+     `-b cookies.txt` sends the session cookie from step 4, `-H` says the body is JSON and
+     `-d` is the body: `nodeId` must be exactly the agent's `RASPUTIN_NODE_ID`.
 
 3. **Start an agent** in mock-update mode, from the repository root:
 

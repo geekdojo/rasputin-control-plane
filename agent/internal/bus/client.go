@@ -72,7 +72,13 @@ func (d *mdnsDialer) Dial(network, address string) (net.Conn, error) {
 // conn, and five nodes sat off the bus for 17 hours logging "connection
 // closed" every 10s until a human restarted them. See doc.go.
 type Client struct {
-	url, nodeID, token string
+	url, nodeID string
+	// token yields the join token for each connection attempt (SetTokenSource).
+	// It is asked on EVERY connect and reconnect, so a token file the
+	// controlplane's api re-mints reaches this client on its next attempt.
+	// Atomic, not under mu: nats.go asks for it while holding its own conn
+	// lock, and mu is held around calls into the conn elsewhere.
+	token atomic.Pointer[TokenSource]
 	// onConn runs on every NEW conn — the first Dial and each re-dial from
 	// the closed state — before onConnected. Subscriptions live on the conn,
 	// so this is where the agent (re-)registers every handler. A non-nil
@@ -118,22 +124,23 @@ type Client struct {
 // New builds a Client that is not yet connected; call Dial. url "" means
 // nats.DefaultURL. See Client for what onConn and onConnected are for.
 //
-// token is the node's bus join credential (RASPUTIN_CP_JOIN_TOKEN). It is
+// token is the node's bus join credential (RASPUTIN_CP_JOIN_TOKEN), used for
+// every connection; SetTokenSource replaces it with one read per attempt. It is
 // presented as NATS username=nodeID, password=token, which the api's
 // auth-callout responder validates to mint a per-node scoped JWT. It is
 // harmless to pass when the server has no auth enabled (NATS ignores creds it
 // doesn't require), so the agent always passes it; only the SERVER's
-// RASPUTIN_BUS_AUTH flag gates enforcement. A controlplane's co-located agent
-// has no token and is trusted via loopback.
+// RASPUTIN_BUS_AUTH flag gates enforcement. Every node carries a token, the
+// controlplane's own agent included (geekdojo/geekdojo-brain#140): see
+// ResolveTokenSource.
 func New(url, nodeID, token string, onConn func(*nats.Conn) error, onConnected func(*nats.Conn)) *Client {
 	if url == "" {
 		url = nats.DefaultURL
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Client{
+	c := &Client{
 		url:           url,
 		nodeID:        nodeID,
-		token:         token,
 		onConn:        onConn,
 		onConnected:   onConnected,
 		reconnectWait: 2 * time.Second,
@@ -141,6 +148,32 @@ func New(url, nodeID, token string, onConn func(*nats.Conn) error, onConnected f
 		ctx:           ctx,
 		cancel:        cancel,
 	}
+	c.SetTokenSource(StaticToken(token))
+	return c
+}
+
+// SetTokenSource makes every connection attempt from now on present the token
+// src returns at that moment. Call it before Dial. A source that fails for an
+// attempt makes that attempt present no token: the bus refuses it, the error
+// is logged, and the client's ordinary reconnect loop asks the source again on
+// the next attempt — nothing waits on a timer for the token to appear.
+func (c *Client) SetTokenSource(src TokenSource) {
+	if src == nil {
+		src = StaticToken("")
+	}
+	c.token.Store(&src)
+}
+
+// userInfo is the nats UserInfoHandler: nats.go calls it while writing the
+// CONNECT of every connection attempt, the first and each reconnect, so the
+// token is read fresh each time.
+func (c *Client) userInfo() (string, string) {
+	tok, err := (*c.token.Load())()
+	if err != nil {
+		log.Printf("agent/bus: no join token for this connection attempt as %s: %q — the bus refuses it; the next attempt reads the token again", c.nodeID, err.Error())
+		return c.nodeID, ""
+	}
+	return c.nodeID, tok
 }
 
 // Dial makes ONE connection attempt: connect, run onConn, run onConnected.
@@ -224,12 +257,14 @@ func (c *Client) dial() (*nats.Conn, bool, error) {
 			log.Printf("rasputin-agent: bus: async error on %s: %v", subject, err)
 		}),
 	}
-	// Always present the node id as the NATS username (token as password, which
-	// may be empty). The callout needs the id to scope the grant and to apply
-	// loopback trust for a tokenless controlplane agent; an empty token from a
-	// non-loopback node is correctly denied. Harmless when the server has no
-	// auth — NATS ignores creds it doesn't require.
-	connOpts = append(connOpts, nats.UserInfo(c.nodeID, c.token))
+	// Always present the node id as the NATS username and the join token as
+	// the password. The callout needs the id to scope the grant and a token
+	// bound to that id to admit the connection at all — from any address,
+	// loopback included (geekdojo/geekdojo-brain#140). Asked per attempt
+	// (userInfo), never captured here, so a re-minted token file is picked up
+	// by the next reconnect. Harmless when the server has no auth — NATS
+	// ignores creds it doesn't require.
+	connOpts = append(connOpts, nats.UserInfoHandler(c.userInfo))
 	if pin != "" {
 		// nats.Secure sets Opts.Secure, so a server whose INFO offers no TLS
 		// is refused with ErrSecureConnWanted BEFORE the CONNECT carrying the

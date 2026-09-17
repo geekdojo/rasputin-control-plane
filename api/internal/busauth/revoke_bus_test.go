@@ -3,7 +3,6 @@ package busauth
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -13,27 +12,11 @@ import (
 // Real embedded server + real callout responder: revoke must close a live
 // connection, including one whose authentication is still in flight. The
 // HTTP-level functional test (API revoke, removal cascade, other nodes and the
-// loopback agent unaffected) is api/internal/api/bus_revoke_test.go.
+// controlplane's own agent unaffected) is api/internal/api/bus_revoke_test.go.
 
 // busWaitLimit bounds every single wait for an event; each wait fails naming
 // what never happened.
 const busWaitLimit = 10 * time.Second
-
-// requireNonLoopbackIPv4 returns an address the callout does not trust as
-// loopback, so a client dialing it must present a valid token. A developer
-// machine with no such interface skips; CI must have one, so there it fails
-// rather than silently not running the test.
-func requireNonLoopbackIPv4(t *testing.T) string {
-	t.Helper()
-	ip := nonLoopbackIPv4()
-	if ip == "" {
-		if os.Getenv("CI") != "" {
-			t.Fatal("no non-loopback IPv4 interface in CI: the revoke tests cannot exercise token authentication")
-		}
-		t.Skip("no non-loopback IPv4 interface on this machine; loopback would bypass the token check entirely")
-	}
-	return ip
-}
 
 // TestRevokeDuringInFlightCallout: the callout has validated the token and not
 // yet answered the server when the revoke arrives. The connection must not
@@ -42,7 +25,7 @@ func requireNonLoopbackIPv4(t *testing.T) string {
 // with the revoked token is refused.
 func TestRevokeDuringInFlightCallout(t *testing.T) {
 	ctx := context.Background()
-	eb := startEnforcedBus(t, requireNonLoopbackIPv4(t))
+	eb := startEnforcedBus(t, "127.0.0.1")
 	store := eb.tokens
 	tok, id, err := store.MintBound(ctx, "a", "node-a")
 	if err != nil {

@@ -488,3 +488,60 @@ func TestBackupRunEntry_SpecRecordsScheduled(t *testing.T) {
 		t.Fatalf("Interval = %s, want the check interval passed in", e.Interval)
 	}
 }
+
+// ensureSelfAgentToken is the api's zero-touch mint for its own agent
+// (geekdojo-brain#140): a dev api with no self node id writes nothing, a
+// controlplane writes a live token bound to its id and keeps it across
+// restarts, and an id the bus would never accept is reported and writes
+// nothing — the api still starts.
+func TestEnsureSelfAgentToken(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := busauth.OpenStore(ctx, filepath.Join(dir, "bus.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	path := filepath.Join(dir, "bus", "agent.token")
+
+	step := func(selfNodeID, wantLog string) {
+		t.Helper()
+		logs.Reset()
+		ensureSelfAgentToken(ctx, store, path, selfNodeID)
+		if !strings.Contains(logs.String(), wantLog) {
+			t.Fatalf("ensureSelfAgentToken(%q) logged %q, want it to contain %q", selfNodeID, logs.String(), wantLog)
+		}
+	}
+
+	step("", "not minting a bus token")
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a dev api (no self node id) wrote the token file: %v", err)
+	}
+
+	step("cp-1", `minted a bus token for this controlplane's agent "cp-1"`)
+	tok, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no token file after the mint: %v", err)
+	}
+	if ok, err := store.Validate(ctx, strings.TrimSpace(string(tok)), "cp-1"); err != nil || !ok {
+		t.Fatalf("the minted token does not validate for cp-1: (%v, %v)", ok, err)
+	}
+
+	step("cp-1", "is live")
+	if again, _ := os.ReadFile(path); string(again) != string(tok) {
+		t.Fatal("a restart replaced a live token")
+	}
+
+	other := filepath.Join(dir, "other", "agent.token")
+	logs.Reset()
+	ensureSelfAgentToken(ctx, store, other, "CP_1")
+	if !strings.Contains(logs.String(), "cannot join the bus") {
+		t.Fatalf("an invalid self node id logged %q, want the failure reported", logs.String())
+	}
+	if _, err := os.Lstat(other); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an invalid self node id wrote a token file: %v", err)
+	}
+}

@@ -245,6 +245,18 @@ func main() {
 	}
 	logUnboundBusTokens(ctx, busTokenStore)
 
+	// The api's own node id — the system.update saga skips this one (the
+	// operator updates the controlplane node manually after the cascade), and
+	// it is the id the controlplane's own agent authenticates to the bus as.
+	selfNodeID := os.Getenv("RASPUTIN_SELF_NODE_ID")
+
+	// The controlplane's own agent authenticates with a join token like every
+	// other node; the bus trusts nothing for coming from loopback
+	// (geekdojo/geekdojo-brain#140). Mint it here, before the responder admits
+	// anyone and long before READY=1, so the agent — ordered After= this unit —
+	// finds the file on its first connect. Zero-touch: nobody provisions it.
+	ensureSelfAgentToken(ctx, busTokenStore, filepath.Join(dataDir, "bus", proto.BusAgentTokenFileName), selfNodeID)
+
 	// The bus TLS service, once it exists (it is built further down, after the
 	// stores it reads). The responder reads it from the first callout on, so
 	// it is handed over atomically.
@@ -435,9 +447,6 @@ func main() {
 	// :8080; in production this is the api's tailnet hostname.
 	publicBaseURL := envOr("RASPUTIN_PUBLIC_BASE_URL", applianceOr(
 		func(h string) string { return "https://" + h }, "http://localhost:8080"))
-	// The api's own node id — the system.update saga skips this one (the
-	// operator updates the controlplane node manually after the cascade).
-	selfNodeID := os.Getenv("RASPUTIN_SELF_NODE_ID")
 	// The control plane's own LAN IPv4, followed from kernel address events
 	// rather than looked up once at start (geekdojo/geekdojo-brain#431). Every
 	// consumer below — the nameserver's listeners and self answers, the
@@ -1861,6 +1870,35 @@ func logUnboundBusTokens(ctx context.Context, store *busauth.Store) {
 	}
 	if n > 0 {
 		log.Printf("rasputin-api: WARNING %d live UNBOUND bus join token(s) — the bus refuses them, so a node seeded with one cannot join; list them with GET /api/bus/tokens (no nodeId), revoke them, and re-provision those nodes with a token bound to their node id", n)
+	}
+}
+
+// ensureSelfAgentToken makes sure the controlplane's own agent has a live join
+// token bound to selfNodeID at path (busauth.Store.EnsureAgentToken), and says
+// what it did. A dev api with no self node id has no co-located agent to mint
+// for and skips it.
+//
+// A failure is logged, not fatal: a controlplane that will not start cannot be
+// used to fix anything (#89). Its own agent then stays off the bus — refused
+// for want of a token, and reported offline in the UI — until a restart
+// succeeds; every other node is unaffected.
+func ensureSelfAgentToken(ctx context.Context, store *busauth.Store, path, selfNodeID string) {
+	if selfNodeID == "" {
+		log.Printf("rasputin-api: no RASPUTIN_SELF_NODE_ID — not minting a bus token for a co-located agent (dev); a local agent needs RASPUTIN_CP_JOIN_TOKEN, or RASPUTIN_BUS_AUTH=off on this api")
+		return
+	}
+	reason, err := store.EnsureAgentToken(ctx, path, selfNodeID)
+	// Every value is %q-formatted: the node id and path come from this
+	// process's own environment, and reason and err are built from them.
+	switch {
+	case err != nil && reason != "":
+		log.Printf("rasputin-api: minted a bus token for this controlplane's agent %q at %q (%q), but: %q", selfNodeID, path, reason, err.Error())
+	case err != nil:
+		log.Printf("rasputin-api: ⚠️  bus token for this controlplane's agent %q at %q: %q — its agent cannot join the bus until the api starts successfully", selfNodeID, path, err.Error())
+	case reason != "":
+		log.Printf("rasputin-api: minted a bus token for this controlplane's agent %q at %q: %q", selfNodeID, path, reason)
+	default:
+		log.Printf("rasputin-api: bus token for this controlplane's agent %q at %q is live", selfNodeID, path)
 	}
 }
 

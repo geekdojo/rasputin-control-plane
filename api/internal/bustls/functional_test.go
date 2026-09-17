@@ -160,7 +160,10 @@ type agentOpts struct {
 	role  proto.NodeRole
 	url   string
 	token string
-	pin   string // RASPUTIN_BUS_PIN; "" leaves it unset
+	// tokenFile is RASPUTIN_CP_JOIN_TOKEN_FILE: how the controlplane's own
+	// agent reads the token its api mints (cp.agentTokenFile).
+	tokenFile string
+	pin       string // RASPUTIN_BUS_PIN; "" leaves it unset
 	// stateDir reuses a previous agent's state (a restart); "" is fresh.
 	stateDir string
 }
@@ -196,6 +199,9 @@ func startAgent(t *testing.T, o agentOpts) *agentProc {
 	}
 	if o.token != "" {
 		env = append(env, "RASPUTIN_CP_JOIN_TOKEN="+o.token)
+	}
+	if o.tokenFile != "" {
+		env = append(env, "RASPUTIN_CP_JOIN_TOKEN_FILE="+o.tokenFile)
 	}
 	if o.pin != "" {
 		env = append(env, "RASPUTIN_BUS_PIN="+o.pin)
@@ -334,7 +340,8 @@ type cpOpts struct {
 	dataDir string // reuse (a restart); "" is fresh
 	port    int    // reuse (a restart); 0 lets the server pick
 	// selfNode is RASPUTIN_SELF_NODE_ID: the controlplane's own node id, whose
-	// agent answers the commit question.
+	// agent answers the commit question, and for which the controlplane mints
+	// its agent's bus token at start (agentTokenFile), as the api does.
 	selfNode string
 	// pinMode pins the mode the way RASPUTIN_BUS_TLS does; "" resolves it
 	// from the recorded setting, as a real start does.
@@ -405,6 +412,12 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		t.Fatal(err)
 	}
 	c.tokens = tokens
+	if o.selfNode != "" {
+		// As cmd/rasputin-api does: before the responder admits anyone.
+		if _, err := tokens.EnsureAgentToken(ctx, c.agentTokenFile(), o.selfNode); err != nil {
+			t.Fatalf("EnsureAgentToken: %v", err)
+		}
+	}
 	tokens.TrackSessions(srv)
 	responder := busauth.NewResponder(srv.Conn(), issuer, tokens)
 	var holdSvc atomic.Pointer[bustls.Service] // as cmd/rasputin-api wires it
@@ -516,6 +529,23 @@ func startCP(t *testing.T, o cpOpts) *cp {
 
 func (c *cp) url() string { return fmt.Sprintf("nats://127.0.0.1:%d", c.port) }
 
+// agentTokenFile is where this controlplane mints its own agent's bus token.
+func (c *cp) agentTokenFile() string {
+	return filepath.Join(c.dataDir, "bus", proto.BusAgentTokenFileName)
+}
+
+// mint returns a fresh join token bound to id, as Add-node or a matched set
+// provisions one. Every agent needs one: loopback earns none
+// (geekdojo-brain#140).
+func (c *cp) mint(t *testing.T, id string) string {
+	t.Helper()
+	tok, _, err := c.tokens.MintBound(context.Background(), id, id)
+	if err != nil {
+		t.Fatalf("MintBound(%s): %v", id, err)
+	}
+	return tok
+}
+
 func (c *cp) evaluations() int {
 	c.evalMu.Lock()
 	defer c.evalMu.Unlock()
@@ -614,13 +644,13 @@ func TestFunctional_PinnedOffer(t *testing.T) {
 	skipShort(t)
 	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
 
-	startAgent(t, agentOpts{id: "n-good", url: c.url(), pin: c.key.Pin()})
+	startAgent(t, agentOpts{id: "n-good", url: c.url(), token: c.mint(t, "n-good"), pin: c.key.Pin()})
 	c.waitRegistered(t, "n-good", true)
 
-	bad := startAgent(t, agentOpts{id: "n-bad", url: c.url(), pin: otherPin(t)})
+	bad := startAgent(t, agentOpts{id: "n-bad", url: c.url(), token: c.mint(t, "n-bad"), pin: otherPin(t)})
 	bad.waitLog(t, "the pin mismatch refusal", "does not match RASPUTIN_BUS_PIN")
 
-	startAgent(t, agentOpts{id: "n-plain", url: c.url()})
+	startAgent(t, agentOpts{id: "n-plain", url: c.url(), token: c.mint(t, "n-plain")})
 	c.waitRegistered(t, "n-plain", false)
 
 	if c.registeredAtAll("n-bad") {
@@ -688,7 +718,7 @@ func TestFunctional_AutomaticLadder(t *testing.T) {
 	}
 	cpState := t.TempDir()
 	seedUncommittedMock(t, cpState)
-	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), stateDir: cpState})
+	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: c.agentTokenFile(), stateDir: cpState})
 	n1Token, _, err := c.tokens.MintBound(ctx, "n1", "n1")
 	if err != nil {
 		t.Fatal(err)
@@ -840,7 +870,7 @@ func TestFunctional_AutomaticLadder(t *testing.T) {
 	if len(plain) != 0 {
 		t.Fatalf("plaintext connections on a TLS-required bus: %+v", plain)
 	}
-	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: c.url()})
+	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: c.url(), token: c.mint(t, "n-unmigrated")})
 	stray.waitLog(t, "the TLS-required refusal of an unpinned node", "NATS connect", "tls")
 	if c.registeredAtAll("n-unmigrated") {
 		t.Fatal("an unpinned node registered on a TLS-required bus")
@@ -850,7 +880,7 @@ func TestFunctional_AutomaticLadder(t *testing.T) {
 	cpAgent.stop(t)
 	n1.stop(t)
 	regsBefore = c.regCount()
-	startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), stateDir: cpAgent.stateDir})
+	startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: c.agentTokenFile(), stateDir: cpAgent.stateDir})
 	n1b := startAgent(t, agentOpts{id: "n1", url: c.url(), token: n1Token, stateDir: n1.stateDir})
 	n1b.waitLog(t, "the saved pin", "from file")
 	n1b.waitLog(t, "a pinned TLS connection", "over TLS, server key pin verified")
@@ -935,9 +965,84 @@ func TestFunctional_ClockIndependence(t *testing.T) {
 			}
 			c := startCP(t, cpOpts{dataDir: dataDir, pinMode: bustls.ModeRequire, cert: &cert})
 			id := "n-" + name
-			startAgent(t, agentOpts{id: id, url: c.url(), pin: key.Pin()})
+			startAgent(t, agentOpts{id: id, url: c.url(), token: c.mint(t, id), pin: key.Pin()})
 			c.waitRegistered(t, id, true)
 			c.stop()
 		})
+	}
+}
+
+// The controlplane's own agent on the bus once loopback earns no trust
+// (geekdojo-brain#140), with the REAL agent binary:
+//
+//  1. the agent starts BEFORE its api has minted the token file (an update
+//     that puts the agent up first, or a slow api): its connect attempts fail
+//     for want of a token, and it joins on its own once the file appears —
+//     no restart, no timer, just its ordinary retry reading the file again;
+//  2. an impostor agent on the same box, with no token, claiming an enrolled
+//     node's id over 127.0.0.1, is refused and never registers — nor does one
+//     claiming the controlplane's own id;
+//  3. the token file is deleted and the controlplane restarts: it re-mints,
+//     the old token stops authenticating, and the SAME agent process rejoins
+//     with the new token.
+func TestFunctional_ControlplaneAgentToken(t *testing.T) {
+	skipShort(t)
+	ctx := context.Background()
+	// Offer, pinned: this test is about authentication, not the TLS ladder.
+	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
+	tokenFile := c.agentTokenFile()
+
+	// 1. No file yet (startCP minted nothing: no self node id).
+	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: tokenFile})
+	cpAgent.waitLog(t, "a connect attempt with no token file", "no join token for this connection attempt", "does not exist yet")
+	if c.registeredAtAll("cp1") {
+		t.Fatal("the controlplane agent registered with no token")
+	}
+	if _, err := c.tokens.EnsureAgentToken(ctx, tokenFile, "cp1"); err != nil { // the api's start
+		t.Fatal(err)
+	}
+	c.waitRegistered(t, "cp1", false)
+
+	// 2. Impostors over loopback, no token.
+	c.mint(t, "n-victim") // enrolled, not running
+	for _, id := range []string{"n-victim", "cp1"} {
+		imp := startAgent(t, agentOpts{id: id, url: c.url()})
+		imp.waitLog(t, "the refusal of a tokenless agent claiming "+id, "NATS connect", "Authorization Violation")
+		imp.stop(t)
+	}
+	if c.registeredAtAll("n-victim") {
+		t.Fatal("a tokenless agent registered as n-victim")
+	}
+
+	// 3. The file is lost; the controlplane restarts and re-mints.
+	old, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.stop()
+	if err := os.Remove(tokenFile); err != nil {
+		t.Fatal(err)
+	}
+	since := cpAgent.lineCount()
+	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1", pinMode: bustls.ModeOffer})
+	cur, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("the restarted controlplane did not re-mint the token file: %v", err)
+	}
+	if string(cur) == string(old) {
+		t.Fatal("the restarted controlplane wrote the old token back")
+	}
+	c2.waitRegistered(t, "cp1", false)
+	cpAgent.waitLogSince(t, since, "the same agent process back on the bus", "reconnected to", fmt.Sprint(c2.port))
+	if cpAgent.cmd.ProcessState != nil {
+		t.Fatal("the controlplane agent process exited")
+	}
+	select {
+	case <-cpAgent.done:
+		t.Fatal("the controlplane agent process ended")
+	default:
+	}
+	if ok, err := c2.tokens.Validate(ctx, strings.TrimSpace(string(old)), "cp1"); err != nil || ok {
+		t.Fatalf("the replaced token still validates: (%v, %v)", ok, err)
 	}
 }

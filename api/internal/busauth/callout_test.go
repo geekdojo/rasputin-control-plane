@@ -16,8 +16,10 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
-// TestResponder_Authorize exercises the trust matrix directly: node-id always
-// required; loopback trusted without a token; everyone else needs a live token.
+// TestResponder_Authorize exercises the trust matrix directly: a valid node id
+// and a live token bound to it are both required, for every connection. There
+// is no source-address input any more: loopback earned a tokenless pass until
+// geekdojo-brain#140, and authorize cannot be handed an address to exempt.
 func TestResponder_Authorize(t *testing.T) {
 	ctx := context.Background()
 	store := newTokenStore(t)
@@ -40,28 +42,26 @@ func TestResponder_Authorize(t *testing.T) {
 	cases := []struct {
 		name           string
 		nodeID, token  string
-		host           string
 		wantAuthorized bool
 	}{
-		{"empty node id denied", "", good, "192.168.1.50", false},
-		{"loopback no token trusted", "node-cp", "", "127.0.0.1", true},
-		{"loopback ipv6 trusted", "node-cp", "", "::1", true},
-		{"remote valid token", "fw-1", good, "192.168.1.50", true},
-		{"remote no token denied", "fw-1", "", "192.168.1.50", false},
-		{"remote bad token denied", "fw-1", "garbage", "192.168.1.50", false},
-		{"remote revoked token denied", "fw-1", revoked, "192.168.1.50", false},
-		{"empty node id even on loopback denied", "", "", "127.0.0.1", false},
-		{"bound token as its node", "fw-1", bound, "192.168.1.50", true},
-		{"bound token as a different node denied", "fw-2", bound, "192.168.1.50", false},
-		{"legacy unbound token denied", "fw-1", legacy, "192.168.1.50", false},
-		{"legacy unbound token denied as another node", "fw-2", legacy, "192.168.1.50", false},
+		{"empty node id denied", "", good, false},
+		{"empty node id and no token denied", "", "", false},
+		{"no token denied (the controlplane's own id earns nothing)", "node-cp", "", false},
+		{"valid token", "fw-1", good, true},
+		{"no token denied", "fw-1", "", false},
+		{"bad token denied", "fw-1", "garbage", false},
+		{"revoked token denied", "fw-1", revoked, false},
+		{"bound token as its node", "fw-1", bound, true},
+		{"bound token as a different node denied", "fw-2", bound, false},
+		{"legacy unbound token denied", "fw-1", legacy, false},
+		{"legacy unbound token denied as another node", "fw-2", legacy, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, reason := r.authorize("test-server", 1, tc.nodeID, tc.token, tc.host)
+			ok, reason := r.authorize("test-server", 1, tc.nodeID, tc.token)
 			if ok != tc.wantAuthorized {
-				t.Errorf("authorize(%q,token,%q) = %v (%q); want %v",
-					tc.nodeID, tc.host, ok, reason, tc.wantAuthorized)
+				t.Errorf("authorize(%q, token) = %v (%q); want %v",
+					tc.nodeID, ok, reason, tc.wantAuthorized)
 			}
 		})
 	}

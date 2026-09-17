@@ -160,9 +160,10 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 	)
 	waitLimit := injectedTTL + busWaitLimit
 
-	ip := requireNonLoopbackIPv4(t) // loopback skips the token check, and with it the admission we observe
 	admits := make(chan admission, 64)
-	eb := startEnforcedBus(t, ip, func(r *Responder) {
+	// Loopback: every connection goes through the token check and so through
+	// the admission observed here (geekdojo-brain#140).
+	eb := startEnforcedBus(t, "127.0.0.1", func(r *Responder) {
 		r.userTTL = injectedTTL
 		r.tokens = admitRecorder{inner: r.tokens, admits: admits}
 	})

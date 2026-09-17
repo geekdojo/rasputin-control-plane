@@ -3,7 +3,6 @@ package busauth
 import (
 	"context"
 	"log"
-	"net"
 	"sync/atomic"
 	"time"
 
@@ -44,8 +43,8 @@ type Validator interface {
 }
 
 // Responder handles NATS auth-callout requests on the in-process connection:
-// it validates the presented join token (or trusts loopback), then mints a
-// per-node subject-scoped user JWT signed by the issuer account key.
+// it validates the presented join token, then mints a per-node subject-scoped
+// user JWT signed by the issuer account key.
 type Responder struct {
 	nc     *nats.Conn
 	issuer *Issuer
@@ -88,8 +87,8 @@ func (r *Responder) Start() error {
 // now, and the reason it gives the client.
 type HoldFunc func() (held bool, reason string)
 
-// SetHold makes the responder refuse every connection, loopback included,
-// while hold answers true. Safe to call at any time.
+// SetHold makes the responder refuse every connection, the controlplane's own
+// agent's included, while hold answers true. Safe to call at any time.
 //
 // The one use: while the api replaces its embedded server to refuse plaintext
 // (bus.Server.SetAllowNonTLS), job intake is closed, and it reopens only after
@@ -132,7 +131,7 @@ func (r *Responder) handle(m *nats.Msg) {
 			return
 		}
 	}
-	ok, reason := r.authorize(serverID, cid, nodeID, token, host)
+	ok, reason := r.authorize(serverID, cid, nodeID, token)
 	if !ok {
 		log.Printf("busauth: deny node=%q host=%q: %s", nodeID, host, reason)
 		r.respond(m, userNkey, serverID, "", reason)
@@ -148,25 +147,28 @@ func (r *Responder) handle(m *nats.Msg) {
 	r.respond(m, userNkey, serverID, userJWT, "")
 }
 
-// authorize implements the trust model: a valid node id is always required (it
-// scopes the grant); loopback connections are trusted same-box-as-the-authority
-// (the controlplane's co-located agent, which carries no join token); every
-// other connection must present a live token. serverID and cid name the
-// connection (the asking server's id and its id for the connection), recorded
-// on a token grant so revoking the token can close it.
+// authorize implements the trust model: every connection presents a valid node
+// id (it scopes the grant) and a live join token bound to that id. serverID and
+// cid name the connection (the asking server's id and its id for the
+// connection), recorded on the grant so revoking the token can close it.
 //
-// The node id check runs BEFORE the loopback short-circuit so it covers both
-// paths: the id becomes one token of every subject in the minted credential,
-// and nats-server passes the username through to the callout unvalidated.
-func (r *Responder) authorize(serverID string, cid uint64, nodeID, token, host string) (bool, string) {
+// Where a connection comes from earns it nothing. The bus used to trust any
+// loopback connection without a token, for the controlplane's co-located
+// agent; that let any local user on the controlplane claim any node's id, and
+// bus TLS authenticates the server, never the client. That agent now holds a
+// token the api mints for it (Store.EnsureAgentToken), and loopback clients
+// authenticate like everyone else (geekdojo/geekdojo-brain#140, decided
+// 2026-09-17). Do not reintroduce a source-address exemption.
+//
+// The node id is checked first: it becomes one token of every subject in the
+// minted credential, and nats-server passes the username through to the
+// callout unvalidated.
+func (r *Responder) authorize(serverID string, cid uint64, nodeID, token string) (bool, string) {
 	if nodeID == "" {
 		return false, "missing node id (NATS username)"
 	}
 	if !ValidNodeID(nodeID) {
 		return false, "invalid node id (NATS username): " + NodeIDRule
-	}
-	if isLoopback(host) {
-		return true, ""
 	}
 	if token == "" {
 		return false, "missing join token"
@@ -267,12 +269,4 @@ func (r *Responder) respond(m *nats.Msg, userNkey, serverID, userJWT, errMsg str
 		return
 	}
 	_ = m.Respond([]byte(tok))
-}
-
-func isLoopback(host string) bool {
-	if host == "" {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
