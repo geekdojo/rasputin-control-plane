@@ -40,9 +40,9 @@ remote="$1"
 tag="$2"
 built="$3"
 
-# Tag names here are CalVer, SemVer, catalog-vN or sha256-<hex>. Refusing
-# anything else keeps glob and ref-syntax characters out of the ls-remote
-# patterns below.
+# Tag names here are v-prefixed CalVer (vYYYY.MM.MICRO, optionally -dev.N). Refusing anything outside a plain tag-name
+# alphabet keeps glob and ref-syntax characters out of the ls-remote patterns
+# below.
 [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || fail 2 "refusing tag name '$tag'"
 [[ "$built" =~ ^[0-9a-f]{40}$ ]] || fail 2 "built commit '$built' is not a full 40-character SHA"
 
@@ -67,7 +67,12 @@ while IFS=$'\t' read -r sha ref; do
 done <<<"$refs"
 
 tagged="${peeled:-$direct}"
-[ -n "$tagged" ] || fail 3 "tag $tag does not exist on $remote"
+if [ -z "$tagged" ]; then
+	# Not an ::error:: annotation: before a dispatch creates its tag, absent is
+	# the expected answer, and the caller decides whether it is a failure.
+	printf 'release-target-guard: tag %s does not exist on %s\n' "$tag" "$remote" >&2
+	exit 3
+fi
 
 if [ "$tagged" != "$built" ]; then
 	fail 1 "tag $tag points at $tagged, but this run built $built"

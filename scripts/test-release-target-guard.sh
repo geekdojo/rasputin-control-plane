@@ -64,6 +64,13 @@ check "lightweight tag on another commit fails with both SHAs" 1 "points at $b, 
 check "annotated tag on another commit fails with the peeled SHA" 1 "points at $b, but this run built $a" "$remote" annotated-b "$a"
 check "annotated tag is not compared by its tag-object SHA" 1 "points at $a" "$remote" annotated-a "$(git -C "$remote" rev-parse annotated-a)"
 check "an absent tag is status 3" 3 "does not exist" "$remote" v1 "$a"
+absent_output="$("$GUARD" "$remote" v1 "$a" 2>&1)" || true
+if grep -qF '::error::' <<<"$absent_output"; then
+	printf 'FAIL %s\n' "an absent tag is not annotated as an error (a dispatch expects it)"
+	failures=$((failures + 1))
+else
+	printf 'ok   %s\n' "an absent tag is not annotated as an error (a dispatch expects it)"
+fi
 check "an unreadable remote is status 2, never 'absent'" 2 "could not read tags" "$tmp/no-such-remote.git" light-a "$a"
 check "a short SHA is refused" 2 "not a full 40-character SHA" "$remote" light-a "${a:0:7}"
 check "an upper-case SHA is refused" 2 "not a full 40-character SHA" "$remote" light-a "$(tr 'a-f' 'A-F' <<<"$a")"
