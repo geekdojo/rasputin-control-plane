@@ -337,7 +337,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	spec, _ := json.Marshal(apps.DeleteSpec{AppID: id, DeleteVolumes: req.DeleteVolumes})
 	j, err := s.runner.Submit(r.Context(), "app.delete", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -349,7 +349,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	spec, _ := json.Marshal(map[string]string{"appId": id})
 	j, err := s.runner.Submit(r.Context(), "app.deploy", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -591,7 +591,7 @@ func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind s
 		if stashedFor != "" {
 			s.composeStash.Discard(stashedFor)
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -603,7 +603,7 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	spec, _ := json.Marshal(map[string]string{"appId": id})
 	j, err := s.runner.Submit(r.Context(), "app.stop", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

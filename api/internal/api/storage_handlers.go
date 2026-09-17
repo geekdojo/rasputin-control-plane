@@ -327,7 +327,7 @@ func (s *Server) handleClaimBackupTarget(w http.ResponseWriter, r *http.Request)
 	}
 	j, err := s.runner.Submit(r.Context(), storage.ClaimJobKind, body, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, j)

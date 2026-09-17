@@ -12,34 +12,55 @@ import (
 // Disconnector. The real embedded server is driven in revoke_bus_test.go and,
 // through the HTTP handlers, in api/internal/api/bus_revoke_test.go.
 
-// fakeBus is a Disconnector over a set of "open" connection ids.
+// testServer is the server id the fake bus runs as, and mustAdmit admits on.
+const testServer = "server-1"
+
+// fakeBus is a Disconnector over a set of "open" connection ids on one running
+// server, whose id replace changes, as bus.Server.SetAllowNonTLS does.
 type fakeBus struct {
 	mu     sync.Mutex
+	server string
 	open   map[uint64]bool
 	kicked []uint64
 }
 
 func newFakeBus(cids ...uint64) *fakeBus {
-	b := &fakeBus{open: make(map[uint64]bool)}
+	b := &fakeBus{server: testServer, open: make(map[uint64]bool)}
 	for _, c := range cids {
 		b.open[c] = true
 	}
 	return b
 }
 
-func (b *fakeBus) ClientOpen(cid uint64) bool {
+func (b *fakeBus) ClientOpen(serverID string, cid uint64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.open[cid]
+	return serverID == b.server && b.open[cid]
 }
 
-func (b *fakeBus) DisconnectClient(cid uint64) bool {
+func (b *fakeBus) DisconnectClient(serverID string, cid uint64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if serverID != b.server {
+		return false
+	}
 	b.kicked = append(b.kicked, cid)
 	was := b.open[cid]
 	delete(b.open, cid)
 	return was
+}
+
+// replace swaps in a new server whose open connections are cids: every
+// connection on the old one is gone, and ids start over.
+func (b *fakeBus) replace(serverID string, cids ...uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.server = serverID
+	b.open = make(map[uint64]bool)
+	b.kicked = nil
+	for _, c := range cids {
+		b.open[c] = true
+	}
 }
 
 // closeByPeer simulates a connection closing on its own (the node went away).
@@ -59,7 +80,12 @@ func (b *fakeBus) kickedIDs() []uint64 {
 
 func mustAdmit(t *testing.T, s *Store, cid uint64, token, nodeID string, want bool) {
 	t.Helper()
-	ok, err := s.Admit(context.Background(), cid, token, nodeID)
+	mustAdmitOn(t, s, testServer, cid, token, nodeID, want)
+}
+
+func mustAdmitOn(t *testing.T, s *Store, serverID string, cid uint64, token, nodeID string, want bool) {
+	t.Helper()
+	ok, err := s.Admit(context.Background(), serverID, cid, token, nodeID)
 	if err != nil {
 		t.Fatalf("Admit(cid=%d, %s): %v", cid, nodeID, err)
 	}
@@ -108,7 +134,7 @@ func TestRevoke_ClosesOnlyThatTokensConnections(t *testing.T) {
 	if got := bus.kickedIDs(); !slices.Equal(got, []uint64{1, 3, 4}) {
 		t.Fatalf("after Revoke(C) closed %v, want [1 3 4]", got)
 	}
-	if !bus.ClientOpen(2) {
+	if !bus.ClientOpen(testServer, 2) {
 		t.Error("node-b's connection was closed by revokes of other tokens")
 	}
 
@@ -171,7 +197,7 @@ func TestRevokeByNodeID_ClosesEveryTokenSessionOfTheNode(t *testing.T) {
 	if got := bus.kickedIDs(); !slices.Equal(got, []uint64{1, 2}) {
 		t.Fatalf("closed %v, want [1 2]", got)
 	}
-	if !bus.ClientOpen(3) {
+	if !bus.ClientOpen(testServer, 3) {
 		t.Error("node-b's connection was closed by node-a's removal")
 	}
 	// Neither of the removed node's tokens can reconnect.
@@ -247,10 +273,10 @@ func TestAdmit_PrunesClosedConnections(t *testing.T) {
 	bus.closeByPeer(1) // the node dropped and is reconnecting
 	mustAdmit(t, s, 2, tok, "node-a", true)
 
-	if _, ok := s.sess.grants[1]; ok {
+	if _, ok := s.sess.grants[session{testServer, 1}]; ok {
 		t.Error("record for closed connection 1 survived the next admission")
 	}
-	if _, ok := s.sess.grants[2]; !ok {
+	if _, ok := s.sess.grants[session{testServer, 2}]; !ok {
 		t.Error("live connection 2 is not recorded")
 	}
 }
@@ -303,7 +329,7 @@ func TestRevoke_RacingAnInFlightAdmission(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Revoke did not return within 10s of the admission finishing")
 	}
-	if bus.ClientOpen(7) {
+	if bus.ClientOpen(testServer, 7) {
 		t.Error("connection admitted concurrently with the revoke is still open")
 	}
 }
@@ -328,7 +354,7 @@ func TestSessionLockReleasedOnErrors(t *testing.T) {
 		if _, _, err := s.RevokeByNodeID(ctx, "node-a"); err == nil {
 			t.Error("RevokeByNodeID on a closed DB returned no error")
 		}
-		if _, err := s.Admit(ctx, 1, "tok", "node-a"); err == nil {
+		if _, err := s.Admit(ctx, testServer, 1, "tok", "node-a"); err == nil {
 			t.Error("Admit on a closed DB returned no error")
 		}
 		s.TrackSessions(newFakeBus()) // would deadlock if any path above leaked the lock
@@ -342,34 +368,72 @@ func TestSessionLockReleasedOnErrors(t *testing.T) {
 
 // recordingValidator captures what the responder hands the token store.
 type recordingValidator struct {
-	calls []uint64
+	calls   []uint64
+	servers []string
 }
 
-func (v *recordingValidator) Admit(_ context.Context, cid uint64, _, _ string) (bool, error) {
+func (v *recordingValidator) Admit(_ context.Context, serverID string, cid uint64, _, _ string) (bool, error) {
 	v.calls = append(v.calls, cid)
+	v.servers = append(v.servers, serverID)
 	return true, nil
 }
 
-// The responder must hand the store the server's connection id — that id is
-// what a revoke closes — and must not admit (record) a loopback connection,
-// which holds no token for a revoke to act on.
+// The responder must hand the store the asking server's id and its connection
+// id — the pair is what a revoke closes — and must not admit (record) a
+// loopback connection, which holds no token for a revoke to act on.
 func TestResponder_AdmitsTokenConnectionsByConnectionID(t *testing.T) {
 	v := &recordingValidator{}
 	r := &Responder{tokens: v}
 
-	if ok, reason := r.authorize(42, "node-a", "some-token", "192.168.1.50"); !ok {
+	if ok, reason := r.authorize("srv-a", 42, "node-a", "some-token", "192.168.1.50"); !ok {
 		t.Fatalf("remote token connection denied: %s", reason)
 	}
-	if !slices.Equal(v.calls, []uint64{42}) {
-		t.Fatalf("Admit called with cids %v, want [42]", v.calls)
+	if !slices.Equal(v.calls, []uint64{42}) || !slices.Equal(v.servers, []string{"srv-a"}) {
+		t.Fatalf("Admit called with cids %v on servers %v, want [42] on [srv-a]", v.calls, v.servers)
 	}
-	if ok, reason := r.authorize(43, "cp-1", "", "127.0.0.1"); !ok {
+	if ok, reason := r.authorize("srv-a", 43, "cp-1", "", "127.0.0.1"); !ok {
 		t.Fatalf("loopback connection denied: %s", reason)
 	}
-	if ok, _ := r.authorize(44, "cp-1", "", "192.168.1.50"); ok {
+	if ok, _ := r.authorize("srv-a", 44, "cp-1", "", "192.168.1.50"); ok {
 		t.Fatal("tokenless remote connection admitted")
 	}
 	if !slices.Equal(v.calls, []uint64{42}) {
 		t.Errorf("Admit called with cids %v; loopback and tokenless connections must not reach the store", v.calls)
+	}
+}
+
+// A connection id is unique within one server only. After the api replaces its
+// embedded server (the switch to TLS-only), a record from the old server must
+// never close the new server's connection that reuses its id — not even one an
+// auth request queued before the switch records after it.
+func TestRevoke_ARecordFromAReplacedServerClosesNothingOnTheNewOne(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+	bus := newFakeBus(1)
+	s.TrackSessions(bus)
+	tokA, idA, _ := s.MintBound(ctx, "a", "node-a")
+	tokB, _, _ := s.MintBound(ctx, "b", "node-b")
+
+	mustAdmit(t, s, 1, tokA, "node-a", true)
+	bus.replace("server-2", 1) // connection 1 on the new server is someone else
+	// A late admission from the old server, recorded after the replacement.
+	mustAdmitOn(t, s, testServer, 1, tokA, "node-a", true)
+	mustAdmitOn(t, s, "server-2", 1, tokB, "node-b", true)
+
+	n, err := s.Revoke(ctx, idA)
+	if err != nil {
+		t.Fatalf("Revoke(A): %v", err)
+	}
+	if n != 0 || len(bus.kickedIDs()) != 0 {
+		t.Fatalf("Revoke(A) closed %d connection(s) %v on the new server, want none: node-a had no session there", n, bus.kickedIDs())
+	}
+	if !bus.ClientOpen("server-2", 1) {
+		t.Fatal("node-b's connection on the new server was closed by a revoke of node-a's token")
+	}
+	s.sess.mu.Lock()
+	_, kept := s.sess.grants[session{"server-2", 1}]
+	s.sess.mu.Unlock()
+	if !kept {
+		t.Fatal("node-b's session on the new server is no longer recorded")
 	}
 }

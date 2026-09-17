@@ -14,10 +14,20 @@ import (
 //
 // # Mechanism
 //
-// The auth callout reports the server-assigned connection id (CID) of the
-// connection it is authenticating. Admit records CID → (token, node id) for
-// every token it accepts; Revoke and RevokeByNodeID close exactly the recorded
-// CIDs through the embedded server (bus.Server.DisconnectClient).
+// The auth callout reports the id of the server asking and the
+// server-assigned connection id (CID) of the connection it is authenticating.
+// Admit records (server id, CID) → (token, node id) for every token it
+// accepts; Revoke and RevokeByNodeID close exactly the recorded connections
+// through the embedded server (bus.Server.DisconnectClient).
+//
+// The server id is part of the key because a CID is unique within one server
+// only. The api replaces its embedded server in-process when the bus switches
+// to TLS-only (bus.Server.SetAllowNonTLS, geekdojo/geekdojo-brain#448), and
+// the new server numbers connections from the start again. A record from the
+// old server — including one an auth request queued before the switch writes
+// after it — must never close a connection on the new one: the Disconnector
+// answers false for any server id but the running server's, and prune drops
+// such records.
 //
 // Rejected alternatives:
 //
@@ -50,12 +60,20 @@ import (
 // the controlplane node cannot be removed.
 
 // Disconnector closes client connections on the embedded bus.
-// *bus.Server implements it.
+// *bus.Server implements it. A connection is named by the id of the server it
+// is on and its connection id on that server; a server id other than the
+// running server's names no open connection.
 type Disconnector interface {
 	// ClientOpen reports whether the connection is still registered.
-	ClientOpen(cid uint64) bool
+	ClientOpen(serverID string, cid uint64) bool
 	// DisconnectClient closes the connection; false if it was already gone.
-	DisconnectClient(cid uint64) bool
+	DisconnectClient(serverID string, cid uint64) bool
+}
+
+// session names one connection: the server it is on and its id there.
+type session struct {
+	serverID string
+	cid      uint64
 }
 
 // grant is one connection a join token authenticated.
@@ -68,7 +86,7 @@ type grant struct {
 type sessions struct {
 	mu     sync.Mutex
 	disc   Disconnector
-	grants map[uint64]grant
+	grants map[session]grant
 
 	// afterValidate, when set, runs inside Admit after the token has validated
 	// and before the grant is recorded, with mu held. Tests only: it opens the
@@ -86,15 +104,15 @@ func (s *Store) TrackSessions(d Disconnector) {
 	defer s.sess.mu.Unlock()
 	s.sess.disc = d
 	if s.sess.grants == nil {
-		s.sess.grants = make(map[uint64]grant)
+		s.sess.grants = make(map[session]grant)
 	}
 }
 
-// Admit is the auth callout's token check for the connection with server id
-// cid: Validate, plus — when sessions are tracked — a record of the grant so a
-// later revoke can close that connection. See the concurrency note above for
-// why both happen under one lock.
-func (s *Store) Admit(ctx context.Context, cid uint64, plaintext, presentedNodeID string) (bool, error) {
+// Admit is the auth callout's token check for connection cid on the server
+// serverID: Validate, plus — when sessions are tracked — a record of the grant
+// so a later revoke can close that connection. See the concurrency note above
+// for why both happen under one lock.
+func (s *Store) Admit(ctx context.Context, serverID string, cid uint64, plaintext, presentedNodeID string) (bool, error) {
 	s.sess.mu.Lock()
 	defer s.sess.mu.Unlock()
 	ok, err := s.Validate(ctx, plaintext, presentedNodeID)
@@ -108,7 +126,7 @@ func (s *Store) Admit(ctx context.Context, cid uint64, plaintext, presentedNodeI
 		s.sess.afterValidate()
 	}
 	s.pruneLocked()
-	s.sess.grants[cid] = grant{tokenID: HashToken(plaintext), nodeID: presentedNodeID}
+	s.sess.grants[session{serverID: serverID, cid: cid}] = grant{tokenID: HashToken(plaintext), nodeID: presentedNodeID}
 	return true, nil
 }
 
@@ -116,32 +134,33 @@ func (s *Store) Admit(ctx context.Context, cid uint64, plaintext, presentedNodeI
 // table tracks live sessions rather than every connection ever made. It runs
 // on each grant, which bounds the table by the live connections plus those
 // closed since the previous grant — no timer involved. CIDs are never reused
-// within a server's lifetime, so a closed CID cannot come back.
+// within a server's lifetime, and a server that was replaced never comes back,
+// so a closed session cannot reopen.
 func (s *Store) pruneLocked() {
-	for cid := range s.sess.grants {
-		if !s.sess.disc.ClientOpen(cid) {
-			delete(s.sess.grants, cid)
+	for k := range s.sess.grants {
+		if !s.sess.disc.ClientOpen(k.serverID, k.cid) {
+			delete(s.sess.grants, k)
 		}
 	}
 }
 
-// takeLocked removes and returns the CIDs of every record match selects.
-func (s *Store) takeLocked(match func(grant) bool) []uint64 {
-	var cids []uint64
-	for cid, g := range s.sess.grants {
+// takeLocked removes and returns every recorded session match selects.
+func (s *Store) takeLocked(match func(grant) bool) []session {
+	var out []session
+	for k, g := range s.sess.grants {
 		if match(g) {
-			cids = append(cids, cid)
-			delete(s.sess.grants, cid)
+			out = append(out, k)
+			delete(s.sess.grants, k)
 		}
 	}
-	return cids
+	return out
 }
 
-// disconnect closes cids and returns how many were still open.
-func (s *Store) disconnect(d Disconnector, cids []uint64) int {
+// disconnect closes sessions and returns how many were still open.
+func (s *Store) disconnect(d Disconnector, sessions []session) int {
 	n := 0
-	for _, cid := range cids {
-		if d.DisconnectClient(cid) {
+	for _, k := range sessions {
+		if d.DisconnectClient(k.serverID, k.cid) {
 			n++
 		}
 	}

@@ -117,7 +117,7 @@ func (s *Server) handleSetupMesh(w http.ResponseWriter, r *http.Request) {
 	spec, _ := json.Marshal(mesh.EnrollSpec{NodeID: selfID})
 	j, err := s.runner.Submit(r.Context(), "mesh.enroll_node", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

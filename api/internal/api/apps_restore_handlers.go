@@ -199,7 +199,7 @@ func (s *Server) handleAppRestore(w http.ResponseWriter, r *http.Request) {
 	j, err := s.runner.Submit(r.Context(), storage.RestoreAppJobKind, spec, creator(r))
 	if err != nil {
 		s.appRestore.Sessions.Close(sessionID)
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	if err := s.appRestore.Sessions.Bind(sessionID, j.ID); err != nil {

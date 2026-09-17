@@ -276,10 +276,10 @@ func (s *Store) Revoke(ctx context.Context, id string) (disconnected int, err er
 		s.sess.mu.Unlock()
 		return 0, sql.ErrNoRows
 	}
-	cids := s.takeLocked(func(g grant) bool { return g.tokenID == id })
+	taken := s.takeLocked(func(g grant) bool { return g.tokenID == id })
 	d := s.sess.disc
 	s.sess.mu.Unlock()
-	return s.disconnect(d, cids), nil
+	return s.disconnect(d, taken), nil
 }
 
 // RevokeByNodeID revokes every still-active token bound to nodeID and closes
@@ -304,10 +304,10 @@ func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, dis
 		return 0, 0, fmt.Errorf("busauth: revoke by node: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	cids := s.takeLocked(func(g grant) bool { return g.nodeID == nodeID })
+	taken := s.takeLocked(func(g grant) bool { return g.nodeID == nodeID })
 	d := s.sess.disc
 	s.sess.mu.Unlock()
-	return int(n), s.disconnect(d, cids), nil
+	return int(n), s.disconnect(d, taken), nil
 }
 
 // CountActiveUnbound returns how many live (unrevoked) legacy unbound tokens

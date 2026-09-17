@@ -89,7 +89,9 @@ The api migrates an existing cluster by itself: once
 its own build is committed on its A/B slot it hands the pin to nodes that lack
 it, and once every enrolled node reports TLS with the pin verified, no
 plaintext connection is open and no job is in flight, it records TLS-only and
-restarts to refuse plaintext. The seed/file contract and the mode ladder are in
+replaces its embedded bus server in-process with one that refuses plaintext —
+the api process and its own bus connection stay up. The seed/file contract and
+the mode ladder are in
 [`docs/bus-tls-contract.md`](docs/bus-tls-contract.md).
 
 A node id is a lowercase DNS label — the first label of the node's FQDN:

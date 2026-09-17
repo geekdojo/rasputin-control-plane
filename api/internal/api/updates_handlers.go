@@ -397,7 +397,7 @@ func (s *Server) handleCreateSystemUpdate(w http.ResponseWriter, r *http.Request
 	spec, _ := json.Marshal(req)
 	j, err := s.runner.Submit(r.Context(), "system.update", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -479,7 +479,7 @@ func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {
 	spec, _ := json.Marshal(req)
 	j, err := s.runner.Submit(r.Context(), "node.update", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

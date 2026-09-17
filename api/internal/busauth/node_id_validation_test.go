@@ -28,6 +28,7 @@ import (
 type enforcedBus struct {
 	srv    *bus.Server
 	tokens *Store
+	resp   *Responder
 	url    string
 }
 
@@ -69,7 +70,7 @@ func startEnforcedBus(t *testing.T, host string) *enforcedBus {
 	}
 	t.Cleanup(resp.Stop)
 
-	return &enforcedBus{srv: srv, tokens: tokens, url: srv.ClientURL()}
+	return &enforcedBus{srv: srv, tokens: tokens, resp: resp, url: srv.ClientURL()}
 }
 
 // nonLoopbackIPv4 returns an up, non-loopback IPv4 address of this machine so
@@ -324,22 +325,22 @@ func TestResponder_AuthorizeRejectsInvalidNodeID(t *testing.T) {
 
 	for _, id := range invalidNodeIDs {
 		for _, host := range []string{"127.0.0.1", "::1", "192.168.1.50"} {
-			if ok, _ := r.authorize(1, id, unbound, host); ok {
+			if ok, _ := r.authorize("test-server", 1, id, unbound, host); ok {
 				t.Errorf("authorize(%q, unbound token, %s) = true; want denied", id, host)
 			}
-			if ok, _ := r.authorize(1, id, alpha, host); ok {
+			if ok, _ := r.authorize("test-server", 1, id, alpha, host); ok {
 				t.Errorf("authorize(%q, token bound to alpha, %s) = true; want denied", id, host)
 			}
-			if ok, _ := r.authorize(1, id, "", host); ok {
+			if ok, _ := r.authorize("test-server", 1, id, "", host); ok {
 				t.Errorf("authorize(%q, no token, %s) = true; want denied", id, host)
 			}
 		}
 	}
 	// Valid ids still pass on both paths.
-	if ok, reason := r.authorize(1, "alpha", "", "127.0.0.1"); !ok {
+	if ok, reason := r.authorize("test-server", 1, "alpha", "", "127.0.0.1"); !ok {
 		t.Errorf("loopback alpha denied: %s", reason)
 	}
-	if ok, reason := r.authorize(2, "alpha", alpha, "192.168.1.50"); !ok {
+	if ok, reason := r.authorize("test-server", 2, "alpha", alpha, "192.168.1.50"); !ok {
 		t.Errorf("remote alpha with its bound token denied: %s", reason)
 	}
 }

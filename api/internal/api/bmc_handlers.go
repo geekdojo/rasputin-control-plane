@@ -167,7 +167,7 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 	})
 	j, err := s.runner.Submit(r.Context(), "bmc.configure", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -344,7 +344,7 @@ func (s *Server) handleBMCPower(w http.ResponseWriter, r *http.Request) {
 	spec, _ := json.Marshal(bmc.Spec{TargetNodeID: nodeID, Verb: verb})
 	j, err := s.runner.Submit(r.Context(), "bmc.power", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

@@ -180,8 +180,9 @@ func main() {
 	// provisioned one firstboot wrote to <dataDir>/bus/bus.key, or one
 	// generated now — served as server-auth TLS that nodes trust by pin. The
 	// mode (offer | migrate | require, bustls.Mode) decides whether plaintext
-	// is still accepted, and is read before the server starts because
-	// nats-server cannot change that on reload.
+	// is still accepted. It is read before the server starts so a controlplane
+	// already in require starts refusing plaintext; the move to require while
+	// running replaces the server in-process (bustls.Service, below).
 	//
 	// A key that will not load is survived, not fatal: the bus comes up
 	// plaintext-only and says why, because a controlplane that will not start
@@ -244,11 +245,26 @@ func main() {
 	}
 	logUnboundBusTokens(ctx, busTokenStore)
 
+	// The bus TLS service, once it exists (it is built further down, after the
+	// stores it reads). The responder reads it from the first callout on, so
+	// it is handed over atomically.
+	var busTLSForHold atomic.Pointer[bustls.Service]
 	if busAuthEnforce {
 		// Before the responder starts, so every connection it admits is
 		// recorded and a revoke can close it (certificates.md §4.2(1)).
 		busTokenStore.TrackSessions(busSrv)
 		responder := busauth.NewResponder(busSrv.Conn(), busIssuer, busTokenStore)
+		// While the bus server is being replaced to refuse plaintext, admit
+		// no node: job intake reopens only after the api's own connection is
+		// back, and a node registering before that could have a registration
+		// hook's job refused with nobody to retry it. Held nodes retry on
+		// their own reconnect loop.
+		responder.SetHold(func() (bool, string) {
+			if svc := busTLSForHold.Load(); svc != nil {
+				return svc.Switching()
+			}
+			return false, ""
+		})
 		if err := responder.Start(); err != nil {
 			log.Fatalf("rasputin-api: bus auth responder: %v", err)
 		}
@@ -892,21 +908,25 @@ func main() {
 			},
 			InFlight: func(ctx context.Context) ([]string, error) { return jobs.InFlight(ctx, jobStore) },
 			// migrate → require closes job intake atomically with "nothing in
-			// flight", so a job submitted during the restart window is refused
-			// with an error its caller sees rather than recorded and then
-			// failed by the restart.
+			// flight", so a job submitted while the bus server is replaced is
+			// refused with a retryable error (503) rather than started on a
+			// bus that is going away; intake reopens once the api's own
+			// connection is back on the new server.
 			Quiesce: runner.QuiesceIfIdle,
 			Reopen:  runner.Reopen,
-			// Same shape as the restore restart below: end this process
-			// through the ordinary shutdown, then exit non-zero, so the unit
-			// (Restart=always on the appliance) starts one whose server
-			// refuses plaintext. The new process reads require from the
-			// setting, so it never asks to restart again.
-			Restart: func() {
-				requestBusTLSRestartExit()
-				cancel()
+			// Replace the embedded server in this process with one that
+			// refuses plaintext. The api process, its HTTP server and its bus
+			// connection stay up; nodes rejoin over TLS on their own reconnect.
+			RequireTLS: func(ctx context.Context) error { return busSrv.SetAllowNonTLS(ctx, false) },
+			// Neither the new server nor one with the old options came up, or
+			// the api's own connection could not rejoin: this api has no bus.
+			// That is the state a bus that fails at boot is fatal in, and the
+			// unit restarts the api the same way.
+			NoBus: func(err error) {
+				log.Fatalf("rasputin-api: bus: %v", err)
 			},
 		})
+		busTLSForHold.Store(busTLSSvc)
 		// A client connection closing can be the last plaintext one: re-decide
 		// on the event, not on a clock.
 		if err := busSrv.OnClientDisconnect(busTLSSvc.NoteDisconnect); err != nil {
@@ -1540,9 +1560,16 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// Bind before saying so, and before telling systemd the api is ready: the
+	// "listening" line and READY=1 are then facts a client can act on, not a
+	// race with the bind.
+	httpLn, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		log.Fatalf("rasputin-api: http: %v", err)
+	}
+	log.Printf("rasputin-api: http listening on %s", httpAddr)
 	go func() {
-		log.Printf("rasputin-api: http listening on %s", httpAddr)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.Serve(httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("rasputin-api: http: %v", err)
 		}
 	}()
@@ -2417,13 +2444,6 @@ var restoreExitRequested atomic.Bool
 // ordinary shutdown has run. Called by the restore handler's restart hook.
 func requestRestoreExit() { restoreExitRequested.Store(true) }
 
-var busTLSRestartExitRequested atomic.Bool
-
-// requestBusTLSRestartExit is requestRestoreExit for a bus TLS mode change
-// that flips whether plaintext is allowed — a server option nats-server
-// cannot reload (bustls.Service.SetMode).
-func requestBusTLSRestartExit() { busTLSRestartExitRequested.Store(true) }
-
 // restoreExit is deferred FIRST in main, so it runs LAST — after every store
 // has closed and every subsystem has stopped — and turns a clean shutdown
 // into the non-zero exit a restart needs. On every other run it does
@@ -2431,10 +2451,6 @@ func requestBusTLSRestartExit() { busTLSRestartExitRequested.Store(true) }
 func restoreExit() {
 	if restoreExitRequested.Load() {
 		log.Printf("rasputin-api: exiting %d so the unit restarts this api onto the restored identity", restoreExitCode)
-		os.Exit(restoreExitCode)
-	}
-	if busTLSRestartExitRequested.Load() {
-		log.Printf("rasputin-api: exiting %d so the unit restarts this api with the new bus TLS mode", restoreExitCode)
 		os.Exit(restoreExitCode)
 	}
 }

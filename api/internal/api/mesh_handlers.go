@@ -641,7 +641,7 @@ func (s *Server) handleDeleteMeshRoute(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 	j, err := s.runner.Submit(r.Context(), "mesh.apply", json.RawMessage("{}"), creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -651,7 +651,7 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMeshReconcile(w http.ResponseWriter, r *http.Request) {
 	j, err := s.runner.Submit(r.Context(), "mesh.reconcile", json.RawMessage("{}"), creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -695,7 +695,7 @@ func (s *Server) handleMeshEnrollNode(w http.ResponseWriter, r *http.Request) {
 	spec, _ := json.Marshal(mesh.EnrollSpec{NodeID: nodeID, AdvertiseRoutes: req.AdvertiseRoutes})
 	j, err := s.runner.Submit(r.Context(), "mesh.enroll_node", spec, creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

@@ -226,7 +226,7 @@ func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleApplyFirewall(w http.ResponseWriter, r *http.Request) {
 	j, err := s.runner.Submit(r.Context(), "firewall.apply", json.RawMessage("{}"), creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -236,7 +236,7 @@ func (s *Server) handleApplyFirewall(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReconcileFirewall(w http.ResponseWriter, r *http.Request) {
 	j, err := s.runner.Submit(r.Context(), "firewall.reconcile", json.RawMessage("{}"), creator(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

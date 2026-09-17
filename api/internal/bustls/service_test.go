@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -19,6 +24,8 @@ type memSettings struct {
 	mu      sync.Mutex
 	m       map[string]string
 	failSet error
+	// onSet, when set, is told every value written (the ordering log).
+	onSet func(k, v string)
 }
 
 func (s *memSettings) Get(_ context.Context, k string) (string, error) {
@@ -37,6 +44,9 @@ func (s *memSettings) Set(_ context.Context, k, v string) error {
 		s.m = map[string]string{}
 	}
 	s.m[k] = v
+	if s.onSet != nil {
+		s.onSet(k, v)
+	}
 	return nil
 }
 
@@ -63,13 +73,34 @@ type facts struct {
 }
 
 type fixture struct {
-	svc       *Service
-	settings  *memSettings
-	f         *facts
-	restarts  atomic.Int32
-	restarted chan struct{} // closed on the first restart request
-	reopens   atomic.Int32
-	quiesced  atomic.Bool
+	svc      *Service
+	settings *memSettings
+	f        *facts
+	switches atomic.Int32
+	switched chan struct{} // closed when the first RequireTLS returns
+	reopens  atomic.Int32
+	quiesced atomic.Bool
+	noBus    atomic.Int32
+
+	// switchErr is what RequireTLS returns; duringSwitch, when set, runs
+	// inside it (with intake closed and require recorded).
+	switchErr    error
+	duringSwitch func()
+
+	logMu sync.Mutex
+	log   []string // the order things happened in
+}
+
+func (x *fixture) note(e string) {
+	x.logMu.Lock()
+	defer x.logMu.Unlock()
+	x.log = append(x.log, e)
+}
+
+func (x *fixture) events() []string {
+	x.logMu.Lock()
+	defer x.logMu.Unlock()
+	return append([]string(nil), x.log...)
 }
 
 func (x *fixture) set(fn func(f *facts)) {
@@ -90,7 +121,8 @@ func newFixture(t *testing.T, start Mode, pinned bool, nc *nats.Conn) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	x := &fixture{settings: &memSettings{}, f: &facts{}, restarted: make(chan struct{})}
+	x := &fixture{settings: &memSettings{}, f: &facts{}, switched: make(chan struct{})}
+	x.settings.onSet = func(k, v string) { x.note("persist " + v) }
 	x.svc = NewService(Config{
 		Key:             k,
 		Settings:        x.settings,
@@ -124,14 +156,21 @@ func newFixture(t *testing.T, start Mode, pinned bool, nc *nats.Conn) *fixture {
 				return false, x.f.inFlight, nil
 			}
 			x.quiesced.Store(true)
+			x.note("quiesce")
 			return true, nil, nil
 		},
-		Reopen: func() { x.reopens.Add(1); x.quiesced.Store(false) },
-		Restart: func() {
-			if x.restarts.Add(1) == 1 {
-				close(x.restarted)
+		Reopen: func() { x.reopens.Add(1); x.quiesced.Store(false); x.note("reopen") },
+		RequireTLS: func(context.Context) error {
+			x.note("switch")
+			if x.duringSwitch != nil {
+				x.duringSwitch()
 			}
+			if x.switches.Add(1) == 1 {
+				defer close(x.switched)
+			}
+			return x.switchErr
 		},
+		NoBus:          func(error) { x.noBus.Add(1) },
 		DeliverTimeout: 5 * time.Second,
 	})
 	return x
@@ -177,8 +216,8 @@ func TestLadder_NoMigrateWithoutCommit(t *testing.T) {
 	x := newFixture(t, ModeOffer, false, nil)
 	x.set(func(f *facts) { allReady(f); f.committed = false })
 	x.evaluate()
-	if x.svc.Mode() != ModeOffer || x.settings.mode() != "" || x.restarts.Load() != 0 {
-		t.Fatalf("moved without commit: mode=%s setting=%q restarts=%d", x.svc.Mode(), x.settings.mode(), x.restarts.Load())
+	if x.svc.Mode() != ModeOffer || x.settings.mode() != "" || x.switches.Load() != 0 {
+		t.Fatalf("moved without commit: mode=%s setting=%q switches=%d", x.svc.Mode(), x.settings.mode(), x.switches.Load())
 	}
 	st, err := x.svc.Status(context.Background())
 	if err != nil {
@@ -204,8 +243,8 @@ func TestLadder_EachBlockingFactHoldsRequireBack(t *testing.T) {
 			x := newFixture(t, ModeMigrate, false, nil)
 			x.set(func(f *facts) { allReady(f); block(f) })
 			x.evaluate()
-			if x.svc.Mode() != ModeMigrate || x.settings.mode() == string(ModeRequire) || x.restarts.Load() != 0 || x.quiesced.Load() {
-				t.Fatalf("moved past a blocker: mode=%s setting=%q restarts=%d quiesced=%t", x.svc.Mode(), x.settings.mode(), x.restarts.Load(), x.quiesced.Load())
+			if x.svc.Mode() != ModeMigrate || x.settings.mode() == string(ModeRequire) || x.switches.Load() != 0 || x.quiesced.Load() {
+				t.Fatalf("moved past a blocker: mode=%s setting=%q switches=%d quiesced=%t", x.svc.Mode(), x.settings.mode(), x.switches.Load(), x.quiesced.Load())
 			}
 			st, err := x.svc.Status(context.Background())
 			if err != nil {
@@ -218,17 +257,29 @@ func TestLadder_EachBlockingFactHoldsRequireBack(t *testing.T) {
 	}
 }
 
-// All facts true: require is persisted, intake closed, and the api restarts
-// exactly once — however many events arrive after.
-func TestLadder_AllFactsAdvanceToRequireAndRestartOnce(t *testing.T) {
+// All facts true: intake closes, require is persisted, the bus server is
+// replaced, and only then does intake reopen — in exactly that order, once,
+// however many events arrive after. The process is not asked to end.
+func TestLadder_AllFactsSwitchToRequireInOrderOnce(t *testing.T) {
 	x := newFixture(t, ModeMigrate, false, nil)
 	x.set(allReady)
-	x.evaluate()
-	if x.settings.mode() != string(ModeRequire) || x.svc.Mode() != ModeRequire {
-		t.Fatalf("setting=%q mode=%s, want require", x.settings.mode(), x.svc.Mode())
+	x.duringSwitch = func() {
+		if !x.quiesced.Load() {
+			t.Error("the bus server was replaced with job intake open")
+		}
+		if got := x.settings.mode(); got != string(ModeRequire) {
+			t.Errorf("the bus server was replaced with the setting at %q, want require recorded first", got)
+		}
+		if on, _ := x.svc.Switching(); !on {
+			t.Error("Switching() = false during the replacement: the auth-callout hold would not apply")
+		}
 	}
-	if !x.quiesced.Load() {
-		t.Fatal("restarted without closing job intake")
+	x.evaluate()
+	if want := []string{"quiesce", "persist require", "switch", "reopen"}; !slices.Equal(x.events(), want) {
+		t.Fatalf("order = %q, want %q", x.events(), want)
+	}
+	if x.settings.mode() != string(ModeRequire) || x.svc.Mode() != ModeRequire || x.quiesced.Load() {
+		t.Fatalf("setting=%q mode=%s quiesced=%t, want require with intake open", x.settings.mode(), x.svc.Mode(), x.quiesced.Load())
 	}
 	for i := 0; i < 3; i++ {
 		x.evaluate()
@@ -236,37 +287,138 @@ func TestLadder_AllFactsAdvanceToRequireAndRestartOnce(t *testing.T) {
 		x.svc.NoteDisconnect(99)
 		x.svc.Wait()
 	}
-	if got := x.restarts.Load(); got != 1 {
-		t.Fatalf("restarts = %d, want exactly 1", got)
+	if got := x.switches.Load(); got != 1 {
+		t.Fatalf("switches = %d, want exactly 1", got)
 	}
 	st, err := x.svc.Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !st.RestartPending || !st.PlaintextAllowed {
-		t.Fatalf("status = %+v, want restart pending on a server still allowing plaintext", st)
+	if st.Switching || st.PlaintextAllowed || st.SwitchFailed != "" || st.Next != "" {
+		t.Fatalf("status = %+v, want require on a server refusing plaintext, nothing pending", st)
+	}
+	if on, _ := x.svc.Switching(); on || x.noBus.Load() != 0 {
+		t.Fatalf("Switching=%t noBus=%d after a clean switch", on, x.noBus.Load())
+	}
+	if a := x.svc.Alert(time.Now()); a != nil {
+		t.Fatalf("a clean switch raised %+v", a)
 	}
 }
 
-// A process that started TLS-required never asks to restart.
+// A job submitted while the bus server is being replaced is refused with the
+// retryable error — the real job runner's intake, closed by the real
+// QuiesceIfIdle — and the same submit succeeds once the switch is over.
+func TestLadder_SubmitDuringTheSwitchIsRefusedThenAccepted(t *testing.T) {
+	ctx := context.Background()
+	store, err := jobs.OpenStore(ctx, filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	runner := jobs.NewRunner(store, startBus(t))
+	ran := make(chan struct{})
+	runner.Register(jobs.Workflow{Kind: "probe", Steps: []jobs.WorkflowStep{{Name: "noop", Do: func(*jobs.StepCtx) (json.RawMessage, error) {
+		close(ran)
+		return nil, nil
+	}}}})
+
+	x := newFixture(t, ModeMigrate, false, nil)
+	x.set(allReady)
+	x.svc.cfg.Quiesce = runner.QuiesceIfIdle
+	x.svc.cfg.Reopen = runner.Reopen
+	var during error
+	x.duringSwitch = func() { _, during = runner.Submit(ctx, "probe", nil, "test") }
+	x.evaluate()
+
+	if !errors.Is(during, jobs.ErrQuiesced) {
+		t.Fatalf("Submit during the switch = %v, want jobs.ErrQuiesced (retryable, nothing recorded)", during)
+	}
+	if n, _ := jobs.InFlight(ctx, store); len(n) != 0 {
+		t.Fatalf("the refused submit left rows in the ledger: %q", n)
+	}
+	j, err := runner.Submit(ctx, "probe", nil, "test")
+	if err != nil {
+		t.Fatalf("Submit after the switch = %v, want accepted", err)
+	}
+	select {
+	case <-ran:
+	case <-time.After(10 * time.Second): // a deadline on the fact
+		t.Fatalf("job %s accepted after the switch never ran", j.ID)
+	}
+	runner.Wait()
+}
+
+// The replacement server did not start and the bus came back as it was:
+// migrate is recorded again, intake reopens, a standing warning is raised, and
+// no event makes the api try again in this process.
+func TestLadder_SwitchFallbackReopensRecordsMigrateAndWarns(t *testing.T) {
+	x := newFixture(t, ModeMigrate, false, nil)
+	x.set(allReady)
+	x.switchErr = fmt.Errorf("%w: port in use", bus.ErrFellBack)
+	x.evaluate()
+	if want := []string{"quiesce", "persist require", "switch", "persist migrate", "reopen"}; !slices.Equal(x.events(), want) {
+		t.Fatalf("order = %q, want %q", x.events(), want)
+	}
+	if x.settings.mode() != string(ModeMigrate) || x.svc.Mode() != ModeMigrate || x.quiesced.Load() || x.noBus.Load() != 0 {
+		t.Fatalf("setting=%q mode=%s quiesced=%t noBus=%d, want migrate, intake open, the bus still there", x.settings.mode(), x.svc.Mode(), x.quiesced.Load(), x.noBus.Load())
+	}
+	a := x.svc.Alert(time.Now())
+	if a == nil || a.ID != SwitchFailedAlertID || a.Severity != proto.AlertWarn || a.Source != proto.AlertSourceSecurity || !strings.Contains(a.Detail, "port in use") {
+		t.Fatalf("Alert = %+v, want a %s security warning naming the cause", a, SwitchFailedAlertID)
+	}
+	st, err := x.svc.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.PlaintextAllowed || st.Switching || !strings.Contains(st.SwitchFailed, "port in use") || len(st.Blockers) != 1 {
+		t.Fatalf("status = %+v, want plaintext allowed, the failure named as the one blocker", st)
+	}
+	for i := 0; i < 3; i++ {
+		x.svc.OnRegistered(context.Background(), node("n1", proto.StatusOnline, true))
+		x.svc.NoteDisconnect(99)
+		x.evaluate()
+	}
+	if got := x.switches.Load(); got != 1 {
+		t.Fatalf("switches = %d after a fallback and more events, want 1 (no retry loop)", got)
+	}
+}
+
+// No bus at all after the switch: the api is told (it ends the process as a
+// bus that fails at boot does), and intake is not reopened onto no bus.
+func TestLadder_NoBusAfterTheSwitchIsReported(t *testing.T) {
+	x := newFixture(t, ModeMigrate, false, nil)
+	x.set(allReady)
+	x.switchErr = errors.New("bus: NO BUS: nothing starts")
+	x.evaluate()
+	if x.noBus.Load() != 1 || x.reopens.Load() != 0 || !x.quiesced.Load() {
+		t.Fatalf("noBus=%d reopens=%d quiesced=%t, want NoBus once and intake still closed", x.noBus.Load(), x.reopens.Load(), x.quiesced.Load())
+	}
+	x.evaluate()
+	if x.switches.Load() != 1 {
+		t.Fatalf("switches = %d, want 1", x.switches.Load())
+	}
+}
+
+// A process that started TLS-required never switches.
 func TestLadder_RequireAtStartIsTerminal(t *testing.T) {
 	x := newFixture(t, ModeRequire, false, nil)
 	x.set(allReady)
 	x.evaluate()
-	if x.restarts.Load() != 0 || x.quiesced.Load() {
-		t.Fatalf("restarted from require: restarts=%d quiesced=%t", x.restarts.Load(), x.quiesced.Load())
+	if x.switches.Load() != 0 || x.quiesced.Load() {
+		t.Fatalf("switched from require: switches=%d quiesced=%t", x.switches.Load(), x.quiesced.Load())
 	}
 }
 
-// If require cannot be persisted the api does not restart (it would come back
-// allowing plaintext and try again forever), and job intake reopens.
-func TestLadder_PersistFailureReopensIntakeAndDoesNotRestart(t *testing.T) {
+// If require cannot be persisted the bus is not switched (the record would say
+// migrate while the server refuses plaintext, and a restart would undo it),
+// and job intake reopens.
+func TestLadder_PersistFailureReopensIntakeAndDoesNotSwitch(t *testing.T) {
 	x := newFixture(t, ModeMigrate, false, nil)
 	x.set(allReady)
 	x.settings.failSet = errors.New("disk full")
 	x.evaluate()
-	if x.restarts.Load() != 0 || x.reopens.Load() != 1 || x.svc.Mode() != ModeMigrate {
-		t.Fatalf("restarts=%d reopens=%d mode=%s, want no restart, intake reopened, still migrate", x.restarts.Load(), x.reopens.Load(), x.svc.Mode())
+	if x.switches.Load() != 0 || x.reopens.Load() != 1 || x.svc.Mode() != ModeMigrate {
+		t.Fatalf("switches=%d reopens=%d mode=%s, want no switch, intake reopened, still migrate", x.switches.Load(), x.reopens.Load(), x.svc.Mode())
 	}
 }
 
@@ -279,8 +431,8 @@ func TestLadder_FreshPinnedClusterGoesStraightToRequire(t *testing.T) {
 		f.nodes = []*proto.Node{node("cp1", proto.StatusOnline, true)}
 	})
 	x.evaluate()
-	if x.settings.mode() != string(ModeRequire) || x.restarts.Load() != 1 {
-		t.Fatalf("setting=%q restarts=%d, want require after one evaluation", x.settings.mode(), x.restarts.Load())
+	if x.settings.mode() != string(ModeRequire) || x.switches.Load() != 1 {
+		t.Fatalf("setting=%q switches=%d, want require after one evaluation", x.settings.mode(), x.switches.Load())
 	}
 }
 
@@ -290,7 +442,7 @@ func TestLadder_PinnedModeNeverMovesAndWarns(t *testing.T) {
 	x := newFixture(t, ModeOffer, true, nil)
 	x.set(allReady)
 	x.evaluate()
-	if x.svc.Mode() != ModeOffer || x.settings.mode() != "" || x.restarts.Load() != 0 {
+	if x.svc.Mode() != ModeOffer || x.settings.mode() != "" || x.switches.Load() != 0 {
 		t.Fatalf("a pinned mode moved: mode=%s setting=%q", x.svc.Mode(), x.settings.mode())
 	}
 	a := x.svc.Alert(time.Now())
@@ -315,13 +467,20 @@ func TestLadder_DisconnectEventOutranksAStaleListing(t *testing.T) {
 		f.plain = []bus.PlaintextClient{{CID: 42, User: "n1", IP: "127.0.0.1"}}
 	})
 	x.evaluate()
-	if x.restarts.Load() != 0 {
-		t.Fatal("restarted with a plaintext connection listed")
+	if x.switches.Load() != 0 {
+		t.Fatal("switched with a plaintext connection listed")
 	}
 	x.svc.NoteDisconnect(42)
 	x.svc.Wait()
-	if x.restarts.Load() != 1 {
-		t.Fatalf("restarts = %d after the last plaintext connection's disconnect, want 1", x.restarts.Load())
+	if x.switches.Load() != 1 {
+		t.Fatalf("switches = %d after the last plaintext connection's disconnect, want 1", x.switches.Load())
+	}
+	// A switch clears the noted ids: the new server numbers connections anew.
+	x.svc.mu.Lock()
+	noted := len(x.svc.closedCIDs)
+	x.svc.mu.Unlock()
+	if noted != 0 {
+		t.Fatalf("closed ids kept across the switch: %d", noted)
 	}
 	x.set(func(f *facts) { f.plain = nil })
 	if _, err := x.svc.openPlaintext(); err != nil {
@@ -429,8 +588,8 @@ func TestLadder_JobEndIsATrigger(t *testing.T) {
 	}
 	t.Cleanup(x.svc.Stop)
 	x.svc.Wait()
-	if x.restarts.Load() != 0 {
-		t.Fatal("restarted with a job in flight")
+	if x.switches.Load() != 0 {
+		t.Fatal("switched with a job in flight")
 	}
 
 	x.set(func(f *facts) { f.inFlight = nil })
@@ -439,11 +598,33 @@ func TestLadder_JobEndIsATrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-x.restarted:
+	case <-x.switched:
 	case <-time.After(10 * time.Second): // deadline on the fact, not a sync sleep
-		t.Fatalf("no restart after the job-end event (restarts=%d)", x.restarts.Load())
+		t.Fatalf("no switch after the job-end event (switches=%d)", x.switches.Load())
 	}
-	if x.restarts.Load() != 1 {
-		t.Fatalf("restarts = %d after the job-end event, want 1", x.restarts.Load())
+	if x.switches.Load() != 1 {
+		t.Fatalf("switches = %d after the job-end event, want 1", x.switches.Load())
 	}
+}
+
+// Wait is "every evaluation and delivery started so far has finished", and it
+// is called while events keep arriving — the functional test calls it with
+// agents still registering. Kicks racing a Wait must be safe. (A sync.WaitGroup
+// is not: an Add from zero concurrent with Wait is a data race, and the race
+// detector caught exactly that, 1 run in 20, in TestFunctional_AutomaticLadder.)
+func TestService_WaitWithConcurrentKicks(t *testing.T) {
+	x := newFixture(t, ModeOffer, false, nil)
+	x.set(func(f *facts) { f.committed = false })
+	var kickers sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		kickers.Add(1)
+		go func() {
+			defer kickers.Done()
+			x.svc.Kick("concurrent")
+			x.svc.OnRegistered(context.Background(), node("n1", proto.StatusOnline, true))
+		}()
+		x.svc.Wait()
+	}
+	kickers.Wait()
+	x.svc.Wait()
 }
