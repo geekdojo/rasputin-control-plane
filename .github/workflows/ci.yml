@@ -262,7 +262,9 @@ jobs:
     # port disappears on the next Start with no manual step, the container ends
     # up with no TCP listener at all, a non-owner uid is refused by the 0700
     # directory and by the 0600 socket on its own, the api's dashboards still
-    # render, and `admin` is no longer a server admin.
+    # render, and `admin` is no longer a server admin. A second step puts the
+    # api's real /observability/ proxy in front of it and proves the UI still
+    # renders: pages, static assets, API calls, and the Live websocket.
     #
     # It runs under sudo because that is the appliance: the api is root there,
     # so the socket directory is chowned to Grafana's own uid (472) and the
@@ -303,6 +305,24 @@ jobs:
             RASPUTIN_GRAFANA_FUNCTIONAL=required \
             PATH="$PATH" \
             "$RUNNER_TEMP/obs.test" -test.v -test.count=1 -test.timeout=25m
+
+      - name: build the api test binary
+        run: go test -c -race -o "$RUNNER_TEMP/api.test" ./api/internal/api
+
+      - name: the UI still renders Grafana through the api proxy (as root)
+        # The browser only ever reaches Grafana through the api's
+        # /observability/ reverse proxy, now over the socket. This drives the
+        # REAL proxy handler against the REAL Grafana: the app shell and every
+        # static asset it references, a dashboard page, the API calls the UI
+        # makes (incl. a panel query), and a Grafana Live websocket carried
+        # through to a Live connect reply. Run after the obs step, never in
+        # parallel with it: the compose template pins container names.
+        run: |
+          sudo env \
+            RASPUTIN_GRAFANA_FUNCTIONAL=required \
+            PATH="$PATH" \
+            "$RUNNER_TEMP/api.test" -test.v -test.count=1 -test.timeout=15m \
+              -test.run 'TestObsProxyGrafanaUI_OverSocket'
 
   frontend:
     # ⚠️ This name is an API, not a label. `main`'s branch protection lists it

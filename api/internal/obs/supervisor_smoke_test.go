@@ -289,16 +289,18 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 			t.Errorf("/api/user with no header = %d, want 401", resp.StatusCode)
 		}
 
-		// Provisioning landed — the dashboards the operator sees. Polled:
-		// /api/health answers before the file provisioner has indexed them.
-		deadline := time.Now().Add(60 * time.Second)
+		// Provisioning landed — the dashboards the operator sees. Polled
+		// for up to 120s: on a fresh Grafana DB a request during first boot
+		// can hide the dashboard for a fixed 60s (measured; see
+		// starterDashboardDeadline in grafana_functional_linux_test.go).
+		deadline := time.Now().Add(120 * time.Second)
 		for {
 			resp, body := get("/api/search?type=dash-db", "smoke-operator")
 			if resp.StatusCode == http.StatusOK && strings.Contains(body, "Cluster Overview") {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("starter dashboard not searchable after 60s: %d %s", resp.StatusCode, body)
+				t.Fatalf("starter dashboard not searchable after 120s: %d %s", resp.StatusCode, body)
 			}
 			time.Sleep(500 * time.Millisecond)
 		}

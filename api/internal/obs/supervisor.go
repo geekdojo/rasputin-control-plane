@@ -1077,7 +1077,10 @@ socket_mode = 0600
 http_port = 3000
 {{- end }}
 domain = localhost
-root_url = %(protocol)s://%(domain)s/observability/
+# NOT %(protocol)s: with protocol = socket that expands to "socket://", and
+# Grafana hands root_url to the frontend as appUrl (share links, redirects).
+# Pinned to the value it always had over TCP.
+root_url = http://%(domain)s/observability/
 serve_from_sub_path = true
 
 [security]

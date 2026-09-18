@@ -13,10 +13,13 @@
 //     any X-Webauth-User value, including `admin`?
 //  3. Do the api's dashboards still work over the socket?
 //
-// Requires Linux + a working docker. Skipped otherwise, unless
-// RASPUTIN_GRAFANA_FUNCTIONAL=required, which turns every skip into a
-// failure — that is what CI sets, so the test can never quietly stop running.
-// Same shape as the agent's caddy_functional_linux_test.go (PR #329).
+// Opt-in: runs only when RASPUTIN_GRAFANA_FUNCTIONAL is set, and needs Linux
+// plus a working docker. "required" turns every skip into a failure — that is
+// what CI sets, so the test can never quietly stop running. Opt-in rather than
+// "whenever docker is present" because the compose template pins
+// container_name, so this and the api package's proxy test would collide if
+// `go test ./...` ran them in parallel on a dev box; CI runs them in
+// sequence. Same shape as the agent's caddy_functional_linux_test.go (#329).
 
 package obs
 
@@ -60,6 +63,9 @@ func skipOrFail(t *testing.T, format string, args ...any) {
 
 func requireDocker(t *testing.T) {
 	t.Helper()
+	if os.Getenv("RASPUTIN_GRAFANA_FUNCTIONAL") == "" {
+		t.Skip("set RASPUTIN_GRAFANA_FUNCTIONAL=1 to run (needs docker; see file comment)")
+	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		skipOrFail(t, "docker not on PATH: %v", err)
 	}
@@ -209,15 +215,24 @@ func containerTCPListeners(t *testing.T, container string) []string {
 	return held
 }
 
+// starterDashboardDeadline bounds waitForStarterDashboard. Derived from
+// measurement, not picked: on a FRESH Grafana 11.5.1 database, a request that
+// lands during first boot can leave the provisioned dashboard invisible to
+// every user — including one created later — for a fixed 60s, after which it
+// appears. Measured 2026-09-17: 4 of 6 racing trials recovered at exactly 60s,
+// the other 2 at 0s; with main's config (initial admin on) the same thing
+// happens, so it predates the socket change. A 60s deadline sat exactly on
+// that boundary and failed once in 20 runs at 65s; 120s is twice the
+// measured fixed window.
+const starterDashboardDeadline = 120 * time.Second
+
 // waitForStarterDashboard polls until the provisioned starter dashboard is
-// searchable, with a hard deadline. Grafana answers /api/health before its
-// file provisioner has indexed the dashboards, so a single read straight
-// after Start can see `[]` (observed: 1 run in 5). What is under test is that
-// provisioning still happens over the socket — an eventual property — not
-// that it has happened by an arbitrary instant.
+// searchable, with a hard deadline (starterDashboardDeadline). What is under
+// test is that provisioning still happens over the socket — an eventual
+// property — not that it has happened by the instant Start returns.
 func waitForStarterDashboard(t *testing.T, sup *DockerComposeSupervisor, user string) {
 	t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(starterDashboardDeadline)
 	var code int
 	var body string
 	for {
@@ -226,7 +241,19 @@ func waitForStarterDashboard(t *testing.T, sup *DockerComposeSupervisor, user st
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("starter dashboard not searchable after 60s: %d %s", code, body)
+			logs, _ := exec.Command("docker", "logs", "--tail", "200", grafanaFuncContainer).CombinedOutput()
+			var ls []string
+			for _, l := range strings.Split(string(logs), "\n") {
+				ll := strings.ToLower(l)
+				if strings.Contains(ll, "provision") || strings.Contains(ll, "level=error") ||
+					strings.Contains(ll, "dashboard") {
+					ls = append(ls, l)
+				}
+			}
+			files, _ := exec.Command("docker", "exec", grafanaFuncContainer, "ls", "-la",
+				"/var/lib/grafana/dashboards", "/etc/grafana/provisioning/dashboards").CombinedOutput()
+			t.Fatalf("starter dashboard not searchable after %s: %d %s\n--- grafana log (filtered) ---\n%s\n--- files ---\n%s",
+				starterDashboardDeadline, code, body, strings.Join(ls, "\n"), files)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}

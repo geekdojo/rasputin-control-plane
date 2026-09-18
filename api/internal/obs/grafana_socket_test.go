@@ -50,7 +50,7 @@ func TestGrafanaIni_SocketMode(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	for _, want := range []string{
-		"protocol = socket",
+		"\nprotocol = socket\n",
 		"socket = " + grafanaContainerSocketPath,
 		"socket_mode = 0600",
 		"disable_initial_admin_creation = true",
@@ -59,6 +59,10 @@ func TestGrafanaIni_SocketMode(t *testing.T) {
 		"[auth.proxy]",
 		"enabled = true",
 		"header_name = X-Webauth-User",
+		// The UI's generated URLs must not become socket://… — see the
+		// comment in grafanaIniTmpl.
+		"root_url = http://%(domain)s/observability/",
+		"serve_from_sub_path = true",
 	} {
 		if !strings.Contains(ini, want) {
 			t.Errorf("grafana.ini missing %q\n---\n%s", want, ini)
@@ -93,7 +97,8 @@ func TestGrafanaIni_TCPFallbackStillHasNoAdminAccount(t *testing.T) {
 	if !strings.Contains(ini, "http_port = 3000") {
 		t.Errorf("TCP fallback should keep http_port\n---\n%s", ini)
 	}
-	if strings.Contains(ini, "protocol = socket") {
+	// Line-anchored: the template's comments mention the phrase.
+	if strings.Contains(ini, "\nprotocol = socket\n") {
 		t.Errorf("TCP fallback should not claim socket protocol\n---\n%s", ini)
 	}
 	// The admin account is gone on every platform — it is not part of the
