@@ -153,8 +153,13 @@ func TestEnsureAgentToken_ReMints(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "empty"},
+		// s.revoke, not Revoke: the operator route now refuses this very token
+		// (ErrSelfAgentToken, TestRevoke_RefusesTheSelfAgentToken). What is
+		// simulated here is a row that IS revoked in the database — left that
+		// way by a re-mint whose file write then failed, or arriving revoked
+		// in a restored database — which must still re-mint cleanly.
 		{"revoked", func(t *testing.T, s *Store, path string) {
-			if _, err := s.Revoke(context.Background(), HashToken(readTokenFile(t, path))); err != nil {
+			if _, err := s.revoke(context.Background(), HashToken(readTokenFile(t, path))); err != nil {
 				t.Fatal(err)
 			}
 		}, "not a live token"},

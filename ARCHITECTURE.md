@@ -81,7 +81,9 @@ comes from: the controlplane's own co-located agent presents a token bound to
 its node id too, which the api mints into `/var/lib/rasputin/bus/agent.token`
 at every start (and re-mints when it stops validating, as after an identity
 restore), and the agent reads that file on every connect. Nobody provisions
-it.
+it — and nobody can revoke it: the api only mints at start, so revoking that
+one token would take the controlplane's own agent off the bus until a restart,
+and every route that could is refused with a 409.
 
 The bus server offers **TLS with a dedicated bus key**, and nodes trust it by
 **pin**: the SHA-256 of that key, carried in their seed as `RASPUTIN_BUS_PIN`

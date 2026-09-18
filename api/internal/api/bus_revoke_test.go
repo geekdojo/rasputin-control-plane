@@ -215,6 +215,23 @@ func TestBusRevoke_ForceDisconnectsLiveSessions(t *testing.T) {
 		}
 	}
 
+	// geekdojo-brain#140: the one revoke the api refuses. Proven here rather
+	// than only at the handler, because the claim is about the bus — the
+	// controlplane's agent must still be ON it afterwards.
+	t.Run("revoking the controlplane's own agent token is refused and its session survives", func(t *testing.T) {
+		cpID := busauth.HashToken(strings.TrimSpace(string(cpToken)))
+		w := f.do(t, http.MethodDelete, "/api/bus/tokens/"+cpID, "", cookie)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("revoke of the controlplane agent's token = %d %s, want 409", w.Code, w.Body.String())
+		}
+		assertLive(t, busSrv, cp)
+		assertLive(t, busSrv, a)
+		assertLive(t, busSrv, b)
+		// Still a working credential: a fresh connection with it is admitted.
+		again := dialAgent(t, busURL, "cp-1", strings.TrimSpace(string(cpToken)))
+		again.nc.Close()
+	})
+
 	t.Run("API revoke closes the token's live session and its reconnect is refused", func(t *testing.T) {
 		w := f.do(t, http.MethodDelete, "/api/bus/tokens/"+idA, "", cookie)
 		if w.Code != http.StatusOK {

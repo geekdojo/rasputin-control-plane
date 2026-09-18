@@ -15,7 +15,8 @@ import (
 
 // Bus join-token management. The plaintext token is returned exactly once at
 // mint time (like mesh preauth keys); thereafter only secret-free metadata is
-// listable. Agents present a token as NATS username=node-id, password=token;
+// listable. One token is not revocable at all: the one the api minted for this
+// controlplane's own agent, which the list marks `selfAgent` (#140). Agents present a token as NATS username=node-id, password=token;
 // the auth-callout responder validates it. See internal/busauth.
 
 func (s *Server) handleListBusTokens(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +132,15 @@ func (s *Server) handleRevokeBusToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "no live token with that id")
+			return
+		}
+		// The controlplane's own agent token (geekdojo-brain#140). 409, not
+		// 403: the request is well-formed and the caller is authorised — the
+		// state of this particular token is what makes it refusable, and the
+		// same conflict answers the UI's "cancel this pending enrollment",
+		// which is this route too. The message says what to do instead.
+		if errors.Is(err, busauth.ErrSelfAgentToken) {
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
