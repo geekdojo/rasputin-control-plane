@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -57,13 +56,7 @@ func grafanaPost(t *testing.T, sup *DockerComposeSupervisor, path, webauthUser, 
 // dashboard provider from today.
 func legacyGrafanaProvisioning(t *testing.T) []grafanaFile {
 	t.Helper()
-	read := func(name string) string {
-		b, err := os.ReadFile(filepath.Join(legacyGrafanaDir, name))
-		if err != nil {
-			t.Fatalf("read legacy %s: %v", name, err)
-		}
-		return string(b)
-	}
+	read := func(name string) string { return string(readLegacyGrafana(t, name)) }
 	return []grafanaFile{
 		{grafanaDatasourcesPath, read("datasources.yaml")},
 		{grafanaDashboardsPath, grafanaDashboardsYAML},

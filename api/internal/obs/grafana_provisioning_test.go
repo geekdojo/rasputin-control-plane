@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,10 +19,25 @@ import (
 // PBFA97CFB590B2093 was not found". Nothing checked the reference against the
 // provisioning. These tests do, for every dashboard the api provisions.
 
-// legacyGrafanaDir holds the provisioning files exactly as they shipped
+// legacyGrafanaFS holds the provisioning files exactly as they shipped
 // before the fix (copied from origin/main 2b0bd8c). Used to prove the check
 // catches the bug, and by the functional transition test as the "before".
+// Embedded, not read from disk: CI runs the compiled test binary from the
+// repo root, where a relative testdata path does not resolve.
+//
+//go:embed testdata/grafana-pre-2026-09-18
+var legacyGrafanaFS embed.FS
+
 const legacyGrafanaDir = "testdata/grafana-pre-2026-09-18"
+
+func readLegacyGrafana(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := legacyGrafanaFS.ReadFile(legacyGrafanaDir + "/" + name)
+	if err != nil {
+		t.Fatalf("read legacy %s: %v", name, err)
+	}
+	return b
+}
 
 type provisionedDatasource struct {
 	Name      string `yaml:"name"`
@@ -313,14 +329,8 @@ func TestProvisionedDashboards_EveryDatasourceRefResolves(t *testing.T) {
 // The check catches the shipped bug: run against the pre-fix files it
 // reports every panel's reference to PBFA97CFB590B2093.
 func TestProvisionedDashboards_CheckCatchesPreFixDashboard(t *testing.T) {
-	dsBody, err := os.ReadFile(filepath.Join(legacyGrafanaDir, "datasources.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dash, err := os.ReadFile(filepath.Join(legacyGrafanaDir, "cluster-overview.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	dsBody := readLegacyGrafana(t, "datasources.yaml")
+	dash := readLegacyGrafana(t, "cluster-overview.json")
 	bad, checked, err := unresolvedDatasourceRefs(dash, parseDatasources(t, dsBody))
 	if err != nil {
 		t.Fatal(err)
