@@ -66,18 +66,24 @@ func legacyGrafanaProvisioning(t *testing.T) []grafanaFile {
 
 // seedClusterMetrics writes two nodes' worth of the rasputin_* series the
 // starter dashboard plots straight into VictoriaMetrics, then waits for the
-// checkable fact that VM serves them. The samples are stamped a minute in
-// the past so VM's search latency offset does not hide them.
+// checkable fact that VM serves them. The newest sample is 30s old so VM's
+// search latency offset does not hide it.
 func seedClusterMetrics(t *testing.T, sup *DockerComposeSupervisor) {
 	t.Helper()
-	ts := time.Now().Add(-time.Minute).UnixMilli()
+	// A sample every 10s for the last five minutes, ending 30s back, as an
+	// agent reports: VictoriaMetrics gives a lone sample a short lookbehind,
+	// so a range query would see it at one step only (measured on v1.103.0).
+	now := time.Now()
 	var b bytes.Buffer
-	for _, n := range []struct {
-		id       string
-		cpu, mem float64
-	}{{"func-a", 12.5, 1.5e9}, {"func-b", 30, 2.5e9}} {
-		fmt.Fprintf(&b, "rasputin_cpu_percent{nodeId=%q} %g %d\n", n.id, n.cpu, ts)
-		fmt.Fprintf(&b, "rasputin_mem_used_bytes{nodeId=%q} %g %d\n", n.id, n.mem, ts)
+	for i := 3; i <= 30; i++ {
+		ts := now.Add(-time.Duration(i) * 10 * time.Second).UnixMilli()
+		for _, n := range []struct {
+			id       string
+			cpu, mem float64
+		}{{"func-a", 12.5, 1.5e9}, {"func-b", 30, 2.5e9}} {
+			fmt.Fprintf(&b, "rasputin_cpu_percent{nodeId=%q} %g %d\n", n.id, n.cpu, ts)
+			fmt.Fprintf(&b, "rasputin_mem_used_bytes{nodeId=%q} %g %d\n", n.id, n.mem, ts)
+		}
 	}
 	c := &http.Client{Timeout: 10 * time.Second}
 	resp, err := c.Post(sup.VMBaseURL()+"/api/v1/import/prometheus", "text/plain", &b)
@@ -93,12 +99,19 @@ func seedClusterMetrics(t *testing.T, sup *DockerComposeSupervisor) {
 	deadline := time.Now().Add(90 * time.Second)
 	var last string
 	for {
-		r, err := c.Get(sup.VMBaseURL() + "/api/v1/query?query=count(rasputin_cpu_percent)")
+		// The fact the panels read: a RANGE query of the panels' shape whose
+		// newest point counts every seeded node. An instant query is not
+		// enough — right after an import VM answers instant queries with the
+		// new series while range queries still miss them for a moment
+		// (measured on v1.103.0: instant 2, range 1).
+		end := time.Now().Unix()
+		r, err := c.Get(fmt.Sprintf("%s/api/v1/query_range?query=count(rasputin_cpu_percent)&start=%d&end=%d&step=15",
+			sup.VMBaseURL(), end-900, end))
 		if err == nil {
 			body, _ := io.ReadAll(r.Body)
 			_ = r.Body.Close()
 			last = string(body)
-			if strings.Contains(last, `"2"]`) {
+			if rangeLastValueIs(last, fmt.Sprint(2)) {
 				return
 			}
 		} else {
@@ -117,6 +130,7 @@ type panelQuery struct {
 	dsType  string
 	expr    string
 	legend  string
+	instant bool
 	isCount bool
 }
 
@@ -140,19 +154,36 @@ func dashboardPanelQueries(t *testing.T, sup *DockerComposeSupervisor, user stri
 				Targets []struct {
 					Expr         string `json:"expr"`
 					LegendFormat string `json:"legendFormat"`
+					Instant      bool   `json:"instant"`
 				} `json:"targets"`
 			} `json:"panels"`
+			Templating struct {
+				List []struct {
+					Name     string `json:"name"`
+					AllValue string `json:"allValue"`
+				} `json:"list"`
+			} `json:"templating"`
 		} `json:"dashboard"`
 	}
 	if err := json.Unmarshal([]byte(body), &model); err != nil {
 		t.Fatalf("dashboard model json: %v", err)
+	}
+	// The dashboard as opened directly: every variable at "All", which
+	// Grafana's frontend interpolates as the variable's allValue before
+	// the query reaches /api/ds/query (the backend does not interpolate).
+	allOf := func(expr string) string {
+		for _, v := range model.Dashboard.Templating.List {
+			expr = strings.ReplaceAll(expr, "${"+v.Name+"}", v.AllValue)
+			expr = strings.ReplaceAll(expr, "$"+v.Name, v.AllValue)
+		}
+		return expr
 	}
 	var out []panelQuery
 	for _, p := range model.Dashboard.Panels {
 		for _, tg := range p.Targets {
 			out = append(out, panelQuery{
 				title: p.Title, dsUID: p.Datasource.UID, dsType: p.Datasource.Type,
-				expr: tg.Expr, legend: tg.LegendFormat,
+				expr: allOf(tg.Expr), legend: tg.LegendFormat, instant: tg.Instant,
 				isCount: strings.HasPrefix(tg.Expr, "count("),
 			})
 		}
@@ -173,7 +204,8 @@ func runPanelQuery(t *testing.T, sup *DockerComposeSupervisor, user string, q pa
 			"datasource":    map[string]string{"uid": q.dsUID, "type": q.dsType},
 			"expr":          q.expr,
 			"legendFormat":  q.legend,
-			"range":         true,
+			"range":         !q.instant,
+			"instant":       q.instant,
 			"intervalMs":    15000,
 			"maxDataPoints": 100,
 		}},
@@ -444,4 +476,24 @@ func grafanaProvisioningDiagnostics(dbPath string) string {
 		}
 	}
 	return b.String()
+}
+
+// rangeLastValueIs reports whether a Prometheus query_range response has
+// exactly one series whose newest point is want.
+func rangeLastValueIs(body, want string) bool {
+	var resp struct {
+		Data struct {
+			Result []struct {
+				Values [][]any `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(body), &resp) != nil || len(resp.Data.Result) != 1 {
+		return false
+	}
+	v := resp.Data.Result[0].Values
+	if len(v) == 0 || len(v[len(v)-1]) != 2 {
+		return false
+	}
+	return v[len(v)-1][1] == want
 }
