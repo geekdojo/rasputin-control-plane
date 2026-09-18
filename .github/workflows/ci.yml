@@ -266,6 +266,12 @@ jobs:
     # api's real /observability/ proxy in front of it and proves the UI still
     # renders: pages, static assets, API calls, and the Live websocket.
     #
+    # The same steps prove the starter dashboard's panels return data: each
+    # panel's own query, with its own datasource reference, against seeded
+    # series in the real VictoriaMetrics — on a fresh install and on an
+    # existing cluster whose Grafana DB holds the pre-fix, name-derived
+    # datasource uid (grafana_datasource_functional_linux_test.go).
+    #
     # It runs under sudo because that is the appliance: the api is root there,
     # so the socket directory is chowned to Grafana's own uid (472) and the
     # container keeps its unprivileged user. RASPUTIN_GRAFANA_FUNCTIONAL=required
