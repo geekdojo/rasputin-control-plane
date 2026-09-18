@@ -2309,6 +2309,12 @@ func splitCSV(s string) []string {
 //	                              before refusing writes. Default "2GB".
 //	RASPUTIN_OBS_LOKI_RETENTION — how long logs are kept. Default "720h" (30d).
 //
+// RASPUTIN_OBS_ALLOY_LISTEN is GONE. Alloy's debug server is no longer
+// published to the host at all — nothing read it, and it has no
+// authentication (geekdojo-brain#452). RASPUTIN_OBS_GRAFANA_LISTEN survives
+// only for non-Linux developer hosts; on Linux Grafana serves on a unix
+// socket and has no TCP listener to bind (geekdojo-brain#453).
+//
 // Side effect: when the stored setting says on, this starts the stack in the
 // background and calls metricsSvc.SetSink so every received MetricsEvt fans
 // out to VM after the SQLite insert.
@@ -2318,21 +2324,23 @@ func mustWireObs(ctx context.Context, dataDir, selfNodeID string, metricsSvc *me
 		log.Fatalf("rasputin-api: obs state dir: %v", err)
 	}
 	sup, err := obs.NewDockerComposeSupervisor(obs.DockerComposeSupervisorConfig{
-		StateDir:            stateDir,
-		ControlPlaneNodeID:  selfNodeID,
-		DockerBin:           obsDockerBin(),
-		VMImage:             os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
-		VMListenAddr:        os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
-		VMRetention:         os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
-		VMMinFreeDiskSpace:  os.Getenv("RASPUTIN_OBS_VM_MIN_FREE_DISK"),
-		AlloyImage:          os.Getenv("RASPUTIN_OBS_ALLOY_IMAGE"),
-		AlloyListenAddr:     os.Getenv("RASPUTIN_OBS_ALLOY_LISTEN"),
-		EnableCadvisor:      envBoolPtr("RASPUTIN_OBS_ALLOY_CADVISOR"),
-		LokiImage:           os.Getenv("RASPUTIN_OBS_LOKI_IMAGE"),
-		LokiListenAddr:      os.Getenv("RASPUTIN_OBS_LOKI_LISTEN"),
-		LokiRetention:       os.Getenv("RASPUTIN_OBS_LOKI_RETENTION"),
-		EnableLoki:          envBoolPtr("RASPUTIN_OBS_LOKI"),
-		GrafanaImage:        os.Getenv("RASPUTIN_OBS_GRAFANA_IMAGE"),
+		StateDir:           stateDir,
+		ControlPlaneNodeID: selfNodeID,
+		DockerBin:          obsDockerBin(),
+		VMImage:            os.Getenv("RASPUTIN_OBS_VM_IMAGE"),
+		VMListenAddr:       os.Getenv("RASPUTIN_OBS_VM_LISTEN"),
+		VMRetention:        os.Getenv("RASPUTIN_OBS_VM_RETENTION"),
+		VMMinFreeDiskSpace: os.Getenv("RASPUTIN_OBS_VM_MIN_FREE_DISK"),
+		AlloyImage:         os.Getenv("RASPUTIN_OBS_ALLOY_IMAGE"),
+		EnableCadvisor:     envBoolPtr("RASPUTIN_OBS_ALLOY_CADVISOR"),
+		LokiImage:          os.Getenv("RASPUTIN_OBS_LOKI_IMAGE"),
+		LokiListenAddr:     os.Getenv("RASPUTIN_OBS_LOKI_LISTEN"),
+		LokiRetention:      os.Getenv("RASPUTIN_OBS_LOKI_RETENTION"),
+		EnableLoki:         envBoolPtr("RASPUTIN_OBS_LOKI"),
+		GrafanaImage:       os.Getenv("RASPUTIN_OBS_GRAFANA_IMAGE"),
+		// RASPUTIN_OBS_GRAFANA_LISTEN only has an effect on a non-Linux
+		// developer host, where Grafana cannot bind a unix socket. On a
+		// controlplane there is no Grafana TCP listener to move.
 		GrafanaListenAddr:   os.Getenv("RASPUTIN_OBS_GRAFANA_LISTEN"),
 		EnableGrafana:       envBoolPtr("RASPUTIN_OBS_GRAFANA"),
 		VMAlertImage:        os.Getenv("RASPUTIN_OBS_VMALERT_IMAGE"),

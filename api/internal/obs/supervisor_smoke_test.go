@@ -39,9 +39,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -206,48 +209,110 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 		}
 	})
 
-	t.Run("Grafana_ReachableAndProvisioned", func(t *testing.T) {
-		// Grafana's /api/health is unauthenticated. The presence of the
-		// VictoriaMetrics datasource (auto-provisioned at startup)
-		// requires admin auth, which we don't want to bake into the
-		// smoke test — instead just confirm Grafana is up and that
-		// the provisioned dashboard JSON is served (Grafana exposes
-		// it at /api/search?folderIds=…&type=dash-db which also
-		// requires auth, so we use the basic-auth admin credentials
-		// from the rendered grafana.ini).
+	t.Run("Grafana_ReachableByTheApiAndNobodyElse", func(t *testing.T) {
+		// This subtest used to assert the bug. It sent
+		// `X-Webauth-User: smoke-operator` to Grafana's HOST BIND and
+		// asserted 200 — a passing test whose passing was
+		// geekdojo-brain#453: any local caller could authenticate as
+		// anyone by setting one header. What it should have been
+		// exercising is the api's path, and what it must now assert is
+		// that everything else is refused.
 		base := sup.GrafanaBaseURL()
 		if base == "" {
 			t.Fatal("GrafanaBaseURL empty")
 		}
-		// /api/health is open.
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/health", nil)
-		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-		if err != nil {
-			t.Fatalf("/api/health: %v", err)
+		client := &http.Client{Timeout: 10 * time.Second}
+		if tr := sup.GrafanaTransport(); tr != nil {
+			client.Transport = tr
 		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
+		get := func(path, user string) (*http.Response, string) {
+			t.Helper()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+			if err != nil {
+				t.Fatalf("new request %s: %v", path, err)
+			}
+			if user != "" {
+				req.Header.Set("X-Webauth-User", user)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return resp, string(body)
+		}
+
+		// Before ANY request to Grafana: wait for it to commit the
+		// provisioned dashboard (see waitForProvisionedDashboardRow for why
+		// a fact and not a timeout).
+		waitForProvisionedDashboardRow(t, stateDir, 3*time.Minute)
+
+		if runtime.GOOS == "linux" && sup.GrafanaSocketPath() == "" {
+			t.Fatal("on Linux Grafana must serve on a unix socket, not a published port " +
+				"(geekdojo-brain#453)")
+		}
+
+		if path := sup.GrafanaSocketPath(); path != "" {
+			// The socket is the control, so check it rather than trusting
+			// the config that asked for it.
+			fi, err := os.Lstat(path)
+			if err != nil {
+				t.Fatalf("stat grafana socket: %v", err)
+			}
+			if fi.Mode()&os.ModeSocket == 0 {
+				t.Fatalf("%s is not a socket: %v", path, fi.Mode())
+			}
+			if got := fi.Mode().Perm(); got != 0o600 {
+				t.Errorf("grafana socket mode = %#o, want 0600", got)
+			}
+			di, err := os.Lstat(filepath.Dir(path))
+			if err != nil {
+				t.Fatalf("stat grafana socket dir: %v", err)
+			}
+			if got := di.Mode().Perm(); got != 0o700 {
+				t.Errorf("grafana socket dir mode = %#o, want 0700", got)
+			}
+			// Nothing may be listening on the old published port.
+			if conn, err := net.DialTimeout("tcp", defaultGrafanaListenAddr, 2*time.Second); err == nil {
+				_ = conn.Close()
+				t.Errorf("%s still answers — the published port was not removed",
+					defaultGrafanaListenAddr)
+			}
+		} else {
+			t.Logf("NOT on a socket (GOOS=%s): this is the developer fallback and "+
+				"the X-Webauth-User bypass is present on %s",
+				runtime.GOOS, sup.GrafanaBaseURL())
+		}
+
+		// The api's own path: /api/health is open, and a request with no
+		// identity is refused.
+		if resp, _ := get("/api/health", ""); resp.StatusCode != http.StatusOK {
 			t.Fatalf("/api/health = %d, want 200", resp.StatusCode)
 		}
-		// /api/search to confirm provisioning landed. Auth comes via
-		// the X-Webauth-User header (auth.proxy mode) — basic-auth
-		// + the cookie form are both disabled in the rendered
-		// grafana.ini. auto_sign_up creates the user on first sight.
-		req, _ = http.NewRequestWithContext(ctx, http.MethodGet,
-			base+"/api/search?type=dash-db", nil)
-		req.Header.Set("X-Webauth-User", "smoke-operator")
-		resp, err = (&http.Client{Timeout: 5 * time.Second}).Do(req)
-		if err != nil {
-			t.Fatalf("/api/search: %v", err)
+		if resp, _ := get("/api/user", ""); resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("/api/user with no header = %d, want 401", resp.StatusCode)
 		}
-		defer resp.Body.Close()
+
+		// Provisioning landed — the dashboards the operator sees. The row
+		// wait is at the top of this subtest; one read here.
+		resp, body := get("/api/search?type=dash-db", "smoke-operator")
+		if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Cluster Overview") {
+			t.Fatalf("dashboard row committed but search does not show it: %d %s",
+				resp.StatusCode, body)
+		}
+
+		// The worst case in #453: the header value `admin` bound to a
+		// guaranteed server-admin account. There is no such account now.
+		resp, body = get("/api/user", "admin")
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("/api/search = %d", resp.StatusCode)
+			t.Fatalf("/api/user as admin = %d", resp.StatusCode)
 		}
-		body, _ := io.ReadAll(resp.Body)
-		if !strings.Contains(string(body), "Cluster Overview") {
-			t.Fatalf("starter dashboard missing from search response: %s",
-				string(body))
+		if strings.Contains(body, `"isGrafanaAdmin":true`) {
+			t.Errorf("the header value admin is still a Grafana server admin: %s", body)
+		}
+		if resp, _ := get("/api/admin/settings", "admin"); resp.StatusCode == http.StatusOK {
+			t.Error("/api/admin/settings answered 200 to the header value admin")
 		}
 	})
 

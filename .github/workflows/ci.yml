@@ -248,6 +248,93 @@ jobs:
             RASPUTIN_CADDY_FUNCTIONAL=required \
             "$RUNNER_TEMP/proxy.test" -test.v -test.count=1
 
+  grafana-obs-socket:
+    # Grafana runs in auth-proxy mode: it trusts X-Webauth-User as an identity
+    # assertion because the api sets it after validating a passkey session.
+    # geekdojo-brain#453 is that it trusted the header from ANY local caller,
+    # because it was published on 127.0.0.1:13000 and loopback is not a
+    # privilege boundary — naming `admin` yielded Grafana server admin. The fix
+    # takes the port away: Grafana serves on a unix socket in a 0700 directory.
+    #
+    # Unit tests can only check the rendered grafana.ini and compose file. This
+    # job runs the api's OWN supervisor against the REAL pinned Grafana image
+    # and proves it on the running container: an existing cluster's published
+    # port disappears on the next Start with no manual step, the container ends
+    # up with no TCP listener at all, a non-owner uid is refused by the 0700
+    # directory and by the 0600 socket on its own, the api's dashboards still
+    # render, and `admin` is no longer a server admin. A second step puts the
+    # api's real /observability/ proxy in front of it and proves the UI still
+    # renders: pages, static assets, API calls, and the Live websocket.
+    #
+    # It runs under sudo because that is the appliance: the api is root there,
+    # so the socket directory is chowned to Grafana's own uid (472) and the
+    # container keeps its unprivileged user. RASPUTIN_GRAFANA_FUNCTIONAL=required
+    # turns the test's skips into failures, so this job cannot pass by not
+    # running.
+    name: grafana obs socket (real grafana, root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache-dependency-path: "*/go.sum"
+
+      - name: pre-pull the images the test drives
+        # Pulled here, not inside the test, so a registry hiccup reads as a
+        # setup failure rather than a supervisor timeout. The tags are the
+        # supervisor's own pins. Each pull gets 3 attempts: the first run of
+        # this job failed on a single "connection reset by peer" from Docker
+        # Hub's auth endpoint before any test ran.
+        run: |
+          set -eu
+          pull() {
+            for attempt in 1 2 3; do
+              if docker pull "$1"; then return 0; fi
+              echo "::warning::docker pull $1 failed (attempt $attempt of 3)"
+              [ "$attempt" -lt 3 ] && sleep 10
+            done
+            echo "::error::docker pull $1 failed 3 times"
+            return 1
+          }
+          pull grafana/grafana:11.5.1
+          pull victoriametrics/victoria-metrics:v1.103.0
+          pull grafana/alloy:v1.4.2
+          pull curlimages/curl:8.11.1
+
+      - name: build the obs test binary
+        run: go test -c -race -o "$RUNNER_TEMP/obs.test" ./api/internal/obs
+
+      - name: run the obs tests as root, against real grafana
+        # The whole package, so the root-only unit tests run too.
+        run: |
+          sudo env \
+            RASPUTIN_GRAFANA_FUNCTIONAL=required \
+            PATH="$PATH" \
+            "$RUNNER_TEMP/obs.test" -test.v -test.count=1 -test.timeout=25m
+
+      - name: build the api test binary
+        run: go test -c -race -o "$RUNNER_TEMP/api.test" ./api/internal/api
+
+      - name: the UI still renders Grafana through the api proxy (as root)
+        # The browser only ever reaches Grafana through the api's
+        # /observability/ reverse proxy, now over the socket. This drives the
+        # REAL proxy handler against the REAL Grafana: the app shell and every
+        # static asset it references, a dashboard page, the API calls the UI
+        # makes (incl. a panel query), and a Grafana Live websocket carried
+        # through to a Live connect reply. Run after the obs step, never in
+        # parallel with it: the compose template pins container names.
+        run: |
+          sudo env \
+            RASPUTIN_GRAFANA_FUNCTIONAL=required \
+            PATH="$PATH" \
+            "$RUNNER_TEMP/api.test" -test.v -test.count=1 -test.timeout=15m \
+              -test.run 'TestObsProxyGrafanaUI_OverSocket'
+
   frontend:
     # ⚠️ This name is an API, not a label. `main`'s branch protection lists it
     # verbatim as a required status context, and a required context is matched

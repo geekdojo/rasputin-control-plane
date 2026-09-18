@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"text/template"
 	"time"
@@ -73,7 +74,17 @@ type Supervisor interface {
 	// GrafanaBaseURL is the host-side base URL for Grafana. Empty
 	// when Grafana is disabled. The api's /observability/* reverse
 	// proxy uses it.
+	//
+	// In socket mode (the default on Linux) Grafana has no TCP listener
+	// at all, and this returns a fixed pseudo-URL whose host is only
+	// there to make a syntactically valid URL — the connection is made
+	// by GrafanaTransport, not by resolving that host. Callers that dial
+	// this URL MUST use GrafanaTransport when it is non-nil.
 	GrafanaBaseURL() string
+	// GrafanaTransport is the RoundTripper that reaches Grafana, or nil
+	// when the default TCP transport is correct. Non-nil in socket mode:
+	// it dials the unix socket and ignores the URL's host.
+	GrafanaTransport() http.RoundTripper
 }
 
 // NoopSupervisor is the default when obs is disabled. Healthy always
@@ -94,6 +105,7 @@ func (NoopSupervisor) StackReady(context.Context) (bool, error) { return false, 
 func (NoopSupervisor) VMBaseURL() string                        { return "" }
 func (NoopSupervisor) LokiBaseURL() string                      { return "" }
 func (NoopSupervisor) GrafanaBaseURL() string                   { return "" }
+func (NoopSupervisor) GrafanaTransport() http.RoundTripper      { return nil }
 
 // CmdRunner runs a binary and returns its combined output. Injected so
 // tests can drive lifecycle decisions without a real Docker daemon.
@@ -155,11 +167,19 @@ type DockerComposeSupervisorConfig struct {
 	// metrics to victoriametrics over the project network.
 	AlloyImage string
 
-	// AlloyListenAddr is the host bind for Alloy's UI / debug listener.
-	// Defaults to "127.0.0.1:12345"; the container listens on 12345
-	// internally. Loopback-only on purpose — Alloy's debug UI exposes
-	// component state and shouldn't be LAN-reachable.
-	AlloyListenAddr string
+	// Alloy's UI / debug listener is NOT published to the host.
+	//
+	// It used to be, on 127.0.0.1:12345 (RASPUTIN_OBS_ALLOY_LISTEN).
+	// Nothing in the api ever read it — it was an operator debug
+	// affordance — while any local user and any host-network container
+	// could read the rendered pipeline config and component state and
+	// POST /-/reload. Alloy v1.4.2 has no authentication for that server
+	// and no way to turn it off (`--server.http.listen-addr` is TCP-only;
+	// there is no unix-socket or disable flag), so the only control
+	// available is not to publish it. geekdojo-brain#452.
+	//
+	// The container still listens on 12345 inside the compose network,
+	// where only the stack's own services can reach it.
 
 	// EnableCadvisor toggles the prometheus.exporter.cadvisor component
 	// inside Alloy. Default true. cAdvisor scrapes per-container CPU /
@@ -227,14 +247,41 @@ type DockerComposeSupervisorConfig struct {
 	// and is reached via the api's auth-proxy at /observability/*.
 	GrafanaImage string
 
-	// GrafanaListenAddr is the host bind for Grafana's HTTP listener.
-	// Defaults to "127.0.0.1:13000"; container listens on 3000
-	// internally regardless of the host bind (see renderCompose's
-	// fixed in-container ports). Loopback only because the auth-proxy
-	// is what makes Grafana safe to expose — direct access bypasses
-	// Rasputin's session auth. The host port avoids 3000 deliberately
-	// because every JS dev server defaults to it.
+	// GrafanaListenAddr is the host bind for Grafana's HTTP listener,
+	// used ONLY when UseGrafanaSocket is false (see there). Defaults to
+	// "127.0.0.1:13000".
+	//
+	// Loopback is not a privilege boundary, which is the whole of
+	// geekdojo-brain#453: Grafana runs in auth-proxy mode, so anything
+	// that could open a TCP connection to this address was authenticated
+	// as whatever user it named. On Linux this address is not used at all
+	// — Grafana serves on a unix socket instead.
 	GrafanaListenAddr string
+
+	// UseGrafanaSocket makes Grafana serve on a unix socket in
+	// GrafanaSocketDir instead of a published TCP port, so nothing that
+	// cannot open that socket file can reach it (geekdojo-brain#453).
+	// Nil defaults to true on Linux and false everywhere else.
+	//
+	// Why the platform default and not simply "always": Grafana chmods
+	// its socket right after bind, and a macOS Docker bind mount rejects
+	// chmod on a socket —
+	//
+	//	failed to change socket mode 384: chmod /var/run/grafana/grafana.sock: invalid argument
+	//
+	// — so Grafana exits at startup and there is no dashboard at all
+	// (reproduced against grafana/grafana:11.5.1 on Rancher Desktop,
+	// 2026-09-17). Every controlplane is Linux; the fallback exists so a
+	// developer on a Mac still gets dashboards, and Start logs loudly
+	// that the TCP listener carries the bypass.
+	UseGrafanaSocket *bool
+
+	// GrafanaSocketDir is the host directory holding Grafana's listening
+	// socket. Defaults to <StateDir>/grafana-socket. It is bind-mounted
+	// into the container at /var/run/grafana, created 0700, and re-checked
+	// on every Start: a symlink, a non-directory, or the wrong owner is a
+	// hard error rather than something to fix up silently.
+	GrafanaSocketDir string
 
 	// EnableGrafana toggles the Grafana service. Default true. Off
 	// gives a metrics + logs stack without the dashboard UI — useful
@@ -301,7 +348,6 @@ const (
 	// backstop, not the primary signal.
 	defaultVMMinFreeDiskSpace = "2GB"
 	defaultAlloyImage         = "grafana/alloy:v1.4.2"
-	defaultAlloyListenAddr    = "127.0.0.1:12345"
 	defaultLokiImage          = "grafana/loki:3.4.1"
 	defaultLokiListenAddr     = "127.0.0.1:3100"
 	// defaultLokiRetention bounds how far back logs are kept. Loki shipped
@@ -316,12 +362,11 @@ const (
 	// the 85% alert is the whole defense. See storage.md §5.
 	defaultLokiRetention = "720h"
 	defaultGrafanaImage  = "grafana/grafana:11.5.1"
-	// 3000 is the most contended port on a dev box — Next.js, CRA,
-	// Vite, every common JS framework defaults to it. Grafana's
-	// own internal port stays 3000 (handled in renderCompose's
-	// fixed container-port map); only the HOST bind moves. 13000 is
-	// outside the registered-port range and well clear of the
-	// stack's other ports (VM 8428, Loki 3100, Alloy 12345).
+	// Used ONLY by the non-Linux developer fallback — on Linux Grafana
+	// has no TCP listener (UseGrafanaSocket). 3000 is the most contended
+	// port on a dev box — every common JS framework defaults to it — so
+	// the host bind is 13000; Grafana's own port inside the container
+	// stays 3000.
 	defaultGrafanaListenAddr = "127.0.0.1:13000"
 	defaultVMAlertImage      = "victoriametrics/vmalert:v1.103.0"
 	defaultAlertsWebhookURL  = "http://host.docker.internal:8080/api/alerts/webhook"
@@ -352,6 +397,35 @@ const (
 	grafanaIniFile      = "grafana.ini"
 	grafanaDataDir      = "grafana-data"
 
+	// grafanaSocketSubdir is the default GrafanaSocketDir, relative to
+	// StateDir. 0700, and the socket inside it is 0600 — see
+	// prepareGrafanaSocketDir.
+	grafanaSocketSubdir = "grafana-socket"
+	grafanaSocketFile   = "grafana.sock"
+	// grafanaContainerSocketDir is where GrafanaSocketDir is mounted
+	// inside the container. Fixed, like every other in-container path in
+	// this stack, so grafana.ini never has to know the host layout.
+	grafanaContainerSocketDir  = "/var/run/grafana"
+	grafanaContainerSocketPath = grafanaContainerSocketDir + "/" + grafanaSocketFile
+	// grafanaImageUID is the uid grafana/grafana runs as. The socket
+	// directory is chowned to it so Grafana can bind, and to nothing else
+	// so no other uid can enter. Fixed by the image since Grafana 7.3;
+	// verified against grafana/grafana:11.5.1.
+	grafanaImageUID = 472
+	// grafanaSocketHost is the pseudo-host in GrafanaBaseURL when Grafana
+	// is on a socket. net/http needs *a* host to build a request; the
+	// socket dialer ignores it. Grafana does not check Host (root_url +
+	// serve_from_sub_path is what it routes on).
+	//
+	// It is under .invalid (RFC 2606: reserved, guaranteed never to
+	// resolve) ON PURPOSE. A caller that forgets GrafanaTransport must fail
+	// closed with a DNS error — not resolve a real name. The first draft
+	// used a bare "grafana", and a probe that missed the transport resolved
+	// it through a search domain to a host on the internet and sent it a
+	// request; with the api's proxy that request would have carried
+	// X-Webauth-User. Found by the functional test, 2026-09-17.
+	grafanaSocketHost = "grafana.invalid"
+
 	vmalertConfigSubdir = "vmalert-config"
 	vmalertRulesFile    = "rules.yml"
 )
@@ -361,6 +435,13 @@ type DockerComposeSupervisor struct {
 	cfg    DockerComposeSupervisorConfig
 	runner CmdRunner
 	httpc  *http.Client
+
+	// grafanaTransport dials Grafana's unix socket. Nil when Grafana is
+	// on a TCP port, or when the caller injected its own HTTPClient
+	// (tests), in which case that client is used for every probe.
+	grafanaTransport http.RoundTripper
+	// grafanaHTTPC probes Grafana over grafanaTransport.
+	grafanaHTTPC *http.Client
 
 	// dockerDataRoot is the daemon's real data-root, discovered at Start.
 	// Empty until then; renderCompose falls back to defaultDockerDataRoot so
@@ -391,9 +472,6 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	}
 	if cfg.AlloyImage == "" {
 		cfg.AlloyImage = defaultAlloyImage
-	}
-	if cfg.AlloyListenAddr == "" {
-		cfg.AlloyListenAddr = defaultAlloyListenAddr
 	}
 	if cfg.EnableCadvisor == nil {
 		t := true
@@ -443,6 +521,23 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	if cfg.GrafanaListenAddr == "" {
 		cfg.GrafanaListenAddr = defaultGrafanaListenAddr
 	}
+	if cfg.UseGrafanaSocket == nil {
+		// Linux is every controlplane. See UseGrafanaSocket for why this
+		// is not unconditional.
+		on := runtime.GOOS == "linux"
+		cfg.UseGrafanaSocket = &on
+	}
+	if cfg.GrafanaSocketDir == "" {
+		cfg.GrafanaSocketDir = filepath.Join(cfg.StateDir, grafanaSocketSubdir)
+	}
+	// Compose reads a relative volume source as a NAMED VOLUME, and
+	// StateDir is relative in dev (./data) — same trap IDSLogDir hit.
+	// Normalize once here so the rendered bind mount is always a path.
+	if abs, err := filepath.Abs(cfg.GrafanaSocketDir); err == nil {
+		cfg.GrafanaSocketDir = abs
+	} else {
+		return nil, fmt.Errorf("obs supervisor: resolve GrafanaSocketDir: %w", err)
+	}
 	if cfg.EnableGrafana == nil {
 		t := true
 		cfg.EnableGrafana = &t
@@ -474,7 +569,35 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Second}
 	}
-	return &DockerComposeSupervisor{cfg: cfg, runner: runner, httpc: client}, nil
+	s := &DockerComposeSupervisor{cfg: cfg, runner: runner, httpc: client}
+	// A caller-supplied HTTPClient is a test stub for every probe,
+	// including Grafana's — leave it alone. Otherwise, when Grafana is on
+	// a socket, its probes need a transport that dials that socket.
+	if cfg.HTTPClient == nil && s.grafanaSocketEnabled() {
+		s.grafanaTransport = newUnixTransport(s.GrafanaSocketPath())
+		s.grafanaHTTPC = &http.Client{
+			Transport: s.grafanaTransport,
+			Timeout:   2 * time.Second,
+		}
+	}
+	return s, nil
+}
+
+// newUnixTransport returns a transport that ignores the request URL's host
+// and dials sockPath instead. Same shape as the agent's Caddy admin client
+// (agent/internal/proxy/admin.go).
+func newUnixTransport(sockPath string) http.RoundTripper {
+	d := &net.Dialer{Timeout: 2 * time.Second}
+	return &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return d.DialContext(ctx, "unix", sockPath)
+		},
+		// One connection is plenty for a single local peer, and it keeps
+		// the socket's fd count predictable.
+		MaxIdleConns:          4,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
 }
 
 // execRunner is the default CmdRunner — runs the binary and returns its
@@ -517,6 +640,19 @@ func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 		}
 	}
 	if s.grafanaEnabled() {
+		if s.grafanaSocketEnabled() {
+			// Before compose, every time: the directory is the control,
+			// so it is re-checked rather than trusted from last boot.
+			if err := s.prepareGrafanaSocketDir(); err != nil {
+				return err
+			}
+		} else {
+			log.Printf("obs supervisor: WARNING Grafana is published on %s instead of a "+
+				"unix socket — any local caller can authenticate to it with an "+
+				"X-Webauth-User header (geekdojo-brain#453). This is the non-Linux "+
+				"developer fallback and must never be a controlplane.",
+				s.cfg.GrafanaListenAddr)
+		}
 		if err := s.writeGrafanaConfig(); err != nil {
 			return err
 		}
@@ -543,7 +679,13 @@ func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 	if _, err := s.compose(ctx, "up", "-d", "--remove-orphans"); err != nil {
 		return fmt.Errorf("docker compose up: %w", err)
 	}
-	return s.waitHealthy(ctx)
+	if err := s.waitHealthy(ctx); err != nil {
+		return err
+	}
+	if s.grafanaSocketEnabled() {
+		s.checkGrafanaSocket()
+	}
+	return nil
 }
 
 // Stop issues `docker compose stop`. Volumes / data persist.
@@ -642,14 +784,61 @@ func (s *DockerComposeSupervisor) LokiBaseURL() string {
 	return "http://" + s.cfg.LokiListenAddr
 }
 
-// GrafanaBaseURL returns the host-side base URL Grafana is reachable
-// at, or "" when Grafana is disabled. Used by the api's
-// /observability/* reverse proxy.
+// GrafanaBaseURL returns the base URL Grafana is reachable at, or "" when
+// Grafana is disabled. Used by the api's /observability/* reverse proxy.
+//
+// In socket mode the host part is a placeholder — see grafanaSocketHost —
+// and the caller must pair it with GrafanaTransport.
 func (s *DockerComposeSupervisor) GrafanaBaseURL() string {
 	if !s.grafanaEnabled() {
 		return ""
 	}
+	if s.grafanaSocketEnabled() {
+		return "http://" + grafanaSocketHost
+	}
 	return "http://" + s.cfg.GrafanaListenAddr
+}
+
+// GrafanaTransport is the RoundTripper that reaches Grafana over its unix
+// socket, or nil when Grafana is on TCP (or disabled).
+func (s *DockerComposeSupervisor) GrafanaTransport() http.RoundTripper {
+	if !s.grafanaEnabled() {
+		return nil
+	}
+	return s.grafanaTransport
+}
+
+// GrafanaSocketPath is the host path of Grafana's listening socket. Empty
+// unless socket mode is on.
+func (s *DockerComposeSupervisor) GrafanaSocketPath() string {
+	if !s.grafanaSocketEnabled() {
+		return ""
+	}
+	return filepath.Join(s.cfg.GrafanaSocketDir, grafanaSocketFile)
+}
+
+// grafanaSocketEnabled — single-source-of-truth for "is Grafana on a unix
+// socket rather than a published TCP port?".
+func (s *DockerComposeSupervisor) grafanaSocketEnabled() bool {
+	return s.grafanaEnabled() &&
+		s.cfg.UseGrafanaSocket != nil && *s.cfg.UseGrafanaSocket
+}
+
+// grafanaSocketOwnerUID is the uid that must own GrafanaSocketDir, and the
+// uid the Grafana container runs as.
+//
+// When the api is root — every appliance — the container keeps the image's
+// own unprivileged user (472) and the directory is chowned to it. When the
+// api is NOT root (a developer's Linux box) it cannot chown to 472, so the
+// directory stays the api's own uid and the container is rendered with
+// `user: <uid>:<gid>` to match. Either way exactly one uid can enter the
+// directory, and that uid is the api's or the image's — never "anyone
+// local".
+func (s *DockerComposeSupervisor) grafanaSocketOwnerUID() int {
+	if os.Geteuid() == 0 {
+		return grafanaImageUID
+	}
+	return os.Geteuid()
 }
 
 // ----- Compose invocations ------------------------------------------------
@@ -790,11 +979,15 @@ func (s *DockerComposeSupervisor) writeLokiConfig() error {
 // Grafana stateless from the operator's perspective — no point-and-click
 // setup the first time obs is enabled.
 func (s *DockerComposeSupervisor) writeGrafanaConfig() error {
+	ini, err := s.renderGrafanaIni()
+	if err != nil {
+		return err
+	}
 	pairs := []struct {
 		path string
 		body string
 	}{
-		{filepath.Join(grafanaConfigSubdir, grafanaIniFile), grafanaIni},
+		{filepath.Join(grafanaConfigSubdir, grafanaIniFile), ini},
 		{filepath.Join(grafanaConfigSubdir, "provisioning", "datasources", "all.yaml"), grafanaDatasourcesYAML},
 		{filepath.Join(grafanaConfigSubdir, "provisioning", "dashboards", "all.yaml"), grafanaDashboardsYAML},
 		{filepath.Join(grafanaConfigSubdir, "dashboards", "cluster-overview.json"), starterDashboardJSON},
@@ -812,29 +1005,87 @@ func (s *DockerComposeSupervisor) writeGrafanaConfig() error {
 	return nil
 }
 
-// grafanaIni — Slice 1.4 main Grafana config. Two non-default knobs:
+// renderGrafanaIni renders grafana.ini for this supervisor's listener mode.
+// A method, not an inline Execute, so the tests in grafana_socket_test.go
+// assert on the rendered bytes rather than on the template.
+func (s *DockerComposeSupervisor) renderGrafanaIni() (string, error) {
+	var buf bytes.Buffer
+	err := grafanaIniTmpl.Execute(&buf, struct {
+		UseSocket  bool
+		SocketPath string
+	}{
+		UseSocket:  s.grafanaSocketEnabled(),
+		SocketPath: grafanaContainerSocketPath,
+	})
+	if err != nil {
+		return "", fmt.Errorf("obs supervisor: render grafana.ini: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// grafanaIniTmpl — main Grafana config. The non-default knobs:
 //
 //   - [server] serve_from_sub_path = true + root_url path so the
 //     api's /observability/* reverse proxy mounts cleanly.
+//   - [server] protocol = socket, so Grafana has no TCP listener for
+//     anything to reach without the socket file. See grafana_socket.go
+//     for the whole argument (geekdojo-brain#453). The HTTP form is the
+//     non-Linux developer fallback.
 //   - [auth.proxy] enabled = true + header_name = X-Webauth-User.
 //     The api validates the operator's session cookie, then forwards
 //     the request to Grafana with the user's name in this header.
 //     auto_sign_up creates the Grafana user on first sight.
 //
-// allow_sign_up = false everywhere else — we don't want a sneak path
-// past the api's auth via Grafana's own login form.
-const grafanaIni = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
+// Three things deliberately NOT here, which a reader of #453 will look for:
+//
+//   - `admin_user` / `admin_password`. There is no initial admin account
+//     at all now — `disable_initial_admin_creation = true`. It removed a
+//     hardcoded credential from a public repo AND the worst case in #453:
+//     the header value `admin` used to bind to a guaranteed account with
+//     `isGrafanaAdmin: true`. With no such account it is just another
+//     auto-signed-up Viewer (measured: /api/admin/settings 403, was 200).
+//     Nothing needed the account: datasources and dashboards are
+//     provisioned from files, and every other login path is off.
+//   - `auth.proxy.whitelist`. It is a source-IP allowlist and a unix
+//     socket has no source IP: any non-empty value 401s every request
+//     (measured against 11.5.1). The socket, not an IP list, is what says
+//     who may call.
+//   - `auto_sign_up = false`. Operators are passkey users of the api, not
+//     of Grafana, so Grafana has never seen them before their first
+//     dashboard; turning this off would refuse every new operator. With
+//     the socket, the only caller that can assert a name is the api, and
+//     the api asserts the session's name — so auto_sign_up is no longer
+//     reachable by anyone else.
+//
+// allow_sign_up = false — no sneak path past the api's auth via Grafana's
+// own login form.
+var grafanaIniTmpl = template.Must(template.New("grafana-ini").Parse(
+	`# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
 # Edits get clobbered on the next supervisor Start.
 
 [server]
+{{- if .UseSocket }}
+# No TCP listener at all: Grafana is reachable only through this socket,
+# which lives in a 0700 directory. geekdojo-brain#453.
+protocol = socket
+socket = {{.SocketPath}}
+socket_mode = 0600
+{{- else }}
+# DEVELOPER FALLBACK (non-Linux hosts only): a Docker bind mount on macOS
+# cannot chmod a socket, so Grafana cannot bind one there. Any local caller
+# can authenticate to this listener with an X-Webauth-User header.
 http_port = 3000
+{{- end }}
 domain = localhost
-root_url = %(protocol)s://%(domain)s/observability/
+# NOT %(protocol)s: with protocol = socket that expands to "socket://", and
+# Grafana hands root_url to the frontend as appUrl (share links, redirects).
+# Pinned to the value it always had over TCP.
+root_url = http://%(domain)s/observability/
 serve_from_sub_path = true
 
 [security]
-admin_user = admin
-admin_password = rasputin-admin
+# No built-in admin account — see the comment on grafanaIniTmpl.
+disable_initial_admin_creation = true
 # allow_embedding lets the UI's <iframe src="/observability/..."> render
 # the dashboards. Default is X-Frame-Options=DENY which kills the embed.
 # The auth-proxy is what makes this safe — only session-authenticated
@@ -862,6 +1113,8 @@ header_name = X-Webauth-User
 header_property = username
 auto_sign_up = true
 sync_ttl = 60
+# Deliberately empty — a unix socket has no source IP to match. See the
+# comment on grafanaIniTmpl.
 whitelist =
 headers =
 enable_login_token = false
@@ -869,7 +1122,7 @@ enable_login_token = false
 [log]
 mode = console
 level = warn
-`
+`))
 
 const grafanaDatasourcesYAML = `# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
 apiVersion: 1
@@ -1293,13 +1546,6 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 	if vmPort == "" {
 		return nil, fmt.Errorf("invalid VMListenAddr %q: port required", s.cfg.VMListenAddr)
 	}
-	alloyHost, alloyPort, err := net.SplitHostPort(s.cfg.AlloyListenAddr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid AlloyListenAddr %q: %w", s.cfg.AlloyListenAddr, err)
-	}
-	if alloyPort == "" {
-		return nil, fmt.Errorf("invalid AlloyListenAddr %q: port required", s.cfg.AlloyListenAddr)
-	}
 	lokiHost, lokiPort, err := net.SplitHostPort(s.cfg.LokiListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid LokiListenAddr %q: %w", s.cfg.LokiListenAddr, err)
@@ -1334,34 +1580,35 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 			filepath.Join(s.cfg.StateDir, grafanaConfigSubdir, grafanaIniFile)),
 		VMAlertConfigHash: configHash(
 			filepath.Join(s.cfg.StateDir, vmalertConfigSubdir, vmalertRulesFile)),
-		AlloyImage:          s.cfg.AlloyImage,
-		AlloyHost:           alloyHost,
-		AlloyPort:           alloyPort,
-		AlloyConfigDir:      "./" + alloyConfigSubdir,
-		AlloyConfigFile:     alloyConfigFile,
-		EnableCadvisor:      s.cadvisorEnabled(),
-		DockerDataRoot:      s.dockerDataRootOrDefault(),
-		EnableLoki:          s.lokiEnabled(),
-		EnableIDSPipe:       s.idsPipeEnabled(),
-		IDSLogHostDir:       s.cfg.IDSLogDir,
-		LokiImage:           s.cfg.LokiImage,
-		LokiHost:            lokiHost,
-		LokiPort:            lokiPort,
-		LokiConfigDir:       "./" + lokiConfigSubdir,
-		LokiConfigFile:      lokiConfigFile,
-		LokiDataDir:         "./" + lokiDataDir,
-		EnableGrafana:       s.grafanaEnabled(),
-		GrafanaImage:        s.cfg.GrafanaImage,
-		GrafanaHost:         grafanaHost,
-		GrafanaPort:         grafanaPort,
-		GrafanaConfigDir:    "./" + grafanaConfigSubdir,
-		GrafanaDataDir:      "./" + grafanaDataDir,
-		EnableVMAlert:       s.vmalertEnabled(),
-		VMAlertImage:        s.cfg.VMAlertImage,
-		VMAlertConfigDir:    "./" + vmalertConfigSubdir,
-		VMAlertRulesFile:    vmalertRulesFile,
-		AlertsWebhookURL:    s.cfg.AlertsWebhookURL,
-		AlertsWebhookSecret: s.cfg.AlertsWebhookSecret,
+		AlloyImage:           s.cfg.AlloyImage,
+		AlloyConfigDir:       "./" + alloyConfigSubdir,
+		AlloyConfigFile:      alloyConfigFile,
+		EnableCadvisor:       s.cadvisorEnabled(),
+		DockerDataRoot:       s.dockerDataRootOrDefault(),
+		EnableLoki:           s.lokiEnabled(),
+		EnableIDSPipe:        s.idsPipeEnabled(),
+		IDSLogHostDir:        s.cfg.IDSLogDir,
+		LokiImage:            s.cfg.LokiImage,
+		LokiHost:             lokiHost,
+		LokiPort:             lokiPort,
+		LokiConfigDir:        "./" + lokiConfigSubdir,
+		LokiConfigFile:       lokiConfigFile,
+		LokiDataDir:          "./" + lokiDataDir,
+		EnableGrafana:        s.grafanaEnabled(),
+		GrafanaImage:         s.cfg.GrafanaImage,
+		GrafanaHost:          grafanaHost,
+		GrafanaPort:          grafanaPort,
+		GrafanaUseSocket:     s.grafanaSocketEnabled(),
+		GrafanaSocketDir:     s.cfg.GrafanaSocketDir,
+		GrafanaContainerUser: s.grafanaContainerUser(),
+		GrafanaConfigDir:     "./" + grafanaConfigSubdir,
+		GrafanaDataDir:       "./" + grafanaDataDir,
+		EnableVMAlert:        s.vmalertEnabled(),
+		VMAlertImage:         s.cfg.VMAlertImage,
+		VMAlertConfigDir:     "./" + vmalertConfigSubdir,
+		VMAlertRulesFile:     vmalertRulesFile,
+		AlertsWebhookURL:     s.cfg.AlertsWebhookURL,
+		AlertsWebhookSecret:  s.cfg.AlertsWebhookSecret,
 	}
 	var buf bytes.Buffer
 	if err := composeTmpl.Execute(&buf, data); err != nil {
@@ -1371,44 +1618,50 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 }
 
 type composeData struct {
-	VMImage             string
-	VMHost              string
-	VMPort              string
-	VMRetention         string
-	VMMinFreeDiskSpace  string
-	AlloyConfigHash     string
-	LokiConfigHash      string
-	GrafanaConfigHash   string
-	VMAlertConfigHash   string
-	VMDataDir           string
-	AlloyImage          string
-	AlloyHost           string
-	AlloyPort           string
-	AlloyConfigDir      string
-	AlloyConfigFile     string
-	EnableCadvisor      bool
-	DockerDataRoot      string
-	EnableLoki          bool
-	EnableIDSPipe       bool
-	IDSLogHostDir       string // absolute host path, mounted into Alloy at /var/log/rasputin
-	LokiImage           string
-	LokiHost            string
-	LokiPort            string
-	LokiConfigDir       string
-	LokiConfigFile      string
-	LokiDataDir         string
-	EnableGrafana       bool
-	GrafanaImage        string
-	GrafanaHost         string
-	GrafanaPort         string
-	GrafanaConfigDir    string
-	GrafanaDataDir      string
-	EnableVMAlert       bool
-	VMAlertImage        string
-	VMAlertConfigDir    string
-	VMAlertRulesFile    string
-	AlertsWebhookURL    string
-	AlertsWebhookSecret string
+	VMImage            string
+	VMHost             string
+	VMPort             string
+	VMRetention        string
+	VMMinFreeDiskSpace string
+	AlloyConfigHash    string
+	LokiConfigHash     string
+	GrafanaConfigHash  string
+	VMAlertConfigHash  string
+	VMDataDir          string
+	AlloyImage         string
+	AlloyConfigDir     string
+	AlloyConfigFile    string
+	EnableCadvisor     bool
+	DockerDataRoot     string
+	EnableLoki         bool
+	EnableIDSPipe      bool
+	IDSLogHostDir      string // absolute host path, mounted into Alloy at /var/log/rasputin
+	LokiImage          string
+	LokiHost           string
+	LokiPort           string
+	LokiConfigDir      string
+	LokiConfigFile     string
+	LokiDataDir        string
+	EnableGrafana      bool
+	GrafanaImage       string
+	GrafanaHost        string
+	GrafanaPort        string
+	// GrafanaUseSocket renders the socket form of the grafana service:
+	// no host publish, the socket directory bind-mounted in.
+	GrafanaUseSocket bool
+	// GrafanaSocketDir is the absolute HOST path of the socket directory.
+	GrafanaSocketDir string
+	// GrafanaContainerUser is "uid:gid" when the container must be pinned
+	// to the api's own uid, "" to keep the image's user.
+	GrafanaContainerUser string
+	GrafanaConfigDir     string
+	GrafanaDataDir       string
+	EnableVMAlert        bool
+	VMAlertImage         string
+	VMAlertConfigDir     string
+	VMAlertRulesFile     string
+	AlertsWebhookURL     string
+	AlertsWebhookSecret  string
 }
 
 // composeTmpl is the Slice 1.1 compose YAML — VictoriaMetrics only.
@@ -1433,10 +1686,11 @@ type composeData struct {
 // `restart: unless-stopped` lets the Docker daemon (not us) handle crash
 // recovery — simpler than reinventing it.
 // VM listens on a FIXED internal port (8428) and Alloy listens on a
-// FIXED internal port (12345). Only the host-side bind (VMListenAddr /
-// AlloyListenAddr) varies per install — so peers inside the compose
-// network can hard-code `victoriametrics:8428` and `alloy:12345` in
-// their config without seeing the operator's host-port choice. Mirrors
+// FIXED internal port (12345). Only VM's host-side bind (VMListenAddr)
+// varies per install — so peers inside the compose network can hard-code
+// `victoriametrics:8428` and `alloy:12345` in their config without seeing
+// the operator's host-port choice. Alloy is not published to the host at
+// all, and on Linux neither is Grafana (geekdojo-brain#452, #453). Mirrors
 // Headscale's "container always listens on 8080 internally" pattern in
 // mesh/supervisor_docker.go.
 var composeTmpl = template.Must(template.New("obs-compose").Parse(`# Generated by rasputin-api obs.DockerComposeSupervisor — do not hand-edit.
@@ -1473,9 +1727,13 @@ services:
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
+      # No pprof: it is a debug surface nothing here uses, and the server
+      # it hangs off has no authentication of any kind. geekdojo-brain#452.
+      - --server.http.enable-pprof=false
       - /etc/alloy/{{.AlloyConfigFile}}
-    ports:
-      - "{{.AlloyHost}}:{{.AlloyPort}}:12345"
+    # NO ports: stanza — Alloy's HTTP server is NOT published to the host. See
+    # DockerComposeSupervisorConfig. It stays on the compose network, where
+    # only this stack's own services can reach it.
     volumes:
       - {{.AlloyConfigDir}}:/etc/alloy:ro
 {{- if .EnableCadvisor }}
@@ -1529,13 +1787,28 @@ services:
     # and dashboards, so a re-provision actually reaches the container.
     environment:
       RASPUTIN_OBS_CONFIG_DIGEST: "{{.GrafanaConfigHash}}"
+{{- if .GrafanaUseSocket }}
+    # NO ports: stanza — Grafana has no TCP listener at all. It serves on the
+    # unix socket mounted below, in a 0700 host directory only the api's
+    # uid can enter. geekdojo-brain#453.
+{{- if .GrafanaContainerUser }}
+    # The api is not root here, so it cannot chown the socket directory to
+    # the image's uid; the container runs as the api's uid instead.
+    user: "{{.GrafanaContainerUser}}"
+{{- end }}
+{{- else }}
+    # DEVELOPER FALLBACK (non-Linux hosts): see grafanaIniTmpl.
     ports:
       - "{{.GrafanaHost}}:{{.GrafanaPort}}:3000"
+{{- end }}
     volumes:
       - {{.GrafanaConfigDir}}/grafana.ini:/etc/grafana/grafana.ini:ro
       - {{.GrafanaConfigDir}}/provisioning:/etc/grafana/provisioning:ro
       - {{.GrafanaConfigDir}}/dashboards:/var/lib/grafana/dashboards:ro
       - {{.GrafanaDataDir}}:/var/lib/grafana
+{{- if .GrafanaUseSocket }}
+      - {{.GrafanaSocketDir}}:` + grafanaContainerSocketDir + `
+{{- end }}
     depends_on:
       - victoriametrics
 {{- if .EnableLoki }}
@@ -1642,7 +1915,13 @@ func (s *DockerComposeSupervisor) lokiReady(ctx context.Context) (bool, error) {
 // grafanaReady polls Grafana's /api/health. Returns 200 + JSON body
 // {"database":"ok","version":"..."} once it's accepting requests.
 func (s *DockerComposeSupervisor) grafanaReady(ctx context.Context) (bool, error) {
-	return httpGet2xx(ctx, s.httpc, s.GrafanaBaseURL()+"/api/health")
+	// In socket mode the base URL's host does not resolve (by design — see
+	// grafanaSocketHost); only the socket client can reach Grafana.
+	client := s.httpc
+	if s.grafanaHTTPC != nil {
+		client = s.grafanaHTTPC
+	}
+	return httpGet2xx(ctx, client, s.GrafanaBaseURL()+"/api/health")
 }
 
 func httpGet2xx(ctx context.Context, client *http.Client, url string) (bool, error) {
