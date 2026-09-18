@@ -287,13 +287,24 @@ jobs:
       - name: pre-pull the images the test drives
         # Pulled here, not inside the test, so a registry hiccup reads as a
         # setup failure rather than a supervisor timeout. The tags are the
-        # supervisor's own pins.
+        # supervisor's own pins. Each pull gets 3 attempts: the first run of
+        # this job failed on a single "connection reset by peer" from Docker
+        # Hub's auth endpoint before any test ran.
         run: |
           set -eu
-          docker pull grafana/grafana:11.5.1
-          docker pull victoriametrics/victoria-metrics:v1.103.0
-          docker pull grafana/alloy:v1.4.2
-          docker pull curlimages/curl:8.11.1
+          pull() {
+            for attempt in 1 2 3; do
+              if docker pull "$1"; then return 0; fi
+              echo "::warning::docker pull $1 failed (attempt $attempt of 3)"
+              [ "$attempt" -lt 3 ] && sleep 10
+            done
+            echo "::error::docker pull $1 failed 3 times"
+            return 1
+          }
+          pull grafana/grafana:11.5.1
+          pull victoriametrics/victoria-metrics:v1.103.0
+          pull grafana/alloy:v1.4.2
+          pull curlimages/curl:8.11.1
 
       - name: build the obs test binary
         run: go test -c -race -o "$RUNNER_TEMP/obs.test" ./api/internal/obs
