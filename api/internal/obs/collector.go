@@ -175,7 +175,16 @@ services:
     network_mode: host
     command:
       - run
+      # Loopback only, and NOT a privilege boundary: network_mode: host
+      # puts this on the NODE's loopback, where any local user and any
+      # host-network container can reach it. Alloy v1.4.2 has no
+      # authentication for this server, no unix-socket option and no way
+      # to turn it off, and host networking is load-bearing here (mDNS),
+      # so the exposure stands — tracked in geekdojo-brain#452.
       - --server.http.listen-addr=127.0.0.1:12345
+      # What CAN go: the pprof endpoints, which nothing uses and which
+      # hang off that same unauthenticated server.
+      - --server.http.enable-pprof=false
       - ` + collectorConfigPath + `
     configs:
       - source: alloy_config

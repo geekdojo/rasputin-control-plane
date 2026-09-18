@@ -2,6 +2,7 @@ package obs
 
 import (
 	"context"
+	"net/http"
 	"time"
 )
 
@@ -135,6 +136,17 @@ func (s *Status) GrafanaBaseURL(ctx context.Context) string {
 		return ""
 	}
 	return s.sup.GrafanaBaseURL()
+}
+
+// GrafanaTransport is the RoundTripper the api's reverse proxy must use to
+// reach Grafana, or nil when the default TCP transport is correct. Non-nil
+// on Linux, where Grafana serves on a unix socket and GrafanaBaseURL's host
+// is a placeholder (geekdojo-brain#453).
+func (s *Status) GrafanaTransport(ctx context.Context) http.RoundTripper {
+	if !s.GrafanaEnabled(ctx) {
+		return nil
+	}
+	return s.sup.GrafanaTransport()
 }
 
 // VMWriteBaseURL is the loopback base URL the obs mTLS ingress

@@ -335,7 +335,7 @@ func TestRenderCompose_ContainsExpectedServices(t *testing.T) {
 		"./vm-data:/storage",
 		"alloy:",
 		defaultAlloyImage,
-		"127.0.0.1:12345:12345",
+		"--server.http.enable-pprof=false",
 		"./alloy-config:/etc/alloy:ro",
 		"/var/run/docker.sock:/var/run/docker.sock:ro",
 		"depends_on:",
@@ -560,6 +560,9 @@ type fakeSupervisor struct {
 	baseURL    string
 	lokiURL    string
 	grafanaURL string
+	// grafanaTransport is nil in every test but the socket ones — a nil
+	// RoundTripper means "use the default TCP transport".
+	grafanaTransport http.RoundTripper
 }
 
 func (f *fakeSupervisor) Start(context.Context) error           { return nil }
@@ -574,6 +577,8 @@ func (f *fakeSupervisor) StackReady(context.Context) (bool, error) {
 func (f *fakeSupervisor) VMBaseURL() string      { return f.baseURL }
 func (f *fakeSupervisor) LokiBaseURL() string    { return f.lokiURL }
 func (f *fakeSupervisor) GrafanaBaseURL() string { return f.grafanaURL }
+
+func (f *fakeSupervisor) GrafanaTransport() http.RoundTripper { return f.grafanaTransport }
 
 func TestVMSink_RequiresSupervisor(t *testing.T) {
 	if _, err := NewVMSink(VMSinkConfig{}); err == nil {

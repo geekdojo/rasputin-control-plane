@@ -55,6 +55,13 @@ func (s *Server) handleObservabilityProxy(w http.ResponseWriter, r *http.Request
 		username = user.Name
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	// On Linux Grafana has no TCP listener: it serves on a unix socket and
+	// `target` carries a placeholder host (geekdojo-brain#453). The
+	// transport is what actually reaches it, so a nil transport here would
+	// send the request to a host that does not resolve.
+	if tr := s.obs.GrafanaTransport(r.Context()); tr != nil {
+		proxy.Transport = tr
+	}
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
