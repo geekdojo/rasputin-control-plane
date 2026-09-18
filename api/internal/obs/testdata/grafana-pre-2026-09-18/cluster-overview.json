@@ -1,0 +1,31 @@
+{
+  "title": "Cluster Overview",
+  "uid": "rasputin-cluster-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "tags": ["rasputin"],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "CPU % per node",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "rasputin_cpu_percent", "legendFormat": "{{nodeId}}"}],
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory used (bytes) per node",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "rasputin_mem_used_bytes", "legendFormat": "{{nodeId}}"}],
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}
+    },
+    {
+      "type": "stat",
+      "title": "Nodes reporting",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "count(rasputin_cpu_percent)"}],
+      "gridPos": {"x": 0, "y": 8, "w": 6, "h": 4}
+    }
+  ]
+}

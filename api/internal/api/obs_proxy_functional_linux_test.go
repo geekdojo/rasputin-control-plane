@@ -291,6 +291,94 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		}
 	})
 
+	// The query above names the datasource by the uid Grafana reports, so it
+	// could not see the bug that shipped from 2026-06-02: the DASHBOARD's
+	// panels named a datasource uid that did not exist, and every panel
+	// showed "Datasource PBFA97CFB590B2093 was not found". This runs each
+	// panel's own query, with the panel's own datasource reference, from the
+	// dashboard model the browser loads through the proxy.
+	t.Run("b2: every starter-dashboard panel returns data", func(t *testing.T) {
+		if vmUID == "" {
+			t.Skip("subtest b found no VictoriaMetrics datasource")
+		}
+		seedStarterDashboardMetrics(t, "http://127.0.0.1:19316")
+
+		code, _, body := get(t, "/observability/api/dashboards/uid/"+dashUID)
+		if code != http.StatusOK {
+			t.Fatalf("dashboard model = %d", code)
+		}
+		var model struct {
+			Dashboard struct {
+				Panels []struct {
+					Title      string          `json:"title"`
+					Datasource json.RawMessage `json:"datasource"`
+					Targets    []struct {
+						Expr string `json:"expr"`
+					} `json:"targets"`
+				} `json:"panels"`
+			} `json:"dashboard"`
+		}
+		if err := json.Unmarshal([]byte(body), &model); err != nil {
+			t.Fatalf("dashboard model json: %v", err)
+		}
+		if len(model.Dashboard.Panels) == 0 {
+			t.Fatalf("dashboard has no panels: %.300s", body)
+		}
+		for _, p := range model.Dashboard.Panels {
+			var ds struct {
+				UID string `json:"uid"`
+			}
+			_ = json.Unmarshal(p.Datasource, &ds)
+			if ds.UID != vmUID {
+				t.Errorf("panel %q names datasource %s; the provisioned VictoriaMetrics is %q",
+					p.Title, p.Datasource, vmUID)
+			}
+			for _, tg := range p.Targets {
+				q := fmt.Sprintf(`{"queries":[{"refId":"A","datasource":%s,"expr":%q,"range":true,`+
+					`"intervalMs":15000,"maxDataPoints":100}],"from":"now-15m","to":"now"}`,
+					p.Datasource, tg.Expr)
+				req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+					front.URL+"/observability/api/ds/query", strings.NewReader(q))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Origin", front.URL)
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatalf("ds/query: %v", err)
+				}
+				qb, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusOK || strings.Contains(strings.ToLower(string(qb)), "not found") {
+					t.Errorf("panel %q (%s): ds/query = %d %.400s", p.Title, tg.Expr, resp.StatusCode, qb)
+					continue
+				}
+				var out struct {
+					Results map[string]struct {
+						Error  string `json:"error"`
+						Frames []struct {
+							Data struct {
+								Values [][]any `json:"values"`
+							} `json:"data"`
+						} `json:"frames"`
+					} `json:"results"`
+				}
+				if err := json.Unmarshal(qb, &out); err != nil {
+					t.Errorf("panel %q: ds/query json: %v", p.Title, err)
+					continue
+				}
+				r := out.Results["A"]
+				withData := 0
+				for _, f := range r.Frames {
+					if len(f.Data.Values) >= 2 && len(f.Data.Values[1]) > 0 {
+						withData++
+					}
+				}
+				if r.Error != "" || withData == 0 {
+					t.Errorf("panel %q (%s): no data frames (error %q): %.400s", p.Title, tg.Expr, r.Error, qb)
+				}
+			}
+		}
+	})
+
 	t.Run("c: Grafana Live websocket upgrades through the proxy", func(t *testing.T) {
 		wsURL := "ws" + strings.TrimPrefix(front.URL, "http") + "/observability/api/live/ws"
 		dctx, dcancel := context.WithTimeout(ctx, 30*time.Second)
@@ -325,6 +413,49 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		}
 		t.Logf("Live connect reply through the proxy: %.200s", msg)
 	})
+}
+
+// seedStarterDashboardMetrics writes the rasputin_* series the starter
+// dashboard plots into VictoriaMetrics, stamped a minute back so VM's search
+// latency offset does not hide them, and waits for the checkable fact that VM
+// serves them. The deadline bounds only VM making an accepted import
+// searchable.
+func seedStarterDashboardMetrics(t *testing.T, vmURL string) {
+	t.Helper()
+	ts := time.Now().Add(-time.Minute).UnixMilli()
+	var b strings.Builder
+	for _, n := range []string{"func-a", "func-b"} {
+		fmt.Fprintf(&b, "rasputin_cpu_percent{nodeId=%q} 20 %d\n", n, ts)
+		fmt.Fprintf(&b, "rasputin_mem_used_bytes{nodeId=%q} 1e9 %d\n", n, ts)
+	}
+	c := &http.Client{Timeout: 10 * time.Second}
+	resp, err := c.Post(vmURL+"/api/v1/import/prometheus", "text/plain", strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatalf("seed VM: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		t.Fatalf("seed VM: HTTP %d", resp.StatusCode)
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	var last string
+	for {
+		r, err := c.Get(vmURL + "/api/v1/query?query=count(rasputin_cpu_percent)")
+		if err == nil {
+			body, _ := io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			last = string(body)
+			if strings.Contains(last, `"2"]`) {
+				return
+			}
+		} else {
+			last = err.Error()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("VictoriaMetrics never served the seeded series within 90s (last: %.300s)", last)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // starterDashboardUID is the fixed uid in the provisioned cluster-overview
