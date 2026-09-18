@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -297,25 +298,39 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 	// showed "Datasource PBFA97CFB590B2093 was not found". This runs each
 	// panel's own query, with the panel's own datasource reference, from the
 	// dashboard model the browser loads through the proxy.
-	t.Run("b2: every starter-dashboard panel returns data", func(t *testing.T) {
-		if vmUID == "" {
-			t.Skip("subtest b found no VictoriaMetrics datasource")
-		}
-		seedStarterDashboardMetrics(t, "http://127.0.0.1:19316")
-
+	// The dashboard model the browser loads through the proxy, and a panel
+	// query issued exactly as a panel issues it — with the panel's own
+	// datasource reference, after template interpolation.
+	type dashVar struct {
+		Name       string `json:"name"`
+		Type       string `json:"type"`
+		Multi      bool   `json:"multi"`
+		IncludeAll bool   `json:"includeAll"`
+		AllValue   string `json:"allValue"`
+		Datasource struct {
+			UID string `json:"uid"`
+		} `json:"datasource"`
+	}
+	type dashPanel struct {
+		Title      string          `json:"title"`
+		Datasource json.RawMessage `json:"datasource"`
+		Targets    []struct {
+			Expr    string `json:"expr"`
+			Instant bool   `json:"instant"`
+		} `json:"targets"`
+	}
+	loadDashboard := func(t *testing.T) ([]dashPanel, []dashVar) {
+		t.Helper()
 		code, _, body := get(t, "/observability/api/dashboards/uid/"+dashUID)
 		if code != http.StatusOK {
 			t.Fatalf("dashboard model = %d", code)
 		}
 		var model struct {
 			Dashboard struct {
-				Panels []struct {
-					Title      string          `json:"title"`
-					Datasource json.RawMessage `json:"datasource"`
-					Targets    []struct {
-						Expr string `json:"expr"`
-					} `json:"targets"`
-				} `json:"panels"`
+				Panels     []dashPanel `json:"panels"`
+				Templating struct {
+					List []dashVar `json:"list"`
+				} `json:"templating"`
 			} `json:"dashboard"`
 		}
 		if err := json.Unmarshal([]byte(body), &model); err != nil {
@@ -324,7 +339,109 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		if len(model.Dashboard.Panels) == 0 {
 			t.Fatalf("dashboard has no panels: %.300s", body)
 		}
-		for _, p := range model.Dashboard.Panels {
+		return model.Dashboard.Panels, model.Dashboard.Templating.List
+	}
+	type series struct {
+		labels map[string]string
+		last   any
+		tail   string // newest timestamps and values, for failure messages
+	}
+	runPanelQuery := func(t *testing.T, ds json.RawMessage, expr string, instant bool) ([]series, bool) {
+		t.Helper()
+		qj, _ := json.Marshal(expr)
+		q := fmt.Sprintf(`{"queries":[{"refId":"A","datasource":%s,"expr":%s,"range":%t,"instant":%t,`+
+			`"intervalMs":15000,"maxDataPoints":100}],"from":"now-15m","to":"now"}`, ds, qj, !instant, instant)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+			front.URL+"/observability/api/ds/query", strings.NewReader(q))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", front.URL)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("ds/query: %v", err)
+		}
+		qb, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || strings.Contains(strings.ToLower(string(qb)), "not found") {
+			t.Errorf("ds/query %s = %d %.400s", expr, resp.StatusCode, qb)
+			return nil, false
+		}
+		var out struct {
+			Results map[string]struct {
+				Error  string `json:"error"`
+				Frames []struct {
+					Schema struct {
+						Fields []struct {
+							Labels map[string]string `json:"labels"`
+						} `json:"fields"`
+					} `json:"schema"`
+					Data struct {
+						Values [][]any `json:"values"`
+					} `json:"data"`
+				} `json:"frames"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal(qb, &out); err != nil {
+			t.Errorf("ds/query json: %v", err)
+			return nil, false
+		}
+		r := out.Results["A"]
+		if r.Error != "" {
+			t.Errorf("ds/query %s: error %q", expr, r.Error)
+			return nil, false
+		}
+		var got []series
+		for _, f := range r.Frames {
+			if len(f.Data.Values) < 2 || len(f.Data.Values[1]) == 0 {
+				continue
+			}
+			vs := f.Data.Values[1]
+			sr := series{last: vs[len(vs)-1], tail: fmt.Sprint(f.Data.Values[0][max(0, len(vs)-4):], vs[max(0, len(vs)-4):])}
+			if len(f.Schema.Fields) > 1 {
+				sr.labels = f.Schema.Fields[1].Labels
+			}
+			got = append(got, sr)
+		}
+		return got, true
+	}
+	// interpolate does what Grafana's frontend does to a Prometheus query
+	// before it reaches /api/ds/query (the backend does not interpolate
+	// dashboard variables): "All" becomes the variable's allValue verbatim;
+	// a selected value of a multi/includeAll variable is regex-escaped as
+	// prometheusSpecialRegexEscape does. A dashboard with no such variable
+	// leaves the expression unchanged — which is how the pre-variable
+	// dashboard ignored var-nodeId.
+	interpolate := func(expr string, vars []dashVar, selected map[string]string) string {
+		for _, v := range vars {
+			val, ok := selected[v.Name]
+			if !ok {
+				val = v.AllValue
+			} else {
+				val = regexp.MustCompile(`[\\$^*{}\[\]'+?.()|]`).ReplaceAllString(val, `\\$0`)
+			}
+			expr = strings.ReplaceAll(expr, "${"+v.Name+"}", val)
+			expr = strings.ReplaceAll(expr, "$"+v.Name, val)
+		}
+		return expr
+	}
+
+	// The DASHBOARD's panels named a datasource uid that did not exist until
+	// 2026-09-18 (every panel: "Datasource PBFA97CFB590B2093 was not
+	// found"), and the query in b names the datasource by the uid Grafana
+	// reports, so it could not see that. This runs each panel's own query,
+	// with the panel's own datasource reference.
+	//
+	// Two nodes whose ids are prefixes of one another, so "exactly that
+	// node" is tested and not just "a node".
+	nodeA, nodeB := "cp-compute1", "cp-compute10"
+	seeded := false
+	t.Run("b2: every starter-dashboard panel returns data", func(t *testing.T) {
+		if vmUID == "" {
+			t.Skip("subtest b found no VictoriaMetrics datasource")
+		}
+		seedStarterDashboardMetrics(t, "http://127.0.0.1:19316", nodeA, nodeB)
+		seeded = true
+		panels, vars := loadDashboard(t)
+		for _, p := range panels {
 			var ds struct {
 				UID string `json:"uid"`
 			}
@@ -334,46 +451,81 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 					p.Title, p.Datasource, vmUID)
 			}
 			for _, tg := range p.Targets {
-				q := fmt.Sprintf(`{"queries":[{"refId":"A","datasource":%s,"expr":%q,"range":true,`+
-					`"intervalMs":15000,"maxDataPoints":100}],"from":"now-15m","to":"now"}`,
-					p.Datasource, tg.Expr)
-				req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-					front.URL+"/observability/api/ds/query", strings.NewReader(q))
-				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("Origin", front.URL)
-				resp, err := client.Do(req)
-				if err != nil {
-					t.Fatalf("ds/query: %v", err)
+				got, ok := runPanelQuery(t, p.Datasource, interpolate(tg.Expr, vars, nil), tg.Instant)
+				if ok && len(got) == 0 {
+					t.Errorf("panel %q (%s): no data frames", p.Title, tg.Expr)
 				}
-				qb, _ := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				if resp.StatusCode != http.StatusOK || strings.Contains(strings.ToLower(string(qb)), "not found") {
-					t.Errorf("panel %q (%s): ds/query = %d %.400s", p.Title, tg.Expr, resp.StatusCode, qb)
+			}
+		}
+	})
+
+	// The node drawer's "in Grafana" link sends var-nodeId=<node id>. Opened
+	// with one node selected, every panel shows only that node; opened
+	// directly (All), every node.
+	t.Run("b3: a node's link shows only that node", func(t *testing.T) {
+		if !seeded {
+			t.Skip("b2 did not seed metrics")
+		}
+		panels, vars := loadDashboard(t)
+		var nodeVar *dashVar
+		for i := range vars {
+			if vars[i].Name == "nodeId" {
+				nodeVar = &vars[i]
+			}
+		}
+		if nodeVar == nil {
+			t.Errorf("the dashboard declares no nodeId variable, so the UI's var-nodeId is ignored (variables: %+v)", vars)
+		} else {
+			if nodeVar.Datasource.UID != vmUID {
+				t.Errorf("nodeId variable datasource = %q, want %q", nodeVar.Datasource.UID, vmUID)
+			}
+			// The variable's options come from Grafana's own datasource
+			// resource call, as the variable's label_values query makes it;
+			// the link's value must be one of them, or Grafana has nothing
+			// to select.
+			code, _, body := get(t, "/observability/api/datasources/uid/"+vmUID+
+				"/resources/api/v1/label/nodeId/values?match[]=rasputin_cpu_percent")
+			if code != http.StatusOK || !strings.Contains(body, `"`+nodeA+`"`) || !strings.Contains(body, `"`+nodeB+`"`) {
+				t.Errorf("nodeId options through Grafana = %d %.300s; want %s and %s", code, body, nodeA, nodeB)
+			}
+		}
+		nodesOf := func(got []series) []string {
+			var ids []string
+			for _, s := range got {
+				ids = append(ids, s.labels["nodeId"])
+			}
+			sort.Strings(ids)
+			return ids
+		}
+		for _, p := range panels {
+			for _, tg := range p.Targets {
+				isCount := strings.HasPrefix(tg.Expr, "count(")
+				one, ok1 := runPanelQuery(t, p.Datasource, interpolate(tg.Expr, vars, map[string]string{"nodeId": nodeA}), tg.Instant)
+				all, ok2 := runPanelQuery(t, p.Datasource, interpolate(tg.Expr, vars, nil), tg.Instant)
+				if !ok1 || !ok2 {
 					continue
 				}
-				var out struct {
-					Results map[string]struct {
-						Error  string `json:"error"`
-						Frames []struct {
-							Data struct {
-								Values [][]any `json:"values"`
-							} `json:"data"`
-						} `json:"frames"`
-					} `json:"results"`
-				}
-				if err := json.Unmarshal(qb, &out); err != nil {
-					t.Errorf("panel %q: ds/query json: %v", p.Title, err)
-					continue
-				}
-				r := out.Results["A"]
-				withData := 0
-				for _, f := range r.Frames {
-					if len(f.Data.Values) >= 2 && len(f.Data.Values[1]) > 0 {
-						withData++
+				if isCount {
+					if len(one) != 1 || one[0].last != float64(1) {
+						t.Errorf("panel %q with var-nodeId=%s: %+v; want 1 node reporting", p.Title, nodeA, one)
 					}
+					if len(all) != 1 || all[0].last != float64(2) {
+						t.Errorf("panel %q with All: %+v; want 2 nodes reporting", p.Title, all)
+					}
+					// A node that is not reporting: no value, which the
+					// panel's noValue shows as 0.
+					silent, ok := runPanelQuery(t, p.Datasource,
+						interpolate(tg.Expr, vars, map[string]string{"nodeId": "cp-compute9"}), tg.Instant)
+					if ok && len(silent) != 0 {
+						t.Errorf("panel %q for a silent node: %+v; want no value", p.Title, silent)
+					}
+					continue
 				}
-				if r.Error != "" || withData == 0 {
-					t.Errorf("panel %q (%s): no data frames (error %q): %.400s", p.Title, tg.Expr, r.Error, qb)
+				if got := nodesOf(one); len(got) != 1 || got[0] != nodeA {
+					t.Errorf("panel %q with var-nodeId=%s shows nodes %v; want only %s", p.Title, nodeA, got, nodeA)
+				}
+				if got := nodesOf(all); len(got) != 2 || got[0] != nodeA || got[1] != nodeB {
+					t.Errorf("panel %q with All shows nodes %v; want %s and %s", p.Title, got, nodeA, nodeB)
 				}
 			}
 		}
@@ -416,17 +568,25 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 }
 
 // seedStarterDashboardMetrics writes the rasputin_* series the starter
-// dashboard plots into VictoriaMetrics, stamped a minute back so VM's search
-// latency offset does not hide them, and waits for the checkable fact that VM
+// dashboard plots into VictoriaMetrics, stamped at least 30s back so VM's
+// search latency offset does not hide them, and waits for the checkable fact that VM
 // serves them. The deadline bounds only VM making an accepted import
 // searchable.
-func seedStarterDashboardMetrics(t *testing.T, vmURL string) {
+func seedStarterDashboardMetrics(t *testing.T, vmURL string, nodes ...string) {
 	t.Helper()
-	ts := time.Now().Add(-time.Minute).UnixMilli()
+	// A sample every 10s for the last five minutes, ending 30s back, as an
+	// agent reports. A single sample is not enough: VictoriaMetrics gives a
+	// lone sample a short lookbehind, so a range query sees it at one step
+	// only, and "count(...) or vector(0)" then reads 0 at the last step
+	// (measured on v1.103.0).
+	now := time.Now()
 	var b strings.Builder
-	for _, n := range []string{"func-a", "func-b"} {
-		fmt.Fprintf(&b, "rasputin_cpu_percent{nodeId=%q} 20 %d\n", n, ts)
-		fmt.Fprintf(&b, "rasputin_mem_used_bytes{nodeId=%q} 1e9 %d\n", n, ts)
+	for i := 3; i <= 30; i++ {
+		ts := now.Add(-time.Duration(i) * 10 * time.Second).UnixMilli()
+		for _, n := range nodes {
+			fmt.Fprintf(&b, "rasputin_cpu_percent{nodeId=%q} 20 %d\n", n, ts)
+			fmt.Fprintf(&b, "rasputin_mem_used_bytes{nodeId=%q} 1e9 %d\n", n, ts)
+		}
 	}
 	c := &http.Client{Timeout: 10 * time.Second}
 	resp, err := c.Post(vmURL+"/api/v1/import/prometheus", "text/plain", strings.NewReader(b.String()))
@@ -440,12 +600,19 @@ func seedStarterDashboardMetrics(t *testing.T, vmURL string) {
 	deadline := time.Now().Add(90 * time.Second)
 	var last string
 	for {
-		r, err := c.Get(vmURL + "/api/v1/query?query=count(rasputin_cpu_percent)")
+		// The fact the panels read: a RANGE query of the panels' shape whose
+		// newest point counts every seeded node. An instant query is not
+		// enough — right after an import VM answers instant queries with the
+		// new series while range queries still miss them for a moment
+		// (measured on v1.103.0: instant 2, range 1).
+		end := time.Now().Unix()
+		r, err := c.Get(fmt.Sprintf("%s/api/v1/query_range?query=count(rasputin_cpu_percent)&start=%d&end=%d&step=15",
+			vmURL, end-900, end))
 		if err == nil {
 			body, _ := io.ReadAll(r.Body)
 			_ = r.Body.Close()
 			last = string(body)
-			if strings.Contains(last, `"2"]`) {
+			if rangeLastValueIs(last, fmt.Sprint(len(nodes))) {
 				return
 			}
 		} else {
@@ -491,4 +658,24 @@ func waitForGrafanaDashboardRow(t *testing.T, dbPath, uid string, within time.Du
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+// rangeLastValueIs reports whether a Prometheus query_range response has
+// exactly one series whose newest point is want.
+func rangeLastValueIs(body, want string) bool {
+	var resp struct {
+		Data struct {
+			Result []struct {
+				Values [][]any `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(body), &resp) != nil || len(resp.Data.Result) != 1 {
+		return false
+	}
+	v := resp.Data.Result[0].Values
+	if len(v) == 0 || len(v[len(v)-1]) != 2 {
+		return false
+	}
+	return v[len(v)-1][1] == want
 }
