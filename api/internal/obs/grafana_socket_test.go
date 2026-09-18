@@ -3,6 +3,7 @@ package obs
 import (
 	"context"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -435,5 +436,71 @@ func TestGrafanaReady_ProbesOverTheSocket(t *testing.T) {
 	}
 	if n := hits.Load(); n != 1 {
 		t.Errorf("socket server saw %d /api/health hits, want 1", n)
+	}
+}
+
+// checkGrafanaSocket is a tripwire (it logs, it never fails a Start), so the
+// assertions are on what it logs for each shape the socket path can be in.
+func TestCheckGrafanaSocket_Tripwire(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "rgt")
+	if err != nil {
+		t.Fatalf("tempdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	on := true
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:         t.TempDir(),
+		UseGrafanaSocket: &on,
+		GrafanaSocketDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	var buf strings.Builder
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	check := func() string {
+		buf.Reset()
+		sup.checkGrafanaSocket()
+		return buf.String()
+	}
+	path := sup.GrafanaSocketPath()
+
+	if got := check(); !strings.Contains(got, "no such file") {
+		t.Errorf("missing socket: log = %q", got)
+	}
+
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check(); !strings.Contains(got, "is not a socket") {
+		t.Errorf("regular file: log = %q", got)
+	}
+	_ = os.Remove(path)
+
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// As root (the CI job) the expected owner is Grafana's uid, not ours.
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(path, grafanaImageUID, -1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := check(); strings.Contains(got, "WARNING") {
+		t.Errorf("0600 socket owned by the expected uid: unexpected warning %q", got)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if got := check(); !strings.Contains(got, "is 0666, want 0600") {
+		t.Errorf("0666 socket: log = %q", got)
 	}
 }
