@@ -83,6 +83,7 @@ func seedClusterMetrics(t *testing.T, sup *DockerComposeSupervisor) {
 		}{{"func-a", 12.5, 1.5e9}, {"func-b", 30, 2.5e9}} {
 			fmt.Fprintf(&b, "rasputin_cpu_percent{nodeId=%q} %g %d\n", n.id, n.cpu, ts)
 			fmt.Fprintf(&b, "rasputin_mem_used_bytes{nodeId=%q} %g %d\n", n.id, n.mem, ts)
+			fmt.Fprintf(&b, "rasputin_mem_total_bytes{nodeId=%q} %g %d\n", n.id, 4e9, ts)
 		}
 	}
 	c := &http.Client{Timeout: 10 * time.Second}

@@ -344,6 +344,7 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 	type series struct {
 		labels map[string]string
 		last   any
+		vals   []any
 		tail   string // newest timestamps and values, for failure messages
 	}
 	runPanelQuery := func(t *testing.T, ds json.RawMessage, expr string, instant bool) ([]series, bool) {
@@ -395,7 +396,7 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 				continue
 			}
 			vs := f.Data.Values[1]
-			sr := series{last: vs[len(vs)-1], tail: fmt.Sprint(f.Data.Values[0][max(0, len(vs)-4):], vs[max(0, len(vs)-4):])}
+			sr := series{last: vs[len(vs)-1], vals: vs, tail: fmt.Sprint(f.Data.Values[0][max(0, len(vs)-4):], vs[max(0, len(vs)-4):])}
 			if len(f.Schema.Fields) > 1 {
 				sr.labels = f.Schema.Fields[1].Labels
 			}
@@ -489,6 +490,7 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 				t.Errorf("nodeId options through Grafana = %d %.300s; want %s and %s", code, body, nodeA, nodeB)
 			}
 		}
+		memPct := false
 		nodesOf := func(got []series) []string {
 			var ids []string
 			for _, s := range got {
@@ -527,7 +529,29 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 				if got := nodesOf(all); len(got) != 2 || got[0] != nodeA || got[1] != nodeB {
 					t.Errorf("panel %q with All shows nodes %v; want %s and %s", p.Title, got, nodeA, nodeB)
 				}
+				if p.Title == "Memory % per node" {
+					memPct = true
+					// The seed is 1e9 used of 4e9 total: 25%, and every
+					// point a percentage.
+					for _, sr := range append(append([]series(nil), one...), all...) {
+						for _, v := range sr.vals {
+							f, ok := v.(float64)
+							if v == nil {
+								continue
+							}
+							if !ok || f < 0 || f > 100 {
+								t.Errorf("Memory %% for %s has value %v, outside [0,100]", sr.labels["nodeId"], v)
+							}
+						}
+						if sr.last != float64(25) {
+							t.Errorf("Memory %% for %s = %v, want 25 (1e9 of 4e9)", sr.labels["nodeId"], sr.last)
+						}
+					}
+				}
 			}
+		}
+		if !memPct {
+			t.Error(`the dashboard has no "Memory % per node" panel`)
 		}
 	})
 
@@ -586,6 +610,7 @@ func seedStarterDashboardMetrics(t *testing.T, vmURL string, nodes ...string) {
 		for _, n := range nodes {
 			fmt.Fprintf(&b, "rasputin_cpu_percent{nodeId=%q} 20 %d\n", n, ts)
 			fmt.Fprintf(&b, "rasputin_mem_used_bytes{nodeId=%q} 1e9 %d\n", n, ts)
+			fmt.Fprintf(&b, "rasputin_mem_total_bytes{nodeId=%q} 4e9 %d\n", n, ts)
 		}
 	}
 	c := &http.Client{Timeout: 10 * time.Second}

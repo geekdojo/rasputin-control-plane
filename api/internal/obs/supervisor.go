@@ -1225,7 +1225,7 @@ providers:
       path: /var/lib/grafana/dashboards
 `
 
-// starterDashboardJSON is the "Cluster Overview" dashboard — three
+// starterDashboardJSON is the "Cluster Overview" dashboard — four
 // panels backed by the rasputin_* metrics that VMSink writes.
 // Intentionally minimal: the goal is "operator sees something useful
 // the first time they open /observability", not "comprehensive
@@ -1239,6 +1239,11 @@ providers:
 // "All" (allValue .+, i.e. every nodeId), so the whole cluster shows.
 // Multi-value, so Grafana regex-escapes the value and the panels match it
 // with =~, which PromQL anchors: cp-compute1 never matches cp-compute10.
+//
+// Every panel declares a unit, so no axis shows raw numbers: bytes is
+// Grafana's IEC unit (1024), matching the UI's humanBytes. "Memory % per
+// node" is the expression the UI's own chart uses (obs.promExpr,
+// SeriesMemPercent), filtered like every other panel.
 //
 // "Nodes reporting" counts the SELECTED nodes that have a current sample:
 // an instant query, so the answer is "now" and not the last point of a
@@ -1279,6 +1284,7 @@ const starterDashboardJSON = `{
       "title": "CPU % per node",
       "datasource": {"type": "prometheus", "uid": "` + vmDatasourceUID + `"},
       "targets": [{"refId": "A", "expr": "rasputin_cpu_percent{` + vmNodeLabel + `=~\"$` + dashboardNodeVar + `\"}", "legendFormat": "{{` + vmNodeLabel + `}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
       "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}
     },
     {
@@ -1286,6 +1292,7 @@ const starterDashboardJSON = `{
       "title": "Memory used (bytes) per node",
       "datasource": {"type": "prometheus", "uid": "` + vmDatasourceUID + `"},
       "targets": [{"refId": "A", "expr": "rasputin_mem_used_bytes{` + vmNodeLabel + `=~\"$` + dashboardNodeVar + `\"}", "legendFormat": "{{` + vmNodeLabel + `}}"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
       "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}
     },
     {
@@ -1294,9 +1301,17 @@ const starterDashboardJSON = `{
       "description": "How many of the selected nodes have a current CPU sample. All: the whole cluster. One node: 1 while it reports, 0 once it has gone silent.",
       "datasource": {"type": "prometheus", "uid": "` + vmDatasourceUID + `"},
       "targets": [{"refId": "A", "instant": true, "range": false, "expr": "count(rasputin_cpu_percent{` + vmNodeLabel + `=~\"$` + dashboardNodeVar + `\"})"}],
-      "fieldConfig": {"defaults": {"noValue": "0"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "none", "noValue": "0"}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
       "gridPos": {"x": 0, "y": 8, "w": 6, "h": 4}
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory % per node",
+      "datasource": {"type": "prometheus", "uid": "` + vmDatasourceUID + `"},
+      "targets": [{"refId": "A", "expr": "100 * rasputin_mem_used_bytes{` + vmNodeLabel + `=~\"$` + dashboardNodeVar + `\"} / ignoring(__name__) rasputin_mem_total_bytes{` + vmNodeLabel + `=~\"$` + dashboardNodeVar + `\"}", "legendFormat": "{{` + vmNodeLabel + `}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "gridPos": {"x": 6, "y": 8, "w": 18, "h": 8}
     }
   ]
 }
