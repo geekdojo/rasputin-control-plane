@@ -244,9 +244,9 @@ func TestUnresolvedDatasourceRefs_CoversTemplateVariables(t *testing.T) {
 	if len(bad) != 0 {
 		t.Fatalf("starter dashboard refs unresolved: %v", bad)
 	}
-	// 3 panels + the node variable.
-	if checked != 4 {
-		t.Fatalf("checked %d datasource refs in the starter dashboard, want 4 (3 panels + %s variable)", checked, dashboardNodeVar)
+	// Every panel + the node variable.
+	if want := len(parseStarterDashboard(t, starterDashboardJSON).Panels) + 1; checked != want {
+		t.Fatalf("checked %d datasource refs in the starter dashboard, want %d (every panel + %s variable)", checked, want, dashboardNodeVar)
 	}
 }
 
