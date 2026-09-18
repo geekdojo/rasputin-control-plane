@@ -25,6 +25,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,12 +33,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	_ "modernc.org/sqlite"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
@@ -138,38 +141,28 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		return resp.StatusCode, resp.Header, string(b)
 	}
 
-	// The provisioned dashboard can be invisible for a fixed 60s on a fresh
-	// DB (measured; see obs's starterDashboardDeadline), so find its uid by
-	// polling for up to twice that.
-	var dashUID string
-	{
-		deadline := time.Now().Add(120 * time.Second)
-		for dashUID == "" {
-			code, _, body := get(t, "/observability/api/search?type=dash-db")
-			// Only an empty 200 is the provisioning window worth waiting
-			// out; anything else means the proxy cannot reach Grafana.
-			if code != http.StatusOK {
-				t.Fatalf("search through the proxy = %d %s", code, body)
+	// Before ANY authenticated request: wait until Grafana has committed the
+	// provisioned dashboard to its own DB. On a fresh Grafana database a
+	// request that lands before first-boot provisioning finishes hides the
+	// dashboard from search for a while (a fixed 60s idle, longer under load
+	// — measured, and the same on main's config). Once the row is committed
+	// the first search sees it, so after this wait there is ONE read.
+	waitForGrafanaDashboardRow(t, filepath.Join(stateDir, "grafana-data", "grafana.db"),
+		starterDashboardUID, 3*time.Minute)
+	dashUID := starterDashboardUID
+	if code, _, body := get(t, "/observability/api/search?type=dash-db"); code != http.StatusOK ||
+		!strings.Contains(body, `"uid":"`+dashUID+`"`) {
+		logs, _ := exec.Command("docker", "logs", "--tail", "300", "rasputin-grafana").CombinedOutput()
+		var keep []string
+		for _, l := range strings.Split(string(logs), "\n") {
+			ll := strings.ToLower(l)
+			if strings.Contains(ll, "provision") || strings.Contains(ll, "folder") ||
+				strings.Contains(ll, "level=error") {
+				keep = append(keep, l)
 			}
-			var hits []struct {
-				UID   string `json:"uid"`
-				Title string `json:"title"`
-			}
-			if json.Unmarshal([]byte(body), &hits) == nil {
-				for _, h := range hits {
-					if h.Title == "Cluster Overview" {
-						dashUID = h.UID
-					}
-				}
-			}
-			if dashUID != "" {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("starter dashboard not searchable through the proxy after 120s: %d %s", code, body)
-			}
-			time.Sleep(500 * time.Millisecond)
 		}
+		t.Fatalf("dashboard row is committed but search through the proxy does not show it: %d %s\n--- grafana log (filtered) ---\n%s",
+			code, body, strings.Join(keep, "\n"))
 	}
 
 	t.Run("a: pages and static assets render", func(t *testing.T) {
@@ -332,4 +325,39 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		}
 		t.Logf("Live connect reply through the proxy: %.200s", msg)
 	})
+}
+
+// starterDashboardUID is the fixed uid in the provisioned cluster-overview
+// dashboard (obs package, starterDashboardJSON).
+const starterDashboardUID = "rasputin-cluster-overview"
+
+// waitForGrafanaDashboardRow polls Grafana's own SQLite database, read-only,
+// until the dashboard row exists. Same fact as obs's
+// waitForProvisionedDashboardRow; duplicated because test helpers cannot
+// cross packages.
+func waitForGrafanaDashboardRow(t *testing.T, dbPath, uid string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var lastErr error
+	for {
+		db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
+		if err == nil {
+			var n int
+			qctx, qcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			err = db.QueryRowContext(qctx, `SELECT COUNT(*) FROM dashboard WHERE uid = ?`, uid).Scan(&n)
+			qcancel()
+			_ = db.Close()
+			if err == nil && n > 0 {
+				return
+			}
+		}
+		if err != nil {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Grafana never committed dashboard %q to %s within %s (last error: %v)",
+				uid, dbPath, within, lastErr)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }

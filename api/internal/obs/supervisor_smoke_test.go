@@ -243,6 +243,11 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 			return resp, string(body)
 		}
 
+		// Before ANY request to Grafana: wait for it to commit the
+		// provisioned dashboard (see waitForProvisionedDashboardRow for why
+		// a fact and not a timeout).
+		waitForProvisionedDashboardRow(t, stateDir, 3*time.Minute)
+
 		if runtime.GOOS == "linux" && sup.GrafanaSocketPath() == "" {
 			t.Fatal("on Linux Grafana must serve on a unix socket, not a published port " +
 				"(geekdojo-brain#453)")
@@ -289,25 +294,17 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 			t.Errorf("/api/user with no header = %d, want 401", resp.StatusCode)
 		}
 
-		// Provisioning landed — the dashboards the operator sees. Polled
-		// for up to 120s: on a fresh Grafana DB a request during first boot
-		// can hide the dashboard for a fixed 60s (measured; see
-		// starterDashboardDeadline in grafana_functional_linux_test.go).
-		deadline := time.Now().Add(120 * time.Second)
-		for {
-			resp, body := get("/api/search?type=dash-db", "smoke-operator")
-			if resp.StatusCode == http.StatusOK && strings.Contains(body, "Cluster Overview") {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("starter dashboard not searchable after 120s: %d %s", resp.StatusCode, body)
-			}
-			time.Sleep(500 * time.Millisecond)
+		// Provisioning landed — the dashboards the operator sees. The row
+		// wait is at the top of this subtest; one read here.
+		resp, body := get("/api/search?type=dash-db", "smoke-operator")
+		if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Cluster Overview") {
+			t.Fatalf("dashboard row committed but search does not show it: %d %s",
+				resp.StatusCode, body)
 		}
 
 		// The worst case in #453: the header value `admin` bound to a
 		// guaranteed server-admin account. There is no such account now.
-		resp, body := get("/api/user", "admin")
+		resp, body = get("/api/user", "admin")
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("/api/user as admin = %d", resp.StatusCode)
 		}

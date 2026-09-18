@@ -215,47 +215,27 @@ func containerTCPListeners(t *testing.T, container string) []string {
 	return held
 }
 
-// starterDashboardDeadline bounds waitForStarterDashboard. Derived from
-// measurement, not picked: on a FRESH Grafana 11.5.1 database, a request that
-// lands during first boot can leave the provisioned dashboard invisible to
-// every user — including one created later — for a fixed 60s, after which it
-// appears. Measured 2026-09-17: 4 of 6 racing trials recovered at exactly 60s,
-// the other 2 at 0s; with main's config (initial admin on) the same thing
-// happens, so it predates the socket change. A 60s deadline sat exactly on
-// that boundary and failed once in 20 runs at 65s; 120s is twice the
-// measured fixed window.
-const starterDashboardDeadline = 120 * time.Second
-
-// waitForStarterDashboard polls until the provisioned starter dashboard is
-// searchable, with a hard deadline (starterDashboardDeadline). What is under
-// test is that provisioning still happens over the socket — an eventual
-// property — not that it has happened by the instant Start returns.
-func waitForStarterDashboard(t *testing.T, sup *DockerComposeSupervisor, user string) {
+// assertStarterDashboard waits for the checkable fact — Grafana has
+// committed the provisioned dashboard to its own DB (see
+// waitForProvisionedDashboardRow for why that and not a timeout) — and then
+// requires the FIRST authenticated search to show it. One read: nothing
+// here retries until it happens to pass.
+func assertStarterDashboard(t *testing.T, sup *DockerComposeSupervisor, user string) {
 	t.Helper()
-	deadline := time.Now().Add(starterDashboardDeadline)
-	var code int
-	var body string
-	for {
-		code, body = grafanaGet(t, sup, "/api/search?type=dash-db", user)
-		if code == http.StatusOK && strings.Contains(body, "Cluster Overview") {
-			return
-		}
-		if time.Now().After(deadline) {
-			logs, _ := exec.Command("docker", "logs", "--tail", "200", grafanaFuncContainer).CombinedOutput()
-			var ls []string
-			for _, l := range strings.Split(string(logs), "\n") {
-				ll := strings.ToLower(l)
-				if strings.Contains(ll, "provision") || strings.Contains(ll, "level=error") ||
-					strings.Contains(ll, "dashboard") {
-					ls = append(ls, l)
-				}
+	waitForProvisionedDashboardRow(t, sup.cfg.StateDir, 3*time.Minute)
+	code, body := grafanaGet(t, sup, "/api/search?type=dash-db", user)
+	if code != http.StatusOK || !strings.Contains(body, "Cluster Overview") {
+		logs, _ := exec.Command("docker", "logs", "--tail", "200", grafanaFuncContainer).CombinedOutput()
+		var ls []string
+		for _, l := range strings.Split(string(logs), "\n") {
+			ll := strings.ToLower(l)
+			if strings.Contains(ll, "provision") || strings.Contains(ll, "level=error") ||
+				strings.Contains(ll, "dashboard") {
+				ls = append(ls, l)
 			}
-			files, _ := exec.Command("docker", "exec", grafanaFuncContainer, "ls", "-la",
-				"/var/lib/grafana/dashboards", "/etc/grafana/provisioning/dashboards").CombinedOutput()
-			t.Fatalf("starter dashboard not searchable after %s: %d %s\n--- grafana log (filtered) ---\n%s\n--- files ---\n%s",
-				starterDashboardDeadline, code, body, strings.Join(ls, "\n"), files)
 		}
-		time.Sleep(500 * time.Millisecond)
+		t.Fatalf("dashboard row is committed but search does not show it: %d %s\n--- grafana log (filtered) ---\n%s",
+			code, body, strings.Join(ls, "\n"))
 	}
 }
 
@@ -281,6 +261,9 @@ func TestGrafanaSocket_TransitionFromPublishedPort(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("published-port Grafana /api/health = %d, want 200", code)
 	}
+	// No authenticated request before provisioning has committed — see
+	// waitForProvisionedDashboardRow.
+	waitForProvisionedDashboardRow(t, stateDir, 3*time.Minute)
 	// This is the bug, reproduced against the shipped image: no
 	// credential, one header, authenticated.
 	code, body := grafanaGet(t, before, "/api/user", "mallory-not-an-account")
@@ -362,7 +345,7 @@ func TestGrafanaSocket_TransitionFromPublishedPort(t *testing.T) {
 		if code, _ := grafanaGet(t, after, "/api/user", ""); code != http.StatusUnauthorized {
 			t.Errorf("/api/user with no header = %d, want 401", code)
 		}
-		waitForStarterDashboard(t, after, "alice")
+		assertStarterDashboard(t, after, "alice")
 		// The provisioned datasources survived the switch.
 		code, body := grafanaGet(t, after, "/api/datasources", "alice")
 		// A Viewer cannot list datasources (403) — that is expected and
@@ -454,5 +437,5 @@ func TestGrafanaSocket_FreshInstall(t *testing.T) {
 		_ = conn.Close()
 		t.Errorf("a fresh install published %s", grafanaFuncLegacyAddr)
 	}
-	waitForStarterDashboard(t, sup, "alice")
+	assertStarterDashboard(t, sup, "alice")
 }
