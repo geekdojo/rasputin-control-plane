@@ -338,3 +338,26 @@ func (f *convergeFixture) submittedSpecs(t *testing.T) []EnrollSpec {
 	}
 	return out
 }
+
+// CA re-delivery skips a node bound to two devices rather than re-enrol it
+// with routes read off one of them.
+func TestConvergeTrust_SkipsANodeBoundToTwoDevices(t *testing.T) {
+	f := newTrustFixture(t).convergeFixture
+	now := time.Now().UTC()
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "fw", Role: proto.RoleFirewall, Hostname: "fw", FirstSeen: now, LastSeen: now,
+		Metadata: map[string]any{proto.MetadataMeshCAFingerprint: "stale-fingerprint"}}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	seedLegacyBinding(t, f.store, "hs-1", "fw", "192.168.1.0/24")
+	seedLegacyBinding(t, f.store, "hs-2", "fw")
+	out, err := reconcileConvergeTrust(f.svc, f.inv, f.jstore, f.runner)(stepCtx(f.ctx, f.nc, struct{}{}))
+	if err != nil {
+		t.Fatalf("converge_trust: %v", err)
+	}
+	if specs := f.submittedSpecs(t); len(specs) != 0 {
+		t.Errorf("re-delivered to a node bound twice: %+v", specs)
+	}
+	if !strings.Contains(string(out), `"duplicate_binding":1`) {
+		t.Errorf("the skip must be counted: %s", out)
+	}
+}
