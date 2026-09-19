@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS mesh_intents (
     enabled    INTEGER NOT NULL DEFAULT 1,
     spec       TEXT NOT NULL,
     hs_id      TEXT NOT NULL DEFAULT '',  -- Headscale id once created
-    hs_value   TEXT NOT NULL DEFAULT '',  -- e.g. the plaintext preauth key
+    hs_value   TEXT NOT NULL DEFAULT '',  -- unused: always ''; see migrations
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -45,4 +45,10 @@ CREATE INDEX IF NOT EXISTS idx_mesh_devices_kind ON mesh_devices(kind);
 // already-migrated database; "duplicate column name" is expected and swallowed.
 var migrations = []string{
 	`ALTER TABLE mesh_devices ADD COLUMN online INTEGER NOT NULL DEFAULT 0`,
+	// User pre-auth key values are shown once, in the create response, and
+	// never stored. Releases before that kept the plaintext in hs_value;
+	// clear it. Runs on every open, so a database restored from an older
+	// archive is cleared too. The column stays (dropping it gains nothing
+	// and an older api rolled back onto this DB still expects it).
+	`UPDATE mesh_intents SET hs_value = '' WHERE hs_value != ''`,
 }

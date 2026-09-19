@@ -61,19 +61,10 @@ func boolToInt(b bool) int {
 
 func (s *Store) CreateIntent(ctx context.Context, i *Intent) error {
 	_, err := s.db.ExecContext(ctx, `
-        INSERT INTO mesh_intents (id, kind, name, enabled, spec, hs_id, hs_value, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        INSERT INTO mesh_intents (id, kind, name, enabled, spec, hs_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		i.ID, i.Kind, i.Name, boolToInt(i.Enabled), string(i.Spec),
-		i.HSID, i.HSValue, ms(i.CreatedAt), ms(i.UpdatedAt))
-	return err
-}
-
-// SetIntentHSRef writes back the Headscale id + plaintext value (e.g. the
-// preauth key string) once the apply step resolves them.
-func (s *Store) SetIntentHSRef(ctx context.Context, id, hsID, hsValue string) error {
-	_, err := s.db.ExecContext(ctx, `
-        UPDATE mesh_intents SET hs_id = ?, hs_value = ?, updated_at = ?
-        WHERE id = ?`, hsID, hsValue, ms(time.Now().UTC()), id)
+		i.HSID, ms(i.CreatedAt), ms(i.UpdatedAt))
 	return err
 }
 
@@ -112,7 +103,7 @@ func (s *Store) UpdateIntent(ctx context.Context, i *Intent) error {
 
 func (s *Store) GetIntent(ctx context.Context, id string) (*Intent, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, kind, name, enabled, spec, hs_id, hs_value, created_at, updated_at
+        SELECT id, kind, name, enabled, spec, hs_id, created_at, updated_at
         FROM mesh_intents WHERE id = ?`, id)
 	return scanIntent(row.Scan)
 }
@@ -121,7 +112,7 @@ func (s *Store) GetIntent(ctx context.Context, id string) (*Intent, error) {
 // deterministic hashes.
 func (s *Store) ListIntents(ctx context.Context) ([]*Intent, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, kind, name, enabled, spec, hs_id, hs_value, created_at, updated_at
+        SELECT id, kind, name, enabled, spec, hs_id, created_at, updated_at
         FROM mesh_intents ORDER BY created_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -142,7 +133,7 @@ func (s *Store) ListIntents(ctx context.Context) ([]*Intent, error) {
 // the UI's keys table).
 func (s *Store) ListIntentsByKind(ctx context.Context, kind string) ([]*Intent, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, kind, name, enabled, spec, hs_id, hs_value, created_at, updated_at
+        SELECT id, kind, name, enabled, spec, hs_id, created_at, updated_at
         FROM mesh_intents WHERE kind = ? ORDER BY created_at DESC, id ASC`, kind)
 	if err != nil {
 		return nil, err
@@ -167,7 +158,7 @@ func scanIntent(scan func(...any) error) (*Intent, error) {
 		createdAt int64
 		updatedAt int64
 	)
-	if err := scan(&i.ID, &i.Kind, &i.Name, &enabled, &spec, &i.HSID, &i.HSValue,
+	if err := scan(&i.ID, &i.Kind, &i.Name, &enabled, &spec, &i.HSID,
 		&createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

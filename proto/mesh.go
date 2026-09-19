@@ -29,9 +29,9 @@ func ValidMeshIntentKind(k MeshIntentKind) bool {
 	return false
 }
 
-// PreAuthKeySpec describes a single Headscale pre-auth key intent. The
-// resolved key string is persisted on the intent row (hs_value) after
-// apply — Headscale will not return the plaintext on subsequent reads.
+// PreAuthKeySpec describes a single Headscale pre-auth key intent. The key's
+// value is shown once, in the create response, and is not stored anywhere —
+// Headscale will not return it again either.
 type PreAuthKeySpec struct {
 	User       string   `json:"user"`                 // Headscale user; defaults to "rasputin-operator" in v0
 	Reusable   bool     `json:"reusable"`             // default false; single-use is safer

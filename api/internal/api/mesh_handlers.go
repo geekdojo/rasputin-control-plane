@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -300,8 +302,8 @@ func (s *Server) serveMeshCA(w http.ResponseWriter, contentType, filename string
 	_, _ = w.Write(caPEM)
 }
 
-// GET /api/mesh/keys — list preauth_key intents. Returns the plaintext
-// only on the freshly-created response below; subsequent GETs hide it.
+// GET /api/mesh/keys — list preauth_key intents. A key's value is never
+// stored, so no read can return it; only the create response below does.
 func (s *Server) handleListMeshKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := s.mesh.Store().ListIntentsByKind(r.Context(), string(proto.IntentPreAuthKey))
 	if err != nil {
@@ -311,21 +313,26 @@ func (s *Server) handleListMeshKeys(w http.ResponseWriter, r *http.Request) {
 	if keys == nil {
 		keys = []*mesh.Intent{}
 	}
-	// Hide the secret value on list — only the creation response includes it.
-	scrubbed := make([]*mesh.Intent, 0, len(keys))
-	for _, k := range keys {
-		cp := *k
-		cp.HSValue = ""
-		scrubbed = append(scrubbed, &cp)
-	}
-	writeJSON(w, http.StatusOK, scrubbed)
+	writeJSON(w, http.StatusOK, keys)
+}
+
+// createdMeshKey is the create response: the recorded intent plus the key's
+// value, which Headscale returns only at creation and Rasputin never stores.
+type createdMeshKey struct {
+	*mesh.Intent
+	HSValue string `json:"hsValue"`
 }
 
 // POST /api/mesh/keys
 // Body: { "name": "Rasputin Terminal", "deviceHint": "MacBook Pro", ... }
-// Creates a preauth_key intent AND immediately runs mesh.apply so the key
-// is minted on Headscale. Returns the intent with the plaintext key value
-// — this is the only time the value is visible.
+// Mints a user-device pre-auth key on Headscale and records it as a
+// preauth_key intent. Returns the intent with the plaintext key value —
+// this is the only time the value is visible; it is never stored.
+//
+// The key is minted under mesh.PreAuthUserDevice: its tag is always
+// tag:user-device, a tag:rasputin-* tag is refused, and its expiry is capped
+// at mesh.UserDeviceKeyMaxExpiry. A request outside that profile is a 400,
+// never quietly narrowed.
 func (s *Server) handleCreateMeshKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name       string   `json:"name"`
@@ -343,25 +350,40 @@ func (s *Server) handleCreateMeshKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	expiresIn, err := mesh.ParseUserDeviceKeyExpiry(req.ExpiresIn)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Mint inline (don't make the user wait for a job + poll for a key they
+	// need to copy out of the UI right now), then record the intent. Minting
+	// first means no intent row ever exists without its key, and a request
+	// outside the profile is refused before anything is minted.
+	key, err := s.mesh.MintPreAuthKey(r.Context(), mesh.PreAuthUserDevice, mesh.PreAuthKeyRequest{
+		Reusable:  req.Reusable,
+		Ephemeral: req.Ephemeral,
+		ExpiresIn: expiresIn,
+		Tags:      req.Tags,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, mesh.ErrPreAuthRequest) {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, "mint key: "+err.Error())
+		return
+	}
 	if req.ExpiresIn == "" {
-		req.ExpiresIn = "24h"
+		req.ExpiresIn = mesh.UserDeviceKeyDefaultExpiry.String()
 	}
-	if len(req.Tags) == 0 {
-		req.Tags = []string{"tag:user-device"}
-	}
-	spec := proto.PreAuthKeySpec{
-		User:       s.mesh.Config().DefaultUser,
+	specJSON, _ := json.Marshal(proto.PreAuthKeySpec{
+		User:       key.User,
 		Reusable:   req.Reusable,
 		Ephemeral:  req.Ephemeral,
 		ExpiresIn:  req.ExpiresIn,
-		Tags:       req.Tags,
+		Tags:       key.Tags,
 		DeviceHint: req.DeviceHint,
-	}
-	specJSON, err := json.Marshal(spec)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	})
 	now := time.Now().UTC()
 	intent := &mesh.Intent{
 		ID:        ulid.Make().String(),
@@ -369,43 +391,31 @@ func (s *Server) handleCreateMeshKey(w http.ResponseWriter, r *http.Request) {
 		Name:      req.Name,
 		Enabled:   true,
 		Spec:      specJSON,
+		HSID:      key.ID,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	if err := s.mesh.Store().CreateIntent(r.Context(), intent); err != nil {
+		// Nobody will ever be shown this key: expire it rather than leave a
+		// live, unlisted key on Headscale.
+		if xerr := s.mesh.Client().ExpirePreAuthKey(context.WithoutCancel(r.Context()), key.ID); xerr != nil {
+			log.Printf("mesh: expire unrecorded pre-auth key %s: %v", key.ID, xerr)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// Inline mint (don't make the user wait for a job + poll for a key
-	// they need to copy out of the UI right now).
-	id, value, err := s.mesh.Client().CreatePreAuthKey(r.Context(), mesh.CreatePreAuthKeyInput{
-		User:      spec.User,
-		Reusable:  spec.Reusable,
-		Ephemeral: spec.Ephemeral,
-		Expiry:    now.Add(parseDurationOr(spec.ExpiresIn, 24*time.Hour)),
-		Tags:      spec.Tags,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "mint key: "+err.Error())
-		return
-	}
-	if err := s.mesh.Store().SetIntentHSRef(r.Context(), intent.ID, id, value); err != nil {
-		writeError(w, http.StatusInternalServerError, "persist hs ref: "+err.Error())
-		return
-	}
-	intent.HSID = id
-	intent.HSValue = value
-
 	// Publish a key_created change.
-	publishMeshKeyCreated(s, intent.ID, id)
+	publishMeshKeyCreated(s, intent.ID, key.ID)
 
 	// Recompute hash on the way out.
 	intents, _ := s.mesh.Store().ListIntents(r.Context())
 	_, hash, _ := mesh.Compile(intents)
 	_ = s.mesh.Store().UpdateAfterApply(r.Context(), hash, now)
 
-	writeJSON(w, http.StatusCreated, intent)
+	// The one time the value is shown. It is not stored: a lost key is
+	// deleted and a new one created.
+	writeJSON(w, http.StatusCreated, createdMeshKey{Intent: intent, HSValue: key.Value})
 }
 
 // PATCH /api/mesh/keys/{id}
@@ -699,16 +709,6 @@ func (s *Server) handleMeshEnrollNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
-}
-
-// parseDurationOr is a small helper for handlers — kept here to avoid
-// re-exporting from mesh.
-func parseDurationOr(s string, def time.Duration) time.Duration {
-	d, err := time.ParseDuration(s)
-	if err != nil || d <= 0 {
-		return def
-	}
-	return d
 }
 
 // publishMeshKeyCreated emits a key_created change on the bus. Kept local

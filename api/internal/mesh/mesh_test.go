@@ -32,6 +32,10 @@ type fakeClient struct {
 	nodes           map[string]HSNode
 	createCalls     int
 	expireCalls     int
+	createInputs    []CreatePreAuthKeyInput
+	mintedValues    []string
+	expiredIDs      []string
+	expireKeyErr    error
 	setRoutesCalls  int
 	ensureUserCalls int
 	deleteNodeCalls int
@@ -81,8 +85,10 @@ func (f *fakeClient) CreatePreAuthKey(_ context.Context, in CreatePreAuthKeyInpu
 	if f.createKeyErr != nil {
 		return "", "", f.createKeyErr
 	}
-	id := "key-" + in.User + "-" + time.Now().UTC().Format("150405.000000")
+	f.createInputs = append(f.createInputs, in)
+	id := fmt.Sprintf("key-%s-%d", in.User, f.createCalls)
 	value := "plain-" + id
+	f.mintedValues = append(f.mintedValues, value)
 	f.keys[id] = HSPreAuthKey{
 		ID: id, User: in.User, Reusable: in.Reusable, Ephemeral: in.Ephemeral,
 		Tags: append([]string{}, in.Tags...), Expiration: in.Expiry,
@@ -95,6 +101,10 @@ func (f *fakeClient) ExpirePreAuthKey(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.expireCalls++
+	f.expiredIDs = append(f.expiredIDs, id)
+	if f.expireKeyErr != nil {
+		return f.expireKeyErr
+	}
 	k, ok := f.keys[id]
 	if !ok {
 		return nil
@@ -102,6 +112,13 @@ func (f *fakeClient) ExpirePreAuthKey(_ context.Context, id string) error {
 	k.Expiration = time.Now().Add(-time.Second).UTC()
 	f.keys[id] = k
 	return nil
+}
+
+// minted returns every key value the fake handed out, and the ids expired.
+func (f *fakeClient) minted() (values, expired []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.mintedValues...), append([]string(nil), f.expiredIDs...)
 }
 
 func (f *fakeClient) ListPreAuthKeys(_ context.Context, user string) ([]HSPreAuthKey, error) {
@@ -373,17 +390,41 @@ func TestStore_GetIntent_NotFound(t *testing.T) {
 	}
 }
 
-func TestStore_SetIntentHSRef(t *testing.T) {
-	f := newMeshFixture(t)
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	in := &Intent{ID: "i1", Kind: "preauth_key", Name: "x", Spec: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now}
-	_ = f.store.CreateIntent(f.ctx, in)
-	if err := f.store.SetIntentHSRef(f.ctx, "i1", "hsid", "value"); err != nil {
-		t.Fatalf("SetIntentHSRef: %v", err)
+// A user pre-auth key's value is never stored, and a value an older release
+// stored is cleared the next time the store is opened.
+func TestStore_ClearsStoredKeyValuesOnOpen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mesh.db")
+	st, err := OpenStore(ctx, path)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
 	}
-	got, _ := f.store.GetIntent(f.ctx, "i1")
-	if got.HSID != "hsid" || got.HSValue != "value" {
-		t.Errorf("HS ref: %+v", got)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := st.CreateIntent(ctx, &Intent{ID: "new", Kind: "preauth_key", Name: "x", Spec: json.RawMessage(`{}`), HSID: "7", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("CreateIntent: %v", err)
+	}
+	// What an older release wrote.
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO mesh_intents (id, kind, name, enabled, spec, hs_id, hs_value, created_at, updated_at)
+		VALUES ('old', 'preauth_key', 'y', 1, '{}', '3', 'hskey-auth-legacy-plaintext', 0, 0)`); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	_ = st.Close()
+
+	st, err = OpenStore(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	var stored int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mesh_intents WHERE hs_value != ''`).Scan(&stored); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if stored != 0 {
+		t.Errorf("%d intent(s) still hold a key value after reopening", stored)
+	}
+	got, _ := st.GetIntent(ctx, "old")
+	if got == nil || got.HSID != "3" {
+		t.Errorf("clearing the value must keep the row and its Headscale id: %+v", got)
 	}
 }
 
@@ -604,7 +645,7 @@ func TestNoopSupervisor_StartHealthyStop(t *testing.T) {
 }
 
 // ============================================================================
-// applyCompile / applyPushKeys / applyPushRoutes / applyRecord
+// applyCompile / applyPushRoutes / applyRecord
 // ============================================================================
 
 func TestApplyCompile_EmptyStore(t *testing.T) {
@@ -616,51 +657,6 @@ func TestApplyCompile_EmptyStore(t *testing.T) {
 	}
 	if len(out) == 0 {
 		t.Error("expected output")
-	}
-}
-
-func TestApplyPushKeys_MintsForUnsetIntents(t *testing.T) {
-	f := newMeshFixture(t)
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	intent := &Intent{
-		ID: "k1", Kind: string(proto.IntentPreAuthKey), Name: "primary",
-		Enabled:   true,
-		Spec:      mustMarshal(t, proto.PreAuthKeySpec{User: "u1", ExpiresIn: "24h"}),
-		CreatedAt: now, UpdatedAt: now,
-	}
-	if err := f.store.CreateIntent(f.ctx, intent); err != nil {
-		t.Fatalf("CreateIntent: %v", err)
-	}
-	step := applyPushKeys(f.svc)
-	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
-		t.Fatalf("applyPushKeys: %v", err)
-	}
-	if f.client.createCalls != 1 {
-		t.Errorf("CreateKey calls: want 1, got %d", f.client.createCalls)
-	}
-	got, _ := f.store.GetIntent(f.ctx, "k1")
-	if got.HSID == "" || got.HSValue == "" {
-		t.Errorf("HS ref not persisted: %+v", got)
-	}
-}
-
-func TestApplyPushKeys_SkipsExistingKeys(t *testing.T) {
-	f := newMeshFixture(t)
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	intent := &Intent{
-		ID: "k1", Kind: string(proto.IntentPreAuthKey), Name: "primary",
-		Enabled: true,
-		Spec:    mustMarshal(t, proto.PreAuthKeySpec{User: "u1", ExpiresIn: "24h"}),
-		HSID:    "existing", HSValue: "existing-value",
-		CreatedAt: now, UpdatedAt: now,
-	}
-	_ = f.store.CreateIntent(f.ctx, intent)
-	step := applyPushKeys(f.svc)
-	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
-		t.Fatalf("applyPushKeys: %v", err)
-	}
-	if f.client.createCalls != 0 {
-		t.Errorf("should skip already-minted: %d calls", f.client.createCalls)
 	}
 }
 
@@ -1004,23 +1000,6 @@ func TestWorkflowConstructors_Kinds(t *testing.T) {
 // ============================================================================
 // Misc helpers
 // ============================================================================
-
-func TestParseExpiry(t *testing.T) {
-	cases := []struct {
-		in   string
-		want time.Duration
-	}{
-		{"", 24 * time.Hour},
-		{"5m", 5 * time.Minute},
-		{"not a duration", 24 * time.Hour},
-		{"-1h", 24 * time.Hour},
-	}
-	for _, tc := range cases {
-		if got := parseExpiry(tc.in); got != tc.want {
-			t.Errorf("parseExpiry(%q) = %v, want %v", tc.in, got, tc.want)
-		}
-	}
-}
 
 func TestSimpleHash_StableNonNegative(t *testing.T) {
 	a := simpleHash("foo")

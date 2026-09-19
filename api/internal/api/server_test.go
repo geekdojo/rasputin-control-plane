@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -102,6 +103,7 @@ type fakeMeshClient struct {
 	createCalls int
 	createErr   error
 	deleteErr   error
+	lastCreate  mesh.CreatePreAuthKeyInput
 }
 
 func newFakeMeshClient() *fakeMeshClient {
@@ -137,6 +139,7 @@ func (f *fakeMeshClient) DeleteNode(_ context.Context, nodeID string) error {
 }
 func (f *fakeMeshClient) CreatePreAuthKey(_ context.Context, in mesh.CreatePreAuthKeyInput) (string, string, error) {
 	f.createCalls++
+	f.lastCreate = in
 	if f.createErr != nil {
 		return "", "", f.createErr
 	}
@@ -2249,25 +2252,13 @@ func TestAtoiOr(t *testing.T) {
 }
 
 // ============================================================================
-// creator + parseDurationOr
+// creator
 // ============================================================================
 
 func TestCreator(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	if creator(r) == "" {
 		t.Error("want non-empty creator")
-	}
-}
-
-func TestParseDurationOr(t *testing.T) {
-	if got := parseDurationOr("5m", time.Hour); got != 5*time.Minute {
-		t.Errorf("5m: %v", got)
-	}
-	if got := parseDurationOr("", time.Hour); got != time.Hour {
-		t.Errorf("default: %v", got)
-	}
-	if got := parseDurationOr("-1h", time.Hour); got != time.Hour {
-		t.Errorf("negative defaults: %v", got)
 	}
 }
 
@@ -2291,5 +2282,131 @@ func TestWriteError(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "msg") {
 		t.Errorf("body: %s", w.Body.String())
+	}
+}
+
+// A user-device key is always tagged tag:user-device, carries the default
+// 24h expiry when none is asked for, and its tags are recorded as minted.
+func TestHandleCreateMeshKey_UserDeviceProfile(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	before := time.Now()
+	w := f.do(t, http.MethodPost, "/api/mesh/keys", `{"name":"laptop"}`, c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d body=%s", w.Code, w.Body.String())
+	}
+	in := f.meshFake.lastCreate
+	if len(in.Tags) != 1 || in.Tags[0] != mesh.UserDeviceTag {
+		t.Errorf("minted tags = %v, want [%s]", in.Tags, mesh.UserDeviceTag)
+	}
+	if d := in.Expiry.Sub(before); d < 23*time.Hour || d > 25*time.Hour {
+		t.Errorf("default expiry %s from now, want 24h", d)
+	}
+	var got struct {
+		mesh.Intent
+		HSValue string `json:"hsValue"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var spec proto.PreAuthKeySpec
+	_ = json.Unmarshal(got.Spec, &spec)
+	if len(spec.Tags) != 1 || spec.Tags[0] != mesh.UserDeviceTag || spec.ExpiresIn != "24h0m0s" {
+		t.Errorf("recorded spec = %+v", spec)
+	}
+	if got.HSValue == "" || got.HSID == "" {
+		t.Errorf("the create response must show the key once: %+v", got)
+	}
+
+	// An explicit tag:user-device and a 7-day expiry are within the profile.
+	w = f.do(t, http.MethodPost, "/api/mesh/keys", `{"name":"phone","tags":["tag:user-device"],"expiresIn":"168h"}`, c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("want 201 for the profile's own tag and max expiry, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// Anything outside the user-device profile is refused with 400 before a key
+// is minted or an intent recorded.
+func TestHandleCreateMeshKey_RefusesOutsideTheProfile(t *testing.T) {
+	cases := map[string]string{
+		"reserved node tag":      `{"name":"x","tags":["tag:rasputin-node"]}`,
+		"any reserved tag":       `{"name":"x","tags":["tag:rasputin-anything"]}`,
+		"reserved tag alongside": `{"name":"x","tags":["tag:user-device","tag:rasputin-node"]}`,
+		"other tag":              `{"name":"x","tags":["tag:server"]}`,
+		"expiry over the cap":    `{"name":"x","expiresIn":"169h"}`,
+		"expiry years":           `{"name":"x","expiresIn":"87600h"}`,
+		"unparseable expiry":     `{"name":"x","expiresIn":"forever"}`,
+		"negative expiry":        `{"name":"x","expiresIn":"-1h"}`,
+		"zero expiry":            `{"name":"x","expiresIn":"0s"}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newAPIFixture(t)
+			c := f.authenticate(t)
+			w := f.do(t, http.MethodPost, "/api/mesh/keys", body, c)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("want 400, got %d body=%s", w.Code, w.Body.String())
+			}
+			if f.meshFake.createCalls != 0 {
+				t.Errorf("a refused request minted %d key(s)", f.meshFake.createCalls)
+			}
+			w = f.do(t, http.MethodGet, "/api/mesh/keys", "", c)
+			if strings.TrimSpace(w.Body.String()) != "[]" {
+				t.Errorf("a refused request left an intent: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// A failed mint leaves no intent behind: nothing mints it later.
+func TestHandleCreateMeshKey_FailedMintRecordsNothing(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	f.meshFake.createErr = errors.New("headscale down")
+	w := f.do(t, http.MethodPost, "/api/mesh/keys", `{"name":"x"}`, c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", w.Code)
+	}
+	w = f.do(t, http.MethodGet, "/api/mesh/keys", "", c)
+	if strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Errorf("a failed mint left an intent: %s", w.Body.String())
+	}
+}
+
+// The key's value is in the create response and nowhere else: not in the
+// list, not in a PATCH response, not in the store.
+func TestHandleCreateMeshKey_ValueShownOnceNeverStored(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	w := f.do(t, http.MethodPost, "/api/mesh/keys", `{"name":"laptop"}`, c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		ID      string `json:"id"`
+		HSValue string `json:"hsValue"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+	if created.HSValue == "" {
+		t.Fatal("the create response must carry the key value")
+	}
+	for _, rd := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/mesh/keys", ""},
+		{http.MethodPatch, "/api/mesh/keys/" + created.ID, `{"name":"renamed"}`},
+	} {
+		w := f.do(t, rd.method, rd.path, rd.body, c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s %s: %d %s", rd.method, rd.path, w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), created.HSValue) || strings.Contains(w.Body.String(), "hsValue") {
+			t.Errorf("%s %s echoes the key: %s", rd.method, rd.path, w.Body.String())
+		}
+	}
+	got, err := f.srv.mesh.Store().GetIntent(context.Background(), created.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetIntent: %v", err)
+	}
+	if raw, _ := json.Marshal(got); strings.Contains(string(raw), created.HSValue) {
+		t.Errorf("the stored intent carries the key: %s", raw)
 	}
 }
