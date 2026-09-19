@@ -502,13 +502,16 @@ export function createApp(input: {
 // `deleted` change event once the stop completes.
 //
 // deleteVolumes is the operator's answer to "Delete volumes?" on the uninstall
-// confirmation (geekdojo/geekdojo-brain#399). false — the default, and what a
-// caller that passes nothing sends — keeps every one of the app's volumes on
-// the node, anonymous ones included, and they are then listed as orphans. true
-// removes every volume the app ever had: `compose down -v`, then whatever that
-// cannot see (geekdojo/geekdojo-brain#413).
-export function deleteApp(id: string, opts?: { deleteVolumes: boolean }): Promise<Job> {
-  if (!opts) return jsonFetch<Job>(`/api/apps/${id}`, { method: 'DELETE' });
+// confirmation (geekdojo/geekdojo-brain#399), as the exact names of the volumes
+// they were shown. Empty — the default, and what a caller that passes nothing
+// sends — keeps every one of the app's volumes on the node, anonymous ones
+// included, and they are then listed as orphans. A list must be exactly the
+// app's volumes on its node, as getAppVolumes(id, { onNode: true }) lists them:
+// deleting data removes every volume the app ever had (#413), so the api
+// refuses a name the app does not have (400) and a list that leaves one out
+// (409).
+export function deleteApp(id: string, opts?: { deleteVolumes: string[] }): Promise<Job> {
+  if (!opts || opts.deleteVolumes.length === 0) return jsonFetch<Job>(`/api/apps/${id}`, { method: 'DELETE' });
   return jsonFetch<Job>(`/api/apps/${id}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
@@ -518,8 +521,10 @@ export function deleteApp(id: string, opts?: { deleteVolumes: boolean }): Promis
 
 // getAppVolumes lists an app's volumes by class with when each was last
 // captured into a retained backup generation — the uninstall prompt's facts.
-export function getAppVolumes(id: string): Promise<AppVolumesResponse> {
-  return jsonFetch<AppVolumesResponse>(`/api/apps/${id}/volumes`);
+// onNode also asks the app's node which volumes it holds for the app: the
+// exact names a delete with data sends.
+export function getAppVolumes(id: string, opts?: { onNode: boolean }): Promise<AppVolumesResponse> {
+  return jsonFetch<AppVolumesResponse>(`/api/apps/${id}/volumes${opts?.onNode ? '?onNode=1' : ''}`);
 }
 
 // listOrphanVolumes lists rasp_<appId>_* volumes, and the anonymous volumes an

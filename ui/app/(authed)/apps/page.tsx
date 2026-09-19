@@ -150,7 +150,8 @@ export default function AppsPage() {
     if (action === 'delete') {
       setDeleteInfo(null);
       setPendingDelete(app);
-      getAppVolumes(app.id)
+      // onNode: the exact names a delete with data sends are the node's.
+      getAppVolumes(app.id, { onNode: true })
         // A custom app's volumes cannot be listed; the prompt says what a
         // delete with data covers instead, anonymous volumes included (#424).
         .then((info) => setDeleteInfo(isCustomApp(app) ? { ...info, note: customAppVolumesNote(app.id, app.targetNode) } : info))
@@ -173,7 +174,7 @@ export default function AppsPage() {
     }
   }
 
-  async function confirmDelete(app: App, deleteVolumes: boolean) {
+  async function confirmDelete(app: App, deleteVolumes: string[]) {
     setBusy(app.id);
     setErr(null);
     try {
@@ -181,7 +182,7 @@ export default function AppsPage() {
       // drops the row once the container is actually torn down.
       await deleteApp(app.id, { deleteVolumes });
       // A keep-volumes uninstall creates orphans; show them once the row goes.
-      if (!deleteVolumes) setTimeout(() => listOrphanVolumes().then(setOrphans).catch(() => {}), 5_000);
+      if (deleteVolumes.length === 0) setTimeout(() => listOrphanVolumes().then(setOrphans).catch(() => {}), 5_000);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -311,6 +312,8 @@ export default function AppsPage() {
           volumes={deleteInfo ? deleteInfo.volumes : null}
           note={deleteInfo?.note}
           backupNote={deleteInfo?.backupNote}
+          nodeVolumes={deleteInfo ? (deleteInfo.nodeVolumes ?? null) : null}
+          nodeVolumesNote={deleteInfo?.nodeVolumesNote}
           onConfirm={(deleteVolumes) => void confirmDelete(pendingDelete, deleteVolumes)}
           onCancel={() => setPendingDelete(null)}
         />

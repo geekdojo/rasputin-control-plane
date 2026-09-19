@@ -32,6 +32,29 @@ export function customAppVolumesNote(appId: string, targetNode: string): string 
   );
 }
 
+/**
+ * What a delete with data would send, from the uninstall prompt's facts: the
+ * exact names of every volume the app has on its node, sorted. null when the
+ * node did not say (offline, unreachable, an old agent) — a delete with data
+ * cannot be asked for then, because the api refuses one it cannot check. []
+ * when the app has no volume there: there is nothing to delete.
+ */
+export function deleteVolumeNames(info: { nodeVolumes?: { name: string }[] } | null): string[] | null {
+  if (!info || !info.nodeVolumes) return null;
+  return info.nodeVolumes.map((v) => v.name).sort();
+}
+
+/**
+ * How the prompt describes one volume it is about to delete: the docker name,
+ * and for an anonymous volume the only description it has — where it was
+ * mounted.
+ */
+export function describeNodeVolume(v: { name: string; anonymous?: boolean; service?: string; path?: string }): string {
+  if (!v.anonymous) return v.name;
+  const where = [v.service, v.path].filter(Boolean).join(':');
+  return where ? `${v.name} (anonymous, ${where})` : `${v.name} (anonymous)`;
+}
+
 // The checkbox's initial state. Destroying data is never the path of least
 // resistance: delete requires a deliberate act.
 export const DELETE_VOLUMES_DEFAULT = false;

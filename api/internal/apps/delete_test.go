@@ -3,7 +3,9 @@ package apps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,20 +166,96 @@ func TestDelete_DefaultKeepsVolumes(t *testing.T) {
 	}
 }
 
-// deleteVolumes:true reaches the agent as DeleteVolumes on the stop command.
+// A deleteVolumes list that is exactly the app's volumes on the node deletes
+// them: a plain stop first, then the listing, then the stop that deletes.
 func TestDelete_DeleteVolumesReachesAgent(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
-	got := captureStopCmd(t, nc, "n")
-	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`","deleteVolumes":true}`, nc))
+	agent := fakeDeleteAgent(t, nc, "n", delVolData, delVolAnon)
+	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name, delVolAnon.Name), nc))
 	if err != nil {
 		t.Fatalf("deleteStop: %v", err)
 	}
-	if !got.DeleteVolumes {
-		t.Fatalf("agent received %+v; deleteVolumes:true did not carry", got)
+	if got := agent.stops(); len(got) != 2 || got[0] || !got[1] {
+		t.Fatalf("stops sent = %v; want a plain stop, then one that deletes", got)
+	}
+	if agent.lists() != 1 {
+		t.Fatalf("volume listings = %d; want one, between the two stops", agent.lists())
 	}
 	if !strings.Contains(string(out), `"volumes":"deleted"`) {
 		t.Errorf("step result must say the volumes were deleted: %s", out)
+	}
+}
+
+// A list that leaves out a volume the app has on the node is refused after
+// the plain stop: nothing is deleted, the row stays and says why, naming the
+// volume nobody confirmed.
+func TestDelete_UnconfirmedVolumeRefusesAfterStop(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
+	agent := fakeDeleteAgent(t, nc, "n", delVolData, delVolAnon)
+	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
+	if err == nil || !strings.Contains(err.Error(), delVolAnon.Name) || !strings.Contains(err.Error(), "no volume was deleted") {
+		t.Fatalf("deleteStop = %v; want a refusal naming the unconfirmed volume", err)
+	}
+	if got := agent.stops(); len(got) != 1 || got[0] {
+		t.Fatalf("stops sent = %v; want only the plain stop", got)
+	}
+	got, _ := store.Get(ctx, delAppID)
+	if got == nil {
+		t.Fatal("the app row must remain when nothing was deleted")
+	}
+	if got.LastStatus != proto.AppStatusStopped || !strings.Contains(got.LastDetail, delVolAnon.Name) {
+		t.Errorf("row = %s %q; want stopped, naming the volume", got.LastStatus, got.LastDetail)
+	}
+}
+
+// A name the node does not list for the app — shaped like one of its volumes
+// or an anonymous one, but not there — is refused the same way.
+func TestDelete_NameNotOnNodeRefusesAfterStop(t *testing.T) {
+	nc := startNATS(t)
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
+	agent := fakeDeleteAgent(t, nc, "n", delVolData)
+	ghost := proto.AppVolumeName(delAppID, "ghost")
+	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name, ghost), nc))
+	if err == nil || !strings.Contains(err.Error(), ghost) || !strings.Contains(err.Error(), "does not have") {
+		t.Fatalf("deleteStop = %v; want a refusal naming %s", err, ghost)
+	}
+	if got := agent.stops(); len(got) != 1 || got[0] {
+		t.Fatalf("stops sent = %v; want only the plain stop", got)
+	}
+}
+
+// Another app's volume on the same node never counts as this app's.
+func TestDelete_OtherAppsVolumeIsNotThisAppsToDelete(t *testing.T) {
+	nc := startNATS(t)
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
+	other := proto.AppVolumeInfo{Name: proto.AppVolumeName(missingAppID, "data"), AppID: missingAppID, Volume: "data"}
+	agent := fakeDeleteAgent(t, nc, "n", delVolData, other)
+	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc)); err != nil {
+		t.Fatalf("deleteStop: %v — another app's volume must not be required", err)
+	}
+	if got := agent.stops(); len(got) != 2 || !got[1] {
+		t.Fatalf("stops sent = %v", got)
+	}
+	// And naming it is refused before any node is asked.
+	if _, err := parseDeleteSpec(json.RawMessage(deleteSpecJSON(other.Name))); err == nil || !strings.Contains(err.Error(), "not of this app") {
+		t.Fatalf("parseDeleteSpec(other app's volume) = %v", err)
+	}
+}
+
+// A node that cannot list its volumes deletes nothing.
+func TestDelete_ListingFailsDeletesNothing(t *testing.T) {
+	nc := startNATS(t)
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
+	got := captureStopCmd(t, nc, "n") // answers stops, never the listing
+	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
+	if err == nil || !strings.Contains(err.Error(), "could not be listed") {
+		t.Fatalf("deleteStop = %v; want a refusal saying the volumes could not be listed", err)
+	}
+	if got.DeleteVolumes {
+		t.Fatal("a stop that deletes volumes was sent without a listing")
 	}
 }
 
@@ -189,13 +267,15 @@ func TestDelete_FlagNeverLeaksIntoOtherKinds(t *testing.T) {
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	got := captureStopCmd(t, nc, "n")
 
-	if _, err := stopPush(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`","deleteVolumes":true}`, nc)); err == nil {
-		t.Fatal("app.stop must refuse a spec carrying deleteVolumes")
+	for _, spec := range []string{`{"appId":"` + delAppID + `","deleteVolumes":true}`, deleteSpecJSON(delVolData.Name)} {
+		if _, err := stopPush(store, inv, nc)(newStepCtxNATS(spec, nc)); err == nil {
+			t.Fatalf("app.stop must refuse a spec carrying deleteVolumes: %s", spec)
+		}
 	}
 	if got.DeleteVolumes {
 		t.Fatal("app.stop sent deleteVolumes to the agent")
 	}
-	if _, err := parseSpec(json.RawMessage(`{"appId":"` + delAppID + `","deleteVolumes":true}`)); err == nil {
+	if _, err := parseSpec(json.RawMessage(deleteSpecJSON(delVolData.Name))); err == nil {
 		t.Fatal("parseSpec (deploy/stop) must refuse deleteVolumes")
 	}
 	// A plain stop never sends the flag at all.
@@ -208,13 +288,23 @@ func TestDelete_FlagNeverLeaksIntoOtherKinds(t *testing.T) {
 }
 
 // A misspelling of the one field that destroys data is a refusal, not a
-// silent false.
+// silent keep; so is the boolean the field used to be, a malformed name,
+// another app's volume and a name given twice.
 func TestDelete_SpecIsStrict(t *testing.T) {
-	if _, err := parseDeleteSpec(json.RawMessage(`{"appId":"` + delAppID + `","deleteVolume":true}`)); err == nil {
-		t.Fatal("parseDeleteSpec must refuse an unknown field")
+	refused := map[string]string{
+		"misspelled": `{"appId":"` + delAppID + `","deleteVolume":["` + delVolData.Name + `"]}`,
+		"boolean":    `{"appId":"` + delAppID + `","deleteVolumes":true}`,
+		"malformed":  deleteSpecJSON("data"),
+		"other app":  deleteSpecJSON(proto.AppVolumeName(missingAppID, "data")),
+		"twice":      deleteSpecJSON(delVolData.Name, delVolData.Name),
 	}
-	spec, err := parseDeleteSpec(json.RawMessage(`{"appId":"` + delAppID + `","deleteVolumes":true}`))
-	if err != nil || !spec.DeleteVolumes {
+	for name, raw := range refused {
+		if _, err := parseDeleteSpec(json.RawMessage(raw)); err == nil {
+			t.Errorf("%s: parseDeleteSpec(%s) accepted", name, raw)
+		}
+	}
+	spec, err := parseDeleteSpec(json.RawMessage(deleteSpecJSON(delVolData.Name, delVolAnon.Name)))
+	if err != nil || len(spec.DeleteVolumes) != 2 {
 		t.Fatalf("parseDeleteSpec: %v %+v", err, spec)
 	}
 }
@@ -238,7 +328,7 @@ func TestDelete_DeleteVolumesOnOfflineNodeRefuses(t *testing.T) {
 	if err := store.Create(ctx, a); err != nil {
 		t.Fatalf("Create app: %v", err)
 	}
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`","deleteVolumes":true}`, nc))
+	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
 	if err == nil {
 		t.Fatal("expected a refusal on an offline node")
 	}
@@ -264,13 +354,10 @@ func TestDelete_DeleteVolumesWithVolumesLeftBehindKeepsRow(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	const detail = "containers removed, but 1 of the app's volume(s) were NOT deleted — deadbeef: still referenced by 1 container(s): c1"
-	sub, _ := nc.Subscribe(proto.AppStopSubject("n"), func(m *nats.Msg) {
-		ack, _ := json.Marshal(proto.AppStopAck{OK: false, Status: proto.AppStatusStopped, Detail: detail})
-		_ = m.Respond(ack)
-	})
-	defer func() { _ = sub.Unsubscribe() }()
+	agent := fakeDeleteAgent(t, nc, "n", delVolData)
+	agent.deleteAck = proto.AppStopAck{OK: false, Status: proto.AppStatusStopped, Detail: detail}
 
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`","deleteVolumes":true}`, nc))
+	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
 	if err == nil || !strings.Contains(err.Error(), "NOT deleted") || !strings.Contains(err.Error(), "deadbeef") {
 		t.Fatalf("deleteStop = %v, want the agent's naming of the volume left behind", err)
 	}
@@ -280,5 +367,96 @@ func TestDelete_DeleteVolumesWithVolumesLeftBehindKeepsRow(t *testing.T) {
 	}
 	if !strings.Contains(got.LastDetail, "NOT deleted") {
 		t.Errorf("lastDetail = %q, want the agent's detail recorded", got.LastDetail)
+	}
+}
+
+// --- the exact-name list (auth consolidation 1A.12) ---
+
+// The volumes the fake node holds for delAppID in these tests.
+var (
+	delVolData = proto.AppVolumeInfo{Name: proto.AppVolumeName(delAppID, "data"), AppID: delAppID, Volume: "data"}
+	delVolAnon = proto.AppVolumeInfo{Name: strings.Repeat("ab", 32), AppID: delAppID, Anonymous: true, Service: "cache", Path: "/data"}
+)
+
+// deleteSpecJSON is an app.delete spec for delAppID naming names.
+func deleteSpecJSON(names ...string) string {
+	b, _ := json.Marshal(DeleteSpec{AppID: delAppID, DeleteVolumes: names})
+	return string(b)
+}
+
+// deleteAgent is a fake node agent answering docker.stop and
+// docker.volumes.list, recording what it was asked in order.
+type deleteAgent struct {
+	mu        sync.Mutex
+	stopCmds  []bool
+	listCalls int
+	deleteAck proto.AppStopAck
+}
+
+func (a *deleteAgent) stops() []bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]bool(nil), a.stopCmds...)
+}
+
+func (a *deleteAgent) lists() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.listCalls
+}
+
+func fakeDeleteAgent(t *testing.T, nc *nats.Conn, nodeID string, vols ...proto.AppVolumeInfo) *deleteAgent {
+	t.Helper()
+	a := &deleteAgent{deleteAck: proto.AppStopAck{OK: true, Status: proto.AppStatusStopped, Detail: "containers and volumes removed"}}
+	stop, err := nc.Subscribe(proto.AppStopSubject(nodeID), func(m *nats.Msg) {
+		var cmd proto.AppStopCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		a.mu.Lock()
+		a.stopCmds = append(a.stopCmds, cmd.DeleteVolumes)
+		ack := proto.AppStopAck{OK: true, Status: proto.AppStatusStopped}
+		if cmd.DeleteVolumes {
+			ack = a.deleteAck
+		}
+		a.mu.Unlock()
+		b, _ := json.Marshal(ack)
+		_ = m.Respond(b)
+	})
+	if err != nil {
+		t.Fatalf("stop sub: %v", err)
+	}
+	list, err := nc.Subscribe(proto.AppVolumesListSubject(nodeID), func(m *nats.Msg) {
+		var cmd proto.AppVolumesListCmd
+		_ = json.Unmarshal(m.Data, &cmd)
+		a.mu.Lock()
+		a.listCalls++
+		a.mu.Unlock()
+		if !cmd.SkipSizes {
+			t.Errorf("the delete's listing must skip sizes")
+		}
+		b, _ := json.Marshal(proto.AppVolumesListAck{OK: true, Volumes: vols})
+		_ = m.Respond(b)
+	})
+	if err != nil {
+		t.Fatalf("list sub: %v", err)
+	}
+	t.Cleanup(func() { _ = stop.Unsubscribe(); _ = list.Unsubscribe() })
+	return a
+}
+
+// CompareDeleteVolumes is exact both ways, and ignores other apps' volumes.
+func TestCompareDeleteVolumes(t *testing.T) {
+	other := proto.AppVolumeInfo{Name: proto.AppVolumeName(missingAppID, "data"), AppID: missingAppID}
+	onNode := []proto.AppVolumeInfo{delVolAnon, other, delVolData}
+	if err := CompareDeleteVolumes(delAppID, []string{delVolData.Name, delVolAnon.Name}, onNode); err != nil {
+		t.Fatalf("exact set: %v", err)
+	}
+	var mm *DeleteVolumesMismatch
+	err := CompareDeleteVolumes(delAppID, []string{delVolData.Name, other.Name}, onNode)
+	if !errors.As(err, &mm) || len(mm.NotOfApp) != 1 || mm.NotOfApp[0] != other.Name ||
+		len(mm.Unconfirmed) != 1 || mm.Unconfirmed[0].Name != delVolAnon.Name || len(mm.OnNode) != 2 {
+		t.Fatalf("mismatch = %#v (%v)", mm, err)
+	}
+	if err := CompareDeleteVolumes(delAppID, nil, nil); err != nil {
+		t.Fatalf("nothing named, nothing on node: %v", err)
 	}
 }

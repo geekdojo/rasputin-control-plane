@@ -13,8 +13,10 @@ import { describe, test } from 'node:test';
 import {
   DELETE_VOLUMES_DEFAULT,
   customAppVolumesNote,
+  deleteVolumeNames,
   deleteWarning,
   describeCapture,
+  describeNodeVolume,
   isProtectedClass,
   unbackedProtected,
   type PromptVolume,
@@ -129,5 +131,32 @@ describe('customAppVolumesNote', () => {
 
   test('says nothing about the checkbox default, which stays keep', () => {
     assert.equal(DELETE_VOLUMES_DEFAULT, false);
+  });
+});
+
+// Auth consolidation 1A.12: a delete with data names exactly the volumes the
+// node holds for the app, never a flag.
+describe('deleteVolumeNames', () => {
+  const anon = 'ab'.repeat(32);
+  test('is every name the node listed, sorted', () => {
+    const info = {
+      nodeVolumes: [
+        { name: 'rasp_01abc_upload', volume: 'upload' },
+        { name: anon, volume: '', anonymous: true, service: 'redis', path: '/data' },
+        { name: 'rasp_01abc_db', volume: 'db' },
+      ],
+    };
+    assert.deepEqual(deleteVolumeNames(info), [anon, 'rasp_01abc_db', 'rasp_01abc_upload']);
+  });
+  test('is null when the node did not say, so delete-with-data cannot be offered', () => {
+    assert.equal(deleteVolumeNames(null), null);
+    assert.equal(deleteVolumeNames({}), null);
+  });
+  test('is empty, not null, when the app has no volumes there', () => {
+    assert.deepEqual(deleteVolumeNames({ nodeVolumes: [] }), []);
+  });
+  test('describes an anonymous volume by where it was mounted', () => {
+    assert.equal(describeNodeVolume({ name: anon, anonymous: true, service: 'redis', path: '/data' }), `${anon} (anonymous, redis:/data)`);
+    assert.equal(describeNodeVolume({ name: 'rasp_01abc_db' }), 'rasp_01abc_db');
   });
 });

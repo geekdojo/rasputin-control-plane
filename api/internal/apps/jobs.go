@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -30,16 +31,21 @@ type DeploySpec struct {
 // DeleteSpec is the spec body of an app.delete job.
 type DeleteSpec struct {
 	AppID string `json:"appId"`
-	// DeleteVolumes is the operator's answer to "Delete volumes?" on the
-	// uninstall confirmation (geekdojo/geekdojo-brain#399). Absent is false:
-	// every volume the app has stays on the node — named, anonymous, and any
-	// an earlier compose version left — and the app row goes, which is what
-	// every uninstall did before the question existed; the agent keeps what
-	// the orphan reaper needs to list them. True carries to the agent, which
-	// removes every volume the app ever had (geekdojo/geekdojo-brain#413):
-	// `compose down -v`, then by exact name, through the reaper's refusal
-	// gates, what `down -v` cannot see.
-	DeleteVolumes bool `json:"deleteVolumes,omitempty"`
+	// DeleteVolumes is the exact list of volume names the operator confirmed
+	// for deletion on the uninstall confirmation (geekdojo/geekdojo-brain#399).
+	// Absent or empty keeps every volume the app has on the node — named,
+	// anonymous, and any an earlier compose version left — and the app row
+	// goes, which is what every uninstall did before the question existed;
+	// the agent keeps what the orphan reaper needs to list them.
+	//
+	// A non-empty list must be exactly the volumes the app has on its node
+	// (deletevolumes.go): the agent, told to delete data, removes every
+	// volume the app ever had (geekdojo/geekdojo-brain#413) — `compose down
+	// -v`, then by exact name, through the reaper's refusal gates, what
+	// `down -v` cannot see — so the stop step sends that instruction only
+	// once the node's listing, taken after the containers are down, matches
+	// the list name for name.
+	DeleteVolumes []string `json:"deleteVolumes,omitempty"`
 }
 
 // DeployWorkflow drives the deploy saga:
@@ -219,8 +225,10 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 // what makes "delete" actually tear down containers instead of orphaning them.
 //
 //  1. stop   — if the node is online, RPC docker.stop (compose down, or,
-//     when the spec's deleteVolumes is set, compose down -v followed by the
-//     agent removing every other volume the app ever had — #413); this must
+//     when the spec names volumes in deleteVolumes: compose down, then the
+//     node's listing of the app's volumes, which must be exactly the names
+//     the operator confirmed, then compose down -v followed by the agent
+//     removing every other volume the app ever had — #413); this must
 //     succeed, else the saga fails and the row stays (no silent orphan
 //     on a reachable node — the user can retry). If the node is offline
 //     or de-registered, we can't reach it: log a warning and proceed to
@@ -242,7 +250,10 @@ func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLea
 	return jobs.Workflow{
 		Kind: "app.delete",
 		Steps: []jobs.WorkflowStep{
-			{Name: "stop", Timeout: 40 * time.Second, Do: deleteStop(store, inv, nc)},
+			// Keeping data is one `compose down`. Deleting it is a `down`, a
+			// volume listing (appVolumesListRPC) and a `down -v` with the
+			// sweep behind it, each a single round trip to the node.
+			{Name: "stop", Timeout: 90 * time.Second, Do: deleteStop(store, inv, nc)},
 			{Name: "teardown_leaf", Timeout: 10 * time.Second, Do: deleteLeaf(store, inv, nc, removeLeaf)},
 			{Name: "remove", Timeout: 2 * time.Second, Do: deleteRemove(store, nc)},
 		},
@@ -682,6 +693,9 @@ func parseDeleteSpec(raw json.RawMessage) (*DeleteSpec, error) {
 	if err := checkSpecAppID(spec.AppID); err != nil {
 		return nil, err
 	}
+	if err := ValidateAppDeleteVolumeNames(spec.AppID, spec.DeleteVolumes); err != nil {
+		return nil, err
+	}
 	return &spec, nil
 }
 
@@ -923,8 +937,9 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 
 		node, _ := inv.Get(sc.Ctx, app.TargetNode)
 		online := node != nil && computeNodeStatus(node.LastSeen) == proto.StatusOnline
+		deleting := len(spec.DeleteVolumes) > 0
 		if !online {
-			if spec.DeleteVolumes {
+			if deleting {
 				// The operator asked for the data to go, and the node holding
 				// it cannot be reached. Removing the row anyway would leave the
 				// volumes behind as orphans while the operator believes they
@@ -940,8 +955,9 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 			return json.Marshal(map[string]string{"appId": app.ID, "stop": "skipped-unreachable"})
 		}
 
-		if spec.DeleteVolumes {
-			sc.Log("info", fmt.Sprintf("stopping %q on %s and DELETING its volumes before delete", app.Name, app.TargetNode))
+		if deleting {
+			sc.Log("info", fmt.Sprintf("stopping %q on %s before delete; then deleting the %d volume(s) the operator named: %s",
+				app.Name, app.TargetNode, len(spec.DeleteVolumes), strings.Join(spec.DeleteVolumes, ", ")))
 		} else {
 			sc.Log("info", fmt.Sprintf("stopping %q on %s before delete (volumes kept)", app.Name, app.TargetNode))
 		}
@@ -949,39 +965,79 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusStopping, "", now)
 		emitChange(nc, app.ID, proto.AppStopping, proto.AppStatusStopping, "", now)
 
-		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID, DeleteVolumes: spec.DeleteVolumes})
-		msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)
+		// A plain `down` first, deleting nothing, in both cases. For a delete
+		// with data it is what makes the listing below final: no container
+		// of the app is left to create a volume, and the agent records every
+		// anonymous volume the containers mounted before it removes them.
+		if _, err := deleteStopRPC(sc, store, nc, app, false); err != nil {
+			return nil, err
+		}
+		if !deleting {
+			sc.Log("info", "stopped; volumes kept")
+			return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok", "volumes": "kept"})
+		}
+
+		// Re-derive at commit: the volumes the node holds for the app now,
+		// against the names the operator confirmed. Any difference ends the
+		// saga with the containers down and every volume still on the node.
+		onNode, err := AppVolumesOnNode(sc.Ctx, inv, nc, app.TargetNode, app.ID)
 		if err != nil {
-			fctx, cancel := detachCtx(sc.Ctx)
-			now := time.Now().UTC()
-			_ = store.RecordStatus(fctx, app.ID, proto.AppStatusFailed, "stop rpc: "+err.Error(), now)
-			cancel()
-			emitChange(nc, app.ID, proto.AppFailed, proto.AppStatusFailed, "stop rpc failed", now)
-			return nil, fmt.Errorf("stop rpc: %w", err)
+			return nil, deleteKeptVolumes(sc, store, nc, app, "stopped, but the app's volumes could not be listed, so none were deleted: "+err.Error())
 		}
-		var ack proto.AppStopAck
-		if err := json.Unmarshal(msg.Data, &ack); err != nil {
-			return nil, fmt.Errorf("decode stop ack: %w", err)
+		if err := CompareDeleteVolumes(app.ID, spec.DeleteVolumes, onNode); err != nil {
+			return nil, deleteKeptVolumes(sc, store, nc, app, "stopped, but no volume was deleted: "+err.Error())
 		}
-		if !ack.OK {
-			detail := ack.Detail
-			if detail == "" {
-				detail = "agent reported stop failed"
-			}
-			now := time.Now().UTC()
-			_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusFailed, detail, now)
-			return nil, errors.New(detail)
+
+		ack, err := deleteStopRPC(sc, store, nc, app, true)
+		if err != nil {
+			return nil, err
 		}
-		if spec.DeleteVolumes {
-			// The agent names any volume beyond what the current compose
-			// declares — a renamed-away key, a dropped service's, an
-			// anonymous one — so the job log says what actually went.
-			sc.Log("info", "stopped; volumes deleted: "+ack.Detail)
-			return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok", "volumes": "deleted"})
-		}
-		sc.Log("info", "stopped; volumes kept")
-		return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok", "volumes": "kept"})
+		// The agent names any volume beyond what the current compose
+		// declares — a renamed-away key, a dropped service's, an anonymous
+		// one — so the job log says what actually went.
+		sc.Log("info", "stopped; volumes deleted: "+ack.Detail)
+		return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok", "volumes": "deleted"})
 	}
+}
+
+// deleteKeptVolumes ends a delete with data that stopped the app but deleted
+// nothing: the row stays, says stopped with the reason, and the error the step
+// fails with is that reason.
+func deleteKeptVolumes(sc *jobs.StepCtx, store *Store, nc *nats.Conn, app *App, detail string) error {
+	now := time.Now().UTC()
+	_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusStopped, detail, now)
+	emitChange(nc, app.ID, proto.AppStopped, proto.AppStatusStopped, detail, now)
+	return errors.New(detail)
+}
+
+// deleteStopRPC sends one docker.stop for app, deleting its volumes or not,
+// and records a failure on the row. A failed ack is an error carrying the
+// agent's detail.
+func deleteStopRPC(sc *jobs.StepCtx, store *Store, nc *nats.Conn, app *App, deleteVolumes bool) (*proto.AppStopAck, error) {
+	cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID, DeleteVolumes: deleteVolumes})
+	msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)
+	if err != nil {
+		fctx, cancel := detachCtx(sc.Ctx)
+		now := time.Now().UTC()
+		_ = store.RecordStatus(fctx, app.ID, proto.AppStatusFailed, "stop rpc: "+err.Error(), now)
+		cancel()
+		emitChange(nc, app.ID, proto.AppFailed, proto.AppStatusFailed, "stop rpc failed", now)
+		return nil, fmt.Errorf("stop rpc: %w", err)
+	}
+	var ack proto.AppStopAck
+	if err := json.Unmarshal(msg.Data, &ack); err != nil {
+		return nil, fmt.Errorf("decode stop ack: %w", err)
+	}
+	if !ack.OK {
+		detail := ack.Detail
+		if detail == "" {
+			detail = "agent reported stop failed"
+		}
+		now := time.Now().UTC()
+		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusFailed, detail, now)
+		return nil, errors.New(detail)
+	}
+	return &ack, nil
 }
 
 // deleteRemove drops the ledger row and emits the deleted event. Idempotent:
