@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -38,6 +39,9 @@ type identityFixture struct {
 	db, caKey, caPem, hsConfig, hsDB []byte
 	// busKey is the cluster bus key (#448), in the one-line seed form.
 	busKey []byte
+	// busTombstones, when set, is the bus-token revocation tombstone file the
+	// old controlplane held (busauth tombstones.go); nil means it had none.
+	busTombstones []byte
 }
 
 func newIdentityFixture() identityFixture {
@@ -63,6 +67,8 @@ type generationOpts struct {
 	tamper func(t *testing.T, tarBytes []byte, m *Manifest) []byte
 	// manifestVersion overrides the version written into the inner manifest.
 	manifestVersion int
+	// identity, when set, edits the identity fixture before it is archived.
+	identity func(*identityFixture)
 }
 
 // buildGeneration writes a marker and one generation under mount, sealed to
@@ -106,6 +112,9 @@ func buildGeneration(t *testing.T, mount string, key testKeypair, fx identityFix
 		t.Fatal(err)
 	}
 	writeTestFile(t, filepath.Join(busDir, "bus.key"), string(fx.busKey))
+	if fx.busTombstones != nil {
+		writeTestFile(t, filepath.Join(busDir, busauth.TombstoneFileName), string(fx.busTombstones))
+	}
 	if err := os.MkdirAll(filepath.Join(mesh, "headscale", "db"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -311,6 +320,9 @@ func newRestoreHarness(t *testing.T, opts generationOpts) *restoreHarness {
 	}
 	key := newTestKeypair(t)
 	fx := newIdentityFixture()
+	if opts.identity != nil {
+		opts.identity(&fx)
+	}
 	m := buildGeneration(t, mount, key, fx, opts)
 	nc := startNATS(t)
 	agent := &fakeMountAgent{mount: mount, candidates: []proto.StorageCandidate{{

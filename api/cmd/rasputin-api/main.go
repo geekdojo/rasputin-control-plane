@@ -238,11 +238,9 @@ func main() {
 	// can't join is a better failure than a controlplane that won't start. A file
 	// binding a token to an invalid node id is refused whole (nothing loads) and
 	// the error names the entry; see busauth.Store.PreloadHashes.
-	if n, err := loadBusPreseed(ctx, busTokenStore, busPreseedPath(dataDir)); err != nil {
-		log.Printf("rasputin-api: bus token preseed: %v (continuing)", err)
-	} else if n > 0 {
-		log.Printf("rasputin-api: preloaded %d bus token(s) from provisioning seed", n)
-	}
+	//
+	// Revocation tombstones first: see loadBusTokenState.
+	loadBusTokenState(ctx, busTokenStore, dataDir)
 	logUnboundBusTokens(ctx, busTokenStore)
 	logRolelessBusTokens(ctx, busTokenStore)
 
@@ -1860,6 +1858,42 @@ func applianceOr(appliance func(host string) string, devDefault string) string {
 // seed FAT. Overridable for tests / non-default layouts.
 func busPreseedPath(dataDir string) string {
 	return envOr("RASPUTIN_BUS_PRESEED", filepath.Join(dataDir, "bus", "preseed.json"))
+}
+
+// loadBusTokenState takes the revocation tombstone file into use (busauth
+// tombstones.go), then preloads the matched-set preseed. Tombstones come first:
+// they re-apply every revocation this controlplane has made to a database that
+// lost or never saw it (a lost database, a restore), and the preload skips
+// tombstoned hashes. If the tombstone file cannot be read, the preseed is NOT
+// loaded: it may re-admit a token the unreadable file revoked. Nodes it would
+// have loaded stay refused until the file is fixed — fail closed. It returns
+// how many preseed tokens it loaded.
+func loadBusTokenState(ctx context.Context, store *busauth.Store, dataDir string) int {
+	added, reapplied, err := store.UseTombstoneFile(ctx, busTombstonePath(dataDir))
+	if err != nil {
+		log.Printf("rasputin-api: ⚠️  bus token tombstones: %v — NOT loading the preseed this start, and revocations this run are recorded in the database only; fix or move the file aside (after checking it) and restart", err)
+		return 0
+	}
+	if added > 0 || reapplied > 0 {
+		log.Printf("rasputin-api: bus token tombstones: %d added to the file from the database, %d revocation(s) re-applied to the database", added, reapplied)
+	}
+	n, err := loadBusPreseed(ctx, store, busPreseedPath(dataDir))
+	if err != nil {
+		log.Printf("rasputin-api: bus token preseed: %v (continuing)", err)
+		return 0
+	}
+	if n > 0 {
+		log.Printf("rasputin-api: preloaded %d bus token(s) from provisioning seed", n)
+	}
+	return n
+}
+
+// busTombstonePath is the revocation tombstone file: in the bus directory,
+// beside the default preseed.json and bus.key, which is the directory the
+// identity archive takes it from (storage.IdentitySources.BusDir) and a
+// restore merges it back into.
+func busTombstonePath(dataDir string) string {
+	return filepath.Join(dataDir, "bus", busauth.TombstoneFileName)
 }
 
 // loadBusPreseed reads a JSON array of {hash,nodeId,label} and preloads it into

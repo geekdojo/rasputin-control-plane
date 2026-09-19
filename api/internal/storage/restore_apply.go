@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 )
 
 // The second half of the restore: becoming the restored cluster.
@@ -138,6 +140,7 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 	}
 	var targets []target
 	restoredHeadscale := false
+	restoredTombstones := false
 	for _, e := range report.Restored {
 		switch {
 		case e.Path == "rasputin.db":
@@ -150,6 +153,9 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 			// The restored key replaces the one this fresh install generated,
 			// so every node that pinned the original joins again (#448).
 			targets = append(targets, target{staged: busKeyArchivePath, live: filepath.Join(busDir, "bus.key"), aside: busKeyArchivePath})
+		case e.Path == busTombstonesArchivePath:
+			// Not moved into place: merged, after every move has succeeded.
+			restoredTombstones = true
 		case strings.HasPrefix(e.Path, "mesh/headscale/"):
 			restoredHeadscale = true
 		}
@@ -215,6 +221,23 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 	syncDir(trustDir)
 	syncDir(meshDir)
 	syncDir(busDir)
+
+	// Revocation tombstones are the one identity file a restore never
+	// replaces: the archive's are UNIONED into the live file, which may hold
+	// revocations made after the archive was taken. The next start re-applies
+	// the whole set to the restored database (busauth.UseTombstoneFile), so
+	// restoring an older archive cannot un-revoke a token. A failed merge does
+	// not fail the restore: the live file is untouched and still re-applied,
+	// and the archive's own revocations are rows in the restored database,
+	// which that same start adds back to the file.
+	if restoredTombstones {
+		live := filepath.Join(busDir, busauth.TombstoneFileName)
+		if added, err := busauth.MergeTombstoneFiles(live, filepath.Join(pending, busTombstonesArchivePath)); err != nil {
+			log.Printf("storage: restore: merging the archive's bus-token tombstones into %s: %v — the live tombstones are unchanged and are re-applied at this start", live, err)
+		} else if added > 0 {
+			log.Printf("storage: restore: merged %d bus-token revocation tombstone(s) from the archive into %s", added, live)
+		}
+	}
 
 	report.AppliedAt = &now
 	applied := filepath.Join(layout.DataDir, restoreAppliedDirName)

@@ -254,18 +254,18 @@ func (s *Store) agentTokenProblem(ctx context.Context, path, nodeID string) (rea
 func (s *Store) revokeNodeTokensExcept(ctx context.Context, nodeID, keep string) (revoked, disconnected int, err error) {
 	defer s.refreshNodes(ctx, nodeID)
 	s.sess.mu.Lock()
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND token_hash != ? AND revoked_at IS NULL`,
-		ms(time.Now().UTC()), nodeID, keep)
+	tombs, err := s.revokeReturning(ctx, time.Now().UTC(),
+		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND token_hash != ? AND revoked_at IS NULL
+         RETURNING token_hash, COALESCE(node_id, '')`, nodeID, keep)
 	if err != nil {
 		s.sess.mu.Unlock()
 		return 0, 0, fmt.Errorf("busauth: revoke replaced tokens: %w", err)
 	}
-	n, _ := res.RowsAffected()
 	taken := s.takeLocked(func(g grant) bool { return g.nodeID == nodeID && g.tokenID != keep })
 	d := s.sess.disc
 	s.sess.mu.Unlock()
-	return int(n), s.disconnect(d, taken), nil
+	s.recordTombstones(tombs)
+	return len(tombs), s.disconnect(d, taken), nil
 }
 
 // writeOwnerOnlyFile replaces path with data atomically: a 0600 temporary file
