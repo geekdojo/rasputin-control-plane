@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -89,6 +90,35 @@ type appVolumesResponse struct {
 	// say why every volume reads "never".
 	BackupNote string          `json:"backupNote,omitempty"`
 	Volumes    []appVolumeView `json:"volumes"`
+	// NodeVolumes is every volume the app has on its node right now, named
+	// and anonymous, as the node's agent lists them: exactly the names a
+	// delete with data must carry in deleteVolumes. Only asked for with
+	// ?onNode=1, and absent then too when the node could not be asked —
+	// NodeVolumesNote says why. An app with no volumes on its node has an
+	// empty list, which is not the same as none.
+	NodeVolumes     *[]appNodeVolumeView `json:"nodeVolumes,omitempty"`
+	NodeVolumesNote string               `json:"nodeVolumesNote,omitempty"`
+}
+
+// appNodeVolumeView is one volume an app has on its node.
+type appNodeVolumeView struct {
+	// Name is the docker volume name — what deleteVolumes takes.
+	Name string `json:"name"`
+	// Volume is its compose key; empty for an anonymous volume.
+	Volume    string `json:"volume"`
+	Anonymous bool   `json:"anonymous,omitempty"`
+	// Service and Path say where an anonymous volume was mounted.
+	Service string `json:"service,omitempty"`
+	Path    string `json:"path,omitempty"`
+}
+
+// nodeVolumeViews renders a node listing for a response, never null.
+func nodeVolumeViews(vols []proto.AppVolumeInfo) []appNodeVolumeView {
+	out := make([]appNodeVolumeView, 0, len(vols))
+	for _, v := range vols {
+		out = append(out, appNodeVolumeView{Name: v.Name, Volume: v.Volume, Anonymous: v.Anonymous, Service: v.Service, Path: v.Path})
+	}
+	return out
 }
 
 // orphanVolumeView is one reclaimable volume: a rasp_<appID>_* volume, or an
@@ -152,7 +182,10 @@ type reclaimResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-// GET /api/apps/{id}/volumes
+// GET /api/apps/{id}/volumes[?onNode=1]
+//
+// With onNode=1 the answer also carries what the app's node holds for it, the
+// list the uninstall prompt shows and a delete with data sends back.
 func (s *Server) handleAppVolumes(w http.ResponseWriter, r *http.Request) {
 	app, err := s.apps.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -190,7 +223,28 @@ func (s *Server) handleAppVolumes(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	if r.URL.Query().Get("onNode") == "1" {
+		resp.NodeVolumes, resp.NodeVolumesNote = s.appNodeVolumes(r.Context(), app)
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// appNodeVolumes asks the app's node which volumes it holds for the app. A
+// nil list comes with the reason it could not be read.
+func (s *Server) appNodeVolumes(ctx context.Context, app *apps.App) (*[]appNodeVolumeView, string) {
+	node, err := s.inv.Get(ctx, app.TargetNode)
+	if err != nil || node == nil {
+		return nil, "node " + app.TargetNode + " is not in inventory, so the app's volumes on it cannot be listed"
+	}
+	if inventory.ComputeStatus(node.LastSeen) != proto.StatusOnline {
+		return nil, "node " + node.ID + " is offline, so the app's volumes on it cannot be listed or deleted"
+	}
+	vols, err := apps.AppVolumesOnNode(ctx, s.inv, s.nc, node.ID, app.ID)
+	if err != nil {
+		return nil, "the app's volumes on " + node.ID + " could not be listed: " + err.Error()
+	}
+	views := nodeVolumeViews(vols)
+	return &views, ""
 }
 
 // GET /api/volumes/orphans

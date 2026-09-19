@@ -509,13 +509,36 @@ func TestOrphanVolumes_UnreachableReasonsAreHonest(t *testing.T) {
 	}
 }
 
-// DELETE /api/apps/{id}: the body's deleteVolumes lands in the job spec; no
-// body means false; an unknown field is refused.
-func TestDeleteApp_BodyCarriesDeleteVolumes(t *testing.T) {
+// DELETE /api/apps/{id}: deleteVolumes is the exact list of the app's volumes
+// on its node. No body keeps them; the exact list lands in the job spec,
+// sorted; a boolean, a misspelling, a malformed body, a name that is not the
+// app's, and a list that leaves one out are each refused before any job.
+func TestDeleteApp_BodyCarriesExactVolumeNames(t *testing.T) {
 	f, cookie, _ := volumesFixture(t)
 	seedVolumesApp(t, f, volULIDLive, "immich")
 	// The fixture's runner knows no workflows; Submit refuses an unknown kind.
 	f.runner.Register(apps.DeleteWorkflow(f.appsStore, f.inv, f.nc, nil))
+	db := proto.AppVolumeName(volULIDLive, "immich-db")
+	upload := proto.AppVolumeName(volULIDLive, "immich-upload")
+	anon := strings.Repeat("c4", 32)
+	agent := &fakeVolumeAgent{vols: []proto.AppVolumeInfo{
+		{Name: upload, AppID: volULIDLive, Volume: "immich-upload"},
+		{Name: db, AppID: volULIDLive, Volume: "immich-db"},
+		{Name: anon, AppID: volULIDLive, Anonymous: true, Service: "redis", Path: "/data"},
+		{Name: proto.AppVolumeName(volULIDOrphan, "immich-db"), AppID: volULIDOrphan, Volume: "immich-db"},
+	}}
+	agent.serve(t, f.nc, "n1")
+	body := func(names ...string) string {
+		b, _ := json.Marshal(map[string][]string{"deleteVolumes": names})
+		return string(b)
+	}
+	jobsBefore := func() int {
+		all, err := f.jobsStore.ListJobsByKind(f.ctx, "app.delete", 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(all)
+	}
 
 	w := f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, "", cookie)
 	if w.Code != http.StatusAccepted {
@@ -523,24 +546,155 @@ func TestDeleteApp_BodyCarriesDeleteVolumes(t *testing.T) {
 	}
 	job := decodeBody[jobs.Job](t, w.Body.String())
 	var spec apps.DeleteSpec
-	if err := json.Unmarshal(job.Spec, &spec); err != nil || spec.AppID != volULIDLive || spec.DeleteVolumes {
-		t.Fatalf("spec: %s (%v) — deleteVolumes must default to false", job.Spec, err)
+	if err := json.Unmarshal(job.Spec, &spec); err != nil || spec.AppID != volULIDLive || len(spec.DeleteVolumes) != 0 {
+		t.Fatalf("spec: %s (%v) — no body must keep every volume", job.Spec, err)
+	}
+	if w := f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, `{"deleteVolumes":[]}`, cookie); w.Code != http.StatusAccepted {
+		t.Fatalf("empty list: want 202 (keep), got %d (%s)", w.Code, w.Body.String())
 	}
 
-	w = f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, `{"deleteVolumes":true}`, cookie)
+	n := jobsBefore()
+	refusals := []struct {
+		name, body string
+		code       int
+		want       string
+	}{
+		{"boolean", `{"deleteVolumes":true}`, http.StatusBadRequest, "a boolean is not accepted"},
+		{"misspelled", `{"deleteVolume":["` + db + `"]}`, http.StatusBadRequest, "unknown field"},
+		{"bad json", `{"deleteVolumes":`, http.StatusBadRequest, "invalid JSON"},
+		{"another app's volume", body(db, upload, anon, proto.AppVolumeName(volULIDOrphan, "immich-db")), http.StatusBadRequest, "not of this app"},
+		{"not on the node", body(db, upload, anon, proto.AppVolumeName(volULIDLive, "ghost")), http.StatusBadRequest, "does not have on its node"},
+		{"foreign anonymous", body(db, upload, anon, strings.Repeat("0f", 32)), http.StatusBadRequest, "does not have on its node"},
+		{"named twice", body(db, db, upload, anon), http.StatusBadRequest, "named twice"},
+	}
+	for _, tc := range refusals {
+		w := f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, tc.body, cookie)
+		if w.Code != tc.code || !strings.Contains(w.Body.String(), tc.want) {
+			t.Errorf("%s: got %d %s; want %d containing %q", tc.name, w.Code, w.Body.String(), tc.code, tc.want)
+		}
+	}
+
+	// Leaving one out is a 409 that lists every volume the app has, so a
+	// client can show them and resubmit.
+	w = f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, body(db, upload), cookie)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("unconfirmed: want 409, got %d (%s)", w.Code, w.Body.String())
+	}
+	resp := decodeBody[deleteVolumesResponse](t, w.Body.String())
+	if len(resp.Unconfirmed) != 1 || resp.Unconfirmed[0] != anon || len(resp.Volumes) != 3 || !strings.Contains(resp.Error, anon) {
+		t.Fatalf("409 body: %+v", resp)
+	}
+	if got := jobsBefore(); got != n {
+		t.Fatalf("a refused delete queued a job: %d jobs, want %d", got, n)
+	}
+	for _, l := range agent.lists {
+		if !l.SkipSizes {
+			t.Error("the delete's listing must skip sizes")
+		}
+	}
+
+	// The exact set, in any order, lands sorted.
+	w = f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, body(upload, anon, db), cookie)
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("with body: want 202, got %d (%s)", w.Code, w.Body.String())
+		t.Fatalf("exact list: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
 	job = decodeBody[jobs.Job](t, w.Body.String())
-	if err := json.Unmarshal(job.Spec, &spec); err != nil || !spec.DeleteVolumes {
-		t.Fatalf("spec: %s (%v) — deleteVolumes:true did not land", job.Spec, err)
+	spec = apps.DeleteSpec{}
+	if err := json.Unmarshal(job.Spec, &spec); err != nil || strings.Join(spec.DeleteVolumes, ",") != strings.Join([]string{anon, db, upload}, ",") {
+		t.Fatalf("spec: %s (%v) — the exact list did not land sorted", job.Spec, err)
+	}
+}
+
+// A delete with data on an offline node, or one whose agent does not answer
+// the listing, is refused up front and queues nothing.
+func TestDeleteApp_VolumesNeedAListingNode(t *testing.T) {
+	f, cookie, _ := volumesFixture(t)
+	seedVolumesApp(t, f, volULIDLive, "immich")
+	f.runner.Register(apps.DeleteWorkflow(f.appsStore, f.inv, f.nc, nil))
+	body := `{"deleteVolumes":["` + proto.AppVolumeName(volULIDLive, "immich-db") + `"]}`
+
+	// n1 is online and nobody answers its docker.volumes.list.
+	w := f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, body, cookie)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "could not be listed") {
+		t.Fatalf("silent agent: got %d %s", w.Code, w.Body.String())
+	}
+	stale := time.Now().Add(-10 * time.Minute).UTC()
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "n-off", Role: proto.RoleCompute, Hostname: "n-off", FirstSeen: stale, LastSeen: stale}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := f.appsStore.Create(f.ctx, &apps.App{
+		ID: volULIDOrphan, Name: "off", ComposeYAML: "services: {}", TargetNode: "n-off", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w = f.do(t, http.MethodDelete, "/api/apps/"+volULIDOrphan, `{"deleteVolumes":["`+proto.AppVolumeName(volULIDOrphan, "data")+`"]}`, cookie)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "unreachable") {
+		t.Fatalf("offline node: got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// GET /api/apps/{id}/volumes?onNode=1 carries the app's volumes as its node
+// lists them — the names a delete with data sends — and says why when it
+// cannot; without the parameter the node is not asked.
+func TestAppVolumes_OnNodeListsExactNames(t *testing.T) {
+	f, cookie, _ := volumesFixture(t)
+	seedVolumesApp(t, f, volULIDLive, "immich")
+	anon := strings.Repeat("c4", 32)
+	agent := &fakeVolumeAgent{vols: []proto.AppVolumeInfo{
+		{Name: proto.AppVolumeName(volULIDLive, "immich-db"), AppID: volULIDLive, Volume: "immich-db"},
+		{Name: anon, AppID: volULIDLive, Anonymous: true, Service: "redis", Path: "/data"},
+		{Name: proto.AppVolumeName(volULIDOrphan, "x"), AppID: volULIDOrphan, Volume: "x"},
+	}}
+	agent.serve(t, f.nc, "n1")
+
+	w := f.do(t, http.MethodGet, "/api/apps/"+volULIDLive+"/volumes", "", cookie)
+	if strings.Contains(w.Body.String(), "nodeVolumes") || len(agent.lists) != 0 {
+		t.Fatalf("without onNode the node must not be asked: %s", w.Body.String())
+	}
+	w = f.do(t, http.MethodGet, "/api/apps/"+volULIDLive+"/volumes?onNode=1", "", cookie)
+	resp := decodeBody[appVolumesResponse](t, w.Body.String())
+	if resp.NodeVolumes == nil || len(*resp.NodeVolumes) != 2 || resp.NodeVolumesNote != "" {
+		t.Fatalf("onNode: %s", w.Body.String())
+	}
+	got := *resp.NodeVolumes
+	if got[0].Name != anon || !got[0].Anonymous || got[0].Service != "redis" || got[1].Volume != "immich-db" {
+		t.Fatalf("onNode volumes: %+v", got)
 	}
 
-	if w := f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, `{"deleteVolume":true}`, cookie); w.Code != http.StatusBadRequest {
-		t.Errorf("misspelled field: want 400, got %d (%s)", w.Code, w.Body.String())
+	agent.vols = nil
+	w = f.do(t, http.MethodGet, "/api/apps/"+volULIDLive+"/volumes?onNode=1", "", cookie)
+	if !strings.Contains(w.Body.String(), `"nodeVolumes":[]`) {
+		t.Fatalf("no volumes on the node must be an empty list, not an absent one: %s", w.Body.String())
 	}
-	if w := f.do(t, http.MethodDelete, "/api/apps/"+volULIDLive, `{"deleteVolumes":`, cookie); w.Code != http.StatusBadRequest {
-		t.Errorf("bad json: want 400, got %d", w.Code)
+}
+
+// ?onNode=1 says why it has no list — an offline node, a node not in
+// inventory, an agent that does not answer — instead of an empty one, which
+// would read as "the app has no volumes".
+func TestAppVolumes_OnNodeSaysWhyNot(t *testing.T) {
+	f, cookie, _ := volumesFixture(t)
+	seedVolumesApp(t, f, volULIDLive, "immich") // on n1: online, nobody answers
+	stale := time.Now().Add(-10 * time.Minute).UTC()
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "n-off", Role: proto.RoleCompute, Hostname: "n-off", FirstSeen: stale, LastSeen: stale}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for id, node := range map[string]string{volULIDOrphan: "n-off", "01J6ZK3Q9V8XKX2M5TQ7R4A9BG": "n-gone"} {
+		if err := f.appsStore.Create(f.ctx, &apps.App{ID: id, Name: id, ComposeYAML: "services: {}", TargetNode: node, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for id, want := range map[string]string{
+		volULIDLive:                  "could not be listed",
+		volULIDOrphan:                "n-off is offline",
+		"01J6ZK3Q9V8XKX2M5TQ7R4A9BG": "n-gone is not in inventory",
+	} {
+		w := f.do(t, http.MethodGet, "/api/apps/"+id+"/volumes?onNode=1", "", cookie)
+		resp := decodeBody[appVolumesResponse](t, w.Body.String())
+		if resp.NodeVolumes != nil || !strings.Contains(resp.NodeVolumesNote, want) {
+			t.Errorf("%s: %s; want no list and a note containing %q", id, w.Body.String(), want)
+		}
 	}
 }
 

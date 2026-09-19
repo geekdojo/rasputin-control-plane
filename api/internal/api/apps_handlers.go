@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -294,7 +295,7 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /api/apps/{id}
-// Body (optional): { "deleteVolumes": true }
+// Body (optional): { "deleteVolumes": ["rasp_<appid>_<volume>", "<64-hex>", ...] }
 //
 // Runs the app.delete saga: stop the running deployment on the target node
 // (docker compose down) THEN remove the api's record — so delete actually tears
@@ -305,23 +306,36 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 // logged warning.
 //
 // deleteVolumes is the operator's answer to "Delete volumes?" on the uninstall
-// confirmation (geekdojo/geekdojo-brain#399). No body, or false, keeps the
-// app's named volumes on the node — the pre-#399 behaviour and the default.
-// True makes the stop a `compose down -v`, and makes an unreachable node a
-// refusal rather than a warning: data the operator asked to destroy is not
-// left behind as an orphan they believe is gone. Decoded strictly for the same
-// reason every job-spec body is: it is persisted and rendered, and the one
-// field that destroys data must be spelled the way it was declared.
+// confirmation (geekdojo/geekdojo-brain#399), as the exact names of the
+// volumes they confirmed. No body, or an empty list, keeps the app's volumes
+// on the node — the default. A non-empty list must be exactly the volumes the
+// app has on its node, as GET /api/apps/{id}/volumes?onNode=1 lists them,
+// because deleting an app's data removes all of them (#413):
+//
+//   - a name that is not a volume of this app is refused, 400;
+//   - a volume the app has that the list leaves out is refused, 409, and the
+//     answer lists every volume the app has on the node;
+//   - an offline node, or one that cannot list its volumes, is refused, 409 —
+//     data the operator asked to destroy is not left behind as an orphan they
+//     believe is gone.
+//
+// The saga checks the list against the node again once the containers are
+// down, before it deletes anything (apps/deletevolumes.go). Decoded strictly
+// for the same reason every job-spec body is: it is persisted and rendered,
+// and the one field that destroys data must be spelled the way it was
+// declared. The boolean this field used to be is refused with a 400 that says
+// so.
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if existing, _ := s.apps.Get(r.Context(), id); existing == nil {
+	app, _ := s.apps.Get(r.Context(), id)
+	if app == nil {
 		writeError(w, http.StatusNotFound, "app not found")
 		return
 	}
 	var req struct {
-		DeleteVolumes bool `json:"deleteVolumes"`
+		DeleteVolumes []string `json:"deleteVolumes"`
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxDeleteAppBody))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "unreadable body")
 		return
@@ -330,17 +344,82 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		dec := json.NewDecoder(bytes.NewReader(body))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil {
+			var typeErr *json.UnmarshalTypeError
+			if errors.As(err, &typeErr) && typeErr.Field == "deleteVolumes" {
+				writeError(w, http.StatusBadRequest, "deleteVolumes is the list of the exact volume names to delete, as GET /api/apps/{id}/volumes?onNode=1 lists them; a boolean is not accepted")
+				return
+			}
 			writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 			return
 		}
 	}
-	spec, _ := json.Marshal(apps.DeleteSpec{AppID: id, DeleteVolumes: req.DeleteVolumes})
+	if err := apps.ValidateAppDeleteVolumeNames(app.ID, req.DeleteVolumes); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var named []string
+	if len(req.DeleteVolumes) > 0 {
+		named = append(named, req.DeleteVolumes...)
+		sort.Strings(named)
+		if !s.checkDeleteVolumes(w, r, app, named) {
+			return
+		}
+	}
+	spec, _ := json.Marshal(apps.DeleteSpec{AppID: app.ID, DeleteVolumes: named})
 	j, err := s.runner.Submit(r.Context(), "app.delete", spec, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
+}
+
+// maxDeleteAppBody caps a DELETE /api/apps/{id} body: a list of volume names,
+// each at most rasp_ + a ULID + a compose key, or 64 hex characters. An app
+// with more volumes than fit is not a real one.
+const maxDeleteAppBody = 64 << 10
+
+// deleteVolumesResponse is the 409 DELETE /api/apps/{id} answers a
+// deleteVolumes list that leaves out volumes the app has on its node.
+type deleteVolumesResponse struct {
+	Error string `json:"error"`
+	// Volumes is every volume the app has on its node — the list a client
+	// resubmitting must send.
+	Volumes []appNodeVolumeView `json:"volumes"`
+	// Unconfirmed is every one of them the list did not name.
+	Unconfirmed []string `json:"unconfirmed"`
+}
+
+// checkDeleteVolumes compares a delete's named volumes with the ones the app
+// has on its node, and answers any refusal itself.
+func (s *Server) checkDeleteVolumes(w http.ResponseWriter, r *http.Request, app *apps.App, named []string) bool {
+	node, err := s.inv.Get(r.Context(), app.TargetNode)
+	if err != nil || node == nil || inventory.ComputeStatus(node.LastSeen) != proto.StatusOnline {
+		writeError(w, http.StatusConflict, fmt.Sprintf("node %q is unreachable, so this app's volumes cannot be deleted; uninstall without deleting volumes, or retry when the node is back", app.TargetNode))
+		return false
+	}
+	onNode, err := apps.AppVolumesOnNode(r.Context(), s.inv, s.nc, node.ID, app.ID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "this app's volumes could not be listed on "+node.ID+", so none can be deleted: "+err.Error())
+		return false
+	}
+	err = apps.CompareDeleteVolumes(app.ID, named, onNode)
+	var mm *apps.DeleteVolumesMismatch
+	switch {
+	case err == nil:
+		return true
+	case errors.As(err, &mm) && len(mm.NotOfApp) > 0:
+		writeError(w, http.StatusBadRequest, mm.Error())
+	case errors.As(err, &mm):
+		resp := deleteVolumesResponse{Error: mm.Error(), Volumes: nodeVolumeViews(mm.OnNode), Unconfirmed: []string{}}
+		for _, v := range mm.Unconfirmed {
+			resp.Unconfirmed = append(resp.Unconfirmed, v.Name)
+		}
+		writeJSON(w, http.StatusConflict, resp)
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+	return false
 }
 
 // POST /api/apps/{id}/deploy

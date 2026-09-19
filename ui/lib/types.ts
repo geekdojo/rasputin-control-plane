@@ -548,6 +548,24 @@ export interface AppVolumesResponse {
   // Why every volume reads "never", when that is the case.
   backupNote?: string;
   volumes: AppVolume[];
+  // Every volume the app has on its node right now, named and anonymous, as
+  // the node lists them — exactly the names a delete with data sends. Only
+  // asked for with ?onNode=1; absent when the node could not be asked, and
+  // nodeVolumesNote says why. [] means the app has none there.
+  nodeVolumes?: AppNodeVolume[];
+  nodeVolumesNote?: string;
+}
+
+// AppNodeVolume is one volume an app has on its node.
+export interface AppNodeVolume {
+  // The docker volume name — what DELETE /api/apps/{id}'s deleteVolumes takes.
+  name: string;
+  // The compose key; '' for an anonymous volume.
+  volume: string;
+  anonymous?: boolean;
+  // Where an anonymous volume was mounted.
+  service?: string;
+  path?: string;
 }
 
 // OrphanVolume is a rasp_<appId>_* volume, or an anonymous volume the node's

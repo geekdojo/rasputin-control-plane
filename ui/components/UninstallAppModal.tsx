@@ -5,7 +5,8 @@ import { useId, useState } from 'react';
 import { ModalPortal, useModalChrome } from './modal';
 import { MONO } from './ui-theme';
 import { DIM, FG, HAIR_SOFT } from './kit';
-import { DELETE_VOLUMES_DEFAULT, deleteWarning } from '../lib/volumes';
+import { DELETE_VOLUMES_DEFAULT, deleteVolumeNames, deleteWarning, describeNodeVolume } from '../lib/volumes';
+import type { AppNodeVolume } from '../lib/types';
 import { VolumeBackupTable, type VolumeTableRow } from './VolumeBackupTable';
 
 // The uninstall confirmation, and the reclaim confirmation, which are the same
@@ -20,6 +21,12 @@ import { VolumeBackupTable, type VolumeTableRow } from './VolumeBackupTable';
 //
 // In `reclaim` mode there is no app to remove — the volumes ARE the act — so
 // the confirm button stays disabled until the box is ticked.
+//
+// In `uninstall` mode a delete with data names its volumes: ticking the box
+// lists every volume the app has on its node by its exact docker name, and
+// those names are what the confirm sends. The api refuses any other list. When
+// the node could not say what it holds, the box cannot be ticked, and the
+// reason is shown instead.
 
 export type UninstallVolumeRow = VolumeTableRow;
 
@@ -35,7 +42,15 @@ export interface UninstallAppModalProps {
   // Why the list is empty or unclassified, when it is.
   note?: string;
   backupNote?: string;
-  onConfirm: (deleteVolumes: boolean) => void;
+  // uninstall only: every volume the app has on its node, as the node listed
+  // them — what a delete with data sends. null while loading or when the node
+  // could not say; nodeVolumesNote says why.
+  nodeVolumes?: AppNodeVolume[] | null;
+  nodeVolumesNote?: string;
+  // uninstall: the exact volume names the operator confirmed for deletion,
+  // [] to keep them. reclaim: always [] — the confirm is the act, and the
+  // caller already holds the names it showed.
+  onConfirm: (deleteVolumes: string[]) => void;
   onCancel: () => void;
 }
 
@@ -46,6 +61,8 @@ export function UninstallAppModal({
   volumes,
   note,
   backupNote,
+  nodeVolumes,
+  nodeVolumesNote,
   onConfirm,
   onCancel,
 }: UninstallAppModalProps) {
@@ -54,6 +71,15 @@ export function UninstallAppModal({
   const checkboxId = useId();
   const loading = volumes === null;
   const warning = deleteWarning(volumes ?? [], deleteVolumes);
+  // What ticking the box would delete, in uninstall mode: known and non-empty,
+  // or the box stays unticked and says why.
+  const deletable = mode === 'uninstall' ? (nodeVolumes ?? null) : null;
+  const deleteUnavailable =
+    mode === 'uninstall' && !loading && (deletable === null || deletable.length === 0)
+      ? deletable === null
+        ? `Deleting volumes is unavailable: ${nodeVolumesNote ?? "the node did not list this app's volumes"}.`
+        : 'The node holds no volumes for this app, so there is nothing to delete.'
+      : null;
   const title = mode === 'uninstall' ? 'DELETE APP' : 'RECLAIM VOLUMES';
   const canConfirm = !loading && (mode === 'uninstall' || deleteVolumes);
   const confirmLabel =
@@ -124,7 +150,7 @@ export function UninstallAppModal({
             type="checkbox"
             checked={deleteVolumes}
             onChange={(e) => setDeleteVolumes(e.target.checked)}
-            disabled={loading}
+            disabled={loading || deleteUnavailable !== null}
             aria-label={mode === 'uninstall' ? 'Delete volumes' : 'Delete these volumes'}
             style={{ marginTop: 3 }}
           />
@@ -137,6 +163,24 @@ export function UninstallAppModal({
             </span>
           </span>
         </label>
+
+        {deleteUnavailable && (
+          <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, margin: 0, lineHeight: 1.5 }}>{deleteUnavailable}</p>
+        )}
+
+        {mode === 'uninstall' && deleteVolumes && deletable && deletable.length > 0 && (
+          <div>
+            <div style={{ color: DIM, fontSize: 9, fontFamily: MONO, letterSpacing: '0.12em', marginBottom: 6 }}>
+              DELETES EXACTLY THESE {deletable.length} VOLUME{deletable.length === 1 ? '' : 'S'}
+              {nodeId ? ` ON ${nodeId.toUpperCase()}` : ''}
+            </div>
+            <ul aria-label="Volumes to delete" style={{ margin: 0, paddingLeft: 16, color: FG, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, wordBreak: 'break-all' }}>
+              {deletable.map((v) => (
+                <li key={v.name}>{describeNodeVolume(v)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {warning && (
           <div
@@ -168,7 +212,7 @@ export function UninstallAppModal({
             type="button"
             disabled={!canConfirm}
             onClick={() => {
-              onConfirm(deleteVolumes);
+              onConfirm(deleteVolumes ? (deleteVolumeNames({ nodeVolumes: deletable ?? undefined }) ?? []) : []);
               onCancel();
             }}
             style={{
