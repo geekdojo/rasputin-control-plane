@@ -1512,6 +1512,13 @@ func main() {
 					GetCertificate: leaf.getCertificate,
 				},
 			}
+			// A collector is admitted only while its node holds a live join
+			// token: checked once per connection in the handshake, from the
+			// token store's in-memory live-node set, and a revoke closes the
+			// node's open connections (obs_ingest_conns.go).
+			if err := srv.WireObsIngest(obsIngestSrv, busTokenStore); err != nil {
+				log.Fatalf("rasputin-api: obs ingress: %v", err)
+			}
 		}
 		// HTTP demotes to the bootstrap surface right away so the node is
 		// reachable immediately; HTTPS comes up asynchronously once the clock

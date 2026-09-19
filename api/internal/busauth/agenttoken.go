@@ -136,6 +136,7 @@ func (s *Store) adoptSelfAgentToken(ctx context.Context, id, nodeID string) erro
 		`UPDATE bus_tokens SET self_agent = 0 WHERE node_id = ? AND token_hash != ?`, nodeID, id); err != nil {
 		return fmt.Errorf("busauth: unmark the controlplane agent's replaced tokens: %w", err)
 	}
+	s.refreshNodes(ctx, nodeID) // adoption can give the row its role
 	return nil
 }
 
@@ -251,6 +252,7 @@ func (s *Store) agentTokenProblem(ctx context.Context, path, nodeID string) (rea
 // and closes the sessions they admitted. RevokeByNodeID would close the new
 // token's sessions too, which is why this is its own statement.
 func (s *Store) revokeNodeTokensExcept(ctx context.Context, nodeID, keep string) (revoked, disconnected int, err error) {
+	defer s.refreshNodes(ctx, nodeID)
 	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND token_hash != ? AND revoked_at IS NULL`,

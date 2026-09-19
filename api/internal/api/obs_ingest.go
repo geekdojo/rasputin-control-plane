@@ -48,9 +48,9 @@ func (s *Server) ObsIngestHandler() http.Handler {
 	return securityHeaders(mux)
 }
 
-// authenticateCollector runs the three authorization gates every mTLS ingress
-// route shares, beyond the listener's already-completed RequireAndVerifyClient
-// Cert handshake:
+// authenticateCollector runs the two per-request authorization gates every
+// mTLS ingress route shares, beyond the listener's already-completed
+// RequireAndVerifyClientCert handshake:
 //
 //  1. Identity — node_id is the verified client leaf's CommonName (mesh.MintLeaf
 //     sets CN = node_id). Read from the cert, never from request data, so a node
@@ -59,6 +59,10 @@ func (s *Server) ObsIngestHandler() http.Handler {
 //     leaf whose node was removed, or that outlived its node); reject it. A real
 //     store error is a 503, not a 403 — we don't know membership, so we don't
 //     silently drop the push.
+//
+// The node's join token is checked once per connection, not here: in the TLS
+// handshake, against the in-memory live-node set, and a revoke closes the
+// node's open connections (obs_ingest_conns.go).
 //
 // On any failure it writes the response and returns ok=false. `label` prefixes
 // the log lines and error bodies so the two routes are distinguishable.
@@ -80,27 +84,6 @@ func (s *Server) authenticateCollector(w http.ResponseWriter, r *http.Request, l
 	if node == nil {
 		log.Printf("%s: rejecting %q — not a current cluster member (removed or stale leaf)", label, nodeID)
 		writeError(w, http.StatusForbidden, label+": node is not a current cluster member")
-		return "", false
-	}
-	// 3. The node's join token is live. Revoking a node's token keeps the node
-	//    in inventory, so its logs and metrics stay readable, but ends every
-	//    credential it holds: its bus sessions are dropped and its collector
-	//    leaf, which stays cryptographically valid until NotAfter, is refused
-	//    here. No token store wired is a refusal too — fail closed.
-	if s.busTokens == nil {
-		log.Printf("%s: rejecting %q — no bus token store to check the node's token against", label, nodeID)
-		writeError(w, http.StatusServiceUnavailable, label+": token store unavailable")
-		return "", false
-	}
-	live, err := s.busTokens.NodeHasLiveToken(r.Context(), nodeID)
-	if err != nil {
-		log.Printf("%s: token lookup for %q failed: %v", label, nodeID, err)
-		writeError(w, http.StatusServiceUnavailable, label+": token store unavailable")
-		return "", false
-	}
-	if !live {
-		log.Printf("%s: rejecting %q — the node holds no live join token (revoked)", label, nodeID)
-		writeError(w, http.StatusForbidden, label+": the node's join token is revoked")
 		return "", false
 	}
 	return nodeID, true

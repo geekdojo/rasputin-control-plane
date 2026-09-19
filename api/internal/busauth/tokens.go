@@ -67,6 +67,10 @@ type Store struct {
 	// dev api with no RASPUTIN_SELF_NODE_ID never does; nothing is protected
 	// then, because there is no api-minted agent token to protect.
 	selfNodeID string
+
+	// liveMu guards live, the in-memory live-node set (livenodes.go).
+	liveMu sync.RWMutex
+	live   liveNodes
 }
 
 // TokenInfo is the non-secret view of a token row (no plaintext, ever).
@@ -136,7 +140,12 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if err := s.loadLiveNodes(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -227,6 +236,7 @@ func (s *Store) MintBound(ctx context.Context, label, nodeID string, role proto.
 		id, label, ms(time.Now().UTC()), nodeID, string(role)); err != nil {
 		return "", "", fmt.Errorf("busauth: insert token: %w", err)
 	}
+	s.refreshNodes(ctx, nodeID)
 	return plaintext, id, nil
 }
 
@@ -278,6 +288,7 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			inserted++
+			s.refreshNodes(ctx, tk.NodeID)
 		}
 	}
 	return inserted, nil
@@ -358,6 +369,12 @@ func (s *Store) Revoke(ctx context.Context, id string) (disconnected int, err er
 // re-mint uses to retire a token it has just replaced (EnsureAgentToken). No
 // request-driven path may call it: an operator revoke goes through Revoke.
 func (s *Store) revoke(ctx context.Context, id string) (disconnected int, err error) {
+	var node string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(node_id, '') FROM bus_tokens WHERE token_hash = ?`, id).Scan(&node); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("busauth: revoke: %w", err)
+	}
+	defer s.refreshNodes(ctx, node)
 	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`,
@@ -402,6 +419,7 @@ func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, dis
 	if protected {
 		return 0, 0, ErrSelfAgentToken
 	}
+	defer s.refreshNodes(ctx, nodeID)
 	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL`,
