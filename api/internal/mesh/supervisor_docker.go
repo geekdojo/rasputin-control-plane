@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 )
@@ -42,6 +43,10 @@ type DockerSupervisor struct {
 	cfg    DockerSupervisorConfig
 	runner CmdRunner
 	dialer func(network, address string, timeout time.Duration) (net.Conn, error)
+
+	// apiKeyMu serialises MintSessionAPIKey: concurrent 401s must not race
+	// two mints over the recorded prefixes.
+	apiKeyMu sync.Mutex
 }
 
 // CmdRunner runs a binary and returns its combined output. Injected so
@@ -318,12 +323,13 @@ func (s *DockerSupervisor) Healthy(ctx context.Context) (bool, error) {
 
 // ----- API key bootstrap --------------------------------------------------
 
-// apiKeyExpiration is the lifetime of the admin API key the supervisor mints
-// for the api to talk to its own Headscale. This is an appliance-internal
-// credential on a single-owner box, so it's set effectively permanent
-// (~10 years) — re-minting is a recovery action (delete the file + restart),
-// not a routine rotation. Headscale parses this as a Go duration.
-const apiKeyExpiration = "87600h"
+// sessionAPIKeyExpiration is the Headscale-side lifetime of the admin API
+// key each api process mints for itself. The key's real life is the api
+// process that holds it in memory: the next start (or a 401) mints a
+// replacement and expires this one by its recorded prefix. The expiration
+// only bounds a key whose api died before it could be expired, and a 401
+// after it simply re-mints. Parsed by Headscale (prometheus duration form).
+const sessionAPIKeyExpiration = "24h"
 
 // ServerURL returns the resolved Headscale URL that clients should dial. This
 // is what the RealClient uses as its BaseURL and what agents pass to
@@ -331,56 +337,241 @@ const apiKeyExpiration = "87600h"
 // derived from the listen address (dial-trick for the primary LAN IP).
 func (s *DockerSupervisor) ServerURL() string { return s.cfg.ServerURL }
 
-// apiKeyPath is where the bootstrapped admin API key is persisted so it
-// survives api restarts without minting (and accumulating) a new key each
-// boot.
-func (s *DockerSupervisor) apiKeyPath() string {
+// legacyAPIKeyPath is where api releases before the per-start key persisted
+// a long-lived (10-year) admin API key. MintSessionAPIKey expires that key on
+// Headscale by its prefix and then deletes the file.
+func (s *DockerSupervisor) legacyAPIKeyPath() string {
 	return filepath.Join(s.cfg.StateDir, "apikey")
 }
 
-// EnsureAPIKey returns a Headscale admin API key for the supervised
-// container, minting one via `headscale apikeys create` on first call and
-// persisting it to <StateDir>/apikey (0600) for reuse across restarts. The
-// container must be running — call Start first.
+// apiKeyPrefixesPath records the prefixes of admin API keys this supervisor
+// minted and has not yet confirmed expired, one per line. A prefix is only
+// Headscale's lookup id for a key, not a credential; it is recorded so the
+// next api start can expire a key the previous process held only in memory.
+func (s *DockerSupervisor) apiKeyPrefixesPath() string {
+	return filepath.Join(s.cfg.StateDir, "apikey-prefixes")
+}
+
+// MintSessionAPIKey mints a fresh Headscale admin API key for this api
+// process and returns it; the caller holds it in memory only. The container
+// must be running — call Start first.
 //
-// This is the step that closes the self-bootstrap loop. Because the
-// supervisor owns the container, it can mint the very credential the
-// RealClient needs — so a controlplane with Docker comes up on real mesh
-// with zero operator input and zero provision-time secret injection. (The
-// chicken-and-egg the env-var-only path couldn't solve: there's no Headscale
-// to mint a key from until first boot, so the key can't be baked into a
-// seed.)
-func (s *DockerSupervisor) EnsureAPIKey(ctx context.Context) (string, error) {
-	if b, err := os.ReadFile(s.apiKeyPath()); err == nil {
-		if key := strings.TrimSpace(string(b)); key != "" {
-			return key, nil
-		}
+// Every key this supervisor minted earlier is expired (`headscale apikeys
+// expire --prefix`), so at most one supervisor-minted key is live at a time:
+// the one this process holds. Call it at each api start and again when
+// Headscale answers 401. It also retires the legacy on-disk key (see
+// retireLegacyAPIKey).
+//
+// Order matters for crash safety: the new key's prefix is recorded before
+// any old key is expired, and an old prefix is dropped from the record only
+// once Headscale confirms it expired. The one window left — dying between
+// the mint and the record — leaves a key that sessionAPIKeyExpiration bounds.
+//
+// The supervisor owns the container, so it can mint the very credential the
+// RealClient needs: a controlplane with Docker comes up on real mesh with
+// zero operator input and zero provision-time secret injection. (There is no
+// Headscale to mint a key from until first boot, so a key cannot be baked
+// into a seed.)
+func (s *DockerSupervisor) MintSessionAPIKey(ctx context.Context) (string, error) {
+	s.apiKeyMu.Lock()
+	defer s.apiKeyMu.Unlock()
+
+	previous, err := s.readAPIKeyPrefixes()
+	if err != nil {
+		return "", err
 	}
 	key, err := s.mintAPIKey(ctx)
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(s.apiKeyPath(), []byte(key+"\n"), 0o600); err != nil {
-		return "", fmt.Errorf("mesh supervisor: persist api key: %w", err)
+	prefix, err := headscaleAPIKeyPrefix(key)
+	if err != nil {
+		// A key whose prefix cannot be read can never be expired by us, so
+		// it is not used; it lapses at sessionAPIKeyExpiration.
+		return "", fmt.Errorf("mesh supervisor: minted api key has no readable prefix: %w", err)
 	}
-	log.Printf("mesh supervisor: minted Headscale admin API key (persisted at %s)", s.apiKeyPath())
+	if err := s.writeAPIKeyPrefixes(appendUnique(previous, prefix)); err != nil {
+		return "", err
+	}
+	remaining := []string{prefix}
+	for _, old := range previous {
+		if old == prefix {
+			continue
+		}
+		known, err := s.expireAPIKeyPrefix(ctx, old)
+		if err != nil {
+			log.Printf("mesh supervisor: could not expire previous admin API key %s (will retry at the next mint): %v", old, err)
+			remaining = append(remaining, old)
+			continue
+		}
+		if known {
+			log.Printf("mesh supervisor: expired previous admin API key %s", old)
+		} else {
+			log.Printf("mesh supervisor: previous admin API key %s is not on Headscale; nothing to expire", old)
+		}
+	}
+	if err := s.writeAPIKeyPrefixes(remaining); err != nil {
+		return "", err
+	}
+	s.retireLegacyAPIKey(ctx)
+	log.Printf("mesh supervisor: minted this process's Headscale admin API key %s (held in memory)", prefix)
 	return key, nil
+}
+
+// retireLegacyAPIKey expires the long-lived key an older api persisted at
+// legacyAPIKeyPath, then deletes the file. The file stays in place when the
+// expire fails, so the next mint retries; a file whose content is not a
+// Headscale key is left alone and logged, because what it holds cannot be
+// expired by prefix.
+func (s *DockerSupervisor) retireLegacyAPIKey(ctx context.Context) {
+	path := s.legacyAPIKeyPath()
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		log.Printf("mesh supervisor: read legacy admin API key file %s: %v", path, err)
+		return
+	}
+	legacy := strings.TrimSpace(string(b))
+	if legacy != "" {
+		prefix, perr := headscaleAPIKeyPrefix(legacy)
+		if perr != nil {
+			log.Printf("mesh supervisor: legacy admin API key file %s holds no recognisable Headscale key (%v); leaving it in place", path, perr)
+			return
+		}
+		known, err := s.expireAPIKeyPrefix(ctx, prefix)
+		if err != nil {
+			log.Printf("mesh supervisor: could not expire legacy admin API key %s (will retry at the next mint): %v", prefix, err)
+			return
+		}
+		if known {
+			log.Printf("mesh supervisor: expired legacy admin API key %s", prefix)
+		} else {
+			log.Printf("mesh supervisor: legacy admin API key %s is not on Headscale; nothing to expire", prefix)
+		}
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("mesh supervisor: delete legacy admin API key file %s: %v", path, err)
+		return
+	}
+	log.Printf("mesh supervisor: deleted legacy admin API key file %s", path)
 }
 
 // mintAPIKey runs `headscale apikeys create` inside the container and returns
 // the resulting token.
 func (s *DockerSupervisor) mintAPIKey(ctx context.Context) (string, error) {
 	out, err := s.runner(ctx, s.cfg.DockerBin, "exec", s.cfg.ContainerName,
-		"headscale", "apikeys", "create", "--expiration", apiKeyExpiration)
+		"headscale", "apikeys", "create", "--expiration", sessionAPIKeyExpiration)
 	if err != nil {
 		return "", fmt.Errorf("mesh supervisor: create api key: %w", err)
 	}
 	key := parseAPIKey(out)
 	if key == "" {
-		return "", fmt.Errorf("mesh supervisor: could not parse api key from headscale output: %q",
-			strings.TrimSpace(string(out)))
+		// Never echo the output: it is where the key would be.
+		return "", errors.New("mesh supervisor: could not parse api key from headscale output")
 	}
 	return key, nil
+}
+
+// expireAPIKeyPrefix runs `headscale apikeys expire --prefix <p>` inside the
+// container (flag syntax checked against the pinned headscale 0.28.0) and
+// reports whether Headscale had the key. A key Headscale does not have is
+// already as unusable as it can be, so Headscale's "record not found" is
+// done (known=false); every other failure (docker, the CLI, the daemon)
+// is an error and keeps the prefix recorded for the next attempt.
+func (s *DockerSupervisor) expireAPIKeyPrefix(ctx context.Context, prefix string) (known bool, err error) {
+	out, err := s.runner(ctx, s.cfg.DockerBin, "exec", s.cfg.ContainerName,
+		"headscale", "apikeys", "expire", "--prefix", prefix)
+	if err != nil {
+		if strings.Contains(strings.ToLower(string(out)), "record not found") {
+			return false, nil
+		}
+		return false, fmt.Errorf("expire api key %s: %w", prefix, err)
+	}
+	return true, nil
+}
+
+func (s *DockerSupervisor) readAPIKeyPrefixes() ([]string, error) {
+	b, err := os.ReadFile(s.apiKeyPrefixesPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("mesh supervisor: read api key prefixes: %w", err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			out = appendUnique(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (s *DockerSupervisor) writeAPIKeyPrefixes(prefixes []string) error {
+	path := s.apiKeyPrefixesPath()
+	tmp := path + ".tmp"
+	body := strings.Join(prefixes, "\n")
+	if body != "" {
+		body += "\n"
+	}
+	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+		return fmt.Errorf("mesh supervisor: record api key prefixes: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("mesh supervisor: record api key prefixes: %w", err)
+	}
+	return nil
+}
+
+func appendUnique(xs []string, x string) []string {
+	for _, have := range xs {
+		if have == x {
+			return xs
+		}
+	}
+	return append(xs, x)
+}
+
+// Headscale API key formats (headscale 0.28.0 hscontrol/db/api_key.go):
+// current keys are "hskey-api-" + a 12-character URL-safe prefix + "-" +
+// secret; legacy keys are a 7-character prefix + "." + secret.
+const (
+	headscaleAPIKeyTag          = "hskey-api-"
+	headscaleAPIKeyPrefixLen    = 12
+	headscaleLegacyKeyPrefixLen = 7
+)
+
+// headscaleAPIKeyPrefix returns the prefix Headscale identifies key by —
+// what `headscale apikeys expire --prefix` takes.
+func headscaleAPIKeyPrefix(key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if rest, ok := strings.CutPrefix(key, headscaleAPIKeyTag); ok {
+		if len(rest) < headscaleAPIKeyPrefixLen+2 || rest[headscaleAPIKeyPrefixLen] != '-' {
+			return "", errors.New("malformed hskey-api key")
+		}
+		prefix := rest[:headscaleAPIKeyPrefixLen]
+		if !urlSafe(prefix) {
+			return "", errors.New("malformed hskey-api key prefix")
+		}
+		return prefix, nil
+	}
+	if prefix, secret, ok := strings.Cut(key, "."); ok && len(prefix) == headscaleLegacyKeyPrefixLen && secret != "" && urlSafe(prefix) {
+		return prefix, nil
+	}
+	return "", errors.New("not a Headscale API key")
+}
+
+func urlSafe(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 // parseAPIKey extracts the key token from `headscale apikeys create` output.
@@ -711,7 +902,9 @@ func baseDomainFor(clusterID string) string {
 
 var configTmpl = template.Must(template.New("headscale-config").Parse(`server_url: {{.ServerURL}}
 listen_addr: {{.ListenAddr}}
-metrics_listen_addr: 0.0.0.0:9090
+# Empty disables Headscale's metrics and debug listener (headscale 0.28.0
+# serves nothing on it when the address is empty). Nothing scrapes it.
+metrics_listen_addr: ""
 grpc_listen_addr: 127.0.0.1:50443
 grpc_allow_insecure: false
 
@@ -732,6 +925,9 @@ derp:
     stun_listen_addr: "0.0.0.0:3478"
     private_key_path: /var/lib/headscale/derp_server_private.key
     automatically_add_embedded_derp_region: true
+    # Written explicitly rather than left to Headscale's default: the
+    # embedded relay serves only clients this Headscale knows.
+    verify_clients: true
   urls: []
   paths: []
   auto_update_enabled: false

@@ -799,3 +799,117 @@ type nopReadCloser struct {
 }
 
 func (nopReadCloser) Close() error { return nil }
+
+// A 401 re-mints the admin key through RefreshAPIKey and retries the request
+// once with the new key.
+func TestRealClient_401RemintsAndRetries(t *testing.T) {
+	fh := newFakeHeadscale(t)
+	fh.apiKey = "hskey-api-current"
+	var refreshes atomic.Int64
+	c, err := NewRealClient(RealClientConfig{
+		BaseURL: fh.baseURL(),
+		APIKey:  "hskey-api-expired",
+		RefreshAPIKey: func(context.Context) (string, error) {
+			refreshes.Add(1)
+			return "hskey-api-current", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRealClient: %v", err)
+	}
+	if err := c.EnsureUser(context.Background(), "alice"); err != nil {
+		t.Fatalf("EnsureUser after a 401: %v", err)
+	}
+	if n := refreshes.Load(); n != 1 {
+		t.Errorf("refreshes = %d, want 1", n)
+	}
+	// The new key sticks: later calls do not re-mint.
+	if _, err := c.ListNodes(context.Background()); err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if n := refreshes.Load(); n != 1 {
+		t.Errorf("refreshes after a good call = %d, want 1", n)
+	}
+	// A body-carrying request is replayed intact on the retry.
+	fh.mu.Lock()
+	fh.users = map[string]string{}
+	fh.mu.Unlock()
+	c.users = map[string]string{}
+	c.apiKey = "hskey-api-expired-again"
+	if err := c.EnsureUser(context.Background(), "bob"); err != nil {
+		t.Fatalf("EnsureUser (POST retried): %v", err)
+	}
+	fh.mu.Lock()
+	_, ok := fh.users["bob"]
+	fh.mu.Unlock()
+	if !ok {
+		t.Error("the retried POST did not create the user")
+	}
+}
+
+// Concurrent requests that all hit a 401 share one re-mint.
+func TestRealClient_Concurrent401sShareOneRemint(t *testing.T) {
+	fh := newFakeHeadscale(t)
+	fh.apiKey = "hskey-api-current"
+	var refreshes atomic.Int64
+	c, err := NewRealClient(RealClientConfig{
+		BaseURL: fh.baseURL(),
+		APIKey:  "hskey-api-expired",
+		RefreshAPIKey: func(context.Context) (string, error) {
+			refreshes.Add(1)
+			time.Sleep(20 * time.Millisecond)
+			return "hskey-api-current", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRealClient: %v", err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := c.ListNodes(context.Background())
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("ListNodes: %v", err)
+		}
+	}
+	if n := refreshes.Load(); n != 1 {
+		t.Errorf("refreshes = %d, want 1 shared by all", n)
+	}
+}
+
+// Without RefreshAPIKey (an operator-supplied key) a 401 is returned as is;
+// a refresh that fails is reported, and a 401 after the retry is not looped.
+func TestRealClient_401WithoutOrWithFailingRefresh(t *testing.T) {
+	fh := newFakeHeadscale(t)
+	fh.apiKey = "hskey-api-current"
+	c, _ := NewRealClient(RealClientConfig{BaseURL: fh.baseURL(), APIKey: "stale"})
+	var he *HTTPError
+	if err := c.EnsureUser(context.Background(), "alice"); !errors.As(err, &he) || he.Status != http.StatusUnauthorized {
+		t.Fatalf("no refresh: want the 401, got %v", err)
+	}
+
+	c, _ = NewRealClient(RealClientConfig{BaseURL: fh.baseURL(), APIKey: "stale",
+		RefreshAPIKey: func(context.Context) (string, error) { return "", errors.New("docker gone") }})
+	if err := c.EnsureUser(context.Background(), "alice"); err == nil || !strings.Contains(err.Error(), "docker gone") {
+		t.Fatalf("failing refresh: got %v", err)
+	}
+
+	var refreshes atomic.Int64
+	c, _ = NewRealClient(RealClientConfig{BaseURL: fh.baseURL(), APIKey: "stale",
+		RefreshAPIKey: func(context.Context) (string, error) { refreshes.Add(1); return "also-wrong", nil }})
+	if err := c.EnsureUser(context.Background(), "alice"); !errors.As(err, &he) || he.Status != http.StatusUnauthorized {
+		t.Fatalf("still unauthorized after re-mint: want the 401, got %v", err)
+	}
+	if n := refreshes.Load(); n != 1 {
+		t.Errorf("refreshes = %d; one request re-mints at most once", n)
+	}
+}
