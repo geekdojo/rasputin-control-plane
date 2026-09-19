@@ -333,3 +333,33 @@ func TestBackendCredentialsTable(t *testing.T) {
 		t.Error("each backend's credential needs its own settings key")
 	}
 }
+
+// The write-only credential never rides in a bmc.configure spec: the handler
+// strips it, and the validate step refuses a spec built some other way that
+// still carries it (geekdojo/geekdojo-brain#493, gate 6).
+func TestConfigureValidate_RefusesAnInlineCredential(t *testing.T) {
+	f := newFixture(t)
+	inv := newInvStore(t)
+	insertNode(t, f, inv, "host-1")
+	insertNode(t, f, inv, "node-1")
+	idle := func(context.Context) (bool, error) { return false, nil }
+	step := configureValidate(inv, NewSessionManager(f.svc), idle)
+	for kind, cfg := range map[string]string{
+		"bitscope": `{"targets":[{"pos":"A-0","node_id":"node-1"}],"unlock":"SENTINEL"}`,
+		"turingpi": `{"endpoint":"https://bmc","user":"root","pass":"SENTINEL","insecure_skip_verify":true,"targets":[{"node_id":"node-1","slot":1}]}`,
+	} {
+		spec := ConfigureSpec{Kind: kind, HostNodeID: "host-1", Config: json.RawMessage(cfg), ConfigHash: "h"}
+		_, err := step(stepCtx(f.ctx, f.nc, spec))
+		if err == nil || !strings.Contains(err.Error(), "must not be in a bmc.configure job's spec") {
+			t.Errorf("%s: err = %v, want the inline-credential refusal", kind, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "SENTINEL") {
+			t.Errorf("%s: the refusal echoes the credential: %v", kind, err)
+		}
+	}
+	ok := ConfigureSpec{Kind: "bitscope", HostNodeID: "host-1",
+		Config: json.RawMessage(`{"targets":[{"pos":"A-0","node_id":"node-1"}]}`), ConfigHash: "h"}
+	if _, err := step(stepCtx(f.ctx, f.nc, ok)); err != nil && strings.Contains(err.Error(), "must not be in") {
+		t.Errorf("a stripped spec was refused: %v", err)
+	}
+}

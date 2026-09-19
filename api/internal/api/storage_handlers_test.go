@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -159,6 +162,56 @@ func TestClaimBackupTarget_SubmitsTheSaga(t *testing.T) {
 	}
 	if j.Kind != storage.ClaimJobKind {
 		t.Errorf("kind = %q, want %q", j.Kind, storage.ClaimJobKind)
+	}
+}
+
+// The archive key a claim is posted with is staged with the job; the job spec
+// — persisted in the ledger and served by the jobs API — names it by id only
+// (geekdojo/geekdojo-brain#493, gate 6).
+func TestClaimBackupTarget_SpecRefersToTheArchiveKeyByID(t *testing.T) {
+	s, _, nc := storageTestServer(t)
+	sub, err := nc.Subscribe(proto.StorageEnumerateSubject(storageTestNode), func(m *nats.Msg) {
+		b, _ := json.Marshal(proto.StorageEnumerateAck{OK: true, Backend: "mock", Ts: time.Now().UTC()})
+		_ = m.Respond(b)
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("x25519: %v", err)
+	}
+	pub := base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
+	const wrappedPass, wrappedRecovery = "SENTINEL-WRAPPED-PP", "SENTINEL-WRAPPED-RC"
+	rec := postClaim(t, s, `{"nodeId":"`+storageTestNode+`","devicePath":"/dev/sdb","fingerprint":"fp",`+
+		`"archiveKey":{"keyId":"ak-1","alg":"x25519","publicKey":"`+pub+`","wrappedByPassphrase":"`+wrappedPass+`","wrappedByRecoveryCode":"`+wrappedRecovery+`"}}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var j jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &j); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+	s.runner.Wait()
+	stored, err := s.store.GetJob(context.Background(), j.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(stored.Spec, &spec); err != nil {
+		t.Fatalf("decode spec: %v", err)
+	}
+	if spec["archiveKeyId"] != "ak-1" {
+		t.Errorf("spec archiveKeyId = %v, want ak-1: %s", spec["archiveKeyId"], stored.Spec)
+	}
+	for _, where := range []string{string(stored.Spec), rec.Body.String()} {
+		for _, secret := range []string{wrappedPass, wrappedRecovery} {
+			if strings.Contains(where, secret) {
+				t.Errorf("wrapped key reached the ledger or the response: %s", where)
+			}
+		}
 	}
 }
 

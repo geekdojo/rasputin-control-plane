@@ -47,6 +47,22 @@ CREATE INDEX IF NOT EXISTS idx_backup_targets_status ON backup_targets(status);
 CREATE INDEX IF NOT EXISTS idx_backup_targets_node ON backup_targets(node_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_backup_targets_partuuid ON backup_targets(part_uuid);
 
+-- backup_claim_keys holds the §4.6 key material a backup.target.claim job was
+-- submitted with, keyed by that job, from submission until the job ends. The
+-- job spec carries only the key's id: the wrapped private key is a secret
+-- (offline-attackable), and a spec is persisted in the job ledger and served by
+-- the jobs API. Step 5 copies the key onto the claimed backup_targets row; the
+-- terminal hook deletes this row on every path, so nothing outlives its job.
+CREATE TABLE IF NOT EXISTS backup_claim_keys (
+    job_id                   TEXT PRIMARY KEY,
+    key_id                   TEXT NOT NULL,
+    key_alg                  TEXT NOT NULL DEFAULT '',
+    public_key               TEXT NOT NULL DEFAULT '',
+    wrapped_by_passphrase    TEXT NOT NULL,
+    wrapped_by_recovery_code TEXT NOT NULL,
+    created_at               INTEGER NOT NULL
+);
+
 -- backup_runs: one row per backup.run job (design/storage.md §4.1), created by
 -- step 1 and given a terminal status on every path the job can end on.
 --

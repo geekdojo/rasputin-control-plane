@@ -301,14 +301,9 @@ func (s *Server) handleClaimBackupTarget(w http.ResponseWriter, r *http.Request)
 		// carries exactly one thing into the job ledger, and it is the token.
 		spec.Wipe = &storage.WipeConfirmation{Token: strings.TrimSpace(req.Wipe.Token)}
 	}
-	body, err := json.Marshal(spec)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	// Validated here as well as in step 1 so an operator gets a 400 with the
 	// reason instead of a job that exists only to fail.
-	if _, err := storage.ParseClaimSpec(body); err != nil {
+	if err := storage.ValidateClaim(spec); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -325,7 +320,9 @@ func (s *Server) handleClaimBackupTarget(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	j, err := s.runner.Submit(r.Context(), storage.ClaimJobKind, body, creator(r))
+	// The archive key is staged with the job and the spec refers to it by id,
+	// so the wrapped key never enters the job ledger.
+	j, err := storage.SubmitClaim(r.Context(), s.runner, s.backup, spec, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

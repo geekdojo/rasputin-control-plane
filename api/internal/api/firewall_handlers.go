@@ -132,7 +132,7 @@ func (s *Server) handleUpdateIntent(w http.ResponseWriter, r *http.Request) {
 		existing.Enabled = *req.Enabled
 	}
 	if req.Spec != nil {
-		if err := validateIntentSpec(existing.Kind, *req.Spec); err != nil {
+		if err := validateIntentSpecWithStored(existing.Kind, *req.Spec, existing.SecretSet); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -187,7 +187,10 @@ func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) 
 	// hash we last pushed (NodeState.IntentHash). One Compile covers every
 	// firewall node since v0 supports exactly one — the compiled state is
 	// identical across them.
-	intents, err := s.fw.ListIntents(r.Context())
+	// The pending hash has to be the hash of what a push would send, which
+	// includes the write-only secret — so compile the injected form. Only
+	// the hash leaves this handler.
+	intents, err := s.fw.ListIntentsForCompile(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -245,6 +248,14 @@ func (s *Server) handleReconcileFirewall(w http.ResponseWriter, r *http.Request)
 // validateIntentSpec checks a spec parses + is well-formed for the kind.
 // Returns nil on success.
 func validateIntentSpec(kind string, raw json.RawMessage) error {
+	return validateIntentSpecWithStored(kind, raw, false)
+}
+
+// validateIntentSpecWithStored is validateIntentSpec for an update, where
+// secretStored says the intent already has a write-only secret. A PPPoE spec
+// with no secret is then valid: the secret is never returned to the form, so
+// an edit that does not re-type it keeps the stored one.
+func validateIntentSpecWithStored(kind string, raw json.RawMessage, secretStored bool) error {
 	switch proto.FirewallIntentKind(kind) {
 	case proto.IntentPortForward:
 		var spec proto.PortForwardSpec
@@ -274,7 +285,7 @@ func validateIntentSpec(kind string, raw json.RawMessage) error {
 		if err := json.Unmarshal(raw, &spec); err != nil {
 			return errors.New("invalid wan_config spec: " + err.Error())
 		}
-		return validateWANConfigSpec(spec)
+		return validateWANConfigSpec(spec, secretStored)
 	case proto.IntentFirewallRule:
 		var spec proto.FirewallRuleSpec
 		if err := json.Unmarshal(raw, &spec); err != nil {
@@ -317,7 +328,7 @@ func validateIntentSpec(kind string, raw json.RawMessage) error {
 // protocol are silently accepted (they're saved as-is) — the compiler only
 // emits the ones it cares about for the chosen Proto, so leaving extras
 // lets users keep dormant ISP-A settings around while ISP-B is active.
-func validateWANConfigSpec(spec proto.WANConfigSpec) error {
+func validateWANConfigSpec(spec proto.WANConfigSpec, secretStored bool) error {
 	switch spec.Proto {
 	case proto.WANProtoDHCP:
 		// Hostname is optional; no validation required beyond that.
@@ -343,7 +354,7 @@ func validateWANConfigSpec(spec proto.WANConfigSpec) error {
 		if spec.Username == "" {
 			return errors.New("pppoe proto: username is required")
 		}
-		if spec.Secret == "" {
+		if spec.Secret == "" && !secretStored {
 			return errors.New("pppoe proto: secret is required")
 		}
 	case "":

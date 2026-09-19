@@ -376,3 +376,65 @@ func (s *Store) ClaimedTargetHealth(ctx context.Context) ([]proto.BackupTargetHe
 // and a caller reaching for it to run ad-hoc SQL against another package's
 // tables is doing something this method was not opened for.
 func (s *Store) DB() *sql.DB { return s.db }
+
+// ----- Claim key slot -----------------------------------------------------
+//
+// A backup.target.claim job refers to its §4.6 key by id (ClaimSpec.ArchiveKeyID);
+// the key itself waits here, keyed by the job, until step 5 records it on the
+// target row or the job ends without a target. See backup_claim_keys in
+// schema.go.
+
+// StageClaimKey records the key a claim job was submitted with. Called from
+// SubmitClaim's prepare callback, before the job exists or runs.
+func (s *Store) StageClaimKey(ctx context.Context, jobID string, k *ArchiveKey, now time.Time) error {
+	if k == nil {
+		return errors.New("no archive key to stage")
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO backup_claim_keys (job_id, key_id, key_alg, public_key,
+            wrapped_by_passphrase, wrapped_by_recovery_code, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		jobID, k.KeyID, k.Alg, k.PublicKey, k.WrappedByPassphrase, k.WrappedByRecoveryCode, ms(now))
+	return err
+}
+
+// StagedClaimKey returns the key staged for a claim job, or nil when none was.
+func (s *Store) StagedClaimKey(ctx context.Context, jobID string) (*ArchiveKey, error) {
+	var k ArchiveKey
+	err := s.db.QueryRowContext(ctx, `
+        SELECT key_id, key_alg, public_key, wrapped_by_passphrase, wrapped_by_recovery_code
+        FROM backup_claim_keys WHERE job_id = ?`, jobID).
+		Scan(&k.KeyID, &k.Alg, &k.PublicKey, &k.WrappedByPassphrase, &k.WrappedByRecoveryCode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &k, nil
+}
+
+// DiscardStagedClaimKey deletes a claim job's staged key. A no-op when there
+// is none.
+func (s *Store) DiscardStagedClaimKey(ctx context.Context, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM backup_claim_keys WHERE job_id = ?`, jobID)
+	return err
+}
+
+// StagedClaimKeyJobs lists the jobs that still have a staged key.
+func (s *Store) StagedClaimKeyJobs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT job_id FROM backup_claim_keys`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}

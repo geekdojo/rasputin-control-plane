@@ -115,6 +115,26 @@ func ValidateSelection(ctx context.Context, inv *inventory.Store, kind string, c
 	return nil
 }
 
+// refuseInlineCredential refuses a spec whose config carries the backend's
+// write-only credential. The HTTP handler strips it into its own settings key
+// before building the spec, so only a spec built some other way — a hand-built
+// job through POST /api/jobs — can carry it; running that job would record the
+// credential in the job ledger's step results.
+func refuseInlineCredential(kind string, config json.RawMessage) error {
+	cred, ok := CredentialFor(kind)
+	if !ok || len(config) == 0 {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(config, &m); err != nil {
+		return nil // ValidateSelection names the malformed config
+	}
+	if _, present := m[cred.Field]; present {
+		return fmt.Errorf("the %s credential (%q) must not be in a bmc.configure job's spec: it is stored write-only and added at dispatch. Configure the BMC through its settings", kind, cred.Field)
+	}
+	return nil
+}
+
 // injectJSONField returns raw with field set — used to attach the
 // unlock to the bus command without it ever touching the job spec.
 func injectJSONField(raw json.RawMessage, field, value string) (json.RawMessage, error) {
@@ -212,6 +232,9 @@ func configureValidate(inv *inventory.Store, sessions *SessionManager, powerRunn
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseConfigureSpec(sc.Spec)
 		if err != nil {
+			return nil, err
+		}
+		if err := refuseInlineCredential(spec.Kind, spec.Config); err != nil {
 			return nil, err
 		}
 		if err := ValidateSelection(sc.Ctx, inv, spec.Kind, spec.Config); err != nil {

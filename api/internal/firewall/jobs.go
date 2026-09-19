@@ -85,13 +85,19 @@ func applyFindTarget(inv *inventory.Store) jobs.DoFn {
 	}
 }
 
+// applyCompile checks that the intent set compiles and records its hash.
+//
+// The result is the hash and the enabled-intent count, never the compiled
+// state: a step result is persisted in the job ledger and served by the jobs
+// API, and the compiled state carries the PPPoE password. The push step
+// compiles again for the bus command, which is the only place the state goes.
 func applyCompile(store *Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		intents, err := store.ListIntents(sc.Ctx)
+		intents, err := store.ListIntentsForCompile(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("list intents: %w", err)
 		}
-		state, hash, err := Compile(intents)
+		_, hash, err := Compile(intents)
 		if err != nil {
 			return nil, fmt.Errorf("compile: %w", err)
 		}
@@ -102,7 +108,7 @@ func applyCompile(store *Store) jobs.DoFn {
 			}
 		}
 		sc.Log("info", fmt.Sprintf("compiled %d enabled intent(s), hash=%s", enabled, hash[:12]))
-		return json.Marshal(map[string]any{"state": state, "hash": hash, "intentCount": enabled})
+		return json.Marshal(map[string]any{"hash": hash, "intentCount": enabled})
 	}
 }
 
@@ -115,7 +121,7 @@ func applyPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		}
 		nodeID := fws[0].ID
 
-		intents, err := store.ListIntents(sc.Ctx)
+		intents, err := store.ListIntentsForCompile(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("list intents: %w", err)
 		}

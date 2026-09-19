@@ -198,6 +198,9 @@ function WANForm({
   // PPPoE
   const [username, setUsername] = useState('');
   const [secret, setSecret] = useState('');
+  // The api never returns the stored secret, only that one exists; a blank
+  // field then means "keep it".
+  const [secretStored, setSecretStored] = useState(false);
   const [service, setService] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -212,6 +215,7 @@ function WANForm({
     setDns('');
     setUsername('');
     setSecret('');
+    setSecretStored(false);
     setService('');
     setErr(null);
   }
@@ -235,7 +239,8 @@ function WANForm({
       setGateway(s.gateway ?? '');
       setDns((s.dns ?? []).join(', '));
       setUsername(s.username ?? '');
-      setSecret(s.secret ?? '');
+      setSecret('');
+      setSecretStored(editing.secretSet === true);
       setService(s.service ?? '');
       setErr(null);
     }
@@ -366,11 +371,11 @@ function WANForm({
               style={{ flex: '1 1 220px' }}
             />
             <Input
-              placeholder="PPPoE secret"
+              placeholder={secretStored ? 'PPPoE secret (set — leave blank to keep)' : 'PPPoE secret'}
               type="password"
               value={secret}
               onChange={(e) => setSecret(e.target.value)}
-              required
+              required={!secretStored}
               style={{ flex: '1 1 220px' }}
             />
           </div>
@@ -435,7 +440,8 @@ function buildSpec(
       return {
         proto,
         username: fields.username,
-        secret: fields.secret,
+        // Omitted when blank: on an update that keeps the stored secret.
+        ...(fields.secret && { secret: fields.secret }),
         ...(fields.service && { service: fields.service }),
       };
   }

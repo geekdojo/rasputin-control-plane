@@ -12,6 +12,14 @@ CREATE TABLE IF NOT EXISTS firewall_intents (
 );
 CREATE INDEX IF NOT EXISTS idx_firewall_intents_kind ON firewall_intents(kind);
 
+-- firewall_intent_secrets is the write-only slot for an intent's secret (the
+-- PPPoE password of a wan_config). It is kept out of firewall_intents.spec so
+-- no read of an intent returns it; the compile path puts it back (secrets.go).
+CREATE TABLE IF NOT EXISTS firewall_intent_secrets (
+    intent_id TEXT PRIMARY KEY REFERENCES firewall_intents(id) ON DELETE CASCADE,
+    secret    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS firewall_state (
     target_node_id  TEXT PRIMARY KEY,
     intent_hash     TEXT NOT NULL DEFAULT '',

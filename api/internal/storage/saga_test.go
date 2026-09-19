@@ -568,11 +568,18 @@ func TestClaimSaga_Step1RefusesANodeThatCannotHoldATarget(t *testing.T) {
 	}
 }
 
-func TestClaimSaga_KeyMaterialNeverLeavesTheSpecAndTheStore(t *testing.T) {
+// No secret in the job ledger (geekdojo/geekdojo-brain#493, gate 6), for
+// backup.target.claim: the passphrase-wrapped private key counts as a secret,
+// because it can be attacked offline. It reaches the agent's bus command (the
+// disk's marker needs it) and the target row, and nothing else — not the spec,
+// a step result, an event (job.created included), or the process log.
+func TestClaimSaga_KeyMaterialNeverEntersTheLedger(t *testing.T) {
 	const (
 		wrappedPass     = "SENTINEL-WRAPPED-BY-PASSPHRASE"
 		wrappedRecovery = "SENTINEL-WRAPPED-BY-RECOVERY-CODE"
 	)
+	sentinels := []string{wrappedPass, wrappedRecovery}
+	logs := captureLog(t)
 	h := newHarness(t, &fakeAgent{
 		enumerate: func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
 	})
@@ -587,13 +594,11 @@ func TestClaimSaga_KeyMaterialNeverLeavesTheSpecAndTheStore(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Not vacuous: the blobs really are in the spec, which is how they got to
-	// the store at all.
-	j, _ := h.jobStore.GetJob(ctx, jobID)
-	if !strings.Contains(string(j.Spec), wrappedPass) {
-		t.Fatal("the wrapped blob is not in the spec — this test would prove nothing")
+	// Not vacuous: the blobs really did reach the agent and the target row.
+	cmd, ok := h.agent.lastClaim()
+	if !ok || cmd.WrappedByPassphrase != wrappedPass || cmd.WrappedByRecoveryCode != wrappedRecovery {
+		t.Fatalf("the claim command did not carry the wrapped key (ok=%v): the disk's marker would be written without it", ok)
 	}
-	// And they really did land in the store.
 	pass, recovery, err := h.store.GetWrappedKeys(ctx, jobID)
 	if err != nil {
 		t.Fatalf("GetWrappedKeys: %v", err)
@@ -601,6 +606,17 @@ func TestClaimSaga_KeyMaterialNeverLeavesTheSpecAndTheStore(t *testing.T) {
 	if pass != wrappedPass || recovery != wrappedRecovery {
 		t.Fatalf("wrapped blobs not persisted: %q / %q", pass, recovery)
 	}
+
+	// The spec refers to the key by id.
+	j, _ := h.jobStore.GetJob(ctx, jobID)
+	var persisted map[string]any
+	if err := json.Unmarshal(j.Spec, &persisted); err != nil {
+		t.Fatalf("decode spec: %v", err)
+	}
+	if persisted["archiveKeyId"] != "key-2026-08" {
+		t.Errorf("spec archiveKeyId = %v, want the key's id: %s", persisted["archiveKeyId"], j.Spec)
+	}
+	assertNoSentinel(t, "job spec", string(j.Spec), sentinels)
 
 	steps, err := h.jobStore.ListSteps(ctx, jobID)
 	if err != nil {
@@ -610,29 +626,20 @@ func TestClaimSaga_KeyMaterialNeverLeavesTheSpecAndTheStore(t *testing.T) {
 		t.Fatalf("want 5 recorded steps, got %d", len(steps))
 	}
 	for _, st := range steps {
-		for _, sentinel := range []string{wrappedPass, wrappedRecovery} {
-			if strings.Contains(string(st.Result), sentinel) {
-				t.Errorf("step %q result carries key material: %s", st.Name, st.Result)
-			}
-		}
+		assertNoSentinel(t, "step "+st.Name+" result", string(st.Result)+st.Error, sentinels)
 	}
-
 	events, err := h.jobStore.ListEvents(ctx, jobID)
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	for _, ev := range events {
-		// job.created echoes the whole job row, spec included; that is the
-		// ledger carrying wrapped ciphertext, which is allowed. Every other
-		// event type is the saga's own output and must be clean.
-		if ev.Type == string(proto.JobCreated) {
-			continue
-		}
-		for _, sentinel := range []string{wrappedPass, wrappedRecovery} {
-			if strings.Contains(string(ev.Data), sentinel) {
-				t.Errorf("event %q carries key material: %s", ev.Type, ev.Data)
-			}
-		}
+		assertNoSentinel(t, "event "+ev.Type, string(ev.Data), sentinels)
+	}
+	assertNoSentinel(t, "process log", logs.String(), sentinels)
+
+	// The staging slot is emptied once the job ends.
+	if k, err := h.store.StagedClaimKey(ctx, jobID); err != nil || k != nil {
+		t.Errorf("staged key still present after the job ended (err=%v)", err)
 	}
 
 	// And the row an operator sees names the key without carrying it.
@@ -644,12 +651,87 @@ func TestClaimSaga_KeyMaterialNeverLeavesTheSpecAndTheStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal row: %v", err)
 	}
-	for _, sentinel := range []string{wrappedPass, wrappedRecovery} {
-		if strings.Contains(string(blob), sentinel) {
-			t.Errorf("BackupTarget JSON carries key material: %s", blob)
+	assertNoSentinel(t, "BackupTarget JSON", string(blob), sentinels)
+	h.runner.Wait()
+}
+
+// A spec that carries the key inline — a hand-built job through POST
+// /api/jobs — is refused at step 1, before a row is written or the agent is
+// asked anything.
+func TestClaimSaga_RefusesAnInlineArchiveKey(t *testing.T) {
+	h := newHarness(t, &fakeAgent{
+		enumerate: func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
+	})
+	body := `{"nodeId":"` + testNode + `","devicePath":"` + testDevice + `","fingerprint":"` + testFingerpr +
+		`","archiveKey":{"keyId":"k","publicKey":"` + markerPublicKey + `","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`
+	j, err := h.runner.Submit(context.Background(), ClaimJobKind, json.RawMessage(body), "test")
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	done := h.waitTerminal(t, j.ID)
+	if done.Status != jobs.StatusFailed || !strings.Contains(done.Error, "archiveKey must not be in a claim job's spec") {
+		t.Fatalf("status=%s error=%q, want the inline-key refusal", done.Status, done.Error)
+	}
+	if row := h.target(t, j.ID); row != nil {
+		t.Errorf("a refused claim left a target row (%s)", row.Status)
+	}
+	if h.agent.claimCount() != 0 {
+		t.Error("nothing should have been formatted")
+	}
+}
+
+// A spec naming a key that was never staged — the id without the material —
+// is refused at step 1 rather than claiming a disk with no key.
+func TestClaimSaga_RefusesAKeyIDThatIsNotStaged(t *testing.T) {
+	h := newHarness(t, &fakeAgent{
+		enumerate: func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
+	})
+	spec := baseSpec()
+	spec.ArchiveKeyID = "key-nobody-staged"
+	jobID := h.submit(t, spec)
+	done := h.waitTerminal(t, jobID)
+	if done.Status != jobs.StatusFailed || !strings.Contains(done.Error, "is not staged for this job") {
+		t.Fatalf("status=%s error=%q, want the not-staged refusal", done.Status, done.Error)
+	}
+	if row := h.target(t, jobID); row != nil {
+		t.Errorf("a refused claim left a target row (%s)", row.Status)
+	}
+	if h.agent.claimCount() != 0 {
+		t.Error("nothing should have been formatted")
+	}
+}
+
+// A staged key whose job is already terminal — a process that stopped before
+// the terminal hook — is discarded at startup; one whose job is still running
+// is left alone.
+func TestReconcileStrandedRows_DiscardsStrandedClaimKeys(t *testing.T) {
+	h := newHarness(t, &fakeAgent{})
+	ctx := context.Background()
+	now := time.Now().UTC()
+	key := &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}
+	for _, j := range []*jobs.Job{
+		{ID: "done", Kind: ClaimJobKind, Spec: json.RawMessage(`{}`), Status: jobs.StatusFailed, CreatedAt: now},
+		{ID: "live", Kind: ClaimJobKind, Spec: json.RawMessage(`{}`), Status: jobs.StatusRunning, CreatedAt: now},
+	} {
+		if err := h.jobStore.CreateJob(ctx, j); err != nil {
+			t.Fatalf("CreateJob: %v", err)
 		}
 	}
-	h.runner.Wait()
+	for _, id := range []string{"done", "live", "never-recorded"} {
+		if err := h.store.StageClaimKey(ctx, id, key, now); err != nil {
+			t.Fatalf("StageClaimKey: %v", err)
+		}
+	}
+	if err := ReconcileStrandedRows(ctx, h.store, h.jobStore); err != nil {
+		t.Fatalf("ReconcileStrandedRows: %v", err)
+	}
+	left, err := h.store.StagedClaimKeyJobs(ctx)
+	if err != nil {
+		t.Fatalf("StagedClaimKeyJobs: %v", err)
+	}
+	if len(left) != 1 || left[0] != "live" {
+		t.Errorf("staged keys left = %v, want only the running job's", left)
+	}
 }
 
 // A half-supplied key is refused rather than stored: a target with only the
@@ -661,13 +743,12 @@ func TestClaimSaga_RefusesAHalfSuppliedArchiveKey(t *testing.T) {
 	})
 	spec := baseSpec()
 	spec.ArchiveKey = &ArchiveKey{KeyID: "k", WrappedByPassphrase: "only-one"}
-	jobID := h.submit(t, spec)
-	done := h.waitTerminal(t, jobID)
-	if done.Status != jobs.StatusFailed {
-		t.Fatalf("want failed, got %q", done.Status)
+	_, err := SubmitClaim(context.Background(), h.runner, h.store, spec, "test")
+	if err == nil || !strings.Contains(err.Error(), "wrappedByRecoveryCode") {
+		t.Fatalf("SubmitClaim error = %v, want it to name what is missing", err)
 	}
-	if !strings.Contains(done.Error, "wrappedByRecoveryCode") {
-		t.Errorf("error should name what is missing: %q", done.Error)
+	if left, _ := h.store.StagedClaimKeyJobs(context.Background()); len(left) != 0 {
+		t.Errorf("a refused claim staged a key: %v", left)
 	}
 	if h.agent.claimCount() != 0 {
 		t.Error("nothing should have been formatted")
@@ -724,7 +805,7 @@ func TestClaimStep_RefusesToClaimWithoutAPlan(t *testing.T) {
 	nc := startNATS(t)
 	agent := (&fakeAgent{nodeID: testNode}).start(t, nc)
 	sc := stepCtx("j", baseSpec(), nc, nil)
-	if _, err := claimClaim(Config{}, nil)(sc); err == nil {
+	if _, err := claimClaim(Config{}, nil, nil)(sc); err == nil {
 		t.Fatal("want a refusal when check_existing left no plan")
 	} else if !strings.Contains(err.Error(), "does not reconstruct its own authorization") {
 		t.Errorf("error = %q", err)
@@ -856,7 +937,7 @@ func TestCheckExistingStep_FallsBackToAFreshEnumeration(t *testing.T) {
 	}
 	agent.start(t, nc)
 	sc := stepCtx("j", baseSpec(), nc, nil)
-	if _, err := claimCheckExisting()(sc); err == nil {
+	if _, err := claimCheckExisting(nil)(sc); err == nil {
 		t.Fatal("want the backup-set-present refusal")
 	} else if !strings.Contains(err.Error(), string(proto.StorageRefusalBackupSetPresent)) {
 		t.Errorf("error = %q", err)
@@ -866,5 +947,57 @@ func TestCheckExistingStep_FallsBackToAFreshEnumeration(t *testing.T) {
 	agent.mu.Unlock()
 	if calls != 1 {
 		t.Errorf("enumerate calls = %d, want 1 (the fallback)", calls)
+	}
+}
+
+// A submit that fails after the key was staged — here the job cannot be
+// recorded — leaves nothing staged: no job will ever run to discard it.
+func TestSubmitClaim_DiscardsTheStagedKeyWhenTheJobIsNotRecorded(t *testing.T) {
+	h := newHarness(t, &fakeAgent{})
+	ctx := context.Background()
+	_ = h.jobStore.Close() // CreateJob fails; the prepare callback has already run
+	spec := baseSpec()
+	spec.ArchiveKey = &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}
+	if _, err := SubmitClaim(ctx, h.runner, h.store, spec, "test"); err == nil {
+		t.Fatal("want the submit to fail with the job store closed")
+	}
+	if left, err := h.store.StagedClaimKeyJobs(ctx); err != nil || len(left) != 0 {
+		t.Errorf("staged keys left = %v (err %v), want none", left, err)
+	}
+}
+
+// claimKey refuses a job whose staged key and spec disagree, in either
+// direction, and passes a keyless claim with nothing staged.
+func TestClaimKey_SpecAndStagedKeyMustAgree(t *testing.T) {
+	h := newHarness(t, &fakeAgent{})
+	ctx := context.Background()
+	key := &ArchiveKey{KeyID: "k1", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}
+	if err := h.store.StageClaimKey(ctx, "staged-job", key, time.Now().UTC()); err != nil {
+		t.Fatalf("StageClaimKey: %v", err)
+	}
+	cases := []struct {
+		name, jobID, specID, wantErr string
+	}{
+		{name: "no key either side", jobID: "plain-job"},
+		{name: "staged but not named", jobID: "staged-job", wantErr: "its spec names none"},
+		{name: "named but not staged", jobID: "plain-job", specID: "k1", wantErr: "is not staged for this job"},
+		{name: "different ids", jobID: "staged-job", specID: "k2", wantErr: "but the spec names k2"},
+		{name: "agree", jobID: "staged-job", specID: "k1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := &jobs.StepCtx{Ctx: ctx, JobID: tc.jobID}
+			got, err := claimKey(sc, h.store, &ClaimSpec{ArchiveKeyID: tc.specID})
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("err = %v, want it to mention %q", err, tc.wantErr)
+			case tc.wantErr == "" && tc.specID == "" && got != nil:
+				t.Errorf("a keyless claim returned a key: %+v", got)
+			case tc.wantErr == "" && tc.specID != "" && (got == nil || got.KeyID != tc.specID):
+				t.Errorf("key = %+v, want %s", got, tc.specID)
+			}
+		})
 	}
 }

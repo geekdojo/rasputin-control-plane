@@ -410,13 +410,23 @@ func newHarness(t *testing.T, agent *fakeAgent) *harness {
 
 func (h *harness) submit(t *testing.T, spec ClaimSpec) string {
 	t.Helper()
-	body, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatalf("marshal spec: %v", err)
+	if spec.ArchiveKey == nil {
+		// Submitted raw, past SubmitClaim's validation, so the step-1
+		// refusals are exercised on a spec that reaches the saga some other
+		// way — a hand-built job through POST /api/jobs.
+		body, err := json.Marshal(spec)
+		if err != nil {
+			t.Fatalf("marshal spec: %v", err)
+		}
+		j, err := h.runner.Submit(context.Background(), ClaimJobKind, body, "test")
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		return j.ID
 	}
-	j, err := h.runner.Submit(context.Background(), ClaimJobKind, body, "test")
+	j, err := SubmitClaim(context.Background(), h.runner, h.store, spec, "test")
 	if err != nil {
-		t.Fatalf("Submit: %v", err)
+		t.Fatalf("SubmitClaim: %v", err)
 	}
 	return j.ID
 }

@@ -208,12 +208,26 @@ type ClaimSpec struct {
 	// (there is no partition UUID to adopt it by) nor claimed as blank (the
 	// backup-set refusal stands in the way). It can be wiped.
 	Wipe *WipeConfirmation `json:"wipe,omitempty"`
-	// ArchiveKey carries the §4.6 keypair: the public half in clear, the
-	// private half already wrapped under both custody paths. Optional: a target
-	// may be claimed before encryption is configured. The private key is never
+	// ArchiveKeyID refers to the §4.6 keypair this claim records, by its id.
+	// Empty when the target is claimed before encryption is configured.
+	//
+	// The key itself is not in the spec. Its private half is wrapped, but a
+	// wrapped key is still a secret (it can be attacked offline), and a spec is
+	// persisted in the job ledger and served by the jobs API. SubmitClaim stages
+	// the key under the job (Store.StageClaimKey); the saga reads it from there
+	// and step 5 records it on the target row.
+	ArchiveKeyID string `json:"archiveKeyId,omitempty"`
+	// ArchiveKey is submission input only: the keypair from the request, the
+	// public half in clear and the private half already wrapped. It is never
+	// serialized (json:"-"), so a spec read back from the ledger never has it;
+	// the saga's steps read the staged key instead. The private key is never
 	// plaintext, and has no field here to be plaintext in.
-	ArchiveKey *ArchiveKey `json:"archiveKey,omitempty"`
+	ArchiveKey *ArchiveKey `json:"-"`
 }
+
+// inlineArchiveKeyField is the spec key an archive key was carried under
+// before it moved out of the spec. ParseClaimSpec refuses a spec that has it.
+const inlineArchiveKeyField = "archiveKey"
 
 // ParseClaimSpec decodes and validates a job spec. Every failure here is a
 // step-1 refusal, which is the cheapest kind: nothing has been touched.
@@ -221,6 +235,15 @@ func ParseClaimSpec(raw json.RawMessage) (*ClaimSpec, error) {
 	var spec ClaimSpec
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		return nil, fmt.Errorf("invalid spec: %w", err)
+	}
+	// Key material never rides in a claim spec. A spec that carries it was
+	// built by something other than SubmitClaim, and running it would treat
+	// the job ledger as a place a wrapped key may live.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err == nil {
+		if _, ok := fields[inlineArchiveKeyField]; ok {
+			return nil, errors.New("archiveKey must not be in a claim job's spec: the key is staged with the job and referred to by archiveKeyId. Submit the claim through POST /api/backup/targets")
+		}
 	}
 	if strings.TrimSpace(spec.NodeID) == "" {
 		return nil, errors.New("nodeId is required")
@@ -240,10 +263,35 @@ func ParseClaimSpec(raw json.RawMessage) (*ClaimSpec, error) {
 	if spec.Wipe != nil && strings.TrimSpace(spec.Wipe.Token) == "" {
 		return nil, errors.New("wipe.token is required: a wipe must echo the `wipeToken` GET /api/backup/candidates published for the disk being destroyed, which is how a wipe proves it saw what it is destroying. An absent token is a refusal, never a default to wipe")
 	}
+	return &spec, nil
+}
+
+// ValidateClaim checks a claim as submitted — the spec and the key that comes
+// with it — without submitting it. SubmitClaim runs the same checks; the HTTP
+// handler calls this first so a refusal is a 400 rather than a job.
+func ValidateClaim(spec ClaimSpec) error {
+	_, err := claimBody(spec)
+	return err
+}
+
+// claimBody returns the spec as it is persisted: the key replaced by its id.
+func claimBody(spec ClaimSpec) (json.RawMessage, error) {
 	if err := spec.ArchiveKey.validate(); err != nil {
 		return nil, err
 	}
-	return &spec, nil
+	spec.ArchiveKeyID = ""
+	if spec.ArchiveKey.present() {
+		spec.ArchiveKeyID = spec.ArchiveKey.KeyID
+	}
+	spec.ArchiveKey = nil
+	body, err := json.Marshal(spec)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := ParseClaimSpec(body); err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
 // BackupTarget is one row of the backup_targets ledger: an attempt to claim a
