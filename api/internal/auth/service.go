@@ -61,13 +61,37 @@ type pendingAuth struct {
 	user    *User
 	session *webauthn.SessionData
 	expires time.Time
+	// basis records what authorized a registration ceremony at begin, so
+	// finish re-checks that same fact rather than trusting that it still
+	// holds. Unset for login.
+	basis registerBasis
+}
+
+// registerBasis is the fact a registration ceremony was begun on.
+type registerBasis struct {
+	// firstRun: no operator existed at begin. Finish commits only if that
+	// is still true (Store.CreateUserWithCredential's conditional insert).
+	firstRun bool
+	// byUserID: the ID of the signed-in user who began the ceremony. Finish
+	// requires a live session for that same user.
+	byUserID []byte
 }
 
 const (
 	sessionCookie   = "rasputin-session"
 	pendingCookie   = "rasputin-pending"
 	sessionLifetime = 7 * 24 * time.Hour
+	// pendingLifetime bounds an unfinished WebAuthn ceremony. A ceremony is
+	// consumed at finish, but one the browser abandons produces no fact the
+	// api could observe, so this bound is what frees its memory and ends its
+	// authority. It is a safety net, not a state transition (principles.md's
+	// clock rule; exception register row E5).
 	pendingLifetime = 5 * time.Minute
+	// maxPending caps the in-memory ceremony map. login/begin is
+	// unauthenticated, so without a cap the map grows with every request
+	// until the janitor catches up. At the cap, expired entries are pruned
+	// first, then the entry closest to expiry is evicted.
+	maxPending = 1024
 )
 
 // NewService constructs an auth Service. The store must be opened separately
@@ -174,6 +198,16 @@ func (s *Service) cleanupPending(now time.Time) {
 	}
 }
 
+// ----- first run ------------------------------------------------------------
+
+// FirstRun reports whether the installation is at first run: no operator has
+// registered yet. It is the one predicate every first-run surface reads
+// (register/begin, auth/status, the restore routes, the setup probe), and it
+// fails closed: an error returns (false, err), never "first run".
+func (s *Service) FirstRun(ctx context.Context) (bool, error) {
+	return s.store.FirstRun(ctx)
+}
+
 // ----- pending-auth state -------------------------------------------------
 
 func randomToken(n int) (string, error) {
@@ -189,11 +223,38 @@ func (s *Service) storePending(p *pendingAuth) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	p.expires = time.Now().Add(pendingLifetime)
+	now := time.Now()
+	p.expires = now.Add(pendingLifetime)
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) >= maxPending {
+		s.evictPendingLocked(now)
+	}
 	s.pending[token] = p
-	s.mu.Unlock()
 	return token, nil
+}
+
+// evictPendingLocked makes room for one entry: it drops every expired entry,
+// and if none had expired, the one closest to expiry. Caller holds s.mu.
+func (s *Service) evictPendingLocked(now time.Time) {
+	var (
+		oldest    string
+		oldestExp time.Time
+		pruned    bool
+	)
+	for token, p := range s.pending {
+		if now.After(p.expires) {
+			delete(s.pending, token)
+			pruned = true
+			continue
+		}
+		if oldest == "" || p.expires.Before(oldestExp) {
+			oldest, oldestExp = token, p.expires
+		}
+	}
+	if !pruned && oldest != "" {
+		delete(s.pending, oldest)
+	}
 }
 
 func (s *Service) takePending(token string) *pendingAuth {

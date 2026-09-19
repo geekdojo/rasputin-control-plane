@@ -427,3 +427,17 @@ func TestService_GetState_ModeStepRequiredAndBlocksCompletion(t *testing.T) {
 		t.Error("Completed must stay false while the mode is unset")
 	}
 }
+
+// A failing users probe fails GetState. Showing the passkey step as undone
+// would present a configured installation as a fresh one.
+func TestService_GetState_HasUsersProbeErrorFailsClosed(t *testing.T) {
+	ps := &probesState{hasUsersErr: errors.New("db gone")}
+	svc := buildService(t, ps, "self-1")
+	state, err := svc.GetState(context.Background())
+	if err == nil {
+		t.Fatalf("want an error, got state %+v", state)
+	}
+	if state != nil {
+		t.Fatal("GetState returned a state alongside the error")
+	}
+}

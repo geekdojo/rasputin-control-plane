@@ -88,7 +88,6 @@ type apiFixture struct {
 	bmcSvc          *bmc.Service
 	setupSvc        *setup.Service
 	nc              *nats.Conn
-	hasUsers        bool
 	hasFirewallNode bool
 }
 
@@ -224,7 +223,11 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		updStore:     updStore,
 	}
 	probes := setup.Probes{
-		HasUsers:        func(_ context.Context) (bool, error) { return f.hasUsers, nil },
+		// Wired as main wires it: from auth's FirstRun, over the real store.
+		HasUsers: func(ctx context.Context) (bool, error) {
+			firstRun, err := authStore.FirstRun(ctx)
+			return !firstRun, err
+		},
 		HasFirewallNode: func(_ context.Context) (bool, error) { return f.hasFirewallNode, nil },
 	}
 	setupSvc := setup.NewService(setupStore, probes, "self-node", "test1.local", "test1")
@@ -299,7 +302,6 @@ func (f *apiFixture) authenticate(t *testing.T) *http.Cookie {
 	}
 	f.authUser = u
 	f.authSession = sess
-	f.hasUsers = true
 	return &http.Cookie{Name: "rasputin-session", Value: sess.Token}
 }
 
@@ -2081,12 +2083,26 @@ func TestHandleSetupMesh_UnknownWorkflow(t *testing.T) {
 	}
 }
 
+// The setup probe reads auth's FirstRun; a DB error fails setup/state rather
+// than reporting a configured installation as having no users.
+func TestHandleSetupState_FailsClosedWhenFirstRunCannotBeRead(t *testing.T) {
+	f := newAPIFixture(t)
+	_ = f.authStore.Close()
+	w := f.do(t, http.MethodGet, "/api/setup/state", "", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "hasUsers") {
+		t.Fatalf("setup/state reported hasUsers on a DB error: %s", w.Body.String())
+	}
+}
+
 func TestHandleSetupComplete_RequiredStepIncomplete(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
 	w := f.do(t, http.MethodPost, "/api/setup/complete", "", c)
-	// The first-passkey step is unsatisfied until we mark hasUsers=true,
-	// AND install name + deployment mode must be set.
+	// The passkey step is satisfied by authenticate's user, but the install
+	// name and deployment mode must be set too.
 	if w.Code != http.StatusPreconditionFailed {
 		t.Errorf("want 412, got %d body=%s", w.Code, w.Body.String())
 	}

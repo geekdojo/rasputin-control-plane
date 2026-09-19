@@ -56,18 +56,85 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 // ----- Users --------------------------------------------------------------
 
-// CountUsers returns the number of registered users. Used by the api's
-// /api/auth/status endpoint to decide whether to show first-run setup.
+// CountUsers returns the number of registered users. It is a count, not a
+// gate: whether the installation is at first run is FirstRun's question, and
+// nothing decides an authorization on this number.
 func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n)
 	return n, err
 }
 
-func (s *Store) CreateUser(ctx context.Context, u *User) error {
-	_, err := s.db.ExecContext(ctx, `
+// ErrNotFirstRun is CreateUserWithCredential's refusal when a registration
+// authorized by first run finds that an operator already exists.
+var ErrNotFirstRun = errors.New("first-run registration is closed: an operator already exists")
+
+// FirstRun reports whether the installation is at first run: no operator
+// exists yet. It fails closed. Any error reading the answer returns
+// (false, err), so a caller that checks only the bool still reads "not first
+// run" and refuses.
+//
+// This is the one implementation; Service.FirstRun is its public face.
+// It lives on the store too only so main can wire the setup probe before the
+// Service exists.
+func (s *Store) FirstRun(ctx context.Context) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users)`).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("auth: first-run check: %w", err)
+	}
+	return exists == 0, nil
+}
+
+// CreateUserWithCredential persists a new user and its first credential in
+// one transaction, so a failed credential write never leaves a user with no
+// way to sign in.
+//
+// firstRunOnly is set when the registration was authorized by first run
+// rather than by a session. The user row is then inserted only if the users
+// table is still empty, in the same statement that checks it, and
+// ErrNotFirstRun is returned when it is not. Checking at begin is not enough:
+// a ceremony begun while the table was empty must not create a second
+// operator after another registration has finished.
+func (s *Store) CreateUserWithCredential(ctx context.Context, u *User, c *Credential, firstRunOnly bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if firstRunOnly {
+		res, err := tx.ExecContext(ctx, `
         INSERT INTO users (id, name, display_name, created_at)
-        VALUES (?, ?, ?, ?)`,
+        SELECT ?, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM users)`,
+			u.ID, u.Name, u.DisplayName, ms(u.CreatedAt))
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrNotFirstRun
+		}
+	} else if _, err := tx.ExecContext(ctx, insertUserSQL,
+		u.ID, u.Name, u.DisplayName, ms(u.CreatedAt)); err != nil {
+		return err
+	}
+	if err := insertCredential(ctx, tx, c); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+const insertUserSQL = `
+        INSERT INTO users (id, name, display_name, created_at)
+        VALUES (?, ?, ?, ?)`
+
+func (s *Store) CreateUser(ctx context.Context, u *User) error {
+	_, err := s.db.ExecContext(ctx, insertUserSQL,
 		u.ID, u.Name, u.DisplayName, ms(u.CreatedAt))
 	return err
 }
@@ -177,7 +244,16 @@ func (s *Store) loadCredentials(ctx context.Context, u *User) error {
 // ----- Credentials --------------------------------------------------------
 
 func (s *Store) CreateCredential(ctx context.Context, c *Credential) error {
-	_, err := s.db.ExecContext(ctx, `
+	return insertCredential(ctx, s.db, c)
+}
+
+// execer is the part of *sql.DB and *sql.Tx insertCredential needs.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func insertCredential(ctx context.Context, db execer, c *Credential) error {
+	_, err := db.ExecContext(ctx, `
         INSERT INTO credentials (id, user_id, public_key, attestation, transports,
                                  aaguid, sign_count, clone_warning,
                                  backup_eligible, backup_state, nickname,

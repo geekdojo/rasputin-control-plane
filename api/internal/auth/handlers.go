@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -24,14 +26,20 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux) {
 // ----- status / me / logout -----------------------------------------------
 
 // GET /api/auth/status — open. Reports whether any users exist (drives the
-// first-run flow) and the current user if logged in.
+// first-run flow) and the current user if logged in. An error reading
+// FirstRun is a 500, never hasUsers=false.
 func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
+	firstRun, err := s.FirstRun(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	n, err := s.store.CountUsers(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	resp := map[string]any{"hasUsers": n > 0, "userCount": n}
+	resp := map[string]any{"hasUsers": !firstRun, "userCount": n}
 	if _, user, _ := s.resolveSession(r); user != nil {
 		resp["user"] = publicUser(user)
 	}
@@ -68,6 +76,9 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 // Allowed when:
 //   - No users exist yet (first-run), OR
 //   - The caller is authenticated (an existing user is creating a new one).
+//
+// Which of the two authorized the ceremony is recorded in the pending state,
+// and register/finish re-checks that same fact before it commits.
 func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string `json:"name"`
@@ -78,17 +89,24 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n, err := s.store.CountUsers(r.Context())
+	firstRun, err := s.FirstRun(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if n > 0 {
-		if _, user, _ := s.resolveSession(r); user == nil {
+	basis := registerBasis{firstRun: firstRun}
+	if !firstRun {
+		_, by, err := s.resolveSession(r)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if by == nil {
 			writeErr(w, http.StatusUnauthorized,
 				"only an authenticated user can register a new user")
 			return
 		}
+		basis.byUserID = by.ID
 	}
 
 	existing, err := s.store.GetUserByName(r.Context(), req.Name)
@@ -128,6 +146,7 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 		kind:    "register",
 		user:    user,
 		session: sessionData,
+		basis:   basis,
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -152,22 +171,37 @@ func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A ceremony begun by a signed-in user needs that user still signed in:
+	// signing out, or losing the session, ends the authority it lent.
+	if !p.basis.firstRun {
+		_, by, err := s.resolveSession(r)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if by == nil || len(p.basis.byUserID) == 0 || !bytes.Equal(by.ID, p.basis.byUserID) {
+			writeErr(w, http.StatusUnauthorized,
+				"the session that began this registration is no longer signed in")
+			return
+		}
+	}
+
 	cred, err := s.web.FinishRegistration(p.user, *p.session, r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Persist user + credential atomically-ish (no transactions across our
-	// thin wrappers; create user first, then credential. If credential save
-	// fails the user lingers — accept this for v0).
-	if err := s.store.CreateUser(r.Context(), p.user); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	// User and credential commit in one transaction. A ceremony begun at
+	// first run commits only if no operator exists now, checked in the same
+	// statement as the insert.
 	dbCred := fromWebAuthn(cred, p.user.ID)
 	dbCred.CreatedAt = time.Now().UTC()
-	if err := s.store.CreateCredential(r.Context(), dbCred); err != nil {
+	if err := s.store.CreateUserWithCredential(r.Context(), p.user, dbCred, p.basis.firstRun); err != nil {
+		if errors.Is(err, ErrNotFirstRun) {
+			writeErr(w, http.StatusForbidden, err.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

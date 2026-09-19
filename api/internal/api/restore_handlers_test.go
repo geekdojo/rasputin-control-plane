@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -192,7 +193,13 @@ func TestRestoreRoutesAreOpenOnlyBeforeTheFirstOperator(t *testing.T) {
 	if w := rf.do(t, http.MethodGet, "/api/restore/candidates", nil); w.Code != http.StatusOK {
 		t.Fatalf("candidates on a fresh box: %d %s", w.Code, w.Body.String())
 	}
-	rf.hasUsers = true
+	// A registered operator closes the surface: the real users table,
+	// read through auth's FirstRun.
+	if err := rf.authStore.CreateUser(rf.ctx, &auth.User{
+		ID: []byte("0123456789abcdef"), Name: "op", DisplayName: "Op", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if w := rf.do(t, http.MethodGet, "/api/restore/candidates", nil); w.Code != http.StatusConflict {
 		t.Fatalf("candidates with an operator: %d %s", w.Code, w.Body.String())
 	}
@@ -201,6 +208,28 @@ func TestRestoreRoutesAreOpenOnlyBeforeTheFirstOperator(t *testing.T) {
 	})
 	if w.Code != http.StatusConflict {
 		t.Fatalf("restore with an operator: %d %s", w.Code, w.Body.String())
+	}
+	if rf.restarts.Load() != 0 {
+		t.Fatal("a refused restore asked for a restart")
+	}
+	if ents, _ := os.ReadDir(rf.dataDir); len(ents) != 0 {
+		t.Fatalf("data dir written: %v", ents)
+	}
+}
+
+// An unreadable users table closes the restore surface: FirstRun's error is
+// "not first run", never "first run".
+func TestRestoreRoutesFailClosedWhenFirstRunCannotBeRead(t *testing.T) {
+	rf := newRestoreFixture(t)
+	_ = rf.authStore.Close()
+	if w := rf.do(t, http.MethodGet, "/api/restore/candidates", nil); w.Code != http.StatusInternalServerError {
+		t.Fatalf("candidates on a DB error: want 500, got %d %s", w.Code, w.Body.String())
+	}
+	w := rf.do(t, http.MethodPost, "/api/restore", map[string]string{
+		"partUuid": rtPartUUID, "generationId": rf.genID, "keyId": rtKeyID, "privateKey": rf.privB64(),
+	})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("restore on a DB error: want 500, got %d %s", w.Code, w.Body.String())
 	}
 	if rf.restarts.Load() != 0 {
 		t.Fatal("a refused restore asked for a restart")
