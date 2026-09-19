@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
 
 // Mesh TLS PKI ("TLS-A" per design/control-plane/certificates.md).
@@ -79,8 +81,10 @@ func EnsureMeshCA(trustDir, installName string) (*MeshCA, error) {
 	if installName == "" {
 		installName = "rasputin"
 	}
-	if err := os.MkdirAll(trustDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mesh: mkdir trust dir: %w", err)
+	// The trust dir holds the Mesh CA key: owner-only, existing installs
+	// included.
+	if err := atrest.EnsureSecretDir(trustDir); err != nil {
+		return nil, fmt.Errorf("mesh: trust dir: %w", err)
 	}
 	certPath := filepath.Join(trustDir, MeshCAFileName)
 	keyPath := filepath.Join(trustDir, MeshCAKeyFileName)
@@ -127,7 +131,7 @@ func createMeshCA(certPath, keyPath, installName string) (*MeshCA, error) {
 		return nil, fmt.Errorf("mesh: self-sign CA: %w", err)
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	if err := writeAtomic(certPath, certPEM, 0o644); err != nil {
+	if err := writeCert(certPath, certPEM); err != nil {
 		return nil, err
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
@@ -135,7 +139,7 @@ func createMeshCA(certPath, keyPath, installName string) (*MeshCA, error) {
 		return nil, fmt.Errorf("mesh: marshal CA key: %w", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := writeAtomic(keyPath, keyPEM, 0o600); err != nil {
+	if err := writeKey(keyPath, keyPEM); err != nil {
 		return nil, err
 	}
 	cert, err := x509.ParseCertificate(der)
@@ -261,8 +265,10 @@ func MintLeafToDisk(ca *MeshCA, outDir string, spec LeafSpec) (LeafPaths, error)
 	if ca == nil {
 		return LeafPaths{}, errors.New("mesh: MintLeafToDisk: nil CA")
 	}
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return LeafPaths{}, fmt.Errorf("mesh: mkdir leaf dir: %w", err)
+	// The leaf dir holds the leaf's private key: owner-only, existing
+	// installs included.
+	if err := atrest.EnsureSecretDir(outDir); err != nil {
+		return LeafPaths{}, fmt.Errorf("mesh: leaf dir: %w", err)
 	}
 	paths := LeafPaths{
 		CertPath: filepath.Join(outDir, "leaf.pem"),
@@ -275,10 +281,10 @@ func MintLeafToDisk(ca *MeshCA, outDir string, spec LeafSpec) (LeafPaths, error)
 	if err != nil {
 		return LeafPaths{}, err
 	}
-	if err := writeAtomic(paths.CertPath, certPEM, 0o644); err != nil {
+	if err := writeCert(paths.CertPath, certPEM); err != nil {
 		return LeafPaths{}, err
 	}
-	if err := writeAtomic(paths.KeyPath, keyPEM, 0o600); err != nil {
+	if err := writeKey(paths.KeyPath, keyPEM); err != nil {
 		return LeafPaths{}, err
 	}
 	return paths, nil
@@ -423,30 +429,21 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// writeAtomic writes to a temp file in the same dir and renames into
-// place — atomic on POSIX, so a crashed write never leaves a partial
-// cert/key on disk that EnsureMeshCA would later mis-interpret.
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".pki-*.tmp")
-	if err != nil {
-		return fmt.Errorf("mesh: open temp file in %s: %w", dir, err)
+// writeCert and writeKey persist a certificate and its private key through
+// the at-rest helper: atomic (a crashed write never leaves a partial cert or
+// key that EnsureMeshCA would later mis-interpret), with the mode set
+// explicitly. A certificate is public by construction and is 0644; a private
+// key is 0600.
+func writeCert(path string, certPEM []byte) error {
+	if err := atrest.WritePublicFile(path, certPEM); err != nil {
+		return fmt.Errorf("mesh: %w", err)
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) // no-op on success (rename moved it)
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("mesh: write %s: %w", tmpPath, err)
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("mesh: chmod %s: %w", tmpPath, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("mesh: close %s: %w", tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("mesh: rename %s → %s: %w", tmpPath, path, err)
+	return nil
+}
+
+func writeKey(path string, keyPEM []byte) error {
+	if err := atrest.WriteSecretFile(path, keyPEM); err != nil {
+		return fmt.Errorf("mesh: %w", err)
 	}
 	return nil
 }

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"text/template"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
 
 // Supervisor owns the observability sidecar stack's lifecycle on the
@@ -947,11 +949,12 @@ func (s *DockerComposeSupervisor) writeLokiConfig() error {
 		return fmt.Errorf("obs supervisor: render loki config: %w", err)
 	}
 	out := filepath.Join(s.cfg.StateDir, lokiConfigSubdir, lokiConfigFile)
-	tmp := out + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-		return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
+	// Public by design: Loki runs as uid 10001 and must read it; it holds no
+	// secret. 0644 is set explicitly, whatever the umask.
+	if err := atrest.WritePublicFile(out, buf.Bytes()); err != nil {
+		return fmt.Errorf("obs supervisor: %w", err)
 	}
-	return os.Rename(tmp, out)
+	return nil
 }
 
 // lokiConfigTmpl is a minimal single-instance Loki config — filesystem
@@ -978,12 +981,10 @@ func (s *DockerComposeSupervisor) writeGrafanaConfig() error {
 	pairs := append([]grafanaFile{{grafanaIniPath, ini}}, s.grafanaProvisioningFiles()...)
 	for _, p := range pairs {
 		full := filepath.Join(s.cfg.StateDir, p.path)
-		tmp := full + ".tmp"
-		if err := os.WriteFile(tmp, []byte(p.body), 0o644); err != nil {
-			return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
-		}
-		if err := os.Rename(tmp, full); err != nil {
-			return fmt.Errorf("obs supervisor: rename %s: %w", tmp, err)
+		// Public by design: Grafana runs as uid 472 and must read these; they
+		// hold no secret. 0644 is set explicitly, whatever the umask.
+		if err := atrest.WritePublicFile(full, []byte(p.body)); err != nil {
+			return fmt.Errorf("obs supervisor: %w", err)
 		}
 	}
 	return nil
@@ -1310,11 +1311,12 @@ const starterDashboardJSON = `{
 // supervisor Start.
 func (s *DockerComposeSupervisor) writeVMAlertConfig() error {
 	out := filepath.Join(s.cfg.StateDir, vmalertConfigSubdir, vmalertRulesFile)
-	tmp := out + ".tmp"
-	if err := os.WriteFile(tmp, []byte(vmalertRulesYAML), 0o644); err != nil {
-		return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
+	// Public by design: read by the vmalert container; a fixed rule set with no
+	// secret. 0644 is set explicitly, whatever the umask.
+	if err := atrest.WritePublicFile(out, []byte(vmalertRulesYAML)); err != nil {
+		return fmt.Errorf("obs supervisor: %w", err)
 	}
-	return os.Rename(tmp, out)
+	return nil
 }
 
 // vmalertRulesYAML is the Slice 1.5 starter rule set. Three rules,
@@ -1430,11 +1432,12 @@ func (s *DockerComposeSupervisor) writeAlloyConfig() error {
 		return err
 	}
 	out := filepath.Join(s.cfg.StateDir, alloyConfigSubdir, alloyConfigFile)
-	tmp := out + ".tmp"
-	if err := os.WriteFile(tmp, rendered, 0o644); err != nil {
-		return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
+	// Public by design: read by the Alloy container; it holds no secret. 0644
+	// is set explicitly, whatever the umask.
+	if err := atrest.WritePublicFile(out, rendered); err != nil {
+		return fmt.Errorf("obs supervisor: %w", err)
 	}
-	return os.Rename(tmp, out)
+	return nil
 }
 
 func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
@@ -1600,11 +1603,13 @@ func (s *DockerComposeSupervisor) writeCompose() error {
 		return err
 	}
 	out := filepath.Join(s.cfg.StateDir, composeFileName)
-	tmp := out + ".tmp"
-	if err := os.WriteFile(tmp, rendered, 0o644); err != nil {
-		return fmt.Errorf("obs supervisor: write %s: %w", tmp, err)
+	// Owner-only: only the docker CLI, run by this process, reads the compose
+	// file, and a compose file can carry a credential in a service's command
+	// or environment.
+	if err := atrest.WriteSecretFile(out, rendered); err != nil {
+		return fmt.Errorf("obs supervisor: %w", err)
 	}
-	return os.Rename(tmp, out)
+	return nil
 }
 
 // configHash returns a short digest of the given rendered config files, or ""

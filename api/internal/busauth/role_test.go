@@ -11,6 +11,8 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	_ "modernc.org/sqlite"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
 
 // legacyRow is a bus_tokens row as a build before role binding wrote it.
@@ -295,7 +297,7 @@ func TestEnsureAgentToken_ReMintsARolelessPreMarkerToken(t *testing.T) {
 	ctx := context.Background()
 	s, pt := openLegacyStore(t, []legacyRow{{label: AgentTokenLabel, nodeID: "cp-1"}})
 	path := agentTokenPath(t)
-	if err := writeOwnerOnlyFile(path, []byte(pt[0]+"\n")); err != nil {
+	if err := atrest.WriteSecretFile(path, []byte(pt[0]+"\n")); err != nil {
 		t.Fatalf("write token file: %v", err)
 	}
 	reason, err := s.EnsureAgentToken(ctx, path, "cp-1")

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
 
 // The api refuses to revoke the controlplane's own agent token
@@ -198,7 +200,7 @@ func TestEnsureAgentToken_AdoptsAnUnmarkedTokenFromAnEarlierBuild(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeOwnerOnlyFile(path, []byte(plaintext+"\n")); err != nil {
+	if err := atrest.WriteSecretFile(path, []byte(plaintext+"\n")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Revoke(ctx, id); err != nil {
@@ -210,7 +212,7 @@ func TestEnsureAgentToken_AdoptsAnUnmarkedTokenFromAnEarlierBuild(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeOwnerOnlyFile(path, []byte(plaintext+"\n")); err != nil {
+	if err := atrest.WriteSecretFile(path, []byte(plaintext+"\n")); err != nil {
 		t.Fatal(err)
 	}
 	reason, err := s.EnsureAgentToken(ctx, path, "cp-1")

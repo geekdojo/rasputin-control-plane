@@ -26,6 +26,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
@@ -87,7 +88,10 @@ func main() {
 		obsIngestAddr = envOr("RASPUTIN_OBS_INGEST_ADDR", ":8443")
 	}
 
-	if err := os.MkdirAll(filepath.Join(dataDir, "nats"), 0o755); err != nil {
+	// The JetStream store holds the job ledger: owner-only, existing installs
+	// included. The data dir itself is shared with the agent and the OS
+	// (/var/lib/rasputin) and keeps its mode.
+	if err := atrest.EnsureSecretDir(filepath.Join(dataDir, "nats")); err != nil {
 		log.Fatalf("rasputin-api: data dir: %v", err)
 	}
 	dbPath := filepath.Join(dataDir, "rasputin.db")
@@ -378,7 +382,8 @@ func main() {
 	// Set up ahead of mesh because the docker supervisor needs the Mesh CA
 	// at construction time. See wiki design/control-plane/certificates.md.
 	trustDir := envOr("RASPUTIN_TRUST_DIR", filepath.Join(dataDir, "trust"))
-	if err := os.MkdirAll(trustDir, 0o755); err != nil {
+	// Owner-only: it holds the Mesh CA key (EnsureMeshCA tightens it too).
+	if err := atrest.EnsureSecretDir(trustDir); err != nil {
 		log.Fatalf("rasputin-api: trust dir: %v", err)
 	}
 
@@ -392,7 +397,9 @@ func main() {
 	// externally-managed Headscale with RASPUTIN_HEADSCALE_URL +
 	// RASPUTIN_HEADSCALE_API_KEY. See wiki design/control-plane/mesh.md §2.
 	meshStateDir := envOr("RASPUTIN_MESH_STATE_DIR", filepath.Join(dataDir, "mesh"))
-	if err := os.MkdirAll(meshStateDir, 0o755); err != nil {
+	// Owner-only: it holds Headscale's state (its database, noise key and
+	// leaf key) and, with the mock, pre-auth keys.
+	if err := atrest.EnsureSecretDir(meshStateDir); err != nil {
 		log.Fatalf("rasputin-api: mesh state dir: %v", err)
 	}
 	installName := envOr("RASPUTIN_INSTALL_NAME", "rasputin")
