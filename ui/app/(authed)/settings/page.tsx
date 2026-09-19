@@ -16,6 +16,7 @@
 //   • Passkeys — add another passkey to the signed-in account. The operator
 //     first confirms with a passkey they already have, then creates the new
 //     one (lib/auth.ts confirmExistingPasskey / createNewPasskey).
+//     Currently hidden — see SHOW_PASSKEY_MANAGEMENT below.
 // The Settings icon in the sidebar routes here.
 
 import { Check, Settings as SettingsIcon } from 'lucide-react';
@@ -47,6 +48,18 @@ import {
 import { ENROLLED_NODE_KEY_PROCEDURE_URL, operatorKeyDraft } from '../../../lib/operator-key';
 import { confirmExistingPasskey, createNewPasskey, type NewPasskeyOptions } from '../../../lib/auth';
 import type { BMCBackendInfo, BMCConfigView, DeploymentMode, DNSForwarding, Node, ObsStatus, SetupState } from '../../../lib/types';
+
+// Whether Settings shows the Passkeys section. Off until adding a passkey can
+// offer a phone or a security key rather than only the authenticator on this
+// machine: where that authenticator already holds a passkey for the account,
+// creation is correctly refused and the browser's remaining fallback is not one
+// an operator can act on, so the section leads nowhere. Tracked in
+// geekdojo/geekdojo-brain#586 — flip this back to `true` when that ships.
+//
+// Deliberately only the render is gated: PasskeysSection, lib/auth.ts and the
+// /api/auth/register/{begin,step-up,finish} routes all stay exactly as they
+// are, so re-enabling is this one line.
+const SHOW_PASSKEY_MANAGEMENT = false;
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
@@ -88,8 +101,12 @@ export default function SettingsPage() {
         <div style={{ height: 32 }} />
         <OperatorSSHKeySection />
 
-        <div style={{ height: 32 }} />
-        <PasskeysSection />
+        {SHOW_PASSKEY_MANAGEMENT && (
+          <>
+            <div style={{ height: 32 }} />
+            <PasskeysSection />
+          </>
+        )}
       </PageBody>
     </PageShell>
   );
