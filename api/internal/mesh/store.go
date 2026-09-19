@@ -431,8 +431,8 @@ func (s *Store) queryDevices(ctx context.Context, q string, args ...any) ([]*Dev
 
 // GetDeviceByRasputinNodeID returns the one mesh device bound to nodeID, or
 // (nil, nil) if the node is not enrolled. More than one bound device is a
-// *DuplicateBindingError, never a silent pick: the node-removal cascade uses
-// the answer to choose which Headscale device to delete.
+// *DuplicateBindingError, never a silent pick. (Node removal does not use
+// this: it removes every bound device, see DevicesBoundTo.)
 func (s *Store) GetDeviceByRasputinNodeID(ctx context.Context, nodeID string) (*Device, error) {
 	if nodeID == "" {
 		return nil, nil
@@ -452,6 +452,15 @@ func (s *Store) GetDeviceByRasputinNodeID(ctx context.Context, nodeID string) (*
 		e.HSIDs = append(e.HSIDs, d.HSID)
 	}
 	return nil, e
+}
+
+// DevicesBoundTo returns every device bound to nodeID (normally zero or
+// one). For the node-removal cascade, which removes them all.
+func (s *Store) DevicesBoundTo(ctx context.Context, nodeID string) ([]*Device, error) {
+	if nodeID == "" {
+		return nil, nil
+	}
+	return s.queryDevices(ctx, `SELECT `+deviceColumns+` FROM mesh_devices WHERE rasputin_node_id = ? ORDER BY hs_id`, nodeID)
 }
 
 // BoundDevices groups bound devices by node. dup lists every node bound to

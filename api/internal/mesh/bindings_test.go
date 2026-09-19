@@ -361,3 +361,26 @@ func TestConvergeTrust_SkipsANodeBoundToTwoDevices(t *testing.T) {
 		t.Errorf("the skip must be counted: %s", out)
 	}
 }
+
+// Node removal reads every bound device, so a duplicate binding is removed
+// whole instead of blocking the removal or picking one device.
+func TestDevicesBoundTo_ReturnsEveryBoundDevice(t *testing.T) {
+	f := newMeshFixture(t)
+	seedLegacyBinding(t, f.store, "hs-2", "node-a")
+	seedLegacyBinding(t, f.store, "hs-1", "node-a")
+	seedLegacyBinding(t, f.store, "hs-3", "node-b")
+	devs, err := f.store.DevicesBoundTo(f.ctx, "node-a")
+	if err != nil {
+		t.Fatalf("DevicesBoundTo: %v", err)
+	}
+	var ids []string
+	for _, d := range devs {
+		ids = append(ids, d.HSID)
+	}
+	if !slices.Equal(ids, []string{"hs-1", "hs-2"}) {
+		t.Errorf("bound to node-a: %v, want [hs-1 hs-2]", ids)
+	}
+	if devs, _ := f.store.DevicesBoundTo(f.ctx, ""); len(devs) != 0 {
+		t.Errorf("an empty node id matched %d unbound devices", len(devs))
+	}
+}

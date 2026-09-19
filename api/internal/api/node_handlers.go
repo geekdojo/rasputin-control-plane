@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -20,9 +19,14 @@ import (
 // confirmation dialog listing the cascade so the operator knows what
 // they're about to delete.
 type nodeRemovalImpact struct {
-	NodeID           string   `json:"nodeId"`
-	AppIDs           []string `json:"appIds"`
-	MeshDeviceHSID   string   `json:"meshDeviceHsId,omitempty"`
+	NodeID         string   `json:"nodeId"`
+	AppIDs         []string `json:"appIds"`
+	MeshDeviceHSID string   `json:"meshDeviceHsId,omitempty"`
+	// MeshDeviceHSIDs is every mesh device bound to the node. Normally one
+	// (then also MeshDeviceHSID). More than one is a duplicate binding;
+	// removal deletes them all rather than pick one, and never refuses: a
+	// removal is a revocation, so a mesh ambiguity must not block it.
+	MeshDeviceHSIDs  []string `json:"meshDeviceHsIds,omitempty"`
 	HasFirewallState bool     `json:"hasFirewallState"`
 }
 
@@ -42,7 +46,7 @@ func (s *Server) handleGetNodeRemovalImpact(w http.ResponseWriter, r *http.Reque
 	}
 	impact, err := s.computeRemovalImpact(r.Context(), id)
 	if err != nil {
-		writeError(w, removalImpactStatus(err), err.Error())
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, impact)
@@ -89,16 +93,20 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 
 	impact, err := s.computeRemovalImpact(ctx, id)
 	if err != nil {
-		writeError(w, removalImpactStatus(err), err.Error())
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	if impact.MeshDeviceHSID != "" {
-		if err := s.mesh.Client().DeleteNode(ctx, impact.MeshDeviceHSID); err != nil {
+	if len(impact.MeshDeviceHSIDs) > 1 {
+		log.Printf("rasputin-api: removing node %q, which is bound to %d mesh devices (%q); deleting all of them",
+			n.ID, len(impact.MeshDeviceHSIDs), impact.MeshDeviceHSIDs)
+	}
+	for _, hsID := range impact.MeshDeviceHSIDs {
+		if err := s.mesh.Client().DeleteNode(ctx, hsID); err != nil {
 			writeError(w, http.StatusBadGateway, "headscale delete: "+err.Error())
 			return
 		}
-		if err := s.mesh.Store().DeleteDevice(ctx, impact.MeshDeviceHSID); err != nil &&
+		if err := s.mesh.Store().DeleteDevice(ctx, hsID); err != nil &&
 			!errors.Is(err, sql.ErrNoRows) && err.Error() != "sql: no rows in result set" {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -187,16 +195,6 @@ func (s *Server) removeCollectorLeaf(nodeID string) {
 // computeRemovalImpact gathers the cascade preview without mutating
 // anything. Shared between the dry-run endpoint and the delete handler
 // (which uses it to pick up the hs_id it needs to pass to Headscale).
-// removalImpactStatus is 409 when the node is bound to more than one mesh
-// device: removal would have to guess which Headscale device to delete, so
-// it refuses and names them instead.
-func removalImpactStatus(err error) int {
-	if errors.Is(err, mesh.ErrDuplicateBinding) {
-		return http.StatusConflict
-	}
-	return http.StatusInternalServerError
-}
-
 func (s *Server) computeRemovalImpact(ctx context.Context, nodeID string) (*nodeRemovalImpact, error) {
 	// Apps targeting this node.
 	appRows, err := s.apps.List(ctx)
@@ -210,12 +208,19 @@ func (s *Server) computeRemovalImpact(ctx context.Context, nodeID string) (*node
 		}
 	}
 
-	// Mesh device.
-	var hsID string
-	if d, err := s.mesh.Store().GetDeviceByRasputinNodeID(ctx, nodeID); err != nil {
+	// Mesh devices bound to the node — all of them, so a duplicate binding
+	// is removed whole rather than resolved by picking one.
+	bound, err := s.mesh.Store().DevicesBoundTo(ctx, nodeID)
+	if err != nil {
 		return nil, err
-	} else if d != nil {
-		hsID = d.HSID
+	}
+	var hsIDs []string
+	for _, d := range bound {
+		hsIDs = append(hsIDs, d.HSID)
+	}
+	hsID := ""
+	if len(hsIDs) == 1 {
+		hsID = hsIDs[0]
 	}
 
 	// Firewall state.
@@ -233,6 +238,7 @@ func (s *Server) computeRemovalImpact(ctx context.Context, nodeID string) (*node
 		NodeID:           nodeID,
 		AppIDs:           appIDs,
 		MeshDeviceHSID:   hsID,
+		MeshDeviceHSIDs:  hsIDs,
 		HasFirewallState: hasFW,
 	}, nil
 }

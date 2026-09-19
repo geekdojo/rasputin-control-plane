@@ -152,6 +152,9 @@ export interface NodeRemovalImpact {
   nodeId: string;
   appIds: string[];
   meshDeviceHsId?: string;
+  // Every mesh device bound to the node; more than one is a duplicate
+  // binding, and removal deletes them all.
+  meshDeviceHsIds?: string[];
   hasFirewallState: boolean;
 }
 
