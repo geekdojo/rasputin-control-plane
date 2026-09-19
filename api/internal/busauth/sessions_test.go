@@ -100,9 +100,9 @@ func TestRevoke_ClosesOnlyThatTokensConnections(t *testing.T) {
 	bus := newFakeBus(1, 2, 3, 4)
 	s.TrackSessions(bus)
 
-	tokA, idA, _ := s.MintBound(ctx, "a", "node-a")
-	tokB, idB, _ := s.MintBound(ctx, "b", "node-b")
-	tokC, idC, _ := s.MintBound(ctx, "c", "node-c")
+	tokA, idA, _ := s.MintBound(ctx, "a", "node-a", "compute")
+	tokB, idB, _ := s.MintBound(ctx, "b", "node-b", "compute")
+	tokC, idC, _ := s.MintBound(ctx, "c", "node-c", "compute")
 
 	mustAdmit(t, s, 1, tokA, "node-a", true)
 	mustAdmit(t, s, 2, tokB, "node-b", true)
@@ -155,7 +155,7 @@ func TestRevoke_RecordIsConsumed(t *testing.T) {
 	s := newTokenStore(t)
 	bus := newFakeBus(1)
 	s.TrackSessions(bus)
-	tok, id, _ := s.MintBound(ctx, "a", "node-a")
+	tok, id, _ := s.MintBound(ctx, "a", "node-a", "compute")
 	mustAdmit(t, s, 1, tok, "node-a", true)
 
 	if n, _ := s.Revoke(ctx, id); n != 1 {
@@ -179,9 +179,9 @@ func TestRevokeByNodeID_ClosesEveryTokenSessionOfTheNode(t *testing.T) {
 	bus := newFakeBus(1, 2, 3)
 	s.TrackSessions(bus)
 
-	tokA, _, _ := s.MintBound(ctx, "a", "node-a")
-	tokA2, _, _ := s.MintBound(ctx, "a re-mint", "node-a") // a node can hold two
-	tokB, _, _ := s.MintBound(ctx, "b", "node-b")
+	tokA, _, _ := s.MintBound(ctx, "a", "node-a", "compute")
+	tokA2, _, _ := s.MintBound(ctx, "a re-mint", "node-a", "compute") // a node can hold two
+	tokB, _, _ := s.MintBound(ctx, "b", "node-b", "compute")
 
 	mustAdmit(t, s, 1, tokA, "node-a", true)
 	mustAdmit(t, s, 2, tokA2, "node-a", true)
@@ -232,7 +232,7 @@ func TestAdmit_RefusedTokensAreNotRecorded(t *testing.T) {
 	s := newTokenStore(t)
 	bus := newFakeBus(1, 2, 3)
 	s.TrackSessions(bus)
-	tok, _, _ := s.MintBound(ctx, "a", "node-a")
+	tok, _, _ := s.MintBound(ctx, "a", "node-a", "compute")
 
 	mustAdmit(t, s, 1, "not-a-token", "node-a", false)
 	mustAdmit(t, s, 2, tok, "node-b", false) // bound to a different node
@@ -251,7 +251,7 @@ func TestAdmit_RefusedTokensAreNotRecorded(t *testing.T) {
 func TestAdmit_UntrackedStoreRecordsNothing(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t) // no TrackSessions: bus auth off
-	tok, id, _ := s.MintBound(ctx, "a", "node-a")
+	tok, id, _ := s.MintBound(ctx, "a", "node-a", "compute")
 	mustAdmit(t, s, 1, tok, "node-a", true)
 	if len(s.sess.grants) != 0 {
 		t.Errorf("untracked store recorded %v", s.sess.grants)
@@ -267,7 +267,7 @@ func TestAdmit_PrunesClosedConnections(t *testing.T) {
 	s := newTokenStore(t)
 	bus := newFakeBus(1, 2)
 	s.TrackSessions(bus)
-	tok, _, _ := s.MintBound(ctx, "a", "node-a")
+	tok, _, _ := s.MintBound(ctx, "a", "node-a", "compute")
 
 	mustAdmit(t, s, 1, tok, "node-a", true)
 	bus.closeByPeer(1) // the node dropped and is reconnecting
@@ -297,7 +297,7 @@ func TestRevoke_RacingAnInFlightAdmission(t *testing.T) {
 	s := newTokenStore(t)
 	bus := newFakeBus(7)
 	s.TrackSessions(bus)
-	tok, id, _ := s.MintBound(ctx, "a", "node-a")
+	tok, id, _ := s.MintBound(ctx, "a", "node-a", "compute")
 
 	type result struct {
 		n   int
@@ -411,8 +411,8 @@ func TestRevoke_ARecordFromAReplacedServerClosesNothingOnTheNewOne(t *testing.T)
 	s := newTokenStore(t)
 	bus := newFakeBus(1)
 	s.TrackSessions(bus)
-	tokA, idA, _ := s.MintBound(ctx, "a", "node-a")
-	tokB, _, _ := s.MintBound(ctx, "b", "node-b")
+	tokA, idA, _ := s.MintBound(ctx, "a", "node-a", "compute")
+	tokB, _, _ := s.MintBound(ctx, "b", "node-b", "compute")
 
 	mustAdmit(t, s, 1, tokA, "node-a", true)
 	bus.replace("server-2", 1) // connection 1 on the new server is someone else

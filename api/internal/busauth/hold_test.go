@@ -16,7 +16,7 @@ import (
 // replaced server and job intake reopening (bustls.Service.Switching).
 func TestResponder_HoldRefusesEveryConnectionUntilReleased(t *testing.T) {
 	eb := startEnforcedBus(t, "127.0.0.1")
-	token, _, err := eb.tokens.MintBound(context.Background(), "cp-1", "cp-1")
+	token, _, err := eb.tokens.MintBound(context.Background(), "cp-1", "cp-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}

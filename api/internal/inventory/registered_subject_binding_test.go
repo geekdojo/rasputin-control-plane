@@ -73,7 +73,7 @@ func TestHandleRegistered_PayloadNodeIDMustMatchSubject(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
-	alphaToken, _, err := tokens.MintBound(ctx, "alpha", "alpha")
+	alphaToken, _, err := tokens.MintBound(ctx, "alpha", "alpha", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}

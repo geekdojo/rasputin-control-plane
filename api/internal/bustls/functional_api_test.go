@@ -167,7 +167,7 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n1Token, _, err = tokens.MintBound(ctx, "n1", "n1")
+	n1Token, _, err = tokens.MintBound(ctx, "n1", "n1", "compute")
 	_ = tokens.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 // Add-node mints one.
 func (a *apiProc) mint(t *testing.T, id string) string {
 	t.Helper()
-	resp, body, err := a.do(http.MethodPost, "/api/bus/tokens", fmt.Sprintf(`{"label":%q,"nodeId":%q}`, id, id))
+	resp, body, err := a.do(http.MethodPost, "/api/bus/tokens", fmt.Sprintf(`{"role":"compute","label":%q,"nodeId":%q}`, id, id))
 	if err != nil || resp.StatusCode != http.StatusCreated {
 		t.Fatalf("POST /api/bus/tokens for %s = (%v, %s, %v)", id, resp, body, err)
 	}

@@ -55,7 +55,7 @@ func TestMintBusToken_CarriesTheLivePin(t *testing.T) {
 	f := newAPIFixture(t)
 	cookie := f.authenticate(t)
 
-	w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"label":"t","nodeId":"n1"}`, cookie)
+	w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"role":"compute","label":"t","nodeId":"n1"}`, cookie)
 	var body map[string]string
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestMintBusToken_CarriesTheLivePin(t *testing.T) {
 	}
 
 	svc := wireBusTLS(t, f)
-	w = f.do(t, http.MethodPost, "/api/bus/tokens", `{"label":"t","nodeId":"n2"}`, cookie)
+	w = f.do(t, http.MethodPost, "/api/bus/tokens", `{"role":"compute","label":"t","nodeId":"n2"}`, cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("mint = %d %s", w.Code, w.Body)
 	}

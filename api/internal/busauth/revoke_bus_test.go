@@ -27,7 +27,7 @@ func TestRevokeDuringInFlightCallout(t *testing.T) {
 	ctx := context.Background()
 	eb := startEnforcedBus(t, "127.0.0.1")
 	store := eb.tokens
-	tok, id, err := store.MintBound(ctx, "a", "node-a")
+	tok, id, err := store.MintBound(ctx, "a", "node-a", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}

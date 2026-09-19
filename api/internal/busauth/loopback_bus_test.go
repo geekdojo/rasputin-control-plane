@@ -39,7 +39,7 @@ func TestBus_LoopbackWithoutATokenIsRefused(t *testing.T) {
 
 	// The node whose identity a local process would want: connected, with its
 	// own bound token.
-	victimTok, _, err := eb.tokens.MintBound(ctx, "compute", "compute-1")
+	victimTok, _, err := eb.tokens.MintBound(ctx, "compute", "compute-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}

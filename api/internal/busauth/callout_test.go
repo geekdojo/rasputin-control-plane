@@ -23,15 +23,15 @@ import (
 func TestResponder_Authorize(t *testing.T) {
 	ctx := context.Background()
 	store := newTokenStore(t)
-	good, _, err := store.MintBound(ctx, "test", "fw-1")
+	good, _, err := store.MintBound(ctx, "test", "fw-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
-	revoked, revID, _ := store.MintBound(ctx, "revoked", "fw-1")
+	revoked, revID, _ := store.MintBound(ctx, "revoked", "fw-1", "compute")
 	if _, err := store.Revoke(ctx, revID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	bound, _, err := store.MintBound(ctx, "bound", "fw-1")
+	bound, _, err := store.MintBound(ctx, "bound", "fw-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestCallout_EndToEnd(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
-	token, _, err := tokens.MintBound(ctx, "fw", "fw-1")
+	token, _, err := tokens.MintBound(ctx, "fw", "fw-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestReplyGrantExpires(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
-	token, _, err := tokens.MintBound(ctx, "fw", "fw-1")
+	token, _, err := tokens.MintBound(ctx, "fw", "fw-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}

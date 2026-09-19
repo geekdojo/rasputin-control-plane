@@ -294,11 +294,11 @@ func TestRestoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeToken, _, err := busStore.MintBound(ctx, "node-2 join token", "node-2")
+	nodeToken, _, err := busStore.MintBound(ctx, "node-2 join token", "node-2", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := busStore.MintBound(ctx, "firewall join token", "node-fw"); err != nil {
+	if _, _, err := busStore.MintBound(ctx, "firewall join token", "node-fw", "compute"); err != nil {
 		t.Fatal(err)
 	}
 	_ = busStore.Close()

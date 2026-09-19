@@ -223,7 +223,7 @@ func TestUnboundBusTokens_PreseedRefusedAndStartupLogged(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	// No unbound tokens: nothing is logged.
-	if _, _, err := store.MintBound(ctx, "compute", "node-a"); err != nil {
+	if _, _, err := store.MintBound(ctx, "compute", "node-a", "compute"); err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
 	logUnboundBusTokens(ctx, store)

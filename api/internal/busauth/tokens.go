@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // Tokens are high-entropy random strings; only their sha256 is stored, so a
@@ -33,6 +34,11 @@ import (
 // both refuse — and Validate refuses the ones that exist, so a legacy unbound
 // token authenticates nothing. CountActiveUnbound finds them for the operator,
 // who revokes them (DELETE /api/bus/tokens/{id}) and mints bound replacements.
+//
+// Every token also carries the ROLE of the node it was minted for (role.go).
+// The same shape applies: the column is nullable only for rows written before
+// it existed, OpenStore fills it wherever the row says what the role is, and
+// Validate refuses a token whose row still names no role.
 const schema = `
 CREATE TABLE IF NOT EXISTS bus_tokens (
     token_hash   TEXT PRIMARY KEY,   -- sha256(plaintext) hex; the id
@@ -41,7 +47,8 @@ CREATE TABLE IF NOT EXISTS bus_tokens (
     last_used_at INTEGER,
     revoked_at   INTEGER,
     node_id      TEXT,               -- bound node id; NULL only on a legacy unbound row
-    self_agent   INTEGER NOT NULL DEFAULT 0  -- 1 on the token the api minted for this controlplane's own agent
+    self_agent   INTEGER NOT NULL DEFAULT 0, -- 1 on the token the api minted for this controlplane's own agent
+    role         TEXT                -- the node role the token was minted for; NULL only on a legacy row (role.go)
 );`
 
 // Store is the SQLite-backed bus join-token ledger.
@@ -64,12 +71,15 @@ type Store struct {
 
 // TokenInfo is the non-secret view of a token row (no plaintext, ever).
 type TokenInfo struct {
-	ID         string     `json:"id"` // token_hash — stable handle for revoke
-	Label      string     `json:"label"`
-	NodeID     *string    `json:"nodeId,omitempty"` // bound node id, omitted when unbound
-	CreatedAt  time.Time  `json:"createdAt"`
-	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
-	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
+	ID     string  `json:"id"` // token_hash — stable handle for revoke
+	Label  string  `json:"label"`
+	NodeID *string `json:"nodeId,omitempty"` // bound node id, omitted when unbound
+	// Role is the node role the token was minted for. Omitted on a legacy row
+	// that names none, which the bus refuses (role.go).
+	Role       proto.NodeRole `json:"role,omitempty"`
+	CreatedAt  time.Time      `json:"createdAt"`
+	LastUsedAt *time.Time     `json:"lastUsedAt,omitempty"`
+	RevokedAt  *time.Time     `json:"revokedAt,omitempty"`
 	// SelfAgent marks the one token this api minted for its own controlplane's
 	// agent: live, bound to this controlplane's node id, and carrying the
 	// marker EnsureAgentToken sets. It is the token the revoke paths refuse
@@ -85,6 +95,10 @@ type PreseedToken struct {
 	Hash   string `json:"hash"`
 	NodeID string `json:"nodeId"`
 	Label  string `json:"label"`
+	// Role is the node role the token is for. rasputin-provision writes it;
+	// a manifest from before it did carries the role as the label, which
+	// PreloadHashes reads instead (ResolveRole).
+	Role proto.NodeRole `json:"role,omitempty"`
 }
 
 func OpenStore(ctx context.Context, path string) (*Store, error) {
@@ -108,6 +122,19 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		_ = db.Close()
 		return nil, fmt.Errorf("busauth: migrate self_agent: %w", err)
+	}
+	// The role column (role.go), and its backfill. The backfill runs on EVERY
+	// open, not once: restoring an identity archive taken before this column
+	// existed brings role-less rows back, and it is idempotent (it only fills
+	// rows that have no role).
+	if _, err := db.ExecContext(ctx, `ALTER TABLE bus_tokens ADD COLUMN role TEXT`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		_ = db.Close()
+		return nil, fmt.Errorf("busauth: migrate role: %w", err)
+	}
+	if err := backfillRoles(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }
@@ -167,20 +194,25 @@ func GenerateToken() (plaintext, hash string, err error) {
 // is refused. Every token is bound to one node (geekdojo-brain#423).
 var ErrUnboundToken = errors.New("unbound join token: every token must be bound to a node id")
 
-// MintBound generates a fresh token bound to nodeID, stores its hash, and
-// returns the plaintext ONCE along with its id (the hash); the plaintext is
-// unrecoverable after this. Only a connection presenting nodeID as its NATS
-// username can authenticate with the token.
+// MintBound generates a fresh token bound to nodeID and role, stores its
+// hash, and returns the plaintext ONCE along with its id (the hash); the
+// plaintext is unrecoverable after this. Only a connection presenting nodeID
+// as its NATS username can authenticate with the token.
 //
 // It is the only way to mint: there is no unbound mint (geekdojo-brain#423). An
 // empty nodeID is refused with ErrUnboundToken, and any other id that fails
 // ValidNodeID with ErrInvalidNodeID — the callout would never accept it as a
-// username, so the token could never authenticate.
-func (s *Store) MintBound(ctx context.Context, label, nodeID string) (plaintext, id string, err error) {
+// username, so the token could never authenticate. A role that is not one of
+// proto.AllRoles is refused with ErrNoRole, for the same reason: Validate
+// refuses a token with no role.
+func (s *Store) MintBound(ctx context.Context, label, nodeID string, role proto.NodeRole) (plaintext, id string, err error) {
 	if nodeID == "" {
 		return "", "", ErrUnboundToken
 	}
 	if err := checkNodeID(nodeID); err != nil {
+		return "", "", err
+	}
+	if err := checkRole(role); err != nil {
 		return "", "", err
 	}
 	plaintext, id, err = GenerateToken()
@@ -188,8 +220,8 @@ func (s *Store) MintBound(ctx context.Context, label, nodeID string) (plaintext,
 		return "", "", err
 	}
 	if _, err := s.db.ExecContext(ctx, `
-        INSERT INTO bus_tokens (token_hash, label, created_at, node_id) VALUES (?, ?, ?, ?)`,
-		id, label, ms(time.Now().UTC()), nodeID); err != nil {
+        INSERT INTO bus_tokens (token_hash, label, created_at, node_id, role) VALUES (?, ?, ?, ?, ?)`,
+		id, label, ms(time.Now().UTC()), nodeID, string(role)); err != nil {
 		return "", "", fmt.Errorf("busauth: insert token: %w", err)
 	}
 	return plaintext, id, nil
@@ -207,9 +239,12 @@ func (s *Store) MintBound(ctx context.Context, label, nodeID string) (plaintext,
 // one (ErrInvalidNodeID), the error naming the entry. Neither could ever
 // authenticate, and rasputin-provision never emits either, so a manifest
 // carrying one was hand-edited or corrupted — the same treatment an
-// unparseable manifest already gets. An entry with no hash carries nothing to
-// store and is skipped.
+// unparseable manifest already gets. The same goes for an entry whose role
+// cannot be resolved (ErrNoRole): rasputin-provision has always written the
+// node's role, as the label and now also as role. An entry with no hash
+// carries nothing to store and is skipped.
 func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, error) {
+	roles := make([]proto.NodeRole, len(toks))
 	for i, tk := range toks {
 		if tk.Hash == "" {
 			continue
@@ -220,16 +255,21 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 		if err := checkNodeID(tk.NodeID); err != nil {
 			return 0, fmt.Errorf("busauth: preload entry %d: %w", i, err)
 		}
+		role, err := ResolveRole(tk.Role, tk.Label)
+		if err != nil {
+			return 0, fmt.Errorf("busauth: preload entry %d (node %q): %w", i, tk.NodeID, err)
+		}
+		roles[i] = role
 	}
 	now := ms(time.Now().UTC())
 	inserted := 0
-	for _, tk := range toks {
+	for i, tk := range toks {
 		if tk.Hash == "" {
 			continue
 		}
 		res, err := s.db.ExecContext(ctx, `
-            INSERT OR IGNORE INTO bus_tokens (token_hash, label, created_at, node_id) VALUES (?, ?, ?, ?)`,
-			tk.Hash, tk.Label, now, tk.NodeID)
+            INSERT OR IGNORE INTO bus_tokens (token_hash, label, created_at, node_id, role) VALUES (?, ?, ?, ?, ?)`,
+			tk.Hash, tk.Label, now, tk.NodeID, string(roles[i]))
 		if err != nil {
 			return inserted, fmt.Errorf("busauth: preload: %w", err)
 		}
@@ -244,7 +284,8 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 // presentedNodeID. A legacy UNBOUND token (node_id NULL, minted before
 // geekdojo-brain#423) never validates, whatever id it is presented under, and
 // the refusal is logged with the token's id so a node stranded by it can be
-// found and re-provisioned. It best-effort touches last_used_at. Constant work regardless of match isn't
+// found and re-provisioned. A legacy token whose row names no role (role.go)
+// is refused the same way. It best-effort touches last_used_at. Constant work regardless of match isn't
 // attempted — tokens are 256-bit random, so timing oracles on the indexed
 // lookup don't help an attacker.
 func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string) (bool, error) {
@@ -255,9 +296,10 @@ func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string)
 	var (
 		revoked   sql.NullInt64
 		boundNode sql.NullString
+		role      sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT revoked_at, node_id FROM bus_tokens WHERE token_hash = ?`, id).Scan(&revoked, &boundNode)
+		`SELECT revoked_at, node_id, role FROM bus_tokens WHERE token_hash = ?`, id).Scan(&revoked, &boundNode, &role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -274,6 +316,12 @@ func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string)
 	}
 	// A token only authenticates as the node it was provisioned for.
 	if boundNode.String != presentedNodeID {
+		return false, nil
+	}
+	// Every token must name the role it was minted for; a legacy row that
+	// names none authenticates nothing (geekdojo-brain#423 precedent).
+	if !role.Valid || !proto.ValidRole(proto.NodeRole(role.String)) {
+		log.Printf("busauth: refused join token id=%q for node=%q: %s", id, presentedNodeID, noRoleRemedy)
 		return false, nil
 	}
 	_, _ = s.db.ExecContext(ctx,
@@ -386,7 +434,7 @@ func (s *Store) CountActiveUnbound(ctx context.Context) (int, error) {
 func (s *Store) List(ctx context.Context) ([]TokenInfo, error) {
 	self := s.SelfNodeID()
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT token_hash, label, node_id, created_at, last_used_at, revoked_at, self_agent
+        SELECT token_hash, label, node_id, created_at, last_used_at, revoked_at, self_agent, role
         FROM bus_tokens ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("busauth: list: %w", err)
@@ -400,9 +448,13 @@ func (s *Store) List(ctx context.Context) ([]TokenInfo, error) {
 			nodeID            sql.NullString
 			lastUsed, revoked sql.NullInt64
 			selfAgent         int
+			role              sql.NullString
 		)
-		if err := rows.Scan(&t.ID, &t.Label, &nodeID, &createdAt, &lastUsed, &revoked, &selfAgent); err != nil {
+		if err := rows.Scan(&t.ID, &t.Label, &nodeID, &createdAt, &lastUsed, &revoked, &selfAgent, &role); err != nil {
 			return nil, err
+		}
+		if role.Valid && proto.ValidRole(proto.NodeRole(role.String)) {
+			t.Role = proto.NodeRole(role.String)
 		}
 		// Exactly the predicate the revoke paths refuse on, so the UI never
 		// offers an action the api would answer 409 to.

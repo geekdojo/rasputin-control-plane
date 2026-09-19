@@ -177,7 +177,7 @@ func TestCallout_RejectsNodeID_Tokenless(t *testing.T) {
 // id to the presented username literally.
 func TestCallout_BoundTokenRejectedUnderNonLiteralNodeID(t *testing.T) {
 	eb := startEnforcedBus(t, "127.0.0.1")
-	token, _, err := eb.tokens.MintBound(context.Background(), "alpha", "alpha")
+	token, _, err := eb.tokens.MintBound(context.Background(), "alpha", "alpha", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
@@ -213,7 +213,7 @@ func assertNoCrossNodeCommand(t *testing.T, useToken bool) {
 		token, _ = insertLegacyUnbound(t, eb.tokens, "unbound")
 	}
 
-	betaTok, _, err := eb.tokens.MintBound(ctx, "beta", "beta")
+	betaTok, _, err := eb.tokens.MintBound(ctx, "beta", "beta", "compute")
 	if err != nil {
 		t.Fatalf("MintBound beta: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestResponder_AuthorizeRejectsInvalidNodeID(t *testing.T) {
 	ctx := context.Background()
 	store := newTokenStore(t)
 	unbound, _ := insertLegacyUnbound(t, store, "unbound")
-	alpha, _, err := store.MintBound(ctx, "alpha", "alpha")
+	alpha, _, err := store.MintBound(ctx, "alpha", "alpha", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestStore_MintBoundRejectsInvalidNodeID(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 	for _, id := range invalidNodeIDs {
-		if _, _, err := s.MintBound(ctx, "t", id); err == nil {
+		if _, _, err := s.MintBound(ctx, "t", id, "compute"); err == nil {
 			t.Errorf("MintBound(%q) succeeded; want an error", id)
 		}
 	}
@@ -372,7 +372,7 @@ func TestStore_MintBoundRejectsInvalidNodeID(t *testing.T) {
 	if len(infos) != 0 {
 		t.Errorf("rejected mints left %d token rows; want 0", len(infos))
 	}
-	if _, _, err := s.MintBound(ctx, "t", "alpha"); err != nil {
+	if _, _, err := s.MintBound(ctx, "t", "alpha", "compute"); err != nil {
 		t.Errorf("MintBound(alpha): %v", err)
 	}
 }

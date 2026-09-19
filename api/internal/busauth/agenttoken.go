@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // The controlplane's own agent holds a join token like every other node
@@ -107,7 +109,8 @@ func (s *Store) nodeHasSelfAgentToken(ctx context.Context, nodeID string) (bool,
 
 // adoptSelfAgentToken makes id the ONE token bound to nodeID that carries the
 // self_agent marker: it marks id and clears the marker from every other row
-// bound to nodeID. It is the only writer of the column.
+// bound to nodeID. It is the only writer of the column. The marked row is the
+// controlplane's own agent, so its role is proto.RoleControlPlane (role.go).
 //
 // Clearing the others is what keeps "at most one protected token per
 // controlplane" true across a re-mint whose revoke of the replaced tokens
@@ -120,7 +123,8 @@ func (s *Store) adoptSelfAgentToken(ctx context.Context, id, nodeID string) erro
 		return nil
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE bus_tokens SET self_agent = 1 WHERE token_hash = ? AND node_id = ?`, id, nodeID); err != nil {
+		`UPDATE bus_tokens SET self_agent = 1, role = ? WHERE token_hash = ? AND node_id = ?`,
+		string(proto.RoleControlPlane), id, nodeID); err != nil {
 		return fmt.Errorf("busauth: mark the controlplane agent's token: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
@@ -172,7 +176,7 @@ func (s *Store) EnsureAgentToken(ctx context.Context, path, nodeID string) (reas
 		return "", nil
 	}
 
-	plaintext, id, err := s.MintBound(ctx, AgentTokenLabel, nodeID)
+	plaintext, id, err := s.MintBound(ctx, AgentTokenLabel, nodeID, proto.RoleControlPlane)
 	if err != nil {
 		return "", fmt.Errorf("busauth: mint the controlplane agent's token: %w", err)
 	}
