@@ -14,7 +14,6 @@ type Intent struct {
 	Enabled   bool            `json:"enabled"`
 	Spec      json.RawMessage `json:"spec"`
 	HSID      string          `json:"hsId,omitempty"`
-	HSValue   string          `json:"hsValue,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
 }

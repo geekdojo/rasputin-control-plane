@@ -24,9 +24,10 @@ import (
 // retried by converge_enrollment on the usual backoff.
 
 // runEnrollUpTo runs the enroll workflow's steps before name, returning the
-// chained results and the minted key so the caller can drive `name` itself
-// under a context of its choosing and then check the key never leaks.
-func runEnrollUpTo(t *testing.T, wf jobs.Workflow, spec []byte, nc *nats.Conn, ctx context.Context, name string) (prior map[string]json.RawMessage, key string) {
+// chained results so the caller can drive `name` itself under a context of
+// its choosing. The key is minted inside dispatch; callers read it back from
+// the fake client afterwards (mintedKey) to check it never leaks.
+func runEnrollUpTo(t *testing.T, wf jobs.Workflow, spec []byte, nc *nats.Conn, ctx context.Context, name string) (prior map[string]json.RawMessage) {
 	t.Helper()
 	prior = map[string]json.RawMessage{}
 	for _, st := range wf.Steps {
@@ -42,11 +43,17 @@ func runEnrollUpTo(t *testing.T, wf jobs.Workflow, spec []byte, nc *nats.Conn, c
 			prior[st.Name] = res
 		}
 	}
-	var s enrollSession
-	if err := json.Unmarshal(prior["mint_key"], &s); err != nil || s.KeyValue == "" {
-		t.Fatalf("mint_key left no key in its result: %v (%s)", err, prior["mint_key"])
+	return prior
+}
+
+// mintedKey is the one enrolment key the dispatch under test minted.
+func mintedKey(t *testing.T, c *fakeClient) string {
+	t.Helper()
+	values, _ := c.minted()
+	if len(values) != 1 {
+		t.Fatalf("dispatch minted %d keys; want exactly 1", len(values))
 	}
-	return prior, s.KeyValue
+	return values[0]
 }
 
 // The api must lose the race with the agent on purpose: its dispatch step
@@ -79,7 +86,7 @@ func TestEnrollWorkflow_DispatchTimeoutIsNamed(t *testing.T) {
 
 	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
-	prior, key := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
+	prior := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
 	ctx, cancel := context.WithTimeout(f.ctx, 300*time.Millisecond)
 	defer cancel()
 	sc := &jobs.StepCtx{Ctx: ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
@@ -87,6 +94,7 @@ func TestEnrollWorkflow_DispatchTimeoutIsNamed(t *testing.T) {
 	if err == nil {
 		t.Fatal("dispatch succeeded with an agent that never answered")
 	}
+	key := mintedKey(t, f.client)
 	msg := err.Error()
 	for _, want := range []string{"dispatch timed out after", "no ack from node-1", "tailscale up", proto.MeshEnrollWork.String(), "retries after backoff"} {
 		if !strings.Contains(msg, want) {
@@ -108,12 +116,13 @@ func TestEnrollWorkflow_NoResponderIsReadAgainstInventory(t *testing.T) {
 	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC().Add(-time.Hour))
 	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
-	prior, key := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
+	prior := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
 	sc := &jobs.StepCtx{Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
 	_, err := enrollStep(t, wf, "dispatch").Do(sc)
 	if err == nil {
 		t.Fatal("dispatch succeeded with nobody subscribed")
 	}
+	key := mintedKey(t, f.client)
 	if !strings.Contains(err.Error(), "node node-1 is offline") {
 		t.Errorf("step error %q should read the silence as the node being offline", err)
 	}
@@ -131,9 +140,10 @@ func TestEnrollWorkflow_NoResponderWithoutInventoryIsRelayed(t *testing.T) {
 	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC().Add(-time.Hour))
 	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
-	prior, key := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
+	prior := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
 	sc := &jobs.StepCtx{Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
 	_, err := enrollDispatch(f.svc, nil)(sc)
+	key := mintedKey(t, f.client)
 	if err == nil || !strings.Contains(err.Error(), "enroll rpc: ") || !strings.Contains(err.Error(), "no responders") {
 		t.Errorf("without inventory the bus error must be relayed, got %v", err)
 	}
@@ -159,10 +169,15 @@ func dispatchAgainst(t *testing.T, f *convergeFixture, nodeID string) (key strin
 	t.Helper()
 	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
 	spec, _ := json.Marshal(EnrollSpec{NodeID: nodeID})
-	prior, key := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
+	values, _ := f.client.minted()
+	prior := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
 	sc := &jobs.StepCtx{Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
 	_, err = enrollStep(t, wf, "dispatch").Do(sc)
-	return key, err
+	after, _ := f.client.minted()
+	if len(after) != len(values)+1 {
+		t.Fatalf("dispatch minted %d keys; want exactly 1", len(after)-len(values))
+	}
+	return after[len(after)-1], err
 }
 
 // The bench ack, from the bench agent: `tailscale up: signal: killed

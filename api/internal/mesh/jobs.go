@@ -35,18 +35,19 @@ const meshNodeTag = "tag:rasputin-node"
 // ApplyWorkflow reconciles the api's intent set forward into Headscale.
 //
 //  1. compile     — turn intents into canonical state + hash
-//  2. push_keys   — create any pre-auth keys that don't exist on the
-//     Headscale side yet; write the resulting hs_id +
-//     plaintext back onto the intent row
-//  3. push_routes — for each subnet_route intent, look up the node's
+//  2. push_routes — for each subnet_route intent, look up the node's
 //     Headscale id (via mesh_devices) and call SetNodeRoutes
-//  4. record      — persist intent_hash + last_applied
+//  3. record      — persist intent_hash + last_applied
+//
+// It mints no pre-auth keys. A user-device key is minted by POST
+// /api/mesh/keys, which shows its value once; a node's enrolment key is
+// minted inside mesh.enroll_node's dispatch step. A key minted here would be
+// one nobody asked for and nobody is shown.
 func ApplyWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "mesh.apply",
 		Steps: []jobs.WorkflowStep{
 			{Name: "compile", Timeout: 2 * time.Second, Do: applyCompile(svc)},
-			{Name: "push_keys", Timeout: 30 * time.Second, Do: applyPushKeys(svc)},
 			{Name: "push_routes", Timeout: 30 * time.Second, Do: applyPushRoutes(svc, inv)},
 			{Name: "record", Timeout: 2 * time.Second, Do: applyRecord(svc, nc)},
 		},
@@ -71,49 +72,6 @@ func applyCompile(svc *Service) jobs.DoFn {
 		}
 		sc.Log("info", fmt.Sprintf("compiled %d enabled intent(s), hash=%s", enabled, short(hash)))
 		return json.Marshal(map[string]any{"hash": hash, "state": state, "intentCount": enabled})
-	}
-}
-
-func applyPushKeys(svc *Service) jobs.DoFn {
-	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		intents, err := svc.store.ListIntentsByKind(sc.Ctx, string(proto.IntentPreAuthKey))
-		if err != nil {
-			return nil, err
-		}
-		created := 0
-		for _, i := range intents {
-			if !i.Enabled {
-				continue
-			}
-			if i.HSID != "" {
-				continue // already minted
-			}
-			var spec proto.PreAuthKeySpec
-			if err := json.Unmarshal(i.Spec, &spec); err != nil {
-				return nil, fmt.Errorf("intent %s: %w", i.ID, err)
-			}
-			user := spec.User
-			if user == "" {
-				user = svc.cfg.DefaultUser
-			}
-			expiry := time.Now().Add(parseExpiry(spec.ExpiresIn))
-			id, value, err := svc.Client().CreatePreAuthKey(sc.Ctx, CreatePreAuthKeyInput{
-				User:      user,
-				Reusable:  spec.Reusable,
-				Ephemeral: spec.Ephemeral,
-				Expiry:    expiry,
-				Tags:      spec.Tags,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("create key for intent %s: %w", i.ID, err)
-			}
-			if err := svc.store.SetIntentHSRef(sc.Ctx, i.ID, id, value); err != nil {
-				return nil, fmt.Errorf("persist hs ref for %s: %w", i.ID, err)
-			}
-			sc.Log("info", fmt.Sprintf("minted preauth key %s (user=%s, tags=%v)", short(id), user, spec.Tags))
-			created++
-		}
-		return json.Marshal(map[string]int{"created": created})
 	}
 }
 
@@ -223,8 +181,8 @@ var AutoEnrollRoles = []proto.NodeRole{proto.RoleFirewall, proto.RoleCompute, pr
 //
 // Exponential backoff instead: quick early retries for the transient case,
 // converging on the old ceiling for the permanent one, so nothing regresses.
-// Retrying is cheap — enrollMintKey's preauth key expires in 10 minutes, so a
-// failed attempt leaves no state to clean up.
+// Retrying is cheap — the dispatch step expires its preauth key when it ends,
+// so a failed attempt leaves no state to clean up.
 //
 // NOTE the real floor is the reconcile interval, not enrollRetryBase:
 // converge_enrollment only runs on a mesh.reconcile tick (default 5m,
@@ -293,22 +251,32 @@ func reconcileFetch(svc *Service, nc *nats.Conn) jobs.DoFn {
 		}
 
 		// Sync the mesh_devices table with Headscale's view of reality.
-		// Classify by the meshNodeTag the control plane stamps on every node it
-		// enrolls — a DIRECT match on a marker we set, not a guess from the
-		// hostname. (A Rasputin node id like "bench-controlplane1" matches no
-		// hostname prefix, and re-deriving from the hostname would clobber the
-		// authoritative kind/RasputinNodeID the enroll saga recorded — it did,
-		// downgrading enrolled nodes to "user" every reconcile, bench
-		// 2026-06-18.) A tagged node's hostname is its RASPUTIN_NODE_ID by
-		// construction (the agent sets the tailscale hostname to the node id on
-		// enroll). Anything untagged is a user device (e.g. a laptop added on
-		// the Keys tab).
+		//
+		// Which Rasputin node a device IS comes only from the enrol: the
+		// record step stores the Headscale node id the enrolled agent
+		// reported, against the node it enrolled. Reconcile carries that
+		// binding forward by Headscale id and never derives one — not from
+		// the hostname, which the device chooses, and not from a tag, which
+		// says only what kind of key admitted it. A meshNodeTag device with
+		// no recorded binding is listed as a Rasputin-kind device bound to no
+		// node; converge_enrollment then enrols the node, and the enrol
+		// records the binding. Anything untagged and unbound is a user device
+		// (e.g. a laptop added on the Keys tab).
+		recorded, err := svc.store.ListDevices(sc.Ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list recorded devices: %w", err)
+		}
+		boundByHSID := make(map[string]string, len(recorded))
+		for _, d := range recorded {
+			if d.Kind == "rasputin" && d.RasputinNodeID != "" {
+				boundByHSID[d.HSID] = d.RasputinNodeID
+			}
+		}
 		for _, n := range nodes {
 			kind := "user"
-			rasp := ""
-			if slices.Contains(n.Tags, meshNodeTag) {
+			rasp := boundByHSID[n.ID]
+			if rasp != "" || slices.Contains(n.Tags, meshNodeTag) {
 				kind = "rasputin"
-				rasp = n.Hostname
 			}
 			_ = svc.store.UpsertDevice(sc.Ctx, &Device{
 				HSID:             n.ID,
@@ -514,22 +482,23 @@ type EnrollSpec struct {
 // first login was killed (geekdojo/geekdojo-brain#402).
 const enrollDispatchTimeout = proto.MeshEnrollWork + 30*time.Second
 
-// EnrollNodeWorkflow mints an ephemeral preauth key, NATSes it to the
-// target node's agent, waits for the agent's MeshEnrollAck, and writes
-// the resulting Headscale node id back into mesh_devices.
+// EnrollNodeWorkflow NATSes a single-use preauth key to the target node's
+// agent, waits for the agent's MeshEnrollAck, and writes the resulting
+// Headscale node id back into mesh_devices.
 //
 //  0. validate — refuse a spec `tailscale up` would refuse, or one whose
 //     node is not registered, before a key is minted or the agent touched.
-//  1. mint_key — CreatePreAuthKey for the rasputin-operator user
-//     with the Rasputin tag.
-//  2. dispatch — RPC the agent's mesh.enroll handler with the key + URL.
-//  3. record   — persist the device, publish node_enrolled.
+//  1. dispatch — mint the node's enrolment key (PreAuthNode), RPC the
+//     agent's mesh.enroll handler with the key + URL, and expire the key
+//     when the step ends, whatever its outcome. The key exists only for the
+//     life of this step and is never written to a step result.
+//  2. record   — persist the device under the Headscale node id the enrol
+//     reported, publish node_enrolled.
 func EnrollNodeWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "mesh.enroll_node",
 		Steps: []jobs.WorkflowStep{
 			{Name: "validate", Timeout: 5 * time.Second, Do: enrollValidate(inv)},
-			{Name: "mint_key", Timeout: 10 * time.Second, Do: enrollMintKey(svc)},
 			{Name: "dispatch", Timeout: enrollDispatchTimeout, Do: enrollDispatch(svc, inv)},
 			{Name: "record", Timeout: 5 * time.Second, Do: enrollRecord(svc, nc)},
 		},
@@ -540,16 +509,16 @@ func EnrollNodeWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.
 // re-marshaled session as its step result, and the next step reads it back
 // via StepCtx.PriorResults (falling back to the job spec for the first
 // step). It is NOT carried via the spec — the runner hands every step the
-// original job spec unchanged, which is exactly the bug that shipped in v0:
-// dispatch re-parsed the spec, never saw mint_key's KeyValue, and the agent
-// rejected the enroll with "empty auth key" (caught on the first Mu wizard
-// run, 2026-06-12).
+// original job spec unchanged.
+//
+// It carries no key value. Step results are persisted in the job ledger, so
+// the enrolment key is minted, sent and expired inside the dispatch step and
+// only its Headscale id (not a credential) is recorded.
 type enrollSession struct {
 	EnrollSpec
-	KeyID    string `json:"keyId"`
-	KeyValue string `json:"keyValue"`
-	HSID     string `json:"hsId"`
-	HSIP     string `json:"hsIp"`
+	KeyID string `json:"keyId"`
+	HSID  string `json:"hsId"`
+	HSIP  string `json:"hsIp"`
 }
 
 func parseEnrollSession(raw json.RawMessage) (*enrollSession, error) {
@@ -622,37 +591,11 @@ func enrollValidate(inv *inventory.Store) jobs.DoFn {
 	}
 }
 
-func enrollMintKey(svc *Service) jobs.DoFn {
-	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		s, err := parseEnrollSession(sc.Spec)
-		if err != nil {
-			return nil, err
-		}
-		id, value, err := svc.Client().CreatePreAuthKey(sc.Ctx, CreatePreAuthKeyInput{
-			User:      svc.cfg.DefaultUser,
-			Reusable:  false,
-			Ephemeral: false,
-			Expiry:    time.Now().Add(10 * time.Minute),
-			Tags:      []string{meshNodeTag},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("mint key: %w", err)
-		}
-		s.KeyID = id
-		s.KeyValue = value
-		sc.Log("info", fmt.Sprintf("minted enrollment key %s for %s", short(id), s.NodeID))
-		return json.Marshal(s)
-	}
-}
-
 func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		s, err := enrollSessionFrom(sc, "mint_key")
+		s, err := enrollSessionFrom(sc, "validate")
 		if err != nil {
 			return nil, err
-		}
-		if s.KeyValue == "" {
-			return nil, errors.New("no auth key from mint_key step (saga state lost?)")
 		}
 		// The control plane reaches Headscale on ITSELF. Enrolling it against
 		// the cluster's public name makes its own tailscaled resolve
@@ -682,9 +625,20 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 				sc.Log("info", fmt.Sprintf("%s is the control plane — enrolling against %s so its own tailscaled needs no name resolution", s.NodeID, loginServer))
 			}
 		}
+		key, err := svc.MintPreAuthKey(sc.Ctx, PreAuthNode, PreAuthKeyRequest{})
+		if err != nil {
+			return nil, fmt.Errorf("mint key: %w", err)
+		}
+		s.KeyID = key.ID
+		sc.Log("info", fmt.Sprintf("minted enrollment key %s for %s", short(key.ID), s.NodeID))
+		// The key's life is this step. Expire it on every way out — an ack,
+		// a rejection, a timeout, a bad ack — so a single-use key that was
+		// sent but not consumed does not stay valid for its safety-net TTL.
+		defer expireEnrolKey(sc, svc, s.NodeID, key.ID)
+
 		cmd, _ := json.Marshal(proto.MeshEnrollCmd{
 			LoginServer:     loginServer,
-			AuthKey:         s.KeyValue,
+			AuthKey:         key.Value,
 			Hostname:        s.NodeID,
 			AdvertiseRoutes: s.AdvertiseRoutes,
 			AcceptDNS:       true,
@@ -752,6 +706,27 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		}
 		return json.Marshal(s)
 	}
+}
+
+// enrolKeyExpireTimeout bounds the one Headscale call that expires an
+// enrolment key as the dispatch step ends. It runs on a context detached
+// from the step's, because the step's may already be done (a dispatch that
+// timed out is exactly the case that most needs the key expired).
+const enrolKeyExpireTimeout = 10 * time.Second
+
+// expireEnrolKey expires the enrolment key minted by this dispatch step. A
+// failure is logged, never turned into the step's result: the enrol itself
+// succeeded or failed on its own terms, and the key's short expiry
+// (nodeEnrolKeyExpiry) is the safety net for exactly this miss.
+func expireEnrolKey(sc *jobs.StepCtx, svc *Service, nodeID, keyID string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(sc.Ctx), enrolKeyExpireTimeout)
+	defer cancel()
+	if err := svc.Client().ExpirePreAuthKey(ctx, keyID); err != nil {
+		sc.Log("warn", fmt.Sprintf("could not expire enrollment key %s for %s (it lapses on its own within %s): %v",
+			short(keyID), nodeID, nodeEnrolKeyExpiry, err))
+		return
+	}
+	sc.Log("info", fmt.Sprintf("expired enrollment key %s for %s", short(keyID), nodeID))
 }
 
 // enrollDispatchError is the step error for an enroll RPC that returned no
@@ -948,19 +923,6 @@ func mockNodesByHostname(mc *MockClient, hostname string) []HSNode {
 		}
 	}
 	return out
-}
-
-// parseExpiry maps a duration string like "24h" to a time.Duration. Falls
-// back to 24h on parse error.
-func parseExpiry(s string) time.Duration {
-	if s == "" {
-		return 24 * time.Hour
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil || d <= 0 {
-		return 24 * time.Hour
-	}
-	return d
 }
 
 // simpleHash is a small djb2 used only to generate visually-distinct mock

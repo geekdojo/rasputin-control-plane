@@ -47,6 +47,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +196,49 @@ func TestSupervisor_LiveDockerLifecycle(t *testing.T) {
 		}
 		t.Logf("end-to-end via supervised container: key id=%s plaintext_prefix=%s",
 			id, plaintext[:min(20, len(plaintext))])
+
+		// The two pre-auth profiles against the real API: a user-device key
+		// may not carry the node tag; a node key carries exactly the node
+		// tag, is single-use, and is expired on demand (as the enrol dispatch
+		// step does when it ends).
+		svc := NewService(Config{DefaultUser: "smoke-operator"}, nil, c, NewNoopSupervisor())
+		if _, err := svc.MintPreAuthKey(ctx, PreAuthUserDevice, PreAuthKeyRequest{Tags: []string{meshNodeTag}}); !errors.Is(err, ErrPreAuthRequest) {
+			t.Errorf("user key with the node tag: %v", err)
+		}
+		uk, err := svc.MintPreAuthKey(ctx, PreAuthUserDevice, PreAuthKeyRequest{})
+		if err != nil {
+			t.Fatalf("user key: %v", err)
+		}
+		nk, err := svc.MintPreAuthKey(ctx, PreAuthNode, PreAuthKeyRequest{})
+		if err != nil {
+			t.Fatalf("node key: %v", err)
+		}
+		if err := c.ExpirePreAuthKey(ctx, nk.ID); err != nil {
+			t.Fatalf("expire node key: %v", err)
+		}
+		keys, err := c.ListPreAuthKeys(ctx, "")
+		if err != nil {
+			t.Fatalf("list keys: %v", err)
+		}
+		seen := 0
+		for _, k := range keys {
+			t.Logf("preauth key id=%s tags=%v reusable=%v expires=%s", k.ID, k.Tags, k.Reusable, k.Expiration.Format(time.RFC3339))
+			switch k.ID {
+			case nk.ID:
+				seen++
+				if !slices.Equal(k.Tags, []string{meshNodeTag}) || k.Reusable || k.Expiration.After(time.Now()) {
+					t.Errorf("node key on Headscale = %+v; want [%s], single-use, expired", k, meshNodeTag)
+				}
+			case uk.ID:
+				seen++
+				if !slices.Equal(k.Tags, []string{UserDeviceTag}) || k.Expiration.After(time.Now().Add(UserDeviceKeyDefaultExpiry+time.Minute)) {
+					t.Errorf("user key on Headscale = %+v", k)
+				}
+			}
+		}
+		if seen != 2 {
+			t.Errorf("found %d of the 2 minted keys on Headscale", seen)
+		}
 	})
 
 	t.Run("Start_IsIdempotent", func(t *testing.T) {
