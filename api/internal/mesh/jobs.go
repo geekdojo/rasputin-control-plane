@@ -102,16 +102,21 @@ func applyPushRoutes(svc *Service, inv *inventory.Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		hsByRasp := map[string]string{}
-		for _, d := range devices {
-			if d.RasputinNodeID != "" {
-				hsByRasp[d.RasputinNodeID] = d.HSID
-			}
-		}
+		bound, dup := BoundDevices(devices)
 
 		applied := 0
+		var refused []string
 		for nodeID, cidrs := range byNode {
-			hsID, ok := hsByRasp[nodeID]
+			if ids, ok := dup[nodeID]; ok {
+				// Approving routes on one of several devices bound to the
+				// node would be a guess about which one is the node.
+				msg := (&DuplicateBindingError{NodeID: nodeID, HSIDs: ids}).Error() + "; its subnet routes are not approved until that is resolved"
+				sc.Log("error", msg)
+				log.Print(msg)
+				refused = append(refused, nodeID)
+				continue
+			}
+			d, ok := bound[nodeID]
 			if !ok {
 				// Node not yet enrolled in the tailnet; skip without
 				// failing. The next mesh.apply after enrollment will pick
@@ -121,13 +126,14 @@ func applyPushRoutes(svc *Service, inv *inventory.Store) jobs.DoFn {
 				continue
 			}
 			sort.Strings(cidrs)
-			if err := svc.Client().SetNodeRoutes(sc.Ctx, hsID, cidrs); err != nil {
+			if err := svc.Client().SetNodeRoutes(sc.Ctx, d.HSID, cidrs); err != nil {
 				return nil, fmt.Errorf("set routes on %s: %w", nodeID, err)
 			}
 			sc.Log("info", fmt.Sprintf("approved routes on %s: %v", nodeID, cidrs))
 			applied++
 		}
-		return json.Marshal(map[string]int{"applied": applied})
+		sort.Strings(refused)
+		return json.Marshal(map[string]any{"applied": applied, "refusedDuplicateBinding": refused})
 	}
 }
 
@@ -426,6 +432,7 @@ func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *job
 		}
 
 		var submitted []string
+		var records []EnrolRecord // read lazily: only a node about to be enrolled needs them
 		skipped := map[string]int{}
 		for _, n := range nodes {
 			if !slices.Contains(AutoEnrollRoles, n.Role) || enrolled[n.ID] {
@@ -443,7 +450,20 @@ func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *job
 				skipped["backoff"]++
 				continue
 			}
-			spec, _ := json.Marshal(EnrollSpec{NodeID: n.ID})
+			// No device is bound to this node, so the routes come from its
+			// last enrol or its subnet_route intents (ReenrolRoutes): an
+			// automatic enrol must not reset away a route the node advertises.
+			if records == nil {
+				if records, err = (JobsLedger{Store: jstore}).Records(sc.Ctx); err != nil {
+					sc.Log("warn", fmt.Sprintf("converge: read enrol records for routes: %v", err))
+					records = []EnrolRecord{}
+				}
+			}
+			routes, source := ReenrolRoutes(sc.Ctx, svc, n.ID, nil, records)
+			if len(routes) > 0 {
+				sc.Log("info", fmt.Sprintf("converge: %s re-enrols advertising %s (from %s)", n.ID, strings.Join(routes, ", "), source))
+			}
+			spec, _ := json.Marshal(EnrollSpec{NodeID: n.ID, AdvertiseRoutes: routes})
 			if _, err := runner.Submit(sc.Ctx, "mesh.enroll_node", spec, "auto-enroll"); err != nil {
 				// A single bad submit shouldn't fail the whole reconcile.
 				sc.Log("warn", fmt.Sprintf("converge: submit enroll for %s: %v", n.ID, err))
@@ -830,7 +850,10 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 			return nil, errors.New("no tailnet id returned by agent or mock")
 		}
 		now := time.Now().UTC()
-		if err := svc.store.UpsertDevice(sc.Ctx, &Device{
+		// The enrol is the one thing that binds a device to a node. A device
+		// previously bound to this node (a re-registered machine) is unbound
+		// in the same write, and pruned from Headscale just below.
+		unbound, err := svc.store.BindDevice(sc.Ctx, &Device{
 			HSID:             s.HSID,
 			User:             svc.cfg.DefaultUser,
 			Hostname:         s.NodeID,
@@ -841,8 +864,12 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 			Kind:             "rasputin",
 			FirstSeen:        now,
 			LastSeen:         now,
-		}); err != nil {
-			return nil, fmt.Errorf("upsert device: %w", err)
+		}, sc.JobID)
+		if err != nil {
+			return nil, fmt.Errorf("bind device: %w", err)
+		}
+		for _, id := range unbound {
+			sc.Log("info", fmt.Sprintf("%s: device %s is no longer bound to it (now %s)", s.NodeID, short(id), short(s.HSID)))
 		}
 		pruneSupersededRegistrations(sc, svc, s.NodeID, s.HSID)
 		publishChange(nc, proto.MeshChangeEvt{

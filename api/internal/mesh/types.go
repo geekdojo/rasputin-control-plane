@@ -37,15 +37,18 @@ type MeshState struct {
 
 // Device is one row of the mesh_devices table.
 type Device struct {
-	HSID             string    `json:"hsId"`
-	User             string    `json:"user"`
-	Hostname         string    `json:"hostname"`
-	TailnetIP        string    `json:"tailnetIp"`
-	Tags             []string  `json:"tags"`
-	AdvertisedRoutes []string  `json:"advertisedRoutes"`
-	RasputinNodeID   string    `json:"rasputinNodeId,omitempty"`
-	Kind             string    `json:"kind"` // "rasputin" | "user"
-	FirstSeen        time.Time `json:"firstSeen"`
+	HSID             string   `json:"hsId"`
+	User             string   `json:"user"`
+	Hostname         string   `json:"hostname"`
+	TailnetIP        string   `json:"tailnetIp"`
+	Tags             []string `json:"tags"`
+	AdvertisedRoutes []string `json:"advertisedRoutes"`
+	RasputinNodeID   string   `json:"rasputinNodeId,omitempty"`
+	// EnrolJobID is the mesh.enroll_node job that bound this device to
+	// RasputinNodeID. Set only by Store.BindDevice.
+	EnrolJobID string    `json:"enrolJobId,omitempty"`
+	Kind       string    `json:"kind"` // "rasputin" | "user"
+	FirstSeen  time.Time `json:"firstSeen"`
 	// LastSeen is Headscale's last-seen for this device, NOT the time we last
 	// reconciled. The difference is the whole point: a device off the tailnet
 	// for five weeks must read as five weeks stale, not as seen just now.

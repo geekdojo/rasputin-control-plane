@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -41,7 +42,7 @@ func (s *Server) handleGetNodeRemovalImpact(w http.ResponseWriter, r *http.Reque
 	}
 	impact, err := s.computeRemovalImpact(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, removalImpactStatus(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, impact)
@@ -88,7 +89,7 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 
 	impact, err := s.computeRemovalImpact(ctx, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, removalImpactStatus(err), err.Error())
 		return
 	}
 
@@ -186,6 +187,16 @@ func (s *Server) removeCollectorLeaf(nodeID string) {
 // computeRemovalImpact gathers the cascade preview without mutating
 // anything. Shared between the dry-run endpoint and the delete handler
 // (which uses it to pick up the hs_id it needs to pass to Headscale).
+// removalImpactStatus is 409 when the node is bound to more than one mesh
+// device: removal would have to guess which Headscale device to delete, so
+// it refuses and names them instead.
+func removalImpactStatus(err error) int {
+	if errors.Is(err, mesh.ErrDuplicateBinding) {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
+}
+
 func (s *Server) computeRemovalImpact(ctx context.Context, nodeID string) (*nodeRemovalImpact, error) {
 	// Apps targeting this node.
 	appRows, err := s.apps.List(ctx)

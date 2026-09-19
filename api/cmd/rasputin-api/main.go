@@ -339,6 +339,12 @@ func main() {
 		log.Fatalf("rasputin-api: mesh store: %v", err)
 	}
 	defer meshStore.Close()
+	// Device→node bindings come only from enrols. Keep those the job ledger
+	// proves, clear the rest (their nodes re-enrol on the next reconcile),
+	// and make a second binding for one node impossible.
+	if _, err := mesh.VerifyBindings(ctx, meshStore, mesh.JobsLedger{Store: jobStore}); err != nil {
+		log.Printf("rasputin-api: ⚠️  verify mesh device bindings: %v", err)
+	}
 
 	bmcStore, err := bmc.OpenStore(ctx, dbPath)
 	if err != nil {
