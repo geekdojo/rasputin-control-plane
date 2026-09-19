@@ -39,12 +39,13 @@ const (
 //
 // Kept separate from Handler()/BootstrapHandler() (the browser-facing surfaces,
 // server-auth only — browsers don't present client certs) so requiring a client
-// cert can't break the UI. See observability-stack.md §3.10–3.11.
+// cert can't break the UI. See observability-stack.md §3.10–3.11. Its
+// responses carry the same security headers as the browser-facing surfaces.
 func (s *Server) ObsIngestHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(obsIngestPattern, s.handleObsIngest)
 	mux.HandleFunc(obsLogsIngestPattern, s.handleObsLogsIngest)
-	return mux
+	return securityHeaders(mux)
 }
 
 // authenticateCollector runs the two authorization gates every mTLS ingress

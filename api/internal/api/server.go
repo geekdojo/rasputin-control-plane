@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"os"
 
@@ -252,6 +253,14 @@ func NewServer(
 //   - everything else requires a valid session cookie.
 //   - WebSocket endpoints (/ws/*) receive the cookie on upgrade and are
 //     gated by the same middleware.
+//
+// Origin policy: one allowlist, s.auth.Origins() (the WebAuthn RP origins),
+// decides CORS (withCORS), cross-origin protection for unsafe methods
+// (http.CrossOriginProtection), the WebSocket upgrade (wsAcceptOptions) and
+// the Origin check in auth.RequireSession.
+//
+// Every response also carries the security headers (securityHeaders): the
+// outermost wrapper, so a CORS preflight, a refusal or a 401 gets them too.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -453,7 +462,9 @@ func (s *Server) Handler() http.Handler {
 	// trailing slash matters — Go's ServeMux uses it as the prefix
 	// match marker. Method-less because Grafana speaks GET/POST/PUT
 	// (panel saves) and we forward all of them.
-	mux.Handle("/observability/", s.auth.RequireSession(http.HandlerFunc(s.handleObservabilityProxy)))
+	// sameOriginFraming is the one relaxation of the frame-ancestors 'none'
+	// every other response carries; see its comment.
+	mux.Handle("/observability/", s.auth.RequireSession(sameOriginFraming(http.HandlerFunc(s.handleObservabilityProxy))))
 
 	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
 	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
@@ -475,25 +486,64 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", uiHandler{fsys: os.DirFS(s.uiDir)})
 	}
 
-	return withCORS(mux)
+	origins := s.auth.Origins()
+	return securityHeaders(withCORS(origins, crossOriginProtection(origins, mux)))
 }
 
-// withCORS is dev-only: allows the Next.js dev server on :3000 to talk to
-// the api on :8080. With cookies in play we must echo the request Origin
-// explicitly (the wildcard "*" is incompatible with credentials).
-func withCORS(h http.Handler) http.Handler {
+// withCORS answers CORS for the origins on the allowlist and for no others.
+// On an appliance the allowlist is the cluster's own origin, so nothing is
+// allowed cross-origin; a dev run's allowlist carries the Next dev server
+// (:3000), which calls the api on :8080 with credentials. With cookies in
+// play the allowed Origin is echoed explicitly (the wildcard "*" is
+// incompatible with credentials).
+//
+// A preflight from an origin not on the list is refused outright; any other
+// request from one is served without CORS headers, so the browser withholds
+// the response from the calling page. What the request may change is decided
+// further in: crossOriginProtection for unsafe methods, RequireSession for
+// every gated route.
+func withCORS(origins *auth.OriginAllowlist, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		origin := r.Header.Get("Origin")
+		allowed := origin != "" && origins.Allows(origin)
+		if origin != "" {
+			w.Header().Add("Vary", "Origin")
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
 		if r.Method == http.MethodOptions {
+			if origin != "" && !allowed {
+				writeError(w, http.StatusForbidden, "origin not allowed")
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+// crossOriginProtection refuses a cross-origin request with an unsafe method
+// (anything but GET, HEAD and OPTIONS) unless it comes from an origin on the
+// allowlist. It covers the routes RequireSession does not gate — the auth
+// ceremonies, first-run restore — as well as the gated ones. Requests from
+// non-browser clients carry neither Origin nor Sec-Fetch-Site and pass.
+func crossOriginProtection(origins *auth.OriginAllowlist, h http.Handler) http.Handler {
+	cop := http.NewCrossOriginProtection()
+	for _, o := range origins.Origins() {
+		// Normalized origins are exactly the scheme://host[:port] form this
+		// takes, so an error here is a bug; the origin then stays untrusted,
+		// which is the closed direction.
+		if err := cop.AddTrustedOrigin(o); err != nil {
+			log.Printf("api: cross-origin protection: trusted origin %q refused: %v", o, err)
+		}
+	}
+	cop.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusForbidden, "cross-origin request refused")
+	}))
+	return cop.Handler(h)
 }

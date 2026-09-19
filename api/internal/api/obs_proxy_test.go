@@ -156,3 +156,36 @@ func TestObsProxy_ReachesGrafanaOverUnixSocket(t *testing.T) {
 		t.Errorf("X-Webauth-User = %q, want alice", got)
 	}
 }
+
+// TestObsProxy_StripsRasputinCookies confirms Grafana never receives the
+// api's own cookies — the session and the pending WebAuthn ceremony — while
+// any other cookie (Grafana's own) still reaches it.
+func TestObsProxy_StripsRasputinCookies(t *testing.T) {
+	var got atomic.Value // []string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Values("Cookie"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer stub.Close()
+
+	sup := &fakeSupGrafana{healthy: true, vmURL: "http://x", grafanaURL: stub.URL}
+	sink, _ := obs.NewVMSink(obs.VMSinkConfig{Supervisor: sup})
+	srv := &Server{obs: obs.NewStatus(sup, sink, nil)}
+
+	req := httptest.NewRequest(http.MethodGet, "/observability/api/search", nil)
+	req.Header.Set("Cookie", "rasputin-session=s3cret; grafana_session=g1; rasputin-pending=p3nding")
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.User{Name: "alice"}))
+	w := httptest.NewRecorder()
+	srv.handleObservabilityProxy(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	cookies, _ := got.Load().([]string)
+	joined := strings.Join(cookies, "; ")
+	if strings.Contains(joined, "rasputin-") || strings.Contains(joined, "s3cret") {
+		t.Errorf("Grafana received the api's cookies: %q", cookies)
+	}
+	if joined != "grafana_session=g1" {
+		t.Errorf("Cookie at Grafana = %q, want grafana_session=g1", joined)
+	}
+}

@@ -1124,10 +1124,11 @@ serve_from_sub_path = true
 [security]
 # No built-in admin account — see the comment on grafanaIniTmpl.
 disable_initial_admin_creation = true
-# allow_embedding lets the UI's <iframe src="/observability/..."> render
-# the dashboards. Default is X-Frame-Options=DENY which kills the embed.
-# The auth-proxy is what makes this safe — only session-authenticated
-# requests ever reach Grafana, regardless of which origin's frame.
+# allow_embedding stops Grafana sending its own X-Frame-Options: deny, which
+# would break Grafana's own panel embeds. The web UI does not frame Grafana;
+# it links to /observability/. The api's proxy sets the framing policy the
+# browser sees: framing by the api's own origin only (sameOriginFraming in
+# api/internal/api/security_headers.go).
 allow_embedding = true
 
 [users]
