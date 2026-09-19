@@ -42,19 +42,6 @@ const (
 		"form-action 'self'; " +
 		"frame-ancestors 'none'"
 
-	// strictTransportSecurity is sent only on a response that went out over
-	// TLS (see securityHeaders). No includeSubDomains: app hostnames are not
-	// the api's to make promises about.
-	//
-	// The max-age is one day, deliberately short. Each installation has its
-	// own Mesh CA, and a controlplane re-flashed without restoring its
-	// identity mints a new one. A browser holding an HSTS entry for the cluster's name then
-	// refuses to let the operator click through the untrusted certificate, and
-	// upgrades http://<cluster>/trust — the page that installs the new CA — to
-	// https. A day bounds that lockout; the trust page stays reachable by IP
-	// address meanwhile, since browsers never apply HSTS to IP literals.
-	strictTransportSecurity = "max-age=86400"
-
 	// referrerPolicy keeps the cluster's hostnames and paths out of the
 	// Referer the UI's outbound links (GitHub, the docs site) would send.
 	referrerPolicy = "same-origin"
@@ -64,10 +51,12 @@ const (
 // then calls next. They are set before next runs, so a handler that needs a
 // narrower exception overrides them (sameOriginFraming does).
 //
-// HSTS goes out only when the request arrived over TLS. The same Handler
-// serves the plain-HTTP listener whenever HTTPS is off (every dev run), and
-// HSTS over plain HTTP is at best ignored and at worst a promise the host
-// cannot keep; r.TLS is the per-request fact that says which listener this is.
+// Strict-Transport-Security is deliberately never sent, on any listener. Each
+// installation has its own Mesh CA, first trusted from the plain-HTTP /trust
+// page, and a controlplane re-flashed without restoring its identity mints a
+// new one. A browser holding HSTS for the cluster's name would refuse to let
+// the operator click through the new certificate and would upgrade the /trust
+// page itself to https — cutting off the way to install the new CA.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -75,9 +64,6 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Content-Security-Policy", contentSecurityPolicy)
 		h.Set("Referrer-Policy", referrerPolicy)
-		if r.TLS != nil {
-			h.Set("Strict-Transport-Security", strictTransportSecurity)
-		}
 		next.ServeHTTP(w, r)
 	})
 }

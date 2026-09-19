@@ -40,8 +40,7 @@ import (
 // When RASPUTIN_HTTPS_ADDR is unset, main.go never calls this and the
 // HTTP listener serves Handler() exactly as before.
 //
-// It carries the same security headers as Handler — minus HSTS, which
-// securityHeaders only ever sends over TLS and this listener is plain HTTP.
+// It carries the same security headers as Handler (securityHeaders).
 func (s *Server) BootstrapHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)

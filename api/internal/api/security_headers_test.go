@@ -89,13 +89,7 @@ func TestSecurityHeadersOnRepresentativeRoutes(t *testing.T) {
 				t.Fatalf("%s: status %d, want %d", label, w.Code, tc.code)
 			}
 			assertHeaders(t, label, w.Header(), baselineHeaders)
-			hsts := w.Header().Get("Strict-Transport-Security")
-			switch {
-			case tlsOn && hsts != strictTransportSecurity:
-				t.Errorf("%s: Strict-Transport-Security = %q, want %q", label, hsts, strictTransportSecurity)
-			case !tlsOn && hsts != "":
-				t.Errorf("%s: Strict-Transport-Security = %q over plain HTTP, want none", label, hsts)
-			}
+			assertNoHSTS(t, label, w.Header())
 		}
 	}
 }
@@ -116,15 +110,15 @@ func TestObservabilityProxyAllowsSameOriginFramingOnly(t *testing.T) {
 		t.Fatalf("status %d, want 503 from the proxy with observability off", w.Code)
 	}
 	assertHeaders(t, "observability proxy", w.Header(), map[string]string{
-		"X-Frame-Options":           "SAMEORIGIN",
-		"Content-Security-Policy":   "frame-ancestors 'self'",
-		"X-Content-Type-Options":    "nosniff",
-		"Referrer-Policy":           "same-origin",
-		"Strict-Transport-Security": strictTransportSecurity,
+		"X-Frame-Options":         "SAMEORIGIN",
+		"Content-Security-Policy": "frame-ancestors 'self'",
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "same-origin",
 	})
+	assertNoHSTS(t, "observability proxy", w.Header())
 }
 
-// The bootstrap listener is plain HTTP: the baseline headers, never HSTS.
+// The bootstrap listener: the baseline headers.
 func TestBootstrapHandlerSecurityHeaders(t *testing.T) {
 	f := headersFixture(t)
 	h := f.srv.BootstrapHandler()
@@ -132,9 +126,6 @@ func TestBootstrapHandlerSecurityHeaders(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
 		assertHeaders(t, "bootstrap "+path, w.Header(), baselineHeaders)
-		if hsts := w.Header().Get("Strict-Transport-Security"); hsts != "" {
-			t.Errorf("bootstrap %s: Strict-Transport-Security = %q over plain HTTP, want none", path, hsts)
-		}
 	}
 }
 
@@ -143,4 +134,46 @@ func TestObsIngestHandlerSecurityHeaders(t *testing.T) {
 	w := httptest.NewRecorder()
 	f.srv.ObsIngestHandler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/obs/ingest", nil))
 	assertHeaders(t, "obs ingest", w.Header(), baselineHeaders)
+}
+
+// No listener ever sends Strict-Transport-Security, over plain HTTP or TLS:
+// it would lock a browser out of a re-flashed controlplane's new Mesh CA and
+// of the plain-HTTP /trust page that installs it (see securityHeaders).
+func TestNoListenerSendsHSTS(t *testing.T) {
+	f := headersFixture(t)
+	cookie := f.authenticate(t)
+	listeners := []struct {
+		name  string
+		h     http.Handler
+		paths []string
+	}{
+		{"main", f.handler, []string{"/healthz", "/", "/api/jobs", "/api/setup/state", "/observability/d/x", "/ws/jobs"}},
+		{"bootstrap", f.srv.BootstrapHandler(), []string{"/healthz", "/", "/trust", "/api/setup/state", "/mesh-ca.pem", "/api/jobs"}},
+		{"obs ingest", f.srv.ObsIngestHandler(), []string{"/api/obs/ingest", "/loki/api/v1/push"}},
+	}
+	for _, l := range listeners {
+		for _, path := range l.paths {
+			for _, method := range []string{http.MethodGet, http.MethodPost} {
+				for _, tlsOn := range []bool{false, true} {
+					req := httptest.NewRequest(method, path, nil)
+					req.AddCookie(cookie)
+					label := l.name + " " + method + " " + path
+					if tlsOn {
+						req = overTLS(req)
+						label += " (TLS)"
+					}
+					w := httptest.NewRecorder()
+					l.h.ServeHTTP(w, req)
+					assertNoHSTS(t, label, w.Header())
+				}
+			}
+		}
+	}
+}
+
+func assertNoHSTS(t *testing.T, label string, h http.Header) {
+	t.Helper()
+	if v := h.Values("Strict-Transport-Security"); len(v) != 0 {
+		t.Errorf("%s: Strict-Transport-Security = %q, want none", label, v)
+	}
 }
