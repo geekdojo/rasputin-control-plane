@@ -669,6 +669,35 @@ func TestAppVolumes_OnNodeListsExactNames(t *testing.T) {
 	}
 }
 
+// ?onNode=1 says why it has no list — an offline node, a node not in
+// inventory, an agent that does not answer — instead of an empty one, which
+// would read as "the app has no volumes".
+func TestAppVolumes_OnNodeSaysWhyNot(t *testing.T) {
+	f, cookie, _ := volumesFixture(t)
+	seedVolumesApp(t, f, volULIDLive, "immich") // on n1: online, nobody answers
+	stale := time.Now().Add(-10 * time.Minute).UTC()
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "n-off", Role: proto.RoleCompute, Hostname: "n-off", FirstSeen: stale, LastSeen: stale}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for id, node := range map[string]string{volULIDOrphan: "n-off", "01J6ZK3Q9V8XKX2M5TQ7R4A9BG": "n-gone"} {
+		if err := f.appsStore.Create(f.ctx, &apps.App{ID: id, Name: id, ComposeYAML: "services: {}", TargetNode: node, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for id, want := range map[string]string{
+		volULIDLive:                  "could not be listed",
+		volULIDOrphan:                "n-off is offline",
+		"01J6ZK3Q9V8XKX2M5TQ7R4A9BG": "n-gone is not in inventory",
+	} {
+		w := f.do(t, http.MethodGet, "/api/apps/"+id+"/volumes?onNode=1", "", cookie)
+		resp := decodeBody[appVolumesResponse](t, w.Body.String())
+		if resp.NodeVolumes != nil || !strings.Contains(resp.NodeVolumesNote, want) {
+			t.Errorf("%s: %s; want no list and a note containing %q", id, w.Body.String(), want)
+		}
+	}
+}
+
 // A tile the catalog in effect no longer carries is "unclassified, and here is
 // which catalog said so" — not an empty list.
 func TestAppVolumes_TileMissingFromLiveCatalog(t *testing.T) {

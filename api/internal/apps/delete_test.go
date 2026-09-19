@@ -460,3 +460,37 @@ func TestCompareDeleteVolumes(t *testing.T) {
 		t.Fatalf("nothing named, nothing on node: %v", err)
 	}
 }
+
+// AppVolumesOnNode reports an agent's refusal in its words, a refusal with no
+// words as one, and an unreadable reply as unreadable — never as an empty
+// list, which would read as "the app has no volumes".
+func TestAppVolumesOnNode_AgentFailures(t *testing.T) {
+	nc := startNATS(t)
+	_, inv := seedOnlineApp(t, "n", delAppID, "immich")
+	var mu sync.Mutex
+	var reply []byte
+	sub, err := nc.Subscribe(proto.AppVolumesListSubject("n"), func(m *nats.Msg) {
+		mu.Lock()
+		r := reply
+		mu.Unlock()
+		_ = m.Respond(r)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	ctx := context.Background()
+	for _, tc := range []struct{ reply, want string }{
+		{`{"ok":false,"detail":"docker is not running"}`, "docker is not running"},
+		{`{"ok":false}`, "agent reported the volumes list failed"},
+		{`not json`, "decode volumes list ack"},
+	} {
+		mu.Lock()
+		reply = []byte(tc.reply)
+		mu.Unlock()
+		vols, err := AppVolumesOnNode(ctx, inv, nc, "n", delAppID)
+		if err == nil || !strings.Contains(err.Error(), tc.want) || vols != nil {
+			t.Errorf("reply %s: got %v, %v; want an error containing %q", tc.reply, vols, err, tc.want)
+		}
+	}
+}
