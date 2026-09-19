@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -332,3 +335,83 @@ func TestReconcileFetch_BindsByRecordedHeadscaleID(t *testing.T) {
 		t.Errorf("node-b resolved to %+v through a hostname", d)
 	}
 }
+
+// Through the real runner and job store, for an enrol that succeeds and one
+// that the agent rejects: the enrolment key appears in no job spec, step
+// result, step error, job event or process log line — the job-ledger rule
+// (geekdojo/geekdojo-brain#479) holds on the mesh.enroll_node path.
+func TestEnrollJob_KeyNeverReachesTheLedger(t *testing.T) {
+	var logBuf strings.Builder
+	var logMu sync.Mutex
+	prev := log.Writer()
+	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return logBuf.Write(p)
+	}))
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	f := newConvergeFixture(t)
+	f.addNode(t, "good", proto.RoleCompute, time.Now().UTC())
+	f.addNode(t, "bad", proto.RoleCompute, time.Now().UTC())
+	fakeAgent(t, f.nc, "good", proto.MeshEnrollAck{OK: true, TailnetID: "hs-9", TailnetIP: "100.64.0.9", Backend: "test"})
+	fakeAgent(t, f.nc, "bad", proto.MeshEnrollAck{OK: false, Backend: "test", Detail: "refused"})
+
+	jst, err := jobs.OpenStore(f.ctx, filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatalf("jobs.OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = jst.Close() })
+	runner := jobs.NewRunner(jst, f.nc)
+	runner.Register(EnrollNodeWorkflow(f.svc, f.inv, f.nc))
+	var ids []string
+	for _, node := range []string{"good", "bad"} {
+		spec, _ := json.Marshal(EnrollSpec{NodeID: node})
+		j, err := runner.Submit(f.ctx, "mesh.enroll_node", spec, "test")
+		if err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		ids = append(ids, j.ID)
+	}
+	runner.Wait()
+
+	values, _ := f.client.minted()
+	if len(values) != 2 {
+		t.Fatalf("minted %d keys, want 2", len(values))
+	}
+	check := func(where, got string) {
+		for _, v := range values {
+			if strings.Contains(got, v) {
+				t.Errorf("%s carries an enrolment key: %s", where, got)
+			}
+		}
+	}
+	for i, id := range ids {
+		j, err := jst.GetJob(f.ctx, id)
+		if err != nil || j == nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		if want := []jobs.Status{jobs.StatusSucceeded, jobs.StatusFailed}[i]; j.Status != want {
+			t.Errorf("job %d finished %s, want %s", i, j.Status, want)
+		}
+		raw, _ := json.Marshal(j)
+		check("job "+id, string(raw))
+		steps, _ := jst.ListSteps(f.ctx, id)
+		for _, st := range steps {
+			raw, _ := json.Marshal(st)
+			check("step "+st.Name, string(raw))
+		}
+		events, _ := jst.ListEvents(f.ctx, id)
+		for _, ev := range events {
+			raw, _ := json.Marshal(ev)
+			check("event", string(raw))
+		}
+	}
+	logMu.Lock()
+	check("process log", logBuf.String())
+	logMu.Unlock()
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (w writerFunc) Write(p []byte) (int, error) { return w(p) }
