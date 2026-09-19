@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
@@ -61,13 +62,45 @@ type pendingAuth struct {
 	user    *User
 	session *webauthn.SessionData
 	expires time.Time
+	// basis records what authorized a registration ceremony at begin, so
+	// finish re-checks that same fact rather than trusting that it still
+	// holds. Unset for login.
+	basis registerBasis
+	// stepUp is the assertion challenge a signed-in registration must
+	// answer with one of the user's existing passkeys. It is bound to this
+	// ceremony and spent by the first register/step-up call (nil after).
+	stepUp *webauthn.SessionData
+	// stepUpVerified is set when that assertion verified; register/finish
+	// refuses a signed-in registration without it.
+	stepUpVerified bool
+}
+
+// registerBasis is the fact a registration ceremony was begun on.
+type registerBasis struct {
+	// firstRun: no operator existed at begin. Finish commits only if that
+	// is still true (Store.CreateFirstUser's conditional insert).
+	firstRun bool
+	// byUserID: the ID of the signed-in user who began the ceremony, whose
+	// own account the new passkey is added to. Finish requires a verified
+	// step-up and a live session for that same user.
+	byUserID []byte
 }
 
 const (
 	sessionCookie   = "rasputin-session"
 	pendingCookie   = "rasputin-pending"
 	sessionLifetime = 7 * 24 * time.Hour
+	// pendingLifetime bounds an unfinished WebAuthn ceremony. A ceremony is
+	// consumed at finish, but one the browser abandons produces no fact the
+	// api could observe, so this bound is what frees its memory and ends its
+	// authority. It is a safety net, not a state transition (principles.md's
+	// clock rule; exception register row E5).
 	pendingLifetime = 5 * time.Minute
+	// maxPending caps the in-memory ceremony map. login/begin is
+	// unauthenticated, so without a cap the map grows with every request
+	// until the janitor catches up. At the cap, expired entries are pruned
+	// first, then the entry closest to expiry is evicted.
+	maxPending = 1024
 )
 
 // NewService constructs an auth Service. The store must be opened separately
@@ -91,6 +124,11 @@ func NewService(store *Store, cfg Config) (*Service, error) {
 		RPDisplayName: cfg.RPDisplayName,
 		RPID:          cfg.RPID,
 		RPOrigins:     cfg.RPOrigins,
+		// Passkeys require user verification (Face ID, Touch ID, Windows
+		// Hello, PIN) at registration, sign-in and step-up alike
+		// (geekdojo-brain decision #561). One setting drives all three: the
+		// library asks for UV and refuses a response without the UV flag.
+		AuthenticatorSelection: protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("auth: webauthn config: %w", err)
@@ -174,6 +212,16 @@ func (s *Service) cleanupPending(now time.Time) {
 	}
 }
 
+// ----- first run ------------------------------------------------------------
+
+// FirstRun reports whether the installation is at first run: no operator has
+// registered yet. It is the one predicate every first-run surface reads
+// (register/begin, auth/status, the restore routes, the setup probe), and it
+// fails closed: an error returns (false, err), never "first run".
+func (s *Service) FirstRun(ctx context.Context) (bool, error) {
+	return s.store.FirstRun(ctx)
+}
+
 // ----- pending-auth state -------------------------------------------------
 
 func randomToken(n int) (string, error) {
@@ -189,11 +237,38 @@ func (s *Service) storePending(p *pendingAuth) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	p.expires = time.Now().Add(pendingLifetime)
+	now := time.Now()
+	p.expires = now.Add(pendingLifetime)
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) >= maxPending {
+		s.evictPendingLocked(now)
+	}
 	s.pending[token] = p
-	s.mu.Unlock()
 	return token, nil
+}
+
+// evictPendingLocked makes room for one entry: it drops every expired entry,
+// and if none had expired, the one closest to expiry. Caller holds s.mu.
+func (s *Service) evictPendingLocked(now time.Time) {
+	var (
+		oldest    string
+		oldestExp time.Time
+		pruned    bool
+	)
+	for token, p := range s.pending {
+		if now.After(p.expires) {
+			delete(s.pending, token)
+			pruned = true
+			continue
+		}
+		if oldest == "" || p.expires.Before(oldestExp) {
+			oldest, oldestExp = token, p.expires
+		}
+	}
+	if !pruned && oldest != "" {
+		delete(s.pending, oldest)
+	}
 }
 
 func (s *Service) takePending(token string) *pendingAuth {
@@ -208,6 +283,47 @@ func (s *Service) takePending(token string) *pendingAuth {
 		return nil
 	}
 	return p
+}
+
+// takeStepUp spends the step-up challenge of the ceremony under token and
+// returns it with the ceremony. The challenge is removed before it is
+// verified, so it can be answered at most once. Returns nil if there is no
+// live registration awaiting a step-up.
+func (s *Service) takeStepUp(token string) (*pendingAuth, *webauthn.SessionData) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.pending[token]
+	if !ok || p.kind != "register" || p.stepUp == nil {
+		return nil, nil
+	}
+	if time.Now().After(p.expires) {
+		delete(s.pending, token)
+		return nil, nil
+	}
+	challenge := p.stepUp
+	p.stepUp = nil
+	return p, challenge
+}
+
+// completeStepUp records a verified step-up and the creation challenge it
+// unlocked, if the ceremony is still the one under token (not finished,
+// dropped or evicted meanwhile).
+func (s *Service) completeStepUp(token string, p *pendingAuth, target *User, creation *webauthn.SessionData) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.pending[token]; !ok || cur != p {
+		return false
+	}
+	p.user = target
+	p.session = creation
+	p.stepUpVerified = true
+	return true
+}
+
+func (s *Service) dropPending(token string) {
+	s.mu.Lock()
+	delete(s.pending, token)
+	s.mu.Unlock()
 }
 
 // ----- cookies ------------------------------------------------------------

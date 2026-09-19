@@ -476,9 +476,14 @@ func main() {
 	// subsystems' stores; defined here so the setup package stays narrow
 	// and import-cycle-free.
 	setupSvc := setup.NewService(setupStore, setup.Probes{
+		// auth's FirstRun, the one first-run predicate. The store form is
+		// used only because the auth Service is built further down.
 		HasUsers: func(ctx context.Context) (bool, error) {
-			n, err := authStore.CountUsers(ctx)
-			return n > 0, err
+			firstRun, err := authStore.FirstRun(ctx)
+			if err != nil {
+				return false, err
+			}
+			return !firstRun, nil
 		},
 		TrustConfigured: func() bool { return verifier.TrustConfigured() },
 		MeshEnrolled: func(ctx context.Context, selfNodeID string) (bool, error) {

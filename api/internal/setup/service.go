@@ -58,7 +58,9 @@ type State struct {
 // and the setup package stays narrow.
 type Probes struct {
 	// HasUsers reports whether at least one operator passkey has been
-	// registered.
+	// registered. main wires it to auth's FirstRun, the one first-run
+	// predicate; an error from it fails GetState rather than reading as
+	// "no users".
 	HasUsers func(ctx context.Context) (bool, error)
 	// TrustConfigured reports whether the api was loaded with a real
 	// root CA cert (vs. the dev-permissive fallback).
@@ -98,6 +100,11 @@ func (s *Service) Store() *Store { return s.store }
 
 // GetState computes the live wizard state. Cheap — one settings lookup
 // plus three probe calls.
+//
+// GetState is for display. It is never an authorization input: a gate that
+// depends on first run reads auth.Service.FirstRun directly. HasUsers is
+// still fail-closed here, so a probe error is returned instead of showing a
+// configured installation as fresh.
 func (s *Service) GetState(ctx context.Context) (*State, error) {
 	installName, err := s.store.Get(ctx, KeyInstallName)
 	if err != nil {
@@ -111,7 +118,9 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 
 	var hasUsers bool
 	if s.probes.HasUsers != nil {
-		hasUsers, _ = s.probes.HasUsers(ctx)
+		if hasUsers, err = s.probes.HasUsers(ctx); err != nil {
+			return nil, err
+		}
 	}
 	trustConfigured := false
 	if s.probes.TrustConfigured != nil {

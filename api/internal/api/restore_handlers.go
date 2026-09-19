@@ -84,16 +84,13 @@ func (s *Server) SetRestore(cfg *storage.RestoreConfig, restart func()) {
 }
 
 // firstRunOpen reports whether the restore surface is open: no operator
-// exists yet. Any error reading the answer closes the surface.
+// exists yet. It reads auth's FirstRun, which fails closed: any error reading
+// the answer closes the surface.
 func (s *Server) firstRunOpen(r *http.Request) (bool, error) {
-	if s.setup == nil {
-		return false, errors.New("setup service is not wired")
+	if s.auth == nil {
+		return false, errors.New("auth service is not wired")
 	}
-	st, err := s.setup.GetState(r.Context())
-	if err != nil {
-		return false, err
-	}
-	return !st.HasUsers, nil
+	return s.auth.FirstRun(r.Context())
 }
 
 const restoreClosed = "restore is offered only before the first operator is registered; this installation already has one. Re-flash the controlplane to restore onto a fresh partition"

@@ -108,6 +108,48 @@ export async function registerPasskey(
   });
 }
 
+// Adding a passkey while signed in is two steps, each started by its own
+// click (a browser only raises a passkey prompt from a user gesture):
+//
+//   1. confirmExistingPasskey — the api asks for an assertion by one of the
+//      signed-in user's existing passkeys. The challenge belongs to this one
+//      ceremony and can be answered once. On success the api returns the
+//      creation options for the new passkey.
+//   2. createNewPasskey — creates the new passkey with those options.
+//
+// A session alone never adds a passkey; the api refuses step 2 unless step 1
+// verified for the same ceremony.
+export async function confirmExistingPasskey(): Promise<RegistrationOptions> {
+  const begin = await jsonFetch<{ stepUp?: unknown }>('/api/auth/register/begin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  if (!begin.stepUp) {
+    throw new Error('The api did not ask for an existing passkey; refusing to continue.');
+  }
+  const assertion = await startAuthentication({
+    optionsJSON: unwrapPublicKey(begin.stepUp) as AuthenticationOptions,
+  });
+  const creation = await jsonFetch<unknown>('/api/auth/register/step-up', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(assertion),
+  });
+  return unwrapPublicKey(creation) as RegistrationOptions;
+}
+
+export async function createNewPasskey(options: RegistrationOptions): Promise<CurrentUser> {
+  const credential = await startRegistration({ optionsJSON: options });
+  return jsonFetch<CurrentUser>('/api/auth/register/finish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(credential),
+  });
+}
+
+export type NewPasskeyOptions = RegistrationOptions;
+
 export async function loginWithPasskey(): Promise<CurrentUser> {
   const opts = await jsonFetch<unknown>('/api/auth/login/begin', {
     method: 'POST',
