@@ -18,6 +18,7 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/me", s.handleMe)
 	mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/auth/register/begin", s.handleRegisterBegin)
+	mux.HandleFunc("POST /api/auth/register/step-up", s.handleRegisterStepUp)
 	mux.HandleFunc("POST /api/auth/register/finish", s.handleRegisterFinish)
 	mux.HandleFunc("POST /api/auth/login/begin", s.handleLoginBegin)
 	mux.HandleFunc("POST /api/auth/login/finish", s.handleLoginFinish)
@@ -70,15 +71,32 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // ----- registration -------------------------------------------------------
+//
+// Two ways in, recorded in the ceremony's basis and re-checked at finish:
+//
+//   - First run (no users exist). register/begin returns creation options
+//     directly; register/finish commits only if no operator exists by then.
+//
+//   - Signed in. A session alone does not add a passkey. register/begin
+//     returns a step-up assertion challenge for the signed-in user's own
+//     passkeys; register/step-up verifies it (single use: the challenge is
+//     consumed on the first attempt, pass or fail) and only then issues the
+//     creation options; register/finish refuses unless that step-up verified
+//     for THIS ceremony and the same user's session is still live.
+//
+// The step-up assertion uses the same user-verification setting as sign-in
+// (the relying party's default; login passes no override), so it is no
+// stronger and no weaker than signing in.
 
 // POST /api/auth/register/begin
 // Body: { "name": "alice", "displayName": "Alice" }
-// Allowed when:
-//   - No users exist yet (first-run), OR
-//   - The caller is authenticated (an existing user is creating a new one).
 //
-// Which of the two authorized the ceremony is recorded in the pending state,
-// and register/finish re-checks that same fact before it commits.
+// First run: creates the first operator; returns creation options.
+//
+// Signed in: an empty name adds a passkey to the signed-in user's own
+// account; a new name creates another user. Either way the response is
+// { "stepUp": <assertion options> } and the ceremony continues at
+// register/step-up.
 func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string `json:"name"`
@@ -94,65 +112,169 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	basis := registerBasis{firstRun: firstRun}
-	if !firstRun {
-		_, by, err := s.resolveSession(r)
+	if firstRun {
+		s.beginFirstRunRegistration(w, r, req.Name, req.DisplayName)
+		return
+	}
+
+	_, by, err := s.resolveSession(r)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if by == nil {
+		writeErr(w, http.StatusUnauthorized,
+			"only an authenticated user can register a new user")
+		return
+	}
+
+	p := &pendingAuth{kind: "register", basis: registerBasis{byUserID: by.ID}}
+	if req.Name == "" {
+		p.addToSelf = true
+	} else {
+		existing, err := s.store.GetUserByName(r.Context(), req.Name)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if by == nil {
-			writeErr(w, http.StatusUnauthorized,
-				"only an authenticated user can register a new user")
+		if existing != nil {
+			writeErr(w, http.StatusConflict, "user with that name already exists")
 			return
 		}
-		basis.byUserID = by.ID
+		if p.user, err = makeUser(req.Name, req.DisplayName); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
-	existing, err := s.store.GetUserByName(r.Context(), req.Name)
+	if len(by.WebAuthnCredentials()) == 0 {
+		writeErr(w, http.StatusConflict,
+			"this account has no passkey to confirm with")
+		return
+	}
+	// No login options: the same user-verification setting as sign-in.
+	assertion, stepUp, err := s.web.BeginLogin(by)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if existing != nil {
-		writeErr(w, http.StatusConflict, "user with that name already exists")
+	p.stepUp = stepUp
+	token, err := s.storePending(p)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.setPendingCookie(w, token)
+	writeJSON(w, http.StatusOK, map[string]any{"stepUp": assertion})
+}
 
-	user, err := makeUser(req.Name, req.DisplayName)
+func (s *Service) beginFirstRunRegistration(w http.ResponseWriter, r *http.Request, name, displayName string) {
+	user, err := makeUser(name, displayName)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	// Require a discoverable credential (resident key). Login is
-	// BeginDiscoverableLogin — it sends an empty allowCredentials list, so an
-	// authenticator that stored a non-discoverable credential can never be
-	// offered at sign-in. Without this the two halves disagree: registration
-	// succeeds and login is then impossible, with nothing in the UI to explain
-	// why. Platform authenticators (Touch ID, Windows Hello) create
-	// discoverable credentials whether or not they're asked, which is why this
-	// stayed hidden — a USB security key, the only authenticator a Linux
-	// desktop can use, is the case that exposes it. WithResidentKeyRequirement
-	// also sets the legacy requireResidentKey flag for older authenticators.
-	options, sessionData, err := s.web.BeginRegistration(user,
-		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired))
+	options, sessionData, err := s.beginCreation(user)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
 	token, err := s.storePending(&pendingAuth{
 		kind:    "register",
 		user:    user,
 		session: sessionData,
-		basis:   basis,
+		basis:   registerBasis{firstRun: true},
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.setPendingCookie(w, token)
+	writeJSON(w, http.StatusOK, options)
+}
+
+// beginCreation issues WebAuthn creation options for user, excluding the
+// credentials it already has.
+//
+// Require a discoverable credential (resident key). Login is
+// BeginDiscoverableLogin — it sends an empty allowCredentials list, so an
+// authenticator that stored a non-discoverable credential can never be
+// offered at sign-in. Without this the two halves disagree: registration
+// succeeds and login is then impossible, with nothing in the UI to explain
+// why. Platform authenticators (Touch ID, Windows Hello) create
+// discoverable credentials whether or not they're asked, which is why this
+// stayed hidden — a USB security key, the only authenticator a Linux
+// desktop can use, is the case that exposes it. WithResidentKeyRequirement
+// also sets the legacy requireResidentKey flag for older authenticators.
+func (s *Service) beginCreation(user *User) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
+	opts := []webauthn.RegistrationOption{
+		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
+	}
+	if creds := user.WebAuthnCredentials(); len(creds) > 0 {
+		excl := make([]protocol.CredentialDescriptor, 0, len(creds))
+		for i := range creds {
+			excl = append(excl, creds[i].Descriptor())
+		}
+		opts = append(opts, webauthn.WithExclusions(excl))
+	}
+	return s.web.BeginRegistration(user, opts...)
+}
+
+// POST /api/auth/register/step-up
+// Body: the assertion response for the challenge register/begin returned.
+// Verifies it against the signed-in user's own passkeys and, on success,
+// returns the creation options for the new passkey.
+func (s *Service) handleRegisterStepUp(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(pendingCookie)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "missing pending cookie")
+		return
+	}
+	token := cookie.Value
+	p, challenge := s.takeStepUp(token)
+	if p == nil {
+		writeErr(w, http.StatusBadRequest, "no registration awaiting confirmation")
+		return
+	}
+	// Any failure below ends the ceremony: its challenge is already spent.
+	fail := func(status int, msg string) {
+		s.dropPending(token)
+		s.clearPendingCookie(w)
+		writeErr(w, status, msg)
+	}
+
+	_, by, err := s.resolveSession(r)
+	if err != nil {
+		fail(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if by == nil || !bytes.Equal(by.ID, p.basis.byUserID) {
+		fail(http.StatusUnauthorized, "the session that began this registration is no longer signed in")
+		return
+	}
+	cred, err := s.web.FinishLogin(by, *challenge, r)
+	if err != nil {
+		fail(http.StatusUnauthorized, "confirming with an existing passkey failed: "+err.Error())
+		return
+	}
+	if err := s.store.UpdateCredentialAfterLogin(r.Context(), cred, time.Now().UTC()); err != nil {
+		fail(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	target := p.user
+	if p.addToSelf {
+		target = by
+	}
+	options, creation, err := s.beginCreation(target)
+	if err != nil {
+		fail(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.completeStepUp(token, p, target, creation) {
+		fail(http.StatusBadRequest, "no registration awaiting confirmation")
+		return
+	}
 	writeJSON(w, http.StatusOK, options)
 }
 
@@ -166,14 +288,19 @@ func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	p := s.takePending(cookie.Value)
 	s.clearPendingCookie(w)
-	if p == nil || p.kind != "register" || p.user == nil {
+	if p == nil || p.kind != "register" {
 		writeErr(w, http.StatusBadRequest, "no pending registration")
 		return
 	}
 
-	// A ceremony begun by a signed-in user needs that user still signed in:
-	// signing out, or losing the session, ends the authority it lent.
 	if !p.basis.firstRun {
+		// A signed-in registration needs its own step-up to have verified,
+		// and the user who began it still signed in.
+		if !p.stepUpVerified {
+			writeErr(w, http.StatusForbidden,
+				"confirm with an existing passkey before adding a new one")
+			return
+		}
 		_, by, err := s.resolveSession(r)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
@@ -185,18 +312,32 @@ func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if p.user == nil || p.session == nil {
+		writeErr(w, http.StatusBadRequest, "no pending registration")
+		return
+	}
 
 	cred, err := s.web.FinishRegistration(p.user, *p.session, r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	dbCred := fromWebAuthn(cred, p.user.ID)
+	dbCred.CreatedAt = time.Now().UTC()
+
+	if p.addToSelf {
+		// A new passkey on the signed-in account: the session carries on.
+		if err := s.store.CreateCredential(r.Context(), dbCred); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, publicUser(p.user))
+		return
+	}
 
 	// User and credential commit in one transaction. A ceremony begun at
 	// first run commits only if no operator exists now, checked in the same
 	// statement as the insert.
-	dbCred := fromWebAuthn(cred, p.user.ID)
-	dbCred.CreatedAt = time.Now().UTC()
 	if err := s.store.CreateUserWithCredential(r.Context(), p.user, dbCred, p.basis.firstRun); err != nil {
 		if errors.Is(err, ErrNotFirstRun) {
 			writeErr(w, http.StatusForbidden, err.Error())

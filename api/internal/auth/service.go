@@ -65,6 +65,16 @@ type pendingAuth struct {
 	// finish re-checks that same fact rather than trusting that it still
 	// holds. Unset for login.
 	basis registerBasis
+	// addToSelf: a signed-in registration that adds a passkey to the
+	// signed-in user's own account rather than creating a user.
+	addToSelf bool
+	// stepUp is the assertion challenge a signed-in registration must
+	// answer with one of the user's existing passkeys. It is bound to this
+	// ceremony and spent by the first register/step-up call (nil after).
+	stepUp *webauthn.SessionData
+	// stepUpVerified is set when that assertion verified; register/finish
+	// refuses a signed-in registration without it.
+	stepUpVerified bool
 }
 
 // registerBasis is the fact a registration ceremony was begun on.
@@ -269,6 +279,47 @@ func (s *Service) takePending(token string) *pendingAuth {
 		return nil
 	}
 	return p
+}
+
+// takeStepUp spends the step-up challenge of the ceremony under token and
+// returns it with the ceremony. The challenge is removed before it is
+// verified, so it can be answered at most once. Returns nil if there is no
+// live registration awaiting a step-up.
+func (s *Service) takeStepUp(token string) (*pendingAuth, *webauthn.SessionData) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.pending[token]
+	if !ok || p.kind != "register" || p.stepUp == nil {
+		return nil, nil
+	}
+	if time.Now().After(p.expires) {
+		delete(s.pending, token)
+		return nil, nil
+	}
+	challenge := p.stepUp
+	p.stepUp = nil
+	return p, challenge
+}
+
+// completeStepUp records a verified step-up and the creation challenge it
+// unlocked, if the ceremony is still the one under token (not finished,
+// dropped or evicted meanwhile).
+func (s *Service) completeStepUp(token string, p *pendingAuth, target *User, creation *webauthn.SessionData) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.pending[token]; !ok || cur != p {
+		return false
+	}
+	p.user = target
+	p.session = creation
+	p.stepUpVerified = true
+	return true
+}
+
+func (s *Service) dropPending(token string) {
+	s.mu.Lock()
+	delete(s.pending, token)
+	s.mu.Unlock()
 }
 
 // ----- cookies ------------------------------------------------------------

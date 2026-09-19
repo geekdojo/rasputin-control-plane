@@ -32,6 +32,7 @@ type softAuthenticator struct {
 	credID []byte
 	origin string
 	rpID   string
+	count  uint32
 }
 
 func newSoftAuthenticator(t *testing.T) *softAuthenticator {
@@ -95,10 +96,60 @@ func (a *softAuthenticator) attest(t *testing.T, optionsJSON []byte) string {
 	return string(body)
 }
 
+// assert answers an assertion request (options JSON, bare or wrapped in
+// "stepUp") as userID's passkey, returning the body the api expects.
+func (a *softAuthenticator) assert(t *testing.T, optionsJSON []byte, userID []byte) string {
+	t.Helper()
+	var wrapped struct {
+		StepUp    json.RawMessage `json:"stepUp"`
+		PublicKey json.RawMessage `json:"publicKey"`
+	}
+	if err := json.Unmarshal(optionsJSON, &wrapped); err != nil {
+		t.Fatalf("assertion options: %v", err)
+	}
+	if wrapped.StepUp != nil {
+		optionsJSON = wrapped.StepUp
+	}
+	var opts struct {
+		PublicKey struct {
+			Challenge string `json:"challenge"`
+		} `json:"publicKey"`
+	}
+	if err := json.Unmarshal(optionsJSON, &opts); err != nil || opts.PublicKey.Challenge == "" {
+		t.Fatalf("assertion options: %v %s", err, optionsJSON)
+	}
+	clientData, _ := json.Marshal(map[string]any{
+		"type": "webauthn.get", "challenge": opts.PublicKey.Challenge, "origin": a.origin,
+	})
+	rpHash := sha256.Sum256([]byte(a.rpID))
+	a.count++
+	authData := append([]byte{}, rpHash[:]...)
+	authData = append(authData, 0x05) // UP | UV
+	authData = binary.BigEndian.AppendUint32(authData, a.count)
+	cdHash := sha256.Sum256(clientData)
+	digest := sha256.Sum256(append(append([]byte{}, authData...), cdHash[:]...))
+	sig, err := ecdsa.SignASN1(rand.Reader, a.key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.RawURLEncoding.EncodeToString
+	body, _ := json.Marshal(map[string]any{
+		"id": b64(a.credID), "rawId": b64(a.credID), "type": "public-key",
+		"response": map[string]string{
+			"clientDataJSON":    b64(clientData),
+			"authenticatorData": b64(authData),
+			"signature":         b64(sig),
+			"userHandle":        b64(userID),
+		},
+	})
+	return string(body)
+}
+
 // ceremony is one begun registration: the pending cookie and the finish body.
 type ceremony struct {
 	pending *http.Cookie
 	body    string
+	auth    *softAuthenticator
 }
 
 func registerBegin(t *testing.T, h http.Handler, name string, session *http.Cookie) (*httptest.ResponseRecorder, *ceremony) {
@@ -113,7 +164,8 @@ func registerBegin(t *testing.T, h http.Handler, name string, session *http.Cook
 	if w.Code != http.StatusOK {
 		return w, nil
 	}
-	c := &ceremony{body: newSoftAuthenticator(t).attest(t, w.Body.Bytes())}
+	a := newSoftAuthenticator(t)
+	c := &ceremony{body: a.attest(t, w.Body.Bytes()), auth: a}
 	for _, ck := range w.Result().Cookies() {
 		if ck.Name == pendingCookie {
 			c.pending = ck
@@ -284,49 +336,6 @@ func TestRegisterFinish_ConcurrentFirstRunRace(t *testing.T) {
 	}
 }
 
-// A ceremony a signed-in user began commits while that session is live, and
-// is refused once it is gone.
-func TestRegisterFinish_SessionBasisNeedsTheSameLiveSession(t *testing.T) {
-	f := newAuthFixture(t)
-	h := f.handler()
-	alice := f.mintUser(t, "alice")
-	sess := freshSession(t, f, alice)
-	cookie := &http.Cookie{Name: sessionCookie, Value: sess.Token}
-
-	_, bob := registerBegin(t, h, "bob", cookie)
-	if bob == nil {
-		t.Fatal("a signed-in user could not begin a registration")
-	}
-	if w := registerFinish(h, bob, cookie); w.Code != http.StatusOK {
-		t.Fatalf("finish with the session: %d %s", w.Code, w.Body.String())
-	}
-
-	_, carol := registerBegin(t, h, "carol", cookie)
-	if carol == nil {
-		t.Fatal("second begin refused")
-	}
-	if err := f.store.DeleteSession(f.ctx, sess.Token); err != nil {
-		t.Fatal(err)
-	}
-	if w := registerFinish(h, carol, cookie); w.Code != http.StatusUnauthorized {
-		t.Fatalf("finish after sign-out: want 401, got %d %s", w.Code, w.Body.String())
-	}
-	if u, _ := f.store.GetUserByName(f.ctx, "carol"); u != nil {
-		t.Fatal("a ceremony whose session ended created a user")
-	}
-
-	// Another user's session is not the session that began the ceremony.
-	_, dave := registerBegin(t, h, "dave", &http.Cookie{Name: sessionCookie, Value: freshSession(t, f, alice).Token})
-	if dave == nil {
-		t.Fatal("begin refused")
-	}
-	bobUser, _ := f.store.GetUserByName(f.ctx, "bob")
-	bobSess := freshSession(t, f, bobUser)
-	if w := registerFinish(h, dave, &http.Cookie{Name: sessionCookie, Value: bobSess.Token}); w.Code != http.StatusUnauthorized {
-		t.Fatalf("finish under another user's session: want 401, got %d", w.Code)
-	}
-}
-
 func TestRegisterBegin_SecondBeginWithoutSessionRefused(t *testing.T) {
 	f := newAuthFixture(t)
 	h := f.handler()
@@ -465,5 +474,227 @@ func TestStorePending_CapEvictsExpiredFirstThenOldest(t *testing.T) {
 	}
 	if _, ok := f.svc.pending[oldest]; ok {
 		t.Fatal("the oldest entry survived eviction")
+	}
+}
+
+// ============================================================================
+// Signed-in registration: step-up with an existing passkey
+// ============================================================================
+
+// operator is a user registered through the real first-run ceremony: its
+// passkey (the software authenticator) and a live session cookie.
+type operator struct {
+	user    *User
+	auth    *softAuthenticator
+	session *http.Cookie
+}
+
+func firstOperator(t *testing.T, f *authFixture, h http.Handler, name string) *operator {
+	t.Helper()
+	_, c := registerBegin(t, h, name, nil)
+	if c == nil {
+		t.Fatal("first-run begin refused")
+	}
+	w := registerFinish(h, c, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first-run finish: %d %s", w.Code, w.Body.String())
+	}
+	op := &operator{auth: c.auth}
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookie {
+			op.session = ck
+		}
+	}
+	op.user, _ = f.store.GetUserByName(f.ctx, name)
+	if op.session == nil || op.user == nil {
+		t.Fatal("first operator has no session or user row")
+	}
+	return op
+}
+
+func post(h http.Handler, path, body string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	for _, c := range cookies {
+		if c != nil {
+			r.AddCookie(c)
+		}
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func pendingFrom(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == pendingCookie {
+			return ck
+		}
+	}
+	t.Fatalf("no pending cookie: %d %s", w.Code, w.Body.String())
+	return nil
+}
+
+// signedInBegin starts a signed-in registration (empty name: add a passkey to
+// the caller's own account) and returns the pending cookie and step-up
+// options.
+func signedInBegin(t *testing.T, h http.Handler, session *http.Cookie, name string) (*http.Cookie, []byte) {
+	t.Helper()
+	w := post(h, "/api/auth/register/begin", `{"name":"`+name+`"}`, session)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"stepUp"`) {
+		t.Fatalf("signed-in begin: %d %s", w.Code, w.Body.String())
+	}
+	return pendingFrom(t, w), w.Body.Bytes()
+}
+
+func TestAddPasskey_StepUpThenCreateEndToEnd(t *testing.T) {
+	f := newAuthFixture(t)
+	h := f.handler()
+	alice := firstOperator(t, f, h, "alice")
+
+	pending, stepUpOpts := signedInBegin(t, h, alice.session, "")
+	w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, stepUpOpts, alice.user.ID), pending, alice.session)
+	if w.Code != http.StatusOK {
+		t.Fatalf("step-up: %d %s", w.Code, w.Body.String())
+	}
+	// The creation options exclude the passkey alice already has.
+	if !strings.Contains(w.Body.String(), base64.RawURLEncoding.EncodeToString(alice.auth.credID)) {
+		t.Fatalf("creation options do not exclude the existing passkey: %s", w.Body.String())
+	}
+	second := newSoftAuthenticator(t)
+	w = post(h, "/api/auth/register/finish", second.attest(t, w.Body.Bytes()), pending, alice.session)
+	if w.Code != http.StatusOK {
+		t.Fatalf("finish: %d %s", w.Code, w.Body.String())
+	}
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookie {
+			t.Fatal("adding a passkey replaced the session")
+		}
+	}
+	if f.countUsers(t) != 1 || f.countCredentials(t) != 2 {
+		t.Fatalf("users=%d credentials=%d, want 1/2", f.countUsers(t), f.countCredentials(t))
+	}
+	u, _ := f.store.GetUserByID(f.ctx, alice.user.ID)
+	if len(u.WebAuthnCredentials()) != 2 {
+		t.Fatalf("alice has %d passkeys, want 2", len(u.WebAuthnCredentials()))
+	}
+}
+
+func TestAddPasskey_FinishWithoutStepUpRefused(t *testing.T) {
+	f := newAuthFixture(t)
+	h := f.handler()
+	alice := firstOperator(t, f, h, "alice")
+	pending, stepUpOpts := signedInBegin(t, h, alice.session, "")
+	// Skip step-up: answer the step-up challenge with an attestation.
+	var wrapped struct {
+		StepUp json.RawMessage `json:"stepUp"`
+	}
+	_ = json.Unmarshal(stepUpOpts, &wrapped)
+	w := post(h, "/api/auth/register/finish", newSoftAuthenticator(t).attest(t, wrapped.StepUp), pending, alice.session)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("finish without step-up: want 403, got %d %s", w.Code, w.Body.String())
+	}
+	if f.countCredentials(t) != 1 {
+		t.Fatalf("credentials=%d, want 1", f.countCredentials(t))
+	}
+}
+
+func TestAddPasskey_StepUpByAnotherUsersPasskeyRefused(t *testing.T) {
+	f := newAuthFixture(t)
+	h := f.handler()
+	alice := firstOperator(t, f, h, "alice")
+
+	// alice creates bob (itself a stepped-up registration).
+	pending, opts := signedInBegin(t, h, alice.session, "bob")
+	w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, alice.session)
+	if w.Code != http.StatusOK {
+		t.Fatalf("step-up for bob: %d %s", w.Code, w.Body.String())
+	}
+	bobAuth := newSoftAuthenticator(t)
+	if w = post(h, "/api/auth/register/finish", bobAuth.attest(t, w.Body.Bytes()), pending, alice.session); w.Code != http.StatusOK {
+		t.Fatalf("finish bob: %d %s", w.Code, w.Body.String())
+	}
+	bob, _ := f.store.GetUserByName(f.ctx, "bob")
+
+	// alice's add-passkey ceremony answered by bob's passkey, under either
+	// user handle.
+	for _, handle := range [][]byte{bob.ID, alice.user.ID} {
+		pending, opts = signedInBegin(t, h, alice.session, "")
+		w = post(h, "/api/auth/register/step-up", bobAuth.assert(t, opts, handle), pending, alice.session)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("step-up by bob's passkey: want 401, got %d %s", w.Code, w.Body.String())
+		}
+		// The ceremony is gone: the right passkey cannot rescue it.
+		if w = post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, alice.session); w.Code != http.StatusBadRequest {
+			t.Fatalf("retry after a failed step-up: want 400, got %d", w.Code)
+		}
+	}
+	if u, _ := f.store.GetUserByID(f.ctx, alice.user.ID); len(u.WebAuthnCredentials()) != 1 {
+		t.Fatal("alice gained a passkey")
+	}
+}
+
+func TestAddPasskey_StepUpAssertionCannotBeReplayed(t *testing.T) {
+	f := newAuthFixture(t)
+	h := f.handler()
+	alice := firstOperator(t, f, h, "alice")
+
+	p1, opts1 := signedInBegin(t, h, alice.session, "")
+	a1 := alice.auth.assert(t, opts1, alice.user.ID)
+	if w := post(h, "/api/auth/register/step-up", a1, p1, alice.session); w.Code != http.StatusOK {
+		t.Fatalf("step-up 1: %d %s", w.Code, w.Body.String())
+	}
+	// The same ceremony's challenge is spent.
+	if w := post(h, "/api/auth/register/step-up", a1, p1, alice.session); w.Code != http.StatusBadRequest {
+		t.Fatalf("second step-up on the same ceremony: want 400, got %d", w.Code)
+	}
+	// Another ceremony has its own challenge; the old assertion does not answer it.
+	p2, _ := signedInBegin(t, h, alice.session, "")
+	if w := post(h, "/api/auth/register/step-up", a1, p2, alice.session); w.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed assertion on a second ceremony: want 401, got %d %s", w.Code, w.Body.String())
+	}
+	if w := post(h, "/api/auth/register/finish", `{}`, p2, alice.session); w.Code == http.StatusOK {
+		t.Fatal("the second ceremony finished")
+	}
+}
+
+func TestAddPasskey_SessionEndedAfterStepUpRefused(t *testing.T) {
+	f := newAuthFixture(t)
+	h := f.handler()
+	alice := firstOperator(t, f, h, "alice")
+	pending, opts := signedInBegin(t, h, alice.session, "")
+	w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, alice.session)
+	if w.Code != http.StatusOK {
+		t.Fatalf("step-up: %d", w.Code)
+	}
+	if err := f.store.DeleteSession(f.ctx, alice.session.Value); err != nil {
+		t.Fatal(err)
+	}
+	if w = post(h, "/api/auth/register/finish", newSoftAuthenticator(t).attest(t, w.Body.Bytes()), pending, alice.session); w.Code != http.StatusUnauthorized {
+		t.Fatalf("finish after sign-out: want 401, got %d %s", w.Code, w.Body.String())
+	}
+	if f.countCredentials(t) != 1 {
+		t.Fatalf("credentials=%d, want 1", f.countCredentials(t))
+	}
+}
+
+func TestAddPasskey_StepUpUnderAnotherSessionRefused(t *testing.T) {
+	f := newAuthFixture(t)
+	h := f.handler()
+	alice := firstOperator(t, f, h, "alice")
+	other := f.mintUser(t, "carol")
+	carolSess := &http.Cookie{Name: sessionCookie, Value: freshSession(t, f, other).Token}
+	pending, opts := signedInBegin(t, h, alice.session, "")
+	if w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, carolSess); w.Code != http.StatusUnauthorized {
+		t.Fatalf("step-up under another user's session: want 401, got %d", w.Code)
+	}
+}
+
+func TestRegisterBegin_SignedInWithoutAPasskeyRefused(t *testing.T) {
+	f := newAuthFixture(t)
+	u := f.mintUser(t, "alice")
+	w := post(f.handler(), "/api/auth/register/begin", `{}`, &http.Cookie{Name: sessionCookie, Value: freshSession(t, f, u).Token})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d %s", w.Code, w.Body.String())
 	}
 }
