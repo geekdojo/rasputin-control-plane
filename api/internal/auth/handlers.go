@@ -77,24 +77,27 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 //   - First run (no users exist). register/begin returns creation options
 //     directly; register/finish commits only if no operator exists by then.
 //
-//   - Signed in. A session alone does not add a passkey. register/begin
-//     returns a step-up assertion challenge for the signed-in user's own
-//     passkeys; register/step-up verifies it (single use: the challenge is
+//   - Signed in. Adds a passkey to the signed-in user's OWN account, and
+//     nothing else: creating another user while signed in is refused (403;
+//     user creation belongs to the role model). A session alone does not
+//     add a passkey. register/begin returns a step-up assertion challenge
+//     for the signed-in user's own passkeys; register/step-up verifies it (single use: the challenge is
 //     consumed on the first attempt, pass or fail) and only then issues the
 //     creation options; register/finish refuses unless that step-up verified
 //     for THIS ceremony and the same user's session is still live.
 //
 // The step-up assertion uses the same user-verification setting as sign-in
-// (the relying party's default; login passes no override), so it is no
-// stronger and no weaker than signing in.
+// (the relying party's; login passes no override), so it is no stronger and
+// no weaker than signing in.
 
 // POST /api/auth/register/begin
 // Body: { "name": "alice", "displayName": "Alice" }
 //
 // First run: creates the first operator; returns creation options.
 //
-// Signed in: an empty name adds a passkey to the signed-in user's own
-// account; a new name creates another user. Either way the response is
+// Signed in: adds a passkey to the signed-in user's own account. The name
+// must be empty or the user's own; any other name is an attempt to create
+// another user and is refused with 403. The response is
 // { "stepUp": <assertion options> } and the ceremony continues at
 // register/step-up.
 func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
@@ -124,28 +127,16 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	if by == nil {
 		writeErr(w, http.StatusUnauthorized,
-			"only an authenticated user can register a new user")
+			"sign in to add a passkey")
 		return
 	}
 
-	p := &pendingAuth{kind: "register", basis: registerBasis{byUserID: by.ID}}
-	if req.Name == "" {
-		p.addToSelf = true
-	} else {
-		existing, err := s.store.GetUserByName(r.Context(), req.Name)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if existing != nil {
-			writeErr(w, http.StatusConflict, "user with that name already exists")
-			return
-		}
-		if p.user, err = makeUser(req.Name, req.DisplayName); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if req.Name != "" && req.Name != by.Name {
+		writeErr(w, http.StatusForbidden,
+			"signed in, you can only add a passkey to your own account; creating another user is not supported here")
+		return
 	}
+	p := &pendingAuth{kind: "register", basis: registerBasis{byUserID: by.ID}}
 
 	if len(by.WebAuthnCredentials()) == 0 {
 		writeErr(w, http.StatusConflict,
@@ -259,10 +250,7 @@ func (s *Service) handleRegisterStepUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := p.user
-	if p.addToSelf {
-		target = by
-	}
+	target := by
 	options, creation, err := s.beginCreation(target)
 	if err != nil {
 		fail(http.StatusInternalServerError, err.Error())
@@ -322,7 +310,7 @@ func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	dbCred := fromWebAuthn(cred, p.user.ID)
 	dbCred.CreatedAt = time.Now().UTC()
 
-	if p.addToSelf {
+	if !p.basis.firstRun {
 		// A new passkey on the signed-in account: the session carries on.
 		if err := s.store.CreateCredential(r.Context(), dbCred); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
@@ -332,10 +320,9 @@ func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// User and credential commit in one transaction. A ceremony begun at
-	// first run commits only if no operator exists now, checked in the same
-	// statement as the insert.
-	if err := s.store.CreateUserWithCredential(r.Context(), p.user, dbCred, p.basis.firstRun); err != nil {
+	// First run: user and credential commit in one transaction, and only if
+	// no operator exists now, checked in the same statement as the insert.
+	if err := s.store.CreateFirstUser(r.Context(), p.user, dbCred); err != nil {
 		if errors.Is(err, ErrNotFirstRun) {
 			writeErr(w, http.StatusForbidden, err.Error())
 			return

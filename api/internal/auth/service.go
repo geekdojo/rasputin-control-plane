@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
@@ -65,9 +66,6 @@ type pendingAuth struct {
 	// finish re-checks that same fact rather than trusting that it still
 	// holds. Unset for login.
 	basis registerBasis
-	// addToSelf: a signed-in registration that adds a passkey to the
-	// signed-in user's own account rather than creating a user.
-	addToSelf bool
 	// stepUp is the assertion challenge a signed-in registration must
 	// answer with one of the user's existing passkeys. It is bound to this
 	// ceremony and spent by the first register/step-up call (nil after).
@@ -80,10 +78,11 @@ type pendingAuth struct {
 // registerBasis is the fact a registration ceremony was begun on.
 type registerBasis struct {
 	// firstRun: no operator existed at begin. Finish commits only if that
-	// is still true (Store.CreateUserWithCredential's conditional insert).
+	// is still true (Store.CreateFirstUser's conditional insert).
 	firstRun bool
-	// byUserID: the ID of the signed-in user who began the ceremony. Finish
-	// requires a live session for that same user.
+	// byUserID: the ID of the signed-in user who began the ceremony, whose
+	// own account the new passkey is added to. Finish requires a verified
+	// step-up and a live session for that same user.
 	byUserID []byte
 }
 
@@ -125,6 +124,11 @@ func NewService(store *Store, cfg Config) (*Service, error) {
 		RPDisplayName: cfg.RPDisplayName,
 		RPID:          cfg.RPID,
 		RPOrigins:     cfg.RPOrigins,
+		// Passkeys require user verification (Face ID, Touch ID, Windows
+		// Hello, PIN) at registration, sign-in and step-up alike
+		// (geekdojo-brain decision #561). One setting drives all three: the
+		// library asks for UV and refuses a response without the UV flag.
+		AuthenticatorSelection: protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("auth: webauthn config: %w", err)

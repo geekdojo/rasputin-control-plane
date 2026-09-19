@@ -65,7 +65,7 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// ErrNotFirstRun is CreateUserWithCredential's refusal when a registration
+// ErrNotFirstRun is CreateFirstUser's refusal when a registration
 // authorized by first run finds that an operator already exists.
 var ErrNotFirstRun = errors.New("first-run registration is closed: an operator already exists")
 
@@ -86,42 +86,37 @@ func (s *Store) FirstRun(ctx context.Context) (bool, error) {
 	return exists == 0, nil
 }
 
-// CreateUserWithCredential persists a new user and its first credential in
+// CreateFirstUser persists the first operator and its first credential in
 // one transaction, so a failed credential write never leaves a user with no
 // way to sign in.
 //
-// firstRunOnly is set when the registration was authorized by first run
-// rather than by a session. The user row is then inserted only if the users
-// table is still empty, in the same statement that checks it, and
-// ErrNotFirstRun is returned when it is not. Checking at begin is not enough:
-// a ceremony begun while the table was empty must not create a second
-// operator after another registration has finished.
-func (s *Store) CreateUserWithCredential(ctx context.Context, u *User, c *Credential, firstRunOnly bool) error {
+// The user row is inserted only if the users table is still empty, in the
+// same statement that checks it, and ErrNotFirstRun is returned when it is
+// not. Checking at begin is not enough: a ceremony begun while the table was
+// empty must not create a second operator after another registration has
+// finished. It is the only path that creates a user from a registration;
+// signed-in registration adds a passkey to the caller's own account.
+func (s *Store) CreateFirstUser(ctx context.Context, u *User, c *Credential) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if firstRunOnly {
-		res, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
         INSERT INTO users (id, name, display_name, created_at)
         SELECT ?, ?, ?, ?
         WHERE NOT EXISTS (SELECT 1 FROM users)`,
-			u.ID, u.Name, u.DisplayName, ms(u.CreatedAt))
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return ErrNotFirstRun
-		}
-	} else if _, err := tx.ExecContext(ctx, insertUserSQL,
-		u.ID, u.Name, u.DisplayName, ms(u.CreatedAt)); err != nil {
+		u.ID, u.Name, u.DisplayName, ms(u.CreatedAt))
+	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrNotFirstRun
 	}
 	if err := insertCredential(ctx, tx, c); err != nil {
 		return err

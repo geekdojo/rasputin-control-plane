@@ -639,24 +639,6 @@ func TestHandleRegisterBegin_BadJSON(t *testing.T) {
 	}
 }
 
-func TestHandleRegisterBegin_ConflictExistingUser(t *testing.T) {
-	f := newAuthFixture(t)
-	// Existing user → next register requires auth.
-	u := f.mintUser(t, "alice")
-	sess := freshSession(t, f, u)
-
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-	body := `{"name":"alice","displayName":"Alice"}`
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/register/begin", strings.NewReader(body))
-	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess.Token})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusConflict {
-		t.Errorf("want 409, got %d body=%s", w.Code, w.Body.String())
-	}
-}
-
 func TestHandleRegisterBegin_RequiresAuthOnceUsersExist(t *testing.T) {
 	f := newAuthFixture(t)
 	f.mintUser(t, "alice")

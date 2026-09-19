@@ -33,6 +33,8 @@ type softAuthenticator struct {
 	origin string
 	rpID   string
 	count  uint32
+	// noUV makes the authenticator skip user verification (UV flag clear).
+	noUV bool
 }
 
 func newSoftAuthenticator(t *testing.T) *softAuthenticator {
@@ -73,7 +75,7 @@ func (a *softAuthenticator) attest(t *testing.T, optionsJSON []byte) string {
 	}
 	rpHash := sha256.Sum256([]byte(a.rpID))
 	authData := append([]byte{}, rpHash[:]...)
-	authData = append(authData, 0x45)                // UP | UV | AT
+	authData = append(authData, a.flags(0x40))       // UP | UV | AT
 	authData = append(authData, 0, 0, 0, 0)          // sign count
 	authData = append(authData, make([]byte, 16)...) // AAGUID
 	authData = binary.BigEndian.AppendUint16(authData, uint16(len(a.credID)))
@@ -94,6 +96,15 @@ func (a *softAuthenticator) attest(t *testing.T, optionsJSON []byte) string {
 		},
 	})
 	return string(body)
+}
+
+// flags is UP | UV plus extra, without UV when the authenticator skips it.
+func (a *softAuthenticator) flags(extra byte) byte {
+	f := byte(0x05) | extra
+	if a.noUV {
+		f &^= 0x04
+	}
+	return f
 }
 
 // assert answers an assertion request (options JSON, bare or wrapped in
@@ -124,7 +135,7 @@ func (a *softAuthenticator) assert(t *testing.T, optionsJSON []byte, userID []by
 	rpHash := sha256.Sum256([]byte(a.rpID))
 	a.count++
 	authData := append([]byte{}, rpHash[:]...)
-	authData = append(authData, 0x05) // UP | UV
+	authData = append(authData, a.flags(0)) // UP | UV
 	authData = binary.BigEndian.AppendUint32(authData, a.count)
 	cdHash := sha256.Sum256(clientData)
 	digest := sha256.Sum256(append(append([]byte{}, authData...), cdHash[:]...))
@@ -392,7 +403,7 @@ func TestFirstRunCallers_FailClosedOnDBError(t *testing.T) {
 // Store: the conditional insert
 // ============================================================================
 
-func TestCreateUserWithCredential_FirstRunOnlyRefusesWhenAUserExists(t *testing.T) {
+func TestCreateFirstUser_RefusesWhenAUserExists(t *testing.T) {
 	f := newAuthFixture(t)
 	f.mintUser(t, "alice")
 	u, err := makeUser("bob", "")
@@ -400,38 +411,28 @@ func TestCreateUserWithCredential_FirstRunOnlyRefusesWhenAUserExists(t *testing.
 		t.Fatal(err)
 	}
 	cred := &Credential{ID: []byte("cred-bob"), UserID: u.ID, PublicKey: []byte{1}, CreatedAt: time.Now()}
-	err = f.store.CreateUserWithCredential(f.ctx, u, cred, true)
-	if !errors.Is(err, ErrNotFirstRun) {
+	if err := f.store.CreateFirstUser(f.ctx, u, cred); !errors.Is(err, ErrNotFirstRun) {
 		t.Fatalf("want ErrNotFirstRun, got %v", err)
 	}
 	if f.countUsers(t) != 1 || f.countCredentials(t) != 0 {
 		t.Fatalf("users=%d credentials=%d, want 1/0", f.countUsers(t), f.countCredentials(t))
 	}
-	// Without the first-run restriction (a session-authorized registration)
-	// the same insert commits both rows.
-	if err := f.store.CreateUserWithCredential(f.ctx, u, cred, false); err != nil {
-		t.Fatal(err)
-	}
-	if f.countUsers(t) != 2 || f.countCredentials(t) != 1 {
-		t.Fatalf("users=%d credentials=%d, want 2/1", f.countUsers(t), f.countCredentials(t))
-	}
 }
 
 // A credential that cannot be written rolls the user back with it.
-func TestCreateUserWithCredential_RollsBackTheUserOnCredentialFailure(t *testing.T) {
+func TestCreateFirstUser_RollsBackTheUserOnCredentialFailure(t *testing.T) {
 	f := newAuthFixture(t)
-	alice := f.mintUser(t, "alice")
-	dup := &Credential{ID: []byte("dup"), UserID: alice.ID, PublicKey: []byte{1}, CreatedAt: time.Now()}
-	if err := f.store.CreateCredential(f.ctx, dup); err != nil {
-		t.Fatal(err)
-	}
-	u, _ := makeUser("bob", "")
-	err := f.store.CreateUserWithCredential(f.ctx, u, &Credential{ID: []byte("dup"), UserID: u.ID, PublicKey: []byte{1}, CreatedAt: time.Now()}, false)
+	u, _ := makeUser("alice", "")
+	// public_key is NOT NULL: the credential insert fails.
+	err := f.store.CreateFirstUser(f.ctx, u, &Credential{ID: []byte("c"), UserID: u.ID, CreatedAt: time.Now()})
 	if err == nil {
-		t.Fatal("want a duplicate-credential error")
+		t.Fatal("want a credential insert error")
 	}
-	if got, _ := f.store.GetUserByName(context.Background(), "bob"); got != nil {
+	if got, _ := f.store.GetUserByName(context.Background(), "alice"); got != nil {
 		t.Fatal("the user outlived its failed credential")
+	}
+	if first, err := f.store.FirstRun(f.ctx); err != nil || !first {
+		t.Fatalf("installation should still be at first run: first=%v err=%v", first, err)
 	}
 }
 
@@ -510,6 +511,28 @@ func firstOperator(t *testing.T, f *authFixture, h http.Handler, name string) *o
 		t.Fatal("first operator has no session or user row")
 	}
 	return op
+}
+
+// enrol gives u a passkey held by a new software authenticator, written
+// straight to the store.
+func (f *authFixture) enrol(t *testing.T, u *User) *softAuthenticator {
+	t.Helper()
+	a := newSoftAuthenticator(t)
+	pub, err := a.key.PublicKey.ECDH()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := pub.Bytes()
+	cose, err := webauthncbor.Marshal(map[int]any{1: 2, 3: -7, -1: 1, -2: raw[1:33], -3: raw[33:65]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.CreateCredential(f.ctx, &Credential{
+		ID: a.credID, UserID: u.ID, PublicKey: cose, AttestationType: "none", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return a
 }
 
 func post(h http.Handler, path, body string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
@@ -604,17 +627,12 @@ func TestAddPasskey_StepUpByAnotherUsersPasskeyRefused(t *testing.T) {
 	h := f.handler()
 	alice := firstOperator(t, f, h, "alice")
 
-	// alice creates bob (itself a stepped-up registration).
-	pending, opts := signedInBegin(t, h, alice.session, "bob")
-	w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, alice.session)
-	if w.Code != http.StatusOK {
-		t.Fatalf("step-up for bob: %d %s", w.Code, w.Body.String())
-	}
-	bobAuth := newSoftAuthenticator(t)
-	if w = post(h, "/api/auth/register/finish", bobAuth.attest(t, w.Body.Bytes()), pending, alice.session); w.Code != http.StatusOK {
-		t.Fatalf("finish bob: %d %s", w.Code, w.Body.String())
-	}
-	bob, _ := f.store.GetUserByName(f.ctx, "bob")
+	// bob is another user with a passkey of his own.
+	bob := f.mintUser(t, "bob")
+	bobAuth := f.enrol(t, bob)
+	var pending *http.Cookie
+	var opts []byte
+	var w *httptest.ResponseRecorder
 
 	// alice's add-passkey ceremony answered by bob's passkey, under either
 	// user handle.
@@ -697,4 +715,90 @@ func TestRegisterBegin_SignedInWithoutAPasskeyRefused(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Fatalf("want 409, got %d %s", w.Code, w.Body.String())
 	}
+}
+
+// Signed in, registration only adds a passkey to the caller's own account.
+// Any other name is an attempt to create another user and is refused.
+func TestRegisterBegin_SignedInCannotCreateAnotherUser(t *testing.T) {
+	f := newAuthFixture(t)
+	h := f.handler()
+	alice := firstOperator(t, f, h, "alice")
+	for _, name := range []string{"bob", "Alice", "alice2"} {
+		w := post(h, "/api/auth/register/begin", `{"name":"`+name+`","displayName":"X"}`, alice.session)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("name %q: want 403, got %d %s", name, w.Code, w.Body.String())
+		}
+		for _, ck := range w.Result().Cookies() {
+			if ck.Name == pendingCookie {
+				t.Fatalf("name %q: a refused begin started a ceremony", name)
+			}
+		}
+	}
+	// The caller's own name is the same as no name: a passkey for alice.
+	pending, opts := signedInBegin(t, h, alice.session, "alice")
+	w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, alice.session)
+	if w.Code != http.StatusOK {
+		t.Fatalf("step-up: %d %s", w.Code, w.Body.String())
+	}
+	if w = post(h, "/api/auth/register/finish", newSoftAuthenticator(t).attest(t, w.Body.Bytes()), pending, alice.session); w.Code != http.StatusOK {
+		t.Fatalf("finish: %d %s", w.Code, w.Body.String())
+	}
+	if f.countUsers(t) != 1 || f.countCredentials(t) != 2 {
+		t.Fatalf("users=%d credentials=%d, want 1/2", f.countUsers(t), f.countCredentials(t))
+	}
+}
+
+// ============================================================================
+// User verification is required (decision #561)
+// ============================================================================
+
+func TestUserVerificationRequired(t *testing.T) {
+	t.Run("options ask for it", func(t *testing.T) {
+		f := newAuthFixture(t)
+		w, _ := registerBegin(t, f.handler(), "alice", nil)
+		if !strings.Contains(w.Body.String(), `"userVerification":"required"`) {
+			t.Fatalf("creation options: %s", w.Body.String())
+		}
+		w = post(f.handler(), "/api/auth/login/begin", "")
+		if !strings.Contains(w.Body.String(), `"userVerification":"required"`) {
+			t.Fatalf("login options: %s", w.Body.String())
+		}
+	})
+	t.Run("registration without UV refused", func(t *testing.T) {
+		f := newAuthFixture(t)
+		h := f.handler()
+		w := post(h, "/api/auth/register/begin", `{"name":"alice"}`)
+		a := newSoftAuthenticator(t)
+		a.noUV = true
+		w = post(h, "/api/auth/register/finish", a.attest(t, w.Body.Bytes()), pendingFrom(t, w))
+		if w.Code != http.StatusBadRequest || f.countUsers(t) != 0 {
+			t.Fatalf("want 400 and no user, got %d users=%d", w.Code, f.countUsers(t))
+		}
+	})
+	t.Run("sign-in without UV refused", func(t *testing.T) {
+		f := newAuthFixture(t)
+		h := f.handler()
+		alice := firstOperator(t, f, h, "alice")
+		alice.auth.noUV = true
+		w := post(h, "/api/auth/login/begin", "")
+		w = post(h, "/api/auth/login/finish", alice.auth.assert(t, w.Body.Bytes(), alice.user.ID), pendingFrom(t, w))
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("want 401, got %d %s", w.Code, w.Body.String())
+		}
+		alice.auth.noUV = false
+		w = post(h, "/api/auth/login/begin", "")
+		if w = post(h, "/api/auth/login/finish", alice.auth.assert(t, w.Body.Bytes(), alice.user.ID), pendingFrom(t, w)); w.Code != http.StatusOK {
+			t.Fatalf("sign-in with UV: %d %s", w.Code, w.Body.String())
+		}
+	})
+	t.Run("step-up without UV refused", func(t *testing.T) {
+		f := newAuthFixture(t)
+		h := f.handler()
+		alice := firstOperator(t, f, h, "alice")
+		alice.auth.noUV = true
+		pending, opts := signedInBegin(t, h, alice.session, "")
+		if w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, alice.session); w.Code != http.StatusUnauthorized {
+			t.Fatalf("want 401, got %d %s", w.Code, w.Body.String())
+		}
+	})
 }
