@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS credentials (
 CREATE INDEX IF NOT EXISTS idx_credentials_user_id ON credentials(user_id);
 
 CREATE TABLE IF NOT EXISTS sessions (
-    token          TEXT PRIMARY KEY,       -- random 32-byte hex
+    token          TEXT PRIMARY KEY,       -- random 32-byte hex (plaintext; see migrateSessionHash)
+    token_hash     TEXT,                   -- sha256-hex of token (busauth.HashToken); added by migrateSessionHash on older DBs
     user_id        BLOB NOT NULL,
     created_at     INTEGER NOT NULL,
     expires_at     INTEGER NOT NULL,
