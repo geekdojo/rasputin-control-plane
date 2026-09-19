@@ -67,6 +67,11 @@ type Store struct {
 	// dev api with no RASPUTIN_SELF_NODE_ID never does; nothing is protected
 	// then, because there is no api-minted agent token to protect.
 	selfNodeID string
+
+	// sinkMu guards sink, the node registry token liveness is pushed to
+	// (livenodes.go), and serializes every push.
+	sinkMu sync.Mutex
+	sink   LivenessSink
 }
 
 // TokenInfo is the non-secret view of a token row (no plaintext, ever).
@@ -227,6 +232,7 @@ func (s *Store) MintBound(ctx context.Context, label, nodeID string, role proto.
 		id, label, ms(time.Now().UTC()), nodeID, string(role)); err != nil {
 		return "", "", fmt.Errorf("busauth: insert token: %w", err)
 	}
+	s.refreshNodes(ctx, nodeID)
 	return plaintext, id, nil
 }
 
@@ -278,6 +284,7 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			inserted++
+			s.refreshNodes(ctx, tk.NodeID)
 		}
 	}
 	return inserted, nil
@@ -358,6 +365,12 @@ func (s *Store) Revoke(ctx context.Context, id string) (disconnected int, err er
 // re-mint uses to retire a token it has just replaced (EnsureAgentToken). No
 // request-driven path may call it: an operator revoke goes through Revoke.
 func (s *Store) revoke(ctx context.Context, id string) (disconnected int, err error) {
+	var node string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(node_id, '') FROM bus_tokens WHERE token_hash = ?`, id).Scan(&node); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("busauth: revoke: %w", err)
+	}
+	defer s.refreshNodes(ctx, node)
 	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`,
@@ -402,6 +415,7 @@ func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, dis
 	if protected {
 		return 0, 0, ErrSelfAgentToken
 	}
+	defer s.refreshNodes(ctx, nodeID)
 	s.sess.mu.Lock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL`,
@@ -415,6 +429,36 @@ func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, dis
 	d := s.sess.disc
 	s.sess.mu.Unlock()
 	return int(n), s.disconnect(d, taken), nil
+}
+
+// NodeHasLiveToken reports whether nodeID holds at least one token the bus
+// would admit it with: unrevoked, bound to nodeID, and naming a valid role.
+// It is how the node's other credentials follow its token: the collector
+// ingress admits a node only while this holds, so revoking a node's token
+// (or removing the node, which revokes them all) cuts its HTTPS pushes too.
+func (s *Store) NodeHasLiveToken(ctx context.Context, nodeID string) (bool, error) {
+	if nodeID == "" {
+		return false, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT role FROM bus_tokens WHERE node_id = ? AND revoked_at IS NULL`, nodeID)
+	if err != nil {
+		return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var role sql.NullString
+		if err := rows.Scan(&role); err != nil {
+			return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+		}
+		if role.Valid && proto.ValidRole(proto.NodeRole(role.String)) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+	}
+	return false, nil
 }
 
 // CountActiveUnbound returns how many live (unrevoked) legacy unbound tokens

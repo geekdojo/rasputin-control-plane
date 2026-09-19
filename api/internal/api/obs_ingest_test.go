@@ -129,7 +129,7 @@ func newIngestServer(t *testing.T, obsStatus *obs.Status, seedNodes ...string) *
 			t.Fatalf("insert node %q: %v", id, err)
 		}
 	}
-	return &Server{inv: invStore, obs: obsStatus}
+	return &Server{inv: invStore, obs: obsStatus, ingestGated: true}
 }
 
 func ingestReq(cn string) *http.Request {
@@ -191,17 +191,6 @@ func TestHandleObsLogsIngest(t *testing.T) {
 		}
 	})
 
-	t.Run("verified cert but node not in inventory → 403", func(t *testing.T) {
-		s := newIngestServer(t, offStatus()) // no nodes
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
-		req.TLS = certState("ghost")
-		s.handleObsLogsIngest(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("got %d, want 403; body=%q", rec.Code, rec.Body.String())
-		}
-	})
-
 	t.Run("member node but Loki off → 503", func(t *testing.T) {
 		s := newIngestServer(t, offStatus(), "c02")
 		rec := httptest.NewRecorder()
@@ -236,6 +225,26 @@ func TestHandleObsLogsIngest(t *testing.T) {
 	})
 }
 
+// Membership and token liveness are decided at the handshake, not per request
+// (obs_ingest_conns.go); a handler whose listener was never given that gate
+// refuses everything.
+func TestObsIngestHandlers_RefuseWithoutTheHandshakeGate(t *testing.T) {
+	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
+	s.ingestGated = false
+	rec := httptest.NewRecorder()
+	s.handleObsIngest(rec, ingestReq("c02"))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "admission") {
+		t.Errorf("metrics: got %d %q, want 503 naming admission", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
+	req.TLS = certState("c02")
+	s.handleObsLogsIngest(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("logs: got %d, want 503", rec.Code)
+	}
+}
+
 func TestHandleObsIngest(t *testing.T) {
 	offStatus := func() *obs.Status { return obs.NewStatus(obs.NewNoopSupervisor(), nil, nil) }
 
@@ -248,15 +257,6 @@ func TestHandleObsIngest(t *testing.T) {
 		}
 	})
 
-	t.Run("verified cert but node not in inventory → 403", func(t *testing.T) {
-		s := newIngestServer(t, offStatus()) // no nodes seeded
-		rec := httptest.NewRecorder()
-		s.handleObsIngest(rec, ingestReq("ghost"))
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("got %d, want 403; body=%q", rec.Code, rec.Body.String())
-		}
-	})
-
 	t.Run("member node but obs off → 503 (backend not ready)", func(t *testing.T) {
 		s := newIngestServer(t, offStatus(), "c02")
 		rec := httptest.NewRecorder()
@@ -266,24 +266,6 @@ func TestHandleObsIngest(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), "not ready") {
 			t.Errorf("expected a 'backend not ready' message, got %q", rec.Body.String())
-		}
-	})
-
-	t.Run("inventory store error → 503 (fail closed, don't drop as 403)", func(t *testing.T) {
-		ctx := context.Background()
-		invStore, err := inventory.OpenStore(ctx, filepath.Join(t.TempDir(), "inv.db"))
-		if err != nil {
-			t.Fatalf("inventory OpenStore: %v", err)
-		}
-		_ = invStore.Close() // closed store → Get errors
-		s := &Server{inv: invStore, obs: offStatus()}
-		rec := httptest.NewRecorder()
-		s.handleObsIngest(rec, ingestReq("c02"))
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Fatalf("got %d, want 503; body=%q", rec.Code, rec.Body.String())
-		}
-		if !strings.Contains(rec.Body.String(), "inventory") {
-			t.Errorf("expected an 'inventory unavailable' message, got %q", rec.Body.String())
 		}
 	})
 

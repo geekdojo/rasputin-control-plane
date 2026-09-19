@@ -48,38 +48,33 @@ func (s *Server) ObsIngestHandler() http.Handler {
 	return securityHeaders(mux)
 }
 
-// authenticateCollector runs the two authorization gates every mTLS ingress
-// route shares, beyond the listener's already-completed RequireAndVerifyClient
-// Cert handshake:
+// authenticateCollector is the per-request half of ingress authentication,
+// and it reads nothing but the request's own TLS state: the node id is the
+// verified client leaf's CommonName (mesh.MintLeaf sets CN = node_id), read
+// from the certificate, never from request data, so a node cannot claim
+// another's identity.
 //
-//  1. Identity — node_id is the verified client leaf's CommonName (mesh.MintLeaf
-//     sets CN = node_id). Read from the cert, never from request data, so a node
-//     cannot claim another's identity.
-//  2. Membership / revocation — inv.Get returns (nil, nil) for an unknown id (a
-//     leaf whose node was removed, or that outlived its node); reject it. A real
-//     store error is a 503, not a 403 — we don't know membership, so we don't
-//     silently drop the push.
+// Whether that node may connect at all — a current inventory member holding a
+// live join token — is decided once per connection, in the TLS handshake,
+// from the in-memory node registry, and a node that stops qualifying has its
+// open connections closed (obs_ingest_conns.go). No request does a database
+// lookup. A server whose listener was not given that gate (WireObsIngest)
+// refuses every request: fail closed.
 //
 // On any failure it writes the response and returns ok=false. `label` prefixes
 // the log lines and error bodies so the two routes are distinguishable.
 func (s *Server) authenticateCollector(w http.ResponseWriter, r *http.Request, label string) (nodeID string, ok bool) {
+	if !s.ingestGated {
+		log.Printf("%s: refusing: the ingress listener has no node admission gate", label)
+		writeError(w, http.StatusServiceUnavailable, label+": node admission is not configured")
+		return "", false
+	}
 	nodeID, err := nodeIDFromClientCert(r.TLS)
 	if err != nil {
 		// Defense in depth: RequireAndVerifyClientCert should make this
 		// unreachable, but fail closed rather than proxy anonymously.
 		log.Printf("%s: rejecting request without a usable client cert: %v", label, err)
 		writeError(w, http.StatusUnauthorized, label+": client certificate required")
-		return "", false
-	}
-	node, err := s.inv.Get(r.Context(), nodeID)
-	if err != nil {
-		log.Printf("%s: inventory lookup for %q failed: %v", label, nodeID, err)
-		writeError(w, http.StatusServiceUnavailable, label+": inventory unavailable")
-		return "", false
-	}
-	if node == nil {
-		log.Printf("%s: rejecting %q — not a current cluster member (removed or stale leaf)", label, nodeID)
-		writeError(w, http.StatusForbidden, label+": node is not a current cluster member")
 		return "", false
 	}
 	return nodeID, true
