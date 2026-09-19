@@ -40,7 +40,12 @@ const AgentTokenLabel = "controlplane agent (minted by the api at start)"
 // compromise: the plaintext lives only in <dataDir>/bus/agent.token, 0600
 // root-owned, and anyone who can read it is already root on the controlplane —
 // where the bus signing key and the token database itself are.
-var ErrSelfAgentToken = errors.New("the controlplane's own bus agent token cannot be revoked: the api minted it for this controlplane's agent and only re-mints at start, so revoking it takes that agent off the bus with no way back from the UI — to rotate it, restart the api (which mints a fresh token and revokes this one)")
+//
+// The remedy it names is the one that works: EnsureAgentToken re-mints only
+// when the token file is missing or unusable, so a bare restart keeps the same
+// token. Removing the file first is what makes the next start mint a fresh
+// token and revoke this one.
+var ErrSelfAgentToken = errors.New("the controlplane's own bus agent token cannot be revoked: the api minted it for this controlplane's agent, and revoking it would take that agent off the bus with no way back from the UI — to rotate it, delete bus/" + proto.BusAgentTokenFileName + " in the api's data directory (/var/lib/rasputin on an appliance) and restart the api, which then mints a fresh token and revokes this one")
 
 // SelfNodeID returns the node id of the controlplane this api runs on — the id
 // its co-located agent authenticates as — or "" when there is none. It is set

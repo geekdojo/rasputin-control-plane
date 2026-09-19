@@ -1253,6 +1253,9 @@ func main() {
 	// GET/PUT /api/bus/tls, and the live pin every Add-node seed carries.
 	srv.SetBusTLS(busTLSSvc)
 	srv.SetComposeStash(composeStash)
+	// Node removal deletes the node's collector leaf from here — the same
+	// directory mintCollectorLeaf writes under.
+	srv.SetCollectorLeafDir(filepath.Join(dataDir, "tls", "collectors"))
 	// The backup-target ledger, for GET/POST /api/backup/targets, and the
 	// ingest endpoint the nodes upload sealed volumes to.
 	srv.SetBackupStore(backupStore)

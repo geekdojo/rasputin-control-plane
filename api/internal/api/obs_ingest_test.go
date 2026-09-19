@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -113,9 +114,9 @@ type fakeVMSup struct {
 func (f fakeVMSup) VMBaseURL() string   { return f.vmBase }
 func (f fakeVMSup) LokiBaseURL() string { return f.lokiBase }
 
-// newIngestServer builds a minimal Server holding just the two fields the
-// ingress touches — a real (SQLite) inventory store seeded with seedNodes, and
-// the given obs.Status.
+// newIngestServer builds a minimal Server holding just the fields the ingress
+// touches — a real (SQLite) inventory store seeded with seedNodes, a real bus
+// token store holding a live token for each of them, and the given obs.Status.
 func newIngestServer(t *testing.T, obsStatus *obs.Status, seedNodes ...string) *Server {
 	t.Helper()
 	ctx := context.Background()
@@ -124,12 +125,20 @@ func newIngestServer(t *testing.T, obsStatus *obs.Status, seedNodes ...string) *
 		t.Fatalf("inventory OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = invStore.Close() })
+	tokens, err := busauth.OpenStore(ctx, filepath.Join(t.TempDir(), "bus.db"))
+	if err != nil {
+		t.Fatalf("busauth OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = tokens.Close() })
 	for _, id := range seedNodes {
 		if err := invStore.Insert(ctx, &proto.Node{ID: id, Role: proto.RoleCompute, Hostname: id}); err != nil {
 			t.Fatalf("insert node %q: %v", id, err)
 		}
+		if _, _, err := tokens.MintBound(ctx, "compute", id, proto.RoleCompute); err != nil {
+			t.Fatalf("mint token for %q: %v", id, err)
+		}
 	}
-	return &Server{inv: invStore, obs: obsStatus}
+	return &Server{inv: invStore, obs: obsStatus, busTokens: tokens}
 }
 
 func ingestReq(cn string) *http.Request {
@@ -310,4 +319,70 @@ func TestHandleObsIngest(t *testing.T) {
 			t.Errorf("extra_label: got %q, want node_id=c02", gotExtraLabel)
 		}
 	})
+}
+
+// A node whose join token is revoked stays in inventory (its history stays
+// readable) but its collector is refused on both ingress routes, with a 403
+// that names why — whatever the backend's state. A node that holds a second,
+// live token is still admitted; one whose only live token names no role is
+// not, because the bus would not admit it either.
+func TestObsIngest_RefusesANodeWhoseTokenIsRevoked(t *testing.T) {
+	ctx := context.Background()
+	var hits int
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer stub.Close()
+	s := newIngestServer(t, obs.NewStatus(fakeVMSup{vmBase: stub.URL, lokiBase: stub.URL}, nil, nil), "c02")
+
+	push := func() (metrics, logs *httptest.ResponseRecorder) {
+		metrics = httptest.NewRecorder()
+		s.handleObsIngest(metrics, ingestReq("c02"))
+		logs = httptest.NewRecorder()
+		lreq := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
+		lreq.TLS = certState("c02")
+		s.handleObsLogsIngest(logs, lreq)
+		return metrics, logs
+	}
+
+	if m, l := push(); m.Code != http.StatusNoContent || l.Code != http.StatusNoContent {
+		t.Fatalf("live token: metrics %d, logs %d; want 204, 204", m.Code, l.Code)
+	}
+
+	if _, _, err := s.busTokens.RevokeByNodeID(ctx, "c02"); err != nil {
+		t.Fatalf("RevokeByNodeID: %v", err)
+	}
+	before := hits
+	m, l := push()
+	for name, rec := range map[string]*httptest.ResponseRecorder{"metrics": m, "logs": l} {
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "revoked") {
+			t.Errorf("revoked token, %s: got %d %q; want 403 naming the revoke", name, rec.Code, rec.Body.String())
+		}
+	}
+	if hits != before {
+		t.Errorf("a refused push reached the backend (%d proxied)", hits-before)
+	}
+	if n, err := s.inv.Get(ctx, "c02"); err != nil || n == nil {
+		t.Errorf("revoke removed the node from inventory: (%v, %v)", n, err)
+	}
+
+	// A fresh token for the node re-admits it.
+	if _, _, err := s.busTokens.MintBound(ctx, "compute", "c02", proto.RoleCompute); err != nil {
+		t.Fatalf("MintBound: %v", err)
+	}
+	if m, l := push(); m.Code != http.StatusNoContent || l.Code != http.StatusNoContent {
+		t.Errorf("re-minted token: metrics %d, logs %d; want 204, 204", m.Code, l.Code)
+	}
+}
+
+// No token store wired is a refusal, not an open door.
+func TestObsIngest_NoTokenStoreFailsClosed(t *testing.T) {
+	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
+	s.busTokens = nil
+	rec := httptest.NewRecorder()
+	s.handleObsIngest(rec, ingestReq("c02"))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "token store") {
+		t.Fatalf("got %d %q, want 503 naming the token store", rec.Code, rec.Body.String())
+	}
 }

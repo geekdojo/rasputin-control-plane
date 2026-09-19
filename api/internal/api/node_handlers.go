@@ -7,8 +7,11 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -138,7 +141,37 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The node's collector client leaf and key go with it. The ingress already
+	// refuses the leaf (the node is out of inventory and its tokens are
+	// revoked); deleting it means a removed node leaves no private key of its
+	// own on the controlplane. After the inventory row, so a collector
+	// reconcile running now cannot mint it again for a node it still lists.
+	s.removeCollectorLeaf(id)
+
 	writeJSON(w, http.StatusOK, impact)
+}
+
+// removeCollectorLeaf deletes <collectorLeafDir>/<nodeID>. Best-effort and
+// logged, like the token revoke above: the node is already gone, and a leaf
+// left behind is refused at the ingress. The id is checked against the node-id
+// rule first, so it can only name one directory directly under the leaf dir.
+func (s *Server) removeCollectorLeaf(nodeID string) {
+	if s.collectorLeafDir == "" {
+		return
+	}
+	if !busauth.ValidNodeID(nodeID) {
+		log.Printf("rasputin-api: not deleting a collector leaf for removed node %q: not a valid node id, so it names no leaf directory", nodeID)
+		return
+	}
+	dir := filepath.Join(s.collectorLeafDir, nodeID)
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		log.Printf("rasputin-api: delete collector leaf for removed node %q at %s: %v", nodeID, dir, err)
+		return
+	}
+	log.Printf("rasputin-api: deleted the collector leaf for removed node %q", nodeID)
 }
 
 // computeRemovalImpact gathers the cascade preview without mutating

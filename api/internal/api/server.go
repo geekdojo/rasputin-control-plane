@@ -104,6 +104,10 @@ type Server struct {
 	// busTLS is the bus TLS ladder and the live pin (#448); nil when the bus
 	// key did not load. Wired by main after NewServer.
 	busTLS *bustls.Service
+	// collectorLeafDir holds one directory per node, <dir>/<node-id>, with the
+	// collector's client leaf (main.go's mintCollectorLeaf). Node removal
+	// deletes the node's directory; "" skips that step.
+	collectorLeafDir string
 }
 
 // SetReleaseSource wires the update-channel source used by
@@ -134,6 +138,11 @@ func (s *Server) SetAppLeafRotator(rotate apps.LeafRotator) { s.rotateAppLeaf = 
 // registered with, or the job finds nothing to install. Unset, custom compose
 // edits answer 503.
 func (s *Server) SetComposeStash(stash *apps.ComposeStash) { s.composeStash = stash }
+
+// SetCollectorLeafDir wires where the per-node collector client leaves live —
+// the same directory main.go mints them under — so removing a node deletes its
+// leaf and key.
+func (s *Server) SetCollectorLeafDir(dir string) { s.collectorLeafDir = dir }
 
 // SetBackupStore wires the backup_targets ledger (design/storage.md §4.8) so
 // the /api/backup routes can read it. Wired by main after NewServer rather than

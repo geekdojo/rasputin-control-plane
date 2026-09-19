@@ -417,6 +417,36 @@ func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, dis
 	return int(n), s.disconnect(d, taken), nil
 }
 
+// NodeHasLiveToken reports whether nodeID holds at least one token the bus
+// would admit it with: unrevoked, bound to nodeID, and naming a valid role.
+// It is how the node's other credentials follow its token: the collector
+// ingress admits a node only while this holds, so revoking a node's token
+// (or removing the node, which revokes them all) cuts its HTTPS pushes too.
+func (s *Store) NodeHasLiveToken(ctx context.Context, nodeID string) (bool, error) {
+	if nodeID == "" {
+		return false, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT role FROM bus_tokens WHERE node_id = ? AND revoked_at IS NULL`, nodeID)
+	if err != nil {
+		return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var role sql.NullString
+		if err := rows.Scan(&role); err != nil {
+			return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+		}
+		if role.Valid && proto.ValidRole(proto.NodeRole(role.String)) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+	}
+	return false, nil
+}
+
 // CountActiveUnbound returns how many live (unrevoked) legacy unbound tokens
 // the store holds. Validate refuses every one of them, so a nonzero count
 // means a node seeded with one cannot join; the api logs it at startup, and
