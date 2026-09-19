@@ -42,14 +42,20 @@ import (
 //
 // It carries the same security headers as Handler (securityHeaders).
 func (s *Server) BootstrapHandler() http.Handler {
-	mux := http.NewServeMux()
+	return securityHeaders(s.bootstrapRoutes())
+}
+
+// bootstrapRoutes registers the bootstrap surface on a recording mux, so the
+// route-enumeration test can hold it to its exposure invariant.
+func (s *Server) bootstrapRoutes() *routeMux {
+	mux := newRouteMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/setup/state", s.handleSetupState)
 	mux.HandleFunc("GET /mesh-ca.pem", s.handleMeshCAPEM)
 	mux.HandleFunc("GET /mesh-ca.crt", s.handleMeshCACRT)
 	mux.HandleFunc("GET /api/mesh/ios-profile", s.handleMeshIOSProfile)
 	mux.HandleFunc("/", s.handleBootstrapFallback)
-	return securityHeaders(mux)
+	return mux
 }
 
 // handleBootstrapFallback decides, for every path the bootstrap mux
@@ -91,9 +97,12 @@ func bootstrapUIPath(p string) bool {
 		return true
 	}
 	// Asset files (favicon.ico, *.txt RSC payloads, fonts) carry an
-	// extension; app routes (/login, /firewall/rules) never do. API and
-	// WS paths never reach here with an extension either — /api and /ws
-	// trees are extensionless by construction.
+	// extension; app routes (/login, /firewall/rules) never do. Most /api
+	// and /ws paths are extensionless too; the exception is the backup
+	// transport (/api/backup/ingest/…/<volume>.rasputin-archive and its
+	// egress mirror). Such a path is only looked up in the static export,
+	// which never holds one, so it answers 404 here and still never reaches
+	// the API mux.
 	return strings.Contains(path.Base(p), ".")
 }
 

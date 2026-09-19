@@ -14,8 +14,9 @@ import (
 
 // Store persists rule-engine alerts. The aggregator's "current concerns"
 // view (node-offline, job-failed, etc.) stays computed-on-read in
-// service.go; this Store holds alerts that arrived via the webhook from
-// vmalert AND the operator's ack/dismiss state.
+// service.go; this Store holds the rule alerts vmalert raised (read back
+// from VictoriaMetrics by Service.RunRuleSync) AND the operator's
+// ack/dismiss state.
 //
 // Schema rationale: fingerprint is the natural key (Alertmanager-style
 // hash of the labels). We use TEXT not TEXT PRIMARY KEY because we
@@ -211,6 +212,25 @@ func (s *Store) List(ctx context.Context) ([]*PersistedAlert, error) {
 		selectCols+` WHERE dismissed_at IS NULL ORDER BY starts_at DESC LIMIT 500`)
 	if err != nil {
 		return nil, fmt.Errorf("alerts: list: %w", err)
+	}
+	defer rows.Close()
+	var out []*PersistedAlert
+	for rows.Next() {
+		a, err := scanAlert(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListFiring returns every alert whose status is firing, dismissed or not —
+// the set a rule sync must resolve when the rules engine stops reporting one.
+func (s *Store) ListFiring(ctx context.Context) ([]*PersistedAlert, error) {
+	rows, err := s.db.QueryContext(ctx, selectCols+` WHERE status = 'firing'`)
+	if err != nil {
+		return nil, fmt.Errorf("alerts: list firing: %w", err)
 	}
 	defer rows.Close()
 	var out []*PersistedAlert

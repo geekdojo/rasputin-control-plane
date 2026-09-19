@@ -1,13 +1,18 @@
 package api
 
 import (
+	"bytes"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 )
 
 // Routes served on the api's dedicated mTLS ingress listener. Per-node Alloy
@@ -42,10 +47,17 @@ const (
 // cert can't break the UI. See observability-stack.md §3.10–3.11. Its
 // responses carry the same security headers as the browser-facing surfaces.
 func (s *Server) ObsIngestHandler() http.Handler {
-	mux := http.NewServeMux()
+	return securityHeaders(s.obsIngestRoutes())
+}
+
+// obsIngestRoutes registers the ingress routes on a recording mux, so the
+// route-enumeration test can check that each one refuses a caller without a
+// verified client certificate.
+func (s *Server) obsIngestRoutes() *routeMux {
+	mux := newRouteMux()
 	mux.HandleFunc(obsIngestPattern, s.handleObsIngest)
 	mux.HandleFunc(obsLogsIngestPattern, s.handleObsLogsIngest)
-	return securityHeaders(mux)
+	return mux
 }
 
 // authenticateCollector is the per-request half of ingress authentication,
@@ -83,8 +95,10 @@ func (s *Server) authenticateCollector(w http.ResponseWriter, r *http.Request, l
 // handleObsIngest reverse-proxies a per-node collector's Prometheus remote-write
 // stream to the loopback VictoriaMetrics, stamping the caller's verified node
 // identity as an authoritative server-side label (VM's extra_label OVERRIDES any
-// node_id the payload carried — verified 2026-07-17 — so the api never decodes
-// the protobuf yet node_id is server-authoritative). §3.10.
+// node_id the payload carried — verified 2026-07-17 — so node_id is
+// server-authoritative without the api rewriting the payload). §3.10. The api
+// does read each series' metric name, to refuse reserved ones
+// (refuseReservedMetrics); the body it forwards is the one it received.
 func (s *Server) handleObsIngest(w http.ResponseWriter, r *http.Request) {
 	nodeID, ok := s.authenticateCollector(w, r, "obs ingest")
 	if !ok {
@@ -98,7 +112,54 @@ func (s *Server) handleObsIngest(w http.ResponseWriter, r *http.Request) {
 			"obs ingest: metrics backend not ready (observability off or still starting)")
 		return
 	}
+	if refused := refuseReservedMetrics(w, r); refused != "" {
+		log.Printf("obs ingest: refusing push from %q: %s", nodeID, refused)
+		return
+	}
 	s.proxyRemoteWrite(w, r, base, nodeID)
+}
+
+// refuseReservedMetrics reads the whole remote-write body and refuses it when
+// any series carries a metric name only the controlplane writes
+// (obs.IsReservedMetricName: the api's own rasputin_* host metrics, which the
+// alert rules evaluate, and vmalert's ALERTS* state, which the api reads back
+// as rule alerts). extra_label stamps node_id but cannot stop a collector from
+// writing such a series under another node's labels, so the name itself is
+// refused. On success r.Body is replaced with the buffered bytes, unchanged,
+// and it returns "". Otherwise it has written the response — which names the
+// offending metric or format — and returns a fixed reason for the log line;
+// nothing read from the request goes into the log.
+//
+// This is a name check only — the samples are not read, and nothing about the
+// collector's data is evaluated on this path.
+func refuseReservedMetrics(w http.ResponseWriter, r *http.Request) (refused string) {
+	if err := remoteWriteV1(r.Header.Get("Content-Type"), r.Header.Get("Content-Encoding")); err != nil {
+		writeError(w, http.StatusUnsupportedMediaType, "obs ingest: "+err.Error())
+		return "unsupported content type or encoding"
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRemoteWriteBytes))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "obs ingest: request body too large")
+			return "request body too large"
+		}
+		writeError(w, http.StatusBadRequest, "obs ingest: read body: "+err.Error())
+		return "request body unreadable"
+	}
+	name, err := reservedSeriesName(body, obs.IsReservedMetricName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "obs ingest: "+err.Error())
+		return "not a snappy remote-write 1.0 request"
+	}
+	if name != "" {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("obs ingest: metric name %q is reserved for the controlplane", name))
+		return "a series carries a metric name reserved for the controlplane"
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return ""
 }
 
 // handleObsLogsIngest reverse-proxies a per-node collector's Loki push stream to

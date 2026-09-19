@@ -170,12 +170,19 @@ type queryResult struct {
 func (c *ContainersClient) queryInstant(ctx context.Context, base, expr string) ([]queryResult, error) {
 	params := url.Values{}
 	params.Set("query", expr)
+	return vmQueryInstant(ctx, c.client, base, params)
+}
+
+// vmQueryInstant runs one instant query with the given params (query, and
+// optionally step) against VM at base. Shared by every instant-query client in
+// this package.
+func vmQueryInstant(ctx context.Context, client *http.Client, base string, params url.Values) ([]queryResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		base+"/api/v1/query?"+params.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

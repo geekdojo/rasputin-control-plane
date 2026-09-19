@@ -3,7 +3,6 @@ package api
 import (
 	"database/sql"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -27,39 +26,6 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		out = []proto.Alert{}
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-// POST /api/alerts/webhook
-//
-// Receives Alertmanager-v2-format payloads from vmalert (configured with
-// -notifier.url=http://api:8080/api/alerts/webhook). Auth: the route is
-// session-protected, BUT vmalert can't carry a session cookie. The
-// production deployment pattern is to bind the api to a host the
-// vmalert container can reach (host.docker.internal:8080) and protect
-// with the optional shared secret in the X-Webhook-Secret header when
-// RASPUTIN_ALERTS_WEBHOOK_SECRET is set. Without the secret env, anyone
-// who can POST to the api can fire spurious alerts — fine for a
-// dev/single-user homelab, documented as the production gate.
-//
-// Returns {"ingested": N} on success.
-func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
-	if expected := s.alertsWebhookSecret; expected != "" {
-		if got := r.Header.Get("X-Webhook-Secret"); got != expected {
-			writeError(w, http.StatusUnauthorized, "alerts webhook: bad secret")
-			return
-		}
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB cap
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
-		return
-	}
-	n, err := s.alerts.IngestWebhook(r.Context(), body)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]int{"ingested": n})
 }
 
 // POST /api/alerts/{id}/ack
