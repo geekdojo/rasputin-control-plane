@@ -6,6 +6,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
 
 // appTailnetFQDN is an app's bare (tailnet) name — <app>.<cluster-id>.internal.
@@ -145,12 +147,12 @@ func PrepareAppLeaf(ca *MeshCA, dir, clusterID, appName string) (certPEM, keyPEM
 // PrepareAppLeaf sees it as the usable current leaf. Call only after the target
 // node has accepted the leaf.
 func CommitAppLeaf(dir string, certPEM, keyPEM []byte) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mesh: mkdir app leaf dir: %w", err)
+	if err := atrest.EnsureSecretDir(dir); err != nil {
+		return fmt.Errorf("mesh: app leaf dir: %w", err)
 	}
 	paths := appLeafPaths(dir)
-	if err := writeAtomic(paths.CertPath, certPEM, 0o644); err != nil {
+	if err := writeCert(paths.CertPath, certPEM); err != nil {
 		return err
 	}
-	return writeAtomic(paths.KeyPath, keyPEM, 0o600)
+	return writeKey(paths.KeyPath, keyPEM)
 }

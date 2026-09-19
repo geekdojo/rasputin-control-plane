@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -67,8 +68,8 @@ func EnsureKey(dir string) (key *Key, generated bool, err error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, false, errors.New("bustls: EnsureKey: dir required")
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, false, fmt.Errorf("bustls: mkdir %s: %w", dir, err)
+	if err := atrest.EnsureSecretDir(dir); err != nil {
+		return nil, false, fmt.Errorf("bustls: %w", err)
 	}
 	path := filepath.Join(dir, KeyFileName)
 	data, err := os.ReadFile(path)
@@ -79,10 +80,8 @@ func EnsureKey(dir string) (key *Key, generated bool, err error) {
 		}
 		// A seed consumer that forgot the mode leaves the private key world-
 		// readable; tighten it rather than refuse the key the nodes pin.
-		if info, serr := os.Stat(path); serr == nil && info.Mode().Perm()&0o077 != 0 {
-			if cerr := os.Chmod(path, 0o600); cerr != nil {
-				return nil, false, fmt.Errorf("bustls: %s is readable beyond its owner and could not be made 0600: %w", path, cerr)
-			}
+		if cerr := atrest.TightenIfExists(path); cerr != nil {
+			return nil, false, fmt.Errorf("bustls: %s could not be made 0600: %w", path, cerr)
 		}
 		k, kerr := keyFrom(signer)
 		return k, false, kerr
@@ -99,24 +98,12 @@ func EnsureKey(dir string) (key *Key, generated bool, err error) {
 	if err != nil {
 		return nil, false, err
 	}
-	// O_EXCL: two api processes racing a first start must not each write a
-	// different key and leave the loser's pin handed out.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
+	// Exclusive: two api processes racing a first start must not each write
+	// a different key and leave the loser's pin handed out. Staged and linked
+	// into place, so a crash never leaves a partial key that the next start
+	// would refuse as unparseable.
+	if err := atrest.CreateSecretFile(path, []byte(line+"\n")); err != nil {
 		return nil, false, fmt.Errorf("bustls: create %s: %w", path, err)
-	}
-	if _, err := f.WriteString(line + "\n"); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return nil, false, fmt.Errorf("bustls: write %s: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return nil, false, fmt.Errorf("bustls: sync %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return nil, false, fmt.Errorf("bustls: close %s: %w", path, err)
 	}
 	k, err := keyFrom(signer)
 	return k, true, err

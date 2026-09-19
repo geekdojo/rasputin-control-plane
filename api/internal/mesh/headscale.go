@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
 
 // Client is the small surface we use to talk to Headscale. v0 ships a
@@ -129,8 +131,9 @@ type mockState struct {
 }
 
 func NewMockClient(stateDir string) (*MockClient, error) {
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mesh mock: mkdir %s: %w", stateDir, err)
+	// The mock's state holds pre-auth keys: owner-only.
+	if err := atrest.EnsureSecretDir(stateDir); err != nil {
+		return nil, fmt.Errorf("mesh mock: %w", err)
 	}
 	mc := &MockClient{
 		statePath: filepath.Join(stateDir, "headscale.json"),
@@ -160,15 +163,11 @@ func (m *MockClient) load() error {
 }
 
 func (m *MockClient) persistLocked() error {
-	tmp := m.statePath + ".tmp"
 	buf, err := json.MarshalIndent(m.state, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.statePath)
+	return atrest.WriteSecretFile(m.statePath, buf)
 }
 
 func (m *MockClient) EnsureUser(_ context.Context, name string) error {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -235,7 +236,8 @@ func PlanStaging(dir string, dbBytes, identityBytes, volumeBytes, largestVolumeB
 // usually smaller than the source. PlanStaging sizes from the SOURCE anyway,
 // because "usually smaller" is not a guarantee to design a disk-full guard on.
 //
-// dst must not exist — SQLite refuses to overwrite, which is the behaviour we
+// dst must not exist — it is refused before the empty 0600 file is created,
+// and SQLite refuses to write into a non-empty one, which is the behaviour we
 // want: a stale snapshot from a crashed run must not be silently adopted as
 // this run's.
 func SnapshotDB(ctx context.Context, db *sql.DB, dst string) (uint64, error) {
@@ -245,10 +247,17 @@ func SnapshotDB(ctx context.Context, db *sql.DB, dst string) (uint64, error) {
 	if _, err := os.Stat(dst); err == nil {
 		return 0, fmt.Errorf("refusing to snapshot onto %s: it already exists, and adopting a previous run's leftover as this run's database is how a stale backup gets written", dst)
 	}
+	// The snapshot is the whole database, secrets included, so it is created
+	// here, empty and 0600, before SQLite writes into it: `VACUUM INTO` accepts
+	// an empty file, and a file SQLite creates itself is 0644 less the umask.
+	if err := atrest.EnsureSecretFile(dst); err != nil {
+		return 0, fmt.Errorf("snapshot %s: %w", dst, err)
+	}
 	// Bound parameter rather than string interpolation: the path is ours, but
 	// a quoted path assembled by hand is a class of bug this does not need to
 	// be exposed to.
 	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
+		_ = os.Remove(dst) // the empty file created above; nothing of ours to keep
 		return 0, fmt.Errorf("VACUUM INTO %s: %w", dst, err)
 	}
 	info, err := os.Stat(dst)

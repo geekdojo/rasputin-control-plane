@@ -12,6 +12,8 @@ import (
 	"os"
 	"sort"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
 
 // Revocation tombstones (auth consolidation 1A.10).
@@ -131,7 +133,7 @@ func writeTombstoneFile(path string, set map[string]Tombstone) error {
 	if err != nil {
 		return err
 	}
-	if err := writeOwnerOnlyFile(path, append(data, '\n')); err != nil {
+	if err := atrest.WriteSecretFile(path, append(data, '\n')); err != nil {
 		return fmt.Errorf("busauth: write tombstones %s: %w", path, err)
 	}
 	return nil

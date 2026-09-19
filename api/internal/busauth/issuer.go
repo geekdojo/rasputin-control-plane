@@ -16,10 +16,13 @@ package busauth
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	"github.com/nats-io/nkeys"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
 
 // IssuerFileName is the account signing seed the callout responder uses to
@@ -49,8 +52,11 @@ func EnsureIssuer(dir string) (*Issuer, error) {
 	if dir == "" {
 		return nil, errors.New("busauth: EnsureIssuer: dir required")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("busauth: mkdir %s: %w", dir, err)
+	// The bus directory holds this seed, the bus key, the controlplane
+	// agent's token and the tombstones: owner-only, existing installs
+	// included.
+	if err := atrest.EnsureSecretDir(dir); err != nil {
+		return nil, fmt.Errorf("busauth: %w", err)
 	}
 	path := filepath.Join(dir, IssuerFileName)
 
@@ -75,7 +81,12 @@ func EnsureIssuer(dir string) (*Issuer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("busauth: encode seed: %w", err)
 	}
-	if err := os.WriteFile(path, newSeed, 0o600); err != nil {
+	// Exclusive: two api processes racing a first start must not each
+	// persist a different seed. The loser adopts the winner's.
+	if err := atrest.CreateSecretFile(path, newSeed); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return EnsureIssuer(dir)
+		}
 		return nil, fmt.Errorf("busauth: write issuer seed %s: %w", path, err)
 	}
 	return issuerFrom(kp)

@@ -46,6 +46,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -294,7 +295,10 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 		return manifest{}, fmt.Errorf("a matched set needs exactly one controlplane node, got %d", cpCount)
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700 when this creates it: the directory receives every node's seed. An
+	// existing directory the operator named keeps its mode; the seeds in it
+	// are 0600 either way.
+	if err := os.MkdirAll(dir, atrest.SecretDirMode); err != nil {
 		return manifest{}, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 
@@ -341,7 +345,7 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 			// The bus private key, in the controlplane's seed only. One line
 			// of base64, unquoted: nothing in its alphabet means anything to sh.
 			seed += "RASPUTIN_BUS_KEY=" + busKeyLine + "\n"
-			if err := writeFile(filepath.Join(dir, mn.SeedFile), seed, 0o600); err != nil {
+			if err := writeSecret(filepath.Join(dir, mn.SeedFile), seed); err != nil {
 				return manifest{}, err
 			}
 			man.Nodes = append(man.Nodes, mn)
@@ -363,7 +367,7 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 		} else {
 			seed = buildrootSeed(n.Role, n.ID, clusterID, natsURL, plaintext, sshKey, busPin)
 		}
-		if err := writeFile(filepath.Join(dir, mn.SeedFile), seed, 0o600); err != nil {
+		if err := writeSecret(filepath.Join(dir, mn.SeedFile), seed); err != nil {
 			return manifest{}, err
 		}
 		// The role rides twice: as role, which the controlplane binds the
@@ -377,7 +381,7 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 	if err != nil {
 		return manifest{}, fmt.Errorf("marshal preseed: %w", err)
 	}
-	if err := writeFile(filepath.Join(dir, man.PreseedFile), string(preseedJSON)+"\n", 0o644); err != nil {
+	if err := writePublic(filepath.Join(dir, man.PreseedFile), string(preseedJSON)+"\n"); err != nil {
 		return manifest{}, err
 	}
 
@@ -385,7 +389,7 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 	if err != nil {
 		return manifest{}, fmt.Errorf("marshal manifest: %w", err)
 	}
-	if err := writeFile(filepath.Join(dir, "manifest.json"), string(manJSON)+"\n", 0o644); err != nil {
+	if err := writePublic(filepath.Join(dir, "manifest.json"), string(manJSON)+"\n"); err != nil {
 		return manifest{}, err
 	}
 
@@ -447,8 +451,20 @@ func openwrtSeed(id, clusterID, natsURL, token, sshKey, busPin string) string {
 	return b.String()
 }
 
-func writeFile(path, content string, mode os.FileMode) error {
-	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+// writeSecret writes a seed: it carries a join token or the bus private key,
+// so it is 0600, including when a re-run replaces a file an earlier run (or
+// an operator) left at a wider mode.
+func writeSecret(path, content string) error {
+	if err := atrest.WriteSecretFile(path, []byte(content)); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// writePublic writes the preseed and the manifest, which are public by
+// design: token hashes, node ids and roles, never a token.
+func writePublic(path, content string) error {
+	if err := atrest.WritePublicFile(path, []byte(content)); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil

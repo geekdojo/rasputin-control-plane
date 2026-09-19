@@ -7,10 +7,10 @@ import (
 	"io/fs"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -186,7 +186,7 @@ func (s *Store) EnsureAgentToken(ctx context.Context, path, nodeID string) (reas
 	if err != nil {
 		return "", fmt.Errorf("busauth: mint the controlplane agent's token: %w", err)
 	}
-	if err := writeOwnerOnlyFile(path, []byte(plaintext+"\n")); err != nil {
+	if err := atrest.WriteSecretFile(path, []byte(plaintext+"\n")); err != nil {
 		// s.revoke, not Revoke: this is the api retiring a token of its own
 		// that never reached the file, which the operator guard must not stop.
 		if _, rerr := s.revoke(ctx, id); rerr != nil {
@@ -266,45 +266,4 @@ func (s *Store) revokeNodeTokensExcept(ctx context.Context, nodeID, keep string)
 	s.sess.mu.Unlock()
 	s.recordTombstones(tombs)
 	return len(tombs), s.disconnect(d, taken), nil
-}
-
-// writeOwnerOnlyFile replaces path with data atomically: a 0600 temporary file
-// in the same directory, synced, renamed over path, and the directory synced.
-// The rename replaces whatever was at path, a symlink included, and never
-// writes through it. The directory is created 0700 when it does not exist; an
-// existing one keeps its mode.
-func writeOwnerOnlyFile(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // a no-op once renamed
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync() // durability of the rename; not every platform supports it
-		_ = d.Close()
-	}
-	return nil
 }
