@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -133,7 +134,10 @@ func newIngestServer(t *testing.T, obsStatus *obs.Status, seedNodes ...string) *
 }
 
 func ingestReq(cn string) *http.Request {
-	req := httptest.NewRequest(http.MethodPost, "/api/obs/ingest", strings.NewReader("payload"))
+	req := httptest.NewRequest(http.MethodPost, "/api/obs/ingest",
+		bytes.NewReader(remoteWriteBody(series("container_cpu_usage_seconds_total", "name", "web"))))
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "snappy")
 	if cn != "" {
 		req.TLS = certState(cn)
 	}
@@ -271,9 +275,11 @@ func TestHandleObsIngest(t *testing.T) {
 
 	t.Run("member node + obs on → proxied to VM with authoritative node_id", func(t *testing.T) {
 		var gotPath, gotExtraLabel string
+		var gotBody []byte
 		stubVM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotPath = r.URL.Path
 			gotExtraLabel = r.URL.Query().Get("extra_label")
+			gotBody, _ = io.ReadAll(r.Body)
 			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer stubVM.Close()
@@ -290,6 +296,9 @@ func TestHandleObsIngest(t *testing.T) {
 		}
 		if gotExtraLabel != "node_id=c02" {
 			t.Errorf("extra_label: got %q, want node_id=c02", gotExtraLabel)
+		}
+		if want := remoteWriteBody(series("container_cpu_usage_seconds_total", "name", "web")); !bytes.Equal(gotBody, want) {
+			t.Errorf("forwarded body differs from the one received (%d vs %d bytes)", len(gotBody), len(want))
 		}
 	})
 }

@@ -27,11 +27,11 @@ const (
 	// running with auth off). Like setup, these describe the cluster as a
 	// whole, not one drill-through object.
 	AlertSourceSecurity AlertSource = "security"
-	// AlertSourceRule is used by alerts that arrive from vmalert (or any
-	// future Alertmanager-compatible rules engine) via the webhook
-	// receiver at /api/alerts/webhook. The aggregator's source-specific
-	// alerts (node/job/app/setup) are computed on every read; rule
-	// alerts are persisted.
+	// AlertSourceRule is used by alerts raised by vmalert's rules, which
+	// the api reads back from VictoriaMetrics (vmalert's ALERTS series)
+	// and persists. The aggregator's source-specific alerts
+	// (node/job/app/setup) are computed on every read; rule alerts are
+	// persisted.
 	AlertSourceRule AlertSource = "rule"
 )
 

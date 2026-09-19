@@ -2169,39 +2169,27 @@ func TestHandleListAlerts_Default(t *testing.T) {
 // ============================================================================
 
 // ============================================================================
-// Alert webhook + ack/dismiss
+// Alerts
 // ============================================================================
 
-// TestAlertWebhook_NoStoreWiredErrors confirms the webhook handler
-// surfaces the "no persistence wired" error politely when the fixture
-// hasn't called SetAlertsService. Production wiring (main.go) always
-// passes a real store, so this only catches misconfiguration.
-func TestAlertWebhook_NoStoreWiredErrors(t *testing.T) {
+// The api no longer receives alert notifications: rule alerts are read from
+// VictoriaMetrics (alerts.Service.RunRuleSync), so the old receiver path must
+// be served by nothing — with or without a session.
+func TestAlertWebhookRouteIsGone(t *testing.T) {
 	f := newAPIFixture(t)
-	// No cookie — webhook is unauthenticated by design.
-	body := strings.NewReader(`{"alerts":[{"status":"firing","labels":{"alertname":"x"},"startsAt":"2026-06-02T12:00:00Z","fingerprint":"fp"}]}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/alerts/webhook", body)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	f.handler.ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("want 400, got %d body=%s", w.Code, w.Body.String())
-	}
-}
-
-// TestAlertWebhook_Secret_Rejects confirms the X-Webhook-Secret gate
-// rejects requests that don't carry the right secret. Production
-// vmalert is configured to send it via -notifier.headers.
-func TestAlertWebhook_Secret_Rejects(t *testing.T) {
-	f := newAPIFixture(t)
-	f.srv.SetAlertsWebhookSecret("topsecret")
-	req := httptest.NewRequest(http.MethodPost, "/api/alerts/webhook",
-		strings.NewReader(`{}`))
-	req.Header.Set("X-Webhook-Secret", "wrong")
-	w := httptest.NewRecorder()
-	f.handler.ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("want 401, got %d", w.Code)
+	c := f.authenticate(t)
+	for _, cookie := range []*http.Cookie{nil, c} {
+		req := httptest.NewRequest(http.MethodPost, "/api/alerts/webhook",
+			strings.NewReader(`{"alerts":[{"status":"firing","labels":{"alertname":"x"}}]}`))
+		req.Header.Set("Content-Type", "application/json")
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		f.handler.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("POST /api/alerts/webhook (session=%v) = %d, want 404", cookie != nil, w.Code)
+		}
 	}
 }
 

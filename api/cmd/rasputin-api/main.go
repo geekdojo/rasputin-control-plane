@@ -1404,9 +1404,9 @@ func main() {
 	// Real alerting (Slice 1.5): open the persisted alerts store and
 	// wire a Service that merges aggregator + persisted views. Always
 	// on — the store is shared with the rest of the api's SQLite and
-	// is cheap when no rules are firing. The webhook receiver and
+	// is cheap when no rules are firing. The rule sync below and the
 	// /ws/alerts push are no-ops until vmalert (in the obs compose
-	// stack) starts POSTing.
+	// stack) reports an alert.
 	alertsStore, err := alerts.OpenStore(ctx, dbPath)
 	if err != nil {
 		log.Fatalf("rasputin-api: alerts store: %v", err)
@@ -1435,13 +1435,39 @@ func main() {
 	// OFF BUS vs OFFLINE (#401): the same join /api/nodes reads.
 	alertsSvc.SetMeshMembership(meshSvc.Membership)
 	srv.SetAlertsService(alertsSvc)
-	if secret := os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"); secret != "" {
-		srv.SetAlertsWebhookSecret(secret)
-		log.Printf("rasputin-api: alerts webhook protected by shared secret")
-	} else {
-		log.Printf("rasputin-api: WARNING — alerts webhook is unauthenticated " +
-			"(set RASPUTIN_ALERTS_WEBHOOK_SECRET to enable header auth)")
+	// Rule alerts: vmalert evaluates the rules on its own schedule and
+	// writes its verdicts to VictoriaMetrics as ALERTS series; nothing calls
+	// the api. This loop reads them back and mirrors them into the alerts
+	// store (fire, resolve). See alerts.RunRuleSync for why it is a periodic
+	// re-read and obs.RuleAlertFreshness for the staleness bound.
+	ruleAlerts, err := obs.NewRuleAlertsClient(obs.RuleAlertsClientConfig{Supervisor: obsSup})
+	if err != nil {
+		log.Fatalf("rasputin-api: rule alerts client: %v", err)
 	}
+	go alertsSvc.RunRuleSync(ctx, func(ctx context.Context) ([]alerts.FiringRule, error) {
+		on, err := obsEnabled(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !on {
+			// Observability is off, so vmalert is not running and nothing
+			// it last reported is current: nothing is firing.
+			return nil, nil
+		}
+		firing, err := ruleAlerts.Firing(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]alerts.FiringRule, 0, len(firing))
+		for _, a := range firing {
+			out = append(out, alerts.FiringRule{
+				Labels:   a.Labels,
+				ActiveAt: a.ActiveAt,
+				Summary:  obs.RuleAlertSummary(a.Labels),
+			})
+		}
+		return out, nil
+	}, obs.VMAlertEvaluationInterval)
 	// Update discovery: the control plane reads signed releases directly from
 	// each component's PUBLIC source repo over anonymous HTTPS — no token on the
 	// appliance (ADR-0002; the rasputin-releases mirror is retired). Authenticity
@@ -2425,12 +2451,10 @@ func mustWireObs(ctx context.Context, dataDir, selfNodeID string, metricsSvc *me
 		// RASPUTIN_OBS_GRAFANA_LISTEN only has an effect on a non-Linux
 		// developer host, where Grafana cannot bind a unix socket. On a
 		// controlplane there is no Grafana TCP listener to move.
-		GrafanaListenAddr:   os.Getenv("RASPUTIN_OBS_GRAFANA_LISTEN"),
-		EnableGrafana:       envBoolPtr("RASPUTIN_OBS_GRAFANA"),
-		VMAlertImage:        os.Getenv("RASPUTIN_OBS_VMALERT_IMAGE"),
-		AlertsWebhookURL:    os.Getenv("RASPUTIN_OBS_ALERTS_WEBHOOK_URL"),
-		AlertsWebhookSecret: os.Getenv("RASPUTIN_ALERTS_WEBHOOK_SECRET"),
-		EnableVMAlert:       envBoolPtr("RASPUTIN_OBS_VMALERT"),
+		GrafanaListenAddr: os.Getenv("RASPUTIN_OBS_GRAFANA_LISTEN"),
+		EnableGrafana:     envBoolPtr("RASPUTIN_OBS_GRAFANA"),
+		VMAlertImage:      os.Getenv("RASPUTIN_OBS_VMALERT_IMAGE"),
+		EnableVMAlert:     envBoolPtr("RASPUTIN_OBS_VMALERT"),
 		// IDS log dir mounted into Alloy at /var/log/rasputin so
 		// loki.source.file can ship the api's alerts.jsonl to Loki.
 		// Same path the api's ids.Writer just opened a few lines above

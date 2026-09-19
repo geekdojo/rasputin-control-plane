@@ -316,11 +316,12 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 		}
 	})
 
-	t.Run("VMAlert_RunsAndReachableHostWebhook", func(t *testing.T) {
-		// Just confirm vmalert container is up. Verifying it actually
-		// fires takes 5+ minutes (NodeDown needs absent_over_time[5m]);
-		// out of scope for the smoke run. The webhook receiver itself
-		// is covered by alerts package unit tests.
+	t.Run("VMAlert_Runs", func(t *testing.T) {
+		// Just confirm vmalert container is up — which also proves it
+		// accepts running with no notifier. Verifying it actually fires
+		// takes 5+ minutes (every rule has for: 5m); out of scope for the
+		// smoke run. Reading its ALERTS back is covered by the
+		// RuleAlertsClient and alerts package unit tests.
 		out, err := exec.CommandContext(ctx, "docker", "inspect",
 			"--format", "{{.State.Status}}", "rasputin-vmalert").CombinedOutput()
 		if err != nil {

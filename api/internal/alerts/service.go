@@ -66,7 +66,7 @@ type BackupStates interface {
 }
 
 // Service aggregates alerts from the subsystem stores AND merges in
-// rule-engine alerts persisted via the webhook (Slice 1.5). The
+// rule-engine alerts persisted by RunRuleSync (Slice 1.5). The
 // aggregator's view stays computed-on-read; persisted alerts come from
 // the Store and round out the picture with vmalert-driven entries the
 // aggregator can't compute (e.g. "CPU > 90% for 5m").
@@ -108,7 +108,7 @@ func (s *Service) SetBusTLSAlert(fn func(now time.Time) *proto.Alert) { s.busTLS
 
 // New constructs an alerts Service. The store + nats.Conn are optional;
 // dev-time wiring may pass nil for both (the aggregator still works).
-// Production wiring passes both so the webhook receiver can persist and
+// Production wiring passes both so rule alerts can persist and
 // the UI's /ws/alerts gets push updates. busAuthEnforced is whether the
 // api runs with RASPUTIN_BUS_AUTH=enforce — see securityAlerts.
 func New(inv *inventory.Store, j *jobs.Store, a *apps.Store, s *setup.Service, store *Store, nc *nats.Conn, busAuthEnforced bool) *Service {
@@ -391,70 +391,154 @@ func (s *Service) ruleAlerts(ctx context.Context) ([]proto.Alert, error) {
 	return out, nil
 }
 
-// IngestWebhook handles an Alertmanager-v2-format webhook POST. vmalert
-// (configured with -notifier.url=http://api:8080/api/alerts/webhook) is
-// the production caller; tests can drive it directly.
+// FiringRule is one alert the rules engine reports as firing right now.
+// Labels are the alert's labels (alertname, severity, the series labels);
+// ActiveAt is when it became active, zero when unknown; Summary is the
+// operator-facing one-liner, empty when the rule has none.
+type FiringRule struct {
+	Labels   map[string]string
+	ActiveAt time.Time
+	Summary  string
+}
+
+// SyncRuleAlerts reconciles the persisted rule alerts with the complete set of
+// alerts the rules engine reports as firing now. It is called from
+// RunRuleSync; tests drive it directly.
 //
-// Each alert in the payload is upsert-ed by fingerprint. A NEW row
-// triggers AlertFired on the NATS push topic; status transition to
-// "resolved" triggers AlertResolved. Both are best-effort — webhook
-// success is gated on the database write, not the push.
-func (s *Service) IngestWebhook(ctx context.Context, body []byte) (ingested int, err error) {
+// Each firing alert is upserted by fingerprint (a hash of its labels); a row
+// that is new, or was not firing, publishes AlertFired. Every persisted row
+// that is firing but absent from the set is marked resolved and publishes
+// AlertResolved. A row whose state has not changed is not rewritten.
+//
+// firing must be the whole current set: an empty slice resolves everything.
+// A caller that could not read the set must not call this.
+func (s *Service) SyncRuleAlerts(ctx context.Context, firing []FiringRule) error {
 	if s.store == nil {
-		return 0, fmt.Errorf("alerts: webhook: no store wired")
+		return fmt.Errorf("alerts: rule sync: no store wired")
 	}
-	var wh AlertmanagerWebhook
-	if err := json.Unmarshal(body, &wh); err != nil {
-		return 0, fmt.Errorf("alerts: webhook: decode: %w", err)
+	now := s.clock()
+	current, err := s.store.ListFiring(ctx)
+	if err != nil {
+		return err
 	}
-	for _, a := range wh.Alerts {
-		fp := a.Fingerprint
-		if fp == "" {
-			fp = fingerprintFromLabels(a.Labels)
+	wasFiring := make(map[string]*PersistedAlert, len(current))
+	for _, p := range current {
+		wasFiring[p.Fingerprint] = p
+	}
+
+	seen := make(map[string]bool, len(firing))
+	for _, f := range firing {
+		fp := fingerprintFromLabels(f.Labels)
+		if seen[fp] {
+			continue
 		}
-		title := a.Labels["alertname"]
+		seen[fp] = true
+		title := f.Labels["alertname"]
 		if title == "" {
 			title = "alert"
 		}
 		sev := proto.AlertWarn
-		if a.Labels["severity"] == "critical" || a.Labels["severity"] == "crit" {
+		if f.Labels["severity"] == "critical" || f.Labels["severity"] == "crit" {
 			sev = proto.AlertCrit
 		}
-		detail := a.Annotations["summary"]
-		if detail == "" {
-			detail = a.Annotations["description"]
+		starts := f.ActiveAt.UTC()
+		prev := wasFiring[fp]
+		if starts.IsZero() {
+			// No activation time: keep the one already recorded for a
+			// continuing alert, otherwise this is the first sighting.
+			starts = now
+			if prev != nil {
+				starts = prev.StartsAt
+			}
 		}
-		row := &PersistedAlert{
+		if prev != nil && prev.Severity == sev && prev.Title == title &&
+			prev.Detail == f.Summary && prev.StartsAt.Equal(starts.Truncate(time.Millisecond)) {
+			continue // still firing, nothing changed
+		}
+		saved, _, err := s.store.Upsert(ctx, &PersistedAlert{
 			Fingerprint: fp,
-			Status:      a.Status,
+			Status:      "firing",
 			Severity:    sev,
 			Title:       title,
-			Detail:      detail,
-			Labels:      a.Labels,
-			Annotations: a.Annotations,
-			StartsAt:    a.StartsAt,
-		}
-		if !a.EndsAt.IsZero() {
-			t := a.EndsAt
-			row.EndsAt = &t
-		}
-		saved, isNew, err := s.store.Upsert(ctx, row)
+			Detail:      f.Summary,
+			Labels:      f.Labels,
+			Annotations: map[string]string{},
+			StartsAt:    starts,
+		})
 		if err != nil {
-			return ingested, err
+			return err
 		}
-		ingested++
-		change := proto.AlertResolved
-		switch {
-		case isNew:
-			change = proto.AlertFired
-		case saved.Status == "firing":
-			change = proto.AlertFired
-		case saved.Status == "resolved":
-			change = proto.AlertResolved
+		if prev == nil {
+			s.publishChange(proto.AlertFired, saved)
 		}
-		s.publishChange(change, saved)
 	}
-	return ingested, nil
+
+	for fp, p := range wasFiring {
+		if seen[fp] {
+			continue
+		}
+		p.Status = "resolved"
+		ended := now
+		p.EndsAt = &ended
+		saved, _, err := s.store.Upsert(ctx, p)
+		if err != nil {
+			return err
+		}
+		s.publishChange(proto.AlertResolved, saved)
+	}
+	return nil
+}
+
+// RuleReader returns the complete set of rule alerts firing now, or an error
+// when that is unknown.
+type RuleReader func(ctx context.Context) ([]FiringRule, error)
+
+// RunRuleSync keeps the persisted rule alerts in step with the rules engine
+// until ctx ends: it reads the firing set with read and applies it with
+// SyncRuleAlerts, once at start and then every period.
+//
+// The loop is a safety-net tick that re-reads a fact, not a clock that
+// decides state (design/principles.md): the rules engine evaluates on its own
+// schedule and records its verdicts where read finds them, and each tick only
+// copies the latest verdict. Nothing here decides that an alert has fired or
+// resolved because time passed. period only sets how soon a new verdict is
+// seen; the caller passes the engine's own evaluation interval, since reading
+// faster than verdicts are produced gains nothing.
+//
+// A failed read skips the tick and changes nothing: not knowing the firing
+// set is not the same as it being empty.
+func (s *Service) RunRuleSync(ctx context.Context, read RuleReader, period time.Duration) {
+	var lastErr string
+	tick := func() {
+		firing, err := read(ctx)
+		if err == nil {
+			err = s.SyncRuleAlerts(ctx, firing)
+		}
+		// Log a failure once, and its recovery once, rather than every tick.
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		}
+		if msg != lastErr {
+			if msg != "" {
+				log.Printf("alerts: rule sync: %v", err)
+			} else {
+				log.Printf("alerts: rule sync: recovered")
+			}
+			lastErr = msg
+		}
+	}
+	tick()
+	t := time.NewTicker(period)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tick()
+		}
+	}
 }
 
 // Ack persists the operator's acknowledgement of an alert and publishes
@@ -531,31 +615,12 @@ func toAlert(p *PersistedAlert) proto.Alert {
 	return a
 }
 
-// AlertmanagerWebhook is the v2 webhook payload Alertmanager / vmalert
-// POST. Only the fields we actually use are decoded.
-type AlertmanagerWebhook struct {
-	Version  string              `json:"version"`
-	GroupKey string              `json:"groupKey"`
-	Status   string              `json:"status"`
-	Alerts   []AlertmanagerAlert `json:"alerts"`
-}
-
-// AlertmanagerAlert is a single entry inside the webhook payload.
-type AlertmanagerAlert struct {
-	Status       string            `json:"status"`
-	Labels       map[string]string `json:"labels"`
-	Annotations  map[string]string `json:"annotations"`
-	StartsAt     time.Time         `json:"startsAt"`
-	EndsAt       time.Time         `json:"endsAt"`
-	GeneratorURL string            `json:"generatorURL"`
-	Fingerprint  string            `json:"fingerprint"`
-}
-
-// fingerprintFromLabels derives a stable hash from the labels for
-// Alertmanager payloads that don't include a fingerprint field
-// (vmalert older versions). Sorted label k=v pairs joined by | hashed
-// to a hex string is enough — collision-resistant for the homelab
-// alert volume we care about.
+// fingerprintFromLabels derives a stable hash from an alert's labels —
+// the persisted alert's natural key. It is the same derivation the
+// persisted rows have always been keyed by, so rows written before rule
+// alerts were read from VictoriaMetrics keep their identity. Sorted label
+// k=v pairs joined by | hashed to a hex string is enough —
+// collision-resistant for the homelab alert volume we care about.
 func fingerprintFromLabels(labels map[string]string) string {
 	keys := make([]string, 0, len(labels))
 	for k := range labels {

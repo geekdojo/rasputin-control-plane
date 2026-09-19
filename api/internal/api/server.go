@@ -53,16 +53,15 @@ type Server struct {
 	restoreRestart func()
 	// appRestore and restoreEgress are the app-volume restore surface
 	// (design/storage.md §4.5 phase 2, #291); nil keeps their routes at 503.
-	appRestore          *storage.RestoreAppConfig
-	restoreEgress       *storage.RestoreEgress
-	bundleDir           string
-	trustDir            string
-	mesh                *mesh.Service
-	bmc                 *bmc.Service
-	bmcSessions         *bmc.SessionManager
-	setup               *setup.Service
-	alerts              *alerts.Service
-	alertsWebhookSecret string
+	appRestore    *storage.RestoreAppConfig
+	restoreEgress *storage.RestoreEgress
+	bundleDir     string
+	trustDir      string
+	mesh          *mesh.Service
+	bmc           *bmc.Service
+	bmcSessions   *bmc.SessionManager
+	setup         *setup.Service
+	alerts        *alerts.Service
 	// backupStates is the per-app backup derivation the /api/apps rows carry
 	// as `backup` (design/storage.md §4.4, #298); nil omits the field.
 	backupStates *storage.BackupStates
@@ -185,10 +184,6 @@ func (s *Server) SetAlertsService(svc *alerts.Service) { s.alerts = svc }
 // bmc.configure workflow to the same instance the WS handler uses.
 func (s *Server) BMCSessions() *bmc.SessionManager { return s.bmcSessions }
 
-// SetAlertsWebhookSecret turns on shared-secret auth for
-// POST /api/alerts/webhook. Empty disables the check (dev mode).
-func (s *Server) SetAlertsWebhookSecret(secret string) { s.alertsWebhookSecret = secret }
-
 // SetDNSForwardingApplier wires the AA-11 reconcile hook (main → nameserver),
 // kept plain-typed so this package doesn't import nameserver.
 func (s *Server) SetDNSForwardingApplier(fn func(context.Context) (string, bool, error)) {
@@ -243,9 +238,9 @@ func NewServer(
 		bmc: bmcSvc, bmcSessions: bmc.NewSessionManager(bmcSvc),
 		setup: setupSvc,
 		// alerts aggregates the subsystem stores AND, when an alerts
-		// store + nats.Conn are wired, merges in vmalert-driven
-		// persisted alerts via the webhook receiver. Dev wiring passes
-		// nil for both; production passes them through main.go.
+		// store + nats.Conn are wired, merges in the vmalert-driven
+		// persisted alerts. Dev wiring passes nil for both; production
+		// passes them through main.go.
 		alerts: alerts.New(inv, store, appsStore, setupSvc, nil, nc, false),
 		auth:   authSvc, obs: obsStatus, busTokens: busTokens, nc: nc,
 		// Mirrors the saga's SystemUpdateConfig.SelfNodeID (main.go reads the
@@ -274,7 +269,16 @@ func NewServer(
 // Every response also carries the security headers (securityHeaders): the
 // outermost wrapper, so a CORS preflight, a refusal or a 401 gets them too.
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
+	origins := s.auth.Origins()
+	return securityHeaders(withCORS(origins, crossOriginProtection(origins, s.routes())))
+}
+
+// routes registers every route Handler serves on a recording mux. It is split
+// from Handler so the route-enumeration auth test can read the patterns off
+// the same mux the server routes with — there is no second list to keep in
+// sync.
+func (s *Server) routes() *routeMux {
+	mux := newRouteMux()
 
 	// Open
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -456,10 +460,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/alerts", reqd(s.handleListAlerts))
 	mux.HandleFunc("POST /api/alerts/{id}/ack", reqd(s.handleAlertAck))
 	mux.HandleFunc("POST /api/alerts/{id}/dismiss", reqd(s.handleAlertDismiss))
-	// Webhook is intentionally NOT behind reqd — vmalert can't carry a
-	// session cookie. Auth is the optional shared secret in
-	// X-Webhook-Secret (RASPUTIN_ALERTS_WEBHOOK_SECRET).
-	mux.HandleFunc("POST /api/alerts/webhook", s.handleAlertWebhook)
 
 	mux.HandleFunc("GET /api/obs/status", reqd(s.handleObsStatus))
 	mux.HandleFunc("GET /api/obs/logs", reqd(s.handleObsLogs))
@@ -498,8 +498,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", uiHandler{fsys: os.DirFS(s.uiDir)})
 	}
 
-	origins := s.auth.Origins()
-	return securityHeaders(withCORS(origins, crossOriginProtection(origins, mux)))
+	return mux
 }
 
 // withCORS answers CORS for the origins on the allowlist and for no others.

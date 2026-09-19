@@ -11,9 +11,16 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
+// RouteRegistrar is the one method RegisterRoutes needs from a mux. An
+// *http.ServeMux satisfies it; so does the api's recording mux, which is how
+// the route-enumeration auth test sees these routes without a copied list.
+type RouteRegistrar interface {
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
 // RegisterRoutes installs auth-related routes onto mux. Path-prefixed with
 // /api/auth/ so the api.Server can mount them at the right place.
-func (s *Service) RegisterRoutes(mux *http.ServeMux) {
+func (s *Service) RegisterRoutes(mux RouteRegistrar) {
 	mux.HandleFunc("GET /api/auth/status", s.handleStatus)
 	mux.HandleFunc("GET /api/auth/me", s.handleMe)
 	mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
