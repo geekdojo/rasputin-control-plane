@@ -214,6 +214,8 @@ export interface WANConfigSpec {
   dns?: string[];
   // pppoe
   username?: string;
+  // Write-only: sent on create/update, never returned by the api. An update
+  // without it keeps the stored one (FirewallIntent.secretSet says one exists).
   secret?: string;
   service?: string;
   comment?: string;
@@ -248,6 +250,9 @@ export interface FirewallIntent {
   // Narrow by `kind` at the use site (see PreAuthKeySpec / SubnetRouteSpec
   // pattern on MeshIntent).
   spec: PortForwardSpec | FirewallRuleSpec | WANConfigSpec;
+  // True when a write-only secret (the PPPoE password) is stored for this
+  // intent. The secret itself is never in `spec` on a read.
+  secretSet?: boolean;
   createdAt: string;
   updatedAt: string;
 }

@@ -3,6 +3,7 @@ package bmc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -76,11 +77,21 @@ func (r *reconciler) onRegistered(subject string, data []byte) {
 			return // env pin is authoritative; Settings shows it read-only
 		}
 	}
-	cfg, err := r.st.Get(ctx, setup.KeyBMCConfig)
+	stored, err := r.st.Get(ctx, setup.KeyBMCConfig)
 	if err != nil {
 		return
 	}
-	desired := ConfigHash(kind, json.RawMessage(cfg), StoredCredential(ctx, r.st, kind))
+	// A config recorded before the credential had its own settings key can
+	// still carry it inline. The spec built below goes into the job ledger,
+	// and the configure validate step refuses one carrying a credential, so
+	// it is moved to its key here first. The job's record step then writes
+	// the stripped config back.
+	cfg, err := moveLegacyCredential(ctx, r.st, kind, json.RawMessage(stored))
+	if err != nil {
+		log.Printf("bmc: reconcile: %v", err)
+		return
+	}
+	desired := ConfigHash(kind, cfg, StoredCredential(ctx, r.st, kind))
 	var advertised string
 	if ev.Metadata != nil {
 		advertised, _ = ev.Metadata[proto.MetadataBMCConfigHash].(string)
@@ -107,10 +118,39 @@ func (r *reconciler) onRegistered(subject string, data []byte) {
 
 	spec, _ := json.Marshal(ConfigureSpec{
 		Kind: kind, HostNodeID: hostID,
-		Config: json.RawMessage(cfg), ConfigHash: desired,
+		Config: cfg, ConfigHash: desired,
 	})
 	log.Printf("bmc: host %s registered with config hash %q, want %q — re-pushing", hostID, advertised, desired)
 	if err := r.submit(ctx, "bmc.configure", spec, "system:bmc-reconcile"); err != nil {
 		log.Printf("bmc: reconcile submit: %v", err)
 	}
+}
+
+// moveLegacyCredential returns config without the backend's write-only
+// credential field. A non-empty inline value is moved to the credential's
+// settings key when that key is still empty; when both are set the settings
+// key wins, as it already does at dispatch.
+func moveLegacyCredential(ctx context.Context, st *setup.Store, kind string, config json.RawMessage) (json.RawMessage, error) {
+	cred, ok := CredentialFor(kind)
+	if !ok || len(config) == 0 {
+		return config, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(config, &m); err != nil {
+		return config, nil // not an object: ValidateSelection refuses it in the job
+	}
+	raw, present := m[cred.Field]
+	if !present {
+		return config, nil
+	}
+	var inline string
+	_ = json.Unmarshal(raw, &inline)
+	if inline != "" && StoredCredential(ctx, st, kind) == "" {
+		if err := st.Set(ctx, cred.SettingsKey, inline); err != nil {
+			return nil, fmt.Errorf("move stored %s credential to its own key: %w", kind, err)
+		}
+	}
+	delete(m, cred.Field)
+	delete(m, cred.Field+"Set")
+	return json.Marshal(m)
 }

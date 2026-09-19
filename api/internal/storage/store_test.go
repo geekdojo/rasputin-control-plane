@@ -29,27 +29,16 @@ func TestParseClaimSpec(t *testing.T) {
 			wantErr: "fingerprint is required",
 		},
 		{
-			name:    "half a key",
-			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","wrappedByPassphrase":"a"}}`,
-			wantErr: "wrappedByRecoveryCode",
+			// The key is staged with the job and referred to by id; a spec
+			// carrying it inline — whole or not — is refused (SubmitClaim
+			// never writes one).
+			name:    "a key inline in the spec",
+			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","publicKey":"` + markerPublicKey + `","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
+			wantErr: "archiveKey must not be in a claim job's spec",
 		},
 		{
-			// §4.6 as amended: the public key is part of "whole". A target
-			// without it can be written to by nothing — #290 has nothing to
-			// seal a generation to — so it is refused rather than half-stored,
-			// exactly like a missing wrapping.
-			name:    "wrappings but no public key",
-			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
-			wantErr: "publicKey",
-		},
-		{
-			name:    "a public key that is not an X25519 key",
-			body:    `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","publicKey":"AAEC","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
-			wantErr: "X25519 public key is 32",
-		},
-		{
-			name: "a whole key",
-			body: `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKey":{"keyId":"k","publicKey":"` + markerPublicKey + `","wrappedByPassphrase":"a","wrappedByRecoveryCode":"b"}}`,
+			name: "a key by reference",
+			body: `{"nodeId":"n","devicePath":"/dev/sdb","fingerprint":"fp","archiveKeyId":"k"}`,
 		},
 		{
 			// §4.8's wipe is a SECOND, SEPARATE choice, and the token is what
@@ -83,6 +72,48 @@ func TestParseClaimSpec(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseClaimSpec(json.RawMessage(tc.body))
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("want an error mentioning %q", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Errorf("error = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// ValidateClaim carries the key checks ParseClaimSpec made while the key was
+// still in the spec: all-or-nothing, and a usable public key.
+func TestValidateClaim_ArchiveKey(t *testing.T) {
+	base := ClaimSpec{NodeID: "n", DevicePath: "/dev/sdb", Fingerprint: "fp"}
+	cases := []struct {
+		name    string
+		key     *ArchiveKey
+		wantErr string
+	}{
+		{name: "no key"},
+		{name: "half a key", key: &ArchiveKey{KeyID: "k", WrappedByPassphrase: "a"}, wantErr: "wrappedByRecoveryCode"},
+		{
+			// §4.6 as amended: the public key is part of "whole". A target
+			// without it can be written to by nothing — #290 has nothing to
+			// seal a generation to — so it is refused rather than half-stored,
+			// exactly like a missing wrapping.
+			name: "wrappings but no public key", key: &ArchiveKey{KeyID: "k", WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"},
+			wantErr: "publicKey",
+		},
+		{
+			name: "a public key that is not an X25519 key", key: &ArchiveKey{KeyID: "k", PublicKey: "AAEC", WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"},
+			wantErr: "X25519 public key is 32",
+		},
+		{name: "a whole key", key: &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := base
+			spec.ArchiveKey = tc.key
+			err := ValidateClaim(spec)
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)

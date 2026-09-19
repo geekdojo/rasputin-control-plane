@@ -61,14 +61,14 @@ func ClaimWorkflow(store *Store, inv *inventory.Store, cfg Config) jobs.Workflow
 		Steps: []jobs.WorkflowStep{
 			{Name: "validate", Timeout: validateStepTimeout, Do: claimValidate(store, inv)},
 			{Name: "enumerate", Timeout: enumerateStepTimeout, Retries: 1, Do: claimEnumerate()},
-			{Name: "check_existing", Timeout: enumerateStepTimeout, Retries: 1, Do: claimCheckExisting()},
+			{Name: "check_existing", Timeout: enumerateStepTimeout, Retries: 1, Do: claimCheckExisting(store)},
 			// Irreversible: a mkfs cannot be undone by a saga that has no
 			// compensation, so the runner refuses to retry it and refuses to
 			// re-run it for a job whose ledger already records an attempt.
 			// Declared unconditionally even though the ADOPT branch only reads:
 			// the declaration describes what the step MAY do, and a flag cannot
 			// make a static declaration conditional.
-			{Name: "claim", Timeout: claimStepTimeout, Retries: 0, Irreversible: true, Do: claimClaim(cfg, inv)},
+			{Name: "claim", Timeout: claimStepTimeout, Retries: 0, Irreversible: true, Do: claimClaim(cfg, inv, store)},
 			{Name: "persist_target", Timeout: persistStepTimeout, Retries: 1, Do: claimPersist(store)},
 		},
 		OnTerminal: finalizeTargetRow(store),
@@ -80,8 +80,9 @@ func ClaimWorkflow(store *Store, inv *inventory.Store, cfg Config) jobs.Workflow
 // Each step's result is a typed struct rather than a raw ack, so the next step
 // reads a shape this package defined instead of re-deriving one. None of these
 // carries private key material: KeyID is an identifier, and the public key and
-// the wrapped blobs live in the spec and go straight to the store without
-// passing through a step result.
+// the wrapped blobs are staged with the job (Store.StageClaimKey) and go from
+// there to the bus command and the target row without passing through a spec,
+// a step result, an event or a log line.
 
 // enumerateResult is what step 2 proved. The device path here is the one the
 // disk has NOW, resolved from the fingerprint — not the one the operator saw.
@@ -150,6 +151,60 @@ type claimOutcome struct {
 	KeyID       string `json:"keyId,omitempty"`
 }
 
+// SubmitClaim submits a backup.target.claim job for spec.
+//
+// spec.ArchiveKey, when set, is staged under the new job's id before the job is
+// recorded or run, and the persisted spec carries only its id. A submit that
+// fails after staging discards what it staged; a job that ran has its staged
+// key discarded by the workflow's terminal hook.
+func SubmitClaim(ctx context.Context, runner *jobs.Runner, store *Store, spec ClaimSpec, createdBy string) (*jobs.Job, error) {
+	body, err := claimBody(spec)
+	if err != nil {
+		return nil, err
+	}
+	key := spec.ArchiveKey
+	var staged string
+	prepare := func(jobID string) error {
+		if !key.present() {
+			return nil
+		}
+		if err := store.StageClaimKey(ctx, jobID, key, time.Now().UTC()); err != nil {
+			return fmt.Errorf("stage archive key: %w", err)
+		}
+		staged = jobID
+		return nil
+	}
+	j, err := runner.SubmitPrepared(ctx, ClaimJobKind, body, createdBy, prepare)
+	if err != nil && staged != "" {
+		if derr := store.DiscardStagedClaimKey(ctx, staged); derr != nil {
+			log.Printf("storage: discard staged archive key for unsubmitted job %s: %v", staged, derr)
+		}
+	}
+	return j, err
+}
+
+// claimKey returns the key staged for this claim job, or nil when the spec
+// refers to none. A spec that names a key which is not staged, or a staged key
+// with a different id, is refused: the claim would otherwise record, or write
+// to the disk's marker, a key other than the one the operator submitted.
+func claimKey(sc *jobs.StepCtx, store *Store, spec *ClaimSpec) (*ArchiveKey, error) {
+	k, err := store.StagedClaimKey(sc.Ctx, sc.JobID)
+	if err != nil {
+		return nil, fmt.Errorf("read staged archive key: %w", err)
+	}
+	switch {
+	case spec.ArchiveKeyID == "" && k == nil:
+		return nil, nil
+	case spec.ArchiveKeyID == "":
+		return nil, fmt.Errorf("a key (%s) is staged for this job but its spec names none", k.KeyID)
+	case k == nil:
+		return nil, fmt.Errorf("archive key %s is not staged for this job — it is kept only until the job ends, so a claim cannot be re-run from its spec. Submit the claim again", spec.ArchiveKeyID)
+	case k.KeyID != spec.ArchiveKeyID:
+		return nil, fmt.Errorf("the staged archive key is %s, but the spec names %s", k.KeyID, spec.ArchiveKeyID)
+	}
+	return k, nil
+}
+
 // ----- Step 1: validate ---------------------------------------------------
 
 func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
@@ -189,6 +244,10 @@ func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 			return nil, fmt.Errorf("this cluster already has a claimed backup target (%s on %s, partUuid %s) — confirm `replace` to supersede it. The existing disk is not touched either way",
 				displayLabel(cur.Label), cur.NodeID, cur.PartUUID)
 		}
+		// Refused before the row is written, like every other step-1 refusal.
+		if _, err := claimKey(sc, store, spec); err != nil {
+			return nil, err
+		}
 		now := time.Now().UTC()
 		if err := store.CreatePending(sc.Ctx, sc.JobID, spec.NodeID, spec.DevicePath, spec.Label, now); err != nil {
 			return nil, fmt.Errorf("record claim attempt: %w", err)
@@ -210,7 +269,7 @@ func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 			"wipe": spec.Wipe != nil,
 			// Reports only WHETHER key material was supplied. The blobs
 			// themselves never enter a step result.
-			"archiveKeySupplied": spec.ArchiveKey.present(),
+			"archiveKeySupplied": spec.ArchiveKeyID != "",
 		})
 	}
 }
@@ -289,7 +348,7 @@ func claimEnumerate() jobs.DoFn {
 // disk as it is NOW. Nothing about it reaches the agent: it selects the same
 // format the ordinary blank-disk path already runs, so the agent's boot-device
 // exclusion and fingerprint re-check apply to it unchanged.
-func claimCheckExisting() jobs.DoFn {
+func claimCheckExisting(store *Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := ParseClaimSpec(sc.Spec)
 		if err != nil {
@@ -367,14 +426,18 @@ func claimCheckExisting() jobs.DoFn {
 		// key the marker names. Recording a DIFFERENT key against them would
 		// leave an archive that reads as decryptable and is not — discovered,
 		// as always, on the day it was needed.
-		if k := spec.ArchiveKey; k.present() && set.KeyID != "" && k.KeyID != set.KeyID {
+		key, err := claimKey(sc, store, spec)
+		if err != nil {
+			return nil, err
+		}
+		if k := key; k.present() && set.KeyID != "" && k.KeyID != set.KeyID {
 			return nil, fmt.Errorf("refusing to adopt %s: its generations are encrypted under key %s, and the claim supplies key %s. Supply the wrapped blobs for the disk's own key, or pick a different disk",
 				res.DevicePath, set.KeyID, k.KeyID)
 		}
 		if err := checkLegacySymmetricKey(res.DevicePath, set); err != nil {
 			return nil, err
 		}
-		if err := checkAdoptedKeyCustody(res.DevicePath, set, spec.ArchiveKey); err != nil {
+		if err := checkAdoptedKeyCustody(res.DevicePath, set, key); err != nil {
 			return nil, err
 		}
 		if set.KeyID != "" && !markerCarriesWrappings(set) {
@@ -438,7 +501,7 @@ func priorEnumerate(sc *jobs.StepCtx, spec *ClaimSpec) (*enumerateResult, error)
 // re-derives the plan from the spec the way step 3 re-derives an enumeration:
 // re-deriving is how a step ends up formatting a disk on the strength of
 // evidence nothing checked. A missing plan fails the job with nothing written.
-func claimClaim(cfg Config, inv *inventory.Store) jobs.DoFn {
+func claimClaim(cfg Config, inv *inventory.Store, store *Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := ParseClaimSpec(sc.Spec)
 		if err != nil {
@@ -460,13 +523,19 @@ func claimClaim(cfg Config, inv *inventory.Store) jobs.DoFn {
 			return adoptExisting(sc, &plan)
 		}
 
+		// The staged key is put into the bus command here, at dispatch, and
+		// nowhere else: the disk's marker needs it, the ledger must not have it.
+		key, err := claimKey(sc, store, spec)
+		if err != nil {
+			return nil, err
+		}
 		keyID, keyAlg, publicKey, wrappedPass, wrappedRecovery := "", "", "", "", ""
-		if spec.ArchiveKey.present() {
-			keyID = spec.ArchiveKey.KeyID
-			keyAlg = spec.ArchiveKey.Alg
-			publicKey = spec.ArchiveKey.PublicKey
-			wrappedPass = spec.ArchiveKey.WrappedByPassphrase
-			wrappedRecovery = spec.ArchiveKey.WrappedByRecoveryCode
+		if key.present() {
+			keyID = key.KeyID
+			keyAlg = key.Alg
+			publicKey = key.PublicKey
+			wrappedPass = key.WrappedByPassphrase
+			wrappedRecovery = key.WrappedByRecoveryCode
 		}
 		// Through claimCmdBytes, never json.Marshal: that is where the
 		// version-skew gate on Purpose lives, and a claim this agent would
@@ -626,6 +695,10 @@ func claimPersist(store *Store) jobs.DoFn {
 			row.Status == TargetClaimed && row.PartUUID == out.PartUUID {
 			return json.Marshal(row)
 		}
+		key, err := claimKey(sc, store, spec)
+		if err != nil {
+			return nil, err
+		}
 
 		res := ClaimResult{
 			PartUUID:    out.PartUUID,
@@ -636,11 +709,11 @@ func claimPersist(store *Store) jobs.DoFn {
 			Fingerprint: out.Fingerprint,
 			Adopted:     out.Adopted,
 			Wiped:       out.Wiped,
-			// The wrapped blobs come from the SPEC and go straight to the
-			// store. They are the only §4.6 material this package touches, they
-			// are ciphertext, and they never pass through a step result, a log
-			// line or an event payload on the way.
-			Key: spec.ArchiveKey,
+			// The wrapped blobs come from the key staged with the job and go
+			// straight to the target row. They are the only §4.6 material this
+			// package touches, they are ciphertext, and they never pass through
+			// a spec, a step result, a log line or an event payload on the way.
+			Key: key,
 			At:  time.Now().UTC(),
 		}
 		if out.Adopted && out.KeyID != "" {
@@ -708,6 +781,11 @@ func supersedePriorTargets(sc *jobs.StepCtx, store *Store) {
 // and this hook has no business overwriting it.
 func finalizeTargetRow(store *Store) func(context.Context, string, bool, string) {
 	return func(ctx context.Context, jobID string, success bool, errMsg string) {
+		// The staged key has served its purpose on every path: step 5 copied it
+		// onto the target row, or the job ended without a target to hold it.
+		if err := store.DiscardStagedClaimKey(ctx, jobID); err != nil {
+			log.Printf("storage: discard staged archive key for %s: %v", jobID, err)
+		}
 		row, err := store.GetByJob(ctx, jobID)
 		if err != nil || row == nil {
 			return // not a claim job, or the row was never created
@@ -738,6 +816,7 @@ func finalizeTargetRow(store *Store) func(context.Context, string, bool, string)
 // reached a terminal state, never from a clock — a claim legitimately takes
 // fifteen minutes, and a timeout reaper would fail live ones.
 func ReconcileStrandedRows(ctx context.Context, store *Store, jobStore *jobs.Store) error {
+	discardStrandedClaimKeys(ctx, store, jobStore)
 	rows, err := store.ListPending(ctx)
 	if err != nil {
 		return err
@@ -907,4 +986,28 @@ func checkAdoptedKeyCustody(devicePath string, set *proto.StorageBackupSet, k *A
 			devicePath)
 	}
 	return nil
+}
+
+// discardStrandedClaimKeys deletes staged claim keys whose job is terminal or
+// was never recorded — left by a process that stopped before the terminal hook
+// ran, or between staging and recording the job. Decided from the job's state,
+// never from a clock. Best effort: a failure is logged and retried next start.
+func discardStrandedClaimKeys(ctx context.Context, store *Store, jobStore *jobs.Store) {
+	ids, err := store.StagedClaimKeyJobs(ctx)
+	if err != nil {
+		log.Printf("storage: list staged archive keys: %v", err)
+		return
+	}
+	for _, id := range ids {
+		j, err := jobStore.GetJob(ctx, id)
+		if err != nil {
+			continue
+		}
+		if j != nil && j.Status != jobs.StatusFailed && j.Status != jobs.StatusSucceeded && j.Status != jobs.StatusCancelled {
+			continue // still genuinely running
+		}
+		if err := store.DiscardStagedClaimKey(ctx, id); err != nil {
+			log.Printf("storage: discard stranded archive key for %s: %v", id, err)
+		}
+	}
 }

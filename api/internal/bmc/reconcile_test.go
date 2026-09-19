@@ -3,6 +3,7 @@ package bmc
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,5 +147,50 @@ func TestStatusSeed_IgnoresMismatchedPayloadNodeID(t *testing.T) {
 	defer s.mu.Unlock()
 	if s.sweeping || !s.lastDone.IsZero() {
 		t.Errorf("a registration with a mismatched payload node id started a sweep")
+	}
+}
+
+// A config recorded before the credential had its own settings key carries it
+// inline. The re-push spec — persisted in the job ledger — must not, so the
+// credential moves to its key and the spec goes without it
+// (geekdojo/geekdojo-brain#493, gate 6).
+func TestReconcile_MovesALegacyInlineCredentialOutOfTheSpec(t *testing.T) {
+	const secret = "SENTINEL-LEGACY-UNLOCK"
+	ctx := context.Background()
+	st := newSetupStore(t)
+	for k, v := range map[string]string{
+		setup.KeyBMCBackend:  "bitscope",
+		setup.KeyBMCHostNode: "host-1",
+		setup.KeyBMCConfig:   `{"targets":[{"pos":"A-0","node_id":"node-1"}],"unlock":"` + secret + `"}`,
+	} {
+		if err := st.Set(ctx, k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var spec json.RawMessage
+	r := &reconciler{
+		st:   st,
+		busy: func(context.Context) (bool, error) { return false, nil },
+		submit: func(_ context.Context, _ string, s json.RawMessage, _ string) error {
+			spec = s
+			return nil
+		},
+	}
+	r.onRegistered(regMsg(t, "host-1", nil))
+	if spec == nil {
+		t.Fatal("no re-push submitted")
+	}
+	if strings.Contains(string(spec), secret) {
+		t.Errorf("re-push spec carries the credential: %s", spec)
+	}
+	if got := StoredCredential(ctx, st, "bitscope"); got != secret {
+		t.Errorf("credential key = %q, want the legacy inline value moved there", got)
+	}
+	var cs ConfigureSpec
+	if err := json.Unmarshal(spec, &cs); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseInlineCredential(cs.Kind, cs.Config); err != nil {
+		t.Errorf("the validate step would refuse the re-push: %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
@@ -21,7 +22,14 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	// A failed move is logged, not fatal: the row keeps working as before and
+	// the move is retried on the next open. Refusing to start would take the
+	// whole api down over one row.
+	if err := s.migrateInlineSecrets(ctx); err != nil {
+		log.Printf("firewall: move inline wan_config secrets: %v", err)
+	}
+	return s, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -31,21 +39,55 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 
 // ----- Intents ------------------------------------------------------------
 
+// CreateIntent persists i. A wan_config secret is split out of the spec into
+// the write-only secret table (secrets.go) in the same transaction, and i is
+// updated in place to the form a reader sees: no secret, SecretSet set.
 func (s *Store) CreateIntent(ctx context.Context, i *Intent) error {
-	_, err := s.db.ExecContext(ctx, `
+	spec, secret, err := splitSecret(i.Kind, i.Spec)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
         INSERT INTO firewall_intents (id, kind, name, enabled, spec, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		i.ID, i.Kind, i.Name, boolToInt(i.Enabled), string(i.Spec),
-		ms(i.CreatedAt), ms(i.UpdatedAt))
-	return err
+		i.ID, i.Kind, i.Name, boolToInt(i.Enabled), string(spec),
+		ms(i.CreatedAt), ms(i.UpdatedAt)); err != nil {
+		return err
+	}
+	if err := putSecret(ctx, tx, i.ID, secret); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	i.Spec = spec
+	i.SecretSet = secret != ""
+	return nil
 }
 
+// UpdateIntent overwrites i. As in CreateIntent the secret is split out of the
+// spec; an update whose spec carries no secret keeps the stored one. i is
+// updated in place to the reader's form.
 func (s *Store) UpdateIntent(ctx context.Context, i *Intent) error {
-	res, err := s.db.ExecContext(ctx, `
+	spec, secret, err := splitSecret(i.Kind, i.Spec)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
         UPDATE firewall_intents
         SET kind = ?, name = ?, enabled = ?, spec = ?, updated_at = ?
         WHERE id = ?`,
-		i.Kind, i.Name, boolToInt(i.Enabled), string(i.Spec),
+		i.Kind, i.Name, boolToInt(i.Enabled), string(spec),
 		ms(i.UpdatedAt), i.ID)
 	if err != nil {
 		return err
@@ -54,6 +96,19 @@ func (s *Store) UpdateIntent(ctx context.Context, i *Intent) error {
 	if n == 0 {
 		return sql.ErrNoRows
 	}
+	if err := putSecret(ctx, tx, i.ID, secret); err != nil {
+		return err
+	}
+	var set int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM firewall_intent_secrets WHERE intent_id = ?`, i.ID).Scan(&set); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	i.Spec = spec
+	i.SecretSet = set > 0
 	return nil
 }
 
@@ -71,16 +126,16 @@ func (s *Store) DeleteIntent(ctx context.Context, id string) error {
 
 func (s *Store) GetIntent(ctx context.Context, id string) (*Intent, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT id, kind, name, enabled, spec, created_at, updated_at
-        FROM firewall_intents WHERE id = ?`, id)
+        SELECT `+intentCols+`
+        FROM firewall_intents i WHERE i.id = ?`, id)
 	return scanIntent(row.Scan)
 }
 
 func (s *Store) ListIntents(ctx context.Context) ([]*Intent, error) {
 	// Sort by created_at then id so Compile produces deterministic hashes.
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, kind, name, enabled, spec, created_at, updated_at
-        FROM firewall_intents ORDER BY created_at ASC, id ASC`)
+        SELECT `+intentCols+`
+        FROM firewall_intents i ORDER BY i.created_at ASC, i.id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +172,11 @@ func (s *Store) DisableOtherWANConfigs(ctx context.Context, keepID string) (int6
 	return n, nil
 }
 
+// intentCols is the read projection. The secret itself is never selected on a
+// read path — only whether one exists (ListIntentsForCompile reads it apart).
+const intentCols = `i.id, i.kind, i.name, i.enabled, i.spec, i.created_at, i.updated_at,
+        EXISTS (SELECT 1 FROM firewall_intent_secrets x WHERE x.intent_id = i.id)`
+
 func scanIntent(scan func(...any) error) (*Intent, error) {
 	var (
 		i         Intent
@@ -124,14 +184,16 @@ func scanIntent(scan func(...any) error) (*Intent, error) {
 		spec      string
 		createdAt int64
 		updatedAt int64
+		secretSet int
 	)
-	if err := scan(&i.ID, &i.Kind, &i.Name, &enabled, &spec, &createdAt, &updatedAt); err != nil {
+	if err := scan(&i.ID, &i.Kind, &i.Name, &enabled, &spec, &createdAt, &updatedAt, &secretSet); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	i.Enabled = enabled != 0
+	i.SecretSet = secretSet != 0
 	i.Spec = json.RawMessage(spec)
 	i.CreatedAt = fromMs(createdAt)
 	i.UpdatedAt = fromMs(updatedAt)

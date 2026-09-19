@@ -8,13 +8,16 @@ import (
 // Intent is the api's persisted form of a user-declared firewall intent.
 // Spec is event-kind-specific JSON (see proto.PortForwardSpec etc).
 type Intent struct {
-	ID        string          `json:"id"`
-	Kind      string          `json:"kind"`
-	Name      string          `json:"name"`
-	Enabled   bool            `json:"enabled"`
-	Spec      json.RawMessage `json:"spec"`
-	CreatedAt time.Time       `json:"createdAt"`
-	UpdatedAt time.Time       `json:"updatedAt"`
+	ID      string          `json:"id"`
+	Kind    string          `json:"kind"`
+	Name    string          `json:"name"`
+	Enabled bool            `json:"enabled"`
+	Spec    json.RawMessage `json:"spec"`
+	// SecretSet reports that a write-only secret (a PPPoE password) is stored
+	// for this intent. The secret itself is never in Spec on a read.
+	SecretSet bool      `json:"secretSet,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // NodeState is the api's view of a firewall node's apply/reconcile status.
