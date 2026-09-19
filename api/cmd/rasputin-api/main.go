@@ -244,6 +244,7 @@ func main() {
 		log.Printf("rasputin-api: preloaded %d bus token(s) from provisioning seed", n)
 	}
 	logUnboundBusTokens(ctx, busTokenStore)
+	logRolelessBusTokens(ctx, busTokenStore)
 
 	// The api's own node id — the system.update saga skips this one (the
 	// operator updates the controlplane node manually after the cascade), and
@@ -1870,6 +1871,23 @@ func logUnboundBusTokens(ctx context.Context, store *busauth.Store) {
 	}
 	if n > 0 {
 		log.Printf("rasputin-api: WARNING %d live UNBOUND bus join token(s) — the bus refuses them, so a node seeded with one cannot join; list them with GET /api/bus/tokens (no nodeId), revoke them, and re-provision those nodes with a token bound to their node id", n)
+	}
+}
+
+// logRolelessBusTokens reports live bound join tokens whose row names no node
+// role at startup. Every token is bound to a role (busauth role.go); the store
+// fills the role wherever the row says what it is, and refuses the rest at the
+// bus, so a node still seeded with one cannot join. Such a token appears in GET
+// /api/bus/tokens with no role; the operator revokes it and mints a
+// replacement with the node's role.
+func logRolelessBusTokens(ctx context.Context, store *busauth.Store) {
+	n, err := store.CountActiveRoleless(ctx)
+	if err != nil {
+		log.Printf("rasputin-api: counting role-less bus tokens: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("rasputin-api: WARNING %d live bus join token(s) name no node role — the bus refuses them, so a node seeded with one cannot join; list them with GET /api/bus/tokens (no role), revoke them, and mint replacements with the node's role", n)
 	}
 }
 

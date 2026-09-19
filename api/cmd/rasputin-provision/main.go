@@ -366,7 +366,9 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 		if err := writeFile(filepath.Join(dir, mn.SeedFile), seed, 0o600); err != nil {
 			return manifest{}, err
 		}
-		preseed = append(preseed, busauth.PreseedToken{Hash: hash, NodeID: n.ID, Label: n.Role})
+		// The role rides twice: as role, which the controlplane binds the
+		// token to, and as the label, the display text it has always been.
+		preseed = append(preseed, busauth.PreseedToken{Hash: hash, NodeID: n.ID, Label: n.Role, Role: proto.NodeRole(n.Role)})
 		man.Nodes = append(man.Nodes, mn)
 	}
 

@@ -166,7 +166,7 @@ func assertLive(t *testing.T, srv *bus.Server, a *testAgent) {
 
 func mintBoundViaAPI(t *testing.T, f *apiFixture, cookie *http.Cookie, nodeID string) (token, id string) {
 	t.Helper()
-	w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"label":"test","nodeId":"`+nodeID+`"}`, cookie)
+	w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"role":"compute","label":"test","nodeId":"`+nodeID+`"}`, cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("mint for %s = %d %s", nodeID, w.Code, w.Body.String())
 	}

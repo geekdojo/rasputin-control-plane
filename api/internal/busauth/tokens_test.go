@@ -40,7 +40,7 @@ func TestStore_MintValidateRevoke(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 
-	plaintext, id, err := s.MintBound(ctx, "firewall", "fw-1")
+	plaintext, id, err := s.MintBound(ctx, "firewall", "fw-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestStore_MintValidateRevoke(t *testing.T) {
 func TestStore_HashAtRest(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
-	plaintext, id, err := s.MintBound(ctx, "", "node-a")
+	plaintext, id, err := s.MintBound(ctx, "", "node-a", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestStore_BoundToken(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 
-	plaintext, _, err := s.MintBound(ctx, "fw", "fw-1")
+	plaintext, _, err := s.MintBound(ctx, "fw", "fw-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestStore_BoundToken(t *testing.T) {
 func TestStore_MintBoundRefusesUnbound(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
-	if pt, id, err := s.MintBound(ctx, "unbound", ""); !errors.Is(err, ErrUnboundToken) || pt != "" || id != "" {
+	if pt, id, err := s.MintBound(ctx, "unbound", "", "compute"); !errors.Is(err, ErrUnboundToken) || pt != "" || id != "" {
 		t.Fatalf("MintBound(no node id) = (%q, %q, %v); want (\"\", \"\", ErrUnboundToken)", pt, id, err)
 	}
 	infos, err := s.List(ctx)
@@ -163,7 +163,7 @@ func TestStore_LegacyUnboundTokenNeverValidates(t *testing.T) {
 		t.Fatalf("insert empty-node token: %v", err)
 	}
 	// Bound and revoked tokens are not counted.
-	if _, _, err := s.MintBound(ctx, "bound", "node-a"); err != nil {
+	if _, _, err := s.MintBound(ctx, "bound", "node-a", "compute"); err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
 	_, revokedID := insertLegacyUnbound(t, s, "legacy-revoked")
@@ -281,13 +281,13 @@ func TestGenerateToken_HashMatches(t *testing.T) {
 func TestStore_RevokeByNodeID(t *testing.T) {
 	s := newTokenStore(t)
 	ctx := context.Background()
-	if _, _, err := s.MintBound(ctx, "compute", "bench-compute1"); err != nil {
+	if _, _, err := s.MintBound(ctx, "compute", "bench-compute1", "compute"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.MintBound(ctx, "compute", "bench-compute1"); err != nil {
+	if _, _, err := s.MintBound(ctx, "compute", "bench-compute1", "compute"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.MintBound(ctx, "compute", "bench-compute2"); err != nil {
+	if _, _, err := s.MintBound(ctx, "compute", "bench-compute2", "compute"); err != nil {
 		t.Fatal(err)
 	}
 

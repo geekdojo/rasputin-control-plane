@@ -98,11 +98,11 @@ func TestBus_NodeCannotReadOtherNodesReplies(t *testing.T) {
 	eb := startEnforcedBus(t, "127.0.0.1")
 	api := eb.srv.Conn()
 
-	tokenA, _, err := eb.tokens.MintBound(ctx, "node a", "nodea")
+	tokenA, _, err := eb.tokens.MintBound(ctx, "node a", "nodea", "compute")
 	if err != nil {
 		t.Fatalf("MintBound(nodea): %v", err)
 	}
-	tokenB, _, err := eb.tokens.MintBound(ctx, "node b", "nodeb")
+	tokenB, _, err := eb.tokens.MintBound(ctx, "node b", "nodeb", "compute")
 	if err != nil {
 		t.Fatalf("MintBound(nodeb): %v", err)
 	}

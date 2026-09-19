@@ -35,6 +35,10 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Label  string `json:"label"`
 		NodeID string `json:"nodeId"` // required: the node id the token is bound to
+		// Role is the node role the token is for. Optional only because the
+		// Add-node wizard has always sent the role as the label; one of the
+		// two must name a role (busauth.ResolveRole).
+		Role proto.NodeRole `json:"role"`
 	}
 	// Body is optional; ignore decode errors on an empty body.
 	_ = json.NewDecoder(r.Body).Decode(&body)
@@ -51,6 +55,21 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if !busauth.ValidNodeID(body.NodeID) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid nodeId %q: %s", body.NodeID, busauth.NodeIDRule))
+		return
+	}
+
+	// Every token is bound to the role of the node it is for (busauth role.go):
+	// the bus refuses a token that names none, so minting one would hand the
+	// operator a seed that can never join. The controlplane's role is not
+	// mintable here: the only controlplane token is the one the api mints for
+	// its own agent at start.
+	role, err := busauth.ResolveRole(body.Role, body.Label)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "role is required: every join token is bound to the role of the node it is for — send role (one of firewall, compute, storage); "+err.Error())
+		return
+	}
+	if role == proto.RoleControlPlane {
+		writeError(w, http.StatusBadRequest, "role controlplane cannot be minted: the controlplane's own agent token is minted by the api at start")
 		return
 	}
 
@@ -72,7 +91,7 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	plaintext, id, err := s.busTokens.MintBound(r.Context(), body.Label, body.NodeID)
+	plaintext, id, err := s.busTokens.MintBound(r.Context(), body.Label, body.NodeID, role)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -85,6 +104,7 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		"id":     id,
 		"label":  body.Label,
 		"nodeId": body.NodeID,
+		"role":   string(role),
 		"token":  plaintext,
 		"busPin": s.busPin(),
 	})

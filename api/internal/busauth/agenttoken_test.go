@@ -169,7 +169,7 @@ func TestEnsureAgentToken_ReMints(t *testing.T) {
 			}
 		}, "open to more than its owner"},
 		{"bound to another node", func(t *testing.T, s *Store, path string) {
-			other, _, err := s.MintBound(context.Background(), "x", "cp-2")
+			other, _, err := s.MintBound(context.Background(), "x", "cp-2", "compute")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -183,7 +183,7 @@ func TestEnsureAgentToken_ReMints(t *testing.T) {
 			ctx := context.Background()
 			s := newTokenStore(t)
 			path := agentTokenPath(t)
-			bystander, _, err := s.MintBound(ctx, "compute", "compute-1")
+			bystander, _, err := s.MintBound(ctx, "compute", "compute-1", "compute")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -228,7 +228,7 @@ func TestEnsureAgentToken_ReMintsAfterARestoredDatabase(t *testing.T) {
 	restored := newTokenStore(t)
 	// The restored database still holds the token the backed-up controlplane
 	// minted for its agent — a different one — which must not stay live.
-	stale, _, err := restored.MintBound(ctx, AgentTokenLabel, "cp-1")
+	stale, _, err := restored.MintBound(ctx, AgentTokenLabel, "cp-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}

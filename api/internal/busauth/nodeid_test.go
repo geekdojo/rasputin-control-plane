@@ -50,7 +50,7 @@ func TestValidNodeID(t *testing.T) {
 func TestInvalidNodeIDErrorsAreTyped(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
-	if _, _, err := s.MintBound(ctx, "t", "a.b"); !errors.Is(err, ErrInvalidNodeID) {
+	if _, _, err := s.MintBound(ctx, "t", "a.b", "compute"); !errors.Is(err, ErrInvalidNodeID) {
 		t.Errorf("MintBound error = %v, want ErrInvalidNodeID", err)
 	}
 	_, h, _ := GenerateToken()
@@ -62,7 +62,7 @@ func TestInvalidNodeIDErrorsAreTyped(t *testing.T) {
 	if n, err := s.PreloadHashes(ctx, []PreseedToken{{Hash: h, Label: "unbound"}}); !errors.Is(err, ErrUnboundToken) || n != 0 {
 		t.Errorf("PreloadHashes unbound entry = (%d, %v), want (0, ErrUnboundToken)", n, err)
 	}
-	if _, _, err := s.MintBound(ctx, "t", ""); !errors.Is(err, ErrUnboundToken) {
+	if _, _, err := s.MintBound(ctx, "t", "", "compute"); !errors.Is(err, ErrUnboundToken) {
 		t.Errorf("MintBound with no node id error = %v, want ErrUnboundToken", err)
 	}
 }

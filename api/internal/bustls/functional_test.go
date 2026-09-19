@@ -539,7 +539,7 @@ func (c *cp) agentTokenFile() string {
 // (geekdojo-brain#140).
 func (c *cp) mint(t *testing.T, id string) string {
 	t.Helper()
-	tok, _, err := c.tokens.MintBound(context.Background(), id, id)
+	tok, _, err := c.tokens.MintBound(context.Background(), id, id, "compute")
 	if err != nil {
 		t.Fatalf("MintBound(%s): %v", id, err)
 	}
@@ -719,7 +719,7 @@ func TestFunctional_AutomaticLadder(t *testing.T) {
 	cpState := t.TempDir()
 	seedUncommittedMock(t, cpState)
 	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: c.agentTokenFile(), stateDir: cpState})
-	n1Token, _, err := c.tokens.MintBound(ctx, "n1", "n1")
+	n1Token, _, err := c.tokens.MintBound(ctx, "n1", "n1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}

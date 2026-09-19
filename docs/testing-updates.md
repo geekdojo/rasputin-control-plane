@@ -46,12 +46,15 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
 
      ```sh
      curl -s -b cookies.txt -H 'Content-Type: application/json' \
-       -d '{"label":"laptop agent","nodeId":"node-dev"}' \
+       -d '{"label":"laptop agent","nodeId":"node-dev","role":"compute"}' \
        http://localhost:8080/api/bus/tokens
      ```
 
      `-b cookies.txt` sends the session cookie from step 4, `-H` says the body is JSON and
-     `-d` is the body: `nodeId` must be exactly the agent's `RASPUTIN_NODE_ID`.
+     `-d` is the body: `nodeId` must be exactly the agent's `RASPUTIN_NODE_ID`, and `role`
+     is the role the token is bound to — one of `compute`, `firewall` or `storage`. A mint
+     that names no role is refused with 400, because the bus refuses a token with no role.
+     `label` is free text you choose, shown in the token list.
 
 3. **Start an agent** in mock-update mode, from the repository root:
 

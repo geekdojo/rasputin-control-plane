@@ -167,7 +167,7 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 		r.userTTL = injectedTTL
 		r.tokens = admitRecorder{inner: r.tokens, admits: admits}
 	})
-	token, _, err := eb.tokens.MintBound(context.Background(), "expiry", node)
+	token, _, err := eb.tokens.MintBound(context.Background(), "expiry", node, "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}

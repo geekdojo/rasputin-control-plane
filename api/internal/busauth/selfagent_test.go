@@ -71,7 +71,7 @@ func TestRevokeByNodeID_RefusesTheControlplanesOwnNodeID(t *testing.T) {
 
 	// Every other node is unaffected — this is the node-removal cascade, and
 	// removing an ordinary node must still evict it.
-	other, _, err := s.MintBound(ctx, "compute", "compute-1")
+	other, _, err := s.MintBound(ctx, "compute", "compute-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestRevoke_ProtectsOnlyTheApiMintedToken(t *testing.T) {
 	s := newTokenStore(t)
 	path, selfID := ensureSelf(t, s, "cp-1")
 
-	node, nodeID, err := s.MintBound(ctx, "compute", "compute-1")
+	node, nodeID, err := s.MintBound(ctx, "compute", "compute-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestRevoke_ProtectsOnlyTheApiMintedToken(t *testing.T) {
 	// An operator-minted token bound to the controlplane's own node id. It is
 	// not what the agent presents (that is the file's token), so refusing to
 	// revoke it would strand a credential the operator wants gone.
-	stray, strayID, err := s.MintBound(ctx, "a lookalike", "cp-1")
+	stray, strayID, err := s.MintBound(ctx, "a lookalike", "cp-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestRevoke_DoesNotProtectByLabel(t *testing.T) {
 	if got := dev.SelfNodeID(); got != "" {
 		t.Fatalf("SelfNodeID on a store that never ensured = %q, want \"\"", got)
 	}
-	lookalike, lookalikeID, err := dev.MintBound(ctx, AgentTokenLabel, "cp-1")
+	lookalike, lookalikeID, err := dev.MintBound(ctx, AgentTokenLabel, "cp-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestRevoke_DoesNotProtectByLabel(t *testing.T) {
 	// still revocable — only the marked one is not.
 	s := newTokenStore(t)
 	_, selfID := ensureSelf(t, s, "cp-1")
-	_, dupID, err := s.MintBound(ctx, AgentTokenLabel, "cp-1")
+	_, dupID, err := s.MintBound(ctx, AgentTokenLabel, "cp-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestEnsureAgentToken_AdoptsAnUnmarkedTokenFromAnEarlierBuild(t *testing.T) 
 
 	// Exactly what the previous build left behind: a plain MintBound row (no
 	// marker) whose plaintext is in the agent token file.
-	plaintext, id, err := s.MintBound(ctx, AgentTokenLabel, "cp-1")
+	plaintext, id, err := s.MintBound(ctx, AgentTokenLabel, "cp-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestEnsureAgentToken_AdoptsAnUnmarkedTokenFromAnEarlierBuild(t *testing.T) 
 	}
 
 	// Put it back the way the old build had it and start.
-	plaintext, id, err = s.MintBound(ctx, AgentTokenLabel, "cp-1")
+	plaintext, id, err = s.MintBound(ctx, AgentTokenLabel, "cp-1", "compute")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,10 +268,10 @@ func TestList_MarksTheSelfAgentToken(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 	_, selfID := ensureSelf(t, s, "cp-1")
-	if _, _, err := s.MintBound(ctx, "compute", "compute-1"); err != nil {
+	if _, _, err := s.MintBound(ctx, "compute", "compute-1", "compute"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.MintBound(ctx, AgentTokenLabel, "cp-1"); err != nil {
+	if _, _, err := s.MintBound(ctx, AgentTokenLabel, "cp-1", "compute"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -295,7 +295,7 @@ func TestList_MarksTheSelfAgentToken(t *testing.T) {
 
 	// A dev api marks nothing, because it protects nothing.
 	dev := newTokenStore(t)
-	if _, _, err := dev.MintBound(ctx, AgentTokenLabel, "cp-1"); err != nil {
+	if _, _, err := dev.MintBound(ctx, AgentTokenLabel, "cp-1", "compute"); err != nil {
 		t.Fatal(err)
 	}
 	devInfos, err := dev.List(ctx)

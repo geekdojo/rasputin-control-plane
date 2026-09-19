@@ -23,7 +23,7 @@ func TestBus_UnboundTokenRefused_BoundUnaffected(t *testing.T) {
 	api := eb.srv.Conn()
 
 	legacy, legacyID := insertLegacyUnbound(t, eb.tokens, "legacy")
-	bound, _, err := eb.tokens.MintBound(ctx, "beta", "beta")
+	bound, _, err := eb.tokens.MintBound(ctx, "beta", "beta", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
 	}
