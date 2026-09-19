@@ -31,8 +31,15 @@ import (
 // (deferred items).
 type RealClient struct {
 	baseURL string
-	apiKey  string
 	hc      *http.Client
+
+	// keyMu guards apiKey and keyGen. keyGen counts replacements, so a
+	// request that got a 401 can tell whether someone already replaced the
+	// key it used (retry with the new one) or it must mint one itself.
+	keyMu   sync.Mutex
+	apiKey  string
+	keyGen  uint64
+	refresh func(context.Context) (string, error)
 
 	usersMu sync.RWMutex
 	users   map[string]string // user name -> user id (uint64 as string)
@@ -52,6 +59,11 @@ type RealClientConfig struct {
 	TLSConfig *tls.Config
 	// RequestTimeout caps each HTTP round-trip. Defaults to 30s.
 	RequestTimeout time.Duration
+	// RefreshAPIKey, when set, mints a replacement key. A request answered
+	// 401 calls it (once per key, shared by concurrent requests) and is
+	// retried once with the new key. Nil for an operator-supplied key, which
+	// the api cannot replace.
+	RefreshAPIKey func(context.Context) (string, error)
 }
 
 func NewRealClient(cfg RealClientConfig) (*RealClient, error) {
@@ -72,6 +84,7 @@ func NewRealClient(cfg RealClientConfig) (*RealClient, error) {
 	return &RealClient{
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
 		apiKey:  cfg.APIKey,
+		refresh: cfg.RefreshAPIKey,
 		hc:      &http.Client{Transport: transport, Timeout: timeout},
 		users:   map[string]string{},
 	}, nil
@@ -83,28 +96,30 @@ func (c *RealClient) Backend() string { return "headscale" }
 
 // do issues a request, marshals body (if non-nil), and decodes the response
 // (if out non-nil). Non-2xx responses become errors carrying the status code
-// and (truncated) response body.
+// and (truncated) response body. A 401 with a RefreshAPIKey configured
+// replaces the key and retries the request once.
 func (c *RealClient) do(ctx context.Context, method, path string, body, out any) error {
-	var reqBody io.Reader
+	var buf []byte
 	if body != nil {
-		buf, err := json.Marshal(body)
-		if err != nil {
+		var err error
+		if buf, err = json.Marshal(body); err != nil {
 			return fmt.Errorf("mesh: marshal %s %s: %w", method, path, err)
 		}
-		reqBody = bytes.NewReader(buf)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	key, gen := c.currentKey()
+	resp, err := c.send(ctx, method, path, buf, key)
 	if err != nil {
-		return fmt.Errorf("mesh: build %s %s: %w", method, path, err)
+		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Accept", "application/json")
-	if reqBody != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return fmt.Errorf("mesh: %s %s: %w", method, path, err)
+	if resp.StatusCode == http.StatusUnauthorized && c.refresh != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		if key, err = c.replaceKey(ctx, gen); err != nil {
+			return fmt.Errorf("mesh: %s %s: HTTP 401 and the admin key could not be replaced: %w", method, path, err)
+		}
+		if resp, err = c.send(ctx, method, path, buf, key); err != nil {
+			return err
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -124,6 +139,55 @@ func (c *RealClient) do(ctx context.Context, method, path string, body, out any)
 		return fmt.Errorf("mesh: decode %s %s: %w", method, path, err)
 	}
 	return nil
+}
+
+func (c *RealClient) send(ctx context.Context, method, path string, buf []byte, key string) (*http.Response, error) {
+	var reqBody io.Reader
+	if buf != nil {
+		reqBody = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("mesh: build %s %s: %w", method, path, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "application/json")
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mesh: %s %s: %w", method, path, err)
+	}
+	return resp, nil
+}
+
+func (c *RealClient) currentKey() (string, uint64) {
+	c.keyMu.Lock()
+	defer c.keyMu.Unlock()
+	return c.apiKey, c.keyGen
+}
+
+// replaceKey returns a key to retry with after a 401 on the key of
+// generation gen. If another request already replaced that key, the
+// replacement is reused; otherwise one is minted. Holding keyMu across the
+// mint makes concurrent 401s share one mint.
+func (c *RealClient) replaceKey(ctx context.Context, gen uint64) (string, error) {
+	c.keyMu.Lock()
+	defer c.keyMu.Unlock()
+	if c.keyGen != gen {
+		return c.apiKey, nil
+	}
+	key, err := c.refresh(ctx)
+	if err != nil {
+		return "", err
+	}
+	if key == "" {
+		return "", errors.New("refresh returned an empty key")
+	}
+	c.apiKey = key
+	c.keyGen++
+	return key, nil
 }
 
 // HTTPError carries a non-2xx Headscale response. The Body field is the raw

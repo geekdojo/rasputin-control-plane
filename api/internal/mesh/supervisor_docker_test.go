@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ============================================================================
@@ -36,6 +38,10 @@ type fakeDocker struct {
 	calls           []dockerCall
 	errOnCmd        map[string]error // keyed by first arg (e.g. "pull")
 	mintCount       int              // # of `docker exec ... apikeys create`
+	// apiKeys is Headscale's api key table as the fake CLI sees it:
+	// prefix -> expired. Seed it to model keys minted before the test.
+	apiKeys   map[string]bool
+	expireErr error // injected failure for `apikeys expire`
 }
 
 type dockerCall struct {
@@ -44,7 +50,7 @@ type dockerCall struct {
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{errOnCmd: map[string]error{}}
+	return &fakeDocker{errOnCmd: map[string]error{}, apiKeys: map[string]bool{}}
 }
 
 func (f *fakeDocker) record(args []string) {
@@ -131,13 +137,27 @@ func (f *fakeDocker) run(ctx context.Context, name string, args ...string) ([]by
 		return []byte("rasputin-headscale\n"), nil
 	case "exec":
 		// args: exec <container> headscale apikeys create --expiration <dur>
+		//       exec <container> headscale apikeys expire --prefix <p>
 		if !f.containerExists || f.containerState != "running" {
 			return nil, errors.New("container not running")
 		}
+		if len(args) >= 5 && args[3] == "apikeys" && args[4] == "expire" {
+			if f.expireErr != nil {
+				return []byte("Cannot expire Api Key: injected"), f.expireErr
+			}
+			prefix := args[len(args)-1]
+			if _, ok := f.apiKeys[prefix]; !ok {
+				return []byte("Cannot expire Api Key: record not found\n"), errors.New("exit status 1")
+			}
+			f.apiKeys[prefix] = true
+			return []byte("Key expired\n"), nil
+		}
 		f.mintCount++
-		// Mimic the CLI: a human-readable line, then the key on its own line.
-		key := fmt.Sprintf("hskey-fake-%032d", f.mintCount)
-		return []byte("An API key was created:\n" + key + "\n"), nil
+		// Mimic the 0.28 CLI: the key alone, "hskey-api-<12-char prefix>-<secret>".
+		prefix := fmt.Sprintf("pfx%09d", f.mintCount)
+		f.apiKeys[prefix] = false
+		key := "hskey-api-" + prefix + "-" + strings.Repeat("s", 64)
+		return []byte(key + "\n"), nil
 	}
 	return nil, fmt.Errorf("fakeDocker: unhandled command: %v", args)
 }
@@ -864,5 +884,39 @@ func TestStunPublish(t *testing.T) {
 		if got := stunPublish(tc.in); got != tc.want {
 			t.Errorf("stunPublish(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// Headscale's metrics/debug listener is off (an empty address disables it
+// in headscale 0.28.0) and the embedded DERP relay's client verification is
+// written explicitly rather than left to Headscale's default.
+func TestRenderConfig_MetricsOffAndDERPVerifiesClients(t *testing.T) {
+	s, err := NewDockerSupervisor(DockerSupervisorConfig{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewDockerSupervisor: %v", err)
+	}
+	body, err := s.renderConfig()
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	var cfg struct {
+		MetricsListenAddr *string `yaml:"metrics_listen_addr"`
+		DERP              struct {
+			Server struct {
+				VerifyClients *bool `yaml:"verify_clients"`
+			} `yaml:"server"`
+		} `yaml:"derp"`
+	}
+	if err := yaml.Unmarshal(body, &cfg); err != nil {
+		t.Fatalf("rendered config is not YAML: %v", err)
+	}
+	if cfg.MetricsListenAddr == nil || *cfg.MetricsListenAddr != "" {
+		t.Errorf("metrics_listen_addr must be present and empty, got %v", cfg.MetricsListenAddr)
+	}
+	if strings.Contains(string(body), "9090") {
+		t.Errorf("config still names :9090:\n%s", body)
+	}
+	if v := cfg.DERP.Server.VerifyClients; v == nil || !*v {
+		t.Errorf("derp.server.verify_clients must be written as true, got %v", v)
 	}
 }

@@ -43,6 +43,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -254,4 +255,178 @@ func resolveSupervisorStateDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+const sessionKeyTestContainer = "rasputin-headscale-apikey-test"
+
+// TestSupervisor_LiveSessionAPIKey drives the per-start admin key against a
+// real headscale container (the pinned image):
+//
+//  1. a legacy long-lived key file (as older api releases persisted it) is
+//     expired on Headscale by its prefix and then deleted;
+//  2. an api restart (a new supervisor over the same state dir) mints a new
+//     key and the previous process's key stops working (HTTP 401);
+//  3. a client holding a key that has been expired re-mints on the 401 and
+//     its request succeeds;
+//  4. the metrics listener is off.
+func TestSupervisor_LiveSessionAPIKey(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skipf("docker not on PATH: %v", err)
+	}
+	if out, err := exec.Command("docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
+		t.Skipf("docker daemon unreachable; output=%q err=%v", strings.TrimSpace(string(out)), err)
+	}
+	base, err := resolveSupervisorStateDir()
+	if err != nil {
+		t.Fatalf("resolve state dir: %v", err)
+	}
+	stateDir := filepath.Join(base, "session-key")
+	listenAddr := envDefault("SUPERVISOR_APIKEY_LISTEN_ADDR", "127.0.0.1:18081")
+	_ = exec.Command("docker", "rm", "-f", sessionKeyTestContainer).Run()
+	_ = os.RemoveAll(stateDir)
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "rm", "-f", sessionKeyTestContainer).Run()
+		_ = os.RemoveAll(stateDir)
+	})
+	if err := os.MkdirAll(filepath.Join(stateDir, "trust"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	ca, err := EnsureMeshCA(filepath.Join(stateDir, "trust"), "apikey-smoke")
+	if err != nil {
+		t.Fatalf("EnsureMeshCA: %v", err)
+	}
+	newSup := func() *DockerSupervisor {
+		s, err := NewDockerSupervisor(DockerSupervisorConfig{
+			StateDir:      stateDir,
+			ContainerName: sessionKeyTestContainer,
+			ListenAddr:    listenAddr,
+			ServerURL:     "https://" + listenAddr,
+			HealthTimeout: 60 * time.Second,
+			PullTimeout:   3 * time.Minute,
+			MeshCA:        ca,
+		})
+		if err != nil {
+			t.Fatalf("NewDockerSupervisor: %v", err)
+		}
+		return s
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(ca.CertPEM)
+	clientWith := func(key string, refresh func(context.Context) (string, error)) *RealClient {
+		c, err := NewRealClient(RealClientConfig{
+			BaseURL: "https://" + listenAddr, APIKey: key, RefreshAPIKey: refresh,
+			RequestTimeout: 10 * time.Second,
+			TLSConfig:      &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		})
+		if err != nil {
+			t.Fatalf("NewRealClient: %v", err)
+		}
+		return c
+	}
+	status := func(ctx context.Context, key string) int {
+		_, err := clientWith(key, nil).ListNodes(ctx)
+		if err == nil {
+			return 200
+		}
+		var he *HTTPError
+		if errors.As(err, &he) {
+			return he.Status
+		}
+		t.Fatalf("ListNodes: %v", err)
+		return 0
+	}
+	apikeysList := func(ctx context.Context) string {
+		out, err := exec.CommandContext(ctx, "docker", "exec", sessionKeyTestContainer, "headscale", "apikeys", "list").CombinedOutput()
+		if err != nil {
+			t.Fatalf("apikeys list: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	sup1 := newSup()
+	if err := sup1.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// An older api's persisted 10-year key.
+	raw, err := exec.CommandContext(ctx, "docker", "exec", sessionKeyTestContainer,
+		"headscale", "apikeys", "create", "--expiration", "87600h").CombinedOutput()
+	if err != nil {
+		t.Fatalf("mint legacy key: %v\n%s", err, raw)
+	}
+	legacy := parseAPIKey(raw)
+	legacyPrefix, err := headscaleAPIKeyPrefix(legacy)
+	if err != nil {
+		t.Fatalf("legacy key from the real CLI has no readable prefix (%v); output shape: %d bytes", err, len(raw))
+	}
+	if err := os.WriteFile(sup1.legacyAPIKeyPath(), []byte(legacy+"\n"), 0o600); err != nil {
+		t.Fatalf("seed legacy file: %v", err)
+	}
+	if got := status(ctx, legacy); got != 200 {
+		t.Fatalf("legacy key before migration: HTTP %d, want 200", got)
+	}
+
+	key1, err := sup1.MintSessionAPIKey(ctx)
+	if err != nil {
+		t.Fatalf("MintSessionAPIKey (first start): %v", err)
+	}
+	p1, _ := headscaleAPIKeyPrefix(key1)
+	t.Logf("first start: minted %s; legacy %s", p1, legacyPrefix)
+	if got := status(ctx, legacy); got != 401 {
+		t.Errorf("legacy key after migration: HTTP %d, want 401", got)
+	}
+	if _, err := os.Stat(sup1.legacyAPIKeyPath()); !os.IsNotExist(err) {
+		t.Errorf("legacy key file still present: %v", err)
+	}
+	if got := status(ctx, key1); got != 200 {
+		t.Fatalf("session key 1: HTTP %d, want 200", got)
+	}
+
+	// api restart: a new supervisor over the same state dir.
+	sup2 := newSup()
+	if err := sup2.Start(ctx); err != nil {
+		t.Fatalf("re-Start: %v", err)
+	}
+	// A recorded prefix Headscale has never heard of (a restored Headscale
+	// DB, say) must read as done, not be retried forever.
+	f, err := os.OpenFile(sup2.apiKeyPrefixesPath(), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open prefixes: %v", err)
+	}
+	_, _ = f.WriteString("NoSuchPrefx1\n")
+	_ = f.Close()
+	key2, err := sup2.MintSessionAPIKey(ctx)
+	if err != nil {
+		t.Fatalf("MintSessionAPIKey (restart): %v", err)
+	}
+	p2, _ := headscaleAPIKeyPrefix(key2)
+	t.Logf("restart: minted %s", p2)
+	if got := status(ctx, key1); got != 401 {
+		t.Errorf("previous start's key after restart: HTTP %d, want 401", got)
+	}
+	if got := status(ctx, key2); got != 200 {
+		t.Errorf("current key: HTTP %d, want 200", got)
+	}
+	if b, _ := os.ReadFile(sup2.apiKeyPrefixesPath()); strings.TrimSpace(string(b)) != p2 {
+		t.Errorf("recorded prefixes = %q, want %q", b, p2)
+	}
+	t.Logf("headscale apikeys list after restart:\n%s", apikeysList(ctx))
+
+	// A client still holding key1 (expired) re-mints on the 401.
+	c := clientWith(key1, sup2.MintSessionAPIKey)
+	if err := c.EnsureUser(ctx, "rasputin-operator"); err != nil {
+		t.Fatalf("EnsureUser with an expired key and a re-mint: %v", err)
+	}
+	if got := status(ctx, key2); got != 401 {
+		t.Errorf("the re-mint should have expired key2: HTTP %d", got)
+	}
+
+	// Metrics listener off.
+	logs, _ := exec.CommandContext(ctx, "docker", "logs", sessionKeyTestContainer).CombinedOutput()
+	if !strings.Contains(string(logs), "metrics server disabled") {
+		t.Errorf("headscale did not report the metrics server disabled; logs:\n%s", logs)
+	}
 }

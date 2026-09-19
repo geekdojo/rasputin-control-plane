@@ -2032,7 +2032,7 @@ func wireBundleVerifier(trustDir string) *updater.Verifier {
 //
 // "Self-hosted" is the production path and needs no operator input: the
 // supervisor owns the container so it can mint the very API key the client
-// needs (see DockerSupervisor.EnsureAPIKey). This is why mesh can't be
+// needs (see DockerSupervisor.MintSessionAPIKey). This is why mesh can't be
 // provisioned via a seed env var — the Headscale instance doesn't exist
 // until first boot — and why autodetect-on-Docker is the right default.
 //
@@ -2160,7 +2160,7 @@ func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, k
 // wireSelfHostedMesh is the production path. It builds the supervisor cheaply
 // (no container work) and returns a placeholder client plus a bootstrap
 // closure that mesh.Service runs in the background: bring the container up,
-// mint+persist an admin key, and point a real client at the local HTTPS
+// mint this process's in-memory admin key, and point a real client at the local HTTPS
 // endpoint trusting the per-installation Mesh CA. Ships meshCA.CertPEM to
 // nodes so tailscaled trusts the same leaf. Nothing here blocks api boot.
 func wireSelfHostedMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin string) (meshWiring, error) {
@@ -2177,14 +2177,17 @@ func wireSelfHostedMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin strin
 		if err := sup.Start(ctx); err != nil {
 			return nil, fmt.Errorf("start headscale container: %w", err)
 		}
-		key, err := sup.EnsureAPIKey(ctx)
+		// A fresh admin key per api start, held only in memory; minting it
+		// expires the one the previous process held. A 401 re-mints.
+		key, err := sup.MintSessionAPIKey(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap headscale api key: %w", err)
 		}
 		return mesh.NewRealClient(mesh.RealClientConfig{
-			BaseURL:   url,
-			APIKey:    key,
-			TLSConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+			BaseURL:       url,
+			APIKey:        key,
+			RefreshAPIKey: sup.MintSessionAPIKey,
+			TLSConfig:     &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
 		})
 	}
 	log.Printf("rasputin-api: mesh backend = headscale (self-hosted, url=%s, tls=mesh-ca; bringing up in background)", url)
