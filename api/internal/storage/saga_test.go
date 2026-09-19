@@ -949,3 +949,55 @@ func TestCheckExistingStep_FallsBackToAFreshEnumeration(t *testing.T) {
 		t.Errorf("enumerate calls = %d, want 1 (the fallback)", calls)
 	}
 }
+
+// A submit that fails after the key was staged — here the job cannot be
+// recorded — leaves nothing staged: no job will ever run to discard it.
+func TestSubmitClaim_DiscardsTheStagedKeyWhenTheJobIsNotRecorded(t *testing.T) {
+	h := newHarness(t, &fakeAgent{})
+	ctx := context.Background()
+	_ = h.jobStore.Close() // CreateJob fails; the prepare callback has already run
+	spec := baseSpec()
+	spec.ArchiveKey = &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}
+	if _, err := SubmitClaim(ctx, h.runner, h.store, spec, "test"); err == nil {
+		t.Fatal("want the submit to fail with the job store closed")
+	}
+	if left, err := h.store.StagedClaimKeyJobs(ctx); err != nil || len(left) != 0 {
+		t.Errorf("staged keys left = %v (err %v), want none", left, err)
+	}
+}
+
+// claimKey refuses a job whose staged key and spec disagree, in either
+// direction, and passes a keyless claim with nothing staged.
+func TestClaimKey_SpecAndStagedKeyMustAgree(t *testing.T) {
+	h := newHarness(t, &fakeAgent{})
+	ctx := context.Background()
+	key := &ArchiveKey{KeyID: "k1", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}
+	if err := h.store.StageClaimKey(ctx, "staged-job", key, time.Now().UTC()); err != nil {
+		t.Fatalf("StageClaimKey: %v", err)
+	}
+	cases := []struct {
+		name, jobID, specID, wantErr string
+	}{
+		{name: "no key either side", jobID: "plain-job"},
+		{name: "staged but not named", jobID: "staged-job", wantErr: "its spec names none"},
+		{name: "named but not staged", jobID: "plain-job", specID: "k1", wantErr: "is not staged for this job"},
+		{name: "different ids", jobID: "staged-job", specID: "k2", wantErr: "but the spec names k2"},
+		{name: "agree", jobID: "staged-job", specID: "k1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := &jobs.StepCtx{Ctx: ctx, JobID: tc.jobID}
+			got, err := claimKey(sc, h.store, &ClaimSpec{ArchiveKeyID: tc.specID})
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("err = %v, want it to mention %q", err, tc.wantErr)
+			case tc.wantErr == "" && tc.specID == "" && got != nil:
+				t.Errorf("a keyless claim returned a key: %+v", got)
+			case tc.wantErr == "" && tc.specID != "" && (got == nil || got.KeyID != tc.specID):
+				t.Errorf("key = %+v, want %s", got, tc.specID)
+			}
+		})
+	}
+}
