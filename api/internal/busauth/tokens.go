@@ -72,6 +72,10 @@ type Store struct {
 	// (livenodes.go), and serializes every push.
 	sinkMu sync.Mutex
 	sink   LivenessSink
+
+	// tombMu guards tomb, the revocation tombstone file (tombstones.go).
+	tombMu sync.Mutex
+	tomb   tombstones
 }
 
 // TokenInfo is the non-secret view of a token row (no plaintext, ever).
@@ -240,7 +244,8 @@ func (s *Store) MintBound(ctx context.Context, label, nodeID string, role proto.
 // controlplane half of a provisioning matched set. Re-running is a no-op
 // (INSERT OR IGNORE on the hash PK), so it's safe to call on every boot, matching
 // firstboot's derived-state contract. It inserts hashes directly and never sees
-// a plaintext token. Returns the count of newly-inserted rows.
+// a plaintext token. Returns the count of newly-inserted rows. A hash with a
+// revocation tombstone is skipped (tombstones.go).
 //
 // Every entry's node id is checked BEFORE anything is inserted, and one bad
 // entry fails the whole load with nothing stored: an entry naming no node id
@@ -271,9 +276,16 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 		roles[i] = role
 	}
 	now := ms(time.Now().UTC())
-	inserted := 0
+	inserted, skipped := 0, 0
 	for i, tk := range toks {
 		if tk.Hash == "" {
+			continue
+		}
+		// A revoked token stays revoked across a lost or restored database:
+		// the preseed is reloaded on every boot, and its tombstone is what
+		// remembers the revoke when the row is gone (tombstones.go).
+		if s.tombstoned(tk.Hash) {
+			skipped++
 			continue
 		}
 		res, err := s.db.ExecContext(ctx, `
@@ -286,6 +298,9 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 			inserted++
 			s.refreshNodes(ctx, tk.NodeID)
 		}
+	}
+	if skipped > 0 {
+		log.Printf("busauth: preload skipped %d revoked (tombstoned) token(s)", skipped)
 	}
 	return inserted, nil
 }
@@ -372,20 +387,21 @@ func (s *Store) revoke(ctx context.Context, id string) (disconnected int, err er
 	}
 	defer s.refreshNodes(ctx, node)
 	s.sess.mu.Lock()
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`,
-		ms(time.Now().UTC()), id)
+	revoked, err := s.revokeReturning(ctx, time.Now().UTC(),
+		`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL
+         RETURNING token_hash, COALESCE(node_id, '')`, id)
 	if err != nil {
 		s.sess.mu.Unlock()
 		return 0, fmt.Errorf("busauth: revoke: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if len(revoked) == 0 {
 		s.sess.mu.Unlock()
 		return 0, sql.ErrNoRows
 	}
 	taken := s.takeLocked(func(g grant) bool { return g.tokenID == id })
 	d := s.sess.disc
 	s.sess.mu.Unlock()
+	s.recordTombstones(revoked)
 	return s.disconnect(d, taken), nil
 }
 
@@ -417,18 +433,18 @@ func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, dis
 	}
 	defer s.refreshNodes(ctx, nodeID)
 	s.sess.mu.Lock()
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL`,
-		ms(time.Now().UTC()), nodeID)
+	tombs, err := s.revokeReturning(ctx, time.Now().UTC(),
+		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL
+         RETURNING token_hash, COALESCE(node_id, '')`, nodeID)
 	if err != nil {
 		s.sess.mu.Unlock()
 		return 0, 0, fmt.Errorf("busauth: revoke by node: %w", err)
 	}
-	n, _ := res.RowsAffected()
 	taken := s.takeLocked(func(g grant) bool { return g.nodeID == nodeID })
 	d := s.sess.disc
 	s.sess.mu.Unlock()
-	return int(n), s.disconnect(d, taken), nil
+	s.recordTombstones(tombs)
+	return len(tombs), s.disconnect(d, taken), nil
 }
 
 // NodeHasLiveToken reports whether nodeID holds at least one token the bus

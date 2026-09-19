@@ -323,6 +323,79 @@ func TestRolelessBusTokens_StartupLogged(t *testing.T) {
 	}
 }
 
+// At start the tombstones come before the preseed: a revoked matched-set token
+// in the preseed stays out, and an unreadable tombstone file stops the preseed
+// from loading at all.
+func TestLoadBusTokenState(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("RASPUTIN_BUS_PRESEED", "") // the default, <dataDir>/bus/preseed.json
+	open := func(t *testing.T, dataDir string) *busauth.Store {
+		t.Helper()
+		st, err := busauth.OpenStore(ctx, filepath.Join(dataDir, "rasputin.db"))
+		if err != nil {
+			t.Fatalf("OpenStore: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		return st
+	}
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "bus"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ptKeep, hKeep, _ := busauth.GenerateToken()
+	ptGone, hGone, _ := busauth.GenerateToken()
+	preseed := `[{"hash":"` + hKeep + `","nodeId":"keep","label":"compute"},{"hash":"` + hGone + `","nodeId":"gone","label":"compute"}]`
+	if err := os.WriteFile(filepath.Join(dataDir, "bus", "preseed.json"), []byte(preseed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := open(t, dataDir)
+	if n := loadBusTokenState(ctx, st, dataDir); n != 2 {
+		t.Fatalf("first start loaded %d, want 2", n)
+	}
+	if _, err := st.Revoke(ctx, hGone); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	// The database is lost; the bus directory is not.
+	if err := os.Remove(filepath.Join(dataDir, "rasputin.db")); err != nil {
+		t.Fatal(err)
+	}
+	for _, sidecar := range []string{"-wal", "-shm"} {
+		_ = os.Remove(filepath.Join(dataDir, "rasputin.db"+sidecar))
+	}
+	st = open(t, dataDir)
+	if n := loadBusTokenState(ctx, st, dataDir); n != 1 {
+		t.Fatalf("start after the loss loaded %d, want 1", n)
+	}
+	if ok, _ := st.Validate(ctx, ptGone, "gone"); ok {
+		t.Error("the revoked matched-set token came back")
+	}
+	if ok, _ := st.Validate(ctx, ptKeep, "keep"); !ok {
+		t.Error("the unrevoked matched-set token did not load")
+	}
+
+	// An unreadable tombstone file: nothing is preloaded.
+	other := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(other, "bus"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "bus", "preseed.json"), []byte(preseed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "bus", busauth.TombstoneFileName), []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st2 := open(t, other)
+	if n := loadBusTokenState(ctx, st2, other); n != 0 {
+		t.Fatalf("with an unreadable tombstone file, loaded %d, want 0", n)
+	}
+	if ok, _ := st2.Validate(ctx, ptKeep, "keep"); ok {
+		t.Error("the preseed loaded despite an unreadable tombstone file")
+	}
+}
+
 func TestSeedBMCHostNode(t *testing.T) {
 	ctx := context.Background()
 	st, err := setup.OpenStore(ctx, filepath.Join(t.TempDir(), "settings.db"))

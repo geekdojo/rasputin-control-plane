@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -419,6 +420,10 @@ func trustFiles(src IdentitySources) []trustFile {
 			abs:  filepath.Join(src.BusDir, "bus.key"),
 			arc:  busKeyArchivePath,
 			note: busKeyNote,
+		}, trustFile{
+			abs:  filepath.Join(src.BusDir, busauth.TombstoneFileName),
+			arc:  busTombstonesArchivePath,
+			note: busTombstonesNote,
 		})
 	}
 	return out
@@ -427,6 +432,13 @@ func trustFiles(src IdentitySources) []trustFile {
 // busKeyArchivePath is where the bus key sits in an identity archive, and so
 // where a restore puts it back relative to /var/lib/rasputin.
 const busKeyArchivePath = "bus/bus.key"
+
+// busTombstonesArchivePath is where the bus-token revocation tombstones sit in
+// an identity archive. A restore MERGES them into the live file rather than
+// replacing it (restore_apply.go).
+const busTombstonesArchivePath = "bus/" + busauth.TombstoneFileName
+
+const busTombstonesNote = "bus join-token revocation tombstones — a restore unions them with the live file and re-applies them, so restoring this archive cannot un-revoke a token"
 
 const busKeyNote = "the cluster bus's PRIVATE key — every node verifies the bus by its pin, so without it a restored or reflashed controlplane generates a new key and no node can join its bus"
 
@@ -486,6 +498,7 @@ type AssembleOptions struct {
 //	rasputin.db                           the §4.5 identity set
 //	trust/mesh-ca.{key,pem}
 //	bus/bus.key
+//	bus/revoked.json                      revocation tombstones, when any exist
 //	mesh/headscale/...
 //
 // The app volumes are NOT in here. Each is its own sealed member beside this
