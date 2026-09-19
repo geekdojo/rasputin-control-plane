@@ -104,6 +104,7 @@ type fakeMeshClient struct {
 	createErr   error
 	deleteErr   error
 	lastCreate  mesh.CreatePreAuthKeyInput
+	expired     []string
 }
 
 func newFakeMeshClient() *fakeMeshClient {
@@ -116,7 +117,8 @@ func newFakeMeshClient() *fakeMeshClient {
 
 func (f *fakeMeshClient) Backend() string                              { return "fake" }
 func (f *fakeMeshClient) EnsureUser(_ context.Context, n string) error { f.users[n] = true; return nil }
-func (f *fakeMeshClient) ExpirePreAuthKey(_ context.Context, _ string) error {
+func (f *fakeMeshClient) ExpirePreAuthKey(_ context.Context, id string) error {
+	f.expired = append(f.expired, id)
 	return nil
 }
 func (f *fakeMeshClient) ListPreAuthKeys(_ context.Context, _ string) ([]mesh.HSPreAuthKey, error) {
@@ -2408,5 +2410,23 @@ func TestHandleCreateMeshKey_ValueShownOnceNeverStored(t *testing.T) {
 	}
 	if raw, _ := json.Marshal(got); strings.Contains(string(raw), created.HSValue) {
 		t.Errorf("the stored intent carries the key: %s", raw)
+	}
+}
+
+// A key minted for an intent that then cannot be recorded is expired: it
+// would otherwise stay live on Headscale, unlisted and never shown.
+func TestHandleCreateMeshKey_UnrecordedKeyIsExpired(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	_ = f.srv.mesh.Store().Close()
+	w := f.do(t, http.MethodPost, "/api/mesh/keys", `{"name":"x"}`, c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500 when the intent cannot be recorded, got %d %s", w.Code, w.Body.String())
+	}
+	if f.meshFake.createCalls != 1 || len(f.meshFake.expired) != 1 || f.meshFake.expired[0] != "hsid-rasputin-operator" {
+		t.Errorf("minted %d, expired %v; want the one minted key expired", f.meshFake.createCalls, f.meshFake.expired)
+	}
+	if strings.Contains(w.Body.String(), "plain-") {
+		t.Errorf("the error response carries the key: %s", w.Body.String())
 	}
 }
