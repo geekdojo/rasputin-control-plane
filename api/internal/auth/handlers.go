@@ -207,17 +207,14 @@ func (s *Service) beginFirstRunRegistration(w http.ResponseWriter, r *http.Reque
 // desktop can use, is the case that exposes it. WithResidentKeyRequirement
 // also sets the legacy requireResidentKey flag for older authenticators.
 func (s *Service) beginCreation(user *User) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
-	opts := []webauthn.RegistrationOption{
+	creds := user.WebAuthnCredentials()
+	excl := make([]protocol.CredentialDescriptor, 0, len(creds))
+	for i := range creds {
+		excl = append(excl, creds[i].Descriptor())
+	}
+	return s.web.BeginRegistration(user,
 		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
-	}
-	if creds := user.WebAuthnCredentials(); len(creds) > 0 {
-		excl := make([]protocol.CredentialDescriptor, 0, len(creds))
-		for i := range creds {
-			excl = append(excl, creds[i].Descriptor())
-		}
-		opts = append(opts, webauthn.WithExclusions(excl))
-	}
-	return s.web.BeginRegistration(user, opts...)
+		webauthn.WithExclusions(excl))
 }
 
 // POST /api/auth/register/step-up
