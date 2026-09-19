@@ -16,6 +16,9 @@ import (
 // Store is the SQLite-backed ledger of known nodes.
 type Store struct {
 	db *sql.DB
+	// registry is the in-memory node registry (registry.go). Insert and
+	// Delete keep its membership current.
+	registry *Registry
 	// meshLookup is the mesh side of the presence join (presence.go); nil
 	// leaves membership undetermined.
 	meshLookup MeshLookup
@@ -40,7 +43,12 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 			log.Printf("inventory: backfill image_version_confirmed_at: %v", err)
 		}
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db, registry: NewRegistry()}
+	if err := s.loadMembers(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 // applyMigrations runs forward-only DDL that may not be expressible as
@@ -85,6 +93,9 @@ func (s *Store) Insert(ctx context.Context, n *proto.Node) error {
 		n.ID, string(n.Role), n.Hostname, n.AgentVersion, n.ImageVersion, confirmedMillis(n.ImageVersionConfirmedAt), n.Architecture, n.LANIP,
 		string(caps), string(meta), marshalStorage(n.Storage),
 		tsMillis(n.FirstSeen), tsMillis(n.LastSeen))
+	if err == nil {
+		s.registry.setMember(n.ID, n.Role, true)
+	}
 	return err
 }
 
@@ -237,6 +248,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if n == 0 {
 		return sql.ErrNoRows
 	}
+	s.registry.setMember(id, "", false)
 	return nil
 }
 

@@ -295,6 +295,14 @@ func main() {
 		log.Fatalf("rasputin-api: inventory store: %v", err)
 	}
 	defer invStore.Close()
+	// The node registry (inventory.Registry) is the api's one in-memory node
+	// list; inventory loaded membership above, and the token store now pushes
+	// every node's token liveness into it and keeps it current from here on.
+	// A failure leaves every node without a live token in the registry, so
+	// node-facing admission refuses everyone: fail closed, and say so.
+	if err := busTokenStore.SetLivenessSink(ctx, invStore.Registry()); err != nil {
+		log.Printf("rasputin-api: ⚠️  node registry: token liveness did not load: %v — the collector ingress admits no node until the api restarts cleanly", err)
+	}
 
 	authStore, err := auth.OpenStore(ctx, dbPath)
 	if err != nil {
@@ -1512,11 +1520,11 @@ func main() {
 					GetCertificate: leaf.getCertificate,
 				},
 			}
-			// A collector is admitted only while its node holds a live join
-			// token: checked once per connection in the handshake, from the
-			// token store's in-memory live-node set, and a revoke closes the
-			// node's open connections (obs_ingest_conns.go).
-			if err := srv.WireObsIngest(obsIngestSrv, busTokenStore); err != nil {
+			// A collector is admitted only while its node is a current member
+			// holding a live join token: checked once per connection in the
+			// handshake, from the in-memory node registry, and a removal or
+			// revoke closes the node's open connections (obs_ingest_conns.go).
+			if err := srv.WireObsIngest(obsIngestSrv, invStore.Registry()); err != nil {
 				log.Fatalf("rasputin-api: obs ingress: %v", err)
 			}
 		}

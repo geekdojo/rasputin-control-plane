@@ -10,56 +10,55 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// The live-node set: which node ids hold at least one token the bus would
-// admit them with (unrevoked, bound, naming a valid role).
+// Token liveness, pushed to the node registry.
 //
-// It exists so a node's other credentials can follow its token WITHOUT a
-// database read on a hot path: the collector ingress checks it once per TLS
-// handshake, and closes a node's open connections when the node leaves it
-// (OnNodeRevoked). It is kept in memory and changed only by the events that
-// change it — loaded once at OpenStore, then refreshed for a node by every
-// mint, preload, adoption and revoke that touches that node. No timer
-// re-reads it.
+// Whether a node holds a token the bus would admit it with (unrevoked, bound,
+// naming a valid role) is one of the facts the api's single in-memory node
+// registry keeps (inventory.Registry). This store does not keep a copy: it is
+// the source of the fact, and it pushes the fact into the registry through a
+// LivenessSink — the whole set once, when the sink is attached at start, and
+// then one node at a time, from every mint, preload, adoption, revoke and
+// tombstone re-apply that touches that node. No timer re-reads it.
 //
-// A refresh that cannot read the database leaves the node NOT live: failing
-// to learn that a node may connect is a refusal, never an admission.
+// The sink is an interface defined here, not the registry type itself,
+// because the registry's package (inventory) sits above this one: the
+// dependency points from inventory to busauth, never back.
+//
+// A refresh that cannot read the database pushes the node as NOT live:
+// failing to learn that a node may connect is a refusal, never an admission.
 
-// liveNodes is the Store's in-memory live-node set and its subscribers.
-type liveNodes struct {
-	set   map[string]bool
-	hooks []func(nodeID string)
+// LivenessSink receives token liveness. *inventory.Registry implements it.
+type LivenessSink interface {
+	// ReplaceTokenLive sets every node's token liveness at once: the nodes in
+	// live are live, every other node is not.
+	ReplaceTokenLive(live map[string]bool)
+	// SetTokenLive sets one node's token liveness.
+	SetTokenLive(nodeID string, live bool)
 }
 
-// NodeLive reports whether nodeID holds a token the bus would admit it with.
-// In memory only: it never touches the database.
-func (s *Store) NodeLive(nodeID string) bool {
-	s.liveMu.RLock()
-	defer s.liveMu.RUnlock()
-	return s.live.set[nodeID]
+// SetLivenessSink attaches the registry and pushes the whole live set into it,
+// read from the database. From then on every token event pushes the nodes it
+// touched. Held under the same lock as those pushes, so no event between the
+// read and the attach is lost.
+func (s *Store) SetLivenessSink(ctx context.Context, sink LivenessSink) error {
+	s.sinkMu.Lock()
+	defer s.sinkMu.Unlock()
+	set, err := s.liveNodeSet(ctx)
+	if err != nil {
+		return err
+	}
+	sink.ReplaceTokenLive(set)
+	s.sink = sink
+	return nil
 }
 
-// OnNodeRevoked registers fn to be called, outside the store's locks, each time
-// a node leaves the live-node set — its last live token revoked, by an operator
-// revoke or by node removal. The collector ingress uses it to close the node's
-// open connections.
-func (s *Store) OnNodeRevoked(fn func(nodeID string)) {
-	s.liveMu.Lock()
-	s.live.hooks = append(s.live.hooks, fn)
-	s.liveMu.Unlock()
-}
-
-// oneLine removes line breaks, so a value cannot forge a log line.
-func oneLine(v string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), "\r", "")
-}
-
-// loadLiveNodes reads the whole set from the database. OpenStore calls it once.
-func (s *Store) loadLiveNodes(ctx context.Context) error {
+// liveNodeSet reads, from the database, every node that holds a live token.
+func (s *Store) liveNodeSet(ctx context.Context) (map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT node_id, role FROM bus_tokens
         WHERE revoked_at IS NULL AND node_id IS NOT NULL AND node_id != ''`)
 	if err != nil {
-		return fmt.Errorf("busauth: load live nodes: %w", err)
+		return nil, fmt.Errorf("busauth: load live nodes: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	set := map[string]bool{}
@@ -69,27 +68,32 @@ func (s *Store) loadLiveNodes(ctx context.Context) error {
 			role sql.NullString
 		)
 		if err := rows.Scan(&node, &role); err != nil {
-			return fmt.Errorf("busauth: load live nodes: %w", err)
+			return nil, fmt.Errorf("busauth: load live nodes: %w", err)
 		}
 		if role.Valid && proto.ValidRole(proto.NodeRole(role.String)) {
 			set[node] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("busauth: load live nodes: %w", err)
+		return nil, fmt.Errorf("busauth: load live nodes: %w", err)
 	}
-	s.liveMu.Lock()
-	s.live.set = set
-	s.liveMu.Unlock()
-	return nil
+	return set, nil
 }
 
-// refreshNodes re-reads each node's liveness after an event that may have
-// changed it, and calls the OnNodeRevoked hooks for every node that left the
-// set. A read that fails counts as not live.
+// oneLine removes line breaks, so a value cannot forge a log line.
+func oneLine(v string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), "\r", "")
+}
+
+// refreshNodes re-reads each node's token liveness after an event that may
+// have changed it and pushes it to the sink. With no sink attached yet it does
+// nothing: SetLivenessSink reads the whole set when it attaches.
 func (s *Store) refreshNodes(ctx context.Context, nodeIDs ...string) {
-	var left []string
-	var hooks []func(string)
+	s.sinkMu.Lock()
+	defer s.sinkMu.Unlock()
+	if s.sink == nil {
+		return
+	}
 	for _, node := range nodeIDs {
 		if node == "" {
 			continue
@@ -102,25 +106,6 @@ func (s *Store) refreshNodes(ctx context.Context, nodeIDs ...string) {
 				oneLine(node), oneLine(err.Error()))
 			live = false
 		}
-		s.liveMu.Lock()
-		was := s.live.set[node]
-		if s.live.set == nil {
-			s.live.set = map[string]bool{}
-		}
-		if live {
-			s.live.set[node] = true
-		} else {
-			delete(s.live.set, node)
-		}
-		hooks = s.live.hooks
-		s.liveMu.Unlock()
-		if was && !live {
-			left = append(left, node)
-		}
-	}
-	for _, node := range left {
-		for _, fn := range hooks {
-			fn(node)
-		}
+		s.sink.SetTokenLive(node, live)
 	}
 }

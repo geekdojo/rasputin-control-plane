@@ -17,12 +17,13 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// countingLiveness is a fake IngestLiveness that counts every NodeLive call,
+// countingLiveness is a fake IngestRegistry that counts every Admitted call,
 // so a test can assert how often the ingress consults it.
 type countingLiveness struct {
 	calls atomic.Int64
@@ -31,14 +32,14 @@ type countingLiveness struct {
 	hooks []func(string)
 }
 
-func (f *countingLiveness) NodeLive(nodeID string) bool {
+func (f *countingLiveness) Admitted(nodeID string) bool {
 	f.calls.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.live[nodeID]
 }
 
-func (f *countingLiveness) OnNodeRevoked(fn func(string)) {
+func (f *countingLiveness) OnNodeExcluded(fn func(string)) {
 	f.mu.Lock()
 	f.hooks = append(f.hooks, fn)
 	f.mu.Unlock()
@@ -54,7 +55,7 @@ type ingressTLS struct {
 	clients map[string]tls.Certificate
 }
 
-func startIngress(t *testing.T, s *Server, gate IngestLiveness, nodes ...string) *ingressTLS {
+func startIngress(t *testing.T, s *Server, gate IngestRegistry, nodes ...string) *ingressTLS {
 	t.Helper()
 	ca, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "trust"), "test")
 	if err != nil {
@@ -118,7 +119,7 @@ func postIngest(c *http.Client, base string) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// The ingress consults the live-node set once per CONNECTION, in the
+// The ingress consults the node registry once per CONNECTION, in the
 // handshake, and never on a request: five requests over one kept-alive
 // connection cost one check. The pushes pass every gate (503 "backend not
 // ready": observability is off in the fixture).
@@ -135,11 +136,11 @@ func TestObsIngress_LivenessIsCheckedOncePerConnection(t *testing.T) {
 		}
 	}
 	if n := gate.calls.Load(); n != 1 {
-		t.Errorf("NodeLive was called %d times for one connection and five requests; want 1 (handshake only)", n)
+		t.Errorf("Admitted was called %d times for one connection and five requests; want 1 (handshake only)", n)
 	}
 }
 
-// A node not in the live-node set cannot complete a handshake.
+// A node the registry does not admit cannot complete a handshake.
 func TestObsIngress_RevokedNodeHandshakeIsRefused(t *testing.T) {
 	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02", "c03")
 	gate := &countingLiveness{live: map[string]bool{"c02": true}}
@@ -165,63 +166,128 @@ func TestObsIngress_RevokedNodeHandshakeIsRefused(t *testing.T) {
 	}
 }
 
-// With the real token store: an ESTABLISHED kept-alive connection is closed
-// the moment its node's token is revoked, and the node's next handshake is
-// refused. Another node's connection is untouched.
-func TestObsIngress_RevokeClosesTheNodesOpenConnections(t *testing.T) {
+// realRegistry is the production wiring: a real inventory store (membership
+// and the registry) and a real token store pushing liveness into it, with a
+// live token for each of nodes.
+func realRegistry(t *testing.T, s *Server, nodes ...string) (*inventory.Store, *busauth.Store) {
+	t.Helper()
 	ctx := context.Background()
-	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02", "c03")
 	tokens, err := busauth.OpenStore(ctx, filepath.Join(t.TempDir(), "bus.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
-	for _, n := range []string{"c02", "c03"} {
+	inv := s.inv
+	for _, n := range nodes {
 		if _, _, err := tokens.MintBound(ctx, "compute", n, proto.RoleCompute); err != nil {
 			t.Fatal(err)
 		}
 	}
-	it := startIngress(t, s, tokens, "c02", "c03")
-	addr := strings.TrimPrefix(it.srv.URL, "https://")
-
-	// One raw, kept-alive connection per node, each proven usable.
-	open := func(node string) (*tls.Conn, *bufio.Reader) {
-		t.Helper()
-		conn, err := tls.Dial("tcp", addr, it.clientTLS(node))
-		if err != nil {
-			t.Fatalf("%s dial: %v", node, err)
-		}
-		t.Cleanup(func() { _ = conn.Close() })
-		br := bufio.NewReader(conn)
-		send(t, conn, br, node)
-		return conn, br
+	if err := tokens.SetLivenessSink(ctx, inv.Registry()); err != nil {
+		t.Fatal(err)
 	}
-	c02, br02 := open("c02")
-	c03, br03 := open("c03")
+	return inv, tokens
+}
 
+// openConn dials one raw, kept-alive connection and proves it usable.
+func openConn(t *testing.T, it *ingressTLS, node string) (*tls.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, err := tls.Dial("tcp", strings.TrimPrefix(it.srv.URL, "https://"), it.clientTLS(node))
+	if err != nil {
+		t.Fatalf("%s dial: %v", node, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	br := bufio.NewReader(conn)
+	send(t, conn, br, node)
+	return conn, br
+}
+
+// assertClosedByServer checks the server closed conn: the next read ends
+// rather than timing out.
+func assertClosedByServer(t *testing.T, conn *tls.Conn, br *bufio.Reader, why string) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatalf("%s: the connection is still delivering data", why)
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatalf("%s: the connection was not closed (read timed out)", why)
+	}
+}
+
+// With the real registry: an ESTABLISHED kept-alive connection is closed the
+// moment its node's token is revoked, and the node's next handshake is
+// refused; another node's connection is untouched; a fresh token admits it
+// again.
+func TestObsIngress_RevokeClosesTheNodesOpenConnections(t *testing.T) {
+	ctx := context.Background()
+	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02", "c03")
+	inv, tokens := realRegistry(t, s, "c02", "c03")
+	it := startIngress(t, s, inv.Registry(), "c02", "c03")
+
+	c02, br02 := openConn(t, it, "c02")
+	c03, br03 := openConn(t, it, "c03")
 	if _, _, err := tokens.RevokeByNodeID(ctx, "c02"); err != nil {
 		t.Fatalf("RevokeByNodeID: %v", err)
 	}
-
-	// c02's open connection is closed by the server: the next read ends.
-	_ = c02.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := br02.ReadByte(); err == nil {
-		t.Fatal("the revoked node's open connection is still delivering data")
-	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
-		t.Fatal("the revoked node's open connection was not closed (read timed out)")
-	}
-	// c03 still works on its same connection.
+	assertClosedByServer(t, c02, br02, "revoked node")
 	send(t, c03, br03, "c03")
-	// And c02 cannot connect again.
 	if _, err := postIngest(it.keepAliveClient("c02"), it.srv.URL); err == nil {
 		t.Error("the revoked node completed a new request")
 	}
-	// A fresh token for c02 admits it again.
 	if _, _, err := tokens.MintBound(ctx, "compute", "c02", proto.RoleCompute); err != nil {
 		t.Fatal(err)
 	}
 	if code, err := postIngest(it.keepAliveClient("c02"), it.srv.URL); err != nil || code != http.StatusServiceUnavailable {
 		t.Errorf("after a re-mint = (%d, %v), want 503", code, err)
+	}
+}
+
+// Removing a node from inventory closes its open connections too, even with
+// its token still live, and refuses its next handshake. A node with a live
+// token that never registered is refused.
+func TestObsIngress_RemovalClosesTheNodesOpenConnections(t *testing.T) {
+	ctx := context.Background()
+	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
+	inv, tokens := realRegistry(t, s, "c02", "stranger")
+	it := startIngress(t, s, inv.Registry(), "c02", "stranger")
+
+	if _, err := postIngest(it.keepAliveClient("stranger"), it.srv.URL); err == nil {
+		t.Error("a node with a live token but no inventory row completed a request")
+	}
+	c02, br02 := openConn(t, it, "c02")
+	if err := inv.Delete(ctx, "c02"); err != nil {
+		t.Fatal(err)
+	}
+	if !tokensLive(t, tokens, "c02") {
+		t.Fatal("test setup: c02's token should still be live")
+	}
+	assertClosedByServer(t, c02, br02, "removed node")
+	if _, err := postIngest(it.keepAliveClient("c02"), it.srv.URL); err == nil {
+		t.Error("the removed node completed a new request")
+	}
+}
+
+func tokensLive(t *testing.T, tokens *busauth.Store, node string) bool {
+	t.Helper()
+	ok, err := tokens.NodeHasLiveToken(context.Background(), node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ok
+}
+
+// No database on the request path: with an admitted connection open, both the
+// inventory and token databases are closed, and requests on that connection
+// still pass every gate.
+func TestObsIngress_RequestPathReadsNoDatabase(t *testing.T) {
+	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
+	inv, tokens := realRegistry(t, s, "c02")
+	it := startIngress(t, s, inv.Registry(), "c02")
+	conn, br := openConn(t, it, "c02")
+	_ = tokens.Close()
+	_ = inv.Close()
+	for range 3 {
+		send(t, conn, br, "c02")
 	}
 }
 

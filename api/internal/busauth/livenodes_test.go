@@ -3,7 +3,6 @@ package busauth
 import (
 	"context"
 	"path/filepath"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -11,77 +10,50 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// The live-node set follows the token events that change it — mint, preload,
-// adoption, revoke, node removal, rotation — and a node's leaving it fires
-// OnNodeRevoked exactly once. Revoking one of two live tokens does not.
-func TestLiveNodes_FollowTokenEvents(t *testing.T) {
-	ctx := context.Background()
-	s := newTokenStore(t)
-	var mu sync.Mutex
-	var left []string
-	s.OnNodeRevoked(func(n string) { mu.Lock(); left = append(left, n); mu.Unlock() })
-	gone := func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(left) }
+// recordingSink is a LivenessSink that keeps the last value pushed per node
+// and counts pushes.
+type recordingSink struct {
+	mu       sync.Mutex
+	live     map[string]bool
+	pushes   int
+	replaces int
+}
 
-	if s.NodeLive("c1") {
-		t.Fatal("a node with no token is live")
-	}
-	_, id1, _ := s.MintBound(ctx, "compute", "c1", proto.RoleCompute)
-	_, id2, _ := s.MintBound(ctx, "compute", "c1", proto.RoleCompute)
-	if !s.NodeLive("c1") {
-		t.Fatal("mint did not make the node live")
-	}
-	if _, err := s.Revoke(ctx, id1); err != nil {
-		t.Fatal(err)
-	}
-	if !s.NodeLive("c1") || len(gone()) != 0 {
-		t.Fatalf("revoking one of two tokens: live=%v, left=%v; want live, no event", s.NodeLive("c1"), gone())
-	}
-	if _, err := s.Revoke(ctx, id2); err != nil {
-		t.Fatal(err)
-	}
-	if s.NodeLive("c1") || !slices.Equal(gone(), []string{"c1"}) {
-		t.Fatalf("revoking the last token: live=%v, left=%v; want not live, [c1]", s.NodeLive("c1"), gone())
-	}
+func newRecordingSink() *recordingSink { return &recordingSink{live: map[string]bool{}} }
 
-	// Preload, then node removal's revoke-all.
-	_, h, _ := GenerateToken()
-	if _, err := s.PreloadHashes(ctx, []PreseedToken{{Hash: h, NodeID: "c2", Label: "compute"}}); err != nil {
-		t.Fatal(err)
-	}
-	if !s.NodeLive("c2") {
-		t.Fatal("preload did not make the node live")
-	}
-	if _, _, err := s.RevokeByNodeID(ctx, "c2"); err != nil {
-		t.Fatal(err)
-	}
-	if s.NodeLive("c2") || !slices.Equal(gone(), []string{"c1", "c2"}) {
-		t.Fatalf("RevokeByNodeID: live=%v, left=%v", s.NodeLive("c2"), gone())
-	}
-
-	// The controlplane agent's rotation keeps the node live throughout.
-	path := agentTokenPath(t)
-	if _, err := s.EnsureAgentToken(ctx, path, "cp-1"); err != nil {
-		t.Fatal(err)
-	}
-	if !s.NodeLive("cp-1") {
-		t.Fatal("the controlplane agent is not live")
-	}
-	if len(gone()) != 2 {
-		t.Fatalf("minting the agent token fired %v", gone())
+func (r *recordingSink) ReplaceTokenLive(live map[string]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.replaces++
+	r.live = map[string]bool{}
+	for k, v := range live {
+		r.live[k] = v
 	}
 }
 
-// The set is loaded once at OpenStore — backfilled roles count, role-less and
-// revoked rows do not — and NodeLive never touches the database: it still
-// answers with the database closed.
-func TestLiveNodes_LoadedAtOpenAndServedFromMemory(t *testing.T) {
+func (r *recordingSink) SetTokenLive(nodeID string, live bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pushes++
+	r.live[nodeID] = live
+}
+
+func (r *recordingSink) get(nodeID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.live[nodeID]
+}
+
+// Attaching the sink pushes the whole set, read once: backfilled roles count,
+// role-less and revoked rows do not. Nothing is pushed before a sink exists.
+func TestSetLivenessSink_PushesTheWholeSet(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "bus.db")
 	s, err := OpenStore(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.MintBound(ctx, "compute", "a", proto.RoleCompute); err != nil {
+	if _, _, err := s.MintBound(ctx, "compute", "a", proto.RoleCompute); err != nil { // no sink yet: no push, no panic
 		t.Fatal(err)
 	}
 	_, idGone, _ := s.MintBound(ctx, "compute", "gone", proto.RoleCompute)
@@ -96,15 +68,73 @@ func TestLiveNodes_LoadedAtOpenAndServedFromMemory(t *testing.T) {
 		}
 	}
 	_ = s.Close()
-
 	s, err = OpenStore(ctx, path) // backfills b's role from its label
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = s.Close()
-	for node, want := range map[string]bool{"a": true, "b": true, "c": false, "gone": false, "none": false} {
-		if got := s.NodeLive(node); got != want {
-			t.Errorf("NodeLive(%q) = %v with the database closed, want %v", node, got, want)
+	t.Cleanup(func() { _ = s.Close() })
+
+	sink := newRecordingSink()
+	if err := s.SetLivenessSink(ctx, sink); err != nil {
+		t.Fatal(err)
+	}
+	if sink.replaces != 1 || sink.pushes != 0 {
+		t.Fatalf("attach: %d replaces, %d pushes; want 1, 0", sink.replaces, sink.pushes)
+	}
+	for node, want := range map[string]bool{"a": true, "b": true, "c": false, "gone": false} {
+		if got := sink.get(node); got != want {
+			t.Errorf("after attach, %q live = %v, want %v", node, got, want)
 		}
+	}
+}
+
+// Every token event pushes the nodes it touched: mint, preload, revoke of one
+// of two tokens (still live), revoke of the last (not live), node removal's
+// revoke-all, and the controlplane agent's token.
+func TestLivenessSink_FollowsTokenEvents(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+	sink := newRecordingSink()
+	if err := s.SetLivenessSink(ctx, sink); err != nil {
+		t.Fatal(err)
+	}
+	_, id1, _ := s.MintBound(ctx, "compute", "c1", proto.RoleCompute)
+	_, id2, _ := s.MintBound(ctx, "compute", "c1", proto.RoleCompute)
+	if !sink.get("c1") {
+		t.Fatal("mint did not push c1 live")
+	}
+	if _, err := s.Revoke(ctx, id1); err != nil {
+		t.Fatal(err)
+	}
+	if !sink.get("c1") {
+		t.Fatal("revoking one of two tokens pushed c1 not live")
+	}
+	if _, err := s.Revoke(ctx, id2); err != nil {
+		t.Fatal(err)
+	}
+	if sink.get("c1") {
+		t.Fatal("revoking the last token left c1 live")
+	}
+
+	_, h, _ := GenerateToken()
+	if _, err := s.PreloadHashes(ctx, []PreseedToken{{Hash: h, NodeID: "c2", Label: "compute"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !sink.get("c2") {
+		t.Fatal("preload did not push c2 live")
+	}
+	if _, _, err := s.RevokeByNodeID(ctx, "c2"); err != nil {
+		t.Fatal(err)
+	}
+	if sink.get("c2") {
+		t.Fatal("RevokeByNodeID left c2 live")
+	}
+
+	path := agentTokenPath(t)
+	if _, err := s.EnsureAgentToken(ctx, path, "cp-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !sink.get("cp-1") {
+		t.Fatal("the controlplane agent's token did not push cp-1 live")
 	}
 }

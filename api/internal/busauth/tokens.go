@@ -68,9 +68,10 @@ type Store struct {
 	// then, because there is no api-minted agent token to protect.
 	selfNodeID string
 
-	// liveMu guards live, the in-memory live-node set (livenodes.go).
-	liveMu sync.RWMutex
-	live   liveNodes
+	// sinkMu guards sink, the node registry token liveness is pushed to
+	// (livenodes.go), and serializes every push.
+	sinkMu sync.Mutex
+	sink   LivenessSink
 }
 
 // TokenInfo is the non-secret view of a token row (no plaintext, ever).
@@ -140,12 +141,7 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	s := &Store{db: db}
-	if err := s.loadLiveNodes(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return s, nil
+	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
