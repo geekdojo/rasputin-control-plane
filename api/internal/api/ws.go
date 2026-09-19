@@ -10,16 +10,20 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// wsAcceptOptions is the upgrade policy every /ws endpoint uses: the origin
+// allowlist (auth.OriginAllowlist), the same one CORS and RequireSession read.
+// Every /ws route is also behind RequireSession, whose Origin check compares
+// the scheme as well as the host.
+func (s *Server) wsAcceptOptions() *websocket.AcceptOptions {
+	return &websocket.AcceptOptions{OriginPatterns: s.auth.Origins().WebSocketOriginPatterns()}
+}
+
 // bridgeSubject returns an http.HandlerFunc that upgrades to WebSocket and
 // forwards every message published on subjectFilter straight to the client.
 // Used to back the UI's live-update endpoints.
 func (s *Server) bridgeSubject(subjectFilter string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			// Dev: accept any origin. Production reverse-proxies the UI and
-			// api behind one origin so the default same-origin check applies.
-			InsecureSkipVerify: true,
-		})
+		c, err := websocket.Accept(w, r, s.wsAcceptOptions())
 		if err != nil {
 			log.Printf("ws: accept: %v", err)
 			return

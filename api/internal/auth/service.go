@@ -29,6 +29,9 @@ type Service struct {
 	store *Store
 	web   *webauthn.WebAuthn
 	cfg   Config
+	// origins is cfg.RPOrigins normalized: the one browser-origin allowlist
+	// (see OriginAllowlist).
+	origins *OriginAllowlist
 
 	mu      sync.Mutex
 	pending map[string]*pendingAuth // keyed by random pending-token
@@ -79,6 +82,11 @@ func NewService(store *Store, cfg Config) (*Service, error) {
 	if len(cfg.RPOrigins) == 0 {
 		cfg.RPOrigins = []string{"http://localhost:3000"}
 	}
+	origins, err := NewOriginAllowlist(cfg.RPOrigins)
+	if err != nil {
+		return nil, fmt.Errorf("auth: RP origins: %w", err)
+	}
+	cfg.RPOrigins = origins.Origins()
 	w, err := webauthn.New(&webauthn.Config{
 		RPDisplayName: cfg.RPDisplayName,
 		RPID:          cfg.RPID,
@@ -91,9 +99,15 @@ func NewService(store *Store, cfg Config) (*Service, error) {
 		store:   store,
 		web:     w,
 		cfg:     cfg,
+		origins: origins,
 		pending: make(map[string]*pendingAuth),
 	}, nil
 }
+
+// Origins returns the browser-origin allowlist every origin decision in the
+// api reads: CORS, cross-origin protection, the WebSocket upgrade and
+// RequireSession.
+func (s *Service) Origins() *OriginAllowlist { return s.origins }
 
 // SetLoginHook installs (or replaces) the post-login hook. Safe to call
 // before or after Start; concurrent with Service operation. Pass nil to
@@ -300,9 +314,22 @@ func (s *Service) resolveSession(r *http.Request) (*Session, *User, error) {
 }
 
 // RequireSession wraps an http.Handler so it returns 401 unless a valid
-// session cookie is present.
+// session cookie is present, and 403 when the request carries an Origin that
+// is not on the allowlist.
+//
+// The Origin check covers what the other layers do not: WebSocket upgrades
+// are GETs, which http.CrossOriginProtection lets through, and the WebSocket
+// library matches an Origin by host alone when it equals the request's Host.
+// This check compares the whole origin, scheme included, on every gated
+// request, before the session is looked up.
 func (s *Service) RequireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.origins.requestOriginAllowed(r) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"origin not allowed"}`))
+			return
+		}
 		sess, user, err := s.resolveSession(r)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -388,4 +415,26 @@ func (s *Service) createSession(ctx context.Context, userID []byte) (*Session, e
 		return nil, err
 	}
 	return sess, nil
+}
+
+// StripCookies removes the api's own cookies — the session and the pending
+// WebAuthn ceremony — from the Cookie header of a request about to be
+// forwarded to another service (the Grafana proxy). The other service has no
+// use for them, and a credential it never sees is one it cannot log, store or
+// leak. Every other cookie is kept, so the upstream's own cookies still work.
+func StripCookies(h http.Header) {
+	if len(h.Values("Cookie")) == 0 {
+		return
+	}
+	kept := make([]string, 0)
+	for _, c := range (&http.Request{Header: h}).Cookies() {
+		if c.Name == sessionCookie || c.Name == pendingCookie {
+			continue
+		}
+		kept = append(kept, c.String())
+	}
+	h.Del("Cookie")
+	if len(kept) > 0 {
+		h.Set("Cookie", strings.Join(kept, "; "))
+	}
 }

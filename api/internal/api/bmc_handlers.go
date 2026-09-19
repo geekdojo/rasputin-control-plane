@@ -406,9 +406,7 @@ func (s *Server) handleBMCSOL(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // dev cross-origin, same as bridgeSubject
-	})
+	c, err := websocket.Accept(w, r, s.wsAcceptOptions())
 	if err != nil {
 		log.Printf("ws bmc.sol: accept: %v", err)
 		return

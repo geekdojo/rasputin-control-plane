@@ -26,6 +26,9 @@ import (
 //  3. The Director clears any client-supplied X-Webauth-* headers so a
 //     malicious user can't pass themselves off as someone else by
 //     poking at the cookie-protected endpoint.
+//  4. The Director also removes the api's own cookies (the session and
+//     the pending ceremony, auth.StripCookies). Grafana authenticates by
+//     the header above and never needs them; Grafana's own cookies pass.
 //
 // Grafana's grafana.ini is rendered with `serve_from_sub_path = true`
 // and `root_url = .../observability/`, so it generates links that work
@@ -73,6 +76,7 @@ func (s *Server) handleObservabilityProxy(w http.ResponseWriter, r *http.Request
 			}
 		}
 		req.Header.Set("X-Webauth-User", username)
+		auth.StripCookies(req.Header)
 		// Grafana behind serve_from_sub_path expects the original
 		// path. httputil leaves r.URL.Path untouched after Director,
 		// which is what we want — the /observability prefix stays.

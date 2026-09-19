@@ -22,27 +22,34 @@ import (
 //     "Continue securely" link then crosses over to https://.
 //  2. GET /healthz stays reachable over HTTP for the QEMU smoke test and
 //     dumb LB probes that don't speak TLS or trust the Mesh CA.
-//  3. Everything else 302s to the same path on https:// (port stripped),
+//  3. GET /api/setup/state, which the /trust page reads for the cluster's
+//     name. Redirected to https:// it would fail on exactly the device the
+//     page exists for — one that does not trust the Mesh CA yet.
+//  4. Everything else 302s to the same path on https:// (port stripped),
 //     so bookmarks and API clients migrate themselves.
 //
 // Exposure invariant: the only handlers reachable here are handleHealth,
-// the two CA-download endpoints (already unauthenticated on the main
-// handler — the CA cert is public material), and the static UI files
-// needed to render /trust. No session-gated or mutating route gains a
+// the CA-download endpoints and handleSetupState (all already
+// unauthenticated on the main handler — the CA cert is public material and
+// the setup state carries no secret), and the static UI files needed to
+// render /trust. No session-gated or mutating route gains a
 // plain-HTTP surface: anything not allowlisted is redirected before it
 // touches the API mux, and the redirect target is the fully-gated HTTPS
 // handler.
 //
 // When RASPUTIN_HTTPS_ADDR is unset, main.go never calls this and the
 // HTTP listener serves Handler() exactly as before.
+//
+// It carries the same security headers as Handler (securityHeaders).
 func (s *Server) BootstrapHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /api/setup/state", s.handleSetupState)
 	mux.HandleFunc("GET /mesh-ca.pem", s.handleMeshCAPEM)
 	mux.HandleFunc("GET /mesh-ca.crt", s.handleMeshCACRT)
 	mux.HandleFunc("GET /api/mesh/ios-profile", s.handleMeshIOSProfile)
 	mux.HandleFunc("/", s.handleBootstrapFallback)
-	return mux
+	return securityHeaders(mux)
 }
 
 // handleBootstrapFallback decides, for every path the bootstrap mux

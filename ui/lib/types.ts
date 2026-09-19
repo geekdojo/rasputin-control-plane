@@ -1144,9 +1144,10 @@ export interface ObsStatus {
   lastWriteOk?: string;
   lastError?: string;
   lokiBaseUrl?: string;
-  // grafanaUrl is the api-relative path to the embedded Grafana — set
-  // to "/observability/" when the proxy is active. The UI uses this as
-  // the iframe src; the api's reverse proxy handles auth.
+  // grafanaUrl is the api-relative path to Grafana — set to
+  // "/observability/" when the proxy is active. The UI only tests it to
+  // decide whether to show its "open in Grafana" links (new tab); it does
+  // not embed Grafana. The api's reverse proxy handles auth.
   grafanaUrl?: string;
 }
 
