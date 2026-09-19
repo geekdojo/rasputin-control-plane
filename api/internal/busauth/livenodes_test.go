@@ -138,3 +138,29 @@ func TestLivenessSink_FollowsTokenEvents(t *testing.T) {
 		t.Fatal("the controlplane agent's token did not push cp-1 live")
 	}
 }
+
+// A revoke re-applied from the tombstone file (a lost or restored database)
+// is pushed to the node registry too, so a node revoked only by its tombstone
+// is not admitted.
+func TestLivenessSink_FollowsTombstoneReapply(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+	sink := newRecordingSink()
+	if err := s.SetLivenessSink(ctx, sink); err != nil {
+		t.Fatal(err)
+	}
+	_, id, _ := s.MintBound(ctx, "compute", "c1", proto.RoleCompute)
+	if !sink.get("c1") {
+		t.Fatal("not live after mint")
+	}
+	path := filepath.Join(t.TempDir(), "bus", TombstoneFileName)
+	if err := writeTombstoneFile(path, map[string]Tombstone{id: {Hash: id, NodeID: "c1", RevokedAt: time.Now().UTC()}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, n, err := s.UseTombstoneFile(ctx, path); err != nil || n != 1 {
+		t.Fatalf("UseTombstoneFile = (%d, %v), want 1 re-applied", n, err)
+	}
+	if sink.get("c1") {
+		t.Error("a node revoked by its tombstone is still live in the registry")
+	}
+}

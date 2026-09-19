@@ -2,6 +2,7 @@ package busauth
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -218,15 +219,27 @@ func (s *Store) UseTombstoneFile(ctx context.Context, path string) (addedToFile,
 	}
 
 	now := ms(time.Now().UTC())
-	for h := range set {
-		res, err := s.db.ExecContext(ctx,
-			`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`, now, h)
+	var touched []string
+	// The in-memory live-node set (livenodes.go) must follow every revoke
+	// re-applied here, or a node revoked only by its tombstone would still
+	// pass the collector ingress's handshake.
+	defer func() { s.refreshNodes(ctx, touched...) }()
+	for h, tb := range set {
+		var node string
+		err := s.db.QueryRowContext(ctx,
+			`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL
+             RETURNING COALESCE(node_id, '')`, now, h).Scan(&node)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
 		if err != nil {
 			return addedToFile, revokedInDB, fmt.Errorf("busauth: re-apply tombstone: %w", err)
 		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			revokedInDB++
+		revokedInDB++
+		if node == "" {
+			node = tb.NodeID
 		}
+		touched = append(touched, node)
 	}
 
 	s.tombMu.Lock()
