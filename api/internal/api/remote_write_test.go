@@ -67,6 +67,31 @@ func TestReservedSeriesName(t *testing.T) {
 			series("container_cpu_usage_seconds_total"), series("rasputin_disk_used_bytes")), "rasputin_disk_used_bytes"},
 		{"reserved value on a non-name label is fine", remoteWriteBody(series("up", "job", "ALERTS")), ""},
 	}
+	// Fields of every scalar wire type are skipped by their exact width, so
+	// a reserved name after them is still found.
+	var scalars []byte
+	scalars = append(scalars, 5<<3, 0x96, 0x01)               // varint
+	scalars = append(scalars, 6<<3|1, 1, 2, 3, 4, 5, 6, 7, 8) // fixed64
+	scalars = append(scalars, 7<<3|5, 1, 2, 3, 4)             // fixed32
+	scalars = append(scalars, pbBytes(1, series("ALERTS_FOR_STATE"))...)
+	cases = append(cases, struct {
+		name string
+		body []byte
+		want string
+	}{"after scalar fields", s2.EncodeSnappy(nil, scalars), "ALERTS_FOR_STATE"})
+	// A fixed-width field that ends the message exactly is complete, not
+	// truncated.
+	for _, tail := range [][]byte{
+		{6<<3 | 1, 1, 2, 3, 4, 5, 6, 7, 8}, // fixed64
+		{7<<3 | 5, 1, 2, 3, 4},             // fixed32
+	} {
+		body := append(pbBytes(1, series("ALERTS")), tail...)
+		cases = append(cases, struct {
+			name string
+			body []byte
+			want string
+		}{"ends on a fixed-width field", s2.EncodeSnappy(nil, body), "ALERTS"})
+	}
 	// A series whose __name__ label is not first is still found.
 	var late []byte
 	late = append(late, pbBytes(1, pbLabel("nodeId", "x"))...)
@@ -97,6 +122,12 @@ func TestReservedSeriesName_RefusesWhatItCannotRead(t *testing.T) {
 		"truncated protobuf":  s2.EncodeSnappy(nil, raw[:len(raw)-3]),
 		"group wire type":     s2.EncodeSnappy(nil, []byte{1<<3 | 3}),
 		"length past the end": s2.EncodeSnappy(nil, []byte{1<<3 | 2, 0x7f}),
+		"truncated key":       s2.EncodeSnappy(nil, []byte{0x80}),
+		"truncated varint":    s2.EncodeSnappy(nil, []byte{3 << 3, 0x80}),
+		"truncated fixed64":   s2.EncodeSnappy(nil, []byte{3<<3 | 1, 1, 2, 3}),
+		"truncated fixed32":   s2.EncodeSnappy(nil, []byte{3<<3 | 5, 1, 2}),
+		// A malformed Label inside an otherwise well-formed TimeSeries.
+		"malformed label": s2.EncodeSnappy(nil, pbBytes(1, pbBytes(1, []byte{1<<3 | 2, 0x7f}))),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := reservedSeriesName(body, obs.IsReservedMetricName); !errors.Is(err, errRemoteWriteFormat) {
