@@ -259,6 +259,70 @@ func TestUnboundBusTokens_PreseedRefusedAndStartupLogged(t *testing.T) {
 	}
 }
 
+// A live bound token whose row names no role is refused at the bus (busauth
+// role.go), so it is reported at startup until it is revoked; a token with a
+// role, a revoked role-less one and an unbound one (reported by the unbound
+// line instead) are not.
+func TestRolelessBusTokens_StartupLogged(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "rasputin.db")
+	store, err := busauth.OpenStore(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	if _, _, err := store.MintBound(ctx, "compute", "node-a", "compute"); err != nil {
+		t.Fatalf("MintBound: %v", err)
+	}
+	raw, err := dbutil.Open(ctx, dbPath, "SELECT 1", "test")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	_, unboundID, _ := busauth.GenerateToken()
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO bus_tokens (token_hash, label, created_at, node_id) VALUES (?, 'legacy', ?, NULL)`,
+		unboundID, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("insert unbound: %v", err)
+	}
+	logRolelessBusTokens(ctx, store)
+	if logs.Len() != 0 {
+		t.Fatalf("logged %q with no role-less bound tokens; want nothing", logs.String())
+	}
+
+	_, legacyID, _ := busauth.GenerateToken()
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO bus_tokens (token_hash, label, created_at, node_id) VALUES (?, 'laptop agent', ?, 'dev1')`,
+		legacyID, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("insert role-less: %v", err)
+	}
+	logRolelessBusTokens(ctx, store)
+	if got := logs.String(); !strings.Contains(got, "WARNING 1 live bus join token(s) name no node role") {
+		t.Fatalf("startup log %q should report 1 live role-less token", got)
+	}
+
+	logs.Reset()
+	if _, err := store.Revoke(ctx, legacyID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	logRolelessBusTokens(ctx, store)
+	if logs.Len() != 0 {
+		t.Fatalf("logged %q after the role-less token was revoked; want nothing", logs.String())
+	}
+
+	// A store that cannot answer is reported, not mistaken for "none".
+	_ = store.Close()
+	logRolelessBusTokens(ctx, store)
+	if got := logs.String(); !strings.Contains(got, "counting role-less bus tokens") || strings.Contains(got, "WARNING") {
+		t.Fatalf("with a closed store, logged %q; want the counting error only", got)
+	}
+}
+
 func TestSeedBMCHostNode(t *testing.T) {
 	ctx := context.Background()
 	st, err := setup.OpenStore(ctx, filepath.Join(t.TempDir(), "settings.db"))
