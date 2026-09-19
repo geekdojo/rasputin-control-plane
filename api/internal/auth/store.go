@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
@@ -23,6 +25,10 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 	applyMigrations(ctx, db)
+	if err := migrateSessionHash(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -257,27 +263,147 @@ func (s *Store) UserHandleForCredential(ctx context.Context, credID []byte) ([]b
 }
 
 // ----- Sessions -----------------------------------------------------------
+//
+// Session tokens are stored hashed (token_hash = busauth.HashToken(token)),
+// rolled out as expand/contract because an A/B rollback boots the previous
+// api against this same database, and that api reads only the plaintext
+// token column. A session it cannot find is an operator locked out of an
+// appliance that has no account recovery.
+//
+// This is the EXPAND release:
+//   - CreateSession writes both the plaintext token and its hash;
+//   - lookups try the hash first and fall back to the plaintext column;
+//   - every OpenStore backfills token_hash for rows that lack it, because an
+//     identity-archive restore (or a rollback to an api that predates the
+//     column) brings plaintext-only rows back;
+//   - no row is ever deleted by the migration.
+//
+// CONTRACT (a later release, NOT this one): stop writing the plaintext token
+// and clear it from existing rows. Its trigger is a checkable fact, not a
+// date: it ships only once the api in the OTHER RAUC slot is at least this
+// expand release, so a rollback always lands on an api that can look a
+// session up by its hash. Until then the plaintext column must keep being
+// written. Rows are never deleted by either step.
 
+// migrateSessionHash adds the token_hash column and its unique index to a DB
+// that predates them, then backfills the hash for every row that has a
+// plaintext token and no hash. Idempotent: it runs on every open, and a second
+// run finds nothing to do.
+func migrateSessionHash(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN token_hash TEXT`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("auth: migrate sessions.token_hash: %w", err)
+	}
+	// NULLs are distinct in a SQLite UNIQUE index, so rows written by an
+	// older api (no hash yet) never conflict with each other here.
+	if _, err := db.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)`); err != nil {
+		return fmt.Errorf("auth: index sessions.token_hash: %w", err)
+	}
+	if err := backfillSessionHashes(ctx, db); err != nil {
+		return fmt.Errorf("auth: backfill sessions.token_hash: %w", err)
+	}
+	return nil
+}
+
+// backfillSessionHashes sets token_hash on every row that has a plaintext
+// token and no hash. Rows are only updated, never deleted. A row whose hash
+// another row already carries is left alone rather than failing the open.
+func backfillSessionHashes(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Read every candidate before writing: the DB is capped at one
+	// connection, so the rows iterator must be closed before the updates.
+	rows, err := tx.QueryContext(ctx, `
+        SELECT token FROM sessions
+        WHERE token_hash IS NULL AND token IS NOT NULL AND token <> ''`)
+	if err != nil {
+		return err
+	}
+	var tokens []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			rows.Close()
+			return err
+		}
+		tokens = append(tokens, t)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, t := range tokens {
+		h := busauth.HashToken(t)
+		if _, err := tx.ExecContext(ctx, `
+            UPDATE sessions SET token_hash = ?
+            WHERE token = ? AND token_hash IS NULL
+              AND NOT EXISTS (SELECT 1 FROM sessions WHERE token_hash = ?)`,
+			h, t, h); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// CreateSession stores the session with BOTH its plaintext token and the
+// token's hash (expand release; see the Sessions section comment).
 func (s *Store) CreateSession(ctx context.Context, sess *Session) error {
 	_, err := s.db.ExecContext(ctx, `
-        INSERT INTO sessions (token, user_id, created_at, expires_at, last_active_at)
-        VALUES (?, ?, ?, ?, ?)`,
-		sess.Token, sess.UserID,
+        INSERT INTO sessions (token, token_hash, user_id, created_at, expires_at, last_active_at)
+        VALUES (?, ?, ?, ?, ?, ?)`,
+		sess.Token, busauth.HashToken(sess.Token), sess.UserID,
 		ms(sess.CreatedAt), ms(sess.ExpiresAt), ms(sess.LastActiveAt))
 	return err
 }
 
+// GetSession returns the session the presented token names, or nil. It looks
+// the token up by its hash first and falls back to the plaintext column, which
+// only rows written by an older api (or restored from an older archive, before
+// the next open backfills them) still need. The returned Session carries the
+// presented token, so TouchSession/DeleteSession can be called with it.
 func (s *Store) GetSession(ctx context.Context, token string) (*Session, error) {
-	row := s.db.QueryRowContext(ctx, `
-        SELECT token, user_id, created_at, expires_at, last_active_at
-        FROM sessions WHERE token = ?`, token)
+	if token == "" {
+		return nil, nil
+	}
+	sess, err := s.getSession(ctx, sessionByHash, busauth.HashToken(token))
+	if err != nil || sess != nil {
+		if sess != nil {
+			sess.Token = token
+		}
+		return sess, err
+	}
+	sess, err = s.getSession(ctx, sessionByPlaintext, token)
+	if sess != nil {
+		sess.Token = token
+	}
+	return sess, err
+}
+
+const (
+	sessionByHash = `
+        SELECT user_id, created_at, expires_at, last_active_at
+        FROM sessions WHERE token_hash = ?`
+	sessionByPlaintext = `
+        SELECT user_id, created_at, expires_at, last_active_at
+        FROM sessions WHERE token = ?`
+)
+
+// getSession reads the one session row query (sessionByHash or
+// sessionByPlaintext) matches for arg, or nil.
+func (s *Store) getSession(ctx context.Context, query, arg string) (*Session, error) {
+	row := s.db.QueryRowContext(ctx, query, arg)
 	var (
 		sess         Session
 		createdAt    int64
 		expiresAt    int64
 		lastActiveAt int64
 	)
-	if err := row.Scan(&sess.Token, &sess.UserID, &createdAt, &expiresAt, &lastActiveAt); err != nil {
+	if err := row.Scan(&sess.UserID, &createdAt, &expiresAt, &lastActiveAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -289,14 +415,25 @@ func (s *Store) GetSession(ctx context.Context, token string) (*Session, error) 
 	return &sess, nil
 }
 
+// TouchSession and DeleteSession match the row by hash or by plaintext, so a
+// row written before the hash column existed is still reachable.
 func (s *Store) TouchSession(ctx context.Context, token string, ts time.Time) error {
+	if token == "" {
+		return nil
+	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET last_active_at = ? WHERE token = ?`, ms(ts), token)
+		`UPDATE sessions SET last_active_at = ? WHERE token_hash = ? OR token = ?`,
+		ms(ts), busauth.HashToken(token), token)
 	return err
 }
 
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	if token == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE token_hash = ? OR token = ?`,
+		busauth.HashToken(token), token)
 	return err
 }
 

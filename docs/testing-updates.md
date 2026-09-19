@@ -72,7 +72,30 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
      `/proc/sys/kernel/random/boot_id`, which does not change while the laptop stays up and
      does not exist at all on macOS. See the next section for why this value matters.
 
-4. **Authenticate** so the test script has a session cookie. The simplest path for the test harness is to manually insert a session row via sqlite3 against `./data/rasputin.db`, then write the token to `./cookies.txt`. A small `scripts/dev-login.sh` may exist depending on session state.
+4. **Authenticate** so the test script has a session cookie. A passkey sign-in cannot run
+   headless, so the test harness inserts a session row straight into `./data/rasputin.db`.
+   Run this from the repo root; the api does not need a restart:
+
+   ```sh
+   TOKEN=$(openssl rand -hex 32)
+   HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d ' ' -f 1)
+   NOW=$(( $(date +%s) * 1000 ))
+   sqlite3 ./data/rasputin.db "INSERT INTO sessions (token, token_hash, user_id, created_at, expires_at, last_active_at) SELECT '$TOKEN', '$HASH', id, $NOW, $NOW + 86400000, $NOW FROM users ORDER BY created_at LIMIT 1"
+   printf 'rasputin-session=%s\n' "$TOKEN"
+   ```
+
+   - `TOKEN` is the session cookie value: 32 random bytes, hex-encoded, the same shape the
+     api mints. `openssl` and `shasum` ship with macOS; on Linux use `sha256sum` in place of
+     `shasum -a 256`.
+   - `HASH` is the token's sha256 in hex. The api stores sessions hashed (the `token_hash`
+     column) and looks them up by hash first. It still writes and accepts the plaintext
+     `token` column while an A/B rollback could return to an api that only reads that
+     column, so the row carries both.
+   - The `SELECT ... FROM users` picks the first registered user, so the database must
+     already hold an account (sign in once with a passkey through the UI).
+   - `86400000` is one day in milliseconds; the row expires after that.
+   - The last line prints the `Cookie` header value for `curl -H "Cookie: ..."` or the test
+     script's `./cookies.txt`.
 
 ## The mock does not reboot: restart the agent with a new boot id
 

@@ -145,7 +145,10 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 // void and the finding becomes real. Today HashToken's callers are
 // GenerateToken (used by MintBound and by rasputin-provision) and Validate (hashing
 // a presented token for lookup), and PreloadHashes stores only the hashes
-// rasputin-provision got from GenerateToken.
+// rasputin-provision got from GenerateToken. The passkey session store
+// (api/internal/auth/store.go) also uses it as its at-rest verifier for session
+// cookies; those tokens are 32 bytes from crypto/rand (auth.randomToken), the
+// same premise.
 func HashToken(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])
