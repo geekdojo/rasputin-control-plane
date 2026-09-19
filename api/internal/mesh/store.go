@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -243,7 +245,20 @@ func (s *Store) UpdateAfterReconcile(ctx context.Context, observedHash string, t
 
 // ----- Devices ------------------------------------------------------------
 
+// execer is what upsertDevice needs from *sql.DB or *sql.Tx.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// UpsertDevice records Headscale's view of a device. It does not create a
+// binding: a second device carrying a node id that another device is bound
+// to is refused by the unique index (ErrDuplicateBinding); only BindDevice,
+// called by the enrol, moves a binding.
 func (s *Store) UpsertDevice(ctx context.Context, d *Device) error {
+	return asDuplicateBinding(upsertDevice(ctx, s.db, d), d.RasputinNodeID)
+}
+
+func upsertDevice(ctx context.Context, db execer, d *Device) error {
 	tags, _ := json.Marshal(d.Tags)
 	routes, _ := json.Marshal(d.AdvertisedRoutes)
 	if d.FirstSeen.IsZero() {
@@ -260,7 +275,7 @@ func (s *Store) UpsertDevice(ctx context.Context, d *Device) error {
 	if lastSeen.IsZero() {
 		lastSeen = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
         INSERT INTO mesh_devices (hs_id, user, hostname, tailnet_ip, tags, advertised_routes,
             rasputin_node_id, kind, first_seen, last_seen, online)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -279,47 +294,101 @@ func (s *Store) UpsertDevice(ctx context.Context, d *Device) error {
 	return err
 }
 
-func (s *Store) ListDevices(ctx context.Context) ([]*Device, error) {
-	rows, err := s.db.QueryContext(ctx, `
-        SELECT hs_id, user, hostname, tailnet_ip, tags, advertised_routes,
-               rasputin_node_id, kind, first_seen, last_seen, online
-        FROM mesh_devices ORDER BY first_seen ASC`)
+// ErrDuplicateBinding is wrapped by every refusal caused by more than one
+// device bound to the same node.
+var ErrDuplicateBinding = errors.New("more than one mesh device is bound to the node")
+
+// DuplicateBindingError names the node and the devices bound to it.
+type DuplicateBindingError struct {
+	NodeID string
+	HSIDs  []string
+}
+
+func (e *DuplicateBindingError) Error() string {
+	return fmt.Sprintf("mesh: node %s is bound to %d devices (%s); refusing to pick one",
+		e.NodeID, len(e.HSIDs), strings.Join(e.HSIDs, ", "))
+}
+
+func (e *DuplicateBindingError) Unwrap() error { return ErrDuplicateBinding }
+
+// asDuplicateBinding turns the unique-index violation into ErrDuplicateBinding.
+func asDuplicateBinding(err error, nodeID string) error {
+	// SQLite names the indexed column: "UNIQUE constraint failed:
+	// mesh_devices.rasputin_node_id".
+	if err != nil && strings.Contains(err.Error(), "mesh_devices.rasputin_node_id") {
+		return fmt.Errorf("mesh: record device for node %s: %w", nodeID, &DuplicateBindingError{NodeID: nodeID})
+	}
+	return err
+}
+
+// BindDevice records d as the one device bound to d.RasputinNodeID, on the
+// authority of enrolJobID — the mesh.enroll_node job whose agent reported
+// d.HSID. Any other device bound to that node is unbound in the same
+// transaction (a re-registered node's earlier device); their ids are
+// returned so the caller can say so.
+func (s *Store) BindDevice(ctx context.Context, d *Device, enrolJobID string) (unbound []string, err error) {
+	if d.RasputinNodeID == "" || d.HSID == "" || enrolJobID == "" {
+		return nil, errors.New("mesh: BindDevice needs a node id, a device id and the enrol job id")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Device
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `SELECT hs_id FROM mesh_devices WHERE rasputin_node_id = ? AND hs_id != ?`, d.RasputinNodeID, d.HSID)
+	if err != nil {
+		return nil, err
+	}
 	for rows.Next() {
-		var (
-			d            Device
-			tags, routes string
-			firstSeen    int64
-			lastSeen     int64
-			online       int
-		)
-		if err := rows.Scan(&d.HSID, &d.User, &d.Hostname, &d.TailnetIP, &tags, &routes,
-			&d.RasputinNodeID, &d.Kind, &firstSeen, &lastSeen, &online); err != nil {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		d.Online = online != 0
-		_ = json.Unmarshal([]byte(tags), &d.Tags)
-		_ = json.Unmarshal([]byte(routes), &d.AdvertisedRoutes)
-		d.FirstSeen = fromMs(firstSeen)
-		d.LastSeen = fromMs(lastSeen)
-		out = append(out, &d)
+		unbound = append(unbound, id)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE mesh_devices SET rasputin_node_id = '', enrol_job_id = ''
+        WHERE rasputin_node_id = ? AND hs_id != ?`, d.RasputinNodeID, d.HSID); err != nil {
+		return nil, err
+	}
+	if err := upsertDevice(ctx, tx, d); err != nil {
+		return nil, asDuplicateBinding(err, d.RasputinNodeID)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE mesh_devices SET enrol_job_id = ? WHERE hs_id = ?`, enrolJobID, d.HSID); err != nil {
+		return nil, err
+	}
+	return unbound, tx.Commit()
 }
 
-// GetDeviceByRasputinNodeID returns the cached mesh device whose
-// rasputin_node_id matches nodeID, or (nil, nil) if the node is not
-// enrolled. Used by the node-removal cascade to find the hs_id to pass
-// to Headscale.DeleteNode without making the caller list all devices.
-func (s *Store) GetDeviceByRasputinNodeID(ctx context.Context, nodeID string) (*Device, error) {
-	row := s.db.QueryRowContext(ctx, `
-        SELECT hs_id, user, hostname, tailnet_ip, tags, advertised_routes,
-               rasputin_node_id, kind, first_seen, last_seen, online
-        FROM mesh_devices WHERE rasputin_node_id = ? LIMIT 1`, nodeID)
+// UnbindDevice clears a device's binding (it stays listed, bound to no node).
+func (s *Store) UnbindDevice(ctx context.Context, hsID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE mesh_devices SET rasputin_node_id = '', enrol_job_id = '' WHERE hs_id = ?`, hsID)
+	return err
+}
+
+// setEnrolJob records the enrol job that proves an existing binding.
+func (s *Store) setEnrolJob(ctx context.Context, hsID, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE mesh_devices SET enrol_job_id = ? WHERE hs_id = ?`, jobID, hsID)
+	return err
+}
+
+// ensureBindingIndex creates the one-device-per-node index.
+func (s *Store) ensureBindingIndex(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, bindingIndexDDL)
+	return err
+}
+
+const deviceColumns = `hs_id, user, hostname, tailnet_ip, tags, advertised_routes,
+               rasputin_node_id, enrol_job_id, kind, first_seen, last_seen, online`
+
+func scanDevice(scan func(...any) error) (*Device, error) {
 	var (
 		d            Device
 		tags, routes string
@@ -327,11 +396,8 @@ func (s *Store) GetDeviceByRasputinNodeID(ctx context.Context, nodeID string) (*
 		lastSeen     int64
 		online       int
 	)
-	if err := row.Scan(&d.HSID, &d.User, &d.Hostname, &d.TailnetIP, &tags, &routes,
-		&d.RasputinNodeID, &d.Kind, &firstSeen, &lastSeen, &online); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
+	if err := scan(&d.HSID, &d.User, &d.Hostname, &d.TailnetIP, &tags, &routes,
+		&d.RasputinNodeID, &d.EnrolJobID, &d.Kind, &firstSeen, &lastSeen, &online); err != nil {
 		return nil, err
 	}
 	d.Online = online != 0
@@ -340,6 +406,86 @@ func (s *Store) GetDeviceByRasputinNodeID(ctx context.Context, nodeID string) (*
 	d.FirstSeen = fromMs(firstSeen)
 	d.LastSeen = fromMs(lastSeen)
 	return &d, nil
+}
+
+func (s *Store) ListDevices(ctx context.Context) ([]*Device, error) {
+	return s.queryDevices(ctx, `SELECT `+deviceColumns+` FROM mesh_devices ORDER BY first_seen ASC`)
+}
+
+func (s *Store) queryDevices(ctx context.Context, q string, args ...any) ([]*Device, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Device
+	for rows.Next() {
+		d, err := scanDevice(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// GetDeviceByRasputinNodeID returns the one mesh device bound to nodeID, or
+// (nil, nil) if the node is not enrolled. More than one bound device is a
+// *DuplicateBindingError, never a silent pick. (Node removal does not use
+// this: it removes every bound device, see DevicesBoundTo.)
+func (s *Store) GetDeviceByRasputinNodeID(ctx context.Context, nodeID string) (*Device, error) {
+	if nodeID == "" {
+		return nil, nil
+	}
+	devs, err := s.queryDevices(ctx, `SELECT `+deviceColumns+` FROM mesh_devices WHERE rasputin_node_id = ? ORDER BY hs_id`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	switch len(devs) {
+	case 0:
+		return nil, nil
+	case 1:
+		return devs[0], nil
+	}
+	e := &DuplicateBindingError{NodeID: nodeID}
+	for _, d := range devs {
+		e.HSIDs = append(e.HSIDs, d.HSID)
+	}
+	return nil, e
+}
+
+// DevicesBoundTo returns every device bound to nodeID (normally zero or
+// one). For the node-removal cascade, which removes them all.
+func (s *Store) DevicesBoundTo(ctx context.Context, nodeID string) ([]*Device, error) {
+	if nodeID == "" {
+		return nil, nil
+	}
+	return s.queryDevices(ctx, `SELECT `+deviceColumns+` FROM mesh_devices WHERE rasputin_node_id = ? ORDER BY hs_id`, nodeID)
+}
+
+// BoundDevices groups bound devices by node. dup lists every node bound to
+// more than one device, each with its device ids; readers refuse those
+// nodes rather than pick a device.
+func BoundDevices(devices []*Device) (one map[string]*Device, dup map[string][]string) {
+	byNode := map[string][]*Device{}
+	for _, d := range devices {
+		if d != nil && d.RasputinNodeID != "" {
+			byNode[d.RasputinNodeID] = append(byNode[d.RasputinNodeID], d)
+		}
+	}
+	one = make(map[string]*Device, len(byNode))
+	dup = map[string][]string{}
+	for node, ds := range byNode {
+		if len(ds) == 1 {
+			one[node] = ds[0]
+			continue
+		}
+		for _, d := range ds {
+			dup[node] = append(dup[node], d.HSID)
+		}
+		sort.Strings(dup[node])
+	}
+	return one, dup
 }
 
 func (s *Store) DeleteDevice(ctx context.Context, hsID string) error {

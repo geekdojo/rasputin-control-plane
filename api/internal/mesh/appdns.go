@@ -3,6 +3,7 @@ package mesh
 import (
 	"context"
 	"fmt"
+	"log"
 )
 
 // AppDNS is the minimal app shape the tailnet DNS projection needs: the app
@@ -35,10 +36,17 @@ func (s *Service) ReconcileAppDNS(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mesh: list devices for app dns: %w", err)
 	}
-	tailnetIPByNode := make(map[string]string, len(devices))
-	for _, d := range devices {
-		if d.RasputinNodeID != "" && d.TailnetIP != "" {
-			tailnetIPByNode[d.RasputinNodeID] = d.TailnetIP
+	bound, dup := BoundDevices(devices)
+	for node, ids := range dup {
+		// Publishing a name for one of several devices bound to the node
+		// would be a guess about which device the node is; its app names
+		// are left out until the duplicate is resolved.
+		log.Printf("%v; its tailnet app names are not published", &DuplicateBindingError{NodeID: node, HSIDs: ids})
+	}
+	tailnetIPByNode := make(map[string]string, len(bound))
+	for node, d := range bound {
+		if d.TailnetIP != "" {
+			tailnetIPByNode[node] = d.TailnetIP
 		}
 	}
 

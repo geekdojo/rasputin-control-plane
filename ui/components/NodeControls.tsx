@@ -821,7 +821,13 @@ function RemoveNodeModal({
               <ImpactRow label="APP DEPLOYMENTS" value={`${impact!.appIds.length} removed`} />
               <ImpactRow
                 label="MESH ENROLLMENT"
-                value={impact!.meshDeviceHsId ? 'removed from Headscale' : 'not enrolled'}
+                value={
+                  (impact!.meshDeviceHsIds?.length ?? 0) > 1
+                    ? `${impact!.meshDeviceHsIds!.length} devices removed from Headscale`
+                    : impact!.meshDeviceHsId
+                      ? 'removed from Headscale'
+                      : 'not enrolled'
+                }
               />
               <ImpactRow
                 label="FIREWALL STATE"

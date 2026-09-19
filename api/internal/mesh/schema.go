@@ -51,4 +51,17 @@ var migrations = []string{
 	// archive is cleared too. The column stays (dropping it gains nothing
 	// and an older api rolled back onto this DB still expects it).
 	`UPDATE mesh_intents SET hs_value = '' WHERE hs_value != ''`,
+	// The mesh.enroll_node job whose record step bound this device to its
+	// node. Empty on an unbound row, and on a binding an older release made
+	// without an enrol (VerifyBindings proves or clears those at startup).
+	`ALTER TABLE mesh_devices ADD COLUMN enrol_job_id TEXT NOT NULL DEFAULT ''`,
+	// One device per node. On a database that still holds duplicate bindings
+	// this fails (and is logged); VerifyBindings resolves the duplicates at
+	// startup and then creates it.
+	bindingIndexDDL,
 }
+
+// bindingIndexDDL makes a second device bound to the same node a constraint
+// violation rather than something a reader has to pick between.
+const bindingIndexDDL = `CREATE UNIQUE INDEX IF NOT EXISTS ux_mesh_devices_bound_node
+    ON mesh_devices(rasputin_node_id) WHERE rasputin_node_id != ''`

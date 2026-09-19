@@ -86,6 +86,9 @@ func TestHandleGetNodeRemovalImpact(t *testing.T) {
 	if got.MeshDeviceHSID != hsID {
 		t.Errorf("meshDeviceHsId: %q want %q", got.MeshDeviceHSID, hsID)
 	}
+	if len(got.MeshDeviceHSIDs) != 1 || got.MeshDeviceHSIDs[0] != hsID {
+		t.Errorf("meshDeviceHsIds: %v want [%q]", got.MeshDeviceHSIDs, hsID)
+	}
 	if !got.HasFirewallState {
 		t.Errorf("hasFirewallState: want true")
 	}

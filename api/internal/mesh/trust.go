@@ -266,6 +266,7 @@ func reconcileConvergeTrust(svc *Service, inv *inventory.Store, jstore *jobs.Sto
 				enrolled[d.RasputinNodeID] = true
 			}
 		}
+		boundDev, _ := BoundDevices(devices)
 		guards, err := loadEnrollGuards(sc, jstore)
 		if err != nil {
 			return nil, err
@@ -303,7 +304,18 @@ func reconcileConvergeTrust(svc *Service, inv *inventory.Store, jstore *jobs.Sto
 				res.Skipped["delivered_recently"]++
 				continue
 			}
-			spec, _ := json.Marshal(EnrollSpec{NodeID: n.ID})
+			d := boundDev[n.ID]
+			if d == nil {
+				// Bound to more than one device: re-delivering would re-enrol
+				// with routes read off a guess. Left for the duplicate to be
+				// resolved (push_routes and app DNS name it).
+				res.Skipped["duplicate_binding"]++
+				continue
+			}
+			// Re-delivery re-runs `tailscale up --reset`; name the routes the
+			// node advertises now so the reset keeps them.
+			routes, _ := ReenrolRoutes(sc.Ctx, svc, n.ID, d, nil)
+			spec, _ := json.Marshal(EnrollSpec{NodeID: n.ID, AdvertiseRoutes: routes})
 			if _, err := runner.Submit(sc.Ctx, "mesh.enroll_node", spec, "converge-trust"); err != nil {
 				sc.Log("warn", fmt.Sprintf("trust: submit re-delivery for %s: %v", n.ID, err))
 				res.Skipped["submit_error"]++

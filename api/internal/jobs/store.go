@@ -159,6 +159,28 @@ func (s *Store) ListJobsByKind(ctx context.Context, kind string, limit int) ([]*
 	return out, rows.Err()
 }
 
+// ListAllJobsByKind returns every job of kind, newest first, with no limit.
+// For whole-history questions (was this ever recorded by a job?) that a
+// capped listing would answer wrongly for a long-lived cluster.
+func (s *Store) ListAllJobsByKind(ctx context.Context, kind string) ([]*Job, error) {
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, kind, spec, status, created_by, created_at, started_at, finished_at, parent_id, error
+        FROM jobs WHERE kind = ? ORDER BY created_at DESC`, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Job
+	for rows.Next() {
+		j, err := scanJob(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListJobs(ctx context.Context, limit int) ([]*Job, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
