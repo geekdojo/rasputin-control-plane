@@ -327,16 +327,18 @@ func backfillSessionHashes(ctx context.Context, db *sql.DB) error {
 	for rows.Next() {
 		var t string
 		if err := rows.Scan(&t); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		tokens = append(tokens, t)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return err
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	for _, t := range tokens {
 		h := busauth.HashToken(t)
 		if _, err := tx.ExecContext(ctx, `
