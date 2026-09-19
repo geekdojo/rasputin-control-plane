@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
@@ -154,7 +153,9 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 // removeCollectorLeaf deletes <collectorLeafDir>/<nodeID>. Best-effort and
 // logged, like the token revoke above: the node is already gone, and a leaf
 // left behind is refused at the ingress. The id is checked against the node-id
-// rule first, so it can only name one directory directly under the leaf dir.
+// rule first, and the delete runs through an os.Root opened on the leaf
+// directory, so it cannot reach anything outside that directory whatever the
+// id is.
 func (s *Server) removeCollectorLeaf(nodeID string) {
 	if s.collectorLeafDir == "" {
 		return
@@ -163,12 +164,20 @@ func (s *Server) removeCollectorLeaf(nodeID string) {
 		log.Printf("rasputin-api: not deleting a collector leaf for removed node %q: not a valid node id, so it names no leaf directory", nodeID)
 		return
 	}
-	dir := filepath.Join(s.collectorLeafDir, nodeID)
-	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+	root, err := os.OpenRoot(s.collectorLeafDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return // no collector ever had a leaf here
+	}
+	if err != nil {
+		log.Printf("rasputin-api: open the collector leaf directory to delete removed node %q's leaf: %v", nodeID, err)
 		return
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		log.Printf("rasputin-api: delete collector leaf for removed node %q at %s: %v", nodeID, dir, err)
+	defer func() { _ = root.Close() }()
+	if _, err := root.Lstat(nodeID); errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err := root.RemoveAll(nodeID); err != nil {
+		log.Printf("rasputin-api: delete collector leaf for removed node %q: %v", nodeID, err)
 		return
 	}
 	log.Printf("rasputin-api: deleted the collector leaf for removed node %q", nodeID)

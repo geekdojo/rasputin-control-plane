@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -45,6 +46,11 @@ func (s *Store) OnNodeRevoked(fn func(nodeID string)) {
 	s.liveMu.Lock()
 	s.live.hooks = append(s.live.hooks, fn)
 	s.liveMu.Unlock()
+}
+
+// oneLine removes line breaks, so a value cannot forge a log line.
+func oneLine(v string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), "\r", "")
 }
 
 // loadLiveNodes reads the whole set from the database. OpenStore calls it once.
@@ -90,7 +96,10 @@ func (s *Store) refreshNodes(ctx context.Context, nodeIDs ...string) {
 		}
 		live, err := s.NodeHasLiveToken(ctx, node)
 		if err != nil {
-			log.Printf("busauth: refreshing whether node %q holds a live token: %v — treating it as not live", node, err)
+			// The node id can arrive from a request path (node removal), so
+			// line breaks are stripped from everything logged here.
+			log.Printf("busauth: refreshing whether node %q holds a live token: %s — treating it as not live",
+				oneLine(node), oneLine(err.Error()))
 			live = false
 		}
 		s.liveMu.Lock()
