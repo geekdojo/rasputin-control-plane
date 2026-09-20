@@ -98,6 +98,11 @@ The bus server offers **TLS with a dedicated bus key**, and nodes trust it by
 or delivered over the bus to nodes enrolled before it existed. The check is the
 key and nothing else — no CA chain, no hostname, no validity dates — so a node
 with a wrong clock still joins, and a mesh CA change cannot lock the fleet out.
+The certificate that key is served in is **persisted** as `bus/bus.crt` and
+carries one fixed DNS name, `rasputin-bus`. A node ignores it; it is there for
+clients that do verify a name, which is every stock TLS client — Go matches the
+SAN and never the Common Name — and for the node listener and the collector,
+which pin its exact bytes rather than the key.
 The api migrates an existing cluster by itself: once
 its own build is committed on its A/B slot it hands the pin to nodes that lack
 it, and once every enrolled node reports TLS with the pin verified, no

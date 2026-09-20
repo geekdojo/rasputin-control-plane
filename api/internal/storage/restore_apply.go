@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 )
 
 // The second half of the restore: becoming the restored cluster.
@@ -153,6 +154,12 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 			// The restored key replaces the one this fresh install generated,
 			// so every node that pinned the original joins again (#448).
 			targets = append(targets, target{staged: busKeyArchivePath, live: filepath.Join(busDir, "bus.key"), aside: busKeyArchivePath})
+		case e.Path == busCertArchivePath:
+			// Put back beside the key, so a collector that pins its exact
+			// bytes keeps working across the restore. If it is absent, or if
+			// it does not match the key that landed, EnsureCert re-mints it at
+			// the next start.
+			targets = append(targets, target{staged: busCertArchivePath, live: filepath.Join(busDir, bustls.CertFileName), aside: busCertArchivePath})
 		case e.Path == busTombstonesArchivePath:
 			// Not moved into place: merged, after every move has succeeded.
 			restoredTombstones = true

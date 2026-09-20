@@ -194,17 +194,26 @@ var (
 )
 
 // SelfSignedCert wraps signer in a self-signed certificate valid from
-// notBefore to notAfter. Exported so a test can build a certificate that is
-// not yet valid, or long expired, around the same key and prove the pin check
-// ignores both.
+// notBefore to notAfter, carrying BusDNSName as its one SAN. Exported so a
+// test can build a certificate that is not yet valid, or long expired, around
+// the same key and prove the pin check ignores both.
+//
+// EnsureCert is what the api uses: it persists the result rather than minting
+// a fresh serial on every start.
 func SelfSignedCert(signer crypto.Signer, notBefore, notAfter time.Time) (tls.Certificate, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("bustls: serial: %w", err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "rasputin-bus"},
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: BusDNSName},
+		// The SAN, not the CN, is what a verifying client matches: Go's
+		// crypto/tls does not fall back to the Common Name, so a certificate
+		// with only the CN above is "not valid for any names" to anything that
+		// checks (geekdojo/geekdojo-brain#467). A Rasputin node checks the pin
+		// and nothing else, so this is for everyone else.
+		DNSNames:              []string{BusDNSName},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature,
@@ -222,9 +231,14 @@ func SelfSignedCert(signer crypto.Signer, notBefore, notAfter time.Time) (tls.Ce
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: signer, Leaf: leaf}, nil
 }
 
-// ServerTLSConfig is what the embedded NATS server serves: the key in a
-// freshly self-signed certificate, TLS 1.3 only (every client is a Go agent),
-// no client certificates (mTLS is out of scope, #448 decided design step 6).
+// ServerTLSConfig is the embedded NATS server's TLS around a FRESHLY minted,
+// unpersisted certificate: TLS 1.3 only (every client is a Go agent), no
+// client certificates (mTLS is out of scope, #448 decided design step 6).
+//
+// The api does not use this. It serves the PERSISTED certificate (EnsureCert),
+// so the bytes a client may pin stay the same across restarts. This remains
+// for callers that have no directory to persist into — tests, and anything
+// that only needs a config for a bus nobody outside the process talks to.
 func (k *Key) ServerTLSConfig() (*tls.Config, error) {
 	cert, err := SelfSignedCert(k.signer, certNotBefore, certNotAfter)
 	if err != nil {

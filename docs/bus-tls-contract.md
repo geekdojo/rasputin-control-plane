@@ -70,11 +70,22 @@ The api generates a key on first start, writes it to `/var/lib/rasputin/bus/bus.
 
 ## What the api does with the key
 
-- **Serves TLS on `:4222`** using the key, wrapped in a certificate the api self-signs at each start. The certificate is valid from 1970 to 9999, and the dates mean nothing to a node. TLS 1.3 only, and there are no client certificates (mTLS is out of scope).
+- **Serves TLS on `:4222`** using the key, wrapped in the persisted bus certificate (below). TLS 1.3 only, and there are no client certificates (mTLS is out of scope).
 - **Includes the key in the identity backup** as `bus/bus.key`. A restore puts it back, so a restored or reflashed-and-restored controlplane keeps the fleet's pin.
 - **Exposes the pin to the authenticated UI:**
   - `GET /api/bus/tls` returns it as `pin` (read-only status).
   - `POST /api/bus/tokens` returns it as `busPin`. Add-node renders it into the seed from that same response.
+
+## The bus certificate
+
+`/var/lib/rasputin/bus/bus.crt` is the certificate the key is served in. One PEM `CERTIFICATE` block, mode `0644` inside the `0700` bus directory: it holds the bus public key and nothing else, and a container user reads it.
+
+- **It is persisted.** The api mints it once, on the first start that finds no file, and serves the same bytes on every start after that. It used to be re-minted, with a fresh random serial, every time the api started.
+- **It carries a fixed DNS SAN: `rasputin-bus`.** The same value on every cluster. Nothing resolves it — a node reaches the bus by address and verifies the server by the pin alone, checking no chain, no name and no dates. The SAN is for clients that cannot be told to do that. Go's `crypto/tls` matches the name against SANs only and does not fall back to the Common Name, so a certificate with `CN=rasputin-bus` and no SAN is "not valid for any names" to anything that verifies it at all — measured against Alloy v1.4.2 on a certificate of exactly the old shape ([geekdojo-brain#467](https://github.com/geekdojo/geekdojo-brain/issues/467)).
+- **Dates:** 1970-01-01 to 9999-12-31, as before. 9999-12-31 is RFC 5280's "no well-defined expiration".
+- **It is re-minted, with the reason logged, when the persisted file is not one the api would have written:** it does not parse, it wraps a different key (the key was replaced or restored), it carries no `rasputin-bus` SAN, or its `NotAfter` is not 9999-12-31. Re-minting costs nothing on the node side, because the pin is the key. It does invalidate a client that pinned the old bytes.
+- **It is in the identity backup** as `bus/bus.crt`, and a restore puts it back beside the key. It is derivable from the key, so an archive without it still restores — the api mints one at the next start — but a client pinning its exact bytes would refuse the re-minted one until it is reconfigured.
+- **It is public.** It may be copied anywhere. It is not a CA and must not go in a system CA bundle.
 
 ## What the agent does with the pin
 

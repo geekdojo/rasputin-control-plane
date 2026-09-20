@@ -202,13 +202,26 @@ func main() {
 		log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY; every node that holds a bus pin stays off it until the key file is fixed or restored.", busKeyErr)
 		busKey = nil
 	default:
-		serverTLS, terr := busKey.ServerTLSConfig()
-		if terr != nil {
-			log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY.", terr)
+		// The PERSISTED certificate around the key (geekdojo/geekdojo-brain
+		// #508), not a fresh one per start: it carries a fixed DNS SAN, and
+		// its exact bytes are what a client that verifies the name — the
+		// collector, the node listener — will pin. EnsureCert returns a usable
+		// certificate even when it had to replace the file, so an error here
+		// is a note, not a reason to drop TLS. Only a failure to produce one
+		// at all leaves cert zero-valued.
+		busCert, busCertGenerated, certErr := bustls.EnsureCert(filepath.Join(dataDir, "bus"), busKey)
+		if len(busCert.Certificate) == 0 {
+			log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY.", certErr)
 			busKey = nil
 			break
 		}
-		busCfg.TLS = serverTLS
+		switch {
+		case certErr != nil:
+			log.Printf("rasputin-api: bus certificate re-minted: %v", certErr)
+		case busCertGenerated:
+			log.Printf("rasputin-api: bus certificate minted and persisted to %q (DNS %q)", filepath.Join(dataDir, "bus", bustls.CertFileName), bustls.BusDNSName)
+		}
+		busCfg.TLS = bustls.ServerTLSConfigFor(busCert)
 		busCfg.AllowNonTLS = busTLSMode.AllowsPlaintext()
 		origin := "loaded"
 		if busKeyGenerated {
