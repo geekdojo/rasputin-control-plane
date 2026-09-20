@@ -109,7 +109,7 @@ func (b *RealBackend) Enroll(ctx context.Context, in EnrollInput) (Status, error
 	cmd.Stderr = &stderr
 	// Once killed, do not sit on the stderr pipe waiting for EOF: the CLI
 	// forks nothing, but a hung one is exactly the case being handled.
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = upWaitDelay
 	upStarted := time.Now()
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -119,6 +119,15 @@ func (b *RealBackend) Enroll(ctx context.Context, in EnrollInput) (Status, error
 	}
 	return b.Status(ctx)
 }
+
+// upWaitDelay is how long Run may sit on `tailscale up`'s stderr pipe after
+// the kill before giving up on it. Named, because it is the difference the
+// deadline tests measure: when the kill lands on the process holding the
+// pipes, Run returns at the deadline; when it does not — a child that
+// outlived its shell — Run returns a whole upWaitDelay later. A test that
+// tells those two apart has to know this value, so it reads it here rather
+// than carrying a copy.
+const upWaitDelay = 2 * time.Second
 
 // enrollKilledByDeadline is the error for a `tailscale up` that the enroll
 // deadline killed while it was still waiting on the login. It carries what
