@@ -83,8 +83,8 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// REFUSED while bus TLS is unavailable (geekdojo/geekdojo-brain#510). The
-	// seed the UI renders from this response carries RASPUTIN_BUS_PIN, and
-	// with no bus key there is no pin to put in it. A node seeded without one
+	// seed rendered below carries RASPUTIN_BUS_PIN, and with no bus key there
+	// is no pin to put in it. A node seeded without one
 	// comes up unpinned and stays that way: it dials plaintext, and the only
 	// route back is a pin delivery this controlplane cannot make until its own
 	// key is fixed. Minting nothing is the recoverable failure.
