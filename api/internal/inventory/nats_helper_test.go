@@ -58,6 +58,10 @@ func TestService_Start_FullHeartbeatPath(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed insert: %v", err)
 	}
+	// A heartbeat is accepted only from a node the registry admits: a member
+	// holding a live join token. Load the token side, as the token store does
+	// at api start.
+	store.Registry().ReplaceLiveTokens(map[string][]string{nodeID: {"h1"}})
 
 	svc := NewService(store, nc)
 	// Subscribe to the inventory change channel before Start so we don't
@@ -164,6 +168,10 @@ func TestService_Start_RegisteredUpdatesExistingOnlineToUpdated(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed insert: %v", err)
 	}
+	// A heartbeat is accepted only from a node the registry admits: a member
+	// holding a live join token. Load the token side, as the token store does
+	// at api start.
+	store.Registry().ReplaceLiveTokens(map[string][]string{nodeID: {"h1"}})
 
 	svc := NewService(store, nc)
 	// Pre-populate cache so prev == Online; handleRegistered should then

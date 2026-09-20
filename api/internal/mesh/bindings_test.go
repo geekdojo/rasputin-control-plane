@@ -247,6 +247,7 @@ func TestConvergeTrust_ReenrolKeepsAdvertisedRoutes(t *testing.T) {
 		Metadata: map[string]any{proto.MetadataMeshCAFingerprint: "stale-fingerprint"}}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
+	f.admit("fw")
 	if _, err := f.store.BindDevice(f.ctx, &Device{HSID: "hs-fw", RasputinNodeID: "fw", Kind: "rasputin",
 		AdvertisedRoutes: []string{"192.168.1.0/24"}, FirstSeen: now, LastSeen: now}, "j-fw"); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -348,6 +349,7 @@ func TestConvergeTrust_SkipsANodeBoundToTwoDevices(t *testing.T) {
 		Metadata: map[string]any{proto.MetadataMeshCAFingerprint: "stale-fingerprint"}}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
+	f.admit("fw")
 	seedLegacyBinding(t, f.store, "hs-1", "fw", "192.168.1.0/24")
 	seedLegacyBinding(t, f.store, "hs-2", "fw")
 	out, err := reconcileConvergeTrust(f.svc, f.inv, f.jstore, f.runner)(stepCtx(f.ctx, f.nc, struct{}{}))

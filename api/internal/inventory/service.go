@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"log"
 	"sync"
 	"time"
@@ -221,13 +220,14 @@ func (s *Service) handleHeartbeat(m *nats.Msg) {
 		return
 	}
 
+	// Membership and liveness come from the registry, in memory: a heartbeat
+	// from a node the api does not admit — never registered, removed, or its
+	// last join token revoked — is dropped, and an accepted one records the
+	// node's last-seen in the registry. The heartbeat path reads and writes
+	// no database (geekdojo-brain#585). The agent of a dropped node re-emits
+	// a registration on its next reconnect, which is what creates rows.
 	now := time.Now().UTC()
-	if err := s.store.TouchLastSeen(s.ctx, nodeID, now); err != nil {
-		// Unknown node: ignore the heartbeat. The agent will re-emit a
-		// registration on next reconnect, which is what creates rows.
-		if !errors.Is(err, sql.ErrNoRows) {
-			log.Printf("inventory: touch %s: %v", nodeID, err)
-		}
+	if !s.store.Registry().Touch(nodeID, now) {
 		return
 	}
 
@@ -265,10 +265,34 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	}
 	now := time.Now().UTC()
 
-	existing, err := s.store.Get(s.ctx, ev.NodeID)
-	if err != nil {
-		log.Printf("inventory: get %s: %v", ev.NodeID, err)
+	// Membership, role and the cluster-size cap are decided from the registry,
+	// in memory — the api's one node list (geekdojo-brain#585). The database
+	// is read only to hydrate the row a re-registration updates, below.
+	reg := s.store.Registry()
+	entry, known := reg.Lookup(ev.NodeID)
+	if known && entry.Member && entry.Role != ev.Role {
+		// A node cannot change roles once enrolled: changing role means
+		// remove, reflash, re-add. A re-registration presenting a different
+		// role is rejected outright and the row is left exactly as it was —
+		// no field updates, no re-confirmed image version, no last-seen bump.
+		// Removal deletes the row, so a re-added node takes the insert path
+		// with whatever role it presents.
+		log.Printf("inventory: WARN reject registration from %s: node is enrolled as role %q but presented role %q; "+
+			"a node cannot change roles once enrolled (remove it, reflash, and re-add it)",
+			ev.NodeID, entry.Role, ev.Role)
 		return
+	}
+
+	var existing *proto.Node
+	if known && entry.Member {
+		var err error
+		existing, err = s.store.Get(s.ctx, ev.NodeID)
+		if err != nil {
+			log.Printf("inventory: get %s: %v", ev.NodeID, err)
+			return
+		}
+		// The registry says member and the row is gone: the row is the record,
+		// so take the insert path and let it be rebuilt.
 	}
 
 	if existing == nil {
@@ -281,12 +305,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 		// Re-registrations of known nodes take the update path below and are
 		// never affected. Bench-verified 2026-07-15 that without this, a 25th
 		// node enrolls straight into inventory.
-		count, err := s.store.Count(s.ctx)
-		if err != nil {
-			log.Printf("inventory: count nodes: %v", err)
-			return
-		}
-		if count >= proto.MaxClusterNodes {
+		if count := reg.MemberCount(); count >= proto.MaxClusterNodes {
 			log.Printf("inventory: reject %s: cluster is at the %d-node cap", ev.NodeID, proto.MaxClusterNodes)
 			return
 		}
@@ -326,19 +345,6 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 		if s.onRegistered != nil {
 			s.onRegistered(s.ctx, n)
 		}
-		return
-	}
-
-	// A node cannot change roles once enrolled: changing role means remove,
-	// reflash, re-add. A re-registration presenting a different role is
-	// rejected outright and the row is left exactly as it was — no field
-	// updates, no re-confirmed image version, no last-seen bump. Removal
-	// deletes the row, so a re-added node takes the insert path above with
-	// whatever role it presents.
-	if existing.Role != ev.Role {
-		log.Printf("inventory: WARN reject registration from %s: node is enrolled as role %q but presented role %q; "+
-			"a node cannot change roles once enrolled (remove it, reflash, and re-add it)",
-			ev.NodeID, existing.Role, ev.Role)
 		return
 	}
 

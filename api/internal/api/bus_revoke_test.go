@@ -35,7 +35,7 @@ const revokeWaitLimit = 10 * time.Second
 // startAuthBus brings up an auth-enforced bus on loopback whose callout
 // validates against tokens — the store the api handlers revoke through — wired
 // as main.go does, and returns the server and the URL every agent dials.
-func startAuthBus(t *testing.T, tokens *busauth.Store) (srv *bus.Server, url string) {
+func startAuthBus(t *testing.T, tokens *busauth.Store, reg busauth.NodeRegistry) (srv *bus.Server, url string) {
 	t.Helper()
 	dir := t.TempDir()
 	issuer, err := busauth.EnsureIssuer(filepath.Join(dir, "bus"))
@@ -57,6 +57,11 @@ func startAuthBus(t *testing.T, tokens *busauth.Store) (srv *bus.Server, url str
 		t.Fatalf("bus.Start: %v", err)
 	}
 	t.Cleanup(srv.Stop)
+	// As main.go does: the node registry is loaded before the callout
+	// responder starts, and the callout answers from it.
+	if err := tokens.SetNodeRegistry(context.Background(), reg); err != nil {
+		t.Fatalf("SetNodeRegistry: %v", err)
+	}
 	tokens.TrackSessions(srv)
 	resp := busauth.NewResponder(srv.Conn(), issuer, tokens)
 	if err := resp.Start(); err != nil {
@@ -180,7 +185,7 @@ func mintBoundViaAPI(t *testing.T, f *apiFixture, cookie *http.Cookie, nodeID st
 func TestBusRevoke_ForceDisconnectsLiveSessions(t *testing.T) {
 	f := newAPIFixture(t)
 	cookie := f.authenticate(t)
-	busSrv, busURL := startAuthBus(t, f.srv.busTokens)
+	busSrv, busURL := startAuthBus(t, f.srv.busTokens, f.srv.inv.Registry())
 
 	tokA, idA := mintBoundViaAPI(t, f, cookie, "node-a")
 	tokB, _ := mintBoundViaAPI(t, f, cookie, "node-b")

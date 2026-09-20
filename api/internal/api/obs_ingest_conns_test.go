@@ -183,7 +183,7 @@ func realRegistry(t *testing.T, s *Server, nodes ...string) (*inventory.Store, *
 			t.Fatal(err)
 		}
 	}
-	if err := tokens.SetLivenessSink(ctx, inv.Registry()); err != nil {
+	if err := tokens.SetNodeRegistry(ctx, inv.Registry()); err != nil {
 		t.Fatal(err)
 	}
 	return inv, tokens

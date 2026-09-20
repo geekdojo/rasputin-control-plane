@@ -408,10 +408,11 @@ func reconcileCompare(svc *Service, nc *nats.Conn) jobs.DoFn {
 //     the first failure, doubling to a 30m cap; a success resets the streak).
 func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *jobs.Store, runner *jobs.Runner) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		nodes, err := inv.List(sc.Ctx)
-		if err != nil {
-			return nil, fmt.Errorf("list inventory: %w", err)
-		}
+		// The node set comes from the api's one in-memory node registry, not
+		// the nodes table (geekdojo-brain#585): id, role and last-seen are
+		// every fact this pass needs about a node, and the registry holds all
+		// three. Nothing here hydrates a row.
+		nodes := inv.Registry().Members()
 		devices, err := svc.store.ListDevices(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("list devices: %w", err)
@@ -597,11 +598,11 @@ func enrollValidate(inv *inventory.Store) jobs.DoFn {
 		if inv == nil {
 			return nil, errors.New("inventory unavailable: cannot confirm the enroll target is a registered node")
 		}
-		n, err := inv.Get(sc.Ctx, s.NodeID)
-		if err != nil {
-			return nil, fmt.Errorf("look up node %s: %w", s.NodeID, err)
-		}
-		if n == nil {
+		// Membership comes from the api's one in-memory node registry, not a
+		// database read (geekdojo-brain#585). The same question as before —
+		// is this id a node? — asked of the one list instead of the nodes
+		// table.
+		if !inv.Registry().IsMember(s.NodeID) {
 			return nil, fmt.Errorf("node %s is not registered", s.NodeID)
 		}
 		if len(s.AdvertiseRoutes) > 0 {

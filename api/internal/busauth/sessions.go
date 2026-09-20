@@ -46,14 +46,19 @@ import (
 //
 // # Concurrency
 //
-// A revoke racing a reconnect must not leave a session alive. Admit validates
-// and records under mu; Revoke writes revoked_at and snapshots the records
-// under the same mu. So either Admit's validation ran after the revoke
-// committed (and refused the token), or its record exists when Revoke
-// snapshots (and the CID is closed). The close itself happens outside the lock
-// and is safe at any point in the connection's life: a CID is registered with
-// the server before its CONNECT is processed, so a kick that lands while the
-// callout reply is still in flight makes the server refuse the authentication.
+// A revoke racing a reconnect must not leave a session alive. Admit answers
+// from the node registry and records the grant under mu; a revoke pushes the
+// token's removal INTO that registry before it takes mu to snapshot the
+// records. So either Admit read the registry after the push (and refused the
+// token), or its record exists when the revoke snapshots (and the CID is
+// closed) — the registry push is the barrier, and mu is what orders it
+// against the read. The close itself happens outside the lock and is safe at
+// any point in the connection's life: a CID is registered with the server
+// before its CONNECT is processed, so a kick that lands while the callout
+// reply is still in flight makes the server refuse the authentication.
+//
+// Nothing holds mu while pushing to the registry. A push runs the registry's
+// exclusion hooks, and one of them is DisconnectNode, which takes mu.
 //
 // Every connection passes through Admit, the controlplane's own agent's
 // included: the bus trusts no connection for coming from loopback
@@ -130,26 +135,31 @@ func (s *Store) TrackSessions(d Disconnector) {
 	}
 }
 
-// Admit is the auth callout's token check for the connection conn names:
-// Validate, plus — when sessions are tracked — a record of the grant so a
-// later revoke can close that connection, and the eviction of whatever session
-// the same token already held (takeover.go: a token holds ONE live session,
-// and the newest wins). See the concurrency note above for why validating and
-// recording happen under one lock.
+// Admit is the auth callout's token check for the connection conn names: the
+// node registry's answer on the presented token (livenodes.go: no database
+// read, and nobody admitted until it has loaded), plus — when sessions are
+// tracked — a record of the grant so a later revoke can close that
+// connection, and the eviction of whatever session the same token already
+// held (takeover.go: a token holds ONE live session, and the newest wins).
+// See the concurrency note above for why the check and the record happen
+// under one lock.
 //
 // The eviction happens after the lock is released, like revoke's: closing a
 // connection reaches into the server, and nothing here needs it to have
 // finished. The new session is recorded before the old one is closed, so a
 // revoke that arrives in between still finds — and closes — the new one.
+//
+// The error is always nil; the signature keeps it because Validator is what
+// the callout responder holds.
 func (s *Store) Admit(ctx context.Context, conn Conn, plaintext, presentedNodeID string) (bool, error) {
 	s.sess.mu.Lock()
-	ok, err := s.Validate(ctx, plaintext, presentedNodeID)
-	if err != nil || !ok {
+	if !s.admits(plaintext, presentedNodeID) {
 		s.sess.mu.Unlock()
-		return false, err
+		return false, nil
 	}
 	if s.sess.disc == nil {
 		s.sess.mu.Unlock()
+		s.touchLastUsed(ctx, HashToken(plaintext))
 		return true, nil
 	}
 	if s.sess.afterValidate != nil {
@@ -165,8 +175,34 @@ func (s *Store) Admit(ctx context.Context, conn Conn, plaintext, presentedNodeID
 	d := s.sess.disc
 	s.sess.mu.Unlock()
 
+	s.touchLastUsed(ctx, id)
 	s.evictSuperseded(d, conn, id, presentedNodeID, superseded)
 	return true, nil
+}
+
+// DisconnectNode closes every recorded bus session nodeID holds and returns
+// how many were still open. It is wired to the node registry's exclusion hook
+// (inventory.Registry.OnNodeExcluded), which is what makes the session table
+// a thing the ONE node list drives rather than a second node list beside it:
+// whatever stops a node being admitted — its last live token revoked, or the
+// node removed from inventory — closes its bus sessions by the same fact that
+// closes its collector-ingress connections.
+//
+// Idempotent, and safe to call with no Disconnector (bus auth off): there is
+// nothing recorded to close.
+func (s *Store) DisconnectNode(nodeID string) int {
+	if nodeID == "" {
+		return 0
+	}
+	s.sess.mu.Lock()
+	if s.sess.disc == nil {
+		s.sess.mu.Unlock()
+		return 0
+	}
+	taken := s.takeLocked(func(g grant) bool { return g.nodeID == nodeID })
+	d := s.sess.disc
+	s.sess.mu.Unlock()
+	return s.disconnect(d, taken)
 }
 
 // pruneLocked drops records for connections that have since closed, so the
@@ -211,6 +247,49 @@ func (s *Store) disconnect(d Disconnector, sessions []session) int {
 	n := 0
 	for _, k := range sessions {
 		if d.DisconnectClient(k.serverID, k.cid) {
+			n++
+		}
+	}
+	return n
+}
+
+// liveSessions prunes closed records and returns the live ones match selects,
+// without removing them. A revoke snapshots this BEFORE it pushes the token's
+// removal into the registry, because that push is what excludes the node and
+// so what runs DisconnectNode: the sessions the hook closes are closed by the
+// revoke and must be counted by it, even though they are gone from the table
+// by the time the revoke looks again.
+func (s *Store) liveSessions(match func(grant) bool) map[session]bool {
+	out := map[session]bool{}
+	s.sess.mu.Lock()
+	defer s.sess.mu.Unlock()
+	if s.sess.disc == nil {
+		return out
+	}
+	s.pruneLocked()
+	for k, g := range s.sess.grants {
+		if match(g) {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+// closeRemaining closes every session match still selects — the ones the
+// exclusion hook did not take, plus anything a connection racing the revoke
+// recorded after the snapshot — and returns how many sessions the revoke
+// closed in all: the snapshot, plus the racers it closed here.
+func (s *Store) closeRemaining(match func(grant) bool, snapshot map[session]bool) int {
+	s.sess.mu.Lock()
+	rest := s.takeLocked(match)
+	d := s.sess.disc
+	s.sess.mu.Unlock()
+	n := len(snapshot)
+	for _, k := range rest {
+		if d == nil {
+			continue
+		}
+		if d.DisconnectClient(k.serverID, k.cid) && !snapshot[k] {
 			n++
 		}
 	}

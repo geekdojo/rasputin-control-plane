@@ -101,7 +101,7 @@ func TestDecideCollectorActions(t *testing.T) {
 			if tt.teardown != nil {
 				tearState["n1"] = tt.teardown
 			}
-			act := decideCollectorActions(nodes, depState, tearState, tt.on, now)
+			act := decideCollectorActions(nodes, depState, tearState, tt.on, now, func(string) bool { return true })
 
 			gotDeploy := contains(act.deploy, "n1")
 			gotTeardown := contains(act.teardown, "n1")
@@ -134,7 +134,7 @@ func TestDecideCollectorActions_MixedFleet(t *testing.T) {
 	depState := map[string]*nodeJobState{
 		"c02": {lastSuccess: now.Add(-time.Minute)},
 	}
-	act := decideCollectorActions(nodes, depState, map[string]*nodeJobState{}, true, now)
+	act := decideCollectorActions(nodes, depState, map[string]*nodeJobState{}, true, now, func(string) bool { return true })
 
 	if len(act.deploy) != 1 || act.deploy[0] != "c01" {
 		t.Errorf("deploy: got %v, want [c01]", act.deploy)

@@ -94,7 +94,7 @@ func (s *Store) Insert(ctx context.Context, n *proto.Node) error {
 		string(caps), string(meta), marshalStorage(n.Storage),
 		tsMillis(n.FirstSeen), tsMillis(n.LastSeen))
 	if err == nil {
-		s.registry.setMember(n.ID, n.Role, true)
+		s.registry.setMember(n.ID, n.Role, true, n.LastSeen)
 	}
 	return err
 }
@@ -104,14 +104,23 @@ func (s *Store) Insert(ctx context.Context, n *proto.Node) error {
 func (s *Store) Update(ctx context.Context, n *proto.Node) error {
 	caps, _ := json.Marshal(n.Capabilities)
 	meta, _ := json.Marshal(n.Metadata)
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
         UPDATE nodes
         SET role=?, hostname=?, agent_version=?, image_version=?, image_version_confirmed_at=?, architecture=?, lan_ip=?, capabilities=?, metadata=?, storage=?, last_seen=?
         WHERE id=?`,
 		string(n.Role), n.Hostname, n.AgentVersion, n.ImageVersion, confirmedMillis(n.ImageVersionConfirmedAt), n.Architecture, n.LANIP,
 		string(caps), string(meta), marshalStorage(n.Storage),
 		tsMillis(n.LastSeen), n.ID)
-	return err
+	if err != nil {
+		return err
+	}
+	// Only a row that actually matched makes the node a member in the
+	// registry: an UPDATE naming an id with no row writes nothing, and must
+	// not add one to the api's node list either.
+	if rows, raErr := res.RowsAffected(); raErr == nil && rows > 0 {
+		s.registry.setMember(n.ID, n.Role, true, n.LastSeen)
+	}
+	return nil
 }
 
 // SetLANIP writes only the lan_ip column, and only when it differs. It reports
@@ -140,21 +149,20 @@ func marshalStorage(st *proto.StorageInfo) string {
 	return string(b)
 }
 
-// TouchLastSeen updates only the last_seen column. Cheap, used on every
-// heartbeat.
-func (s *Store) TouchLastSeen(ctx context.Context, id string, ts time.Time) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE nodes SET last_seen=? WHERE id=?`, tsMillis(ts), id)
-	if err != nil {
-		return err
+// freshen overlays the node's live last-seen from the registry, which is
+// where heartbeats land. The nodes table's last_seen is the floor: it is what
+// the registry loaded at start and what every registration rewrites, so a row
+// read back between two registrations would otherwise report a node offline
+// while its heartbeats are arriving. Every reader of a node's status derives
+// it from LastSeen (presence.go), so doing this once here covers all of them.
+func (s *Store) freshen(n *proto.Node) *proto.Node {
+	if n == nil {
+		return nil
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
+	if live := s.registry.lastSeen(n.ID); live.After(n.LastSeen) {
+		n.LastSeen = live
 	}
-	if n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return n
 }
 
 // confirmedMillis renders an ImageVersionConfirmedAt for its INTEGER column:
@@ -248,12 +256,15 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if n == 0 {
 		return sql.ErrNoRows
 	}
-	s.registry.setMember(id, "", false)
+	s.registry.setMember(id, "", false, time.Time{})
 	return nil
 }
 
-// Count returns the number of node rows. Used by the cluster-size-cap guards
-// (proto.MaxClusterNodes) so they don't have to hydrate the full node list.
+// Count returns the number of node rows — the database's own count. The
+// cluster-size cap no longer reads it: registration counts members in the
+// registry instead, so the cap costs nothing on that path
+// (geekdojo-brain#585). What is left is the ground truth a caller can compare
+// the registry against.
 func (s *Store) Count(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes`).Scan(&n)
@@ -265,7 +276,11 @@ func (s *Store) Get(ctx context.Context, id string) (*proto.Node, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, role, hostname, agent_version, image_version, image_version_confirmed_at, architecture, lan_ip, capabilities, metadata, storage, first_seen, last_seen
         FROM nodes WHERE id=?`, id)
-	return scanNode(row.Scan)
+	n, err := scanNode(row.Scan)
+	if err != nil {
+		return nil, err
+	}
+	return s.freshen(n), nil
 }
 
 // List returns every known node.
@@ -286,7 +301,7 @@ func (s *Store) ListByRole(ctx context.Context, role proto.NodeRole) ([]*proto.N
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, n)
+		out = append(out, s.freshen(n))
 	}
 	return out, rows.Err()
 }
@@ -305,7 +320,7 @@ func (s *Store) List(ctx context.Context) ([]*proto.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, n)
+		out = append(out, s.freshen(n))
 	}
 	return out, rows.Err()
 }

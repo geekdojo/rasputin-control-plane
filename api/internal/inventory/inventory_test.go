@@ -2,9 +2,7 @@ package inventory
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -137,30 +135,61 @@ func TestStore_Update(t *testing.T) {
 	}
 }
 
-func TestStore_TouchLastSeen(t *testing.T) {
+// A heartbeat's last-seen lands in the registry, not the database: Get
+// serves the live value, and no row write happens (registry.go, Touch).
+func TestStore_HeartbeatLastSeenComesFromTheRegistry(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 	n := makeNode("hb", proto.RoleCompute, 0)
+	n.LastSeen = time.Now().Add(-time.Hour).UTC()
 	if err := s.Insert(ctx, n); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-
-	bump := time.Now().Add(-10 * time.Millisecond).UTC()
-	if err := s.TouchLastSeen(ctx, "hb", bump); err != nil {
-		t.Fatalf("TouchLastSeen: %v", err)
+	bump := time.Now().UTC()
+	if !s.Registry().Touch("hb", bump) {
+		t.Fatal("Touch refused a current member")
 	}
 	got, _ := s.Get(ctx, "hb")
-	// Stored at ms precision — compare via UnixMilli.
 	if got.LastSeen.UnixMilli() != bump.UnixMilli() {
 		t.Errorf("LastSeen: got %v want %v", got.LastSeen, bump)
 	}
+	// The row itself was not rewritten — the registry is the live value.
+	var raw int64
+	if err := s.db.QueryRowContext(ctx, `SELECT last_seen FROM nodes WHERE id='hb'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw != n.LastSeen.UnixMilli() {
+		t.Errorf("a heartbeat wrote the nodes row: last_seen = %d, want %d", raw, n.LastSeen.UnixMilli())
+	}
 }
 
-func TestStore_TouchLastSeen_UnknownNode(t *testing.T) {
+// A heartbeat is accepted from a current member and from nobody else: not
+// from an unknown node, and not from one that has been removed. No database
+// work either way.
+func TestRegistry_TouchAcceptsOnlyCurrentMembers(t *testing.T) {
+	ctx := context.Background()
 	s := newStore(t)
-	err := s.TouchLastSeen(context.Background(), "ghost", time.Now())
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("want sql.ErrNoRows, got %v", err)
+	if err := s.Insert(ctx, makeNode("member", proto.RoleCompute, 0)); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	r := s.Registry()
+	if !r.Touch("member", time.Now()) {
+		t.Error("a heartbeat from a current member was refused")
+	}
+	if r.Touch("ghost", time.Now()) {
+		t.Error("a heartbeat from an unknown node was accepted")
+	}
+	// Token liveness is the bus's gate, not the heartbeat's: a connection
+	// that got this far was already admitted on its token.
+	r.SetLiveTokens("member", nil)
+	if !r.Touch("member", time.Now()) {
+		t.Error("a heartbeat from a member was refused for token liveness")
+	}
+	if err := s.Delete(ctx, "member"); err != nil {
+		t.Fatal(err)
+	}
+	if r.Touch("member", time.Now()) {
+		t.Error("a heartbeat from a removed node was accepted")
 	}
 }
 

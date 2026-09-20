@@ -31,10 +31,22 @@ func TestRegistry_AdmissionNeedsMembershipAndALiveToken(t *testing.T) {
 	excluded := excludedRecorder(r)
 	now := time.Now().UTC()
 
+	// Nothing is admitted until token liveness has loaded, member or not.
+	if err := s.Insert(ctx, &proto.Node{ID: "early", Role: proto.RoleCompute, FirstSeen: now, LastSeen: now}); err != nil {
+		t.Fatal(err)
+	}
+	if r.Loaded() || r.Admitted("early") {
+		t.Fatal("the registry admits a node before token liveness has loaded")
+	}
+	r.ReplaceLiveTokens(map[string][]string{"early": {"h0"}})
+	if !r.Loaded() || !r.Admitted("early") {
+		t.Fatal("the registry did not come up after the whole-set load")
+	}
+
 	if r.Admitted("c1") {
 		t.Fatal("an unknown node is admitted")
 	}
-	r.SetTokenLive("c1", true)
+	r.SetLiveTokens("c1", []string{"h1"})
 	if r.Admitted("c1") {
 		t.Fatal("a live token without membership is admitted")
 	}
@@ -48,16 +60,16 @@ func TestRegistry_AdmissionNeedsMembershipAndALiveToken(t *testing.T) {
 		t.Fatalf("Lookup = %+v, %v", e, ok)
 	}
 
-	r.SetTokenLive("c1", false)
+	r.SetLiveTokens("c1", nil)
 	if r.Admitted("c1") || !slices.Equal(excluded(), []string{"c1"}) {
 		t.Fatalf("token lost: admitted=%v excluded=%v", r.Admitted("c1"), excluded())
 	}
-	r.SetTokenLive("c1", false) // no second event for a node already out
+	r.SetLiveTokens("c1", nil) // no second event for a node already out
 	if len(excluded()) != 1 {
 		t.Fatalf("excluded twice: %v", excluded())
 	}
 
-	r.SetTokenLive("c1", true)
+	r.SetLiveTokens("c1", []string{"h1"})
 	if err := s.Delete(ctx, "c1"); err != nil {
 		t.Fatal(err)
 	}
@@ -90,8 +102,8 @@ func TestRegistry_LoadedAtOpenAndServedFromMemory(t *testing.T) {
 	}
 	r := s.Registry()
 	excluded := excludedRecorder(r)
-	r.ReplaceTokenLive(map[string]bool{"a": true, "b": true, "z": true})
-	r.ReplaceTokenLive(map[string]bool{"a": true, "z": true}) // b's token went
+	r.ReplaceLiveTokens(map[string][]string{"a": {"ha"}, "b": {"hb"}, "z": {"hz"}})
+	r.ReplaceLiveTokens(map[string][]string{"a": {"ha"}, "z": {"hz"}}) // b's token went
 	_ = s.Close()
 
 	for id, want := range map[string]bool{"a": true, "b": false, "c": false, "z": false} {

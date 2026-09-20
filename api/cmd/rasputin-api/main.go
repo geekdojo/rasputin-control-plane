@@ -273,6 +273,39 @@ func main() {
 	// finds the file on its first connect. Zero-touch: nobody provisions it.
 	ensureSelfAgentToken(ctx, busTokenStore, filepath.Join(dataDir, "bus", proto.BusAgentTokenFileName), selfNodeID)
 
+	// The node registry (inventory.Registry) is the api's one in-memory node
+	// list: membership and last-seen loaded from the nodes table by OpenStore,
+	// token liveness pushed in by the token store below. EVERY node membership
+	// and liveness decision the api makes reads it — the bus auth callout per
+	// connection, the collector ingress per handshake, heartbeats,
+	// registration, the collector reconcile and the mesh converge steps — so
+	// none of them touches the database (geekdojo/geekdojo-brain#585).
+	//
+	// It is opened and loaded BEFORE the auth-callout responder starts, because
+	// an unloaded registry admits nobody: a node connecting first would be
+	// refused rather than served from a database read.
+	invStore, err := inventory.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: inventory store: %v", err)
+	}
+	defer invStore.Close()
+	// A failure here leaves every node holding no live token in the registry,
+	// so node-facing admission refuses everyone: fail closed, and say so.
+	if err := busTokenStore.SetNodeRegistry(ctx, invStore.Registry()); err != nil {
+		log.Printf("rasputin-api: ⚠️  node registry: token liveness did not load: %v — the bus and the collector ingress admit no node until the api restarts cleanly", err)
+	}
+	// One fact, one cascade: a node stops being admitted when its last live
+	// token is revoked or it is removed from inventory, and that fact closes
+	// its bus sessions, closes its collector-ingress connections and ends its
+	// contested-token alert (geekdojo/geekdojo-brain#500, #585). No timer, and
+	// no second node-keyed cache beside the registry.
+	invStore.Registry().OnNodeExcluded(func(nodeID string) {
+		if busTokenStore.DisconnectNode(nodeID) > 0 {
+			log.Printf("rasputin-api: node %q is no longer admitted (removed, or its last join token revoked) — its live bus session(s) are closed", nodeID)
+		}
+	})
+	invStore.Registry().OnNodeExcluded(busTokenStore.ForgetNode)
+
 	// The bus TLS service, once it exists (it is built further down, after the
 	// stores it reads). The responder reads it from the first callout on, so
 	// it is handed over atomically.
@@ -304,25 +337,6 @@ func main() {
 		log.Fatalf("rasputin-api: jobs store: %v", err)
 	}
 	defer jobStore.Close()
-
-	invStore, err := inventory.OpenStore(ctx, dbPath)
-	if err != nil {
-		log.Fatalf("rasputin-api: inventory store: %v", err)
-	}
-	defer invStore.Close()
-	// The node registry (inventory.Registry) is the api's one in-memory node
-	// list; inventory loaded membership above, and the token store now pushes
-	// every node's token liveness into it and keeps it current from here on.
-	// A failure leaves every node without a live token in the registry, so
-	// node-facing admission refuses everyone: fail closed, and say so.
-	if err := busTokenStore.SetLivenessSink(ctx, invStore.Registry()); err != nil {
-		log.Printf("rasputin-api: ⚠️  node registry: token liveness did not load: %v — the collector ingress admits no node until the api restarts cleanly", err)
-	}
-	// The same registry decides when a contested-token alert is over: a node
-	// stops being admitted when its last live token is revoked or it is
-	// removed, and that is the fact that ends the alert (geekdojo/
-	// geekdojo-brain#500). No timer, and no second copy of node state.
-	invStore.Registry().OnNodeExcluded(busTokenStore.ForgetNode)
 
 	authStore, err := auth.OpenStore(ctx, dbPath)
 	if err != nil {

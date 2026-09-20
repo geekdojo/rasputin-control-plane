@@ -43,6 +43,7 @@ func (f *trustFixture) addTrustNode(t *testing.T, id string, role proto.NodeRole
 	if err := f.inv.Insert(f.ctx, n); err != nil {
 		t.Fatalf("inv.Insert(%s): %v", id, err)
 	}
+	f.admit(id)
 	if enrolled {
 		if err := f.store.UpsertDevice(f.ctx, &Device{
 			HSID: "hs-" + id, User: "u", Hostname: id, Kind: "rasputin", RasputinNodeID: id,

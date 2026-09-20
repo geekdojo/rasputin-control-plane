@@ -810,6 +810,10 @@ type convergeFixture struct {
 	inv    *inventory.Store
 	jstore *jobs.Store
 	runner *jobs.Runner
+	// live is the node registry's token-liveness set, as the token store
+	// would have pushed it. Re-pushed whole on every change, which is also
+	// what marks the registry loaded — nothing is admitted before that.
+	live map[string][]string
 }
 
 func newConvergeFixture(t *testing.T) *convergeFixture {
@@ -828,9 +832,14 @@ func newConvergeFixture(t *testing.T) *convergeFixture {
 	t.Cleanup(func() { _ = jst.Close() })
 	runner := jobs.NewRunner(jst, f.nc)
 	runner.Register(jobs.Workflow{Kind: "mesh.enroll_node"})
-	return &convergeFixture{meshFixture: f, inv: inv, jstore: jst, runner: runner}
+	cf := &convergeFixture{meshFixture: f, inv: inv, jstore: jst, runner: runner, live: map[string][]string{}}
+	inv.Registry().ReplaceLiveTokens(cf.live)
+	return cf
 }
 
+// addNode registers a node AND gives it a live join token in the node
+// registry — the two facts the api's one node list needs before it admits a
+// node, which is what every mesh membership decision now reads.
 func (f *convergeFixture) addNode(t *testing.T, id string, role proto.NodeRole, lastSeen time.Time) {
 	t.Helper()
 	if err := f.inv.Insert(f.ctx, &proto.Node{
@@ -838,6 +847,22 @@ func (f *convergeFixture) addNode(t *testing.T, id string, role proto.NodeRole, 
 	}); err != nil {
 		t.Fatalf("inv.Insert(%s): %v", id, err)
 	}
+	f.admit(id)
+}
+
+// admit gives the node a live join token in the registry — the second of the
+// two facts the api admits a node on. Pushed as the whole set, which is also
+// what marks the registry loaded.
+func (f *convergeFixture) admit(id string) {
+	f.live[id] = []string{"tok-" + id}
+	f.inv.Registry().ReplaceLiveTokens(f.live)
+}
+
+// revokeTokens takes the node's last live join token away, as a revoke or a
+// node removal does.
+func (f *convergeFixture) revokeTokens(id string) {
+	delete(f.live, id)
+	f.inv.Registry().ReplaceLiveTokens(f.live)
 }
 
 func (f *convergeFixture) addEnrollJob(t *testing.T, id, nodeID string, status jobs.Status, createdAt time.Time) {

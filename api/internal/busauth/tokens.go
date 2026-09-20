@@ -11,6 +11,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
@@ -71,7 +72,10 @@ type Store struct {
 	// sinkMu guards sink, the node registry token liveness is pushed to
 	// (livenodes.go), and serializes every push.
 	sinkMu sync.Mutex
-	sink   LivenessSink
+	sink   NodeRegistry
+	// reg is the same registry, read lock-free by the admission path. See
+	// registryRef for why it is not read under sinkMu.
+	reg atomic.Pointer[registryRef]
 
 	// tombMu guards tomb, the revocation tombstone file (tombstones.go).
 	tombMu sync.Mutex
@@ -310,13 +314,21 @@ func (s *Store) PreloadHashes(ctx context.Context, toks []PreseedToken) (int, er
 }
 
 // Validate reports whether plaintext matches a live (non-revoked) token bound to
-// presentedNodeID. A legacy UNBOUND token (node_id NULL, minted before
-// geekdojo-brain#423) never validates, whatever id it is presented under, and
-// the refusal is logged with the token's id so a node stranded by it can be
-// found and re-provisioned. A legacy token whose row names no role (role.go)
-// is refused the same way. It best-effort touches last_used_at. Constant work regardless of match isn't
-// attempted — tokens are 256-bit random, so timing oracles on the indexed
-// lookup don't help an attacker.
+// presentedNodeID, READ FROM THE DATABASE. A legacy UNBOUND token (node_id
+// NULL, minted before geekdojo-brain#423) never validates, whatever id it is
+// presented under, and the refusal is logged with the token's id so a node
+// stranded by it can be found and re-provisioned. A legacy token whose row
+// names no role (role.go) is refused the same way. It best-effort touches
+// last_used_at. Constant work regardless of match isn't attempted — tokens
+// are 256-bit random, so timing oracles on the indexed lookup don't help an
+// attacker.
+//
+// It is NOT the bus admission path: a connection is admitted by Admit, which
+// reads the node registry and never this (livenodes.go, geekdojo-brain#585).
+// What is left here is the database-truth check the api makes of ITSELF at
+// start — EnsureAgentToken confirming the token file it just wrote is the one
+// the store holds — where there is no registry to read yet and one query is
+// the point.
 func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string) (bool, error) {
 	if plaintext == "" {
 		return false, nil
@@ -353,9 +365,21 @@ func (s *Store) Validate(ctx context.Context, plaintext, presentedNodeID string)
 		log.Printf("busauth: refused join token id=%q for node=%q: %s", id, presentedNodeID, noRoleRemedy)
 		return false, nil
 	}
+	s.touchLastUsed(ctx, id)
+	return true, nil
+}
+
+// touchLastUsed stamps a token's last_used_at. Best effort, and deliberately
+// a write and nothing else: the admission decision is already made when this
+// runs (Admit calls it after releasing the session lock), nothing reads the
+// column to decide anything, and it is the only database work a bus
+// connection does.
+func (s *Store) touchLastUsed(ctx context.Context, id string) {
+	if id == "" {
+		return
+	}
 	_, _ = s.db.ExecContext(ctx,
 		`UPDATE bus_tokens SET last_used_at = ? WHERE token_hash = ?`, ms(time.Now().UTC()), id)
-	return true, nil
 }
 
 // Revoke marks a token revoked by its id (token_hash) and closes every live
@@ -389,24 +413,24 @@ func (s *Store) revoke(ctx context.Context, id string) (disconnected int, err er
 		`SELECT COALESCE(node_id, '') FROM bus_tokens WHERE token_hash = ?`, id).Scan(&node); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("busauth: revoke: %w", err)
 	}
-	defer s.refreshNodes(ctx, node)
-	s.sess.mu.Lock()
 	revoked, err := s.revokeReturning(ctx, time.Now().UTC(),
 		`UPDATE bus_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL
          RETURNING token_hash, COALESCE(node_id, '')`, id)
 	if err != nil {
-		s.sess.mu.Unlock()
 		return 0, fmt.Errorf("busauth: revoke: %w", err)
 	}
 	if len(revoked) == 0 {
-		s.sess.mu.Unlock()
 		return 0, sql.ErrNoRows
 	}
-	taken := s.takeLocked(func(g grant) bool { return g.tokenID == id })
-	d := s.sess.disc
-	s.sess.mu.Unlock()
+	// The registry push comes before the session close, and outside the
+	// session lock: it is the barrier a reconnect racing this revoke has to
+	// cross (sessions.go, "Concurrency"), and it runs the exclusion hooks —
+	// one of which takes that lock.
+	match := func(g grant) bool { return g.tokenID == id }
+	held := s.liveSessions(match)
+	s.refreshNodes(ctx, node)
 	s.recordTombstones(revoked)
-	return s.disconnect(d, taken), nil
+	return s.closeRemaining(match, held), nil
 }
 
 // RevokeByNodeID revokes every still-active token bound to nodeID and closes
@@ -435,50 +459,61 @@ func (s *Store) RevokeByNodeID(ctx context.Context, nodeID string) (revoked, dis
 	if protected {
 		return 0, 0, ErrSelfAgentToken
 	}
-	defer s.refreshNodes(ctx, nodeID)
-	s.sess.mu.Lock()
 	tombs, err := s.revokeReturning(ctx, time.Now().UTC(),
 		`UPDATE bus_tokens SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL
          RETURNING token_hash, COALESCE(node_id, '')`, nodeID)
 	if err != nil {
-		s.sess.mu.Unlock()
 		return 0, 0, fmt.Errorf("busauth: revoke by node: %w", err)
 	}
-	taken := s.takeLocked(func(g grant) bool { return g.nodeID == nodeID })
-	d := s.sess.disc
-	s.sess.mu.Unlock()
+	// Push first, then close: see revoke above.
+	match := func(g grant) bool { return g.nodeID == nodeID }
+	held := s.liveSessions(match)
+	s.refreshNodes(ctx, nodeID)
 	s.recordTombstones(tombs)
-	return len(tombs), s.disconnect(d, taken), nil
+	return len(tombs), s.closeRemaining(match, held), nil
 }
 
-// NodeHasLiveToken reports whether nodeID holds at least one token the bus
-// would admit it with: unrevoked, bound to nodeID, and naming a valid role.
-// It is how the node's other credentials follow its token: the collector
-// ingress admits a node only while this holds, so revoking a node's token
-// (or removing the node, which revokes them all) cuts its HTTPS pushes too.
-func (s *Store) NodeHasLiveToken(ctx context.Context, nodeID string) (bool, error) {
+// liveTokenHashes reads, from the database, the hashes of every token the bus
+// would admit nodeID with: unrevoked, bound to nodeID, and naming a valid
+// role. It is what the store pushes into the node registry, and the ONLY
+// place that decision is computed — the callout reads the registry, never
+// this (livenodes.go).
+func (s *Store) liveTokenHashes(ctx context.Context, nodeID string) ([]string, error) {
 	if nodeID == "" {
-		return false, nil
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT role FROM bus_tokens WHERE node_id = ? AND revoked_at IS NULL`, nodeID)
+		`SELECT token_hash, role FROM bus_tokens WHERE node_id = ? AND revoked_at IS NULL`, nodeID)
 	if err != nil {
-		return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+		return nil, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
 	}
 	defer rows.Close()
+	var out []string
 	for rows.Next() {
-		var role sql.NullString
-		if err := rows.Scan(&role); err != nil {
-			return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+		var (
+			hash string
+			role sql.NullString
+		)
+		if err := rows.Scan(&hash, &role); err != nil {
+			return nil, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
 		}
-		if role.Valid && proto.ValidRole(proto.NodeRole(role.String)) {
-			return true, nil
+		if hash != "" && role.Valid && proto.ValidRole(proto.NodeRole(role.String)) {
+			out = append(out, hash)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
+		return nil, fmt.Errorf("busauth: live token for %q: %w", nodeID, err)
 	}
-	return false, nil
+	return out, nil
+}
+
+// NodeHasLiveToken reports whether nodeID holds at least one token the bus
+// would admit it with. It reads the database: it is the ground truth the
+// registry is loaded from, not a serving path. Nothing on a hot path calls it
+// — the collector ingress and the auth callout both read the registry.
+func (s *Store) NodeHasLiveToken(ctx context.Context, nodeID string) (bool, error) {
+	hashes, err := s.liveTokenHashes(ctx, nodeID)
+	return len(hashes) > 0, err
 }
 
 // CountActiveUnbound returns how many live (unrevoked) legacy unbound tokens

@@ -363,8 +363,12 @@ func TestSessionLockReleasedOnErrors(t *testing.T) {
 		if _, _, err := s.RevokeByNodeID(ctx, "node-a"); err == nil {
 			t.Error("RevokeByNodeID on a closed DB returned no error")
 		}
-		if _, err := s.Admit(ctx, Conn{ServerID: testServer, CID: 1, Host: testHost}, "tok", "node-a"); err == nil {
-			t.Error("Admit on a closed DB returned no error")
+		// Admit answers from the registry, so a closed database is not an
+		// error path for it — it is a refusal, because nothing ever pushed
+		// "tok" as live for node-a. What matters here is the same thing: it
+		// returns, and it returns the lock.
+		if ok, err := s.Admit(ctx, Conn{ServerID: testServer, CID: 1, Host: testHost}, "tok", "node-a"); ok || err != nil {
+			t.Errorf("Admit of an unknown token = (%v, %v), want (false, nil)", ok, err)
 		}
 		s.TrackSessions(newFakeBus()) // would deadlock if any path above leaked the lock
 	}()

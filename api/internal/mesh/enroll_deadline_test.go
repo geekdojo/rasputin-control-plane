@@ -191,6 +191,7 @@ func TestEnrollWorkflow_OldAgentBareKillIsNamed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inv.Insert: %v", err)
 	}
+	f.admit("node-1")
 	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: "tailscale up: signal: killed (stderr=)"})
 	key, err := dispatchAgainst(t, f, "node-1")
 	if err == nil {
@@ -217,6 +218,7 @@ func TestEnrollWorkflow_NewAgentNamedKillIsRelayed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inv.Insert: %v", err)
 	}
+	f.admit("node-1")
 	const detail = "tailscale up killed after 1m58s by the 2m0s enroll deadline while still running; headscale at https://cp.local:8443 had not answered the login (tailscaled reports NeedsLogin)"
 	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: detail})
 	_, err := dispatchAgainst(t, f, "node-1")
@@ -238,6 +240,7 @@ func TestEnrollWorkflow_NewAgentNamedKillIsRelayed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inv.Insert: %v", err)
 	}
+	f.admit("node-2")
 	_, err = dispatchAgainst(t, f, "node-2")
 	if err == nil || strings.Contains(err.Error(), "predates") || !strings.Contains(err.Error(), "agent rejected enroll: tailscale up: signal: killed") {
 		t.Errorf("a newer agent's bare signal is not this bug; got %v", err)
