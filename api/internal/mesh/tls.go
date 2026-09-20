@@ -60,6 +60,41 @@ type MeshCA struct {
 	Cert    *x509.Certificate
 	Key     *ecdsa.PrivateKey
 	CertPEM []byte
+
+	// leafClock, when set, is consulted before a leaf's validity window is
+	// stamped. See ClockGate.
+	leafClock ClockGate
+}
+
+// ClockGate answers whether the wall clock can be trusted to stamp a
+// certificate's validity window, blocking — bounded by the caller's own
+// budget — until it can be, and reporting false when that budget runs out.
+//
+// It exists because a node with no RTC (a Pi 5, say) boots to a bogus pre-NTP
+// time, and a certificate minted then anchors its NotBefore/NotAfter in that
+// bogus window. Once the clock corrects, every verifier reads the certificate
+// as expired or not yet valid — and nothing about the certificate says why.
+//
+// The gate is a fact check, not a timer: it asks whether the clock has
+// synchronized, and the bound on its wait only decides how long a mint is
+// willing to be delayed before proceeding anyway, loudly.
+type ClockGate func() bool
+
+// CAOption configures EnsureMeshCA.
+type CAOption func(*MeshCA)
+
+// WithLeafClockGate makes every leaf minted under this CA wait for a
+// trustworthy clock first (MintLeaf, and so MintLeafToDisk, MintAppLeaf and
+// PrepareAppLeaf with it).
+//
+// Scope, deliberately: this gates LEAF mints. Creating the CA itself is NOT
+// gated, because EnsureMeshCA runs synchronously in the api's startup and the
+// api unit is Type=notify with systemd's default 90s start timeout — a wait
+// there could delay or lose the :80 bootstrap surface on a first boot with no
+// reachable NTP. Closing that half means making the CA itself lazily created,
+// which is a change to what a first boot does and is not made here.
+func WithLeafClockGate(gate ClockGate) CAOption {
+	return func(ca *MeshCA) { ca.leafClock = gate }
 }
 
 // EnsureMeshCA loads the Mesh TLS CA from trustDir, generating a fresh
@@ -74,7 +109,18 @@ type MeshCA struct {
 // fail-loudly).
 //
 // Permissions: cert is 0644 (it's public), key is 0600.
-func EnsureMeshCA(trustDir, installName string) (*MeshCA, error) {
+func EnsureMeshCA(trustDir, installName string, opts ...CAOption) (*MeshCA, error) {
+	ca, err := ensureMeshCA(trustDir, installName)
+	if err != nil {
+		return nil, err
+	}
+	for _, opt := range opts {
+		opt(ca)
+	}
+	return ca, nil
+}
+
+func ensureMeshCA(trustDir, installName string) (*MeshCA, error) {
 	if trustDir == "" {
 		return nil, errors.New("mesh: EnsureMeshCA: trustDir required")
 	}
@@ -306,6 +352,15 @@ func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM, keyPEM []byte, err error) {
 	lifetime := spec.Lifetime
 	if lifetime <= 0 {
 		lifetime = defaultLeafLifetime
+	}
+	// Don't date a certificate against a clock nobody has checked. The gate
+	// blocks until the clock is trustworthy, within its own budget; when that
+	// budget runs out it says so and the mint proceeds, because a node with no
+	// reachable NTP still has to serve TLS. The gate owns the warning — this
+	// path mints once per leaf per renewal, and a line per mint would either
+	// be silence or a flood depending on the fleet.
+	if ca.leafClock != nil {
+		ca.leafClock()
 	}
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

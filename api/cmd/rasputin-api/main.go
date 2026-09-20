@@ -450,7 +450,14 @@ func main() {
 		log.Fatalf("rasputin-api: mesh state dir: %v", err)
 	}
 	installName := envOr("RASPUTIN_INSTALL_NAME", "rasputin")
-	meshCA, err := mesh.EnsureMeshCA(trustDir, installName)
+	// One clock gate for every certificate this process dates. The HTTPS
+	// leaf's mint used to be the only thing that waited for NTP; handing the
+	// gate to the Mesh CA puts every leaf minted under it — Headscale's, each
+	// node's collector leaf, each app's leaf — behind the same check, so none
+	// of them can be anchored in a bogus pre-NTP window and read as expired
+	// once the clock corrects. It waits at most once; see trustedClock.
+	clockGate := newTrustedClock(ctx, clockGateTimeout)
+	meshCA, err := mesh.EnsureMeshCA(trustDir, installName, mesh.WithLeafClockGate(clockGate.ok))
 	if err != nil {
 		log.Fatalf("rasputin-api: mesh CA: %v", err)
 	}
@@ -1634,18 +1641,18 @@ func main() {
 			// (e.g. Pi 5) boots to a bogus pre-NTP time; minting then anchors
 			// the cert's validity window in the past, so the browser reports an
 			// "expired" (or "not yet valid") certificate even though the image
-			// is fine. Wait — bounded — for systemd-timesyncd to synchronize
-			// first. Bounded so a genuinely offline node (no reachable NTP at
-			// all) still eventually serves HTTPS, degraded and logged loudly.
-			// See provisioning.md "Time sync".
-			synced := waitForTrustworthyClock(ctx, clockGateTimeout)
+			// is fine. The gate waits — bounded — for systemd-timesyncd to
+			// synchronize first, and says so if it gives up, so a genuinely
+			// offline node still eventually serves HTTPS, degraded and logged
+			// loudly. See provisioning.md "Time sync".
+			//
+			// It is the SAME gate the Mesh CA hands to every other leaf mint,
+			// so this wait is the one the whole process spends, and it happens
+			// here — off the startup path, where a wait is affordable — rather
+			// than inside whichever mint happens to be first.
+			clockGate.ok()
 			if ctx.Err() != nil {
 				return // shutting down before the clock settled
-			}
-			if !synced {
-				log.Printf("rasputin-api: WARNING — system clock not NTP-synchronized after %s; "+
-					"minting the HTTPS leaf against the current clock. If the UI shows an expired or "+
-					"not-yet-valid certificate, fix time sync (NTP) and restart rasputin-api.", clockGateTimeout)
 			}
 			if err := leaf.load(lanWatch.PrimaryIP()); err != nil {
 				log.Fatalf("rasputin-api: https leaf: %v", err)
