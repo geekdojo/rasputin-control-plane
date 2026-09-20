@@ -552,3 +552,47 @@ func TestVerifyForPurpose_CrossPurposeMatrix(t *testing.T) {
 		})
 	}
 }
+
+// SignerExpiry is a DIAGNOSTIC: it decides the wording of a refusal that has
+// already happened (geekdojo/geekdojo-brain#576). It must therefore be
+// impossible to mistake for a verdict — it never says "valid", only "this
+// signer's window has closed" — and it must never panic or lie on the
+// malformed input that reaches it precisely when something is wrong.
+func TestSignerExpiry(t *testing.T) {
+	t.Run("an expired signer is reported with its expiry", func(t *testing.T) {
+		notAfter, expired := SignerExpiry(fixture(t, "expired-signer.sig"))
+		if !expired {
+			t.Fatal("an expired signer was not detected")
+		}
+		if notAfter.IsZero() {
+			t.Error("no expiry date to tell the operator")
+		}
+		if !notAfter.Before(time.Now()) {
+			t.Errorf("notAfter %s is not in the past", notAfter)
+		}
+	})
+
+	t.Run("a live signer is not reported as expired", func(t *testing.T) {
+		// The ordinary fixture's chain is valid for 100 years, so this is the
+		// case where a verification failure is NOT a stale release — and must
+		// not be described as one.
+		notAfter, expired := SignerExpiry(fixture(t, "payload.bin.sig"))
+		if expired {
+			t.Errorf("a live signer (notAfter %s) was reported as expired", notAfter)
+		}
+		if notAfter.IsZero() {
+			t.Error("a parseable signature should still report its expiry")
+		}
+	})
+
+	t.Run("garbage is not expired, and does not panic", func(t *testing.T) {
+		// Every one of these reaches this function only on a path that has
+		// already refused. Answering "false" is right: the refusal stands, and
+		// it simply is not described as an expiry.
+		for _, name := range []string{"does-not-exist.sig", "payload.bin", "root-ca.pem"} {
+			if _, expired := SignerExpiry(fixture(t, name)); expired {
+				t.Errorf("%s was reported as an expired signer", name)
+			}
+		}
+	})
+}
