@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +12,9 @@ import (
 
 // seedValues parses a generated seed the way firstboot's `.` does for these
 // keys: KEY=VALUE lines, comments skipped.
+// seedValues reads a seed the way the images do — through the one parser
+// (proto.ParseSeed), not a second hand-rolled scan that could disagree with
+// the renderer about quoting.
 func seedValues(t *testing.T, path string) map[string]string {
 	t.Helper()
 	f, err := os.Open(path)
@@ -20,18 +22,28 @@ func seedValues(t *testing.T, path string) map[string]string {
 		t.Fatalf("open %s: %v", path, err)
 	}
 	defer func() { _ = f.Close() }()
+	seed, err := proto.ParseSeed(f)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
 	out := map[string]string{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
-			continue
-		}
-		k, v, _ := strings.Cut(line, "=")
+	for k, v := range seed.Extra {
 		out[k] = v
 	}
-	if err := sc.Err(); err != nil {
-		t.Fatal(err)
+	for k, v := range map[string]string{
+		proto.SeedKeyRole:      string(seed.Role),
+		proto.SeedKeyNodeID:    seed.NodeID,
+		proto.SeedKeyClusterID: seed.ClusterID,
+		proto.SeedKeyNATSURL:   seed.NATSURL,
+		proto.SeedKeyJoinToken: seed.JoinToken,
+		proto.SeedKeyBusPin:    seed.BusPin,
+		proto.SeedKeySSHKey:    seed.SSHAuthorizedKey,
+		proto.SeedKeyBusAuth:   seed.BusAuth,
+		proto.SeedKeyBusKey:    seed.BusKey,
+	} {
+		if v != "" {
+			out[k] = v
+		}
 	}
 	return out
 }

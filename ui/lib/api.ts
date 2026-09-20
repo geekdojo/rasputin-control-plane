@@ -196,11 +196,22 @@ export async function listBusTokens(): Promise<BusTokenInfo[]> {
 // ONCE. The operator seeds it into the new node's enrollment file; it's
 // unrecoverable afterward. Registers the binding in the live controlplane
 // immediately — the node is accepted the moment it boots, no restart.
-export function mintBusToken(label: string, nodeId: string): Promise<MintedBusToken> {
+// The response carries the RENDERED seed: the api builds it with the one
+// renderer (proto.RenderSeed) that rasputin-provision uses, rather than the UI
+// assembling a second copy from the token and the pin.
+//
+// sshAuthorizedKey is the operator public key that seed carries. Pass it
+// explicitly — including '' for a console/UI-only node — so the seed reflects
+// what the operator typed for THIS node rather than whatever key is saved.
+export function mintBusToken(
+  label: string,
+  nodeId: string,
+  sshAuthorizedKey: string,
+): Promise<MintedBusToken> {
   return jsonFetch<MintedBusToken>('/api/bus/tokens', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ label, nodeId }),
+    body: JSON.stringify({ label, nodeId, sshAuthorizedKey }),
   });
 }
 

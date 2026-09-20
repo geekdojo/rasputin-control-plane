@@ -9,14 +9,11 @@ import {
   type AddableRole,
   type NodeArch,
   downloadSeed,
-  natsURLFor,
   cpBaseFor,
   firewallFlashCommand,
   flashCommand,
   NODE_ARCHES,
   nodeImageFor,
-  renderFirewallSeed,
-  renderNodeSeed,
   NODE_ID_RULE,
   suggestNodeId,
   validateSSHKey,
@@ -46,7 +43,6 @@ export function AddNodeWizard({
   clusterPrefix,
   clusterOsVersion,
   clusterHostname,
-  clusterId,
   taken,
   onClose,
   onMinted,
@@ -57,8 +53,6 @@ export function AddNodeWizard({
   // prop rather than re-derived: this value was hardcoded to rasputin.local
   // once already, and a seed that names the wrong host fails silently.
   clusterHostname: string;
-  // Bare cluster id — seeds carry it as RASPUTIN_CLUSTER_ID.
-  clusterId: string;
   // The cluster's OS version (the controlplane's), so the wizard can tell the
   // operator which image to flash + link the matching download. Undefined when
   // unknown → generic guidance.
@@ -134,7 +128,11 @@ export function AddNodeWizard({
     setErr(null);
     try {
       const id = trimmedId;
-      const m = await mintBusToken(role, id);
+      // The key goes WITH the mint: the api renders the seed, and the seed
+      // must carry the key the operator typed here — which may be a one-off
+      // for this node, not the saved operator key. An explicit '' is a
+      // console/UI-only node, and is sent as such rather than omitted.
+      const m = await mintBusToken(role, id, sshCheck.key);
       setMinted(m);
       onMinted({ id: m.nodeId || id, tokenId: m.id, role });
       // Capture the key as the operator key when none is saved yet (the
@@ -176,24 +174,17 @@ export function AddNodeWizard({
         isFirewall ? (
           <FirewallSuccessView
             nodeId={minted.nodeId}
-            token={minted.token}
-            busPin={minted.busPin}
-            sshKey={sshCheck.key}
+            seed={minted.seed}
             clusterHostname={clusterHostname}
-            clusterId={clusterId}
             onClose={onClose}
           />
         ) : (
           <SuccessView
-            role={role}
             arch={arch}
             nodeId={minted.nodeId}
-            token={minted.token}
-            busPin={minted.busPin}
-            sshKey={sshCheck.key}
+            seed={minted.seed}
             clusterOsVersion={clusterOsVersion}
             clusterHostname={clusterHostname}
-            clusterId={clusterId}
             onClose={onClose}
           />
         )
@@ -338,31 +329,25 @@ export function AddNodeWizard({
 }
 
 function SuccessView({
-  role,
   arch,
   nodeId,
-  token,
-  busPin,
-  sshKey,
+  seed,
   clusterOsVersion,
   clusterHostname,
-  clusterId,
   onClose,
 }: {
-  role: AddableRole;
   arch: NodeArch;
   nodeId: string;
-  token: string;
-  // The live bus pin from the mint response ('' if the controlplane has none).
-  busPin: string;
-  sshKey: string;
+  // The rendered enrollment file, exactly as the api returned it. The UI used
+  // to assemble this itself from the token, the pin, the key and the cluster
+  // id — a second renderer that could, and twice did, disagree with the one
+  // rasputin-provision uses. There is now one (proto.RenderSeed), and this is
+  // its output.
+  seed: string;
   clusterOsVersion?: string;
   clusterHostname: string;
-  // Bare cluster id — seeds carry it as RASPUTIN_CLUSTER_ID.
-  clusterId: string;
   onClose: () => void;
 }) {
-  const seed = renderNodeSeed(role, nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId, busPin);
   const image = nodeImageFor(clusterOsVersion, arch);
   // The link above is built from the cluster's version alone. The DESCRIPTOR
   // carries the full checksum and the manifest signature, which is what a
@@ -518,24 +503,17 @@ function SuccessView({
 // 2026-08-04 — the one-command flash supersedes it.)
 function FirewallSuccessView({
   nodeId,
-  token,
-  busPin,
-  sshKey,
+  seed,
   clusterHostname,
-  clusterId,
   onClose,
 }: {
   nodeId: string;
-  token: string;
-  // The live bus pin from the mint response ('' if the controlplane has none).
-  busPin: string;
-  sshKey: string;
+  // The rendered enrollment file, exactly as the api returned it (see
+  // SuccessView).
+  seed: string;
   clusterHostname: string;
-  // Bare cluster id — seeds carry it as RASPUTIN_CLUSTER_ID.
-  clusterId: string;
   onClose: () => void;
 }) {
-  const seed = renderFirewallSeed(nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId, busPin);
   const flashCmd = firewallFlashCommand(seed, cpBaseFor(clusterHostname));
   const [showManual, setShowManual] = useState(false);
   const [image, setImage] = useState<FlashableImage | null>(null);

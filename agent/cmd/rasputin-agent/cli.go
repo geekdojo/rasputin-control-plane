@@ -44,6 +44,8 @@ func dispatchCLI(args []string, stdout, stderr io.Writer) (exitCode int, handled
 		return 0, true
 	case "verify-artifact":
 		return runVerifyArtifact(args[1:], stdout, stderr), true
+	case "seed":
+		return runSeed(args[1:], stdout, stderr), true
 	default:
 		fmt.Fprintf(stderr, "rasputin-agent: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -59,6 +61,7 @@ func dispatchCLI(args []string, stdout, stderr io.Writer) (exitCode int, handled
 // terminal loses the actual error.
 func printShortUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: rasputin-agent verify-artifact <artifact> [--sig <path>] [--trust-root <path>]
+       rasputin-agent seed check <path> [--role <role>]
        rasputin-agent help
 `)
 }
@@ -75,10 +78,20 @@ Commands:
         Verify an update artifact's detached CMS signature against the
         publisher root CA baked into this image. Exits 0 only if the
         signature verifies and its chain is valid right now.
+  seed check <path> [--role <role>]
+        Read the enrollment seed at <path>, refuse it if it is unusable, and
+        print a normalized, fully quoted copy on stdout for an image to
+        source instead of sourcing the operator's file directly. Nothing is
+        printed unless the seed is usable. Exits 1 on an unusable seed,
+        naming the field and what to do about it.
   version
         Print the agent version and exit.
   help
         Print this message.
+
+Options for seed check:
+  --role <role>         Refuse the seed unless it names this role. An image
+                        that can only be one thing passes its own.
 
 Options for verify-artifact:
   --sig <path>          Detached signature to check.

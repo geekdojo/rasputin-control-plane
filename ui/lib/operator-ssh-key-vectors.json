@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "Shared test vectors for the ONE operator-SSH-key rule (methodology §5.1,",
+    "geekdojo/geekdojo-brain#545).",
+    "",
+    "The rule is setup.ValidOperatorSSHKey in Go. The browser cannot call it, so",
+    "ui/lib/enroll.ts carries a mirror — and a mirror nobody executes is how the",
+    "three copies that preceded this drifted, each with a comment asking the next",
+    "reader to keep them in sync. These vectors are what is actually executed:",
+    "api/internal/setup/operatorkeys_test.go runs them against the Go rule and",
+    "ui/lib/enroll.test.ts runs the same file against the TypeScript one. A rule",
+    "that changes on one side without the other fails a build.",
+    "",
+    "Add a vector when a key shape is decided, not when a test needs padding.",
+    "Public keys only — nothing here is a credential."
+  ],
+  "valid": [
+    { "why": "ed25519, the default modern key", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB3Nzb1cMPHdiE8U7Vp0mRfAe6kFxvYPZPRkzVxXqLZ9 bryce@laptop" },
+    { "why": "ed25519 with no comment", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB3Nzb1cMPHdiE8U7Vp0mRfAe6kFxvYPZPRkzVxXqLZ9" },
+    { "why": "rsa", "key": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7 me@desktop" },
+    { "why": "ecdsa p-256", "key": "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBA== me@laptop" },
+    { "why": "a security-key backed ed25519", "key": "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t yubikey" },
+    { "why": "a comment with spaces, which is why the seed line is quoted", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB3Nzb1c bryce on the blue laptop" },
+    { "why": "base64 padding in the key body", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB3Nzb1c= me@laptop" }
+  ],
+  "invalid": [
+    { "why": "empty is handled by the caller, never by the rule", "key": "" },
+    { "why": "whitespace only", "key": "   " },
+    { "why": "a PEM block pasted where a public key belongs. The marker is spaced out on purpose so this file is not itself something a secret scanner has to be told to ignore; the rule refuses it for the same reason it refuses any first field that is not a known algorithm", "key": "----- BEGIN OPENSSH PRIVATE KEY ----- b3BlbnNzaC1rZXktdjEAAAAA" },
+    { "why": "no key body", "key": "ssh-ed25519" },
+    { "why": "an unknown algorithm", "key": "ssh-dss AAAAB3NzaC1kc3MAAACBAP me@laptop" },
+    { "why": "a plausible-looking algorithm that is not one", "key": "ssh-ed25518 AAAAC3NzaC1lZDI1NTE5 me@laptop" },
+    { "why": "not a key at all", "key": "hello there" },
+    { "why": "a key body with characters base64 does not use", "key": "ssh-ed25519 AAAA!C3NzaC1lZDI1NTE5 me@laptop" },
+    { "why": "a double quote, which the seed line cannot carry", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 my \"laptop\"" },
+    { "why": "a dollar sign", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 $HOME" },
+    { "why": "a backslash", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 C:\\Users\\me" },
+    { "why": "a backtick", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 `id`" },
+    { "why": "two keys on two lines — one key per node, and the rule says so", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 me\nssh-ed25519 AAAAC3NzaC1lZDI1NTE6 them" },
+    { "why": "a carriage return from a Windows-saved file", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 me\r" },
+    { "why": "leading whitespace is the caller's to trim, not the rule's to accept", "key": " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 me" }
+  ]
+}

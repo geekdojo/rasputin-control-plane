@@ -95,6 +95,15 @@ func NewService(store *Store, probes Probes, selfNodeID, clusterHostname, cluste
 	}
 }
 
+// ClusterHostname is the name every node reaches this control plane at
+// ("<cluster-id>.local", ADR-0003), "" on a dev box. It is the same value
+// GetState reports; exposed on its own for the seed renderer, which must not
+// depend on a display call.
+func (s *Service) ClusterHostname() string { return s.clusterHostname }
+
+// ClusterID is the cluster's name, "" when it was never set.
+func (s *Service) ClusterID() string { return s.clusterID }
+
 // Store exposes the settings store for subsystems that keep their own
 // keys in the shared table (e.g. the BMC selection handlers).
 func (s *Service) Store() *Store { return s.store }

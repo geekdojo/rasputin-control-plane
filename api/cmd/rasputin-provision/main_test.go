@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/proto"
+
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 )
 
@@ -65,20 +67,20 @@ func TestGenerate_MatchedSetRoundTrips(t *testing.T) {
 			if strings.Contains(seed, "RASPUTIN_CP_JOIN_TOKEN") {
 				t.Errorf("controlplane seed must not carry a join token:\n%s", seed)
 			}
-			if !strings.Contains(seed, "RASPUTIN_NATS_URL="+loopbackNATSURL) {
+			if seedValue(t, seed, proto.SeedKeyNATSURL) != loopbackNATSURL {
 				t.Errorf("controlplane should dial loopback NATS:\n%s", seed)
 			}
-			if !strings.Contains(seed, "RASPUTIN_BUS_AUTH=enforce") {
+			if seedValue(t, seed, proto.SeedKeyBusAuth) != "enforce" {
 				t.Errorf("controlplane seed should ship enforce on:\n%s", seed)
 			}
 			continue
 		}
 		seed := readSeed(t, dir, mn.SeedFile)
-		token := seedValue(seed, "RASPUTIN_CP_JOIN_TOKEN")
+		token := seedValue(t, seed, proto.SeedKeyJoinToken)
 		if token == "" {
 			t.Fatalf("node %s seed missing token:\n%s", mn.ID, seed)
 		}
-		if seedValue(seed, "RASPUTIN_NODE_ID") != mn.ID {
+		if seedValue(t, seed, proto.SeedKeyNodeID) != mn.ID {
 			t.Errorf("node %s seed has wrong RASPUTIN_NODE_ID", mn.ID)
 		}
 		ok, err := store.Validate(ctx, token, mn.ID)
@@ -129,9 +131,9 @@ func TestGenerate_RejectsDuplicateIDs(t *testing.T) {
 }
 
 // Every seed — controlplane, firewall, compute — carries the operator key,
-// double-quoted (the seed is sourced by sh; the value has spaces). Images
-// bake no key, so this line is the only network-SSH path (dog food: the
-// bench provisions the same way end users do).
+// quoted (the seed is sourced by sh; the value has spaces). Images bake no
+// key, so this line is the only network-SSH path (dog food: the bench
+// provisions the same way end users do).
 func TestGenerate_SSHKeyInEverySeed(t *testing.T) {
 	dir := t.TempDir()
 	const key = "ssh-ed25519 AAAATestKey bryce@geekdojo.com"
@@ -150,9 +152,8 @@ func TestGenerate_SSHKeyInEverySeed(t *testing.T) {
 	}
 	for _, mn := range man.Nodes {
 		seed := readSeed(t, dir, mn.SeedFile)
-		want := `RASPUTIN_SSH_AUTHORIZED_KEY="` + key + `"`
-		if !strings.Contains(seed, want+"\n") {
-			t.Errorf("%s (%s) seed missing quoted ssh key line %q:\n%s", mn.ID, mn.Role, want, seed)
+		if got := seedValue(t, seed, proto.SeedKeySSHKey); got != key {
+			t.Errorf("%s (%s) seed ssh key = %q, want %q:\n%s", mn.ID, mn.Role, got, key, seed)
 		}
 	}
 
@@ -230,13 +231,36 @@ func readSeed(t *testing.T, dir, name string) string {
 	return string(b)
 }
 
-func seedValue(seed, key string) string {
-	for _, line := range strings.Split(seed, "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok && k == key {
-			return v
-		}
+// seedValue reads one field out of a rendered seed through the one parser
+// (proto.ParseSeed) — the same code path the images take — rather than a
+// second hand-rolled scan.
+func seedValue(t *testing.T, seed, key string) string {
+	t.Helper()
+	s, err := proto.ParseSeed(strings.NewReader(seed))
+	if err != nil {
+		t.Fatalf("parse seed: %v\n%s", err, seed)
 	}
-	return ""
+	switch key {
+	case proto.SeedKeyRole:
+		return string(s.Role)
+	case proto.SeedKeyNodeID:
+		return s.NodeID
+	case proto.SeedKeyClusterID:
+		return s.ClusterID
+	case proto.SeedKeyNATSURL:
+		return s.NATSURL
+	case proto.SeedKeyJoinToken:
+		return s.JoinToken
+	case proto.SeedKeyBusPin:
+		return s.BusPin
+	case proto.SeedKeySSHKey:
+		return s.SSHAuthorizedKey
+	case proto.SeedKeyBusAuth:
+		return s.BusAuth
+	case proto.SeedKeyBusKey:
+		return s.BusKey
+	}
+	return s.Extra[key]
 }
 
 // Every seed must carry the cluster id. It exists today only in the manifest —
@@ -261,22 +285,31 @@ func TestGenerate_ClusterIDInEverySeed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read seed for %s: %v", n.ID, err)
 		}
-		if !strings.Contains(string(b), "RASPUTIN_CLUSTER_ID=home1\n") {
+		if !strings.Contains(string(b), "RASPUTIN_CLUSTER_ID='home1'\n") {
 			t.Errorf("%s seed (%s) is missing RASPUTIN_CLUSTER_ID=home1:\n%s", n.Role, n.ID, b)
 		}
 	}
 }
 
-// The seed is sourced by sh, so the cluster id must render as a bare, unquoted
-// token. A value needing quotes would break every field after it — the same
-// class of defect that shipped a truncated recovery command in the agent unit.
-func TestBuildrootSeed_ClusterIDIsBareToken(t *testing.T) {
-	seed := buildrootSeed("controlplane", "cp1", "home1", "nats://127.0.0.1:4222", "", "", "")
-	if !strings.Contains(seed, "\nRASPUTIN_CLUSTER_ID=home1\n") {
-		t.Errorf("cluster id should render bare and unquoted, got:\n%s", seed)
+// The seed is sourced by sh, so every value has to survive a shell reading it.
+// It used to be written as a bare token, which made "does this value need
+// quotes" a judgement each renderer made for itself; proto.RenderSeed now
+// quotes every value, and proto tests that a POSIX shell reads each one back
+// byte for byte. What is left to check here is that this tool's own two seed
+// shapes carry the cluster id at all.
+func TestRenderSeed_ClusterIDInBothShapes(t *testing.T) {
+	cp, err := renderSeed(proto.Seed{Role: proto.RoleControlPlane, NodeID: "cp1", ClusterID: "home1", NATSURL: "nats://127.0.0.1:4222"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	fw := openwrtSeed("fw1", "home1", "nats://rasputin.local:4222", "tok", "", "")
-	if !strings.Contains(fw, "\nRASPUTIN_CLUSTER_ID=home1\n") {
+	if !strings.Contains(cp, "\nRASPUTIN_CLUSTER_ID='home1'\n") {
+		t.Errorf("controlplane seed is missing the cluster id, got:\n%s", cp)
+	}
+	fw, err := renderSeed(proto.Seed{Role: proto.RoleFirewall, NodeID: "fw1", ClusterID: "home1", NATSURL: "nats://rasputin.local:4222", JoinToken: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fw, "\nRASPUTIN_CLUSTER_ID='home1'\n") {
 		t.Errorf("firewall seed should carry the cluster id, got:\n%s", fw)
 	}
 }
@@ -304,7 +337,7 @@ func TestGenerate_NATSURLDerivesFromClusterID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read compute seed: %v", err)
 	}
-	if !strings.Contains(string(b), "RASPUTIN_NATS_URL=nats://home1.local:4222\n") {
+	if seedValue(t, string(b), proto.SeedKeyNATSURL) != "nats://home1.local:4222" {
 		t.Errorf("compute seed should dial the cluster's own name:\n%s", b)
 	}
 	// The controlplane always dials its own bus over loopback — that must NOT
@@ -319,7 +352,7 @@ func TestGenerate_NATSURLDerivesFromClusterID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read controlplane seed: %v", err)
 	}
-	if !strings.Contains(string(cpSeed), "RASPUTIN_NATS_URL=nats://127.0.0.1:4222\n") {
+	if seedValue(t, string(cpSeed), proto.SeedKeyNATSURL) != "nats://127.0.0.1:4222" {
 		t.Errorf("controlplane must still dial loopback, not the cluster name:\n%s", cpSeed)
 	}
 }
@@ -440,7 +473,7 @@ func TestGenerate_NormalizesIntoArtifacts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read seed: %v", err)
 		}
-		if !strings.Contains(string(b), "RASPUTIN_CLUSTER_ID=home1\n") {
+		if !strings.Contains(string(b), "RASPUTIN_CLUSTER_ID='home1'\n") {
 			t.Errorf("%s seed should carry the normalized cluster id:\n%s", n.ID, b)
 		}
 	}
