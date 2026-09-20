@@ -1,27 +1,38 @@
 'use client';
 
-import { ExternalLink } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { listFirewallState } from '../../../../lib/api';
 import type { FirewallNodeState } from '../../../../lib/types';
-import { Btn, DIM, Hint, SectionLabel, Tok } from '../../../../components/kit';
+import { CopyButton, DIM, Hint, Input, SectionLabel, Tok } from '../../../../components/kit';
 import { MONO } from '../../../../components/ui-theme';
+import {
+  LUCI_LOCAL_PORT,
+  LUCI_REMOTE_PORT,
+  luciLocalUrl,
+  luciTunnelCommand,
+} from '../../../../lib/luci-tunnel';
 
-// The Advanced tab is the explicit escape hatch: link out to the firewall's
-// own native admin UI for anything Rasputin doesn't model. Changes made there
-// get flagged by the next reconcile (firewall-integration.md §1) — users see
-// drift in the state row and can re-Apply to overwrite or update intents to
-// match.
+// The Advanced tab is the explicit escape hatch: it tells the operator how to
+// reach the firewall's own native admin UI for anything Rasputin doesn't model.
+// Changes made there get flagged by the next reconcile (firewall-integration.md
+// §1) — users see drift in the state row and can re-Apply to overwrite or
+// update intents to match.
+//
+// The native UI listens on the firewall's LOOPBACK interface, so this tab has
+// no URL to link to and deliberately does not offer one: the operator forwards
+// a local port to it over SSH and opens the local end in their own browser. The
+// command is built by lib/luci-tunnel.ts, which also decides what a usable host
+// is; see its header for why the host is validated before interpolation.
 //
 // Today the firewall ships as OpenWrt → the native UI is LuCI; when OPNsense
-// lands as an alternate backend (§14 backlog), this same tab will point at the
+// lands as an alternate backend (§14 backlog), this same tab will describe the
 // OPNsense web GUI. User-facing strings stay vendor-neutral so no UI churn is
 // needed when the flavor field arrives on inventory. Internal nodeId / host
 // derivation is the same either way.
 //
 // Host derivation isn't wired yet — we don't have a per-node LAN-IP field in
-// inventory. For now the operator pastes their firewall LAN IP and we build
-// the URL client-side. When primaryLanIp lands on Node (mesh.md ships
+// inventory. For now the operator pastes their firewall host and we build the
+// command client-side. When primaryLanIp lands on Node (mesh.md ships
 // primaryLanCidr already; an IP follow-up is small), this becomes automatic.
 export default function AdvancedPage() {
   const [states, setStates] = useState<FirewallNodeState[]>([]);
@@ -32,69 +43,73 @@ export default function AdvancedPage() {
   }, []);
 
   const nodeId = states[0]?.nodeId ?? '';
+  const typed = firewallHost.trim();
+  const command = luciTunnelCommand(firewallHost);
 
   return (
     <>
       <SectionLabel>NATIVE FIREWALL ADMIN UI</SectionLabel>
       <Hint style={{ marginBottom: 16 }}>
-        Opens the firewall&apos;s own admin interface in a new tab. Use it for anything Rasputin
-        doesn&apos;t expose. Changes you make there are flagged on the next reconcile as{' '}
-        <Tok>DRIFT</Tok> — adopt or revert by editing the matching Rasputin intent and clicking{' '}
-        <Tok>APPLY</Tok>.
+        The firewall&apos;s own admin interface is bound to the firewall&apos;s loopback interface,
+        so it isn&apos;t served to the LAN. Reach it by forwarding a local port to it over SSH, then
+        opening that local port in your browser. Use it for anything Rasputin doesn&apos;t expose.
+        Changes you make there are flagged on the next reconcile as <Tok>DRIFT</Tok> — adopt or
+        revert by editing the matching Rasputin intent and clicking <Tok>APPLY</Tok>.
       </Hint>
 
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 24 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
         <span style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>firewall host:</span>
-        <input
+        <Input
           value={firewallHost}
           onChange={(e) => setFirewallHost(e.target.value)}
           aria-label="Firewall host"
           placeholder={nodeId ? `${nodeId}.lan` : 'firewall LAN IP or hostname'}
+          style={{ minWidth: 240 }}
+        />
+      </div>
+
+      <div
+        style={{
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          marginBottom: 8,
+        }}
+      >
+        <code
           style={{
             background: 'var(--rasp-field-bg)',
             border: '1px solid rgba(var(--rasp-fg-rgb),0.18)',
-            color: 'var(--rasp-fg)',
+            color: command ? 'var(--rasp-fg)' : DIM,
             fontFamily: MONO,
             fontSize: 11,
             padding: '7px 9px',
-            minWidth: 240,
+            userSelect: 'all',
           }}
-        />
-        {/*
-          CodeQL flags the href below as js/xss-through-dom (HIGH): DOM text
-          reaching a URL. False positive — the scheme is not attacker-reachable.
-          The template literal hard-codes `http://` as a prefix, so the value
-          can never begin with `javascript:` or `data:`, which is the only way
-          a URL becomes script execution. Worst case is the operator navigating
-          to a host they themselves typed, in a new tab that gets no opener
-          reference (rel="noopener noreferrer").
-
-          firewallHost is also operator-typed and nothing else: useState(''),
-          set only by this input's onChange. No API value reaches it — nodeId
-          from listFirewallState is used for the PLACEHOLDER only, which is
-          inert text.
-
-          TRIP-WIRE: the file comment above says host derivation becomes
-          automatic when primaryLanIp lands on Node. On that day firewallHost
-          stops being operator-typed and starts carrying a NODE-SUPPLIED value,
-          and this verdict must be re-opened in .github/codeql-register.tsv —
-          a compromised node could then choose where this link points. The
-          hard-coded scheme still caps it at open-redirect rather than XSS.
-        */}
-        <a
-          href={firewallHost ? `http://${firewallHost}/` : '#'}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => {
-            if (!firewallHost) e.preventDefault();
-          }}
-          style={{ textDecoration: 'none' }}
         >
-          <Btn variant="primary" small disabled={!firewallHost}>
-            OPEN NATIVE UI <ExternalLink size={10} />
-          </Btn>
-        </a>
+          {command ?? `ssh -L ${LUCI_LOCAL_PORT}:127.0.0.1:${LUCI_REMOTE_PORT} root@<firewall host>`}
+        </code>
+        {command ? (
+          <CopyButton value={command} ariaLabel="Copy the SSH tunnel command" />
+        ) : null}
       </div>
+
+      <Hint style={{ marginBottom: 24 }}>
+        {typed && !command
+          ? 'That is not a hostname or an IP address. Enter the firewall’s hostname, IPv4 address, or a bracketed IPv6 address.'
+          : null}
+        {!typed ? 'Enter the firewall host above to fill in the command.' : null}
+        {command ? (
+          <>
+            Run that in a terminal, leave it running, then open <Tok>{luciLocalUrl()}</Tok> in your
+            browser. <Tok>-L</Tok> forwards port <Tok>{String(LUCI_LOCAL_PORT)}</Tok> on your
+            machine to the admin UI on the firewall&apos;s own <Tok>127.0.0.1</Tok>; closing the SSH
+            session closes the tunnel. If port {String(LUCI_LOCAL_PORT)} is already taken on your
+            machine, edit the first number in the command and open that port instead.
+          </>
+        ) : null}
+      </Hint>
 
       <SectionLabel>WHAT THE NATIVE UI IS GOOD FOR</SectionLabel>
       <Hint>
