@@ -193,35 +193,54 @@ func main() {
 	// cannot be used to fix anything (#89). Pinned nodes refuse plaintext, so
 	// nothing of theirs crosses the wire while it is broken.
 	busKey, busKeyGenerated, busKeyErr := bustls.EnsureKey(filepath.Join(dataDir, "bus"))
-	busTLSMode, busTLSModePinned, busTLSModeErr := busTLSStartMode(ctx, dbPath)
-	if busTLSModeErr != nil {
-		log.Printf("rasputin-api: bus TLS mode: %v", busTLSModeErr)
-	}
-	switch {
-	case busKeyErr != nil:
+	var serverTLS *tls.Config
+	if busKeyErr != nil {
 		log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY; every node that holds a bus pin stays off it until the key file is fixed or restored.", busKeyErr)
 		busKey = nil
-	default:
+	} else {
 		// The PERSISTED certificate around the key (geekdojo/geekdojo-brain
 		// #508), not a fresh one per start: it carries a fixed DNS SAN, and
 		// its exact bytes are what a client that verifies the name — the
 		// collector, the node listener — will pin. EnsureCert returns a usable
 		// certificate even when it had to replace the file, so an error here
 		// is a note, not a reason to drop TLS. Only a failure to produce one
-		// at all leaves cert zero-valued.
+		// at all leaves it zero-valued.
 		busCert, busCertGenerated, certErr := bustls.EnsureCert(filepath.Join(dataDir, "bus"), busKey)
 		if len(busCert.Certificate) == 0 {
 			log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY.", certErr)
 			busKey = nil
-			break
+		} else {
+			switch {
+			case certErr != nil:
+				log.Printf("rasputin-api: bus certificate re-minted: %v", certErr)
+			case busCertGenerated:
+				log.Printf("rasputin-api: bus certificate minted and persisted to %q (DNS %q)", filepath.Join(dataDir, "bus", bustls.CertFileName), bustls.BusDNSName)
+			}
+			serverTLS = bustls.ServerTLSConfigFor(busCert)
 		}
-		switch {
-		case certErr != nil:
-			log.Printf("rasputin-api: bus certificate re-minted: %v", certErr)
-		case busCertGenerated:
-			log.Printf("rasputin-api: bus certificate minted and persisted to %q (DNS %q)", filepath.Join(dataDir, "bus", bustls.CertFileName), bustls.BusDNSName)
+	}
+	// The mode is resolved AFTER the key, because whether this api can serve
+	// TLS at all is one of the facts it resolves on (bustls.StartFacts).
+	busTLSStart := busTLSStartMode(ctx, dbPath, busKey != nil)
+	busTLSMode, busTLSModePinned := busTLSStart.Mode, busTLSStart.Pinned
+	if busTLSStart.Fault != "" {
+		log.Printf("rasputin-api: ⚠️  bus TLS mode: %s — running as %q instead (%s); this is re-derived on every start until the recorded value is fixed",
+			busTLSStart.Fault, busTLSMode, busTLSStart.Why)
+	}
+	if busTLSStart.Derived {
+		// Persisted so the next start reads it back: a fresh cluster that
+		// derived require from "no node is enrolled" must not fall back to
+		// offer the moment its own agent has registered and that fact is
+		// no longer true. A failure to record it is survivable — the same
+		// facts derive the same mode next time — so it is logged, not fatal.
+		if perr := recordBusTLSMode(ctx, dbPath, busTLSMode); perr != nil {
+			log.Printf("rasputin-api: bus TLS mode %q was derived (%s) but could not be recorded: %v", busTLSMode, busTLSStart.Why, perr)
+		} else {
+			log.Printf("rasputin-api: bus TLS mode %q recorded: %s", busTLSMode, busTLSStart.Why)
 		}
-		busCfg.TLS = bustls.ServerTLSConfigFor(busCert)
+	}
+	if serverTLS != nil {
+		busCfg.TLS = serverTLS
 		busCfg.AllowNonTLS = busTLSMode.AllowsPlaintext()
 		origin := "loaded"
 		if busKeyGenerated {
@@ -229,6 +248,16 @@ func main() {
 		}
 		log.Printf("rasputin-api: bus TLS on, mode=%s (pinned=%t, plaintext %s), bus key %s, pin %s",
 			busTLSMode, busTLSModePinned, map[bool]string{true: "allowed", false: "REFUSED"}[busTLSMode.AllowsPlaintext()], origin, busKey.Pin())
+		// The pin, beside the token, for this controlplane's own agent. See
+		// bustls.WriteAgentPinFile: a self-initialised controlplane has no
+		// seed, and one that starts in require can never deliver a pin over
+		// the bus. Survivable: an agent that was seeded a pin does not need
+		// the file, so this is logged rather than fatal (#89).
+		if pinPath, perr := bustls.WriteAgentPinFile(filepath.Join(dataDir, "bus"), busKey); perr != nil {
+			log.Printf("rasputin-api: ⚠️  could not write the bus pin for this controlplane's agent at %q: %v — an agent with no seeded pin of its own cannot join a bus that requires TLS", pinPath, perr)
+		} else {
+			log.Printf("rasputin-api: bus pin for this controlplane's agent written to %q", pinPath)
+		}
 	}
 
 	busSrv, err := bus.Start(ctx, busCfg)
@@ -944,6 +973,7 @@ func main() {
 			Settings:        setupStore,
 			StartMode:       busTLSMode,
 			StartModePinned: busTLSModePinned,
+			StartFault:      busTLSStart.Fault,
 			Nodes: func(ctx context.Context) ([]*proto.Node, error) {
 				nodes, err := invStore.List(ctx)
 				if err == nil {
@@ -2634,18 +2664,69 @@ func restoreExit() {
 }
 
 // busTLSStartMode reads the bus TLS mode before the bus starts — which is
-// before the rest of the stores open, so it opens the settings store on its
-// own for the one read. The env pin (RASPUTIN_BUS_TLS) needs no database.
-func busTLSStartMode(ctx context.Context, dbPath string) (bustls.Mode, bool, error) {
+// before the rest of the stores open, so it opens the settings store, and the
+// inventory store the facts come from, on its own for the one read each.
+//
+// tlsAvailable is whether the bus key loaded. A settings store that will not
+// open is itself a fault: it resolves through the facts like any other
+// unreadable mode, never to offer (bustls.ResolveStartMode).
+func busTLSStartMode(ctx context.Context, dbPath string, tlsAvailable bool) bustls.StartMode {
+	facts := busTLSStartFacts(ctx, dbPath, tlsAvailable)
 	if os.Getenv(bustls.EnvMode) != "" {
-		return bustls.ResolveStartMode(ctx, nil)
+		return bustls.ResolveStartMode(ctx, nil, facts)
 	}
 	st, err := setup.OpenStore(ctx, dbPath)
 	if err != nil {
-		return bustls.ModeOffer, false, fmt.Errorf("open settings: %w; running as %q", err, bustls.ModeOffer)
+		return bustls.ResolveStartMode(ctx, failingSettings{err}, facts)
 	}
 	defer func() { _ = st.Close() }()
-	return bustls.ResolveStartMode(ctx, st)
+	return bustls.ResolveStartMode(ctx, st, facts)
+}
+
+// busTLSStartFacts reads inventory for the two facts a derived mode rests on:
+// how many nodes are enrolled, and whether every one of them reported bus TLS.
+//
+// An inventory that will not open answers "nodes are enrolled and not all of
+// them are on TLS", which is the conservative reading: it derives migrate, the
+// rung that keeps a fleet reachable, rather than require on a fleet nobody
+// could look at.
+func busTLSStartFacts(ctx context.Context, dbPath string, tlsAvailable bool) bustls.StartFacts {
+	unknown := bustls.StartFacts{TLSAvailable: tlsAvailable, Enrolled: 1, AllReportedTLS: false}
+	inv, err := inventory.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Printf("rasputin-api: bus TLS mode: read inventory: %v — assuming a fleet that is not all on TLS", err)
+		return unknown
+	}
+	defer func() { _ = inv.Close() }()
+	nodes, err := inv.List(ctx)
+	if err != nil {
+		log.Printf("rasputin-api: bus TLS mode: list inventory: %v — assuming a fleet that is not all on TLS", err)
+		return unknown
+	}
+	return bustls.FactsFromNodes(tlsAvailable, nodes)
+}
+
+// failingSettings stands in for a settings store that would not open, so the
+// one read reports the open error the way an unreadable setting reports its
+// own. It is never written to.
+type failingSettings struct{ err error }
+
+func (f failingSettings) Get(context.Context, string) (string, error) {
+	return "", fmt.Errorf("open settings: %w", f.err)
+}
+func (f failingSettings) Set(context.Context, string, string) error {
+	return fmt.Errorf("open settings: %w", f.err)
+}
+
+// recordBusTLSMode persists a derived mode, opening the settings store on its
+// own for the one write — this runs before the rest of the stores are open.
+func recordBusTLSMode(ctx context.Context, dbPath string, mode bustls.Mode) error {
+	st, err := setup.OpenStore(ctx, dbPath)
+	if err != nil {
+		return fmt.Errorf("open settings: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+	return st.Set(ctx, bustls.SettingKey, string(mode))
 }
 
 // removeAppLeafDir removes one app's leaf directory under root. It refuses an

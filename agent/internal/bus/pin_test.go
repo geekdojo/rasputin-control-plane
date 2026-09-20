@@ -47,33 +47,109 @@ func TestResolvePin(t *testing.T) {
 	dir := t.TempDir()
 	file := PinFilePath(dir)
 
-	// Nothing anywhere: unpinned, no fault.
-	if pin, src, envErr, fileErr := ResolvePin("", file); pin != "" || src != "" || envErr != nil || fileErr != nil {
-		t.Fatalf("empty: got (%q, %q, %v, %v)", pin, src, envErr, fileErr)
+	// Nothing anywhere: unpinned, no fault, and plaintext is still allowed —
+	// that is how a node enrolled before the pin existed reaches the bus.
+	r := ResolvePin("", file, "")
+	if r.Pin != "" || r.Source != "" || len(r.Faults()) != 0 || !r.Plaintext() {
+		t.Fatalf("empty: got %+v, want an unpinned node that may dial plaintext", r)
 	}
 	if err := WritePinFile(file, filePin); err != nil {
 		t.Fatal(err)
 	}
 	// File only.
-	if pin, src, _, _ := ResolvePin("", file); pin != filePin || src != "file" {
-		t.Fatalf("file: got (%q, %q)", pin, src)
+	if r := ResolvePin("", file, ""); r.Pin != filePin || r.Source != "file" || r.Plaintext() {
+		t.Fatalf("file: got %+v", r)
 	}
 	// Env wins over the file.
-	if pin, src, _, _ := ResolvePin("  "+envPin+"\n", file); pin != envPin || src != "env" {
-		t.Fatalf("env: got (%q, %q)", pin, src)
+	if r := ResolvePin("  "+envPin+"\n", file, ""); r.Pin != envPin || r.Source != "env" || r.Plaintext() {
+		t.Fatalf("env: got %+v", r)
 	}
 	// A bad env pin is a fault and falls through to the file.
-	pin, src, envErr, fileErr := ResolvePin("sha256/nope", file)
-	if envErr == nil || fileErr != nil || pin != filePin || src != "file" {
-		t.Fatalf("bad env: got (%q, %q, %v, %v)", pin, src, envErr, fileErr)
+	r = ResolvePin("sha256/nope", file, "")
+	if r.EnvErr == nil || r.FileErr != nil || r.Pin != filePin || r.Source != "file" {
+		t.Fatalf("bad env: got %+v", r)
 	}
-	// A corrupt file is a fault and leaves the node unpinned.
+	// A corrupt file is a fault, leaves the node unpinned — and FAILS CLOSED:
+	// the node was pinned, so it must not fall back to plaintext.
 	if err := os.WriteFile(file, []byte("garbage\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pin, src, envErr, fileErr = ResolvePin("", file)
-	if fileErr == nil || envErr != nil || pin != "" || src != "" {
-		t.Fatalf("corrupt file: got (%q, %q, %v, %v)", pin, src, envErr, fileErr)
+	r = ResolvePin("", file, "")
+	if r.FileErr == nil || r.EnvErr != nil || r.Pin != "" || r.Source != "" {
+		t.Fatalf("corrupt file: got %+v", r)
+	}
+	if !r.Configured || r.Plaintext() {
+		t.Fatalf("corrupt file: got %+v, want a configured node that refuses plaintext", r)
+	}
+}
+
+// A bad env pin with nothing else to fall back on leaves the node with no pin
+// AND no permission to dial: the whole point of #510's F09 fix. The same holds
+// for a pin file the node cannot read at all.
+func TestResolvePin_FailsClosedWithNoUsableSource(t *testing.T) {
+	dir := t.TempDir()
+	file := PinFilePath(dir)
+
+	r := ResolvePin("sha256/nope", file, "")
+	if r.Pin != "" || r.EnvErr == nil {
+		t.Fatalf("bad env alone: got %+v", r)
+	}
+	if !r.Configured || r.Plaintext() {
+		t.Fatalf("bad env alone: got %+v, want a configured node that refuses plaintext", r)
+	}
+
+	// A pin file that exists but cannot be read (a directory in its place is
+	// the portable way to make os.ReadFile fail) is the same answer.
+	blocked := filepath.Join(dir, "blocked-pin")
+	if err := os.MkdirAll(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r = ResolvePin("", blocked, "")
+	if r.FileErr == nil || r.Pin != "" || !r.Configured || r.Plaintext() {
+		t.Fatalf("unreadable file: got %+v, want a configured node that refuses plaintext", r)
+	}
+}
+
+// The controlplane's own agent falls back to the file the api writes beside
+// its bus key — last, after the seed and after a delivered pin, and only when
+// a path is given at all (every other role passes "").
+func TestResolvePin_ControlplaneFile(t *testing.T) {
+	envPin := mustPin(t, newKey(t))
+	filePin := mustPin(t, newKey(t))
+	cpPin := mustPin(t, newKey(t))
+	dir := t.TempDir()
+	file := PinFilePath(dir)
+	cpFile := filepath.Join(dir, "agent.pin")
+	if err := os.WriteFile(cpFile, []byte(cpPin+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if r := ResolvePin("", file, cpFile); r.Pin != cpPin || r.Source != "controlplane" || r.Plaintext() {
+		t.Fatalf("controlplane only: got %+v", r)
+	}
+	if err := WritePinFile(file, filePin); err != nil {
+		t.Fatal(err)
+	}
+	if r := ResolvePin("", file, cpFile); r.Pin != filePin || r.Source != "file" {
+		t.Fatalf("a delivered pin wins over the controlplane file: got %+v", r)
+	}
+	if r := ResolvePin(envPin, file, cpFile); r.Pin != envPin || r.Source != "env" {
+		t.Fatalf("the seed wins over both: got %+v", r)
+	}
+	// A controlplane file that is present but unusable fails closed like any
+	// other configured pin.
+	if err := os.WriteFile(cpFile, []byte("garbage\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := ResolvePin("", filepath.Join(dir, "absent"), cpFile)
+	if r.CPErr == nil || r.Pin != "" || !r.Configured || r.Plaintext() {
+		t.Fatalf("corrupt controlplane file: got %+v", r)
+	}
+	// A missing controlplane file contributes nothing at all: an api too old
+	// to write it leaves the agent exactly as it was.
+	r = ResolvePin("", filepath.Join(dir, "absent"), filepath.Join(dir, "also-absent"))
+	if r.Configured || !r.Plaintext() || len(r.Faults()) != 0 {
+		t.Fatalf("absent files: got %+v, want an unpinned node that may dial plaintext", r)
 	}
 }
 

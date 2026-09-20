@@ -184,29 +184,130 @@ func allReady(f *facts) {
 	f.inFlight = nil
 }
 
+// aFleet is a StartFacts for a controlplane that serves TLS and has nodes
+// enrolled, not all of them on TLS.
+var aFleet = StartFacts{TLSAvailable: true, Enrolled: 2, AllReportedTLS: false}
+
 func TestResolveStartMode(t *testing.T) {
 	ctx := context.Background()
 	s := &memSettings{}
 
 	t.Setenv(EnvMode, "")
-	if m, pinned, err := ResolveStartMode(ctx, s); m != ModeOffer || pinned || err != nil {
-		t.Fatalf("unset: (%s, %t, %v), want offer", m, pinned, err)
+	// Nothing recorded and nodes enrolled: still offer. The offer → migrate
+	// gate (the build is committed) is what stops a rollback stranding a node
+	// that was already handed a pin, so an existing fleet keeps it.
+	got := ResolveStartMode(ctx, s, aFleet)
+	if got.Mode != ModeOffer || got.Pinned || got.Derived || got.Fault != "" {
+		t.Fatalf("unset with a fleet: %+v, want plain offer", got)
 	}
 	_ = s.Set(ctx, SettingKey, "require")
-	if m, pinned, err := ResolveStartMode(ctx, s); m != ModeRequire || pinned || err != nil {
-		t.Fatalf("setting: (%s, %t, %v), want require", m, pinned, err)
-	}
-	_ = s.Set(ctx, SettingKey, "bogus")
-	if m, _, err := ResolveStartMode(ctx, s); m != ModeOffer || err == nil {
-		t.Fatalf("bad setting: (%s, %v), want offer and an error", m, err)
+	if got := ResolveStartMode(ctx, s, aFleet); got.Mode != ModeRequire || got.Pinned || got.Derived || got.Fault != "" {
+		t.Fatalf("setting: %+v, want require", got)
 	}
 	t.Setenv(EnvMode, " Migrate ")
-	if m, pinned, err := ResolveStartMode(ctx, s); m != ModeMigrate || !pinned || err != nil {
-		t.Fatalf("env: (%s, %t, %v), want pinned migrate", m, pinned, err)
+	if got := ResolveStartMode(ctx, s, aFleet); got.Mode != ModeMigrate || !got.Pinned || got.Fault != "" {
+		t.Fatalf("env: %+v, want pinned migrate", got)
 	}
-	t.Setenv(EnvMode, "yes")
-	if m, pinned, err := ResolveStartMode(ctx, s); m != ModeOffer || pinned || err == nil {
-		t.Fatalf("bad env: (%s, %t, %v), want unpinned offer and an error", m, pinned, err)
+}
+
+// A fresh cluster — nothing recorded, no node enrolled — starts in require and
+// records it, so the next start does not fall back to offer once its own agent
+// has registered and "no node is enrolled" is no longer true.
+func TestResolveStartMode_FreshClusterStartsInRequire(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(EnvMode, "")
+	fresh := StartFacts{TLSAvailable: true, Enrolled: 0, AllReportedTLS: true}
+
+	got := ResolveStartMode(ctx, &memSettings{}, fresh)
+	if got.Mode != ModeRequire || got.Pinned || !got.Derived || got.Fault != "" || got.Why == "" {
+		t.Fatalf("fresh: %+v, want a derived, unfaulted require with a reason", got)
+	}
+	// ...but not when this api cannot serve TLS at all: recording require
+	// would name a rung the bus is not running.
+	noTLS := StartFacts{TLSAvailable: false, Enrolled: 0, AllReportedTLS: true}
+	if got := ResolveStartMode(ctx, &memSettings{}, noTLS); got.Mode != ModeMigrate || !got.Derived {
+		t.Fatalf("fresh with no bus key: %+v, want a derived migrate", got)
+	}
+}
+
+// A mode nobody can read never resolves to offer. It resolves UP: to require
+// when every enrolled node is on TLS, and to migrate when one is not.
+func TestResolveStartMode_UnreadableModeNeverResolvesToOffer(t *testing.T) {
+	ctx := context.Background()
+	allOnTLS := StartFacts{TLSAvailable: true, Enrolled: 3, AllReportedTLS: true}
+
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T) Settings
+	}{
+		{"a malformed setting", func(t *testing.T) Settings {
+			s := &memSettings{}
+			_ = s.Set(context.Background(), SettingKey, "bogus")
+			t.Setenv(EnvMode, "")
+			return s
+		}},
+		{"a malformed env mode", func(t *testing.T) Settings {
+			t.Setenv(EnvMode, "yes")
+			return &memSettings{}
+		}},
+		{"a settings store that will not read", func(t *testing.T) Settings {
+			t.Setenv(EnvMode, "")
+			return unreadableSettings{}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.setup(t)
+			got := ResolveStartMode(ctx, s, allOnTLS)
+			if got.Mode != ModeRequire || got.Pinned || !got.Derived || got.Fault == "" {
+				t.Fatalf("all on TLS: %+v, want a faulted, derived require", got)
+			}
+			got = ResolveStartMode(ctx, s, aFleet)
+			if got.Mode != ModeMigrate || !got.Derived || got.Fault == "" {
+				t.Fatalf("not all on TLS: %+v, want a faulted, derived migrate", got)
+			}
+			if got.Mode == ModeOffer {
+				t.Fatal("resolved to offer")
+			}
+		})
+	}
+}
+
+type unreadableSettings struct{}
+
+func (unreadableSettings) Get(context.Context, string) (string, error) {
+	return "", errors.New("database is locked")
+}
+func (unreadableSettings) Set(context.Context, string, string) error {
+	return errors.New("database is locked")
+}
+
+func TestFactsFromNodes(t *testing.T) {
+	if f := FactsFromNodes(true, nil); f.Enrolled != 0 || !f.AllReportedTLS || !f.TLSAvailable {
+		t.Fatalf("no nodes: %+v, want 0 enrolled and a vacuously true AllReportedTLS", f)
+	}
+	on := []*proto.Node{node("a", proto.StatusOnline, true), node("b", proto.StatusOffline, true)}
+	if f := FactsFromNodes(true, on); f.Enrolled != 2 || !f.AllReportedTLS {
+		t.Fatalf("all on TLS: %+v", f)
+	}
+	mixed := append(on, node("c", proto.StatusOnline, false), node("d", proto.StatusOnline, nil))
+	if f := FactsFromNodes(true, mixed); f.Enrolled != 4 || f.AllReportedTLS {
+		t.Fatalf("one plaintext and one silent: %+v, want AllReportedTLS false", f)
+	}
+}
+
+// A start that had to ignore the mode it was given says so as a standing
+// alert, whichever rung it derived.
+func TestAlert_UnreadableStartMode(t *testing.T) {
+	svc := NewService(Config{StartMode: ModeRequire, StartFault: "the recorded bus TLS mode could not be read: database is locked"})
+	a := svc.Alert(time.Now())
+	if a == nil || a.ID != StartFaultAlertID || a.Severity != proto.AlertWarn {
+		t.Fatalf("alert = %+v, want a %s warn", a, StartFaultAlertID)
+	}
+	if !strings.Contains(a.Detail, "database is locked") || !strings.Contains(a.Detail, string(ModeRequire)) {
+		t.Fatalf("detail = %q, want the fault and the mode it ran as", a.Detail)
+	}
+	if svc := NewService(Config{StartMode: ModeRequire}); svc.Alert(time.Now()) != nil {
+		t.Fatalf("a clean start raised an alert")
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -89,6 +90,7 @@ type apiFixture struct {
 	bmcSvc          *bmc.Service
 	setupSvc        *setup.Service
 	nc              *nats.Conn
+	busTLS          *bustls.Service
 	hasFirewallNode bool
 }
 
@@ -276,6 +278,12 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	f.meshFake = meshClient
 	f.bmcSvc = bmcSvc
 	f.setupSvc = setupSvc
+	// A controlplane HAS a bus key: it is generated on first start and only
+	// absent when the file is broken. Wiring it here is what a real api does,
+	// and it is load-bearing for minting — a seed with no RASPUTIN_BUS_PIN is
+	// refused (geekdojo/geekdojo-brain#510). A test that wants the broken-key
+	// path calls f.srv.SetBusTLS(nil).
+	f.busTLS = wireBusTLS(t, f)
 	return f
 }
 

@@ -94,8 +94,9 @@ The api generates a key on first start, writes it to `/var/lib/rasputin/bus/bus.
   - Firewall: `/etc/rasputin/agent-state/bus/pin`, already kept across sysupgrade by `keep.d`.
 
   **No image change is needed for the file.**
+- **On the controlplane's own agent only,** there is a third source, read last: `/var/lib/rasputin/bus/agent.pin`, which the api writes beside its bus key on **every** start. Nobody provisions it, exactly as nobody provisions `agent.token` next to it. It exists because a controlplane that self-initialised (the `bootstrap.sh` path) has no seed — so nothing put `RASPUTIN_BUS_PIN` in its agent's environment — and a controlplane whose bus already refuses plaintext can never deliver a pin over the bus to the one agent that needs it. `RASPUTIN_BUS_PIN_FILE` overrides the path on a dev box. Other roles never read it.
 - **With a pin,** every connection is TLS. The agent verifies only that the SHA-256 of the server leaf's `SubjectPublicKeyInfo` equals the pin. It does not check a chain, a hostname or dates. If the server offers no TLS, or the key differs, the agent refuses before its join token is sent and keeps retrying on its normal reconnect schedule.
-- **Without a pin,** it dials plaintext, as today.
+- **Without a pin,** it dials plaintext, as today — but only if it was never GIVEN one. A node that holds a pin it cannot use **refuses to dial at all**; see [Bad values](#bad-values).
 - **On every registration** it reports `metadata.busTls`: `true` only for a TLS connection with the pin verified, `false` otherwise. An agent that predates this field omits it, and the api treats that as not TLS.
 
 ## Pin delivery to nodes enrolled before the pin existed
@@ -113,9 +114,17 @@ During migration this command travels over the plaintext bus. Bryce accepted tha
 
 The api moves itself through three modes. Nobody calls an API to do it, and nothing moves on a timer: each step waits for facts, and the api re-checks them whenever one might have changed.
 
+**Where a start begins.** `RASPUTIN_BUS_TLS` pins the mode when it is set and valid. Otherwise the api reads the recorded `bus.tls_mode` setting. With nothing recorded it derives one from the facts and records what it derived:
+
+- **No node is enrolled at all** — a fresh cluster — → `require`. Nothing can be stranded: every seed minted from here carries the pin, a provisioned matched set carries it, and the controlplane's own agent reads it from `bus/agent.pin`. The derived mode is recorded, so a restart after its own agent has registered reads `require` back rather than deriving again.
+- **Nodes are enrolled and nothing is recorded** → `offer`, as before. This fleet has not climbed the ladder yet, and the `offer` → `migrate` gate is what stops a rolled-back api stranding a node it had already pinned.
+- **The value is malformed or unreadable** → never `offer`; see [Bad values](#bad-values).
+
+A controlplane whose bus key did not load derives `migrate` in every case: it serves no TLS, so there is no `require` to record.
+
 | Mode | Plaintext | Pin delivery | The api moves on when |
 |---|---|---|---|
-| `offer` (start) | accepted | none | the controlplane's running build is **committed** → `migrate` |
+| `offer` | accepted | none | the controlplane's running build is **committed** → `migrate` |
 | `migrate` | accepted | to every online node not on TLS when the mode is entered, then to each node that registers without `busTls=true` | every enrolled node (online or not) reports `busTls=true`, **and** the server holds no plaintext client connection (the controlplane's own agent included), **and** no job is in flight → `require` |
 | `require` | **refused by the server** | none | never; this is the end |
 
@@ -151,7 +160,7 @@ Nodes rejoin over TLS on their own reconnect loop, the controlplane's own agent 
 
 **If the new server does not start** (for example, the port is taken), the api starts a server with the previous options again. The bus accepts plaintext as before, and every node reconnects. The api records `migrate` again, reopens job intake, and raises a standing security warning, `bus-tls-require-failed`. It does not try again until the api next starts: a retry on the next event would drop every node again each time it failed. **If no server starts at all**, or the api's own connection cannot rejoin, the api has no bus. It exits non-zero, as it does when the bus cannot start at boot, and the unit restarts it.
 
-**A fresh cluster whose seeds all carry the pin** (a provisioned matched set, Add-node) never speaks plaintext, because every agent is pinned from its first boot. A freshly flashed controlplane is committed, so the first check after its own agent registers moves `offer` → `migrate` (nothing to deliver) → `require` in one pass, as soon as no job is in flight, and the bus server is replaced once. Until then the server accepts plaintext that no node uses.
+**A fresh cluster whose seeds all carry the pin** (a provisioned matched set, Add-node) never speaks plaintext, because every agent is pinned from its first boot. Such a controlplane now *starts* in `require` (no node is enrolled), so there is no ladder to climb and no window in which the server accepts plaintext at all. A cluster that reaches a fresh api with nodes already enrolled — a restore onto an empty settings table, say — still climbs: a freshly flashed controlplane is committed, so the first check after its own agent registers moves `offer` → `migrate` (nothing to deliver) → `require` in one pass, as soon as no job is in flight, and the bus server is replaced once.
 
 **Status and the escape hatch:**
 
@@ -161,9 +170,10 @@ Nodes rejoin over TLS on their own reconnect loop, the controlplane's own agent 
 ## Bad values
 
 - **An invalid pin or key in a seed is refused by the seed consumer.** Both images stop provisioning with an error rather than applying a partial seed; the firewall's `apply-seed` leaves `/etc/config/rasputin` untouched. Dropping a bad pin and carrying on would provision the node straight into plaintext. So the agent-side fallback in the next bullet only applies to a value that got past the seed (for example, a hand-edited `node.env` or UCI value).
-- **An invalid `RASPUTIN_BUS_PIN` that reaches the agent** is reported as a configuration fault (it appears in the node's registration and the startup log). The agent then uses the pin file if one exists, and otherwise plaintext.
-- **An unreadable pin file** is also reported as a fault, and the agent dials in plaintext.
-- **An unusable `bus.key` on the controlplane** does not stop the api from starting. The bus runs **plaintext-only** and the api logs why. `GET /api/bus/tls` answers 503, and a standing `bus-tls-unavailable` warning is raised. Pinned nodes stay off the bus rather than speak plaintext.
+- **An invalid `RASPUTIN_BUS_PIN` that reaches the agent** is reported as a configuration fault and the agent falls through to the pin file, which is still the right pin to use while the typo is fixed.
+- **A pin that was given and cannot be used — every source — fails CLOSED.** The agent does not dial the bus at all. It logs what is wrong, names the variable and the file, and exits non-zero; the unit restarts it, so the line repeats in the journal until the pin is fixed. This is the one case where the agent refuses to run: the node was pinned, so the only thing a plaintext dial could achieve is sending its join token in the clear to whatever answered on `:4222`. A node that was **never** given a pin is unaffected and still dials plaintext — that is how a fleet enrolled before the pin existed receives one.
+- **An unusable `bus.key` on the controlplane** does not stop the api from starting. The bus runs **plaintext-only** and the api logs why. `GET /api/bus/tls` answers 503, a standing `bus-tls-unavailable` warning is raised, and **`POST /api/bus/tokens` is refused with 503**: the seed it would mint carries no `RASPUTIN_BUS_PIN`, and a node seeded without one joins unencrypted and has no route back. Pinned nodes stay off the bus rather than speak plaintext.
+- **A bus TLS mode nobody can read** — a malformed `RASPUTIN_BUS_TLS`, a malformed or unreadable `bus.tls_mode` setting — never resolves to `offer`. It resolves to `require` when every enrolled node has reported `busTls`, and to `migrate` when one has not, with a standing `bus-tls-mode-unreadable` warning naming the value that was ignored. A controlplane whose bus key did not load resolves to `migrate` whatever the fleet looks like, because it serves no TLS to require.
 
 ## Checking a pin by hand
 

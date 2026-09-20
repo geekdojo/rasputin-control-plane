@@ -73,6 +73,19 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// REFUSED while bus TLS is unavailable (geekdojo/geekdojo-brain#510). The
+	// seed the UI renders from this response carries RASPUTIN_BUS_PIN, and
+	// with no bus key there is no pin to put in it. A node seeded without one
+	// comes up unpinned and stays that way: it dials plaintext, and the only
+	// route back is a pin delivery this controlplane cannot make until its own
+	// key is fixed. Minting nothing is the recoverable failure.
+	if s.busTLS == nil {
+		writeError(w, http.StatusServiceUnavailable, "refusing to mint a join token: "+busTLSUnavailable+
+			", so the seed would carry no bus pin and the node would join unencrypted and stay that way. "+
+			"Fix or restore the bus key (bus/bus.key in the api's data directory, /var/lib/rasputin on an appliance) and restart the api, then mint the token.")
+		return
+	}
+
 	// Cluster-size cap (proto.MaxClusterNodes): refuse a mint that would
 	// commit a NEW prospective node past the cap. Committed = live nodes +
 	// pending enrollments (bound, unrevoked tokens whose node hasn't
