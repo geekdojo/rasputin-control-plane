@@ -1,0 +1,36 @@
+# .github/image-sources.tsv — every place in this tree that produces a
+# container image reference, and the rule it is held to.
+#
+# A tile from a signed catalog bundle is digest-pinned and checked by
+# tileschema.ValidateImagePin. The platform sidecars are not: they carry tag
+# defaults with environment overrides that pass through no validator at all.
+# That is two rules for one kind of value, and until this file existed nothing
+# said so.
+#
+# This file does not close the gap — pinning the platform images by digest per
+# architecture is its own work. It makes the gap countable and stops it
+# growing: a source that is neither `validated` nor `pending` fails the test in
+# api/internal/catalog/parity_test.go, so a third rule cannot arrive without
+# someone deciding on it.
+#
+# status:
+#   validated  the reference passes tileschema.ValidateImagePin before use.
+#   pending    it does not yet. `cite` names the issue that will make it.
+#
+# The test also fails on a row whose code no longer exists, because a row that
+# outlives its source makes the validated count read higher than it is.
+#
+# Checked by: go test ./api/internal/catalog/
+id	path	symbol	kind	status	cite	note
+I01	api/internal/mesh/supervisor_docker.go	defaultImage	platform default	pending	geekdojo/geekdojo-brain#534	The baked mesh server image. Tag-pinned, and the tarball the OS image loads is the thing actually run, so the pin that matters is the image ID per architecture.
+I02	api/internal/obs/supervisor.go	defaultVMImage	platform default	pending	geekdojo/geekdojo-brain#534	The metrics store, pulled at observability enable. Tag-pinned.
+I03	api/internal/obs/supervisor.go	defaultAlloyImage	platform default	pending	geekdojo/geekdojo-brain#534	The collector, pulled per node at observability enable. Tag-pinned.
+I04	api/internal/obs/supervisor.go	defaultLokiImage	platform default	pending	geekdojo/geekdojo-brain#534	The log store. Tag-pinned.
+I05	api/internal/obs/supervisor.go	defaultGrafanaImage	platform default	pending	geekdojo/geekdojo-brain#534	The dashboard sidecar. Tag-pinned.
+I06	api/internal/obs/supervisor.go	defaultVMAlertImage	platform default	pending	geekdojo/geekdojo-brain#534	The rule evaluator. Tag-pinned.
+I07	api/cmd/rasputin-api/main.go	RASPUTIN_HEADSCALE_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I01 with no validation, so any reference the daemon will pull is accepted, tag or digest.
+I08	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_VM_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I02 with no validation.
+I09	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_ALLOY_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I03 with no validation.
+I10	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_LOKI_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I04 with no validation.
+I11	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_GRAFANA_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I05 with no validation.
+I12	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_VMALERT_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I06 with no validation.

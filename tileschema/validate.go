@@ -350,9 +350,19 @@ func requires(t Tile, capability string) bool {
 	return false
 }
 
-// validateImagePin requires a digest-pinned reference. A tag — including a
+// ValidateImagePin requires a digest-pinned reference. A tag — including a
 // version tag — is mutable at the registry, so a tile pinned to one does not
 // describe a fixed stack no matter how specific the tag looks.
+//
+// Exported because a tile is not the only place an image reference comes from.
+// The platform sidecars carry their own defaults and their own environment
+// overrides, and until this was exported there was no way for those paths to
+// be held to the same rule as a tile's — which is the whole of what "validator
+// parity" means (geekdojo/geekdojo-brain#495). .github/image-sources.tsv
+// records every place a reference is produced and whether it passes through
+// here yet.
+func ValidateImagePin(img string) error { return validateImagePin(img) }
+
 func validateImagePin(img string) error {
 	if strings.TrimSpace(img) == "" {
 		return fmt.Errorf("empty image reference")
