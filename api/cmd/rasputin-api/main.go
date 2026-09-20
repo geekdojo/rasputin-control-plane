@@ -2249,21 +2249,30 @@ func wireMockMesh(stateDir, defaultLogin string) (meshWiring, error) {
 // wireExternalMesh talks to a Headscale the operator runs themselves. We
 // trust the system pool unless RASPUTIN_HEADSCALE_CA_FILE points at a PEM
 // bundle (e.g. their internal CA) — in which case nodes need that CA too, so
-// we ship it in the enroll command. The container lifecycle is theirs (noop
-// supervisor) unless they explicitly asked us to drive it. Eager: the client
-// is constructed up front (EnsureUser still runs in the background Start).
+// it is APPENDED to the Mesh CA in the bundle the enroll command ships
+// (mesh.NodeTrustBundle; geekdojo/geekdojo-brain#506). The Mesh CA goes to
+// every node whoever runs Headscale: it also signs the api's own HTTPS leaf
+// and the app leaves. The container lifecycle is theirs (noop supervisor)
+// unless they explicitly asked us to drive it. Eager: the client is
+// constructed up front (EnsureUser still runs in the background Start).
 func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, key string) (meshWiring, error) {
 	cfg := mesh.RealClientConfig{BaseURL: url, APIKey: key}
-	var caToShip []byte
+	var operatorCA []byte
 	if caFile := os.Getenv("RASPUTIN_HEADSCALE_CA_FILE"); caFile != "" {
-		tlsCfg, err := loadCATLSConfig(caFile)
+		pem, err := os.ReadFile(caFile)
 		if err != nil {
-			return meshWiring{}, err
+			return meshWiring{}, errors.New("read RASPUTIN_HEADSCALE_CA_FILE: " + err.Error())
+		}
+		// One helper for both backends. Read once: the file the api trusts
+		// and the CA the nodes are shipped are the same bytes, and a file
+		// that cannot be read fails the start rather than quietly shipping
+		// nodes a CA the api itself does not trust.
+		tlsCfg, cerr := mesh.CATLSConfig(pem, "RASPUTIN_HEADSCALE_CA_FILE="+caFile)
+		if cerr != nil {
+			return meshWiring{}, cerr
 		}
 		cfg.TLSConfig = tlsCfg
-		if pem, rerr := os.ReadFile(caFile); rerr == nil {
-			caToShip = pem // nodes trust the same custom CA before tailscale up
-		}
+		operatorCA = pem
 	}
 	c, err := mesh.NewRealClient(cfg)
 	if err != nil {
@@ -2277,8 +2286,16 @@ func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, k
 		}
 		sup = ds
 	}
-	log.Printf("rasputin-api: mesh backend = headscale (external, url=%s)", url)
-	return meshWiring{client: c, sup: sup, login: url, caPEM: caToShip}, nil
+	caPEM := mesh.NodeTrustBundle(meshCA.CertPEM, operatorCA)
+	bundle := "mesh-ca"
+	if len(operatorCA) > 0 {
+		bundle = "mesh-ca+operator-ca"
+	}
+	// %q on the url: it is this process's own RASPUTIN_HEADSCALE_URL, but
+	// quoting it means not even a hand-edited node.env could forge a second
+	// log line. bundle is one of two literals.
+	log.Printf("rasputin-api: mesh backend = headscale (external, url=%q, node trust bundle=%s)", url, bundle)
+	return meshWiring{client: c, sup: sup, login: url, caPEM: caPEM}, nil
 }
 
 // wireSelfHostedMesh is the production path. It builds the supervisor cheaply
@@ -2292,9 +2309,11 @@ func wireSelfHostedMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin strin
 	if err != nil {
 		return meshWiring{}, err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(meshCA.CertPEM) {
-		return meshWiring{}, errors.New("mesh: failed to build trust pool from mesh CA")
+	// The same helper the external path uses; here the root that signs the
+	// Headscale leaf is this installation's Mesh CA (#506).
+	tlsCfg, err := mesh.CATLSConfig(meshCA.CertPEM, "the Mesh CA")
+	if err != nil {
+		return meshWiring{}, err
 	}
 	url := sup.ServerURL() // resolved at construction; no container needed
 	bootstrap := func(ctx context.Context) (mesh.Client, error) {
@@ -2311,7 +2330,7 @@ func wireSelfHostedMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin strin
 			BaseURL:       url,
 			APIKey:        key,
 			RefreshAPIKey: sup.MintSessionAPIKey,
-			TLSConfig:     &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+			TLSConfig:     tlsCfg,
 		})
 	}
 	log.Printf("rasputin-api: mesh backend = headscale (self-hosted, url=%s, tls=mesh-ca; bringing up in background)", url)
@@ -2319,7 +2338,7 @@ func wireSelfHostedMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin strin
 		client:    mesh.NewNotReadyClient("headscale"),
 		sup:       sup,
 		login:     url,
-		caPEM:     meshCA.CertPEM,
+		caPEM:     mesh.NodeTrustBundle(meshCA.CertPEM),
 		bootstrap: bootstrap,
 	}, nil
 }
@@ -2373,18 +2392,6 @@ func dockerAvailable() bool {
 // obsDockerBin is the container runtime obs shells out to. Its own env var,
 // defaulted to "docker".
 func obsDockerBin() string { return envOr("RASPUTIN_OBS_DOCKER_BIN", "docker") }
-
-func loadCATLSConfig(caFile string) (*tls.Config, error) {
-	pem, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, errors.New("read RASPUTIN_HEADSCALE_CA_FILE: " + err.Error())
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, errors.New("RASPUTIN_HEADSCALE_CA_FILE: no certs parsed from " + caFile)
-	}
-	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
-}
 
 func splitCSV(s string) []string {
 	parts := strings.Split(s, ",")
