@@ -164,10 +164,7 @@ func main() {
 	// over the bus (geekdojo/geekdojo-brain#510). Every other role has no such
 	// file, and passes "".
 	busPinFile := bus.PinFilePath(stateDir)
-	cpPinFile := ""
-	if role == proto.RoleControlPlane {
-		cpPinFile = envOr("RASPUTIN_BUS_PIN_FILE", proto.BusAgentPinPath)
-	}
+	cpPinFile := controlplanePinFile(role)
 	busPinRes := bus.ResolvePin(os.Getenv(bus.EnvPin), busPinFile, cpPinFile)
 	busPin, busPinSource := busPinRes.Pin, busPinRes.Source
 	if busPinRes.EnvErr != nil {
@@ -1222,6 +1219,41 @@ func splitCSV(s string) []string {
 // The fault marker lives here and must be looked for here — deriving it twice
 // is what let the arm and consume sites disagree (bench 2026-08-13).
 func updaterStateDir(stateDir string) string { return filepath.Join(stateDir, "updater") }
+
+// EnvControlplanePinFile overrides where the CONTROLPLANE's own agent reads
+// the pin its api writes. It exists for a dev box whose api runs on a data dir
+// that is not /var/lib/rasputin.
+const EnvControlplanePinFile = "RASPUTIN_BUS_PIN_FILE"
+
+// controlplanePinFile resolves the third and last pin source: the file the api
+// writes beside the join token it mints for its own agent
+// (proto.BusAgentPinPath). See bus.ResolvePin.
+//
+// It is a resolver, not an inline read, because it decides whether a pin
+// source exists at all (.github/security-resolvers.tsv). Two rules, and both
+// are fail-closed in the direction that matters:
+//
+//   - Only the controlplane role gets a path. Every other role gets "", so no
+//     compute or firewall node can be pointed at a file the api wrote for a
+//     different machine, whatever the environment says.
+//   - A controlplane ALWAYS gets a path: an unset or blank override falls back
+//     to the appliance location rather than to "". Returning "" would silently
+//     drop the source, and a self-initialised controlplane — which has no
+//     seeded pin and can be handed none over a bus that refuses plaintext —
+//     would fall back to dialing in the clear.
+//
+// What the file CONTAINS is not this function's business: a path that does not
+// exist contributes nothing, and one that exists with an unusable pin makes
+// the node refuse to dial (bus.Resolution.Plaintext).
+func controlplanePinFile(role proto.NodeRole) string {
+	if role != proto.RoleControlPlane {
+		return ""
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvControlplanePinFile)); v != "" {
+		return v
+	}
+	return proto.BusAgentPinPath
+}
 
 func agentStateDir(nodeID string) string {
 	if v := os.Getenv("RASPUTIN_AGENT_STATE_DIR"); v != "" {
