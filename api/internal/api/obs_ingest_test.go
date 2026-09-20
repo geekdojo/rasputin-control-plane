@@ -88,7 +88,7 @@ func registerCollectorKey(t *testing.T, inv *inventory.Store, node string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv.Registry().SetTokenLive(node, true)
+	inv.Registry().SetLiveTokens(node, []string{"tok-" + node})
 	if _, err := inv.SetNodeKeys(context.Background(), node, proto.NodeKeys{proto.NodeKeyCollector: hash}); err != nil {
 		t.Fatal(err)
 	}
@@ -196,6 +196,13 @@ func newIngestServer(t *testing.T, obsStatus *obs.Status, seedNodes ...string) *
 	}
 	for _, id := range seedNodes {
 		registerCollectorKey(t, invStore, id)
+	}
+	// The whole-set token load the api does at start. Without it the registry
+	// is deliberately not "loaded" and admits nobody, so every gate below
+	// would answer the same whatever the test set up.
+	invStore.Registry().ReplaceLiveTokens(map[string][]string{})
+	for _, id := range seedNodes {
+		invStore.Registry().SetLiveTokens(id, []string{"tok-" + id})
 	}
 	return &Server{inv: invStore, obs: obsStatus, nodeGate: newIngestConns(invStore.Registry(), nil)}
 }
@@ -348,7 +355,7 @@ func TestObsIngestHandlers_RecheckAdmissionPerRequest(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("baseline: got %d, want 503 backend-not-ready", rec.Code)
 	}
-	s.inv.Registry().SetTokenLive("c02", false)
+	s.inv.Registry().SetLiveTokens("c02", nil)
 	rec = httptest.NewRecorder()
 	s.handleObsIngest(rec, ingestReq(t, "c02"))
 	if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusForbidden {
