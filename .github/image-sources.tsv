@@ -2,15 +2,15 @@
 # container image reference, and the rule it is held to.
 #
 # A tile from a signed catalog bundle is digest-pinned and checked by
-# tileschema.ValidateImagePin. The platform sidecars are not: they carry tag
-# defaults with environment overrides that pass through no validator at all.
-# That is two rules for one kind of value, and until this file existed nothing
-# said so.
+# tileschema.ValidateImagePin. The platform sidecars used to carry tag defaults
+# with environment overrides that passed through no validator at all — two
+# rules for one kind of value, and until this file existed nothing said so.
 #
-# This file does not close the gap — pinning the platform images by digest per
-# architecture is its own work. It makes the gap countable and stops it
-# growing: a source that is neither `validated` nor `pending` fails the test in
-# api/internal/catalog/parity_test.go, so a third rule cannot arrive without
+# That gap is closed (geekdojo/geekdojo-brain#534): every reference below is
+# digest-pinned and every one of them, default or override, goes through
+# ValidateImagePin before it is used. What this file still does is stop the gap
+# reopening — a source that is neither `validated` nor `pending` fails the test
+# in api/internal/catalog/parity_test.go, so a third rule cannot arrive without
 # someone deciding on it.
 #
 # status:
@@ -22,15 +22,15 @@
 #
 # Checked by: go test ./api/internal/catalog/
 id	path	symbol	kind	status	cite	note
-I01	api/internal/mesh/supervisor_docker.go	defaultImage	platform default	pending	geekdojo/geekdojo-brain#534	The baked mesh server image. Tag-pinned, and the tarball the OS image loads is the thing actually run, so the pin that matters is the image ID per architecture.
-I02	api/internal/obs/supervisor.go	defaultVMImage	platform default	pending	geekdojo/geekdojo-brain#534	The metrics store, pulled at observability enable. Tag-pinned.
-I03	api/internal/obs/supervisor.go	defaultAlloyImage	platform default	pending	geekdojo/geekdojo-brain#534	The collector, pulled per node at observability enable. Tag-pinned.
-I04	api/internal/obs/supervisor.go	defaultLokiImage	platform default	pending	geekdojo/geekdojo-brain#534	The log store. Tag-pinned.
-I05	api/internal/obs/supervisor.go	defaultGrafanaImage	platform default	pending	geekdojo/geekdojo-brain#534	The dashboard sidecar. Tag-pinned.
-I06	api/internal/obs/supervisor.go	defaultVMAlertImage	platform default	pending	geekdojo/geekdojo-brain#534	The rule evaluator. Tag-pinned.
-I07	api/cmd/rasputin-api/main.go	RASPUTIN_HEADSCALE_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I01 with no validation, so any reference the daemon will pull is accepted, tag or digest.
-I08	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_VM_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I02 with no validation.
-I09	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_ALLOY_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I03 with no validation.
-I10	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_LOKI_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I04 with no validation.
-I11	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_GRAFANA_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I05 with no validation.
-I12	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_VMALERT_IMAGE	environment override	pending	geekdojo/geekdojo-brain#534	Substitutes I06 with no validation.
+I01	api/internal/mesh/supervisor_docker.go	defaultImage	platform default	validated	geekdojo/geekdojo-brain#534	The baked mesh server image. Digest-pinned from the embedded mesh-images.json, which the control-plane release publishes and the OS build reads. A tarball `docker load` records no RepoDigest, so the OS build also writes the image ID it resolved at pull time and the supervisor checks the loaded image against it.
+I02	api/internal/obs/supervisor.go	defaultVMImage	platform default	validated	geekdojo/geekdojo-brain#534	The metrics store, pulled at observability enable. Digest-pinned; checked in NewDockerComposeSupervisor.
+I03	api/internal/obs/supervisor.go	defaultAlloyImage	platform default	validated	geekdojo/geekdojo-brain#534	The collector, pulled per node at observability enable. Digest-pinned; checked in NewDockerComposeSupervisor and again in BuildCollectorCompose, which is the last place the reference is seen before it leaves the box.
+I04	api/internal/obs/supervisor.go	defaultLokiImage	platform default	validated	geekdojo/geekdojo-brain#534	The log store. Digest-pinned; checked in NewDockerComposeSupervisor.
+I05	api/internal/obs/supervisor.go	defaultGrafanaImage	platform default	validated	geekdojo/geekdojo-brain#534	The dashboard sidecar. Digest-pinned; checked in NewDockerComposeSupervisor.
+I06	api/internal/obs/supervisor.go	defaultVMAlertImage	platform default	validated	geekdojo/geekdojo-brain#534	The rule evaluator. Digest-pinned; checked in NewDockerComposeSupervisor.
+I07	api/cmd/rasputin-api/main.go	RASPUTIN_HEADSCALE_IMAGE	environment override	validated	geekdojo/geekdojo-brain#534	Substitutes I01. Goes through ValidateImagePin in NewDockerSupervisor, which refuses construction rather than discovering it at `docker run`.
+I08	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_VM_IMAGE	environment override	validated	geekdojo/geekdojo-brain#534	Substitutes I02. Checked in NewDockerComposeSupervisor with every other override.
+I09	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_ALLOY_IMAGE	environment override	validated	geekdojo/geekdojo-brain#534	Substitutes I03. Checked in NewDockerComposeSupervisor with every other override.
+I10	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_LOKI_IMAGE	environment override	validated	geekdojo/geekdojo-brain#534	Substitutes I04. Checked in NewDockerComposeSupervisor with every other override.
+I11	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_GRAFANA_IMAGE	environment override	validated	geekdojo/geekdojo-brain#534	Substitutes I05. Checked in NewDockerComposeSupervisor with every other override.
+I12	api/cmd/rasputin-api/main.go	RASPUTIN_OBS_VMALERT_IMAGE	environment override	validated	geekdojo/geekdojo-brain#534	Substitutes I06. Checked in NewDockerComposeSupervisor with every other override.

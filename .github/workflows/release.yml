@@ -172,9 +172,9 @@ jobs:
           gh release create "$TAG" \
             --target "$TARGET_SHA" \
             --title "Rasputin control plane $TAG" \
-            --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64; the api tarball bundles the web UI). Vendored by rasputin-os; verify with the published .sha256 / .hash." \
+            --notes "Static linux binaries for the OS-image pipeline (agent + api, amd64 + arm64; the api tarball bundles the web UI), plus mesh-images.json — the pinned container images the OS image bakes for an offline first boot. Vendored by rasputin-os; verify with the published .sha256 / .hash." \
             $PRERELEASE_FLAG \
-            dist/*.tar.gz dist/*.sha256 dist/*.hash
+            dist/*.tar.gz dist/*.json dist/*.sha256 dist/*.hash
 
           # After publishing: prove the tag landed on the built commit. A tag
           # this run created on the wrong commit is deleted with its release so

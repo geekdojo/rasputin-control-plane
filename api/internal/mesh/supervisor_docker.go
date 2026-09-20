@@ -17,6 +17,8 @@ import (
 	"sync"
 	"text/template"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // DockerSupervisor manages a single Headscale container via the local
@@ -47,6 +49,12 @@ type DockerSupervisor struct {
 	// apiKeyMu serialises MintSessionAPIKey: concurrent 401s must not race
 	// two mints over the recorded prefixes.
 	apiKeyMu sync.Mutex
+
+	// runImage is the reference `docker run` is given, settled by ensureImage.
+	// It is cfg.Image on a node that pulled, and the OS-baked image ID on an
+	// appliance -- where the digest-pinned reference cannot be resolved
+	// locally at all. See ensureImage.
+	runImage string
 }
 
 // CmdRunner runs a binary and returns its combined output. Injected so
@@ -63,7 +71,12 @@ type DockerSupervisorConfig struct {
 	// ContainerName is the docker container name. Defaults to "rasputin-headscale".
 	ContainerName string
 
-	// Image is the headscale image reference. Defaults to "headscale/headscale:0.28.0".
+	// Image is the headscale image reference. Defaults to the pin in
+	// mesh-images.json. It must be digest-pinned (name:tag@sha256:...) whether
+	// it came from the default or from RASPUTIN_HEADSCALE_IMAGE: an override
+	// that skipped the rule would be a second, weaker rule for the same kind of
+	// value, which is exactly the gap .github/image-sources.tsv was written to
+	// count.
 	Image string
 
 	// ListenAddr is the host bind for Headscale's HTTP listener. Defaults
@@ -117,9 +130,20 @@ type DockerSupervisorConfig struct {
 	ExtraLeafDNSNames []string
 }
 
+// defaultImage is the pinned Headscale reference, read from the embedded
+// mesh-images.json rather than written twice. The OS build reads the same file
+// out of the control-plane release, so the ref the image bakes and the ref the
+// api runs cannot drift.
+var defaultImage = func() string {
+	ref, ok := BakedImageRef("headscale")
+	if !ok {
+		panic("mesh: mesh-images.json has no \"headscale\" image; names present: " + strings.Join(bakedImageNames(), ", "))
+	}
+	return ref
+}()
+
 const (
 	defaultContainerName = "rasputin-headscale"
-	defaultImage         = "headscale/headscale:0.28.0"
 	// Bind to all interfaces by default. On a real Rasputin chassis the
 	// controlplane sits behind Node N (the firewall) on a LAN-only
 	// interface — there is no WAN-facing NIC to accidentally expose, so
@@ -143,6 +167,14 @@ func NewDockerSupervisor(cfg DockerSupervisorConfig) (*DockerSupervisor, error) 
 	}
 	if cfg.Image == "" {
 		cfg.Image = defaultImage
+	}
+	// Fail closed on an unpinned reference, from either source. A tag is
+	// mutable at the registry, so `docker pull` of one does not describe a
+	// fixed image no matter how specific the tag looks -- and the mesh server
+	// is the component that mints the credentials every node joins with.
+	if err := tileschema.ValidateImagePin(cfg.Image); err != nil {
+		return nil, fmt.Errorf("mesh supervisor: image %q: %w (set %s to a name:tag@sha256:... reference)",
+			cfg.Image, err, "RASPUTIN_HEADSCALE_IMAGE")
 	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = defaultListenAddr
@@ -628,8 +660,51 @@ func (s *DockerSupervisor) inspect(ctx context.Context) (containerState, error) 
 	}
 }
 
-// ensureImage runs `docker image inspect`; on miss, `docker pull`.
+// ensureImage settles WHICH image this node will run, and makes it present.
+//
+// It returns nothing; the answer is s.runImage, read by createAndStart.
+//
+// TWO PATHS REACH THE SAME IMAGE, VERIFIED DIFFERENTLY.
+//
+//   - PULLED. The reference is digest-pinned, so the daemon verifies the
+//     manifest digest itself and nothing further is needed. This is the dev
+//     box, and any node whose baked tarball did not load.
+//
+//   - LOADED FROM THE OS-BAKED TARBALL. This is a Rasputin appliance forming
+//     its mesh on a first boot with no internet. Here the digest cannot be
+//     checked and the REFERENCE CANNOT EVEN BE RESOLVED: `docker save` of a
+//     digest-pinned reference writes a tarball whose RepoTags is null, and
+//     `docker load` records no RepoDigest in the classic image store because
+//     there was no registry pull to record one from. So the loaded image has
+//     no name at all -- `docker image inspect headscale/...@sha256:...` fails
+//     on a node that is holding exactly the right bytes.
+//
+//     What survives `docker save`/`docker load` is the image ID, the digest of
+//     the image config, and the OS build writes it beside the tarball at pull
+//     time, when the digest pin still held. So on such a node the image is
+//     both FOUND and PINNED by that ID: running it by ID is a stronger pin
+//     than any name, because a name is a local label anyone with the daemon
+//     can move and an ID is the content.
 func (s *DockerSupervisor) ensureImage(ctx context.Context) error {
+	path := bakedImageIDsPath()
+	if id, ok := readBakedImageID(path, s.cfg.Image); ok {
+		if _, err := s.runner(ctx, s.cfg.DockerBin, "image", "inspect", id); err == nil {
+			log.Printf("mesh supervisor: running the OS-baked image %s (%s, recorded in %s)",
+				id, s.cfg.Image, path)
+			s.runImage = id
+			return nil
+		}
+		// A record with no image behind it is the normal state on a node whose
+		// tarball did not load -- rasputin-mesh-images.service is ordering-only
+		// and a failed load does not block the api. Fall through to the pull,
+		// which is still digest-verified; say so, because "it silently went to
+		// the network" is exactly the failure the baked image exists to avoid
+		// and it should be visible in a boot log.
+		log.Printf("mesh supervisor: %s records image %s for %s, but no such image is loaded; falling back to a pull",
+			path, id, s.cfg.Image)
+	}
+
+	s.runImage = s.cfg.Image
 	if _, err := s.runner(ctx, s.cfg.DockerBin, "image", "inspect", s.cfg.Image); err == nil {
 		return nil
 	}
@@ -664,10 +739,17 @@ func (s *DockerSupervisor) createAndStart(ctx context.Context) error {
 		certsDir := filepath.Join(s.cfg.StateDir, "certs")
 		args = append(args, "-v", certsDir+":/etc/headscale-certs:ro")
 	}
-	args = append(args, s.cfg.Image, "serve")
+	// runImage, not cfg.Image: on an appliance the baked image has no resolvable
+	// name and is addressed by its ID. ensureImage settled which one applies and
+	// runs before every path that reaches here.
+	img := s.runImage
+	if img == "" {
+		return fmt.Errorf("mesh supervisor: createAndStart before ensureImage settled an image")
+	}
+	args = append(args, img, "serve")
 
 	log.Printf("mesh supervisor: creating container %q (image=%s listen=%s tls=%v)",
-		s.cfg.ContainerName, s.cfg.Image, s.cfg.ListenAddr, s.cfg.MeshCA != nil)
+		s.cfg.ContainerName, img, s.cfg.ListenAddr, s.cfg.MeshCA != nil)
 	if _, err := s.runner(ctx, s.cfg.DockerBin, args...); err != nil {
 		return fmt.Errorf("docker run %s: %w", s.cfg.ContainerName, err)
 	}
