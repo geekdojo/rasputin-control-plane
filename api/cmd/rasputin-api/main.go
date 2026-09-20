@@ -1370,13 +1370,30 @@ func main() {
 			}
 			return string(cert), string(key), string(meshCA.CertPEM), nil
 		}
-		runner.Register(obs.CollectorReconcileWorkflow(obs.CollectorReconcileDeps{
-			Inv: invStore, Jobs: jobStore, Runner: runner, Enabled: obsEnabled,
-		}))
-		runner.Register(obs.CollectorDeployWorkflow(obs.CollectorDeployDeps{
+		// The node-key shape: a collector presents the key its node
+		// registered and trusts the api by the bus certificate's exact bytes,
+		// asking for the name that certificate answers to. Empty when the bus
+		// key did not load, which keeps every node on the legacy mesh leaf.
+		collectorDeploy := obs.CollectorDeployDeps{
 			Inv: invStore, Mint: mintCollectorLeaf,
 			IngressBaseURL: ingressBaseURL, ServerName: ingressServerName,
+		}
+		if len(busCert.Certificate) > 0 {
+			// The PERSISTED certificate (geekdojo/geekdojo-brain#508), rendered
+			// by the package that writes the file, so the collector's ca_pem is
+			// byte-for-byte what the listener serves and what is on disk. Being
+			// persisted is what keeps a restart from changing it and putting
+			// every collector through a redeploy.
+			collectorDeploy.NodeKeyServerName = bustls.BusDNSName
+			collectorDeploy.BusCertPEM = string(bustls.EncodeCertPEM(busCert))
+		} else {
+			log.Printf("rasputin-api: obs collectors: no bus certificate — collectors stay on the mesh leaf")
+		}
+		runner.Register(obs.CollectorReconcileWorkflow(obs.CollectorReconcileDeps{
+			Inv: invStore, Jobs: jobStore, Runner: runner, Enabled: obsEnabled,
+			Deploy: collectorDeploy, MeshCAPEM: string(meshCA.CertPEM),
 		}))
+		runner.Register(obs.CollectorDeployWorkflow(collectorDeploy))
 		runner.Register(obs.CollectorTeardownWorkflow())
 		obsCollectorReconcileEvery := parseDurationOr(
 			os.Getenv("RASPUTIN_OBS_COLLECTOR_RECONCILE_INTERVAL"), 5*time.Minute)

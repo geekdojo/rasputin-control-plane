@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -166,5 +167,33 @@ func TestNodeKeysEqualAndClone(t *testing.T) {
 	}
 	if want := []NodeKeyPurpose{NodeKeyAgent, NodeKeyCollector}; !reflect.DeepEqual(keys.Purposes(), want) {
 		t.Errorf("Purposes = %v, want %v", keys.Purposes(), want)
+	}
+}
+
+// The api renders a node's collector compose from these two paths without
+// being able to ask that node where its files are, so their exact value is a
+// contract between the two sides rather than an implementation detail. The
+// agent pins its own derivation equal to them (agent/internal/nodekeys); this
+// is proto's half of that pin.
+func TestNodeKeyPaths(t *testing.T) {
+	for _, tc := range []struct {
+		purpose   NodeKeyPurpose
+		key, cert string
+	}{
+		{NodeKeyAgent, "/var/lib/rasputin/agent-state/keys/agent.key", "/var/lib/rasputin/agent-state/keys/agent.crt"},
+		{NodeKeyCollector, "/var/lib/rasputin/agent-state/keys/collector.key", "/var/lib/rasputin/agent-state/keys/collector.crt"},
+	} {
+		t.Run(string(tc.purpose), func(t *testing.T) {
+			if got := NodeKeyPath(tc.purpose); got != tc.key {
+				t.Errorf("NodeKeyPath = %q, want %q", got, tc.key)
+			}
+			if got := NodeCertPath(tc.purpose); got != tc.cert {
+				t.Errorf("NodeCertPath = %q, want %q", got, tc.cert)
+			}
+		})
+	}
+	// Both sit under the one state-dir constant, so a move is a single edit.
+	if !strings.HasPrefix(NodeKeyPath(NodeKeyAgent), NodeStateDir+"/") {
+		t.Errorf("NodeKeyPath is not under NodeStateDir (%q)", NodeStateDir)
 	}
 }

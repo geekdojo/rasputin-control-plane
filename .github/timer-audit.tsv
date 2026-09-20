@@ -68,3 +68,5 @@ L19	api/internal/inventory/service.go	offlineAfter	ttl	the time of this node's l
 L20	api/internal/nameserver/responder.go	recordTTL	retention	the answer a resolver may cache before asking again		A DNS cache bound published to clients. Decides no credential.
 L21	api/internal/nameserver/responder.go	negativeTTL	retention	how long a negative answer may be cached		Same as L20.
 L22	api/cmd/rasputin-api/main.go	clockGateTimeout	io-bound	bounds the single wait for the time-sync marker before the api mints its TLS leaf		Measured on the monotonic clock, so a jumping wall clock cannot shorten or extend it.
+L23	agent/internal/nodekeys/nodekeys.go	certNotAfter	ttl	the registered SPKI hash, which is dateless - the api compares the peer's key and reads nothing else about the certificate around it		1970 to 9999 deliberately, the same pair and the same reason as L11/L12 on the bus certificate. A node boots before NTP with no battery-backed clock, so a wrapper minted or checked at a bogus time must not decide whether it reaches its control plane.
+L24	agent/internal/nodekeys/nodekeys.go	certNotBefore	ttl	the registered SPKI hash, which is dateless		Same constant pair as L23.

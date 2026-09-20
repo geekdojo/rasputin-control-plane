@@ -48,7 +48,7 @@ func TestDecideCollectorActions_SkipsANodeThatIsNotAdmitted(t *testing.T) {
 		{ID: "n2", Role: proto.RoleCompute, LastSeen: now},
 	}
 	admitted := func(id string) bool { return id == "n1" }
-	act := decideCollectorActions(nodes, map[string]*nodeJobState{}, map[string]*nodeJobState{}, true, now, admitted)
+	act := decideCollectorActions(nodes, map[string]*nodeJobState{}, map[string]*nodeJobState{}, true, now, admitted, noWant)
 	if len(act.deploy) != 1 || act.deploy[0] != "n1" {
 		t.Errorf("deploy = %v, want [n1]", act.deploy)
 	}
