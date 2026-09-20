@@ -216,7 +216,10 @@ func TestHandleObsLogsIngest(t *testing.T) {
 
 		s := newIngestServer(t, obs.NewStatus(fakeVMSup{lokiBase: stubLoki.URL}, nil, nil), "c02")
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("payload"))
+		body := lokiPushBody(lokiStream(`{container="db"}`, "line"))
+		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		req.Header.Set("Content-Encoding", "snappy")
 		req.TLS = certState("c02")
 		s.handleObsLogsIngest(rec, req)
 
