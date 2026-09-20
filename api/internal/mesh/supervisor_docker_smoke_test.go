@@ -163,18 +163,20 @@ func TestSupervisor_LiveDockerLifecycle(t *testing.T) {
 			t.Fatalf("could not parse API key from CLI output:\n%s", raw)
 		}
 
-		// Trust pool that ONLY contains our Mesh CA — proves the chain
+		// Trust config that ONLY contains our Mesh CA — proves the chain
 		// works without falling back to system roots (which wouldn't
-		// trust a per-installation CA anyway).
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(ca.CertPEM) {
-			t.Fatal("failed to add mesh CA to trust pool")
+		// trust a per-installation CA anyway). Built by the one helper both
+		// backends use in main (CATLSConfig, geekdojo/geekdojo-brain#506),
+		// so this run exercises it against the real Headscale leaf.
+		tlsCfg, err := CATLSConfig(ca.CertPEM, "the Mesh CA")
+		if err != nil {
+			t.Fatalf("CATLSConfig: %v", err)
 		}
 		c, err := NewRealClient(RealClientConfig{
 			BaseURL:        "https://" + listenAddr,
 			APIKey:         apiKey,
 			RequestTimeout: 10 * time.Second,
-			TLSConfig:      &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+			TLSConfig:      tlsCfg,
 		})
 		if err != nil {
 			t.Fatalf("NewRealClient: %v", err)

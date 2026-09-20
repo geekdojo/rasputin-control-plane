@@ -5,8 +5,6 @@ package mesh
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"os"
 	"os/exec"
@@ -78,11 +76,15 @@ func TestSupervisor_LiveBindingsAndRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintSessionAPIKey: %v", err)
 	}
-	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(ca.CertPEM)
+	// The one helper main uses for both Headscale backends (#506), here
+	// against the real container's leaf.
+	tlsCfg, err := CATLSConfig(ca.CertPEM, "the Mesh CA")
+	if err != nil {
+		t.Fatalf("CATLSConfig: %v", err)
+	}
 	client, err := NewRealClient(RealClientConfig{BaseURL: "https://" + listenAddr, APIKey: key,
 		RefreshAPIKey: sup.MintSessionAPIKey, RequestTimeout: 10 * time.Second,
-		TLSConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}})
+		TLSConfig: tlsCfg})
 	if err != nil {
 		t.Fatalf("NewRealClient: %v", err)
 	}
