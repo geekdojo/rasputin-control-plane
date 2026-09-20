@@ -256,19 +256,14 @@ func updateDownload(store *Store, cfg Config) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
+		// parseSpec above has already refused an empty BundleSHA256, which is
+		// what keeps ExpectedSHA256 non-empty in the command built below —
+		// agents refuse one without it. TestUpdateDownload_EmptySHAIsRefused
+		// pins that, because the guarantee is now load-bearing at the far end
+		// of the bus rather than merely tidy.
 		bundle, err := store.GetBundle(sc.Ctx, spec.BundleSHA256)
 		if err != nil || bundle == nil {
 			return nil, fmt.Errorf("bundle missing at download time")
-		}
-		// The sha is the bundle's whole identity here — it names the row, the
-		// blob on disk and the path in the URL below — so an empty one means
-		// the saga is about to tell a node to fetch bytes and compare them to
-		// nothing. Agents now refuse such a command; the api refuses to send
-		// one, so the fault is reported against the update rather than against
-		// the node that declined it.
-		if spec.BundleSHA256 == "" {
-			return nil, fmt.Errorf("update spec carries no bundle sha256; refusing to send a download " +
-				"command with nothing for the node to verify the artifact against")
 		}
 		bundleURL := cfg.PublicBaseURL + "/api/bundles/" + spec.BundleSHA256
 		// Guardrail: a loopback bundle URL only reaches the api from its OWN
