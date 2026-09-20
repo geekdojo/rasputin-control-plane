@@ -144,6 +144,12 @@ func TestRewriteLokiPush(t *testing.T) {
 			wantLines:  [][]string{{"l"}},
 		},
 		{
+			name:       "a digit in a label name is fine after the first byte",
+			body:       lokiPushBody(lokiStream(`{container2="db"}`, "l")),
+			wantLabels: []string{`{container2="db", node_id="c02"}`},
+			wantLines:  [][]string{{"l"}},
+		},
+		{
 			name:       "an unreserved job label is left alone",
 			body:       lokiPushBody(lokiStream(`{job="varlogs", node_id="x"}`, "l")),
 			wantLabels: []string{`{job="varlogs", node_id="c02"}`},
@@ -254,6 +260,10 @@ func TestRewriteLokiPush_RefusesUnparseable(t *testing.T) {
 		{"invalid label name", lokiPushBody(lokiStream(`{1container="db"}`, "l"))},
 		{"trailing comma", lokiPushBody(lokiStream(`{container="db",}`, "l"))},
 		{"group wire type", s2.EncodeSnappy(nil, []byte{1<<3 | 3})},
+		// Every scalar wire type the walker must skip by width, truncated.
+		{"truncated fixed64", s2.EncodeSnappy(nil, []byte{1<<3 | 1, 1, 2, 3})},
+		{"truncated fixed32", s2.EncodeSnappy(nil, []byte{1<<3 | 5, 1})},
+		{"truncated varint", s2.EncodeSnappy(nil, []byte{1 << 3, 0x80})},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -350,6 +360,19 @@ func TestHandleObsLogsIngest_StampsNodeID(t *testing.T) {
 	if rec := push(make([]byte, maxLokiPushBytes+1), "application/x-protobuf", "snappy"); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized body: got %d, want 413", rec.Code)
 	}
+	// A body that cannot be read at all — a connection that dies mid-push —
+	// is refused, not forwarded half-read.
+	{
+		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", errReader{})
+		req.TLS = certState("c02")
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		req.Header.Set("Content-Encoding", "snappy")
+		rec := httptest.NewRecorder()
+		s.handleObsLogsIngest(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("unreadable body: got %d, want 400", rec.Code)
+		}
+	}
 	if n := lokiCalls.Load(); n != before {
 		t.Fatalf("Loki received %d refused pushes, want 0", n-before)
 	}
@@ -359,6 +382,12 @@ func TestHandleObsLogsIngest_StampsNodeID(t *testing.T) {
 // apart: the job label the CP's Alloy writes is exactly the one the ingress
 // refuses from a node.
 func TestIDSLogJobIsReserved(t *testing.T) {
+	// The literal is what supervisor.go's Alloy template writes on the
+	// controlplane's own IDS stream. Pinned here so a change to either side
+	// has to be a change to both.
+	if obs.IDSLogJob != "rasputin-ids" {
+		t.Errorf("IDSLogJob = %q, want rasputin-ids — the CP's Alloy config writes that literal", obs.IDSLogJob)
+	}
 	if !obs.IsReservedLogJob(obs.IDSLogJob) {
 		t.Fatalf("IsReservedLogJob(%q) = false", obs.IDSLogJob)
 	}
@@ -450,3 +479,8 @@ func FuzzRewriteLokiPush(f *testing.F) {
 		}
 	})
 }
+
+// errReader is a request body that fails on read.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
