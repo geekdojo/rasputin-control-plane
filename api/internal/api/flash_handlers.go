@@ -75,7 +75,15 @@ func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) 
 	osComp, _ := releases.ComponentByID("os")
 	desc, err := releases.PublicNodeImage(r.Context(), http.DefaultClient, s.updaterVerifier, base, osComp, version, compatible)
 	if err != nil {
-		log.Printf("cluster node-image (os %s, %s): %v", version, compatible, err)
+		// %q on the error, not %v: as of geekdojo/geekdojo-brain#527 this error
+		// can carry text derived from a REMOTE document (a release manifest's
+		// own version, a signing leaf's common name). Each of those is already
+		// escaped where the error is built, but an escape one level away is the
+		// kind of reasoning that rots — the next error added to that chain
+		// would silently undo it. Escaping here makes it true at the line that
+		// writes the log. This is still the #145 class (version and compatible
+		// are interpolated with %s); it is simply not widened by this change.
+		log.Printf("cluster node-image (os %s, %s): %q", version, compatible, err.Error())
 		status, msg := nodeImageError(err, version)
 		writeError(w, status, msg)
 		return
@@ -184,7 +192,8 @@ func (s *Server) handleClusterFirewallImage(w http.ResponseWriter, r *http.Reque
 	}
 	info, err := s.releaseSource.LatestFor(r.Context(), comp, channel)
 	if err != nil {
-		log.Printf("cluster firewall-image (%s): %v", channel, err)
+		// %q on the error, for the reason given in handleClusterNodeImage.
+		log.Printf("cluster firewall-image (%s): %q", channel, err.Error())
 		status, msg := nodeImageError(err, "the latest firewall release")
 		if status == http.StatusBadGateway {
 			msg = "couldn't resolve the latest firewall image"
