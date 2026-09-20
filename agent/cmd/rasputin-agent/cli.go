@@ -92,9 +92,12 @@ which both shipping unit files set:
   RASPUTIN_NODE_ID          this node's id
   RASPUTIN_NODE_ROLE        controlplane | compute | firewall
   RASPUTIN_NATS_URL         control-plane bus URL
-  RASPUTIN_CP_JOIN_TOKEN    bus join token
   RASPUTIN_CP_JOIN_TOKEN_FILE  file holding the bus join token, read on every
-                            connect (controlplane default: /var/lib/rasputin/bus/agent.token)
+                            connect. The canonical source on every role; it
+                            wins when both are set (controlplane default:
+                            /var/lib/rasputin/bus/agent.token)
+  RASPUTIN_CP_JOIN_TOKEN    bus join token, inline. Legacy: read only when no
+                            token file is named, for nodes on older images
   RASPUTIN_CLUSTER_ID       cluster name, used for <cluster-id>.local
   RASPUTIN_AGENT_STATE_DIR  agent state (updater bookkeeping)
   RASPUTIN_TRUST_ROOT       publisher root CA (see verify-artifact above)

@@ -120,9 +120,12 @@ func main() {
 	// per-node scoped credential, and harmless when the server has no auth
 	// enabled. Every node has one, the controlplane's own agent included — the
 	// bus trusts nothing for coming from loopback (geekdojo/geekdojo-brain#140).
-	// A seeded RASPUTIN_CP_JOIN_TOKEN (compute, firewall) is used as is; the
-	// controlplane reads the token its api mints into a file, again on every
-	// connect attempt. See bus.ResolveTokenSource for the order.
+	// RASPUTIN_CP_JOIN_TOKEN_FILE is the canonical source on every role: one
+	// 0600 file, re-read on every connect attempt, so a re-minted token
+	// reaches a running agent without a restart. A seeded
+	// RASPUTIN_CP_JOIN_TOKEN is the legacy inline form, still read when no
+	// file is named so a new agent on an older image keeps joining. See
+	// bus.ResolveTokenSource for the order.
 	joinToken, joinTokenFrom := bus.ResolveTokenSource(os.Getenv(bus.EnvJoinToken), os.Getenv(bus.EnvJoinTokenFile), role, proto.BusAgentTokenPath)
 	log.Printf("rasputin-agent: bus join token from %q", joinTokenFrom)
 	// Bus pin (geekdojo/geekdojo-brain#448): the SHA-256 of the controlplane's
