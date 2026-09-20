@@ -222,3 +222,132 @@ func TestParse_AcceptsAnOpenSSLECKey(t *testing.T) {
 		t.Error("a non-PEM blob was accepted")
 	}
 }
+
+// The self-signed wrapper: clientAuth EKU, 1970-9999, carrying the key beside
+// it, and owner-only like the key.
+func TestEnsure_WritesASelfSignedCertificatePerKey(t *testing.T) {
+	dir := t.TempDir()
+	keys, _, err := Ensure(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range proto.NodeKeyPurposes() {
+		path := CertPath(dir, p)
+		blob, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(blob)
+		if block == nil || block.Type != "CERTIFICATE" {
+			t.Fatalf("%s is not a PEM certificate", path)
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Self-signed: issuer is subject and the signature verifies under its
+		// own key. Not CheckSignatureFrom, which additionally demands the
+		// signer be a CA — this certificate deliberately is not one, because
+		// nothing chains to it.
+		if cert.Issuer.String() != cert.Subject.String() {
+			t.Errorf("%s issuer %q != subject %q", p, cert.Issuer, cert.Subject)
+		}
+		if err := cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature); err != nil {
+			t.Errorf("%s signature does not verify under its own key: %v", p, err)
+		}
+		if cert.IsCA {
+			t.Errorf("%s is marked as a CA", p)
+		}
+		if !reflect.DeepEqual(cert.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}) {
+			t.Errorf("%s EKU = %v, want clientAuth only", p, cert.ExtKeyUsage)
+		}
+		if !cert.NotBefore.Equal(certNotBefore) || !cert.NotAfter.Equal(certNotAfter) {
+			t.Errorf("%s dates = %s..%s, want 1970..9999", p, cert.NotBefore, cert.NotAfter)
+		}
+		// It wraps THIS key: the api admits by SPKI, so a certificate around
+		// another key would be an identity the node cannot present.
+		hash := proto.NodeKeySPKIHashForDER(cert.RawSubjectPublicKeyInfo)
+		if hash != keys.Hashes()[p] {
+			t.Errorf("%s certificate wraps %s, the key hashes to %s", p, hash, keys.Hashes()[p])
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Owner-only like everything else in the agent's state tree: it
+		// carries public bytes, but the only reader is the collector
+		// container, which runs as uid 0.
+		if got := fi.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s certificate mode %o, want 600", p, got)
+		}
+	}
+}
+
+// The certificate is stable across restarts — a new one every start would
+// churn the collector — but a certificate that wraps the WRONG key is
+// rewritten rather than served.
+func TestEnsure_CertificateIsStableAndSelfHealing(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := Ensure(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := CertPath(dir, proto.NodeKeyCollector)
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Ensure(dir); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.ReadFile(path)
+	if err != nil || string(again) != string(first) {
+		t.Fatalf("the certificate was rewritten on a second Ensure")
+	}
+
+	// A certificate for the OTHER key — what a restore from another node, or
+	// a half-written file, looks like.
+	other, err := os.ReadFile(CertPath(dir, proto.NodeKeyAgent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, other, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Ensure(dir); err != nil {
+		t.Fatal(err)
+	}
+	healed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(healed) == string(other) {
+		t.Error("a certificate wrapping the wrong key was left in place")
+	}
+	block, _ := pem.Decode(healed)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _, err := Ensure(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := proto.NodeKeySPKIHashForDER(cert.RawSubjectPublicKeyInfo); got != keys.Hashes()[proto.NodeKeyCollector] {
+		t.Errorf("the healed certificate wraps %s, want %s", got, keys.Hashes()[proto.NodeKeyCollector])
+	}
+}
+
+// The api renders a node's collector compose from proto's fixed convention,
+// without being able to ask that node where its files are. The agent derives
+// the same paths from its own state dir. Pinned here so the two cannot drift
+// apart and leave a collector bind-mounting nothing.
+func TestPathsAgreeWithTheProtoConvention(t *testing.T) {
+	for _, p := range proto.NodeKeyPurposes() {
+		if got, want := KeyPath(proto.NodeStateDir, p), proto.NodeKeyPath(p); got != want {
+			t.Errorf("%s key: agent says %q, proto says %q", p, got, want)
+		}
+		if got, want := CertPath(proto.NodeStateDir, p), proto.NodeCertPath(p); got != want {
+			t.Errorf("%s cert: agent says %q, proto says %q", p, got, want)
+		}
+	}
+}

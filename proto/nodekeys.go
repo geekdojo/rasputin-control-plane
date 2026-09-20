@@ -38,6 +38,29 @@ const (
 	NodeKeyCollector NodeKeyPurpose = "collector"
 )
 
+// NodeStateDir is where the agent keeps its state on a deployed Rasputin OS
+// node, and therefore where its keys and their certificates are. It is a fixed
+// convention, like BusAgentTokenPath and the collector's Docker data-root: the
+// api renders a node's collector compose without being able to ask that node
+// where its files are, so both sides derive the paths from this one constant.
+//
+// The firewall keeps its state under /etc/rasputin/agent-state instead, which
+// is fine here because the firewall never runs a collector (it has no Docker,
+// and the collector reconcile excludes its role).
+//
+// The agent itself never reads this: it derives its own paths from
+// RASPUTIN_AGENT_STATE_DIR, which on a deployed node IS this. The two
+// derivations are pinned equal by a test.
+const NodeStateDir = "/var/lib/rasputin/agent-state"
+
+// NodeKeyPath and NodeCertPath are where one purpose's private key and its
+// self-signed certificate live on a deployed node.
+//
+// The key is 0600 and the certificate 0644: the certificate is the public half
+// wrapped in bytes anyone may read, and only the key is a secret.
+func NodeKeyPath(p NodeKeyPurpose) string  { return NodeStateDir + "/keys/" + string(p) + ".key" }
+func NodeCertPath(p NodeKeyPurpose) string { return NodeStateDir + "/keys/" + string(p) + ".crt" }
+
 // NodeKeyPurposes is every purpose this release knows, in a stable order.
 // A report may carry purposes not in this list — a newer agent — and those
 // are ignored rather than refused, the same way an unknown metadata key is.
