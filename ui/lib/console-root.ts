@@ -3,7 +3,9 @@
 //
 // What it is (geekdojo/geekdojo-brain#587, decision #558): the password root
 // uses at a node's physical console or its serial-over-LAN session. No image
-// ships one. The operator chooses it in the first-run wizard; the api hashes
+// ships one, and root's console login is LOCKED until one is set — so this is
+// the out-of-band way in, not a hole being closed. The operator chooses it in
+// the first-run wizard (an optional step); the api hashes
 // it and a job applies the HASH to every node in inventory, the controlplane
 // included. Settings can change it and re-apply it at any time.
 //

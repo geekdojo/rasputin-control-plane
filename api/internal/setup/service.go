@@ -78,8 +78,8 @@ type Probes struct {
 	HasFirewallNode func(ctx context.Context) (bool, error)
 	// ConsoleRootSet reports whether the operator has chosen a console root
 	// password (geekdojo/geekdojo-brain#587, decision #558). Nothing is
-	// baked into an image, so until this is true every node's console takes
-	// whatever password its image shipped with. Wired to
+	// baked into an image, so until this is true root's console login is
+	// locked on every node. Wired to
 	// console.Store.CurrentHashID; nil (dev api without the store) leaves
 	// the step undone rather than pretending it is satisfied.
 	ConsoleRootSet func(ctx context.Context) (bool, error)
@@ -189,8 +189,8 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 			ID:       "console_root",
 			Title:    "Set the console root password",
 			Done:     consoleRootSet,
-			Required: true,
-			Detail:   "The password root uses at a node's physical console or serial-over-LAN. No image ships one, so until you choose it here each node keeps whatever its image was built with. Saving it applies it to every node in the cluster, and you can change it later in Settings.",
+			Required: false,
+			Detail:   "Root's console login is locked until you set a password here. Setting one gives you a way in at a node's physical console or serial-over-LAN when the mesh and LAN SSH are both unavailable. Saving it applies it to every node in the cluster, and you can change it later in Settings.",
 		},
 		{
 			ID:       "remote_access",

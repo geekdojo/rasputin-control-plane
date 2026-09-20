@@ -449,8 +449,11 @@ func TestService_GetState_HasUsersProbeErrorFailsClosed(t *testing.T) {
 
 // ============================================================================
 // The console root password step (geekdojo/geekdojo-brain#587, dec #558).
-// No image ships a console password, so the wizard has to ask for one — and
-// an installation that has not chosen one is NOT finished.
+// No image ships a console password AND root's console login is locked until
+// one is set, so a cluster that never sets one has no console password rather
+// than a default one. The wizard therefore OFFERS the step — it is the
+// out-of-band recovery path — but does not require it, and an installation
+// that skips it is still finished.
 // ============================================================================
 
 func TestService_GetState_ConsoleRootStep(t *testing.T) {
@@ -465,8 +468,8 @@ func TestService_GetState_ConsoleRootStep(t *testing.T) {
 	if st.Done {
 		t.Error("console_root reads as done with no password set")
 	}
-	if !st.Required {
-		t.Error("console_root should be required — dec #558 puts it beside the passkey step")
+	if st.Required {
+		t.Error("console_root should be optional — root's console login is locked until it is set, so skipping it leaves no password rather than a default one")
 	}
 
 	ps.consoleRootSet = true
@@ -476,9 +479,11 @@ func TestService_GetState_ConsoleRootStep(t *testing.T) {
 	}
 }
 
-// Without the console password the wizard cannot report itself finished,
-// even with everything else done and Finish clicked.
-func TestService_GetState_ConsoleRootGatesCompletion(t *testing.T) {
+// The console password does NOT gate completion: a cluster that skips the
+// step has root's console locked, which is a safe resting state, so forcing
+// it would make every such installation read "setup incomplete" over a risk
+// that does not exist. ConsoleRootSet still reports the truth either way.
+func TestService_GetState_ConsoleRootDoesNotGateCompletion(t *testing.T) {
 	ctx := context.Background()
 	ps := &probesState{hasUsers: true}
 	svc := buildService(t, ps, "self")
@@ -495,8 +500,8 @@ func TestService_GetState_ConsoleRootGatesCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Completed {
-		t.Error("the wizard reported itself complete with no console root password")
+	if !state.Completed {
+		t.Error("the wizard withheld completion over the optional console root step")
 	}
 	if state.ConsoleRootSet {
 		t.Error("ConsoleRootSet is true with no password set")
@@ -507,7 +512,7 @@ func TestService_GetState_ConsoleRootGatesCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !state.Completed || !state.ConsoleRootSet {
-		t.Errorf("state = %+v, want completed once the password is set", state)
+		t.Errorf("state = %+v, want completed and ConsoleRootSet once the password is set", state)
 	}
 }
 

@@ -8,8 +8,9 @@
 // geekdojo/geekdojo-brain#587 (decision #558). The copy has to say three
 // things plainly, because none of them is guessable:
 //
-//   1. No image ships a console password. Until this is set and applied,
-//      each node's console holds whatever its image was built with.
+//   1. No image ships a console password, and root's console login is
+//      LOCKED until this is set and applied. Setting one is what creates
+//      the out-of-band way in, not what closes a hole.
 //   2. Saving applies it to EVERY node, the controlplane included, and the
 //      job reports per node.
 //   3. A node that could not take it is reported as failed with a reason —
@@ -123,8 +124,9 @@ export function ConsoleRootPassword({
     <div style={{ maxWidth: 720 }}>
       {!compact && (
         <Hint style={{ marginBottom: 8 }}>
-          The password <Mono>root</Mono> uses at a node&apos;s physical console or its serial-over-LAN session.
-          No Rasputin image ships one, so until you set it here each node keeps whatever its image was built with.
+          <Mono>root</Mono>&apos;s console login is locked until you set a password here. Setting one gives you a
+          way in at a node&apos;s physical console or its serial-over-LAN session when the mesh and LAN SSH are
+          both unavailable.
         </Hint>
       )}
       <Hint style={{ marginBottom: 16 }}>
