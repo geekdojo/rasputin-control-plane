@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/clusterdns"
@@ -102,11 +103,34 @@ func main() {
 	// a bad location fails loudly here — on a read-only rootfs with cwd=/
 	// the relative dev default fails with EROFS, which used to surface as
 	// a confusing mkdir error from whichever backend touched it first.
+	// 0700, and an existing install's 0755 is tightened here on every start:
+	// this tree holds the node's bus token and pin, its TLS leaf keys, the
+	// BMC selection and every app's compose file, and the agent is the only
+	// thing that reads any of it. Files inside get their modes from
+	// agent/internal/atrest at each write; the two files another daemon reads
+	// (the systemd-resolved drop-in, the dnsmasq hosts file) are written
+	// outside this tree and are 0644 by design.
 	stateDir := agentStateDir(nodeID)
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(stateDir); err != nil {
 		log.Fatalf("rasputin-agent: create state dir %s: %v (set RASPUTIN_AGENT_STATE_DIR to a writable absolute path)", stateDir, err)
 	}
 	log.Printf("rasputin-agent: state dir %s", stateDir)
+
+	// The mesh CA bundle's directory sits OUTSIDE the state tree (it is
+	// per-image: /var/lib/rasputin/mesh on Rasputin OS, /etc/rasputin/... on
+	// the firewall), and on a controlplane it is the same directory the api
+	// keeps its mesh state in. An older agent created it 0755, and the code
+	// that writes into it (tailscale.installMeshCA) only runs when the CA
+	// changes — so a node already holding the right CA would keep the wide
+	// directory forever. Tighten it here instead
+	// (geekdojo/geekdojo-brain#144). Not fatal: an image with a read-only
+	// path here still runs, and the enroll that needs the directory reports
+	// its own error.
+	if meshDir := filepath.Dir(tailscale.CABundlePath()); meshDir != "" {
+		if err := atrest.EnsureSecretDir(meshDir); err != nil {
+			log.Printf("rasputin-agent: mesh CA directory %s: %v", meshDir, err)
+		}
+	}
 
 	// Update-path fault injection (updater/fault.go). Resolved once, here.
 	// updater.Arm cannot fail and cannot exit — an unrecognised value, or any

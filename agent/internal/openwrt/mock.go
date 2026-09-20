@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -35,13 +36,21 @@ type MockClient struct {
 // NewMockClient creates a MockClient rooted at dir. dir is created if it
 // doesn't exist.
 func NewMockClient(dir string) (*MockClient, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(dir); err != nil {
 		return nil, fmt.Errorf("openwrt-mock: mkdir %s: %w", dir, err)
 	}
-	return &MockClient{
+	c := &MockClient{
 		dir:       dir,
 		statePath: filepath.Join(dir, "firewall.json"),
-	}, nil
+	}
+	// An existing install's file was written 0644 by an older agent and is
+	// not rewritten until something changes it. Tighten it at start.
+	for _, p := range []string{c.statePath, filepath.Join(dir, "active")} {
+		if err := atrest.TightenIfExists(p); err != nil {
+			return nil, fmt.Errorf("openwrt-mock: %w", err)
+		}
+	}
+	return c, nil
 }
 
 // Apply writes state to disk and returns its hash.
@@ -56,12 +65,10 @@ func (c *MockClient) Apply(ctx context.Context, state map[string]any) (string, e
 		return "", fmt.Errorf("openwrt-mock: marshal: %w", err)
 	}
 	// Atomic write — temp file + rename so a partial write can't be observed.
-	tmp := c.statePath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return "", fmt.Errorf("openwrt-mock: write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, c.statePath); err != nil {
-		return "", fmt.Errorf("openwrt-mock: rename: %w", err)
+	// 0600: the firewall state the api pushes carries the WAN credentials
+	// (the PPPoE username and password) when the owner has set them.
+	if err := atrest.WriteSecretFile(c.statePath, b); err != nil {
+		return "", fmt.Errorf("openwrt-mock: write %s: %w", c.statePath, err)
 	}
 	return hashState(state)
 }
@@ -77,7 +84,7 @@ func (c *MockClient) SetActive(ctx context.Context, active bool) error {
 	if active {
 		v = []byte("1")
 	}
-	if err := os.WriteFile(filepath.Join(c.dir, "active"), v, 0o644); err != nil {
+	if err := atrest.WriteSecretFile(filepath.Join(c.dir, "active"), v); err != nil {
 		return fmt.Errorf("openwrt-mock: write active: %w", err)
 	}
 	return nil

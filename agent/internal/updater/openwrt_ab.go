@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -80,7 +81,7 @@ type OpenWrtABBackend struct {
 // not probe the environment — the agent selects it by role (firewall) + the
 // absence of rauc; see autodetectUpdaterBackend / main.go.
 func NewOpenWrtABBackend(stateDir string) (*OpenWrtABBackend, error) {
-	if err := os.MkdirAll(filepath.Join(stateDir, "bundles"), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(filepath.Join(stateDir, "bundles")); err != nil {
 		return nil, err
 	}
 	b := &OpenWrtABBackend{

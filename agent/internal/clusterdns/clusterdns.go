@@ -138,6 +138,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -386,25 +387,25 @@ func Apply(ctx context.Context, cfg Config, trigger string) (changed bool, err e
 		return false, nil
 	}
 
-	// 0755/0644, not 0600/0700, and gosec is overruled on both (G301, G306 in
-	// .github/sast-register.tsv). systemd-resolved runs unprivileged and reads
-	// drop-ins after dropping privileges: at 0600/0700 it SILENTLY ignores this
-	// file — no error, no log, the routing domains simply never appear and the
-	// cluster name falls back to mDNS, which is the exact failure this package
-	// exists to prevent. Verified on the bench 2026-08-29. The contents are a
-	// cluster id and a LAN address; there is no secret here to protect.
-	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
+	// 0755/0644, not the 0700/0600 the rest of the agent's files get, and
+	// gosec is overruled on both (G301, G306 in .github/sast-register.tsv).
+	// systemd-resolved runs unprivileged and reads drop-ins after dropping
+	// privileges: at 0600/0700 it SILENTLY ignores this file — no error, no
+	// log, the routing domains simply never appear and the cluster name falls
+	// back to mDNS, which is the exact failure this package exists to prevent.
+	// Verified on the bench 2026-08-29. The contents are a cluster id and a
+	// LAN address; there is no secret here to protect.
+	//
+	// Both modes are SET, not inherited: atrest fchmods the file and chmods
+	// the directory, so neither a tight umask nor a directory some earlier
+	// tool left at 0700 can take the drop-in away silently.
+	if err := atrest.EnsurePublicDir(cfg.Dir); err != nil {
 		return false, fmt.Errorf("clusterdns: mkdir %s: %w", cfg.Dir, err)
 	}
 	// Write-then-rename so systemd-resolved never reads a half-written file if
 	// it happens to be reloading for an unrelated reason.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(want), 0o644); err != nil {
-		return false, fmt.Errorf("clusterdns: write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return false, fmt.Errorf("clusterdns: rename %s: %w", path, err)
+	if err := atrest.WritePublicFile(path, []byte(want)); err != nil {
+		return false, fmt.Errorf("clusterdns: write %s: %w", path, err)
 	}
 	if err := cfg.reload(ctx); err != nil {
 		// The file is written; a failed reload means it takes effect at the

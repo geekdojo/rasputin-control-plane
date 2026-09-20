@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -119,7 +120,7 @@ func (c *ComposeBackend) saveRecord(appID string, rec *volumeRecord) error {
 		}
 		return nil
 	}
-	if err := os.MkdirAll(c.appDir(appID), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(c.appDir(appID)); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 	sort.Slice(rec.Anonymous, func(i, j int) bool { return rec.Anonymous[i].Name < rec.Anonymous[j].Name })
@@ -127,11 +128,11 @@ func (c *ComposeBackend) saveRecord(appID string, rec *volumeRecord) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return fmt.Errorf("write volume record: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	// 0600 in the app's 0700 directory, like everything else the agent writes
+	// there. The record holds docker volume ids and container mount paths —
+	// no credential — but it lives beside the app's compose, and one rule for
+	// the whole directory is what makes the rule checkable.
+	if err := atrest.WriteSecretFile(path, b); err != nil {
 		return fmt.Errorf("write volume record: %w", err)
 	}
 	return nil

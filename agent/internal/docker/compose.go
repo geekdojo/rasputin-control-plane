@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -21,6 +22,14 @@ import (
 // State files live at <dir>/<appID>/docker-compose.yml; the compose project
 // name is rasp_<appID> so projects don't collide with any other compose
 // stacks the user is running.
+//
+// Everything under <dir> is owner-only (0700 directories, 0600 files, through
+// agent/internal/atrest). A compose file is not public text: the api renders
+// the observability collector's compose with that node's mesh-CA leaf KEY
+// inline (api/internal/obs), and an owner's custom compose or a catalog tile's
+// environment can carry credentials of its own. Only the docker CLI this
+// backend runs — as the agent's own uid — ever reads these files; the
+// containers get their content from the daemon, not from the file.
 type ComposeBackend struct {
 	mu  sync.Mutex
 	dir string
@@ -36,13 +45,55 @@ type ComposeBackend struct {
 // and DISABLES the subsystem if it isn't there — it does not fall back to the
 // mock; see agent/internal/configfault).
 func NewComposeBackend(dir string) (*ComposeBackend, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(dir); err != nil {
 		return nil, fmt.Errorf("docker-compose: mkdir: %w", err)
 	}
+	// An install made by an older agent has its app directories at 0755 and
+	// its compose files at 0644, and nothing rewrites them until the app is
+	// deployed again. Bring them to the rule here, at every start.
+	TightenAppState(dir)
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil, fmt.Errorf("docker-compose: docker CLI not found: %w", err)
 	}
 	return &ComposeBackend{dir: dir}, nil
+}
+
+// TightenAppState brings the app state an older agent left in dir to the
+// at-rest rule: every app directory 0700, every file in one 0600. Contents are
+// not read or rewritten.
+//
+// It is best effort by design, and per app. A directory that cannot be
+// tightened is logged and skipped rather than failing the constructor,
+// because the alternative is worse: refusing to construct the backend
+// disables the node's whole app subsystem (agent/internal/configfault), so one
+// unreadable leftover directory would stop every app on the node from being
+// deployed, stopped or reported. The next Deploy tightens that app's own
+// directory anyway, and the state root above it is already 0700 by then.
+func TightenAppState(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("rasputin-agent: docker: cannot list %s to tighten app state: %v", dir, err)
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		appDir := filepath.Join(dir, e.Name())
+		if err := atrest.EnsureSecretDir(appDir); err != nil {
+			log.Printf("rasputin-agent: docker: %v", err)
+			continue
+		}
+		// Only the files the agent itself writes. A compose file's relative
+		// paths resolve against this directory, so a tile may have a bind
+		// mount rooted here; that content belongs to the container, which may
+		// run as a uid that is not ours, and chmodding it would break the app.
+		for _, name := range agentWrittenFiles {
+			if err := atrest.TightenIfExists(filepath.Join(appDir, name)); err != nil {
+				log.Printf("rasputin-agent: docker: %v", err)
+			}
+		}
+	}
 }
 
 func (c *ComposeBackend) Name() string { return "docker" }
@@ -52,8 +103,18 @@ func (c *ComposeBackend) appDir(appID string) string {
 }
 
 func (c *ComposeBackend) composePath(appID string) string {
-	return filepath.Join(c.appDir(appID), "docker-compose.yml")
+	return filepath.Join(c.appDir(appID), composeFileName)
 }
+
+// composeFileName is the one name an app's live compose is written under.
+const composeFileName = "docker-compose.yml"
+
+// agentWrittenFiles are the files in an app's state directory that this agent
+// writes, and therefore the only ones TightenAppState touches. Anything else
+// in the directory arrived through a tile's own bind mount.
+// The mock backend's state.json is here too: TightenAppState serves both
+// backends, and a dev box that switches between them keeps one state tree.
+var agentWrittenFiles = []string{composeFileName, volumeRecordFile, mockStateFileName}
 
 // projectName is what `docker compose -p` sees. Prefixed so we can identify
 // (and clean up) Rasputin-managed projects. App IDs are ULIDs so they're
@@ -69,7 +130,7 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 		err := fmt.Errorf("refusing app id %q: not a single path element", appID)
 		return proto.AppStatusFailed, err.Error(), err
 	}
-	if err := os.MkdirAll(c.appDir(appID), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(c.appDir(appID)); err != nil {
 		return proto.AppStatusFailed, "mkdir: " + err.Error(), err
 	}
 	// Record the anonymous volumes of the containers `up` may be about to
@@ -77,7 +138,7 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 	// that drops a service takes the only container that named its anonymous
 	// volume with it, and an app an older agent deployed has no record yet.
 	c.recordVolumesOrLog(ctx, appID, "docker.deploy")
-	if err := os.WriteFile(c.composePath(appID), []byte(composeYAML), 0o644); err != nil {
+	if err := c.writeCompose(appID, composeYAML); err != nil {
 		return proto.AppStatusFailed, "write compose: " + err.Error(), err
 	}
 
@@ -101,6 +162,17 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 		return status, deployDetail(status, services), nil
 	}
 	return status, "", nil
+}
+
+// writeCompose puts appID's live compose on disk at the at-rest rule: the
+// app's own directory 0700, the file 0600 (see the type comment for why a
+// compose is not public text). Atomic, so a `docker compose` running against
+// the app never reads a half-written file.
+func (c *ComposeBackend) writeCompose(appID, composeYAML string) error {
+	if err := atrest.EnsureSecretDir(c.appDir(appID)); err != nil {
+		return err
+	}
+	return atrest.WriteSecretFile(c.composePath(appID), []byte(composeYAML))
 }
 
 // stagedPullPattern names the throwaway compose file Pull hands `compose pull`.
@@ -157,7 +229,7 @@ func (c *ComposeBackend) stageCompose(appID, pattern, composeYAML string) (strin
 	if !safeAppID(appID) {
 		return "", nil, fmt.Errorf("refusing app id %q: not a single path element", appID)
 	}
-	if err := os.MkdirAll(c.appDir(appID), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(c.appDir(appID)); err != nil {
 		return "", nil, fmt.Errorf("mkdir: %w", err)
 	}
 	staged, err := os.CreateTemp(c.appDir(appID), pattern)
@@ -165,6 +237,15 @@ func (c *ComposeBackend) stageCompose(appID, pattern, composeYAML string) (strin
 		return "", nil, fmt.Errorf("stage compose: %w", err)
 	}
 	cleanup := func() { _ = os.Remove(staged.Name()) }
+	// os.CreateTemp asks for 0600, but the umask can only REMOVE bits, so the
+	// mode is set here too — for the same reason every other write in this
+	// tree does it, and so a staged copy of a compose carrying a key is never
+	// wider than the compose itself.
+	if err := staged.Chmod(atrest.SecretFileMode); err != nil {
+		_ = staged.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("stage compose: %w", err)
+	}
 	if _, err := staged.WriteString(composeYAML); err != nil {
 		_ = staged.Close()
 		cleanup()

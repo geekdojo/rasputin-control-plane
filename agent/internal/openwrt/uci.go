@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -101,16 +102,22 @@ func NewRealClient(dir string) (*UCIRealClient, error) {
 // newRealClient uses the production observer of the running dnsmasq; tests
 // replace the dnsmasq field.
 func newRealClient(dir string, runner CmdRunner) (*UCIRealClient, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(dir); err != nil {
 		return nil, fmt.Errorf("openwrt-uci: mkdir %s: %w", dir, err)
 	}
-	return &UCIRealClient{
+	c := &UCIRealClient{
 		runner:       runner,
 		dnsmasq:      realDnsmasq{server: dnsmasqListen},
 		manifestPath: filepath.Join(dir, "managed.json"),
 		logTimeout:   dnsmasqLogTimeout,
 		probeTimeout: dnsmasqProbeTimeout,
-	}, nil
+	}
+	// An existing install's file was written 0644 by an older agent and is
+	// not rewritten until something changes it. Tighten it at start.
+	if err := atrest.TightenIfExists(c.manifestPath); err != nil {
+		return nil, fmt.Errorf("openwrt-uci: %w", err)
+	}
+	return c, nil
 }
 
 // managedManifest is the tiny local record of what Rasputin manages on
@@ -634,12 +641,8 @@ func (c *UCIRealClient) saveManifest(m managedManifest) error {
 	if err != nil {
 		return fmt.Errorf("openwrt-uci: marshal manifest: %w", err)
 	}
-	tmp := c.manifestPath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return fmt.Errorf("openwrt-uci: write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, c.manifestPath); err != nil {
-		return fmt.Errorf("openwrt-uci: rename manifest: %w", err)
+	if err := atrest.WriteSecretFile(c.manifestPath, b); err != nil {
+		return fmt.Errorf("openwrt-uci: write %s: %w", c.manifestPath, err)
 	}
 	return nil
 }

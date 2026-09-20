@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 )
 
 // RouteMeta is the per-app routing info the control plane delivers with the leaf
@@ -46,10 +48,14 @@ func (s *LeafStore) CertPath(appID string) string { return filepath.Join(s.appDi
 func (s *LeafStore) KeyPath(appID string) string  { return filepath.Join(s.appDir(appID), "leaf.key") }
 func (s *LeafStore) metaPath(appID string) string { return filepath.Join(s.appDir(appID), "meta.json") }
 
-// Write stores appID's leaf (cert 0644, key 0600) and route metadata, each
-// written atomically (temp + rename). Caddy reads the pair on config (re)load,
-// not via a filewatcher, so an atomic rename is safe here (unlike the Headscale
-// extra_records file).
+// Write stores appID's leaf and route metadata, each written atomically (temp
+// + rename). Caddy reads the pair on config (re)load, not via a filewatcher,
+// so an atomic rename is safe here (unlike the Headscale extra_records file).
+//
+// The app's directory is 0700 and the key and route metadata in it are 0600;
+// the certificate is 0644, set explicitly, because a certificate is public by
+// construction. Caddy runs as this process's own uid (see RunCaddy and
+// PrepareAdminDir), so nothing here needs to be readable by another user.
 func (s *LeafStore) Write(appID string, certPEM, keyPEM []byte, meta RouteMeta) error {
 	if appID == "" {
 		return fmt.Errorf("proxy: leaf write: empty appID")
@@ -60,17 +66,20 @@ func (s *LeafStore) Write(appID string, certPEM, keyPEM []byte, meta RouteMeta) 
 	if meta.TailnetFQDN == "" || meta.UpstreamPort == 0 {
 		return fmt.Errorf("proxy: leaf write %s: tailnet FQDN and upstream port required", appID)
 	}
-	if err := os.MkdirAll(s.appDir(appID), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(s.appDir(appID)); err != nil {
 		return fmt.Errorf("proxy: leaf dir: %w", err)
 	}
-	if err := writeFileAtomic(s.CertPath(appID), certPEM, 0o644); err != nil {
-		return err
+	if err := atrest.WritePublicFile(s.CertPath(appID), certPEM); err != nil {
+		return fmt.Errorf("proxy: write %s: %w", s.CertPath(appID), err)
 	}
-	if err := writeFileAtomic(s.KeyPath(appID), keyPEM, 0o600); err != nil {
-		return err
+	if err := atrest.WriteSecretFile(s.KeyPath(appID), keyPEM); err != nil {
+		return fmt.Errorf("proxy: write %s: %w", s.KeyPath(appID), err)
 	}
 	metaJSON, _ := json.Marshal(meta)
-	return writeFileAtomic(s.metaPath(appID), metaJSON, 0o644)
+	if err := atrest.WriteSecretFile(s.metaPath(appID), metaJSON); err != nil {
+		return fmt.Errorf("proxy: write %s: %w", s.metaPath(appID), err)
+	}
+	return nil
 }
 
 // Routes assembles an AppRoute for every app with a stored leaf + metadata,
@@ -118,15 +127,4 @@ func (s *LeafStore) Remove(appID string) error {
 		return fmt.Errorf("proxy: leaf remove: empty appID")
 	}
 	return os.RemoveAll(s.appDir(appID))
-}
-
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return fmt.Errorf("proxy: write %s: %w", path, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("proxy: rename %s: %w", path, err)
-	}
-	return nil
 }

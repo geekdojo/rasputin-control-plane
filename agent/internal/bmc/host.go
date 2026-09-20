@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -65,10 +66,15 @@ type Advertisement struct {
 // fails logs and comes up off (the api re-pushes on registration, and a
 // hardware fault shouldn't crash-loop the whole agent).
 func NewHost(nodeID, stateDir, envKind string, envCfg Config) (*Host, error) {
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(stateDir); err != nil {
 		return nil, fmt.Errorf("bmc host: mkdir %s: %w", stateDir, err)
 	}
 	host := &Host{nodeID: nodeID, stateDir: stateDir}
+	// An existing install's file was written 0644 by an older agent and is
+	// not rewritten until something changes it. Tighten it at start.
+	if err := atrest.TightenIfExists(filepath.Join(stateDir, hostConfigFile)); err != nil {
+		return nil, fmt.Errorf("bmc host: %w", err)
+	}
 
 	if envKind != "" && envKind != BackendNone {
 		b, err := New(envKind, envCfg)
@@ -341,11 +347,8 @@ func persistSelection(stateDir string, cmd proto.BMCConfigureCmd) error {
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(stateDir, hostConfigFile+".tmp")
-	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(stateDir, hostConfigFile))
+	// The pushed BMC selection carries the operator's BMC credentials.
+	return atrest.WriteSecretFile(filepath.Join(stateDir, hostConfigFile), buf)
 }
 
 func clearPersistedSelection(stateDir string) error {

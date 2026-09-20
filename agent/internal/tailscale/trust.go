@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -69,15 +70,19 @@ func installMeshCA(caPEM []byte, path string) (changed bool, err error) {
 	if existing, e := os.ReadFile(path); e == nil && bytes.Equal(existing, want) {
 		return false, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// 0700, tightening an existing install's 0755 (geekdojo/geekdojo-brain#144).
+	// On a controlplane this is the same /var/lib/rasputin/mesh the api keeps
+	// its mesh state in — pre-auth keys among it — and the agent created it
+	// world-listable. Everything that reads what is in here (tailscaled via
+	// SSL_CERT_FILE, the agent's own updater client, the api) runs as root.
+	if err := atrest.EnsureSecretDir(filepath.Dir(path)); err != nil {
 		return false, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, want, 0o644); err != nil {
-		return false, fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return false, fmt.Errorf("rename %s: %w", path, err)
+	// 0644, set explicitly: a CA certificate is public by construction, it is
+	// what every node is told to trust, and the mode is stated here rather
+	// than left to the umask so it cannot drift either way.
+	if err := atrest.WritePublicFile(path, want); err != nil {
+		return false, fmt.Errorf("write %s: %w", path, err)
 	}
 	return true, nil
 }
