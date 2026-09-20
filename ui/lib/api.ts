@@ -1163,6 +1163,60 @@ export function setOperatorKey(key: string): Promise<OperatorKey> {
   });
 }
 
+// ----- Console root password (geekdojo/geekdojo-brain#587, dec #558) ------
+//
+// The password root uses at a node's console. Nothing here ever carries the
+// password or its hash: `hashId` NAMES the stored password so the UI can say
+// which one a node holds, and that is all the api will hand out.
+
+// One node's delivery record.
+export type ConsoleRootNode = {
+  nodeId: string;
+  status: 'applied' | 'pending' | 'failed';
+  // The password this node holds, by id; '' when it holds none we know of.
+  hashId?: string;
+  detail?: string;
+  jobId?: string;
+  updatedAt: string;
+  // Whether hashId is the password currently stored.
+  current: boolean;
+};
+
+export type ConsoleRootStatus = {
+  set: boolean;
+  hashId?: string;
+  setAt?: string;
+  nodes: ConsoleRootNode[];
+};
+
+export type ConsoleRootSaved = {
+  hashId: string;
+  // The push job applying it, when one was submitted.
+  jobId?: string;
+  // Set when the password was saved but the push could not start. The
+  // password IS saved — offer the re-apply action, don't ask for a retype.
+  pushError?: string;
+};
+
+export function getConsoleRootPassword(): Promise<ConsoleRootStatus> {
+  return jsonFetch<ConsoleRootStatus>('/api/console/root-password');
+}
+
+// Stores the password (hashed api-side) and, unless push is false, submits
+// the job that applies it to every node.
+export function setConsoleRootPassword(password: string, push = true): Promise<ConsoleRootSaved> {
+  return jsonFetch<ConsoleRootSaved>('/api/console/root-password', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password, push }),
+  });
+}
+
+// Re-applies the stored password to every node. Re-runnable.
+export function pushConsoleRootPassword(): Promise<ConsoleRootSaved> {
+  return jsonFetch<ConsoleRootSaved>('/api/console/root-password/push', { method: 'POST' });
+}
+
 export function completeSetup(): Promise<SetupState> {
   return jsonFetch<SetupState>('/api/setup/complete', { method: 'POST' });
 }

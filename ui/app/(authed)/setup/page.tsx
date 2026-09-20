@@ -8,6 +8,7 @@ import type { DeploymentMode, SetupState, SetupStep } from '../../../lib/types';
 import { Badge, Btn, DIM, FG, HAIR, Input, PageBody, PageHeader, PageShell, PANEL } from '../../../components/kit';
 import { ACCENT, MONO } from '../../../components/ui-theme';
 import { DeploymentModePicker } from '../../../components/DeploymentModePicker';
+import { ConsoleRootPassword } from '../../../components/ConsoleRootPassword';
 
 export default function SetupPage() {
   const router = useRouter();
@@ -131,6 +132,7 @@ export default function SetupPage() {
                   onSaveName={handleSaveName}
                   onEnroll={handleEnroll}
                   onSetMode={handleSetMode}
+                  onRefresh={refresh}
                 />
               ))}
             </ol>
@@ -166,6 +168,7 @@ function StepCard({
   onSaveName,
   onEnroll,
   onSetMode,
+  onRefresh,
 }: {
   step: SetupStep;
   state: SetupState;
@@ -173,6 +176,7 @@ function StepCard({
   onSaveName: (name: string) => void;
   onEnroll: () => void;
   onSetMode: (mode: DeploymentMode) => void;
+  onRefresh: () => void;
 }) {
   return (
     <li
@@ -195,7 +199,15 @@ function StepCard({
         )}
       </div>
       {step.detail && <p style={{ color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{step.detail}</p>}
-      <StepBody step={step} state={state} busy={busy} onSaveName={onSaveName} onEnroll={onEnroll} onSetMode={onSetMode} />
+      <StepBody
+        step={step}
+        state={state}
+        busy={busy}
+        onSaveName={onSaveName}
+        onEnroll={onEnroll}
+        onSetMode={onSetMode}
+        onRefresh={onRefresh}
+      />
     </li>
   );
 }
@@ -217,6 +229,7 @@ function StepBody({
   onSaveName,
   onEnroll,
   onSetMode,
+  onRefresh,
 }: {
   step: SetupStep;
   state: SetupState;
@@ -224,6 +237,7 @@ function StepBody({
   onSaveName: (name: string) => void;
   onEnroll: () => void;
   onSetMode: (mode: DeploymentMode) => void;
+  onRefresh: () => void;
 }) {
   switch (step.id) {
     case 'passkey':
@@ -238,6 +252,11 @@ function StepBody({
       return <InstallNameForm state={state} busy={busy} onSave={onSaveName} />;
     case 'deployment_mode':
       return <DeploymentModeStep state={state} busy={busy} onSetMode={onSetMode} />;
+    case 'console_root':
+      // The card above already carries the step's own copy, so the shared
+      // surface renders compact. Saving re-derives the wizard state, which
+      // is what ticks this step.
+      return <ConsoleRootPassword compact onSaved={onRefresh} />;
     case 'remote_access':
       return state.selfNodeId === '' ? (
         <Hint warn>

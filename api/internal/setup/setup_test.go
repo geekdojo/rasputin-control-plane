@@ -120,8 +120,10 @@ type probesState struct {
 	trustConfigured bool
 	meshEnrolled    bool
 	hasFirewallNode bool
+	consoleRootSet  bool
 	hasUsersErr     error
 	meshErr         error
+	consoleErr      error
 }
 
 func buildService(t *testing.T, ps *probesState, selfNodeID string) *Service {
@@ -137,6 +139,9 @@ func buildService(t *testing.T, ps *probesState, selfNodeID string) *Service {
 		},
 		HasFirewallNode: func(ctx context.Context) (bool, error) {
 			return ps.hasFirewallNode, nil
+		},
+		ConsoleRootSet: func(ctx context.Context) (bool, error) {
+			return ps.consoleRootSet, ps.consoleErr
 		},
 	}
 	return NewService(store, probes, selfNodeID, "test1.local", "test1")
@@ -206,7 +211,7 @@ func TestService_GetState_StepDoneFlagsTrackProbes(t *testing.T) {
 
 func TestService_GetState_CompletedOnlyAfterMarkCompleted(t *testing.T) {
 	ctx := context.Background()
-	ps := &probesState{hasUsers: true}
+	ps := &probesState{hasUsers: true, consoleRootSet: true}
 	svc := buildService(t, ps, "self")
 	if err := svc.SetInstallName(ctx, "X"); err != nil {
 		t.Fatalf("SetInstallName: %v", err)
@@ -440,4 +445,87 @@ func TestService_GetState_HasUsersProbeErrorFailsClosed(t *testing.T) {
 	if state != nil {
 		t.Fatal("GetState returned a state alongside the error")
 	}
+}
+
+// ============================================================================
+// The console root password step (geekdojo/geekdojo-brain#587, dec #558).
+// No image ships a console password, so the wizard has to ask for one — and
+// an installation that has not chosen one is NOT finished.
+// ============================================================================
+
+func TestService_GetState_ConsoleRootStep(t *testing.T) {
+	ctx := context.Background()
+	ps := &probesState{hasUsers: true}
+	svc := buildService(t, ps, "self")
+
+	st, ok := findStep(mustSteps(t, svc, ctx), "console_root")
+	if !ok {
+		t.Fatal("the wizard has no console_root step")
+	}
+	if st.Done {
+		t.Error("console_root reads as done with no password set")
+	}
+	if !st.Required {
+		t.Error("console_root should be required — dec #558 puts it beside the passkey step")
+	}
+
+	ps.consoleRootSet = true
+	st, _ = findStep(mustSteps(t, svc, ctx), "console_root")
+	if !st.Done {
+		t.Error("console_root should be done once a password is set")
+	}
+}
+
+// Without the console password the wizard cannot report itself finished,
+// even with everything else done and Finish clicked.
+func TestService_GetState_ConsoleRootGatesCompletion(t *testing.T) {
+	ctx := context.Background()
+	ps := &probesState{hasUsers: true}
+	svc := buildService(t, ps, "self")
+	if err := svc.SetInstallName(ctx, "X"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetMode(ctx, string(ModeLANPeer)); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.MarkCompleted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, err := svc.GetState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Completed {
+		t.Error("the wizard reported itself complete with no console root password")
+	}
+	if state.ConsoleRootSet {
+		t.Error("ConsoleRootSet is true with no password set")
+	}
+	ps.consoleRootSet = true
+	state, err = svc.GetState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Completed || !state.ConsoleRootSet {
+		t.Errorf("state = %+v, want completed once the password is set", state)
+	}
+}
+
+// Fail-closed like HasUsers: a probe error must not render an installation
+// with no console password as one that has set it.
+func TestService_GetState_ConsoleRootProbeErrorFailsClosed(t *testing.T) {
+	ps := &probesState{hasUsers: true, consoleErr: errors.New("db is gone")}
+	svc := buildService(t, ps, "self")
+	if _, err := svc.GetState(context.Background()); err == nil {
+		t.Fatal("a console probe error was swallowed")
+	}
+}
+
+func mustSteps(t *testing.T, svc *Service, ctx context.Context) []Step {
+	t.Helper()
+	state, err := svc.GetState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state.Steps
 }

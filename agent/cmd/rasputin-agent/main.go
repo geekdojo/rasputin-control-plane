@@ -21,6 +21,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/clusterdns"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/configfault"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/health"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
@@ -373,6 +374,14 @@ func main() {
 		log.Printf("rasputin-agent: subscribed to %s", healthSubj)
 		return nil
 	})
+
+	// console.root_hash — the console root password the control plane's
+	// first-run wizard set, delivered as a HASH over this node's own lane
+	// (geekdojo/geekdojo-brain#587). No image ships a console password, so
+	// until this lands the node's console holds whatever its image was
+	// built with; a node that cannot apply it REFUSES and says why rather
+	// than letting the control plane count it as done.
+	subscribe(console.NewHandler(nodeID, console.ShadowPathFromEnv(), console.HelperPathFromEnv()).Subscriber())
 
 	subscribe(func(c *nats.Conn) error {
 		if _, err := system.RegisterRebootHandler(c, nodeID, reregister); err != nil {

@@ -10,6 +10,11 @@
 //     as deployment mode: the stack shipped complete but could only be turned on
 //     by restarting the api with an env var, which an appliance operator cannot
 //     do. Backend: POST /api/obs/{enable,disable} (async — returns a job).
+//   • Console root password — the password root uses at a node's console
+//     (geekdojo/geekdojo-brain#587, decision #558). Set in the first-run
+//     wizard; this is where it is changed and re-applied. Unlike the operator
+//     SSH key below, saving here DOES reach every enrolled node: a job pushes
+//     the hash over each node's own lane and reports per node.
 //   • Operator SSH key — the one key the Add-node wizard prefills, so it goes
 //     into nodes enrolled from now on. It never changes an already-enrolled
 //     node (geekdojo/geekdojo-brain#246).
@@ -25,6 +30,7 @@ import { Btn, PageShell, PageHeader, PageBody, SectionLabel, Hint, Input, Select
 import { accentA, ACCENT, MONO } from '../../../components/ui-theme';
 import { THEMES, useTheme, type ThemeMeta } from '../../../lib/theme';
 import { DeploymentModePicker, MODES } from '../../../components/DeploymentModePicker';
+import { ConsoleRootPassword } from '../../../components/ConsoleRootPassword';
 import { ConfirmModal } from '../../../components/ConfirmModal';
 import {
   disableObs,
@@ -97,6 +103,9 @@ export default function SettingsPage() {
 
         <div style={{ height: 32 }} />
         <ObservabilitySection />
+
+        <div style={{ height: 32 }} />
+        <ConsoleRootPasswordSection />
 
         <div style={{ height: 32 }} />
         <OperatorSSHKeySection />
@@ -840,6 +849,21 @@ function ObservabilitySection() {
           onCancel={() => setPending(null)}
         />
       )}
+    </>
+  );
+}
+
+// --- Console root password --------------------------------------------------
+
+// The change-and-re-apply surface for the console root password
+// (geekdojo/geekdojo-brain#587, decision #558). The form, the per-node report
+// and the rules live in components/ConsoleRootPassword so the first-run
+// wizard's console_root step asks exactly the same question.
+function ConsoleRootPasswordSection() {
+  return (
+    <>
+      <SectionLabel>CONSOLE ROOT PASSWORD</SectionLabel>
+      <ConsoleRootPassword />
     </>
   );
 }

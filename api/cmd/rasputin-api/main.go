@@ -34,6 +34,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog/floor"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -444,6 +445,14 @@ func main() {
 	}
 	defer setupStore.Close()
 
+	// The console root password (#587). Its hash is secret material: the
+	// table lives in rasputin.db, which dbutil opens 0600.
+	consoleStore, err := console.OpenStore(ctx, dbPath)
+	if err != nil {
+		log.Fatalf("rasputin-api: console store: %v", err)
+	}
+	defer consoleStore.Close()
+
 	// backup_targets — design/storage.md §4.8's ledger of claimed backup disks.
 	backupStore, err := storage.OpenStore(ctx, dbPath)
 	if err != nil {
@@ -628,6 +637,10 @@ func main() {
 				return false, err
 			}
 			return len(nodes) > 0, nil
+		},
+		ConsoleRootSet: func(ctx context.Context) (bool, error) {
+			id, err := consoleStore.CurrentHashID(ctx)
+			return id != "", err
 		},
 	}, selfNodeID, clusterHostname(), strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")))
 
@@ -827,6 +840,20 @@ func main() {
 	}))
 	runner.Register(updater.SystemUpdateWorkflow(updaterStore, invStore, jobStore, runner, busSrv.Conn(), updater.SystemUpdateConfig{
 		SelfNodeID: selfNodeID,
+	}))
+	// The console root password reaches every node in inventory, the
+	// controlplane included, over that node's own command lane (#587).
+	//
+	// List THEN Presence, the same pair bustls uses: a bare List returns
+	// rows with no derived Status, and the push job reads Status to tell an
+	// offline node from one whose agent predates the verb. Without the
+	// Presence call every unanswered node reads as the same blank.
+	runner.Register(console.PushWorkflow(consoleStore, func(ctx context.Context) ([]*proto.Node, error) {
+		nodes, err := invStore.List(ctx)
+		if err == nil {
+			invStore.Presence(ctx, nodes)
+		}
+		return nodes, err
 	}))
 	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
@@ -1157,12 +1184,23 @@ func main() {
 	// changed or never landed, so a routine reconnect costs one no-op job.
 	// And the same fact hands the bus pin to a node that registered without
 	// TLS while the ladder is at migrate (#448).
+	// And a node that registers without the cluster's console root password
+	// is pushed it (#587) — including one enrolling for the first time,
+	// which is what "nodes that join later receive it" means in practice.
+	consoleConverger := console.NewConverger(consoleStore, func(hookCtx context.Context, kind string, spec json.RawMessage, createdBy string) error {
+		_, err := runner.Submit(hookCtx, kind, spec, createdBy)
+		return err
+	})
+	if err := console.ClearPendingOnStart(ctx, consoleStore); err != nil {
+		log.Printf("rasputin-api: console root password: clear pending deliveries: %v", err)
+	}
 	onFirewallRegistration := dnsForwardOnFirewallRegistration(submitDNSForward)
 	invSvc.SetOnRegistered(func(hookCtx context.Context, n *proto.Node) {
 		onFirewallRegistration(hookCtx, n)
 		if busTLSSvc != nil {
 			busTLSSvc.OnRegistered(hookCtx, n)
 		}
+		consoleConverger.OnRegistered(hookCtx, n)
 	})
 	// A node whose registered key was REPLACED raises a crit alert
 	// (geekdojo/geekdojo-brain#514). inventory audits the change in the log
@@ -1458,6 +1496,10 @@ func main() {
 	srv.SetAppLeafRotator(rotateAppLeaf)
 	// GET/PUT /api/bus/tls, and the live pin every Add-node seed carries.
 	srv.SetBusTLS(busTLSSvc)
+	// GET/PUT /api/console/root-password and the Settings "apply to all
+	// nodes" action. The store hands the api the hash on exactly one path,
+	// the push step's dispatch; nothing the server serves can reach it.
+	srv.SetConsole(consoleStore)
 	srv.SetComposeStash(composeStash)
 	// Node removal deletes the node's collector leaf from here — the same
 	// directory mintCollectorLeaf writes under.

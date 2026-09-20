@@ -29,6 +29,10 @@ type fixture struct {
 	svc      *Service
 	ctx      context.Context
 	hasUsers bool
+	// consoleRootSet stands in for the console root password probe (#587),
+	// the second REQUIRED wizard gate this package's fixtures have to
+	// satisfy before "setup is complete" is true.
+	consoleRootSet bool
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -70,6 +74,11 @@ func newFixture(t *testing.T) *fixture {
 	// can opt in (markSetupComplete) without rebuilding the Service.
 	probes := setup.Probes{
 		HasUsers: func(ctx context.Context) (bool, error) { return f.hasUsers, nil },
+		// Same shape as HasUsers: the console root password step
+		// (geekdojo/geekdojo-brain#587) is another REQUIRED wizard gate, so
+		// markSetupComplete has to satisfy it too or every fixture here
+		// carries a setup-incomplete alert it did not ask for.
+		ConsoleRootSet: func(ctx context.Context) (bool, error) { return f.consoleRootSet, nil },
 	}
 	f.setup = setup.NewService(setupStore, probes, "", "", "")
 	f.svc = New(invStore, jobStore, appStore, f.setup, nil, nil, true)
@@ -139,9 +148,11 @@ func (f *fixture) markSetupComplete(t *testing.T) {
 	t.Helper()
 	// Satisfy all the required gates the wizard checks (see setup.GetState):
 	// (1) HasUsers probe true, (2) install name set, (3) a deployment mode
-	// chosen (LAN-peer needs no firewall node), (4) operator explicitly
-	// clicked Finish (recorded via MarkCompleted).
+	// chosen (LAN-peer needs no firewall node), (4) a console root password
+	// set (#587), (5) operator explicitly clicked Finish (recorded via
+	// MarkCompleted).
 	f.hasUsers = true
+	f.consoleRootSet = true
 	if err := f.setup.SetInstallName(f.ctx, "Test Cluster"); err != nil {
 		t.Fatalf("set install name: %v", err)
 	}
