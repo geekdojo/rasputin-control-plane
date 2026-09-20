@@ -267,7 +267,7 @@ func TestHandleObsLogsIngest(t *testing.T) {
 		s := newIngestServer(t, offStatus(), "c02")
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
-		req.TLS = certState("c02")
+		req.TLS = nodeKeyState(t, "c02")
 		s.handleObsLogsIngest(rec, req)
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("got %d, want 503; body=%q", rec.Code, rec.Body.String())
@@ -285,7 +285,7 @@ func TestHandleObsLogsIngest(t *testing.T) {
 		s := newIngestServer(t, obs.NewStatus(fakeVMSup{lokiBase: stubLoki.URL}, nil, nil), "c02")
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("payload"))
-		req.TLS = certState("c02")
+		req.TLS = nodeKeyState(t, "c02")
 		s.handleObsLogsIngest(rec, req)
 
 		if rec.Code != http.StatusNoContent {
