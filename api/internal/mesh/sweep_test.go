@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/ledgertest"
 )
 
 func sweepTestCA(t *testing.T) *MeshCA {
@@ -400,4 +402,94 @@ func TestLeafSweepWorkflow(t *testing.T) {
 	if !slices.Equal(rep.Failed, []string{"broken"}) {
 		t.Errorf("failed = %v, want the fan-out that errored recorded", rep.Failed)
 	}
+}
+
+// Gate 6 (geekdojo/geekdojo-brain#493): the sweep mints private keys, so its
+// ledger is a place one could land. Run the real workflow on the real Runner
+// and jobs store, with a reload that fails so the warning path is exercised
+// too, and scan all four surfaces.
+func TestLeafSweep_KeyMaterialNeverReachesTheLedger(t *testing.T) {
+	capturedLog := ledgertest.CaptureLog(t)
+	ctx := context.Background()
+	ca := sweepTestCA(t)
+	renewed := t.TempDir()
+	reloadFails := t.TempDir()
+	mintWithLifetime(t, ca, renewed, "api.local", time.Hour)
+	mintWithLifetime(t, ca, reloadFails, "hs.local", time.Hour)
+
+	s := NewLeafSweeper(ca)
+	for _, c := range []struct {
+		name, dir, cn string
+		reload        func(context.Context, LeafPaths) error
+	}{
+		{name: "api-https", dir: renewed, cn: "api.local"},
+		{
+			name: "headscale", dir: reloadFails, cn: "hs.local",
+			reload: func(context.Context, LeafPaths) error { return errors.New("docker restart: exit status 1") },
+		},
+	} {
+		if err := s.Register(LeafConsumer{
+			Name: c.name, Dir: c.dir,
+			Spec:   func() (LeafSpec, error) { return LeafSpec{CommonName: c.cn, DNSNames: []string{c.cn}}, nil },
+			Reload: c.reload,
+		}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+	}
+
+	store, err := jobs.OpenStore(ctx, filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatalf("jobs.OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	runner := jobs.NewRunner(store, nil)
+	runner.Register(LeafSweepWorkflow(LeafSweepDeps{Sweeper: s}))
+	job, err := runner.Submit(ctx, LeafSweepKind, nil, "test")
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	runner.Wait()
+
+	// The secrets: the private keys the sweep just minted. Read from where
+	// they belong, so the scan below cannot pass by looking for nothing.
+	var secrets []ledgertest.Secret
+	var onDisk string
+	for _, d := range []struct{ name, dir string }{{"the api leaf key", renewed}, {"the Headscale leaf key", reloadFails}} {
+		raw, err := os.ReadFile(LeafPathsIn(d.dir).KeyPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", d.name, err)
+		}
+		secrets = append(secrets, ledgertest.Secret{Name: d.name, Value: strings.TrimSpace(string(raw))})
+		onDisk += string(raw)
+	}
+
+	got, err := store.GetJob(ctx, job.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	steps, err := store.ListSteps(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("ListSteps: %v", err)
+	}
+	events, err := store.ListEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	stepJSON, _ := json.Marshal(steps)
+	eventJSON, _ := json.Marshal(events)
+	jobJSON, _ := json.Marshal(got)
+
+	// The reload failure must be in the ledger — otherwise the scan below is
+	// checking a job that never did anything.
+	if !strings.Contains(string(stepJSON), "headscale") {
+		t.Fatalf("the sweep's step result does not mention the consumer it failed to reload")
+	}
+	surfaces := ledgertest.Surfaces{
+		Spec:   string(jobJSON),
+		Steps:  string(stepJSON),
+		Events: string(eventJSON),
+		Log:    capturedLog.String(),
+	}
+	surfaces.AssertPresent(t, "the leaf key files on disk", onDisk, secrets)
+	surfaces.AssertAbsent(t, secrets)
 }
