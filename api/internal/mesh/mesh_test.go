@@ -858,13 +858,6 @@ func (f *convergeFixture) admit(id string) {
 	f.inv.Registry().ReplaceLiveTokens(f.live)
 }
 
-// revokeTokens takes the node's last live join token away, as a revoke or a
-// node removal does.
-func (f *convergeFixture) revokeTokens(id string) {
-	delete(f.live, id)
-	f.inv.Registry().ReplaceLiveTokens(f.live)
-}
-
 func (f *convergeFixture) addEnrollJob(t *testing.T, id, nodeID string, status jobs.Status, createdAt time.Time) {
 	t.Helper()
 	spec, _ := json.Marshal(EnrollSpec{NodeID: nodeID})

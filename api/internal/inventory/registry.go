@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -365,20 +364,6 @@ func (r *Registry) ReplaceLiveTokens(live map[string][]string) {
 	r.mu.Lock()
 	r.tokensLoaded = true
 	r.mu.Unlock()
-}
-
-// liveTokenHashes is the whole live set as the registry holds it — used by
-// tests to assert the registry and the token table agree.
-func (r *Registry) liveTokenHashes() map[string]map[string]struct{} {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := map[string]map[string]struct{}{}
-	for id, e := range r.entries {
-		if len(e.tokens) > 0 {
-			out[id] = maps.Clone(e.tokens)
-		}
-	}
-	return out
 }
 
 // loadMembers fills membership and last-seen from the nodes table. OpenStore
