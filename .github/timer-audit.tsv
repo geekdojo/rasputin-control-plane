@@ -39,7 +39,7 @@ K11	api/internal/api/bmc_handlers.go	Server.handleBMCSOL:NewTicker	tick	the cons
 K12	agent/cmd/rasputin-agent/main.go	runHeartbeats:NewTicker	tick	this node is alive - the tick EMITS the fact K06 reads		
 K13	agent/internal/metrics/collector.go	Run:NewTicker	tick	the sample the collector reads from the host		
 K14	agent/internal/clusterdns/clusterdns.go	Run:NewTicker	tick	the pinned control-plane entry is still in the resolver drop-in		Also woken by bus connected and lost, so the tick is the backstop, not the trigger.
-K15	agent/internal/hostsync/hostsync.go	Run:NewTimer	tick	the address discovery resolves for the cluster name		First fire is immediate, so the fact is read before any wait.
+K15	agent/internal/hostsync/hostsync.go	Run:NewTimer	tick	the address the authenticated bus connection reports for the control plane		First fire is immediate, so the fact is read before any wait. The fact CHANGED with geekdojo/geekdojo-brain#547: it used to be "the cluster name resolves over mDNS", which is an unauthenticated answer this then republished into dnsmasq. It is now the peer address of the bus socket, read fresh on every look. Nothing is published or withdrawn because a tick happened - only because the address the bus reports differs from the one on disk, and an address the bus cannot report leaves the published entry alone.
 K16	agent/internal/nameguard/nameguard.go	Run:NewTimer	tick	the probe result - the state machine keys on it, not on the timer		First fire is immediate.
 K17	agent/internal/ids/tailer.go	Tailer.Run:NewTicker	tick	new lines in the file being tailed		
 K18	agent/internal/sdnotify/sdnotify.go	StartWatchdog:NewTicker	tick	a liveness ping succeeds before the watchdog is petted		Same shape as K09.
