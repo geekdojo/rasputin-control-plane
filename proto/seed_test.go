@@ -362,3 +362,139 @@ func TestRenderSeed_ExtraCannotShadowANamedField(t *testing.T) {
 		t.Error("an Extra key shadowing a named field rendered without error")
 	}
 }
+
+// The mutation gate found four changes to this file that every test above
+// still passed on, and a handful of lines nothing executed. Each case below
+// fails for exactly one of them; they are grouped here rather than scattered
+// because what they have in common is that they are the EDGES — the first
+// byte, the last byte, the empty value, the one-character string — which is
+// where a hand-rolled parser goes wrong.
+
+// A forbidden byte at index 0. `i >= 0` and `i > 0` behave identically for
+// every value where the newline is in the middle, which is what the cases
+// above use.
+func TestRenderSeed_RefusesAForbiddenByteAtTheStart(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"a leading newline", "\nssh-ed25519 AAAA me"},
+		{"a leading carriage return", "\rssh-ed25519 AAAA me"},
+		{"a leading NUL", "\x00ssh-ed25519 AAAA me"},
+		{"nothing but a newline", "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := baseSeed()
+			s.SSHAuthorizedKey = tc.value
+			if got, err := RenderSeed(s); err == nil {
+				t.Fatalf("rendered a value starting with a forbidden byte:\n%s", got)
+			}
+		})
+	}
+}
+
+// The line number in a parse error is the whole value of the message: it is
+// read off a console beside a file the operator has to edit. Nothing above
+// asserted it, so a counter that stopped counting would have gone unnoticed.
+func TestParseSeed_ErrorNamesTheLineNumber(t *testing.T) {
+	for _, tc := range []struct {
+		name, seed, want string
+	}{
+		{"the first line", "rm -rf /\n", "line 1"},
+		{"a later line", "# a comment\n\nRASPUTIN_NODE_ID='n1'\nrm -rf /\n", "line 4"},
+		{"blank lines still count", "\n\n\n\nRASPUTIN_NODE_ID=$(id)\n", "line 5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseSeed(strings.NewReader(tc.seed))
+			if err == nil {
+				t.Fatal("parsed without error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not say %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The edges of the quoting the renderer itself produces: a quote as the FIRST
+// byte of a single-quoted body, and as the last.
+func TestSeed_QuoteAtTheEdgesOfAValue(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"a value that is one quote", "'"},
+		{"a value that starts with a quote", "'me"},
+		{"a value that ends with a quote", "me'"},
+		{"a value that is two quotes", "''"},
+		{"quotes either side", "'me'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := baseSeed()
+			s.SSHAuthorizedKey = tc.value
+			rendered, err := RenderSeed(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ParseSeed(strings.NewReader(rendered))
+			if err != nil {
+				t.Fatalf("the renderer's own output did not parse: %v\n%s", err, rendered)
+			}
+			if got.SSHAuthorizedKey != tc.value {
+				t.Errorf("round trip gave %q, want %q\nrendered:\n%s", got.SSHAuthorizedKey, tc.value, rendered)
+			}
+		})
+	}
+}
+
+// One-character values, where a length check is the only thing standing
+// between a parse and an index out of range.
+func TestParseSeed_OneCharacterValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		wantErr    bool
+		want       string
+	}{
+		{name: "a bare double quote", line: `RASPUTIN_NODE_ID="`, wantErr: true},
+		{name: "a bare single quote", line: "RASPUTIN_NODE_ID='", wantErr: true},
+		{name: "an empty double-quoted value", line: `RASPUTIN_NODE_ID=""`, want: ""},
+		{name: "an empty single-quoted value", line: "RASPUTIN_NODE_ID=''", want: ""},
+		{name: "no value at all", line: "RASPUTIN_NODE_ID=", want: ""},
+		{name: "only whitespace after the =", line: "RASPUTIN_NODE_ID=   ", want: ""},
+		{name: "a backslash at the end of a double-quoted value", line: `RASPUTIN_NODE_ID="me\`, wantErr: true},
+		{name: "an escaped quote at the end", line: `RASPUTIN_NODE_ID="me\""`, want: `me"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseSeed(strings.NewReader(tc.line + "\n"))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parsed %q without error", tc.line)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsing %q: %v", tc.line, err)
+			}
+			if got.NodeID != tc.want {
+				t.Errorf("node id = %q, want %q", got.NodeID, tc.want)
+			}
+		})
+	}
+}
+
+// NATSURLFor decides the bus every seeded node dials. Getting it wrong is the
+// silent failure the one-renderer change exists to end: a node that boots,
+// resolves nothing and never joins (control-plane #70).
+func TestNATSURLFor(t *testing.T) {
+	for _, tc := range []struct{ name, hostname, want string }{
+		{"a named cluster", "home1.local", "nats://home1.local:4222"},
+		{"surrounding whitespace is trimmed", "  home1.local  ", "nats://home1.local:4222"},
+		{"no hostname falls back to the dev-box name", "", DefaultNATSURL},
+		{"whitespace only is no hostname", "   ", DefaultNATSURL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NATSURLFor(tc.hostname); got != tc.want {
+				t.Errorf("NATSURLFor(%q) = %q, want %q", tc.hostname, got, tc.want)
+			}
+		})
+	}
+	// The fallback is a real bus URL, not a placeholder, and it names the
+	// port the bus listens on.
+	if !strings.HasPrefix(DefaultNATSURL, "nats://") || !strings.HasSuffix(DefaultNATSURL, ":4222") {
+		t.Errorf("DefaultNATSURL = %q", DefaultNATSURL)
+	}
+}
