@@ -333,8 +333,21 @@ func TestClient_PinnedTLS(t *testing.T) {
 
 // --- delivery --------------------------------------------------------------
 
-func requestPin(t *testing.T, s *natsserver.Server, pin string) proto.BusPinAck {
+// requestPin delivers a pin to the node's bus.pin handler from a separate
+// probe connection. It flushes the Client's own connection first for the same
+// reason ping does (see ping in client_test.go): nats.go buffers SUB and
+// writes it from another goroutine, so a probe on a second connection can
+// reach the server before the handler's subscription does and be answered
+// "no responders".
+func requestPin(t *testing.T, c connHolder, s *natsserver.Server, pin string) proto.BusPinAck {
 	t.Helper()
+	nc := c.Conn()
+	if nc == nil {
+		t.Fatal("the Client has no connection: nothing could be subscribed")
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush the agent's connection: %v (its subscriptions never reached the server)", err)
+	}
 	probe, err := nats.Connect(natsURL(t, s), nats.UserInfo(testNode, "tok-A"), nats.Secure(&tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: true, // test probe on loopback; the pin check under test is the agent's
@@ -389,12 +402,12 @@ func TestClient_PinDeliveryReconnectsOverTLS(t *testing.T) {
 		t.Fatal("started on TLS without a pin")
 	}
 
-	ack := requestPin(t, s, "sha256/garbage")
+	ack := requestPin(t, tc, s, "sha256/garbage")
 	if ack.OK {
 		t.Fatalf("a malformed pin was accepted: %+v", ack)
 	}
 
-	ack = requestPin(t, s, pin)
+	ack = requestPin(t, tc, s, pin)
 	if !ack.OK || !ack.Reconnecting || ack.Pin != pin || ack.NodeID != testNode {
 		t.Fatalf("ack = %+v, want OK, reconnecting, pin %s", ack, pin)
 	}
@@ -411,12 +424,12 @@ func TestClient_PinDeliveryReconnectsOverTLS(t *testing.T) {
 
 	// Same pin again: acknowledged, nothing replaced.
 	cur := tc.Conn()
-	ack = requestPin(t, s, pin)
+	ack = requestPin(t, tc, s, pin)
 	if !ack.OK || ack.Reconnecting {
 		t.Fatalf("repeat delivery ack = %+v, want OK without reconnecting", ack)
 	}
 	// A different pin: key rotation, refused, and the node keeps its pin.
-	ack = requestPin(t, s, mustPin(t, newKey(t)))
+	ack = requestPin(t, tc, s, mustPin(t, newKey(t)))
 	if ack.OK || ack.Pin != pin {
 		t.Fatalf("rotation ack = %+v, want a refusal naming the held pin", ack)
 	}

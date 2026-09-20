@@ -164,10 +164,34 @@ func natsDefaultAuthAbort() nats.Option {
 	}
 }
 
+// connHolder is the Client under test as ping needs it — bare, or wrapped in
+// a testClient.
+type connHolder interface{ Conn() *nats.Conn }
+
 // ping asks the agent's handler for a reply through a separate client
 // connection to s, proving the subscription is live on the CURRENT server.
-func ping(t *testing.T, s *natsserver.Server, pass string) {
+//
+// It flushes the Client's own connection first, and that is the whole reason
+// this probe is reliable. nats.go does not put a SUB on the wire when
+// Subscribe returns: Conn.subscribe appends the protocol to a buffer and
+// kicks a flusher goroutine, and a nats-level reconnect re-sends the
+// subscriptions the same buffered way. So neither "Dial returned" nor
+// "onConn ran" nor "the reconnect callback fired" says the SERVER has
+// registered the subscription. The probe below is a SEPARATE connection, so
+// nothing orders its request after that SUB — on a contended runner the
+// request wins the race and the server answers "no responders available",
+// which is a test bug, not a broken Client. Flush is a PING/PONG on the
+// agent's own connection: when its PONG comes back the server has parsed
+// everything written on that connection before it, the SUB included.
+func ping(t *testing.T, c connHolder, s *natsserver.Server, pass string) {
 	t.Helper()
+	nc := c.Conn()
+	if nc == nil {
+		t.Fatal("the Client has no connection: nothing could be subscribed")
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush the agent's connection: %v (its subscriptions never reached the server)", err)
+	}
 	probe, err := nats.Connect(s.ClientURL(), nats.UserInfo(testNode, pass))
 	if err != nil {
 		t.Fatalf("probe connect: %v", err)
@@ -180,6 +204,19 @@ func ping(t *testing.T, s *natsserver.Server, pass string) {
 	if string(reply.Data) != "pong" {
 		t.Fatalf("reply = %q, want pong", reply.Data)
 	}
+}
+
+// connAttempts is how many client connections s has accepted since it
+// started, connections it went on to reject included: the server bumps the
+// counter when it creates the client, before authentication. It is the
+// observable for "nats.go has tried again", which a sleep can only guess at.
+func connAttempts(t *testing.T, s *natsserver.Server) uint64 {
+	t.Helper()
+	v, err := s.Varz(nil)
+	if err != nil {
+		t.Fatalf("varz: %v", err)
+	}
+	return v.TotalConnections
 }
 
 func waitFor(t *testing.T, what string, deadline time.Duration, cond func() bool) {
@@ -217,7 +254,7 @@ func TestClient_RedialsFromClosedAfterAuthAbort(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	first := tc.Conn()
-	ping(t, s1, "tok-A")
+	ping(t, tc, s1, "tok-A")
 	if got := tc.conns.Load(); got != 1 {
 		t.Fatalf("onConn calls after first dial = %d, want 1", got)
 	}
@@ -240,10 +277,13 @@ func TestClient_RedialsFromClosedAfterAuthAbort(t *testing.T) {
 	if got := tc.conns.Load(); got != 2 {
 		t.Errorf("onConn calls = %d, want 2 (one per new conn: first dial + re-dial)", got)
 	}
-	if got := tc.connected.Load(); got < 2 {
-		t.Errorf("onConnected calls = %d, want >= 2 (the re-dial must re-publish the registration)", got)
-	}
-	ping(t, s3, "tok-A")
+	// install() installs the conn and bumps the re-dial counter BEFORE it
+	// runs onConnected, so the wait above can be satisfied in the window
+	// between the two. Wait for the hook itself rather than assume the
+	// ordering — what is asserted is unchanged, only when it is read.
+	waitFor(t, "onConnected to fire for the re-dial (the registration must be re-published)", 5*time.Second,
+		func() bool { return tc.connected.Load() >= 2 })
+	ping(t, tc, s3, "tok-A")
 }
 
 // TestClient_KeepsReconnectingThroughAuthErrors is the same server sequence
@@ -261,13 +301,17 @@ func TestClient_KeepsReconnectingThroughAuthErrors(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	first := tc.Conn()
-	ping(t, s1, "tok-A")
+	ping(t, tc, s1, "tok-A")
 
 	stopServer(s1)
 	s2 := startServer(t, port, testNode, "tok-B")
-	// Give nats.go several reconnect rounds against the rejecting server —
-	// more than the two it needs to abort by default.
-	time.Sleep(600 * time.Millisecond)
+	// Give nats.go more reconnect rounds against the rejecting server than
+	// the two it needs to abort by default. Waiting on the server's own
+	// count of accepted connections, not on a clock: a sleep that is too
+	// short on a contended runner turns the assertion below into a vacuous
+	// pass, because a conn that was never retried cannot have been aborted.
+	waitFor(t, "nats.go to be rejected by the rebuilt server at least 3 times", 10*time.Second,
+		func() bool { return connAttempts(t, s2) >= 3 || first.IsClosed() })
 	if first.IsClosed() {
 		t.Fatal("nats.go closed the conn on repeated auth errors; IgnoreAuthErrorAbort is not in effect")
 	}
@@ -285,7 +329,7 @@ func TestClient_KeepsReconnectingThroughAuthErrors(t *testing.T) {
 		t.Errorf("onConn calls = %d, want 1: subscriptions survive a nats-level reconnect and must not be duplicated", got)
 	}
 	waitFor(t, "onConnected to fire for the reconnect", 5*time.Second, func() bool { return tc.connected.Load() >= 2 })
-	ping(t, s3, "tok-A")
+	ping(t, tc, s3, "tok-A")
 }
 
 // TestClient_RedialsWhenConnClosedByAnyRoute: closed is closed, whatever
@@ -307,7 +351,7 @@ func TestClient_RedialsWhenConnClosedByAnyRoute(t *testing.T) {
 	if got := tc.Redials(); got != 1 {
 		t.Errorf("Redials = %d, want 1", got)
 	}
-	ping(t, s, "tok-A")
+	ping(t, tc, s, "tok-A")
 }
 
 // TestClient_RedialRetriesWithBackoffUntilServerReturns: while nothing is
@@ -333,7 +377,7 @@ func TestClient_RedialRetriesWithBackoffUntilServerReturns(t *testing.T) {
 		nc := tc.Conn()
 		return nc != first && nc.IsConnected()
 	})
-	ping(t, s2, "tok-A")
+	ping(t, tc, s2, "tok-A")
 	// Close returns promptly (the loop is not running); the drain it starts
 	// closes the conn shortly after.
 	done := make(chan struct{})
