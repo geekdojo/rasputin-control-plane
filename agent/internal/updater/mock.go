@@ -161,6 +161,11 @@ func (m *MockBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 	if err != nil {
 		return "", "", err
 	}
+	// Same rule as the real backends, for the same reason given above: a check
+	// the mock skips is a check dev and CI never exercise.
+	if err := requireExpectedSHA(bundleID, expectedSHA); err != nil {
+		return "", "", err
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", "", err
@@ -213,7 +218,8 @@ func (m *MockBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 		return "", "", err
 	}
 	observed := hex.EncodeToString(hasher.Sum(nil))
-	if expectedSHA != "" && observed != expectedSHA {
+	// Unconditional — see requireExpectedSHA.
+	if observed != expectedSHA {
 		return "", observed, fmt.Errorf("sha mismatch: expected %s got %s", expectedSHA, observed)
 	}
 	if err := os.Rename(tmpFile.Name(), dest); err != nil {

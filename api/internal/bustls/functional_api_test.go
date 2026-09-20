@@ -207,7 +207,6 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 		"RASPUTIN_OBS_INGEST_ADDR=" + fmt.Sprintf("127.0.0.1:%d", ingestPort),
 		"RASPUTIN_SELF_NODE_ID=cp1",
 		"RASPUTIN_MESH_BACKEND=mock",
-		"RASPUTIN_UPDATE_TRUST=dev-permissive",
 		"RASPUTIN_DNS=off",
 		"RASPUTIN_SECURE_COOKIES=false",
 		"RASPUTIN_UI_DIR=" + filepath.Join(dataDir, "no-ui"),

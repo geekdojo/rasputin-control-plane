@@ -591,7 +591,7 @@ func TestRAUCBackend_DownloadHTTPError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
-	if _, _, err := b.Download(context.Background(), "b", srv.URL, "", "", 0, nil); err == nil {
+	if _, _, err := b.Download(context.Background(), "b", srv.URL, "", wellFormedSHA, 0, nil); err == nil {
 		t.Error("expected HTTP error")
 	}
 }
@@ -602,7 +602,7 @@ func TestRAUCBackend_DownloadBadURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
-	if _, _, err := b.Download(context.Background(), "b", "::not-a-url::", "", "", 0, nil); err == nil {
+	if _, _, err := b.Download(context.Background(), "b", "::not-a-url::", "", wellFormedSHA, 0, nil); err == nil {
 		t.Error("expected URL parse error")
 	}
 }

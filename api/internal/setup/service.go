@@ -63,7 +63,8 @@ type Probes struct {
 	// "no users".
 	HasUsers func(ctx context.Context) (bool, error)
 	// TrustConfigured reports whether the api was loaded with a real
-	// root CA cert (vs. the dev-permissive fallback).
+	// root CA cert. False means every OS update artifact is refused —
+	// there is no unverified mode to fall back to.
 	TrustConfigured func() bool
 	// MeshEnrolled reports whether the api's self node is recorded as a
 	// Rasputin-kind device in the mesh tailnet.

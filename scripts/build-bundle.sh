@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
-# build-bundle.sh — produce a signed mock Rasputin update bundle.
+# build-bundle.sh — produce a mock Rasputin update artifact and its DETACHED
+# CMS signature, for dev, CI and air-gapped upload rehearsals.
 #
-# In v0 this builds the *mock* bundle format only — a JSON envelope:
-#   { manifest, payload (hex), signature (hex), certPem }
-# that the api's verifier understands. When we have hardware images
-# we'll add a --rauc mode that runs `rauc bundle` instead.
+# It emits the same two files a real release publishes:
 #
-# The mock format is dev-only; real production updates require RAUC.
+#   <out>       the artifact bytes
+#   <out>.sig   a detached CMS SignedData over them, DER
+#
+# and the signing command below is a copy of the one the release pipelines run
+# (rasputin-openwrt-firewall .github/workflows/release.yml, "CMS-sign images"),
+# so an artifact from here is verified by exactly the code path that verifies a
+# published one — in the api at upload and on the node at install.
+#
+# THIS REPLACED THE `.raspbundle` JSON ENVELOPE, which wrapped the payload,
+# a manifest, a raw signature and a cert chain into one file. That format was
+# dev-only, so the thing operators hand-carried into an air-gapped cluster was
+# the one thing nothing else in the system spoke — and it had a verifier of its
+# own, which signed only sha256(payload) and left the manifest unauthenticated.
+#
+# The leaf must be a RELEASE leaf: scripts/pki-init.sh mints one carrying
+# 1.3.6.1.4.1.66587.1.1.1, and a leaf without that purpose is refused. That is
+# the same rule the fleet enforces, so a bundle that verifies here verifies
+# there.
 
 set -euo pipefail
 
@@ -19,16 +34,16 @@ Usage: $0 --version V --out FILE \\
 
 Options:
   --version V         Bundle version, e.g. 0.1.0
-  --out FILE          Output bundle file (will be overwritten)
-  --leaf-cert PEM     Path to leaf signing cert (from pki-init.sh)
-  --leaf-key KEY      Path to leaf signing key (from pki-init.sh)
+  --out FILE          Output artifact (overwritten; FILE.sig is written too)
+  --leaf-cert PEM     Path to a RELEASE leaf signing cert (from pki-init.sh)
+  --leaf-key KEY      Path to its private key
   --compatible STR    Compatible string (default: rasputin-pi5-cm5)
   --architecture STR  arm64 | amd64 (default: arm64)
   --description STR   Free-text description
-  --payload FILE      Bytes to wrap as the "OS image" (default: a 256KB
+  --payload FILE      Bytes to use as the "OS image" (default: a 256KB
                       pseudo-random blob, sufficient for end-to-end tests)
 
-Output: a single .raspbundle JSON file ready to upload to /api/bundles.
+Output: the artifact plus its detached .sig, ready to upload to /api/bundles.
 EOF
     exit 1
 }
@@ -59,69 +74,44 @@ done
 
 [[ -z $VERSION || -z $OUT || -z $LEAF_CERT || -z $LEAF_KEY ]] && usage
 
-# Stage in tmpdir.
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
-
 if [[ -n $PAYLOAD ]]; then
-    cp "$PAYLOAD" "$TMP/payload.bin"
+    cp "$PAYLOAD" "$OUT"
 else
     # 256 KB pseudo-random "rootfs" placeholder.
-    dd if=/dev/urandom of="$TMP/payload.bin" bs=1024 count=256 status=none
+    dd if=/dev/urandom of="$OUT" bs=1024 count=256 status=none
 fi
 
-# Hex-encode payload (avoids JSON escaping pain).
-if command -v xxd >/dev/null; then
-    xxd -p -c0 "$TMP/payload.bin" > "$TMP/payload.hex"
-else
-    # macOS without xxd — fall back to od.
-    od -An -v -tx1 "$TMP/payload.bin" | tr -d ' \n' > "$TMP/payload.hex"
-fi
-PAYLOAD_HEX=$(cat "$TMP/payload.hex")
-
-# Sign sha256(payload) with leaf key (PKCS#1v15 + SHA-256).
-openssl dgst -sha256 -sign "$LEAF_KEY" -out "$TMP/sig.bin" "$TMP/payload.bin"
-if command -v xxd >/dev/null; then
-    SIG_HEX=$(xxd -p -c0 "$TMP/sig.bin")
-else
-    SIG_HEX=$(od -An -v -tx1 "$TMP/sig.bin" | tr -d ' \n')
-fi
-
-# Read leaf cert as a single-line PEM (escape newlines for JSON). If an
-# intermediate-ca.pem sits next to the leaf cert, append it so the api
-# verifier can complete the chain to the root.
-LEAF_PEM=$(awk '{printf "%s\\n", $0}' "$LEAF_CERT")
+# The pipeline's sign_file(), modulo paths: detached (no -nodetach), DER, with
+# the intermediate travelling in the CMS object so a verifier holding only the
+# root can complete the chain.
+SIGN_ARGS=(-sign -binary -in "$OUT" -signer "$LEAF_CERT" -inkey "$LEAF_KEY" -outform DER -out "$OUT.sig")
 INT_PEM_PATH="$(dirname "$LEAF_CERT")/intermediate-ca.pem"
 if [[ -f "$INT_PEM_PATH" ]]; then
-    INT_PEM=$(awk '{printf "%s\\n", $0}' "$INT_PEM_PATH")
-    LEAF_PEM="${LEAF_PEM}${INT_PEM}"
+    SIGN_ARGS+=(-certfile "$INT_PEM_PATH")
+fi
+openssl cms "${SIGN_ARGS[@]}"
+
+# Prove the pair is what we think it is before handing it to anyone. If
+# openssl will not verify what it just signed, the upload was never going to.
+ROOT_CA_PATH="$(dirname "$LEAF_CERT")/root-ca.pem"
+if [[ -f "$ROOT_CA_PATH" ]]; then
+    openssl cms -verify -binary -inform DER -in "$OUT.sig" -content "$OUT" \
+        -CAfile "$ROOT_CA_PATH" -purpose any -out /dev/null 2>/dev/null \
+        || { echo "error: the signature this script just produced does not verify against $ROOT_CA_PATH" >&2; exit 1; }
+    echo "self-check: $OUT.sig verifies against $ROOT_CA_PATH"
 fi
 
-BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-cat > "$OUT" <<EOF
-{
-  "manifest": {
-    "version": "$VERSION",
-    "compatible": "$COMPATIBLE",
-    "architecture": "$ARCH",
-    "description": "$DESCRIPTION",
-    "buildDate": "$BUILD_DATE",
-    "sha256": "",
-    "sizeBytes": 0,
-    "signedBy": ""
-  },
-  "payload": "$PAYLOAD_HEX",
-  "signature": "$SIG_HEX",
-  "certPem": "$LEAF_PEM"
-}
-EOF
-
-# Print the resulting file size + sha256 for the operator.
 SHA=$(shasum -a 256 "$OUT" | awk '{print $1}')
 SIZE=$(wc -c < "$OUT" | tr -d ' ')
-echo "wrote $OUT"
-echo "  sha256: $SHA"
-echo "  size:   $SIZE bytes"
-echo "  upload: curl --data-binary @$OUT -H 'Content-Type: application/octet-stream' \\"
-echo "            -b cookies.txt http://localhost:8080/api/bundles"
+echo "wrote $OUT and $OUT.sig"
+echo "  version:    $VERSION"
+echo "  compatible: $COMPATIBLE"
+echo "  arch:       $ARCH"
+[[ -n $DESCRIPTION ]] && echo "  description: $DESCRIPTION"
+echo "  sha256:     $SHA"
+echo "  size:       $SIZE bytes"
+echo "  upload:"
+echo "    curl -b cookies.txt -X POST http://localhost:8080/api/bundles \\"
+echo "      -F signature=@$OUT.sig \\"
+echo "      -F version=$VERSION -F architecture=$ARCH -F compatible=$COMPATIBLE \\"
+echo "      -F artifact=@$OUT"

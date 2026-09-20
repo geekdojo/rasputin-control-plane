@@ -434,12 +434,14 @@ func issued(t *testing.T, cn string, notBefore, notAfter time.Time,
 		tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
 	} else {
 		tmpl.KeyUsage = x509.KeyUsageDigitalSignature
-		// Match the deployed leaf-001, which carries generic codeSigning and no
-		// explicit Rasputin purpose. These fixtures previously set no EKU at
-		// all, which is not a shape the PKI has ever issued — and once #192
-		// started asking what a leaf was authorized to do, that unrealism was
-		// the only thing failing.
-		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}
+		// Match the RELEASE leaf the PKI actually issues: codeSigning and
+		// emailProtection for openssl's and RAUC's purpose checks, plus the
+		// release purpose OID, which is the only thing artifactsig authorizes
+		// on. Generic codeSigning alone was enough while a transitional
+		// allowance accepted it; that allowance is deleted, so a leaf built
+		// that way would only be testing a shape nothing issues.
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning, x509.ExtKeyUsageEmailProtection}
+		tmpl.UnknownExtKeyUsage = []asn1.ObjectIdentifier{OIDCodeSigningRelease}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
 	if err != nil {
@@ -513,12 +515,22 @@ func TestVerifyForPurpose_CrossPurposeMatrix(t *testing.T) {
 		{
 			name: "release leaf may NOT sign a catalog", sig: "payload.bin.sig",
 			purpose: OIDCodeSigningCatalog, wantOK: false,
-			why: "the legacy codeSigning allowance is release-only and must not leak into the catalog path",
+			why: "a release leaf carries the release OID and nothing authorizes it for the catalog",
 		},
 		{
 			name: "release leaf signs a release", sig: "payload.bin.sig",
 			purpose: OIDCodeSigningRelease, wantOK: true,
-			why: "legacy codeSigning leaf, accepted for releases during the transition",
+			why: "the leaf carries OIDCodeSigningRelease, the shape pki-init.sh mints and leaf-003 has",
+		},
+		{
+			name: "generic codeSigning leaf may NOT sign a release", sig: "payload.bin.generic.sig",
+			purpose: OIDCodeSigningRelease, wantOK: false,
+			why: "the transitional allowance for a purposeless codeSigning leaf is deleted",
+		},
+		{
+			name: "generic codeSigning leaf may NOT sign a catalog", sig: "payload.bin.generic.sig",
+			purpose: OIDCodeSigningCatalog, wantOK: false,
+			why: "it never could, and deleting the release allowance must not invert that",
 		},
 	}
 

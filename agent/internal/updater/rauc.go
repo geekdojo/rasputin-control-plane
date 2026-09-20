@@ -362,6 +362,12 @@ func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 	if err != nil {
 		return "", "", fmt.Errorf("rauc download: %w", err)
 	}
+	// A .raucb carries its own signature, so this backend has no detached .sig
+	// to demand — which makes the stated hash the only thing the agent can
+	// measure the transfer against before handing it to rauc. It is required.
+	if err := requireExpectedSHA(bundleID, expectedSHA); err != nil {
+		return "", "", fmt.Errorf("rauc download: %w", err)
+	}
 	// Free the store before pulling: drop any prior bundles/partials so they
 	// don't accumulate and fill a small data partition (see pruneBundles).
 	r.pruneBundles(bundleID)
@@ -414,7 +420,8 @@ func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 		return "", "", err
 	}
 	observed := hex.EncodeToString(h.Sum(nil))
-	if expectedSHA != "" && observed != expectedSHA {
+	// Unconditional — see requireExpectedSHA.
+	if observed != expectedSHA {
 		return "", observed, fmt.Errorf("sha mismatch")
 	}
 	if err := os.Rename(tmp.Name(), dest); err != nil {

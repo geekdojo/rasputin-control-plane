@@ -552,33 +552,25 @@ func TestWireMesh_ExplicitMockIsHonoured(t *testing.T) {
 // all by itself: bundle signatures were parsed but never chain-verified, and
 // every bundle was recorded SignedBy "<unverified>". That is a fail-open on the
 // artifact that decides what code a node boots, signalled only by a string
-// nobody watches. `require` is the default and it must mean require.
+// nobody watches. Making it opt-in by name kept it one environment variable
+// away; "dev-permissive" is now a value with no mode behind it, and this test
+// asserts that naming it changes nothing.
 func TestWireBundleVerifier_MissingTrustRootIsNeverPermissive(t *testing.T) {
-	for _, mode := range []string{"", "require", "REQUIRE", "permissive", "yes", "1"} {
+	for _, mode := range []string{"", "require", "REQUIRE", "dev-permissive", "permissive", "yes", "1"} {
 		t.Setenv(updateTrustEnv, mode)
 		v := wireBundleVerifier(t.TempDir()) // no root-ca.pem anywhere in it
 		if v.Available() {
-			t.Errorf("%s=%q produced a usable verifier with no trust root — an unrecognised or "+
-				"absent value must fall back to require, never to permissive", updateTrustEnv, mode)
+			t.Errorf("%s=%q produced a usable verifier with no trust root — no value of this "+
+				"variable may select a mode that skips the check", updateTrustEnv, mode)
 		}
 		if got := v.Mode(); got != updater.TrustUnavailable {
 			t.Errorf("%s=%q: mode = %q, want %q", updateTrustEnv, mode, got, updater.TrustUnavailable)
 		}
 		// The api still has to BOOT — #89. wireBundleVerifier returning at all,
 		// with no fatal and no error, is that contract.
-		if _, _, err := v.Verify(strings.NewReader("{}"), updater.FormatRaspbundle); !errors.Is(err, updater.ErrTrustUnavailable) {
+		if _, err := v.VerifyArtifact("artifact", "artifact.sig"); !errors.Is(err, updater.ErrTrustUnavailable) {
 			t.Errorf("%s=%q: want ErrTrustUnavailable, got %v", updateTrustEnv, mode, err)
 		}
-	}
-}
-
-// The other half: the dev box the old fail-open was written for still works,
-// once it says so out loud.
-func TestWireBundleVerifier_ExplicitDevPermissiveIsHonoured(t *testing.T) {
-	t.Setenv(updateTrustEnv, "dev-permissive")
-	v := wireBundleVerifier(t.TempDir())
-	if got := v.Mode(); got != updater.TrustDevPermissive {
-		t.Errorf("mode = %q, want %q — an explicit request must be honoured", got, updater.TrustDevPermissive)
 	}
 }
 

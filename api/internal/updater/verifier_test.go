@@ -1,474 +1,215 @@
 package updater
 
 import (
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
 	"errors"
-	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 )
 
-// pkiFixture builds an in-memory root CA + leaf cert + signing helpers and
-// writes the CA PEM into a trust dir. Tests use it to mint mock bundles
-// the Verifier can chain-validate.
-type pkiFixture struct {
-	rootKey  *rsa.PrivateKey
-	rootCert *x509.Certificate
-	rootPEM  []byte // bytes you'd write to root-ca.pem
-	leafKey  *rsa.PrivateKey
-	leafCert *x509.Certificate
-	leafPEM  []byte // PEM-encoded leaf cert (what goes in the bundle envelope)
-	trustDir string
+// The CMS fixtures live in artifactsig's testdata and are reached across
+// modules, exactly as catalogsync's verifier tests reach them. Hand-rolling a
+// second set here would mean this verifier was proven against signatures we
+// made up rather than against the ones the release pipeline's own `openssl cms
+// -sign` command emits — which is the only property worth testing.
+func fixture(t *testing.T, name string) string {
+	t.Helper()
+	return filepath.Join("..", "..", "..", "artifactsig", "testdata", name)
 }
 
-func newPKI(t *testing.T) *pkiFixture {
+// trustDirWith writes the named fixture root CA into a fresh trust dir and
+// returns the dir, so NewVerifier can be exercised the way main wires it.
+func trustDirWith(t *testing.T, rootFixture string) string {
 	t.Helper()
 	dir := t.TempDir()
-
-	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	raw, err := os.ReadFile(fixture(t, rootFixture))
 	if err != nil {
-		t.Fatalf("gen root key: %v", err)
+		t.Fatalf("read %s: %v", rootFixture, err)
 	}
-	rootTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "Rasputin Test Root"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(2 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		IsCA:                  true,
-		BasicConstraintsValid: true,
+	if err := os.WriteFile(filepath.Join(dir, RootCAName), raw, 0o600); err != nil {
+		t.Fatalf("write trust root: %v", err)
 	}
-	rootDER, err := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
-	if err != nil {
-		t.Fatalf("create root: %v", err)
-	}
-	rootCert, _ := x509.ParseCertificate(rootDER)
-	rootPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})
-
-	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("gen leaf key: %v", err)
-	}
-	leafTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "Rasputin Build Signer"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(2 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
-	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, rootCert, &leafKey.PublicKey, rootKey)
-	if err != nil {
-		t.Fatalf("create leaf: %v", err)
-	}
-	leafCert, _ := x509.ParseCertificate(leafDER)
-	leafPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
-
-	// Write the root CA to trust dir as root-ca.pem.
-	if err := os.WriteFile(filepath.Join(dir, "root-ca.pem"), rootPEM, 0o600); err != nil {
-		t.Fatalf("write root pem: %v", err)
-	}
-	return &pkiFixture{
-		rootKey: rootKey, rootCert: rootCert, rootPEM: rootPEM,
-		leafKey: leafKey, leafCert: leafCert, leafPEM: leafPEM,
-		trustDir: dir,
-	}
+	return dir
 }
-
-// buildMockBundle constructs a mock envelope: signs sha256(payload) with the
-// leaf key (PKCS1v15+SHA256), encodes everything as the JSON envelope the
-// verifier expects.
-func (p *pkiFixture) buildMockBundle(t *testing.T, manifest proto.BundleManifest, payload []byte) []byte {
-	t.Helper()
-	hashed := sha256.Sum256(payload)
-	sig, err := rsa.SignPKCS1v15(rand.Reader, p.leafKey, crypto.SHA256, hashed[:])
-	if err != nil {
-		t.Fatalf("sign payload: %v", err)
-	}
-	env := raspbundleEnvelope{
-		Manifest:  manifest,
-		Payload:   hex.EncodeToString(payload),
-		Signature: hex.EncodeToString(sig),
-		CertPEM:   string(p.leafPEM),
-	}
-	buf, err := json.Marshal(env)
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
-	return buf
-}
-
-// ============================================================================
-// NewVerifier
-// ============================================================================
 
 func TestNewVerifier_LoadsRootCA(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
+	v := NewVerifier(trustDirWith(t, "root-ca.pem"))
 	if !v.TrustConfigured() {
-		t.Error("TrustConfigured: want true")
+		t.Fatal("TrustConfigured = false with a real root CA present")
 	}
-	if !v.Available() || v.Mode() != TrustEnforced {
-		t.Errorf("Mode() = %q, want %q", v.Mode(), TrustEnforced)
+	if !v.Available() {
+		t.Error("Available = false with a real root CA present")
+	}
+	if got := v.Mode(); got != TrustEnforced {
+		t.Errorf("Mode = %q, want %q", got, TrustEnforced)
+	}
+	if got := v.UnavailableReason(); got != "" {
+		t.Errorf("UnavailableReason = %q, want empty", got)
 	}
 }
 
-// REPLACES TestNewVerifier_MissingRootIsDevPermissive, which asserted the
-// defect: a missing root-ca.pem used to hand back a verifier that skipped every
-// signature check and flagged the bundle "<unverified>". A missing trust root
-// is now a refusal, and permissiveness has to be asked for by name.
+// A missing root CA is a REFUSAL, not a downgrade. This is the fail-open the
+// verifier's type doc exists to describe: deleting one file used to turn every
+// signature check off.
 func TestNewVerifier_MissingRootIsUnavailableNotPermissive(t *testing.T) {
-	dir := t.TempDir() // no root-ca.pem
-	v := NewVerifier(dir)
+	v := NewVerifier(t.TempDir())
 	if v.TrustConfigured() {
-		t.Error("TrustConfigured: want false (no root pem)")
+		t.Fatal("TrustConfigured = true with no root CA")
 	}
 	if v.Available() {
-		t.Fatal("a missing trust root must NOT yield a usable verifier")
+		t.Fatal("Available = true with no root CA — the verifier degraded instead of refusing")
 	}
-	if v.Mode() != TrustUnavailable {
-		t.Errorf("Mode() = %q, want %q", v.Mode(), TrustUnavailable)
+	if got := v.Mode(); got != TrustUnavailable {
+		t.Errorf("Mode = %q, want %q", got, TrustUnavailable)
 	}
-	if r := v.UnavailableReason(); !strings.Contains(r, "root-ca.pem") {
-		t.Errorf("the reason must name the missing file; got %q", r)
+	reason := v.UnavailableReason()
+	if !strings.Contains(reason, "no update trust root") {
+		t.Errorf("the reason must name what is missing, got %q", reason)
+	}
+	if !strings.Contains(reason, "pki-init.sh") {
+		t.Errorf("the reason must name the fix, got %q", reason)
 	}
 }
 
-// An unparseable root CA used to be a hard error that the api turned into
-// log.Fatalf. On an appliance (Restart=always, read-only rootfs) a process that
-// will not start is unreachable and unfixable — #89. So it degrades to the same
-// unavailable posture as a missing file: nothing verifies, the api still boots.
+// An unparseable root is a configuration fault reported once at startup, not a
+// per-upload verification failure that reads like a bad artifact.
 func TestNewVerifier_BadPEMIsUnavailableNotFatal(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "root-ca.pem"), []byte("not a pem"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, RootCAName), []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	v := NewVerifier(dir)
 	if v.Available() {
-		t.Fatal("an unparseable root CA must not yield a usable verifier")
+		t.Fatal("a garbage root CA produced an available verifier")
 	}
-	if r := v.UnavailableReason(); !strings.Contains(r, "root-ca.pem") {
-		t.Errorf("the reason must name the file; got %q", r)
+	if !strings.Contains(v.UnavailableReason(), "no certificates parsed") {
+		t.Errorf("reason = %q", v.UnavailableReason())
 	}
 }
 
-// The zero value is the last line of defence: a Verifier nobody constructed
-// through a constructor must still refuse.
+// The zero value is what a struct literal or a forgotten constructor produces.
+// It must refuse like any other unavailable verifier rather than sail through.
 func TestZeroValueVerifierRefuses(t *testing.T) {
 	var v Verifier
 	if v.Available() {
-		t.Fatal("the zero-value Verifier must not be available")
+		t.Fatal("the zero-value Verifier is available")
 	}
-	if _, _, err := v.Verify(strings.NewReader("{}"), FormatRaspbundle); !errors.Is(err, ErrTrustUnavailable) {
-		t.Errorf("want ErrTrustUnavailable, got %v", err)
-	}
-}
-
-// ============================================================================
-// Verify: mock format with trust configured
-// ============================================================================
-
-func TestVerify_MockBundle_Valid(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
-	manifest := proto.BundleManifest{
-		Version:      "2026.05.30",
-		Compatible:   "rasputin-rpi-arm64",
-		Architecture: "arm64",
-	}
-	payload := []byte("hello world bundle")
-	buf := pki.buildMockBundle(t, manifest, payload)
-
-	got, shaHex, err := v.Verify(strings.NewReader(string(buf)), FormatRaspbundle)
-	if err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-	if got.Version != manifest.Version {
-		t.Errorf("Version: got %q", got.Version)
-	}
-	if got.SignedBy != "Rasputin Build Signer" {
-		t.Errorf("SignedBy: got %q", got.SignedBy)
-	}
-	// sha256 should be over the whole envelope buf.
-	sum := sha256.Sum256(buf)
-	if shaHex != hex.EncodeToString(sum[:]) {
-		t.Errorf("sha mismatch")
-	}
-	if got.SizeBytes != int64(len(buf)) {
-		t.Errorf("SizeBytes: got %d want %d", got.SizeBytes, len(buf))
-	}
-}
-
-func TestVerify_MockBundle_TamperedPayload(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
-	manifest := proto.BundleManifest{Version: "1", Compatible: "rasputin-rpi-arm64", Architecture: "arm64"}
-	buf := pki.buildMockBundle(t, manifest, []byte("original"))
-
-	// Decode → flip payload → re-encode, leaving signature intact.
-	var env raspbundleEnvelope
-	if err := json.Unmarshal(buf, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	env.Payload = hex.EncodeToString([]byte("TAMPERED"))
-	tampered, _ := json.Marshal(env)
-
-	if _, _, err := v.Verify(strings.NewReader(string(tampered)), FormatRaspbundle); err == nil {
-		t.Error("want error for tampered payload, got nil")
-	}
-}
-
-func TestVerify_MockBundle_BadCertChain(t *testing.T) {
-	// PKI A signs; verifier trusts PKI B's root → chain verify should fail.
-	pkiA := newPKI(t)
-	pkiB := newPKI(t)
-	manifest := proto.BundleManifest{Version: "1", Compatible: "x", Architecture: "arm64"}
-	buf := pkiA.buildMockBundle(t, manifest, []byte("payload"))
-	v := NewVerifier(pkiB.trustDir)
-
-	if _, _, err := v.Verify(strings.NewReader(string(buf)), FormatRaspbundle); err == nil {
-		t.Error("want chain-verify error")
-	}
-}
-
-func TestVerify_MockBundle_MissingManifestVersion(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
-	buf := pki.buildMockBundle(t, proto.BundleManifest{}, []byte("x"))
-	if _, _, err := v.Verify(strings.NewReader(string(buf)), FormatRaspbundle); err == nil {
-		t.Error("want error: manifest.version required")
-	}
-}
-
-func TestVerify_MockBundle_NoCert(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
-	buf := pki.buildMockBundle(t, proto.BundleManifest{Version: "1", Architecture: "arm64", Compatible: "x"}, []byte("x"))
-	// Strip the cert PEM.
-	var env raspbundleEnvelope
-	_ = json.Unmarshal(buf, &env)
-	env.CertPEM = ""
-	stripped, _ := json.Marshal(env)
-	if _, _, err := v.Verify(strings.NewReader(string(stripped)), FormatRaspbundle); err == nil {
-		t.Error("want error for missing cert")
-	}
-}
-
-// ============================================================================
-// Verify: no trust root (fail closed) and the explicit dev opt-in
-// ============================================================================
-
-// REPLACES TestVerify_NoTrustReturnsUnverified, which asserted the fail-open:
-// a well-formed bundle with no trust root came back with a manifest and a
-// nil error, ready to be stored and installed.
-func TestVerify_NoTrustRootRefusesEveryBundle(t *testing.T) {
-	dir := t.TempDir() // no root pem
-	v := NewVerifier(dir)
-	pki := newPKI(t) // a perfectly valid bundle — signed, chain intact
-	manifest := proto.BundleManifest{Version: "1", Compatible: "x", Architecture: "arm64"}
-	buf := pki.buildMockBundle(t, manifest, []byte("any"))
-
-	man, _, err := v.Verify(strings.NewReader(string(buf)), FormatRaspbundle)
-	if err == nil {
-		t.Fatal("a bundle must not verify with no trust root")
-	}
+	_, err := v.VerifyArtifact(fixture(t, "payload.bin"), fixture(t, "payload.bin.sig"))
 	if !errors.Is(err, ErrTrustUnavailable) {
-		t.Errorf("want ErrTrustUnavailable, got %v", err)
+		t.Fatalf("want ErrTrustUnavailable, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "root-ca.pem") {
-		t.Errorf("the error must name the missing trust root; got %v", err)
-	}
-	if man != nil {
-		t.Error("no manifest may be returned when nothing could be verified")
-	}
-	// VerifyFile is the path the api actually calls; it must refuse too.
-	path := filepath.Join(t.TempDir(), "bundle.raspbundle")
-	if err := os.WriteFile(path, buf, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, _, err := v.VerifyFile(path, FormatRaspbundle); !errors.Is(err, ErrTrustUnavailable) {
-		t.Errorf("VerifyFile: want ErrTrustUnavailable, got %v", err)
+	if got := v.UnavailableReason(); got == "" {
+		t.Error("an unavailable verifier must say why")
 	}
 }
 
-// The dev workflow the old fail-open existed to serve is still reachable — by
-// name. RASPUTIN_UPDATE_TRUST=dev-permissive is what the api wires to this.
-func TestNewDevPermissiveVerifier_OptInStillSkipsTheCheck(t *testing.T) {
-	dir := t.TempDir() // no root pem
-	v := NewDevPermissiveVerifier(dir)
-	if !v.Available() || v.Mode() != TrustDevPermissive {
-		t.Fatalf("Mode() = %q, want %q", v.Mode(), TrustDevPermissive)
-	}
-	pki := newPKI(t)
-	manifest := proto.BundleManifest{Version: "1", Compatible: "x", Architecture: "arm64"}
-	buf := pki.buildMockBundle(t, manifest, []byte("any"))
-
-	got, _, err := v.Verify(strings.NewReader(string(buf)), FormatRaspbundle)
+// The happy path, against the artifact and detached signature the release
+// pipeline's own signing command produces.
+func TestVerifyArtifact_PipelineSignature(t *testing.T) {
+	v := NewVerifier(trustDirWith(t, "root-ca.pem"))
+	res, err := v.VerifyArtifact(fixture(t, "payload.bin"), fixture(t, "payload.bin.sig"))
 	if err != nil {
-		t.Fatalf("Verify: %v", err)
+		t.Fatalf("VerifyArtifact: %v", err)
 	}
-	if got.SignedBy != "<unverified>" {
-		t.Errorf("SignedBy: want <unverified>, got %q", got.SignedBy)
+	if res.Signer == "" {
+		t.Error("a verified result must attribute the signature to a leaf")
 	}
-}
-
-// The opt-in is a floor, not a ceiling: where a root CA exists it is loaded and
-// enforced, so setting the dev var on a provisioned box does not weaken it.
-func TestNewDevPermissiveVerifier_StillEnforcesAnExistingRoot(t *testing.T) {
-	pkiA := newPKI(t)
-	pkiB := newPKI(t)
-	v := NewDevPermissiveVerifier(pkiB.trustDir)
-	if v.Mode() != TrustEnforced {
-		t.Fatalf("Mode() = %q, want %q with a root CA present", v.Mode(), TrustEnforced)
-	}
-	buf := pkiA.buildMockBundle(t, proto.BundleManifest{Version: "1", Compatible: "x", Architecture: "arm64"}, []byte("p"))
-	if _, _, err := v.Verify(strings.NewReader(string(buf)), FormatRaspbundle); err == nil {
-		t.Error("a bundle from the wrong PKI must still fail the chain check")
+	if res.DigestAlg != "sha256" {
+		t.Errorf("DigestAlg = %q, want sha256", res.DigestAlg)
 	}
 }
 
-// ============================================================================
-// Verify: real RAUC path is rejected without rauc CLI
-// ============================================================================
-
-func TestVerify_RealRAUCBundleRejected(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
-	// Non-JSON binary content (squashfs-ish prefix), no .raspbundle hint.
-	binBuf := []byte{0x68, 0x73, 0x71, 0x73, 0x00, 0x01, 0x02, 0x03}
-	if _, _, err := v.Verify(strings.NewReader(string(binBuf)), FormatRAUC); err == nil {
-		t.Error("want error for real .raucb without rauc CLI, got nil")
-	}
-}
-
-// ============================================================================
-// VerifyFile
-// ============================================================================
-
-func TestVerifyFile(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
-	manifest := proto.BundleManifest{Version: "9", Compatible: "x", Architecture: "amd64"}
-	buf := pki.buildMockBundle(t, manifest, []byte("file payload"))
-	path := filepath.Join(t.TempDir(), "bundle.raspbundle")
-	if err := os.WriteFile(path, buf, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, _, err := v.VerifyFile(path, FormatRaspbundle)
-	if err != nil {
-		t.Fatalf("VerifyFile: %v", err)
-	}
-	if got.Version != "9" {
-		t.Errorf("Version: got %q", got.Version)
-	}
-}
-
-func TestVerifyFile_NotFound(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
-	if _, _, err := v.VerifyFile(filepath.Join(t.TempDir(), "missing"), FormatRaspbundle); err == nil {
-		t.Error("want error for missing file")
-	}
-}
-
-// ============================================================================
-// VerifyEnvelopeBytes
-// ============================================================================
-
-func TestVerifyEnvelopeBytes(t *testing.T) {
-	pki := newPKI(t)
-	manifest := proto.BundleManifest{Version: "1", Compatible: "x", Architecture: "amd64"}
-	buf := pki.buildMockBundle(t, manifest, []byte("payload"))
-	got, err := VerifyEnvelopeBytes(buf)
-	if err != nil {
-		t.Fatalf("VerifyEnvelopeBytes: %v", err)
-	}
-	if got.Version != "1" {
-		t.Errorf("Version: got %q", got.Version)
-	}
-}
-
-func TestVerifyEnvelopeBytes_NotJSON(t *testing.T) {
-	if _, err := VerifyEnvelopeBytes([]byte("plain text")); err == nil {
-		t.Error("want error for non-JSON bytes")
-	}
-}
-
-// ============================================================================
-// Format is declared, never sniffed
-// ============================================================================
-
-// The format used to be chosen by looking at the bundle's first non-space byte
-// for '{', so a JSON blob selected the raspbundle verifier no matter what the
-// operator or the signed release manifest said the artifact was. Content that
-// picks its own checker is the defect; these cases pin that it cannot.
-func TestVerify_FormatIsNeverInferredFromContent(t *testing.T) {
-	pki := newPKI(t)
-	v := NewVerifier(pki.trustDir)
-	manifest := proto.BundleManifest{Version: "1", Compatible: "x", Architecture: "arm64"}
-	jsonBundle := pki.buildMockBundle(t, manifest, []byte("payload"))
-
-	// A cryptographically VALID raspbundle, declared as a RAUC artifact: the
-	// bytes do not get to re-route themselves to the path that would accept
-	// them. (Under the old sniff this returned a manifest and a nil error.)
-	man, _, err := v.Verify(strings.NewReader(string(jsonBundle)), FormatRAUC)
+// THE PURPOSE SPLIT, on the api's side of it. A catalog bundle is a real,
+// well-formed signature chaining to the same root — the only thing wrong with
+// it is that its signer was never issued to sign an OS artifact. An api that
+// accepted it would let a compromise of catalog CI produce something the
+// update path installs.
+func TestVerifyArtifact_CatalogLeafIsRefused(t *testing.T) {
+	v := NewVerifier(trustDirWith(t, "root-ca.pem"))
+	_, err := v.VerifyArtifact(fixture(t, "payload.bin"), fixture(t, "payload.bin.catalog.sig"))
 	if err == nil {
-		t.Fatal("JSON content must not select the raspbundle path when .raucb was declared")
+		t.Fatal("a catalog-purpose signature was accepted for an OS update artifact")
 	}
-	if man != nil {
-		t.Error("no manifest may come back from a format the caller did not ask for")
-	}
-	if !strings.Contains(err.Error(), "rauc") {
-		t.Errorf("want the .raucb refusal, got %v", err)
-	}
-
-	// An undeclared format is refused rather than guessed — including the zero
-	// value, which is what a caller that forgets the argument would pass.
-	for _, f := range []Format{"", "raspbundle", ".rootfs", ".img.gz"} {
-		if _, _, err := v.Verify(strings.NewReader(string(jsonBundle)), f); err == nil {
-			t.Errorf("format %q must be refused, not guessed", f)
-		}
+	var wrong *artifactsig.ErrWrongPurpose
+	if !errors.As(err, &wrong) {
+		t.Errorf("want ErrWrongPurpose so the fault is distinguishable from a broken signature; got %T: %v", err, err)
 	}
 }
 
-// ============================================================================
-// checkRSA fallback
-// ============================================================================
-
-func TestCheckRSA_NonRSAKey(t *testing.T) {
-	// Build a self-signed ECDSA-like leaf would be heavyweight; just feed a
-	// cert whose PublicKey we synthesize to non-RSA via reflection-of-intent:
-	// easier — pass a cert pointer with a manually replaced PublicKey field.
-	pki := newPKI(t)
-	leaf := *pki.leafCert
-	leaf.PublicKey = "not an rsa pubkey"
-	if err := checkRSA(&leaf, []byte("hash"), []byte("sig")); err == nil {
-		t.Error("want error for non-RSA public key")
+// The retired envelope's chain check passed x509.ExtKeyUsageAny, so a leaf
+// with no stated purpose satisfied it. The detached path requires the release
+// OID and nothing else does.
+func TestVerifyArtifact_GenericCodeSigningLeafIsRefused(t *testing.T) {
+	v := NewVerifier(trustDirWith(t, "root-ca.pem"))
+	if _, err := v.VerifyArtifact(fixture(t, "payload.bin"), fixture(t, "payload.bin.generic.sig")); err == nil {
+		t.Fatal("a leaf carrying only generic codeSigning was accepted for an OS update artifact")
 	}
 }
 
-func TestCheckRSA_ValidSignaturePasses(t *testing.T) {
-	pki := newPKI(t)
-	payload := []byte("payload-bytes")
-	hashed := sha256.Sum256(payload)
-	sig, err := rsa.SignPKCS1v15(rand.Reader, pki.leafKey, crypto.SHA256, hashed[:])
+// A properly signed artifact under someone else's root. Without this, a
+// verifier that parses the CMS and forgets to pin the root passes everything
+// else in this file.
+func TestVerifyArtifact_ForeignRootIsRefused(t *testing.T) {
+	v := NewVerifier(trustDirWith(t, "root-ca.pem"))
+	if _, err := v.VerifyArtifact(fixture(t, "payload.bin"), fixture(t, "payload.bin.other.sig")); err == nil {
+		t.Fatal("a signature under a foreign root was accepted")
+	}
+}
+
+func TestVerifyArtifact_TamperedArtifactIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.ReadFile(fixture(t, "payload.bin"))
 	if err != nil {
-		t.Fatalf("sign: %v", err)
+		t.Fatal(err)
 	}
-	if err := checkRSA(pki.leafCert, hashed[:], sig); err != nil {
-		t.Errorf("checkRSA: want pass, got %v", err)
+	raw[len(raw)/2] ^= 0xFF
+	tampered := filepath.Join(dir, "payload.bin")
+	if err := os.WriteFile(tampered, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v := NewVerifier(trustDirWith(t, "root-ca.pem"))
+	if _, err := v.VerifyArtifact(tampered, fixture(t, "payload.bin.sig")); err == nil {
+		t.Fatal("a flipped byte in the artifact still verified")
+	}
+}
+
+// A missing `.sig` is a hard failure, never a fallback to some weaker check.
+func TestVerifyArtifact_MissingSignatureIsRefused(t *testing.T) {
+	v := NewVerifier(trustDirWith(t, "root-ca.pem"))
+	_, err := v.VerifyArtifact(fixture(t, "payload.bin"), filepath.Join(t.TempDir(), "absent.sig"))
+	if !errors.Is(err, artifactsig.ErrNoSignature) {
+		t.Fatalf("want ErrNoSignature, got %v", err)
+	}
+}
+
+// An unavailable verifier refuses before either file is opened, so an api with
+// no PKI answers "this installation cannot verify" rather than "your artifact
+// is bad" — two different problems with two different fixes.
+func TestVerifyArtifact_NoTrustRootRefusesEverything(t *testing.T) {
+	v := NewVerifier(t.TempDir())
+	_, err := v.VerifyArtifact(fixture(t, "payload.bin"), fixture(t, "payload.bin.sig"))
+	if !errors.Is(err, ErrTrustUnavailable) {
+		t.Fatalf("want ErrTrustUnavailable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no update trust root") {
+		t.Errorf("the refusal must carry the reason, got %v", err)
+	}
+}
+
+// There is no mode that skips the check. This is the assertion that would fail
+// if a permissive verifier were reintroduced: nothing in the package's surface
+// can turn a refusal into a pass.
+func TestVerifier_HasNoPermissivePosture(t *testing.T) {
+	for _, v := range []*Verifier{NewVerifier(t.TempDir()), NewVerifier(trustDirWith(t, "root-ca.pem"))} {
+		if got := v.Mode(); got != TrustEnforced && got != TrustUnavailable {
+			t.Errorf("Mode returned %q — a third posture is back", got)
+		}
+		if v.Available() != v.TrustConfigured() {
+			t.Error("a verifier is available exactly when a trust root is configured; " +
+				"a gap between the two is where a permissive mode lives")
+		}
 	}
 }

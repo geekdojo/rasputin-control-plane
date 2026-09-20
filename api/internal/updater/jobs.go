@@ -256,6 +256,11 @@ func updateDownload(store *Store, cfg Config) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
+		// parseSpec above has already refused an empty BundleSHA256, which is
+		// what keeps ExpectedSHA256 non-empty in the command built below —
+		// agents refuse one without it. TestUpdateDownload_EmptySHAIsRefused
+		// pins that, because the guarantee is now load-bearing at the far end
+		// of the bus rather than merely tidy.
 		bundle, err := store.GetBundle(sc.Ctx, spec.BundleSHA256)
 		if err != nil || bundle == nil {
 			return nil, fmt.Errorf("bundle missing at download time")

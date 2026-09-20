@@ -246,6 +246,27 @@ func TestUpdateDownload_HappyPath(t *testing.T) {
 	}
 }
 
+// A spec with no bundle sha names nothing for the node to check the bytes
+// against. parseSpec refuses it before the step does any work, which is what
+// makes UpdateDownloadCmd.ExpectedSHA256 non-empty by construction — and
+// agents now refuse a command without it, so this became a contract with a far
+// end rather than an internal tidiness. Asserted on the MESSAGE so a later
+// change that lets an empty sha through and fails elsewhere ("bundle missing
+// at download time", which is what an empty sha would otherwise produce) is a
+// failure here rather than a puzzle on a node.
+func TestUpdateDownload_EmptySHAIsRefused(t *testing.T) {
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	sc := newUpdaterCtx("j", specJSON("n", ""), nc)
+	_, err := updateDownload(store, Config{PublicBaseURL: "http://api"})(sc)
+	if err == nil {
+		t.Fatal("a download command with no expected sha was dispatched")
+	}
+	if !strings.Contains(err.Error(), "bundleSha256 is required") {
+		t.Errorf("the refusal must name the spec's missing field, got: %v", err)
+	}
+}
+
 func TestUpdateDownload_BadSpec(t *testing.T) {
 	nc := startNATS(t)
 	store := newStoreFixture(t).store

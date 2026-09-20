@@ -33,10 +33,10 @@ func (s *Server) handleListBundles(w http.ResponseWriter, r *http.Request) {
 	if bs == nil {
 		bs = []*updater.Bundle{}
 	}
-	// trustMode is additive alongside the original bool, which cannot say the
-	// third thing: "no root CA" now means bundles are REFUSED, not merely
-	// unchecked, unless the dev opt-in is set. Those need different words in
-	// front of an operator.
+	// trustMode is additive alongside the original bool: "no root CA" means
+	// artifacts are REFUSED, not merely unchecked, and those need different
+	// words in front of an operator. The third value the field used to carry,
+	// "dev-permissive", is gone with the verifier that had a permissive mode.
 	resp := struct {
 		TrustConfigured bool              `json:"trustConfigured"`
 		TrustMode       string            `json:"trustMode"`
@@ -49,50 +49,242 @@ func (s *Server) handleListBundles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// POST /api/bundles
-// Body: raw bundle bytes. The api parses the manifest, verifies the
-// signature, and stores the file at <bundleDir>/<sha256>. Returns the
-// Bundle row.
+// POST /api/bundles — multipart/form-data.
 //
-// We accept the bundle as the request body directly (not multipart) so
-// curl uploads are trivial: `curl --data-binary @bundle.raspbundle ...`.
+// An operator uploads the ARTIFACT and the DETACHED SIGNATURE the release
+// publishes beside it, which is the pair a node verifies and the pair the
+// pipeline emits. The `.raspbundle` JSON envelope this route used to take is
+// retired: it wrapped the payload in a format only the api understood, left
+// its own manifest unsigned, and needed a verifier of its own — see the type
+// doc on updater.Verifier for why each of those was load-bearing.
+//
+// Parts, and THE ORDER MATTERS:
+//
+//	signature     the detached CMS `.sig`, MUST come first
+//	version       required — the release version this artifact is
+//	architecture  required — arm64 | amd64
+//	compatible    required — the hardware compat string
+//	description   optional — free text
+//	artifact      required, LAST — the artifact bytes
+//
+// The signature is demanded before the artifact for the reason the agent
+// fetches it first (agent/internal/updater/openwrt_ab.go): a missing or
+// unusable `.sig` refuses the upload either way, and taking it first means the
+// refusal costs a kilobyte instead of a gigabyte.
+//
+//	curl -b cookies.txt -X POST http://localhost:8080/api/bundles \
+//	  -F signature=@artifact.sig -F version=2026.09.3 -F architecture=amd64 \
+//	  -F compatible=rasputin-n100 -F artifact=@artifact
+//
+// The declared metadata is the operator's claim about the artifact and is NOT
+// a security control — it never was. The retired envelope carried the same
+// fields inside a manifest its signature did not cover, so they were
+// attacker-chosen in a bundle that verified; now they are operator-chosen in an
+// upload the operator authenticated to make. What the signature decides — that
+// these bytes were published by the holder of the offline Rasputin root, under
+// a leaf issued to sign releases — is checked before the blob is stored.
 func (s *Server) handleUploadBundle(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength > maxBundleSize {
 		writeError(w, http.StatusRequestEntityTooLarge,
 			fmt.Sprintf("bundle too large: %d > %d", r.ContentLength, maxBundleSize))
 		return
 	}
-	// Upload verifies the bundle's own signature + parses its manifest (the
-	// same gate for any operator-supplied bundle).
-	//
-	// The format is declared here, by the ENDPOINT, and is not read out of the
-	// uploaded bytes: this route accepts the .raspbundle JSON envelope, which
-	// is the only format the api can verify host-side (a real .raucb needs the
-	// rauc CLI). The ingest temp file is named ingest-*.bin, so before this
-	// declaration existed the only thing choosing the verification path was the
-	// upload's own first byte.
-	verify := func(tmpPath, sha string) (bundleMeta, error) {
-		man, _, err := s.updaterVerifier.VerifyFile(tmpPath, updater.FormatRaspbundle)
-		if err != nil {
-			return bundleMeta{}, err
-		}
-		return bundleMeta{
-			Version: man.Version, Compatible: man.Compatible, Architecture: man.Architecture,
-			Description: man.Description, BuildDate: man.BuildDate, SignedBy: man.SignedBy,
-		}, nil
-	}
-	bundle, created, err := s.ingestBundle(r.Context(), r.Body, creator(r), verify)
-	if err != nil {
-		writeError(w, ingestStatus(err), err.Error())
+	// Refuse before reading anything if this api cannot verify at all, so an
+	// operator on a box with no trust root is told to fix the installation
+	// rather than being told their artifact is bad after uploading it.
+	if !s.updaterVerifier.Available() {
+		writeError(w, http.StatusServiceUnavailable,
+			updater.ErrTrustUnavailable.Error()+": "+s.updaterVerifier.UnavailableReason())
 		return
 	}
-	if !created {
-		// Bundle content is hash-keyed; an upload of an existing one is a dup.
-		writeError(w, http.StatusConflict, "bundle already exists: "+bundle.SHA256)
+
+	mr, err := r.MultipartReader()
+	if err != nil {
+		writeError(w, http.StatusBadRequest,
+			"this endpoint takes multipart/form-data with a `signature` part, the `version`, "+
+				"`architecture` and `compatible` fields, and the `artifact` part last: "+err.Error())
+		return
+	}
+
+	var (
+		sigDER []byte
+		meta   bundleMeta
+		bundle *updater.Bundle
+		seen   bool
+	)
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "read upload: "+err.Error())
+			return
+		}
+		switch part.FormName() {
+		case "signature":
+			sigDER, err = readDetachedSignature(part)
+			_ = part.Close()
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "signature part: "+err.Error())
+				return
+			}
+		case "version", "architecture", "compatible", "description":
+			val, err := io.ReadAll(io.LimitReader(part, maxUploadFieldBytes+1))
+			_ = part.Close()
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "read "+part.FormName()+": "+err.Error())
+				return
+			}
+			if len(val) > maxUploadFieldBytes {
+				writeError(w, http.StatusBadRequest, part.FormName()+" is too long")
+				return
+			}
+			switch part.FormName() {
+			case "version":
+				meta.Version = strings.TrimSpace(string(val))
+			case "architecture":
+				meta.Architecture = strings.TrimSpace(string(val))
+			case "compatible":
+				meta.Compatible = strings.TrimSpace(string(val))
+			case "description":
+				meta.Description = strings.TrimSpace(string(val))
+			}
+		case "artifact":
+			// Everything the verify callback needs must already be in hand:
+			// this part is streamed straight to disk and cannot be rewound.
+			if msg := missingUploadField(sigDER, meta); msg != "" {
+				_ = part.Close()
+				writeError(w, http.StatusBadRequest, msg)
+				return
+			}
+			bundle, err = s.ingestSignedArtifact(r.Context(), part, creator(r), sigDER, meta)
+			_ = part.Close()
+			if err != nil {
+				writeError(w, ingestStatus(err), err.Error())
+				return
+			}
+			seen = true
+		default:
+			_ = part.Close()
+			writeError(w, http.StatusBadRequest, "unexpected part "+part.FormName())
+			return
+		}
+	}
+	if !seen {
+		writeError(w, http.StatusBadRequest, "the upload carried no `artifact` part")
 		return
 	}
 	writeJSON(w, http.StatusCreated, bundle)
 }
+
+// maxUploadFieldBytes bounds one metadata form field. Version strings and
+// compat strings are tens of bytes; a kilobyte is room to spare and still
+// refuses a field used as a smuggling channel.
+const maxUploadFieldBytes = 1 << 10
+
+// readDetachedSignature reads a `.sig` part whole, capped. A real one is
+// ~1.6 KiB, so it is never streamed.
+func readDetachedSignature(r io.Reader) ([]byte, error) {
+	der, err := io.ReadAll(io.LimitReader(r, maxSigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(der) == 0 {
+		return nil, errors.New("the signature is empty")
+	}
+	if len(der) > maxSigBytes {
+		return nil, fmt.Errorf("the signature exceeds %d bytes", maxSigBytes)
+	}
+	return der, nil
+}
+
+// missingUploadField names the first required part or field the upload did not
+// carry, or "" when all are present. One message per fault, naming the field,
+// because "bad request" on a six-part form is not actionable.
+func missingUploadField(sigDER []byte, meta bundleMeta) string {
+	switch {
+	case len(sigDER) == 0:
+		return "the `signature` part must be sent BEFORE the `artifact` part; " +
+			"nothing was received to verify the artifact against"
+	case meta.Version == "":
+		return "the `version` field is required"
+	case meta.Architecture == "":
+		return "the `architecture` field is required"
+	case meta.Compatible == "":
+		return "the `compatible` field is required"
+	}
+	return ""
+}
+
+// ingestSignedArtifact stores the artifact, but only after its detached
+// signature verifies against it. The signature is written to a temp sidecar so
+// the verifier reads the same pair of files a node will, then moved next to the
+// blob once both are known good.
+func (s *Server) ingestSignedArtifact(
+	ctx context.Context, src io.Reader, uploadedBy string, sigDER []byte, meta bundleMeta,
+) (*updater.Bundle, error) {
+	var sigTmp string
+	verify := func(tmpPath, sha string) (bundleMeta, error) {
+		// The verifier reads the signature off disk, as it does on a node, so
+		// the uploaded DER gets a file of its own next to the artifact's temp.
+		// Named by CreateTemp rather than built from tmpPath: the two are
+		// equivalent here, and a path nobody constructs is a path nobody has
+		// to reason about.
+		f, err := os.CreateTemp(filepath.Dir(tmpPath), "ingest-sig-*.sig")
+		if err != nil {
+			return bundleMeta{}, fmt.Errorf("stage signature for verification: %w", err)
+		}
+		sigTmp = f.Name()
+		if _, err := f.Write(sigDER); err != nil {
+			_ = f.Close()
+			return bundleMeta{}, fmt.Errorf("stage signature for verification: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return bundleMeta{}, fmt.Errorf("stage signature for verification: %w", err)
+		}
+		res, err := s.updaterVerifier.VerifyArtifact(tmpPath, sigTmp)
+		if err != nil {
+			return bundleMeta{}, err
+		}
+		// SignedBy is the verified leaf's CN — attribution that was CHECKED,
+		// not a string copied out of the upload.
+		out := meta
+		out.SignedBy = res.Signer
+		return out, nil
+	}
+	// sigTmp is only known after the callback has run, so the cleanup is
+	// deferred once, here, and reads the variable at return time.
+	defer func() {
+		if sigTmp != "" {
+			_ = os.Remove(sigTmp)
+		}
+	}()
+
+	bundle, created, err := s.ingestBundle(ctx, src, uploadedBy, verify)
+	if err != nil {
+		return nil, err
+	}
+	if !created {
+		// Bundle content is hash-keyed; an upload of an existing one is a dup.
+		return nil, errBundleConflict{sha: bundle.SHA256}
+	}
+	// The verified signature goes beside the blob, where the agent fetches it
+	// from /api/bundles/{sha}/sig and re-verifies it against the root baked
+	// into its own image. Failing to place it fails the upload: a bundle whose
+	// signature is missing looks ready and refuses at the last step on the node.
+	if err := s.writeBundleSignature(bundle.SHA256, sigDER); err != nil {
+		_ = s.updater.DeleteBundle(ctx, bundle.SHA256)
+		_ = os.Remove(bundle.StoragePath)
+		return nil, fmt.Errorf("stage signature beside the bundle: %w", err)
+	}
+	return bundle, nil
+}
+
+// errBundleConflict is a duplicate upload — the same bytes are already stored.
+type errBundleConflict struct{ sha string }
+
+func (e errBundleConflict) Error() string { return "bundle already exists: " + e.sha }
 
 // bundleMeta is the metadata persisted for an ingested bundle, returned by an
 // ingest verify callback.
@@ -116,6 +308,10 @@ func ingestStatus(err error) int {
 	// fine and the trust root is missing.
 	if errors.Is(err, updater.ErrTrustUnavailable) {
 		return http.StatusServiceUnavailable
+	}
+	var dup errBundleConflict
+	if errors.As(err, &dup) {
+		return http.StatusConflict
 	}
 	var ve errBundleVerify
 	if errors.As(err, &ve) {
@@ -236,13 +432,21 @@ func (s *Server) stageBundleSignature(ctx context.Context, sigURL, sha string) e
 	if len(der) > maxSigBytes {
 		return fmt.Errorf("signature asset exceeds %d bytes", maxSigBytes)
 	}
-	// Write-then-rename: a half-written .sig beside a complete blob would fail
-	// verification on the node and read exactly like tampering.
+	return s.writeBundleSignature(sha, der)
+}
+
+// writeBundleSignature puts a detached signature beside its content-addressed
+// blob, atomically. Shared by the pull path and the operator upload so the two
+// cannot drift on where a `.sig` lands or on how it gets there.
+//
+// Write-then-rename: a half-written `.sig` beside a complete blob would fail
+// verification on the node and read exactly like tampering.
+func (s *Server) writeBundleSignature(sha string, der []byte) error {
 	tmp, err := os.CreateTemp(s.bundleDir, "sig-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create tmp: %w", err)
 	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
+	defer func() { _ = os.Remove(tmp.Name()) }() // no-op after a successful rename
 	if _, err := tmp.Write(der); err != nil {
 		_ = tmp.Close() // the write already failed; the deferred Remove is the cleanup
 		return fmt.Errorf("write tmp: %w", err)
@@ -310,8 +514,12 @@ func (s *Server) handleGetBundle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", b.SizeBytes))
 	w.Header().Set("X-Bundle-Version", b.Version)
 	w.Header().Set("X-Bundle-Architecture", b.Architecture)
+	// No extension: the store holds whatever the release publishes — a RAUC
+	// `.raucb`, the firewall's bare `.rootfs`, whatever comes next — and the
+	// row records none of them. This said `.raspbundle` for every pulled
+	// `.raucb` too, which was a filename that described nothing on disk.
 	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`attachment; filename="rasputin-%s-%s.raspbundle"`, b.Version, b.Architecture))
+		fmt.Sprintf(`attachment; filename="rasputin-%s-%s"`, b.Version, b.Architecture))
 	http.ServeContent(w, r, b.SHA256, b.UploadedAt, f)
 }
 
@@ -678,28 +886,19 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 			if sha != wantSHA {
 				return bundleMeta{}, fmt.Errorf("sha256 mismatch: downloaded %s, manifest says %s", sha, wantSHA)
 			}
-			meta := bundleMeta{
+			// Version, compat, arch and signer come from the SIGNED release
+			// manifest, and the sha compare above pins these bytes to it. The
+			// artifact itself is re-verified where it is installed: RAUC checks
+			// the OS bundle's embedded signature against the same baked root,
+			// and the firewall verifies the detached `.sig` staged below. The
+			// api deliberately does not stand in for either — see
+			// stageBundleSignature for why a check here would be performed by
+			// the component the gate defends against.
+			return bundleMeta{
 				Version: info.Version, Compatible: art.Compatible, Architecture: art.Architecture,
 				BuildDate: art.BuildDate, SignedBy: art.SignedBy,
 				Description: "pulled from " + channel + " channel",
-			}
-			// Mock bundles (dev/CI) get the full host-side signature gate. Real
-			// .raucb / .rootfs artifacts are sha-pinned by the signed manifest
-			// here and re-verified on the target node at install (RAUC for the OS;
-			// the firewall's detached-CMS verify hook is a follow-up) — host-side
-			// bundle verify needs the rauc CLI and lands with that work.
-			if strings.HasSuffix(assetName, string(updater.FormatRaspbundle)) {
-				// assetName comes from the SIGNED release manifest, not from
-				// the downloaded bytes — so the format declared here is one the
-				// artifact cannot choose for itself.
-				man, _, err := s.updaterVerifier.VerifyFile(tmpPath, updater.FormatRaspbundle)
-				if err != nil {
-					return bundleMeta{}, err
-				}
-				meta.Version, meta.Compatible, meta.Architecture = man.Version, man.Compatible, man.Architecture
-				meta.SignedBy, meta.BuildDate = man.SignedBy, man.BuildDate
-			}
-			return meta, nil
+			}, nil
 		}
 		bundle, created, err := s.ingestBundle(r.Context(), rc, "update-check", verify)
 		rc.Close()

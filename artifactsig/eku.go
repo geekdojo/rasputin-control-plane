@@ -83,61 +83,32 @@ func (e *ErrWrongPurpose) Error() string {
 }
 
 // authorizePurpose reports whether a verified leaf may sign the given class of
-// artifact.
+// artifact. The ONLY way to be authorized is to carry the purpose OID.
 //
-// TRANSITIONAL, AND THE TRANSITION IS THE DANGEROUS PART. Every leaf minted
-// before 2026-08-19 — including leaf-001, which signed every artifact currently
-// in the field — carries only the generic codeSigning EKU and none of the OIDs
-// above. A verifier that simply demanded OIDCodeSigningRelease would reject
-// every release already published and brick OTA for the whole fleet, which is a
-// worse outcome than the hole it closes.
+// THE TRANSITIONAL ALLOWANCE IS GONE. Until this change a leaf carrying the
+// generic codeSigning EKU and no Rasputin purpose OID at all was accepted for
+// the RELEASE purpose, because #192 landed while leaf-001 — which had signed
+// every artifact then in the field — was still the signing leaf, and demanding
+// the OID would have made every published release uninstallable.
 //
-// So a bare generic codeSigning leaf is accepted for the RELEASE purpose only.
-// It is NOT accepted for the catalog purpose: no catalog leaf exists yet, so
-// nothing legitimate needs that allowance, and granting it would let the legacy
-// leaf sign catalog bundles for no reason.
+// ADR-0006's revisit criterion for that allowance was "leaf-001 rotates". It
+// has: `Rasputin Bundle Signing leaf-003` (notBefore 2026-08-21) signs every
+// release from 2026.08.4 onward, and it carries
+// `1.3.6.1.4.1.66587.1.1.1` — OIDCodeSigningRelease — explicitly, alongside
+// codeSigning and emailProtection (scripts/pki-init.sh EKU_RELEASE mints
+// exactly that, so a dev box's own leaf qualifies too).
 //
-// This loosening must die when leaf-001 rotates. It is written into ADR-0006's
-// revisit criteria rather than left as a comment nobody re-reads, because a
-// transitional allowance with no expiry is just the permanent rule with an
-// apology attached.
+// Deleting the allowance therefore changes the verdict on nothing that was
+// ever published. `Rasputin Release Leaf 001` carries NO extendedKeyUsage
+// extension whatsoever — not even generic codeSigning — so hasGenericCodeSigning
+// was already false for it and artifacts it signed were already refused here.
+// The allowance was a door that nothing walked through, which is the only kind
+// worth deleting quietly.
 func authorizePurpose(leaf *x509.Certificate, want asn1.ObjectIdentifier) error {
 	for _, oid := range leaf.UnknownExtKeyUsage {
 		if oid.Equal(want) {
 			return nil
 		}
 	}
-
-	if want.Equal(OIDCodeSigningRelease) && hasGenericCodeSigning(leaf) && !hasAnyRasputinPurpose(leaf) {
-		// Legacy leaf: generic codeSigning and no explicit purpose at all.
-		return nil
-	}
-
 	return &ErrWrongPurpose{Signer: leaf.Subject.CommonName, Want: want}
-}
-
-func hasGenericCodeSigning(leaf *x509.Certificate) bool {
-	for _, u := range leaf.ExtKeyUsage {
-		if u == x509.ExtKeyUsageCodeSigning {
-			return true
-		}
-	}
-	return false
-}
-
-// hasAnyRasputinPurpose distinguishes a LEGACY leaf (generic codeSigning, no
-// explicit purpose) from a MODERN one that was deliberately issued for a
-// different purpose. Without this, a catalog leaf that also carried generic
-// codeSigning would slip through the legacy allowance and defeat the split.
-func hasAnyRasputinPurpose(leaf *x509.Certificate) bool {
-	for _, oid := range leaf.UnknownExtKeyUsage {
-		// >= not >: a leaf carrying the BARE arc with no purpose suffix is still
-		// a leaf someone deliberately issued under Rasputin's arc, so it must
-		// not fall back to the legacy allowance. Using > left that as a way to
-		// carry a Rasputin-arc EKU and still be treated as a pre-#192 leaf.
-		if len(oid) >= len(OIDGeekdojo) && oid[:len(OIDGeekdojo)].Equal(OIDGeekdojo) {
-			return true
-		}
-	}
-	return false
 }

@@ -265,6 +265,12 @@ func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, 
 		return "", "", fmt.Errorf("openwrt-ab download: the control plane sent no signature URL for bundle %s; "+
 			"this node will not install an unsigned artifact — update the control plane", bundleID)
 	}
+	// Checked here for the same reason and in the same breath: the signature
+	// and the stated hash are the two things the artifact gets measured
+	// against, and neither may be absent.
+	if err := requireExpectedSHA(bundleID, expectedSHA); err != nil {
+		return "", "", fmt.Errorf("openwrt-ab download: %w", err)
+	}
 	if err := o.downloadSignature(ctx, sigURL, artifactsig.SigPathFor(dest)); err != nil {
 		return "", "", err
 	}
@@ -318,7 +324,10 @@ func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, 
 		return "", "", err
 	}
 	observed := hex.EncodeToString(h.Sum(nil))
-	if expectedSHA != "" && observed != expectedSHA {
+	// Unconditional: requireExpectedSHA above has already refused an empty or
+	// malformed hash, so there is no longer a value of expectedSHA that turns
+	// this compare off.
+	if observed != expectedSHA {
 		return "", observed, fmt.Errorf("sha mismatch")
 	}
 	if err := os.Rename(tmp.Name(), dest); err != nil {

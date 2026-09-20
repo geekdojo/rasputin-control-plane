@@ -72,7 +72,7 @@ func fakeReleaseServerOpts(t *testing.T, bundle []byte, bundleSHA string, opts f
 			"tag_name": "2026.06.0-dev.99", "prerelease": true,
 			"assets": []map[string]any{
 				{"name": "manifest.json", "browser_download_url": base + "/os-manifest"},
-				{"name": "bundle.raspbundle", "browser_download_url": base + "/os-asset"},
+				{"name": "bundle.raucb", "browser_download_url": base + "/os-asset"},
 			},
 		}})
 	})
@@ -91,7 +91,7 @@ func fakeReleaseServerOpts(t *testing.T, bundle []byte, bundleSHA string, opts f
 			Version: "2026.06.0-dev.99", Channel: "dev",
 			Artifacts: []releases.ManifestArtifact{{
 				SKU: "n100", Architecture: "amd64", Compatible: "rasputin-n100",
-				Raucb: "bundle.raspbundle", SHA256: bundleSHA, SizeBytes: int64(len(bundle)),
+				Raucb: "bundle.raucb", SHA256: bundleSHA, SizeBytes: int64(len(bundle)),
 				SignedBy: "Rasputin Release 2026.06.0-dev.99",
 			}},
 		})
@@ -203,7 +203,7 @@ func mixedArchReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *http
 			"tag_name": "2026.06.0-dev.99", "prerelease": true,
 			"assets": []map[string]any{
 				{"name": "manifest.json", "browser_download_url": base + "/os-manifest"},
-				{"name": "bundle.raspbundle", "browser_download_url": base + "/os-asset"},
+				{"name": "bundle.raucb", "browser_download_url": base + "/os-asset"},
 			},
 		}})
 	})
@@ -213,12 +213,12 @@ func mixedArchReleaseServer(t *testing.T, bundle []byte, bundleSHA string) *http
 			Artifacts: []releases.ManifestArtifact{
 				{
 					SKU: "n100", Architecture: "amd64", Compatible: "rasputin-n100",
-					Raucb: "bundle.raspbundle", SHA256: bundleSHA, SizeBytes: int64(len(bundle)),
+					Raucb: "bundle.raucb", SHA256: bundleSHA, SizeBytes: int64(len(bundle)),
 					SignedBy: "Rasputin Release 2026.06.0-dev.99",
 				},
 				{
 					SKU: "rpi", Architecture: "arm64", Compatible: "rasputin-rpi-arm64",
-					Raucb: "missing-arm64.raspbundle", SHA256: strings.Repeat("b", 64), SizeBytes: 4096,
+					Raucb: "missing-arm64.raucb", SHA256: strings.Repeat("b", 64), SizeBytes: 4096,
 				},
 			},
 		})
@@ -298,9 +298,9 @@ func TestPullUpdate_NothingStagedIsStillAFailureWithDetail(t *testing.T) {
 			Version: "2026.06.0-dev.99", Channel: "dev",
 			Artifacts: []releases.ManifestArtifact{
 				{SKU: "n100", Architecture: "amd64", Compatible: "rasputin-n100",
-					Raucb: "gone-amd64.raspbundle", SHA256: strings.Repeat("a", 64)},
+					Raucb: "gone-amd64.raucb", SHA256: strings.Repeat("a", 64)},
 				{SKU: "rpi", Architecture: "arm64", Compatible: "rasputin-rpi-arm64",
-					Raucb: "gone-arm64.raspbundle", SHA256: strings.Repeat("b", 64)},
+					Raucb: "gone-arm64.raucb", SHA256: strings.Repeat("b", 64)},
 			},
 		})
 	})

@@ -264,8 +264,7 @@ function StepBody({
           preinstalled — if you&apos;re seeing this on a real system, re-flash the OS image
           (images from 2026.06.0-dev.12 onward wire it up automatically). Developing locally? Run{' '}
           <Mono>./scripts/pki-init.sh</Mono> and copy <Mono>root-ca.pem</Mono> into <Mono>data/trust/</Mono>,
-          then restart the api — or start it with <Mono>RASPUTIN_UPDATE_TRUST=dev-permissive</Mono> to
-          work without a PKI.
+          then restart the api. There is no mode that skips the check.
         </Hint>
       );
     default:

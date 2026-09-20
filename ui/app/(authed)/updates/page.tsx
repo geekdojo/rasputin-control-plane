@@ -171,14 +171,7 @@ export default function UpdatesPage() {
             <strong>refused</strong> — nothing stages or installs until it is in place. On Rasputin hardware
             this ships in the OS image; if you&apos;re seeing this on an appliance, re-flash. Developing
             locally? Run <Tok>./scripts/pki-init.sh</Tok>, copy <Tok>root-ca.pem</Tok> into the trust dir and
-            restart the api — or start it with <Tok>RASPUTIN_UPDATE_TRUST=dev-permissive</Tok> to work without
-            a PKI.
-          </Hint>
-        )}
-        {trustMode === 'dev-permissive' && (
-          <Hint warn style={{ marginBottom: 14 }}>
-            ⚠ <Tok>RASPUTIN_UPDATE_TRUST=dev-permissive</Tok> — bundle signatures are <strong>not checked</strong>{' '}
-            and everything staged here is recorded as <Tok>&lt;unverified&gt;</Tok>. Dev boxes only.
+            restart the api. There is no mode that skips the check.
           </Hint>
         )}
         {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}
@@ -471,48 +464,106 @@ function AdvancedUpload({ onUploaded }: { onUploaded: (b: Bundle) => void }) {
 function UploadBundleForm({ onUploaded }: { onUploaded: (b: Bundle) => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [artifact, setArtifact] = useState<File | null>(null);
+  const [signature, setSignature] = useState<File | null>(null);
+  const [version, setVersion] = useState('');
+  const [architecture, setArchitecture] = useState('amd64');
+  const [compatible, setCompatible] = useState('');
 
-  async function handle(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const ready = artifact !== null && signature !== null && version !== '' && compatible !== '';
+
+  async function submit() {
+    if (!artifact || !signature) return;
     setBusy(true);
     setErr(null);
     try {
-      onUploaded(await uploadBundle(file));
+      onUploaded(await uploadBundle({ artifact, signature, version, architecture, compatible }));
+      setArtifact(null);
+      setSignature(null);
+      setVersion('');
+      setCompatible('');
     } catch (e2) {
       setErr(String(e2));
     } finally {
       setBusy(false);
-      e.target.value = '';
     }
   }
+
+  const pickStyle = {
+    ...fieldStyle,
+    display: 'inline-flex' as const,
+    alignItems: 'center' as const,
+    gap: 6,
+    width: 'fit-content' as const,
+    color: ACCENT,
+    border: `1px solid ${accentA(0.35)}`,
+    background: accentA(0.08),
+    fontSize: 10,
+    letterSpacing: '0.08em',
+    cursor: busy ? ('not-allowed' as const) : ('pointer' as const),
+    opacity: busy ? 0.5 : 1,
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <Hint>
-        only needed for air-gapped installs or a locally built bundle — produce a <Tok>.raspbundle</Tok> with{' '}
-        <Tok>scripts/build-bundle.sh</Tok>, then upload it
+        only needed for air-gapped installs — upload the release artifact together with the detached
+        signature published beside it (<Tok>&lt;artifact&gt;.sig</Tok>). Both come straight off the
+        release; the api verifies the pair against the trust root before it stores anything.
       </Hint>
-      <label
-        style={{
-          ...fieldStyle,
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          width: 'fit-content',
-          color: ACCENT,
-          border: `1px solid ${accentA(0.35)}`,
-          background: accentA(0.08),
-          fontSize: 10,
-          letterSpacing: '0.08em',
-          cursor: busy ? 'not-allowed' : 'pointer',
-          opacity: busy ? 0.5 : 1,
-        }}
-      >
-        <UploadCloud size={11} />
-        {busy ? 'UPLOADING…' : 'UPLOAD BUNDLE'}
-        <input type="file" onChange={handle} disabled={busy} aria-label="Upload bundle" style={{ display: 'none' }} />
-      </label>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <label style={pickStyle}>
+          <UploadCloud size={11} />
+          {artifact ? artifact.name : 'CHOOSE ARTIFACT'}
+          <input
+            type="file"
+            onChange={(e) => setArtifact(e.target.files?.[0] ?? null)}
+            disabled={busy}
+            aria-label="Artifact"
+            style={{ display: 'none' }}
+          />
+        </label>
+        <label style={pickStyle}>
+          <UploadCloud size={11} />
+          {signature ? signature.name : 'CHOOSE .SIG'}
+          <input
+            type="file"
+            onChange={(e) => setSignature(e.target.files?.[0] ?? null)}
+            disabled={busy}
+            aria-label="Detached signature"
+            style={{ display: 'none' }}
+          />
+        </label>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <input
+          style={{ ...fieldStyle, fontSize: 10 }}
+          value={version}
+          placeholder="version, e.g. 2026.09.3"
+          aria-label="Version"
+          disabled={busy}
+          onChange={(e) => setVersion(e.target.value.trim())}
+        />
+        <input
+          style={{ ...fieldStyle, fontSize: 10 }}
+          value={architecture}
+          placeholder="architecture"
+          aria-label="Architecture"
+          disabled={busy}
+          onChange={(e) => setArchitecture(e.target.value.trim())}
+        />
+        <input
+          style={{ ...fieldStyle, fontSize: 10 }}
+          value={compatible}
+          placeholder="compatible, e.g. rasputin-fw-n100"
+          aria-label="Compatible"
+          disabled={busy}
+          onChange={(e) => setCompatible(e.target.value.trim())}
+        />
+      </div>
+      <Btn variant="primary" small disabled={busy || !ready} onClick={submit}>
+        <UploadCloud size={10} /> {busy ? 'UPLOADING…' : 'UPLOAD BUNDLE'}
+      </Btn>
       {err && <span style={{ color: '#f87171', fontSize: 10, fontFamily: MONO }}>{err}</span>}
     </div>
   );

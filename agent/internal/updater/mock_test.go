@@ -224,7 +224,7 @@ func TestDownload_HTTPErrorBubbles(t *testing.T) {
 	}))
 	defer srv.Close()
 	mb := newUpdaterMock(t)
-	if _, _, err := mb.Download(context.Background(), "b3", srv.URL, "", "", 0, nil); err == nil {
+	if _, _, err := mb.Download(context.Background(), "b3", srv.URL, "", wellFormedSHA, 0, nil); err == nil {
 		t.Errorf("expected error on HTTP 500")
 	}
 }
@@ -232,7 +232,7 @@ func TestDownload_HTTPErrorBubbles(t *testing.T) {
 func TestDownload_FailModeEnvErrors(t *testing.T) {
 	t.Setenv("RASPUTIN_UPDATE_FAIL_MODE", "download")
 	mb := newUpdaterMock(t)
-	if _, _, err := mb.Download(context.Background(), "b4", "http://unused", "", "", 0, nil); err == nil {
+	if _, _, err := mb.Download(context.Background(), "b4", "http://unused", "", wellFormedSHA, 0, nil); err == nil {
 		t.Errorf("expected fail-mode error")
 	}
 }
@@ -240,7 +240,7 @@ func TestDownload_FailModeEnvErrors(t *testing.T) {
 func TestDownload_BadURLErrors(t *testing.T) {
 	mb := newUpdaterMock(t)
 	// Invalid URL — NewRequestWithContext should reject.
-	if _, _, err := mb.Download(context.Background(), "b5", "::not-a-url::", "", "", 0, nil); err == nil {
+	if _, _, err := mb.Download(context.Background(), "b5", "::not-a-url::", "", wellFormedSHA, 0, nil); err == nil {
 		t.Errorf("expected URL parse error")
 	}
 }

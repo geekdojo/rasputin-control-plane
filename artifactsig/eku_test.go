@@ -46,38 +46,45 @@ func TestAuthorize_ReleaseLeafCannotSignCatalog(t *testing.T) {
 	}
 }
 
-// leaf-001 signed everything currently in the field and carries only generic
-// codeSigning. Rejecting it would brick OTA for the whole fleet, which is worse
-// than the hole being closed.
-func TestAuthorize_LegacyLeafStillSignsReleases(t *testing.T) {
-	legacy := leafWith([]x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}, nil)
-	if err := authorizePurpose(legacy, OIDCodeSigningRelease); err != nil {
-		t.Fatalf("the deployed legacy leaf must keep working: %v", err)
+// THE ALLOWANCE IS DELETED. A leaf carrying generic codeSigning and no
+// Rasputin purpose OID used to be accepted for the release purpose while
+// leaf-001 was still signing. leaf-001 has rotated — leaf-003 carries
+// OIDCodeSigningRelease explicitly on every release from 2026.08.4 onward —
+// so the purpose OID is now the only way in, for either purpose.
+func TestAuthorize_GenericCodeSigningIsNotEnough(t *testing.T) {
+	for _, want := range []asn1.ObjectIdentifier{OIDCodeSigningRelease, OIDCodeSigningCatalog} {
+		generic := leafWith([]x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}, nil)
+		err := authorizePurpose(generic, want)
+		if err == nil {
+			t.Fatalf("generic codeSigning was accepted for %s — the legacy allowance is back", want)
+		}
+		var wrong *ErrWrongPurpose
+		if !errors.As(err, &wrong) {
+			t.Errorf("want ErrWrongPurpose for %s, got %T: %v", want, err, err)
+		}
 	}
 }
 
-// ...but the legacy allowance is scoped to releases only. Nothing legitimate
-// needs a bare codeSigning leaf to sign catalog bundles, and granting it would
-// hand the widest-reaching existing key a second job for free.
-func TestAuthorize_LegacyLeafCannotSignCatalog(t *testing.T) {
-	legacy := leafWith([]x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}, nil)
-	if err := authorizePurpose(legacy, OIDCodeSigningCatalog); err == nil {
-		t.Fatal("the legacy allowance must not extend to the catalog purpose")
+// The real shape of the leaf that signs today: codeSigning + emailProtection
+// for openssl/RAUC purpose checks, plus the release OID for this one. The
+// non-OID usages are noise here; the OID is what authorizes.
+func TestAuthorize_DeployedReleaseLeafShapeIsAccepted(t *testing.T) {
+	deployed := leafWith(
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning, x509.ExtKeyUsageEmailProtection},
+		[]asn1.ObjectIdentifier{OIDCodeSigningRelease})
+	if err := authorizePurpose(deployed, OIDCodeSigningRelease); err != nil {
+		t.Fatalf("the leaf shape scripts/pki-init.sh mints must verify: %v", err)
 	}
-}
-
-// The escape hatch the legacy allowance could become: a catalog leaf that ALSO
-// carries generic codeSigning would otherwise look legacy and be waved through.
-func TestAuthorize_CatalogLeafWithGenericCodeSigningIsStillRefused(t *testing.T) {
-	sneaky := leafWith([]x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
-		[]asn1.ObjectIdentifier{OIDCodeSigningCatalog})
-	if err := authorizePurpose(sneaky, OIDCodeSigningRelease); err == nil {
-		t.Fatal("a leaf carrying an explicit Rasputin purpose must not fall back to the legacy allowance")
+	if err := authorizePurpose(deployed, OIDCodeSigningCatalog); err == nil {
+		t.Error("the release leaf must still be refused for the catalog purpose")
 	}
 }
 
 // A leaf with no EKU at all is not a shape this PKI issues. Conventionally it
-// means "any purpose", which is exactly what we are refusing to grant.
+// means "any purpose", which is exactly what we are refusing to grant. This is
+// also the exact shape of `Rasputin Release Leaf 001`, which carries no
+// extendedKeyUsage extension whatsoever — it was refused before the allowance
+// was deleted and is refused after.
 func TestAuthorize_NoEKULeafIsRefused(t *testing.T) {
 	bare := leafWith(nil, nil)
 	if err := authorizePurpose(bare, OIDCodeSigningRelease); err == nil {
@@ -85,16 +92,15 @@ func TestAuthorize_NoEKULeafIsRefused(t *testing.T) {
 	}
 }
 
-// A leaf carrying the bare Rasputin arc with no purpose suffix is malformed,
-// but it is unambiguously issued under our arc — so it must not get the legacy
-// allowance. This is the case the mutation gate found unguarded: with a `>`
-// length test instead of `>=`, such a leaf was treated as pre-#192 and accepted
-// for releases.
-func TestAuthorize_BareArcLeafDoesNotGetTheLegacyAllowance(t *testing.T) {
+// A leaf carrying the bare Rasputin arc with no purpose suffix is malformed.
+// A prefix match would make it satisfy every purpose under the arc at once.
+func TestAuthorize_BareArcLeafIsRefused(t *testing.T) {
 	bareArc := leafWith([]x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
 		[]asn1.ObjectIdentifier{OIDGeekdojo})
-	if err := authorizePurpose(bareArc, OIDCodeSigningRelease); err == nil {
-		t.Fatal("a leaf carrying the bare Rasputin arc must not fall back to the legacy allowance")
+	for _, want := range []asn1.ObjectIdentifier{OIDCodeSigningRelease, OIDCodeSigningCatalog} {
+		if err := authorizePurpose(bareArc, want); err == nil {
+			t.Fatalf("a leaf carrying the bare Rasputin arc was accepted for %s", want)
+		}
 	}
 }
 

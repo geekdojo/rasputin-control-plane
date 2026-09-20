@@ -18,8 +18,13 @@
 #   otherwise              read from the geekdojo org variable via `gh`
 #
 # PREREQUISITES
-#   gh       GitHub CLI, authenticated.  brew install gh   then: gh auth login
-#   openssl  for the signature check.    Ships with macOS and every CI image.
+#   gh   GitHub CLI, authenticated.  brew install gh   then: gh auth login
+#   go   for the signature check — it runs api/cmd/rasputin-catalog-verify,
+#        the SAME verifier the api applies to a catalog it fetches at runtime.
+#        This used to be `openssl cms -verify -purpose any`, which could not ask
+#        about the catalog's private purpose OID and so checked only that the
+#        signer chained to the root: a catalog signed with the RELEASE leaf
+#        verified and got embedded. See that command's package doc.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,6 +56,17 @@ esac
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# verify_catalog <bundle> <sig> — the ONE signature check in this script, so
+# the --verify path and the embed path cannot drift apart in what they accept.
+# It refuses a bundle whose signer is not authorized for the app-catalog
+# purpose, which is the check `openssl -purpose any` could not express.
+verify_catalog() {
+    command -v go >/dev/null \
+        || { echo "error: go is required to verify a catalog signature (see the PREREQUISITES note above)" >&2; return 2; }
+    ( cd "$REPO_ROOT/api" && go run ./cmd/rasputin-catalog-verify \
+        -catalog "$1" -sig "$2" -root-ca "$TMP/root-ca.pem" )
+}
+
 # Resolve the trust anchor before downloading anything, so a missing root CA
 # fails before we have an unverified bundle sitting on disk.
 if [[ -n "${RASPUTIN_ROOT_CA_PEM:-}" ]]; then
@@ -68,10 +84,8 @@ if [[ $VERIFY_ONLY -eq 1 ]]; then
     # checks the bundle parses and matches the pin; only this checks that the
     # bytes are still the ones the publisher signed.
     echo "==> Verifying the committed floor in ${OUT_DIR#"$REPO_ROOT"/}"
-    openssl cms -verify -binary -inform DER \
-        -in "$OUT_DIR/catalog.json.sig" -content "$OUT_DIR/catalog.json" \
-        -CAfile "$TMP/root-ca.pem" -purpose any -out /dev/null 2>/dev/null \
-        || { echo "error: the embedded floor does not verify against the Rasputin root CA" >&2; exit 1; }
+    verify_catalog "$OUT_DIR/catalog.json" "$OUT_DIR/catalog.json.sig" \
+        || { echo "error: the embedded floor does not verify as an app-catalog bundle signed by the Rasputin root CA" >&2; exit 1; }
     echo "    floor signature OK"
     exit 0
 fi
@@ -82,13 +96,8 @@ gh release download "catalog-v${VERSION}" --repo "$CATALOG_REPO" \
     || { echo "error: no such catalog release: catalog-v${VERSION}" >&2; exit 1; }
 
 echo "==> Verifying the signature before embedding anything"
-# -purpose any is required, not laziness: the catalog leaf carries the catalog
-# EKU and deliberately NOT codeSigning, so openssl's default purpose check
-# rejects it on that basis alone.
-openssl cms -verify -binary -inform DER \
-    -in "$TMP/catalog.json.sig" -content "$TMP/catalog.json" \
-    -CAfile "$TMP/root-ca.pem" -purpose any -out /dev/null 2>/dev/null \
-    || { echo "error: catalog-v${VERSION} does not verify against the Rasputin root CA — refusing to embed it" >&2; exit 1; }
+verify_catalog "$TMP/catalog.json" "$TMP/catalog.json.sig" \
+    || { echo "error: catalog-v${VERSION} does not verify as an app-catalog bundle signed by the Rasputin root CA — refusing to embed it" >&2; exit 1; }
 
 # The release tag and the bundle's own version field are separate claims. If
 # they disagree, something is wrong with the publish and embedding either one
