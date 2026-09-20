@@ -111,10 +111,27 @@ type apiLeaf struct {
 func (l *apiLeaf) load(lanIP net.IP) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := ipString(lanIP)
-	if l.loaded && key == l.ip {
+	if l.loaded && ipString(lanIP) == l.ip {
 		return nil
 	}
+	return l.loadLocked(lanIP)
+}
+
+// refresh re-reads the leaf for lanIP and swaps it in WITHOUT the
+// same-address short-circuit load takes. The short-circuit is right for an
+// address change — a leaf already made for this address needs nothing — and
+// wrong for a renewal, where the address is the same and the bytes are not.
+// The leaf sweep calls this after minting, so the listeners serve the
+// certificate that is now on disk instead of the one this process loaded at
+// start. mint is idempotent, so this does not mint a second time.
+func (l *apiLeaf) refresh(lanIP net.IP) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.loadLocked(lanIP)
+}
+
+// loadLocked does the work of both. Caller holds l.mu.
+func (l *apiLeaf) loadLocked(lanIP net.IP) error {
 	paths, err := l.mint(lanIP)
 	if err != nil {
 		return err
@@ -124,7 +141,7 @@ func (l *apiLeaf) load(lanIP net.IP) error {
 		return err
 	}
 	l.cert.Store(&c)
-	l.loaded, l.ip = true, key
+	l.loaded, l.ip = true, ipString(lanIP)
 	return nil
 }
 

@@ -477,10 +477,24 @@ func main() {
 	}
 	log.Printf("rasputin-api: mesh CA loaded (CN=%s, expires=%s)",
 		meshCA.Cert.Subject.CommonName, meshCA.Cert.NotAfter.Format("2006-01-02"))
+	// One renewal driver for every Mesh-CA leaf this controlplane holds
+	// (§7.1). Consumers register below as they are built; the sweep itself is
+	// a job on the schedule, and what it does is decided by each leaf's
+	// NotAfter, not by the tick.
+	leafSweeper := mesh.NewLeafSweeper(meshCA)
 	defaultLogin := envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local")
 	mw, err := wireMesh(meshStateDir, meshCA, defaultLogin)
 	if err != nil {
 		log.Fatalf("rasputin-api: mesh: %v", err)
+	}
+	// Headscale serves a Mesh-CA leaf and reads it only at container start, so
+	// its renewal needs a restart to reach a client. Registered only for the
+	// self-hosted Docker backend: the mock has no container, and an external
+	// Headscale brings its own certificate.
+	if sup, ok := mw.sup.(*mesh.DockerSupervisor); ok && sup != nil {
+		if err := leafSweeper.Register(sup.LeafConsumer()); err != nil {
+			log.Fatalf("rasputin-api: leaf sweep: %v", err)
+		}
 	}
 	// The scheduler's mesh.reconcile cadence (also read where the scheduler
 	// is built). The mesh service needs it too: the staleness bound on "on
@@ -794,6 +808,41 @@ func main() {
 	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
+	// Per-node collector leaves. A source rather than a fixed registration:
+	// the set follows inventory, so a node that has been removed is no longer
+	// renewed (§5.2 revocation), and a node that has never had a collector is
+	// never minted one here — only directories that already exist are swept.
+	// A renewed leaf rides to the node inside its collector compose, so the
+	// reload hook is a redeploy.
+	leafSweeper.RegisterSource(collectorLeafSource(
+		filepath.Join(dataDir, "tls", "collectors"), invStore,
+		func(ctx context.Context, nodeID string) error {
+			spec, err := json.Marshal(obs.CollectorNodeSpec{NodeID: nodeID})
+			if err != nil {
+				return err
+			}
+			_, err = runner.Submit(ctx, obs.CollectorDeployKind, spec, "mesh-leaf-sweep")
+			return err
+		}))
+	// The controlplane's ONE leaf-renewal driver (§7.1). Everything holding a
+	// Mesh-CA leaf registers with the sweeper — the api's own HTTPS leaf and
+	// Headscale's below, the per-node collector leaves through a source — and
+	// the leaf lifecycles that own a delivery contract of their own run as
+	// fan-outs from the same job, so there is one thing to look at when a
+	// certificate is about to lapse. See mesh/sweep.go.
+	runner.Register(mesh.LeafSweepWorkflow(mesh.LeafSweepDeps{
+		Sweeper: leafSweeper,
+		FanOut: []mesh.LeafFanOut{{
+			// The per-app leaves keep their prepare → ship → commit contract
+			// (the on-disk copy must not advance past what the node holds),
+			// so the sweep submits their sweep rather than re-minting them.
+			Name: "apps.leaf_rotate",
+			Run: func(sc *jobs.StepCtx) error {
+				_, err := runner.Submit(sc.Ctx, "apps.leaf_rotate", nil, "mesh-leaf-sweep")
+				return err
+			},
+		}},
+	}))
 	// App catalog (ADR-0006). The floor embedded in this build is what a
 	// cluster has before it has ever completed a verified fetch; the poller
 	// (started further down, once the server exists) replaces it with the
@@ -1257,14 +1306,14 @@ func main() {
 		if err != nil {
 			log.Fatalf("rasputin-api: obs collector ingress endpoint: %v", err)
 		}
-		// Mint (idempotently, near-expiry renewal via MintLeafToDisk) each
-		// node's client-auth leaf under the mesh CA. CN = node_id is what the
-		// ingress reads back; the DNS SAN is cosmetic for a client leaf (Go
-		// verifies the chain + clientAuth EKU, not SANs, on the server side).
+		// Mint (idempotently) each node's client-auth leaf under the mesh CA.
+		// Renewal is the leaf sweep's job (collectorLeafSource), not this
+		// function's: MintLeafToDisk returns the existing leaf until it enters
+		// its renew window, and by then the sweep has already replaced it.
 		mintCollectorLeaf := func(nodeID string) (certPEM, keyPEM, caPEM string, err error) {
 			paths, err := mesh.MintLeafToDisk(meshCA,
 				filepath.Join(dataDir, "tls", "collectors", nodeID),
-				mesh.LeafSpec{CommonName: nodeID, DNSNames: []string{nodeID}, ClientAuth: true})
+				collectorLeafSpec(nodeID))
 			if err != nil {
 				return "", "", "", err
 			}
@@ -1302,10 +1351,14 @@ func main() {
 	fwReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_FW_RECONCILE_INTERVAL"), 5*time.Minute)
 	appsReconcileEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_RECONCILE_INTERVAL"), 5*time.Minute)
 	// meshReconcileEvery is parsed where the mesh service is built, above.
-	// Per-app TLS leaves live a year and renew at <60d left (mesh.renewWindow);
-	// a daily sweep is ample and cheap (it no-ops until a leaf enters the window).
-	leafRotateEvery := parseDurationOr(os.Getenv("RASPUTIN_APPS_LEAF_ROTATE_INTERVAL"), 24*time.Hour)
-	sched := scheduler.New(runner, append(append(reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafRotateEvery), []scheduler.Entry{
+	// Mesh-CA leaves live a year and renew at <60d left (mesh.renewWindow); the
+	// sweep re-checks that fact, so a daily tick is ample and cheap (it reads
+	// each leaf's NotAfter and does nothing until one enters the window). The
+	// old per-app name is still honoured for an operator who set it.
+	leafSweepEvery := parseDurationOr(
+		envOr("RASPUTIN_LEAF_SWEEP_INTERVAL", os.Getenv("RASPUTIN_APPS_LEAF_ROTATE_INTERVAL")),
+		mesh.DefaultLeafSweepInterval)
+	sched := scheduler.New(runner, append(append(reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafSweepEvery), []scheduler.Entry{
 		// storage.reconcile (#398): the claimed backup target's health, with
 		// a write probe. Fires only while a target is claimed (Due).
 		{
@@ -1599,6 +1652,26 @@ func main() {
 		leaf := &apiLeaf{mint: func(lanIP net.IP) (mesh.LeafPaths, error) {
 			return ensureAPILeaf(meshCA, dataDir, lanIP)
 		}}
+		// The api's own HTTPS leaf joins the sweep. Until now nothing renewed
+		// it: it was minted at start and re-minted only when the primary LAN
+		// address changed, so a controlplane that neither restarted nor moved
+		// would have served it past its NotAfter. The reload hook swaps the
+		// fresh bytes into the in-memory certificate both TLS listeners read
+		// per handshake, so the HTTPS surface and the mTLS ingress pick it up
+		// together and neither needs a restart.
+		if err := leafSweeper.Register(mesh.LeafConsumer{
+			Name: "api-https",
+			Dir:  filepath.Join(dataDir, "tls", "api"),
+			Spec: func() (mesh.LeafSpec, error) {
+				hostname, _ := os.Hostname()
+				return apiLeafSpec(hostname, lanWatch.PrimaryIP()), nil
+			},
+			Reload: func(context.Context, mesh.LeafPaths) error {
+				return leaf.refresh(lanWatch.PrimaryIP())
+			},
+		}); err != nil {
+			log.Fatalf("rasputin-api: leaf sweep: %v", err)
+		}
 		httpsSrv = &http.Server{
 			Addr:              httpsAddr,
 			Handler:           handler,
@@ -1867,12 +1940,17 @@ func apiLeafSpec(hostname string, lanIP net.IP) mesh.LeafSpec {
 // only re-check what those already cover (#431). firewall.reconcile keeps its
 // own entry and cadence; it compares observed state and never rewrites the
 // forward.
-func reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafRotateEvery time.Duration) []scheduler.Entry {
+func reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafSweepEvery time.Duration) []scheduler.Entry {
 	return []scheduler.Entry{
 		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
 		{Kind: "apps.reconcile", Interval: appsReconcileEvery, InitialDelay: 60 * time.Second},
 		{Kind: "mesh.reconcile", Interval: meshReconcileEvery, InitialDelay: 90 * time.Second},
-		{Kind: "apps.leaf_rotate", Interval: leafRotateEvery, InitialDelay: 2 * time.Minute},
+		// ONE entry for leaf renewal, whatever holds the leaf. apps.leaf_rotate
+		// is still a workflow — the sweep submits it, and the PATCH handler
+		// still drives one app's leaf directly — but it no longer has a tick of
+		// its own, because two ticks renewing certificates is two places to
+		// look when one lapses.
+		{Kind: mesh.LeafSweepKind, Interval: leafSweepEvery, InitialDelay: 2 * time.Minute},
 	}
 }
 
