@@ -61,6 +61,10 @@ func ApplyRootHash(path, hash string) (changed bool, err error) {
 	if err := proto.ValidConsoleRootHash(hash); err != nil {
 		return false, err
 	}
+	// gosec G304 (.github/sast-register.tsv): path is the agent's own
+	// configuration — DefaultShadowPath, or RASPUTIN_SHADOW_FILE from the
+	// process environment — and never anything from a bus message. The
+	// delivered hash is CONTENT here, not a path.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", path, err)
@@ -168,6 +172,8 @@ func statOrDefault(path string) (fs.FileMode, int, int) {
 // syncDir fsyncs a directory so the rename is durable. Best-effort: a
 // filesystem that refuses it has already taken the rename.
 func syncDir(dir string) {
+	// gosec G304 (.github/sast-register.tsv): dir is filepath.Dir of the
+	// shadow path above — agent configuration, not request data.
 	d, err := os.Open(dir)
 	if err != nil {
 		return

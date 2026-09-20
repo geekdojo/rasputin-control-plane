@@ -18,12 +18,33 @@ import (
 // `mkpasswd -m sha512` (the firewall image's crypt) and OpenSSL's
 // `passwd -6`.
 //
-// Default rounds only. See proto.ConsoleRootHashCmd for why the fleet does
-// not carry a "$6$rounds=N$" variant.
-
-// cryptRounds is the default round count every crypt(3) SHA-512
-// implementation uses when the hash carries no "rounds=" field.
-const cryptRounds = 5000
+// CryptRounds is the stretch, and the api mints one value for the whole
+// fleet: a cluster half on one round count and half on another is invisible
+// until someone needs a console.
+//
+// 100,000, not crypt(3)'s 5,000 default. The default is what CodeQL's
+// weak-password-hashing query is really objecting to, and it is right to:
+// 5,000 rounds of SHA-512 is about 3 ms to try a candidate on a 2026 laptop,
+// so an /etc/shadow that leaks is a wordlist away from a console login.
+//
+// The ceiling is what a node spends VERIFYING it, at the console, on the
+// slowest hardware in a cluster. Measured 2026-09-19 on an x86 dev host:
+// BusyBox 1.37 (the firewall image's crypt) takes ~0.09 s at 100,000 and
+// ~0.42 s at 200,000; this package takes ~70 ms and ~187 ms. A Pi 4 is
+// several times slower again, which puts 100,000 around a second there and
+// 200,000 well past what anyone would sit through at a serial console.
+//
+// The "rounds=" form is portable, which is why this is not simply left at
+// the default: BusyBox 1.37 and glibc produce BYTE-IDENTICAL output for
+// "$6$rounds=100000$<salt>$..." (checked both ways, 2026-09-19), and the
+// firewall image's set-root-hash accepts it. Both are pinned as vectors in
+// sha512crypt_test.go, so a change on either side fails the build rather
+// than a console.
+//
+// Raising it later is a password change, not a migration: the operator sets
+// a new one and the push job delivers it. Nothing re-hashes in place,
+// because nothing here ever holds the password again.
+const CryptRounds = 100000
 
 // saltLen is the full 16 characters the format allows.
 const saltLen = 16
@@ -59,10 +80,16 @@ func newSalt() (string, error) {
 	return string(out), nil
 }
 
-// sha512Crypt returns the "$6$<salt>$<digest>" hash of password under salt,
-// at the default round count. salt must already be 1..16 characters of
-// crypt's alphabet.
+// sha512Crypt returns the hash of password under salt at CryptRounds.
+// salt must already be 1..16 characters of crypt's alphabet.
 func sha512Crypt(password, salt []byte) string {
+	return sha512CryptRounds(password, salt, CryptRounds)
+}
+
+// sha512CryptRounds is the algorithm itself, at an explicit round count, so
+// the published default-rounds vectors and the rounds= ones are both
+// checkable against it.
+func sha512CryptRounds(password, salt []byte, rounds int) string {
 	// B = SHA512(password || salt || password)
 	bh := sha512.New()
 	bh.Write(password)
@@ -107,10 +134,18 @@ func sha512Crypt(password, salt []byte) string {
 	}
 	s := repeatDigest(dsh.Sum(nil), len(salt))
 
-	// The stretch. Each round mixes the previous digest with the password
-	// and salt sequences in an order driven by the round number.
+	// THE STRETCH, and the answer to CodeQL's go/weak-sensitive-data-hashing
+	// on the sha512.New() calls in this function (.github/codeql-register.tsv).
+	// The query flags SHA-512 as "not a computationally expensive hash
+	// function" and is right about the primitive; it cannot see this loop,
+	// which is the whole construction. crypt(3) SHA-512 is CryptRounds
+	// iterations of it over a per-password salt.
+	//
+	// TRIP-WIRE: that verdict is void if this loop is removed or short-
+	// circuited, or if CryptRounds is lowered — then it really would be a
+	// bare digest over a password, and the register row must be reopened.
 	c := a
-	for r := 0; r < cryptRounds; r++ {
+	for r := 0; r < rounds; r++ {
 		h := sha512.New()
 		if r%2 != 0 {
 			h.Write(p)
@@ -131,7 +166,15 @@ func sha512Crypt(password, salt []byte) string {
 		c = h.Sum(nil)
 	}
 
-	return "$6$" + string(salt) + "$" + encode(c)
+	// The spec omits the field entirely at the default count, and every
+	// implementation writes it that way — so the default form is emitted
+	// as the default form, which is what makes the published vectors
+	// comparable.
+	prefix := "$6$"
+	if rounds != 5000 {
+		prefix = fmt.Sprintf("$6$rounds=%d$", rounds)
+	}
+	return prefix + string(salt) + "$" + encode(c)
 }
 
 // repeatDigest returns n bytes of digest, repeating it as needed.

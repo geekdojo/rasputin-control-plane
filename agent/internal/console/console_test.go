@@ -21,6 +21,12 @@ const testHash = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFN
 
 const otherHash = "$6$toolongsaltstrin$lQ8jolhgVRVhY4b5pZKaysCLi0QBxGoNeKQzQ3glMhwllF7oGDZxUhx1yxdYcz/e1JSbq3y6JMxxl8audkUEm0"
 
+// The form the api actually mints (console.CryptRounds = 100000). BusyBox
+// 1.37 and glibc produce this byte for byte, and the firewall image's
+// set-root-hash accepts it — checked 2026-09-19. An agent that refused it
+// would fail every node the moment the round count moved.
+const roundsHash = "$6$rounds=100000$0123456789abcdef$iJ7fHUuAH7szYrYSsd9VSIo1lThtOcStIyubkK8vpm1ghu1.q5O4I1sN5Ci3sND5foG/iO89FuDGxs1JHvMFs/"
+
 func writeShadow(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -72,6 +78,26 @@ func TestApplyRootHashReplacesAnEmptyPassword(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 	if !strings.Contains(string(raw), "daemon:*:0:0:99999:7:::") || !strings.Contains(string(raw), "nobody:*:0:0:99999:7:::") {
 		t.Errorf("another account's entry changed:\n%s", raw)
+	}
+}
+
+// The form the control plane mints today: crypt's rounds= spelling.
+func TestApplyRootHashAcceptsTheRoundsForm(t *testing.T) {
+	path := writeShadow(t, "root::0:0:99999:7:::\n")
+	changed, err := ApplyRootHash(path, roundsHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("changed=false")
+	}
+	if got := rootLine(t, path)[1]; got != roundsHash {
+		t.Fatalf("root password field is %q", got)
+	}
+	// And it is idempotent in that form too.
+	changed, err = ApplyRootHash(path, roundsHash)
+	if err != nil || changed {
+		t.Fatalf("re-apply: changed=%v err=%v", changed, err)
 	}
 }
 

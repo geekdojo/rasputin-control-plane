@@ -46,7 +46,7 @@ var cryptVectors = []struct {
 
 func TestSHA512CryptMatchesReferenceVectors(t *testing.T) {
 	for _, v := range cryptVectors {
-		got := sha512Crypt([]byte(v.password), []byte(v.salt))
+		got := sha512CryptRounds([]byte(v.password), []byte(v.salt), 5000)
 		if got != v.want {
 			t.Errorf("salt %q password %q:\n got %q\nwant %q", v.salt, v.password, got, v.want)
 		}
@@ -56,15 +56,60 @@ func TestSHA512CryptMatchesReferenceVectors(t *testing.T) {
 	}
 }
 
+// The round count the api actually mints. These vectors were produced
+// independently by BusyBox 1.37 (`mkpasswd -m sha512 -S "rounds=100000$<salt>"`),
+// the firewall image's crypt, and by glibc (`mkpasswd -m sha512crypt -R
+// 100000 -S <salt>`), the Buildroot OS's — byte-identical, both ways,
+// 2026-09-19. They are what makes CryptRounds a portable choice rather than
+// a hopeful one: if either implementation ever stops agreeing, this fails
+// instead of a console does.
+var cryptRoundsVectors = []struct {
+	salt, password, want string
+}{
+	{
+		"saltstring", "Hello world!",
+		"$6$rounds=100000$saltstring$9s1nPRwOKo4FeNBCK5BUtBm4SG17hIi1AdBjtdwEAoIS.4ckJW8FPR8goM6zZZeHEFTq2BK/BQz3f/G/Yjbkg/",
+	},
+	{
+		"0123456789abcdef", "a perfectly fine console password",
+		"$6$rounds=100000$0123456789abcdef$iJ7fHUuAH7szYrYSsd9VSIo1lThtOcStIyubkK8vpm1ghu1.q5O4I1sN5Ci3sND5foG/iO89FuDGxs1JHvMFs/",
+	},
+}
+
+func TestSHA512CryptAtTheRoundCountWeMint(t *testing.T) {
+	if CryptRounds != 100000 {
+		t.Fatalf("CryptRounds is %d; these vectors are for 100000 — regenerate them against BusyBox and glibc before changing it", CryptRounds)
+	}
+	for _, v := range cryptRoundsVectors {
+		got := sha512CryptRounds([]byte(v.password), []byte(v.salt), CryptRounds)
+		if got != v.want {
+			t.Errorf("salt %q password %q:\n got %q\nwant %q", v.salt, v.password, got, v.want)
+		}
+		if err := proto.ValidConsoleRootHash(got); err != nil {
+			t.Errorf("salt %q: fails the wire check: %v", v.salt, err)
+		}
+	}
+	// And what HashPassword mints carries the round count, so a node is
+	// never handed the 5,000-round default by accident.
+	h, _, err := HashPassword("a perfectly fine console password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(h, "$6$rounds=100000$") {
+		t.Fatalf("minted hash is not at the fleet round count: %q", h[:24])
+	}
+}
+
 // Every password length from 0 to two digest blocks exercises the two
 // length-driven steps (the B-to-the-length-of-the-password loop and the
-// bitwise one), which is where a misreading of the spec hides.
+// bitwise one), which is where a misreading of the spec hides. At the
+// default count, so a failure here is the algorithm and not the stretch.
 func TestSHA512CryptLengthSweepIsSelfConsistent(t *testing.T) {
 	const salt = "0123456789abcdef"
 	seen := map[string]int{}
 	for n := 0; n <= 130; n++ {
 		pw := strings.Repeat("x", n)
-		got := sha512Crypt([]byte(pw), []byte(salt))
+		got := sha512CryptRounds([]byte(pw), []byte(salt), 5000)
 		if len(got) != len("$6$"+salt+"$")+86 {
 			t.Fatalf("len %d: hash is %d characters: %q", n, len(got), got)
 		}

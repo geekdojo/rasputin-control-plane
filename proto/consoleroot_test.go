@@ -10,25 +10,41 @@ import (
 // and byte-identical to BusyBox 1.37's `mkpasswd -m sha512 -S saltstring`.
 const sampleHash = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1"
 
+// The same password and salt at the round count the api actually mints,
+// produced independently by BusyBox 1.37's `mkpasswd -m sha512` and glibc's
+// `mkpasswd -m sha512crypt -R 100000` — byte-identical (2026-09-19).
+const sampleHashRounds = "$6$rounds=100000$saltstring$9s1nPRwOKo4FeNBCK5BUtBm4SG17hIi1AdBjtdwEAoIS.4ckJW8FPR8goM6zZZeHEFTq2BK/BQz3f/G/Yjbkg/"
+
 func TestValidConsoleRootHash(t *testing.T) {
-	if err := ValidConsoleRootHash(sampleHash); err != nil {
-		t.Fatalf("a real $6$ hash was refused: %v", err)
+	// Both spellings of the format, each a real hash that BusyBox 1.37 and
+	// glibc agree on byte for byte.
+	for name, h := range map[string]string{
+		"default rounds": sampleHash,
+		"rounds=100000":  sampleHashRounds,
+	} {
+		if err := ValidConsoleRootHash(h); err != nil {
+			t.Fatalf("%s: a real $6$ hash was refused: %v", name, err)
+		}
 	}
 	bad := map[string]string{
-		"empty":            "",
-		"md5":              "$1$saltstrin$T0bHfzpPnpcfqGLPRQHnT0",
-		"locked":           "!",
-		"bcrypt":           "$2b$10$abcdefghijklmnopqrstuv",
-		"rounds variant":   "$6$rounds=10000$saltstringsaltst$OW1/O6BYHV6BcXZu8QVeXbDWra3Oeqh0sbHbbMCVNSnCM/UrjmM0Dp8vOuZeHBy/YTBmSK6H9qs/y3RnOaw5v.",
-		"no salt":          "$6$$" + strings.Repeat("a", 86),
-		"short digest":     "$6$salt$" + strings.Repeat("a", 85),
-		"long digest":      "$6$salt$" + strings.Repeat("a", 87),
-		"colon in digest":  "$6$salt$" + strings.Repeat("a", 85) + ":",
-		"newline":          sampleHash + "\n",
-		"space":            sampleHash[:10] + " " + sampleHash[11:],
-		"bad salt char":    "$6$sa!t$" + strings.Repeat("a", 86),
-		"oversized salt":   "$6$" + strings.Repeat("s", 17) + "$" + strings.Repeat("a", 86),
-		"trailing garbage": sampleHash + "$x",
+		"empty":               "",
+		"md5":                 "$1$saltstrin$T0bHfzpPnpcfqGLPRQHnT0",
+		"locked":              "!",
+		"bcrypt":              "$2b$10$abcdefghijklmnopqrstuv",
+		"rounds not a number": "$6$rounds=lots$saltstring$" + strings.Repeat("a", 86),
+		"rounds too low":      "$6$rounds=999$saltstring$" + strings.Repeat("a", 86),
+		"rounds too high":     "$6$rounds=1000000000$saltstring$" + strings.Repeat("a", 86),
+		"third field junk":    "$6$notrounds$saltstring$" + strings.Repeat("a", 86),
+		"six fields":          "$6$rounds=5000$a$b$" + strings.Repeat("a", 86),
+		"no salt":             "$6$$" + strings.Repeat("a", 86),
+		"short digest":        "$6$salt$" + strings.Repeat("a", 85),
+		"long digest":         "$6$salt$" + strings.Repeat("a", 87),
+		"colon in digest":     "$6$salt$" + strings.Repeat("a", 85) + ":",
+		"newline":             sampleHash + "\n",
+		"space":               sampleHash[:10] + " " + sampleHash[11:],
+		"bad salt char":       "$6$sa!t$" + strings.Repeat("a", 86),
+		"oversized salt":      "$6$" + strings.Repeat("s", 17) + "$" + strings.Repeat("a", 86),
+		"trailing garbage":    sampleHash + "$x",
 	}
 	for name, h := range bad {
 		if err := ValidConsoleRootHash(h); err == nil {

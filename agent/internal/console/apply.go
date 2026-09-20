@@ -113,6 +113,9 @@ func runHelper(ctx context.Context, helperPath, shadowPath, hash string) error {
 
 // rootHoldsHash reports whether root's shadow field already equals hash.
 func rootHoldsHash(shadowPath, hash string) (bool, error) {
+	// gosec G304 (.github/sast-register.tsv): shadowPath is the agent's own
+	// configuration (DefaultShadowPath or RASPUTIN_SHADOW_FILE), never a
+	// value from a bus message.
 	raw, err := os.ReadFile(shadowPath)
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", shadowPath, err)

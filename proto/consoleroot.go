@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -23,12 +24,18 @@ import (
 // it by HashID instead.
 //
 // Encoding: the crypt(3) string the node writes into root's /etc/shadow
-// field, SHA-512 ("$6$") at the default round count. That form is what both
-// images can verify: BusyBox 1.37 (the firewall) and glibc/libxcrypt (the
-// Buildroot OS) produce byte-identical output for the same salt and
-// password, checked against OpenSSL's `passwd -6`. A "$6$rounds=N$" variant
-// is deliberately NOT sent — every implementation accepts the default form,
-// and the round count is not something a fleet can be half-way through.
+// field, SHA-512 ("$6$"), in either of the format's two spellings —
+// "$6$<salt>$<hash>" at crypt's 5,000-round default, or
+// "$6$rounds=N$<salt>$<hash>". BusyBox 1.37 (the firewall image's crypt) and
+// glibc/libxcrypt (the Buildroot OS) produce byte-identical output for both,
+// checked both ways against each other and against OpenSSL's `passwd -6`
+// (2026-09-19).
+//
+// The api mints ONE round count for the whole fleet
+// (console.CryptRounds) — a cluster half on one and half on another is
+// invisible until someone needs a console. Both spellings are ACCEPTED here
+// because this is the check an agent runs on what it was handed, and it must
+// not refuse a value a later api legitimately mints.
 
 // ConsoleRootHashVerb is the agent command that delivers the console root
 // password hash: rasputin.node.<id>.cmd.console.root_hash.
@@ -90,17 +97,14 @@ func ConsoleRootHashID(hash string) string {
 }
 
 // ErrConsoleRootHashForm is wrapped by every ValidConsoleRootHash failure.
-var ErrConsoleRootHashForm = errors.New(`console root hash must be a crypt(3) SHA-512 string ("$6$<salt>$<hash>")`)
+var ErrConsoleRootHashForm = errors.New(`console root hash must be a crypt(3) SHA-512 string ("$6$<salt>$<hash>" or "$6$rounds=N$<salt>$<hash>")`)
 
 // ValidConsoleRootHash checks the shape of a hash before it goes on the wire
-// or into a shadow file: the "$6$" prefix, a non-empty salt, a 86-character
-// SHA-512 crypt digest, and none of the characters that would split a shadow
-// line into the wrong fields. Checked on BOTH ends — the api will not
-// dispatch a malformed hash, and an agent will not write one.
-//
-// A "$6$rounds=N$" value is refused here rather than repaired: it is a
-// different hash the fleet has no agreed round count for, and half a fleet
-// on each would be invisible until someone needed the console.
+// or into a shadow file: the "$6$" prefix, an optional well-formed
+// "rounds=N", a non-empty salt, an 86-character SHA-512 crypt digest, and
+// none of the characters that would split a shadow line into the wrong
+// fields. Checked on BOTH ends — the api will not dispatch a malformed hash,
+// and an agent will not write one.
 func ValidConsoleRootHash(hash string) error {
 	if !strings.HasPrefix(hash, ConsoleRootHashPrefix) {
 		return fmt.Errorf("%w (prefix)", ErrConsoleRootHashForm)
@@ -109,9 +113,21 @@ func ValidConsoleRootHash(hash string) error {
 		return fmt.Errorf("%w (illegal character)", ErrConsoleRootHashForm)
 	}
 	parts := strings.Split(hash, "$")
-	// "" / "6" / salt / digest
-	if len(parts) != 4 {
-		return fmt.Errorf("%w (want $6$<salt>$<hash>)", ErrConsoleRootHashForm)
+	// "" / "6" / [rounds=N] / salt / digest
+	switch len(parts) {
+	case 4:
+	case 5:
+		spec, ok := strings.CutPrefix(parts[2], "rounds=")
+		if !ok {
+			return fmt.Errorf("%w (the third field must be rounds=N)", ErrConsoleRootHashForm)
+		}
+		n, err := strconv.Atoi(spec)
+		if err != nil || n < 1000 || n > 999999999 {
+			return fmt.Errorf("%w (rounds must be 1000..999999999)", ErrConsoleRootHashForm)
+		}
+		parts = append(parts[:2], parts[3:]...)
+	default:
+		return fmt.Errorf("%w (want $6$<salt>$<hash> or $6$rounds=N$<salt>$<hash>)", ErrConsoleRootHashForm)
 	}
 	salt, digest := parts[2], parts[3]
 	if salt == "" || len(salt) > 16 {
