@@ -159,6 +159,32 @@ func f(secret string) error {
 		passes(t, tree(t, "", "", map[string]string{"api/a.go": src}))
 	})
 
+	t.Run("a continue is skipping too", func(t *testing.T) {
+		src := pkgHeader + `
+func f(tokens []string) {
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+	}
+}
+`
+		refuses(t, tree(t, "", "", map[string]string{"api/a.go": src}), "FO03")
+	})
+
+	t.Run("a break is not, because it leaves the loop rather than the check", func(t *testing.T) {
+		src := pkgHeader + `
+func f(tokens []string) {
+	for _, token := range tokens {
+		if token == "" {
+			break
+		}
+	}
+}
+`
+		passes(t, tree(t, "", "", map[string]string{"api/a.go": src}))
+	})
+
 	t.Run("an ordinary empty-string check is not a finding", func(t *testing.T) {
 		src := pkgHeader + `
 func f(name string) error {
@@ -348,11 +374,66 @@ func boot() string { return os.Getenv("RASPUTIN_BUS_AUTH") }
 		refuses(t, tree(t, "", rows, map[string]string{"api/a.go": src}), "duplicate id")
 	})
 
+	t.Run("covered with no test named at all", func(t *testing.T) {
+		refuses(t, tree(t, "",
+			"R1\tapi/a.go\tboot\tRASPUTIN_BUS_AUTH\t\tcovered\t\n",
+			map[string]string{"api/a.go": src}), "covered with no test named")
+	})
+
+	t.Run("a row with no path", func(t *testing.T) {
+		refuses(t, tree(t, "",
+			"R1\t\tboot\tRASPUTIN_BUS_AUTH\t\tpending\tgeekdojo/geekdojo-brain#1\n",
+			map[string]string{"api/a.go": src}), "path and symbol are both required")
+	})
+
+	t.Run("a row with no symbol", func(t *testing.T) {
+		refuses(t, tree(t, "",
+			"R1\tapi/a.go\t\tRASPUTIN_BUS_AUTH\t\tpending\tgeekdojo/geekdojo-brain#1\n",
+			map[string]string{"api/a.go": src}), "path and symbol are both required")
+	})
+
 	t.Run("a pending row that names a test", func(t *testing.T) {
 		refuses(t, tree(t, "",
 			"R1\tapi/a.go\tboot\tRASPUTIN_BUS_AUTH\tTestBoot\tpending\tgeekdojo/geekdojo-brain#1\n",
 			map[string]string{"api/a.go": src}), "mark it covered")
 	})
+}
+
+// Both registers are read by the same parser, and a header whose columns have
+// been renamed or reordered would put every field in the wrong column while
+// still parsing. Each file's header is checked, not just the first one read.
+func TestARenamedRegisterColumnIsRefused(t *testing.T) {
+	src := pkgHeader + `
+func boot() string { return os.Getenv("RASPUTIN_BUS_AUTH") }
+`
+	t.Run("the allowance register", func(t *testing.T) {
+		root := tree(t, "", "", map[string]string{"api/a.go": src})
+		write(t, root, ".github/failopen-allow.tsv",
+			"rule\tpath\tsymbol\tverdict\tissue\treason\n")
+		refuses(t, root, "header column 6")
+	})
+
+	t.Run("the resolver register", func(t *testing.T) {
+		root := tree(t, "", "", map[string]string{"api/a.go": src})
+		write(t, root, ".github/security-resolvers.tsv",
+			"id\tpath\tsymbol\treads\ttests\tstatus\tcite\n")
+		refuses(t, root, "header column 5")
+	})
+
+	t.Run("too few columns", func(t *testing.T) {
+		root := tree(t, "", "", map[string]string{"api/a.go": src})
+		write(t, root, ".github/security-resolvers.tsv", "id\tpath\n")
+		refuses(t, root, "header has 2 columns")
+	})
+}
+
+// write replaces a file in a fixture tree.
+func write(t *testing.T, root, rel, body string) {
+	t.Helper()
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", rel, err)
+	}
 }
 
 func TestTheRepoItselfPasses(t *testing.T) {
