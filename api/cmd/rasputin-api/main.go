@@ -2281,7 +2281,10 @@ func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, k
 	if len(operatorCA) > 0 {
 		bundle = "mesh-ca+operator-ca"
 	}
-	log.Printf("rasputin-api: mesh backend = headscale (external, url=%s, node trust bundle=%s)", url, bundle)
+	// %q on the url: it is this process's own RASPUTIN_HEADSCALE_URL, but
+	// quoting it means not even a hand-edited node.env could forge a second
+	// log line. bundle is one of two literals.
+	log.Printf("rasputin-api: mesh backend = headscale (external, url=%q, node trust bundle=%s)", url, bundle)
 	return meshWiring{client: c, sup: sup, login: url, caPEM: caPEM}, nil
 }
 
