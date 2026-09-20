@@ -1661,7 +1661,7 @@ func main() {
 				log.Fatalf("rasputin-api: node listener: %v", lerr)
 			}
 			log.Printf("rasputin-api: node listener on %s (TLS 1.3, client key required; serving the bus certificate as %q)",
-				obsIngestAddr, bustls.CertDNSName)
+				obsIngestAddr, bustls.BusDNSName)
 			go func() {
 				if err := obsIngestSrv.ServeTLS(nodeLn, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					log.Fatalf("rasputin-api: node listener: %v", err)

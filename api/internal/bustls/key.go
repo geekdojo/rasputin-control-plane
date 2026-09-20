@@ -199,22 +199,25 @@ var (
 	certNotAfter  = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 )
 
-// CertDNSName is the one name a certificate wrapping the bus key carries.
+// BusDNSName is the one name a certificate wrapping the bus key carries, and
+// it is FIXED: the same value on every cluster.
 //
-// It exists so the api's node listener can tell a client that pins the BUS
-// key from one that trusts the mesh CA: both dial the same address, so SNI is
-// the only thing that distinguishes them, and it can only distinguish them if
-// the two certificates answer to different names.
+// Nothing resolves it. A node reaches the bus, and the api, by address and
+// verifies the server by the pin — the hash of the key — checking no chain, no
+// name and no dates. The SAN exists for clients that cannot be told to do
+// that, and for one thing more: it is what lets the node listener tell a
+// client that pins the BUS key from one that trusts the mesh CA. Both dial the
+// same address, so SNI is the only thing that separates them, and it can only
+// separate them if the two certificates answer to different names.
 //
-// It is deliberately under .invalid (RFC 6761), which can never resolve. This
-// name is an SNI and SAN token, never a DNS lookup: a client reaches the api
-// at its ordinary address and sets this as its server name, so nothing can be
-// steered anywhere by it, and an operator reading it in a config sees at once
-// that it is not a host to go looking for.
-const CertDNSName = "bus.rasputin.invalid"
+// ⚠️ geekdojo/geekdojo-brain#508 (PR #360) owns this constant and declares it
+// in bustls/cert.go, with this same name and this same value, alongside the
+// certificate it persists. This declaration is the seam that lets the listener
+// land first; merging #508 deletes it and nothing else changes.
+const BusDNSName = "rasputin-bus"
 
 // SelfSignedCert wraps signer in a self-signed certificate valid from
-// notBefore to notAfter, carrying CertDNSName. Exported so a test can build a
+// notBefore to notAfter, carrying BusDNSName. Exported so a test can build a
 // certificate that is not yet valid, or long expired, around the same key and
 // prove the pin check ignores both.
 func SelfSignedCert(signer crypto.Signer, notBefore, notAfter time.Time) (tls.Certificate, error) {
@@ -225,7 +228,7 @@ func SelfSignedCert(signer crypto.Signer, notBefore, notAfter time.Time) (tls.Ce
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "rasputin-bus"},
-		DNSNames:              []string{CertDNSName},
+		DNSNames:              []string{BusDNSName},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature,

@@ -148,7 +148,7 @@ func (l *apiLeaf) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error)
 // So the two certificates answer to different names, and the client says which
 // one it came for:
 //
-//   - bustls.CertDNSName: the bus key's certificate. A node pins the bus key
+//   - bustls.BusDNSName: the bus key's certificate. A node pins the bus key
 //     already, and a collector is handed these exact bytes as its CA. This is
 //     the default, and it is what a client that sends no SNI at all gets.
 //   - anything else: the api's mesh-CA-signed server leaf, for a collector
@@ -162,13 +162,13 @@ func (l *apiLeaf) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error)
 // which is what a node presenting a registered key needs.
 func nodeListenerCert(busCert *tls.Certificate, apiLeafFor func() *apiLeaf) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		if hello.ServerName == "" || hello.ServerName == bustls.CertDNSName {
+		if hello.ServerName == "" || hello.ServerName == bustls.BusDNSName {
 			return busCert, nil
 		}
 		l := apiLeafFor()
 		if l == nil {
 			return nil, fmt.Errorf("rasputin-api: node listener: no server leaf for %q (HTTPS is off on this api); a node key client must ask for %q",
-				hello.ServerName, bustls.CertDNSName)
+				hello.ServerName, bustls.BusDNSName)
 		}
 		return l.getCertificate(hello)
 	}

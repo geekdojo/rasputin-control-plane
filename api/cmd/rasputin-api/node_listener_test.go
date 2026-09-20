@@ -45,7 +45,7 @@ func TestNodeListenerCert_SelectsBySNI(t *testing.T) {
 		sni  string
 		want *tls.Certificate
 	}{
-		"the bus certificate's name": {bustls.CertDNSName, &busCert},
+		"the bus certificate's name": {bustls.BusDNSName, &busCert},
 		"no SNI at all":              {"", &busCert},
 		"the cluster name":           {"rasputin.local", &leafCert},
 	} {
@@ -62,8 +62,8 @@ func TestNodeListenerCert_SelectsBySNI(t *testing.T) {
 
 	// The bus certificate carries that name and nothing else, so a client
 	// pinning it by name cannot be handed the mesh leaf by mistake.
-	if got := busCert.Leaf.DNSNames; len(got) != 1 || got[0] != bustls.CertDNSName {
-		t.Errorf("bus certificate DNS names = %v, want [%s]", got, bustls.CertDNSName)
+	if got := busCert.Leaf.DNSNames; len(got) != 1 || got[0] != bustls.BusDNSName {
+		t.Errorf("bus certificate DNS names = %v, want [%s]", got, bustls.BusDNSName)
 	}
 }
 
@@ -83,7 +83,7 @@ func TestNodeListenerCert_NoLeafNamesTheReason(t *testing.T) {
 	if _, err := get(&tls.ClientHelloInfo{ServerName: "rasputin.local"}); err == nil {
 		t.Error("a legacy client was served a certificate with no leaf loaded")
 	}
-	if got, err := get(&tls.ClientHelloInfo{ServerName: bustls.CertDNSName}); err != nil || got != &busCert {
+	if got, err := get(&tls.ClientHelloInfo{ServerName: bustls.BusDNSName}); err != nil || got != &busCert {
 		t.Errorf("a key client with no leaf loaded = (%v, %v), want the bus certificate", got, err)
 	}
 }
