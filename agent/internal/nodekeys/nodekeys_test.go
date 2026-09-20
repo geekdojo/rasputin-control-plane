@@ -1,6 +1,11 @@
 package nodekeys
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -177,5 +182,43 @@ func TestPathsAreUnderTheStateDir(t *testing.T) {
 	want := filepath.Join(dir, "keys", "collector.key")
 	if got := keys.Path(proto.NodeKeyCollector); got != want {
 		t.Errorf("Path = %q, want %q", got, want)
+	}
+}
+
+// A key an operator made with openssl comes out as an "EC PRIVATE KEY" block
+// rather than PKCS#8. It is accepted, and the key it yields is the one in the
+// file — a node whose key was produced that way must not read as unusable,
+// which Ensure treats as a hard error rather than a reason to generate.
+func TestParse_AcceptsAnOpenSSLECKey(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := parse(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}))
+	if err != nil {
+		t.Fatalf("an EC PRIVATE KEY block was refused: %v", err)
+	}
+	got, err := proto.NodeKeySPKIHash(signer.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := proto.NodeKeySPKIHash(key.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("parsed key hashes to %s, the file holds %s", got, want)
+	}
+
+	// And a block that is neither is refused rather than half-read.
+	if _, err := parse(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte("nonsense")})); err == nil {
+		t.Error("a malformed EC PRIVATE KEY block was accepted")
+	}
+	if _, err := parse([]byte("no pem here")); err == nil {
+		t.Error("a non-PEM blob was accepted")
 	}
 }
