@@ -1,0 +1,70 @@
+# .github/timer-audit.tsv - every periodic tick and every credential lifetime
+# in this tree, classified, each naming the fact behind it.
+#
+# principles.md: a state change follows a checkable FACT, never a clock. A
+# timeout is allowed on a single I/O call. A periodic tick is allowed as a
+# safety net that RE-CHECKS a fact. Every unavoidable bound needs a comment
+# saying why.
+#
+# That rule is easy to agree with and easy to lose. Each of the bounds below was
+# added for a reason that made sense where it was written; what nothing recorded
+# was which KIND it is, and therefore whether the fact behind it still exists.
+#
+# class:
+#   tick       a periodic construct that re-checks a fact. `fact` names it.
+#   ttl        a credential lifetime. `fact` names what it is a safety net
+#              over, or the word `none` - and then `cite` must say where that
+#              is recorded, because a credential whose validity the clock
+#              decides on its own IS clock-driven state.
+#   io-bound   a bound on one I/O call, which principles.md allows outright.
+#   retention  neither: a cache or data-retention bound that decides no
+#              credential's validity and no state transition.
+#
+# The `fact` column is the point of the file. A row that names no fact is a
+# bound nobody can retire.
+#
+# Checked by: go test ./api/internal/gatereg/
+id	path	symbol	class	fact	cite	note
+K01	api/cmd/rasputin-api/main.go	waitForTrustworthyClock:NewTicker	tick	the time-sync marker file appears		Polls for the fact; the wait itself is bounded by clockGateTimeout.
+K02	api/cmd/rasputin-api/restore_trust.go	waitUntil:NewTicker	tick	the condition the caller passed becomes true		A generic fact-poll used by the trust-restore sequence.
+K03	api/internal/scheduler/scheduler.go	Scheduler.runEntry:NewTicker	tick	each tick submits a reconcile job that re-derives desired state from facts		The precedent lives beside it: firewall.dns_forward was deliberately removed from this timer and is submitted on a fact instead.
+K04	api/internal/auth/service.go	Service.janitor:NewTicker	tick	a pending ceremony or a session row has passed its bound		The sweep is periodic; what it enforces is E5 and E3 below.
+K05	api/internal/metrics/service.go	Service.gcLoop:NewTicker	retention	metric rows older than the retention window are deleted		Data retention. No credential and no state transition.
+K06	api/internal/inventory/service.go	Service.tickLoop:NewTicker	tick	the time of each node's last heartbeat		The transition it drives is bounded by staleAfter and offlineAfter below.
+K07	api/internal/alerts/service.go	Service.RunRuleSync:NewTicker	tick	the alert series the rule evaluator has written to the metric store		A re-read of a fact, not a clock deciding an alert. Runs once before the loop too.
+K08	api/internal/catalogsync/poller.go	Poller.Run:NewTicker	tick	the published catalog version		Also woken on demand.
+K09	api/internal/sdnotify/sdnotify.go	StartWatchdog:NewTicker	tick	a liveness ping succeeds before the watchdog is petted		Petting on the clock alone would defeat the watchdog; the ping is the fact.
+K10	api/internal/api/ws.go	Server.bridgeSubject:NewTicker	tick	the websocket peer still answers a ping		Each ping is itself bounded by a 5s context.
+K11	api/internal/api/bmc_handlers.go	Server.handleBMCSOL:NewTicker	tick	the console websocket peer still answers a ping		Same shape as K10.
+K12	agent/cmd/rasputin-agent/main.go	runHeartbeats:NewTicker	tick	this node is alive - the tick EMITS the fact K06 reads		
+K13	agent/internal/metrics/collector.go	Run:NewTicker	tick	the sample the collector reads from the host		
+K14	agent/internal/clusterdns/clusterdns.go	Run:NewTicker	tick	the pinned control-plane entry is still in the resolver drop-in		Also woken by bus connected and lost, so the tick is the backstop, not the trigger.
+K15	agent/internal/hostsync/hostsync.go	Run:NewTimer	tick	the address discovery resolves for the cluster name		First fire is immediate, so the fact is read before any wait.
+K16	agent/internal/nameguard/nameguard.go	Run:NewTimer	tick	the probe result - the state machine keys on it, not on the timer		First fire is immediate.
+K17	agent/internal/ids/tailer.go	Tailer.Run:NewTicker	tick	new lines in the file being tailed		
+K18	agent/internal/sdnotify/sdnotify.go	StartWatchdog:NewTicker	tick	a liveness ping succeeds before the watchdog is petted		Same shape as K09.
+K19	agent/internal/quiesce/watchdog.go	guard.run:NewTimer	tick	Release is called when the operation that stopped the app finishes		The one tick here whose EXPIRY is itself the transition: nothing having called Release is the fact it acts on, and the app is restarted. Heavily commented in place.
+K20	agent/internal/openwrt/dnsmasq.go	awaitLine:NewTimer	io-bound	bounds one wait for an expected log line		
+K21	agent/internal/bmc/mock.go	mockSOL.run:NewTicker	retention	the mock backend's own state churn		Test support that lives in a non-test file. Decides nothing on a real node.
+L01	api/internal/auth/service.go	sessionLifetime	ttl	none	auth-register.tsv#E3	A lost laptop produces no fact the api can observe. This is the one credential bound here with nothing behind it, and it is recorded as an exception rather than explained away.
+L02	api/internal/auth/service.go	pendingLifetime	ttl	the ceremony is consumed at finish	auth-register.tsv#E5	An abandoned ceremony emits no fact, so the bound frees the memory and ends a stale ceremony's authority. Safety net, not a transition.
+L03	api/internal/busauth/callout.go	mintedTTL	ttl	revoke forces a disconnect, and on reconnect the callout re-reads the registry	auth-register.tsv#E13	The lapse covers a missed kick only.
+L04	api/internal/mesh/preauth.go	nodeEnrolKeyExpiry	ttl	the enrol step explicitly expires the key when it ends, on success or failure	auth-register.tsv#E15	Covers an api that stops mid-step.
+L05	api/internal/mesh/preauth.go	UserDeviceKeyDefaultExpiry	ttl	the mesh server is the only thing that checks the key, so expiry is the only bound it can apply	auth-register.tsv#E10	
+L06	api/internal/mesh/preauth.go	UserDeviceKeyMaxExpiry	ttl	the same: a key copied off the page and never used is bounded by nothing else	auth-register.tsv#E10	The cap is what keeps that window short.
+L07	api/internal/mesh/supervisor_docker.go	sessionAPIKeyExpiration	ttl	the api expires the previous key by prefix at every start	auth-register.tsv#E20	Bounds only a key whose api died before it could expire it.
+L08	api/internal/mesh/tls.go	meshCALifetime	ttl	browsers and the tailnet client enforce NotAfter and Rasputin publishes no revocation list	auth-register.tsv#E16	Long on purpose: the operator installs the CA once.
+L09	api/internal/mesh/tls.go	defaultLeafLifetime	ttl	the same third-party verifiers, and renewal is driven by NotAfter approaching	auth-register.tsv#E16	
+L10	api/internal/mesh/tls.go	renewWindow	tick	NotAfter is within the window when the leaf is read		A threshold on a fact the certificate carries, checked on a safety-net sweep.
+L11	api/internal/bustls/key.go	certNotAfter	ttl	the SPKI pin, which is dateless - this constant exists to take the clock OUT of the check		1970 to 9999 deliberately. Nothing verifies these dates.
+L12	api/internal/bustls/key.go	certNotBefore	ttl	the SPKI pin, which is dateless		Same constant pair as L11.
+L13	backupxfer/token.go	CredentialTTL	ttl	the transfer operation is open	auth-register.tsv#E14	Derived from the operation's own work budget plus slack, so it cannot be shorter than the work.
+L14	backupxfer/restore_wire.go	RestoreCredentialTTL	ttl	the restore operation is open	auth-register.tsv#E14	Same derivation as L13.
+L15	backupxfer/token.go	maxCredentialTTL	ttl	a mint-time ceiling over L13 and L14, so neither can be widened by a caller		Derived from them rather than written down separately.
+L16	proto/busreply.go	BusReplyGrantTTL	ttl	the reply inbox exists only while the agent work it belongs to is running		Derived from the maximum agent work budget plus slack. Scoped to one literal inbox subject, so a longer grant buys no new capability.
+L17	api/internal/storage/restore_sessions.go	unboundSessionTTL	ttl	the restore session is claimed, or abandoned by the operator closing the flow		Expiry discards the in-memory archive key, which is the conservative direction.
+L18	api/internal/inventory/service.go	staleAfter	ttl	the time of this node's last heartbeat		Liveness is the ABSENCE of a fact, which has no positive fact to key on. The bound turns that absence into a reported status; it grants nothing and revokes nothing.
+L19	api/internal/inventory/service.go	offlineAfter	ttl	the time of this node's last heartbeat		Same as L18, one step further out.
+L20	api/internal/nameserver/responder.go	recordTTL	retention	the answer a resolver may cache before asking again		A DNS cache bound published to clients. Decides no credential.
+L21	api/internal/nameserver/responder.go	negativeTTL	retention	how long a negative answer may be cached		Same as L20.
+L22	api/cmd/rasputin-api/main.go	clockGateTimeout	io-bound	bounds the single wait for the time-sync marker before the api mints its TLS leaf		Measured on the monotonic clock, so a jumping wall clock cannot shorten or extend it.
