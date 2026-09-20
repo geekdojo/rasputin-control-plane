@@ -3,15 +3,21 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
@@ -20,13 +26,71 @@ import (
 
 // certState fabricates a *tls.ConnectionState carrying a single client leaf
 // with the given CommonName. nodeIDFromClientCert only reads
-// Subject.CommonName, so a bare x509.Certificate (no signing) is enough — the
-// real listener's RequireAndVerifyClientCert does the cryptographic
-// verification before any handler runs; these tests exercise identity
-// extraction and the authorization gates, not the TLS stack.
+// Subject.CommonName, so a bare x509.Certificate (no signing) is enough —
+// these tests exercise identity extraction, not the TLS stack.
 func certState(cn string) *tls.ConnectionState {
 	return &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{{Subject: pkix.Name{CommonName: cn}}},
+	}
+}
+
+// nodeKeyCerts hands out one stable key per node id, and the connection state
+// a client presenting it produces. The node listener identifies a caller by
+// its key's SPKI, so a handler test needs a real key rather than a bare
+// Subject — the key IS the identity now.
+var nodeKeyCerts = struct {
+	mu    sync.Mutex
+	certs map[string]*x509.Certificate
+}{certs: map[string]*x509.Certificate{}}
+
+func nodeKeyCert(t *testing.T, node string) *x509.Certificate {
+	t.Helper()
+	nodeKeyCerts.mu.Lock()
+	defer nodeKeyCerts.mu.Unlock()
+	if c, ok := nodeKeyCerts.certs[node]; ok {
+		return c
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: node},
+		NotBefore:    time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
+		NotAfter:     time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeKeyCerts.certs[node] = cert
+	return cert
+}
+
+// nodeKeyState is the connection state a node presenting its registered key
+// produces.
+func nodeKeyState(t *testing.T, node string) *tls.ConnectionState {
+	t.Helper()
+	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{nodeKeyCert(t, node)}}
+}
+
+// registerCollectorKey records node's key as its COLLECTOR key and makes the
+// node admitted, which is what the listener's routes require.
+func registerCollectorKey(t *testing.T, inv *inventory.Store, node string) {
+	t.Helper()
+	hash, err := proto.NodeKeySPKIHash(nodeKeyCert(t, node).PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv.Registry().SetLiveTokens(node, []string{"tok-" + node})
+	if _, err := inv.SetNodeKeys(context.Background(), node, proto.NodeKeys{proto.NodeKeyCollector: hash}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -130,16 +194,27 @@ func newIngestServer(t *testing.T, obsStatus *obs.Status, seedNodes ...string) *
 			t.Fatalf("insert node %q: %v", id, err)
 		}
 	}
-	return &Server{inv: invStore, obs: obsStatus, ingestGated: true}
+	for _, id := range seedNodes {
+		registerCollectorKey(t, invStore, id)
+	}
+	// The whole-set token load the api does at start. Without it the registry
+	// is deliberately not "loaded" and admits nobody, so every gate below
+	// would answer the same whatever the test set up.
+	invStore.Registry().ReplaceLiveTokens(map[string][]string{})
+	for _, id := range seedNodes {
+		invStore.Registry().SetLiveTokens(id, []string{"tok-" + id})
+	}
+	return &Server{inv: invStore, obs: obsStatus, nodeGate: newIngestConns(invStore.Registry(), nil)}
 }
 
-func ingestReq(cn string) *http.Request {
+func ingestReq(t *testing.T, node string) *http.Request {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/obs/ingest",
 		bytes.NewReader(remoteWriteBody(series("container_cpu_usage_seconds_total", "name", "web"))))
 	req.Header.Set("Content-Type", "application/x-protobuf")
 	req.Header.Set("Content-Encoding", "snappy")
-	if cn != "" {
-		req.TLS = certState(cn)
+	if node != "" {
+		req.TLS = nodeKeyState(t, node)
 	}
 	return req
 }
@@ -199,7 +274,7 @@ func TestHandleObsLogsIngest(t *testing.T) {
 		s := newIngestServer(t, offStatus(), "c02")
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
-		req.TLS = certState("c02")
+		req.TLS = nodeKeyState(t, "c02")
 		s.handleObsLogsIngest(rec, req)
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("got %d, want 503; body=%q", rec.Code, rec.Body.String())
@@ -220,7 +295,7 @@ func TestHandleObsLogsIngest(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/x-protobuf")
 		req.Header.Set("Content-Encoding", "snappy")
-		req.TLS = certState("c02")
+		req.TLS = nodeKeyState(t, "c02")
 		s.handleObsLogsIngest(rec, req)
 
 		if rec.Code != http.StatusNoContent {
@@ -232,23 +307,59 @@ func TestHandleObsLogsIngest(t *testing.T) {
 	})
 }
 
-// Membership and token liveness are decided at the handshake, not per request
-// (obs_ingest_conns.go); a handler whose listener was never given that gate
-// refuses everything.
+// A handler whose listener was never given the admission gate refuses
+// everything: fail closed.
 func TestObsIngestHandlers_RefuseWithoutTheHandshakeGate(t *testing.T) {
 	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
-	s.ingestGated = false
+	s.nodeGate = nil
 	rec := httptest.NewRecorder()
-	s.handleObsIngest(rec, ingestReq("c02"))
+	s.handleObsIngest(rec, ingestReq(t, "c02"))
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "admission") {
 		t.Errorf("metrics: got %d %q, want 503 naming admission", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", strings.NewReader("x"))
-	req.TLS = certState("c02")
+	req.TLS = nodeKeyState(t, "c02")
 	s.handleObsLogsIngest(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("logs: got %d, want 503", rec.Code)
+	}
+}
+
+// The route's purpose is checked per request: a node's AGENT key is not its
+// collector, so it cannot push the collector's metrics or logs even though
+// both keys belong to the same admitted node.
+func TestObsIngestHandlers_RefuseTheWrongKeyPurpose(t *testing.T) {
+	ctx := context.Background()
+	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
+	hash, err := proto.NodeKeySPKIHash(nodeKeyCert(t, "c02-agent").PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.inv.SetNodeKeys(ctx, "c02", proto.NodeKeys{proto.NodeKeyAgent: hash}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	s.handleObsIngest(rec, ingestReq(t, "c02-agent"))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "collector key") {
+		t.Errorf("metrics with the agent key: got %d %q, want 403 naming the collector key", rec.Code, rec.Body.String())
+	}
+}
+
+// A node that stops being admitted between the handshake and the request is
+// refused by the per-request re-check, without a database read.
+func TestObsIngestHandlers_RecheckAdmissionPerRequest(t *testing.T) {
+	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
+	rec := httptest.NewRecorder()
+	s.handleObsIngest(rec, ingestReq(t, "c02"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("baseline: got %d, want 503 backend-not-ready", rec.Code)
+	}
+	s.inv.Registry().SetLiveTokens("c02", nil)
+	rec = httptest.NewRecorder()
+	s.handleObsIngest(rec, ingestReq(t, "c02"))
+	if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusForbidden {
+		t.Errorf("after the token was revoked: got %d %q, want 401 or 403", rec.Code, rec.Body.String())
 	}
 }
 
@@ -258,7 +369,7 @@ func TestHandleObsIngest(t *testing.T) {
 	t.Run("no client cert → 401", func(t *testing.T) {
 		s := newIngestServer(t, offStatus(), "c02")
 		rec := httptest.NewRecorder()
-		s.handleObsIngest(rec, ingestReq("")) // req.TLS nil
+		s.handleObsIngest(rec, ingestReq(t, "")) // req.TLS nil
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("got %d, want 401; body=%q", rec.Code, rec.Body.String())
 		}
@@ -267,7 +378,7 @@ func TestHandleObsIngest(t *testing.T) {
 	t.Run("member node but obs off → 503 (backend not ready)", func(t *testing.T) {
 		s := newIngestServer(t, offStatus(), "c02")
 		rec := httptest.NewRecorder()
-		s.handleObsIngest(rec, ingestReq("c02"))
+		s.handleObsIngest(rec, ingestReq(t, "c02"))
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("got %d, want 503; body=%q", rec.Code, rec.Body.String())
 		}
@@ -289,7 +400,7 @@ func TestHandleObsIngest(t *testing.T) {
 
 		s := newIngestServer(t, obs.NewStatus(fakeVMSup{vmBase: stubVM.URL}, nil, nil), "c02")
 		rec := httptest.NewRecorder()
-		s.handleObsIngest(rec, ingestReq("c02"))
+		s.handleObsIngest(rec, ingestReq(t, "c02"))
 
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("got %d, want 204; body=%q", rec.Code, rec.Body.String())

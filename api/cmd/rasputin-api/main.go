@@ -74,19 +74,23 @@ func main() {
 	// RASPUTIN_RP_ORIGINS or RASPUTIN_PUBLIC_BASE_URL: those derive from
 	// RASPUTIN_CLUSTER_ID as <cluster-id>.local (ADR-0003; see applianceOr).
 	httpsAddr := os.Getenv("RASPUTIN_HTTPS_ADDR")
-	// obsIngestAddr is the dedicated mTLS remote-write ingress for per-node obs
-	// collectors (Slice 1.2b, observability-stack.md §3.10). It comes up only in
-	// appliance mode (HTTPS on) — dev has no mesh server leaf and no compute
-	// nodes — and defaults to :8443 on all interfaces so compute/storage nodes
-	// can reach it via rasputin.local, the same mDNS path they already use for
-	// NATS. mTLS-only (RequireAndVerifyClientCert against the mesh CA): a
-	// connection without a mesh-CA-signed client cert never completes the
-	// handshake, so an always-open :8443 is not an open door, and VM stays
-	// loopback-only behind it.
-	obsIngestAddr := ""
-	if httpsAddr != "" {
-		obsIngestAddr = envOr("RASPUTIN_OBS_INGEST_ADDR", ":8443")
-	}
+	// obsIngestAddr is the api's NODE listener: the dedicated mTLS port a
+	// node's agent and its observability collector reach the api on
+	// (geekdojo/geekdojo-brain#513, observability-stack.md §3.10). It defaults
+	// to :8443 on all interfaces so nodes can reach it via rasputin.local, the
+	// same mDNS path they already use for NATS.
+	//
+	// UNCONDITIONAL, where it used to come up only with HTTPS on. It serves a
+	// certificate wrapping the BUS key, which exists from the first start, so
+	// it does not wait for the mesh leaf and it does not wait for the clock
+	// gate — a node with no trustworthy clock is exactly the node that needs
+	// this listener. Set RASPUTIN_OBS_INGEST_ADDR empty to turn it off.
+	//
+	// Not an open door: ClientAuth=RequireAnyClientCert plus a VerifyConnection
+	// that admits only a registered node key, or (while legacy collectors
+	// remain) a mesh-CA-signed client leaf. A caller with neither never
+	// completes the handshake, and VM stays loopback-only behind it.
+	obsIngestAddr := envOr("RASPUTIN_OBS_INGEST_ADDR", ":8443")
 
 	// The JetStream store holds the job ledger: owner-only, existing installs
 	// included. The data dir itself is shared with the agent and the OS
@@ -206,6 +210,11 @@ func main() {
 	// nothing of theirs crosses the wire while it is broken.
 	busKey, busKeyGenerated, busKeyErr := bustls.EnsureKey(filepath.Join(dataDir, "bus"))
 	var serverTLS *tls.Config
+	// The persisted bus certificate, loaded below. Declared out here because
+	// the node listener serves it too, and serves it from the FIRST start —
+	// before the mesh leaf exists and before the clock gate
+	// (geekdojo/geekdojo-brain#513).
+	var busCert tls.Certificate
 	if busKeyErr != nil {
 		log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY; every node that holds a bus pin stays off it until the key file is fixed or restored.", busKeyErr)
 		busKey = nil
@@ -217,7 +226,9 @@ func main() {
 		// certificate even when it had to replace the file, so an error here
 		// is a note, not a reason to drop TLS. Only a failure to produce one
 		// at all leaves it zero-valued.
-		busCert, busCertGenerated, certErr := bustls.EnsureCert(filepath.Join(dataDir, "bus"), busKey)
+		var busCertGenerated bool
+		var certErr error
+		busCert, busCertGenerated, certErr = bustls.EnsureCert(filepath.Join(dataDir, "bus"), busKey)
 		if len(busCert.Certificate) == 0 {
 			log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY.", certErr)
 			busKey = nil
@@ -1685,11 +1696,16 @@ func main() {
 	// exactly as before.
 	httpHandler := handler
 	var httpsSrv, obsIngestSrv *http.Server
+	// The api's HTTPS server leaf, minted under the mesh CA behind the clock
+	// gate. Declared out here because the node listener serves it too, by SNI,
+	// for collectors deployed before node keys existed — while itself starting
+	// long before the leaf exists.
+	var leaf *apiLeaf
 	if httpsAddr != "" {
 		// Served from memory through GetCertificate rather than from files at
 		// ListenAndServeTLS, so a LAN address change re-mints the leaf's IP SAN
 		// without a restart (#431).
-		leaf := &apiLeaf{mint: func(lanIP net.IP) (mesh.LeafPaths, error) {
+		leaf = &apiLeaf{mint: func(lanIP net.IP) (mesh.LeafPaths, error) {
 			return ensureAPILeaf(meshCA, dataDir, lanIP)
 		}}
 		// The api's own HTTPS leaf joins the sweep. Until now nothing renewed
@@ -1728,35 +1744,6 @@ func main() {
 			},
 		}
 		httpsSrv.TLSConfig.GetCertificate = leaf.getCertificate
-		// The obs mTLS ingress shares the api's own server leaf for its
-		// identity (started with the same cert/key below, once minted) but
-		// adds RequireAndVerifyClientCert against the mesh CA — a per-node
-		// collector authenticates purely by presenting a mesh-CA-signed client
-		// leaf, whose node_id is the cert CN (see obs_ingest.go). Constructed
-		// synchronously here (like httpsSrv) so shutdown can reach it; it only
-		// starts serving inside the clock-gated goroutine, after the leaf exists.
-		if obsIngestAddr != "" {
-			clientCAs := x509.NewCertPool()
-			clientCAs.AddCert(meshCA.Cert)
-			obsIngestSrv = &http.Server{
-				Addr:              obsIngestAddr,
-				Handler:           srv.ObsIngestHandler(),
-				ReadHeaderTimeout: 10 * time.Second,
-				TLSConfig: &tls.Config{
-					MinVersion:     tls.VersionTLS12,
-					ClientAuth:     tls.RequireAndVerifyClientCert,
-					ClientCAs:      clientCAs,
-					GetCertificate: leaf.getCertificate,
-				},
-			}
-			// A collector is admitted only while its node is a current member
-			// holding a live join token: checked once per connection in the
-			// handshake, from the in-memory node registry, and a removal or
-			// revoke closes the node's open connections (obs_ingest_conns.go).
-			if err := srv.WireObsIngest(obsIngestSrv, invStore.Registry()); err != nil {
-				log.Fatalf("rasputin-api: obs ingress: %v", err)
-			}
-		}
 		// HTTP demotes to the bootstrap surface right away so the node is
 		// reachable immediately; HTTPS comes up asynchronously once the clock
 		// is trustworthy (below). Minting the leaf must NOT block main() —
@@ -1793,22 +1780,66 @@ func main() {
 				}
 			})
 			log.Printf("rasputin-api: https listening on %s (leaf %s)", httpsAddr, filepath.Join(dataDir, "tls", "api", "leaf.pem"))
-			// Bring up the obs mTLS ingress on the same leaf, in its own
-			// goroutine so it serves alongside (not after) HTTPS. Both listeners
-			// read the leaf per handshake through leaf.getCertificate, so a
-			// re-mint reaches them together.
-			if obsIngestSrv != nil {
-				go func() {
-					log.Printf("rasputin-api: obs mTLS ingress listening on %s", obsIngestAddr)
-					if err := obsIngestSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-						log.Fatalf("rasputin-api: obs ingress: %v", err)
-					}
-				}()
-			}
 			if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("rasputin-api: https: %v", err)
 			}
 		}()
+	}
+
+	// The node listener. Built and started HERE — outside the httpsAddr block
+	// and outside the clock gate — because a node reaches the api on it before
+	// the api has a mesh leaf, and on a no-RTC node, before the clock is
+	// trustworthy. It serves the bus key's certificate by default and the mesh
+	// leaf to a legacy collector that asks for it by name (nodeListenerCert).
+	if obsIngestAddr != "" {
+		switch {
+		case busKey == nil || len(busCert.Certificate) == 0:
+			log.Printf("rasputin-api: ⚠️  node listener OFF on %s — the bus key did not load, so there is no certificate to serve. "+
+				"Nodes reach the api only on the legacy routes until the key file is fixed or restored.", obsIngestAddr)
+		default:
+			// The PERSISTED certificate (#508), so its bytes are the same
+			// across restarts — which is what a client that pins those bytes,
+			// rather than the key, depends on.
+			cert := busCert
+			// A legacy collector presents a mesh-CA-signed client leaf, so the
+			// mesh CA is the pool its chain is verified against. It drops out
+			// of here once every collector runs on a registered key.
+			meshClients := x509.NewCertPool()
+			meshClients.AddCert(meshCA.Cert)
+			obsIngestSrv = &http.Server{
+				Addr:              obsIngestAddr,
+				Handler:           srv.ObsIngestHandler(),
+				ReadHeaderTimeout: 10 * time.Second,
+				TLSConfig: &tls.Config{
+					// Every client here is a Go TLS stack or Grafana Alloy,
+					// which is one; the bus already requires 1.3 of all of
+					// them.
+					MinVersion: tls.VersionTLS13,
+					// Nothing is verified by the stack: admission is a check
+					// on the peer's KEY, made in VerifyConnection against the
+					// in-memory registry. RequireAndVerifyClientCert would
+					// instead demand a mesh-CA chain, which a node's own
+					// self-signed certificate does not have and is not
+					// supposed to have.
+					ClientAuth:     tls.RequireAnyClientCert,
+					GetCertificate: nodeListenerCert(&cert, func() *apiLeaf { return leaf }),
+				},
+			}
+			if err := srv.WireObsIngest(obsIngestSrv, invStore.Registry(), meshClients); err != nil {
+				log.Fatalf("rasputin-api: node listener: %v", err)
+			}
+			nodeLn, lerr := net.Listen("tcp", obsIngestAddr)
+			if lerr != nil {
+				log.Fatalf("rasputin-api: node listener: %v", lerr)
+			}
+			log.Printf("rasputin-api: node listener on %s (TLS 1.3, client key required; serving the bus certificate as %q)",
+				obsIngestAddr, bustls.BusDNSName)
+			go func() {
+				if err := obsIngestSrv.ServeTLS(nodeLn, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					log.Fatalf("rasputin-api: node listener: %v", err)
+				}
+			}()
+		}
 	}
 
 	httpSrv := &http.Server{

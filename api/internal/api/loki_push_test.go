@@ -323,7 +323,7 @@ func TestHandleObsLogsIngest_StampsNodeID(t *testing.T) {
 
 	push := func(body []byte, ct, enc string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", bytes.NewReader(body))
-		req.TLS = certState("c02")
+		req.TLS = nodeKeyState(t, "c02")
 		req.Header.Set("Content-Type", ct)
 		req.Header.Set("Content-Encoding", enc)
 		rec := httptest.NewRecorder()
@@ -364,7 +364,7 @@ func TestHandleObsLogsIngest_StampsNodeID(t *testing.T) {
 	// is refused, not forwarded half-read.
 	{
 		req := httptest.NewRequest(http.MethodPost, "/api/obs/logs/ingest", errReader{})
-		req.TLS = certState("c02")
+		req.TLS = nodeKeyState(t, "c02")
 		req.Header.Set("Content-Type", "application/x-protobuf")
 		req.Header.Set("Content-Encoding", "snappy")
 		rec := httptest.NewRecorder()

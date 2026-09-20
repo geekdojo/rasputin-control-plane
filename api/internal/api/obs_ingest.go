@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // Routes served on the api's dedicated mTLS ingress listener. Per-node Alloy
@@ -35,12 +36,17 @@ const (
 	lokiPushPath = "/loki/api/v1/push"
 )
 
-// ObsIngestHandler builds the http.Handler served on the api's dedicated mTLS
-// ingress listener (wired in main.go). Every route here has NO session
-// middleware: the TLS handshake (RequireAndVerifyClientCert against the
-// per-installation mesh CA) IS the authentication, and the verified client
-// cert's CommonName is the authorization identity. Everything reachable on this
-// listener must be safe to expose to any mesh-CA-signed node and nothing else.
+// ObsIngestHandler builds the http.Handler served on the api's dedicated node
+// listener (wired in main.go). Every route here has NO session middleware: the
+// TLS handshake IS the authentication — the peer presents a key the node
+// registered, or, while legacy collectors remain, a mesh-CA-signed client leaf
+// — and the key's owner is the authorization identity. Everything reachable on
+// this listener must be safe to expose to an admitted node and nothing else.
+//
+// ⚠️ ALPN does NOT keep an ordinary HTTPS client off this listener: Go adds
+// http/1.1 to whatever protocols are offered, so a browser or curl negotiates
+// fine. Every check here therefore happens AFTER the handshake, on the
+// identity it established, and nothing may be gated on the protocol name.
 //
 // Kept separate from Handler()/BootstrapHandler() (the browser-facing surfaces,
 // server-auth only — browsers don't present client certs) so requiring a client
@@ -60,36 +66,54 @@ func (s *Server) obsIngestRoutes() *routeMux {
 	return mux
 }
 
-// authenticateCollector is the per-request half of ingress authentication,
-// and it reads nothing but the request's own TLS state: the node id is the
-// verified client leaf's CommonName (mesh.MintLeaf sets CN = node_id), read
-// from the certificate, never from request data, so a node cannot claim
-// another's identity.
+// authenticateCollector is the per-request half of node authentication, and it
+// reads nothing but the request's own TLS state and the in-memory node
+// registry. The identity is the key the peer presented — or, for a legacy
+// client, its verified mesh leaf's CommonName — never anything in the request,
+// so a node cannot claim another's identity.
 //
-// Whether that node may connect at all — a current inventory member holding a
-// live join token — is decided once per connection, in the TLS handshake,
-// from the in-memory node registry, and a node that stops qualifying has its
-// open connections closed (obs_ingest_conns.go). No request does a database
-// lookup. A server whose listener was not given that gate (WireObsIngest)
-// refuses every request: fail closed.
+// The handshake already decided all of this once (obs_ingest_conns.go). It is
+// decided AGAIN here, per request, because a connection outlives the facts it
+// was admitted on: a kept-alive connection is closed when its node stops
+// qualifying, but the request in flight when that happens must not be served
+// on the strength of a decision the registry has since reversed. The re-check
+// is three map lookups against memory — no request does a database lookup.
+//
+// The route's purpose is checked here too: a key registered as the node's
+// AGENT key is not the collector, so it cannot push the collector's metrics
+// and logs even though both belong to the same node. A legacy mesh-chain
+// client has no purpose to check and keeps the access it has always had.
+//
+// A server whose listener was not given the gate (WireObsIngest) refuses every
+// request: fail closed.
 //
 // On any failure it writes the response and returns ok=false. `label` prefixes
 // the log lines and error bodies so the two routes are distinguishable.
 func (s *Server) authenticateCollector(w http.ResponseWriter, r *http.Request, label string) (nodeID string, ok bool) {
-	if !s.ingestGated {
-		log.Printf("%s: refusing: the ingress listener has no node admission gate", label)
+	if s.nodeGate == nil {
+		log.Printf("%s: refusing: the listener has no node admission gate", label)
 		writeError(w, http.StatusServiceUnavailable, label+": node admission is not configured")
 		return "", false
 	}
-	nodeID, err := nodeIDFromClientCert(r.TLS)
+	id, err := s.nodeGate.identify(r.TLS)
 	if err != nil {
-		// Defense in depth: RequireAndVerifyClientCert should make this
-		// unreachable, but fail closed rather than proxy anonymously.
-		log.Printf("%s: rejecting request without a usable client cert: %v", label, err)
-		writeError(w, http.StatusUnauthorized, label+": client certificate required")
+		// The handshake should make this unreachable; fail closed rather
+		// than proxy anonymously if it ever is not.
+		log.Printf("%s: rejecting a request whose client certificate is not admitted: %v", label, err)
+		writeError(w, http.StatusUnauthorized, label+": a registered node key is required")
 		return "", false
 	}
-	return nodeID, true
+	if !s.nodeGate.gate.Admitted(id.nodeID) {
+		log.Printf("%s: rejecting a request from %q — it is no longer a member holding a live join token", label, id.nodeID)
+		writeError(w, http.StatusForbidden, label+": this node is not admitted")
+		return "", false
+	}
+	if id.purpose != "" && id.purpose != proto.NodeKeyCollector {
+		log.Printf("%s: rejecting a request from %q — it presented its %q key, which this route is not for", label, id.nodeID, id.purpose)
+		writeError(w, http.StatusForbidden, label+": this key is not the node's collector key")
+		return "", false
+	}
+	return id.nodeID, true
 }
 
 // handleObsIngest reverse-proxies a per-node collector's Prometheus remote-write
