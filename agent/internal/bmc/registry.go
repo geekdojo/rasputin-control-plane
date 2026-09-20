@@ -28,14 +28,17 @@ type Config struct {
 
 	// Turing Pi driver settings (RASPUTIN_BMC_TURINGPI_*). The address
 	// map is "<node-id>:<slot>" pairs, comma-separated — e.g.
-	// "tp-cp1:1,tp-n1:2". TLS needs one of CA/Insecure explicitly (the
-	// board ships a self-signed cert); see TuringPiOptions.
-	TuringPiEndpoint    string
-	TuringPiUser        string
-	TuringPiPass        string
-	TuringPiMap         string
-	TuringPiFingerprint string
-	TuringPiInsecure    bool
+	// "tp-cp1:1,tp-n1:2". TuringPiPin is required: it is the board's device
+	// pin, the same encoding as the bus pin, and there is no unpinned mode
+	// (geekdojo/geekdojo-brain#548). RASPUTIN_BMC_TURINGPI_FINGERPRINT and
+	// RASPUTIN_BMC_TURINGPI_INSECURE are gone; an agent started with either
+	// comes up BMC-off and says why, which is the env-path equivalent of the
+	// "re-detect needed" a stored selection gets.
+	TuringPiEndpoint string
+	TuringPiUser     string
+	TuringPiPass     string
+	TuringPiMap      string
+	TuringPiPin      string
 
 	// MockTargets is the mock backend's advertised bmc-targets list
 	// (RASPUTIN_BMC_MOCK_TARGETS, comma-separated) — dev-only, for
@@ -67,12 +70,11 @@ var factories = map[string]factory{
 			return nil, err
 		}
 		return NewTuringPiBackend(TuringPiOptions{
-			Endpoint:           cfg.TuringPiEndpoint,
-			User:               cfg.TuringPiUser,
-			Pass:               cfg.TuringPiPass,
-			Targets:            targets,
-			Fingerprint:        cfg.TuringPiFingerprint,
-			InsecureSkipVerify: cfg.TuringPiInsecure,
+			Endpoint: cfg.TuringPiEndpoint,
+			User:     cfg.TuringPiUser,
+			Pass:     cfg.TuringPiPass,
+			Targets:  targets,
+			Pin:      cfg.TuringPiPin,
 		})
 	},
 }

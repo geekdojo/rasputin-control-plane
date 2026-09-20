@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -197,5 +200,66 @@ func TestStoredCredentialBacksABlankProbePassword(t *testing.T) {
 	// Backends without a credential must not pick one up by accident.
 	if got := bmc.StoredCredential(ctx, st, "mock"); got != "" {
 		t.Errorf("mock has no credential; got %q", got)
+	}
+}
+
+// A stored selection that can no longer be dispatched must SAY SO on the
+// settings surface. The operator's only visible symptom otherwise is a BMC
+// that has quietly stopped working, with no hint that the fix is to detect the
+// board again (geekdojo/geekdojo-brain#548).
+func TestBMCConfigViewCarriesTheRedetectReason(t *testing.T) {
+	ctx := context.Background()
+	st := bmcTestSetupStore(t)
+	inv, err := inventory.OpenStore(ctx, filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatalf("inventory store: %v", err)
+	}
+	t.Cleanup(func() { _ = inv.Close() })
+
+	s := &Server{
+		inv:   inv,
+		setup: setup.NewService(st, setup.Probes{}, "cp-1", "rasputin.local", "rasputin"),
+	}
+
+	view := func(t *testing.T) bmcConfigView {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleBMCGetConfig(rec, httptest.NewRequest(http.MethodGet, "/api/bmc/config", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/bmc/config = %d: %s", rec.Code, rec.Body.String())
+		}
+		var got bmcConfigView
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode view: %v", err)
+		}
+		return got
+	}
+
+	store := func(t *testing.T, config string) {
+		t.Helper()
+		if err := st.Set(ctx, setup.KeyBMCBackend, "turingpi"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Set(ctx, setup.KeyBMCConfig, config); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const pin = "sha256/epr81hmPYzpdyR6LUQ2gb+spADtZSHpXfIQ5fF+AHqs="
+
+	// A selection stored the old way: it accepted any certificate.
+	store(t, `{"endpoint":"turingpi.local","user":"root","insecure_skip_verify":true,"targets":[{"node_id":"a","slot":1}]}`)
+	got := view(t)
+	if got.RedetectReason == "" {
+		t.Fatal("a selection that accepted any certificate must be reported as needing re-detection")
+	}
+	if !strings.Contains(got.RedetectReason, "detect the board again") {
+		t.Errorf("the reason must say what to do; got %q", got.RedetectReason)
+	}
+
+	// The same selection re-detected and pinned: nothing to report.
+	store(t, `{"endpoint":"turingpi.local","user":"root","pin":"`+pin+`","targets":[{"node_id":"a","slot":1}]}`)
+	if got := view(t); got.RedetectReason != "" {
+		t.Errorf("a pinned selection needs nothing; got %q", got.RedetectReason)
 	}
 }

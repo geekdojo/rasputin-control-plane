@@ -147,8 +147,8 @@ function BMCSection() {
   const [tpUser, setTpUser] = useState('root');
   const [tpPass, setTpPass] = useState('');
   const [tpPassSet, setTpPassSet] = useState(false);
-  const [tpFingerprint, setTpFingerprint] = useState('');
-  const [tpInsecure, setTpInsecure] = useState(false);
+  const [tpPin, setTpPin] = useState('');
+  const [tpRedetect, setTpRedetect] = useState('');
   const [tpSlots, setTpSlots] = useState<Record<number, string>>({ 1: '', 2: '', 3: '', 4: '' });
   const [tpProbing, setTpProbing] = useState(false);
   const [tpProbe, setTpProbe] = useState<BMCProbeResult | null>(null);
@@ -193,8 +193,10 @@ function BMCSection() {
       setTpEndpoint(typeof cfg.endpoint === 'string' ? cfg.endpoint : '');
       setTpUser(typeof cfg.user === 'string' ? cfg.user : 'root');
       setTpPassSet(cfg.passSet === true);
-      setTpFingerprint(typeof cfg.fingerprint === 'string' ? cfg.fingerprint : '');
-      setTpInsecure(cfg.insecure_skip_verify === true);
+      setTpPin(typeof cfg.pin === 'string' ? cfg.pin : '');
+      // The api decides this, not the form: a stored selection that cannot be
+      // dispatched any more says so in one sentence, shown as written.
+      setTpRedetect(c.redetectReason ?? '');
       const slots: Record<number, string> = { 1: '', 2: '', 3: '', 4: '' };
       if (Array.isArray(cfg.targets)) {
         for (const t of cfg.targets as Array<{ node_id?: string; slot?: number }>) {
@@ -206,8 +208,8 @@ function BMCSection() {
       setTpEndpoint('');
       setTpUser('root');
       setTpPassSet(false);
-      setTpFingerprint('');
-      setTpInsecure(false);
+      setTpPin('');
+      setTpRedetect('');
       setTpSlots({ 1: '', 2: '', 3: '', 4: '' });
     }
     setTpPass('');
@@ -234,7 +236,7 @@ function BMCSection() {
   // 2026-07-29). So the certificate now gets an explicit accept, exactly
   // like ssh asking about an unknown host key, and accepting runs the
   // credentialed half straight away.
-  async function runProbe(acceptedFingerprint?: string) {
+  async function runProbe(acceptedPin?: string) {
     setTpProbing(true);
     setErr(null);
     try {
@@ -243,7 +245,7 @@ function BMCSection() {
         endpoint: tpEndpoint.trim() || undefined,
         user: tpUser.trim() || undefined,
         pass: tpPass || undefined,
-        fingerprint: acceptedFingerprint,
+        pin: acceptedPin,
       });
       setTpProbe(res);
       if (!res.ok) return;
@@ -268,18 +270,20 @@ function BMCSection() {
   async function detectBoard() {
     setTpProbe(null);
     setTpAccepted(false);
-    await runProbe(tpFingerprint.trim() || undefined);
+    await runProbe(tpPin.trim() || undefined);
   }
 
   // Accepting is the trust decision, so it is its own act — and it is
   // the only thing that lets a credential leave this cluster.
-  async function acceptCertificate() {
-    const fp = tpProbe?.fingerprint;
-    if (!fp) return;
-    setTpFingerprint(fp);
-    setTpInsecure(false);
+  async function acceptKey() {
+    const pin = tpProbe?.pin;
+    if (!pin) return;
+    setTpPin(pin);
+    // Whatever was stored before, the board has now been detected and its key
+    // accepted, which is exactly what clears a "detect the board again" state.
+    setTpRedetect('');
     setTpAccepted(true);
-    await runProbe(fp);
+    await runProbe(pin);
   }
 
   function buildConfig(): unknown {
@@ -305,8 +309,7 @@ function BMCSection() {
         endpoint: tpEndpoint.trim(),
         user: tpUser.trim(),
       };
-      if (tpFingerprint.trim()) cfg.fingerprint = tpFingerprint.trim();
-      if (tpInsecure) cfg.insecure_skip_verify = true;
+      if (tpPin.trim()) cfg.pin = tpPin.trim();
       if (tpPass) cfg.pass = tpPass; // empty = keep stored (write-only)
       return cfg;
     }
@@ -472,6 +475,12 @@ function BMCSection() {
                   {tpProbing ? 'DETECTING…' : 'DETECT BOARD'}
                 </Btn>
               </div>
+              {tpRedetect && (
+                <Hint warn>
+                  {tpRedetect}. Until then this board is not being contacted at all, and its password has not been
+                  sent anywhere.
+                </Hint>
+              )}
               <Hint>
                 Leave the address blank and press DETECT BOARD to find it automatically — the search runs from{' '}
                 {hostNode || 'the BMC host node'}, which is on the board&rsquo;s network. It reads the board&rsquo;s
@@ -486,22 +495,22 @@ function BMCSection() {
                   {tpProbe.certSubject && (
                     <div style={{ color: DIM, fontFamily: MONO, fontSize: 10 }}>certificate: {tpProbe.certSubject}</div>
                   )}
-                  {tpProbe.fingerprint && (
+                  {tpProbe.pin && (
                     <>
-                      <div style={{ color: FG, fontFamily: MONO, fontSize: 10, wordBreak: 'break-all' }}>{tpProbe.fingerprint}</div>
+                      <div style={{ color: FG, fontFamily: MONO, fontSize: 10, wordBreak: 'break-all' }}>{tpProbe.pin}</div>
                       <Hint>
-                        This certificate is self-signed and dated 1970 — normal for this board, which has no clock at
-                        boot, and why it cannot be checked against a certificate authority. Accepting pins this exact
-                        certificate; if it ever changes, Rasputin refuses to connect rather than trusting the new one
-                        silently.
+                        This board&rsquo;s certificate is self-signed and dated 1970 — normal for a board with no clock at
+                        boot, and why it cannot be checked against a certificate authority. Accepting pins the board&rsquo;s
+                        key, the same kind of pin the cluster bus uses; if it ever changes, Rasputin refuses to connect
+                        rather than trusting the new one silently.
                       </Hint>
                       {/* The trust decision is its own act, like ssh asking
                           about an unknown host key — and it is the only thing
                           that lets the password leave this cluster. */}
                       {!tpAccepted && (
                         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                          <Btn variant="primary" disabled={tpProbing} onClick={() => void acceptCertificate()}>
-                            {tpProbing ? 'READING SLOTS…' : 'ACCEPT CERTIFICATE'}
+                          <Btn variant="primary" disabled={tpProbing} onClick={() => void acceptKey()}>
+                            {tpProbing ? 'READING SLOTS…' : 'ACCEPT THIS BOARD'}
                           </Btn>
                           <span style={{ color: DIM, fontFamily: MONO, fontSize: 10 }}>
                             {tpPass || tpPassSet ? 'then the slot list fills in' : 'add the password above first'}
@@ -516,21 +525,11 @@ function BMCSection() {
                 </div>
               )}
 
-              <label htmlFor="bmc-fingerprint" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
-                CERTIFICATE FINGERPRINT (SHA-256)
-                <Input id="bmc-fingerprint" value={tpFingerprint} onChange={(e) => setTpFingerprint(e.target.value)} placeholder="41:7C:1E:EA:…" disabled={tpInsecure} style={{ display: 'block', marginTop: 4, width: '100%' }} />
+              <label htmlFor="bmc-pin" style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>
+                BOARD PIN
+                <Input id="bmc-pin" value={tpPin} onChange={(e) => setTpPin(e.target.value)} placeholder="sha256/…" style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
-              <Hint>DETECT BOARD fills this in. Only type it by hand if you already have the fingerprint from elsewhere.</Hint>
-              <label style={{ display: 'flex', gap: 8, alignItems: 'center', color: DIM, fontFamily: MONO, fontSize: 10 }}>
-                <input
-                  type="checkbox"
-                  checked={tpInsecure}
-                  onChange={(e) => setTpInsecure(e.target.checked)}
-                  aria-label="Accept any certificate (no pinning)"
-                />
-                ACCEPT ANY CERTIFICATE (no pinning)
-              </label>
-              {tpInsecure && <Hint warn>Any certificate will be accepted, so this connection can be intercepted on your network. Pin the fingerprint instead unless you are deliberately testing.</Hint>}
+              <Hint>DETECT BOARD fills this in. Only type it by hand if you already have the pin from elsewhere.</Hint>
 
               <div style={{ color: DIM, fontFamily: MONO, fontSize: 10, letterSpacing: '0.08em' }}>WHICH NODE IS IN WHICH SLOT</div>
               <Hint>

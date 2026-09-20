@@ -29,6 +29,13 @@ type bmcConfigView struct {
 	HostNodeID string          `json:"hostNodeId,omitempty"`
 	Config     json.RawMessage `json:"config,omitempty"`
 	PinnedNode string          `json:"pinnedNode,omitempty"`
+	// RedetectReason is set when the stored selection cannot be dispatched to
+	// the host any more — it accepted any certificate, used an http address,
+	// or carries a pin form the agent no longer checks. Nothing is sent to the
+	// board, and no credential moves, until the operator detects it again
+	// (geekdojo/geekdojo-brain#548). The UI shows this sentence as-is, so it
+	// says what happened and what to do, not which field failed a check.
+	RedetectReason string `json:"redetectReason,omitempty"`
 }
 
 // GET /api/bmc/config — current selection from settings + the env-pin
@@ -52,6 +59,7 @@ func (s *Server) handleBMCGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw != "" {
 		view.Config = sanitizeBMCConfig(view.Backend, raw)
+		view.RedetectReason = bmc.RedetectNeeded(view.Backend, json.RawMessage(raw))
 	}
 	// A backend's credential lives under its own settings key (never in
 	// bmc.config); surface only whether one is stored, so the form can

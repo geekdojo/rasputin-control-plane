@@ -1057,18 +1057,24 @@ export type BMCProbeResult = {
   ok: boolean;
   slots?: BMCProbeSlot[];
   endpoint?: string;
-  fingerprint?: string;
+  // pin is the device pin for the key the board presented — the same encoding
+  // as the cluster bus pin ("sha256/" + base64). It replaced a cert-DER
+  // fingerprint: the board's web UI displays no fingerprint to compare
+  // against, so there was nothing the second form bought.
+  pin?: string;
   identified?: boolean;
   certSubject?: string;
   detail?: string;
 };
 
-// probeBMC asks the BMC-host agent to find a board and capture the
-// certificate it presents. Runs before any backend is configured and
-// needs no credentials — it exists so Settings can offer discovery
-// instead of asking for an IP and a fingerprint the operator would have
-// to go and read out of openssl themselves.
-export function probeBMC(req: { kind?: string; endpoint?: string; user?: string; pass?: string; fingerprint?: string }): Promise<BMCProbeResult> {
+// probeBMC asks the BMC-host agent to find a board and capture the key it
+// presents. Runs before any backend is configured and needs no credentials —
+// it exists so Settings can offer discovery instead of asking for an IP and a
+// pin the operator would have to go and read out of openssl themselves.
+//
+// `pin` carries back the pin the operator has already accepted; the agent
+// sends credentials only when the board is still presenting that key.
+export function probeBMC(req: { kind?: string; endpoint?: string; user?: string; pass?: string; pin?: string }): Promise<BMCProbeResult> {
   return jsonFetch<BMCProbeResult>('/api/bmc/probe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

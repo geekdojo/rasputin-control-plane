@@ -2,7 +2,6 @@ package bmc
 
 import (
 	"context"
-	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -99,18 +98,21 @@ func (f *fakeBMC) allQueries() []url.Values {
 
 func testBackend(t *testing.T, srv *httptest.Server, targets map[string]int) *TuringPiBackend {
 	t.Helper()
+	// Pin the test server's own key. There is no unpinned mode any more, and
+	// there is no need for one here: pinning ignores the chain, so httptest's
+	// untrusted certificate is exactly as acceptable as the board's expired
+	// self-signed one. The transport is left alone, which also means these
+	// tests exercise the real pinned TLS config rather than replacing it.
 	b, err := NewTuringPiBackend(TuringPiOptions{
-		Endpoint:           srv.URL,
-		User:               "root",
-		Pass:               "turing",
-		Targets:            targets,
-		InsecureSkipVerify: true,
+		Endpoint: srv.URL,
+		User:     "root",
+		Pass:     "turing",
+		Targets:  targets,
+		Pin:      proto.DevicePinForCert(srv.Certificate()),
 	})
 	if err != nil {
 		t.Fatalf("NewTuringPiBackend: %v", err)
 	}
-	// httptest's TLS cert isn't the board's; trust the test server.
-	b.client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	return b
 }
 
@@ -311,68 +313,54 @@ func TestTuringPiUnknownTargetRefused(t *testing.T) {
 	}
 }
 
-// TLS has to be an explicit choice — a driver that silently skipped
-// verification would be out of step with the rest of the platform.
-func TestTuringPiRequiresExplicitTLSChoice(t *testing.T) {
+// There is no unpinned mode: a driver with no pin does not construct, so a
+// selection that lost its pin fails loudly at the node instead of talking to
+// a board nothing has vouched for (geekdojo/geekdojo-brain#548).
+func TestTuringPiRequiresAPin(t *testing.T) {
 	_, err := NewTuringPiBackend(TuringPiOptions{
 		Endpoint: "turingpi.local",
 		User:     "root",
 		Targets:  map[string]int{"tp-cp1": 1},
 	})
 	if err == nil {
-		t.Fatal("expected construction to fail without a TLS choice")
+		t.Fatal("expected construction to fail without a pin")
 	}
-	if !strings.Contains(err.Error(), "TLS not configured") {
-		t.Errorf("error should name the TLS decision, got: %v", err)
-	}
-}
-
-// Operators paste fingerprints in whatever shape their tool emitted.
-func TestNormalizeFingerprint(t *testing.T) {
-	const want = "417c1eeab9427f1033634c7af2d2ddf1e8758a9226ce1f633fe1ffd5110fb9e1"
-	for _, in := range []string{
-		"41:7C:1E:EA:B9:42:7F:10:33:63:4C:7A:F2:D2:DD:F1:E8:75:8A:92:26:CE:1F:63:3F:E1:FF:D5:11:0F:B9:E1",
-		"417C1EEAB9427F1033634C7AF2D2DDF1E8758A9226CE1F633FE1FFD5110FB9E1",
-		"  417c1eeab9427f1033634c7af2d2ddf1e8758a9226ce1f633fe1ffd5110fb9e1  ",
-	} {
-		got, err := normalizeFingerprint(in)
-		if err != nil {
-			t.Errorf("normalizeFingerprint(%.20s…): %v", in, err)
-			continue
-		}
-		if got != want {
-			t.Errorf("normalizeFingerprint(%.20s…) = %q, want %q", in, got, want)
-		}
-	}
-	for _, bad := range []string{"", "abc", "zz7c1eeab9427f1033634c7af2d2ddf1e8758a9226ce1f633fe1ffd5110fb9e1"} {
-		if _, err := normalizeFingerprint(bad); err == nil {
-			t.Errorf("normalizeFingerprint(%q) should fail", bad)
-		}
+	if !strings.Contains(err.Error(), "pin") {
+		t.Errorf("error should name the missing pin, got: %v", err)
 	}
 }
 
-// The pinned verifier must accept exactly one certificate and reject any
-// other — including a valid-but-different one.
-func TestPinnedCertVerifier(t *testing.T) {
-	der := []byte("pretend-DER-bytes")
-	pin := certFingerprint(der)
-
-	if err := pinnedCertVerifier(pin)([][]byte{der}, nil); err != nil {
-		t.Errorf("matching certificate should verify: %v", err)
-	}
-	err := pinnedCertVerifier(pin)([][]byte{[]byte("a-different-cert")}, nil)
+// An http endpoint would put the BMC password on the wire in a Basic header.
+// It used to be honoured "so a lab board with TLS disabled still works".
+func TestTuringPiRefusesHTTPEndpoints(t *testing.T) {
+	_, err := NewTuringPiBackend(TuringPiOptions{
+		Endpoint: "http://turingpi.local",
+		User:     "root",
+		Targets:  map[string]int{"tp-cp1": 1},
+		Pin:      testDevicePin,
+	})
 	if err == nil {
-		t.Fatal("a different certificate must be rejected")
+		t.Fatal("expected construction to fail on an http endpoint")
 	}
-	// The message has to point at the likely cause, since a firmware
-	// update regenerating the cert is a normal-operation path here.
-	if !strings.Contains(err.Error(), "re-pin") {
-		t.Errorf("mismatch error should mention re-pinning, got: %v", err)
+	for _, want := range []string{"http", "clear"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should say why http is refused (mentioning %q), got: %v", want, err)
+		}
 	}
-	if err := pinnedCertVerifier(pin)(nil, nil); err == nil {
-		t.Error("an empty chain must be rejected")
+	// A bare host is still read as https — the form operators are told to use.
+	if _, err := NewTuringPiBackend(TuringPiOptions{
+		Endpoint: "turingpi.local",
+		User:     "root",
+		Targets:  map[string]int{"tp-cp1": 1},
+		Pin:      testDevicePin,
+	}); err != nil {
+		t.Errorf("a bare host must still be accepted as https: %v", err)
 	}
 }
+
+// testDevicePin is a syntactically valid pin for construction tests that never
+// complete a handshake.
+const testDevicePin = "sha256/epr81hmPYzpdyR6LUQ2gb+spADtZSHpXfIQ5fF+AHqs="
 
 // An expired self-signed cert is what this board actually presents, so
 // pinning has to work against one. A CA-trust approach cannot.
@@ -381,14 +369,14 @@ func TestTuringPiPinnedCertWorksAgainstExpiredSelfSignedBoard(t *testing.T) {
 	leaf := srv.Certificate()
 
 	b, err := NewTuringPiBackend(TuringPiOptions{
-		Endpoint:    srv.URL,
-		User:        "root",
-		Pass:        "turing",
-		Targets:     map[string]int{"tp-cp1": 1},
-		Fingerprint: certFingerprint(leaf.Raw),
+		Endpoint: srv.URL,
+		User:     "root",
+		Pass:     "turing",
+		Targets:  map[string]int{"tp-cp1": 1},
+		Pin:      proto.DevicePinForCert(leaf),
 	})
 	if err != nil {
-		t.Fatalf("NewTuringPiBackend with a pinned fingerprint: %v", err)
+		t.Fatalf("NewTuringPiBackend with a pinned key: %v", err)
 	}
 	if _, _, err := b.Power(context.Background(), "tp-cp1", proto.BMCPowerQuery); err != nil {
 		t.Fatalf("pinned request should succeed: %v", err)
@@ -396,11 +384,11 @@ func TestTuringPiPinnedCertWorksAgainstExpiredSelfSignedBoard(t *testing.T) {
 
 	// A wrong pin must fail the handshake rather than fall through.
 	bad, err := NewTuringPiBackend(TuringPiOptions{
-		Endpoint:    srv.URL,
-		User:        "root",
-		Pass:        "turing",
-		Targets:     map[string]int{"tp-cp1": 1},
-		Fingerprint: certFingerprint([]byte("not-this-board")),
+		Endpoint: srv.URL,
+		User:     "root",
+		Pass:     "turing",
+		Targets:  map[string]int{"tp-cp1": 1},
+		Pin:      proto.DevicePinForSPKI([]byte("not-this-board")),
 	})
 	if err != nil {
 		t.Fatalf("construction with a wrong pin should still build: %v", err)
@@ -414,23 +402,23 @@ func TestTuringPiPinnedCertWorksAgainstExpiredSelfSignedBoard(t *testing.T) {
 	// "request failed" — indistinguishable from an unplugged cable, for
 	// what is the most likely misconfiguration of the whole driver
 	// (caught on the bench 2026-07-28 with a deliberately wrong pin).
-	if !strings.Contains(err.Error(), "pinned fingerprint") {
+	if !strings.Contains(err.Error(), "does not match the pin") {
 		t.Errorf("a pin mismatch must name itself; got %q", err)
 	}
-	// The pinned and presented digests both belong in the message: the
-	// operator needs the value to re-pin after a firmware update.
-	if !strings.Contains(err.Error(), certFingerprint(leaf.Raw)) {
-		t.Errorf("pin-mismatch error should report the presented fingerprint; got %q", err)
+	// The pinned and presented pins both belong in the message: the operator
+	// needs the value after a firmware reinstall regenerates the key.
+	if !strings.Contains(err.Error(), proto.DevicePinForCert(leaf)) {
+		t.Errorf("pin-mismatch error should report the presented pin; got %q", err)
 	}
 }
 
 func TestTuringPiRejectsBadConfig(t *testing.T) {
 	base := func() TuringPiOptions {
 		return TuringPiOptions{
-			Endpoint:           "turingpi.local",
-			User:               "root",
-			Targets:            map[string]int{"tp-cp1": 1},
-			InsecureSkipVerify: true,
+			Endpoint: "turingpi.local",
+			User:     "root",
+			Targets:  map[string]int{"tp-cp1": 1},
+			Pin:      testDevicePin,
 		}
 	}
 	t.Run("slot out of range", func(t *testing.T) {
@@ -468,7 +456,6 @@ func TestParseTuringPiEndpoint(t *testing.T) {
 		{"turingpi.local", "https://turingpi.local"},
 		{"192.168.1.5", "https://192.168.1.5"},
 		{"https://turingpi.local:8443", "https://turingpi.local:8443"},
-		{"http://turingpi.local", "http://turingpi.local"},
 	} {
 		got, err := parseTuringPiEndpoint(tc.in)
 		if err != nil {
@@ -479,7 +466,9 @@ func TestParseTuringPiEndpoint(t *testing.T) {
 			t.Errorf("parseTuringPiEndpoint(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-	for _, bad := range []string{"", "ftp://turingpi.local"} {
+	// http is refused, not honoured: it would put the BMC password on the
+	// wire in a Basic header (geekdojo/geekdojo-brain#548).
+	for _, bad := range []string{"", "ftp://turingpi.local", "http://turingpi.local"} {
 		if _, err := parseTuringPiEndpoint(bad); err == nil {
 			t.Errorf("parseTuringPiEndpoint(%q) should fail", bad)
 		}
@@ -542,10 +531,10 @@ func TestTuringPiRegisteredInBothPaths(t *testing.T) {
 // the driver dials through the mDNS-aware path.
 func TestTuringPiDialsLocalNamesViaMDNS(t *testing.T) {
 	b, err := NewTuringPiBackend(TuringPiOptions{
-		Endpoint:           "turingpi.local",
-		User:               "root",
-		Targets:            map[string]int{"cp-1": 1},
-		InsecureSkipVerify: true,
+		Endpoint: "turingpi.local",
+		User:     "root",
+		Targets:  map[string]int{"cp-1": 1},
+		Pin:      testDevicePin,
 	})
 	if err != nil {
 		t.Fatalf("construct: %v", err)
@@ -556,20 +545,6 @@ func TestTuringPiDialsLocalNamesViaMDNS(t *testing.T) {
 	}
 	if tr.DialContext == nil {
 		t.Fatal("no DialContext — .local endpoints would go to the OS resolver, which cannot resolve them on the appliance")
-	}
-}
-
-// The probe renders digests the way `openssl x509 -fingerprint` does, so
-// an operator comparing what the UI shows against what they ran by hand
-// sees the same string rather than having to squint at case and colons.
-func TestDisplayFingerprintMatchesOpensslForm(t *testing.T) {
-	got := displayFingerprint("417c1eeab9427f10")
-	want := "41:7C:1E:EA:B9:42:7F:10"
-	if got != want {
-		t.Errorf("displayFingerprint = %q, want %q", got, want)
-	}
-	if displayFingerprint("") != "" {
-		t.Error("empty digest should render empty, not a stray colon")
 	}
 }
 

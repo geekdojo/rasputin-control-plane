@@ -3,7 +3,6 @@ package bmc
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -77,43 +76,46 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 		return proto.BMCProbeResult{Detail: err.Error()}
 	}
 
-	// Capture the leaf without judging it. Verification is explicitly
+	// Capture the board's key without judging it. Verification is explicitly
 	// disabled: the board's certificate is self-signed and minted at the
 	// epoch, so every check would fail and we would learn nothing. The
 	// operator does the trusting, once, on what we show them.
 	//
-	// CodeQL flags this as go/disabled-certificate-check (HIGH). Accepted as
-	// deliberate rather than a false positive — verification really is off and
-	// this really is trust-on-first-use, with TOFU's usual weakness that an
-	// attacker present at probe time gets their fingerprint pinned instead of
-	// the board's. What makes it safe to ship is what this connection does
-	// NOT do:
+	// CodeQL flags this as go/disabled-certificate-check (HIGH), and gosec as
+	// G402. Accepted as deliberate rather than a false positive: verification
+	// really is off and this really is trust-on-first-use, with TOFU's usual
+	// weakness that an attacker present at probe time gets their pin recorded
+	// instead of the board's. What makes it safe to ship is what this
+	// connection does NOT do:
 	//
 	//   * it sends no credentials — the request is an unauthenticated
 	//     GET /api/bmc?opt=get&type=about, so a hostile endpoint learns
 	//     nothing and captures nothing;
-	//   * it grants no trust — VerifyPeerCertificate below only RECORDS the
-	//     fingerprint and subject and always returns nil. Nothing downstream
+	//   * it grants no trust — the VerifyConnection hook below only RECORDS
+	//     the pin and the subject and always returns nil. Nothing downstream
 	//     acts on this connection;
-	//   * the fingerprint it captures is shown to the operator, who confirms
-	//     it against the board before it ever becomes the pin that
-	//     NewTuringPiBackend enforces.
+	//   * the pin it captures is shown to the operator, who accepts it before
+	//     it ever becomes the pin NewTuringPiBackend enforces.
 	//
 	// TRIP-WIRE: this verdict rests on the connection carrying no secrets and
 	// conferring no trust. If this probe ever sends credentials, or its result
-	// is used to configure anything without the operator confirming the
-	// digest, re-open .github/codeql-register.tsv — it becomes a real finding.
+	// is used to configure anything without the operator accepting the pin,
+	// re-open .github/codeql-register.tsv and .github/sast-register.tsv — it
+	// becomes a real finding.
 	var (
-		fingerprint string
-		subject     string
+		pin     string
+		subject string
 	)
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // TOFU capture; the operator confirms the digest
+		InsecureSkipVerify: true, //nolint:gosec // TOFU capture; the operator accepts the pin
 		MinVersion:         tls.VersionTLS12,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) > 0 {
-				fingerprint = displayFingerprint(certFingerprint(rawCerts[0]))
-				subject = leafSubject(rawCerts[0])
+		// VerifyConnection, not VerifyPeerCertificate, for the same reason
+		// pinnedtls.go gives: it runs on resumed connections too, so what is
+		// recorded here is always the key of the connection actually in use.
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) > 0 {
+				pin = proto.DevicePinForCert(cs.PeerCertificates[0])
+				subject = cs.PeerCertificates[0].Subject.String()
 			}
 			return nil
 		},
@@ -147,7 +149,7 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 	res := proto.BMCProbeResult{
 		OK:          true,
 		Endpoint:    endpoint,
-		Fingerprint: fingerprint,
+		Pin:         pin,
 		CertSubject: subject,
 	}
 	switch {
@@ -160,14 +162,14 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 		res.Detail = "A BMC requiring authentication answered. Treated as the board."
 	default:
 		// Something answered but not the way this board does. Surface it
-		// rather than pinning whatever certificate happened to arrive.
-		res.Detail = fmt.Sprintf("something answered at %s with HTTP %d, which is not how a Turing Pi BMC responds unauthenticated. Confirm the address before trusting this certificate.", endpoint, resp.StatusCode)
+		// rather than pinning whatever key happened to arrive.
+		res.Detail = fmt.Sprintf("something answered at %s with HTTP %d, which is not how a Turing Pi BMC responds unauthenticated. Confirm the address before trusting this device.", endpoint, resp.StatusCode)
 	}
 	if discovered {
 		// Two boards on one LAN both claim the name; say "a board".
 		res.Detail += fmt.Sprintf(" Found by resolving %s from this node.", turingpiMDNSName)
 	}
-	if res.Fingerprint == "" {
+	if res.Pin == "" {
 		res.OK = false
 		res.Detail = "connected but no certificate was presented — nothing to pin"
 		return res
@@ -177,39 +179,38 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 	// BMC credentials, so it is gated on a certificate they have ALREADY
 	// accepted — never on the one just captured.
 	//
-	// Pinning to res.Fingerprint here would be circular: that digest came
-	// from this very handshake, made with verification disabled, so it
-	// would authorise whatever answered. Anyone able to answer for the
-	// board's mDNS name could then present any certificate, return the
-	// 401 marker to look identified, and collect an account that also
-	// serves SSH and controls power for the whole chassis.
+	// Pinning to res.Pin here would be circular: that pin came from this very
+	// handshake, made with verification disabled, so it would authorise
+	// whatever answered. Anyone able to answer for the board's mDNS name could
+	// then present any certificate, return the 401 marker to look identified,
+	// and collect an account that also serves SSH and controls power for the
+	// whole chassis.
 	//
-	// So credentials require cmd.Fingerprint — carried back from the
-	// operator's form after the first, uncredentialed probe showed it to
-	// them — AND the board must still be presenting exactly that
-	// certificate now. A mismatch is refused loudly rather than
-	// re-pinned, because at that point either the firmware was
-	// regenerated or someone is answering in the board's place, and only
+	// So credentials require cmd.Pin — carried back from the operator's form
+	// after the first, uncredentialed probe showed it to them — AND the board
+	// must still be presenting exactly that key now. A mismatch is refused
+	// loudly rather than re-pinned, because at that point either the firmware
+	// was reinstalled or someone is answering in the board's place, and only
 	// the operator can tell those apart.
 	if !res.Identified || strings.TrimSpace(cmd.User) == "" {
 		return res
 	}
-	if strings.TrimSpace(cmd.Fingerprint) == "" {
-		res.Detail += " Slot detection skipped: confirm the certificate above first — credentials are never sent to a board whose certificate has not been accepted."
+	if strings.TrimSpace(cmd.Pin) == "" {
+		res.Detail += " Slot detection skipped: accept the pin above first — credentials are never sent to a device whose key has not been accepted."
 		return res
 	}
-	wantFP, ferr := normalizeFingerprint(cmd.Fingerprint)
-	gotFP, gerr := normalizeFingerprint(res.Fingerprint)
-	if ferr != nil || gerr != nil || wantFP != gotFP {
-		res.Detail += " Slot detection refused: this board is presenting a different certificate than the one you accepted. No credentials were sent. If the BMC firmware was reinstalled, clear the fingerprint and detect again; otherwise treat this as a trust failure."
+	wantPin, ferr := proto.ParseDevicePin(cmd.Pin)
+	gotPin, gerr := proto.ParseDevicePin(res.Pin)
+	if ferr != nil || gerr != nil || wantPin != gotPin {
+		res.Detail += " Slot detection refused: this device is presenting a different key than the one you accepted. No credentials were sent. If the BMC firmware was reinstalled, clear the pin and detect again; otherwise treat this as a trust failure."
 		return res
 	}
 	b, berr := NewTuringPiBackend(TuringPiOptions{
-		Endpoint:    endpoint,
-		User:        cmd.User,
-		Pass:        cmd.Pass,
-		Targets:     map[string]int{"probe-placeholder": 1},
-		Fingerprint: gotFP,
+		Endpoint: endpoint,
+		User:     cmd.User,
+		Pass:     cmd.Pass,
+		Targets:  map[string]int{"probe-placeholder": 1},
+		Pin:      res.Pin,
 	})
 	if berr != nil {
 		res.Detail += " Slot detection unavailable: " + berr.Error()
@@ -217,34 +218,6 @@ func Probe(ctx context.Context, cmd proto.BMCProbeCmd) proto.BMCProbeResult {
 	}
 	res.Slots = detectSlots(ctx, b)
 	return res
-}
-
-// leafSubject parses just enough of the presented certificate to show
-// the operator something human next to the digest.
-func leafSubject(der []byte) string {
-	c, err := x509.ParseCertificate(der)
-	if err != nil {
-		return ""
-	}
-	return c.Subject.String()
-}
-
-// displayFingerprint renders a hex digest as colon-separated uppercase
-// pairs — the form `openssl x509 -fingerprint` prints, so an operator
-// comparing the two sees the same string rather than having to squint.
-func displayFingerprint(hexDigest string) string {
-	if hexDigest == "" {
-		return ""
-	}
-	up := strings.ToUpper(hexDigest)
-	var b strings.Builder
-	for i := 0; i < len(up); i += 2 {
-		if i > 0 {
-			b.WriteByte(':')
-		}
-		b.WriteString(up[i : i+2])
-	}
-	return b.String()
 }
 
 // loginBannerHost matches the hostname a getty prints before its login

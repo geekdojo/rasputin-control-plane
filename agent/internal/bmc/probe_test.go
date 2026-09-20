@@ -138,10 +138,10 @@ func unauthedBoard(t *testing.T) *httptest.Server {
 // every node in the chassis. Caught by the automated security review on
 // CP #51 before any build shipped.
 //
-// These pin the gate rather than the plumbing: no accepted fingerprint,
-// or one that does not match what the board is presenting now, means no
-// credential leaves the node.
-func TestProbeRefusesCredentialsWithoutAnAcceptedFingerprint(t *testing.T) {
+// These pin the gate rather than the plumbing: no accepted pin, or one that
+// does not match what the board is presenting now, means no credential leaves
+// the node.
+func TestProbeRefusesCredentialsWithoutAnAcceptedPin(t *testing.T) {
 	srv := unauthedBoard(t)
 
 	res := Probe(context.Background(), proto.BMCProbeCmd{
@@ -149,18 +149,18 @@ func TestProbeRefusesCredentialsWithoutAnAcceptedFingerprint(t *testing.T) {
 		Endpoint: srv.URL,
 		User:     "root",
 		Pass:     "hunter2",
-		// Fingerprint deliberately absent — the operator has not
-		// accepted anything yet.
+		// Pin deliberately absent — the operator has not accepted
+		// anything yet.
 	})
 	if len(res.Slots) != 0 {
-		t.Error("slot detection ran without an accepted certificate — that sends credentials to an unverified host")
+		t.Error("slot detection ran without an accepted pin — that sends credentials to an unverified host")
 	}
-	if !strings.Contains(res.Detail, "confirm the certificate") {
+	if !strings.Contains(res.Detail, "accept the pin") {
 		t.Errorf("detail should tell the operator what to do; got %q", res.Detail)
 	}
 }
 
-func TestProbeRefusesCredentialsOnFingerprintMismatch(t *testing.T) {
+func TestProbeRefusesCredentialsOnPinMismatch(t *testing.T) {
 	srv := unauthedBoard(t)
 
 	res := Probe(context.Background(), proto.BMCProbeCmd{
@@ -168,14 +168,14 @@ func TestProbeRefusesCredentialsOnFingerprintMismatch(t *testing.T) {
 		Endpoint: srv.URL,
 		User:     "root",
 		Pass:     "hunter2",
-		// An accepted fingerprint that is NOT what this host presents —
-		// i.e. something else is answering for the board.
-		Fingerprint: strings.Repeat("ab", 32),
+		// An accepted pin that is NOT the key this host presents — i.e.
+		// something else is answering for the board.
+		Pin: proto.DevicePinForSPKI([]byte("some-other-board")),
 	})
 	if len(res.Slots) != 0 {
-		t.Error("slot detection ran against a certificate the operator never accepted")
+		t.Error("slot detection ran against a key the operator never accepted")
 	}
-	if !strings.Contains(res.Detail, "different certificate") {
+	if !strings.Contains(res.Detail, "different key") {
 		t.Errorf("a mismatch must be named as a trust failure; got %q", res.Detail)
 	}
 	if !strings.Contains(res.Detail, "No credentials were sent") {
@@ -238,10 +238,36 @@ func TestProbeIdentifiesUnmarkedUnauthorizedAsAuthRequired(t *testing.T) {
 	}
 }
 
-// Colon-separated display form is what the UI shows and hands back, so
-// the gate has to accept it rather than only raw hex.
-func TestProbeAcceptsTheDisplayFingerprintForm(t *testing.T) {
-	if _, err := normalizeFingerprint("41:7C:1E:EA:B9:42:7F:10:33:63:4C:7A:F2:D2:DD:F1:E8:75:8A:92:26:CE:1F:63:3F:E1:FF:D5:11:0F:B9:E1"); err != nil {
-		t.Fatalf("the form shown to operators must normalize: %v", err)
+// The pin the probe reports is the value the operator accepts and the value
+// the driver then enforces — the same string, in the bus pin's encoding. A
+// probe that reported one form and pinned another would fail on the first
+// real request instead of at detection time.
+func TestProbeReportsThePinTheDriverEnforces(t *testing.T) {
+	srv := unauthedBoard(t)
+
+	res := Probe(context.Background(), proto.BMCProbeCmd{
+		Kind:     "turingpi",
+		Endpoint: srv.URL,
+	})
+	if !res.OK {
+		t.Fatalf("probe should have reached the board: %+v", res)
+	}
+	want := proto.DevicePinForCert(srv.Certificate())
+	if res.Pin != want {
+		t.Errorf("probe reported pin %q, want %q", res.Pin, want)
+	}
+	if !strings.HasPrefix(res.Pin, proto.DevicePinPrefix) {
+		t.Errorf("pin %q should carry the algorithm prefix", res.Pin)
+	}
+	// The same value builds a backend. (That it also SATISFIES the driver's
+	// check against this very certificate is pinned in TestPinnedTLSConfig,
+	// which can complete a handshake without a credentialed request.)
+	if _, err := NewTuringPiBackend(TuringPiOptions{
+		Endpoint: srv.URL,
+		User:     "root",
+		Targets:  map[string]int{"tp-cp1": 1},
+		Pin:      res.Pin,
+	}); err != nil {
+		t.Fatalf("the reported pin must build a backend: %v", err)
 	}
 }

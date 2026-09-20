@@ -887,14 +887,28 @@ func (r *recRunner) Run(_ context.Context, name string, args ...string) (string,
 	return "", nil
 }
 
-func TestUCIRealClient_SetActiveIdleTurnsOffDHCPAndSnort(t *testing.T) {
-	rr := &recRunner{}
+// setActiveClient builds a real client whose deployment-mode file lands in a
+// temp dir, and returns both. Every SetActive test needs it: the production
+// path is /etc/rasputin/deployment-mode, which a test must never write.
+func setActiveClient(t *testing.T, rr *recRunner) (*UCIRealClient, string) {
+	t.Helper()
+	modePath := filepath.Join(t.TempDir(), "deployment-mode")
+	t.Setenv("RASPUTIN_DEPLOYMENT_MODE_FILE", modePath)
 	c, err := newRealClient(t.TempDir(), rr)
 	if err != nil {
 		t.Fatalf("newRealClient: %v", err)
 	}
+	return c, modePath
+}
+
+func TestUCIRealClient_SetActiveIdleTurnsOffDHCPAndSnort(t *testing.T) {
+	rr := &recRunner{}
+	c, modePath := setActiveClient(t, rr)
 	if err := c.SetActive(context.Background(), false); err != nil {
 		t.Fatalf("SetActive(false): %v", err)
+	}
+	if got := readFileString(t, modePath); got != "idle\n" {
+		t.Errorf("deployment mode file = %q, want %q", got, "idle\n")
 	}
 	for _, want := range [][]string{
 		{"uci", "set", "dhcp.lan.ignore=1"},
@@ -912,12 +926,12 @@ func TestUCIRealClient_SetActiveIdleTurnsOffDHCPAndSnort(t *testing.T) {
 
 func TestUCIRealClient_SetActiveActivateTurnsOnDHCPAndSnort(t *testing.T) {
 	rr := &recRunner{}
-	c, err := newRealClient(t.TempDir(), rr)
-	if err != nil {
-		t.Fatalf("newRealClient: %v", err)
-	}
+	c, modePath := setActiveClient(t, rr)
 	if err := c.SetActive(context.Background(), true); err != nil {
 		t.Fatalf("SetActive(true): %v", err)
+	}
+	if got := readFileString(t, modePath); got != "active\n" {
+		t.Errorf("deployment mode file = %q, want %q", got, "active\n")
 	}
 	for _, want := range [][]string{
 		{"uci", "set", "dhcp.lan.ignore=0"},
@@ -928,6 +942,67 @@ func TestUCIRealClient_SetActiveActivateTurnsOnDHCPAndSnort(t *testing.T) {
 			t.Errorf("missing call %v; got %s", want, fmtCalls(rr.calls))
 		}
 	}
+}
+
+// The mode file is what the firewall's boot-time DHCP init reads instead of
+// probing the LAN (geekdojo/geekdojo-brain#543), so these three properties are
+// the contract with that script: the last mode applied wins, the file is
+// readable by it (it runs as root but the file is deliberately not secret),
+// and a mode that could not be recorded is reported rather than swallowed.
+func TestUCIRealClient_SetActiveRecordsTheLastModeApplied(t *testing.T) {
+	rr := &recRunner{}
+	c, modePath := setActiveClient(t, rr)
+	for _, active := range []bool{true, false, true} {
+		if err := c.SetActive(context.Background(), active); err != nil {
+			t.Fatalf("SetActive(%v): %v", active, err)
+		}
+	}
+	if got := readFileString(t, modePath); got != "active\n" {
+		t.Errorf("after true,false,true the file should say active; got %q", got)
+	}
+	fi, err := os.Stat(modePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o644 {
+		t.Errorf("deployment mode file mode = %o, want 644", perm)
+	}
+}
+
+func TestUCIRealClient_SetActiveFailsWhenTheModeCannotBeRecorded(t *testing.T) {
+	rr := &recRunner{}
+	// A path whose parent is a FILE: the directory cannot be created, so the
+	// write cannot succeed however the helper is implemented.
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RASPUTIN_DEPLOYMENT_MODE_FILE", filepath.Join(blocked, "deployment-mode"))
+	c, err := newRealClient(t.TempDir(), rr)
+	if err != nil {
+		t.Fatalf("newRealClient: %v", err)
+	}
+	err = c.SetActive(context.Background(), true)
+	if err == nil {
+		t.Fatal("want an error when the deployment mode cannot be recorded")
+	}
+	if !strings.Contains(err.Error(), "deployment-mode") {
+		t.Errorf("the error should name the file it could not write; got %v", err)
+	}
+	// The live box was still put in the requested mode before the failure —
+	// the record is the part that did not happen.
+	if !containsCall(rr.calls, []string{"uci", "set", "dhcp.lan.ignore=0"}) {
+		t.Errorf("the UCI state should still have been applied; got %s", fmtCalls(rr.calls))
+	}
+}
+
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
 }
 
 // ----- dns_forward (dnsmasq conditional-forward) ------------------------------

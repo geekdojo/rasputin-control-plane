@@ -53,23 +53,19 @@ func (b *RealBackend) Enroll(ctx context.Context, in EnrollInput) (Status, error
 	// changed (first enroll); subsequent enrolls + post-reboot starts already
 	// have it on the persistent bundle.
 	if len(in.MeshCAPEM) > 0 {
-		// Two trust mechanisms, run together so the agent doesn't need to know
-		// its OS: (1) a dedicated bundle at b.caBundle that the tailscaled
-		// service trusts via SSL_CERT_FILE (Buildroot, read-only /etc); (2)
-		// appending to the system trust bundle (OpenWrt, writable /etc, whose
-		// stock tailscale init has no env hook). Each no-ops where it doesn't
-		// apply. tailscaled caches the cert pool at start, so restart it if
-		// either mechanism changed something.
+		// ONE trust mechanism on both images: the bundle at b.caBundle, which
+		// the tailscaled service is pointed at with SSL_CERT_FILE (a systemd
+		// drop-in on rasputin-os, files/etc/init.d/rasputin-tailscale on the
+		// OpenWrt firewall). The agent no longer also appends the CA to the
+		// box's global trust bundle — see the note in trust.go
+		// (geekdojo/geekdojo-brain#542). tailscaled caches the cert pool at
+		// process start, so restart it when the bundle actually changed.
 		changedFile, err := installMeshCA(in.MeshCAPEM, b.caBundle)
 		if err != nil {
 			return Status{}, fmt.Errorf("tailscale: install mesh CA: %w", err)
 		}
-		changedBundle, berr := ensureCAInSystemBundle(in.MeshCAPEM, defaultSystemBundles)
-		if berr != nil && !changedBundle {
-			log.Printf("rasputin-agent: mesh CA system-bundle append skipped (%v); relying on SSL_CERT_FILE=%s", berr, b.caBundle)
-		}
-		if changedFile || changedBundle {
-			log.Printf("rasputin-agent: mesh CA installed (file=%v bundle=%v); restarting tailscaled", changedFile, changedBundle)
+		if changedFile {
+			log.Printf("rasputin-agent: mesh CA installed at %s; restarting tailscaled", b.caBundle)
 			if err := restartTailscaled(ctx, b.run); err != nil {
 				if ctx.Err() != nil {
 					return Status{}, fmt.Errorf("tailscale: restarting tailscaled had not finished when the enroll deadline expired, %s after the enroll began: %w",

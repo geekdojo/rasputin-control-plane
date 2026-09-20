@@ -1054,6 +1054,11 @@ export interface BMCConfigView {
   hostNodeId?: string;
   config?: Record<string, unknown>;
   pinnedNode?: string;
+  // Set when the stored selection cannot be used any more — it accepted any
+  // certificate, used an http address, or carries a pin form the agent no
+  // longer checks. Nothing is sent to the board until it is detected again.
+  // The sentence is written by the api and shown as-is.
+  redetectReason?: string;
 }
 
 export interface BMCState {

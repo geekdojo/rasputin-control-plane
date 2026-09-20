@@ -2,10 +2,6 @@ package bmc
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,29 +78,27 @@ type TuringPiOptions struct {
 	Targets  map[string]int // node-id -> slot
 	Settle   time.Duration  // off->on gap when synthesizing `cycle`
 
-	// TLS against the chassis BMC.
+	// Pin is how this driver trusts the board: one typed pin, in the same
+	// encoding as the cluster bus pin ("sha256/" + base64 of the SHA-256 of
+	// the DER SubjectPublicKeyInfo). Required — there is no unpinned mode.
 	//
-	// The board presents a self-signed certificate that is ALREADY
-	// EXPIRED — it is minted at epoch because the BMC has no clock:
+	// The board presents a self-signed certificate that is ALREADY EXPIRED —
+	// it is minted at the epoch because the BMC has no clock:
 	//
 	//	subject=CN=Turing-Pi self signed  issuer=CN=Turing-Pi self signed
 	//	notBefore=Jan 1 1970  notAfter=Jan 31 1970  BasicConstraints: CA:TRUE
 	//
-	// So trusting it as a CA cannot work: Go checks validity independently
-	// of trust and the chain fails on expiry no matter what is in the pool.
-	// The mechanism that does work is pinning the exact certificate:
+	// So trusting it as a CA cannot work: Go checks validity independently of
+	// trust, and the chain fails on expiry no matter what is in the pool.
+	// Pinning the key is what works, and it is stricter than CA trust — see
+	// pinnedtls.go, which builds the one TLS config this driver uses.
 	//
-	//	Fingerprint        — SHA-256 of the leaf, hex (colons optional)
-	//	InsecureSkipVerify — accept any certificate (explicit opt-in only)
-	//
-	// Fingerprint pinning reads alarming because it rides on
-	// InsecureSkipVerify, but it is STRICTER than CA trust here — it
-	// accepts exactly one certificate rather than anything chaining to an
-	// anchor. Neither is defaulted on: a driver that silently disabled
-	// verification would be out of step with the rest of the platform
-	// (mesh CA, bus-auth enforce), so the operator has to choose.
-	Fingerprint        string
-	InsecureSkipVerify bool
+	// What used to be here as well: a cert-DER fingerprint, and
+	// InsecureSkipVerify as an explicit opt-in. Both are gone
+	// (geekdojo/geekdojo-brain#548). A selection that carried either is not
+	// dispatched at all any more; the board is detected again and its pin
+	// accepted, which is the only moment trust is established.
+	Pin string
 }
 
 // NewTuringPiBackend builds the driver. It performs no I/O — the first
@@ -117,6 +111,10 @@ func NewTuringPiBackend(opts TuringPiOptions) (*TuringPiBackend, error) {
 	base, err := parseTuringPiEndpoint(opts.Endpoint)
 	if err != nil {
 		return nil, err
+	}
+	tlsCfg, err := pinnedTLSConfig(opts.Pin)
+	if err != nil {
+		return nil, fmt.Errorf("turingpi: %w", err)
 	}
 	if opts.User == "" {
 		return nil, fmt.Errorf("turingpi: user is required (BMC auth is mandatory since firmware v2.0.0)")
@@ -131,39 +129,6 @@ func NewTuringPiBackend(opts TuringPiOptions) (*TuringPiBackend, error) {
 	}
 	if err := assertDistinctSlots(opts.Targets); err != nil {
 		return nil, err
-	}
-
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	switch {
-	case opts.Fingerprint != "":
-		want, err := normalizeFingerprint(opts.Fingerprint)
-		if err != nil {
-			return nil, err
-		}
-		// Go's own verification is disabled so the expired-at-epoch cert
-		// gets past it; VerifyPeerCertificate then applies the stricter
-		// exact-match check.
-		//
-		// CodeQL flags the next line as go/disabled-certificate-check (HIGH)
-		// and it is a false positive: certificate pinning is STRICTER than the
-		// CA trust being skipped. CA trust accepts any cert a trusted issuer
-		// signed; pinnedCertVerifier accepts exactly one SHA-256 fingerprint
-		// and nothing else. Skipping is not optional either — the board mints
-		// a self-signed cert at the epoch, so it is permanently expired and no
-		// chain check can ever pass.
-		//
-		// TRIP-WIRE: the safety of this line lives on the line AFTER it. If
-		// the VerifyPeerCertificate assignment is removed, moved behind a
-		// condition, or replaced with a verifier that does not compare the
-		// full fingerprint, this becomes "accept any certificate" and the
-		// verdict in .github/codeql-register.tsv is void. The register's
-		// fingerprint covers only the flagged line and will NOT catch that.
-		tlsCfg.InsecureSkipVerify = true
-		tlsCfg.VerifyPeerCertificate = pinnedCertVerifier(want)
-	case opts.InsecureSkipVerify:
-		tlsCfg.InsecureSkipVerify = true
-	default:
-		return nil, fmt.Errorf("turingpi: TLS not configured — pin the board's certificate with its SHA-256 fingerprint, or set insecure_skip_verify to accept any (the board's self-signed cert is minted at epoch and permanently expired, so CA trust cannot work)")
 	}
 
 	settle := opts.Settle
@@ -193,28 +158,15 @@ func NewTuringPiBackend(opts TuringPiOptions) (*TuringPiBackend, error) {
 	}, nil
 }
 
-// parseTuringPiEndpoint accepts "turingpi.local", "turingpi.local:8443",
-// or a full URL, and normalises to an https base. Plain http is honoured
-// when explicitly asked for so a lab board with TLS disabled still works.
+// parseTuringPiEndpoint accepts "turingpi.local", "turingpi.local:8443", or a
+// full https URL, and normalises to an https base. An http endpoint is
+// refused: see requireHTTPSEndpoint.
 func parseTuringPiEndpoint(raw string) (*url.URL, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return nil, fmt.Errorf("turingpi: endpoint is required")
-	}
-	if !strings.Contains(s, "://") {
-		s = "https://" + s
-	}
-	u, err := url.Parse(s)
+	u, err := requireHTTPSEndpoint(raw)
 	if err != nil {
-		return nil, fmt.Errorf("turingpi: endpoint %q: %w", raw, err)
+		return nil, fmt.Errorf("turingpi: %w", err)
 	}
-	if u.Scheme != "https" && u.Scheme != "http" {
-		return nil, fmt.Errorf("turingpi: endpoint %q: unsupported scheme %q", raw, u.Scheme)
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("turingpi: endpoint %q has no host", raw)
-	}
-	return &url.URL{Scheme: u.Scheme, Host: u.Host}, nil
+	return u, nil
 }
 
 func assertDistinctSlots(targets map[string]int) error {
@@ -471,54 +423,6 @@ func turingpiResultFailure(body []byte) (string, bool) {
 		return s, true
 	}
 	return "", false
-}
-
-// normalizeFingerprint accepts the shapes an operator will actually
-// paste — "41:7C:1E:…" from openssl, or bare hex, in either case.
-func normalizeFingerprint(raw string) (string, error) {
-	clean := strings.ToLower(strings.NewReplacer(":", "", " ", "", "-", "").Replace(strings.TrimSpace(raw)))
-	clean = strings.TrimPrefix(clean, "sha256")
-	if len(clean) != sha256HexLen {
-		return "", fmt.Errorf("turingpi: fingerprint must be a SHA-256 hex digest (%d hex chars, colons optional), got %d chars", sha256HexLen, len(clean))
-	}
-	if _, err := hex.DecodeString(clean); err != nil {
-		return "", fmt.Errorf("turingpi: fingerprint is not valid hex: %w", err)
-	}
-	return clean, nil
-}
-
-// certFingerprint returns the lowercase hex SHA-256 of a certificate's DER.
-func certFingerprint(der []byte) string {
-	sum := sha256.Sum256(der)
-	return hex.EncodeToString(sum[:])
-}
-
-// pinError is a trust failure raised by our own verifier. It is a named
-// type so get() can tell it apart from every other transport error and
-// let its message through: get() otherwise collapses transport failures
-// to "request failed" to keep the URL out of the text, which would hide
-// the single most likely misconfiguration behind the single least
-// actionable message (bench 2026-07-28 — a deliberately wrong pin
-// reported only "get power: request failed"). This error is built here
-// from the fingerprints alone, so it carries no credentials.
-type pinError struct{ msg string }
-
-func (e *pinError) Error() string { return e.msg }
-
-// pinnedCertVerifier matches the presented leaf against a pinned digest.
-// Deliberately ignores chain and validity: this board's certificate is
-// permanently expired by construction, so those checks can only ever fail.
-func pinnedCertVerifier(want string) func([][]byte, [][]*x509.Certificate) error {
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		if len(rawCerts) == 0 {
-			return &pinError{"BMC presented no certificate"}
-		}
-		got := certFingerprint(rawCerts[0])
-		if got != want {
-			return &pinError{fmt.Sprintf("BMC certificate does not match the pinned fingerprint (got %s, pinned %s) — if the BMC firmware was updated its certificate was regenerated and needs re-pinning; otherwise treat this as a trust failure", got, want)}
-		}
-		return nil
-	}
 }
 
 func truncate(s string, n int) string {
