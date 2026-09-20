@@ -273,6 +273,24 @@ func TestVerifyRAUCBundleSigner_TrailerProblems(t *testing.T) {
 			wantErr: ErrNotRAUCBundle,
 		},
 		{
+			// Exactly the trailer and nothing else. The boundary matters: a
+			// file of exactly raucSigSizeField bytes has room for the length
+			// field and none for the signature it describes, so `<=` and not
+			// `<` -- with `<` the next read seeks to offset 0 for a signature
+			// of whatever the trailer happens to say.
+			name:    "exactly a trailer, with no bundle under it",
+			path:    writeBundleRaw(t, dir, "trailer-only.raucb", nil, nil, lenTrailer(64)),
+			wantErr: ErrNotRAUCBundle,
+		},
+		{
+			// One byte more: a trailer plus a single payload byte. The bound
+			// on the far side, so the case above is a boundary and not just a
+			// small number.
+			name:    "a trailer and one byte, claiming a signature",
+			path:    writeBundleRaw(t, dir, "one-byte.raucb", []byte{0x00}, nil, lenTrailer(64)),
+			wantErr: ErrNotRAUCBundle,
+		},
+		{
 			name:    "zero-length signature",
 			path:    writeBundleRaw(t, dir, "zero.raucb", make([]byte, 64), nil, lenTrailer(0)),
 			wantErr: ErrNotRAUCBundle,
