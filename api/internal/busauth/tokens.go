@@ -76,6 +76,10 @@ type Store struct {
 	// tombMu guards tomb, the revocation tombstone file (tombstones.go).
 	tombMu sync.Mutex
 	tomb   tombstones
+
+	// tk records the tokens whose live session has been taken over by a second
+	// presenter, and carries its own lock (takeover.go).
+	tk takeovers
 }
 
 // TokenInfo is the non-secret view of a token row (no plaintext, ever).

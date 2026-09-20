@@ -112,11 +112,11 @@ type admitRecorder struct {
 	admits chan<- admission
 }
 
-func (a admitRecorder) Admit(ctx context.Context, serverID string, cid uint64, plaintext, presentedNodeID string) (bool, error) {
-	ok, err := a.inner.Admit(ctx, serverID, cid, plaintext, presentedNodeID)
+func (a admitRecorder) Admit(ctx context.Context, conn Conn, plaintext, presentedNodeID string) (bool, error) {
+	ok, err := a.inner.Admit(ctx, conn, plaintext, presentedNodeID)
 	if ok && err == nil {
 		select {
-		case a.admits <- admission{cid: cid, nodeID: presentedNodeID, at: time.Now()}:
+		case a.admits <- admission{cid: conn.CID, nodeID: presentedNodeID, at: time.Now()}:
 		default: // never block the callout; a dropped admission fails the wait for it
 		}
 	}

@@ -72,6 +72,19 @@ type Disconnector interface {
 	DisconnectClient(serverID string, cid uint64) bool
 }
 
+// Conn names the connection being authenticated: the server asking, its id
+// for the connection, and the host the server saw the connection come from.
+// The auth callout fills it from the authorization request
+// (jwt.ClientInformation).
+type Conn struct {
+	ServerID string
+	CID      uint64
+	// Host is the client's address as the server saw it. It is not an
+	// identity and nothing is authorized by it — it only tells one presenter
+	// of a token from another when a session is taken over (takeover.go).
+	Host string
+}
+
 // session names one connection: the server it is on and its id there.
 type session struct {
 	serverID string
@@ -82,6 +95,13 @@ type session struct {
 type grant struct {
 	tokenID string // token_hash
 	nodeID  string // the node id the connection presented
+	host    string // the host that presented it; see Conn.Host
+}
+
+// heldSession is a recorded session together with what it was granted.
+type heldSession struct {
+	session
+	grant
 }
 
 // sessions is the Store's record of token-authenticated connections.
@@ -110,25 +130,42 @@ func (s *Store) TrackSessions(d Disconnector) {
 	}
 }
 
-// Admit is the auth callout's token check for connection cid on the server
-// serverID: Validate, plus — when sessions are tracked — a record of the grant
-// so a later revoke can close that connection. See the concurrency note above
-// for why both happen under one lock.
-func (s *Store) Admit(ctx context.Context, serverID string, cid uint64, plaintext, presentedNodeID string) (bool, error) {
+// Admit is the auth callout's token check for the connection conn names:
+// Validate, plus — when sessions are tracked — a record of the grant so a
+// later revoke can close that connection, and the eviction of whatever session
+// the same token already held (takeover.go: a token holds ONE live session,
+// and the newest wins). See the concurrency note above for why validating and
+// recording happen under one lock.
+//
+// The eviction happens after the lock is released, like revoke's: closing a
+// connection reaches into the server, and nothing here needs it to have
+// finished. The new session is recorded before the old one is closed, so a
+// revoke that arrives in between still finds — and closes — the new one.
+func (s *Store) Admit(ctx context.Context, conn Conn, plaintext, presentedNodeID string) (bool, error) {
 	s.sess.mu.Lock()
-	defer s.sess.mu.Unlock()
 	ok, err := s.Validate(ctx, plaintext, presentedNodeID)
 	if err != nil || !ok {
+		s.sess.mu.Unlock()
 		return false, err
 	}
 	if s.sess.disc == nil {
+		s.sess.mu.Unlock()
 		return true, nil
 	}
 	if s.sess.afterValidate != nil {
 		s.sess.afterValidate()
 	}
+	// Prune first: a session the node has already dropped is not a second
+	// presenter, so an ordinary agent reconnect evicts nothing and is not
+	// recorded as a takeover.
 	s.pruneLocked()
-	s.sess.grants[session{serverID: serverID, cid: cid}] = grant{tokenID: HashToken(plaintext), nodeID: presentedNodeID}
+	id := HashToken(plaintext)
+	superseded := s.takeHeldLocked(func(g grant) bool { return g.tokenID == id })
+	s.sess.grants[session{serverID: conn.ServerID, cid: conn.CID}] = grant{tokenID: id, nodeID: presentedNodeID, host: conn.Host}
+	d := s.sess.disc
+	s.sess.mu.Unlock()
+
+	s.evictSuperseded(d, conn, id, presentedNodeID, superseded)
 	return true, nil
 }
 
@@ -148,10 +185,21 @@ func (s *Store) pruneLocked() {
 
 // takeLocked removes and returns every recorded session match selects.
 func (s *Store) takeLocked(match func(grant) bool) []session {
-	var out []session
+	held := s.takeHeldLocked(match)
+	out := make([]session, 0, len(held))
+	for _, h := range held {
+		out = append(out, h.session)
+	}
+	return out
+}
+
+// takeHeldLocked is takeLocked with the grant each session held — what a
+// takeover needs to name the presenter it evicted.
+func (s *Store) takeHeldLocked(match func(grant) bool) []heldSession {
+	var out []heldSession
 	for k, g := range s.sess.grants {
 		if match(g) {
-			out = append(out, k)
+			out = append(out, heldSession{session: k, grant: g})
 			delete(s.sess.grants, k)
 		}
 	}

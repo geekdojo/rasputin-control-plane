@@ -78,14 +78,23 @@ func (b *fakeBus) kickedIDs() []uint64 {
 	return out
 }
 
+// testHost is the presenter mustAdmit admits from: one node, one machine, so
+// nothing these tests do reads as two presenters trading a token.
+const testHost = "10.0.0.9"
+
 func mustAdmit(t *testing.T, s *Store, cid uint64, token, nodeID string, want bool) {
 	t.Helper()
-	mustAdmitOn(t, s, testServer, cid, token, nodeID, want)
+	mustAdmitFrom(t, s, testServer, testHost, cid, token, nodeID, want)
 }
 
 func mustAdmitOn(t *testing.T, s *Store, serverID string, cid uint64, token, nodeID string, want bool) {
 	t.Helper()
-	ok, err := s.Admit(context.Background(), serverID, cid, token, nodeID)
+	mustAdmitFrom(t, s, serverID, testHost, cid, token, nodeID, want)
+}
+
+func mustAdmitFrom(t *testing.T, s *Store, serverID, host string, cid uint64, token, nodeID string, want bool) {
+	t.Helper()
+	ok, err := s.Admit(context.Background(), Conn{ServerID: serverID, CID: cid, Host: host}, token, nodeID)
 	if err != nil {
 		t.Fatalf("Admit(cid=%d, %s): %v", cid, nodeID, err)
 	}
@@ -107,7 +116,6 @@ func TestRevoke_ClosesOnlyThatTokensConnections(t *testing.T) {
 	mustAdmit(t, s, 1, tokA, "node-a", true)
 	mustAdmit(t, s, 2, tokB, "node-b", true)
 	mustAdmit(t, s, 3, tokC, "node-c", true)
-	mustAdmit(t, s, 4, tokC, "node-c", true) // a second session on the same token
 
 	n, err := s.Revoke(ctx, idA)
 	if err != nil {
@@ -123,16 +131,17 @@ func TestRevoke_ClosesOnlyThatTokensConnections(t *testing.T) {
 	// The revoked token's reconnect is refused, and the refusal records nothing.
 	mustAdmit(t, s, 5, tokA, "node-a", false)
 
-	// Revoking a token closes every session it authenticated.
+	// Revoking a token closes the session it authenticated. A token has at
+	// most one: the newest admission evicts the previous (takeover_test.go).
 	n, err = s.Revoke(ctx, idC)
 	if err != nil {
 		t.Fatalf("Revoke(C): %v", err)
 	}
-	if n != 2 {
-		t.Errorf("Revoke(C) disconnected %d, want 2", n)
+	if n != 1 {
+		t.Errorf("Revoke(C) disconnected %d, want 1", n)
 	}
-	if got := bus.kickedIDs(); !slices.Equal(got, []uint64{1, 3, 4}) {
-		t.Fatalf("after Revoke(C) closed %v, want [1 3 4]", got)
+	if got := bus.kickedIDs(); !slices.Equal(got, []uint64{1, 3}) {
+		t.Fatalf("after Revoke(C) closed %v, want [1 3]", got)
 	}
 	if !bus.ClientOpen(testServer, 2) {
 		t.Error("node-b's connection was closed by revokes of other tokens")
@@ -354,7 +363,7 @@ func TestSessionLockReleasedOnErrors(t *testing.T) {
 		if _, _, err := s.RevokeByNodeID(ctx, "node-a"); err == nil {
 			t.Error("RevokeByNodeID on a closed DB returned no error")
 		}
-		if _, err := s.Admit(ctx, testServer, 1, "tok", "node-a"); err == nil {
+		if _, err := s.Admit(ctx, Conn{ServerID: testServer, CID: 1, Host: testHost}, "tok", "node-a"); err == nil {
 			t.Error("Admit on a closed DB returned no error")
 		}
 		s.TrackSessions(newFakeBus()) // would deadlock if any path above leaked the lock
@@ -370,11 +379,13 @@ func TestSessionLockReleasedOnErrors(t *testing.T) {
 type recordingValidator struct {
 	calls   []uint64
 	servers []string
+	hosts   []string
 }
 
-func (v *recordingValidator) Admit(_ context.Context, serverID string, cid uint64, _, _ string) (bool, error) {
-	v.calls = append(v.calls, cid)
-	v.servers = append(v.servers, serverID)
+func (v *recordingValidator) Admit(_ context.Context, conn Conn, _, _ string) (bool, error) {
+	v.calls = append(v.calls, conn.CID)
+	v.servers = append(v.servers, conn.ServerID)
+	v.hosts = append(v.hosts, conn.Host)
 	return true, nil
 }
 
@@ -385,16 +396,16 @@ func TestResponder_AdmitsTokenConnectionsByConnectionID(t *testing.T) {
 	v := &recordingValidator{}
 	r := &Responder{tokens: v}
 
-	if ok, reason := r.authorize("srv-a", 42, "node-a", "some-token"); !ok {
+	if ok, reason := r.authorize(Conn{ServerID: "srv-a", CID: 42, Host: "10.0.0.9"}, "node-a", "some-token"); !ok {
 		t.Fatalf("token connection denied: %s", reason)
 	}
 	if !slices.Equal(v.calls, []uint64{42}) || !slices.Equal(v.servers, []string{"srv-a"}) {
 		t.Fatalf("Admit called with cids %v on servers %v, want [42] on [srv-a]", v.calls, v.servers)
 	}
-	if ok, reason := r.authorize("srv-a", 43, "cp-1", "cp-token"); !ok {
+	if ok, reason := r.authorize(Conn{ServerID: "srv-a", CID: 43, Host: "10.0.0.9"}, "cp-1", "cp-token"); !ok {
 		t.Fatalf("the controlplane agent's token connection denied: %s", reason)
 	}
-	if ok, _ := r.authorize("srv-a", 44, "cp-1", ""); ok {
+	if ok, _ := r.authorize(Conn{ServerID: "srv-a", CID: 44, Host: "10.0.0.9"}, "cp-1", ""); ok {
 		t.Fatal("tokenless connection admitted")
 	}
 	if !slices.Equal(v.calls, []uint64{42, 43}) {

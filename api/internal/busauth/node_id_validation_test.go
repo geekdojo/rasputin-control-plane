@@ -283,21 +283,21 @@ func TestResponder_AuthorizeRejectsInvalidNodeID(t *testing.T) {
 	r := &Responder{tokens: store}
 
 	for _, id := range invalidNodeIDs {
-		if ok, _ := r.authorize("test-server", 1, id, unbound); ok {
+		if ok, _ := r.authorize(Conn{ServerID: "test-server", CID: 1, Host: "127.0.0.1"}, id, unbound); ok {
 			t.Errorf("authorize(%q, unbound token) = true; want denied", id)
 		}
-		if ok, _ := r.authorize("test-server", 1, id, alpha); ok {
+		if ok, _ := r.authorize(Conn{ServerID: "test-server", CID: 1, Host: "127.0.0.1"}, id, alpha); ok {
 			t.Errorf("authorize(%q, token bound to alpha) = true; want denied", id)
 		}
-		if ok, _ := r.authorize("test-server", 1, id, ""); ok {
+		if ok, _ := r.authorize(Conn{ServerID: "test-server", CID: 1, Host: "127.0.0.1"}, id, ""); ok {
 			t.Errorf("authorize(%q, no token) = true; want denied", id)
 		}
 	}
 	// A valid id passes with its bound token, and only with it.
-	if ok, reason := r.authorize("test-server", 2, "alpha", alpha); !ok {
+	if ok, reason := r.authorize(Conn{ServerID: "test-server", CID: 2, Host: "127.0.0.1"}, "alpha", alpha); !ok {
 		t.Errorf("alpha with its bound token denied: %s", reason)
 	}
-	if ok, _ := r.authorize("test-server", 3, "alpha", ""); ok {
+	if ok, _ := r.authorize(Conn{ServerID: "test-server", CID: 3, Host: "127.0.0.1"}, "alpha", ""); ok {
 		t.Error("alpha with no token authorized")
 	}
 }

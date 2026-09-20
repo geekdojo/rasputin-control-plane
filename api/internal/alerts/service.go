@@ -100,11 +100,22 @@ type Service struct {
 	// busTLSAlert, when set, reports the bus TLS posture's standing warning
 	// (bus TLS mode pinned below require, or the bus key unusable), or nil.
 	busTLSAlert func(now time.Time) *proto.Alert
+	// busSessionAlerts, when set, reports the nodes whose join token two
+	// presenters are trading the bus session between (busauth.Store.
+	// SessionAlerts). Nil (dev wiring, tests) means no such alert, exactly as
+	// before it existed.
+	busSessionAlerts func(now time.Time) []proto.Alert
 }
 
 // SetBusTLSAlert wires the bus TLS posture warning (bustls.Service.Alert, or
 // bustls.UnavailableAlert when the bus key did not load). Set before List.
 func (s *Service) SetBusTLSAlert(fn func(now time.Time) *proto.Alert) { s.busTLSAlert = fn }
+
+// SetBusSessionAlerts wires the contested-join-token alert
+// (busauth.Store.SessionAlerts). Set before List. A func, not the store
+// itself, for the same reason SetBusTLSAlert is one: this package stays free
+// of a dependency on the bus packages.
+func (s *Service) SetBusSessionAlerts(fn func(now time.Time) []proto.Alert) { s.busSessionAlerts = fn }
 
 // New constructs an alerts Service. The store + nats.Conn are optional;
 // dev-time wiring may pass nil for both (the aggregator still works).
@@ -289,6 +300,9 @@ func (s *Service) securityAlerts(now time.Time) []proto.Alert {
 		if a := s.busTLSAlert(now); a != nil {
 			out = append(out, *a)
 		}
+	}
+	if s.busSessionAlerts != nil {
+		out = append(out, s.busSessionAlerts(now)...)
 	}
 	if s.busAuthEnforced {
 		return out
