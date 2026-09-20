@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -207,8 +206,20 @@ func main() {
 	// Constructed before the bus connects so the first registration can
 	// advertise bmc-targets; the configure handler attaches after.
 	bmcKind := os.Getenv("RASPUTIN_BMC_BACKEND")
-	bmcHost, err := bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"),
-		bmcKind, bmcConfigFromEnv(filepath.Join(stateDir, "bmc")))
+	// A box configured through the env path with the RETIRED BMC TLS settings
+	// — a cert-DER fingerprint, or the switch that turned verification off —
+	// is not silently reconfigured and is not taken down either. The env pin
+	// is rejected, the node comes up BMC-off with the reason on its
+	// registration, and the operator detects the board again to get a pin.
+	// That is the env-path form of the "re-detect needed" a stored selection
+	// gets (geekdojo/geekdojo-brain#548).
+	bmcCfg := bmcConfigFromEnv(filepath.Join(stateDir, "bmc"))
+	if reason := retiredBMCEnvInUse(bmcKind, bmcCfg.TuringPiPin); reason != "" {
+		faults.Reject("RASPUTIN_BMC_BACKEND", bmcKind, []string{bmc.BackendNone},
+			reason+" — BMC is OFF on this node until the board is detected again (no power control, no serial console)")
+		bmcKind = bmc.BackendNone
+	}
+	bmcHost, err := bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"), bmcKind, bmcCfg)
 	if err != nil {
 		// THE SITE THAT WAS PROVEN ON HARDWARE (tp-cp1, 2026-07-28): an env pin
 		// naming a backend this image doesn't carry used to be fatal, and took
@@ -223,8 +234,7 @@ func main() {
 		if errors.Is(err, bmc.ErrUnknownBackend) {
 			faults.Reject("RASPUTIN_BMC_BACKEND", bmcKind, append([]string{bmc.BackendNone}, bmc.Names()...),
 				"BMC is OFF on this node — no power control, no serial console")
-			bmcHost, err = bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"), bmc.BackendNone,
-				bmcConfigFromEnv(filepath.Join(stateDir, "bmc")))
+			bmcHost, err = bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"), bmc.BackendNone, bmcCfg)
 		}
 		if err != nil {
 			log.Fatalf("rasputin-agent: bmc host: %v", err)
@@ -504,19 +514,27 @@ func main() {
 		}
 	}
 
-	// Publish rasputin.local into a local resolver dir (a dnsmasq hostsdir) so
+	// Publish <cluster>.local into a local resolver dir (a dnsmasq hostsdir) so
 	// clients on this box that can't do mDNS themselves can still resolve the
 	// control plane. The firewall sets RASPUTIN_CP_HOSTS_DIR for exactly this:
 	// musl has no nss-mdns, so tailscaled couldn't otherwise reach the mesh
-	// login server at https://rasputin.local. Env-gated — unset on rasputin-os
-	// (systemd-resolved does mDNS natively) → no-op. The agent already resolves
-	// the name over mDNS for NATS; this surfaces it to the whole box and
-	// self-heals when the control plane's address changes.
+	// login server at https://<cluster>.local. Env-gated — unset on rasputin-os
+	// (systemd-resolved does mDNS natively) → no-op.
+	//
+	// The address comes off the live bus socket, the same source clusterdns
+	// uses, and never from resolving the name. mDNS is unauthenticated: the
+	// earlier version republished whatever answered on the LAN into dnsmasq,
+	// which handed one host's unverified claim the authority of the network's
+	// own resolver, for every client on that LAN and for this box's own
+	// tailscaled (geekdojo/geekdojo-brain#547). mDNS is still how the bus is
+	// DIALLED; the pin is what authenticates the result.
 	if hostsDir := os.Getenv("RASPUTIN_CP_HOSTS_DIR"); hostsDir != "" {
 		// RASPUTIN_CP_HOSTS_RELOAD_CMD re-reads the resolver after a change —
 		// dnsmasq doesn't auto-watch addn-hosts files. The firewall sets it to
 		// "/etc/init.d/dnsmasq reload".
-		go hostsync.Run(ctx, clusterName(), hostsDir, 30*time.Second, os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"), nil)
+		go hostsync.Run(ctx, clusterName(), hostsDir, 30*time.Second,
+			os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"),
+			func() string { return hostOf(client.ConnectedAddr()) })
 	}
 
 	// Keep our own mDNS name published, and say so loudly when another cluster
@@ -1204,21 +1222,50 @@ func bmcConfigFromEnv(bmcStateDir string) bmc.Config {
 		BitScopeMap:    os.Getenv("RASPUTIN_BMC_BITSCOPE_MAP"),
 		MockTargets:    splitCSV(os.Getenv("RASPUTIN_BMC_MOCK_TARGETS")),
 
-		TuringPiEndpoint:    os.Getenv("RASPUTIN_BMC_TURINGPI_ENDPOINT"),
-		TuringPiUser:        os.Getenv("RASPUTIN_BMC_TURINGPI_USER"),
-		TuringPiPass:        os.Getenv("RASPUTIN_BMC_TURINGPI_PASS"),
-		TuringPiMap:         os.Getenv("RASPUTIN_BMC_TURINGPI_MAP"),
-		TuringPiFingerprint: os.Getenv("RASPUTIN_BMC_TURINGPI_FINGERPRINT"),
-		TuringPiInsecure:    envBool("RASPUTIN_BMC_TURINGPI_INSECURE"),
+		TuringPiEndpoint: os.Getenv("RASPUTIN_BMC_TURINGPI_ENDPOINT"),
+		TuringPiUser:     os.Getenv("RASPUTIN_BMC_TURINGPI_USER"),
+		TuringPiPass:     os.Getenv("RASPUTIN_BMC_TURINGPI_PASS"),
+		TuringPiMap:      os.Getenv("RASPUTIN_BMC_TURINGPI_MAP"),
+		TuringPiPin:      os.Getenv("RASPUTIN_BMC_TURINGPI_PIN"),
 	}
 }
 
-// envBool reads a boolean env var. Anything strconv.ParseBool rejects —
-// including unset — is false: an env var that disables TLS verification
-// must never be turned on by a typo.
-func envBool(key string) bool {
-	v, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(key)))
-	return err == nil && v
+// retiredBMCEnv are the env vars that used to configure BMC TLS: a cert-DER
+// fingerprint, and a switch that turned verification off entirely
+// (geekdojo/geekdojo-brain#548). They are not read any more. A box still
+// carrying one is told so at start rather than being silently reconfigured:
+// with no RASPUTIN_BMC_TURINGPI_PIN the backend refuses to construct, the
+// agent comes up BMC-off, and this line says which value to replace. That is
+// the env-path equivalent of the "re-detect needed" a stored selection gets.
+var retiredBMCEnv = []string{
+	"RASPUTIN_BMC_TURINGPI_FINGERPRINT",
+	"RASPUTIN_BMC_TURINGPI_INSECURE",
+}
+
+// retiredBMCEnvInUse reports why a turingpi env selection cannot be honoured,
+// or "" when it can. Two cases, and they read differently to an operator: a
+// retired variable is still set (their configuration says something this agent
+// no longer does), or no pin was resolved at all (it says nothing about trust).
+//
+// pin comes from bmcConfigFromEnv, the declared resolver
+// (.github/security-resolvers.tsv R15) — this function does not read the pin
+// variable itself, so there is exactly one place that does and exactly one
+// place whose fail-closed behaviour has to be table-tested.
+//
+// Only the turingpi backend is affected; every other kind is left alone.
+func retiredBMCEnvInUse(kind, pin string) string {
+	if kind != "turingpi" {
+		return ""
+	}
+	for _, key := range retiredBMCEnv {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return key + " is set, and BMC TLS is not configured that way any more: the board is trusted by one pin (RASPUTIN_BMC_TURINGPI_PIN, the same form as the bus pin)"
+		}
+	}
+	if strings.TrimSpace(pin) == "" {
+		return "RASPUTIN_BMC_TURINGPI_PIN is not set, and there is no unpinned mode"
+	}
+	return ""
 }
 
 // splitCSV splits a comma-separated env value, trimming whitespace and

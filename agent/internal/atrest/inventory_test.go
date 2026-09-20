@@ -211,7 +211,7 @@ func rows() []row {
 				go func() {
 					defer close(done)
 					hostsync.Run(ctx, "rasputin.local", dir, time.Hour, "",
-						func(string, time.Duration) (string, error) { return "10.0.0.9", nil })
+						func() string { return "10.0.0.9" })
 				}()
 				waitForFile(t, filepath.Join(dir, "rasputin.local"), "10.0.0.9 rasputin.local\n")
 				cancel()

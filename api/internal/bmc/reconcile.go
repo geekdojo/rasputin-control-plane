@@ -91,6 +91,15 @@ func (r *reconciler) onRegistered(subject string, data []byte) {
 		log.Printf("bmc: reconcile: %v", err)
 		return
 	}
+	// A stored selection that predates the pinned-TLS rule is NOT re-pushed:
+	// the push carries the operator's device password to a board this api can
+	// no longer say it trusts. The operator detects the board again, which
+	// stores a selection this passes (geekdojo/geekdojo-brain#548). Logged
+	// once per registration rather than submitted on a loop.
+	if reason := RedetectNeeded(kind, cfg); reason != "" {
+		log.Printf("bmc: host %s registered, but its stored %s selection is not dispatchable: %s", hostID, kind, reason)
+		return
+	}
 	desired := ConfigHash(kind, cfg, StoredCredential(ctx, r.st, kind))
 	var advertised string
 	if ev.Metadata != nil {

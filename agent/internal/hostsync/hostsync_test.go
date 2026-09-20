@@ -13,17 +13,22 @@ import (
 	"time"
 )
 
+// seq returns a ServerIP that walks the given addresses and then repeats the
+// last one — a stand-in for the live bus connection's peer.
+func seq(ips ...string) (ServerIP, *atomic.Int32) {
+	var calls atomic.Int32
+	return func() string {
+		i := int(calls.Add(1) - 1)
+		if i >= len(ips) {
+			return ips[len(ips)-1]
+		}
+		return ips[i]
+	}, &calls
+}
+
 func TestRunWritesAndRefreshes(t *testing.T) {
 	dir := t.TempDir()
-	var calls atomic.Int32
-	ips := []string{"192.168.1.50", "192.168.1.50", "192.168.1.77"} // unchanged, then changed
-	resolve := func(name string, _ time.Duration) (string, error) {
-		i := calls.Add(1) - 1
-		if int(i) >= len(ips) {
-			return ips[len(ips)-1], nil
-		}
-		return ips[i], nil
-	}
+	serverIP, _ := seq("192.168.1.50", "192.168.1.50", "192.168.1.77") // unchanged, then changed
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -31,7 +36,7 @@ func TestRunWritesAndRefreshes(t *testing.T) {
 	// every address change (first write + the change), not every tick.
 	marker := filepath.Join(dir, "reload.count")
 	reloadCmd := "printf x >> " + marker
-	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, reloadCmd, resolve)
+	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, reloadCmd, serverIP)
 
 	file := filepath.Join(dir, "rasputin.local")
 	// First write: 192.168.1.50
@@ -43,62 +48,81 @@ func TestRunWritesAndRefreshes(t *testing.T) {
 	waitFor(t, func() bool { return len(readHost(marker)) == 2 })
 }
 
-func TestRunNoopOnResolveError(t *testing.T) {
+// The bus has never connected, so nothing can say where the control plane is.
+// Nothing is published: an entry is only ever written from an address the bus
+// itself reported.
+func TestRunPublishesNothingWithoutABusAddress(t *testing.T) {
 	dir := t.TempDir()
-	resolve := func(string, time.Duration) (string, error) { return "", os.ErrDeadlineExceeded }
+	serverIP := func() string { return "" }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "", resolve)
+	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "", serverIP)
 	time.Sleep(50 * time.Millisecond)
 	if _, err := os.Stat(filepath.Join(dir, "rasputin.local")); !os.IsNotExist(err) {
-		t.Fatalf("expected no hosts file on resolve error, got err=%v", err)
+		t.Fatalf("expected no hosts file while the bus address is unknown, got err=%v", err)
 	}
 }
 
-// Run must call the resolver with a 3s per-attempt timeout. Guards the
-// `3*time.Second` argument against arithmetic mutation (e.g. to `3/time.Second`,
-// which is 0).
-func TestRunPassesResolveTimeout(t *testing.T) {
+// NOT KNOWING is not LOSING: once an address has been published, a bus that
+// goes down must not withdraw it. Withdrawing would take this box's own
+// tailscaled off the mesh for as long as the bus was down and put nothing
+// better in its place.
+func TestRunKeepsThePublishedEntryWhenTheBusGoesDown(t *testing.T) {
 	dir := t.TempDir()
-	var gotTimeout atomic.Int64
-	resolve := func(name string, timeout time.Duration) (string, error) {
-		gotTimeout.Store(int64(timeout))
-		return "192.168.1.50", nil
-	}
+	serverIP, _ := seq("192.168.1.50", "", "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "", resolve)
+	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "", serverIP)
 
 	file := filepath.Join(dir, "rasputin.local")
-	waitFor(t, func() bool { return readHost(file) != "" }) // resolver has run
-	if got := time.Duration(gotTimeout.Load()); got != 3*time.Second {
-		t.Fatalf("resolve timeout = %v, want 3s", got)
+	waitFor(t, func() bool { return readHost(file) == "192.168.1.50 rasputin.local\n" })
+	time.Sleep(60 * time.Millisecond) // several ticks with no address
+	if got := readHost(file); got != "192.168.1.50 rasputin.local\n" {
+		t.Fatalf("published entry should survive a bus outage; got %q", got)
+	}
+}
+
+// A nil address source is a wiring bug, not a reason to fall back to resolving
+// the name — that fallback is the mDNS republish this package no longer does.
+func TestRunRefusesWithoutAnAddressSource(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "", nil); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run should return immediately when it has no address source")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "rasputin.local")); !os.IsNotExist(err) {
+		t.Fatalf("expected no hosts file, got err=%v", err)
 	}
 }
 
 // A non-positive interval must be clamped to the 30s default, not used verbatim.
 // With interval == 0 the ticker would otherwise fire immediately every loop,
-// hammering the resolver in a hot spin. We prove the clamp by showing that after
-// the first (immediate) tick, no second resolve happens for a long stretch —
+// hammering the address source in a hot spin. We prove the clamp by showing that after
+// the first (immediate) tick, no second look happens for a long stretch —
 // which only holds if interval was replaced with a large default. Guards the
 // `interval <= 0` clamp against being narrowed to `interval < 0`.
 func TestRunClampsNonPositiveInterval(t *testing.T) {
 	dir := t.TempDir()
 	calls := make(chan struct{}, 64)
-	resolve := func(string, time.Duration) (string, error) {
+	serverIP := func() string {
 		calls <- struct{}{}
-		return "192.168.1.50", nil
+		return "192.168.1.50"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Run(ctx, "rasputin.local", dir, 0, "", resolve) // interval == 0
+	go Run(ctx, "rasputin.local", dir, 0, "", serverIP) // interval == 0
 
 	<-calls // the immediate first tick
 	select {
 	case <-calls:
-		t.Fatal("interval <= 0 must clamp to the 30s default; got an immediate second resolve (hot spin)")
+		t.Fatal("interval <= 0 must clamp to the 30s default; got an immediate second look (hot spin)")
 	case <-time.After(300 * time.Millisecond):
-		// No second resolve — the interval was clamped to a long default.
+		// No second look — the interval was clamped to a long default.
 	}
 }
 
@@ -111,12 +135,12 @@ func TestRunLogsReloadFailure(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
 
-	resolve := func(string, time.Duration) (string, error) { return "192.168.1.50", nil }
+	serverIP := func() string { return "192.168.1.50" }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// "exit 3" makes CombinedOutput return a non-nil error, exercising the
 	// failure branch on the very first (immediate) tick.
-	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "exit 3", resolve)
+	go Run(ctx, "rasputin.local", dir, 10*time.Millisecond, "exit 3", serverIP)
 
 	waitFor(t, func() bool {
 		s := buf.String()

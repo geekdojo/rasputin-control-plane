@@ -48,13 +48,18 @@ func NewFromSelection(kind string, raw json.RawMessage, stateDir string) (Backen
 		}
 		return newBitScopeOnDevice(sel.Dev, sel.Unlock, targets)
 	case "turingpi":
+		// `fingerprint` and `insecure_skip_verify` are deliberately absent:
+		// this struct IS the contract, and a selection that carried either is
+		// refused by the api before it is ever dispatched
+		// (geekdojo/geekdojo-brain#548). Ignoring them here rather than
+		// parsing them means a hand-built selection cannot smuggle either
+		// past this driver either — with no `pin`, construction fails.
 		var sel struct {
-			Endpoint    string `json:"endpoint"`
-			User        string `json:"user"`
-			Pass        string `json:"pass,omitempty"`
-			Fingerprint string `json:"fingerprint,omitempty"`
-			Insecure    bool   `json:"insecure_skip_verify,omitempty"`
-			Targets     []struct {
+			Endpoint string `json:"endpoint"`
+			User     string `json:"user"`
+			Pass     string `json:"pass,omitempty"`
+			Pin      string `json:"pin,omitempty"`
+			Targets  []struct {
 				NodeID string `json:"node_id"`
 				Slot   int    `json:"slot"`
 			} `json:"targets"`
@@ -73,12 +78,11 @@ func NewFromSelection(kind string, raw json.RawMessage, stateDir string) (Backen
 			targets[e.NodeID] = e.Slot
 		}
 		return NewTuringPiBackend(TuringPiOptions{
-			Endpoint:           sel.Endpoint,
-			User:               sel.User,
-			Pass:               sel.Pass,
-			Targets:            targets,
-			Fingerprint:        sel.Fingerprint,
-			InsecureSkipVerify: sel.Insecure,
+			Endpoint: sel.Endpoint,
+			User:     sel.User,
+			Pass:     sel.Pass,
+			Targets:  targets,
+			Pin:      sel.Pin,
 		})
 	}
 	return nil, fmt.Errorf("bmc: unknown backend %q in selection (expected %s)", kind, strings.Join(Names(), "|"))

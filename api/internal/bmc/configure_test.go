@@ -275,7 +275,7 @@ func TestStartReconcile_SubscribesAndSubmits(t *testing.T) {
 // freezes the selection and makes Settings decline to manage it, so the
 // gap could not surface there.
 func TestTuringPiSelectionAccepted(t *testing.T) {
-	good := `{"endpoint":"turingpi.local","user":"root","fingerprint":"41:7C:1E:EA","targets":[{"node_id":"cp-1","slot":1},{"node_id":"n-1","slot":2}]}`
+	good := `{"endpoint":"turingpi.local","user":"root","pin":"` + testDevicePin + `","targets":[{"node_id":"cp-1","slot":1},{"node_id":"n-1","slot":2}]}`
 	ids, err := selectionTargets("turingpi", json.RawMessage(good))
 	if err != nil {
 		t.Fatalf("a well-formed turingpi config must validate: %v", err)
@@ -283,19 +283,30 @@ func TestTuringPiSelectionAccepted(t *testing.T) {
 	if len(ids) != 2 || ids[0] != "cp-1" || ids[1] != "n-1" {
 		t.Errorf("targets = %v, want [cp-1 n-1]", ids)
 	}
+	// An explicit https endpoint is the same selection.
+	withScheme := `{"endpoint":"https://turingpi.local","user":"root","pin":"` + testDevicePin + `","targets":[{"node_id":"cp-1","slot":1}]}`
+	if _, err := selectionTargets("turingpi", json.RawMessage(withScheme)); err != nil {
+		t.Errorf("an https endpoint must validate: %v", err)
+	}
 }
 
-// Each rejection names the field an operator has to fix. The TLS one is
-// deliberate rather than defaulted: the board's certificate is minted at
-// the epoch and permanently expired, so CA trust can never pass and a
-// silent default would mean silently unverified.
+// Each rejection names what an operator has to fix. The three trust ones each
+// mean the same thing — detect the board again — because that is the only
+// moment trust is established (geekdojo/geekdojo-brain#548).
 func TestTuringPiSelectionRejections(t *testing.T) {
+	pinned := func(extra string) string {
+		return `{"endpoint":"e","user":"root","pin":"` + testDevicePin + `"` + extra + `}`
+	}
 	for _, tc := range []struct{ name, cfg, want string }{
-		{"no endpoint", `{"user":"root","fingerprint":"x","targets":[{"node_id":"a","slot":1}]}`, "endpoint is required"},
-		{"no user", `{"endpoint":"e","fingerprint":"x","targets":[{"node_id":"a","slot":1}]}`, "username is required"},
-		{"no tls choice", `{"endpoint":"e","user":"root","targets":[{"node_id":"a","slot":1}]}`, "pin the BMC certificate"},
-		{"slot out of range", `{"endpoint":"e","user":"root","fingerprint":"x","targets":[{"node_id":"a","slot":9}]}`, "want 1..4"},
-		{"duplicate slot", `{"endpoint":"e","user":"root","fingerprint":"x","targets":[{"node_id":"a","slot":1},{"node_id":"b","slot":1}]}`, "both claim slot 1"},
+		{"no endpoint", `{"user":"root","pin":"` + testDevicePin + `","targets":[{"node_id":"a","slot":1}]}`, "endpoint is required"},
+		{"no user", `{"endpoint":"e","pin":"` + testDevicePin + `","targets":[{"node_id":"a","slot":1}]}`, "username is required"},
+		{"no pin at all", `{"endpoint":"e","user":"root","targets":[{"node_id":"a","slot":1}]}`, "has no pin"},
+		{"retired cert fingerprint", `{"endpoint":"e","user":"root","fingerprint":"41:7C:1E:EA","targets":[{"node_id":"a","slot":1}]}`, "detect the board again"},
+		{"insecure_skip_verify", `{"endpoint":"e","user":"root","insecure_skip_verify":true,"targets":[{"node_id":"a","slot":1}]}`, "accept any certificate"},
+		{"http endpoint", `{"endpoint":"http://turingpi.local","user":"root","pin":"` + testDevicePin + `","targets":[{"node_id":"a","slot":1}]}`, "in clear"},
+		{"unreadable pin", `{"endpoint":"e","user":"root","pin":"41:7C:1E:EA","targets":[{"node_id":"a","slot":1}]}`, "not readable"},
+		{"slot out of range", pinned(`,"targets":[{"node_id":"a","slot":9}]`), "want 1..4"},
+		{"duplicate slot", pinned(`,"targets":[{"node_id":"a","slot":1},{"node_id":"b","slot":1}]`), "both claim slot 1"},
 	} {
 		_, err := selectionTargets("turingpi", json.RawMessage(tc.cfg))
 		if err == nil {
@@ -306,12 +317,44 @@ func TestTuringPiSelectionRejections(t *testing.T) {
 			t.Errorf("%s: error %q should mention %q", tc.name, err, tc.want)
 		}
 	}
-	// insecure_skip_verify is an explicit alternative to pinning.
-	if _, err := selectionTargets("turingpi", json.RawMessage(
-		`{"endpoint":"e","user":"root","insecure_skip_verify":true,"targets":[{"node_id":"a","slot":1}]}`)); err != nil {
-		t.Errorf("explicit insecure opt-in should validate: %v", err)
+}
+
+// RedetectNeeded is the read side of the same rule: a selection stored before
+// the pinned-TLS change is already on disk, and must never be pushed to the
+// host — the push carries the operator's device password with it.
+func TestRedetectNeeded(t *testing.T) {
+	for _, tc := range []struct {
+		name, cfg string
+		want      bool
+	}{
+		{"pinned", `{"endpoint":"turingpi.local","user":"root","pin":"` + testDevicePin + `"}`, false},
+		{"https pinned", `{"endpoint":"https://turingpi.local","user":"root","pin":"` + testDevicePin + `"}`, false},
+		{"insecure", `{"endpoint":"turingpi.local","user":"root","insecure_skip_verify":true}`, true},
+		{"http", `{"endpoint":"http://turingpi.local","user":"root","pin":"` + testDevicePin + `"}`, true},
+		{"cert fingerprint", `{"endpoint":"turingpi.local","user":"root","fingerprint":"41:7C"}`, true},
+		{"no pin", `{"endpoint":"turingpi.local","user":"root"}`, true},
+		{"unreadable", `not json`, true},
+	} {
+		got := RedetectNeeded("turingpi", json.RawMessage(tc.cfg))
+		if (got != "") != tc.want {
+			t.Errorf("%s: RedetectNeeded = %q, want needed=%v", tc.name, got, tc.want)
+		}
+		if tc.want && !strings.Contains(got, "detect the board again") {
+			t.Errorf("%s: the reason must tell the operator what to do; got %q", tc.name, got)
+		}
+	}
+	// Other kinds are not affected, and neither is an unconfigured BMC.
+	if got := RedetectNeeded("bitscope", json.RawMessage(`{"targets":[]}`)); got != "" {
+		t.Errorf("bitscope selections are not affected; got %q", got)
+	}
+	if got := RedetectNeeded("turingpi", nil); got != "" {
+		t.Errorf("an empty selection needs nothing; got %q", got)
 	}
 }
+
+// A valid device pin: "sha256/" + standard base64 of a 32-byte SHA-256, the
+// same encoding as the bus pin.
+const testDevicePin = "sha256/epr81hmPYzpdyR6LUQ2gb+spADtZSHpXfIQ5fF+AHqs="
 
 // No backend's credential may sit in the config blob — job specs and step
 // results are served unredacted by the jobs API. The kind->credential

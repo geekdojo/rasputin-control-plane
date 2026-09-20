@@ -249,10 +249,11 @@ type BMCConfigureAck struct {
 //     Turing Pi BMC returns 401 with `no authorization header provided`.
 //     That identifies the board before any password exists, so the UI can
 //     say "found a Turing Pi" rather than "something answered".
-//   - **The certificate itself.** The leaf is captured during the probe
-//     and shown for confirmation — trust-on-first-use, the known_hosts
-//     model. Chain validation can never work here: the board's cert is
-//     self-signed AND minted at the epoch, so it is permanently expired.
+//   - **The key itself.** The leaf's public key is captured during the
+//     probe and its pin shown for confirmation — trust-on-first-use, the
+//     known_hosts model. Chain validation can never work here: the board's
+//     cert is self-signed AND minted at the epoch, so it is permanently
+//     expired.
 type BMCProbeCmd struct {
 	// Kind is the backend being probed; only networked kinds are
 	// probeable. Empty defaults to turingpi, the only one today.
@@ -271,23 +272,27 @@ type BMCProbeCmd struct {
 	// half it has the inputs for.
 	User string `json:"user,omitempty"`
 	Pass string `json:"pass,omitempty"`
-	// Fingerprint is the certificate the operator has ALREADY seen and
-	// accepted, echoed back from the form. It is required before any
-	// credential is sent.
+	// Pin is the device pin the operator has ALREADY seen and accepted,
+	// echoed back from the form. It is required before any credential is
+	// sent.
 	//
-	// Without it the trust-on-first-use pin defeats itself: pinning to a
-	// certificate captured moments earlier on the same unverified
-	// handshake validates whatever just answered, so an attacker able to
-	// answer for the board's mDNS name receives the operator's BMC
-	// credentials — an account that also serves SSH and controls power
-	// for the whole chassis. Found by the automated security review on
-	// CP #51 before any build shipped.
+	// Without it the trust-on-first-use pin defeats itself: pinning to a key
+	// captured moments earlier on the same unverified handshake validates
+	// whatever just answered, so an attacker able to answer for the board's
+	// mDNS name receives the operator's BMC credentials — an account that
+	// also serves SSH and controls power for the whole chassis. Found by the
+	// automated security review on CP #51 before any build shipped.
 	//
-	// So identification and certificate capture are the ONLY things a
-	// first, uncredentialed probe does. Sending a password requires a
-	// second call carrying the fingerprint the operator kept from the
-	// first, and the board must still present that exact certificate.
-	Fingerprint string `json:"fingerprint,omitempty"`
+	// So identification and key capture are the ONLY things a first,
+	// uncredentialed probe does. Sending a password requires a second call
+	// carrying the pin the operator kept from the first, and the board must
+	// still present that exact key.
+	//
+	// It replaced a cert-DER `fingerprint` field in
+	// geekdojo/geekdojo-brain#548. An agent older than that change ignores
+	// this field and sends no credentials, so slot detection is skipped and
+	// says so — fail-closed in both directions.
+	Pin string `json:"pin,omitempty"`
 }
 
 // BMCProbeSlot is one physical slot as the board reports it. The agent
@@ -308,9 +313,12 @@ type BMCProbeResult struct {
 	// Endpoint actually reached — echoed back because it may have been
 	// discovered rather than supplied.
 	Endpoint string `json:"endpoint,omitempty"`
-	// Fingerprint is the SHA-256 of the presented leaf certificate,
-	// colon-separated uppercase hex, ready to display and to pin.
-	Fingerprint string `json:"fingerprint,omitempty"`
+	// Pin is the device pin for the key the endpoint presented, in the same
+	// encoding as the bus pin ("sha256/" + base64), ready to display and to
+	// pin. Empty from an agent older than geekdojo/geekdojo-brain#548, which
+	// reported a cert-DER fingerprint instead; a selection cannot be built
+	// from that, so the board is detected again.
+	Pin string `json:"pin,omitempty"`
 	// Identified is true when the response carried the signature of the
 	// expected board. False with OK true means something answered on that
 	// address but did not look like the backend selected — worth showing,

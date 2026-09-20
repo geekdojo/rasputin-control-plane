@@ -185,16 +185,7 @@ func selectionTargets(kind string, config json.RawMessage) ([]string, error) {
 		// Shape mirrors the agent's NewFromSelection case exactly — that
 		// is the contract, and a mismatch here would validate cleanly and
 		// then fail on the node.
-		var sel struct {
-			Endpoint    string `json:"endpoint"`
-			User        string `json:"user"`
-			Fingerprint string `json:"fingerprint,omitempty"`
-			Insecure    bool   `json:"insecure_skip_verify,omitempty"`
-			Targets     []struct {
-				NodeID string `json:"node_id"`
-				Slot   int    `json:"slot"`
-			} `json:"targets"`
-		}
+		var sel turingPiSelection
 		if err := json.Unmarshal(config, &sel); err != nil {
 			return nil, fmt.Errorf("turingpi config: %w", err)
 		}
@@ -204,12 +195,8 @@ func selectionTargets(kind string, config json.RawMessage) ([]string, error) {
 		if strings.TrimSpace(sel.User) == "" {
 			return nil, errors.New("turingpi config: username is required (the BMC requires auth)")
 		}
-		// TLS has to be chosen explicitly, same rule the driver enforces:
-		// the board's certificate is minted at the epoch and permanently
-		// expired, so CA trust cannot work and a silent default would mean
-		// silently unverified.
-		if sel.Fingerprint == "" && !sel.Insecure {
-			return nil, errors.New("turingpi config: pin the BMC certificate fingerprint, or explicitly accept any certificate")
+		if reason := sel.unusable(); reason != "" {
+			return nil, fmt.Errorf("turingpi config: %s", reason)
 		}
 		seenSlot := map[int]string{}
 		out := make([]string, 0, len(sel.Targets))
@@ -226,6 +213,92 @@ func selectionTargets(kind string, config json.RawMessage) ([]string, error) {
 		return out, nil
 	}
 	return nil, fmt.Errorf("no config schema for backend %q", kind)
+}
+
+// turingPiSelection is the stored/validated shape of a Turing Pi selection.
+// The two retired TLS fields are still PARSED, and only so that a selection
+// carrying them can be recognised and refused by name; nothing is ever built
+// from them (geekdojo/geekdojo-brain#548).
+type turingPiSelection struct {
+	Endpoint string `json:"endpoint"`
+	User     string `json:"user"`
+	// Pin is the device pin for the board's key, the same encoding as the bus
+	// pin. The only way this driver trusts a board.
+	Pin string `json:"pin,omitempty"`
+	// Fingerprint is the retired cert-DER pin.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// Insecure is the retired "accept any certificate" switch.
+	Insecure bool `json:"insecure_skip_verify,omitempty"`
+	Targets  []struct {
+		NodeID string `json:"node_id"`
+		Slot   int    `json:"slot"`
+	} `json:"targets"`
+}
+
+// unusable reports why this selection cannot be dispatched, or "" when it can.
+//
+// The three refusals, in the order an operator meets them:
+//
+//   - insecure_skip_verify accepted ANY certificate, so the BMC password — an
+//     account that also serves SSH and controls power for every node in the
+//     chassis — went to whatever answered;
+//   - an http:// endpoint sent that password in clear, in a Basic header;
+//   - a cert-DER fingerprint is the retired pin form. It is not weaker, it is
+//     simply not what the driver checks any more, and a pin the driver cannot
+//     check is not a pin.
+//
+// Each of them means the same thing for a STORED selection: the board has to
+// be detected again and its pin accepted, which is the one moment trust is
+// established. Nothing is dispatched, and no credential moves, until then.
+func (s turingPiSelection) unusable() string {
+	if s.Insecure {
+		return "this board was configured to accept any certificate, which is no longer supported — detect the board again and accept its pin"
+	}
+	if scheme := endpointScheme(s.Endpoint); scheme != "" && scheme != "https" {
+		return fmt.Sprintf("this board's address uses %s, which would send its credentials over the network in clear — detect the board again at an https address and accept its pin", scheme)
+	}
+	pin := strings.TrimSpace(s.Pin)
+	if pin == "" {
+		if strings.TrimSpace(s.Fingerprint) != "" {
+			return "this board is pinned by a certificate fingerprint, which the agent no longer checks — detect the board again and accept its pin"
+		}
+		return "this board has no pin — detect the board again and accept its pin"
+	}
+	if _, err := proto.ParseDevicePin(pin); err != nil {
+		return "this board's pin is not readable — detect the board again and accept its pin"
+	}
+	return ""
+}
+
+// endpointScheme returns the scheme an endpoint names, or "" when it names
+// none (a bare host, which the agent reads as https).
+func endpointScheme(endpoint string) string {
+	e := strings.TrimSpace(endpoint)
+	scheme, _, found := strings.Cut(e, "://")
+	if !found {
+		return ""
+	}
+	return strings.ToLower(scheme)
+}
+
+// RedetectNeeded reports why a STORED selection cannot be dispatched to its
+// host, or "" when it can. It is the read-side twin of the validation above:
+// the api refuses to store a selection like this, but selections stored before
+// geekdojo/geekdojo-brain#548 are already on disk, and they must not be pushed
+// — pushing carries the operator's device password with them.
+//
+// Callers: the registration reconcile, which stands down instead of re-pushing
+// on a loop, and the settings view, which tells the operator why the section
+// is asking them to detect the board again.
+func RedetectNeeded(kind string, config json.RawMessage) string {
+	if kind != "turingpi" || len(config) == 0 {
+		return ""
+	}
+	var sel turingPiSelection
+	if err := json.Unmarshal(config, &sel); err != nil {
+		return "this board's stored settings could not be read — detect the board again"
+	}
+	return sel.unusable()
 }
 
 func configureValidate(inv *inventory.Store, sessions *SessionManager, powerRunning RunningPowerJobsFn) jobs.DoFn {

@@ -428,16 +428,15 @@ func TestPublishRegistered_OffAdvertisesNothing(t *testing.T) {
 // bmc.Config without an env read here and this test names it.
 func TestBMCConfigFromEnvCoversEveryField(t *testing.T) {
 	for k, v := range map[string]string{
-		"RASPUTIN_BMC_BITSCOPE_DEV":         "/dev/ttyS0",
-		"RASPUTIN_BMC_BITSCOPE_UNLOCK":      "unlock",
-		"RASPUTIN_BMC_BITSCOPE_MAP":         "/tmp/bitscope-map.json",
-		"RASPUTIN_BMC_MOCK_TARGETS":         "mock-a,mock-b",
-		"RASPUTIN_BMC_TURINGPI_ENDPOINT":    "turingpi.local",
-		"RASPUTIN_BMC_TURINGPI_USER":        "root",
-		"RASPUTIN_BMC_TURINGPI_PASS":        "turing",
-		"RASPUTIN_BMC_TURINGPI_MAP":         "tp-cp1:1,tp-n1:2",
-		"RASPUTIN_BMC_TURINGPI_FINGERPRINT": "41:7C:1E:EA",
-		"RASPUTIN_BMC_TURINGPI_INSECURE":    "true",
+		"RASPUTIN_BMC_BITSCOPE_DEV":      "/dev/ttyS0",
+		"RASPUTIN_BMC_BITSCOPE_UNLOCK":   "unlock",
+		"RASPUTIN_BMC_BITSCOPE_MAP":      "/tmp/bitscope-map.json",
+		"RASPUTIN_BMC_MOCK_TARGETS":      "mock-a,mock-b",
+		"RASPUTIN_BMC_TURINGPI_ENDPOINT": "turingpi.local",
+		"RASPUTIN_BMC_TURINGPI_USER":     "root",
+		"RASPUTIN_BMC_TURINGPI_PASS":     "turing",
+		"RASPUTIN_BMC_TURINGPI_MAP":      "tp-cp1:1,tp-n1:2",
+		"RASPUTIN_BMC_TURINGPI_PIN":      "sha256/epr81hmPYzpdyR6LUQ2gb+spADtZSHpXfIQ5fF+AHqs=",
 	} {
 		t.Setenv(k, v)
 	}
@@ -453,22 +452,51 @@ func TestBMCConfigFromEnvCoversEveryField(t *testing.T) {
 	}
 }
 
-// TestEnvBool pins the fail-closed reading: only an explicit true-ish
-// value enables the flag. TuringPiInsecure disables TLS verification, so
-// a typo'd value must read false rather than "not false".
-func TestEnvBool(t *testing.T) {
-	for _, v := range []string{"true", "1", "TRUE", "T"} {
-		t.Setenv("RASPUTIN_TEST_BOOL", v)
-		if !envBool("RASPUTIN_TEST_BOOL") {
-			t.Errorf("envBool(%q) = false, want true", v)
+// The retired BMC TLS env vars are not read any more, and a box still
+// carrying one must be TOLD rather than silently reconfigured or taken down:
+// the env selection is rejected, the node comes up BMC-off, and the
+// registration carries the reason (geekdojo/geekdojo-brain#548).
+func TestRetiredBMCEnvInUse(t *testing.T) {
+	const pin = "sha256/epr81hmPYzpdyR6LUQ2gb+spADtZSHpXfIQ5fF+AHqs="
+
+	t.Run("a retired variable is named", func(t *testing.T) {
+		for _, key := range retiredBMCEnv {
+			t.Run(key, func(t *testing.T) {
+				t.Setenv("RASPUTIN_BMC_TURINGPI_PIN", pin)
+				t.Setenv(key, "true")
+				got := retiredBMCEnvInUse("turingpi", bmcConfigFromEnv(t.TempDir()).TuringPiPin)
+				if got == "" {
+					t.Fatalf("%s is set; the selection must be rejected", key)
+				}
+				if !strings.Contains(got, key) {
+					t.Errorf("the reason must name the variable to fix; got %q", got)
+				}
+			})
 		}
-	}
-	for _, v := range []string{"", "false", "0", "yes", "on", "maybe", "  "} {
-		t.Setenv("RASPUTIN_TEST_BOOL", v)
-		if envBool("RASPUTIN_TEST_BOOL") {
-			t.Errorf("envBool(%q) = true, want false", v)
+	})
+
+	t.Run("no pin at all", func(t *testing.T) {
+		got := retiredBMCEnvInUse("turingpi", bmcConfigFromEnv(t.TempDir()).TuringPiPin)
+		if got == "" || !strings.Contains(got, "RASPUTIN_BMC_TURINGPI_PIN") {
+			t.Errorf("a turingpi selection with no pin must be rejected by name; got %q", got)
 		}
-	}
+	})
+
+	t.Run("a pinned selection is honoured", func(t *testing.T) {
+		t.Setenv("RASPUTIN_BMC_TURINGPI_PIN", pin)
+		if got := retiredBMCEnvInUse("turingpi", bmcConfigFromEnv(t.TempDir()).TuringPiPin); got != "" {
+			t.Errorf("a pinned turingpi selection must be honoured; got %q", got)
+		}
+	})
+
+	t.Run("other backends are untouched", func(t *testing.T) {
+		t.Setenv("RASPUTIN_BMC_TURINGPI_INSECURE", "true")
+		for _, kind := range []string{"", "none", "mock", "bitscope"} {
+			if got := retiredBMCEnvInUse(kind, bmcConfigFromEnv(t.TempDir()).TuringPiPin); got != "" {
+				t.Errorf("kind %q must be unaffected; got %q", kind, got)
+			}
+		}
+	})
 }
 
 // --- cluster name derivation (ADR-0003) --------------------------------------

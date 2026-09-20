@@ -1,6 +1,7 @@
 package tailscale
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -138,6 +139,42 @@ func TestRestartTailscaled_SystemdFirstWins(t *testing.T) {
 	}
 }
 
+// On a firewall image that carries Rasputin's own tailscaled service, that is
+// the one to restart: it is the service that passes SSL_CERT_FILE. Restarting
+// the stock one, which is still on disk, would start a second, env-less daemon
+// on the same state file and port. (geekdojo/geekdojo-brain#542)
+func TestRestartTailscaled_PrefersRasputinService(t *testing.T) {
+	withInitSystems(t, "/etc/init.d/rasputin-tailscale", "/etc/init.d/tailscale")
+	var calls [][]string
+	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return []byte("ok"), nil
+	}
+	if err := restartTailscaled(context.Background(), run); err != nil {
+		t.Fatalf("expected the rasputin service restart to succeed: %v", err)
+	}
+	if len(calls) != 1 || calls[0][0] != "/etc/init.d/rasputin-tailscale" {
+		t.Fatalf("want exactly one restart, of the rasputin service; got %v", calls)
+	}
+}
+
+// An image that predates that service still has to work: a newer agent on an
+// older firewall image falls back to the stock init.
+func TestRestartTailscaled_FallsBackToStockInit(t *testing.T) {
+	withInitSystems(t, "/etc/init.d/tailscale")
+	var calls [][]string
+	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return []byte("ok"), nil
+	}
+	if err := restartTailscaled(context.Background(), run); err != nil {
+		t.Fatalf("expected the stock restart to succeed: %v", err)
+	}
+	if len(calls) != 1 || calls[0][0] != "/etc/init.d/tailscale" {
+		t.Fatalf("want exactly one restart, of the stock service; got %v", calls)
+	}
+}
+
 func TestRestartTailscaled_BothFail(t *testing.T) {
 	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
 		return nil, errors.New("nope")
@@ -147,38 +184,47 @@ func TestRestartTailscaled_BothFail(t *testing.T) {
 	}
 }
 
-func TestEnsureCAInSystemBundle_AppendsOnceWhenWritable(t *testing.T) {
-	bundle := filepath.Join(t.TempDir(), "ca-certificates.crt")
-	if err := os.WriteFile(bundle, []byte("-----BEGIN CERTIFICATE-----\npublicroot\n-----END CERTIFICATE-----\n"), 0o644); err != nil {
+// The global-bundle append is gone (geekdojo/geekdojo-brain#542), so the two
+// tests that covered it are replaced by the property that took its place: an
+// enroll installs the Mesh CA in exactly one place, the SSL_CERT_FILE bundle,
+// and touches no other trust store.
+func TestInstallMeshCA_WritesOnlyTheSSLCertFileBundle(t *testing.T) {
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "mesh", "tailscaled-ca.pem")
+	// A stand-in for the box's global trust bundle, in the same tree, so a
+	// stray write anywhere under dir would show up.
+	global := filepath.Join(dir, "ca-certificates.crt")
+	if err := os.WriteFile(global, []byte("-----BEGIN CERTIFICATE-----\npublicroot\n-----END CERTIFICATE-----\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cands := []string{bundle}
+	before, err := os.ReadFile(global)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	changed, err := ensureCAInSystemBundle([]byte(testCAPEM), cands)
+	changed, err := installMeshCA([]byte(testCAPEM), bundle)
 	if err != nil || !changed {
-		t.Fatalf("first append: changed=%v err=%v", changed, err)
+		t.Fatalf("install: changed=%v err=%v", changed, err)
 	}
-	b, _ := os.ReadFile(bundle)
-	if !strings.Contains(string(b), "publicroot") || !strings.Contains(string(b), testCAPEM) {
-		t.Fatalf("bundle should keep public roots AND gain mesh CA:\n%s", b)
+	got, err := os.ReadFile(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), testCAPEM) {
+		t.Fatalf("mesh CA missing from the SSL_CERT_FILE bundle:\n%s", got)
+	}
+	after, err := os.ReadFile(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("the global trust bundle must not be touched; before:\n%s\nafter:\n%s", before, after)
 	}
 
-	// Idempotent: CA already present → no change.
-	changed, err = ensureCAInSystemBundle([]byte(testCAPEM), cands)
+	// Idempotent: the same CA again is not a change, so no tailscaled restart.
+	changed, err = installMeshCA([]byte(testCAPEM), bundle)
 	if err != nil || changed {
-		t.Fatalf("second append should be a noop: changed=%v err=%v", changed, err)
-	}
-}
-
-func TestEnsureCAInSystemBundle_AbsentBundleIsNotFatal(t *testing.T) {
-	// No candidate exists (mirrors a read-only/missing bundle): returns
-	// changed=false with an error the caller logs but doesn't treat as fatal.
-	changed, err := ensureCAInSystemBundle([]byte(testCAPEM), []string{"/nonexistent/ca.crt"})
-	if changed {
-		t.Fatal("should not report changed when no writable bundle exists")
-	}
-	if err == nil {
-		t.Fatal("expected a (non-fatal) error when no bundle was writable")
+		t.Fatalf("second install should be a noop: changed=%v err=%v", changed, err)
 	}
 }
 

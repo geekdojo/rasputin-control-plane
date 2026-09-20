@@ -85,10 +85,44 @@ type UCIRealClient struct {
 	runner       CmdRunner
 	dnsmasq      dnsmasqObserver
 	manifestPath string
+	// modePath is where SetActive records the deployment mode it applied, for
+	// the boot-time init script to read; see deploymentModePath.
+	modePath string
 	// logTimeout and probeTimeout bound the waits on the running dnsmasq; see
 	// dnsmasqLogTimeout and dnsmasqProbeTimeout. Fields so tests can shorten them.
 	logTimeout   time.Duration
 	probeTimeout time.Duration
+}
+
+// defaultDeploymentModePath is where the firewall's boot-time init script
+// (files/etc/init.d/rasputin-dhcp-auto in rasputin-openwrt-firewall) looks for
+// the deployment mode this node is in. It sits under /etc/rasputin/, which is
+// on the firewall's writable overlay and in its sysupgrade keep-list, so the
+// mode survives a reboot, an A/B slot update and a sysupgrade alike.
+//
+// Why it exists: that script decides whether this box serves LAN DHCP. Without
+// a recorded mode its only input is a DHCP probe on the LAN, whose answer
+// comes from whatever else is on the wire — so any OFFER at boot could switch
+// off a DHCP server the operator had chosen, until the agent reconnected and
+// re-applied it. With the mode recorded, the probe is reserved for the first
+// boot, before any mode exists (geekdojo/geekdojo-brain#543).
+const defaultDeploymentModePath = "/etc/rasputin/deployment-mode"
+
+// The two values the file can hold. They are the init script's vocabulary, not
+// Go's, so they are written out literally on both sides.
+const (
+	deploymentModeActive = "active"
+	deploymentModeIdle   = "idle"
+)
+
+// deploymentModePath resolves the mode file's location.
+// RASPUTIN_DEPLOYMENT_MODE_FILE overrides it for tests and for a dev box that
+// is not a firewall; the firewall never sets it.
+func deploymentModePath() string {
+	if p := os.Getenv("RASPUTIN_DEPLOYMENT_MODE_FILE"); p != "" {
+		return p
+	}
+	return defaultDeploymentModePath
 }
 
 // NewRealClient creates a UCIRealClient with the production exec runner and
@@ -109,6 +143,7 @@ func newRealClient(dir string, runner CmdRunner) (*UCIRealClient, error) {
 		runner:       runner,
 		dnsmasq:      realDnsmasq{server: dnsmasqListen},
 		manifestPath: filepath.Join(dir, "managed.json"),
+		modePath:     deploymentModePath(),
 		logTimeout:   dnsmasqLogTimeout,
 		probeTimeout: dnsmasqProbeTimeout,
 	}
@@ -355,6 +390,41 @@ func (c *UCIRealClient) SetActive(ctx context.Context, active bool) error {
 		action = "start"
 	}
 	_, _ = c.runner.Run(ctx, "/etc/init.d/snort", action)
+
+	// Record what was applied, LAST: the file says "this mode is in force on
+	// this box", so it must never claim a mode the box is not actually in.
+	// The boot-time DHCP init reads it and skips its probe
+	// (geekdojo/geekdojo-brain#543).
+	//
+	// A failure here is returned rather than logged. The UCI state above is
+	// already right, so the live box is in the requested mode either way — but
+	// the NEXT boot would go back to deciding the DHCP role from whatever
+	// answers a DISCOVER first, which is the thing this is here to stop. The
+	// api's firewall reconcile re-asserts set_active, so a nack is retried.
+	if err := c.recordDeploymentMode(active); err != nil {
+		return err
+	}
+	return nil
+}
+
+// recordDeploymentMode writes the applied mode to c.modePath, atomically.
+//
+// 0644 in a 0755 directory, set explicitly rather than inherited: the reader
+// is a boot-time shell script, the content is one word describing a role the
+// operator chose, and there is nothing secret in it. Stating the mode here
+// means it cannot drift either way.
+func (c *UCIRealClient) recordDeploymentMode(active bool) error {
+	mode := deploymentModeIdle
+	if active {
+		mode = deploymentModeActive
+	}
+	if err := atrest.EnsurePublicDir(filepath.Dir(c.modePath)); err != nil {
+		return fmt.Errorf("openwrt-uci: record deployment mode in %s: mkdir %s: %w",
+			c.modePath, filepath.Dir(c.modePath), err)
+	}
+	if err := atrest.WritePublicFile(c.modePath, []byte(mode+"\n")); err != nil {
+		return fmt.Errorf("openwrt-uci: record deployment mode in %s: %w", c.modePath, err)
+	}
 	return nil
 }
 
