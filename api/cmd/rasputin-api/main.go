@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -1379,14 +1378,16 @@ func main() {
 			Inv: invStore, Mint: mintCollectorLeaf,
 			IngressBaseURL: ingressBaseURL, ServerName: ingressServerName,
 		}
-		if busKey != nil {
-			if cert, cerr := busKey.ListenerCertificate(); cerr != nil {
-				log.Printf("rasputin-api: obs collectors: no bus certificate (%v) — collectors stay on the mesh leaf", cerr)
-			} else {
-				collectorDeploy.NodeKeyServerName = bustls.BusDNSName
-				collectorDeploy.BusCertPEM = string(pem.EncodeToMemory(
-					&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))
-			}
+		if len(busCert.Certificate) > 0 {
+			// The PERSISTED certificate (geekdojo/geekdojo-brain#508), rendered
+			// by the package that writes the file, so the collector's ca_pem is
+			// byte-for-byte what the listener serves and what is on disk. Being
+			// persisted is what keeps a restart from changing it and putting
+			// every collector through a redeploy.
+			collectorDeploy.NodeKeyServerName = bustls.BusDNSName
+			collectorDeploy.BusCertPEM = string(bustls.EncodeCertPEM(busCert))
+		} else {
+			log.Printf("rasputin-api: obs collectors: no bus certificate — collectors stay on the mesh leaf")
 		}
 		runner.Register(obs.CollectorReconcileWorkflow(obs.CollectorReconcileDeps{
 			Inv: invStore, Jobs: jobStore, Runner: runner, Enabled: obsEnabled,
