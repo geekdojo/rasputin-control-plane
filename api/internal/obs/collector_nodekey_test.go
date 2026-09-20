@@ -152,7 +152,7 @@ func TestDecideCollectorActions_RedeploysOnAChangedFact(t *testing.T) {
 	}
 
 	same := func(string) collectorWant { return deployed }
-	act := decideCollectorActions(nodes, depState, nil, true, now, same)
+	act := decideCollectorActions(nodes, depState, nil, true, now, allAdmitted, same)
 	if len(act.deploy) != 0 || act.skipped["fresh"] != 1 {
 		t.Fatalf("a current collector was redeployed: %+v", act)
 	}
@@ -163,7 +163,7 @@ func TestDecideCollectorActions_RedeploysOnAChangedFact(t *testing.T) {
 		"the node moved off the legacy shape": {key: "sha256/first", trust: "busfp"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			act := decideCollectorActions(nodes, depState, nil, true, now,
+			act := decideCollectorActions(nodes, depState, nil, true, now, allAdmitted,
 				func(string) collectorWant { return want })
 			if len(act.deploy) != 1 || act.deploy[0] != "c02" {
 				t.Fatalf("not redeployed: %+v", act)
@@ -179,7 +179,7 @@ func TestDecideCollectorActions_UnrecordedDeployIsNotStale(t *testing.T) {
 	now := time.Now().UTC()
 	nodes := []*proto.Node{{ID: "c02", Role: proto.RoleCompute, LastSeen: now}}
 	depState := map[string]*nodeJobState{"c02": {lastSuccess: now.Add(-time.Minute)}}
-	act := decideCollectorActions(nodes, depState, nil, true, now,
+	act := decideCollectorActions(nodes, depState, nil, true, now, allAdmitted,
 		func(string) collectorWant { return collectorWant{key: "sha256/new", trust: "busfp"} })
 	if len(act.deploy) != 0 || act.skipped["fresh"] != 1 {
 		t.Fatalf("an unrecorded deploy was treated as stale: %+v", act)
@@ -187,7 +187,7 @@ func TestDecideCollectorActions_UnrecordedDeployIsNotStale(t *testing.T) {
 	// And the safety net still picks it up.
 	act = decideCollectorActions(nodes,
 		map[string]*nodeJobState{"c02": {lastSuccess: now.Add(-7 * time.Hour)}}, nil, true, now,
-		func(string) collectorWant { return collectorWant{} })
+		allAdmitted, func(string) collectorWant { return collectorWant{} })
 	if len(act.deploy) != 1 {
 		t.Fatalf("the safety net did not redeploy: %+v", act)
 	}
@@ -215,3 +215,8 @@ func TestCollectorDeployDeps_WantFor(t *testing.T) {
 		t.Errorf("want with no bus certificate = %+v, want the legacy shape", got)
 	}
 }
+
+// allAdmitted is the registry answer for the cases below, which are about what
+// a collector CARRIES rather than about admission. Admission has its own
+// cases in collector_jobs_test.go.
+func allAdmitted(string) bool { return true }
