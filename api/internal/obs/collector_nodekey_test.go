@@ -1,10 +1,13 @@
 package obs
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"gopkg.in/yaml.v3"
 )
@@ -220,3 +223,34 @@ func TestCollectorDeployDeps_WantFor(t *testing.T) {
 // a collector CARRIES rather than about admission. Admission has its own
 // cases in collector_jobs_test.go.
 func allAdmitted(string) bool { return true }
+
+// wantFor answers the LEGACY shape whenever it cannot establish that a node
+// has a collector key: no inventory to ask, or a read that failed. Failing
+// the other way would put a node on a key the api cannot confirm it has, and
+// the collector would be deployed unable to authenticate.
+func TestCollectorReconcileDeps_WantForFallsBackWhenItCannotAsk(t *testing.T) {
+	ctx := context.Background()
+	want := collectorWant{trust: proto.MeshCAFingerprint([]byte(testMeshCA))}
+
+	// No inventory wired at all.
+	d := CollectorReconcileDeps{
+		Deploy:    CollectorDeployDeps{NodeKeyServerName: "rasputin-bus", BusCertPEM: testBusCert},
+		MeshCAPEM: testMeshCA,
+	}
+	if got := d.wantFor(ctx, "c02"); got != want {
+		t.Errorf("no inventory: want = %+v, want the legacy shape %+v", got, want)
+	}
+
+	// An inventory whose read fails: the store's database is closed.
+	inv, err := inventory.OpenStore(ctx, filepath.Join(t.TempDir(), "inv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d.Inv = inv
+	if got := d.wantFor(ctx, "c02"); got != want {
+		t.Errorf("unreadable inventory: want = %+v, want the legacy shape %+v", got, want)
+	}
+}
