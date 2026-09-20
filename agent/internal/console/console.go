@@ -115,8 +115,15 @@ func setShadowPassword(line, hash string) (string, bool, error) {
 // replaceFile writes data over path atomically, keeping path's mode, owner
 // and group. A temporary file in the same directory, synced, then renamed:
 // a crash leaves the old shadow file intact, and the rename replaces a
-// symlink at the target rather than writing through it. Same shape as the
-// api's atrest helper, which the agent cannot import (separate module).
+// symlink at the target rather than writing through it.
+//
+// Not agent/internal/atrest, deliberately, though the write shape is the
+// same one. That package is for the agent's OWN state tree, where the agent
+// decides the mode and 0600 is the rule. /etc/shadow is not the agent's
+// file: the IMAGE decides its mode and owner, the two images do not have to
+// agree, and a system where root's shadow is 0640 with a `shadow` group
+// reader would have that reader broken by a helper that rewrites it 0600
+// root:root. So this preserves what it found and only replaces the bytes.
 func replaceFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	mode, uid, gid := statOrDefault(path)
