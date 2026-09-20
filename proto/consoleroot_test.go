@@ -26,25 +26,44 @@ func TestValidConsoleRootHash(t *testing.T) {
 			t.Fatalf("%s: a real $6$ hash was refused: %v", name, err)
 		}
 	}
+	// The EXACT boundaries, both sides. The mutation gate found these
+	// unpinned: `n < 1000` and `n > 999999999` and `len(salt) > 16` all
+	// survived being turned into their <=/>= forms, because every case
+	// below was a step away from the edge rather than on it.
+	digest := strings.Repeat("a", 86)
+	for name, h := range map[string]string{
+		"rounds at the floor":   "$6$rounds=1000$saltstring$" + digest,
+		"rounds at the ceiling": "$6$rounds=999999999$saltstring$" + digest,
+		"salt at 16":            "$6$" + strings.Repeat("s", 16) + "$" + digest,
+		"salt at 1":             "$6$s$" + digest,
+	} {
+		if err := ValidConsoleRootHash(h); err != nil {
+			t.Errorf("%s: refused a value at the edge of what is allowed: %v", name, err)
+		}
+	}
+
 	bad := map[string]string{
-		"empty":               "",
-		"md5":                 "$1$saltstrin$T0bHfzpPnpcfqGLPRQHnT0",
-		"locked":              "!",
-		"bcrypt":              "$2b$10$abcdefghijklmnopqrstuv",
-		"rounds not a number": "$6$rounds=lots$saltstring$" + strings.Repeat("a", 86),
-		"rounds too low":      "$6$rounds=999$saltstring$" + strings.Repeat("a", 86),
-		"rounds too high":     "$6$rounds=1000000000$saltstring$" + strings.Repeat("a", 86),
-		"third field junk":    "$6$notrounds$saltstring$" + strings.Repeat("a", 86),
-		"six fields":          "$6$rounds=5000$a$b$" + strings.Repeat("a", 86),
-		"no salt":             "$6$$" + strings.Repeat("a", 86),
-		"short digest":        "$6$salt$" + strings.Repeat("a", 85),
-		"long digest":         "$6$salt$" + strings.Repeat("a", 87),
-		"colon in digest":     "$6$salt$" + strings.Repeat("a", 85) + ":",
-		"newline":             sampleHash + "\n",
-		"space":               sampleHash[:10] + " " + sampleHash[11:],
-		"bad salt char":       "$6$sa!t$" + strings.Repeat("a", 86),
-		"oversized salt":      "$6$" + strings.Repeat("s", 17) + "$" + strings.Repeat("a", 86),
-		"trailing garbage":    sampleHash + "$x",
+		"rounds one below the floor":   "$6$rounds=999$saltstring$" + digest,
+		"rounds one above the ceiling": "$6$rounds=1000000000$saltstring$" + digest,
+		"salt at 17":                   "$6$" + strings.Repeat("s", 17) + "$" + digest,
+		"empty":                        "",
+		"md5":                          "$1$saltstrin$T0bHfzpPnpcfqGLPRQHnT0",
+		"locked":                       "!",
+		"bcrypt":                       "$2b$10$abcdefghijklmnopqrstuv",
+		"rounds not a number":          "$6$rounds=lots$saltstring$" + strings.Repeat("a", 86),
+		"rounds too low":               "$6$rounds=999$saltstring$" + strings.Repeat("a", 86),
+		"rounds too high":              "$6$rounds=1000000000$saltstring$" + strings.Repeat("a", 86),
+		"third field junk":             "$6$notrounds$saltstring$" + strings.Repeat("a", 86),
+		"six fields":                   "$6$rounds=5000$a$b$" + strings.Repeat("a", 86),
+		"no salt":                      "$6$$" + strings.Repeat("a", 86),
+		"short digest":                 "$6$salt$" + strings.Repeat("a", 85),
+		"long digest":                  "$6$salt$" + strings.Repeat("a", 87),
+		"colon in digest":              "$6$salt$" + strings.Repeat("a", 85) + ":",
+		"newline":                      sampleHash + "\n",
+		"space":                        sampleHash[:10] + " " + sampleHash[11:],
+		"bad salt char":                "$6$sa!t$" + strings.Repeat("a", 86),
+		"oversized salt":               "$6$" + strings.Repeat("s", 17) + "$" + strings.Repeat("a", 86),
+		"trailing garbage":             sampleHash + "$x",
 	}
 	for name, h := range bad {
 		if err := ValidConsoleRootHash(h); err == nil {
