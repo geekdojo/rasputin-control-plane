@@ -35,7 +35,7 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 // The metadata key converge_trust acts on has a floor, so a silent node can
 // be told apart from one whose agent never heard of the key.
 func TestMetadataMinAgentVersionLookup(t *testing.T) {
-	for _, key := range []string{MetadataMeshCAFingerprint, MetadataBusTLS} {
+	for _, key := range []string{MetadataMeshCAFingerprint, MetadataBusTLS, MetadataNodeKeys} {
 		if _, ok := MetadataMinAgentVersion(key); !ok {
 			t.Errorf("%s has no minimum agent version recorded", key)
 		}

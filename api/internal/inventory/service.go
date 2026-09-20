@@ -41,6 +41,11 @@ type Service struct {
 	// the first one and every reconnect alike. See SetOnRegistered.
 	onRegistered func(ctx context.Context, n *proto.Node)
 
+	// onNodeKeyChanged, if set, is invoked when an accepted registration
+	// REPLACED a key this node had already registered. See
+	// SetOnNodeKeyChanged.
+	onNodeKeyChanged func(ctx context.Context, change NodeKeyChange)
+
 	// selfNodeID / selfLANIP: the node this api runs on, and its LAN address as
 	// the api itself knows it. See SetSelfLANIP. selfMu serializes that node's
 	// registration writes with RefreshSelfLANIP, so a registration that read the
@@ -121,6 +126,80 @@ func (s *Service) SetOnNodeAdded(fn func(ctx context.Context, n *proto.Node)) {
 // callback goroutine. Set before Start.
 func (s *Service) SetOnRegistered(fn func(ctx context.Context, n *proto.Node)) {
 	s.onRegistered = fn
+}
+
+// SetOnNodeKeyChanged registers the audit-and-alert callback for a node whose
+// registered key was REPLACED — a purpose that already had a hash now has a
+// different one. A first registration does not fire it: that is a node
+// acquiring an identity, not one changing it.
+//
+// The change means the node was reflashed (its keys live where its join token
+// lives and survive a sysupgrade) or somebody with its token registered a key
+// of their own. The api cannot tell those apart, which is precisely why it is
+// surfaced rather than decided. Same contract as SetOnRegistered: it must not
+// block, and it runs on the bus callback goroutine. Set before Start.
+func (s *Service) SetOnNodeKeyChanged(fn func(ctx context.Context, change NodeKeyChange)) {
+	s.onNodeKeyChanged = fn
+}
+
+// recordNodeKeys applies a registration's reported node keys
+// (geekdojo/geekdojo-brain#514). It is the whole accept rule in one place:
+//
+//   - Nothing reported: nothing happens. That is an agent that predates the
+//     keys, and a node whose bus connection is not pinned — which reports
+//     nothing by design. Neither is a failure, and neither retires a key the
+//     node registered earlier.
+//   - Reported over an unpinned connection: REFUSED and logged. The node is
+//     not rejected — its registration stands, it simply keeps whatever keys
+//     were already recorded and stays on the legacy path.
+//   - A malformed report: refused whole, for the same reason.
+//   - Otherwise recorded, and a replacement is audited here and handed to
+//     onNodeKeyChanged, which raises the alert.
+//
+// It never fails a registration: a node the api cannot record keys for is
+// still a node in inventory, and refusing it would take it off the bus over a
+// change to a credential it does not need to be there.
+func (s *Service) recordNodeKeys(nodeID string, metadata map[string]any) {
+	keys, ok, err := proto.DecodeNodeKeys(metadata)
+	if err != nil {
+		log.Printf("inventory: WARN %s reported unusable node keys, ignoring the whole report (its recorded keys are unchanged): %v", nodeID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if !proto.NodeKeysAcceptable(metadata) {
+		// A key is taken only where the node has proven which control plane
+		// it is talking to. An agent of this release does not send one on an
+		// unpinned link, so reaching here means an older or other client.
+		log.Printf("inventory: WARN refusing node keys from %s: it did not register over a pinned TLS bus connection (%s=true). "+
+			"Deliver the bus pin to this node, or reseed it, and the keys will be accepted on its next registration.",
+			nodeID, proto.MetadataBusTLS)
+		return
+	}
+	change, err := s.store.SetNodeKeys(s.ctx, nodeID, keys)
+	if err != nil {
+		log.Printf("inventory: WARN could not record node keys for %s (its recorded keys are unchanged): %v", nodeID, err)
+		return
+	}
+	if !change.Changed() {
+		return
+	}
+	if len(change.Replaced) == 0 {
+		log.Printf("inventory: %s registered node key(s) %s", nodeID, change.Current)
+		return
+	}
+	// The audit record of a key change: which node, which purposes, what it
+	// was and what it is now. Hashes are public values, so the whole thing
+	// can go in the log an operator reads.
+	for _, p := range change.Replaced {
+		log.Printf("inventory: WARN node key CHANGED for %s: purpose %q was %s, now %s. "+
+			"Expected after a reflash; if this node was not reflashed, revoke its join token and investigate.",
+			nodeID, p, change.Previous[p], change.Current[p])
+	}
+	if s.onNodeKeyChanged != nil {
+		s.onNodeKeyChanged(s.ctx, change)
+	}
 }
 
 // SetSelfLANIP makes the api authoritative for its own node's LAN address.
@@ -317,6 +396,10 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 		s.statusByNode[ev.NodeID] = proto.StatusOnline
 		s.mu.Unlock()
 		s.emit(n, proto.InventoryAdded)
+		// After the row exists: the registry entry the keys hang off is
+		// created by Insert, and a key recorded for a node with no row
+		// would be a key nothing can ever admit.
+		s.recordNodeKeys(ev.NodeID, ev.Metadata)
 		if s.onNodeAdded != nil {
 			// First-registration hook (e.g. firewall baseline seeding). Run
 			// synchronously but never let it break registration — the hook is
@@ -386,6 +469,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 	} else {
 		s.emit(existing, proto.InventoryUpdated)
 	}
+	s.recordNodeKeys(ev.NodeID, ev.Metadata)
 	if s.onRegistered != nil {
 		s.onRegistered(s.ctx, existing)
 	}

@@ -28,6 +28,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/nameguard"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/nodekeys"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/proxy"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/quiesce"
@@ -107,6 +108,23 @@ func main() {
 		log.Fatalf("rasputin-agent: create state dir %s: %v (set RASPUTIN_AGENT_STATE_DIR to a writable absolute path)", stateDir, err)
 	}
 	log.Printf("rasputin-agent: state dir %s", stateDir)
+
+	// The node's own TLS keys: one for the agent, one for the collector,
+	// generated once here and never leaving the node
+	// (geekdojo/geekdojo-brain#514). Their SPKI hashes ride out in
+	// registration metadata, but only over a pinned TLS bus connection — see
+	// publishRegistered. Fatal on failure: a node that cannot hold its own
+	// keys would report none and quietly stay on the legacy path forever,
+	// which is the kind of silent downgrade this work exists to remove.
+	nodeKeySet, freshKeys, err := nodekeys.Ensure(stateDir)
+	if err != nil {
+		log.Fatalf("rasputin-agent: node keys: %v", err)
+	}
+	if len(freshKeys) > 0 {
+		log.Printf("rasputin-agent: generated node key(s) %v under %s — this node's HTTPS identity; "+
+			"a later change to it raises a control-plane alert", freshKeys, nodekeys.Dir(stateDir))
+	}
+	log.Printf("rasputin-agent: node keys %s", nodeKeySet.Hashes())
 
 	// Update-path fault injection (updater/fault.go). Resolved once, here.
 	// updater.Arm cannot fail and cannot exit — an unrecognised value, or any
@@ -221,7 +239,7 @@ func main() {
 	// client exists, below, and read only from bus callbacks after Dial.
 	var busTLS func(*nats.Conn) bool
 	reregister := func(c *nats.Conn) {
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint, busTLS)
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint, busTLS, nodeKeySet.Hashes())
 	}
 	// The cluster-DNS pin follows the bus connection: every successful
 	// connect — first dial, nats reconnect, re-dial — fires this right after
@@ -874,14 +892,24 @@ func uciLANAddr(lookup func(context.Context) (string, string, error), fallback f
 	}
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), trustFingerprint func() string, busTLS func(*nats.Conn) bool) {
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), trustFingerprint func() string, busTLS func(*nats.Conn) bool, nodeKeys proto.NodeKeys) {
 	meta := map[string]any{}
 	// Whether THIS connection is TLS with the bus key pin verified. Always
 	// present from an agent that knows the field, false included: the api
 	// turns plaintext off only when every node says true, so "said false" and
 	// "cannot say" both hold it back, and only the first is a node that needs
 	// the pin delivered (geekdojo/geekdojo-brain#448).
-	meta[proto.MetadataBusTLS] = busTLS != nil && busTLS(nc)
+	pinnedTLS := busTLS != nil && busTLS(nc)
+	meta[proto.MetadataBusTLS] = pinnedTLS
+	// This node's registered key SPKIs (geekdojo/geekdojo-brain#514) — the
+	// public half only, never the key. Reported ONLY over a connection this
+	// node has verified by the bus pin: on an unpinned link the api refuses
+	// the report anyway (proto.NodeKeysAcceptable), and sending it would put
+	// the node's HTTPS identity on a wire it has not authenticated. So a node
+	// still on plaintext is silent here by design, not by failure.
+	if pinnedTLS && len(nodeKeys) > 0 {
+		meta[proto.MetadataNodeKeys] = nodeKeys
+	}
 	// Which mesh CA this node trusts, as a fingerprint — never the PEM. The
 	// api compares it with its own on every mesh.reconcile and re-delivers
 	// the CA when they differ (converge_trust; e3bench 2026-09-04, where an

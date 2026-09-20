@@ -1023,6 +1023,26 @@ func main() {
 			busTLSSvc.OnRegistered(hookCtx, n)
 		}
 	})
+	// A node whose registered key was REPLACED raises a crit alert
+	// (geekdojo/geekdojo-brain#514). inventory audits the change in the log
+	// itself; this is the operator-facing half.
+	//
+	// The alerts service is built further down — it needs stores that are not
+	// open yet — while the hook must be installed BEFORE Start, or the bus
+	// callback goroutine races the assignment. So the hook reads a pointer
+	// published once, atomically, when the service exists. Until then a key
+	// change is audited in the log and nowhere else, which is the same window
+	// in which nothing is serving the alerts API either.
+	var nodeKeyAlerts atomic.Pointer[alerts.Service]
+	invSvc.SetOnNodeKeyChanged(func(hookCtx context.Context, change inventory.NodeKeyChange) {
+		svc := nodeKeyAlerts.Load()
+		if svc == nil {
+			return
+		}
+		if err := svc.RaiseNodeKeyChanged(hookCtx, change); err != nil {
+			log.Printf("rasputin-api: could not raise the node-key-change alert for %s: %v", change.NodeID, err)
+		}
+	})
 	if err := invSvc.Start(ctx); err != nil {
 		log.Fatalf("rasputin-api: inventory service: %v", err)
 	}
@@ -1442,6 +1462,8 @@ func main() {
 	// OFF BUS vs OFFLINE (#401): the same join /api/nodes reads.
 	alertsSvc.SetMeshMembership(meshSvc.Membership)
 	srv.SetAlertsService(alertsSvc)
+	// The inventory hook installed before Start can raise alerts from here on.
+	nodeKeyAlerts.Store(alertsSvc)
 	// Rule alerts: vmalert evaluates the rules on its own schedule and
 	// writes its verdicts to VictoriaMetrics as ALERTS series; nothing calls
 	// the api. This loop reads them back and mirrors them into the alerts

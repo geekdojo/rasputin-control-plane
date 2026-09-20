@@ -48,6 +48,10 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.loadKeys(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -247,6 +251,16 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	}
 	if n == 0 {
 		return sql.ErrNoRows
+	}
+	// The node's key registrations go with its row (the §5.2 revocation
+	// cascade). The registry drops them too — setMember(false) clears the
+	// entry's keys and retires them, which closes any HTTPS session held
+	// under one.
+	if err := s.deleteNodeKeys(ctx, id); err != nil {
+		// The row is already gone, so the node is out of inventory and the
+		// registry is about to refuse it whatever this table says. Log
+		// rather than fail the removal and leave a half-removed node.
+		log.Printf("inventory: remove %s: %v", id, err)
 	}
 	s.registry.setMember(id, "", false)
 	return nil

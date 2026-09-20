@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -28,7 +29,21 @@ import (
 type Registry struct {
 	mu      sync.RWMutex
 	entries map[string]*RegistryEntry
-	hooks   []func(nodeID string)
+	// byKey is the reverse index the node listener reads: one registered
+	// key SPKI hash to the node that registered it and what it is for. It
+	// is what makes admission a map lookup under a read lock rather than a
+	// scan of every node, and it is kept in step with the entries under the
+	// same write lock, so the two can never disagree.
+	byKey     map[string]KeyOwner
+	hooks     []func(nodeID string)
+	keyRetire []func(nodeID string, retired []string)
+}
+
+// KeyOwner names the node a registered key belongs to and what the key is
+// for.
+type KeyOwner struct {
+	NodeID  string
+	Purpose proto.NodeKeyPurpose
 }
 
 // RegistryEntry is what the api holds about one node.
@@ -41,7 +56,12 @@ type RegistryEntry struct {
 	// TokenLive: it holds a join token the bus would admit it with
 	// (unrevoked, bound, naming a valid role).
 	TokenLive bool
-	// Step 6 adds the node's registered key SPKIs here.
+	// Keys are the node's registered key SPKI hashes, by purpose — what a
+	// node-facing TLS handshake compares the peer's key against
+	// (geekdojo/geekdojo-brain#514). Empty for a node that has not
+	// registered any: every node on the legacy path, and every node whose
+	// bus connection is not yet pinned.
+	Keys proto.NodeKeys
 }
 
 // admitted is the one rule node-facing admission applies.
@@ -49,7 +69,7 @@ func (e *RegistryEntry) admitted() bool { return e != nil && e.Member && e.Token
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{entries: map[string]*RegistryEntry{}}
+	return &Registry{entries: map[string]*RegistryEntry{}, byKey: map[string]KeyOwner{}}
 }
 
 // Admitted reports whether nodeID is a current member holding a live token.
@@ -68,7 +88,36 @@ func (r *Registry) Lookup(nodeID string) (RegistryEntry, bool) {
 	if !ok {
 		return RegistryEntry{}, false
 	}
-	return *e, true
+	out := *e
+	out.Keys = e.Keys.Clone()
+	return out, true
+}
+
+// KeyOwner reports which node registered the key with this SPKI hash, and
+// what the key is for. Memory only, one map lookup: nothing on a connection
+// or request path reads the database to answer it.
+//
+// It answers REGISTRATION only. Whether that node may connect right now is
+// Admitted, and AdmitKey asks both at once, which is what a handshake wants.
+func (r *Registry) KeyOwner(spki string) (KeyOwner, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	o, ok := r.byKey[spki]
+	return o, ok
+}
+
+// AdmitKey is the one rule a node-facing TLS handshake applies: this SPKI is
+// registered, AND the node that registered it is a current inventory member
+// holding a live join token. Both facts under one read lock, so a handshake
+// cannot see a key whose owner was excluded between the two lookups.
+func (r *Registry) AdmitKey(spki string) (KeyOwner, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	o, ok := r.byKey[spki]
+	if !ok || !r.entries[o.NodeID].admitted() {
+		return KeyOwner{}, false
+	}
+	return o, true
 }
 
 // OnNodeExcluded registers fn to run, outside the registry's lock, each time a
@@ -80,11 +129,24 @@ func (r *Registry) OnNodeExcluded(fn func(nodeID string)) {
 	r.mu.Unlock()
 }
 
+// OnKeysRetired registers fn to run, outside the registry's lock, each time a
+// node's registered keys change: retired holds the SPKI hashes that are no
+// longer registered for it. The node listener ends the HTTPS sessions held
+// under them, so a replaced key stops working at once rather than lasting as
+// long as somebody keeps a connection open.
+func (r *Registry) OnKeysRetired(fn func(nodeID string, retired []string)) {
+	r.mu.Lock()
+	r.keyRetire = append(r.keyRetire, fn)
+	r.mu.Unlock()
+}
+
 // update applies change to the entries of the nodes ids names — read under
 // the lock, so a whole-set change sees every entry — and fires the exclusion
-// hooks for every node that went from admitted to not.
+// hooks for every node that went from admitted to not, and the key-retirement
+// hooks for every SPKI that stopped being registered.
 func (r *Registry) update(ids func(entries map[string]*RegistryEntry) []string, change func(id string, e *RegistryEntry)) {
 	var excluded []string
+	retired := map[string][]string{}
 	r.mu.Lock()
 	for _, id := range ids(r.entries) {
 		e := r.entries[id]
@@ -93,21 +155,66 @@ func (r *Registry) update(ids func(entries map[string]*RegistryEntry) []string, 
 			r.entries[id] = e
 		}
 		was := e.admitted()
+		before := e.Keys.Clone()
 		change(id, e)
 		if was && !e.admitted() {
 			excluded = append(excluded, id)
 		}
 		if !e.Member && !e.TokenLive {
+			e.Keys = nil
 			delete(r.entries, id)
+		}
+		if gone := r.reindexKeysLocked(id, before, e.Keys); len(gone) > 0 {
+			retired[id] = append(retired[id], gone...)
 		}
 	}
 	hooks := r.hooks
+	keyHooks := r.keyRetire
 	r.mu.Unlock()
 	for _, id := range excluded {
 		for _, fn := range hooks {
 			fn(id)
 		}
 	}
+	for id, gone := range retired {
+		for _, fn := range keyHooks {
+			fn(id, gone)
+		}
+	}
+}
+
+// reindexKeysLocked moves nodeID from before to after in the reverse index and
+// returns the SPKI hashes that stopped being registered for it. Caller holds
+// the write lock.
+func (r *Registry) reindexKeysLocked(nodeID string, before, after proto.NodeKeys) []string {
+	var retired []string
+	for p, spki := range before {
+		if after[p] == spki {
+			continue
+		}
+		// Only drop the index entry this node owns: a hash another node
+		// holds is not this node's to remove, and SetNodeKeys refuses to
+		// let two nodes register the same key in the first place.
+		if o, ok := r.byKey[spki]; ok && o.NodeID == nodeID {
+			delete(r.byKey, spki)
+		}
+		retired = append(retired, spki)
+	}
+	for p, spki := range after {
+		if before[p] == spki {
+			continue
+		}
+		r.byKey[spki] = KeyOwner{NodeID: nodeID, Purpose: p}
+	}
+	sort.Strings(retired)
+	return retired
+}
+
+// setKeys records nodeID's registered keys. A node with no entry yet — a
+// registration whose row write has not reached the registry — gets one, the
+// same way setMember and SetTokenLive make one.
+func (r *Registry) setKeys(nodeID string, keys proto.NodeKeys) {
+	r.update(one(nodeID), func(_ string, e *RegistryEntry) { e.Keys = keys.Clone() })
 }
 
 func one(id string) func(map[string]*RegistryEntry) []string {
@@ -121,7 +228,12 @@ func (r *Registry) setMember(nodeID string, role proto.NodeRole, member bool) {
 		e.Role = ""
 		if member {
 			e.Role = role
+			return
 		}
+		// Removal clears the node's key registrations, the same cascade
+		// that deletes its rows: a node that is gone has no registered
+		// identity, and a later re-add re-registers its keys.
+		e.Keys = nil
 	})
 }
 
