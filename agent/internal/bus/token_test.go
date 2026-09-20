@@ -206,7 +206,7 @@ func TestClient_ReadsTheTokenFileOnEveryConnect(t *testing.T) {
 	}
 	waitBusEvent(t, connected, "the first connection")
 	first := c.Conn()
-	ping(t, s1, "tok-A")
+	ping(t, c, s1, "tok-A")
 
 	// 3.
 	stopServer(s1)
@@ -218,7 +218,7 @@ func TestClient_ReadsTheTokenFileOnEveryConnect(t *testing.T) {
 	if c.Conn() != first || !first.IsConnected() {
 		t.Fatalf("recovery replaced the conn or left it down (redials=%d, status %v)", c.Redials(), first.Status())
 	}
-	ping(t, s2, "tok-B")
+	ping(t, c, s2, "tok-B")
 }
 
 // The static token New is given is presented unchanged on every attempt, as
