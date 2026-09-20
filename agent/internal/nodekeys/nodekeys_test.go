@@ -168,7 +168,8 @@ func TestEnsure_RequiresAStateDir(t *testing.T) {
 // got keys does not have to guard every use.
 func TestNilKeysReportNothing(t *testing.T) {
 	var k *Keys
-	if k.Hashes() != nil || k.Signer(proto.NodeKeyAgent) != nil || k.Path(proto.NodeKeyAgent) != "" {
+	if k.Hashes() != nil || k.Signer(proto.NodeKeyAgent) != nil ||
+		k.Path(proto.NodeKeyAgent) != "" || k.CertPath(proto.NodeKeyAgent) != "" {
 		t.Error("a nil key set answered something")
 	}
 }
@@ -182,6 +183,15 @@ func TestPathsAreUnderTheStateDir(t *testing.T) {
 	want := filepath.Join(dir, "keys", "collector.key")
 	if got := keys.Path(proto.NodeKeyCollector); got != want {
 		t.Errorf("Path = %q, want %q", got, want)
+	}
+	// The collector's compose bind-mounts this path, so it has to be the file
+	// Ensure actually wrote.
+	wantCert := filepath.Join(dir, "keys", "collector.crt")
+	if got := keys.CertPath(proto.NodeKeyCollector); got != wantCert {
+		t.Errorf("CertPath = %q, want %q", got, wantCert)
+	}
+	if _, err := os.Stat(wantCert); err != nil {
+		t.Errorf("CertPath names a file that does not exist: %v", err)
 	}
 }
 
