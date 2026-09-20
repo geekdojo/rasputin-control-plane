@@ -156,6 +156,16 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	// reconcile running now cannot mint it again for a node it still lists.
 	s.removeCollectorLeaf(id)
 
+	// And its console root password record, so a removed node stops being
+	// counted as a fleet node that never took the password (#587).
+	if s.console != nil {
+		if err := s.console.ForgetNode(ctx, id); err != nil {
+			// gosec G706 (.github/sast-register.tsv): %q, and `id` reached
+			// this line only by matching a registered inventory row above.
+			log.Printf("rasputin-api: forget the console root password record for removed node %q: %v", id, err)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, impact)
 }
 

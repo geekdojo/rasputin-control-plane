@@ -44,6 +44,9 @@ type State struct {
 	// host that does not exist, and the node simply never joined. The api
 	// always knew the right answer; it just had no way to say it.
 	ClusterHostname string `json:"clusterHostname"`
+	// ConsoleRootSet reports whether a console root password has been
+	// chosen. Never the password, and never its hash.
+	ConsoleRootSet bool `json:"consoleRootSet"`
 	// ClusterID is the bare id ("home1"), the value seeds carry as
 	// RASPUTIN_CLUSTER_ID. Exposed separately from ClusterHostname rather
 	// than having the UI strip ".local": the two are wired from the same
@@ -73,6 +76,13 @@ type Probes struct {
 	// inventory. Drives the deployment-mode hardware gate — the router and
 	// sub-segment modes are only offerable when this is true.
 	HasFirewallNode func(ctx context.Context) (bool, error)
+	// ConsoleRootSet reports whether the operator has chosen a console root
+	// password (geekdojo/geekdojo-brain#587, decision #558). Nothing is
+	// baked into an image, so until this is true root's console login is
+	// locked on every node. Wired to
+	// console.Store.CurrentHashID; nil (dev api without the store) leaves
+	// the step undone rather than pretending it is satisfied.
+	ConsoleRootSet func(ctx context.Context) (bool, error)
 }
 
 // Service is the wizard coordinator. Constructed in main with the probes
@@ -144,6 +154,14 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 	if s.probes.HasFirewallNode != nil {
 		firewallCapable, _ = s.probes.HasFirewallNode(ctx)
 	}
+	// Fail-closed like HasUsers: a probe error must not render an
+	// installation with no console password as one that has set it.
+	consoleRootSet := false
+	if s.probes.ConsoleRootSet != nil {
+		if consoleRootSet, err = s.probes.ConsoleRootSet(ctx); err != nil {
+			return nil, err
+		}
+	}
 
 	steps := []Step{
 		{
@@ -166,6 +184,13 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 			Done:     Mode(mode).Valid(),
 			Required: true,
 			Detail:   "How Rasputin fits into your network. This changes which features run — pick the one that matches how you plugged it in.",
+		},
+		{
+			ID:       "console_root",
+			Title:    "Set the console root password",
+			Done:     consoleRootSet,
+			Required: false,
+			Detail:   "Root's console login is locked until you set a password here. Setting one gives you a way in at a node's physical console or serial-over-LAN when the mesh and LAN SSH are both unavailable. Saving it applies it to every node in the cluster, and you can change it later in Settings.",
 		},
 		{
 			ID:       "remote_access",
@@ -208,6 +233,7 @@ func (s *Service) GetState(ctx context.Context) (*State, error) {
 		SelfNodeID:      s.selfNodeID,
 		Mode:            Mode(mode),
 		FirewallCapable: firewallCapable,
+		ConsoleRootSet:  consoleRootSet,
 		ClusterHostname: s.clusterHostname,
 		ClusterID:       s.clusterID,
 	}, nil

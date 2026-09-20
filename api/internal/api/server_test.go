@@ -24,6 +24,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -89,6 +90,7 @@ type apiFixture struct {
 	meshFake        *fakeMeshClient
 	bmcSvc          *bmc.Service
 	setupSvc        *setup.Service
+	console         *console.Store
 	nc              *nats.Conn
 	busTLS          *bustls.Service
 	hasFirewallNode bool
@@ -217,6 +219,12 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	}
 	t.Cleanup(func() { _ = setupStore.Close() })
 
+	consoleStore, err := console.OpenStore(ctx, open("console.db"))
+	if err != nil {
+		t.Fatalf("console: %v", err)
+	}
+	t.Cleanup(func() { _ = consoleStore.Close() })
+
 	f := &apiFixture{
 		ctx:          ctx,
 		dir:          dir,
@@ -236,6 +244,10 @@ func newAPIFixture(t *testing.T) *apiFixture {
 			return !firstRun, err
 		},
 		HasFirewallNode: func(_ context.Context) (bool, error) { return f.hasFirewallNode, nil },
+		ConsoleRootSet: func(ctx context.Context) (bool, error) {
+			id, err := consoleStore.CurrentHashID(ctx)
+			return id != "", err
+		},
 	}
 	setupSvc := setup.NewService(setupStore, probes, "self-node", "test1.local", "test1")
 
@@ -268,6 +280,8 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		mtrStore, updStore, verifier, bundleDir, trustDir,
 		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, busTokenStore, nc)
 
+	srv.SetConsole(consoleStore)
+	f.console = consoleStore
 	f.srv = srv
 	f.handler = srv.Handler()
 	f.authSvc = authSvc

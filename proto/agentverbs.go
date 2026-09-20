@@ -79,6 +79,21 @@ var verbMinAgentVersion = map[string]string{
 	// authoring as dev.163, the guessed next release run; dev.163 was cut
 	// before #317 merged and does not carry it.
 	BusPinVerb: "2026.09.4-dev.164",
+	// console.root_hash (geekdojo/geekdojo-brain#587): entered when the verb
+	// was authored, before its release existed, as the NEXT release run
+	// after v2026.09.4-dev.171 (the newest published control-plane release
+	// at the time). If a release was cut between this entry and the one
+	// that ships the verb, an agent at that in-between version is reported
+	// as "should answer and did not" rather than "predates the verb";
+	// confirm with `git tag --contains` once the release exists and correct
+	// the floor.
+	//
+	// This floor is load-bearing rather than cosmetic. A node whose agent
+	// predates the verb draws no responder, and the console root push has
+	// to tell that apart from a fault so it can say "update the node"
+	// instead of "the node did not answer" — and so it can FAIL that node
+	// rather than skip it (#558: never silently skip).
+	ConsoleRootHashVerb: "2026.09.4-dev.172",
 }
 
 // RestoreReplayMinAgentVersion is the first agent release whose

@@ -14,6 +14,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -61,7 +62,10 @@ type Server struct {
 	bmc           *bmc.Service
 	bmcSessions   *bmc.SessionManager
 	setup         *setup.Service
-	alerts        *alerts.Service
+	// console is the console root password store (#587). nil keeps its
+	// routes at 503.
+	console *console.Store
+	alerts  *alerts.Service
 	// backupStates is the per-app backup derivation the /api/apps rows carry
 	// as `backup` (design/storage.md §4.4, #298); nil omits the field.
 	backupStates *storage.BackupStates
@@ -450,6 +454,14 @@ func (s *Server) routes() *routeMux {
 	// material; authed because it's operator configuration).
 	mux.HandleFunc("GET /api/enroll/operator-key", reqd(s.handleGetOperatorKey))
 	mux.HandleFunc("PUT /api/enroll/operator-key", reqd(s.handlePutOperatorKey))
+
+	// Console root password (#587): chosen in the first-run wizard, changed
+	// from Settings, applied to every node by console.root_push. Authed —
+	// the wizard registers the operator's passkey before this step. The GET
+	// never returns the hash; see console_handlers.go.
+	mux.HandleFunc("GET /api/console/root-password", reqd(s.handleGetConsoleRootPassword))
+	mux.HandleFunc("PUT /api/console/root-password", reqd(s.handlePutConsoleRootPassword))
+	mux.HandleFunc("POST /api/console/root-password/push", reqd(s.handlePushConsoleRootPassword))
 
 	mux.HandleFunc("GET /api/bmc", reqd(s.handleListBMCStates))
 	mux.HandleFunc("GET /api/bmc/backends", reqd(s.handleBMCBackends))

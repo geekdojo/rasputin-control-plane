@@ -3,6 +3,7 @@ package tailscale
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -58,6 +59,16 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, onEnrolled 
 	subs = append(subs, statusSub)
 	log.Printf("rasputin-agent: subscribed to %s", proto.MeshStatusSubject(nodeID))
 
+	// Flush before returning: nats.go buffers the SUB protocol, so without
+	// this a caller that subscribes and immediately requests can have its
+	// request reach the server first and time out waiting for a responder
+	// that is not registered yet. Same test race geekdojo/rasputin-control-plane#365
+	// fixed in agent/internal/bus; it lives here rather than in each test so
+	// every caller gets it. Flush is a PING/PONG, so it returns only once the
+	// server has processed everything written before it.
+	if err := nc.Flush(); err != nil {
+		return subs, fmt.Errorf("flush subscriptions for %s: %w", nodeID, err)
+	}
 	return subs, nil
 }
 
