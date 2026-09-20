@@ -1,39 +1,22 @@
-// Node-enrollment helpers for the "Add node" flow. The seed renderer mirrors
-// buildrootSeed() in cmd/rasputin-provision so a UI-minted node and a
-// CLI-provisioned node consume byte-compatible enrollment files — the firstboot
-// oneshot parses the same KEY=VALUE lines either way.
-
-// The DEV-BOX control-plane name, and the pre-ADR-0003 default. Agents resolve
-// it via mDNS, so the seed never carries an IP (avoids the F-LOG-1 churn — see
-// token-provisioning-pipeline.md).
+// Node-enrollment helpers for the "Add node" flow.
 //
-// ⚠️ This is a FALLBACK, not the answer. Per ADR-0003 a cluster is reached at
-// `<cluster-id>.local`, and only the api knows the id — it arrives as
-// `SetupState.clusterHostname`, empty on a dev box. This constant was the
-// hardcoded default of both seed renderers and of flashCommand, so on a cluster
-// named anything but `rasputin` the wizard minted seeds pointing at a host that
-// does not exist: the node booted, the agent's mdnsDialer resolved nothing, and
-// it never joined — with nothing in the UI, the seed, or the node's logs
-// naming the cause.
+// This file no longer RENDERS a seed. The api does, with the one renderer
+// (proto.RenderSeed) that rasputin-provision also uses, and returns the
+// finished file on the mint response. What is left here is what belongs in the
+// browser: the node-name rule the wizard checks before submitting, the
+// operator-SSH-key mirror, the image the operator should flash, and the
+// one-liner they paste on their own laptop.
+
+// The DEV-BOX control-plane name, and the pre-ADR-0003 default. Per ADR-0003 a
+// cluster is reached at `<cluster-id>.local`, and only the api knows the id —
+// it arrives as `SetupState.clusterHostname`, empty on a dev box.
 //
-// The renderers below therefore take the host as a REQUIRED argument. There is
-// no UI test harness in this repo (frontend CI is typecheck + build), so a
-// required parameter is the guard that actually runs: a caller that forgets
-// fails `npm run type-check` instead of failing on someone's bench.
-export const DEFAULT_NATS_URL = 'nats://rasputin.local:4222';
-
-// natsURLFor / cpBaseFor turn SetupState.clusterHostname into the two strings
-// enrollment needs, falling back to the dev-box name when it is empty.
-export function natsURLFor(clusterHostname: string): string {
-  const h = clusterHostname.trim();
-  return h ? `nats://${h}:4222` : DEFAULT_NATS_URL;
-}
-
-// clusterIdOr mirrors firstboot's and apply-seed's own fallback (ADR-0003), so
-// a dev-box seed is byte-identical to what a default cluster produces.
-export function clusterIdOr(clusterId: string): string {
-  return clusterId.trim() || 'rasputin';
-}
+// The seed's own bus URL and cluster-id fallbacks moved to the api with the
+// renderer (proto.NATSURLFor, proto.DefaultClusterID): the values a NODE is
+// told are decided in one place now. What is left here is the address of the
+// control plane as the OPERATOR'S LAPTOP reaches it, for the flash one-liner's
+// curl — a different question with a different answer, which is why it stays
+// in the browser.
 
 export function cpBaseFor(clusterHostname: string): string {
   const h = clusterHostname.trim();
@@ -88,92 +71,62 @@ export function skuForArch(arch: NodeArch): string {
   return arch === 'arm64' ? 'rpi' : 'n100';
 }
 
-// validateSSHKey normalizes + validates an operator-pasted OpenSSH public key
-// destined for the seed's RASPUTIN_SSH_AUTHORIZED_KEY line. Empty is valid —
-// images bake no SSH key at all, so "no key" simply means a console/UI-only
-// node. Mirrors resolveSSHKey in cmd/rasputin-provision, same rules for the
-// same reason: the line is rendered double-quoted and sourced by sh on the
-// node, so a quote/dollar/backslash/backtick would break every seed field.
+// validateSSHKey normalizes + validates an operator-pasted OpenSSH public key.
+// Empty is valid — images bake no SSH key at all, so "no key" simply means a
+// console/UI-only node.
+//
+// THE RULE IS setup.ValidOperatorSSHKey, in Go (methodology §5.1,
+// geekdojo/geekdojo-brain#545). This is a mirror, because a browser cannot
+// call it, and a mirror nobody executes is exactly how the three copies that
+// preceded it drifted — this one, rasputin-provision's resolveSSHKey and the
+// api's, each carrying a comment asking the next reader to keep all three in
+// sync. rasputin-provision and the api now call the Go rule directly, and this
+// mirror is pinned to it by operator-ssh-key-vectors.json, which both test
+// suites execute. Change the rule and this regexp together, or a build fails.
+//
+// The character exclusions are not redundant with the pattern: the comment
+// field is free text, and the rendered seed line is read by a shell.
+const SSH_KEY_RE =
+  /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9-]+(@[a-z0-9.-]+)?) [A-Za-z0-9+/=]+( \S.*)?$/;
+
+// validOperatorSSHKey mirrors setup.ValidOperatorSSHKey exactly: one trimmed
+// line, no character a shell would act on, and a recognised algorithm.
+export function validOperatorSSHKey(key: string): boolean {
+  if (/["$\\`\n\r]/.test(key)) return false;
+  return SSH_KEY_RE.test(key);
+}
+
 export function validateSSHKey(input: string): { key: string; error?: string } {
   const key = input.trim();
   if (key === '') return { key: '' };
   if (/[\n\r]/.test(key)) return { key, error: 'paste a single key line (one key only)' };
-  if (/["$\\`]/.test(key)) return { key, error: 'the key must not contain ", $, \\ or ` characters' };
-  const fields = key.split(/\s+/);
-  if (fields.length < 2 || !/^(ssh-|ecdsa-|sk-)/.test(fields[0])) {
-    return { key, error: 'that doesn’t look like an SSH public key — expected something like "ssh-ed25519 AAAA… you@laptop"' };
+  if (/["$\\`]/.test(key)) {
+    return { key, error: 'the key must not contain ", $, \\ or ` characters' };
+  }
+  if (!validOperatorSSHKey(key)) {
+    return {
+      key,
+      error:
+        'that doesn’t look like an SSH public key — expected something like "ssh-ed25519 AAAA… you@laptop"',
+    };
   }
   return { key };
 }
 
-// sshKeyLine renders the optional seed line ('' when no key). Double-quoted:
-// the seed is sourced by sh and the key value contains spaces.
-function sshKeyLine(sshKey: string): string {
-  return sshKey ? `RASPUTIN_SSH_AUTHORIZED_KEY="${sshKey}"\n` : '';
-}
-
-// busPinLine renders the bus pin line ('' when there is none) — the SHA-256 of
-// the controlplane's bus key, which the node verifies the bus server's TLS
-// against (geekdojo-brain#448, docs/bus-tls-contract.md). Unquoted, like the
-// other single-token fields: "sha256/" + base64 has nothing sh interprets.
-// Emitted after the join token, in the same position buildrootSeed and
-// openwrtSeed use, so the renderers stay byte-compatible.
-function busPinLine(busPin: string): string {
-  return busPin ? `RASPUTIN_BUS_PIN=${busPin}\n` : '';
-}
-
-// renderNodeSeed builds the rasputin-seed.env the new node's firstboot reads.
-// Mirrors buildrootSeed (role / node-id / NATS url / join token / bus pin /
-// ssh key). busPin is REQUIRED for the same reason natsUrl is: a caller that
-// forgets it fails type-check instead of minting a node that never gets TLS.
-export function renderNodeSeed(
-  role: AddableRole,
-  nodeId: string,
-  token: string,
-  sshKey: string,
-  natsUrl: string,
-  clusterId: string,
-  busPin: string,
-): string {
-  return (
-    `# rasputin-seed.env — node enrollment file (generated by the Rasputin control plane)\n` +
-    `RASPUTIN_NODE_ROLE=${role}\n` +
-    `RASPUTIN_NODE_ID=${nodeId}\n` +
-    `RASPUTIN_CLUSTER_ID=${clusterIdOr(clusterId)}\n` +
-    `RASPUTIN_NATS_URL=${natsUrl}\n` +
-    `RASPUTIN_CP_JOIN_TOKEN=${token}\n` +
-    busPinLine(busPin) +
-    sshKeyLine(sshKey)
-  );
-}
-
-// renderFirewallSeed builds the firewall's seed.env — the SAME four keys as a
-// node seed (role / node-id / NATS url / join token, always with a token). The
-// firewall can consume it two ways: dropped on the boot-partition FAT
-// (RASPUTIN-FW) of a blank board and read at first boot (the flash.sh path), or
-// pushed to /etc/rasputin/seed.env over SSH and applied by apply-seed on an
-// already-running unit. Mirrors openwrtSeed() in cmd/rasputin-provision so a
-// UI-enrolled firewall and a CLI-provisioned one are byte-compatible. See
-// firewall-image.md + token-provisioning-pipeline.md.
-export function renderFirewallSeed(
-  nodeId: string,
-  token: string,
-  sshKey: string,
-  natsUrl: string,
-  clusterId: string,
-  busPin: string,
-): string {
-  return (
-    `# seed.env (firewall) — enrollment file (generated by the Rasputin control plane)\n` +
-    `RASPUTIN_NODE_ROLE=firewall\n` +
-    `RASPUTIN_NODE_ID=${nodeId}\n` +
-    `RASPUTIN_CLUSTER_ID=${clusterIdOr(clusterId)}\n` +
-    `RASPUTIN_NATS_URL=${natsUrl}\n` +
-    `RASPUTIN_CP_JOIN_TOKEN=${token}\n` +
-    busPinLine(busPin) +
-    sshKeyLine(sshKey)
-  );
-}
+// The seed renderers that used to live here are gone.
+//
+// There were four: these two and buildrootSeed / openwrtSeed in
+// rasputin-provision, all writing the same keys in the same order, each with
+// its own idea of which values needed quoting. The duplication cost real
+// enrollments twice on the same function — RASPUTIN_NATS_URL hardcoded to
+// rasputin.local (control-plane #70), and RASPUTIN_CLUSTER_ID omitted
+// entirely, which pinned a UI-enrolled firewall to a cluster name nothing on
+// the LAN answered to, silently.
+//
+// There is now one renderer, proto.RenderSeed. The api runs it and returns the
+// finished file on the mint response (MintedBusToken.seed); the wizard shows
+// and downloads that verbatim. Methodology §5.6 and §7 4.2,
+// geekdojo/geekdojo-brain#540.
 
 // OS_RELEASES_URL is the OS source repo whose public Releases hold the node OS
 // images, read directly since the repos went public (ADR-0002). The add-node

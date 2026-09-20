@@ -9,7 +9,10 @@ import (
 	"log"
 	"net/http"
 
+	"strings"
+
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -39,6 +42,12 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		// Add-node wizard has always sent the role as the label; one of the
 		// two must name a role (busauth.ResolveRole).
 		Role proto.NodeRole `json:"role"`
+		// SSHAuthorizedKey is the operator public key to put in this node's
+		// seed. Optional: omitted means the saved operator key (the wizard's
+		// prefill), and an explicit empty string means no key at all — a
+		// console/UI-only node, which is a valid choice. Public-key material
+		// only; nothing here is a secret.
+		SSHAuthorizedKey *string `json:"sshAuthorizedKey,omitempty"`
 	}
 	// Body is optional; ignore decode errors on an empty body.
 	_ = json.NewDecoder(r.Body).Decode(&body)
@@ -109,10 +118,40 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The SEED is rendered here, by the one renderer (proto.RenderSeed,
+	// methodology §5.6 and §7 4.2). The UI used to render its own copy from
+	// this response, with its own idea of which values needed quoting and its
+	// own default cluster name; a UI-minted seed and a CLI-provisioned one
+	// could differ, and did (control-plane #70, and a missing cluster id that
+	// silently bound a UI-enrolled firewall to the wrong cluster).
+	sshKey, err := s.seedSSHKey(r.Context(), body.SSHAuthorizedKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	seed, err := proto.RenderSeed(proto.Seed{
+		Role:      role,
+		NodeID:    body.NodeID,
+		ClusterID: s.setup.ClusterID(),
+		NATSURL:   proto.NATSURLFor(s.setup.ClusterHostname()),
+		JoinToken: plaintext,
+		// The pin comes from the same response as the token, so a seed can
+		// never pair a token with a pin read at another moment (#448).
+		BusPin:           s.busPin(),
+		SSHAuthorizedKey: sshKey,
+		Origin:           "the Rasputin control plane",
+	})
+	if err != nil {
+		// The token is already minted, so this is not a 4xx the caller can
+		// retry away: it is a control plane that cannot describe its own
+		// cluster. Say so rather than returning a response with no seed and
+		// letting the wizard show a blank box.
+		writeError(w, http.StatusInternalServerError, "the join token was minted but its seed could not be rendered: "+err.Error())
+		return
+	}
 	// token is returned ONCE — the operator seeds it into the node and it's
-	// unrecoverable afterward. busPin rides along so the seed the UI renders
-	// from this response carries RASPUTIN_BUS_PIN (#448) — the same response,
-	// so a seed can never pair a token with a pin fetched at another moment.
+	// unrecoverable afterward. busPin rides along for callers that predate
+	// the rendered seed and still assemble their own.
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"id":     id,
 		"label":  body.Label,
@@ -120,7 +159,37 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		"role":   string(role),
 		"token":  plaintext,
 		"busPin": s.busPin(),
+		"seed":   seed,
 	})
+}
+
+// seedSSHKey resolves the operator public key a minted seed carries.
+//
+// nil (the field absent) means "whatever is saved" — the wizard's prefill, and
+// what every caller that does not care should send. A non-nil value is the
+// operator's choice for THIS node, including an explicit empty string, which
+// is a console/UI-only node and a valid answer.
+//
+// A non-empty value is checked by setup.ValidOperatorSSHKey — the one
+// operator-SSH-key rule (geekdojo/geekdojo-brain#545). A key the wizard would
+// accept and this endpoint would refuse, or the reverse, is a cluster
+// provisioned two ways from one keyboard.
+func (s *Server) seedSSHKey(ctx context.Context, requested *string) (string, error) {
+	if requested == nil {
+		ok, err := s.setup.OperatorSSHKey(ctx)
+		if err != nil {
+			return "", fmt.Errorf("read the saved operator SSH key: %w", err)
+		}
+		return ok.Key, nil
+	}
+	key := strings.TrimSpace(*requested)
+	if key == "" {
+		return "", nil
+	}
+	if !setup.ValidOperatorSSHKey(key) {
+		return "", fmt.Errorf("sshAuthorizedKey is %w", setup.ErrInvalidSSHKey)
+	}
+	return key, nil
 }
 
 // mintGrowsCluster reports whether minting a token bound to nodeID would

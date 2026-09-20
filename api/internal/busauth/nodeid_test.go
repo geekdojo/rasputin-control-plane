@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 func TestValidNodeID(t *testing.T) {
@@ -64,5 +66,26 @@ func TestInvalidNodeIDErrorsAreTyped(t *testing.T) {
 	}
 	if _, _, err := s.MintBound(ctx, "t", "", "compute"); !errors.Is(err, ErrUnboundToken) {
 		t.Errorf("MintBound with no node id error = %v, want ErrUnboundToken", err)
+	}
+}
+
+// proto.ValidSeedNodeID is the same rule as this one.
+//
+// The seed renderer lives in proto, which has no dependencies by design, so it
+// carries its own copy of the node-id rule rather than importing tileschema.
+// A seed that named an id the bus refuses would produce a node that boots and
+// never joins, so the two are pinned equal here — the api module is the one
+// place that can see both.
+func TestProtoSeedNodeIDMatchesValidNodeID(t *testing.T) {
+	cases := []string{
+		"", "a", "0", "compute1", "home1-compute1", "a-b-c", "node-9bbaa24a",
+		strings.Repeat("a", 63), strings.Repeat("a", 64),
+		"-a", "a-", "-", "A", "Compute1", "a_b", "a.b", "a b", "a--b",
+		"1compute", "compute-1", "ünïcode", "a\tb", "a\n",
+	}
+	for _, id := range cases {
+		if got, want := proto.ValidSeedNodeID(id), ValidNodeID(id); got != want {
+			t.Errorf("%q: proto.ValidSeedNodeID = %v, busauth.ValidNodeID = %v", id, got, want)
+		}
 	}
 }

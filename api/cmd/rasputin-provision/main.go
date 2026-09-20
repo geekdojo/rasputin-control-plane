@@ -49,6 +49,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -173,6 +174,14 @@ func run() error {
 
 // resolveSSHKey merges the two --ssh-authorized-key* flags into one validated
 // key line ("" = no key, a valid choice: console/UI-only cluster).
+//
+// The rule itself is setup.ValidOperatorSSHKey — the ONE operator-SSH-key
+// validator (methodology §5.1, geekdojo/geekdojo-brain#545). This function
+// used to carry its own copy, the api carried a second, and the UI a third,
+// each with a comment asking the next reader to keep all three in sync. A key
+// this tool accepts and the wizard refuses (or the reverse) is a cluster
+// provisioned two ways from one keyboard, so there is now one rule and one set
+// of vectors it is tested against.
 func resolveSSHKey(literal, file string) (string, error) {
 	literal = strings.TrimSpace(literal)
 	if literal != "" && file != "" {
@@ -191,14 +200,8 @@ func resolveSSHKey(literal, file string) (string, error) {
 	if strings.ContainsAny(literal, "\n\r") {
 		return "", fmt.Errorf("ssh authorized key must be a single key line (got multiple lines)")
 	}
-	// The seed renders it double-quoted (the seed file is sourced by sh), so a
-	// quote in the value would break every node's provisioning.
-	if strings.ContainsAny(literal, `"$\`+"`") {
-		return "", fmt.Errorf(`ssh authorized key must not contain ", $, \ or backtick (the seed is sourced by sh)`)
-	}
-	f := strings.Fields(literal)
-	if len(f) < 2 || !(strings.HasPrefix(f[0], "ssh-") || strings.HasPrefix(f[0], "ecdsa-") || strings.HasPrefix(f[0], "sk-")) {
-		return "", fmt.Errorf("value doesn't look like an OpenSSH public key (want e.g. \"ssh-ed25519 AAAA... comment\")")
+	if !setup.ValidOperatorSSHKey(literal) {
+		return "", fmt.Errorf("value doesn't look like an OpenSSH public key (want e.g. \"ssh-ed25519 AAAA... comment\"): %w", setup.ErrInvalidSSHKey)
 	}
 	return literal, nil
 }
@@ -338,13 +341,24 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 			// and is the recipient of the preseed (everyone else's hashes). A
 			// matched set ships enforced — carried in the controlplane seed.
 			mn.SeedFile = seedFileName(n)
-			seed := buildrootSeed(n.Role, n.ID, clusterID, loopbackNATSURL, "", sshKey, busPin)
-			if enforce {
-				seed += "RASPUTIN_BUS_AUTH=enforce\n"
+			cpSeed := proto.Seed{
+				Role:             proto.NodeRole(n.Role),
+				NodeID:           n.ID,
+				ClusterID:        clusterID,
+				NATSURL:          loopbackNATSURL,
+				BusPin:           busPin,
+				SSHAuthorizedKey: sshKey,
+				// The bus PRIVATE key, in the controlplane's seed only —
+				// firstboot moves it off the card.
+				BusKey: busKeyLine,
 			}
-			// The bus private key, in the controlplane's seed only. One line
-			// of base64, unquoted: nothing in its alphabet means anything to sh.
-			seed += "RASPUTIN_BUS_KEY=" + busKeyLine + "\n"
+			if enforce {
+				cpSeed.BusAuth = "enforce"
+			}
+			seed, err := renderSeed(cpSeed)
+			if err != nil {
+				return manifest{}, fmt.Errorf("render the controlplane seed: %w", err)
+			}
 			if err := writeSecret(filepath.Join(dir, mn.SeedFile), seed); err != nil {
 				return manifest{}, err
 			}
@@ -361,11 +375,17 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 		mn.TokenHash = hash
 		mn.Bound = true
 
-		var seed string
-		if n.Role == "firewall" {
-			seed = openwrtSeed(n.ID, clusterID, natsURL, plaintext, sshKey, busPin)
-		} else {
-			seed = buildrootSeed(n.Role, n.ID, clusterID, natsURL, plaintext, sshKey, busPin)
+		seed, err := renderSeed(proto.Seed{
+			Role:             proto.NodeRole(n.Role),
+			NodeID:           n.ID,
+			ClusterID:        clusterID,
+			NATSURL:          natsURL,
+			JoinToken:        plaintext,
+			BusPin:           busPin,
+			SSHAuthorizedKey: sshKey,
+		})
+		if err != nil {
+			return manifest{}, fmt.Errorf("render the seed for %s: %w", n.ID, err)
 		}
 		if err := writeSecret(filepath.Join(dir, mn.SeedFile), seed); err != nil {
 			return manifest{}, err
@@ -403,52 +423,17 @@ func seedFileName(n nodeSpec) string {
 	return "seed-" + n.ID + ".env" // Buildroot FAT rasputin-seed.env
 }
 
-// buildrootSeed renders the FAT rasputin-seed.env consumed by the Buildroot
-// firstboot oneshot (provisioning.md §1). An empty token (controlplane) omits
-// the join-token line; an empty sshKey omits the key line (console/UI-only).
-// The key line is double-quoted — the seed is sourced by sh and the value
-// contains spaces; an unquoted key would break every field's sourcing. An
-// empty busPin omits the pin line (the node dials the bus in plaintext until
-// the controlplane delivers one).
-func buildrootSeed(role, id, clusterID, natsURL, token, sshKey, busPin string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# rasputin-seed.env — generated by rasputin-provision\n")
-	fmt.Fprintf(&b, "RASPUTIN_NODE_ROLE=%s\n", role)
-	fmt.Fprintf(&b, "RASPUTIN_NODE_ID=%s\n", id)
-	fmt.Fprintf(&b, "RASPUTIN_CLUSTER_ID=%s\n", clusterID)
-	fmt.Fprintf(&b, "RASPUTIN_NATS_URL=%s\n", natsURL)
-	if token != "" {
-		fmt.Fprintf(&b, "RASPUTIN_CP_JOIN_TOKEN=%s\n", token)
-	}
-	if busPin != "" {
-		fmt.Fprintf(&b, "RASPUTIN_BUS_PIN=%s\n", busPin)
-	}
-	if sshKey != "" {
-		fmt.Fprintf(&b, "RASPUTIN_SSH_AUTHORIZED_KEY=%q\n", sshKey)
-	}
-	return b.String()
-}
-
-// openwrtSeed renders the firewall image's /etc/rasputin/seed.env. apply-seed
-// requires RASPUTIN_NODE_ID and never makes one up (rasputin-openwrt-firewall#51),
-// and the bus accepts the token only under the id it is bound to, so the id
-// written here is the one the token was minted for. sshKey and busPin as in
-// buildrootSeed.
-func openwrtSeed(id, clusterID, natsURL, token, sshKey, busPin string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# seed.env (firewall) — generated by rasputin-provision\n")
-	fmt.Fprintf(&b, "RASPUTIN_NODE_ROLE=firewall\n")
-	fmt.Fprintf(&b, "RASPUTIN_NODE_ID=%s\n", id)
-	fmt.Fprintf(&b, "RASPUTIN_CLUSTER_ID=%s\n", clusterID)
-	fmt.Fprintf(&b, "RASPUTIN_NATS_URL=%s\n", natsURL)
-	fmt.Fprintf(&b, "RASPUTIN_CP_JOIN_TOKEN=%s\n", token)
-	if busPin != "" {
-		fmt.Fprintf(&b, "RASPUTIN_BUS_PIN=%s\n", busPin)
-	}
-	if sshKey != "" {
-		fmt.Fprintf(&b, "RASPUTIN_SSH_AUTHORIZED_KEY=%q\n", sshKey)
-	}
-	return b.String()
+// renderSeed is the one renderer (proto.RenderSeed, methodology §5.6 and §7
+// 4.2). buildrootSeed and openwrtSeed used to live here, byte-compatible with
+// two more copies in the UI; there is now one, in proto, which the api's
+// Add-node mint calls too. The role picks the file name and nothing else — the
+// two images read the same keys.
+//
+// An error here fails provisioning rather than writing a seed a node cannot
+// read: a bad seed on a FAT volume is discovered on a headless box.
+func renderSeed(s proto.Seed) (string, error) {
+	s.Origin = "rasputin-provision"
+	return proto.RenderSeed(s)
 }
 
 // writeSecret writes a seed: it carries a join token or the bus private key,

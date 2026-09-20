@@ -221,7 +221,6 @@ export default function NodesPage() {
           clusterPrefix={clusterPrefix}
           clusterOsVersion={clusterOsVersion}
           clusterHostname={clusterHostname}
-          clusterId={clusterId}
           taken={takenIds}
           onClose={() => setWizardOpen(false)}
           onMinted={({ id, tokenId, role }) => {

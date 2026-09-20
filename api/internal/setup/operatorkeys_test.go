@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -234,4 +235,53 @@ func TestSeedOperatorSSHKeyFromFile(t *testing.T) {
 			t.Errorf("want still-unset, got %+v", k)
 		}
 	})
+}
+
+// The operator-SSH-key rule, executed against the vectors the TypeScript
+// mirror is executed against.
+//
+// ValidOperatorSSHKey is THE rule (methodology §5.1,
+// geekdojo/geekdojo-brain#545). rasputin-provision and the bus-token mint call
+// it directly; ui/lib/enroll.ts carries a mirror, because a browser cannot
+// call Go. Three copies of this rule existed before, each with a comment
+// asking the next reader to keep them in sync, and they drifted — the UI
+// accepted any algorithm beginning "ssh-", which this rule refuses.
+//
+// ui/lib/operator-ssh-key-vectors.json is the contract. Both suites run the
+// same file, so a change on one side without the other fails a build.
+func TestValidOperatorSSHKey_SharedVectors(t *testing.T) {
+	const vectorsPath = "../../../ui/lib/operator-ssh-key-vectors.json"
+	b, err := os.ReadFile(vectorsPath)
+	if err != nil {
+		t.Fatalf("read the shared vectors (%s): %v", vectorsPath, err)
+	}
+	var vectors struct {
+		Valid []struct {
+			Why string `json:"why"`
+			Key string `json:"key"`
+		} `json:"valid"`
+		Invalid []struct {
+			Why string `json:"why"`
+			Key string `json:"key"`
+		} `json:"invalid"`
+	}
+	if err := json.Unmarshal(b, &vectors); err != nil {
+		t.Fatalf("parse %s: %v", vectorsPath, err)
+	}
+	// A vectors file that has quietly emptied would make both suites pass
+	// while testing nothing, which is the failure this whole arrangement is
+	// meant to prevent.
+	if len(vectors.Valid) < 5 || len(vectors.Invalid) < 10 {
+		t.Fatalf("the shared vectors look truncated: %d valid, %d invalid", len(vectors.Valid), len(vectors.Invalid))
+	}
+	for _, v := range vectors.Valid {
+		if !ValidOperatorSSHKey(v.Key) {
+			t.Errorf("refused a valid key (%s): %q", v.Why, v.Key)
+		}
+	}
+	for _, v := range vectors.Invalid {
+		if ValidOperatorSSHKey(v.Key) {
+			t.Errorf("accepted an invalid key (%s): %q", v.Why, v.Key)
+		}
+	}
 }

@@ -3,40 +3,58 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // testPin is a well-formed pin (sha256/ + base64 of 32 zero bytes).
 const testPin = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
-// The UI mints seeds too (ui/lib/enroll.ts), and enroll.ts claims to be
-// byte-compatible with these renderers. Nothing enforces that across the
-// Go/TS boundary, and the gap has now bitten twice on the same function:
-// RASPUTIN_NATS_URL was hardcoded to rasputin.local (control-plane #70) and
-// RASPUTIN_CLUSTER_ID was omitted entirely — which silently pinned a
-// UI-enrolled firewall to the wrong cluster name, since apply-seed defaults
-// the key to "rasputin" when the seed omits it.
+// This file used to guard a drift class that no longer exists.
 //
-// This test pins the canonical field set so a future field added here fails
-// loudly and sends the author looking for the other renderer.
-func TestSeedRenderers_CarryTheCanonicalFieldSet(t *testing.T) {
+// There were four seed renderers — buildrootSeed and openwrtSeed here,
+// renderNodeSeed and renderFirewallSeed in the UI — and the tests below
+// checked that the two in this package carried the same field set as the two
+// in TypeScript, because nothing across that boundary could. The gap bit
+// twice on the same function: RASPUTIN_NATS_URL hardcoded to rasputin.local
+// (control-plane #70), and RASPUTIN_CLUSTER_ID omitted entirely, which pinned
+// a UI-enrolled firewall to the wrong cluster name silently, since apply-seed
+// defaults that key to "rasputin".
+//
+// There is now one renderer, proto.RenderSeed, and the UI renders nothing —
+// it shows the seed the api returned from the same function. So these tests
+// check what is still this tool's own: that it passes the right fields in,
+// that a controlplane seed and a node seed differ in the ways they should,
+// and that a bad value fails provisioning here rather than on a headless box.
+// The renderer's own contract (quoting, ordering, refusals) is tested in
+// proto.
+
+func TestRenderSeed_CarriesTheCanonicalFieldSet(t *testing.T) {
 	want := []string{
-		"RASPUTIN_NODE_ROLE=",
-		"RASPUTIN_NODE_ID=",
-		"RASPUTIN_CLUSTER_ID=",
-		"RASPUTIN_NATS_URL=",
-		"RASPUTIN_CP_JOIN_TOKEN=",
-		"RASPUTIN_SSH_AUTHORIZED_KEY=",
-		"RASPUTIN_BUS_PIN=",
+		proto.SeedKeyRole,
+		proto.SeedKeyNodeID,
+		proto.SeedKeyClusterID,
+		proto.SeedKeyNATSURL,
+		proto.SeedKeyJoinToken,
+		proto.SeedKeySSHKey,
+		proto.SeedKeyBusPin,
 	}
-	seeds := map[string]string{
-		"buildrootSeed": buildrootSeed("compute", "n1", "home1", "nats://home1.local:4222", "tok", "ssh-ed25519 AAAA me@laptop", testPin),
-		"openwrtSeed":   openwrtSeed("fw1", "home1", "nats://home1.local:4222", "tok", "ssh-ed25519 AAAA me@laptop", testPin),
-	}
-	for name, seed := range seeds {
+	for _, role := range []proto.NodeRole{proto.RoleCompute, proto.RoleFirewall} {
+		seed, err := renderSeed(proto.Seed{
+			Role: role, NodeID: "n1", ClusterID: "home1",
+			NATSURL: "nats://home1.local:4222", JoinToken: "tok",
+			SSHAuthorizedKey: "ssh-ed25519 AAAA me@laptop", BusPin: testPin,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, key := range want {
-			if !strings.Contains(seed, key) {
-				t.Errorf("%s: missing %s\nIf you added or removed a seed field, update ui/lib/enroll.ts to match.\ngot:\n%s", name, key, seed)
+			if !strings.Contains(seed, key+"=") {
+				t.Errorf("%s: missing %s\ngot:\n%s", role, key, seed)
 			}
+		}
+		if !strings.Contains(seed, "rasputin-provision") {
+			t.Errorf("%s: the seed does not say what generated it:\n%s", role, seed)
 		}
 	}
 }
@@ -44,43 +62,69 @@ func TestSeedRenderers_CarryTheCanonicalFieldSet(t *testing.T) {
 // A seed whose cluster id is wrong fails SILENTLY: firstboot and apply-seed
 // both default to "rasputin", so the node comes up bound to a cluster name
 // nothing on this LAN answers to, and never reaches the bus or Headscale.
-func TestSeedRenderers_ClusterIDIsTheGivenOne(t *testing.T) {
-	for name, seed := range map[string]string{
-		"buildrootSeed": buildrootSeed("compute", "n1", "home1", "nats://home1.local:4222", "tok", "", ""),
-		"openwrtSeed":   openwrtSeed("fw1", "home1", "nats://home1.local:4222", "tok", "", ""),
-	} {
-		if !strings.Contains(seed, "RASPUTIN_CLUSTER_ID=home1\n") {
-			t.Errorf("%s: cluster id is not the one passed in:\n%s", name, seed)
+func TestRenderSeed_ClusterIDIsTheGivenOne(t *testing.T) {
+	for _, role := range []proto.NodeRole{proto.RoleCompute, proto.RoleFirewall} {
+		seed, err := renderSeed(proto.Seed{
+			Role: role, NodeID: "n1", ClusterID: "home1",
+			NATSURL: "nats://home1.local:4222", JoinToken: "tok",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(seed, proto.SeedKeyClusterID+"='home1'\n") {
+			t.Errorf("%s: cluster id is not the one passed in:\n%s", role, seed)
 		}
 	}
 }
 
-// The pin line sits right after the join token in both renderers, and the UI
-// renderers (ui/lib/enroll.ts, pinned by ui/lib/enroll.test.ts with the same
-// inputs) emit the same field lines below their own comment header.
-func TestSeedRenderers_BusPinLinePosition(t *testing.T) {
-	got := buildrootSeed("compute", "home1-n1", "home1", "nats://home1.local:4222", "tok", "ssh-ed25519 AAAA me@laptop", testPin)
-	want := "RASPUTIN_NODE_ROLE=compute\n" +
-		"RASPUTIN_NODE_ID=home1-n1\n" +
-		"RASPUTIN_CLUSTER_ID=home1\n" +
-		"RASPUTIN_NATS_URL=nats://home1.local:4222\n" +
-		"RASPUTIN_CP_JOIN_TOKEN=tok\n" +
-		"RASPUTIN_BUS_PIN=" + testPin + "\n" +
-		"RASPUTIN_SSH_AUTHORIZED_KEY=\"ssh-ed25519 AAAA me@laptop\"\n"
-	_, body, _ := strings.Cut(got, "\n") // drop the renderer's own comment header
+// The field lines, in full, for the shape this tool writes most often.
+func TestRenderSeed_FieldLines(t *testing.T) {
+	got, err := renderSeed(proto.Seed{
+		Role: proto.RoleCompute, NodeID: "home1-n1", ClusterID: "home1",
+		NATSURL: "nats://home1.local:4222", JoinToken: "tok",
+		BusPin: testPin, SSHAuthorizedKey: "ssh-ed25519 AAAA me@laptop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "RASPUTIN_NODE_ROLE='compute'\n" +
+		"RASPUTIN_NODE_ID='home1-n1'\n" +
+		"RASPUTIN_CLUSTER_ID='home1'\n" +
+		"RASPUTIN_NATS_URL='nats://home1.local:4222'\n" +
+		"RASPUTIN_CP_JOIN_TOKEN='tok'\n" +
+		"RASPUTIN_BUS_PIN='" + testPin + "'\n" +
+		"RASPUTIN_SSH_AUTHORIZED_KEY='ssh-ed25519 AAAA me@laptop'\n"
+	_, body, _ := strings.Cut(got, "\n") // drop the comment header
 	if body != want {
-		t.Errorf("buildrootSeed field lines:\n%s\nwant:\n%s", body, want)
+		t.Errorf("field lines:\n%s\nwant:\n%s", body, want)
 	}
-	fw := openwrtSeed("home1-fw", "home1", "nats://home1.local:4222", "tok", "", testPin)
-	if !strings.HasSuffix(fw, "RASPUTIN_CP_JOIN_TOKEN=tok\nRASPUTIN_BUS_PIN="+testPin+"\n") {
-		t.Errorf("openwrtSeed: pin line not right after the join token:\n%s", fw)
-	}
-	for name, seed := range map[string]string{
-		"buildrootSeed": buildrootSeed("compute", "n1", "h", "nats://h.local:4222", "tok", "", ""),
-		"openwrtSeed":   openwrtSeed("fw1", "h", "nats://h.local:4222", "tok", "", ""),
-	} {
-		if strings.Contains(seed, "RASPUTIN_BUS_PIN") {
-			t.Errorf("%s: an empty pin still rendered a line:\n%s", name, seed)
+}
+
+// An empty pin renders no line at all: the node then dials plaintext until
+// the control plane delivers one, which is a different state from a pin set
+// to nothing.
+func TestRenderSeed_EmptyPinRendersNoLine(t *testing.T) {
+	for _, role := range []proto.NodeRole{proto.RoleCompute, proto.RoleFirewall} {
+		seed, err := renderSeed(proto.Seed{
+			Role: role, NodeID: "n1", ClusterID: "h",
+			NATSURL: "nats://h.local:4222", JoinToken: "tok",
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
+		if strings.Contains(seed, proto.SeedKeyBusPin) {
+			t.Errorf("%s: an empty pin still rendered a line:\n%s", role, seed)
+		}
+	}
+}
+
+// A value this tool cannot write is a provisioning failure, not a seed a node
+// discovers it cannot read.
+func TestRenderSeed_BadValueFailsProvisioning(t *testing.T) {
+	if _, err := renderSeed(proto.Seed{Role: proto.RoleCompute, NodeID: "Bad_Id"}); err == nil {
+		t.Error("an invalid node id rendered without error")
+	}
+	if _, err := renderSeed(proto.Seed{Role: "router", NodeID: "n1"}); err == nil {
+		t.Error("an unknown role rendered without error")
 	}
 }

@@ -181,6 +181,11 @@ export interface MintedBusToken {
   // moment. '' when the controlplane's bus key did not load (the seed then
   // omits the line and the node dials plaintext). geekdojo-brain#448.
   busPin: string;
+  // The rendered enrollment file, built by the api with the ONE seed renderer
+  // (proto.RenderSeed) that rasputin-provision also uses. The UI shows and
+  // downloads this verbatim; it no longer assembles a seed of its own, which
+  // is what let a UI-minted seed and a CLI-provisioned one differ.
+  seed: string;
 }
 
 // FlashableImage is the public, verifiable image descriptor returned by the
