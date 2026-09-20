@@ -89,33 +89,134 @@ type Settings interface {
 	Set(ctx context.Context, key, value string) error
 }
 
-// ResolveStartMode decides the mode for this process start: the env pin when
-// set, else the recorded rung, else offer. A malformed value is an error the
-// caller reports and survives — as offer, the rung that changes nothing.
-func ResolveStartMode(ctx context.Context, settings Settings) (mode Mode, pinned bool, err error) {
+// StartFacts are what ResolveStartMode reads when it has no recorded rung to
+// go on. Each is a fact about this controlplane right now, never a clock.
+type StartFacts struct {
+	// TLSAvailable is false when the bus key did not load. The bus can then
+	// serve plaintext and nothing else, so no rung above migrate is startable
+	// however clean the fleet is.
+	TLSAvailable bool
+	// Enrolled is how many nodes inventory holds, online or not.
+	Enrolled int
+	// AllReportedTLS is whether every one of them last registered over TLS
+	// with the pin verified. Vacuously true at Enrolled == 0.
+	AllReportedTLS bool
+}
+
+// FactsFromNodes reads StartFacts off an inventory listing.
+func FactsFromNodes(tlsAvailable bool, nodes []*proto.Node) StartFacts {
+	f := StartFacts{TLSAvailable: tlsAvailable, Enrolled: len(nodes), AllReportedTLS: true}
+	for _, n := range nodes {
+		if on, _ := BusTLSOf(n); !on {
+			f.AllReportedTLS = false
+		}
+	}
+	return f
+}
+
+// StartMode is the answer ResolveStartMode gives.
+type StartMode struct {
+	Mode Mode
+	// Pinned is true when EnvMode named the mode. The ladder then never moves.
+	Pinned bool
+	// Derived is true when nothing readable named a mode and this one came
+	// from the facts. The caller PERSISTS a derived mode: a fresh cluster that
+	// derived require must still read require back once its own agent has
+	// registered and Enrolled is no longer zero.
+	Derived bool
+	// Fault is the malformed or unreadable value that was ignored, in words,
+	// or "". It is logged AND raised as a standing alert, because the
+	// controlplane is not running the mode someone recorded for it.
+	Fault string
+	// Why is the reason for a derived mode, for the log.
+	Why string
+}
+
+// ResolveStartMode decides the mode for this process start.
+//
+//	EnvMode names a valid mode          → that mode, pinned.
+//	the bus.tls_mode setting parses     → that mode.
+//	neither is set, and NO node is
+//	enrolled (a fresh cluster)          → require, derived and persisted.
+//	neither is set, nodes are enrolled  → offer: the ladder's own gates decide
+//	                                      when this fleet may be handed a pin,
+//	                                      and the offer → migrate gate (the
+//	                                      build is committed) exists so an api
+//	                                      that rolls back cannot strand a node
+//	                                      it already pinned.
+//	either is set but MALFORMED or
+//	unreadable                          → require when every enrolled node has
+//	                                      reported bus TLS, else migrate.
+//	                                      Never offer, and always with a fault.
+//
+// The last row is the fail-closed change (geekdojo/geekdojo-brain#510, F08).
+// A value nobody can read used to resolve to offer — the rung that accepts
+// plaintext from anyone and hands out nothing — so a corrupted setting silently
+// undid a cluster that had already reached require. It now resolves UP: to the
+// strictest rung the fleet can actually live with.
+//
+// A fresh cluster starting in require is the other half. Every seed minted
+// from here carries the pin, a provisioned matched set carries it, and the
+// controlplane's own agent reads it from the file the api writes at start
+// (WriteAgentPinFile), so there is no node left to strand — and the first
+// plaintext client to reach :4222 on a cluster that never had one is not a
+// node of ours.
+func ResolveStartMode(ctx context.Context, settings Settings, facts StartFacts) StartMode {
 	if v := strings.TrimSpace(os.Getenv(EnvMode)); v != "" {
 		m, perr := ParseMode(v)
-		if perr != nil {
-			return ModeOffer, false, fmt.Errorf("%s: %w; running as %q", EnvMode, perr, ModeOffer)
+		if perr == nil {
+			return StartMode{Mode: m, Pinned: true}
 		}
-		return m, true, nil
+		return derive(facts, fmt.Sprintf("%s=%q on this controlplane is not a bus TLS mode (%v), so it was ignored", EnvMode, v, perr))
 	}
 	if settings == nil {
-		return ModeOffer, false, nil
+		return derive(facts, "")
 	}
 	v, gerr := settings.Get(ctx, SettingKey)
 	if gerr != nil {
-		return ModeOffer, false, fmt.Errorf("read %s: %w; running as %q", SettingKey, gerr, ModeOffer)
+		return derive(facts, fmt.Sprintf("the recorded bus TLS mode (setting %s) could not be read: %v", SettingKey, gerr))
 	}
 	if strings.TrimSpace(v) == "" {
-		return ModeOffer, false, nil
+		return derive(facts, "")
 	}
 	m, perr := ParseMode(v)
 	if perr != nil {
-		return ModeOffer, false, fmt.Errorf("setting %s: %w; running as %q", SettingKey, perr, ModeOffer)
+		return derive(facts, fmt.Sprintf("the recorded bus TLS mode (setting %s = %q) is not a bus TLS mode: %v", SettingKey, v, perr))
 	}
-	return m, false, nil
+	return StartMode{Mode: m}
 }
+
+// derive picks a mode from the facts. fault is "" when nothing was malformed —
+// the fresh-cluster and no-setting cases — and the reason otherwise.
+func derive(facts StartFacts, fault string) StartMode {
+	switch {
+	case !facts.TLSAvailable:
+		// Whatever the fleet looks like, this api serves no TLS: claiming
+		// require would record a rung the bus is not running, and the next
+		// start would come up refusing every connection on a bus that has no
+		// certificate to offer.
+		return StartMode{Mode: ModeMigrate, Derived: true, Fault: fault,
+			Why: "the bus key did not load, so this controlplane serves no TLS"}
+	case fault == "" && facts.Enrolled > 0:
+		// Nothing is wrong, nothing was recorded: an existing fleet that has
+		// not climbed the ladder yet. Leave the gates to do their job.
+		return StartMode{Mode: ModeOffer,
+			Why: fmt.Sprintf("no bus TLS mode is recorded yet and %d node(s) are enrolled", facts.Enrolled)}
+	case facts.Enrolled == 0:
+		return StartMode{Mode: ModeRequire, Derived: true, Fault: fault,
+			Why: "no node is enrolled on this controlplane, so no node can be stranded and every seed minted from here carries the pin"}
+	case facts.AllReportedTLS:
+		return StartMode{Mode: ModeRequire, Derived: true, Fault: fault,
+			Why: fmt.Sprintf("all %d enrolled node(s) last registered over bus TLS with the pin verified", facts.Enrolled)}
+	default:
+		return StartMode{Mode: ModeMigrate, Derived: true, Fault: fault,
+			Why: fmt.Sprintf("not all of the %d enrolled node(s) have reported bus TLS", facts.Enrolled)}
+	}
+}
+
+// StartFaultAlertID is the standing warning raised when the mode this
+// controlplane was told to run could not be read.
+const StartFaultAlertID = "bus-tls-mode-unreadable"
 
 // Config wires a Service.
 type Config struct {
@@ -125,6 +226,10 @@ type Config struct {
 	// StartModePinned whether it came from EnvMode (ResolveStartMode).
 	StartMode       Mode
 	StartModePinned bool
+	// StartFault is StartMode.Fault: the malformed or unreadable mode this
+	// start had to ignore, in words. It becomes a standing alert, because the
+	// controlplane is not running the mode someone recorded for it.
+	StartFault string
 	// Nodes lists inventory — every enrolled node, online or not.
 	Nodes func(ctx context.Context) ([]*proto.Node, error)
 	// Plaintext lists open plaintext client connections (bus.Server).
@@ -749,6 +854,23 @@ func (s *Service) Alert(now time.Time) *proto.Alert {
 	s.mu.Lock()
 	failed, plaintext, mode := s.switchFailed, s.plaintextAllowed, s.mode
 	s.mu.Unlock()
+	// First: the mode this controlplane was told to run could not be read, so
+	// it is running one derived from the facts instead. That is not a healthy
+	// steady state whichever rung it landed on — something wrote a value
+	// nobody can read, and it will be re-derived on every start until it is
+	// fixed.
+	if s.cfg.StartFault != "" {
+		return &proto.Alert{
+			ID:       StartFaultAlertID,
+			Severity: proto.AlertWarn,
+			Source:   proto.AlertSourceSecurity,
+			Title:    "Node bus TLS mode could not be read",
+			Detail: s.cfg.StartFault + ". The controlplane started its bus in " + string(s.cfg.StartMode) +
+				", the strictest mode every enrolled node can currently reach, and it re-derives that on every start. " +
+				"Set " + EnvMode + " on this controlplane, or let the api record a mode again, to clear this.",
+			Since: now,
+		}
+	}
 	if failed != "" && plaintext && mode == ModeMigrate {
 		return &proto.Alert{
 			ID:       SwitchFailedAlertID,

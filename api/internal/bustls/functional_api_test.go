@@ -43,6 +43,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -172,6 +173,19 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This test is the LADDER, so the api has to start at the bottom of it.
+	// A controlplane with nothing recorded and no node enrolled is a fresh
+	// cluster, which starts in require and has no ladder to climb
+	// (bustls.ResolveStartMode). Recording offer is what an existing cluster
+	// mid-migration looks like, and it is what this scenario needs.
+	settings, err := setup.OpenStore(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.Set(ctx, bustls.SettingKey, string(bustls.ModeOffer)); err != nil {
+		t.Fatal(err)
+	}
+	_ = settings.Close()
 	authStore, err := auth.OpenStore(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)

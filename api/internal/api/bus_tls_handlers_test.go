@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,20 +52,37 @@ func wireBusTLS(t *testing.T, f *apiFixture) *bustls.Service {
 
 // The seed the UI renders comes from the mint response, so the pin must be in
 // it: a token and a pin from the same moment.
+//
+// And with no pin to put in it, there is no mint: a seed with no
+// RASPUTIN_BUS_PIN produces a node that joins unencrypted and has no route
+// back, so the mint is REFUSED while the bus key is unusable
+// (geekdojo/geekdojo-brain#510).
 func TestMintBusToken_CarriesTheLivePin(t *testing.T) {
 	f := newAPIFixture(t)
 	cookie := f.authenticate(t)
 
+	f.srv.SetBusTLS(nil) // the bus key did not load
 	w := f.do(t, http.MethodPost, "/api/bus/tokens", `{"role":"compute","label":"t","nodeId":"n1"}`, cookie)
-	var body map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("mint with bus TLS unavailable = %d %s, want 503", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "bus pin") {
+		t.Fatalf("the refusal does not say why: %s", w.Body)
+	}
+	// Nothing was minted: the refusal is before MintBound, so there is no
+	// token recorded for a seed that will never exist.
+	tokens, err := f.srv.busTokens.List(f.ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if v, ok := body["busPin"]; !ok || v != "" {
-		t.Fatalf("with bus TLS unavailable, busPin = (%q, present=%t), want present and empty", v, ok)
+	for _, tok := range tokens {
+		if tok.NodeID != nil && *tok.NodeID == "n1" {
+			t.Fatalf("a token was minted for n1 despite the refusal: %+v", tok)
+		}
 	}
 
 	svc := wireBusTLS(t, f)
+	var body map[string]string
 	w = f.do(t, http.MethodPost, "/api/bus/tokens", `{"role":"compute","label":"t","nodeId":"n2"}`, cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("mint = %d %s", w.Code, w.Body)
@@ -85,6 +103,7 @@ func TestBusTLSEndpoint(t *testing.T) {
 	f := newAPIFixture(t)
 	cookie := f.authenticate(t)
 
+	f.srv.SetBusTLS(nil) // the bus key did not load
 	if w := f.do(t, http.MethodGet, "/api/bus/tls", "", cookie); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("GET without a bus key = %d, want 503", w.Code)
 	}

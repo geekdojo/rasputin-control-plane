@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
+)
 
 // Fail-closed table test for bmcConfigFromEnv, the resolver declared in
 // .github/security-resolvers.tsv (gate 4, geekdojo/geekdojo-brain#491).
@@ -47,6 +51,52 @@ func TestBMCConfigFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 			if got := bmcConfigFromEnv(t.TempDir()).TuringPiInsecure; got != tc.want {
 				t.Fatalf("TuringPiInsecure = %v for %q, want %v — an unrecognised value "+
 					"must never be the one that switches verification off", got, tc.env, tc.want)
+			}
+		})
+	}
+}
+
+// controlplanePinFile is a security resolver (.github/security-resolvers.tsv
+// R23): it decides whether the last bus-pin source exists. This is its
+// fail-closed table — every shape of input, and what must come back.
+//
+// The two directions it must never go: handing a path to a role that has no
+// such file, and handing "" to a controlplane, which would drop the source and
+// let a self-initialised controlplane fall back to dialing in the clear.
+func TestControlplanePinFile_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		role proto.NodeRole
+		env  string
+		set  bool
+		want string
+	}{
+		// Absent, empty and blank all resolve to the appliance location for a
+		// controlplane. None of them resolves to "".
+		{"controlplane, variable absent", proto.RoleControlPlane, "", false, proto.BusAgentPinPath},
+		{"controlplane, variable empty", proto.RoleControlPlane, "", true, proto.BusAgentPinPath},
+		{"controlplane, variable blank", proto.RoleControlPlane, "   \t ", true, proto.BusAgentPinPath},
+		{"controlplane, override", proto.RoleControlPlane, "/tmp/dev/bus/agent.pin", true, "/tmp/dev/bus/agent.pin"},
+		{"controlplane, override with surrounding space", proto.RoleControlPlane, "  /tmp/dev/bus/agent.pin\n", true, "/tmp/dev/bus/agent.pin"},
+
+		// No other role ever gets a path, however the variable is set. A
+		// compute node must not be pointed at a file the api wrote for a
+		// different machine.
+		{"compute, variable absent", proto.RoleCompute, "", false, ""},
+		{"compute, override set", proto.RoleCompute, "/tmp/dev/bus/agent.pin", true, ""},
+		{"firewall, override set", proto.RoleFirewall, "/tmp/dev/bus/agent.pin", true, ""},
+		{"storage, override set", proto.RoleStorage, "/tmp/dev/bus/agent.pin", true, ""},
+		{"an unknown role, override set", proto.NodeRole("wat"), "/tmp/dev/bus/agent.pin", true, ""},
+		{"an empty role, override set", proto.NodeRole(""), "/tmp/dev/bus/agent.pin", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv(EnvControlplanePinFile, tc.env)
+			} else {
+				t.Setenv(EnvControlplanePinFile, "")
+			}
+			if got := controlplanePinFile(tc.role); got != tc.want {
+				t.Fatalf("controlplanePinFile(%q) = %q, want %q", tc.role, got, tc.want)
 			}
 		})
 	}

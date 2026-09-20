@@ -167,6 +167,11 @@ type agentOpts struct {
 	// agent reads the token its api mints (cp.agentTokenFile).
 	tokenFile string
 	pin       string // RASPUTIN_BUS_PIN; "" leaves it unset
+	// pinFile is RASPUTIN_BUS_PIN_FILE: where the controlplane's own agent
+	// reads the pin its api writes (cp.agentPinFile). Read by the
+	// controlplane role only, and last — after the seed and after a
+	// delivered pin.
+	pinFile string
 	// stateDir reuses a previous agent's state (a restart); "" is fresh.
 	stateDir string
 }
@@ -208,6 +213,9 @@ func startAgent(t *testing.T, o agentOpts) *agentProc {
 	}
 	if o.pin != "" {
 		env = append(env, "RASPUTIN_BUS_PIN="+o.pin)
+	}
+	if o.pinFile != "" {
+		env = append(env, "RASPUTIN_BUS_PIN_FILE="+o.pinFile)
 	}
 	cmd.Env = env
 	stderr, err := cmd.StderrPipe()
@@ -351,6 +359,12 @@ type cpOpts struct {
 	pinMode bustls.Mode
 	// cert overrides the certificate wrapped around the bus key.
 	cert *tls.Certificate
+	// facts are the StartFacts a resolved (unpinned) mode is derived from,
+	// as the api derives them from inventory at start. The default stands for
+	// an existing fleet that is not all on TLS, which is what every ladder
+	// test here needs: a controlplane that starts at the bottom and climbs.
+	// A test that wants the fresh-cluster path sets it.
+	facts *bustls.StartFacts
 }
 
 func startCP(t *testing.T, o cpOpts) *cp {
@@ -372,8 +386,19 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	c.settings = settings
 	mode, pinned := o.pinMode, o.pinMode != ""
 	if !pinned {
-		if mode, _, err = bustls.ResolveStartMode(ctx, settings); err != nil {
-			t.Fatal(err)
+		facts := bustls.StartFacts{TLSAvailable: true, Enrolled: 1, AllReportedTLS: false}
+		if o.facts != nil {
+			facts = *o.facts
+		}
+		start := bustls.ResolveStartMode(ctx, settings, facts)
+		if start.Fault != "" {
+			t.Fatalf("resolve start mode: %s", start.Fault)
+		}
+		mode = start.Mode
+		if start.Derived {
+			if err := settings.Set(ctx, bustls.SettingKey, string(mode)); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	c.mode = mode
@@ -538,6 +563,11 @@ func (c *cp) url() string { return fmt.Sprintf("nats://127.0.0.1:%d", c.port) }
 // agentTokenFile is where this controlplane mints its own agent's bus token.
 func (c *cp) agentTokenFile() string {
 	return filepath.Join(c.dataDir, "bus", proto.BusAgentTokenFileName)
+}
+
+// agentPinFile is where this controlplane writes its own agent's bus pin.
+func (c *cp) agentPinFile() string {
+	return filepath.Join(c.dataDir, "bus", proto.BusAgentPinFileName)
 }
 
 // mint returns a fresh join token bound to id, as Add-node or a matched set
@@ -1149,4 +1179,89 @@ func mustParsePEM(t *testing.T, b []byte) *x509.Certificate {
 		t.Fatal(err)
 	}
 	return leaf
+}
+
+// A controlplane that never had a seed — nothing put RASPUTIN_BUS_PIN in its
+// agent's environment, nothing was ever delivered to it — still joins a bus
+// that REQUIRES TLS, because the api writes the pin beside the token it
+// already mints (geekdojo/geekdojo-brain#510).
+//
+// This is the case that had no answer before: the agent's only route to a pin
+// was a bus.pin delivery over the plaintext bus, and a controlplane in require
+// serves no plaintext for that delivery to travel on. Its own agent was the one
+// node it could never reach.
+func TestFunctional_ControlplaneAgentPinFile(t *testing.T) {
+	skipShort(t)
+	ctx := context.Background()
+	// A fresh cluster: no node is enrolled, so the mode resolves to require
+	// and the bus refuses plaintext from its first listen.
+	c := startCP(t, cpOpts{selfNode: "cp1", facts: &bustls.StartFacts{TLSAvailable: true, AllReportedTLS: true}})
+	if c.mode != bustls.ModeRequire {
+		t.Fatalf("a fresh cluster started in %q, want require", c.mode)
+	}
+	assertPlaintextRefused(t, c.port)
+
+	// The api's start: the token, and now the pin beside it.
+	tokenFile := c.agentTokenFile()
+	if _, err := c.tokens.EnsureAgentToken(ctx, tokenFile, "cp1"); err != nil {
+		t.Fatal(err)
+	}
+	pinFile, err := bustls.WriteAgentPinFile(filepath.Join(c.dataDir, "bus"), c.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinFile != c.agentPinFile() {
+		t.Fatalf("pin written to %q, want %q", pinFile, c.agentPinFile())
+	}
+	got, err := os.ReadFile(pinFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != c.key.Pin() {
+		t.Fatalf("pin file = %q, want %q", got, c.key.Pin())
+	}
+
+	// No `pin:` — this agent was never seeded one. It must find the file.
+	a := startAgent(t, agentOpts{
+		id: "cp1", role: proto.RoleControlPlane, url: c.url(),
+		tokenFile: tokenFile, pinFile: pinFile,
+	})
+	a.waitLog(t, "the pin taken from the controlplane's own file", "bus pin", "from controlplane")
+	// busTls=true: it handshook and verified the pin, on a bus that would have
+	// refused it any other way.
+	c.waitRegistered(t, "cp1", true)
+
+	// A node of any other role ignores the file entirely: it is passed "" and
+	// has no such path. Given no pin at all, it cannot reach this bus.
+	other := startAgent(t, agentOpts{id: "n1", url: c.url(), token: c.mint(t, "n1")})
+	other.waitLog(t, "the refusal of an unpinned node by a TLS-required bus", "NATS connect")
+	if c.registeredAtAll("n1") {
+		t.Fatal("an unpinned node registered on a bus that requires TLS")
+	}
+}
+
+// FAIL CLOSED: a node that holds a pin it cannot use does not dial the bus at
+// all. It says what is wrong and exits, rather than sending its join token in
+// the clear to whatever answered (geekdojo/geekdojo-brain#510, F09).
+func TestFunctional_AgentRefusesToDialOnAnUnusablePin(t *testing.T) {
+	skipShort(t)
+	// A bus that ACCEPTS plaintext, so nothing but the agent's own refusal can
+	// be what keeps it off: if it dialed, it would get on.
+	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
+
+	a := startAgent(t, agentOpts{id: "n-typo", url: c.url(), token: c.mint(t, "n-typo"), pin: "sha256/nope"})
+	a.waitLog(t, "the refusal to dial on an unusable pin", "REFUSING to dial the bus", "unencrypted")
+	select {
+	case <-a.done:
+	case <-time.After(factDeadline):
+		t.Fatal("the agent kept running with an unusable pin")
+	}
+	if c.registeredAtAll("n-typo") {
+		t.Fatal("an agent with an unusable pin registered")
+	}
+	// The contrast: the same node with no pin at all is a node that was never
+	// pinned, and it still joins in plaintext — that is how a fleet enrolled
+	// before the pin existed reaches a controlplane in offer.
+	startAgent(t, agentOpts{id: "n-unpinned", url: c.url(), token: c.mint(t, "n-unpinned")})
+	c.waitRegistered(t, "n-unpinned", false)
 }
