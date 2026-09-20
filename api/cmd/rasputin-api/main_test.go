@@ -682,3 +682,67 @@ func TestEnsureSelfAgentToken(t *testing.T) {
 		t.Fatalf("an invalid self node id wrote a token file: %v", err)
 	}
 }
+
+// A node always gets its own cluster's Mesh CA, whoever runs Headscale
+// (geekdojo/geekdojo-brain#506). The operator's CA is APPENDED when they name
+// one; before this it replaced the Mesh CA, so a node on an external Headscale
+// trusted the operator's root and not the CA that signs its own controlplane's
+// HTTPS leaf and app leaves.
+func TestWireExternalMesh_ShipsTheMeshCAPlusTheOperatorCA(t *testing.T) {
+	meshCA, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "trust"), "wire-test")
+	if err != nil {
+		t.Fatalf("EnsureMeshCA: %v", err)
+	}
+	operatorCA, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "operator"), "operator")
+	if err != nil {
+		t.Fatalf("EnsureMeshCA(operator): %v", err)
+	}
+	t.Setenv("RASPUTIN_HEADSCALE_SUPERVISOR", "noop")
+
+	t.Run("no CA file: the Mesh CA alone, unchanged", func(t *testing.T) {
+		t.Setenv("RASPUTIN_HEADSCALE_CA_FILE", "")
+		mw, err := wireExternalMesh(t.TempDir(), meshCA, "dev@example.com", "https://hs.example", "hskey-test")
+		if err != nil {
+			t.Fatalf("wireExternalMesh: %v", err)
+		}
+		if !bytes.Equal(mw.caPEM, meshCA.CertPEM) {
+			t.Errorf("node bundle = %q, want the Mesh CA PEM byte for byte", mw.caPEM)
+		}
+	})
+
+	t.Run("CA file: the operator's CA appended to the Mesh CA", func(t *testing.T) {
+		caFile := filepath.Join(t.TempDir(), "operator-ca.pem")
+		if err := os.WriteFile(caFile, operatorCA.CertPEM, 0o644); err != nil {
+			t.Fatalf("write CA file: %v", err)
+		}
+		t.Setenv("RASPUTIN_HEADSCALE_CA_FILE", caFile)
+		mw, err := wireExternalMesh(t.TempDir(), meshCA, "dev@example.com", "https://hs.example", "hskey-test")
+		if err != nil {
+			t.Fatalf("wireExternalMesh: %v", err)
+		}
+		if !bytes.Contains(mw.caPEM, bytes.TrimSpace(meshCA.CertPEM)) {
+			t.Error("the node bundle dropped the Mesh CA when the operator named their own")
+		}
+		if !bytes.Contains(mw.caPEM, bytes.TrimSpace(operatorCA.CertPEM)) {
+			t.Error("the node bundle does not carry the operator's CA")
+		}
+	})
+
+	t.Run("unreadable CA file: the api refuses to start", func(t *testing.T) {
+		t.Setenv("RASPUTIN_HEADSCALE_CA_FILE", filepath.Join(t.TempDir(), "absent.pem"))
+		if _, err := wireExternalMesh(t.TempDir(), meshCA, "dev@example.com", "https://hs.example", "hskey-test"); err == nil {
+			t.Fatal("a CA file that cannot be read was ignored; nodes would be shipped a CA the api itself does not trust")
+		}
+	})
+
+	t.Run("unusable CA file: the api refuses to start", func(t *testing.T) {
+		caFile := filepath.Join(t.TempDir(), "junk.pem")
+		if err := os.WriteFile(caFile, []byte("not a certificate"), 0o644); err != nil {
+			t.Fatalf("write CA file: %v", err)
+		}
+		t.Setenv("RASPUTIN_HEADSCALE_CA_FILE", caFile)
+		if _, err := wireExternalMesh(t.TempDir(), meshCA, "dev@example.com", "https://hs.example", "hskey-test"); err == nil {
+			t.Fatal("a CA file with no certificates in it was accepted; the client would fall back to the system pool")
+		}
+	})
+}
