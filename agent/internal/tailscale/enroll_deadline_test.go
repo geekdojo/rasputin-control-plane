@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,16 @@ import (
 // margin over that measurement. A regression still fails; a busy laptop does
 // not.
 
+// The envelope subprocessCost accepts a host inside. Package-level because
+// the cap is not only subprocessCost's own business: it is the largest spawn
+// this file will ever build a budget from, so it is also the worst case the
+// kill assertions have to stay separable under — see the invariant asserted
+// in TestRealBackend_MissedKillWaitsOutTheWaitDelay.
+const (
+	spawnCostFloor = 20 * time.Millisecond
+	spawnCostCap   = 300 * time.Millisecond
+)
+
 // subprocessCost measures what one round trip through the fake CLI costs on
 // this machine: fork, exec /bin/sh, run a case arm, exit, reap. That is the
 // unit the budgets are built from, because it is exactly what load inflates.
@@ -54,8 +65,8 @@ func subprocessCost(t *testing.T, bin string) time.Duration {
 	t.Helper()
 	const (
 		runs    = 5
-		floorAt = 20 * time.Millisecond
-		tooSlow = 300 * time.Millisecond
+		floorAt = spawnCostFloor
+		tooSlow = spawnCostCap
 	)
 	worst := time.Duration(0)
 	for i := 0; i <= runs; i++ { // run 0 is the cold one, and is discarded
@@ -95,6 +106,29 @@ func enrollDeadlineFor(cost time.Duration) time.Duration { return 10 * cost }
 // separation still holds rather than assuming it.
 func killTimeBudget(cost time.Duration) time.Duration { return 5 * cost }
 
+// waitDelayWindow is how far after the deadline Run may return on the MISSED
+// -kill path and still be reading upWaitDelay off the clock: the window is
+// [upWaitDelay-early, upWaitDelay+late].
+//
+// Asymmetric, because the two sides are not the same kind of risk, and only
+// one of them discriminates.
+//
+// Late: the delay is followed by the same `status` probe a landed kill makes,
+// and a loaded host pushes both. Nothing is proved by a tight late side — a
+// wait that is too LONG is not a wait mistaken for no wait — so it gets the
+// ten spawns of headroom enrollDeadlineFor grants elsewhere in this file, on
+// the machine's own number, and a busy CI runner does not go red for being
+// busy.
+//
+// Early: a timer cannot fire ahead of time, so the only early slack the
+// measurement needs is the sliver between arming the context and starting the
+// stopwatch — one spawn is already generous for that. Keeping the early side
+// tight is what makes the window reject a wait of about a second rather than
+// shrug at it, which is the whole value of the assertion.
+func waitDelayWindow(cost time.Duration) (early, late time.Duration) {
+	return cost, enrollDeadlineFor(cost)
+}
+
 // slowUpBin writes a fake tailscale CLI whose `up` blocks for upFor and whose
 // `status --json` answers with state. Everything else exits 0. This is the
 // bench shape: a headscale that has not answered the login yet, with
@@ -102,7 +136,8 @@ func killTimeBudget(cost time.Duration) time.Duration { return 5 * cost }
 //
 // The `up` arm EXECS sleep, so the shell is replaced and the kill lands on
 // the process holding the pipes — that is the behaviour real.go's WaitDelay
-// exists for, and reproducing it is the point of the fake.
+// exists for, and reproducing it is the point of the fake. forkingUpBin below
+// is the same fake without the exec, for the kill that misses.
 //
 // reached, when non-empty, is a path the `up` arm creates immediately BEFORE
 // it blocks. Its existence is proof the child got as far as waiting, which is
@@ -111,19 +146,51 @@ func killTimeBudget(cost time.Duration) time.Duration { return 5 * cost }
 // some other failure.
 func slowUpBin(t *testing.T, upFor time.Duration, state, reached string) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-binary shim is /bin/sh; skipped on Windows")
-	}
 	mark := ":"
 	if reached != "" {
 		mark = "touch '" + reached + "'"
+	}
+	return upBin(t, state, mark+`
+    exec sleep `+fmt.Sprintf("%.3f", upFor.Seconds()))
+}
+
+// forkingUpBin is slowUpBin with the exec taken out, and that is the whole
+// difference: /bin/sh FORKS the sleep and waits on it, so Process.Kill ends
+// the shell while the child lives on — still holding the stderr pipe it
+// inherited. Run never sees EOF on that pipe and sits on it for cmd.WaitDelay
+// before giving up, which is the one behaviour upWaitDelay governs and the
+// one shape slowUpBin cannot produce.
+//
+// The trailing `exit 0` keeps the sleep off the end of the script, where a
+// shell is free to exec it anyway and quietly turn this fake back into the
+// other one.
+//
+// reached is written BEFORE the wait, as in slowUpBin, and carries the
+// child's pid: one fact that both proves the fork happened and gives the test
+// a handle on the orphan it deliberately created.
+func forkingUpBin(t *testing.T, upFor time.Duration, state, reached string) string {
+	t.Helper()
+	if reached == "" {
+		t.Fatal("forkingUpBin needs a reached path: the pid written there is both the proof the fork happened and the handle to reap the orphan")
+	}
+	return upBin(t, state, `sleep `+fmt.Sprintf("%.3f", upFor.Seconds())+` &
+    echo $! > '`+reached+`'
+    wait
+    exit 0`)
+}
+
+// upBin writes the fake CLI the two shapes share: `up` runs upArm, `status
+// --json` answers with state, everything else exits 0.
+func upBin(t *testing.T, state, upArm string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-binary shim is /bin/sh; skipped on Windows")
 	}
 	path := t.TempDir() + "/tailscale"
 	body := `#!/bin/sh
 case "$1" in
   up)
-    ` + mark + `
-    exec sleep ` + fmt.Sprintf("%.3f", upFor.Seconds()) + `
+    ` + upArm + `
     ;;
   status)
     echo '{"Self":{"ID":"abc","HostName":"node-1","TailscaleIPs":["100.64.0.1"],"PrimaryRoutes":[],"Online":true},"Peer":{},"BackendState":"` + state + `"}'
@@ -158,6 +225,34 @@ func waitReached(t *testing.T, path string, within time.Duration) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("the fake `tailscale up` never reached its blocking state within %s, so nothing below is testing a kill", within)
+}
+
+// reapOrphan kills the child forkingUpBin deliberately left behind. The
+// subject of that test is a process that OUTLIVES the shell the deadline
+// killed, so nothing else is going to collect it: without this the sleep sits
+// on the machine until it finishes on its own, once per run of this file.
+// Best effort by nature — the orphan is not this process's child, so it can
+// only be signalled, not waited on.
+func reapOrphan(t *testing.T, pidPath string) {
+	t.Helper()
+	raw, err := os.ReadFile(pidPath) // #nosec G304 -- a path this test just created
+	if err != nil {
+		t.Logf("no pid to reap at %s: %v", pidPath, err)
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Logf("pid file %s holds %q, which does not parse: %v", pidPath, raw, err)
+		return
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		t.Logf("orphan %d is already gone: %v", pid, err)
+		return
+	}
+	if err := p.Kill(); err != nil {
+		t.Logf("could not reap orphan %d: %v", pid, err)
+	}
 }
 
 // deadlineNamed pulls the duration out of "... by the 300ms enroll deadline
@@ -249,6 +344,98 @@ func TestRealBackend_EnrollKilledByDeadlineIsNamed(t *testing.T) {
 	}
 	if strings.Contains(msg, key) {
 		t.Errorf("error carries the auth key: %q", msg)
+	}
+}
+
+// The other half of the kill, and the only thing upWaitDelay actually
+// governs.
+//
+// Every test above runs a fake whose `up` EXECS its sleep, so the kill lands
+// on the process holding the stderr pipe and Run returns at the deadline.
+// They therefore read upWaitDelay as a CEILING — "not this late" — and never
+// as the duration Run waits, which means nothing here observed what the
+// constant does. (The mutation gate found exactly that on 2026-09-20:
+// `2 + time.Second` — about a second — survived the whole file.)
+//
+// Take the exec away and the kill misses: /bin/sh dies, the sleep it forked
+// does not, the pipe never reaches EOF, and Run sits on it for cmd.WaitDelay
+// before giving up. That wait IS upWaitDelay, so measuring it observes the
+// constant through the behaviour it produces — no assertion anywhere compares
+// it against a copy of itself.
+func TestRealBackend_MissedKillWaitsOutTheWaitDelay(t *testing.T) {
+	childPID := t.TempDir() + "/up-child-pid"
+	// An hour, as in the landed-kill test: the fake must never finish on its
+	// own. Here the child outlives the test by construction, hence the reaper.
+	bin := forkingUpBin(t, time.Hour, "NeedsLogin", childPID)
+	t.Cleanup(func() { reapOrphan(t, childPID) })
+	cost := subprocessCost(t, bin) // also warms it, through the status arm
+	deadline := enrollDeadlineFor(cost)
+	early, late := waitDelayWindow(cost)
+
+	// The claim subprocessCost's cap rests on ("the cap is what keeps
+	// killTimeBudget below upWaitDelay, which is the whole basis of the kill
+	// assertion"), asserted here instead of left in prose — and the one
+	// assertion in this file that does not move when upWaitDelay does.
+	//
+	// A LANDED kill returns within killTimeBudget of the deadline, and on the
+	// slowest host this file will accept — spawnCostCap per spawn — that
+	// allowance is its largest. A MISSED kill costs one upWaitDelay on top.
+	// If the wait is not longer than that allowance the two outcomes overlap:
+	// the window below would accept a wait a landed kill could have produced,
+	// and the ceilings in the tests above would accept a missed one. Nothing
+	// here says what upWaitDelay should be; what it may not be is short
+	// enough to pass for no wait at all.
+	if landed := killTimeBudget(spawnCostCap); upWaitDelay-early <= landed {
+		t.Fatalf("upWaitDelay is %s, so this test's window opens %s after the deadline (a spawn costs %s here) — but on the slowest host this file accepts, %s per spawn, a LANDED kill may still be returning %s after it. A missed kill is no longer distinguishable from a landed one, and every kill assertion in this file can now pass for the wrong reason.",
+			upWaitDelay, upWaitDelay-early, cost, spawnCostCap, landed)
+	}
+
+	b := &RealBackend{binary: bin, caBundle: t.TempDir() + "/ca.pem", run: execRun}
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	// Enroll runs off the test goroutine only so that the upper edge of the
+	// window can be ENFORCED rather than measured after the fact. It has to
+	// be: giving up on the pipe is the entire job of cmd.WaitDelay, and a
+	// WaitDelay that never gives up does not return late — it does not return
+	// at all, and this test would sit on the orphan's hour-long sleep until
+	// the package timeout killed it with nothing to say. This is the one kind
+	// of duration the house rule allows: a bound on a single operation, and
+	// the operation here is the wait under test.
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := b.Enroll(ctx, EnrollInput{LoginServer: "https://hs.example:8443", AuthKey: "tskey", Hostname: "node-1"})
+		done <- err
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(deadline + upWaitDelay + late):
+		t.Fatalf("Enroll had still not returned %s after its %s deadline. The kill landed on the shell and the sleep it forked still holds the stderr pipe, so cmd.WaitDelay (%s) should have made Run give up on that pipe — nothing is, and a caller waits on a dead command forever.",
+			upWaitDelay+late, deadline, upWaitDelay)
+	}
+	took := time.Since(start)
+	if err == nil {
+		t.Fatal("Enroll succeeded with `up` blocked past the deadline")
+	}
+	// Same precondition as everywhere else here, and doubly so: the pid file
+	// is written by the shell between forking the sleep and waiting on it, so
+	// its absence means there was no orphan and no missed kill to measure.
+	waitReached(t, childPID, killTimeBudget(cost))
+	// A missed kill is still the deadline killing `up`; if the error says
+	// something else, the timing below is timing some other failure.
+	if msg := err.Error(); !strings.Contains(msg, "tailscale up killed after") {
+		t.Fatalf("a missed kill should still be reported as the enroll deadline killing `up`, got %q", msg)
+	}
+
+	// The upper edge of the window was enforced by the select above; this is
+	// the lower one, and it is what separates a wait from no wait: a kill
+	// that had landed would have returned here at the deadline.
+	over := took - deadline
+	t.Logf("Enroll returned %s after the deadline; upWaitDelay is %s and a spawn costs %s here", over, upWaitDelay, cost)
+	if over < upWaitDelay-early {
+		t.Errorf("the kill missed the process holding the pipe — the fake's sleep outlived the shell — so Run should have sat on that pipe for cmd.WaitDelay (%s) before giving up. It returned %s after its %s deadline, i.e. %s of waiting: whatever governs that wait, it is not upWaitDelay.",
+			upWaitDelay, took, deadline, over)
 	}
 }
 
