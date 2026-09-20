@@ -187,14 +187,19 @@ func TestStart_HappyPath(t *testing.T) {
 	}
 }
 
-func TestStart_PullFailureIsRecoverable(t *testing.T) {
+// A pull failure is survivable ONLY when every pinned image is already in the
+// local store — an offline first boot, which this stack has to survive. The
+// fake runner answers `docker image inspect` successfully, so that is the case
+// under test here; the missing-image case is
+// TestStart_PullFailureWithAMissingImageFailsClosed.
+func TestStart_PullFailureIsRecoverableWhenTheImagesArePresent(t *testing.T) {
 	vm := newStubVM()
 	srv := httptest.NewServer(vm.handler())
 	defer srv.Close()
 
 	dir := t.TempDir()
 	fake := newFakeCompose()
-	// pull errors → we should continue to `up` anyway (image may be cached).
+	// pull errors → we should continue to `up` anyway (image is cached).
 	fake.errOnSub["pull"] = errors.New("registry unreachable")
 
 	host, port := splitHostPort(t, srv.URL)

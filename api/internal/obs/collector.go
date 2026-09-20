@@ -259,6 +259,14 @@ func BuildCollectorCompose(spec CollectorSpec) (string, error) {
 	if image == "" {
 		image = defaultAlloyImage
 	}
+	// This compose file is rendered per node and handed to an agent to run, so
+	// it is the last place the reference can be checked before it becomes a
+	// `docker compose up` somewhere else. The controlplane's own stack is
+	// gated in NewDockerComposeSupervisor; this is the same rule for the copy
+	// that leaves the box (geekdojo/geekdojo-brain#534).
+	if err := validateImages(map[string]string{"RASPUTIN_OBS_ALLOY_IMAGE": image}); err != nil {
+		return "", fmt.Errorf("obs collector: %w", err)
+	}
 
 	base := strings.TrimRight(spec.IngressBaseURL, "/")
 	var alloyBuf bytes.Buffer

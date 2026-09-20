@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "note": "Single source for the container images the OS image bakes for an offline first boot. The control-plane release publishes this file verbatim as mesh-images.json; the OS build reads it instead of carrying its own copy of the refs.",
+  "images": {
+    "headscale": {
+      "ref": "headscale/headscale:0.28.0@sha256:51b1b9182bb6219e97374fa89af6b9320d6f87ecc739e328d5357ea4fa7a5ce3",
+      "platforms": {
+        "linux/amd64": "sha256:f66e9e3dfb3e795f1bf6ea28b0b7eddc1f803e54342fc089af0880b374503cae",
+        "linux/arm64": "sha256:44aa28de565af389d15cd7d695005a570076c6ef373d6563545e0163f4666310"
+      }
+    }
+  }
+}

@@ -108,6 +108,27 @@ done
 
 rm -rf "$DIST/ui"   # packed into the api tarballs; not an artifact itself
 
+# The mesh image pin, published verbatim so the OS build can read it instead of
+# carrying its own copy of the refs.
+#
+# rasputin-os used to keep board/rasputin/common/mesh-images.list, whose comment
+# said in capitals that the headscale ref "MUST match defaultImage" in this
+# repository -- a sync contract enforced by nobody. When the two drifted the
+# baked tarball simply was not matched by the supervisor and it fell back to
+# pulling at runtime: no error, no alert, just a controlplane that silently
+# needs internet on its first boot, which is the one thing baking the image
+# exists to prevent (geekdojo/geekdojo-brain#210, #211).
+#
+# This repository owns the pin because it is the code that runs the image, so
+# the file it embeds is the file that ships.
+MESH_PIN="api/internal/mesh/mesh-images.json"
+[ -f "$MESH_PIN" ] || { echo "missing $MESH_PIN — the OS build reads this from the release" >&2; exit 1; }
+cp "$MESH_PIN" "$DIST/mesh-images.json"
+sum=$(sha256_of "$DIST/mesh-images.json")
+echo "$sum" > "$DIST/mesh-images.json.sha256"
+echo "sha256  $sum  mesh-images.json" > "$DIST/mesh-images.json.hash"
+echo "   mesh-images.json  sha256=$sum"
+
 echo
 echo "release artifacts in $DIST:"
 ls -1 "$DIST"

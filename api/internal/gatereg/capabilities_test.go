@@ -1,6 +1,7 @@
 package gatereg_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -108,6 +109,39 @@ func goConstImage(src, name string) (string, bool) {
 	return ref[i+1:], true
 }
 
+// jsonImage reads .images.<name>.ref out of a pin file and returns its TAG.
+//
+// The mesh image's pin moved out of a Go constant and into
+// api/internal/mesh/mesh-images.json, which the control-plane release publishes
+// and the rasputin-os build reads, so that the two repositories cannot drift
+// (geekdojo/geekdojo-brain#210, #211, #534). This resolver follows it there:
+// the register still reads the real pin and still compares the tag, which is
+// what a vendor capability is recorded against.
+func jsonImage(src []byte, name string) (string, bool) {
+	var doc struct {
+		Images map[string]struct {
+			Ref string `json:"ref"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(src, &doc); err != nil {
+		return "", false
+	}
+	img, ok := doc.Images[name]
+	if !ok || img.Ref == "" {
+		return "", false
+	}
+	ref := img.Ref
+	// Strip the digest: "repo:tag@sha256:…" — the tag is what is recorded.
+	if at := strings.Index(ref, "@"); at >= 0 {
+		ref = ref[:at]
+	}
+	i := strings.LastIndex(ref, ":")
+	if i < 0 || strings.Contains(ref[i+1:], "/") {
+		return "", false
+	}
+	return ref[i+1:], true
+}
+
 // goModVersion reads a module's version out of a go.mod require line.
 func goModVersion(src, module string) (string, bool) {
 	re := regexp.MustCompile(`(?m)^\s*(?:require )?` + regexp.QuoteMeta(module) + `\s+(v\S+)`)
@@ -122,14 +156,15 @@ func goModVersion(src, module string) (string, bool) {
 //
 // The pin column names where to look:
 //
-//	go-const:<path>#<Name>   a Go constant holding "repo/image:tag"
-//	go-mod:<path>#<module>   a require line in a go.mod
-//	elsewhere:<repo path>    the pin lives in another repository
+//	go-const:<path>#<Name>    a Go constant holding "repo/image:tag"
+//	go-mod:<path>#<module>    a require line in a go.mod
+//	json-image:<path>#<name>  .images.<name>.ref in a pin file
+//	elsewhere:<repo path>     the pin lives in another repository
 func resolvePin(t *testing.T, repo, pin string) (version string, checkable bool, err string) {
 	t.Helper()
 	kind, rest, ok := strings.Cut(pin, ":")
 	if !ok || rest == "" {
-		return "", false, "pin is malformed; want go-const:, go-mod: or elsewhere:"
+		return "", false, "pin is malformed; want go-const:, go-mod:, json-image: or elsewhere:"
 	}
 	if kind == "elsewhere" {
 		return "", false, ""
@@ -153,6 +188,12 @@ func resolvePin(t *testing.T, repo, pin string) (version string, checkable bool,
 		v, found := goModVersion(string(b), target)
 		if !found {
 			return "", true, "no require line for " + target + " in " + path
+		}
+		return v, true, ""
+	case "json-image":
+		v, found := jsonImage(b, target)
+		if !found {
+			return "", true, "no images." + target + ".ref holding an image reference in " + path
 		}
 		return v, true, ""
 	}

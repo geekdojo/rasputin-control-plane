@@ -322,9 +322,23 @@ type DockerComposeSupervisorConfig struct {
 	PullTimeout time.Duration
 }
 
+// EVERY image reference below is digest-pinned, name:tag@sha256:... . The tag
+// is kept for readability -- an operator reading `docker ps` should not have to
+// look a digest up to learn the version -- but the digest is what resolves.
+//
+// A tag alone, however specific it looks, is a registry-side pointer that can
+// be repointed at any time. These five containers run on the controlplane, two
+// of them with access to the host's container runtime, so "whatever that tag
+// means today" is not an acceptable description of what runs there. Bumping a
+// version means changing BOTH halves; a mismatched pair does not resolve and
+// the pull fails loudly rather than quietly running the tag.
+//
+// .github/image-sources.tsv records every place in this tree that produces an
+// image reference and the rule it is held to; a new one fails the parity test
+// until it is listed.
 const (
 	defaultProjectName  = "rasputin-obs"
-	defaultVMImage      = "victoriametrics/victoria-metrics:v1.103.0"
+	defaultVMImage      = "victoriametrics/victoria-metrics:v1.103.0@sha256:4d7f1b98e9a73431a0c4ff156bf86fdf23679fc7cc06a4b3cbb042e5d03c101c"
 	defaultVMListenAddr = "127.0.0.1:8428"
 	defaultVMRetention  = "1y"
 	// defaultVMMinFreeDiskSpace reserves 2 GB of the controlplane's single
@@ -339,8 +353,8 @@ const (
 	// DiskAlmostFull alert, so the alert always fires first and this is a
 	// backstop, not the primary signal.
 	defaultVMMinFreeDiskSpace = "2GB"
-	defaultAlloyImage         = "grafana/alloy:v1.4.2"
-	defaultLokiImage          = "grafana/loki:3.4.1"
+	defaultAlloyImage         = "grafana/alloy:v1.4.2@sha256:625174f60ee3287a4ec9de7e818805f117376f1375169bc73482b41540697376"
+	defaultLokiImage          = "grafana/loki:3.4.1@sha256:1d0c5ddc7644b88956aa0bd775ad796d9635180258a225d6ab3552751d5e2a66"
 	defaultLokiListenAddr     = "127.0.0.1:3100"
 	// defaultLokiRetention bounds how far back logs are kept. Loki shipped
 	// with NO retention configured at all — no compactor, no
@@ -353,14 +367,14 @@ const (
 	// equivalent of -storage.minFreeDiskSpaceBytes — so time retention plus
 	// the 85% alert is the whole defense. See storage.md §5.
 	defaultLokiRetention = "720h"
-	defaultGrafanaImage  = "grafana/grafana:11.5.1"
+	defaultGrafanaImage  = "grafana/grafana:11.5.1@sha256:5781759b3d27734d4d548fcbaf60b1180dbf4290e708f01f292faa6ae764c5e6"
 	// Used ONLY by the non-Linux developer fallback — on Linux Grafana
 	// has no TCP listener (UseGrafanaSocket). 3000 is the most contended
 	// port on a dev box — every common JS framework defaults to it — so
 	// the host bind is 13000; Grafana's own port inside the container
 	// stays 3000.
 	defaultGrafanaListenAddr = "127.0.0.1:13000"
-	defaultVMAlertImage      = "victoriametrics/vmalert:v1.103.0"
+	defaultVMAlertImage      = "victoriametrics/vmalert:v1.103.0@sha256:ec4990f7b00e6cc640529f06616ee25a385b87c719ef9b0952f71054c71be731"
 	defaultDockerBin         = "docker"
 	// defaultDockerDataRoot is Docker's stock data-root. A Rasputin appliance
 	// moves it onto the persistent partition (/var/lib/rasputin/docker) — this
@@ -555,6 +569,22 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	if cfg.PullTimeout == 0 {
 		cfg.PullTimeout = defaultPullTimeout
 	}
+	// Every effective reference -- default or environment override -- must be
+	// digest-pinned, and a bad one refuses construction rather than being
+	// discovered at `compose up`. An override that skipped this would be a
+	// second, weaker rule for the same kind of value: a tile out of a signed
+	// catalog has been held to ValidateImagePin since ADR-0006, while these
+	// carried tag defaults that nothing checked at all
+	// (geekdojo/geekdojo-brain#534, .github/image-sources.tsv).
+	if err := validateImages(map[string]string{
+		"RASPUTIN_OBS_VM_IMAGE":      cfg.VMImage,
+		"RASPUTIN_OBS_ALLOY_IMAGE":   cfg.AlloyImage,
+		"RASPUTIN_OBS_LOKI_IMAGE":    cfg.LokiImage,
+		"RASPUTIN_OBS_GRAFANA_IMAGE": cfg.GrafanaImage,
+		"RASPUTIN_OBS_VMALERT_IMAGE": cfg.VMAlertImage,
+	}); err != nil {
+		return nil, err
+	}
 	runner := cfg.Runner
 	if runner == nil {
 		runner = execRunner
@@ -660,15 +690,28 @@ func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 		return err
 	}
 	pullCtx, pullCancel := context.WithTimeout(ctx, s.cfg.PullTimeout)
-	if _, err := s.compose(pullCtx, "pull"); err != nil {
-		pullCancel()
-		// `compose pull` failure on a private registry / offline host is
-		// recoverable if the image is already cached — `up -d` will
-		// succeed. Log and continue; if `up` then fails, that's the real
-		// signal.
-		log.Printf("obs supervisor: compose pull failed (continuing): %v", err)
-	} else {
-		pullCancel()
+	_, pullErr := s.compose(pullCtx, "pull")
+	pullCancel()
+	if pullErr != nil {
+		// A pull failure on an offline host IS recoverable when every image is
+		// already in the local store -- and an offline first boot is a case
+		// this stack has to survive. What is not acceptable is the previous
+		// behaviour: log it and carry on regardless, so "the registry was
+		// unreachable" and "the image is not here and never was" produced the
+		// same outcome, and a `compose up` that then found a STALE image of the
+		// right name started it without comment.
+		//
+		// So the error is only survivable if the images are provably present,
+		// by digest. Ask the daemon, and if any is missing, fail here with the
+		// pull error -- which names the real cause -- rather than letting `up`
+		// fail later with something less useful, or worse, succeed.
+		if missing, err := s.missingImages(ctx); err != nil {
+			return fmt.Errorf("docker compose pull: %w (and the local image store could not be read: %v)", pullErr, err)
+		} else if len(missing) > 0 {
+			return fmt.Errorf("docker compose pull: %w (not in the local image store either: %s)",
+				pullErr, strings.Join(missing, ", "))
+		}
+		log.Printf("obs supervisor: compose pull failed (%v) but every pinned image is already in the local store; continuing", pullErr)
 	}
 	if _, err := s.compose(ctx, "up", "-d", "--remove-orphans"); err != nil {
 		return fmt.Errorf("docker compose up: %w", err)
