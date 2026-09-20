@@ -9,6 +9,10 @@ name: ci
 #   release-target-guard — tests for scripts/release-target-guard.sh, which
 #              release.yml runs to prove a release tag is on the built commit.
 #
+#   auth-register — .github/auth-register.tsv still describes the code it
+#              anchors to (scripts/auth-register.sh --gate), plus the gate's
+#              own tests. python3 only.
+#
 #   failopen — the fail-open lint (api/cmd/failopenlint) over the whole tree,
 #              its allowance register, the security-resolver register, and the
 #              lint's own tests.
@@ -109,6 +113,30 @@ jobs:
           persist-credentials: false
       - name: guard tests
         run: ./scripts/test-release-target-guard.sh
+
+  auth-register:
+    # The auth exception register: one canonical authentication method per cell,
+    # and every second method recorded with the constraint that forces it and a
+    # checkable fact that retires it. The gate refuses a row whose anchored
+    # declaration has changed, a revisit trigger that is a date, and a premise
+    # recorded as unverified with no probe scheduled to settle it.
+    #
+    # Policy lives in scripts/auth-register.sh, as sast.yml defers to
+    # scripts/sast-register.sh. Its own tests run here too: a gate nobody has
+    # fed a bad input to is a gate nobody knows the shape of.
+    #
+    # No setup-go step and no toolchain: this gate is python3 and the tree.
+    name: auth exception register
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: register gate
+        run: ./scripts/auth-register.sh --gate
+      - name: tests for the gate itself
+        run: ./scripts/test-auth-register.sh
 
   failopen:
     # The fail-open lint (api/cmd/failopenlint) and the two registers it holds:
