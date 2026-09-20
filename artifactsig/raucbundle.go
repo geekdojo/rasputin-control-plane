@@ -135,16 +135,18 @@ func VerifyRAUCBundleSignerForPurpose(bundlePath, trustRootPath string, purpose 
 		Roots:         roots,
 		Intermediates: intermediates,
 		CurrentTime:   time.Now().UTC(),
-		// ExtKeyUsageAny is how Go is told NOT to constrain the extended key
-		// usage; leaving KeyUsages nil would default it to ServerAuth and
-		// reject every signing leaf we issue. That is deliberate rather than
-		// lax: the X509 purpose is RAUC's job, enforced on the device by
-		// [keyring] check-purpose=codesign, and the Rasputin purpose is the
-		// next check below. Duplicating RAUC's purpose here would couple this
-		// function to which generic EKUs a leaf happens to carry, and those
-		// are scheduled to change -- emailProtection comes out once no node
-		// still enforcing the S/MIME default remains.
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		// Stated explicitly because Go's default is ServerAuth, which would
+		// reject every signing leaf the pipeline issues.
+		//
+		// codeSigning and not ExtKeyUsageAny: Any would accept a certificate
+		// issued for anything at all, and this asks a narrower question than
+		// the OID check below rather than none. It is also stable. The
+		// transitional EKU on a release leaf is emailProtection, which comes
+		// out once no node still enforcing OpenSSL's S/MIME default remains;
+		// codeSigning is the one RAUC's own codesign purpose requires of the
+		// leaf, so it is there for as long as the device keyring says
+		// check-purpose=codesign.
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
 	}); err != nil {
 		return nil, fmt.Errorf("verify %s bundle signer against %s: %w", bundlePath, trustRootPath, err)
 	}
