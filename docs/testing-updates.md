@@ -20,9 +20,10 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
    cp ./pki-out/root-ca.pem ./data/trust/root-ca.pem
    ```
 
-   Working without a PKI is still possible, by asking for it: start the api with
-   `RASPUTIN_UPDATE_TRUST=dev-permissive` and bundles are accepted unchecked and
-   recorded `SignedBy "<unverified>"`.
+   This step is not optional: there is no mode that accepts an artifact
+   unchecked. `pki-init.sh` mints a release leaf carrying the same purpose OID
+   the release pipeline's leaf carries, so a bundle built against it verifies
+   under exactly the rule the fleet enforces.
 
 2. **Start the api**:
 
@@ -178,8 +179,8 @@ restart. It does not exercise the agent binary or the mock backend. See
 
 The script:
 
-1. Builds a unique mock bundle per scenario via `build-bundle.sh`
-2. Uploads it to `/api/bundles`
+1. Builds a unique mock artifact and its detached `.sig` per scenario via `build-bundle.sh`
+2. Uploads the pair to `/api/bundles` as multipart, signature part first
 3. Submits a `node.update` job
 4. Polls the job to completion
 5. Asserts the `node_updates` row's final status
@@ -194,7 +195,7 @@ The script:
 
 ## When hardware arrives
 
-Two Raspberry Pi 5 / 8GB units + custom Buildroot 2026.02 LTS image with rauc 1.15. Same partition layout described in `wiki/projects/rasputin/design/control-plane/updates.md`. The bundle producer needs a `--rauc` mode added to `scripts/build-bundle.sh` that calls `rauc bundle` instead of producing the mock JSON envelope. The saga and test harness are unchanged.
+Two Raspberry Pi 5 / 8GB units + custom Buildroot 2026.02 LTS image with rauc 1.15. Same partition layout described in `wiki/projects/rasputin/design/control-plane/updates.md`. The bundle producer needs a `--rauc` mode added to `scripts/build-bundle.sh` that calls `rauc bundle` instead of signing a plain blob. The saga and test harness are unchanged.
 
 Scenario A on hardware: build a bundle whose kernel cmdline includes `panic=1 panic_on_oops=1` + an OOPS-triggering test module. Boot will fail, Pi tryboot will revert.
 

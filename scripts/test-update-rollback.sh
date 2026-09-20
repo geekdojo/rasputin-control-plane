@@ -73,9 +73,9 @@ run_scenario() {
     echo "=== Scenario $name: $desc ==="
     echo "    RASPUTIN_UPDATE_FAIL_MODE=$fail_mode  expected outcome: $expect"
 
-    # 1. Build the bundle.
+    # 1. Build the artifact and its detached signature.
     local version="0.test-$name-$(date +%s)"
-    local bundle="$cdir/bundle-$name.raspbundle"
+    local bundle="$cdir/bundle-$name.bin"
     ./scripts/build-bundle.sh \
         --version "$version" \
         --out "$bundle" \
@@ -84,11 +84,16 @@ run_scenario() {
         --description "test scenario $name" \
         >/dev/null
 
-    # 2. Upload.
+    # 2. Upload the pair. The signature part goes first — see the route's doc
+    #    comment; the api reads it before it will touch the artifact.
     local upload_resp
     upload_resp=$(curl_auth -X POST \
-        -H 'Content-Type: application/octet-stream' \
-        --data-binary "@$bundle" \
+        -F "signature=@$bundle.sig" \
+        -F "version=$version" \
+        -F "architecture=arm64" \
+        -F "compatible=rasputin-pi5-cm5" \
+        -F "description=test scenario $name" \
+        -F "artifact=@$bundle" \
         "$API/api/bundles")
     local sha
     sha=$(echo "$upload_resp" | jq -r .sha256)

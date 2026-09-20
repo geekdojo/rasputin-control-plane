@@ -2088,56 +2088,43 @@ func envBoolPtr(key string) *bool {
 	}
 }
 
-// updateTrustEnv is the one way to reach the dev-permissive OS-update verifier.
-// Named, never inferred — the whole point of wireBundleVerifier below.
+// updateTrustEnv named the OS-update verifier's mode. The only mode left is
+// the required one, so the variable no longer selects anything — it is read
+// solely to tell an operator whose start-up scripts still set it that it has
+// stopped doing what it used to.
 const updateTrustEnv = "RASPUTIN_UPDATE_TRUST"
 
-// wireBundleVerifier selects the OS-update signature verifier
-// (RASPUTIN_UPDATE_TRUST, default "require"):
+// wireBundleVerifier builds the OS-update signature verifier.
 //
-//	require        — <trustDir>/root-ca.pem must load. If it does not, the
-//	                 verifier is UNAVAILABLE and every bundle is refused.
-//	dev-permissive — a dev box with no PKI: with no root CA present, bundle
-//	                 signatures are parsed but not checked. Explicit only.
+// There is exactly one posture now: <trustDir>/root-ca.pem must load, and if
+// it does not the verifier is UNAVAILABLE and every artifact is refused.
 //
-// ⚠️ THE MISSING FILE USED TO SELECT THE PERMISSIVE MODE BY ITSELF, and that is
-// the same class of bug as the 2026-09-01 storage incident and the mock-mesh
-// fallback #220 removed: an absent prerequisite silently became a confident
-// answer. Here the answer was "this OS update bundle is fine to install",
-// produced without checking a single signature, on the artifact that decides
-// what code a node boots. It was visible only as SignedBy "<unverified>" in a
-// manifest, which nothing alerts on. `require` means require.
+// ⚠️ THERE USED TO BE A SECOND, and before that the missing file selected it by
+// itself — the same class of bug as the 2026-09-01 storage incident and the
+// mock-mesh fallback #220 removed: an absent prerequisite silently became a
+// confident answer. Here the answer was "this OS update bundle is fine to
+// install", produced without checking a single signature, on the artifact that
+// decides what code a node boots. Making it opt-in by name kept the answer
+// available to anyone who typed the name. It is now unreachable: the verifier
+// delegates to artifactsig, which has no permissive mode to select. A dev box
+// gets a real PKI from scripts/pki-init.sh, whose release leaf carries the
+// same purpose OID the release pipeline's does.
 //
 // NOT log.Fatalf, for the reason #89 settled: an appliance that will not start
 // is unreachable and unfixable. The api boots, /healthz answers, every other
 // page works; only bundle upload and staging refuse, naming the missing file.
-// An unrecognised value falls back to `require` — never to permissive.
 func wireBundleVerifier(trustDir string) *updater.Verifier {
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv(updateTrustEnv)))
-	if mode == "dev-permissive" {
-		v := updater.NewDevPermissiveVerifier(trustDir)
-		if v.TrustConfigured() {
-			log.Printf("rasputin-api: %s=dev-permissive, but a root CA loaded from %s — bundle "+
-				"signatures are still verified against it. The opt-in only takes effect with no trust root.",
-				updateTrustEnv, trustDir)
-		} else {
-			log.Printf("rasputin-api: ⚠️  %s=dev-permissive — OS update bundles are accepted WITHOUT any "+
-				"signature check and recorded as SignedBy \"<unverified>\". EXPLICITLY REQUESTED; this must "+
-				"never be set on hardware.", updateTrustEnv)
-		}
-		return v
-	}
-	if mode != "" && mode != "require" {
-		log.Printf("rasputin-api: ⚠️  CONFIG FAULT: %s=%q is not recognised (expected require|dev-permissive) "+
-			"— falling back to require, never to permissive. Correct it and restart the api.", updateTrustEnv, mode)
+	if mode := strings.ToLower(strings.TrimSpace(os.Getenv(updateTrustEnv))); mode != "" && mode != "require" {
+		log.Printf("rasputin-api: ⚠️  %s=%q is ignored — OS update artifacts are verified against "+
+			"%s/root-ca.pem and there is no longer any mode that skips the check. Run scripts/pki-init.sh "+
+			"on a dev box with no PKI, and drop the variable.", updateTrustEnv, mode, trustDir)
 	}
 	v := updater.NewVerifier(trustDir)
 	if !v.Available() {
 		log.Printf("rasputin-api: ⚠️  OS UPDATE VERIFICATION UNAVAILABLE: %s. No unverified mode was "+
-			"substituted — an update bundle nobody checked is the one artifact that decides what code a "+
+			"substituted — an update artifact nobody checked is the one thing that decides what code a "+
 			"node boots. The api is starting anyway so this control plane stays reachable and fixable; "+
-			"bundle upload and staging refuse until the trust root is in place, or set %s=dev-permissive "+
-			"explicitly if this is a dev box with no PKI.", v.UnavailableReason(), updateTrustEnv)
+			"bundle upload and staging refuse until the trust root is in place.", v.UnavailableReason())
 	}
 	return v
 }

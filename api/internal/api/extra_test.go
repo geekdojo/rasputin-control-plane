@@ -1,16 +1,12 @@
 package api
 
 import (
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
+	"bytes"
 	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
-	"math/big"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,97 +26,147 @@ import (
 // Bundle upload — round-trip through verifier + GET-by-sha
 // ============================================================================
 
-// buildBundleFixture sets up the verifier with a fresh root CA stashed under
-// the api fixture dir and returns the bundle bytes + expected sha.
-func buildBundleFixture(t *testing.T, f *apiFixture) ([]byte, string) {
+// artifactFixture is the artifact / detached-signature / trust-root triple the
+// bundle routes now take. It is the CMS pair artifactsig's fixtures hold —
+// produced by a verbatim copy of the release pipeline's own `openssl cms
+// -sign` command — rather than anything invented here, because a verifier
+// proven against signatures the test made up proves nothing about the ones the
+// pipeline emits.
+type artifactFixture struct {
+	artifact []byte
+	sig      []byte
+	sha      string
+}
+
+func artifactsigFixture(t *testing.T, name string) string {
 	t.Helper()
-	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	return filepath.Join("..", "..", "..", "artifactsig", "testdata", name)
+}
+
+// buildBundleFixture installs the fixture root CA under f.dir, re-inits the
+// server's verifier so trust is ENFORCED, and returns the artifact bytes plus
+// their sha256. Callers that also need the detached signature use
+// buildSignedArtifactFixture.
+func buildBundleFixture(t *testing.T, f *apiFixture) ([]byte, string) {
+	af := buildSignedArtifactFixture(t, f)
+	return af.artifact, af.sha
+}
+
+func buildSignedArtifactFixture(t *testing.T, f *apiFixture) artifactFixture {
+	t.Helper()
+	rootPEM, err := os.ReadFile(artifactsigFixture(t, "root-ca.pem"))
 	if err != nil {
-		t.Fatalf("gen root: %v", err)
+		t.Fatalf("read fixture root CA: %v", err)
 	}
-	rootTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "TestRoot"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(2 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign,
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-	}
-	rootDER, _ := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
-	rootCert, _ := x509.ParseCertificate(rootDER)
-
-	leafKey, _ := rsa.GenerateKey(rand.Reader, 2048)
-	leafTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "TestSigner"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(2 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
-	}
-	leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, rootCert, &leafKey.PublicKey, rootKey)
-	leafCert, _ := x509.ParseCertificate(leafDER)
-	_ = leafCert
-	leafPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
-	rootPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})
-
-	// Overwrite the verifier dir with a real root CA.
 	if err := os.WriteFile(filepath.Join(f.dir, "root-ca.pem"), rootPEM, 0o600); err != nil {
 		t.Fatalf("write root: %v", err)
 	}
-	// Re-init the verifier on the server.
 	v := updater.NewVerifier(f.dir)
 	if !v.TrustConfigured() {
 		t.Fatalf("fixture root CA did not load from %s", f.dir)
 	}
 	f.srv.updaterVerifier = v
 
-	manifest := proto.BundleManifest{
-		Version: "test-1.0", Compatible: "rasputin-rpi-arm64", Architecture: "arm64",
+	artifact, err := os.ReadFile(artifactsigFixture(t, "payload.bin"))
+	if err != nil {
+		t.Fatalf("read fixture artifact: %v", err)
 	}
-	payload := []byte("hello payload")
-	hashed := sha256.Sum256(payload)
-	sig, _ := rsa.SignPKCS1v15(rand.Reader, leafKey, crypto.SHA256, hashed[:])
+	sig, err := os.ReadFile(artifactsigFixture(t, "payload.bin.sig"))
+	if err != nil {
+		t.Fatalf("read fixture signature: %v", err)
+	}
+	sum := sha256.Sum256(artifact)
+	return artifactFixture{artifact: artifact, sig: sig, sha: hex.EncodeToString(sum[:])}
+}
 
-	env := map[string]any{
-		"manifest":  manifest,
-		"payload":   hex.EncodeToString(payload),
-		"signature": hex.EncodeToString(sig),
-		"certPem":   string(leafPEM),
+// uploadBody builds the multipart body POST /api/bundles takes, in the order
+// the route requires: signature first, artifact last.
+func uploadBody(t *testing.T, sig, artifact []byte, fields map[string]string) (io.Reader, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if sig != nil {
+		part, err := mw.CreateFormFile("signature", "artifact.sig")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(sig); err != nil {
+			t.Fatal(err)
+		}
 	}
-	buf, _ := json.Marshal(env)
-	sum := sha256.Sum256(buf)
-	return buf, hex.EncodeToString(sum[:])
+	for k, val := range fields {
+		if err := mw.WriteField(k, val); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if artifact != nil {
+		part, err := mw.CreateFormFile("artifact", "artifact")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(artifact); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf, mw.FormDataContentType()
+}
+
+func defaultUploadFields() map[string]string {
+	return map[string]string{
+		"version": "test-1.0", "architecture": "arm64", "compatible": "rasputin-rpi-arm64",
+	}
+}
+
+// uploadArtifact POSTs the multipart upload and returns the recorder.
+func uploadArtifact(t *testing.T, f *apiFixture, c *http.Cookie,
+	sig, artifact []byte, fields map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, contentType := uploadBody(t, sig, artifact, fields)
+	req := httptest.NewRequest(http.MethodPost, "/api/bundles", body)
+	req.Header.Set("Content-Type", contentType)
+	if c != nil {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, req)
+	return w
 }
 
 func TestHandleUploadAndGetBundle_RoundTrip(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
-	buf, sha := buildBundleFixture(t, f)
+	af := buildSignedArtifactFixture(t, f)
 
 	if err := os.MkdirAll(f.bundleDir, 0o755); err != nil {
 		t.Fatalf("mkdir bundle: %v", err)
 	}
 
-	// Upload via raw body.
-	req := httptest.NewRequest(http.MethodPost, "/api/bundles", strings.NewReader(string(buf)))
-	req.ContentLength = int64(len(buf))
-	req.AddCookie(c)
-	w := httptest.NewRecorder()
-	f.handler.ServeHTTP(w, req)
+	w := uploadArtifact(t, f, c, af.sig, af.artifact, defaultUploadFields())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("upload want 201, got %d body=%s", w.Code, w.Body.String())
 	}
+	// SignedBy is the VERIFIED leaf's CN, not a string the upload supplied.
+	if body := w.Body.String(); !strings.Contains(body, "Rasputin Test Release Leaf") {
+		t.Errorf("the stored bundle must be attributed to the verified signer; got %s", body)
+	}
+
+	// The detached signature is staged beside the blob, which is where the
+	// agent fetches it from before it moves the artifact.
+	ws := f.do(t, http.MethodGet, "/api/bundles/"+af.sha+"/sig", "", nil)
+	if ws.Code != http.StatusOK {
+		t.Errorf("get sig want 200, got %d body=%s", ws.Code, ws.Body.String())
+	}
+	if !bytes.Equal(ws.Body.Bytes(), af.sig) {
+		t.Error("the served signature is not the one that was uploaded")
+	}
 
 	// Duplicate upload → 409.
-	req2 := httptest.NewRequest(http.MethodPost, "/api/bundles", strings.NewReader(string(buf)))
-	req2.ContentLength = int64(len(buf))
-	req2.AddCookie(c)
-	w2 := httptest.NewRecorder()
-	f.handler.ServeHTTP(w2, req2)
+	w2 := uploadArtifact(t, f, c, af.sig, af.artifact, defaultUploadFields())
 	if w2.Code != http.StatusConflict {
-		t.Errorf("dup upload want 409, got %d", w2.Code)
+		t.Errorf("dup upload want 409, got %d body=%s", w2.Code, w2.Body.String())
 	}
 
 	// List: bundle now present.
@@ -128,35 +174,131 @@ func TestHandleUploadAndGetBundle_RoundTrip(t *testing.T) {
 	if w3.Code != http.StatusOK {
 		t.Errorf("list want 200, got %d", w3.Code)
 	}
-	if !strings.Contains(w3.Body.String(), sha) {
+	if !strings.Contains(w3.Body.String(), af.sha) {
 		t.Errorf("list missing sha; body=%s", w3.Body.String())
 	}
 
 	// GET bytes (open endpoint).
-	wb := f.do(t, http.MethodGet, "/api/bundles/"+sha, "", nil)
+	wb := f.do(t, http.MethodGet, "/api/bundles/"+af.sha, "", nil)
 	if wb.Code != http.StatusOK {
 		t.Errorf("get bytes want 200, got %d", wb.Code)
 	}
 
 	// Delete: 204.
-	wd := f.do(t, http.MethodDelete, "/api/bundles/"+sha, "", c)
+	wd := f.do(t, http.MethodDelete, "/api/bundles/"+af.sha, "", c)
 	if wd.Code != http.StatusNoContent {
 		t.Errorf("delete want 204, got %d", wd.Code)
+	}
+}
+
+// THE GATE. A real artifact and a real, well-formed signature — over DIFFERENT
+// bytes. Chain-to-root passes; the content binding does not. This is the case
+// the retired envelope could not even express, because its signature travelled
+// inside the thing it signed.
+func TestHandleUploadBundle_SignatureOverOtherBytesIsRefused(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	af := buildSignedArtifactFixture(t, f)
+
+	tampered := slices.Clone(af.artifact)
+	tampered[len(tampered)/2] ^= 0xFF
+
+	w := uploadArtifact(t, f, c, af.sig, tampered, defaultUploadFields())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	sum := sha256.Sum256(tampered)
+	if g := f.do(t, http.MethodGet, "/api/bundles/"+hex.EncodeToString(sum[:]), "", nil); g.Code == http.StatusOK {
+		t.Error("an artifact whose signature does not cover it must not be stored")
+	}
+}
+
+// THE PURPOSE SPLIT at the HTTP boundary: a catalog-signed bundle is a valid
+// signature under the same root, and the update route must still refuse it.
+func TestHandleUploadBundle_CatalogPurposeSignatureIsRefused(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	af := buildSignedArtifactFixture(t, f)
+	catalogSig, err := os.ReadFile(artifactsigFixture(t, "payload.bin.catalog.sig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := uploadArtifact(t, f, c, catalogSig, af.artifact, defaultUploadFields())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	if g := f.do(t, http.MethodGet, "/api/bundles/"+af.sha, "", nil); g.Code == http.StatusOK {
+		t.Error("an artifact signed by a catalog leaf must not be stored as an OS update")
+	}
+}
+
+// Each required part named on its own, because "400" on a six-part form tells
+// an operator nothing about which one they left out.
+func TestHandleUploadBundle_MissingPartsAreNamed(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	af := buildSignedArtifactFixture(t, f)
+
+	fieldsWithout := func(drop string) map[string]string {
+		m := defaultUploadFields()
+		delete(m, drop)
+		return m
+	}
+	for _, tc := range []struct {
+		name   string
+		sig    []byte
+		fields map[string]string
+		want   string
+	}{
+		{"no signature", nil, defaultUploadFields(), "`signature` part"},
+		{"no version", af.sig, fieldsWithout("version"), "`version` field"},
+		{"no architecture", af.sig, fieldsWithout("architecture"), "`architecture` field"},
+		{"no compatible", af.sig, fieldsWithout("compatible"), "`compatible` field"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := uploadArtifact(t, f, c, tc.sig, af.artifact, tc.fields)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("want 400, got %d body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.want) {
+				t.Errorf("the refusal must name %s; got %s", tc.want, w.Body.String())
+			}
+		})
+	}
+}
+
+// The retired format must not still be accepted by the route that used to take
+// it. A raspbundle envelope is now just a JSON file with no detached
+// signature, and the api refuses it as such rather than parsing it.
+func TestHandleUploadBundle_RaspbundleEnvelopeIsNoLongerAccepted(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	buildSignedArtifactFixture(t, f) // trust enforced
+
+	envelope := []byte(`{"manifest":{"version":"1.0"},"payload":"00","signature":"00","certPem":""}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/bundles", bytes.NewReader(envelope))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = int64(len(envelope))
+	req.AddCookie(c)
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "multipart/form-data") {
+		t.Errorf("the refusal must say what the route takes now; got %s", w.Body.String())
 	}
 }
 
 func TestHandleUploadBundle_VerificationFails(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
-	buildBundleFixture(t, f) // installs a real root CA, so trust is enforced
-	// A malformed envelope, WITH trust configured: rejected on its own merits
-	// as a bad artifact (400), not because the api cannot verify anything.
-	buf := []byte(`{not a valid envelope`)
-	req := httptest.NewRequest(http.MethodPost, "/api/bundles", strings.NewReader(string(buf)))
-	req.ContentLength = int64(len(buf))
-	req.AddCookie(c)
-	w := httptest.NewRecorder()
-	f.handler.ServeHTTP(w, req)
+	af := buildSignedArtifactFixture(t, f) // installs a real root CA, so trust is enforced
+	// Garbage where the detached signature should be, WITH trust configured:
+	// rejected on its own merits as a bad artifact (400), not because the api
+	// cannot verify anything.
+	w := uploadArtifact(t, f, c, []byte("not a CMS object"), af.artifact, defaultUploadFields())
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("want 400, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -164,28 +306,24 @@ func TestHandleUploadBundle_VerificationFails(t *testing.T) {
 
 // The fail-closed contract at the HTTP boundary. The fixture has no root CA,
 // which is exactly the state a box is in before scripts/pki-init.sh has run or
-// after root-ca.pem goes missing — and the bundle below is a perfectly
-// well-formed envelope. It used to be ingested and stored, SignedBy
-// "<unverified>", and was then installable on every node in the fleet.
+// after root-ca.pem goes missing — and the pair below is perfectly valid. A
+// well-formed bundle used to be ingested and stored, SignedBy "<unverified>",
+// and was then installable on every node in the fleet.
 func TestHandleUploadBundle_NoTrustRootRefusesAndStoresNothing(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
 
-	// Build a valid envelope against a throwaway PKI, then take the api's trust
-	// root back away so the upload meets an unavailable verifier.
-	buf, sha := buildBundleFixture(t, f)
+	// Build a valid pair, then take the api's trust root back away so the
+	// upload meets an unavailable verifier.
+	af := buildSignedArtifactFixture(t, f)
 	if err := os.Remove(filepath.Join(f.dir, "root-ca.pem")); err != nil {
 		t.Fatalf("remove root: %v", err)
 	}
 	f.srv.updaterVerifier = updater.NewVerifier(f.dir)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/bundles", strings.NewReader(string(buf)))
-	req.ContentLength = int64(len(buf))
-	req.AddCookie(c)
-	w := httptest.NewRecorder()
-	f.handler.ServeHTTP(w, req)
+	w := uploadArtifact(t, f, c, af.sig, af.artifact, defaultUploadFields())
 
-	// 503, not 400: the bundle is fine, the api's trust root is missing.
+	// 503, not 400: the artifact is fine, the api's trust root is missing.
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("want 503, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -193,7 +331,7 @@ func TestHandleUploadBundle_NoTrustRootRefusesAndStoresNothing(t *testing.T) {
 		t.Errorf("the refusal must name the missing trust root; got %s", body)
 	}
 	// And nothing was persisted — a refused bundle must not be stageable.
-	if g := f.do(t, http.MethodGet, "/api/bundles/"+sha, "", nil); g.Code == http.StatusOK {
+	if g := f.do(t, http.MethodGet, "/api/bundles/"+af.sha, "", nil); g.Code == http.StatusOK {
 		t.Error("a bundle refused for want of a trust root must not be stored")
 	}
 }

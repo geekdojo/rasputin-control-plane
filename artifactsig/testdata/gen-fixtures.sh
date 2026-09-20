@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# NOTE: leaves carry extendedKeyUsage=codeSigning because the real PKI issues
-# them that way (pki-init.sh, and the deployed leaf-001). They previously
-# carried no EKU at all, which is a shape Rasputin has never issued — harmless
-# until #192 made the verifier ask what a leaf is authorized to do, at which
-# point the only thing failing was the fixtures' unrealism.
+# NOTE: the release leaf carries exactly what scripts/pki-init.sh's EKU_RELEASE
+# mints and what the deployed `Rasputin Bundle Signing leaf-003` carries —
+# codeSigning, emailProtection AND the release purpose OID. Generic codeSigning
+# alone used to be enough here, because a transitional allowance accepted it
+# while leaf-001 was still signing; that allowance is deleted, so a fixture
+# without the OID now tests a leaf the PKI does not issue and the verifier does
+# not accept.
 # Regenerate the checked-in CMS fixtures for the artifactsig tests.
 #
 # These are NOT hand-rolled: the signing command below is a copy of the one the
 # firewall release pipeline runs (rasputin-openwrt-firewall
 # .github/workflows/release.yml, "CMS-sign images + emit manifest.json"), and
 # the chain shape is a copy of the production PKI's — root → intermediate →
-# leaf, leaf with CA:FALSE + digitalSignature and no EKU. The point of the
+# leaf, leaf with CA:FALSE + digitalSignature and the release EKU set. The point of the
 # fixtures is to prove the verifier accepts exactly what the pipeline emits, so
 # any divergence here quietly destroys their value. If the pipeline's sign_file
 # changes, change this to match and regenerate.
@@ -27,8 +29,10 @@ cd "$(dirname "$0")"
 DAYS=36500
 
 rm -f root-ca.pem root-ca.key intermediate.pem intermediate.key leaf.pem leaf.key \
+      catalog-leaf.pem catalog-leaf.key generic-leaf.pem generic-leaf.key \
       other-root-ca.pem other-root-ca.key other-leaf.pem other-leaf.key \
-      payload.bin payload.bin.sig payload.bin.other.sig *.csr *.srl
+      payload.bin payload.bin.sig payload.bin.other.sig payload.bin.catalog.sig \
+      payload.bin.generic.sig *.csr *.srl
 
 # --- the trusted chain ------------------------------------------------------
 openssl req -x509 -newkey rsa:4096 -noenc -keyout root-ca.key -out root-ca.pem \
@@ -44,7 +48,7 @@ openssl req -newkey rsa:2048 -noenc -keyout leaf.key -out leaf.csr \
   -subj "/C=US/O=Geekdojo Test/CN=Rasputin Test Release Leaf"
 openssl x509 -req -in leaf.csr -CA intermediate.pem -CAkey intermediate.key \
   -CAcreateserial -out leaf.pem -days "$DAYS" -sha256 \
-  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n')
+  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning,emailProtection,1.3.6.1.4.1.66587.1.1.1\n')
 
 # --- a CATALOG-purpose leaf under the SAME root -----------------------------
 # Carries the catalog OID and deliberately NOT codeSigning, exactly as
@@ -58,6 +62,17 @@ openssl x509 -req -in catalog-leaf.csr -CA intermediate.pem -CAkey intermediate.
   -CAcreateserial -out catalog-leaf.pem -days "$DAYS" -sha256 \
   -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=1.3.6.1.4.1.66587.1.1.2\n')
 
+# --- a leaf with GENERIC codeSigning and no Rasputin purpose OID ------------
+# The shape the deleted transitional allowance used to wave through. Kept as a
+# fixture precisely so a regression that reinstates the allowance fails a test
+# instead of passing silently: this leaf chains to the trusted root and is
+# well-formed, and the ONLY reason to refuse it is that it names no purpose.
+openssl req -newkey rsa:2048 -noenc -keyout generic-leaf.key -out generic-leaf.csr \
+  -subj "/C=US/O=Geekdojo Test/CN=Rasputin Test Generic CodeSigning Leaf"
+openssl x509 -req -in generic-leaf.csr -CA intermediate.pem -CAkey intermediate.key \
+  -CAcreateserial -out generic-leaf.pem -days "$DAYS" -sha256 \
+  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n')
+
 # --- an equally well-formed chain under a DIFFERENT root --------------------
 # The "attacker signed it properly, just not with our key" case. Without this,
 # a verifier that parses the CMS and forgets to pin the root still passes every
@@ -68,7 +83,7 @@ openssl req -newkey rsa:2048 -noenc -keyout other-leaf.key -out other-leaf.csr \
   -subj "/C=US/O=Someone Else/CN=Not Rasputin Leaf"
 openssl x509 -req -in other-leaf.csr -CA other-root-ca.pem -CAkey other-root-ca.key \
   -CAcreateserial -out other-leaf.pem -days "$DAYS" -sha256 \
-  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n')
+  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning,emailProtection,1.3.6.1.4.1.66587.1.1.1\n')
 
 # --- the payload + its detached signatures ----------------------------------
 # Deliberately not a round number of blocks, so an off-by-one in streaming
@@ -103,6 +118,15 @@ openssl cms -sign -binary \
   -outform DER \
   -out payload.bin.catalog.sig
 
+# The same payload signed by the GENERIC codeSigning leaf — no purpose OID.
+openssl cms -sign -binary \
+  -in payload.bin \
+  -signer   generic-leaf.pem \
+  -certfile intermediate.pem \
+  -inkey    generic-leaf.key \
+  -outform DER \
+  -out payload.bin.generic.sig
+
 # Prove the fixtures are what we think they are before checking them in: if
 # openssl itself will not verify them, the Go tests are testing nothing.
 openssl cms -verify -binary -inform DER -in payload.bin.sig -content payload.bin \
@@ -119,5 +143,5 @@ echo "ok: payload.bin.sig verifies against root-ca.pem"
 # and *.pem for that reason. The *.pem ignore carries one narrow, commented
 # negation for this directory; the *.key ignore has none, and nothing here
 # should ever make anyone want one.
-rm -f *.csr *.srl *.key intermediate.pem leaf.pem other-leaf.pem
+rm -f *.csr *.srl *.key intermediate.pem leaf.pem catalog-leaf.pem generic-leaf.pem other-leaf.pem
 echo "fixtures regenerated"

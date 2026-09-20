@@ -649,7 +649,9 @@ export interface Bundle {
 // How the api verifies OS update bundles right now. `unavailable` is not a
 // softer `enforced`: with no trust root the api REFUSES every bundle rather
 // than accepting it unchecked, and the banner has to say which one it is.
-export type BundleTrustMode = 'enforced' | 'unavailable' | 'dev-permissive';
+// 'dev-permissive' is gone: the verifier it named has no permissive mode to
+// select, so the api reports only the two postures that exist.
+export type BundleTrustMode = 'enforced' | 'unavailable';
 
 export interface BundleList {
   trustConfigured: boolean;

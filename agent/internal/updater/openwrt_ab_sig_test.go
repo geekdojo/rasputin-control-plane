@@ -125,7 +125,7 @@ func TestOpenWrtDownload_MissingStagedSignatureSaysRepull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = b.Download(context.Background(), "b1", as.bundleURL(), as.sigURL(), "", 0, nil)
+	_, _, err = b.Download(context.Background(), "b1", as.bundleURL(), as.sigURL(), wellFormedSHA, 0, nil)
 	if err == nil {
 		t.Fatal("Download accepted an artifact whose signature 404'd")
 	}
@@ -143,7 +143,7 @@ func TestOpenWrtDownload_RejectsAnOversizedSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := b.Download(context.Background(), "b1", as.bundleURL(), as.sigURL(), "", 0, nil); err == nil {
+	if _, _, err := b.Download(context.Background(), "b1", as.bundleURL(), as.sigURL(), wellFormedSHA, 0, nil); err == nil {
 		t.Fatal("Download accepted a signature larger than the cap")
 	}
 	if n := as.bundleHits.Load(); n != 0 {
@@ -157,7 +157,7 @@ func TestOpenWrtDownload_EmptySignatureRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := b.Download(context.Background(), "b1", as.bundleURL(), as.sigURL(), "", 0, nil); err == nil {
+	if _, _, err := b.Download(context.Background(), "b1", as.bundleURL(), as.sigURL(), wellFormedSHA, 0, nil); err == nil {
 		t.Fatal("Download accepted an empty signature")
 	}
 }

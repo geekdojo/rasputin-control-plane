@@ -5,11 +5,11 @@
 //
 // Components:
 //   - Store: SQLite ledger of bundles + per-node update history.
-//   - Verifier: x509 chain check against the trusted root cert; rejects
-//     bundles whose signature doesn't validate. A MISSING trust root is a
-//     refusal, not a downgrade — see the fail-closed note on Verifier. The
-//     unverified dev mode is opt-in by name (RASPUTIN_UPDATE_TRUST=
-//     dev-permissive) and is never inferred from an absent file.
+//   - Verifier: the shared artifactsig detached-CMS check against the trusted
+//     root cert, bound to the release signing purpose; rejects an artifact
+//     whose `.sig` doesn't validate or whose leaf was not issued to sign
+//     releases. A MISSING trust root is a refusal, not a downgrade — see the
+//     fail-closed note on Verifier. There is no unverified mode.
 //   - UpdateWorkflow: the 7-step saga (validate, precheck, download,
 //     install, reboot, wait-online-and-verify-slot, health-check-and-commit).
 //

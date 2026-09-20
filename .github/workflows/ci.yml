@@ -3,7 +3,8 @@ name: ci
 # Safety net for every push and PR. Jobs, in parallel:
 #
 #   catalog-floor — the embedded catalog floor still carries the publisher's
-#              signature (scripts/embed-catalog.sh --verify).
+#              signature, made by a leaf authorized to sign catalogs
+#              (scripts/embed-catalog.sh --verify).
 #
 #   release-target-guard — tests for scripts/release-target-guard.sh, which
 #              release.yml runs to prove a release tag is on the built commit.
@@ -63,13 +64,22 @@ jobs:
     # The offline floor ships in every image, so a hand-edited or stale bundle
     # would reach every cluster built from this commit. The Go test checks it
     # parses and agrees with catalog-version.txt; this checks the bytes are
-    # still the ones the publisher SIGNED, which no amount of Go can tell.
+    # still the ones a CATALOG-authorized leaf signed.
     name: catalog floor signature
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The floor check is a Go program now, not `openssl -purpose any`: only
+      # the Go verifier can ask whether the signer was authorized for the
+      # app-catalog purpose, which is the whole question. See
+      # api/cmd/rasputin-catalog-verify.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache-dependency-path: "*/go.sum"
       - name: verify the embedded catalog floor
         env:
           RASPUTIN_ROOT_CA_PEM: ${{ vars.RASPUTIN_ROOT_CA_PEM }}

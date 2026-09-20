@@ -34,10 +34,10 @@ incident that settled this):
 | Variable | Default | Dev value | Without it |
 |---|---|---|---|
 | `RASPUTIN_MESH_BACKEND` | `auto` | `mock` | With no Headscale and no Docker the mesh is *unavailable*; the api boots, mesh verbs refuse |
-| `RASPUTIN_UPDATE_TRUST` | `require` | `dev-permissive` | With no `$RASPUTIN_TRUST_DIR/root-ca.pem` OS update bundles are *refused* (503); the api boots, everything else works |
+| `RASPUTIN_UPDATE_TRUST` | *(ignored)* | *(unset)* | With no `$RASPUTIN_TRUST_DIR/root-ca.pem` OS update artifacts are *refused* (503); the api boots, everything else works |
 
-`RASPUTIN_UPDATE_TRUST=dev-permissive` accepts bundles without checking any
-signature and records them `SignedBy "<unverified>"`. It exists for a laptop
-that has never run `scripts/pki-init.sh`. It must never be set on hardware —
-and on a box that has a `root-ca.pem` it changes nothing, because the root is
-loaded and enforced either way. See [`../docs/pki.md`](../docs/pki.md).
+`RASPUTIN_UPDATE_TRUST` no longer selects anything. It used to name a
+`dev-permissive` mode that accepted bundles without checking any signature and
+recorded them `SignedBy "<unverified>"`; the verifier it named is gone, so a
+set value is only logged as ignored. A laptop with no PKI runs
+`scripts/pki-init.sh`. See [`../docs/pki.md`](../docs/pki.md).

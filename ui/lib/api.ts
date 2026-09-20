@@ -670,12 +670,34 @@ export async function listBundles(): Promise<BundleList> {
   return r ?? { trustConfigured: false, trustMode: 'unavailable', bundles: [] };
 }
 
-export async function uploadBundle(file: File): Promise<Bundle> {
+export interface UploadBundleInput {
+  artifact: File;
+  /** The detached CMS signature published beside the artifact (`<artifact>.sig`). */
+  signature: File;
+  version: string;
+  architecture: string;
+  compatible: string;
+  description?: string;
+}
+
+/** POST /api/bundles takes the artifact AND its detached signature. The order
+ *  of the parts is part of the contract: the api reads the signature first so
+ *  an unusable one costs a kilobyte instead of the whole artifact, and it
+ *  streams the artifact straight to disk once it has everything else. */
+export async function uploadBundle(input: UploadBundleInput): Promise<Bundle> {
+  const form = new FormData();
+  form.append('signature', input.signature);
+  form.append('version', input.version);
+  form.append('architecture', input.architecture);
+  form.append('compatible', input.compatible);
+  if (input.description) form.append('description', input.description);
+  form.append('artifact', input.artifact);
   const res = await fetch(`${BASE}/api/bundles`, {
     method: 'POST',
     credentials: 'include',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: file,
+    // No explicit Content-Type: the browser sets multipart/form-data with the
+    // boundary it generated, and overriding it makes the body unparseable.
+    body: form,
   });
   if (!res.ok) {
     let detail = '';

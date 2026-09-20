@@ -12,19 +12,26 @@ Trust on the device side: `/etc/rasputin/trust/root-ca.pem`. The api reads the s
 
 ## The trust root is required
 
-Without it the api **refuses every OS update bundle** — upload and staging return `503` naming the missing file, and nothing installs. It does not degrade to accepting bundles unverified, which is what it used to do: a missing `root-ca.pem` selected a "dev-permissive" verifier that skipped every signature check and marked the bundle `SignedBy "<unverified>"`, on the one artifact that decides what code a node boots.
+Without it the api **refuses every OS update artifact** — upload and staging return `503` naming the missing file, and nothing installs. It does not degrade to accepting artifacts unverified, which is what it used to do: a missing `root-ca.pem` selected a "dev-permissive" verifier that skipped every signature check and marked the bundle `SignedBy "<unverified>"`, on the one artifact that decides what code a node boots.
+
+**There is no longer any mode that skips the check.** Naming it by hand was the last way to reach it, and that is gone too: the api verifies with the shared `artifactsig` package, which has no permissive mode to select. `RASPUTIN_UPDATE_TRUST` is read only so an api started with it logs that the variable no longer does anything; run `scripts/pki-init.sh` instead.
 
 The api still **starts** with no trust root — it serves `/healthz`, the UI and every other subsystem, because a control plane that won't start can't be used to fix anything (#89). Only the update path refuses.
 
 On Rasputin hardware nothing is needed: the OS image bakes the public root at `/etc/rasputin/trust/root-ca.pem` (CI injects `vars.RASPUTIN_ROOT_CA_PEM`) and `rasputin-os`'s `tmpfiles.d` symlinks it into `/var/lib/rasputin/trust/root-ca.pem` before the api starts.
 
-On a dev box with no PKI at all, ask for the old behaviour by name:
+## What an operator uploads
+
+`POST /api/bundles` takes the **artifact and the detached `.sig` published beside it** — the same pair the release publishes and the node verifies — as `multipart/form-data`, with the `signature` part first and the `artifact` part last:
 
 ```sh
-RASPUTIN_UPDATE_TRUST=dev-permissive go run ./api/cmd/rasputin-api
+curl -b cookies.txt -X POST http://localhost:8080/api/bundles \
+  -F signature=@rasputin-fw-n100-2026.09.3.rootfs.sig \
+  -F version=2026.09.3 -F architecture=amd64 -F compatible=rasputin-fw-n100 \
+  -F artifact=@rasputin-fw-n100-2026.09.3.rootfs
 ```
 
-`require` (the default) and `dev-permissive` are the only accepted values; anything else falls back to `require`, never to permissive. Setting `dev-permissive` on a box that *does* have a `root-ca.pem` changes nothing — the root is loaded and enforced.
+The api verifies the pair before it stores anything, and requires a leaf carrying the **release** purpose OID `1.3.6.1.4.1.66587.1.1.1`. The `.raspbundle` JSON envelope this route used to take is retired: it was a dev-only format with a verifier of its own, and its signature covered only the payload, never the manifest that travelled with it.
 
 ## One-time bootstrap
 
