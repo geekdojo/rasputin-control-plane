@@ -37,7 +37,7 @@ R11	api/internal/setup/store.go	Store.GetBool	a boolean setting row	TestGetBool_
 R12	artifactsig/verify.go	TrustRootPath	RASPUTIN_TRUST_ROOT	TestTrustRootPath	covered	
 R13	agent/internal/bus/pin.go	ResolvePin	the bus pin, from the environment or the pin file		pending	geekdojo/geekdojo-brain#510
 R14	agent/internal/bus/token.go	ResolveTokenSource	the join token, from the environment or the token file	TestResolveTokenSource	covered	
-R15	agent/cmd/rasputin-agent/main.go	bmcConfigFromEnv	RASPUTIN_BMC_TURINGPI_FINGERPRINT and RASPUTIN_BMC_TURINGPI_INSECURE	TestBMCConfigFromEnvCoversEveryField TestBMCConfigFromEnv_FailsClosedOnEveryShapeOfInput	covered	
+R15	agent/cmd/rasputin-agent/main.go	bmcConfigFromEnv	RASPUTIN_BMC_TURINGPI_PIN, and whether a retired RASPUTIN_BMC_TURINGPI_{FINGERPRINT,INSECURE} is still set	TestBMCConfigFromEnvCoversEveryField TestBMCConfigFromEnv_FailsClosedOnEveryShapeOfInput TestRetiredBMCEnvInUse	covered	
 R16	agent/cmd/rasputin-agent/main.go	agentStateDir	RASPUTIN_AGENT_STATE_DIR, which holds the pin file	TestAgentStateDir	covered	
 R17	agent/internal/updater/fault.go	Arm	RASPUTIN_DEBUG_UPDATE_FAULT, against the release marker	TestArm_UnsetIsNoneAndSilent TestArm_UnknownValueArmsNothingAndCannotStopTheAgent TestArm_RefusesToArmOnAReleasedImage	covered	
 R18	agent/internal/health/health.go	check	RASPUTIN_UCI_BACKEND and the firewall config file	TestFirewallRoleWithoutConfigIsUnhealthy TestOnlyTheMockBackendOptsIntoTheDegradedGate	covered	

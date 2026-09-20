@@ -464,7 +464,7 @@ func TestRetiredBMCEnvInUse(t *testing.T) {
 			t.Run(key, func(t *testing.T) {
 				t.Setenv("RASPUTIN_BMC_TURINGPI_PIN", pin)
 				t.Setenv(key, "true")
-				got := retiredBMCEnvInUse("turingpi")
+				got := retiredBMCEnvInUse("turingpi", bmcConfigFromEnv(t.TempDir()).TuringPiPin)
 				if got == "" {
 					t.Fatalf("%s is set; the selection must be rejected", key)
 				}
@@ -476,7 +476,7 @@ func TestRetiredBMCEnvInUse(t *testing.T) {
 	})
 
 	t.Run("no pin at all", func(t *testing.T) {
-		got := retiredBMCEnvInUse("turingpi")
+		got := retiredBMCEnvInUse("turingpi", bmcConfigFromEnv(t.TempDir()).TuringPiPin)
 		if got == "" || !strings.Contains(got, "RASPUTIN_BMC_TURINGPI_PIN") {
 			t.Errorf("a turingpi selection with no pin must be rejected by name; got %q", got)
 		}
@@ -484,7 +484,7 @@ func TestRetiredBMCEnvInUse(t *testing.T) {
 
 	t.Run("a pinned selection is honoured", func(t *testing.T) {
 		t.Setenv("RASPUTIN_BMC_TURINGPI_PIN", pin)
-		if got := retiredBMCEnvInUse("turingpi"); got != "" {
+		if got := retiredBMCEnvInUse("turingpi", bmcConfigFromEnv(t.TempDir()).TuringPiPin); got != "" {
 			t.Errorf("a pinned turingpi selection must be honoured; got %q", got)
 		}
 	})
@@ -492,7 +492,7 @@ func TestRetiredBMCEnvInUse(t *testing.T) {
 	t.Run("other backends are untouched", func(t *testing.T) {
 		t.Setenv("RASPUTIN_BMC_TURINGPI_INSECURE", "true")
 		for _, kind := range []string{"", "none", "mock", "bitscope"} {
-			if got := retiredBMCEnvInUse(kind); got != "" {
+			if got := retiredBMCEnvInUse(kind, bmcConfigFromEnv(t.TempDir()).TuringPiPin); got != "" {
 				t.Errorf("kind %q must be unaffected; got %q", kind, got)
 			}
 		}

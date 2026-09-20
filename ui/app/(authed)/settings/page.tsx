@@ -222,19 +222,19 @@ function BMCSection() {
   // Discovery, not a form field. The probe runs on the BMC-host agent
   // with no credentials: mDNS is link-local so only that node can resolve
   // the board's name, and an unauthenticated 401 identifies the board
-  // before a password exists. The operator confirms the certificate we
-  // captured rather than reading one out of openssl themselves.
+  // before a password exists. The operator accepts the pin we captured
+  // rather than reading one out of openssl themselves.
   // Two-step by necessity, one press by design.
   //
   // Finding the board needs no credentials; reading its slots does. We
-  // must not send a password to a board whose certificate the operator
-  // has not accepted — pinning to a digest captured on the same
-  // unverified handshake would authorise whatever answered.
+  // must not send a password to a board whose key the operator has not
+  // accepted — pinning to something captured on the same unverified
+  // handshake would authorise whatever answered.
   //
   // The first build made that an implicit second press of the same
   // button, which reads as the button not working (Bryce, bench
-  // 2026-07-29). So the certificate now gets an explicit accept, exactly
-  // like ssh asking about an unknown host key, and accepting runs the
+  // 2026-07-29). So the board now gets an explicit accept, exactly like
+  // ssh asking about an unknown host key, and accepting runs the
   // credentialed half straight away.
   async function runProbe(acceptedPin?: string) {
     setTpProbing(true);
@@ -484,7 +484,7 @@ function BMCSection() {
               <Hint>
                 Leave the address blank and press DETECT BOARD to find it automatically — the search runs from{' '}
                 {hostNode || 'the BMC host node'}, which is on the board&rsquo;s network. It reads the board&rsquo;s
-                certificate and shows it to you; accepting it pins it and fills in the slot list.
+                key and shows you its pin; accepting it pins the board and fills in the slot list.
               </Hint>
               {tpProbe && (
                 <div style={{ border: `1px solid ${HAIR}`, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>

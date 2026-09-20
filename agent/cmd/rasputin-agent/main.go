@@ -213,13 +213,13 @@ func main() {
 	// registration, and the operator detects the board again to get a pin.
 	// That is the env-path form of the "re-detect needed" a stored selection
 	// gets (geekdojo/geekdojo-brain#548).
-	if reason := retiredBMCEnvInUse(bmcKind); reason != "" {
+	bmcCfg := bmcConfigFromEnv(filepath.Join(stateDir, "bmc"))
+	if reason := retiredBMCEnvInUse(bmcKind, bmcCfg.TuringPiPin); reason != "" {
 		faults.Reject("RASPUTIN_BMC_BACKEND", bmcKind, []string{bmc.BackendNone},
 			reason+" — BMC is OFF on this node until the board is detected again (no power control, no serial console)")
 		bmcKind = bmc.BackendNone
 	}
-	bmcHost, err := bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"),
-		bmcKind, bmcConfigFromEnv(filepath.Join(stateDir, "bmc")))
+	bmcHost, err := bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"), bmcKind, bmcCfg)
 	if err != nil {
 		// THE SITE THAT WAS PROVEN ON HARDWARE (tp-cp1, 2026-07-28): an env pin
 		// naming a backend this image doesn't carry used to be fatal, and took
@@ -234,8 +234,7 @@ func main() {
 		if errors.Is(err, bmc.ErrUnknownBackend) {
 			faults.Reject("RASPUTIN_BMC_BACKEND", bmcKind, append([]string{bmc.BackendNone}, bmc.Names()...),
 				"BMC is OFF on this node — no power control, no serial console")
-			bmcHost, err = bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"), bmc.BackendNone,
-				bmcConfigFromEnv(filepath.Join(stateDir, "bmc")))
+			bmcHost, err = bmc.NewHost(nodeID, filepath.Join(stateDir, "bmc"), bmc.BackendNone, bmcCfg)
 		}
 		if err != nil {
 			log.Fatalf("rasputin-agent: bmc host: %v", err)
@@ -1246,10 +1245,15 @@ var retiredBMCEnv = []string{
 // retiredBMCEnvInUse reports why a turingpi env selection cannot be honoured,
 // or "" when it can. Two cases, and they read differently to an operator: a
 // retired variable is still set (their configuration says something this agent
-// no longer does), or no pin is set at all (it says nothing about trust).
+// no longer does), or no pin was resolved at all (it says nothing about trust).
+//
+// pin comes from bmcConfigFromEnv, the declared resolver
+// (.github/security-resolvers.tsv R15) — this function does not read the pin
+// variable itself, so there is exactly one place that does and exactly one
+// place whose fail-closed behaviour has to be table-tested.
 //
 // Only the turingpi backend is affected; every other kind is left alone.
-func retiredBMCEnvInUse(kind string) string {
+func retiredBMCEnvInUse(kind, pin string) string {
 	if kind != "turingpi" {
 		return ""
 	}
@@ -1258,7 +1262,7 @@ func retiredBMCEnvInUse(kind string) string {
 			return key + " is set, and BMC TLS is not configured that way any more: the board is trusted by one pin (RASPUTIN_BMC_TURINGPI_PIN, the same form as the bus pin)"
 		}
 	}
-	if strings.TrimSpace(os.Getenv("RASPUTIN_BMC_TURINGPI_PIN")) == "" {
+	if strings.TrimSpace(pin) == "" {
 		return "RASPUTIN_BMC_TURINGPI_PIN is not set, and there is no unpinned mode"
 	}
 	return ""
