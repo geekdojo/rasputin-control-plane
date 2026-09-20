@@ -48,4 +48,3 @@ FO04	api/cmd/rasputin-api/main.go	main:RASPUTIN_TRUST_DIR	blocked	geekdojo/geekd
 FO05	agent/internal/updater/openwrt_ab.go	OpenWrtABBackend.httpClient	blocked	geekdojo/geekdojo-brain#590	Release artifacts are fetched over the public web and their integrity comes from the detached signature, not the transport. Which trust root this client should carry is decided in the cited issue.
 FO05	agent/internal/updater/rauc.go	RAUCBackend.httpClient	blocked	geekdojo/geekdojo-brain#590	Same client, same question.
 FO05	backupxfer/client.go	NewHTTPTransport	blocked	geekdojo/geekdojo-brain#590	The transfer client reaches our own control plane, so the system pool is the wrong root for it. Decided in the cited issue.
-FO06	api/internal/updater/verifier.go	Verifier.verifyRaspbundle	blocked	geekdojo/geekdojo-brain#501	The uploaded-bundle path does not go through the purpose-checked verifier yet. It is retired when that path moves onto the one detached-CMS verifier.

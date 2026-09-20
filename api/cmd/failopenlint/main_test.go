@@ -293,6 +293,25 @@ func dial() *tls.Config { return &tls.Config{InsecureSkipVerify: true} }
 			map[string]string{"agent/a.go": pkgHeader}),
 			"match nothing any more")
 	})
+
+	t.Run("every stale allowance is named, not just the first", func(t *testing.T) {
+		// Two of them, because reporting one and stopping would leave the
+		// second row looking granted — and a reader who deletes the row the
+		// gate named would still not be green.
+		root := tree(t,
+			"FO01\tagent/gone-a.go\tdial\tdeliberate\t\tthe pin is checked elsewhere\n"+
+				"FO06\tapi/gone-b.go\tusages\tblocked\tgeekdojo/geekdojo-brain#1\tretired with the verifier\n",
+			"", map[string]string{"agent/a.go": pkgHeader})
+		code, out := lint(t, root)
+		if code == 0 {
+			t.Fatalf("gate passed with two stale allowances.\n%s", out)
+		}
+		for _, want := range []string{"agent/gone-a.go", "api/gone-b.go", "2 allowance(s)"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output does not mention %q.\n%s", want, out)
+			}
+		}
+	})
 }
 
 func TestResolverRegisterHoldsItsOwnContract(t *testing.T) {

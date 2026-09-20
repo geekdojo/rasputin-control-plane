@@ -24,7 +24,7 @@
 # Checked by: go run ./api/cmd/failopenlint
 id	path	symbol	reads	test	status	cite
 R01	api/cmd/rasputin-api/main.go	secureCookies	RASPUTIN_SECURE_COOKIES and the HTTPS address	TestSecureCookies	covered	
-R02	api/cmd/rasputin-api/main.go	wireBundleVerifier	RASPUTIN_UPDATE_TRUST and the trust root on disk	TestWireBundleVerifier_MissingTrustRootIsNeverPermissive TestWireBundleVerifier_ExplicitDevPermissiveIsHonoured TestWireBundleVerifier_LoadsTheTrustRootWhenPresent	covered	
+R02	api/cmd/rasputin-api/main.go	wireBundleVerifier	RASPUTIN_UPDATE_TRUST (now ignored with a warning) and the trust root on disk	TestWireBundleVerifier_MissingTrustRootIsNeverPermissive TestWireBundleVerifier_LoadsTheTrustRootWhenPresent	covered	
 R03	api/cmd/rasputin-api/main.go	wireMesh	RASPUTIN_MESH_BACKEND, RASPUTIN_HEADSCALE_URL, RASPUTIN_HEADSCALE_API_KEY	TestWireMesh_AutoNeverInfersMock TestWireMesh_ExplicitMockIsHonoured	covered	
 R04	api/cmd/rasputin-api/main.go	clusterHostname	RASPUTIN_CLUSTER_ID	TestClusterHostname TestNoClusterIDKeepsDevDefaults	covered	
 R05	api/cmd/rasputin-api/main.go	loadBusTokenState	the preseed and tombstone files	TestLoadBusTokenState TestLoadBusPreseed	covered	
