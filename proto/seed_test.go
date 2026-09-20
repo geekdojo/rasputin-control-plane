@@ -455,7 +455,11 @@ func TestParseSeed_OneCharacterValues(t *testing.T) {
 		{name: "an empty single-quoted value", line: "RASPUTIN_NODE_ID=''", want: ""},
 		{name: "no value at all", line: "RASPUTIN_NODE_ID=", want: ""},
 		{name: "only whitespace after the =", line: "RASPUTIN_NODE_ID=   ", want: ""},
-		{name: "a backslash at the end of a double-quoted value", line: `RASPUTIN_NODE_ID="me\`, wantErr: true},
+		{name: "an unterminated double-quoted value", line: `RASPUTIN_NODE_ID="me\`, wantErr: true},
+		// The body's LAST byte is the backslash, and the value does close —
+		// so this reaches the escape handling rather than being turned away
+		// by the closing-quote check, and is the only input that does.
+		{name: "a backslash as the last byte inside double quotes", line: `RASPUTIN_NODE_ID="me\"`, wantErr: true},
 		{name: "an escaped quote at the end", line: `RASPUTIN_NODE_ID="me\""`, want: `me"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
