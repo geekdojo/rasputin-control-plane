@@ -177,3 +177,38 @@ func (h *hookedRegistry) SetLiveTokens(nodeID string, hashes []string) {
 		h.onEmpty(nodeID)
 	}
 }
+
+// A connection recorded AFTER a revoke snapshotted the live sessions — the
+// reconnect that raced it — is closed by the revoke too, and counted. This
+// drives the two halves of the count directly: what was live when the revoke
+// started, and what arrived after.
+func TestCloseRemaining_CountsASessionRecordedAfterTheSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStoreNoRegistry(t)
+	if err := s.SetNodeRegistry(ctx, newRecordingRegistry()); err != nil {
+		t.Fatal(err)
+	}
+	bus := newFakeBus(1, 2)
+	s.TrackSessions(bus)
+	tok, _, err := s.MintBound(ctx, "compute", "c1", proto.RoleCompute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := func(g grant) bool { return g.nodeID == "c1" }
+
+	// Nothing live yet: the snapshot is empty.
+	held := s.liveSessions(match)
+	if len(held) != 0 {
+		t.Fatalf("snapshot = %v, want empty", held)
+	}
+	// The racer connects after the snapshot.
+	if ok, _ := s.Admit(ctx, Conn{ServerID: testServer, CID: 1, Host: testHost}, tok, "c1"); !ok {
+		t.Fatal("the racing connection was refused")
+	}
+	if n := s.closeRemaining(match, held); n != 1 {
+		t.Errorf("closeRemaining counted %d, want 1 (the session that arrived after the snapshot)", n)
+	}
+	if bus.ClientOpen(testServer, 1) {
+		t.Error("the racing session is still open")
+	}
+}

@@ -141,3 +141,26 @@ func TestRegistry_LoadsLastSeenAtOpen(t *testing.T) {
 		t.Fatalf("Get after reopen = %+v, %v", got, err)
 	}
 }
+
+// MemberCount counts members and nothing else: a node the registry knows only
+// because it holds a live token — it has not registered yet — is not one.
+func TestRegistry_MemberCountCountsOnlyMembers(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	r := s.Registry()
+	now := time.Now().UTC()
+	if err := s.Insert(ctx, &proto.Node{ID: "member", Role: proto.RoleCompute, FirstSeen: now, LastSeen: now}); err != nil {
+		t.Fatal(err)
+	}
+	// "pending" holds a live token but has never registered.
+	r.ReplaceLiveTokens(map[string][]string{"member": {"h1"}, "pending": {"h2"}})
+	if got := r.MemberCount(); got != 1 {
+		t.Errorf("MemberCount = %d, want 1 (a node with a token but no row is not a member)", got)
+	}
+	if err := s.Delete(ctx, "member"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.MemberCount(); got != 0 {
+		t.Errorf("MemberCount after removal = %d, want 0", got)
+	}
+}
