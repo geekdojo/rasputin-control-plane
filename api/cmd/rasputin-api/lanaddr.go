@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nameserver"
@@ -153,4 +155,38 @@ func (l *apiLeaf) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error)
 		return c, nil
 	}
 	return nil, errNoAPILeaf
+}
+
+// nodeListenerCert is the node listener's certificate selection, by SNI.
+//
+// Two kinds of client reach the same port and neither can be told apart any
+// other way — they dial the same address, and ALPN cannot separate them (Go
+// adds http/1.1 to whatever is offered, so the protocol name proves nothing).
+// So the two certificates answer to different names, and the client says which
+// one it came for:
+//
+//   - bustls.BusDNSName: the bus key's certificate. A node pins the bus key
+//     already, and a collector is handed these exact bytes as its CA. This is
+//     the default, and it is what a client that sends no SNI at all gets.
+//   - anything else: the api's mesh-CA-signed server leaf, for a collector
+//     deployed before node keys existed, which asks for the cluster name and
+//     verifies against the mesh CA.
+//
+// The mesh leaf does not exist until the clock gate has passed and it has been
+// minted, so a legacy client that arrives before then is refused — with a
+// certificate error naming the reason, rather than being handed a certificate
+// it cannot verify. The listener itself is up from the first start either way,
+// which is what a node presenting a registered key needs.
+func nodeListenerCert(busCert *tls.Certificate, apiLeafFor func() *apiLeaf) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if hello.ServerName == "" || hello.ServerName == bustls.BusDNSName {
+			return busCert, nil
+		}
+		l := apiLeafFor()
+		if l == nil {
+			return nil, fmt.Errorf("rasputin-api: node listener: no server leaf for %q (HTTPS is off on this api); a node key client must ask for %q",
+				hello.ServerName, bustls.BusDNSName)
+		}
+		return l.getCertificate(hello)
+	}
 }

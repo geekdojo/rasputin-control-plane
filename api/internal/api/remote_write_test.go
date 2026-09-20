@@ -170,7 +170,7 @@ func TestHandleObsIngest_RefusesReservedMetricNames(t *testing.T) {
 
 	push := func(body []byte, ct, enc string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/obs/ingest", bytes.NewReader(body))
-		req.TLS = certState("c02")
+		req.TLS = nodeKeyState(t, "c02")
 		req.Header.Set("Content-Type", ct)
 		req.Header.Set("Content-Encoding", enc)
 		rec := httptest.NewRecorder()
