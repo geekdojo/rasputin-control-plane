@@ -305,6 +305,11 @@ func main() {
 	if err := busTokenStore.SetLivenessSink(ctx, invStore.Registry()); err != nil {
 		log.Printf("rasputin-api: ⚠️  node registry: token liveness did not load: %v — the collector ingress admits no node until the api restarts cleanly", err)
 	}
+	// The same registry decides when a contested-token alert is over: a node
+	// stops being admitted when its last live token is revoked or it is
+	// removed, and that is the fact that ends the alert (geekdojo/
+	// geekdojo-brain#500). No timer, and no second copy of node state.
+	invStore.Registry().OnNodeExcluded(busTokenStore.ForgetNode)
 
 	authStore, err := auth.OpenStore(ctx, dbPath)
 	if err != nil {
@@ -1427,6 +1432,11 @@ func main() {
 	} else {
 		alertsSvc.SetBusTLSAlert(bustls.UnavailableAlert)
 	}
+	// A join token holds one live session: when two presenters take it from
+	// each other, the token is in use from more than one place and the
+	// operator has to see it (#500). Nothing is reported while no token has
+	// been taken over.
+	alertsSvc.SetBusSessionAlerts(busTokenStore.SessionAlerts)
 	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
 	// the backup ledger, the fan-out records in the job ledger, the installed
 	// apps joined to the LIVE catalog, and the schedule — read by the /api/apps

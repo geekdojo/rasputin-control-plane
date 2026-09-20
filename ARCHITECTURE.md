@@ -75,7 +75,15 @@ live view of everything the system is doing.
 Agents authenticate with a **join token bound to their node id**. The api
 validates the token against a hashed store and mints a short-lived user JWT
 scoped to that node's own subject subtree — a compromised compute node cannot
-impersonate the firewall or read another node's command stream. Revocation is
+impersonate the firewall or read another node's command stream. Within that
+subtree the two directions stay apart: the credential may publish the node's
+events, heartbeats and logs and subscribe to `rasputin.node.<id>.cmd.>`, but
+publishing there is **denied**, because that lane is the api's direction of
+travel. Replies to commands ride the reply subject, not a command subject. A
+token also holds **one live session**: a second connection presenting it is
+admitted and the older session is disconnected, so a node's own reconnect
+always wins; each takeover is logged, and two presenters taking the session
+from each other in turn raise an alert on the alerts page. Revocation is
 a store delete; the next reconnect fails. No connection is trusted for where it
 comes from: the controlplane's own co-located agent presents a token bound to
 its node id too, which the api mints into `/var/lib/rasputin/bus/agent.token`

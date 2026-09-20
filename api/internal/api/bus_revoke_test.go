@@ -215,6 +215,10 @@ func TestBusRevoke_ForceDisconnectsLiveSessions(t *testing.T) {
 		}
 	}
 
+	// The subtests below share these connections, so anything re-dialed inside
+	// one is dialed on this t, not the subtest's.
+	outer := t
+
 	// geekdojo-brain#140: the one revoke the api refuses. Proven here rather
 	// than only at the handler, because the claim is about the bus — the
 	// controlplane's agent must still be ON it afterwards.
@@ -228,8 +232,17 @@ func TestBusRevoke_ForceDisconnectsLiveSessions(t *testing.T) {
 		assertLive(t, busSrv, a)
 		assertLive(t, busSrv, b)
 		// Still a working credential: a fresh connection with it is admitted.
-		again := dialAgent(t, busURL, "cp-1", strings.TrimSpace(string(cpToken)))
-		again.nc.Close()
+		// A token holds ONE live session (geekdojo/geekdojo-brain#500), so the
+		// agent's current connection is closed first and the fresh one takes
+		// its place for the rest of this test — presenting the token beside a
+		// live session would evict that session, which is the takeover rule,
+		// not this test's subject.
+		cp.nc.Close()
+		// dialAgent closes its connection in a t.Cleanup, so the replacement
+		// is dialed on the parent's t — a subtest's cleanup would close it
+		// before the later subtests read it.
+		cp = dialAgent(outer, busURL, "cp-1", strings.TrimSpace(string(cpToken)))
+		assertLive(t, busSrv, cp)
 	})
 
 	t.Run("API revoke closes the token's live session and its reconnect is refused", func(t *testing.T) {

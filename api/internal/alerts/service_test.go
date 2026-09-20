@@ -438,6 +438,38 @@ func TestList_BusTLSAlertHook(t *testing.T) {
 	}
 }
 
+// The contested-join-token alert (one live session per token, geekdojo/
+// geekdojo-brain#500) rides the same security source, and an unwired hook
+// produces nothing.
+func TestList_BusSessionAlertsHook(t *testing.T) {
+	f := newFixture(t)
+	f.markSetupComplete(t)
+
+	quiet, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if _, ok := find(quiet, "bus-session-alternating:node-a"); ok {
+		t.Fatalf("an unwired hook produced an alert: %+v", quiet)
+	}
+
+	f.svc.SetBusSessionAlerts(func(now time.Time) []proto.Alert {
+		return []proto.Alert{{
+			ID: "bus-session-alternating:node-a", Severity: proto.AlertCrit,
+			Source: proto.AlertSourceSecurity, Title: "t", Since: now,
+			RelatedKind: "node", RelatedID: "node-a",
+		}}
+	})
+	loud, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got, ok := find(loud, "bus-session-alternating:node-a")
+	if !ok || got.Severity != proto.AlertCrit || got.Source != proto.AlertSourceSecurity {
+		t.Fatalf("bus-session-alternating = (%+v, %t), want a security crit", got, ok)
+	}
+}
+
 // ============================================================================
 // Empty / sort / stability
 // ============================================================================

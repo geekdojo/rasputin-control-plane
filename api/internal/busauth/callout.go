@@ -36,10 +36,12 @@ const (
 )
 
 // Validator is the subset of *Store the responder needs (eases testing).
-// Admit validates a join token for connection cid on the server serverID and,
-// on success, records the grant so revoking the token closes that connection.
+// Admit validates a join token for the connection conn names and, on success,
+// records the grant so revoking the token closes that connection — and
+// disconnects the token's previous session, because a token holds one
+// (sessions.go).
 type Validator interface {
-	Admit(ctx context.Context, serverID string, cid uint64, plaintext, presentedNodeID string) (bool, error)
+	Admit(ctx context.Context, conn Conn, plaintext, presentedNodeID string) (bool, error)
 }
 
 // Responder handles NATS auth-callout requests on the in-process connection:
@@ -131,7 +133,7 @@ func (r *Responder) handle(m *nats.Msg) {
 			return
 		}
 	}
-	ok, reason := r.authorize(serverID, cid, nodeID, token)
+	ok, reason := r.authorize(Conn{ServerID: serverID, CID: cid, Host: host}, nodeID, token)
 	if !ok {
 		log.Printf("busauth: deny node=%q host=%q: %s", nodeID, host, reason)
 		r.respond(m, userNkey, serverID, "", reason)
@@ -148,9 +150,10 @@ func (r *Responder) handle(m *nats.Msg) {
 }
 
 // authorize implements the trust model: every connection presents a valid node
-// id (it scopes the grant) and a live join token bound to that id. serverID and
-// cid name the connection (the asking server's id and its id for the
-// connection), recorded on the grant so revoking the token can close it.
+// id (it scopes the grant) and a live join token bound to that id. conn names
+// the connection (the asking server's id, its id for the connection, and the
+// host it came from), recorded on the grant so revoking the token can close
+// it and so a takeover names both presenters.
 //
 // Where a connection comes from earns it nothing. The bus used to trust any
 // loopback connection without a token, for the controlplane's co-located
@@ -163,7 +166,7 @@ func (r *Responder) handle(m *nats.Msg) {
 // The node id is checked first: it becomes one token of every subject in the
 // minted credential, and nats-server passes the username through to the
 // callout unvalidated.
-func (r *Responder) authorize(serverID string, cid uint64, nodeID, token string) (bool, string) {
+func (r *Responder) authorize(conn Conn, nodeID, token string) (bool, string) {
 	if nodeID == "" {
 		return false, "missing node id (NATS username)"
 	}
@@ -177,7 +180,7 @@ func (r *Responder) authorize(serverID string, cid uint64, nodeID, token string)
 	defer cancel()
 	// Pass the presented node id: a token bound to a different node is rejected
 	// here, so a leaked token can't be replayed as another node.
-	valid, err := r.tokens.Admit(ctx, serverID, cid, token, nodeID)
+	valid, err := r.tokens.Admit(ctx, conn, token, nodeID)
 	if err != nil {
 		return false, "token validation error"
 	}
@@ -220,6 +223,23 @@ func (r *Responder) mintUserJWT(userNkey, nodeID string) (string, error) {
 
 	scope := "rasputin.node." + nodeID
 	uc.Permissions.Pub.Allow.Add(scope + ".>") // events, heartbeat, logs
+	// ...but NOT its own command lane. `rasputin.node.<id>.cmd.>` is the
+	// control plane's direction of travel (proto/subjects.go): the api
+	// publishes commands there and the agent subscribes, so a node that can
+	// publish there can issue itself every verb the agent implements —
+	// firewall.apply, storage.claim, update.install, app.leaf — with no api
+	// decision in front of it. The broker is the only thing that separates the
+	// two directions on a shared subject tree, so it has to say so. Deny wins
+	// over Allow in nats-server, and the deny is one subtree of the allow above
+	// (jwt v2 Permission.Deny; geekdojo/geekdojo-brain#500).
+	//
+	// This costs a real agent nothing: every agent publish is an evt.*,
+	// heartbeat or log subject (agent/…: NodeEvtSubject, NodeHeartbeatSubject,
+	// the log subjects), and replies to the api's commands go to the reply
+	// subject through the Resp grant below, never to a cmd subject. The api's
+	// own connection is not callout-minted (it is the in-process AuthUser), so
+	// CP→node commands are untouched.
+	uc.Permissions.Pub.Deny.Add(proto.NodeCmdFilter(nodeID))
 	// A node subscribes to its own commands and NOTHING else — in particular
 	// not _INBOX.>. Inbox subscriptions exist only to receive replies to
 	// requests a connection makes, and the agent makes none: it only answers,
