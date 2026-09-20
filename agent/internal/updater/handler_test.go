@@ -623,6 +623,11 @@ func TestRAUCBackend_InstallHappyPath(t *testing.T) {
 	if err := writeFile644(tmp, []byte("x")); err != nil {
 		t.Fatalf("write tmp: %v", err)
 	}
+	// The signer gate needs the image's baked publisher trust root and a real
+	// signed bundle, neither of which exists on a test host. Its own
+	// behaviour, including that the production default is not a no-op, is
+	// covered in rauc_signer_test.go.
+	b.verifySigner = func(string) error { return nil }
 	ver, err := b.Install(context.Background(), "b1", tmp, proto.SlotB, nil)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
