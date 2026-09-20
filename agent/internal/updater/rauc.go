@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -66,7 +67,7 @@ func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
 	if binary == "" {
 		return nil, errors.New("rauc backend: binary path required")
 	}
-	if err := os.MkdirAll(filepath.Join(stateDir, "bundles"), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(filepath.Join(stateDir, "bundles")); err != nil {
 		return nil, err
 	}
 	return &RAUCBackend{stateDir: stateDir, binary: binary, procCmdline: "/proc/cmdline"}, nil

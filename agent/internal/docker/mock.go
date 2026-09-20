@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -21,10 +22,14 @@ type MockBackend struct {
 	dir string
 }
 
+// NewMockBackend roots the mock at dir. The at-rest rules are the real
+// backend's (0700 directories, 0600 files): the mock writes the same compose
+// the real one would, and a dev box running it is a node like any other.
 func NewMockBackend(dir string) (*MockBackend, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(dir); err != nil {
 		return nil, fmt.Errorf("docker-mock: mkdir: %w", err)
 	}
+	TightenAppState(dir)
 	return &MockBackend{dir: dir}, nil
 }
 
@@ -45,12 +50,16 @@ func (m *MockBackend) appDir(appID string) string {
 	return filepath.Join(m.dir, appID)
 }
 
+// mockStateFileName is the mock backend's per-app state file. Named so
+// TightenAppState, which serves both backends, can reach it.
+const mockStateFileName = "state.json"
+
 func (m *MockBackend) statePath(appID string) string {
-	return filepath.Join(m.appDir(appID), "state.json")
+	return filepath.Join(m.appDir(appID), mockStateFileName)
 }
 
 func (m *MockBackend) composePath(appID string) string {
-	return filepath.Join(m.appDir(appID), "docker-compose.yml")
+	return filepath.Join(m.appDir(appID), composeFileName)
 }
 
 func (m *MockBackend) loadState(appID string) (*mockState, error) {
@@ -69,27 +78,23 @@ func (m *MockBackend) loadState(appID string) (*mockState, error) {
 }
 
 func (m *MockBackend) saveState(s *mockState) error {
-	if err := os.MkdirAll(m.appDir(s.AppID), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(m.appDir(s.AppID)); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := m.statePath(s.AppID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.statePath(s.AppID))
+	return atrest.WriteSecretFile(m.statePath(s.AppID), b)
 }
 
 func (m *MockBackend) Deploy(ctx context.Context, appID, name, composeYAML string) (proto.AppStatus, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := os.MkdirAll(m.appDir(appID), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(m.appDir(appID)); err != nil {
 		return proto.AppStatusFailed, "mkdir: " + err.Error(), err
 	}
-	if err := os.WriteFile(m.composePath(appID), []byte(composeYAML), 0o644); err != nil {
+	if err := atrest.WriteSecretFile(m.composePath(appID), []byte(composeYAML)); err != nil {
 		return proto.AppStatusFailed, "write compose: " + err.Error(), err
 	}
 	s := &mockState{

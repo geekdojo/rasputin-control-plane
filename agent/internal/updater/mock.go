@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -55,10 +56,15 @@ type mockState struct {
 // NewMockBackend opens (and initialises) a MockBackend rooted at stateDir.
 // The first run writes a sensible default state.
 func NewMockBackend(stateDir string) (*MockBackend, error) {
-	if err := os.MkdirAll(filepath.Join(stateDir, "bundles"), 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(filepath.Join(stateDir, "bundles")); err != nil {
 		return nil, err
 	}
 	m := &MockBackend{stateDir: stateDir}
+	// An existing install's file was written 0644 by an older agent and is
+	// not rewritten until something changes it. Tighten it at start.
+	if err := atrest.TightenIfExists(m.statePath()); err != nil {
+		return nil, err
+	}
 	if _, err := m.loadState(); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
@@ -111,11 +117,7 @@ func (m *MockBackend) saveState(st *mockState) error {
 	if err != nil {
 		return err
 	}
-	tmp := m.statePath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.statePath())
+	return atrest.WriteSecretFile(m.statePath(), b)
 }
 
 func (m *MockBackend) Name() string { return "mock" }

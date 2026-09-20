@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 )
 
 // MockBackend file-backs state in <stateDir>/tailscale.json. Mimics the
@@ -29,12 +31,17 @@ type mockTSState struct {
 }
 
 func NewMockBackend(stateDir string) (*MockBackend, error) {
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	if err := atrest.EnsureSecretDir(stateDir); err != nil {
 		return nil, fmt.Errorf("tailscale mock: mkdir %s: %w", stateDir, err)
 	}
 	b := &MockBackend{
 		statePath: filepath.Join(stateDir, "tailscale.json"),
 		caBundle:  filepath.Join(stateDir, "tailscaled-ca.pem"),
+	}
+	// An existing install's file was written 0644 by an older agent and is
+	// not rewritten until something changes it. Tighten it at start.
+	if err := atrest.TightenIfExists(b.statePath); err != nil {
+		return nil, fmt.Errorf("tailscale mock: %w", err)
 	}
 	if err := b.load(); err != nil {
 		return nil, err
@@ -61,15 +68,11 @@ func (b *MockBackend) load() error {
 }
 
 func (b *MockBackend) persistLocked() error {
-	tmp := b.statePath + ".tmp"
 	buf, err := json.MarshalIndent(b.state, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, b.statePath)
+	return atrest.WriteSecretFile(b.statePath, buf)
 }
 
 func (b *MockBackend) Enroll(_ context.Context, in EnrollInput) (Status, error) {

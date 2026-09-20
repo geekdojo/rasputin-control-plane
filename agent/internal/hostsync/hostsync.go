@@ -19,12 +19,12 @@ package hostsync
 import (
 	"context"
 	"log"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/mdns"
 )
 
@@ -50,7 +50,13 @@ func Run(ctx context.Context, name, dir string, interval time.Duration, reloadCm
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0755/0644 (agent/internal/atrest's public helpers), set rather than
+	// inherited: dnsmasq reads this directory and the files in it AFTER
+	// dropping to its own unprivileged user, so an owner-only mode would stop
+	// the control plane's name resolving on the firewall's LAN. What is in
+	// them is one "<ip> <name>" line — the control plane's LAN address, which
+	// every client on that LAN already learns by resolving the name.
+	if err := atrest.EnsurePublicDir(dir); err != nil {
 		log.Printf("hostsync: cannot create %s: %v (%s won't resolve via dnsmasq)", dir, err, name)
 		return
 	}
@@ -82,9 +88,5 @@ func Run(ctx context.Context, name, dir string, interval time.Duration, reloadCm
 }
 
 func writeHost(file, ip, name string) error {
-	tmp := file + ".tmp"
-	if err := os.WriteFile(tmp, []byte(ip+" "+name+"\n"), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, file)
+	return atrest.WritePublicFile(file, []byte(ip+" "+name+"\n"))
 }
