@@ -746,3 +746,17 @@ func TestWireExternalMesh_ShipsTheMeshCAPlusTheOperatorCA(t *testing.T) {
 		}
 	})
 }
+
+// The self-hosted path goes through the same helper, so a Mesh CA that holds
+// no certificate stops the api there too, instead of leaving the Headscale
+// client on the system pool.
+func TestWireSelfHostedMesh_UnusableMeshCAIsRefused(t *testing.T) {
+	t.Setenv("RASPUTIN_HEADSCALE_URL", "https://127.0.0.1:18080")
+	_, err := wireSelfHostedMesh(t.TempDir(), &mesh.MeshCA{CertPEM: []byte("not a certificate")}, "dev@example.com")
+	if err == nil {
+		t.Fatal("a Mesh CA with no certificate in it was accepted")
+	}
+	if !strings.Contains(err.Error(), "Mesh CA") {
+		t.Errorf("error %q does not name the Mesh CA as the input to fix", err)
+	}
+}
