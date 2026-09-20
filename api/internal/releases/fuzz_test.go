@@ -107,7 +107,7 @@ func FuzzPublicNodeImage(f *testing.F) {
 	f.Fuzz(func(t *testing.T, version string, manifest []byte) {
 		tr := &captureTransport{body: manifest}
 		hc := &http.Client{Transport: tr}
-		d, err := PublicNodeImage(context.Background(), hc, fuzzBase, fuzzRepo, version, fuzzSKU)
+		d, err := PublicNodeImage(context.Background(), hc, nil, fuzzBase, testComponent(fuzzRepo), version, fuzzSKU)
 
 		// Whatever the outcome, any request that went out must have been on the
 		// release path: a rejected version must not be fetched at all.

@@ -19,17 +19,23 @@ type githubPublicSource struct {
 	apiBase string // e.g. https://api.github.com
 	meta    *http.Client
 	dl      *http.Client
+	// verifier checks manifest.json.sig. Nil is a valid state — a control
+	// plane with no trust root — and then every component at or above its
+	// signing floor fails to resolve, rather than resolving unverified.
+	verifier ManifestVerifier
 }
 
 // NewGithubPublicSource builds a Source that reads each component's releases
 // from the component's own source repo, using the given API base (override for
-// a proxy/CDN or tests; default https://api.github.com).
-func NewGithubPublicSource(apiBase string) Source {
+// a proxy/CDN or tests; default https://api.github.com), and verifying each
+// release manifest's detached signature with v.
+func NewGithubPublicSource(apiBase string, v ManifestVerifier) Source {
 	if apiBase == "" {
 		apiBase = "https://api.github.com"
 	}
 	return &githubPublicSource{
-		apiBase: strings.TrimRight(apiBase, "/"),
+		apiBase:  strings.TrimRight(apiBase, "/"),
+		verifier: v,
 		// Small JSON calls: bounded total timeout.
 		meta: &http.Client{Timeout: 30 * time.Second},
 		// Large asset downloads (100s of MB): no total timeout; cancellation
@@ -104,22 +110,48 @@ func (g *githubPublicSource) LatestFor(ctx context.Context, comp Component, chan
 		Tag:       best.TagName,
 		assetURLs: make(map[string]string, len(best.Assets)),
 	}
-	var manifestURL string
+	var manifestURL, manifestSigURL string
 	for _, a := range best.Assets {
 		info.assetURLs[a.Name] = a.URL
-		if a.Name == "manifest.json" {
+		switch a.Name {
+		case "manifest.json":
 			manifestURL = a.URL
+		case "manifest.json.sig":
+			manifestSigURL = a.URL
 		}
 	}
 	if manifestURL == "" {
 		return nil, fmt.Errorf("release %s has no manifest.json asset", best.TagName)
 	}
-	if err := g.getJSON(ctx, manifestURL, &info.Manifest); err != nil {
+	manifestRaw, err := fetchBytes(ctx, g.meta, manifestURL)
+	if err != nil {
 		return nil, fmt.Errorf("fetch manifest for %s: %w", best.TagName, err)
 	}
-	// Prefer the manifest's own version string if present (authoritative).
-	if info.Manifest.Version != "" {
-		info.Version = info.Manifest.Version
+	// Absent asset and failed fetch are deliberately the same case: whether a
+	// missing signature is fatal is VerifyManifest's call, and it refuses both
+	// identically above the floor.
+	var sigDER []byte
+	if manifestSigURL != "" {
+		sigDER, _ = fetchBytes(ctx, g.meta, manifestSigURL)
+	}
+	res, err := VerifyManifest(g.verifier, comp, bestVer, manifestRaw, sigDER)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil {
+		info.Signer = res.Signer
+	}
+	if err := json.Unmarshal(manifestRaw, &info.Manifest); err != nil {
+		return nil, fmt.Errorf("parse manifest for %s: %w", best.TagName, err)
+	}
+	// The manifest's own version used to win here as "authoritative". It is
+	// authoritative only once it is signed — and once it is, VerifyManifest has
+	// already required it to equal the tag, so there is nothing left to prefer.
+	// Below the floor the two can still disagree, and taking the manifest's
+	// word for which release this is would let an unsigned document rename an
+	// unsigned release. The tag is what was fetched; the tag is what it is.
+	if info.Manifest.Version != "" && info.Manifest.Version != bestVer {
+		return nil, fmt.Errorf("%w: tag %q carries a manifest for %q", ErrManifestVersionMismatch, best.TagName, info.Manifest.Version)
 	}
 	if info.Manifest.Channel != "" {
 		info.Channel = info.Manifest.Channel

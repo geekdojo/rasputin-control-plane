@@ -58,6 +58,20 @@ type Component struct {
 	// "image" → Node.ImageVersion (CalVer OS), "agent" → Node.AgentVersion
 	// (semver control-plane software).
 	CompareField string
+
+	// SignedManifestFrom is the FIRST version of this component whose release
+	// publishes a `manifest.json.sig` this api can accept — one made by a leaf
+	// carrying the release purpose OID. At or above it a signature is required
+	// and a missing one is a hard failure; below it the `.sig` is not read.
+	//
+	// Empty means no such release exists yet, so nothing is required. That is
+	// the firewall's state until geekdojo/geekdojo-brain#526 ships and one
+	// release is published with it.
+	//
+	// This is a fact about published artifacts, not a policy date — see
+	// manifestsig.go, and TestSignedManifestFloorsMatchPublishedReleases, which
+	// checks each value against the real releases.
+	SignedManifestFrom string
 }
 
 // Components is the v1 registry of independently-checkable update targets. Both
@@ -79,6 +93,11 @@ var Components = []Component{
 		Scheme: SchemeCalVer, Kind: KindRAUC, Deployable: true,
 		CompareRoles: []proto.NodeRole{proto.RoleControlPlane, proto.RoleCompute, proto.RoleStorage},
 		CompareField: "image",
+		// Measured against the published releases, not taken from a doc:
+		// 2026.08.3 and earlier are signed by `Rasputin Release Leaf 001`,
+		// which carries no extendedKeyUsage at all; 2026.08.4 onward by
+		// `Rasputin Bundle Signing leaf-003`, which carries the release OID.
+		SignedManifestFrom: "2026.08.4",
 	},
 	{
 		ID: "fw", Label: "Rasputin OpenWrt Firewall",
@@ -86,6 +105,12 @@ var Components = []Component{
 		Scheme: SchemeCalVer, Kind: KindRootfsAB, Deployable: true,
 		CompareRoles: []proto.NodeRole{proto.RoleFirewall},
 		CompareField: "image",
+		// EMPTY on purpose: no firewall release publishes a manifest.json.sig
+		// yet (checked against every published release, 2026-09-19).
+		// geekdojo/geekdojo-brain#526 adds the signing step; set this to the
+		// first version published with it, and the firewall's manifests become
+		// required reading rather than optional.
+		SignedManifestFrom: "",
 	},
 }
 

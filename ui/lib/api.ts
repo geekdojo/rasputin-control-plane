@@ -218,6 +218,23 @@ export async function getFirewallImage(): Promise<FlashableImage | null> {
   }
 }
 
+// getNodeImage resolves the OS image a NEW node should be flashed with — the
+// cluster's own version, for the given architecture — with its full sha256 and,
+// when the release is signed, who signed it (geekdojo/geekdojo-brain#527).
+//
+// The Add-node wizard's automatic path never needed this (flash.sh asks the
+// same endpoint itself), but the MANUAL path did: it linked a download and told
+// the operator to "verify against the checksum in the release's manifest",
+// which is a checksum they then had to go and find. Returns null when the
+// control plane cannot resolve one, so the wizard falls back as before.
+export async function getNodeImage(arch: string): Promise<FlashableImage | null> {
+  try {
+    return await jsonFetch<FlashableImage>(`/api/cluster/node-image?arch=${encodeURIComponent(arch)}`);
+  } catch {
+    return null;
+  }
+}
+
 // revokeBusToken cancels a token by id — used to cancel a pending enrollment
 // that was never finished. Revoking also closes any live bus connection the
 // token authenticated; DELETE returns 200 with {id, disconnected} (the count of

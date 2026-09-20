@@ -2,7 +2,7 @@
 
 import { ChevronDown, ChevronRight, Cpu, Database, Download, Plus, Shield, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { getFirewallImage, getOperatorKey, mintBusToken, setOperatorKey, type OperatorKey } from '../lib/api';
+import { getFirewallImage, getNodeImage, getOperatorKey, mintBusToken, setOperatorKey, type OperatorKey } from '../lib/api';
 import { keyToRemember } from '../lib/operator-key';
 import type { FlashableImage, MintedBusToken } from '../lib/types';
 import {
@@ -364,6 +364,25 @@ function SuccessView({
 }) {
   const seed = renderNodeSeed(role, nodeId, token, sshKey, natsURLFor(clusterHostname), clusterId, busPin);
   const image = nodeImageFor(clusterOsVersion, arch);
+  // The link above is built from the cluster's version alone. The DESCRIPTOR
+  // carries the full checksum and the manifest signature, which is what a
+  // person flashing by hand actually needs (geekdojo/geekdojo-brain#527).
+  // Best-effort: the manual steps read the same either way, minus the numbers.
+  // Stored WITH the arch it was fetched for, rather than cleared at the top of
+  // the effect: a synchronous setState inside an effect is a render-loop
+  // hazard (react-hooks/set-state-in-effect), and keying the value is also
+  // simply more correct — switching arch can no longer show the previous
+  // arch's checksum for a frame.
+  const [imageDesc, setImageDesc] = useState<{ arch: NodeArch; desc: FlashableImage } | null>(null);
+  useEffect(() => {
+    let live = true;
+    getNodeImage(arch).then((d) => {
+      if (live && d) setImageDesc({ arch, desc: d });
+    });
+    return () => {
+      live = false;
+    };
+  }, [arch]);
   const command = flashCommand(seed, arch, cpBaseFor(clusterHostname));
   const archLabel = NODE_ARCHES.find((a) => a.value === arch)?.label ?? arch.toUpperCase();
   const [showManual, setShowManual] = useState(false);
@@ -460,9 +479,10 @@ function SuccessView({
                   </a>{' '}
                   (
                   <a href={image.releaseUrl} target="_blank" rel="noreferrer" style={linkStyle}>
-                    verify against the checksum in the release&apos;s manifest
+                    release notes
                   </a>
                   ).
+                  {imageDesc && imageDesc.arch === arch ? <VerifyImage image={imageDesc.desc} /> : null}
                 </>
               ) : (
                 <>Flash a Rasputin OS node image — the same build your cluster runs — to the new node&apos;s storage.</>
@@ -627,8 +647,8 @@ function FirewallSuccessView({
                   <a href={image.url} target="_blank" rel="noreferrer" style={linkStyle}>
                     download the image
                   </a>{' '}
-                  (verify its sha256 <Tok>{image.sha256.slice(0, 12)}…</Tok> against the release&apos;s{' '}
-                  <Tok>manifest.json</Tok>).
+                  ).
+                  <VerifyImage image={image} />
                 </>
               ) : imageResolved ? (
                 <>
@@ -729,3 +749,64 @@ const seedBox: React.CSSProperties = {
   whiteSpace: 'pre-wrap',
   wordBreak: 'break-all',
 };
+
+// VerifyImage shows what a person flashing BY HAND needs in order to check the
+// image themselves: the full sha256, and the command that compares it.
+//
+// Both manual paths used to send the operator away to find the number — "verify
+// against the checksum in the release's manifest" on the OS path, and a
+// truncated `abc123def456…` on the firewall path, which is not a checksum, it
+// is a hint that one exists. A verification step nobody can complete without
+// leaving the page is a verification step that does not happen
+// (geekdojo/geekdojo-brain#527).
+//
+// When the control plane verified the release's signed manifest it also says
+// who signed it, and offers the commands to repeat that check rather than take
+// this page's word for it. `manifestB64` is written out with base64 -d so what
+// is verified is the exact bytes the control plane verified, not a re-fetched
+// copy that might differ.
+function VerifyImage({ image }: { image: FlashableImage }) {
+  const shaCmd = `shasum -a 256 ${image.image}`;
+  const manifestCmds = image.manifestB64 && image.manifestSigB64
+    ? [
+        `printf '%s' '${image.manifestB64}' | base64 -d > manifest.json`,
+        `printf '%s' '${image.manifestSigB64}' | base64 -d > manifest.json.sig`,
+        'curl -fsSLO https://rasputin.geekdojo.com/rasputin-root-ca.pem',
+        'openssl cms -verify -purpose any -binary -inform DER -in manifest.json.sig \\',
+        '  -content manifest.json -CAfile rasputin-root-ca.pem -signer signer.pem -out /dev/null',
+        "openssl x509 -in signer.pem -noout -text | grep -A1 'Extended Key Usage'",
+      ].join('\n')
+    : null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+      <div style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
+        Expected sha256 — compare it with <Tok>{shaCmd}</Tok>:
+      </div>
+      <div style={{ position: 'relative' }}>
+        <pre style={seedBox}>{image.sha256}</pre>
+        <div style={{ position: 'absolute', top: 4, right: 4 }}>
+          <CopyButton value={image.sha256} />
+        </div>
+      </div>
+      {image.signer ? (
+        <>
+          <div style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
+            That checksum came from a release manifest signed by <Tok>{image.signer}</Tok>, verified by this
+            control plane. To check it yourself — the last line must print{' '}
+            <Tok>1.3.6.1.4.1.66587.1.1.1</Tok>:
+          </div>
+          <div style={{ position: 'relative' }}>
+            <pre style={seedBox}>{manifestCmds}</pre>
+            <div style={{ position: 'absolute', top: 4, right: 4 }}>
+              <CopyButton value={manifestCmds ?? ''} />
+            </div>
+          </div>
+        </>
+      ) : (
+        <div style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
+          This release predates manifest signing, so the checksum above is its whole integrity story.
+        </div>
+      )}
+    </div>
+  );
+}

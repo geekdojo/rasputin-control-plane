@@ -112,6 +112,11 @@ type ReleaseInfo struct {
 	Channel   string
 	Tag       string
 	Manifest  Manifest
+	// Signer is the common name of the leaf that signed this release's
+	// manifest, when it was verified. Empty below the component's signing
+	// floor. Logged and surfaced rather than discarded: on a security gate, an
+	// unattributed pass is only marginally better than no gate.
+	Signer string
 	// assetURLs maps asset filename → download URL (public, anonymous).
 	assetURLs map[string]string
 }

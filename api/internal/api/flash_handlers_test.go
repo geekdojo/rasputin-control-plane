@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -171,7 +172,7 @@ func TestClusterFirewallImage(t *testing.T) {
 		t.Fatalf("expected 503 before release source configured, got %d", rec.Code)
 	}
 
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 	rec := f.do(t, http.MethodGet, "/api/cluster/firewall-image", "", nil)
 	if rec.Code != http.StatusOK {
@@ -273,5 +274,90 @@ func TestClusterOSVersion_FallsBackToUnconfirmedRatherThanRefusing(t *testing.T)
 func TestClusterOSVersion_NoVersionAtAll(t *testing.T) {
 	if got := clusterOSVersion([]*proto.Node{{ID: "cp", Role: proto.RoleControlPlane}}); got != "" {
 		t.Errorf("clusterOSVersion = %q, want \"\"", got)
+	}
+}
+
+// The cluster's own OS version can age past its signing certificate, and then
+// the node-image lookup for that version stops verifying. Bryce decided the
+// requirement rather than a workaround (dec 24, geekdojo/geekdojo-brain#576),
+// so the endpoint has to SAY so — a 502 "couldn't resolve" sends an operator
+// looking at their network, and a signature-failure message sends them looking
+// for an attacker. Neither is what happened.
+func TestClusterNodeImage_ExpiredSignerSaysUpdateTheCluster(t *testing.T) {
+	const version = "2026.09.3"
+	sigDER, err := os.ReadFile("../releases/testdata/expired-manifest.json.sig")
+	if err != nil {
+		t.Skipf("no expired-signer fixture: %v", err)
+	}
+	manifest := releases.Manifest{
+		Version:   version,
+		Artifacts: []releases.ManifestArtifact{{Compatible: "rasputin-n100", Architecture: "amd64", Image: "i.img.xz", ImageSha256: "abc"}},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/geekdojo/rasputin-os/releases/download/"+version+"/manifest.json",
+		func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(manifest) })
+	mux.HandleFunc("/geekdojo/rasputin-os/releases/download/"+version+"/manifest.json.sig",
+		func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(sigDER) })
+	rel := httptest.NewServer(mux)
+	defer rel.Close()
+
+	f := newAPIFixture(t)
+	f.srv.SetReleaseDownloadBase(rel.URL)
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "x", Role: proto.RoleControlPlane, ImageVersion: version}); err != nil {
+		t.Fatalf("seed cp node: %v", err)
+	}
+
+	rec := f.do(t, http.MethodGet, "/api/cluster/node-image", "", nil)
+	body := rec.Body.String()
+	// The fixture's chain does not verify against this api's trust root, and
+	// the signer is expired — which is the pair the operator meets when a
+	// cluster has sat on one version too long.
+	if rec.Code == http.StatusOK {
+		t.Fatalf("an unverifiable manifest resolved anyway: %s", body)
+	}
+	if !strings.Contains(body, "Update the cluster before adding a node") {
+		t.Errorf("the refusal does not tell the operator what to do.\n  status %d\n  body   %s", rec.Code, body)
+	}
+	if !strings.Contains(body, "Nothing is wrong with the node you are adding") {
+		t.Errorf("the refusal does not say the new node is fine: %s", body)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409 (a state problem, not a gateway problem)", rec.Code)
+	}
+}
+
+// A signed release travels with its manifest so the laptop can repeat the
+// check. Without this the flasher has only the control plane's word for the
+// checksum, which is the thing geekdojo/geekdojo-brain#527 is about.
+func TestClusterNodeImage_CarriesTheManifestWhenSigned(t *testing.T) {
+	// Below the signing floor: no manifest travels, and that is correct — the
+	// signature those releases carry cannot be accepted.
+	const old = "2026.06.0-dev.31"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/geekdojo/rasputin-os/releases/download/"+old+"/manifest.json",
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(releases.Manifest{
+				Version:   old,
+				Artifacts: []releases.ManifestArtifact{{Compatible: "rasputin-n100", Architecture: "amd64", Image: "i.img.xz", ImageSha256: "abc"}},
+			})
+		})
+	rel := httptest.NewServer(mux)
+	defer rel.Close()
+
+	f := newAPIFixture(t)
+	f.srv.SetReleaseDownloadBase(rel.URL)
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "x", Role: proto.RoleControlPlane, ImageVersion: old}); err != nil {
+		t.Fatalf("seed cp node: %v", err)
+	}
+	rec := f.do(t, http.MethodGet, "/api/cluster/node-image", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var desc releases.NodeImageDescriptor
+	if err := json.Unmarshal(rec.Body.Bytes(), &desc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if desc.ManifestB64 != "" || desc.Signer != "" {
+		t.Errorf("a release below the signing floor must not travel with a manifest: %+v", desc)
 	}
 }

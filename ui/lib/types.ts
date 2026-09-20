@@ -194,6 +194,15 @@ export interface FlashableImage {
   url: string;
   sha256: string;
   image: string;
+  // Present when the control plane verified the release's signed manifest
+  // (geekdojo/geekdojo-brain#527): `signer` is the certificate that signed it,
+  // and the base64 fields carry the manifest and its detached signature so a
+  // flasher — or a person at a terminal — can repeat the check. Absent for a
+  // release published before manifest signing, where the sha256 is the whole
+  // integrity story.
+  signer?: string;
+  manifestB64?: string;
+  manifestSigB64?: string;
 }
 
 export type FirewallIntentKind = 'port_forward' | 'firewall_rule' | 'wan_config';

@@ -2,10 +2,12 @@ package api
 
 import (
 	_ "embed"
+	"errors"
 	"log"
 	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -71,13 +73,48 @@ func (s *Server) handleClusterNodeImage(w http.ResponseWriter, r *http.Request) 
 		base = "https://github.com"
 	}
 	osComp, _ := releases.ComponentByID("os")
-	desc, err := releases.PublicNodeImage(r.Context(), http.DefaultClient, base, osComp.Repo, version, compatible)
+	desc, err := releases.PublicNodeImage(r.Context(), http.DefaultClient, s.updaterVerifier, base, osComp, version, compatible)
 	if err != nil {
 		log.Printf("cluster node-image (os %s, %s): %v", version, compatible, err)
-		writeError(w, http.StatusBadGateway, "couldn't resolve the node image for this cluster's version + architecture")
+		status, msg := nodeImageError(err, version)
+		writeError(w, status, msg)
 		return
 	}
 	writeJSON(w, http.StatusOK, desc)
+}
+
+// nodeImageError turns a manifest-resolution failure into the status and the
+// sentence an operator should read.
+//
+// The signature checks introduced with geekdojo/geekdojo-brain#527 can fail for
+// reasons that are not "the release is broken", and the generic 502 that used
+// to cover everything sent the operator to the wrong place for each of them.
+// Three get their own answer:
+//
+//   - An EXPIRED signing certificate (dec 24, geekdojo/geekdojo-brain#576).
+//     Every release is signed by a leaf with a finite life, so a cluster that
+//     stays on one version long enough eventually cannot fetch the first-flash
+//     image for its OWN version any more. Nothing is wrong with the release and
+//     nothing is wrong with the cluster: it is simply too old, and the fix is to
+//     update it. Bryce decided the requirement rather than work around it, so
+//     the message has to SAY that instead of reporting a signature failure and
+//     leaving an operator hunting for an attack.
+//   - NO TRUST ROOT on this control plane. An installation fault, not a bad
+//     artifact — 503, naming the fix.
+//   - Everything else stays a 502.
+func nodeImageError(err error, version string) (int, string) {
+	switch {
+	case errors.Is(err, releases.ErrManifestSignerExpired):
+		return http.StatusConflict, "this cluster is on " + version +
+			", and the certificate that signed that release has expired — so its image can no longer be verified. " +
+			"Update the cluster before adding a node; a current release is signed by a current certificate. " +
+			"Nothing is wrong with the node you are adding."
+	case errors.Is(err, releases.ErrNoVerifier), errors.Is(err, updater.ErrTrustUnavailable):
+		return http.StatusServiceUnavailable, "this control plane has no publisher trust root, so it cannot verify the release manifest " +
+			"for this cluster's version. On an appliance, re-flash; on a dev box, run scripts/pki-init.sh."
+	default:
+		return http.StatusBadGateway, "couldn't resolve the node image for this cluster's version + architecture"
+	}
 }
 
 // clusterOSVersion picks the OS version a NEW node should be flashed with, from
@@ -148,7 +185,11 @@ func (s *Server) handleClusterFirewallImage(w http.ResponseWriter, r *http.Reque
 	info, err := s.releaseSource.LatestFor(r.Context(), comp, channel)
 	if err != nil {
 		log.Printf("cluster firewall-image (%s): %v", channel, err)
-		writeError(w, http.StatusBadGateway, "couldn't resolve the latest firewall image")
+		status, msg := nodeImageError(err, "the latest firewall release")
+		if status == http.StatusBadGateway {
+			msg = "couldn't resolve the latest firewall image"
+		}
+		writeError(w, status, msg)
 		return
 	}
 	if info == nil {
@@ -168,11 +209,18 @@ func (s *Server) handleClusterFirewallImage(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadGateway, "firewall release "+info.Version+" missing asset "+art.Image)
 		return
 	}
-	writeJSON(w, http.StatusOK, releases.NodeImageDescriptor{
+	desc := releases.NodeImageDescriptor{
 		Version:      info.Version,
 		Architecture: art.Architecture,
 		URL:          url,
 		SHA256:       art.SHA256,
 		Image:        art.Image,
-	})
+	}
+	// The firewall descriptor carries no manifest+signature yet, because no
+	// firewall release publishes one (releases.Components: the fw entry's
+	// SignedManifestFrom is empty). Once geekdojo/geekdojo-brain#526 ships and
+	// that floor is set, LatestFor verifies the manifest and this is where the
+	// verified bytes would travel on to flash.sh, exactly as the OS path does.
+	desc.Signer = info.Signer
+	writeJSON(w, http.StatusOK, desc)
 }
