@@ -270,10 +270,7 @@ func MintLeafToDisk(ca *MeshCA, outDir string, spec LeafSpec) (LeafPaths, error)
 	if err := atrest.EnsureSecretDir(outDir); err != nil {
 		return LeafPaths{}, fmt.Errorf("mesh: leaf dir: %w", err)
 	}
-	paths := LeafPaths{
-		CertPath: filepath.Join(outDir, "leaf.pem"),
-		KeyPath:  filepath.Join(outDir, "leaf.key"),
-	}
+	paths := LeafPathsIn(outDir)
 	if existing := loadLeafIfUsable(paths, ca, spec); existing != nil {
 		return paths, nil
 	}

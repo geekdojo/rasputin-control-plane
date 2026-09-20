@@ -135,6 +135,12 @@ func (f *fakeDocker) run(ctx context.Context, name string, args ...string) ([]by
 		}
 		f.containerState = "exited"
 		return []byte("rasputin-headscale\n"), nil
+	case "restart":
+		if !f.containerExists {
+			return nil, errors.New("no such container")
+		}
+		f.containerState = "running"
+		return []byte("rasputin-headscale\n"), nil
 	case "exec":
 		// args: exec <container> headscale apikeys create --expiration <dur>
 		//       exec <container> headscale apikeys expire --prefix <p>

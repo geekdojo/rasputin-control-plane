@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 )
@@ -89,12 +88,7 @@ func appLeafSpec(clusterID, appName string) LeafSpec {
 	}
 }
 
-func appLeafPaths(dir string) LeafPaths {
-	return LeafPaths{
-		CertPath: filepath.Join(dir, "leaf.pem"),
-		KeyPath:  filepath.Join(dir, "leaf.key"),
-	}
-}
+func appLeafPaths(dir string) LeafPaths { return LeafPathsIn(dir) }
 
 // PrepareAppLeaf is the rotation-aware form of MintAppLeaf (ADR-0004 §6). It
 // returns the app's current on-disk leaf when that leaf is still usable — more

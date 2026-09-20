@@ -690,11 +690,65 @@ func (s *DockerSupervisor) prepareHostDirs() error {
 	return nil
 }
 
+// headscaleLeafName is the leaf sweep's name for Headscale's TLS leaf.
+const headscaleLeafName = "headscale"
+
+// LeafConsumer registers Headscale's TLS leaf with the controlplane's one leaf
+// sweep (sweep.go). Headscale reads its certificate once, when the container
+// starts, so a renewed file on the host reaches no client until the container
+// restarts — which is why this consumer has a reload hook, and why that hook
+// restarts. Sweep calls it only when a fresh leaf was actually minted, so the
+// restart follows real drift (near-expiry, a moved hostname) and never a tick.
+func (s *DockerSupervisor) LeafConsumer() LeafConsumer {
+	return LeafConsumer{
+		Name:   headscaleLeafName,
+		Dir:    s.certsDir(),
+		Spec:   s.leafSpec,
+		Reload: s.reloadLeaf,
+	}
+}
+
+func (s *DockerSupervisor) certsDir() string { return filepath.Join(s.cfg.StateDir, "certs") }
+
+// reloadLeaf restarts the Headscale container so it picks up the leaf now on
+// disk. A container that is missing or stopped needs nothing: the next Start
+// creates or starts it, and Start reads the current leaf.
+func (s *DockerSupervisor) reloadLeaf(ctx context.Context, _ LeafPaths) error {
+	state, err := s.inspect(ctx)
+	if err != nil {
+		return err
+	}
+	if state != containerRunning {
+		return nil
+	}
+	log.Printf("mesh supervisor: restarting %q to serve the renewed TLS leaf", s.cfg.ContainerName)
+	if _, err := s.runner(ctx, s.cfg.DockerBin, "restart", s.cfg.ContainerName); err != nil {
+		return fmt.Errorf("docker restart %s: %w", s.cfg.ContainerName, err)
+	}
+	return s.waitHealthy(ctx)
+}
+
 // ensureLeaf mints (or reuses) the TLS leaf cert the container will
-// serve from. SANs include the resolved server host, 127.0.0.1 (for
-// same-host probes), localhost (same-host dev), and any ExtraLeafDNSNames
-// the caller wanted to advertise.
+// serve from.
 func (s *DockerSupervisor) ensureLeaf() error {
+	spec, err := s.leafSpec()
+	if err != nil {
+		return err
+	}
+	if _, err := MintLeafToDisk(s.cfg.MeshCA, s.certsDir(), spec); err != nil {
+		return fmt.Errorf("mesh supervisor: mint leaf: %w", err)
+	}
+	return nil
+}
+
+// leafSpec is the SAN set Headscale's leaf must carry. SANs include the
+// resolved server host, 127.0.0.1 (for same-host probes), localhost (same-host
+// dev), and any ExtraLeafDNSNames the caller wanted to advertise.
+//
+// Derived on every call rather than captured once, so the sweep re-checks the
+// names as well as the dates: a controlplane that changed hostname or moved
+// subnets gets a re-mint from the same check that catches near-expiry.
+func (s *DockerSupervisor) leafSpec() (LeafSpec, error) {
 	spec := LeafSpec{
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
 		DNSNames:    []string{"localhost"},
@@ -727,11 +781,7 @@ func (s *DockerSupervisor) ensureLeaf() error {
 		}
 	}
 	spec.DNSNames = append(spec.DNSNames, s.cfg.ExtraLeafDNSNames...)
-	certsDir := filepath.Join(s.cfg.StateDir, "certs")
-	if _, err := MintLeafToDisk(s.cfg.MeshCA, certsDir, spec); err != nil {
-		return fmt.Errorf("mesh supervisor: mint leaf: %w", err)
-	}
-	return nil
+	return spec, nil
 }
 
 // serverURLHost returns the hostname from a server URL like

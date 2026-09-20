@@ -326,9 +326,15 @@ func TestReconcileEntries_NoDNSForwardTick(t *testing.T) {
 	if !ok || fw.Interval != 5*time.Minute || fw.InitialDelay != 30*time.Second {
 		t.Fatalf("firewall.reconcile entry = %+v (present %v), want it unchanged", fw, ok)
 	}
-	for _, k := range []string{"apps.reconcile", "mesh.reconcile", "apps.leaf_rotate"} {
+	for _, k := range []string{"apps.reconcile", "mesh.reconcile", mesh.LeafSweepKind} {
 		if _, ok := kinds[k]; !ok {
 			t.Errorf("%s missing from the schedule", k)
 		}
+	}
+	// Leaf renewal has ONE driver. apps.leaf_rotate is still a workflow — the
+	// sweep submits it — but a tick of its own would be a second place to look
+	// when a certificate lapses.
+	if _, ok := kinds["apps.leaf_rotate"]; ok {
+		t.Error("apps.leaf_rotate has its own tick again; the leaf sweep is the one driver")
 	}
 }
