@@ -17,8 +17,8 @@ comfortable with SSH but would rather not need it, and know what a VLAN is.
 
 The design principle throughout is **opinionated-but-open**: strong defaults
 that work in the first hour (firewall, updates, observability, app catalog),
-with documented escape hatches everywhere (root shell, LuCI, the whole OS
-image build is reproducible from these repos).
+with documented escape hatches everywhere (root shell, the firewall's own LuCI
+over an SSH tunnel, the whole OS image build is reproducible from these repos).
 
 The name is a nod to Grigori Rasputin — the machine that wouldn't die.
 Atomic A/B updates with automatic rollback are the load-bearing feature, not
@@ -195,7 +195,10 @@ The firewall node runs an OpenWrt-based image. The control plane owns
 deltas, and ships them to the firewall agent as jobs. The agent applies them
 and reports a hash of resulting state; periodic reconciliation detects
 out-of-band edits and asks the operator to adopt or revert — SSH and LuCI
-remain first-class escape hatches, not violations.
+remain first-class escape hatches, not violations. LuCI is bound to the
+firewall's loopback interface rather than served to the LAN, so it is reached
+by forwarding a local port to it over SSH (`ssh -L`); the UI's Advanced tab
+builds that command.
 
 Firewall updates don't use RAUC (it isn't in the OpenWrt package feeds).
 Instead the image reproduces the same contract with OpenWrt parts: an A/B
