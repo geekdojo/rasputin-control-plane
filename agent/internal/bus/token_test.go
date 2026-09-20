@@ -27,17 +27,26 @@ func TestResolveTokenSource(t *testing.T) {
 		want            string
 		wantFromContain string
 	}{
-		{"compute with a seeded token", "seeded", "", proto.RoleCompute, "seeded", EnvJoinToken},
-		{"firewall with a seeded token", "seeded", "", proto.RoleFirewall, "seeded", EnvJoinToken},
+		// The legacy inline token, still honoured for a new agent on an image
+		// whose firstboot/init.d names no token file.
+		{"compute with only a seeded token", "seeded", "", proto.RoleCompute, "seeded", EnvJoinToken},
+		{"firewall with only a seeded token", "seeded", "", proto.RoleFirewall, "seeded", EnvJoinToken},
 		{"the seeded token is used exactly as given", " seeded ", "", proto.RoleCompute, " seeded ", EnvJoinToken},
 		{"compute with neither", "", "", proto.RoleCompute, "", "none"},
+		// The canonical source: one 0600 file, on every role.
 		{"a token file", "", envFile, proto.RoleCompute, "from-env-file", EnvJoinTokenFile},
-		{"both set: the token wins", "seeded", envFile, proto.RoleCompute, "seeded", "ignored"},
+		{"firewall with a token file", "", envFile, proto.RoleFirewall, "from-env-file", EnvJoinTokenFile},
+		// Precedence: the FILE wins. Whatever wrote it wrote it after the
+		// seed, and it is the only one of the two that can be re-read.
+		{"both set: the file wins", "seeded", envFile, proto.RoleCompute, "from-env-file", EnvJoinTokenFile},
+		{"both set: the file wins on a firewall too", "seeded", envFile, proto.RoleFirewall, "from-env-file", EnvJoinTokenFile},
+		{"both set: the ignored variable is named", "seeded", envFile, proto.RoleCompute, "from-env-file", "ignored"},
 		// firstboot writes RASPUTIN_CP_JOIN_TOKEN_FILE for a new controlplane
 		{"controlplane with the file named", "", envFile, proto.RoleControlPlane, "from-env-file", EnvJoinTokenFile},
 		// an updated controlplane whose node.env predates the file
 		{"controlplane with neither: the default file", "", "", proto.RoleControlPlane, "from-default", "controlplane default"},
-		{"controlplane with a seeded token keeps it", "seeded", "", proto.RoleControlPlane, "seeded", EnvJoinToken},
+		{"controlplane with only a seeded token keeps it", "seeded", "", proto.RoleControlPlane, "seeded", EnvJoinToken},
+		{"both set: the file wins on a controlplane too", "seeded", envFile, proto.RoleControlPlane, "from-env-file", EnvJoinTokenFile},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,6 +67,52 @@ func TestResolveTokenSource(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A named token file decides the attempt even when the legacy variable is also
+// set: it is re-read every time, and a file that is missing or empty is an
+// error for that attempt rather than a silent fall-back to the seeded token.
+// Falling back would make a token that has been rotated or revoked on disk
+// keep working for the life of the process, which is the whole reason the file
+// exists.
+func TestResolveTokenSource_FileWinsAndIsRereadNotFallenBackFrom(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "join.token")
+	src, from := ResolveTokenSource("seeded", path, proto.RoleCompute, filepath.Join(dir, "unused.token"))
+	if !strings.Contains(from, EnvJoinTokenFile) || !strings.Contains(from, "ignored") {
+		t.Fatalf("description %q should name the file source and say the variable is ignored", from)
+	}
+
+	// The file is not there yet: no token for this attempt, and no fall-back
+	// to the variable.
+	if got, err := src(); err == nil {
+		t.Fatalf("a missing token file returned %q, want an error rather than the seeded token", got)
+	}
+
+	// It appears, and the very next attempt uses it — no restart.
+	if err := os.WriteFile(path, []byte("from-the-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := src(); err != nil || got != "from-the-file" {
+		t.Fatalf("source = (%q, %v), want from-the-file", got, err)
+	}
+
+	// It is rewritten (a re-mint, an identity restore): the next attempt sees
+	// the new value, still not the variable.
+	if err := os.WriteFile(path, []byte("re-minted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := src(); err != nil || got != "re-minted" {
+		t.Fatalf("source after the re-mint = (%q, %v), want re-minted", got, err)
+	}
+
+	// It is emptied: an error again, never "seeded".
+	if err := os.WriteFile(path, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := src(); err == nil {
+		t.Fatalf("an empty token file returned %q, want an error rather than the seeded token", got)
 	}
 }
 
