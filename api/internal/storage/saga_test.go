@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/ledgertest"
 	"strings"
 	"testing"
 	"time"
@@ -578,8 +579,10 @@ func TestClaimSaga_KeyMaterialNeverEntersTheLedger(t *testing.T) {
 		wrappedPass     = "SENTINEL-WRAPPED-BY-PASSPHRASE"
 		wrappedRecovery = "SENTINEL-WRAPPED-BY-RECOVERY-CODE"
 	)
-	sentinels := []string{wrappedPass, wrappedRecovery}
-	logs := captureLog(t)
+	sentinels := ledgertest.Secrets(
+		"the passphrase-wrapped archive key", wrappedPass,
+		"the recovery-code-wrapped archive key", wrappedRecovery)
+	logs := ledgertest.CaptureLog(t)
 	h := newHarness(t, &fakeAgent{
 		enumerate: func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
 	})
@@ -616,7 +619,11 @@ func TestClaimSaga_KeyMaterialNeverEntersTheLedger(t *testing.T) {
 	if persisted["archiveKeyId"] != "key-2026-08" {
 		t.Errorf("spec archiveKeyId = %v, want the key's id: %s", persisted["archiveKeyId"], j.Spec)
 	}
-	assertNoSentinel(t, "job spec", string(j.Spec), sentinels)
+	ledger := &ledgertest.Surfaces{Spec: string(j.Spec), Log: logs.String()}
+	// Not vacuous: the wrapped blobs reached the agent's claim command and the
+	// staging slot, both checked above.
+	ledger.AssertPresent(t, "the claim command the agent received",
+		cmd.WrappedByPassphrase+cmd.WrappedByRecoveryCode, sentinels)
 
 	steps, err := h.jobStore.ListSteps(ctx, jobID)
 	if err != nil {
@@ -626,16 +633,15 @@ func TestClaimSaga_KeyMaterialNeverEntersTheLedger(t *testing.T) {
 		t.Fatalf("want 5 recorded steps, got %d", len(steps))
 	}
 	for _, st := range steps {
-		assertNoSentinel(t, "step "+st.Name+" result", string(st.Result)+st.Error, sentinels)
+		ledger.Steps += string(st.Result) + st.Error
 	}
 	events, err := h.jobStore.ListEvents(ctx, jobID)
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	for _, ev := range events {
-		assertNoSentinel(t, "event "+ev.Type, string(ev.Data), sentinels)
+		ledger.Events += string(ev.Data)
 	}
-	assertNoSentinel(t, "process log", logs.String(), sentinels)
 
 	// The staging slot is emptied once the job ends.
 	if k, err := h.store.StagedClaimKey(ctx, jobID); err != nil || k != nil {
@@ -651,7 +657,8 @@ func TestClaimSaga_KeyMaterialNeverEntersTheLedger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal row: %v", err)
 	}
-	assertNoSentinel(t, "BackupTarget JSON", string(blob), sentinels)
+	ledger.Extra = map[string]string{"the BackupTarget an operator sees": string(blob)}
+	ledger.AssertAbsent(t, sentinels)
 	h.runner.Wait()
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/ledgertest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -52,7 +53,8 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 		t.Fatalf("ListIntents: %v (%d)", err, len(list))
 	}
 	blob, _ := json.Marshal(list)
-	assertNoSentinel(t, "ListIntents JSON", string(blob), []string{pppoeSecret})
+	ledgertest.AssertAbsentIn(t, "the ListIntents response", string(blob),
+		ledgertest.Secrets("the PPPoE password", pppoeSecret))
 
 	forCompile, err := s.ListIntentsForCompile(ctx)
 	if err != nil {
@@ -171,7 +173,7 @@ func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 // or logged.
 func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	ctx := context.Background()
-	logs := captureLog(t)
+	logs := ledgertest.CaptureLog(t)
 	nc := startNATS(t)
 	dbPath := filepath.Join(t.TempDir(), "rasputin.db")
 	store, err := OpenStore(ctx, dbPath)
@@ -236,14 +238,17 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 		t.Fatal("the agent was never asked to apply")
 	}
 
-	sentinels := []string{pppoeSecret}
-	assertNoSentinel(t, "job spec", string(done.Spec)+done.Error, sentinels)
+	secrets := ledgertest.Secrets("the PPPoE password", pppoeSecret)
+	ledger := &ledgertest.Surfaces{Spec: string(done.Spec) + done.Error, Log: logs.String()}
+	// Not vacuous: the agent really was sent the password, checked above.
+	ledger.AssertPresent(t, "the apply command the agent received", pppoeSecret, secrets)
+
 	steps, err := jobStore.ListSteps(ctx, j.ID)
 	if err != nil {
 		t.Fatalf("ListSteps: %v", err)
 	}
 	for _, st := range steps {
-		assertNoSentinel(t, "step "+st.Name+" result", string(st.Result)+st.Error, sentinels)
+		ledger.Steps += string(st.Result) + st.Error
 		if st.Name == "compile" {
 			var res map[string]any
 			_ = json.Unmarshal(st.Result, &res)
@@ -260,7 +265,7 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	for _, ev := range events {
-		assertNoSentinel(t, "event "+ev.Type, string(ev.Data), sentinels)
+		ledger.Events += string(ev.Data)
 	}
-	assertNoSentinel(t, "process log", logs.String(), sentinels)
+	ledger.AssertAbsent(t, secrets)
 }
