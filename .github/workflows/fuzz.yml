@@ -107,6 +107,7 @@ jobs:
             agent/internal/mdns:FuzzReadName
             agent/internal/ids:FuzzParseAlertFast
             agent/internal/updater:FuzzParseGrubenv
+            api/internal/api:FuzzRewriteLokiPush
             api/internal/busauth:FuzzValidNodeID
             api/internal/busauth:FuzzMintUserJWT
             api/internal/busauth:FuzzParsePreseed

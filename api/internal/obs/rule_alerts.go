@@ -62,6 +62,25 @@ func IsReservedMetricName(name string) bool {
 	return strings.HasPrefix(name, ReservedMetricPrefixRasputin) || strings.HasPrefix(name, ReservedMetricPrefixAlerts)
 }
 
+// Reserved log jobs. The same rule as the metric names above, on the logs
+// side: a `job` label under this prefix names a stream only a process on the
+// controlplane writes, and the controlplane's own Alloy writes it straight to
+// Loki over the compose network — never through the per-node mTLS ingress. So
+// the ingress refuses the prefix outright rather than trying to attribute it.
+const (
+	ReservedLogJobPrefix = "rasputin-"
+	// IDSLogJob is the job label the controlplane's Alloy puts on the snort
+	// alert stream the api writes (supervisor.go's IDS pipe). Named here so
+	// the producer and the ingress rule cannot drift apart.
+	IDSLogJob = ReservedLogJobPrefix + "ids"
+)
+
+// IsReservedLogJob reports whether job is a log stream only the controlplane
+// may write (see ReservedLogJobPrefix).
+func IsReservedLogJob(job string) bool {
+	return strings.HasPrefix(job, ReservedLogJobPrefix)
+}
+
 // RuleAlert is one alert vmalert currently reports as firing.
 type RuleAlert struct {
 	// Labels are the alert's labels as vmalert sends them to a notifier:

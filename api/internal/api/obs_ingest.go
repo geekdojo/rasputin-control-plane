@@ -29,9 +29,9 @@ const (
 	// (/api/v1/import/prometheus, text); per-node Alloy speaks remote-write.
 	vmRemoteWritePath = "/api/v1/write"
 	// lokiPushPath is Loki's push endpoint (snappy protobuf). Unlike VM's
-	// remote-write it has no extra_label query arg, so node_id is carried in the
-	// stream labels by the collector's controlplane-rendered config, not stamped
-	// here (§3.11 decision (a)).
+	// remote-write it has no extra_label query arg, so the ingress stamps
+	// node_id into the stream labels itself (stampLogStreams) rather than
+	// trusting the value the collector's config put there.
 	lokiPushPath = "/loki/api/v1/push"
 )
 
@@ -163,13 +163,14 @@ func refuseReservedMetrics(w http.ResponseWriter, r *http.Request) (refused stri
 }
 
 // handleObsLogsIngest reverse-proxies a per-node collector's Loki push stream to
-// the loopback Loki. Same auth as the metrics route, but node_id is NOT stamped
-// server-side: Loki has no extra_label equivalent, so the collector carries it
-// in the stream labels via its controlplane-rendered config (§3.11 decision (a)).
-// The ingress still fails closed and revocation-checks; it just doesn't override
-// the label.
+// the loopback Loki. Same auth as the metrics route, and the same identity rule:
+// node_id is the authenticated caller's, decided by the server. Loki has no
+// extra_label equivalent, so instead of a query arg the api rewrites the label
+// into every stream of the body (stampLogStreams) and refuses a job label
+// reserved for the controlplane.
 func (s *Server) handleObsLogsIngest(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticateCollector(w, r, "obs logs ingest"); !ok {
+	nodeID, ok := s.authenticateCollector(w, r, "obs logs ingest")
+	if !ok {
 		return
 	}
 	base := s.obs.LokiWriteBaseURL(r.Context())
@@ -178,7 +179,54 @@ func (s *Server) handleObsLogsIngest(w http.ResponseWriter, r *http.Request) {
 			"obs logs ingest: log backend not ready (observability off, Loki disabled, or still starting)")
 		return
 	}
+	if refused := stampLogStreams(w, r, nodeID); refused != "" {
+		log.Printf("obs logs ingest: refusing push from %q: %s", nodeID, refused)
+		return
+	}
 	s.proxyLokiPush(w, r, base)
+}
+
+// stampLogStreams reads the whole push body and replaces it with one in which
+// every stream carries node_id=<the verified client leaf's CommonName>. The
+// label the collector sent is overwritten, not merged: a node's own leaf
+// authenticates only that node, so its logs are that node's whatever its
+// config claims. A stream whose `job` label is reserved for the controlplane
+// (obs.IsReservedLogJob) is refused, because no node owns it.
+//
+// On success r.Body holds the rewritten bytes and ContentLength matches, and
+// it returns "". Otherwise it has written the response and returns a fixed
+// reason for the log line; nothing read from the request goes into the log.
+//
+// Log LINES are never parsed — only each stream's label string. The body cap
+// bounds what is held in memory to rewrite it.
+func stampLogStreams(w http.ResponseWriter, r *http.Request, nodeID string) (refused string) {
+	if err := lokiPushV1(r.Header.Get("Content-Type"), r.Header.Get("Content-Encoding")); err != nil {
+		writeError(w, http.StatusUnsupportedMediaType, "obs logs ingest: "+err.Error())
+		return "unsupported content type or encoding"
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxLokiPushBytes))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "obs logs ingest: request body too large")
+			return "request body too large"
+		}
+		writeError(w, http.StatusBadRequest, "obs logs ingest: read body: "+err.Error())
+		return "request body unreadable"
+	}
+	out, refusedJob, err := rewriteLokiPush(body, nodeID, obs.IsReservedLogJob)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "obs logs ingest: "+err.Error())
+		return "not a snappy Loki push request"
+	}
+	if refusedJob != "" {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("obs logs ingest: job %q is reserved for the controlplane", refusedJob))
+		return "a stream carries a job label reserved for the controlplane"
+	}
+	r.Body = io.NopCloser(bytes.NewReader(out))
+	r.ContentLength = int64(len(out))
+	return ""
 }
 
 // proxyRemoteWrite streams r's body to VM's remote-write endpoint at base,

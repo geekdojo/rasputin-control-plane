@@ -107,8 +107,10 @@ prometheus.remote_write "ingress" {
 }
 
 // Container logs -> Loki push through the mTLS ingress. node_id rides in
-// external_labels — this config is control-plane-rendered and the ingress does
-// NOT stamp it (Loki has no extra_label equivalent — §3.11 decision (a)).
+// external_labels so the collector's own view is self-consistent, but it is
+// not what decides attribution: the ingress overwrites node_id on every stream
+// with the node id on the verified client leaf (Loki has no extra_label
+// equivalent, so the api rewrites the label instead).
 loki.write "ingress" {
   external_labels = {
     node_id = "{{.NodeID}}",
