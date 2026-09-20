@@ -8,7 +8,20 @@ import (
 	"time"
 )
 
+// newTokenStore opens a store with a node registry attached, which is what
+// main does before the auth-callout responder starts. Without one the store
+// admits nobody (livenodes.go), so every test that exercises admission needs
+// it; newTokenStoreNoRegistry is the deliberate exception.
 func newTokenStore(t *testing.T) *Store {
+	t.Helper()
+	s := newTokenStoreNoRegistry(t)
+	if err := s.SetNodeRegistry(context.Background(), newRecordingRegistry()); err != nil {
+		t.Fatalf("SetNodeRegistry: %v", err)
+	}
+	return s
+}
+
+func newTokenStoreNoRegistry(t *testing.T) *Store {
 	t.Helper()
 	s, err := OpenStore(context.Background(), filepath.Join(t.TempDir(), "bus.db"))
 	if err != nil {

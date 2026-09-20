@@ -10,43 +10,67 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// recordingSink is a LivenessSink that keeps the last value pushed per node
-// and counts pushes.
-type recordingSink struct {
+// recordingRegistry is a NodeRegistry that keeps the live token hashes pushed
+// per node and counts pushes. It answers TokenAdmits from what it was pushed,
+// exactly as the real registry does.
+type recordingRegistry struct {
 	mu       sync.Mutex
-	live     map[string]bool
+	live     map[string]map[string]bool
 	pushes   int
 	replaces int
+	queries  int
 }
 
-func newRecordingSink() *recordingSink { return &recordingSink{live: map[string]bool{}} }
+func newRecordingRegistry() *recordingRegistry {
+	return &recordingRegistry{live: map[string]map[string]bool{}}
+}
 
-func (r *recordingSink) ReplaceTokenLive(live map[string]bool) {
+func (r *recordingRegistry) ReplaceLiveTokens(live map[string][]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.replaces++
-	r.live = map[string]bool{}
+	r.live = map[string]map[string]bool{}
 	for k, v := range live {
-		r.live[k] = v
+		r.setLocked(k, v)
 	}
 }
 
-func (r *recordingSink) SetTokenLive(nodeID string, live bool) {
+func (r *recordingRegistry) SetLiveTokens(nodeID string, hashes []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pushes++
-	r.live[nodeID] = live
+	r.setLocked(nodeID, hashes)
 }
 
-func (r *recordingSink) get(nodeID string) bool {
+func (r *recordingRegistry) setLocked(nodeID string, hashes []string) {
+	delete(r.live, nodeID)
+	if len(hashes) == 0 {
+		return
+	}
+	set := map[string]bool{}
+	for _, h := range hashes {
+		set[h] = true
+	}
+	r.live[nodeID] = set
+}
+
+func (r *recordingRegistry) TokenAdmits(nodeID, hash string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.live[nodeID]
+	r.queries++
+	return r.live[nodeID][hash]
+}
+
+// get reports whether the node holds any live token.
+func (r *recordingRegistry) get(nodeID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.live[nodeID]) > 0
 }
 
 // Attaching the sink pushes the whole set, read once: backfilled roles count,
 // role-less and revoked rows do not. Nothing is pushed before a sink exists.
-func TestSetLivenessSink_PushesTheWholeSet(t *testing.T) {
+func TestSetNodeRegistry_PushesTheWholeSet(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "bus.db")
 	s, err := OpenStore(ctx, path)
@@ -74,8 +98,8 @@ func TestSetLivenessSink_PushesTheWholeSet(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	sink := newRecordingSink()
-	if err := s.SetLivenessSink(ctx, sink); err != nil {
+	sink := newRecordingRegistry()
+	if err := s.SetNodeRegistry(ctx, sink); err != nil {
 		t.Fatal(err)
 	}
 	if sink.replaces != 1 || sink.pushes != 0 {
@@ -91,11 +115,11 @@ func TestSetLivenessSink_PushesTheWholeSet(t *testing.T) {
 // Every token event pushes the nodes it touched: mint, preload, revoke of one
 // of two tokens (still live), revoke of the last (not live), node removal's
 // revoke-all, and the controlplane agent's token.
-func TestLivenessSink_FollowsTokenEvents(t *testing.T) {
+func TestNodeRegistry_FollowsTokenEvents(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
-	sink := newRecordingSink()
-	if err := s.SetLivenessSink(ctx, sink); err != nil {
+	sink := newRecordingRegistry()
+	if err := s.SetNodeRegistry(ctx, sink); err != nil {
 		t.Fatal(err)
 	}
 	_, id1, _ := s.MintBound(ctx, "compute", "c1", proto.RoleCompute)
@@ -142,11 +166,11 @@ func TestLivenessSink_FollowsTokenEvents(t *testing.T) {
 // A revoke re-applied from the tombstone file (a lost or restored database)
 // is pushed to the node registry too, so a node revoked only by its tombstone
 // is not admitted.
-func TestLivenessSink_FollowsTombstoneReapply(t *testing.T) {
+func TestNodeRegistry_FollowsTombstoneReapply(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
-	sink := newRecordingSink()
-	if err := s.SetLivenessSink(ctx, sink); err != nil {
+	sink := newRecordingRegistry()
+	if err := s.SetNodeRegistry(ctx, sink); err != nil {
 		t.Fatal(err)
 	}
 	_, id, _ := s.MintBound(ctx, "compute", "c1", proto.RoleCompute)

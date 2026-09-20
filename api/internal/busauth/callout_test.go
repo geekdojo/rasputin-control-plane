@@ -86,6 +86,9 @@ func TestCallout_EndToEnd(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
+	if err := tokens.SetNodeRegistry(ctx, newRecordingRegistry()); err != nil {
+		t.Fatalf("SetNodeRegistry: %v", err)
+	}
 	token, _, err := tokens.MintBound(ctx, "fw", "fw-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)
@@ -278,6 +281,9 @@ func TestReplyGrantExpires(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
+	if err := tokens.SetNodeRegistry(ctx, newRecordingRegistry()); err != nil {
+		t.Fatalf("SetNodeRegistry: %v", err)
+	}
 	token, _, err := tokens.MintBound(ctx, "fw", "fw-1", "compute")
 	if err != nil {
 		t.Fatalf("MintBound: %v", err)

@@ -27,6 +27,7 @@ import (
 type enforcedBus struct {
 	srv    *bus.Server
 	tokens *Store
+	reg    *recordingRegistry
 	resp   *Responder
 	url    string
 }
@@ -51,6 +52,12 @@ func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) 
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
+	// As main.go does: the node registry is attached, and so loaded, before
+	// anything can connect. Without it the store admits nobody.
+	reg := newRecordingRegistry()
+	if err := tokens.SetNodeRegistry(ctx, reg); err != nil {
+		t.Fatalf("SetNodeRegistry: %v", err)
+	}
 
 	srv, err := bus.Start(ctx, bus.Config{
 		Host: host, Port: -1,
@@ -75,7 +82,7 @@ func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) 
 	}
 	t.Cleanup(resp.Stop)
 
-	return &enforcedBus{srv: srv, tokens: tokens, resp: resp, url: srv.ClientURL()}
+	return &enforcedBus{srv: srv, tokens: tokens, reg: reg, resp: resp, url: srv.ClientURL()}
 }
 
 func connect(url, username, token string, opts ...nats.Option) (*nats.Conn, error) {

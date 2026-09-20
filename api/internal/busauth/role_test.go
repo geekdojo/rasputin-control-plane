@@ -342,9 +342,14 @@ func TestBus_RolelessTokenRefused_BackfilledAdmitted(t *testing.T) {
 			t.Fatalf("insert legacy row: %v", err)
 		}
 	}
-	// The backfill is what OpenStore runs on every start.
+	// The backfill is what OpenStore runs on every start, and the node
+	// registry is loaded from the table after it — so re-attach here, in the
+	// same order main.go does, now that the legacy rows are in place.
 	if err := backfillRoles(ctx, eb.tokens.db); err != nil {
 		t.Fatalf("backfillRoles: %v", err)
+	}
+	if err := eb.tokens.SetNodeRegistry(ctx, eb.reg); err != nil {
+		t.Fatalf("SetNodeRegistry: %v", err)
 	}
 
 	if nc, err := connect(eb.url, "legacy", pt[0]); err == nil {

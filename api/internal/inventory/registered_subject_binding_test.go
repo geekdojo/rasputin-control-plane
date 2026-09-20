@@ -98,6 +98,12 @@ func TestHandleRegistered_PayloadNodeIDMustMatchSubject(t *testing.T) {
 
 	// The controlplane's row, already registered and confirmed.
 	store := newStore(t)
+	// The api's one node list, wired as main.go wires it: the token store
+	// pushes liveness into the inventory registry, and the auth callout reads
+	// it back per connection.
+	if err := tokens.SetNodeRegistry(ctx, store.Registry()); err != nil {
+		t.Fatalf("SetNodeRegistry: %v", err)
+	}
 	confirmed := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
 	cp := makeNode("controlplane", proto.RoleControlPlane, 0)
 	cp.Hostname = "cp.test"

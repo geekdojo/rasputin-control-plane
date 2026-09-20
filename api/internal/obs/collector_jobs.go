@@ -144,13 +144,30 @@ type collectorActions struct {
 
 // decideCollectorActions is the pure convergence decision — no I/O — so the
 // whole matrix is unit-testable with a fixed `now`. Given the inventory, the
-// per-node deploy/teardown job history, and the obs opt-in, it returns which
-// nodes to deploy to (obs on) or tear down (obs off), plus a tally of why the
-// rest were skipped. The caller submits the resulting jobs.
-func decideCollectorActions(nodes []*proto.Node, deployState, teardownState map[string]*nodeJobState, on bool, now time.Time) collectorActions {
+// per-node deploy/teardown job history, the obs opt-in and the node registry's
+// admission answer, it returns which nodes to deploy to (obs on) or tear down
+// (obs off), plus a tally of why the rest were skipped. The caller submits the
+// resulting jobs.
+//
+// admitted is inventory.Registry.Admitted: a collector is the node's HTTPS
+// credential, so it follows the node's join token, not merely its inventory
+// row. A node whose token was revoked keeps its row (the revoke cascade
+// leaves it in inventory, geekdojo-brain#575) but is no longer admitted by
+// the ingress, so minting it a fresh leaf and deploying a collector it cannot
+// push through would be work with no possible outcome. Deciding it from the
+// registry is the same fact the ingress enforces, read from the same place
+// (geekdojo-brain#585).
+func decideCollectorActions(nodes []*proto.Node, deployState, teardownState map[string]*nodeJobState, on bool, now time.Time, admitted func(nodeID string) bool) collectorActions {
 	act := collectorActions{skipped: map[string]int{}}
 	for _, n := range nodes {
 		if !slices.Contains(collectorRoles, n.Role) {
+			continue
+		}
+		// Not admitted ⇒ no bus session to dispatch to and an ingress that
+		// would refuse the collector anyway; neither a deploy nor a teardown
+		// can reach it.
+		if !admitted(n.ID) {
+			act.skipped["not_admitted"]++
 			continue
 		}
 		online := inventory.ComputeStatus(n.LastSeen) == proto.StatusOnline
@@ -225,7 +242,7 @@ func collectorConverge(d CollectorReconcileDeps) jobs.DoFn {
 			return nil, fmt.Errorf("list teardown jobs: %w", err)
 		}
 		act := decideCollectorActions(nodes,
-			scanNodeJobs(deploys), scanNodeJobs(teardowns), on, time.Now().UTC())
+			scanNodeJobs(deploys), scanNodeJobs(teardowns), on, time.Now().UTC(), d.Inv.Registry().Admitted)
 
 		submit := func(kind, nodeID string) bool {
 			spec, _ := json.Marshal(CollectorNodeSpec{NodeID: nodeID})
@@ -288,8 +305,18 @@ func collectorDeploy(d CollectorDeployDeps) jobs.DoFn {
 		if err := json.Unmarshal(sc.Spec, &spec); err != nil || spec.NodeID == "" {
 			return nil, fmt.Errorf("collector deploy: bad spec: %v", err)
 		}
-		// Guard: node vanished or went offline between reconcile and now. A no-op
-		// success beats burning the deploy timeout on an RPC that will time out.
+		// Guard: the node stopped being admitted, or went offline, between the
+		// reconcile and now. Admission is the node registry's answer — a
+		// current inventory member holding a live join token — read from
+		// memory, which is the same fact the collector ingress will apply to
+		// the connection this deploy is about to create. Minting a leaf for a
+		// node the ingress would refuse is work with no possible outcome, and
+		// a no-op success beats burning the deploy timeout on an RPC that
+		// will time out.
+		if !d.Inv.Registry().Admitted(spec.NodeID) {
+			sc.Log("info", fmt.Sprintf("collector deploy: node %s is not admitted (removed from inventory, or its join tokens revoked); skipping", spec.NodeID))
+			return nil, jobs.ErrStopWorkflow
+		}
 		node, err := d.Inv.Get(sc.Ctx, spec.NodeID)
 		if err != nil {
 			return nil, fmt.Errorf("collector deploy: inventory lookup: %w", err)

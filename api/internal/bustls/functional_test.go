@@ -443,12 +443,22 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		t.Fatal(err)
 	}
 	c.tokens = tokens
+	// The api's one node list, opened and loaded before the responder admits
+	// anyone — as cmd/rasputin-api does. Without it nothing is admitted.
+	invStore, err := inventory.OpenStore(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if o.selfNode != "" {
 		// As cmd/rasputin-api does: before the responder admits anyone.
 		if _, err := tokens.EnsureAgentToken(ctx, c.agentTokenFile(), o.selfNode); err != nil {
 			t.Fatalf("EnsureAgentToken: %v", err)
 		}
 	}
+	if err := tokens.SetNodeRegistry(ctx, invStore.Registry()); err != nil {
+		t.Fatalf("SetNodeRegistry: %v", err)
+	}
+	invStore.Registry().OnNodeExcluded(func(nodeID string) { _ = tokens.DisconnectNode(nodeID) })
 	tokens.TrackSessions(srv)
 	responder := busauth.NewResponder(srv.Conn(), issuer, tokens)
 	var holdSvc atomic.Pointer[bustls.Service] // as cmd/rasputin-api wires it
@@ -459,10 +469,6 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		return false, ""
 	})
 	if err := responder.Start(); err != nil {
-		t.Fatal(err)
-	}
-	invStore, err := inventory.OpenStore(ctx, dbPath)
-	if err != nil {
 		t.Fatal(err)
 	}
 	jobStore, err := jobs.OpenStore(ctx, dbPath)

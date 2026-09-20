@@ -252,6 +252,11 @@ func reconcileConvergeTrust(svc *Service, inv *inventory.Store, jstore *jobs.Sto
 			sc.Log("info", "trust: no mesh CA is shipped to nodes in this configuration — nothing to converge")
 			return json.Marshal(res)
 		}
+		// This list is a DATA read, not a membership decision: what the pass
+		// needs from each node is the mesh CA fingerprint its agent reported,
+		// which lives in the node row's metadata and not in the node registry
+		// (geekdojo-brain#585). The membership decision it makes — is this
+		// node enrolled? — comes from the mesh device table below.
 		nodes, err := inv.List(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("list inventory: %w", err)
