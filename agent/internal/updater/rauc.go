@@ -17,8 +17,10 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -48,6 +50,11 @@ type RAUCBackend struct {
 	// Mirrors OpenWrtABBackend's field of the same name; overridable in tests.
 	// See Precheck for why this outranks anything `rauc status` reports.
 	procCmdline string
+	// verifySigner checks that the bundle's own inline signer is authorized to
+	// sign RELEASES, before `rauc install` is allowed to touch the inactive
+	// slot. Mirrors OpenWrtABBackend.verifySig, and is overridden in tests for
+	// the same reason: a test host has no baked publisher trust root.
+	verifySigner func(bundlePath string) error
 }
 
 // NewRAUCBackend constructs a RAUCBackend. Returns an error if the rauc
@@ -70,7 +77,12 @@ func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
 	if err := atrest.EnsureSecretDir(filepath.Join(stateDir, "bundles")); err != nil {
 		return nil, err
 	}
-	return &RAUCBackend{stateDir: stateDir, binary: binary, procCmdline: "/proc/cmdline"}, nil
+	return &RAUCBackend{
+		stateDir:     stateDir,
+		binary:       binary,
+		procCmdline:  "/proc/cmdline",
+		verifySigner: defaultVerifyRAUCSigner,
+	}, nil
 }
 
 func (r *RAUCBackend) SetMuteHook(b *atomic.Bool) { r.muted = b }
@@ -441,6 +453,25 @@ func (r *RAUCBackend) Install(ctx context.Context, bundleID, localPath string, t
 	if progressFn != nil {
 		progressFn("verify", 5)
 	}
+	// Before anything is written to the inactive slot: is the bundle's signer
+	// authorized to sign RELEASES?
+	//
+	// `rauc install` verifies the signature and, with [keyring]
+	// check-purpose=codesign in the device config, that the signer carries the
+	// generic codeSigning extended key usage. That is the most an OpenSSL X509
+	// purpose can ask, and it cannot distinguish a release leaf from any other
+	// code-signing leaf under the same intermediate. The Rasputin purpose OID
+	// can, and this is where it is asked — the same authorization the firewall
+	// rootfs path has applied since geekdojo/geekdojo-brain#154.
+	//
+	// The two are a conjunction. This runs first so an unauthorized signer
+	// stops the update before a slot is touched; rauc then applies its own
+	// verification to the same bytes.
+	if r.verifySigner != nil {
+		if err := r.verifySigner(localPath); err != nil {
+			return "", fmt.Errorf("rauc install: bundle signer: %w", err)
+		}
+	}
 	cmd := exec.CommandContext(ctx, r.binary, "install", localPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -527,5 +558,29 @@ func (r *RAUCBackend) MarkBad(ctx context.Context, bundleID, reason string) erro
 		_ = exec.Command("sleep", "2").Run()
 		_ = exec.Command("systemctl", "reboot").Run()
 	}()
+	return nil
+}
+
+// defaultVerifyRAUCSigner is the production signer check: the bundle's inline
+// signer must chain to the image's baked publisher trust root AND carry the
+// Rasputin release purpose.
+//
+// It FAILS CLOSED, which is the requirement and not an implementation detail:
+// an unreadable trust root, an unparseable signature trailer and an
+// unauthorized leaf all abort the install. There is no outcome that says
+// "could not tell, proceeding" — a gate that can be degraded is one an
+// attacker chooses to degrade.
+func defaultVerifyRAUCSigner(bundlePath string) error {
+	res, err := artifactsig.VerifyRAUCBundleSigner(bundlePath)
+	if err != nil {
+		return err
+	}
+	// Attribution, not just "ok", for the same reason the firewall path logs
+	// it: an unattributed pass on a security gate is barely more useful than
+	// no gate when reading a bench log. The leaf expiry is here because the
+	// failure it eventually causes reads like tampering unless the operator
+	// knows the signer simply aged out.
+	log.Printf("rasputin-agent: rauc: bundle signer authorized for releases — %q (issued by %q, expires %s)",
+		res.Signer, res.Issuer, res.NotAfter.UTC().Format(time.RFC3339))
 	return nil
 }
