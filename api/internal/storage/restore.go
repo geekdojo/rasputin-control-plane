@@ -360,6 +360,8 @@ func identityRestorePath(p string) (note string, ok bool) {
 		return "the per-installation mesh CA certificate", true
 	case p == busKeyArchivePath:
 		return busKeyNote, true
+	case p == busCertArchivePath:
+		return busCertNote, true
 	case p == busTombstonesArchivePath:
 		return busTombstonesNote, true
 	case strings.HasPrefix(p, "mesh/headscale/"):

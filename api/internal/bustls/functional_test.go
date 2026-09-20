@@ -32,9 +32,12 @@ package bustls_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -380,10 +383,13 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		t.Fatal(err)
 	}
 	c.key = key
-	serverTLS, err := key.ServerTLSConfig()
+	// The PERSISTED certificate, as the api serves it (geekdojo-brain#508):
+	// same bytes across restarts, carrying the fixed DNS SAN.
+	busCert, _, err := bustls.EnsureCert(filepath.Join(o.dataDir, "bus"), key)
 	if err != nil {
 		t.Fatal(err)
 	}
+	serverTLS := bustls.ServerTLSConfigFor(busCert)
 	if o.cert != nil {
 		serverTLS = bustls.ServerTLSConfigFor(*o.cert)
 	}
@@ -1045,4 +1051,102 @@ func TestFunctional_ControlplaneAgentToken(t *testing.T) {
 	if ok, err := c2.tokens.Validate(ctx, strings.TrimSpace(string(old)), "cp1"); err != nil || ok {
 		t.Fatalf("the replaced token still validates: (%v, %v)", ok, err)
 	}
+}
+
+// The bus serves the PERSISTED certificate, and a client that verifies it the
+// way Alloy will — the file's exact bytes as its only root, plus a server name
+// — completes the handshake (geekdojo/geekdojo-brain#508, #467).
+//
+// This is what a Rasputin node does NOT do: a node checks the pin and ignores
+// the chain, the name and the dates. The SAN exists for everything else, and
+// the prerequisite it unblocks is the node listener on :8443
+// (geekdojo/geekdojo-brain#513), which serves this same certificate.
+func TestFunctional_BusServesThePersistedCertificate(t *testing.T) {
+	skipShort(t)
+	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
+
+	certPath := filepath.Join(c.dataDir, "bus", bustls.CertFileName)
+	pemBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("the api did not persist a bus certificate: %v", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pemBytes) {
+		t.Fatalf("%s is not loadable as a trust root", certPath)
+	}
+
+	// NATS always sends its INFO line in the clear and the client upgrades
+	// after it, TLS-required bus or not (the same fact assertPlaintextRefused
+	// leans on), so the handshake is driven by hand here.
+	raw, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", c.port), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	_ = raw.SetDeadline(time.Now().Add(15 * time.Second)) // bounds this one exchange
+	if line, rerr := bufio.NewReader(raw).ReadString('\n'); rerr != nil || !strings.HasPrefix(line, "INFO ") {
+		t.Fatalf("first line from the bus = (%q, %v), want INFO", line, rerr)
+	}
+
+	// From here it is exactly a collector's tls_config: ca_pem = the file's
+	// bytes, server_name = the SAN. No pin, and no InsecureSkipVerify — this
+	// client trusts the certificate and checks the name, which is the whole
+	// reason the SAN had to exist.
+	conn := tls.Client(raw, &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		RootCAs:    roots,
+		ServerName: bustls.BusDNSName,
+	})
+	if err := conn.Handshake(); err != nil {
+		t.Fatalf("a name-verifying client could not handshake with the bus: %v", err)
+	}
+
+	served := conn.ConnectionState().PeerCertificates
+	if len(served) != 1 {
+		t.Fatalf("the bus served %d certificates, want 1", len(served))
+	}
+	// Byte for byte the file: a client may pin these bytes.
+	if !bytes.Equal(served[0].Raw, mustParsePEM(t, pemBytes).Raw) {
+		t.Fatal("the certificate on the wire is not the one in bus/bus.crt")
+	}
+	if got := served[0].DNSNames; len(got) != 1 || got[0] != bustls.BusDNSName {
+		t.Fatalf("the served certificate's DNSNames = %v, want [%q]", got, bustls.BusDNSName)
+	}
+	// And it still wraps the key every node pins, so the two checks agree.
+	pin, err := proto.BusPinForPublicKey(served[0].PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin != c.key.Pin() {
+		t.Fatalf("the served certificate wraps %q, and nodes pin %q", pin, c.key.Pin())
+	}
+
+	// A node with the pin and no notion of names joins the same bus.
+	startAgent(t, agentOpts{id: "n-pinned", url: c.url(), token: c.mint(t, "n-pinned"), pin: c.key.Pin()})
+	c.waitRegistered(t, "n-pinned", true)
+
+	// The api restarting does not change the bytes: the certificate is a file
+	// now, not something minted per start.
+	c.stop()
+	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, pinMode: bustls.ModeOffer})
+	after, err := os.ReadFile(filepath.Join(c2.dataDir, "bus", bustls.CertFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, pemBytes) {
+		t.Fatal("the persisted certificate changed across a restart")
+	}
+}
+
+func mustParsePEM(t *testing.T, b []byte) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode(b)
+	if block == nil {
+		t.Fatal("no PEM block")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf
 }
