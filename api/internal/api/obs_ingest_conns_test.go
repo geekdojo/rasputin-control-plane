@@ -24,11 +24,13 @@ import (
 )
 
 // countingLiveness is a fake IngestRegistry that counts every Admitted call,
-// so a test can assert how often the ingress consults it.
+// so a test can assert how often the listener consults it — and, because it
+// holds nothing but maps, that the answer never comes from a database.
 type countingLiveness struct {
 	calls atomic.Int64
 	mu    sync.Mutex
 	live  map[string]bool
+	keys  map[string]inventory.KeyOwner
 	hooks []func(string)
 }
 
@@ -39,11 +41,21 @@ func (f *countingLiveness) Admitted(nodeID string) bool {
 	return f.live[nodeID]
 }
 
+func (f *countingLiveness) AdmitKey(spki string) (inventory.KeyOwner, bool) {
+	f.calls.Add(1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.keys[spki]
+	return o, ok && f.live[o.NodeID]
+}
+
 func (f *countingLiveness) OnNodeExcluded(fn func(string)) {
 	f.mu.Lock()
 	f.hooks = append(f.hooks, fn)
 	f.mu.Unlock()
 }
+
+func (f *countingLiveness) OnKeysRetired(func(string, []string)) {}
 
 // ingressTLS is a real mTLS ingress: a Mesh CA, the api's server leaf and a
 // collector client leaf per node, served by the real ObsIngestHandler behind
@@ -82,14 +94,17 @@ func startIngress(t *testing.T, s *Server, gate IngestRegistry, nodes ...string)
 		}
 	}
 	it.srv = httptest.NewUnstartedServer(s.ObsIngestHandler())
+	// The production shape: the stack verifies nothing (a node's own key is
+	// wrapped in a certificate no CA issued), and admission is decided in
+	// VerifyConnection against the registry. A legacy collector's mesh chain
+	// is verified explicitly, against this pool.
 	it.srv.TLS = &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    pool,
+		MinVersion:   tls.VersionTLS13,
+		ClientAuth:   tls.RequireAnyClientCert,
 		Certificates: []tls.Certificate{serverCert},
 	}
 	it.srv.Config.TLSConfig = it.srv.TLS
-	if err := s.WireObsIngest(it.srv.Config, gate); err != nil {
+	if err := s.WireObsIngest(it.srv.Config, gate, pool); err != nil {
 		t.Fatalf("WireObsIngest: %v", err)
 	}
 	it.srv.TLS = it.srv.Config.TLSConfig
@@ -99,7 +114,7 @@ func startIngress(t *testing.T, s *Server, gate IngestRegistry, nodes ...string)
 }
 
 func (it *ingressTLS) clientTLS(node string) *tls.Config {
-	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: it.roots, Certificates: []tls.Certificate{it.clients[node]}, ServerName: "127.0.0.1"}
+	return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: it.roots, Certificates: []tls.Certificate{it.clients[node]}, ServerName: "127.0.0.1"}
 }
 
 // keepAliveClient is an http.Client that holds one connection open.
@@ -119,24 +134,42 @@ func postIngest(c *http.Client, base string) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// The ingress consults the node registry once per CONNECTION, in the
-// handshake, and never on a request: five requests over one kept-alive
-// connection cost one check. The pushes pass every gate (503 "backend not
-// ready": observability is off in the fixture).
-func TestObsIngress_LivenessIsCheckedOncePerConnection(t *testing.T) {
+// The listener consults the node registry once in the handshake and once per
+// request, and NOTHING else: a connection outlives the facts it was admitted
+// on, so the request in flight when a node is revoked must not be served on a
+// decision the registry has since reversed (geekdojo/geekdojo-brain#513).
+//
+// The registry is memory, so the re-check costs a map lookup — see
+// TestObsIngress_RequestPathReadsNoDatabase, which proves nothing here reads a
+// database. The pushes pass every gate (503 "backend not ready":
+// observability is off in the fixture).
+func TestObsIngress_AdmissionIsRecheckedPerRequest(t *testing.T) {
 	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
 	gate := &countingLiveness{live: map[string]bool{"c02": true}}
 	it := startIngress(t, s, gate, "c02")
 
 	c := it.keepAliveClient("c02")
-	for i := range 5 {
+	const requests = 5
+	for i := range requests {
 		code, err := postIngest(c, it.srv.URL)
 		if err != nil || code != http.StatusServiceUnavailable {
 			t.Fatalf("request %d = (%d, %v), want 503 backend-not-ready", i, code, err)
 		}
 	}
-	if n := gate.calls.Load(); n != 1 {
-		t.Errorf("Admitted was called %d times for one connection and five requests; want 1 (handshake only)", n)
+	// One handshake and one re-check per request. A mesh-chain client has no
+	// registered key, so identify misses AdmitKey and then calls Admitted;
+	// the request path calls Admitted once more after that.
+	if want, n := int64(3*requests+2), gate.calls.Load(); n != want {
+		t.Errorf("the registry was consulted %d times for one connection and %d requests; want %d", n, requests, want)
+	}
+
+	// And a revoke between requests is caught by the re-check, not only by
+	// the connection close.
+	gate.mu.Lock()
+	gate.live["c02"] = false
+	gate.mu.Unlock()
+	if code, _ := postIngest(c, it.srv.URL); code != http.StatusUnauthorized && code != http.StatusForbidden {
+		t.Errorf("a request after the node stopped being admitted = %d, want 401 or 403", code)
 	}
 }
 
@@ -313,10 +346,10 @@ func send(t *testing.T, conn *tls.Conn, br *bufio.Reader, node string) {
 
 func TestWireObsIngest_RefusesWithoutAGate(t *testing.T) {
 	s := &Server{}
-	if err := s.WireObsIngest(&http.Server{TLSConfig: &tls.Config{}}, nil); err == nil {
+	if err := s.WireObsIngest(&http.Server{TLSConfig: &tls.Config{}}, nil, nil); err == nil {
 		t.Error("no gate: want an error")
 	}
-	if err := s.WireObsIngest(&http.Server{}, &countingLiveness{}); err == nil {
+	if err := s.WireObsIngest(&http.Server{}, &countingLiveness{}, nil); err == nil {
 		t.Error("no TLS config: want an error")
 	}
 }

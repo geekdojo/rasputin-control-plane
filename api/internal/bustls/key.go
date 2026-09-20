@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
@@ -48,6 +49,11 @@ const KeyFileName = "bus.key"
 type Key struct {
 	signer crypto.Signer
 	pin    string
+
+	// The node listener's certificate, minted once — see ListenerCertificate.
+	certOnce sync.Once
+	cert     *tls.Certificate
+	certErr  error
 }
 
 // Pin is the value nodes carry as RASPUTIN_BUS_PIN.
@@ -193,10 +199,24 @@ var (
 	certNotAfter  = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 )
 
+// CertDNSName is the one name a certificate wrapping the bus key carries.
+//
+// It exists so the api's node listener can tell a client that pins the BUS
+// key from one that trusts the mesh CA: both dial the same address, so SNI is
+// the only thing that distinguishes them, and it can only distinguish them if
+// the two certificates answer to different names.
+//
+// It is deliberately under .invalid (RFC 6761), which can never resolve. This
+// name is an SNI and SAN token, never a DNS lookup: a client reaches the api
+// at its ordinary address and sets this as its server name, so nothing can be
+// steered anywhere by it, and an operator reading it in a config sees at once
+// that it is not a host to go looking for.
+const CertDNSName = "bus.rasputin.invalid"
+
 // SelfSignedCert wraps signer in a self-signed certificate valid from
-// notBefore to notAfter. Exported so a test can build a certificate that is
-// not yet valid, or long expired, around the same key and prove the pin check
-// ignores both.
+// notBefore to notAfter, carrying CertDNSName. Exported so a test can build a
+// certificate that is not yet valid, or long expired, around the same key and
+// prove the pin check ignores both.
 func SelfSignedCert(signer crypto.Signer, notBefore, notAfter time.Time) (tls.Certificate, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
@@ -205,6 +225,7 @@ func SelfSignedCert(signer crypto.Signer, notBefore, notAfter time.Time) (tls.Ce
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "rasputin-bus"},
+		DNSNames:              []string{CertDNSName},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature,
@@ -231,6 +252,31 @@ func (k *Key) ServerTLSConfig() (*tls.Config, error) {
 		return nil, err
 	}
 	return ServerTLSConfigFor(cert), nil
+}
+
+// ListenerCertificate is the certificate the api's node listener serves: the
+// bus key, wrapped once for the life of the process and dated 1970-9999 like
+// the one the NATS server re-mints on every call.
+//
+// Minted once rather than per handshake because a client that cannot pin a
+// key — Grafana Alloy, which takes a CA as PEM bytes — has to be handed the
+// exact bytes it will be shown. A per-handshake mint would hand it a
+// different serial every time.
+//
+// It is held in memory only. geekdojo/geekdojo-brain#508 persists it and adds
+// it to the identity backup, at which point a restart stops changing the
+// bytes; until then a restart re-mints, and the fact-driven collector
+// reconcile redeploys the collectors that pinned the previous one.
+func (k *Key) ListenerCertificate() (*tls.Certificate, error) {
+	k.certOnce.Do(func() {
+		cert, err := SelfSignedCert(k.signer, certNotBefore, certNotAfter)
+		if err != nil {
+			k.certErr = err
+			return
+		}
+		k.cert = &cert
+	})
+	return k.cert, k.certErr
 }
 
 // ServerTLSConfigFor is ServerTLSConfig around an existing certificate.

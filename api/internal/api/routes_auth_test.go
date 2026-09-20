@@ -274,7 +274,7 @@ func TestBootstrapListenerServesNoGatedRoute(t *testing.T) {
 	}
 }
 
-// Every obs-ingress route authenticates by the verified client certificate;
+// Every node-listener route authenticates by the key the caller presented;
 // a request with no TLS state must be refused. A server whose listener was
 // never given the node admission gate (WireObsIngest) refuses everything with
 // 503 before it looks at the certificate: fail closed.
@@ -285,7 +285,10 @@ func TestObsIngestRoutesRequireClientCert(t *testing.T) {
 		t.Fatal("no obs ingress routes enumerated")
 	}
 	for _, gated := range []bool{false, true} {
-		f.srv.ingestGated = gated
+		f.srv.nodeGate = nil
+		if gated {
+			f.srv.nodeGate = newIngestConns(f.srv.inv.Registry(), nil)
+		}
 		want := http.StatusServiceUnavailable
 		if gated {
 			want = http.StatusUnauthorized

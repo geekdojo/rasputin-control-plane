@@ -107,9 +107,12 @@ type Server struct {
 	// collector's client leaf (main.go's mintCollectorLeaf). Node removal
 	// deletes the node's directory; "" skips that step.
 	collectorLeafDir string
-	// ingestGated is set by WireObsIngest once the ingress listener checks
-	// node admission at the handshake; the ingress handlers refuse without it.
-	ingestGated bool
+	// nodeGate is the node listener's admission gate, set by WireObsIngest.
+	// It decides the caller's identity and admission at the handshake and
+	// again on every request, from memory (obs_ingest_conns.go). nil means
+	// the listener was never wired, and the handlers refuse everything:
+	// fail closed.
+	nodeGate *ingestConns
 }
 
 // SetReleaseSource wires the update-channel source used by
