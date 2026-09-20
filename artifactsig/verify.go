@@ -295,3 +295,40 @@ func hashName(h crypto.Hash) string {
 	}
 	return fmt.Sprintf("hash-%d", int(h))
 }
+
+// SignerExpiry reports whether a verification failure over the signature at
+// sigPath is explained by an EXPIRED signing certificate, and when it expired.
+//
+// This is a DIAGNOSTIC, not a verification step, and it deliberately makes no
+// trust decision: it is only ever consulted after Verify has already refused,
+// to choose the wording of a refusal that has already happened. It parses the
+// signature without checking any chain, so nothing it returns may be used to
+// admit an artifact — callers get a time and a bool, never a verdict.
+//
+// It exists because the two conditions look identical from the outside and
+// need opposite responses from an operator. A release whose leaf has aged out
+// is not a tampered release: the bytes are fine, the cluster is simply too old
+// to still be fetching first-flash images for its own version. Reporting that
+// as "signature verification failed" sends the operator hunting for an attack
+// (geekdojo/geekdojo-brain#576).
+func SignerExpiry(sigPath string) (notAfter time.Time, expired bool) {
+	der, err := readSignature(sigPath)
+	if err != nil {
+		return time.Time{}, false
+	}
+	p7, err := pkcs7.Parse(der)
+	if err != nil {
+		return time.Time{}, false
+	}
+	// The signer specifically, not "any embedded certificate": an expired
+	// INTERMEDIATE bundled alongside a live leaf is a different fault, and
+	// calling it a stale release would misdirect just as badly.
+	leaf := p7.GetOnlySigner()
+	if leaf == nil {
+		return time.Time{}, false
+	}
+	if now := time.Now().UTC(); now.After(leaf.NotAfter) {
+		return leaf.NotAfter, true
+	}
+	return leaf.NotAfter, false
+}

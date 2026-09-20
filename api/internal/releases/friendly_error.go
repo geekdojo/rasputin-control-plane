@@ -19,6 +19,23 @@ func friendlyFetchError(err error) string {
 		return ""
 	}
 
+	// Signature problems, before the transport classes below. These are not
+	// network faults and the network advice would send an operator to look at
+	// the wrong thing entirely (geekdojo/geekdojo-brain#527).
+	switch {
+	case errors.Is(err, ErrManifestSignerExpired):
+		return "This release's signing certificate has expired, so its manifest can no longer be verified. " +
+			"Update to a current release — a current release is signed by a current certificate."
+	case errors.Is(err, ErrManifestUnsigned):
+		return "The published release has no signature on its manifest, so it was refused. " +
+			"Nothing was installed."
+	case errors.Is(err, ErrManifestVersionMismatch):
+		return "The published release's signed manifest does not match the release it was published under, so it was refused."
+	case errors.Is(err, ErrNoVerifier):
+		return "This control plane has no publisher trust root, so it cannot verify a release. " +
+			"On an appliance, re-flash; on a dev box, run scripts/pki-init.sh."
+	}
+
 	// Non-200 from the release host: classify by status code.
 	var he *httpError
 	if errors.As(err, &he) {

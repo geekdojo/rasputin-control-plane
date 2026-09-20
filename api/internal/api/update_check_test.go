@@ -134,7 +134,7 @@ func TestCheckAndPullUpdate(t *testing.T) {
 	bundle, sha := buildBundleFixture(t, f) // also installs a real root CA on f.srv
 
 	rel := fakeReleaseServer(t, bundle, sha)
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 	// Seed inventory: a controlplane node on an older OS, a firewall node.
 	_ = f.inv.Insert(f.ctx, &proto.Node{ID: "x", Role: proto.RoleControlPlane, ImageVersion: "2026.06.0-dev.20", AgentVersion: "v0.8.4"})
@@ -240,7 +240,7 @@ func TestPullUpdate_PartialStagingIsReportedNotSwallowed(t *testing.T) {
 	c := f.authenticate(t)
 	bundle, sha := buildBundleFixture(t, f)
 	rel := mixedArchReleaseServer(t, bundle, sha)
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"os","channel":"dev"}`, c)
 	if rec.Code != http.StatusMultiStatus {
@@ -307,7 +307,7 @@ func TestPullUpdate_NothingStagedIsStillAFailureWithDetail(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	base = srv.URL
 	t.Cleanup(srv.Close)
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(srv.URL), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(srv.URL, nil), "dev")
 
 	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"os","channel":"dev"}`, c)
 	if rec.Code != http.StatusBadGateway {
@@ -345,7 +345,7 @@ func TestCheckUpdates_StagedIsPerArchNotPerComponent(t *testing.T) {
 	c := f.authenticate(t)
 	bundle, sha := buildBundleFixture(t, f)
 	rel := mixedArchReleaseServer(t, bundle, sha)
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 	// An all-amd64 cluster on an older image.
 	_ = f.inv.Insert(f.ctx, &proto.Node{
@@ -426,7 +426,7 @@ func TestPullFirewall(t *testing.T) {
 	c := f.authenticate(t)
 	bundle, sha := buildBundleFixture(t, f)
 	rel := fakeReleaseServer(t, bundle, sha)
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
 	if rec.Code != http.StatusCreated {
@@ -447,7 +447,7 @@ func TestPullFirewallStagesTheDetachedSignature(t *testing.T) {
 	c := f.authenticate(t)
 	bundle, sha := buildBundleFixture(t, f)
 	rel := fakeReleaseServer(t, bundle, sha)
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
 	if rec.Code != http.StatusCreated {
@@ -489,7 +489,7 @@ func TestPullFirewallRefusesAnUnsignedRelease(t *testing.T) {
 	c := f.authenticate(t)
 	bundle, sha := buildBundleFixture(t, f)
 	rel := fakeReleaseServerOpts(t, bundle, sha, fakeReleaseOpts{omitFirewallSig: true})
-	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
 	if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {
@@ -551,7 +551,7 @@ func TestPullFirewallSignatureFetchFailures(t *testing.T) {
 			c := f.authenticate(t)
 			bundle, sha := buildBundleFixture(t, f)
 			rel := fakeReleaseServerOpts(t, bundle, sha, tc.opts)
-			f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL), "dev")
+			f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 			rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"fw","channel":"dev"}`, c)
 			if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {

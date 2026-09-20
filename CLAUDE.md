@@ -21,6 +21,19 @@ asking first (proposed and declined 2026-07-08). The working methodology:
    is not there: as of 2026-09-01 a missing bundle-signing root CA makes the api
    REFUSE every OS update artifact instead of accepting it unverified, so the
    Updates page's upload and staging paths return 503 until it is in place.
+
+   As of geekdojo/geekdojo-brain#527 that same root also gates the release
+   MANIFEST the update check reads, so on a dev box "Check for updates" and the
+   Add-node image lookup now refuse too — the published releases are signed by
+   the PRODUCTION root, which a dev PKI is not. A trust root is a PEM bundle, so
+   trust both: append the public production root to your dev one.
+
+   ```sh
+   curl -fsSL https://rasputin.geekdojo.com/rasputin-root-ca.pem >> data/trust/root-ca.pem
+   ```
+
+   That is a dev-box convenience and nothing more: on hardware the OS image bakes
+   exactly one root, the production one.
    `RASPUTIN_UPDATE_TRUST=dev-permissive` was the other answer and no longer
    exists — the verifier it named has no permissive mode. On hardware nothing is
    needed; the OS image bakes the root in.

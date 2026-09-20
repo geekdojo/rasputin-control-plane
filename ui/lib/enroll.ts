@@ -193,8 +193,14 @@ export interface NodeImage {
 // nodeImageFor builds the public download for the node OS image at a given
 // version + architecture — pass the cluster's OS version so a new node matches
 // it, and the arch the operator is flashing for. Returns null when the version
-// is unknown (the wizard then falls back to generic guidance). The image is
-// verifiable against the `imageSha256` in the release's manifest.json.
+// is unknown (the wizard then falls back to generic guidance).
+//
+// This is a LINK, not a verification: it is derived from the version string
+// alone and knows no checksum. The wizard pairs it with the control plane's
+// node-image descriptor (getNodeImage), which carries the sha256 out of the
+// release's SIGNED manifest plus the manifest itself, so a person flashing by
+// hand can check the download without leaving the page
+// (geekdojo/geekdojo-brain#527).
 export function nodeImageFor(
   osVersion: string | undefined | null,
   arch: NodeArch = 'amd64',

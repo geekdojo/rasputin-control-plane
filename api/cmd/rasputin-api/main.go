@@ -1609,7 +1609,13 @@ func main() {
 	// is overridable for a proxy/CDN or tests.
 	releaseChannel := envOr("RASPUTIN_RELEASE_CHANNEL", "stable")
 	releaseAPIBase := envOr("RASPUTIN_RELEASE_API_BASE", "https://api.github.com")
-	srv.SetReleaseSource(releases.NewGithubPublicSource(releaseAPIBase), releaseChannel)
+	// The SAME verifier that gates an OTA install also gates the release
+	// manifest the update decision is made from (geekdojo/geekdojo-brain#527) —
+	// one verifier, bound to the release purpose, not a second one for
+	// metadata. A control plane with no trust root passes a verifier that
+	// refuses everything, so components at or above their signing floor fail to
+	// resolve instead of resolving unverified.
+	srv.SetReleaseSource(releases.NewGithubPublicSource(releaseAPIBase, verifier), releaseChannel)
 	srv.SetReleaseDownloadBase(envOr("RASPUTIN_RELEASE_DOWNLOAD_BASE", "https://github.com"))
 	log.Printf("rasputin-api: update channel = %s (direct from source repos)", releaseChannel)
 

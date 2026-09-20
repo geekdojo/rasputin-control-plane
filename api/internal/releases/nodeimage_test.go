@@ -31,7 +31,7 @@ func TestPublicNodeImage(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	desc, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "geekdojo/rasputin-os", version, "rasputin-n100")
+	desc, err := PublicNodeImage(context.Background(), srv.Client(), nil, srv.URL, testComponent("geekdojo/rasputin-os"), version, "rasputin-n100")
 	if err != nil {
 		t.Fatalf("PublicNodeImage: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestPublicNodeImage(t *testing.T) {
 func TestPublicNodeImage_ManifestMissing(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
-	if _, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "geekdojo/rasputin-os", "2026.06.0-dev.31", "rasputin-n100"); err == nil {
+	if _, err := PublicNodeImage(context.Background(), srv.Client(), nil, srv.URL, testComponent("geekdojo/rasputin-os"), "2026.06.0-dev.31", "rasputin-n100"); err == nil {
 		t.Fatal("expected error when the manifest 404s")
 	}
 }
@@ -68,7 +68,7 @@ func TestPublicNodeImage_NoMatchingArtifact(t *testing.T) {
 		})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	if _, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "r", version, "rasputin-n100"); err == nil {
+	if _, err := PublicNodeImage(context.Background(), srv.Client(), nil, srv.URL, testComponent("r"), version, "rasputin-n100"); err == nil {
 		t.Fatal("expected error when no rasputin-n100 image is present")
 	}
 }
@@ -137,7 +137,7 @@ func TestPublicNodeImage_VersionCannotTraverse(t *testing.T) {
 	for _, v := range versions {
 		t.Run(v, func(t *testing.T) {
 			gotPaths = nil
-			desc, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, repo, v, "rasputin-n100")
+			desc, err := PublicNodeImage(context.Background(), srv.Client(), nil, srv.URL, testComponent(repo), v, "rasputin-n100")
 			for _, p := range gotPaths {
 				// Compare against the cleaned path: if cleaning changes it, the
 				// request left the download prefix.
@@ -225,7 +225,7 @@ func TestPublicNodeImage_InvalidVersionMakesNoRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 	for _, v := range []string{"", "x/y", "../x", "x?y", "x#y", "x%2fy", "x y"} {
-		_, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "geekdojo/rasputin-os", v, "rasputin-n100")
+		_, err := PublicNodeImage(context.Background(), srv.Client(), nil, srv.URL, testComponent("geekdojo/rasputin-os"), v, "rasputin-n100")
 		if !errors.Is(err, ErrInvalidVersion) {
 			t.Errorf("version %q: err = %v, want ErrInvalidVersion", v, err)
 		}
@@ -264,7 +264,7 @@ func TestPublicNodeImage_ManifestImageName(t *testing.T) {
 				})
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
-			desc, err := PublicNodeImage(context.Background(), srv.Client(), srv.URL, "geekdojo/rasputin-os", version, "rasputin-n100")
+			desc, err := PublicNodeImage(context.Background(), srv.Client(), nil, srv.URL, testComponent("geekdojo/rasputin-os"), version, "rasputin-n100")
 			if tc.wantErr {
 				if !errors.Is(err, ErrInvalidAssetName) {
 					t.Fatalf("err = %v (desc %+v), want ErrInvalidAssetName", err, desc)
@@ -280,4 +280,12 @@ func TestPublicNodeImage_ManifestImageName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// testComponent is an OS-shaped component with NO signing floor, for the cases
+// that predate manifest signatures and are about URL and manifest handling
+// rather than about signatures. The floor's own behaviour is covered in
+// manifestsig_test.go, where it is set deliberately.
+func testComponent(repo string) Component {
+	return Component{ID: "os", Repo: repo, Scheme: SchemeCalVer}
 }
