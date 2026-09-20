@@ -225,10 +225,21 @@ func (s *Store) List(ctx context.Context) ([]*PersistedAlert, error) {
 	return out, rows.Err()
 }
 
+// RuleAlertIDPrefix is the id every row the rules engine owns carries
+// (Upsert's default id). It is what tells those rows apart from the alerts the
+// api persists on its own — a node key change, say — which the rules engine
+// has never heard of and must never resolve.
+const RuleAlertIDPrefix = "rule:"
+
 // ListFiring returns every alert whose status is firing, dismissed or not —
 // the set a rule sync must resolve when the rules engine stops reporting one.
+//
+// Rows the rules engine does not own are excluded. Without that, the first
+// rule sync after the api persisted an alert of its own would find a firing
+// row the engine is not reporting and resolve it, which would erase an alert
+// nobody had read.
 func (s *Store) ListFiring(ctx context.Context) ([]*PersistedAlert, error) {
-	rows, err := s.db.QueryContext(ctx, selectCols+` WHERE status = 'firing'`)
+	rows, err := s.db.QueryContext(ctx, selectCols+` WHERE status = 'firing' AND id LIKE 'rule:%'`)
 	if err != nil {
 		return nil, fmt.Errorf("alerts: list firing: %w", err)
 	}

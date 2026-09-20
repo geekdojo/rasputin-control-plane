@@ -610,7 +610,7 @@ func toAlert(p *PersistedAlert) proto.Alert {
 	a := proto.Alert{
 		ID:       p.ID,
 		Severity: p.Severity,
-		Source:   proto.AlertSourceRule,
+		Source:   persistedSource(p.Labels),
 		Title:    p.Title,
 		Detail:   p.Detail,
 		Since:    p.StartsAt,
@@ -627,6 +627,26 @@ func toAlert(p *PersistedAlert) proto.Alert {
 		a.RelatedID = n
 	}
 	return a
+}
+
+// persistedSource reads the subsystem a persisted alert came from off its
+// labels. Rows the rules engine wrote carry no such label and stay
+// AlertSourceRule, which is what every persisted row was before the api
+// started persisting alerts of its own.
+func persistedSource(labels map[string]string) proto.AlertSource {
+	switch proto.AlertSource(labels["source"]) {
+	case proto.AlertSourceNode:
+		return proto.AlertSourceNode
+	case proto.AlertSourceJob:
+		return proto.AlertSourceJob
+	case proto.AlertSourceApp:
+		return proto.AlertSourceApp
+	case proto.AlertSourceSetup:
+		return proto.AlertSourceSetup
+	case proto.AlertSourceSecurity:
+		return proto.AlertSourceSecurity
+	}
+	return proto.AlertSourceRule
 }
 
 // fingerprintFromLabels derives a stable hash from an alert's labels —
