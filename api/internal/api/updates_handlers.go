@@ -124,14 +124,14 @@ func (s *Server) handleUploadBundle(w http.ResponseWriter, r *http.Request) {
 		switch part.FormName() {
 		case "signature":
 			sigDER, err = readDetachedSignature(part)
-			part.Close()
+			_ = part.Close()
 			if err != nil {
 				writeError(w, http.StatusBadRequest, "signature part: "+err.Error())
 				return
 			}
 		case "version", "architecture", "compatible", "description":
 			val, err := io.ReadAll(io.LimitReader(part, maxUploadFieldBytes+1))
-			part.Close()
+			_ = part.Close()
 			if err != nil {
 				writeError(w, http.StatusBadRequest, "read "+part.FormName()+": "+err.Error())
 				return
@@ -154,19 +154,19 @@ func (s *Server) handleUploadBundle(w http.ResponseWriter, r *http.Request) {
 			// Everything the verify callback needs must already be in hand:
 			// this part is streamed straight to disk and cannot be rewound.
 			if msg := missingUploadField(sigDER, meta); msg != "" {
-				part.Close()
+				_ = part.Close()
 				writeError(w, http.StatusBadRequest, msg)
 				return
 			}
 			bundle, err = s.ingestSignedArtifact(r.Context(), part, creator(r), sigDER, meta)
-			part.Close()
+			_ = part.Close()
 			if err != nil {
 				writeError(w, ingestStatus(err), err.Error())
 				return
 			}
 			seen = true
 		default:
-			part.Close()
+			_ = part.Close()
 			writeError(w, http.StatusBadRequest, "unexpected part "+part.FormName())
 			return
 		}
@@ -226,8 +226,21 @@ func (s *Server) ingestSignedArtifact(
 ) (*updater.Bundle, error) {
 	var sigTmp string
 	verify := func(tmpPath, sha string) (bundleMeta, error) {
-		sigTmp = tmpPath + ".sig"
-		if err := os.WriteFile(sigTmp, sigDER, 0o600); err != nil {
+		// The verifier reads the signature off disk, as it does on a node, so
+		// the uploaded DER gets a file of its own next to the artifact's temp.
+		// Named by CreateTemp rather than built from tmpPath: the two are
+		// equivalent here, and a path nobody constructs is a path nobody has
+		// to reason about.
+		f, err := os.CreateTemp(filepath.Dir(tmpPath), "ingest-sig-*.sig")
+		if err != nil {
+			return bundleMeta{}, fmt.Errorf("stage signature for verification: %w", err)
+		}
+		sigTmp = f.Name()
+		if _, err := f.Write(sigDER); err != nil {
+			_ = f.Close()
+			return bundleMeta{}, fmt.Errorf("stage signature for verification: %w", err)
+		}
+		if err := f.Close(); err != nil {
 			return bundleMeta{}, fmt.Errorf("stage signature for verification: %w", err)
 		}
 		res, err := s.updaterVerifier.VerifyArtifact(tmpPath, sigTmp)
@@ -260,7 +273,7 @@ func (s *Server) ingestSignedArtifact(
 	// from /api/bundles/{sha}/sig and re-verifies it against the root baked
 	// into its own image. Failing to place it fails the upload: a bundle whose
 	// signature is missing looks ready and refuses at the last step on the node.
-	if err := os.WriteFile(s.bundleSigPath(bundle.SHA256), sigDER, 0o644); err != nil {
+	if err := s.writeBundleSignature(bundle.SHA256, sigDER); err != nil {
 		_ = s.updater.DeleteBundle(ctx, bundle.SHA256)
 		_ = os.Remove(bundle.StoragePath)
 		return nil, fmt.Errorf("stage signature beside the bundle: %w", err)
@@ -419,13 +432,21 @@ func (s *Server) stageBundleSignature(ctx context.Context, sigURL, sha string) e
 	if len(der) > maxSigBytes {
 		return fmt.Errorf("signature asset exceeds %d bytes", maxSigBytes)
 	}
-	// Write-then-rename: a half-written .sig beside a complete blob would fail
-	// verification on the node and read exactly like tampering.
+	return s.writeBundleSignature(sha, der)
+}
+
+// writeBundleSignature puts a detached signature beside its content-addressed
+// blob, atomically. Shared by the pull path and the operator upload so the two
+// cannot drift on where a `.sig` lands or on how it gets there.
+//
+// Write-then-rename: a half-written `.sig` beside a complete blob would fail
+// verification on the node and read exactly like tampering.
+func (s *Server) writeBundleSignature(sha string, der []byte) error {
 	tmp, err := os.CreateTemp(s.bundleDir, "sig-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create tmp: %w", err)
 	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
+	defer func() { _ = os.Remove(tmp.Name()) }() // no-op after a successful rename
 	if _, err := tmp.Write(der); err != nil {
 		_ = tmp.Close() // the write already failed; the deferred Remove is the cleanup
 		return fmt.Errorf("write tmp: %w", err)
