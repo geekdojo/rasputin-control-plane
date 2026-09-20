@@ -17,11 +17,23 @@ import (
 // makes a container on `c02` show up in c02's Containers drawer, while VM stays
 // loopback-only on the controlplane.
 //
-// Everything the collector needs — its Alloy config AND the three PEM files for
-// mTLS (client leaf, key, mesh CA) — rides inside the compose YAML as inline
-// `configs` content, because `AppDeployCmd` carries only a compose string and
-// the agent writes no other files. This keeps the whole deployment in one
-// self-contained artifact with no host-file dependency on the remote node.
+// Two shapes, while both kinds of node are in the fleet
+// (geekdojo/geekdojo-brain#515):
+//
+//   - NODE KEY (the target). The collector presents the key the node
+//     generated, in a certificate the node self-signed, and it trusts the
+//     control plane by the bus certificate's exact bytes. The key never leaves
+//     the node and is never in the compose file: the container bind-mounts it
+//     read-only from the node's key directory. The api puts only public bytes
+//     in the compose — the certificate's path and the bus certificate itself.
+//   - MESH LEAF (legacy). The control plane mints the node a client leaf under
+//     the mesh CA and puts the leaf, its KEY and the CA into the compose as
+//     inline `configs` content. That is the shape this file has always had,
+//     and it is why the key sat in a 0644 file on the node. It is used only
+//     for a node whose agent has not registered a collector key.
+//
+// Either way the whole deployment is one compose string, because
+// `AppDeployCmd` carries only that and the agent writes no other files.
 
 const (
 	// collectorContainerName is the collector's container name on the node.
@@ -32,8 +44,12 @@ const (
 	// collectorConfigDir is where the inline configs land inside the container.
 	collectorConfigPath   = "/etc/alloy/config.alloy"
 	collectorLeafCertPath = "/etc/alloy/certs/leaf.pem"
-	collectorLeafKeyPath  = "/etc/alloy/certs/leaf.key"
-	collectorMeshCAPath   = "/etc/alloy/certs/mesh-ca.pem"
+	// Where the node's own collector certificate and key are mounted, in the
+	// node-key shape.
+	collectorNodeKeyCertPath = "/etc/alloy/certs/node.crt"
+	collectorNodeKeyPath     = "/etc/alloy/certs/node.key"
+	collectorLeafKeyPath     = "/etc/alloy/certs/leaf.key"
+	collectorMeshCAPath      = "/etc/alloy/certs/mesh-ca.pem"
 
 	// collectorDataRoot is the appliance's FIXED Docker data-root — the OS
 	// image pins it here (§3.9b). Unlike the controlplane supervisor, which
@@ -61,12 +77,25 @@ type CollectorSpec struct {
 	IngressBaseURL string
 	ServerName     string
 
-	// The mTLS material, PEM-encoded. LeafCertPEM/LeafKeyPEM are the node's
-	// client leaf (minted with LeafSpec.ClientAuth); MeshCAPEM is the CA the
-	// collector trusts for the api's server cert.
+	// The mTLS material, PEM-encoded, for the LEGACY shape only.
+	// LeafCertPEM/LeafKeyPEM are the node's client leaf (minted with
+	// LeafSpec.ClientAuth); MeshCAPEM is the CA the collector trusts for the
+	// api's server cert. Leave all three empty for the node-key shape.
 	LeafCertPEM string
 	LeafKeyPEM  string
 	MeshCAPEM   string
+
+	// NodeKeyCertPath / NodeKeyPath are the node's own collector certificate
+	// and key, as absolute paths ON THE NODE (proto.NodeCertPath /
+	// proto.NodeKeyPath). Set both for the node-key shape. The compose
+	// bind-mounts them read-only; nothing about the key is in the compose.
+	NodeKeyCertPath string
+	NodeKeyPath     string
+
+	// BusCertPEM is the control plane's bus certificate, which the collector
+	// trusts as its only CA in the node-key shape — by exact bytes, not by a
+	// chain, which is the same thing the node's bus pin does one layer down.
+	BusCertPEM string
 
 	// AlloyImage overrides the pinned collector image. Defaults to the same
 	// tag the controlplane obs stack uses so the fleet runs one Alloy version.
@@ -98,9 +127,9 @@ prometheus.remote_write "ingress" {
   endpoint {
     url = "{{.MetricsIngressURL}}"
     tls_config {
-      cert_file   = "{{.LeafCertPath}}"
-      key_file    = "{{.LeafKeyPath}}"
-      ca_file     = "{{.MeshCAPath}}"
+      cert_file   = "{{.ClientCertPath}}"
+      key_file    = "{{.ClientKeyPath}}"
+{{.TrustBlock}}
       server_name = "{{.ServerName}}"
     }
   }
@@ -116,9 +145,9 @@ loki.write "ingress" {
   endpoint {
     url = "{{.LogsIngressURL}}"
     tls_config {
-      cert_file   = "{{.LeafCertPath}}"
-      key_file    = "{{.LeafKeyPath}}"
-      ca_file     = "{{.MeshCAPath}}"
+      cert_file   = "{{.ClientCertPath}}"
+      key_file    = "{{.ClientKeyPath}}"
+{{.TrustBlock}}
       server_name = "{{.ServerName}}"
     }
   }
@@ -153,9 +182,13 @@ loki.source.docker "containers" {
 }
 `))
 
-// collectorComposeTmpl renders the collector's compose file. The three cert
-// files and the Alloy config ride as inline `configs` content (Compose
-// >= v2.23.1). network_mode: host is load-bearing — a bridge-network container
+// collectorComposeTmpl renders the collector's compose file. The Alloy config
+// rides as inline `configs` content (Compose >= v2.23.1), and so do the legacy
+// mesh leaf's PEM files. In the node-key shape the client material is not in
+// the file at all: it is bind-mounted read-only from the node's own key
+// directory, so the collector's private key stays a 0600 file on the node
+// instead of sitting inside a compose file the agent writes.
+// network_mode: host is load-bearing — a bridge-network container
 // can't resolve the controlplane's mDNS `rasputin.local` name (Docker's DNS
 // forwarder bypasses the host's nss-mdns), whereas host networking uses the
 // node's own resolver, exactly as the agent already does for NATS. Host
@@ -189,23 +222,34 @@ services:
     configs:
       - source: alloy_config
         target: ` + collectorConfigPath + `
+{{- if .Legacy }}
       - source: leaf_cert
         target: ` + collectorLeafCertPath + `
       - source: leaf_key
         target: ` + collectorLeafKeyPath + `
       - source: mesh_ca
         target: ` + collectorMeshCAPath + `
+{{- end }}
     volumes:
       # cAdvisor needs the Docker socket, the host cgroup tree, and Docker's
       # data-root (the fixed appliance path, §3.9b) to enumerate containers.
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /sys:/sys:ro
       - ` + collectorDataRoot + `:` + collectorDataRoot + `:ro
+{{- if not .Legacy }}
+      # The node's own collector key and its self-signed certificate,
+      # read-only. The key is 0600 on the node and is never copied into this
+      # file; the container runs as uid 0, which is what makes a 0600
+      # read-only mount readable to it.
+      - {{.NodeKeyCertPath}}:{{.ClientCertPath}}:ro
+      - {{.NodeKeyPath}}:{{.ClientKeyPath}}:ro
+{{- end }}
 
 configs:
   alloy_config:
     content: |
 {{ indent 6 .AlloyConfig }}
+{{- if .Legacy }}
   leaf_cert:
     content: |
 {{ indent 6 .LeafCertPEM }}
@@ -215,6 +259,7 @@ configs:
   mesh_ca:
     content: |
 {{ indent 6 .MeshCAPEM }}
+{{- end }}
 `))
 
 // indentBlock prefixes every non-empty line of s with n spaces. Blank lines are
@@ -234,10 +279,17 @@ func indentBlock(n int, s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// Legacy reports whether this spec is the mesh-leaf shape. A spec that names
+// the node's own key is the node-key shape; anything else is legacy.
+func (s CollectorSpec) Legacy() bool {
+	return strings.TrimSpace(s.NodeKeyPath) == "" || strings.TrimSpace(s.NodeKeyCertPath) == ""
+}
+
 // BuildCollectorCompose renders the self-contained compose YAML for a per-node
-// collector: the Alloy River config plus the three mTLS PEM files, all inline.
-// Returns an error if the spec is missing anything the deployment can't work
-// without.
+// collector: the Alloy River config, plus either a read-only bind of the
+// node's own key and certificate (the node-key shape) or the mesh leaf's PEM
+// files inline (legacy). Returns an error if the spec is missing anything the
+// deployment can't work without.
 func BuildCollectorCompose(spec CollectorSpec) (string, error) {
 	switch {
 	case strings.TrimSpace(spec.NodeID) == "":
@@ -246,16 +298,41 @@ func BuildCollectorCompose(spec CollectorSpec) (string, error) {
 		return "", fmt.Errorf("obs collector: IngressBaseURL required")
 	case strings.TrimSpace(spec.ServerName) == "":
 		return "", fmt.Errorf("obs collector: ServerName required")
-	case strings.TrimSpace(spec.LeafCertPEM) == "":
-		return "", fmt.Errorf("obs collector: LeafCertPEM required")
-	case strings.TrimSpace(spec.LeafKeyPEM) == "":
-		return "", fmt.Errorf("obs collector: LeafKeyPEM required")
-	case strings.TrimSpace(spec.MeshCAPEM) == "":
-		return "", fmt.Errorf("obs collector: MeshCAPEM required")
+	}
+	if spec.Legacy() {
+		switch {
+		case strings.TrimSpace(spec.LeafCertPEM) == "":
+			return "", fmt.Errorf("obs collector: LeafCertPEM required")
+		case strings.TrimSpace(spec.LeafKeyPEM) == "":
+			return "", fmt.Errorf("obs collector: LeafKeyPEM required")
+		case strings.TrimSpace(spec.MeshCAPEM) == "":
+			return "", fmt.Errorf("obs collector: MeshCAPEM required")
+		}
+	} else if strings.TrimSpace(spec.BusCertPEM) == "" {
+		// Fail closed rather than render a collector with no trust anchor:
+		// Alloy would fall back to the system roots, which on this image
+		// trust nothing the control plane presents.
+		return "", fmt.Errorf("obs collector: BusCertPEM required for a node-key collector")
 	}
 	image := spec.AlloyImage
 	if image == "" {
 		image = defaultAlloyImage
+	}
+
+	// Where the client material lands INSIDE the container, and how the
+	// collector is told what to trust. The node-key shape pins the control
+	// plane by the bus certificate's exact bytes, carried inline (it is public
+	// and the node has no copy of its own); legacy trusts the mesh CA, which
+	// rides as a file next to the leaf.
+	certPath, keyPath := collectorNodeKeyCertPath, collectorNodeKeyPath
+	// %q: one double-quoted Alloy string with the PEM's newlines escaped.
+	// Alloy's config language has no heredoc, and a PEM with literal newlines
+	// would not parse. The trailing newline is kept so the value is the
+	// certificate's exact bytes.
+	trust := fmt.Sprintf("      ca_pem      = %q", strings.TrimRight(spec.BusCertPEM, "\n")+"\n")
+	if spec.Legacy() {
+		certPath, keyPath = collectorLeafCertPath, collectorLeafKeyPath
+		trust = fmt.Sprintf("      ca_file     = %q", collectorMeshCAPath)
 	}
 
 	base := strings.TrimRight(spec.IngressBaseURL, "/")
@@ -265,20 +342,25 @@ func BuildCollectorCompose(spec CollectorSpec) (string, error) {
 		"MetricsIngressURL": base + obsMetricsIngestPath,
 		"LogsIngressURL":    base + obsLogsIngestPath,
 		"ServerName":        spec.ServerName,
-		"LeafCertPath":      collectorLeafCertPath,
-		"LeafKeyPath":       collectorLeafKeyPath,
-		"MeshCAPath":        collectorMeshCAPath,
+		"ClientCertPath":    certPath,
+		"ClientKeyPath":     keyPath,
+		"TrustBlock":        trust,
 	}); err != nil {
 		return "", fmt.Errorf("obs collector: render alloy config: %w", err)
 	}
 
 	var composeBuf bytes.Buffer
-	if err := collectorComposeTmpl.Execute(&composeBuf, map[string]string{
-		"AlloyImage":  image,
-		"AlloyConfig": alloyBuf.String(),
-		"LeafCertPEM": strings.TrimRight(spec.LeafCertPEM, "\n"),
-		"LeafKeyPEM":  strings.TrimRight(spec.LeafKeyPEM, "\n"),
-		"MeshCAPEM":   strings.TrimRight(spec.MeshCAPEM, "\n"),
+	if err := collectorComposeTmpl.Execute(&composeBuf, map[string]any{
+		"AlloyImage":      image,
+		"AlloyConfig":     alloyBuf.String(),
+		"Legacy":          spec.Legacy(),
+		"LeafCertPEM":     strings.TrimRight(spec.LeafCertPEM, "\n"),
+		"LeafKeyPEM":      strings.TrimRight(spec.LeafKeyPEM, "\n"),
+		"MeshCAPEM":       strings.TrimRight(spec.MeshCAPEM, "\n"),
+		"NodeKeyCertPath": spec.NodeKeyCertPath,
+		"NodeKeyPath":     spec.NodeKeyPath,
+		"ClientCertPath":  certPath,
+		"ClientKeyPath":   keyPath,
 	}); err != nil {
 		return "", fmt.Errorf("obs collector: render compose: %w", err)
 	}

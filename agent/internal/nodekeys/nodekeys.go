@@ -23,16 +23,20 @@
 package nodekeys
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -46,6 +50,30 @@ func Dir(stateDir string) string { return filepath.Join(stateDir, "keys") }
 func KeyPath(stateDir string, p proto.NodeKeyPurpose) string {
 	return filepath.Join(Dir(stateDir), string(p)+".key")
 }
+
+// CertPath is where the key's SELF-SIGNED certificate lives, 0644.
+//
+// The certificate is a wrapper, not a credential: the api admits the key by
+// its SPKI and reads nothing else, so nothing about the certificate is
+// checked — not its chain, not its name, not its dates. It exists because TLS
+// has no way to present a bare key, and because Grafana Alloy takes a
+// cert_file. It is public bytes and is readable as such; only the key beside
+// it is a secret.
+func CertPath(stateDir string, p proto.NodeKeyPurpose) string {
+	return filepath.Join(Dir(stateDir), string(p)+".crt")
+}
+
+// certNotBefore / certNotAfter bracket every certificate written here. The
+// dates mean nothing to the api, which checks the key and ignores the wrapper,
+// and they are wide on purpose: a node boots before NTP with no battery-backed
+// clock, so a certificate minted at a bogus time — or checked at one — must
+// not decide whether the node can reach its control plane. 9999-12-31 is
+// RFC 5280's "no well-defined expiration". Same bracket as the bus
+// certificate (api/internal/bustls).
+var (
+	certNotBefore = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	certNotAfter  = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+)
 
 // Keys is the node's loaded key set.
 type Keys struct {
@@ -92,10 +120,67 @@ func Ensure(stateDir string) (keys *Keys, generated []proto.NodeKeyPurpose, err 
 		if err != nil {
 			return nil, nil, fmt.Errorf("nodekeys: %s: %w", path, err)
 		}
+		// The self-signed wrapper the key is presented in. Rewritten whenever
+		// it is missing or does not wrap THIS key, so a half-written file or a
+		// restored certificate from another node heals itself rather than
+		// leaving a node that presents a key it cannot prove it holds.
+		if err := ensureCert(CertPath(stateDir, p), signer, string(p)); err != nil {
+			return nil, nil, err
+		}
 		k.signers[p] = signer
 		k.hashes[p] = hash
 	}
 	return k, generated, nil
+}
+
+// ensureCert writes a self-signed certificate for signer at path when the one
+// there does not wrap signer's public key. clientAuth EKU, because that is
+// what a TLS client certificate is for and what Go's own verification of a
+// chain would demand; the api checks neither.
+func ensureCert(path string, signer crypto.Signer, cn string) error {
+	if blob, err := os.ReadFile(path); err == nil && certWraps(blob, signer) {
+		return nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("nodekeys: read %s: %w", path, err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
+	if err != nil {
+		return fmt.Errorf("nodekeys: serial for %s: %w", path, err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             certNotBefore,
+		NotAfter:              certNotAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, signer.Public(), signer)
+	if err != nil {
+		return fmt.Errorf("nodekeys: self-sign %s: %w", path, err)
+	}
+	// 0644: public bytes. Only the key beside it is a secret, and the
+	// collector container bind-mounts both read-only.
+	return writeFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
+}
+
+// certWraps reports whether the PEM certificate in blob carries signer's
+// public key. A certificate that wraps a different key is not this node's.
+func certWraps(blob []byte, signer crypto.Signer) bool {
+	block, _ := pem.Decode(blob)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	want, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(cert.RawSubjectPublicKeyInfo, want)
 }
 
 // ensureOne loads path, or generates and persists a key when there is none.
@@ -129,7 +214,7 @@ func ensureOne(path string) (signer crypto.Signer, generated bool, err error) {
 		return nil, false, fmt.Errorf("nodekeys: marshal %s: %w", path, err)
 	}
 	blob := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := writeSecret(path, blob); err != nil {
+	if err := writeFile(path, blob, 0o600); err != nil {
 		return nil, false, err
 	}
 	return fresh, true, nil
@@ -160,11 +245,12 @@ func parse(data []byte) (crypto.Signer, error) {
 	return s, nil
 }
 
-// writeSecret stages data beside path with mode 0600, fsyncs it, and renames
-// it into place, then fsyncs the directory. O_EXCL on the final rename is not
-// available, so a concurrent first start could race; the agent is a single
-// process per node and starts this before anything else reads a key.
-func writeSecret(path string, data []byte) error {
+// writeFile stages data beside path with the given mode, fsyncs it, and
+// renames it into place, then fsyncs the directory — so a power cut leaves the
+// old file or the new one and never half of one. O_EXCL on the final rename is
+// not available, so a concurrent first start could race; the agent is a single
+// process per node and does this before anything else reads a key.
+func writeFile(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".key-*")
 	if err != nil {
@@ -172,7 +258,7 @@ func writeSecret(path string, data []byte) error {
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("nodekeys: stage %s: %w", path, err)
 	}
@@ -222,4 +308,12 @@ func (k *Keys) Path(p proto.NodeKeyPurpose) string {
 		return ""
 	}
 	return KeyPath(k.stateDir, p)
+}
+
+// CertPath is where a purpose's certificate file is.
+func (k *Keys) CertPath(p proto.NodeKeyPurpose) string {
+	if k == nil {
+		return ""
+	}
+	return CertPath(k.stateDir, p)
 }
