@@ -46,3 +46,4 @@ R20	agent/internal/tailscale/trust.go	InstalledCAFingerprint	the installed mesh 
 R21	agent/internal/clusterdns/clusterdns.go	pinnedIP	the resolved DNS drop-in		pending	geekdojo/geekdojo-brain#547
 R22	agent/internal/storage/archive.go	StagingRoot	RASPUTIN_BACKUP_STAGING_DIR	TestStagingRootIsTheDeployedDefaultWithNoEnvironmentSet	covered	
 R23	agent/cmd/rasputin-agent/main.go	controlplanePinFile	RASPUTIN_BUS_PIN_FILE, the controlplane agent's last bus-pin source	TestControlplanePinFile_FailsClosedOnEveryShapeOfInput	covered	
+R24	api/internal/busauth/enforce.go	ResolveEnforcement	RASPUTIN_BUS_AUTH and the host the embedded NATS server binds	TestResolveEnforcement TestResolveEnforcement_RefusalIsNeverOpen	covered	

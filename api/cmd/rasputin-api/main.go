@@ -133,7 +133,7 @@ func main() {
 	// federating agents from other nodes set RASPUTIN_NATS_HOST=0.0.0.0
 	// (or a specific LAN IP) so the embedded server is reachable. Port
 	// override is rarely useful but kept symmetric.
-	natsHost := envOr("RASPUTIN_NATS_HOST", "127.0.0.1")
+	natsHost := envOr(busauth.EnvNATSHost, "127.0.0.1")
 	natsPort := 4222
 	if p, err := strconv.Atoi(envOr("RASPUTIN_NATS_PORT", "4222")); err == nil && p > 0 {
 		natsPort = p
@@ -156,7 +156,18 @@ func main() {
 	// a cluster already running open should verify token-readiness (dry-run
 	// reconciliation: every live node's token hashes to an active bound record)
 	// before updating to a build carrying this default, or set `=off` explicitly.
-	busAuthEnforce := envOr("RASPUTIN_BUS_AUTH", "enforce") != "off"
+	//
+	// AND `=off` is REFUSED unless the bus binds loopback
+	// (geekdojo/geekdojo-brain#511). With auth off every connection gets the
+	// bus's full permissions and can claim any node's id; on a bus bound to
+	// 0.0.0.0 or a LAN address that is every device that can reach this host.
+	// Fatal, not a warning: the whole point is that the process must not come
+	// up in that state, and the refusal names what to change. There is
+	// deliberately no override — see busauth.ResolveEnforcement.
+	busAuthEnforce, busAuthErr := busauth.ResolveEnforcement(os.Getenv(busauth.EnvEnforce), natsHost)
+	if busAuthErr != nil {
+		log.Fatalf("rasputin-api: %v", busAuthErr)
+	}
 	busCfg := bus.Config{Host: natsHost, Port: natsPort, StoreDir: filepath.Join(dataDir, "nats")}
 	var (
 		busIssuer *busauth.Issuer
@@ -177,7 +188,8 @@ func main() {
 		busCfg.APIPass = apiPass
 		log.Printf("rasputin-api: bus auth ENFORCED (issuer=%s)", busIssuer.PublicKey())
 	} else {
-		log.Printf("rasputin-api: bus auth OFF (explicitly disabled via RASPUTIN_BUS_AUTH=off — the bus accepts any connection; unset it to fail closed)")
+		log.Printf("rasputin-api: bus auth OFF (explicitly disabled via %s=%s, and allowed only because the bus binds the loopback address %q — the bus accepts any connection from this machine; unset it to fail closed)",
+			busauth.EnvEnforce, busauth.OffValue, natsHost)
 	}
 
 	// Bus TLS (geekdojo/geekdojo-brain#448): the dedicated bus key — the
