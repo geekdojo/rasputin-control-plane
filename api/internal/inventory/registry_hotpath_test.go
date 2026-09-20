@@ -164,3 +164,27 @@ func TestRegistry_MemberCountCountsOnlyMembers(t *testing.T) {
 		t.Errorf("MemberCount after removal = %d, want 0", got)
 	}
 }
+
+// IsMember answers the same question one node at a time: a registered node is
+// one, a node that only holds a token is not, and an unknown id is not.
+func TestRegistry_IsMember(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	r := s.Registry()
+	now := time.Now().UTC()
+	if err := s.Insert(ctx, &proto.Node{ID: "member", Role: proto.RoleCompute, FirstSeen: now, LastSeen: now}); err != nil {
+		t.Fatal(err)
+	}
+	r.ReplaceLiveTokens(map[string][]string{"member": {"h1"}, "pending": {"h2"}})
+	for id, want := range map[string]bool{"member": true, "pending": false, "ghost": false} {
+		if got := r.IsMember(id); got != want {
+			t.Errorf("IsMember(%q) = %v, want %v", id, got, want)
+		}
+	}
+	if err := s.Delete(ctx, "member"); err != nil {
+		t.Fatal(err)
+	}
+	if r.IsMember("member") {
+		t.Error("a removed node is still a member")
+	}
+}
