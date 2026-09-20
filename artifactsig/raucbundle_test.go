@@ -273,22 +273,30 @@ func TestVerifyRAUCBundleSigner_TrailerProblems(t *testing.T) {
 			wantErr: ErrNotRAUCBundle,
 		},
 		{
-			// Exactly the trailer and nothing else. The boundary matters: a
-			// file of exactly raucSigSizeField bytes has room for the length
-			// field and none for the signature it describes, so `<=` and not
-			// `<` -- with `<` the next read seeks to offset 0 for a signature
-			// of whatever the trailer happens to say.
+			// Exactly the trailer and nothing else. A file of exactly
+			// raucSigSizeField bytes has room for the length field and none
+			// for the signature it describes, so the bound is `<=` and not
+			// `<`.
+			//
+			// The MESSAGE is what is asserted, not just the error kind. Both
+			// bounds refuse this file -- with `<` it falls through and is
+			// refused one case later, for declaring a signature larger than
+			// the bundle -- so a test that only checked ErrNotRAUCBundle would
+			// pass either way, which is exactly what the mutation gate
+			// reported when this case was first written.
 			name:    "exactly a trailer, with no bundle under it",
 			path:    writeBundleRaw(t, dir, "trailer-only.raucb", nil, nil, lenTrailer(64)),
 			wantErr: ErrNotRAUCBundle,
+			wantMsg: "too small to hold one",
 		},
 		{
-			// One byte more: a trailer plus a single payload byte. The bound
-			// on the far side, so the case above is a boundary and not just a
-			// small number.
+			// One byte more, so the case above is a boundary and not just a
+			// small number: here the size check passes and the refusal comes
+			// from the signature length instead.
 			name:    "a trailer and one byte, claiming a signature",
 			path:    writeBundleRaw(t, dir, "one-byte.raucb", []byte{0x00}, nil, lenTrailer(64)),
 			wantErr: ErrNotRAUCBundle,
+			wantMsg: "larger than the bundle",
 		},
 		{
 			name:    "zero-length signature",
