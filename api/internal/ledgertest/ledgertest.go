@@ -66,6 +66,10 @@ func Secrets(pairs ...string) []Secret {
 	return out
 }
 
+// Every assertion below takes testing.TB rather than *testing.T. That is what
+// lets this package's OWN tests drive it with a recorder and check what it
+// reports — including that it never reports the secret itself.
+//
 // Log captures the standard logger for the rest of a test.
 //
 // The standard logger only: a workflow that logs through its own logger needs
@@ -78,7 +82,7 @@ type Log struct {
 
 // CaptureLog redirects log.Default()'s output into a buffer and restores the
 // previous writer when the test ends.
-func CaptureLog(t *testing.T) *Log {
+func CaptureLog(t testing.TB) *Log {
 	t.Helper()
 	l := &Log{}
 	prev := log.Writer()
@@ -133,7 +137,7 @@ type Surfaces struct {
 // Call it before [Surfaces.AssertAbsent], on the same Surfaces value, so a
 // workflow that quietly stopped passing the secret at all cannot read as a
 // clean ledger.
-func (s *Surfaces) AssertPresent(t *testing.T, where, got string, secrets []Secret) {
+func (s *Surfaces) AssertPresent(t testing.TB, where, got string, secrets []Secret) {
 	t.Helper()
 	for _, sec := range secrets {
 		if !strings.Contains(got, sec.Value) {
@@ -149,7 +153,7 @@ func (s *Surfaces) AssertPresent(t *testing.T, where, got string, secrets []Secr
 // It reports every surface that carries a secret rather than stopping at the
 // first, because "the spec is clean" and "the ledger is clean" are different
 // answers and a caller fixing one wants to see the others.
-func (s *Surfaces) AssertAbsent(t *testing.T, secrets []Secret) {
+func (s *Surfaces) AssertAbsent(t testing.TB, secrets []Secret) {
 	t.Helper()
 	if !s.arrived {
 		t.Fatal("ledgertest: AssertAbsent called without AssertPresent. An empty ledger " +
@@ -175,7 +179,7 @@ func (s *Surfaces) AssertAbsent(t *testing.T, secrets []Secret) {
 // rendered row, a rendered config — and the vacuity question is answered by
 // the test around it. For a workflow's ledger use [Surfaces], which asks that
 // question itself.
-func AssertAbsentIn(t *testing.T, where, got string, secrets []Secret) {
+func AssertAbsentIn(t testing.TB, where, got string, secrets []Secret) {
 	t.Helper()
 	for _, sec := range secrets {
 		if strings.Contains(got, sec.Value) {
