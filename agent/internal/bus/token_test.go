@@ -26,31 +26,41 @@ func TestResolveTokenSource(t *testing.T) {
 		role            proto.NodeRole
 		want            string
 		wantFromContain string
+		// wantKind is the proto.TokenSource* value the agent reports in its
+		// registration metadata. It must name the source this call actually
+		// returned: the deletion of the environment fallback waits on every
+		// node reporting "file" (geekdojo/geekdojo-brain#536, §7 4.1), so a
+		// node counted as migrated while still reading the variable would
+		// stop joining when the fallback goes.
+		wantKind string
 	}{
 		// The legacy inline token, still honoured for a new agent on an image
 		// whose firstboot/init.d names no token file.
-		{"compute with only a seeded token", "seeded", "", proto.RoleCompute, "seeded", EnvJoinToken},
-		{"firewall with only a seeded token", "seeded", "", proto.RoleFirewall, "seeded", EnvJoinToken},
-		{"the seeded token is used exactly as given", " seeded ", "", proto.RoleCompute, " seeded ", EnvJoinToken},
-		{"compute with neither", "", "", proto.RoleCompute, "", "none"},
+		{"compute with only a seeded token", "seeded", "", proto.RoleCompute, "seeded", EnvJoinToken, proto.TokenSourceEnv},
+		{"firewall with only a seeded token", "seeded", "", proto.RoleFirewall, "seeded", EnvJoinToken, proto.TokenSourceEnv},
+		{"the seeded token is used exactly as given", " seeded ", "", proto.RoleCompute, " seeded ", EnvJoinToken, proto.TokenSourceEnv},
+		{"compute with neither", "", "", proto.RoleCompute, "", "none", proto.TokenSourceNone},
 		// The canonical source: one 0600 file, on every role.
-		{"a token file", "", envFile, proto.RoleCompute, "from-env-file", EnvJoinTokenFile},
-		{"firewall with a token file", "", envFile, proto.RoleFirewall, "from-env-file", EnvJoinTokenFile},
+		{"a token file", "", envFile, proto.RoleCompute, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
+		{"firewall with a token file", "", envFile, proto.RoleFirewall, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
 		// Precedence: the FILE wins. Whatever wrote it wrote it after the
 		// seed, and it is the only one of the two that can be re-read.
-		{"both set: the file wins", "seeded", envFile, proto.RoleCompute, "from-env-file", EnvJoinTokenFile},
-		{"both set: the file wins on a firewall too", "seeded", envFile, proto.RoleFirewall, "from-env-file", EnvJoinTokenFile},
-		{"both set: the ignored variable is named", "seeded", envFile, proto.RoleCompute, "from-env-file", "ignored"},
+		{"both set: the file wins", "seeded", envFile, proto.RoleCompute, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
+		{"both set: the file wins on a firewall too", "seeded", envFile, proto.RoleFirewall, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
+		{"both set: the ignored variable is named", "seeded", envFile, proto.RoleCompute, "from-env-file", "ignored", proto.TokenSourceFile},
 		// firstboot writes RASPUTIN_CP_JOIN_TOKEN_FILE for a new controlplane
-		{"controlplane with the file named", "", envFile, proto.RoleControlPlane, "from-env-file", EnvJoinTokenFile},
+		{"controlplane with the file named", "", envFile, proto.RoleControlPlane, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
 		// an updated controlplane whose node.env predates the file
-		{"controlplane with neither: the default file", "", "", proto.RoleControlPlane, "from-default", "controlplane default"},
-		{"controlplane with only a seeded token keeps it", "seeded", "", proto.RoleControlPlane, "seeded", EnvJoinToken},
-		{"both set: the file wins on a controlplane too", "seeded", envFile, proto.RoleControlPlane, "from-env-file", EnvJoinTokenFile},
+		{"controlplane with neither: the default file", "", "", proto.RoleControlPlane, "from-default", "controlplane default", proto.TokenSourceFile},
+		{"controlplane with only a seeded token keeps it", "seeded", "", proto.RoleControlPlane, "seeded", EnvJoinToken, proto.TokenSourceEnv},
+		{"both set: the file wins on a controlplane too", "seeded", envFile, proto.RoleControlPlane, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			src, from := ResolveTokenSource(tc.token, tc.file, tc.role, defFile)
+			src, from, kind := ResolveTokenSource(tc.token, tc.file, tc.role, defFile)
+			if kind != tc.wantKind {
+				t.Errorf("kind = %q, want %q", kind, tc.wantKind)
+			}
 			got, err := src()
 			if err != nil {
 				t.Fatalf("source: %v", err)
@@ -79,7 +89,10 @@ func TestResolveTokenSource(t *testing.T) {
 func TestResolveTokenSource_FileWinsAndIsRereadNotFallenBackFrom(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "join.token")
-	src, from := ResolveTokenSource("seeded", path, proto.RoleCompute, filepath.Join(dir, "unused.token"))
+	src, from, kind := ResolveTokenSource("seeded", path, proto.RoleCompute, filepath.Join(dir, "unused.token"))
+	if kind != proto.TokenSourceFile {
+		t.Fatalf("kind = %q, want %q — the file is the source, so that is what the node must report", kind, proto.TokenSourceFile)
+	}
 	if !strings.Contains(from, EnvJoinTokenFile) || !strings.Contains(from, "ignored") {
 		t.Fatalf("description %q should name the file source and say the variable is ignored", from)
 	}

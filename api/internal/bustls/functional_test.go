@@ -55,6 +55,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/cutover"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
@@ -321,6 +322,10 @@ type cp struct {
 	svc      *bustls.Service
 	key      *bustls.Key
 	tokens   *busauth.Store
+	// inv is the node store the api records registrations into, so a test
+	// can read back what was PERSISTED on the node row and not only what
+	// crossed the bus.
+	inv      *inventory.Store
 	jobStore *jobs.Store
 	runner   *jobs.Runner
 	settings *setup.Store
@@ -337,6 +342,11 @@ type cp struct {
 	regMu   sync.Mutex
 	regs    []proto.NodeRegisteredEvt
 	changed signal
+
+	// recorded names every node whose registration has been written to the
+	// node row, as reported by inventory's own post-write hook.
+	recordedMu sync.Mutex
+	recorded   map[string]struct{}
 
 	evalMu    sync.Mutex
 	evals     int
@@ -376,7 +386,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if o.port == 0 {
 		o.port = -1 // the server picks; read back below
 	}
-	c := &cp{dataDir: o.dataDir, selfNode: o.selfNode, switched: make(chan struct{})}
+	c := &cp{dataDir: o.dataDir, selfNode: o.selfNode, switched: make(chan struct{}), recorded: map[string]struct{}{}}
 	dbPath := filepath.Join(o.dataDir, "rasputin.db")
 
 	settings, err := setup.OpenStore(ctx, dbPath)
@@ -475,6 +485,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.inv = invStore
 	c.jobStore = jobStore
 	c.runner = jobs.NewRunner(jobStore, srv.Conn())
 	invSvc := inventory.NewService(invStore, srv.Conn())
@@ -526,7 +537,17 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if err := srv.OnClientDisconnect(c.svc.NoteDisconnect); err != nil {
 		t.Fatal(err)
 	}
-	invSvc.SetOnRegistered(c.svc.OnRegistered)
+	// The bustls service's own hook, plus a test-side signal: OnRegistered
+	// fires AFTER the node row is written, so a test that needs the RECORDED
+	// row (not only the event that crossed the bus) has a fact to wait on
+	// instead of a poll.
+	invSvc.SetOnRegistered(func(ctx context.Context, n *proto.Node) {
+		c.svc.OnRegistered(ctx, n)
+		c.recordedMu.Lock()
+		c.recorded[n.ID] = struct{}{}
+		c.recordedMu.Unlock()
+		c.changed.fire()
+	})
 	if err := invSvc.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -635,6 +656,31 @@ func (c *cp) waitRegisteredSince(t *testing.T, since int, id string, want bool) 
 		}
 		return false
 	}, c.describeRegs)
+}
+
+// waitRecorded blocks until id's registration has been written to the node
+// row, which is the fact inventory's post-write hook reports.
+func (c *cp) waitRecorded(t *testing.T, id string) {
+	t.Helper()
+	waitFact(t, "the node row for "+id, &c.changed, func() bool {
+		c.recordedMu.Lock()
+		defer c.recordedMu.Unlock()
+		_, ok := c.recorded[id]
+		return ok
+	}, c.describeRegs)
+}
+
+// lastRegistration is the most recent registration this controlplane received
+// from id.
+func (c *cp) lastRegistration(id string) (proto.NodeRegisteredEvt, bool) {
+	c.regMu.Lock()
+	defer c.regMu.Unlock()
+	for i := len(c.regs) - 1; i >= 0; i-- {
+		if c.regs[i].NodeID == id {
+			return c.regs[i], true
+		}
+	}
+	return proto.NodeRegisteredEvt{}, false
 }
 
 func (c *cp) registeredAtAll(id string) bool {
@@ -1270,4 +1316,119 @@ func TestFunctional_AgentRefusesToDialOnAnUnusablePin(t *testing.T) {
 	// before the pin existed reaches a controlplane in offer.
 	startAgent(t, agentOpts{id: "n-unpinned", url: c.url(), token: c.mint(t, "n-unpinned")})
 	c.waitRegistered(t, "n-unpinned", false)
+}
+
+// THE FUNCTIONAL CHECK for the §7 4.0 cutover emitters
+// (geekdojo/geekdojo-brain#536): the REAL rasputin-agent binary, connecting
+// over the REAL bus to the REAL inventory service, reports where it read its
+// join token and whether its HTTPS clients to the api are pinned — and the api
+// records both on the node row.
+//
+// Both halves are here on purpose. A unit test can prove publishRegistered
+// puts a value in a map; only this can prove that the value the agent PUBLISHES
+// is the source it actually used, that it survives the bus and the store, and
+// that a later step reading inventory sees it. The cutovers that delete the
+// environment fallback (4.1) and the chain-verified routes (6.5) are decided
+// on exactly this round trip.
+func TestFunctional_CutoverFactsReportedAndRecorded(t *testing.T) {
+	skipShort(t)
+	ctx := context.Background()
+	// Offer: this test is about what registration carries, not the ladder.
+	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
+
+	// A node whose token is in a file — the canonical source (§7 4.1).
+	fileTok := c.mint(t, "n-file")
+	tokenFile := filepath.Join(t.TempDir(), "join.token")
+	if err := os.WriteFile(tokenFile, []byte(fileTok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	onFile := startAgent(t, agentOpts{id: "n-file", url: c.url(), tokenFile: tokenFile})
+	defer onFile.stop(t)
+
+	// A node still carrying the seeded variable — the legacy source, which is
+	// what the cutover is waiting to see the last of.
+	envTok := c.mint(t, "n-env")
+	onEnv := startAgent(t, agentOpts{id: "n-env", url: c.url(), token: envTok})
+	defer onEnv.stop(t)
+
+	c.waitRegistered(t, "n-file", false)
+	c.waitRegistered(t, "n-env", false)
+	// The event crossing the bus and the node row being written are two
+	// different facts, and this test asserts on both — so wait for the
+	// second one rather than reading the store while the insert is in
+	// flight.
+	c.waitRecorded(t, "n-file")
+	c.waitRecorded(t, "n-env")
+
+	for _, tc := range []struct {
+		id   string
+		want string
+	}{
+		{"n-file", proto.TokenSourceFile},
+		{"n-env", proto.TokenSourceEnv},
+	} {
+		// 1. What crossed the bus.
+		ev, ok := c.lastRegistration(tc.id)
+		if !ok {
+			t.Fatalf("no registration from %s\n%s", tc.id, c.describeRegs())
+		}
+		src, reported := proto.TokenSourceOf(ev.Metadata)
+		if !reported {
+			t.Fatalf("%s did not report %s: %v", tc.id, proto.MetadataTokenSource, ev.Metadata)
+		}
+		if src != tc.want {
+			t.Errorf("%s reported %s=%q, want %q", tc.id, proto.MetadataTokenSource, src, tc.want)
+		}
+		pinned, reported := proto.HTTPSPinnedOf(ev.Metadata)
+		if !reported {
+			t.Fatalf("%s did not report %s: %v", tc.id, proto.MetadataHTTPSPinned, ev.Metadata)
+		}
+		// False today, and reported rather than omitted: the node has not
+		// moved, and "has not moved" must not look like "cannot say".
+		if pinned {
+			t.Errorf("%s reported %s=true, but nothing pins the agent's HTTPS clients yet", tc.id, proto.MetadataHTTPSPinned)
+		}
+
+		// 2. What the api recorded on the node row.
+		n, err := c.inv.Get(ctx, tc.id)
+		if err != nil {
+			t.Fatalf("inventory Get(%s): %v", tc.id, err)
+		}
+		if n == nil {
+			t.Fatalf("inventory has no row for %s", tc.id)
+		}
+		src, reported = proto.TokenSourceOf(n.Metadata)
+		if !reported || src != tc.want {
+			t.Errorf("node row %s: %s = (%q, %v), want (%q, true)", tc.id, proto.MetadataTokenSource, src, reported, tc.want)
+		}
+		if _, reported = proto.HTTPSPinnedOf(n.Metadata); !reported {
+			t.Errorf("node row %s: %s was not recorded: %v", tc.id, proto.MetadataHTTPSPinned, n.Metadata)
+		}
+	}
+
+	// 3. The gate a later step reads: one node still on the variable holds the
+	// cutover, and the blocker names it.
+	nodes, err := c.inv.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := cutover.TokenOnFile(nodes)
+	if st.Satisfied {
+		t.Fatalf("the token-on-file cutover read as satisfied while n-env is on the variable: %+v", st)
+	}
+	var named bool
+	for _, b := range st.Blockers {
+		if strings.Contains(b, "n-env") {
+			named = true
+		}
+		if strings.Contains(b, "n-file") {
+			t.Errorf("blocker names the migrated node: %q", b)
+		}
+	}
+	if !named {
+		t.Errorf("blockers = %v, want one naming n-env", st.Blockers)
+	}
+	if st := cutover.HTTPSPinned(nodes); st.Satisfied {
+		t.Fatalf("the https-pinned cutover read as satisfied while no node is pinned: %+v", st)
+	}
 }

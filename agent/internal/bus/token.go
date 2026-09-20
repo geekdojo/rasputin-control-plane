@@ -87,23 +87,33 @@ func TokenFile(path string) TokenSource {
 }
 
 // ResolveTokenSource picks the token source from the agent's environment
-// values and role, in the order documented above, and describes the choice
-// for the startup log (never the token itself). defaultFile is the
-// controlplane default, proto.BusAgentTokenPath outside tests.
-func ResolveTokenSource(token, tokenFile string, role proto.NodeRole, defaultFile string) (TokenSource, string) {
+// values and role, in the order documented above. It returns three things: the
+// source itself; a sentence describing the choice for the startup log (never
+// the token itself); and kind, the same choice as one of the three
+// proto.TokenSource* values, which the agent reports in its registration
+// metadata under proto.MetadataTokenSource. defaultFile is the controlplane
+// default, proto.BusAgentTokenPath outside tests.
+//
+// kind comes from HERE, and not from a second look at the environment beside
+// the emitter, for one reason: the deletion of the environment fallback waits
+// on every node reporting proto.TokenSourceFile (§7 4.1), so a node that
+// reported "file" while actually reading the variable would be counted as
+// migrated and then stop joining when the fallback goes. One function decides
+// the source, so one function names it.
+func ResolveTokenSource(token, tokenFile string, role proto.NodeRole, defaultFile string) (src TokenSource, describe, kind string) {
 	// The token is used exactly as given, as it always has been; only the
 	// file path is trimmed.
 	tokenFile = strings.TrimSpace(tokenFile)
 	switch {
 	case tokenFile != "" && token != "":
-		return TokenFile(tokenFile), fmt.Sprintf("the file %s (%s), read on every connect (%s is set too, and ignored)", tokenFile, EnvJoinTokenFile, EnvJoinToken)
+		return TokenFile(tokenFile), fmt.Sprintf("the file %s (%s), read on every connect (%s is set too, and ignored)", tokenFile, EnvJoinTokenFile, EnvJoinToken), proto.TokenSourceFile
 	case tokenFile != "":
-		return TokenFile(tokenFile), fmt.Sprintf("the file %s (%s), read on every connect", tokenFile, EnvJoinTokenFile)
+		return TokenFile(tokenFile), fmt.Sprintf("the file %s (%s), read on every connect", tokenFile, EnvJoinTokenFile), proto.TokenSourceFile
 	case token != "":
-		return StaticToken(token), EnvJoinToken
+		return StaticToken(token), EnvJoinToken, proto.TokenSourceEnv
 	case role == proto.RoleControlPlane:
-		return TokenFile(defaultFile), fmt.Sprintf("the file %s (the controlplane default; the api mints it), read on every connect", defaultFile)
+		return TokenFile(defaultFile), fmt.Sprintf("the file %s (the controlplane default; the api mints it), read on every connect", defaultFile), proto.TokenSourceFile
 	default:
-		return StaticToken(""), fmt.Sprintf("none — neither %s nor %s is set, and a bus that enforces auth refuses a node without one", EnvJoinToken, EnvJoinTokenFile)
+		return StaticToken(""), fmt.Sprintf("none — neither %s nor %s is set, and a bus that enforces auth refuses a node without one", EnvJoinToken, EnvJoinTokenFile), proto.TokenSourceNone
 	}
 }

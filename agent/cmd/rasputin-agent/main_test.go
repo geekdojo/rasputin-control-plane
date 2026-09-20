@@ -267,8 +267,18 @@ func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bm
 	return registeredEvtFull(t, nc, nodeID, adv, faults, nil)
 }
 
-// registeredEvtFull is registeredEvtWithFaults plus the bus-TLS reporter.
+// registeredEvtFull is registeredEvtWithFaults plus the bus-TLS reporter. The
+// two cutover facts (#536) are fixed here — registeredEvtCutover is the helper
+// that varies them.
 func registeredEvtFull(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool) proto.NodeRegisteredEvt {
+	t.Helper()
+	return registeredEvtCutover(t, nc, nodeID, adv, faults, busTLS, proto.TokenSourceFile, false)
+}
+
+// registeredEvtCutover is registeredEvtFull with the §7 4.0 cutover facts —
+// where the join token came from, and whether this agent's HTTPS clients to
+// the api are pinned — supplied by the caller.
+func registeredEvtCutover(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool, tokenSource string, httpsPinned bool) proto.NodeRegisteredEvt {
 	t.Helper()
 	sub, err := nc.SubscribeSync(proto.NodeRegisteredSubject(nodeID))
 	if err != nil {
@@ -280,7 +290,7 @@ func registeredEvtFull(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Adve
 	// table would make that assertion depend on where the suite runs.
 	lanAddr := func() (string, string) { return "192.168.1.50", "192.168.1.50/24" }
 	trust := func() string { return "fp-test" }
-	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr, trust, busTLS)
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr, trust, busTLS, tokenSource, httpsPinned)
 	msg, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
 		t.Fatalf("no registered event: %v", err)
@@ -339,6 +349,53 @@ func TestPublishRegistered_ReportsBusTLS(t *testing.T) {
 				t.Errorf("metadata %s = %v, want %v", proto.MetadataBusTLS, got, tc.want)
 			}
 		})
+	}
+}
+
+// The two §7 4.0 cutover facts ride on every registration, "env" and false
+// included. The api gates the deletion of the environment fallback and of the
+// chain-verified routes on every node reporting "file" and true, so a node
+// that has not moved yet must be able to SAY so: absent reads as an agent too
+// old to report (a different fix — update it), and that must not be
+// indistinguishable from a node that is simply still on the old path.
+func TestPublishRegistered_ReportsCutoverFacts(t *testing.T) {
+	nc := testBus(t)
+	for _, tc := range []struct {
+		name        string
+		tokenSource string
+		httpsPinned bool
+	}{
+		{"a migrated node", proto.TokenSourceFile, true},
+		{"a node still reading the variable", proto.TokenSourceEnv, false},
+		{"a node with no token at all", proto.TokenSourceNone, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := registeredEvtCutover(t, nc, "cp-test", nil, nil, nil, tc.tokenSource, tc.httpsPinned)
+			src, reported := proto.TokenSourceOf(ev.Metadata)
+			if !reported {
+				t.Fatalf("metadata %s absent or unreadable: %v", proto.MetadataTokenSource, ev.Metadata)
+			}
+			if src != tc.tokenSource {
+				t.Errorf("metadata %s = %q, want %q", proto.MetadataTokenSource, src, tc.tokenSource)
+			}
+			pinned, reported := proto.HTTPSPinnedOf(ev.Metadata)
+			if !reported {
+				t.Fatalf("metadata %s absent or unreadable: %v", proto.MetadataHTTPSPinned, ev.Metadata)
+			}
+			if pinned != tc.httpsPinned {
+				t.Errorf("metadata %s = %v, want %v", proto.MetadataHTTPSPinned, pinned, tc.httpsPinned)
+			}
+		})
+	}
+}
+
+// Nothing on this node is pinned yet, so the honest report is false. The test
+// exists so that flipping apiHTTPSPinned without the client change behind it
+// is a failing test rather than a fleet that reports a capability it does not
+// have — the cutover in §7 6.5 deletes code on the strength of this value.
+func TestAPIHTTPSPinnedIsFalseUntilTheClientsArePinned(t *testing.T) {
+	if apiHTTPSPinned() {
+		t.Error("apiHTTPSPinned() = true, but the agent's HTTPS clients to the api still build a root pool from the mesh CA")
 	}
 }
 

@@ -150,7 +150,7 @@ func main() {
 	// RASPUTIN_CP_JOIN_TOKEN is the legacy inline form, still read when no
 	// file is named so a new agent on an older image keeps joining. See
 	// bus.ResolveTokenSource for the order.
-	joinToken, joinTokenFrom := bus.ResolveTokenSource(os.Getenv(bus.EnvJoinToken), os.Getenv(bus.EnvJoinTokenFile), role, proto.BusAgentTokenPath)
+	joinToken, joinTokenFrom, joinTokenKind := bus.ResolveTokenSource(os.Getenv(bus.EnvJoinToken), os.Getenv(bus.EnvJoinTokenFile), role, proto.BusAgentTokenPath)
 	log.Printf("rasputin-agent: bus join token from %q", joinTokenFrom)
 	// Bus pin (geekdojo/geekdojo-brain#448): the SHA-256 of the controlplane's
 	// bus key, which this node verifies the bus server against over TLS.
@@ -274,7 +274,8 @@ func main() {
 	// client exists, below, and read only from bus callbacks after Dial.
 	var busTLS func(*nats.Conn) bool
 	reregister := func(c *nats.Conn) {
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint, busTLS)
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint, busTLS,
+			joinTokenKind, apiHTTPSPinned())
 	}
 	// The cluster-DNS pin follows the bus connection: every successful
 	// connect — first dial, nats reconnect, re-dial — fires this right after
@@ -927,8 +928,31 @@ func uciLANAddr(lookup func(context.Context) (string, string, error), fallback f
 	}
 }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), trustFingerprint func() string, busTLS func(*nats.Conn) bool) {
+// apiHTTPSPinned reports whether this agent's HTTPS clients to the control
+// plane verify the api by the bus key pin this node already holds, rather than
+// by a certificate chain. It is the fact the last cutover in the ladder waits
+// on (proto.MetadataHTTPSPinned, methodology §7 6.2 and 6.5).
+//
+// It is false, and it is a function rather than a literal so there is one
+// place to change when that stops being true. Every HTTPS client this agent
+// opens against the api builds its root pool from the mesh CA bundle plus the
+// system roots — agent/internal/updater (bundle downloads, both backends) and
+// agent/internal/quiesce (backup transfer) — so today no client on this node
+// is pinned, and the honest report is false. Reporting false rather than
+// omitting the key is the point: a node that says false is a node still to
+// migrate, and a node that says nothing is one whose agent predates the key.
+func apiHTTPSPinned() bool { return false }
+
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), trustFingerprint func() string, busTLS func(*nats.Conn) bool, tokenSource string, httpsPinned bool) {
 	meta := map[string]any{}
+	// Where this agent read the join token it presented, and whether its
+	// HTTPS clients to the api are pinned: the two cutover facts of §7 4.0.
+	// Always present from an agent that knows them, "env"/false included —
+	// the steps that delete the environment fallback and the chain-verified
+	// routes wait on every node reporting "file"/true, so a node that has
+	// not moved must be able to say so (geekdojo/geekdojo-brain#536).
+	meta[proto.MetadataTokenSource] = tokenSource
+	meta[proto.MetadataHTTPSPinned] = httpsPinned
 	// Whether THIS connection is TLS with the bus key pin verified. Always
 	// present from an agent that knows the field, false included: the api
 	// turns plaintext off only when every node says true, so "said false" and
