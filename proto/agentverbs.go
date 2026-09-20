@@ -182,16 +182,24 @@ var metadataMinAgentVersion = map[string]string{
 	// busTls (geekdojo/geekdojo-brain#448): same change and release as the
 	// bus.pin verb — first in v2026.09.4-dev.164, confirmed.
 	MetadataBusTLS: "2026.09.4-dev.164",
-	// tokenSource and httpsPinned (geekdojo/geekdojo-brain#536, methodology
-	// §7 4.0): the two cutover facts, entered when they were authored,
-	// before their release existed, as the NEXT release run after
-	// v2026.09.4-dev.171 (the newest published control-plane release at the
-	// time). If a release was cut between this entry and the one that ships
-	// the keys, an agent at that in-between version reads as "should report
-	// and did not" rather than "predates the key"; confirm with `git tag
-	// --contains` once the release exists and correct the floor.
+	// tokenSource, httpsPinned (geekdojo/geekdojo-brain#536) and nodeKeys
+	// (geekdojo/geekdojo-brain#514), methodology §7 4.0: the cutover facts,
+	// each entered when it was authored, before its release existed, as the
+	// NEXT release run after v2026.09.4-dev.171 (the newest published
+	// control-plane release at the time). If a release was cut between these
+	// entries and the one that ships the keys, an agent at that in-between
+	// version reads as "should report and did not" rather than "predates the
+	// key"; confirm with `git tag --contains` once the release exists and
+	// correct the floors.
 	MetadataTokenSource: "2026.09.4-dev.172",
 	MetadataHTTPSPinned: "2026.09.4-dev.172",
+	// ⚠️ nodeKeys differs from the two above in what its floor means. Theirs
+	// say a node at or above the floor that reports nothing is a fault. This
+	// one says only that the agent CAN report: keys are reported solely over
+	// a pinned TLS bus connection (NodeKeysAcceptable), so a node still on
+	// plaintext is silent by design and is not a fault. A cutover on this key
+	// reads silence together with busTls, never alone.
+	MetadataNodeKeys: "2026.09.4-dev.172",
 }
 
 // MetadataMinAgentVersion reports the first agent release whose registration

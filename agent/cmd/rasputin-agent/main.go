@@ -28,6 +28,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/nameguard"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/nodekeys"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/proxy"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/quiesce"
@@ -130,6 +131,23 @@ func main() {
 			log.Printf("rasputin-agent: mesh CA directory %s: %v", meshDir, err)
 		}
 	}
+
+	// The node's own TLS keys: one for the agent, one for the collector,
+	// generated once here and never leaving the node
+	// (geekdojo/geekdojo-brain#514). Their SPKI hashes ride out in
+	// registration metadata, but only over a pinned TLS bus connection — see
+	// publishRegistered. Fatal on failure: a node that cannot hold its own
+	// keys would report none and quietly stay on the legacy path forever,
+	// which is the kind of silent downgrade this work exists to remove.
+	nodeKeySet, freshKeys, err := nodekeys.Ensure(stateDir)
+	if err != nil {
+		log.Fatalf("rasputin-agent: node keys: %v", err)
+	}
+	if len(freshKeys) > 0 {
+		log.Printf("rasputin-agent: generated node key(s) %v under %s — this node's HTTPS identity; "+
+			"a later change to it raises a control-plane alert", freshKeys, nodekeys.Dir(stateDir))
+	}
+	log.Printf("rasputin-agent: node keys %s", nodeKeySet.Hashes())
 
 	// Update-path fault injection (updater/fault.go). Resolved once, here.
 	// updater.Arm cannot fail and cannot exit — an unrecognised value, or any
@@ -284,8 +302,14 @@ func main() {
 	// client exists, below, and read only from bus callbacks after Dial.
 	var busTLS func(*nats.Conn) bool
 	reregister := func(c *nats.Conn) {
-		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr, trustFingerprint, busTLS,
-			joinTokenKind, apiHTTPSPinned())
+		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr,
+			registrationFacts{
+				TrustFingerprint: trustFingerprint,
+				BusTLS:           busTLS,
+				TokenSource:      joinTokenKind,
+				HTTPSPinned:      apiHTTPSPinned(),
+				NodeKeys:         nodeKeySet.Hashes(),
+			})
 	}
 	// The cluster-DNS pin follows the bus connection: every successful
 	// connect — first dial, nats reconnect, re-dial — fires this right after
@@ -961,7 +985,33 @@ func uciLANAddr(lookup func(context.Context) (string, string, error), fallback f
 // migrate, and a node that says nothing is one whose agent predates the key.
 func apiHTTPSPinned() bool { return false }
 
-func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), trustFingerprint func() string, busTLS func(*nats.Conn) bool, tokenSource string, httpsPinned bool) {
+// registrationFacts is everything this node REPORTS about itself on a
+// registration, as opposed to what it is (id, role, hardware).
+//
+// It is a struct rather than more parameters because the list only grows: the
+// migration plan adds one fact per cutover it wants to wait on (§7 4.0), and
+// three of the five below arrived that way. Each new one is a field and one
+// line in publishRegistered's metadata block — never a second reporting site,
+// which is how two facts about the same node start disagreeing.
+type registrationFacts struct {
+	// TrustFingerprint reports which mesh CA this node trusts, or nil when
+	// it cannot say.
+	TrustFingerprint func() string
+	// BusTLS reports whether the connection being registered over is TLS
+	// with the bus pin verified. nil reads as false.
+	BusTLS func(*nats.Conn) bool
+	// TokenSource is where the join token presented on this connection was
+	// read from (proto.TokenSource*).
+	TokenSource string
+	// HTTPSPinned is whether this agent's HTTPS clients verify the api by
+	// the bus pin rather than a chain.
+	HTTPSPinned bool
+	// NodeKeys are this node's registered key SPKI hashes. Reported ONLY
+	// over a pinned connection — see the metadata block.
+	NodeKeys proto.NodeKeys
+}
+
+func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), facts registrationFacts) {
 	meta := map[string]any{}
 	// Where this agent read the join token it presented, and whether its
 	// HTTPS clients to the api are pinned: the two cutover facts of §7 4.0.
@@ -969,20 +1019,30 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 	// the steps that delete the environment fallback and the chain-verified
 	// routes wait on every node reporting "file"/true, so a node that has
 	// not moved must be able to say so (geekdojo/geekdojo-brain#536).
-	meta[proto.MetadataTokenSource] = tokenSource
-	meta[proto.MetadataHTTPSPinned] = httpsPinned
+	meta[proto.MetadataTokenSource] = facts.TokenSource
+	meta[proto.MetadataHTTPSPinned] = facts.HTTPSPinned
 	// Whether THIS connection is TLS with the bus key pin verified. Always
 	// present from an agent that knows the field, false included: the api
 	// turns plaintext off only when every node says true, so "said false" and
 	// "cannot say" both hold it back, and only the first is a node that needs
 	// the pin delivered (geekdojo/geekdojo-brain#448).
-	meta[proto.MetadataBusTLS] = busTLS != nil && busTLS(nc)
+	pinnedTLS := facts.BusTLS != nil && facts.BusTLS(nc)
+	meta[proto.MetadataBusTLS] = pinnedTLS
+	// This node's registered key SPKIs (geekdojo/geekdojo-brain#514) — the
+	// public half only, never the key. Reported ONLY over a connection this
+	// node has verified by the bus pin: on an unpinned link the api refuses
+	// the report anyway (proto.NodeKeysAcceptable), and sending it would put
+	// the node's HTTPS identity on a wire it has not authenticated. So a node
+	// still on plaintext is silent here by design, not by failure.
+	if pinnedTLS && len(facts.NodeKeys) > 0 {
+		meta[proto.MetadataNodeKeys] = facts.NodeKeys
+	}
 	// Which mesh CA this node trusts, as a fingerprint — never the PEM. The
 	// api compares it with its own on every mesh.reconcile and re-delivers
 	// the CA when they differ (converge_trust; e3bench 2026-09-04, where an
 	// identity restore changed the api's CA under an enrolled node).
-	if trustFingerprint != nil {
-		if fp := trustFingerprint(); fp != "" {
+	if facts.TrustFingerprint != nil {
+		if fp := facts.TrustFingerprint(); fp != "" {
 			meta[proto.MetadataMeshCAFingerprint] = fp
 		}
 	}

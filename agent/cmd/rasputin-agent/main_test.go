@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -271,14 +274,37 @@ func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bm
 // two cutover facts (#536) are fixed here — registeredEvtCutover is the helper
 // that varies them.
 func registeredEvtFull(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool) proto.NodeRegisteredEvt {
+	return registeredEvtKeys(t, nc, nodeID, adv, faults, busTLS, nil)
+}
+
+// registeredEvtKeys is registeredEvtFull plus the node's key hashes.
+func registeredEvtKeys(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool, keys proto.NodeKeys) proto.NodeRegisteredEvt {
 	t.Helper()
-	return registeredEvtCutover(t, nc, nodeID, adv, faults, busTLS, proto.TokenSourceFile, false)
+	return registeredEvtFacts(t, nc, nodeID, adv, faults, registrationFacts{
+		TrustFingerprint: func() string { return "fp-test" },
+		BusTLS:           busTLS,
+		TokenSource:      proto.TokenSourceFile,
+		NodeKeys:         keys,
+	})
 }
 
 // registeredEvtCutover is registeredEvtFull with the §7 4.0 cutover facts —
 // where the join token came from, and whether this agent's HTTPS clients to
 // the api are pinned — supplied by the caller.
 func registeredEvtCutover(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool, tokenSource string, httpsPinned bool) proto.NodeRegisteredEvt {
+	t.Helper()
+	return registeredEvtFacts(t, nc, nodeID, adv, faults, registrationFacts{
+		TrustFingerprint: func() string { return "fp-test" },
+		BusTLS:           busTLS,
+		TokenSource:      tokenSource,
+		HTTPSPinned:      httpsPinned,
+	})
+}
+
+// registeredEvtFacts is the one publish the helpers above share: every
+// reported fact arrives in one struct, so a new cutover fact is a field here
+// and nowhere else.
+func registeredEvtFacts(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, facts registrationFacts) proto.NodeRegisteredEvt {
 	t.Helper()
 	sub, err := nc.SubscribeSync(proto.NodeRegisteredSubject(nodeID))
 	if err != nil {
@@ -289,8 +315,7 @@ func registeredEvtCutover(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.A
 	// the publish path CARRIES, and reading the test machine's own routing
 	// table would make that assertion depend on where the suite runs.
 	lanAddr := func() (string, string) { return "192.168.1.50", "192.168.1.50/24" }
-	trust := func() string { return "fp-test" }
-	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr, trust, busTLS, tokenSource, httpsPinned)
+	publishRegistered(nc, nodeID, proto.RoleControlPlane, nil, adv, faults, lanAddr, facts)
 	msg, err := sub.NextMsg(2 * time.Second)
 	if err != nil {
 		t.Fatalf("no registered event: %v", err)
@@ -746,4 +771,63 @@ func TestPublishRegistered_CarriesMeshCAFingerprint(t *testing.T) {
 			t.Errorf("metadata %s carries PEM material", k)
 		}
 	}
+}
+
+// Node keys ride out ONLY on a connection this node has verified by the bus
+// pin (geekdojo/geekdojo-brain#514). On a plaintext or unverified link the
+// api refuses the report anyway, and sending it would put the node's HTTPS
+// identity on a wire it has not authenticated — so the agent does not send it.
+func TestPublishRegistered_ReportsNodeKeysOnlyOverAPinnedBus(t *testing.T) {
+	nc := testBus(t)
+	keys := proto.NodeKeys{
+		proto.NodeKeyAgent:     testKeyHash(t),
+		proto.NodeKeyCollector: testKeyHash(t),
+	}
+	for _, tc := range []struct {
+		name   string
+		busTLS func(*nats.Conn) bool
+		keys   proto.NodeKeys
+		want   bool
+	}{
+		{"pinned tls", func(*nats.Conn) bool { return true }, keys, true},
+		{"plaintext", func(*nats.Conn) bool { return false }, keys, false},
+		{"no reporter", nil, keys, false},
+		{"pinned but no keys", func(*nats.Conn) bool { return true }, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := registeredEvtKeys(t, nc, "cp-test", nil, nil, tc.busTLS, tc.keys)
+			got, present := ev.Metadata[proto.MetadataNodeKeys]
+			if present != tc.want {
+				t.Fatalf("metadata %s present = %v, want %v (value %v)",
+					proto.MetadataNodeKeys, present, tc.want, got)
+			}
+			if !tc.want {
+				return
+			}
+			// What the api will decode is what arrives after the JSON
+			// round-trip the bus does, so assert on that.
+			decoded, ok, err := proto.DecodeNodeKeys(ev.Metadata)
+			if err != nil || !ok {
+				t.Fatalf("DecodeNodeKeys = (%v, %v, %v)", decoded, ok, err)
+			}
+			if !decoded.Equal(keys) {
+				t.Errorf("decoded %v, want %v", decoded, keys)
+			}
+		})
+	}
+}
+
+// testKeyHash is the SPKI hash of a throwaway key, in the canonical form an
+// agent reports.
+func testKeyHash(t *testing.T) string {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := proto.NodeKeySPKIHash(k.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
 }

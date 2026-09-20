@@ -17,6 +17,24 @@ CREATE TABLE IF NOT EXISTS nodes (
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_role      ON nodes(role);
 CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen);
+
+-- node_keys: the SPKI hash of each key a node generated and registered
+-- (geekdojo/geekdojo-brain#514, nodekeys.go). One row per (node, purpose).
+-- The api reads this table exactly twice: once at start, to fill the
+-- in-memory registry an HTTPS handshake checks against, and again on the
+-- registration that changes a value. No connection and no request reads it.
+--
+-- The UNIQUE index on spki is the rule "two nodes cannot share an HTTPS
+-- identity", enforced where it cannot be raced: the one way it happens is a
+-- key file copied off one node onto another, which is exactly what it stops.
+CREATE TABLE IF NOT EXISTS node_keys (
+    node_id     TEXT NOT NULL,
+    purpose     TEXT NOT NULL,
+    spki        TEXT NOT NULL,
+    recorded_at INTEGER NOT NULL,
+    PRIMARY KEY (node_id, purpose)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_node_keys_spki ON node_keys(spki);
 `
 
 // migrations applied after schema. Each statement must be idempotent on its
