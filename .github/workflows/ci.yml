@@ -9,6 +9,10 @@ name: ci
 #   release-target-guard — tests for scripts/release-target-guard.sh, which
 #              release.yml runs to prove a release tag is on the built commit.
 #
+#   failopen — the fail-open lint (api/cmd/failopenlint) over the whole tree,
+#              its allowance register, the security-resolver register, and the
+#              lint's own tests.
+#
 #   backend  — gofmt + go vet + go build + go test for EVERY module in
 #              go.work, enumerated by scripts/workspace-modules.sh rather
 #              than listed here (it said api / agent / proto long after the
@@ -105,6 +109,37 @@ jobs:
           persist-credentials: false
       - name: guard tests
         run: ./scripts/test-release-target-guard.sh
+
+  failopen:
+    # The fail-open lint (api/cmd/failopenlint) and the two registers it holds:
+    # .github/failopen-allow.tsv, the recorded verdict for every site a rule
+    # fires on, and .github/security-resolvers.tsv, the fail-closed table test
+    # each security resolver owes.
+    #
+    # Every rule is an error and none of them has a severity to lower. An
+    # allowance is not a downgrade: the rule still fires, the row carries a
+    # verdict and its reasoning, and a `blocked` row cites the issue that
+    # closes it. The gate also fails on an allowance that matches nothing any
+    # more, so a row cannot outlive the code it described.
+    #
+    # The lint's own tests run here too — every one of them is a tree it must
+    # refuse, which is what lets a reviewer assume those shapes are absent.
+    name: fail-open lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache-dependency-path: "*/go.sum"
+      - name: lint
+        run: go run ./api/cmd/failopenlint
+      - name: tests for the lint itself
+        run: go test ./api/cmd/failopenlint/...
 
   backend:
     name: backend (vet + test + build)

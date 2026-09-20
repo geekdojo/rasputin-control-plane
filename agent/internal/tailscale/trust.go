@@ -26,7 +26,11 @@ import (
 const defaultCABundlePath = "/var/lib/rasputin/mesh/tailscaled-ca.pem"
 
 func caBundlePath() string {
-	if p := os.Getenv("RASPUTIN_MESH_CA_BUNDLE"); p != "" {
+	// Trimmed: an override that is only whitespace is a misconfiguration, and
+	// honouring it would point tailscaled's trust file at a path that cannot
+	// exist — which reads, from the outside, exactly like "no mesh CA is
+	// installed". Falling back to the per-image default is the closed answer.
+	if p := strings.TrimSpace(os.Getenv("RASPUTIN_MESH_CA_BUNDLE")); p != "" {
 		return p
 	}
 	return defaultCABundlePath

@@ -1,0 +1,47 @@
+# .github/security-resolvers.tsv — every function that resolves a security
+# setting, and the fail-closed table test that owns it.
+#
+# A resolver reads a setting from the environment, a file, a database row or
+# a probe, and returns the value that decides whether something is enforced.
+# Each one owes a table test over {absent, empty, malformed, unreadable,
+# probe error}, with every case asserting the CLOSED outcome.
+#
+# This file is the other half of failopenlint's FO04 rule. FO04 refuses a
+# security setting read inline, because a setting parsed inline cannot be
+# table-tested; this file is what makes 'declared resolver' mean 'tested'
+# rather than 'written down'.
+#
+# status:
+#   covered   `test` names the test(s) that exercise the closed outcomes. The
+#             gate fails if no test by that name exists.
+#   pending   no fail-closed table test yet. `cite` names the issue that will
+#             add it, and `test` is empty.
+#
+# The gate also fails when the named symbol is no longer declared in the
+# named file, so a renamed or deleted resolver cannot leave a row behind
+# claiming it is covered.
+#
+# Checked by: go run ./api/cmd/failopenlint
+id	path	symbol	reads	test	status	cite
+R01	api/cmd/rasputin-api/main.go	secureCookies	RASPUTIN_SECURE_COOKIES and the HTTPS address	TestSecureCookies	covered	
+R02	api/cmd/rasputin-api/main.go	wireBundleVerifier	RASPUTIN_UPDATE_TRUST (now ignored with a warning) and the trust root on disk	TestWireBundleVerifier_MissingTrustRootIsNeverPermissive TestWireBundleVerifier_LoadsTheTrustRootWhenPresent	covered	
+R03	api/cmd/rasputin-api/main.go	wireMesh	RASPUTIN_MESH_BACKEND, RASPUTIN_HEADSCALE_URL, RASPUTIN_HEADSCALE_API_KEY	TestWireMesh_AutoNeverInfersMock TestWireMesh_ExplicitMockIsHonoured	covered	
+R04	api/cmd/rasputin-api/main.go	clusterHostname	RASPUTIN_CLUSTER_ID	TestClusterHostname TestNoClusterIDKeepsDevDefaults	covered	
+R05	api/cmd/rasputin-api/main.go	loadBusTokenState	the preseed and tombstone files	TestLoadBusTokenState TestLoadBusPreseed	covered	
+R06	api/cmd/rasputin-api/main.go	busTLSStartMode	the bus mode, from the environment or the settings row		pending	geekdojo/geekdojo-brain#510
+R07	api/internal/bustls/service.go	ResolveStartMode	the bus mode, from the environment or the settings row		pending	geekdojo/geekdojo-brain#510
+R08	api/internal/updater/verifier.go	NewVerifier	the bundle-signing root CA on disk	TestNewVerifier_LoadsRootCA TestNewVerifier_MissingRootIsUnavailableNotPermissive TestNewVerifier_BadPEMIsUnavailableNotFatal TestZeroValueVerifierRefuses	covered	
+R09	api/internal/auth/origins.go	NewOriginAllowlist	the configured browser origins	TestNewOriginAllowlistNormalizesAndDeduplicates TestNormalizeOrigin	covered	
+R10	api/internal/auth/store.go	Store.FirstRun	whether any user row exists	TestFirstRun_TrueOnEmptyFalseOnceAUserExists TestFirstRun_FailsClosedOnDBError	covered	
+R11	api/internal/setup/store.go	Store.GetBool	a boolean setting row	TestGetBool_DefaultAppliesOnlyWhenUnset TestGetBool_FailsClosedWhenTheRowCannotBeRead	covered	
+R12	artifactsig/verify.go	TrustRootPath	RASPUTIN_TRUST_ROOT	TestTrustRootPath	covered	
+R13	agent/internal/bus/pin.go	ResolvePin	the bus pin, from the environment or the pin file		pending	geekdojo/geekdojo-brain#510
+R14	agent/internal/bus/token.go	ResolveTokenSource	the join token, from the environment or the token file	TestResolveTokenSource	covered	
+R15	agent/cmd/rasputin-agent/main.go	bmcConfigFromEnv	RASPUTIN_BMC_TURINGPI_FINGERPRINT and RASPUTIN_BMC_TURINGPI_INSECURE	TestBMCConfigFromEnvCoversEveryField TestBMCConfigFromEnv_FailsClosedOnEveryShapeOfInput	covered	
+R16	agent/cmd/rasputin-agent/main.go	agentStateDir	RASPUTIN_AGENT_STATE_DIR, which holds the pin file	TestAgentStateDir	covered	
+R17	agent/internal/updater/fault.go	Arm	RASPUTIN_DEBUG_UPDATE_FAULT, against the release marker	TestArm_UnsetIsNoneAndSilent TestArm_UnknownValueArmsNothingAndCannotStopTheAgent TestArm_RefusesToArmOnAReleasedImage	covered	
+R18	agent/internal/health/health.go	check	RASPUTIN_UCI_BACKEND and the firewall config file	TestFirewallRoleWithoutConfigIsUnhealthy TestOnlyTheMockBackendOptsIntoTheDegradedGate	covered	
+R19	agent/internal/tailscale/trust.go	caBundlePath	RASPUTIN_MESH_CA_BUNDLE	TestCABundlePath_FailsClosedOnEveryShapeOfInput	covered	
+R20	agent/internal/tailscale/trust.go	InstalledCAFingerprint	the installed mesh CA bundle	TestInstalledCAFingerprint_FailsClosedOnEveryShapeOfInput	covered	
+R21	agent/internal/clusterdns/clusterdns.go	pinnedIP	the resolved DNS drop-in		pending	geekdojo/geekdojo-brain#547
+R22	agent/internal/storage/archive.go	StagingRoot	RASPUTIN_BACKUP_STAGING_DIR	TestStagingRootIsTheDeployedDefaultWithNoEnvironmentSet	covered	

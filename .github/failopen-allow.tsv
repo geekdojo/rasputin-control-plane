@@ -1,0 +1,50 @@
+# .github/failopen-allow.tsv — every site the fail-open rules fire on that is
+# not being changed right now.
+#
+# An allowance is NOT a lowered severity. Every rule in api/cmd/failopenlint
+# is an error and stays one; a row here records a verdict and the reasoning
+# behind it, exactly as .github/sast-register.tsv does for gosec.
+#
+# verdict:
+#   deliberate      the pattern is real and intended, with a stated tradeoff.
+#   blocked         real, and the fix waits on the issue cited. These are what
+#                   get revisited when the fix becomes available, which is the
+#                   point of keeping them.
+#   false-positive  the rule fired and the code is correct. The reasoning must
+#                   say WHY, specifically enough that the next reader need not
+#                   re-derive it.
+#
+# A row is keyed on rule + path + symbol, never on a line number. For FO04 and
+# FO07 the symbol carries the variable name too, so an allowance covers one
+# setting rather than everything the function happens to read.
+#
+# The gate FAILS on an allowance that matches nothing any more: a row that
+# outlives its site is a permission nobody granted.
+rule	path	symbol	verdict	issue	reasoning
+FO01	agent/internal/bmc/probe.go	Probe	deliberate		The named exception: this is the TOFU capture that reads a BMC's certificate so the operator can confirm its digest before it is stored as a pin. There is nothing to verify against yet, which is the whole purpose of the call.
+FO01	agent/internal/bmc/registry.go	InsecureSkipVerify	blocked	geekdojo/geekdojo-brain#548	A stored BMC selection can still opt out of verification. Retired with the rest of the insecure selections when the BMC moves onto the one pinned-TLS helper.
+FO01	agent/internal/bmc/selection.go	NewFromSelection	blocked	geekdojo/geekdojo-brain#548	Same selection, applied at construction. Retired by the same change.
+FO01	agent/internal/bmc/turingpi.go	NewTuringPiBackend	blocked	geekdojo/geekdojo-brain#548	The backend honours the insecure selection and the pin-only mode through the same field. Retired by the same change.
+FO01	agent/internal/bus/client.go	pinnedTLSConfig	deliberate		This IS the pinned-TLS helper the rule names. Verification is not skipped, it is moved: VerifyConnection compares the peer's SPKI against the pin and fails the handshake on any mismatch, which is stricter than chain verification. The file carries a trip-wire comment saying the same thing at the line.
+FO02	api/internal/obs/sink.go	VMSink.Write	deliberate		The discarded error can only leave healthy false, which is the closed outcome: the sink refuses the write, records the result and returns an error to its caller. Nothing is lost to the operator.
+FO02	api/internal/obs/status.go	Status.Snapshot	deliberate		Same shape and same direction: a readiness probe that errors reports the stack as not ready, which is what the snapshot already shows while the stack is starting.
+FO03	api/internal/auth/store.go	Store.DeleteSession	false-positive		Nothing to delete, for the same reason. The early return is not a skipped authorization check: no caller reaches it with an authenticated session.
+FO03	api/internal/auth/store.go	Store.GetSession	false-positive		An empty token means the request carried no session cookie. Returning no session is the closed outcome — the caller treats a nil session as unauthenticated — and looking up the hash of an empty string would match nothing anyway.
+FO03	api/internal/auth/store.go	Store.TouchSession	false-positive		Nothing to touch. The statement updates rows matching the token's hash or the token, and an empty token matches no row; the early return only avoids the query.
+FO03	api/internal/firewall/secrets.go	putSecret	deliberate		The write-only slot's contract: an empty value means 'keep the stored one', because a form that did not re-type the password is not asking to clear it. Clearing is a separate act, not an empty write.
+FO04	agent/cmd/rasputin-agent/main.go	main:RASPUTIN_BMC_BACKEND	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	agent/cmd/rasputin-agent/main.go	main:RASPUTIN_DOCKER_BACKEND	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	agent/cmd/rasputin-agent/main.go	main:RASPUTIN_RESOLVED_DROPIN_DIR	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	agent/cmd/rasputin-agent/main.go	main:RASPUTIN_STORAGE_BACKEND	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	agent/cmd/rasputin-agent/main.go	main:RASPUTIN_TAILSCALE_BACKEND	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	agent/cmd/rasputin-agent/main.go	main:RASPUTIN_UCI_BACKEND	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	agent/cmd/rasputin-agent/main.go	main:RASPUTIN_UPDATE_BACKEND	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	api/cmd/rasputin-api/main.go	main:RASPUTIN_BUS_AUTH	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	api/cmd/rasputin-api/main.go	main:RASPUTIN_CP_AUTHORIZED_KEYS	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	api/cmd/rasputin-api/main.go	main:RASPUTIN_RP_ID	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	api/cmd/rasputin-api/main.go	main:RASPUTIN_RP_ORIGINS	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	api/cmd/rasputin-api/main.go	main:RASPUTIN_SECURE_COOKIES	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO04	api/cmd/rasputin-api/main.go	main:RASPUTIN_TRUST_DIR	blocked	geekdojo/geekdojo-brain#591	Read inline, so nothing can table-test what it does when it is absent, empty or unrecognised. Becomes a named resolver with a fail-closed table test; extracting it here would touch files other E21 items are editing.
+FO05	agent/internal/updater/openwrt_ab.go	OpenWrtABBackend.httpClient	blocked	geekdojo/geekdojo-brain#590	Release artifacts are fetched over the public web and their integrity comes from the detached signature, not the transport. Which trust root this client should carry is decided in the cited issue.
+FO05	agent/internal/updater/rauc.go	RAUCBackend.httpClient	blocked	geekdojo/geekdojo-brain#590	Same client, same question.
+FO05	backupxfer/client.go	NewHTTPTransport	blocked	geekdojo/geekdojo-brain#590	The transfer client reaches our own control plane, so the system pool is the wrong root for it. Decided in the cited issue.
