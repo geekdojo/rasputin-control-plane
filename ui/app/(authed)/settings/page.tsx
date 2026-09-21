@@ -19,9 +19,9 @@
 //     into nodes enrolled from now on. It never changes an already-enrolled
 //     node (geekdojo/geekdojo-brain#246).
 //   • Passkeys — add another passkey to the signed-in account. The operator
-//     first confirms with a passkey they already have, then creates the new
+//     picks where it should live (this device, a phone or tablet, a security
+//     key), confirms with a passkey they already have, then creates the new
 //     one (lib/auth.ts confirmExistingPasskey / createNewPasskey).
-//     Currently hidden — see SHOW_PASSKEY_MANAGEMENT below.
 // The Settings icon in the sidebar routes here.
 
 import { Check, Settings as SettingsIcon } from 'lucide-react';
@@ -53,19 +53,8 @@ import {
 } from '../../../lib/api';
 import { ENROLLED_NODE_KEY_PROCEDURE_URL, operatorKeyDraft } from '../../../lib/operator-key';
 import { confirmExistingPasskey, createNewPasskey, type NewPasskeyOptions } from '../../../lib/auth';
+import { PASSKEY_AUTHENTICATORS, type PasskeyAuthenticatorChoice } from '../../../lib/passkey-authenticator';
 import type { BMCBackendInfo, BMCConfigView, DeploymentMode, DNSForwarding, Node, ObsStatus, SetupState } from '../../../lib/types';
-
-// Whether Settings shows the Passkeys section. Off until adding a passkey can
-// offer a phone or a security key rather than only the authenticator on this
-// machine: where that authenticator already holds a passkey for the account,
-// creation is correctly refused and the browser's remaining fallback is not one
-// an operator can act on, so the section leads nowhere. Tracked in
-// geekdojo/geekdojo-brain#586 — flip this back to `true` when that ships.
-//
-// Deliberately only the render is gated: PasskeysSection, lib/auth.ts and the
-// /api/auth/register/{begin,step-up,finish} routes all stay exactly as they
-// are, so re-enabling is this one line.
-const SHOW_PASSKEY_MANAGEMENT = false;
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
@@ -110,12 +99,8 @@ export default function SettingsPage() {
         <div style={{ height: 32 }} />
         <OperatorSSHKeySection />
 
-        {SHOW_PASSKEY_MANAGEMENT && (
-          <>
-            <div style={{ height: 32 }} />
-            <PasskeysSection />
-          </>
-        )}
+        <div style={{ height: 32 }} />
+        <PasskeysSection />
       </PageBody>
     </PageShell>
   );
@@ -1014,19 +999,31 @@ function OperatorSSHKeySection() {
 // because a browser raises a passkey prompt only from a user gesture:
 // confirm with a passkey you already have, then create the new one. The api
 // refuses the second step unless the first verified for this same attempt.
+//
+// The operator picks WHERE the new passkey goes before step 1, not after: the
+// api mints the creation options at the end of step 1, so the choice has to
+// ride the register/begin body (lib/auth.ts confirmExistingPasskey). Choosing
+// is not a convenience — on a machine whose built-in authenticator already
+// holds a passkey for this account, that authenticator is correctly refused,
+// and a browser left to decide for itself offers its own password manager
+// instead of the phone or key the operator has in hand
+// (geekdojo/geekdojo-brain#586).
 function PasskeysSection() {
   const [phase, setPhase] = useState<'idle' | 'confirming' | 'confirmed' | 'creating' | 'done'>('idle');
+  const [choice, setChoice] = useState<PasskeyAuthenticatorChoice | null>(null);
   const [options, setOptions] = useState<NewPasskeyOptions | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  async function confirm() {
+  async function confirm(picked: PasskeyAuthenticatorChoice) {
     setErr(null);
+    setChoice(picked);
     setPhase('confirming');
     try {
-      setOptions(await confirmExistingPasskey());
+      setOptions(await confirmExistingPasskey(picked.value));
       setPhase('confirmed');
     } catch (e) {
       setErr(passkeyError(e));
+      setChoice(null);
       setPhase('idle');
     }
   }
@@ -1043,6 +1040,7 @@ function PasskeysSection() {
       // The attempt is spent either way; start over from step 1.
       setErr(passkeyError(e));
       setOptions(null);
+      setChoice(null);
       setPhase('idle');
     }
   }
@@ -1052,15 +1050,29 @@ function PasskeysSection() {
       <SectionLabel>PASSKEYS</SectionLabel>
       <Hint style={{ marginBottom: 16 }}>
         Add another passkey to your account — for example on a second device, so losing one doesn&apos;t lock
-        you out. You&apos;ll confirm with a passkey you already have first, then create the new one.
+        you out. Choose where the new passkey should live, confirm with a passkey you already have, then
+        create it.
       </Hint>
       <div style={{ maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 10 }}>
         {(phase === 'idle' || phase === 'confirming') && (
           <div>
-            <Btn variant="primary" small onClick={confirm} disabled={phase === 'confirming'}>
-              {phase === 'confirming' ? 'WAITING FOR YOUR PASSKEY…' : 'ADD A PASSKEY'}
-            </Btn>
-            <Hint style={{ marginTop: 6 }}>Step 1 of 2: use a passkey you already have.</Hint>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {PASSKEY_AUTHENTICATORS.map((a) => (
+                <Btn
+                  key={a.value}
+                  variant="primary"
+                  small
+                  onClick={() => confirm(a)}
+                  disabled={phase === 'confirming'}
+                >
+                  {phase === 'confirming' && choice?.value === a.value ? 'WAITING FOR YOUR PASSKEY…' : a.label}
+                </Btn>
+              ))}
+            </div>
+            <Hint style={{ marginTop: 6 }}>
+              Step 1 of 2: choose where the new passkey goes, then confirm with a passkey you already have.
+            </Hint>
+            {choice && phase === 'confirming' && <Hint style={{ marginTop: 6 }}>{choice.hint}</Hint>}
           </div>
         )}
         {(phase === 'confirmed' || phase === 'creating') && (
@@ -1069,8 +1081,7 @@ function PasskeysSection() {
               {phase === 'creating' ? 'CREATING…' : 'CREATE THE NEW PASSKEY'}
             </Btn>
             <Hint style={{ marginTop: 6 }}>
-              Step 2 of 2: confirmed. Now create the new passkey — on this device, a security key, or your
-              phone.
+              Step 2 of 2: confirmed. Now create the new passkey.{choice ? ` ${choice.hint}` : ''}
             </Hint>
           </div>
         )}
@@ -1078,7 +1089,14 @@ function PasskeysSection() {
           <Hint>
             <Check size={11} style={{ verticalAlign: 'middle', marginRight: 6 }} />
             New passkey added. You can sign in with either passkey.{' '}
-            <Btn small variant="ghost" onClick={() => setPhase('idle')}>
+            <Btn
+              small
+              variant="ghost"
+              onClick={() => {
+                setChoice(null);
+                setPhase('idle');
+              }}
+            >
               ADD ANOTHER
             </Btn>
           </Hint>

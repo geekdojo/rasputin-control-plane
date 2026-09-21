@@ -98,7 +98,11 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 // no weaker than signing in.
 
 // POST /api/auth/register/begin
-// Body: { "name": "alice", "displayName": "Alice" }
+// Body: { "name": "alice", "displayName": "Alice", "authenticator": "platform" }
+//
+// authenticator is optional and names the kind of authenticator the operator
+// picked in the UI — see authenticatorChoice. Absent or empty means "whatever
+// the browser offers", which is what the first-run wizard sends.
 //
 // First run: creates the first operator; returns creation options.
 //
@@ -109,11 +113,17 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 // register/step-up.
 func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name        string `json:"name"`
-		DisplayName string `json:"displayName"`
+		Name          string `json:"name"`
+		DisplayName   string `json:"displayName"`
+		Authenticator string `json:"authenticator"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	choice, err := parseAuthenticatorChoice(req.Authenticator)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -123,7 +133,7 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if firstRun {
-		s.beginFirstRunRegistration(w, r, req.Name, req.DisplayName)
+		s.beginFirstRunRegistration(w, r, req.Name, req.DisplayName, choice)
 		return
 	}
 
@@ -143,7 +153,14 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 			"signed in, you can only add a passkey to your own account; creating another user is not supported here")
 		return
 	}
-	p := &pendingAuth{kind: "register", basis: registerBasis{byUserID: by.ID}}
+	// The choice rides the ceremony: the creation options are not minted
+	// until register/step-up, which has no request body of its own to carry
+	// it (it carries the assertion).
+	p := &pendingAuth{
+		kind:          "register",
+		basis:         registerBasis{byUserID: by.ID},
+		authenticator: choice,
+	}
 
 	if len(by.WebAuthnCredentials()) == 0 {
 		writeErr(w, http.StatusConflict,
@@ -166,13 +183,13 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"stepUp": assertion})
 }
 
-func (s *Service) beginFirstRunRegistration(w http.ResponseWriter, r *http.Request, name, displayName string) {
+func (s *Service) beginFirstRunRegistration(w http.ResponseWriter, r *http.Request, name, displayName string, choice authenticatorChoice) {
 	user, err := makeUser(name, displayName)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	options, sessionData, err := s.beginCreation(user)
+	options, sessionData, err := s.beginCreation(user, choice)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -191,8 +208,64 @@ func (s *Service) beginFirstRunRegistration(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, options)
 }
 
+// authenticatorChoice is the kind of authenticator the operator picked before
+// adding a passkey. It exists because excludeCredentials does its job: on a
+// machine whose built-in authenticator already holds a passkey for the
+// account, creation is refused, and a browser left to choose for itself offers
+// its own password manager rather than the phone or the security key the
+// operator actually has in hand. The choice is made in the UI, travels on the
+// register/begin body, and becomes the attachment and hint on the creation
+// options.
+type authenticatorChoice string
+
+const (
+	// authenticatorAny is the absent choice: no attachment and no hints, so
+	// the browser offers everything it can. This is what the first-run
+	// wizard sends — there is no existing passkey to collide with, and the
+	// operator is at the machine they are setting up.
+	authenticatorAny authenticatorChoice = ""
+	// authenticatorPlatform is the authenticator built into this machine
+	// (Touch ID, Windows Hello).
+	authenticatorPlatform authenticatorChoice = "platform"
+	// authenticatorHybrid is a phone or tablet, reached by QR code or a
+	// previously linked device.
+	authenticatorHybrid authenticatorChoice = "hybrid"
+	// authenticatorSecurityKey is a roaming hardware key (USB, NFC).
+	authenticatorSecurityKey authenticatorChoice = "security-key"
+)
+
+// parseAuthenticatorChoice validates the wire value. An unknown value is a
+// 400 rather than a silent fall back to authenticatorAny: a UI sending a value
+// this api does not model has a bug, and quietly widening the ceremony would
+// put the operator back at the dead end the choice exists to avoid.
+func parseAuthenticatorChoice(s string) (authenticatorChoice, error) {
+	switch c := authenticatorChoice(s); c {
+	case authenticatorAny, authenticatorPlatform, authenticatorHybrid, authenticatorSecurityKey:
+		return c, nil
+	default:
+		return authenticatorAny, errors.New(`authenticator must be "platform", "hybrid", "security-key", or absent`)
+	}
+}
+
+// hint maps the choice onto the WebAuthn Level 3 hint that expresses it.
+// authenticatorAny has no hint, which is how beginCreation knows to leave the
+// creation options untouched.
+func (c authenticatorChoice) hint() protocol.PublicKeyCredentialHints {
+	switch c {
+	case authenticatorPlatform:
+		return protocol.PublicKeyCredentialHintClientDevice
+	case authenticatorHybrid:
+		return protocol.PublicKeyCredentialHintHybrid
+	case authenticatorSecurityKey:
+		return protocol.PublicKeyCredentialHintSecurityKey
+	default:
+		return ""
+	}
+}
+
 // beginCreation issues WebAuthn creation options for user, excluding the
-// credentials it already has.
+// credentials it already has, narrowed to the authenticator kind the operator
+// picked.
 //
 // Require a discoverable credential (resident key). Login is
 // BeginDiscoverableLogin — it sends an empty allowCredentials list, so an
@@ -204,15 +277,36 @@ func (s *Service) beginFirstRunRegistration(w http.ResponseWriter, r *http.Reque
 // stayed hidden — a USB security key, the only authenticator a Linux
 // desktop can use, is the case that exposes it. WithResidentKeyRequirement
 // also sets the legacy requireResidentKey flag for older authenticators.
-func (s *Service) beginCreation(user *User) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
+//
+// The choice is expressed twice, deliberately. The hint is what a current
+// browser reads; the matching authenticatorAttachment is what a browser that
+// predates hints reads, and the spec tells relying parties to send both so the
+// two kinds of user agent filter the same way (protocol.PublicKeyCredentialHints).
+//
+// WithAuthenticatorSelection REPLACES the whole AuthenticatorSelection struct
+// the library seeded from Config — including UserVerification: required
+// (decision #561). So the user-verification setting is re-supplied here, read
+// back off the relying-party config rather than restated, and
+// WithResidentKeyRequirement is applied last because it edits that same struct
+// in place. TestUserVerificationRequired executes this.
+func (s *Service) beginCreation(user *User, choice authenticatorChoice) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
 	creds := user.WebAuthnCredentials()
 	excl := make([]protocol.CredentialDescriptor, 0, len(creds))
 	for i := range creds {
 		excl = append(excl, creds[i].Descriptor())
 	}
-	return s.web.BeginRegistration(user,
-		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
-		webauthn.WithExclusions(excl))
+	opts := []webauthn.RegistrationOption{webauthn.WithExclusions(excl)}
+	if hint := choice.hint(); hint != "" {
+		opts = append(opts,
+			webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+				AuthenticatorAttachment: hint.AuthenticatorAttachment(),
+				UserVerification:        s.web.Config.AuthenticatorSelection.UserVerification,
+			}),
+			webauthn.WithPublicKeyCredentialHints([]protocol.PublicKeyCredentialHints{hint}),
+		)
+	}
+	opts = append(opts, webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired))
+	return s.web.BeginRegistration(user, opts...)
 }
 
 // POST /api/auth/register/step-up
@@ -258,7 +352,7 @@ func (s *Service) handleRegisterStepUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target := by
-	options, creation, err := s.beginCreation(target)
+	options, creation, err := s.beginCreation(target, p.authenticator)
 	if err != nil {
 		fail(http.StatusInternalServerError, err.Error())
 		return

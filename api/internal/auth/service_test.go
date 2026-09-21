@@ -721,6 +721,140 @@ func TestHandleRegisterBegin_RequiresDiscoverableCredential(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// The authenticator choice on the wire (geekdojo/geekdojo-brain#586)
+// ============================================================================
+
+// creationOptionsJSON is the slice of the emitted creation options these tests
+// read: the fields a browser acts on when deciding which authenticators to
+// offer. Asserted as JSON for the same reason the discoverable-credential test
+// is — this is what the browser sees, and an option that stopped reaching the
+// response would still leave our own structs looking right.
+type creationOptionsJSON struct {
+	PublicKey struct {
+		AuthenticatorSelection struct {
+			AuthenticatorAttachment string `json:"authenticatorAttachment"`
+			ResidentKey             string `json:"residentKey"`
+			RequireResidentKey      *bool  `json:"requireResidentKey"`
+			UserVerification        string `json:"userVerification"`
+		} `json:"authenticatorSelection"`
+		Hints []string `json:"hints"`
+	} `json:"publicKey"`
+}
+
+func decodeCreationOptions(t *testing.T, body []byte) creationOptionsJSON {
+	t.Helper()
+	var got creationOptionsJSON
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode creation options: %v body=%s", err, body)
+	}
+	return got
+}
+
+// A choice narrows the ceremony to the authenticator the operator picked, and
+// says so twice: the hint for a browser that implements WebAuthn Level 3, the
+// matching authenticatorAttachment for one that predates hints. Whatever the
+// choice, the credential stays discoverable and user verification stays
+// required — WithAuthenticatorSelection replaces that whole struct, so this is
+// the assertion that catches it being dropped.
+func TestHandleRegisterBegin_AuthenticatorChoice(t *testing.T) {
+	cases := []struct {
+		choice     authenticatorChoice
+		attachment string
+		hint       string
+	}{
+		{authenticatorPlatform, "platform", "client-device"},
+		{authenticatorHybrid, "cross-platform", "hybrid"},
+		{authenticatorSecurityKey, "cross-platform", "security-key"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.choice), func(t *testing.T) {
+			f := newAuthFixture(t)
+			mux := http.NewServeMux()
+			f.svc.RegisterRoutes(mux)
+			body := `{"name":"alice","displayName":"Alice","authenticator":"` + string(tc.choice) + `"}`
+			r := httptest.NewRequest(http.MethodPost, "/api/auth/register/begin", strings.NewReader(body))
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+			}
+
+			got := decodeCreationOptions(t, w.Body.Bytes())
+			sel := got.PublicKey.AuthenticatorSelection
+			if sel.AuthenticatorAttachment != tc.attachment {
+				t.Errorf("authenticatorAttachment = %q, want %q", sel.AuthenticatorAttachment, tc.attachment)
+			}
+			if len(got.PublicKey.Hints) != 1 || got.PublicKey.Hints[0] != tc.hint {
+				t.Errorf("hints = %v, want [%q]", got.PublicKey.Hints, tc.hint)
+			}
+			if sel.UserVerification != "required" {
+				t.Errorf("userVerification = %q, want \"required\" — the choice must not relax decision #561", sel.UserVerification)
+			}
+			if sel.ResidentKey != "required" || sel.RequireResidentKey == nil || !*sel.RequireResidentKey {
+				t.Errorf("residentKey = %q requireResidentKey = %v, want required/true", sel.ResidentKey, sel.RequireResidentKey)
+			}
+		})
+	}
+}
+
+// No choice is not a fourth choice: it emits neither field, so the browser
+// offers everything it can. This is the first-run wizard's request, which the
+// #586 work must leave exactly as it was.
+func TestHandleRegisterBegin_NoAuthenticatorChoiceNarrowsNothing(t *testing.T) {
+	for _, body := range []string{
+		`{"name":"alice","displayName":"Alice"}`,
+		`{"name":"alice","displayName":"Alice","authenticator":""}`,
+	} {
+		f := newAuthFixture(t)
+		mux := http.NewServeMux()
+		f.svc.RegisterRoutes(mux)
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/register/begin", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: want 200, got %d body=%s", body, w.Code, w.Body.String())
+		}
+		// The keys are omitempty, so their absence is visible in the raw JSON
+		// — a decoded zero value would not tell them apart from "sent empty".
+		for _, key := range []string{"authenticatorAttachment", "hints"} {
+			if strings.Contains(w.Body.String(), key) {
+				t.Errorf("%s: creation options carry %q: %s", body, key, w.Body.String())
+			}
+		}
+		got := decodeCreationOptions(t, w.Body.Bytes())
+		if got.PublicKey.AuthenticatorSelection.UserVerification != "required" {
+			t.Errorf("%s: userVerification = %q, want \"required\"", body, got.PublicKey.AuthenticatorSelection.UserVerification)
+		}
+	}
+}
+
+// An authenticator value this api does not model is a 400, not a silent
+// widening back to "whatever the browser offers" — that is the dead end the
+// choice exists to avoid, and a UI sending it has a bug worth seeing.
+func TestHandleRegisterBegin_UnknownAuthenticatorRefused(t *testing.T) {
+	for _, v := range []string{"cross-platform", "client-device", "PLATFORM", "usb", "none", " platform"} {
+		f := newAuthFixture(t)
+		mux := http.NewServeMux()
+		f.svc.RegisterRoutes(mux)
+		body := `{"name":"alice","displayName":"Alice","authenticator":"` + v + `"}`
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/register/begin", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("authenticator %q: want 400, got %d %s", v, w.Code, w.Body.String())
+		}
+		for _, c := range w.Result().Cookies() {
+			if c.Name == pendingCookie {
+				t.Errorf("authenticator %q: a refused begin started a ceremony", v)
+			}
+		}
+		if f.countUsers(t) != 0 {
+			t.Errorf("authenticator %q: a refused begin created a user", v)
+		}
+	}
+}
+
 func TestHandleRegisterBegin_InvalidName(t *testing.T) {
 	f := newAuthFixture(t)
 	mux := http.NewServeMux()
