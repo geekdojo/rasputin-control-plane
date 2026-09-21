@@ -559,11 +559,19 @@ func pendingFrom(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
 }
 
 // signedInBegin starts a signed-in registration (empty name: add a passkey to
-// the caller's own account) and returns the pending cookie and step-up
-// options.
+// the caller's own account) with no authenticator choice, and returns the
+// pending cookie and step-up options.
 func signedInBegin(t *testing.T, h http.Handler, session *http.Cookie, name string) (*http.Cookie, []byte) {
 	t.Helper()
-	w := post(h, "/api/auth/register/begin", `{"name":"`+name+`"}`, session)
+	return signedInBeginAs(t, h, session, name, authenticatorAny)
+}
+
+// signedInBeginAs is signedInBegin with the authenticator kind the operator
+// picked in the UI on the body.
+func signedInBeginAs(t *testing.T, h http.Handler, session *http.Cookie, name string, choice authenticatorChoice) (*http.Cookie, []byte) {
+	t.Helper()
+	body := `{"name":"` + name + `","authenticator":"` + string(choice) + `"}`
+	w := post(h, "/api/auth/register/begin", body, session)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"stepUp"`) {
 		t.Fatalf("signed-in begin: %d %s", w.Code, w.Body.String())
 	}
@@ -600,6 +608,86 @@ func TestAddPasskey_StepUpThenCreateEndToEnd(t *testing.T) {
 	u, _ := f.store.GetUserByID(f.ctx, alice.user.ID)
 	if len(u.WebAuthnCredentials()) != 2 {
 		t.Fatalf("alice has %d passkeys, want 2", len(u.WebAuthnCredentials()))
+	}
+}
+
+// The authenticator the operator picked at register/begin has to survive the
+// step-up, because that is where the creation options are minted — a signed-in
+// ceremony issues them at the END of step 1, and step 2 only replays them.
+// This is the whole point of #586: on a machine whose built-in authenticator
+// already holds a passkey for the account, exclusion refuses it and the
+// operator needs the ceremony pointed at their phone or their key instead.
+func TestAddPasskey_ChoiceRidesTheCeremony(t *testing.T) {
+	cases := []struct {
+		name       string
+		choice     authenticatorChoice
+		attachment string
+		hint       string
+	}{
+		{"no choice", authenticatorAny, "", ""},
+		{"this device", authenticatorPlatform, "platform", "client-device"},
+		{"phone or tablet", authenticatorHybrid, "cross-platform", "hybrid"},
+		{"security key", authenticatorSecurityKey, "cross-platform", "security-key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAuthFixture(t)
+			h := f.handler()
+			alice := firstOperator(t, f, h, "alice")
+
+			pending, stepUpOpts := signedInBeginAs(t, h, alice.session, "", tc.choice)
+			w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, stepUpOpts, alice.user.ID), pending, alice.session)
+			if w.Code != http.StatusOK {
+				t.Fatalf("step-up: %d %s", w.Code, w.Body.String())
+			}
+			got := decodeCreationOptions(t, w.Body.Bytes())
+			sel := got.PublicKey.AuthenticatorSelection
+			if sel.AuthenticatorAttachment != tc.attachment {
+				t.Errorf("authenticatorAttachment = %q, want %q", sel.AuthenticatorAttachment, tc.attachment)
+			}
+			if tc.hint == "" {
+				if len(got.PublicKey.Hints) != 0 {
+					t.Errorf("hints = %v, want none", got.PublicKey.Hints)
+				}
+			} else if len(got.PublicKey.Hints) != 1 || got.PublicKey.Hints[0] != tc.hint {
+				t.Errorf("hints = %v, want [%q]", got.PublicKey.Hints, tc.hint)
+			}
+			// Narrowing the ceremony never widens anything else: the passkey
+			// alice already has stays excluded, and both the discoverable and
+			// the user-verification requirements survive.
+			if !strings.Contains(w.Body.String(), base64.RawURLEncoding.EncodeToString(alice.auth.credID)) {
+				t.Errorf("creation options do not exclude the existing passkey: %s", w.Body.String())
+			}
+			if sel.UserVerification != "required" || sel.ResidentKey != "required" {
+				t.Errorf("userVerification = %q residentKey = %q, want both required", sel.UserVerification, sel.ResidentKey)
+			}
+
+			// And the passkey is still created: a narrowed ceremony finishes.
+			second := newSoftAuthenticator(t)
+			if w = post(h, "/api/auth/register/finish", second.attest(t, w.Body.Bytes()), pending, alice.session); w.Code != http.StatusOK {
+				t.Fatalf("finish: %d %s", w.Code, w.Body.String())
+			}
+			if f.countCredentials(t) != 2 {
+				t.Fatalf("credentials=%d, want 2", f.countCredentials(t))
+			}
+		})
+	}
+}
+
+// A signed-in begin validates the choice the same way first-run does, before
+// it starts a ceremony.
+func TestAddPasskey_UnknownAuthenticatorRefused(t *testing.T) {
+	f := newAuthFixture(t)
+	h := f.handler()
+	alice := firstOperator(t, f, h, "alice")
+	w := post(h, "/api/auth/register/begin", `{"name":"","authenticator":"usb"}`, alice.session)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d %s", w.Code, w.Body.String())
+	}
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == pendingCookie {
+			t.Fatal("a refused begin started a ceremony")
+		}
 	}
 }
 
@@ -799,6 +887,49 @@ func TestUserVerificationRequired(t *testing.T) {
 		pending, opts := signedInBegin(t, h, alice.session, "")
 		if w := post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, alice.session); w.Code != http.StatusUnauthorized {
 			t.Fatalf("want 401, got %d %s", w.Code, w.Body.String())
+		}
+	})
+	// Picking an authenticator (#586) sets AuthenticatorSelection through a
+	// library option that REPLACES the struct the relying-party config seeded
+	// — including this requirement. Every choice, on both paths that mint
+	// creation options, is asserted here rather than trusted to a reading of
+	// the option's source.
+	t.Run("every authenticator choice still asks for it", func(t *testing.T) {
+		for _, choice := range []authenticatorChoice{
+			authenticatorAny, authenticatorPlatform, authenticatorHybrid, authenticatorSecurityKey,
+		} {
+			f := newAuthFixture(t)
+			h := f.handler()
+			w := post(h, "/api/auth/register/begin", `{"name":"alice","authenticator":"`+string(choice)+`"}`)
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"userVerification":"required"`) {
+				t.Fatalf("first-run options for %q: %d %s", choice, w.Code, w.Body.String())
+			}
+
+			f = newAuthFixture(t)
+			h = f.handler()
+			alice := firstOperator(t, f, h, "alice")
+			pending, opts := signedInBeginAs(t, h, alice.session, "", choice)
+			w = post(h, "/api/auth/register/step-up", alice.auth.assert(t, opts, alice.user.ID), pending, alice.session)
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"userVerification":"required"`) {
+				t.Fatalf("add-passkey options for %q: %d %s", choice, w.Code, w.Body.String())
+			}
+		}
+	})
+	// The whole point of requiring it: an authenticator that skips user
+	// verification is refused even on a narrowed ceremony.
+	t.Run("registration without UV refused for every choice", func(t *testing.T) {
+		for _, choice := range []authenticatorChoice{
+			authenticatorPlatform, authenticatorHybrid, authenticatorSecurityKey,
+		} {
+			f := newAuthFixture(t)
+			h := f.handler()
+			w := post(h, "/api/auth/register/begin", `{"name":"alice","authenticator":"`+string(choice)+`"}`)
+			a := newSoftAuthenticator(t)
+			a.noUV = true
+			w = post(h, "/api/auth/register/finish", a.attest(t, w.Body.Bytes()), pendingFrom(t, w))
+			if w.Code != http.StatusBadRequest || f.countUsers(t) != 0 {
+				t.Fatalf("choice %q: want 400 and no user, got %d users=%d", choice, w.Code, f.countUsers(t))
+			}
 		}
 	})
 }

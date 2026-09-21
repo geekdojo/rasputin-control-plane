@@ -2,6 +2,7 @@ import {
   startAuthentication,
   startRegistration,
 } from '@simplewebauthn/browser';
+import type { PasskeyAuthenticator } from './passkey-authenticator';
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
@@ -119,11 +120,17 @@ export async function registerPasskey(
 //
 // A session alone never adds a passkey; the api refuses step 2 unless step 1
 // verified for the same ceremony.
-export async function confirmExistingPasskey(): Promise<RegistrationOptions> {
+//
+// `authenticator` is the kind of authenticator the operator chose. It has to
+// be sent here, at step 1, because the api mints the creation options at the
+// end of step 1 — step 2 only replays what it was given.
+export async function confirmExistingPasskey(
+  authenticator: PasskeyAuthenticator,
+): Promise<RegistrationOptions> {
   const begin = await jsonFetch<{ stepUp?: unknown }>('/api/auth/register/begin', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ authenticator }),
   });
   if (!begin.stepUp) {
     throw new Error('The api did not ask for an existing passkey; refusing to continue.');

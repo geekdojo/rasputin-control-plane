@@ -73,6 +73,12 @@ type pendingAuth struct {
 	// stepUpVerified is set when that assertion verified; register/finish
 	// refuses a signed-in registration without it.
 	stepUpVerified bool
+	// authenticator is the kind of authenticator the operator picked at
+	// register/begin. A signed-in ceremony does not mint its creation
+	// options until register/step-up, so the choice has to survive the gap;
+	// it is an option on the new credential, not an authorization fact,
+	// which is why it sits here and not in basis.
+	authenticator authenticatorChoice
 }
 
 // registerBasis is the fact a registration ceremony was begun on.
