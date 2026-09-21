@@ -79,9 +79,6 @@ export function upgradeReviewUrl(
 /** The revert confirm's one static prompt, verbatim (Bryce, 2026-09-12). */
 export const REVERT_PROMPT = 'Reverting does not restore your data and may cause unexpected behavior. Proceed?';
 
-/** The API's PUT body cap (maxComposeBody in apps_handlers.go). */
-export const MAX_COMPOSE_BODY_BYTES = 1 << 20;
-
 export type ComposeChangeKind = 'upgrade' | 'edit' | 'revert';
 
 export type ComposeChangeBody =

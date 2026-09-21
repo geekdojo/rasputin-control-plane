@@ -484,15 +484,6 @@ func TestComputeStatus(t *testing.T) {
 // Helpers (jobs.go)
 // ============================================================================
 
-func TestShort(t *testing.T) {
-	if got := short("0123456789abcdef"); got != "0123456789ab" {
-		t.Errorf("short long: got %q", got)
-	}
-	if got := short("abc"); got != "abc" {
-		t.Errorf("short short: got %q", got)
-	}
-}
-
 func TestParseSpec(t *testing.T) {
 	cases := []struct {
 		name    string

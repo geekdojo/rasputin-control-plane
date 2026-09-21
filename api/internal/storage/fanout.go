@@ -362,11 +362,11 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 func (o fanOutOpts) landed(rec VolumeRecord, pv PlannedVolume, stage proto.BackupStageVolumeAck, xfer proto.BackupTransferAck, rc *backupxfer.Receipt, node string) VolumeRecord {
 	if xfer.OK && xfer.PlaintextDigest != "" && !strings.EqualFold(xfer.PlaintextDigest, stage.Digest) {
 		rec.Reason = fmt.Sprintf("REFUSED: %s staged %s with digest %s and sealed bytes hashing to %s; the member on the target is not the copy the stage verb described and is not indexed",
-			node, pv.Volume, short(stage.Digest), short(xfer.PlaintextDigest))
+			node, pv.Volume, proto.ShortFingerprint(stage.Digest), proto.ShortFingerprint(xfer.PlaintextDigest))
 		return rec
 	}
 	if rc.PlaintextDigest != "" && !strings.EqualFold(rc.PlaintextDigest, stage.Digest) {
-		rec.Reason = fmt.Sprintf("REFUSED: the member that landed declares plaintext digest %s and the stage verb reported %s; not indexed", short(rc.PlaintextDigest), short(stage.Digest))
+		rec.Reason = fmt.Sprintf("REFUSED: the member that landed declares plaintext digest %s and the stage verb reported %s; not indexed", proto.ShortFingerprint(rc.PlaintextDigest), proto.ShortFingerprint(stage.Digest))
 		return rec
 	}
 	if !xfer.OK && xfer.Refusal == proto.BackupRefusalDigestMismatch {

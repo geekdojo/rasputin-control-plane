@@ -1078,7 +1078,7 @@ func runSeal(cfg RunConfig) jobs.DoFn {
 
 		sc.Log("info", fmt.Sprintf("sealed %s to key %s (%s plaintext → %s sealed, sha256 %s)",
 			tgt.GenerationID, displayLabel(tgt.KeyID),
-			humanBytes(res.PlaintextBytes), humanBytes(res.SizeBytes), short(res.Digest)))
+			humanBytes(res.PlaintextBytes), humanBytes(res.SizeBytes), proto.ShortFingerprint(res.Digest)))
 		return json.Marshal(runSealResult{StagingName: name, Seal: res})
 	}
 }

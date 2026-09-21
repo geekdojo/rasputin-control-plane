@@ -281,7 +281,7 @@ func (s *Stager) RestoreVolume(ctx context.Context, cmd proto.BackupRestoreVolum
 	ack.OwnershipApplied = res.OwnershipApplied
 	if res.StreamBytes != cmd.PlaintextBytes || !strings.EqualFold(res.Digest, cmd.PlaintextDigest) {
 		return s.failRestore(ack, fmt.Errorf("%w: %d bytes arrived hashing to %s; the manifest recorded %d bytes hashing to %s. The live volume was not touched",
-			ErrDigestMismatch, res.StreamBytes, short(res.Digest), cmd.PlaintextBytes, short(cmd.PlaintextDigest)))
+			ErrDigestMismatch, res.StreamBytes, proto.ShortFingerprint(res.Digest), cmd.PlaintextBytes, proto.ShortFingerprint(cmd.PlaintextDigest)))
 	}
 	// The staged tree takes the live root's own mode and ownership, so the
 	// container finds its data directory exactly as permissive as it was —
@@ -480,7 +480,7 @@ func (s *Stager) writeRestoreRecord(r restoreRecord) (string, error) {
 func (s *Stager) replayRestore(ack *proto.BackupRestoreVolumeAck, cmd proto.BackupRestoreVolumeCmd, prior *restoreOutcome) *proto.BackupRestoreVolumeAck {
 	if prior.GenerationID != cmd.GenerationID || prior.Member != cmd.Member || !strings.EqualFold(prior.PlaintextDigest, cmd.PlaintextDigest) {
 		return s.failRestore(ack, fmt.Errorf("%w: restore id %s already names a completed restore of %s/%s from generation %s member %s (digest %s), and this command asks for generation %s member %s (digest %s) under the same id; a restore id names one restore, so nothing was done",
-			ErrBadName, cmd.RestoreID, cmd.AppID, cmd.Volume, prior.GenerationID, prior.Member, short(prior.PlaintextDigest), cmd.GenerationID, cmd.Member, short(cmd.PlaintextDigest)))
+			ErrBadName, cmd.RestoreID, cmd.AppID, cmd.Volume, prior.GenerationID, prior.Member, proto.ShortFingerprint(prior.PlaintextDigest), cmd.GenerationID, cmd.Member, proto.ShortFingerprint(cmd.PlaintextDigest)))
 	}
 	*ack = prior.Ack
 	ack.Replayed = true
@@ -679,13 +679,6 @@ const maxRestoreBytes = 64 << 40
 func isHex(s string) bool {
 	_, err := hex.DecodeString(s)
 	return err == nil
-}
-
-func short(digest string) string {
-	if len(digest) > 12 {
-		return digest[:12]
-	}
-	return digest
 }
 
 func randomHex(n int) string {

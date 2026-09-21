@@ -212,7 +212,7 @@ func updateValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 			Version:  bundle.Version,
 			Ts:       now,
 		})
-		sc.Log("info", fmt.Sprintf("update %s → %s on %s", short(spec.BundleSHA256), bundle.Version, spec.NodeID))
+		sc.Log("info", fmt.Sprintf("update %s → %s on %s", proto.ShortFingerprint(spec.BundleSHA256), bundle.Version, spec.NodeID))
 		return json.Marshal(map[string]string{"version": bundle.Version})
 	}
 }
@@ -630,14 +630,7 @@ func bootIDForLog(id string) string {
 	if id == "" {
 		return "(none)"
 	}
-	return short(id)
-}
-
-func short(h string) string {
-	if len(h) > 12 {
-		return h[:12]
-	}
-	return h
+	return proto.ShortFingerprint(id)
 }
 
 func publishChange(nc *nats.Conn, ev proto.UpdateChangeEvt) {

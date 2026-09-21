@@ -304,7 +304,7 @@ func reconcileFetch(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn
 		if err := store.UpdateAfterReconcile(sc.Ctx, nodeID, ack.Hash, now); err != nil {
 			log.Printf("firewall: persist reconcile state: %v", err)
 		}
-		sc.Log("info", fmt.Sprintf("observed hash=%s", short(ack.Hash)))
+		sc.Log("info", fmt.Sprintf("observed hash=%s", proto.ShortFingerprint(ack.Hash)))
 		return json.Marshal(map[string]string{"nodeId": nodeID, "observedHash": ack.Hash})
 	}
 }
@@ -329,7 +329,7 @@ func reconcileCompare(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Do
 		if state.Drift {
 			change = proto.FirewallDrift
 			sc.Log("warn", fmt.Sprintf("DRIFT: intent=%s observed=%s",
-				short(state.IntentHash), short(state.ObservedHash)))
+				proto.ShortFingerprint(state.IntentHash), proto.ShortFingerprint(state.ObservedHash)))
 		} else {
 			change = proto.FirewallInSync
 			sc.Log("info", "in sync with intent")
@@ -350,11 +350,4 @@ func reconcileCompare(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Do
 			"observedHash": state.ObservedHash,
 		})
 	}
-}
-
-func short(h string) string {
-	if len(h) > 12 {
-		return h[:12]
-	}
-	return h
 }

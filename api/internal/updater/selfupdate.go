@@ -86,7 +86,7 @@ func verifyBootedSlot(ctx context.Context, nc *nats.Conn, store *Store, inv *inv
 		unconfirmInventoryVersion(ctx, inv, nodeID,
 			"the pre-reboot agent is still answering; what it runs next is not yet decided", lg)
 		return res, fmt.Errorf("pre_reboot_agent_answered: still on boot %s — the node has not rebooted, this is NOT a rollback",
-			short(pre.BootID))
+			proto.ShortFingerprint(pre.BootID))
 	}
 
 	// Recorded before the branch so BOTH outcomes carry it: a rolled-back node

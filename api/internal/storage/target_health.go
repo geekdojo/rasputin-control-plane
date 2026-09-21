@@ -328,7 +328,7 @@ func whatIsAtTheOldPath(ctx context.Context, nc *nats.Conn, target *BackupTarget
 			return fmt.Sprintf("a disk is at %s now (%s) but the claim recorded no fingerprint to compare it against", path, desc)
 		case c.Fingerprint != target.Fingerprint:
 			return fmt.Sprintf("a DIFFERENT disk is at %s now (%s; fingerprint %s ≠ the claimed %s) — not the claimed target, and nothing will be written to it",
-				path, desc, short(c.Fingerprint), short(target.Fingerprint))
+				path, desc, proto.ShortFingerprint(c.Fingerprint), proto.ShortFingerprint(target.Fingerprint))
 		default:
 			return fmt.Sprintf("the disk at %s fingerprints as the claimed one (%s) but no longer carries the partition — its partition table changed underneath the claim",
 				path, desc)

@@ -1030,15 +1030,6 @@ func TestSimpleHash_StableNonNegative(t *testing.T) {
 	}
 }
 
-func TestShort_Mesh(t *testing.T) {
-	if got := short("0123456789abcd"); got != "0123456789ab" {
-		t.Errorf("short long: %q", got)
-	}
-	if got := short("abc"); got != "abc" {
-		t.Errorf("short short: %q", got)
-	}
-}
-
 // Reconcile classifies a device as a Rasputin node by the control-plane-set
 // meshNodeTag, never by guessing from the hostname — a real node id like
 // "bench-controlplane1" matches no prefix, so the old hostname heuristic

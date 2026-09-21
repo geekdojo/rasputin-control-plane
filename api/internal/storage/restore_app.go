@@ -1074,7 +1074,7 @@ func restoreRecordFromAck(sc *jobs.StepCtx, tgt restoreAppTarget, p RestoreVolum
 	} else {
 		rec.Restored = true
 		sc.Log("info", fmt.Sprintf("restored %s/%s on %s: %d file(s), %s, sha256 %s verified against the manifest; previous contents kept at %s%s",
-			tgt.AppName, p.Volume, tgt.NodeID, ack.FileCount, humanBytes(ack.UnpackedBytes), short(ack.Digest), ack.PreviousKept, restoreDowntimeText(ack)))
+			tgt.AppName, p.Volume, tgt.NodeID, ack.FileCount, humanBytes(ack.UnpackedBytes), proto.ShortFingerprint(ack.Digest), ack.PreviousKept, restoreDowntimeText(ack)))
 	}
 	if !ack.AppRestored {
 		sc.Log("error", fmt.Sprintf("APP LEFT DOWN: %s was stopped to replace %s and did not come back: %s. The agent's guard keeps retrying and a boot sweep will restart it", tgt.AppName, p.Volume, ack.RestoreDetail))
