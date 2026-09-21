@@ -194,6 +194,25 @@ func (s *Server) handleClusterFirewallImage(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		// %q on the error, for the reason given in handleClusterNodeImage.
 		log.Printf("cluster firewall-image (%s): %q", channel, err.Error())
+		// Before giving up: this control plane may simply have no route. The
+		// no-DHCP bootstrap address carries no gateway by design (rasputin-os
+		// #53), and that is the path where the operator most needs a firewall
+		// image -- the firewall is what would restore internet. Fall back to
+		// the manifest rasputin-os baked in at build time, verified here
+		// exactly as an online one would be (geekdojo/geekdojo-brain#595).
+		bakedBase := s.releaseDownloadBase
+		if bakedBase == "" {
+			bakedBase = "https://github.com"
+		}
+		if d, berr := releases.BakedFirewallImage(s.updaterVerifier, bakedBase, comp); berr == nil {
+			log.Printf("cluster firewall-image (%s): serving the BAKED manifest for %s (this control plane could not reach the release source)", channel, d.Version)
+			writeJSON(w, http.StatusOK, d)
+			return
+		} else if !errors.Is(berr, releases.ErrNoBakedManifest) {
+			// A baked manifest that is present and BAD is worth saying out
+			// loud; an absent one is just an older or dev image.
+			log.Printf("cluster firewall-image (%s): baked manifest unusable: %q", channel, berr.Error())
+		}
 		status, msg := nodeImageError(err, "the latest firewall release")
 		if status == http.StatusBadGateway {
 			msg = "couldn't resolve the latest firewall image"
