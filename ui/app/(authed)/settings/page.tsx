@@ -22,6 +22,7 @@
 //     picks where it should live (this device, a phone or tablet, a security
 //     key), confirms with a passkey they already have, then creates the new
 //     one (lib/auth.ts confirmExistingPasskey / createNewPasskey).
+//     Shown unless SHOW_PASSKEY_MANAGEMENT below is turned off.
 // The Settings icon in the sidebar routes here.
 
 import { Check, Settings as SettingsIcon } from 'lucide-react';
@@ -55,6 +56,18 @@ import { ENROLLED_NODE_KEY_PROCEDURE_URL, operatorKeyDraft } from '../../../lib/
 import { confirmExistingPasskey, createNewPasskey, type NewPasskeyOptions } from '../../../lib/auth';
 import { PASSKEY_AUTHENTICATORS, type PasskeyAuthenticatorChoice } from '../../../lib/passkey-authenticator';
 import type { BMCBackendInfo, BMCConfigView, DeploymentMode, DNSForwarding, Node, ObsStatus, SetupState } from '../../../lib/types';
+
+// Whether Settings shows the Passkeys section. On — adding a passkey can now
+// offer a phone or a security key rather than only the authenticator on this
+// machine (geekdojo/geekdojo-brain#586), which is what the section needed to
+// lead somewhere.
+//
+// It stays a flag rather than becoming unconditional so the section can be
+// taken off an operator's Settings page in one line if the flow misbehaves on
+// hardware, without reverting the feature. Deliberately only the render is
+// gated: PasskeysSection, lib/auth.ts and the
+// /api/auth/register/{begin,step-up,finish} routes are untouched by it.
+const SHOW_PASSKEY_MANAGEMENT = true;
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
@@ -99,8 +112,12 @@ export default function SettingsPage() {
         <div style={{ height: 32 }} />
         <OperatorSSHKeySection />
 
-        <div style={{ height: 32 }} />
-        <PasskeysSection />
+        {SHOW_PASSKEY_MANAGEMENT && (
+          <>
+            <div style={{ height: 32 }} />
+            <PasskeysSection />
+          </>
+        )}
       </PageBody>
     </PageShell>
   );
