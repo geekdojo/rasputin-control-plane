@@ -290,7 +290,20 @@ esac
 SEED="$(printf '%s' "$RASPUTIN_SEED_B64" | base64 -d 2>/dev/null || printf '%s' "$RASPUTIN_SEED_B64" | base64 -D 2>/dev/null || true)"
 printf '%s' "$SEED" | grep -q '^RASPUTIN_NODE_ROLE=' || die "the seed didn't decode cleanly — re-copy the command from the wizard."
 
-seed_val() { printf '%s\n' "$SEED" | sed -n "s/^$1=//p" | head -1; }
+# The control plane's own RenderSeed emits SINGLE-QUOTED values, and a
+# hand-written seed may use double quotes or none. Strip one surrounding layer,
+# the same one layer proto.ParseSeed strips for the agent. Without this every
+# derived value keeps its quotes: NODE_ROLE becomes 'firewall' (quotes and all),
+# which matches no case arm and silently falls through to the OS-node branch,
+# and the NATS host parse yields https://'nats. Both observed on the bench
+# 2026-09-21 flashing a firewall seed the wizard had just generated.
+#
+# Only the three values below are parsed; $SEED itself is written to the seed
+# FAT verbatim, so the quoting the image expects is untouched.
+seed_val() {
+	printf '%s\n' "$SEED" | sed -n "s/^$1=//p" | head -1 \
+		| sed -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/'
+}
 NODE_ID="$(seed_val RASPUTIN_NODE_ID)"
 NODE_ROLE="$(seed_val RASPUTIN_NODE_ROLE)"
 NATS_URL="$(seed_val RASPUTIN_NATS_URL)"

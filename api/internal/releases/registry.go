@@ -105,12 +105,15 @@ var Components = []Component{
 		Scheme: SchemeCalVer, Kind: KindRootfsAB, Deployable: true,
 		CompareRoles: []proto.NodeRole{proto.RoleFirewall},
 		CompareField: "image",
-		// EMPTY on purpose: no firewall release publishes a manifest.json.sig
-		// yet (checked against every published release, 2026-09-19).
-		// geekdojo/geekdojo-brain#526 adds the signing step; set this to the
-		// first version published with it, and the firewall's manifests become
-		// required reading rather than optional.
-		SignedManifestFrom: "",
+		// #526 shipped: 2026.09.4-dev.127 (published 2026-09-20T18:03:17Z) is
+		// the FIRST firewall release carrying manifest.json.sig, signed by
+		// `Rasputin Bundle Signing leaf-003` with the release OID — the same
+		// signer the OS uses. dev.126 and earlier have no sig asset at all.
+		// Measured against the published releases, not taken from a doc.
+		//
+		// Until this was set, a firewall flash trusted the control plane's
+		// sha256 with nothing behind it while the OS path verified its own.
+		SignedManifestFrom: "2026.09.4-dev.127",
 	},
 }
 
