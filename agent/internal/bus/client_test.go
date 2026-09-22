@@ -1,8 +1,11 @@
 package bus
 
 import (
+	"errors"
+	"log"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -485,5 +488,113 @@ func TestClient_OnLostFiresWhenTheServerGoesAwayAndNotOnClose(t *testing.T) {
 	time.Sleep(200 * time.Millisecond) // long enough for the drain's handlers to have run
 	if got := lost.Load(); got != before {
 		t.Errorf("OnLost fired %d more time(s) for the Client's own Close", got-before)
+	}
+}
+
+// --- the dialer gets a NAME, not an address --------------------------------
+
+// recordingDialer stands in for mdnsDialer and records every address nats.go
+// asks it to dial. It always fails the dial, so the connect attempt returns
+// immediately and the test never needs a server.
+type recordingDialer struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (d *recordingDialer) Dial(network, address string) (net.Conn, error) {
+	d.mu.Lock()
+	d.seen = append(d.seen, address)
+	d.mu.Unlock()
+	return nil, errors.New("recordingDialer: dial refused by the test")
+}
+
+func (d *recordingDialer) addrs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.seen...)
+}
+
+// TestDial_CustomDialerReceivesHostnameNotResolvedIP is the regression guard
+// for geekdojo-brain#547: the custom dialer must be handed the hostname from
+// the URL, not an address nats.go resolved on its own behalf.
+//
+// It matters because mdnsDialer decides whether to consult mDNS by looking at
+// the address it is given (`strings.HasSuffix(host, ".local")`). nats.go's
+// createConn resolves the URL's hostname through the OS resolver BEFORE
+// calling the dialer and passes the A record it gets back, so without
+// nats.SkipHostLookup() the dialer sees an IP literal, the guard never
+// matches, and mDNS is never consulted — the agent can then never re-find a
+// control plane whose DHCP lease moved, because the only answer it has is the
+// stale one its own dnsmasq is serving.
+//
+// The URL deliberately uses "localhost" rather than a .local name. The
+// assertion is that no OS lookup happened, and a name that does NOT resolve
+// cannot show that: nats.go falls back to the raw URL host when a lookup
+// returns nothing, so the dialer would receive the name either way and the
+// test could not fail. "localhost" is the one name every machine that can run
+// this suite resolves, which is what gives the assertion teeth.
+// TestMDNSDialer_LocalNameEntersMDNSPath covers the second half — that a
+// .local name reaching this dialer does send the agent down the mDNS path.
+func TestDial_CustomDialerReceivesHostnameNotResolvedIP(t *testing.T) {
+	const host = "localhost"
+	if addrs, err := net.LookupHost(host); err != nil || len(addrs) == 0 {
+		t.Skipf("this machine does not resolve %q (%v) — the assertion would pass vacuously", host, err)
+	}
+	rec := &recordingDialer{}
+	c := New("nats://"+host+":4222", testNode, "", nil, nil)
+	// extraOpts are appended after the client's own options, so this replaces
+	// the mdnsDialer while leaving every other option — SkipHostLookup among
+	// them — exactly as the agent sets it.
+	c.extraOpts = []nats.Option{nats.SetCustomDialer(rec)}
+	if err := c.Dial(); err == nil {
+		t.Fatal("Dial succeeded against a dialer that always fails")
+	}
+	c.Close()
+
+	got := rec.addrs()
+	if len(got) == 0 {
+		t.Fatal("the custom dialer was never called — nats.go dialed some other way")
+	}
+	want := net.JoinHostPort(host, "4222")
+	for _, addr := range got {
+		if addr == want {
+			continue
+		}
+		h, _, err := net.SplitHostPort(addr)
+		if err == nil && net.ParseIP(h) != nil {
+			t.Fatalf("the custom dialer was handed the resolved address %q; it must be handed %q. "+
+				"nats.SkipHostLookup() is missing from the options in dial() — mdnsDialer's "+
+				".local guard cannot match an IP literal, so mDNS is never consulted and a "+
+				"control plane that changed address is unreachable forever.", addr, want)
+		}
+		t.Fatalf("the custom dialer was handed %q, want %q", addr, want)
+	}
+}
+
+// TestMDNSDialer_LocalNameEntersMDNSPath pins the other half of the chain: once
+// a .local NAME reaches mdnsDialer, the mDNS path really is entered rather than
+// the name being handed straight to the OS resolver.
+//
+// There is no mDNS responder for this name, so Resolve fails and the dialer
+// takes its documented fallback — dialing the unmodified name. The evidence
+// that Resolve ran at all is the log line the fallback emits, so the test reads
+// the log rather than the return value: a passing dial would prove nothing
+// about which path produced the address.
+func TestMDNSDialer_LocalNameEntersMDNSPath(t *testing.T) {
+	var buf strings.Builder
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	const name = "rasputin-no-such-responder-547.local"
+	d := &mdnsDialer{resolveTimeout: 250 * time.Millisecond, dialTimeout: 250 * time.Millisecond}
+	if conn, err := d.Dial("tcp", net.JoinHostPort(name, "4222")); err == nil {
+		conn.Close()
+		t.Fatalf("dialing %q unexpectedly succeeded", name)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "mDNS resolve "+name) {
+		t.Errorf("mdnsDialer did not report an mDNS attempt for a .local name; log was %q. "+
+			"The .local guard did not match, so mdns.Resolve was never called.", logged)
 	}
 }

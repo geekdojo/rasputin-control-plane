@@ -37,6 +37,13 @@ type Publisher interface {
 // .local resolver (notably the OpenWrt firewall image). nats calls Dial on every
 // (re)connect, so address churn is handled transparently — each reconnect
 // re-resolves. Non-.local hosts and bare IPs dial normally.
+//
+// TRIP-WIRE: this only ever sees a hostname because the options in dial() set
+// nats.SkipHostLookup(). Remove that option and nats.go resolves the name
+// itself first, this function is handed an IP literal, the guard below stops
+// matching, and mDNS silently stops being consulted — which is exactly how a
+// control plane that moved became unreachable forever (geekdojo-brain#547).
+// TestDial_CustomDialerReceivesHostnameNotResolvedIP is the guard.
 type mdnsDialer struct {
 	resolveTimeout time.Duration
 	dialTimeout    time.Duration
@@ -201,6 +208,30 @@ func (c *Client) dial() (*nats.Conn, bool, error) {
 		nats.Name(fmt.Sprintf("rasputin-agent/%s", c.nodeID)),
 		// Resolve rasputin.local via mDNS on every (re)connect (see mdnsDialer).
 		nats.SetCustomDialer(&mdnsDialer{resolveTimeout: 2 * time.Second, dialTimeout: 5 * time.Second}),
+		// SkipHostLookup is what makes the dialer above reachable at all.
+		// Without it, createConn resolves the URL's hostname through the OS
+		// resolver BEFORE calling the dialer (nats.go v1.53.1, nats.go:2454)
+		// and hands it the resulting A record. The dialer then receives an IP
+		// literal, its ".local" guard never matches, and mdns.Resolve is never
+		// called — the mDNS path has been dead since the custom dialer was
+		// introduced. With this option createConn falls through to
+		// `hosts = append(hosts, u.Host)` and the dialer gets the NAME.
+		//
+		// This is not cosmetic. On the firewall the OS resolver IS dnsmasq
+		// answering from the hosts file hostsync publishes, so when the
+		// control plane takes a new DHCP lease the lookup does not fail — it
+		// SUCCEEDS with the old address, and the agent dials a host that is no
+		// longer there, forever. hostsync deliberately keeps its stale entry
+		// while the bus is down (it publishes only what an authenticated bus
+		// connection reported), so nothing else breaks the loop: re-resolving
+		// the name on the wire, on every reconnect, is the rescue path.
+		//
+		// What is given up is only nats.go's own multi-A expansion and
+		// randomization across them, which a single-control-plane cluster has
+		// no use for. A bare IP in the URL is unaffected (net.ParseIP already
+		// short-circuited the lookup), and a non-.local hostname still
+		// resolves — the dialer passes the name to net.DialTimeout.
+		nats.SkipHostLookup(),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(c.reconnectWait),
 		nats.PingInterval(20 * time.Second),
