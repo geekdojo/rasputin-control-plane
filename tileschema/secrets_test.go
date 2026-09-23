@@ -165,3 +165,75 @@ func TestValidateTileAcceptsAPreviewTileDeclaringTheCapability(t *testing.T) {
 		t.Fatalf("a preview tile declaring tile.secrets was refused: %v", err)
 	}
 }
+
+// The edge cases the mutation gate found nothing testing (PR #393): a token at
+// byte 0, an empty name, and the End offset. All four surviving mutants were in
+// ScanSecretTokens and all four are boundary conditions, which is the shape of
+// bug a scanner actually ships.
+
+// A token at the very first byte of the compose. This is the offset where the
+// scanner's own arithmetic is most likely to be wrong: `rel < 0` and `start > 0`
+// both sit one step from a value that occurs here and nowhere else, and the
+// second guards an index of compose[start-1].
+func TestScanSecretTokensFindsATokenAtByteZero(t *testing.T) {
+	got, err := ScanSecretTokens("${secret:db-password}\n")
+	if err != nil {
+		t.Fatalf("a token at byte 0 is a legal token: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d tokens, want 1 — a token at offset 0 must not be skipped", len(got))
+	}
+	if got[0].Start != 0 {
+		t.Errorf("Start = %d, want 0", got[0].Start)
+	}
+	if got[0].Name != "db-password" {
+		t.Errorf("Name = %q, want %q", got[0].Name, "db-password")
+	}
+}
+
+// The End offset is not decoration: Resolve and Escape rewrite the span
+// [Start,End), so an off-by-one there either leaves a `}` behind in the compose
+// or eats the byte after it. Asserted as an exact slice, not a length.
+func TestScanSecretTokensEndSpansTheWholeToken(t *testing.T) {
+	compose := "P: ${secret:db}\nQ: ${secret:session-key}\n"
+	got, err := ScanSecretTokens(compose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d tokens, want 2", len(got))
+	}
+	for _, want := range []struct {
+		tok  SecretToken
+		span string
+	}{
+		{got[0], "${secret:db}"},
+		{got[1], "${secret:session-key}"},
+	} {
+		if span := compose[want.tok.Start:want.tok.End]; span != want.span {
+			t.Errorf("compose[Start:End] = %q, want %q — the span must cover the token and its closing brace exactly", span, want.span)
+		}
+	}
+}
+
+// An empty name and a name-less token are DIFFERENT refusals, and the scanner
+// must not collapse them: `${secret:}` has its closing brace, so it is a bad
+// NAME, while `${secret:` has none. Both error either way, so asserting only
+// "it errored" cannot tell them apart — which is how a boundary mutant survived.
+func TestScanSecretTokensTellsAnEmptyNameFromAnUnterminatedToken(t *testing.T) {
+	emptyName, err := ScanSecretTokens("P: ${secret:}\n")
+	if err == nil {
+		t.Fatalf("an empty name must be refused, got %v", emptyName)
+	}
+	if !strings.Contains(err.Error(), "DNS-1123") {
+		t.Errorf("`${secret:}` has its brace, so it is a bad NAME, not an unterminated token; got %q", err)
+	}
+
+	_, err = ScanSecretTokens("P: ${secret:\n")
+	if err == nil {
+		t.Fatal("a token with no closing brace on its line must be refused")
+	}
+	if !strings.Contains(err.Error(), "closing brace") {
+		t.Errorf("an unterminated token must say so; got %q", err)
+	}
+}
