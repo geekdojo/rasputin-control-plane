@@ -99,6 +99,15 @@ const (
 	// way the length prefixing could stop being injective and so the one way
 	// the property this whole encoding exists for could be lost quietly.
 	maxAppIDLen = 256
+
+	// maxSecretNameLen bounds the secret name that reaches the derivation. A
+	// name is a DNS-1123 label, so tileschema.ValidSecretName already caps it at
+	// 63 and Derive runs that check. This is the same number stated locally, so
+	// infoV1's uint32 length prefix is provably lossless without reading another
+	// module. If tileschema's bound ever rises above this, Derive starts refusing
+	// names it used to accept - which is the safe direction for a frozen
+	// derivation, and loud.
+	maxSecretNameLen = 63
 )
 
 // Seed is one installation's app-secret seed together with the derivation
@@ -199,7 +208,11 @@ const secretLenV1 = 32
 // §3.3 describes for exactly this case, and it is the construction the frozen
 // vectors pin.
 func deriveV1(seed []byte, appID, name string, version uint32) (string, error) {
-	out, err := hkdf.Expand(sha256.New, seed, string(infoV1(appID, name, version)), secretLenV1)
+	info, err := infoV1(appID, name, version)
+	if err != nil {
+		return "", err
+	}
+	out, err := hkdf.Expand(sha256.New, seed, string(info), secretLenV1)
 	if err != nil {
 		return "", fmt.Errorf("appsecret: hkdf expand: %w", err)
 	}
@@ -230,12 +243,25 @@ func deriveV1(seed []byte, appID, name string, version uint32) (string, error) {
 // the network byte order every other length on the wire in this tree uses, and
 // fixed-width because a varint's encoding is one more thing that could be
 // implemented differently by the independent generator that pins these vectors.
-func infoV1(appID, name string, version uint32) []byte {
+//
+// The two length bounds are re-checked HERE, immediately above the conversions
+// they protect, even though Derive has already refused anything longer. They are
+// what makes `uint32(len(...))` provably lossless, and a truncated length is not
+// a crash — it is a silently different `info` for the same inputs, which for a
+// frozen derivation is the worst failure mode this package has. A guard that
+// lives one function away is a guard a later refactor can move out from under.
+func infoV1(appID, name string, version uint32) ([]byte, error) {
+	if len(appID) > maxAppIDLen {
+		return nil, fmt.Errorf("appsecret: appID is %d bytes, over the %d-byte bound its uint32 length prefix can encode", len(appID), maxAppIDLen)
+	}
+	if len(name) > maxSecretNameLen {
+		return nil, fmt.Errorf("appsecret: secret name is %d bytes, over the %d-byte bound its uint32 length prefix can encode", len(name), maxSecretNameLen)
+	}
 	info := make([]byte, 0, 4+len(appID)+4+len(name)+4)
 	info = binary.BigEndian.AppendUint32(info, uint32(len(appID)))
 	info = append(info, appID...)
 	info = binary.BigEndian.AppendUint32(info, uint32(len(name)))
 	info = append(info, name...)
 	info = binary.BigEndian.AppendUint32(info, version)
-	return info
+	return info, nil
 }

@@ -96,7 +96,11 @@ func TestDerivationMatchesTheFrozenVectors(t *testing.T) {
 func TestInfoEncodingMatchesTheFrozenVectors(t *testing.T) {
 	v := loadVectors(t)
 	for _, c := range v.Cases {
-		got := hex.EncodeToString(infoV1(c.AppID, c.Name, c.Version))
+		info, err := infoV1(c.AppID, c.Name, c.Version)
+		if err != nil {
+			t.Fatalf("infoV1(%q, %q, %d): %v", c.AppID, c.Name, c.Version, err)
+		}
+		got := hex.EncodeToString(info)
 		if got != c.InfoHex {
 			t.Errorf("info encoding moved (%s)\n appID=%q name=%q version=%d\n  got %s\n want %s",
 				c.Why, c.AppID, c.Name, c.Version, got, c.InfoHex)
