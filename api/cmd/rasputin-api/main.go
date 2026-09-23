@@ -760,11 +760,16 @@ func main() {
 			log.Printf("rasputin-api: dns_forward submit (%s): %v", reason, err)
 		}
 	}
-	// Per-app TLS-leaf minter for the deploy saga (ADR-0004 §6): mints a Mesh-CA
-	// leaf for the app's FQDN(s) and fills the delivery command. nil (no CA)
-	// disables leaf delivery; the app still deploys, just without the proxy.
+	// Per-app TLS leaves (ADR-0004 §6). ONE rotator serves every path that puts
+	// a leaf on a node — the deploy saga, revert, edit, upgrade, the reconcile
+	// recovery, the renewal sweep and the exposure toggle — because they all want
+	// the same thing: the app's current leaf, minted only if the one on disk is
+	// no longer usable, persisted only once the node has accepted it. The deploy
+	// saga used to have a minter of its own that never persisted, which made the
+	// first renewal sweep after any deploy mint a second leaf and re-ship it
+	// (geekdojo/geekdojo-brain#603). nil (no CA) disables leaf delivery; the app
+	// still deploys, just without the proxy.
 	var (
-		mintAppLeaf   apps.LeafMinter
 		rotateAppLeaf apps.LeafRotator
 		removeAppLeaf apps.LeafRemover
 	)
@@ -772,8 +777,8 @@ func main() {
 		clusterID := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID"))
 		appLeafDir := filepath.Join(dataDir, "tls", "apps")
 		// buildAppLeafCmd fills the delivery command from freshly-minted PEMs —
-		// shared by the deploy minter and the rotation path so the wire shape
-		// (FQDNs, upstream port) can't drift between them.
+		// shared by every caller of the rotator so the wire shape (FQDNs,
+		// upstream port) is built in exactly one place.
 		//
 		// The cert and the route come from different places on purpose. The leaf
 		// carries BOTH of the app's names whatever its exposure (a cert is an
@@ -794,18 +799,10 @@ func main() {
 				UpstreamTLS:  app.WebTLS,
 			}
 		}
-		mintAppLeaf = func(app *apps.App) (proto.AppLeafCmd, error) {
-			certPEM, keyPEM, err := mesh.MintAppLeaf(meshCA, clusterID, app.Name)
-			if err != nil {
-				return proto.AppLeafCmd{}, err
-			}
-			return buildAppLeafCmd(app, certPEM, keyPEM), nil
-		}
-		// rotateAppLeaf is the disk-backed form used by the rotation sweep and by
-		// the exposure toggle. It always returns the app's CURRENT desired state
-		// — RotateAppLeaf delivers it either way — and renewed reports only
-		// whether the cert in it is new, which is what decides the commit
-		// (apps.LeafRotator).
+		// rotateAppLeaf is the one disk-backed leaf path. It always returns the
+		// app's CURRENT desired state — every caller delivers it either way — and
+		// renewed reports only whether the cert in it is new, which is what
+		// decides the commit (apps.LeafRotator).
 		rotateAppLeaf = func(app *apps.App) (proto.AppLeafCmd, bool, func() error, error) {
 			dir := filepath.Join(appLeafDir, app.ID)
 			certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(meshCA, dir, clusterID, app.Name)
@@ -819,20 +816,20 @@ func main() {
 			return removeAppLeafDir(appLeafDir, appID)
 		}
 	}
-	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
+	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	// app.revert (#411): re-apply an app's previous compose, named by hash. Its
 	// compose comes from the row, so unlike app.upgrade it needs nothing from
 	// the catalog.
-	runner.Register(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
+	runner.Register(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	// app.edit (#410): replace a custom app's compose with one its owner sent.
 	// The compose is held in composeStash, never in the job spec; the server
 	// is given the same stash below, and the workflow discards what it holds
 	// when the job ends.
 	composeStash := apps.NewComposeStash()
-	runner.Register(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf, composeStash))
+	runner.Register(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash))
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
-	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf))
+	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
 		PublicBaseURL: publicBaseURL,
@@ -919,7 +916,7 @@ func main() {
 	}
 	// app.upgrade (#409) registers here rather than with the other app sagas
 	// above because its new compose comes from this store and nowhere else.
-	runner.Register(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), mintAppLeaf, catalogStore.GetVersioned))
+	runner.Register(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned))
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.

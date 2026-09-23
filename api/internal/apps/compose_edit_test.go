@@ -52,9 +52,9 @@ func seedCustomApp(t *testing.T, id string) (*Store, *inventory.Store) {
 	return store, inv
 }
 
-func runRevert(t *testing.T, store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter, appID, targetCompose string) (string, error) {
+func runRevert(t *testing.T, store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, appID, targetCompose string) (string, error) {
 	t.Helper()
-	r := runWorkflow(t, RevertWorkflow(store, inv, nc, mint), nc, revertSpec(appID, targetCompose), "job-test")
+	r := runWorkflow(t, RevertWorkflow(store, inv, nc, rotate), nc, revertSpec(appID, targetCompose), "job-test")
 	return r.failedAt, r.err
 }
 

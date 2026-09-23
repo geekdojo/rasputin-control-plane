@@ -56,13 +56,7 @@ type DeleteSpec struct {
 //
 // The agent owns whether the deploy actually succeeded (container running,
 // healthchecks passing). The api just records what the agent reported.
-// LeafMinter mints an app's per-app TLS leaf and returns the delivery command
-// (cert/key + proxy route info) the deploy saga ships to the target node
-// (ADR-0004 §6). main backs it with the Mesh CA + cluster id; nil disables leaf
-// delivery (e.g. dev without a CA).
-type LeafMinter func(app *App) (proto.AppLeafCmd, error)
-
-func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.Workflow {
+func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.deploy",
 		Steps: []jobs.WorkflowStep{
@@ -78,7 +72,7 @@ func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 			// agent answers with the real failure instead of a step timing out
 			// on top of it — see proto.AppDeployWorkFor.
 			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc)},
-			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, mint)},
+			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, rotate)},
 		},
 	}
 }
@@ -88,15 +82,15 @@ func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 // URL (ADR-0004 §6/§9). Best-effort: a successful container deploy is not undone
 // by a leaf hiccup — the failure is logged, and a redeploy (or the node's
 // startup reconcile) retries. Skipped for a headless app (no published port) or
-// when leaf delivery is disabled (nil minter).
-func deployLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.DoFn {
-	return leafStep(store, inv, nc, mint, deploySpecAppID)
+// when leaf delivery is disabled (nil rotator).
+func deployLeaf(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.DoFn {
+	return leafStep(store, inv, nc, rotate, deploySpecAppID)
 }
 
 // leafStep is deployLeaf for a saga whose spec has its own shape.
-func leafStep(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter, appID specAppID) jobs.DoFn {
+func leafStep(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, appID specAppID) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		if mint == nil {
+		if rotate == nil {
 			return nil, nil
 		}
 		app, err := loadAppFor(sc, store, inv, appID)
@@ -107,7 +101,7 @@ func leafStep(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter
 			sc.Log("info", "no published port — skipping proxy leaf")
 			return nil, nil
 		}
-		ok, detail := provisionAppLeaf(sc.Ctx, nc, mint, app)
+		ok, detail := provisionAppLeaf(sc.Ctx, nc, rotate, app)
 		if !ok {
 			sc.Log("warn", detail+" (app is deployed; proxy unavailable)")
 			return nil, nil
@@ -117,20 +111,35 @@ func leafStep(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter
 	}
 }
 
-// provisionAppLeaf mints an app's TLS leaf and ships it with its proxy route.
+// provisionAppLeaf provisions an app's TLS leaf and ships it with its proxy
+// route.
 //
 // One implementation, two callers — the deploy saga's leaf step and the
 // reconcile sweep's recovery path. A second copy would differ in exactly the
 // case that matters and nobody would notice until an app was unreachable.
 //
+// It runs the SAME prepare → ship → commit contract as the renewal sweep, and
+// that is the whole point of it taking a LeafRotator rather than a minter of
+// its own. A deploy used to mint in memory and never persist, so the app's leaf
+// directory stayed empty and the first renewal sweep to look at the app saw a
+// leaf-less app, minted a second one and re-shipped it — every deployed app was
+// re-leafed exactly once, for nothing (geekdojo/geekdojo-brain#603). Sharing
+// the rotator closes that by construction: a deploy that the node accepts
+// leaves the same on-disk leaf the sweep would have left.
+//
+// Commit only after the node accepts, and only for a fresh leaf. That ordering
+// is load-bearing for the same reason it is in RotateAppLeaf: the on-disk copy
+// must never advance past what the node actually holds, or a node that failed
+// to take the leaf is never retried.
+//
 // Returns whether the node is now serving the app, plus a line to log. Callers
 // treat failure as non-fatal: an app that is up but unrouted is worth another
 // attempt on the next sweep, not a rollback of a working container.
-func provisionAppLeaf(ctx context.Context, nc *nats.Conn, mint LeafMinter, app *App) (ok bool, detail string) {
-	if mint == nil || app.PublishedPort == 0 {
+func provisionAppLeaf(ctx context.Context, nc *nats.Conn, rotate LeafRotator, app *App) (ok bool, detail string) {
+	if rotate == nil || app.PublishedPort == 0 {
 		return false, "no published port or leaf delivery disabled — nothing to route"
 	}
-	cmd, err := mint(app)
+	cmd, renewed, commit, err := rotate(app)
 	if err != nil {
 		return false, "mint leaf failed: " + err.Error()
 	}
@@ -142,6 +151,14 @@ func provisionAppLeaf(ctx context.Context, nc *nats.Conn, mint LeafMinter, app *
 	}
 	if !accepted {
 		return false, "node rejected leaf: " + rejectDetail
+	}
+	if renewed && commit != nil {
+		if err := commit(); err != nil {
+			// Delivered but not persisted. Harmless — the renewal sweep will
+			// re-mint and re-ship an equivalent leaf — but it is the state this
+			// function exists to avoid, so it is said out loud.
+			return true, "delivered TLS leaf + proxy route (persist failed: " + err.Error() + ")"
+		}
 	}
 	return true, "delivered TLS leaf + proxy route"
 }
@@ -276,12 +293,12 @@ func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLea
 // The saga never fails as a whole — individual app failures are logged
 // and counted but don't abort the sweep. This is "honest drift
 // reporting", not "apply intent".
-func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.Workflow {
+func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "apps.reconcile",
 		Steps: []jobs.WorkflowStep{
 			{Name: "list", Timeout: 2 * time.Second, Do: reconcileList(store)},
-			{Name: "sweep", Timeout: 90 * time.Second, Do: reconcileSweep(store, inv, nc, mint)},
+			{Name: "sweep", Timeout: 90 * time.Second, Do: reconcileSweep(store, inv, nc, rotate)},
 		},
 	}
 }
@@ -555,7 +572,7 @@ func anyOutdated(services []proto.AppServiceStatus) bool {
 	return false
 }
 
-func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.DoFn {
+func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		all, err := store.List(sc.Ctx)
 		if err != nil {
@@ -633,7 +650,7 @@ func reconcileSweep(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 			// is running must not be rolled back over a proxy hiccup, and the
 			// next sweep tries again.
 			if wasFailed && ack.Status == proto.AppStatusRunning {
-				ok, leafDetail := provisionAppLeaf(sc.Ctx, nc, mint, app)
+				ok, leafDetail := provisionAppLeaf(sc.Ctx, nc, rotate, app)
 				if ok {
 					recovered++
 					sc.Log("info", fmt.Sprintf("%s recovered after a timed-out deploy: %s", app.Name, leafDetail))

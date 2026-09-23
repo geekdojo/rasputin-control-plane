@@ -84,9 +84,9 @@ func TestReconcileSweep_RecoveredAppGetsItsLeaf(t *testing.T) {
 	delivered := countingLeafNode(t, nc, "n", true)
 
 	var minted int32
-	mint := func(app *App) (proto.AppLeafCmd, error) {
+	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
 		atomic.AddInt32(&minted, 1)
-		return proto.AppLeafCmd{AppID: app.ID, Name: app.Name}, nil
+		return proto.AppLeafCmd{AppID: app.ID, Name: app.Name}, false, nil, nil
 	}
 
 	out, err := reconcileSweep(store, inv, nc, mint)(newStepCtxNATS(`{}`, nc))
@@ -120,9 +120,9 @@ func TestReconcileSweep_OrdinaryDriftDoesNotMintALeaf(t *testing.T) {
 	delivered := countingLeafNode(t, nc, "n", true)
 
 	var minted int32
-	mint := func(app *App) (proto.AppLeafCmd, error) {
+	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
 		atomic.AddInt32(&minted, 1)
-		return proto.AppLeafCmd{AppID: app.ID}, nil
+		return proto.AppLeafCmd{AppID: app.ID}, false, nil, nil
 	}
 	if _, err := reconcileSweep(store, inv, nc, mint)(newStepCtxNATS(`{}`, nc)); err != nil {
 		t.Fatalf("reconcileSweep: %v", err)
@@ -143,8 +143,8 @@ func TestReconcileSweep_LeafRefusalDoesNotUndoTheRecovery(t *testing.T) {
 	agentReports(t, nc, "n", "a", proto.AppStatusRunning)
 	countingLeafNode(t, nc, "n", false) // node rejects it
 
-	mint := func(app *App) (proto.AppLeafCmd, error) {
-		return proto.AppLeafCmd{AppID: app.ID}, nil
+	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
+		return proto.AppLeafCmd{AppID: app.ID}, false, nil, nil
 	}
 	out, err := reconcileSweep(store, inv, nc, mint)(newStepCtxNATS(`{}`, nc))
 	if err != nil {

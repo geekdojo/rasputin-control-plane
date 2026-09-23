@@ -40,11 +40,6 @@ func TestLeafMintsWaitForATrustworthyClock(t *testing.T) {
 				t.Fatalf("MintLeafToDisk: %v", err)
 			}
 		}},
-		{"MintAppLeaf", func(t *testing.T, ca *MeshCA) {
-			if _, _, err := MintAppLeaf(ca, "c1", "jellyfin"); err != nil {
-				t.Fatalf("MintAppLeaf: %v", err)
-			}
-		}},
 		{"PrepareAppLeaf", func(t *testing.T, ca *MeshCA) {
 			_, _, renewed, err := PrepareAppLeaf(ca, t.TempDir(), "c1", "jellyfin")
 			if err != nil {

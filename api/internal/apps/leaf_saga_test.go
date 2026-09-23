@@ -56,12 +56,12 @@ func TestDeployLeaf_MintsAndDelivers(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	// Stub minter returns a known delivery command; the step must publish it.
-	mint := func(app *App) (proto.AppLeafCmd, error) {
+	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
 		return proto.AppLeafCmd{
 			AppID: app.ID, Name: app.Name, CertPEM: []byte("C"), KeyPEM: []byte("K"),
 			TailnetFQDN: "jellyfin.home1.internal", LANFQDN: "jellyfin.lan.home1.internal",
 			UpstreamPort: app.PublishedPort,
-		}, nil
+		}, false, nil, nil
 	}
 
 	if _, err := deployLeaf(store, inv, nc, mint)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
@@ -79,9 +79,9 @@ func TestDeployLeaf_MintsAndDelivers(t *testing.T) {
 
 func TestDeployLeaf_SkipsWhenNoPortOrNilMinter(t *testing.T) {
 	nc := startNATS(t)
-	mint := func(app *App) (proto.AppLeafCmd, error) {
-		t.Fatal("minter should not be called")
-		return proto.AppLeafCmd{}, nil
+	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
+		t.Fatal("rotator should not be called")
+		return proto.AppLeafCmd{}, false, nil, nil
 	}
 
 	// Headless app (port 0): minter not called, no delivery.
