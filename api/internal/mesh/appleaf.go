@@ -62,16 +62,16 @@ func AppRouteHosts(clusterID, appName string, exposeLAN bool) (tailnet, lan stri
 	return tailnet, lan
 }
 
-// MintAppLeaf mints a Mesh-CA server leaf for an app, valid for BOTH of its
-// FQDNs regardless of exposure. This is the per-app leaf of ADR-0004 §6 — the
-// node-local Caddy terminates TLS with it. Pure: no disk I/O; the caller (the
-// deploy saga) ships the returned PEMs to the target node over the bus
-// (slice 3). 127.0.0.1 is included so a same-host health probe can hit the
-// proxy over loopback.
-func MintAppLeaf(ca *MeshCA, clusterID, appName string) (certPEM, keyPEM []byte, err error) {
-	return MintLeaf(ca, appLeafSpec(clusterID, appName))
-}
-
+// appLeafSpec is the per-app leaf of ADR-0004 §6 — a Mesh-CA server leaf valid
+// for BOTH of the app's FQDNs regardless of exposure, which the node-local
+// Caddy terminates TLS with. 127.0.0.1 is included so a same-host health probe
+// can hit the proxy over loopback.
+//
+// There is no pure mint-an-app-leaf entry point any more, deliberately. One
+// existed for the deploy saga, minted in memory and persisted nothing, so the
+// first renewal sweep after a deploy found an empty leaf directory and minted a
+// second leaf for an app that already had one (geekdojo/geekdojo-brain#603).
+// PrepareAppLeaf is now the only way in, and it is disk-backed by construction.
 func appLeafSpec(clusterID, appName string) LeafSpec {
 	names := AppLeafDNSNames(clusterID, appName)
 	return LeafSpec{
@@ -90,7 +90,8 @@ func appLeafSpec(clusterID, appName string) LeafSpec {
 
 func appLeafPaths(dir string) LeafPaths { return LeafPathsIn(dir) }
 
-// PrepareAppLeaf is the rotation-aware form of MintAppLeaf (ADR-0004 §6). It
+// PrepareAppLeaf is the ONE way an app's leaf comes into being (ADR-0004 §6).
+// It
 // returns the app's current on-disk leaf when that leaf is still usable — more
 // than renewWindow of life left, and a SAN set that still matches the app's
 // identity — with renewed=false. When there is no usable leaf on disk (first

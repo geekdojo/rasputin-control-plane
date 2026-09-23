@@ -342,9 +342,9 @@ func TestRevertSaga_AfterAFailedUpReappliesThePreviousComposeAndItsRoute(t *test
 	deploys := fakeDeployAgent(t, nc2, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	delivered := countingLeafNode(t, nc2, "n", true)
 	routed := make(chan [2]any, 1)
-	mint := func(app *App) (proto.AppLeafCmd, error) {
+	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
 		routed <- [2]any{app.PublishedPort, app.WebTLS}
-		return proto.AppLeafCmd{AppID: app.ID, UpstreamPort: app.PublishedPort, UpstreamTLS: app.WebTLS}, nil
+		return proto.AppLeafCmd{AppID: app.ID, UpstreamPort: app.PublishedPort, UpstreamTLS: app.WebTLS}, false, nil, nil
 	}
 	if step, err := runRevert(t, store, inv, nc2, mint, testAppID, composeV1); err != nil {
 		t.Fatalf("re-apply failed at %s: %v", step, err)
@@ -471,9 +471,9 @@ func TestReconcileSweep_AnOutdatedSurvivorDoesNotRecoverAFailedApp(t *testing.T)
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	delivered := countingLeafNode(t, nc, "n", true)
 	var minted int32
-	mint := func(app *App) (proto.AppLeafCmd, error) {
+	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
 		atomic.AddInt32(&minted, 1)
-		return proto.AppLeafCmd{AppID: app.ID}, nil
+		return proto.AppLeafCmd{AppID: app.ID}, false, nil, nil
 	}
 
 	out, err := reconcileSweep(store, inv, nc, mint)(newStepCtxNATS(`{}`, nc))

@@ -163,7 +163,7 @@ func revertSpecAppID(raw json.RawMessage) (string, error) {
 //
 // Like the other compose sagas, a failure after the pull is not reverted
 // automatically.
-func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint LeafMinter) jobs.Workflow {
+func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.revert",
 		Steps: []jobs.WorkflowStep{
@@ -173,7 +173,7 @@ func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, mint Leaf
 			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "re-apply of the previous compose", revertSpecAppID, revertSpecDeleteVolumes, revertPullSource)},
 			{Name: "apply", Timeout: 2 * time.Second, Do: revertApply(store, inv, nc)},
 			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, revertSpecAppID)},
-			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, mint, revertSpecAppID)},
+			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, revertSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, revertSpecAppID)},
 		},
 	}

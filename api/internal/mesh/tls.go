@@ -84,7 +84,7 @@ type ClockGate func() bool
 type CAOption func(*MeshCA)
 
 // WithLeafClockGate makes every leaf minted under this CA wait for a
-// trustworthy clock first (MintLeaf, and so MintLeafToDisk, MintAppLeaf and
+// trustworthy clock first (MintLeaf, and so MintLeafToDisk and
 // PrepareAppLeaf with it).
 //
 // Scope, deliberately: this gates LEAF mints. Creating the CA itself is NOT

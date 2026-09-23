@@ -49,13 +49,13 @@ func TestAppRouteHosts(t *testing.T) {
 // The SAN set does not move with exposure. A certificate asserts identity, not
 // permission — what a node will answer for is a route on a bound listener — so
 // both names are always present and an exposure toggle costs no re-mint.
-func TestMintAppLeaf_SANsAreExposureIndependent(t *testing.T) {
+func TestPrepareAppLeaf_SANsAreExposureIndependent(t *testing.T) {
 	ca := newCAForTest(t)
 	wantSANs := []string{"jellyfin.home1.internal", "jellyfin.lan.home1.internal"}
 
-	certPEM, keyPEM, err := MintAppLeaf(ca, "home1", "jellyfin")
+	certPEM, keyPEM, _, err := PrepareAppLeaf(ca, t.TempDir(), "home1", "jellyfin")
 	if err != nil {
-		t.Fatalf("MintAppLeaf: %v", err)
+		t.Fatalf("PrepareAppLeaf: %v", err)
 	}
 	if len(keyPEM) == 0 {
 		t.Error("empty key PEM")
