@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -29,6 +30,8 @@ import (
 //	                            bus-token store, app declarations, mesh intents
 //	<trustDir>/mesh-ca.{key,pem} the per-installation CA — without it every
 //	                            operator device's installed trust is orphaned
+//	<trustDir>/app-secret.seed   the app-secret seed — every generated app
+//	                            credential derives from it and nothing else can
 //	<dataDir>/mesh/headscale/    tailnet identity; nodes stay enrolled
 //
 // Every one of those is a local file on the controlplane, sealed HERE by the
@@ -414,6 +417,11 @@ func trustFiles(src IdentitySources) []trustFile {
 				arc:  "trust/mesh-ca.pem",
 				note: "the per-installation mesh CA certificate",
 			},
+			trustFile{
+				abs:  filepath.Join(src.TrustDir, appsecret.SeedFileName),
+				arc:  appSecretSeedArchivePath,
+				note: appSecretSeedNote,
+			},
 		)
 	}
 	if strings.TrimSpace(src.BusDir) != "" {
@@ -433,6 +441,26 @@ func trustFiles(src IdentitySources) []trustFile {
 	}
 	return out
 }
+
+// appSecretSeedArchivePath is where the app-secret seed sits in an identity
+// archive (ADR-0006 Decision 11a, geekdojo/geekdojo-brain#520).
+//
+// It is in this archive because there is NO other copy of it, anywhere, and no
+// way to recompute one. Every ${secret:<name>} an installed app holds — its
+// database password, its session-signing key — is a pure function of this seed,
+// and the app's own data volume keeps the value it was given. A restore without
+// the seed therefore comes up with apps whose credentials cannot be re-derived:
+// not degraded, not recoverable by redeploying, gone. That is why it ships out
+// AND comes back in the same change — see the case in restore_apply.go, which is
+// a hand-written switch on path and silently restores nothing for an entry no
+// case names.
+//
+// One file, not two, and the derivation version rides inside it (appsecret's
+// seed.go says why): a version that could be separated from its seed is a way to
+// restore half a key.
+const appSecretSeedArchivePath = "trust/" + appsecret.SeedFileName
+
+const appSecretSeedNote = "the per-installation app-secret seed — every generated app credential on the cluster is derived from it, the apps' own data volumes still hold the values, and nothing can re-derive them without this file"
 
 // busKeyArchivePath is where the bus key sits in an identity archive, and so
 // where a restore puts it back relative to /var/lib/rasputin.

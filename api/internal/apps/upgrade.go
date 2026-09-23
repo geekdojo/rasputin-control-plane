@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -157,7 +158,7 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 // installed hash now matches the tile. Nothing is reverted automatically: new
 // containers may have started and migrated the data. Retrying is an ordinary
 // deploy; going back is the owner's explicit re-apply (RevertWorkflow).
-func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup) jobs.Workflow {
+func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup, secrets *appsecret.Seed) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.upgrade",
 		Steps: []jobs.WorkflowStep{
@@ -169,7 +170,7 @@ func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate L
 			// Same backstop as DeployWorkflow's push, for the same reason: the
 			// real deadline is the app's own budget, applied inside the push,
 			// and here that is the budget persist just re-copied from the tile.
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID, secrets)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, composeChangeSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
 		},

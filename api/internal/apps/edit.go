@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -116,7 +117,7 @@ var errEditComposeNotHeld = errors.New("compose edit not applied: the submitted 
 // The compose is not validated, as it is not at custom create (ADR-0006 D12).
 // It never appears in the job's spec, a step result or a log line: the steps
 // record its hash, and stash holds the text until OnTerminal discards it.
-func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, stash *ComposeStash) jobs.Workflow {
+func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, stash *ComposeStash, secrets *appsecret.Seed) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.edit",
 		Steps: []jobs.WorkflowStep{
@@ -125,7 +126,7 @@ func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate Leaf
 			// own budget, applied inside each step.
 			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "compose edit", composeChangeSpecAppID, composeChangeSpecDeleteVolumes, editPullSource(stash))},
 			{Name: "persist", Timeout: 2 * time.Second, Do: editPersist(store, inv, nc, stash)},
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID, secrets)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, composeChangeSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
 		},

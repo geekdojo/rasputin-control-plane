@@ -41,10 +41,10 @@ func upgradeFixture(t *testing.T) (*apiFixture, *http.Cookie, *catalogsync.Store
 		t.Fatalf("catalog store: %v", err)
 	}
 	f.srv.SetCatalogSync(cat, nil)
-	f.runner.Register(apps.UpgradeWorkflow(f.appsStore, f.inv, f.nc, nil, cat.GetVersioned))
-	f.runner.Register(apps.RevertWorkflow(f.appsStore, f.inv, f.nc, nil))
+	f.runner.Register(apps.UpgradeWorkflow(f.appsStore, f.inv, f.nc, nil, cat.GetVersioned, nil))
+	f.runner.Register(apps.RevertWorkflow(f.appsStore, f.inv, f.nc, nil, nil))
 	stash := apps.NewComposeStash()
-	f.runner.Register(apps.EditWorkflow(f.appsStore, f.inv, f.nc, nil, stash))
+	f.runner.Register(apps.EditWorkflow(f.appsStore, f.inv, f.nc, nil, stash, nil))
 	f.srv.SetComposeStash(stash)
 
 	// The volumes check every compose change's pull step makes first (#412);

@@ -107,7 +107,7 @@ func gateVariants() []gateVariant {
 			store, inv := seedUpgradeApp(t, gateAppID)
 			return store, inv, func(dv []string) workflowRun {
 				spec, _ := json.Marshal(ComposeChangeSpec{AppID: gateAppID, DeleteVolumes: dv})
-				return runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(composeV2), 2)), nc, string(spec), "job-up")
+				return runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(composeV2), 2), nil), nc, string(spec), "job-up")
 			}
 		}},
 		{"edit", func(t *testing.T, nc *nats.Conn) (*Store, *inventory.Store, func([]string) workflowRun) {
@@ -118,7 +118,7 @@ func gateVariants() []gateVariant {
 			}
 			return store, inv, func(dv []string) workflowRun {
 				spec, _ := json.Marshal(ComposeChangeSpec{AppID: gateAppID, DeleteVolumes: dv})
-				return runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash), nc, string(spec), "job-edit")
+				return runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash, nil), nc, string(spec), "job-edit")
 			}
 		}},
 		{"revert", func(t *testing.T, nc *nats.Conn) (*Store, *inventory.Store, func([]string) workflowRun) {
@@ -128,7 +128,7 @@ func gateVariants() []gateVariant {
 			}
 			return store, inv, func(dv []string) workflowRun {
 				spec, _ := json.Marshal(RevertSpec{AppID: gateAppID, ComposeSHA256: ComposeHash(composeV1), DeleteVolumes: dv})
-				return runWorkflow(t, RevertWorkflow(store, inv, nc, nil), nc, string(spec), "job-revert")
+				return runWorkflow(t, RevertWorkflow(store, inv, nc, nil, nil), nc, string(spec), "job-revert")
 			}
 		}},
 	}
@@ -376,7 +376,7 @@ func TestComposeSagas_AnUnansweredCheckChangesNothing(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedUpgradeApp(t, gateAppID)
 	pulls := fakePullOnly(t, nc, proto.AppPullAck{OK: true}, nil)
-	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(composeV2), 2)), nc, `{"appId":"`+gateAppID+`"}`, "j")
+	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(composeV2), 2), nil), nc, `{"appId":"`+gateAppID+`"}`, "j")
 	if r.failedAt != "pull" || !strings.Contains(r.err.Error(), "docker.volumes.check") {
 		t.Fatalf("want a refusal naming docker.volumes.check, got step=%q err=%v", r.failedAt, r.err)
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -162,8 +163,15 @@ func pullStep(store *Store, inv *inventory.Store, nc *nats.Conn, change string, 
 // succeed, in words for the owner.
 func pullOnNode(ctx context.Context, inv *inventory.Store, nc *nats.Conn, app *App, target pullTarget) string {
 	payload, err := json.Marshal(proto.AppPullCmd{
-		AppID:             app.ID,
-		ComposeYAML:       target.ComposeYAML,
+		AppID: app.ID,
+		// ESCAPED, never resolved (#520). This command pulls images and has no
+		// use for a credential, so the derived value is not sent: the fewer
+		// paths a secret travels, the smaller the blast radius of a compromised
+		// node or a captured bus message, and "it was convenient to send the
+		// same string" is not a reason to widen it. Escaped rather than left
+		// alone because the agent hands this compose to Docker Compose, whose
+		// interpolator hard-fails on the raw token.
+		ComposeYAML:       appsecret.Escape(target.ComposeYAML),
 		WorkBudgetSeconds: target.DeployBudgetSeconds,
 	})
 	if err != nil {

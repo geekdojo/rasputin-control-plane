@@ -89,9 +89,17 @@ var (
 // to open it. A tile carrying this capability is refused instead, out loud, by
 // any reader that cannot read its web port. Silent degradation is the failure
 // mode Requires exists to prevent; this is the first rename to need it.
+//
+// tile.secrets is the third (Decision 11a, #520). ADR-0006's own text calls it
+// the first entry — that was written while this map was still empty and is
+// stale; the two above landed first. What is NOT stale is why it is here: a
+// reader that cannot resolve ${secret:<name>} cannot tell that it failed to,
+// because the token is an ordinary string. It would deploy the literal as a
+// password. See CapabilityTileSecrets.
 var KnownCapabilities = map[string]bool{
 	CapabilityPrivilegeTiers: true,
 	CapabilityWebPort:        true,
+	CapabilityTileSecrets:    true,
 }
 
 // Port is a structured published port. The reverse proxy must route

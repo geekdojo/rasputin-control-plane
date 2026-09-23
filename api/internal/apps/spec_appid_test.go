@@ -122,23 +122,27 @@ func TestAppSagas_InvalidAppIDFailsAtFirstStep(t *testing.T) {
 		spec  func(t *testing.T, id string) string
 	}{
 		{"app.deploy", installedApp,
-			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow { return DeployWorkflow(s, i, nc, nil) },
+			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
+				return DeployWorkflow(s, i, nc, nil, nil)
+			},
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, DeploySpec{AppID: id})) }},
 		{"app.stop", installedApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow { return StopWorkflow(s, i, nc) },
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, DeploySpec{AppID: id})) }},
 		{"app.upgrade", installedApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
-				return UpgradeWorkflow(s, i, nc, nil, lookup)
+				return UpgradeWorkflow(s, i, nc, nil, lookup, nil)
 			},
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, ComposeChangeSpec{AppID: id})) }},
 		{"app.edit", customApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
-				return EditWorkflow(s, i, nc, nil, NewComposeStash())
+				return EditWorkflow(s, i, nc, nil, NewComposeStash(), nil)
 			},
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, ComposeChangeSpec{AppID: id})) }},
 		{"app.revert", installedApp,
-			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow { return RevertWorkflow(s, i, nc, nil) },
+			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
+				return RevertWorkflow(s, i, nc, nil, nil)
+			},
 			func(t *testing.T, id string) string {
 				return string(mustSpecJSON(t, RevertSpec{AppID: id, ComposeSHA256: ComposeHash(composeV2)}))
 			}},
