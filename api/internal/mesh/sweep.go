@@ -106,6 +106,26 @@ func (s *LeafSweeper) Register(c LeafConsumer) error {
 	return nil
 }
 
+// RegisteredNames returns the names of the fixed consumers registered so far,
+// sorted. It exists so startup can CHECK its own wiring: every Register call
+// sits inline in main(), where deleting one is invisible — the build passes,
+// the tests pass, and that leaf simply stops being renewed until it expires.
+// A name the caller expected and does not find here is that mistake, caught at
+// boot instead of at NotAfter.
+//
+// Sources are deliberately not included: their membership follows inventory
+// and is empty on a cluster with no collectors, so absence proves nothing.
+func (s *LeafSweeper) RegisteredNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.fixed))
+	for _, c := range s.fixed {
+		names = append(names, c.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // RegisterSource adds a source of consumers re-read on every sweep.
 func (s *LeafSweeper) RegisterSource(fn LeafSource) {
 	if fn == nil {

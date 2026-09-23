@@ -523,7 +523,9 @@ func main() {
 	// its renewal needs a restart to reach a client. Registered only for the
 	// self-hosted Docker backend: the mock has no container, and an external
 	// Headscale brings its own certificate.
+	selfHostedMesh := false
 	if sup, ok := mw.sup.(*mesh.DockerSupervisor); ok && sup != nil {
+		selfHostedMesh = true
 		if err := leafSweeper.Register(sup.LeafConsumer()); err != nil {
 			log.Fatalf("rasputin-api: leaf sweep: %v", err)
 		}
@@ -1845,6 +1847,14 @@ func main() {
 		}()
 	}
 
+	// Every Mesh-CA leaf this configuration holds is now either registered with
+	// the one renewal driver or it is not, and there is no third state — so say
+	// which, here, while the answer is still cheap. See requiredLeafConsumers.
+	if err := verifyLeafConsumers(leafSweeper.RegisteredNames(),
+		requiredLeafConsumers(httpsAddr != "", selfHostedMesh)); err != nil {
+		log.Fatalf("rasputin-api: %v", err)
+	}
+
 	// The node listener. Built and started HERE — outside the httpsAddr block
 	// and outside the clock gate — because a node reaches the api on it before
 	// the api has a mesh leaf, and on a no-RTC node, before the clock is
@@ -2070,6 +2080,66 @@ func apiLeafSpec(hostname string, lanIP net.IP) mesh.LeafSpec {
 // only re-check what those already cover (#431). firewall.reconcile keeps its
 // own entry and cadence; it compares observed state and never rewrites the
 // forward.
+// requiredLeafConsumers names the Mesh-CA leaves this configuration holds and
+// is therefore obliged to renew. ONE place that says it, because the Register
+// calls themselves are scattered through main() next to whatever dependency
+// each one needs, and a reader there cannot tell whether the set is complete.
+//
+// Both leaves are conditional on real facts, not on preference:
+//
+//   - api-https exists only when RASPUTIN_HTTPS_ADDR is set. A dev run without
+//     it serves plain HTTP and mints no leaf.
+//   - headscale exists only for the self-hosted Docker backend. The mock has no
+//     container, and an external Headscale brings its own certificate — neither
+//     is ours to renew.
+//
+// The per-node collector leaves are deliberately absent: they arrive through a
+// LeafSource whose membership follows inventory, so it is legitimately empty on
+// a cluster that has never deployed a collector, and "missing" cannot be told
+// from "none yet".
+func requiredLeafConsumers(httpsEnabled, selfHostedMesh bool) []string {
+	var want []string
+	if httpsEnabled {
+		want = append(want, "api-https")
+	}
+	if selfHostedMesh {
+		want = append(want, mesh.HeadscaleLeafName)
+	}
+	return want
+}
+
+// verifyLeafConsumers reports any leaf this configuration holds that nothing
+// will renew.
+//
+// This exists because every leafSweeper.Register call lives inline in main(),
+// where deleting one is invisible: it compiles, the whole suite still passes,
+// and that certificate simply stops being renewed until it expires months
+// later — which is the exact failure the single renewal driver was built to
+// prevent. A check on a FACT (what is registered) turns that into a refusal to
+// start, naming the leaf.
+//
+// Extra registrations are not an error. A consumer that registers itself
+// without being listed here is renewed correctly; it is only the missing ones
+// that lapse.
+func verifyLeafConsumers(registered, required []string) error {
+	have := make(map[string]bool, len(registered))
+	for _, n := range registered {
+		have[n] = true
+	}
+	var missing []string
+	for _, n := range required {
+		if !have[n] {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("leaf sweep: nothing will renew %s — this configuration holds "+
+		"those leaves and they would expire in service (registered: %s)",
+		strings.Join(missing, ", "), strings.Join(registered, ", "))
+}
+
 func reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafSweepEvery time.Duration) []scheduler.Entry {
 	return []scheduler.Entry{
 		{Kind: "firewall.reconcile", Interval: fwReconcileEvery, InitialDelay: 30 * time.Second},
