@@ -772,8 +772,13 @@ func (s *DockerSupervisor) prepareHostDirs() error {
 	return nil
 }
 
-// headscaleLeafName is the leaf sweep's name for Headscale's TLS leaf.
-const headscaleLeafName = "headscale"
+// HeadscaleLeafName is the leaf sweep's name for Headscale's TLS leaf.
+// Exported so the api can state, in one place, which leaves a given
+// configuration is obliged to renew.
+const HeadscaleLeafName = "headscale"
+
+// headscaleLeafName is retained as the package-internal spelling.
+const headscaleLeafName = HeadscaleLeafName
 
 // LeafConsumer registers Headscale's TLS leaf with the controlplane's one leaf
 // sweep (sweep.go). Headscale reads its certificate once, when the container
