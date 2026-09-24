@@ -306,7 +306,7 @@ func TestResolveUpgrade(t *testing.T) {
 }
 
 func TestUpgradeWorkflowShape(t *testing.T) {
-	w := UpgradeWorkflow(nil, nil, nil, nil, nil)
+	w := UpgradeWorkflow(nil, nil, nil, nil, nil, nil)
 	if w.Kind != "app.upgrade" {
 		t.Errorf("Kind = %q", w.Kind)
 	}
@@ -436,7 +436,7 @@ func runWorkflow(t *testing.T, w jobs.Workflow, nc *nats.Conn, spec, jobID strin
 // failure. It returns the name of the step that failed, or "".
 func runUpgrade(t *testing.T, store *Store, inv *inventory.Store, nc *nats.Conn, lookup TileLookup, appID string) (string, error) {
 	t.Helper()
-	return runSteps(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, appID)
+	return runSteps(t, UpgradeWorkflow(store, inv, nc, nil, lookup, nil), nc, appID)
 }
 
 // The done-means of #409, on the wire: the agent is sent the tile's new compose
@@ -551,7 +551,7 @@ func TestUpgradeSaga_SubmittedDirectlyForACurrentAppChangesNothing(t *testing.T)
 	receiveWithin(t, checks, "no volumes check reached the agent")
 	before, _ := store.Get(ctx, testAppID)
 
-	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"`+testAppID+`"}`, "job-direct")
+	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup, nil), nc, `{"appId":"`+testAppID+`"}`, "job-direct")
 	if !errors.Is(r.err, jobs.ErrStopWorkflow) || r.failedAt != "load" {
 		t.Fatalf("want the job to end successfully at load, got step=%q err=%v", r.failedAt, r.err)
 	}
@@ -592,7 +592,7 @@ func TestUpgradeSaga_AnUpgradeThatLostTheRaceDuringThePullEndsWithoutPushing(t *
 	})
 	got := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 
-	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup), nc, `{"appId":"`+testAppID+`"}`, "job-loser")
+	r := runWorkflow(t, UpgradeWorkflow(store, inv, nc, nil, lookup, nil), nc, `{"appId":"`+testAppID+`"}`, "job-loser")
 	if !errors.Is(r.err, jobs.ErrStopWorkflow) || r.failedAt != "persist" {
 		t.Fatalf("want the job to end successfully at persist, got step=%q err=%v", r.failedAt, r.err)
 	}

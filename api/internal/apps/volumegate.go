@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -215,7 +216,15 @@ func DroppedByDeclared(appID string, onNode []proto.AppVolumeInfo, declared []st
 // says which), or Compose could not read the compose — never that nothing is
 // dropped.
 func DroppedVolumesOnNode(ctx context.Context, inv *inventory.Store, nc *nats.Conn, app *App, compose string) ([]proto.AppDroppedVolume, error) {
-	payload, err := json.Marshal(proto.AppVolumesCheckCmd{AppID: app.ID, ComposeYAML: compose})
+	// ESCAPED, never resolved (#520). This command exists so the node's own
+	// Docker Compose reads the compose and lists its volumes, so an unescaped
+	// ${secret:} token does not merely reach a node with no need for it — it
+	// makes Compose refuse the file with "invalid interpolation format", and
+	// this check answers "the node could not read the compose", which refuses
+	// every compose change to a tile that uses a secret. Escaping it makes
+	// Compose emit the token literally, and a volume name is not a place a
+	// secret ever appears.
+	payload, err := json.Marshal(proto.AppVolumesCheckCmd{AppID: app.ID, ComposeYAML: appsecret.Escape(compose)})
 	if err != nil {
 		return nil, fmt.Errorf("encode volumes check: %w", err)
 	}

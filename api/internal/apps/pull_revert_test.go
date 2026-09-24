@@ -309,7 +309,7 @@ func TestStore_RevertComposeRefusals(t *testing.T) {
 }
 
 func TestRevertWorkflowShape(t *testing.T) {
-	w := RevertWorkflow(nil, nil, nil, nil)
+	w := RevertWorkflow(nil, nil, nil, nil, nil)
 	var names []string
 	for _, s := range w.Steps {
 		names = append(names, s.Name)

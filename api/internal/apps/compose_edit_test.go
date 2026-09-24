@@ -54,7 +54,7 @@ func seedCustomApp(t *testing.T, id string) (*Store, *inventory.Store) {
 
 func runRevert(t *testing.T, store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, appID, targetCompose string) (string, error) {
 	t.Helper()
-	r := runWorkflow(t, RevertWorkflow(store, inv, nc, rotate), nc, revertSpec(appID, targetCompose), "job-test")
+	r := runWorkflow(t, RevertWorkflow(store, inv, nc, rotate, nil), nc, revertSpec(appID, targetCompose), "job-test")
 	return r.failedAt, r.err
 }
 
@@ -104,7 +104,7 @@ func TestComposeStash(t *testing.T) {
 }
 
 func TestEditWorkflowShape(t *testing.T) {
-	w := EditWorkflow(nil, nil, nil, nil, nil)
+	w := EditWorkflow(nil, nil, nil, nil, nil, nil)
 	var names []string
 	for _, s := range w.Steps {
 		names = append(names, s.Name)
@@ -137,7 +137,7 @@ func TestEditSaga_DeploysTheSubmittedComposeToTheSameULIDWithoutRecordingIt(t *t
 		t.Fatal(err)
 	}
 
-	run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash), nc, `{"appId":"`+id+`"}`, jobID)
+	run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash, nil), nc, `{"appId":"`+id+`"}`, jobID)
 	if run.err != nil {
 		t.Fatalf("step %s: %v", run.failedAt, run.err)
 	}
@@ -196,7 +196,7 @@ func TestEditSaga_AFailedPullChangesNothing(t *testing.T) {
 	stash := NewComposeStash()
 	_ = stash.Put("j", customV2)
 
-	run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash), nc, `{"appId":"`+testAppID+`"}`, "j")
+	run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash, nil), nc, `{"appId":"`+testAppID+`"}`, "j")
 	if run.failedAt != "pull" || !strings.Contains(run.err.Error(), "manifest unknown") {
 		t.Fatalf("want the pull to fail with the agent's reason, got step=%q err=%v", run.failedAt, run.err)
 	}
@@ -228,7 +228,7 @@ func TestEditSaga_Refusals(t *testing.T) {
 		store, inv := seedCustomApp(t, testAppID)
 		before, _ := store.Get(ctx, testAppID)
 		pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
-		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, NewComposeStash()), nc, `{"appId":"`+testAppID+`"}`, "j")
+		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, NewComposeStash(), nil), nc, `{"appId":"`+testAppID+`"}`, "j")
 		if run.failedAt != "pull" || !errors.Is(run.err, errEditComposeNotHeld) {
 			t.Fatalf("got step=%q err=%v", run.failedAt, run.err)
 		}
@@ -247,7 +247,7 @@ func TestEditSaga_Refusals(t *testing.T) {
 		store, inv := seedUpgradeApp(t, testAppID)
 		stash := NewComposeStash()
 		_ = stash.Put("j", customV2)
-		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash), nc, `{"appId":"`+testAppID+`"}`, "j")
+		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, stash, nil), nc, `{"appId":"`+testAppID+`"}`, "j")
 		if run.failedAt != "load" || !errors.Is(run.err, ErrEditCatalogApp) {
 			t.Fatalf("got step=%q err=%v", run.failedAt, run.err)
 		}
@@ -255,7 +255,7 @@ func TestEditSaga_Refusals(t *testing.T) {
 	t.Run("spec carrying a compose", func(t *testing.T) {
 		nc := startNATS(t)
 		store, inv := seedCustomApp(t, testAppID)
-		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, NewComposeStash()), nc, `{"appId":"`+testAppID+`","composeYaml":"x"}`, "j")
+		run := runWorkflow(t, EditWorkflow(store, inv, nc, nil, NewComposeStash(), nil), nc, `{"appId":"`+testAppID+`","composeYaml":"x"}`, "j")
 		if run.failedAt != "load" || run.err == nil {
 			t.Fatalf("a spec with a compose in it must be refused, got step=%q err=%v", run.failedAt, run.err)
 		}
@@ -349,7 +349,7 @@ func TestRevertSaga_ARepeatedReapplyIsANoOpNotABounce(t *testing.T) {
 		t.Fatalf("after the re-apply: compose=%q previous=%q", first.ComposeYAML, first.PreviousComposeYAML)
 	}
 
-	run := runWorkflow(t, RevertWorkflow(store, inv, nc, nil), nc, revertSpec(testAppID, composeV1), "job-2")
+	run := runWorkflow(t, RevertWorkflow(store, inv, nc, nil, nil), nc, revertSpec(testAppID, composeV1), "job-2")
 	if run.failedAt != "load" || !errors.Is(run.err, jobs.ErrStopWorkflow) {
 		t.Fatalf("the repeat must end at load as a successful no-op, got step=%q err=%v", run.failedAt, run.err)
 	}

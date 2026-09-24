@@ -26,6 +26,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
@@ -480,6 +481,26 @@ func main() {
 		log.Fatalf("rasputin-api: trust dir: %v", err)
 	}
 
+	// The app-secret seed (ADR-0006 Decision 11a, geekdojo/geekdojo-brain#520):
+	// every ${secret:<name>} an installed tile declares is derived from this one
+	// file, created once on first start and never replaced.
+	//
+	// FATAL, like the Mesh CA above. A start that could not read the seed must
+	// not come up secret-less: a deploy would then either refuse (which is the
+	// good case, and is what appsecret.Resolve does) or, in any future path that
+	// forgot to check, send the literal placeholder to a container as a
+	// password. And a start that could not read an EXISTING seed must not mint a
+	// fresh one over it — every app secret on the cluster is a function of the
+	// old one, the old values still live inside the apps' data volumes, and
+	// there is nothing to re-derive them from. Failing to boot leaves the file
+	// intact to be rolled back or restored; carrying on does not.
+	appSecretSeed, err := appsecret.EnsureSeed(trustDir)
+	if err != nil {
+		log.Fatalf("rasputin-api: app-secret seed: %v", err)
+	}
+	log.Printf("rasputin-api: app-secret seed loaded from %s (derivation version %d)",
+		filepath.Join(trustDir, appsecret.SeedFileName), appSecretSeed.DerivationVersion())
+
 	// Mesh subsystem. The controlplane self-hosts Headscale: when Docker is
 	// present (production and most dev), the api brings up the Headscale
 	// container, mints its own admin API key against it, and talks to it for
@@ -818,18 +839,18 @@ func main() {
 			return removeAppLeafDir(appLeafDir, appID)
 		}
 	}
-	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
+	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, appSecretSeed))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	// app.revert (#411): re-apply an app's previous compose, named by hash. Its
 	// compose comes from the row, so unlike app.upgrade it needs nothing from
 	// the catalog.
-	runner.Register(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
+	runner.Register(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, appSecretSeed))
 	// app.edit (#410): replace a custom app's compose with one its owner sent.
 	// The compose is held in composeStash, never in the job spec; the server
 	// is given the same stash below, and the workflow discards what it holds
 	// when the job ends.
 	composeStash := apps.NewComposeStash()
-	runner.Register(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash))
+	runner.Register(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, appSecretSeed))
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
@@ -918,7 +939,7 @@ func main() {
 	}
 	// app.upgrade (#409) registers here rather than with the other app sagas
 	// above because its new compose comes from this store and nowhere else.
-	runner.Register(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned))
+	runner.Register(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, appSecretSeed))
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.

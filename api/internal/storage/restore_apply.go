@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 )
@@ -150,6 +151,17 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 			targets = append(targets, target{staged: "trust/mesh-ca.key", live: filepath.Join(trustDir, "mesh-ca.key"), aside: "trust/mesh-ca.key"})
 		case e.Path == "trust/mesh-ca.pem":
 			targets = append(targets, target{staged: "trust/mesh-ca.pem", live: filepath.Join(trustDir, "mesh-ca.pem"), aside: "trust/mesh-ca.pem"})
+		case e.Path == appSecretSeedArchivePath:
+			// The restored seed replaces the one this fresh install generated at
+			// its first start (#520). Without this case the entry is staged,
+			// reported as restored, and then silently left behind — and the
+			// cluster comes up with a seed that derives a different value for
+			// every app secret in it, while each app's data volume still holds
+			// the one it was given. There is no way back from that: nothing can
+			// re-derive the old values, so the apps' credentials are simply
+			// lost. Assemble captures it and this puts it back; the pair is the
+			// whole feature, which is why they landed in one change.
+			targets = append(targets, target{staged: appSecretSeedArchivePath, live: filepath.Join(trustDir, appsecret.SeedFileName), aside: appSecretSeedArchivePath})
 		case e.Path == busKeyArchivePath:
 			// The restored key replaces the one this fresh install generated,
 			// so every node that pinned the original joins again (#448).

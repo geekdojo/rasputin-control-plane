@@ -143,6 +143,36 @@ func ValidateTile(t Tile) error {
 		return fmt.Errorf("docker-compose.yml is empty")
 	}
 
+	// --- ADR-0006 Decision 11a (#520): the ${secret:} channel. ---
+	//
+	// Here rather than in ValidateTileSafety, and not only because a preview
+	// tile never reaches that validator. This is the same must-understand
+	// question the loop at the top of this function asks, arrived at from the
+	// other direction: there the tile says which capabilities it needs and the
+	// reader checks it knows them, here the tile's compose demonstrates that it
+	// needs one and the reader checks it was declared. Both halves are
+	// necessary — a reader is only protected by Requires for a tile that
+	// remembered to write it.
+	//
+	// The refusal direction that matters more is the one an older build takes.
+	// This build resolves the token, so a tile that forgot the declaration
+	// would work here; refusing it is what keeps the declaration honest for
+	// every OTHER cluster, including the ones that predate this release and
+	// would otherwise hand the app the literal string as its password.
+	//
+	// The names are validated by the same scan, so a compose can neither carry
+	// a token this build would refuse to resolve at deploy — a failure that
+	// would surface as a broken install rather than a refused publish — nor
+	// reach the derivation with an unbounded, author-supplied name.
+	secretTokens, err := ScanSecretTokens(t.ComposeYAML)
+	if err != nil {
+		return fmt.Errorf("docker-compose.yml: %w", err)
+	}
+	if len(secretTokens) > 0 && !requires(t, CapabilityTileSecrets) {
+		return fmt.Errorf("compose uses %s%s} but the tile does not list %q in requires — a control plane that cannot resolve the token would deploy the literal string as a credential, so it must refuse this tile instead",
+			SecretTokenPrefix, secretTokens[0].Name, CapabilityTileSecrets)
+	}
+
 	// A tile promising public exposure with nothing to expose is a metadata
 	// bug that would otherwise surface as a broken proxy route at install.
 	// Public exposure is a WEB affordance: there is no public-facing story for

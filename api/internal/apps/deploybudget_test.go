@@ -41,7 +41,7 @@ func TestDeployPush_SendsTheAppsOwnBudgetToTheAgent(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deployPush(store, inv, nc)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc, nil)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestDeployPush_UndeclaredBudgetIsSentAsZero(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deployPush(store, inv, nc)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc, nil)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 

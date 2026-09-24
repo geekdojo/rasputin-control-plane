@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -56,7 +57,7 @@ type DeleteSpec struct {
 //
 // The agent owns whether the deploy actually succeeded (container running,
 // healthchecks passing). The api just records what the agent reported.
-func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator) jobs.Workflow {
+func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, secrets *appsecret.Seed) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "app.deploy",
 		Steps: []jobs.WorkflowStep{
@@ -71,7 +72,7 @@ func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate Le
 			// Both are longer than the agent's work budget on purpose, so the
 			// agent answers with the real failure instead of a step timing out
 			// on top of it — see proto.AppDeployWorkFor.
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc, secrets)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, rotate)},
 		},
 	}
@@ -807,14 +808,33 @@ func deployLoad(store *Store, inv *inventory.Store) jobs.DoFn {
 	}
 }
 
-func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
-	return pushStep(store, inv, nc, deploySpecAppID)
+func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn, secrets *appsecret.Seed) jobs.DoFn {
+	return pushStep(store, inv, nc, deploySpecAppID, secrets)
 }
 
 // pushStep is deployPush for a saga whose spec has its own shape.
-func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID) jobs.DoFn {
+func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID, secrets *appsecret.Seed) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		app, err := loadAppFor(sc, store, inv, appID)
+		if err != nil {
+			return nil, err
+		}
+
+		// THE one substitution site (ADR-0006 Decision 11a, #520). Resolved
+		// here, on the way out, and nowhere upstream: the row this compose came
+		// from still holds `${secret:<name>}`, because the control plane's
+		// SQLite has no encryption at rest and resolving before the store would
+		// write plaintext credentials into apps.compose_yaml permanently — and
+		// would show them in the UI's compose preview, which reads the row.
+		//
+		// Before the status flips to DEPLOYING: a compose whose token cannot be
+		// resolved is a refusal, and refusing before anything was announced
+		// leaves the app where it was instead of stranding it in DEPLOYING with
+		// nothing on the node having changed.
+		//
+		// Rotation always derives at InitialVersion for now — nothing stores a
+		// per-app counter yet (see appsecret.InitialVersion).
+		composeYAML, err := appsecret.Resolve(app.ComposeYAML, app.ID, secrets, appsecret.InitialVersion)
 		if err != nil {
 			return nil, err
 		}
@@ -829,7 +849,7 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 		cmd, _ := json.Marshal(proto.AppDeployCmd{
 			AppID:             app.ID,
 			Name:              app.Name,
-			ComposeYAML:       app.ComposeYAML,
+			ComposeYAML:       composeYAML,
 			WorkBudgetSeconds: app.DeployBudgetSeconds,
 		})
 
