@@ -430,6 +430,11 @@ export interface PrivilegeAck {
     catalogVersion: number;
     composeSha256: string;
   };
+  /**
+   * The stored record cannot be read, so it is consent to nothing: a
+   * tier-raising upgrade asks again, and consenting replaces it.
+   */
+  unreadable?: boolean;
 }
 
 /**

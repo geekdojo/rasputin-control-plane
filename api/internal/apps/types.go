@@ -107,6 +107,12 @@ type PrivilegeAck struct {
 	By string `json:"by"`
 	// What is what was consented to.
 	What PrivilegeConsent `json:"what"`
+	// Unreadable says a record is stored but cannot be trusted — it does not
+	// decode, or names no tier or compose this build knows (see
+	// readPrivilegeAck). What is then empty, and the record is consent to
+	// nothing: a tier-raising upgrade is refused until the owner consents
+	// again, which replaces it.
+	Unreadable bool `json:"unreadable,omitempty"`
 }
 
 // PrivilegeConsent is what a PrivilegeAck accepted: the move from one tier to

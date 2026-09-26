@@ -90,6 +90,11 @@ func (c PrivilegeChange) Refusal() string {
 	return b.String()
 }
 
+// UnreadableConsentNote is added to a raise's refusal when the app's stored
+// consent record cannot be read: it names the record and says what replaces
+// it, so the owner is not left wondering why a consent they gave is ignored.
+const UnreadableConsentNote = ". This app's stored privilege consent record is unreadable (damaged or written by something other than this control plane), so it counts as no consent; consenting again on the upgrade replaces it"
+
 // CheckUpgradeConsent is the saga's gate: nil when the upgrade to target does
 // not raise the app's tier, or when the app's recorded consent is for exactly
 // target's compose at a tier that covers it. Otherwise
@@ -98,6 +103,9 @@ func CheckUpgradeConsent(app *App, target UpgradeTarget) error {
 	change := UpgradePrivilege(app, target.Tile)
 	if !change.Raises {
 		return nil
+	}
+	if ack := app.PrivilegeAck; ack != nil && ack.Unreadable {
+		return fmt.Errorf("%w: %s", ErrPrivilegeConsentRequired, change.Refusal()+UnreadableConsentNote)
 	}
 	if ack := app.PrivilegeAck; ack != nil &&
 		ack.What.ComposeSHA256 == ComposeHash(target.Tile.ComposeYAML) &&

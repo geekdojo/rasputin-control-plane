@@ -616,7 +616,7 @@ func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, a
 	}
 	change := apps.UpgradePrivilege(app, target.Tile)
 	if change.Raises && (acceptTier == nil || !tileschema.TierCovers(*acceptTier, change.Privilege.Tier)) {
-		writePrivilegeRaise(w, change, target)
+		writePrivilegeRaise(w, app, change, target)
 		return
 	}
 	named, ok := s.deleteVolumesFor(w, app, deleteVolumes)
@@ -661,7 +661,7 @@ type privilegeRaise struct {
 	CatalogVersion   int      `json:"catalogVersion"`
 }
 
-func writePrivilegeRaise(w http.ResponseWriter, change apps.PrivilegeChange, target apps.UpgradeTarget) {
+func writePrivilegeRaise(w http.ResponseWriter, app *apps.App, change apps.PrivilegeChange, target apps.UpgradeTarget) {
 	grants := change.Privilege.Grants
 	if grants == nil {
 		grants = []string{}
@@ -670,7 +670,7 @@ func writePrivilegeRaise(w http.ResponseWriter, change apps.PrivilegeChange, tar
 		Error          string         `json:"error"`
 		PrivilegeRaise privilegeRaise `json:"privilegeRaise"`
 	}{
-		Error: change.Refusal(),
+		Error: privilegeRefusal(app, change),
 		PrivilegeRaise: privilegeRaise{
 			FromTier:         tileschema.Privilege{Tier: change.FromTier}.EffectiveTier(),
 			FromTierRecorded: change.FromTier != "",
@@ -681,6 +681,16 @@ func writePrivilegeRaise(w http.ResponseWriter, change apps.PrivilegeChange, tar
 			CatalogVersion:   target.CatalogVersion,
 		},
 	})
+}
+
+// privilegeRefusal is the 409's error text: what is raised and what consent
+// is needed, plus, when the app's stored consent record is unreadable, which
+// record that is and that consenting again replaces it.
+func privilegeRefusal(app *apps.App, change apps.PrivilegeChange) string {
+	if app.PrivilegeAck != nil && app.PrivilegeAck.Unreadable {
+		return change.Refusal() + apps.UnreadableConsentNote
+	}
+	return change.Refusal()
 }
 
 // userName is the authenticated user's name, for a record of who did

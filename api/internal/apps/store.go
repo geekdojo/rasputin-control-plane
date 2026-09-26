@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // Store is the SQLite-backed ledger of declared apps.
@@ -552,7 +554,7 @@ func scanApp(scan func(...any) error) (*App, error) {
 		updatedAt    int64
 		ackAt        sql.NullInt64
 		ackBy        string
-		privAckAt    sql.NullInt64
+		privAckAt    sql.NullString
 		privAckBy    string
 		privAckWhat  string
 	)
@@ -585,15 +587,49 @@ func scanApp(scan func(...any) error) (*App, error) {
 	if ackAt.Valid {
 		a.BackupAck = &BackupAck{At: fromMs(ackAt.Int64), By: ackBy}
 	}
-	if privAckAt.Valid {
-		ack := &PrivilegeAck{At: fromMs(privAckAt.Int64), By: privAckBy}
-		if err := json.Unmarshal([]byte(privAckWhat), &ack.What); err != nil {
-			// Only RecordPrivilegeAck writes this column, from a struct. A
-			// record that does not decode is not read as "no consent was
-			// needed", nor as consent to anything: the row is refused.
-			return nil, fmt.Errorf("apps: app %s: privilege consent record does not decode: %w", a.ID, err)
-		}
-		a.PrivilegeAck = ack
-	}
+	a.PrivilegeAck = readPrivilegeAck(a.ID, privAckAt, privAckBy, privAckWhat)
 	return &a, nil
+}
+
+// readPrivilegeAck turns the three privilege_ack_* columns into the app's
+// consent record (#522), never failing the row.
+//
+// A record this build cannot trust — a timestamp that is not a number, JSON
+// that does not decode, or a decoded record that names no tier it knows or no
+// compose hash — is not "no consent was needed" and not consent to anything.
+// It comes back flagged Unreadable, carrying no consent, and the app loads
+// with the rest of its row: one bad record must not take GET /api/apps, the
+// backup fan-out or the reconcile sweep down with it. It fails closed where
+// it matters, in CheckUpgradeConsent, which refuses a raise over it and says
+// how to replace it. Only RecordPrivilegeAck writes these columns, from a
+// struct, so this is a bad disk or a hand edit, and it is logged.
+//
+// ackAt is read as text so that even a non-number in the INTEGER column is a
+// flagged record rather than a scan error. No timestamp and nothing else set
+// is the ordinary "no consent recorded", nil.
+func readPrivilegeAck(appID string, ackAt sql.NullString, by, what string) *PrivilegeAck {
+	if !ackAt.Valid && by == "" && what == "" {
+		return nil
+	}
+	unreadable := func(why string) *PrivilegeAck {
+		log.Printf("apps: app %s: privilege consent record is unreadable (%s); a tier-raising upgrade of it is refused until the owner consents again", appID, why)
+		ack := &PrivilegeAck{By: by, Unreadable: true}
+		if ms, err := strconv.ParseInt(ackAt.String, 10, 64); err == nil {
+			ack.At = fromMs(ms)
+		}
+		return ack
+	}
+	// A NULL timestamp beside a by or a what reads as "" here, and fails too.
+	at, err := strconv.ParseInt(ackAt.String, 10, 64)
+	if err != nil {
+		return unreadable("timestamp missing or not a number")
+	}
+	var consent PrivilegeConsent
+	if err := json.Unmarshal([]byte(what), &consent); err != nil {
+		return unreadable("does not decode")
+	}
+	if !tileschema.KnownTier(consent.Tier) || !ValidComposeHash(consent.ComposeSHA256) {
+		return unreadable("names no known tier or no compose hash")
+	}
+	return &PrivilegeAck{At: fromMs(at), By: by, What: consent}
 }
