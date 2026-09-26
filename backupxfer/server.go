@@ -330,7 +330,7 @@ func (i *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	i.mu.Lock()
 	i.landed[member] = rc
 	i.mu.Unlock()
-	i.logf("backup ingest: landed %s/%s from node %s: %d sealed bytes, sha256 %s", generation, member, grant.NodeID, rc.SealedBytes, short(rc.SealedDigest))
+	i.logf("backup ingest: landed %s/%s from node %s: %d sealed bytes, sha256 %s", generation, member, grant.NodeID, rc.SealedBytes, proto.ShortFingerprint(rc.SealedDigest))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(rc)
@@ -421,7 +421,7 @@ func (i *Ingest) land(w http.ResponseWriter, r *http.Request, gen *openGeneratio
 	if got != wantDigest || total != wantSize {
 		return nil, http.StatusUnprocessableEntity, CodeDigestMismatch,
 			fmt.Sprintf("the node declared sha256 %s over %d bytes and %d bytes arrived hashing to %s; the member was discarded",
-				short(wantDigest), wantSize, total, short(got))
+				proto.ShortFingerprint(wantDigest), wantSize, total, proto.ShortFingerprint(got))
 	}
 	if err := f.Sync(); err != nil {
 		return nil, http.StatusInsufficientStorage, CodeWriteFailed, err.Error()
@@ -499,11 +499,4 @@ func refuse(w http.ResponseWriter, status int, code, detail string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(Problem{Code: code, Detail: detail})
-}
-
-func short(digest string) string {
-	if len(digest) > 12 {
-		return digest[:12]
-	}
-	return digest
 }

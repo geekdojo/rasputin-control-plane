@@ -14,6 +14,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer/fsat"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // RestoreEgress is the restore-stream endpoint: GET one member of the
@@ -177,7 +178,7 @@ func (e *RestoreEgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if facts.SealedSHA256 != "" && (!strings.EqualFold(got, facts.SealedSHA256) || (facts.SealedBytes != 0 && byteCount(n) != facts.SealedBytes)) {
-		e.logf("restore egress: %s/%s on the target hashes to %s over %d bytes; the manifest recorded %s over %d — refused", generation, member, short(got), n, short(facts.SealedSHA256), facts.SealedBytes)
+		e.logf("restore egress: %s/%s on the target hashes to %s over %d bytes; the manifest recorded %s over %d — refused", generation, member, proto.ShortFingerprint(got), n, proto.ShortFingerprint(facts.SealedSHA256), facts.SealedBytes)
 		egressRefuse(w, http.StatusUnprocessableEntity, backupxfer.CodeDigestMismatch, "the member on the target is not the one the manifest recorded; it is not served")
 		return
 	}

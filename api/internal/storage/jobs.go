@@ -256,7 +256,7 @@ func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 		// live event stream. Nothing here is key material: a node, a path the
 		// disk had a moment ago, a truncated fingerprint and a label.
 		sc.Log("info", fmt.Sprintf("claiming backup target %s on %s (fingerprint %s)%s",
-			spec.DevicePath, spec.NodeID, short(spec.Fingerprint), choiceSuffix(spec)))
+			spec.DevicePath, spec.NodeID, proto.ShortFingerprint(spec.Fingerprint), choiceSuffix(spec)))
 		return json.Marshal(map[string]any{
 			"nodeId":     spec.NodeID,
 			"devicePath": spec.DevicePath,
@@ -889,16 +889,6 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-// short truncates a fingerprint for a log line. Fingerprints are not secrets —
-// they are a hash of hardware identity — but a full one is 64 characters of
-// noise in a line an operator is trying to read.
-func short(h string) string {
-	if len(h) > 12 {
-		return h[:12]
-	}
-	return h
 }
 
 // markerCarriesWrappings reports whether the disk's own marker holds both §4.6

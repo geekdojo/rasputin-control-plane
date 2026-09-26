@@ -844,24 +844,6 @@ func TestModeGate(t *testing.T) {
 	}
 }
 
-func TestShort(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"", ""},
-		{"abc", "abc"},
-		{"123456789012", "123456789012"},
-		{"1234567890123", "123456789012"},
-		{"deadbeefcafe1234567890", "deadbeefcafe"},
-	}
-	for _, tc := range cases {
-		if got := short(tc.in); got != tc.want {
-			t.Errorf("short(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 func TestHash_Determinism(t *testing.T) {
 	m1 := map[string]any{"firewall": map[string]any{"redirect": []map[string]any{
 		{"name": "a", "src": "wan"},

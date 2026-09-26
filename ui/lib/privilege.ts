@@ -17,12 +17,6 @@ export interface TilePrivilege {
   why?: string;
 }
 
-export const TIER_RANK: Record<PrivilegeTier, number> = {
-  routine: 0,
-  elevated: 1,
-  'host-trusting': 2,
-};
-
 export const AMBER = '#facc15';
 export const RED = '#f87171';
 

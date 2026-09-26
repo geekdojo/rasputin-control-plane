@@ -1004,10 +1004,6 @@ export function openMeshWS(
 
 // ----- BMC ----------------------------------------------------------------
 
-export async function listBMCStates(): Promise<BMCState[]> {
-  return (await jsonFetch<BMCState[] | null>('/api/bmc')) ?? [];
-}
-
 export async function getBMCStatus(nodeId: string): Promise<BMCState> {
   return jsonFetch<BMCState>(
     `/api/bmc/${encodeURIComponent(nodeId)}/status`,

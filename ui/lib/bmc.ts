@@ -16,7 +16,6 @@ export const BMC_CAP_RESET = 'reset';
 export const BMC_CAP_CONSOLE = 'console';
 
 export const BMC_CONSOLE_CHARACTER = 'character';
-export const BMC_CONSOLE_LINE = 'line';
 
 export type BmcConsoleInfo = { mode: string; lossy?: boolean };
 export type BmcCaps = { caps: Set<string>; console?: BmcConsoleInfo };

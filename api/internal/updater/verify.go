@@ -195,7 +195,7 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 	if degraded {
 		lg.log("warn", "no pre-reboot boot id captured; waiting for the node to go away and come back (verify will be degraded)")
 	} else {
-		lg.log("info", fmt.Sprintf("waiting for a boot other than %s", short(req.PriorBootID)))
+		lg.log("info", fmt.Sprintf("waiting for a boot other than %s", proto.ShortFingerprint(req.PriorBootID)))
 	}
 
 	// Three facts, deliberately kept apart, because the deadline verdict below
@@ -228,7 +228,7 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 			// got: alive and well, it simply never rebooted. c13. This is the
 			// only shape that earns the bootSame verdict.
 			return bootSame, fmt.Errorf("node never rebooted: still answering on boot %s after %w",
-				short(req.PriorBootID), ctx.Err())
+				proto.ShortFingerprint(req.PriorBootID), ctx.Err())
 		case degraded && !wentQuiet:
 			// The degraded flavour of the same observation, and the case
 			// that used to pass in 2ms. No identity to name, so name the
@@ -279,7 +279,7 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 				if degraded {
 					switch {
 					case ack.BootID != "":
-						lg.log("info", fmt.Sprintf("node is up on boot %s, which the pre-reboot agent could not report — rebooted", short(ack.BootID)))
+						lg.log("info", fmt.Sprintf("node is up on boot %s, which the pre-reboot agent could not report — rebooted", proto.ShortFingerprint(ack.BootID)))
 						return bootUnknown, nil
 					case wentQuiet:
 						lg.log("info", "node went away and came back; its agent still reports no boot id — verify will be degraded")
@@ -291,7 +291,7 @@ func waitForNewBoot(ctx context.Context, nc *nats.Conn, req verifyRequest, regCh
 				} else {
 					switch classifyBoot(req.PriorBootID, ack.BootID) {
 					case bootDiffers:
-						lg.log("info", fmt.Sprintf("node is up on a new boot (%s)", short(ack.BootID)))
+						lg.log("info", fmt.Sprintf("node is up on a new boot (%s)", proto.ShortFingerprint(ack.BootID)))
 						return bootDiffers, nil
 					case bootUnknown:
 						// Prior WAS reported and this answer is not, so the thing

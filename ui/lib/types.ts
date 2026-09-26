@@ -417,13 +417,6 @@ export interface DroppedVolume {
   lastCaptured: VolumeCapture | null;
 }
 
-/** The 409 PUT /api/apps/{id}/compose answers when a change would drop volumes. */
-export interface VolumeGateResponse {
-  error: string;
-  droppedVolumes: DroppedVolume[];
-  notDropped: string[];
-}
-
 /** Who acknowledged installing with no backup target, and when (#299). */
 export interface BackupAck {
   at: string;

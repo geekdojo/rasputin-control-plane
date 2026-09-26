@@ -70,7 +70,7 @@ func applyCompile(svc *Service) jobs.DoFn {
 				enabled++
 			}
 		}
-		sc.Log("info", fmt.Sprintf("compiled %d enabled intent(s), hash=%s", enabled, short(hash)))
+		sc.Log("info", fmt.Sprintf("compiled %d enabled intent(s), hash=%s", enabled, proto.ShortFingerprint(hash)))
 		return json.Marshal(map[string]any{"hash": hash, "state": state, "intentCount": enabled})
 	}
 }
@@ -157,7 +157,7 @@ func applyRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 			IntentHash: hash,
 			Ts:         now,
 		})
-		sc.Log("info", fmt.Sprintf("applied: hash=%s", short(hash)))
+		sc.Log("info", fmt.Sprintf("applied: hash=%s", proto.ShortFingerprint(hash)))
 		return json.Marshal(map[string]string{"hash": hash})
 	}
 }
@@ -350,7 +350,7 @@ func reconcileFetch(svc *Service, nc *nats.Conn) jobs.DoFn {
 			ObservedHash: hash,
 			Ts:           now,
 		})
-		sc.Log("info", fmt.Sprintf("observed hash=%s (%d keys, %d nodes)", short(hash), len(keys), len(nodes)))
+		sc.Log("info", fmt.Sprintf("observed hash=%s (%d keys, %d nodes)", proto.ShortFingerprint(hash), len(keys), len(nodes)))
 		return json.Marshal(map[string]any{"hash": hash, "keys": len(keys), "nodes": len(nodes)})
 	}
 }
@@ -371,7 +371,7 @@ func reconcileCompare(svc *Service, nc *nats.Conn) jobs.DoFn {
 		if state.Drift {
 			change = proto.MeshDrift
 			sc.Log("warn", fmt.Sprintf("DRIFT: intent=%s observed=%s",
-				short(state.IntentHash), short(state.ObservedHash)))
+				proto.ShortFingerprint(state.IntentHash), proto.ShortFingerprint(state.ObservedHash)))
 		} else {
 			sc.Log("info", "in sync with intent")
 		}
@@ -651,7 +651,7 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 			return nil, fmt.Errorf("mint key: %w", err)
 		}
 		s.KeyID = key.ID
-		sc.Log("info", fmt.Sprintf("minted enrollment key %s for %s", short(key.ID), s.NodeID))
+		sc.Log("info", fmt.Sprintf("minted enrollment key %s for %s", proto.ShortFingerprint(key.ID), s.NodeID))
 		// The key's life is this step. Expire it on every way out — an ack,
 		// a rejection, a timeout, a bad ack — so a single-use key that was
 		// sent but not consumed does not stay valid for its safety-net TTL.
@@ -712,7 +712,7 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		}
 
 		sc.Log("info", fmt.Sprintf("agent enrolled (hsId=%s ip=%s backend=%s)",
-			short(s.HSID), s.HSIP, ack.Backend))
+			proto.ShortFingerprint(s.HSID), s.HSIP, ack.Backend))
 		// What the node trusts now, against what was sent. A mismatch here
 		// is a real fault (the agent installed something other than what it
 		// was handed); a pre-fingerprint agent reports nothing and is not
@@ -744,10 +744,10 @@ func expireEnrolKey(sc *jobs.StepCtx, svc *Service, nodeID, keyID string) {
 	defer cancel()
 	if err := svc.Client().ExpirePreAuthKey(ctx, keyID); err != nil {
 		sc.Log("warn", fmt.Sprintf("could not expire enrollment key %s for %s (it lapses on its own within %s): %v",
-			short(keyID), nodeID, nodeEnrolKeyExpiry, err))
+			proto.ShortFingerprint(keyID), nodeID, nodeEnrolKeyExpiry, err))
 		return
 	}
-	sc.Log("info", fmt.Sprintf("expired enrollment key %s for %s", short(keyID), nodeID))
+	sc.Log("info", fmt.Sprintf("expired enrollment key %s for %s", proto.ShortFingerprint(keyID), nodeID))
 }
 
 // enrollDispatchError is the step error for an enroll RPC that returned no
@@ -870,7 +870,7 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 			return nil, fmt.Errorf("bind device: %w", err)
 		}
 		for _, id := range unbound {
-			sc.Log("info", fmt.Sprintf("%s: device %s is no longer bound to it (now %s)", s.NodeID, short(id), short(s.HSID)))
+			sc.Log("info", fmt.Sprintf("%s: device %s is no longer bound to it (now %s)", s.NodeID, proto.ShortFingerprint(id), proto.ShortFingerprint(s.HSID)))
 		}
 		pruneSupersededRegistrations(sc, svc, s.NodeID, s.HSID)
 		publishChange(nc, proto.MeshChangeEvt{
@@ -880,7 +880,7 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 			TailnetID: s.HSID,
 			Ts:        now,
 		})
-		sc.Log("info", fmt.Sprintf("%s enrolled in tailnet as %s", s.NodeID, short(s.HSID)))
+		sc.Log("info", fmt.Sprintf("%s enrolled in tailnet as %s", s.NodeID, proto.ShortFingerprint(s.HSID)))
 		return json.Marshal(s)
 	}
 }
@@ -929,14 +929,14 @@ func pruneSupersededRegistrations(sc *jobs.StepCtx, svc *Service, nodeID, hsID s
 	}
 	for _, g := range ghosts {
 		if err := svc.Client().DeleteNode(sc.Ctx, g.ID); err != nil {
-			sc.Log("warn", fmt.Sprintf("%s: superseded registration %s (ip %s) could not be removed from Headscale: %v", nodeID, short(g.ID), g.IPv4, err))
+			sc.Log("warn", fmt.Sprintf("%s: superseded registration %s (ip %s) could not be removed from Headscale: %v", nodeID, proto.ShortFingerprint(g.ID), g.IPv4, err))
 			continue
 		}
 		if err := svc.store.DeleteDevice(sc.Ctx, g.ID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			sc.Log("warn", fmt.Sprintf("%s: superseded device row %s: %v", nodeID, short(g.ID), err))
+			sc.Log("warn", fmt.Sprintf("%s: superseded device row %s: %v", nodeID, proto.ShortFingerprint(g.ID), err))
 		}
 		sc.Log("info", fmt.Sprintf("%s: removed superseded Headscale registration %s (ip %s) — the node re-registered with a new machine key as %s",
-			nodeID, short(g.ID), g.IPv4, short(hsID)))
+			nodeID, proto.ShortFingerprint(g.ID), g.IPv4, proto.ShortFingerprint(hsID)))
 	}
 }
 
@@ -962,13 +962,6 @@ func simpleHash(s string) int {
 	}
 	if h < 0 {
 		h = -h
-	}
-	return h
-}
-
-func short(h string) string {
-	if len(h) > 12 {
-		return h[:12]
 	}
 	return h
 }
