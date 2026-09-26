@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -118,11 +119,11 @@ func (s *Store) Create(ctx context.Context, a *App) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO apps (id, name, compose_yaml, target_node, published_port,
                           source_tile, deploy_budget_s, expose_lan, web_tls, last_status, created_at, updated_at,
-                          backup_ack_at, backup_ack_by, compose_sha256, compose_catalog_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          backup_ack_at, backup_ack_by, compose_sha256, compose_catalog_version, privilege_tier)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.Name, a.ComposeYAML, a.TargetNode, a.PublishedPort,
 		a.SourceTile, a.DeployBudgetSeconds, a.ExposeLAN, a.WebTLS, string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt),
-		ackAt, ackBy, a.ComposeSHA256, a.ComposeCatalogVersion)
+		ackAt, ackBy, a.ComposeSHA256, a.ComposeCatalogVersion, a.PrivilegeTier)
 	return err
 }
 
@@ -179,6 +180,9 @@ type ComposeUpgrade struct {
 	PublishedPort       int
 	WebTLS              bool
 	DeployBudgetSeconds int
+	// PrivilegeTier is the tile's declared tier, resolved, so the row keeps
+	// describing the compose it holds (#522).
+	PrivilegeTier string
 }
 
 // ErrComposeChanged is UpgradeCompose refusing because the installed compose
@@ -202,11 +206,12 @@ func (s *Store) UpgradeCompose(ctx context.Context, id, fromHash string, up Comp
                         previous_compose_catalog_version = compose_catalog_version,
                         previous_published_port = published_port, previous_web_tls = web_tls,
                         previous_deploy_budget_s = deploy_budget_s,
+                        previous_privilege_tier = privilege_tier,
                         compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = ?,
-                        published_port = ?, web_tls = ?, deploy_budget_s = ?, updated_at = ?
+                        published_port = ?, web_tls = ?, deploy_budget_s = ?, privilege_tier = ?, updated_at = ?
         WHERE id = ? AND compose_sha256 = ?`,
 		up.ComposeYAML, ComposeHash(up.ComposeYAML), up.CatalogVersion,
-		up.PublishedPort, up.WebTLS, up.DeployBudgetSeconds, ms(now),
+		up.PublishedPort, up.WebTLS, up.DeployBudgetSeconds, up.PrivilegeTier, ms(now),
 		id, fromHash)
 	if err != nil {
 		return err
@@ -256,7 +261,8 @@ func (s *Store) EditCompose(ctx context.Context, id, fromHash, composeYAML strin
                         previous_compose_catalog_version = compose_catalog_version,
                         previous_published_port = published_port, previous_web_tls = web_tls,
                         previous_deploy_budget_s = deploy_budget_s,
-                        compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = 0, updated_at = ?
+                        previous_privilege_tier = privilege_tier,
+                        compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = 0, privilege_tier = '', updated_at = ?
         WHERE id = ? AND compose_sha256 = ? AND source_tile = ''`,
 		composeYAML, ComposeHash(composeYAML), ms(now), id, fromHash)
 	if err != nil {
@@ -315,6 +321,7 @@ func (s *Store) RevertCompose(ctx context.Context, id, fromHash, previousYAML st
                         published_port = previous_published_port, previous_published_port = published_port,
                         web_tls = previous_web_tls, previous_web_tls = web_tls,
                         deploy_budget_s = previous_deploy_budget_s, previous_deploy_budget_s = deploy_budget_s,
+                        privilege_tier = previous_privilege_tier, previous_privilege_tier = privilege_tier,
                         updated_at = ?
         WHERE id = ? AND compose_sha256 = ? AND previous_compose_yaml = ?`,
 		ComposeHash(previousYAML), ms(now), id, fromHash, previousYAML)
@@ -332,6 +339,40 @@ func (s *Store) RevertCompose(ctx context.Context, id, fromHash, previousYAML st
 		return err
 	case previous == "":
 		return ErrNoPreviousCompose
+	}
+	return ErrComposeChanged
+}
+
+// RecordPrivilegeAck records an owner's consent to a catalog upgrade that
+// raises the app's privilege tier (dec 12, #522), replacing any earlier one.
+// Nothing installed changes: the upgrade's job reads the record and writes
+// the compose.
+//
+// Conditional on fromHash, the compose_sha256 the caller read, in the style
+// of UpgradeCompose: consent given while looking at one installed compose is
+// not recorded against a row that has since moved. A mismatch is
+// ErrComposeChanged; an unknown id is sql.ErrNoRows.
+func (s *Store) RecordPrivilegeAck(ctx context.Context, id, fromHash string, ack PrivilegeAck) error {
+	what, err := json.Marshal(ack.What)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE apps SET privilege_ack_at = ?, privilege_ack_by = ?, privilege_ack_what = ?
+        WHERE id = ? AND compose_sha256 = ?`,
+		ms(ack.At), ack.By, string(what), id, fromHash)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var exists int
+	switch err := s.db.QueryRowContext(ctx, `SELECT 1 FROM apps WHERE id = ?`, id).Scan(&exists); {
+	case errors.Is(err, sql.ErrNoRows):
+		return sql.ErrNoRows
+	case err != nil:
+		return err
 	}
 	return ErrComposeChanged
 }
@@ -460,7 +501,8 @@ func (s *Store) Get(ctx context.Context, id string) (*App, error) {
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
                compose_sha256, compose_catalog_version, previous_compose_yaml,
-               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s
+               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s,
+               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what
         FROM apps WHERE id = ?`, id)
 	return scanApp(row.Scan)
 }
@@ -470,7 +512,8 @@ func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
                compose_sha256, compose_catalog_version, previous_compose_yaml,
-               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s
+               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s,
+               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what
         FROM apps WHERE name = ?`, name)
 	return scanApp(row.Scan)
 }
@@ -480,7 +523,8 @@ func (s *Store) List(ctx context.Context) ([]*App, error) {
         SELECT id, name, compose_yaml, target_node, published_port, source_tile, deploy_budget_s, expose_lan, web_tls, last_status, last_detail,
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
                compose_sha256, compose_catalog_version, previous_compose_yaml,
-               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s
+               previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s,
+               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what
         FROM apps ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
@@ -508,12 +552,16 @@ func scanApp(scan func(...any) error) (*App, error) {
 		updatedAt    int64
 		ackAt        sql.NullInt64
 		ackBy        string
+		privAckAt    sql.NullInt64
+		privAckBy    string
+		privAckWhat  string
 	)
 	if err := scan(&a.ID, &a.Name, &a.ComposeYAML, &a.TargetNode, &a.PublishedPort,
 		&a.SourceTile, &a.DeployBudgetSeconds, &a.ExposeLAN, &a.WebTLS, &status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
 		&createdAt, &updatedAt, &ackAt, &ackBy,
 		&a.ComposeSHA256, &a.ComposeCatalogVersion, &a.PreviousComposeYAML,
-		&a.PreviousComposeCatalogVersion, &a.PreviousPublishedPort, &a.PreviousWebTLS, &a.PreviousDeployBudgetSeconds); err != nil {
+		&a.PreviousComposeCatalogVersion, &a.PreviousPublishedPort, &a.PreviousWebTLS, &a.PreviousDeployBudgetSeconds,
+		&a.PrivilegeTier, &a.PreviousPrivilegeTier, &privAckAt, &privAckBy, &privAckWhat); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -536,6 +584,16 @@ func scanApp(scan func(...any) error) (*App, error) {
 	a.UpdatedAt = fromMs(updatedAt)
 	if ackAt.Valid {
 		a.BackupAck = &BackupAck{At: fromMs(ackAt.Int64), By: ackBy}
+	}
+	if privAckAt.Valid {
+		ack := &PrivilegeAck{At: fromMs(privAckAt.Int64), By: privAckBy}
+		if err := json.Unmarshal([]byte(privAckWhat), &ack.What); err != nil {
+			// Only RecordPrivilegeAck writes this column, from a struct. A
+			// record that does not decode is not read as "no consent was
+			// needed", nor as consent to anything: the row is refused.
+			return nil, fmt.Errorf("apps: app %s: privilege consent record does not decode: %w", a.ID, err)
+		}
+		a.PrivilegeAck = ack
 	}
 	return &a, nil
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
 )
 
@@ -33,9 +34,16 @@ const upgradeCatalogVersion = 7
 // deploy on n1.
 func upgradeFixture(t *testing.T) (*apiFixture, *http.Cookie, *catalogsync.Store, <-chan proto.AppDeployCmd) {
 	t.Helper()
+	return upgradeFixtureWith(t)
+}
+
+// upgradeFixtureWith is upgradeFixture with extra tiles in the catalog.
+func upgradeFixtureWith(t *testing.T, extra ...tileschema.BundleTile) (*apiFixture, *http.Cookie, *catalogsync.Store, <-chan proto.AppDeployCmd) {
+	t.Helper()
 	f, cookie, _ := gateFixture(t)
 	b := gateTileBundle(upgradeCatalogVersion)
 	b.Tiles = append(b.Tiles, oneTileBundle(upgradeCatalogVersion, "preview-app").Tiles[0])
+	b.Tiles = append(b.Tiles, extra...)
 	cat, err := catalogsync.New(t.TempDir(), stubVerifier{}, b)
 	if err != nil {
 		t.Fatalf("catalog store: %v", err)

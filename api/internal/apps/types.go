@@ -77,6 +77,53 @@ type App struct {
 	PreviousPublishedPort         int  `json:"previousPublishedPort,omitempty"`
 	PreviousWebTLS                bool `json:"previousWebTls,omitempty"`
 	PreviousDeployBudgetSeconds   int  `json:"previousDeployBudgetSeconds,omitempty"`
+	// PrivilegeTier is the tier the installed compose's tile declared —
+	// routine, elevated or host-trusting — copied from the tile by install and
+	// by every catalog upgrade, and swapped with PreviousPrivilegeTier by a
+	// re-apply, so it always describes ComposeYAML. It is what a catalog
+	// upgrade's consent compares against (auth-methodology §9 dec 12,
+	// geekdojo/geekdojo-brain#522). "" means not recorded: a custom app, which
+	// has no tile, or a catalog app installed before the column existed, which
+	// an upgrade reads as routine so that anything above it asks once.
+	PrivilegeTier string `json:"privilegeTier,omitempty"`
+	// PreviousPrivilegeTier is PrivilegeTier as it was beside
+	// PreviousComposeYAML.
+	PreviousPrivilegeTier string `json:"previousPrivilegeTier,omitempty"`
+	// PrivilegeAck is the most recent consent an owner gave to a catalog
+	// upgrade that raises this app's tier: who, when, and exactly what they
+	// accepted. Nil when no upgrade has needed one. Written by PUT
+	// /api/apps/{id}/compose before the upgrade's job starts, and read by that
+	// job, which refuses a raise the record does not cover — so consent cannot
+	// ride in a job spec, which any caller of POST /api/jobs could write.
+	PrivilegeAck *PrivilegeAck `json:"privilegeAck,omitempty"`
+}
+
+// PrivilegeAck records an owner's consent to a catalog upgrade that raises an
+// app's privilege tier (dec 12), in the style of BackupAck.
+type PrivilegeAck struct {
+	// At is when the consent was given: the upgrade request's time.
+	At time.Time `json:"at"`
+	// By is the authenticated user's NAME. Never a session token, never an id.
+	By string `json:"by"`
+	// What is what was consented to.
+	What PrivilegeConsent `json:"what"`
+}
+
+// PrivilegeConsent is what a PrivilegeAck accepted: the move from one tier to
+// another, the grants and runtime-socket access the target declares, and the
+// one compose — by catalog version and hash — the consent is for. The hash is
+// what binds it: the upgrade's job honours the record only for that compose.
+type PrivilegeConsent struct {
+	// FromTier is the tier recorded for the compose being replaced; "" when
+	// none was recorded.
+	FromTier string `json:"fromTier"`
+	// Tier is the target tile's declared tier, resolved (never "").
+	Tier         string   `json:"tier"`
+	DockerSocket bool     `json:"dockerSocket,omitempty"`
+	Grants       []string `json:"grants,omitempty"`
+	// CatalogVersion and ComposeSHA256 name the compose consented to.
+	CatalogVersion int    `json:"catalogVersion"`
+	ComposeSHA256  string `json:"composeSha256"`
 }
 
 // BackupAck records that an operator installed an app knowing its critical

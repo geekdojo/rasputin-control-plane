@@ -47,3 +47,4 @@ R21	agent/internal/clusterdns/clusterdns.go	pinnedIP	the resolved DNS drop-in		p
 R22	agent/internal/storage/archive.go	StagingRoot	RASPUTIN_BACKUP_STAGING_DIR	TestStagingRootIsTheDeployedDefaultWithNoEnvironmentSet	covered	
 R23	agent/cmd/rasputin-agent/main.go	controlplanePinFile	RASPUTIN_BUS_PIN_FILE, the controlplane agent's last bus-pin source	TestControlplanePinFile_FailsClosedOnEveryShapeOfInput	covered	
 R24	api/internal/busauth/enforce.go	ResolveEnforcement	RASPUTIN_BUS_AUTH and the host the embedded NATS server binds	TestResolveEnforcement TestResolveEnforcement_RefusalIsNeverOpen	covered	
+R25	api/internal/apps/privilege_consent.go	CheckUpgradeConsent	an app row's recorded privilege tier and privilege consent (dec 12, geekdojo/geekdojo-brain#522)	TestCheckUpgradeConsent_FailsClosedOnEveryShapeOfRecord TestUpgradeSaga_AnUnreadableConsentRecordRefuses TestUpgradeSaga_RefusesARaiseWithNoRecordedConsent	covered	

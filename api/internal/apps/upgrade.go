@@ -45,6 +45,7 @@ func (t UpgradeTarget) ComposeUpgrade() ComposeUpgrade {
 		PublishedPort:       t.Tile.WebPort(),
 		WebTLS:              t.Tile.WebPortTLS(),
 		DeployBudgetSeconds: t.Tile.DeployBudgetSeconds,
+		PrivilegeTier:       t.Tile.DeclaredPrivilege().EffectiveTier(),
 	}
 }
 
@@ -221,6 +222,15 @@ func upgradePullSource(lookup TileLookup) pullSource {
 			return pullTarget{}, jobs.ErrStopWorkflow
 		}
 		if err != nil {
+			return pullTarget{}, err
+		}
+		// Dec 12 (#522): a raise in privilege tier goes no further without the
+		// owner's recorded consent to exactly this compose. Here, in the saga,
+		// and not only in the handler, because POST /api/jobs can submit
+		// app.upgrade without the handler ever running. Nothing is marked or
+		// asked yet, so a refusal leaves the app exactly as it was. Persist
+		// needs no second check: it refuses any compose but the one pulled.
+		if err := CheckUpgradeConsent(app, target); err != nil {
 			return pullTarget{}, err
 		}
 		return pullTarget{ComposeYAML: target.Tile.ComposeYAML, DeployBudgetSeconds: target.Tile.DeployBudgetSeconds}, nil

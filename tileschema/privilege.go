@@ -67,6 +67,48 @@ var TierRank = map[string]int{
 	TierHostTrusting: 2,
 }
 
+// KnownTier reports whether tier is one of the three tier strings, exactly.
+// Empty is not a tier here: it is what a tile omits, not what a caller names.
+func KnownTier(tier string) bool {
+	_, ok := TierRank[tier]
+	return ok
+}
+
+// TierRaised reports whether moving from one tier to another goes UP the
+// ladder — the question a catalog upgrade's consent turns on (auth-methodology
+// §9 dec 12). Empty is routine on either side, as EffectiveTier resolves it.
+//
+// Every uncertain input leans towards asking: an installed tier this build
+// cannot rank reads as the lowest, and a target tier it cannot rank is never
+// assumed to be lower than anything.
+func TierRaised(from, to string) bool {
+	f, ok := TierRank[Privilege{Tier: from}.EffectiveTier()]
+	if !ok {
+		f = TierRank[TierRoutine]
+	}
+	t, ok := TierRank[Privilege{Tier: to}.EffectiveTier()]
+	if !ok {
+		return true
+	}
+	return t > f
+}
+
+// TierCovers reports whether consent to accepted covers a stack at tier: the
+// accepted rank is at least the tier's. Consent is never inferred, so an empty
+// or unknown acceptance covers nothing, and nothing covers a tier this build
+// cannot rank. An empty tier is routine.
+func TierCovers(accepted, tier string) bool {
+	a, ok := TierRank[accepted]
+	if !ok {
+		return false
+	}
+	t, ok := TierRank[Privilege{Tier: tier}.EffectiveTier()]
+	if !ok {
+		return false
+	}
+	return a >= t
+}
+
 // Grant identifiers. Stable machine strings — the UI renders them into
 // sentences (#200), and the catalog lints against them (#199), so changing one
 // is a contract change, not a copy edit.
