@@ -26,11 +26,16 @@
 // A custom compose can inline secrets. Nothing here logs one, stores one, or
 // puts one anywhere but the body of the request in flight.
 
+import { TIER_COPY, type PrivilegeTier } from './privilege';
 import type { App, DroppedVolume, Job } from './types';
 
 /**
  * The only warning the upgrade confirm carries, verbatim (Bryce, 2026-09-12).
- * No image diff, no privilege diff, no database warning.
+ * No image diff and no database warning. The one addition since is dec 12
+ * (Bryce, 2026-09-26; #522): an upgrade that RAISES the app's privilege tier
+ * shows what is being escalated and needs the owner's explicit consent, which
+ * the server enforces. An upgrade that keeps or lowers the tier shows nothing
+ * new.
  */
 export const UPGRADE_WARNING = 'Be sure you have reviewed changes on GitHub before upgrading!';
 
@@ -82,7 +87,7 @@ export const REVERT_PROMPT = 'Reverting does not restore your data and may cause
 export type ComposeChangeKind = 'upgrade' | 'edit' | 'revert';
 
 export type ComposeChangeBody =
-  | { source: 'catalog'; deleteVolumes?: string[] }
+  | { source: 'catalog'; acceptPrivilegeTier?: PrivilegeTier; deleteVolumes?: string[] }
   | { composeYaml: string; deleteVolumes?: string[] }
   | { sha256: string; deleteVolumes?: string[] };
 
@@ -135,8 +140,12 @@ export function composeActions(
 
 // ----- request bodies --------------------------------------------------------
 
-export function upgradeBody(): ComposeChangeBody {
-  return { source: 'catalog' };
+/**
+ * The upgrade body. `acceptPrivilegeTier` is the owner's consent to a raise in
+ * privilege tier, sent only when they gave it.
+ */
+export function upgradeBody(acceptPrivilegeTier?: PrivilegeTier): ComposeChangeBody {
+  return acceptPrivilegeTier ? { source: 'catalog', acceptPrivilegeTier } : { source: 'catalog' };
 }
 
 export function editBody(composeYaml: string): ComposeChangeBody {
@@ -151,15 +160,19 @@ export function revertBody(app: Pick<App, 'revertAvailable' | 'previousComposeSh
   return { sha256: app.previousComposeSha256 };
 }
 
-/** The body for a change of `kind`, for the app as the page last read it. */
+/**
+ * The body for a change of `kind`, for the app as the page last read it.
+ * `acceptPrivilegeTier` applies to an upgrade only.
+ */
 export function bodyFor(
   kind: ComposeChangeKind,
   app: Pick<App, 'revertAvailable' | 'previousComposeSha256'>,
   composeYaml?: string,
+  acceptPrivilegeTier?: PrivilegeTier,
 ): ComposeChangeBody {
   switch (kind) {
     case 'upgrade':
-      return upgradeBody();
+      return upgradeBody(acceptPrivilegeTier);
     case 'edit':
       return editBody(composeYaml ?? '');
     case 'revert':
@@ -175,7 +188,13 @@ export function bodyFor(
  */
 export function withDeleteVolumes(body: ComposeChangeBody, names: readonly string[]): ComposeChangeBody {
   const deleteVolumes = [...new Set(names)];
-  if ('source' in body) return { source: body.source, deleteVolumes };
+  // Consent given for the refused body is consent to the same upgrade, so it
+  // rides along: the owner is not asked twice.
+  if ('source' in body) {
+    return body.acceptPrivilegeTier
+      ? { source: body.source, acceptPrivilegeTier: body.acceptPrivilegeTier, deleteVolumes }
+      : { source: body.source, deleteVolumes };
+  }
   if ('composeYaml' in body) return { composeYaml: body.composeYaml, deleteVolumes };
   return { sha256: body.sha256, deleteVolumes };
 }
@@ -199,6 +218,12 @@ export type ComposeOutcome =
    * already explains the choice in its own words (Bryce, 2026-09-12).
    */
   | { kind: 'dropped'; dropped: DroppedVolume[]; notDropped: string[] }
+  /**
+   * 409 with privilegeRaise: the upgrade raises the app's privilege tier and
+   * the request did not consent to it (#522). `message` is the server's own
+   * plain statement of what is raised and what consent is needed.
+   */
+  | { kind: 'privilege'; raise: PrivilegeRaise; message: string }
   /** Any other refusal, in words an owner can act on. */
   | { kind: 'error'; status: number; message: string };
 
@@ -236,6 +261,27 @@ export function composeErrorMessage(status: number, apiError: string): string {
   }
 }
 
+// A tier string this build can show. Membership only: the page never ranks
+// tiers — whether an upgrade raises one is the API's answer.
+function isTier(v: unknown): v is PrivilegeTier {
+  return typeof v === 'string' && Object.prototype.hasOwnProperty.call(TIER_COPY, v);
+}
+
+/** Reads the 409's privilegeRaise, or null when it is not one this build can show. */
+function readPrivilegeRaise(v: unknown): PrivilegeRaise | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  if (!isTier(o.tier) || !isTier(o.fromTier)) return null;
+  return {
+    fromTier: o.fromTier,
+    fromTierRecorded: o.fromTierRecorded === true,
+    tier: o.tier,
+    dockerSocket: o.dockerSocket === true,
+    grants: Array.isArray(o.grants) ? o.grants.filter((g): g is string => typeof g === 'string') : [],
+    ...(typeof o.why === 'string' && o.why ? { why: o.why } : {}),
+  };
+}
+
 /**
  * Reads a PUT /api/apps/{id}/compose answer. `body` is the parsed JSON, or
  * undefined when the response had none.
@@ -244,6 +290,11 @@ export function parseComposeResponse(status: number, body: unknown): ComposeOutc
   if (status === 202) return { kind: 'started', job: body as Job };
   if (status === 200) return { kind: 'noop', app: body as App };
   const message = errorText(body);
+  if (status === 409 && body && typeof body === 'object' && 'privilegeRaise' in body) {
+    const raise = readPrivilegeRaise((body as { privilegeRaise?: unknown }).privilegeRaise);
+    // A shape this build cannot read still refuses in words: the server's own.
+    if (raise) return { kind: 'privilege', raise, message: composeErrorMessage(status, message) };
+  }
   if (status === 409 && body && typeof body === 'object' && Array.isArray((body as { droppedVolumes?: unknown }).droppedVolumes)) {
     const raw = body as { droppedVolumes: unknown[]; notDropped?: unknown };
     const dropped = raw.droppedVolumes.filter(isDroppedVolume).map((v) => ({
@@ -260,6 +311,77 @@ export function parseComposeResponse(status: number, body: unknown): ComposeOutc
     return { kind: 'error', status, message: composeErrorMessage(status, message) + kept };
   }
   return { kind: 'error', status, message: composeErrorMessage(status, message) };
+}
+
+// ----- privilege consent on a tier-raising upgrade (#522) --------------------
+
+/**
+ * What a tier-raising upgrade escalates, as the consent prompt shows it. Built
+ * from the app row the page already has (upgradePrivilege) or from the 409
+ * that refused an upgrade the page did not know raised anything.
+ */
+export interface PrivilegeRaise {
+  /** The installed tier; routine when none was recorded (fromTierRecorded false). */
+  fromTier: PrivilegeTier;
+  fromTierRecorded: boolean;
+  /** The tier the upgrade takes the app to. */
+  tier: PrivilegeTier;
+  dockerSocket: boolean;
+  /** Contract grant strings — render with grantLabel, never invent one. */
+  grants: string[];
+  why?: string;
+}
+
+/**
+ * The raise an upgrade on offer carries, from the app as the page read it, or
+ * null when the upgrade keeps or lowers the tier. The API decides
+ * (upgradeRaisesPrivilege); the page never compares tiers itself.
+ */
+export function upgradeRaiseOf(
+  app: Pick<App, 'upgradeAvailable' | 'upgradeRaisesPrivilege' | 'upgradePrivilege' | 'privilegeTier'>,
+): PrivilegeRaise | null {
+  if (!app.upgradeAvailable || !app.upgradeRaisesPrivilege) return null;
+  const p = app.upgradePrivilege;
+  if (!p || !isTier(p.tier)) return null;
+  const recorded = isTier(app.privilegeTier);
+  return {
+    fromTier: recorded ? (app.privilegeTier as PrivilegeTier) : 'routine',
+    fromTierRecorded: recorded,
+    tier: p.tier,
+    dockerSocket: p.dockerSocket === true,
+    grants: p.grants ?? [],
+    ...(p.why ? { why: p.why } : {}),
+  };
+}
+
+/** Nothing is consented to until the owner ticks the box. */
+export const PRIVILEGE_CONSENT_DEFAULT = false;
+
+/**
+ * Whether the upgrade confirm may be sent: always when nothing is raised,
+ * otherwise only once the owner has consented.
+ */
+export function canConfirmUpgrade(raise: PrivilegeRaise | null, consented: boolean): boolean {
+  return raise === null || consented;
+}
+
+/** The tier the upgrade body accepts: the raise's, and only with consent. */
+export function consentedTier(raise: PrivilegeRaise | null, consented: boolean): PrivilegeTier | undefined {
+  return raise && consented ? raise.tier : undefined;
+}
+
+/** The one-line statement of what the upgrade escalates. */
+export function privilegeRaiseStatement(appName: string, raise: PrivilegeRaise): string {
+  const from = TIER_COPY[raise.fromTier].label;
+  const to = TIER_COPY[raise.tier].label;
+  const was = raise.fromTierRecorded ? from : `${from} (no tier was recorded for the installed version)`;
+  const socket = raise.dockerSocket ? ' It also gains control of the container runtime socket.' : '';
+  return `This upgrade raises "${appName}" from ${was} to ${to}: ${TIER_COPY[raise.tier].summary}${socket}`;
+}
+
+/** The consent checkbox's label: exactly what ticking it accepts. */
+export function privilegeConsentLabel(appName: string, raise: PrivilegeRaise, node: string): string {
+  return `I accept that "${appName}" will run as ${TIER_COPY[raise.tier].label} on ${node}.`;
 }
 
 // ----- the dropped-volume refusal ---------------------------------------------

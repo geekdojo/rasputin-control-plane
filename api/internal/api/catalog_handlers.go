@@ -181,11 +181,15 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		// Which catalog the compose came from, so a later upgrade check can
 		// tell a newer tile from a catalog that went backwards (#409).
 		ComposeCatalogVersion: catalogVersion,
-		ExposeLAN:             req.ExposeLAN,
-		LastStatus:            proto.AppStatusStopped,
-		CreatedAt:             now,
-		UpdatedAt:             now,
-		BackupAck:             backupAck,
+		// The tier the tile declares, so the first upgrade can tell whether it
+		// raises it (dec 12, #522). Recorded, not consented: install asks the
+		// server for nothing (Bryce, 2026-09-12).
+		PrivilegeTier: tile.DeclaredPrivilege().EffectiveTier(),
+		ExposeLAN:     req.ExposeLAN,
+		LastStatus:    proto.AppStatusStopped,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		BackupAck:     backupAck,
 	}
 	if err := s.apps.Create(r.Context(), app); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -48,6 +50,15 @@ type appView struct {
 	// computing it from previousComposeYaml would make every client
 	// reimplement ComposeHash byte for byte. Absent unless RevertAvailable.
 	PreviousComposeSHA256 string `json:"previousComposeSha256,omitempty"`
+	// UpgradeRaisesPrivilege says the upgrade on offer raises the app's
+	// privilege tier, so PUT /api/apps/{id}/compose will refuse it without
+	// "acceptPrivilegeTier" (dec 12, #522). apps.UpgradePrivilege's answer, the
+	// one the route asks, so the page asks for consent exactly when the route
+	// needs it. Always present; false unless UpgradeAvailable.
+	UpgradeRaisesPrivilege bool `json:"upgradeRaisesPrivilege"`
+	// UpgradePrivilege is the privilege the upgrade's tile declares, its tier
+	// resolved — what the consent prompt shows. Absent unless UpgradeAvailable.
+	UpgradePrivilege *tileschema.Privilege `json:"upgradePrivilege,omitempty"`
 }
 
 // newAppView decorates one app row with what the catalog in effect says about
@@ -58,6 +69,9 @@ func (s *Server) newAppView(a *apps.App) appView {
 	if target, err := apps.ResolveUpgrade(a, s.tileLookup()); err == nil {
 		v.UpgradeAvailable = true
 		v.UpgradeCatalogVersion = target.CatalogVersion
+		change := apps.UpgradePrivilege(a, target.Tile)
+		v.UpgradeRaisesPrivilege = change.Raises
+		v.UpgradePrivilege = &change.Privilege
 	}
 	if apps.CanRevert(a) == nil {
 		v.RevertAvailable = true
@@ -450,6 +464,11 @@ type composeRequest struct {
 	// volumes the owner asks to delete because the change drops them (#412).
 	// Not a fourth variant, so it is not counted among them.
 	DeleteVolumes []string `json:"deleteVolumes"`
+	// AcceptPrivilegeTier is the owner's consent to a catalog upgrade that
+	// raises the app's privilege tier (dec 12, #522): the highest tier they
+	// accept. Only beside "source"; a tier string exactly as tileschema spells
+	// it. Ignored when the upgrade raises nothing.
+	AcceptPrivilegeTier *string `json:"acceptPrivilegeTier"`
 }
 
 // PUT /api/apps/{id}/compose
@@ -488,8 +507,10 @@ type composeRequest struct {
 // ComposeStash under the job's id before the job starts, read from there by
 // the job's pull and persist steps, and discarded when the job ends.
 //
-// No privilege re-consent is asked for here: consent is the UI's, as it is at
-// install (Bryce, 2026-09-12).
+// Privilege consent is asked for here only for a catalog upgrade that raises
+// the app's tier (dec 12, Bryce 2026-09-26; #522): see putComposeFromCatalog.
+// A custom compose and a re-apply ask for none, and neither does install (the
+// 2026-09-12 ruling stands there).
 //
 // A change must not orphan a volume (#412). A compose that no longer declares
 // a named volume the app has on disk — a renamed key, a dropped service — is
@@ -544,10 +565,20 @@ func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, `name exactly one of "source", "composeYaml" or "sha256"`)
 		return
 	}
+	if req.AcceptPrivilegeTier != nil {
+		if req.Source == nil {
+			writeError(w, http.StatusBadRequest, `"acceptPrivilegeTier" is consent to a catalog upgrade, so it goes only beside "source"`)
+			return
+		}
+		if !tileschema.KnownTier(*req.AcceptPrivilegeTier) {
+			writeError(w, http.StatusBadRequest, `"acceptPrivilegeTier" must be "routine", "elevated" or "host-trusting"`)
+			return
+		}
+	}
 
 	switch {
 	case req.Source != nil:
-		s.putComposeFromCatalog(w, r, app, *req.Source, req.DeleteVolumes)
+		s.putComposeFromCatalog(w, r, app, *req.Source, req.AcceptPrivilegeTier, req.DeleteVolumes)
 	case req.ComposeYAML != nil:
 		s.putComposeYAML(w, r, app, *req.ComposeYAML, req.DeleteVolumes)
 	default:
@@ -560,7 +591,16 @@ func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
 // flag and the saga ask, so the badge cannot offer an upgrade this refuses.
 // The compose itself is not taken from the request; the saga resolves it from
 // the verified store when it runs.
-func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, app *apps.App, source string, deleteVolumes []string) {
+//
+// An upgrade that raises the app's privilege tier is refused with 409 unless
+// acceptPrivilegeTier covers the tier the tile declares (dec 12, #522). The
+// 409 carries privilegeRaise — the tiers, grants and reason the consent
+// prompt shows — beside the error. With consent, it is recorded on the app
+// {at, by, what} before the job starts, and the job refuses the raise unless
+// that record is for the very compose it pulls. The consent check comes
+// before the dropped-volume check, which asks the node: an owner is asked
+// whether to accept the privilege before being asked what to delete.
+func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, app *apps.App, source string, acceptTier *string, deleteVolumes []string) {
 	if source != "catalog" {
 		writeError(w, http.StatusBadRequest, `source must be "catalog"`)
 		return
@@ -574,6 +614,11 @@ func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, a
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	change := apps.UpgradePrivilege(app, target.Tile)
+	if change.Raises && (acceptTier == nil || !tileschema.TierCovers(*acceptTier, change.Privilege.Tier)) {
+		writePrivilegeRaise(w, change, target)
+		return
+	}
 	named, ok := s.deleteVolumesFor(w, app, deleteVolumes)
 	if !ok {
 		return
@@ -581,7 +626,71 @@ func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, a
 	if s.refuseDroppedVolumes(w, r, app, named, s.catalogDropped(r, app, target.Tile)) {
 		return
 	}
+	if change.Raises {
+		by := userName(r)
+		if by == "" {
+			// Consent is someone's. A record with no name on it is not one.
+			writeError(w, http.StatusInternalServerError, "no authenticated user to record the privilege consent against; nothing was recorded or started")
+			return
+		}
+		ack := apps.PrivilegeAck{At: time.Now().UTC(), By: by, What: change.Consent(target)}
+		if err := s.apps.RecordPrivilegeAck(r.Context(), app.ID, app.ComposeSHA256, ack); err != nil {
+			if errors.Is(err, apps.ErrComposeChanged) {
+				writeError(w, http.StatusConflict, "the app's compose changed while this upgrade was being requested; nothing was recorded or started — check the app and request the upgrade again")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	s.submitComposeJob(w, r, "app.upgrade", apps.ComposeChangeSpec{AppID: app.ID, DeleteVolumes: named}, nil)
+}
+
+// privilegeRaise is the body of the 409 a tier-raising upgrade without
+// consent gets: what the consent prompt needs to show, from the tile the
+// upgrade would install.
+type privilegeRaise struct {
+	// FromTier is resolved: routine when nothing was recorded, which
+	// FromTierRecorded then says.
+	FromTier         string   `json:"fromTier"`
+	FromTierRecorded bool     `json:"fromTierRecorded"`
+	Tier             string   `json:"tier"`
+	DockerSocket     bool     `json:"dockerSocket"`
+	Grants           []string `json:"grants"`
+	Why              string   `json:"why,omitempty"`
+	CatalogVersion   int      `json:"catalogVersion"`
+}
+
+func writePrivilegeRaise(w http.ResponseWriter, change apps.PrivilegeChange, target apps.UpgradeTarget) {
+	grants := change.Privilege.Grants
+	if grants == nil {
+		grants = []string{}
+	}
+	writeJSON(w, http.StatusConflict, struct {
+		Error          string         `json:"error"`
+		PrivilegeRaise privilegeRaise `json:"privilegeRaise"`
+	}{
+		Error: change.Refusal(),
+		PrivilegeRaise: privilegeRaise{
+			FromTier:         tileschema.Privilege{Tier: change.FromTier}.EffectiveTier(),
+			FromTierRecorded: change.FromTier != "",
+			Tier:             change.Privilege.Tier,
+			DockerSocket:     change.Privilege.DockerSocket,
+			Grants:           grants,
+			Why:              change.Privilege.Why,
+			CatalogVersion:   target.CatalogVersion,
+		},
+	})
+}
+
+// userName is the authenticated user's name, for a record of who did
+// something — never the session token, never the WebAuthn handle. "" when the
+// request carries no user, which the session middleware does not let happen.
+func userName(r *http.Request) string {
+	if u, ok := auth.UserFromContext(r.Context()); ok && u != nil {
+		return u.Name
+	}
+	return ""
 }
 
 // putComposeYAML is {"composeYaml":"…"}: replace a custom app's compose.

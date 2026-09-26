@@ -400,6 +400,36 @@ export interface App {
   revertAvailable?: boolean;
   /** The hash a re-apply names. Absent unless revertAvailable. */
   previousComposeSha256?: string;
+  /**
+   * The tier the installed compose's tile declared (#522). Absent for a custom
+   * app, and for a catalog app installed before the tier was recorded — which
+   * an upgrade reads as routine.
+   */
+  privilegeTier?: PrivilegeTier;
+  /**
+   * The upgrade on offer raises the app's privilege tier, so it needs the
+   * owner's consent (dec 12, #522). Always present on GET /api/apps and
+   * /api/apps/{id}; false unless upgradeAvailable.
+   */
+  upgradeRaisesPrivilege?: boolean;
+  /** The privilege the upgrade's tile declares, tier resolved. Absent unless upgradeAvailable. */
+  upgradePrivilege?: TilePrivilege;
+  /** The most recent consent to a tier-raising upgrade: who, when, and what. */
+  privilegeAck?: PrivilegeAck;
+}
+
+/** An owner's consent to a catalog upgrade that raised an app's tier (#522). */
+export interface PrivilegeAck {
+  at: string;
+  by: string;
+  what: {
+    fromTier: string;
+    tier: PrivilegeTier;
+    dockerSocket?: boolean;
+    grants?: string[];
+    catalogVersion: number;
+    composeSha256: string;
+  };
 }
 
 /**
@@ -480,7 +510,7 @@ export interface CatalogStatus {
   // from. Absent when nothing polls or the source is not github.com.
   sourceRepo?: string;
 }
-import type { TilePrivilege } from './privilege';
+import type { PrivilegeTier, TilePrivilege } from './privilege';
 
 export interface CatalogTile {
   id: string;
