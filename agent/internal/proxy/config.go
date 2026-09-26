@@ -17,7 +17,38 @@ type AppRoute struct {
 	UpstreamTLS  bool // the app speaks HTTPS on UpstreamPort — dial it over TLS
 	CertPath     string
 	KeyPath      string
+	// CertSHA256 is the hex SHA-256 of the certificate file's bytes at render
+	// time (LeafStore.Routes). It is rendered into the config so that the
+	// config changes when — and only when — the leaf does; see certDigestTag.
+	CertSHA256 string
 }
+
+// certDigestTagPrefix marks the load_files tag that carries a leaf's content
+// digest (geekdojo-brain#611).
+//
+// Caddy reads load_files certificates only when it loads a config, and its
+// /load compares the new config's bytes with the running one and does nothing
+// when they match (caddy.changeConfig, Caddy 2.11.4). The config names each
+// leaf by FILE PATH, and a renewal rewrites the same path, so before this tag a
+// renewed leaf produced a byte-identical config: /load no-oped, and Caddy went
+// on serving the old certificate until something restarted it. Carrying the
+// digest makes the config a function of what is on disk, so Caddy's own
+// comparison reloads exactly when a leaf's bytes changed.
+//
+// Not Cache-Control: must-revalidate on every push, which forces a reload even
+// for an identical config: every Caddy reload closes every proxied WebSocket
+// on the node (reverse_proxy stream_close_delay defaults to 0), and the leaf
+// sweep re-delivers every app's leaf daily, so forcing would cut every app's
+// streams once per app per day. Caddy 2.11.4 has no admin endpoint that
+// reloads certificates alone.
+//
+// A tag, because tags are the one free-form field on a load_files entry
+// (Caddy decodes config strictly and rejects unknown keys); nothing selects
+// certificates by tag here (the connection policies select by SNI). Only the
+// certificate is hashed: a renewal always issues a new certificate, a key that
+// changed without one would not match it anyway, and a key-derived value has
+// no business in a config Caddy autosaves to disk and serves on GET /config/.
+const certDigestTagPrefix = "rasputin-leaf-sha256:"
 
 // RenderCaddyConfig builds the full Caddy admin JSON for a node's app routes.
 // Exposure (ADR-0004 §9) is enforced by BIND, using two HTTP servers:
@@ -79,10 +110,14 @@ func RenderCaddyConfig(routes []AppRoute, tailnetAddr, lanAddr string, certPort 
 		if r.CertPath == "" || r.KeyPath == "" {
 			continue
 		}
+		tags := []string{r.AppID}
+		if r.CertSHA256 != "" {
+			tags = append(tags, certDigestTagPrefix+r.CertSHA256)
+		}
 		loadFiles = append(loadFiles, map[string]any{
 			"certificate": r.CertPath,
 			"key":         r.KeyPath,
-			"tags":        []string{r.AppID},
+			"tags":        tags,
 		})
 	}
 

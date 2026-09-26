@@ -63,7 +63,11 @@ func NewReconciler(store *LeafStore, adminSocket string, tailnetIP, lanIP func()
 }
 
 // Reconcile renders the current config and loads it into Caddy. Idempotent —
-// Caddy no-ops an unchanged config, and the render is stable.
+// Caddy no-ops an unchanged config, and the render is stable. A renewed leaf is
+// a changed config, not an unchanged one: the render carries each leaf's
+// content digest (certDigestTagPrefix), because the file paths alone do not
+// change on renewal and Caddy would otherwise keep the old certificate
+// (geekdojo-brain#611).
 func (r *Reconciler) Reconcile() error {
 	routes, err := r.store.Routes()
 	if err != nil {
