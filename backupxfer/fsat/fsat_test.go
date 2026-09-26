@@ -3,6 +3,7 @@
 package fsat
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,5 +140,99 @@ func TestOpenRootRefusesAFile(t *testing.T) {
 	}
 	if _, err := OpenRoot(p); err == nil {
 		t.Fatal("a file opened as a root")
+	}
+}
+
+// TestEveryPrimitiveRefusesANameThatIsNotOneComponent: O_NOFOLLOW guards only
+// the final component, so without the inline check openat(root, "../x") would
+// climb out of root. Each hostile name is refused with ErrNotAComponent by
+// every fd-relative primitive, before any syscall, and nothing appears outside
+// root. A leading-dot name (the ingest's ".upload-" temp, the restore's
+// ".restore-staging-") is a single component and still works.
+func TestEveryPrimitiveRefusesANameThatIsNotOneComponent(t *testing.T) {
+	outer := t.TempDir()
+	inner := filepath.Join(outer, "root")
+	if err := os.Mkdir(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(inner, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inner, "sub", "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outer, "secret"), []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(outer, "secretdir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := OpenRoot(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	hostile := []string{
+		"", ".", "..", "../secret", "../secretdir", "../escaped",
+		"sub/f", "sub/../../secret", "/etc/passwd", "sub/", "./sub",
+	}
+	refused := func(t *testing.T, what, name string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrNotAComponent) {
+			t.Errorf("%s(%q): err=%v, want ErrNotAComponent", what, name, err)
+		}
+	}
+	for _, name := range hostile {
+		f, err := OpenDir(root, name)
+		refused(t, "OpenDir", name, err)
+		if f != nil {
+			_ = f.Close()
+		}
+		f, err = MkdirOpen(root, name)
+		refused(t, "MkdirOpen", name, err)
+		if f != nil {
+			_ = f.Close()
+		}
+		f, err = OpenFile(root, name)
+		refused(t, "OpenFile", name, err)
+		if f != nil {
+			_ = f.Close()
+		}
+		f, err = CreateExclusive(root, name)
+		refused(t, "CreateExclusive", name, err)
+		if f != nil {
+			_ = f.Close()
+		}
+		_, err = Exists(root, name)
+		refused(t, "Exists", name, err)
+		refused(t, "Unlink", name, Unlink(root, name))
+		refused(t, "Rename(from)", name, Rename(root, name, "ok"))
+		refused(t, "Rename(to)", name, Rename(root, "sub", name))
+	}
+
+	// Nothing escaped: the outside files are intact, nothing new beside them.
+	if b, err := os.ReadFile(filepath.Join(outer, "secret")); err != nil || string(b) != "s" {
+		t.Fatalf("secret outside root was touched: %q, %v", b, err)
+	}
+	ents, err := os.ReadDir(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 3 {
+		t.Fatalf("entries beside root changed: %v", ents)
+	}
+	if _, err := os.Lstat(filepath.Join(inner, "sub")); err != nil {
+		t.Fatalf("sub was renamed or removed: %v", err)
+	}
+
+	// A single component with a leading dot is still a name.
+	f, err := CreateExclusive(root, ".upload-x")
+	if err != nil {
+		t.Fatalf("leading-dot component refused: %v", err)
+	}
+	_ = f.Close()
+	if err := Rename(root, ".upload-x", "x"); err != nil {
+		t.Fatal(err)
 	}
 }

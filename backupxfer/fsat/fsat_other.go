@@ -16,6 +16,10 @@ const Supported = false
 // ErrUnsupported is what every primitive returns here.
 var ErrUnsupported = errors.New("fsat: no-follow filesystem primitives are only supported on unix (needs openat with O_NOFOLLOW)")
 
+// ErrNotAComponent is never returned here (every primitive refuses with
+// ErrUnsupported first); it exists so callers can name it on every platform.
+var ErrNotAComponent = errors.New("fsat: not a single path component")
+
 func OpenRoot(string) (*os.File, error)                  { return nil, ErrUnsupported }
 func OpenDir(*os.File, string) (*os.File, error)         { return nil, ErrUnsupported }
 func MkdirOpen(*os.File, string) (*os.File, error)       { return nil, ErrUnsupported }
