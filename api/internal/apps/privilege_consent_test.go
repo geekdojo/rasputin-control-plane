@@ -238,3 +238,62 @@ func TestUpgradeSaga_RefusesARaiseWithNoRecordedConsent(t *testing.T) {
 		t.Errorf("after the consented upgrade: tier=%q compose=%q", row.PrivilegeTier, row.ComposeYAML)
 	}
 }
+
+// Registered in .github/security-resolvers.tsv: CheckUpgradeConsent decides
+// whether a raise is enforced from the app row, so every shape of that row's
+// consent record that is not exactly "consent to this compose at this tier"
+// must refuse — absent, empty, malformed, and a tier this build cannot rank.
+func TestCheckUpgradeConsent_FailsClosedOnEveryShapeOfRecord(t *testing.T) {
+	target := UpgradeTarget{Tile: hostTrustingTile(composeV2), CatalogVersion: 2}
+	hash := ComposeHash(composeV2)
+	cases := []struct {
+		name      string
+		installed string
+		ack       *PrivilegeAck
+	}{
+		{"absent", tileschema.TierRoutine, nil},
+		{"empty record", tileschema.TierRoutine, &PrivilegeAck{}},
+		{"empty tier", tileschema.TierRoutine, &PrivilegeAck{What: PrivilegeConsent{ComposeSHA256: hash}}},
+		{"empty hash", tileschema.TierRoutine, &PrivilegeAck{What: PrivilegeConsent{Tier: tileschema.TierHostTrusting}}},
+		{"malformed tier", tileschema.TierRoutine, &PrivilegeAck{What: PrivilegeConsent{Tier: "HOST-TRUSTING", ComposeSHA256: hash}}},
+		{"unknown tier", tileschema.TierRoutine, &PrivilegeAck{What: PrivilegeConsent{Tier: "root-plus", ComposeSHA256: hash}}},
+		{"malformed hash", tileschema.TierRoutine, &PrivilegeAck{What: PrivilegeConsent{Tier: tileschema.TierHostTrusting, ComposeSHA256: strings.ToUpper(hash)}}},
+		// An installed tier this build cannot rank is not read as "already
+		// host-trusting": it reads as routine, and the raise asks.
+		{"unknown installed tier", "root-plus", nil},
+		{"empty installed tier", "", nil},
+	}
+	for _, c := range cases {
+		app := installedApp("a")
+		app.PrivilegeTier = c.installed
+		app.PrivilegeAck = c.ack
+		if err := CheckUpgradeConsent(app, target); !errors.Is(err, ErrPrivilegeConsentRequired) {
+			t.Errorf("%s: err = %v, want ErrPrivilegeConsentRequired", c.name, err)
+		}
+	}
+}
+
+// An unreadable consent record — one that does not decode — is never read as
+// "no consent was needed" or as consent to anything: the row does not load,
+// and the upgrade job fails before the node is asked anything.
+func TestUpgradeSaga_AnUnreadableConsentRecordRefuses(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store, inv := seedUpgradeApp(t, testAppID)
+	pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
+	if _, err := store.db.ExecContext(ctx, `UPDATE apps SET privilege_ack_at = 1, privilege_ack_by = 'bryce', privilege_ack_what = '{not json' WHERE id = ?`, testAppID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, testAppID); err == nil {
+		t.Fatal("a consent record that does not decode loaded")
+	}
+	step, err := runUpgrade(t, store, inv, nc, lookupOf(hostTrustingTile(composeV2), 2), testAppID)
+	if err == nil || step != "load" {
+		t.Fatalf("want the load step to refuse, got step=%q err=%v", step, err)
+	}
+	select {
+	case cmd := <-pulls:
+		t.Fatalf("an unreadable consent record let a pull through: %+v", cmd)
+	case <-time.After(100 * time.Millisecond):
+	}
+}

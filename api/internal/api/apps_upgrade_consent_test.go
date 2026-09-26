@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -274,5 +275,25 @@ func TestAppsUpgradeConsent_InstallIsUnaffected(t *testing.T) {
 	created = decodeBody[apps.App](t, w.Body.String())
 	if row, _ := f.appsStore.Get(f.ctx, created.ID); row.PrivilegeTier != tileschema.TierRoutine {
 		t.Errorf("routine install recorded tier %q", row.PrivilegeTier)
+	}
+}
+
+// Consent is recorded against a named user or not at all. The session
+// middleware never lets a request through without one, so this calls the
+// handler directly to prove the handler does not lean on that.
+func TestAppsUpgradeConsent_NoUserRecordsNothing(t *testing.T) {
+	f, _, _, got := upgradeFixtureWith(t, hostTrustingBundleTile())
+	seedTieredApp(t, f, haID, "ha", "homeassistant", tileschema.TierRoutine)
+
+	r := httptest.NewRequest(http.MethodPut, "/api/apps/"+haID+"/compose", strings.NewReader(`{"source":"catalog","acceptPrivilegeTier":"host-trusting"}`))
+	r.SetPathValue("id", haID)
+	w := httptest.NewRecorder()
+	f.srv.handlePutAppCompose(w, r)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("no user: want 500, got %d (%s)", w.Code, w.Body.String())
+	}
+	assertNoComposeJob(t, f, got)
+	if row, _ := f.appsStore.Get(f.ctx, haID); row.PrivilegeAck != nil {
+		t.Errorf("a nameless consent was recorded: %+v", row.PrivilegeAck)
 	}
 }

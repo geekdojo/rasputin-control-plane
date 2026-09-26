@@ -627,7 +627,13 @@ func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 	if change.Raises {
-		ack := apps.PrivilegeAck{At: time.Now().UTC(), By: userName(r), What: change.Consent(target)}
+		by := userName(r)
+		if by == "" {
+			// Consent is someone's. A record with no name on it is not one.
+			writeError(w, http.StatusInternalServerError, "no authenticated user to record the privilege consent against; nothing was recorded or started")
+			return
+		}
+		ack := apps.PrivilegeAck{At: time.Now().UTC(), By: by, What: change.Consent(target)}
 		if err := s.apps.RecordPrivilegeAck(r.Context(), app.ID, app.ComposeSHA256, ack); err != nil {
 			if errors.Is(err, apps.ErrComposeChanged) {
 				writeError(w, http.StatusConflict, "the app's compose changed while this upgrade was being requested; nothing was recorded or started — check the app and request the upgrade again")
