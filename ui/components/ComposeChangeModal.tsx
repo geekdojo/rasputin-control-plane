@@ -1,23 +1,31 @@
 'use client';
 
-import { AlertTriangle, ArrowUpCircle, FileCode, RotateCcw, X } from 'lucide-react';
+import { AlertTriangle, ArrowUpCircle, FileCode, RotateCcw, ShieldAlert, X } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 import { getAppVolumes, getCatalogStatus, putAppCompose } from '../lib/api';
 import {
   DROP_SELECTION_DEFAULT,
+  PRIVILEGE_CONSENT_DEFAULT,
   REVERT_PROMPT,
   UPGRADE_WARNING_PARTS,
   bodyFor,
+  canConfirmUpgrade,
   canResubmitWithDeletions,
   canSubmitEdit,
+  consentedTier,
   dropDeletionStatement,
+  privilegeConsentLabel,
+  privilegeRaiseStatement,
   toggleDropSelection,
+  upgradeRaiseOf,
   upgradeReviewUrl,
   withDeleteVolumes,
   type ComposeChangeBody,
   type ComposeChangeKind,
   type ComposeOutcome,
+  type PrivilegeRaise,
 } from '../lib/compose-change';
+import { TIER_COPY, grantLabel } from '../lib/privilege';
 import type { App, AppVolumesResponse, DroppedVolume } from '../lib/types';
 import { deleteWarning } from '../lib/volumes';
 import { Btn, DIM, FG, HAIR_SOFT, Textarea } from './kit';
@@ -32,6 +40,12 @@ import { VolumeBackupTable, type VolumeTableRow } from './VolumeBackupTable';
 //            volumes by name and class with each one's last capture, as
 //            information, and exactly one static warning: UPGRADE_WARNING,
 //            whose "GitHub" links to the catalog changes (upgradeReviewUrl).
+//            When the upgrade RAISES the app's privilege tier (dec 12, #522),
+//            the confirm also shows what is escalated — tier, runtime socket,
+//            each grant in the owner's words, the publisher's reason — and
+//            UPGRADE stays disabled until the owner ticks consent. The server
+//            enforces it: without acceptPrivilegeTier it answers 409, and
+//            that refusal opens the same prompt.
 //   edit     a custom app's compose, edited here and redeployed in place.
 //   revert   re-apply a failed app's previous compose. The confirm is one
 //            static prompt, REVERT_PROMPT, and nothing else.
@@ -80,6 +94,11 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
   const [selected, setSelected] = useState<string[]>([...DROP_SELECTION_DEFAULT]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The raise this upgrade carries, as the page read it — or as a 409 said it
+  // when the catalog moved after the page loaded. null: nothing is raised.
+  const [raise, setRaise] = useState<PrivilegeRaise | null>(() => (kind === 'upgrade' ? upgradeRaiseOf(app) : null));
+  const [consented, setConsented] = useState<boolean>(PRIVILEGE_CONSENT_DEFAULT);
+  const consentId = useId();
 
   useEffect(() => {
     if (kind !== 'upgrade') return;
@@ -133,6 +152,13 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
         onFinished(kind, app, outcome);
         onClose();
         return;
+      case 'privilege':
+        // Consent was not given for what the upgrade now takes. Show it, say
+        // why in the server's words, and ask again from unticked.
+        setRaise(outcome.raise);
+        setConsented(PRIVILEGE_CONSENT_DEFAULT);
+        setError(outcome.message);
+        return;
       case 'dropped':
         setRefusedBody(body);
         setRefusal({ dropped: outcome.dropped, notDropped: outcome.notDropped });
@@ -147,7 +173,7 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
   function confirm() {
     let body: ComposeChangeBody;
     try {
-      body = bodyFor(kind, app, draft);
+      body = bodyFor(kind, app, draft, consentedTier(raise, consented));
     } catch (e: unknown) {
       setError(String(e instanceof Error ? e.message : e));
       return;
@@ -201,7 +227,19 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
         {inDropped ? (
           <DroppedBody app={app} refusal={refusal} selected={selected} busy={busy} onToggle={(name) => setSelected((s) => toggleDropSelection(refusal.dropped, s, name))} />
         ) : kind === 'upgrade' ? (
-          <UpgradeBody app={app} volumes={volumes} reviewUrl={upgradeReviewUrl(sourceRepo, app)} />
+          <>
+            {raise && (
+              <PrivilegeRaisePanel
+                app={app}
+                raise={raise}
+                consentId={consentId}
+                consented={consented}
+                busy={busy}
+                onConsent={setConsented}
+              />
+            )}
+            <UpgradeBody app={app} volumes={volumes} reviewUrl={upgradeReviewUrl(sourceRepo, app)} />
+          </>
         ) : kind === 'revert' ? (
           <p style={{ color: FG, fontSize: 11, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{REVERT_PROMPT}</p>
         ) : (
@@ -248,7 +286,7 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
               {busy ? 'APPLYING…' : `DELETE ${refusal.dropped.length} VOLUME${refusal.dropped.length === 1 ? '' : 'S'} AND APPLY`}
             </Btn>
           ) : kind === 'upgrade' ? (
-            <Btn variant="primary" disabled={busy || volumes === null} onClick={confirm}>
+            <Btn variant="primary" disabled={busy || volumes === null || !canConfirmUpgrade(raise, consented)} onClick={confirm}>
               {busy ? 'UPGRADING…' : 'UPGRADE'}
             </Btn>
           ) : kind === 'revert' ? (
@@ -309,6 +347,69 @@ function UpgradeBody({ app, volumes, reviewUrl }: { app: App; volumes: AppVolume
         {UPGRADE_WARNING_PARTS.after}
       </div>
     </>
+  );
+}
+
+// PrivilegeRaisePanel — what a tier-raising upgrade escalates, and the
+// consent the server requires for it (dec 12, #522). The catalog page's
+// PrivilegePanel idiom: the tier in its colour with its summary, the
+// publisher's reason, and each grant as a sentence (grantLabel), plus the
+// explainer that teaches rather than warns.
+function PrivilegeRaisePanel({
+  app,
+  raise,
+  consentId,
+  consented,
+  busy,
+  onConsent,
+}: {
+  app: App;
+  raise: PrivilegeRaise;
+  consentId: string;
+  consented: boolean;
+  busy: boolean;
+  onConsent: (v: boolean) => void;
+}) {
+  const copy = TIER_COPY[raise.tier];
+  return (
+    <div style={{ border: `1px solid ${copy.color}55`, background: `${copy.color}0d`, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <ShieldAlert size={12} color={copy.color} />
+        <span style={{ color: copy.color, fontSize: 10, fontFamily: MONO, letterSpacing: '0.06em' }}>
+          PRIVILEGE RAISED: {TIER_COPY[raise.fromTier].label} → {copy.label}
+        </span>
+      </div>
+      <p style={{ color: FG, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{privilegeRaiseStatement(app.name, raise)}</p>
+      {raise.why && <p style={{ color: FG, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{raise.why}</p>}
+      {raise.grants.length > 0 && (
+        <div>
+          <div style={{ color: DIM, fontSize: 9, fontFamily: MONO, letterSpacing: '0.12em', marginBottom: 4 }}>AFTER THIS UPGRADE, THIS APP CAN</div>
+          <ul style={{ margin: 0, paddingLeft: 16, color: FG, fontSize: 10, fontFamily: MONO, lineHeight: 1.7 }}>
+            {raise.grants.map((g) => (
+              <li key={g} title={g}>
+                {grantLabel(g)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{copy.explainer}</p>
+      <label
+        htmlFor={consentId}
+        style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', color: FG, fontSize: 10, fontFamily: MONO, lineHeight: 1.6 }}
+      >
+        <input
+          id={consentId}
+          type="checkbox"
+          checked={consented}
+          onChange={(e) => onConsent(e.target.checked)}
+          disabled={busy}
+          aria-label={privilegeConsentLabel(app.name, raise, app.targetNode)}
+          style={{ marginTop: 3 }}
+        />
+        <span>{privilegeConsentLabel(app.name, raise, app.targetNode)}</span>
+      </label>
+    </div>
   );
 }
 

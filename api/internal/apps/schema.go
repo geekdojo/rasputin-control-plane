@@ -26,7 +26,12 @@ CREATE TABLE IF NOT EXISTS apps (
     previous_compose_catalog_version INTEGER NOT NULL DEFAULT 0, -- compose_catalog_version as it was beside previous_compose_yaml (#411)
     previous_published_port INTEGER NOT NULL DEFAULT 0, -- published_port as it was beside previous_compose_yaml
     previous_web_tls        INTEGER NOT NULL DEFAULT 0, -- web_tls as it was beside previous_compose_yaml
-    previous_deploy_budget_s INTEGER NOT NULL DEFAULT 0 -- deploy_budget_s as it was beside previous_compose_yaml
+    previous_deploy_budget_s INTEGER NOT NULL DEFAULT 0, -- deploy_budget_s as it was beside previous_compose_yaml
+    privilege_tier          TEXT NOT NULL DEFAULT '',  -- the installed compose's tile tier ('' = custom, or not recorded) (#522)
+    previous_privilege_tier TEXT NOT NULL DEFAULT '',  -- privilege_tier as it was beside previous_compose_yaml
+    privilege_ack_at        INTEGER,                   -- consent to a tier-raising upgrade (dec 12); NULL = none needed yet
+    privilege_ack_by        TEXT NOT NULL DEFAULT '',  -- the consenting user's name (never a token)
+    privilege_ack_what      TEXT NOT NULL DEFAULT ''   -- JSON PrivilegeConsent: what was accepted
 );
 CREATE INDEX IF NOT EXISTS idx_apps_target_node ON apps(target_node);
 CREATE INDEX IF NOT EXISTS idx_apps_status      ON apps(last_status);
@@ -102,4 +107,19 @@ var migrations = []string{
 	`ALTER TABLE apps ADD COLUMN previous_published_port INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE apps ADD COLUMN previous_web_tls INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE apps ADD COLUMN previous_deploy_budget_s INTEGER NOT NULL DEFAULT 0`,
+	// privilege_tier / previous_privilege_tier / privilege_ack_*: server-
+	// enforced consent on a catalog upgrade that raises the app's tier
+	// (auth-methodology §9 dec 12, geekdojo/geekdojo-brain#522).
+	//
+	// privilege_tier is NOT backfilled, and '' is the honest answer: nothing
+	// recorded which tier an existing install's tile declared, and the catalog
+	// in effect may no longer carry that compose. An upgrade reads '' as
+	// routine, so an existing elevated or host-trusting install asks for
+	// consent once, on its next tier-carrying upgrade — the direction that
+	// asks rather than the one that assumes.
+	`ALTER TABLE apps ADD COLUMN privilege_tier TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE apps ADD COLUMN previous_privilege_tier TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE apps ADD COLUMN privilege_ack_at INTEGER`,
+	`ALTER TABLE apps ADD COLUMN privilege_ack_by TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE apps ADD COLUMN privilege_ack_what TEXT NOT NULL DEFAULT ''`,
 }
