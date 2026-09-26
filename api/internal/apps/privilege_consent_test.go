@@ -288,6 +288,8 @@ var corruptions = []struct {
 	{"empty object", `privilege_ack_at = 1, privilege_ack_by = 'bryce', privilege_ack_what = '{}'`},
 	{"unknown tier", `privilege_ack_at = 1, privilege_ack_by = 'bryce', privilege_ack_what = '{"tier":"root-plus","composeSha256":"` + strings.Repeat("a", 64) + `"}'`},
 	{"bad hash", `privilege_ack_at = 1, privilege_ack_by = 'bryce', privilege_ack_what = '{"tier":"host-trusting","composeSha256":"nope"}'`},
+	{"no name", `privilege_ack_at = 1, privilege_ack_by = '', privilege_ack_what = '{"tier":"host-trusting","composeSha256":"` + strings.Repeat("a", 64) + `"}'`},
+	{"unknown field", `privilege_ack_at = 1, privilege_ack_by = 'bryce', privilege_ack_what = '{"tier":"host-trusting","composeSha256":"` + strings.Repeat("a", 64) + `","scope":"all"}'`},
 	{"timestamp missing", `privilege_ack_at = NULL, privilege_ack_by = 'bryce', privilege_ack_what = '{"tier":"host-trusting","composeSha256":"` + strings.Repeat("a", 64) + `"}'`},
 	{"timestamp not a number", `privilege_ack_at = 'yesterday', privilege_ack_by = 'bryce', privilege_ack_what = '{"tier":"host-trusting","composeSha256":"` + strings.Repeat("a", 64) + `"}'`},
 }

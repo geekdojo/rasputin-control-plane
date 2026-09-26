@@ -594,9 +594,9 @@ func scanApp(scan func(...any) error) (*App, error) {
 // readPrivilegeAck turns the three privilege_ack_* columns into the app's
 // consent record (#522), never failing the row.
 //
-// A record this build cannot trust — a timestamp that is not a number, JSON
-// that does not decode, or a decoded record that names no tier it knows or no
-// compose hash — is not "no consent was needed" and not consent to anything.
+// A record this build cannot trust — a timestamp that is not a number, no
+// consenting user's name, JSON that does not decode strictly, or a decoded
+// record that names no tier it knows or no compose hash — is not "no consent was needed" and not consent to anything.
 // It comes back flagged Unreadable, carrying no consent, and the app loads
 // with the rest of its row: one bad record must not take GET /api/apps, the
 // backup fan-out or the reconcile sweep down with it. It fails closed where
@@ -624,8 +624,14 @@ func readPrivilegeAck(appID string, ackAt sql.NullString, by, what string) *Priv
 	if err != nil {
 		return unreadable("timestamp missing or not a number")
 	}
+	if by == "" {
+		// The writer refuses a consent with no name on it; so does the reader.
+		return unreadable("no name")
+	}
 	var consent PrivilegeConsent
-	if err := json.Unmarshal([]byte(what), &consent); err != nil {
+	dec := json.NewDecoder(strings.NewReader(what))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&consent); err != nil || dec.More() {
 		return unreadable("does not decode")
 	}
 	if !tileschema.KnownTier(consent.Tier) || !ValidComposeHash(consent.ComposeSHA256) {
