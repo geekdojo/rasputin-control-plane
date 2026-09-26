@@ -235,7 +235,8 @@ func TestRenderCaddyConfig_CertDigestTag(t *testing.T) {
 	if render(route) == render(renewed) {
 		t.Error("renders differing only in the leaf digest are byte-identical; Caddy would no-op the renewal")
 	}
-	if render(route) != render(route) {
+	first, second := render(route), render(route)
+	if first != second {
 		t.Error("the same routes rendered differently; every push would reload Caddy")
 	}
 }
