@@ -6,6 +6,8 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,6 +53,9 @@ func (s *LeafStore) metaPath(appID string) string { return filepath.Join(s.appDi
 // Write stores appID's leaf and route metadata, each written atomically (temp
 // + rename). Caddy reads the pair on config (re)load, not via a filewatcher,
 // so an atomic rename is safe here (unlike the Headscale extra_records file).
+// It also means rewriting the files changes nothing Caddy serves until a
+// config that differs is loaded — which is why Routes carries each
+// certificate's digest into the config (geekdojo-brain#611).
 //
 // The app's directory is 0700 and the key and route metadata in it are 0600;
 // the certificate is 0644, set explicitly, because a certificate is public by
@@ -107,6 +112,15 @@ func (s *LeafStore) Routes() ([]AppRoute, error) {
 		if json.Unmarshal(metaJSON, &m) != nil || m.TailnetFQDN == "" || m.UpstreamPort == 0 {
 			continue
 		}
+		// The digest is what makes a renewed leaf reload Caddy (see
+		// certDigestTagPrefix). A certificate that cannot be read is skipped
+		// like any other half-written app: rendered, it would make Caddy
+		// reject the whole config and take every other app down with it.
+		certPEM, err := os.ReadFile(s.CertPath(appID))
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(certPEM)
 		out = append(out, AppRoute{
 			AppID:        appID,
 			TailnetFQDN:  m.TailnetFQDN,
@@ -115,6 +129,7 @@ func (s *LeafStore) Routes() ([]AppRoute, error) {
 			UpstreamPort: m.UpstreamPort,
 			CertPath:     s.CertPath(appID),
 			KeyPath:      s.KeyPath(appID),
+			CertSHA256:   hex.EncodeToString(sum[:]),
 		})
 	}
 	return out, nil

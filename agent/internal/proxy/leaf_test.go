@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"testing"
 )
@@ -54,5 +56,37 @@ func TestLeafStore_Rejects(t *testing.T) {
 	}
 	if err := s.Write("a", []byte("c"), nil, RouteMeta{TailnetFQDN: "a", UpstreamPort: 80}); err == nil {
 		t.Error("empty key should error")
+	}
+}
+
+// Routes carries the certificate's digest (#611) and skips an app whose
+// certificate cannot be read rather than rendering a path Caddy would reject.
+func TestLeafStore_RoutesCertDigest(t *testing.T) {
+	s := NewLeafStore(t.TempDir())
+	meta := RouteMeta{TailnetFQDN: "a.home1.internal", UpstreamPort: 80}
+	if err := s.Write("a1", []byte("CERT-1"), []byte("KEY-1"), meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write("gone", []byte("CERT-G"), []byte("KEY-G"), meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(s.CertPath("gone")); err != nil {
+		t.Fatal(err)
+	}
+
+	routes, err := s.Routes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 || routes[0].AppID != "a1" {
+		t.Fatalf("routes = %+v, want only a1 (gone has no certificate)", routes)
+	}
+	want := sha256.Sum256([]byte("CERT-1"))
+	if routes[0].CertSHA256 != hex.EncodeToString(want[:]) {
+		t.Errorf("CertSHA256 = %q, want sha256(CERT-1) %x", routes[0].CertSHA256, want)
+	}
+	keySum := sha256.Sum256([]byte("KEY-1"))
+	if routes[0].CertSHA256 == hex.EncodeToString(keySum[:]) {
+		t.Error("CertSHA256 is the key's digest; only the certificate may be hashed into the config")
 	}
 }

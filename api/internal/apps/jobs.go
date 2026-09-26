@@ -432,7 +432,9 @@ type LeafResult struct {
 // the way down — the agent writes the leaf into its store and re-renders the
 // node's whole Caddy config from that store, and Caddy no-ops an unchanged
 // config — so the cost of an unnecessary delivery is one bus round-trip, and
-// the sweep runs daily.
+// the sweep runs daily. A renewed leaf is NOT an unchanged config: the render
+// carries each leaf's content digest, so new bytes at the same path reload
+// Caddy and the same bytes do not (geekdojo-brain#611).
 //
 // That is deliberate and it is the lesson of #197. Exposure used to reach a
 // node only as a SIDE EFFECT of the leaf's SAN set drifting, so a revoke that

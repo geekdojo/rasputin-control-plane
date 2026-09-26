@@ -198,3 +198,45 @@ func TestRenderCaddyConfig_UpstreamTLS(t *testing.T) {
 		t.Errorf("dial = %v; skipping verification is only defensible for a loopback upstream", up["dial"])
 	}
 }
+
+// The config carries each leaf's content digest (#611), so two renders that
+// differ only in a leaf's bytes differ, and the digest is only ever added
+// beside the app-id tag.
+func TestRenderCaddyConfig_CertDigestTag(t *testing.T) {
+	route := AppRoute{AppID: "a1", TailnetFQDN: "x.home1.internal", UpstreamPort: 80,
+		CertPath: "/c/a1/leaf.pem", KeyPath: "/c/a1/leaf.key", CertSHA256: "aaaa"}
+	tagsOf := func(t *testing.T, r AppRoute) []any {
+		t.Helper()
+		cfg := renderAndParse(t, []AppRoute{r}, "100.64.0.2", "")
+		lf := cfg["apps"].(map[string]any)["tls"].(map[string]any)["certificates"].(map[string]any)["load_files"].([]any)
+		if len(lf) != 1 {
+			t.Fatalf("load_files = %v, want one entry", lf)
+		}
+		return lf[0].(map[string]any)["tags"].([]any)
+	}
+	if got := tagsOf(t, route); len(got) != 2 || got[0] != "a1" || got[1] != certDigestTagPrefix+"aaaa" {
+		t.Errorf("tags = %v, want [a1 %saaaa]", got, certDigestTagPrefix)
+	}
+	noDigest := route
+	noDigest.CertSHA256 = ""
+	if got := tagsOf(t, noDigest); len(got) != 1 || got[0] != "a1" {
+		t.Errorf("tags without a digest = %v, want [a1]", got)
+	}
+
+	render := func(r AppRoute) string {
+		b, err := RenderCaddyConfig([]AppRoute{r}, "100.64.0.2", "", 443, testAdminSocket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	renewed := route
+	renewed.CertSHA256 = "bbbb"
+	if render(route) == render(renewed) {
+		t.Error("renders differing only in the leaf digest are byte-identical; Caddy would no-op the renewal")
+	}
+	first, second := render(route), render(route)
+	if first != second {
+		t.Error("the same routes rendered differently; every push would reload Caddy")
+	}
+}

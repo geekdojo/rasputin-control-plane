@@ -276,6 +276,12 @@ jobs:
     # and by the 0600 socket on its own, a leftover TCP-admin Caddy retired, and
     # a killed Caddy / restarted agent converging back to the same state.
     #
+    # The same package also carries geekdojo-brain#611's regression: a renewed
+    # app leaf delivered over the agent's own NATS path must be SERVED by the
+    # running Caddy (the handshake's serial changes, no restart, the other app
+    # undisturbed), and an unchanged re-delivery must not reload it. Caddy
+    # no-ops a byte-identical /load, so only a real Caddy can show either.
+    #
     # It needs root (to be the agent, and to drop to uid 65534 for the refusal),
     # so the test binary is built as the runner user and only RUN under sudo.
     # RASPUTIN_CADDY_FUNCTIONAL=required turns the test's skips into failures,

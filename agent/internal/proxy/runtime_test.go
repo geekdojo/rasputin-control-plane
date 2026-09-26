@@ -93,6 +93,79 @@ func TestReconcile_PushesRenderedConfigOverSocket(t *testing.T) {
 	}
 }
 
+// TestReconcile_RenewedLeafReloadsCaddy is the unit half of
+// geekdojo-brain#611. The config names each leaf by FILE PATH, and a renewal
+// rewrites the same path, so a config rendered from paths alone is byte-identical
+// before and after — and Caddy's /load compares bytes and no-ops an identical
+// config, so the new leaf was never read. The pushed config must therefore
+// change whenever the leaf's bytes change, and ONLY then: every Caddy reload
+// closes every proxied WebSocket on the node (reverse_proxy's
+// stream_close_delay defaults to 0), and the sweep re-delivers every app's leaf
+// daily, so a reload on an unchanged leaf would cut every app's streams daily.
+// That is also why the fix is not Cache-Control: must-revalidate on every push,
+// and the request must not carry it.
+func TestReconcile_RenewedLeafReloadsCaddy(t *testing.T) {
+	type push struct {
+		body         string
+		cacheControl string
+	}
+	var pushes []push
+	sock := serveAdminSocket(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/load" || r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		pushes = append(pushes, push{body: string(b), cacheControl: r.Header.Get("Cache-Control")})
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	store := NewLeafStore(t.TempDir())
+	meta := RouteMeta{TailnetFQDN: "kuma.home1.internal", LANFQDN: "kuma.lan.home1.internal", UpstreamPort: 3001}
+	other := RouteMeta{TailnetFQDN: "jellyfin.home1.internal", UpstreamPort: 8096}
+	if err := store.Write("other", []byte("OTHER-CERT"), []byte("OTHER-KEY"), other); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReconciler(store, sock, func() string { return "100.64.0.2" }, func() string { return "192.168.1.2" })
+	deliver := func(cert, key string) {
+		t.Helper()
+		if err := store.Write("kuma", []byte(cert), []byte(key), meta); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Reconcile(); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+	}
+
+	deliver("CERT-1", "KEY-1") // deploy
+	deliver("CERT-2", "KEY-2") // renewal: same paths, new bytes
+	deliver("CERT-2", "KEY-2") // the daily sweep re-asserting the same leaf
+	if len(pushes) != 3 {
+		t.Fatalf("got %d pushes, want 3", len(pushes))
+	}
+
+	if pushes[1].body == pushes[0].body {
+		t.Errorf("a renewed leaf pushed a byte-identical config, which Caddy no-ops: the old leaf keeps being served (#611)\n%s", pushes[1].body)
+	}
+	if pushes[2].body != pushes[1].body {
+		t.Errorf("re-delivering an unchanged leaf changed the pushed config, so Caddy reloads and drops every app's streams:\nbefore: %s\nafter:  %s", pushes[1].body, pushes[2].body)
+	}
+	for i, p := range pushes {
+		if p.cacheControl != "" {
+			t.Errorf("push %d sent Cache-Control %q; a forced reload on every push would cut every app's streams on each daily re-delivery", i, p.cacheControl)
+		}
+	}
+	// The key never enters the config: Caddy autosaves every loaded config to
+	// disk and serves it back on GET /config/.
+	for i, p := range pushes {
+		for _, secret := range []string{"KEY-1", "KEY-2", "OTHER-KEY"} {
+			if strings.Contains(p.body, secret) {
+				t.Errorf("push %d carries key material %q", i, secret)
+			}
+		}
+	}
+}
+
 func TestReconcile_NoSocketIsAnError(t *testing.T) {
 	sock := shortTempDir(t) + "/absent.sock"
 	r := NewReconciler(NewLeafStore(t.TempDir()), sock, func() string { return "" }, func() string { return "" })
