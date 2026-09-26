@@ -26,7 +26,7 @@
 // A custom compose can inline secrets. Nothing here logs one, stores one, or
 // puts one anywhere but the body of the request in flight.
 
-import { TIER_COPY, TIER_RANK, type PrivilegeTier } from './privilege';
+import { TIER_COPY, type PrivilegeTier } from './privilege';
 import type { App, DroppedVolume, Job } from './types';
 
 /**
@@ -261,8 +261,10 @@ export function composeErrorMessage(status: number, apiError: string): string {
   }
 }
 
+// A tier string this build can show. Membership only: the page never ranks
+// tiers — whether an upgrade raises one is the API's answer.
 function isTier(v: unknown): v is PrivilegeTier {
-  return typeof v === 'string' && Object.prototype.hasOwnProperty.call(TIER_RANK, v);
+  return typeof v === 'string' && Object.prototype.hasOwnProperty.call(TIER_COPY, v);
 }
 
 /** Reads the 409's privilegeRaise, or null when it is not one this build can show. */
