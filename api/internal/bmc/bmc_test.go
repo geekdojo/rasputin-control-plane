@@ -302,8 +302,16 @@ func TestPowerWorkflow_KindAndSteps(t *testing.T) {
 	if wf.Kind != "bmc.power" {
 		t.Errorf("kind: %q", wf.Kind)
 	}
-	if len(wf.Steps) != 3 {
-		t.Errorf("steps: want 3, got %d", len(wf.Steps))
+	// observe_boot and verify are the proof that a reset or cycle restarted
+	// the target (geekdojo/geekdojo-brain#617); there were three steps.
+	want := []string{"validate", "observe_boot", "dispatch", "verify", "record"}
+	if len(wf.Steps) != len(want) {
+		t.Fatalf("steps: want %d, got %d", len(want), len(wf.Steps))
+	}
+	for i, name := range want {
+		if wf.Steps[i].Name != name {
+			t.Errorf("step %d: got %q, want %q", i, wf.Steps[i].Name, name)
+		}
 	}
 }
 

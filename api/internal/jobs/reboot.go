@@ -20,13 +20,6 @@ type RebootSpec struct {
 const (
 	rebootDefaultDelay = 3
 	rebootMaxDelay     = 30
-
-	// rebootVerifyTimeout bounds the wait for the node to answer on a new
-	// boot. It is the update saga's bound for the same wait, for the same
-	// reason: it has to outlast a real boot on the slowest node. It decides
-	// nothing by itself — the step ends when a new boot answers, and when the
-	// bound is reached instead it fails naming what was observed.
-	rebootVerifyTimeout = 5 * time.Minute
 )
 
 // Step names, shared with the step functions that read each other's results.
@@ -75,7 +68,7 @@ func RebootWorkflow() Workflow {
 			{Name: "prepare", Timeout: 2 * time.Second, Do: rebootPrepare},
 			{Name: rebootStepObserveBoot, Timeout: 10 * time.Second, Retries: 1, Do: rebootObserveBoot},
 			{Name: "request_and_observe", Timeout: 10 * time.Second, Do: rebootRequestAndObserve},
-			{Name: rebootStepWaitNewBoot, Timeout: rebootVerifyTimeout, Do: rebootWaitNewBoot},
+			{Name: rebootStepWaitNewBoot, Timeout: bootverify.RestartBound, Do: rebootWaitNewBoot},
 			{Name: "health_check", Timeout: 5 * time.Second, Retries: 2, Do: rebootHealthCheck},
 		},
 	}
