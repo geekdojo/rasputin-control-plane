@@ -40,6 +40,10 @@ type Service struct {
 	// the first one and every reconnect alike. See SetOnRegistered.
 	onRegistered func(ctx context.Context, n *proto.Node)
 
+	// onHeartbeat, if set, is invoked for every heartbeat from an enrolled
+	// node. See SetOnHeartbeat.
+	onHeartbeat func(nodeID string)
+
 	// onNodeKeyChanged, if set, is invoked when an accepted registration
 	// REPLACED a key this node had already registered. See
 	// SetOnNodeKeyChanged.
@@ -125,6 +129,20 @@ func (s *Service) SetOnNodeAdded(fn func(ctx context.Context, n *proto.Node)) {
 // callback goroutine. Set before Start.
 func (s *Service) SetOnRegistered(fn func(ctx context.Context, n *proto.Node)) {
 	s.onRegistered = fn
+}
+
+// SetOnHeartbeat registers a callback fired for every heartbeat the api
+// accepts — one from a node that is enrolled. A heartbeat is the fact "this
+// node is connected and listening right now", and it is the only event a node
+// that is already connected, and stays connected, ever sends: the trigger for
+// work that is owed to such a node, instead of a timer.
+//
+// The callback runs on the bus callback goroutine, once per node per heartbeat
+// interval, on the path that otherwise touches no database
+// (geekdojo-brain#585). It must return at once and do its own I/O, if it has
+// any, on another goroutine. Set before Start.
+func (s *Service) SetOnHeartbeat(fn func(nodeID string)) {
+	s.onHeartbeat = fn
 }
 
 // SetOnNodeKeyChanged registers the audit-and-alert callback for a node whose
@@ -308,6 +326,9 @@ func (s *Service) handleHeartbeat(m *nats.Msg) {
 	now := time.Now().UTC()
 	if !s.store.Registry().Touch(nodeID, now) {
 		return
+	}
+	if s.onHeartbeat != nil {
+		s.onHeartbeat(nodeID)
 	}
 
 	s.mu.Lock()

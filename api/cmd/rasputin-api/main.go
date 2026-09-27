@@ -1222,6 +1222,13 @@ func main() {
 		}
 		consoleConverger.OnRegistered(hookCtx, n)
 	})
+	// A heartbeat is the only thing a node that is connected, and stays
+	// connected, ever sends. At migrate it is what offers the bus pin again to
+	// a node the move into migrate did not reach, or whose delivery failed
+	// (geekdojo/geekdojo-brain#615).
+	if busTLSSvc != nil {
+		invSvc.SetOnHeartbeat(busTLSSvc.OnHeartbeat)
+	}
 	// A node whose registered key was REPLACED raises a crit alert
 	// (geekdojo/geekdojo-brain#514). inventory audits the change in the log
 	// itself; this is the operator-facing half.

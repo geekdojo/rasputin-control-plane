@@ -51,6 +51,10 @@ import (
 // Re-evaluation is event-driven: a node registering, a client connection
 // closing, a job ending, and the service starting. Each evaluation's I/O is
 // bounded by a timeout; nothing waits on a clock for a fact to change.
+//
+// Pin delivery in migrate is event-driven too, and it is not one-shot: the
+// move into migrate, a node's registration and a node's HEARTBEAT each offer
+// the pin to a node that is not on TLS (OnHeartbeat has the rule).
 type Mode string
 
 const (
@@ -302,7 +306,9 @@ type Service struct {
 	// does not try again in this process (see evaluate).
 	switchFailed string
 	stopped      bool
-	pending      map[string]bool // node ids with a delivery in flight
+	// pins is what this process knows about each node's pin: whether it is
+	// on TLS, whether a delivery is in flight, and how the last one went.
+	pins map[string]*nodePin
 	// closedCIDs are connections a disconnect advisory reported closed. The
 	// advisory can precede the server dropping the connection from Connz, so
 	// the listing is filtered through this set. Pruned to ids still listed.
@@ -334,7 +340,7 @@ func NewService(cfg Config) *Service {
 	if cfg.StartMode == "" {
 		cfg.StartMode = ModeOffer
 	}
-	s := &Service{cfg: cfg, mode: cfg.StartMode, plaintextAllowed: cfg.StartMode.AllowsPlaintext(), pending: map[string]bool{}, closedCIDs: map[uint64]bool{}}
+	s := &Service{cfg: cfg, mode: cfg.StartMode, plaintextAllowed: cfg.StartMode.AllowsPlaintext(), pins: map[string]*nodePin{}, closedCIDs: map[uint64]bool{}}
 	s.idle = sync.NewCond(&s.mu)
 	return s
 }
@@ -427,6 +433,60 @@ type NodeTLS struct {
 	// false" from "never said" (an agent that predates the field).
 	BusTLS   bool `json:"busTls"`
 	Reported bool `json:"reported"`
+	// PinDelivery is how the last attempt to hand this node the pin went, or
+	// absent when this api process has made none. It is what tells a node
+	// that refused the pin, or could not be reached, from one that was never
+	// offered it.
+	PinDelivery *PinDelivery `json:"pinDelivery,omitempty"`
+}
+
+// The outcomes of one pin delivery attempt.
+const (
+	// PinDelivered: the node answered that it holds the pin.
+	PinDelivered = "delivered"
+	// PinRefused: the node answered, and did not take the pin. Detail is its
+	// reason, in its words.
+	PinRefused = "refused"
+	// PinError: no usable answer came back (nothing is listening on the
+	// node's command subject, the request timed out, the answer did not
+	// parse). Detail is the error.
+	PinError = "error"
+)
+
+// PinDelivery is the last pin delivery attempt this api process made to one
+// node. It is kept in memory only: a restarted api has made no attempt yet.
+type PinDelivery struct {
+	// At is when the attempt ended.
+	At time.Time `json:"at"`
+	// Outcome is PinDelivered, PinRefused or PinError.
+	Outcome string `json:"outcome"`
+	// Detail is the node's own words for a refusal (and for "already
+	// pinned"), or the error.
+	Detail string `json:"detail,omitempty"`
+	// Reconnecting is the node's statement that it saved a new pin and is
+	// dropping its connection to come back over TLS.
+	Reconnecting bool `json:"reconnecting,omitempty"`
+	// Attempts counts the attempts made to this node since the api started,
+	// this one included.
+	Attempts int `json:"attempts"`
+}
+
+// nodePin is what the service holds about one node's pin. Guarded by mu.
+type nodePin struct {
+	// known is true once this process has learned whether the node is on TLS:
+	// from a registration it received, or from the node's inventory row. tls
+	// is that answer. A registration always overwrites; an inventory read
+	// only fills a gap (see seed).
+	known, tls bool
+	// inFlight is true while a delivery to the node is running.
+	inFlight bool
+	// settled is true from the node acknowledging the pin until its next
+	// registration. A node that holds the pin has nothing more to be told:
+	// what is still owed is its reconnect, and that arrives as a
+	// registration.
+	settled bool
+	// last is the last attempt's outcome, nil before the first.
+	last *PinDelivery
 }
 
 // Status is the whole picture GET /api/bus/tls serves.
@@ -479,10 +539,17 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return st, fmt.Errorf("bustls: list inventory: %w", err)
 	}
+	s.mu.Lock()
 	for _, n := range nodes {
 		on, reported := BusTLSOf(n)
-		st.Nodes = append(st.Nodes, NodeTLS{ID: n.ID, Role: n.Role, Status: n.Status, BusTLS: on, Reported: reported})
+		nt := NodeTLS{ID: n.ID, Role: n.Role, Status: n.Status, BusTLS: on, Reported: reported}
+		if p := s.pins[n.ID]; p != nil && p.last != nil {
+			last := *p.last
+			nt.PinDelivery = &last
+		}
+		st.Nodes = append(st.Nodes, nt)
 	}
+	s.mu.Unlock()
 	sort.Slice(st.Nodes, func(i, j int) bool { return st.Nodes[i].ID < st.Nodes[j].ID })
 	if switching {
 		// The server is being replaced; there is no listing to read, and the
@@ -778,12 +845,105 @@ func (s *Service) OnRegistered(_ context.Context, n *proto.Node) {
 	if n == nil {
 		return
 	}
-	if s.Mode() == ModeMigrate {
-		if on, _ := BusTLSOf(n); !on {
-			s.deliverAsync(n.ID)
-		}
+	on, _ := BusTLSOf(n)
+	s.mu.Lock()
+	p := s.pinLocked(n.ID)
+	// A registration is the node's own statement about the connection it is
+	// on now, so it replaces whatever was known, and it ends the wait that
+	// follows an acknowledged delivery.
+	p.known, p.tls, p.settled = true, on, false
+	s.mu.Unlock()
+	if s.Mode() == ModeMigrate && !on {
+		s.deliverAsync(n.ID, false)
 	}
 	s.Kick("registration of " + n.ID)
+}
+
+// OnHeartbeat is the inventory hook for a heartbeat from an enrolled node: in
+// migrate, a node that is not on TLS is offered the pin again.
+//
+// A heartbeat is the fact "this node is connected and listening right now",
+// and it is the only one the api receives from a node that is already
+// connected and stays connected. The move into migrate offers the pin once,
+// to the nodes that read as online at that moment, and a registration offers
+// it to the node that registered; a node that was missed by both — it had not
+// been heard from yet when the mode moved, or its delivery failed — sends
+// nothing but heartbeats from then on.
+//
+// The rule, in full. A heartbeat from node N starts a delivery when all of
+// these hold:
+//
+//   - the mode is migrate;
+//   - N is not known to be on TLS. What is known comes from N's last
+//     registration, or, when this process has not received one, from N's
+//     inventory row, read once;
+//   - no delivery to N is in flight;
+//   - N has not acknowledged the pin since it last registered. A node that
+//     answered "I hold the pin" is not told again: what is owed is its
+//     reconnect, and that arrives as a registration, which clears this.
+//
+// So a delivery that failed or was refused is tried again on N's next
+// heartbeat, and the rate is bounded by facts alone: at most one attempt per
+// heartbeat received, none while one is in flight, none after an
+// acknowledgement. No timer is involved.
+//
+// It runs on the bus callback goroutine and does no I/O: the inventory read
+// and the delivery happen on the delivery's own goroutine.
+func (s *Service) OnHeartbeat(nodeID string) {
+	if nodeID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.stopped || s.mode != ModeMigrate || s.switching {
+		s.mu.Unlock()
+		return
+	}
+	p := s.pins[nodeID]
+	if p != nil && (p.inFlight || p.settled || (p.known && p.tls)) {
+		s.mu.Unlock()
+		return
+	}
+	check := p == nil || !p.known
+	s.mu.Unlock()
+	s.deliverAsync(nodeID, check)
+}
+
+// pinLocked returns the node's entry, creating it. Callers hold mu.
+func (s *Service) pinLocked(nodeID string) *nodePin {
+	p := s.pins[nodeID]
+	if p == nil {
+		p = &nodePin{}
+		s.pins[nodeID] = p
+	}
+	return p
+}
+
+// seed records what inventory says about each listed node's TLS report, for
+// the nodes this process knows nothing about yet. It never overwrites: a
+// registration handled while the listing was being read is newer than the
+// listing. It reports whether nodeID is enrolled and not on TLS, by what is
+// known after seeding.
+func (s *Service) seed(nodes []*proto.Node, nodeID string) (needsPin bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	enrolled := false
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		if n.ID == nodeID {
+			enrolled = true
+		}
+		p := s.pinLocked(n.ID)
+		if !p.known {
+			on, _ := BusTLSOf(n)
+			p.known, p.tls = true, on
+		}
+	}
+	if !enrolled {
+		return false
+	}
+	return !s.pins[nodeID].tls
 }
 
 // NoteDisconnect is the disconnect-advisory hook (bus.Server.OnClientDisconnect).
@@ -794,8 +954,9 @@ func (s *Service) NoteDisconnect(cid uint64) {
 	s.Kick(fmt.Sprintf("connection %d closed", cid))
 }
 
-// DeliverToAll hands the pin to every ONLINE node not reporting TLS. Offline
-// nodes get it when they register.
+// DeliverToAll hands the pin to every ONLINE node not reporting TLS. A node
+// that does not read as online here gets it when it is next heard from: on its
+// registration, or on its heartbeat (OnHeartbeat).
 func (s *Service) DeliverToAll(ctx context.Context) {
 	nodes, err := s.cfg.Nodes(ctx)
 	if err != nil {
@@ -809,38 +970,83 @@ func (s *Service) DeliverToAll(ctx context.Context) {
 		if on, _ := BusTLSOf(n); on {
 			continue
 		}
-		s.deliverAsync(n.ID)
+		s.deliverAsync(n.ID, false)
 	}
 }
 
-func (s *Service) deliverAsync(nodeID string) {
+// deliverAsync starts one delivery to nodeID unless one is already in flight.
+// check makes it read inventory first and deliver only if the node is
+// enrolled and not on TLS — for a caller that does not hold the node's report
+// (OnHeartbeat, for a node this process has had no registration from).
+func (s *Service) deliverAsync(nodeID string, check bool) {
 	s.mu.Lock()
-	if s.pending[nodeID] || s.stopped {
+	p := s.pinLocked(nodeID)
+	if p.inFlight || s.stopped {
 		s.mu.Unlock()
 		return
 	}
-	s.pending[nodeID] = true
+	p.inFlight = true
 	s.active++
 	s.mu.Unlock()
 	go func() {
 		defer s.finished()
 		defer func() {
 			s.mu.Lock()
-			delete(s.pending, nodeID)
+			p.inFlight = false
 			s.mu.Unlock()
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.DeliverTimeout)
 		defer cancel()
-		ack, err := s.Deliver(ctx, nodeID)
-		switch {
-		case err != nil:
-			log.Printf("bustls: deliver pin to %q: %q", nodeID, err.Error())
-		case !ack.OK:
-			log.Printf("bustls: %q refused the pin: %q", nodeID, ack.Detail)
-		default:
-			log.Printf("bustls: %q holds the pin (reconnecting=%t)", nodeID, ack.Reconnecting)
+		if check {
+			nodes, err := s.cfg.Nodes(ctx)
+			if err != nil {
+				log.Printf("bustls: deliver pin to %q: list inventory: %q", nodeID, err.Error())
+				return
+			}
+			if !s.seed(nodes, nodeID) {
+				return
+			}
 		}
+		ack, err := s.Deliver(ctx, nodeID)
+		s.record(nodeID, p, ack, err)
 	}()
+}
+
+// record keeps the outcome of one delivery attempt for the status page, and
+// logs it when it differs from the attempt before — a node that refuses on
+// every heartbeat is one line in the log, and a count in the status.
+func (s *Service) record(nodeID string, p *nodePin, ack *proto.BusPinAck, err error) {
+	d := PinDelivery{At: time.Now().UTC()}
+	switch {
+	case err != nil:
+		d.Outcome, d.Detail = PinError, err.Error()
+	case !ack.OK:
+		d.Outcome, d.Detail = PinRefused, ack.Detail
+	default:
+		d.Outcome, d.Detail, d.Reconnecting = PinDelivered, ack.Detail, ack.Reconnecting
+	}
+	s.mu.Lock()
+	prev := p.last
+	d.Attempts = 1
+	if prev != nil {
+		d.Attempts = prev.Attempts + 1
+	}
+	p.last = &d
+	if d.Outcome == PinDelivered {
+		p.settled = true
+	}
+	s.mu.Unlock()
+	if prev != nil && prev.Outcome == d.Outcome && prev.Detail == d.Detail {
+		return
+	}
+	switch d.Outcome {
+	case PinError:
+		log.Printf("bustls: deliver pin to %q: %q (tried again on its next heartbeat)", nodeID, d.Detail)
+	case PinRefused:
+		log.Printf("bustls: %q refused the pin: %q (offered again on its next heartbeat)", nodeID, d.Detail)
+	default:
+		log.Printf("bustls: %q holds the pin (reconnecting=%t)", nodeID, d.Reconnecting)
+	}
 }
 
 // Deliver sends the pin to one node and returns its answer.

@@ -375,6 +375,15 @@ type cpOpts struct {
 	// test here needs: a controlplane that starts at the bottom and climbs.
 	// A test that wants the fresh-cluster path sets it.
 	facts *bustls.StartFacts
+	// beforeAdmission runs once the bus is up and BEFORE the auth callout
+	// answers, so before any agent can be on the bus; beforeInventory runs
+	// after agents are being admitted and BEFORE inventory subscribes. The
+	// api has the same gap between the two (it starts its bus and the
+	// callout early, and inventory after its stores and sagas are up), and a
+	// registration published in it reaches nobody. A test uses the pair to
+	// put agents in that gap on purpose.
+	beforeAdmission func(c *cp)
+	beforeInventory func(c *cp)
 }
 
 func startCP(t *testing.T, o cpOpts) *cp {
@@ -478,6 +487,9 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		}
 		return false, ""
 	})
+	if o.beforeAdmission != nil {
+		o.beforeAdmission(c)
+	}
 	if err := responder.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -548,6 +560,11 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		c.recordedMu.Unlock()
 		c.changed.fire()
 	})
+	// As cmd/rasputin-api wires it: a heartbeat offers the pin again.
+	invSvc.SetOnHeartbeat(c.svc.OnHeartbeat)
+	if o.beforeInventory != nil {
+		o.beforeInventory(c)
+	}
 	if err := invSvc.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
