@@ -3,6 +3,7 @@ package bmc
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -192,5 +193,67 @@ func TestReconcile_MovesALegacyInlineCredentialOutOfTheSpec(t *testing.T) {
 	}
 	if err := refuseInlineCredential(cs.Kind, cs.Config); err != nil {
 		t.Errorf("the validate step would refuse the re-push: %v", err)
+	}
+}
+
+// A turingpi selection stored before the pinned-TLS rule is never re-pushed by
+// the registration reconcile: the push carries the BMC password to a board the
+// api can no longer say it trusts. RedetectNeeded is unit-tested on its own;
+// this is the dispatch side — for each legacy shape, no submit at all, and the
+// reason logged so the operator-facing cause is not silent. The valid
+// SPKI-pinned https selection is the control: pushed exactly once
+// (geekdojo/geekdojo-brain#548).
+func TestReconcile_NeverRepushesALegacyTuringPiSelection(t *testing.T) {
+	const targets = `"targets":[{"node_id":"node-1","slot":1}]`
+	for _, tc := range []struct {
+		name, cfg  string
+		wantPushes int
+	}{
+		{"insecure_skip_verify", `{"endpoint":"turingpi.local","user":"root","insecure_skip_verify":true,` + targets + `}`, 0},
+		{"http endpoint", `{"endpoint":"http://turingpi.local","user":"root","pin":"` + testDevicePin + `",` + targets + `}`, 0},
+		{"cert-DER fingerprint pin", `{"endpoint":"turingpi.local","user":"root","fingerprint":"41:7C:1E:EA",` + targets + `}`, 0},
+		{"no pin", `{"endpoint":"turingpi.local","user":"root",` + targets + `}`, 0},
+		{"SPKI-pinned https (control)", `{"endpoint":"https://turingpi.local","user":"root","pin":"` + testDevicePin + `",` + targets + `}`, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := newSetupStore(t)
+			cred, ok := CredentialFor("turingpi")
+			if !ok {
+				t.Fatal("turingpi has no credential key")
+			}
+			for k, v := range map[string]string{
+				setup.KeyBMCBackend:  "turingpi",
+				setup.KeyBMCHostNode: "host-1",
+				setup.KeyBMCConfig:   tc.cfg,
+				cred.SettingsKey:     "SENTINEL-DUMMY-BMC-PASSWORD",
+			} {
+				if err := st.Set(ctx, k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var logs strings.Builder
+			prev, prevFlags := log.Writer(), log.Flags()
+			log.SetOutput(&logs)
+			log.SetFlags(0)
+			t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+
+			r, n := newReconciler(t, st, false)
+			r.onRegistered(regMsg(t, "host-1", nil)) // no hash advertised: stale, so a push is due
+			if *n != tc.wantPushes {
+				t.Fatalf("submitted %d, want %d", *n, tc.wantPushes)
+			}
+			reason := RedetectNeeded("turingpi", json.RawMessage(tc.cfg))
+			if tc.wantPushes == 0 {
+				if reason == "" {
+					t.Fatal("RedetectNeeded gave no reason for a legacy selection")
+				}
+				if !strings.Contains(logs.String(), "not dispatchable: "+reason) {
+					t.Errorf("the reason must be logged; log was %q, want it to carry %q", logs.String(), reason)
+				}
+			} else if strings.Contains(logs.String(), "not dispatchable") {
+				t.Errorf("a valid selection logged a refusal: %q", logs.String())
+			}
+		})
 	}
 }
