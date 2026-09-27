@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +72,7 @@ func newRegistered(t *testing.T) (*nats.Conn, *MockBackend) {
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
+	mb.SetRebooter(&recordingRebooter{})
 	subs, err := RegisterHandlers(nc, "node-1", mb)
 	if err != nil {
 		t.Fatalf("RegisterHandlers: %v", err)
@@ -256,13 +258,27 @@ func TestRegisterHandlers_InstallBackendError(t *testing.T) {
 	}
 }
 
-func TestRegisterHandlers_RebootPublishesEvent(t *testing.T) {
-	nc, _ := newRegistered(t)
-	evSub, err := nc.SubscribeSync(proto.NodeEvtSubject("node-1", "rebooting"))
+// update.reboot acks with the delay the reboot function applied, and asks it
+// exactly once. This test used to assert that the HANDLER published the
+// rebooting event; the handler no longer does, because the one reboot function
+// publishes it for every caller (asserted in the system package).
+func TestRegisterHandlers_RebootAsksTheRebooterOnce(t *testing.T) {
+	nc := startNATS(t)
+	mb, err := NewMockBackend(t.TempDir())
 	if err != nil {
-		t.Fatalf("subscribe ev: %v", err)
+		t.Fatalf("NewMockBackend: %v", err)
 	}
-	t.Cleanup(func() { _ = evSub.Unsubscribe() })
+	rec := &recordingRebooter{}
+	mb.SetRebooter(rec)
+	subs, err := RegisterHandlers(nc, "node-1", mb)
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
 
 	var ack proto.UpdateRebootAck
 	request(t, nc, proto.UpdateRebootSubject("node-1"), proto.UpdateRebootCmd{
@@ -274,8 +290,32 @@ func TestRegisterHandlers_RebootPublishesEvent(t *testing.T) {
 	if ack.DelaySeconds != 3 {
 		t.Errorf("delay: %d", ack.DelaySeconds)
 	}
-	if _, err := evSub.NextMsg(200 * time.Millisecond); err != nil {
-		t.Errorf("rebooting event not published: %v", err)
+	if req := rec.only(t); req.DelaySeconds != 3 || req.AnnounceOnly {
+		t.Errorf("reboot request = %+v", req)
+	}
+}
+
+// A refused reboot reaches the control plane as OK=false WITH the reason.
+func TestRegisterHandlers_RefusedRebootRepliesWithTheReason(t *testing.T) {
+	nc := startNATS(t)
+	mb, err := NewMockBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewMockBackend: %v", err)
+	}
+	mb.SetRebooter(&recordingRebooter{err: errStr(`this node has no "reboot" command`)})
+	subs, err := RegisterHandlers(nc, "node-1", mb)
+	if err != nil {
+		t.Fatalf("RegisterHandlers: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	})
+	var ack proto.UpdateRebootAck
+	request(t, nc, proto.UpdateRebootSubject("node-1"), proto.UpdateRebootCmd{BundleID: "b"}, &ack)
+	if ack.OK || !strings.Contains(ack.Detail, "no \"reboot\" command") {
+		t.Errorf("ack = %+v, want OK=false naming the missing command", ack)
 	}
 }
 
@@ -379,16 +419,12 @@ func TestNewRAUCBackend_NoCLI(t *testing.T) {
 	}
 }
 
-// TestRAUCBackend_NameAndSetMuteHook covers the trivial accessors so the
-// production methods aren't entirely 0%-uncovered.
-func TestRAUCBackend_NameAndSetMuteHook(t *testing.T) {
+// TestRAUCBackend_Name covers the trivial accessor.
+func TestRAUCBackend_Name(t *testing.T) {
 	b := &RAUCBackend{stateDir: t.TempDir()}
 	if b.Name() != "rauc" {
 		t.Errorf("Name: %q want rauc", b.Name())
 	}
-	// SetMuteHook is a single assignment — exercising it ensures someone
-	// who breaks the field reference gets a compile-time failure here.
-	b.SetMuteHook(nil)
 }
 
 // fakeRAUC writes a shim "rauc" binary into a temp dir and prepends that dir
@@ -514,6 +550,7 @@ func TestRAUCBackend_MarkGoodAndBad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
+	b.SetRebooter(&recordingRebooter{})
 	if err := b.MarkGood(context.Background(), "x"); err != nil {
 		t.Errorf("MarkGood: %v", err)
 	}
@@ -533,25 +570,6 @@ func TestRAUCBackend_MarkGoodAndBadFail(t *testing.T) {
 	}
 	if err := b.MarkBad(context.Background(), "x", "r"); err == nil {
 		t.Error("MarkBad should fail")
-	}
-}
-
-func TestRAUCBackend_RebootReturnsDelay(t *testing.T) {
-	fakeRAUC(t, "ok")
-	b, err := NewRAUCBackend(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewRAUCBackend: %v", err)
-	}
-	got, err := b.Reboot(context.Background(), "x", 0)
-	if err != nil {
-		t.Fatalf("Reboot: %v", err)
-	}
-	if got != 3 {
-		t.Errorf("Reboot delay clamp: got %d want 3", got)
-	}
-	got, _ = b.Reboot(context.Background(), "x", 5)
-	if got != 5 {
-		t.Errorf("Reboot delay pass-through: got %d", got)
 	}
 }
 

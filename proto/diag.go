@@ -9,11 +9,18 @@ type DiagPingCmd struct {
 
 // DiagPongEvt is the reply an agent returns to a diag.ping command.
 type DiagPongEvt struct {
-	JobID    string    `json:"jobId"`
-	NodeID   string    `json:"nodeId"`
-	Hostname string    `json:"hostname"`
-	Uptime   string    `json:"uptime"`
-	Ts       time.Time `json:"ts"`
+	JobID    string `json:"jobId"`
+	NodeID   string `json:"nodeId"`
+	Hostname string `json:"hostname"`
+	Uptime   string `json:"uptime"`
+	// BootID is the kernel's per-boot identity for the boot that is answering,
+	// the same value carried on NodeRegisteredEvt and UpdatePrecheckAck. It is
+	// here because diag.ping is the one command every agent answers whatever
+	// its role or update backend, so it is how the control plane asks a node
+	// "which boot are you?" when verifying a reboot or a BMC reset. Empty from
+	// an agent that predates the field; consumers treat "" as unknown.
+	BootID string    `json:"bootId,omitempty"`
+	Ts     time.Time `json:"ts"`
 }
 
 // DiagHealthCmd requests a role-aware health check. Unlike diag.ping (which only

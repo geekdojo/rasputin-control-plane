@@ -13,7 +13,9 @@ The Go agent binary that runs on every Rasputin node — including the control p
 | Package | Purpose |
 |---|---|
 | `internal/bus` | NATS connection (outbound-only, join-token creds) + shared reply helper. nats.go reconnects within one conn; the `Client` re-dials a new conn from the closed state and re-runs every subscription on it. No dispatch, no ack/dedup — each subsystem subscribes its own subjects, on every conn |
-| `internal/host` | Host facts, RAUC slot control, reboot |
+| `internal/host` | Host facts (hostname, image version, boot identity) |
+| `internal/system` | The ONE function that reboots the node (`Rebooter.Reboot`). The `system.reboot` command and every update backend call it; nothing else may exec a reboot |
+| `internal/updater` | OS updates: RAUC, the firewall's A/B backend, and the dev mock |
 | `internal/docker` | Compose ops (compute nodes only) |
 | `internal/openwrt` | ubus / UCI client (firewall node only) |
 | `internal/ipmi` | BMC client for adjacent slots (control plane node only) |
@@ -43,6 +45,13 @@ RASPUTIN_TAILSCALE_BACKEND=mock \
 RASPUTIN_UCI_BACKEND=mock \
 go run ./cmd/rasputin-agent
 ```
+
+`RASPUTIN_UPDATE_BACKEND=mock` has one effect beyond the update backend: the agent
+**simulates reboots** (it mutes its heartbeat, waits and re-registers, and restarts
+nothing), because a development machine must not restart itself. That holds only on a dev
+build. On a released image the setting does not enable simulation, and without it every
+reboot runs the OS `reboot` command or fails. See
+[`docs/testing-updates.md`](../docs/testing-updates.md).
 
 There is deliberately **no single "mock everything" switch**: one variable that
 turns on five mocks is one variable away from an OS image that fakes the whole

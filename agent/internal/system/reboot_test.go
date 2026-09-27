@@ -18,10 +18,9 @@ func TestIsMuted_DefaultsFalse(t *testing.T) {
 	}
 }
 
-// TestMutedAtomic_ReadModifyWriteFlow mirrors how updater.MockBackend uses
-// the shared flag: set, do work, defer reset. The heartbeat loop reads
-// IsMuted() concurrently; the race detector will catch any unsoundness if
-// our parallel sub-tests interleave.
+// TestMutedAtomic_ReadModifyWriteFlow mirrors how Reboot uses the flag: set,
+// do work, reset. The heartbeat loop reads IsMuted() concurrently; the race
+// detector will catch any unsoundness if our parallel sub-tests interleave.
 func TestMutedAtomic_ReadModifyWriteFlow(t *testing.T) {
 	prev := IsMuted()
 	t.Cleanup(func() { MutedAtomic().Store(prev) })
@@ -36,9 +35,8 @@ func TestMutedAtomic_ReadModifyWriteFlow(t *testing.T) {
 	}
 }
 
-// TestMutedAtomic_ReturnsSameInstance — important for the cross-package
-// contract documented in MutedAtomic's docstring: the updater and system
-// packages must share *the same* atomic, not snapshots of it.
+// TestMutedAtomic_ReturnsSameInstance — the heartbeat loop and Reboot must
+// share *the same* atomic, not snapshots of it.
 func TestMutedAtomic_ReturnsSameInstance(t *testing.T) {
 	a := MutedAtomic()
 	b := MutedAtomic()

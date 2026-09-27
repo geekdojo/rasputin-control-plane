@@ -40,6 +40,17 @@ func ImageVersion() string {
 	return strings.TrimSpace(string(b))
 }
 
+// IsDevImage reports whether v is a pre-release build rather than a released
+// image. An EMPTY version is a dev checkout with no /etc/rasputin/image-version
+// at all — not an appliance — so it counts as dev; an appliance always has one.
+//
+// It is the one gate for everything that must never happen on a released
+// image: update fault injection and simulated reboots.
+func IsDevImage(v string) bool {
+	v = strings.TrimSpace(v)
+	return v == "" || strings.Contains(v, "-dev.")
+}
+
 // BootID returns the kernel's boot identity for the running boot — the UUID at
 // /proc/sys/kernel/random/boot_id, regenerated on every boot. It is an
 // IDENTITY, not a timestamp: the only comparison it supports (and the only one

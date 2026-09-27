@@ -16,10 +16,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -38,7 +38,9 @@ type RAUCBackend struct {
 	// backend's pattern and lets tests point at a shim without touching
 	// the process-wide PATH.
 	binary string
-	muted  *atomic.Bool
+	// rebooter is the agent's one reboot function. Wired from main.go via
+	// SetRebooter; nil means this backend refuses to reboot.
+	rebooter Rebooter
 	// caBundlePath, when set, is a PEM file (the per-installation Mesh CA)
 	// added to the bundle-download client's trust pool on top of the system
 	// roots. The api serves /api/bundles/{sha} over its mesh-CA HTTPS leaf,
@@ -85,11 +87,12 @@ func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
 	}, nil
 }
 
-func (r *RAUCBackend) SetMuteHook(b *atomic.Bool) { r.muted = b }
+// SetRebooter wires the agent's one reboot function.
+func (r *RAUCBackend) SetRebooter(rb Rebooter) { r.rebooter = rb }
 
 // SetCABundle points the bundle-download HTTPS client at a CA bundle to trust
 // in addition to the system roots — the per-installation Mesh CA that signs
-// the api's leaf. Mirrors SetMuteHook (post-construction wiring).
+// the api's leaf. Mirrors SetRebooter (post-construction wiring).
 func (r *RAUCBackend) SetCABundle(path string) { r.caBundlePath = path }
 
 // httpClient returns the client used to pull bundles. Its root pool is the
@@ -500,44 +503,31 @@ func (r *RAUCBackend) Install(ctx context.Context, bundleID, localPath string, t
 // (rasputin-rauc-reconcile.service / rasputin-mark-good.service).
 var trybootMarker = "/run/rasputin-seed/autoboot.txt"
 
-// rebootArgs returns the `systemctl` arguments for the post-install trial
-// reboot. On a Pi (tryboot backend) the install armed [tryboot] boot_partition
-// but NOT the firmware one-shot (no vcmailbox in-tree), so a PLAIN reboot would
-// boot the still-committed slot and never trial the new one. `reboot "0 tryboot"`
-// arms the firmware one-shot so the next boot loads the candidate boot
-// partition; on a healthy boot the saga's health-gated mark-good commits, and a
-// failed trial reverts to the committed slot on the next (normal) boot. On the
-// n100 (GRUB) a plain reboot is correct — `rauc install` already set grubenv.
-func rebootArgs() []string {
+// rebootMode returns the mode of the post-install trial reboot. On a Pi
+// (tryboot backend) the install armed [tryboot] boot_partition but NOT the
+// firmware one-shot (no vcmailbox in-tree), so a PLAIN reboot would boot the
+// still-committed slot and never trial the new one. A tryboot reboot arms the
+// firmware one-shot so the next boot loads the candidate boot partition; on a
+// healthy boot the saga's health-gated mark-good commits, and a failed trial
+// reverts to the committed slot on the next (normal) boot. On the n100 (GRUB)
+// a plain reboot is correct — `rauc install` already set grubenv.
+//
+// This decides the MODE only. What the mode means on the command line is the
+// Rebooter's business (system.Rebooter), which is the one place a reboot is
+// run from.
+func rebootMode() system.RebootMode {
 	if _, err := os.Stat(trybootMarker); err == nil {
-		return []string{"reboot", "0 tryboot"}
+		return system.RebootTryboot
 	}
-	return []string{"reboot"}
+	return system.RebootPlain
 }
 
 func (r *RAUCBackend) Reboot(ctx context.Context, bundleID string, delaySeconds int) (int, error) {
-	if delaySeconds <= 0 || delaySeconds > 30 {
-		delaySeconds = 3
-	}
-	args := rebootArgs()
-	// Schedule the reboot in the background so we can ack synchronously.
-	go func() {
-		if r.muted != nil {
-			r.muted.Store(true)
-		}
-		_ = exec.Command("sleep", fmt.Sprintf("%d", delaySeconds)).Run()
-		// Exec the `reboot` command directly — NOT `systemctl reboot`. The Pi
-		// firmware tryboot one-shot needs "0 tryboot" passed to reboot(2), which
-		// the `reboot` compat command does but the `systemctl reboot` VERB does
-		// not (systemd 256: `systemctl reboot "0 tryboot"` fails to arg-parse and
-		// never reboots). args[0] is "reboot" (+ "0 tryboot" on the Pi, nothing on
-		// n100). Log the error — a swallowed failure here silently stalled the
-		// first Pi OTA at wait_online_and_verify_slot (the box never rebooted).
-		if err := exec.Command(args[0], args[1:]...).Run(); err != nil {
-			log.Printf("rasputin-agent: reboot %v failed: %v", args, err)
-		}
-	}()
-	return delaySeconds, nil
+	return requestReboot(r.rebooter, system.RebootRequest{
+		Reason:       rebootReason("update.reboot", bundleID),
+		Mode:         rebootMode(),
+		DelaySeconds: delaySeconds,
+	})
 }
 
 func (r *RAUCBackend) MarkGood(ctx context.Context, bundleID string) error {
@@ -553,11 +543,16 @@ func (r *RAUCBackend) MarkBad(ctx context.Context, bundleID, reason string) erro
 	if err != nil {
 		return fmt.Errorf("rauc mark-bad: %w: %s", err, out)
 	}
-	// Reboot back to the previously-good slot.
-	go func() {
-		_ = exec.Command("sleep", "2").Run()
-		_ = exec.Command("systemctl", "reboot").Run()
-	}()
+	// Reboot back to the previously-good slot. PLAIN, never tryboot: the
+	// point is to leave the trial and boot the committed slot. Best-effort
+	// per the Backend contract — the Rebooter has already logged a refusal.
+	if _, err := requestReboot(r.rebooter, system.RebootRequest{
+		Reason:       rebootReason("update.mark-bad", bundleID),
+		Mode:         system.RebootPlain,
+		DelaySeconds: 2,
+	}); err != nil {
+		log.Printf("rasputin-agent: rauc: slot marked bad, but the reboot back to the good slot was refused: %v", err)
+	}
 	return nil
 }
 

@@ -175,6 +175,25 @@ that present a new boot id when they reboot. It needs no running processes and n
 restart. It does not exercise the agent binary or the mock backend. See
 [`testing-fleet-updates.md`](testing-fleet-updates.md).
 
+## The same applies to the REBOOT action
+
+`RASPUTIN_UPDATE_BACKEND=mock` also makes the agent **simulate** every reboot, because a
+laptop must not restart itself. It is the only setting that does, and it works only on a dev
+build: an agent whose image version is a released one (no `-dev.` in it) ignores it and
+reboots for real. An agent started without the mock always reboots for real, through the
+one function every reboot goes through (`Reboot` in `agent/internal/system/reboot.go`). If
+the node has no `reboot` command, or the command fails, the reboot fails and says so; it is
+never simulated instead.
+
+The `node.reboot` job (the REBOOT button) uses the same boot-identity check as step 6 above
+(`VerifyRestart` in `api/internal/bootverify`). Against a mock agent it therefore stops at
+its `wait_new_boot` step until you restart the agent with a new `RASPUTIN_BOOT_ID`, exactly
+as described above, and fails after 5 minutes with
+`node never rebooted: still answering on boot <id> after context deadline exceeded` if you
+do not. Unlike an update, a reboot has nothing else to check, so a node that reports no boot
+identity at all (macOS without `RASPUTIN_BOOT_ID`) can never pass it: set
+`RASPUTIN_BOOT_ID`.
+
 ## Running
 
 ```sh

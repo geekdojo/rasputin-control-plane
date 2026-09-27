@@ -401,34 +401,46 @@ func TestRebootRequestAndObserve_RPCFails(t *testing.T) {
 }
 
 // ============================================================================
-// rebootWaitOnline: a fake agent emits an evt.registered after a brief delay;
-// the step picks it up via the subscription.
+// rebootWaitNewBoot replaced rebootWaitOnline, which returned as soon as the
+// node re-registered — evidence a node that never restarted produces. What it
+// does now is covered end to end in reboot_job_test.go; these cover the step's
+// own edges.
 // ============================================================================
 
-func TestRebootWaitOnline_HappyPath(t *testing.T) {
+func TestRebootWaitNewBoot_BadSpec(t *testing.T) {
+	sc := &StepCtx{
+		Ctx:  context.Background(),
+		Spec: json.RawMessage(`{}`),
+		Log:  func(string, string) {},
+	}
+	if _, err := rebootWaitNewBoot(sc); err == nil {
+		t.Error("missing nodeId: want error")
+	}
+}
+
+// A re-registration alone must NOT satisfy the step. This is the old
+// rebootWaitOnline happy path, asserting the opposite outcome.
+func TestRebootWaitNewBoot_ARegistrationAloneIsNotARestart(t *testing.T) {
 	nc := startNATS(t)
 	const nodeID = "n-up"
-
-	// Publish the registered event from a goroutine so the test stays
-	// deterministic — the subscriber is already up before publish thanks
-	// to nc.Flush() inside Subscribe.
+	stop := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
-		// Tiny stagger to let the saga's subscribe land before we publish.
-		// Using nats.Flush + Subscribe ordering is sufficient: the saga
-		// subscribes inside rebootWaitOnline before reading from ch.
-		// But this goroutine needs to run *after* that subscribe; the
-		// simplest deterministic option is to wait until the saga's
-		// subscription is visible by retrying.
-		for i := 0; i < 50; i++ {
-			if _, err := nc.Request("nonexistent-sentinel-"+nodeID, nil, 5*time.Millisecond); err != nil {
-				_ = err
+		defer close(done)
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				_ = nc.Publish(proto.NodeRegisteredSubject(nodeID), []byte(`{"nodeId":"`+nodeID+`"}`))
 			}
-			_ = nc.Publish(proto.NodeRegisteredSubject(nodeID), []byte(`{"nodeId":"`+nodeID+`"}`))
-			time.Sleep(10 * time.Millisecond)
 		}
 	}()
+	defer func() { close(stop); <-done }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	sc := &StepCtx{
 		Ctx:  ctx,
@@ -436,38 +448,8 @@ func TestRebootWaitOnline_HappyPath(t *testing.T) {
 		Spec: json.RawMessage(`{"nodeId":"` + nodeID + `"}`),
 		Log:  func(string, string) {},
 	}
-	out, err := rebootWaitOnline(sc)
-	if err != nil {
-		t.Fatalf("rebootWaitOnline: %v", err)
-	}
-	if len(out) == 0 {
-		t.Error("expected reg event payload")
-	}
-}
-
-func TestRebootWaitOnline_BadSpec(t *testing.T) {
-	sc := &StepCtx{
-		Ctx:  context.Background(),
-		Spec: json.RawMessage(`{}`),
-		Log:  func(string, string) {},
-	}
-	if _, err := rebootWaitOnline(sc); err == nil {
-		t.Error("missing nodeId: want error")
-	}
-}
-
-func TestRebootWaitOnline_ContextCancelled(t *testing.T) {
-	nc := startNATS(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	sc := &StepCtx{
-		Ctx:  ctx,
-		NATS: nc,
-		Spec: json.RawMessage(`{"nodeId":"never"}`),
-		Log:  func(string, string) {},
-	}
-	if _, err := rebootWaitOnline(sc); err == nil {
-		t.Error("waiting without anyone publishing should error after ctx deadline")
+	if _, err := rebootWaitNewBoot(sc); err == nil {
+		t.Error("the node only re-registered; it never answered on a new boot, so the step must fail")
 	}
 }
 

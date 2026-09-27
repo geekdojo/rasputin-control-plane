@@ -183,9 +183,13 @@ type UpdateRebootCmd struct {
 }
 
 // UpdateRebootAck is the synchronous reply before the reboot starts.
+//
+// OK=false means the reboot was refused and will not happen; Detail says why.
+// Detail is absent from an agent that predates it.
 type UpdateRebootAck struct {
-	OK           bool `json:"ok"`
-	DelaySeconds int  `json:"delaySeconds"`
+	OK           bool   `json:"ok"`
+	DelaySeconds int    `json:"delaySeconds"`
+	Detail       string `json:"detail,omitempty"`
 }
 
 // UpdateMarkGoodCmd is sent after the post-reboot health check passes. The

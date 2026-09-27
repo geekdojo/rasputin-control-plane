@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -23,6 +24,7 @@ func newUpdaterMock(t *testing.T) *MockBackend {
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
+	mb.SetRebooter(&recordingRebooter{})
 	return mb
 }
 
@@ -99,34 +101,6 @@ func TestPrecheck_CorruptStateBubblesError(t *testing.T) {
 	}
 	if ack.OK {
 		t.Errorf("precheck on corrupt state should not be OK: %+v", ack)
-	}
-}
-
-func TestSetMuteHook_StoresAtomic(t *testing.T) {
-	mb := newUpdaterMock(t)
-	var flag atomic.Bool
-	mb.SetMuteHook(&flag)
-	// Round-trip: store via flag, read via mb (no public getter, but
-	// the contract is set+observe via the shared pointer).
-	flag.Store(true)
-	if !flag.Load() {
-		t.Error("flag store/load broken")
-	}
-	// Reset to false so no test downstream is affected.
-	flag.Store(false)
-}
-
-func TestSetReregisterHook_StoresFn(t *testing.T) {
-	mb := newUpdaterMock(t)
-	called := false
-	mb.SetReregisterHook(func() { called = true })
-	// The hook is consumed inside simulateReboot, which we don't trigger
-	// directly here (it sleeps). We assert the constructor accepts it
-	// without blowing up; the integration path is covered via the
-	// MarkGood/MarkBad tests that *do* exercise the post-reboot path
-	// would set this true. For now: smoke test only.
-	if called {
-		t.Error("hook should not fire just from SetReregisterHook")
 	}
 }
 
@@ -246,22 +220,22 @@ func TestDownload_BadURLErrors(t *testing.T) {
 }
 
 // TestMarkBad_FlipsActiveSlot — the saga relies on mark-bad swapping active
-// and inactive and reporting the previous slot as bad. We assert the
-// persisted state shape *without* waiting for the simulateReboot goroutine
-// (it sleeps 2s and we don't want to block on it).
+// and inactive and reporting the previous slot as bad, and on it then asking
+// for a reboot through the agent's one reboot function.
 func TestMarkBad_FlipsActiveSlot(t *testing.T) {
 	dir := t.TempDir()
 	mb, err := NewMockBackend(dir)
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
+	rec := &recordingRebooter{}
+	mb.SetRebooter(rec)
 	if err := mb.MarkBad(context.Background(), "bundle-x", "health check failed"); err != nil {
 		t.Fatalf("MarkBad: %v", err)
 	}
-	// The mock spawns a simulateReboot goroutine in the background that
-	// would mutate state again after 2s. Read state immediately so we
-	// capture the *first* mutation (the swap), not whatever the goroutine
-	// later writes.
+	if req := rec.only(t); req.Mode != system.RebootPlain || !strings.HasPrefix(req.Reason, "update.mark-bad") {
+		t.Errorf("reboot request = %+v, want a plain reboot for update.mark-bad", req)
+	}
 	buf, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err != nil {
 		t.Fatalf("read state: %v", err)
@@ -279,29 +253,21 @@ func TestMarkBad_FlipsActiveSlot(t *testing.T) {
 	}
 }
 
-// TestReboot_ClampsDelay covers the clamp+kickoff path. We pass a nil
-// reregister hook so the background goroutine has nothing to call back into;
-// the test asserts the synchronous return value, which is the contract.
-func TestReboot_ClampsDelay(t *testing.T) {
-	mb := newUpdaterMock(t)
-	cases := []struct {
-		in   int
-		want int
-	}{
-		{0, 3},    // clamps to default
-		{-5, 3},   // negative clamps
-		{1000, 3}, // way too big clamps
-		{5, 5},    // legal pass-through
-		{30, 30},  // boundary pass-through
-		{31, 3},   // just over the boundary clamps
-	}
-	for _, tc := range cases {
-		got, err := mb.Reboot(context.Background(), "b", tc.in)
+// TestReboot_PassesTheDelayThrough — the mock no longer clamps the delay or
+// schedules anything itself (it used to, in its own simulated reboot). The
+// clamp is the one reboot function's, tested in the system package; what the
+// mock owes is to pass the request through and report the delay applied.
+func TestReboot_PassesTheDelayThrough(t *testing.T) {
+	for _, in := range []int{0, -5, 5, 30, 31} {
+		rec := &recordingRebooter{}
+		mb := newUpdaterMock(t)
+		mb.SetRebooter(rec)
+		got, err := mb.Reboot(context.Background(), "b", in)
 		if err != nil {
-			t.Fatalf("Reboot(%d): %v", tc.in, err)
+			t.Fatalf("Reboot(%d): %v", in, err)
 		}
-		if got != tc.want {
-			t.Errorf("Reboot(%d) = %d, want %d", tc.in, got, tc.want)
+		if req := rec.only(t); req.DelaySeconds != in || got != in {
+			t.Errorf("Reboot(%d): requested %d, returned %d — the mock must not alter the delay", in, req.DelaySeconds, got)
 		}
 	}
 }
