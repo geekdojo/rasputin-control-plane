@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -175,7 +177,7 @@ func TestBootedSlotFromCmdline(t *testing.T) {
 // newTestBackend wires an OpenWrtABBackend with a pre-created grubenv, a fake
 // /proc/cmdline booting slot A, and in-memory seams. Returns the backend and a
 // helper to read the current A/B state.
-func newTestBackend(t *testing.T) (*OpenWrtABBackend, func() abState, *[]int) {
+func newTestBackend(t *testing.T) (*OpenWrtABBackend, func() abState, *recordingRebooter) {
 	t.Helper()
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
@@ -194,7 +196,7 @@ func newTestBackend(t *testing.T) (*OpenWrtABBackend, func() abState, *[]int) {
 		t.Fatal(err)
 	}
 
-	reboots := &[]int{}
+	reboots := &recordingRebooter{}
 	b := &OpenWrtABBackend{
 		stateDir:    stateDir,
 		grubenvPath: grubenvPath,
@@ -213,7 +215,7 @@ func newTestBackend(t *testing.T) (*OpenWrtABBackend, func() abState, *[]int) {
 		},
 		verifySig: func(ctx context.Context, _ string) error { return nil },
 	}
-	b.doReboot = func(delay int) { *reboots = append(*reboots, delay) }
+	b.SetRebooter(reboots)
 
 	read := func() abState { return decodeAB(mustRead(t, grubenvPath)) }
 	return b, read, reboots
@@ -292,8 +294,8 @@ func TestMarkGoodOnBootResetsConsumedTry(t *testing.T) {
 	if !got.ok["A"] || got.try["A"] {
 		t.Errorf("after boot mark-good running slot A should be OK+untried, got ok=%v try=%v", got.ok["A"], got.try["A"])
 	}
-	if len(*reboots) != 0 {
-		t.Errorf("boot mark-good must not reboot, got %d", len(*reboots))
+	if n := len(reboots.got()); n != 0 {
+		t.Errorf("boot mark-good must not reboot, got %d", n)
 	}
 }
 
@@ -306,8 +308,8 @@ func TestMarkBadClearsRunningSlotAndReboots(t *testing.T) {
 	if got.ok["A"] {
 		t.Error("after mark-bad running slot A should have OK=0 so GRUB boots B")
 	}
-	if len(*reboots) != 1 {
-		t.Errorf("mark-bad should trigger exactly one reboot, got %d", len(*reboots))
+	if req := reboots.only(t); req.Mode != system.RebootPlain || !strings.HasPrefix(req.Reason, "update.mark-bad") {
+		t.Errorf("mark-bad reboot request = %+v, want a plain reboot for update.mark-bad", req)
 	}
 }
 
@@ -331,35 +333,26 @@ func TestPrecheckReportsBootedSlotAndVersion(t *testing.T) {
 	}
 }
 
-// Reboot clamps delaySeconds to a 3s default outside the (0, 30] window and
-// passes the effective delay through to doReboot (both the return value and the
-// scheduled reboot). Guards both bounds of the
-// `delaySeconds <= 0 || delaySeconds > 30` clamp (openwrt_ab.go:358):
-//   - 358:18 boundary (`<= 0` → `< 0`) and negation (`<= 0` → `> 0`): the in=0
-//     case would slip through unclamped (returns 0) or wrongly clamp in=5.
-//   - 358:39 boundary (`> 30` → `>= 30`) and negation (`> 30` → `<= 30`): the
-//     in=30 case would be wrongly clamped to 3, and in=31 slip through as 31.
-func TestRebootClampsDelaySeconds(t *testing.T) {
-	cases := []struct {
-		in   int
-		want int
-	}{
-		{in: 0, want: 3},   // non-positive → default
-		{in: 5, want: 5},   // inside the window → unchanged
-		{in: 30, want: 30}, // upper bound is inclusive
-		{in: 31, want: 3},  // above the window → default
-	}
-	for _, c := range cases {
+// Reboot asks the agent's one reboot function for a PLAIN reboot and passes
+// the delay through untouched. The backend used to clamp the delay and exec
+// `reboot` itself; both now belong to system.Rebooter, where the clamp's
+// boundaries are tested (TestReboot_DelayIsClamped).
+func TestRebootAsksTheRebooterForAPlainReboot(t *testing.T) {
+	for _, in := range []int{0, 5, 30, 31} {
 		b, _, reboots := newTestBackend(t)
-		got, err := b.Reboot(context.Background(), "bundle", c.in)
+		got, err := b.Reboot(context.Background(), "bundle", in)
 		if err != nil {
-			t.Fatalf("Reboot(%d): %v", c.in, err)
+			t.Fatalf("Reboot(%d): %v", in, err)
 		}
-		if got != c.want {
-			t.Errorf("Reboot(%d) returned %d, want %d", c.in, got, c.want)
+		req := reboots.only(t)
+		if req.Mode != system.RebootPlain {
+			t.Errorf("Reboot(%d) mode = %q, want plain: GRUB picks the slot, there is no trial-boot argument", in, req.Mode)
 		}
-		if len(*reboots) != 1 || (*reboots)[0] != c.want {
-			t.Errorf("Reboot(%d) scheduled reboots %v, want [%d]", c.in, *reboots, c.want)
+		if req.DelaySeconds != in || got != in {
+			t.Errorf("Reboot(%d): requested %d, returned %d — the backend must not alter the delay", in, req.DelaySeconds, got)
+		}
+		if !strings.HasPrefix(req.Reason, "update.reboot") {
+			t.Errorf("Reboot(%d) reason = %q, want update.reboot", in, req.Reason)
 		}
 	}
 }

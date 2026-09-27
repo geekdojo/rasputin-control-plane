@@ -8,14 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -32,10 +33,12 @@ import (
 //	              will then send mark-bad, and we reboot back to old slot
 //	"download"  — Download() returns an error
 type MockBackend struct {
-	stateDir   string
-	mu         sync.Mutex
-	muted      *atomic.Bool // shared with system.IsMuted via SetMuteHook
-	reregister func()       // wired via SetReregisterHook; called after simulated reboot
+	stateDir string
+	mu       sync.Mutex
+	// rebooter is the agent's one reboot function. With the mock selected on
+	// a dev image it SIMULATES (system.Rebooter.EnableSimulation), and calls
+	// back into afterSimulatedBoot to flip the slot model.
+	rebooter Rebooter
 }
 
 // State persisted between agent restarts so the slot model survives.
@@ -86,14 +89,8 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 	return m, nil
 }
 
-// SetMuteHook lets the parent process wire in the system.IsMuted /
-// mute-during-reboot flag so simulated reboots actually mute heartbeats.
-func (m *MockBackend) SetMuteHook(b *atomic.Bool) { m.muted = b }
-
-// SetReregisterHook lets the parent wire in the function that re-publishes
-// the agent's NodeRegisteredEvt. The mock calls this after a simulated
-// reboot so the api's wait-for-re-registration step unblocks.
-func (m *MockBackend) SetReregisterHook(fn func()) { m.reregister = fn }
+// SetRebooter wires the agent's one reboot function.
+func (m *MockBackend) SetRebooter(rb Rebooter) { m.rebooter = rb }
 
 func (m *MockBackend) statePath() string { return filepath.Join(m.stateDir, "state.json") }
 
@@ -291,22 +288,21 @@ func (m *MockBackend) Install(ctx context.Context, bundleID, localPath string, t
 }
 
 func (m *MockBackend) Reboot(ctx context.Context, bundleID string, delaySeconds int) (int, error) {
-	if delaySeconds <= 0 || delaySeconds > 30 {
-		delaySeconds = 3
-	}
-	// Background goroutine simulates the reboot. Heartbeat mute is wired
-	// in via the system package's atomic, so the api sees us go offline.
-	go m.simulateReboot(delaySeconds)
-	return delaySeconds, nil
+	// The mock has no reboot of its own. It asks the agent's one reboot
+	// function, which SIMULATES when the dev mock was selected and then calls
+	// afterSimulatedBoot; heartbeat mute and re-registration are the
+	// Rebooter's, exactly as for a real reboot.
+	return requestReboot(m.rebooter, system.RebootRequest{
+		Reason:             rebootReason("update.reboot", bundleID),
+		Mode:               system.RebootPlain,
+		DelaySeconds:       delaySeconds,
+		AfterSimulatedBoot: m.afterSimulatedBoot,
+	})
 }
 
-func (m *MockBackend) simulateReboot(delaySeconds int) {
-	if m.muted != nil {
-		m.muted.Store(true)
-		defer m.muted.Store(false)
-	}
-	time.Sleep(time.Duration(delaySeconds) * time.Second)
-
+// afterSimulatedBoot flips the slot model the way a boot into the pending
+// slot would. It runs only inside a simulated reboot.
+func (m *MockBackend) afterSimulatedBoot() {
 	m.mu.Lock()
 	st, err := m.loadState()
 	if err != nil {
@@ -338,12 +334,6 @@ func (m *MockBackend) simulateReboot(delaySeconds int) {
 	}
 	_ = m.saveState(st)
 	m.mu.Unlock()
-
-	// Tell the api we're back. This is what step 6 of the saga is
-	// blocked on (NodeRegisteredSubject).
-	if m.reregister != nil {
-		m.reregister()
-	}
 }
 
 func (m *MockBackend) MarkGood(ctx context.Context, bundleID string) error {
@@ -377,7 +367,14 @@ func (m *MockBackend) MarkBad(ctx context.Context, bundleID, reason string) erro
 	}
 	m.mu.Unlock()
 
-	// Reboot back to the good slot.
-	go m.simulateReboot(2)
+	// Reboot back to the good slot. The slot model was already flipped
+	// above, so there is nothing to do when the simulated node comes back.
+	if _, err := requestReboot(m.rebooter, system.RebootRequest{
+		Reason:       rebootReason("update.mark-bad", bundleID),
+		Mode:         system.RebootPlain,
+		DelaySeconds: 2,
+	}); err != nil {
+		log.Printf("rasputin-agent: updater mock: slot marked bad, but the reboot was refused: %v", err)
+	}
 	return nil
 }

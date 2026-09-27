@@ -383,8 +383,19 @@ func main() {
 	// than letting the control plane count it as done.
 	subscribe(console.NewHandler(nodeID, console.ShadowPathFromEnv(), console.HelperPathFromEnv()).Subscriber())
 
+	// THE reboot function. One Rebooter, shared by the system.reboot command
+	// and every update backend, so a reboot is announced, muted and logged the
+	// same way whoever asked for it (geekdojo/geekdojo-brain#616).
+	//
+	// It performs REAL reboots unless the dev mock was asked for by name —
+	// RASPUTIN_UPDATE_BACKEND=mock, which autodetect never answers — and even
+	// then EnableSimulation refuses on a released image. There is no path by
+	// which a production node fakes a reboot: it reboots, or the command fails.
+	updateBackendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(role))
+	rebooter := newRebooter(nodeID, client, updateBackendChoice, host.ImageVersion(), rereg)
+
 	subscribe(func(c *nats.Conn) error {
-		if _, err := system.RegisterRebootHandler(c, nodeID, reregister); err != nil {
+		if _, err := system.RegisterRebootHandler(c, nodeID, rebooter); err != nil {
 			return fmt.Errorf("register reboot handler: %w", err)
 		}
 		log.Printf("rasputin-agent: subscribed to %s", proto.NodeCmdSubject(nodeID, "system.reboot"))
@@ -651,7 +662,7 @@ func main() {
 	// via RASPUTIN_UPDATE_BACKEND=rauc|openwrt-ab|mock.
 	{
 		updaterDir := updaterStateDir(stateDir)
-		backendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(role))
+		backendChoice := updateBackendChoice
 
 		var upBackend updater.Backend
 		switch backendChoice {
@@ -660,7 +671,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("rasputin-agent: rauc backend: %v", err)
 			}
-			rb.SetMuteHook(system.MutedAtomic())
+			rb.SetRebooter(rebooter)
 			// Trust the Mesh CA when pulling bundles — the api serves them
 			// over its mesh-CA HTTPS leaf, which the system roots don't cover.
 			rb.SetCABundle(tailscale.CABundlePath())
@@ -670,7 +681,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("rasputin-agent: openwrt-ab backend: %v", err)
 			}
-			ab.SetMuteHook(system.MutedAtomic())
+			ab.SetRebooter(rebooter)
 			ab.SetCABundle(tailscale.CABundlePath())
 			upBackend = ab
 		case "mock":
@@ -678,11 +689,11 @@ func main() {
 			if err != nil {
 				log.Fatalf("rasputin-agent: updater mock: %v", err)
 			}
-			mb.SetMuteHook(system.MutedAtomic())
-			// Reregister after a simulated reboot so the api's saga step 6
-			// unblocks. Real rauc reboots the whole agent process, so the
-			// fresh process publishes its own registration on connect.
-			mb.SetReregisterHook(rereg)
+			// The mock reboots through the same Rebooter as everything else.
+			// On a dev image that Rebooter simulates and re-registers
+			// afterwards; on a released image it refused to simulate, so a
+			// mock update's reboot restarts the node for real.
+			mb.SetRebooter(rebooter)
 			upBackend = mb
 		case backendUnavailable:
 			faults.Unavailable("RASPUTIN_UPDATE_BACKEND", updaterExpectedFor(role), updaterMissingPrereq(role),
@@ -694,7 +705,7 @@ func main() {
 		}
 		if upBackend != nil {
 			subscribe(func(c *nats.Conn) error {
-				if _, err := updater.RegisterHandlersWithFault(c, nodeID, upBackend, updateFault); err != nil {
+				if _, err := updater.RegisterHandlersWithFault(c, nodeID, upBackend, updateFault, rebooter); err != nil {
 					return fmt.Errorf("register update handlers: %w", err)
 				}
 				return nil
@@ -1172,7 +1183,11 @@ func handlePing(nodeID string, m *nats.Msg) {
 		NodeID:   nodeID,
 		Hostname: host.Hostname(),
 		Uptime:   host.Uptime().String(),
-		Ts:       time.Now().UTC(),
+		// Which boot is answering. diag.ping is the one command every agent
+		// answers, so this is how the control plane verifies a reboot or a
+		// BMC reset of a node whatever its role or update backend.
+		BootID: host.BootID(),
+		Ts:     time.Now().UTC(),
 	}
 	payload, err := json.Marshal(pong)
 	if err != nil {
@@ -1457,6 +1472,19 @@ func nodeTailnetIP() string {
 		return ""
 	}
 	return strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+}
+
+// newRebooter builds the agent's one Rebooter. It simulates only when the
+// update backend choice is exactly "mock" — a value autodetectUpdaterBackend
+// never returns, so it can only have been asked for by name — and the running
+// image is a dev build. Every other combination, including a choice that is
+// unavailable, unrecognised or empty, reboots for real.
+func newRebooter(nodeID string, pub system.Publisher, updateBackendChoice, imageVersion string, reregister func()) *system.Rebooter {
+	rb := system.NewRebooter(nodeID, pub)
+	if updateBackendChoice == "mock" {
+		rb.EnableSimulation(imageVersion, reregister)
+	}
+	return rb
 }
 
 // autodetectUpdaterBackend picks the OS-update backend. The firewall runs

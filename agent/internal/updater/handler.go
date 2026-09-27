@@ -8,6 +8,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -19,13 +20,18 @@ import (
 // install) stream progress on
 // rasputin.node.<nodeID>.evt.update.{download,install}.progress.
 func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend) ([]*nats.Subscription, error) {
-	return RegisterHandlersWithFault(nc, nodeID, backend, FaultNone)
+	return RegisterHandlersWithFault(nc, nodeID, backend, FaultNone, nil)
 }
 
 // RegisterHandlersWithFault is RegisterHandlers plus update-path fault
 // injection (see fault.go). fault is FaultNone in every non-bench path, and
 // can only have come from updater.Arm.
-func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fault Fault) ([]*nats.Subscription, error) {
+//
+// rb is the agent's one reboot function. The handlers use it for one thing
+// only: FaultNoReboot's announce-and-do-not-reboot, so that even a faked
+// reboot is announced by the same code as a real one. Real reboots reach it
+// through the backend.
+func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fault Fault, rb Rebooter) ([]*nats.Subscription, error) {
 	subs := make([]*nats.Subscription, 0, 6)
 
 	bind := func(subj string, fn nats.MsgHandler) error {
@@ -157,30 +163,28 @@ func RegisterHandlersWithFault(nc *nats.Conn, nodeID string, backend Backend, fa
 		// from a node whose reboot silently failed — bench node c13 — and it is
 		// the only way to reach the terminal bootSame verdict.
 		if fault == FaultNoReboot {
-			log.Printf("rasputin-agent: ⚠️  FAULT %s: acking the reboot and NOT rebooting", FaultNoReboot)
-			bus.Respond(m, proto.UpdateRebootAck{OK: true, DelaySeconds: cmd.DelaySeconds})
-			ev, _ := json.Marshal(proto.SystemRebootingEvt{
-				NodeID:       nodeID,
+			delay, err := requestReboot(rb, system.RebootRequest{
+				Reason:       rebootReason("update.reboot", cmd.BundleID) + " fault=" + string(FaultNoReboot),
+				Mode:         system.RebootPlain,
 				DelaySeconds: cmd.DelaySeconds,
-				Ts:           time.Now().UTC(),
+				AnnounceOnly: true,
 			})
-			_ = nc.Publish(proto.NodeEvtSubject(nodeID, "rebooting"), ev)
+			if err != nil {
+				bus.Respond(m, proto.UpdateRebootAck{OK: false, Detail: err.Error()})
+				return
+			}
+			bus.Respond(m, proto.UpdateRebootAck{OK: true, DelaySeconds: delay})
 			return
 		}
 
+		// The backend asks the agent's one reboot function, which publishes
+		// the rebooting event the saga's sub-before-RPC is waiting for.
 		delay, err := backend.Reboot(ctx, cmd.BundleID, cmd.DelaySeconds)
 		if err != nil {
-			bus.Respond(m, proto.UpdateRebootAck{OK: false})
+			bus.Respond(m, proto.UpdateRebootAck{OK: false, Detail: err.Error()})
 			return
 		}
 		bus.Respond(m, proto.UpdateRebootAck{OK: true, DelaySeconds: delay})
-		// Publish the rebooting event so the saga's sub-before-RPC catches it.
-		ev, _ := json.Marshal(proto.SystemRebootingEvt{
-			NodeID:       nodeID,
-			DelaySeconds: delay,
-			Ts:           time.Now().UTC(),
-		})
-		_ = nc.Publish(proto.NodeEvtSubject(nodeID, "rebooting"), ev)
 	}); err != nil {
 		return subs, err
 	}

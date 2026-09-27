@@ -15,10 +15,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -61,7 +61,9 @@ type OpenWrtABBackend struct {
 	// versionFile is the baked image version reported as CurrentVersion.
 	versionFile string
 
-	muted        *atomic.Bool
+	// rebooter is the agent's one reboot function. Wired from main.go via
+	// SetRebooter; nil means this backend refuses to reboot.
+	rebooter     Rebooter
 	caBundlePath string
 
 	// --- injectable OS-coupled seams (see type doc) --------------------
@@ -69,8 +71,6 @@ type OpenWrtABBackend struct {
 	resolveDevice func(slot string) (string, error)
 	// writeSlot streams the squashfs at src into the block device dev.
 	writeSlot func(ctx context.Context, src, dev string, progressFn func(phase string, percent int)) error
-	// doReboot performs the (backgrounded) reboot after delaySeconds.
-	doReboot func(delaySeconds int)
 	// verifySig verifies the artifact's detached CMS signature against the
 	// baked publisher trust root before install, and fails the install if it
 	// cannot. Overridden in tests, which have no baked trust root.
@@ -94,12 +94,12 @@ func NewOpenWrtABBackend(stateDir string) (*OpenWrtABBackend, error) {
 	}
 	b.resolveDevice = defaultResolveDevice
 	b.writeSlot = defaultWriteSlot
-	b.doReboot = b.defaultReboot
 	b.verifySig = defaultVerifySig
 	return b, nil
 }
 
-func (o *OpenWrtABBackend) SetMuteHook(b *atomic.Bool) { o.muted = b }
+// SetRebooter wires the agent's one reboot function.
+func (o *OpenWrtABBackend) SetRebooter(rb Rebooter) { o.rebooter = rb }
 
 // SetCABundle mirrors RAUCBackend.SetCABundle: trust the Mesh CA (in addition
 // to system roots) when pulling bundles from the api's mesh-CA HTTPS leaf.
@@ -494,12 +494,15 @@ func (o *OpenWrtABBackend) activateSlot(letter string) error {
 	})
 }
 
+// Reboot asks for a PLAIN reboot. GRUB (not the Pi tryboot firmware) selects
+// the slot from grubenv, and activateSlot already armed the counter, so there
+// is no trial-boot argument to pass.
 func (o *OpenWrtABBackend) Reboot(ctx context.Context, bundleID string, delaySeconds int) (int, error) {
-	if delaySeconds <= 0 || delaySeconds > 30 {
-		delaySeconds = 3
-	}
-	o.doReboot(delaySeconds)
-	return delaySeconds, nil
+	return requestReboot(o.rebooter, system.RebootRequest{
+		Reason:       rebootReason("update.reboot", bundleID),
+		Mode:         system.RebootPlain,
+		DelaySeconds: delaySeconds,
+	})
 }
 
 // MarkGood commits the running slot: OK=1, TRY=0. Idempotent. This resets the
@@ -534,7 +537,13 @@ func (o *OpenWrtABBackend) MarkBad(ctx context.Context, bundleID, reason string)
 	if err := o.markRunning(false); err != nil {
 		return err
 	}
-	o.doReboot(2)
+	if _, err := requestReboot(o.rebooter, system.RebootRequest{
+		Reason:       rebootReason("update.mark-bad", bundleID),
+		Mode:         system.RebootPlain,
+		DelaySeconds: 2,
+	}); err != nil {
+		log.Printf("rasputin-agent: openwrt-ab: slot marked bad, but the reboot to the good slot was refused: %v", err)
+	}
 	return nil
 }
 
@@ -753,21 +762,6 @@ func defaultWriteSlot(ctx context.Context, src, dev string, progressFn func(stri
 		}
 	}
 	return out.Sync()
-}
-
-// defaultReboot backgrounds a plain reboot after delaySeconds. GRUB (not the Pi
-// tryboot firmware) selects the slot from grubenv, so no "0 tryboot" arg is
-// needed — activateSlot already armed the counter. Uses busybox `reboot`.
-func (o *OpenWrtABBackend) defaultReboot(delaySeconds int) {
-	go func() {
-		if o.muted != nil {
-			o.muted.Store(true)
-		}
-		_ = exec.Command("sleep", fmt.Sprintf("%d", delaySeconds)).Run()
-		if err := exec.Command("reboot").Run(); err != nil {
-			log.Printf("rasputin-agent: reboot failed: %v", err)
-		}
-	}()
 }
 
 // defaultVerifySig verifies the detached CMS signature the release pipeline

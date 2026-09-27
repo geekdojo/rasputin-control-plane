@@ -4,6 +4,8 @@ import (
 	"log"
 	"os"
 	"strings"
+
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
 )
 
 // Fault injection for the update path.
@@ -137,12 +139,9 @@ func parseFault(raw string) (Fault, error) {
 }
 
 // isDevImage reports whether v is a pre-release build rather than a released
-// image. An EMPTY version is a dev checkout with no /etc/rasputin/image-version
-// at all — not an appliance — so it is allowed; an appliance always has one.
-func isDevImage(v string) bool {
-	v = strings.TrimSpace(v)
-	return v == "" || strings.Contains(v, "-dev.")
-}
+// image. The rule itself lives in host.IsDevImage, shared with the reboot
+// simulator's gate.
+func isDevImage(v string) bool { return host.IsDevImage(v) }
 
 // UnknownFaultError describes an unrecognised FaultEnv value. It is a diagnostic
 // carried into a log line, never a reason to stop the agent — see Arm.

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -146,12 +147,23 @@ func TestIsDevImage(t *testing.T) {
 // point where the reboot doesn't happen: the ack says OK and the rebooting
 // event is published, so the api takes exactly the path it takes for a real
 // reboot. That is what makes the resulting bootSame verdict meaningful.
+//
+// The announcement comes from the agent's one reboot function, asked to
+// announce only. The Rebooter here is the real one in SIMULATION mode, so that
+// nothing in this test could restart the machine even if the handler got it
+// wrong.
 func TestFaultNoReboot_AcksAndAnnouncesButDoesNotReboot(t *testing.T) {
 	nc := startNATS(t)
 	const nodeID = "n"
 	be := &countingRebootBackend{}
+	rb := system.NewRebooter(nodeID, nc)
+	if !rb.EnableSimulation("", func() {
+		t.Error("the no-reboot fault re-registered: it ran a simulated reboot instead of announcing only")
+	}) {
+		t.Fatal("simulation refused on a dev checkout")
+	}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultNoReboot)
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultNoReboot, rb)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -190,6 +202,36 @@ func TestFaultNoReboot_AcksAndAnnouncesButDoesNotReboot(t *testing.T) {
 	if be.reboots != 0 {
 		t.Errorf("backend.Reboot called %d times — the whole point is that it is not", be.reboots)
 	}
+	if system.IsMuted() {
+		t.Error("the fault muted heartbeats; its node must keep answering on the boot it was told to leave")
+	}
+}
+
+// The fault asks the one reboot function to announce only — it does not
+// publish the event itself, and it does not ask for a reboot.
+func TestFaultNoReboot_AsksTheRebooterToAnnounceOnly(t *testing.T) {
+	nc := startNATS(t)
+	rec := &recordingRebooter{}
+	subs, err := RegisterHandlersWithFault(nc, "n", &countingRebootBackend{}, FaultNoReboot, rec)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	defer func() {
+		for _, s := range subs {
+			_ = s.Unsubscribe()
+		}
+	}()
+	cmd, _ := json.Marshal(proto.UpdateRebootCmd{BundleID: "sha", DelaySeconds: 3})
+	if _, err := nc.Request(proto.UpdateRebootSubject("n"), cmd, 3*time.Second); err != nil {
+		t.Fatalf("reboot rpc: %v", err)
+	}
+	req := rec.only(t)
+	if !req.AnnounceOnly {
+		t.Errorf("request = %+v, want AnnounceOnly", req)
+	}
+	if !strings.Contains(req.Reason, string(FaultNoReboot)) {
+		t.Errorf("reason = %q, want the fault named so the journal says why nothing rebooted", req.Reason)
+	}
 }
 
 // And the same handler without the fault must still reboot, so the test above
@@ -199,7 +241,7 @@ func TestNoFault_RebootsNormally(t *testing.T) {
 	const nodeID = "n"
 	be := &countingRebootBackend{}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultNone)
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultNone, &recordingRebooter{})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -226,7 +268,7 @@ func TestFaultFailHealth_DoesNotTouchTheRebootPath(t *testing.T) {
 	const nodeID = "n"
 	be := &countingRebootBackend{}
 
-	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultFailHealth)
+	subs, err := RegisterHandlersWithFault(nc, nodeID, be, FaultFailHealth, &recordingRebooter{})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
