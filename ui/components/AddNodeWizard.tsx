@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { getFirewallImage, getNodeImage, getOperatorKey, mintBusToken, setOperatorKey, type OperatorKey } from '../lib/api';
 import { keyToRemember } from '../lib/operator-key';
 import type { FlashableImage, MintedBusToken } from '../lib/types';
+import { imageVerifyState } from '../lib/image-verify';
 import {
   type AddableRole,
   type NodeArch,
@@ -745,16 +746,7 @@ const seedBox: React.CSSProperties = {
 // copy that might differ.
 function VerifyImage({ image }: { image: FlashableImage }) {
   const shaCmd = `shasum -a 256 ${image.image}`;
-  const manifestCmds = image.manifestB64 && image.manifestSigB64
-    ? [
-        `printf '%s' '${image.manifestB64}' | base64 -d > manifest.json`,
-        `printf '%s' '${image.manifestSigB64}' | base64 -d > manifest.json.sig`,
-        'curl -fsSLO https://rasputin.geekdojo.com/rasputin-root-ca.pem',
-        'openssl cms -verify -purpose any -binary -inform DER -in manifest.json.sig \\',
-        '  -content manifest.json -CAfile rasputin-root-ca.pem -signer signer.pem -out /dev/null',
-        "openssl x509 -in signer.pem -noout -text | grep -A1 'Extended Key Usage'",
-      ].join('\n')
-    : null;
+  const verify = imageVerifyState(image);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
       <div style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
@@ -766,20 +758,26 @@ function VerifyImage({ image }: { image: FlashableImage }) {
           <CopyButton value={image.sha256} />
         </div>
       </div>
-      {image.signer ? (
+      {verify.kind === 'signed' ? (
         <>
           <div style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
-            That checksum came from a release manifest signed by <Tok>{image.signer}</Tok>, verified by this
+            That checksum came from a release manifest signed by <Tok>{verify.signer}</Tok>, verified by this
             control plane. To check it yourself — the last line must print{' '}
             <Tok>1.3.6.1.4.1.66587.1.1.1</Tok>:
           </div>
           <div style={{ position: 'relative' }}>
-            <pre style={seedBox}>{manifestCmds}</pre>
+            <pre style={seedBox}>{verify.commands}</pre>
             <div style={{ position: 'absolute', top: 4, right: 4 }}>
-              <CopyButton value={manifestCmds ?? ''} />
+              <CopyButton value={verify.commands} />
             </div>
           </div>
         </>
+      ) : verify.kind === 'unchecked' ? (
+        <div style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
+          This control plane did not hand over the release&apos;s signed manifest, so its signature can&apos;t be
+          checked from here. Verify the image against the release&apos;s own <Tok>manifest.json</Tok> and{' '}
+          <Tok>manifest.json.sig</Tok>, not this checksum alone.
+        </div>
       ) : (
         <div style={{ color: DIM, fontSize: 10, fontFamily: MONO }}>
           This release predates manifest signing, so the checksum above is its whole integrity story.

@@ -117,8 +117,27 @@ type ReleaseInfo struct {
 	// floor. Logged and surfaced rather than discarded: on a security gate, an
 	// unattributed pass is only marginally better than no gate.
 	Signer string
+	// signedManifest and signedManifestSig are the exact manifest bytes and
+	// detached signature that were VERIFIED, kept so a caller can hand them on
+	// for someone else to repeat the check (the firewall-image descriptor ->
+	// flash.sh, geekdojo/geekdojo-brain#527). Set together with Signer and
+	// never otherwise: bytes that were not checked here must not travel as if
+	// they had been.
+	signedManifest    []byte
+	signedManifestSig []byte
 	// assetURLs maps asset filename → download URL (public, anonymous).
 	assetURLs map[string]string
+}
+
+// SignedManifest returns the release manifest and its detached signature
+// exactly as they were verified, and false when this release was not verified
+// (below the component's signing floor). The slices are the caller's to read,
+// not to modify.
+func (r *ReleaseInfo) SignedManifest() (manifest, sig []byte, ok bool) {
+	if len(r.signedManifest) == 0 || len(r.signedManifestSig) == 0 {
+		return nil, nil, false
+	}
+	return r.signedManifest, r.signedManifestSig, true
 }
 
 // Artifact returns the manifest artifact matching the given compatible string

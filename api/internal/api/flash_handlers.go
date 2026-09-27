@@ -2,6 +2,7 @@ package api
 
 import (
 	_ "embed"
+	"encoding/base64"
 	"errors"
 	"log"
 	"net/http"
@@ -244,11 +245,22 @@ func (s *Server) handleClusterFirewallImage(w http.ResponseWriter, r *http.Reque
 		SHA256:       art.SHA256,
 		Image:        art.Image,
 	}
-	// The firewall descriptor carries no manifest+signature yet, because no
-	// firewall release publishes one (releases.Components: the fw entry's
-	// SignedManifestFrom is empty). Once geekdojo/geekdojo-brain#526 ships and
-	// that floor is set, LatestFor verifies the manifest and this is where the
-	// verified bytes would travel on to flash.sh, exactly as the OS path does.
-	desc.Signer = info.Signer
+	// The verified manifest and its signature travel on to flash.sh, exactly
+	// as the OS path (releases.PublicNodeImage) and the baked fallback above
+	// send them, so the laptop repeats the check rather than trusting this
+	// control plane's sha256 (geekdojo/geekdojo-brain#527). Every firewall
+	// release from the fw signing floor (releases.Components) on carries a
+	// signature and LatestFor refuses one that does not verify, so in practice
+	// this is always taken.
+	//
+	// Signer travels ONLY with the bytes. Before this the descriptor carried a
+	// signer and no manifest, which told flash.sh "unsigned" and told the UI
+	// "signed, check it yourself" above an empty command box; one field
+	// without the other is a claim nobody downstream can check.
+	if manifest, sig, ok := info.SignedManifest(); ok {
+		desc.ManifestB64 = base64.StdEncoding.EncodeToString(manifest)
+		desc.ManifestSigB64 = base64.StdEncoding.EncodeToString(sig)
+		desc.Signer = info.Signer
+	}
 	writeJSON(w, http.StatusOK, desc)
 }
