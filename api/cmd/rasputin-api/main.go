@@ -2989,7 +2989,11 @@ func restoreExit() {
 // unreadable mode, never to offer (bustls.ResolveStartMode).
 func busTLSStartMode(ctx context.Context, dbPath string, tlsAvailable bool) bustls.StartMode {
 	facts := busTLSStartFacts(ctx, dbPath, tlsAvailable)
-	if os.Getenv(bustls.EnvMode) != "" {
+	// Trimmed exactly as ResolveStartMode trims it. A blank-but-not-empty
+	// value is no pin, so the recorded mode must still be read: skipping the
+	// settings store on it would resolve a cluster that recorded require as
+	// though nothing were recorded at all, which on an enrolled fleet is offer.
+	if strings.TrimSpace(os.Getenv(bustls.EnvMode)) != "" {
 		return bustls.ResolveStartMode(ctx, nil, facts)
 	}
 	st, err := setup.OpenStore(ctx, dbPath)
@@ -3004,21 +3008,26 @@ func busTLSStartMode(ctx context.Context, dbPath string, tlsAvailable bool) bust
 // how many nodes are enrolled, and whether every one of them reported bus TLS.
 //
 // An inventory that will not open answers "nodes are enrolled and not all of
-// them are on TLS", which is the conservative reading: it derives migrate, the
-// rung that keeps a fleet reachable, rather than require on a fleet nobody
-// could look at.
+// them are on TLS", which is the conservative reading, and says why in
+// StartFacts.Unknown: it derives migrate, the rung that keeps a fleet
+// reachable, rather than require on a fleet nobody could look at — and never
+// offer, which is what the same guess would derive with nothing recorded if it
+// were not marked as a guess.
 func busTLSStartFacts(ctx context.Context, dbPath string, tlsAvailable bool) bustls.StartFacts {
-	unknown := bustls.StartFacts{TLSAvailable: tlsAvailable, Enrolled: 1, AllReportedTLS: false}
+	unknown := func(err error) bustls.StartFacts {
+		return bustls.StartFacts{TLSAvailable: tlsAvailable, Enrolled: 1, AllReportedTLS: false,
+			Unknown: fmt.Sprintf("the node inventory could not be read (%v), so whether every enrolled node is on bus TLS is unknown", err)}
+	}
 	inv, err := inventory.OpenStore(ctx, dbPath)
 	if err != nil {
 		log.Printf("rasputin-api: bus TLS mode: read inventory: %v — assuming a fleet that is not all on TLS", err)
-		return unknown
+		return unknown(fmt.Errorf("open: %w", err))
 	}
 	defer func() { _ = inv.Close() }()
 	nodes, err := inv.List(ctx)
 	if err != nil {
 		log.Printf("rasputin-api: bus TLS mode: list inventory: %v — assuming a fleet that is not all on TLS", err)
-		return unknown
+		return unknown(fmt.Errorf("list: %w", err))
 	}
 	return bustls.FactsFromNodes(tlsAvailable, nodes)
 }

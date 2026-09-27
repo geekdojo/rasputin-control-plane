@@ -272,6 +272,91 @@ func TestResolveStartMode_UnreadableModeNeverResolvesToOffer(t *testing.T) {
 	}
 }
 
+// The cases the three tests above do not reach, one table so the closed
+// outcome of each is stated once (R07 in .github/security-resolvers.tsv):
+// blank values are absent values and never mask a recorded mode; a fault on a
+// controlplane with no bus key derives migrate, never require it cannot serve;
+// a fault on a fresh cluster is still require; and facts that could not be
+// read (StartFacts.Unknown, the probe error) are a fault that never derives
+// offer. offer is owed on exactly one row: an existing fleet, read cleanly,
+// with nothing recorded.
+func TestResolveStartMode_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+	ctx := context.Background()
+	fresh := StartFacts{TLSAvailable: true, Enrolled: 0, AllReportedTLS: true}
+	allOnTLS := StartFacts{TLSAvailable: true, Enrolled: 3, AllReportedTLS: true}
+	noKey := StartFacts{TLSAvailable: false, Enrolled: 3, AllReportedTLS: true}
+	probeFailed := StartFacts{TLSAvailable: true, Enrolled: 1, AllReportedTLS: false,
+		Unknown: "the node inventory could not be read (disk I/O error)"}
+	recorded := func(v string) Settings {
+		s := &memSettings{}
+		_ = s.Set(context.Background(), SettingKey, v)
+		return s
+	}
+	for _, tc := range []struct {
+		name     string
+		env      string
+		settings Settings
+		facts    StartFacts
+		want     Mode
+		pinned   bool
+		derived  bool
+		faulted  bool
+		mayOffer bool
+	}{
+		{name: "absent everywhere, an existing fleet read cleanly — the ladder's gates decide",
+			settings: &memSettings{}, facts: aFleet, want: ModeOffer, mayOffer: true},
+		{name: "absent everywhere and no settings store to ask, a fresh cluster",
+			settings: nil, facts: fresh, want: ModeRequire, derived: true},
+
+		{name: "blank env pin does not pin and does not mask a recorded require",
+			env: " \t\n", settings: recorded("require"), facts: aFleet, want: ModeRequire},
+		{name: "blank setting row on a fresh cluster",
+			settings: recorded("  "), facts: fresh, want: ModeRequire, derived: true},
+
+		{name: "malformed setting on a fresh cluster",
+			settings: recorded("bogus"), facts: fresh, want: ModeRequire, derived: true, faulted: true},
+		{name: "malformed setting, no bus key",
+			settings: recorded("bogus"), facts: noKey, want: ModeMigrate, derived: true, faulted: true},
+		{name: "malformed env pin, no settings store to fall back on",
+			env: "tls", settings: nil, facts: allOnTLS, want: ModeRequire, derived: true, faulted: true},
+		{name: "malformed env pin, no bus key",
+			env: "tls", settings: recorded("require"), facts: noKey, want: ModeMigrate, derived: true, faulted: true},
+
+		{name: "unreadable setting on a fresh cluster",
+			settings: unreadableSettings{}, facts: fresh, want: ModeRequire, derived: true, faulted: true},
+		{name: "unreadable setting, no bus key",
+			settings: unreadableSettings{}, facts: noKey, want: ModeMigrate, derived: true, faulted: true},
+
+		{name: "probe error, nothing recorded",
+			settings: &memSettings{}, facts: probeFailed, want: ModeMigrate, derived: true, faulted: true},
+		{name: "probe error, no settings store",
+			settings: nil, facts: probeFailed, want: ModeMigrate, derived: true, faulted: true},
+		{name: "probe error, malformed setting",
+			settings: recorded("bogus"), facts: probeFailed, want: ModeMigrate, derived: true, faulted: true},
+		{name: "probe error, unreadable setting",
+			settings: unreadableSettings{}, facts: probeFailed, want: ModeMigrate, derived: true, faulted: true},
+		{name: "probe error, a recorded require is kept",
+			settings: recorded("require"), facts: probeFailed, want: ModeRequire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvMode, tc.env)
+			got := ResolveStartMode(ctx, tc.settings, tc.facts)
+			if got.Mode == ModeOffer && !tc.mayOffer {
+				t.Fatalf("resolved to offer: %+v", got)
+			}
+			if got.Mode != tc.want || got.Pinned != tc.pinned || got.Derived != tc.derived || (got.Fault != "") != tc.faulted {
+				t.Fatalf("got %+v\nwant mode=%s pinned=%t derived=%t faulted=%t", got, tc.want, tc.pinned, tc.derived, tc.faulted)
+			}
+			if !tc.facts.TLSAvailable && got.Mode == ModeRequire {
+				t.Fatalf("resolved to require with no bus key to serve TLS: %+v", got)
+			}
+			if tc.facts.Unknown != "" && tc.faulted && !strings.Contains(got.Fault, tc.facts.Unknown) {
+				t.Fatalf("fault %q does not say the facts could not be read", got.Fault)
+			}
+		})
+	}
+}
+
 type unreadableSettings struct{}
 
 func (unreadableSettings) Get(context.Context, string) (string, error) {

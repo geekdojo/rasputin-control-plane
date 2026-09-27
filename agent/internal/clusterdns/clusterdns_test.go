@@ -872,6 +872,80 @@ func TestPinnedIP(t *testing.T) {
 	}
 }
 
+// Every shape the drop-in can take (R21 in .github/security-resolvers.tsv).
+// The CLOSED outcome for pinnedIP is "": no address to keep. The caller then
+// withdraws the drop-in instead of probing, and possibly keeping, something
+// this package never wrote. A bare address, the one shape Render writes, is
+// the only thing it returns. The gate's probe-error case is the caller's —
+// the probe runs on pinnedIP's answer — and is owned by
+// TestApply_LostBusWithdrawsAPinWhoseServerDoesNotAnswer; this test also
+// drives every "" row through Apply to show the probe is never reached.
+func TestPinnedIP_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body *string // nil: absent
+		dir  bool    // a directory where the file should be: unreadable
+		want string
+	}{
+		{name: "absent"},
+		{name: "unreadable", dir: true},
+		{name: "empty file", body: ptr("")},
+		{name: "no DNS= line", body: ptr("[Resolve]\nDomains=~rasputin.local\n")},
+		{name: "empty DNS=", body: ptr("[Resolve]\nDNS=\nDomains=~rasputin.local\n")},
+		{name: "blank DNS=", body: ptr("[Resolve]\nDNS=  \t\nDomains=~rasputin.local\n")},
+		{name: "a hostname", body: ptr("[Resolve]\nDNS=cp.example.com\n")},
+		{name: "not an address", body: ptr("[Resolve]\nDNS=not-an-ip\n")},
+		{name: "a list", body: ptr("[Resolve]\nDNS=192.168.1.181 192.168.1.182\n")},
+		{name: "an address with a port", body: ptr("[Resolve]\nDNS=192.168.1.181:53\n")},
+		{name: "a truncated address", body: ptr("[Resolve]\nDNS=192.168.1.\n")},
+		{name: "only a zone", body: ptr("[Resolve]\nDNS=%eth0\n")},
+		{name: "a malformed first DNS= is not rescued by a second", body: ptr("[Resolve]\nDNS=bogus\nDNS=192.168.1.181\n")},
+
+		{name: "what Render writes", body: ptr(Render("e3bench", "192.168.1.181")), want: "192.168.1.181"},
+		{name: "IPv6", body: ptr(Render("e3bench", "fd00::1")), want: "fd00::1"},
+		{name: "IPv6 with a zone", body: ptr(Render("e3bench", "fe80::1%eth0")), want: "fe80::1%eth0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			path := h.path()
+			if err := os.MkdirAll(h.cfg.Dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case tc.dir:
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case tc.body != nil:
+				if err := os.WriteFile(path, []byte(*tc.body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := pinnedIP(path); got != tc.want {
+				t.Fatalf("pinnedIP = %q, want %q", got, tc.want)
+			}
+			if tc.want != "" || tc.body == nil {
+				return // absent and unreadable-as-a-directory are not drop-ins Apply withdraws
+			}
+			// The bus cannot say where the controlplane is, so Apply falls back
+			// to the pin — and must withdraw this one without probing it.
+			h.cfg.probe = func(_ context.Context, ip, _ string) error {
+				t.Errorf("probed %q, which the drop-in never pinned", ip)
+				return nil
+			}
+			changed, err := Apply(context.Background(), h.cfg, TriggerLost)
+			if !changed || err == nil {
+				t.Fatalf("changed=%v err=%v, want a reported withdrawal", changed, err)
+			}
+			if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+				t.Error("a drop-in with no usable address is still present")
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
+
 // Nothing pinned and no address is the boot case: nothing to keep, nothing to
 // withdraw, and nothing to ask.
 func TestApply_UnknownAddressWithNothingPinnedIsQuiet(t *testing.T) {

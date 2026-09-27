@@ -101,6 +101,12 @@ type StartFacts struct {
 	// AllReportedTLS is whether every one of them last registered over TLS
 	// with the pin verified. Vacuously true at Enrolled == 0.
 	AllReportedTLS bool
+	// Unknown is why the facts above could not be read, in words, or "" when
+	// they were. A reader that fails sets it beside the conservative answer
+	// (nodes enrolled, not all on TLS), and derive treats it as a fault: an
+	// inventory nobody could read is not an existing fleet that has simply
+	// not climbed the ladder yet, so it never derives offer.
+	Unknown string
 }
 
 // FactsFromNodes reads StartFacts off an inventory listing.
@@ -145,7 +151,8 @@ type StartMode struct {
 //	                                      that rolls back cannot strand a node
 //	                                      it already pinned.
 //	either is set but MALFORMED or
-//	unreadable                          → require when every enrolled node has
+//	unreadable, or the facts themselves
+//	could not be read (Unknown)         → require when every enrolled node has
 //	                                      reported bus TLS, else migrate.
 //	                                      Never offer, and always with a fault.
 //
@@ -189,6 +196,16 @@ func ResolveStartMode(ctx context.Context, settings Settings, facts StartFacts) 
 // derive picks a mode from the facts. fault is "" when nothing was malformed —
 // the fresh-cluster and no-setting cases — and the reason otherwise.
 func derive(facts StartFacts, fault string) StartMode {
+	if facts.Unknown != "" {
+		// The facts are a guess. Whatever else went wrong, that is a fault
+		// too — otherwise "nothing recorded" plus a guessed fleet would read
+		// as an ordinary fleet below and derive offer.
+		if fault == "" {
+			fault = facts.Unknown
+		} else {
+			fault += "; " + facts.Unknown
+		}
+	}
 	switch {
 	case !facts.TLSAvailable:
 		// Whatever the fleet looks like, this api serves no TLS: claiming
