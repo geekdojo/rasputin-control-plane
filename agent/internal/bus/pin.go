@@ -167,8 +167,15 @@ func ResolvePin(env, pinFile, cpPinFile string) Resolution {
 
 // readSource reads one pin file. A file that is absent contributes nothing. A
 // file that is present sets configured — the node holds a pin — and a file that
-// is present but unreadable or unparseable sets *srcErr and yields no pin,
-// which is what makes the node refuse plaintext rather than downgrade to it.
+// is present but unreadable, empty or unparseable sets *srcErr and yields no
+// pin, which is what makes the node refuse plaintext rather than downgrade to
+// it.
+//
+// Empty is a fault, not an absence: both writers (WritePinFile, and the api's
+// bustls.WriteAgentPinFile) write a whole pin or nothing, so a pin file that
+// exists and holds nothing is a pinned node's file truncated by something
+// else, and reading it as "never pinned" would send the join token in the
+// clear (geekdojo/geekdojo-brain#510, F09).
 func readSource(path string, configured *bool, srcErr *error) (string, bool) {
 	if strings.TrimSpace(path) == "" {
 		return "", false
@@ -180,6 +187,18 @@ func readSource(path string, configured *bool, srcErr *error) (string, bool) {
 		*srcErr = fmt.Errorf("read %s: %w", path, rerr)
 		return "", false
 	case v == "":
+		// ReadPinFile says "" for a file that is absent AND for one that is
+		// present and blank; only the first contributes nothing.
+		_, serr := os.Stat(path)
+		if errors.Is(serr, os.ErrNotExist) {
+			return "", false
+		}
+		*configured = true
+		if serr != nil {
+			*srcErr = fmt.Errorf("stat %s: %w", path, serr)
+		} else {
+			*srcErr = fmt.Errorf("%s: the pin file is present but empty", path)
+		}
 		return "", false
 	}
 	*configured = true

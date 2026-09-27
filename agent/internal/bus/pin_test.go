@@ -153,6 +153,112 @@ func TestResolvePin_ControlplaneFile(t *testing.T) {
 	}
 }
 
+// Every shape each of the three sources can take, alone and in front of a
+// good source (R13 in .github/security-resolvers.tsv). The CLOSED outcome for a
+// pin is: a usable pin from the highest source that has one, and otherwise —
+// if any source was configured at all — no pin AND no plaintext. A node may
+// dial plaintext in exactly one case, the one that is owed: nothing anywhere
+// was ever given a pin. There is no probe behind ResolvePin, so the gate's
+// probe-error case does not apply to it.
+func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+	good := mustPin(t, newKey(t))
+	const (
+		absent = iota
+		empty
+		blank
+		malformed
+		unreadable
+		valid
+	)
+	// file puts one shape of pin file at dir/name and returns its path.
+	file := func(t *testing.T, dir, name string, shape int) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		var err error
+		switch shape {
+		case absent:
+		case empty:
+			err = os.WriteFile(path, nil, 0o644)
+		case blank:
+			err = os.WriteFile(path, []byte(" \n\t\n"), 0o644)
+		case malformed:
+			err = os.WriteFile(path, []byte("sha256/short\n"), 0o644)
+		case unreadable:
+			err = os.MkdirAll(path, 0o700) // a directory where the file should be
+		case valid:
+			err = os.WriteFile(path, []byte(good+"\n"), 0o644)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	envOf := map[int]string{absent: "", empty: "", blank: " \t\n", malformed: "sha256/nope", valid: good}
+
+	for _, tc := range []struct {
+		name          string
+		env, pin, cp  int
+		noCPPath      bool // a node that is not the controlplane passes ""
+		wantSource    string
+		wantPlaintext bool // only the never-pinned row
+		wantFaults    int
+	}{
+		{name: "never pinned anywhere", env: absent, pin: absent, cp: absent, wantPlaintext: true},
+		{name: "never pinned, not the controlplane", env: absent, pin: absent, noCPPath: true, wantPlaintext: true},
+		{name: "blank env is no env", env: blank, pin: absent, cp: absent, wantPlaintext: true},
+
+		{name: "empty pin file", env: absent, pin: empty, cp: absent, wantFaults: 1},
+		{name: "blank pin file", env: absent, pin: blank, cp: absent, wantFaults: 1},
+		{name: "malformed pin file", env: absent, pin: malformed, cp: absent, wantFaults: 1},
+		{name: "unreadable pin file", env: absent, pin: unreadable, cp: absent, wantFaults: 1},
+		{name: "empty pin file, not the controlplane", env: absent, pin: empty, noCPPath: true, wantFaults: 1},
+
+		{name: "empty controlplane file", env: absent, pin: absent, cp: empty, wantFaults: 1},
+		{name: "blank controlplane file", env: absent, pin: absent, cp: blank, wantFaults: 1},
+		{name: "malformed controlplane file", env: absent, pin: absent, cp: malformed, wantFaults: 1},
+		{name: "unreadable controlplane file", env: absent, pin: absent, cp: unreadable, wantFaults: 1},
+
+		{name: "malformed env alone", env: malformed, pin: absent, cp: absent, wantFaults: 1},
+		{name: "malformed env, empty pin file", env: malformed, pin: empty, cp: absent, wantFaults: 2},
+		{name: "every source present and unusable", env: malformed, pin: unreadable, cp: blank, wantFaults: 3},
+		{name: "blank env does not mask an empty pin file", env: blank, pin: empty, cp: absent, wantFaults: 1},
+
+		{name: "malformed env falls through to a good pin file", env: malformed, pin: valid, cp: absent, wantSource: "file", wantFaults: 1},
+		{name: "empty pin file falls through to a good controlplane file", env: absent, pin: empty, cp: valid, wantSource: "controlplane", wantFaults: 1},
+		{name: "unreadable pin file behind a good env", env: valid, pin: unreadable, cp: absent, wantSource: "env"},
+		{name: "blank env, good pin file", env: blank, pin: valid, cp: absent, wantSource: "file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			pinPath := file(t, dir, "pin", tc.pin)
+			cpPath := ""
+			if !tc.noCPPath {
+				cpPath = file(t, dir, "agent.pin", tc.cp)
+			}
+			r := ResolvePin(envOf[tc.env], pinPath, cpPath)
+
+			if r.Plaintext() != tc.wantPlaintext {
+				t.Fatalf("Plaintext() = %t, want %t: %+v", r.Plaintext(), tc.wantPlaintext, r)
+			}
+			if r.Source != tc.wantSource {
+				t.Fatalf("source %q, want %q: %+v", r.Source, tc.wantSource, r)
+			}
+			if tc.wantSource != "" && r.Pin != good {
+				t.Fatalf("pin %q, want the good one: %+v", r.Pin, r)
+			}
+			if tc.wantSource == "" && r.Pin != "" {
+				t.Fatalf("pin %q from no source: %+v", r.Pin, r)
+			}
+			if tc.wantSource == "" && !tc.wantPlaintext && !r.Configured {
+				t.Fatalf("a node with a pin source but no pin is not Configured: %+v", r)
+			}
+			if got := len(r.Faults()); got != tc.wantFaults {
+				t.Fatalf("%d faults %v, want %d", got, r.Faults(), tc.wantFaults)
+			}
+		})
+	}
+}
+
 func TestWritePinFile_RefusesAMalformedPinAndLeavesNoTemp(t *testing.T) {
 	dir := t.TempDir()
 	file := PinFilePath(dir)

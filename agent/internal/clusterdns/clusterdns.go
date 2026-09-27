@@ -458,9 +458,19 @@ func pinnedIP(path string) string {
 	if err != nil {
 		return ""
 	}
+	// Only the first DNS= line counts, and only when it is one bare address —
+	// the one shape Render writes. Anything else (blank, a hostname, a list, an
+	// address with a port) is not a pin this package wrote, so it answers ""
+	// and the caller withdraws the drop-in rather than probing, and possibly
+	// keeping, something it never vouched for.
 	for _, line := range strings.Split(string(body), "\n") {
 		if v, ok := strings.CutPrefix(line, "DNS="); ok {
-			return strings.TrimSpace(v)
+			v = strings.TrimSpace(v)
+			host, _, _ := strings.Cut(v, "%") // an IPv6 zone, as ConnectedAddr may carry
+			if net.ParseIP(host) == nil {
+				return ""
+			}
+			return v
 		}
 	}
 	return ""
