@@ -104,8 +104,10 @@ func TestReboot_CommandKilledByTheShutdownItStartedIsNotAFailure(t *testing.T) {
 }
 
 // The agent's own stop (its signal context cancelled by the unit stop) is the
-// same fact from the other side, and it is enough on its own.
-func TestReboot_CommandKilledWhileTheAgentIsBeingStoppedIsNotAFailure(t *testing.T) {
+// same fact from the other side, and it is enough on its own: here nothing
+// else says a shutdown is under way, and the command's exit status alone
+// would be a definitive failure (TestReboot_CommandFailingBeforeShutdown...).
+func TestReboot_CommandEndingWhileTheAgentIsBeingStoppedIsNotAFailure(t *testing.T) {
 	nc := startNATS(t)
 	rig := newTestRebooter(t, nc, "node-stop")
 	rig.setSystem(shutdownUnknown, "no systemd on this node")
@@ -114,10 +116,10 @@ func TestReboot_CommandKilledWhileTheAgentIsBeingStoppedIsNotAFailure(t *testing
 	rig.rb.StopsWith(ctx)
 	failSub := subscribeEvt(t, nc, "node-stop", "reboot_failed")
 
-	runFailing(t, rig, killedBySIGTERM(t))
+	runFailing(t, rig, exitedOne(t))
 	rig.finished(t)
 
-	nothingPublished(t, nc, failSub, "a reboot command killed while the agent is being stopped")
+	nothingPublished(t, nc, failSub, "a reboot command that ended while the agent is being stopped")
 	if logs := rig.logs.String(); strings.Contains(logs, "NOT rebooted") {
 		t.Errorf("logs = %q — nothing is known to have failed", logs)
 	}
