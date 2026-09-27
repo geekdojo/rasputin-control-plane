@@ -54,7 +54,7 @@ func TestValidateAdvertiseRoutes_RefusesNonCIDRAndIPv6(t *testing.T) {
 		{"192.168.1.0", "not an IPv4 CIDR"},    // bare address, no prefix
 		{"192.168.1.0/33", "not an IPv4 CIDR"}, // impossible prefix
 		{"lan", "not an IPv4 CIDR"},
-		{"fd7a:115c:a1e0::/48", "IPv4-only"},    // LOCKED decision #9
+		{"fd7a:115c:a1e0::/48", "IPv4-only"},    // decision #9
 		{" 192.168.1.0/24", "not an IPv4 CIDR"}, // untrimmed — the caller trims, the validator does not guess
 	} {
 		err := ValidateAdvertiseRoutes([]string{tc.route})

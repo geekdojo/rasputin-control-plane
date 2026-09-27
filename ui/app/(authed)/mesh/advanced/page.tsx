@@ -7,7 +7,7 @@ import type { MeshStateEnvelope } from '../../../../lib/types';
 import { Btn, Hint, SectionLabel, Tok } from '../../../../components/kit';
 
 // Headplane covers anything Rasputin doesn't model on the mesh side: HuJSON
-// ACLs, DNS overrides, exit-node selection, DERP map. Per locked decision
+// ACLs, DNS overrides, exit-node selection, DERP map. Per decision
 // #6 in mesh.md, it's a sibling tab — not embedded — to avoid cross-origin
 // SSO friction.
 export default function MeshAdvancedPage() {

@@ -65,7 +65,7 @@ var excludedLinkPrefixes = []string{"tailscale", "docker", "br-", "veth"}
 
 // Usable reports whether a may be the control plane's LAN address. The rules:
 //
-//   - IPv4 only (Rasputin is IPv4-only, LOCKED decision #9).
+//   - IPv4 only (Rasputin is IPv4-only, decision #9).
 //   - Not loopback — neither a 127/8 address nor any address on a loopback
 //     interface.
 //   - Not link-local 169.254/16. networkd's IPv4LL gives the node one while it

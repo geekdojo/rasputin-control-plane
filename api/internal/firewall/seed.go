@@ -26,7 +26,7 @@ type baselineRule struct {
 // pending; the operator (or the first apply) pushes them.
 //
 // IPv6 stock rules (Allow-DHCPv6, Allow-MLD, Allow-ICMPv6-Input/Forward) are
-// deliberately OMITTED here: v1 is IPv4-only (locked decision, backlog W-1).
+// deliberately OMITTED here: v1 is IPv4-only (decision #9, backlog W-1).
 // They ride W-1 (IPv6 WAN support) and are tracked there, not silently missing.
 var baselineRules = []baselineRule{
 	{

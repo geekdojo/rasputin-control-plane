@@ -91,7 +91,7 @@ func (c *ClusterSource) Records() map[string]net.IP {
 }
 
 // usableIPv4 returns the 4-byte form of ip, or nil if ip is nil or not IPv4
-// (Rasputin is IPv4-only, LOCKED decision #9).
+// (Rasputin is IPv4-only, decision #9).
 func usableIPv4(ip net.IP) net.IP {
 	if ip == nil {
 		return nil

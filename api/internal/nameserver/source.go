@@ -17,8 +17,8 @@ import (
 // Slice 1 wires [SelfSource]. Slice 2 adds an inventory+apps projection; the
 // responder can read more than one Source, so the projection is additive.
 type Source interface {
-	// Records returns fqdn -> LAN IPv4. Rasputin is IPv4-only (LOCKED decision
-	// #9), so every value is a 4-byte IP; a nil/!To4 value is skipped by the
+	// Records returns fqdn -> LAN IPv4. Rasputin is IPv4-only (decision #9),
+	// so every value is a 4-byte IP; a nil/!To4 value is skipped by the
 	// responder. Returning nil (e.g. the CP has no LAN route yet) is valid and
 	// means "serve nothing," not an error.
 	Records() map[string]net.IP

@@ -260,7 +260,7 @@ func compileDNSForward(in *Intent) (string, error) {
 	return "/" + spec.Zone + "/" + spec.Target, nil
 }
 
-// rejectIPv6 enforces LOCKED decision #9 (Rasputin is IPv4-only): an explicit
+// rejectIPv6 enforces decision #9 (Rasputin is IPv4-only): an explicit
 // IPv6 literal or IPv6 CIDR in a firewall intent's address field is rejected at
 // compile time so it can never reach the firewall. IPv4 values and non-IP
 // strings (a LAN hostname the firewall resolves itself) pass through — this

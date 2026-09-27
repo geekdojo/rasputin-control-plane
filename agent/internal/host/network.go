@@ -36,7 +36,7 @@ func PrimaryLanCIDR() string {
 // PrimaryLANIP returns the node's LAN IPv4 — the source address the kernel
 // would use to reach the public internet (its default-route interface) — or ""
 // if there is no default route or the source is IPv6-only (Rasputin is IPv4-
-// only, LOCKED decision #9). It is reported on every agent registration
+// only, decision #9). It is reported on every agent registration
 // (NodeRegisteredEvt), so it tracks the node moving subnets and the reboot-time
 // IP churn that comes with making no DHCP reservations (ADR-0004 §8). It is what
 // the CP nameserver resolves this node's name — and its apps' names — to.

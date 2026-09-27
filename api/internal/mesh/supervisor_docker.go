@@ -925,8 +925,8 @@ func (s *DockerSupervisor) ensureExtraRecordsFile() error {
 }
 
 // extraRecord is one Headscale dns.extra_records entry. Only A records are used:
-// the Tailscale client processes A/AAAA, and Rasputin is IPv4-only (LOCKED
-// decision #9).
+// the Tailscale client processes A/AAAA, and Rasputin is IPv4-only
+// (decision #9).
 type extraRecord struct {
 	Name  string `json:"name"`
 	Type  string `json:"type"`

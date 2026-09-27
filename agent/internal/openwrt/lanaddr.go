@@ -55,7 +55,7 @@ func lanAddress(ctx context.Context, runner CmdRunner, addrs ifaceAddrsByName) (
 		if !ok {
 			continue
 		}
-		// IPv4 only, deliberately: Rasputin is IPv4-only (LOCKED decision #9)
+		// IPv4 only, deliberately: Rasputin is IPv4-only (decision #9)
 		// and an interface that also holds a v6 link-local must not return it.
 		v4 := ipNet.IP.To4()
 		if v4 == nil {
