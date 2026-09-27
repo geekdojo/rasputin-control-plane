@@ -18,12 +18,12 @@ type Config struct {
 	// controlplane's tailnet-reachable Headscale URL.
 	LoginServer string
 	// DefaultUser is the Headscale user name new pre-auth keys default to.
-	// Per the locked decision (#9), v0 maps everything to one user;
+	// Per decision #9 in mesh.md, v0 maps everything to one user;
 	// per-IAM-user mapping is post-v0 schema-ready.
 	DefaultUser string
 	// HeadplaneURL is the base URL of a Headplane instance the operator
 	// runs alongside Headscale. When set, the UI surfaces a sibling-tab
-	// link from the Mesh page; "" hides it. Per locked decision #6 in
+	// link from the Mesh page; "" hides it. Per decision #6 in
 	// mesh.md we do not iframe Headplane — the cross-origin auth pain
 	// isn't worth it — so this is just a link target.
 	HeadplaneURL string

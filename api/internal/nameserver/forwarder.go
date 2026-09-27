@@ -36,7 +36,7 @@ import (
 //
 // Queries are proxied transparently (any qtype): what a client resolves for the
 // public internet is the client's business, not something we filter. IPv4-only
-// (LOCKED decision #9) applies to the *transport* — the upstream is dialed over
+// (decision #9) applies to the *transport* — the upstream is dialed over
 // v4 — not to which record types a client may look up through us.
 type Forwarder struct {
 	upstream string        // upstream resolver "ip:port"; "" disables forwarding

@@ -71,7 +71,7 @@ func canonicalRoute(route string) (string, error) {
 }
 
 // parseIPv4Route parses a route and refuses anything but IPv4: Rasputin is
-// IPv4-only (LOCKED decision #9), and the firewall intent fields already
+// IPv4-only (decision #9), and the firewall intent fields already
 // refuse v6 addresses at the api, so the mesh does the same.
 func parseIPv4Route(route string) (net.IP, *net.IPNet, error) {
 	ip, ipNet, err := net.ParseCIDR(route)

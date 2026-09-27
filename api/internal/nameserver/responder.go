@@ -155,7 +155,7 @@ func (r *Responder) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		// The name exists (it has an A) but not of the requested type: NODATA —
 		// NOERROR with an empty answer section and the SOA in authority so
 		// resolvers cache the negative for MINIMUM. (AAAA lands here: Rasputin
-		// is IPv4-only, LOCKED decision #9.) This covers both in-zone names and
+		// is IPv4-only, decision #9.) This covers both in-zone names and
 		// the extra unicast names, which are equally ours to answer for.
 		m.Ns = append(m.Ns, r.soa())
 	default:

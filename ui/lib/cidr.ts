@@ -8,7 +8,7 @@
 // before submit, naming the value and the network it sits in. It is NOT
 // rewritten: the operator typed it, so the operator corrects it.
 //
-// IPv4 only, deliberately — Rasputin is IPv4-only (LOCKED decision #9).
+// IPv4 only, deliberately — Rasputin is IPv4-only (decision #9).
 
 const IPV4_CIDR = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/;
 

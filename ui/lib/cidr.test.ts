@@ -26,7 +26,7 @@ describe('canonicalCIDR', () => {
     }
   });
 
-  test('refuses IPv6 (LOCKED decision #9)', () => {
+  test('refuses IPv6 (decision #9)', () => {
     assert.match(canonicalCIDR('fd7a:115c:a1e0::/48').error ?? '', /IPv4-only/);
   });
 });

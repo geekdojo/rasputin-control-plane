@@ -82,7 +82,7 @@ func TestLANAddress_FallsBackToIfname(t *testing.T) {
 	}
 }
 
-// Rasputin is IPv4-only (LOCKED decision #9). An interface holding a v6
+// Rasputin is IPv4-only (decision #9). An interface holding a v6
 // link-local alongside its v4 must still report the v4.
 func TestLANAddress_PrefersIPv4(t *testing.T) {
 	r := &stubRunner{values: map[string]string{"network.lan.device": "br-lan"}}
