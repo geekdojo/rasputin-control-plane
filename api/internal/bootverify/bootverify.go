@@ -361,6 +361,13 @@ func PollCancelledByStep(ctx context.Context, err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
+// RestartBound bounds the wait for a node to answer on a new boot. It is the
+// update saga's bound for the same wait, for the same reason: it has to
+// outlast a real boot on the slowest node. It decides nothing by itself — the
+// wait ends when a new boot answers, and when the bound is reached instead
+// the wait fails naming what was observed.
+const RestartBound = 5 * time.Minute
+
 // ErrRestartUnverified is wrapped by every VerifyRestart failure in which the
 // node was heard from again and the restart still could not be proven.
 var ErrRestartUnverified = errors.New("restart not verified")

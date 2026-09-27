@@ -61,8 +61,8 @@ func TestBitScope_NameIsBitscope(t *testing.T) {
 }
 
 func TestBitScope_PowerOn(t *testing.T) {
-	// Round 1: '/' verb ack. Round 2: '=' status reply.
-	b, port := newBitScopeForTest(t, "ok", "", "01|=\n01 ff 1 26 98", "")
+	// Round 1: '/' gets no reply. Round 2: '=' status reply.
+	b, port := newBitScopeForTest(t, "", "01|=\n01 ff 1 26 98", "")
 	state, detail, err := b.Power(context.Background(), "node-a1", proto.BMCPowerOn)
 	if err != nil {
 		t.Fatalf("Power(on): %v", err)
@@ -80,7 +80,7 @@ func TestBitScope_PowerOn(t *testing.T) {
 }
 
 func TestBitScope_PowerOffDecodesOff(t *testing.T) {
-	b, port := newBitScopeForTest(t, "ok", "", "17|=\n17 ff 0 00 00", "")
+	b, port := newBitScopeForTest(t, "", "17|=\n17 ff 0 00 00", "")
 	state, _, err := b.Power(context.Background(), "node-f3", proto.BMCPowerOff)
 	if err != nil {
 		t.Fatalf("Power(off): %v", err)
@@ -95,7 +95,7 @@ func TestBitScope_PowerOffDecodesOff(t *testing.T) {
 }
 
 func TestBitScope_CycleSendsOffThenOn(t *testing.T) {
-	b, port := newBitScopeForTest(t, "ok", "", "ok", "", "01|=\n01 ff 1 26 98", "")
+	b, port := newBitScopeForTest(t, cycleScript...)
 	state, _, err := b.Power(context.Background(), "node-a1", proto.BMCPowerCycle)
 	if err != nil {
 		t.Fatalf("Power(cycle): %v", err)
@@ -113,7 +113,7 @@ func TestBitScope_CycleSendsOffThenOn(t *testing.T) {
 
 func TestBitScope_ResetDisclosesHardCycle(t *testing.T) {
 	// D-1: reset is a hard power-cycle and the detail must say so.
-	b, _ := newBitScopeForTest(t, "ok", "", "ok", "", "01|=\n01 ff 1 26 98", "")
+	b, _ := newBitScopeForTest(t, cycleScript...)
 	_, detail, err := b.Power(context.Background(), "node-a1", proto.BMCPowerReset)
 	if err != nil {
 		t.Fatalf("Power(reset): %v", err)
@@ -199,7 +199,7 @@ func TestBitScope_CommandClosesPipe(t *testing.T) {
 	// Pipe discipline: "<addr>|" attaches the slave and everything after
 	// is forwarded to it — each command must end with ^G or the next one
 	// vanishes into the attached slave (the 2026-07-26 bench wedge).
-	b, port := newBitScopeForTest(t, "ok", "", "01|=\n01 ff 1 26 98", "")
+	b, port := newBitScopeForTest(t, "", "01|=\n01 ff 1 26 98", "")
 	if _, _, err := b.Power(context.Background(), "node-a1", proto.BMCPowerOn); err != nil {
 		t.Fatalf("Power(on): %v", err)
 	}
