@@ -55,7 +55,12 @@ type RebootVerified struct {
 //     identity
 //  5. health_check         — diag.ping confirms the node came back functional
 //
-// The proof is step 4 and nothing else. The agent's ack, its "rebooting"
+// The proof is step 4 and nothing else. Step 4 fails on a fact too, never on
+// a report that may be wrong: the node's DEFINITIVE statement that its reboot
+// command failed with no shutdown under way, or the node going critical
+// (OFFLINE or OFF BUS) without a new boot answering — see
+// bootverify.VerifyReboot. Otherwise it fails at its bound, naming what was
+// last observed. The agent's ack, its "rebooting"
 // event and its re-registration are all things a node that never restarted
 // produces just as well — until geekdojo/geekdojo-brain#616 this job accepted
 // the re-registration, and an agent that only simulated its reboots passed
@@ -197,7 +202,7 @@ func rebootWaitNewBoot(sc *StepCtx) (json.RawMessage, error) {
 	}
 	prior := priorObservedBoot(sc.PriorResults)
 
-	verdict, err := bootverify.VerifyRestart(sc.Ctx, sc.NATS, spec.NodeID, prior, sc.Log)
+	verdict, err := bootverify.VerifyReboot(sc.Ctx, sc.NATS, spec.NodeID, prior, sc.Log)
 	if err != nil {
 		return nil, err
 	}

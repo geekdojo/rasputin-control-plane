@@ -204,6 +204,8 @@ func TestVerifyRestart_NoPriorIdentityIsNotProofEvenWhenOneAppears(t *testing.T)
 	}
 }
 
+// A DEFINITIVE report — the agent established that its reboot command failed
+// with no shutdown under way — is the node's own fact that it did not reboot.
 func TestVerifyRestart_TheNodesOwnFailureReportEndsTheWait(t *testing.T) {
 	nc := startNATS(t)
 	startNode(t, nc, "n", `{"bootId":"boot-before"}`, ``)
@@ -215,7 +217,7 @@ func TestVerifyRestart_TheNodesOwnFailureReportEndsTheWait(t *testing.T) {
 		defer close(done)
 		tick := time.NewTicker(10 * time.Millisecond)
 		defer tick.Stop()
-		ev, _ := json.Marshal(proto.SystemRebootFailedEvt{NodeID: "n", Detail: "exit status 1"})
+		ev, _ := json.Marshal(proto.SystemRebootFailedEvt{NodeID: "n", Detail: "exit status 1", Definitive: true})
 		for {
 			select {
 			case <-stop:
@@ -241,5 +243,200 @@ func TestVerifyRestart_TheNodesOwnFailureReportEndsTheWait(t *testing.T) {
 	}
 	if ctx.Err() != nil {
 		t.Error("the wait ran to its bound instead of ending on the node's report")
+	}
+}
+
+// ---- geekdojo/geekdojo-brain#616, the bench race -------------------------
+//
+// cp-compute1 (CP dev.182) really rebooted, and the job failed in 3 s: the
+// agent's reboot child was SIGTERMed by the shutdown it had started, the agent
+// read that as a failed reboot and published reboot_failed, and the wait ended
+// on the report instead of on the boot identity. These tests hold the wait to
+// facts: a new boot identity passes, and only a definitive report or the node
+// going critical ends it early.
+
+// racingNode answers diag.ping. Its first answer is the dying pre-reboot agent:
+// it publishes report on reboot_failed and then answers on the boot it is
+// leaving — so the report is delivered to the waiter before that answer is.
+// Every later answer is from the new boot.
+func racingNode(t *testing.T, nc *nats.Conn, id, report, before, after string) {
+	t.Helper()
+	var mu sync.Mutex
+	pings := 0
+	s, err := nc.Subscribe(proto.NodeCmdSubject(id, "diag.ping"), func(m *nats.Msg) {
+		mu.Lock()
+		pings++
+		first := pings == 1
+		mu.Unlock()
+		if first {
+			_ = nc.Publish(proto.NodeEvtSubject(id, "reboot_failed"), []byte(report))
+			_ = m.Respond([]byte(`{"bootId":"` + before + `"}`))
+			return
+		}
+		_ = m.Respond([]byte(`{"bootId":"` + after + `"}`))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Unsubscribe() })
+	if err := nc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// THE BENCH DEFECT, at the wait. The report an agent up to dev.182 sends when
+// its reboot child is killed by the shutdown (no "definitive") arrives just
+// before the node comes back on a new boot. The new boot is the fact; the
+// report is not.
+func TestVerifyRestart_AReportThatMayBeTheShutdownRaceDoesNotEndTheWait(t *testing.T) {
+	for _, verify := range []struct {
+		name string
+		fn   func(context.Context, *nats.Conn, string, string, Logger) (Identity, error)
+	}{{"VerifyRestart", VerifyRestart}, {"VerifyReboot", VerifyReboot}} {
+		t.Run(verify.name, func(t *testing.T) {
+			nc := startNATS(t)
+			racingNode(t, nc, "n",
+				`{"nodeId":"n","bootId":"boot-before","detail":"\"/usr/sbin/reboot\" failed: signal: terminated"}`,
+				"boot-before", "boot-after")
+			lg, logs := collect()
+			// Reaching this bound would fail the run: the new boot must end it.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			got, err := verify.fn(ctx, nc, "n", "boot-before", lg)
+			if err != nil || got != Differs {
+				t.Fatalf("got %q, %v; want differs — the node came back on a new boot", got, err)
+			}
+			if !strings.Contains(logs(), "signal: terminated") {
+				t.Errorf("logs = %q, want the node's report recorded, not dropped", logs())
+			}
+		})
+	}
+}
+
+// The same undefinitive report from a node that really did not reboot: it is
+// still on the boot it was told to leave. The report does not end the wait;
+// the node answering on its old boot when the bound is reached does, as it
+// does without any report — and the failure carries the node's account.
+func TestVerifyRestart_AnUndefinitiveReportFromANodeThatStaysUpStillFails(t *testing.T) {
+	nc := startNATS(t)
+	racingNode(t, nc, "n",
+		`{"nodeId":"n","bootId":"boot-before","detail":"\"/sbin/reboot\" failed: exit status 1"}`,
+		"boot-before", "boot-before")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	got, err := VerifyRestart(ctx, nc, "n", "boot-before", nil)
+	if err == nil || got != Same {
+		t.Fatalf("got %q, %v; want same and a failure", got, err)
+	}
+	for _, want := range []string{"never rebooted", "still answering on boot boot-before", "exit status 1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+// criticalNode answers diag.ping on the boot it was told to leave — its agent
+// is alive and muted, or it is the pre-reboot answer — and, once it has been
+// asked, the api's inventory service reports its presence transition to
+// change: the node-offline alert's critical state.
+func criticalNode(t *testing.T, nc *nats.Conn, id, boot string, change proto.InventoryChangeType) {
+	t.Helper()
+	var once sync.Once
+	s, err := nc.Subscribe(proto.NodeCmdSubject(id, "diag.ping"), func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"bootId":"` + boot + `"}`))
+		once.Do(func() {
+			ev, _ := json.Marshal(proto.InventoryChangeEvt{
+				Change: change,
+				Node:   proto.Node{ID: id, Status: proto.NodeStatus(change), LastSeen: time.Now().Add(-2 * time.Minute)},
+				Ts:     time.Now(),
+			})
+			_ = nc.Publish(proto.InventoryChangedSubject(id, string(change)), ev)
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Unsubscribe() })
+	if err := nc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A node told to reboot that goes critical — offline, or off-bus — without
+// answering on a new boot: the reboot is not verified, and the wait ends on
+// that fact rather than on its bound.
+func TestVerifyReboot_TheNodeGoingCriticalEndsTheWait(t *testing.T) {
+	for _, tc := range []struct {
+		change proto.InventoryChangeType
+		want   string
+	}{
+		{proto.InventoryOffline, "OFFLINE"},
+		{proto.InventoryOffBus, "OFF BUS"},
+	} {
+		t.Run(string(tc.change), func(t *testing.T) {
+			nc := startNATS(t)
+			criticalNode(t, nc, "n", "boot-before", tc.change)
+			// Reaching this bound would fail the run: the critical state must
+			// end the wait.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			start := time.Now()
+			_, err := VerifyReboot(ctx, nc, "n", "boot-before", nil)
+			if !errors.Is(err, ErrRestartUnverified) {
+				t.Fatalf("err = %v, want ErrRestartUnverified", err)
+			}
+			if time.Since(start) > time.Minute {
+				t.Errorf("the wait ran %v: it ended on its bound, not on the node going critical", time.Since(start))
+			}
+			for _, want := range []string{tc.want, "critical", "boot-before"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %q, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// Stale is the warning tier, not critical: a reboot passes through it on every
+// node. It must not end the wait.
+func TestVerifyReboot_StaleIsNotCritical(t *testing.T) {
+	nc := startNATS(t)
+	var mu sync.Mutex
+	pings := 0
+	s, err := nc.Subscribe(proto.NodeCmdSubject("n", "diag.ping"), func(m *nats.Msg) {
+		mu.Lock()
+		pings++
+		first := pings == 1
+		mu.Unlock()
+		if first {
+			ev, _ := json.Marshal(proto.InventoryChangeEvt{Change: proto.InventoryStale, Node: proto.Node{ID: "n"}})
+			_ = nc.Publish(proto.InventoryChangedSubject("n", string(proto.InventoryStale)), ev)
+			_ = m.Respond([]byte(`{"bootId":"boot-before"}`))
+			return
+		}
+		_ = m.Respond([]byte(`{"bootId":"boot-after"}`))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Unsubscribe() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if got, err := VerifyReboot(ctx, nc, "n", "boot-before", nil); err != nil || got != Differs {
+		t.Fatalf("got %q, %v; want differs", got, err)
+	}
+}
+
+// Only node.reboot reads the critical state (VerifyReboot). A BMC reset or
+// cycle cuts power and has its own account of the outage, and VerifyRestart —
+// its wait — is unchanged by this: it still ends on its bound.
+func TestVerifyRestart_DoesNotReadTheCriticalState(t *testing.T) {
+	nc := startNATS(t)
+	criticalNode(t, nc, "n", "boot-before", proto.InventoryOffline)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := VerifyRestart(ctx, nc, "n", "boot-before", nil)
+	if err == nil || strings.Contains(err.Error(), "OFFLINE") || !strings.Contains(err.Error(), "never rebooted") {
+		t.Fatalf("err = %v, want the bound's verdict, not the critical state", err)
 	}
 }

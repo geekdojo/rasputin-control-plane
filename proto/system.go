@@ -49,10 +49,23 @@ type SystemRebootingEvt struct {
 // when the agent announced a reboot and the OS reboot command then failed. The
 // node is still up on the boot it announced it was leaving.
 type SystemRebootFailedEvt struct {
-	NodeID string    `json:"nodeId"`
-	Reason string    `json:"reason,omitempty"`
-	Mode   string    `json:"mode,omitempty"`
-	BootID string    `json:"bootId,omitempty"`
-	Detail string    `json:"detail"`
-	Ts     time.Time `json:"ts"`
+	NodeID string `json:"nodeId"`
+	Reason string `json:"reason,omitempty"`
+	Mode   string `json:"mode,omitempty"`
+	BootID string `json:"bootId,omitempty"`
+	Detail string `json:"detail"`
+	// Definitive is true only when the agent established that the reboot did
+	// not happen: the command failed on its own terms, or was killed while
+	// the system positively was not shutting down, and no shutdown was under
+	// way. It is the only form of this event the control plane ends a
+	// restart's verification on.
+	//
+	// An agent that predates it (up to CP 2026.09.5-dev.182) publishes this
+	// event even when the reboot command was killed by the very shutdown it
+	// started — a real reboot reported as a failed one
+	// (geekdojo/geekdojo-brain#616, cp-compute1 on the bench). Without
+	// Definitive the event is therefore not evidence of anything, and the
+	// control plane waits on the boot identity instead.
+	Definitive bool      `json:"definitive,omitempty"`
+	Ts         time.Time `json:"ts"`
 }

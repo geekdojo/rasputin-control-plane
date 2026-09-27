@@ -38,6 +38,9 @@ type fakeRebootAgent struct {
 	ack string
 	// commands counts system.reboot commands received.
 	commands int
+	// beforePong, when set, runs in the diag.ping handler before the answer is
+	// read and sent, so a case can publish something the job hears first.
+	beforePong func(a *fakeRebootAgent)
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -77,6 +80,12 @@ func startFakeRebootAgent(t *testing.T, nc *nats.Conn, nodeID, bootID string, on
 		t.Cleanup(func() { _ = s.Unsubscribe() })
 	}
 	sub(proto.NodeCmdSubject(nodeID, "diag.ping"), func(m *nats.Msg) {
+		a.mu.Lock()
+		hook := a.beforePong
+		a.mu.Unlock()
+		if hook != nil {
+			hook(a)
+		}
 		pong := map[string]any{"nodeId": nodeID, "hostname": nodeID, "uptime": "1s"}
 		if id := a.boot(); id != "" {
 			pong["bootId"] = id
@@ -234,9 +243,9 @@ func TestNodeRebootJob_FailsWhenTheAgentRefuses(t *testing.T) {
 	}
 }
 
-// The agent announced the reboot and the OS command then failed. The node says
-// so, and the job fails with the node's account instead of waiting out its
-// bound.
+// The agent announced the reboot and the OS command then failed before any
+// shutdown began. The node says so definitively, and the job fails with the
+// node's account instead of waiting out its bound.
 func TestNodeRebootJob_FailsWhenTheNodeReportsItsRebootFailed(t *testing.T) {
 	nc := startNATS(t)
 	const nodeID = "n-execfail"
@@ -255,7 +264,8 @@ func TestNodeRebootJob_FailsWhenTheNodeReportsItsRebootFailed(t *testing.T) {
 			case <-tick.C:
 				ev, _ := json.Marshal(map[string]any{
 					"nodeId": nodeID, "bootId": "boot-aaaaaaaaaaaa",
-					"detail": `"/sbin/reboot" failed: exit status 1`,
+					"detail":     `"/sbin/reboot" failed: exit status 1`,
+					"definitive": true,
 				})
 				_ = nc.Publish(proto.NodeEvtSubject(nodeID, "reboot_failed"), ev)
 			}
@@ -321,5 +331,154 @@ func TestNodeRebootJob_DoesNotSendTheCommandToANodeThatIsNotAnswering(t *testing
 	defer mu.Unlock()
 	if commands != 0 {
 		t.Errorf("system.reboot was sent %d times to a node that never answered", commands)
+	}
+}
+
+// ---- geekdojo/geekdojo-brain#616, the bench race -------------------------
+
+// THE BENCH DEFECT (cp-compute1, CP dev.182, OS dev.263). The node really
+// rebooted; its agent's reboot child was SIGTERMed by the shutdown it had
+// started, and the agent published reboot_failed ("signal: terminated", no
+// "definitive") just before it died. The job failed in 3 s on that report.
+// The report arrives here before the wait's first answer, and every answer
+// after that is from the new boot: the job must succeed on the new boot.
+func TestNodeRebootJob_AFailureReportJustBeforeTheNewBootDoesNotFailTheJob(t *testing.T) {
+	nc := startNATS(t)
+	const nodeID = "n-race"
+	var rebooted, reported bool
+	agent := startFakeRebootAgent(t, nc, nodeID, "boot-eb89b7ed0000", func(a *fakeRebootAgent) {
+		a.mu.Lock()
+		rebooted = true
+		a.mu.Unlock()
+	})
+	agent.beforePong = func(a *fakeRebootAgent) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if !rebooted {
+			return
+		}
+		if !reported {
+			// The dying agent: report, then answer on the boot it is leaving.
+			reported = true
+			ev, _ := json.Marshal(map[string]any{
+				"nodeId": nodeID, "reason": "system.reboot", "mode": "plain", "bootId": "boot-eb89b7ed0000",
+				"detail": `"/usr/sbin/reboot" failed: signal: terminated`,
+			})
+			_ = nc.Publish(proto.NodeEvtSubject(nodeID, "reboot_failed"), ev)
+			return
+		}
+		a.bootID = "boot-10857791000"
+	}
+
+	// Reaching this bound would fail the test run: the new boot must end it.
+	job, steps := runRebootJob(t, nc, nodeID, 2*time.Minute)
+	if job.Status != StatusSucceeded {
+		t.Fatalf("job status = %s (error %q), want succeeded: the node came back on a new boot", job.Status, job.Error)
+	}
+	agent.mu.Lock()
+	sawReport := reported
+	agent.mu.Unlock()
+	if !sawReport {
+		t.Fatal("the report was never published: this case did not exercise the race")
+	}
+	for _, s := range steps {
+		if s.Name == "wait_new_boot" && !strings.Contains(string(s.Result), `"differs"`) {
+			t.Errorf("wait_new_boot result = %s, want the verdict differs", s.Result)
+		}
+	}
+}
+
+// A node told to reboot that goes critical — its heartbeat lapsed to OFFLINE,
+// or OFF BUS with the mesh still seeing the machine; the node-offline alert's
+// crit state — without ever answering on a new boot. The job fails on that
+// fact, not on its bound.
+func TestNodeRebootJob_FailsWhenTheNodeGoesCriticalWithoutANewBoot(t *testing.T) {
+	for _, tc := range []struct {
+		change proto.InventoryChangeType
+		want   string
+	}{
+		{proto.InventoryOffline, "OFFLINE"},
+		{proto.InventoryOffBus, "OFF BUS"},
+	} {
+		t.Run(string(tc.change), func(t *testing.T) {
+			nc := startNATS(t)
+			nodeID := "n-crit-" + string(tc.change)
+			var rebooted, published bool
+			agent := startFakeRebootAgent(t, nc, nodeID, "boot-aaaaaaaaaaaa", func(a *fakeRebootAgent) {
+				a.mu.Lock()
+				rebooted = true
+				a.mu.Unlock()
+			})
+			// The api's inventory service publishes the presence transition;
+			// here it is published once the job's wait is asking.
+			agent.beforePong = func(a *fakeRebootAgent) {
+				a.mu.Lock()
+				defer a.mu.Unlock()
+				if !rebooted || published {
+					return
+				}
+				published = true
+				ev, _ := json.Marshal(proto.InventoryChangeEvt{
+					Change: tc.change,
+					Node:   proto.Node{ID: nodeID, Status: proto.NodeStatus(tc.change), LastSeen: time.Now().Add(-2 * time.Minute)},
+					Ts:     time.Now(),
+				})
+				_ = nc.Publish(proto.InventoryChangedSubject(nodeID, string(tc.change)), ev)
+			}
+
+			start := time.Now()
+			// Reaching this bound would fail the run: the critical state must
+			// end the job.
+			job, _ := runRebootJob(t, nc, nodeID, 2*time.Minute)
+			if job.Status != StatusFailed {
+				t.Fatalf("job status = %s, want failed", job.Status)
+			}
+			if time.Since(start) > time.Minute {
+				t.Errorf("the job ran %v: it ended on its bound, not on the node going critical", time.Since(start))
+			}
+			for _, want := range []string{tc.want, "critical", "boot-aaaaaaa", "restart not verified"} {
+				if !strings.Contains(job.Error, want) {
+					t.Errorf("job error = %q, want it to contain %q", job.Error, want)
+				}
+			}
+		})
+	}
+}
+
+// An undefinitive report (an agent up to dev.182) from a node that really did
+// not reboot and stays healthy on the same boot. The report is not evidence,
+// so it does not end the job; the node still answering on the boot it was told
+// to leave does, when the step's bound is reached — as with no report at all.
+func TestNodeRebootJob_AnUndefinitiveReportFromANodeThatStaysUpStillFails(t *testing.T) {
+	nc := startNATS(t)
+	const nodeID = "n-legacy"
+	var rebooted bool
+	agent := startFakeRebootAgent(t, nc, nodeID, "boot-aaaaaaaaaaaa", func(a *fakeRebootAgent) {
+		a.mu.Lock()
+		rebooted = true
+		a.mu.Unlock()
+	})
+	agent.beforePong = func(a *fakeRebootAgent) {
+		a.mu.Lock()
+		r := rebooted
+		a.mu.Unlock()
+		if !r {
+			return
+		}
+		ev, _ := json.Marshal(map[string]any{
+			"nodeId": nodeID, "bootId": "boot-aaaaaaaaaaaa", "detail": `"/sbin/reboot" failed: exit status 1`,
+		})
+		_ = nc.Publish(proto.NodeEvtSubject(nodeID, "reboot_failed"), ev)
+	}
+	agent.keepRegistering()
+
+	job, _ := runRebootJob(t, nc, nodeID, 3*time.Second)
+	if job.Status != StatusFailed {
+		t.Fatalf("job status = %s, want failed: the node never left boot-aaaaaaaaaaaa", job.Status)
+	}
+	for _, want := range []string{"never rebooted", "still answering on boot boot-aaaaaaa", "exit status 1"} {
+		if !strings.Contains(job.Error, want) {
+			t.Errorf("job error = %q, want it to contain %q", job.Error, want)
+		}
 	}
 }
