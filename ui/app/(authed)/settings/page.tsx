@@ -470,6 +470,13 @@ function BMCSection() {
                 BMC PASSWORD {tpPassSet ? '(set — leave blank to keep)' : ''}
                 <Input id="bmc-password" type="password" value={tpPass} onChange={(e) => setTpPass(e.target.value)} placeholder={tpPassSet ? '••••••••' : 'turing'} style={{ display: 'block', marginTop: 4, width: '100%' }} />
               </label>
+              {/* Typing a new password here reads like a reset. It is not: the
+                  field is what Rasputin signs in with, so a value the board does
+                  not already have only makes every request fail. */}
+              <Hint>
+                The BMC&rsquo;s current root password. Rasputin stores it to talk to the board; it does not change the
+                password on the board. To change it, run <Tok>passwd</Tok> on the BMC over SSH, then enter the new one here.
+              </Hint>
               {/* The board ships root/turing and its BMC also serves SSH, so
                   factory credentials on a LAN-reachable board are real exposure
                   — say so rather than let the default ride silently. */}
