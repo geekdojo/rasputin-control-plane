@@ -386,11 +386,18 @@ MANIFEST_SIG_B64="$(json_val manifestSigB64)"
 # §5b, F50) and is why the control plane is reached over HTTPS validated against
 # the cluster's own CA.
 #
-# An OLDER control plane sends no manifest at all, and so does a current one for
-# a release that predates manifest signing. Then this falls back to the bare
-# sha256, exactly as this script has always behaved — the same integrity story
-# as before, not a weaker one, and it is stated out loud rather than passed over
-# in silence.
+# An OS release that predates manifest signing comes with no manifest at all.
+# Then this falls back to the bare sha256, exactly as this script has always
+# behaved — the same integrity story as before, not a weaker one, and it is
+# stated out loud rather than passed over in silence.
+#
+# The FIREWALL has no such case. Every firewall release this control plane can
+# serve is above the firewall's signing floor, and it is the same control plane
+# that served this script, so a firewall descriptor without a manifest is a
+# fault — and the old fallback's "this release has no signed manifest" was a
+# false statement about a signed release (geekdojo/geekdojo-brain#527, bench
+# 2026-09-27). It refuses instead. So does half a pair, for either image: a
+# manifest without its signature (or the reverse) is not an unsigned release.
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/rasputin-flash.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -430,6 +437,14 @@ if [ -n "$MANIFEST_B64" ] && [ -n "$MANIFEST_SIG_B64" ]; then
 Nothing was written. Do not flash this image."
 	fi
 	IMG_SHA="$MSHA"
+elif [ -n "$MANIFEST_B64" ] || [ -n "$MANIFEST_SIG_B64" ]; then
+	die "the control plane handed over only half of the signed release manifest for ${IMG_KIND} ${IMG_VERSION} (the manifest or its signature is missing), so it can't be verified.
+Nothing was written. Re-run; if it persists, check the control plane's log for the image request."
+elif [ "$NODE_ROLE" = "firewall" ]; then
+	die "the control plane did not hand over the signed release manifest for ${IMG_KIND} ${IMG_VERSION}.
+Every firewall release it can serve is signed, so this is a fault on the control plane, not an old release,
+and this script will not flash a firewall on a checksum alone. Nothing was written.
+Re-run; if it persists, check the control plane's log for the firewall-image request."
 else
 	warn "This release has no signed manifest, so the image is verified by checksum alone (as every release before manifest signing was). The checksum came from the control plane over HTTPS."
 fi

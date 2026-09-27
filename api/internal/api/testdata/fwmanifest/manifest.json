@@ -1,0 +1,1 @@
+{"version":"2026.09.4-dev.130","channel":"dev","artifacts":[{"sku":"fw-n100","architecture":"amd64","compatible":"rasputin-fw-n100","kind":"ab","image":"rasputin-fw-n100-2026.09.4-dev.130-ab.img.gz","sha256":"455e19da50a95802d2684bae259edce8668a07c6a80aa4a7e3efb87a1d45dafd","sizeBytes":60127009}]}

@@ -140,6 +140,8 @@ func (g *githubPublicSource) LatestFor(ctx context.Context, comp Component, chan
 	}
 	if res != nil {
 		info.Signer = res.Signer
+		info.signedManifest = manifestRaw
+		info.signedManifestSig = sigDER
 	}
 	if err := json.Unmarshal(manifestRaw, &info.Manifest); err != nil {
 		return nil, fmt.Errorf("parse manifest for %s: %w", best.TagName, err)

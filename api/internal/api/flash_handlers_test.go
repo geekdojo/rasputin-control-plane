@@ -189,6 +189,12 @@ func TestClusterFirewallImage(t *testing.T) {
 	if !strings.HasSuffix(desc.URL, "/"+img) {
 		t.Fatalf("url = %q", desc.URL)
 	}
+	// Below the firewall's signing floor nothing was verified, so nothing may
+	// travel as if it had been — least of all a signer with no manifest behind
+	// it (geekdojo/geekdojo-brain#527).
+	if desc.ManifestB64 != "" || desc.ManifestSigB64 != "" || desc.Signer != "" {
+		t.Errorf("an unverified firewall release travels with verification fields: %+v", desc)
+	}
 }
 
 // channelRecordingSource records the channel every LatestFor call was asked

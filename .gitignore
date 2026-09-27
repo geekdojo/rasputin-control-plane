@@ -47,6 +47,11 @@ ui/.test-out/
 # which negated nothing: the fixtures stayed tracked only because they were
 # already committed, and a new one could not have been added.
 !artifactsig/testdata/*.pem
+# The same kind of fixture for the firewall-image / flash.sh tests
+# (geekdojo/geekdojo-brain#527): a public test root, no key half; its generator
+# (api/internal/api/testdata/fwmanifest/gen-fixtures.sh) mints keys in a temp dir
+# and deletes them.
+!api/internal/api/testdata/fwmanifest/*.pem
 *.key
 *.srl
 *.csr
