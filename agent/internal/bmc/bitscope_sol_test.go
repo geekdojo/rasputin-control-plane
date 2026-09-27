@@ -225,11 +225,6 @@ func TestBitScopeSOL_PowerVerbInterruptsAndResumes(t *testing.T) {
 	// Suspend: console exit escape, then the verb on the other target.
 	off = awaitWrite(t, port, off, string(bitscopeConsoleExit))
 	off = awaitWrite(t, port, off, `[17]|\`)
-	// The bus echoes the verb. This test used to feed nothing here and
-	// the driver accepted the silence; a power verb that gets no reply is
-	// now an error (geekdojo/geekdojo-brain#617), so the bus answers as
-	// the real one does.
-	port.in <- []byte(`17|\`)
 	// Status re-read: feed the reply inside the quiet window.
 	off = awaitWrite(t, port, off, "[17]|=")
 	port.in <- []byte("17|=\n17 ff 0 00 00")

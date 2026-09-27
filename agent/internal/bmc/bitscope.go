@@ -268,13 +268,17 @@ func bitscopeMasterStatus(reply string) bool {
 // success whether or not the node lost power, so a reset that reset nothing
 // was indistinguishable from one that worked. Now:
 //
-//   - every command's reply is read. A bus that returns NOTHING after a power
-//     verb — not even the echo of the command — is an error, and so is an
-//     echo that names a different address;
+//   - the evidence for a power verb is the STATUS READ that follows it. The
+//     BMC returns nothing after `/` or `\` (the rack's operator, 2026-09-27),
+//     so silence after a power verb is normal and is not an error. The status
+//     must decode, must carry the address it was sent to, and must report the
+//     state the verb intended: on after on, off after off, on after a cycle
+//     or reset. A mismatch, or a status that is absent or cannot be decoded,
+//     is an error;
 //   - cycle and reset read the status BETWEEN off and on and require it to say
 //     off. "Still on after the off command" is reported as exactly that;
 //   - every command is logged, with the node, its position and bus address,
-//     what was written and what came back (logCommand).
+//     what was written and what came back (logBitScopeCommand).
 //
 // What it does not and cannot check is whether the node at the address is the
 // node named; see bitscopeTarget.serial.
@@ -372,6 +376,9 @@ func (b *BitScopeBackend) Power(ctx context.Context, target string, verb proto.B
 	if stateDetail != "" {
 		detail += "; " + stateDetail
 	}
+	if want, ok := bitscopeIntendedState(verb); ok && state != want {
+		problems = append(problems, fmt.Sprintf("%s is %q after the %s command, and %q was intended", t, state, verb, want))
+	}
 	if len(problems) > 0 {
 		return state, detail, fmt.Errorf("bitscope: %s of %s failed (its BMC now reports %q): %s",
 			verb, t, state, strings.Join(problems, "; "))
@@ -386,14 +393,26 @@ func (t bitscopeTarget) String() string {
 	return fmt.Sprintf("node %q (pos %s, bus address %02x)", t.nodeID, t.pos, t.addr)
 }
 
-// powerVerb issues on or off and checks the reply. The reply to a power verb
-// used to be discarded.
+// powerVerb issues on or off. It fails only if the command could not be
+// written or the port could not be read. What comes back is NOT evidence and
+// is not checked: the BMC returns nothing after a power verb, so nothing is
+// the normal reply. Whether the verb worked is decided by the status read the
+// caller makes next.
 func (b *BitScopeBackend) powerVerb(ctx context.Context, t bitscopeTarget, verb byte) error {
-	reply, err := b.command(ctx, t, verb)
-	if err != nil {
-		return err
+	_, err := b.command(ctx, t, verb)
+	return err
+}
+
+// bitscopeIntendedState is the power state verb leaves the node in. ok is
+// false for the status query, which intends nothing.
+func bitscopeIntendedState(verb proto.BMCPowerVerb) (state proto.BMCPowerState, ok bool) {
+	switch verb {
+	case proto.BMCPowerOn, proto.BMCPowerCycle, proto.BMCPowerReset:
+		return proto.BMCStateOn, true
+	case proto.BMCPowerOff:
+		return proto.BMCStateOff, true
 	}
-	return checkBitScopeEcho(t, verb, reply)
+	return "", false
 }
 
 // status issues `=` and decodes the reply.
@@ -402,47 +421,40 @@ func (b *BitScopeBackend) status(ctx context.Context, t bitscopeTarget) (proto.B
 	if err != nil {
 		return proto.BMCStateUnknown, "", err
 	}
+	// A status command IS answered. Silence here is the bus not hearing us,
+	// and it is said as that rather than as a reply that would not parse.
+	if strings.TrimSpace(reply) == "" {
+		return proto.BMCStateUnknown, "", fmt.Errorf("bitscope: the bus returned nothing to the status command to %s", t)
+	}
 	return decodeBitScopeState(t.addr, reply)
 }
 
-// checkBitScopeEcho checks the reply to a power verb.
+// bitscopeReplyNote says what is worth noticing about the bytes that came back
+// after a POWER verb, for the journal. It never fails anything.
 //
-// What is known about that reply, and it is not much: the bus echoes the
-// command it was given, as "<addr>|<verb>" (captured for `=` on the rack
-// 2026-07-22: "04|=" ahead of the status line). This checks only what follows
-// from that and nothing it would have to guess at:
-//
-//   - NOTHING came back. The bus is not hearing the command, or the bytes were
-//     lost; either way the verb cannot be assumed to have taken effect.
-//   - an echo came back naming a DIFFERENT address. The command went
-//     somewhere other than where it was sent.
-//
-// Anything else — including a reply with no echo line in it — is accepted
-// here and is in the journal (logCommand), because no capture exists of what
-// a power verb's full reply looks like and refusing an unfamiliar one would
-// be inventing protocol. Whether the verb WORKED is not decided here at all:
-// the status read after it decides that.
-func checkBitScopeEcho(t bitscopeTarget, verb byte, reply string) error {
-	if strings.TrimSpace(reply) == "" {
-		return fmt.Errorf("bitscope: the bus returned nothing after the %s command to %s — not even the echo of the command",
-			bitscopeVerbName(verb), t)
-	}
+// Nothing is expected after a power verb, so nothing is noted for silence. If
+// bytes do arrive they are logged as they are, and one thing is pointed out: a
+// line shaped like a command echo ("<addr>|…") that names a bus address other
+// than the one written to. That is pointed out and not failed on, because no
+// capture exists of what the rack returns after a power verb, if anything;
+// calling such a line an error would be inventing protocol. The address IS
+// enforced where a reply is expected and its format is known: the status
+// reply (decodeBitScopeState).
+func bitscopeReplyNote(t bitscopeTarget, reply string) string {
 	for _, raw := range strings.FieldsFunc(reply, func(r rune) bool { return r == '\n' || r == '\r' }) {
 		addrField, _, isEcho := strings.Cut(strings.TrimSpace(raw), "|")
 		if !isEcho {
 			continue
 		}
-		addrField = strings.Trim(addrField, "[] ")
-		id, err := strconv.ParseUint(addrField, 16, 8)
+		id, err := strconv.ParseUint(strings.Trim(addrField, "[] "), 16, 8)
 		if err != nil {
 			continue
 		}
 		if byte(id) != t.addr {
-			return fmt.Errorf("bitscope: the %s command to %s was echoed for bus address %02x (reply %q)",
-				bitscopeVerbName(verb), t, byte(id), strings.TrimSpace(reply))
+			return fmt.Sprintf("unexpected: the reply names bus address %02x, and the command was written to %02x", byte(id), t.addr)
 		}
 	}
-	return nil
+	return ""
 }
 
 // bitscopeVerbName names a BIOS verb for logs and errors.
@@ -514,12 +526,23 @@ func logBitScopeCommand(t bitscopeTarget, verb byte, wire string, sent bool, rep
 	if len(shown) > bitscopeLogReplyMax {
 		shown = shown[:bitscopeLogReplyMax] + "…"
 	}
+	// No reply is the normal answer to a power verb, so it is written as
+	// what it is and not as an empty string that reads like a fault.
+	shownReply := "(none)"
+	if shown != "" {
+		shownReply = fmt.Sprintf("%q", shown)
+	}
 	outcome := "sent"
 	if !sent {
 		outcome = "NOT sent"
 	}
-	line := fmt.Sprintf("rasputin-agent: bmc bitscope: %s verb=%s node=%q pos=%s addr=%02x wire=%q reply=%q",
-		outcome, bitscopeVerbName(verb), t.nodeID, t.pos, t.addr, wire, shown)
+	line := fmt.Sprintf("rasputin-agent: bmc bitscope: %s verb=%s node=%q pos=%s addr=%02x wire=%q reply=%s",
+		outcome, bitscopeVerbName(verb), t.nodeID, t.pos, t.addr, wire, shownReply)
+	if verb != bitscopeVerbStatus {
+		if note := bitscopeReplyNote(t, reply); note != "" {
+			line += fmt.Sprintf(" note=%q", note)
+		}
+	}
 	if err != nil {
 		line += fmt.Sprintf(" error=%q", err.Error())
 	}
