@@ -110,6 +110,29 @@ The api sends `rasputin.node.<id>.cmd.bus.pin` (request/reply, `proto.BusPinCmd{
 
 During migration this command travels over the plaintext bus. Bryce accepted that exposure in #448.
 
+The agent needs nothing new for the api to offer the pin more than once: every answer above is safe to give again, and "it already holds that pin" is what a repeated delivery gets.
+
+### When the api delivers
+
+Only in `migrate`, and only to a node that is not on TLS. Three events start a delivery, and each is something the api receives, never a timer:
+
+1. **The mode moves to `migrate`.** The api offers the pin once to every node that reads as `online` at that moment and is not on TLS.
+2. **A node registers** without `busTls=true`. It is offered the pin.
+3. **A node's heartbeat arrives.** It is offered the pin if **all** of these hold:
+   - the node is not known to be on TLS. What is known is the node's last registration. If this api process has not received one from the node, it reads the node's inventory row once instead;
+   - no delivery to that node is in flight;
+   - the node has not acknowledged the pin since it last registered.
+
+Rule 3 is what reaches a node that rules 1 and 2 missed. A node that is already connected, and stays connected, sends nothing but heartbeats. If it did not read as `online` when the mode moved — a restarted api has not heard from it yet — or its delivery failed, no other event would ever offer it the pin.
+
+**What bounds the repeats.** There is at most one delivery to a node at a time, and at most one per heartbeat the api receives from it (agents send one every 10 seconds).
+
+- A delivery that **failed** or was **refused** is tried again on the node's next heartbeat.
+- A delivery the node **acknowledged** (`ok`) is not repeated. The node holds the pin, and what is still owed is its reconnect over TLS, which arrives as a registration. That registration ends the matter if it reports `busTls=true`, and is offered the pin again by rule 2 if it does not.
+- The 10-second time limit on a delivery bounds that one request. It does not schedule anything.
+
+An api that restarts has made no delivery yet, so it starts again from rule 3 for every node that is still not on TLS.
+
 ## The migration ladder (api)
 
 The api moves itself through three modes. Nobody calls an API to do it, and nothing moves on a timer: each step waits for facts, and the api re-checks them whenever one might have changed.
@@ -125,7 +148,7 @@ A controlplane whose bus key did not load derives `migrate` in every case: it se
 | Mode | Plaintext | Pin delivery | The api moves on when |
 |---|---|---|---|
 | `offer` | accepted | none | the controlplane's running build is **committed** → `migrate` |
-| `migrate` | accepted | to every online node not on TLS when the mode is entered, then to each node that registers without `busTls=true` | every enrolled node (online or not) reports `busTls=true`, **and** the server holds no plaintext client connection (the controlplane's own agent included), **and** no job is in flight → `require` |
+| `migrate` | accepted | to every online node not on TLS when the mode is entered, then to each node that registers without `busTls=true`, and to each node not on TLS when its heartbeat arrives (see [When the api delivers](#when-the-api-delivers)) | every enrolled node (online or not) reports `busTls=true`, **and** the server holds no plaintext client connection (the controlplane's own agent included), **and** no job is in flight → `require` |
 | `require` | **refused by the server** | none | never; this is the end |
 
 **What "committed" means.** Both of these must hold:
@@ -149,6 +172,8 @@ Why pin delivery waits for commit: **a delivered pin cannot be taken back over t
 
 A time limit applies only to each check's individual calls.
 
+A heartbeat does not start a re-check. It can start a pin delivery (see [When the api delivers](#when-the-api-delivers)), and the registration that follows a delivery is what re-checks.
+
 **The switch to `require`** happens inside the running api. The api process, its HTTP server and its own bus connection stay up. nats-server cannot change whether it accepts plaintext on a config reload (`config reload not supported for AllowNonTLS`, checked by a test against the vendored version), so the api replaces its embedded bus server instead. In this order:
 
 1. **Close job intake.** This happens under the same lock as the "no job in flight" check. From this point a job submit is **refused** with an error its caller can retry, and nothing is recorded. Every HTTP endpoint that submits a job answers `503` with `Retry-After`.
@@ -165,6 +190,17 @@ Nodes rejoin over TLS on their own reconnect loop, the controlplane's own agent 
 **Status and the escape hatch:**
 
 - `GET /api/bus/tls` (authenticated) is read-only. It shows the mode, the pin, the next mode, and exactly which facts hold that next mode back. `plaintextAllowed` is what the running server does, `switching` is true while the server is being replaced, and `switchFailed` names the error when a switch fell back.
+- Each entry in `nodes` carries `pinDelivery` once this api process has tried to deliver the pin to that node. It is absent until then, and it is kept in memory only, so it is absent again after the api restarts. Use it to tell a node that refused the pin, or could not be reached, from one that was never offered it:
+
+  | Field | Meaning |
+  |---|---|
+  | `outcome` | `delivered`: the node answered that it holds the pin. `refused`: the node answered and did not take it. `error`: no usable answer came back. |
+  | `detail` | For `refused`, the node's reason in its own words. For `error`, the error (for example, nothing answered on the node's command subject, or the request timed out). For `delivered`, empty, or `already pinned`. |
+  | `reconnecting` | `true` when the node said it saved a new pin and is reconnecting over TLS. Omitted otherwise. |
+  | `at` | When that attempt ended (UTC). |
+  | `attempts` | How many attempts this api process has made to that node, this one included. |
+
+  A node that shows `delivered` and still reports `busTls=false` has the pin and has not come back over TLS: look at that node's agent log. The existing fields and the wording of `blockers` are unchanged.
 - `RASPUTIN_BUS_TLS=offer|migrate|require` in `node.env` pins the mode. This is the escape hatch for a controlplane with a node that cannot speak TLS. A pinned mode never moves, and a pinned mode below `require` raises a standing security warning (`bus-tls-pinned`), like `bus-auth-off`.
 
 ## Bad values
