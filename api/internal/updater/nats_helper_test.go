@@ -599,6 +599,29 @@ func TestUpdateReboot_HappyPath(t *testing.T) {
 	}
 }
 
+// An agent that cannot reboot refuses. The step fails with the agent's reason;
+// it must not sit waiting for an announcement that is not coming, and the
+// refusal must not be read as an ack.
+func TestUpdateReboot_RefusedFailsWithTheAgentsReason(t *testing.T) {
+	nc := startNATS(t)
+	const nodeID = "n"
+	sub, _ := nc.Subscribe(proto.UpdateRebootSubject(nodeID), func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"ok":false,"delaySeconds":0,"detail":"this node has no \"reboot\" command"}`))
+	})
+	defer func() { _ = sub.Unsubscribe() }()
+
+	sc := newUpdaterCtx("j", specJSON(nodeID, "sha"), nc)
+	_, err := updateReboot()(sc)
+	if err == nil {
+		t.Fatal("a refused reboot must fail the step")
+	}
+	for _, want := range []string{"refused the reboot", "NOT rebooted", `no "reboot" command`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
 func TestUpdateReboot_BadSpec(t *testing.T) {
 	nc := startNATS(t)
 	sc := newUpdaterCtx("j", `{}`, nc)

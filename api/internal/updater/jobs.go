@@ -476,8 +476,15 @@ func updateReboot() jobs.DoFn {
 		defer func() { _ = sub.Unsubscribe() }()
 
 		cmd, _ := json.Marshal(proto.UpdateRebootCmd{BundleID: spec.BundleSHA256, DelaySeconds: 3})
-		if _, err := sc.NATS.RequestWithContext(sc.Ctx, proto.UpdateRebootSubject(spec.NodeID), cmd); err != nil {
+		reply, err := sc.NATS.RequestWithContext(sc.Ctx, proto.UpdateRebootSubject(spec.NodeID), cmd)
+		if err != nil {
 			return nil, fmt.Errorf("reboot rpc: %w", err)
+		}
+		// An agent that cannot reboot says so instead of announcing a reboot
+		// it will not perform. Fail here with its reason, rather than waiting
+		// for an announcement that is not coming.
+		if detail, refused := jobs.RebootRefused(reply.Data); refused {
+			return nil, fmt.Errorf("%s refused the reboot and was NOT rebooted: %s", spec.NodeID, detail)
 		}
 		sc.Log("info", "reboot acked; waiting for rebooting event")
 		select {

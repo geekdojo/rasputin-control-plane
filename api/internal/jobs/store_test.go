@@ -536,7 +536,10 @@ func TestRebootWorkflowShape(t *testing.T) {
 	if w.Kind != "node.reboot" {
 		t.Errorf("Kind: %q", w.Kind)
 	}
-	wantSteps := []string{"prepare", "request_and_observe", "wait_online", "health_check"}
+	// observe_boot and wait_new_boot are the proof that the node restarted
+	// (geekdojo/geekdojo-brain#616). wait_online, which they replace, accepted
+	// a re-registration.
+	wantSteps := []string{"prepare", "observe_boot", "request_and_observe", "wait_new_boot", "health_check"}
 	if len(w.Steps) != len(wantSteps) {
 		t.Fatalf("step count: got %d want %d", len(w.Steps), len(wantSteps))
 	}
