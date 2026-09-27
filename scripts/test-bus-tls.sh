@@ -25,6 +25,12 @@
 #     TLS, a job submitted at the decision answered 503+Retry-After (or 201 if
 #     the switch had already finished) and jobs running afterwards, plaintext
 #     refused, an unpinned node refused;
+#   * pin redelivery (geekdojo-brain#615) — a controlplane restarts on a fleet
+#     that enrolled before the pin existed, the agents are back on its bus
+#     before inventory is listening, and the mode moves to migrate before the
+#     api has heard from any of them; every node still reaches TLS and the bus
+#     reaches require, with no agent restarted, reconnected or re-registered
+#     by the test;
 #   * a pinned offer (RASPUTIN_BUS_TLS) — right pin TLS, wrong pin refused, no
 #     pin plaintext, and the pinned mode does not move;
 #   * clock independence — a bus certificate not valid until decades from now,
