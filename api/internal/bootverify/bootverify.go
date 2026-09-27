@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -374,9 +375,9 @@ var ErrRestartUnverified = errors.New("restart not verified")
 
 // VerifyRestart waits for nodeID to answer on a boot identity different from
 // priorBootID and returns nil only when it has. It is the one verification
-// every restart that is not an update goes through — the node.reboot job and
-// the bmc.power job's reset and cycle — and it is the update saga's mechanism
-// (WaitForNewBoot) with the one rule those jobs add:
+// every restart that is not an update goes through — the node.reboot job (as
+// VerifyReboot) and the bmc.power job's reset and cycle — and it is the update
+// saga's mechanism (WaitForNewBoot) with the one rule those jobs add:
 //
 // ONLY a different boot identity is proof. The update saga lets an unknown
 // identity through as a degraded pass, because it has two further conjuncts
@@ -384,10 +385,49 @@ var ErrRestartUnverified = errors.New("restart not verified")
 // plain restart has no further conjuncts, so an unknown identity proves
 // nothing and is a failure that says so.
 //
-// The caller's ctx bounds the wait. While waiting, a reboot_failed event from
-// the node ends it early with the node's own account of why; that event is a
-// shortcut to the failure and never the evidence for it.
+// The caller's ctx bounds the wait. The outcome rests on facts only:
+//
+//   - a new boot identity passes, whatever else was heard first;
+//   - a DEFINITIVE reboot_failed event (the agent established that its reboot
+//     command failed and no shutdown was under way) ends the wait early with
+//     the node's own account — it is the node stating, as a fact, that it is
+//     still up on the boot it was told to leave;
+//   - a reboot_failed event WITHOUT that is not evidence and ends nothing. It
+//     is what an agent up to CP dev.182 sends when its reboot command is
+//     killed by the very shutdown it started, for a node that is in fact
+//     rebooting (geekdojo/geekdojo-brain#616, cp-compute1 on the bench). It is
+//     logged, and carried into the failure if the wait fails anyway.
 func VerifyRestart(ctx context.Context, nc *nats.Conn, nodeID, priorBootID string, lg Logger) (Identity, error) {
+	return verifyRestart(ctx, nc, nodeID, priorBootID, lg, false)
+}
+
+// VerifyReboot is VerifyRestart for a reboot the node's own agent performs —
+// the node.reboot job — with one more fact that ends the wait: the node going
+// CRITICAL. That is the control plane's existing presence derivation
+// (inventory.DeriveStatus) reaching OFFLINE (heartbeat lapsed, mesh not showing
+// the machine) or OFF BUS (heartbeat lapsed, mesh still showing it) — the
+// states the node-offline alert raises as crit — published by the inventory
+// service as its transition on rasputin.inventory.<id>.offline / .off-bus.
+//
+// Why it is an honest failure: a node told to reboot mutes its heartbeat and
+// then either comes back on a new boot or does not. Reaching the critical tier
+// without a new boot answering means the cluster, by its own definition, has
+// lost the node and the reboot has not been shown to have happened. The job
+// says exactly that — "not verified", naming the state — and does not claim
+// the node did not reboot. Stale, the warning tier every reboot passes
+// through, is not critical and ends nothing.
+//
+// It is not read for a BMC reset or cycle (VerifyRestart): cutting power is a
+// different outage, whose account the bmc job gives itself.
+func VerifyReboot(ctx context.Context, nc *nats.Conn, nodeID, priorBootID string, lg Logger) (Identity, error) {
+	return verifyRestart(ctx, nc, nodeID, priorBootID, lg, true)
+}
+
+// criticalChanges are the presence transitions into the node-offline alert's
+// crit state (alerts.nodeAlerts).
+var criticalChanges = []proto.InventoryChangeType{proto.InventoryOffline, proto.InventoryOffBus}
+
+func verifyRestart(ctx context.Context, nc *nats.Conn, nodeID, priorBootID string, lg Logger, readCritical bool) (Identity, error) {
 	hint := make(chan *nats.Msg, 1)
 	regSub, err := nc.Subscribe(proto.NodeRegisteredSubject(nodeID), func(m *nats.Msg) {
 		select {
@@ -402,10 +442,26 @@ func VerifyRestart(ctx context.Context, nc *nats.Conn, nodeID, priorBootID strin
 
 	wctx, stop := context.WithCancel(ctx)
 	defer stop()
+
 	failed := make(chan proto.SystemRebootFailedEvt, 1)
+	var mu sync.Mutex
+	var undefinitive string // the latest report that is not evidence
 	failSub, err := nc.Subscribe(proto.NodeEvtSubject(nodeID, "reboot_failed"), func(m *nats.Msg) {
 		var ev proto.SystemRebootFailedEvt
 		_ = json.Unmarshal(m.Data, &ev)
+		if !ev.Definitive {
+			detail := reportDetail(ev)
+			mu.Lock()
+			first := undefinitive == ""
+			undefinitive = detail
+			mu.Unlock()
+			if first {
+				lg.log("warn", fmt.Sprintf("%s reported that its reboot command ended (%s) without establishing that "+
+					"no shutdown was under way — the report of an agent whose reboot was killed by its own shutdown. "+
+					"It is not evidence; waiting for the boot identity", nodeID, detail))
+			}
+			return
+		}
 		select {
 		case failed <- ev:
 			stop()
@@ -417,32 +473,82 @@ func VerifyRestart(ctx context.Context, nc *nats.Conn, nodeID, priorBootID strin
 	}
 	defer func() { _ = failSub.Unsubscribe() }()
 
+	critical := make(chan proto.InventoryChangeEvt, 1)
+	if readCritical {
+		for _, change := range criticalChanges {
+			sub, err := nc.Subscribe(proto.InventoryChangedSubject(nodeID, string(change)), func(m *nats.Msg) {
+				var ev proto.InventoryChangeEvt
+				_ = json.Unmarshal(m.Data, &ev)
+				ev.Change = change // the subject is the fact; the payload only describes it
+				select {
+				case critical <- ev:
+					stop()
+				default:
+				}
+			})
+			if err != nil {
+				return Unknown, fmt.Errorf("subscribe %s: %w", change, err)
+			}
+			defer func() { _ = sub.Unsubscribe() }()
+		}
+	}
+
 	verdict, werr := WaitForNewBoot(wctx, NodeProbe(nc, nodeID), priorBootID, hint, lg)
 
+	// A new boot answered: that is the proof, whatever was heard before it.
+	if werr == nil && verdict == Differs {
+		return verdict, nil
+	}
 	select {
 	case ev := <-failed:
-		detail := ev.Detail
-		if detail == "" {
-			detail = "the agent gave no detail"
-		}
-		return Same, fmt.Errorf("%w: %s reported that its reboot command failed, and it is still on boot %s: %s",
-			ErrRestartUnverified, nodeID, bootForMessage(priorBootID), detail)
+		return Same, fmt.Errorf("%w: %s reported that its reboot command failed with no shutdown under way, "+
+			"and it is still on boot %s: %s",
+			ErrRestartUnverified, nodeID, bootForMessage(priorBootID), reportDetail(ev))
+	case ev := <-critical:
+		return verdict, fmt.Errorf("%w: %s went %s without answering on a boot other than %s",
+			ErrRestartUnverified, nodeID, criticalForMessage(ev), bootForMessage(priorBootID))
 	default:
 	}
+	mu.Lock()
+	reported := undefinitive
+	mu.Unlock()
 	if werr != nil {
+		if reported != "" {
+			werr = fmt.Errorf("%w (earlier, the node reported, without establishing that no shutdown was under way: %s)",
+				werr, reported)
+		}
 		return verdict, werr
 	}
-	if verdict != Differs {
-		// WaitForNewBoot passed on something weaker than a changed identity:
-		// the node reported none before, or none after.
-		if priorBootID == "" {
-			return verdict, fmt.Errorf("%w: %s answered again, but it reported no boot identity before the command, "+
-				"so there is nothing to show it restarted", ErrRestartUnverified, nodeID)
-		}
-		return verdict, fmt.Errorf("%w: %s was on boot %s and answered again WITHOUT a boot identity, "+
-			"so there is nothing to show it restarted", ErrRestartUnverified, nodeID, bootForMessage(priorBootID))
+	// WaitForNewBoot passed on something weaker than a changed identity: the
+	// node reported none before, or none after.
+	if priorBootID == "" {
+		return verdict, fmt.Errorf("%w: %s answered again, but it reported no boot identity before the command, "+
+			"so there is nothing to show it restarted", ErrRestartUnverified, nodeID)
 	}
-	return verdict, nil
+	return verdict, fmt.Errorf("%w: %s was on boot %s and answered again WITHOUT a boot identity, "+
+		"so there is nothing to show it restarted", ErrRestartUnverified, nodeID, bootForMessage(priorBootID))
+}
+
+func reportDetail(ev proto.SystemRebootFailedEvt) string {
+	if ev.Detail == "" {
+		return "the agent gave no detail"
+	}
+	return ev.Detail
+}
+
+// criticalForMessage names the critical state the node reached, in the words
+// the nodes page and the node-offline alert use.
+func criticalForMessage(ev proto.InventoryChangeEvt) string {
+	var state string
+	if ev.Change == proto.InventoryOffBus {
+		state = "OFF BUS (critical: its heartbeat lapsed; the mesh still shows the machine)"
+	} else {
+		state = "OFFLINE (critical: its heartbeat lapsed and the mesh does not show the machine)"
+	}
+	if !ev.Node.LastSeen.IsZero() {
+		state += fmt.Sprintf(", last heard from at %s", ev.Node.LastSeen.UTC().Format(time.RFC3339))
+	}
+	return state
 }
 
 func bootForMessage(id string) string {

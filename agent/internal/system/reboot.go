@@ -17,6 +17,7 @@
 package system
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,6 +126,16 @@ type Rebooter struct {
 	run      func(path string, args ...string) ([]byte, error)
 	wait     func(d time.Duration)
 
+	// systemState reports whether the SYSTEM is shutting down. stopping
+	// reports whether this AGENT is being stopped (StopsWith). Either one
+	// being a shutdown is what turns a killed reboot command from a failure
+	// into the reboot under way. See shutdownFactNow.
+	systemState func() shutdownFact
+	stopping    func() bool
+
+	// performed, when set, is called as perform's last act. A test seam only.
+	performed func()
+
 	// sim is nil unless EnableSimulation accepted. nil means every reboot is
 	// real.
 	sim *simulation
@@ -149,7 +160,83 @@ func NewRebooter(nodeID string, pub Publisher) *Rebooter {
 		run: func(path string, args ...string) ([]byte, error) {
 			return exec.Command(path, args...).CombinedOutput()
 		},
-		wait: time.Sleep,
+		wait:        time.Sleep,
+		systemState: systemdState(exec.LookPath, runOutput),
+	}
+}
+
+// runOutput runs a command and returns its stdout, whatever its exit status.
+func runOutput(path string, args ...string) ([]byte, error) {
+	return exec.Command(path, args...).Output()
+}
+
+// StopsWith tells the Rebooter that ctx is the agent's own life: cancelled
+// when the agent is told to stop (SIGTERM, which is what a unit stop and a
+// shutdown send). A reboot command that ends while it is cancelled ended
+// because the agent — and, during a reboot, the system — is going down.
+func (r *Rebooter) StopsWith(ctx context.Context) {
+	r.stopping = func() bool { return ctx.Err() != nil }
+}
+
+// shutdownState is whether the system is shutting down, as a fact the node can
+// read. Unknown is a real answer: a node without systemd (the OpenWrt
+// firewall) has no state to read, and unknown is never "not shutting down".
+type shutdownState int
+
+const (
+	shutdownUnknown shutdownState = iota
+	shutdownNotUnderway
+	shutdownUnderway
+)
+
+func (s shutdownState) String() string {
+	switch s {
+	case shutdownNotUnderway:
+		return "not-underway"
+	case shutdownUnderway:
+		return "underway"
+	}
+	return "unknown"
+}
+
+// shutdownFact is a shutdownState and what it was read from, for the log.
+type shutdownFact struct {
+	state    shutdownState
+	evidence string
+}
+
+// classifySystemState reads `systemctl is-system-running`. systemd answers
+// "stopping" from the moment a shutdown target's start job is queued — which
+// happens in the same transaction that stops this agent's unit, so by the time
+// the unit stop kills the reboot command, the answer is already "stopping".
+// Every state of a running system is not-underway; anything else (offline, no
+// answer, an error message) is unknown.
+func classifySystemState(out string) shutdownState {
+	switch strings.TrimSpace(out) {
+	case "stopping":
+		return shutdownUnderway
+	case "running", "degraded", "starting", "initializing", "maintenance":
+		return shutdownNotUnderway
+	}
+	return shutdownUnknown
+}
+
+// systemdState returns the production systemState: systemd's own answer, or
+// unknown on a node without systemctl.
+func systemdState(lookPath func(string) (string, error), run func(string, ...string) ([]byte, error)) func() shutdownFact {
+	return func() shutdownFact {
+		path, err := lookPath("systemctl")
+		if err != nil {
+			return shutdownFact{state: shutdownUnknown, evidence: "this node has no systemd to ask"}
+		}
+		// is-system-running exits non-zero for every state but "running";
+		// the answer is on stdout either way, so the exit status is not read.
+		out, _ := run(path, "is-system-running")
+		answer := strings.TrimSpace(string(out))
+		return shutdownFact{
+			state:    classifySystemState(answer),
+			evidence: fmt.Sprintf("systemd reports %q", answer),
+		}
 	}
 }
 
@@ -203,8 +290,10 @@ var ErrRebootInProgress = errors.New("a reboot is already under way on this node
 //  4. waits the delay;
 //  5. runs the reboot command, and logs that it did.
 //
-// If the command fails, that is logged, heartbeats are unmuted and a
-// reboot_failed event is published: the node is still up and says so.
+// If the command fails before any shutdown began, that is logged, heartbeats
+// are unmuted and a definitive reboot_failed event is published: the node is
+// still up and says so. A command killed by the shutdown it started has not
+// failed, and is not reported as failing — see commandEnded.
 func (r *Rebooter) Reboot(req RebootRequest) (delaySeconds int, err error) {
 	if r == nil {
 		return 0, errors.New("reboot: no rebooter is wired")
@@ -262,6 +351,9 @@ func (r *Rebooter) Reboot(req RebootRequest) (delaySeconds int, err error) {
 }
 
 func (r *Rebooter) perform(req RebootRequest, reason string, mode RebootMode, delay int, leaving, path string) {
+	if r.performed != nil {
+		defer r.performed()
+	}
 	r.announce(reason, mode, delay, leaving)
 	muted.Store(true)
 	r.wait(time.Duration(delay) * time.Second)
@@ -289,22 +381,93 @@ func (r *Rebooter) perform(req RebootRequest, reason string, mode RebootMode, de
 		if o := strings.TrimSpace(string(out)); o != "" {
 			detail += ": " + o
 		}
-		log.Printf("rasputin-agent: reboot: FAILED — requested by %q, mode=%s, leaving boot %s: %s. "+
-			"The node was NOT rebooted.", reason, mode, bootForLog(leaving), detail)
-		muted.Store(false)
-		r.busy.Store(false)
-		r.publish("reboot_failed", proto.SystemRebootFailedEvt{
-			NodeID: r.nodeID,
-			Reason: reason,
-			Mode:   string(mode),
-			BootID: leaving,
-			Detail: detail,
-			Ts:     time.Now().UTC(),
-		})
+		r.commandEnded(reason, mode, leaving, detail, killedBySignal(err))
 		return
 	}
 	log.Printf("rasputin-agent: reboot: the OS accepted the reboot — requested by %q, mode=%s, leaving boot %s",
 		reason, mode, bootForLog(leaving))
+}
+
+// commandEnded decides what a reboot command that ended with an error means,
+// from facts only, and reports a failure only when one is established.
+//
+// The bench defect it exists for (geekdojo/geekdojo-brain#616, cp-compute1,
+// CP dev.182): the reboot child runs in the agent's cgroup, so when systemd
+// stops rasputin-agent.service during the very shutdown the child started, it
+// SIGTERMs the child too. That child "failed: signal: terminated" — and the
+// node rebooted. Reading its death as a failed reboot published reboot_failed
+// for a node that was going down, and the job ended on that report.
+//
+// So, in order:
+//
+//  1. A shutdown is under way (systemd reports "stopping", or this agent is
+//     being stopped): whatever the command's error, the node is going down.
+//     Nothing is reported, heartbeats stay muted.
+//  2. The command was killed by a signal and the system positively is NOT
+//     shutting down: something killed the reboot and nothing is going down.
+//     That is a failure, reported as definitive.
+//  3. Killed by a signal and the node cannot tell whether it is shutting down
+//     (no systemd to ask): a shutdown is exactly what kills it, so the outcome
+//     is not known here and nothing is claimed. Heartbeats stay muted; the
+//     control plane decides on the boot identity, or on the node going
+//     critical if it never comes back.
+//  4. Otherwise the command failed on its own terms (it could not be started,
+//     or it exited with a failure status) with no shutdown under way: the
+//     node is up on the boot it announced leaving. Reported as definitive.
+//
+// Only 2 and 4 say "NOT rebooted", because only there is it known.
+func (r *Rebooter) commandEnded(reason string, mode RebootMode, leaving, detail string, killed bool) {
+	fact := r.shutdownFactNow()
+	switch {
+	case fact.state == shutdownUnderway:
+		log.Printf("rasputin-agent: reboot: the system is shutting down (%s) — %s, which is what a shutdown "+
+			"does to it. Not a failure: the reboot requested by %q, mode=%s, is under way, leaving boot %s",
+			fact.evidence, detail, reason, mode, bootForLog(leaving))
+		return
+	case killed && fact.state == shutdownUnknown:
+		log.Printf("rasputin-agent: reboot: %s, and this node cannot tell whether it is shutting down (%s). "+
+			"Whether it reboots is not known here, so no failure is reported; the control plane decides on the "+
+			"boot identity. Requested by %q, mode=%s, leaving boot %s",
+			detail, fact.evidence, reason, mode, bootForLog(leaving))
+		return
+	}
+	log.Printf("rasputin-agent: reboot: FAILED — requested by %q, mode=%s, leaving boot %s: %s, and no shutdown "+
+		"is under way (%s). The node was NOT rebooted.", reason, mode, bootForLog(leaving), detail, fact.evidence)
+	muted.Store(false)
+	r.busy.Store(false)
+	r.publish("reboot_failed", proto.SystemRebootFailedEvt{
+		NodeID:     r.nodeID,
+		Reason:     reason,
+		Mode:       string(mode),
+		BootID:     leaving,
+		Detail:     detail,
+		Definitive: true,
+		Ts:         time.Now().UTC(),
+	})
+}
+
+// shutdownFactNow reads whether a shutdown is under way. This agent being
+// stopped is read first: it is this process's own fact and needs no command.
+// It is not relied on alone, because the unit stop signals the agent and its
+// reboot child together and the child's exit can be seen before the agent's
+// signal is — which is why systemd's own state is read as well.
+func (r *Rebooter) shutdownFactNow() shutdownFact {
+	if r.stopping != nil && r.stopping() {
+		return shutdownFact{state: shutdownUnderway, evidence: "this agent is being stopped"}
+	}
+	if r.systemState == nil {
+		return shutdownFact{state: shutdownUnknown, evidence: "no way to read the system state is wired"}
+	}
+	return r.systemState()
+}
+
+// killedBySignal reports whether err is a child process that was terminated by
+// a signal rather than exiting on its own. os.ProcessState.ExitCode is -1 in
+// exactly that case (and for a process that has not exited, which an
+// *exec.ExitError never is).
+func killedBySignal(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == -1
 }
 
 func (r *Rebooter) announce(reason string, mode RebootMode, delay int, leaving string) {

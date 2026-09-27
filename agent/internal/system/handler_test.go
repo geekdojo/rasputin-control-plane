@@ -67,6 +67,8 @@ type rebootRig struct {
 	execs chan execCall
 	waits chan time.Duration
 	logs  *syncBuffer
+	// done receives once each time perform returns.
+	done chan struct{}
 
 	mu       sync.Mutex
 	lookErr  error
@@ -105,6 +107,7 @@ func newTestRebooter(t *testing.T, pub Publisher, nodeID string) *rebootRig {
 		execs: make(chan execCall, 4),
 		waits: make(chan time.Duration, 4),
 		logs:  &syncBuffer{},
+		done:  make(chan struct{}, 4),
 	}
 	prevOut, prevFlags := log.Writer(), log.Flags()
 	log.SetOutput(rig.logs)
@@ -136,6 +139,12 @@ func newTestRebooter(t *testing.T, pub Publisher, nodeID string) *rebootRig {
 		},
 		// The delay is recorded, not slept.
 		wait: func(d time.Duration) { rig.waits <- d },
+		performed: func() {
+			select {
+			case rig.done <- struct{}{}:
+			default:
+			}
+		},
 	}
 	return rig
 }
@@ -376,9 +385,9 @@ func TestSystemReboot_ExecFailureIsReportedAndIsNotSimulated(t *testing.T) {
 	if err := json.Unmarshal(msg.Data, &ev); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if ev.BootID != "boot-before" || ev.Reason != ReasonOperator ||
+	if ev.BootID != "boot-before" || ev.Reason != ReasonOperator || !ev.Definitive ||
 		!strings.Contains(ev.Detail, "exit status 1") || !strings.Contains(ev.Detail, "Failed to talk to init daemon") {
-		t.Errorf("event = %+v, want the boot still running, who asked, and the command's own error", ev)
+		t.Errorf("event = %+v, want a definitive report of the boot still running, who asked, and the command's own error", ev)
 	}
 	// The event is published after the unmute, so this is already true.
 	if IsMuted() {

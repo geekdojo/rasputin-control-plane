@@ -393,6 +393,10 @@ func main() {
 	// which a production node fakes a reboot: it reboots, or the command fails.
 	updateBackendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(role))
 	rebooter := newRebooter(nodeID, client, updateBackendChoice, host.ImageVersion(), rereg)
+	// ctx is cancelled by the SIGTERM a unit stop sends. A reboot command
+	// that ends while it is cancelled ended because this agent is going down,
+	// not because the reboot failed (geekdojo/geekdojo-brain#616).
+	rebooter.StopsWith(ctx)
 
 	subscribe(func(c *nats.Conn) error {
 		if _, err := system.RegisterRebootHandler(c, nodeID, rebooter); err != nil {
