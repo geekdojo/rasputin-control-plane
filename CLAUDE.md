@@ -2,10 +2,6 @@
 
 <!-- AGENTS.md is canonical, shared by Claude Code and Codex; Claude Code does not read it natively, so this file imports it. Add only Claude-specific notes here. -->
 
-@~/Documents/Claude/Projects/Rasputin/CLAUDE.md
-
-Project-wide context comes from the import above; repo instructions come from `AGENTS.md`.
-
 ## Verifying authed UI pages in a browser
 
 Start the local stack described under "Verifying UI changes (authed pages)" in
