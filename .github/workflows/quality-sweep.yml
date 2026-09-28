@@ -110,7 +110,7 @@ jobs:
           prompt: |
             Weekly code-quality sweep: duplicative and dead code.
 
-            Read AGENTS.md, ARCHITECTURE.md, and CLAUDE.md before changing
+            Read AGENTS.md and ARCHITECTURE.md before changing
             anything. Scope: EVERY Go module go.work names, plus the Next.js
             ui/. Enumerate them by running ./scripts/workspace-modules.sh —
             do not trust a module list written in this prompt, and do not

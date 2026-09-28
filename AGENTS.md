@@ -12,6 +12,7 @@ install contract:
 
 Repo facts an agent should know:
 
+- Go api + agent + proto (see go.work) and the Next.js control-plane UI in `ui/`.
 - `ARCHITECTURE.md` is the system map — read it before proposing structural changes.
 - `GET /healthz` on the api is the unauthenticated liveness probe (HTTP 200,
   `{"status":"ok"}`); it's part of the documented install contract, so don't move or
@@ -40,3 +41,85 @@ Repo facts an agent should know:
   **closing keyword** — `Fixes #N` / `Closes #N` — not a bare `(#N)` reference. Bare references leave the
   issue open after the fix ships (audited 2026-07-20: four of six stale-open issues
   across the rasputin repos were exactly this).
+
+## Go dependencies (Go gotcha)
+
+The Go workspace pins to **`go 1.26`** in every `go.mod` and `go.work`; CI runs
+`go-version: "1.26"`, and `scripts/vuln-scan.sh` pins the exact local toolchain
+(`GOTOOLCHAIN`, kept equal to the one in `.github/workflows/vuln-scan.yml`). When a
+change touches dependencies:
+
+- **Pin new deps to exact versions** (`go get foo@v1.2.3`) rather than fetching `@latest`.
+  `go get @latest` pulls transitive deps whose `go.mod` directives can demand a newer Go
+  (1.27+); they build silently on a dev box with a newer toolchain and then blow up CI with
+  errors like `module foo@vX requires go >= 1.27.0`.
+- **`go mod tidy` is a trap on newer local toolchains** — it auto-bumps the `go` directive
+  in `go.mod`/`go.work` to whatever the deepest transitive demands. If you must run it,
+  prefix it with the `GOTOOLCHAIN` value from `scripts/vuln-scan.sh`, OR manually roll the
+  directive back before committing.
+
+This caused five fix-up commits in the 2026-05-30 coverage sweep: one
+`go get -t github.com/nats-io/nats-server/v2@latest` in the agent module pulled
+transitives demanding Go 1.24+, and none surfaced locally because dev Go was 1.26.
+
+## Verifying UI changes (authed pages)
+
+Auth is passkey-only (WebAuthn + Touch ID; 7-day DB-backed session cookie, see
+`api/internal/auth/`). A headless/preview browser can therefore **never** log in —
+don't burn time trying, and don't add dev-login endpoints or auth bypasses without
+asking first (proposed and declined 2026-07-08).
+
+**Local stack:** UI dev server on :3000 (`npm run dev` in `ui/`) + the api on
+:8080 — run `RASPUTIN_MESH_BACKEND=mock go run ./api/cmd/rasputin-api` from the
+**repo root** so the default `./data` dir resolves; `data/rasputin.db` already
+holds Bryce's account and passkey credential.
+
+Run `scripts/pki-init.sh` and copy its `root-ca.pem` into `data/trust/` if it
+is not there: as of 2026-09-01 a missing bundle-signing root CA makes the api
+REFUSE every OS update artifact instead of accepting it unverified, so the
+Updates page's upload and staging paths return 503 until it is in place.
+
+As of geekdojo/geekdojo-brain#527 that same root also gates the release
+MANIFEST the update check reads, so on a dev box "Check for updates" and the
+Add-node image lookup now refuse too — the published releases are signed by
+the PRODUCTION root, which a dev PKI is not. A trust root is a PEM bundle, so
+trust both: append the public production root to your dev one.
+
+```sh
+curl -fsSL https://rasputin.geekdojo.com/rasputin-root-ca.pem >> data/trust/root-ca.pem
+```
+
+That is a dev-box convenience and nothing more: on hardware the OS image bakes
+exactly one root, the production one.
+`RASPUTIN_UPDATE_TRUST=dev-permissive` was the other answer and no longer
+exists — the verifier it named has no permissive mode. On hardware nothing is
+needed; the OS image bakes the root in.
+
+The `RASPUTIN_MESH_BACKEND=mock` is required as of 2026-09-01 and is not
+optional boilerplate: the default `auto` no longer falls back to the mock when
+it finds no Headscale and no Docker. A mock mesh mints pre-auth keys and
+invents `100.64.0.x` tailnet addresses that `/api/mesh/devices` then serves as
+real, so inferring it on a controlplane means the control plane reports a mesh
+that does not exist. Without the var the api boots fine and every other page
+works; the mesh pages show an "unavailable" banner and mesh verbs refuse.
+
+Handy always-visible kit components for styling checks: `/metrics` (range Select),
+`/firewall/rules` (proto + target Selects in the ADD RULE form). All shared UI
+primitives live in `ui/components/kit.tsx` — fix styling there, not per-page.
+
+## Next.js version skew (`ui/`)
+
+`ui/` runs **Next.js 16.3.6** — newer than most model training data, with breaking
+changes to APIs, conventions and file structure. Before writing UI code, read the
+relevant guide in `ui/node_modules/next/dist/docs/` (`01-app/`, `02-pages/`,
+`03-architecture/`) and heed deprecation notices. Re-read after any Next bump.
+
+Next ships that warning itself: `next dev` writes `ui/AGENTS.md` + `ui/CLAUDE.md`
+whenever it detects an AI coding agent. **We turned that off** — `agentRules: false`
+in `ui/next.config.mjs` (2026-08-31). A nested CLAUDE.md/AGENTS.md loads as project
+instructions with the same standing as this file, and that channel carries no
+provenance, so an npm package could author instructions nobody reviewed — refreshed on
+every version bump, invisible to supply-chain tooling that only inspects code, and
+emitted only when the reader is an agent (never in CI or a plain dev run).
+Agent-instruction files in this repo are human-authored. **Don't re-enable
+`agentRules`** — if the version note above goes stale, fix it here by hand.

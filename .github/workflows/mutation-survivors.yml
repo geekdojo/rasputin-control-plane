@@ -101,8 +101,8 @@ jobs:
             --allowedTools "Edit,MultiEdit,Write,Bash(go:*),Bash(gofmt:*),Bash(gremlins:*),Bash(git:*),Bash(gh pr create:*),Bash(gh pr list:*)"
           prompt: |
             Weekly mutation-survivor sweep: write tests that KILL surviving
-            mutants in the agent/ module. Read AGENTS.md, ARCHITECTURE.md, and
-            CLAUDE.md before writing anything.
+            mutants in the agent/ module. Read AGENTS.md and ARCHITECTURE.md
+            before writing anything.
 
             Tooling preinstalled on PATH: the Go toolchain, gremlins, git, gh.
             Do not install or work around other tools; if something is

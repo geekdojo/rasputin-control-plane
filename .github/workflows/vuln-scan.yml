@@ -7,7 +7,7 @@ name: vuln-scan
 #
 # govulncheck is pinned to an exact version (not `@latest`) so a new
 # release can't silently drag a newer toolchain requirement into the
-# build — the trap described in CLAUDE.md's "Go gotcha" section. v1.3.0
+# build — the trap described in AGENTS.md's "Go gotcha" section. v1.3.0
 # requires Go >= 1.25, which the toolchain pin below satisfies.
 #
 # The weekly schedule catches advisories published while the code sits
