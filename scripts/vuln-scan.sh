@@ -113,7 +113,7 @@ if [ -n "$new" ]; then
   echo
   echo "::error::New reachable vulnerabilities, not in $BASELINE:"
   echo "$new" | sed 's|^|  https://pkg.go.dev/vuln/|'
-  echo "Fix the dependency (pin an exact version — see CLAUDE.md before" \
+  echo "Fix the dependency (pin an exact version — see AGENTS.md before" \
        "running go get) or, if no fix is shippable yet, add the ID to" \
        "$BASELINE with a comment."
   exit 1

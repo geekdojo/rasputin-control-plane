@@ -42,6 +42,26 @@ Repo facts an agent should know:
   issue open after the fix ships (audited 2026-07-20: four of six stale-open issues
   across the rasputin repos were exactly this).
 
+## Go dependencies (Go gotcha)
+
+The Go workspace pins to **`go 1.26`** in every `go.mod` and `go.work`; CI runs
+`go-version: "1.26"`, and `scripts/vuln-scan.sh` pins the exact local toolchain
+(`GOTOOLCHAIN`, kept equal to the one in `.github/workflows/vuln-scan.yml`). When a
+change touches dependencies:
+
+- **Pin new deps to exact versions** (`go get foo@v1.2.3`) rather than fetching `@latest`.
+  `go get @latest` pulls transitive deps whose `go.mod` directives can demand a newer Go
+  (1.27+); they build silently on a dev box with a newer toolchain and then blow up CI with
+  errors like `module foo@vX requires go >= 1.27.0`.
+- **`go mod tidy` is a trap on newer local toolchains** — it auto-bumps the `go` directive
+  in `go.mod`/`go.work` to whatever the deepest transitive demands. If you must run it,
+  prefix it with the `GOTOOLCHAIN` value from `scripts/vuln-scan.sh`, OR manually roll the
+  directive back before committing.
+
+This caused five fix-up commits in the 2026-05-30 coverage sweep: one
+`go get -t github.com/nats-io/nats-server/v2@latest` in the agent module pulled
+transitives demanding Go 1.24+, and none surfaced locally because dev Go was 1.26.
+
 ## Verifying UI changes (authed pages)
 
 Auth is passkey-only (WebAuthn + Touch ID; 7-day DB-backed session cookie, see
