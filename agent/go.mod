@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/geekdojo/rasputin-control-plane/artifactsig v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/backupxfer v0.0.0-00010101000000-000000000000
+	github.com/geekdojo/rasputin-control-plane/logkit v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats-server/v2 v2.14.6
@@ -39,5 +40,7 @@ replace github.com/geekdojo/rasputin-control-plane/proto => ../proto
 replace github.com/geekdojo/rasputin-control-plane/artifactsig => ../artifactsig
 
 replace github.com/geekdojo/rasputin-control-plane/backupxfer => ../backupxfer
+
+replace github.com/geekdojo/rasputin-control-plane/logkit => ../logkit
 
 replace github.com/geekdojo/rasputin-control-plane/tileschema => ../tileschema
