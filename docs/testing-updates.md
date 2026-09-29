@@ -65,6 +65,7 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
 
    ```sh
    RASPUTIN_NODE_ID=node-dev \
+   RASPUTIN_BUS_PIN="$(cat data/bus/agent.pin)" \
    RASPUTIN_UPDATE_BACKEND=mock \
    RASPUTIN_BOOT_ID=laptop-boot-1 \
    ./agent/rasputin-agent
@@ -72,6 +73,10 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
 
    - `RASPUTIN_NODE_ID` is the name the node registers under. The test script expects
      `node-dev`.
+   - `RASPUTIN_BUS_PIN` is the pin of the api's bus key. The bus accepts only TLS, and an
+     agent with no pin refuses to start: it exits with a `FATAL` line naming the variable.
+     The api writes its pin to `data/bus/agent.pin` on every start, so that file is where
+     to read it on a laptop.
    - `RASPUTIN_UPDATE_BACKEND=mock` replaces RAUC with a file-backed slot model. Its state
      lives in `./agent-state/node-dev/state.json`, relative to the directory you start the
      agent from, so always start it from the same directory.
@@ -139,6 +144,7 @@ answering. Setting a new `RASPUTIN_BOOT_ID` on restart is what stands in for the
 
    ```sh
    RASPUTIN_NODE_ID=node-dev \
+   RASPUTIN_BUS_PIN="$(cat data/bus/agent.pin)" \
    RASPUTIN_UPDATE_BACKEND=mock \
    RASPUTIN_BOOT_ID=laptop-boot-2 \
    ./agent/rasputin-agent

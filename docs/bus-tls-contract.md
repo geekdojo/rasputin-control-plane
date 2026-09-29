@@ -1,6 +1,6 @@
 # Bus TLS: the seed and file contract
 
-The cluster bus is the controlplane's embedded NATS server on `:4222`. It now serves TLS. Nodes decide whether to trust it by checking a **pin**: the hash of one dedicated, long-lived **bus key**. The decision is recorded in [geekdojo/geekdojo-brain#448](https://github.com/geekdojo/geekdojo-brain/issues/448).
+The cluster bus is the controlplane's embedded NATS server on `:4222`. It accepts **only TLS**. Nodes decide whether to trust it by checking a **pin**: the hash of one dedicated, long-lived **bus key**. The decision is recorded in [geekdojo/geekdojo-brain#448](https://github.com/geekdojo/geekdojo-brain/issues/448); the plaintext migration ladder that once let an older fleet climb to TLS was deleted in [geekdojo/geekdojo-brain#517](https://github.com/geekdojo/geekdojo-brain/issues/517).
 
 This page is the contract between this repo (the api, the agent and `rasputin-provision`) and the repos that consume seeds:
 
@@ -36,7 +36,7 @@ It is the `pin-sha256` format from HPKP ([RFC 7469 §2.4](https://www.rfc-editor
 
 Hex would work too, but it is 71 characters instead of 51 and matches no existing tool.
 
-The agent accepts **only** the exact form above. It trims surrounding whitespace and nothing else. Hex, URL-safe base64, a missing `=`, `SHA256/` or curl's `sha256//` are all refused. A refused pin is not an outage: it is reported, and the node falls back as described in [Bad values](#bad-values).
+The agent accepts **only** the exact form above. It trims surrounding whitespace and nothing else. Hex, URL-safe base64, a missing `=`, `SHA256/` or curl's `sha256//` are all refused, as described in [Bad values](#bad-values).
 
 ## What a seed consumer must do
 
@@ -46,7 +46,7 @@ Hand the value to the agent as the environment variable `RASPUTIN_BUS_PIN`, exac
 
 - **Rasputin OS:** firstboot copies the line into `/var/lib/rasputin/node.env`. The pin is public, so it needs no scrubbing and may stay in the seed.
 - **Firewall:** `apply-seed` stores the value in UCI as `rasputin.main.bus_pin`, and `init.d/rasputin-agent` passes it on with `procd_append_param env RASPUTIN_BUS_PIN="$bus_pin"`. It is trust material, so it lives in `/etc/rasputin` / UCI, which survives sysupgrade. It must **not** go in the system CA bundle, because it is not a CA.
-- **If the seed has no pin line** (an older seed, or a hand-written one), write nothing. The agent then dials in plaintext, as it does today, until the controlplane delivers a pin (see [below](#pin-delivery-to-nodes-enrolled-before-the-pin-existed)).
+- **If the seed has no pin line** (an older seed, or a hand-written one), write nothing. The agent then uses the pin file an earlier agent saved, if the node has one (see [below](#what-the-agent-does-with-the-pin)). A node with no pin anywhere cannot join: the bus accepts only TLS, and the agent refuses to dial without a pin.
 
 ### Controlplane only: `RASPUTIN_BUS_KEY`
 
@@ -66,14 +66,14 @@ Also note:
 The api generates a key on first start, writes it to `/var/lib/rasputin/bus/bus.key` and logs the pin. After that:
 
 - Add-node puts the live pin into every seed it mints.
-- Nodes enrolled earlier get the pin by delivery.
+- The controlplane's own agent reads it from `bus/agent.pin` (below).
 
 ## What the api does with the key
 
 - **Serves TLS on `:4222`** using the key, wrapped in the persisted bus certificate (below). TLS 1.3 only, and there are no client certificates (mTLS is out of scope).
 - **Includes the key in the identity backup** as `bus/bus.key`. A restore puts it back, so a restored or reflashed-and-restored controlplane keeps the fleet's pin.
 - **Exposes the pin to the authenticated UI:**
-  - `GET /api/bus/tls` returns it as `pin` (read-only status).
+  - `GET /api/bus/tls` returns `{"pin": "sha256/…"}`, and nothing else.
   - `POST /api/bus/tokens` returns it as `busPin`. Add-node renders it into the seed from that same response.
 
 ## The bus certificate
@@ -89,127 +89,34 @@ The api generates a key on first start, writes it to `/var/lib/rasputin/bus/bus.
 
 ## What the agent does with the pin
 
-- **Choosing the pin.** It uses `RASPUTIN_BUS_PIN` if the variable is set and valid. Otherwise it reads the pin file `<RASPUTIN_AGENT_STATE_DIR>/bus/pin`, which it writes itself when a pin is delivered:
+- **Choosing the pin.** It uses `RASPUTIN_BUS_PIN` if the variable is set and valid. Otherwise it reads the saved pin file `<RASPUTIN_AGENT_STATE_DIR>/bus/pin`:
   - Rasputin OS: `/var/lib/rasputin/agent-state/bus/pin`
-  - Firewall: `/etc/rasputin/agent-state/bus/pin`, already kept across sysupgrade by `keep.d`.
+  - Firewall: `/etc/rasputin/agent-state/bus/pin`, kept across sysupgrade by `keep.d`.
 
-  **No image change is needed for the file.**
-- **On the controlplane's own agent only,** there is a third source, read last: `/var/lib/rasputin/bus/agent.pin`, which the api writes beside its bus key on **every** start. Nobody provisions it, exactly as nobody provisions `agent.token` next to it. It exists because a controlplane that self-initialised (the `bootstrap.sh` path) has no seed — so nothing put `RASPUTIN_BUS_PIN` in its agent's environment — and a controlplane whose bus already refuses plaintext can never deliver a pin over the bus to the one agent that needs it. `RASPUTIN_BUS_PIN_FILE` overrides the path on a dev box. Other roles never read it.
-- **With a pin,** every connection is TLS. The agent verifies only that the SHA-256 of the server leaf's `SubjectPublicKeyInfo` equals the pin. It does not check a chain, a hostname or dates. If the server offers no TLS, or the key differs, the agent refuses before its join token is sent and keeps retrying on its normal reconnect schedule.
-- **Without a pin,** it dials plaintext, as today — but only if it was never GIVEN one. A node that holds a pin it cannot use **refuses to dial at all**; see [Bad values](#bad-values).
-- **On every registration** it reports `metadata.busTls`: `true` only for a TLS connection with the pin verified, `false` otherwise. An agent that predates this field omits it, and the api treats that as not TLS.
+  An agent of release 2026.09.5 or older wrote that file when the controlplane delivered the pin over the bus to a node enrolled before pins existed. Nothing writes it any more, and it is still read: a node migrated in place holds its pin only there, so the file must be kept.
+- **On the controlplane's own agent only,** there is a third source, read last: `/var/lib/rasputin/bus/agent.pin`, which the api writes beside its bus key on **every** start. Nobody provisions it, exactly as nobody provisions `agent.token` next to it. It exists because a controlplane that self-initialised (the `bootstrap.sh` path) has no seed, so nothing put `RASPUTIN_BUS_PIN` in its agent's environment. `RASPUTIN_BUS_PIN_FILE` overrides the path on a dev box. Other roles never read it.
+- **Every connection is TLS.** The agent verifies only that the SHA-256 of the server leaf's `SubjectPublicKeyInfo` equals the pin. It does not check a chain, a hostname or dates. If the server offers no TLS, or the key differs, the agent refuses before its join token is sent and keeps retrying on its normal reconnect schedule; a refused key is logged at WARN once per distinct error.
+- **With no usable pin from any source,** the agent does not dial at all. It logs one FATAL entry naming the node, each source it read and the fix, and exits non-zero; see [Bad values](#bad-values).
+- **Registration** reports `tokenSource` and the node's keys (`nodeKeys`). Agents of 2026.09.5 and older also sent `busTls`; nothing reads it now.
+- **Nothing in this release accepts a pin over the bus.** The `bus.pin` verb is gone from the agent and the api.
 
-## Pin delivery to nodes enrolled before the pin existed
+## Upgrading from a release with the ladder
 
-The api sends `rasputin.node.<id>.cmd.bus.pin` (request/reply, `proto.BusPinCmd{pin}` → `proto.BusPinAck`). The agent handles it as follows:
+- **The floor is 2026.09.5**, the last stable release that carried the plaintext ladder. A cluster below it must update through it before taking a release without the ladder: its unpinned nodes would otherwise be stranded and need reseeding. Nothing in the code enforces the floor (Bryce accepted this on 2026-09-28: Rasputin is in alpha, and early adopters may have to rebuild).
+- **A recorded `bus.tls_mode` setting** is left in the settings table and never read.
+- **`RASPUTIN_BUS_TLS` in `node.env`** is no longer read. Whatever its value, the bus requires TLS. The api writes one WARN entry at start naming the variable and its value; remove it from `node.env`.
+- **Rolling out:** computes update before the controlplane. An api of 2026.09.5 wants `busTls=true` before it records a node's keys, so while it still runs it logs `WARN refusing node keys` for a node on the new agent and keeps whatever keys it had recorded. Once the controlplane updates, every node reconnects and re-registers, and the new api records the keys.
 
-- **It holds no pin:** it validates the pin, saves it to the pin file (atomically) and replies `ok, reconnecting`. It then drops the current connection and re-dials over TLS. The next registration reports `busTls=true`.
-- **It already holds that pin:** it replies `ok` and changes nothing.
-- **It holds a different pin:** it **refuses**. Replacing a pin is key rotation, which the bus cannot serve.
-- **It cannot save the pin:** it refuses and stays on its current connection.
+## Restoring onto another key
 
-During migration this command travels over the plaintext bus. Bryce accepted that exposure in #448.
-
-The agent needs nothing new for the api to offer the pin more than once: every answer above is safe to give again, and "it already holds that pin" is what a repeated delivery gets.
-
-### When the api delivers
-
-Only in `migrate`, and only to a node that is not on TLS. Three events start a delivery, and each is something the api receives, never a timer:
-
-1. **The mode moves to `migrate`.** The api offers the pin once to every node that reads as `online` at that moment and is not on TLS.
-2. **A node registers** without `busTls=true`. It is offered the pin.
-3. **A node's heartbeat arrives.** It is offered the pin if **all** of these hold:
-   - the node is not known to be on TLS. What is known is the node's last registration. If this api process has not received one from the node, it reads the node's inventory row once instead;
-   - no delivery to that node is in flight;
-   - the node has not acknowledged the pin since it last registered.
-
-Rule 3 is what reaches a node that rules 1 and 2 missed. A node that is already connected, and stays connected, sends nothing but heartbeats. If it did not read as `online` when the mode moved — a restarted api has not heard from it yet — or its delivery failed, no other event would ever offer it the pin.
-
-**What bounds the repeats.** There is at most one delivery to a node at a time, and at most one per heartbeat the api receives from it (agents send one every 10 seconds).
-
-- A delivery that **failed** or was **refused** is tried again on the node's next heartbeat.
-- A delivery the node **acknowledged** (`ok`) is not repeated. The node holds the pin, and what is still owed is its reconnect over TLS, which arrives as a registration. That registration ends the matter if it reports `busTls=true`, and is offered the pin again by rule 2 if it does not.
-- The 10-second time limit on a delivery bounds that one request. It does not schedule anything.
-
-An api that restarts has made no delivery yet, so it starts again from rule 3 for every node that is still not on TLS.
-
-## The migration ladder (api)
-
-The api moves itself through three modes. Nobody calls an API to do it, and nothing moves on a timer: each step waits for facts, and the api re-checks them whenever one might have changed.
-
-**Where a start begins.** `RASPUTIN_BUS_TLS` pins the mode when it is set and valid. Otherwise the api reads the recorded `bus.tls_mode` setting. With nothing recorded it derives one from the facts and records what it derived:
-
-- **No node is enrolled at all** — a fresh cluster — → `require`. Nothing can be stranded: every seed minted from here carries the pin, a provisioned matched set carries it, and the controlplane's own agent reads it from `bus/agent.pin`. The derived mode is recorded, so a restart after its own agent has registered reads `require` back rather than deriving again.
-- **Nodes are enrolled and nothing is recorded** → `offer`, as before. This fleet has not climbed the ladder yet, and the `offer` → `migrate` gate is what stops a rolled-back api stranding a node it had already pinned.
-- **The value is malformed or unreadable** → never `offer`; see [Bad values](#bad-values).
-
-A controlplane whose bus key did not load derives `migrate` in every case: it serves no TLS, so there is no `require` to record.
-
-| Mode | Plaintext | Pin delivery | The api moves on when |
-|---|---|---|---|
-| `offer` | accepted | none | the controlplane's running build is **committed** → `migrate` |
-| `migrate` | accepted | to every online node not on TLS when the mode is entered, then to each node that registers without `busTls=true`, and to each node not on TLS when its heartbeat arrives (see [When the api delivers](#when-the-api-delivers)) | every enrolled node (online or not) reports `busTls=true`, **and** the server holds no plaintext client connection (the controlplane's own agent included), **and** no job is in flight → `require` |
-| `require` | **refused by the server** | none | never; this is the end |
-
-**What "committed" means.** Both of these must hold:
-
-- **The job ledger has no update in flight that could still roll the controlplane back:** no queued or running `node.update` for the controlplane, and no `system.update`.
-- **The controlplane's own agent says its slot is committed.** It reports this as `bootCommitted` in its `update.precheck` answer:
-  - **RAUC:** the booted slot is the bootloader's primary slot, and its boot status is good.
-  - **Raspberry Pi:** additionally, there is no `rauc-trial.pending` marker on the selector partition.
-  - **Mock backend:** nothing is pending and the active slot is marked good.
-  - **An api with no node of its own** (`RASPUTIN_SELF_NODE_ID` unset, i.e. a dev box) counts as committed. There is no A/B slot that could roll it back.
-  - **An agent too old to report `bootCommitted`**, or no answer at all, counts as **not** committed.
-
-Why pin delivery waits for commit: **a delivered pin cannot be taken back over the bus.** If the api were rolled back to a build without TLS, every pinned node would be stranded.
-
-**When the api re-checks.** It re-evaluates when:
-
-- a node registers;
-- a client connection closes (the server's disconnect advisory);
-- a job ends (which is also how a self-update's commit shows up);
-- the api starts.
-
-A time limit applies only to each check's individual calls.
-
-A heartbeat does not start a re-check. It can start a pin delivery (see [When the api delivers](#when-the-api-delivers)), and the registration that follows a delivery is what re-checks.
-
-**The switch to `require`** happens inside the running api. The api process, its HTTP server and its own bus connection stay up. nats-server cannot change whether it accepts plaintext on a config reload (`config reload not supported for AllowNonTLS`, checked by a test against the vendored version), so the api replaces its embedded bus server instead. In this order:
-
-1. **Close job intake.** This happens under the same lock as the "no job in flight" check. From this point a job submit is **refused** with an error its caller can retry, and nothing is recorded. Every HTTP endpoint that submits a job answers `503` with `Retry-After`.
-2. **Record `require`** in the `bus.tls_mode` setting. If that fails, job intake reopens and the bus is not touched.
-3. **Replace the bus server.** The old server shuts down, which closes every client connection. A new one starts on the same port and JetStream store, with the same bus key, the same auth callout and the same disconnect-advisory wiring, and it refuses plaintext. The api's own connection is the same connection object before and after: it is sent to the new server at once, every subscription on it (the auth-callout responder, heartbeats, registrations, job events, the disconnect advisory, request replies) is re-sent, and a round trip confirms the server has them.
-4. **Reopen job intake.** While steps 2 to 4 run, the auth callout refuses every node, so no node can register and trigger a job before intake reopens.
-
-Nodes rejoin over TLS on their own reconnect loop, the controlplane's own agent included. The switch runs at most once per process, and a process that starts in `require` starts its server refusing plaintext.
-
-**If the new server does not start** (for example, the port is taken), the api starts a server with the previous options again. The bus accepts plaintext as before, and every node reconnects. The api records `migrate` again, reopens job intake, and raises a standing security warning, `bus-tls-require-failed`. It does not try again until the api next starts: a retry on the next event would drop every node again each time it failed. **If no server starts at all**, or the api's own connection cannot rejoin, the api has no bus. It exits non-zero, as it does when the bus cannot start at boot, and the unit restarts it.
-
-**A fresh cluster whose seeds all carry the pin** (a provisioned matched set, Add-node) never speaks plaintext, because every agent is pinned from its first boot. Such a controlplane now *starts* in `require` (no node is enrolled), so there is no ladder to climb and no window in which the server accepts plaintext at all. A cluster that reaches a fresh api with nodes already enrolled — a restore onto an empty settings table, say — still climbs: a freshly flashed controlplane is committed, so the first check after its own agent registers moves `offer` → `migrate` (nothing to deliver) → `require` in one pass, as soon as no job is in flight, and the bus server is replaced once.
-
-**Status and the escape hatch:**
-
-- `GET /api/bus/tls` (authenticated) is read-only. It shows the mode, the pin, the next mode, and exactly which facts hold that next mode back. `plaintextAllowed` is what the running server does, `switching` is true while the server is being replaced, and `switchFailed` names the error when a switch fell back.
-- Each entry in `nodes` carries `pinDelivery` once this api process has tried to deliver the pin to that node. It is absent until then, and it is kept in memory only, so it is absent again after the api restarts. Use it to tell a node that refused the pin, or could not be reached, from one that was never offered it:
-
-  | Field | Meaning |
-  |---|---|
-  | `outcome` | `delivered`: the node answered that it holds the pin. `refused`: the node answered and did not take it. `error`: no usable answer came back. |
-  | `detail` | For `refused`, the node's reason in its own words. For `error`, the error (for example, nothing answered on the node's command subject, or the request timed out). For `delivered`, empty, or `already pinned`. |
-  | `reconnecting` | `true` when the node said it saved a new pin and is reconnecting over TLS. Omitted otherwise. |
-  | `at` | When that attempt ended (UTC). |
-  | `attempts` | How many attempts this api process has made to that node, this one included. |
-
-  A node that shows `delivered` and still reports `busTls=false` has the pin and has not come back over TLS: look at that node's agent log. The existing fields and the wording of `blockers` are unchanged.
-- `RASPUTIN_BUS_TLS=offer|migrate|require` in `node.env` pins the mode. This is the escape hatch for a controlplane with a node that cannot speak TLS. A pinned mode never moves, and a pinned mode below `require` raises a standing security warning (`bus-tls-pinned`), like `bus-auth-off`.
+Restoring the identity backup onto a controlplane that had generated its own bus key (a reflash that self-initialised first) puts the old key back and restarts **only the api**. The api rewrites `agent.pin` with the restored pin at start. The controlplane's own agent is still running and still pinned to the key it read at its own start, so it refuses the restored key: it logs `refused the bus server's key` with the pin it holds and keeps re-dialing, but does not register. A reboot, or `systemctl restart rasputin-agent`, makes it read the rewritten file and join. Re-reading the file on every dial is tracked as [geekdojo/geekdojo-brain#669](https://github.com/geekdojo/geekdojo-brain/issues/669).
 
 ## Bad values
 
-- **An invalid pin or key in a seed is refused by the seed consumer.** Both images stop provisioning with an error rather than applying a partial seed; the firewall's `apply-seed` leaves `/etc/config/rasputin` untouched. Dropping a bad pin and carrying on would provision the node straight into plaintext. So the agent-side fallback in the next bullet only applies to a value that got past the seed (for example, a hand-edited `node.env` or UCI value).
-- **An invalid `RASPUTIN_BUS_PIN` that reaches the agent** is reported as a configuration fault and the agent falls through to the pin file, which is still the right pin to use while the typo is fixed.
-- **A pin that was given and cannot be used — every source — fails CLOSED.** The agent does not dial the bus at all. It logs what is wrong, names the variable and the file, and exits non-zero; the unit restarts it, so the line repeats in the journal until the pin is fixed. This is the one case where the agent refuses to run: the node was pinned, so the only thing a plaintext dial could achieve is sending its join token in the clear to whatever answered on `:4222`. A node that was **never** given a pin is unaffected and still dials plaintext — that is how a fleet enrolled before the pin existed receives one.
-- **An unusable `bus.key` on the controlplane** does not stop the api from starting. The bus runs **plaintext-only** and the api logs why. `GET /api/bus/tls` answers 503, a standing `bus-tls-unavailable` warning is raised, and **`POST /api/bus/tokens` is refused with 503**: the seed it would mint carries no `RASPUTIN_BUS_PIN`, and a node seeded without one joins unencrypted and has no route back. Pinned nodes stay off the bus rather than speak plaintext.
-- **A bus TLS mode nobody can read** — a malformed `RASPUTIN_BUS_TLS`, a malformed or unreadable `bus.tls_mode` setting — never resolves to `offer`. It resolves to `require` when every enrolled node has reported `busTls`, and to `migrate` when one has not, with a standing `bus-tls-mode-unreadable` warning naming the value that was ignored. A controlplane whose bus key did not load resolves to `migrate` whatever the fleet looks like, because it serves no TLS to require.
+- **An invalid pin or key in a seed is refused by the seed consumer.** Both images stop provisioning with an error rather than applying a partial seed; the firewall's `apply-seed` leaves `/etc/config/rasputin` untouched. So the agent-side handling below only applies to a value that got past the seed (for example, a hand-edited `node.env` or UCI value).
+- **An invalid `RASPUTIN_BUS_PIN` that reaches the agent** is reported as a configuration fault, and the agent falls through to the saved pin file, which is still the right pin to use while the typo is fixed.
+- **No usable pin from any source fails CLOSED.** The agent does not dial the bus at all. It logs one FATAL entry naming the node, the variable, each file it read and what was wrong with it, and the fix, and exits non-zero; the unit restarts it, so the entry repeats in the journal until the pin is fixed (on the firewall, procd's respawn limit stops after ten fast exits, and `apply-seed` or a UCI change restarts it). A present-but-empty or malformed pin file counts as unusable, not absent.
+- **An unusable `bus.key`, or a `bus.crt` that cannot be read or written, on the controlplane** does not stop the api from starting. The bus serves **no network listener at all**, so no node — the controlplane's own agent included — can join, and the api logs an ERROR naming the file that failed. A standing crit alert, `bus-tls-unavailable`, names that file. `GET /api/bus/tls` and `POST /api/bus/tokens` answer `503` with the code `bus_unavailable` and a correlation id, and the cause is logged under that id: a seed minted now would carry no `RASPUTIN_BUS_PIN`, and its node could not join. Restoring the identity backup puts the key and certificate back.
 
 ## Checking a pin by hand
 

@@ -23,8 +23,12 @@ The Go agent binary that runs on every Rasputin node — including the control p
 ## Run
 
 ```sh
-go run ./cmd/rasputin-agent
+RASPUTIN_BUS_PIN="$(cat ../data/bus/agent.pin)" go run ./cmd/rasputin-agent
 ```
+
+The bus accepts only TLS, so the agent needs the pin of the api's bus key; with none
+it exits with a `FATAL` line naming `RASPUTIN_BUS_PIN`. A dev api (run from the repo
+root) writes its pin to `data/bus/agent.pin` on every start.
 
 On a machine with none of the real tooling (a laptop), that comes up with the
 hardware-backed subsystems **disabled** — each logs what it is missing and
@@ -43,6 +47,7 @@ RASPUTIN_UPDATE_BACKEND=mock \
 RASPUTIN_STORAGE_BACKEND=mock \
 RASPUTIN_TAILSCALE_BACKEND=mock \
 RASPUTIN_UCI_BACKEND=mock \
+RASPUTIN_BUS_PIN="$(cat ../data/bus/agent.pin)" \
 go run ./cmd/rasputin-agent
 ```
 
