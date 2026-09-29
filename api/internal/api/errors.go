@@ -26,11 +26,14 @@ type codedError struct {
 // writeCodedError answers status with a stable code, a safe message and a
 // correlation id, and logs a WARN record under that id carrying the route, the
 // code and cause — the internal detail, which never reaches the client.
+//
+// The route is the pattern the request matched ("GET /api/bus/tls"), never
+// the path the client sent, so nothing a caller types reaches the log.
 func (s *Server) writeCodedError(w http.ResponseWriter, r *http.Request, status int, code, msg string, cause ...slog.Attr) {
 	id := s.newCorrelationID()
 	attrs := append([]slog.Attr{
 		slog.String("correlation_id", id),
-		slog.String("route", r.Method+" "+r.URL.Path),
+		slog.String("route", r.Pattern),
 		slog.String("code", code),
 	}, cause...)
 	s.log.LogAttrs(r.Context(), slog.LevelWarn, "api: request refused", attrs...)
