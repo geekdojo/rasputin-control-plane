@@ -13,6 +13,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls/bustlstest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -52,6 +53,7 @@ func startAuthBus(t *testing.T, tokens *busauth.Store, reg busauth.NodeRegistry)
 		IssuerPublicKey: issuer.PublicKey(),
 		APIUser:         "rasputin-api",
 		APIPass:         "test-secret",
+		TLS:             busKit.Server,
 	})
 	if err != nil {
 		t.Fatalf("bus.Start: %v", err)
@@ -68,8 +70,13 @@ func startAuthBus(t *testing.T, tokens *busauth.Store, reg busauth.NodeRegistry)
 		t.Fatalf("responder.Start: %v", err)
 	}
 	t.Cleanup(resp.Stop)
-	return srv, srv.ClientURL()
+	url, _ = srv.ClientURL()
+	return srv, url
 }
+
+// busKit is the bus identity this package's bus tests serve and trust: the bus
+// accepts only TLS (geekdojo/geekdojo-brain#517).
+var busKit = bustlstest.MustNew()
 
 // testAgent is a connected agent-equivalent client and the events it saw.
 type testAgent struct {
@@ -101,6 +108,7 @@ func dialAgent(t *testing.T, addr, nodeID, token string) *testAgent {
 		authRefused:  make(chan struct{}, 1),
 	}
 	opts := []nats.Option{
+		busKit.Option,
 		nats.Name("rasputin-agent/" + nodeID),
 		nats.UserInfo(nodeID, token),
 		nats.MaxReconnects(-1),
@@ -212,7 +220,7 @@ func TestBusRevoke_ForceDisconnectsLiveSessions(t *testing.T) {
 	// refused, loopback or not. If this ever stopped holding, an agent above
 	// could be admitted without a token and never recorded for revocation.
 	for _, id := range []string{"node-x", "cp-1", "node-b"} {
-		if nc, err := nats.Connect(busURL, nats.UserInfo(id, ""), nats.MaxReconnects(0)); err == nil {
+		if nc, err := nats.Connect(busURL, busKit.Option, nats.UserInfo(id, ""), nats.MaxReconnects(0)); err == nil {
 			nc.Close()
 			t.Fatalf("tokenless connection as %s over loopback was accepted", id)
 		} else if !errors.Is(err, nats.ErrAuthorization) {

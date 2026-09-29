@@ -38,6 +38,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/system"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/tailscale"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/updater"
+	"github.com/geekdojo/rasputin-control-plane/logkit"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -66,6 +67,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// The process logger, built here at the composition root and injected
+	// into every component that logs through it (logkit, ARCH-COMMON's
+	// interim reference). Code this change did not touch still uses the
+	// standard log package.
+	logger := logkit.New(os.Stderr)
 
 	nodeID := envOr("RASPUTIN_NODE_ID", "node-dev")
 	natsURL := envOr("RASPUTIN_NATS_URL", nats.DefaultURL)
@@ -136,8 +143,8 @@ func main() {
 	// The node's own TLS keys: one for the agent, one for the collector,
 	// generated once here and never leaving the node
 	// (geekdojo/geekdojo-brain#514). Their SPKI hashes ride out in
-	// registration metadata, but only over a pinned TLS bus connection — see
-	// publishRegistered. Fatal on failure: a node that cannot hold its own
+	// registration metadata, over the bus connection, which is always TLS
+	// with the server verified by the bus pin — see publishRegistered. Fatal on failure: a node that cannot hold its own
 	// keys would report none and quietly stay on the legacy path forever,
 	// which is the kind of silent downgrade this work exists to remove.
 	nodeKeySet, freshKeys, err := nodekeys.Ensure(stateDir)
@@ -172,44 +179,49 @@ func main() {
 	log.Printf("rasputin-agent: bus join token from %q", joinTokenFrom)
 	// Bus pin (geekdojo/geekdojo-brain#448): the SHA-256 of the controlplane's
 	// bus key, which this node verifies the bus server against over TLS.
-	// RASPUTIN_BUS_PIN from the seed, else the pin the controlplane delivered
-	// over the bus and this agent saved under its state dir. None: the node
-	// dials plaintext, as every node did before, until one is delivered.
+	// RASPUTIN_BUS_PIN from the seed, else the pin file saved under this
+	// agent's state dir (written by an agent of 2026.09.5 or older when the
+	// controlplane delivered the pin to a node enrolled before pins existed).
 	// On the controlplane's own agent there is a third source: the file the
 	// api writes beside its bus key on every start. A self-initialised
-	// controlplane has no seed, so nothing put a pin in its environment, and a
-	// controlplane whose bus already refuses plaintext can never deliver one
-	// over the bus (geekdojo/geekdojo-brain#510). Every other role has no such
-	// file, and passes "".
+	// controlplane has no seed, so nothing put a pin in its environment
+	// (geekdojo/geekdojo-brain#510). Every other role has no such file, and
+	// passes "".
 	busPinFile := bus.PinFilePath(stateDir)
 	cpPinFile := controlplanePinFile(role)
 	busPinRes := bus.ResolvePin(os.Getenv(bus.EnvPin), busPinFile, cpPinFile)
 	busPin, busPinSource := busPinRes.Pin, busPinRes.Source
 	if busPinRes.EnvErr != nil {
 		faults.Reject(bus.EnvPin, os.Getenv(bus.EnvPin), []string{"sha256/<44-character base64>"},
-			"this node does not verify the bus server by that value; it uses the pin the control plane delivered, if any, and otherwise refuses to dial the bus at all")
+			"this node does not verify the bus server by that value; it uses the saved pin file, if any, and otherwise refuses to dial the bus at all")
 	}
 	if busPinRes.FileErr != nil {
 		faults.Reject(busPinFile, "", []string{"sha256/<44-character base64>"},
-			"the saved bus pin is unusable; this node was pinned, so it refuses to dial the bus rather than fall back to plaintext")
+			"the saved bus pin is unusable; this node refuses to dial the bus rather than send its join token without one")
 	}
 	if busPinRes.CPErr != nil {
 		faults.Reject(cpPinFile, "", []string{"sha256/<44-character base64>"},
-			"the control plane's own pin file is unusable; this agent refuses to dial the bus rather than fall back to plaintext")
+			"the control plane's own pin file is unusable; this agent refuses to dial the bus rather than send its join token without one")
 	}
-	// FAIL CLOSED. A node that was given a pin and cannot use one does not dial
-	// at all: dialing would send its join token in the clear to whatever
-	// answered on :4222, which is the single thing the pin exists to prevent.
-	// Exiting rather than idling is deliberate — the unit restarts the agent,
-	// and every restart writes this line to the journal, so the fault is
-	// visible on a node that is by definition off the bus and cannot report it
-	// through registration metadata.
-	if !busPinRes.Plaintext() && busPin == "" {
-		log.Fatalf("rasputin-agent: REFUSING to dial the bus: this node holds a bus pin and none of its sources is usable (%v). "+
-			"Dialing now would send this node's join token unencrypted. Fix %s in the node's environment (node.env on Rasputin OS, "+
-			"UCI rasputin.main.bus_pin on the firewall) or remove the unusable pin file, then restart the agent; the value is "+
-			"%q followed by 44 base64 characters and is shown by GET /api/bus/tls on the control plane",
-			errors.Join(busPinRes.Faults()...), bus.EnvPin, "sha256/")
+	// FAIL CLOSED. The bus accepts only TLS, and the pin is the only check on
+	// the server's key (geekdojo/geekdojo-brain#517), so a node with no usable
+	// pin does not dial at all. Exiting rather than idling is deliberate — the
+	// unit restarts the agent, every restart re-reads the pin sources and
+	// writes this entry to the journal, so the fault is visible on a node that
+	// is by definition off the bus and cannot report it through registration
+	// metadata.
+	if busPin == "" {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-agent: refusing to dial the bus: no usable bus pin",
+			"node_id", nodeID,
+			"env_pin_fault", faultText(busPinRes.EnvErr),
+			"pin_file", busPinFile,
+			"pin_file_fault", faultText(busPinRes.FileErr),
+			"cp_pin_file", cpPinFile,
+			"cp_pin_fault", faultText(busPinRes.CPErr),
+			"fix", "set "+bus.EnvPin+" in the node's environment (node.env on Rasputin OS, UCI rasputin.main.bus_pin on the firewall) "+
+				"to the pin GET /api/bus/tls shows on the control plane ("+proto.BusPinPrefix+" followed by 44 base64 characters), "+
+				"or remove an unusable pin file, then restart the agent")
+		os.Exit(1)
 	}
 	// Storage snapshot paths for the register event: statfs the same
 	// filesystem the disk metric measures (the persistent partition — never
@@ -299,16 +311,11 @@ func main() {
 		}
 		return tsBackend.TrustFingerprint()
 	}
-	// busTLS reports the registering connection's transport; set once the
-	// client exists, below, and read only from bus callbacks after Dial.
-	var busTLS func(*nats.Conn) bool
 	reregister := func(c *nats.Conn) {
 		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr,
 			registrationFacts{
 				TrustFingerprint: trustFingerprint,
-				BusTLS:           busTLS,
 				TokenSource:      joinTokenKind,
-				HTTPSPinned:      apiHTTPSPinned(),
 				NodeKeys:         nodeKeySet.Hashes(),
 			})
 	}
@@ -331,22 +338,24 @@ func main() {
 	// subscribeAll, then the registration goes out. Everything that
 	// publishes on a timer takes the client rather than a conn, so a
 	// publish lands on whichever connection is current.
-	client := bus.New(natsURL, nodeID, "", subscribeAll, onConnected)
-	client.SetTokenSource(joinToken)
-	client.OnLost(dnsPin.Lost)
-	busTLS = client.BusTLS
-	if busPin != "" {
-		if err := client.SetPin(busPin); err != nil {
-			// ResolvePin already validated it; this is unreachable short of a
-			// bug, and a bug here must not take the node off the bus.
-			log.Printf("rasputin-agent: bus pin %q (%s): %q — dialing without it", busPin, busPinSource, err.Error())
-		} else {
-			log.Printf("rasputin-agent: bus pin %q (from %s) — the bus is dialed over TLS and the server's key must match", busPin, busPinSource)
-		}
-	} else {
-		log.Printf("rasputin-agent: no bus pin was ever given to this node — the bus is dialed in PLAINTEXT until the control plane delivers one (%q)", busPinFile)
+	client, err := bus.New(bus.Config{
+		URL:         natsURL,
+		NodeID:      nodeID,
+		Pin:         busPin,
+		Token:       joinToken,
+		OnConn:      subscribeAll,
+		OnConnected: onConnected,
+		OnLost:      dnsPin.Lost,
+		Log:         logger,
+	})
+	if err != nil {
+		// ResolvePin already validated the pin, so this is a bug, and a node
+		// that cannot build its bus client cannot do anything else.
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-agent: bus client", "node_id", nodeID, "err", err.Error())
+		os.Exit(1)
 	}
-	subscribe(client.PinSubscriber(nodeID, busPinFile))
+	logger.Info("rasputin-agent: bus pin; the bus is dialed over TLS and the server's key must match",
+		"node_id", nodeID, "pin", busPin, "source", busPinSource, "pin_file", pinSourcePath(busPinSource, busPinFile, cpPinFile))
 	defer client.Close()
 	// For hooks that re-register outside a bus event (a simulated reboot, a
 	// mesh enroll, a BMC swap): always the current conn, never a captured one.
@@ -994,71 +1003,39 @@ func uciLANAddr(lookup func(context.Context) (string, string, error), fallback f
 	}
 }
 
-// apiHTTPSPinned reports whether this agent's HTTPS clients to the control
-// plane verify the api by the bus key pin this node already holds, rather than
-// by a certificate chain. It is the fact the last cutover in the ladder waits
-// on (proto.MetadataHTTPSPinned, methodology §7 6.2 and 6.5).
-//
-// It is false, and it is a function rather than a literal so there is one
-// place to change when that stops being true. Every HTTPS client this agent
-// opens against the api builds its root pool from the mesh CA bundle plus the
-// system roots — agent/internal/updater (bundle downloads, both backends) and
-// agent/internal/quiesce (backup transfer) — so today no client on this node
-// is pinned, and the honest report is false. Reporting false rather than
-// omitting the key is the point: a node that says false is a node still to
-// migrate, and a node that says nothing is one whose agent predates the key.
-func apiHTTPSPinned() bool { return false }
-
 // registrationFacts is everything this node REPORTS about itself on a
 // registration, as opposed to what it is (id, role, hardware).
 //
 // It is a struct rather than more parameters because the list only grows: the
 // migration plan adds one fact per cutover it wants to wait on (§7 4.0), and
-// three of the five below arrived that way. Each new one is a field and one
+// two of the three below arrived that way. Each new one is a field and one
 // line in publishRegistered's metadata block — never a second reporting site,
 // which is how two facts about the same node start disagreeing.
 type registrationFacts struct {
 	// TrustFingerprint reports which mesh CA this node trusts, or nil when
 	// it cannot say.
 	TrustFingerprint func() string
-	// BusTLS reports whether the connection being registered over is TLS
-	// with the bus pin verified. nil reads as false.
-	BusTLS func(*nats.Conn) bool
 	// TokenSource is where the join token presented on this connection was
 	// read from (proto.TokenSource*).
 	TokenSource string
-	// HTTPSPinned is whether this agent's HTTPS clients verify the api by
-	// the bus pin rather than a chain.
-	HTTPSPinned bool
-	// NodeKeys are this node's registered key SPKI hashes. Reported ONLY
-	// over a pinned connection — see the metadata block.
+	// NodeKeys are this node's registered key SPKI hashes.
 	NodeKeys proto.NodeKeys
 }
 
 func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), facts registrationFacts) {
 	meta := map[string]any{}
-	// Where this agent read the join token it presented, and whether its
-	// HTTPS clients to the api are pinned: the two cutover facts of §7 4.0.
-	// Always present from an agent that knows them, "env"/false included —
-	// the steps that delete the environment fallback and the chain-verified
-	// routes wait on every node reporting "file"/true, so a node that has
-	// not moved must be able to say so (geekdojo/geekdojo-brain#536).
+	// Where this agent read the join token it presented: the cutover fact of
+	// §7 4.0. Always present from an agent that knows it, "env" included —
+	// the step that deletes the environment fallback waits on every node
+	// reporting "file", so a node that has not moved must be able to say so
+	// (geekdojo/geekdojo-brain#536).
 	meta[proto.MetadataTokenSource] = facts.TokenSource
-	meta[proto.MetadataHTTPSPinned] = facts.HTTPSPinned
-	// Whether THIS connection is TLS with the bus key pin verified. Always
-	// present from an agent that knows the field, false included: the api
-	// turns plaintext off only when every node says true, so "said false" and
-	// "cannot say" both hold it back, and only the first is a node that needs
-	// the pin delivered (geekdojo/geekdojo-brain#448).
-	pinnedTLS := facts.BusTLS != nil && facts.BusTLS(nc)
-	meta[proto.MetadataBusTLS] = pinnedTLS
 	// This node's registered key SPKIs (geekdojo/geekdojo-brain#514) — the
-	// public half only, never the key. Reported ONLY over a connection this
-	// node has verified by the bus pin: on an unpinned link the api refuses
-	// the report anyway (proto.NodeKeysAcceptable), and sending it would put
-	// the node's HTTPS identity on a wire it has not authenticated. So a node
-	// still on plaintext is silent here by design, not by failure.
-	if pinnedTLS && len(facts.NodeKeys) > 0 {
+	// public half only, never the key. Every connection this agent makes is
+	// TLS with the server verified by the bus pin (bus.New refuses to build a
+	// client without one), so the report never crosses an unauthenticated
+	// wire (geekdojo/geekdojo-brain#517).
+	if len(facts.NodeKeys) > 0 {
 		meta[proto.MetadataNodeKeys] = facts.NodeKeys
 	}
 	// Which mesh CA this node trusts, as a fingerprint — never the PEM. The
@@ -1287,6 +1264,25 @@ func rolesAsStrings() []string {
 	return out
 }
 
+// pinSourcePath is the file a resolved pin came from, "" for the environment.
+func pinSourcePath(source, pinFile, cpPinFile string) string {
+	switch source {
+	case "file":
+		return pinFile
+	case "controlplane":
+		return cpPinFile
+	}
+	return ""
+}
+
+// faultText renders one pin-source fault for the log, "" for none.
+func faultText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -1398,12 +1394,11 @@ const EnvControlplanePinFile = "RASPUTIN_BUS_PIN_FILE"
 //   - A controlplane ALWAYS gets a path: an unset or blank override falls back
 //     to the appliance location rather than to "". Returning "" would silently
 //     drop the source, and a self-initialised controlplane — which has no
-//     seeded pin and can be handed none over a bus that refuses plaintext —
-//     would fall back to dialing in the clear.
+//     seeded pin — would be left with no pin at all, and so off the bus.
 //
 // What the file CONTAINS is not this function's business: a path that does not
-// exist contributes nothing, and one that exists with an unusable pin makes
-// the node refuse to dial (bus.Resolution.Plaintext).
+// exist contributes nothing, and one that exists with an unusable pin is a
+// fault; a node that ends up with no pin refuses to dial (bus.ResolvePin).
 func controlplanePinFile(role proto.NodeRole) string {
 	if role != proto.RoleControlPlane {
 		return ""

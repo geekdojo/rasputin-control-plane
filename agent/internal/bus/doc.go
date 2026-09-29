@@ -24,11 +24,12 @@
 // from closed, because closed is also reachable by other routes (a Drain, a
 // server error the client treats as fatal).
 //
-// With a bus pin (RASPUTIN_BUS_PIN, or the pin file a bus.pin delivery wrote)
-// every connection is TLS and the server is trusted by the SHA-256 of its key
-// alone — no chain, no hostname, no dates; without one the Client dials in
-// plaintext, as every node did before geekdojo/geekdojo-brain#448. See pin.go
-// and docs/bus-tls-contract.md.
+// Every connection is TLS, and the server is trusted by the SHA-256 of its key
+// alone — no chain, no hostname, no dates. The pin comes from
+// RASPUTIN_BUS_PIN, the node's saved pin file, or (controlplane only) the
+// file the api writes; a Client cannot be built without one, because the bus
+// accepts nothing else (geekdojo/geekdojo-brain#448, #517). See pin.go and
+// docs/bus-tls-contract.md.
 //
 // Subject dispatch does NOT live here. Each subsystem (docker, storage,
 // updater, openwrt, tailscale, bmc, …) subscribes its own subjects on the

@@ -187,20 +187,20 @@ func waitBusEvent(t *testing.T, ch <-chan struct{}, what string) {
 //     re-minted its agent's token at start) and the file is rewritten — the
 //     SAME connection reconnects with the new token, subscriptions intact.
 func TestClient_ReadsTheTokenFileOnEveryConnect(t *testing.T) {
-	s1 := startServer(t, -1, testNode, "tok-A")
+	s1 := startBus(t, -1, testNode, "tok-A")
 	port := portOf(t, s1)
 	path := filepath.Join(t.TempDir(), "agent.token")
 
 	connected := make(chan struct{}, 1)
-	c := New(s1.ClientURL(), testNode, "",
-		func(nc *nats.Conn) error {
+	c := mustNew(t, Config{
+		URL: natsURL(t, s1), NodeID: testNode, Pin: testPin(t), Token: TokenFile(path),
+		OnConn: func(nc *nats.Conn) error {
 			_, err := nc.Subscribe(testSubj, func(m *nats.Msg) { _ = m.Respond([]byte("pong")) })
 			return err
 		},
-		func(*nats.Conn) { busEvent(connected) },
-	)
-	c.reconnectWait = 50 * time.Millisecond
-	c.SetTokenSource(TokenFile(path))
+		OnConnected:   func(*nats.Conn) { busEvent(connected) },
+		ReconnectWait: 50 * time.Millisecond,
+	})
 	t.Cleanup(c.Close)
 
 	// 1.
@@ -223,7 +223,7 @@ func TestClient_ReadsTheTokenFileOnEveryConnect(t *testing.T) {
 
 	// 3.
 	stopServer(s1)
-	s2 := startServer(t, port, testNode, "tok-B")
+	s2 := startBus(t, port, testNode, "tok-B")
 	if err := os.WriteFile(path, []byte("tok-B\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -234,16 +234,16 @@ func TestClient_ReadsTheTokenFileOnEveryConnect(t *testing.T) {
 	ping(t, c, s2, "tok-B")
 }
 
-// The static token New is given is presented unchanged on every attempt, as
+// The static token source is presented unchanged on every attempt, as
 // before token sources existed.
 func TestClient_StaticTokenIsPresented(t *testing.T) {
-	s := startServer(t, -1, testNode, "tok-A")
-	c := New(s.ClientURL(), testNode, "tok-A", nil, nil)
+	s := startBus(t, -1, testNode, "tok-A")
+	c := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: testPin(t), Token: StaticToken("tok-A")})
 	t.Cleanup(c.Close)
 	if err := c.Dial(); err != nil {
 		t.Fatalf("Dial with the static token: %v", err)
 	}
-	wrong := New(s.ClientURL(), testNode, "tok-B", nil, nil)
+	wrong := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: testPin(t), Token: StaticToken("tok-B")})
 	t.Cleanup(wrong.Close)
 	if err := wrong.Dial(); err == nil {
 		t.Fatal("Dial with the wrong static token succeeded")

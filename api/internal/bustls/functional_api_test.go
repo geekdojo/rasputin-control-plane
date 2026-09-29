@@ -1,26 +1,16 @@
 package bustls_test
 
-// The bus TLS switch with the REAL rasputin-api binary: what only a running
-// process can show. On a fresh controlplane the api reaches require by itself
-// — offer → migrate → pin delivered to its own agent → require — and
-// it does so WITHOUT ending: the same process (same PID, never exits, one
-// "http listening" line) answers GET /healthz on every one of a tight,
-// back-to-back series of polls from before the switch until after it. The
-// dev-image QEMU smoke test's 70s uptime soak failed on exactly this when the
-// switch restarted the api (rasputin-os run 35146258476).
+// The TLS-only bus with the REAL rasputin-api binary: what only a running
+// process shows.
 //
-// It also checks, from outside, what the in-process test checks from inside:
-// plaintext refused on the wire; both agents (the controlplane's own agent, on
-// the token the api minted for it, and a pinned compute node) back over TLS after the switch; an unpinned node
-// refused; the recorded mode; and job submits across the switch — 503 with
-// Retry-After or accepted, never anything else, and accepted on retry.
-//
-// Whether a submit lands inside the switch is timing: the switch lasts as long
-// as one in-process server replacement, and this test cannot pause a real
-// process. It fires one at the moment the api logs the decision (intake is
-// already closed then) and reports whether it was refused; the deterministic
-// proof that a submit during the switch is refused and then accepted is
-// TestFunctional_AutomaticLadder, which runs inside the switch.
+//   - A controlplane upgraded from a release that had the ladder still carries
+//     its recorded bus.tls_mode row, and may still carry RASPUTIN_BUS_TLS in
+//     node.env. Neither changes anything: the bus refuses plaintext on the
+//     wire, the row is left alone, and a set variable earns one WARN entry.
+//   - A bus key, or a bus certificate, that will not load: the api keeps
+//     running and answering, serves no bus listener at all, lists a crit alert
+//     naming the file that failed, answers GET /api/bus/tls and mint with a
+//     coded 503, mints nothing, and never claims a listener in its log.
 
 import (
 	"bufio"
@@ -35,7 +25,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -43,9 +32,14 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls/bustlstest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
+
+// legacyModeSetting is the settings row the plaintext ladder recorded its rung
+// in. Nothing reads it any more; an upgraded controlplane still carries it.
+const legacyModeSetting = "bus.tls_mode"
 
 var (
 	apiBinOnce sync.Once
@@ -54,7 +48,7 @@ var (
 )
 
 // buildAPI builds rasputin-api from this workspace — with the race detector
-// when this test binary has it, so a race in the switch fails this test too.
+// when this test binary has it.
 func buildAPI(t *testing.T) string {
 	t.Helper()
 	apiBinOnce.Do(func() {
@@ -98,19 +92,15 @@ func freePort(t *testing.T) int {
 // apiProc is one running rasputin-api, with its log captured.
 type apiProc struct {
 	cmd      *exec.Cmd
+	dataDir  string
 	httpBase string
 	natsPort int
 	cookie   *http.Cookie
-	// agentTokenFile is where the api mints its own agent's bus token.
-	agentTokenFile string
 
 	mu      sync.Mutex
 	lines   []string
 	changed signal
 	exited  chan struct{}
-
-	// onLine, when set, sees every line as it is read, before waiters do.
-	onLine atomic.Pointer[func(string)]
 }
 
 func (a *apiProc) log() string {
@@ -119,25 +109,30 @@ func (a *apiProc) log() string {
 	return strings.Join(a.lines, "\n")
 }
 
-func (a *apiProc) count(sub string) int {
+// count is how many log lines contain every one of subs.
+func (a *apiProc) count(subs ...string) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	n := 0
 	for _, l := range a.lines {
-		if strings.Contains(l, sub) {
+		all := true
+		for _, s := range subs {
+			all = all && strings.Contains(l, s)
+		}
+		if all {
 			n++
 		}
 	}
 	return n
 }
 
-func (a *apiProc) waitLog(t *testing.T, what, sub string) {
+func (a *apiProc) waitLog(t *testing.T, what string, subs ...string) {
 	t.Helper()
 	waitFact(t, what+" in the api log", &a.changed, func() bool {
 		if a.hasExited() {
 			t.Fatalf("the api exited while waiting for %s\n%s", what, a.log())
 		}
-		return a.count(sub) > 0
+		return a.count(subs...) > 0
 	}, a.log)
 }
 
@@ -150,49 +145,111 @@ func (a *apiProc) hasExited() bool {
 	}
 }
 
-// startAPI seeds a fresh controlplane data dir the way firstboot and an
-// operator would have — a provisioned bus key, a bound join token for n1, and
-// a signed-in session (written to the database directly: auth is passkey-only)
-// — and starts the api binary on it.
-func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
+// stop ends the api and waits for it.
+func (a *apiProc) stop() {
+	if !a.hasExited() {
+		_ = a.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-a.exited:
+		case <-time.After(30 * time.Second): // bounds the one wait for exit
+			_ = a.cmd.Process.Kill()
+			<-a.exited
+		}
+	}
+}
+
+type apiOpts struct {
+	// recordMode writes the ladder's bus.tls_mode settings row, as a
+	// controlplane upgraded from a ladder release carries it.
+	recordMode string
+	// env is extra environment for the api (RASPUTIN_BUS_TLS, say).
+	env []string
+	// corruptKey puts an unusable bus.key in place; badCert puts a directory
+	// where bus.crt should be, beside a good key.
+	corruptKey, badCert bool
+	// bin runs another api binary (the compatibility tests' floor api); ""
+	// builds this workspace's.
+	bin string
+	// dataDir and the two ports reuse a previous api's (the swap to a new
+	// build); zero values are fresh.
+	dataDir            string
+	httpPort, natsPort int
+	// noSeed leaves the data dir alone: no key, no settings, no session. An
+	// older api then creates its own database rather than open one a newer
+	// build's schema already migrated; with no key it generates one.
+	noSeed bool
+	// preseed is written as the matched-set token preseed (bus/preseed.json),
+	// the one way to give an api a join token without touching its database.
+	preseed []busauth.PreseedToken
+}
+
+// startAPI seeds a controlplane data dir the way firstboot and an operator
+// would have — a bus key and a signed-in session (written to the database
+// directly: auth is passkey-only) — and starts the api binary on it.
+func startAPI(t *testing.T, o apiOpts) (a *apiProc, pin string) {
 	t.Helper()
 	ctx := context.Background()
-	dataDir := t.TempDir()
+	dataDir := o.dataDir
+	if dataDir == "" {
+		dataDir = t.TempDir()
+	}
 	dbPath := filepath.Join(dataDir, "rasputin.db")
+	busDir := filepath.Join(dataDir, "bus")
+	sessToken := "bustls-functional-session"
 
-	key, _, err := bustls.EnsureKey(filepath.Join(dataDir, "bus"))
-	if err != nil {
-		t.Fatal(err)
+	if len(o.preseed) > 0 {
+		if err := os.MkdirAll(busDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		b, err := json.Marshal(o.preseed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(busDir, "preseed.json"), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	tokens, err := busauth.OpenStore(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
+	switch {
+	case o.noSeed:
+	case o.corruptKey:
+		if err := os.MkdirAll(busDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(busDir, bustls.KeyFileName), []byte("not a key\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		key, _, err := bustls.EnsureKey(busDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pin = key.Pin()
 	}
-	n1Token, _, err = tokens.MintBound(ctx, "n1", "n1", "compute")
-	_ = tokens.Close()
-	if err != nil {
-		t.Fatal(err)
+	if o.noSeed {
+		return runAPI(t, o, dataDir, sessToken), pin
 	}
-	// This test is the LADDER, so the api has to start at the bottom of it.
-	// A controlplane with nothing recorded and no node enrolled is a fresh
-	// cluster, which starts in require and has no ladder to climb
-	// (bustls.ResolveStartMode). Recording offer is what an existing cluster
-	// mid-migration looks like, and it is what this scenario needs.
-	settings, err := setup.OpenStore(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
+	if o.badCert {
+		if err := os.MkdirAll(filepath.Join(busDir, bustls.CertFileName), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := settings.Set(ctx, bustls.SettingKey, string(bustls.ModeOffer)); err != nil {
-		t.Fatal(err)
+	if o.recordMode != "" {
+		settings, err := setup.OpenStore(ctx, dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := settings.Set(ctx, legacyModeSetting, o.recordMode); err != nil {
+			t.Fatal(err)
+		}
+		_ = settings.Close()
 	}
-	_ = settings.Close()
 	authStore, err := auth.OpenStore(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	user := &auth.User{ID: []byte("bustls-functional-user"), Name: "operator", DisplayName: "Operator", CreatedAt: now}
-	sess := &auth.Session{Token: "bustls-functional-session", UserID: user.ID, CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActiveAt: now}
+	sess := &auth.Session{Token: sessToken, UserID: user.ID, CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActiveAt: now}
 	if err := authStore.CreateUser(ctx, user); err != nil {
 		t.Fatal(err)
 	}
@@ -200,18 +257,34 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 		t.Fatal(err)
 	}
 	_ = authStore.Close()
+	return runAPI(t, o, dataDir, sessToken), pin
+}
 
-	httpPort, natsPort, ingestPort := freePort(t), freePort(t), freePort(t)
-	a = &apiProc{
-		httpBase:       fmt.Sprintf("http://127.0.0.1:%d", httpPort),
-		natsPort:       natsPort,
-		cookie:         &http.Cookie{Name: "rasputin-session", Value: sess.Token},
-		agentTokenFile: filepath.Join(dataDir, "bus", proto.BusAgentTokenFileName),
-		exited:         make(chan struct{}),
+// runAPI starts the api binary on dataDir and waits for its HTTP listener.
+func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
+	t.Helper()
+	httpPort, natsPort := o.httpPort, o.natsPort
+	if httpPort == 0 {
+		httpPort = freePort(t)
 	}
-	dead := "http://127.0.0.1:1"     // no network: release and catalog checks fail fast
-	cmd := exec.Command(buildAPI(t)) // G204: the binary this test just built
-	cmd.Env = []string{
+	if natsPort == 0 {
+		natsPort = freePort(t)
+	}
+	ingestPort := freePort(t)
+	a := &apiProc{
+		dataDir:  dataDir,
+		httpBase: fmt.Sprintf("http://127.0.0.1:%d", httpPort),
+		natsPort: natsPort,
+		cookie:   &http.Cookie{Name: "rasputin-session", Value: sessToken},
+		exited:   make(chan struct{}),
+	}
+	bin := o.bin
+	if bin == "" {
+		bin = buildAPI(t)
+	}
+	dead := "http://127.0.0.1:1" // no network: release and catalog checks fail fast
+	cmd := exec.Command(bin)     // G204: a binary this test built
+	cmd.Env = append([]string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + dataDir,
 		"RASPUTIN_DATA_DIR=" + dataDir,
@@ -235,7 +308,7 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 		"RASPUTIN_STORAGE_RECONCILE_INTERVAL=24h",
 		"RASPUTIN_BACKUP_CHECK_INTERVAL=24h",
 		"RASPUTIN_OBS_COLLECTOR_RECONCILE_INTERVAL=24h",
-	}
+	}, o.env...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -245,38 +318,21 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 		t.Fatalf("start api: %v", err)
 	}
 	a.cmd = cmd
-	readDone := make(chan struct{})
 	go func() {
-		defer close(readDone)
 		sc := bufio.NewScanner(stderr)
 		sc.Buffer(make([]byte, 64*1024), 1024*1024)
 		for sc.Scan() {
-			line := sc.Text()
-			if f := a.onLine.Load(); f != nil {
-				(*f)(line)
-			}
 			a.mu.Lock()
-			a.lines = append(a.lines, line)
+			a.lines = append(a.lines, sc.Text())
 			a.mu.Unlock()
 			a.changed.fire()
 		}
-	}()
-	go func() {
-		<-readDone
 		_ = cmd.Wait()
 		close(a.exited)
 		a.changed.fire()
 	}()
 	t.Cleanup(func() {
-		if !a.hasExited() {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-			select {
-			case <-a.exited:
-			case <-time.After(30 * time.Second): // bounds the one wait for exit
-				_ = cmd.Process.Kill()
-				<-a.exited
-			}
-		}
+		a.stop()
 		if a.count("DATA RACE") != 0 {
 			t.Errorf("the api binary (built with -race) reported a data race")
 		}
@@ -285,24 +341,7 @@ func startAPI(t *testing.T) (a *apiProc, pin, n1Token string) {
 		}
 	})
 	a.waitLog(t, "the HTTP listener", "rasputin-api: http listening on")
-	return a, key.Pin(), n1Token
-}
-
-// mint returns a join token bound to id from the api's own endpoint, as
-// Add-node mints one.
-func (a *apiProc) mint(t *testing.T, id string) string {
-	t.Helper()
-	resp, body, err := a.do(http.MethodPost, "/api/bus/tokens", fmt.Sprintf(`{"role":"compute","label":%q,"nodeId":%q}`, id, id))
-	if err != nil || resp.StatusCode != http.StatusCreated {
-		t.Fatalf("POST /api/bus/tokens for %s = (%v, %s, %v)", id, resp, body, err)
-	}
-	var tok struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(body, &tok); err != nil || tok.Token == "" {
-		t.Fatalf("mint body %s: %v", body, err)
-	}
-	return tok.Token
+	return a
 }
 
 // do is one bounded HTTP round trip, signed in.
@@ -326,244 +365,172 @@ func (a *apiProc) do(method, path, body string) (*http.Response, []byte, error) 
 	return resp, b, err
 }
 
-// healthPoller asks GET /healthz back to back, each request bounded, until
-// stopped: any failure is recorded.
-type healthPoller struct {
-	ok       atomic.Int64
-	mu       sync.Mutex
-	failures []string
-	stop     chan struct{}
-	done     chan struct{}
+// mint returns a join token bound to id from the api's own endpoint, as
+// Add-node mints one.
+func (a *apiProc) mint(t *testing.T, id string) string {
+	t.Helper()
+	resp, body, err := a.do(http.MethodPost, "/api/bus/tokens", fmt.Sprintf(`{"role":"compute","label":%q,"nodeId":%q}`, id, id))
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/bus/tokens for %s = (%v, %s, %v)", id, resp, body, err)
+	}
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &tok); err != nil || tok.Token == "" {
+		t.Fatalf("mint body %s: %v", body, err)
+	}
+	return tok.Token
 }
 
-func startHealthPoller(a *apiProc) *healthPoller {
-	p := &healthPoller{stop: make(chan struct{}), done: make(chan struct{})}
-	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{MaxIdleConnsPerHost: 1}}
-	go func() {
-		defer close(p.done)
-		for {
-			select {
-			case <-p.stop:
-				return
-			default:
+// tokenCount is how many join tokens GET /api/bus/tokens lists.
+func (a *apiProc) tokenCount(t *testing.T) int {
+	t.Helper()
+	resp, body, err := a.do(http.MethodGet, "/api/bus/tokens", "")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/bus/tokens = (%v, %s, %v)", resp, body, err)
+	}
+	var list []json.RawMessage
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatalf("token list %s: %v", body, err)
+	}
+	return len(list)
+}
+
+// TC-517-29: an upgraded controlplane's stale bus.tls_mode=offer row, and
+// RASPUTIN_BUS_TLS set to a ladder mode or to garbage, change nothing: the bus
+// refuses plaintext on the wire, the row is left in place, and the variable
+// earns exactly one WARN entry naming it — none when it is unset.
+func TestFunctional_RealAPIProcess_StaleModeChangesNothing(t *testing.T) {
+	skipShort(t)
+	for _, tc := range []struct {
+		name      string
+		node      string
+		env       []string
+		wantWarns int
+	}{
+		{"recorded offer, variable unset", "n-unset", nil, 0},
+		{"RASPUTIN_BUS_TLS=offer", "n-offer", []string{"RASPUTIN_BUS_TLS=offer"}, 1},
+		{"RASPUTIN_BUS_TLS=banana", "n-banana", []string{"RASPUTIN_BUS_TLS=banana"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, pin := startAPI(t, apiOpts{recordMode: "offer", env: tc.env})
+			api.waitLog(t, "the bus listener", "rasputin-api: bus listening")
+			bustlstest.AssertPlaintextRefused(t, fmt.Sprintf("127.0.0.1:%d", api.natsPort))
+
+			// And the bus works: a node seeded with the pin joins.
+			id := tc.node
+			a := startAgent(t, agentOpts{id: id, url: fmt.Sprintf("nats://127.0.0.1:%d", api.natsPort), token: api.mint(t, id), pin: pin})
+			a.waitLog(t, "the node on the bus", "agent/bus: connected")
+
+			if got := api.count("level=WARN", "RASPUTIN_BUS_TLS is set but no longer read"); got != tc.wantWarns {
+				t.Fatalf("%d WARN entries naming RASPUTIN_BUS_TLS, want %d", got, tc.wantWarns)
 			}
-			resp, err := client.Get(a.httpBase + "/healthz")
-			switch {
-			case err != nil:
-				p.fail(err.Error())
-			default:
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
-					p.fail(fmt.Sprintf("status %d", resp.StatusCode))
-				} else {
-					p.ok.Add(1)
+			if tc.wantWarns == 1 {
+				value := strings.SplitN(tc.env[0], "=", 2)[1]
+				if api.count("RASPUTIN_BUS_TLS is set", "value="+value, "fix=") != 1 {
+					t.Fatalf("the WARN does not carry value=%s and a fix", value)
 				}
 			}
-		}
-	}()
-	return p
+
+			a.stop(t)
+			api.stop()
+			settings, err := setup.OpenStore(context.Background(), filepath.Join(api.dataDir, "rasputin.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = settings.Close() }()
+			if v, err := settings.Get(context.Background(), legacyModeSetting); err != nil || v != "offer" {
+				t.Fatalf("the %s row = (%q, %v) after the run, want it left at offer", legacyModeSetting, v, err)
+			}
+		})
+	}
 }
 
-func (p *healthPoller) fail(why string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.failures = append(p.failures, why)
-}
-
-func (p *healthPoller) finish() (ok int64, failures []string) {
-	close(p.stop)
-	<-p.done
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.ok.Load(), p.failures
-}
-
-func (a *agentProc) lineCount() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return len(a.lines)
-}
-
-// waitLogSince is waitLog over the lines after the first `since`.
-func (a *agentProc) waitLogSince(t *testing.T, since int, what string, subs ...string) {
+// busDown is the shared body of TC-517-30 and TC-517-44: the api keeps
+// running with no bus listener, a crit alert naming failedFile, coded 503s on
+// GET /api/bus/tls and mint, no token minted, and no listener claimed.
+func busDown(t *testing.T, o apiOpts, failedFile, otherFile, logWhat string) {
 	t.Helper()
-	waitFact(t, what+" in agent "+a.id+"'s log", &a.changed, func() bool {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		for _, l := range a.lines[since:] {
-			all := true
-			for _, s := range subs {
-				all = all && strings.Contains(l, s)
-			}
-			if all {
-				return true
-			}
-		}
-		return false
-	}, a.log)
-}
+	api, _ := startAPI(t, o)
+	api.waitLog(t, logWhat, logWhat, "file=", failedFile)
 
-func TestFunctional_RealAPIProcess_RequireWithoutRestart(t *testing.T) {
-	skipShort(t)
-	api, pin, n1Token := startAPI(t)
-	pid := api.cmd.Process.Pid
-	url := fmt.Sprintf("nats://127.0.0.1:%d", api.natsPort)
-
-	// The submit fired the moment the api logs the decision: intake is closed
-	// by then, so it is refused unless the whole switch already finished.
-	type submitResult struct {
-		code       int
-		retryAfter string
-		body       string
-		err        error
-	}
-	atDecision := make(chan submitResult, 1)
-	var switchPolls [2]int64 // health polls answered when the replacement began and ended
-	var poller atomic.Pointer[healthPoller]
-	onLine := func(line string) {
-		p := poller.Load()
-		switch {
-		case strings.Contains(line, "bustls: migrate → require"):
-			resp, body, err := api.do(http.MethodPost, "/api/jobs", `{"kind":"diag.ping","spec":{"nodeId":"cp1"}}`)
-			r := submitResult{err: err, body: string(body)}
-			if resp != nil {
-				r.code, r.retryAfter = resp.StatusCode, resp.Header.Get("Retry-After")
-			}
-			atDecision <- r
-		case strings.Contains(line, "bus: replacing the embedded server") && p != nil:
-			switchPolls[0] = p.ok.Load()
-		case strings.Contains(line, "bus: the embedded server was replaced") && p != nil:
-			switchPolls[1] = p.ok.Load()
-		}
-	}
-	api.onLine.Store(&onLine)
-	// Zero-touch: the api minted its own agent's token before it was ready.
-	api.waitLog(t, "the api minting its own agent's bus token", `minted a bus token for this controlplane's agent "cp1"`)
-	hp := startHealthPoller(api)
-	poller.Store(hp)
-
-	// The controlplane's own agent: the token the api minted into its data dir
-	// at start, no pin yet (it is delivered). A compute node seeded with the
-	// pin, as a matched set is.
-	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: url, tokenFile: api.agentTokenFile})
-	n1 := startAgent(t, agentOpts{id: "n1", url: url, token: n1Token, pin: pin})
-
-	api.waitLog(t, "the pin delivery to the controlplane's own agent", `bustls: "cp1" holds the pin`)
-	cpSince, n1Since := cpAgent.lineCount(), n1.lineCount()
-	api.waitLog(t, "the switch to TLS-only completing", "bustls: require: the bus refuses plaintext")
-
-	// Both agents rejoin the replaced server over TLS on their own.
-	cpAgent.waitLogSince(t, cpSince, "the controlplane agent reconnecting after the switch", "reconnected to", fmt.Sprint(api.natsPort))
-	n1.waitLogSince(t, n1Since, "the compute node reconnecting after the switch", "reconnected to", fmt.Sprint(api.natsPort))
-
-	// The job submitted at the decision: refused-and-retryable, or accepted
-	// because the switch had already finished. Nothing else.
-	var first submitResult
-	select {
-	case first = <-atDecision:
-	case <-time.After(factDeadline):
-		t.Fatal("the api logged the decision but the submit made then never returned")
-	}
-	switch {
-	case first.err != nil:
-		t.Fatalf("POST /api/jobs at the decision failed outright: %v", first.err)
-	case first.code == http.StatusServiceUnavailable && first.retryAfter != "":
-		t.Logf("a job submitted at the decision was refused during the switch: 503, Retry-After %s", first.retryAfter)
-	case first.code == http.StatusCreated:
-		t.Logf("a job submitted at the decision landed after the switch had finished (201); the in-switch refusal is proven by TestFunctional_AutomaticLadder")
-	default:
-		t.Fatalf("POST /api/jobs at the decision = %d (Retry-After %q) %s, want 503 with Retry-After or 201", first.code, first.retryAfter, first.body)
-	}
-
-	// Now jobs run, over the new bus, to both agents.
-	for _, node := range []string{"cp1", "n1"} {
-		resp, body, err := api.do(http.MethodPost, "/api/jobs", fmt.Sprintf(`{"kind":"diag.ping","spec":{"nodeId":%q}}`, node))
-		if err != nil || resp.StatusCode != http.StatusCreated {
-			t.Fatalf("POST /api/jobs diag.ping %s after the switch = (%v, %s, %v)", node, resp, body, err)
-		}
-		var j struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(body, &j); err != nil || j.ID == "" {
-			t.Fatalf("job body %s: %v", body, err)
-		}
-		waitJobSucceeded(t, api, j.ID)
-	}
-
-	ok, failures := hp.finish()
-	if len(failures) != 0 {
-		t.Fatalf("GET /healthz failed %d time(s) across the switch (answered %d): %q", len(failures), ok, failures)
-	}
-	if ok == 0 {
-		t.Fatal("the health poller never got an answer")
-	}
-	t.Logf("GET /healthz answered %d times back to back with no failure; %d of them while the bus server was being replaced", ok, switchPolls[1]-switchPolls[0])
-
-	// Same process, never exited, never restarted.
-	if api.hasExited() || api.cmd.Process.Pid != pid {
-		t.Fatalf("the api process exited or changed (pid %d → %d)", pid, api.cmd.Process.Pid)
-	}
-	if n := api.count("rasputin-api: http listening on"); n != 1 {
-		t.Fatalf("the api started its HTTP server %d times, want once", n)
-	}
-	for _, never := range []string{"rasputin-api: shutting down", "exiting 75", "DATA RACE"} {
-		if api.count(never) != 0 {
-			t.Fatalf("the api log contains %q", never)
-		}
-	}
-
-	// The recorded state, through the api.
-	resp, body, err := api.do(http.MethodGet, "/api/bus/tls", "")
+	resp, _, err := api.do(http.MethodGet, "/healthz", "")
 	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /api/bus/tls = (%v, %s, %v)", resp, body, err)
+		t.Fatalf("GET /healthz = (%v, %v), want 200", resp, err)
 	}
-	var st bustls.Status
-	if err := json.Unmarshal(body, &st); err != nil {
+	if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", api.natsPort), 2*time.Second); err == nil {
+		_ = c.Close()
+		t.Fatalf("something accepts on the bus port %d with the bus down", api.natsPort)
+	}
+
+	resp, body, err := api.do(http.MethodGet, "/api/alerts", "")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/alerts = (%v, %s, %v)", resp, body, err)
+	}
+	var alerts []proto.Alert
+	if err := json.Unmarshal(body, &alerts); err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode != bustls.ModeRequire || st.PlaintextAllowed || st.Switching || st.SwitchFailed != "" || st.Pin != pin {
-		t.Fatalf("GET /api/bus/tls = %+v, want require, plaintext refused, not switching, the provisioned pin", st)
-	}
-	for _, n := range st.Nodes {
-		if !n.BusTLS {
-			t.Fatalf("node %s is not on TLS after the switch: %+v", n.ID, st.Nodes)
+	var found *proto.Alert
+	for i := range alerts {
+		if alerts[i].ID == bustls.AlertID {
+			found = &alerts[i]
 		}
 	}
+	if found == nil || found.Severity != proto.AlertCrit {
+		t.Fatalf("alerts = %+v, want a crit %s", alerts, bustls.AlertID)
+	}
+	if !strings.Contains(found.Detail, failedFile) || strings.Contains(found.Detail, otherFile) {
+		t.Fatalf("alert detail %q, want it to name %s and not %s", found.Detail, failedFile, otherFile)
+	}
 
-	// Plaintext is refused on the wire, and an unpinned node cannot join.
-	assertPlaintextRefused(t, api.natsPort)
-	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: url, token: api.mint(t, "n-unmigrated")})
-	stray.waitLog(t, "the TLS-required refusal of an unpinned node", "NATS connect", "tls")
-	stray.stop(t)
-	if api.count("bus: replacing the embedded server") != 1 {
-		t.Fatalf("the bus server was replaced %d times, want once", api.count("bus: replacing the embedded server"))
+	for _, path := range []string{"/api/bus/tls"} {
+		resp, body, err := api.do(http.MethodGet, path, "")
+		if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("GET %s = (%v, %s, %v), want 503", path, resp, body, err)
+		}
+		assertBusUnavailableBody(t, body)
+	}
+	before := api.tokenCount(t)
+	resp, body, err = api.do(http.MethodPost, "/api/bus/tokens", `{"role":"compute","label":"n1","nodeId":"n1"}`)
+	if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("mint with the bus down = (%v, %s, %v), want 503", resp, body, err)
+	}
+	assertBusUnavailableBody(t, body)
+	if after := api.tokenCount(t); after != before {
+		t.Fatalf("a refused mint changed the token count %d → %d", before, after)
+	}
+	if api.count("bus listening") != 0 || api.count("nats listening") != 0 {
+		t.Fatalf("the api claimed a bus listener with the bus down")
+	}
+	if api.hasExited() {
+		t.Fatal("the api exited")
 	}
 }
 
-// waitJobSucceeded asks for the job until it ends. Each ask is one bounded
-// HTTP round trip, back to back, under the fact deadline.
-func waitJobSucceeded(t *testing.T, a *apiProc, id string) {
+func assertBusUnavailableBody(t *testing.T, body []byte) {
 	t.Helper()
-	deadline := time.Now().Add(factDeadline)
-	for time.Now().Before(deadline) {
-		resp, body, err := a.do(http.MethodGet, "/api/jobs/"+id, "")
-		if err != nil || resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET /api/jobs/%s = (%v, %s, %v)", id, resp, body, err)
-		}
-		var j struct {
-			Status string `json:"status"`
-			Error  string `json:"error"`
-		}
-		if err := json.Unmarshal(body, &j); err != nil {
-			t.Fatal(err)
-		}
-		switch j.Status {
-		case "succeeded":
-			return
-		case "failed", "cancelled":
-			t.Fatalf("job %s %s: %s", id, j.Status, j.Error)
-		}
+	var c struct {
+		Error         string `json:"error"`
+		Code          string `json:"code"`
+		CorrelationID string `json:"correlationId"`
 	}
-	t.Fatalf("job %s did not end within %s", id, factDeadline)
+	if err := json.Unmarshal(body, &c); err != nil {
+		t.Fatalf("503 body %s is not JSON: %v", body, err)
+	}
+	if c.Code != "bus_unavailable" || c.CorrelationID == "" || c.Error == "" {
+		t.Fatalf("503 body = %s, want code bus_unavailable, a message and a correlation id", body)
+	}
+}
+
+// TC-517-30: a corrupt bus.key.
+func TestFunctional_RealAPIProcess_BusKeyDown(t *testing.T) {
+	skipShort(t)
+	busDown(t, apiOpts{corruptKey: true}, bustls.KeyFileName, bustls.CertFileName, "bus key did not load")
+}
+
+// TC-517-44: a good bus.key beside a bus.crt that cannot be read.
+func TestFunctional_RealAPIProcess_BusCertDown(t *testing.T) {
+	skipShort(t)
+	busDown(t, apiOpts{badCert: true}, bustls.CertFileName, bustls.KeyFileName, "bus certificate unusable")
 }

@@ -1,32 +1,29 @@
 package bustls_test
 
-// THE FUNCTIONAL TEST for bus TLS (geekdojo/geekdojo-brain#448): the real
-// embedded bus (bus.Start, with the auth callout enforced), the real inventory
-// service, job store and runner, the real bustls service and its real commit
-// check (updater.SelfBuildCommitted), wired the way cmd/rasputin-api wires
-// them — and the REAL rasputin-agent binary, built from this workspace and run
-// as subprocesses, doing the TLS handshake, the pin check, the pin delivery
-// and the commit report itself.
+// THE FUNCTIONAL TEST for the TLS-only bus (geekdojo/geekdojo-brain#448,
+// #517): the real embedded bus (bus.Start, TLS required, with the auth callout
+// enforced), the real inventory service and join-token store, wired the way
+// cmd/rasputin-api wires them — and the REAL rasputin-agent binary, built from
+// this workspace and run as subprocesses, doing the TLS handshake and the pin
+// check itself.
 //
 // Why a subprocess: the agent's client lives in agent/internal and cannot be
 // imported from the api module, and the parts most likely to be wrong are in
-// agent main — where the pin is resolved, where a delivered one is saved, and
-// what the registration reports. A copy of the client wired by this test would
-// prove the copy.
+// agent main — where the pin is resolved, where a missing one ends the
+// process, and what the registration reports. A copy of the client wired by
+// this test would prove the copy.
 //
 // Every wait is for a fact, signalled when it changes, under a hard deadline:
-// a registration that says busTls, a log line naming a refusal, the switch to
-// TLS-only completing. Nothing here sleeps to let something happen.
+// a registration, a log line, a process exit. Nothing here sleeps to let
+// something happen.
 //
-// TestFunctional_RealAPIProcess (functional_api_test.go) runs the REAL
-// rasputin-api binary too, for what only a process shows: the same PID and an
-// HTTP server that never stops answering while the bus switches.
+// functional_api_test.go runs the REAL rasputin-api binary too, for what only
+// a process shows: a stale mode setting and RASPUTIN_BUS_TLS changing nothing,
+// and a bus key or certificate that will not load.
 //
 // What it does NOT prove: the OS or firewall images (firstboot, apply-seed,
-// the seed scrub), mDNS resolution of <cluster>.local, a real RAUC slot commit
-// (the controlplane agent runs the mock updater backend, whose commit model is
-// unit-tested beside the RAUC one), or real clocks on real hardware. That is
-// the bench plan in the PR.
+// the seed scrub), mDNS resolution of <cluster>.local, or real clocks on real
+// hardware. That is the bench plan in the PR.
 //
 // Run alone: scripts/test-bus-tls.sh.
 
@@ -45,9 +42,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -55,11 +52,9 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls/bustlstest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/cutover"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -156,7 +151,8 @@ type agentProc struct {
 	mu      sync.Mutex
 	lines   []string
 	changed signal
-	done    chan struct{}
+	done    chan struct{} // closed once the process has exited and been reaped
+	exitErr error
 }
 
 type agentOpts struct {
@@ -170,16 +166,21 @@ type agentOpts struct {
 	pin       string // RASPUTIN_BUS_PIN; "" leaves it unset
 	// pinFile is RASPUTIN_BUS_PIN_FILE: where the controlplane's own agent
 	// reads the pin its api writes (cp.agentPinFile). Read by the
-	// controlplane role only, and last — after the seed and after a
-	// delivered pin.
+	// controlplane role only, and last.
 	pinFile string
 	// stateDir reuses a previous agent's state (a restart); "" is fresh.
 	stateDir string
+	// bin runs another agent binary (the compatibility tests' floor agent);
+	// "" builds this workspace's.
+	bin string
 }
 
 func startAgent(t *testing.T, o agentOpts) *agentProc {
 	t.Helper()
-	bin := buildAgent(t)
+	bin := o.bin
+	if bin == "" {
+		bin = buildAgent(t)
+	}
 	if o.stateDir == "" {
 		o.stateDir = t.TempDir()
 	}
@@ -197,8 +198,7 @@ func startAgent(t *testing.T, o agentOpts) *agentProc {
 		"RASPUTIN_AGENT_STATE_DIR=" + o.stateDir,
 		// Mock every backend: this test is about the bus, and an autodetect
 		// that found a real docker or tailscale on the runner would make it
-		// about the runner. The mock updater is also what answers the
-		// controlplane's commit question.
+		// about the runner.
 		"RASPUTIN_DOCKER_BACKEND=mock",
 		"RASPUTIN_UPDATE_BACKEND=mock",
 		"RASPUTIN_STORAGE_BACKEND=mock",
@@ -229,8 +229,6 @@ func startAgent(t *testing.T, o agentOpts) *agentProc {
 	}
 	a.cmd = cmd
 	go func() {
-		defer close(a.done)
-		defer a.changed.fire()
 		sc := bufio.NewScanner(stderr)
 		sc.Buffer(make([]byte, 64*1024), 1024*1024)
 		for sc.Scan() {
@@ -239,26 +237,50 @@ func startAgent(t *testing.T, o agentOpts) *agentProc {
 			a.mu.Unlock()
 			a.changed.fire()
 		}
+		a.exitErr = cmd.Wait()
+		close(a.done)
+		a.changed.fire()
 	}()
 	t.Cleanup(func() { a.stop(t) })
 	return a
 }
 
-func (a *agentProc) stop(t *testing.T) {
-	if a.cmd.ProcessState != nil {
-		return
-	}
-	_ = a.cmd.Process.Signal(syscall.SIGTERM)
+func (a *agentProc) exited() bool {
 	select {
 	case <-a.done:
-	case <-time.After(10 * time.Second): // bounds the one wait for exit
-		_ = a.cmd.Process.Kill()
-		<-a.done
+		return true
+	default:
+		return false
 	}
-	_ = a.cmd.Wait()
+}
+
+func (a *agentProc) stop(t *testing.T) {
+	if !a.exited() {
+		_ = a.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-a.done:
+		case <-time.After(10 * time.Second): // bounds the one wait for exit
+			_ = a.cmd.Process.Kill()
+			<-a.done
+		}
+	}
 	if t.Failed() {
 		t.Logf("--- agent %s log ---\n%s", a.id, a.log())
 	}
+}
+
+// waitExit waits for the process to end on its own and returns its exit code.
+func (a *agentProc) waitExit(t *testing.T) int {
+	t.Helper()
+	waitFact(t, "agent "+a.id+" to exit", &a.changed, a.exited, a.log)
+	var ee *exec.ExitError
+	if errors.As(a.exitErr, &ee) {
+		return ee.ExitCode()
+	}
+	if a.exitErr != nil {
+		t.Fatalf("agent %s: %v", a.id, a.exitErr)
+	}
+	return 0
 }
 
 func (a *agentProc) log() string {
@@ -267,13 +289,25 @@ func (a *agentProc) log() string {
 	return strings.Join(a.lines, "\n")
 }
 
+func (a *agentProc) lineCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.lines)
+}
+
 // waitLog waits for a log line containing every one of subs.
 func (a *agentProc) waitLog(t *testing.T, what string, subs ...string) {
+	t.Helper()
+	a.waitLogSince(t, 0, what, subs...)
+}
+
+// waitLogSince is waitLog over the lines after the first `since`.
+func (a *agentProc) waitLogSince(t *testing.T, since int, what string, subs ...string) {
 	t.Helper()
 	waitFact(t, what+" in agent "+a.id+"'s log", &a.changed, func() bool {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		for _, l := range a.lines {
+		for _, l := range a.lines[since:] {
 			all := true
 			for _, s := range subs {
 				all = all && strings.Contains(l, s)
@@ -286,29 +320,37 @@ func (a *agentProc) waitLog(t *testing.T, what string, subs ...string) {
 	}, a.log)
 }
 
-// seedUncommittedMock writes the mock updater state an agent starts from: a
-// build booted as a TRIAL on slot b (marked active, not good) — what a
-// controlplane looks like after a self-update's reboot and before the saga's
-// mark-good.
-func seedUncommittedMock(t *testing.T, stateDir string) {
+// --- a listener nobody should reach -----------------------------------------
+
+// stub is a TCP listener standing where the bus would be, for an agent that
+// must never dial.
+func stub(t *testing.T) net.Listener {
 	t.Helper()
-	dir := filepath.Join(stateDir, "updater")
-	if err := os.MkdirAll(filepath.Join(dir, "bundles"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	st := map[string]any{
-		"activeSlot":     proto.SlotB,
-		"inactiveSlot":   proto.SlotA,
-		"currentVersion": "0.0.1-trial",
-		"pendingSlot":    proto.SlotUnknown,
-		"marks":          map[proto.UpdateSlot]proto.UpdateSlotState{proto.SlotA: proto.SlotStateInactive, proto.SlotB: proto.SlotStateActive},
-	}
-	b, err := json.Marshal(st)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), b, 0o644); err != nil {
+	t.Cleanup(func() { _ = l.Close() })
+	return l
+}
+
+// assertNeverDialed proves nothing connected to l: the test dials l itself,
+// and the first connection l accepts must be that sentinel — any connection
+// the agent had made would be queued ahead of it.
+func assertNeverDialed(t *testing.T, l net.Listener) {
+	t.Helper()
+	sentinel, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
 		t.Fatal(err)
+	}
+	defer func() { _ = sentinel.Close() }()
+	got, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = got.Close() }()
+	if got.RemoteAddr().String() != sentinel.LocalAddr().String() {
+		t.Fatalf("the listener's first connection came from %s, not the sentinel: the agent dialed", got.RemoteAddr())
 	}
 }
 
@@ -319,25 +361,12 @@ type cp struct {
 	port     int
 	selfNode string
 	srv      *bus.Server
-	svc      *bustls.Service
 	key      *bustls.Key
 	tokens   *busauth.Store
 	// inv is the node store the api records registrations into, so a test
 	// can read back what was PERSISTED on the node row and not only what
 	// crossed the bus.
-	inv      *inventory.Store
-	jobStore *jobs.Store
-	runner   *jobs.Runner
-	settings *setup.Store
-	mode     bustls.Mode
-	// switched is closed when the switch to TLS-only has returned without
-	// error; switches counts the calls. onSwitch, when set before the switch,
-	// runs twice inside it with job intake closed and require recorded:
-	// "before" the bus server is replaced and "after" it is, before intake
-	// reopens.
-	switched chan struct{}
-	switches atomic.Int32
-	onSwitch atomic.Pointer[func(phase string)]
+	inv *inventory.Store
 
 	regMu   sync.Mutex
 	regs    []proto.NodeRegisteredEvt
@@ -348,10 +377,6 @@ type cp struct {
 	recordedMu sync.Mutex
 	recorded   map[string]struct{}
 
-	evalMu    sync.Mutex
-	evals     int
-	evaluated signal
-
 	stopFn func()
 }
 
@@ -360,30 +385,16 @@ func (c *cp) stop() { c.stopFn() }
 type cpOpts struct {
 	dataDir string // reuse (a restart); "" is fresh
 	port    int    // reuse (a restart); 0 lets the server pick
-	// selfNode is RASPUTIN_SELF_NODE_ID: the controlplane's own node id, whose
-	// agent answers the commit question, and for which the controlplane mints
-	// its agent's bus token at start (agentTokenFile), as the api does.
+	// selfNode is RASPUTIN_SELF_NODE_ID: the controlplane's own node id, for
+	// which the controlplane mints its agent's bus token at start
+	// (agentTokenFile), as the api does.
 	selfNode string
-	// pinMode pins the mode the way RASPUTIN_BUS_TLS does; "" resolves it
-	// from the recorded setting, as a real start does.
-	pinMode bustls.Mode
 	// cert overrides the certificate wrapped around the bus key.
 	cert *tls.Certificate
-	// facts are the StartFacts a resolved (unpinned) mode is derived from,
-	// as the api derives them from inventory at start. The default stands for
-	// an existing fleet that is not all on TLS, which is what every ladder
-	// test here needs: a controlplane that starts at the bottom and climbs.
-	// A test that wants the fresh-cluster path sets it.
-	facts *bustls.StartFacts
-	// beforeAdmission runs once the bus is up and BEFORE the auth callout
-	// answers, so before any agent can be on the bus; beforeInventory runs
-	// after agents are being admitted and BEFORE inventory subscribes. The
-	// api has the same gap between the two (it starts its bus and the
-	// callout early, and inventory after its stores and sagas are up), and a
-	// registration published in it reaches nobody. A test uses the pair to
-	// put agents in that gap on purpose.
-	beforeAdmission func(c *cp)
-	beforeInventory func(c *cp)
+	// noPinFile skips writing the controlplane agent's pin file, which the
+	// api writes on every start; a test that wants the moment before it sets
+	// this.
+	noPinFile bool
 }
 
 func startCP(t *testing.T, o cpOpts) *cp {
@@ -395,64 +406,50 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if o.port == 0 {
 		o.port = -1 // the server picks; read back below
 	}
-	c := &cp{dataDir: o.dataDir, selfNode: o.selfNode, switched: make(chan struct{}), recorded: map[string]struct{}{}}
+	c := &cp{dataDir: o.dataDir, selfNode: o.selfNode, recorded: map[string]struct{}{}}
 	dbPath := filepath.Join(o.dataDir, "rasputin.db")
+	busDir := filepath.Join(o.dataDir, "bus")
 
-	settings, err := setup.OpenStore(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.settings = settings
-	mode, pinned := o.pinMode, o.pinMode != ""
-	if !pinned {
-		facts := bustls.StartFacts{TLSAvailable: true, Enrolled: 1, AllReportedTLS: false}
-		if o.facts != nil {
-			facts = *o.facts
-		}
-		start := bustls.ResolveStartMode(ctx, settings, facts)
-		if start.Fault != "" {
-			t.Fatalf("resolve start mode: %s", start.Fault)
-		}
-		mode = start.Mode
-		if start.Derived {
-			if err := settings.Set(ctx, bustls.SettingKey, string(mode)); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	c.mode = mode
-
-	key, _, err := bustls.EnsureKey(filepath.Join(o.dataDir, "bus"))
+	key, _, err := bustls.EnsureKey(busDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.key = key
 	// The PERSISTED certificate, as the api serves it (geekdojo-brain#508):
 	// same bytes across restarts, carrying the fixed DNS SAN.
-	busCert, _, err := bustls.EnsureCert(filepath.Join(o.dataDir, "bus"), key)
-	if err != nil {
+	busCert, _, err := bustls.EnsureCert(busDir, key)
+	if len(busCert.Certificate) == 0 {
 		t.Fatal(err)
 	}
 	serverTLS := bustls.ServerTLSConfigFor(busCert)
 	if o.cert != nil {
 		serverTLS = bustls.ServerTLSConfigFor(*o.cert)
 	}
-	issuer, err := busauth.EnsureIssuer(filepath.Join(o.dataDir, "bus"))
+	if !o.noPinFile {
+		if _, err := bustls.WriteAgentPinFile(busDir, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	issuer, err := busauth.EnsureIssuer(busDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv, err := bus.Start(ctx, bus.Config{
 		Host: "127.0.0.1", Port: o.port, StoreDir: filepath.Join(o.dataDir, "nats"),
 		AuthEnforce: true, IssuerPublicKey: issuer.PublicKey(), APIUser: "rasputin-api", APIPass: "functional-test",
-		TLS: serverTLS, AllowNonTLS: mode.AllowsPlaintext(),
+		TLS: serverTLS,
 	})
 	if err != nil {
 		t.Fatalf("bus.Start: %v", err)
 	}
 	c.srv = srv
-	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(strings.TrimPrefix(srv.ClientURL(), "tls://"), "nats://"))
+	url, listening := srv.ClientURL()
+	if !listening {
+		t.Fatal("a TLS bus reports no listener")
+	}
+	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(url, "tls://"))
 	if err != nil {
-		t.Fatalf("server URL %q: %v", srv.ClientURL(), err)
+		t.Fatalf("server URL %q: %v", url, err)
 	}
 	if _, err := fmt.Sscan(portStr, &c.port); err != nil {
 		t.Fatal(err)
@@ -468,8 +465,8 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.inv = invStore
 	if o.selfNode != "" {
-		// As cmd/rasputin-api does: before the responder admits anyone.
 		if _, err := tokens.EnsureAgentToken(ctx, c.agentTokenFile(), o.selfNode); err != nil {
 			t.Fatalf("EnsureAgentToken: %v", err)
 		}
@@ -480,91 +477,19 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	invStore.Registry().OnNodeExcluded(func(nodeID string) { _ = tokens.DisconnectNode(nodeID) })
 	tokens.TrackSessions(srv)
 	responder := busauth.NewResponder(srv.Conn(), issuer, tokens)
-	var holdSvc atomic.Pointer[bustls.Service] // as cmd/rasputin-api wires it
-	responder.SetHold(func() (bool, string) {
-		if svc := holdSvc.Load(); svc != nil {
-			return svc.Switching()
-		}
-		return false, ""
-	})
-	if o.beforeAdmission != nil {
-		o.beforeAdmission(c)
-	}
 	if err := responder.Start(); err != nil {
 		t.Fatal(err)
 	}
-	jobStore, err := jobs.OpenStore(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.inv = invStore
-	c.jobStore = jobStore
-	c.runner = jobs.NewRunner(jobStore, srv.Conn())
 	invSvc := inventory.NewService(invStore, srv.Conn())
-	var switchedOnce sync.Once
-	c.svc = bustls.NewService(bustls.Config{
-		Key:             key,
-		Settings:        settings,
-		StartMode:       mode,
-		StartModePinned: pinned,
-		Nodes: func(ctx context.Context) ([]*proto.Node, error) {
-			nodes, err := invStore.List(ctx)
-			if err == nil {
-				invStore.Presence(ctx, nodes)
-			}
-			return nodes, err
-		},
-		Plaintext: srv.PlaintextClients,
-		NC:        srv.Conn(),
-		Committed: func(ctx context.Context) (bool, string, error) {
-			return updater.SelfBuildCommitted(ctx, jobStore, srv.Conn(), o.selfNode, 10*time.Second)
-		},
-		InFlight: func(ctx context.Context) ([]string, error) { return jobs.InFlight(ctx, jobStore) },
-		Quiesce:  c.runner.QuiesceIfIdle,
-		Reopen:   c.runner.Reopen,
-		RequireTLS: func(ctx context.Context) error {
-			c.switches.Add(1)
-			hook := c.onSwitch.Load()
-			if hook != nil {
-				(*hook)("before")
-			}
-			err := srv.SetAllowNonTLS(ctx, false)
-			if hook != nil {
-				(*hook)("after")
-			}
-			if err == nil {
-				switchedOnce.Do(func() { close(c.switched) })
-			}
-			return err
-		},
-		NoBus: func(err error) { t.Errorf("the switch left no bus: %v", err) },
-		OnEvaluated: func(bustls.Mode, error) {
-			c.evalMu.Lock()
-			c.evals++
-			c.evalMu.Unlock()
-			c.evaluated.fire()
-		},
-	})
-	holdSvc.Store(c.svc)
-	if err := srv.OnClientDisconnect(c.svc.NoteDisconnect); err != nil {
-		t.Fatal(err)
-	}
-	// The bustls service's own hook, plus a test-side signal: OnRegistered
-	// fires AFTER the node row is written, so a test that needs the RECORDED
-	// row (not only the event that crossed the bus) has a fact to wait on
-	// instead of a poll.
+	// OnRegistered fires AFTER the node row is written, so a test that needs
+	// the RECORDED row (not only the event that crossed the bus) has a fact to
+	// wait on instead of a poll.
 	invSvc.SetOnRegistered(func(ctx context.Context, n *proto.Node) {
-		c.svc.OnRegistered(ctx, n)
 		c.recordedMu.Lock()
 		c.recorded[n.ID] = struct{}{}
 		c.recordedMu.Unlock()
 		c.changed.fire()
 	})
-	// As cmd/rasputin-api wires it: a heartbeat offers the pin again.
-	invSvc.SetOnHeartbeat(c.svc.OnHeartbeat)
-	if o.beforeInventory != nil {
-		o.beforeInventory(c)
-	}
 	if err := invSvc.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -581,20 +506,14 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.svc.Start(); err != nil {
-		t.Fatal(err)
-	}
 	var once sync.Once
 	c.stopFn = func() {
 		once.Do(func() {
-			c.svc.Stop()
 			invSvc.Stop()
 			responder.Stop()
 			srv.Stop()
 			cancel()
 			_ = invStore.Close()
-			_ = jobStore.Close()
-			_ = settings.Close()
 			_ = tokens.Close()
 		})
 	}
@@ -602,7 +521,8 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	return c
 }
 
-func (c *cp) url() string { return fmt.Sprintf("nats://127.0.0.1:%d", c.port) }
+func (c *cp) url() string  { return fmt.Sprintf("nats://127.0.0.1:%d", c.port) }
+func (c *cp) addr() string { return fmt.Sprintf("127.0.0.1:%d", c.port) }
 
 // agentTokenFile is where this controlplane mints its own agent's bus token.
 func (c *cp) agentTokenFile() string {
@@ -626,53 +546,28 @@ func (c *cp) mint(t *testing.T, id string) string {
 	return tok
 }
 
-func (c *cp) evaluations() int {
-	c.evalMu.Lock()
-	defer c.evalMu.Unlock()
-	return c.evals
-}
-
-// waitEvaluatedAfter waits for an evaluation to complete after the count n was
-// read — the positive fact behind "it looked, and did not move".
-func (c *cp) waitEvaluatedAfter(t *testing.T, n int, what string) {
-	t.Helper()
-	waitFact(t, "evaluation after "+what, &c.evaluated, func() bool { return c.evaluations() > n }, func() string { return "" })
-	c.svc.Wait()
-}
-
 func (c *cp) describeRegs() string {
 	c.regMu.Lock()
 	defer c.regMu.Unlock()
 	return fmt.Sprintf("registrations: %+v", c.regs)
 }
 
-// waitRegistered waits for THIS instance to receive a registration from id
-// whose busTls is want.
-func (c *cp) waitRegistered(t *testing.T, id string, want bool) {
+// waitRegistered waits for THIS instance to receive a registration from id.
+func (c *cp) waitRegistered(t *testing.T, id string) proto.NodeRegisteredEvt {
 	t.Helper()
-	c.waitRegisteredSince(t, 0, id, want)
-}
-
-func (c *cp) regCount() int {
-	c.regMu.Lock()
-	defer c.regMu.Unlock()
-	return len(c.regs)
-}
-
-// waitRegisteredSince is waitRegistered counting only registrations after the
-// first `since` this instance received.
-func (c *cp) waitRegisteredSince(t *testing.T, since int, id string, want bool) {
-	t.Helper()
-	waitFact(t, fmt.Sprintf("registration from %s with busTls=%t (after #%d)", id, want, since), &c.changed, func() bool {
+	var got proto.NodeRegisteredEvt
+	waitFact(t, "registration from "+id, &c.changed, func() bool {
 		c.regMu.Lock()
 		defer c.regMu.Unlock()
-		for _, ev := range c.regs[since:] {
-			if v, ok := ev.Metadata[proto.MetadataBusTLS].(bool); ev.NodeID == id && ok && v == want {
+		for _, ev := range c.regs {
+			if ev.NodeID == id {
+				got = ev
 				return true
 			}
 		}
 		return false
 	}, c.describeRegs)
+	return got
 }
 
 // waitRecorded blocks until id's registration has been written to the node
@@ -701,26 +596,8 @@ func (c *cp) lastRegistration(id string) (proto.NodeRegisteredEvt, bool) {
 }
 
 func (c *cp) registeredAtAll(id string) bool {
-	c.regMu.Lock()
-	defer c.regMu.Unlock()
-	for _, ev := range c.regs {
-		if ev.NodeID == id {
-			return true
-		}
-	}
-	return false
-}
-
-// waitSwitched waits for the switch to TLS-only to complete.
-func (c *cp) waitSwitched(t *testing.T) {
-	t.Helper()
-	select {
-	case <-c.switched:
-	case <-time.After(factDeadline):
-		st, _ := c.svc.Status(context.Background())
-		t.Fatalf("no switch to TLS-only within %s; status %+v", factDeadline, st)
-	}
-	c.svc.Wait()
+	_, ok := c.lastRegistration(id)
+	return ok
 }
 
 func otherPin(t *testing.T) string {
@@ -739,319 +616,244 @@ func skipShort(t *testing.T) {
 	}
 }
 
+// assertNoLadderMetadata fails when a registration still carries a key the
+// plaintext ladder used.
+func assertNoLadderMetadata(t *testing.T, ev proto.NodeRegisteredEvt) {
+	t.Helper()
+	for _, gone := range []string{"busTls", "httpsPinned"} {
+		if v, ok := ev.Metadata[gone]; ok {
+			t.Errorf("%s registered with %s=%v; the key is gone", ev.NodeID, gone, v)
+		}
+	}
+}
+
 // --- the scenarios -----------------------------------------------------------
 
-// With the mode pinned to offer (RASPUTIN_BUS_TLS, the escape hatch): the
-// right pin connects over TLS and says so; a wrong pin is refused by the agent
-// and never registers; no pin still connects, in plaintext, and the server
-// lists it. A pinned mode never moves, however ready things look.
-func TestFunctional_PinnedOffer(t *testing.T) {
+// TC-517-25: a controlplane that never had a seed — nothing put
+// RASPUTIN_BUS_PIN in its agent's environment — joins its own TLS-only bus
+// from the pin file the api writes beside the token (geekdojo/geekdojo-brain
+// #510). The bus refuses plaintext from its first listen.
+func TestFunctional_ControlplaneAgentPinFile(t *testing.T) {
 	skipShort(t)
-	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
-
-	startAgent(t, agentOpts{id: "n-good", url: c.url(), token: c.mint(t, "n-good"), pin: c.key.Pin()})
-	c.waitRegistered(t, "n-good", true)
-
-	bad := startAgent(t, agentOpts{id: "n-bad", url: c.url(), token: c.mint(t, "n-bad"), pin: otherPin(t)})
-	bad.waitLog(t, "the pin mismatch refusal", "does not match RASPUTIN_BUS_PIN")
-
-	startAgent(t, agentOpts{id: "n-plain", url: c.url(), token: c.mint(t, "n-plain")})
-	c.waitRegistered(t, "n-plain", false)
-
-	if c.registeredAtAll("n-bad") {
-		t.Fatal("a node with the wrong pin registered")
-	}
-	st, err := c.svc.Status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode != bustls.ModeOffer || !st.ModePinned || st.Next != "" {
-		t.Fatalf("pinned status = %+v, want offer, pinned, going nowhere", st)
-	}
-	var plainListed bool
-	for _, pc := range st.PlaintextConnections {
-		plainListed = plainListed || strings.Contains(pc.Name, "n-plain")
-		if strings.Contains(pc.Name, "n-good") {
-			t.Errorf("the TLS agent is listed as plaintext: %+v", pc)
-		}
-	}
-	if !plainListed {
-		t.Errorf("the plaintext agent is not in PlaintextConnections: %+v", st.PlaintextConnections)
-	}
-}
-
-// The whole automatic ladder, end to end, with no operator action:
-//
-//  1. offer: the controlplane (cp1) booted a build as a trial, and a
-//     self-update job is in flight; it and a compute node (n1), both enrolled
-//     before the pin existed, connect in plaintext. Nothing moves.
-//  2. commit, each half on its own: the self-update job ends while cp1's agent
-//     still reports the trial — nothing moves; the saga's mark-good lands and
-//     the next job end re-evaluates — the api moves to migrate and delivers
-//     the pin.
-//  3. both agents save the pin, re-dial over TLS and register busTls=true; the
-//     plaintext connections they closed are reported by disconnect events; a
-//     job in flight still holds require back until it ends.
-//  4. require, IN-PROCESS: job intake closes, require is recorded, the bus
-//     server is replaced by one that refuses plaintext — the same bus.Server,
-//     the same api connection, no restart — and a job submitted before and
-//     after the server swap is refused with the retryable error, not lost.
-//     Intake reopens; the same job then runs, over the new bus, to both
-//     agents, which rejoined over TLS by themselves.
-//  5. afterwards: plaintext is refused on the wire, no plaintext client is
-//     listed, a node that never got a pin is refused, both agents restarted
-//     with no pin in their environment rejoin from the pin they saved, and
-//     the switch never runs again. A later restart of the controlplane comes
-//     up in require and does not switch either.
-func TestFunctional_AutomaticLadder(t *testing.T) {
-	skipShort(t)
-	ctx := context.Background()
 	c := startCP(t, cpOpts{selfNode: "cp1"})
-	if c.mode != bustls.ModeOffer {
-		t.Fatalf("a fresh controlplane starts in %s, want offer", c.mode)
-	}
-	pin := c.key.Pin()
+	bustlstest.AssertPlaintextRefused(t, c.addr())
 
-	// 1. An uncommitted build and a self-update in flight.
-	now := time.Now().UTC()
-	selfUpdate := &jobs.Job{ID: "01SELFUPDATE", Kind: "node.update", Spec: json.RawMessage(`{"nodeId":"cp1"}`), Status: jobs.StatusQueued, CreatedAt: now}
-	if err := c.jobStore.CreateJob(ctx, selfUpdate); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.jobStore.MarkJobStarted(ctx, selfUpdate.ID, now); err != nil {
-		t.Fatal(err)
-	}
-	cpState := t.TempDir()
-	seedUncommittedMock(t, cpState)
-	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: c.agentTokenFile(), stateDir: cpState})
-	n1Token, _, err := c.tokens.MintBound(ctx, "n1", "n1", "compute")
+	got, err := os.ReadFile(c.agentPinFile())
 	if err != nil {
 		t.Fatal(err)
 	}
-	n1 := startAgent(t, agentOpts{id: "n1", url: c.url(), token: n1Token})
-	c.waitRegistered(t, "cp1", false)
-	c.waitRegistered(t, "n1", false)
-	c.svc.Wait() // the evaluations those registrations kicked
-	st, err := c.svc.Status(ctx)
+	if strings.TrimSpace(string(got)) != c.key.Pin() {
+		t.Fatalf("pin file = %q, want %q", got, c.key.Pin())
+	}
+
+	// No `pin:` — this agent was never seeded one. It must find the file.
+	a := startAgent(t, agentOpts{
+		id: "cp1", role: proto.RoleControlPlane, url: c.url(),
+		tokenFile: c.agentTokenFile(), pinFile: c.agentPinFile(),
+	})
+	a.waitLog(t, "the pin taken from the controlplane's own file", "bus pin", "source=controlplane", "pin_file="+c.agentPinFile())
+	ev := c.waitRegistered(t, "cp1")
+	assertNoLadderMetadata(t, ev)
+}
+
+// TC-517-26: a compute node seeded with the pin joins over TLS.
+func TestFunctional_ComputeJoinsOnItsSeededPin(t *testing.T) {
+	skipShort(t)
+	c := startCP(t, cpOpts{})
+	a := startAgent(t, agentOpts{id: "n1", url: c.url(), token: c.mint(t, "n1"), pin: c.key.Pin()})
+	a.waitLog(t, "the seeded pin", "bus pin", "source=env")
+	assertNoLadderMetadata(t, c.waitRegistered(t, "n1"))
+}
+
+// TC-517-27: a node migrated in place holds its pin only in the file an older
+// agent saved when the pin was delivered. It still joins, and nothing touches
+// the file.
+func TestFunctional_SavedPinFileOnlyNodeJoins(t *testing.T) {
+	skipShort(t)
+	c := startCP(t, cpOpts{})
+	stateDir := t.TempDir()
+	pinFile := filepath.Join(stateDir, "bus", "pin")
+	if err := os.MkdirAll(filepath.Dir(pinFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pinFile, []byte(c.key.Pin()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(pinFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode != bustls.ModeOffer || st.Committed == nil || *st.Committed {
-		t.Fatalf("status before commit = %+v, want offer and not committed", st)
-	}
-	if _, err := os.Stat(filepath.Join(n1.stateDir, "bus", "pin")); !os.IsNotExist(err) {
-		t.Fatalf("a pin was delivered before the build committed (stat: %v)", err)
-	}
+	beforeBytes, _ := os.ReadFile(pinFile)
 
-	// Two more jobs in flight: one whose end is the trigger after mark-good,
-	// one that holds require back.
-	var others []*jobs.Job
-	for _, id := range []string{"01TRIGGER", "01BLOCKER"} {
-		j := &jobs.Job{ID: id, Kind: "mesh.reconcile", Spec: json.RawMessage(`{}`), Status: jobs.StatusQueued, CreatedAt: now}
-		if err := c.jobStore.CreateJob(ctx, j); err != nil {
-			t.Fatal(err)
-		}
-		if err := c.jobStore.MarkJobStarted(ctx, j.ID, now); err != nil {
-			t.Fatal(err)
-		}
-		others = append(others, j)
-	}
+	a := startAgent(t, agentOpts{id: "n-migrated", url: c.url(), token: c.mint(t, "n-migrated"), stateDir: stateDir})
+	a.waitLog(t, "the saved pin", "bus pin", "source=file", "pin_file="+pinFile)
+	c.waitRegistered(t, "n-migrated")
 
-	// 2a. The self-update job ends, but the slot is still a trial.
-	n := c.evaluations()
-	c.runner.FinishDeferred(ctx, selfUpdate.ID, true, "")
-	c.waitEvaluatedAfter(t, n, "the self-update job ended")
-	if st, err = c.svc.Status(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode != bustls.ModeOffer || st.Committed == nil || *st.Committed || !strings.Contains(st.CommittedDetail, "not good") {
-		t.Fatalf("after the job ended with the slot uncommitted: %+v, want offer held back by the agent's report", st)
-	}
-
-	// 2b. mark-good on cp1's agent, as the saga does; the next job end is the
-	// event that re-decides.
-	markGood, err := json.Marshal(proto.UpdateMarkGoodCmd{})
+	after, err := os.Stat(pinFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.srv.Conn().Request(proto.UpdateMarkGoodSubject("cp1"), markGood, 10*time.Second); err != nil {
-		t.Fatalf("mark-good on cp1: %v", err)
+	afterBytes, _ := os.ReadFile(pinFile)
+	if !bytes.Equal(beforeBytes, afterBytes) || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("the saved pin file changed: %q (%s) → %q (%s)", beforeBytes, before.ModTime(), afterBytes, after.ModTime())
 	}
-	c.runner.FinishDeferred(ctx, others[0].ID, true, "")
-	blocker := others[1]
+}
 
-	// 3. Pins delivered, TLS re-dials, busTls=true everywhere.
-	c.waitRegistered(t, "cp1", true)
-	c.waitRegistered(t, "n1", true)
-	for _, a := range []*agentProc{cpAgent, n1} {
-		saved, err := os.ReadFile(filepath.Join(a.stateDir, "bus", "pin"))
-		if err != nil || strings.TrimSpace(string(saved)) != pin {
-			t.Fatalf("%s saved pin = (%q, %v), want %s", a.id, saved, err, pin)
-		}
+// TC-517-28: nothing on a node accepts a pin over the bus any more. A request
+// on the node's bus.pin lane gets no responder, while the same node answers
+// diag.ping on the same lane.
+func TestFunctional_BusPinVerbHasNoResponder(t *testing.T) {
+	skipShort(t)
+	c := startCP(t, cpOpts{})
+	startAgent(t, agentOpts{id: "n1", url: c.url(), token: c.mint(t, "n1"), pin: c.key.Pin()})
+	// The agent subscribes on a new connection before it registers, and both
+	// go out on that one connection, so its lane is live by now.
+	c.waitRegistered(t, "n1")
+	nc := c.srv.Conn()
+	if _, err := nc.Request(proto.NodeCmdSubject("n1", "diag.ping"), []byte("{}"), 10*time.Second); err != nil {
+		t.Fatalf("diag.ping on n1's lane: %v (the control: the lane must be live)", err)
 	}
-	if got, _ := c.settings.Get(ctx, bustls.SettingKey); got != string(bustls.ModeMigrate) {
-		t.Fatalf("recorded mode = %q with a job in flight, want migrate", got)
+	_, err := nc.Request(proto.NodeCmdSubject("n1", "bus.pin"), []byte(`{"pin":"`+otherPin(t)+`"}`), 10*time.Second)
+	if !errors.Is(err, nats.ErrNoResponders) {
+		t.Fatalf("bus.pin request = %v, want nats.ErrNoResponders", err)
 	}
-	if got := c.switches.Load(); got != 0 {
-		t.Fatalf("switched %d time(s) while a job was in flight", got)
-	}
+}
 
-	// 4. The last job ends: require, switched in-process, once.
-	pingOK := make(chan string, 4)
-	c.runner.Register(jobs.Workflow{Kind: "probe.ping", Steps: []jobs.WorkflowStep{{Name: "ping", Timeout: 20 * time.Second, Do: func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		for _, id := range []string{"cp1", "n1"} {
-			cmd, _ := json.Marshal(proto.DiagPingCmd{JobID: sc.JobID})
-			if _, err := sc.NATS.RequestWithContext(sc.Ctx, proto.NodeCmdSubject(id, "diag.ping"), cmd); err != nil {
-				return nil, fmt.Errorf("ping %s: %w", id, err)
+// TC-517-10: a node with no pin anywhere does not dial. It exits non-zero with
+// one FATAL entry naming the node, every source it read, and the fix — and
+// nothing ever connects to where the bus would be.
+func TestFunctional_AgentExitsWithNoPin(t *testing.T) {
+	skipShort(t)
+	l := stub(t)
+	stateDir := t.TempDir()
+	a := startAgent(t, agentOpts{id: "n-nopin", url: "nats://" + l.Addr().String(), token: "tok-never-sent", stateDir: stateDir})
+	if code := a.waitExit(t); code == 0 {
+		t.Fatal("an agent with no pin exited 0")
+	}
+	a.waitLog(t, "the FATAL entry", "level=FATAL", "refusing to dial the bus", "node_id=n-nopin",
+		"pin_file="+filepath.Join(stateDir, "bus", "pin"), "cp_pin_file=", "fix=")
+	assertNeverDialed(t, l)
+}
+
+// TC-517-11: a saved pin file that is empty or malformed, or a malformed
+// seeded pin, gives the same FATAL exit, and the token is never sent.
+func TestFunctional_AgentExitsOnAnUnusablePin(t *testing.T) {
+	skipShort(t)
+	for name, tc := range map[string]struct {
+		file     *string // saved pin file content; nil for none
+		envPin   string
+		wantText string
+	}{
+		"empty saved pin file":     {file: ptr(""), wantText: "pin_file_fault="},
+		"malformed saved pin file": {file: ptr("sha256/short\n"), wantText: "pin_file_fault="},
+		"malformed seeded pin":     {envPin: "sha256/nope", wantText: "env_pin_fault="},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := stub(t)
+			stateDir := t.TempDir()
+			if tc.file != nil {
+				p := filepath.Join(stateDir, "bus", "pin")
+				if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(*tc.file), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
-			pingOK <- id
-		}
-		return nil, nil
-	}}}})
-	api := c.srv.Conn()
-	regsBefore := c.regCount()
-	refused := map[string]error{}
-	onSwitch := func(phase string) {
-		_, refused[phase] = c.runner.Submit(ctx, "probe.ping", nil, "test")
-		if got, _ := c.settings.Get(ctx, bustls.SettingKey); got != string(bustls.ModeRequire) {
-			t.Errorf("%s the server swap the recorded mode is %q, want require", phase, got)
-		}
-		if on, _ := c.svc.Switching(); !on {
-			t.Errorf("%s the server swap Switching() = false", phase)
-		}
+			a := startAgent(t, agentOpts{id: "n-bad", url: "nats://" + l.Addr().String(), token: "tok-never-sent", pin: tc.envPin, stateDir: stateDir})
+			if code := a.waitExit(t); code == 0 {
+				t.Fatal("an agent with an unusable pin exited 0")
+			}
+			a.waitLog(t, "the FATAL entry", "level=FATAL", "refusing to dial the bus", "node_id=n-bad", tc.wantText)
+			assertNeverDialed(t, l)
+		})
 	}
-	c.onSwitch.Store(&onSwitch)
-	c.runner.FinishDeferred(ctx, blocker.ID, true, "")
-	c.waitSwitched(t)
-	for _, phase := range []string{"before", "after"} {
-		if !errors.Is(refused[phase], jobs.ErrQuiesced) {
-			t.Fatalf("Submit %s the server swap = %v, want ErrQuiesced (refused, retryable, not lost)", phase, refused[phase])
-		}
+}
+
+func ptr(s string) *string { return &s }
+
+// TC-517-34: a controlplane agent that starts before its api has written the
+// pin file exits, and once the file is there the unit's restart joins it with
+// no manual step. The harness plays the unit: it starts the agent again.
+func TestFunctional_ControlplaneAgentStartsBeforeItsPinFile(t *testing.T) {
+	skipShort(t)
+	c := startCP(t, cpOpts{selfNode: "cp1", noPinFile: true})
+	stateDir := t.TempDir()
+	opts := agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: c.agentTokenFile(), pinFile: c.agentPinFile(), stateDir: stateDir}
+	first := startAgent(t, opts)
+	if code := first.waitExit(t); code == 0 {
+		t.Fatal("the controlplane agent exited 0 with no pin file")
 	}
-	if n, err := jobs.InFlight(ctx, c.jobStore); err != nil || len(n) != 0 {
-		t.Fatalf("jobs in flight after refused submits: %q (%v)", n, err)
+	first.waitLog(t, "the FATAL entry", "level=FATAL", "refusing to dial the bus")
+	if c.registeredAtAll("cp1") {
+		t.Fatal("the controlplane agent registered with no pin")
 	}
-	if got, _ := c.settings.Get(ctx, bustls.SettingKey); got != string(bustls.ModeRequire) {
-		t.Fatalf("recorded mode = %q after the switch, want require", got)
-	}
-	if c.srv.Conn() != api || !api.IsConnected() || c.srv.AllowsPlaintext() {
-		t.Fatalf("after the switch: same conn %t, connected %t, plaintext allowed %t", c.srv.Conn() == api, api.IsConnected(), c.srv.AllowsPlaintext())
-	}
-	st, err = c.svc.Status(ctx)
-	if err != nil {
+
+	if _, err := bustls.WriteAgentPinFile(filepath.Join(c.dataDir, "bus"), c.key); err != nil { // the api's start
 		t.Fatal(err)
 	}
-	if st.Mode != bustls.ModeRequire || st.PlaintextAllowed || st.Switching || st.SwitchFailed != "" {
-		t.Fatalf("status after the switch = %+v", st)
-	}
-	// The agents rejoin the new server over TLS on their own reconnect loops.
-	c.waitRegisteredSince(t, regsBefore, "cp1", true)
-	c.waitRegisteredSince(t, regsBefore, "n1", true)
-	// The retry of the refused submit is accepted and runs over the new bus.
-	j, err := c.runner.Submit(ctx, "probe.ping", nil, "test")
-	if err != nil {
-		t.Fatalf("Submit after the switch = %v, want accepted", err)
-	}
-	for range 2 {
-		select {
-		case <-pingOK:
-		case <-time.After(factDeadline):
-			got, _ := c.jobStore.GetJob(ctx, j.ID)
-			t.Fatalf("job %s did not reach both agents over the new bus: %+v", j.ID, got)
-		}
-	}
-	c.runner.Wait()
-	if got, err := c.jobStore.GetJob(ctx, j.ID); err != nil || got.Status != jobs.StatusSucceeded {
-		t.Fatalf("job after the switch = %+v (%v), want succeeded", got, err)
-	}
+	startAgent(t, opts) // the unit's restart
+	c.waitRegistered(t, "cp1")
+}
 
-	// 5. Plaintext is refused, nobody is on it, an unpinned node is refused,
-	// and the saved pins bring the agents back from a restart of their own.
-	assertPlaintextRefused(t, c.port)
-	plain, err := c.srv.PlaintextClients()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plain) != 0 {
-		t.Fatalf("plaintext connections on a TLS-required bus: %+v", plain)
-	}
-	stray := startAgent(t, agentOpts{id: "n-unmigrated", url: c.url(), token: c.mint(t, "n-unmigrated")})
-	stray.waitLog(t, "the TLS-required refusal of an unpinned node", "NATS connect", "tls")
-	if c.registeredAtAll("n-unmigrated") {
-		t.Fatal("an unpinned node registered on a TLS-required bus")
-	}
-	stray.stop(t)
+// TC-517-33: an identity restore that changes the bus key under a running
+// controlplane agent (a controlplane that generated its own key K2, then had
+// K1 restored). The api restarts with K1 and rewrites agent.pin; the running
+// agent, pinned to K2, refuses K1 — it logs the refusal, never registers, and
+// keeps running. Restarted, it reads the rewritten file and joins on K1. The
+// fix (re-reading the file on every dial) is geekdojo/geekdojo-brain#669.
+func TestFunctional_RestoreOntoAnotherKey(t *testing.T) {
+	skipShort(t)
+	c := startCP(t, cpOpts{selfNode: "cp1"})
+	stateDir := t.TempDir()
+	opts := agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: c.agentTokenFile(), pinFile: c.agentPinFile(), stateDir: stateDir}
+	a := startAgent(t, opts)
+	a.waitLog(t, "the pin source", "bus pin", "source=controlplane", "pin_file="+c.agentPinFile())
+	c.waitRegistered(t, "cp1")
+	k2 := c.key.Pin()
 
-	cpAgent.stop(t)
-	n1.stop(t)
-	regsBefore = c.regCount()
-	startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: c.agentTokenFile(), stateDir: cpAgent.stateDir})
-	n1b := startAgent(t, agentOpts{id: "n1", url: c.url(), token: n1Token, stateDir: n1.stateDir})
-	n1b.waitLog(t, "the saved pin", "from file")
-	n1b.waitLog(t, "a pinned TLS connection", "over TLS, server key pin verified")
-	c.waitRegisteredSince(t, regsBefore, "cp1", true)
-	c.waitRegisteredSince(t, regsBefore, "n1", true)
-	if got := c.switches.Load(); got != 1 {
-		t.Fatalf("switches = %d, want exactly 1", got)
-	}
-
-	// A later restart of the controlplane (a reboot, an update) starts in
-	// require and has nothing to switch.
+	// The restore: another key, K1, into bus.key; the certificate re-minted
+	// around it on the next start.
 	c.stop()
-	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1"})
-	if c2.mode != bustls.ModeRequire || c2.key.Pin() != pin {
-		t.Fatalf("restarted controlplane: mode %s pin %s, want require and %s", c2.mode, c2.key.Pin(), pin)
-	}
-	c2.waitRegistered(t, "cp1", true)
-	c2.waitRegistered(t, "n1", true)
-	if got := c2.switches.Load(); got != 0 {
-		t.Fatalf("a controlplane started in require switched %d time(s)", got)
-	}
-}
-
-// assertPlaintextRefused dials the bus port in plaintext: the server's INFO
-// says TLS is required, and a CONNECT written anyway gets no PONG — the
-// connection is closed.
-func assertPlaintextRefused(t *testing.T, port int) {
-	t.Helper()
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
+	k1Dir := t.TempDir()
+	k1, _, err := bustls.EnsureKey(k1Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second)) // bounds this one exchange
-	r := bufio.NewReader(conn)
-	line, err := r.ReadString('\n')
-	if err != nil || !strings.HasPrefix(line, "INFO ") {
-		t.Fatalf("first line from the bus = (%q, %v), want INFO", line, err)
-	}
-	var info map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(strings.TrimSpace(line), "INFO ")), &info); err != nil {
+	k1Bytes, err := os.ReadFile(filepath.Join(k1Dir, bustls.KeyFileName))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if info["tls_required"] != true {
-		t.Fatalf("INFO tls_required = %v, want true", info["tls_required"])
-	}
-	if _, err := conn.Write([]byte("CONNECT {\"verbose\":false,\"user\":\"n1\"}\r\nPING\r\n")); err != nil {
+	busDir := filepath.Join(c.dataDir, "bus")
+	if err := os.WriteFile(filepath.Join(busDir, bustls.KeyFileName), k1Bytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				t.Fatalf("the bus neither answered nor closed a plaintext CONNECT: %v", err)
-			}
-			return
-		}
-		if strings.HasPrefix(line, "PONG") {
-			t.Fatal("a plaintext CONNECT got PONG from a TLS-required bus")
-		}
+	since := a.lineCount()
+	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1"})
+	if c2.key.Pin() != k1.Pin() || k1.Pin() == k2 {
+		t.Fatalf("the restarted controlplane serves %s, want the restored %s", c2.key.Pin(), k1.Pin())
 	}
+	if got, _ := os.ReadFile(c2.agentPinFile()); strings.TrimSpace(string(got)) != k1.Pin() {
+		t.Fatalf("agent.pin = %q after the restart, want %q", got, k1.Pin())
+	}
+
+	a.waitLogSince(t, since, "the refusal of the restored key", "refused the bus server's key", "pin="+strconv.Quote(k2), "does not match RASPUTIN_BUS_PIN")
+	if a.exited() {
+		t.Fatal("the agent exited on a key mismatch; it must keep re-dialing")
+	}
+	if c2.registeredAtAll("cp1") {
+		t.Fatal("the agent pinned to the old key registered on the restored one")
+	}
+
+	a.stop(t)
+	b := startAgent(t, opts) // what a reboot or `systemctl restart rasputin-agent` does
+	b.waitLog(t, "the rewritten pin", "bus pin", "pin="+strconv.Quote(k1.Pin()), "source=controlplane")
+	c2.waitRegistered(t, "cp1")
 }
 
-// A node's clock does not decide whether it joins: the bus certificate is not
-// yet valid, or long expired, and the pinned agent connects anyway.
+// TC-517-05 (functional): a node's clock does not decide whether it joins: the
+// bus certificate is not yet valid, or long expired, and the pinned agent
+// connects anyway.
 func TestFunctional_ClockIndependence(t *testing.T) {
 	skipShort(t)
 	dataDir := t.TempDir()
@@ -1068,10 +870,10 @@ func TestFunctional_ClockIndependence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c := startCP(t, cpOpts{dataDir: dataDir, pinMode: bustls.ModeRequire, cert: &cert})
+			c := startCP(t, cpOpts{dataDir: dataDir, cert: &cert})
 			id := "n-" + name
 			startAgent(t, agentOpts{id: id, url: c.url(), token: c.mint(t, id), pin: key.Pin()})
-			c.waitRegistered(t, id, true)
+			c.waitRegistered(t, id)
 			c.stop()
 		})
 	}
@@ -1080,25 +882,24 @@ func TestFunctional_ClockIndependence(t *testing.T) {
 // The controlplane's own agent on the bus once loopback earns no trust
 // (geekdojo-brain#140), with the REAL agent binary:
 //
-//  1. the agent starts BEFORE its api has minted the token file (an update
-//     that puts the agent up first, or a slow api): its connect attempts fail
-//     for want of a token, and it joins on its own once the file appears —
-//     no restart, no timer, just its ordinary retry reading the file again;
-//  2. an impostor agent on the same box, with no token, claiming an enrolled
-//     node's id over 127.0.0.1, is refused and never registers — nor does one
-//     claiming the controlplane's own id;
+//  1. the agent starts BEFORE its api has minted the token file: its connect
+//     attempts fail for want of a token, and it joins on its own once the
+//     file appears — no restart, no timer, just its ordinary retry reading
+//     the file again;
+//  2. an impostor agent on the same box, holding the pin but no token,
+//     claiming an enrolled node's id over 127.0.0.1, is refused and never
+//     registers — nor does one claiming the controlplane's own id;
 //  3. the token file is deleted and the controlplane restarts: it re-mints,
 //     the old token stops authenticating, and the SAME agent process rejoins
 //     with the new token.
 func TestFunctional_ControlplaneAgentToken(t *testing.T) {
 	skipShort(t)
 	ctx := context.Background()
-	// Offer, pinned: this test is about authentication, not the TLS ladder.
-	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
+	c := startCP(t, cpOpts{})
 	tokenFile := c.agentTokenFile()
 
 	// 1. No file yet (startCP minted nothing: no self node id).
-	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: tokenFile})
+	cpAgent := startAgent(t, agentOpts{id: "cp1", role: proto.RoleControlPlane, url: c.url(), tokenFile: tokenFile, pinFile: c.agentPinFile()})
 	cpAgent.waitLog(t, "a connect attempt with no token file", "no join token for this connection attempt", "does not exist yet")
 	if c.registeredAtAll("cp1") {
 		t.Fatal("the controlplane agent registered with no token")
@@ -1106,12 +907,12 @@ func TestFunctional_ControlplaneAgentToken(t *testing.T) {
 	if _, err := c.tokens.EnsureAgentToken(ctx, tokenFile, "cp1"); err != nil { // the api's start
 		t.Fatal(err)
 	}
-	c.waitRegistered(t, "cp1", false)
+	c.waitRegistered(t, "cp1")
 
-	// 2. Impostors over loopback, no token.
+	// 2. Impostors over loopback, pinned, no token.
 	c.mint(t, "n-victim") // enrolled, not running
 	for _, id := range []string{"n-victim", "cp1"} {
-		imp := startAgent(t, agentOpts{id: id, url: c.url()})
+		imp := startAgent(t, agentOpts{id: id, url: c.url(), pin: c.key.Pin()})
 		imp.waitLog(t, "the refusal of a tokenless agent claiming "+id, "NATS connect", "Authorization Violation")
 		imp.stop(t)
 	}
@@ -1129,7 +930,7 @@ func TestFunctional_ControlplaneAgentToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	since := cpAgent.lineCount()
-	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1", pinMode: bustls.ModeOffer})
+	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1"})
 	cur, err := os.ReadFile(tokenFile)
 	if err != nil {
 		t.Fatalf("the restarted controlplane did not re-mint the token file: %v", err)
@@ -1137,15 +938,10 @@ func TestFunctional_ControlplaneAgentToken(t *testing.T) {
 	if string(cur) == string(old) {
 		t.Fatal("the restarted controlplane wrote the old token back")
 	}
-	c2.waitRegistered(t, "cp1", false)
-	cpAgent.waitLogSince(t, since, "the same agent process back on the bus", "reconnected to", fmt.Sprint(c2.port))
-	if cpAgent.cmd.ProcessState != nil {
-		t.Fatal("the controlplane agent process exited")
-	}
-	select {
-	case <-cpAgent.done:
+	c2.waitRegistered(t, "cp1")
+	cpAgent.waitLogSince(t, since, "the same agent process back on the bus", "reconnected", fmt.Sprint(c2.port))
+	if cpAgent.exited() {
 		t.Fatal("the controlplane agent process ended")
-	default:
 	}
 	if ok, err := c2.tokens.Validate(ctx, strings.TrimSpace(string(old)), "cp1"); err != nil || ok {
 		t.Fatalf("the replaced token still validates: (%v, %v)", ok, err)
@@ -1157,12 +953,10 @@ func TestFunctional_ControlplaneAgentToken(t *testing.T) {
 // — completes the handshake (geekdojo/geekdojo-brain#508, #467).
 //
 // This is what a Rasputin node does NOT do: a node checks the pin and ignores
-// the chain, the name and the dates. The SAN exists for everything else, and
-// the prerequisite it unblocks is the node listener on :8443
-// (geekdojo/geekdojo-brain#513), which serves this same certificate.
+// the chain, the name and the dates. The SAN exists for everything else.
 func TestFunctional_BusServesThePersistedCertificate(t *testing.T) {
 	skipShort(t)
-	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
+	c := startCP(t, cpOpts{})
 
 	certPath := filepath.Join(c.dataDir, "bus", bustls.CertFileName)
 	pemBytes, err := os.ReadFile(certPath)
@@ -1175,9 +969,8 @@ func TestFunctional_BusServesThePersistedCertificate(t *testing.T) {
 	}
 
 	// NATS always sends its INFO line in the clear and the client upgrades
-	// after it, TLS-required bus or not (the same fact assertPlaintextRefused
-	// leans on), so the handshake is driven by hand here.
-	raw, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", c.port), 5*time.Second)
+	// after it, so the handshake is driven by hand here.
+	raw, err := net.DialTimeout("tcp", c.addr(), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1188,9 +981,7 @@ func TestFunctional_BusServesThePersistedCertificate(t *testing.T) {
 	}
 
 	// From here it is exactly a collector's tls_config: ca_pem = the file's
-	// bytes, server_name = the SAN. No pin, and no InsecureSkipVerify — this
-	// client trusts the certificate and checks the name, which is the whole
-	// reason the SAN had to exist.
+	// bytes, server_name = the SAN. No pin, and no InsecureSkipVerify.
 	conn := tls.Client(raw, &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		RootCAs:    roots,
@@ -1204,14 +995,12 @@ func TestFunctional_BusServesThePersistedCertificate(t *testing.T) {
 	if len(served) != 1 {
 		t.Fatalf("the bus served %d certificates, want 1", len(served))
 	}
-	// Byte for byte the file: a client may pin these bytes.
 	if !bytes.Equal(served[0].Raw, mustParsePEM(t, pemBytes).Raw) {
 		t.Fatal("the certificate on the wire is not the one in bus/bus.crt")
 	}
 	if got := served[0].DNSNames; len(got) != 1 || got[0] != bustls.BusDNSName {
 		t.Fatalf("the served certificate's DNSNames = %v, want [%q]", got, bustls.BusDNSName)
 	}
-	// And it still wraps the key every node pins, so the two checks agree.
 	pin, err := proto.BusPinForPublicKey(served[0].PublicKey)
 	if err != nil {
 		t.Fatal(err)
@@ -1222,12 +1011,11 @@ func TestFunctional_BusServesThePersistedCertificate(t *testing.T) {
 
 	// A node with the pin and no notion of names joins the same bus.
 	startAgent(t, agentOpts{id: "n-pinned", url: c.url(), token: c.mint(t, "n-pinned"), pin: c.key.Pin()})
-	c.waitRegistered(t, "n-pinned", true)
+	c.waitRegistered(t, "n-pinned")
 
-	// The api restarting does not change the bytes: the certificate is a file
-	// now, not something minted per start.
+	// The api restarting does not change the bytes.
 	c.stop()
-	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, pinMode: bustls.ModeOffer})
+	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port})
 	after, err := os.ReadFile(filepath.Join(c2.dataDir, "bus", bustls.CertFileName))
 	if err != nil {
 		t.Fatal(err)
@@ -1250,108 +1038,14 @@ func mustParsePEM(t *testing.T, b []byte) *x509.Certificate {
 	return leaf
 }
 
-// A controlplane that never had a seed — nothing put RASPUTIN_BUS_PIN in its
-// agent's environment, nothing was ever delivered to it — still joins a bus
-// that REQUIRES TLS, because the api writes the pin beside the token it
-// already mints (geekdojo/geekdojo-brain#510).
-//
-// This is the case that had no answer before: the agent's only route to a pin
-// was a bus.pin delivery over the plaintext bus, and a controlplane in require
-// serves no plaintext for that delivery to travel on. Its own agent was the one
-// node it could never reach.
-func TestFunctional_ControlplaneAgentPinFile(t *testing.T) {
-	skipShort(t)
-	ctx := context.Background()
-	// A fresh cluster: no node is enrolled, so the mode resolves to require
-	// and the bus refuses plaintext from its first listen.
-	c := startCP(t, cpOpts{selfNode: "cp1", facts: &bustls.StartFacts{TLSAvailable: true, AllReportedTLS: true}})
-	if c.mode != bustls.ModeRequire {
-		t.Fatalf("a fresh cluster started in %q, want require", c.mode)
-	}
-	assertPlaintextRefused(t, c.port)
-
-	// The api's start: the token, and now the pin beside it.
-	tokenFile := c.agentTokenFile()
-	if _, err := c.tokens.EnsureAgentToken(ctx, tokenFile, "cp1"); err != nil {
-		t.Fatal(err)
-	}
-	pinFile, err := bustls.WriteAgentPinFile(filepath.Join(c.dataDir, "bus"), c.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pinFile != c.agentPinFile() {
-		t.Fatalf("pin written to %q, want %q", pinFile, c.agentPinFile())
-	}
-	got, err := os.ReadFile(pinFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(got)) != c.key.Pin() {
-		t.Fatalf("pin file = %q, want %q", got, c.key.Pin())
-	}
-
-	// No `pin:` — this agent was never seeded one. It must find the file.
-	a := startAgent(t, agentOpts{
-		id: "cp1", role: proto.RoleControlPlane, url: c.url(),
-		tokenFile: tokenFile, pinFile: pinFile,
-	})
-	a.waitLog(t, "the pin taken from the controlplane's own file", "bus pin", "from controlplane")
-	// busTls=true: it handshook and verified the pin, on a bus that would have
-	// refused it any other way.
-	c.waitRegistered(t, "cp1", true)
-
-	// A node of any other role ignores the file entirely: it is passed "" and
-	// has no such path. Given no pin at all, it cannot reach this bus.
-	other := startAgent(t, agentOpts{id: "n1", url: c.url(), token: c.mint(t, "n1")})
-	other.waitLog(t, "the refusal of an unpinned node by a TLS-required bus", "NATS connect")
-	if c.registeredAtAll("n1") {
-		t.Fatal("an unpinned node registered on a bus that requires TLS")
-	}
-}
-
-// FAIL CLOSED: a node that holds a pin it cannot use does not dial the bus at
-// all. It says what is wrong and exits, rather than sending its join token in
-// the clear to whatever answered (geekdojo/geekdojo-brain#510, F09).
-func TestFunctional_AgentRefusesToDialOnAnUnusablePin(t *testing.T) {
-	skipShort(t)
-	// A bus that ACCEPTS plaintext, so nothing but the agent's own refusal can
-	// be what keeps it off: if it dialed, it would get on.
-	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
-
-	a := startAgent(t, agentOpts{id: "n-typo", url: c.url(), token: c.mint(t, "n-typo"), pin: "sha256/nope"})
-	a.waitLog(t, "the refusal to dial on an unusable pin", "REFUSING to dial the bus", "unencrypted")
-	select {
-	case <-a.done:
-	case <-time.After(factDeadline):
-		t.Fatal("the agent kept running with an unusable pin")
-	}
-	if c.registeredAtAll("n-typo") {
-		t.Fatal("an agent with an unusable pin registered")
-	}
-	// The contrast: the same node with no pin at all is a node that was never
-	// pinned, and it still joins in plaintext — that is how a fleet enrolled
-	// before the pin existed reaches a controlplane in offer.
-	startAgent(t, agentOpts{id: "n-unpinned", url: c.url(), token: c.mint(t, "n-unpinned")})
-	c.waitRegistered(t, "n-unpinned", false)
-}
-
-// THE FUNCTIONAL CHECK for the §7 4.0 cutover emitters
-// (geekdojo/geekdojo-brain#536): the REAL rasputin-agent binary, connecting
-// over the REAL bus to the REAL inventory service, reports where it read its
-// join token and whether its HTTPS clients to the api are pinned — and the api
-// records both on the node row.
-//
-// Both halves are here on purpose. A unit test can prove publishRegistered
-// puts a value in a map; only this can prove that the value the agent PUBLISHES
-// is the source it actually used, that it survives the bus and the store, and
-// that a later step reading inventory sees it. The cutovers that delete the
-// environment fallback (4.1) and the chain-verified routes (6.5) are decided
-// on exactly this round trip.
+// THE FUNCTIONAL CHECK for the §7 4.0 token-source emitter
+// (geekdojo/geekdojo-brain#536): the REAL rasputin-agent binary, over the REAL
+// bus to the REAL inventory service, reports where it read its join token, and
+// the api records it on the node row, where the cutover reads it.
 func TestFunctional_CutoverFactsReportedAndRecorded(t *testing.T) {
 	skipShort(t)
 	ctx := context.Background()
-	// Offer: this test is about what registration carries, not the ladder.
-	c := startCP(t, cpOpts{pinMode: bustls.ModeOffer})
+	c := startCP(t, cpOpts{})
 
 	// A node whose token is in a file — the canonical source (§7 4.1).
 	fileTok := c.mint(t, "n-file")
@@ -1359,21 +1053,12 @@ func TestFunctional_CutoverFactsReportedAndRecorded(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte(fileTok+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	onFile := startAgent(t, agentOpts{id: "n-file", url: c.url(), tokenFile: tokenFile})
-	defer onFile.stop(t)
+	startAgent(t, agentOpts{id: "n-file", url: c.url(), tokenFile: tokenFile, pin: c.key.Pin()})
+	// A node still carrying the seeded variable.
+	startAgent(t, agentOpts{id: "n-env", url: c.url(), token: c.mint(t, "n-env"), pin: c.key.Pin()})
 
-	// A node still carrying the seeded variable — the legacy source, which is
-	// what the cutover is waiting to see the last of.
-	envTok := c.mint(t, "n-env")
-	onEnv := startAgent(t, agentOpts{id: "n-env", url: c.url(), token: envTok})
-	defer onEnv.stop(t)
-
-	c.waitRegistered(t, "n-file", false)
-	c.waitRegistered(t, "n-env", false)
-	// The event crossing the bus and the node row being written are two
-	// different facts, and this test asserts on both — so wait for the
-	// second one rather than reading the store while the insert is in
-	// flight.
+	c.waitRegistered(t, "n-file")
+	c.waitRegistered(t, "n-env")
 	c.waitRecorded(t, "n-file")
 	c.waitRecorded(t, "n-env")
 
@@ -1384,47 +1069,23 @@ func TestFunctional_CutoverFactsReportedAndRecorded(t *testing.T) {
 		{"n-file", proto.TokenSourceFile},
 		{"n-env", proto.TokenSourceEnv},
 	} {
-		// 1. What crossed the bus.
 		ev, ok := c.lastRegistration(tc.id)
 		if !ok {
 			t.Fatalf("no registration from %s\n%s", tc.id, c.describeRegs())
 		}
-		src, reported := proto.TokenSourceOf(ev.Metadata)
-		if !reported {
-			t.Fatalf("%s did not report %s: %v", tc.id, proto.MetadataTokenSource, ev.Metadata)
+		if src, reported := proto.TokenSourceOf(ev.Metadata); !reported || src != tc.want {
+			t.Errorf("%s reported %s = (%q, %v), want %q", tc.id, proto.MetadataTokenSource, src, reported, tc.want)
 		}
-		if src != tc.want {
-			t.Errorf("%s reported %s=%q, want %q", tc.id, proto.MetadataTokenSource, src, tc.want)
-		}
-		pinned, reported := proto.HTTPSPinnedOf(ev.Metadata)
-		if !reported {
-			t.Fatalf("%s did not report %s: %v", tc.id, proto.MetadataHTTPSPinned, ev.Metadata)
-		}
-		// False today, and reported rather than omitted: the node has not
-		// moved, and "has not moved" must not look like "cannot say".
-		if pinned {
-			t.Errorf("%s reported %s=true, but nothing pins the agent's HTTPS clients yet", tc.id, proto.MetadataHTTPSPinned)
-		}
-
-		// 2. What the api recorded on the node row.
+		assertNoLadderMetadata(t, ev)
 		n, err := c.inv.Get(ctx, tc.id)
-		if err != nil {
-			t.Fatalf("inventory Get(%s): %v", tc.id, err)
+		if err != nil || n == nil {
+			t.Fatalf("inventory Get(%s) = (%v, %v)", tc.id, n, err)
 		}
-		if n == nil {
-			t.Fatalf("inventory has no row for %s", tc.id)
-		}
-		src, reported = proto.TokenSourceOf(n.Metadata)
-		if !reported || src != tc.want {
+		if src, reported := proto.TokenSourceOf(n.Metadata); !reported || src != tc.want {
 			t.Errorf("node row %s: %s = (%q, %v), want (%q, true)", tc.id, proto.MetadataTokenSource, src, reported, tc.want)
-		}
-		if _, reported = proto.HTTPSPinnedOf(n.Metadata); !reported {
-			t.Errorf("node row %s: %s was not recorded: %v", tc.id, proto.MetadataHTTPSPinned, n.Metadata)
 		}
 	}
 
-	// 3. The gate a later step reads: one node still on the variable holds the
-	// cutover, and the blocker names it.
 	nodes, err := c.inv.List(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1435,17 +1096,12 @@ func TestFunctional_CutoverFactsReportedAndRecorded(t *testing.T) {
 	}
 	var named bool
 	for _, b := range st.Blockers {
-		if strings.Contains(b, "n-env") {
-			named = true
-		}
+		named = named || strings.Contains(b, "n-env")
 		if strings.Contains(b, "n-file") {
 			t.Errorf("blocker names the migrated node: %q", b)
 		}
 	}
 	if !named {
 		t.Errorf("blockers = %v, want one naming n-env", st.Blockers)
-	}
-	if st := cutover.HTTPSPinned(nodes); st.Satisfied {
-		t.Fatalf("the https-pinned cutover read as satisfied while no node is pinned: %+v", st)
 	}
 }

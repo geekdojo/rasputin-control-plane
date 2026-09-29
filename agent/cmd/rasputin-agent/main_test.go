@@ -267,37 +267,28 @@ func registeredEvt(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertis
 // registeredEvtWithFaults is registeredEvt plus the startup config-fault set,
 // so the reporting half of #89 can be exercised on the real publish path.
 func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set) proto.NodeRegisteredEvt {
-	return registeredEvtFull(t, nc, nodeID, adv, faults, nil)
+	return registeredEvtKeys(t, nc, nodeID, adv, faults, nil)
 }
 
-// registeredEvtFull is registeredEvtWithFaults plus the bus-TLS reporter. The
-// two cutover facts (#536) are fixed here — registeredEvtCutover is the helper
-// that varies them.
-func registeredEvtFull(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool) proto.NodeRegisteredEvt {
-	return registeredEvtKeys(t, nc, nodeID, adv, faults, busTLS, nil)
-}
-
-// registeredEvtKeys is registeredEvtFull plus the node's key hashes.
-func registeredEvtKeys(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool, keys proto.NodeKeys) proto.NodeRegisteredEvt {
+// registeredEvtKeys is registeredEvtWithFaults plus the node's key hashes. The
+// token-source cutover fact (#536) is fixed here — registeredEvtCutover is the
+// helper that varies it.
+func registeredEvtKeys(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, keys proto.NodeKeys) proto.NodeRegisteredEvt {
 	t.Helper()
 	return registeredEvtFacts(t, nc, nodeID, adv, faults, registrationFacts{
 		TrustFingerprint: func() string { return "fp-test" },
-		BusTLS:           busTLS,
 		TokenSource:      proto.TokenSourceFile,
 		NodeKeys:         keys,
 	})
 }
 
-// registeredEvtCutover is registeredEvtFull with the §7 4.0 cutover facts —
-// where the join token came from, and whether this agent's HTTPS clients to
-// the api are pinned — supplied by the caller.
-func registeredEvtCutover(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, busTLS func(*nats.Conn) bool, tokenSource string, httpsPinned bool) proto.NodeRegisteredEvt {
+// registeredEvtCutover is registeredEvtWithFaults with the §7 4.0 cutover
+// fact — where the join token came from — supplied by the caller.
+func registeredEvtCutover(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, tokenSource string) proto.NodeRegisteredEvt {
 	t.Helper()
 	return registeredEvtFacts(t, nc, nodeID, adv, faults, registrationFacts{
 		TrustFingerprint: func() string { return "fp-test" },
-		BusTLS:           busTLS,
 		TokenSource:      tokenSource,
-		HTTPSPinned:      httpsPinned,
 	})
 }
 
@@ -350,52 +341,46 @@ func TestPublishRegistered_AdvertisesBMCTargets(t *testing.T) {
 	}
 }
 
-// busTls is on every registration, false included: the api holds plaintext
-// on until every node says true, and a missing key reads as an agent too old
-// to say — which is a different fix (update it) from false (deliver the pin).
-func TestPublishRegistered_ReportsBusTLS(t *testing.T) {
+// TC-517-12: a registration carries tokenSource and the node keys, and none of
+// the ladder's keys — busTls and httpsPinned are gone with the plaintext bus
+// (geekdojo/geekdojo-brain#517).
+func TestPublishRegistered_CarriesNoLadderMetadata(t *testing.T) {
 	nc := testBus(t)
-	for _, tc := range []struct {
-		name   string
-		busTLS func(*nats.Conn) bool
-		want   bool
-	}{
-		{"no reporter", nil, false},
-		{"plaintext", func(*nats.Conn) bool { return false }, false},
-		{"tls with pin verified", func(*nats.Conn) bool { return true }, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ev := registeredEvtFull(t, nc, "cp-test", nil, nil, tc.busTLS)
-			got, present := ev.Metadata[proto.MetadataBusTLS]
-			if !present {
-				t.Fatalf("metadata %s absent: %v", proto.MetadataBusTLS, ev.Metadata)
-			}
-			if got != tc.want {
-				t.Errorf("metadata %s = %v, want %v", proto.MetadataBusTLS, got, tc.want)
-			}
-		})
+	keys := proto.NodeKeys{
+		proto.NodeKeyAgent:     testKeyHash(t),
+		proto.NodeKeyCollector: testKeyHash(t),
+	}
+	ev := registeredEvtKeys(t, nc, "cp-test", nil, nil, keys)
+	for _, gone := range []string{"busTls", "httpsPinned"} {
+		if v, present := ev.Metadata[gone]; present {
+			t.Errorf("metadata %s = %v, want the key absent", gone, v)
+		}
+	}
+	if src, reported := proto.TokenSourceOf(ev.Metadata); !reported || src != proto.TokenSourceFile {
+		t.Errorf("tokenSource = (%q, %v), want (%q, true)", src, reported, proto.TokenSourceFile)
+	}
+	decoded, ok, err := proto.DecodeNodeKeys(ev.Metadata)
+	if err != nil || !ok || len(decoded) == 0 {
+		t.Fatalf("nodeKeys = (%v, %v, %v), want the node's keys", decoded, ok, err)
 	}
 }
 
-// The two §7 4.0 cutover facts ride on every registration, "env" and false
-// included. The api gates the deletion of the environment fallback and of the
-// chain-verified routes on every node reporting "file" and true, so a node
-// that has not moved yet must be able to SAY so: absent reads as an agent too
-// old to report (a different fix — update it), and that must not be
-// indistinguishable from a node that is simply still on the old path.
+// The §7 4.0 cutover fact rides on every registration, "env" included. The
+// api gates the deletion of the environment fallback on every node reporting
+// "file", so a node that has not moved yet must be able to SAY so: absent reads
+// as an agent too old to report (a different fix — update it).
 func TestPublishRegistered_ReportsCutoverFacts(t *testing.T) {
 	nc := testBus(t)
 	for _, tc := range []struct {
 		name        string
 		tokenSource string
-		httpsPinned bool
 	}{
-		{"a migrated node", proto.TokenSourceFile, true},
-		{"a node still reading the variable", proto.TokenSourceEnv, false},
-		{"a node with no token at all", proto.TokenSourceNone, false},
+		{"a migrated node", proto.TokenSourceFile},
+		{"a node still reading the variable", proto.TokenSourceEnv},
+		{"a node with no token at all", proto.TokenSourceNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ev := registeredEvtCutover(t, nc, "cp-test", nil, nil, nil, tc.tokenSource, tc.httpsPinned)
+			ev := registeredEvtCutover(t, nc, "cp-test", nil, nil, tc.tokenSource)
 			src, reported := proto.TokenSourceOf(ev.Metadata)
 			if !reported {
 				t.Fatalf("metadata %s absent or unreadable: %v", proto.MetadataTokenSource, ev.Metadata)
@@ -403,24 +388,7 @@ func TestPublishRegistered_ReportsCutoverFacts(t *testing.T) {
 			if src != tc.tokenSource {
 				t.Errorf("metadata %s = %q, want %q", proto.MetadataTokenSource, src, tc.tokenSource)
 			}
-			pinned, reported := proto.HTTPSPinnedOf(ev.Metadata)
-			if !reported {
-				t.Fatalf("metadata %s absent or unreadable: %v", proto.MetadataHTTPSPinned, ev.Metadata)
-			}
-			if pinned != tc.httpsPinned {
-				t.Errorf("metadata %s = %v, want %v", proto.MetadataHTTPSPinned, pinned, tc.httpsPinned)
-			}
 		})
-	}
-}
-
-// Nothing on this node is pinned yet, so the honest report is false. The test
-// exists so that flipping apiHTTPSPinned without the client change behind it
-// is a failing test rather than a fleet that reports a capability it does not
-// have — the cutover in §7 6.5 deletes code on the strength of this value.
-func TestAPIHTTPSPinnedIsFalseUntilTheClientsArePinned(t *testing.T) {
-	if apiHTTPSPinned() {
-		t.Error("apiHTTPSPinned() = true, but the agent's HTTPS clients to the api still build a root pool from the mesh CA")
 	}
 }
 
@@ -773,29 +741,26 @@ func TestPublishRegistered_CarriesMeshCAFingerprint(t *testing.T) {
 	}
 }
 
-// Node keys ride out ONLY on a connection this node has verified by the bus
-// pin (geekdojo/geekdojo-brain#514). On a plaintext or unverified link the
-// api refuses the report anyway, and sending it would put the node's HTTPS
-// identity on a wire it has not authenticated — so the agent does not send it.
-func TestPublishRegistered_ReportsNodeKeysOnlyOverAPinnedBus(t *testing.T) {
+// TC-517-12: node keys ride out on every registration that has them
+// (geekdojo/geekdojo-brain#514). Every connection the agent makes is TLS with
+// the server verified by the bus pin, so there is no transport condition on
+// the report; a node with no keys sends no key.
+func TestPublishRegistered_ReportsNodeKeys(t *testing.T) {
 	nc := testBus(t)
 	keys := proto.NodeKeys{
 		proto.NodeKeyAgent:     testKeyHash(t),
 		proto.NodeKeyCollector: testKeyHash(t),
 	}
 	for _, tc := range []struct {
-		name   string
-		busTLS func(*nats.Conn) bool
-		keys   proto.NodeKeys
-		want   bool
+		name string
+		keys proto.NodeKeys
+		want bool
 	}{
-		{"pinned tls", func(*nats.Conn) bool { return true }, keys, true},
-		{"plaintext", func(*nats.Conn) bool { return false }, keys, false},
-		{"no reporter", nil, keys, false},
-		{"pinned but no keys", func(*nats.Conn) bool { return true }, nil, false},
+		{"keys", keys, true},
+		{"no keys", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ev := registeredEvtKeys(t, nc, "cp-test", nil, nil, tc.busTLS, tc.keys)
+			ev := registeredEvtKeys(t, nc, "cp-test", nil, nil, tc.keys)
 			got, present := ev.Metadata[proto.MetadataNodeKeys]
 			if present != tc.want {
 				t.Fatalf("metadata %s present = %v, want %v (value %v)",

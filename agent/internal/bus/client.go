@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -47,6 +47,7 @@ type Publisher interface {
 type mdnsDialer struct {
 	resolveTimeout time.Duration
 	dialTimeout    time.Duration
+	log            *slog.Logger
 }
 
 func (d *mdnsDialer) Dial(network, address string) (net.Conn, error) {
@@ -55,7 +56,8 @@ func (d *mdnsDialer) Dial(network, address string) (net.Conn, error) {
 		if ip, rerr := mdns.Resolve(host, d.resolveTimeout); rerr == nil && ip != "" {
 			address = net.JoinHostPort(ip, port)
 		} else if rerr != nil {
-			log.Printf("agent/bus: mDNS resolve %s failed (%v); falling back to OS resolver", host, rerr)
+			d.log.Warn("agent/bus: mDNS resolve failed; using the OS resolver",
+				"host", host, "err", rerr.Error())
 		}
 	}
 	return net.DialTimeout(network, address, d.dialTimeout)
@@ -80,12 +82,16 @@ func (d *mdnsDialer) Dial(network, address string) (net.Conn, error) {
 // closed" every 10s until a human restarted them. See doc.go.
 type Client struct {
 	url, nodeID string
-	// token yields the join token for each connection attempt (SetTokenSource).
+	// token yields the join token for each connection attempt (Config.Token).
 	// It is asked on EVERY connect and reconnect, so a token file the
 	// controlplane's api re-mints reaches this client on its next attempt.
-	// Atomic, not under mu: nats.go asks for it while holding its own conn
-	// lock, and mu is held around calls into the conn elsewhere.
-	token atomic.Pointer[TokenSource]
+	token TokenSource
+	// pin is the bus key pin (proto.ParseBusPin form) every conn is dialed
+	// with, and pinDigest its parsed digest. Fixed at New: nothing on a node
+	// can change the pin a running agent trusts.
+	pin       string
+	pinDigest [sha256.Size]byte
+	log       *slog.Logger
 	// onConn runs on every NEW conn — the first Dial and each re-dial from
 	// the closed state — before onConnected. Subscriptions live on the conn,
 	// so this is where the agent (re-)registers every handler. A non-nil
@@ -96,9 +102,9 @@ type Client struct {
 	// re-dial. The agent (re-)publishes its registration here.
 	onConnected func(*nats.Conn)
 	// onLost runs whenever the current connection is lost: nats.go reports a
-	// disconnect it will reconnect from, or closes the conn for good. Set
-	// with OnLost before Dial. The agent re-verifies its cluster-DNS pin from
-	// here — on the event, rather than on a clock (see internal/clusterdns).
+	// disconnect it will reconnect from, or closes the conn for good. The
+	// agent re-verifies its cluster-DNS pin from here — on the event, rather
+	// than on a clock (see internal/clusterdns).
 	onLost func()
 
 	reconnectWait time.Duration
@@ -116,68 +122,106 @@ type Client struct {
 	conn      *nats.Conn
 	closed    bool // Close was called; never re-dial again
 	redialing bool
-	// pin is the bus key pin (proto.ParseBusPin form) every NEW conn is
-	// dialed with, "" for none; pinDigest is its parsed digest. See SetPin.
-	pin       string
-	pinDigest [sha256.Size]byte
-	// connPinned says the current conn was dialed with a pin, i.e. it can
-	// only exist at all because the TLS handshake verified the server's key.
-	connPinned bool
+	// lastRefusal is the last handshake refusal logged, so a server that
+	// keeps failing the pin the same way is one entry, not one per attempt.
+	// A successful connect or reconnect clears it.
+	lastRefusal string
 
 	// redials counts successful re-dials from the closed state.
 	redials atomic.Int64
 }
 
-// New builds a Client that is not yet connected; call Dial. url "" means
-// nats.DefaultURL. See Client for what onConn and onConnected are for.
-//
-// token is the node's bus join credential (RASPUTIN_CP_JOIN_TOKEN), used for
-// every connection; SetTokenSource replaces it with one read per attempt. It is
-// presented as NATS username=nodeID, password=token, which the api's
-// auth-callout responder validates to mint a per-node scoped JWT. It is
-// harmless to pass when the server has no auth enabled (NATS ignores creds it
-// doesn't require), so the agent always passes it; only the SERVER's
-// RASPUTIN_BUS_AUTH flag gates enforcement. Every node carries a token, the
-// controlplane's own agent included (geekdojo/geekdojo-brain#140): see
-// ResolveTokenSource.
-func New(url, nodeID, token string, onConn func(*nats.Conn) error, onConnected func(*nats.Conn)) *Client {
+// defaultReconnectWait is nats.go's own reconnect wait when Config leaves it
+// zero.
+const defaultReconnectWait = 2 * time.Second
+
+// Config is everything a Client is given. The agent's composition root
+// (cmd/rasputin-agent) builds it; the Client reaches for no collaborator of its
+// own.
+type Config struct {
+	// URL is the bus to dial; "" means nats.DefaultURL.
+	URL string
+	// NodeID is presented as the NATS username.
+	NodeID string
+	// Pin is the bus key pin (proto.ParseBusPin form). Required: the bus
+	// accepts only TLS, and the pin is the one check on the server's key
+	// (geekdojo/geekdojo-brain#517).
+	Pin string
+	// Token yields the node's bus join credential for each connection
+	// attempt. It is presented as NATS username=NodeID, password=token, which
+	// the api's auth-callout responder validates to mint a per-node scoped
+	// JWT. Every node carries a token, the controlplane's own agent included
+	// (geekdojo/geekdojo-brain#140): see ResolveTokenSource. nil presents no
+	// token, which an enforcing bus refuses.
+	Token TokenSource
+	// OnConn, OnConnected and OnLost: see the fields of Client.
+	OnConn      func(*nats.Conn) error
+	OnConnected func(*nats.Conn)
+	OnLost      func()
+	// Backoff is the re-dial schedule from the closed state; zero means
+	// DefaultBackoff.
+	Backoff Backoff
+	// ReconnectWait is nats.go's own wait between nats-level reconnect
+	// attempts; zero means 2s.
+	ReconnectWait time.Duration
+	// Log receives every entry the Client writes. Required.
+	Log *slog.Logger
+}
+
+// New builds a Client that is not yet connected; call Dial. It dials nothing.
+// It refuses a Config with no usable pin — there is no plaintext bus to fall
+// back to — and one with no logger.
+func New(cfg Config) (*Client, error) {
+	if cfg.Log == nil {
+		return nil, errors.New("agent/bus: Config.Log is required")
+	}
+	pin := strings.TrimSpace(cfg.Pin)
+	digest, err := proto.ParseBusPin(pin)
+	if err != nil {
+		return nil, fmt.Errorf("agent/bus: the bus accepts only TLS, so a bus pin is required: %w", err)
+	}
+	url := cfg.URL
 	if url == "" {
 		url = nats.DefaultURL
 	}
+	token := cfg.Token
+	if token == nil {
+		token = StaticToken("")
+	}
+	backoff := cfg.Backoff
+	if backoff == (Backoff{}) {
+		backoff = DefaultBackoff
+	}
+	reconnectWait := cfg.ReconnectWait
+	if reconnectWait == 0 {
+		reconnectWait = defaultReconnectWait
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Client{
+	return &Client{
 		url:           url,
-		nodeID:        nodeID,
-		onConn:        onConn,
-		onConnected:   onConnected,
-		reconnectWait: 2 * time.Second,
-		backoff:       DefaultBackoff,
+		nodeID:        cfg.NodeID,
+		token:         token,
+		pin:           pin,
+		pinDigest:     digest,
+		log:           cfg.Log,
+		onConn:        cfg.OnConn,
+		onConnected:   cfg.OnConnected,
+		onLost:        cfg.OnLost,
+		reconnectWait: reconnectWait,
+		backoff:       backoff,
 		ctx:           ctx,
 		cancel:        cancel,
-	}
-	c.SetTokenSource(StaticToken(token))
-	return c
-}
-
-// SetTokenSource makes every connection attempt from now on present the token
-// src returns at that moment. Call it before Dial. A source that fails for an
-// attempt makes that attempt present no token: the bus refuses it, the error
-// is logged, and the client's ordinary reconnect loop asks the source again on
-// the next attempt — nothing waits on a timer for the token to appear.
-func (c *Client) SetTokenSource(src TokenSource) {
-	if src == nil {
-		src = StaticToken("")
-	}
-	c.token.Store(&src)
+	}, nil
 }
 
 // userInfo is the nats UserInfoHandler: nats.go calls it while writing the
 // CONNECT of every connection attempt, the first and each reconnect, so the
 // token is read fresh each time.
 func (c *Client) userInfo() (string, string) {
-	tok, err := (*c.token.Load())()
+	tok, err := c.token()
 	if err != nil {
-		log.Printf("agent/bus: no join token for this connection attempt as %s: %q — the bus refuses it; the next attempt reads the token again", c.nodeID, err.Error())
+		c.log.Warn("agent/bus: no join token for this connection attempt; the bus refuses it and the next attempt reads the token again",
+			"node_id", c.nodeID, "err", err.Error())
 		return c.nodeID, ""
 	}
 	return c.nodeID, tok
@@ -189,25 +233,22 @@ func (c *Client) userInfo() (string, string) {
 // control plane it is dialing). Once Dial has succeeded the Client keeps the
 // connection alive on its own for the rest of the process.
 func (c *Client) Dial() error {
-	nc, pinned, err := c.dial()
+	nc, err := c.dial()
 	if err != nil {
 		return err
 	}
-	c.install(nc, pinned, false)
+	c.install(nc, false)
 	return nil
 }
 
 // dial connects and runs onConn. The returned conn is not yet the Client's
 // current conn — install does that — so a ClosedHandler firing on it before
 // install is ignored, and a rejected conn is closed without a re-dial.
-func (c *Client) dial() (*nats.Conn, bool, error) {
-	c.mu.Lock()
-	pin, digest := c.pin, c.pinDigest
-	c.mu.Unlock()
+func (c *Client) dial() (*nats.Conn, error) {
 	connOpts := []nats.Option{
 		nats.Name(fmt.Sprintf("rasputin-agent/%s", c.nodeID)),
 		// Resolve rasputin.local via mDNS on every (re)connect (see mdnsDialer).
-		nats.SetCustomDialer(&mdnsDialer{resolveTimeout: 2 * time.Second, dialTimeout: 5 * time.Second}),
+		nats.SetCustomDialer(&mdnsDialer{resolveTimeout: 2 * time.Second, dialTimeout: 5 * time.Second, log: c.log}),
 		// SkipHostLookup is what makes the dialer above reachable at all.
 		// Without it, createConn resolves the URL's hostname through the OS
 		// resolver BEFORE calling the dialer (nats.go v1.53.1, nats.go:2454)
@@ -247,12 +288,15 @@ func (c *Client) dial() (*nats.Conn, bool, error) {
 		nats.IgnoreAuthErrorAbort(),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			if err != nil {
-				log.Printf("agent/bus: disconnected: %v", err)
+				c.log.Warn("agent/bus: disconnected", "node_id", c.nodeID, "err", err.Error())
 			}
 			c.lost()
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
-			log.Printf("agent/bus: reconnected to %s", nc.ConnectedUrl())
+			c.mu.Lock()
+			c.lastRefusal = ""
+			c.mu.Unlock()
+			c.log.Info("agent/bus: reconnected", "node_id", c.nodeID, "url", nc.ConnectedUrl(), "transport", "tls-pinned")
 			if c.onConnected != nil {
 				c.onConnected(nc)
 			}
@@ -272,20 +316,19 @@ func (c *Client) dial() (*nats.Conn, bool, error) {
 				subject = sub.Subject
 			}
 			if errors.Is(err, nats.ErrPermissionViolation) {
-				log.Printf("rasputin-agent: bus: PERMISSIONS VIOLATION on %s: %v — "+
-					"this node's minted credential does not allow that subject. If it "+
-					"names an _INBOX subject, a reply outlived its response grant "+
-					"(see proto.BusReplyGrantTTL); otherwise the publish is outside "+
-					"rasputin.node.%s.>", subject, err, c.nodeID)
+				c.log.Error("agent/bus: permissions violation: this node's minted credential does not allow that subject",
+					"node_id", c.nodeID, "subject", subject, "err", err.Error(),
+					"fix", "an _INBOX subject means a reply outlived its response grant (see proto.BusReplyGrantTTL); "+
+						"any other subject is a publish outside rasputin.node."+c.nodeID+".>")
 				return
 			}
 			if errors.Is(err, nats.ErrAuthorization) {
-				log.Printf("rasputin-agent: bus: %v — the control plane is up but does not "+
-					"accept this node's join token (a rebuilt controlplane whose token store "+
-					"is not seeded yet looks exactly like this); the client keeps retrying", err)
+				c.log.Warn("agent/bus: the control plane does not accept this node's join token; retrying "+
+					"(a rebuilt controlplane whose token store is not seeded yet looks exactly like this)",
+					"node_id", c.nodeID, "err", err.Error())
 				return
 			}
-			log.Printf("rasputin-agent: bus: async error on %s: %v", subject, err)
+			c.log.Error("agent/bus: async error", "node_id", c.nodeID, "subject", subject, "err", err.Error())
 		}),
 	}
 	// Always present the node id as the NATS username and the join token as
@@ -296,29 +339,24 @@ func (c *Client) dial() (*nats.Conn, bool, error) {
 	// by the next reconnect. Harmless when the server has no auth — NATS
 	// ignores creds it doesn't require.
 	connOpts = append(connOpts, nats.UserInfoHandler(c.userInfo))
-	if pin != "" {
-		// nats.Secure sets Opts.Secure, so a server whose INFO offers no TLS
-		// is refused with ErrSecureConnWanted BEFORE the CONNECT carrying the
-		// join token is written: a pinned node never speaks plaintext, and a
-		// man in the middle cannot talk it down to it. The verification is
-		// the pin and nothing else — see pinnedTLSConfig.
-		connOpts = append(connOpts, nats.Secure(pinnedTLSConfig(digest)))
-	}
+	// nats.Secure sets Opts.Secure, so a server whose INFO offers no TLS is
+	// refused with ErrSecureConnWanted BEFORE the CONNECT carrying the join
+	// token is written: the agent never speaks plaintext, and a man in the
+	// middle cannot talk it down to it. The verification is the pin and
+	// nothing else — see pinnedTLSConfig.
+	connOpts = append(connOpts, nats.Secure(c.tlsConfig()))
 	connOpts = append(connOpts, c.extraOpts...)
 	nc, err := nats.Connect(c.url, connOpts...)
 	if err != nil {
-		if pin != "" {
-			return nil, false, fmt.Errorf("agent/bus: connect %s (TLS, pinned %s): %w", c.url, pin, err)
-		}
-		return nil, false, fmt.Errorf("agent/bus: connect %s: %w", c.url, err)
+		return nil, fmt.Errorf("agent/bus: connect %s (TLS, pinned %s): %w", c.url, c.pin, err)
 	}
 	if c.onConn != nil {
 		if err := c.onConn(nc); err != nil {
 			nc.Close()
-			return nil, false, fmt.Errorf("agent/bus: set up %s: %w", c.url, err)
+			return nil, fmt.Errorf("agent/bus: set up %s: %w", c.url, err)
 		}
 	}
-	return nc, pin != "", nil
+	return nc, nil
 }
 
 // errPinMismatch is what the TLS handshake fails with when the server's key is
@@ -357,24 +395,20 @@ func pinnedTLSConfig(want [sha256.Size]byte) *tls.Config {
 }
 
 // install makes nc the current conn, announces it, and runs onConnected.
-// pinned says nc was dialed with a pin. redialed says whether this is the
-// first Dial or a re-dial from the closed state — the log line and the counter
-// differ, the rest is identical.
-func (c *Client) install(nc *nats.Conn, pinned, redialed bool) {
+// redialed says whether this is the first Dial or a re-dial from the closed
+// state — the log line and the counter differ, the rest is identical.
+func (c *Client) install(nc *nats.Conn, redialed bool) {
 	c.mu.Lock()
 	c.conn = nc
-	c.connPinned = pinned
 	c.redialing = false
+	c.lastRefusal = ""
 	c.mu.Unlock()
-	transport := "PLAINTEXT (no bus pin)"
-	if pinned {
-		transport = "TLS, server key pin verified"
-	}
 	if redialed {
 		c.redials.Add(1)
-		log.Printf("agent/bus: re-dialed %s as %s over %s — new connection, handlers re-subscribed", nc.ConnectedUrl(), c.nodeID, transport)
+		c.log.Info("agent/bus: re-dialed; new connection, handlers re-subscribed",
+			"node_id", c.nodeID, "url", nc.ConnectedUrl(), "transport", "tls-pinned")
 	} else {
-		log.Printf("agent/bus: connected to %s as %s over %s", nc.ConnectedUrl(), c.nodeID, transport)
+		c.log.Info("agent/bus: connected", "node_id", c.nodeID, "url", nc.ConnectedUrl(), "transport", "tls-pinned")
 	}
 	if c.onConnected != nil {
 		c.onConnected(nc)
@@ -402,15 +436,44 @@ func (c *Client) onClosed(nc *nats.Conn) {
 	if err := nc.LastError(); err != nil {
 		reason = err.Error()
 	}
-	log.Printf("agent/bus: connection CLOSED (%s) — the nats client will not reconnect this one; re-dialing %s from scratch", reason, c.url)
+	c.log.Warn("agent/bus: connection closed for good; re-dialing from scratch",
+		"node_id", c.nodeID, "reason", reason, "url", c.url)
 	c.lost()
 	go c.redial()
 }
 
-// OnLost registers f to run each time the connection is lost — a nats-level
-// disconnect or a close — for as long as the Client is open. Call before
-// Dial; it is read without a lock from nats.go's callback goroutine.
-func (c *Client) OnLost(f func()) { c.onLost = f }
+// tlsConfig is pinnedTLSConfig for this Client's pin, with every handshake the
+// pin check refuses reported through handshakeRefused. nats.go reports no
+// error for a nats-level reconnect whose TLS handshake fails, so without this
+// a running node refused by a controlplane restored onto a different key would
+// sit off the bus with nothing in its journal saying why
+// (docs/bus-tls-contract.md).
+func (c *Client) tlsConfig() *tls.Config {
+	cfg := pinnedTLSConfig(c.pinDigest)
+	check := cfg.VerifyConnection
+	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		err := check(cs)
+		if err != nil {
+			c.handshakeRefused(err)
+		}
+		return err
+	}
+	return cfg
+}
+
+// handshakeRefused logs a handshake the pin check refused, at WARN, once per
+// distinct error until the next successful connect.
+func (c *Client) handshakeRefused(err error) {
+	msg := err.Error()
+	c.mu.Lock()
+	same := msg == c.lastRefusal
+	c.lastRefusal = msg
+	c.mu.Unlock()
+	if same {
+		return
+	}
+	c.log.Warn("agent/bus: refused the bus server's key; retrying", "node_id", c.nodeID, "url", c.url, "pin", c.pin, "err", msg)
+}
 
 // lost runs the OnLost hook unless the Client itself is closing: the agent's
 // own shutdown drains the conn through the same handlers, and that is not a
@@ -430,13 +493,14 @@ func (c *Client) lost() {
 func (c *Client) redial() {
 	defer c.wg.Done()
 	for attempt := 1; ; attempt++ {
-		nc, pinned, err := c.dial()
+		nc, err := c.dial()
 		if err == nil {
-			c.install(nc, pinned, true)
+			c.install(nc, true)
 			return
 		}
 		wait := c.backoff.Delay(attempt)
-		log.Printf("agent/bus: re-dial attempt %d failed: %v; next attempt in %s", attempt, err, wait.Round(time.Millisecond))
+		c.log.Warn("agent/bus: re-dial attempt failed",
+			"node_id", c.nodeID, "attempt", attempt, "err", err.Error(), "next", wait.Round(time.Millisecond))
 		select {
 		case <-c.ctx.Done():
 			return
@@ -471,60 +535,6 @@ func (c *Client) ConnectedAddr() string {
 		return ""
 	}
 	return nc.ConnectedAddr()
-}
-
-// SetPin sets the bus key pin every new connection is dialed with ("" for
-// none). It does not touch a connection that is already up — a delivered pin
-// (handlePin) replaces that one itself. Call before Dial.
-func (c *Client) SetPin(pin string) error {
-	pin = strings.TrimSpace(pin)
-	var digest [sha256.Size]byte
-	if pin != "" {
-		d, err := proto.ParseBusPin(pin)
-		if err != nil {
-			return err
-		}
-		digest = d
-	}
-	c.mu.Lock()
-	c.pin, c.pinDigest = pin, digest
-	c.mu.Unlock()
-	return nil
-}
-
-// Pin is the pin new connections are dialed with, "" for none.
-func (c *Client) Pin() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.pin
-}
-
-// redialUnderPin closes nc when it is still the current connection, so the
-// closed-state re-dial replaces it with one dialed under the current pin. A
-// nil or already-closed conn needs nothing: the next dial reads the pin.
-func (c *Client) redialUnderPin(nc *nats.Conn) {
-	if nc == nil || nc.IsClosed() || nc != c.Conn() {
-		return
-	}
-	log.Printf("agent/bus: bus pin is %s — closing the current connection to re-dial over TLS", c.Pin())
-	nc.Close()
-}
-
-// BusTLS reports whether nc is the Client's current connection and is TLS with
-// the server's key verified against the pin. It is what the registration
-// reports as busTls.
-func (c *Client) BusTLS(nc *nats.Conn) bool {
-	if nc == nil {
-		return false
-	}
-	c.mu.Lock()
-	pinned := nc == c.conn && c.connPinned
-	c.mu.Unlock()
-	if !pinned {
-		return false
-	}
-	_, err := nc.TLSConnectionState()
-	return err == nil
 }
 
 // Redials reports how many times the Client has re-dialed from the closed

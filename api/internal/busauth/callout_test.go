@@ -70,6 +70,10 @@ func TestResponder_Authorize(t *testing.T) {
 // TestCallout_EndToEnd brings up the real embedded server with AuthEnforce and
 // the responder, then drives a client through it: a valid-token connection
 // works and is subject-scoped; a connection with no node id is rejected.
+// TC-517-23: the callout runs over the TLS-only bus, and admission is decided
+// by the token alone — there is no hold that refuses a connection for any
+// other reason (geekdojo/geekdojo-brain#517). The takeover, revoke and
+// loopback bus tests run over the same TLS bus.
 func TestCallout_EndToEnd(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -101,6 +105,7 @@ func TestCallout_EndToEnd(t *testing.T) {
 		IssuerPublicKey: issuer.PublicKey(),
 		APIUser:         "rasputin-api",
 		APIPass:         "test-secret",
+		TLS:             busKit.Server,
 	})
 	if err != nil {
 		t.Fatalf("bus.Start: %v", err)
@@ -113,13 +118,13 @@ func TestCallout_EndToEnd(t *testing.T) {
 	}
 	t.Cleanup(resp.Stop)
 
-	url := srv.ClientURL()
+	url, _ := srv.ClientURL()
 
 	// 1. Valid token → connects, and is scoped: it can round-trip on its own
 	//    node subject but a publish to a foreign node raises a permissions
 	//    violation.
 	permErr := make(chan error, 4)
-	nc, err := nats.Connect(url,
+	nc, err := nats.Connect(url, busKit.Option,
 		nats.UserInfo("fw-1", token),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, e error) { permErr <- e }),
 	)
@@ -153,7 +158,7 @@ func TestCallout_EndToEnd(t *testing.T) {
 	}
 
 	// 2. No node id (no username) → rejected at connect.
-	bad, err := nats.Connect(url, nats.Token("whatever"), nats.MaxReconnects(0), nats.Timeout(2*time.Second))
+	bad, err := nats.Connect(url, busKit.Option, nats.Token("whatever"), nats.MaxReconnects(0), nats.Timeout(2*time.Second))
 	if err == nil {
 		bad.Close()
 		t.Fatal("connection with no node id should be rejected")
@@ -296,6 +301,7 @@ func TestReplyGrantExpires(t *testing.T) {
 		IssuerPublicKey: issuer.PublicKey(),
 		APIUser:         "rasputin-api",
 		APIPass:         "test-secret",
+		TLS:             busKit.Server,
 	})
 	if err != nil {
 		t.Fatalf("bus.Start: %v", err)
@@ -312,7 +318,8 @@ func TestReplyGrantExpires(t *testing.T) {
 	// The fake agent: connects as a node, and hands every command it receives
 	// to the test so the test controls when the reply goes out.
 	asyncErr := make(chan error, 64)
-	agent, err := nats.Connect(srv.ClientURL(),
+	agentURL, _ := srv.ClientURL()
+	agent, err := nats.Connect(agentURL, busKit.Option,
 		nats.UserInfo("fw-1", token),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, e error) {
 			select {

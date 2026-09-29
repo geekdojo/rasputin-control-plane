@@ -25,9 +25,8 @@ const BusAgentTokenPath = "/var/lib/rasputin/bus/" + BusAgentTokenFileName
 // The controlplane's own agent needs the bus PIN as well as the token, and for
 // the same reason: nobody provisions it by hand. A controlplane that
 // self-initialised (the bootstrap.sh path) has no seed, so its agent has no
-// RASPUTIN_BUS_PIN, and before this file the only way it learned the pin was a
-// bus.pin delivery over the plaintext bus — which a controlplane that starts in
-// require never gets to make (geekdojo/geekdojo-brain#510).
+// RASPUTIN_BUS_PIN, and the bus accepts only TLS, so there is no other channel
+// to learn it through (geekdojo/geekdojo-brain#510, #517).
 //
 // So the api writes its own live pin beside the token on every start, and its
 // agent falls back to that file when nothing else gave it a pin.
@@ -39,5 +38,5 @@ const BusAgentPinFileName = "agent.pin"
 
 // BusAgentPinPath is that file on an appliance, whose data dir is
 // /var/lib/rasputin. A controlplane agent that was given no pin — no
-// RASPUTIN_BUS_PIN and no delivered pin of its own — reads it from here.
+// RASPUTIN_BUS_PIN and no saved pin file of its own — reads it from here.
 const BusAgentPinPath = "/var/lib/rasputin/bus/" + BusAgentPinFileName

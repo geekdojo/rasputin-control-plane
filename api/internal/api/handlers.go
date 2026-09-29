@@ -2,11 +2,9 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -150,21 +148,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// submitRetryAfter is the Retry-After, in seconds, on a submit refused while
-// job intake is closed. The closure lasts one in-process replacement of the
-// bus server: a shutdown, a start and a local reconnect.
-const submitRetryAfter = "2"
-
-// writeSubmitError answers a refused job submit. A submit refused because job
-// intake is closed for the bus switch to TLS-only (jobs.ErrQuiesced) is 503
-// with Retry-After, whatever the endpoint: nothing was recorded, and the same
-// request succeeds once the switch is over. Any other error gets status.
+// writeSubmitError answers a refused job submit with status.
 func writeSubmitError(w http.ResponseWriter, status int, err error) {
-	if errors.Is(err, jobs.ErrQuiesced) {
-		w.Header().Set("Retry-After", submitRetryAfter)
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
 	writeError(w, status, err.Error())
 }
 

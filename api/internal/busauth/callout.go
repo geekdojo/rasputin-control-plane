@@ -3,7 +3,6 @@ package busauth
 import (
 	"context"
 	"log"
-	"sync/atomic"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -53,10 +52,6 @@ type Responder struct {
 	tokens Validator
 	sub    *nats.Subscription
 
-	// hold, when set and answering true, refuses every connection with the
-	// reason it gives (SetHold).
-	hold atomic.Pointer[HoldFunc]
-
 	// replyTTL is the lifetime stamped into every minted credential's dynamic
 	// response permission. Production is always proto.BusReplyGrantTTL; the
 	// integration test shortens it so the expiry path runs in milliseconds
@@ -85,28 +80,6 @@ func (r *Responder) Start() error {
 	return nil
 }
 
-// HoldFunc reports whether the responder should refuse every connection for
-// now, and the reason it gives the client.
-type HoldFunc func() (held bool, reason string)
-
-// SetHold makes the responder refuse every connection, the controlplane's own
-// agent's included, while hold answers true. Safe to call at any time.
-//
-// The one use: while the api replaces its embedded server to refuse plaintext
-// (bus.Server.SetAllowNonTLS), job intake is closed, and it reopens only after
-// the api's own connection is back on the new server. That connection carries
-// this responder, so a node could otherwise be admitted — and register, and
-// have a registration hook submit a job — in the moment between the two, and
-// that job would be refused with nobody to retry it. Held, the node is refused
-// and retries on its own reconnect loop, after intake has reopened.
-func (r *Responder) SetHold(hold HoldFunc) {
-	if hold == nil {
-		r.hold.Store(nil)
-		return
-	}
-	r.hold.Store(&hold)
-}
-
 func (r *Responder) Stop() {
 	if r.sub != nil {
 		_ = r.sub.Unsubscribe()
@@ -126,13 +99,6 @@ func (r *Responder) handle(m *nats.Msg) {
 	host := arc.ClientInformation.Host
 	cid := arc.ClientInformation.ID // server connection id; what a revoke closes
 
-	if hold := r.hold.Load(); hold != nil {
-		if held, why := (*hold)(); held {
-			log.Printf("busauth: hold node=%q host=%q: %s", nodeID, host, why)
-			r.respond(m, userNkey, serverID, "", why)
-			return
-		}
-	}
 	ok, reason := r.authorize(Conn{ServerID: serverID, CID: cid, Host: host}, nodeID, token)
 	if !ok {
 		log.Printf("busauth: deny node=%q host=%q: %s", nodeID, host, reason)

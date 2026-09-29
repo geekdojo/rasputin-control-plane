@@ -1,13 +1,11 @@
 package api
 
 import (
-	"errors"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 )
 
@@ -58,10 +56,6 @@ func (s *Server) submitObsJob(w http.ResponseWriter, r *http.Request, kind strin
 	job, err := s.runner.Submit(r.Context(), kind, nil, creator(r))
 	if err != nil {
 		log.Printf("api/obs: submit %s: %v", kind, err)
-		if errors.Is(err, jobs.ErrQuiesced) {
-			writeSubmitError(w, http.StatusServiceUnavailable, err)
-			return
-		}
 		writeError(w, http.StatusServiceUnavailable,
 			"observability cannot be changed on this control plane: "+err.Error())
 		return

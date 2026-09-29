@@ -16,7 +16,7 @@ import (
 const testServer = "server-1"
 
 // fakeBus is a Disconnector over a set of "open" connection ids on one running
-// server, whose id replace changes, as bus.Server.SetAllowNonTLS does.
+// server, whose id replace changes, standing in for a different server.
 type fakeBus struct {
 	mu     sync.Mutex
 	server string
@@ -417,10 +417,9 @@ func TestResponder_AdmitsTokenConnectionsByConnectionID(t *testing.T) {
 	}
 }
 
-// A connection id is unique within one server only. After the api replaces its
-// embedded server (the switch to TLS-only), a record from the old server must
-// never close the new server's connection that reuses its id — not even one an
-// auth request queued before the switch records after it.
+// A connection id is unique within one server only. A record from another
+// server must never close this server's connection that reuses its id — not
+// even one an auth request queued on the other server records late.
 func TestRevoke_ARecordFromAReplacedServerClosesNothingOnTheNewOne(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)

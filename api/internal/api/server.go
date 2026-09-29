@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -11,7 +13,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
@@ -104,9 +105,15 @@ type Server struct {
 	// SystemUpdateConfig is built from, so the plan preview excludes the
 	// controlplane exactly as the real cascade does. Empty off-appliance.
 	selfNodeID string
-	// busTLS is the bus TLS ladder and the live pin (#448); nil when the bus
-	// key did not load. Wired by main after NewServer.
-	busTLS *bustls.Service
+	// bus is the bus TLS state: the live pin, or which file failed and why
+	// (geekdojo/geekdojo-brain#517). Never nil: NewServer refuses one.
+	bus BusState
+	// log is the injected structured logger the handlers this change wrote
+	// log through (writeCodedError). Never nil.
+	log *slog.Logger
+	// newCorrelationID yields the id a coded error carries in its body and
+	// its log entry. Never nil.
+	newCorrelationID func() string
 	// collectorLeafDir holds one directory per node, <dir>/<node-id>, with the
 	// collector's client leaf (main.go's mintCollectorLeaf). Node removal
 	// deletes the node's directory; "" skips that step.
@@ -208,6 +215,11 @@ func (s *Server) SetHostLANInfo(fn func() (ip string, mac string)) {
 // want the api to run without auth (e.g. for early dev), pass a Service
 // configured with an "allow-all" middleware in a future refactor — for v0
 // auth is always on.
+//
+// bus, logger and newCorrelationID are required, and NewServer returns an
+// error rather than a Server that would fail on its first use: bus is the bus
+// TLS state (bustls.Available or bustls.Unavailable), logger the process
+// logger, and newCorrelationID the source of the id a coded error carries.
 func NewServer(
 	store *jobs.Store,
 	runner *jobs.Runner,
@@ -227,7 +239,18 @@ func NewServer(
 	obsStatus *obs.Status,
 	busTokens *busauth.Store,
 	nc *nats.Conn,
-) *Server {
+	bus BusState,
+	logger *slog.Logger,
+	newCorrelationID func() string,
+) (*Server, error) {
+	switch {
+	case bus == nil:
+		return nil, errors.New("api: NewServer: a BusState is required")
+	case logger == nil:
+		return nil, errors.New("api: NewServer: a logger is required")
+	case newCorrelationID == nil:
+		return nil, errors.New("api: NewServer: a correlation id generator is required")
+	}
 	if obsStatus == nil {
 		// Always-non-nil so handler can call Snapshot without guarding.
 		// A nil-input Status returns Enabled=false snapshots — exactly
@@ -255,7 +278,8 @@ func NewServer(
 		// caller for a process-wide constant; reading it here keeps the one
 		// source without disturbing the signature.
 		selfNodeID: os.Getenv("RASPUTIN_SELF_NODE_ID"),
-	}
+		bus:        bus, log: logger, newCorrelationID: newCorrelationID,
+	}, nil
 }
 
 // Handler returns the root http.Handler with all routes wired.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -109,7 +110,9 @@ func TestBMCConfigFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 //
 // The two directions it must never go: handing a path to a role that has no
 // such file, and handing "" to a controlplane, which would drop the source and
-// let a self-initialised controlplane fall back to dialing in the clear.
+// leave a self-initialised controlplane with no pin, so off the bus.
+//
+// TC-517-09: the controlplane file is consulted only on role controlplane.
 func TestControlplanePinFile_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -146,5 +149,23 @@ func TestControlplanePinFile_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 				t.Fatalf("controlplanePinFile(%q) = %q, want %q", tc.role, got, tc.want)
 			}
 		})
+	}
+}
+
+// The start-up entry names the file a pin came from, so a restore that changes
+// the key (docs/bus-tls-contract.md) can be traced to the file the agent read.
+func TestPinSourcePath(t *testing.T) {
+	for _, tc := range []struct{ source, want string }{
+		{"env", ""},
+		{"file", "/state/bus/pin"},
+		{"controlplane", "/var/lib/rasputin/bus/agent.pin"},
+		{"", ""},
+	} {
+		if got := pinSourcePath(tc.source, "/state/bus/pin", "/var/lib/rasputin/bus/agent.pin"); got != tc.want {
+			t.Errorf("pinSourcePath(%q) = %q, want %q", tc.source, got, tc.want)
+		}
+	}
+	if faultText(nil) != "" || faultText(errors.New("x")) != "x" {
+		t.Error("faultText")
 	}
 }

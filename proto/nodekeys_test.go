@@ -57,7 +57,7 @@ func TestDecodeNodeKeys(t *testing.T) {
 	other := testSPKIHash(t)
 
 	t.Run("absent is not an error", func(t *testing.T) {
-		keys, ok, err := DecodeNodeKeys(map[string]any{MetadataBusTLS: true})
+		keys, ok, err := DecodeNodeKeys(map[string]any{MetadataMeshCAFingerprint: "abc"})
 		if err != nil || ok || keys != nil {
 			t.Fatalf("got (%v, %v, %v), want (nil, false, nil)", keys, ok, err)
 		}
@@ -119,29 +119,6 @@ func TestDecodeNodeKeys(t *testing.T) {
 			}
 			if ok || keys != nil {
 				t.Errorf("a refused report still returned (%v, %v)", keys, ok)
-			}
-		})
-	}
-}
-
-// A key is taken only where the node proved which control plane it is
-// talking to. Absent, false, or a non-boolean all read as "not pinned".
-func TestNodeKeysAcceptable(t *testing.T) {
-	for name, tc := range map[string]struct {
-		meta map[string]any
-		want bool
-	}{
-		"pinned tls":     {map[string]any{MetadataBusTLS: true}, true},
-		"plaintext":      {map[string]any{MetadataBusTLS: false}, false},
-		"absent":         {map[string]any{}, false},
-		"not a bool":     {map[string]any{MetadataBusTLS: "true"}, false},
-		"null":           {map[string]any{MetadataBusTLS: nil}, false},
-		"nil metadata":   {nil, false},
-		"other key only": {map[string]any{MetadataMeshCAFingerprint: "abc"}, false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if got := NodeKeysAcceptable(tc.meta); got != tc.want {
-				t.Errorf("NodeKeysAcceptable(%v) = %v, want %v", tc.meta, got, tc.want)
 			}
 		})
 	}

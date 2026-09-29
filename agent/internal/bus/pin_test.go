@@ -7,8 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
-	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -18,7 +16,6 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	natsserver "github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats.go"
 )
 
 // --- pin sources -----------------------------------------------------------
@@ -41,27 +38,26 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 	return k
 }
 
+// TC-517-07: the order is env, then the saved file, then the controlplane
+// file — each alone, and in combination.
 func TestResolvePin(t *testing.T) {
 	envPin := mustPin(t, newKey(t))
 	filePin := mustPin(t, newKey(t))
 	dir := t.TempDir()
 	file := PinFilePath(dir)
 
-	// Nothing anywhere: unpinned, no fault, and plaintext is still allowed —
-	// that is how a node enrolled before the pin existed reaches the bus.
+	// Nothing anywhere: no pin, no fault, and so no dial.
 	r := ResolvePin("", file, "")
-	if r.Pin != "" || r.Source != "" || len(r.Faults()) != 0 || !r.Plaintext() {
-		t.Fatalf("empty: got %+v, want an unpinned node that may dial plaintext", r)
+	if r.Pin != "" || r.Source != "" || len(r.Faults()) != 0 {
+		t.Fatalf("empty: got %+v, want no pin and no fault", r)
 	}
-	if err := WritePinFile(file, filePin); err != nil {
-		t.Fatal(err)
-	}
+	writePin(t, file, filePin)
 	// File only.
-	if r := ResolvePin("", file, ""); r.Pin != filePin || r.Source != "file" || r.Plaintext() {
+	if r := ResolvePin("", file, ""); r.Pin != filePin || r.Source != "file" {
 		t.Fatalf("file: got %+v", r)
 	}
 	// Env wins over the file.
-	if r := ResolvePin("  "+envPin+"\n", file, ""); r.Pin != envPin || r.Source != "env" || r.Plaintext() {
+	if r := ResolvePin("  "+envPin+"\n", file, ""); r.Pin != envPin || r.Source != "env" {
 		t.Fatalf("env: got %+v", r)
 	}
 	// A bad env pin is a fault and falls through to the file.
@@ -69,8 +65,7 @@ func TestResolvePin(t *testing.T) {
 	if r.EnvErr == nil || r.FileErr != nil || r.Pin != filePin || r.Source != "file" {
 		t.Fatalf("bad env: got %+v", r)
 	}
-	// A corrupt file is a fault, leaves the node unpinned — and FAILS CLOSED:
-	// the node was pinned, so it must not fall back to plaintext.
+	// A corrupt file is a fault and gives no pin.
 	if err := os.WriteFile(file, []byte("garbage\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -78,15 +73,22 @@ func TestResolvePin(t *testing.T) {
 	if r.FileErr == nil || r.EnvErr != nil || r.Pin != "" || r.Source != "" {
 		t.Fatalf("corrupt file: got %+v", r)
 	}
-	if !r.Configured || r.Plaintext() {
-		t.Fatalf("corrupt file: got %+v, want a configured node that refuses plaintext", r)
+}
+
+// writePin puts a saved pin file where an older agent's delivery left it.
+func writePin(t *testing.T, path, pin string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(pin+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
-// A bad env pin with nothing else to fall back on leaves the node with no pin
-// AND no permission to dial: the whole point of #510's F09 fix. The same holds
-// for a pin file the node cannot read at all.
-func TestResolvePin_FailsClosedWithNoUsableSource(t *testing.T) {
+// TC-517-08: a bad env pin with nothing else to fall back on, and a pin file
+// the node cannot read, each leave the node with no pin and a fault.
+func TestResolvePin_NoPinWithNoUsableSource(t *testing.T) {
 	dir := t.TempDir()
 	file := PinFilePath(dir)
 
@@ -94,25 +96,35 @@ func TestResolvePin_FailsClosedWithNoUsableSource(t *testing.T) {
 	if r.Pin != "" || r.EnvErr == nil {
 		t.Fatalf("bad env alone: got %+v", r)
 	}
-	if !r.Configured || r.Plaintext() {
-		t.Fatalf("bad env alone: got %+v, want a configured node that refuses plaintext", r)
-	}
 
-	// A pin file that exists but cannot be read (a directory in its place is
-	// the portable way to make os.ReadFile fail) is the same answer.
+	// A directory in the pin file's place is the portable way to make
+	// os.ReadFile fail.
 	blocked := filepath.Join(dir, "blocked-pin")
 	if err := os.MkdirAll(blocked, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	r = ResolvePin("", blocked, "")
-	if r.FileErr == nil || r.Pin != "" || !r.Configured || r.Plaintext() {
-		t.Fatalf("unreadable file: got %+v, want a configured node that refuses plaintext", r)
+	if r.FileErr == nil || r.Pin != "" {
+		t.Fatalf("unreadable file: got %+v, want no pin and a fault", r)
+	}
+
+	// Mode 000 is the other unreadable shape (not for root, which reads it).
+	if os.Geteuid() != 0 {
+		locked := filepath.Join(dir, "locked-pin")
+		writePin(t, locked, mustPin(t, newKey(t)))
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		r = ResolvePin("", locked, "")
+		if r.FileErr == nil || r.Pin != "" {
+			t.Fatalf("mode-000 file: got %+v, want no pin and a fault", r)
+		}
 	}
 }
 
-// The controlplane's own agent falls back to the file the api writes beside
-// its bus key — last, after the seed and after a delivered pin, and only when
-// a path is given at all (every other role passes "").
+// TC-517-07: the controlplane's own agent falls back to the file the api
+// writes beside its bus key — last, after the seed and after a saved pin, and
+// only when a path is given at all (every other role passes "").
 func TestResolvePin_ControlplaneFile(t *testing.T) {
 	envPin := mustPin(t, newKey(t))
 	filePin := mustPin(t, newKey(t))
@@ -120,46 +132,37 @@ func TestResolvePin_ControlplaneFile(t *testing.T) {
 	dir := t.TempDir()
 	file := PinFilePath(dir)
 	cpFile := filepath.Join(dir, "agent.pin")
-	if err := os.WriteFile(cpFile, []byte(cpPin+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writePin(t, cpFile, cpPin)
 
-	if r := ResolvePin("", file, cpFile); r.Pin != cpPin || r.Source != "controlplane" || r.Plaintext() {
+	if r := ResolvePin("", file, cpFile); r.Pin != cpPin || r.Source != "controlplane" {
 		t.Fatalf("controlplane only: got %+v", r)
 	}
-	if err := WritePinFile(file, filePin); err != nil {
-		t.Fatal(err)
-	}
+	writePin(t, file, filePin)
 	if r := ResolvePin("", file, cpFile); r.Pin != filePin || r.Source != "file" {
-		t.Fatalf("a delivered pin wins over the controlplane file: got %+v", r)
+		t.Fatalf("a saved pin wins over the controlplane file: got %+v", r)
 	}
 	if r := ResolvePin(envPin, file, cpFile); r.Pin != envPin || r.Source != "env" {
 		t.Fatalf("the seed wins over both: got %+v", r)
 	}
-	// A controlplane file that is present but unusable fails closed like any
-	// other configured pin.
 	if err := os.WriteFile(cpFile, []byte("garbage\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	r := ResolvePin("", filepath.Join(dir, "absent"), cpFile)
-	if r.CPErr == nil || r.Pin != "" || !r.Configured || r.Plaintext() {
+	if r.CPErr == nil || r.Pin != "" {
 		t.Fatalf("corrupt controlplane file: got %+v", r)
 	}
-	// A missing controlplane file contributes nothing at all: an api too old
-	// to write it leaves the agent exactly as it was.
+	// Missing files contribute nothing, and no fault.
 	r = ResolvePin("", filepath.Join(dir, "absent"), filepath.Join(dir, "also-absent"))
-	if r.Configured || !r.Plaintext() || len(r.Faults()) != 0 {
-		t.Fatalf("absent files: got %+v, want an unpinned node that may dial plaintext", r)
+	if r.Pin != "" || len(r.Faults()) != 0 {
+		t.Fatalf("absent files: got %+v, want no pin and no fault", r)
 	}
 }
 
-// Every shape each of the three sources can take, alone and in front of a
-// good source (R13 in .github/security-resolvers.tsv). The CLOSED outcome for a
-// pin is: a usable pin from the highest source that has one, and otherwise —
-// if any source was configured at all — no pin AND no plaintext. A node may
-// dial plaintext in exactly one case, the one that is owed: nothing anywhere
-// was ever given a pin. There is no probe behind ResolvePin, so the gate's
-// probe-error case does not apply to it.
+// TC-517-08: every shape each of the three sources can take, alone and in
+// front of a good source (resolver R13 in .github/security-resolvers.tsv). The
+// CLOSED outcome is a usable pin from the highest source that has one, and
+// otherwise no pin — and a node with no pin does not dial. There is no probe
+// behind ResolvePin, so the gate's probe-error case does not apply to it.
 func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	good := mustPin(t, newKey(t))
 	const (
@@ -196,16 +199,15 @@ func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	envOf := map[int]string{absent: "", empty: "", blank: " \t\n", malformed: "sha256/nope", valid: good}
 
 	for _, tc := range []struct {
-		name          string
-		env, pin, cp  int
-		noCPPath      bool // a node that is not the controlplane passes ""
-		wantSource    string
-		wantPlaintext bool // only the never-pinned row
-		wantFaults    int
+		name         string
+		env, pin, cp int
+		noCPPath     bool // a node that is not the controlplane passes ""
+		wantSource   string
+		wantFaults   int
 	}{
-		{name: "never pinned anywhere", env: absent, pin: absent, cp: absent, wantPlaintext: true},
-		{name: "never pinned, not the controlplane", env: absent, pin: absent, noCPPath: true, wantPlaintext: true},
-		{name: "blank env is no env", env: blank, pin: absent, cp: absent, wantPlaintext: true},
+		{name: "never pinned anywhere", env: absent, pin: absent, cp: absent},
+		{name: "never pinned, not the controlplane", env: absent, pin: absent, noCPPath: true},
+		{name: "blank env is no env", env: blank, pin: absent, cp: absent},
 
 		{name: "empty pin file", env: absent, pin: empty, cp: absent, wantFaults: 1},
 		{name: "blank pin file", env: absent, pin: blank, cp: absent, wantFaults: 1},
@@ -237,9 +239,6 @@ func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 			}
 			r := ResolvePin(envOf[tc.env], pinPath, cpPath)
 
-			if r.Plaintext() != tc.wantPlaintext {
-				t.Fatalf("Plaintext() = %t, want %t: %+v", r.Plaintext(), tc.wantPlaintext, r)
-			}
 			if r.Source != tc.wantSource {
 				t.Fatalf("source %q, want %q: %+v", r.Source, tc.wantSource, r)
 			}
@@ -249,42 +248,10 @@ func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 			if tc.wantSource == "" && r.Pin != "" {
 				t.Fatalf("pin %q from no source: %+v", r.Pin, r)
 			}
-			if tc.wantSource == "" && !tc.wantPlaintext && !r.Configured {
-				t.Fatalf("a node with a pin source but no pin is not Configured: %+v", r)
-			}
 			if got := len(r.Faults()); got != tc.wantFaults {
 				t.Fatalf("%d faults %v, want %d", got, r.Faults(), tc.wantFaults)
 			}
 		})
-	}
-}
-
-func TestWritePinFile_RefusesAMalformedPinAndLeavesNoTemp(t *testing.T) {
-	dir := t.TempDir()
-	file := PinFilePath(dir)
-	if err := WritePinFile(file, "sha256/short"); !errors.Is(err, proto.ErrBusPinFormat) {
-		t.Fatalf("WritePinFile(bad) = %v, want ErrBusPinFormat", err)
-	}
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
-		t.Fatalf("a malformed pin was written: %v", err)
-	}
-	pin := mustPin(t, newKey(t))
-	if err := WritePinFile(file, pin); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != pin+"\n" {
-		t.Fatalf("file = %q, want %q", got, pin+"\n")
-	}
-	entries, err := os.ReadDir(filepath.Dir(file))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("pin dir holds %d entries, want only the pin file: %v", len(entries), entries)
 	}
 }
 
@@ -314,70 +281,29 @@ func alwaysValid(t *testing.T, k *ecdsa.PrivateKey) tls.Certificate {
 	return selfSigned(t, k, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 }
 
-// startTLSServer runs a user/password nats-server serving cert. allowPlain is
-// the migration window (AllowNonTLS); false is TLS-required.
-func startTLSServer(t *testing.T, cert tls.Certificate, allowPlain bool) *natsserver.Server {
+// dialWithPin dials a TLS-required bus serving cert with a Client pinned to
+// pin.
+func dialWithPin(t *testing.T, cert tls.Certificate, pin string) (*Client, *natsserver.Server, error) {
 	t.Helper()
-	s, err := natsserver.NewServer(&natsserver.Options{
-		Host: "127.0.0.1", Port: -1, Username: testNode, Password: "tok-A", NoLog: true, NoSigs: true,
-		TLSConfig:   &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}},
-		TLSTimeout:  5,
-		AllowNonTLS: allowPlain,
+	s := runServer(t, &natsserver.Options{
+		Host: "127.0.0.1", Port: -1, Username: testNode, Password: "tok-A",
+		TLSConfig:  &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}},
+		TLSTimeout: 5,
 	})
-	if err != nil {
-		t.Fatalf("nats server: %v", err)
-	}
-	go s.Start()
-	if !s.ReadyForConnections(5 * time.Second) {
-		t.Fatal("nats server not ready")
-	}
-	t.Cleanup(func() {
-		s.Shutdown()
-		s.WaitForShutdown()
-	})
-	return s
+	c := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: pin, Token: StaticToken("tok-A")})
+	t.Cleanup(c.Close)
+	return c, s, c.Dial()
 }
 
-// natsURL is the server's address as a nats:// URL. A TLS server's ClientURL
-// says tls://, and nats.go turns TLS on for that scheme by itself — which is
-// not how a node dials (seeds carry nats://), so it would hide exactly the
-// behaviour under test.
-func natsURL(t *testing.T, s *natsserver.Server) string {
-	t.Helper()
-	return "nats://" + s.Addr().String()
-}
-
-func dialWithPin(t *testing.T, url, pin string) (*testClient, error) {
-	t.Helper()
-	tc := newTestClient(t, url, "tok-A")
-	if err := tc.SetPin(pin); err != nil {
-		t.Fatalf("SetPin: %v", err)
-	}
-	return tc, tc.Dial()
-}
-
+// TC-517-04, TC-517-05: the pin decides, and nothing else does.
 func TestClient_PinnedTLS(t *testing.T) {
 	key := newKey(t)
 	pin := mustPin(t, key)
 	other := mustPin(t, newKey(t))
 
-	t.Run("right pin connects over TLS and reports it", func(t *testing.T) {
-		s := startTLSServer(t, alwaysValid(t, key), true)
-		tc, err := dialWithPin(t, natsURL(t, s), pin)
-		if err != nil {
-			t.Fatalf("Dial: %v", err)
-		}
-		if !tc.BusTLS(tc.Conn()) {
-			t.Fatal("BusTLS = false on a pinned TLS connection")
-		}
-		if _, err := tc.Conn().TLSConnectionState(); err != nil {
-			t.Fatalf("connection is not TLS: %v", err)
-		}
-	})
-
+	// TC-517-04
 	t.Run("wrong pin is refused", func(t *testing.T) {
-		s := startTLSServer(t, alwaysValid(t, key), true)
-		_, err := dialWithPin(t, natsURL(t, s), other)
+		_, s, err := dialWithPin(t, alwaysValid(t, key), other)
 		if err == nil || !strings.Contains(err.Error(), "does not match RASPUTIN_BUS_PIN") {
 			t.Fatalf("Dial with the wrong pin = %v, want the pin mismatch", err)
 		}
@@ -385,164 +311,31 @@ func TestClient_PinnedTLS(t *testing.T) {
 		waitFor(t, "the server to drop the refused connection", 5*time.Second, func() bool { return s.NumClients() == 0 })
 	})
 
-	t.Run("no pin still connects in plaintext during migration", func(t *testing.T) {
-		s := startTLSServer(t, alwaysValid(t, key), true)
-		tc := newTestClient(t, natsURL(t, s), "tok-A")
-		if err := tc.Dial(); err != nil {
+	// TC-517-04
+	t.Run("right pin connects over TLS", func(t *testing.T) {
+		c, _, err := dialWithPin(t, alwaysValid(t, key), pin)
+		if err != nil {
 			t.Fatalf("Dial: %v", err)
 		}
-		if tc.BusTLS(tc.Conn()) {
-			t.Fatal("BusTLS = true on a plaintext connection")
-		}
-		if _, err := tc.Conn().TLSConnectionState(); !errors.Is(err, nats.ErrConnectionNotTLS) {
-			t.Fatalf("TLSConnectionState = %v, want ErrConnectionNotTLS", err)
+		if _, err := c.Conn().TLSConnectionState(); err != nil {
+			t.Fatalf("connection is not TLS: %v", err)
 		}
 	})
 
-	t.Run("TLS-required refuses a client with no pin", func(t *testing.T) {
-		s := startTLSServer(t, alwaysValid(t, key), false)
-		tc := newTestClient(t, natsURL(t, s), "tok-A")
-		// nats.go upgrades to TLS on its own when the server requires it, and
-		// then verifies against the system roots — which the self-signed bus
-		// certificate is not in. Refused either way, and before CONNECT.
-		if err := tc.Dial(); err == nil {
-			t.Fatal("an unpinned client connected to a TLS-required bus")
-		}
-	})
-
-	t.Run("a pinned client refuses a server that offers no TLS", func(t *testing.T) {
-		s := startServer(t, -1, testNode, "tok-A") // plaintext only: an old, or a man-in-the-middle, server
-		_, err := dialWithPin(t, natsURL(t, s), pin)
-		if !errors.Is(err, nats.ErrSecureConnWanted) {
-			t.Fatalf("Dial = %v, want nats.ErrSecureConnWanted (no CONNECT, so no token, over plaintext)", err)
-		}
-	})
-
-	// Clock independence (#448 "a node that boots with a wrong clock still
-	// joins the bus"): the check is the key, never the dates.
+	// TC-517-05: clock independence (#448 "a node that boots with a wrong
+	// clock still joins the bus"): the check is the key, never the dates.
 	for name, cert := range map[string]tls.Certificate{
 		"certificate not valid until 2099": selfSigned(t, key, time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)),
-		"certificate expired in 1999":      selfSigned(t, key, time.Date(1990, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)),
+		"certificate expired in 1991":      selfSigned(t, key, time.Date(1990, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(1991, 1, 1, 0, 0, 0, 0, time.UTC)),
 	} {
 		t.Run(name, func(t *testing.T) {
-			s := startTLSServer(t, cert, false)
-			tc, err := dialWithPin(t, natsURL(t, s), pin)
+			c, _, err := dialWithPin(t, cert, pin)
 			if err != nil {
 				t.Fatalf("Dial: %v", err)
 			}
-			if !tc.BusTLS(tc.Conn()) {
-				t.Fatal("BusTLS = false")
+			if _, err := c.Conn().TLSConnectionState(); err != nil {
+				t.Fatalf("connection is not TLS: %v", err)
 			}
 		})
-	}
-}
-
-// --- delivery --------------------------------------------------------------
-
-// requestPin delivers a pin to the node's bus.pin handler from a separate
-// probe connection. It flushes the Client's own connection first for the same
-// reason ping does (see ping in client_test.go): nats.go buffers SUB and
-// writes it from another goroutine, so a probe on a second connection can
-// reach the server before the handler's subscription does and be answered
-// "no responders".
-func requestPin(t *testing.T, c connHolder, s *natsserver.Server, pin string) proto.BusPinAck {
-	t.Helper()
-	nc := c.Conn()
-	if nc == nil {
-		t.Fatal("the Client has no connection: nothing could be subscribed")
-	}
-	if err := nc.Flush(); err != nil {
-		t.Fatalf("flush the agent's connection: %v (its subscriptions never reached the server)", err)
-	}
-	probe, err := nats.Connect(natsURL(t, s), nats.UserInfo(testNode, "tok-A"), nats.Secure(&tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true, // test probe on loopback; the pin check under test is the agent's
-	}))
-	if err != nil {
-		t.Fatalf("probe connect: %v", err)
-	}
-	defer probe.Close()
-	payload, err := json.Marshal(proto.BusPinCmd{Pin: pin})
-	if err != nil {
-		t.Fatal(err)
-	}
-	msg, err := probe.Request(proto.NodeCmdSubject(testNode, proto.BusPinVerb), payload, 5*time.Second)
-	if err != nil {
-		t.Fatalf("request bus.pin: %v", err)
-	}
-	var ack proto.BusPinAck
-	if err := json.Unmarshal(msg.Data, &ack); err != nil {
-		t.Fatal(err)
-	}
-	return ack
-}
-
-// A plaintext node handed the pin saves it, answers, and comes back on a new
-// connection over TLS — onConn and onConnected re-run, so the registration
-// that follows can say busTls=true.
-func TestClient_PinDeliveryReconnectsOverTLS(t *testing.T) {
-	key := newKey(t)
-	pin := mustPin(t, key)
-	s := startTLSServer(t, alwaysValid(t, key), true)
-	stateDir := t.TempDir()
-	pinFile := PinFilePath(stateDir)
-
-	tc := &testClient{}
-	var sub func(*nats.Conn) error
-	tc.Client = New(natsURL(t, s), testNode, "tok-A",
-		func(nc *nats.Conn) error {
-			tc.conns.Add(1)
-			return sub(nc)
-		},
-		func(*nats.Conn) { tc.connected.Add(1) },
-	)
-	sub = tc.PinSubscriber(testNode, pinFile)
-	tc.reconnectWait = 50 * time.Millisecond
-	tc.backoff = Backoff{Min: 50 * time.Millisecond, Max: 200 * time.Millisecond}
-	t.Cleanup(tc.Close)
-	if err := tc.Dial(); err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	first := tc.Conn()
-	if tc.BusTLS(first) {
-		t.Fatal("started on TLS without a pin")
-	}
-
-	ack := requestPin(t, tc, s, "sha256/garbage")
-	if ack.OK {
-		t.Fatalf("a malformed pin was accepted: %+v", ack)
-	}
-
-	ack = requestPin(t, tc, s, pin)
-	if !ack.OK || !ack.Reconnecting || ack.Pin != pin || ack.NodeID != testNode {
-		t.Fatalf("ack = %+v, want OK, reconnecting, pin %s", ack, pin)
-	}
-	if got, err := ReadPinFile(pinFile); err != nil || got != pin {
-		t.Fatalf("pin file = (%q, %v), want %q — the pin must be persisted before the ack", got, err, pin)
-	}
-	waitFor(t, "the Client to re-dial over TLS", 10*time.Second, func() bool {
-		nc := tc.Conn()
-		return nc != first && nc.IsConnected() && tc.BusTLS(nc)
-	})
-	if got := tc.conns.Load(); got != 2 {
-		t.Errorf("onConn calls = %d, want 2 (the TLS conn re-subscribes)", got)
-	}
-
-	// Same pin again: acknowledged, nothing replaced.
-	cur := tc.Conn()
-	ack = requestPin(t, tc, s, pin)
-	if !ack.OK || ack.Reconnecting {
-		t.Fatalf("repeat delivery ack = %+v, want OK without reconnecting", ack)
-	}
-	// A different pin: key rotation, refused, and the node keeps its pin.
-	ack = requestPin(t, tc, s, mustPin(t, newKey(t)))
-	if ack.OK || ack.Pin != pin {
-		t.Fatalf("rotation ack = %+v, want a refusal naming the held pin", ack)
-	}
-	if tc.Conn() != cur || !tc.BusTLS(cur) {
-		t.Fatal("a refused or repeated delivery replaced the TLS connection")
-	}
-	if got, _ := ReadPinFile(pinFile); got != pin {
-		t.Fatalf("pin file changed to %q after a refused rotation", got)
 	}
 }

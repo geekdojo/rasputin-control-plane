@@ -17,10 +17,15 @@ import (
 	"unicode"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls/bustlstest"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 )
+
+// busKit is the one bus identity this package's tests serve and trust: the
+// bus accepts only TLS (geekdojo/geekdojo-brain#517).
+var busKit = bustlstest.MustNew()
 
 // enforcedBus is the embedded server with AuthEnforce on and the real callout
 // responder, bound to host, wired as main.go wires it (sessions tracked).
@@ -66,6 +71,7 @@ func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) 
 		IssuerPublicKey: issuer.PublicKey(),
 		APIUser:         "rasputin-api",
 		APIPass:         "test-secret",
+		TLS:             busKit.Server,
 	})
 	if err != nil {
 		t.Fatalf("bus.Start(host=%s): %v", host, err)
@@ -82,11 +88,13 @@ func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) 
 	}
 	t.Cleanup(resp.Stop)
 
-	return &enforcedBus{srv: srv, tokens: tokens, reg: reg, resp: resp, url: srv.ClientURL()}
+	url, _ := srv.ClientURL()
+	return &enforcedBus{srv: srv, tokens: tokens, reg: reg, resp: resp, url: url}
 }
 
 func connect(url, username, token string, opts ...nats.Option) (*nats.Conn, error) {
 	all := append([]nats.Option{
+		busKit.Option,
 		nats.UserInfo(username, token), // token "" = tokenless
 		nats.MaxReconnects(0),
 		nats.Timeout(3 * time.Second),

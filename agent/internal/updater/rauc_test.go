@@ -1,6 +1,8 @@
 package updater
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,5 +100,120 @@ RAUC_SLOT_STATE_1='booted'
 	if active != proto.SlotA {
 		t.Errorf("ActiveSlot = %q, want RAUC's answer kept — degrading to unknown here would itself "+
 			"trip conjunct (b) and manufacture a rollback", active)
+	}
+}
+
+// realPiCP1Status is verbatim `rauc status --output-format=shell` stdout from
+// the e12bench controlplane cp-1 (Raspberry Pi 5, rauc 1.13, image
+// 2026.09.4-dev.222, captured 2026-09-16) after its self-update committed:
+// booted from B (rootfs.1, /proc/cmdline rauc.slot=B), primary rootfs.1, both
+// slots good, no rauc-trial.pending marker. The Pi slot devices are
+// by-partuuid paths, so the device says nothing about which slot is which: the
+// slot names come only from RAUC_SYSTEM_SLOTS. It is the only verbatim
+// capture from a Pi 5 on rauc 1.13 in the tree.
+const realPiCP1Status = `RAUC_SYSTEM_COMPATIBLE='rasputin-rpi-arm64'
+RAUC_SYSTEM_VARIANT='(null)'
+RAUC_SYSTEM_BOOTED_BOOTNAME='B'
+RAUC_BOOT_PRIMARY='rootfs.1'
+RAUC_SYSTEM_SLOTS='rootfs.1 rootfs.0'
+RAUC_SLOTS='1 2'
+RAUC_SLOT_STATE_1='booted'
+RAUC_SLOT_CLASS_1='rootfs'
+RAUC_SLOT_DEVICE_1='/dev/disk/by-partuuid/52415350-06'
+RAUC_SLOT_TYPE_1='raw'
+RAUC_SLOT_BOOTNAME_1='B'
+RAUC_SLOT_PARENT_1=''
+RAUC_SLOT_MOUNTPOINT_1=''
+RAUC_SLOT_BOOT_STATUS_1='good'
+RAUC_SLOT_STATE_2='inactive'
+RAUC_SLOT_CLASS_2='rootfs'
+RAUC_SLOT_DEVICE_2='/dev/disk/by-partuuid/52415350-05'
+RAUC_SLOT_TYPE_2='raw'
+RAUC_SLOT_BOOTNAME_2='A'
+RAUC_SLOT_PARENT_2=''
+RAUC_SLOT_MOUNTPOINT_2=''
+RAUC_SLOT_BOOT_STATUS_2='good'
+RAUC_REPOS=''
+`
+
+// realPiCP1Cmdline is cp-1's /proc/cmdline from the same capture.
+const realPiCP1Cmdline = "reboot=w coherent_pool=1M 8250.nr_uarts=1 pci=pcie_bus_safe snd_bcm2835.enable_compat_alsa=0 snd_bcm2835.enable_hdmi=1 bcm2708_fb.fbwidth=1920 bcm2708_fb.fbheight=1080 bcm2708_fb.fbdepth=16 bcm2708_fb.fbswap=1 smsc95xx.macaddr=98:FE:54:02:A1:A0 vc_mem.mem_base=0x3fc00000 vc_mem.mem_size=0x40000000  root=PARTUUID=52415350-06 rootfstype=squashfs ro rootwait rauc.slot=B audit=0 cgroup_enable=memory cgroup_memory=1 console=ttyS0,115200 console=tty1\n"
+
+// realPiComputeStatus is the same capture from e12bench cp-compute1 (Raspberry
+// Pi, rauc 1.13, image 2026.09.2-dev.216, 2026-09-16): booted from A
+// (rootfs.0, rauc.slot=A), primary rootfs.0, both slots good, no marker. The
+// second sample: the other slot booted, the same index→name order.
+const realPiComputeStatus = `RAUC_SYSTEM_COMPATIBLE='rasputin-rpi-arm64'
+RAUC_SYSTEM_VARIANT='(null)'
+RAUC_SYSTEM_BOOTED_BOOTNAME='A'
+RAUC_BOOT_PRIMARY='rootfs.0'
+RAUC_SYSTEM_SLOTS='rootfs.1 rootfs.0'
+RAUC_SLOTS='1 2'
+RAUC_SLOT_STATE_1='inactive'
+RAUC_SLOT_CLASS_1='rootfs'
+RAUC_SLOT_DEVICE_1='/dev/disk/by-partuuid/52415350-06'
+RAUC_SLOT_TYPE_1='raw'
+RAUC_SLOT_BOOTNAME_1='B'
+RAUC_SLOT_PARENT_1=''
+RAUC_SLOT_MOUNTPOINT_1=''
+RAUC_SLOT_BOOT_STATUS_1='good'
+RAUC_SLOT_STATE_2='booted'
+RAUC_SLOT_CLASS_2='rootfs'
+RAUC_SLOT_DEVICE_2='/dev/disk/by-partuuid/52415350-05'
+RAUC_SLOT_TYPE_2='raw'
+RAUC_SLOT_BOOTNAME_2='A'
+RAUC_SLOT_PARENT_2=''
+RAUC_SLOT_MOUNTPOINT_2=''
+RAUC_SLOT_BOOT_STATUS_2='good'
+RAUC_REPOS=''
+`
+
+// TC-517-43: the agent's whole precheck path on the Pi controlplane, against a
+// fake rauc that prints cp-1's real capture and cp-1's real /proc/cmdline: the
+// ack says B is active and A inactive, and carries no bootCommitted key — that
+// fact existed only for the bus TLS ladder (geekdojo/geekdojo-brain#517).
+func TestRAUCPrecheck_PiControlplaneSlots(t *testing.T) {
+	if runtimeIsWindows() {
+		t.Skip("fake-rauc shim is /bin/sh; skipped on Windows")
+	}
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "status.txt")
+	if err := os.WriteFile(capture, []byte(realPiCP1Status), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(dir, "rauc")
+	if err := writeFile755(shim, "#!/bin/sh\ncat '"+capture+"'\n"); err != nil {
+		t.Fatal(err)
+	}
+	cmdline := filepath.Join(dir, "cmdline")
+	if err := os.WriteFile(cmdline, []byte(realPiCP1Cmdline), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := newRAUCBackend(t.TempDir(), shim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.procCmdline = cmdline
+
+	ack, err := b.Precheck(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.OK || ack.ActiveSlot != proto.SlotB || ack.InactiveSlot != proto.SlotA {
+		t.Fatalf("ack = %+v, want OK on B with A inactive", ack)
+	}
+	raw, err := json.Marshal(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys map[string]any
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"bootCommitted", "bootCommittedDetail"} {
+		if _, ok := keys[k]; ok {
+			t.Errorf("the precheck ack still carries %q: %s", k, raw)
+		}
 	}
 }

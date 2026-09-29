@@ -128,9 +128,15 @@ func (a admitRecorder) Admit(ctx context.Context, conn Conn, plaintext, presente
 type clientEvent struct {
 	kind string // "error", "disconnected" or "reconnected"
 	err  error
+	// cid is the server-assigned id of the connection the client is on after
+	// a reconnect, read inside the reconnect handler (GetClientID). Set only
+	// on "reconnected".
+	cid uint64
+	// at is when the callback ran.
+	at time.Time
 }
 
-// TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates proves the
+// TC-517-24 (F-517-04): TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates proves the
 // behaviour, against the real embedded nats-server with enforced auth and the
 // real callout responder: when a callout-minted user JWT expires, the SERVER
 // closes the connection and tells the client its authentication expired, and
@@ -140,9 +146,25 @@ type clientEvent struct {
 // too.
 //
 // The lifetime is injected at 2s (production's 24h is asserted above). There
-// are no sleeps: every step waits on an event — the server's own disconnect
-// advisory, the client's callbacks, the callout's admission — each bounded by
-// a hard deadline that fails naming what never happened.
+// are no sleeps: every step waits on an event — the client's callbacks and the
+// callout's admission — each bounded by a hard deadline that fails naming what
+// never happened.
+//
+// # Why the client's own events prove the SERVER closed the connection
+//
+// nats-server ends an expired credential's session in one place:
+// client.authExpired sends "-ERR 'User Authentication Expired'" and then closes
+// the connection (nats-server v2.14.6 server/client.go:2500-2503). The client
+// receives that error as nats.ErrAuthExpired. Under IgnoreAuthErrorAbort — set
+// below, as the agent sets it — nats.go does not close the connection itself on
+// an auth error: processAuthError answers "do not abort" (nats.go v1.53.1
+// nats.go:4077-4091), so processErr takes the reconnect path rather than
+// nc.close (nats.go:4327, 4336). The "disconnected" the client then observes
+// is therefore the server's close, not its own. The id of the connection that
+// expired is the one the client was on: it is read in the connect and
+// reconnect handlers only (GetClientID in an error callback can already return
+// the next connection's id), carried in event order, and must equal the
+// connection the callout admitted.
 //
 // # The lower bound on when the server closed
 //
@@ -150,8 +172,9 @@ type clientEvent struct {
 // Expires = floor(mint + TTL); the server, on accepting the credential at s,
 // arms a timer for Expires - floor(s) seconds. Since s >= mint, the timer fires
 // more than TTL - 1s after the mint, and the admission is recorded before the
-// mint. So a close observed less than TTL - 1s after the admission was not the
-// expiry, whatever the client was told.
+// mint. So an expiry the client observed less than TTL - 1s after the
+// admission was not the expiry, whatever it was told; observing it later than
+// the server sent it only makes the interval longer.
 func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T) {
 	const (
 		injectedTTL = 2 * time.Second
@@ -172,18 +195,9 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 		t.Fatalf("MintBound: %v", err)
 	}
 
-	serverClosed := make(chan uint64, 64)
-	if err := eb.srv.OnClientDisconnect(func(cid uint64) {
-		select {
-		case serverClosed <- cid:
-		default: // never block the api's connection; a dropped close fails the wait for it
-		}
-	}); err != nil {
-		t.Fatalf("OnClientDisconnect: %v", err)
-	}
-
 	events := make(chan clientEvent, 64)
 	push := func(e clientEvent) {
+		e.at = time.Now()
 		select {
 		case events <- e:
 		default: // never block the client's dispatcher; a dropped event fails the wait for it
@@ -192,7 +206,7 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 	// Configured as the agent configures its own connection
 	// (agent/internal/bus/client.go): reconnect forever, including through
 	// auth errors.
-	nc, err := nats.Connect(eb.url,
+	nc, err := nats.Connect(eb.url, busKit.Option,
 		nats.Name("rasputin-agent/"+node),
 		nats.UserInfo(node, token),
 		nats.MaxReconnects(-1),
@@ -204,14 +218,21 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			push(clientEvent{kind: "disconnected", err: err})
 		}),
-		nats.ReconnectHandler(func(*nats.Conn) {
-			push(clientEvent{kind: "reconnected"})
+		nats.ReconnectHandler(func(c *nats.Conn) {
+			cid, _ := c.GetClientID() // 0 when unknown, which matches no admission
+			push(clientEvent{kind: "reconnected", cid: cid})
 		}),
 	)
 	if err != nil {
 		t.Fatalf("node connect: %v", err)
 	}
 	t.Cleanup(nc.Close)
+	// The connection the client is on, read at connect and, from the event
+	// stream, at every reconnect.
+	current, err := nc.GetClientID()
+	if err != nil {
+		t.Fatalf("client id at connect: %v", err)
+	}
 
 	nextAdmission := func(what string) admission {
 		t.Helper()
@@ -241,31 +262,26 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 	}
 
 	admitted := nextAdmission("initial connect")
+	if current != admitted.cid {
+		t.Fatalf("the client is on connection %d, the callout admitted %d", current, admitted.cid)
+	}
 	for cycle := 1; cycle <= cycles; cycle++ {
-		// 1. The server closes the connection it authenticated, by itself.
-		deadline := time.After(waitLimit)
-	closed:
-		for {
-			select {
-			case cid := <-serverClosed:
-				if cid == admitted.cid {
-					break closed
-				}
-				t.Logf("cycle %d: server closed unrelated connection %d", cycle, cid)
-			case <-deadline:
-				t.Fatalf("cycle %d: server did not close connection %d within %s of its admission: "+
-					"an expired callout-minted user JWT does not end the session", cycle, admitted.cid, waitLimit)
-			}
+		// 1. The server tells the client its credential expired, on the
+		//    connection the callout admitted, and not before it could have.
+		e := nextClientEvent("error", "cycle expiry reason")
+		if !errors.Is(e.err, nats.ErrAuthExpired) {
+			t.Fatalf("cycle %d: client was told %v, want %v", cycle, e.err, nats.ErrAuthExpired)
 		}
-		if lived := time.Since(admitted.at); lived <= injectedTTL-time.Second {
-			t.Fatalf("cycle %d: server closed connection %d %s after admission, before its %s JWT could have expired",
+		if current != admitted.cid {
+			t.Fatalf("cycle %d: the expiry arrived on connection %d, the callout admitted %d", cycle, current, admitted.cid)
+		}
+		if lived := e.at.Sub(admitted.at); lived <= injectedTTL-time.Second {
+			t.Fatalf("cycle %d: connection %d expired %s after admission, before its %s JWT could have expired",
 				cycle, admitted.cid, lived, injectedTTL)
 		}
 
-		// 2. It told the client why: the credential expired, nothing else.
-		if e := nextClientEvent("error", "cycle expiry reason"); !errors.Is(e.err, nats.ErrAuthExpired) {
-			t.Fatalf("cycle %d: client was told %v, want %v", cycle, e.err, nats.ErrAuthExpired)
-		}
+		// 2. The server closed it: under IgnoreAuthErrorAbort the client does
+		//    not close itself on an auth error (see the doc comment).
 		nextClientEvent("disconnected", "client observing the expiry disconnect")
 
 		// 3. Getting back on means authenticating through the callout again:
@@ -274,7 +290,11 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 		if next.cid == admitted.cid {
 			t.Fatalf("cycle %d: reconnect admitted under the expired connection's id %d", cycle, next.cid)
 		}
-		nextClientEvent("reconnected", "client reconnecting after expiry")
+		back := nextClientEvent("reconnected", "client reconnecting after expiry")
+		if back.cid != next.cid {
+			t.Fatalf("cycle %d: the client reconnected as %d, the callout admitted %d", cycle, back.cid, next.cid)
+		}
+		current = back.cid
 		t.Logf("cycle %d: connection %d expired and closed by the server; reconnect re-authenticated as %d",
 			cycle, admitted.cid, next.cid)
 		admitted = next
