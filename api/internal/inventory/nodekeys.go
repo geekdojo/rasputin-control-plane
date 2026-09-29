@@ -20,11 +20,12 @@ import (
 //
 // Rules, from auth-methodology §5.2:
 //
-//   - A key is accepted only over a connection the node reports as TLS with
-//     the bus pin verified. On an unpinned link a man-in-the-middle holding a
-//     sniffed join token could otherwise register a key of its own.
+//   - Every registration arrives over TLS with the bus pin verified, because
+//     the bus accepts nothing else (geekdojo/geekdojo-brain#517), so no
+//     man-in-the-middle holding a sniffed join token sits on the link to
+//     register a key of its own.
 //   - A registration presenting a DIFFERENT hash for a purpose replaces the
-//     recorded one, again only over a pinned connection. Refusing changes
+//     recorded one. Refusing changes
 //     would strand every reflashed node; the change is audited and alerted
 //     instead, which is what makes it visible. Keys live where the join token
 //     lives and survive a sysupgrade, so a change means a reflash and the
@@ -62,8 +63,8 @@ func (c NodeKeyChange) Changed() bool { return !c.Previous.Equal(c.Current) }
 // one purpose must not retire the other. Passing an empty set is therefore a
 // no-op, not a revocation — removal (Delete) is what clears a node's keys.
 //
-// The caller has already decided the report is acceptable
-// (proto.NodeKeysAcceptable); this is the recording half.
+// The caller has already decoded the report (proto.DecodeNodeKeys); this is
+// the recording half.
 func (s *Store) SetNodeKeys(ctx context.Context, nodeID string, keys proto.NodeKeys) (NodeKeyChange, error) {
 	change := NodeKeyChange{NodeID: nodeID}
 	if nodeID == "" {

@@ -178,8 +178,10 @@ export interface MintedBusToken {
   token: string;
   // The live bus pin (sha256/…) the seed carries as RASPUTIN_BUS_PIN, from the
   // same response so a seed never pairs a token with a pin read at another
-  // moment. '' when the controlplane's bus key did not load (the seed then
-  // omits the line and the node dials plaintext). geekdojo-brain#448.
+  // moment. Always set on a mint that succeeds: with no usable bus key the
+  // api refuses the mint (503 bus_unavailable), because a node seeded
+  // without a pin cannot join a bus that accepts only TLS.
+  // geekdojo-brain#448, #517.
   busPin: string;
   // The rendered enrollment file, built by the api with the ONE seed renderer
   // (proto.RenderSeed) that rasputin-provision also uses. The UI shows and

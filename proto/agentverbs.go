@@ -74,11 +74,6 @@ var verbMinAgentVersion = map[string]string{
 	// reason, and corrected for the same reason.
 	"docker.volumes.check": "2026.09.0-dev.151",
 	"docker.volumes.drop":  "2026.09.0-dev.151",
-	// bus.pin (geekdojo/geekdojo-brain#448): #317's merge 2fe3365, first in
-	// v2026.09.4-dev.164 (confirmed with `git tag --contains`). Entered at
-	// authoring as dev.163, the guessed next release run; dev.163 was cut
-	// before #317 merged and does not carry it.
-	BusPinVerb: "2026.09.4-dev.164",
 	// console.root_hash (geekdojo/geekdojo-brain#587): entered when the verb
 	// was authored, before its release existed, as the NEXT release run
 	// after v2026.09.4-dev.171 (the newest published control-plane release
@@ -114,13 +109,6 @@ var verbMinAgentVersion = map[string]string{
 // once the release exists and correct the floor if a release was cut in
 // between.
 const RestoreReplayMinAgentVersion = "2026.08.5-dev.147"
-
-// BootCommittedMinAgentVersion is the first agent release whose
-// update.precheck answers UpdatePrecheckAck.BootCommitted. Not a verb — an older
-// agent still answers precheck, without the field — so a separate floor.
-// #319's merge 08ed3f7, first in v2026.09.4-dev.164 (confirmed with `git tag
-// --contains`; entered at authoring as dev.163, like BusPinVerb's entry).
-const BootCommittedMinAgentVersion = "2026.09.4-dev.164"
 
 // StorageInspectProbeMinAgentVersion is the first agent release whose
 // storage.inspect honours StorageInspectCmd.Probe and answers with a
@@ -194,10 +182,7 @@ var metadataMinAgentVersion = map[string]string{
 	// with `git tag --contains` once the release exists and correct the
 	// floor.
 	MetadataMeshCAFingerprint: "2026.08.5-dev.141",
-	// busTls (geekdojo/geekdojo-brain#448): same change and release as the
-	// bus.pin verb — first in v2026.09.4-dev.164, confirmed.
-	MetadataBusTLS: "2026.09.4-dev.164",
-	// tokenSource, httpsPinned (geekdojo/geekdojo-brain#536) and nodeKeys
+	// tokenSource (geekdojo/geekdojo-brain#536) and nodeKeys
 	// (geekdojo/geekdojo-brain#514), methodology §7 4.0: the cutover facts,
 	// each entered when it was authored, before its release existed, as the
 	// NEXT release run after v2026.09.4-dev.171 (the newest published
@@ -207,13 +192,11 @@ var metadataMinAgentVersion = map[string]string{
 	// key"; confirm with `git tag --contains` once the release exists and
 	// correct the floors.
 	MetadataTokenSource: "2026.09.4-dev.172",
-	MetadataHTTPSPinned: "2026.09.4-dev.172",
-	// ⚠️ nodeKeys differs from the two above in what its floor means. Theirs
-	// say a node at or above the floor that reports nothing is a fault. This
-	// one says only that the agent CAN report: keys are reported solely over
-	// a pinned TLS bus connection (NodeKeysAcceptable), so a node still on
-	// plaintext is silent by design and is not a fault. A cutover on this key
-	// reads silence together with busTls, never alone.
+	// nodeKeys: an agent at or above this floor reports its keys on every
+	// registration. Agents at this floor up to 2026.09.5 sent them only over
+	// a pinned TLS connection, and the bus now accepts nothing else
+	// (geekdojo/geekdojo-brain#517), so a node at or above the floor that
+	// reports none is a fault, as for tokenSource.
 	MetadataNodeKeys: "2026.09.4-dev.172",
 }
 

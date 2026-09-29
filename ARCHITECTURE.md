@@ -93,9 +93,11 @@ it — and nobody can revoke it: the api only mints at start, so revoking that
 one token would take the controlplane's own agent off the bus until a restart,
 and every route that could is refused with a 409.
 
-The bus server offers **TLS with a dedicated bus key**, and nodes trust it by
-**pin**: the SHA-256 of that key, carried in their seed as `RASPUTIN_BUS_PIN`
-or delivered over the bus to nodes enrolled before it existed. The check is the
+The bus server accepts **only TLS, with a dedicated bus key**, and nodes trust
+it by **pin**: the SHA-256 of that key, carried in their seed as
+`RASPUTIN_BUS_PIN`, in a pin file saved on a node migrated in place, or — for
+the controlplane's own agent — in `bus/agent.pin`, which the api writes at
+every start. An agent with no pin does not dial. The check is the
 key and nothing else — no CA chain, no hostname, no validity dates — so a node
 with a wrong clock still joins, and a mesh CA change cannot lock the fleet out.
 The certificate that key is served in is **persisted** as `bus/bus.crt` and
@@ -103,13 +105,10 @@ carries one fixed DNS name, `rasputin-bus`. A node ignores it; it is there for
 clients that do verify a name, which is every stock TLS client — Go matches the
 SAN and never the Common Name — and for the node listener and the collector,
 which pin its exact bytes rather than the key.
-The api migrates an existing cluster by itself: once
-its own build is committed on its A/B slot it hands the pin to nodes that lack
-it, and once every enrolled node reports TLS with the pin verified, no
-plaintext connection is open and no job is in flight, it records TLS-only and
-replaces its embedded bus server in-process with one that refuses plaintext —
-the api process and its own bus connection stay up. The seed/file contract and
-the mode ladder are in
+A bus key or certificate that will not load leaves the api running with no bus
+listener at all and a standing crit alert naming the file. The plaintext
+migration ladder that took existing clusters to TLS was deleted once every
+cluster had climbed it (geekdojo/geekdojo-brain#517). The seed/file contract is
 [`docs/bus-tls-contract.md`](docs/bus-tls-contract.md).
 
 A node id is a lowercase DNS label — the first label of the node's FQDN:

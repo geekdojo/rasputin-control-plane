@@ -16,13 +16,10 @@ import (
 // appliance and dev alike (geekdojo/geekdojo-brain#510):
 //
 //   - A controlplane that self-initialised (the bootstrap.sh path) has no seed.
-//     Nothing ever put RASPUTIN_BUS_PIN in its agent's environment, so before
-//     this file its agent's only route to the pin was a bus.pin delivery over
-//     the PLAINTEXT bus — the api's own loopback agent was, by construction,
-//     the last plaintext client on the bus and the thing holding `require`
-//     back.
-//   - A controlplane that starts in `require` never makes that delivery: its
-//     agent cannot connect at all without the pin it was going to be sent.
+//     Nothing ever put RASPUTIN_BUS_PIN in its agent's environment.
+//   - The bus accepts only TLS (geekdojo/geekdojo-brain#517), so this file is
+//     the one route that agent has to the pin: without it the agent cannot
+//     connect at all.
 //
 // It is written unconditionally rather than only when missing, so an identity
 // restore or a regenerated key reaches the local agent on its next start with

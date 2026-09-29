@@ -1,7 +1,6 @@
 package bus
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -13,14 +12,10 @@ import (
 // reconnect) is tested in busauth and api; this pins the two primitives
 // against a real embedded server.
 func TestClientOpenAndDisconnectClient(t *testing.T) {
-	srv, err := Start(context.Background(), Config{Host: "127.0.0.1", Port: -1, StoreDir: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(srv.Stop)
+	srv, kit := startTLSBus(t)
 
 	closed := make(chan struct{})
-	nc, err := nats.Connect(srv.ClientURL(), nats.NoReconnect(),
+	nc, err := nats.Connect("nats://"+addrOf(srv), kit.Option, nats.NoReconnect(),
 		nats.ClosedHandler(func(*nats.Conn) { close(closed) }))
 	if err != nil {
 		t.Fatalf("connect: %v", err)

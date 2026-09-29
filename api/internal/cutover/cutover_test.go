@@ -115,7 +115,7 @@ func TestEmptyInventoryIsNotSatisfied(t *testing.T) {
 	if st := TokenOnFile(nil); st.Satisfied {
 		t.Error("an empty inventory read as satisfied")
 	}
-	if st := HTTPSPinned([]*proto.Node{}); st.Satisfied {
+	if st := TokenOnFile([]*proto.Node{}); st.Satisfied {
 		t.Error("an empty inventory read as satisfied")
 	}
 }
@@ -131,34 +131,6 @@ func TestNilNodesAreSkipped(t *testing.T) {
 	if len(st.Nodes) != 1 {
 		t.Errorf("nodes = %d, want 1", len(st.Nodes))
 	}
-}
-
-func TestHTTPSPinned(t *testing.T) {
-	v := floorVersion(t, proto.MetadataHTTPSPinned)
-	t.Run("every node pinned", func(t *testing.T) {
-		st := HTTPSPinned([]*proto.Node{
-			node("compute1", v, map[string]any{proto.MetadataHTTPSPinned: true}),
-			node("cp1", v, map[string]any{proto.MetadataHTTPSPinned: true}),
-		})
-		if !st.Satisfied {
-			t.Fatalf("satisfied = false, blockers = %v", st.Blockers)
-		}
-	})
-	t.Run("a reported false blocks and is named", func(t *testing.T) {
-		st := HTTPSPinned([]*proto.Node{
-			node("compute1", v, map[string]any{proto.MetadataHTTPSPinned: true}),
-			node("compute2", v, map[string]any{proto.MetadataHTTPSPinned: false}),
-		})
-		if st.Satisfied {
-			t.Fatal("satisfied = true with a node reporting false")
-		}
-		if len(st.Blockers) != 1 || !strings.Contains(st.Blockers[0], "compute2") {
-			t.Errorf("blockers = %v, want one naming compute2", st.Blockers)
-		}
-		if !st.Nodes[1].Reported || st.Nodes[1].Value != "false" {
-			t.Errorf("compute2 = %+v, want a reported false", st.Nodes[1])
-		}
-	})
 }
 
 // Nodes come back sorted by id whatever order the caller listed them in, so a
@@ -183,16 +155,8 @@ func TestNodesAreSortedByID(t *testing.T) {
 
 // The floor the state reports is proto's, not a copy.
 func TestStateCarriesTheFloorFromProto(t *testing.T) {
-	for _, key := range []string{proto.MetadataTokenSource, proto.MetadataHTTPSPinned} {
-		want := floorVersion(t, key)
-		var got string
-		if key == proto.MetadataTokenSource {
-			got = TokenOnFile(nil).Floor
-		} else {
-			got = HTTPSPinned(nil).Floor
-		}
-		if got != want {
-			t.Errorf("%s: floor = %q, want %q", key, got, want)
-		}
+	want := floorVersion(t, proto.MetadataTokenSource)
+	if got := TokenOnFile(nil).Floor; got != want {
+		t.Errorf("%s: floor = %q, want %q", proto.MetadataTokenSource, got, want)
 	}
 }

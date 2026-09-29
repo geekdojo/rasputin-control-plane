@@ -47,11 +47,12 @@ updates:
       include: scope
 
   # ── Go modules: every member of go.work ───────────────────────────────────
-  # go.work uses agent, artifactsig, backupxfer, api, proto and tileschema. All
-  # six are listed. (The note that used to sit here — that vuln-scan.sh scanned only
-  # api, agent and proto, leaving artifactsig and tileschema outside the gate —
-  # was the separate finding it called itself. It is fixed: every scan gate now
-  # derives its module list from go.work via scripts/workspace-modules.sh.
+  # go.work uses agent, artifactsig, backupxfer, api, logkit, proto and
+  # tileschema. All seven are listed. (The note that used to sit here — that
+  # vuln-scan.sh scanned only api, agent and proto, leaving artifactsig and
+  # tileschema outside the gate — was the separate finding it called itself.
+  # It is fixed: every scan gate now derives its module list from go.work via
+  # scripts/workspace-modules.sh.
   # This block is the one module list still written by hand, because Dependabot
   # reads this file directly and cannot call a script — so ci.yml runs
   # `workspace-modules.sh --verify-dependabot` to fail if it drifts from go.work.)
@@ -61,6 +62,7 @@ updates:
       - /api
       - /artifactsig
       - /backupxfer
+      - /logkit
       - /proto
       - /tileschema
     schedule:

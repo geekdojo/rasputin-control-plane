@@ -17,6 +17,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls/bustlstest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -78,6 +79,7 @@ func TestHandleRegistered_PayloadNodeIDMustMatchSubject(t *testing.T) {
 		t.Fatalf("MintBound: %v", err)
 	}
 
+	kit := bustlstest.Bus(t)
 	srv, err := bus.Start(ctx, bus.Config{
 		Host: host, Port: -1,
 		StoreDir:        filepath.Join(dir, "nats"),
@@ -85,6 +87,7 @@ func TestHandleRegistered_PayloadNodeIDMustMatchSubject(t *testing.T) {
 		IssuerPublicKey: issuer.PublicKey(),
 		APIUser:         "rasputin-api",
 		APIPass:         "test-secret",
+		TLS:             kit.Server,
 	})
 	if err != nil {
 		t.Fatalf("bus.Start: %v", err)
@@ -131,7 +134,8 @@ func TestHandleRegistered_PayloadNodeIDMustMatchSubject(t *testing.T) {
 	}
 
 	permErr := make(chan error, 4)
-	alpha, err := nats.Connect(srv.ClientURL(),
+	url, _ := srv.ClientURL()
+	alpha, err := nats.Connect(url, kit.Option,
 		nats.UserInfo("alpha", alphaToken),
 		nats.MaxReconnects(0),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, e error) { permErr <- e }),

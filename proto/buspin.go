@@ -36,43 +36,6 @@ import (
 // BusPinPrefix introduces a bus pin. The one algorithm there is.
 const BusPinPrefix = "sha256/"
 
-// MetadataBusTLS is the registration-metadata key under which an agent reports
-// whether the connection it is registering over is TLS with the pin verified.
-// true only then; false for a plaintext connection. Absent from a pre-TLS
-// agent's registration, and consumers must treat absence as "not TLS" — the
-// switch to TLS-required waits for every node to say true, and a node that
-// cannot say anything has not.
-const MetadataBusTLS = "busTls"
-
-// BusPinVerb is the agent command that delivers the pin to an already-enrolled
-// node: rasputin.node.<id>.cmd.bus.pin.
-const BusPinVerb = "bus.pin"
-
-// BusPinCmd carries the pin. It travels over the bus the node is connected to
-// right now, which during migration is plaintext — accepted by Bryce for the
-// migration window (#448, decided design step 4).
-type BusPinCmd struct {
-	Pin string `json:"pin"`
-}
-
-// BusPinAck is the agent's answer.
-//
-// OK means the node now holds exactly this pin, persisted, and is about to
-// reconnect over TLS (Reconnecting) or already is connected over it. A node
-// that holds a DIFFERENT pin refuses (OK=false): replacing a pin is key
-// rotation, which the server cannot serve (it holds one key), so accepting
-// would strand the node.
-type BusPinAck struct {
-	NodeID string `json:"nodeId"`
-	OK     bool   `json:"ok"`
-	// Pin is the pin the node holds after handling the command ("" if none).
-	Pin string `json:"pin,omitempty"`
-	// Reconnecting is true when the node persisted a new pin and is dropping
-	// its current connection to come back over TLS.
-	Reconnecting bool   `json:"reconnecting,omitempty"`
-	Detail       string `json:"detail,omitempty"`
-}
-
 // BusPinForSPKI returns the pin for a DER SubjectPublicKeyInfo.
 func BusPinForSPKI(spkiDER []byte) string {
 	sum := sha256.Sum256(spkiDER)

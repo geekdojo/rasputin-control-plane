@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/geekdojo/rasputin-control-plane/artifactsig v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/backupxfer v0.0.0-00010101000000-000000000000
+	github.com/geekdojo/rasputin-control-plane/logkit v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
 	github.com/go-webauthn/webauthn v0.18.1
@@ -54,3 +55,5 @@ replace github.com/geekdojo/rasputin-control-plane/tileschema => ../tileschema
 replace github.com/geekdojo/rasputin-control-plane/artifactsig => ../artifactsig
 
 replace github.com/geekdojo/rasputin-control-plane/backupxfer => ../backupxfer
+
+replace github.com/geekdojo/rasputin-control-plane/logkit => ../logkit

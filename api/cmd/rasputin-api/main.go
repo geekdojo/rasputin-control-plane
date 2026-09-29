@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -52,6 +53,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
+	"github.com/geekdojo/rasputin-control-plane/logkit"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -64,6 +66,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// The process logger, built here at the composition root and injected
+	// into every component that logs through it (logkit, ARCH-COMMON's
+	// interim reference). Code this change did not touch still uses the
+	// standard log package.
+	logger := logkit.New(os.Stderr)
 
 	dataDir := envOr("RASPUTIN_DATA_DIR", "./data")
 	httpAddr := envOr("RASPUTIN_HTTP_ADDR", ":8080")
@@ -198,90 +206,31 @@ func main() {
 			busauth.EnvEnforce, busauth.OffValue, natsHost)
 	}
 
-	// Bus TLS (geekdojo/geekdojo-brain#448): the dedicated bus key — the
+	// Bus TLS (geekdojo/geekdojo-brain#448, #517): the dedicated bus key — the
 	// provisioned one firstboot wrote to <dataDir>/bus/bus.key, or one
-	// generated now — served as server-auth TLS that nodes trust by pin. The
-	// mode (offer | migrate | require, bustls.Mode) decides whether plaintext
-	// is still accepted. It is read before the server starts so a controlplane
-	// already in require starts refusing plaintext; the move to require while
-	// running replaces the server in-process (bustls.Service, below).
+	// generated now — served in its persisted certificate as server-auth TLS
+	// that nodes trust by pin. The bus accepts only TLS.
 	//
-	// A key that will not load is survived, not fatal: the bus comes up
-	// plaintext-only and says why, because a controlplane that will not start
-	// cannot be used to fix anything (#89). Pinned nodes refuse plaintext, so
-	// nothing of theirs crosses the wire while it is broken.
-	busKey, busKeyGenerated, busKeyErr := bustls.EnsureKey(filepath.Join(dataDir, "bus"))
-	var serverTLS *tls.Config
-	// The persisted bus certificate, loaded below. Declared out here because
-	// the node listener serves it too, and serves it from the FIRST start —
-	// before the mesh leaf exists and before the clock gate
-	// (geekdojo/geekdojo-brain#513).
-	var busCert tls.Certificate
-	if busKeyErr != nil {
-		log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY; every node that holds a bus pin stays off it until the key file is fixed or restored.", busKeyErr)
-		busKey = nil
-	} else {
-		// The PERSISTED certificate around the key (geekdojo/geekdojo-brain
-		// #508), not a fresh one per start: it carries a fixed DNS SAN, and
-		// its exact bytes are what a client that verifies the name — the
-		// collector, the node listener — will pin. EnsureCert returns a usable
-		// certificate even when it had to replace the file, so an error here
-		// is a note, not a reason to drop TLS. Only a failure to produce one
-		// at all leaves it zero-valued.
-		var busCertGenerated bool
-		var certErr error
-		busCert, busCertGenerated, certErr = bustls.EnsureCert(filepath.Join(dataDir, "bus"), busKey)
-		if len(busCert.Certificate) == 0 {
-			log.Printf("rasputin-api: ⚠️  bus TLS OFF — %v. The bus accepts PLAINTEXT ONLY.", certErr)
-			busKey = nil
-		} else {
-			switch {
-			case certErr != nil:
-				log.Printf("rasputin-api: bus certificate re-minted: %v", certErr)
-			case busCertGenerated:
-				log.Printf("rasputin-api: bus certificate minted and persisted to %q (DNS %q)", filepath.Join(dataDir, "bus", bustls.CertFileName), bustls.BusDNSName)
-			}
-			serverTLS = bustls.ServerTLSConfigFor(busCert)
-		}
-	}
-	// The mode is resolved AFTER the key, because whether this api can serve
-	// TLS at all is one of the facts it resolves on (bustls.StartFacts).
-	busTLSStart := busTLSStartMode(ctx, dbPath, busKey != nil)
-	busTLSMode, busTLSModePinned := busTLSStart.Mode, busTLSStart.Pinned
-	if busTLSStart.Fault != "" {
-		log.Printf("rasputin-api: ⚠️  bus TLS mode: %s — running as %q instead (%s); this is re-derived on every start until the recorded value is fixed",
-			busTLSStart.Fault, busTLSMode, busTLSStart.Why)
-	}
-	if busTLSStart.Derived {
-		// Persisted so the next start reads it back: a fresh cluster that
-		// derived require from "no node is enrolled" must not fall back to
-		// offer the moment its own agent has registered and that fact is
-		// no longer true. A failure to record it is survivable — the same
-		// facts derive the same mode next time — so it is logged, not fatal.
-		if perr := recordBusTLSMode(ctx, dbPath, busTLSMode); perr != nil {
-			log.Printf("rasputin-api: bus TLS mode %q was derived (%s) but could not be recorded: %v", busTLSMode, busTLSStart.Why, perr)
-		} else {
-			log.Printf("rasputin-api: bus TLS mode %q recorded: %s", busTLSMode, busTLSStart.Why)
-		}
-	}
-	if serverTLS != nil {
-		busCfg.TLS = serverTLS
-		busCfg.AllowNonTLS = busTLSMode.AllowsPlaintext()
-		origin := "loaded"
-		if busKeyGenerated {
-			origin = "GENERATED (no provisioned key) — nodes seeded with a different pin cannot join; restore the identity backup if this controlplane was reflashed"
-		}
-		log.Printf("rasputin-api: bus TLS on, mode=%s (pinned=%t, plaintext %s), bus key %s, pin %s",
-			busTLSMode, busTLSModePinned, map[bool]string{true: "allowed", false: "REFUSED"}[busTLSMode.AllowsPlaintext()], origin, busKey.Pin())
+	// A key or certificate that will not load is survived, not fatal: the api
+	// starts with a bus that serves NO network listener, raises a standing
+	// alert naming the file, and refuses to mint seeds, because a controlplane
+	// that will not start cannot be used to restore the file (#89). No node
+	// can join meanwhile — none could anyway, since every node dials only TLS.
+	busDir := filepath.Join(dataDir, "bus")
+	busState, busKey, busCert := loadBusTLS(logger, busDir)
+	warnRetiredBusTLS(logger, os.Getenv)
+	applyBusTLS(&busCfg, busKey, busCert)
+	if busKey != nil {
 		// The pin, beside the token, for this controlplane's own agent. See
 		// bustls.WriteAgentPinFile: a self-initialised controlplane has no
-		// seed, and one that starts in require can never deliver a pin over
-		// the bus. Survivable: an agent that was seeded a pin does not need
-		// the file, so this is logged rather than fatal (#89).
-		if pinPath, perr := bustls.WriteAgentPinFile(filepath.Join(dataDir, "bus"), busKey); perr != nil {
-			log.Printf("rasputin-api: ⚠️  could not write the bus pin for this controlplane's agent at %q: %v — an agent with no seeded pin of its own cannot join a bus that requires TLS", pinPath, perr)
+		// seed, so this file is its agent's only route to the pin. Survivable:
+		// an agent that was seeded a pin does not need the file, so this is
+		// logged rather than fatal (#89).
+		if pinPath, perr := bustls.WriteAgentPinFile(busDir, busKey); perr != nil {
+			logger.Error("rasputin-api: could not write the bus pin for this controlplane's agent; an agent with no seeded pin of its own cannot join",
+				"file", pinPath, "err", perr.Error())
 		} else {
-			log.Printf("rasputin-api: bus pin for this controlplane's agent written to %q", pinPath)
+			logger.Info("rasputin-api: bus pin for this controlplane's agent written", "file", pinPath)
 		}
 	}
 
@@ -290,7 +239,9 @@ func main() {
 		log.Fatalf("rasputin-api: bus: %v", err)
 	}
 	defer busSrv.Stop()
-	log.Printf("rasputin-api: nats listening on %s", busSrv.ClientURL())
+	if url, listening := busSrv.ClientURL(); listening {
+		logger.Info("rasputin-api: bus listening", "url", url)
+	}
 
 	// Token store backs both the auth-callout responder and the token-mgmt
 	// endpoints. Opened regardless of enforcement so an operator can mint
@@ -360,26 +311,11 @@ func main() {
 	})
 	invStore.Registry().OnNodeExcluded(busTokenStore.ForgetNode)
 
-	// The bus TLS service, once it exists (it is built further down, after the
-	// stores it reads). The responder reads it from the first callout on, so
-	// it is handed over atomically.
-	var busTLSForHold atomic.Pointer[bustls.Service]
 	if busAuthEnforce {
 		// Before the responder starts, so every connection it admits is
 		// recorded and a revoke can close it (certificates.md §4.2(1)).
 		busTokenStore.TrackSessions(busSrv)
 		responder := busauth.NewResponder(busSrv.Conn(), busIssuer, busTokenStore)
-		// While the bus server is being replaced to refuse plaintext, admit
-		// no node: job intake reopens only after the api's own connection is
-		// back, and a node registering before that could have a registration
-		// hook's job refused with nobody to retry it. Held nodes retry on
-		// their own reconnect loop.
-		responder.SetHold(func() (bool, string) {
-			if svc := busTLSForHold.Load(); svc != nil {
-				return svc.Switching()
-			}
-			return false, ""
-		})
 		if err := responder.Start(); err != nil {
 			log.Fatalf("rasputin-api: bus auth responder: %v", err)
 		}
@@ -1104,57 +1040,6 @@ func main() {
 	updater.ResumeSystemUpdates(ctx, jobStore, runner, busSrv.Conn(), selfNodeID)
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn())
-	// The bus TLS ladder and pin delivery. nil when the key did not load (see
-	// above); every consumer treats nil as "bus TLS unavailable".
-	var busTLSSvc *bustls.Service
-	if busKey != nil {
-		busTLSSvc = bustls.NewService(bustls.Config{
-			Key:             busKey,
-			Settings:        setupStore,
-			StartMode:       busTLSMode,
-			StartModePinned: busTLSModePinned,
-			StartFault:      busTLSStart.Fault,
-			Nodes: func(ctx context.Context) ([]*proto.Node, error) {
-				nodes, err := invStore.List(ctx)
-				if err == nil {
-					invStore.Presence(ctx, nodes)
-				}
-				return nodes, err
-			},
-			Plaintext: busSrv.PlaintextClients,
-			NC:        busSrv.Conn(),
-			// offer → migrate waits for this: no self-update in flight, and
-			// the controlplane's own agent reports its slot committed.
-			Committed: func(ctx context.Context) (bool, string, error) {
-				return updater.SelfBuildCommitted(ctx, jobStore, busSrv.Conn(), selfNodeID, 10*time.Second)
-			},
-			InFlight: func(ctx context.Context) ([]string, error) { return jobs.InFlight(ctx, jobStore) },
-			// migrate → require closes job intake atomically with "nothing in
-			// flight", so a job submitted while the bus server is replaced is
-			// refused with a retryable error (503) rather than started on a
-			// bus that is going away; intake reopens once the api's own
-			// connection is back on the new server.
-			Quiesce: runner.QuiesceIfIdle,
-			Reopen:  runner.Reopen,
-			// Replace the embedded server in this process with one that
-			// refuses plaintext. The api process, its HTTP server and its bus
-			// connection stay up; nodes rejoin over TLS on their own reconnect.
-			RequireTLS: func(ctx context.Context) error { return busSrv.SetAllowNonTLS(ctx, false) },
-			// Neither the new server nor one with the old options came up, or
-			// the api's own connection could not rejoin: this api has no bus.
-			// That is the state a bus that fails at boot is fatal in, and the
-			// unit restarts the api the same way.
-			NoBus: func(err error) {
-				log.Fatalf("rasputin-api: bus: %v", err)
-			},
-		})
-		busTLSForHold.Store(busTLSSvc)
-		// A client connection closing can be the last plaintext one: re-decide
-		// on the event, not on a clock.
-		if err := busSrv.OnClientDisconnect(busTLSSvc.NoteDisconnect); err != nil {
-			log.Printf("rasputin-api: bus TLS: %v — the switch to TLS-only waits for the next registration or job end instead", err)
-		}
-	}
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent
 	// baseline firewall rules (Allow-DHCP-Renew / Allow-Ping / Allow-IGMP) as
 	// real, visible, deletable intents. SeedBaselineRules is idempotent via a
@@ -1202,8 +1087,6 @@ func main() {
 	// moved while the firewall was away could not be applied then; this is the
 	// fact that says it can be now (#431). The saga applies only a forward that
 	// changed or never landed, so a routine reconnect costs one no-op job.
-	// And the same fact hands the bus pin to a node that registered without
-	// TLS while the ladder is at migrate (#448).
 	// And a node that registers without the cluster's console root password
 	// is pushed it (#587) — including one enrolling for the first time,
 	// which is what "nodes that join later receive it" means in practice.
@@ -1217,18 +1100,8 @@ func main() {
 	onFirewallRegistration := dnsForwardOnFirewallRegistration(submitDNSForward)
 	invSvc.SetOnRegistered(func(hookCtx context.Context, n *proto.Node) {
 		onFirewallRegistration(hookCtx, n)
-		if busTLSSvc != nil {
-			busTLSSvc.OnRegistered(hookCtx, n)
-		}
 		consoleConverger.OnRegistered(hookCtx, n)
 	})
-	// A heartbeat is the only thing a node that is connected, and stays
-	// connected, ever sends. At migrate it is what offers the bus pin again to
-	// a node the move into migrate did not reach, or whose delivery failed
-	// (geekdojo/geekdojo-brain#615).
-	if busTLSSvc != nil {
-		invSvc.SetOnHeartbeat(busTLSSvc.OnHeartbeat)
-	}
 	// A node whose registered key was REPLACED raises a crit alert
 	// (geekdojo/geekdojo-brain#514). inventory audits the change in the log
 	// itself; this is the operator-facing half.
@@ -1251,12 +1124,6 @@ func main() {
 	})
 	if err := invSvc.Start(ctx); err != nil {
 		log.Fatalf("rasputin-api: inventory service: %v", err)
-	}
-	if busTLSSvc != nil {
-		if err := busTLSSvc.Start(); err != nil {
-			log.Printf("rasputin-api: bus TLS: %v", err)
-		}
-		defer busTLSSvc.Stop()
 	}
 	defer invSvc.Stop()
 	if selfNodeID != "" {
@@ -1514,15 +1381,20 @@ func main() {
 		go kickTrustConvergenceAfterRestore(ctx, meshSvc, runner, jobStore, backupStore, appliedRestore.ID)
 	}
 
-	srv := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn())
+	// busState is a value, never nil: bustls.Available or bustls.Unavailable.
+	// The correlation id a coded error carries is crypto/rand's Text.
+	srv, err := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn(),
+		busState, logger, cryptorand.Text)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: api server", "err", err.Error())
+		os.Exit(1)
+	}
 	// The SAME rotator closure the leaf-rotation workflow uses, so PATCH
 	// /api/apps/{id} applies a LAN-exposure change (#197) to the proxy
 	// immediately instead of leaving the .lan name resolving until the next
 	// sweep. One rotator, two callers — a second one would differ in exactly
 	// the case that matters, an offline node.
 	srv.SetAppLeafRotator(rotateAppLeaf)
-	// GET/PUT /api/bus/tls, and the live pin every Add-node seed carries.
-	srv.SetBusTLS(busTLSSvc)
 	// GET/PUT /api/console/root-password and the Settings "apply to all
 	// nodes" action. The store hands the api the hash on exactly one path,
 	// the push step's dispatch; nothing the server serves can reach it.
@@ -1671,13 +1543,9 @@ func main() {
 	}
 	defer alertsStore.Close()
 	alertsSvc := alerts.New(invStore, jobStore, appsStore, setupSvc, alertsStore, busSrv.Conn(), busAuthEnforce)
-	// Bus TLS posture: a pinned mode below require, or a bus key that did not
-	// load, is a standing warning like bus-auth-off.
-	if busTLSSvc != nil {
-		alertsSvc.SetBusTLSAlert(busTLSSvc.Alert)
-	} else {
-		alertsSvc.SetBusTLSAlert(bustls.UnavailableAlert)
-	}
+	// A bus key or certificate that did not load is a standing crit alert
+	// naming the file; an available bus raises none (bustls.State.Alert).
+	alertsSvc.SetBusTLSAlert(busState.Alert)
 	// A join token holds one live session: when two presenters take it from
 	// each other, the token is in use from more than one place and the
 	// operator has to see it (#500). Nothing is reported while no token has
@@ -2987,79 +2855,86 @@ func restoreExit() {
 	}
 }
 
-// busTLSStartMode reads the bus TLS mode before the bus starts — which is
-// before the rest of the stores open, so it opens the settings store, and the
-// inventory store the facts come from, on its own for the one read each.
-//
-// tlsAvailable is whether the bus key loaded. A settings store that will not
-// open is itself a fault: it resolves through the facts like any other
-// unreadable mode, never to offer (bustls.ResolveStartMode).
-func busTLSStartMode(ctx context.Context, dbPath string, tlsAvailable bool) bustls.StartMode {
-	facts := busTLSStartFacts(ctx, dbPath, tlsAvailable)
-	// Trimmed exactly as ResolveStartMode trims it. A blank-but-not-empty
-	// value is no pin, so the recorded mode must still be read: skipping the
-	// settings store on it would resolve a cluster that recorded require as
-	// though nothing were recorded at all, which on an enrolled fleet is offer.
-	if strings.TrimSpace(os.Getenv(bustls.EnvMode)) != "" {
-		return bustls.ResolveStartMode(ctx, nil, facts)
-	}
-	st, err := setup.OpenStore(ctx, dbPath)
-	if err != nil {
-		return bustls.ResolveStartMode(ctx, failingSettings{err}, facts)
-	}
-	defer func() { _ = st.Close() }()
-	return bustls.ResolveStartMode(ctx, st, facts)
+// envRetiredBusTLS pinned the bus's old TLS mode ladder. The ladder is gone
+// and the bus always requires TLS (geekdojo/geekdojo-brain#517); the variable
+// is no longer read, and busTLSEnvWarning says so when it is set.
+const envRetiredBusTLS = "RASPUTIN_BUS_TLS"
+
+// busTLSEnvWarning reports whether envRetiredBusTLS is set, and to what, so the
+// api can warn once at start that it no longer does anything. It decides
+// nothing about the bus: whatever the value, the bus requires TLS. A value that
+// is empty or only whitespace is unset.
+func busTLSEnvWarning(getenv func(string) string) (value string, set bool) {
+	value = strings.TrimSpace(getenv(envRetiredBusTLS))
+	return value, value != ""
 }
 
-// busTLSStartFacts reads inventory for the two facts a derived mode rests on:
-// how many nodes are enrolled, and whether every one of them reported bus TLS.
-//
-// An inventory that will not open answers "nodes are enrolled and not all of
-// them are on TLS", which is the conservative reading, and says why in
-// StartFacts.Unknown: it derives migrate, the rung that keeps a fleet
-// reachable, rather than require on a fleet nobody could look at — and never
-// offer, which is what the same guess would derive with nothing recorded if it
-// were not marked as a guess.
-func busTLSStartFacts(ctx context.Context, dbPath string, tlsAvailable bool) bustls.StartFacts {
-	unknown := func(err error) bustls.StartFacts {
-		return bustls.StartFacts{TLSAvailable: tlsAvailable, Enrolled: 1, AllReportedTLS: false,
-			Unknown: fmt.Sprintf("the node inventory could not be read (%v), so whether every enrolled node is on bus TLS is unknown", err)}
+// warnRetiredBusTLS writes the one WARN entry a set envRetiredBusTLS earns.
+func warnRetiredBusTLS(logger *slog.Logger, getenv func(string) string) {
+	if value, set := busTLSEnvWarning(getenv); set {
+		logger.Warn("rasputin-api: "+envRetiredBusTLS+" is set but no longer read; the bus always requires TLS",
+			"value", value, "fix", "remove "+envRetiredBusTLS+" from node.env")
 	}
-	inv, err := inventory.OpenStore(ctx, dbPath)
-	if err != nil {
-		log.Printf("rasputin-api: bus TLS mode: read inventory: %v — assuming a fleet that is not all on TLS", err)
-		return unknown(fmt.Errorf("open: %w", err))
-	}
-	defer func() { _ = inv.Close() }()
-	nodes, err := inv.List(ctx)
-	if err != nil {
-		log.Printf("rasputin-api: bus TLS mode: list inventory: %v — assuming a fleet that is not all on TLS", err)
-		return unknown(fmt.Errorf("list: %w", err))
-	}
-	return bustls.FactsFromNodes(tlsAvailable, nodes)
 }
 
-// failingSettings stands in for a settings store that would not open, so the
-// one read reports the open error the way an unreadable setting reports its
-// own. It is never written to.
-type failingSettings struct{ err error }
-
-func (f failingSettings) Get(context.Context, string) (string, error) {
-	return "", fmt.Errorf("open settings: %w", f.err)
-}
-func (f failingSettings) Set(context.Context, string, string) error {
-	return fmt.Errorf("open settings: %w", f.err)
-}
-
-// recordBusTLSMode persists a derived mode, opening the settings store on its
-// own for the one write — this runs before the rest of the stores are open.
-func recordBusTLSMode(ctx context.Context, dbPath string, mode bustls.Mode) error {
-	st, err := setup.OpenStore(ctx, dbPath)
-	if err != nil {
-		return fmt.Errorf("open settings: %w", err)
+// applyBusTLS sets the bus's listener from what loadBusTLS found, and from
+// nothing else: TLS with cert when there is a key, and no listener at all when
+// there is none. No environment variable enters into it.
+func applyBusTLS(cfg *bus.Config, key *bustls.Key, cert tls.Certificate) {
+	if key != nil {
+		cfg.TLS, cfg.NoListen = bustls.ServerTLSConfigFor(cert), false
+		return
 	}
-	defer func() { _ = st.Close() }()
-	return st.Set(ctx, bustls.SettingKey, string(mode))
+	cfg.TLS, cfg.NoListen = nil, true
+}
+
+// loadBusTLS loads the bus key and its persisted certificate from busDir. It
+// returns the api's bus TLS state and, when it is available, the key and the
+// certificate to serve. A key or certificate that cannot be used is an ERROR
+// entry naming the file, and an unavailable state carrying it; it is never
+// fatal (#89).
+func loadBusTLS(logger *slog.Logger, busDir string) (bustls.State, *bustls.Key, tls.Certificate) {
+	keyPath := filepath.Join(busDir, bustls.KeyFileName)
+	certPath := filepath.Join(busDir, bustls.CertFileName)
+	key, generated, err := bustls.EnsureKey(busDir)
+	if err != nil {
+		logger.Error("rasputin-api: bus key did not load; the bus serves no listener",
+			"file", keyPath, "err", err.Error(), "alert_id", bustls.AlertID)
+		return bustls.Unavailable(keyPath, err), nil, tls.Certificate{}
+	}
+	// The PERSISTED certificate around the key (geekdojo/geekdojo-brain#508),
+	// not a fresh one per start: it carries a fixed DNS SAN, and its exact
+	// bytes are what a client that verifies the name — the collector, the node
+	// listener — pins. EnsureCert returns a usable certificate even when it had
+	// to replace the file, so an error beside one is a note, not a failure.
+	cert, certGenerated, certErr := bustls.EnsureCert(busDir, key)
+	if len(cert.Certificate) == 0 {
+		logger.Error("rasputin-api: bus certificate unusable; the bus serves no listener",
+			"file", certPath, "err", errText(certErr), "alert_id", bustls.AlertID)
+		return bustls.Unavailable(certPath, certErr), nil, tls.Certificate{}
+	}
+	switch {
+	case certErr != nil:
+		logger.Warn("rasputin-api: bus certificate re-minted", "file", certPath, "reason", certErr.Error())
+	case certGenerated:
+		logger.Info("rasputin-api: bus certificate minted and persisted", "file", certPath, "dns", bustls.BusDNSName)
+	}
+	keyOrigin := "loaded"
+	if generated {
+		keyOrigin = "generated"
+		logger.Warn("rasputin-api: bus key generated; nodes seeded with a different pin cannot join; restore the identity backup if this controlplane was reflashed",
+			"file", keyPath, "pin", key.Pin())
+	}
+	logger.Info("rasputin-api: bus TLS on", "key_origin", keyOrigin, "pin", key.Pin())
+	return bustls.Available(key), key, cert
+}
+
+// errText renders an error for a log field, "" for none.
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // removeAppLeafDir removes one app's leaf directory under root. It refuses an

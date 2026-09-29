@@ -5,6 +5,7 @@ use (
 	./artifactsig
 	./backupxfer
 	./api
+	./logkit
 	./proto
 	./tileschema
 )

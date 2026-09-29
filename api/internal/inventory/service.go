@@ -40,10 +40,6 @@ type Service struct {
 	// the first one and every reconnect alike. See SetOnRegistered.
 	onRegistered func(ctx context.Context, n *proto.Node)
 
-	// onHeartbeat, if set, is invoked for every heartbeat from an enrolled
-	// node. See SetOnHeartbeat.
-	onHeartbeat func(nodeID string)
-
 	// onNodeKeyChanged, if set, is invoked when an accepted registration
 	// REPLACED a key this node had already registered. See
 	// SetOnNodeKeyChanged.
@@ -131,20 +127,6 @@ func (s *Service) SetOnRegistered(fn func(ctx context.Context, n *proto.Node)) {
 	s.onRegistered = fn
 }
 
-// SetOnHeartbeat registers a callback fired for every heartbeat the api
-// accepts — one from a node that is enrolled. A heartbeat is the fact "this
-// node is connected and listening right now", and it is the only event a node
-// that is already connected, and stays connected, ever sends: the trigger for
-// work that is owed to such a node, instead of a timer.
-//
-// The callback runs on the bus callback goroutine, once per node per heartbeat
-// interval, on the path that otherwise touches no database
-// (geekdojo-brain#585). It must return at once and do its own I/O, if it has
-// any, on another goroutine. Set before Start.
-func (s *Service) SetOnHeartbeat(fn func(nodeID string)) {
-	s.onHeartbeat = fn
-}
-
 // SetOnNodeKeyChanged registers the audit-and-alert callback for a node whose
 // registered key was REPLACED — a purpose that already had a hash now has a
 // different one. A first registration does not fire it: that is a node
@@ -163,13 +145,16 @@ func (s *Service) SetOnNodeKeyChanged(fn func(ctx context.Context, change NodeKe
 // (geekdojo/geekdojo-brain#514). It is the whole accept rule in one place:
 //
 //   - Nothing reported: nothing happens. That is an agent that predates the
-//     keys, and a node whose bus connection is not pinned — which reports
-//     nothing by design. Neither is a failure, and neither retires a key the
-//     node registered earlier.
-//   - Reported over an unpinned connection: REFUSED and logged. The node is
-//     not rejected — its registration stands, it simply keeps whatever keys
-//     were already recorded and stays on the legacy path.
-//   - A malformed report: refused whole, for the same reason.
+//     keys. It is not a failure, and it does not retire a key the node
+//     registered earlier.
+//   - A malformed report: refused whole. The node is not rejected — its
+//     registration stands, it simply keeps whatever keys were already
+//     recorded.
+//
+// Every registration arrives over a TLS connection whose client verified the
+// server by the bus pin, because the bus accepts nothing else
+// (geekdojo/geekdojo-brain#517), so there is no transport condition to check
+// here.
 //   - Otherwise recorded, and a replacement is audited here and handed to
 //     onNodeKeyChanged, which raises the alert.
 //
@@ -183,15 +168,6 @@ func (s *Service) recordNodeKeys(nodeID string, metadata map[string]any) {
 		return
 	}
 	if !ok {
-		return
-	}
-	if !proto.NodeKeysAcceptable(metadata) {
-		// A key is taken only where the node has proven which control plane
-		// it is talking to. An agent of this release does not send one on an
-		// unpinned link, so reaching here means an older or other client.
-		log.Printf("inventory: WARN refusing node keys from %s: it did not register over a pinned TLS bus connection (%s=true). "+
-			"Deliver the bus pin to this node, or reseed it, and the keys will be accepted on its next registration.",
-			nodeID, proto.MetadataBusTLS)
 		return
 	}
 	change, err := s.store.SetNodeKeys(s.ctx, nodeID, keys)
@@ -327,10 +303,6 @@ func (s *Service) handleHeartbeat(m *nats.Msg) {
 	if !s.store.Registry().Touch(nodeID, now) {
 		return
 	}
-	if s.onHeartbeat != nil {
-		s.onHeartbeat(nodeID)
-	}
-
 	s.mu.Lock()
 	prev, known := s.statusByNode[nodeID]
 	s.statusByNode[nodeID] = proto.StatusOnline

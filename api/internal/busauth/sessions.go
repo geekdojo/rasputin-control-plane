@@ -21,13 +21,10 @@ import (
 // through the embedded server (bus.Server.DisconnectClient).
 //
 // The server id is part of the key because a CID is unique within one server
-// only. The api replaces its embedded server in-process when the bus switches
-// to TLS-only (bus.Server.SetAllowNonTLS, geekdojo/geekdojo-brain#448), and
-// the new server numbers connections from the start again. A record from the
-// old server — including one an auth request queued before the switch writes
-// after it — must never close a connection on the new one: the Disconnector
-// answers false for any server id but the running server's, and prune drops
-// such records.
+// only, and another server numbers its connections from the start again. A
+// record must only ever name a connection on the server that admitted it: the
+// Disconnector answers false for any server id but the running server's, and
+// prune drops such records.
 //
 // Rejected alternatives:
 //
@@ -209,8 +206,8 @@ func (s *Store) DisconnectNode(nodeID string) int {
 // table tracks live sessions rather than every connection ever made. It runs
 // on each grant, which bounds the table by the live connections plus those
 // closed since the previous grant — no timer involved. CIDs are never reused
-// within a server's lifetime, and a server that was replaced never comes back,
-// so a closed session cannot reopen.
+// within a server's lifetime, and a server that is gone never comes back, so a
+// closed session cannot reopen.
 func (s *Store) pruneLocked() {
 	for k := range s.sess.grants {
 		if !s.sess.disc.ClientOpen(k.serverID, k.cid) {

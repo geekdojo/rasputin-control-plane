@@ -82,16 +82,15 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REFUSED while bus TLS is unavailable (geekdojo/geekdojo-brain#510). The
-	// seed rendered below carries RASPUTIN_BUS_PIN, and with no bus key there
-	// is no pin to put in it. A node seeded without one
-	// comes up unpinned and stays that way: it dials plaintext, and the only
-	// route back is a pin delivery this controlplane cannot make until its own
-	// key is fixed. Minting nothing is the recoverable failure.
-	if s.busTLS == nil {
-		writeError(w, http.StatusServiceUnavailable, "refusing to mint a join token: "+busTLSUnavailable+
-			", so the seed would carry no bus pin and the node would join unencrypted and stay that way. "+
-			"Fix or restore the bus key (bus/bus.key in the api's data directory, /var/lib/rasputin on an appliance) and restart the api, then mint the token.")
+	// REFUSED while the bus has no key (geekdojo/geekdojo-brain#510, #517).
+	// The seed rendered below carries RASPUTIN_BUS_PIN, and with no key there
+	// is no pin to put in it: a node seeded without one cannot join a bus that
+	// accepts only TLS. The check runs before MintBound, so a refusal leaves no
+	// token behind. Minting nothing is the recoverable failure.
+	busPin, ok := s.bus.Pin()
+	if !ok {
+		s.writeBusUnavailable(w, r, "refusing to mint a join token: "+busUnavailableMessage+
+			"; a seed minted now would carry no bus pin, and its node could not join")
 		return
 	}
 
@@ -137,7 +136,7 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		JoinToken: plaintext,
 		// The pin comes from the same response as the token, so a seed can
 		// never pair a token with a pin read at another moment (#448).
-		BusPin:           s.busPin(),
+		BusPin:           busPin,
 		SSHAuthorizedKey: sshKey,
 		Origin:           "the Rasputin control plane",
 	})
@@ -158,7 +157,7 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		"nodeId": body.NodeID,
 		"role":   string(role),
 		"token":  plaintext,
-		"busPin": s.busPin(),
+		"busPin": busPin,
 		"seed":   seed,
 	})
 }

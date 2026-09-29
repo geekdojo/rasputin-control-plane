@@ -97,8 +97,8 @@ type Service struct {
 	// pass the real value produces a visible false warning, not a silently
 	// missing security alert.
 	busAuthEnforced bool
-	// busTLSAlert, when set, reports the bus TLS posture's standing warning
-	// (bus TLS mode pinned below require, or the bus key unusable), or nil.
+	// busTLSAlert, when set, reports the standing bus TLS alert (the bus key
+	// or certificate unusable), or nil.
 	busTLSAlert func(now time.Time) *proto.Alert
 	// busSessionAlerts, when set, reports the nodes whose join token two
 	// presenters are trading the bus session between (busauth.Store.
@@ -107,8 +107,8 @@ type Service struct {
 	busSessionAlerts func(now time.Time) []proto.Alert
 }
 
-// SetBusTLSAlert wires the bus TLS posture warning (bustls.Service.Alert, or
-// bustls.UnavailableAlert when the bus key did not load). Set before List.
+// SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
+// key or certificate did not load, nil otherwise). Set before List.
 func (s *Service) SetBusTLSAlert(fn func(now time.Time) *proto.Alert) { s.busTLSAlert = fn }
 
 // SetBusSessionAlerts wires the contested-join-token alert

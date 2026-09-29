@@ -84,9 +84,10 @@ func ValidNodeKeyPurpose(p NodeKeyPurpose) bool {
 //	"nodeKeys": {"agent": "sha256/…", "collector": "sha256/…"}
 //
 // Absent from an agent that predates the keys (MetadataMinAgentVersion tells
-// that apart from "should report and did not"), and absent — deliberately —
-// from any registration the agent did not make over a pinned TLS bus
-// connection. See NodeKeysAcceptable.
+// that apart from "should report and did not"). Every registration arrives
+// over a pinned TLS bus connection, because the bus accepts nothing else
+// (geekdojo/geekdojo-brain#517), so the report needs no transport flag beside
+// it.
 const MetadataNodeKeys = "nodeKeys"
 
 // NodeKeySPKIHash is the canonical hash of a node key's public half: the same
@@ -212,22 +213,4 @@ func DecodeNodeKeys(metadata map[string]any) (keys NodeKeys, ok bool, err error)
 		return nil, false, nil
 	}
 	return out, true, nil
-}
-
-// NodeKeysAcceptable reports whether a registration carrying these metadata
-// may register or replace keys: only when the agent says the connection it
-// registered over is TLS with the bus pin verified (MetadataBusTLS true).
-//
-// This is the same rule successor bus pins follow (auth-methodology §5.1). On
-// an unpinned link the key grants nothing the join token does not already
-// grant, but a man-in-the-middle holding a sniffed token could register a key
-// of its own — so the key is taken only where the node has proven it is
-// talking to this control plane.
-func NodeKeysAcceptable(metadata map[string]any) bool {
-	v, ok := metadata[MetadataBusTLS]
-	if !ok {
-		return false
-	}
-	b, ok := v.(bool)
-	return ok && b
 }

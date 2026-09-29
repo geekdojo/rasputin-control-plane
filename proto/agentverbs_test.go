@@ -24,7 +24,6 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 		"MeshEnrollDeadlineMinAgentVersion":  MeshEnrollDeadlineMinAgentVersion,
 		"RestoreReplayMinAgentVersion":       RestoreReplayMinAgentVersion,
 		"StorageClaimPurposeMinAgentVersion": StorageClaimPurposeMinAgentVersion,
-		"BootCommittedMinAgentVersion":       BootCommittedMinAgentVersion,
 	} {
 		if !calver.MatchString(v) {
 			t.Errorf("%s: %q is not bare CalVer (YYYY.MM.PATCH[-dev.N])", name, v)
@@ -35,7 +34,7 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 // The metadata key converge_trust acts on has a floor, so a silent node can
 // be told apart from one whose agent never heard of the key.
 func TestMetadataMinAgentVersionLookup(t *testing.T) {
-	for _, key := range []string{MetadataMeshCAFingerprint, MetadataBusTLS, MetadataTokenSource, MetadataHTTPSPinned, MetadataNodeKeys} {
+	for _, key := range []string{MetadataMeshCAFingerprint, MetadataTokenSource, MetadataNodeKeys} {
 		if _, ok := MetadataMinAgentVersion(key); !ok {
 			t.Errorf("%s has no minimum agent version recorded", key)
 		}
@@ -48,7 +47,7 @@ func TestMetadataMinAgentVersionLookup(t *testing.T) {
 // The verbs the two misdiagnosed sites send are recorded, and a verb nobody
 // recorded says so rather than inventing a floor.
 func TestVerbMinAgentVersionLookup(t *testing.T) {
-	for _, verb := range []string{"storage.backup_stage_volume", "docker.volumes.list", "docker.volumes.remove", "storage.backup_restore_volume", "docker.pull", "docker.volumes.check", "docker.volumes.drop", BusPinVerb, ConsoleRootHashVerb} {
+	for _, verb := range []string{"storage.backup_stage_volume", "docker.volumes.list", "docker.volumes.remove", "storage.backup_restore_volume", "docker.pull", "docker.volumes.check", "docker.volumes.drop", ConsoleRootHashVerb} {
 		if _, ok := VerbMinAgentVersion(verb); !ok {
 			t.Errorf("%s has no minimum agent version recorded", verb)
 		}
@@ -81,6 +80,19 @@ func TestCmdSubjectVerbRoundTrips(t *testing.T) {
 	for _, bad := range []string{"", "rasputin.node.n1.heartbeat", "rasputin.node.n1.cmd.", "rasputin.node..cmd.diag.ping", "rasputin.job.j1.events"} {
 		if _, _, ok := CmdSubjectVerb(bad); ok {
 			t.Errorf("%q parsed as a cmd subject", bad)
+		}
+	}
+}
+
+// TC-517-14: the plaintext ladder's verb and metadata keys are gone from the
+// floor tables, so nothing reads an agent's silence on them as a fault.
+func TestLadderKeysHaveNoFloor(t *testing.T) {
+	if v, ok := VerbMinAgentVersion("bus.pin"); ok {
+		t.Errorf("bus.pin still has a floor %q", v)
+	}
+	for _, key := range []string{"busTls", "httpsPinned"} {
+		if v, ok := MetadataMinAgentVersion(key); ok {
+			t.Errorf("metadata key %s still has a floor %q", key, v)
 		}
 	}
 }

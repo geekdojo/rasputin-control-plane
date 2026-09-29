@@ -53,18 +53,6 @@ const (
 	TokenSourceNone = "none"
 )
 
-// MetadataHTTPSPinned is the registration-metadata key under which an agent
-// reports whether its HTTPS clients to the control plane verify the api by the
-// BUS KEY PIN it already holds, rather than by a certificate chain (§7 6.2).
-// A bool, reported on every registration, false included.
-//
-// The cutover it gates is the last one in the ladder (§7 6.5): the plaintext
-// and chain-verified routes are deleted once every registered node reports
-// true. False is the honest answer from an agent that still trusts a CA
-// bundle, and it is REPORTED rather than omitted so the api can tell a node
-// that has not moved yet from one that cannot say either way.
-const MetadataHTTPSPinned = "httpsPinned"
-
 // TokenSourceOf reads a node's MetadataTokenSource report out of its
 // registration metadata. reported is false when the key is absent or carries
 // anything but one of the three values above — an unknown value is not a
@@ -91,22 +79,4 @@ func TokenSourceOf(metadata map[string]any) (source string, reported bool) {
 		return TokenSourceNone, true
 	}
 	return "", false
-}
-
-// HTTPSPinnedOf reads a node's MetadataHTTPSPinned report out of its
-// registration metadata. reported is false when the key is absent or is not a
-// bool; pinned is true only for a reported true.
-func HTTPSPinnedOf(metadata map[string]any) (pinned, reported bool) {
-	if metadata == nil {
-		return false, false
-	}
-	v, ok := metadata[MetadataHTTPSPinned]
-	if !ok {
-		return false, false
-	}
-	b, isBool := v.(bool)
-	if !isBool {
-		return false, false
-	}
-	return b, true
 }

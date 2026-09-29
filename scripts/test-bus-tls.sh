@@ -1,53 +1,112 @@
 #!/usr/bin/env bash
-# test-bus-tls.sh — the bus TLS functional test (geekdojo/geekdojo-brain#448),
-# run alone and verbosely. CI runs the same tests with the rest of ./api/...
+# test-bus-tls.sh — the bus TLS functional tests (geekdojo/geekdojo-brain#448,
+# #517), run alone and verbosely. CI runs the same tests with the rest of
+# ./api/...
 #
-# What runs (api/internal/bustls/functional_test.go and functional_api_test.go):
-# the real embedded bus with auth callout enforced, the real inventory, job
-# store/runner and bustls service with its real commit check, and the REAL
-# rasputin-agent binary (built from this workspace) as subprocesses:
+# What runs (api/internal/bustls/functional_test.go and
+# functional_api_test.go): the real embedded bus, TLS required, with the auth
+# callout enforced; the real inventory and join-token store; and the REAL
+# rasputin-agent and rasputin-api binaries, built from this workspace:
 #
-#   * the automatic ladder, no operator action — offer while the controlplane's
-#     build is an uncommitted trial and a self-update is in flight (each half
-#     proven on its own); commit → migrate → pins delivered → both agents
-#     (the controlplane's own and a compute node) re-dial over TLS and report
-#     busTls=true; a job in flight holds require back; the job ends → require
-#     recorded, job intake closed, and the bus server replaced IN-PROCESS (same
-#     bus.Server, same api connection) — a job submitted before and after the
-#     server swap is refused with jobs.ErrQuiesced, then accepted and run over
-#     the new bus to both agents, which rejoined over TLS by themselves;
-#     plaintext refused on the wire; an unpinned node refused; the agents
-#     rejoin again from their saved pin; a later restart comes up in require;
-#   * the REAL rasputin-api binary (built with -race under -race) on a fresh
-#     controlplane: it reaches require by itself with the SAME process — one
-#     PID, never exits, GET /healthz answered on every back-to-back poll across
-#     the switch — pin delivered to its own agent, both agents back over
-#     TLS, a job submitted at the decision answered 503+Retry-After (or 201 if
-#     the switch had already finished) and jobs running afterwards, plaintext
-#     refused, an unpinned node refused;
-#   * pin redelivery (geekdojo-brain#615) — a controlplane restarts on a fleet
-#     that enrolled before the pin existed, the agents are back on its bus
-#     before inventory is listening, and the mode moves to migrate before the
-#     api has heard from any of them; every node still reaches TLS and the bus
-#     reaches require, with no agent restarted, reconnected or re-registered
-#     by the test;
-#   * a pinned offer (RASPUTIN_BUS_TLS) — right pin TLS, wrong pin refused, no
-#     pin plaintext, and the pinned mode does not move;
-#   * clock independence — a bus certificate not valid until decades from now,
-#     and one expired in 1991, both accepted by a pinned agent;
-#   * the controlplane's own agent on the token its api mints
-#     (geekdojo-brain#140) — an agent started before the file exists joins once
-#     it appears, a tokenless impostor on 127.0.0.1 is refused, and a deleted
-#     file re-mints on restart with the same agent process rejoining.
+#   * the controlplane's own agent joins from the pin file its api writes, a
+#     compute node from its seeded pin, and a node migrated in place from the
+#     pin file an older agent saved — which nothing changes;
+#   * nothing on a node answers the retired bus.pin verb;
+#   * an agent with no usable pin exits FATAL and never dials;
+#   * a controlplane agent started before its pin file exists joins on the
+#     unit's restart; one pinned to a key a restore replaced refuses the new
+#     key, logs why, and joins after a restart;
+#   * the real api refuses plaintext on the wire whatever a stale mode row or
+#     RASPUTIN_BUS_TLS says, and warns once about the variable;
+#   * the real api with an unusable bus key, or certificate, keeps running
+#     with no bus listener, a crit alert naming the file, and coded 503s;
+#   * clock independence, the controlplane agent's minted token, and the
+#     persisted bus certificate.
+#
+# --compat instead builds rasputin-agent and rasputin-api from the floor
+# release tag (v2026.09.5) and runs the -tags buscompat tests against them:
+# the floor agent on this api, and this agent on the floor api. It fails on a
+# missing tag, a failed build, any skipped or failed test, or fewer than two
+# top-level TestCompat* passes. The backend CI job runs exactly this.
 #
 # No bench, no hardware, no root. What it does NOT cover: the OS firstboot and
 # firewall apply-seed consumers, mDNS, real hardware clocks — see the PR's
 # bench plan.
 #
-# Usage: scripts/test-bus-tls.sh [extra go test flags]
+# Usage:
+#   scripts/test-bus-tls.sh [extra go test flags]
+#   scripts/test-bus-tls.sh --compat
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.4}"
-exec go test -count=1 -race -v -run 'TestFunctional' ./api/internal/bustls/ "$@"
+
+if [ "${1:-}" != "--compat" ]; then
+	exec go test -count=1 -race -v -run 'TestFunctional' ./api/internal/bustls/ "$@"
+fi
+
+floor_tag="v2026.09.5"
+if ! git rev-parse -q --verify "refs/tags/${floor_tag}^{commit}" >/dev/null; then
+	echo "test-bus-tls: tag ${floor_tag} is not in this clone; fetch it with: git fetch --depth=1 origin tag ${floor_tag}" >&2
+	exit 1
+fi
+
+work="$(mktemp -d)"
+src="${work}/src"
+cleanup() {
+	git worktree remove --force "${src}" >/dev/null 2>&1 || true
+	rm -rf "${work}"
+}
+trap cleanup EXIT
+
+git worktree add --detach "${src}" "${floor_tag}" >/dev/null
+echo "test-bus-tls: building the floor binaries from ${floor_tag} ($(git -C "${src}" rev-parse HEAD))"
+for bin in agent api; do
+	if ! (cd "${src}" && env -u GOWORK go build -o "${work}/rasputin-${bin}" "./${bin}/cmd/rasputin-${bin}"); then
+		echo "test-bus-tls: go build rasputin-${bin} from ${floor_tag} failed" >&2
+		exit 1
+	fi
+done
+
+go vet -tags buscompat ./api/internal/bustls/
+
+results="${work}/compat.json"
+RASPUTIN_BUSCOMPAT_OLD_AGENT="${work}/rasputin-agent" \
+RASPUTIN_BUSCOMPAT_OLD_API="${work}/rasputin-api" \
+	go test -count=1 -race -tags buscompat -json -run '^TestCompat' ./api/internal/bustls/ | tee "${results}"
+
+python3 - "${results}" <<'PY'
+import json, sys
+
+passed, failed, skipped = set(), set(), set()
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    ev = json.loads(line)
+    test, action = ev.get("Test"), ev.get("Action")
+    if not test:
+        if action == "fail":
+            failed.add("(package)")
+        continue
+    if action == "fail":
+        failed.add(test)
+    elif action == "skip":
+        skipped.add(test)
+    elif action == "pass" and "/" not in test and test.startswith("TestCompat"):
+        passed.add(test)
+
+problems = []
+if failed:
+    problems.append("failed: " + ", ".join(sorted(failed)))
+if skipped:
+    problems.append("skipped (a skip is not a pass): " + ", ".join(sorted(skipped)))
+if len(passed) < 2:
+    problems.append(f"{len(passed)} top-level TestCompat* test(s) passed, want at least 2: {sorted(passed)}")
+if problems:
+    for p in problems:
+        print("test-bus-tls: " + p, file=sys.stderr)
+    sys.exit(1)
+print("test-bus-tls: compatibility passed: " + ", ".join(sorted(passed)))
+PY

@@ -6,8 +6,8 @@
 // agent's environment token fallback, deleting the chain-verified HTTPS routes
 // — is allowed to fire only once every node in inventory has said it no longer
 // needs the old path. The nodes say it in registration metadata (proto
-// MetadataTokenSource, MetadataHTTPSPinned), the api records it on the node
-// row, and this package turns those rows into the yes/no the step reads.
+// MetadataTokenSource), the api records it on the node row, and this package
+// turns those rows into the yes/no the step reads.
 //
 // Three readings, kept apart on purpose, because they send an operator to
 // three different places:
@@ -94,26 +94,6 @@ func TokenOnFile(nodes []*proto.Node) State {
 				return fmt.Sprintf("%s reports no join token at all", n.NodeID)
 			}
 			return ""
-		})
-}
-
-// HTTPSPinned reports whether every node's HTTPS clients to the api verify the
-// control plane by the bus pin (proto.MetadataHTTPSPinned). It is one of the
-// three facts the plaintext-ladder deletion waits on (§7 6.5).
-func HTTPSPinned(nodes []*proto.Node) State {
-	return evaluate(proto.MetadataHTTPSPinned, "true", nodes,
-		func(m map[string]any) (string, bool) {
-			pinned, reported := proto.HTTPSPinnedOf(m)
-			if !reported {
-				return "", false
-			}
-			if pinned {
-				return "true", true
-			}
-			return "false", true
-		},
-		func(n NodeState) string {
-			return fmt.Sprintf("%s reports its HTTPS clients to the api are not pinned", n.NodeID)
 		})
 }
 

@@ -260,6 +260,7 @@ func TestBus_NodeCannotReadOtherNodesReplies(t *testing.T) {
 // *.local names, and this test dials an IP.
 func agentShapedOptions(nodeID, token string, errs chan<- error) []nats.Option {
 	return []nats.Option{
+		busKit.Option,
 		nats.Name(fmt.Sprintf("rasputin-agent/%s", nodeID)),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),

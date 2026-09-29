@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -92,7 +93,8 @@ type apiFixture struct {
 	setupSvc        *setup.Service
 	console         *console.Store
 	nc              *nats.Conn
-	busTLS          *bustls.Service
+	busKey          *bustls.Key
+	logs            *logCapture
 	hasFirewallNode bool
 }
 
@@ -276,9 +278,23 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	if err != nil {
 		t.Fatalf("busauth OpenStore: %v", err)
 	}
-	srv := NewServer(jobStore, runner, invStore, invSvc, fwStore, appStore,
+	// A controlplane HAS a bus key: it is generated on first start and only
+	// absent when the file is broken. Wiring it here is what a real api does,
+	// and it is load-bearing for minting — a seed with no RASPUTIN_BUS_PIN is
+	// refused (geekdojo/geekdojo-brain#510). A test that wants the broken-key
+	// path calls f.useBusState(t, bustls.Unavailable(...)).
+	busKey, _, err := bustls.EnsureKey(filepath.Join(dir, "bus"))
+	if err != nil {
+		t.Fatalf("bus key: %v", err)
+	}
+	logs := &logCapture{}
+	srv, err := NewServer(jobStore, runner, invStore, invSvc, fwStore, appStore,
 		mtrStore, updStore, verifier, bundleDir, trustDir,
-		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, busTokenStore, nc)
+		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, busTokenStore, nc,
+		bustls.Available(busKey), slog.New(logs), sequentialIDs())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 
 	srv.SetConsole(consoleStore)
 	f.console = consoleStore
@@ -292,12 +308,8 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	f.meshFake = meshClient
 	f.bmcSvc = bmcSvc
 	f.setupSvc = setupSvc
-	// A controlplane HAS a bus key: it is generated on first start and only
-	// absent when the file is broken. Wiring it here is what a real api does,
-	// and it is load-bearing for minting — a seed with no RASPUTIN_BUS_PIN is
-	// refused (geekdojo/geekdojo-brain#510). A test that wants the broken-key
-	// path calls f.srv.SetBusTLS(nil).
-	f.busTLS = wireBusTLS(t, f)
+	f.busKey = busKey
+	f.logs = logs
 	return f
 }
 
@@ -1613,10 +1625,14 @@ func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
 		DefaultUser:  "rasputin-operator",
 		HeadplaneURL: hpURL,
 	}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
-	srv := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
+	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
 		f.fw, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
-		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc)
+		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
+		f.srv.bus, f.srv.log, f.srv.newCorrelationID)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	handler := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/mesh/state", nil)
@@ -1650,10 +1666,14 @@ func TestHandleListMeshDevices_CarriesTrust(t *testing.T) {
 	c := f.authenticate(t)
 	ca := []byte("-----BEGIN CERTIFICATE-----\nORIGINAL\n-----END CERTIFICATE-----\n")
 	meshSvc := mesh.NewService(mesh.Config{MeshCAPEM: ca}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
-	srv := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
+	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
 		f.fw, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
-		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc)
+		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
+		f.srv.bus, f.srv.log, f.srv.newCorrelationID)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	now := time.Now().UTC()
 	ctx := context.Background()
 	for id, meta := range map[string]map[string]any{

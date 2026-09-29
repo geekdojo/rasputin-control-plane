@@ -1,8 +1,8 @@
 // Package bustls is the controlplane's half of TLS on the cluster bus
 // (geekdojo/geekdojo-brain#448): the dedicated bus key, the self-signed
 // certificate the embedded NATS server wraps it in, the pin nodes trust it by,
-// the migration mode that decides whether plaintext is still accepted, and the
-// delivery of the pin to nodes that were enrolled before it existed.
+// and the State the api starts with (served, or which file failed). The bus
+// accepts only TLS (geekdojo/geekdojo-brain#517).
 //
 // The seed and file contract the OS and firewall images consume is
 // docs/bus-tls-contract.md; keep the two in step.

@@ -107,7 +107,7 @@ func TestBus_DeletedAgentTokenReMintsAndTheAgentRejoins(t *testing.T) {
 		default:
 		}
 	}
-	agent, err := nats.Connect(eb.url,
+	agent, err := nats.Connect(eb.url, busKit.Option,
 		nats.UserInfoHandler(func() (string, string) {
 			b, err := os.ReadFile(path)
 			if err != nil {
