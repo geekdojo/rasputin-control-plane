@@ -28,14 +28,12 @@ R02	api/cmd/rasputin-api/main.go	wireBundleVerifier	RASPUTIN_UPDATE_TRUST (now i
 R03	api/cmd/rasputin-api/main.go	wireMesh	RASPUTIN_MESH_BACKEND, RASPUTIN_HEADSCALE_URL, RASPUTIN_HEADSCALE_API_KEY	TestWireMesh_AutoNeverInfersMock TestWireMesh_ExplicitMockIsHonoured	covered	
 R04	api/cmd/rasputin-api/main.go	clusterHostname	RASPUTIN_CLUSTER_ID	TestClusterHostname TestNoClusterIDKeepsDevDefaults	covered	
 R05	api/cmd/rasputin-api/main.go	loadBusTokenState	the preseed and tombstone files	TestLoadBusTokenState TestLoadBusPreseed	covered	
-R06	api/cmd/rasputin-api/main.go	busTLSStartMode	the bus mode, from the environment or the settings row, and the inventory facts it derives from	TestBusTLSStartMode_FailsClosedOnEveryShapeOfInput	covered	
-R07	api/internal/bustls/service.go	ResolveStartMode	the bus mode, from the environment or the settings row	TestResolveStartMode TestResolveStartMode_FreshClusterStartsInRequire TestResolveStartMode_UnreadableModeNeverResolvesToOffer TestResolveStartMode_FailsClosedOnEveryShapeOfInput	covered	
 R08	api/internal/updater/verifier.go	NewVerifier	the bundle-signing root CA on disk	TestNewVerifier_LoadsRootCA TestNewVerifier_MissingRootIsUnavailableNotPermissive TestNewVerifier_BadPEMIsUnavailableNotFatal TestZeroValueVerifierRefuses	covered	
 R09	api/internal/auth/origins.go	NewOriginAllowlist	the configured browser origins	TestNewOriginAllowlistNormalizesAndDeduplicates TestNormalizeOrigin	covered	
 R10	api/internal/auth/store.go	Store.FirstRun	whether any user row exists	TestFirstRun_TrueOnEmptyFalseOnceAUserExists TestFirstRun_FailsClosedOnDBError	covered	
 R11	api/internal/setup/store.go	Store.GetBool	a boolean setting row	TestGetBool_DefaultAppliesOnlyWhenUnset TestGetBool_FailsClosedWhenTheRowCannotBeRead	covered	
 R12	artifactsig/verify.go	TrustRootPath	RASPUTIN_TRUST_ROOT	TestTrustRootPath	covered	
-R13	agent/internal/bus/pin.go	ResolvePin	the bus pin, from the environment or the pin file	TestResolvePin TestResolvePin_FailsClosedWithNoUsableSource TestResolvePin_ControlplaneFile TestResolvePin_FailsClosedOnEveryShapeOfInput	covered	
+R13	agent/internal/bus/pin.go	ResolvePin	the bus pin, from the environment, the saved pin file, or the controlplane pin file	TestResolvePin TestResolvePin_NoPinWithNoUsableSource TestResolvePin_ControlplaneFile TestResolvePin_FailsClosedOnEveryShapeOfInput	covered	
 R14	agent/internal/bus/token.go	ResolveTokenSource	the join token, from the environment or the token file	TestResolveTokenSource	covered	
 R15	agent/cmd/rasputin-agent/main.go	bmcConfigFromEnv	RASPUTIN_BMC_TURINGPI_PIN, and whether a retired RASPUTIN_BMC_TURINGPI_{FINGERPRINT,INSECURE} is still set	TestBMCConfigFromEnvCoversEveryField TestBMCConfigFromEnv_FailsClosedOnEveryShapeOfInput TestRetiredBMCEnvInUse	covered	
 R16	agent/cmd/rasputin-agent/main.go	agentStateDir	RASPUTIN_AGENT_STATE_DIR, which holds the pin file	TestAgentStateDir	covered	
@@ -48,3 +46,4 @@ R22	agent/internal/storage/archive.go	StagingRoot	RASPUTIN_BACKUP_STAGING_DIR	Te
 R23	agent/cmd/rasputin-agent/main.go	controlplanePinFile	RASPUTIN_BUS_PIN_FILE, the controlplane agent's last bus-pin source	TestControlplanePinFile_FailsClosedOnEveryShapeOfInput	covered	
 R24	api/internal/busauth/enforce.go	ResolveEnforcement	RASPUTIN_BUS_AUTH and the host the embedded NATS server binds	TestResolveEnforcement TestResolveEnforcement_RefusalIsNeverOpen	covered	
 R25	api/internal/apps/privilege_consent.go	CheckUpgradeConsent	an app row's recorded privilege tier and privilege consent (dec 12, geekdojo/geekdojo-brain#522)	TestCheckUpgradeConsent_FailsClosedOnEveryShapeOfRecord TestUpgradeSaga_AnUnreadableConsentRecordRefusesUntilReplaced TestCheckUpgradeConsent_AnUnreadableRecordRefusesARaiseAndSaysWhy TestStore_AnUnreadableConsentRecordStillLoadsTheApp TestUpgradeSaga_RefusesARaiseWithNoRecordedConsent	covered	
+R26	api/cmd/rasputin-api/main.go	busTLSEnvWarning	RASPUTIN_BUS_TLS, the retired bus TLS mode, which is reported when set and decides nothing (geekdojo/geekdojo-brain#517)	TestBusTLSEnvWarning	covered	
