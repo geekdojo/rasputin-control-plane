@@ -245,6 +245,23 @@ jobs:
             echo "::endgroup::"
           done
 
+      # The compatibility tests for the release that deleted the plaintext bus
+      # ladder (geekdojo/geekdojo-brain#517): an agent built from the floor
+      # release v2026.09.5 on this api, and this agent on that release's api.
+      # A step inside this required job, so a failure blocks the merge. The
+      # checkout is shallow and carries no tags, so the one tag is fetched;
+      # the script builds both old binaries from it, runs the -tags buscompat
+      # tests, and fails on a missing tag, a failed build, a skipped or failed
+      # test, or fewer than two top-level TestCompat* passes. Proven on amd64
+      # (this runner) only; arm64 is the bench. Remove it once no known cluster
+      # runs a release below this one.
+      - name: bus TLS compatibility (v2026.09.5 floor)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin tag v2026.09.5
+          ./scripts/test-bus-tls.sh --compat
+
       - name: coverage summary
         run: |
           go tool cover -func=api.coverage.out | tail -1
