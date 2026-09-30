@@ -119,9 +119,13 @@ func main() {
 	// and offer first-run setup over the top of it. The trust and mesh dirs
 	// are resolved here from the same env the sections below read, so the
 	// files land where those sections will look.
+	//
+	// trustDir is resolved once, here, and serves both the restore layout and
+	// the trust material set up further down.
+	trustDir := trustDirFromEnv(dataDir)
 	restoreLayout := storage.RestoreLayout{
 		DataDir:      dataDir,
-		TrustDir:     envOr("RASPUTIN_TRUST_DIR", filepath.Join(dataDir, "trust")),
+		TrustDir:     trustDir,
 		MeshStateDir: envOr("RASPUTIN_MESH_STATE_DIR", filepath.Join(dataDir, "mesh")),
 		BusDir:       filepath.Join(dataDir, "bus"),
 	}
@@ -411,7 +415,7 @@ func main() {
 	//   - the .mobileconfig endpoint (serves mesh-ca.pem to operator devices)
 	// Set up ahead of mesh because the docker supervisor needs the Mesh CA
 	// at construction time. See wiki design/control-plane/certificates.md.
-	trustDir := envOr("RASPUTIN_TRUST_DIR", filepath.Join(dataDir, "trust"))
+	// trustDir was resolved above, before the restore layout.
 	// Owner-only: it holds the Mesh CA key (EnsureMeshCA tightens it too).
 	if err := atrest.EnsureSecretDir(trustDir); err != nil {
 		log.Fatalf("rasputin-api: trust dir: %v", err)
@@ -609,7 +613,7 @@ func main() {
 	// before it's ever opened. Only fires while the setting has NEVER been set
 	// (an operator's explicit clear sticks); best-effort — a missing
 	// or unreadable file must never block boot (dev api has no seed).
-	akPath := envOr("RASPUTIN_CP_AUTHORIZED_KEYS", "/var/lib/rasputin/dropbear/authorized_keys")
+	akPath := cpAuthorizedKeysFromEnv()
 	if key, others, err := setupSvc.SeedOperatorSSHKeyFromFile(ctx, akPath); err != nil {
 		log.Printf("setup: seed operator SSH key from %s: %v (continuing)", akPath, err)
 	} else if key != "" {
@@ -624,13 +628,13 @@ func main() {
 	// origin https://<cluster-id>.local (ADR-0003) — and the OS image enables
 	// the native HTTPS listener (RASPUTIN_HTTPS_ADDR above) so the passkey
 	// ceremony gets its secure context without any tunnel.
+	secure, ignored, why := secureCookies(httpsAddr)
+	warnSecureCookiesNotHonoured(logger, ignored, why)
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
-		RPID:          envOr("RASPUTIN_RP_ID", applianceOr(func(h string) string { return h }, "localhost")),
-		RPOrigins: splitCSV(envOr("RASPUTIN_RP_ORIGINS", applianceOr(
-			func(h string) string { return "https://" + h },
-			"http://localhost:3000,http://localhost:8080"))),
-		SecureCookies: secureCookies(httpsAddr, envBoolPtr("RASPUTIN_SECURE_COOKIES")),
+		RPID:          rpIDFromEnv(),
+		RPOrigins:     rpOriginsFromEnv(),
+		SecureCookies: secure,
 	}
 	// Say what this node believes its identity IS, on startup, verbatim.
 	//
@@ -2273,15 +2277,15 @@ func randomSecret() (string, error) {
 }
 
 // secureCookies decides whether the session and pending-auth cookies carry
-// the Secure attribute.
+// the Secure attribute. It reads RASPUTIN_SECURE_COOKIES itself.
 //
-// It is DERIVED from whether this process terminates TLS, rather than read
-// from a standalone env var, because `httpsAddr != ""` is the exact condition
-// under which the cookie actually travels over TLS: it is the same value that
-// starts the HTTPS listener AND demotes the plain-HTTP listener to the
-// bootstrap surface, where everything but the trust page and healthz 302s to
-// https. So whenever this returns true, an authenticated request cannot be
-// served over plaintext, and whenever it returns false there is no https
+// The default is DERIVED from whether this process terminates TLS, rather than
+// read from a standalone env var, because `httpsAddr != ""` is the exact
+// condition under which the cookie actually travels over TLS: it is the same
+// value that starts the HTTPS listener AND demotes the plain-HTTP listener to
+// the bootstrap surface, where everything but the trust page and healthz 302s
+// to https. So whenever the derived value is true, an authenticated request
+// cannot be served over plaintext, and whenever it is false there is no https
 // listener for a Secure cookie to be sent to.
 //
 // It previously read `os.Getenv("RASPUTIN_SECURE_COOKIES") == "1"` — opt-in,
@@ -2292,16 +2296,58 @@ func randomSecret() (string, error) {
 // default was the bench value and production had to remember to opt in; a
 // derived value cannot be forgotten the way an env var can.
 //
-// The override remains for deployments this process cannot observe — TLS
-// terminated by a reverse proxy in front of a plain-HTTP api (force true), or
-// an https listener reached over a path where Secure would strand the session
-// (force false). Unset means derived, which is what every current deployment
-// wants.
-func secureCookies(httpsAddr string, override *bool) bool {
-	if override != nil {
-		return *override
+// The override exists for what this process cannot observe, and it can only
+// ever make the cookie safer than the derivation says:
+//
+//   - A recognised on value (1|true|yes|on) forces Secure on. That is for TLS
+//     terminated by a reverse proxy in front of a plain-HTTP api.
+//   - A recognised off value (0|false|no|off) turns Secure off ONLY when there
+//     is no HTTPS listener. Whenever one exists the off value is refused:
+//     Secure stays on, and the value comes back in ignored with
+//     reasonOffRefused.
+//   - Any other value forces Secure on, and comes back in ignored with
+//     reasonUnrecognised. Only a recognised off value can turn Secure off.
+//   - Absent or blank means derived.
+//
+// ignored is the trimmed value, with the case the operator typed, whenever
+// the setting was not honoured, and "" otherwise; reason says why. Matching is
+// case-insensitive. main writes one WARN for a non-empty ignored
+// (warnSecureCookiesNotHonoured).
+func secureCookies(httpsAddr string) (secure bool, ignored string, reason string) {
+	derived := httpsAddr != ""
+	raw, _ := os.LookupEnv("RASPUTIN_SECURE_COOKIES")
+	value := strings.TrimSpace(raw)
+	switch strings.ToLower(value) {
+	case "":
+		return derived, "", ""
+	case "1", "true", "yes", "on":
+		return true, "", ""
+	case "0", "false", "no", "off":
+		if derived {
+			return true, value, reasonOffRefused
+		}
+		return false, "", ""
+	default:
+		return true, value, reasonUnrecognised
 	}
-	return httpsAddr != ""
+}
+
+// The reasons secureCookies gives for not honouring RASPUTIN_SECURE_COOKIES.
+const (
+	reasonUnrecognised = "not a recognised value (1|true|yes|on|0|false|no|off)"
+	reasonOffRefused   = "an off value is refused while an HTTPS listener is running (RASPUTIN_HTTPS_ADDR is set)"
+)
+
+// warnSecureCookiesNotHonoured writes the one WARN entry a RASPUTIN_SECURE_COOKIES
+// value that secureCookies did not honour earns. Nothing is written when
+// ignored is empty. The value is an operator flag, not a secret.
+func warnSecureCookiesNotHonoured(logger *slog.Logger, ignored, reason string) {
+	if ignored == "" {
+		return
+	}
+	logger.Warn("rasputin-api: RASPUTIN_SECURE_COOKIES is not honoured; session cookies are Secure",
+		"value", ignored, "reason", reason,
+		"fix", "unset it to derive from RASPUTIN_HTTPS_ADDR, or set 1|true|yes|on; an off value takes effect only without an HTTPS listener")
 }
 
 // envBoolPtr returns nil when the env var is unset (so the config's own

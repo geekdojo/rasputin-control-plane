@@ -241,7 +241,7 @@ func main() {
 	// registers or advertises until Settings pushes a selection.
 	// Constructed before the bus connects so the first registration can
 	// advertise bmc-targets; the configure handler attaches after.
-	bmcKind := os.Getenv("RASPUTIN_BMC_BACKEND")
+	bmcKind := bmcBackendFromEnv()
 	// A box configured through the env path with the RETIRED BMC TLS settings
 	// — a cert-DER fingerprint, or the switch that turned verification off —
 	// is not silently reconfigured and is not taken down either. The env pin
@@ -405,7 +405,7 @@ func main() {
 	// RASPUTIN_UPDATE_BACKEND=mock, which autodetect never answers — and even
 	// then EnableSimulation refuses on a released image. There is no path by
 	// which a production node fakes a reboot: it reboots, or the command fails.
-	updateBackendChoice := envOr("RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(role))
+	updateBackendChoice := updateBackendFromEnv(func() string { return autodetectUpdaterBackend(role) })
 	rebooter := newRebooter(nodeID, client, updateBackendChoice, host.ImageVersion(), rereg)
 	// ctx is cancelled by the SIGTERM a unit stop sends. A reboot command
 	// that ends while it is cancelled ended because this agent is going down,
@@ -426,7 +426,7 @@ func main() {
 	// mock. Force via RASPUTIN_DOCKER_BACKEND=mock|docker.
 	if role == proto.RoleCompute || role == proto.RoleControlPlane {
 		appsDir := filepath.Join(stateDir, "apps")
-		backendChoice := envOr("RASPUTIN_DOCKER_BACKEND", autodetectDockerBackend())
+		backendChoice := dockerBackendFromEnv(autodetectDockerBackend)
 
 		var dockerBackend docker.Backend
 		switch backendChoice {
@@ -540,7 +540,7 @@ func main() {
 	// DISABLED and reported. The file-backed mock is dev-only and must be
 	// asked for: RASPUTIN_UCI_BACKEND=uci|mock.
 	if role == proto.RoleFirewall {
-		backendChoice := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend())
+		backendChoice := uciBackendFromEnv(autodetectUCIBackend)
 		var uciClient openwrt.UCIClient
 		switch backendChoice {
 		case "uci":
@@ -666,7 +666,7 @@ func main() {
 		go clusterdns.Run(ctx, clusterdns.Config{
 			ClusterID: clusterID(),
 			ServerIP:  func() string { return hostOf(client.ConnectedAddr()) },
-			Dir:       envOr("RASPUTIN_RESOLVED_DROPIN_DIR", clusterdns.DefaultDir),
+			Dir:       resolvedDropinDirFromEnv(),
 			Trigger:   dnsPin,
 		})
 	}
@@ -757,7 +757,7 @@ func main() {
 	// where a storage node will), so arming them would be surface with no
 	// consumer. Widen this when something consumes it, not before.
 	if role == proto.RoleControlPlane || role == proto.RoleStorage {
-		backendChoice := envOr("RASPUTIN_STORAGE_BACKEND", autodetectStorageBackend())
+		backendChoice := storageBackendFromEnv(autodetectStorageBackend)
 
 		var stBackend storage.Backend
 		switch backendChoice {
@@ -862,7 +862,7 @@ func main() {
 	// rather than mocked into looking joined. Force via
 	// RASPUTIN_TAILSCALE_BACKEND=mock|tailscale.
 	{
-		backendChoice := envOr("RASPUTIN_TAILSCALE_BACKEND", autodetectTailscaleBackend())
+		backendChoice := tailscaleBackendFromEnv(autodetectTailscaleBackend)
 		switch backendChoice {
 		case "tailscale":
 			rb, err := tailscale.NewRealBackend()
