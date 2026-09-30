@@ -23,7 +23,7 @@
 #
 # Checked by: go run ./api/cmd/failopenlint
 id	path	symbol	reads	test	status	cite
-R01	api/cmd/rasputin-api/main.go	secureCookies	RASPUTIN_SECURE_COOKIES and the HTTPS address	TestSecureCookies	covered	
+R01	api/cmd/rasputin-api/main.go	secureCookies	RASPUTIN_SECURE_COOKIES and the HTTPS address	TestSecureCookies TestSecureCookies_FailsClosedOnEveryShapeOfInput	covered	
 R02	api/cmd/rasputin-api/main.go	wireBundleVerifier	RASPUTIN_UPDATE_TRUST (now ignored with a warning) and the trust root on disk	TestWireBundleVerifier_MissingTrustRootIsNeverPermissive TestWireBundleVerifier_LoadsTheTrustRootWhenPresent	covered	
 R03	api/cmd/rasputin-api/main.go	wireMesh	RASPUTIN_MESH_BACKEND, RASPUTIN_HEADSCALE_URL, RASPUTIN_HEADSCALE_API_KEY	TestWireMesh_AutoNeverInfersMock TestWireMesh_ExplicitMockIsHonoured	covered	
 R04	api/cmd/rasputin-api/main.go	clusterHostname	RASPUTIN_CLUSTER_ID	TestClusterHostname TestNoClusterIDKeepsDevDefaults	covered	
@@ -48,3 +48,14 @@ R24	api/internal/busauth/enforce.go	ResolveEnforcement	RASPUTIN_BUS_AUTH and the
 R25	api/internal/apps/privilege_consent.go	CheckUpgradeConsent	an app row's recorded privilege tier and privilege consent (dec 12, geekdojo/geekdojo-brain#522)	TestCheckUpgradeConsent_FailsClosedOnEveryShapeOfRecord TestUpgradeSaga_AnUnreadableConsentRecordRefusesUntilReplaced TestCheckUpgradeConsent_AnUnreadableRecordRefusesARaiseAndSaysWhy TestStore_AnUnreadableConsentRecordStillLoadsTheApp TestUpgradeSaga_RefusesARaiseWithNoRecordedConsent	covered	
 R26	api/cmd/rasputin-api/main.go	busTLSEnvWarning	RASPUTIN_BUS_TLS, the retired bus TLS mode, which is reported when set and decides nothing (geekdojo/geekdojo-brain#517)	TestBusTLSEnvWarning	covered	
 R27	agent/internal/tailscale/trust.go	MeshTrust.ClientTLSConfig	the node's mesh CA bundle file, the only root the agent's HTTPS clients (bundle download, backup transfer, restore fetch) trust (geekdojo/geekdojo-brain#590)	TestMeshTrust_ClientTLSConfig_FailsClosedOnEveryShapeOfInput	covered	
+R28	agent/cmd/rasputin-agent/resolvers.go	bmcBackendFromEnv	RASPUTIN_BMC_BACKEND, the env pin that selects the BMC backend (geekdojo/geekdojo-brain#591)	TestBMCBackendFromEnv_FailsClosedOnEveryShapeOfInput	covered	
+R29	agent/cmd/rasputin-agent/resolvers.go	dockerBackendFromEnv	RASPUTIN_DOCKER_BACKEND and the docker autodetect probe (geekdojo/geekdojo-brain#591)	TestBackendFromEnv_FailsClosedOnEveryShapeOfInput TestExplicitMockIsAlwaysHonoured	covered	
+R30	agent/cmd/rasputin-agent/resolvers.go	uciBackendFromEnv	RASPUTIN_UCI_BACKEND and the uci autodetect probe (geekdojo/geekdojo-brain#591)	TestBackendFromEnv_FailsClosedOnEveryShapeOfInput TestExplicitMockIsAlwaysHonoured TestUCIBackendSelectionEnvOverride	covered	
+R31	agent/cmd/rasputin-agent/resolvers.go	updateBackendFromEnv	RASPUTIN_UPDATE_BACKEND and the updater autodetect probe, which also decides whether reboots may be simulated (geekdojo/geekdojo-brain#591)	TestBackendFromEnv_FailsClosedOnEveryShapeOfInput TestExplicitMockIsAlwaysHonoured	covered	
+R32	agent/cmd/rasputin-agent/resolvers.go	storageBackendFromEnv	RASPUTIN_STORAGE_BACKEND and the block-storage autodetect probe (geekdojo/geekdojo-brain#591)	TestBackendFromEnv_FailsClosedOnEveryShapeOfInput TestExplicitMockIsAlwaysHonoured	covered	
+R33	agent/cmd/rasputin-agent/resolvers.go	tailscaleBackendFromEnv	RASPUTIN_TAILSCALE_BACKEND and the tailscale autodetect probe (geekdojo/geekdojo-brain#591)	TestBackendFromEnv_FailsClosedOnEveryShapeOfInput TestExplicitMockIsAlwaysHonoured	covered	
+R34	agent/cmd/rasputin-agent/resolvers.go	resolvedDropinDirFromEnv	RASPUTIN_RESOLVED_DROPIN_DIR, where the cluster-name DNS pin is written (geekdojo/geekdojo-brain#591)	TestResolvedDropinDirFromEnv_FailsClosedOnEveryShapeOfInput	covered	
+R35	api/cmd/rasputin-api/resolvers.go	trustDirFromEnv	RASPUTIN_TRUST_DIR, the directory holding the bundle-signing root and the mesh CA (geekdojo/geekdojo-brain#591)	TestTrustDirFromEnv_FailsClosedOnEveryShapeOfInput	covered	
+R36	api/cmd/rasputin-api/resolvers.go	cpAuthorizedKeysFromEnv	RASPUTIN_CP_AUTHORIZED_KEYS, the file the operator SSH key is seeded from (geekdojo/geekdojo-brain#591)	TestCPAuthorizedKeysFromEnv_FailsClosedOnEveryShapeOfInput	covered	
+R37	api/cmd/rasputin-api/resolvers.go	rpIDFromEnv	RASPUTIN_RP_ID and RASPUTIN_CLUSTER_ID, the WebAuthn relying-party ID (geekdojo/geekdojo-brain#591)	TestRPIDFromEnv_FailsClosedOnEveryShapeOfInput	covered	
+R38	api/cmd/rasputin-api/resolvers.go	rpOriginsFromEnv	RASPUTIN_RP_ORIGINS and RASPUTIN_CLUSTER_ID, the browser origins the passkey ceremony accepts (geekdojo/geekdojo-brain#591)	TestRPOriginsFromEnv_FailsClosedOnEveryShapeOfInput	covered	

@@ -76,23 +76,25 @@ func TestAutodetectUCIBackend(t *testing.T) {
 	}
 }
 
+// TC-591-11: drives the uciBackendFromEnv resolver main calls, with the real
+// autodetect probe on a PATH that holds nothing.
 func TestUCIBackendSelectionEnvOverride(t *testing.T) {
 	// Autodetect finds nothing on PATH, but the env forces uci.
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("RASPUTIN_UCI_BACKEND", "uci")
-	if got := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend()); got != "uci" {
+	if got := uciBackendFromEnv(autodetectUCIBackend); got != "uci" {
 		t.Errorf("env override: got %q, want uci", got)
 	}
 	// Explicit mock is still honoured — it is a legitimate dev selection,
 	// just never an inferred one.
 	t.Setenv("RASPUTIN_UCI_BACKEND", "mock")
-	if got := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend()); got != "mock" {
+	if got := uciBackendFromEnv(autodetectUCIBackend); got != "mock" {
 		t.Errorf("explicit mock: got %q, want mock", got)
 	}
 	// Empty env falls through to autodetect, which on a box with no uci
 	// yields unavailable — NOT mock.
 	t.Setenv("RASPUTIN_UCI_BACKEND", "")
-	if got := envOr("RASPUTIN_UCI_BACKEND", autodetectUCIBackend()); got != backendUnavailable {
+	if got := uciBackendFromEnv(autodetectUCIBackend); got != backendUnavailable {
 		t.Errorf("autodetect fallback: got %q, want backendUnavailable", got)
 	}
 }
@@ -149,23 +151,34 @@ func TestNoAutodetectEverYieldsMock(t *testing.T) {
 
 // The other half of the contract: an operator who ASKS for mock still gets it.
 // Breaking this would push developers back toward re-adding the inference.
+//
+// TC-591-11: this drives the five resolvers main calls (F-591-05), each with
+// the real autodetect probe on a PATH that holds nothing.
 func TestExplicitMockIsAlwaysHonoured(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // autodetect would find nothing
 
 	cases := []struct {
-		env      string
-		fallback string
+		env     string
+		resolve func() string
 	}{
-		{"RASPUTIN_DOCKER_BACKEND", autodetectDockerBackend()},
-		{"RASPUTIN_STORAGE_BACKEND", autodetectStorageBackend()},
-		{"RASPUTIN_TAILSCALE_BACKEND", autodetectTailscaleBackend()},
-		{"RASPUTIN_UCI_BACKEND", autodetectUCIBackend()},
-		{"RASPUTIN_UPDATE_BACKEND", autodetectUpdaterBackend(proto.RoleCompute)},
+		{"RASPUTIN_DOCKER_BACKEND", func() string { return dockerBackendFromEnv(autodetectDockerBackend) }},
+		{"RASPUTIN_STORAGE_BACKEND", func() string { return storageBackendFromEnv(autodetectStorageBackend) }},
+		{"RASPUTIN_TAILSCALE_BACKEND", func() string { return tailscaleBackendFromEnv(autodetectTailscaleBackend) }},
+		{"RASPUTIN_UCI_BACKEND", func() string { return uciBackendFromEnv(autodetectUCIBackend) }},
+		{"RASPUTIN_UPDATE_BACKEND", func() string {
+			return updateBackendFromEnv(func() string { return autodetectUpdaterBackend(proto.RoleCompute) })
+		}},
 	}
 	for _, c := range cases {
 		t.Setenv(c.env, "mock")
-		if got := envOr(c.env, c.fallback); got != "mock" {
+		if got := c.resolve(); got != "mock" {
 			t.Errorf("%s=mock: got %q, want mock — an explicit request must always win", c.env, got)
+		}
+		// With nothing asked for, the empty probe answer disables the
+		// subsystem rather than falling back to the mock.
+		t.Setenv(c.env, "")
+		if got := c.resolve(); got != backendUnavailable {
+			t.Errorf("%s unset with nothing on PATH: got %q, want backendUnavailable", c.env, got)
 		}
 	}
 }
