@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +40,8 @@ const (
 type xferRig struct {
 	ingest *backupxfer.Ingest
 	srv    *httptest.Server
+	// hits counts every request the endpoint received.
+	hits   *atomic.Int32
 	genDir string
 	dest   string
 	priv   *ecdh.PrivateKey
@@ -47,6 +50,17 @@ type xferRig struct {
 
 func newXferRig(t *testing.T) *xferRig {
 	t.Helper()
+	return newXferRigOn(t, func(h http.Handler) *httptest.Server {
+		srv := httptest.NewServer(h)
+		t.Cleanup(srv.Close)
+		return srv
+	})
+}
+
+// newXferRigOn is newXferRig on a server start chooses — an HTTPS one under
+// a given CA, for the trust cases.
+func newXferRigOn(t *testing.T, start func(http.Handler) *httptest.Server) *xferRig {
+	t.Helper()
 	auth, err := backupxfer.NewAuthority()
 	if err != nil {
 		t.Fatal(err)
@@ -54,8 +68,11 @@ func newXferRig(t *testing.T) *xferRig {
 	ing := backupxfer.New(auth, 1)
 	mux := http.NewServeMux()
 	mux.Handle("PUT "+backupxfer.IngestPathPrefix, ing)
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
+	hits := &atomic.Int32{}
+	srv := start(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		hits.Add(1)
+		mux.ServeHTTP(w, req)
+	}))
 	genDir, err := ing.Open(filepath.Join(t.TempDir(), "generations"), xferGen, xferJob)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +85,7 @@ func newXferRig(t *testing.T) *xferRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &xferRig{ingest: ing, srv: srv, genDir: genDir, dest: dest, priv: priv,
+	return &xferRig{ingest: ing, srv: srv, hits: hits, genDir: genDir, dest: dest, priv: priv,
 		pubB64: base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())}
 }
 

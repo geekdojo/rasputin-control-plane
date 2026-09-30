@@ -413,7 +413,7 @@ func writeBundle(path string, body []byte) error {
 // the constructor without needing a real rauc binary.
 func TestNewRAUCBackend_NoCLI(t *testing.T) {
 	t.Setenv("PATH", "")
-	_, err := NewRAUCBackend(t.TempDir())
+	_, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err == nil {
 		t.Error("expected NewRAUCBackend to fail with empty PATH")
 	}
@@ -505,7 +505,7 @@ func runtimeIsWindows() bool { return runtime.GOOS == "windows" }
 
 func TestRAUCBackend_PrecheckHappy(t *testing.T) {
 	fakeRAUC(t, "ok")
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -531,7 +531,7 @@ func TestRAUCBackend_PrecheckHappy(t *testing.T) {
 
 func TestRAUCBackend_PrecheckFail(t *testing.T) {
 	fakeRAUC(t, "fail")
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestRAUCBackend_PrecheckFail(t *testing.T) {
 
 func TestRAUCBackend_MarkGoodAndBad(t *testing.T) {
 	fakeRAUC(t, "ok")
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestRAUCBackend_MarkGoodAndBad(t *testing.T) {
 
 func TestRAUCBackend_MarkGoodAndBadFail(t *testing.T) {
 	fakeRAUC(t, "fail")
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -583,7 +583,7 @@ func TestRAUCBackend_DownloadHappyPath(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -605,7 +605,7 @@ func TestRAUCBackend_DownloadHTTPError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestRAUCBackend_DownloadHTTPError(t *testing.T) {
 
 func TestRAUCBackend_DownloadBadURL(t *testing.T) {
 	fakeRAUC(t, "ok")
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -628,7 +628,7 @@ func TestRAUCBackend_DownloadBadURL(t *testing.T) {
 func TestRAUCBackend_InstallHappyPath(t *testing.T) {
 	fakeRAUC(t, "ok")
 	stateDir := t.TempDir()
-	b, err := NewRAUCBackend(stateDir)
+	b, err := NewRAUCBackend(stateDir, trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -657,7 +657,7 @@ func TestRAUCBackend_InstallHappyPath(t *testing.T) {
 
 func TestRAUCBackend_InstallFail(t *testing.T) {
 	fakeRAUC(t, "fail")
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestRAUCBackend_InstallFail(t *testing.T) {
 
 func TestRAUCBackend_InstallNoVersion(t *testing.T) {
 	fakeRAUC(t, "noversion")
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -708,7 +708,7 @@ esac
 	if err := writeFile755(shimPath, body); err != nil {
 		t.Fatalf("write shim: %v", err)
 	}
-	b, err := newRAUCBackend(t.TempDir(), shimPath)
+	b, err := newRAUCBackend(t.TempDir(), shimPath, trustNoTLS)
 	if err != nil {
 		t.Fatalf("newRAUCBackend: %v", err)
 	}
@@ -728,7 +728,7 @@ esac
 }
 
 func TestRAUCBackend_NewRAUCBackend_RejectsEmptyBinary(t *testing.T) {
-	if _, err := newRAUCBackend(t.TempDir(), ""); err == nil {
+	if _, err := newRAUCBackend(t.TempDir(), "", trustNoTLS); err == nil {
 		t.Error("empty binary path should fail")
 	}
 }

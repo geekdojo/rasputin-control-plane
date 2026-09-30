@@ -190,7 +190,7 @@ func TestRAUCPrecheck_PiControlplaneSlots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b, err := newRAUCBackend(t.TempDir(), shim)
+	b, err := newRAUCBackend(t.TempDir(), shim, trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}

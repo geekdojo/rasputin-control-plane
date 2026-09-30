@@ -147,7 +147,7 @@ func fixtureVolume(t *testing.T, root string) {
 // milliseconds.
 func newStager(t *testing.T, rt Runtime) *Stager {
 	t.Helper()
-	s := New(rt, t.TempDir(), t.TempDir())
+	s := New(rt, t.TempDir(), t.TempDir(), trustNoTLS)
 	s.freeBytes = func(string) (uint64, error) { return 1 << 40, nil }
 	s.watchdogDeadline = 10 * time.Second
 	s.restartBackoff = []time.Duration{0, 10 * time.Millisecond, 10 * time.Millisecond}
@@ -416,7 +416,7 @@ func TestStopReportsAnAppThatWillNotComeBackAndTheSweepRetries(t *testing.T) {
 	rt.startFail = 0
 	rt.startCalls = 0
 	rt.mu.Unlock()
-	s2 := New(rt, s.stagingRoot, s.markerDir)
+	s2 := New(rt, s.stagingRoot, s.markerDir, trustNoTLS)
 	s2.restartBackoff = s.restartBackoff
 	s2.logf = t.Logf
 	if n := s2.SweepArmedStops(); n != 1 {

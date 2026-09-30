@@ -3,66 +3,136 @@ package updater
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
-	"encoding/pem"
+	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/proto/tlstest"
 )
 
-// The api serves /api/bundles/{sha} over its Mesh-CA HTTPS leaf, which the
-// system roots don't cover. Download must trust the configured CA bundle, or
-// every real update stalls at the download step with a TLS "bad certificate"
-// — the bug that wedged the first control-plane self-update on hardware
-// (agent rejected the api's mesh-CA cert because its client used system roots
-// only). Mock-backend tests never caught it since they don't do real TLS.
-func TestRAUCBackend_Download_TrustsMeshCA(t *testing.T) {
-	body := []byte("pretend-raucb-bytes")
-	sum := sha256.Sum256(body)
-	wantSHA := hex.EncodeToString(sum[:])
+// The bundle download trusts exactly the node's mesh CA bundle
+// (geekdojo/geekdojo-brain#590). The api serves /api/bundles/{sha} over its
+// Mesh-CA HTTPS leaf; a system root can never legitimately verify it, so the
+// client carries none, and a node with no usable bundle refuses before it
+// asks for anything.
 
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// trusting is a TrustSource over ca alone, built the way the agent builds it.
+func trusting(t *testing.T, ca *tlstest.CA) TrustSource {
+	t.Helper()
+	return func() (*tls.Config, error) { return proto.CATLSConfig(ca.PEM, "test CA") }
+}
+
+// countingServer serves body under ca and counts every request it receives.
+func countingServer(t *testing.T, ca *tlstest.CA, body []byte) (url string, hits *atomic.Int32) {
+	t.Helper()
+	hits = &atomic.Int32{}
+	srv := ca.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
 		_, _ = w.Write(body)
 	}))
-	defer srv.Close()
+	return srv.URL, hits
+}
 
-	// Write the server's self-signed cert as the CA the client should trust —
-	// stands in for the per-installation Mesh CA at tailscale.CABundlePath().
-	caPath := filepath.Join(t.TempDir(), "mesh-ca.pem")
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
-	if err := os.WriteFile(caPath, certPEM, 0o644); err != nil {
-		t.Fatal(err)
-	}
+func shaOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
-	newBackend := func() *RAUCBackend {
-		b, err := newRAUCBackend(t.TempDir(), "/bin/true")
-		if err != nil {
-			t.Fatalf("newRAUCBackend: %v", err)
-		}
-		return b
-	}
-	url := srv.URL + "/api/bundles/" + wantSHA
-
-	// Without the CA: system roots don't cover the server cert → TLS failure,
-	// not a silent success.
-	b := newBackend()
-	if _, _, err := b.Download(context.Background(), "b1", url, "", wantSHA, int64(len(body)), nil); err == nil {
-		t.Fatal("expected a TLS failure without the mesh CA, got nil")
-	}
-
-	// With the CA trusted: download succeeds and the sha matches.
-	b = newBackend()
-	b.SetCABundle(caPath)
-	path, observed, err := b.Download(context.Background(), "b1", url, "", wantSHA, int64(len(body)), nil)
+// assertNoBundleFiles checks the bundle store holds no bundle and no partial.
+func assertNoBundleFiles(t *testing.T, stateDir string) {
+	t.Helper()
+	ents, err := os.ReadDir(filepath.Join(stateDir, "bundles"))
 	if err != nil {
-		t.Fatalf("Download with mesh CA trusted: %v", err)
+		t.Fatalf("read bundle store: %v", err)
 	}
-	if observed != wantSHA {
-		t.Errorf("observed sha = %s, want %s", observed, wantSHA)
+	for _, e := range ents {
+		t.Errorf("bundle store holds %s after a refused download", e.Name())
 	}
-	if got, _ := os.ReadFile(path); string(got) != string(body) {
-		t.Errorf("downloaded bytes mismatch")
+}
+
+// TC-590-07: over TLS the bundle's CA signs, the download succeeds, reports
+// the observed sha, and the file on disk hashes to it.
+func TestRAUCBackend_Download_TrustsMeshCA(t *testing.T) {
+	ca := tlstest.NewCA(t, "mesh")
+	body := []byte("pretend-raucb-bytes")
+	want := shaOf(body)
+	url, _ := countingServer(t, ca, body)
+
+	b, err := newRAUCBackend(t.TempDir(), "/bin/true", trusting(t, ca))
+	if err != nil {
+		t.Fatalf("newRAUCBackend: %v", err)
+	}
+	path, observed, err := b.Download(context.Background(), "b1", url+"/api/bundles/"+want, "", want, int64(len(body)), nil)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if observed != want {
+		t.Errorf("observed sha = %s, want %s", observed, want)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read downloaded bundle: %v", err)
+	}
+	if shaOf(got) != want {
+		t.Errorf("file on disk hashes to %s, want %s", shaOf(got), want)
+	}
+}
+
+// TC-590-08: a server whose leaf the trusted CA did not sign is refused with
+// the X.509 verdict, and nothing — no bundle, no partial — is left behind.
+func TestRAUCBackend_Download_RefusesAnUntrustedServer(t *testing.T) {
+	serverCA := tlstest.NewCA(t, "server")
+	unrelated := tlstest.NewCA(t, "unrelated")
+	body := []byte("pretend-raucb-bytes")
+	url, _ := countingServer(t, serverCA, body)
+
+	stateDir := t.TempDir()
+	b, err := newRAUCBackend(stateDir, "/bin/true", trusting(t, unrelated))
+	if err != nil {
+		t.Fatalf("newRAUCBackend: %v", err)
+	}
+	_, _, err = b.Download(context.Background(), "b1", url, "", shaOf(body), int64(len(body)), nil)
+	if !tlstest.IsUnknownAuthority(err) {
+		t.Fatalf("err = %v, want an unknown-authority failure", err)
+	}
+	assertNoBundleFiles(t, stateDir)
+}
+
+// TC-590-09: a trust failure refuses the download before any request, with
+// the trust error wrapped under "rauc download:".
+func TestRAUCBackend_Download_TrustFailureRefusesBeforeAnyRequest(t *testing.T) {
+	ca := tlstest.NewCA(t, "mesh")
+	body := []byte("pretend-raucb-bytes")
+	url, hits := countingServer(t, ca, body)
+	errTrust := errors.New("mesh CA bundle /x/tailscaled-ca.pem: no such file")
+
+	b, err := newRAUCBackend(t.TempDir(), "/bin/true", func() (*tls.Config, error) { return nil, errTrust })
+	if err != nil {
+		t.Fatalf("newRAUCBackend: %v", err)
+	}
+	_, _, err = b.Download(context.Background(), "b1", url, "", shaOf(body), int64(len(body)), nil)
+	if err == nil || !strings.HasPrefix(err.Error(), "rauc download:") {
+		t.Fatalf("err = %v, want it to start %q", err, "rauc download:")
+	}
+	if !errors.Is(err, errTrust) {
+		t.Errorf("err = %v, want it to wrap the trust error", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("server received %d request(s), want 0", n)
+	}
+}
+
+// TC-590-11 (RAUC): a backend with no trust source cannot be built.
+func TestNewRAUCBackend_RefusesANilTrustSource(t *testing.T) {
+	b, err := newRAUCBackend(t.TempDir(), "/bin/true", nil)
+	if b != nil || err == nil {
+		t.Errorf("newRAUCBackend(nil trust) = (%v, %v), want (nil, error)", b, err)
 	}
 }

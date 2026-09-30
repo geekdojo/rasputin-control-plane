@@ -41,7 +41,7 @@ func TestOpenWrtDownload_MultiChunkBodyIsWrittenWhole(t *testing.T) {
 	wantSHA := hex.EncodeToString(sum[:])
 	as := newArtifactServer(t, body, []byte("detached-cms-bytes"))
 
-	b, err := NewOpenWrtABBackend(t.TempDir())
+	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestRAUCDownload_MultiChunkBodyIsWrittenWhole(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b, err := newRAUCBackend(t.TempDir(), "/bin/true")
+	b, err := newRAUCBackend(t.TempDir(), "/bin/true", trustNoTLS)
 	if err != nil {
 		t.Fatalf("newRAUCBackend: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestOpenWrtDownload_RejectsShaMismatch(t *testing.T) {
 	body := []byte("SQUASHFS-BYTES")
 	as := newArtifactServer(t, body, []byte("detached-cms-bytes"))
 
-	b, err := NewOpenWrtABBackend(t.TempDir())
+	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestRAUCDownload_RejectsShaMismatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b, err := newRAUCBackend(t.TempDir(), "/bin/true")
+	b, err := newRAUCBackend(t.TempDir(), "/bin/true", trustNoTLS)
 	if err != nil {
 		t.Fatalf("newRAUCBackend: %v", err)
 	}

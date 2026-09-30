@@ -165,12 +165,22 @@ var (
 	ErrSwapFailed = errors.New("quiesce: the live volume could not be exchanged for the staged tree")
 )
 
-// fetcher resolves a source's fetcher. Seam for tests.
+// fetcher resolves a source's fetcher over the node's mesh CA trust,
+// resolved afresh for this restore; ordered like transport, so an
+// unsupported scheme is refused as such. Seam for tests.
 func (s *Stager) fetcher(source string) (backupxfer.Fetcher, error) {
 	if s.fetcherFor != nil {
 		return s.fetcherFor(source)
 	}
-	return backupxfer.FetcherFor(source, backupxfer.HTTPOptions{CABundlePath: s.caBundlePath})
+	cfg, trustErr := s.clientTLS()
+	f, err := backupxfer.FetcherFor(source, backupxfer.HTTPOptions{TLSConfig: cfg})
+	if err != nil {
+		return nil, err
+	}
+	if trustErr != nil {
+		return nil, trustErr
+	}
+	return f, nil
 }
 
 // RestoreVolume carries out one BackupRestoreVolumeCmd. It ALWAYS returns

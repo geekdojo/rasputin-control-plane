@@ -139,6 +139,11 @@ func main() {
 			log.Printf("rasputin-agent: mesh CA directory %s: %v", meshDir, err)
 		}
 	}
+	// The one trust root the agent's own HTTPS clients (the OS update
+	// download, the backup transfer, the restore fetch) verify the api with:
+	// the node's mesh CA bundle and nothing else, re-read on every call
+	// (geekdojo/geekdojo-brain#590). Each client gets it by constructor.
+	meshTrust := tailscale.NewMeshTrust(tailscale.CABundlePath())
 
 	// The node's own TLS keys: one for the agent, one for the collector,
 	// generated once here and never leaving the node
@@ -478,11 +483,10 @@ func main() {
 			if n, freed := storage.CleanStaging(stagingRoot); n > 0 {
 				log.Printf("rasputin-agent: swept %d orphaned staged file(s) from %s (%d bytes)", n, stagingRoot, freed)
 			}
-			stager := quiesce.New(rt, stagingRoot, quiesce.MarkerDir(stateDir))
 			// The transfer verb uploads sealed volumes to the api's ingest
-			// endpoint over the api's mesh-CA HTTPS leaf; the same bundle
-			// the updater's download client trusts.
-			stager.SetCABundle(tailscale.CABundlePath())
+			// endpoint over the api's mesh-CA HTTPS leaf; the same trust the
+			// updater's download client has.
+			stager := quiesce.New(rt, stagingRoot, quiesce.MarkerDir(stateDir), meshTrust.ClientTLSConfig)
 			// The restore verb (#291 phase 2) stages beside each volume and
 			// records where, so a tree a dying process left is swept here —
 			// the previous contents a restore keeps aside are never touched.
@@ -680,22 +684,19 @@ func main() {
 		var upBackend updater.Backend
 		switch backendChoice {
 		case "rauc":
-			rb, err := updater.NewRAUCBackend(updaterDir)
+			// Bundles are pulled from the api over its mesh-CA HTTPS leaf.
+			rb, err := updater.NewRAUCBackend(updaterDir, meshTrust.ClientTLSConfig)
 			if err != nil {
 				log.Fatalf("rasputin-agent: rauc backend: %v", err)
 			}
 			rb.SetRebooter(rebooter)
-			// Trust the Mesh CA when pulling bundles — the api serves them
-			// over its mesh-CA HTTPS leaf, which the system roots don't cover.
-			rb.SetCABundle(tailscale.CABundlePath())
 			upBackend = rb
 		case "openwrt-ab":
-			ab, err := updater.NewOpenWrtABBackend(updaterDir)
+			ab, err := updater.NewOpenWrtABBackend(updaterDir, meshTrust.ClientTLSConfig)
 			if err != nil {
 				log.Fatalf("rasputin-agent: openwrt-ab backend: %v", err)
 			}
 			ab.SetRebooter(rebooter)
-			ab.SetCABundle(tailscale.CABundlePath())
 			upBackend = ab
 		case "mock":
 			mb, err := updater.NewMockBackend(updaterDir)

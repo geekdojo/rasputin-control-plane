@@ -121,7 +121,7 @@ func TestBackends_RejectTraversingBundleIDOnDownload(t *testing.T) {
 	const evil = "../../../../etc/rasputin/trust/root-ca"
 
 	t.Run("openwrt-ab", func(t *testing.T) {
-		b, err := NewOpenWrtABBackend(t.TempDir())
+		b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 		if err != nil {
 			t.Fatalf("NewOpenWrtABBackend: %v", err)
 		}
@@ -133,7 +133,7 @@ func TestBackends_RejectTraversingBundleIDOnDownload(t *testing.T) {
 
 	t.Run("rauc", func(t *testing.T) {
 		fakeRAUC(t, "ok")
-		b, err := NewRAUCBackend(t.TempDir())
+		b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 		if err != nil {
 			t.Fatalf("NewRAUCBackend: %v", err)
 		}
@@ -157,7 +157,7 @@ func TestBackends_RejectTraversingBundleIDOnDownload(t *testing.T) {
 
 func TestBackends_RejectOutOfStoreLocalPathOnInstall(t *testing.T) {
 	t.Run("openwrt-ab", func(t *testing.T) {
-		b, err := NewOpenWrtABBackend(t.TempDir())
+		b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 		if err != nil {
 			t.Fatalf("NewOpenWrtABBackend: %v", err)
 		}
@@ -169,7 +169,7 @@ func TestBackends_RejectOutOfStoreLocalPathOnInstall(t *testing.T) {
 
 	t.Run("rauc", func(t *testing.T) {
 		fakeRAUC(t, "ok")
-		b, err := NewRAUCBackend(t.TempDir())
+		b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 		if err != nil {
 			t.Fatalf("NewRAUCBackend: %v", err)
 		}

@@ -3,8 +3,6 @@ package updater
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -41,13 +39,10 @@ type RAUCBackend struct {
 	// rebooter is the agent's one reboot function. Wired from main.go via
 	// SetRebooter; nil means this backend refuses to reboot.
 	rebooter Rebooter
-	// caBundlePath, when set, is a PEM file (the per-installation Mesh CA)
-	// added to the bundle-download client's trust pool on top of the system
-	// roots. The api serves /api/bundles/{sha} over its mesh-CA HTTPS leaf,
-	// and the agent process has no SSL_CERT_FILE, so without this the default
-	// client rejects that cert ("bad certificate") and the saga stalls before
-	// install. Wired from main.go via SetCABundle(tailscale.CABundlePath()).
-	caBundlePath string
+	// trust is the bundle download's only trust root: the node's mesh CA
+	// bundle, which signs the api's HTTPS leaf that serves /api/bundles/{sha}.
+	// Called once per Download. Required by the constructor.
+	trust TrustSource
 	// procCmdline is read to determine the slot we are ACTUALLY running from.
 	// Mirrors OpenWrtABBackend's field of the same name; overridable in tests.
 	// See Precheck for why this outranks anything `rauc status` reports.
@@ -61,20 +56,23 @@ type RAUCBackend struct {
 
 // NewRAUCBackend constructs a RAUCBackend. Returns an error if the rauc
 // CLI is not on PATH — callers should fall through to MockBackend then.
-func NewRAUCBackend(stateDir string) (*RAUCBackend, error) {
+func NewRAUCBackend(stateDir string, trust TrustSource) (*RAUCBackend, error) {
 	bin, err := exec.LookPath("rauc")
 	if err != nil {
 		return nil, fmt.Errorf("rauc not on PATH: %w", err)
 	}
-	return newRAUCBackend(stateDir, bin)
+	return newRAUCBackend(stateDir, bin, trust)
 }
 
 // newRAUCBackend is the lower-level constructor that takes an explicit
 // rauc binary path. Used by NewRAUCBackend (after PATH lookup) and by
 // tests that want to point at a shim without mutating the process env.
-func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
+func newRAUCBackend(stateDir, binary string, trust TrustSource) (*RAUCBackend, error) {
 	if binary == "" {
 		return nil, errors.New("rauc backend: binary path required")
+	}
+	if trust == nil {
+		return nil, fmt.Errorf("rauc backend: %w", errNoTrustSource)
 	}
 	if err := atrest.EnsureSecretDir(filepath.Join(stateDir, "bundles")); err != nil {
 		return nil, err
@@ -82,6 +80,7 @@ func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
 	return &RAUCBackend{
 		stateDir:     stateDir,
 		binary:       binary,
+		trust:        trust,
 		procCmdline:  "/proc/cmdline",
 		verifySigner: defaultVerifyRAUCSigner,
 	}, nil
@@ -90,29 +89,11 @@ func newRAUCBackend(stateDir, binary string) (*RAUCBackend, error) {
 // SetRebooter wires the agent's one reboot function.
 func (r *RAUCBackend) SetRebooter(rb Rebooter) { r.rebooter = rb }
 
-// SetCABundle points the bundle-download HTTPS client at a CA bundle to trust
-// in addition to the system roots — the per-installation Mesh CA that signs
-// the api's leaf. Mirrors SetRebooter (post-construction wiring).
-func (r *RAUCBackend) SetCABundle(path string) { r.caBundlePath = path }
-
-// httpClient returns the client used to pull bundles. Its root pool is the
-// system roots plus the Mesh CA at caBundlePath (when set + readable). Built
-// per call so a re-enrolled CA is picked up without restarting the agent; an
-// unreadable/empty path degrades to system roots only.
-func (r *RAUCBackend) httpClient() *http.Client {
-	if r.caBundlePath == "" {
-		return http.DefaultClient
-	}
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
-	if pem, err := os.ReadFile(r.caBundlePath); err == nil {
-		pool.AppendCertsFromPEM(pem)
-	}
-	return &http.Client{Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-	}}
+// httpClient returns the client used to pull a bundle. It trusts exactly
+// the mesh CA bundle trust returns; a trust failure (no bundle, an unusable
+// one) is returned, never degraded to the system roots.
+func (r *RAUCBackend) httpClient() (*http.Client, error) {
+	return trustedClient(r.trust)
 }
 
 func (r *RAUCBackend) Name() string { return "rauc" }
@@ -380,6 +361,12 @@ func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 	if err := requireExpectedSHA(bundleID, expectedSHA); err != nil {
 		return "", "", fmt.Errorf("rauc download: %w", err)
 	}
+	// Trust is resolved before anything is pruned or requested: a node that
+	// trusts no mesh CA refuses here, with the bundle path in the error.
+	client, err := r.httpClient()
+	if err != nil {
+		return "", "", fmt.Errorf("rauc download: %w", err)
+	}
 	// Free the store before pulling: drop any prior bundles/partials so they
 	// don't accumulate and fill a small data partition (see pruneBundles).
 	r.pruneBundles(bundleID)
@@ -387,7 +374,7 @@ func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 	if err != nil {
 		return "", "", err
 	}
-	resp, err := r.httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
 	}

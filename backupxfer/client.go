@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -59,10 +58,13 @@ var ErrUnsupportedDestination = errors.New("backupxfer: no transport for that de
 
 // HTTPOptions configures the HTTP transport.
 type HTTPOptions struct {
-	// CABundlePath is a PEM file trusted in addition to the system roots — the
-	// per-installation mesh CA that signs the api's HTTPS leaf. Empty means
-	// system roots only, which is right for a dev api on plain http.
-	CABundlePath string
+	// TLSConfig is the TLS client config the transport verifies the api
+	// with: on a node, exactly the mesh CA bundle that signs the api's HTTPS
+	// leaf (geekdojo/geekdojo-brain#590), built by the caller so this package
+	// does no I/O. It is cloned, never mutated. Nil trusts NO certificate —
+	// an empty pool, not the system roots — so every HTTPS server is refused;
+	// plain http, a dev api or a test server, is unaffected.
+	TLSConfig *tls.Config
 	// AcceptWait is how long the client waits for the endpoint's 100 Continue
 	// before giving up on the slot — the §4.7 backpressure wait. Zero means
 	// DefaultAcceptWait.
@@ -99,10 +101,10 @@ type HTTPTransport struct {
 	client *http.Client
 }
 
-// NewHTTPTransport builds the transport. The client's root pool is the system
-// roots plus the CA bundle at opts.CABundlePath when it is readable; the
-// bundle is read per construction so a re-enrolled CA is picked up without a
-// restart, exactly as the updater's download client does.
+// NewHTTPTransport builds the transport over opts.TLSConfig (see
+// HTTPOptions.TLSConfig): a clone of it, with MinVersion raised to at least
+// TLS 1.2. The request carries a bearer credential, so for this client the
+// transport's root is the control, and there is no system-root fallback.
 func NewHTTPTransport(opts HTTPOptions) *HTTPTransport {
 	if opts.Client != nil {
 		return &HTTPTransport{client: opts.Client}
@@ -117,22 +119,26 @@ func NewHTTPTransport(opts HTTPOptions) *HTTPTransport {
 		// without waiting for the server's 100, which would defeat the
 		// semaphore on the other side.
 		ExpectContinueTimeout: wait,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:       clientTLS(opts.TLSConfig),
 		// A new connection per upload: the connection is the lease, and a
 		// pooled idle connection is a lease nobody is using.
 		DisableKeepAlives: true,
 	}
-	if opts.CABundlePath != "" {
-		pool, err := x509.SystemCertPool()
-		if err != nil || pool == nil {
-			pool = x509.NewCertPool()
-		}
-		if pem, err := os.ReadFile(opts.CABundlePath); err == nil { //nolint:gosec // G304: the path is the agent's own configured trust bundle, never request data
-			pool.AppendCertsFromPEM(pem)
-		}
-		tr.TLSClientConfig.RootCAs = pool
-	}
 	return &HTTPTransport{client: &http.Client{Transport: tr}}
+}
+
+// clientTLS is the transport's TLS config: a clone of cfg with MinVersion at
+// least TLS 1.2, or, for a nil cfg, a config whose root pool is empty and
+// non-nil. A nil RootCAs would mean the system roots.
+func clientTLS(cfg *tls.Config) *tls.Config {
+	if cfg == nil {
+		return &tls.Config{RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS12}
+	}
+	out := cfg.Clone()
+	if out.MinVersion < tls.VersionTLS12 {
+		out.MinVersion = tls.VersionTLS12
+	}
+	return out
 }
 
 // Put streams the sealed body to the member's URL and returns the receipt.
