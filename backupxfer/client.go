@@ -129,12 +129,16 @@ func NewHTTPTransport(opts HTTPOptions) *HTTPTransport {
 
 // clientTLS is the transport's TLS config: a clone of cfg with MinVersion at
 // least TLS 1.2, or, for a nil cfg, a config whose root pool is empty and
-// non-nil. A nil RootCAs would mean the system roots.
+// non-nil. A nil RootCAs would mean the system roots, so a cfg without one
+// gets an empty pool too: no roots means no trust.
 func clientTLS(cfg *tls.Config) *tls.Config {
 	if cfg == nil {
 		return &tls.Config{RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS12}
 	}
 	out := cfg.Clone()
+	if out.RootCAs == nil {
+		out.RootCAs = x509.NewCertPool()
+	}
 	if out.MinVersion < tls.VersionTLS12 {
 		out.MinVersion = tls.VersionTLS12
 	}

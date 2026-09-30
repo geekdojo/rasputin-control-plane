@@ -157,3 +157,34 @@ func TestNewHTTPTransport_PlainHTTPUnaffectedByNoTLSConfig(t *testing.T) {
 		t.Errorf("handler invoked %d time(s), want 2", n)
 	}
 }
+
+// F-590-05: a non-nil config whose RootCAs is nil would mean the system
+// roots. The transport gives it an empty pool instead, so a Put and a Get to
+// an HTTPS server both fail the handshake with unknown-authority and the
+// handler never runs, and the caller's config is left as it was.
+func TestNewHTTPTransport_NilRootCAsTrustsNothing(t *testing.T) {
+	given := &tls.Config{MinVersion: tls.VersionTLS12} // RootCAs nil
+	cfg := transportTLS(t, HTTPOptions{TLSConfig: given})
+	if cfg.RootCAs == nil {
+		t.Fatal("RootCAs is nil, which means the system roots")
+	}
+	if !cfg.RootCAs.Equal(x509.NewCertPool()) {
+		t.Error("RootCAs is not empty")
+	}
+
+	var hits atomic.Int32
+	srv := tlstest.NewCA(t, "mesh").NewServer(t, endpointStub(&hits))
+	putErr, getErr := putAndGet(t, srv, HTTPOptions{TLSConfig: given})
+	if !tlstest.IsUnknownAuthority(putErr) {
+		t.Errorf("Put: err = %v, want an unknown-authority failure", putErr)
+	}
+	if !tlstest.IsUnknownAuthority(getErr) {
+		t.Errorf("Get: err = %v, want an unknown-authority failure", getErr)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("handler invoked %d time(s), want 0", n)
+	}
+	if given.RootCAs != nil {
+		t.Error("caller's RootCAs was changed")
+	}
+}
