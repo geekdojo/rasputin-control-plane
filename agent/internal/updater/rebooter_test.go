@@ -121,7 +121,7 @@ func TestRAUCBackend_MarkBadRebootsPlainEvenOnATrybootImage(t *testing.T) {
 	fakeRAUC(t, "ok")
 	useTrybootMarker(t, true)
 	rec := &recordingRebooter{}
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestRAUCBackend_MarkBadRebootsPlainEvenOnATrybootImage(t *testing.T) {
 func TestRAUCBackend_FailedMarkBadDoesNotReboot(t *testing.T) {
 	fakeRAUC(t, "fail")
 	rec := &recordingRebooter{}
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}

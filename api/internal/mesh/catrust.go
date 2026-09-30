@@ -3,8 +3,8 @@ package mesh
 import (
 	"bytes"
 	"crypto/tls"
-	"crypto/x509"
-	"fmt"
+
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // One trust source for api→Headscale, and one bundle for the nodes
@@ -44,16 +44,10 @@ import (
 
 // CATLSConfig is the TLS client config that trusts exactly caPEM and nothing
 // else. source names where the PEM came from, so a parse failure says which
-// input to fix.
+// input to fix. It is proto.CATLSConfig, which the agent shares
+// (geekdojo/geekdojo-brain#590).
 func CATLSConfig(caPEM []byte, source string) (*tls.Config, error) {
-	if len(bytes.TrimSpace(caPEM)) == 0 {
-		return nil, fmt.Errorf("mesh: %s: no CA PEM to trust", source)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("mesh: %s: no certificates parsed from the CA PEM", source)
-	}
-	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
+	return proto.CATLSConfig(caPEM, source)
 }
 
 // NodeTrustBundle concatenates the PEM blobs a node must trust, in the order

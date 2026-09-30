@@ -74,7 +74,7 @@ func TestRAUCInstall_FailsClosedWithoutAnAuthorizedSigner(t *testing.T) {
 			fakeRAUC(t, "ok")
 			t.Setenv(artifactsig.TrustRootEnv, tc.trustRoot)
 			stateDir := t.TempDir()
-			b, err := NewRAUCBackend(stateDir)
+			b, err := NewRAUCBackend(stateDir, trustNoTLS)
 			if err != nil {
 				t.Fatalf("NewRAUCBackend: %v", err)
 			}
@@ -103,7 +103,7 @@ func TestRAUCInstall_FailsClosedWithoutAnAuthorizedSigner(t *testing.T) {
 func TestRAUCInstall_SignerCheckRunsBeforeRauc(t *testing.T) {
 	fakeRAUC(t, "ok")
 	stateDir := t.TempDir()
-	b, err := NewRAUCBackend(stateDir)
+	b, err := NewRAUCBackend(stateDir, trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestRAUCInstall_SignerCheckRunsBeforeRauc(t *testing.T) {
 func TestRAUCInstall_SignerCheckSeesTheResolvedPath(t *testing.T) {
 	fakeRAUC(t, "ok")
 	stateDir := t.TempDir()
-	b, err := NewRAUCBackend(stateDir)
+	b, err := NewRAUCBackend(stateDir, trustNoTLS)
 	if err != nil {
 		t.Fatalf("NewRAUCBackend: %v", err)
 	}

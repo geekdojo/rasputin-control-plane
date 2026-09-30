@@ -483,7 +483,7 @@ func TestNewRAUCBackend_ReturnsErrorWithoutRaucCLI(t *testing.T) {
 	// On most dev boxes rauc isn't on PATH — the constructor surfaces
 	// that as an error. Accept either outcome: if rauc IS installed,
 	// the Name() should be "rauc".
-	b, err := NewRAUCBackend(t.TempDir())
+	b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		return // expected on most boxes
 	}

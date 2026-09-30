@@ -838,7 +838,7 @@ func TestRestoreVolumeRecordSurvivesAnAgentRestart(t *testing.T) {
 	}
 
 	// The next agent process: the same runtime, marker dir and state dir.
-	s2 := New(r.rt, r.s.stagingRoot, r.s.markerDir)
+	s2 := New(r.rt, r.s.stagingRoot, r.s.markerDir, trustNoTLS)
 	s2.logf = r.s.logf
 	s2.SetRestoreRecordDir(r.s.restoreRecordDir)
 	s2.SetRestoreOutcomeDir(r.s.restoreOutcomeDir)

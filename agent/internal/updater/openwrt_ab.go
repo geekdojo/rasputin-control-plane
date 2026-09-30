@@ -3,8 +3,6 @@ package updater
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -63,8 +61,11 @@ type OpenWrtABBackend struct {
 
 	// rebooter is the agent's one reboot function. Wired from main.go via
 	// SetRebooter; nil means this backend refuses to reboot.
-	rebooter     Rebooter
-	caBundlePath string
+	rebooter Rebooter
+	// trust is the download's only trust root, the node's mesh CA bundle;
+	// see RAUCBackend.trust. Called once per Download, for the .sig and the
+	// artifact alike. Required by the constructor.
+	trust TrustSource
 
 	// --- injectable OS-coupled seams (see type doc) --------------------
 	// resolveDevice maps a slot letter ("A"/"B") to its rootfs block device.
@@ -80,7 +81,10 @@ type OpenWrtABBackend struct {
 // NewOpenWrtABBackend constructs the backend with production defaults. It does
 // not probe the environment — the agent selects it by role (firewall) + the
 // absence of rauc; see autodetectUpdaterBackend / main.go.
-func NewOpenWrtABBackend(stateDir string) (*OpenWrtABBackend, error) {
+func NewOpenWrtABBackend(stateDir string, trust TrustSource) (*OpenWrtABBackend, error) {
+	if trust == nil {
+		return nil, fmt.Errorf("openwrt-ab backend: %w", errNoTrustSource)
+	}
 	if err := atrest.EnsureSecretDir(filepath.Join(stateDir, "bundles")); err != nil {
 		return nil, err
 	}
@@ -91,6 +95,7 @@ func NewOpenWrtABBackend(stateDir string) (*OpenWrtABBackend, error) {
 		grubenvPath: "",
 		procCmdline: "/proc/cmdline",
 		versionFile: "/etc/rasputin/image-version",
+		trust:       trust,
 	}
 	b.resolveDevice = defaultResolveDevice
 	b.writeSlot = defaultWriteSlot
@@ -100,10 +105,6 @@ func NewOpenWrtABBackend(stateDir string) (*OpenWrtABBackend, error) {
 
 // SetRebooter wires the agent's one reboot function.
 func (o *OpenWrtABBackend) SetRebooter(rb Rebooter) { o.rebooter = rb }
-
-// SetCABundle mirrors RAUCBackend.SetCABundle: trust the Mesh CA (in addition
-// to system roots) when pulling bundles from the api's mesh-CA HTTPS leaf.
-func (o *OpenWrtABBackend) SetCABundle(path string) { o.caBundlePath = path }
 
 func (o *OpenWrtABBackend) Name() string { return "openwrt-ab" }
 
@@ -191,23 +192,10 @@ func (o *OpenWrtABBackend) Precheck(ctx context.Context) (*proto.UpdatePrecheckA
 	}, nil
 }
 
-// httpClient mirrors RAUCBackend.httpClient — system roots plus the Mesh CA at
-// caBundlePath (when set + readable), rebuilt per call so a re-enrolled CA is
-// picked up without an agent restart.
-func (o *OpenWrtABBackend) httpClient() *http.Client {
-	if o.caBundlePath == "" {
-		return http.DefaultClient
-	}
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
-	if pem, err := os.ReadFile(o.caBundlePath); err == nil {
-		pool.AppendCertsFromPEM(pem)
-	}
-	return &http.Client{Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-	}}
+// httpClient mirrors RAUCBackend.httpClient: exactly the mesh CA bundle
+// trust returns, and a trust failure is returned, never degraded.
+func (o *OpenWrtABBackend) httpClient() (*http.Client, error) {
+	return trustedClient(o.trust)
 }
 
 // bundlePath is where a downloaded rootfs artifact is cached. `.rootfs` rather
@@ -253,6 +241,13 @@ func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, 
 	if err != nil {
 		return "", "", fmt.Errorf("openwrt-ab download: %w", err)
 	}
+	// One client, from one trust call, for the .sig and the artifact both —
+	// resolved before anything is pruned or requested, so a node that
+	// trusts no mesh CA refuses here with the bundle path in the error.
+	client, err := o.httpClient()
+	if err != nil {
+		return "", "", fmt.Errorf("openwrt-ab download: %w", err)
+	}
 	o.pruneBundles(bundleID)
 
 	// The signature comes FIRST, before half a gigabyte moves. Install will
@@ -271,7 +266,7 @@ func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, 
 	if err := requireExpectedSHA(bundleID, expectedSHA); err != nil {
 		return "", "", fmt.Errorf("openwrt-ab download: %w", err)
 	}
-	if err := o.downloadSignature(ctx, sigURL, artifactsig.SigPathFor(dest)); err != nil {
+	if err := o.downloadSignature(ctx, client, sigURL, artifactsig.SigPathFor(dest)); err != nil {
 		return "", "", err
 	}
 
@@ -279,7 +274,7 @@ func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, 
 	if err != nil {
 		return "", "", err
 	}
-	resp, err := o.httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
 	}
@@ -343,12 +338,12 @@ func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, 
 // A 404 here has a specific and actionable meaning worth saying out loud: the
 // api staged this bundle before it knew to stage signatures alongside, so the
 // fix is to re-pull the release rather than to go looking for tampering.
-func (o *OpenWrtABBackend) downloadSignature(ctx context.Context, sigURL, dest string) error {
+func (o *OpenWrtABBackend) downloadSignature(ctx context.Context, client *http.Client, sigURL, dest string) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", sigURL, nil)
 	if err != nil {
 		return fmt.Errorf("openwrt-ab download: signature request: %w", err)
 	}
-	resp, err := o.httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("openwrt-ab download: fetch signature %s: %w", sigURL, err)
 	}

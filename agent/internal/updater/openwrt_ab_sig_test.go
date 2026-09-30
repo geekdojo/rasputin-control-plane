@@ -72,7 +72,7 @@ func TestOpenWrtDownload_StagesTheSignatureBesideTheArtifact(t *testing.T) {
 	sum := sha256.Sum256(body)
 	as := newArtifactServer(t, body, []byte("detached-cms-bytes"))
 
-	b, err := NewOpenWrtABBackend(t.TempDir())
+	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestOpenWrtDownload_StagesTheSignatureBesideTheArtifact(t *testing.T) {
 // find that out.
 func TestOpenWrtDownload_RefusesWithoutASignatureURL(t *testing.T) {
 	as := newArtifactServer(t, []byte("SQUASHFS-BYTES"), nil)
-	b, err := NewOpenWrtABBackend(t.TempDir())
+	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestOpenWrtDownload_MissingStagedSignatureSaysRepull(t *testing.T) {
 	as := newArtifactServer(t, []byte("SQUASHFS-BYTES"), nil)
 	as.sigStatus = http.StatusNotFound
 
-	b, err := NewOpenWrtABBackend(t.TempDir())
+	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestOpenWrtDownload_MissingStagedSignatureSaysRepull(t *testing.T) {
 
 func TestOpenWrtDownload_RejectsAnOversizedSignature(t *testing.T) {
 	as := newArtifactServer(t, []byte("SQUASHFS-BYTES"), make([]byte, maxSignatureBytes+1))
-	b, err := NewOpenWrtABBackend(t.TempDir())
+	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestOpenWrtDownload_RejectsAnOversizedSignature(t *testing.T) {
 
 func TestOpenWrtDownload_EmptySignatureRejected(t *testing.T) {
 	as := newArtifactServer(t, []byte("SQUASHFS-BYTES"), []byte{})
-	b, err := NewOpenWrtABBackend(t.TempDir())
+	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestOpenWrtInstall_FailsClosedWithoutAValidSignature(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(artifactsig.TrustRootEnv, tc.trustRoot)
 			stateDir := t.TempDir()
-			b, err := NewOpenWrtABBackend(stateDir)
+			b, err := NewOpenWrtABBackend(stateDir, trustNoTLS)
 			if err != nil {
 				t.Fatal(err)
 			}

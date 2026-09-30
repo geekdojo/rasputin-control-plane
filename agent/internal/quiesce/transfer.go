@@ -45,17 +45,26 @@ import (
 // otherwise. The sealed digest the destination verifies is computed as the
 // bytes go out and declared in the request's trailer.
 
-// SetCABundle points the HTTP transport at a PEM bundle to trust beside the
-// system roots — the per-installation mesh CA that signs the api's HTTPS
-// leaf. Same wiring the updater's download client has.
-func (s *Stager) SetCABundle(path string) { s.caBundlePath = path }
-
-// transport resolves a destination's transport. Seam for tests.
+// transport resolves a destination's transport over the node's mesh CA
+// trust, resolved afresh for this transfer. Seam for tests.
+//
+// The destination is classified before a trust failure is reported, so an
+// unsupported scheme is still refused as unsupported; either way nothing is
+// sent, and a transport built with no trust (a nil config) trusts no
+// certificate at all.
 func (s *Stager) transport(destination string) (backupxfer.Transport, error) {
 	if s.transportFor != nil {
 		return s.transportFor(destination)
 	}
-	return backupxfer.TransportFor(destination, backupxfer.HTTPOptions{CABundlePath: s.caBundlePath})
+	cfg, trustErr := s.clientTLS()
+	tr, err := backupxfer.TransportFor(destination, backupxfer.HTTPOptions{TLSConfig: cfg})
+	if err != nil {
+		return nil, err
+	}
+	if trustErr != nil {
+		return nil, trustErr
+	}
+	return tr, nil
 }
 
 // Transfer carries out one BackupTransferCmd. Like Stage it ALWAYS returns

@@ -2,6 +2,7 @@ package quiesce
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -37,10 +38,11 @@ type Stager struct {
 	releaseWait      time.Duration
 	afterFile        func(rel string) error
 	logf             func(format string, args ...any)
-	// caBundlePath and transportFor are the transfer verb's seams: the
-	// mesh CA the HTTP transport trusts, and a test's replacement for the
-	// transport itself.
-	caBundlePath string
+	// trust is what the transfer's and the restore's HTTP clients verify
+	// the api with: the node's mesh CA bundle and nothing else. Called once
+	// per transfer and per restore fetch. transportFor is a test's
+	// replacement for the transport itself.
+	trust        TrustSource
 	transportFor func(destination string) (backupxfer.Transport, error)
 	// The restore verb's seams (restore.go): the fetcher for a source, the
 	// directory in-flight staging trees are recorded in for the boot sweep,
@@ -53,13 +55,26 @@ type Stager struct {
 	swapFn            func(live, staging string) error
 }
 
+// TrustSource returns the TLS client config the transfer and restore
+// clients verify the api with (geekdojo/geekdojo-brain#590). The composition
+// root passes tailscale.MeshTrust.ClientTLSConfig, which re-reads the node's
+// mesh CA bundle on every call.
+type TrustSource func() (*tls.Config, error)
+
+// errNoTrustSource is a Stager built without a trust source. Every transfer
+// and every restore fetch refuses with it; nothing falls back to the system
+// roots.
+var errNoTrustSource = errors.New("quiesce: no mesh trust source wired")
+
 // New builds a Stager over the runtime. stagingRoot is the agent's one
-// staging root (storage.StagingRoot) and markerDir is MarkerDir(stateDir).
-func New(rt Runtime, stagingRoot, markerDir string) *Stager {
+// staging root (storage.StagingRoot), markerDir is MarkerDir(stateDir), and
+// trust is the node's mesh CA trust.
+func New(rt Runtime, stagingRoot, markerDir string, trust TrustSource) *Stager {
 	return &Stager{
 		rt:          rt,
 		stagingRoot: stagingRoot,
 		markerDir:   markerDir,
+		trust:       trust,
 		freeBytes: func(dir string) (uint64, error) {
 			du, err := disk.Usage(dir)
 			if err != nil {
@@ -75,6 +90,19 @@ func New(rt Runtime, stagingRoot, markerDir string) *Stager {
 		releaseWait:      defaultReleaseWait,
 		logf:             log.Printf,
 	}
+}
+
+// clientTLS resolves the trust for one transfer or restore fetch. A nil
+// source and a trust error are both refusals.
+func (s *Stager) clientTLS() (*tls.Config, error) {
+	if s.trust == nil {
+		return nil, errNoTrustSource
+	}
+	cfg, err := s.trust()
+	if err != nil {
+		return nil, fmt.Errorf("quiesce: %w", err)
+	}
+	return cfg, nil
 }
 
 // Stage carries out one BackupStageVolumeCmd. It ALWAYS returns an ack — a

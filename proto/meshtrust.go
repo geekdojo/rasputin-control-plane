@@ -3,7 +3,10 @@ package proto
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
+	"fmt"
 )
 
 // What a node trusts, as a fingerprint.
@@ -62,4 +65,24 @@ func ShortFingerprint(fp string) string {
 		return fp[:12]
 	}
 	return fp
+}
+
+// CATLSConfig is the TLS client config that trusts exactly caPEM and nothing
+// else: no system roots, no pin. source names where the PEM came from, so a
+// parse failure says which input to fix.
+//
+// It lives here, not in the api, because the api (its Headscale clients) and
+// the agent (its HTTPS clients to the api, geekdojo/geekdojo-brain#590) need
+// the same answer and are separate modules; proto is the one both import. An
+// empty or unparseable PEM is an error, never a silent fall back to the
+// system pool — a nil RootCAs would mean exactly that.
+func CATLSConfig(caPEM []byte, source string) (*tls.Config, error) {
+	if len(bytes.TrimSpace(caPEM)) == 0 {
+		return nil, fmt.Errorf("mesh: %s: no CA PEM to trust", source)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("mesh: %s: no certificates parsed from the CA PEM", source)
+	}
+	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
 }

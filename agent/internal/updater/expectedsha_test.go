@@ -74,7 +74,7 @@ func TestBackends_RefuseAnEmptyExpectedSHABeforeDownloading(t *testing.T) {
 
 	t.Run("openwrt-ab", func(t *testing.T) {
 		srv, hits := newServer(t)
-		b, err := NewOpenWrtABBackend(t.TempDir())
+		b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -93,7 +93,7 @@ func TestBackends_RefuseAnEmptyExpectedSHABeforeDownloading(t *testing.T) {
 	t.Run("rauc", func(t *testing.T) {
 		fakeRAUC(t, "ok")
 		srv, hits := newServer(t)
-		b, err := NewRAUCBackend(t.TempDir())
+		b, err := NewRAUCBackend(t.TempDir(), trustNoTLS)
 		if err != nil {
 			t.Fatal(err)
 		}
