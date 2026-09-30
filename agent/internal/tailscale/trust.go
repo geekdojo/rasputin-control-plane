@@ -3,6 +3,7 @@ package tailscale
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -38,10 +39,10 @@ func caBundlePath() string {
 
 // CABundlePath is the exported accessor for the resolved Mesh CA bundle path
 // (env override RASPUTIN_MESH_CA_BUNDLE, else the per-image default). The
-// updater's bundle-download HTTPS client uses it to trust the api's mesh-CA
+// composition root builds the agent's MeshTrust on it, which the updater's
+// download client and the backup transfer use to trust the api's mesh-CA
 // leaf — the api serves /api/bundles/{sha} over the mesh-CA HTTPS listener,
-// and the agent's process (unlike tailscaled's) has no SSL_CERT_FILE, so its
-// default client would otherwise reject that cert.
+// and the agent's process (unlike tailscaled's) has no SSL_CERT_FILE.
 func CABundlePath() string { return caBundlePath() }
 
 // InstalledCAFingerprint reports proto.MeshCAFingerprint of the mesh CA bundle
@@ -59,6 +60,38 @@ func InstalledCAFingerprint(path string) string {
 		return fp
 	}
 	return proto.MeshCAFingerprintNone
+}
+
+// MeshTrust is the trust the agent's own HTTPS clients place in the api:
+// the node's mesh CA bundle and nothing else (geekdojo/geekdojo-brain#590).
+//
+// Every one of those clients — the OS updater's bundle and .sig download,
+// the backup transfer, the restore fetch — connects to the same endpoint,
+// the api at https://<cluster>.local, whose leaf the Mesh CA signs. A system
+// root can never legitimately verify that name, so adding the system pool
+// could only widen who can impersonate the api; no pin is added either (the
+// leaf is re-minted on SAN drift and near expiry).
+type MeshTrust struct {
+	path string
+}
+
+// NewMeshTrust returns the trust in the bundle at path. The composition root
+// passes CABundlePath().
+func NewMeshTrust(path string) *MeshTrust { return &MeshTrust{path: path} }
+
+// ClientTLSConfig is a TLS client config that trusts exactly the mesh CA
+// bundle, read from disk on this call: installMeshCA replaces the file
+// atomically, so a re-delivered CA is trusted by the next request without an
+// agent restart. A missing, unreadable, empty or certificate-less bundle is
+// refused, with the path named — never a config that falls back to the
+// system roots.
+func (m *MeshTrust) ClientTLSConfig() (*tls.Config, error) {
+	pem, err := os.ReadFile(m.path)
+	if err != nil {
+		return nil, fmt.Errorf("mesh CA bundle %s: %w: this node trusts no mesh CA; "+
+			"mesh.enroll installs it and mesh.reconcile re-delivers it", m.path, err)
+	}
+	return proto.CATLSConfig(pem, "mesh CA bundle "+m.path)
 }
 
 // installMeshCA writes the Mesh CA PEM to path, atomically, and reports
