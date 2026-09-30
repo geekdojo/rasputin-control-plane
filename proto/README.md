@@ -21,8 +21,9 @@ It contains:
   subject conventions in its package comment.
 - **Contract helpers** that both sides need to agree on, not just data shapes:
   which agent release answers which verb (`agentverbs.go`), the bus reply-grant
-  bounds (`busreply.go`), the mesh-CA trust fingerprint (`meshtrust.go`), and
-  the count-or-percentage fleet knob (`intorstring.go`).
+  bounds (`busreply.go`), the mesh-CA trust fingerprint (`meshtrust.go`), the
+  TLS client config that trusts exactly a CA PEM (`CATLSConfig`, also
+  `meshtrust.go`), and the count-or-percentage fleet knob (`intorstring.go`).
 
 The files are split by subsystem: inventory, diag, system, jobs, updates,
 apps, firewall, IDS, mesh, BMC, alerts, metrics, and the storage/backup family
