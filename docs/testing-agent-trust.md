@@ -102,7 +102,8 @@ For every node used below (one amd64 compute, one arm64 compute, the firewall), 
 3. **The fingerprints agree.** The node's value must equal the node's
    `metadata.meshCaFingerprint` in `GET /api/nodes`. The field sits inside each node object's
    `metadata`, not at the node object's top level. It must also equal the same computation on
-   the controlplane's own CA, `/var/lib/rasputin/trust/mesh-ca.pem` (the api's `RASPUTIN_TRUST_DIR`, if set, moves it).
+   the controlplane's own CA, `/var/lib/rasputin/trust/mesh-ca.pem` (the api's
+   `RASPUTIN_TRUST_DIR`, if set, moves it).
    If any of the three differs, stop: the node's trust has not converged, and every case below
    would fail for that reason rather than for the one under test.
 
