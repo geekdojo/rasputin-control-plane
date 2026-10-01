@@ -33,14 +33,14 @@ Repo facts an agent should know:
 - ⚠️ **Tracked work lives in ANOTHER repo — `geekdojo/geekdojo-brain` — so `Fixes #N` here
   is wrong.** A bare `#N` resolves inside *this* repo, where that number is an unrelated
   issue or (GitHub shares one number sequence) a long-merged PR. It fails silently: the PR
-  looks annotated and the tracked issue never closes. On 2026-08-14 eight PRs (#121–#128)
+  looks annotated and the tracked issue is never linked. On 2026-08-14 eight PRs (#121–#128)
   each carried `Fixes #N` and not one brain issue closed. Write the cross-repo form,
-  `Fixes geekdojo/geekdojo-brain#N`, and **close the issue explicitly** rather than trusting
-  auto-close across repos.
+  `Fixes geekdojo/geekdojo-brain#N`, and **close the issue explicitly**: a merged PR never
+  closes it (auto-close is off org-wide since 2026-09-30).
 - For an issue that genuinely lives in THIS repo, a commit or PR must still use a
-  **closing keyword** — `Fixes #N` / `Closes #N` — not a bare `(#N)` reference. Bare references leave the
-  issue open after the fix ships (audited 2026-07-20: four of six stale-open issues
-  across the rasputin repos were exactly this).
+  **closing keyword** — `Fixes #N` / `Closes #N` — not a bare `(#N)` reference, so the PR and
+  the issue are linked. A merged PR does not close the issue: close it deliberately once it
+  is done.
 
 ## Engineering standard
 
