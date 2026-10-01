@@ -390,7 +390,7 @@ RAUC_SLOT_DEVICE_2='/dev/disk/by-partlabel/rootfs-0'
 }
 
 // The same fallback on the Pi, whose slot devices are by-partuuid paths that
-// carry no slot name: the real controlplane and compute-node captures with the boot key
+// carry no slot name: the real cp-1 and cp-compute1 captures with the boot key
 // removed must still resolve the booted slot from RAUC_SYSTEM_SLOTS.
 func TestParseRAUCStatus_StateFallbackPi(t *testing.T) {
 	for _, tc := range []struct {

@@ -336,7 +336,7 @@ func TestNodeRebootJob_DoesNotSendTheCommandToANodeThatIsNotAnswering(t *testing
 
 // ---- geekdojo/geekdojo-brain#616, the bench race -------------------------
 
-// THE BENCH DEFECT (a compute node, CP dev.182, OS dev.263). The node really
+// THE BENCH DEFECT (cp-compute1, CP dev.182, OS dev.263). The node really
 // rebooted; its agent's reboot child was SIGTERMed by the shutdown it had
 // started, and the agent published reboot_failed ("signal: terminated", no
 // "definitive") just before it died. The job failed in 3 s on that report.

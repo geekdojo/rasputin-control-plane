@@ -395,7 +395,7 @@ var ErrRestartUnverified = errors.New("restart not verified")
 //   - a reboot_failed event WITHOUT that is not evidence and ends nothing. It
 //     is what an agent up to CP dev.182 sends when its reboot command is
 //     killed by the very shutdown it started, for a node that is in fact
-//     rebooting (geekdojo/geekdojo-brain#616, a compute node on the bench). It is
+//     rebooting (geekdojo/geekdojo-brain#616, cp-compute1 on the bench). It is
 //     logged, and carried into the failure if the wait fails anyway.
 func VerifyRestart(ctx context.Context, nc *nats.Conn, nodeID, priorBootID string, lg Logger) (Identity, error) {
 	return verifyRestart(ctx, nc, nodeID, priorBootID, lg, false)

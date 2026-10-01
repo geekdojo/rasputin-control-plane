@@ -7,4 +7,4 @@ For the system-level overview, see [ARCHITECTURE.md](../ARCHITECTURE.md) at the 
 ## Testing procedures
 
 - [testing-updates.md](testing-updates.md): one node's OS update, on a laptop, with the mock backend.
-- [testing-storage.md](testing-storage.md): the storage backend on a bench node's real disks.
+- [testing-fleet-updates.md](testing-fleet-updates.md): a whole fleet's rollout, simulated.

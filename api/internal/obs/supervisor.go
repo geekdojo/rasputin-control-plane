@@ -1269,7 +1269,7 @@ providers:
 // one node id selects exactly that node. Opened directly the variable is
 // "All" (allValue .+, i.e. every nodeId), so the whole cluster shows.
 // Multi-value, so Grafana regex-escapes the value and the panels match it
-// with =~, which PromQL anchors: compute1 never matches compute10.
+// with =~, which PromQL anchors: cp-compute1 never matches cp-compute10.
 //
 // Every panel declares a unit, so no axis shows raw numbers: bytes is
 // Grafana's IEC unit (1024), matching the UI's humanBytes. "Memory % per

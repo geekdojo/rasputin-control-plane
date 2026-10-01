@@ -104,7 +104,7 @@ RAUC_SLOT_STATE_1='booted'
 }
 
 // realPiCP1Status is verbatim `rauc status --output-format=shell` stdout from
-// a controlplane (Raspberry Pi 5, rauc 1.13, image
+// the e12bench controlplane cp-1 (Raspberry Pi 5, rauc 1.13, image
 // 2026.09.4-dev.222, captured 2026-09-16) after its self-update committed:
 // booted from B (rootfs.1, /proc/cmdline rauc.slot=B), primary rootfs.1, both
 // slots good, no rauc-trial.pending marker. The Pi slot devices are
@@ -139,7 +139,7 @@ RAUC_REPOS=''
 // realPiCP1Cmdline is cp-1's /proc/cmdline from the same capture.
 const realPiCP1Cmdline = "reboot=w coherent_pool=1M 8250.nr_uarts=1 pci=pcie_bus_safe snd_bcm2835.enable_compat_alsa=0 snd_bcm2835.enable_hdmi=1 bcm2708_fb.fbwidth=1920 bcm2708_fb.fbheight=1080 bcm2708_fb.fbdepth=16 bcm2708_fb.fbswap=1 smsc95xx.macaddr=98:FE:54:02:A1:A0 vc_mem.mem_base=0x3fc00000 vc_mem.mem_size=0x40000000  root=PARTUUID=52415350-06 rootfstype=squashfs ro rootwait rauc.slot=B audit=0 cgroup_enable=memory cgroup_memory=1 console=ttyS0,115200 console=tty1\n"
 
-// realPiComputeStatus is the same capture from a compute node (Raspberry
+// realPiComputeStatus is the same capture from e12bench cp-compute1 (Raspberry
 // Pi, rauc 1.13, image 2026.09.2-dev.216, 2026-09-16): booted from A
 // (rootfs.0, rauc.slot=A), primary rootfs.0, both slots good, no marker. The
 // second sample: the other slot booted, the same index→name order.

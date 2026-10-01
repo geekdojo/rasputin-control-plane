@@ -20,14 +20,14 @@ Repo facts an agent should know:
 - The `rasputin-provision` matched-set CLI lives at `api/cmd/rasputin-provision`.
 - `agent/cmd/storageprobe` is a **bench tool**, not part of the OS image: it drives
   `agent/internal/storage` straight against a node's real disks, bypassing NATS and the api's
-  passkey session. Cross-compile and `scp -O` it to a node — see
-  [`docs/testing-storage.md`](docs/testing-storage.md). ⚠️ Its `claim` verb formats a disk, and
+  passkey session. Cross-compile and `scp -O` it to a node; `storageprobe help` and the
+  package comment are the reference. ⚠️ Its `claim` verb formats a disk, and
   it REFUSES to run when the real block tooling is missing rather than falling back to the mock.
 - Go code: run `gofmt` before pushing; check CI after every push.
 - Changing anything under `api/internal/updater`? The fan-out state machine has a
   simulated-fleet **regression net** — a whole cluster's rollout, on the real sagas and the real
-  bus, in about eleven seconds:
-  `go test ./api/internal/updater -run TestFleetFunctional -count=1`. ⚠️ It mocks at the bus
+  bus, in about eleven seconds. Run it and read
+  [`docs/testing-fleet-updates.md`](docs/testing-fleet-updates.md). ⚠️ It mocks at the bus
   boundary, so it is blind to everything below it (RAUC, GRUB, `/proc/cmdline`); a green run is
   not evidence a rollout works. Real fleet proof is the bench.
 - ⚠️ **Tracked work lives in ANOTHER repo — `geekdojo/geekdojo-brain` — so `Fixes #N` here

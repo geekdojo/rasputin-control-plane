@@ -391,7 +391,7 @@ func (r *Rebooter) perform(req RebootRequest, reason string, mode RebootMode, de
 // commandEnded decides what a reboot command that ended with an error means,
 // from facts only, and reports a failure only when one is established.
 //
-// The bench defect it exists for (geekdojo/geekdojo-brain#616, a compute node,
+// The bench defect it exists for (geekdojo/geekdojo-brain#616, cp-compute1,
 // CP dev.182): the reboot child runs in the agent's cgroup, so when systemd
 // stops rasputin-agent.service during the very shutdown the child started, it
 // SIGTERMs the child too. That child "failed: signal: terminated" — and the

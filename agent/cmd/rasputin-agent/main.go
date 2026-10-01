@@ -638,8 +638,8 @@ func main() {
 	// ignoring routing domains entirely. Measured on e3bench 2026-08-30 with
 	// the drop-in applied, querying the stub the way Go does:
 	//
-	//	A    <cluster>.local -> 100.64.0.1, 172.17.0.1     (not the LAN IP)
-	//	AAAA <cluster>.local -> fe80::..., fe80::..., fe80::...
+	//	A    e3bench.local -> 100.64.0.1, 172.17.0.1     (not the LAN IP)
+	//	AAAA e3bench.local -> fe80::..., fe80::..., fe80::...
 	//
 	// Identical with and without the drop-in. Do not "fix" the control plane by
 	// deleting this exclusion — it was tried, it changes nothing, and the test

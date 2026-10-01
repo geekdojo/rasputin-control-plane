@@ -2,7 +2,7 @@
 // choice — geekdojo/geekdojo-brain#426.
 //
 // On the #415 bench run the custom-app drawer defaulted to the first node in
-// the list, a compute node that was off the mesh (`mesh.state: 'absent'` in
+// the list, cp-compute1, which was off the mesh (`mesh.state: 'absent'` in
 // GET /api/nodes, from inventory.ApplyMesh). An owner accepting that default
 // deploys a tailnet-only app onto a node with no tailnet interface.
 //

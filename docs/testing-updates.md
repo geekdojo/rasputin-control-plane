@@ -2,8 +2,8 @@
 
 > This page covers ONE node updating, against a real `rasputin-agent` process with the mock
 > backend. For a whole FLEET — the canary gate, bounded fan-out, the failure budget and the
-> results grid — run `go test ./api/internal/updater -run TestFleetFunctional -count=1`, which
-> needs no running processes at all.
+> results grid — see [`testing-fleet-updates.md`](testing-fleet-updates.md), which needs no
+> running processes at all.
 >
 > The mock backend below downloads over plain http from a laptop api. The real backends'
 > download client, which trusts only the node's mesh CA bundle, is not exercised here.
@@ -181,7 +181,8 @@ unaffected.
 **Automated path.** `go test ./api/internal/updater -run TestFleetFunctional -count=1` runs
 the real `node.update` saga, including step 6's boot-identity check, against simulated nodes
 that present a new boot id when they reboot. It needs no running processes and no manual
-restart. It does not exercise the agent binary or the mock backend.
+restart. It does not exercise the agent binary or the mock backend. See
+[`testing-fleet-updates.md`](testing-fleet-updates.md).
 
 ## The same applies to the REBOOT action
 
