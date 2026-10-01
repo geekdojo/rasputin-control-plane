@@ -2976,10 +2976,12 @@ func loadBusTLS(logger *slog.Logger, busDir string) (bustls.State, *bustls.Key, 
 		return bustls.Unavailable(keyPath, err), nil, tls.Certificate{}
 	}
 	// The PERSISTED certificate around the key (geekdojo/geekdojo-brain#508),
-	// not a fresh one per start: it carries a fixed DNS SAN, and its exact
-	// bytes are what a client that verifies the name — the collector, the node
-	// listener — pins. EnsureCert returns a usable certificate even when it had
-	// to replace the file, so an error beside one is a note, not a failure.
+	// not a fresh one per start: it carries a fixed DNS SAN for any client that
+	// verifies a name. A node verifies the bus by the key's pin, and nothing
+	// pins this certificate's bytes; the collectors trust the api's Mesh leaf on
+	// the node listener instead (geekdojo/geekdojo-brain#672). EnsureCert
+	// returns a usable certificate even when it had to replace the file, so an
+	// error beside one is a note, not a failure.
 	cert, certGenerated, certErr := bustls.EnsureCert(busDir, key)
 	if len(cert.Certificate) == 0 {
 		logger.Error("rasputin-api: bus certificate unusable; the bus serves no listener",

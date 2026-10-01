@@ -476,12 +476,11 @@ const busTombstonesNote = "bus join-token revocation tombstones — a restore un
 // busCertArchivePath is where the bus certificate sits in an identity
 // archive. It is public and derivable from the key beside it, so a restore
 // without it is not fatal — the api mints one at its next start. It is
-// captured because it is the file a client PINS BY BYTES (the collector's
-// ca_pem), and a re-minted one has a different serial, which would refuse
-// every collector still carrying the old bytes until the reconcile catches up.
+// captured so a restore puts back the same file beside the key. Nothing pins
+// its bytes (geekdojo/geekdojo-brain#672), so a re-minted one breaks no client.
 const busCertArchivePath = "bus/" + bustls.CertFileName
 
-const busCertNote = "the cluster bus's certificate — public, and re-minted from the key if it is missing, but a client that pins its exact bytes (the collector) refuses a re-minted one until it is reconfigured"
+const busCertNote = "the cluster bus's certificate — public, and re-minted from the key if it is missing; nodes verify the bus by the key's pin and no client pins the certificate, so a re-minted one changes nothing"
 
 const busKeyNote = "the cluster bus's PRIVATE key — every node verifies the bus by its pin, so without it a restored or reflashed controlplane generates a new key and no node can join its bus"
 

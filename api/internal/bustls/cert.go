@@ -20,8 +20,8 @@ import (
 // beside the key it wraps.
 //
 // Format: one PEM CERTIFICATE block. It is PUBLIC: it carries the bus public
-// key, which is already published as the pin, and nothing else. 0644, because
-// a container user reads it (see below).
+// key, which is already published as the pin, and nothing else, so it is
+// 0644 (see mintAndWrite).
 const CertFileName = "bus.crt"
 
 // BusDNSName is the certificate's one Subject Alternative Name, and it is
@@ -37,23 +37,25 @@ const CertFileName = "bus.crt"
 //     SAN is rejected as "not valid for any names" by anything that verifies
 //     it at all. Measured on grafana/alloy v1.4.2 against a certificate of
 //     exactly today's shape (geekdojo/geekdojo-brain#467).
-//   - The collector will trust this certificate as an exact-bytes `ca_pem`
-//     with `server_name` set to this value (Step 6.3), and the node listener
-//     (geekdojo/geekdojo-brain#513) serves it.
+//   - No Rasputin client verifies this certificate by chain or pins its
+//     bytes. The collectors trust the api's Mesh-CA-signed leaf, which the
+//     node listener serves in place of this certificate
+//     (geekdojo/geekdojo-brain#672).
 //
 // It is fixed rather than derived from the cluster name because it is not a
-// name anyone looks up: deriving it would make the certificate — and so every
-// collector config pinning it — change when a cluster is renamed, for no gain.
+// name anyone looks up: deriving it would make the certificate change when a
+// cluster is renamed, for no gain.
 const BusDNSName = "rasputin-bus"
 
 // EnsureCert loads dir/bus.crt, minting and persisting one around key when
 // there is none it can use. generated reports which happened.
 //
-// Until now nothing persisted a bus certificate at all: the api minted a fresh
-// one, with a fresh random serial, every time it started. That was invisible to
-// a node, which pins the key. It is not invisible to a client that pins the
-// certificate's bytes, which is what the collector will do, so the certificate
-// becomes a file with a life of its own (geekdojo/geekdojo-brain#508).
+// Before geekdojo/geekdojo-brain#508 nothing persisted a bus certificate: the
+// api minted a fresh one, with a fresh random serial, every time it started.
+// That is invisible to a node, which pins the key. It was persisted for a
+// collector that pinned the certificate's bytes; since
+// geekdojo/geekdojo-brain#672 no client does, so the file is kept only as a
+// stable certificate around the key.
 //
 // A persisted certificate is reused only when all three hold:
 //
@@ -65,9 +67,8 @@ const BusDNSName = "rasputin-bus"
 // None of this reads a clock: a certificate is not judged by whether it has
 // expired, only by whether it is one this package would have written. Nothing
 // is lost by re-minting — the pin is the key, so every node keeps verifying the
-// bus across the change — and a stale certificate that no longer matches the
-// key is worse than useless, because a client pinning its bytes would refuse a
-// bus that every node accepts.
+// bus across the change, and no client pins the certificate's bytes — while a
+// stale certificate that no longer matches the key cannot be served with it.
 func EnsureCert(dir string, key *Key) (cert tls.Certificate, generated bool, err error) {
 	if key == nil {
 		return tls.Certificate{}, false, errors.New("bustls: EnsureCert: key required")
@@ -131,19 +132,18 @@ func mintAndWrite(path string, key *Key) (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	// 0644: the certificate is public, and the collector reads it as its
-	// `ca_pem` from a read-only bind mount under a container user
-	// (geekdojo/geekdojo-brain#467). The bus directory around it stays 0700.
-	if err := atrest.WritePublicFile(path, EncodeCertPEM(cert)); err != nil {
+	// 0644: the certificate is public — it carries the public key, already
+	// published as the pin, and nothing else. The bus directory around it
+	// stays 0700.
+	if err := atrest.WritePublicFile(path, encodeCertPEM(cert)); err != nil {
 		return tls.Certificate{}, fmt.Errorf("bustls: write %s: %w", path, err)
 	}
 	return cert, nil
 }
 
-// EncodeCertPEM renders a minted certificate in the persisted form: one PEM
-// CERTIFICATE block. Exported because the collector's `ca_pem` is these exact
-// bytes, so whatever writes that config renders it the same way.
-func EncodeCertPEM(cert tls.Certificate) []byte {
+// encodeCertPEM renders a minted certificate in the persisted form: one PEM
+// CERTIFICATE block.
+func encodeCertPEM(cert tls.Certificate) []byte {
 	var buf bytes.Buffer
 	for _, der := range cert.Certificate {
 		_ = pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der})

@@ -2,15 +2,10 @@ package main
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"errors"
 	"fmt"
-	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -21,6 +16,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 )
 
@@ -136,35 +132,6 @@ func TestCollectorsWired(t *testing.T) {
 	}
 }
 
-// agentStyleClientCert is a client pair made the way the agent makes its
-// collector key (agent/internal/nodekeys): ECDSA P-256, self-signed,
-// clientAuth EKU, 1970 to 9999.
-func agentStyleClientCert(t *testing.T) tls.Certificate {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "collector"},
-		NotBefore:             time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
-		NotAfter:              time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
-}
-
 // handshake runs one in-process TLS handshake and returns the client-side
 // view, the SPKI the server saw, and the client's error.
 func handshake(t *testing.T, server, client *tls.Config) (tls.ConnectionState, []byte, error) {
@@ -213,7 +180,7 @@ func TestNodeListener_HandshakeByChainSurvivesReMint(t *testing.T) {
 	if server.MinVersion != tls.VersionTLS13 || server.ClientAuth != tls.RequireAnyClientCert {
 		t.Fatalf("node listener TLS = min %x, client auth %v; want TLS 1.3 and RequireAnyClientCert", server.MinVersion, server.ClientAuth)
 	}
-	clientCert := agentStyleClientCert(t)
+	clientCert := nodekeytest.New(t, "collector").TLS() // made the way the agent makes its collector key
 	roots := x509.NewCertPool()
 	roots.AddCert(ca.Cert)
 	client := &tls.Config{

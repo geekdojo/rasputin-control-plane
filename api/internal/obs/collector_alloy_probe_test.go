@@ -41,15 +41,8 @@ package obs
 import (
 	"bufio"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -63,6 +56,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
 )
 
 const (
@@ -180,48 +174,6 @@ func probeLeaf(t *testing.T, ca *mesh.MeshCA, dnsName string) tls.Certificate {
 	return c
 }
 
-// agentStyleClientPair writes a client pair made the way the agent writes its
-// collector key (agent/internal/nodekeys): ECDSA P-256, PKCS#8 "PRIVATE KEY"
-// PEM, a self-signed certificate with the clientAuth EKU, dated 1970 to 9999.
-// It returns the SPKI the server should see.
-func agentStyleClientPair(t *testing.T, certPath, keyPath string) []byte {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "collector"},
-		NotBefore:             time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
-		NotAfter:              time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 0644: a throwaway key, readable by whatever uid the VM's file sharing
-	// maps the container's root to.
-	writeProbeFile(t, certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-	writeProbeFile(t, keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}))
-	parsed, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return parsed.RawSubjectPublicKeyInfo
-}
-
 func writeProbeFile(t *testing.T, path string, b []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -246,9 +198,13 @@ type probeAlloy struct {
 func runAlloy(t *testing.T, dir, name string, ca *mesh.MeshCA, port int) (*probeAlloy, []byte) {
 	t.Helper()
 	certDir := filepath.Join(dir, "certs")
-	spki := agentStyleClientPair(t,
-		filepath.Join(certDir, filepath.Base(collectorNodeKeyCertPath)),
-		filepath.Join(certDir, filepath.Base(collectorNodeKeyPath)))
+	// A client pair made the way the agent writes its collector key. 0644 (via
+	// writeProbeFile): a throwaway key, readable by whatever uid the VM's file
+	// sharing maps the container's root to.
+	pair := nodekeytest.New(t, "collector")
+	writeProbeFile(t, filepath.Join(certDir, filepath.Base(collectorNodeKeyCertPath)), pair.CertPEM())
+	writeProbeFile(t, filepath.Join(certDir, filepath.Base(collectorNodeKeyPath)), pair.KeyPEM(t))
+	spki := pair.Leaf.RawSubjectPublicKeyInfo
 	writeProbeFile(t, filepath.Join(certDir, filepath.Base(collectorMeshCAPath)), ca.CertPEM)
 	config := fmt.Sprintf(`prometheus.exporter.self "probe" { }
 
