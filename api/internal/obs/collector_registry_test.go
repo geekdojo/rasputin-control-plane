@@ -65,9 +65,9 @@ func TestCollectorDeploy_StopsWhenTheNodeIsNotAdmitted(t *testing.T) {
 	minted := 0
 	deps := CollectorDeployDeps{
 		Inv: inv,
-		Mint: func(string) (string, string, string, error) {
+		Mint: func(string) (string, string, error) {
 			minted++
-			return "", "", "", errors.New("should not be reached")
+			return "", "", errors.New("should not be reached")
 		},
 		IngressBaseURL: "https://cluster.local:8443",
 		ServerName:     "cluster.local",

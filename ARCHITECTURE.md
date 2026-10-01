@@ -103,8 +103,10 @@ with a wrong clock still joins, and a mesh CA change cannot lock the fleet out.
 The certificate that key is served in is **persisted** as `bus/bus.crt` and
 carries one fixed DNS name, `rasputin-bus`. A node ignores it; it is there for
 clients that do verify a name, which is every stock TLS client — Go matches the
-SAN and never the Common Name — and for the node listener and the collector,
-which pin its exact bytes rather than the key.
+SAN and never the Common Name. Nothing pins its bytes. The node listener
+(`:8443`) does not serve it: it serves the api's Mesh-CA-signed HTTPS leaf, and
+every observability collector verifies that leaf by chain to the Mesh CA under
+the cluster name (geekdojo/geekdojo-brain#672).
 A bus key or certificate that will not load leaves the api running with no bus
 listener at all and a standing crit alert naming the file. The plaintext
 migration ladder that took existing clusters to TLS was deleted once every

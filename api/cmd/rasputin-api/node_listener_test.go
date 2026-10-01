@@ -1,92 +1,329 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"errors"
+	"fmt"
+	"math/big"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/logkit"
 )
 
-// The node listener serves two certificates on one port, and SNI is the only
-// thing that tells its two kinds of client apart. A client that asks for the
-// bus certificate's name gets the bus certificate; anything else — and that
-// means the cluster name a legacy collector asks for — gets the api's mesh
-// leaf. A client that sends no SNI at all gets the bus certificate, because
-// that is the path everything new is on.
-func TestNodeListenerCert_SelectsBySNI(t *testing.T) {
-	key, err := bustls.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	busCert, err := bustls.SelfSignedCert(key, timeZero(), timeMax())
-	if err != nil {
-		t.Fatal(err)
-	}
+// The node listener serves the api's Mesh-CA-signed leaf for every name, and a
+// collector verifies it by chain (geekdojo/geekdojo-brain#672). The bus
+// certificate is never served here.
+
+// meshLeafOnDisk is an apiLeaf whose mint writes a FRESH leaf (new key, new
+// serial) under ca for the cluster "home1" on every call, so refresh swaps in
+// a genuinely re-minted certificate the way the leaf sweep's renewal does.
+func meshLeafOnDisk(t *testing.T, ca *mesh.MeshCA) *apiLeaf {
+	t.Helper()
+	dir := t.TempDir()
+	var n atomic.Int32
+	return &apiLeaf{mint: func(lanIP net.IP) (mesh.LeafPaths, error) {
+		certPEM, keyPEM, err := mesh.MintLeaf(ca, apiLeafSpec("home1", lanIP))
+		if err != nil {
+			return mesh.LeafPaths{}, err
+		}
+		i := n.Add(1)
+		p := mesh.LeafPaths{
+			CertPath: filepath.Join(dir, fmt.Sprintf("leaf%d.pem", i)),
+			KeyPath:  filepath.Join(dir, fmt.Sprintf("leaf%d.key", i)),
+		}
+		if err := os.WriteFile(p.CertPath, certPEM, 0o600); err != nil {
+			return p, err
+		}
+		return p, os.WriteFile(p.KeyPath, keyPEM, 0o600)
+	}}
+}
+
+func testMeshCA(t *testing.T) *mesh.MeshCA {
+	t.Helper()
 	ca, err := mesh.EnsureMeshCA(t.TempDir(), "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, keyPEM, err := mesh.MintLeaf(ca, mesh.LeafSpec{CommonName: "api", DNSNames: []string{"rasputin.local"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	leafCert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf := &apiLeaf{}
-	leaf.cert.Store(&leafCert)
+	return ca
+}
 
-	get := nodeListenerCert(&busCert, func() *apiLeaf { return leaf })
-	for name, tc := range map[string]struct {
-		sni  string
-		want *tls.Certificate
+// TC-672-11: with the leaf loaded, every SNI — the cluster name, the old bus
+// name, and none at all — gets the same Mesh leaf, and it chains to the Mesh CA.
+func TestNodeListenerCert_ServesTheMeshLeafForEveryName(t *testing.T) {
+	ca := testMeshCA(t)
+	leaf := meshLeafOnDisk(t, ca)
+	if err := leaf.load(net.IPv4(192, 168, 1, 10)); err != nil {
+		t.Fatal(err)
+	}
+	served := leaf.cert.Load()
+	get := nodeListenerCert(leaf)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.Cert)
+	for _, sni := range []string{"home1.local", bustls.BusDNSName, ""} {
+		got, err := get(&tls.ClientHelloInfo{ServerName: sni})
+		if err != nil {
+			t.Fatalf("SNI %q: %v", sni, err)
+		}
+		if got != served {
+			t.Errorf("SNI %q served a certificate other than the loaded Mesh leaf", sni)
+		}
+		x, err := x509.ParseCertificate(got.Certificate[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := x.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+			t.Errorf("SNI %q: served certificate does not chain to the Mesh CA: %v", sni, err)
+		}
+	}
+}
+
+// TC-672-12: no leaf yet means errNoAPILeaf; no apiLeaf at all (HTTPS off)
+// means an error naming RASPUTIN_HTTPS_ADDR. Never a certificate.
+func TestNodeListenerCert_NoLeafRefuses(t *testing.T) {
+	notYet := nodeListenerCert(&apiLeaf{})
+	for _, sni := range []string{"home1.local", bustls.BusDNSName, ""} {
+		got, err := notYet(&tls.ClientHelloInfo{ServerName: sni})
+		if got != nil || !errors.Is(err, errNoAPILeaf) {
+			t.Errorf("unloaded leaf, SNI %q = (%v, %v), want (nil, errNoAPILeaf)", sni, got, err)
+		}
+	}
+	off := nodeListenerCert(nil)
+	got, err := off(&tls.ClientHelloInfo{ServerName: "home1.local"})
+	if got != nil || err == nil || !strings.Contains(err.Error(), "RASPUTIN_HTTPS_ADDR") {
+		t.Errorf("HTTPS off = (%v, %v), want (nil, an error naming RASPUTIN_HTTPS_ADDR)", got, err)
+	}
+}
+
+// TC-672-13: collectors are wired only when both the node listener and HTTPS
+// are on, and each refusal names the missing variable.
+func TestCollectorsWired(t *testing.T) {
+	for _, tc := range []struct {
+		obs, https string
+		want       bool
+		names      []string
 	}{
-		"the bus certificate's name": {bustls.BusDNSName, &busCert},
-		"no SNI at all":              {"", &busCert},
-		"the cluster name":           {"rasputin.local", &leafCert},
+		{":8443", ":443", true, nil},
+		{":8443", "", false, []string{"RASPUTIN_HTTPS_ADDR"}},
+		{"", ":443", false, []string{"RASPUTIN_OBS_INGEST_ADDR"}},
+		{"", "", false, []string{"RASPUTIN_OBS_INGEST_ADDR", "RASPUTIN_HTTPS_ADDR"}},
 	} {
-		t.Run(name, func(t *testing.T) {
-			got, err := get(&tls.ClientHelloInfo{ServerName: tc.sni})
-			if err != nil {
-				t.Fatalf("SNI %q: %v", tc.sni, err)
+		got, why := collectorsWired(tc.obs, tc.https)
+		if got != tc.want {
+			t.Errorf("collectorsWired(%q, %q) = %v, want %v", tc.obs, tc.https, got, tc.want)
+		}
+		if tc.want && why != "" {
+			t.Errorf("collectorsWired(%q, %q) wired but gave a reason %q", tc.obs, tc.https, why)
+		}
+		for _, n := range tc.names {
+			if !strings.Contains(why, n) {
+				t.Errorf("collectorsWired(%q, %q) reason %q does not name %s", tc.obs, tc.https, why, n)
 			}
-			if got != tc.want {
-				t.Errorf("SNI %q served the wrong certificate", tc.sni)
-			}
-		})
-	}
-
-	// The bus certificate carries that name and nothing else, so a client
-	// pinning it by name cannot be handed the mesh leaf by mistake.
-	if got := busCert.Leaf.DNSNames; len(got) != 1 || got[0] != bustls.BusDNSName {
-		t.Errorf("bus certificate DNS names = %v, want [%s]", got, bustls.BusDNSName)
+		}
 	}
 }
 
-// With HTTPS off there is no mesh leaf at all, and a legacy client asking for
-// the cluster name is told why rather than handed something it cannot verify.
-// The listener itself still serves registered-key clients.
-func TestNodeListenerCert_NoLeafNamesTheReason(t *testing.T) {
-	key, err := bustls.GenerateKey()
+// agentStyleClientCert is a client pair made the way the agent makes its
+// collector key (agent/internal/nodekeys): ECDSA P-256, self-signed,
+// clientAuth EKU, 1970 to 9999.
+func agentStyleClientCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	busCert, err := bustls.SelfSignedCert(key, timeZero(), timeMax())
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "collector"},
+		NotBefore:             time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
+		NotAfter:              time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	get := nodeListenerCert(&busCert, func() *apiLeaf { return nil })
-	if _, err := get(&tls.ClientHelloInfo{ServerName: "rasputin.local"}); err == nil {
-		t.Error("a legacy client was served a certificate with no leaf loaded")
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got, err := get(&tls.ClientHelloInfo{ServerName: bustls.BusDNSName}); err != nil || got != &busCert {
-		t.Errorf("a key client with no leaf loaded = (%v, %v), want the bus certificate", got, err)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
+}
+
+// handshake runs one in-process TLS handshake and returns the client-side
+// view, the SPKI the server saw, and the client's error.
+func handshake(t *testing.T, server, client *tls.Config) (tls.ConnectionState, []byte, error) {
+	t.Helper()
+	var seen []byte
+	srvCfg := server.Clone()
+	srvCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) > 0 {
+			seen = cs.PeerCertificates[0].RawSubjectPublicKeyInfo
+		}
+		return nil
+	}
+	c, s := net.Pipe()
+	defer c.Close()
+	defer s.Close()
+	srvDone := make(chan error, 1)
+	go func() {
+		ts := tls.Server(s, srvCfg)
+		err := ts.Handshake()
+		srvDone <- err
+		_ = ts.Close()
+	}()
+	tc := tls.Client(c, client)
+	err := tc.Handshake()
+	if err != nil {
+		_ = c.Close()
+	}
+	<-srvDone
+	return tc.ConnectionState(), seen, err
+}
+
+// TC-672-14: the collector's trust, end to end in-process. Mesh CA as the only
+// root plus the cluster name verifies the served leaf, and the server sees the
+// client's own SPKI. A re-minted leaf (new key, same CA) is accepted with the
+// client config untouched: nothing is pinned. A client that trusts only the
+// bus certificate — the old pin — fails with an x509 error.
+func TestNodeListener_HandshakeByChainSurvivesReMint(t *testing.T) {
+	ca := testMeshCA(t)
+	leaf := meshLeafOnDisk(t, ca)
+	ip := net.IPv4(192, 168, 1, 10)
+	if err := leaf.load(ip); err != nil {
+		t.Fatal(err)
+	}
+	// The listener's own server configuration, as main builds it.
+	server := newNodeListenerServer("", nil, leaf).TLSConfig
+	if server.MinVersion != tls.VersionTLS13 || server.ClientAuth != tls.RequireAnyClientCert {
+		t.Fatalf("node listener TLS = min %x, client auth %v; want TLS 1.3 and RequireAnyClientCert", server.MinVersion, server.ClientAuth)
+	}
+	clientCert := agentStyleClientCert(t)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.Cert)
+	client := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		RootCAs:      roots,
+		ServerName:   "home1.local",
+		Certificates: []tls.Certificate{clientCert},
+	}
+
+	cs, seen, err := handshake(t, server, client)
+	if err != nil {
+		t.Fatalf("handshake by Mesh chain: %v", err)
+	}
+	if !bytes.Equal(seen, clientCert.Leaf.RawSubjectPublicKeyInfo) {
+		t.Error("the server did not see the client's own SPKI")
+	}
+	firstSerial := cs.PeerCertificates[0].SerialNumber
+
+	if err := leaf.refresh(ip); err != nil {
+		t.Fatal(err)
+	}
+	cs, _, err = handshake(t, server, client)
+	if err != nil {
+		t.Fatalf("handshake after the leaf was re-minted: %v", err)
+	}
+	if cs.PeerCertificates[0].SerialNumber.Cmp(firstSerial) == 0 {
+		t.Fatal("refresh did not swap in a re-minted leaf; the renewal case proved nothing")
+	}
+
+	busKey, err := bustls.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	busCert, err := bustls.SelfSignedCert(busKey, time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	busOnly := x509.NewCertPool()
+	busOnly.AddCert(busCert.Leaf)
+	pinned := client.Clone()
+	pinned.RootCAs = busOnly
+	_, _, err = handshake(t, server, pinned)
+	var verr *tls.CertificateVerificationError
+	if err == nil || !errors.As(err, &verr) || !strings.Contains(err.Error(), "x509:") {
+		t.Fatalf("a client trusting only the bus certificate = %v, want an x509 verification error", err)
 	}
 }
 
-func timeZero() time.Time { return time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC) }
-func timeMax() time.Time  { return time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC) }
+// logCollectorWiring logs at INFO exactly when collectors are not wired, with
+// the fields an operator acts on: the HTTPS-off case names the listener and
+// the fix (TC-672-23's log line, at unit level).
+func TestLogCollectorWiring(t *testing.T) {
+	var buf bytes.Buffer
+	if !logCollectorWiring(logkit.New(&buf), ":8443", ":443") || buf.Len() != 0 {
+		t.Errorf("wired: logged %q", buf.String())
+	}
+
+	buf.Reset()
+	if logCollectorWiring(logkit.New(&buf), "127.0.0.1:8443", "") {
+		t.Fatal("wired with HTTPS off")
+	}
+	for _, want := range []string{"level=INFO", `msg="rasputin-api: obs collectors not wired"`,
+		"obs_ingest_addr=127.0.0.1:8443", `fix="set RASPUTIN_HTTPS_ADDR"`, "RASPUTIN_HTTPS_ADDR is unset"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("HTTPS-off entry lacks %q: %s", want, buf.String())
+		}
+	}
+
+	buf.Reset()
+	if logCollectorWiring(logkit.New(&buf), "", ":443") {
+		t.Fatal("wired with the node listener off")
+	}
+	if !strings.Contains(buf.String(), "obs collectors not wired") || strings.Contains(buf.String(), "fix=") {
+		t.Errorf("listener-off entry = %q, want a not-wired line with no fix", buf.String())
+	}
+}
+
+// collectorLeafMinter writes a legacy node's client leaf under the Mesh CA
+// and hands back its PEMs; a second call returns the same leaf.
+func TestCollectorLeafMinter(t *testing.T) {
+	ca := testMeshCA(t)
+	dataDir := t.TempDir()
+	mint := collectorLeafMinter(ca, dataDir)
+	certPEM, keyPEM, err := mint("c03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		t.Fatalf("minted pair does not load: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.Cert)
+	if _, err := pair.Leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		t.Errorf("minted leaf is not a Mesh-CA client leaf: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "tls", "collectors", "c03")); err != nil {
+		t.Errorf("leaf not written under tls/collectors/c03: %v", err)
+	}
+	again, _, err := mint("c03")
+	if err != nil || again != certPEM {
+		t.Errorf("second mint = (%d bytes, %v), want the same leaf", len(again), err)
+	}
+
+	// A data dir the leaf cannot be written under is an error, not a leaf.
+	blocked := t.TempDir()
+	if err := os.WriteFile(filepath.Join(blocked, "tls"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectorLeafMinter(ca, blocked)("c03"); err == nil {
+		t.Error("mint into an unwritable data dir succeeded")
+	}
+}

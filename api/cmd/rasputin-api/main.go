@@ -90,11 +90,13 @@ func main() {
 	// to :8443 on all interfaces so nodes can reach it via rasputin.local, the
 	// same mDNS path they already use for NATS.
 	//
-	// UNCONDITIONAL, where it used to come up only with HTTPS on. It serves a
-	// certificate wrapping the BUS key, which exists from the first start, so
-	// it does not wait for the mesh leaf and it does not wait for the clock
-	// gate — a node with no trustworthy clock is exactly the node that needs
-	// this listener. Set RASPUTIN_OBS_INGEST_ADDR empty to turn it off.
+	// It binds whether or not HTTPS is on, and serves the api's Mesh-CA-signed
+	// HTTPS leaf for every name, which a collector verifies by chain to the
+	// Mesh CA (geekdojo/geekdojo-brain#672). Until that leaf has loaded —
+	// after the clock gate — every handshake is refused and the collector
+	// retries; with HTTPS off there is no leaf, every handshake is refused,
+	// and no collector is deployed (collectorsWired). Set
+	// RASPUTIN_OBS_INGEST_ADDR empty to turn it off.
 	//
 	// Not an open door: ClientAuth=RequireAnyClientCert plus a VerifyConnection
 	// that admits only a registered node key, or (while legacy collectors
@@ -1274,60 +1276,31 @@ func main() {
 	}))
 	runner.Register(obs.DisableWorkflow(obsSup, setObsEnabled, setObsSink))
 
-	// Per-node observability collectors (Slice 1.2b, §3.10). Only in appliance
-	// mode: the mTLS ingress the collectors write to is appliance-only
-	// (obsIngestAddr), and dev has no compute/storage nodes. The reconcile
-	// converges the fleet to the operator's obs opt-in — deploy collectors when
-	// on, tear them down when off.
+	// Per-node observability collectors (Slice 1.2b, §3.10). Only when the
+	// node listener is on AND it has a Mesh leaf to serve, which needs HTTPS:
+	// a collector verifies the api by chain to the Mesh CA, so with no leaf
+	// there is nothing it could verify (collectorsWired). Appliances always
+	// run HTTPS; dev normally does not, and has no compute/storage nodes. The
+	// reconcile converges the fleet to the operator's obs opt-in — deploy
+	// collectors when on, tear them down when off.
 	var obsCollectorEntries []scheduler.Entry
-	if obsIngestAddr != "" {
+	if logCollectorWiring(logger, obsIngestAddr, httpsAddr) {
 		ingressBaseURL, ingressServerName, err := obs.DeriveIngressEndpoint(publicBaseURL, obsIngestAddr)
 		if err != nil {
 			log.Fatalf("rasputin-api: obs collector ingress endpoint: %v", err)
 		}
-		// Mint (idempotently) each node's client-auth leaf under the mesh CA.
-		// Renewal is the leaf sweep's job (collectorLeafSource), not this
-		// function's: MintLeafToDisk returns the existing leaf until it enters
-		// its renew window, and by then the sweep has already replaced it.
-		mintCollectorLeaf := func(nodeID string) (certPEM, keyPEM, caPEM string, err error) {
-			paths, err := mesh.MintLeafToDisk(meshCA,
-				filepath.Join(dataDir, "tls", "collectors", nodeID),
-				collectorLeafSpec(nodeID))
-			if err != nil {
-				return "", "", "", err
-			}
-			cert, err := os.ReadFile(paths.CertPath)
-			if err != nil {
-				return "", "", "", fmt.Errorf("read collector leaf cert: %w", err)
-			}
-			key, err := os.ReadFile(paths.KeyPath)
-			if err != nil {
-				return "", "", "", fmt.Errorf("read collector leaf key: %w", err)
-			}
-			return string(cert), string(key), string(meshCA.CertPEM), nil
-		}
-		// The node-key shape: a collector presents the key its node
-		// registered and trusts the api by the bus certificate's exact bytes,
-		// asking for the name that certificate answers to. Empty when the bus
-		// key did not load, which keeps every node on the legacy mesh leaf.
+		// Every collector, keyed or legacy, trusts the api by chain to the
+		// Mesh CA under the cluster name — the name the api's HTTPS leaf
+		// carries by construction (apiLeafSpec). No certificate is pinned, so
+		// a renewed leaf needs no redeploy.
 		collectorDeploy := obs.CollectorDeployDeps{
-			Inv: invStore, Mint: mintCollectorLeaf,
+			Inv: invStore, Mint: collectorLeafMinter(meshCA, dataDir),
 			IngressBaseURL: ingressBaseURL, ServerName: ingressServerName,
-		}
-		if len(busCert.Certificate) > 0 {
-			// The PERSISTED certificate (geekdojo/geekdojo-brain#508), rendered
-			// by the package that writes the file, so the collector's ca_pem is
-			// byte-for-byte what the listener serves and what is on disk. Being
-			// persisted is what keeps a restart from changing it and putting
-			// every collector through a redeploy.
-			collectorDeploy.NodeKeyServerName = bustls.BusDNSName
-			collectorDeploy.BusCertPEM = string(bustls.EncodeCertPEM(busCert))
-		} else {
-			log.Printf("rasputin-api: obs collectors: no bus certificate — collectors stay on the mesh leaf")
+			MeshCAPEM: string(meshCA.CertPEM),
 		}
 		runner.Register(obs.CollectorReconcileWorkflow(obs.CollectorReconcileDeps{
 			Inv: invStore, Jobs: jobStore, Runner: runner, Enabled: obsEnabled,
-			Deploy: collectorDeploy, MeshCAPEM: string(meshCA.CertPEM),
+			Deploy: collectorDeploy,
 		}))
 		runner.Register(obs.CollectorDeployWorkflow(collectorDeploy))
 		runner.Register(obs.CollectorTeardownWorkflow())
@@ -1655,9 +1628,8 @@ func main() {
 	httpHandler := handler
 	var httpsSrv, obsIngestSrv *http.Server
 	// The api's HTTPS server leaf, minted under the mesh CA behind the clock
-	// gate. Declared out here because the node listener serves it too, by SNI,
-	// for collectors deployed before node keys existed — while itself starting
-	// long before the leaf exists.
+	// gate. Declared out here because the node listener serves it too, for
+	// every collector — while itself starting long before the leaf exists.
 	var leaf *apiLeaf
 	if httpsAddr != "" {
 		// Served from memory through GetCertificate rather than from files at
@@ -1753,59 +1725,30 @@ func main() {
 	}
 
 	// The node listener. Built and started HERE — outside the httpsAddr block
-	// and outside the clock gate — because a node reaches the api on it before
-	// the api has a mesh leaf, and on a no-RTC node, before the clock is
-	// trustworthy. It serves the bus key's certificate by default and the mesh
-	// leaf to a legacy collector that asks for it by name (nodeListenerCert).
+	// and outside the clock gate — so it is bound from the first start. It
+	// serves the api's Mesh leaf for every name (nodeListenerCert) and refuses
+	// handshakes until that leaf has loaded; it does not depend on the bus key.
 	if obsIngestAddr != "" {
-		switch {
-		case busKey == nil || len(busCert.Certificate) == 0:
-			log.Printf("rasputin-api: ⚠️  node listener OFF on %s — the bus key did not load, so there is no certificate to serve. "+
-				"Nodes reach the api only on the legacy routes until the key file is fixed or restored.", obsIngestAddr)
-		default:
-			// The PERSISTED certificate (#508), so its bytes are the same
-			// across restarts — which is what a client that pins those bytes,
-			// rather than the key, depends on.
-			cert := busCert
-			// A legacy collector presents a mesh-CA-signed client leaf, so the
-			// mesh CA is the pool its chain is verified against. It drops out
-			// of here once every collector runs on a registered key.
-			meshClients := x509.NewCertPool()
-			meshClients.AddCert(meshCA.Cert)
-			obsIngestSrv = &http.Server{
-				Addr:              obsIngestAddr,
-				Handler:           srv.ObsIngestHandler(),
-				ReadHeaderTimeout: 10 * time.Second,
-				TLSConfig: &tls.Config{
-					// Every client here is a Go TLS stack or Grafana Alloy,
-					// which is one; the bus already requires 1.3 of all of
-					// them.
-					MinVersion: tls.VersionTLS13,
-					// Nothing is verified by the stack: admission is a check
-					// on the peer's KEY, made in VerifyConnection against the
-					// in-memory registry. RequireAndVerifyClientCert would
-					// instead demand a mesh-CA chain, which a node's own
-					// self-signed certificate does not have and is not
-					// supposed to have.
-					ClientAuth:     tls.RequireAnyClientCert,
-					GetCertificate: nodeListenerCert(&cert, func() *apiLeaf { return leaf }),
-				},
-			}
-			if err := srv.WireObsIngest(obsIngestSrv, invStore.Registry(), meshClients); err != nil {
+		// A legacy collector presents a mesh-CA-signed client leaf, so the
+		// mesh CA is the pool its chain is verified against. It drops out of
+		// here once every collector runs on a registered key.
+		meshClients := x509.NewCertPool()
+		meshClients.AddCert(meshCA.Cert)
+		obsIngestSrv = newNodeListenerServer(obsIngestAddr, srv.ObsIngestHandler(), leaf)
+		if err := srv.WireObsIngest(obsIngestSrv, invStore.Registry(), meshClients); err != nil {
+			log.Fatalf("rasputin-api: node listener: %v", err)
+		}
+		nodeLn, lerr := net.Listen("tcp", obsIngestAddr)
+		if lerr != nil {
+			log.Fatalf("rasputin-api: node listener: %v", lerr)
+		}
+		logger.Info("rasputin-api: node listener up", "addr", nodeLn.Addr().String(),
+			"serves", "api Mesh leaf", "client_auth", "registered key or legacy mesh leaf")
+		go func() {
+			if err := obsIngestSrv.ServeTLS(nodeLn, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("rasputin-api: node listener: %v", err)
 			}
-			nodeLn, lerr := net.Listen("tcp", obsIngestAddr)
-			if lerr != nil {
-				log.Fatalf("rasputin-api: node listener: %v", lerr)
-			}
-			log.Printf("rasputin-api: node listener on %s (TLS 1.3, client key required; serving the bus certificate as %q)",
-				obsIngestAddr, bustls.BusDNSName)
-			go func() {
-				if err := obsIngestSrv.ServeTLS(nodeLn, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					log.Fatalf("rasputin-api: node listener: %v", err)
-				}
-			}()
-		}
+		}()
 	}
 
 	httpSrv := &http.Server{
@@ -2274,6 +2217,90 @@ func randomSecret() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// logCollectorWiring decides, through collectorsWired, whether the per-node
+// collectors are wired, and says so at INFO when they are not: with the node
+// listener on, that is a configuration an operator can fix, and the entry
+// names the fix; with it off on purpose there is nothing to fix.
+func logCollectorWiring(logger *slog.Logger, obsIngestAddr, httpsAddr string) bool {
+	wired, reason := collectorsWired(obsIngestAddr, httpsAddr)
+	switch {
+	case wired:
+	case obsIngestAddr != "":
+		logger.Info("rasputin-api: obs collectors not wired", "reason", reason,
+			"obs_ingest_addr", obsIngestAddr, "fix", "set RASPUTIN_HTTPS_ADDR")
+	default:
+		logger.Info("rasputin-api: obs collectors not wired", "reason", reason)
+	}
+	return wired
+}
+
+// collectorLeafMinter mints (idempotently) a legacy node's client-auth leaf
+// under the mesh CA, into dataDir/tls/collectors/<node>. Renewal is the leaf
+// sweep's job (collectorLeafSource), not this function's: MintLeafToDisk
+// returns the existing leaf until it enters its renew window, and by then the
+// sweep has already replaced it.
+func collectorLeafMinter(meshCA *mesh.MeshCA, dataDir string) obs.MintCollectorLeafFn {
+	return func(nodeID string) (certPEM, keyPEM string, err error) {
+		paths, err := mesh.MintLeafToDisk(meshCA,
+			filepath.Join(dataDir, "tls", "collectors", nodeID),
+			collectorLeafSpec(nodeID))
+		if err != nil {
+			return "", "", err
+		}
+		cert, err := os.ReadFile(paths.CertPath)
+		if err != nil {
+			return "", "", fmt.Errorf("read collector leaf cert: %w", err)
+		}
+		key, err := os.ReadFile(paths.KeyPath)
+		if err != nil {
+			return "", "", fmt.Errorf("read collector leaf key: %w", err)
+		}
+		return string(cert), string(key), nil
+	}
+}
+
+// newNodeListenerServer is the node listener's server: TLS 1.3, any client
+// certificate required (admission is a check on the peer's key, wired by
+// WireObsIngest), and the api's Mesh leaf served for every name
+// (nodeListenerCert). leaf is nil when HTTPS is off.
+func newNodeListenerServer(addr string, handler http.Handler, leaf *apiLeaf) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig: &tls.Config{
+			// Every client here is a Go TLS stack or Grafana Alloy, which is
+			// one; the bus already requires 1.3 of all of them.
+			MinVersion: tls.VersionTLS13,
+			// Nothing is verified by the stack: admission is a check on the
+			// peer's KEY, made in VerifyConnection against the in-memory
+			// registry. RequireAndVerifyClientCert would instead demand a
+			// mesh-CA chain, which a node's own self-signed certificate does
+			// not have and is not supposed to have.
+			ClientAuth:     tls.RequireAnyClientCert,
+			GetCertificate: nodeListenerCert(leaf),
+		},
+	}
+}
+
+// collectorsWired reports whether the per-node collector workflows and their
+// schedule entry are registered, and when they are not, why. Both settings
+// are needed: obsIngestAddr is the node listener a collector writes to, and
+// httpsAddr is what gives the api the Mesh leaf that listener serves. With
+// HTTPS off there is no leaf, so a collector could verify nothing and every
+// handshake would be refused (geekdojo/geekdojo-brain#672).
+func collectorsWired(obsIngestAddr, httpsAddr string) (bool, string) {
+	switch {
+	case obsIngestAddr == "" && httpsAddr == "":
+		return false, "RASPUTIN_OBS_INGEST_ADDR is empty, so the node listener is off, and RASPUTIN_HTTPS_ADDR is unset, so there is no Mesh leaf"
+	case obsIngestAddr == "":
+		return false, "RASPUTIN_OBS_INGEST_ADDR is empty, so the node listener is off and there is nowhere for a collector to write"
+	case httpsAddr == "":
+		return false, "HTTPS is off (RASPUTIN_HTTPS_ADDR is unset), so the node listener has no Mesh leaf for a collector to verify"
+	}
+	return true, ""
 }
 
 // secureCookies decides whether the session and pending-auth cookies carry

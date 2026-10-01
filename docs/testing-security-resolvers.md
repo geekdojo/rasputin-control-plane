@@ -235,7 +235,7 @@ cookie_warns() {
 start_api RASPUTIN_RP_ORIGINS=" , "
 wait_for_log "http listening on 127.0.0.1:$HTTP_PORT"
 grep 'rasputin-api: cluster identity:' "$LOG"
-grep "node listener on 127.0.0.1:$OBS_PORT" "$LOG"
+grep "node listener up" "$LOG" | grep "addr=127.0.0.1:$OBS_PORT"
 grep "http listening on 127.0.0.1:$HTTP_PORT" "$LOG"
 grep -E 'rasputin-api: bus:|node listener:|level=ERROR|panic' "$LOG" || echo "no fatal line"
 lsof -a -p "$PID" -iTCP -sTCP:LISTEN -nP
