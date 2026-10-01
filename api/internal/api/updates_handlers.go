@@ -786,13 +786,16 @@ func componentFullyStaged(c *releases.ComponentStatus) bool {
 }
 
 // POST /api/updates/pull
-// Body: { "component": "os", "channel"?: "stable" | "dev" }
-// Downloads the latest deployable bundle for the component from the public
-// channel into the local bundle store (verifying the manifest sha256, and the
-// signature for mock bundles), so the existing Deploy / Update-all flow can
-// distribute it. Only RAUC components are pullable; the firewall is
-// display-only. Idempotent: returns 200 with the existing bundle if already
-// staged, 201 when freshly pulled.
+// Body: { "component": "os" | "fw", "channel"?: "stable" | "dev" }
+// Downloads the latest release of the component from the public channel into
+// the local bundle store, one artifact per architecture the manifest lists,
+// so the existing Deploy / Update-all flow can distribute it. Any component
+// the registry marks Deployable can be pulled: the OS (RAUC bundles) and the
+// firewall (its rootfs image, with the detached .sig staged beside it). Each
+// artifact's sha256 must match the release manifest; the artifact's own
+// signature is verified on the node that installs it. Idempotent: returns 200
+// with the existing bundle if already staged, 201 when freshly pulled, and
+// 207 when only some architectures staged.
 func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.releaseSource == nil {
 		writeError(w, http.StatusServiceUnavailable, "update channel not configured on this control plane")
