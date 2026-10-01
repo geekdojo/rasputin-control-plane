@@ -181,6 +181,10 @@ type apiOpts struct {
 	// preseed is written as the matched-set token preseed (bus/preseed.json),
 	// the one way to give an api a join token without touching its database.
 	preseed []busauth.PreseedToken
+	// noWait returns from runAPI as soon as the process has started, instead
+	// of at its HTTP listener, so a test can act on a start-up log line that
+	// comes before it (the auth-callout responder going active).
+	noWait bool
 }
 
 // startAPI seeds a controlplane data dir the way firstboot and an operator
@@ -260,7 +264,8 @@ func startAPI(t *testing.T, o apiOpts) (a *apiProc, pin string) {
 	return runAPI(t, o, dataDir, sessToken), pin
 }
 
-// runAPI starts the api binary on dataDir and waits for its HTTP listener.
+// runAPI starts the api binary on dataDir and waits for its HTTP listener,
+// unless o.noWait.
 func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
 	t.Helper()
 	httpPort, natsPort := o.httpPort, o.natsPort
@@ -340,7 +345,9 @@ func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
 			t.Logf("--- api log ---\n%s", a.log())
 		}
 	})
-	a.waitLog(t, "the HTTP listener", "rasputin-api: http listening on")
+	if !o.noWait {
+		a.waitLog(t, "the HTTP listener", "rasputin-api: http listening on")
+	}
 	return a
 }
 

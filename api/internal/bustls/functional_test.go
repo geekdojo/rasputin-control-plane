@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -459,7 +460,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		t.Fatal(err)
 	}
 	c.tokens = tokens
-	// The api's one node list, opened and loaded before the responder admits
+	// The api's one node list, opened and loaded before the bus admits
 	// anyone — as cmd/rasputin-api does. Without it nothing is admitted.
 	invStore, err := inventory.OpenStore(ctx, dbPath)
 	if err != nil {
@@ -475,12 +476,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 		t.Fatalf("SetNodeRegistry: %v", err)
 	}
 	invStore.Registry().OnNodeExcluded(func(nodeID string) { _ = tokens.DisconnectNode(nodeID) })
-	tokens.TrackSessions(srv)
-	responder := busauth.NewResponder(srv.Conn(), issuer, tokens)
-	if err := responder.Start(); err != nil {
-		t.Fatal(err)
-	}
-	invSvc := inventory.NewService(invStore, srv.Conn())
+	invSvc := inventory.NewService(invStore, srv.Conn(), slog.New(slog.DiscardHandler))
 	// OnRegistered fires AFTER the node row is written, so a test that needs
 	// the RECORDED row (not only the event that crossed the bus) has a fact to
 	// wait on instead of a poll.
@@ -506,11 +502,19 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Agents are admitted only now, after inventory and every other
+	// subscriber above, through the same busauth.StartAdmission
+	// cmd/rasputin-api calls after its own subscribers
+	// (geekdojo/geekdojo-brain#623).
+	stopAdmission, err := busauth.StartAdmission(true, srv, issuer, tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var once sync.Once
 	c.stopFn = func() {
 		once.Do(func() {
+			stopAdmission()
 			invSvc.Stop()
-			responder.Stop()
 			srv.Stop()
 			cancel()
 			_ = invStore.Close()

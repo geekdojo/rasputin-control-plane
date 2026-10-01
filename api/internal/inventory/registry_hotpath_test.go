@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestHandleHeartbeat_NoDatabaseWorkOnTheHotPath(t *testing.T) {
 	}
 	store.Registry().ReplaceLiveTokens(map[string][]string{nodeID: {"h1"}})
 
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 	changeSub, err := nc.SubscribeSync("rasputin.inventory.>")
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +100,7 @@ func TestHandleRegistered_CapAndMembershipComeFromTheRegistry(t *testing.T) {
 		t.Fatalf("MemberCount = %d, want %d", got, proto.MaxClusterNodes)
 	}
 
-	svc := NewService(store, nil) // nc nil: the refusal returns before any emit
+	svc := NewService(store, nil, slog.New(slog.DiscardHandler)) // nc nil: the refusal returns before any emit
 	svc.ctx = ctx
 	if err := store.db.Close(); err != nil {
 		t.Fatal(err)

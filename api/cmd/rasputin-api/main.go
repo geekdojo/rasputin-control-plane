@@ -279,7 +279,7 @@ func main() {
 
 	// The controlplane's own agent authenticates with a join token like every
 	// other node; the bus trusts nothing for coming from loopback
-	// (geekdojo/geekdojo-brain#140). Mint it here, before the responder admits
+	// (geekdojo/geekdojo-brain#140). Mint it here, before the bus admits
 	// anyone and long before READY=1, so the agent — ordered After= this unit —
 	// finds the file on its first connect. Zero-touch: nobody provisions it.
 	ensureSelfAgentToken(ctx, busTokenStore, filepath.Join(dataDir, "bus", proto.BusAgentTokenFileName), selfNodeID)
@@ -316,17 +316,6 @@ func main() {
 		}
 	})
 	invStore.Registry().OnNodeExcluded(busTokenStore.ForgetNode)
-
-	if busAuthEnforce {
-		// Before the responder starts, so every connection it admits is
-		// recorded and a revoke can close it (certificates.md §4.2(1)).
-		busTokenStore.TrackSessions(busSrv)
-		responder := busauth.NewResponder(busSrv.Conn(), busIssuer, busTokenStore)
-		if err := responder.Start(); err != nil {
-			log.Fatalf("rasputin-api: bus auth responder: %v", err)
-		}
-		defer responder.Stop()
-	}
 
 	jobStore, err := jobs.OpenStore(ctx, dbPath)
 	if err != nil {
@@ -1045,7 +1034,7 @@ func main() {
 	// drives — starting it first would just poll for longer.
 	updater.ResumeSystemUpdates(ctx, jobStore, runner, busSrv.Conn(), selfNodeID)
 
-	invSvc := inventory.NewService(invStore, busSrv.Conn())
+	invSvc := inventory.NewService(invStore, busSrv.Conn(), logger)
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent
 	// baseline firewall rules (Allow-DHCP-Renew / Allow-Ping / Allow-IGMP) as
 	// real, visible, deletable intents. SeedBaselineRules is idempotent via a
@@ -1545,6 +1534,20 @@ func main() {
 	srv.SetAlertsService(alertsSvc)
 	// The inventory hook installed before Start can raise alerts from here on.
 	nodeKeyAlerts.Store(alertsSvc)
+
+	// Agents are admitted to the bus only now, after every start-up subscriber
+	// of agent subjects above — inventory, metrics, IDS, the BMC reconcile and
+	// status seed — and the node-key alert sink, so a registration sent the
+	// moment a node joins always has a listener (geekdojo/geekdojo-brain#623).
+	// Nothing below subscribes to agent subjects; keep it that way, or wire
+	// the new subscriber above this call. Deferred here, it stops first at
+	// shutdown, before any subscriber goes away. Sessions are tracked before
+	// the responder starts, so every admitted connection can be closed by a
+	// revoke (certificates.md §4.2(1)).
+	stopAdmission := admitAgents(ctx, logger, os.Exit, func() (func(), error) {
+		return busauth.StartAdmission(busAuthEnforce, busSrv, busIssuer, busTokenStore)
+	})
+	defer stopAdmission()
 	// Rule alerts: vmalert evaluates the rules on its own schedule and
 	// writes its verdicts to VictoriaMetrics as ALERTS series; nothing calls
 	// the api. This loop reads them back and mirrors them into the alerts

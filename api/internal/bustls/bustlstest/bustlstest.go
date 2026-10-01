@@ -65,9 +65,7 @@ func New() (Kit, error) {
 	if err != nil {
 		return Kit{}, err
 	}
-	roots := x509.NewCertPool()
-	roots.AddCert(cert.Leaf)
-	client := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: bustls.BusDNSName}
+	client := ClientConfig(cert.Leaf)
 	return Kit{
 		Server: bustls.ServerTLSConfigFor(cert),
 		Client: client,
@@ -76,6 +74,16 @@ func New() (Kit, error) {
 		Cert:   cert,
 		Signer: signer,
 	}, nil
+}
+
+// ClientConfig is a client TLS config that trusts leaf, the bus certificate,
+// by chain and name: leaf is its only root and bustls.BusDNSName is the name.
+// No InsecureSkipVerify. A test reaching a bus whose certificate it read off
+// disk (the real api's bus/bus.crt) uses it as Kit.Client is built.
+func ClientConfig(leaf *x509.Certificate) *tls.Config {
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: bustls.BusDNSName}
 }
 
 // MustNew is New for a package-level variable; it panics if a Kit cannot be

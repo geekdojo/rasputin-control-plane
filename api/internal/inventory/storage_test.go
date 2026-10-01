@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestService_Registered_StorageLearnAndKeep(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 
 	changeSub, err := nc.SubscribeSync("rasputin.inventory.>")
 	if err != nil {

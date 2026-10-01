@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -63,7 +64,7 @@ func TestService_Start_FullHeartbeatPath(t *testing.T) {
 	// at api start.
 	store.Registry().ReplaceLiveTokens(map[string][]string{nodeID: {"h1"}})
 
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 	// Subscribe to the inventory change channel before Start so we don't
 	// race a fast emit.
 	changeSub, err := nc.SubscribeSync("rasputin.inventory.>")
@@ -108,7 +109,7 @@ func TestService_Start_RegisteredCreatesNode(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 
 	changeSub, err := nc.SubscribeSync("rasputin.inventory.>")
 	if err != nil {
@@ -173,7 +174,7 @@ func TestService_Start_RegisteredUpdatesExistingOnlineToUpdated(t *testing.T) {
 	// at api start.
 	store.Registry().ReplaceLiveTokens(map[string][]string{nodeID: {"h1"}})
 
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 	// Pre-populate cache so prev == Online; handleRegistered should then
 	// emit InventoryUpdated, not InventoryOnline.
 	svc.statusByNode[nodeID] = proto.StatusOnline
@@ -245,7 +246,7 @@ func TestService_ScanForTransitions_EmitsOnStatusChange(t *testing.T) {
 		}
 	}
 
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 	svc.ctx = ctx
 	for _, s := range seeds {
 		svc.statusByNode[s.id] = s.cacheVal
@@ -288,7 +289,7 @@ func TestService_Start_SubscribeError(t *testing.T) {
 	nc := startNATS(t)
 	nc.Close()
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 	if err := svc.Start(context.Background()); err == nil {
 		t.Error("Start on a closed conn should error")
 	}
@@ -297,7 +298,7 @@ func TestService_Start_SubscribeError(t *testing.T) {
 // TestService_Stop_BeforeStart_IsSafe pins the cancel == nil branch of Stop.
 func TestService_Stop_BeforeStart_IsSafe(t *testing.T) {
 	store := newStore(t)
-	svc := NewService(store, nil)
+	svc := NewService(store, nil, slog.New(slog.DiscardHandler))
 	svc.Stop()
 }
 
@@ -306,7 +307,7 @@ func TestService_Stop_BeforeStart_IsSafe(t *testing.T) {
 func TestService_Emit_Direct(t *testing.T) {
 	nc := startNATS(t)
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 	svc.ctx = context.Background()
 
 	sub, err := nc.SubscribeSync("rasputin.inventory.>")

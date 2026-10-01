@@ -21,7 +21,9 @@
 #   * the real api with an unusable bus key, or certificate, keeps running
 #     with no bus listener, a crit alert naming the file, and coded 503s;
 #   * clock independence, the controlplane agent's minted token, and the
-#     persisted bus certificate.
+#     persisted bus certificate;
+#   * the real api records every node that registers at the first moment the
+#     bus admits it, once, during start-up (geekdojo/geekdojo-brain#623).
 #
 # --compat instead builds rasputin-agent and rasputin-api from the floor
 # release tag (v2026.09.5) and runs the -tags buscompat tests against them:

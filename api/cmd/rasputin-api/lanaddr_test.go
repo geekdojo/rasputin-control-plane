@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
@@ -264,7 +265,7 @@ func TestDNSForward_FirewallRegistrationSubmits(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	submitted := make(chan string, 8)
-	svc := inventory.NewService(store, nc)
+	svc := inventory.NewService(store, nc, slog.New(slog.DiscardHandler))
 	svc.SetOnRegistered(dnsForwardOnFirewallRegistration(func(reason string) { submitted <- reason }))
 	if err := svc.Start(ctx); err != nil {
 		t.Fatal(err)

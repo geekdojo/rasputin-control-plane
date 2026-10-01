@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -23,8 +24,9 @@ const (
 // the inventory ledger, and emits inventory change events when a node's
 // status, role, or membership changes.
 type Service struct {
-	store *Store
-	nc    *nats.Conn
+	store  *Store
+	nc     *nats.Conn
+	logger *slog.Logger
 
 	mu           sync.Mutex
 	statusByNode map[string]proto.NodeStatus // last published status per node
@@ -59,13 +61,25 @@ type Service struct {
 	wg     sync.WaitGroup
 }
 
-// NewService constructs an inventory Service bound to a store and bus.
-func NewService(store *Store, nc *nats.Conn) *Service {
+// NewService constructs an inventory Service bound to a store and bus. The
+// logger is the process logger, injected by the composition root.
+func NewService(store *Store, nc *nats.Conn, logger *slog.Logger) *Service {
 	return &Service{
 		store:        store,
 		nc:           nc,
+		logger:       logger,
 		statusByNode: make(map[string]proto.NodeStatus),
 	}
+}
+
+// logRecorded is the one trace a written registration leaves: the fact an
+// operator (and the start-up functional test) checks to know a node's
+// registration was received and stored, not merely published
+// (geekdojo/geekdojo-brain#623). Emitted only after the store write succeeds,
+// so a rejected or failed registration never produces it.
+func (s *Service) logRecorded(n *proto.Node, first bool) {
+	s.logger.Info("inventory: registration recorded",
+		"node_id", n.ID, "role", string(n.Role), "first", first)
 }
 
 // Start subscribes to the bus and launches the transition-tick loop.
@@ -404,6 +418,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 			log.Printf("inventory: insert %s: %v", ev.NodeID, err)
 			return
 		}
+		s.logRecorded(n, true)
 		s.mu.Lock()
 		s.statusByNode[ev.NodeID] = proto.StatusOnline
 		s.mu.Unlock()
@@ -456,6 +471,7 @@ func (s *Service) handleRegistered(m *nats.Msg) {
 		log.Printf("inventory: update %s: %v", ev.NodeID, err)
 		return
 	}
+	s.logRecorded(existing, false)
 
 	s.mu.Lock()
 	prev := s.statusByNode[ev.NodeID]

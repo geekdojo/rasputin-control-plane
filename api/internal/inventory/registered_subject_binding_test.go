@@ -9,6 +9,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -120,7 +121,7 @@ func TestHandleRegistered_PayloadNodeIDMustMatchSubject(t *testing.T) {
 	before, _ := store.Get(ctx, "controlplane")
 
 	api := srv.Conn()
-	svc := NewService(store, api)
+	svc := NewService(store, api, slog.New(slog.DiscardHandler))
 	changes, err := api.SubscribeSync("rasputin.inventory.>")
 	if err != nil {
 		t.Fatalf("change sub: %v", err)

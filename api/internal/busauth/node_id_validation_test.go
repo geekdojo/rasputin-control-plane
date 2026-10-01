@@ -42,6 +42,28 @@ type enforcedBus struct {
 // shorten a lifetime or wrap its validator without racing the callout.
 func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) *enforcedBus {
 	t.Helper()
+	reg := newRecordingRegistry()
+	srv, issuer, tokens := startUnadmittedBus(t, host, filepath.Join(t.TempDir(), "bus.db"), reg)
+
+	tokens.TrackSessions(srv) // as main.go does, before the responder starts
+	resp := NewResponder(srv.Conn(), issuer, tokens)
+	for _, fn := range configure {
+		fn(resp)
+	}
+	if err := resp.Start(); err != nil {
+		t.Fatalf("responder.Start: %v", err)
+	}
+	t.Cleanup(resp.Stop)
+
+	url, _ := srv.ClientURL()
+	return &enforcedBus{srv: srv, tokens: tokens, reg: reg, resp: resp, url: url}
+}
+
+// startUnadmittedBus starts the embedded server with AuthEnforce on, bound to
+// host, and the token store at dbPath with reg attached. It starts no
+// responder, so nothing is admitted until the caller starts one.
+func startUnadmittedBus(t *testing.T, host, dbPath string, reg NodeRegistry) (*bus.Server, *Issuer, *Store) {
+	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
 
@@ -52,14 +74,13 @@ func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) 
 	if err := os.MkdirAll(filepath.Join(dir, "nats"), 0o755); err != nil {
 		t.Fatalf("mkdir nats: %v", err)
 	}
-	tokens, err := OpenStore(ctx, filepath.Join(dir, "bus.db"))
+	tokens, err := OpenStore(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
 	// As main.go does: the node registry is attached, and so loaded, before
 	// anything can connect. Without it the store admits nobody.
-	reg := newRecordingRegistry()
 	if err := tokens.SetNodeRegistry(ctx, reg); err != nil {
 		t.Fatalf("SetNodeRegistry: %v", err)
 	}
@@ -77,19 +98,7 @@ func startEnforcedBus(t *testing.T, host string, configure ...func(*Responder)) 
 		t.Fatalf("bus.Start(host=%s): %v", host, err)
 	}
 	t.Cleanup(srv.Stop)
-
-	tokens.TrackSessions(srv) // as main.go does, before the responder starts
-	resp := NewResponder(srv.Conn(), issuer, tokens)
-	for _, fn := range configure {
-		fn(resp)
-	}
-	if err := resp.Start(); err != nil {
-		t.Fatalf("responder.Start: %v", err)
-	}
-	t.Cleanup(resp.Stop)
-
-	url, _ := srv.ClientURL()
-	return &enforcedBus{srv: srv, tokens: tokens, reg: reg, resp: resp, url: url}
+	return srv, issuer, tokens
 }
 
 func connect(url, username, token string, opts ...nats.Option) (*nats.Conn, error) {

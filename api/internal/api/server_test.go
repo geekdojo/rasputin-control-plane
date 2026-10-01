@@ -273,7 +273,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	runner := jobs.NewRunner(jobStore, nc)
 
 	trustDir := dir
-	invSvc := inventory.NewService(invStore, nc)
+	invSvc := inventory.NewService(invStore, nc, slog.New(slog.DiscardHandler))
 	busTokenStore, err := busauth.OpenStore(ctx, open("bus.db"))
 	if err != nil {
 		t.Fatalf("busauth OpenStore: %v", err)
@@ -1625,7 +1625,7 @@ func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
 		DefaultUser:  "rasputin-operator",
 		HeadplaneURL: hpURL,
 	}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
-	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
+	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 		f.fw, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
@@ -1666,7 +1666,7 @@ func TestHandleListMeshDevices_CarriesTrust(t *testing.T) {
 	c := f.authenticate(t)
 	ca := []byte("-----BEGIN CERTIFICATE-----\nORIGINAL\n-----END CERTIFICATE-----\n")
 	meshSvc := mesh.NewService(mesh.Config{MeshCAPEM: ca}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
-	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
+	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 		f.fw, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,

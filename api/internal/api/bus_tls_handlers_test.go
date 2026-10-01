@@ -74,7 +74,7 @@ func sequentialIDs() func() string {
 // from what the bus key and certificate turned out to be.
 func (f *apiFixture) useBusState(t *testing.T, st BusState) {
 	t.Helper()
-	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
+	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 		f.fw, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
 		st, f.srv.log, f.srv.newCorrelationID)
@@ -251,7 +251,7 @@ func TestNewServer_RefusesNilCollaborators(t *testing.T) {
 		"nil id generator": {key, logger, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc),
+			srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 				f.fw, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 				f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil, f.srv.busTokens, f.nc,
 				tc.bus, tc.log, tc.ids)
