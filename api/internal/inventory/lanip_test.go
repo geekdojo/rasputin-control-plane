@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ func TestService_Registered_LANIPLearnAndKeep(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 
 	changeSub, err := nc.SubscribeSync("rasputin.inventory.>")
 	if err != nil {
@@ -74,7 +75,7 @@ func TestService_SelfLANIP(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 
 	var mu sync.Mutex
 	selfIP := "192.168.1.2" // booted with no DHCP: only the fallback
@@ -182,7 +183,7 @@ func TestService_OnRegisteredFiresOnEveryRegistration(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 
 	got := make(chan proto.Node, 8)
 	svc.SetOnRegistered(func(_ context.Context, n *proto.Node) { got <- *n })

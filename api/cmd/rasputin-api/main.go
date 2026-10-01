@@ -1045,7 +1045,7 @@ func main() {
 	// drives — starting it first would just poll for longer.
 	updater.ResumeSystemUpdates(ctx, jobStore, runner, busSrv.Conn(), selfNodeID)
 
-	invSvc := inventory.NewService(invStore, busSrv.Conn())
+	invSvc := inventory.NewService(invStore, busSrv.Conn(), logger)
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent
 	// baseline firewall rules (Allow-DHCP-Renew / Allow-Ping / Allow-IGMP) as
 	// real, visible, deletable intents. SeedBaselineRules is idempotent via a

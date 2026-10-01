@@ -8,6 +8,7 @@ package inventory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func newRoleTestService(t *testing.T) (*Service, *Store, *nats.Subscription) {
 	t.Helper()
 	nc := startNATS(t)
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 	svc.ctx = context.Background()
 	changes, err := nc.SubscribeSync("rasputin.inventory.>")
 	if err != nil {

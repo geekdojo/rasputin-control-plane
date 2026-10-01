@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -480,7 +481,7 @@ func startCP(t *testing.T, o cpOpts) *cp {
 	if err := responder.Start(); err != nil {
 		t.Fatal(err)
 	}
-	invSvc := inventory.NewService(invStore, srv.Conn())
+	invSvc := inventory.NewService(invStore, srv.Conn(), slog.New(slog.DiscardHandler))
 	// OnRegistered fires AFTER the node row is written, so a test that needs
 	// the RECORDED row (not only the event that crossed the bus) has a fact to
 	// wait on instead of a poll.

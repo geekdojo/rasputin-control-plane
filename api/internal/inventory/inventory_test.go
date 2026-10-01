@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -325,7 +326,7 @@ func TestService_ScanForTransitions_NoTransition_NoEmit(t *testing.T) {
 	}
 
 	// nc is nil — that's fine as long as no branch attempts to publish.
-	svc := NewService(store, nil)
+	svc := NewService(store, nil, slog.New(slog.DiscardHandler))
 	svc.ctx = ctx
 
 	// Pre-populate the in-memory cache so cur == prev for every node and
@@ -352,7 +353,7 @@ func TestService_ScanForTransitions_NoTransition_NoEmit(t *testing.T) {
 func TestService_ScanForTransitions_EmptyStore(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
-	svc := NewService(store, nil)
+	svc := NewService(store, nil, slog.New(slog.DiscardHandler))
 	svc.ctx = ctx
 	// No nodes, no transitions, no emit, no panic.
 	svc.scanForTransitions()
@@ -373,7 +374,7 @@ func TestService_Seed_PopulatesCache(t *testing.T) {
 		t.Fatalf("insert cold: %v", err)
 	}
 
-	svc := NewService(store, nil)
+	svc := NewService(store, nil, slog.New(slog.DiscardHandler))
 	svc.ctx = ctx
 	if err := svc.seed(ctx); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -392,7 +393,7 @@ func TestService_Seed_PopulatesCache(t *testing.T) {
 
 func TestService_StoreAccessor(t *testing.T) {
 	store := newStore(t)
-	svc := NewService(store, nil)
+	svc := NewService(store, nil, slog.New(slog.DiscardHandler))
 	if svc.Store() != store {
 		t.Errorf("Store() did not return the wrapped store")
 	}
@@ -416,7 +417,7 @@ func TestService_StoreAccessor(t *testing.T) {
 
 func TestService_HandleHeartbeat_EarlyExits(t *testing.T) {
 	store := newStore(t)
-	svc := NewService(store, nil) // nc is nil; safe as long as no emit() is reached.
+	svc := NewService(store, nil, slog.New(slog.DiscardHandler)) // nc is nil; safe as long as no emit() is reached.
 	svc.ctx = context.Background()
 
 	// These cases all return before emit():
@@ -442,7 +443,7 @@ func TestService_HandleHeartbeat_EarlyExits(t *testing.T) {
 
 func TestService_HandleRegistered_EarlyExits(t *testing.T) {
 	store := newStore(t)
-	svc := NewService(store, nil)
+	svc := NewService(store, nil, slog.New(slog.DiscardHandler))
 	svc.ctx = context.Background()
 
 	cases := []struct {
@@ -469,7 +470,7 @@ func TestService_HandleRegistered_RejectsAtNodeCap(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store := newStore(t)
-	svc := NewService(store, nc)
+	svc := NewService(store, nc, slog.New(slog.DiscardHandler))
 	svc.ctx = ctx
 
 	for i := 0; i < proto.MaxClusterNodes; i++ {
