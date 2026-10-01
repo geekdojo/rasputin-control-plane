@@ -6,8 +6,7 @@
 > running processes at all.
 >
 > The mock backend below downloads over plain http from a laptop api. The real backends'
-> download client, which trusts only the node's mesh CA bundle, is proven on the bench by
-> [`testing-agent-trust.md`](testing-agent-trust.md).
+> download client, which trusts only the node's mesh CA bundle, is not exercised here.
 
 Three failure scenarios exercise the Phase 2 exit-gate criterion "atomic A/B OS update demonstrably rolls back on simulated failure." All three run against the **mock backend** on a dev laptop — no real hardware required.
 

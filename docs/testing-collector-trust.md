@@ -1,4 +1,4 @@
-# Testing collector trust: the Alloy probe and the bench
+# Testing collector trust: the Alloy probe
 
 Every observability collector trusts the api the standard way every Rasputin HTTPS client
 does: **by chain to the Mesh CA, under the cluster name, with no certificate pinned**
@@ -12,13 +12,9 @@ the auth register's C17 row anchors to it, so changing what a collector trusts f
 `scripts/auth-register.sh --gate` until the row is re-read.
 
 The unit tests prove the rendering and the decisions. They cannot prove what Alloy does with
-the config. Two functional tests cover that:
-
-- **The Alloy probe** — local, repeatable, about a minute. Run it on any change to the
-  collector's TLS config, and on every bump of the pinned Alloy image (`defaultAlloyImage`;
-  the `T05` row of `.github/third-party-capabilities.tsv` records it).
-- **The bench procedure** — real collectors on real nodes, run after merge on a signed dev
-  build in the next bench batch.
+the config. The Alloy probe covers that: local, repeatable, about a minute. Run it on any
+change to the collector's TLS config, and on every bump of the pinned Alloy image
+(`defaultAlloyImage`; the `T05` row of `.github/third-party-capabilities.tsv` records it).
 
 ## The Alloy probe
 
@@ -46,7 +42,7 @@ certificate:
 
 ### What it does not prove
 
-- The real fleet: real nodes, the real api leaf, both architectures. The bench does.
+- The real fleet: real nodes, the real api leaf, both architectures.
 - `loki.write`. It renders the same block as `remote_write` (a unit test, TC-672-05, checks
   that byte for byte), but the probe drives only `remote_write`.
 - The Linux docker route. On Linux the probe adds
@@ -79,175 +75,3 @@ PATH="$HOME/.rd/bin:$PATH" go test -tags=alloyprobe -run TestAlloyProbe -count=1
   PATH="$HOME/.rd/bin:$PATH" docker ps -a --filter name=rasputin-alloy-probe   # header only
   ls "$HOME/.cache/rasputin-alloy-probe"                                       # No such file or directory
   ```
-
-## The bench procedure
-
-### What it proves
-
-- Real keyed collectors on the bench verify the api's real Mesh leaf by chain, under the
-  cluster name, and ship metrics and logs, on **amd64 and arm64** (TC-672-26, TC-672-27).
-- The upgrade migrates every keyed collector by trust drift, with no manual step, and does not
-  churn legacy collectors (TC-672-25).
-- A collector follows the api's leaf across an api restart without a redeploy (TC-672-28).
-
-### What it does not prove
-
-- Behaviour, or how much data is lost, on a node with a wrong clock. Alloy checks the leaf's
-  dates against the node's clock; that is the same dependency the agent's HTTPS clients
-  already carry (register row C16).
-- A leaf renewal in the field (the probe's re-minted-leaf case and the unit test TC-672-14
-  stand in for it).
-- The firewall, which runs no collector.
-- Anything on the BitScope rack.
-
-### Scope guard
-
-- **`bench.local` only.** Refuse to run against any other cluster. The BitScope rack is never
-  used unless Bryce names it, in so many words, for this run. A general "validate on hardware"
-  does not name it.
-- **Resolve every node fresh, every time,** from `GET /api/nodes` (or `<node>.local`) at the
-  start of each step and again after any restart. The bench has no DHCP reservations; never
-  reuse an address from an earlier run.
-- **Announce every disruptive action in the same message that takes it:** the update and the
-  api restart.
-
-### Prerequisites
-
-- A signed dev build of the controlplane holding this change.
-- **The operator's passkey session in real Chrome.** The agent drives the api from the page
-  context of its own tab in the operator's Chrome, signed in to `https://bench.local`, using
-  the mechanics in
-  [`rasputin-fleet-test` §1](https://github.com/geekdojo/geekdojo-brain/blob/main/plugins/geekdojo/skills/rasputin-fleet-test/SKILL.md)
-  (its own tab, never one of the operator's; `fetch(..., {credentials: 'same-origin'})` from
-  the page).
-- **SSH** to the controlplane and to the compute nodes. Node images ship no `openssl`, so
-  nothing below runs one on a node.
-- At least one **keyed** amd64 compute node and one **keyed** arm64 compute node: their agent
-  has registered a collector key.
-
-### Step 1: facts before the update
-
-1. Obs is on: `GET /api/obs/status`.
-2. Which compute nodes are keyed. For each node in `GET /api/nodes`, a keyed node is one whose
-   newest successful `obs.collectors.deploy_node` job (below) has a non-empty `collectorKey`
-   in its spec. Record the keyed set and the legacy set.
-3. **Every node's last successful deploy time.** This is what scopes steps 3 and 5:
-
-   ```js
-   // In the agent's tab: the newest 300 collector deploy jobs, newest first.
-   const jobs = await (await fetch('/api/jobs?kind=obs.collectors.deploy_node&limit=300',
-     {credentials: 'same-origin'})).json();
-   ```
-
-   For each node id, the `createdAt` of its newest job with status `succeeded`.
-4. The Mesh CA's trust fingerprint, computed the way `proto.MeshCAFingerprint` computes it
-   (surrounding whitespace trimmed, then SHA-256). On the controlplane:
-
-   ```sh
-   # /var/lib/rasputin/trust/mesh-ca.pem is the api's Mesh CA (RASPUTIN_TRUST_DIR moves it).
-   printf '%s' "$(cat /var/lib/rasputin/trust/mesh-ca.pem)" | sha256sum
-   ```
-
-   This is `fp(Mesh CA)` below.
-
-### Step 2: update the controlplane
-
-Announce it, then update the controlplane to the dev build through the normal update path.
-Record the api's start time: the first `rasputin-api:` line of this start in
-`journalctl -u rasputin-api`. Every "after the api start" below means after that time.
-
-### Step 3: migration by trust drift (TC-672-25)
-
-Wait for the reconcile (its first run is two minutes after start, then every five), with a
-deadline of 20 minutes from the api start that names the node whose job never came. Then,
-from the same jobs list:
-
-- **Every keyed node** has exactly one successful `obs.collectors.deploy_node` job created
-  after the api start, and its spec's `trustFingerprint` equals `fp(Mesh CA)`.
-- **No legacy node whose last successful deploy (Step 1, item 3) was under 6 hours old at the
-  api start gets a deploy job** after the api start. A legacy collector already records
-  `fp(Mesh CA)`, so it is current.
-- **The 6-hour safety net is expected, not a failure.** `collectorRedeployInterval` (6 h,
-  `api/internal/obs/collector_jobs.go`) redeploys any collector whose last success is 6 h or
-  more old. So a legacy node whose previous success was 6 h or more old at the api start may
-  get a deploy job after it. Record each such job with the node's previous success time, and
-  check that it, too, records `trustFingerprint = fp(Mesh CA)`.
-- No manual step is taken.
-
-### Step 4: the rendered compose, on both platforms (TC-672-26)
-
-On one keyed amd64 node and one keyed arm64 node, over SSH:
-
-```sh
-# The compose the agent wrote for the collector (app id obs-collector).
-C=/var/lib/rasputin/agent-state/apps/obs-collector/docker-compose.yml
-grep -n 'ca_file' "$C"                      # two lines: ca_file = "/etc/alloy/certs/mesh-ca.pem"
-grep -n 'server_name = "bench.local"' "$C"  # two lines
-grep -c -E 'ca_pem|PRIVATE KEY' "$C"        # 0
-docker ps --filter name=rasputin-obs-collector --format '{{.Names}} {{.Status}}'   # Up ...
-```
-
-### Step 5: the handshake works (TC-672-27)
-
-For each node from Step 4, with `<deploy time>` its Step 3 job's `createdAt`:
-
-1. **No certificate error since the deploy.** On the node:
-
-   ```sh
-   # <deploy time>: RFC 3339, e.g. 2026-10-02T14:05:00Z.
-   docker logs --since <deploy time> rasputin-obs-collector 2>&1 | grep -c 'x509:'   # 0
-   ```
-
-2. **Fresh metrics.** VictoriaMetrics listens on the controlplane's loopback only
-   (`127.0.0.1:8428`). From the Mac, forward it over SSH and query it:
-
-   ```sh
-   # -N: no remote command; -L: forward local 18428 to the controlplane's loopback 8428.
-   ssh -N -L 18428:127.0.0.1:8428 root@bench.local &
-   # The newest cAdvisor sample's timestamp for the node, in Unix seconds.
-   curl -s http://127.0.0.1:18428/api/v1/query \
-     --data-urlencode 'query=max(timestamp(container_last_seen{node_id="<node>"}))'
-   kill %1
-   ```
-
-   The value is later than `<deploy time>`.
-3. **Fresh log streams.** In the agent's tab:
-
-   ```js
-   // node: the node id; start: <deploy time>.
-   await (await fetch('/api/obs/logs?node=<node>&start=<deploy time>&limit=5',
-     {credentials: 'same-origin'})).json();
-   ```
-
-   At least one stream with `node_id=<node>` and an entry newer than `<deploy time>`.
-
-Both amd64 and arm64 must be shown.
-
-### Step 6: the collector follows the leaf across an api restart (TC-672-28)
-
-1. Announce it, then restart the api on the controlplane (`systemctl restart rasputin-api`).
-   Record the new start time.
-2. Repeat Step 5, items 2 and 3, with the restart time in place of `<deploy time>`. Series and
-   log streams for each keyed node resume after the restart.
-3. **No deploy job is created after the restart for any node whose last successful deploy is
-   under 6 hours old** at the restart. A deploy job for a node whose last success was 6 hours
-   or more old is the safety net (Step 3); record it with the node's previous success time and
-   check it records `trustFingerprint = fp(Mesh CA)`.
-
-### Step 7: cleanup
-
-Nothing is copied off a node, and nothing is left running: kill any SSH forward that is still
-open.
-
-### Recording
-
-Record, in the story record and as a comment on
-[geekdojo-brain#672](https://github.com/geekdojo/geekdojo-brain/issues/672):
-
-- Step 1's facts: the keyed and legacy sets, each node's last success time, and `fp(Mesh CA)`;
-- the jobs list before and after (Step 3 and Step 6), with each node's previous success time;
-- the `grep` and `docker ps` output from both nodes (Step 4);
-- the log count, the metric timestamp and the log query result per node (Steps 5 and 6).
-
-A step that could not run is recorded as **not run**, with the reason; it is never recorded as
-passed. State coverage by platform, for example "proven on amd64, not arm64".

@@ -8,6 +8,5 @@ For the system-level overview, see [ARCHITECTURE.md](../ARCHITECTURE.md) at the 
 
 - [testing-updates.md](testing-updates.md): one node's OS update, on a laptop, with the mock backend.
 - [testing-fleet-updates.md](testing-fleet-updates.md): a whole fleet's rollout, simulated.
-- [testing-storage.md](testing-storage.md): the storage backend on a bench node's real disks.
-- [testing-agent-trust.md](testing-agent-trust.md): the agent's HTTPS clients against the real api leaf on the bench, and their refusal without a mesh CA bundle.
-- [testing-security-resolvers.md](testing-security-resolvers.md): the lint gate over the security-setting resolvers, and the api's RP ID, origins and Secure cookie wiring, on a laptop and on the bench.
+- [testing-security-resolvers.md](testing-security-resolvers.md): the lint gate over the security-setting resolvers, and the api's RP ID, origins and Secure cookie wiring, on a laptop.
+- [testing-collector-trust.md](testing-collector-trust.md): the Alloy probe, which runs the pinned Alloy image against a local TLS server to prove collector trust, on a laptop.

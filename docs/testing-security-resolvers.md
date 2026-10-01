@@ -19,8 +19,7 @@ asserts the closed outcome for every shape of input:
 
 The unit tests prove each resolver in isolation. This page is the functional test: it proves
 that the lint gate sees every read, and that `main` wires the api's resolvers into the running
-process. The local part runs on a laptop in a few minutes and can be run by an agent. The bench
-part runs with the normal batched bench pass.
+process. It runs on a laptop in a few minutes and can be run by an agent.
 
 ## What it proves
 
@@ -36,9 +35,6 @@ part runs with the normal batched bench pass.
   (`0|false|no|off`) turns it off only when there is no HTTPS listener. With an HTTPS listener,
   an off value is refused: the cookie keeps Secure and the api logs one WARN with the refused
   value. Any unrecognised value forces Secure on, with one WARN.
-- **On hardware, on arm64 and amd64**, an upgrade changes nothing on a default appliance, an
-  off value is refused on the appliance's HTTPS listener, and an agent survives and reports an
-  unknown backend selector (the bench section).
 
 ## What it does not prove
 
@@ -46,8 +42,7 @@ part runs with the normal batched bench pass.
   consumers check them.
 - Secure behind a TLS-terminating reverse proxy in front of a plain-HTTP api. There is no HTTPS
   listener there, so an off value is honoured by design; the operator forces Secure on.
-- The agent's wiring for the four selectors other than Docker on hardware. The bench case uses
-  Docker; the other four go through the same `switch` shape and the same unit table.
+- The agent's wiring of its backend selectors on hardware. No check here starts a `rasputin-agent`.
 
 ## Local checks
 
@@ -335,58 +330,3 @@ git status --short
 ```
 
 **Pass:** `no api under test running`, and `git status` shows only the change under test.
-
-## Bench checks
-
-These run in the normal batched bench pass for this body of work, **on `bench.local` only**,
-on **an arm64 controlplane and an amd64 controlplane**. Never on the BitScope rack unless Bryce
-names it for the run. Resolve every node by name (`<node>.local` or `GET /api/nodes`) each
-time, and again after any restart; the bench has no DHCP reservations. Announce each restart in
-the same message that does it.
-
-`node.env` is `/var/lib/rasputin/node.env` on every node. The api's log is
-`journalctl -u rasputin-api`, the agent's `journalctl -u rasputin-agent`.
-
-### TC-591-28: an upgrade changes nothing, and an off value is refused on the appliance
-
-On **each** controlplane, arm64 and amd64:
-
-1. **Before the upgrade**, on the previous release, with `node.env` as shipped, record:
-   - the api's `rasputin-api: cluster identity:` line
-     (`journalctl -u rasputin-api -b | grep 'cluster identity'`);
-   - the `rasputin-pending` cookie over HTTPS:
-     `curl -sik -X POST -H 'Origin: https://<cluster>.local' https://<cluster>.local/api/auth/login/begin | grep -i '^set-cookie: rasputin-pending'`
-     (`<cluster>`: the cluster id, `bench` on the bench);
-   - every node's registration from `GET /api/nodes`: its backends and its `configFaults`
-     metadata.
-2. **Upgrade** to a build holding this change through the normal update path.
-3. **After the upgrade**, record the same three things. **Pass:** the identity line is
-   identical; the cookie carries `Secure`; `journalctl -u rasputin-api -b | grep
-   RASPUTIN_SECURE_COOKIES` finds nothing; every node shows the same backends and no new
-   configfault.
-4. **Refused off value.** Announce it, then add `RASPUTIN_SECURE_COOKIES=false` to the
-   controlplane's `node.env` and `systemctl restart rasputin-api`. **Pass:** the cookie from
-   step 1's `curl` still carries `Secure`, and the api's start log has exactly one WARN
-   `rasputin-api: RASPUTIN_SECURE_COOKIES is not honoured; session cookies are Secure` with
-   `value=false` and `reason="an off value is refused while an HTTPS listener is running
-   (RASPUTIN_HTTPS_ADDR is set)"`.
-5. **Restore, in the same run.** Remove the line, restart the api, and confirm the WARN is gone
-   from the new start log.
-
-### TC-591-29: an agent survives and reports an unknown backend selector
-
-On one compute node (record which, and its architecture):
-
-1. Announce it, then add `RASPUTIN_DOCKER_BACKEND=Mock` (capital M) to the node's `node.env`
-   and `systemctl restart rasputin-agent`.
-2. **Pass:**
-   - `systemctl is-active rasputin-agent` reads `active`, and stays so;
-   - the node's registration in `GET /api/nodes` carries a `configFaults` entry naming
-     `RASPUTIN_DOCKER_BACKEND` and the value `Mock`;
-   - an app deploy to that node is refused (record the response);
-   - no backend is serving, mock or real: the agent's start log
-     (`journalctl -u rasputin-agent -b`) has a `CONFIG FAULT` line naming
-     `RASPUTIN_DOCKER_BACKEND` and `Mock`, the agent registered no app handlers, and so the
-     deploy above is refused rather than reported as `running`.
-3. **Restore, in the same run.** Remove the line, restart the agent, and confirm the fault is
-   gone from the node's registration.
