@@ -7,7 +7,6 @@ package busauth
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,42 +29,13 @@ type admissionBus struct {
 
 func startAdmissionBus(t *testing.T) *admissionBus {
 	t.Helper()
-	ctx := context.Background()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "rasputin.db")
-	issuer, err := EnsureIssuer(filepath.Join(dir, "bus"))
-	if err != nil {
-		t.Fatalf("EnsureIssuer: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, "nats"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tokens, err := OpenStore(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	t.Cleanup(func() { _ = tokens.Close() })
-	inv, err := inventory.OpenStore(ctx, dbPath)
+	dbPath := filepath.Join(t.TempDir(), "rasputin.db")
+	inv, err := inventory.OpenStore(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("inventory.OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = inv.Close() })
-	if err := tokens.SetNodeRegistry(ctx, inv.Registry()); err != nil {
-		t.Fatalf("SetNodeRegistry: %v", err)
-	}
-	srv, err := bus.Start(ctx, bus.Config{
-		Host: "127.0.0.1", Port: -1,
-		StoreDir:        filepath.Join(dir, "nats"),
-		AuthEnforce:     true,
-		IssuerPublicKey: issuer.PublicKey(),
-		APIUser:         "rasputin-api",
-		APIPass:         "test-secret",
-		TLS:             busKit.Server,
-	})
-	if err != nil {
-		t.Fatalf("bus.Start: %v", err)
-	}
-	t.Cleanup(srv.Stop)
+	srv, issuer, tokens := startUnadmittedBus(t, "127.0.0.1", dbPath, inv.Registry())
 	url, listening := srv.ClientURL()
 	if !listening {
 		t.Fatal("the bus reports no listener")

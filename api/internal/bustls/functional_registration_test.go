@@ -19,9 +19,7 @@ package bustls_test
 // still missing was dropped.
 
 import (
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,15 +54,7 @@ func busClientTLS(t *testing.T, dataDir string) nats.Option {
 	if err != nil {
 		t.Fatalf("read the api's bus certificate: %v", err)
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		t.Fatalf("the api's bus certificate is not PEM")
-	}
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatalf("parse the api's bus certificate: %v", err)
-	}
-	return nats.Secure(bustlstest.ClientConfig(leaf))
+	return nats.Secure(bustlstest.ClientConfig(mustParsePEM(t, data)))
 }
 
 // registerOnce connects as id, publishes one registration, flushes it to the

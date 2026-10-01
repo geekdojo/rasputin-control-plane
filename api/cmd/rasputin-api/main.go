@@ -1544,11 +1544,9 @@ func main() {
 	// shutdown, before any subscriber goes away. Sessions are tracked before
 	// the responder starts, so every admitted connection can be closed by a
 	// revoke (certificates.md §4.2(1)).
-	stopAdmission, err := busauth.StartAdmission(busAuthEnforce, busSrv, busIssuer, busTokenStore)
-	if err != nil {
-		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: bus admission did not start; no node can join", "err", err.Error())
-		os.Exit(1)
-	}
+	stopAdmission := admitAgents(ctx, logger, os.Exit, func() (func(), error) {
+		return busauth.StartAdmission(busAuthEnforce, busSrv, busIssuer, busTokenStore)
+	})
 	defer stopAdmission()
 	// Rule alerts: vmalert evaluates the rules on its own schedule and
 	// writes its verdicts to VictoriaMetrics as ALERTS series; nothing calls
