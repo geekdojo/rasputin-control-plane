@@ -59,6 +59,9 @@ cycle (see [Batching](#batching)), not run per merge.
   Rasputin OS amd64, Rasputin OS arm64, and the firewall image (which carries its own agent).
 - **N is already installed on every bench node**, through the normal update path. Confirm the
   running version of each node in `GET /api/nodes` before Step 0.
+- **For Case A, a build newer than the amd64 node's running build.** If that node is still on N,
+  N+1 is that build. If it has already taken N+1 (in Case B, or in an earlier fleet update), you
+  need a third build, N+2, that also holds the change.
 - **The operator's passkey session in real Chrome.** Auth is passkey-only, so the agent drives
   the api from the page context of its own tab in the operator's Chrome, signed in to
   `https://bench.local`. Use the same mechanics as the fleet test, and don't re-derive them:
@@ -96,9 +99,10 @@ For every node used below (one amd64 compute, one arm64 compute, the firewall), 
    printf '%s' "$(cat <path>)" | sha256sum
    ```
 
-3. **The fingerprints agree.** The node's value must equal the node's `meshCaFingerprint` in
-   `GET /api/nodes`, and the same computation on the controlplane's own CA,
-   `/var/lib/rasputin/trust/mesh-ca.pem` (the api's `RASPUTIN_TRUST_DIR`, if set, moves it).
+3. **The fingerprints agree.** The node's value must equal the node's
+   `metadata.meshCaFingerprint` in `GET /api/nodes`. The field sits inside each node object's
+   `metadata`, not at the node object's top level. It must also equal the same computation on
+   the controlplane's own CA, `/var/lib/rasputin/trust/mesh-ca.pem` (the api's `RASPUTIN_TRUST_DIR`, if set, moves it).
    If any of the three differs, stop: the node's trust has not converged, and every case below
    would fail for that reason rather than for the one under test.
 
@@ -120,9 +124,13 @@ it.
 
 ## Case A: fail closed, then recover
 
-The node is **Case C's amd64 node**: it runs build N, holds a captured volume, and Case C
-recorded at least one member transferred from it. Without that record, stop: a backup that
-had nothing to send from this node would "refuse" vacuously.
+The node is **Case C's amd64 node**: it runs a build that holds the change, holds a captured
+volume, and Case C recorded at least one member transferred from it. Without that record, stop:
+a backup that had nothing to send from this node would "refuse" vacuously.
+
+Below, `<newer build>` is a build that holds the change and is newer than the node's running
+build (see [Prerequisites](#prerequisites)). It must be staged for the node: `GET /api/bundles`
+lists it.
 
 1. Announce the action, then move the bundle aside on the node (`<path>` from Step 0):
 
@@ -130,16 +138,19 @@ had nothing to send from this node would "refuse" vacuously.
    mv <path> <path>.aside
    ```
 
-2. Start a node update to N+1 for that node only. The download step fails, and its error
+2. Start a node update to `<newer build>` for that node only. The download step fails, and its error
    starts `rauc download: mesh CA bundle <path>:` and names the path. Record the job's step
    results (`GET /api/jobs/{id}/steps`).
 3. Start a backup run covering the node's captured volume. That node's transfer is refused
    with refusal `backend-error` (`StorageRefusalBackendError`), and the bundle path is in the
    detail. The target's generation for this run holds no member from this node. Record the
    run result and the target listing.
-4. Put the file back (`mv <path>.aside <path>`), and re-run both. The update reaches
-   `committed`, with its download step fetched from `https://bench.local/api/bundles/<sha>`.
-   This is also Case B's amd64 update. The backup run transfers the node's member.
+4. Put the file back (`mv <path>.aside <path>`), and re-run both:
+   - **The backup re-run** transfers the node's member. Record the run result and the target
+     listing.
+   - **The update re-run** to `<newer build>` reaches `committed`, with its download step
+     fetched from `https://bench.local/api/bundles/<sha>` (`<sha>`: the sha256 of
+     `<newer build>`'s bundle, as `GET /api/bundles` lists it).
 5. **The file is present at the end, whatever happened.** If any step above fails or the run is
    abandoned, restore the file before doing anything else, and list it
    (`ls -l <path>`) as the last record of the case.
@@ -148,13 +159,66 @@ If the file reappears by itself partway through the case, that is `mesh.reconcil
 re-delivering the CA after the node re-registered, which is working as designed. Record it as
 that, then run the case again from step 1.
 
-## Case B: updates taken from N
+## Case B: updates taken from a build that holds the change
 
-1. Update one arm64 compute node from N to N+1. The job reaches `committed`, and its download
-   step fetched from `https://bench.local/api/bundles/<sha>`.
-2. Update the firewall from N to N+1. The job reaches `committed`, and both the `.sig` and the
-   artifact downloaded (the firewall refuses to install without the `.sig`).
-3. The amd64 update is Case A's step 4.
+Each update below stands on its own. Any update to a newer build, taken by a node already
+running a build that holds the change, proves the new download client on that node's image.
+It may run as a single-node update or as that node's part of a fleet Update All
+(`POST /api/updates/system`, or the Update page); either path counts. Case A's update does not
+stand in for any of them.
+
+1. **amd64.** Update one amd64 (n100) compute node from N to N+1. The job reaches `committed`,
+   and its download step fetched from `https://bench.local/api/bundles/<sha>`. The job's
+   `precheck` step reports N's image version, which shows the update started from N and not
+   from a reflash. Record the node's id and architecture from `GET /api/nodes`.
+2. **arm64.** Update one arm64 compute node from N to N+1, with the same checks and the same
+   record as the amd64 update.
+3. **The firewall.** An OS update (`component: os`) neither stages nor updates the firewall,
+   so a fleet Update All of the OS leaves it on N. Stage its bundle and update it on its own:
+   1. Stage the firewall bundle. Either use the Update page's equivalent action for the
+      firewall, or send:
+
+      ```http
+      POST /api/updates/pull
+      {"component":"fw","channel":"dev"}
+      ```
+
+      `component` `fw` is the firewall image. `channel` `dev` is the release channel the
+      bench's builds come from.
+   2. Check that `GET /api/bundles` lists the firewall bundle: an entry in `bundles` whose
+      `version` is the firewall's N+1. Record its `sha256`. Below it is `<fw sha>`.
+   3. Start the firewall update with `component` `fw`, either from the Update page or with:
+
+      ```http
+      POST /api/updates/system
+      {"version":"<fw version>","component":"fw"}
+      ```
+
+      `<fw version>` is the `version` from the previous step. The job reaches `committed`.
+      The firewall refuses to install without the `.sig`, so a commit already implies it
+      arrived, but record the direct evidence too (next step).
+   4. Show that the `.sig` was downloaded. The job record logs only the artifact URL, not the
+      `.sig` URL, so the evidence is the file the agent wrote. Do this before any later
+      firewall update, which prunes the file. On the firewall:
+
+      ```sh
+      ls -l /etc/rasputin/agent-state/updater/bundles/
+      sha256sum /etc/rasputin/agent-state/updater/bundles/*.rootfs.sig
+      ```
+
+      The listing shows a file ending `.rootfs.sig` next to the `.rootfs` artifact. Then hash
+      the api's copy of the same signature. From the agent's own tab in the operator's Chrome
+      (see [Prerequisites](#prerequisites)), in the page's console:
+
+      ```js
+      // Replace <fw sha> with the sha256 recorded in step 2.
+      fetch('/api/bundles/<fw sha>/sig', {credentials: 'same-origin'})
+        .then(r => r.arrayBuffer())
+        .then(b => crypto.subtle.digest('SHA-256', b))
+        .then(d => [...new Uint8Array(d)].map(x => x.toString(16).padStart(2, '0')).join(''))
+      ```
+
+      The two hashes must be equal. Record both, and the listing.
 
 ## Recording
 
@@ -163,7 +227,9 @@ For each case, record:
 - the job-ledger step results (`GET /api/jobs/{id}/steps`) for every update, backup and restore;
 - the Step 0 record for each node: path, the three fingerprints, and the `public-base-url` line;
 - the target listings for the backup runs, and the content comparison for the restore;
-- for Case A, the file listing at the end.
+- for Case A, the file listing at the end;
+- for Case B, each update's `precheck` version and download URL, the node's id and
+  architecture, and for the firewall the bundle listing and the two `.sig` hashes.
 
 A case that could not run is recorded as **not run**, with the reason. It is never recorded as
 passed. State coverage by platform, for example "proven on amd64 and the firewall, not arm64".
