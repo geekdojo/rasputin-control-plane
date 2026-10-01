@@ -51,7 +51,8 @@ cycle (see [Batching](#batching)), not run per merge.
   and addresses from `GET /api/nodes` or `<node>.local` at the start of each case, and again
   after any reboot. Never reuse an address from an earlier run or an earlier case.
 - **Announce every disruptive action in the same message that takes it:** moving a bundle
-  aside, starting an update, starting a restore.
+  aside, starting an update, starting a backup run, asking the operator to start a restore.
+- **The agent never starts a restore and never enters a backup credential.** See Case C step 6.
 
 ## Prerequisites
 
@@ -68,9 +69,23 @@ cycle (see [Batching](#batching)), not run per merge.
   [`rasputin-fleet-test` §1](https://github.com/geekdojo/geekdojo-brain/blob/main/plugins/geekdojo/skills/rasputin-fleet-test/SKILL.md)
   (own tab, never one of the operator's; `fetch(..., {credentials: 'same-origin'})` from the
   page).
-- **SSH to the nodes**, to read a bundle path and move a file.
+- **SSH to the nodes**, to read a bundle path, move a file, and hash a volume's files.
 - **At least one app with a captured volume on one amd64 compute node and on one arm64 compute
   node** (for Case C and Case A).
+- **A restore target with real bytes.** One of those captured volumes must hold at least one
+  non-empty file, and it must belong to an app whose data you can change from its own UI (for
+  example, adding an item). An app that has not finished its first-run setup can capture a
+  volume holding only empty directories, and a byte compare of nothing proves nothing. Case C
+  step 1 shows how to check.
+- **The operator, present for the restore.** Restoring an app needs the archive's private key.
+  The browser unwraps that key only with the operator's backup passphrase or recovery code, so
+  the operator starts the restore and the agent only reads the result.
+- **Backup runs use up retention.** Every `backup.run` is a generation on the target, and the
+  target keeps only the newest few (the retention setting in the Storage page's backup runs
+  section; four when unset).
+  This procedure starts at least three runs (Case C once, Case A twice), so it can prune an
+  older generation the operator wants to keep. Before Case C, list the target's generations
+  and tell the operator which ones the procedure's runs would prune.
 
 ## Run order
 
@@ -114,14 +129,72 @@ it.
 
 ## Case C: backup and restore through the new transport
 
-1. Start a backup run (`POST /api/backup/runs`, or the Backups page) that covers the captured
-   volumes on the amd64 node and the arm64 node.
-2. The run completes with every member transferred. Record the run's result and the listing of
+Placeholders in this case:
+
+- `<restore node>`: the compute node (amd64 or arm64) that holds the restore target's volume.
+- `<volume name>`: the Docker volume's name on that node. Volumes are named
+  `rasp_<app id in lower case>_<volume>`; list them on the node with
+  `docker volume ls --format '{{ .Name }}'`.
+- `<volume path>`: the volume's directory on the node, which Docker reports. Take it fresh with
+  `docker volume inspect --format '{{ .Mountpoint }}' <volume name>`. It ends in `_data`.
+
+To hash a volume, run this on `<restore node>`. It prints one `sha256  ./<file>` line per file,
+sorted by file name, so two records can be compared line by line:
+
+```sh
+cd <volume path> && find . -type f -exec sha256sum {} + | sort -k2
+```
+
+1. **Choose the restore target and check it has bytes.** On `<restore node>`:
+
+   ```sh
+   find <volume path> -type f -size +0 | head
+   ```
+
+   `find -type f -size +0` lists regular files larger than zero bytes, and `head` keeps the
+   first ten. At least one line must print. If none does, the volume holds no data: choose
+   another app, or have the operator finish the app's setup first. Record the output.
+2. Announce the backup run, then start it (`POST /api/backup/runs`, or the backup runs
+   section of the Storage page). It must cover the captured volumes on the amd64 node and the
+   arm64 node.
+3. The run completes with every member transferred. Record the run's result and the listing of
    the target's generation directory, and name at least one member from each of the two nodes.
-   The amd64 member is Case A's precondition.
-3. Announce the restore, then restore one captured volume through the app's restore
-   (`POST /api/apps/{id}/restore`, or the app's page). The restore job completes, and the
-   restored volume's contents match the source. Compare the bytes, not only the job status.
+   The amd64 member is Case A's precondition. Record the generation's name (for example
+   `20261001T142859Z-611TVQF9-full`); below it is `<generation>`.
+4. **Record the backed-up hashes.** Hash the restore target's volume as soon as the run
+   completes, before anything else changes it. These are the **backed-up hashes**.
+5. **Change the app's data.** Ask the operator to make one change in the app's own UI, for
+   example adding an item. Then hash the volume again. These are the **post-change hashes**. At
+   least one file's hash must differ from its backed-up hash; if none does, the change has not
+   reached the volume, so do not go on to the restore. Without this step a restore that did
+   nothing would pass the compare, because the bytes on disk would already equal the backup.
+   Start no backup run between this step and the restore.
+6. **The operator restores; the agent watches.** Announce that the restore will replace the
+   app's data, then ask the operator to start it: in the app's drawer on the Apps page, **RESTORE
+   DATA FROM A BACKUP…**, choose `<generation>`, and enter the backup passphrase or recovery
+   code. The agent never calls `POST /api/apps/{id}/restore` and never handles that passphrase
+   or code. When the operator says it has started, check the result. Every check is a read:
+   - **The job.** `GET /api/backup/restores` lists the restore and its job id. In
+     `GET /api/jobs/{id}/steps`, `validate`, `restore_volumes` and `record` all succeeded.
+     `GET /api/jobs/{id}/events` holds an event that says `sha256 <first 12 hex digits>
+     verified against the manifest`.
+   - **The agent fetched through the egress endpoint.** In the agent's journal on
+     `<restore node>` (`journalctl -u rasputin-agent`), a line contains `RESTORE VOLUME` and
+     ends with `source=https://bench.local/api/backup/egress/ backend=docker`.
+   - **The api streamed it.** In the api's journal on the controlplane
+     (`journalctl -u rasputin-api`), a line reads `restore egress: streaming
+     <generation>/volumes/... to node <restore node>`.
+   - **The bytes came back.** Hash the volume again. These are the **post-restore hashes**.
+     The case passes only if both hold:
+     - every file's post-restore hash equals its backed-up hash, and no file is missing or
+       added; and
+     - at least one file's post-restore hash differs from its post-change hash (the file the
+       change in step 5 wrote).
+   - **The app is back up.** The app's container is running again, and the app answers on its
+     own health or front page.
+
+   If the operator cannot do the restore in this session, record the restore half of Case C as
+   **not run**, with that reason.
 
 ## Case A: fail closed, then recover
 
@@ -227,7 +300,10 @@ For each case, record:
 
 - the job-ledger step results (`GET /api/jobs/{id}/steps`) for every update, backup and restore;
 - the Step 0 record for each node: path, the three fingerprints, and the `public-base-url` line;
-- the target listings for the backup runs, and the content comparison for the restore;
+- the target listings for the backup runs;
+- for Case C, the non-empty-file check, the three sets of volume hashes (backed-up,
+  post-change, post-restore), the restore's job id, its agent and api journal lines, and the
+  `verified against the manifest` event;
 - for Case A, the file listing at the end;
 - for Case B, each update's `precheck` version and download URL, the node's id and
   architecture, and for the firewall the bundle listing and the two `.sig` hashes.
