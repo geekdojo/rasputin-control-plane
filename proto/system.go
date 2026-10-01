@@ -63,7 +63,7 @@ type SystemRebootFailedEvt struct {
 	// An agent that predates it (up to CP 2026.09.5-dev.182) publishes this
 	// event even when the reboot command was killed by the very shutdown it
 	// started — a real reboot reported as a failed one
-	// (geekdojo/geekdojo-brain#616, cp-compute1 on the bench). Without
+	// (geekdojo/geekdojo-brain#616, a compute node on the bench). Without
 	// Definitive the event is therefore not evidence of anything, and the
 	// control plane waits on the boot identity instead.
 	Definitive bool      `json:"definitive,omitempty"`

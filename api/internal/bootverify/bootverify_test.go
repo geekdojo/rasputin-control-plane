@@ -248,7 +248,7 @@ func TestVerifyRestart_TheNodesOwnFailureReportEndsTheWait(t *testing.T) {
 
 // ---- geekdojo/geekdojo-brain#616, the bench race -------------------------
 //
-// cp-compute1 (CP dev.182) really rebooted, and the job failed in 3 s: the
+// A compute node (CP dev.182) really rebooted, and the job failed in 3 s: the
 // agent's reboot child was SIGTERMed by the shutdown it had started, the agent
 // read that as a failed reboot and published reboot_failed, and the wait ended
 // on the report instead of on the boot identity. These tests hold the wait to

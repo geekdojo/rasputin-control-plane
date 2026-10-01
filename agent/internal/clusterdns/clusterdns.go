@@ -21,7 +21,7 @@
 // link-local address, and dialling one without a zone index is not a timeout
 // but an outright error:
 //
-//	fetch control key: Get "https://e3bench.local:18080/key?v=109":
+//	fetch control key: Get "https://<cluster>.local:18080/key?v=109":
 //	  dial tcp [fe80::52d5:9eef:adaa:29ca]:18080: connect: invalid argument
 //
 // Same root cause — mDNS in tailscaled's control-URL path — reached by a

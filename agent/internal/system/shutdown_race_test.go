@@ -14,7 +14,7 @@ import (
 )
 
 // These tests are the agent half of the defect found benching
-// geekdojo/geekdojo-brain#616 (CP dev.182, OS dev.263): cp-compute1 really
+// geekdojo/geekdojo-brain#616 (CP dev.182, OS dev.263): a compute node really
 // rebooted, and the agent logged
 //
 //	"/usr/sbin/reboot" failed: signal: terminated. The node was NOT rebooted.
