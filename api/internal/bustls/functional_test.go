@@ -948,9 +948,11 @@ func TestFunctional_ControlplaneAgentToken(t *testing.T) {
 	}
 }
 
-// The bus serves the PERSISTED certificate, and a client that verifies it the
-// way Alloy will — the file's exact bytes as its only root, plus a server name
-// — completes the handshake (geekdojo/geekdojo-brain#508, #467).
+// The bus serves the PERSISTED certificate, and a stock client that verifies
+// it — the file as its only root, plus a server name — completes the handshake
+// (geekdojo/geekdojo-brain#508, #467). No Rasputin client trusts the bus this
+// way since geekdojo/geekdojo-brain#672; the test proves the file is the one
+// served and that its SAN satisfies a name check.
 //
 // This is what a Rasputin node does NOT do: a node checks the pin and ignores
 // the chain, the name and the dates. The SAN exists for everything else.
@@ -980,8 +982,8 @@ func TestFunctional_BusServesThePersistedCertificate(t *testing.T) {
 		t.Fatalf("first line from the bus = (%q, %v), want INFO", line, rerr)
 	}
 
-	// From here it is exactly a collector's tls_config: ca_pem = the file's
-	// bytes, server_name = the SAN. No pin, and no InsecureSkipVerify.
+	// From here it is a stock verifying client: the file as its only root,
+	// the SAN as the server name. No pin, and no InsecureSkipVerify.
 	conn := tls.Client(raw, &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		RootCAs:    roots,

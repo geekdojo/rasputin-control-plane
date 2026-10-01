@@ -11,8 +11,8 @@ import (
 
 // The bus certificate travels with the key in the identity set
 // (geekdojo/geekdojo-brain#508). It is derivable from the key, so an archive
-// without it still restores — but a client that pins its exact bytes (the
-// collector's ca_pem) refuses a re-minted one, so it is captured and put back.
+// without it still restores, and the manifest note says so: no client pins the
+// certificate, so a re-minted one changes nothing (geekdojo/geekdojo-brain#672).
 func TestIdentitySet_CarriesTheBusCertificate(t *testing.T) {
 	busDir := t.TempDir()
 	src := IdentitySources{BusDir: busDir, TrustDir: t.TempDir()}
@@ -29,8 +29,8 @@ func TestIdentitySet_CarriesTheBusCertificate(t *testing.T) {
 	if want := filepath.Join(busDir, bustls.CertFileName); cert.abs != want {
 		t.Fatalf("captured from %q, want %q", cert.abs, want)
 	}
-	if !strings.Contains(cert.note, "pins its exact bytes") {
-		t.Fatalf("the manifest note does not say why it is captured: %q", cert.note)
+	if !strings.Contains(cert.note, "no client pins the certificate") || strings.Contains(cert.note, "collector") {
+		t.Fatalf("the manifest note does not say a re-minted certificate is harmless: %q", cert.note)
 	}
 
 	// A restore recognises it as part of the identity set, with the same note.

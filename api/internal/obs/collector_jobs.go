@@ -21,8 +21,9 @@ import (
 //   - obs.collectors.reconcile  — periodic (scheduler). Decides which nodes
 //     should gain or lose a collector and submits per-node jobs. Modeled on
 //     mesh.reconcile's converge_enrollment: fast, idempotent, job-history-driven.
-//   - obs.collectors.deploy_node   — mint the node's client leaf, render its
-//     collector compose, and docker.deploy it via the existing agent command.
+//   - obs.collectors.deploy_node   — render the node's collector compose (minting
+//     a client leaf only for a legacy node with no registered collector key)
+//     and docker.deploy it via the existing agent command.
 //   - obs.collectors.teardown_node — docker.stop the collector.
 //
 // The reconcile runs whether obs is on or off: on ⇒ converge collectors ONTO
@@ -79,10 +80,11 @@ var collectorRoles = []proto.NodeRole{proto.RoleCompute, proto.RoleStorage}
 
 // MintCollectorLeafFn mints (idempotently, with near-expiry renewal) the
 // per-node client-auth leaf under the mesh CA and returns the leaf cert + key
-// PEM plus the mesh CA PEM the collector trusts for the api's server cert.
-// Injected so the obs package stays decoupled from mesh — main wires this to
-// mesh.MintLeafToDisk + meshCA.CertPEM.
-type MintCollectorLeafFn func(nodeID string) (leafCertPEM, leafKeyPEM, caPEM string, err error)
+// PEM. Used only for a legacy node. Injected so the obs package stays
+// decoupled from mesh — main wires this to mesh.MintLeafToDisk. The CA the
+// collector trusts is not part of it: that is CollectorDeployDeps.MeshCAPEM,
+// one value for every shape.
+type MintCollectorLeafFn func(nodeID string) (leafCertPEM, leafKeyPEM string, err error)
 
 // CollectorNodeSpec is the spec body for the per-node deploy/teardown jobs.
 type CollectorNodeSpec struct {
@@ -115,10 +117,9 @@ type CollectorReconcileDeps struct {
 	// Deploy is the same configuration the deploy workflow runs with, so the
 	// reconcile derives what a node's collector SHOULD carry with exactly the
 	// function that decides what it WILL carry. One derivation, so the two
-	// cannot disagree and leave a node redeploying forever.
+	// cannot disagree and leave a node redeploying forever. It also carries
+	// the Mesh CA, so there is one source of what a collector trusts.
 	Deploy CollectorDeployDeps
-	// MeshCAPEM is the legacy shape's trust anchor, for the same comparison.
-	MeshCAPEM string
 }
 
 // wantFor is what node nodeID's collector should be carrying now. A node whose
@@ -133,7 +134,7 @@ func (d CollectorReconcileDeps) wantFor(ctx context.Context, nodeID string) coll
 			keys = k
 		}
 	}
-	return d.Deploy.wantFor(keys, d.MeshCAPEM)
+	return d.Deploy.wantFor(keys)
 }
 
 // CollectorReconcileWorkflow converges the collector fleet to match the
@@ -375,13 +376,10 @@ type CollectorDeployDeps struct {
 	IngressBaseURL string // from DeriveIngressEndpoint (canonical hostname, not hardcoded)
 	ServerName     string
 	AlloyImage     string // optional; defaults to the pinned collector image
-	// NodeKeyServerName and BusCertPEM are the node-key shape's half of the
-	// TLS configuration: the name the bus certificate answers to
-	// (bustls.BusDNSName) and the certificate itself, which the collector
-	// trusts by its exact bytes. Empty for either keeps every node on the
-	// legacy mesh-leaf shape.
-	NodeKeyServerName string
-	BusCertPEM        string
+	// MeshCAPEM is the CA every collector verifies the api's leaf against,
+	// by chain and under ServerName — the one source of what a collector
+	// trusts, for both shapes. Empty refuses every deploy (fail closed).
+	MeshCAPEM string
 }
 
 // collectorWant is the pair of facts a node's deployed collector must match.
@@ -391,17 +389,17 @@ type collectorWant struct {
 }
 
 // wantFor decides what a node's collector should be carrying right now: its
-// registered collector key and the bus certificate when both exist, otherwise
-// the legacy shape's mesh CA and no key.
-func (d CollectorDeployDeps) wantFor(keys proto.NodeKeys, meshCAPEM string) collectorWant {
-	if d.BusCertPEM != "" && d.NodeKeyServerName != "" && keys[proto.NodeKeyCollector] != "" {
-		return collectorWant{key: keys[proto.NodeKeyCollector], trust: proto.MeshCAFingerprint([]byte(d.BusCertPEM))}
-	}
-	return collectorWant{trust: proto.MeshCAFingerprint([]byte(meshCAPEM))}
+// registered collector key (empty for a legacy node) and the Mesh CA it
+// trusts the api by. A collector recorded with any other trust fingerprint —
+// one deployed by a release that pinned the bus certificate — no longer
+// matches, and the reconcile redeploys it.
+func (d CollectorDeployDeps) wantFor(keys proto.NodeKeys) collectorWant {
+	return collectorWant{key: keys[proto.NodeKeyCollector], trust: proto.MeshCAFingerprint([]byte(d.MeshCAPEM))}
 }
 
-// CollectorDeployWorkflow mints the node's client leaf, renders its collector
-// compose, and deploys it via the existing docker.deploy agent command.
+// CollectorDeployWorkflow renders the node's collector compose (minting a
+// client leaf for a legacy node only) and deploys it via the existing
+// docker.deploy agent command.
 func CollectorDeployWorkflow(d CollectorDeployDeps) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: CollectorDeployKind,
@@ -443,9 +441,9 @@ func collectorDeploy(d CollectorDeployDeps) jobs.DoFn {
 		}
 
 		// Which shape this node gets. A node that registered a collector key
-		// presents that key and trusts the bus certificate; anything else —
-		// an agent that predates the keys, or one whose bus connection is not
-		// pinned — keeps the mesh leaf it has always had.
+		// presents that key; anything else — an agent that predates the keys
+		// — keeps the mesh leaf it has always had. Both trust the api the
+		// same way: by chain to the Mesh CA, under the cluster name.
 		keys, err := d.Inv.NodeKeys(sc.Ctx, spec.NodeID)
 		if err != nil {
 			return nil, fmt.Errorf("collector deploy: read node keys for %s: %w", spec.NodeID, err)
@@ -455,28 +453,27 @@ func collectorDeploy(d CollectorDeployDeps) jobs.DoFn {
 			IngressBaseURL: d.IngressBaseURL,
 			ServerName:     d.ServerName,
 			AlloyImage:     d.AlloyImage,
+			MeshCAPEM:      d.MeshCAPEM,
 		}
-		want := d.wantFor(keys, "")
+		want := d.wantFor(keys)
 		if want.key != "" {
-			cSpec.ServerName = d.NodeKeyServerName
-			cSpec.BusCertPEM = d.BusCertPEM
 			cSpec.NodeKeyCertPath = proto.NodeCertPath(proto.NodeKeyCollector)
 			cSpec.NodeKeyPath = proto.NodeKeyPath(proto.NodeKeyCollector)
-			sc.Log("info", fmt.Sprintf("collector deploy: %s presents its registered key %s",
-				spec.NodeID, proto.ShortFingerprint(strings.TrimPrefix(want.key, proto.BusPinPrefix))))
+			sc.Log("info", fmt.Sprintf("collector deploy: %s presents its registered key %s, trust=mesh-ca %s",
+				spec.NodeID, proto.ShortFingerprint(strings.TrimPrefix(want.key, proto.BusPinPrefix)),
+				proto.ShortFingerprint(want.trust)))
 		} else {
 			// The mesh leaf is minted only for the legacy shape, so a node on
 			// its own key stops having one minted, renewed or written at all.
-			leafCert, leafKey, caPEM, mErr := d.Mint(spec.NodeID)
+			leafCert, leafKey, mErr := d.Mint(spec.NodeID)
 			if mErr != nil {
 				return nil, fmt.Errorf("collector deploy: mint leaf for %s: %w", spec.NodeID, mErr)
 			}
-			cSpec.LeafCertPEM, cSpec.LeafKeyPEM, cSpec.MeshCAPEM = leafCert, leafKey, caPEM
-			want = d.wantFor(keys, caPEM)
+			cSpec.LeafCertPEM, cSpec.LeafKeyPEM = leafCert, leafKey
 		}
 		compose, err := BuildCollectorCompose(cSpec)
 		if err != nil {
-			return nil, fmt.Errorf("collector deploy: build compose: %w", err)
+			return nil, fmt.Errorf("collector deploy: build compose for %s: %w", spec.NodeID, err)
 		}
 
 		cmd, _ := json.Marshal(proto.AppDeployCmd{

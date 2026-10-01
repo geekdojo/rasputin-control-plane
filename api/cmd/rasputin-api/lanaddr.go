@@ -4,14 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nameserver"
@@ -157,36 +155,28 @@ func (l *apiLeaf) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	return nil, errNoAPILeaf
 }
 
-// nodeListenerCert is the node listener's certificate selection, by SNI.
+// errHTTPSOff is the node listener's answer to every handshake when this api
+// serves no HTTPS: there is no Mesh leaf, so there is nothing a collector
+// could verify. Refusing names the setting rather than handing out a
+// certificate the client cannot check.
+var errHTTPSOff = errors.New("rasputin-api: node listener: no Mesh leaf to serve because HTTPS is off; set RASPUTIN_HTTPS_ADDR")
+
+// nodeListenerCert is the node listener's certificate selection: the api's
+// Mesh-CA-signed server leaf, for every SNI. A collector verifies it by chain
+// to the Mesh CA under the cluster name, the same way every other Rasputin
+// HTTPS client verifies the api, and nothing pins its bytes, so a renewed or
+// re-minted leaf is served with no change on any node
+// (geekdojo/geekdojo-brain#672).
 //
-// Two kinds of client reach the same port and neither can be told apart any
-// other way — they dial the same address, and ALPN cannot separate them (Go
-// adds http/1.1 to whatever is offered, so the protocol name proves nothing).
-// So the two certificates answer to different names, and the client says which
-// one it came for:
-//
-//   - bustls.BusDNSName: the bus key's certificate. A node pins the bus key
-//     already, and a collector is handed these exact bytes as its CA. This is
-//     the default, and it is what a client that sends no SNI at all gets.
-//   - anything else: the api's mesh-CA-signed server leaf, for a collector
-//     deployed before node keys existed, which asks for the cluster name and
-//     verifies against the mesh CA.
-//
-// The mesh leaf does not exist until the clock gate has passed and it has been
-// minted, so a legacy client that arrives before then is refused — with a
-// certificate error naming the reason, rather than being handed a certificate
-// it cannot verify. The listener itself is up from the first start either way,
-// which is what a node presenting a registered key needs.
-func nodeListenerCert(busCert *tls.Certificate, apiLeafFor func() *apiLeaf) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+// The leaf does not exist until the clock gate has passed and it has been
+// minted. A handshake before then is refused with errNoAPILeaf and the
+// collector retries; nothing here changes state on a timer. leaf is nil when
+// HTTPS is off, and then every handshake is refused with errHTTPSOff.
+func nodeListenerCert(leaf *apiLeaf) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		if hello.ServerName == "" || hello.ServerName == bustls.BusDNSName {
-			return busCert, nil
+		if leaf == nil {
+			return nil, errHTTPSOff
 		}
-		l := apiLeafFor()
-		if l == nil {
-			return nil, fmt.Errorf("rasputin-api: node listener: no server leaf for %q (HTTPS is off on this api); a node key client must ask for %q",
-				hello.ServerName, bustls.BusDNSName)
-		}
-		return l.getCertificate(hello)
+		return leaf.getCertificate(hello)
 	}
 }

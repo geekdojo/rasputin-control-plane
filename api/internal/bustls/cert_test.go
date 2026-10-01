@@ -24,8 +24,8 @@ func ensureKeyIn(t *testing.T, dir string) *Key {
 }
 
 // The certificate is minted once and then REUSED, byte for byte, across every
-// later start. That is the whole point of persisting it: a client may pin its
-// bytes (geekdojo/geekdojo-brain#508).
+// later start (geekdojo/geekdojo-brain#508). No client pins its bytes any more
+// (geekdojo/geekdojo-brain#672), but a restart still leaves the file as it was.
 func TestEnsureCert_PersistsAndReuses(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "bus")
 	key := ensureKeyIn(t, dir)
@@ -39,7 +39,7 @@ func TestEnsureCert_PersistsAndReuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(first) != string(EncodeCertPEM(cert)) {
+	if string(first) != string(encodeCertPEM(cert)) {
 		t.Fatal("the file does not hold the certificate that was returned")
 	}
 
@@ -80,11 +80,11 @@ func TestEnsureCert_CarriesTheFixedDNSName(t *testing.T) {
 	if err := cert.Leaf.VerifyHostname(BusDNSName); err != nil {
 		t.Fatalf("VerifyHostname(%q): %v", BusDNSName, err)
 	}
-	// A full client-side verification against itself as the only root, the way
-	// the collector will trust it as an exact-bytes ca_pem with
-	// server_name = BusDNSName.
+	// A full client-side verification against itself as the only root, with
+	// BusDNSName as the server name: what any stock client that verifies a
+	// name would need from it.
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(EncodeCertPEM(cert)) {
+	if !pool.AppendCertsFromPEM(encodeCertPEM(cert)) {
 		t.Fatal("the persisted PEM is not loadable as a trust root")
 	}
 	if _, err := cert.Leaf.Verify(x509.VerifyOptions{
@@ -131,17 +131,17 @@ func TestEnsureCert_ReplacesAnUnusableFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			write(t, filepath.Join(dir, CertFileName), EncodeCertPEM(otherCert))
+			write(t, filepath.Join(dir, CertFileName), encodeCertPEM(otherCert))
 		}, "was replaced or restored"},
 		{"no DNS name", func(t *testing.T, dir string, key *Key) {
-			write(t, filepath.Join(dir, CertFileName), EncodeCertPEM(noSANCert(t, key)))
+			write(t, filepath.Join(dir, CertFileName), encodeCertPEM(noSANCert(t, key)))
 		}, "carries no"},
 		{"a bounded expiry", func(t *testing.T, dir string, key *Key) {
 			c, err := SelfSignedCert(key.Signer(), certNotBefore, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 			if err != nil {
 				t.Fatal(err)
 			}
-			write(t, filepath.Join(dir, CertFileName), EncodeCertPEM(c))
+			write(t, filepath.Join(dir, CertFileName), encodeCertPEM(c))
 		}, "expires at 2030-01-01"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,8 +175,8 @@ func TestEnsureCert_ReplacesAnUnusableFile(t *testing.T) {
 	}
 }
 
-// The file is public — it carries a public key and nothing else — and a
-// container user reads it as the collector's ca_pem. The directory stays 0700.
+// The file is public — it carries a public key and nothing else — so it is
+// 0644. The directory stays 0700.
 func TestEnsureCert_FileIsPublicInAPrivateDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "bus")
 	key := ensureKeyIn(t, dir)

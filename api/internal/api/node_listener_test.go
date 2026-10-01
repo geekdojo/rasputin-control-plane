@@ -3,50 +3,31 @@ package api
 import (
 	"bufio"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"math/big"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // selfSignedClient builds the certificate a node presents on the node
-// listener: its own key, wrapped in a certificate IT signed, dated 1970-9999,
-// with the clientAuth EKU. No CA issues it, and nothing on the server reads
-// anything but the key — which is the whole point.
+// listener: its own key, wrapped in a certificate IT signed, made the way the
+// agent makes it (nodekeytest). No CA issues it, and nothing on the server
+// reads anything but the key — which is the whole point.
 func selfSignedClient(t *testing.T, cn string) (tls.Certificate, string) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	pair := nodekeytest.New(t, cn)
+	hash, err := proto.NodeKeySPKIHash(pair.Key.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: cn},
-		NotBefore:    time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
-		NotAfter:     time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hash, err := proto.NodeKeySPKIHash(key.Public())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, hash
+	return pair.TLS(), hash
 }
 
 // keyClientTLS dials the listener with a self-signed client certificate.

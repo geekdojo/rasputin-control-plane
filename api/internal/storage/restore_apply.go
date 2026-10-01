@@ -167,8 +167,8 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 			// so every node that pinned the original joins again (#448).
 			targets = append(targets, target{staged: busKeyArchivePath, live: filepath.Join(busDir, "bus.key"), aside: busKeyArchivePath})
 		case e.Path == busCertArchivePath:
-			// Put back beside the key, so a collector that pins its exact
-			// bytes keeps working across the restore. If it is absent, or if
+			// Put back beside the key, so the restored bus serves the same
+			// certificate it served before. If it is absent, or if
 			// it does not match the key that landed, EnsureCert re-mints it at
 			// the next start.
 			targets = append(targets, target{staged: busCertArchivePath, live: filepath.Join(busDir, bustls.CertFileName), aside: busCertArchivePath})
