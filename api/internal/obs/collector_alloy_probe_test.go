@@ -4,7 +4,7 @@
 // against an in-process TLS 1.3 server on this machine, with the exact
 // tls_config a collector is rendered with (collectorTLSConfig), to prove the
 // half of collector trust no unit test can: what Alloy itself does with it.
-// See geekdojo/geekdojo-brain#672.
+// See docs/testing-collector-trust.md (geekdojo/geekdojo-brain#672).
 //
 // What it proves, each case on the pinned image:
 //
