@@ -376,7 +376,8 @@ func TestNodeListener_CollectorRouteRefusalIsAStructuredRecord(t *testing.T) {
 }
 
 // An api with no backup endpoint wired answers the keyed routes 503, after
-// authenticating the node, as the public routes do.
+// authenticating the node, as the public routes do: a coded refusal with a
+// correlation id, and a WARN record under that id (F-514-11).
 func TestNodeBackup_UnwiredEndpointsAnswer503(t *testing.T) {
 	r := newNodeBackupRig(t)
 	r.s.backupIngest, r.s.restoreEgress = nil, nil
@@ -385,8 +386,15 @@ func TestNodeBackup_UnwiredEndpointsAnswer503(t *testing.T) {
 		{http.MethodPut, backupxfer.IngestPathPrefix},
 		{http.MethodGet, backupxfer.EgressPathPrefix},
 	} {
-		if code, body := r.raw(cfg, c.method, c.prefix, "rbx1.unused.unused"); code != http.StatusServiceUnavailable {
-			t.Errorf("%s %s = %d %+v, want 503", c.method, c.prefix, code, body)
+		code, body := r.raw(cfg, c.method, c.prefix, "rbx1.unused.unused")
+		if code != http.StatusServiceUnavailable || body.Code != codeBackupTransferUnconfigured || body.CorrelationID == "" {
+			t.Fatalf("%s %s = %d %+v, want 503 %s with a correlation id", c.method, c.prefix, code, body, codeBackupTransferUnconfigured)
 		}
+		rec := r.refusalRecord(body.CorrelationID)
+		wantFields(t, rec, map[string]string{
+			"route":   c.method + " " + c.prefix,
+			"code":    codeBackupTransferUnconfigured,
+			"node_id": "n-a",
+		})
 	}
 }

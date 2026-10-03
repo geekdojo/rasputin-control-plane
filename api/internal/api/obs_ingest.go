@@ -157,7 +157,8 @@ func (s *Server) handleNodeBackupIngest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if s.backupIngest == nil {
-		writeError(w, http.StatusServiceUnavailable, "backup ingest is not configured on this api")
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeBackupTransferUnconfigured, "backup ingest is not configured on this api",
+			slog.String("node_id", nodeID), slog.String("cause", "the server has no backup ingest wired"))
 		return
 	}
 	s.backupIngest.ServeNode(w, r, nodeID)
@@ -171,7 +172,8 @@ func (s *Server) handleNodeRestoreEgress(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if s.restoreEgress == nil {
-		writeError(w, http.StatusServiceUnavailable, "app-volume restore is not configured on this api")
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeBackupTransferUnconfigured, "app-volume restore is not configured on this api",
+			slog.String("node_id", nodeID), slog.String("cause", "the server has no restore egress wired"))
 		return
 	}
 	s.restoreEgress.ServeNode(w, r, nodeID)

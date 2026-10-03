@@ -22,6 +22,9 @@ const (
 	codeNodeNotAdmitted = "node_not_admitted"
 	// codeNodeKeyPurpose: the node presented a key this route is not for.
 	codeNodeKeyPurpose = "node_key_wrong_purpose"
+	// codeBackupTransferUnconfigured: the node listener admitted the node,
+	// but this api has no backup ingest or restore egress wired behind it.
+	codeBackupTransferUnconfigured = "backup_transfer_unconfigured"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -921,16 +920,18 @@ func main() {
 	// sends nodes that present their agent key there, and the collectors
 	// below write to it. "" when this api runs none (HTTPS off, a dev box),
 	// and then every node uploads by bearer credential, said once at WARN.
-	nodeListenerBase, err := nodeListenerBaseURL(logger, publicBaseURL, obsIngestAddr, httpsAddr)
+	nodeListenerBase, nodeListenerServerName, err := nodeListenerBaseURL(logger, publicBaseURL, obsIngestAddr, httpsAddr)
 	if err != nil {
-		log.Fatalf("rasputin-api: node listener endpoint: %v", err)
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: node listener endpoint", "err", err.Error())
+		os.Exit(1)
 	}
 	// Which route each node's backup transfers take, and whether its
 	// credentials are key-bound (storage.TransferRouter): decided per node
 	// at mint, from what its agent advertises and the keys it registered.
 	transferRouter, err := storage.NewTransferRouter(invStore, publicBaseURL, nodeListenerBase)
 	if err != nil {
-		log.Fatalf("rasputin-api: backup transfer router: %v", err)
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: backup transfer router", "err", err.Error())
+		os.Exit(1)
 	}
 	// backup.restore_app — design/storage.md §4.5's restore, phase 2 (#291):
 	// one app's classified volumes, from one generation, back to the node
@@ -1290,10 +1291,10 @@ func main() {
 	// collectors when on, tear them down when off.
 	var obsCollectorEntries []scheduler.Entry
 	if logCollectorWiring(logger, obsIngestAddr, httpsAddr) {
-		// The same node-listener base the backup router was given; the
-		// server name is its host, the cluster name.
+		// The same node-listener base the backup router was given, and the
+		// server name derived with it: the cluster name.
 		ingressBaseURL := nodeListenerBase
-		ingressServerName := hostOf(nodeListenerBase)
+		ingressServerName := nodeListenerServerName
 		// Every collector, keyed or legacy, trusts the api by chain to the
 		// Mesh CA under the cluster name — the name the api's HTTPS leaf
 		// carries by construction (apiLeafSpec). No certificate is pinned, so
@@ -2305,32 +2306,24 @@ func newNodeListenerServer(addr string, handler http.Handler, leaf *apiLeaf) *ht
 }
 
 // nodeListenerBaseURL is the base URL nodes reach the api's node listener
-// at, derived once at start for the backup transfer router and the
-// collectors. It is "" when the listener is not wired (collectorsWired), with
+// at, and the TLS server name they verify it under, derived once at start
+// (obs.DeriveIngressEndpoint) for the backup transfer router and the
+// collectors. Both are "" when the listener is not wired (collectorsWired), with
 // exactly one WARN record, because then every node uploads backups by bearer
 // credential alone. A wired listener whose address yields no URL is an error:
 // "" there would silently put every node on the bearer route and deploy no
 // collector, so main exits instead.
-func nodeListenerBaseURL(logger *slog.Logger, publicBaseURL, obsIngestAddr, httpsAddr string) (string, error) {
+func nodeListenerBaseURL(logger *slog.Logger, publicBaseURL, obsIngestAddr, httpsAddr string) (base, serverName string, err error) {
 	if wired, _ := collectorsWired(obsIngestAddr, httpsAddr); !wired {
 		logger.Warn("backup transfer: no node listener; nodes upload by bearer credential alone",
 			"obs_ingest_addr", obsIngestAddr, "https_addr", httpsAddr)
-		return "", nil
+		return "", "", nil
 	}
-	base, _, err := obs.DeriveIngressEndpoint(publicBaseURL, obsIngestAddr)
+	base, serverName, err = obs.DeriveIngressEndpoint(publicBaseURL, obsIngestAddr)
 	if err != nil {
-		return "", fmt.Errorf("the node listener at %q has no usable URL: %w", obsIngestAddr, err)
+		return "", "", fmt.Errorf("the node listener at %q has no usable URL: %w", obsIngestAddr, err)
 	}
-	return base, nil
-}
-
-// hostOf is the host of a URL nodeListenerBaseURL built.
-func hostOf(base string) string {
-	u, err := url.Parse(base)
-	if err != nil {
-		return ""
-	}
-	return u.Hostname()
+	return base, serverName, nil
 }
 
 // collectorsWired reports whether the per-node collector workflows and their

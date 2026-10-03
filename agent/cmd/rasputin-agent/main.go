@@ -168,7 +168,8 @@ func main() {
 	// so but cannot present its key would have every backup refused.
 	agentCert, err := nodeKeySet.ClientCertificate(proto.NodeKeyAgent)
 	if err != nil {
-		log.Fatalf("rasputin-agent: node agent certificate: %v", err)
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-agent: node agent certificate", "err", err.Error())
+		os.Exit(1)
 	}
 
 	// Update-path fault injection (updater/fault.go). Resolved once, here.

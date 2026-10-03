@@ -302,19 +302,19 @@ func TestCollectorLeafMinter(t *testing.T) {
 // silent "" — when a wired listener yields no URL (F-514-08).
 func TestNodeListenerBaseURL(t *testing.T) {
 	logger, rec := logkittest.New()
-	base, err := nodeListenerBaseURL(logger, "https://c.local", ":8443", ":443")
+	base, serverName, err := nodeListenerBaseURL(logger, "https://c.local", ":8443", ":443")
 	if err != nil || base != "https://c.local:8443" || len(rec.Records()) != 0 {
 		t.Errorf("wired: %q, %v, records:\n%s", base, err, rec.Text())
 	}
-	// The collectors' server name is that base's host, the cluster name.
-	if got := hostOf(base); got != "c.local" {
-		t.Errorf("hostOf(%q) = %q, want c.local", base, got)
+	// The collectors' server name comes back with the base: the cluster name.
+	if serverName != "c.local" {
+		t.Errorf("wired: server name %q, want c.local", serverName)
 	}
 
 	logger, rec = logkittest.New()
-	base, err = nodeListenerBaseURL(logger, "https://c.local", ":8443", "")
-	if err != nil || base != "" {
-		t.Fatalf("HTTPS off: %q, %v", base, err)
+	base, serverName, err = nodeListenerBaseURL(logger, "https://c.local", ":8443", "")
+	if err != nil || base != "" || serverName != "" {
+		t.Fatalf("HTTPS off: %q, %q, %v", base, serverName, err)
 	}
 	warns := rec.Matching(slog.LevelWarn, "backup transfer: no node listener")
 	if len(warns) != 1 || len(rec.Records()) != 1 {
@@ -327,8 +327,8 @@ func TestNodeListenerBaseURL(t *testing.T) {
 	}
 
 	logger, _ = logkittest.New()
-	base, err = nodeListenerBaseURL(logger, "https://c.local", "0.0.0.0:", ":443")
-	if err == nil || base != "" || !strings.Contains(err.Error(), "0.0.0.0:") {
-		t.Fatalf("no port: %q, %v; want an error naming the ingest address", base, err)
+	base, serverName, err = nodeListenerBaseURL(logger, "https://c.local", "0.0.0.0:", ":443")
+	if err == nil || base != "" || serverName != "" || !strings.Contains(err.Error(), "0.0.0.0:") {
+		t.Fatalf("no port: %q, %q, %v; want an error naming the ingest address", base, serverName, err)
 	}
 }
