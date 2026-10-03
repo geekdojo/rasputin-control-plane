@@ -224,9 +224,9 @@ func TestRestoreAppUsesTheRoute(t *testing.T) {
 		}
 	})
 	for _, tc := range []struct {
-		name   string
+		name    string
 		breakIt func(*fakeRouteNodes)
-		want   []string
+		want    []string
 	}{
 		{"capable with no agent key", func(f *fakeRouteNodes) {
 			f.capable(runNodeID, proto.NodeKeys{proto.NodeKeyCollector: "spki-collector"})

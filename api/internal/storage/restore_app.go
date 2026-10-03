@@ -835,11 +835,7 @@ func restoreAppValidate(cfg RestoreAppConfig) jobs.DoFn {
 			return nil, fmt.Errorf("nothing in generation %s can be restored to %s: %s. Nothing was touched", spec.GenerationID, app.Name, plan.skipReasons())
 		}
 
-		members := map[string]restoreMemberFacts{}
-		for _, p := range plan.Restore {
-			members[p.Member] = restoreMemberFacts{sealedSHA256: p.SealedSHA256, sealedBytes: p.SealedBytes, plaintextSHA256: p.SHA256, plaintextBytes: p.SizeBytes}
-		}
-		if err := cfg.Sessions.Arm(spec.SessionID, mountPath, spec.PartUUID, spec.GenerationID, node, members); err != nil {
+		if err := cfg.Sessions.Arm(spec.SessionID, mountPath, spec.PartUUID, spec.GenerationID, node, plan.Restore); err != nil {
 			return nil, err
 		}
 		out := restoreAppTarget{

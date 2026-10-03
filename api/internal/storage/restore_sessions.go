@@ -216,9 +216,14 @@ func (r *RestoreSessions) MemberPlanned(jobID, generation, member, nodeID string
 }
 
 // Arm records what the saga's step 1 decided: where the generation is, and
-// which members the restore may stream. The endpoint serves nothing for a
-// session that is not armed.
-func (r *RestoreSessions) Arm(id, mountPath, partUUID, genID, nodeID string, members map[string]restoreMemberFacts) error {
+// which members the restore may stream — the plan's, each with the
+// manifest's digests and sizes. The endpoint serves nothing for a session
+// that is not armed.
+func (r *RestoreSessions) Arm(id, mountPath, partUUID, genID, nodeID string, plan []RestoreVolumePlan) error {
+	members := make(map[string]restoreMemberFacts, len(plan))
+	for _, p := range plan {
+		members[p.Member] = restoreMemberFacts{sealedSHA256: p.SealedSHA256, sealedBytes: p.SealedBytes, plaintextSHA256: p.SHA256, plaintextBytes: p.SizeBytes}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.by[id]

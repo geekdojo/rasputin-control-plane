@@ -102,13 +102,14 @@ func (s *Server) obsIngestRoutes() *routeMux {
 // request: fail closed.
 //
 // On any failure it writes a coded refusal (writeCodedError: a correlation id
-// in the body and in the WARN record, with the node, the purpose and the
-// cause) and returns ok=false. `label` prefixes the error bodies so the
+// in the body and in the WARN record, with the node, the purpose of the key
+// it presented — empty for a mesh-chain client — the purpose the route
+// serves, and the cause) and returns ok=false. `label` prefixes the error bodies so the
 // routes are distinguishable.
 func (s *Server) authenticateNode(w http.ResponseWriter, r *http.Request, label string, want proto.NodeKeyPurpose, allowMeshChain bool) (nodeID string, ok bool) {
 	if s.nodeGate == nil {
 		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeNodeAdmissionUnconfigured, label+": node admission is not configured",
-			slog.String("purpose", string(want)), slog.String("cause", "the listener has no node admission gate"))
+			slog.String("route_purpose", string(want)), slog.String("cause", "the listener has no node admission gate"))
 		return "", false
 	}
 	id, err := s.nodeGate.identify(r.TLS)
@@ -116,12 +117,13 @@ func (s *Server) authenticateNode(w http.ResponseWriter, r *http.Request, label 
 		// The handshake should make this unreachable; fail closed rather
 		// than serve anonymously if it ever is not.
 		s.writeCodedError(w, r, http.StatusUnauthorized, codeNodeKeyRequired, label+": a registered node key is required",
-			slog.String("purpose", string(want)), slog.String("cause", "client certificate not admitted: "+err.Error()))
+			slog.String("route_purpose", string(want)), slog.String("cause", "client certificate not admitted: "+err.Error()))
 		return "", false
 	}
 	refuse := func(code, msg, cause string) (string, bool) {
 		s.writeCodedError(w, r, http.StatusForbidden, code, label+": "+msg,
-			slog.String("node_id", id.nodeID), slog.String("purpose", string(id.purpose)), slog.String("cause", cause))
+			slog.String("node_id", id.nodeID), slog.String("purpose", string(id.purpose)),
+			slog.String("route_purpose", string(want)), slog.String("cause", cause))
 		return "", false
 	}
 	if !s.nodeGate.gate.Admitted(id.nodeID) {

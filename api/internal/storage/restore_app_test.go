@@ -204,7 +204,7 @@ func TestRestoreSessionsHoldOneKeyForOneJobAndZeroIt(t *testing.T) {
 	if r.ByJob("job-1") != s || r.ByJob("job-9") != nil {
 		t.Fatal("ByJob")
 	}
-	if err := r.Arm(id, "/mnt/x", "part", "gen", "n1", map[string]restoreMemberFacts{"volumes/a/b.rasputin-archive": {}}); err != nil {
+	if err := r.Arm(id, "/mnt/x", "part", "gen", "n1", []RestoreVolumePlan{{Member: "volumes/a/b.rasputin-archive"}}); err != nil {
 		t.Fatal(err)
 	}
 	held := s.key
@@ -349,8 +349,8 @@ func (r *egressRig) arm(sealedDigest string) string {
 	if err := r.sessions.Bind(id, "job-restore"); err != nil {
 		r.t.Fatal(err)
 	}
-	if err := r.sessions.Arm(id, r.mount, "part", r.genID, "n-compute", map[string]restoreMemberFacts{
-		r.member: {sealedSHA256: sealedDigest, sealedBytes: uint64(len(r.sealed)), plaintextSHA256: mustSHA(r.plain), plaintextBytes: uint64(len(r.plain))},
+	if err := r.sessions.Arm(id, r.mount, "part", r.genID, "n-compute", []RestoreVolumePlan{
+		{Member: r.member, SealedSHA256: sealedDigest, SealedBytes: uint64(len(r.sealed)), SHA256: mustSHA(r.plain), SizeBytes: uint64(len(r.plain))},
 	}); err != nil {
 		r.t.Fatal(err)
 	}
@@ -491,8 +491,8 @@ func TestRestoreEgressAbortsTheStreamWhenTheKeyDoesNotOpenTheMember(t *testing.T
 	other := newTestKeypair(t)
 	id, _ := r.sessions.Open(other.priv.Bytes())
 	_ = r.sessions.Bind(id, "job-restore")
-	_ = r.sessions.Arm(id, r.mount, "part", r.genID, "n-compute", map[string]restoreMemberFacts{
-		r.member: {sealedSHA256: mustSHA(r.sealed), plaintextSHA256: mustSHA(r.plain), plaintextBytes: uint64(len(r.plain))},
+	_ = r.sessions.Arm(id, r.mount, "part", r.genID, "n-compute", []RestoreVolumePlan{
+		{Member: r.member, SealedSHA256: mustSHA(r.sealed), SHA256: mustSHA(r.plain), SizeBytes: uint64(len(r.plain))},
 	})
 	cred, _ := r.egress.Mint(backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: "n-compute", JobID: "job-restore", MaxBytes: 1 << 20, Use: backupxfer.UseRestore}, time.Minute)
 	got, _, err := r.fetch(cred)
