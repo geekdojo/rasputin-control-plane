@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -339,8 +340,8 @@ func TestPublishRegistered_AdvertisesBMCTargets(t *testing.T) {
 	ev := registeredEvt(t, nc, "cp-test", &bmc.Advertisement{
 		Targets: []string{"n-a", "n-b"}, ConfigHash: "h1", Pinned: true,
 	})
-	if !reflect.DeepEqual(ev.Capabilities, []string{proto.CapabilityBMCTargets}) {
-		t.Errorf("capabilities: %v, want [%s]", ev.Capabilities, proto.CapabilityBMCTargets)
+	if want := []string{proto.CapabilityKeyBoundTransfer, proto.CapabilityBMCTargets}; !reflect.DeepEqual(ev.Capabilities, want) {
+		t.Errorf("capabilities: %v, want %v", ev.Capabilities, want)
 	}
 	got, ok := ev.Metadata[proto.MetadataBMCTargets].([]any)
 	if !ok || len(got) != 2 || got[0] != "n-a" || got[1] != "n-b" {
@@ -808,4 +809,37 @@ func testKeyHash(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return h
+}
+
+// TC-514-25: every role advertises key-bound transfer — it is a property of
+// this binary's backup clients — and a BMC host still advertises its targets.
+func TestPublishRegistered_AdvertisesKeyBoundTransferOnEveryRole(t *testing.T) {
+	nc := testBus(t)
+	lanAddr := func() (string, string) { return "192.168.1.50", "192.168.1.50/24" }
+	for _, role := range []proto.NodeRole{proto.RoleCompute, proto.RoleControlPlane, proto.RoleFirewall} {
+		for _, adv := range []*bmc.Advertisement{nil, {Targets: []string{"n-a"}}} {
+			sub, err := nc.SubscribeSync(proto.NodeRegisteredSubject("n-" + string(role)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			publishRegistered(nc, "n-"+string(role), role, nil, adv, nil, lanAddr, registrationFacts{
+				TrustFingerprint: func() string { return "fp-test" }, TokenSource: proto.TokenSourceFile,
+			})
+			msg, err := sub.NextMsg(2 * time.Second)
+			_ = sub.Unsubscribe()
+			if err != nil {
+				t.Fatalf("%s: no registered event: %v", role, err)
+			}
+			var ev proto.NodeRegisteredEvt
+			if err := json.Unmarshal(msg.Data, &ev); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(ev.Capabilities, proto.CapabilityKeyBoundTransfer) {
+				t.Errorf("%s (bmc %v): capabilities %v lack %s", role, adv != nil, ev.Capabilities, proto.CapabilityKeyBoundTransfer)
+			}
+			if adv != nil && !slices.Contains(ev.Capabilities, proto.CapabilityBMCTargets) {
+				t.Errorf("%s with a BMC backend: capabilities %v lack %s", role, ev.Capabilities, proto.CapabilityBMCTargets)
+			}
+		}
+	}
 }

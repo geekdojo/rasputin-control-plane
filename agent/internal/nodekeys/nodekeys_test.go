@@ -361,3 +361,60 @@ func TestPathsAgreeWithTheProtoConvention(t *testing.T) {
 		}
 	}
 }
+
+// TC-514-21: each purpose's client certificate presents that purpose's key,
+// read from the file Ensure wrote; a missing or garbage file is an error.
+func TestClientCertificate(t *testing.T) {
+	dir := t.TempDir()
+	keys, _, err := Ensure(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, p := range []proto.NodeKeyPurpose{proto.NodeKeyAgent, proto.NodeKeyCollector} {
+		cert, err := keys.ClientCertificate(p)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		hash, err := proto.NodeKeySPKIHash(cert.Leaf.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hash != keys.Hashes()[p] {
+			t.Errorf("%s: the certificate's key hashes to %s, Hashes() says %s", p, hash, keys.Hashes()[p])
+		}
+		if len(cert.Certificate) != 1 || cert.PrivateKey != keys.Signer(p) {
+			t.Errorf("%s: certificate chain %d, private key is not the purpose's signer", p, len(cert.Certificate))
+		}
+		seen[hash] = true
+	}
+	if len(seen) != 2 {
+		t.Error("the agent and collector certificates present the same key")
+	}
+
+	path := CertPath(dir, proto.NodeKeyAgent)
+	// The collector's certificate in the agent's place: a real certificate,
+	// for another key.
+	other, err := os.ReadFile(CertPath(dir, proto.NodeKeyCollector))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, other, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.ClientCertificate(proto.NodeKeyAgent); err == nil {
+		t.Error("a certificate wrapping another key was accepted")
+	}
+	if err := os.WriteFile(path, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.ClientCertificate(proto.NodeKeyAgent); err == nil {
+		t.Error("a garbage certificate file was accepted")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.ClientCertificate(proto.NodeKeyAgent); err == nil {
+		t.Error("a missing certificate file was accepted")
+	}
+}

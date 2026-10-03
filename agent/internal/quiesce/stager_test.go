@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -147,7 +148,14 @@ func fixtureVolume(t *testing.T, root string) {
 // milliseconds.
 func newStager(t *testing.T, rt Runtime) *Stager {
 	t.Helper()
-	s := New(rt, t.TempDir(), t.TempDir(), trustNoTLS)
+	return newStagerWith(t, rt, trustNoTLS, testAgentCert(t))
+}
+
+// newStagerWith is newStager over the trust source and client certificate
+// given to New.
+func newStagerWith(t *testing.T, rt Runtime, trust TrustSource, clientCert *tls.Certificate) *Stager {
+	t.Helper()
+	s := New(rt, t.TempDir(), t.TempDir(), trust, clientCert)
 	s.freeBytes = func(string) (uint64, error) { return 1 << 40, nil }
 	s.watchdogDeadline = 10 * time.Second
 	s.restartBackoff = []time.Duration{0, 10 * time.Millisecond, 10 * time.Millisecond}
@@ -416,7 +424,7 @@ func TestStopReportsAnAppThatWillNotComeBackAndTheSweepRetries(t *testing.T) {
 	rt.startFail = 0
 	rt.startCalls = 0
 	rt.mu.Unlock()
-	s2 := New(rt, s.stagingRoot, s.markerDir, trustNoTLS)
+	s2 := New(rt, s.stagingRoot, s.markerDir, trustNoTLS, s.clientCert)
 	s2.restartBackoff = s.restartBackoff
 	s2.logf = t.Logf
 	if n := s2.SweepArmedStops(); n != 1 {
