@@ -374,3 +374,19 @@ func TestNodeListener_CollectorRouteRefusalIsAStructuredRecord(t *testing.T) {
 		t.Errorf("the global log was written: %q", global.String())
 	}
 }
+
+// An api with no backup endpoint wired answers the keyed routes 503, after
+// authenticating the node, as the public routes do.
+func TestNodeBackup_UnwiredEndpointsAnswer503(t *testing.T) {
+	r := newNodeBackupRig(t)
+	r.s.backupIngest, r.s.restoreEgress = nil, nil
+	cfg := r.tlsAs(r.certs["n-a/agent"])
+	for _, c := range []struct{ method, prefix string }{
+		{http.MethodPut, backupxfer.IngestPathPrefix},
+		{http.MethodGet, backupxfer.EgressPathPrefix},
+	} {
+		if code, body := r.raw(cfg, c.method, c.prefix, "rbx1.unused.unused"); code != http.StatusServiceUnavailable {
+			t.Errorf("%s %s = %d %+v, want 503", c.method, c.prefix, code, body)
+		}
+	}
+}

@@ -306,6 +306,10 @@ func TestNodeListenerBaseURL(t *testing.T) {
 	if err != nil || base != "https://c.local:8443" || len(rec.Records()) != 0 {
 		t.Errorf("wired: %q, %v, records:\n%s", base, err, rec.Text())
 	}
+	// The collectors' server name is that base's host, the cluster name.
+	if got := hostOf(base); got != "c.local" {
+		t.Errorf("hostOf(%q) = %q, want c.local", base, got)
+	}
 
 	logger, rec = logkittest.New()
 	base, err = nodeListenerBaseURL(logger, "https://c.local", ":8443", "")
