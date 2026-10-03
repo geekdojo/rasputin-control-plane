@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,11 +54,20 @@ import (
 // the handler returns, which is when the connection closes, including when
 // the client dies mid-body. Connection lifetime is the lease. No grant, no
 // TTL, no renewal.
+//
+// # Two entries, one handler
+//
+// ServeNode is the node listener's entry: the api authenticated the request
+// by the presenting node's registered agent key, and passes that node in.
+// ServeHTTP is the legacy bearer-only entry on the api's public listener, kept
+// for agents that predate key-bound transfer (register row E12) and deleted
+// with it. Both run serve, and CheckPresenter decides between the credential
+// and whoever presents it.
 type Ingest struct {
 	auth *Authority
 	sem  chan struct{}
 	now  func() time.Time
-	logf func(format string, args ...any)
+	log  *slog.Logger
 	idle time.Duration
 
 	mu  sync.Mutex
@@ -95,8 +104,14 @@ const IdleTimeout = 2 * time.Minute
 // nodes — which should widen it deliberately.
 const DefaultConcurrency = 1
 
-// New builds the endpoint. concurrency <= 0 means DefaultConcurrency.
-func New(auth *Authority, concurrency int) *Ingest {
+// New builds the endpoint. concurrency <= 0 means DefaultConcurrency. logger
+// is the process logger every record goes through; a nil one is a wiring
+// fault in the caller and panics here, at construction, rather than on the
+// first upload.
+func New(auth *Authority, concurrency int, logger *slog.Logger) *Ingest {
+	if logger == nil {
+		panic("backupxfer: New needs a logger; nil was passed")
+	}
 	if concurrency <= 0 {
 		concurrency = DefaultConcurrency
 	}
@@ -104,7 +119,7 @@ func New(auth *Authority, concurrency int) *Ingest {
 		auth: auth,
 		sem:  make(chan struct{}, concurrency),
 		now:  time.Now,
-		logf: log.Printf,
+		log:  logger,
 		idle: IdleTimeout,
 	}
 }
@@ -239,8 +254,62 @@ func (i *Ingest) OpenGeneration() (generationID, jobID string, open bool) {
 	return i.gen.id, i.gen.jobID, true
 }
 
-// ServeHTTP lands one member.
+// PathNodeKey and PathBearer name, in every record, how the request was
+// authenticated: by the presenting node's registered agent key on the node
+// listener, or by the credential alone on the legacy route.
+const (
+	PathNodeKey = "node-key"
+	PathBearer  = "bearer"
+)
+
+// pathOf is the record's path for a key owner.
+func pathOf(keyOwner string) string {
+	if keyOwner == "" {
+		return PathBearer
+	}
+	return PathNodeKey
+}
+
+// GrantAttrs are the facts every record about a grant carries: which grant
+// (its nonce, never the credential), which run, which member, and the node it
+// was issued to. Shared by the ingest and the api's restore endpoint so both
+// write the same fields.
+func GrantAttrs(g Grant) []any {
+	return []any{
+		"grant_id", g.ID(), "job_id", g.JobID, "generation", g.Generation,
+		"member", g.Member, "grant_node", g.NodeID,
+	}
+}
+
+// PresenterAttrs are how the request was authenticated: the path, and the
+// node whose key presented it ("" on the bearer path).
+func PresenterAttrs(keyOwner string) []any {
+	return []any{"path", pathOf(keyOwner), "presenting_node", keyOwner}
+}
+
+// ServeHTTP lands one member on the legacy bearer-only route: nothing but the
+// credential is presented, so a key-bound credential is refused here.
 func (i *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	i.serve(w, r, "")
+}
+
+// ServeNode lands one member on the node listener. keyOwner is the node whose
+// registered agent key the caller authenticated the request with; the
+// credential must have been issued to that node. An empty owner is a wiring
+// fault in the caller — it would turn this entry into the bearer route — and
+// is refused before a slot is taken: fail closed.
+func (i *Ingest) ServeNode(w http.ResponseWriter, r *http.Request, keyOwner string) {
+	if strings.TrimSpace(keyOwner) == "" {
+		i.log.ErrorContext(r.Context(), "backup ingest: the node listener passed no key owner; refusing (an api wiring fault)",
+			"path", PathNodeKey, "code", CodeCredentialInvalid)
+		refuse(w, http.StatusInternalServerError, CodeCredentialInvalid, "the api could not tell which node presented this request")
+		return
+	}
+	i.serve(w, r, keyOwner)
+}
+
+// serve lands one member for whoever presented it.
+func (i *Ingest) serve(w http.ResponseWriter, r *http.Request, keyOwner string) {
 	if !ingestSupported {
 		refuse(w, http.StatusNotImplemented, CodeUnsupported, "this build cannot ingest on this operating system")
 		return
@@ -276,17 +345,24 @@ func (i *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A restore credential. Valid, signed by this authority, and for
 		// the other direction: it may fetch a member and must never land
 		// one. Refused before its scope is even compared.
-		i.logf("backup ingest: restore credential %s (%s/%s, node %s) presented to the ingest endpoint — refused",
-			grant.ID(), grant.Generation, grant.Member, grant.NodeID)
+		i.warn(r, "backup ingest: a restore credential was presented to the ingest endpoint; refused", grant, keyOwner, CodeCredentialScope)
 		refuse(w, http.StatusForbidden, CodeCredentialScope, "that is a restore credential; the ingest endpoint takes upload credentials only")
+		return
+	}
+	// Who presents it, before what it is for: a key-bound credential off the
+	// node listener, or another node's credential on it, is refused whatever
+	// member it names.
+	if p := CheckPresenter(grant, keyOwner); p != nil {
+		i.warn(r, "backup ingest: the credential is not this presenter's to use; refused", grant, keyOwner, p.Code)
+		refuse(w, p.Status, p.Code, p.Detail)
 		return
 	}
 	if grant.Generation != generation || grant.Member != member {
 		// Valid, and not for this. A credential names one member, and this
 		// is where "cannot upload a second volume on the first volume's
 		// credential" is enforced.
-		i.logf("backup ingest: credential %s for %s/%s presented for %s/%s by node %s — refused",
-			grant.ID(), grant.Generation, grant.Member, generation, member, grant.NodeID)
+		i.warn(r, "backup ingest: the credential is scoped to a different member; refused", grant, keyOwner, CodeCredentialScope,
+			"requested_generation", generation, "requested_member", member)
 		refuse(w, http.StatusForbidden, CodeCredentialScope, "the credential is scoped to a different member")
 		return
 	}
@@ -323,17 +399,34 @@ func (i *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	rc, status, code, detail := i.land(w, r, gen, grant, member)
 	if rc == nil {
-		i.logf("backup ingest: %s/%s from node %s (grant %s) refused: %s — %s", generation, member, grant.NodeID, grant.ID(), code, detail)
+		// The target failing to take a member is an operation that did not
+		// complete; a body that is not what the credential and its trailer
+		// promised is bad input, handled.
+		level, msg := slog.LevelWarn, "backup ingest: the upload was refused"
+		if code == CodeWriteFailed {
+			level, msg = slog.LevelError, "backup ingest: the target could not take the member"
+		}
+		attrs := append(append(GrantAttrs(grant), PresenterAttrs(keyOwner)...), "code", code, "detail", detail)
+		i.log.Log(r.Context(), level, msg, attrs...)
 		refuse(w, status, code, detail)
 		return
 	}
 	i.mu.Lock()
 	i.landed[member] = rc
 	i.mu.Unlock()
-	i.logf("backup ingest: landed %s/%s from node %s: %d sealed bytes, sha256 %s", generation, member, grant.NodeID, rc.SealedBytes, proto.ShortFingerprint(rc.SealedDigest))
+	attrs := append(append(GrantAttrs(grant), PresenterAttrs(keyOwner)...),
+		"sealed_bytes", rc.SealedBytes, "sealed_sha256", proto.ShortFingerprint(rc.SealedDigest))
+	i.log.InfoContext(r.Context(), "backup ingest: member landed", attrs...)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(rc)
+}
+
+// warn writes a refusal of a valid credential: what it was, who presented it,
+// and the code the presenter is answered with. Never the credential itself.
+func (i *Ingest) warn(r *http.Request, msg string, g Grant, keyOwner, code string, extra ...any) {
+	attrs := append(append(GrantAttrs(g), PresenterAttrs(keyOwner)...), "code", code)
+	i.log.WarnContext(r.Context(), msg, append(attrs, extra...)...)
 }
 
 // land streams the body onto the target beneath the open generation.

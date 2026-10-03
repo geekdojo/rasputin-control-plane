@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,7 +39,7 @@ func (s *stallingReader) Read(p []byte) (int, error) {
 
 func TestIngestDropsAStalledUploadAndFreesTheSlot(t *testing.T) {
 	auth, _ := NewAuthority()
-	ing := New(auth, 1)
+	ing := New(auth, 1, slog.New(slog.DiscardHandler))
 	ing.idle = 300 * time.Millisecond
 	mux := http.NewServeMux()
 	mux.Handle("PUT "+IngestPathPrefix, ing)

@@ -42,11 +42,13 @@ import (
 // a restore credential can do, stated once: fetch ONE named member of ONE
 // generation, unsealed, once per request, for the one restore that minted
 // it, until its TTL. It cannot list, cannot name another member, cannot
-// reach another generation, and is refused once the restore ends. Its holder
-// need not be the node it names — it is a bearer, which is why its scope is
-// this narrow — and what it yields is plaintext app data, which is why the
-// api only hands one to the node the app is installed on, over TLS, inside
-// the command that carries it and nowhere else.
+// reach another generation, and is refused once the restore ends. A
+// key-bound one is honoured only from the node it names, presenting its
+// agent key on the node listener (CheckPresenter); an unbound one, for an
+// agent that predates key-bound transfer, is a bearer, which is why its scope
+// is this narrow. What it yields is plaintext app data, which is why the api
+// only hands one to the node the app is installed on, over TLS, inside the
+// command that carries it and nowhere else.
 
 // EgressPathPrefix is where the api mounts the restore-stream endpoint. The
 // source URI the api hands an agent is the public base URL plus this prefix;
