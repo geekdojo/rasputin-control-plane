@@ -1,6 +1,7 @@
 package backupxfer
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -270,21 +271,34 @@ func pathOf(keyOwner string) string {
 	return PathNodeKey
 }
 
-// GrantAttrs are the facts every record about a grant carries: which grant
-// (its nonce, never the credential), which run, which member, and the node it
-// was issued to. Shared by the ingest and the api's restore endpoint so both
-// write the same fields.
-func GrantAttrs(g Grant) []any {
-	return []any{
+// LogGrant writes one record about grant g as presented by keyOwner. It is
+// the one place a record carries a grant's fields, so the ingest and the
+// api's restore endpoint write the same ones: which grant (its nonce, never
+// the credential), which run, which member, the node it was issued to, how
+// the request was authenticated (path) and whose key presented it ("" on the
+// bearer path) — then extra.
+//
+// The grant's fields are the api's own: Verify checks the signature before
+// it decodes them, and Mint refuses any that are not their shape, so a
+// presenter cannot choose them. extra may carry request-derived values that
+// passed the endpoint's shape checks. Every value is still rendered by the
+// process logger's slog.TextHandler, which quotes and escapes control
+// characters (logkit.New), so none can forge a log line.
+//
+// CodeQL's go/log-injection fires on the l.Log call below, tracing the
+// grant back to the request's Authorization header; the verdict and its
+// reasoning are in .github/codeql-register.tsv. TRIP-WIRE: that verdict
+// holds while (1) every grant field logged here is one Verify decodes only
+// after checking the signature, and (2) the process logger stays logkit.New's
+// TextHandler. Logging an unverified request value here, or injecting a
+// handler that does not escape, voids it.
+func LogGrant(ctx context.Context, l *slog.Logger, level slog.Level, msg string, g Grant, keyOwner string, extra ...any) {
+	attrs := []any{
 		"grant_id", g.ID(), "job_id", g.JobID, "generation", g.Generation,
 		"member", g.Member, "grant_node", g.NodeID,
+		"path", pathOf(keyOwner), "presenting_node", keyOwner,
 	}
-}
-
-// PresenterAttrs are how the request was authenticated: the path, and the
-// node whose key presented it ("" on the bearer path).
-func PresenterAttrs(keyOwner string) []any {
-	return []any{"path", pathOf(keyOwner), "presenting_node", keyOwner}
+	l.Log(ctx, level, msg, append(attrs, extra...)...)
 }
 
 // ServeHTTP lands one member on the legacy bearer-only route: nothing but the
@@ -406,17 +420,15 @@ func (i *Ingest) serve(w http.ResponseWriter, r *http.Request, keyOwner string) 
 		if code == CodeWriteFailed {
 			level, msg = slog.LevelError, "backup ingest: the target could not take the member"
 		}
-		attrs := append(append(GrantAttrs(grant), PresenterAttrs(keyOwner)...), "code", code, "detail", detail)
-		i.log.Log(r.Context(), level, msg, attrs...)
+		LogGrant(r.Context(), i.log, level, msg, grant, keyOwner, "code", code, "detail", detail)
 		refuse(w, status, code, detail)
 		return
 	}
 	i.mu.Lock()
 	i.landed[member] = rc
 	i.mu.Unlock()
-	attrs := append(append(GrantAttrs(grant), PresenterAttrs(keyOwner)...),
+	LogGrant(r.Context(), i.log, slog.LevelInfo, "backup ingest: member landed", grant, keyOwner,
 		"sealed_bytes", rc.SealedBytes, "sealed_sha256", proto.ShortFingerprint(rc.SealedDigest))
-	i.log.InfoContext(r.Context(), "backup ingest: member landed", attrs...)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(rc)
@@ -425,8 +437,7 @@ func (i *Ingest) serve(w http.ResponseWriter, r *http.Request, keyOwner string) 
 // warn writes a refusal of a valid credential: what it was, who presented it,
 // and the code the presenter is answered with. Never the credential itself.
 func (i *Ingest) warn(r *http.Request, msg string, g Grant, keyOwner, code string, extra ...any) {
-	attrs := append(append(GrantAttrs(g), PresenterAttrs(keyOwner)...), "code", code)
-	i.log.WarnContext(r.Context(), msg, append(attrs, extra...)...)
+	LogGrant(r.Context(), i.log, slog.LevelWarn, msg, g, keyOwner, append([]any{"code", code}, extra...)...)
 }
 
 // land streams the body onto the target beneath the open generation.

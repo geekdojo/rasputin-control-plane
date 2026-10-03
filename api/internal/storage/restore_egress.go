@@ -108,13 +108,6 @@ func (e *RestoreEgress) ServeNode(w http.ResponseWriter, r *http.Request, keyOwn
 	e.serve(w, r, keyOwner)
 }
 
-// egressAttrs are a record's fields about grant g as presented by keyOwner, plus
-// any extra: the same fields the ingest writes.
-func egressAttrs(g backupxfer.Grant, keyOwner string, extra ...any) []any {
-	out := append(backupxfer.GrantAttrs(g), backupxfer.PresenterAttrs(keyOwner)...)
-	return append(out, extra...)
-}
-
 // serve streams one member for whoever presented it.
 func (e *RestoreEgress) serve(w http.ResponseWriter, r *http.Request, keyOwner string) {
 	if !fsat.Supported {
@@ -146,22 +139,19 @@ func (e *RestoreEgress) serve(w http.ResponseWriter, r *http.Request, keyOwner s
 		return
 	}
 	if !grant.ForRestore() {
-		e.log.WarnContext(r.Context(), "restore egress: an upload credential was presented to the restore endpoint; refused",
-			egressAttrs(grant, keyOwner, "code", backupxfer.CodeCredentialScope)...)
+		backupxfer.LogGrant(r.Context(), e.log, slog.LevelWarn, "restore egress: an upload credential was presented to the restore endpoint; refused", grant, keyOwner, "code", backupxfer.CodeCredentialScope)
 		egressRefuse(w, http.StatusForbidden, backupxfer.CodeCredentialScope, "that is an upload credential; the restore endpoint takes restore credentials only")
 		return
 	}
 	// Who presents it, before what it is for (the ingest's order).
 	if p := backupxfer.CheckPresenter(grant, keyOwner); p != nil {
-		e.log.WarnContext(r.Context(), "restore egress: the credential is not this presenter's to use; refused",
-			egressAttrs(grant, keyOwner, "code", p.Code)...)
+		backupxfer.LogGrant(r.Context(), e.log, slog.LevelWarn, "restore egress: the credential is not this presenter's to use; refused", grant, keyOwner, "code", p.Code)
 		egressRefuse(w, p.Status, p.Code, p.Detail)
 		return
 	}
 	if grant.Generation != generation || grant.Member != member {
-		e.log.WarnContext(r.Context(), "restore egress: the credential is scoped to a different member; refused",
-			egressAttrs(grant, keyOwner, "code", backupxfer.CodeCredentialScope,
-				"requested_generation", generation, "requested_member", member)...)
+		backupxfer.LogGrant(r.Context(), e.log, slog.LevelWarn, "restore egress: the credential is scoped to a different member; refused", grant, keyOwner, "code", backupxfer.CodeCredentialScope,
+			"requested_generation", generation, "requested_member", member)
 		egressRefuse(w, http.StatusForbidden, backupxfer.CodeCredentialScope, "the credential is scoped to a different member")
 		return
 	}
@@ -230,10 +220,9 @@ func (e *RestoreEgress) serve(w http.ResponseWriter, r *http.Request, keyOwner s
 	if facts.SealedSHA256 != "" && (!strings.EqualFold(got, facts.SealedSHA256) || (facts.SealedBytes != 0 && byteCount(n) != facts.SealedBytes)) {
 		// Not bad input: the stored backup is not the one the manifest
 		// vouches for, so this restore cannot complete from it.
-		e.log.ErrorContext(r.Context(), "restore egress: the member on the target does not match its manifest; refused",
-			egressAttrs(grant, keyOwner, "code", backupxfer.CodeDigestMismatch,
-				"target_sha256", proto.ShortFingerprint(got), "target_bytes", n,
-				"manifest_sha256", proto.ShortFingerprint(facts.SealedSHA256), "manifest_bytes", facts.SealedBytes)...)
+		backupxfer.LogGrant(r.Context(), e.log, slog.LevelError, "restore egress: the member on the target does not match its manifest; refused", grant, keyOwner, "code", backupxfer.CodeDigestMismatch,
+			"target_sha256", proto.ShortFingerprint(got), "target_bytes", n,
+			"manifest_sha256", proto.ShortFingerprint(facts.SealedSHA256), "manifest_bytes", facts.SealedBytes)
 		egressRefuse(w, http.StatusUnprocessableEntity, backupxfer.CodeDigestMismatch, "the member on the target is not the one the manifest recorded; it is not served")
 		return
 	}
@@ -247,19 +236,17 @@ func (e *RestoreEgress) serve(w http.ResponseWriter, r *http.Request, keyOwner s
 	w.Header().Set(backupxfer.HeaderPlaintextBytes, strconv.FormatUint(facts.PlaintextBytes, 10))
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	e.log.DebugContext(r.Context(), "restore egress: streaming a member", egressAttrs(grant, keyOwner, "sealed_bytes", n)...)
+	backupxfer.LogGrant(r.Context(), e.log, slog.LevelDebug, "restore egress: streaming a member", grant, keyOwner, "sealed_bytes", n)
 	res, err := Unseal(&flushWriter{w: w, rc: http.NewResponseController(w)}, f, s.Key())
 	if err != nil {
 		// The status is gone. Abort the connection so the node sees a cut
 		// stream — which its byte count and digest then refuse — rather
 		// than a clean EOF on a truncated tar.
-		e.log.ErrorContext(r.Context(), "restore egress: the stream was aborted mid-member",
-			egressAttrs(grant, keyOwner, "sealed_bytes", n, "error", err.Error())...)
+		backupxfer.LogGrant(r.Context(), e.log, slog.LevelError, "restore egress: the stream was aborted mid-member", grant, keyOwner, "sealed_bytes", n, "error", err.Error())
 		panic(http.ErrAbortHandler)
 	}
-	e.log.InfoContext(r.Context(), "restore egress: member streamed",
-		egressAttrs(grant, keyOwner, "sealed_bytes", n, "sealed_sha256", proto.ShortFingerprint(got),
-			"plaintext_bytes", res.PlaintextBytes)...)
+	backupxfer.LogGrant(r.Context(), e.log, slog.LevelInfo, "restore egress: member streamed", grant, keyOwner, "sealed_bytes", n, "sealed_sha256", proto.ShortFingerprint(got),
+		"plaintext_bytes", res.PlaintextBytes)
 }
 
 // flushWriter flushes after every chunk so the node's idle deadline sees

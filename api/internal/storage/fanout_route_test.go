@@ -58,17 +58,19 @@ outer:
 // twoNodeApps puts two captured volumes on each of runNodeID and
 // computeNodeID.
 func twoNodeApps() ([]*apps.App, fakeTiles) {
-	return []*apps.App{
+	list := []*apps.App{
 		testApp("app-vw", "vaultwarden", runNodeID, "vaultwarden"),
 		testApp("app-pl", "paperless", runNodeID, "paperless"),
 		testApp("app-im", "immich", computeNodeID, "immich"),
 		testApp("app-nc", "nextcloud", computeNodeID, "nextcloud"),
-	}, fakeTiles{
+	}
+	tiles := fakeTiles{
 		"vaultwarden": testTile("vaultwarden", vol("vaultwarden-data", tileschema.BackupCritical, tileschema.QuiesceStop)),
 		"paperless":   testTile("paperless", vol("paperless-data", tileschema.BackupState, tileschema.QuiesceStop)),
 		"immich":      testTile("immich", vol("immich-upload", tileschema.BackupState, tileschema.QuiesceStop)),
 		"nextcloud":   testTile("nextcloud", vol("nextcloud-data", tileschema.BackupState, tileschema.QuiesceStop)),
 	}
+	return list, tiles
 }
 
 // TC-514-11: the fan-out routes each node by its own answer, asked once.
