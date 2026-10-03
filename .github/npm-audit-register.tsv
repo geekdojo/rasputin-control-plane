@@ -27,9 +27,8 @@
 # written by hand by someone who read the advisory. The gate rejects a row
 # with an empty reason or no issue.
 #
-# Currently EMPTY, and not as a placeholder: on 2026-08-31, the run that
-# introduced this gate, `npm audit` reported ZERO advisories at every severity
-# across all 447 packages (25 prod, 386 dev, 87 optional). The gate landed
-# green with nothing suppressed. If this file is still empty, that is the
-# state being asserted — no exceptions have ever been needed.
+# History: empty from 2026-08-31, when this gate landed with ZERO advisories
+# across all 447 packages, until 2026-10-03, when GHSA-vfj7-8cjw-p6xm (braces)
+# was published with no patched release and became the first row below.
 advisory	package	severity	scope	reason	issue
+GHSA-vfj7-8cjw-p6xm	braces	high	dev	No patched release exists: the advisory covers braces <= 3.0.3 with first_patched_version null, and 3.0.3 is the newest braces on npm. Dev-only, reached solely through the ESLint toolchain (eslint-config-next -> @next/eslint-plugin-next -> fast-glob -> micromatch -> braces); nothing in the UI bundle or the appliance image loads it. Every newer release in that chain still requires braces@^3.0.3, and npm audit's suggested fix is a downgrade of eslint-config-next to 14.2.35, two majors behind the UI's Next 16, so it is not taken. Unblocks when braces publishes a patched release: pick it up (parent bump or override) and delete this row in the same PR.	geekdojo/rasputin-control-plane#427
