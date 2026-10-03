@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -389,6 +390,10 @@ type runHarness struct {
 	restoreCfg RestoreAppConfig
 	baseURL    string
 	inv        *inventory.Store
+	// nodeURL is the stand-in node listener's base, and router the transfer
+	// router the run and the restore were wired with.
+	nodeURL string
+	router  *TransferRouter
 }
 
 // generationDir is the committed generation's directory on the fake target.
@@ -486,6 +491,13 @@ type runHarnessOpts struct {
 	// restoreOutcomes decides what the fake agents do with each restore,
 	// keyed by volume name.
 	restoreOutcomes map[string]restoreOutcome
+	// routeNodes is the transfer router's view of inventory. Nil routes
+	// every node by bearer credential, as an agent that predates key-bound
+	// transfer; a node marked capable routes to the harness's stand-in node
+	// listener with key-bound credentials.
+	routeNodes *fakeRouteNodes
+	// noRouter leaves RunConfig.Router nil, for the step-1 refusal.
+	noRouter bool
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -551,14 +563,26 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	if err != nil {
 		t.Fatal(err)
 	}
-	ingest := backupxfer.New(auth, 1)
+	ingest := backupxfer.New(auth, 1, slog.New(slog.DiscardHandler))
 	sessions := NewRestoreSessions()
-	egress := NewRestoreEgress(auth, sessions)
+	egress := NewRestoreEgress(auth, sessions, slog.New(slog.DiscardHandler))
 	mux := http.NewServeMux()
 	mux.Handle("PUT "+backupxfer.IngestPathPrefix, ingest)
 	mux.Handle("GET "+backupxfer.EgressPathPrefix, egress)
 	ingestSrv := httptest.NewServer(mux)
 	t.Cleanup(ingestSrv.Close)
+	// The node listener's entries, on their own socket, so a key-bound route
+	// is a different URL from the bearer one.
+	nodeSrv := httptest.NewServer(standInNodeListener(ingest, egress))
+	t.Cleanup(nodeSrv.Close)
+	routeNodes := opts.routeNodes
+	if routeNodes == nil {
+		routeNodes = &fakeRouteNodes{}
+	}
+	router, err := NewTransferRouter(routeNodes, ingestSrv.URL, nodeSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if agent == nil {
 		agent = &fakeBackupAgent{}
@@ -578,7 +602,7 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		nc: nc, store: st, jobStore: js, agent: agent, key: key,
 		stagingDir: stagingDir, trustDir: trustDir, meshDir: meshDir,
 		dbPath: dbPath, mountDir: mountDir, ingest: ingest, settings: newMemorySettings(),
-		sessions: sessions, egress: egress, baseURL: ingestSrv.URL,
+		sessions: sessions, egress: egress, baseURL: ingestSrv.URL, nodeURL: nodeSrv.URL, router: router,
 	}
 	if opts.computeAgent {
 		computeStaging := filepath.Join(dir, "compute-state", "backup-staging")
@@ -605,13 +629,12 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		self = *opts.selfNodeID
 	}
 	cfg := RunConfig{
-		ClusterID:     "home1",
-		SelfNodeID:    self,
-		Sources:       IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
-		DB:            st.DB(),
-		DBPath:        dbPath,
-		Retain:        opts.retain,
-		IngestBaseURL: ingestSrv.URL,
+		ClusterID:  "home1",
+		SelfNodeID: self,
+		Sources:    IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
+		DB:         st.DB(),
+		DBPath:     dbPath,
+		Retain:     opts.retain,
 		// The schedule setting and the job ledger, wired the way main wires
 		// them: a run reads its retention depth from the one and the sizes
 		// of earlier captures from the other.
@@ -620,6 +643,9 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	}
 	if !opts.noIngest {
 		cfg.Ingest = ingest
+	}
+	if !opts.noRouter {
+		cfg.Router = router
 	}
 	if len(opts.nodes) > 0 {
 		inv := newInventory(t)
@@ -649,7 +675,7 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		cfg.Restores = sessions
 		h.restoreCfg = RestoreAppConfig{
 			NC: nc, SelfNodeID: self, Apps: &fakeApps{list: opts.apps, err: opts.appsErr}, Tiles: cfg.Tiles,
-			Inventory: h.inv, Sessions: sessions, Egress: egress, EgressBaseURL: ingestSrv.URL, Store: st,
+			Inventory: h.inv, Sessions: sessions, Egress: egress, Router: router, Store: st,
 			VolumeRPCBudget: opts.restoreRPCBudget,
 		}
 		r.Register(RestoreAppWorkflow(st, h.restoreCfg))
@@ -1082,9 +1108,9 @@ func (f *fakeBackupAgent) startVolumeAgent(t *testing.T, nc *nats.Conn, outcomes
 				t.Errorf("no credential recorded for %s to reuse", out.reuseCredentialOf)
 			}
 		}
-		ack := realTransfer(t, f.stagingRoot, cmd, cred)
+		ack := realTransfer(t, f.nodeID, f.stagingRoot, cmd, cred)
 		if out.replay && ack.OK {
-			again := realTransfer(t, f.stagingRoot, cmd, cred)
+			again := realTransfer(t, f.nodeID, f.stagingRoot, cmd, cred)
 			f.mu.Lock()
 			out.replayAck = &again
 			outcomes[cmd.Volume] = out
@@ -1162,7 +1188,10 @@ func (f *fakeBackupAgent) stagedOrder() []string {
 // REAL HTTP transport on the credential given. The agent module has the full
 // verb (quiesce.Stager.Transfer) and tests it against the same endpoint; this
 // is the same client code path, minus the runtime.
-func realTransfer(t *testing.T, stagingRoot string, cmd proto.BackupTransferCmd, credential string) proto.BackupTransferAck {
+//
+// The client names node in testKeyOwnerHeader, which the harness's stand-in
+// node listener reads as the presenting key's owner.
+func realTransfer(t *testing.T, node, stagingRoot string, cmd proto.BackupTransferCmd, credential string) proto.BackupTransferAck {
 	t.Helper()
 	ack := proto.BackupTransferAck{StagingName: cmd.StagingName, Member: cmd.Member, KeyID: cmd.KeyID}
 	f, err := os.Open(filepath.Join(stagingRoot, cmd.StagingName))
@@ -1174,7 +1203,7 @@ func realTransfer(t *testing.T, stagingRoot string, cmd proto.BackupTransferCmd,
 	plain := sha256.New()
 	stream := backupxfer.NewSealedStream(io.TeeReader(f, plain), cmd.PublicKey, cmd.KeyID, cmd.Scope)
 	defer func() { _ = stream.Close() }()
-	tr, err := backupxfer.TransportFor(cmd.Destination, backupxfer.HTTPOptions{AcceptWait: 5 * time.Second})
+	tr, err := backupxfer.TransportFor(cmd.Destination, backupxfer.HTTPOptions{Client: ownerClient(node)})
 	if err != nil {
 		ack.Refusal, ack.Detail = proto.BackupRefusalDestinationUnsupported, err.Error()
 		return ack
@@ -1415,7 +1444,7 @@ func (f *fakeBackupAgent) startRestoreAgent(t *testing.T, nc *nats.Conn, outcome
 			record()
 			return
 		}
-		fetcher, err := backupxfer.FetcherFor(cmd.Source, backupxfer.HTTPOptions{})
+		fetcher, err := backupxfer.FetcherFor(cmd.Source, backupxfer.HTTPOptions{Client: ownerClient(f.nodeID)})
 		if err != nil {
 			ack.Refusal, ack.Detail = proto.BackupRefusalSourceRefused, err.Error()
 			record()

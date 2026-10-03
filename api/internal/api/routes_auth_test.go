@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/base64"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -177,8 +178,8 @@ func routeFixture(t *testing.T) *apiFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.srv.SetBackupIngest(backupxfer.New(authority, backupxfer.DefaultConcurrency))
-	f.srv.SetAppRestore(&storage.RestoreAppConfig{}, storage.NewRestoreEgress(authority, storage.NewRestoreSessions()))
+	f.srv.SetBackupIngest(backupxfer.New(authority, backupxfer.DefaultConcurrency, slog.New(slog.DiscardHandler)))
+	f.srv.SetAppRestore(&storage.RestoreAppConfig{}, storage.NewRestoreEgress(authority, storage.NewRestoreSessions(), slog.New(slog.DiscardHandler)))
 	f.handler = f.srv.Handler()
 	return f
 }

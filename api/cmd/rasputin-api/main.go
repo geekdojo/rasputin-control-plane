@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -915,7 +916,22 @@ func main() {
 	// RASPUTIN_BACKUP_INGEST_CONCURRENCY is the inbound-upload semaphore —
 	// design/storage.md §4.7's backpressure. One by default: the fan-out is
 	// serial and the target may be spinning media.
-	backupIngest := backupxfer.New(backupAuthority, parseIntOr(os.Getenv("RASPUTIN_BACKUP_INGEST_CONCURRENCY"), backupxfer.DefaultConcurrency))
+	backupIngest := backupxfer.New(backupAuthority, parseIntOr(os.Getenv("RASPUTIN_BACKUP_INGEST_CONCURRENCY"), backupxfer.DefaultConcurrency), logger)
+	// The node listener's base URL, derived once: the backup transfer router
+	// sends nodes that present their agent key there, and the collectors
+	// below write to it. "" when this api runs none (HTTPS off, a dev box),
+	// and then every node uploads by bearer credential, said once at WARN.
+	nodeListenerBase, err := nodeListenerBaseURL(logger, publicBaseURL, obsIngestAddr, httpsAddr)
+	if err != nil {
+		log.Fatalf("rasputin-api: node listener endpoint: %v", err)
+	}
+	// Which route each node's backup transfers take, and whether its
+	// credentials are key-bound (storage.TransferRouter): decided per node
+	// at mint, from what its agent advertises and the keys it registered.
+	transferRouter, err := storage.NewTransferRouter(invStore, publicBaseURL, nodeListenerBase)
+	if err != nil {
+		log.Fatalf("rasputin-api: backup transfer router: %v", err)
+	}
 	// backup.restore_app — design/storage.md §4.5's restore, phase 2 (#291):
 	// one app's classified volumes, from one generation, back to the node
 	// that hosts the app. The operator's browser lends the archive's private
@@ -927,17 +943,17 @@ func main() {
 	// restore holds a session, and a restore refuses while a run is in
 	// flight: one party on the target at a time.
 	restoreSessions := storage.NewRestoreSessions()
-	restoreEgress := storage.NewRestoreEgress(backupAuthority, restoreSessions)
+	restoreEgress := storage.NewRestoreEgress(backupAuthority, restoreSessions, logger)
 	appRestoreCfg := storage.RestoreAppConfig{
-		NC:            busSrv.Conn(),
-		SelfNodeID:    selfNodeID,
-		Apps:          appsStore,
-		Tiles:         catalogStore,
-		Inventory:     invStore,
-		Sessions:      restoreSessions,
-		Egress:        restoreEgress,
-		EgressBaseURL: publicBaseURL,
-		Store:         backupStore,
+		NC:         busSrv.Conn(),
+		SelfNodeID: selfNodeID,
+		Apps:       appsStore,
+		Tiles:      catalogStore,
+		Inventory:  invStore,
+		Sessions:   restoreSessions,
+		Egress:     restoreEgress,
+		Router:     transferRouter,
+		Store:      backupStore,
 	}
 	runner.Register(storage.RestoreAppWorkflow(backupStore, appRestoreCfg))
 	// storage.reconcile — #398: every five minutes, storage.inspect plus a
@@ -955,12 +971,12 @@ func main() {
 		// size on the target is recorded (storage/target_estimate.go).
 		Settings: setupStore,
 		Jobs:     jobStore,
-		// The transport: the endpoint members land at, and the URL the
-		// nodes are handed for it — the same public base the update
-		// bundles are served from, so a node that can pull a bundle can
-		// push a volume.
-		Ingest:        backupIngest,
-		IngestBaseURL: publicBaseURL,
+		// The transport: the endpoint members land at, and the router that
+		// hands each node its URL for it — the node listener for an agent
+		// that presents its key, else the public base the update bundles
+		// are served from.
+		Ingest: backupIngest,
+		Router: transferRouter,
 		// Step 1 refuses a target on any other node: the archive is sealed here
 		// and read by the agent beside it, and that is also what keeps the
 		// staging root the api acts on coming from this host.
@@ -1274,10 +1290,10 @@ func main() {
 	// collectors when on, tear them down when off.
 	var obsCollectorEntries []scheduler.Entry
 	if logCollectorWiring(logger, obsIngestAddr, httpsAddr) {
-		ingressBaseURL, ingressServerName, err := obs.DeriveIngressEndpoint(publicBaseURL, obsIngestAddr)
-		if err != nil {
-			log.Fatalf("rasputin-api: obs collector ingress endpoint: %v", err)
-		}
+		// The same node-listener base the backup router was given; the
+		// server name is its host, the cluster name.
+		ingressBaseURL := nodeListenerBase
+		ingressServerName := hostOf(nodeListenerBase)
 		// Every collector, keyed or legacy, trusts the api by chain to the
 		// Mesh CA under the cluster name — the name the api's HTTPS leaf
 		// carries by construction (apiLeafSpec). No certificate is pinned, so
@@ -2286,6 +2302,35 @@ func newNodeListenerServer(addr string, handler http.Handler, leaf *apiLeaf) *ht
 			GetCertificate: nodeListenerCert(leaf),
 		},
 	}
+}
+
+// nodeListenerBaseURL is the base URL nodes reach the api's node listener
+// at, derived once at start for the backup transfer router and the
+// collectors. It is "" when the listener is not wired (collectorsWired), with
+// exactly one WARN record, because then every node uploads backups by bearer
+// credential alone. A wired listener whose address yields no URL is an error:
+// "" there would silently put every node on the bearer route and deploy no
+// collector, so main exits instead.
+func nodeListenerBaseURL(logger *slog.Logger, publicBaseURL, obsIngestAddr, httpsAddr string) (string, error) {
+	if wired, _ := collectorsWired(obsIngestAddr, httpsAddr); !wired {
+		logger.Warn("backup transfer: no node listener; nodes upload by bearer credential alone",
+			"obs_ingest_addr", obsIngestAddr, "https_addr", httpsAddr)
+		return "", nil
+	}
+	base, _, err := obs.DeriveIngressEndpoint(publicBaseURL, obsIngestAddr)
+	if err != nil {
+		return "", fmt.Errorf("the node listener at %q has no usable URL: %w", obsIngestAddr, err)
+	}
+	return base, nil
+}
+
+// hostOf is the host of a URL nodeListenerBaseURL built.
+func hostOf(base string) string {
+	u, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // collectorsWired reports whether the per-node collector workflows and their

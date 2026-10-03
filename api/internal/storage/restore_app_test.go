@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +22,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
@@ -296,25 +297,10 @@ type egressRig struct {
 	member   string
 	plain    []byte
 	sealed   []byte
-	logs     *syncLog
-}
-
-// syncLog is a log sink the handler goroutine writes and the test reads.
-type syncLog struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (l *syncLog) Printf(format string, args ...any) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	fmt.Fprintf(&l.buf, format+"\n", args...)
-}
-
-func (l *syncLog) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.String()
+	// logs records what the endpoint writes through its injected logger;
+	// nodeSrv mounts its node-listener entry (standInNodeListener).
+	logs    *logkittest.Recorder
+	nodeSrv *httptest.Server
 }
 
 func newEgressRig(t *testing.T) *egressRig {
@@ -324,13 +310,14 @@ func newEgressRig(t *testing.T) *egressRig {
 		t.Fatal(err)
 	}
 	sessions := NewRestoreSessions()
-	egress := NewRestoreEgress(auth, sessions)
-	logs := &syncLog{}
-	egress.logf = logs.Printf
+	logger, logs := logkittest.New()
+	egress := NewRestoreEgress(auth, sessions, logger)
 	mux := http.NewServeMux()
 	mux.Handle("GET "+backupxfer.EgressPathPrefix, egress)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+	nodeSrv := httptest.NewServer(standInNodeListener(nil, egress))
+	t.Cleanup(nodeSrv.Close)
 	key := newTestKeypair(t)
 	mount := filepath.Join(t.TempDir(), "mnt")
 	genID := proto.BackupGenerationID(time.Now(), "job-1", proto.BackupScopeFull)
@@ -348,7 +335,7 @@ func newEgressRig(t *testing.T) *egressRig {
 		t.Fatal(err)
 	}
 	return &egressRig{t: t, auth: auth, sessions: sessions, egress: egress, srv: srv, mount: mount, key: key,
-		genID: genID, member: member, plain: plain, sealed: sealed.Bytes(), logs: logs}
+		genID: genID, member: member, plain: plain, sealed: sealed.Bytes(), logs: logs, nodeSrv: nodeSrv}
 }
 
 // arm opens, binds and arms a session for the member with the manifest's
@@ -372,8 +359,19 @@ func (r *egressRig) arm(sealedDigest string) string {
 
 func (r *egressRig) fetch(cred string) ([]byte, *backupxfer.Stream, error) {
 	r.t.Helper()
-	source, _ := backupxfer.EgressDestination(r.srv.URL)
-	f, _ := backupxfer.FetcherFor(source, backupxfer.HTTPOptions{})
+	return r.fetchFrom(r.srv.URL, backupxfer.HTTPOptions{}, cred)
+}
+
+// fetchAs fetches on the node-listener entry, presented by owner's key.
+func (r *egressRig) fetchAs(owner, cred string) ([]byte, *backupxfer.Stream, error) {
+	r.t.Helper()
+	return r.fetchFrom(r.nodeSrv.URL, backupxfer.HTTPOptions{Client: ownerClient(owner)}, cred)
+}
+
+func (r *egressRig) fetchFrom(base string, opts backupxfer.HTTPOptions, cred string) ([]byte, *backupxfer.Stream, error) {
+	r.t.Helper()
+	source, _ := backupxfer.EgressDestination(base)
+	f, _ := backupxfer.FetcherFor(source, opts)
 	st, err := f.Get(context.Background(), backupxfer.GetRequest{Source: source, Generation: r.genID, Member: r.member, Credential: cred})
 	if err != nil {
 		return nil, nil, err
@@ -400,11 +398,11 @@ func TestRestoreEgressStreamsAPlannedMemberUnsealed(t *testing.T) {
 	if st.DeclaredDigest != mustSHA(r.plain) || st.DeclaredBytes != uint64(len(r.plain)) {
 		t.Fatalf("declared: %+v", st)
 	}
-	if strings.Contains(r.logs.String(), cred) {
+	if strings.Contains(r.logs.Text(), cred) {
 		t.Fatal("the credential reached a log line")
 	}
-	if !strings.Contains(r.logs.String(), "streamed") {
-		t.Fatalf("no record of the stream: %s", r.logs.String())
+	if len(r.logs.Matching(slog.LevelInfo, "streamed")) != 1 {
+		t.Fatalf("no record of the stream: %s", r.logs.Text())
 	}
 }
 
@@ -474,6 +472,15 @@ func TestRestoreEgressRefusesAMemberTheManifestDoesNotVouchFor(t *testing.T) {
 	if !errors.As(err, &refused) || refused.Problem.Code != backupxfer.CodeDigestMismatch {
 		t.Fatalf("err = %v", err)
 	}
+	// F-514-07: the stored member not matching its manifest is a restore
+	// that cannot complete, not bad input: ERROR, with the run's job id.
+	errs := r.logs.AtLevel(slog.LevelError)
+	if len(errs) != 1 || !strings.Contains(errs[0].Message, "does not match its manifest") {
+		t.Fatalf("ERROR records:\n%s", r.logs.Text())
+	}
+	if v, _ := logkittest.Attr(errs[0], "job_id"); v != "job-restore" {
+		t.Errorf("job_id = %q", v)
+	}
 }
 
 // The wrong key in the session: the status is already 200 when the unseal
@@ -492,8 +499,13 @@ func TestRestoreEgressAbortsTheStreamWhenTheKeyDoesNotOpenTheMember(t *testing.T
 	if err == nil {
 		t.Fatalf("a stream under the wrong key ended cleanly with %d bytes", len(got))
 	}
-	if !strings.Contains(r.logs.String(), "ABORTED") {
-		t.Fatalf("the abort was not logged: %s", r.logs.String())
+	// F-514-07: a mid-stream abort is ERROR, with the run's job id.
+	errs := r.logs.Matching(slog.LevelError, "aborted")
+	if len(errs) != 1 {
+		t.Fatalf("the abort was not logged at ERROR: %s", r.logs.Text())
+	}
+	if v, _ := logkittest.Attr(errs[0], "job_id"); v != "job-restore" {
+		t.Errorf("job_id = %q", v)
 	}
 }
 

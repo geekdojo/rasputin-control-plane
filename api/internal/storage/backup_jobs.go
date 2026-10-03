@@ -130,13 +130,13 @@ type RunConfig struct {
 	Jobs StepLister
 	// Ingest is the endpoint volume members land at — the same *Ingest the
 	// HTTP server mounts, so the credentials this run mints are verifiable by
-	// exactly the endpoint that receives them — and IngestBaseURL is the
-	// api's public base URL, from which the destination the agents are handed
-	// is derived (backupxfer.IngestDestination). Both required: step 1
-	// refuses a run that could not land a single app volume rather than
-	// writing an identity-only generation and recording every volume failed.
-	Ingest        *backupxfer.Ingest
-	IngestBaseURL string
+	// exactly the endpoint that receives them — and Router decides, per node,
+	// which URL the agent is handed for it and whether its credential is
+	// key-bound (TransferRouter). Both required: step 1 refuses a run that
+	// could not land a single app volume rather than writing an identity-only
+	// generation and recording every volume failed.
+	Ingest *backupxfer.Ingest
+	Router *TransferRouter
 	// Store is the backup ledger, so the write step can record its generation
 	// the moment it lands rather than at the end of the saga. Set by
 	// RunWorkflow from its own argument — a caller never fills it in.
@@ -396,9 +396,9 @@ type runSnapshotResult struct {
 // without decrypting an archive. Note what is NOT in it: any credential. They
 // are minted per member, live in one command each, and expire.
 type runFanOutResult struct {
-	// Destination is the URI the agents uploaded to, and GenerationDir the
-	// partial generation directory on the target the members landed in.
-	Destination   string          `json:"destination,omitempty"`
+	// GenerationDir is the partial generation directory on the target the
+	// members landed in. Where each node uploaded to is per node now, and is
+	// in the feed (fanOutOpts.routeFor).
 	GenerationDir string          `json:"generationDir,omitempty"`
 	Report        AppVolumeReport `json:"report"`
 }
@@ -557,8 +557,8 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 			return nil, errors.New("this api has no backup ingest endpoint, so no app volume could land anywhere. " +
 				"Refusing rather than writing a generation that would record every volume as failed")
 		}
-		if _, err := backupxfer.IngestDestination(cfg.IngestBaseURL); err != nil {
-			return nil, fmt.Errorf("this api cannot tell the nodes where to upload volumes: %v (RASPUTIN_PUBLIC_BASE_URL). Nothing was staged", err)
+		if cfg.Router == nil {
+			return nil, errors.New("this api cannot route uploads: it has no transfer router, so it cannot tell the nodes where to upload volumes. Nothing was staged")
 		}
 
 		// The retention depth, read NOW rather than at api start, so an
@@ -864,9 +864,8 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 			return nil, fmt.Errorf("list installed apps: %w", err)
 		}
 		plan := PlanAppVolumes(installed, cfg.Tiles)
-		destination, err := backupxfer.IngestDestination(cfg.IngestBaseURL)
-		if err != nil {
-			return nil, err
+		if cfg.Router == nil {
+			return nil, errors.New("this api cannot route uploads to its ingest endpoint")
 		}
 
 		// The mount path is the co-located agent's answer, shape-checked on
@@ -887,7 +886,7 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 		// Closed on every path out of this step: after this, no member may
 		// land, because the manifest built next is the index of what did.
 		defer cfg.Ingest.Close(tgt.GenerationID)
-		sc.Log("info", fmt.Sprintf("generation %s is open for ingest at %s; nodes upload sealed volumes to %s", tgt.GenerationID, genDir, destination))
+		sc.Log("info", fmt.Sprintf("generation %s is open for ingest at %s", tgt.GenerationID, genDir))
 
 		report, err := runFanOut(sc.Ctx, fanOutOpts{
 			NATS:         sc.NATS,
@@ -895,7 +894,7 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 			JobID:        sc.JobID,
 			GenerationID: tgt.GenerationID,
 			Ingest:       cfg.Ingest,
-			Destination:  destination,
+			Router:       cfg.Router,
 			PublicKey:    tgt.PublicKey,
 			KeyID:        tgt.KeyID,
 			Scope:        tgt.Scope,
@@ -907,7 +906,7 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(runFanOutResult{Destination: destination, GenerationDir: genDir, Report: report})
+		return json.Marshal(runFanOutResult{GenerationDir: genDir, Report: report})
 	}
 }
 

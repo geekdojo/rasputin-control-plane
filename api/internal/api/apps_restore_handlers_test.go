@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -107,10 +108,14 @@ func newAppRestoreFixture(t *testing.T) *appRestoreFixture {
 		t.Fatal(err)
 	}
 	sessions := storage.NewRestoreSessions()
-	egress := storage.NewRestoreEgress(auth, sessions)
+	egress := storage.NewRestoreEgress(auth, sessions, slog.New(slog.DiscardHandler))
+	router, err := storage.NewTransferRouter(f.inv, "https://cp.test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &storage.RestoreAppConfig{
 		NC: f.nc, SelfNodeID: arNodeID, Apps: f.appsStore, Tiles: catalog, Inventory: f.inv,
-		Sessions: sessions, Egress: egress, EgressBaseURL: "https://cp.test", Store: backup,
+		Sessions: sessions, Egress: egress, Router: router, Store: backup,
 	}
 	f.srv.runner.Register(storage.RestoreAppWorkflow(backup, *cfg))
 	f.srv.SetAppRestore(cfg, egress)

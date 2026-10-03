@@ -107,14 +107,15 @@ type fanOutOpts struct {
 	// GenerationID names every staged file this pass mints and the
 	// generation every member lands in.
 	GenerationID string
-	// Ingest is the endpoint the members land at; Destination is the URI the
-	// agents are handed for it. PublicKey, KeyID and Scope are what every
-	// member is sealed to and with.
-	Ingest      *backupxfer.Ingest
-	Destination string
-	PublicKey   string
-	KeyID       string
-	Scope       string
+	// Ingest is the endpoint the members land at; Router decides, per node,
+	// which of its entries that node is handed and whether the credential is
+	// key-bound. PublicKey, KeyID and Scope are what every member is sealed
+	// to and with.
+	Ingest    *backupxfer.Ingest
+	Router    *TransferRouter
+	PublicKey string
+	KeyID     string
+	Scope     string
 	// Plan is what to stage, in order; Skipped is everything already known not
 	// to be capturable, records complete; Enumeration is what the plan looked
 	// at to arrive at both.
@@ -123,6 +124,37 @@ type fanOutOpts struct {
 	Enumeration AppEnumeration
 	// Log writes to the job feed.
 	Log func(level, msg string)
+
+	// routes is this pass's answer per node, asked of Router once: every
+	// volume on a node goes the same way, and the feed says which way once.
+	routes map[string]routeAnswer
+}
+
+// routeAnswer is one node's route, or why it has none.
+type routeAnswer struct {
+	route TransferRoute
+	err   error
+}
+
+// routeFor is node's route for this pass, asked of the router the first time
+// and remembered. The first answer is written to the feed: the route at info,
+// a bearer route's reason at warn, and a node with no route at error.
+func (o fanOutOpts) routeFor(ctx context.Context, node string) (TransferRoute, error) {
+	if a, ok := o.routes[node]; ok {
+		return a.route, a.err
+	}
+	r, err := o.Router.Ingest(ctx, node)
+	o.routes[node] = routeAnswer{route: r, err: err}
+	switch {
+	case err != nil:
+		o.log("error", fmt.Sprintf("node %s has no upload route, so none of its volumes is staged and each is FAILED: %v", node, err))
+	case r.KeyBound:
+		o.log("info", fmt.Sprintf("node %s uploads over its node key at %s", node, r.Destination))
+	default:
+		o.log("info", fmt.Sprintf("node %s uploads by bearer credential at %s", node, r.Destination))
+		o.log("warn", fmt.Sprintf("node %s is not on the node-key route (%s); its uploads are authorised by the credential alone", node, r.Why))
+	}
+	return r, err
 }
 
 // budgetAllows reports whether what is left of the step's deadline could hold
@@ -161,13 +193,14 @@ func runFanOut(ctx context.Context, o fanOutOpts) (AppVolumeReport, error) {
 		}
 		return NewAppVolumeReport(o.Enumeration, records, 0), nil
 	}
-	if o.Ingest == nil || strings.TrimSpace(o.Destination) == "" {
-		return AppVolumeReport{}, errors.New("this api has no ingest endpoint for volumes to land at, so no app volume can be captured; refusing rather than recording every one as failed")
+	if o.Ingest == nil || o.Router == nil {
+		return AppVolumeReport{}, errors.New("this api has no ingest endpoint for volumes to land at, or cannot route uploads to it, so no app volume can be captured; refusing rather than recording every one as failed")
 	}
+	o.routes = map[string]routeAnswer{}
 
-	o.log("info", fmt.Sprintf("app-volume fan-out: %d volume(s) to stage, one at a time — `critical` first, then `state` — each sealed on its own node and uploaded to %s. "+
+	o.log("info", fmt.Sprintf("app-volume fan-out: %d volume(s) to stage, one at a time — `critical` first, then `state` — each sealed on its own node and uploaded to the api by that node's route. "+
 		"A volume whose tile declares the `stop` strategy takes its app DOWN for the length of the local copy, and not for the upload",
-		len(o.Plan), o.Destination))
+		len(o.Plan)))
 
 	for i, pv := range o.Plan {
 		// The phase's own budget, checked BEFORE each volume rather than
@@ -223,6 +256,14 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 		return failedVolume(pv, fmt.Sprintf("internal: %q is not a valid staging name", name))
 	}
 	node := strings.TrimSpace(pv.NodeID)
+
+	// ----- route -----------------------------------------------------------
+	// Before the stage verb, which may STOP the app: a node that could not
+	// upload the copy must not have its app taken down for it.
+	route, err := o.routeFor(ctx, node)
+	if err != nil {
+		return failedVolume(pv, fmt.Sprintf("no upload route for node %s, so the volume was not staged and its app was not stopped: %v", node, err))
+	}
 
 	// ----- stage -----------------------------------------------------------
 	cmd, err := json.Marshal(proto.BackupStageVolumeCmd{
@@ -300,13 +341,16 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 			// Bounded to the member it is for: the stage verb reported the
 			// tar's size, and a seal of it cannot be larger than this.
 			MaxBytes: backupxfer.SealedSizeBound(ack.SizeBytes),
+			// Honoured only from this node's agent key on the node
+			// listener when the router sent it there.
+			KeyBound: route.KeyBound,
 		}, transferRPCBudget)
 		if err != nil {
 			rec.Reason = fmt.Sprintf("could not mint an upload credential for %s: %v", member, err)
 			return rec
 		}
 		tcmd, err := json.Marshal(proto.BackupTransferCmd{
-			StagingName: name, Destination: o.Destination, Credential: cred,
+			StagingName: name, Destination: route.Destination, Credential: cred,
 			PublicKey: o.PublicKey, KeyID: o.KeyID, Scope: o.Scope,
 			GenerationID: o.GenerationID, Member: member,
 			AppID: pv.AppID, AppName: pv.AppName, Volume: pv.Volume,

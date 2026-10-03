@@ -129,11 +129,11 @@ type RestoreAppConfig struct {
 	// a lost reply cheap to produce.
 	VolumeRPCBudget time.Duration
 	// Sessions holds the lent key; Egress serves the plaintext stream and
-	// mints its credentials; EgressBaseURL is the public base the nodes are
-	// handed for it.
-	Sessions      *RestoreSessions
-	Egress        *RestoreEgress
-	EgressBaseURL string
+	// mints its credentials; Router decides which of its entries the node is
+	// handed and whether the credential is key-bound (TransferRouter).
+	Sessions *RestoreSessions
+	Egress   *RestoreEgress
+	Router   *TransferRouter
 	// Store is the backup ledger: claimed targets, in-flight runs, and the
 	// restore_reports table the record step writes.
 	Store *Store
@@ -707,10 +707,13 @@ type restoreAppTarget struct {
 	Complete            bool      `json:"complete"`
 	ManifestVersion     int       `json:"manifestVersion"`
 	MatchedBy           string    `json:"matchedBy"`
-	// Source is the URI the node is handed for the plaintext stream.
-	Source  string                   `json:"source"`
-	Restore []RestoreVolumePlan      `json:"restore"`
-	Skipped []AppVolumeRestoreRecord `json:"skipped"`
+	// Source is the URI the node is handed for the plaintext stream, and
+	// KeyBound whether its credentials are honoured only from the node's
+	// agent key (TransferRouter).
+	Source   string                   `json:"source"`
+	KeyBound bool                     `json:"keyBound,omitempty"`
+	Restore  []RestoreVolumePlan      `json:"restore"`
+	Skipped  []AppVolumeRestoreRecord `json:"skipped"`
 }
 
 // restoreAppVolumesResult is step 2's: every volume's record.
@@ -724,8 +727,8 @@ func restoreAppValidate(cfg RestoreAppConfig) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		if cfg.Sessions == nil || cfg.Egress == nil || cfg.Apps == nil || cfg.Tiles == nil || cfg.Store == nil {
-			return nil, errors.New("this api is not wired for app-volume restores (sessions, egress, apps, tiles or the ledger is missing)")
+		if cfg.Sessions == nil || cfg.Egress == nil || cfg.Router == nil || cfg.Apps == nil || cfg.Tiles == nil || cfg.Store == nil {
+			return nil, errors.New("this api is not wired for app-volume restores (sessions, egress, the transfer router, apps, tiles or the ledger is missing)")
 		}
 		// The session named by the spec is bound to THIS job — by the
 		// handler after Submit, or here first, since Submit starts the
@@ -737,10 +740,6 @@ func restoreAppValidate(cfg RestoreAppConfig) jobs.DoFn {
 		session := cfg.Sessions.Get(spec.SessionID)
 		if session == nil || session.jobID != sc.JobID {
 			return nil, ErrRestoreSessionGone
-		}
-		source, err := backupxfer.EgressDestination(cfg.EgressBaseURL)
-		if err != nil {
-			return nil, fmt.Errorf("this api cannot tell the node where to fetch the volume from: %v (RASPUTIN_PUBLIC_BASE_URL). Nothing was touched", err)
 		}
 		running, err := cfg.Store.ListRunning(sc.Ctx)
 		if err != nil {
@@ -774,6 +773,19 @@ func restoreAppValidate(cfg RestoreAppConfig) jobs.DoFn {
 			if inventory.ComputeStatus(n.LastSeen) != proto.StatusOnline {
 				return nil, fmt.Errorf("node %s, which hosts %s, is OFFLINE; the restore is refused, not queued — bring the node back and start it again", node, app.Name)
 			}
+		}
+		// Where the node fetches from, and whether its credentials are
+		// key-bound: decided before any restore verb is sent, and a node
+		// with no route is refused, never sent to the bearer route.
+		route, err := cfg.Router.Egress(sc.Ctx, node)
+		if err != nil {
+			return nil, fmt.Errorf("the restore is refused, nothing was touched: %w", err)
+		}
+		if route.KeyBound {
+			sc.Log("info", fmt.Sprintf("node %s fetches the restore stream over its node key at %s", node, route.Destination))
+		} else {
+			sc.Log("info", fmt.Sprintf("node %s fetches the restore stream by bearer credential at %s", node, route.Destination))
+			sc.Log("warn", fmt.Sprintf("node %s is not on the node-key route (%s); its fetches are authorised by the credential alone", node, route.Why))
 		}
 		tile, haveTile := cfg.Tiles.Get(strings.TrimSpace(app.SourceTile))
 		if !haveTile {
@@ -834,7 +846,7 @@ func restoreAppValidate(cfg RestoreAppConfig) jobs.DoFn {
 			RestoreID: "rs-" + randomHex(8), AppID: app.ID, AppName: app.Name, TileID: app.SourceTile, NodeID: node,
 			PartUUID: spec.PartUUID, SourceLabel: marker.Label, GenerationID: spec.GenerationID, GenerationCreatedAt: m.CreatedAt.UTC(),
 			ClusterID: m.ClusterID, KeyID: spec.KeyID, Scope: m.Scope, Complete: m.Complete, ManifestVersion: m.ManifestVersion,
-			MatchedBy: matchedBy, Source: source, Restore: plan.Restore, Skipped: plan.Skipped,
+			MatchedBy: matchedBy, Source: route.Destination, KeyBound: route.KeyBound, Restore: plan.Restore, Skipped: plan.Skipped,
 		}
 		if out.Skipped == nil {
 			out.Skipped = []AppVolumeRestoreRecord{}
@@ -980,6 +992,7 @@ var (
 func sendRestoreVolume(sc *jobs.StepCtx, cfg RestoreAppConfig, tgt restoreAppTarget, p RestoreVolumePlan, subject string) (*nats.Msg, error) {
 	cred, err := cfg.Egress.Mint(backupxfer.Grant{
 		Generation: tgt.GenerationID, Member: p.Member, NodeID: tgt.NodeID, JobID: sc.JobID, MaxBytes: p.SizeBytes, Use: backupxfer.UseRestore,
+		KeyBound: tgt.KeyBound,
 	}, cfg.volumeRPCBudget())
 	if err != nil {
 		return nil, fmt.Errorf("%w for %s: %v", errRestoreMint, p.Member, err)
