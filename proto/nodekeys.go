@@ -41,10 +41,10 @@ const (
 // CapabilityKeyBoundTransfer is advertised in NodeRegisteredEvt.Capabilities
 // by an agent whose backup-transfer clients (upload and restore fetch) present
 // its NodeKeyAgent key. It is a property of the binary, on every role: the api
-// routes such a node's transfers to its node listener and mints it key-bound
-// credentials (backupxfer.Grant.KeyBound), and routes a node without it to the
-// legacy bearer-only routes. Capabilities are replaced on every registration,
-// so an A/B fallback to an older agent clears it.
+// routes such a node's transfers to its node listener, and refuses a node
+// without it, by name, before any of its apps is stopped (the node must be
+// updated). Capabilities are replaced on every registration, so an A/B
+// fallback to an older agent clears it.
 const CapabilityKeyBoundTransfer = "key-bound-transfer"
 
 // NodeStateDir is where the agent keeps its state on a deployed Rasputin OS

@@ -131,8 +131,8 @@ type RunConfig struct {
 	// Ingest is the endpoint volume members land at — the same *Ingest the
 	// HTTP server mounts, so the credentials this run mints are verifiable by
 	// exactly the endpoint that receives them — and Router decides, per node,
-	// which URL the agent is handed for it and whether its credential is
-	// key-bound (TransferRouter). Both required: step 1 refuses a run that
+	// which node-listener URL the agent is handed for it, or refuses the node
+	// (TransferRouter). Both required: step 1 refuses a run that
 	// could not land a single app volume rather than writing an identity-only
 	// generation and recording every volume failed.
 	Ingest *backupxfer.Ingest

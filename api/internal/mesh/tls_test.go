@@ -1,8 +1,13 @@
 package mesh
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -372,69 +377,53 @@ func mustMtime(t *testing.T, path string) time.Time {
 	return info.ModTime()
 }
 
-// A client-auth leaf carries ExtKeyUsageClientAuth (and NOT ServerAuth) —
-// least-privilege for the obs per-node collectors, which are TLS clients to
-// the api's mTLS ingress and never servers.
-func TestMintLeaf_ClientAuth(t *testing.T) {
-	ca := newCAForTest(t)
-	certPEM, _, err := MintLeaf(ca, LeafSpec{
-		CommonName:  "c02",
-		DNSNames:    []string{"c02"},
-		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
-		ClientAuth:  true,
-	})
-	if err != nil {
-		t.Fatalf("MintLeaf: %v", err)
-	}
-	cert := mustParseCert(t, certPEM)
-	var hasClient, hasServer bool
-	for _, eku := range cert.ExtKeyUsage {
-		switch eku {
-		case x509.ExtKeyUsageClientAuth:
-			hasClient = true
-		case x509.ExtKeyUsageServerAuth:
-			hasServer = true
-		}
-	}
-	if !hasClient {
-		t.Error("client leaf missing ExtKeyUsageClientAuth")
-	}
-	if hasServer {
-		t.Error("client leaf should NOT carry ServerAuth (least privilege)")
-	}
-}
-
-// A leaf on disk with the wrong EKU must be re-minted, not reused — otherwise
-// a collector could pick up a stale server leaf and fail the mTLS handshake.
+// A leaf on disk that is not a server leaf — a client-auth leaf an earlier
+// release minted for a collector — is re-minted as a server leaf, never
+// reused for one.
 func TestMintLeafToDisk_ReMintsOnEKUDrift(t *testing.T) {
 	ca := newCAForTest(t)
 	dir := t.TempDir()
 	spec := LeafSpec{CommonName: "c02", DNSNames: []string{"c02"}}
 
-	// First mint a SERVER leaf.
+	// A client-auth leaf at the path, signed by the same CA, valid for a
+	// year: everything usable about it but its EKU.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(4242),
+		Subject:      pkix.Name{CommonName: "c02"},
+		DNSNames:     []string{"c02"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, key.Public(), ca.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := LeafPathsIn(dir)
+	if err := os.WriteFile(paths.CertPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.KeyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := MintLeafToDisk(ca, dir, spec); err != nil {
-		t.Fatalf("mint server leaf: %v", err)
+		t.Fatalf("MintLeafToDisk: %v", err)
 	}
-	serverCert := mustParseCertFile(t, filepath.Join(dir, "leaf.pem"))
-
-	// Now ask for a CLIENT leaf at the same path — must re-mint, not reuse.
-	clientSpec := spec
-	clientSpec.ClientAuth = true
-	if _, err := MintLeafToDisk(ca, dir, clientSpec); err != nil {
-		t.Fatalf("mint client leaf: %v", err)
+	got := mustParseCertFile(t, paths.CertPath)
+	if got.SerialNumber.Cmp(big.NewInt(4242)) == 0 {
+		t.Fatal("EKU drift did not force a re-mint — the client leaf was reused for a server spec")
 	}
-	clientCert := mustParseCertFile(t, filepath.Join(dir, "leaf.pem"))
-
-	if clientCert.SerialNumber.Cmp(serverCert.SerialNumber) == 0 {
-		t.Fatal("EKU drift did not force a re-mint — the server leaf was reused for a client spec")
-	}
-	hasClient := false
-	for _, eku := range clientCert.ExtKeyUsage {
-		if eku == x509.ExtKeyUsageClientAuth {
-			hasClient = true
-		}
-	}
-	if !hasClient {
-		t.Error("re-minted leaf is not client-auth")
+	if len(got.ExtKeyUsage) != 1 || got.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
+		t.Errorf("re-minted leaf EKU = %v, want exactly ServerAuth", got.ExtKeyUsage)
 	}
 }

@@ -42,16 +42,14 @@ import (
 // a restore credential can do, stated once: fetch ONE named member of ONE
 // generation, unsealed, once per request, for the one restore that minted
 // it, until its TTL. It cannot list, cannot name another member, cannot
-// reach another generation, and is refused once the restore ends. A
-// key-bound one is honoured only from the node it names, presenting its
-// agent key on the node listener (CheckPresenter); an unbound one, for an
-// agent that predates key-bound transfer, is a bearer, which is why its scope
-// is this narrow. What it yields is plaintext app data, which is why the api
-// only hands one to the node the app is installed on, over TLS, inside the
-// command that carries it and nowhere else.
+// reach another generation, and is refused once the restore ends. It is
+// honoured only from the node it names, presenting its registered agent key
+// on the node listener (CheckPresenter). What it yields is plaintext app
+// data, which is why the api only hands one to the node the app is installed
+// on, over TLS, inside the command that carries it and nowhere else.
 
 // EgressPathPrefix is where the api mounts the restore-stream endpoint. The
-// source URI the api hands an agent is the public base URL plus this prefix;
+// source URI the api hands an agent is the node listener's base URL plus this prefix;
 // the agent appends the generation and the member.
 const EgressPathPrefix = "/api/backup/egress/"
 
@@ -78,13 +76,13 @@ const (
 )
 
 // EgressDestination is the source URI the api hands an agent for the
-// restore-stream endpoint it serves itself: the public base URL plus
+// restore-stream endpoint it serves itself: the node listener's base URL plus
 // EgressPathPrefix.
-func EgressDestination(publicBaseURL string) (string, error) {
-	base := strings.TrimRight(strings.TrimSpace(publicBaseURL), "/")
+func EgressDestination(baseURL string) (string, error) {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	u, err := url.Parse(base)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("backupxfer: %q is not an http(s) base URL", publicBaseURL)
+		return "", fmt.Errorf("backupxfer: %q is not an http(s) base URL", baseURL)
 	}
 	return base + EgressPathPrefix, nil
 }

@@ -6,14 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,9 +20,8 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 )
 
-// Key-bound transfer at the ingest: which entry a credential may be
-// presented on, and the records each outcome writes through the injected
-// logger.
+// The ingest's one entry, ServeNode: who may present a credential on it, and
+// the records each outcome writes through the injected logger.
 
 // captureGlobalLog redirects the standard library's global logger for the
 // test, so a test can assert the endpoint never writes to it.
@@ -45,11 +42,9 @@ func nodeEntry(owner string) func(*backupxfer.Ingest) http.Handler {
 	}
 }
 
-func legacyEntry(ing *backupxfer.Ingest) http.Handler { return ing }
-
-func (r *rig) mintBound(member string) (string, backupxfer.Grant) {
+func (r *rig) mintGrant(member string) (string, backupxfer.Grant) {
 	r.t.Helper()
-	g := backupxfer.Grant{Generation: genID, Member: member, NodeID: nodeID, JobID: jobID, MaxBytes: 1 << 30, KeyBound: true}
+	g := backupxfer.Grant{Generation: genID, Member: member, NodeID: nodeID, JobID: jobID, MaxBytes: 1 << 30}
 	tok, err := r.ingest.Mint(g, backupxfer.CredentialTTL)
 	if err != nil {
 		r.t.Fatalf("Mint: %v", err)
@@ -89,67 +84,11 @@ func (r *rig) nothingLanded(member string) {
 	}
 }
 
-// TC-514-03: the legacy bearer-only entry refuses a key-bound credential.
-func TestLegacyIngestRefusesAKeyBoundCredential(t *testing.T) {
-	global := captureGlobalLog(t)
-	logger, rec := logkittest.New()
-	r := newRigServing(t, 1, logger, legacyEntry)
-	tok, g := r.mintBound(memVW)
-
-	_, err := r.put(context.Background(), tok, memVW, []byte("vaultwarden"))
-	refusedWith(t, err, backupxfer.CodeKeyRequired)
-	var re *backupxfer.RefusedError
-	if errors.As(err, &re) && re.Status != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", re.Status)
-	}
-	r.nothingLanded(memVW)
-
-	warns := rec.AtLevel(slog.LevelWarn)
-	if len(warns) != 1 {
-		t.Fatalf("WARN records = %d, want 1:\n%s", len(warns), rec.Text())
-	}
-	wantAttrs(t, warns[0], map[string]string{
-		"grant_id": g.ID(), "job_id": jobID, "generation": genID, "member": memVW,
-		"grant_node": nodeID, "path": backupxfer.PathBearer, "code": backupxfer.CodeKeyRequired,
-	})
-	if global.Len() != 0 {
-		t.Errorf("the global log was written: %q", global.String())
-	}
-	if strings.Contains(rec.Text(), tok) || strings.Contains(global.String(), tok) {
-		t.Error("the credential appears in a log")
-	}
-}
-
-// TC-514-04: the legacy entry still lands an unbound credential, an older
-// agent's, and records it as the bearer path.
-func TestLegacyIngestLandsAnUnboundCredential(t *testing.T) {
-	logger, rec := logkittest.New()
-	r := newRigServing(t, 1, logger, legacyEntry)
-	rc, err := r.put(context.Background(), r.mint(memVW), memVW, []byte("vaultwarden"))
-	if err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	if digest := fileDigest(t, r.memberPath(memVW)); digest != rc.SealedDigest {
-		t.Errorf("on-disk digest %s, receipt %s", digest, rc.SealedDigest)
-	}
-	landed := rec.Matching(slog.LevelInfo, "landed")
-	if len(landed) != 1 {
-		t.Fatalf("INFO landing records = %d, want 1:\n%s", len(landed), rec.Text())
-	}
-	wantAttrs(t, landed[0], map[string]string{
-		"path": backupxfer.PathBearer, "presenting_node": "", "grant_node": nodeID, "job_id": jobID,
-		"generation": genID, "member": memVW, "sealed_bytes": strconv.FormatUint(rc.SealedBytes, 10),
-	})
-	if v, ok := logkittest.Attr(landed[0], "sealed_sha256"); !ok || v == "" || !strings.HasPrefix(rc.SealedDigest, v) {
-		t.Errorf("sealed_sha256 = %q, receipt digest %s", v, rc.SealedDigest)
-	}
-}
-
 // TC-514-05: ServeNode with no key owner fails closed, before a slot.
 func TestServeNodeRefusesAnEmptyOwnerBeforeASlot(t *testing.T) {
 	logger, rec := logkittest.New()
 	r := newRigServing(t, 1, logger, nodeEntry(nodeID))
-	tok, _ := r.mintBound(memVW)
+	tok, _ := r.mintGrant(memVW)
 
 	// Called directly, with a body that never ends: had the entry taken the
 	// one slot or read the body, this call would never return.
@@ -182,10 +121,11 @@ func TestServeNodeRefusesAnEmptyOwnerBeforeASlot(t *testing.T) {
 // TC-514-06: on the node listener, a credential issued to another node is
 // refused, whoever's key presents it.
 func TestServeNodeRefusesAnotherNodesCredential(t *testing.T) {
+	global := captureGlobalLog(t)
 	logger, rec := logkittest.New()
 	const other = "e3bench-compute2"
 	r := newRigServing(t, 1, logger, nodeEntry(other))
-	tok, g := r.mintBound(memVW)
+	tok, g := r.mintGrant(memVW)
 
 	_, err := r.put(context.Background(), tok, memVW, []byte("vaultwarden"))
 	refusedWith(t, err, backupxfer.CodeCredentialScope)
@@ -196,18 +136,24 @@ func TestServeNodeRefusesAnotherNodesCredential(t *testing.T) {
 	}
 	wantAttrs(t, warns[0], map[string]string{
 		"grant_id": g.ID(), "job_id": jobID, "grant_node": nodeID, "presenting_node": other,
-		"path": backupxfer.PathNodeKey, "code": backupxfer.CodeCredentialScope,
+		"code": backupxfer.CodeCredentialScope,
 	})
+	noPathAttr(t, warns[0])
+	if global.Len() != 0 {
+		t.Errorf("the global log was written: %q", global.String())
+	}
 	if strings.Contains(rec.Text(), tok) {
 		t.Error("the credential appears in a log")
 	}
 }
 
 // TC-514-07: on the node listener, the credential's own node lands it.
+// TC-516-02: the landing record names the presenting node and the grant's
+// node, and carries no path attribute.
 func TestServeNodeLandsItsOwnNodesCredential(t *testing.T) {
 	logger, rec := logkittest.New()
 	r := newRigServing(t, 1, logger, nodeEntry(nodeID))
-	tok, _ := r.mintBound(memVW)
+	tok, _ := r.mintGrant(memVW)
 	rc, err := r.put(context.Background(), tok, memVW, []byte("vaultwarden"))
 	if err != nil {
 		t.Fatalf("Put: %v", err)
@@ -220,8 +166,18 @@ func TestServeNodeLandsItsOwnNodesCredential(t *testing.T) {
 		t.Fatalf("INFO landing records = %d, want 1:\n%s", len(landed), rec.Text())
 	}
 	wantAttrs(t, landed[0], map[string]string{
-		"path": backupxfer.PathNodeKey, "presenting_node": nodeID, "grant_node": nodeID, "job_id": jobID,
+		"presenting_node": nodeID, "grant_node": nodeID, "job_id": jobID,
 	})
+	// TC-516-02: with one entry the record has no path to name.
+	noPathAttr(t, landed[0])
+}
+
+// noPathAttr asserts rec carries no "path" attribute (TC-516-02).
+func noPathAttr(t *testing.T, rec slog.Record) {
+	t.Helper()
+	if v, ok := logkittest.Attr(rec, "path"); ok {
+		t.Errorf("record %q carries path=%q; the only entry is the node listener", rec.Message, v)
+	}
 }
 
 // TC-514-30: the constructor refuses a nil logger, naming it.

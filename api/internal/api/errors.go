@@ -16,7 +16,7 @@ const (
 	// so it admits nobody.
 	codeNodeAdmissionUnconfigured = "node_admission_unconfigured"
 	// codeNodeKeyRequired: the request was not made with a registered node
-	// key (or, where allowed, a mesh-chain leaf).
+	// key.
 	codeNodeKeyRequired = "node_key_required"
 	// codeNodeNotAdmitted: the key's node is no longer a member.
 	codeNodeNotAdmitted = "node_not_admitted"

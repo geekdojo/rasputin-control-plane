@@ -4,8 +4,8 @@ Every observability collector trusts the api the standard way every Rasputin HTT
 does: **by chain to the Mesh CA, under the cluster name, with no certificate pinned**
 ([geekdojo-brain#672](https://github.com/geekdojo/geekdojo-brain/issues/672)). The api's
 node listener (`RASPUTIN_OBS_INGEST_ADDR`, default `:8443`) serves the api's Mesh-CA-signed
-HTTPS leaf for every name. A collector presents its node's own self-signed key (or, on a
-legacy node, a mesh client leaf), and the api admits it by that key.
+HTTPS leaf for every name. A collector presents its node's own self-signed key, and the api
+admits it by that key and nothing else.
 
 The trust line is one constant, `collectorTrustLine` in `api/internal/obs/collector.go`, and
 the auth register's C17 row anchors to it, so changing what a collector trusts fails

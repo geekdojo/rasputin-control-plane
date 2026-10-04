@@ -169,4 +169,4 @@ func contains(ss []string, want string) bool {
 // every node wants the zero pair, which every recorded pair matches (see
 // collectorWant.matches), so those cases exercise the same decisions they
 // always did.
-func noWant(string) collectorWant { return collectorWant{} }
+func noWant(string) (collectorWant, bool) { return collectorWant{}, true }

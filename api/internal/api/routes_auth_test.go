@@ -10,9 +10,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -68,10 +70,9 @@ var openRoutes = map[string]string{
 }
 
 // probePathFor overrides the placeholder path for a route whose own parser
-// refuses a malformed path (400) before it reaches its credential check. The
-// backup transport endpoints are not behind the session gate — their callers
-// are node agents — and authenticate with a per-member bearer credential; a
-// well-formed path makes the probe meet that check and its 401.
+// refuses a malformed path (400) before it reaches its authentication. The
+// backup transport endpoints live on the node listener only; a well-formed
+// path makes the probe meet the key check and its 401.
 var probePathFor = map[string]string{
 	"PUT " + backupxfer.IngestPathPrefix: backupxfer.IngestPathPrefix + "probe/" + probeMember,
 	"GET " + backupxfer.EgressPathPrefix: backupxfer.EgressPathPrefix + "probe/" + probeMember,
@@ -173,7 +174,7 @@ func routeFixture(t *testing.T) *apiFixture {
 	f.srv.SetUIDir(uiDir)
 	// The backup transport endpoints answer 503 until wired, which would say
 	// nothing about their gate. Wire them as main.go does, over one authority,
-	// so the probes meet the per-member credential check they rely on.
+	// so a probe of the node listener meets its key check.
 	authority, err := backupxfer.NewAuthority()
 	if err != nil {
 		t.Fatal(err)
@@ -288,7 +289,7 @@ func TestObsIngestRoutesRequireClientCert(t *testing.T) {
 	for _, gated := range []bool{false, true} {
 		f.srv.nodeGate = nil
 		if gated {
-			f.srv.nodeGate = newIngestConns(f.srv.inv.Registry(), nil)
+			f.srv.nodeGate = newIngestConns(f.srv.inv.Registry(), slog.New(slog.DiscardHandler))
 		}
 		want := http.StatusServiceUnavailable
 		if gated {
@@ -304,6 +305,72 @@ func TestObsIngestRoutesRequireClientCert(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TC-516-08: backup transfer is served on the node listener only. The public
+// mux registers neither route, the node-listener mux registers both, and a
+// PUT and a GET to those paths through Handler(), with a live credential for
+// an open generation, are refused without the ingest landing or recording
+// anything.
+func TestBackupTransferIsNotOnThePublicListener(t *testing.T) {
+	transfer := []string{"PUT " + backupxfer.IngestPathPrefix, "GET " + backupxfer.EgressPathPrefix}
+	public := patternSet(routeFixture(t).srv.routes().Patterns())
+	node := patternSet((&Server{}).obsIngestRoutes().Patterns())
+	for _, p := range transfer {
+		if public[p] {
+			t.Errorf("the public listener registers %s", p)
+		}
+		if !node[p] {
+			t.Errorf("the node listener does not register %s", p)
+		}
+	}
+
+	f := routeFixture(t)
+	logger, records := logkittest.New()
+	authority, err := backupxfer.NewAuthority()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ing := backupxfer.New(authority, 1, logger)
+	f.srv.SetBackupIngest(ing)
+	f.srv.SetAppRestore(&storage.RestoreAppConfig{}, storage.NewRestoreEgress(authority, storage.NewRestoreSessions(), logger))
+	h := f.srv.Handler()
+	const gen = "20261004T120000Z-JOB51600-full"
+	if _, err := ing.Open(filepath.Join(t.TempDir(), proto.BackupGenerationsDir), gen, "job-516"); err != nil {
+		t.Fatal(err)
+	}
+	member := proto.BackupMemberPath("vaultwarden", "vaultwarden-data")
+	cred, err := ing.Mint(backupxfer.Grant{Generation: gen, Member: member, NodeID: "n1", JobID: "job-516", MaxBytes: 1 << 20}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{http.MethodPut, http.MethodGet} {
+		prefix := backupxfer.IngestPathPrefix
+		if method == http.MethodGet {
+			prefix = backupxfer.EgressPathPrefix
+		}
+		req := httptest.NewRequest(method, prefix+gen+"/"+member, strings.NewReader("sealed bytes"))
+		req.Header.Set("Authorization", "Bearer "+cred)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code >= 200 && w.Code < 300 {
+			t.Errorf("%s %s through the public handler = %d, want a refusal", method, prefix, w.Code)
+		}
+	}
+	if _, ok := ing.Landed(gen, member); ok {
+		t.Error("the ingest landed a member sent to the public listener")
+	}
+	if n := len(records.Records()); n != 0 {
+		t.Errorf("the transfer endpoints wrote %d record(s) for requests to the public listener:\n%s", n, records.Text())
+	}
+}
+
+func patternSet(ps []string) map[string]bool {
+	m := map[string]bool{}
+	for _, p := range ps {
+		m[p] = true
+	}
+	return m
 }
 
 func TestConcretePath(t *testing.T) {

@@ -68,7 +68,11 @@ func newXferRigOn(t *testing.T, start func(http.Handler) *httptest.Server) *xfer
 	}
 	ing := backupxfer.New(auth, 1, slog.New(slog.DiscardHandler))
 	mux := http.NewServeMux()
-	mux.Handle("PUT "+backupxfer.IngestPathPrefix, ing)
+	// The node listener's stand-in: ServeNode with the owner it would have
+	// authenticated, the node every credential below is issued to.
+	mux.Handle("PUT "+backupxfer.IngestPathPrefix, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		ing.ServeNode(w, req, xferNode)
+	}))
 	hits := &atomic.Int32{}
 	srv := start(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		hits.Add(1)

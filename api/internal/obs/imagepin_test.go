@@ -230,13 +230,13 @@ func TestStart_PullFailureIgnoresDisabledServices(t *testing.T) {
 // it leaves this box and becomes a `docker compose up` on an agent.
 func TestBuildCollectorCompose_RefusesAnUnpinnedImage(t *testing.T) {
 	_, err := BuildCollectorCompose(CollectorSpec{
-		NodeID:         "node-1",
-		IngressBaseURL: "https://rasputin.local",
-		ServerName:     "rasputin.local",
-		LeafCertPEM:    "x",
-		LeafKeyPEM:     "x",
-		MeshCAPEM:      "x",
-		AlloyImage:     "grafana/alloy:v1.4.2",
+		NodeID:          "node-1",
+		IngressBaseURL:  "https://rasputin.local",
+		ServerName:      "rasputin.local",
+		MeshCAPEM:       "x",
+		NodeKeyCertPath: "/k.crt",
+		NodeKeyPath:     "/k.key",
+		AlloyImage:      "grafana/alloy:v1.4.2",
 	})
 	if err == nil {
 		t.Fatal("an unpinned collector image was rendered into a compose file for an agent to run")

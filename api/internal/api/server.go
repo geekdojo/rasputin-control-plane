@@ -114,10 +114,6 @@ type Server struct {
 	// newCorrelationID yields the id a coded error carries in its body and
 	// its log entry. Never nil.
 	newCorrelationID func() string
-	// collectorLeafDir holds one directory per node, <dir>/<node-id>, with the
-	// collector's client leaf (main.go's mintCollectorLeaf). Node removal
-	// deletes the node's directory; "" skips that step.
-	collectorLeafDir string
 	// nodeGate is the node listener's admission gate, set by WireObsIngest.
 	// It decides the caller's identity and admission at the handshake and
 	// again on every request, from memory (obs_ingest_conns.go). nil means
@@ -155,11 +151,6 @@ func (s *Server) SetAppLeafRotator(rotate apps.LeafRotator) { s.rotateAppLeaf = 
 // edits answer 503.
 func (s *Server) SetComposeStash(stash *apps.ComposeStash) { s.composeStash = stash }
 
-// SetCollectorLeafDir wires where the per-node collector client leaves live —
-// the same directory main.go mints them under — so removing a node deletes its
-// leaf and key.
-func (s *Server) SetCollectorLeafDir(dir string) { s.collectorLeafDir = dir }
-
 // SetBackupStore wires the backup_targets ledger (design/storage.md §4.8) so
 // the /api/backup routes can read it. Wired by main after NewServer rather than
 // as a twentieth constructor argument, the same way the alerts service and the
@@ -177,16 +168,6 @@ func (s *Server) SetBackupIngest(in *backupxfer.Ingest) { s.backupIngest = in }
 // says where the app stands against its backup cadence. Wired by main beside
 // the alerts service that reads the same derivation.
 func (s *Server) SetBackupStates(b *storage.BackupStates) { s.backupStates = b }
-
-// handleBackupIngest is PUT /api/backup/ingest/{generation}/{member}. The
-// whole handler lives in backupxfer, beside the client that speaks to it.
-func (s *Server) handleBackupIngest(w http.ResponseWriter, r *http.Request) {
-	if s.backupIngest == nil {
-		writeError(w, http.StatusServiceUnavailable, "backup ingest is not configured on this api")
-		return
-	}
-	s.backupIngest.ServeHTTP(w, r)
-}
 
 // SetAlertsService overrides the default aggregator-only alerts service
 // with one that has a persistence store + nats conn wired. main.go
@@ -422,20 +403,9 @@ func (s *Server) routes() *routeMux {
 	// the on-demand "Back up now", which submits the same saga with the same
 	// refusals as the weekly schedule. The schedule routes are §4.1's
 	// "overridable per installation".
-	// The backup INGEST endpoint is deliberately NOT behind the session
-	// middleware: its caller is a node's agent, not a browser, and its
-	// authentication is the per-member upload credential the backup.run
-	// saga minted (backupxfer). A credential can PUT one named member into
-	// the one generation that is open and nothing else — it cannot read,
-	// list, overwrite or reach another generation. 503 until main wires an
-	// endpoint, exactly like the other backup routes without a ledger.
-	mux.HandleFunc("PUT "+backupxfer.IngestPathPrefix, s.handleBackupIngest)
-	// The restore EGRESS endpoint is the ingest's mirror and is likewise not
-	// behind the session middleware: its caller is a node's agent presenting
-	// the per-member restore credential the backup.restore_app saga minted.
-	// It serves ONE member of the one generation a restore has open, unsealed
-	// here — the key never leaves this process — and nothing else.
-	mux.HandleFunc("GET "+backupxfer.EgressPathPrefix, s.handleRestoreEgress)
+	// The backup INGEST and restore EGRESS endpoints are not on this
+	// listener: a node moves members only on the node listener, by its
+	// registered agent key (obsIngestRoutes).
 	mux.HandleFunc("GET /api/backup/runs", reqd(s.handleListBackupRuns))
 	mux.HandleFunc("POST /api/backup/runs", reqd(s.handleStartBackupRun))
 	mux.HandleFunc("GET /api/backup/restores", reqd(s.handleListRestores))

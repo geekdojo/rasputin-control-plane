@@ -108,9 +108,9 @@ func New(rt Runtime, stagingRoot, markerDir string, trust TrustSource, clientCer
 
 // clientTLS resolves the TLS config for one transfer or restore fetch: the
 // trust, cloned, presenting the node's agent key. A nil source, a trust error
-// and a missing key are all refusals. The key is offered, never forced: Go
-// sends a client certificate only when the server asks for one, so the api's
-// public listener, which asks for none, sees exactly what it saw before.
+// and a missing key are all refusals. The key is always required: the api
+// serves transfer and restore only on its node listener, which admits a
+// connection by its registered key and nothing else.
 func (s *Stager) clientTLS() (*tls.Config, error) {
 	if s.trust == nil {
 		return nil, errNoTrustSource

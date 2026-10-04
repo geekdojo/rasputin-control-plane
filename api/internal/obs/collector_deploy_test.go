@@ -3,7 +3,7 @@ package obs
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -59,21 +59,6 @@ func startCollectorAgent(t *testing.T, nodeID string) (*nats.Conn, *fakeCollecto
 	return nc, f
 }
 
-// countingMint is a Mint that records its calls and returns a fixed leaf, or
-// err when set.
-type countingMint struct {
-	calls int
-	err   error
-}
-
-func (m *countingMint) fn(string) (string, string, error) {
-	m.calls++
-	if m.err != nil {
-		return "", "", m.err
-	}
-	return testLeafCert, testLeafKey, nil
-}
-
 type deployRun struct {
 	err  error
 	logs []string
@@ -100,8 +85,8 @@ func alloyConfigOf(t *testing.T, compose string) composeFile {
 }
 
 // TC-672-08: a keyed node gets the Mesh-chain trust line under the deps'
-// ServerName, Mint is never called, and the step says trust=mesh-ca with the
-// CA's short fingerprint.
+// ServerName, and the step says trust=mesh-ca with the CA's short
+// fingerprint.
 func TestCollectorDeploy_KeyedNodeTrustsTheMeshChain(t *testing.T) {
 	inv := admittedStore(t, "c02")
 	if _, err := inv.SetNodeKeys(context.Background(), "c02",
@@ -109,17 +94,13 @@ func TestCollectorDeploy_KeyedNodeTrustsTheMeshChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	nc, agent := startCollectorAgent(t, "c02")
-	mint := &countingMint{}
 	d := CollectorDeployDeps{
-		Inv: inv, Mint: mint.fn, MeshCAPEM: testMeshCA,
+		Inv: inv, MeshCAPEM: testMeshCA,
 		IngressBaseURL: "https://home1.local:8443", ServerName: "home1.local",
 	}
 	r := runCollectorDeploy(t, d, nc, "c02")
 	if r.err != nil {
 		t.Fatalf("deploy: %v", r.err)
-	}
-	if mint.calls != 0 {
-		t.Errorf("Mint called %d time(s) for a keyed node, want 0", mint.calls)
 	}
 	cmds := agent.sent()
 	if len(cmds) != 1 {
@@ -141,56 +122,59 @@ func TestCollectorDeploy_KeyedNodeTrustsTheMeshChain(t *testing.T) {
 	}
 }
 
-// TC-672-09: a node with no collector key is minted a leaf once and its
-// compose carries d.MeshCAPEM; a Mint failure fails the step naming the node,
-// with no RPC sent.
-func TestCollectorDeploy_LegacyNodeAndMintFailure(t *testing.T) {
-	inv := admittedStore(t, "c03")
+// TC-516-12: a node with no registered collector key is refused by name and
+// sent nothing; a key read that fails fails the step with the wrapped error
+// and sends nothing.
+func TestCollectorDeploy_RefusesANodeWithNoCollectorKey(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "inv.db")
+	inv := admittedStoreAt(t, dbPath, "c03")
+	if _, err := inv.SetNodeKeys(context.Background(), "c03",
+		proto.NodeKeys{proto.NodeKeyAgent: "sha256/" + strings.Repeat("C", 43) + "="}); err != nil {
+		t.Fatal(err)
+	}
 	nc, agent := startCollectorAgent(t, "c03")
-	mint := &countingMint{}
 	d := CollectorDeployDeps{
-		Inv: inv, Mint: mint.fn, MeshCAPEM: testMeshCA,
+		Inv: inv, MeshCAPEM: testMeshCA,
 		IngressBaseURL: "https://home1.local:8443", ServerName: "home1.local",
 	}
-	if r := runCollectorDeploy(t, d, nc, "c03"); r.err != nil {
-		t.Fatalf("deploy: %v", r.err)
+	r := runCollectorDeploy(t, d, nc, "c03")
+	if r.err == nil {
+		t.Fatal("a node with no registered collector key was deployed")
 	}
-	if mint.calls != 1 {
-		t.Errorf("Mint called %d time(s), want 1", mint.calls)
+	for _, sub := range []string{"node c03", "has no registered collector key", "not deployed"} {
+		if !strings.Contains(r.err.Error(), sub) {
+			t.Errorf("error %q lacks %q", r.err, sub)
+		}
 	}
-	cmds := agent.sent()
-	if len(cmds) != 1 {
-		t.Fatalf("deploy RPCs = %d, want 1", len(cmds))
-	}
-	if got := strings.TrimRight(alloyConfigOf(t, cmds[0].ComposeYAML).Configs["mesh_ca"].Content, "\n"); got != testMeshCA {
-		t.Errorf("legacy mesh_ca = %q, want d.MeshCAPEM", got)
+	if n := len(agent.sent()); n != 0 {
+		t.Fatalf("%d deploy RPC(s) sent to a node with no collector key", n)
 	}
 
-	failing := &countingMint{err: errors.New("disk full")}
-	d.Mint = failing.fn
-	r := runCollectorDeploy(t, d, nc, "c03")
-	if r.err == nil || !strings.Contains(r.err.Error(), "c03") {
-		t.Errorf("mint failure = %v, want an error naming c03", r.err)
+	// The keys table is gone: inventory answers Get, and NodeKeys fails.
+	breakNodeKeys(t, dbPath)
+	r = runCollectorDeploy(t, d, nc, "c03")
+	if r.err == nil || !strings.Contains(r.err.Error(), "read node keys for c03") || !strings.Contains(r.err.Error(), "node_keys") {
+		t.Errorf("deploy with an unreadable key table = %v, want the wrapped read error", r.err)
 	}
-	if n := len(agent.sent()); n != 1 {
-		t.Errorf("a deploy RPC was sent after the mint failed (%d total)", n)
+	if n := len(agent.sent()); n != 0 {
+		t.Errorf("%d deploy RPC(s) sent after the key read failed", n)
 	}
 }
 
-// TC-672-10: with no Mesh CA configured, both shapes fail with an error that
-// wraps "MeshCAPEM required" and names the node, and no RPC is sent.
+// TC-672-10: with no Mesh CA configured, a keyed node's deploy fails with an
+// error that wraps "MeshCAPEM required" and names the node, and no RPC is
+// sent.
 func TestCollectorDeploy_RefusesWithNoMeshCA(t *testing.T) {
-	inv := admittedStore(t, "k1", "l1")
+	inv := admittedStore(t, "k1")
 	if _, err := inv.SetNodeKeys(context.Background(), "k1",
 		proto.NodeKeys{proto.NodeKeyCollector: "sha256/" + strings.Repeat("B", 43) + "="}); err != nil {
 		t.Fatal(err)
 	}
-	for _, node := range []string{"k1", "l1"} {
+	for _, node := range []string{"k1"} {
 		t.Run(node, func(t *testing.T) {
 			nc, agent := startCollectorAgent(t, node)
-			mint := &countingMint{}
 			d := CollectorDeployDeps{
-				Inv: inv, Mint: mint.fn,
+				Inv:            inv,
 				IngressBaseURL: "https://home1.local:8443", ServerName: "home1.local",
 			}
 			r := runCollectorDeploy(t, d, nc, node)

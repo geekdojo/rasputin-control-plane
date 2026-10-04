@@ -106,7 +106,7 @@ func (r *nodeBackupRig) tlsAs(cert tls.Certificate) *tls.Config {
 
 func (r *nodeBackupRig) mint(node string, use string) string {
 	r.t.Helper()
-	g := backupxfer.Grant{Generation: nbGen, Member: nbMember, NodeID: node, JobID: nbJob, MaxBytes: 1 << 20, KeyBound: true, Use: use}
+	g := backupxfer.Grant{Generation: nbGen, Member: nbMember, NodeID: node, JobID: nbJob, MaxBytes: 1 << 20, Use: use}
 	var tok string
 	var err error
 	if use == backupxfer.UseRestore {
@@ -191,7 +191,8 @@ func wantFields(t *testing.T, rec slog.Record, want map[string]string) {
 	}
 }
 
-// TC-514-15: a key-bound member uploaded by its node's agent key lands.
+// TC-514-15: a member uploaded by its node's agent key lands, and its record
+// names the presenting node and no path (TC-516-02).
 func TestNodeBackup_KeyedUploadLands(t *testing.T) {
 	r := newNodeBackupRig(t)
 	rc, err := r.put(r.tlsAs(r.certs["n-a/agent"]), r.mint("n-a", ""))
@@ -209,7 +210,10 @@ func TestNodeBackup_KeyedUploadLands(t *testing.T) {
 	if len(landed) != 1 {
 		t.Fatalf("landing records:\n%s", r.xferLog.Text())
 	}
-	wantFields(t, landed[0], map[string]string{"path": backupxfer.PathNodeKey, "presenting_node": "n-a"})
+	wantFields(t, landed[0], map[string]string{"presenting_node": "n-a", "grant_node": "n-a"})
+	if v, ok := logkittest.Attr(landed[0], "path"); ok {
+		t.Errorf("the landing record carries path=%q", v)
+	}
 }
 
 // TC-514-16: the node's collector key, registered and admitted, cannot move
@@ -223,36 +227,6 @@ func TestNodeBackup_CollectorKeyIsRefused(t *testing.T) {
 	r.nothingLanded()
 	rec := r.refusalRecord(body.CorrelationID)
 	wantFields(t, rec, map[string]string{"node_id": "n-a", "purpose": string(proto.NodeKeyCollector), "route": "PUT " + backupxfer.IngestPathPrefix})
-}
-
-// TC-514-17: a legacy Mesh-chain leaf, admitted by the listener for the
-// collector routes, cannot move backups in either direction.
-func TestNodeBackup_MeshChainLeafIsRefused(t *testing.T) {
-	r := newNodeBackupRig(t)
-	cfg := r.it.clientTLS("n-a")
-	for _, c := range []struct {
-		method, prefix, use string
-	}{
-		{http.MethodPut, backupxfer.IngestPathPrefix, ""},
-		{http.MethodGet, backupxfer.EgressPathPrefix, backupxfer.UseRestore},
-	} {
-		cred := ""
-		if c.use == "" {
-			cred = r.mint("n-a", "")
-		} else {
-			cred = "rbx1.unused.unused" // refused before the credential is read
-		}
-		code, body := r.raw(cfg, c.method, c.prefix, cred)
-		if code != http.StatusForbidden || !strings.Contains(body.Error, "a registered agent key is required") || body.CorrelationID == "" {
-			t.Fatalf("%s %s: got %d %+v", c.method, c.prefix, code, body)
-		}
-		rec := r.refusalRecord(body.CorrelationID)
-		wantFields(t, rec, map[string]string{"node_id": "n-a"})
-	}
-	r.nothingLanded()
-	if served := r.xferLog.Matching(slog.LevelInfo, "streamed"); len(served) != 0 {
-		t.Error("something was streamed")
-	}
 }
 
 // TC-514-18: node B's agent key cannot spend node A's credential.
@@ -327,6 +301,45 @@ func TestNodeBackup_KeyedRestoreFetch(t *testing.T) {
 	_, err = get(r.certs["n-a/collector"])
 	if !errors.As(err, &re) || re.Status != http.StatusForbidden {
 		t.Fatalf("A's collector key: %v, want 403", err)
+	}
+}
+
+// TC-516-11: with the mesh-chain allowance gone, the purpose check is the
+// whole route rule: the agent key cannot push the collector's metrics or
+// logs, and the collector key cannot move a backup in either direction. Each
+// is a 403 node_key_wrong_purpose, and nothing lands or streams.
+func TestNodeListener_EveryRouteChecksTheKeyPurpose(t *testing.T) {
+	r := newNodeBackupRig(t)
+	for _, c := range []struct {
+		key, method, path, cred string
+	}{
+		{"n-a/agent", http.MethodPost, "/api/obs/ingest", ""},
+		{"n-a/agent", http.MethodPost, "/api/obs/logs/ingest", ""},
+		{"n-a/collector", http.MethodPut, backupxfer.IngestPathPrefix + nbGen + "/" + nbMember, r.mint("n-a", "")},
+		{"n-a/collector", http.MethodGet, backupxfer.EgressPathPrefix + nbGen + "/" + nbMember, "rbx1.unused.unused"},
+	} {
+		req, err := http.NewRequest(c.method, r.it.srv.URL+c.path, strings.NewReader("x"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.cred != "" {
+			req.Header.Set("Authorization", "Bearer "+c.cred)
+		}
+		hc := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: r.tlsAs(r.certs[c.key])}}
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s %s: %v", c.key, c.method, c.path, err)
+		}
+		var body codedError
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || body.Code != codeNodeKeyPurpose {
+			t.Errorf("%s %s %s = %d %q, want 403 %s", c.key, c.method, c.path, resp.StatusCode, body.Code, codeNodeKeyPurpose)
+		}
+	}
+	r.nothingLanded()
+	if served := r.xferLog.Matching(slog.LevelInfo, "streamed"); len(served) != 0 {
+		t.Error("something was streamed")
 	}
 }
 

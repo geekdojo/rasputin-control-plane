@@ -70,20 +70,12 @@ type LeafConsumer struct {
 	Reload func(ctx context.Context, paths LeafPaths) error
 }
 
-// LeafSource yields consumers whose set changes while the api runs — the
-// per-node collector leaves. Re-read on every sweep, so a node that has left
-// inventory simply stops being renewed (§5.2 revocation: the node's leaves are
-// no longer renewed). Deleting what it leaves behind is a separate matter and
-// is not done here.
-type LeafSource func(ctx context.Context) ([]LeafConsumer, error)
-
 // LeafSweeper renews the Mesh-CA leaves the controlplane holds.
 type LeafSweeper struct {
 	ca *MeshCA
 
-	mu      sync.Mutex
-	fixed   []LeafConsumer
-	sources []LeafSource
+	mu    sync.Mutex
+	fixed []LeafConsumer
 }
 
 // NewLeafSweeper returns a sweeper for ca. A nil CA is allowed and makes every
@@ -112,9 +104,6 @@ func (s *LeafSweeper) Register(c LeafConsumer) error {
 // the tests pass, and that leaf simply stops being renewed until it expires.
 // A name the caller expected and does not find here is that mistake, caught at
 // boot instead of at NotAfter.
-//
-// Sources are deliberately not included: their membership follows inventory
-// and is empty on a cluster with no collectors, so absence proves nothing.
 func (s *LeafSweeper) RegisteredNames() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,16 +113,6 @@ func (s *LeafSweeper) RegisteredNames() []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-// RegisterSource adds a source of consumers re-read on every sweep.
-func (s *LeafSweeper) RegisterSource(fn LeafSource) {
-	if fn == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sources = append(s.sources, fn)
 }
 
 // LeafSweepReport is what one sweep did. It is the job's recorded result, so
@@ -160,7 +139,7 @@ func (s *LeafSweeper) Sweep(ctx context.Context, logf func(level, msg string)) L
 	if s.ca == nil {
 		return report
 	}
-	for _, c := range s.consumers(ctx, logf) {
+	for _, c := range s.consumers() {
 		if err := ctx.Err(); err != nil {
 			return report
 		}
@@ -199,27 +178,12 @@ func (s *LeafSweeper) Sweep(ctx context.Context, logf func(level, msg string)) L
 	return report
 }
 
-// consumers is the registered set plus whatever the sources yield this sweep,
-// in a stable order. A source that errors is logged and skipped: the leaves it
-// would have named keep their current certificates, which is the same position
-// a missed tick leaves them in.
-func (s *LeafSweeper) consumers(ctx context.Context, logf func(level, msg string)) []LeafConsumer {
+// consumers is the registered set, copied under the lock so a sweep does not
+// hold it while it mints.
+func (s *LeafSweeper) consumers() []LeafConsumer {
 	s.mu.Lock()
-	fixed := append([]LeafConsumer(nil), s.fixed...)
-	sources := append([]LeafSource(nil), s.sources...)
-	s.mu.Unlock()
-
-	var dynamic []LeafConsumer
-	for _, fn := range sources {
-		got, err := fn(ctx)
-		if err != nil {
-			logf("warn", fmt.Sprintf("leaf sweep: listing leaves: %v", err))
-			continue
-		}
-		dynamic = append(dynamic, got...)
-	}
-	sort.Slice(dynamic, func(i, j int) bool { return dynamic[i].Name < dynamic[j].Name })
-	return append(fixed, dynamic...)
+	defer s.mu.Unlock()
+	return append([]LeafConsumer(nil), s.fixed...)
 }
 
 // LeafPathsIn names the leaf files inside dir. One place, so a sweep asking

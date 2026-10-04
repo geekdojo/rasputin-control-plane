@@ -1081,7 +1081,8 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 	}
 	// Every agent of this build presents its agent key on backup transfer
 	// (quiesce.New), on every role: the api routes such a node to its node
-	// listener and mints it key-bound credentials (storage.TransferRouter).
+	// listener, and refuses a node without the capability by name
+	// (storage.TransferRouter).
 	caps := []string{proto.CapabilityKeyBoundTransfer}
 	if bmcAdv != nil {
 		// This node hosts an active BMC backend: advertise the reachable

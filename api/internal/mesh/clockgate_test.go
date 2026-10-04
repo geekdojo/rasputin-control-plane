@@ -49,12 +49,6 @@ func TestLeafMintsWaitForATrustworthyClock(t *testing.T) {
 				t.Fatal("PrepareAppLeaf did not mint, so the test proves nothing")
 			}
 		}},
-		{"the collector's client-auth leaf", func(t *testing.T, ca *MeshCA) {
-			clientSpec := LeafSpec{CommonName: "c02", DNSNames: []string{"c02"}, ClientAuth: true}
-			if _, err := MintLeafToDisk(ca, t.TempDir(), clientSpec); err != nil {
-				t.Fatalf("MintLeafToDisk (client): %v", err)
-			}
-		}},
 	}
 	for _, m := range mints {
 		t.Run(m.name, func(t *testing.T) {

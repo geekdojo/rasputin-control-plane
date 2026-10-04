@@ -271,24 +271,13 @@ type LeafSpec struct {
 	// appLeafSpec); note they no longer withdraw a name on an exposure
 	// change, because exposure is enforced by the route, not the SAN set.
 	ExactDNSNames bool
-	// ClientAuth mints a leaf for the CLIENT side of mTLS (ExtKeyUsage
-	// clientAuth) instead of the default server leaf (serverAuth). Used by
-	// the obs per-node collectors, which present a client cert to the api's
-	// mTLS remote-write ingress; the api reads their node id from the
-	// verified cert (observability-stack.md §3.10). Least-privilege: a leaf
-	// is either a server leaf or a client leaf, never both.
-	ClientAuth bool
 }
 
-// ekuFor returns the single ExtKeyUsage a leaf carries for the given spec.
-// Kept as one helper so MintLeaf (which stamps it) and loadLeafIfUsable
-// (which must re-mint on a mismatch) can never disagree.
-func ekuFor(spec LeafSpec) x509.ExtKeyUsage {
-	if spec.ClientAuth {
-		return x509.ExtKeyUsageClientAuth
-	}
-	return x509.ExtKeyUsageServerAuth
-}
+// leafEKU is the single ExtKeyUsage every leaf carries: a server leaf. The
+// controlplane mints no client leaf; a node authenticates by its own key.
+// One constant, so MintLeaf (which stamps it) and loadLeafIfUsable (which
+// must re-mint on a mismatch) can never disagree.
+const leafEKU = x509.ExtKeyUsageServerAuth
 
 // LeafPaths is a small bundle of where a leaf's PEM files live on disk.
 // Returned from MintLeafToDisk so callers (the supervisor) can mount
@@ -377,7 +366,7 @@ func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM, keyPEM []byte, err error) {
 		NotBefore:   now.Add(-time.Hour),
 		NotAfter:    now.Add(lifetime),
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{ekuFor(spec)},
+		ExtKeyUsage: []x509.ExtKeyUsage{leafEKU},
 		DNSNames:    append([]string(nil), spec.DNSNames...),
 		IPAddresses: append([]net.IP(nil), spec.IPAddresses...),
 	}
@@ -423,13 +412,11 @@ func loadLeafIfUsable(paths LeafPaths, ca *MeshCA, spec LeafSpec) *x509.Certific
 	if time.Until(cert.NotAfter) < renewWindow {
 		return nil
 	}
-	// EKU drift — a leaf minted server-auth can't be reused for a client
-	// spec (or vice versa). Without this a collector could pick up a stale
-	// server leaf from an earlier mint and fail the mTLS handshake.
-	wantEKU := ekuFor(spec)
+	// EKU drift — a leaf on disk that is not a server leaf (a client leaf
+	// an earlier release minted) is not reused for one.
 	hasEKU := false
 	for _, eku := range cert.ExtKeyUsage {
-		if eku == wantEKU {
+		if eku == leafEKU {
 			hasEKU = true
 			break
 		}

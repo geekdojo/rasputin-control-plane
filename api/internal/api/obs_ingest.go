@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
@@ -43,9 +41,8 @@ const (
 // listener (wired in main.go): the collectors' metrics and log pushes, and the
 // agents' backup upload and restore fetch. Every route here has NO session
 // middleware: the TLS handshake IS the authentication — the peer presents a
-// key the node registered, or, while legacy collectors remain, a
-// mesh-CA-signed client leaf on the collector routes — and the key's owner is
-// the authorization identity, with each route's key purpose checked per
+// key the node registered — and the key's owner is the authorization
+// identity, with each route's key purpose checked per
 // request (authenticateNode). Everything reachable on this listener must be
 // safe to expose to an admitted node and nothing else.
 //
@@ -69,10 +66,8 @@ func (s *Server) obsIngestRoutes() *routeMux {
 	mux := newRouteMux()
 	mux.HandleFunc(obsIngestPattern, s.handleObsIngest)
 	mux.HandleFunc(obsLogsIngestPattern, s.handleObsLogsIngest)
-	// Backup transfer, authenticated by the node's agent key: the routes an
-	// agent that advertises proto.CapabilityKeyBoundTransfer is sent to
-	// (storage.TransferRouter). Their bearer-only twins on the public
-	// listener remain for older agents (register row E12).
+	// Backup transfer, authenticated by the node's agent key: the only
+	// routes a member is uploaded to or fetched from (storage.TransferRouter).
 	mux.HandleFunc("PUT "+backupxfer.IngestPathPrefix, s.handleNodeBackupIngest)
 	mux.HandleFunc("GET "+backupxfer.EgressPathPrefix, s.handleNodeRestoreEgress)
 	return mux
@@ -80,9 +75,8 @@ func (s *Server) obsIngestRoutes() *routeMux {
 
 // authenticateNode is the per-request half of node authentication, and it
 // reads nothing but the request's own TLS state and the in-memory node
-// registry. The identity is the key the peer presented — or, for a legacy
-// client, its verified mesh leaf's CommonName — never anything in the request,
-// so a node cannot claim another's identity.
+// registry. The identity is the owner of the key the peer presented, never
+// anything in the request, so a node cannot claim another's identity.
 //
 // The handshake already decided all of this once (obs_ingest_conns.go). It is
 // decided AGAIN here, per request, because a connection outlives the facts it
@@ -94,19 +88,16 @@ func (s *Server) obsIngestRoutes() *routeMux {
 // The route's purpose is checked here too: want is the one key purpose the
 // route serves, so a node's AGENT key cannot push its collector's metrics and
 // its COLLECTOR key cannot move its backups, though both belong to the same
-// node. allowMeshChain says whether a legacy mesh-chain client, which has no
-// purpose to check, keeps the access it has always had: the collector routes
-// allow it; the backup routes, which no legacy client ever reached, do not.
+// node.
 //
 // A server whose listener was not given the gate (WireObsIngest) refuses every
 // request: fail closed.
 //
 // On any failure it writes a coded refusal (writeCodedError: a correlation id
 // in the body and in the WARN record, with the node, the purpose of the key
-// it presented — empty for a mesh-chain client — the purpose the route
-// serves, and the cause) and returns ok=false. `label` prefixes the error bodies so the
+// it presented, the purpose the route serves, and the cause) and returns ok=false. `label` prefixes the error bodies so the
 // routes are distinguishable.
-func (s *Server) authenticateNode(w http.ResponseWriter, r *http.Request, label string, want proto.NodeKeyPurpose, allowMeshChain bool) (nodeID string, ok bool) {
+func (s *Server) authenticateNode(w http.ResponseWriter, r *http.Request, label string, want proto.NodeKeyPurpose) (nodeID string, ok bool) {
 	if s.nodeGate == nil {
 		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeNodeAdmissionUnconfigured, label+": node admission is not configured",
 			slog.String("route_purpose", string(want)), slog.String("cause", "the listener has no node admission gate"))
@@ -129,10 +120,7 @@ func (s *Server) authenticateNode(w http.ResponseWriter, r *http.Request, label 
 	if !s.nodeGate.gate.Admitted(id.nodeID) {
 		return refuse(codeNodeNotAdmitted, "this node is not admitted", "the node is no longer a member holding a live join token")
 	}
-	switch {
-	case id.purpose == "" && !allowMeshChain:
-		return refuse(codeNodeKeyPurpose, wrongKeyMessage(want), "a legacy mesh-chain client; this route takes a registered key only")
-	case id.purpose != "" && id.purpose != want:
+	if id.purpose != want {
 		return refuse(codeNodeKeyPurpose, wrongKeyMessage(want), fmt.Sprintf("presented its %s key; this route is for the %s key", id.purpose, want))
 	}
 	return id.nodeID, true
@@ -149,10 +137,9 @@ func wrongKeyMessage(want proto.NodeKeyPurpose) string {
 // handleNodeBackupIngest is PUT /api/backup/ingest/{generation}/{member} on
 // the node listener: the request is authenticated by the presenting node's
 // registered agent key, and the endpoint is told which node that is, so a
-// key-bound credential is honoured only from its own node
-// (backupxfer.CheckPresenter).
+// credential is honoured only from its own node (backupxfer.CheckPresenter).
 func (s *Server) handleNodeBackupIngest(w http.ResponseWriter, r *http.Request) {
-	nodeID, ok := s.authenticateNode(w, r, "backup ingest", proto.NodeKeyAgent, false)
+	nodeID, ok := s.authenticateNode(w, r, "backup ingest", proto.NodeKeyAgent)
 	if !ok {
 		return
 	}
@@ -165,9 +152,9 @@ func (s *Server) handleNodeBackupIngest(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleNodeRestoreEgress is GET /api/backup/egress/{generation}/{member} on
-// the node listener, the restore stream's keyed entry; as the ingest.
+// the node listener, the restore stream's only entry; as the ingest.
 func (s *Server) handleNodeRestoreEgress(w http.ResponseWriter, r *http.Request) {
-	nodeID, ok := s.authenticateNode(w, r, "restore egress", proto.NodeKeyAgent, false)
+	nodeID, ok := s.authenticateNode(w, r, "restore egress", proto.NodeKeyAgent)
 	if !ok {
 		return
 	}
@@ -187,7 +174,7 @@ func (s *Server) handleNodeRestoreEgress(w http.ResponseWriter, r *http.Request)
 // does read each series' metric name, to refuse reserved ones
 // (refuseReservedMetrics); the body it forwards is the one it received.
 func (s *Server) handleObsIngest(w http.ResponseWriter, r *http.Request) {
-	nodeID, ok := s.authenticateNode(w, r, "obs ingest", proto.NodeKeyCollector, true)
+	nodeID, ok := s.authenticateNode(w, r, "obs ingest", proto.NodeKeyCollector)
 	if !ok {
 		return
 	}
@@ -200,7 +187,7 @@ func (s *Server) handleObsIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if refused := refuseReservedMetrics(w, r); refused != "" {
-		log.Printf("obs ingest: refusing push from %q: %s", nodeID, refused)
+		s.log.WarnContext(r.Context(), "obs ingest: refusing a push", "node_id", nodeID, "reason", refused)
 		return
 	}
 	s.proxyRemoteWrite(w, r, base, nodeID)
@@ -256,7 +243,7 @@ func refuseReservedMetrics(w http.ResponseWriter, r *http.Request) (refused stri
 // into every stream of the body (stampLogStreams) and refuses a job label
 // reserved for the controlplane.
 func (s *Server) handleObsLogsIngest(w http.ResponseWriter, r *http.Request) {
-	nodeID, ok := s.authenticateNode(w, r, "obs logs ingest", proto.NodeKeyCollector, true)
+	nodeID, ok := s.authenticateNode(w, r, "obs logs ingest", proto.NodeKeyCollector)
 	if !ok {
 		return
 	}
@@ -267,15 +254,15 @@ func (s *Server) handleObsLogsIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if refused := stampLogStreams(w, r, nodeID); refused != "" {
-		log.Printf("obs logs ingest: refusing push from %q: %s", nodeID, refused)
+		s.log.WarnContext(r.Context(), "obs logs ingest: refusing a push", "node_id", nodeID, "reason", refused)
 		return
 	}
 	s.proxyLokiPush(w, r, base)
 }
 
 // stampLogStreams reads the whole push body and replaces it with one in which
-// every stream carries node_id=<the verified client leaf's CommonName>. The
-// label the collector sent is overwritten, not merged: a node's own leaf
+// every stream carries node_id=<the owner of the presented collector key>. The
+// label the collector sent is overwritten, not merged: a node's own key
 // authenticates only that node, so its logs are that node's whatever its
 // config claims. A stream whose `job` label is reserved for the controlplane
 // (obs.IsReservedLogJob) is refused, because no node owns it.
@@ -355,25 +342,4 @@ func (s *Server) reverseProxyIngest(w http.ResponseWriter, r *http.Request, base
 		writeError(w, http.StatusBadGateway, label+": backend error")
 	}
 	proxy.ServeHTTP(w, r)
-}
-
-// nodeIDFromClientCert extracts the calling node's id from a verified mTLS
-// connection — the client leaf's Subject CommonName (mesh mints per-node client
-// leaves with CN = node_id). Returns an error (all "reject the request"
-// conditions) on no TLS state, no peer cert, or an empty CommonName. It does NOT
-// re-verify the chain: RequireAndVerifyClientCert already proved the leaf chains
-// to the mesh CA before any handler runs; this only reads identity off the
-// already-verified leaf (PeerCertificates[0], leaf-first).
-func nodeIDFromClientCert(cs *tls.ConnectionState) (string, error) {
-	if cs == nil {
-		return "", errors.New("no TLS connection state (non-TLS request)")
-	}
-	if len(cs.PeerCertificates) == 0 {
-		return "", errors.New("no client certificate presented")
-	}
-	cn := strings.TrimSpace(cs.PeerCertificates[0].Subject.CommonName)
-	if cn == "" {
-		return "", errors.New("client certificate has empty CommonName")
-	}
-	return cn, nil
 }

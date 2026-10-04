@@ -4,7 +4,6 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -99,10 +98,14 @@ func main() {
 	// RASPUTIN_OBS_INGEST_ADDR empty to turn it off.
 	//
 	// Not an open door: ClientAuth=RequireAnyClientCert plus a VerifyConnection
-	// that admits only a registered node key, or (while legacy collectors
-	// remain) a mesh-CA-signed client leaf. A caller with neither never
+	// that admits only a registered node key. A caller without one never
 	// completes the handshake, and VM stays loopback-only behind it.
 	obsIngestAddr := envOr("RASPUTIN_OBS_INGEST_ADDR", ":8443")
+
+	// Collector client leaves an earlier release minted under the Mesh CA
+	// hold private keys nothing uses any more: no code mints, renews or
+	// admits one. Deleted once, here (legacyleaves.go).
+	removeLegacyCollectorLeaves(logger, legacyCollectorLeafDir(dataDir))
 
 	// The JetStream store holds the job ledger: owner-only, existing installs
 	// included. The data dir itself is shared with the agent and the OS
@@ -809,26 +812,9 @@ func main() {
 	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
-	// Per-node collector leaves. A source rather than a fixed registration:
-	// the set follows inventory, so a node that has been removed is no longer
-	// renewed (§5.2 revocation), and a node that has never had a collector is
-	// never minted one here — only directories that already exist are swept.
-	// A renewed leaf rides to the node inside its collector compose, so the
-	// reload hook is a redeploy.
-	leafSweeper.RegisterSource(collectorLeafSource(
-		filepath.Join(dataDir, "tls", "collectors"), invStore,
-		func(ctx context.Context, nodeID string) error {
-			spec, err := json.Marshal(obs.CollectorNodeSpec{NodeID: nodeID})
-			if err != nil {
-				return err
-			}
-			_, err = runner.Submit(ctx, obs.CollectorDeployKind, spec, "mesh-leaf-sweep")
-			return err
-		}))
 	// The controlplane's ONE leaf-renewal driver (§7.1). Everything holding a
 	// Mesh-CA leaf registers with the sweeper — the api's own HTTPS leaf and
-	// Headscale's below, the per-node collector leaves through a source — and
-	// the leaf lifecycles that own a delivery contract of their own run as
+	// Headscale's below — and the leaf lifecycles that own a delivery contract of their own run as
 	// fan-outs from the same job, so there is one thing to look at when a
 	// certificate is about to lapse. See mesh/sweep.go.
 	runner.Register(mesh.LeafSweepWorkflow(mesh.LeafSweepDeps{
@@ -917,18 +903,18 @@ func main() {
 	// serial and the target may be spinning media.
 	backupIngest := backupxfer.New(backupAuthority, parseIntOr(os.Getenv("RASPUTIN_BACKUP_INGEST_CONCURRENCY"), backupxfer.DefaultConcurrency), logger)
 	// The node listener's base URL, derived once: the backup transfer router
-	// sends nodes that present their agent key there, and the collectors
-	// below write to it. "" when this api runs none (HTTPS off, a dev box),
-	// and then every node uploads by bearer credential, said once at WARN.
+	// sends every node there, and the collectors below write to it. "" when
+	// this api runs none (HTTPS off, a dev box), and then no node has a
+	// backup transfer route, said once at WARN and per route.
 	nodeListenerBase, nodeListenerServerName, err := nodeListenerBaseURL(logger, publicBaseURL, obsIngestAddr, httpsAddr)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: node listener endpoint", "err", err.Error())
 		os.Exit(1)
 	}
-	// Which route each node's backup transfers take, and whether its
-	// credentials are key-bound (storage.TransferRouter): decided per node
-	// at mint, from what its agent advertises and the keys it registered.
-	transferRouter, err := storage.NewTransferRouter(invStore, publicBaseURL, nodeListenerBase)
+	// Each node's backup transfer route, or why it has none
+	// (storage.TransferRouter): decided per node before any app stops, from
+	// what its agent advertises and the keys it registered.
+	transferRouter, err := storage.NewTransferRouter(invStore, nodeListenerBase)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: backup transfer router", "err", err.Error())
 		os.Exit(1)
@@ -1295,12 +1281,12 @@ func main() {
 		// server name derived with it: the cluster name.
 		ingressBaseURL := nodeListenerBase
 		ingressServerName := nodeListenerServerName
-		// Every collector, keyed or legacy, trusts the api by chain to the
-		// Mesh CA under the cluster name — the name the api's HTTPS leaf
+		// Every collector presents its node's registered collector key and
+		// trusts the api by chain to the Mesh CA under the cluster name — the name the api's HTTPS leaf
 		// carries by construction (apiLeafSpec). No certificate is pinned, so
 		// a renewed leaf needs no redeploy.
 		collectorDeploy := obs.CollectorDeployDeps{
-			Inv: invStore, Mint: collectorLeafMinter(meshCA, dataDir),
+			Inv:            invStore,
 			IngressBaseURL: ingressBaseURL, ServerName: ingressServerName,
 			MeshCAPEM: string(meshCA.CertPEM),
 		}
@@ -1383,9 +1369,6 @@ func main() {
 	// the push step's dispatch; nothing the server serves can reach it.
 	srv.SetConsole(consoleStore)
 	srv.SetComposeStash(composeStash)
-	// Node removal deletes the node's collector leaf from here — the same
-	// directory mintCollectorLeaf writes under.
-	srv.SetCollectorLeafDir(filepath.Join(dataDir, "tls", "collectors"))
 	// The backup-target ledger, for GET/POST /api/backup/targets, and the
 	// ingest endpoint the nodes upload sealed volumes to.
 	srv.SetBackupStore(backupStore)
@@ -1749,13 +1732,8 @@ func main() {
 	// serves the api's Mesh leaf for every name (nodeListenerCert) and refuses
 	// handshakes until that leaf has loaded; it does not depend on the bus key.
 	if obsIngestAddr != "" {
-		// A legacy collector presents a mesh-CA-signed client leaf, so the
-		// mesh CA is the pool its chain is verified against. It drops out of
-		// here once every collector runs on a registered key.
-		meshClients := x509.NewCertPool()
-		meshClients.AddCert(meshCA.Cert)
 		obsIngestSrv = newNodeListenerServer(obsIngestAddr, srv.ObsIngestHandler(), leaf)
-		if err := srv.WireObsIngest(obsIngestSrv, invStore.Registry(), meshClients); err != nil {
+		if err := srv.WireObsIngest(obsIngestSrv, invStore.Registry()); err != nil {
 			log.Fatalf("rasputin-api: node listener: %v", err)
 		}
 		nodeLn, lerr := net.Listen("tcp", obsIngestAddr)
@@ -1763,7 +1741,7 @@ func main() {
 			log.Fatalf("rasputin-api: node listener: %v", lerr)
 		}
 		logger.Info("rasputin-api: node listener up", "addr", nodeLn.Addr().String(),
-			"serves", "api Mesh leaf", "client_auth", "registered key or legacy mesh leaf")
+			"serves", "api Mesh leaf", "client_auth", "registered node key")
 		go func() {
 			if err := obsIngestSrv.ServeTLS(nodeLn, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("rasputin-api: node listener: %v", err)
@@ -1952,11 +1930,6 @@ func apiLeafSpec(hostname string, lanIP net.IP) mesh.LeafSpec {
 //   - headscale exists only for the self-hosted Docker backend. The mock has no
 //     container, and an external Headscale brings its own certificate — neither
 //     is ours to renew.
-//
-// The per-node collector leaves are deliberately absent: they arrive through a
-// LeafSource whose membership follows inventory, so it is legitimately empty on
-// a cluster that has never deployed a collector, and "missing" cannot be told
-// from "none yet".
 func requiredLeafConsumers(httpsEnabled, selfHostedMesh bool) []string {
 	var want []string
 	if httpsEnabled {
@@ -2256,31 +2229,6 @@ func logCollectorWiring(logger *slog.Logger, obsIngestAddr, httpsAddr string) bo
 	return wired
 }
 
-// collectorLeafMinter mints (idempotently) a legacy node's client-auth leaf
-// under the mesh CA, into dataDir/tls/collectors/<node>. Renewal is the leaf
-// sweep's job (collectorLeafSource), not this function's: MintLeafToDisk
-// returns the existing leaf until it enters its renew window, and by then the
-// sweep has already replaced it.
-func collectorLeafMinter(meshCA *mesh.MeshCA, dataDir string) obs.MintCollectorLeafFn {
-	return func(nodeID string) (certPEM, keyPEM string, err error) {
-		paths, err := mesh.MintLeafToDisk(meshCA,
-			filepath.Join(dataDir, "tls", "collectors", nodeID),
-			collectorLeafSpec(nodeID))
-		if err != nil {
-			return "", "", err
-		}
-		cert, err := os.ReadFile(paths.CertPath)
-		if err != nil {
-			return "", "", fmt.Errorf("read collector leaf cert: %w", err)
-		}
-		key, err := os.ReadFile(paths.KeyPath)
-		if err != nil {
-			return "", "", fmt.Errorf("read collector leaf key: %w", err)
-		}
-		return string(cert), string(key), nil
-	}
-}
-
 // newNodeListenerServer is the node listener's server: TLS 1.3, any client
 // certificate required (admission is a check on the peer's key, wired by
 // WireObsIngest), and the api's Mesh leaf served for every name
@@ -2309,13 +2257,13 @@ func newNodeListenerServer(addr string, handler http.Handler, leaf *apiLeaf) *ht
 // at, and the TLS server name they verify it under, derived once at start
 // (obs.DeriveIngressEndpoint) for the backup transfer router and the
 // collectors. Both are "" when the listener is not wired (collectorsWired), with
-// exactly one WARN record, because then every node uploads backups by bearer
-// credential alone. A wired listener whose address yields no URL is an error:
-// "" there would silently put every node on the bearer route and deploy no
-// collector, so main exits instead.
+// exactly one WARN record, because then no node has a backup transfer route
+// and no collector is deployed. A wired listener whose address yields no URL
+// is an error: "" there would silently refuse every node's backups and deploy
+// no collector, so main exits instead.
 func nodeListenerBaseURL(logger *slog.Logger, publicBaseURL, obsIngestAddr, httpsAddr string) (base, serverName string, err error) {
 	if wired, _ := collectorsWired(obsIngestAddr, httpsAddr); !wired {
-		logger.Warn("backup transfer: no node listener; nodes upload by bearer credential alone",
+		logger.Warn("no node listener; backup transfer and per-node collectors are unavailable",
 			"obs_ingest_addr", obsIngestAddr, "https_addr", httpsAddr)
 		return "", "", nil
 	}

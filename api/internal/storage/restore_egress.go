@@ -46,13 +46,12 @@ import (
 // length so the node can check the command and the source agree. The
 // credential is never logged — the grant's nonce is.
 //
-// # Two entries, one handler
+// # One entry
 //
-// ServeNode is the node listener's entry, for a request the api authenticated
-// by the presenting node's registered agent key; ServeHTTP is the legacy
-// bearer-only entry on the public listener (register row E12). Both run
-// serve, and backupxfer.CheckPresenter decides between the credential and
-// whoever presents it — the same rule as the ingest.
+// ServeNode is the only entry, on the node listener, for a request the api
+// authenticated by the presenting node's registered agent key.
+// backupxfer.CheckPresenter decides between the credential and the node that
+// presents it — the same rule as the ingest.
 type RestoreEgress struct {
 	auth     *backupxfer.Authority
 	sessions *RestoreSessions
@@ -88,12 +87,6 @@ func (e *RestoreEgress) Mint(g backupxfer.Grant, ttl time.Duration) (string, err
 	return e.auth.Mint(g, ttl)
 }
 
-// ServeHTTP streams one member on the legacy bearer-only route: nothing but
-// the credential is presented, so a key-bound credential is refused here.
-func (e *RestoreEgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	e.serve(w, r, "")
-}
-
 // ServeNode streams one member on the node listener. keyOwner is the node
 // whose registered agent key the caller authenticated the request with; the
 // credential must have been issued to that node. An empty owner is a wiring
@@ -101,7 +94,7 @@ func (e *RestoreEgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (e *RestoreEgress) ServeNode(w http.ResponseWriter, r *http.Request, keyOwner string) {
 	if strings.TrimSpace(keyOwner) == "" {
 		e.log.ErrorContext(r.Context(), "restore egress: the node listener passed no key owner; refusing (an api wiring fault)",
-			"path", backupxfer.PathNodeKey, "code", backupxfer.CodeCredentialInvalid)
+			"code", backupxfer.CodeCredentialInvalid)
 		egressRefuse(w, http.StatusInternalServerError, backupxfer.CodeCredentialInvalid, "the api could not tell which node presented this request")
 		return
 	}

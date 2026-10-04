@@ -47,9 +47,8 @@ import (
 // this is the alternative it was tabled for.
 
 // IngestPathPrefix is where the api mounts the endpoint, on its node listener
-// and, for agents that predate key-bound transfer, on its public listener. The
-// destination URI the api hands an agent is one of those bases plus this
-// prefix; the agent appends the generation and the member.
+// only. The destination URI the api hands an agent is that listener's base
+// plus this prefix; the agent appends the generation and the member.
 const IngestPathPrefix = "/api/backup/ingest/"
 
 // ContentType names the body: a sealed archive, and nothing else is accepted.
@@ -77,7 +76,6 @@ const (
 	CodeWriteFailed       = "write-failed"       // 500/507: the target could not take it
 	CodeOverBound         = "over-bound"         // 413: more bytes than the credential authorises
 	CodeUnsupported       = "unsupported"        // 501: this build cannot ingest here
-	CodeKeyRequired       = "key-required"       // 403: a key-bound credential on the bearer-only route
 )
 
 // Receipt is the endpoint's answer to a landed member: the facts the manifest
@@ -128,13 +126,13 @@ func (e *RefusedError) Error() string {
 }
 
 // IngestDestination is the destination URI the api hands an agent for the
-// endpoint it serves itself: the public base URL plus IngestPathPrefix. The
+// endpoint it serves itself: the node listener's base URL plus IngestPathPrefix. The
 // agent appends the generation and the member.
-func IngestDestination(publicBaseURL string) (string, error) {
-	base := strings.TrimRight(strings.TrimSpace(publicBaseURL), "/")
+func IngestDestination(baseURL string) (string, error) {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	u, err := url.Parse(base)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("backupxfer: %q is not an http(s) base URL", publicBaseURL)
+		return "", fmt.Errorf("backupxfer: %q is not an http(s) base URL", baseURL)
 	}
 	return base + IngestPathPrefix, nil
 }

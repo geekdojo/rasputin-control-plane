@@ -46,13 +46,12 @@ type rig struct {
 
 func newRig(t *testing.T, concurrency int) *rig {
 	t.Helper()
-	return newRigServing(t, concurrency, slog.New(slog.DiscardHandler),
-		func(ing *backupxfer.Ingest) http.Handler { return ing })
+	return newRigServing(t, concurrency, slog.New(slog.DiscardHandler), nodeEntry(nodeID))
 }
 
 // newRigServing is newRig with the logger the endpoint writes through and the
-// entry the mux mounts: the legacy ServeHTTP, or a ServeNode wrapper standing
-// in for the node listener's authenticated handler.
+// entry the mux mounts: a ServeNode wrapper standing in for the node
+// listener's authenticated handler, with the key owner it authenticated.
 func newRigServing(t *testing.T, concurrency int, logger *slog.Logger, entry func(*backupxfer.Ingest) http.Handler) *rig {
 	t.Helper()
 	auth, err := backupxfer.NewAuthority()
@@ -274,7 +273,7 @@ func TestIngestRefusesAMemberThatEscapesTheGeneration(t *testing.T) {
 		req.URL.Path = path // keep the raw path; httptest cleans it
 		req.Header.Set("Authorization", "Bearer "+cred)
 		w := httptest.NewRecorder()
-		r.ingest.ServeHTTP(w, req)
+		r.ingest.ServeNode(w, req, nodeID)
 		if w.Code != http.StatusBadRequest && w.Code != http.StatusForbidden {
 			t.Errorf("%s: status %d, want a refusal", path, w.Code)
 		}

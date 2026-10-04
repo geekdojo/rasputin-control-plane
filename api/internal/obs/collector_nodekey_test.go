@@ -1,7 +1,10 @@
 package obs
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"gopkg.in/yaml.v3"
 )
@@ -99,8 +103,7 @@ func TestBuildCollectorCompose_NodeKeyShapeTrustsTheMeshChain(t *testing.T) {
 // TC-672-02: no exact-bytes ca_pem on any path.
 func TestBuildCollectorCompose_NoCAPEMOnAnyPath(t *testing.T) {
 	for name, spec := range map[string]CollectorSpec{
-		"keyed":  nodeKeyCollectorSpec(),
-		"legacy": validCollectorSpec(),
+		"keyed": nodeKeyCollectorSpec(),
 	} {
 		out, _ := renderCompose(t, spec)
 		if strings.Contains(out, "ca_pem") {
@@ -109,12 +112,11 @@ func TestBuildCollectorCompose_NoCAPEMOnAnyPath(t *testing.T) {
 	}
 }
 
-// TC-672-03: a missing or blank Mesh CA is refused for either shape, with no
-// compose rendered, so Alloy never falls back to the system roots.
+// TC-672-03: a missing or blank Mesh CA is refused, with no compose
+// rendered, so Alloy never falls back to the system roots.
 func TestBuildCollectorCompose_RefusesWithNoMeshCA(t *testing.T) {
 	for name, spec := range map[string]CollectorSpec{
-		"keyed":  nodeKeyCollectorSpec(),
-		"legacy": validCollectorSpec(),
+		"keyed": nodeKeyCollectorSpec(),
 	} {
 		for _, ca := range []string{"", "  \n"} {
 			spec.MeshCAPEM = ca
@@ -126,38 +128,48 @@ func TestBuildCollectorCompose_RefusesWithNoMeshCA(t *testing.T) {
 	}
 }
 
-// TC-672-04: the legacy shape is otherwise unchanged: leaf and key inline,
-// the same trust line, the spec's server_name, no node-key bind, and an
-// empty leaf or key still refused.
-func TestBuildCollectorCompose_LegacyShapeUnchanged(t *testing.T) {
-	_, cf := renderCompose(t, validCollectorSpec())
-	alloy := cf.Configs["alloy_config"].Content
-	if n := strings.Count(alloy, collectorTrustLine); n != 2 {
-		t.Errorf("legacy trust line appears %d time(s), want 2\n---\n%s", n, alloy)
-	}
-	if !strings.Contains(alloy, `server_name = "rasputin.local"`) {
-		t.Errorf("legacy server_name is not the spec's\n---\n%s", alloy)
-	}
-	if got := strings.TrimRight(cf.Configs["leaf_cert"].Content, "\n"); got != testLeafCert {
-		t.Errorf("legacy leaf cert content = %q", got)
-	}
-	if got := strings.TrimRight(cf.Configs["leaf_key"].Content, "\n"); got != testLeafKey {
-		t.Errorf("legacy leaf key content = %q", got)
-	}
-	for _, v := range cf.Services["alloy"].Volumes {
-		if strings.Contains(v, "/etc/alloy/certs/node.") {
-			t.Errorf("the legacy shape bind-mounted node key material: %q", v)
-		}
-	}
-	for _, blank := range []func(*CollectorSpec){
-		func(s *CollectorSpec) { s.LeafCertPEM = "" },
-		func(s *CollectorSpec) { s.LeafKeyPEM = "" },
+// TC-516-13: the node key is the only shape. A spec without the node-key
+// paths is refused; one with them binds them read-only and carries no private
+// key, no leaf config or target, and exactly one certificate: the Mesh CA.
+func TestBuildCollectorCompose_RequiresTheNodeKey(t *testing.T) {
+	for name, blank := range map[string]func(*CollectorSpec){
+		"no NodeKeyCertPath": func(s *CollectorSpec) { s.NodeKeyCertPath = "" },
+		"no NodeKeyPath":     func(s *CollectorSpec) { s.NodeKeyPath = "  " },
+		"neither":            func(s *CollectorSpec) { s.NodeKeyCertPath, s.NodeKeyPath = "", "" },
 	} {
-		spec := validCollectorSpec()
+		spec := nodeKeyCollectorSpec()
 		blank(&spec)
-		if _, err := BuildCollectorCompose(spec); err == nil {
-			t.Error("a legacy collector rendered with no leaf cert or key")
+		if out, err := BuildCollectorCompose(spec); err == nil || out != "" {
+			t.Errorf("%s: rendered %d bytes, err %v; want a refusal", name, len(out), err)
 		}
+	}
+
+	out, cf := renderCompose(t, nodeKeyCollectorSpec())
+	svc := cf.Services["alloy"]
+	for _, want := range []string{
+		proto.NodeCertPath(proto.NodeKeyCollector) + ":" + collectorNodeKeyCertPath + ":ro",
+		proto.NodeKeyPath(proto.NodeKeyCollector) + ":" + collectorNodeKeyPath + ":ro",
+	} {
+		if !containsStr(svc.Volumes, want) {
+			t.Errorf("volume %q not mounted read-only; got %v", want, svc.Volumes)
+		}
+	}
+	if strings.Contains(out, "PRIVATE KEY") {
+		t.Error("the compose contains a PRIVATE KEY block")
+	}
+	for name := range cf.Configs {
+		if name == "leaf_cert" || name == "leaf_key" {
+			t.Errorf("the compose carries a %s config", name)
+		}
+	}
+	if strings.Contains(out, "leaf.pem") || strings.Contains(out, "leaf.key") {
+		t.Error("the compose names a leaf.pem or leaf.key target")
+	}
+	if n := strings.Count(out, "BEGIN CERTIFICATE"); n != 1 {
+		t.Errorf("BEGIN CERTIFICATE appears %d time(s), want 1 (the mesh_ca config)", n)
+	}
+	if !strings.Contains(cf.Configs["mesh_ca"].Content, "BEGIN CERTIFICATE") {
+		t.Error("the one certificate is not the mesh_ca config's content")
 	}
 }
 
@@ -180,13 +192,9 @@ func TestCollectorTLSConfig_IsTheRenderedBlock(t *testing.T) {
 		t.Errorf("collectorTrustLine = %q", collectorTrustLine)
 	}
 	for name, spec := range map[string]CollectorSpec{
-		"keyed":  nodeKeyCollectorSpec(),
-		"legacy": validCollectorSpec(),
+		"keyed": nodeKeyCollectorSpec(),
 	} {
 		cert, key := collectorNodeKeyCertPath, collectorNodeKeyPath
-		if spec.Legacy() {
-			cert, key = collectorLeafCertPath, collectorLeafKeyPath
-		}
 		_, cf := renderCompose(t, spec)
 		block := collectorTLSConfig(cert, key, spec.ServerName)
 		if n := strings.Count(cf.Configs["alloy_config"].Content, block); n != 2 {
@@ -226,7 +234,7 @@ func TestDecideCollectorActions_UpgradeFromBusPin(t *testing.T) {
 		"a": {proto.NodeKeyCollector: "sha256/a"},
 		"d": {proto.NodeKeyCollector: "sha256/d"},
 	}
-	want := func(id string) collectorWant { return d.wantFor(keys[id]) }
+	want := func(id string) (collectorWant, bool) { return d.wantFor(keys[id]), true }
 	recent := now.Add(-time.Hour)
 	state := map[string]*nodeJobState{
 		"a": {lastSuccess: recent, deployed: collectorWant{key: "sha256/a", trust: busFP}},
@@ -265,7 +273,7 @@ func TestDecideCollectorActions_RedeploysOnAChangedFact(t *testing.T) {
 		"c02": {lastSuccess: now.Add(-time.Minute), deployed: deployed},
 	}
 
-	same := func(string) collectorWant { return deployed }
+	same := func(string) (collectorWant, bool) { return deployed, true }
 	act := decideCollectorActions(nodes, depState, nil, true, now, allAdmitted, same)
 	if len(act.deploy) != 0 || act.skipped["fresh"] != 1 {
 		t.Fatalf("a current collector was redeployed: %+v", act)
@@ -278,7 +286,7 @@ func TestDecideCollectorActions_RedeploysOnAChangedFact(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			act := decideCollectorActions(nodes, depState, nil, true, now, allAdmitted,
-				func(string) collectorWant { return want })
+				func(string) (collectorWant, bool) { return want, true })
 			if len(act.deploy) != 1 || act.deploy[0] != "c02" {
 				t.Fatalf("not redeployed: %+v", act)
 			}
@@ -294,14 +302,14 @@ func TestDecideCollectorActions_UnrecordedDeployIsNotStale(t *testing.T) {
 	nodes := []*proto.Node{{ID: "c02", Role: proto.RoleCompute, LastSeen: now}}
 	depState := map[string]*nodeJobState{"c02": {lastSuccess: now.Add(-time.Minute)}}
 	act := decideCollectorActions(nodes, depState, nil, true, now, allAdmitted,
-		func(string) collectorWant { return collectorWant{key: "sha256/new", trust: "busfp"} })
+		func(string) (collectorWant, bool) { return collectorWant{key: "sha256/new", trust: "busfp"}, true })
 	if len(act.deploy) != 0 || act.skipped["fresh"] != 1 {
 		t.Fatalf("an unrecorded deploy was treated as stale: %+v", act)
 	}
 	// And the safety net still picks it up.
 	act = decideCollectorActions(nodes,
 		map[string]*nodeJobState{"c02": {lastSuccess: now.Add(-7 * time.Hour)}}, nil, true, now,
-		allAdmitted, func(string) collectorWant { return collectorWant{} })
+		allAdmitted, func(string) (collectorWant, bool) { return collectorWant{}, true })
 	if len(act.deploy) != 1 {
 		t.Fatalf("the safety net did not redeploy: %+v", act)
 	}
@@ -312,18 +320,16 @@ func TestDecideCollectorActions_UnrecordedDeployIsNotStale(t *testing.T) {
 // cases in collector_jobs_test.go.
 func allAdmitted(string) bool { return true }
 
-// wantFor answers the LEGACY shape whenever it cannot establish that a node
-// has a collector key: no inventory to ask, or a read that failed. Failing
-// the other way would put a node on a key the api cannot confirm it has, and
-// the collector would be deployed unable to authenticate.
-func TestCollectorReconcileDeps_WantForFallsBackWhenItCannotAsk(t *testing.T) {
+// TC-516-21: wantFor has no answer when it cannot read a node's keys — no
+// inventory to ask, or a read that failed — and says why, rather than
+// guessing a shape.
+func TestCollectorReconcileDeps_WantForHasNoAnswerWhenItCannotAsk(t *testing.T) {
 	ctx := context.Background()
-	want := collectorWant{trust: proto.MeshCAFingerprint([]byte(testMeshCA))}
 
 	// No inventory wired at all.
 	d := CollectorReconcileDeps{Deploy: CollectorDeployDeps{MeshCAPEM: testMeshCA}}
-	if got := d.wantFor(ctx, "c02"); got != want {
-		t.Errorf("no inventory: want = %+v, want the legacy shape %+v", got, want)
+	if got, err := d.wantFor(ctx, "c02"); err == nil || got != (collectorWant{}) {
+		t.Errorf("no inventory: want = %+v, %v; want no answer and an error", got, err)
 	}
 
 	// An inventory whose read fails: the store's database is closed.
@@ -335,7 +341,93 @@ func TestCollectorReconcileDeps_WantForFallsBackWhenItCannotAsk(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.Inv = inv
-	if got := d.wantFor(ctx, "c02"); got != want {
-		t.Errorf("unreadable inventory: want = %+v, want the legacy shape %+v", got, want)
+	if got, err := d.wantFor(ctx, "c02"); err == nil || got != (collectorWant{}) {
+		t.Errorf("unreadable inventory: want = %+v, %v; want no answer and an error", got, err)
+	}
+}
+
+// TC-516-21: with obs on, a node whose want has no answer is neither deployed
+// nor torn down, whether or not it runs a collector, and is counted under
+// keys_unreadable.
+func TestDecideCollectorActions_LeavesANodeWithUnreadableKeysAlone(t *testing.T) {
+	now := time.Now().UTC()
+	nodes := []*proto.Node{
+		{ID: "running", Role: proto.RoleCompute, LastSeen: now},
+		{ID: "none", Role: proto.RoleCompute, LastSeen: now},
+	}
+	depState := map[string]*nodeJobState{
+		"running": {lastSuccess: now.Add(-7 * time.Hour), deployed: collectorWant{key: "sha256/k", trust: "t"}},
+	}
+	act := decideCollectorActions(nodes, depState, nil, true, now, allAdmitted,
+		func(string) (collectorWant, bool) { return collectorWant{}, false })
+	if len(act.deploy) != 0 || len(act.teardown) != 0 {
+		t.Fatalf("acted on unreadable keys: deploy %v, teardown %v", act.deploy, act.teardown)
+	}
+	if act.skipped["keys_unreadable"] != 2 {
+		t.Errorf("skipped = %v, want keys_unreadable:2", act.skipped)
+	}
+}
+
+// TC-516-21: the reconcile step, obs on, over two online admitted nodes whose
+// keys cannot be read (the key table is gone; inventory still lists them):
+// it submits nothing, counts both under keys_unreadable, writes one warn feed
+// line per node naming it and the read error, and nothing to the standard
+// log package.
+func TestCollectorConverge_LeavesNodesWithUnreadableKeysAlone(t *testing.T) {
+	var global bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&global)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "inv.db")
+	inv := admittedStoreAt(t, dbPath, "c01", "c02")
+	breakNodeKeys(t, dbPath)
+	js, err := jobs.OpenStore(ctx, filepath.Join(dir, "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = js.Close() })
+	d := CollectorReconcileDeps{
+		Inv: inv, Jobs: js, Runner: jobs.NewRunner(js, nil),
+		Deploy: CollectorDeployDeps{Inv: inv, MeshCAPEM: testMeshCA},
+	}
+	var feed []string
+	out, err := collectorConverge(d)(&jobs.StepCtx{Ctx: ctx, JobID: "j", Log: func(level, msg string) {
+		feed = append(feed, level+": "+msg)
+	}})
+	if err != nil {
+		t.Fatalf("converge: %v", err)
+	}
+	var res struct {
+		Deployed []string       `json:"deployed"`
+		TornDown []string       `json:"tornDown"`
+		Skipped  map[string]int `json:"skipped"`
+	}
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Deployed) != 0 || len(res.TornDown) != 0 || res.Skipped["keys_unreadable"] != 2 {
+		t.Errorf("result = %+v, want nothing deployed or torn down and keys_unreadable:2", res)
+	}
+	for _, kind := range []string{CollectorDeployKind, CollectorTeardownKind} {
+		if submitted, err := js.ListJobsByKind(ctx, kind, 10); err != nil || len(submitted) != 0 {
+			t.Errorf("%s jobs submitted: %d (%v), want 0", kind, len(submitted), err)
+		}
+	}
+	for _, node := range []string{"c01", "c02"} {
+		n := 0
+		for _, l := range feed {
+			if strings.HasPrefix(l, "warn: ") && strings.Contains(l, "node "+node+"'s registered keys") && strings.Contains(l, "node_keys") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("warn lines naming %s and the read error = %d, want 1; feed:\n%s", node, n, strings.Join(feed, "\n"))
+		}
+	}
+	if global.Len() != 0 {
+		t.Errorf("the global log was written: %q", global.String())
 	}
 }
