@@ -184,14 +184,16 @@ func main() {
 	// per-node scoped credential, and harmless when the server has no auth
 	// enabled. Every node has one, the controlplane's own agent included — the
 	// bus trusts nothing for coming from loopback (geekdojo/geekdojo-brain#140).
-	// RASPUTIN_CP_JOIN_TOKEN_FILE is the canonical source on every role: one
-	// 0600 file, re-read on every connect attempt, so a re-minted token
-	// reaches a running agent without a restart. A seeded
-	// RASPUTIN_CP_JOIN_TOKEN is the legacy inline form, still read when no
-	// file is named so a new agent on an older image keeps joining. See
+	// It has one storage form: the 0600 file named by
+	// RASPUTIN_CP_JOIN_TOKEN_FILE (on a controlplane, the api-minted default
+	// when none is named), re-read on every connect attempt, so a re-minted
+	// token reaches a running agent without a restart. The inline
+	// RASPUTIN_CP_JOIN_TOKEN is retired (geekdojo/geekdojo-brain#539): only
+	// whether it is set is read here, to diagnose it, never its value. See
 	// bus.ResolveTokenSource for the order.
-	joinToken, joinTokenFrom, joinTokenKind := bus.ResolveTokenSource(os.Getenv(bus.EnvJoinToken), os.Getenv(bus.EnvJoinTokenFile), role, proto.BusAgentTokenPath)
-	log.Printf("rasputin-agent: bus join token from %q", joinTokenFrom)
+	legacyJoinTokenSet := os.Getenv(bus.EnvJoinToken) != ""
+	joinToken, joinTokenFrom, noJoinToken := bus.ResolveTokenSource(os.Getenv(bus.EnvJoinTokenFile), legacyJoinTokenSet, role, proto.BusAgentTokenPath)
+	logJoinTokenSource(logger, joinTokenFrom, noJoinToken, legacyJoinTokenSet)
 	// Bus pin (geekdojo/geekdojo-brain#448): the SHA-256 of the controlplane's
 	// bus key, which this node verifies the bus server against over TLS.
 	// RASPUTIN_BUS_PIN from the seed, else the pin file saved under this
@@ -330,7 +332,6 @@ func main() {
 		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr,
 			registrationFacts{
 				TrustFingerprint: trustFingerprint,
-				TokenSource:      joinTokenKind,
 				NodeKeys:         nodeKeySet.Hashes(),
 			})
 	}
@@ -1022,30 +1023,22 @@ func uciLANAddr(lookup func(context.Context) (string, string, error), fallback f
 // registrationFacts is everything this node REPORTS about itself on a
 // registration, as opposed to what it is (id, role, hardware).
 //
-// It is a struct rather than more parameters because the list only grows: the
+// It is a struct rather than more parameters because the list changes: the
 // migration plan adds one fact per cutover it wants to wait on (§7 4.0), and
-// two of the three below arrived that way. Each new one is a field and one
-// line in publishRegistered's metadata block — never a second reporting site,
-// which is how two facts about the same node start disagreeing.
+// removes it with the cutover (tokenSource went with
+// geekdojo/geekdojo-brain#539). Each new one is a field and one line in
+// publishRegistered's metadata block — never a second reporting site, which is
+// how two facts about the same node start disagreeing.
 type registrationFacts struct {
 	// TrustFingerprint reports which mesh CA this node trusts, or nil when
 	// it cannot say.
 	TrustFingerprint func() string
-	// TokenSource is where the join token presented on this connection was
-	// read from (proto.TokenSource*).
-	TokenSource string
 	// NodeKeys are this node's registered key SPKI hashes.
 	NodeKeys proto.NodeKeys
 }
 
 func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storage *proto.StorageInfo, bmcAdv *bmc.Advertisement, faults *configfault.Set, lanAddr func() (ip, cidr string), facts registrationFacts) {
 	meta := map[string]any{}
-	// Where this agent read the join token it presented: the cutover fact of
-	// §7 4.0. Always present from an agent that knows it, "env" included —
-	// the step that deletes the environment fallback waits on every node
-	// reporting "file", so a node that has not moved must be able to say so
-	// (geekdojo/geekdojo-brain#536).
-	meta[proto.MetadataTokenSource] = facts.TokenSource
 	// This node's registered key SPKIs (geekdojo/geekdojo-brain#514) — the
 	// public half only, never the key. Every connection this agent makes is
 	// TLS with the server verified by the bus pin (bus.New refuses to build a

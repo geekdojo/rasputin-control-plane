@@ -11,6 +11,17 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// mentionsRetiredVariable reports whether s names the retired
+// RASPUTIN_CP_JOIN_TOKEN on its own. The file variable's name begins with the
+// retired one, so its occurrences are removed before looking.
+func mentionsRetiredVariable(s string) bool {
+	return strings.Contains(strings.ReplaceAll(s, EnvJoinTokenFile, ""), EnvJoinToken)
+}
+
+// TC-539-01 to TC-539-05: the resolver over role × named file × whether the
+// retired variable is set. The signature takes no token value, so no row can
+// hand the resolver an inline token: the retired variable can only change the
+// description, never the source (TC-539-03).
 func TestResolveTokenSource(t *testing.T) {
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, "env.token")
@@ -20,46 +31,52 @@ func TestResolveTokenSource(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cases := []struct {
-		name            string
-		token, file     string
-		role            proto.NodeRole
-		want            string
-		wantFromContain string
-		// wantKind is the proto.TokenSource* value the agent reports in its
-		// registration metadata. It must name the source this call actually
-		// returned: the deletion of the environment fallback waits on every
-		// node reporting "file" (geekdojo/geekdojo-brain#536, §7 4.1), so a
-		// node counted as migrated while still reading the variable would
-		// stop joining when the fallback goes.
-		wantKind string
-	}{
-		// The legacy inline token, still honoured for a new agent on an image
-		// whose firstboot/init.d names no token file.
-		{"compute with only a seeded token", "seeded", "", proto.RoleCompute, "seeded", EnvJoinToken, proto.TokenSourceEnv},
-		{"firewall with only a seeded token", "seeded", "", proto.RoleFirewall, "seeded", EnvJoinToken, proto.TokenSourceEnv},
-		{"the seeded token is used exactly as given", " seeded ", "", proto.RoleCompute, " seeded ", EnvJoinToken, proto.TokenSourceEnv},
-		{"compute with neither", "", "", proto.RoleCompute, "", "none", proto.TokenSourceNone},
-		// The canonical source: one 0600 file, on every role.
-		{"a token file", "", envFile, proto.RoleCompute, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
-		{"firewall with a token file", "", envFile, proto.RoleFirewall, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
-		// Precedence: the FILE wins. Whatever wrote it wrote it after the
-		// seed, and it is the only one of the two that can be re-read.
-		{"both set: the file wins", "seeded", envFile, proto.RoleCompute, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
-		{"both set: the file wins on a firewall too", "seeded", envFile, proto.RoleFirewall, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
-		{"both set: the ignored variable is named", "seeded", envFile, proto.RoleCompute, "from-env-file", "ignored", proto.TokenSourceFile},
-		// firstboot writes RASPUTIN_CP_JOIN_TOKEN_FILE for a new controlplane
-		{"controlplane with the file named", "", envFile, proto.RoleControlPlane, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
-		// an updated controlplane whose node.env predates the file
-		{"controlplane with neither: the default file", "", "", proto.RoleControlPlane, "from-default", "controlplane default", proto.TokenSourceFile},
-		{"controlplane with only a seeded token keeps it", "seeded", "", proto.RoleControlPlane, "seeded", EnvJoinToken, proto.TokenSourceEnv},
-		{"both set: the file wins on a controlplane too", "seeded", envFile, proto.RoleControlPlane, "from-env-file", EnvJoinTokenFile, proto.TokenSourceFile},
+	roles := []proto.NodeRole{proto.RoleCompute, proto.RoleFirewall, proto.RoleControlPlane}
+	type row struct {
+		name      string
+		file      string
+		legacySet bool
+		role      proto.NodeRole
+		// want is the token the source yields; "" with wantNone.
+		want     string
+		wantNone bool
+		// wantContain are substrings the description must carry.
+		wantContain []string
+		// wantRetired: the description must (true) or must not (false)
+		// mention the retired variable.
+		wantRetired bool
 	}
+	var cases []row
+	for _, r := range roles {
+		// TC-539-01: the file is the source on every role.
+		cases = append(cases, row{"TC-539-01 file on " + string(r), envFile, false, r,
+			"from-env-file", false, []string{EnvJoinTokenFile, envFile}, false})
+		// TC-539-02: the file plus the retired variable: the file is used,
+		// and the description says the variable is not read.
+		cases = append(cases, row{"TC-539-02 file and the retired variable on " + string(r), envFile, true, r,
+			"from-env-file", false, []string{EnvJoinTokenFile, envFile, "not read"}, true})
+	}
+	for _, r := range []proto.NodeRole{proto.RoleCompute, proto.RoleFirewall} {
+		// TC-539-03: the retired variable alone grants nothing.
+		cases = append(cases, row{"TC-539-03 the retired variable alone on " + string(r), "", true, r,
+			"", true, []string{EnvJoinTokenFile, "no longer read"}, true})
+		// TC-539-05: neither: no token, and no word of the retired variable.
+		cases = append(cases, row{"TC-539-05 neither on " + string(r), "", false, r,
+			"", true, []string{EnvJoinTokenFile}, false})
+	}
+	// TC-539-04: a controlplane with the retired variable alone uses its
+	// default file, never an env value.
+	cases = append(cases, row{"TC-539-04 the retired variable alone on a controlplane", "", true, proto.RoleControlPlane,
+		"from-default", false, []string{"controlplane default", "not read"}, true})
+	// TC-539-05: a controlplane with neither uses its default file.
+	cases = append(cases, row{"TC-539-05 neither on a controlplane", "", false, proto.RoleControlPlane,
+		"from-default", false, []string{"controlplane default"}, false})
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			src, from, kind := ResolveTokenSource(tc.token, tc.file, tc.role, defFile)
-			if kind != tc.wantKind {
-				t.Errorf("kind = %q, want %q", kind, tc.wantKind)
+			src, from, none := ResolveTokenSource(tc.file, tc.legacySet, tc.role, defFile)
+			if none != tc.wantNone {
+				t.Errorf("none = %v, want %v", none, tc.wantNone)
 			}
 			got, err := src()
 			if err != nil {
@@ -68,10 +85,18 @@ func TestResolveTokenSource(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("token = %q, want %q", got, tc.want)
 			}
-			if !strings.Contains(from, tc.wantFromContain) {
-				t.Errorf("description %q does not mention %q", from, tc.wantFromContain)
+			for _, sub := range tc.wantContain {
+				if !strings.Contains(from, sub) {
+					t.Errorf("description %q does not mention %q", from, sub)
+				}
 			}
-			for _, secret := range []string{"seeded", "from-env-file", "from-default"} {
+			if got := mentionsRetiredVariable(from); got != tc.wantRetired {
+				t.Errorf("description %q mentions %s = %v, want %v", from, EnvJoinToken, got, tc.wantRetired)
+			}
+			if strings.Contains(from, EnvJoinToken+"=") {
+				t.Errorf("description %q carries an assignment of %s", from, EnvJoinToken)
+			}
+			for _, secret := range []string{"from-env-file", "from-default"} {
 				if strings.Contains(from, secret) {
 					t.Errorf("description %q contains the token %q", from, secret)
 				}
@@ -80,27 +105,26 @@ func TestResolveTokenSource(t *testing.T) {
 	}
 }
 
-// A named token file decides the attempt even when the legacy variable is also
-// set: it is re-read every time, and a file that is missing or empty is an
-// error for that attempt rather than a silent fall-back to the seeded token.
+// TC-539-06: a named token file decides every attempt, and the retired
+// variable being set changes nothing: the file is re-read each time, and a
+// file that is missing or empty is an error for that attempt with no fallback.
 // Falling back would make a token that has been rotated or revoked on disk
 // keep working for the life of the process, which is the whole reason the file
 // exists.
-func TestResolveTokenSource_FileWinsAndIsRereadNotFallenBackFrom(t *testing.T) {
+func TestResolveTokenSource_FileIsRereadNeverFallenBackFrom(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "join.token")
-	src, from, kind := ResolveTokenSource("seeded", path, proto.RoleCompute, filepath.Join(dir, "unused.token"))
-	if kind != proto.TokenSourceFile {
-		t.Fatalf("kind = %q, want %q — the file is the source, so that is what the node must report", kind, proto.TokenSourceFile)
+	src, from, none := ResolveTokenSource(path, true, proto.RoleCompute, filepath.Join(dir, "unused.token"))
+	if none {
+		t.Fatal("none = true for a named file, want false")
 	}
-	if !strings.Contains(from, EnvJoinTokenFile) || !strings.Contains(from, "ignored") {
-		t.Fatalf("description %q should name the file source and say the variable is ignored", from)
+	if !strings.Contains(from, EnvJoinTokenFile) || !strings.Contains(from, "not read") {
+		t.Fatalf("description %q should name the file source and say the retired variable is not read", from)
 	}
 
-	// The file is not there yet: no token for this attempt, and no fall-back
-	// to the variable.
+	// The file is not there yet: no token for this attempt.
 	if got, err := src(); err == nil {
-		t.Fatalf("a missing token file returned %q, want an error rather than the seeded token", got)
+		t.Fatalf("a missing token file returned %q, want an error", got)
 	}
 
 	// It appears, and the very next attempt uses it — no restart.
@@ -112,7 +136,7 @@ func TestResolveTokenSource_FileWinsAndIsRereadNotFallenBackFrom(t *testing.T) {
 	}
 
 	// It is rewritten (a re-mint, an identity restore): the next attempt sees
-	// the new value, still not the variable.
+	// the new value.
 	if err := os.WriteFile(path, []byte("re-minted\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -120,12 +144,12 @@ func TestResolveTokenSource_FileWinsAndIsRereadNotFallenBackFrom(t *testing.T) {
 		t.Fatalf("source after the re-mint = (%q, %v), want re-minted", got, err)
 	}
 
-	// It is emptied: an error again, never "seeded".
+	// It is emptied: an error again, with nothing to fall back to.
 	if err := os.WriteFile(path, []byte("\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := src(); err == nil {
-		t.Fatalf("an empty token file returned %q, want an error rather than the seeded token", got)
+		t.Fatalf("an empty token file returned %q, want an error", got)
 	}
 }
 

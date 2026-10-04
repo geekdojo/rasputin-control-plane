@@ -16,7 +16,7 @@ import (
 // shape that arrives off the bus.
 func registerWithKeys(t *testing.T, svc *Service, nodeID string, keys proto.NodeKeys) {
 	t.Helper()
-	meta := map[string]any{proto.MetadataTokenSource: proto.TokenSourceFile}
+	meta := map[string]any{}
 	if keys != nil {
 		meta[proto.MetadataNodeKeys] = keys
 	}

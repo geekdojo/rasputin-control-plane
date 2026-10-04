@@ -23,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
+	"github.com/geekdojo/rasputin-control-plane/logkit"
 )
 
 // Secure is derived from whether this process terminates TLS, because that is
@@ -768,11 +769,12 @@ func TestBackupRunEntry_SpecRecordsScheduled(t *testing.T) {
 	}
 }
 
-// ensureSelfAgentToken is the api's zero-touch mint for its own agent
-// (geekdojo-brain#140): a dev api with no self node id writes nothing, a
+// TC-539-16: ensureSelfAgentToken is the api's zero-touch mint for its own
+// agent (geekdojo-brain#140): a dev api with no self node id writes nothing, a
 // controlplane writes a live token bound to its id and keeps it across
 // restarts, and an id the bus would never accept is reported and writes
-// nothing — the api still starts.
+// nothing — the api still starts. Each outcome is one structured record at a
+// level through the injected logger, and no record carries the token.
 func TestEnsureSelfAgentToken(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -781,26 +783,43 @@ func TestEnsureSelfAgentToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	var logs bytes.Buffer
-	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	path := filepath.Join(dir, "bus", "agent.token")
+	var all bytes.Buffer // every record of the test, checked for the token at the end
 
-	step := func(selfNodeID, wantLog string) {
+	// step runs one call and returns its single record.
+	step := func(selfNodeID, p, wantLevel, wantMsg string, wantFields ...string) string {
 		t.Helper()
-		logs.Reset()
-		ensureSelfAgentToken(ctx, store, path, selfNodeID)
-		if !strings.Contains(logs.String(), wantLog) {
-			t.Fatalf("ensureSelfAgentToken(%q) logged %q, want it to contain %q", selfNodeID, logs.String(), wantLog)
+		var buf bytes.Buffer
+		ensureSelfAgentToken(ctx, logkit.New(&buf), store, p, selfNodeID)
+		all.Write(buf.Bytes())
+		lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("ensureSelfAgentToken(%q): want one record, got %d:\n%s", selfNodeID, len(lines), buf.String())
 		}
+		rec := lines[0]
+		if !strings.Contains(rec, "level="+wantLevel+" ") {
+			t.Errorf("ensureSelfAgentToken(%q) record %q: want level=%s", selfNodeID, rec, wantLevel)
+		}
+		if !strings.Contains(rec, wantMsg) {
+			t.Errorf("ensureSelfAgentToken(%q) record %q: want message %q", selfNodeID, rec, wantMsg)
+		}
+		for _, f := range wantFields {
+			if !strings.Contains(rec, f) {
+				t.Errorf("ensureSelfAgentToken(%q) record %q: want %q", selfNodeID, rec, f)
+			}
+		}
+		return rec
 	}
 
-	step("", "not minting a bus token")
+	rec := step("", path, "INFO", "not minting a bus token", "RASPUTIN_CP_JOIN_TOKEN_FILE")
+	if strings.Contains(strings.ReplaceAll(rec, "RASPUTIN_CP_JOIN_TOKEN_FILE", ""), "RASPUTIN_CP_JOIN_TOKEN") {
+		t.Errorf("the dev record %q names the retired RASPUTIN_CP_JOIN_TOKEN", rec)
+	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a dev api (no self node id) wrote the token file: %v", err)
 	}
 
-	step("cp-1", `minted a bus token for this controlplane's agent "cp-1"`)
+	step("cp-1", path, "INFO", "minted a bus token for this controlplane's agent", "node_id=cp-1", "path="+path, "reason=")
 	tok, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("no token file after the mint: %v", err)
@@ -809,19 +828,19 @@ func TestEnsureSelfAgentToken(t *testing.T) {
 		t.Fatalf("the minted token does not validate for cp-1: (%v, %v)", ok, err)
 	}
 
-	step("cp-1", "is live")
+	step("cp-1", path, "INFO", "is live", "node_id=cp-1", "path="+path)
 	if again, _ := os.ReadFile(path); string(again) != string(tok) {
 		t.Fatal("a restart replaced a live token")
 	}
 
 	other := filepath.Join(dir, "other", "agent.token")
-	logs.Reset()
-	ensureSelfAgentToken(ctx, store, other, "CP_1")
-	if !strings.Contains(logs.String(), "cannot join the bus") {
-		t.Fatalf("an invalid self node id logged %q, want the failure reported", logs.String())
-	}
+	step("CP_1", other, "ERROR", "cannot join the bus", "node_id=CP_1", "path="+other, "err=")
 	if _, err := os.Lstat(other); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("an invalid self node id wrote a token file: %v", err)
+	}
+
+	if strings.Contains(all.String(), strings.TrimSpace(string(tok))) {
+		t.Errorf("a record carries the minted token:\n%s", all.String())
 	}
 }
 

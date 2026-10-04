@@ -31,13 +31,26 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 	}
 }
 
-// The metadata key converge_trust acts on has a floor, so a silent node can
-// be told apart from one whose agent never heard of the key.
+// The metadata keys a consumer acts on have a floor, so a silent node can be
+// told apart from one whose agent never heard of the key.
+//
+// TC-539-09: tokenSource has no floor any more — its emitter and its cutover
+// went with the agent's environment token fallback
+// (geekdojo/geekdojo-brain#539) — and the two floors that remain are bare
+// CalVer strings.
 func TestMetadataMinAgentVersionLookup(t *testing.T) {
-	for _, key := range []string{MetadataMeshCAFingerprint, MetadataTokenSource, MetadataNodeKeys} {
-		if _, ok := MetadataMinAgentVersion(key); !ok {
+	calver := regexp.MustCompile(`^\d{4}\.\d{1,2}\.\d+(?:-dev\.\d+)?$`)
+	for _, key := range []string{MetadataMeshCAFingerprint, MetadataNodeKeys} {
+		v, ok := MetadataMinAgentVersion(key)
+		if !ok {
 			t.Errorf("%s has no minimum agent version recorded", key)
 		}
+		if !calver.MatchString(v) {
+			t.Errorf("%s: floor %q is not bare CalVer", key, v)
+		}
+	}
+	if v, ok := MetadataMinAgentVersion("tokenSource"); ok || v != "" {
+		t.Errorf("tokenSource: got (%q, %v), want no floor", v, ok)
 	}
 	if v, ok := MetadataMinAgentVersion("primaryLanCidr"); ok || v != "" {
 		t.Errorf("primaryLanCidr: got (%q, %v), want unrecorded", v, ok)

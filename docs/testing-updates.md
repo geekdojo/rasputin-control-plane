@@ -48,9 +48,8 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
      `0.0.0.0` or a LAN address lets any device that can reach the host claim any node's
      id. The api logs that bus auth is off and raises its bus-auth-off alert; both are
      expected.
-   - To keep bus auth on instead, sign in (step 4), mint a token bound to `node-dev`, and
-     give it to the agent as `RASPUTIN_CP_JOIN_TOKEN=<token>` in step 3. `<token>` is the
-     `token` field of the response, which is shown only once:
+   - To keep bus auth on instead, sign in (step 4) and mint a token bound to `node-dev`.
+     The token is the `token` field of the response, which is shown only once:
 
      ```sh
      curl -s -b cookies.txt -H 'Content-Type: application/json' \
@@ -63,6 +62,17 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
      is the role the token is bound to — one of `compute`, `firewall` or `storage`. A mint
      that names no role is refused with 400, because the bus refuses a token with no role.
      `label` is free text you choose, shown in the token list.
+
+     Save the token to a file only you can read, replacing `<token>` with the value from
+     the response. `umask 077` makes the new file mode 0600:
+
+     ```sh
+     (umask 077 && printf '%s\n' '<token>' > data/node-dev.token)
+     ```
+
+     Then add `RASPUTIN_CP_JOIN_TOKEN_FILE=data/node-dev.token \` to the agent's command
+     in step 3. The agent reads the file again on every connect. It reads a token from a
+     file only: `RASPUTIN_CP_JOIN_TOKEN` is not read.
 
 3. **Start an agent** in mock-update mode, from the repository root:
 

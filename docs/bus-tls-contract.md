@@ -42,7 +42,7 @@ The agent accepts **only** the exact form above. It trims surrounding whitespace
 
 ### Every node: `RASPUTIN_BUS_PIN`
 
-Hand the value to the agent as the environment variable `RASPUTIN_BUS_PIN`, exactly as you already hand over `RASPUTIN_CP_JOIN_TOKEN`:
+Hand the value to the agent as the environment variable `RASPUTIN_BUS_PIN`:
 
 - **Rasputin OS:** firstboot copies the line into `/var/lib/rasputin/node.env`. The pin is public, so it needs no scrubbing and may stay in the seed.
 - **Firewall:** `apply-seed` stores the value in UCI as `rasputin.main.bus_pin`, and `init.d/rasputin-agent` passes it on with `procd_append_param env RASPUTIN_BUS_PIN="$bus_pin"`. It is trust material, so it lives in `/etc/rasputin` / UCI, which survives sysupgrade. It must **not** go in the system CA bundle, because it is not a CA.
@@ -99,7 +99,7 @@ The api generates a key on first start, writes it to `/var/lib/rasputin/bus/bus.
   When the pin came from this file, the agent reads the file again on **every** TLS handshake, the first and each reconnect, so a pin the api rewrites reaches the running agent with no restart; see [Restoring onto another key](#restoring-onto-another-key). A pin from `RASPUTIN_BUS_PIN` or the saved pin file is fixed for the life of the process, and on every role but the controlplane the pin never changes while the agent runs.
 - **Every connection is TLS.** The agent verifies only that the SHA-256 of the server leaf's `SubjectPublicKeyInfo` equals the pin. It does not check a chain, a hostname or dates. If the server offers no TLS, or the key differs, the agent refuses before its join token is sent and keeps retrying on its normal reconnect schedule; a refused key is logged at WARN once per distinct error.
 - **With no usable pin from any source,** the agent does not dial at all. It logs one FATAL entry naming the node, each source it read and the fix, and exits non-zero; see [Bad values](#bad-values).
-- **Registration** reports `tokenSource` and the node's keys (`nodeKeys`). Agents of 2026.09.5 and older also sent `busTls`; nothing reads it now.
+- **Registration** reports the node's keys (`nodeKeys`). Agents of 2026.09.6 and older also send `tokenSource`, and agents of 2026.09.5 and older `busTls`; nothing reads either.
 - **Nothing in this release accepts a pin over the bus.** The `bus.pin` verb is gone from the agent and the api.
 
 ## Upgrading from a release with the ladder

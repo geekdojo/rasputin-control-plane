@@ -284,25 +284,12 @@ func registeredEvtWithFaults(t *testing.T, nc *nats.Conn, nodeID string, adv *bm
 	return registeredEvtKeys(t, nc, nodeID, adv, faults, nil)
 }
 
-// registeredEvtKeys is registeredEvtWithFaults plus the node's key hashes. The
-// token-source cutover fact (#536) is fixed here — registeredEvtCutover is the
-// helper that varies it.
+// registeredEvtKeys is registeredEvtWithFaults plus the node's key hashes.
 func registeredEvtKeys(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, keys proto.NodeKeys) proto.NodeRegisteredEvt {
 	t.Helper()
 	return registeredEvtFacts(t, nc, nodeID, adv, faults, registrationFacts{
 		TrustFingerprint: func() string { return "fp-test" },
-		TokenSource:      proto.TokenSourceFile,
 		NodeKeys:         keys,
-	})
-}
-
-// registeredEvtCutover is registeredEvtWithFaults with the §7 4.0 cutover
-// fact — where the join token came from — supplied by the caller.
-func registeredEvtCutover(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement, faults *configfault.Set, tokenSource string) proto.NodeRegisteredEvt {
-	t.Helper()
-	return registeredEvtFacts(t, nc, nodeID, adv, faults, registrationFacts{
-		TrustFingerprint: func() string { return "fp-test" },
-		TokenSource:      tokenSource,
 	})
 }
 
@@ -355,9 +342,10 @@ func TestPublishRegistered_AdvertisesBMCTargets(t *testing.T) {
 	}
 }
 
-// TC-517-12: a registration carries tokenSource and the node keys, and none of
-// the ladder's keys — busTls and httpsPinned are gone with the plaintext bus
-// (geekdojo/geekdojo-brain#517).
+// TC-517-12 and TC-539-08: a registration carries the node keys, and none of
+// the retired cutover keys — busTls and httpsPinned are gone with the plaintext
+// bus (geekdojo/geekdojo-brain#517), tokenSource with the agent's environment
+// token fallback (geekdojo/geekdojo-brain#539).
 func TestPublishRegistered_CarriesNoLadderMetadata(t *testing.T) {
 	nc := testBus(t)
 	keys := proto.NodeKeys{
@@ -365,44 +353,14 @@ func TestPublishRegistered_CarriesNoLadderMetadata(t *testing.T) {
 		proto.NodeKeyCollector: testKeyHash(t),
 	}
 	ev := registeredEvtKeys(t, nc, "cp-test", nil, nil, keys)
-	for _, gone := range []string{"busTls", "httpsPinned"} {
+	for _, gone := range []string{"busTls", "httpsPinned", "tokenSource"} {
 		if v, present := ev.Metadata[gone]; present {
 			t.Errorf("metadata %s = %v, want the key absent", gone, v)
 		}
 	}
-	if src, reported := proto.TokenSourceOf(ev.Metadata); !reported || src != proto.TokenSourceFile {
-		t.Errorf("tokenSource = (%q, %v), want (%q, true)", src, reported, proto.TokenSourceFile)
-	}
 	decoded, ok, err := proto.DecodeNodeKeys(ev.Metadata)
 	if err != nil || !ok || len(decoded) == 0 {
 		t.Fatalf("nodeKeys = (%v, %v, %v), want the node's keys", decoded, ok, err)
-	}
-}
-
-// The §7 4.0 cutover fact rides on every registration, "env" included. The
-// api gates the deletion of the environment fallback on every node reporting
-// "file", so a node that has not moved yet must be able to SAY so: absent reads
-// as an agent too old to report (a different fix — update it).
-func TestPublishRegistered_ReportsCutoverFacts(t *testing.T) {
-	nc := testBus(t)
-	for _, tc := range []struct {
-		name        string
-		tokenSource string
-	}{
-		{"a migrated node", proto.TokenSourceFile},
-		{"a node still reading the variable", proto.TokenSourceEnv},
-		{"a node with no token at all", proto.TokenSourceNone},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ev := registeredEvtCutover(t, nc, "cp-test", nil, nil, tc.tokenSource)
-			src, reported := proto.TokenSourceOf(ev.Metadata)
-			if !reported {
-				t.Fatalf("metadata %s absent or unreadable: %v", proto.MetadataTokenSource, ev.Metadata)
-			}
-			if src != tc.tokenSource {
-				t.Errorf("metadata %s = %q, want %q", proto.MetadataTokenSource, src, tc.tokenSource)
-			}
-		})
 	}
 }
 
@@ -823,7 +781,7 @@ func TestPublishRegistered_AdvertisesKeyBoundTransferOnEveryRole(t *testing.T) {
 				t.Fatal(err)
 			}
 			publishRegistered(nc, "n-"+string(role), role, nil, adv, nil, lanAddr, registrationFacts{
-				TrustFingerprint: func() string { return "fp-test" }, TokenSource: proto.TokenSourceFile,
+				TrustFingerprint: func() string { return "fp-test" },
 			})
 			msg, err := sub.NextMsg(2 * time.Second)
 			_ = sub.Unsubscribe()

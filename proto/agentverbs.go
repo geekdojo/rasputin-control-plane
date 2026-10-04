@@ -182,21 +182,20 @@ var metadataMinAgentVersion = map[string]string{
 	// with `git tag --contains` once the release exists and correct the
 	// floor.
 	MetadataMeshCAFingerprint: "2026.08.5-dev.141",
-	// tokenSource (geekdojo/geekdojo-brain#536) and nodeKeys
-	// (geekdojo/geekdojo-brain#514), methodology §7 4.0: the cutover facts,
-	// each entered when it was authored, before its release existed, as the
+	// nodeKeys (geekdojo/geekdojo-brain#514), methodology §7 4.0: a cutover
+	// fact, entered when it was authored, before its release existed, as the
 	// NEXT release run after v2026.09.4-dev.171 (the newest published
-	// control-plane release at the time). If a release was cut between these
-	// entries and the one that ships the keys, an agent at that in-between
+	// control-plane release at the time). If a release was cut between this
+	// entry and the one that ships the key, an agent at that in-between
 	// version reads as "should report and did not" rather than "predates the
 	// key"; confirm with `git tag --contains` once the release exists and
-	// correct the floors.
-	MetadataTokenSource: "2026.09.4-dev.172",
-	// nodeKeys: an agent at or above this floor reports its keys on every
+	// correct the floor.
+	//
+	// An agent at or above this floor reports its keys on every
 	// registration. Agents at this floor up to 2026.09.5 sent them only over
 	// a pinned TLS connection, and the bus now accepts nothing else
 	// (geekdojo/geekdojo-brain#517), so a node at or above the floor that
-	// reports none is a fault, as for tokenSource.
+	// reports none is a fault.
 	MetadataNodeKeys: "2026.09.4-dev.172",
 }
 
