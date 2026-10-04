@@ -22,8 +22,11 @@ import (
 //     connect at all.
 //
 // It is written unconditionally rather than only when missing, so an identity
-// restore or a regenerated key reaches the local agent on its next start with
-// nobody editing a file.
+// restore or a regenerated key reaches the local agent with nobody editing a
+// file: the agent reads this file again on every TLS handshake, so the new pin
+// reaches the running agent on its next handshake (geekdojo/geekdojo-brain#669).
+// The api writes it before its bus listens, so the agent's first handshake
+// with the restarted bus already reads the new pin.
 //
 // The pin is public — it is the hash of a public key, printed by
 // GET /api/bus/tls and rendered into every seed — so the file is 0644. It sits

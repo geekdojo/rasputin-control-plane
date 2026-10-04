@@ -15,6 +15,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,19 +25,35 @@ import (
 // config that skips chain verification without a pin check in its place. The
 // verdict's fingerprint covers only the InsecureSkipVerify line, so this test
 // is the only thing that notices.
+//
+// TC-669-08: it is run over pinnedTLSConfig on its own AND over the config a
+// Client actually dials with (Client.tlsConfig, on a PinFile source), so the
+// verdict describes the code production runs.
 func TestPinnedTLSConfig_TripWire_NeverSkipsVerificationWithoutAPinCheck(t *testing.T) {
-	cfg := pinnedTLSConfig(sha256.Sum256([]byte("any pin")))
+	for name, cfg := range map[string]*tls.Config{
+		"pinnedTLSConfig":    pinnedTLSConfig(fixedPin(sha256.Sum256([]byte("any pin")))),
+		"Client.tlsConfig()": pinFileClient(t, mustPin(t, newKey(t))).tlsConfig(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertPinnedConfig(t, cfg)
+		})
+	}
+}
+
+// assertPinnedConfig is the trip-wire's checks over one config.
+func assertPinnedConfig(t *testing.T, cfg *tls.Config) {
+	t.Helper()
 	if cfg.InsecureSkipVerify && cfg.VerifyConnection == nil {
-		t.Fatal("pinnedTLSConfig skips chain verification and installs no VerifyConnection: this accepts ANY server")
+		t.Fatal("the config skips chain verification and installs no VerifyConnection: this accepts ANY server")
 	}
 	if cfg.VerifyPeerCertificate != nil {
-		t.Fatal("pinnedTLSConfig uses VerifyPeerCertificate, which does not run on resumed handshakes; the pin check must be VerifyConnection")
+		t.Fatal("the config uses VerifyPeerCertificate, which does not run on resumed handshakes; the pin check must be VerifyConnection")
 	}
 	if cfg.MinVersion < tls.VersionTLS13 {
 		t.Errorf("MinVersion = %#x, want TLS 1.3", cfg.MinVersion)
 	}
 	// And the callback is a pin check, not a placeholder: it refuses a
-	// connection whose leaf is some other key.
+	// connection whose leaf is some other key, and one with no certificate.
 	cert := alwaysValid(t, newKey(t))
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
@@ -44,13 +62,41 @@ func TestPinnedTLSConfig_TripWire_NeverSkipsVerificationWithoutAPinCheck(t *test
 	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}); !errors.Is(err, errPinMismatch) {
 		t.Fatalf("VerifyConnection on a different key = %v, want errPinMismatch", err)
 	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{}); err == nil || !strings.Contains(err.Error(), "presented no certificate") {
+		t.Fatalf("VerifyConnection with no certificate = %v, want the no-certificate refusal", err)
+	}
+}
+
+// TC-669-08: the config the Client dials with refuses a server with another
+// key in a real handshake, and accepts the key its pin file names.
+func TestClientTLSConfig_RefusesADifferentKeyInARealHandshake(t *testing.T) {
+	served := newKey(t)
+	addr := tlsEcho(t, alwaysValid(t, served))
+	if err := handshake(addr, pinFileClient(t, mustPin(t, newKey(t))).tlsConfig()); !errors.Is(err, errPinMismatch) {
+		t.Fatalf("handshake against a different key = %v, want errPinMismatch", err)
+	}
+	if err := handshake(addr, pinFileClient(t, mustPin(t, served)).tlsConfig()); err != nil {
+		t.Fatalf("handshake against the pinned key = %v, want success", err)
+	}
+}
+
+// A pin source that fails refuses the handshake even when the server's key is
+// one a pin once named: no pin, no connection.
+func TestPinnedTLSConfig_RefusesAHandshakeWhenThePinSourceFails(t *testing.T) {
+	served := newKey(t)
+	addr := tlsEcho(t, alwaysValid(t, served))
+	failing := errors.New("no pin for you")
+	cfg := pinnedTLSConfig(func() ([sha256.Size]byte, error) { return [sha256.Size]byte{}, failing })
+	if err := handshake(addr, cfg); !errors.Is(err, failing) {
+		t.Fatalf("handshake with a failing pin source = %v, want its error", err)
+	}
 }
 
 // A server that presents no certificate at all is refused, not waved through
 // for lack of anything to compare.
 func TestPinnedTLSConfig_RefusesAServerWithNoCertificate(t *testing.T) {
 	k := newKey(t)
-	cfg := pinnedTLSConfig(pinDigest(t, k))
+	cfg := pinnedTLSConfig(fixedPin(pinDigest(t, k)))
 	if err := cfg.VerifyConnection(tls.ConnectionState{}); err == nil {
 		t.Fatal("VerifyConnection accepted a handshake with no peer certificate")
 	}
@@ -61,11 +107,11 @@ func TestPinnedTLSConfig_RefusesAServerWithNoCertificate(t *testing.T) {
 func TestPinnedTLSConfig_RefusesADifferentKeyInARealHandshake(t *testing.T) {
 	served := newKey(t)
 	addr := tlsEcho(t, alwaysValid(t, served))
-	pinned := pinnedTLSConfig(pinDigest(t, newKey(t)))
+	pinned := pinnedTLSConfig(fixedPin(pinDigest(t, newKey(t))))
 	if err := handshake(addr, pinned); !errors.Is(err, errPinMismatch) {
 		t.Fatalf("handshake against a different key = %v, want errPinMismatch", err)
 	}
-	if err := handshake(addr, pinnedTLSConfig(pinDigest(t, served))); err != nil {
+	if err := handshake(addr, pinnedTLSConfig(fixedPin(pinDigest(t, served)))); err != nil {
 		t.Fatalf("handshake against the pinned key = %v, want success", err)
 	}
 }
@@ -79,7 +125,7 @@ func TestPinnedTLSConfig_PinCheckRunsOnResumedSessions(t *testing.T) {
 	addr := tlsEcho(t, alwaysValid(t, served))
 	cache := tls.NewLRUClientSessionCache(4)
 
-	good := pinnedTLSConfig(pinDigest(t, served))
+	good := pinnedTLSConfig(fixedPin(pinDigest(t, served)))
 	good.ClientSessionCache = cache
 	good.ServerName = "rasputin-bus"
 	if err := handshake(addr, good); err != nil {
@@ -93,7 +139,7 @@ func TestPinnedTLSConfig_PinCheckRunsOnResumedSessions(t *testing.T) {
 		t.Fatal("the second handshake did not resume, so this test would prove nothing about resumption")
 	}
 
-	wrong := pinnedTLSConfig(pinDigest(t, newKey(t)))
+	wrong := pinnedTLSConfig(fixedPin(pinDigest(t, newKey(t))))
 	wrong.ClientSessionCache = cache
 	wrong.ServerName = "rasputin-bus"
 	if err := handshake(addr, wrong); !errors.Is(err, errPinMismatch) {
@@ -102,6 +148,22 @@ func TestPinnedTLSConfig_PinCheckRunsOnResumedSessions(t *testing.T) {
 }
 
 // --- helpers -----------------------------------------------------------------
+
+// fixedPin is a pinnedTLSConfig pin source that always answers d.
+func fixedPin(d [sha256.Size]byte) func() ([sha256.Size]byte, error) {
+	return func() ([sha256.Size]byte, error) { return d, nil }
+}
+
+// pinFileClient is a Client whose pin source is a PinFile holding pin, the
+// shape the controlplane's own agent runs.
+func pinFileClient(t *testing.T, pin string) *Client {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "agent.pin")
+	writePin(t, path, pin)
+	c := mustNew(t, Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: PinFile(path)})
+	t.Cleanup(c.Close)
+	return c
+}
 
 func pinDigest(t *testing.T, k *ecdsa.PrivateKey) [sha256.Size]byte {
 	t.Helper()

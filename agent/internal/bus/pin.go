@@ -23,9 +23,9 @@ import (
 //     persistent on both images — /var/lib/rasputin/agent-state on Rasputin
 //     OS, /etc/rasputin/agent-state on the firewall (kept across sysupgrade).
 //  3. On the CONTROLPLANE's own agent only: the file the api writes beside its
-//     bus key on every start (proto.BusAgentPinPath). A controlplane that
-//     self-initialised has no seed, so nothing put a pin in its environment.
-//     See proto/busagenttoken.go.
+//     bus key on every start (proto.BusAgentPinPath), re-read on every TLS
+//     handshake (PinSourceFor) so a restored bus key reaches a running agent.
+//     A self-initialised controlplane has no seed. See proto/busagenttoken.go.
 //
 // The env pin wins when several exist: it is what the operator seeded.
 //
@@ -141,4 +141,58 @@ func readSource(path string, srcErr *error) (string, bool) {
 		return "", false
 	}
 	return v, true
+}
+
+// PinSource returns the pin one TLS handshake verifies the bus server against.
+// The Client asks it once in New, which refuses to build without a usable pin,
+// and again on EVERY handshake. An error means there is no usable pin for this
+// handshake: the handshake is refused before the CONNECT carrying the join
+// token is written, and the next attempt asks again. It mirrors TokenSource.
+type PinSource func() (string, error)
+
+// StaticPin is a PinSource that always answers pin. The env pin and the saved
+// pin file cannot change while the agent runs — the environment is fixed and
+// nothing writes the saved file — so a pin from either is fixed for the life
+// of the process.
+func StaticPin(pin string) PinSource {
+	return func() (string, error) { return pin, nil }
+}
+
+// PinFile is a PinSource that reads path on every call, through the same
+// checks ResolvePin applies (readSource): a file that is empty, blank,
+// malformed or unreadable is an error naming path.
+//
+// Absent is an error here too, not "no pin": PinFile is chosen only for a file
+// that held a usable pin when the agent started, so a file that has gone since
+// is a fault, and the handshake fails closed until the api writes it again.
+func PinFile(path string) PinSource {
+	return func() (string, error) {
+		var err error
+		if v, ok := readSource(path, &err); ok {
+			return v, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("%s: the pin file does not exist", path)
+		}
+		return "", err
+	}
+}
+
+// PinSourceFor is the PinSource for a node whose pin ResolvePin resolved as r.
+//
+// Only the controlplane's own pin file (cpPinFile) is read again on every
+// handshake. The api rewrites it at every start, so after an identity restore
+// that changes the bus key the running agent follows the restored key on its
+// next handshake, with no restart (geekdojo/geekdojo-brain#669).
+//
+// Every other source is fixed for the life of the process, and so is the pin
+// of every node that is not the controlplane: cpPinFile is "" on those, so r
+// never names it. Following the controlplane's file adds no capability: the
+// api writes it inside the 0700 bus directory beside bus.key, and whoever can
+// write it there can read the bus key itself.
+func PinSourceFor(r Resolution, cpPinFile string) PinSource {
+	if r.Source == "controlplane" {
+		return PinFile(cpPinFile)
+	}
+	return StaticPin(r.Pin)
 }

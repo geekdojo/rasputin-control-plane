@@ -800,12 +800,18 @@ func TestFunctional_ControlplaneAgentStartsBeforeItsPinFile(t *testing.T) {
 	c.waitRegistered(t, "cp1")
 }
 
-// TC-517-33: an identity restore that changes the bus key under a running
-// controlplane agent (a controlplane that generated its own key K2, then had
-// K1 restored). The api restarts with K1 and rewrites agent.pin; the running
-// agent, pinned to K2, refuses K1 — it logs the refusal, never registers, and
-// keeps running. Restarted, it reads the rewritten file and joins on K1. The
-// fix (re-reading the file on every dial) is geekdojo/geekdojo-brain#669.
+// TC-669-09 (TC-517-33 inverted, geekdojo/geekdojo-brain#669): an identity
+// restore that changes the bus key under a running controlplane agent (a
+// controlplane that generated its own key K2, then had K1 restored). The
+// controlplane restarts with K1 and rewrites agent.pin; the SAME agent
+// process, which re-reads that file on every TLS handshake, logs the change
+// of pin and registers on K1 — no exit, no restart, no FATAL.
+//
+// What this runs: the startCP harness, which writes agent.pin itself the way
+// cmd/rasputin-api does at start, and the REAL rasputin-agent binary. It does
+// NOT run cmd/rasputin-api, so the api's own order (pin written before
+// bus.Start) and its exit-75 restore path are not proven here; the bench
+// case TC-669-11 proves those, on hardware.
 func TestFunctional_RestoreOntoAnotherKey(t *testing.T) {
 	skipShort(t)
 	c := startCP(t, cpOpts{selfNode: "cp1"})
@@ -841,18 +847,14 @@ func TestFunctional_RestoreOntoAnotherKey(t *testing.T) {
 		t.Fatalf("agent.pin = %q after the restart, want %q", got, k1.Pin())
 	}
 
-	a.waitLogSince(t, since, "the refusal of the restored key", "refused the bus server's key", "pin="+strconv.Quote(k2), "does not match RASPUTIN_BUS_PIN")
-	if a.exited() {
-		t.Fatal("the agent exited on a key mismatch; it must keep re-dialing")
-	}
-	if c2.registeredAtAll("cp1") {
-		t.Fatal("the agent pinned to the old key registered on the restored one")
-	}
-
-	a.stop(t)
-	b := startAgent(t, opts) // what a reboot or `systemctl restart rasputin-agent` does
-	b.waitLog(t, "the rewritten pin", "bus pin", "pin="+strconv.Quote(k1.Pin()), "source=controlplane")
+	a.waitLogSince(t, since, "the change of pin", "the bus pin changed", "old_pin="+strconv.Quote(k2), "new_pin="+strconv.Quote(k1.Pin()))
 	c2.waitRegistered(t, "cp1")
+	if a.exited() {
+		t.Fatal("the agent exited; the restored key must reach the running process")
+	}
+	if strings.Contains(a.log(), "refusing to dial") {
+		t.Fatal("the agent logged the no-pin FATAL")
+	}
 }
 
 // TC-517-05 (functional): a node's clock does not decide whether it joins: the

@@ -352,11 +352,15 @@ func main() {
 	// handlers below are collected first and subscribed on each conn by
 	// subscribeAll, then the registration goes out. Everything that
 	// publishes on a timer takes the client rather than a conn, so a
-	// publish lands on whichever connection is current.
+	// publish lands on whichever connection is current. The pin source
+	// re-reads the controlplane's own pin file on every handshake, so a
+	// restored bus key reaches this running agent; every other source is
+	// fixed for the life of the process (bus.PinSourceFor,
+	// geekdojo/geekdojo-brain#669).
 	client, err := bus.New(bus.Config{
 		URL:         natsURL,
 		NodeID:      nodeID,
-		Pin:         busPin,
+		Pin:         bus.PinSourceFor(busPinRes, cpPinFile),
 		Token:       joinToken,
 		OnConn:      subscribeAll,
 		OnConnected: onConnected,

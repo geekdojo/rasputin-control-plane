@@ -29,7 +29,10 @@ const BusAgentTokenPath = "/var/lib/rasputin/bus/" + BusAgentTokenFileName
 // to learn it through (geekdojo/geekdojo-brain#510, #517).
 //
 // So the api writes its own live pin beside the token on every start, and its
-// agent falls back to that file when nothing else gave it a pin.
+// agent falls back to that file when nothing else gave it a pin. An agent that
+// took its pin from this file reads it again on every TLS handshake, so a pin
+// the api rewrites (an identity restore that changed the bus key) reaches the
+// running agent on its next handshake (geekdojo/geekdojo-brain#669).
 
 // BusAgentPinFileName is the controlplane agent's pin file, under the api's bus
 // directory (<dataDir>/bus/, beside agent.token). One line: the pin, then a

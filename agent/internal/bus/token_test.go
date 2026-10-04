@@ -193,7 +193,7 @@ func TestClient_ReadsTheTokenFileOnEveryConnect(t *testing.T) {
 
 	connected := make(chan struct{}, 1)
 	c := mustNew(t, Config{
-		URL: natsURL(t, s1), NodeID: testNode, Pin: testPin(t), Token: TokenFile(path),
+		URL: natsURL(t, s1), NodeID: testNode, Pin: StaticPin(testPin(t)), Token: TokenFile(path),
 		OnConn: func(nc *nats.Conn) error {
 			_, err := nc.Subscribe(testSubj, func(m *nats.Msg) { _ = m.Respond([]byte("pong")) })
 			return err
@@ -238,12 +238,12 @@ func TestClient_ReadsTheTokenFileOnEveryConnect(t *testing.T) {
 // before token sources existed.
 func TestClient_StaticTokenIsPresented(t *testing.T) {
 	s := startBus(t, -1, testNode, "tok-A")
-	c := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: testPin(t), Token: StaticToken("tok-A")})
+	c := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: StaticPin(testPin(t)), Token: StaticToken("tok-A")})
 	t.Cleanup(c.Close)
 	if err := c.Dial(); err != nil {
 		t.Fatalf("Dial with the static token: %v", err)
 	}
-	wrong := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: testPin(t), Token: StaticToken("tok-B")})
+	wrong := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: StaticPin(testPin(t)), Token: StaticToken("tok-B")})
 	t.Cleanup(wrong.Close)
 	if err := wrong.Dial(); err == nil {
 		t.Fatal("Dial with the wrong static token succeeded")
