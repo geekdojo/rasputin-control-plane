@@ -91,15 +91,28 @@ func (s *Server) handlePutConsoleRootPassword(w http.ResponseWriter, r *http.Req
 		return
 	}
 	resp := consoleSetResponse{HashID: hashID}
-	if req.Push == nil || *req.Push {
+	push := req.Push == nil || *req.Push
+	if push {
 		j, jerr := s.submitConsolePush(r, console.PushSpec{Reason: "the console root password was set"})
 		if jerr != nil {
-			// The password IS stored; only the fan-out did not start.
+			// The password IS stored; only the fan-out did not start. That
+			// leaves every node short of the password the operator just
+			// chose, so it is an ERROR, not a warning (#597).
 			resp.PushError = jerr.Error()
+			s.log.ErrorContext(r.Context(), "console: the console root password was stored but the job that applies it did not start",
+				"hash_id", hashID, "error", jerr.Error())
 		} else {
 			resp.JobID = j
 		}
 	}
+	// One record per stored password, carrying the job applying it so the
+	// journal leads from the change to its per-node outcomes. Never the
+	// password: only its id.
+	attrs := []any{"hash_id", hashID, "push", push}
+	if resp.JobID != "" {
+		attrs = append(attrs, "job_id", resp.JobID)
+	}
+	s.log.InfoContext(r.Context(), "console: console root password set", attrs...)
 	writeJSON(w, http.StatusOK, resp)
 }
 

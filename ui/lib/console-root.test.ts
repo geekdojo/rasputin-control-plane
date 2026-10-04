@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import type { ConsoleRootNode, ConsoleRootStatus } from './api';
 import {
   consoleDraftState,
+  consoleSavedNote,
   consoleSummary,
   MAX_CONSOLE_PASSWORD,
   MIN_CONSOLE_PASSWORD,
@@ -99,4 +100,26 @@ test('consoleSummary survives a status with no nodes yet', () => {
     outstanding: 0,
     total: 0,
   });
+});
+
+// TC-597-15: after a save the form says what happened and, only when a job
+// was submitted, hands back its id for the "Follow it in Tasks" link.
+test('consoleSavedNote: a submitted push links to its job', () => {
+  const got = consoleSavedNote({ hashId: 'h1', jobId: '01JOB' });
+  assert.equal(got.jobId, '01JOB');
+  assert.match(got.note, /^Saved\. Applying it to every node/);
+});
+
+test('consoleSavedNote: a push that did not start says so and links nowhere', () => {
+  const got = consoleSavedNote({ hashId: 'h1', pushError: 'unknown job kind' });
+  assert.equal(got.jobId, undefined);
+  assert.ok(got.note.startsWith('Saved, but the job that applies it did not start:'), got.note);
+  assert.ok(got.note.includes('unknown job kind'), got.note);
+});
+
+test('consoleSavedNote: a save with no push has no job', () => {
+  const got = consoleSavedNote({ hashId: 'h1' });
+  assert.equal(got.jobId, undefined);
+  assert.match(got.note, /^Saved\./);
+  assert.ok(!got.note.includes('Applying'), got.note);
 });

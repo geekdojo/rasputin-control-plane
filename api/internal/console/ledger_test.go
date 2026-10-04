@@ -9,6 +9,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/ledgertest"
+	"github.com/geekdojo/rasputin-control-plane/logkit"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -36,6 +37,13 @@ func TestPushNeverPutsTheHashInTheLedger_RealRunner(t *testing.T) {
 	// error and a failed step's error are ledger surfaces like any other,
 	// and an error is exactly where a value tends to get spilled.
 	f.agent("refuser", refusing("refuser", "this node's /etc/shadow is on a read-only filesystem"))
+	// TC-597-06: the TC-597-03 fleet's other two readings as well — a node
+	// that already held it and an agent that predates the verb — so every
+	// journal record the workflow writes (changed, unchanged, failed, the
+	// summary and the terminal ERROR) lands in the process log checked below.
+	f.add("same", proto.RoleCompute, proto.StatusOnline, "2026.09.4-dev.172")
+	f.agent("same", unchanging("same"))
+	f.add("old", proto.RoleCompute, proto.StatusOnline, "2026.09.4-dev.100")
 
 	hashID, err := f.store.SetPassword(ctx, goodPassword)
 	if err != nil {
@@ -65,7 +73,9 @@ func TestPushNeverPutsTheHashInTheLedger_RealRunner(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = jobStore.Close() })
 	runner := jobs.NewRunner(jobStore, f.nc)
-	runner.Register(PushWorkflow(f.store, f.list))
+	// The workflow journals through the process logger, and that logger
+	// writes into the same captured process log the ledger scan reads.
+	runner.Register(PushWorkflow(f.store, f.list, logkit.New(logs), time.Now))
 
 	spec, err := json.Marshal(PushSpec{Reason: "ledger gate"})
 	if err != nil {
@@ -103,6 +113,17 @@ func TestPushNeverPutsTheHashInTheLedger_RealRunner(t *testing.T) {
 	}
 
 	ledger := &ledgertest.Surfaces{Log: logs.String()}
+	// TC-597-06: the workflow's journal records are in the log being scanned,
+	// so the absence checks below are not run against an empty surface.
+	for _, want := range []string{
+		"console: pushing the console root password",
+		"console: console root password delivery finished",
+		"console: console root password push failed",
+	} {
+		if !strings.Contains(ledger.Log, want) {
+			t.Fatalf("the process log lacks the journal record %q, so its scan would prove nothing:\n%s", want, ledger.Log)
+		}
+	}
 	ledger.AssertPresent(t, "the console.root_hash command both agents received",
 		sawCP+sawRefuser, sentinels)
 

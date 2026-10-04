@@ -14,7 +14,7 @@
 // the authority — this never lets something through that it would refuse, and
 // a refusal from it is still shown verbatim.
 
-import type { ConsoleRootNode, ConsoleRootStatus } from './api';
+import type { ConsoleRootNode, ConsoleRootSaved, ConsoleRootStatus } from './api';
 
 // Mirrors console.MinPasswordLen / MaxPasswordLen.
 export const MIN_CONSOLE_PASSWORD = 12;
@@ -62,6 +62,22 @@ export function consoleDraftState(
   if (confirm === '') return { canSave: false };
   if (password !== confirm) return { canSave: false, error: 'The two entries do not match.' };
   return { canSave: true };
+}
+
+// consoleSavedNote is what the form says after a save, and the job to link
+// to. The job id is the operator's way from the action to its per-node
+// outcomes (#597), so it is returned only when a job was actually submitted.
+export function consoleSavedNote(saved: ConsoleRootSaved): { note: string; jobId?: string } {
+  if (saved.pushError) {
+    return { note: `Saved, but the job that applies it did not start: ${saved.pushError}` };
+  }
+  if (saved.jobId) {
+    return {
+      note: 'Saved. Applying it to every node — the per-node result appears below.',
+      jobId: saved.jobId,
+    };
+  }
+  return { note: 'Saved. It has not been applied to any node yet — use re-apply to send it.' };
 }
 
 // A node's reading, in the words Settings shows.

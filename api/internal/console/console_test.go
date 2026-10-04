@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,12 +13,16 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 )
 
 const goodPassword = "a perfectly fine console password"
+
+// discardLog is the workflow logger for tests that do not read the journal.
+var discardLog = slog.New(slog.DiscardHandler)
 
 func newStore(t *testing.T) *Store {
 	t.Helper()
@@ -213,7 +218,7 @@ func (f *fleet) run(t *testing.T, spec PushSpec) (map[string]json.RawMessage, er
 	if err != nil {
 		t.Fatal(err)
 	}
-	wf := PushWorkflow(f.store, f.list)
+	wf := PushWorkflow(f.store, f.list, discardLog, time.Now)
 	prior := map[string]json.RawMessage{}
 	var logged []string
 	for _, step := range wf.Steps {
@@ -685,5 +690,553 @@ func TestPushSaysSoWhenItCannotReadANodesPresence(t *testing.T) {
 	}
 	if !strings.Contains(d, "could not read its presence") {
 		t.Errorf("reason = %q", d)
+	}
+}
+
+// ─── #597: outcomes and the journal, on the real runner ────────────────────
+
+// unchanging is the fake agent that already holds whatever it is sent.
+func unchanging(id string) func(proto.ConsoleRootHashCmd) proto.ConsoleRootHashAck {
+	return func(cmd proto.ConsoleRootHashCmd) proto.ConsoleRootHashAck {
+		return proto.ConsoleRootHashAck{NodeID: id, OK: true, HashID: proto.ConsoleRootHashID(cmd.Hash), Changed: false}
+	}
+}
+
+// rawAgent subscribes a fake agent that answers with bytes that are not an ack.
+func (f *fleet) rawAgent(id string, data []byte) {
+	f.t.Helper()
+	if _, err := f.nc.Subscribe(proto.NodeCmdSubject(id, proto.ConsoleRootHashVerb), func(m *nats.Msg) {
+		_ = m.Respond(data)
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := f.nc.Flush(); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// realRunner is a jobs.Runner on its own jobs store, over nc, with wf
+// registered — how production runs the push.
+func realRunner(t *testing.T, nc *nats.Conn, wf jobs.Workflow) (*jobs.Runner, *jobs.Store) {
+	t.Helper()
+	js, err := jobs.OpenStore(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = js.Close() })
+	r := jobs.NewRunner(js, nc)
+	r.Register(wf)
+	return r, js
+}
+
+// submitAndWait runs one push to its terminal state, OnTerminal included.
+func submitAndWait(t *testing.T, r *jobs.Runner, js *jobs.Store, spec PushSpec) *jobs.Job {
+	t.Helper()
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := r.Submit(context.Background(), PushKind, raw, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, js, j.ID)
+	// The job reads terminal before its OnTerminal hook has run; Wait is
+	// what guarantees the hook's record is in the journal.
+	r.Wait()
+	final, err := js.GetJob(context.Background(), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return final
+}
+
+// runPush runs one push on the real runner with the given journal and clock.
+func (f *fleet) runPush(t *testing.T, spec PushSpec, log *slog.Logger, now func() time.Time) (*jobs.Job, *jobs.Store) {
+	t.Helper()
+	r, js := realRunner(t, f.nc, PushWorkflow(f.store, f.list, log, now))
+	return submitAndWait(t, r, js, spec), js
+}
+
+// deliverOf reads the deliver step's recorded result.
+func deliverOf(t *testing.T, js *jobs.Store, jobID string) DeliverResult {
+	t.Helper()
+	steps, err := js.ListSteps(context.Background(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range steps {
+		if st.Name == "deliver" {
+			var del DeliverResult
+			if err := json.Unmarshal(st.Result, &del); err != nil {
+				t.Fatalf("decode deliver result %s: %v", st.Result, err)
+			}
+			return del
+		}
+	}
+	t.Fatalf("job %s recorded no deliver step", jobID)
+	return DeliverResult{}
+}
+
+// attrs returns rec's fields as resolved values, for exact comparison.
+func attrs(rec slog.Record) map[string]any {
+	out := map[string]any{}
+	rec.Attrs(func(a slog.Attr) bool {
+		out[a.Key] = a.Value.Resolve().Any()
+		return true
+	})
+	return out
+}
+
+// forJob keeps the records carrying job_id == jobID.
+func forJob(recs []slog.Record, jobID string) []slog.Record {
+	var out []slog.Record
+	for _, r := range recs {
+		if attrs(r)["job_id"] == jobID {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+const (
+	msgPlan     = "console: pushing the console root password"
+	msgNodeOK   = "console: console root password delivered to a node"
+	msgNodeFail = "console: console root password not applied on a node"
+	msgSummary  = "console: console root password delivery finished"
+	msgFailed   = "console: console root password push failed"
+)
+
+func counts(d DeliverResult) [4]int { return [4]int{d.Changed, d.Unchanged, d.Applied, d.Failed} }
+
+// TC-597-01: a converged node reports unchanged, its Settings row says
+// nothing was written, and the record step stamps the injected clock.
+func TestPushReportsANodeThatAlreadyHeldThePasswordAsUnchanged(t *testing.T) {
+	ctx := context.Background()
+	f := newFleet(t)
+	f.add("cp", proto.RoleControlPlane, proto.StatusOnline, "2026.09.4-dev.172")
+	f.agent("cp", unchanging("cp"))
+	hashID, err := f.store.SetPassword(ctx, goodPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Date(2026, 10, 4, 12, 30, 0, 0, time.UTC)
+	log, rec := logkittest.New()
+
+	j, js := f.runPush(t, PushSpec{Reason: "requested from Settings"}, log, func() time.Time { return fixed })
+	if j.Status != jobs.StatusSucceeded {
+		t.Fatalf("job %s: %s", j.Status, j.Error)
+	}
+	del := deliverOf(t, js, j.ID)
+	if got := counts(del); got != [4]int{0, 1, 1, 0} {
+		t.Fatalf("changed/unchanged/applied/failed = %v, want [0 1 1 0]", got)
+	}
+	if len(del.Results) != 1 || del.Results[0].Outcome != OutcomeUnchanged {
+		t.Fatalf("results = %+v, want one row with outcome unchanged", del.Results)
+	}
+	status, err := f.store.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := status.Nodes[0]
+	if n.Status != NodeApplied || n.HashID != hashID || !n.Current {
+		t.Fatalf("store row = %+v, want applied, current, holding %s", n, hashID)
+	}
+	if !strings.Contains(n.Detail, "already held this password") || !strings.Contains(n.Detail, "nothing was written") {
+		t.Errorf("store row detail = %q, want it to say the node already held it and nothing was written", n.Detail)
+	}
+	if !n.UpdatedAt.Equal(fixed) {
+		t.Errorf("store row updatedAt = %s, want the injected clock's %s", n.UpdatedAt, fixed)
+	}
+	infos := rec.Matching(slog.LevelInfo, msgNodeOK)
+	if len(infos) != 1 {
+		t.Fatalf("%d per-node INFO records, want 1:\n%s", len(infos), rec.Text())
+	}
+	a := attrs(infos[0])
+	if a["job_id"] != j.ID || a["hash_id"] != hashID || a["node_id"] != "cp" || a["outcome"] != "unchanged" {
+		t.Errorf("per-node record fields = %v", a)
+	}
+}
+
+// TC-597-02: a node that wrote the password reports changed.
+func TestPushReportsANodeThatWroteThePasswordAsChanged(t *testing.T) {
+	ctx := context.Background()
+	f := newFleet(t)
+	f.add("cp", proto.RoleControlPlane, proto.StatusOnline, "2026.09.4-dev.172")
+	f.agent("cp", applying("cp"))
+	if _, err := f.store.SetPassword(ctx, goodPassword); err != nil {
+		t.Fatal(err)
+	}
+	log, rec := logkittest.New()
+
+	j, js := f.runPush(t, PushSpec{}, log, time.Now)
+	if j.Status != jobs.StatusSucceeded {
+		t.Fatalf("job %s: %s", j.Status, j.Error)
+	}
+	del := deliverOf(t, js, j.ID)
+	if del.Changed != 1 || del.Unchanged != 0 || del.Applied != 1 {
+		t.Fatalf("changed/unchanged/applied = %d/%d/%d, want 1/0/1", del.Changed, del.Unchanged, del.Applied)
+	}
+	if del.Results[0].Outcome != OutcomeChanged {
+		t.Fatalf("outcome = %q, want changed", del.Results[0].Outcome)
+	}
+	status, _ := f.store.Status(ctx)
+	if d := status.Nodes[0].Detail; d != "" {
+		t.Errorf("a changed node's row has detail %q, want none", d)
+	}
+	infos := rec.Matching(slog.LevelInfo, msgNodeOK)
+	if len(infos) != 1 || attrs(infos[0])["outcome"] != "changed" {
+		t.Fatalf("per-node INFO records:\n%s", rec.Text())
+	}
+}
+
+// mixedFleet is the TC-597-03 fleet: one node that changes, one that
+// already held it, and an online node whose agent predates the verb.
+func mixedFleet(t *testing.T) (*fleet, string) {
+	t.Helper()
+	f := newFleet(t)
+	f.add("a-changes", proto.RoleControlPlane, proto.StatusOnline, "2026.09.4-dev.172")
+	f.add("b-same", proto.RoleCompute, proto.StatusOnline, "2026.09.4-dev.172")
+	f.add("c-old", proto.RoleCompute, proto.StatusOnline, "2026.09.4-dev.100")
+	f.agent("a-changes", applying("a-changes"))
+	f.agent("b-same", unchanging("b-same"))
+	if _, err := f.store.SetPassword(context.Background(), goodPassword); err != nil {
+		t.Fatal(err)
+	}
+	hash, _, err := f.store.HashForDispatch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, hash
+}
+
+// TC-597-03: a mixed fleet fails the job on the old agent, with the release
+// it needs, and the summary counts every reading.
+func TestPushMixedFleetCountsEachOutcomeAndFailsTheOldAgent(t *testing.T) {
+	f, _ := mixedFleet(t)
+	log, rec := logkittest.New()
+
+	j, js := f.runPush(t, PushSpec{}, log, time.Now)
+	if j.Status != jobs.StatusFailed {
+		t.Fatalf("job %s, want failed", j.Status)
+	}
+	del := deliverOf(t, js, j.ID)
+	if del.Changed != 1 || del.Unchanged != 1 || del.Failed != 1 || del.Applied != 2 {
+		t.Fatalf("changed/unchanged/failed/applied = %d/%d/%d/%d, want 1/1/1/2", del.Changed, del.Unchanged, del.Failed, del.Applied)
+	}
+	for _, want := range []string{"c-old", "2026.09.4-dev.172"} {
+		if !strings.Contains(j.Error, want) {
+			t.Errorf("job error does not name %q: %s", want, j.Error)
+		}
+	}
+	warns := rec.Matching(slog.LevelWarn, msgNodeFail)
+	if len(warns) != 1 {
+		t.Fatalf("%d WARN records, want 1:\n%s", len(warns), rec.Text())
+	}
+	w := attrs(warns[0])
+	if w["node_id"] != "c-old" || w["outcome"] != "failed" || !strings.Contains(fmt.Sprint(w["detail"]), "2026.09.4-dev.172") {
+		t.Errorf("WARN fields = %v", w)
+	}
+	sums := rec.Matching(slog.LevelInfo, msgSummary)
+	if len(sums) != 1 {
+		t.Fatalf("%d summary records, want 1", len(sums))
+	}
+	s := attrs(sums[0])
+	if s["changed"] != int64(1) || s["unchanged"] != int64(1) || s["failed"] != int64(1) {
+		t.Errorf("summary fields = %v, want 1/1/1", s)
+	}
+	if errs := rec.AtLevel(slog.LevelError); len(errs) != 1 {
+		t.Errorf("%d ERROR records, want exactly 1:\n%s", len(errs), rec.Text())
+	}
+}
+
+// TC-597-04: every way a node can fail sets outcome=failed, keeps the
+// existing wording, and writes a WARN record.
+func TestPushEveryFailurePathIsOutcomeFailed(t *testing.T) {
+	const refusal = "this node's /etc/shadow is on a read-only filesystem"
+	for name, tc := range map[string]struct {
+		setup func(f *fleet)
+		want  string
+	}{
+		"refusing agent": {
+			setup: func(f *fleet) {
+				f.add("n1", proto.RoleCompute, proto.StatusOnline, "2026.09.4-dev.172")
+				f.agent("n1", refusing("n1", refusal))
+			},
+			want: refusal,
+		},
+		"ack for another password": {
+			setup: func(f *fleet) {
+				f.add("n1", proto.RoleCompute, proto.StatusOnline, "2026.09.4-dev.172")
+				f.agent("n1", func(proto.ConsoleRootHashCmd) proto.ConsoleRootHashAck {
+					return proto.ConsoleRootHashAck{NodeID: "n1", OK: true, HashID: "0000000000000000", Changed: true}
+				})
+			},
+			want: "the agent acknowledged a different password",
+		},
+		"unparseable answer": {
+			setup: func(f *fleet) {
+				f.add("n1", proto.RoleCompute, proto.StatusOnline, "2026.09.4-dev.172")
+				f.rawAgent("n1", []byte("not json"))
+			},
+			want: "the node's answer could not be read",
+		},
+		"offline node": {
+			setup: func(f *fleet) {
+				f.add("n1", proto.RoleCompute, proto.StatusOffline, "2026.09.4-dev.172")
+			},
+			want: "the node is offline",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFleet(t)
+			tc.setup(f)
+			if _, err := f.store.SetPassword(context.Background(), goodPassword); err != nil {
+				t.Fatal(err)
+			}
+			log, rec := logkittest.New()
+			j, js := f.runPush(t, PushSpec{}, log, time.Now)
+			del := deliverOf(t, js, j.ID)
+			if len(del.Results) != 1 {
+				t.Fatalf("results = %+v", del.Results)
+			}
+			r := del.Results[0]
+			if r.Outcome != OutcomeFailed || r.Status != NodeFailed {
+				t.Fatalf("outcome/status = %q/%q, want failed/failed", r.Outcome, r.Status)
+			}
+			if !strings.Contains(r.Detail, tc.want) {
+				t.Errorf("detail = %q, want it to contain %q", r.Detail, tc.want)
+			}
+			warns := rec.Matching(slog.LevelWarn, msgNodeFail)
+			if len(warns) != 1 {
+				t.Fatalf("%d WARN records, want 1:\n%s", len(warns), rec.Text())
+			}
+			w := attrs(warns[0])
+			if w["node_id"] != "n1" || w["outcome"] != "failed" || w["detail"] != r.Detail {
+				t.Errorf("WARN fields = %v, want node_id n1, outcome failed, detail %q", w, r.Detail)
+			}
+		})
+	}
+}
+
+// TC-597-05: the plan step writes one INFO record per job naming the job,
+// the password id, the reason and the resolved targets.
+func TestPushPlanRecordNamesTheJobReasonAndTargets(t *testing.T) {
+	f := newFleet(t)
+	f.add("n2", proto.RoleCompute, proto.StatusOnline, "2026.09.4-dev.172")
+	f.add("n1", proto.RoleControlPlane, proto.StatusOnline, "2026.09.4-dev.172")
+	f.agent("n1", applying("n1"))
+	f.agent("n2", applying("n2"))
+	hashID, err := f.store.SetPassword(context.Background(), goodPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		spec PushSpec
+		want []string
+	}{
+		{PushSpec{Reason: "requested from Settings"}, []string{"n1", "n2"}},
+		{PushSpec{Reason: "the console root password was set"}, []string{"n1", "n2"}},
+		{PushSpec{Reason: "registration of n1", NodeIDs: []string{"n1"}}, []string{"n1"}},
+	} {
+		log, rec := logkittest.New()
+		j, _ := f.runPush(t, tc.spec, log, time.Now)
+		plans := rec.Matching(slog.LevelInfo, msgPlan)
+		if len(plans) != 1 {
+			t.Fatalf("%q: %d plan records, want 1", tc.spec.Reason, len(plans))
+		}
+		a := attrs(plans[0])
+		if a["job_id"] != j.ID || a["hash_id"] != hashID || a["reason"] != tc.spec.Reason {
+			t.Errorf("%q: plan fields = %v", tc.spec.Reason, a)
+		}
+		if got := fmt.Sprint(a["targets"]); got != fmt.Sprint(tc.want) {
+			t.Errorf("%q: targets = %s, want %v", tc.spec.Reason, got, tc.want)
+		}
+	}
+}
+
+// TC-597-06: nothing the journal receives carries the hash or the password.
+// (The ledger half is TestPushNeverPutsTheHashInTheLedger_RealRunner.)
+func TestPushJournalCarriesNoSecret(t *testing.T) {
+	f, hash := mixedFleet(t)
+	log, rec := logkittest.New()
+	f.runPush(t, PushSpec{Reason: "requested from Settings"}, log, time.Now)
+	text := rec.Text()
+	if len(rec.Records()) == 0 {
+		t.Fatal("no journal records, so the absence check would prove nothing")
+	}
+	assertNoSecret(t, "the journal", text, hash)
+}
+
+// TC-597-07: a missing logger or clock is refused at construction.
+func TestPushWorkflowRefusesANilLoggerOrClock(t *testing.T) {
+	st := newStore(t)
+	list := func(context.Context) ([]*proto.Node, error) { return nil, nil }
+	for name, tc := range map[string]struct {
+		build func()
+		want  string
+	}{
+		"nil logger": {func() { PushWorkflow(st, list, nil, time.Now) }, "logger"},
+		"nil clock":  {func() { PushWorkflow(st, list, discardLog, nil) }, "clock"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				p := fmt.Sprint(recover())
+				if !strings.Contains(p, "PushWorkflow") || !strings.Contains(p, tc.want) {
+					t.Fatalf("panic = %q, want it to name PushWorkflow and the %s", p, tc.want)
+				}
+			}()
+			tc.build()
+		})
+	}
+}
+
+// TC-597-08: re-running on a converged fleet reads as no change (#587).
+func TestPushRerunOnAConvergedFleetIsUnchanged(t *testing.T) {
+	ctx := context.Background()
+	f := newFleet(t)
+	f.add("cp", proto.RoleControlPlane, proto.StatusOnline, "2026.09.4-dev.172")
+	var mu sync.Mutex
+	held := ""
+	f.agent("cp", func(cmd proto.ConsoleRootHashCmd) proto.ConsoleRootHashAck {
+		mu.Lock()
+		defer mu.Unlock()
+		id := proto.ConsoleRootHashID(cmd.Hash)
+		changed := held != id
+		held = id
+		return proto.ConsoleRootHashAck{NodeID: "cp", OK: true, HashID: id, Changed: changed}
+	})
+	if _, err := f.store.SetPassword(ctx, goodPassword); err != nil {
+		t.Fatal(err)
+	}
+	for run := 1; run <= 3; run++ {
+		log, rec := logkittest.New()
+		j, js := f.runPush(t, PushSpec{Reason: "requested from Settings"}, log, time.Now)
+		if j.Status != jobs.StatusSucceeded {
+			t.Fatalf("run %d: %s %s", run, j.Status, j.Error)
+		}
+		del := deliverOf(t, js, j.ID)
+		if run == 1 {
+			if del.Changed != 1 || del.Unchanged != 0 {
+				t.Fatalf("run 1: changed/unchanged = %d/%d, want 1/0", del.Changed, del.Unchanged)
+			}
+		} else {
+			if del.Changed != 0 || del.Unchanged != 1 {
+				t.Fatalf("run %d: changed/unchanged = %d/%d, want 0/1", run, del.Changed, del.Unchanged)
+			}
+			infos := rec.Matching(slog.LevelInfo, msgNodeOK)
+			if len(infos) != 1 || attrs(infos[0])["outcome"] != "unchanged" {
+				t.Fatalf("run %d: per-node records:\n%s", run, rec.Text())
+			}
+		}
+		status, _ := f.store.Status(ctx)
+		if len(status.Nodes) != 1 || !status.Nodes[0].Current {
+			t.Fatalf("run %d: the node does not read current: %+v", run, status.Nodes)
+		}
+	}
+}
+
+// assertOneTerminalError checks the single ERROR record a failed job gets.
+func assertOneTerminalError(t *testing.T, rec *logkittest.Recorder, j *jobs.Job) {
+	t.Helper()
+	errs := rec.AtLevel(slog.LevelError)
+	if len(errs) != 1 {
+		t.Fatalf("%d ERROR records, want exactly 1:\n%s", len(errs), rec.Text())
+	}
+	if errs[0].Message != msgFailed {
+		t.Errorf("ERROR message = %q, want %q", errs[0].Message, msgFailed)
+	}
+	a := attrs(errs[0])
+	if a["job_id"] != j.ID {
+		t.Errorf("ERROR job_id = %v, want %s", a["job_id"], j.ID)
+	}
+	if a["error"] != j.Error {
+		t.Errorf("ERROR error = %q, want the job's stored error %q", a["error"], j.Error)
+	}
+}
+
+// TC-597-09: a push that fails before verify still reaches the journal, once.
+func TestPushFailureBeforeVerifyIsJournalledOnce(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		noPassword bool
+		nodes      Nodes
+		spec       PushSpec
+		nilBus     bool
+		want       string
+	}{
+		"no password set":   {noPassword: true, want: ErrNoPassword.Error()},
+		"unregistered node": {spec: PushSpec{NodeIDs: []string{"ghost"}}, want: "not registered: ghost"},
+		"inventory error":   {nodes: func(context.Context) ([]*proto.Node, error) { return nil, errors.New("inventory is down") }, want: "list inventory: inventory is down"},
+		"no bus connection": {nilBus: true, want: "no bus connection"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFleet(t)
+			f.add("cp", proto.RoleControlPlane, proto.StatusOnline, "2026.09.4-dev.172")
+			f.agent("cp", applying("cp"))
+			hash := ""
+			if !tc.noPassword {
+				if _, err := f.store.SetPassword(ctx, goodPassword); err != nil {
+					t.Fatal(err)
+				}
+				hash, _, _ = f.store.HashForDispatch(ctx)
+			}
+			nodes := Nodes(f.list)
+			if tc.nodes != nil {
+				nodes = tc.nodes
+			}
+			nc := f.nc
+			if tc.nilBus {
+				nc = nil
+			}
+			log, rec := logkittest.New()
+			r, js := realRunner(t, nc, PushWorkflow(f.store, nodes, log, time.Now))
+			j := submitAndWait(t, r, js, tc.spec)
+			if j.Status != jobs.StatusFailed || j.Error != tc.want {
+				t.Fatalf("job %s %q, want failed %q", j.Status, j.Error, tc.want)
+			}
+			assertOneTerminalError(t, rec, j)
+			if hash != "" {
+				assertNoSecret(t, "the journal", rec.Text(), hash)
+			}
+		})
+	}
+}
+
+// TC-597-10: a push orphaned by an api restart reaches the journal.
+func TestPushOrphanedByARestartIsJournalled(t *testing.T) {
+	ctx := context.Background()
+	f := newFleet(t)
+	log, rec := logkittest.New()
+	r, js := realRunner(t, f.nc, PushWorkflow(f.store, f.list, log, time.Now))
+	orphan := &jobs.Job{ID: "01ORPHANEDPUSH", Kind: PushKind, Spec: json.RawMessage(`{}`),
+		Status: jobs.StatusQueued, CreatedBy: "test", CreatedAt: time.Now().UTC()}
+	if err := js.CreateJob(ctx, orphan); err != nil {
+		t.Fatal(err)
+	}
+	if err := js.MarkJobStarted(ctx, orphan.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	j, err := js.GetJob(ctx, orphan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != jobs.StatusFailed || j.Error != "control plane restarted mid-job" {
+		t.Fatalf("orphan = %s %q", j.Status, j.Error)
+	}
+	assertOneTerminalError(t, rec, j)
+}
+
+// TC-597-11: a verify failure is logged once, naming the failed node.
+func TestPushVerifyFailureIsJournalledOnce(t *testing.T) {
+	f, _ := mixedFleet(t)
+	log, rec := logkittest.New()
+	j, _ := f.runPush(t, PushSpec{}, log, time.Now)
+	assertOneTerminalError(t, rec, j)
+	if e := attrs(rec.AtLevel(slog.LevelError)[0])["error"]; !strings.Contains(fmt.Sprint(e), "c-old") {
+		t.Errorf("ERROR error = %v, want it to name c-old", e)
 	}
 }

@@ -808,7 +808,7 @@ func main() {
 			invStore.Presence(ctx, nodes)
 		}
 		return nodes, err
-	}))
+	}, logger, time.Now))
 	runner.Register(mesh.ApplyWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
